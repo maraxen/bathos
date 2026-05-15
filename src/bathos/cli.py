@@ -1,0 +1,161 @@
+from __future__ import annotations
+import os
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+from typing import Optional
+import typer
+
+app = typer.Typer(help="bathos — local-first experiment tracking")
+
+
+def _catalog_dir() -> Path:
+    override = os.environ.get("BTH_CATALOG_DIR")
+    if override:
+        return Path(override)
+    from bathos.config import default_catalog_dir
+    return default_catalog_dir()
+
+
+def _require_project_slug() -> str:
+    slug_env = os.environ.get("BTH_PROJECT_SLUG")
+    if slug_env:
+        return slug_env
+    from bathos.config import find_project_config, load_project_config
+    cfg_path = find_project_config()
+    if cfg_path is None:
+        typer.echo("No .bth.toml found. Run `bth init` first.", err=True)
+        raise typer.Exit(1)
+    return load_project_config(cfg_path).slug
+
+
+@app.callback(invoke_without_command=True)
+def main(
+    version: bool = typer.Option(False, "--version", "-V", is_eager=True),
+):
+    if version:
+        from bathos import __version__
+        typer.echo(f"bathos {__version__}")
+        raise typer.Exit()
+
+
+@app.command()
+def init(
+    slug: str = typer.Option(..., "--slug", "-s", help="Project slug"),
+    remote: Optional[str] = typer.Option(None, "--remote", help="host:remote_path"),
+    slurm_partition: Optional[str] = typer.Option(None, "--slurm-partition"),
+):
+    """Register project, scaffold scripts/ dirs, write .bth.toml."""
+    from bathos.init import init_project
+    init_project(
+        Path.cwd(),
+        slug=slug,
+        catalog_dir=_catalog_dir(),
+        remote=remote,
+        slurm_partition=slurm_partition,
+    )
+    typer.echo(f"Initialized bathos project '{slug}'")
+
+
+@app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def run(
+    argv: list[str] = typer.Argument(...),
+    out: list[str] = typer.Option([], "--out", help="Output path to register"),
+    tag: list[str] = typer.Option([], "--tag", "-t"),
+):
+    """Run a script and record provenance."""
+    from bathos.runner import run_script
+    slug = _require_project_slug()
+    exit_code = run_script(
+        argv=argv,
+        project_slug=slug,
+        catalog_dir=_catalog_dir(),
+        output_paths=out,
+        tags=tag,
+    )
+    raise typer.Exit(exit_code)
+
+
+@app.command("ls")
+def ls_cmd(
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    since: Optional[str] = typer.Option(None, "--since", help="e.g. 7d, 24h"),
+    status: Optional[str] = typer.Option(None, "--status"),
+    limit: int = typer.Option(20, "--limit", "-n"),
+):
+    """List recent runs."""
+    from bathos.query import find_runs
+    since_dt = _parse_since(since)
+    runs = find_runs(_catalog_dir(), since=since_dt, project=project, status=status)
+    runs = runs[:limit]
+    if not runs:
+        typer.echo("No runs found.")
+        return
+    header = f"{'ID':38} {'PROJECT':12} {'STATUS':10} {'EXIT':5} {'DURATION':8} COMMAND"
+    typer.echo(header)
+    typer.echo("-" * len(header))
+    for r in runs:
+        typer.echo(
+            f"{r.id:38} {r.project_slug:12} {r.status:10} {r.exit_code:5} "
+            f"{r.duration_s:7.1f}s {r.command[:40]}"
+        )
+
+
+@app.command()
+def show(run_id: str = typer.Argument(...)):
+    """Show full details of a run."""
+    from bathos.query import get_run
+    r = get_run(run_id, _catalog_dir())
+    if r is None:
+        typer.echo(f"Run not found: {run_id}", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"id:           {r.id}")
+    typer.echo(f"project:      {r.project_slug}")
+    typer.echo(f"status:       {r.status}")
+    typer.echo(f"exit_code:    {r.exit_code}")
+    typer.echo(f"duration:     {r.duration_s:.2f}s")
+    typer.echo(f"git_hash:     {r.git_hash}")
+    typer.echo(f"git_branch:   {r.git_branch}")
+    typer.echo(f"git_dirty:    {r.git_dirty}")
+    typer.echo(f"timestamp:    {r.timestamp.isoformat()}")
+    typer.echo(f"command:      {r.command}")
+    typer.echo(f"output_paths: {r.output_paths}")
+    typer.echo(f"tags:         {r.tags}")
+
+
+@app.command()
+def find(
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    since: Optional[str] = typer.Option(None, "--since"),
+    status: Optional[str] = typer.Option(None, "--status"),
+    tag: list[str] = typer.Option([], "--tag"),
+):
+    """Find runs matching filters."""
+    from bathos.query import find_runs
+    runs = find_runs(
+        _catalog_dir(),
+        since=_parse_since(since),
+        project=project,
+        status=status,
+        tags=tag or None,
+    )
+    for r in runs:
+        typer.echo(f"{r.id}  {r.project_slug}  {r.status}  {r.command[:60]}")
+
+
+@app.command()
+def sql(query: str = typer.Argument(...)):
+    """Run raw DuckDB SQL against the catalog."""
+    from bathos.query import run_sql
+    rows = run_sql(query)
+    for row in rows:
+        typer.echo("\t".join(str(v) for v in row))
+
+
+def _parse_since(since: str | None) -> datetime | None:
+    if since is None:
+        return None
+    if since.endswith("d"):
+        return datetime.now(timezone.utc) - timedelta(days=float(since[:-1]))
+    if since.endswith("h"):
+        return datetime.now(timezone.utc) - timedelta(hours=float(since[:-1]))
+    return None

@@ -22,9 +22,11 @@ packages = ["src/bathos"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "--json-report --json-report-file=tmp/pytest.json -q"
 
 [dependency-groups]
 dev = [
     "pytest>=8",
     "pytest-tmp-files>=0.0.2",
+    "pytest-json-report>=1.5",
 ]
