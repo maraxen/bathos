@@ -27,7 +27,7 @@ def test_run_defaults():
     assert r.tags == []
     assert isinstance(r.timestamp, datetime)
     assert r.timestamp.tzinfo is not None
-    assert r.schema_version == "1"
+    assert r.schema_version == "2"
     assert r.slurm_job_id == ""
     assert r.metadata == "{}"
 
@@ -53,7 +53,7 @@ def test_run_roundtrip_via_arrow():
     assert r2.duration_s == 1.5
     assert r2.output_paths == ["/tmp/out.parquet"]
     assert r2.tags == ["tip3p"]
-    assert r2.schema_version == "1"
+    assert r2.schema_version == "2"
     assert r2.slurm_job_id == ""
 
 
@@ -63,7 +63,7 @@ def test_schema_version_in_cool_parquet():
             git_hash="abc123", git_branch="main", git_dirty=False)
     table = r.to_arrow()
     assert "schema_version" in table.column_names
-    assert table.column("schema_version")[0].as_py() == "1"
+    assert table.column("schema_version")[0].as_py() == "2"
 
 
 def test_slurm_job_id_captured_from_env(monkeypatch):
@@ -154,3 +154,12 @@ def test_hostname_roundtrip_via_arrow():
     # Round-trip
     r2 = Run.from_arrow_row(table.to_pydict(), 0)
     assert r2.hostname == "compute-node-42"
+
+
+def test_schema_version_defaults_to_2():
+    """Verify new runs default to schema_version='2'."""
+    r = Run(
+        project_slug="test", command="python foo.py", argv=["python", "foo.py"],
+        git_hash="abc123", git_branch="main", git_dirty=False
+    )
+    assert r.schema_version == "2"
