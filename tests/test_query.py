@@ -140,3 +140,82 @@ def test_find_runs_filter_by_project(populated_catalog: Path):
     runs = find_runs(populated_catalog, project="espaloma")
     assert len(runs) == 1
     assert runs[0].project_slug == "espaloma"
+
+
+def test_filter_runs_by_output_file_pattern():
+    """Verify output file glob pattern filtering works."""
+    from bathos.query import _filter_runs_by_output_file
+
+    run1 = Run(
+        project_slug="test", command="test1", argv=["test1"],
+        git_hash="abc123", git_branch="main", git_dirty=False,
+        output_paths=["/tmp/result.json"]
+    )
+    run2 = Run(
+        project_slug="test", command="test2", argv=["test2"],
+        git_hash="abc123", git_branch="main", git_dirty=False,
+        output_paths=["/tmp/result.csv"]
+    )
+
+    runs = [run1, run2]
+    filtered = _filter_runs_by_output_file(runs, pattern="*.json")
+
+    assert len(filtered) == 1
+    assert filtered[0].id == run1.id
+
+
+def test_filter_runs_no_pattern_returns_all():
+    """Verify no pattern returns all runs."""
+    from bathos.query import _filter_runs_by_output_file
+
+    run1 = Run(
+        project_slug="test", command="test1", argv=["test1"],
+        git_hash="abc", git_branch="main", git_dirty=False,
+        output_paths=["/tmp/a.json"]
+    )
+    run2 = Run(
+        project_slug="test", command="test2", argv=["test2"],
+        git_hash="abc", git_branch="main", git_dirty=False,
+        output_paths=["/tmp/b.csv"]
+    )
+
+    filtered = _filter_runs_by_output_file([run1, run2], pattern=None)
+    assert len(filtered) == 2
+
+
+def test_filter_runs_with_warm_metadata():
+    """Verify filtering works with warm-tier metadata."""
+    from bathos.query import _filter_runs_by_output_file
+    import json
+
+    run = Run(
+        project_slug="test", command="test", argv=["test"],
+        git_hash="abc", git_branch="main", git_dirty=False
+    )
+    run.metadata = json.dumps({
+        "output_files": [
+            {"path": "/results/analysis.json", "status": "present"}
+        ]
+    })
+
+    filtered = _filter_runs_by_output_file([run], pattern="*.json")
+    assert len(filtered) == 1
+
+
+def test_filter_ignores_missing_output_files():
+    """Verify missing output files are not matched."""
+    from bathos.query import _filter_runs_by_output_file
+    import json
+
+    run = Run(
+        project_slug="test", command="test", argv=["test"],
+        git_hash="abc", git_branch="main", git_dirty=False
+    )
+    run.metadata = json.dumps({
+        "output_files": [
+            {"path": "/results/missing.json", "status": "missing"}
+        ]
+    })
+
+    filtered = _filter_runs_by_output_file([run], pattern="*.json")
+    assert len(filtered) == 0

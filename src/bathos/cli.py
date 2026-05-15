@@ -139,9 +139,10 @@ def find(
     status: Optional[str] = typer.Option(None, "--status"),
     tag: list[str] = typer.Option([], "--tag"),
     slurm_job: Optional[str] = typer.Option(None, "--slurm-job", help="SLURM job ID"),
+    output_file: Optional[str] = typer.Option(None, "--output-file", help="Filter to runs with matching output file path (glob pattern)"),
 ):
     """Find runs matching filters."""
-    from bathos.query import find_runs
+    from bathos.query import find_runs, _filter_runs_by_output_file
     runs = find_runs(
         _catalog_dir(),
         since=_parse_since(since),
@@ -150,6 +151,7 @@ def find(
         tags=tag or None,
         slurm_job_id=slurm_job,
     )
+    runs = _filter_runs_by_output_file(runs, pattern=output_file)
     for r in runs:
         typer.echo(f"{r.id}  {r.project_slug}  {r.status}  {r.command[:60]}")
 

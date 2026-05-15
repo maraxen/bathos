@@ -1,11 +1,65 @@
 from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 import duckdb
+import fnmatch
+import json
 
 from bathos.catalog import read_runs
 from bathos.schema import Run
+
+
+def _filter_runs_by_output_file(
+    runs: list[Run],
+    pattern: Optional[str] = None,
+) -> list[Run]:
+    """Filter runs by output file glob pattern.
+
+    Checks both cool-tier output_paths and warm-tier metadata output_files.
+    Missing output files are ignored (status != 'present' is filtered out).
+
+    Args:
+        runs: List of Run objects
+        pattern: Glob pattern for output file paths (e.g., "*.json")
+
+    Returns:
+        Filtered list of runs matching the pattern, or all runs if pattern is None
+    """
+    if not pattern:
+        return runs
+
+    filtered = []
+    for run in runs:
+        # First check output_paths (cool tier)
+        if run.output_paths:
+            matches = any(
+                fnmatch.fnmatch(path, pattern)
+                for path in run.output_paths
+            )
+            if matches:
+                filtered.append(run)
+                continue
+
+        # Then check warm-tier metadata if no match in output_paths
+        if run.metadata and run.metadata != "{}":
+            try:
+                metadata = json.loads(run.metadata)
+                if isinstance(metadata, dict) and "output_files" in metadata:
+                    matches = any(
+                        fnmatch.fnmatch(
+                            f.get("path", ""),
+                            pattern
+                        )
+                        for f in metadata.get("output_files", [])
+                        if f.get("status") == "present"
+                    )
+                    if matches:
+                        filtered.append(run)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+    return filtered
 
 
 def _row_to_run(row: tuple, con) -> Run | None:

@@ -457,3 +457,41 @@ def test_archive_command_with_project_filter(tmp_path: Path, monkeypatch):
     assert "Archived" in result.output
     # Should archive 2 runs (only from proj1)
     assert "2" in result.output
+
+
+def test_find_command_output_file_filter(tmp_path: Path, monkeypatch):
+    """Verify bth find --output-file filter works."""
+    monkeypatch.chdir(tmp_path)
+    catalog = tmp_path / ".bth" / "catalog"
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
+    monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
+    (tmp_path / ".bth.toml").write_text(
+        f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n'
+    )
+
+    # Create and write runs with different output files
+    init_catalog(catalog)
+    run1 = Run(
+        id="run1", project_slug="test", command="test1", argv=["test1"],
+        git_hash="abc123", git_branch="main", git_dirty=False,
+        output_paths=["/tmp/analysis.json"]
+    )
+    run2 = Run(
+        id="run2", project_slug="test", command="test2", argv=["test2"],
+        git_hash="abc123", git_branch="main", git_dirty=False,
+        output_paths=["/tmp/report.csv"]
+    )
+    write_run(run1, catalog)
+    write_run(run2, catalog)
+
+    # Find with pattern
+    result = runner.invoke(
+        app, ["find", "--output-file", "*.json"]
+    )
+
+    assert result.exit_code == 0
+    # Should only show run1 with json output file
+    assert "run1" in result.output
+    assert "test1" in result.output
+    # run2 should not appear
+    assert "run2" not in result.output
