@@ -130,7 +130,12 @@ def test_ls_no_banner_below_threshold(tmp_path: Path, monkeypatch):
 
 
 def test_ls_no_banner_when_warm_db_exists(tmp_path: Path, monkeypatch):
-    """Test that ls does not show banner when warm DB already exists."""
+    """Test that ls does not show banner when warm DB already exists.
+
+    Note: We verify the decision logic directly since find_runs warm tier
+    is not yet implemented (Task A3). Once warm tier is available, this test
+    can be expanded to actually invoke ls and check the output.
+    """
     monkeypatch.chdir(tmp_path)
     catalog = tmp_path / ".bth" / "catalog"
     monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
@@ -147,15 +152,13 @@ def test_ls_no_banner_when_warm_db_exists(tmp_path: Path, monkeypatch):
     runner.invoke(app, ["compact"])
     assert (catalog / "bathos.db").exists()
 
-    # Verify the banner logic by checking directly:
-    # If warm DB exists and fragment count > 50, banner should not appear
-    from bathos.compact import _fragment_count
+    # Verify the should_compact decision logic
+    # If warm DB exists and fragment count > 50, should_compact returns False (no banner)
+    from bathos.compact import should_compact, _fragment_count
     frag_count = _fragment_count(catalog)
-    warm_db_exists = (catalog / "bathos.db").exists()
-    # The banner appears only if frag_count > 50 AND NOT warm_db_exists
     assert frag_count > 50  # We have 51 fragments
-    assert warm_db_exists  # We compacted
-    # So banner should NOT appear (which is what ls_cmd checks)
+    assert (catalog / "bathos.db").exists()  # We compacted
+    assert not should_compact(catalog)  # Banner should NOT appear
 
 
 def test_sql_error_without_warm_db(tmp_path: Path, monkeypatch):

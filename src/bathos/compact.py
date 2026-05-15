@@ -54,12 +54,31 @@ CREATE TABLE IF NOT EXISTS runs (
 """
 
 
+COMPACTION_THRESHOLD = 50  # Public constant for compaction trigger threshold
+
+
 def _fragment_count(catalog_dir: Path) -> int:
     """Count cool fragments in catalog directory."""
     runs_dir = catalog_dir / "runs"
     if not runs_dir.exists():
         return 0
     return len(list(runs_dir.glob("run_*.parquet")))
+
+
+def should_compact(catalog_dir: Path) -> bool:
+    """Return True if fragment count > COMPACTION_THRESHOLD and warm DB missing.
+
+    This indicates the user should run `bth compact` to improve query performance.
+
+    Args:
+        catalog_dir: Path to catalog root
+
+    Returns:
+        True if compaction is recommended, False otherwise
+    """
+    if (catalog_dir / "bathos.db").exists():
+        return False
+    return _fragment_count(catalog_dir) > COMPACTION_THRESHOLD
 
 
 def _apply_migrations(run: Run) -> Run:
