@@ -1,6 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 import time
 import duckdb
 
@@ -17,7 +18,7 @@ class CompactResult:
 
 
 # Migration registry: transforms Run objects from older schema versions to current
-MIGRATIONS: dict[str, callable] = {}
+MIGRATIONS: dict[str, Callable[[dict], dict]] = {}
 
 
 def _migrate_v0(run_dict: dict) -> dict:
