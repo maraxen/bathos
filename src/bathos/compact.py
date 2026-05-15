@@ -1,5 +1,5 @@
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Callable
 import time
@@ -68,53 +68,17 @@ def _apply_migrations(run: Run) -> Run:
     if schema_version not in MIGRATIONS:
         return run
 
-    # Create dict representation, apply migration
-    run_dict = {
-        "id": run.id,
-        "project_slug": run.project_slug,
-        "command": run.command,
-        "argv": run.argv,
-        "git_hash": run.git_hash,
-        "git_branch": run.git_branch,
-        "git_dirty": run.git_dirty,
-        "timestamp": run.timestamp,
-        "duration_s": run.duration_s,
-        "exit_code": run.exit_code,
-        "status": run.status,
-        "output_paths": run.output_paths,
-        "tags": run.tags,
-        "schema_version": run.schema_version,
-        "slurm_job_id": run.slurm_job_id,
-        "metadata": run.metadata,
-    }
-    run_dict = MIGRATIONS[schema_version](run_dict)
-
-    # Reconstruct Run object with migrated data
-    return Run(
-        id=run_dict["id"],
-        project_slug=run_dict["project_slug"],
-        command=run_dict["command"],
-        argv=run_dict["argv"],
-        git_hash=run_dict["git_hash"],
-        git_branch=run_dict["git_branch"],
-        git_dirty=run_dict["git_dirty"],
-        timestamp=run_dict["timestamp"],
-        duration_s=run_dict["duration_s"],
-        exit_code=run_dict["exit_code"],
-        status=run_dict["status"],
-        output_paths=run_dict["output_paths"],
-        tags=run_dict["tags"],
-        schema_version=run_dict["schema_version"],
-        slurm_job_id=run_dict["slurm_job_id"],
-        metadata=run_dict.get("metadata", "{}"),
-    )
+    # Convert to dict, apply migration, reconstruct
+    run_dict = asdict(run)
+    run_dict.update(MIGRATIONS[schema_version](run_dict))
+    return Run(**run_dict)
 
 
 def compact(catalog_dir: Path) -> CompactResult:
     """Ingest all cool fragments into bathos.db DuckDB database.
 
     - Snapshots file list at start (ignores fragments written after snapshot)
-    - Upserts into DuckDB `runs` table (keyed on `id`)
+    - Inserts new runs into DuckDB `runs` table; skips any runs already present (keyed on `id`)
     - Tracks warm-tier schema version in `_schema_meta` table
     - Does NOT remove cool fragments after ingest (safe default)
 

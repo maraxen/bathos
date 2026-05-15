@@ -2,7 +2,6 @@ from pathlib import Path
 import dataclasses
 import duckdb
 import pytest
-from uuid import uuid4
 
 from bathos.catalog import write_run, init_catalog, read_runs
 from bathos.compact import compact, CompactResult, _fragment_count
@@ -83,8 +82,8 @@ def test_compact_is_idempotent(tmp_catalog: Path, sample_run: Run):
     assert rows[0][0] == 2
 
 
-def test_compact_snapshots_file_list(tmp_catalog: Path, sample_run: Run):
-    """compact() should snapshot file list at start; fragments written during compact ignored."""
+def test_compact_is_idempotent_with_new_fragments(tmp_catalog: Path, sample_run: Run):
+    """compact() skips already-ingested runs; new fragments ingested on subsequent calls."""
     init_catalog(tmp_catalog)
 
     # Write 1 fragment
