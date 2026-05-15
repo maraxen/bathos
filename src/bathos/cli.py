@@ -136,6 +136,7 @@ def find(
     since: Optional[str] = typer.Option(None, "--since"),
     status: Optional[str] = typer.Option(None, "--status"),
     tag: list[str] = typer.Option([], "--tag"),
+    slurm_job: Optional[str] = typer.Option(None, "--slurm-job", help="SLURM job ID"),
 ):
     """Find runs matching filters."""
     from bathos.query import find_runs
@@ -145,6 +146,7 @@ def find(
         project=project,
         status=status,
         tags=tag or None,
+        slurm_job_id=slurm_job,
     )
     for r in runs:
         typer.echo(f"{r.id}  {r.project_slug}  {r.status}  {r.command[:60]}")
@@ -172,6 +174,76 @@ def compact():
     typer.echo(
         f"Compacted {result.ingested} runs into bathos.db in {result.duration_s:.1f}s"
     )
+
+
+@app.command()
+def check(
+    status: Optional[str] = typer.Option(None, "--status", help="Filter by status (OK, STALE, DIRTY_RUN, UNKNOWN_CODE)"),
+):
+    """Check runs for git-drift validity against current HEAD."""
+    from bathos.checker import check_runs
+    catalog_dir = _catalog_dir()
+    project_root = Path.cwd()
+
+    results = check_runs(catalog_dir, project_root, status_filter=status)
+
+    if not results:
+        if status:
+            typer.echo(f"No runs found with status={status}")
+        else:
+            typer.echo("No runs found in catalog")
+        return
+
+    # Print header
+    header = f"{'RUN_ID':38} {'STATUS':12} {'RUN_HASH':40} {'CURRENT_HASH':40}"
+    typer.echo(header)
+    typer.echo("-" * len(header))
+
+    # Print results
+    stale_count = 0
+    for result in results:
+        typer.echo(
+            f"{result.run_id:38} {result.status:12} {result.run_git_hash:40} {result.current_hash:40}"
+        )
+        if result.status == "STALE":
+            stale_count += 1
+
+    # Exit with error if any STALE runs found
+    if stale_count > 0:
+        typer.echo()
+        typer.echo(f"Warning: {stale_count} stale run(s) detected", err=True)
+        raise typer.Exit(1)
+
+
+@app.command()
+def sync(
+    remote: str = typer.Argument(..., help="Remote name from .bth.toml"),
+    pull: bool = typer.Option(False, "--pull", help="Pull from remote (default: push)"),
+):
+    """Sync cool-tier catalog to/from remote."""
+    from bathos.sync import sync_catalog
+    from bathos.config import find_project_config, load_project_config
+
+    cfg_path = find_project_config()
+    if cfg_path is None:
+        typer.echo("No .bth.toml found. Run `bth init` first.", err=True)
+        raise typer.Exit(1)
+
+    config = load_project_config(cfg_path)
+    catalog_dir = _catalog_dir()
+
+    try:
+        result = sync_catalog(remote, config, catalog_dir, pull=pull)
+        direction = "pulled" if pull else "pushed"
+        typer.echo(
+            f"{direction.capitalize()} {result.transferred} runs to/from '{result.remote}' in {result.duration_s:.1f}s"
+        )
+    except ValueError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1)
+    except RuntimeError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1)
 
 
 def _parse_since(since: str | None) -> datetime | None:

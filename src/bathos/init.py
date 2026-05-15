@@ -53,7 +53,7 @@ def init_project(
 
     # scripts/slurm/_bth_env.sh
     template = _load_env_sh_template()
-    env_sh = template.format(slug=slug, root=str(project_root))
+    env_sh = template.format(slug=slug, root=str(project_root), catalog_dir=str(catalog_dir))
     (project_root / "scripts" / "slurm" / "_bth_env.sh").write_text(env_sh)
 
     # .gitignore

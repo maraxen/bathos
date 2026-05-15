@@ -96,6 +96,7 @@ def _cool_find_runs(
     project: str | None = None,
     status: str | None = None,
     tags: list[str] | None = None,
+    slurm_job_id: str | None = None,
 ) -> list[Run]:
     """Find runs using cool tier (PyArrow)."""
     runs = read_runs(catalog_dir)
@@ -107,6 +108,8 @@ def _cool_find_runs(
         runs = [r for r in runs if r.status == status]
     if tags:
         runs = [r for r in runs if any(t in r.tags for t in tags)]
+    if slurm_job_id:
+        runs = [r for r in runs if r.slurm_job_id == slurm_job_id]
     return runs
 
 
@@ -116,6 +119,7 @@ def find_runs(
     project: str | None = None,
     status: str | None = None,
     tags: list[str] | None = None,
+    slurm_job_id: str | None = None,
 ) -> list[Run]:
     """Find runs with multiple filter criteria.
 
@@ -123,8 +127,8 @@ def find_runs(
     """
     backend = _resolve_backend(catalog_dir)
     if backend == "warm":
-        return _warm_find_runs(catalog_dir, since=since, project=project, status=status, tags=tags)
-    return _cool_find_runs(catalog_dir, since=since, project=project, status=status, tags=tags)
+        return _warm_find_runs(catalog_dir, since=since, project=project, status=status, tags=tags, slurm_job_id=slurm_job_id)
+    return _cool_find_runs(catalog_dir, since=since, project=project, status=status, tags=tags, slurm_job_id=slurm_job_id)
 
 
 def _warm_find_runs(
@@ -133,6 +137,7 @@ def _warm_find_runs(
     project: str | None = None,
     status: str | None = None,
     tags: list[str] | None = None,
+    slurm_job_id: str | None = None,
 ) -> list[Run]:
     """Find runs using warm tier (DuckDB).
 
