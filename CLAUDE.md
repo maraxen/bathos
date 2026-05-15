@@ -12,13 +12,13 @@ bathos is a standalone experiment tracking CLI for a single researcher across 10
 
 ## Current Status (as of 2026-05-15)
 
-**Design: complete.** Implementation: not started.
+**v0.1: complete and merged to main.** 44 tests passing.
 
 - Full design spec: `.praxia/specs/bathos-design.md`
-- v0.1 implementation plan: `.praxia/specs/bathos-v01-plan.md` (also at `docs/superpowers/plans/2026-05-15-bathos-v01-core.md`)
-- Backlog: items #124–137 in praxia DB (see below)
+- v0.1 implementation plan: `.praxia/specs/bathos-v01-plan.md`
+- Backlog: items #124–139 in praxia DB (see below); #124–127 done
 
-**Next action:** implement v0.1 core plan (Tasks 1–10 in `.praxia/specs/bathos-v01-plan.md`). Use `superpowers:subagent-driven-development` or `superpowers:executing-plans` skill.
+**Next sprint candidates (P2):** #128 (FastMCP), #130 (bth check) + #128 unblocked once 130 done, #138 (bth sync), #139 (bth compact / warm tier), #131 (SLURM integration), #132 (bth new-experiment).
 
 ---
 
@@ -160,11 +160,12 @@ src/bathos/
 | 135 | `bth migrate` — Phase 1 mechanical (existing projects) | P2 | 125 |
 | 136 | `bth-migrate` praxia workflow — agentic classification + git mv plan | P2 | 135 |
 | 137 | Global instruction portability (separate design session needed) | P2 | — |
+| 138 | `bth sync` — rsync cool-tier catalog to/from cluster remote | P2 | 125, v0.1 done |
+| 139 | `bth compact` + warm-tier DuckDB (`bth sql` catalog queries) | P2 | v0.1 done |
 
-**Not yet backlogged (design decisions from this session):**
-- `bth compact` — cool → warm DuckDB compaction (add as P1 alongside 127)
+**Not yet backlogged:**
 - Sidecar pre-registration enforcement in `bth run` (add as P2, depends on 126)
-- Outcome evaluation + `runs.outcome` column in warm DuckDB (add as P2, depends on compact)
+- Outcome evaluation + `runs.outcome` column in warm DuckDB (add as P2, depends on 139)
 
 ---
 
