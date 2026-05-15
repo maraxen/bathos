@@ -1,0 +1,12 @@
+{
+  "workspace_id": "1df6625f-def4-4711-893c-f770b57a5355",
+  "s1_boundaries": [
+    "python"
+  ],
+  "s4_scan_scope": "/home/marielle/projects/bathos",
+  "initial_posture": "investigate",
+  "initial_gap_type": "SystemModel",
+  "planning_tier": "Tactical",
+  "schema_confidence": 1.0,
+  "initialized_at": "2026-05-15T17:47:54.292948046+00:00"
+}

@@ -1,7 +1,5 @@
-import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-import dataclasses
 import pytest
 from bathos.catalog import write_run, init_catalog
 from bathos.query import list_runs, get_run, find_runs, run_sql, _resolve_backend
@@ -104,3 +102,19 @@ def test_run_sql_errors_clearly_without_warm_db(tmp_catalog: Path):
     init_catalog(tmp_catalog)
     with pytest.raises(RuntimeError, match="No warm catalog.*bth compact"):
         run_sql("SELECT 1", catalog_dir=tmp_catalog)
+
+
+def test_warm_list_runs_stub_raises_not_implemented(tmp_catalog: Path):
+    """When warm DB exists, list_runs attempts warm path and raises NotImplementedError."""
+    init_catalog(tmp_catalog)
+    # Create a dummy bathos.db file to trigger warm backend
+    (tmp_catalog / "bathos.db").touch()
+    with pytest.raises(NotImplementedError, match="Warm tier list_runs coming in Task A3"):
+        list_runs(tmp_catalog)
+
+
+def test_find_runs_filter_by_project(populated_catalog: Path):
+    """find_runs with project filter returns only runs from that project."""
+    runs = find_runs(populated_catalog, project="espaloma")
+    assert len(runs) == 1
+    assert runs[0].project_slug == "espaloma"
