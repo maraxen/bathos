@@ -84,8 +84,10 @@ def ls_cmd(
 ):
     """List recent runs."""
     from bathos.query import find_runs
+    from bathos.compact import _fragment_count
     since_dt = _parse_since(since)
-    runs = find_runs(_catalog_dir(), since=since_dt, project=project, status=status)
+    catalog_dir = _catalog_dir()
+    runs = find_runs(catalog_dir, since=since_dt, project=project, status=status)
     runs = runs[:limit]
     if not runs:
         typer.echo("No runs found.")
@@ -98,6 +100,13 @@ def ls_cmd(
             f"{r.id:38} {r.project_slug:12} {r.status:10} {r.exit_code:5} "
             f"{r.duration_s:7.1f}s {r.command[:40]}"
         )
+
+    # Check fragment count and show banner if needed
+    frag_count = _fragment_count(catalog_dir)
+    warm_db_exists = (catalog_dir / "bathos.db").exists()
+    if frag_count > 50 and not warm_db_exists:
+        typer.echo()
+        typer.echo(f"⚠  {frag_count} uncompacted runs — run 'bth compact' to speed up queries")
 
 
 @app.command()
@@ -149,6 +158,17 @@ def sql(query: str = typer.Argument(...)):
     rows = run_sql(query)
     for row in rows:
         typer.echo("\t".join(str(v) for v in row))
+
+
+@app.command()
+def compact():
+    """Compact cool fragments into warm DuckDB catalog."""
+    from bathos.compact import compact
+    catalog_dir = _catalog_dir()
+    result = compact(catalog_dir)
+    typer.echo(
+        f"Compacted {result.ingested} runs into bathos.db in {result.duration_s:.1f}s"
+    )
 
 
 def _parse_since(since: str | None) -> datetime | None:
