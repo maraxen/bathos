@@ -8,6 +8,57 @@ from bathos.catalog import read_runs
 from bathos.schema import Run
 
 
+def _row_to_run(row: tuple, con) -> Run | None:
+    """Convert a DuckDB row (from runs table) to a Run object.
+
+    DuckDB returns rows as tuples; we need to map back to Run dataclass.
+    Column order must match: id, project_slug, command, argv, git_hash, git_branch,
+    git_dirty, timestamp, duration_s, exit_code, status, output_paths, tags,
+    schema_version, slurm_job_id, metadata, outcome
+    """
+    try:
+        (
+            id_,
+            project_slug,
+            command,
+            argv,
+            git_hash,
+            git_branch,
+            git_dirty,
+            timestamp,
+            duration_s,
+            exit_code,
+            status,
+            output_paths,
+            tags,
+            schema_version,
+            slurm_job_id,
+            metadata,
+            outcome,
+        ) = row
+
+        return Run(
+            id=id_,
+            project_slug=project_slug,
+            command=command,
+            argv=argv if argv else [],
+            git_hash=git_hash,
+            git_branch=git_branch,
+            git_dirty=git_dirty,
+            timestamp=timestamp,
+            duration_s=duration_s,
+            exit_code=exit_code,
+            status=status,
+            output_paths=output_paths if output_paths else [],
+            tags=tags if tags else [],
+            schema_version=schema_version,
+            slurm_job_id=slurm_job_id if slurm_job_id else "",
+            metadata=metadata if metadata else "{}",
+        )
+    except (ValueError, TypeError) as e:
+        raise RuntimeError(f"Failed to convert DuckDB row to Run: {e}") from e
+
+
 def _resolve_backend(catalog_dir: Path) -> Literal["cool", "warm"]:
     """Determine which backend to use based on catalog state.
 
@@ -55,11 +106,39 @@ def _warm_list_runs(
     status: str | None = None,
     limit: int = 50,
 ) -> list[Run]:
-    """List runs using warm tier (DuckDB).
+    """List runs using warm tier (DuckDB)."""
+    db_path = catalog_dir / "bathos.db"
+    con = duckdb.connect(str(db_path))
+    con.execute("SET TimeZone='UTC'")
 
-    Not yet implemented; placeholder for Task A3.
-    """
-    raise NotImplementedError("Warm tier list_runs coming in Task A3")
+    # Build query
+    query = "SELECT * FROM runs"
+    params = []
+    conditions = []
+
+    if project:
+        conditions.append("project_slug = ?")
+        params.append(project)
+    if status:
+        conditions.append("status = ?")
+        params.append(status)
+
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+
+    query += f" LIMIT {limit}"
+
+    rows = con.execute(query, params).fetchall()
+
+    # Convert rows to Run objects
+    runs = []
+    for row in rows:
+        run = _row_to_run(row, con)
+        if run:
+            runs.append(run)
+
+    con.close()
+    return runs
 
 
 def _cool_get_run(run_id: str, catalog_dir: Path) -> Run | None:
@@ -83,11 +162,20 @@ def get_run(run_id: str, catalog_dir: Path) -> Run | None:
 
 
 def _warm_get_run(run_id: str, catalog_dir: Path) -> Run | None:
-    """Get a single run by ID using warm tier (DuckDB).
+    """Get a single run by ID using warm tier (DuckDB)."""
+    db_path = catalog_dir / "bathos.db"
+    con = duckdb.connect(str(db_path))
+    con.execute("SET TimeZone='UTC'")
 
-    Not yet implemented; placeholder for Task A3.
-    """
-    raise NotImplementedError("Warm tier get_run coming in Task A3")
+    rows = con.execute("SELECT * FROM runs WHERE id = ?", [run_id]).fetchall()
+
+    if not rows:
+        con.close()
+        return None
+
+    run = _row_to_run(rows[0], con)
+    con.close()
+    return run
 
 
 def _cool_find_runs(
@@ -139,11 +227,44 @@ def _warm_find_runs(
     tags: list[str] | None = None,
     slurm_job_id: str | None = None,
 ) -> list[Run]:
-    """Find runs using warm tier (DuckDB).
+    """Find runs using warm tier (DuckDB)."""
+    db_path = catalog_dir / "bathos.db"
+    con = duckdb.connect(str(db_path))
+    con.execute("SET TimeZone='UTC'")
 
-    Not yet implemented; placeholder for Task A3.
-    """
-    raise NotImplementedError("Warm tier find_runs coming in Task A3")
+    query = "SELECT * FROM runs"
+    params = []
+    conditions = []
+
+    if since:
+        conditions.append("timestamp >= ?")
+        params.append(since)
+    if project:
+        conditions.append("project_slug = ?")
+        params.append(project)
+    if status:
+        conditions.append("status = ?")
+        params.append(status)
+    if slurm_job_id:
+        conditions.append("slurm_job_id = ?")
+        params.append(slurm_job_id)
+
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+
+    rows = con.execute(query, params).fetchall()
+
+    # For tags filtering, need to check each run (tags are stored as arrays)
+    runs = []
+    for row in rows:
+        run = _row_to_run(row, con)
+        if run:
+            if tags and not any(t in run.tags for t in tags):
+                continue
+            runs.append(run)
+
+    con.close()
+    return runs
 
 
 def run_sql(sql: str, catalog_dir: Path | None = None) -> list[tuple]:

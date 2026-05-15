@@ -104,13 +104,35 @@ def test_run_sql_errors_clearly_without_warm_db(tmp_catalog: Path):
         run_sql("SELECT COUNT(*) FROM runs", catalog_dir=tmp_catalog)
 
 
-def test_warm_list_runs_stub_raises_not_implemented(tmp_catalog: Path):
-    """When warm DB exists, list_runs attempts warm path and raises NotImplementedError."""
+def test_warm_list_runs_works_with_real_db(tmp_catalog: Path):
+    """When warm DB exists and is valid, list_runs uses warm path (DuckDB)."""
+    # Use the compact flow to create a valid warm DB
+    from bathos.compact import compact
     init_catalog(tmp_catalog)
-    # Create a dummy bathos.db file to trigger warm backend
-    (tmp_catalog / "bathos.db").touch()
-    with pytest.raises(NotImplementedError, match="Warm tier list_runs coming in Task A3"):
-        list_runs(tmp_catalog)
+
+    # Create and write runs to cool tier
+    base = datetime(2026, 5, 10, 12, 0, 0, tzinfo=timezone.utc)
+    for i in range(2):
+        r = Run(
+            project_slug="testproj",
+            command=f"python run_{i}.py",
+            argv=["python", f"run_{i}.py"],
+            git_hash="abc",
+            git_branch="main",
+            git_dirty=False,
+            timestamp=base + timedelta(hours=i),
+            status="completed",
+            exit_code=0,
+        )
+        write_run(r, tmp_catalog)
+
+    # Compact to create valid warm DB
+    compact(tmp_catalog)
+
+    # Now list_runs should use warm path and return results
+    runs = list_runs(tmp_catalog)
+    assert len(runs) == 2
+    assert all(isinstance(r, Run) for r in runs)
 
 
 def test_find_runs_filter_by_project(populated_catalog: Path):
