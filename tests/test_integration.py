@@ -4,7 +4,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 from bathos.cli import app
 from bathos.catalog import read_runs, init_catalog
-from bathos.compact import compact
+from bathos.compact import compact, COMPACTION_THRESHOLD
 from bathos.query import run_sql
 
 runner = CliRunner()
@@ -15,6 +15,10 @@ def test_full_workflow(tmp_path: Path, monkeypatch):
     catalog = tmp_path / ".bth" / "catalog"
     monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
     monkeypatch.setenv("BTH_PROJECT_SLUG", "intproj")
+
+    # Lower threshold so 2 runs triggers banner; test banner appearance before/after compact
+    import bathos.compact
+    monkeypatch.setattr(bathos.compact, "COMPACTION_THRESHOLD", 1)
 
     # 1. init
     r = runner.invoke(app, ["init", "--slug", "intproj"])
@@ -30,13 +34,14 @@ def test_full_workflow(tmp_path: Path, monkeypatch):
     r = runner.invoke(app, ["run", sys.executable, "--", "-c", "raise SystemExit(1)"])
     assert r.exit_code == 1
 
-    # 4. ls shows both runs (should show banner since only 2 fragments, below 50-threshold)
+    # 4a. ls shows both runs and banner BEFORE compact (threshold now 1, so 2 fragments triggers it)
     r = runner.invoke(app, ["ls"])
     assert r.exit_code == 0
     assert "intproj" in r.output
     lines = [l for l in r.output.splitlines() if "intproj" in l]
     assert len(lines) == 2
-    # Note: 2 runs below COMPACTION_THRESHOLD (50), so no banner yet
+    # Banner should appear now since fragment count (2) > threshold (1)
+    assert "uncompacted" in r.output
 
     # 5. find by status
     r = runner.invoke(app, ["find", "--status", "failed"])
@@ -63,6 +68,10 @@ def test_full_workflow(tmp_path: Path, monkeypatch):
     assert result.ingested == 2
     assert result.skipped == 0
     assert (catalog / "bathos.db").exists()
+
+    # 8b. verify banner logic: should_compact returns False after warm DB exists
+    from bathos.compact import should_compact
+    assert not should_compact(catalog), "Banner should not appear after compact (warm DB now exists)"
 
     # 9. verify warm tier has both runs via SQL
     rows = run_sql("SELECT count(*) FROM runs", catalog)
