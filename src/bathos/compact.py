@@ -2,11 +2,54 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Callable
+import hashlib
+import json
 import time
 import duckdb
 
 from bathos.catalog import read_runs
 from bathos.schema import Run
+
+
+def _collect_output_metadata(output_path: str) -> dict:
+    """Collect metadata about an output file.
+
+    Returns dict with:
+    - status: "present", "missing", or "unreadable"
+    - size_bytes: file size (0 if missing/unreadable)
+    - mtime_unix: modification time (Unix timestamp)
+    - sha256: file hash (None if >100MB or unreadable)
+    """
+    path = Path(output_path)
+
+    try:
+        if not path.exists():
+            return {"status": "missing", "size_bytes": 0}
+
+        stat = path.stat()
+        size_bytes = stat.st_size
+        mtime_unix = stat.st_mtime
+
+        # Skip SHA256 for large files (>100MB)
+        sha256_hash = None
+        if size_bytes < 100 * 1024 * 1024:
+            try:
+                h = hashlib.sha256()
+                with open(path, "rb") as f:
+                    while chunk := f.read(8192):
+                        h.update(chunk)
+                sha256_hash = h.hexdigest()
+            except Exception:
+                sha256_hash = None
+
+        return {
+            "status": "present",
+            "size_bytes": size_bytes,
+            "mtime_unix": mtime_unix,
+            "sha256": sha256_hash,
+        }
+    except (PermissionError, OSError):
+        return {"status": "unreadable", "size_bytes": 0}
 
 
 @dataclass
@@ -62,7 +105,8 @@ CREATE TABLE IF NOT EXISTS runs (
     slurm_job_id TEXT,
     hostname TEXT,
     metadata TEXT,
-    outcome TEXT
+    outcome TEXT,
+    output_metadata TEXT
 )
 """
 
@@ -163,14 +207,27 @@ def compact(catalog_dir: Path) -> CompactResult:
         # Apply migrations if needed
         run = _apply_migrations(run)
 
+        # Collect output metadata
+        output_metadata = []
+        if run.output_paths:
+            for output_path in run.output_paths:
+                meta = _collect_output_metadata(output_path)
+                output_metadata.append({
+                    "path": output_path,
+                    **meta
+                })
+
+        # Serialize metadata to JSON
+        output_metadata_json = json.dumps(output_metadata) if output_metadata else "[]"
+
         # Insert into DuckDB
         con.execute(
             """
             INSERT INTO runs (
                 id, project_slug, command, argv, git_hash, git_branch,
                 git_dirty, timestamp, duration_s, exit_code, status,
-                output_paths, tags, schema_version, slurm_job_id, hostname, metadata, outcome
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                output_paths, tags, schema_version, slurm_job_id, hostname, metadata, outcome, output_metadata
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 run.id,
@@ -191,6 +248,7 @@ def compact(catalog_dir: Path) -> CompactResult:
                 run.hostname,
                 run.metadata,
                 None,  # outcome is not set during compact
+                output_metadata_json,
             ],
         )
 

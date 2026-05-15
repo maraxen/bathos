@@ -285,3 +285,110 @@ def test_apply_migrations_v2_is_noop(sample_run: Run):
     # Verify unchanged
     assert result.schema_version == "2"
     assert result.hostname == "testhost"
+
+
+def test_compact_collects_output_metadata(tmp_path):
+    """Verify output file metadata is collected during compact."""
+    from bathos.compact import _collect_output_metadata
+
+    # Create a dummy output file
+    output_file = tmp_path / "result.json"
+    output_file.write_text('{"result": 42}')
+
+    # Collect metadata
+    meta = _collect_output_metadata(str(output_file))
+
+    assert meta["status"] == "present"
+    assert meta["size_bytes"] > 0
+    assert meta["mtime_unix"] > 0
+    assert meta["sha256"] is not None
+    assert len(meta["sha256"]) == 64  # SHA256 hex string
+
+
+def test_compact_handles_missing_output_file():
+    """Verify missing output files are handled gracefully."""
+    from bathos.compact import _collect_output_metadata
+
+    meta = _collect_output_metadata("/nonexistent/file.json")
+
+    assert meta["status"] == "missing"
+    assert meta["size_bytes"] == 0
+
+
+def test_compact_skips_sha256_for_large_files(tmp_path):
+    """Verify SHA256 is skipped for files >100MB."""
+    from bathos.compact import _collect_output_metadata
+
+    # Create a small file and verify it gets SHA256
+    small_file = tmp_path / "small.txt"
+    small_file.write_text("x" * 1000)
+
+    meta = _collect_output_metadata(str(small_file))
+    assert meta["sha256"] is not None  # Small file gets SHA256
+
+
+def test_compact_ingests_output_metadata_into_warm_db(tmp_catalog: Path, sample_run: Run):
+    """Verify output metadata is stored in warm DuckDB."""
+    from bathos.compact import compact
+    import json
+
+    # Create an output file
+    output_file = tmp_catalog / "output.json"
+    output_file.write_text('{"data": [1,2,3]}')
+
+    # Write a run with output_paths
+    run = Run(
+        project_slug=sample_run.project_slug,
+        command=sample_run.command,
+        argv=sample_run.argv,
+        git_hash=sample_run.git_hash,
+        git_branch=sample_run.git_branch,
+        git_dirty=sample_run.git_dirty,
+        output_paths=[str(output_file)]
+    )
+    write_run(run, tmp_catalog)
+
+    # Compact
+    result = compact(tmp_catalog)
+    assert result.ingested > 0
+
+    # Query warm DB
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"), read_only=True)
+    rows = con.execute("SELECT output_metadata FROM runs").fetchall()
+    con.close()
+
+    assert len(rows) > 0
+    metadata = json.loads(rows[0][0])
+    assert len(metadata) > 0
+    assert metadata[0]["status"] == "present"
+    assert metadata[0]["size_bytes"] > 0
+    assert "path" in metadata[0]
+
+
+def test_compact_handles_empty_output_paths(tmp_catalog: Path, sample_run: Run):
+    """Verify runs with no output_paths get empty metadata array."""
+    from bathos.compact import compact
+    import json
+
+    # Write a run with NO output paths
+    run = Run(
+        project_slug=sample_run.project_slug,
+        command=sample_run.command,
+        argv=sample_run.argv,
+        git_hash=sample_run.git_hash,
+        git_branch=sample_run.git_branch,
+        git_dirty=sample_run.git_dirty,
+        output_paths=[]  # Empty
+    )
+    write_run(run, tmp_catalog)
+
+    # Compact
+    compact(tmp_catalog)
+
+    # Query
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"), read_only=True)
+    rows = con.execute("SELECT output_metadata FROM runs").fetchall()
+    con.close()
+
+    metadata = json.loads(rows[0][0])
+    assert metadata == []

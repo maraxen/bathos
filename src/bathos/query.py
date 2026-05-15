@@ -14,7 +14,7 @@ def _row_to_run(row: tuple, con) -> Run | None:
     DuckDB returns rows as tuples; we need to map back to Run dataclass.
     Column order must match: id, project_slug, command, argv, git_hash, git_branch,
     git_dirty, timestamp, duration_s, exit_code, status, output_paths, tags,
-    schema_version, slurm_job_id, hostname, metadata, outcome
+    schema_version, slurm_job_id, hostname, metadata, outcome, output_metadata
     """
     try:
         (
@@ -36,6 +36,7 @@ def _row_to_run(row: tuple, con) -> Run | None:
             hostname,
             metadata,
             outcome,
+            output_metadata,
         ) = row
 
         return Run(

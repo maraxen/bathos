@@ -43,6 +43,7 @@ WARM_SCHEMA = pa.schema([
     pa.field("hostname", pa.string()),
     pa.field("metadata", pa.string()),
     pa.field("outcome", pa.string()),
+    pa.field("output_metadata", pa.string()),
 ])
 
 
