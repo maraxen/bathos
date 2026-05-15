@@ -1,5 +1,6 @@
 from __future__ import annotations
 import dataclasses
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -28,6 +29,7 @@ def run_script(
         output_paths=output_paths,
         tags=tags,
         status="running",
+        slurm_job_id=os.environ.get("SLURM_JOB_ID", ""),
     )
     write_run(run, catalog_dir)
 

@@ -5,7 +5,7 @@ from uuid import uuid4
 import pyarrow as pa
 
 
-RUN_SCHEMA = pa.schema([
+COOL_SCHEMA = pa.schema([
     pa.field("id", pa.string()),
     pa.field("project_slug", pa.string()),
     pa.field("command", pa.string()),
@@ -19,6 +19,27 @@ RUN_SCHEMA = pa.schema([
     pa.field("status", pa.string()),
     pa.field("output_paths", pa.list_(pa.string())),
     pa.field("tags", pa.list_(pa.string())),
+    pa.field("schema_version", pa.string()),
+    pa.field("slurm_job_id", pa.string()),
+])
+
+WARM_SCHEMA = pa.schema([
+    pa.field("id", pa.string()),
+    pa.field("project_slug", pa.string()),
+    pa.field("command", pa.string()),
+    pa.field("argv", pa.list_(pa.string())),
+    pa.field("git_hash", pa.string()),
+    pa.field("git_branch", pa.string()),
+    pa.field("git_dirty", pa.bool_()),
+    pa.field("timestamp", pa.timestamp("us", tz="UTC")),
+    pa.field("duration_s", pa.float64()),
+    pa.field("exit_code", pa.int32()),
+    pa.field("status", pa.string()),
+    pa.field("output_paths", pa.list_(pa.string())),
+    pa.field("tags", pa.list_(pa.string())),
+    pa.field("schema_version", pa.string()),
+    pa.field("slurm_job_id", pa.string()),
+    pa.field("metadata", pa.string()),
 ])
 
 
@@ -39,6 +60,9 @@ class Run:
     status: str = "running"
     output_paths: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
+    schema_version: str = "1"
+    slurm_job_id: str = ""
+    metadata: str = "{}"
 
     def to_arrow(self) -> pa.Table:
         return pa.table(
@@ -58,8 +82,10 @@ class Run:
                 "status": [self.status],
                 "output_paths": [self.output_paths],
                 "tags": [self.tags],
+                "schema_version": [self.schema_version],
+                "slurm_job_id": [self.slurm_job_id],
             },
-            schema=RUN_SCHEMA,
+            schema=COOL_SCHEMA,
         )
 
     @classmethod
@@ -81,4 +107,6 @@ class Run:
             status=pydict["status"][i],
             output_paths=list(pydict["output_paths"][i]),
             tags=list(pydict["tags"][i]),
+            schema_version=pydict.get("schema_version", ["1"])[i] if "schema_version" in pydict else "1",
+            slurm_job_id=pydict.get("slurm_job_id", [""])[i] if "slurm_job_id" in pydict else "",
         )

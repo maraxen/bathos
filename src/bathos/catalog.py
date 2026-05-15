@@ -4,7 +4,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-from bathos.schema import Run, RUN_SCHEMA
+from bathos.schema import Run, COOL_SCHEMA
 
 
 def init_catalog(catalog_dir: Path) -> None:
