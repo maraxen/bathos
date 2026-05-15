@@ -158,6 +158,29 @@ def test_ls_no_banner_when_warm_db_exists(tmp_path: Path, monkeypatch):
     # So banner should NOT appear (which is what ls_cmd checks)
 
 
+def test_sql_error_without_warm_db(tmp_path: Path, monkeypatch):
+    """Test that bth sql raises clear error when warm DB is missing and query needs it."""
+    monkeypatch.chdir(tmp_path)
+    catalog = tmp_path / ".bth" / "catalog"
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
+    monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
+    (tmp_path / ".bth.toml").write_text(
+        f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n'
+    )
+
+    # Create a run to have Parquet files
+    runner.invoke(app, ["run", sys.executable, "--", "-c", "pass"])
+
+    # Verify no warm DB exists
+    assert not (catalog / "bathos.db").exists()
+
+    # Try to query a table that requires warm DB (the runs table from compact)
+    result = runner.invoke(app, ["sql", "SELECT COUNT(*) FROM runs"])
+    assert result.exit_code != 0
+    # Should show clear error message
+    assert "No warm catalog" in result.output or "bth compact" in result.output
+
+
 def test_sql_allows_arbitrary_queries(tmp_path: Path, monkeypatch):
     """Test that bth sql allows arbitrary queries (e.g., read_parquet) without warm DB."""
     monkeypatch.chdir(tmp_path)

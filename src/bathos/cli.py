@@ -155,9 +155,13 @@ def find(
 def sql(query: str = typer.Argument(...)):
     """Run raw DuckDB SQL against the catalog."""
     from bathos.query import run_sql
-    rows = run_sql(query)
-    for row in rows:
-        typer.echo("\t".join(str(v) for v in row))
+    try:
+        rows = run_sql(query, catalog_dir=_catalog_dir())
+        for row in rows:
+            typer.echo("\t".join(str(v) for v in row))
+    except RuntimeError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1)
 
 
 @app.command()

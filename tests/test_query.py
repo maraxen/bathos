@@ -98,10 +98,10 @@ def test_list_runs_uses_cool_when_no_warm_db(populated_catalog: Path):
 
 
 def test_run_sql_errors_clearly_without_warm_db(tmp_catalog: Path):
-    """When warm DB doesn't exist but catalog_dir is provided, run_sql raises clear error."""
+    """When warm DB doesn't exist but query needs it (runs table), run_sql raises clear error."""
     init_catalog(tmp_catalog)
     with pytest.raises(RuntimeError, match="No warm catalog.*bth compact"):
-        run_sql("SELECT 1", catalog_dir=tmp_catalog)
+        run_sql("SELECT COUNT(*) FROM runs", catalog_dir=tmp_catalog)
 
 
 def test_warm_list_runs_stub_raises_not_implemented(tmp_catalog: Path):

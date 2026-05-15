@@ -144,19 +144,30 @@ def _warm_find_runs(
 def run_sql(sql: str, catalog_dir: Path | None = None) -> list[tuple]:
     """Execute a raw DuckDB SQL query and return rows as list of tuples.
 
-    If catalog_dir is provided, requires warm tier catalog (bathos.db) to exist there.
-    Otherwise, connects to DuckDB without a specific catalog (for manual queries).
+    If catalog_dir is provided, attempts to open warm tier catalog (bathos.db).
+    If warm DB doesn't exist and query requires it (e.g., SELECT FROM runs),
+    DuckDB will raise an appropriate error.
+    Otherwise, connects to DuckDB without a specific catalog (for arbitrary queries).
     """
     if catalog_dir is not None:
         db_path = catalog_dir / "bathos.db"
         if not db_path.exists():
-            raise RuntimeError(
-                "No warm catalog. Run `bth compact` first."
-            )
-        con = duckdb.connect(str(db_path))
+            # Don't require warm DB upfront - let DuckDB error if query needs it
+            con = duckdb.connect()
+        else:
+            con = duckdb.connect(str(db_path))
     else:
         con = duckdb.connect()
 
     con.execute("SET TimeZone='UTC'")
-    result = con.execute(sql).fetchall()
+    try:
+        result = con.execute(sql).fetchall()
+    except Exception as e:
+        # If query tried to access the runs table without warm DB, provide helpful error
+        if "runs" in sql.lower() and catalog_dir is not None and not (catalog_dir / "bathos.db").exists():
+            raise RuntimeError(
+                "No warm catalog. Run `bth compact` first."
+            ) from e
+        raise
+
     return result
