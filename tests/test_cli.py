@@ -1,7 +1,10 @@
 import sys
+import subprocess
 from pathlib import Path
 from typer.testing import CliRunner
 from bathos.cli import app
+from bathos.catalog import init_catalog, write_run
+from bathos.schema import Run
 
 runner = CliRunner()
 
@@ -202,3 +205,157 @@ def test_sql_allows_arbitrary_queries(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["sql", f"SELECT COUNT(*) FROM read_parquet('{glob}')"])
     assert result.exit_code == 0
     assert "1" in result.output
+
+
+def test_check_command_detects_stale_runs(tmp_path: Path, monkeypatch):
+    """Test that bth check detects stale runs and exits with code 1."""
+    monkeypatch.chdir(tmp_path)
+    catalog = tmp_path / ".bth" / "catalog"
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
+    monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
+    (tmp_path / ".bth.toml").write_text(
+        f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n'
+    )
+
+    # Initialize git repo
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+    (tmp_path / "file.txt").write_text("content")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "initial"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+
+    # Create a run with an old hash
+    init_catalog(catalog)
+    stale_run = Run(
+        project_slug="testproj",
+        command="python test.py",
+        argv=["python", "test.py"],
+        git_hash="olddeadbeef0000",
+        git_branch="main",
+        git_dirty=False,
+    )
+    write_run(stale_run, catalog)
+
+    result = runner.invoke(app, ["check"])
+    assert result.exit_code == 1
+    assert "STALE" in result.output
+    assert "Warning" in result.output or "stale" in result.output.lower()
+
+
+def test_check_command_shows_ok_runs(tmp_path: Path, monkeypatch):
+    """Test that bth check shows OK status for runs at current HEAD."""
+    monkeypatch.chdir(tmp_path)
+    catalog = tmp_path / ".bth" / "catalog"
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
+    monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
+    (tmp_path / ".bth.toml").write_text(
+        f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n'
+    )
+
+    # Initialize git repo
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+    (tmp_path / "file.txt").write_text("content")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "initial"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+
+    current_hash = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True
+    ).strip()
+
+    # Create a run with current hash
+    init_catalog(catalog)
+    ok_run = Run(
+        project_slug="testproj",
+        command="python test.py",
+        argv=["python", "test.py"],
+        git_hash=current_hash,
+        git_branch="main",
+        git_dirty=False,
+    )
+    write_run(ok_run, catalog)
+
+    result = runner.invoke(app, ["check"])
+    assert result.exit_code == 0
+    assert "OK" in result.output
+
+
+def test_check_command_filters_by_status(tmp_path: Path, monkeypatch):
+    """Test that bth check --status filter works."""
+    monkeypatch.chdir(tmp_path)
+    catalog = tmp_path / ".bth" / "catalog"
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
+    monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
+    (tmp_path / ".bth.toml").write_text(
+        f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n'
+    )
+
+    # Initialize git repo
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+    (tmp_path / "file.txt").write_text("content")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "initial"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+
+    # Create both stale and dirty runs
+    init_catalog(catalog)
+    stale_run = Run(
+        project_slug="testproj",
+        command="python test1.py",
+        argv=["python", "test1.py"],
+        git_hash="olddeadbeef0000",
+        git_branch="main",
+        git_dirty=False,
+    )
+    dirty_run = Run(
+        project_slug="testproj",
+        command="python test2.py",
+        argv=["python", "test2.py"],
+        git_hash="anyhash",
+        git_branch="main",
+        git_dirty=True,
+    )
+    write_run(stale_run, catalog)
+    write_run(dirty_run, catalog)
+
+    # Filter by STALE
+    result = runner.invoke(app, ["check", "--status", "STALE"])
+    assert result.exit_code == 1
+    assert "STALE" in result.output
+    assert "DIRTY_RUN" not in result.output
+
+    # Filter by DIRTY_RUN
+    result = runner.invoke(app, ["check", "--status", "DIRTY_RUN"])
+    assert result.exit_code == 0
+    assert "DIRTY_RUN" in result.output
+    assert "STALE" not in result.output
