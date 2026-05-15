@@ -168,7 +168,7 @@ def test_compact_tracks_warm_schema_version(tmp_catalog: Path, sample_run: Run):
         "SELECT value FROM _schema_meta WHERE key = 'warm_version'"
     ).fetchall()
     assert len(rows) == 1
-    assert rows[0][0] == "1"
+    assert rows[0][0] == "2"
 
 
 def test_fragment_count_helper(tmp_catalog: Path, sample_run: Run):

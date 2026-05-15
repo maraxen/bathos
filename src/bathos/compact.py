@@ -199,7 +199,7 @@ def compact(catalog_dir: Path) -> CompactResult:
     # Update schema_meta table
     con.execute(
         "INSERT OR REPLACE INTO _schema_meta (key, value) VALUES (?, ?)",
-        ["warm_version", "1"],
+        ["warm_version", "2"],
     )
 
     # Commit and close
