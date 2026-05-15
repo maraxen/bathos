@@ -40,6 +40,7 @@ WARM_SCHEMA = pa.schema([
     pa.field("schema_version", pa.string()),
     pa.field("slurm_job_id", pa.string()),
     pa.field("metadata", pa.string()),
+    pa.field("outcome", pa.string()),
 ])
 
 

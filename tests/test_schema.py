@@ -97,6 +97,14 @@ def test_warm_schema_has_metadata_column():
     assert metadata_field.type == pa.string()
 
 
+def test_warm_schema_has_outcome_column():
+    """Verify WARM_SCHEMA includes outcome column."""
+    assert "outcome" in WARM_SCHEMA.names
+    # Find outcome field and check it's string type
+    outcome_field = next(f for f in WARM_SCHEMA if f.name == "outcome")
+    assert outcome_field.type == pa.string()
+
+
 def test_cool_schema_has_new_fields():
     """Verify COOL_SCHEMA includes schema_version and slurm_job_id."""
     assert "schema_version" in COOL_SCHEMA.names
