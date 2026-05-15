@@ -1,7 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "bathos"
 version = "0.1.0"
-description = "Add your description here"
+description = "Local-first, zero-server experiment tracking for researchers"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "typer>=0.12",
+    "duckdb>=1.0",
+    "pyarrow>=16",
+]
+
+[project.scripts]
+bth = "bathos.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bathos"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-tmp-files>=0.0.2",
+]
