@@ -1,19 +1,30 @@
 from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 import duckdb
 
 from bathos.catalog import read_runs
 from bathos.schema import Run
 
 
-def list_runs(
+def _resolve_backend(catalog_dir: Path) -> Literal["cool", "warm"]:
+    """Determine which backend to use based on catalog state.
+
+    Returns 'warm' if catalog_dir/bathos.db exists, else 'cool'.
+    """
+    if (catalog_dir / "bathos.db").exists():
+        return "warm"
+    return "cool"
+
+
+def _cool_list_runs(
     catalog_dir: Path,
     project: str | None = None,
     status: str | None = None,
     limit: int = 50,
 ) -> list[Run]:
-    """List runs from catalog, with optional filtering and limit."""
+    """List runs using cool tier (PyArrow Parquet files)."""
     runs = read_runs(catalog_dir)
     if project:
         runs = [r for r in runs if r.project_slug == project]
@@ -22,8 +33,37 @@ def list_runs(
     return runs[:limit]
 
 
-def get_run(run_id: str, catalog_dir: Path) -> Run | None:
-    """Get a single run by ID, or None if not found."""
+def list_runs(
+    catalog_dir: Path,
+    project: str | None = None,
+    status: str | None = None,
+    limit: int = 50,
+) -> list[Run]:
+    """List runs from catalog, with optional filtering and limit.
+
+    Dispatches to cool or warm backend based on catalog state.
+    """
+    backend = _resolve_backend(catalog_dir)
+    if backend == "warm":
+        return _warm_list_runs(catalog_dir, project=project, status=status, limit=limit)
+    return _cool_list_runs(catalog_dir, project=project, status=status, limit=limit)
+
+
+def _warm_list_runs(
+    catalog_dir: Path,
+    project: str | None = None,
+    status: str | None = None,
+    limit: int = 50,
+) -> list[Run]:
+    """List runs using warm tier (DuckDB).
+
+    Not yet implemented; placeholder for Task A3.
+    """
+    raise NotImplementedError("Warm tier list_runs coming in Task A3")
+
+
+def _cool_get_run(run_id: str, catalog_dir: Path) -> Run | None:
+    """Get a single run by ID using cool tier (PyArrow)."""
     runs = read_runs(catalog_dir)
     for r in runs:
         if r.id == run_id:
@@ -31,14 +71,33 @@ def get_run(run_id: str, catalog_dir: Path) -> Run | None:
     return None
 
 
-def find_runs(
+def get_run(run_id: str, catalog_dir: Path) -> Run | None:
+    """Get a single run by ID, or None if not found.
+
+    Dispatches to cool or warm backend based on catalog state.
+    """
+    backend = _resolve_backend(catalog_dir)
+    if backend == "warm":
+        return _warm_get_run(run_id, catalog_dir)
+    return _cool_get_run(run_id, catalog_dir)
+
+
+def _warm_get_run(run_id: str, catalog_dir: Path) -> Run | None:
+    """Get a single run by ID using warm tier (DuckDB).
+
+    Not yet implemented; placeholder for Task A3.
+    """
+    raise NotImplementedError("Warm tier get_run coming in Task A3")
+
+
+def _cool_find_runs(
     catalog_dir: Path,
     since: datetime | None = None,
     project: str | None = None,
     status: str | None = None,
     tags: list[str] | None = None,
 ) -> list[Run]:
-    """Find runs with multiple filter criteria."""
+    """Find runs using cool tier (PyArrow)."""
     runs = read_runs(catalog_dir)
     if since:
         runs = [r for r in runs if r.timestamp >= since]
@@ -51,9 +110,53 @@ def find_runs(
     return runs
 
 
-def run_sql(sql: str) -> list[tuple]:
-    """Execute a raw DuckDB SQL query and return rows as list of tuples."""
-    con = duckdb.connect()
+def find_runs(
+    catalog_dir: Path,
+    since: datetime | None = None,
+    project: str | None = None,
+    status: str | None = None,
+    tags: list[str] | None = None,
+) -> list[Run]:
+    """Find runs with multiple filter criteria.
+
+    Dispatches to cool or warm backend based on catalog state.
+    """
+    backend = _resolve_backend(catalog_dir)
+    if backend == "warm":
+        return _warm_find_runs(catalog_dir, since=since, project=project, status=status, tags=tags)
+    return _cool_find_runs(catalog_dir, since=since, project=project, status=status, tags=tags)
+
+
+def _warm_find_runs(
+    catalog_dir: Path,
+    since: datetime | None = None,
+    project: str | None = None,
+    status: str | None = None,
+    tags: list[str] | None = None,
+) -> list[Run]:
+    """Find runs using warm tier (DuckDB).
+
+    Not yet implemented; placeholder for Task A3.
+    """
+    raise NotImplementedError("Warm tier find_runs coming in Task A3")
+
+
+def run_sql(sql: str, catalog_dir: Path | None = None) -> list[tuple]:
+    """Execute a raw DuckDB SQL query and return rows as list of tuples.
+
+    If catalog_dir is provided, requires warm tier catalog (bathos.db) to exist there.
+    Otherwise, connects to DuckDB without a specific catalog (for manual queries).
+    """
+    if catalog_dir is not None:
+        db_path = catalog_dir / "bathos.db"
+        if not db_path.exists():
+            raise RuntimeError(
+                "No warm catalog. Run `bth compact` first."
+            )
+        con = duckdb.connect(str(db_path))
+    else:
+        con = duckdb.connect()
+
     con.execute("SET TimeZone='UTC'")
     result = con.execute(sql).fetchall()
     return result

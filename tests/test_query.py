@@ -4,7 +4,7 @@ from pathlib import Path
 import dataclasses
 import pytest
 from bathos.catalog import write_run, init_catalog
-from bathos.query import list_runs, get_run, find_runs, run_sql
+from bathos.query import list_runs, get_run, find_runs, run_sql, _resolve_backend
 from bathos.schema import Run
 
 
@@ -75,3 +75,32 @@ def test_run_sql_returns_rows(populated_catalog: Path):
     projects = {row[0] for row in rows}
     assert "prolix" in projects
     assert "espaloma" in projects
+
+
+def test_backend_resolution_returns_cool_when_no_warm_db(populated_catalog: Path):
+    """When bathos.db does not exist, _resolve_backend returns 'cool'."""
+    backend = _resolve_backend(populated_catalog)
+    assert backend == "cool"
+
+
+def test_backend_resolution_returns_warm_when_db_exists(populated_catalog: Path):
+    """When bathos.db exists, _resolve_backend returns 'warm'."""
+    # Create a dummy bathos.db file
+    (populated_catalog / "bathos.db").touch()
+    backend = _resolve_backend(populated_catalog)
+    assert backend == "warm"
+
+
+def test_list_runs_uses_cool_when_no_warm_db(populated_catalog: Path):
+    """When warm DB doesn't exist, list_runs uses cool path (PyArrow)."""
+    # No bathos.db exists, should use cool path
+    runs = list_runs(populated_catalog)
+    assert len(runs) == 3
+    assert all(isinstance(r, Run) for r in runs)
+
+
+def test_run_sql_errors_clearly_without_warm_db(tmp_catalog: Path):
+    """When warm DB doesn't exist but catalog_dir is provided, run_sql raises clear error."""
+    init_catalog(tmp_catalog)
+    with pytest.raises(RuntimeError, match="No warm catalog.*bth compact"):
+        run_sql("SELECT 1", catalog_dir=tmp_catalog)
