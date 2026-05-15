@@ -1,0 +1,17 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# bathos scratch (ephemeral, not tracked)
+scripts/scratch/
+
+# IDE
+.cursor/
+.vscode/
