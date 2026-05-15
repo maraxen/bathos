@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Optional
 import typer
 
+from bathos.archive import archive
+
 app = typer.Typer(help="bathos — local-first experiment tracking")
 
 
@@ -174,6 +176,50 @@ def compact():
     typer.echo(
         f"Compacted {result.ingested} runs into bathos.db in {result.duration_s:.1f}s"
     )
+
+
+@app.command("archive")
+def archive_cmd(
+    project: Optional[str] = typer.Option(
+        None, "--project", "-p", help="Filter to specific project (default: all)"
+    ),
+    archive_dir: Optional[Path] = typer.Option(
+        None, "--archive-dir", "-d", help="Archive root directory (default: ~/.bth/archive)"
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show what would be archived without writing"
+    ),
+):
+    """Archive old runs to partitioned cold storage."""
+    catalog_dir = _catalog_dir()
+
+    if not catalog_dir.exists():
+        typer.secho("✗ Catalog not found", fg="red")
+        raise typer.Exit(1)
+
+    try:
+        result = archive(
+            catalog_dir,
+            archive_root=archive_dir,
+            project_slug=project,
+            dry_run=dry_run,
+        )
+
+        status = "[dry-run] " if dry_run else ""
+        typer.secho(
+            f"✓ {status}Archived {result.runs_archived} runs into "
+            f"{result.partitions_created} partitions in {result.duration_s:.1f}s",
+            fg="green"
+        )
+
+        if not dry_run:
+            typer.secho(
+                f"  Manifest: {result.manifest_path}",
+                fg="cyan"
+            )
+    except RuntimeError as e:
+        typer.secho(f"✗ {str(e)}", fg="red")
+        raise typer.Exit(1)
 
 
 @app.command()

@@ -359,3 +359,101 @@ def test_check_command_filters_by_status(tmp_path: Path, monkeypatch):
     assert result.exit_code == 0
     assert "DIRTY_RUN" in result.output
     assert "STALE" not in result.output
+
+
+def test_archive_command_runs(tmp_path: Path, monkeypatch):
+    """Verify bth archive command invokes archive() and reports success."""
+    monkeypatch.chdir(tmp_path)
+    catalog = tmp_path / ".bth" / "catalog"
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
+    monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
+    (tmp_path / ".bth.toml").write_text(
+        f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n'
+    )
+
+    # Create and compact a run
+    runner.invoke(app, ["run", sys.executable, "--", "-c", "pass"])
+    runner.invoke(app, ["compact"])
+
+    # Run archive command
+    archive_dir = tmp_path / "archive"
+    result = runner.invoke(app, ["archive", "--archive-dir", str(archive_dir)])
+
+    assert result.exit_code == 0
+    assert "Archived" in result.output
+    assert "partitions" in result.output
+    assert "Manifest" in result.output
+
+
+def test_archive_command_dry_run(tmp_path: Path, monkeypatch):
+    """Verify --dry-run flag prevents writing."""
+    monkeypatch.chdir(tmp_path)
+    catalog = tmp_path / ".bth" / "catalog"
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
+    monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
+    (tmp_path / ".bth.toml").write_text(
+        f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n'
+    )
+
+    # Create and compact a run
+    runner.invoke(app, ["run", sys.executable, "--", "-c", "pass"])
+    runner.invoke(app, ["compact"])
+
+    # Run archive with --dry-run
+    archive_dir = tmp_path / "archive"
+    result = runner.invoke(app, ["archive", "--archive-dir", str(archive_dir), "--dry-run"])
+
+    assert result.exit_code == 0
+    assert "[dry-run]" in result.output
+    # Archive directory should not be created in dry-run
+    assert not archive_dir.exists()
+
+
+def test_archive_command_without_warm_db(tmp_path: Path, monkeypatch):
+    """Verify command errors clearly if warm DB missing."""
+    monkeypatch.chdir(tmp_path)
+    catalog = tmp_path / ".bth" / "catalog"
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
+    monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
+    (tmp_path / ".bth.toml").write_text(
+        f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n'
+    )
+
+    # Create a run but don't compact (so no warm DB)
+    runner.invoke(app, ["run", sys.executable, "--", "-c", "pass"])
+
+    # Try archive without warm DB
+    result = runner.invoke(app, ["archive"])
+
+    assert result.exit_code != 0
+    assert "No warm catalog" in result.output or "bth compact" in result.output
+
+
+def test_archive_command_with_project_filter(tmp_path: Path, monkeypatch):
+    """Verify --project filter works correctly."""
+    monkeypatch.chdir(tmp_path)
+    catalog = tmp_path / ".bth" / "catalog"
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
+    (tmp_path / ".bth.toml").write_text(
+        f'[project]\nslug = "proj1"\nroot = "{tmp_path}"\n'
+    )
+
+    # Create runs for two projects
+    monkeypatch.setenv("BTH_PROJECT_SLUG", "proj1")
+    runner.invoke(app, ["run", sys.executable, "--", "-c", "pass"])
+    runner.invoke(app, ["run", sys.executable, "--", "-c", "pass"])
+
+    monkeypatch.setenv("BTH_PROJECT_SLUG", "proj2")
+    runner.invoke(app, ["run", sys.executable, "--", "-c", "pass"])
+
+    # Compact
+    runner.invoke(app, ["compact"])
+
+    # Archive only proj1
+    archive_dir = tmp_path / "archive"
+    result = runner.invoke(app, ["archive", "--project", "proj1", "--archive-dir", str(archive_dir)])
+
+    assert result.exit_code == 0
+    assert "Archived" in result.output
+    # Should archive 2 runs (only from proj1)
+    assert "2" in result.output
