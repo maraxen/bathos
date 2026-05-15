@@ -495,3 +495,58 @@ def test_find_command_output_file_filter(tmp_path: Path, monkeypatch):
     assert "test1" in result.output
     # run2 should not appear
     assert "run2" not in result.output
+
+
+def test_check_command_with_check_outputs(tmp_path: Path, monkeypatch):
+    """Verify bth check --check-outputs verifies output files."""
+    monkeypatch.chdir(tmp_path)
+    catalog = tmp_path / ".bth" / "catalog"
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
+    monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
+    (tmp_path / ".bth.toml").write_text(
+        f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n'
+    )
+
+    # Initialize git repo
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+    (tmp_path / "file.txt").write_text("content")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "initial"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+
+    current_hash = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True
+    ).strip()
+
+    # Create an output file
+    output_file = tmp_path / "output.json"
+    output_file.write_text('{"data": 123}')
+
+    # Write a run with output file
+    init_catalog(catalog)
+    run = Run(
+        id="test-run", project_slug="test", command="test", argv=["test"],
+        git_hash=current_hash, git_branch="main", git_dirty=False,
+        output_paths=[str(output_file)]
+    )
+    write_run(run, catalog)
+
+    # Run check with output verification
+    result = runner.invoke(
+        app, ["check", "--check-outputs"]
+    )
+
+    assert result.exit_code == 0
+    assert "Output File Status" in result.output
+    assert "present" in result.output
+    assert str(output_file) in result.output

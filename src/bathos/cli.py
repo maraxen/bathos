@@ -227,9 +227,11 @@ def archive_cmd(
 @app.command()
 def check(
     status: Optional[str] = typer.Option(None, "--status", help="Filter by status (OK, STALE, DIRTY_RUN, UNKNOWN_CODE)"),
+    check_outputs: bool = typer.Option(False, "--check-outputs", help="Also verify output files exist and are readable"),
 ):
     """Check runs for git-drift validity against current HEAD."""
-    from bathos.checker import check_runs
+    from bathos.checker import check_runs, check_output_files
+    from bathos.query import get_run
     catalog_dir = _catalog_dir()
     project_root = Path.cwd()
 
@@ -255,6 +257,24 @@ def check(
         )
         if result.status == "STALE":
             stale_count += 1
+
+    # Check output files if requested
+    if check_outputs:
+        typer.secho("\n[Output File Status]", fg="cyan")
+        for result in results:
+            run = get_run(result.run_id, catalog_dir)
+            if run is None:
+                continue
+            output_results = check_output_files(run)
+            if output_results:
+                for out_result in output_results:
+                    status_color = "green" if out_result.status == "present" else "red"
+                    typer.secho(
+                        f"  {result.run_id}: {out_result.path} ({out_result.status})",
+                        fg=status_color
+                    )
+            else:
+                typer.secho(f"  {result.run_id}: no output files", fg="dim")
 
     # Exit with error if any STALE runs found
     if stale_count > 0:

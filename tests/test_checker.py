@@ -234,3 +234,66 @@ def test_check_result_has_required_fields(tmp_catalog: Path, git_repo: Path, mon
     assert hasattr(result, "run_git_hash")
     assert hasattr(result, "current_hash")
     assert result.current_hash == current_hash
+
+
+def test_check_output_files_present(tmp_path: Path):
+    """Verify check_output_files detects present files."""
+    from bathos.checker import check_output_files
+
+    output_file = tmp_path / "result.json"
+    output_file.write_text('{"success": true}')
+
+    run = Run(
+        project_slug="test", command="test", argv=["test"],
+        git_hash="abc123", git_branch="main", git_dirty=False,
+        output_paths=[str(output_file)]
+    )
+
+    results = check_output_files(run)
+
+    assert len(results) == 1
+    assert results[0].path == str(output_file)
+    assert results[0].status == "present"
+    assert results[0].size_bytes > 0
+
+
+def test_check_output_files_missing(tmp_path: Path):
+    """Verify check_output_files detects missing files."""
+    from bathos.checker import check_output_files
+
+    run = Run(
+        project_slug="test", command="test", argv=["test"],
+        git_hash="abc123", git_branch="main", git_dirty=False,
+        output_paths=["/nonexistent/result.json"]
+    )
+
+    results = check_output_files(run)
+
+    assert len(results) == 1
+    assert results[0].status == "missing"
+    assert results[0].size_bytes == 0
+
+
+def test_check_output_files_multiple(tmp_path: Path):
+    """Verify checking multiple output files."""
+    from bathos.checker import check_output_files
+
+    file1 = tmp_path / "results.json"
+    file2 = tmp_path / "metrics.csv"
+    file3 = "/nonexistent/missing.txt"
+
+    file1.write_text('{}')
+    file2.write_text('a,b,c\n1,2,3')
+
+    run = Run(
+        project_slug="test", command="test", argv=["test"],
+        git_hash="abc123", git_branch="main", git_dirty=False,
+        output_paths=[str(file1), str(file2), file3]
+    )
+
+    results = check_output_files(run)
+
+    assert len(results) == 3
+    assert results[0].status == "present"
+    assert results[1].status == "present"
+    assert results[2].status == "missing"

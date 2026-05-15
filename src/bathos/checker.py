@@ -5,6 +5,7 @@ from typing import Literal
 
 from bathos.git import capture_git_state
 from bathos.query import list_runs
+from bathos.schema import Run
 
 
 @dataclass
@@ -14,6 +15,14 @@ class CheckResult:
     status: Literal["OK", "STALE", "DIRTY_RUN", "UNKNOWN_CODE"]
     run_git_hash: str
     current_hash: str
+
+
+@dataclass
+class OutputCheckResult:
+    """Result of checking a single output file."""
+    path: str
+    status: str  # "present", "missing", "unreadable"
+    size_bytes: int = 0
 
 
 def check_runs(
@@ -66,5 +75,28 @@ def check_runs(
     # Apply filter if provided
     if status_filter:
         results = [r for r in results if r.status == status_filter]
+
+    return results
+
+
+def check_output_files(run: Run) -> list[OutputCheckResult]:
+    """Verify output files exist and are readable.
+
+    Args:
+        run: Run object with output_paths
+
+    Returns:
+        List of OutputCheckResult for each file
+    """
+    from bathos.compact import _collect_output_metadata
+
+    results = []
+    for path in run.output_paths:
+        meta = _collect_output_metadata(path)
+        results.append(OutputCheckResult(
+            path=path,
+            status=meta["status"],
+            size_bytes=meta.get("size_bytes", 0),
+        ))
 
     return results
