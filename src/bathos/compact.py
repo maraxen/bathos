@@ -28,7 +28,19 @@ def _migrate_v0(run_dict: dict) -> dict:
     return run_dict
 
 
+def _migrate_v1(run_dict: dict) -> dict:
+    """Migrate v1 fragment (no hostname) to v2.
+
+    v1 fragments have schema_version='1' but no hostname field.
+    This migration adds hostname (defaults to "") and updates version.
+    """
+    run_dict["hostname"] = ""
+    run_dict["schema_version"] = "2"
+    return run_dict
+
+
 MIGRATIONS["0"] = _migrate_v0
+MIGRATIONS["1"] = _migrate_v1
 
 
 _RUNS_TABLE_SCHEMA = """
@@ -83,14 +95,22 @@ def should_compact(catalog_dir: Path) -> bool:
 
 
 def _apply_migrations(run: Run) -> Run:
-    """Apply schema migrations to a run if needed."""
-    schema_version = run.schema_version or "0"
-    if schema_version not in MIGRATIONS:
-        return run
+    """Apply schema migrations to a run, chaining through all versions.
 
-    # Convert to dict, apply migration, reconstruct
+    Migrations are applied sequentially: v0→v1→v2→...
+    Each migration updates the schema_version field, which determines
+    the next migration to apply.
+    """
     run_dict = asdict(run)
-    run_dict.update(MIGRATIONS[schema_version](run_dict))
+
+    # Default v0 fragments (pre-schema_version) to "0"
+    current_version = run_dict.get("schema_version") or "0"
+
+    # Chain migrations until we reach the latest version
+    while current_version in MIGRATIONS:
+        run_dict = MIGRATIONS[current_version](run_dict)
+        current_version = run_dict.get("schema_version")
+
     return Run(**run_dict)
 
 
