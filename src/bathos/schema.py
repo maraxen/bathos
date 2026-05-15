@@ -21,6 +21,7 @@ COOL_SCHEMA = pa.schema([
     pa.field("tags", pa.list_(pa.string())),
     pa.field("schema_version", pa.string()),
     pa.field("slurm_job_id", pa.string()),
+    pa.field("hostname", pa.string()),
 ])
 
 WARM_SCHEMA = pa.schema([
@@ -39,6 +40,7 @@ WARM_SCHEMA = pa.schema([
     pa.field("tags", pa.list_(pa.string())),
     pa.field("schema_version", pa.string()),
     pa.field("slurm_job_id", pa.string()),
+    pa.field("hostname", pa.string()),
     pa.field("metadata", pa.string()),
     pa.field("outcome", pa.string()),
 ])
@@ -63,6 +65,7 @@ class Run:
     tags: list[str] = field(default_factory=list)
     schema_version: str = "1"
     slurm_job_id: str = ""
+    hostname: str = ""
     metadata: str = "{}"
 
     def to_arrow(self) -> pa.Table:
@@ -85,6 +88,7 @@ class Run:
                 "tags": [self.tags],
                 "schema_version": [self.schema_version],
                 "slurm_job_id": [self.slurm_job_id],
+                "hostname": [self.hostname],
             },
             schema=COOL_SCHEMA,
         )
@@ -110,4 +114,5 @@ class Run:
             tags=list(pydict["tags"][i]),
             schema_version=pydict.get("schema_version", ["1"])[i] if "schema_version" in pydict else "1",
             slurm_job_id=pydict.get("slurm_job_id", [""])[i] if "slurm_job_id" in pydict else "",
+            hostname=pydict.get("hostname", [""])[i] if "hostname" in pydict else "",
         )

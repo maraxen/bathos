@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS runs (
     tags TEXT[],
     schema_version TEXT,
     slurm_job_id TEXT,
+    hostname TEXT,
     metadata TEXT,
     outcome TEXT
 )
@@ -148,8 +149,8 @@ def compact(catalog_dir: Path) -> CompactResult:
             INSERT INTO runs (
                 id, project_slug, command, argv, git_hash, git_branch,
                 git_dirty, timestamp, duration_s, exit_code, status,
-                output_paths, tags, schema_version, slurm_job_id, metadata, outcome
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                output_paths, tags, schema_version, slurm_job_id, hostname, metadata, outcome
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 run.id,
@@ -167,6 +168,7 @@ def compact(catalog_dir: Path) -> CompactResult:
                 run.tags,
                 run.schema_version,
                 run.slurm_job_id,
+                run.hostname,
                 run.metadata,
                 None,  # outcome is not set during compact
             ],

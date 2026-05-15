@@ -24,4 +24,5 @@ def sample_run() -> Run:
         duration_s=2.5,
         output_paths=["/tmp/results.parquet"],
         tags=["smoke"],
+        hostname="test-host",
     )

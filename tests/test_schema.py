@@ -119,3 +119,38 @@ def test_run_with_custom_metadata():
     assert r.metadata == '{"hypothesis": "test", "outcome": "pass"}'
     table = r.to_arrow()
     assert "metadata" not in table.column_names
+
+
+def test_cool_schema_has_hostname_field():
+    """Verify COOL_SCHEMA contains hostname field."""
+    assert "hostname" in COOL_SCHEMA.names
+    hostname_field = next(f for f in COOL_SCHEMA if f.name == "hostname")
+    assert hostname_field.type == pa.string()
+
+
+def test_warm_schema_has_hostname_field():
+    """Verify WARM_SCHEMA contains hostname field."""
+    assert "hostname" in WARM_SCHEMA.names
+    hostname_field = next(f for f in WARM_SCHEMA if f.name == "hostname")
+    assert hostname_field.type == pa.string()
+
+
+def test_run_hostname_default_empty_string():
+    """Verify Run hostname defaults to empty string."""
+    r = Run(project_slug="proj", command="python foo.py", argv=["python", "foo.py"],
+            git_hash="abc123", git_branch="main", git_dirty=False)
+    assert r.hostname == ""
+
+
+def test_hostname_roundtrip_via_arrow():
+    """Verify hostname is serialized to Parquet and round-trips correctly."""
+    r = Run(project_slug="proj", command="python foo.py", argv=["python", "foo.py"],
+            git_hash="abc123", git_branch="main", git_dirty=False,
+            hostname="compute-node-42")
+    table = r.to_arrow()
+    assert "hostname" in table.column_names
+    assert table.column("hostname")[0].as_py() == "compute-node-42"
+
+    # Round-trip
+    r2 = Run.from_arrow_row(table.to_pydict(), 0)
+    assert r2.hostname == "compute-node-42"
