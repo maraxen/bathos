@@ -162,6 +162,8 @@ src/bathos/
 | 137 | Global instruction portability (separate design session needed) | P2 | — |
 | 138 | `bth sync` — rsync cool-tier catalog to/from cluster remote | P2 | 125, v0.1 done |
 | 139 | `bth compact` + warm-tier DuckDB (`bth sql` catalog queries) | P2 | v0.1 done |
+| 140 | Schema versioning + extended provenance (hostname, slurm_job_id, metadata JSON, migrations) | P2 | 139 |
+| 141 | `bth archive` — warm→cold partitioned Parquet export | P3 | 139, 140 |
 
 **Not yet backlogged:**
 - Sidecar pre-registration enforcement in `bth run` (add as P2, depends on 126)
