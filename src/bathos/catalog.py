@@ -1,7 +1,8 @@
 from __future__ import annotations
 from pathlib import Path
+import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
-import duckdb
 
 from bathos.schema import Run, RUN_SCHEMA
 
@@ -21,20 +22,16 @@ def write_run(run: Run, catalog_dir: Path) -> None:
 
 
 def read_runs(catalog_dir: Path) -> list[Run]:
-    """Read all runs, deduplicating by id (latest write wins)."""
+    """Read all runs from Parquet fragments, sorted by timestamp DESC."""
     runs_dir = catalog_dir / "runs"
     if not runs_dir.exists():
         return []
     parquet_files = list(runs_dir.glob("run_*.parquet"))
     if not parquet_files:
         return []
-    # One file per run id (write_run overwrites in-place), no dedup needed.
-    # duckdb reads multiple files efficiently via glob.
-    glob_pattern = str(runs_dir / "run_*.parquet")
-    con = duckdb.connect()
-    result = con.execute(
-        f"SELECT * FROM read_parquet('{glob_pattern}') ORDER BY timestamp DESC"
-    ).fetchall()
-    columns = [desc[0] for desc in con.description]
-    pydict = {col: [row[i] for row in result] for i, col in enumerate(columns)}
-    return [Run.from_arrow_row(pydict, i) for i in range(len(result))]
+    tables = [pq.read_table(f) for f in parquet_files]
+    combined = pa.concat_tables(tables)
+    order = pc.sort_indices(combined, sort_keys=[("timestamp", "descending")])
+    combined = combined.take(order)
+    pydict = combined.to_pydict()
+    return [Run.from_arrow_row(pydict, i) for i in range(combined.num_rows)]
