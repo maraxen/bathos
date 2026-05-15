@@ -163,3 +163,9 @@ def test_schema_version_defaults_to_2():
         git_hash="abc123", git_branch="main", git_dirty=False
     )
     assert r.schema_version == "2"
+
+
+def test_sample_run_fixture_has_hostname(sample_run):
+    """Verify sample_run fixture includes hostname field."""
+    assert hasattr(sample_run, 'hostname')
+    assert sample_run.hostname == "test-host"
