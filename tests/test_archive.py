@@ -15,7 +15,7 @@ def test_archive_requires_warm_catalog(tmp_catalog: Path):
         archive(tmp_catalog)
 
 
-def test_archive_creates_partitions(tmp_catalog: Path, sample_run: Run):
+def test_archive_creates_partitions(tmp_catalog: Path):
     """Verify archive creates project=.../year=.../month=... structure."""
     init_catalog(tmp_catalog)
 
@@ -48,7 +48,7 @@ def test_archive_creates_partitions(tmp_catalog: Path, sample_run: Run):
     assert len(parquet_files) == 1
 
 
-def test_archive_manifest_created(tmp_catalog: Path, sample_run: Run):
+def test_archive_manifest_created(tmp_catalog: Path):
     """Verify manifest.json is written with metadata."""
     init_catalog(tmp_catalog)
 
@@ -73,7 +73,7 @@ def test_archive_manifest_created(tmp_catalog: Path, sample_run: Run):
     assert len(manifest["entries"]) == 1
 
 
-def test_archive_dry_run_no_writes(tmp_catalog: Path, sample_run: Run):
+def test_archive_dry_run_no_writes(tmp_catalog: Path):
     """Verify --dry-run shows what would happen without writing."""
     init_catalog(tmp_catalog)
 
@@ -98,7 +98,7 @@ def test_archive_dry_run_no_writes(tmp_catalog: Path, sample_run: Run):
     assert result.partitions_created == 1
 
 
-def test_archive_filters_by_project(tmp_catalog: Path, sample_run: Run):
+def test_archive_filters_by_project(tmp_catalog: Path):
     """Verify --project filter archives only matching project."""
     init_catalog(tmp_catalog)
 
@@ -131,7 +131,7 @@ def test_archive_filters_by_project(tmp_catalog: Path, sample_run: Run):
     assert not (archive_root / "project=proj2").exists()
 
 
-def test_archive_returns_result_object(tmp_catalog: Path, sample_run: Run):
+def test_archive_returns_result_object(tmp_catalog: Path):
     """Verify archive returns ArchiveResult with all fields populated."""
     init_catalog(tmp_catalog)
 

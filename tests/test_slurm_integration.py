@@ -9,7 +9,7 @@ from bathos.query import find_runs
 from bathos.schema import Run
 
 
-def test_bth_env_sh_exports_catalog_dir(tmp_path: Path):
+def test_bth_env_sh_exports_catalog_dir():
     """_bth_env.sh template exports BTH_CATALOG_DIR with placeholder."""
     template = _load_env_sh_template()
     assert "BTH_CATALOG_DIR" in template

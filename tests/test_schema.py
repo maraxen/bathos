@@ -103,7 +103,7 @@ def test_schema_version_in_cool_parquet():
     assert table.column("schema_version")[0].as_py() == "2"
 
 
-def test_slurm_job_id_captured_from_env(monkeypatch):
+def test_slurm_job_id_captured_from_env():
     """Verify slurm_job_id can be set and round-trips through Parquet."""
     r = Run(
         project_slug="proj",

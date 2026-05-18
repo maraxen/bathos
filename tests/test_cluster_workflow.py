@@ -47,7 +47,7 @@ def git_repo(tmp_path: Path):
     return tmp_path
 
 
-def test_full_cluster_workflow(git_repo: Path, tmp_path: Path, monkeypatch):
+def test_full_cluster_workflow(git_repo: Path, monkeypatch):
     """
     End-to-end cluster workflow test:
     1. Initialize project with remote configured

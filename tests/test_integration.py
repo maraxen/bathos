@@ -42,7 +42,7 @@ def test_full_workflow(tmp_path: Path, monkeypatch):
     r = runner.invoke(app, ["ls"])
     assert r.exit_code == 0
     assert "intproj" in r.output
-    lines = [l for l in r.output.splitlines() if "intproj" in l]
+    lines = [line for line in r.output.splitlines() if "intproj" in line]
     assert len(lines) == 2
     # Banner should appear now since fragment count (2) > threshold (1)
     assert "uncompacted" in r.output

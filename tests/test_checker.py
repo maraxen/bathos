@@ -35,7 +35,7 @@ def git_repo(tmp_path: Path):
     return tmp_path
 
 
-def test_check_flags_stale_run(tmp_catalog: Path, sample_run: Run, git_repo: Path, monkeypatch):
+def test_check_flags_stale_run(tmp_catalog: Path, git_repo: Path, monkeypatch):
     """Run with hash != HEAD and dirty=False should be flagged STALE."""
     monkeypatch.chdir(git_repo)
     init_catalog(tmp_catalog)
@@ -61,7 +61,7 @@ def test_check_flags_stale_run(tmp_catalog: Path, sample_run: Run, git_repo: Pat
     assert results[0].run_git_hash == "deadbeef0000"
 
 
-def test_check_ok_for_current_run(tmp_catalog: Path, sample_run: Run, git_repo: Path, monkeypatch):
+def test_check_ok_for_current_run(tmp_catalog: Path, git_repo: Path, monkeypatch):
     """Run with hash == HEAD should be flagged OK."""
     monkeypatch.chdir(git_repo)
     init_catalog(tmp_catalog)
@@ -91,7 +91,7 @@ def test_check_ok_for_current_run(tmp_catalog: Path, sample_run: Run, git_repo: 
     assert results[0].run_id == current_run.id
 
 
-def test_check_flags_dirty_run(tmp_catalog: Path, sample_run: Run, git_repo: Path, monkeypatch):
+def test_check_flags_dirty_run(tmp_catalog: Path, git_repo: Path, monkeypatch):
     """Run with git_dirty=True should be flagged DIRTY_RUN."""
     monkeypatch.chdir(git_repo)
     init_catalog(tmp_catalog)
@@ -116,7 +116,7 @@ def test_check_flags_dirty_run(tmp_catalog: Path, sample_run: Run, git_repo: Pat
     assert results[0].run_id == dirty_run.id
 
 
-def test_check_unknown_outside_git(tmp_catalog: Path, sample_run: Run, monkeypatch):
+def test_check_unknown_outside_git(tmp_catalog: Path, monkeypatch):
     """Run with git_hash='unknown' should be flagged UNKNOWN_CODE."""
     # Don't set up a git repo, so capture_git_state returns unknown
     tmp_path = tmp_catalog.parent.parent  # get a temp directory
@@ -269,7 +269,7 @@ def test_check_output_files_present(tmp_path: Path):
     assert results[0].size_bytes > 0
 
 
-def test_check_output_files_missing(tmp_path: Path):
+def test_check_output_files_missing():
     """Verify check_output_files detects missing files."""
     from bathos.checker import check_output_files
 

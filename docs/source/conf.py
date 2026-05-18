@@ -35,7 +35,7 @@ autodoc_default_options = {
 # Suppress harmless warnings
 suppress_warnings = [
     "ref.class",  # pathlib.Path and similar stdlib types
-    "autodoc",    # Suppress autodoc import errors for modules still under development
+    "autodoc",  # Suppress autodoc import errors for modules still under development
 ]
 
 # Options for HTML output
