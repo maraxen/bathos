@@ -11,6 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
@@ -24,4 +25,4 @@ jobs:
       - name: Build distribution
         run: uv build
       - name: Publish to PyPI
-        run: uv publish --token ${{ secrets.PYPI_API_TOKEN }}
+        run: uv publish
