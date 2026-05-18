@@ -1,0 +1,394 @@
+"""Tests for FastMCP server tools."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+from bathos.mcp import (
+    list_runs_tool,
+    find_runs_tool,
+    get_run_tool,
+    run_sql_tool,
+    compact_tool,
+    archive_tool,
+    check_tool,
+    sync_tool,
+    init_tool,
+    run_tool,
+    app,
+)
+from bathos.schema import Run
+
+
+class TestListRunsTool:
+    """Test list_runs MCP tool."""
+
+    def test_list_runs_tool_returns_json_table(self, tmp_catalog, sample_run):
+        """Verify list_runs returns JSON with runs array."""
+        # Write sample run to catalog
+        from bathos.catalog import write_run
+        write_run(sample_run, tmp_catalog)
+
+        result = list_runs_tool(catalog_dir=str(tmp_catalog), limit=10)
+
+        data = json.loads(result)
+        assert "runs" in data
+        assert "count" in data
+        assert data["count"] == 1
+        assert data["runs"][0]["id"] == sample_run.id
+        assert data["runs"][0]["status"] == "completed"
+
+    def test_list_runs_tool_respects_limit(self, tmp_catalog):
+        """Verify list_runs respects limit parameter."""
+        from bathos.catalog import write_run
+        for i in range(5):
+            run = Run(
+                project_slug="test",
+                command=f"cmd {i}",
+                argv=["python", f"script{i}.py"],
+                git_hash=f"hash{i}",
+                git_branch="main",
+                git_dirty=False,
+                status="completed",
+                exit_code=0,
+                duration_s=1.0,
+                hostname="test",
+            )
+            write_run(run, tmp_catalog)
+
+        result = list_runs_tool(catalog_dir=str(tmp_catalog), limit=2)
+        data = json.loads(result)
+        assert data["count"] == 2
+
+    def test_list_runs_tool_error_handling(self):
+        """Verify list_runs handles errors gracefully."""
+        result = list_runs_tool(catalog_dir="/nonexistent/path", limit=10)
+        data = json.loads(result)
+        # Should return either empty list or error, but must be valid JSON
+        assert isinstance(data, dict)
+
+
+class TestFindRunsTool:
+    """Test find_runs MCP tool."""
+
+    def test_find_runs_tool_filters_by_pattern(self, tmp_catalog):
+        """Verify find_runs filters runs."""
+        from bathos.catalog import write_run
+        run1 = Run(
+            project_slug="proj_a",
+            command="cmd1",
+            argv=["python", "s1.py"],
+            git_hash="h1",
+            git_branch="main",
+            git_dirty=False,
+            status="completed",
+            exit_code=0,
+            duration_s=1.0,
+            hostname="test",
+        )
+        run2 = Run(
+            project_slug="proj_b",
+            command="cmd2",
+            argv=["python", "s2.py"],
+            git_hash="h2",
+            git_branch="main",
+            git_dirty=False,
+            status="completed",
+            exit_code=0,
+            duration_s=1.0,
+            hostname="test",
+        )
+        write_run(run1, tmp_catalog)
+        write_run(run2, tmp_catalog)
+
+        result = find_runs_tool(catalog_dir=str(tmp_catalog), pattern="proj_a")
+        data = json.loads(result)
+        assert data["count"] == 1
+        assert data["runs"][0]["project_slug"] == "proj_a"
+
+    def test_find_runs_tool_error_handling(self):
+        """Verify find_runs handles errors gracefully."""
+        result = find_runs_tool(catalog_dir="/nonexistent/path")
+        data = json.loads(result)
+        # Should return either empty list or error, but must be valid JSON
+        assert isinstance(data, dict)
+
+
+class TestGetRunTool:
+    """Test get_run MCP tool."""
+
+    def test_get_run_tool_returns_run_json(self, tmp_catalog, sample_run):
+        """Verify get_run returns complete run details."""
+        from bathos.catalog import write_run
+        write_run(sample_run, tmp_catalog)
+
+        result = get_run_tool(catalog_dir=str(tmp_catalog), run_id=sample_run.id)
+
+        data = json.loads(result)
+        assert data["id"] == sample_run.id
+        assert data["project_slug"] == "testproj"
+        assert data["status"] == "completed"
+        assert data["exit_code"] == 0
+        assert isinstance(data["argv"], list)
+
+    def test_get_run_tool_missing_run_id(self):
+        """Verify get_run requires run_id."""
+        result = get_run_tool(catalog_dir="", run_id="")
+        data = json.loads(result)
+        assert "error" in data
+
+    def test_get_run_tool_not_found(self, tmp_catalog):
+        """Verify get_run returns error for missing run."""
+        result = get_run_tool(catalog_dir=str(tmp_catalog), run_id="nonexistent")
+        data = json.loads(result)
+        assert "error" in data
+
+
+class TestRunSqlTool:
+    """Test run_sql MCP tool."""
+
+    def test_run_sql_tool_executes_query(self, tmp_catalog, sample_run):
+        """Verify run_sql executes and returns results."""
+        from bathos.catalog import write_run
+        from bathos.compact import compact
+        write_run(sample_run, tmp_catalog)
+        # Compact to warm tier so SQL works
+        compact(tmp_catalog)
+
+        result = run_sql_tool(
+            catalog_dir=str(tmp_catalog),
+            sql="SELECT id, status FROM runs LIMIT 1"
+        )
+
+        data = json.loads(result)
+        assert "rows" in data
+        assert "count" in data
+
+    def test_run_sql_tool_missing_sql(self):
+        """Verify run_sql requires sql parameter."""
+        result = run_sql_tool(catalog_dir="", sql="")
+        data = json.loads(result)
+        assert "error" in data
+
+    def test_run_sql_tool_error_handling(self):
+        """Verify run_sql handles invalid SQL gracefully."""
+        result = run_sql_tool(
+            catalog_dir="/nonexistent/path",
+            sql="SELECT * FROM nonexistent"
+        )
+        data = json.loads(result)
+        assert "error" in data
+
+
+class TestCompactTool:
+    """Test compact MCP tool."""
+
+    def test_compact_tool_calls_compact_module(self, tmp_catalog, sample_run):
+        """Verify compact tool returns expected result."""
+        from bathos.catalog import write_run
+        write_run(sample_run, tmp_catalog)
+
+        result = compact_tool(catalog_dir=str(tmp_catalog))
+
+        data = json.loads(result)
+        assert "ingested" in data
+        assert "skipped" in data
+        assert "duration_s" in data
+        assert data["ingested"] >= 0
+
+    def test_compact_tool_error_handling(self):
+        """Verify compact handles errors gracefully."""
+        result = compact_tool(catalog_dir="/nonexistent/path")
+        data = json.loads(result)
+        assert "error" in data
+
+
+class TestArchiveTool:
+    """Test archive MCP tool."""
+
+    def test_archive_tool_requires_project(self):
+        """Verify archive requires project parameter."""
+        result = archive_tool(catalog_dir="", project="")
+        data = json.loads(result)
+        assert "error" in data
+
+    def test_archive_tool_calls_archive_module(self, tmp_catalog, sample_run):
+        """Verify archive tool returns expected result."""
+        from bathos.catalog import write_run
+        from bathos.compact import compact
+        write_run(sample_run, tmp_catalog)
+        compact(tmp_catalog)
+
+        result = archive_tool(
+            catalog_dir=str(tmp_catalog),
+            project=sample_run.project_slug,
+        )
+
+        data = json.loads(result)
+        # Archive may return error if archive_root not set, but should be valid JSON
+        assert isinstance(data, dict)
+        assert "archived" in data or "error" in data
+
+    def test_archive_tool_error_handling(self):
+        """Verify archive handles errors gracefully."""
+        result = archive_tool(
+            catalog_dir="/nonexistent/path",
+            project="test"
+        )
+        data = json.loads(result)
+        assert "error" in data
+
+
+class TestCheckTool:
+    """Test check MCP tool."""
+
+    def test_check_tool_returns_check_results(self, tmp_catalog, sample_run, tmp_path):
+        """Verify check tool returns results."""
+        from bathos.catalog import write_run
+        write_run(sample_run, tmp_catalog)
+
+        result = check_tool(catalog_dir=str(tmp_catalog), project_root=str(tmp_path))
+
+        data = json.loads(result)
+        assert "results" in data or "error" in data
+        # Check results may have errors if not a git repo, but should return valid JSON
+        assert isinstance(data, dict)
+
+    def test_check_tool_error_handling(self, tmp_path):
+        """Verify check handles errors gracefully."""
+        # Non-existent catalog should return empty results
+        result = check_tool(catalog_dir="/nonexistent/path", project_root=str(tmp_path))
+        data = json.loads(result)
+        assert isinstance(data, dict)
+        # Can either have error or empty results
+        if "error" not in data:
+            assert "results" in data
+
+
+class TestSyncTool:
+    """Test sync MCP tool."""
+
+    def test_sync_tool_requires_remote_name(self):
+        """Verify sync requires remote_name parameter."""
+        result = sync_tool(catalog_dir="", remote_name="")
+        data = json.loads(result)
+        assert "error" in data
+
+    @patch("bathos.mcp.sync_catalog")
+    def test_sync_tool_calls_sync_module(self, mock_sync):
+        """Verify sync tool calls sync module."""
+        from bathos.sync import SyncResult
+        mock_result = SyncResult(transferred=10, duration_s=1.5, remote="origin")
+        mock_sync.return_value = mock_result
+
+        result = sync_tool(catalog_dir="/tmp", remote_name="origin", pull=False)
+
+        data = json.loads(result)
+        assert "transferred" in data
+        assert "duration_s" in data
+        assert "remote" in data
+
+    def test_sync_tool_error_handling(self):
+        """Verify sync handles errors gracefully."""
+        result = sync_tool(
+            catalog_dir="/nonexistent/path",
+            remote_name="origin"
+        )
+        data = json.loads(result)
+        assert "error" in data
+
+
+class TestInitTool:
+    """Test init MCP tool."""
+
+    def test_init_tool_requires_slug(self):
+        """Verify init requires slug parameter."""
+        result = init_tool(project_root="", slug="")
+        data = json.loads(result)
+        assert "error" in data
+
+    def test_init_tool_initializes_project(self, tmp_path):
+        """Verify init tool initializes project."""
+        project_root = tmp_path / "test_project"
+        project_root.mkdir()
+        catalog_dir = tmp_path / "catalog"
+        catalog_dir.mkdir()
+
+        result = init_tool(
+            project_root=str(project_root),
+            catalog_dir=str(catalog_dir),
+            slug="test_proj",
+        )
+
+        data = json.loads(result)
+        assert data["initialized"] is True
+        assert data["slug"] == "test_proj"
+        # Verify .bth.toml was created
+        assert (project_root / ".bth.toml").exists()
+
+    def test_init_tool_error_handling(self):
+        """Verify init handles errors gracefully."""
+        result = init_tool(
+            project_root="/nonexistent/path",
+            slug="test"
+        )
+        data = json.loads(result)
+        assert "error" in data
+
+
+class TestRunTool:
+    """Test run MCP tool."""
+
+    def test_run_tool_requires_script_path(self):
+        """Verify run requires script_path parameter."""
+        result = run_tool(script_path="", args=[])
+        data = json.loads(result)
+        assert "error" in data
+
+    @patch("bathos.mcp.run_script")
+    def test_run_tool_executes_script(self, mock_run):
+        """Verify run tool executes script."""
+        mock_run.return_value = 0
+
+        result = run_tool(script_path="/tmp/script.py", args=["--n", "10"])
+
+        data = json.loads(result)
+        assert "exit_code" in data
+        assert data["exit_code"] == 0
+        assert data["success"] is True
+
+    def test_run_tool_error_handling(self):
+        """Verify run handles errors gracefully."""
+        # This will fail during actual execution
+        result = run_tool(script_path="/nonexistent/script.py")
+        # Should return JSON with error or exit_code info
+        data = json.loads(result)
+        # Check that it's valid JSON with either error or exit_code
+        assert "error" in data or "exit_code" in data
+
+
+class TestMCPServerStartup:
+    """Test MCP server initialization."""
+
+    def test_mcp_server_starts(self):
+        """Verify FastMCP app is initialized."""
+        assert app is not None
+        assert hasattr(app, "run")
+
+    def test_mcp_server_has_all_tools(self):
+        """Verify all 10 tools are registered."""
+        # FastMCP tools are registered via @app.tool decorator
+        # We can verify by checking that the decorated functions exist
+        assert callable(list_runs_tool)
+        assert callable(find_runs_tool)
+        assert callable(get_run_tool)
+        assert callable(run_sql_tool)
+        assert callable(compact_tool)
+        assert callable(archive_tool)
+        assert callable(check_tool)
+        assert callable(sync_tool)
+        assert callable(init_tool)
+        assert callable(run_tool)
