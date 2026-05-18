@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -11,6 +12,7 @@ from bathos.schema import Run
 @dataclass
 class CheckResult:
     """Result of checking a single run's git-drift validity."""
+
     run_id: str
     status: Literal["OK", "STALE", "DIRTY_RUN", "UNKNOWN_CODE"]
     run_git_hash: str
@@ -20,6 +22,7 @@ class CheckResult:
 @dataclass
 class OutputCheckResult:
     """Result of checking a single output file."""
+
     path: str
     status: str  # "present", "missing", "unreadable"
     size_bytes: int = 0
@@ -93,10 +96,12 @@ def check_output_files(run: Run) -> list[OutputCheckResult]:
     results = []
     for path in run.output_paths:
         meta = _collect_output_metadata(path)
-        results.append(OutputCheckResult(
-            path=path,
-            status=meta["status"],
-            size_bytes=meta.get("size_bytes", 0),
-        ))
+        results.append(
+            OutputCheckResult(
+                path=path,
+                status=meta["status"],
+                size_bytes=meta.get("size_bytes", 0),
+            )
+        )
 
     return results

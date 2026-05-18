@@ -1,21 +1,20 @@
 from __future__ import annotations
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Optional
+
 import json
 import time
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 
+import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
-import duckdb
-
-from bathos.schema import WARM_SCHEMA
 
 
 @dataclass
 class ArchiveResult:
     """Result of an archive operation."""
+
     runs_archived: int
     partitions_created: int
     archive_size_bytes: int
@@ -25,8 +24,8 @@ class ArchiveResult:
 
 def archive(
     catalog_dir: Path,
-    archive_root: Optional[Path] = None,
-    project_slug: Optional[str] = None,
+    archive_root: Path | None = None,
+    project_slug: str | None = None,
     dry_run: bool = False,
 ) -> ArchiveResult:
     """Export warm-tier runs to cold-tier partitioned Parquet.
@@ -89,10 +88,7 @@ def archive(
         ts = timestamp_col[i].as_py()
 
         # Handle both int (microseconds) and datetime
-        if isinstance(ts, int):
-            dt = datetime.fromtimestamp(ts / 1e6)
-        else:
-            dt = ts
+        dt = datetime.fromtimestamp(ts / 1000000.0) if isinstance(ts, int) else ts
 
         year = dt.year
         month = f"{dt.month:02d}"
@@ -117,10 +113,7 @@ def archive(
 
             # Filter results to just these rows
             indices_array = pa.array(indices)
-            mask = pa.compute.is_in(
-                pa.array(list(range(len(results)))),
-                indices_array
-            )
+            mask = pa.compute.is_in(pa.array(list(range(len(results)))), indices_array)
             filtered = results.filter(mask)
 
             # Write atomically: write to temp, then rename
@@ -133,11 +126,13 @@ def archive(
         else:
             file_size = 0
 
-        manifest_entries.append({
-            "partition": f"project={project}/year={year}/month={month}",
-            "rows": len(indices),
-            "size_bytes": file_size if not dry_run else 0,
-        })
+        manifest_entries.append(
+            {
+                "partition": f"project={project}/year={year}/month={month}",
+                "rows": len(indices),
+                "size_bytes": file_size if not dry_run else 0,
+            }
+        )
 
         total_archived += len(indices)
         partitions_created += 1
@@ -146,7 +141,7 @@ def archive(
     manifest_path = archive_root / "manifest.json"
     if not dry_run:
         manifest = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "runs_archived": total_archived,
             "partitions": partitions_created,
             "total_size_bytes": total_size,

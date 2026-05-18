@@ -1,9 +1,12 @@
 from __future__ import annotations
+
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import patch
+
 import pytest
-from bathos.sync import SyncResult, sync_catalog
+
 from bathos.config import ProjectConfig
+from bathos.sync import SyncResult, sync_catalog
 
 
 def test_sync_result_dataclass():

@@ -1,11 +1,10 @@
 """Tests for SLURM integration: _bth_env.sh template, catalog-dir override, slurm-job filter."""
 
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-import pytest
 
-from bathos.catalog import write_run, init_catalog
-from bathos.init import init_project, _load_env_sh_template
+from bathos.catalog import init_catalog, write_run
+from bathos.init import _load_env_sh_template, init_project
 from bathos.query import find_runs
 from bathos.schema import Run
 
@@ -37,7 +36,7 @@ def test_init_catalog_dir_override(tmp_path: Path):
 def test_check_filter_by_slurm_job(tmp_catalog: Path):
     """find_runs with slurm_job_id filter returns only matching runs."""
     init_catalog(tmp_catalog)
-    base = datetime(2026, 5, 10, 12, 0, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 5, 10, 12, 0, 0, tzinfo=UTC)
 
     # Create runs with and without slurm_job_id
     r1 = Run(
@@ -91,7 +90,7 @@ def test_check_filter_by_slurm_job(tmp_catalog: Path):
 def test_find_runs_slurm_job_filter_with_other_filters(tmp_catalog: Path):
     """find_runs with slurm_job_id AND project filter works correctly."""
     init_catalog(tmp_catalog)
-    base = datetime(2026, 5, 10, 12, 0, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 5, 10, 12, 0, 0, tzinfo=UTC)
 
     r1 = Run(
         project_slug="prolix",

@@ -1,5 +1,6 @@
 from pathlib import Path
-from bathos.init import init_project, SCRIPT_DIRS
+
+from bathos.init import SCRIPT_DIRS, init_project
 
 
 def test_creates_all_script_dirs(tmp_path: Path):

@@ -1,20 +1,17 @@
 """End-to-end integration tests for FastMCP server."""
+
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
-import pytest
-
-from bathos.mcp import (
-    init_tool,
-    run_tool,
-    list_runs_tool,
-    compact_tool,
-    run_sql_tool,
-    get_run_tool,
-)
 from bathos.catalog import write_run
+from bathos.mcp import (
+    compact_tool,
+    get_run_tool,
+    init_tool,
+    list_runs_tool,
+    run_sql_tool,
+)
 from bathos.schema import Run
 
 
@@ -68,7 +65,7 @@ class TestFullMCPWorkflow:
         # Step 5: Run SQL via MCP
         sql_result = run_sql_tool(
             catalog_dir=str(catalog_dir),
-            sql="SELECT COUNT(*) as cnt FROM runs WHERE status='completed'"
+            sql="SELECT COUNT(*) as cnt FROM runs WHERE status='completed'",
         )
         sql_data = json.loads(sql_result)
         assert "rows" in sql_data
@@ -123,7 +120,7 @@ class TestFullMCPWorkflow:
         # SQL query
         sql_result = run_sql_tool(
             catalog_dir=str(catalog_dir),
-            sql="SELECT id, status FROM runs WHERE project_slug='multi_test'"
+            sql="SELECT id, status FROM runs WHERE project_slug='multi_test'",
         )
         sql_data = json.loads(sql_result)
         assert sql_data["count"] >= 0
@@ -145,8 +142,7 @@ class TestFullMCPWorkflow:
 
         # Try invalid SQL
         sql_result = run_sql_tool(
-            catalog_dir=str(catalog_dir),
-            sql="SELECT * FROM nonexistent_table"
+            catalog_dir=str(catalog_dir), sql="SELECT * FROM nonexistent_table"
         )
         sql_data = json.loads(sql_result)
         assert "error" in sql_data

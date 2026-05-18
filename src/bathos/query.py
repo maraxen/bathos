@@ -1,10 +1,12 @@
 from __future__ import annotations
-from datetime import datetime
-from pathlib import Path
-from typing import Literal, Optional
-import duckdb
+
 import fnmatch
 import json
+from datetime import datetime
+from pathlib import Path
+from typing import Literal
+
+import duckdb
 
 from bathos.catalog import read_runs
 from bathos.schema import Run
@@ -12,7 +14,7 @@ from bathos.schema import Run
 
 def _filter_runs_by_output_file(
     runs: list[Run],
-    pattern: Optional[str] = None,
+    pattern: str | None = None,
 ) -> list[Run]:
     """Filter runs by output file glob pattern.
 
@@ -33,10 +35,7 @@ def _filter_runs_by_output_file(
     for run in runs:
         # First check output_paths (cool tier)
         if run.output_paths:
-            matches = any(
-                fnmatch.fnmatch(path, pattern)
-                for path in run.output_paths
-            )
+            matches = any(fnmatch.fnmatch(path, pattern) for path in run.output_paths)
             if matches:
                 filtered.append(run)
                 continue
@@ -47,10 +46,7 @@ def _filter_runs_by_output_file(
                 metadata = json.loads(run.metadata)
                 if isinstance(metadata, dict) and "output_files" in metadata:
                     matches = any(
-                        fnmatch.fnmatch(
-                            f.get("path", ""),
-                            pattern
-                        )
+                        fnmatch.fnmatch(f.get("path", ""), pattern)
                         for f in metadata.get("output_files", [])
                         if f.get("status") == "present"
                     )
@@ -62,7 +58,7 @@ def _filter_runs_by_output_file(
     return filtered
 
 
-def _row_to_run(row: tuple, con) -> Run | None:
+def _row_to_run(row: tuple) -> Run | None:
     """Convert a DuckDB row (from runs table) to a Run object.
 
     DuckDB returns rows as tuples; we need to map back to Run dataclass.
@@ -190,7 +186,7 @@ def _warm_list_runs(
     # Convert rows to Run objects
     runs = []
     for row in rows:
-        run = _row_to_run(row, con)
+        run = _row_to_run(row)
         if run:
             runs.append(run)
 
@@ -230,7 +226,7 @@ def _warm_get_run(run_id: str, catalog_dir: Path) -> Run | None:
         con.close()
         return None
 
-    run = _row_to_run(rows[0], con)
+    run = _row_to_run(rows[0])
     con.close()
     return run
 
@@ -272,8 +268,22 @@ def find_runs(
     """
     backend = _resolve_backend(catalog_dir)
     if backend == "warm":
-        return _warm_find_runs(catalog_dir, since=since, project=project, status=status, tags=tags, slurm_job_id=slurm_job_id)
-    return _cool_find_runs(catalog_dir, since=since, project=project, status=status, tags=tags, slurm_job_id=slurm_job_id)
+        return _warm_find_runs(
+            catalog_dir,
+            since=since,
+            project=project,
+            status=status,
+            tags=tags,
+            slurm_job_id=slurm_job_id,
+        )
+    return _cool_find_runs(
+        catalog_dir,
+        since=since,
+        project=project,
+        status=status,
+        tags=tags,
+        slurm_job_id=slurm_job_id,
+    )
 
 
 def _warm_find_runs(
@@ -314,7 +324,7 @@ def _warm_find_runs(
     # For tags filtering, need to check each run (tags are stored as arrays)
     runs = []
     for row in rows:
-        run = _row_to_run(row, con)
+        run = _row_to_run(row)
         if run:
             if tags and not any(t in run.tags for t in tags):
                 continue
@@ -334,11 +344,7 @@ def run_sql(sql: str, catalog_dir: Path | None = None) -> list[tuple]:
     """
     if catalog_dir is not None:
         db_path = catalog_dir / "bathos.db"
-        if not db_path.exists():
-            # Don't require warm DB upfront - let DuckDB error if query needs it
-            con = duckdb.connect()
-        else:
-            con = duckdb.connect(str(db_path))
+        con = duckdb.connect(str(db_path) if db_path.exists() else "")
     else:
         con = duckdb.connect()
 
@@ -347,10 +353,12 @@ def run_sql(sql: str, catalog_dir: Path | None = None) -> list[tuple]:
         result = con.execute(sql).fetchall()
     except Exception as e:
         # If query tried to access the runs table without warm DB, provide helpful error
-        if "runs" in sql.lower() and catalog_dir is not None and not (catalog_dir / "bathos.db").exists():
-            raise RuntimeError(
-                "No warm catalog. Run `bth compact` first."
-            ) from e
+        if (
+            "runs" in sql.lower()
+            and catalog_dir is not None
+            and not (catalog_dir / "bathos.db").exists()
+        ):
+            raise RuntimeError("No warm catalog. Run `bth compact` first.") from e
         raise
 
     return result

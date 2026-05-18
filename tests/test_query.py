@@ -1,20 +1,24 @@
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
 import pytest
-from bathos.catalog import write_run, init_catalog
-from bathos.query import list_runs, get_run, find_runs, run_sql, _resolve_backend
+
+from bathos.catalog import init_catalog, write_run
+from bathos.query import _resolve_backend, find_runs, get_run, list_runs, run_sql
 from bathos.schema import Run
 
 
 @pytest.fixture
 def populated_catalog(tmp_catalog: Path) -> Path:
     init_catalog(tmp_catalog)
-    base = datetime(2026, 5, 10, 12, 0, 0, tzinfo=timezone.utc)
-    for i, (proj, status) in enumerate([
-        ("prolix", "completed"),
-        ("prolix", "failed"),
-        ("espaloma", "completed"),
-    ]):
+    base = datetime(2026, 5, 10, 12, 0, 0, tzinfo=UTC)
+    for i, (proj, status) in enumerate(
+        [
+            ("prolix", "completed"),
+            ("prolix", "failed"),
+            ("espaloma", "completed"),
+        ]
+    ):
         r = Run(
             project_slug=proj,
             command=f"python run_{i}.py",
@@ -60,7 +64,7 @@ def test_get_run_returns_none_for_unknown(populated_catalog: Path):
 
 
 def test_find_runs_since(populated_catalog: Path):
-    since = datetime(2026, 5, 10, 13, 30, 0, tzinfo=timezone.utc)
+    since = datetime(2026, 5, 10, 13, 30, 0, tzinfo=UTC)
     runs = find_runs(populated_catalog, since=since)
     assert len(runs) == 1
     assert runs[0].project_slug == "espaloma"
@@ -68,7 +72,9 @@ def test_find_runs_since(populated_catalog: Path):
 
 def test_run_sql_returns_rows(populated_catalog: Path):
     glob = str(populated_catalog / "runs" / "run_*.parquet")
-    rows = run_sql(f"SELECT project_slug, count(*) as n FROM read_parquet('{glob}') GROUP BY 1 ORDER BY 1")
+    rows = run_sql(
+        f"SELECT project_slug, count(*) as n FROM read_parquet('{glob}') GROUP BY 1 ORDER BY 1"
+    )
     assert len(rows) == 2
     projects = {row[0] for row in rows}
     assert "prolix" in projects
@@ -108,10 +114,11 @@ def test_warm_list_runs_works_with_real_db(tmp_catalog: Path):
     """When warm DB exists and is valid, list_runs uses warm path (DuckDB)."""
     # Use the compact flow to create a valid warm DB
     from bathos.compact import compact
+
     init_catalog(tmp_catalog)
 
     # Create and write runs to cool tier
-    base = datetime(2026, 5, 10, 12, 0, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 5, 10, 12, 0, 0, tzinfo=UTC)
     for i in range(2):
         r = Run(
             project_slug="testproj",
@@ -147,14 +154,22 @@ def test_filter_runs_by_output_file_pattern():
     from bathos.query import _filter_runs_by_output_file
 
     run1 = Run(
-        project_slug="test", command="test1", argv=["test1"],
-        git_hash="abc123", git_branch="main", git_dirty=False,
-        output_paths=["/tmp/result.json"]
+        project_slug="test",
+        command="test1",
+        argv=["test1"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+        output_paths=["/tmp/result.json"],
     )
     run2 = Run(
-        project_slug="test", command="test2", argv=["test2"],
-        git_hash="abc123", git_branch="main", git_dirty=False,
-        output_paths=["/tmp/result.csv"]
+        project_slug="test",
+        command="test2",
+        argv=["test2"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+        output_paths=["/tmp/result.csv"],
     )
 
     runs = [run1, run2]
@@ -169,14 +184,22 @@ def test_filter_runs_no_pattern_returns_all():
     from bathos.query import _filter_runs_by_output_file
 
     run1 = Run(
-        project_slug="test", command="test1", argv=["test1"],
-        git_hash="abc", git_branch="main", git_dirty=False,
-        output_paths=["/tmp/a.json"]
+        project_slug="test",
+        command="test1",
+        argv=["test1"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        output_paths=["/tmp/a.json"],
     )
     run2 = Run(
-        project_slug="test", command="test2", argv=["test2"],
-        git_hash="abc", git_branch="main", git_dirty=False,
-        output_paths=["/tmp/b.csv"]
+        project_slug="test",
+        command="test2",
+        argv=["test2"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        output_paths=["/tmp/b.csv"],
     )
 
     filtered = _filter_runs_by_output_file([run1, run2], pattern=None)
@@ -185,18 +208,21 @@ def test_filter_runs_no_pattern_returns_all():
 
 def test_filter_runs_with_warm_metadata():
     """Verify filtering works with warm-tier metadata."""
-    from bathos.query import _filter_runs_by_output_file
     import json
 
+    from bathos.query import _filter_runs_by_output_file
+
     run = Run(
-        project_slug="test", command="test", argv=["test"],
-        git_hash="abc", git_branch="main", git_dirty=False
+        project_slug="test",
+        command="test",
+        argv=["test"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
     )
-    run.metadata = json.dumps({
-        "output_files": [
-            {"path": "/results/analysis.json", "status": "present"}
-        ]
-    })
+    run.metadata = json.dumps(
+        {"output_files": [{"path": "/results/analysis.json", "status": "present"}]}
+    )
 
     filtered = _filter_runs_by_output_file([run], pattern="*.json")
     assert len(filtered) == 1
@@ -204,18 +230,21 @@ def test_filter_runs_with_warm_metadata():
 
 def test_filter_ignores_missing_output_files():
     """Verify missing output files are not matched."""
-    from bathos.query import _filter_runs_by_output_file
     import json
 
+    from bathos.query import _filter_runs_by_output_file
+
     run = Run(
-        project_slug="test", command="test", argv=["test"],
-        git_hash="abc", git_branch="main", git_dirty=False
+        project_slug="test",
+        command="test",
+        argv=["test"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
     )
-    run.metadata = json.dumps({
-        "output_files": [
-            {"path": "/results/missing.json", "status": "missing"}
-        ]
-    })
+    run.metadata = json.dumps(
+        {"output_files": [{"path": "/results/missing.json", "status": "missing"}]}
+    )
 
     filtered = _filter_runs_by_output_file([run], pattern="*.json")
     assert len(filtered) == 0

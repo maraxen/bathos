@@ -1,6 +1,7 @@
 from __future__ import annotations
-from pathlib import Path
+
 import importlib.resources
+from pathlib import Path
 
 from bathos.catalog import init_catalog
 
@@ -46,9 +47,9 @@ def init_project(
     content = _BTH_TOML_TEMPLATE.format(slug=slug, root=str(project_root))
     if remote:
         host, remote_root = remote.split(":", 1)
-        content += f"\n[remotes.{host}]\nhost = \"{host}\"\nremote_root = \"{remote_root}\"\n"
+        content += f'\n[remotes.{host}]\nhost = "{host}"\nremote_root = "{remote_root}"\n'
     if slurm_partition:
-        content += f"\n[slurm]\npartition = \"{slurm_partition}\"\n"
+        content += f'\n[slurm]\npartition = "{slurm_partition}"\n'
     toml_path.write_text(content)
 
     # scripts/slurm/_bth_env.sh

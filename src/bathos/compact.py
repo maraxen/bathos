@@ -1,10 +1,12 @@
 from __future__ import annotations
-from dataclasses import asdict, dataclass, replace
-from pathlib import Path
-from typing import Callable
+
 import hashlib
 import json
 import time
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
+from pathlib import Path
+
 import duckdb
 
 from bathos.catalog import read_runs
@@ -55,6 +57,7 @@ def _collect_output_metadata(output_path: str) -> dict:
 @dataclass
 class CompactResult:
     """Result of a compact operation."""
+
     ingested: int
     skipped: int
     duration_s: float
@@ -182,9 +185,7 @@ def compact(catalog_dir: Path) -> CompactResult:
     con = duckdb.connect(str(db_path))
 
     # Initialize schema meta table if it doesn't exist
-    con.execute(
-        "CREATE TABLE IF NOT EXISTS _schema_meta (key TEXT PRIMARY KEY, value TEXT)"
-    )
+    con.execute("CREATE TABLE IF NOT EXISTS _schema_meta (key TEXT PRIMARY KEY, value TEXT)")
 
     # Initialize runs table if it doesn't exist
     con.execute(_RUNS_TABLE_SCHEMA)
@@ -196,9 +197,7 @@ def compact(catalog_dir: Path) -> CompactResult:
     # Ingest each run
     for run in cool_runs:
         # Check if run already exists in DuckDB
-        existing = con.execute(
-            "SELECT id FROM runs WHERE id = ?", [run.id]
-        ).fetchall()
+        existing = con.execute("SELECT id FROM runs WHERE id = ?", [run.id]).fetchall()
 
         if existing:
             skipped += 1
@@ -212,10 +211,7 @@ def compact(catalog_dir: Path) -> CompactResult:
         if run.output_paths:
             for output_path in run.output_paths:
                 meta = _collect_output_metadata(output_path)
-                output_metadata.append({
-                    "path": output_path,
-                    **meta
-                })
+                output_metadata.append({"path": output_path, **meta})
 
         # Serialize metadata to JSON
         output_metadata_json = json.dumps(output_metadata) if output_metadata else "[]"

@@ -1,6 +1,6 @@
 from pathlib import Path
-import pytest
-from bathos.config import find_project_config, load_project_config, ProjectConfig
+
+from bathos.config import find_project_config, load_project_config
 
 
 def test_find_config_in_current_dir(tmp_path: Path):
@@ -48,5 +48,6 @@ def test_load_config_with_remote_and_slurm(tmp_path: Path):
 
 def test_default_catalog_dir():
     from bathos.config import default_catalog_dir
+
     d = default_catalog_dir()
     assert d == Path.home() / ".bth" / "catalog"

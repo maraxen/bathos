@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import subprocess
 import time
 from dataclasses import dataclass
@@ -66,9 +67,7 @@ def sync_catalog(
     duration_s = time.time() - start_time
 
     if result.returncode != 0:
-        raise RuntimeError(
-            f"rsync failed with exit code {result.returncode}: {result.stderr}"
-        )
+        raise RuntimeError(f"rsync failed with exit code {result.returncode}: {result.stderr}")
 
     # Parse transferred count from rsync output
     # rsync outputs something like "Number of regular files transferred: 42"

@@ -1,9 +1,11 @@
-import sys
 import subprocess
+import sys
 from pathlib import Path
+
 from typer.testing import CliRunner
-from bathos.cli import app
+
 from bathos.catalog import init_catalog, write_run
+from bathos.cli import app
 from bathos.schema import Run
 
 runner = CliRunner()
@@ -29,9 +31,7 @@ def test_run_records_run(tmp_path: Path, monkeypatch):
     catalog = tmp_path / ".bth" / "catalog"
     monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
     monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
-    (tmp_path / ".bth.toml").write_text(
-        f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n'
-    )
+    (tmp_path / ".bth.toml").write_text(f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n')
     result = runner.invoke(app, ["run", sys.executable, "--", "-c", "pass"])
     assert result.exit_code == 0
 
@@ -41,9 +41,7 @@ def test_ls_shows_runs(tmp_path: Path, monkeypatch):
     catalog = tmp_path / ".bth" / "catalog"
     monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
     monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
-    (tmp_path / ".bth.toml").write_text(
-        f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n'
-    )
+    (tmp_path / ".bth.toml").write_text(f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n')
     runner.invoke(app, ["run", sys.executable, "--", "-c", "pass"])
     result = runner.invoke(app, ["ls"])
     assert result.exit_code == 0
@@ -55,11 +53,10 @@ def test_show_displays_run_detail(tmp_path: Path, monkeypatch):
     catalog = tmp_path / ".bth" / "catalog"
     monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
     monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
-    (tmp_path / ".bth.toml").write_text(
-        f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n'
-    )
+    (tmp_path / ".bth.toml").write_text(f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n')
     runner.invoke(app, ["run", sys.executable, "--", "-c", "pass"])
-    from bathos.catalog import read_runs, init_catalog
+    from bathos.catalog import init_catalog, read_runs
+
     init_catalog(catalog)
     runs = read_runs(catalog)
     result = runner.invoke(app, ["show", runs[0].id])
@@ -73,9 +70,7 @@ def test_compact_command_runs(tmp_path: Path, monkeypatch):
     catalog = tmp_path / ".bth" / "catalog"
     monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
     monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
-    (tmp_path / ".bth.toml").write_text(
-        f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n'
-    )
+    (tmp_path / ".bth.toml").write_text(f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n')
     # Create a few runs
     runner.invoke(app, ["run", sys.executable, "--", "-c", "pass"])
     runner.invoke(app, ["run", sys.executable, "--", "-c", "pass"])
@@ -94,9 +89,7 @@ def test_ls_shows_compact_banner_at_threshold(tmp_path: Path, monkeypatch):
     catalog = tmp_path / ".bth" / "catalog"
     monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
     monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
-    (tmp_path / ".bth.toml").write_text(
-        f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n'
-    )
+    (tmp_path / ".bth.toml").write_text(f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n')
 
     # Create 51 fragments by creating 51 runs
     for _ in range(51):
@@ -118,9 +111,7 @@ def test_ls_no_banner_below_threshold(tmp_path: Path, monkeypatch):
     catalog = tmp_path / ".bth" / "catalog"
     monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
     monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
-    (tmp_path / ".bth.toml").write_text(
-        f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n'
-    )
+    (tmp_path / ".bth.toml").write_text(f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n')
 
     # Create 10 runs (< 50 threshold)
     for _ in range(10):
@@ -143,9 +134,7 @@ def test_ls_no_banner_when_warm_db_exists(tmp_path: Path, monkeypatch):
     catalog = tmp_path / ".bth" / "catalog"
     monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
     monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
-    (tmp_path / ".bth.toml").write_text(
-        f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n'
-    )
+    (tmp_path / ".bth.toml").write_text(f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n')
 
     # Create 51 runs
     for _ in range(51):
@@ -157,7 +146,8 @@ def test_ls_no_banner_when_warm_db_exists(tmp_path: Path, monkeypatch):
 
     # Verify the should_compact decision logic
     # If warm DB exists and fragment count > 50, should_compact returns False (no banner)
-    from bathos.compact import should_compact, _fragment_count
+    from bathos.compact import _fragment_count, should_compact
+
     frag_count = _fragment_count(catalog)
     assert frag_count > 50  # We have 51 fragments
     assert (catalog / "bathos.db").exists()  # We compacted
@@ -170,9 +160,7 @@ def test_sql_error_without_warm_db(tmp_path: Path, monkeypatch):
     catalog = tmp_path / ".bth" / "catalog"
     monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
     monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
-    (tmp_path / ".bth.toml").write_text(
-        f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n'
-    )
+    (tmp_path / ".bth.toml").write_text(f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n')
 
     # Create a run to have Parquet files
     runner.invoke(app, ["run", sys.executable, "--", "-c", "pass"])
@@ -193,9 +181,7 @@ def test_sql_allows_arbitrary_queries(tmp_path: Path, monkeypatch):
     catalog = tmp_path / ".bth" / "catalog"
     monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
     monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
-    (tmp_path / ".bth.toml").write_text(
-        f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n'
-    )
+    (tmp_path / ".bth.toml").write_text(f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n')
 
     # Create a run to have Parquet files
     runner.invoke(app, ["run", sys.executable, "--", "-c", "pass"])
@@ -213,25 +199,29 @@ def test_check_command_detects_stale_runs(tmp_path: Path, monkeypatch):
     catalog = tmp_path / ".bth" / "catalog"
     monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
     monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
-    (tmp_path / ".bth.toml").write_text(
-        f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n'
-    )
+    (tmp_path / ".bth.toml").write_text(f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n')
 
     # Initialize git repo
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
-        cwd=tmp_path, check=True, capture_output=True,
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
     )
     subprocess.run(
         ["git", "config", "user.name", "Test"],
-        cwd=tmp_path, check=True, capture_output=True,
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
     )
     (tmp_path / "file.txt").write_text("content")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(
         ["git", "commit", "-m", "initial"],
-        cwd=tmp_path, check=True, capture_output=True,
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
     )
 
     # Create a run with an old hash
@@ -258,25 +248,29 @@ def test_check_command_shows_ok_runs(tmp_path: Path, monkeypatch):
     catalog = tmp_path / ".bth" / "catalog"
     monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
     monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
-    (tmp_path / ".bth.toml").write_text(
-        f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n'
-    )
+    (tmp_path / ".bth.toml").write_text(f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n')
 
     # Initialize git repo
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
-        cwd=tmp_path, check=True, capture_output=True,
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
     )
     subprocess.run(
         ["git", "config", "user.name", "Test"],
-        cwd=tmp_path, check=True, capture_output=True,
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
     )
     (tmp_path / "file.txt").write_text("content")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(
         ["git", "commit", "-m", "initial"],
-        cwd=tmp_path, check=True, capture_output=True,
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
     )
 
     current_hash = subprocess.check_output(
@@ -306,25 +300,29 @@ def test_check_command_filters_by_status(tmp_path: Path, monkeypatch):
     catalog = tmp_path / ".bth" / "catalog"
     monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
     monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
-    (tmp_path / ".bth.toml").write_text(
-        f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n'
-    )
+    (tmp_path / ".bth.toml").write_text(f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n')
 
     # Initialize git repo
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
-        cwd=tmp_path, check=True, capture_output=True,
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
     )
     subprocess.run(
         ["git", "config", "user.name", "Test"],
-        cwd=tmp_path, check=True, capture_output=True,
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
     )
     (tmp_path / "file.txt").write_text("content")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(
         ["git", "commit", "-m", "initial"],
-        cwd=tmp_path, check=True, capture_output=True,
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
     )
 
     # Create both stale and dirty runs
@@ -367,9 +365,7 @@ def test_archive_command_runs(tmp_path: Path, monkeypatch):
     catalog = tmp_path / ".bth" / "catalog"
     monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
     monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
-    (tmp_path / ".bth.toml").write_text(
-        f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n'
-    )
+    (tmp_path / ".bth.toml").write_text(f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n')
 
     # Create and compact a run
     runner.invoke(app, ["run", sys.executable, "--", "-c", "pass"])
@@ -391,9 +387,7 @@ def test_archive_command_dry_run(tmp_path: Path, monkeypatch):
     catalog = tmp_path / ".bth" / "catalog"
     monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
     monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
-    (tmp_path / ".bth.toml").write_text(
-        f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n'
-    )
+    (tmp_path / ".bth.toml").write_text(f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n')
 
     # Create and compact a run
     runner.invoke(app, ["run", sys.executable, "--", "-c", "pass"])
@@ -415,9 +409,7 @@ def test_archive_command_without_warm_db(tmp_path: Path, monkeypatch):
     catalog = tmp_path / ".bth" / "catalog"
     monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
     monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
-    (tmp_path / ".bth.toml").write_text(
-        f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n'
-    )
+    (tmp_path / ".bth.toml").write_text(f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n')
 
     # Create a run but don't compact (so no warm DB)
     runner.invoke(app, ["run", sys.executable, "--", "-c", "pass"])
@@ -434,9 +426,7 @@ def test_archive_command_with_project_filter(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     catalog = tmp_path / ".bth" / "catalog"
     monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
-    (tmp_path / ".bth.toml").write_text(
-        f'[project]\nslug = "proj1"\nroot = "{tmp_path}"\n'
-    )
+    (tmp_path / ".bth.toml").write_text(f'[project]\nslug = "proj1"\nroot = "{tmp_path}"\n')
 
     # Create runs for two projects
     monkeypatch.setenv("BTH_PROJECT_SLUG", "proj1")
@@ -451,7 +441,9 @@ def test_archive_command_with_project_filter(tmp_path: Path, monkeypatch):
 
     # Archive only proj1
     archive_dir = tmp_path / "archive"
-    result = runner.invoke(app, ["archive", "--project", "proj1", "--archive-dir", str(archive_dir)])
+    result = runner.invoke(
+        app, ["archive", "--project", "proj1", "--archive-dir", str(archive_dir)]
+    )
 
     assert result.exit_code == 0
     assert "Archived" in result.output
@@ -465,29 +457,35 @@ def test_find_command_output_file_filter(tmp_path: Path, monkeypatch):
     catalog = tmp_path / ".bth" / "catalog"
     monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
     monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
-    (tmp_path / ".bth.toml").write_text(
-        f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n'
-    )
+    (tmp_path / ".bth.toml").write_text(f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n')
 
     # Create and write runs with different output files
     init_catalog(catalog)
     run1 = Run(
-        id="run1", project_slug="test", command="test1", argv=["test1"],
-        git_hash="abc123", git_branch="main", git_dirty=False,
-        output_paths=["/tmp/analysis.json"]
+        id="run1",
+        project_slug="test",
+        command="test1",
+        argv=["test1"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+        output_paths=["/tmp/analysis.json"],
     )
     run2 = Run(
-        id="run2", project_slug="test", command="test2", argv=["test2"],
-        git_hash="abc123", git_branch="main", git_dirty=False,
-        output_paths=["/tmp/report.csv"]
+        id="run2",
+        project_slug="test",
+        command="test2",
+        argv=["test2"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+        output_paths=["/tmp/report.csv"],
     )
     write_run(run1, catalog)
     write_run(run2, catalog)
 
     # Find with pattern
-    result = runner.invoke(
-        app, ["find", "--output-file", "*.json"]
-    )
+    result = runner.invoke(app, ["find", "--output-file", "*.json"])
 
     assert result.exit_code == 0
     # Should only show run1 with json output file
@@ -503,25 +501,29 @@ def test_check_command_with_check_outputs(tmp_path: Path, monkeypatch):
     catalog = tmp_path / ".bth" / "catalog"
     monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
     monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
-    (tmp_path / ".bth.toml").write_text(
-        f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n'
-    )
+    (tmp_path / ".bth.toml").write_text(f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n')
 
     # Initialize git repo
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
-        cwd=tmp_path, check=True, capture_output=True,
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
     )
     subprocess.run(
         ["git", "config", "user.name", "Test"],
-        cwd=tmp_path, check=True, capture_output=True,
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
     )
     (tmp_path / "file.txt").write_text("content")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(
         ["git", "commit", "-m", "initial"],
-        cwd=tmp_path, check=True, capture_output=True,
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
     )
 
     current_hash = subprocess.check_output(
@@ -535,16 +537,19 @@ def test_check_command_with_check_outputs(tmp_path: Path, monkeypatch):
     # Write a run with output file
     init_catalog(catalog)
     run = Run(
-        id="test-run", project_slug="test", command="test", argv=["test"],
-        git_hash=current_hash, git_branch="main", git_dirty=False,
-        output_paths=[str(output_file)]
+        id="test-run",
+        project_slug="test",
+        command="test",
+        argv=["test"],
+        git_hash=current_hash,
+        git_branch="main",
+        git_dirty=False,
+        output_paths=[str(output_file)],
     )
     write_run(run, catalog)
 
     # Run check with output verification
-    result = runner.invoke(
-        app, ["check", "--check-outputs"]
-    )
+    result = runner.invoke(app, ["check", "--check-outputs"])
 
     assert result.exit_code == 0
     assert "Output File Status" in result.output

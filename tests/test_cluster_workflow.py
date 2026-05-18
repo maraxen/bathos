@@ -1,18 +1,17 @@
 """End-to-end cluster workflow: init → run → compact → check → mutate → check → sync."""
 
 import subprocess
-import sys
 from pathlib import Path
 from unittest.mock import patch
-from typer.testing import CliRunner
 
 import pytest
+from typer.testing import CliRunner
 
 from bathos.catalog import init_catalog, write_run
 from bathos.checker import check_runs
 from bathos.cli import app
 from bathos.compact import compact
-from bathos.config import load_project_config, ProjectConfig
+from bathos.config import load_project_config
 from bathos.schema import Run
 from bathos.sync import sync_catalog
 
@@ -165,7 +164,9 @@ remote_root = "~/projects/testproj"
     with patch("bathos.sync.subprocess.run") as mock_run:
         mock_run.return_value.returncode = 0
         # Provide realistic rsync output with file transfer info
-        mock_run.return_value.stdout = "sent 1000 bytes  received 500 bytes\nNumber of regular files transferred: 2"
+        mock_run.return_value.stdout = (
+            "sent 1000 bytes  received 500 bytes\nNumber of regular files transferred: 2"
+        )
 
         result = sync_catalog("engaging", config, catalog, pull=False)
 
@@ -189,7 +190,9 @@ remote_root = "~/projects/testproj"
     # Step 7b: Test pull direction (rsync with remote as source)
     with patch("bathos.sync.subprocess.run") as mock_run:
         mock_run.return_value.returncode = 0
-        mock_run.return_value.stdout = "sent 500 bytes  received 1000 bytes\nNumber of regular files transferred: 2"
+        mock_run.return_value.stdout = (
+            "sent 500 bytes  received 1000 bytes\nNumber of regular files transferred: 2"
+        )
 
         result = sync_catalog("engaging", config, catalog, pull=True)
 
@@ -302,9 +305,7 @@ def test_cluster_workflow_multiple_checks(git_repo: Path, monkeypatch):
     init_catalog(catalog)
 
     # Get initial HEAD and create runs
-    head1 = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=git_repo, text=True
-    ).strip()
+    head1 = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=git_repo, text=True).strip()
 
     run1 = Run(
         project_slug="testproj",

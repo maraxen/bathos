@@ -1,7 +1,8 @@
 import sys
 from pathlib import Path
+
+from bathos.catalog import init_catalog, read_runs
 from bathos.runner import run_script
-from bathos.catalog import read_runs, init_catalog
 
 
 def test_run_records_completed_status(tmp_catalog: Path):
@@ -38,19 +39,27 @@ def test_run_records_failed_status(tmp_catalog: Path):
 
 def test_run_captures_git_hash(tmp_catalog: Path, tmp_path: Path):
     import subprocess
+
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "t@t.com"],
-                   cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "T"],
-                   cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "t@t.com"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "T"], cwd=tmp_path, check=True, capture_output=True
+    )
     (tmp_path / "f.txt").write_text("x")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "i"], cwd=tmp_path,
-                   check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "i"], cwd=tmp_path, check=True, capture_output=True)
 
     init_catalog(tmp_catalog)
-    run_script(argv=[sys.executable, "-c", "pass"], project_slug="p",
-               catalog_dir=tmp_catalog, output_paths=[], tags=[], cwd=tmp_path)
+    run_script(
+        argv=[sys.executable, "-c", "pass"],
+        project_slug="p",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
     runs = read_runs(tmp_catalog)
     assert runs[0].git_hash != "unknown"
     assert len(runs[0].git_hash) == 40

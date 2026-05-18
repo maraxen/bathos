@@ -1,7 +1,8 @@
-from pathlib import Path
-from bathos.catalog import write_run, read_runs, init_catalog
-from bathos.schema import Run
 import dataclasses
+from pathlib import Path
+
+from bathos.catalog import init_catalog, read_runs, write_run
+from bathos.schema import Run
 
 
 def test_init_catalog_creates_dirs(tmp_catalog: Path):
@@ -58,10 +59,12 @@ def test_multiple_runs_all_returned(tmp_catalog: Path):
 def test_parallel_writes_do_not_collide(tmp_catalog: Path):
     """Simulate two concurrent SLURM jobs writing simultaneously."""
     init_catalog(tmp_catalog)
-    r1 = Run(project_slug="p", command="a", argv=["a"],
-             git_hash="x", git_branch="main", git_dirty=False)
-    r2 = Run(project_slug="p", command="b", argv=["b"],
-             git_hash="x", git_branch="main", git_dirty=False)
+    r1 = Run(
+        project_slug="p", command="a", argv=["a"], git_hash="x", git_branch="main", git_dirty=False
+    )
+    r2 = Run(
+        project_slug="p", command="b", argv=["b"], git_hash="x", git_branch="main", git_dirty=False
+    )
     # Write both without waiting (atomic rename ensures no collision)
     write_run(r1, tmp_catalog)
     write_run(r2, tmp_catalog)

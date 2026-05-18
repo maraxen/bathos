@@ -1,11 +1,12 @@
 import json
-import pytest
 from pathlib import Path
 
-from bathos.archive import archive, ArchiveResult
-from bathos.schema import Run
-from bathos.catalog import write_run, init_catalog
+import pytest
+
+from bathos.archive import ArchiveResult, archive
+from bathos.catalog import init_catalog, write_run
 from bathos.compact import compact
+from bathos.schema import Run
 
 
 def test_archive_requires_warm_catalog(tmp_catalog: Path):

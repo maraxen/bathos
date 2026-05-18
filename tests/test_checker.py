@@ -1,9 +1,11 @@
 import subprocess
 from pathlib import Path
+
 import pytest
-from bathos.checker import CheckResult, check_runs
-from bathos.schema import Run
+
 from bathos.catalog import init_catalog, write_run
+from bathos.checker import check_runs
+from bathos.schema import Run
 
 
 @pytest.fixture
@@ -12,17 +14,23 @@ def git_repo(tmp_path: Path):
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
-        cwd=tmp_path, check=True, capture_output=True,
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
     )
     subprocess.run(
         ["git", "config", "user.name", "Test User"],
-        cwd=tmp_path, check=True, capture_output=True,
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
     )
     (tmp_path / "file.txt").write_text("initial")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(
         ["git", "commit", "-m", "initial"],
-        cwd=tmp_path, check=True, capture_output=True,
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
     )
     return tmp_path
 
@@ -244,9 +252,13 @@ def test_check_output_files_present(tmp_path: Path):
     output_file.write_text('{"success": true}')
 
     run = Run(
-        project_slug="test", command="test", argv=["test"],
-        git_hash="abc123", git_branch="main", git_dirty=False,
-        output_paths=[str(output_file)]
+        project_slug="test",
+        command="test",
+        argv=["test"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+        output_paths=[str(output_file)],
     )
 
     results = check_output_files(run)
@@ -262,9 +274,13 @@ def test_check_output_files_missing(tmp_path: Path):
     from bathos.checker import check_output_files
 
     run = Run(
-        project_slug="test", command="test", argv=["test"],
-        git_hash="abc123", git_branch="main", git_dirty=False,
-        output_paths=["/nonexistent/result.json"]
+        project_slug="test",
+        command="test",
+        argv=["test"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+        output_paths=["/nonexistent/result.json"],
     )
 
     results = check_output_files(run)
@@ -282,13 +298,17 @@ def test_check_output_files_multiple(tmp_path: Path):
     file2 = tmp_path / "metrics.csv"
     file3 = "/nonexistent/missing.txt"
 
-    file1.write_text('{}')
-    file2.write_text('a,b,c\n1,2,3')
+    file1.write_text("{}")
+    file2.write_text("a,b,c\n1,2,3")
 
     run = Run(
-        project_slug="test", command="test", argv=["test"],
-        git_hash="abc123", git_branch="main", git_dirty=False,
-        output_paths=[str(file1), str(file2), file3]
+        project_slug="test",
+        command="test",
+        argv=["test"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+        output_paths=[str(file1), str(file2), file3],
     )
 
     results = check_output_files(run)

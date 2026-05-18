@@ -1,24 +1,23 @@
 """Tests for FastMCP server tools."""
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from bathos.mcp import (
-    list_runs_tool,
-    find_runs_tool,
-    get_run_tool,
-    run_sql_tool,
-    compact_tool,
+    app,
     archive_tool,
     check_tool,
-    sync_tool,
+    compact_tool,
+    find_runs_tool,
+    get_run_tool,
     init_tool,
+    list_runs_tool,
+    run_sql_tool,
     run_tool,
-    app,
+    sync_tool,
 )
 from bathos.schema import Run
 
@@ -30,6 +29,7 @@ class TestListRunsTool:
         """Verify list_runs returns JSON with runs array."""
         # Write sample run to catalog
         from bathos.catalog import write_run
+
         write_run(sample_run, tmp_catalog)
 
         result = list_runs_tool(catalog_dir=str(tmp_catalog), limit=10)
@@ -44,6 +44,7 @@ class TestListRunsTool:
     def test_list_runs_tool_respects_limit(self, tmp_catalog):
         """Verify list_runs respects limit parameter."""
         from bathos.catalog import write_run
+
         for i in range(5):
             run = Run(
                 project_slug="test",
@@ -77,6 +78,7 @@ class TestFindRunsTool:
     def test_find_runs_tool_filters_by_pattern(self, tmp_catalog):
         """Verify find_runs filters runs."""
         from bathos.catalog import write_run
+
         run1 = Run(
             project_slug="proj_a",
             command="cmd1",
@@ -123,6 +125,7 @@ class TestGetRunTool:
     def test_get_run_tool_returns_run_json(self, tmp_catalog, sample_run):
         """Verify get_run returns complete run details."""
         from bathos.catalog import write_run
+
         write_run(sample_run, tmp_catalog)
 
         result = get_run_tool(catalog_dir=str(tmp_catalog), run_id=sample_run.id)
@@ -154,13 +157,13 @@ class TestRunSqlTool:
         """Verify run_sql executes and returns results."""
         from bathos.catalog import write_run
         from bathos.compact import compact
+
         write_run(sample_run, tmp_catalog)
         # Compact to warm tier so SQL works
         compact(tmp_catalog)
 
         result = run_sql_tool(
-            catalog_dir=str(tmp_catalog),
-            sql="SELECT id, status FROM runs LIMIT 1"
+            catalog_dir=str(tmp_catalog), sql="SELECT id, status FROM runs LIMIT 1"
         )
 
         data = json.loads(result)
@@ -175,10 +178,7 @@ class TestRunSqlTool:
 
     def test_run_sql_tool_error_handling(self):
         """Verify run_sql handles invalid SQL gracefully."""
-        result = run_sql_tool(
-            catalog_dir="/nonexistent/path",
-            sql="SELECT * FROM nonexistent"
-        )
+        result = run_sql_tool(catalog_dir="/nonexistent/path", sql="SELECT * FROM nonexistent")
         data = json.loads(result)
         assert "error" in data
 
@@ -189,6 +189,7 @@ class TestCompactTool:
     def test_compact_tool_calls_compact_module(self, tmp_catalog, sample_run):
         """Verify compact tool returns expected result."""
         from bathos.catalog import write_run
+
         write_run(sample_run, tmp_catalog)
 
         result = compact_tool(catalog_dir=str(tmp_catalog))
@@ -219,6 +220,7 @@ class TestArchiveTool:
         """Verify archive tool returns expected result."""
         from bathos.catalog import write_run
         from bathos.compact import compact
+
         write_run(sample_run, tmp_catalog)
         compact(tmp_catalog)
 
@@ -238,10 +240,7 @@ class TestArchiveTool:
 
     def test_archive_tool_error_handling(self):
         """Verify archive handles errors gracefully."""
-        result = archive_tool(
-            catalog_dir="/nonexistent/path",
-            project="test"
-        )
+        result = archive_tool(catalog_dir="/nonexistent/path", project="test")
         data = json.loads(result)
         assert "error" in data
 
@@ -252,6 +251,7 @@ class TestCheckTool:
     def test_check_tool_returns_check_results(self, tmp_catalog, sample_run, tmp_path):
         """Verify check tool returns results."""
         from bathos.catalog import write_run
+
         write_run(sample_run, tmp_catalog)
 
         result = check_tool(catalog_dir=str(tmp_catalog), project_root=str(tmp_path))
@@ -286,8 +286,8 @@ class TestSyncTool:
     @patch("bathos.mcp.find_project_config")
     def test_sync_tool_calls_sync_module(self, mock_find_config, mock_load_config, mock_sync):
         """Verify sync tool calls sync module."""
-        from bathos.sync import SyncResult
         from bathos.config import ProjectConfig
+        from bathos.sync import SyncResult
 
         mock_config_path = Path("/tmp/.bth.toml")
         mock_config = ProjectConfig(slug="test", root=Path("/tmp"), remotes={"origin": {}})
@@ -306,10 +306,7 @@ class TestSyncTool:
 
     def test_sync_tool_error_handling(self):
         """Verify sync handles errors gracefully."""
-        result = sync_tool(
-            catalog_dir="/nonexistent/path",
-            remote_name="origin"
-        )
+        result = sync_tool(catalog_dir="/nonexistent/path", remote_name="origin")
         data = json.loads(result)
         assert "error" in data
 
@@ -344,10 +341,7 @@ class TestInitTool:
 
     def test_init_tool_error_handling(self):
         """Verify init handles errors gracefully."""
-        result = init_tool(
-            project_root="/nonexistent/path",
-            slug="test"
-        )
+        result = init_tool(project_root="/nonexistent/path", slug="test")
         data = json.loads(result)
         assert "error" in data
 

@@ -1,10 +1,10 @@
-from pathlib import Path
 import dataclasses
-import duckdb
-import pytest
+from pathlib import Path
 
-from bathos.catalog import write_run, init_catalog, read_runs
-from bathos.compact import compact, CompactResult, _fragment_count
+import duckdb
+
+from bathos.catalog import init_catalog, write_run
+from bathos.compact import _fragment_count, compact
 from bathos.schema import Run
 
 
@@ -74,7 +74,7 @@ def test_compact_is_idempotent(tmp_catalog: Path, sample_run: Run):
     # Second compact
     result2 = compact(tmp_catalog)
     assert result2.ingested == 0  # Already ingested
-    assert result2.skipped == 2    # Both skipped as already present
+    assert result2.skipped == 2  # Both skipped as already present
 
     # Still only 2 rows
     con = duckdb.connect(str(tmp_catalog / "bathos.db"))
@@ -160,13 +160,11 @@ def test_compact_tracks_warm_schema_version(tmp_catalog: Path, sample_run: Run):
     write_run(sample_run, tmp_catalog)
 
     # Compact
-    result = compact(tmp_catalog)
+    compact(tmp_catalog)
 
     # Verify _schema_meta table
     con = duckdb.connect(str(tmp_catalog / "bathos.db"))
-    rows = con.execute(
-        "SELECT value FROM _schema_meta WHERE key = 'warm_version'"
-    ).fetchall()
+    rows = con.execute("SELECT value FROM _schema_meta WHERE key = 'warm_version'").fetchall()
     assert len(rows) == 1
     assert rows[0][0] == "2"
 
@@ -231,16 +229,14 @@ def test_compact_preserves_run_data(tmp_catalog: Path, sample_run: Run):
 
     # Verify data preserved
     con = duckdb.connect(str(tmp_catalog / "bathos.db"))
-    rows = con.execute(
-        "SELECT tags, output_paths, slurm_job_id, metadata FROM runs"
-    ).fetchall()
+    rows = con.execute("SELECT tags, output_paths, slurm_job_id, metadata FROM runs").fetchall()
     assert len(rows) == 1
     # Verify complex types preserved (tags and output_paths)
     assert rows[0][0] == ["smoke", "critical"]
     assert rows[0][1] == ["/tmp/a.json", "/tmp/b.json"]
     assert rows[0][2] == "12345"
     # Note: metadata is not part of cool tier schema, so defaults to '{}' on read
-    assert rows[0][3] == '{}'
+    assert rows[0][3] == "{}"
 
 
 def test_compact_migrates_v1_to_v2(sample_run: Run):
@@ -329,8 +325,9 @@ def test_compact_skips_sha256_for_large_files(tmp_path):
 
 def test_compact_ingests_output_metadata_into_warm_db(tmp_catalog: Path, sample_run: Run):
     """Verify output metadata is stored in warm DuckDB."""
-    from bathos.compact import compact
     import json
+
+    from bathos.compact import compact
 
     # Create an output file
     output_file = tmp_catalog / "output.json"
@@ -344,7 +341,7 @@ def test_compact_ingests_output_metadata_into_warm_db(tmp_catalog: Path, sample_
         git_hash=sample_run.git_hash,
         git_branch=sample_run.git_branch,
         git_dirty=sample_run.git_dirty,
-        output_paths=[str(output_file)]
+        output_paths=[str(output_file)],
     )
     write_run(run, tmp_catalog)
 
@@ -367,8 +364,9 @@ def test_compact_ingests_output_metadata_into_warm_db(tmp_catalog: Path, sample_
 
 def test_compact_handles_empty_output_paths(tmp_catalog: Path, sample_run: Run):
     """Verify runs with no output_paths get empty metadata array."""
-    from bathos.compact import compact
     import json
+
+    from bathos.compact import compact
 
     # Write a run with NO output paths
     run = Run(
@@ -378,7 +376,7 @@ def test_compact_handles_empty_output_paths(tmp_catalog: Path, sample_run: Run):
         git_hash=sample_run.git_hash,
         git_branch=sample_run.git_branch,
         git_dirty=sample_run.git_dirty,
-        output_paths=[]  # Empty
+        output_paths=[],  # Empty
     )
     write_run(run, tmp_catalog)
 

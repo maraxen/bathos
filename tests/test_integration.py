@@ -1,10 +1,13 @@
 """End-to-end: init → run → ls → show → find → compact."""
+
 import sys
 from pathlib import Path
+
 from typer.testing import CliRunner
+
+from bathos.catalog import init_catalog, read_runs
 from bathos.cli import app
-from bathos.catalog import read_runs, init_catalog
-from bathos.compact import compact, COMPACTION_THRESHOLD
+from bathos.compact import compact
 from bathos.query import run_sql
 
 runner = CliRunner()
@@ -18,6 +21,7 @@ def test_full_workflow(tmp_path: Path, monkeypatch):
 
     # Lower threshold so 2 runs triggers banner; test banner appearance before/after compact
     import bathos.compact
+
     monkeypatch.setattr(bathos.compact, "COMPACTION_THRESHOLD", 1)
 
     # 1. init
@@ -71,7 +75,10 @@ def test_full_workflow(tmp_path: Path, monkeypatch):
 
     # 8b. verify banner logic: should_compact returns False after warm DB exists
     from bathos.compact import should_compact
-    assert not should_compact(catalog), "Banner should not appear after compact (warm DB now exists)"
+
+    assert not should_compact(catalog), (
+        "Banner should not appear after compact (warm DB now exists)"
+    )
 
     # 9. verify warm tier has both runs via SQL
     rows = run_sql("SELECT count(*) FROM runs", catalog)
@@ -92,15 +99,15 @@ def test_full_workflow_140_141_142(tmp_path: Path, monkeypatch):
     Tests for tasks #140 (schema versioning), #141 (archive),
     #142 (results management / output filtering).
     """
-    from bathos.schema import Run
-    from bathos.catalog import write_run, read_runs, init_catalog
-    from bathos.compact import compact
-    from bathos.archive import archive
-    from bathos.checker import check_runs
-    from bathos.query import find_runs, _filter_runs_by_output_file
-    from bathos.config import ProjectConfig
     import json
     import subprocess
+
+    from bathos.archive import archive
+    from bathos.catalog import init_catalog, read_runs, write_run
+    from bathos.checker import check_runs
+    from bathos.compact import compact
+    from bathos.query import _filter_runs_by_output_file, find_runs
+    from bathos.schema import Run
 
     # Setup
     catalog_dir = tmp_path / ".bth" / "catalog"
@@ -168,6 +175,7 @@ def test_full_workflow_140_141_142(tmp_path: Path, monkeypatch):
 
     # Verify runs can be queried via DuckDB (which applies migrations)
     from bathos.query import list_runs
+
     warm_runs = list_runs(catalog_dir)
     assert len(warm_runs) == 2, "Should have 2 runs via warm tier"
     for run in warm_runs:
@@ -205,17 +213,23 @@ def test_full_workflow_140_141_142(tmp_path: Path, monkeypatch):
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
-        cwd=tmp_path, check=True, capture_output=True,
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
     )
     subprocess.run(
         ["git", "config", "user.name", "Test User"],
-        cwd=tmp_path, check=True, capture_output=True,
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
     )
     (tmp_path / "file.txt").write_text("initial")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(
         ["git", "commit", "-m", "initial"],
-        cwd=tmp_path, check=True, capture_output=True,
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
     )
 
     # Get current HEAD hash
@@ -245,8 +259,9 @@ def test_full_workflow_140_141_142(tmp_path: Path, monkeypatch):
     assert len(check_results) >= 1, "Should check at least 1 run"
     # At least one should be OK (the run with current HEAD)
     statuses = {r.status for r in check_results}
-    assert "OK" in statuses or "UNKNOWN_CODE" in statuses, \
+    assert "OK" in statuses or "UNKNOWN_CODE" in statuses, (
         f"Should have OK or UNKNOWN_CODE status, got {statuses}"
+    )
 
     # 5. Find with output-file filter
     all_runs = find_runs(catalog_dir)

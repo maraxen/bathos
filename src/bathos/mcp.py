@@ -5,31 +5,30 @@ Provides 10 tools that mirror the CLI:
 - Compact/Archive: compact, archive
 - Check/Sync/Init/Run: check, sync, init, run
 """
+
 from __future__ import annotations
 
 import json
 import os
 from pathlib import Path
-from typing import Optional
 
 from fastmcp import FastMCP
 
 # Import core modules
 from bathos.archive import archive as archive_runs
 from bathos.catalog import init_catalog
+from bathos.checker import check_runs
 from bathos.compact import compact as compact_catalog
 from bathos.config import default_catalog_dir, find_project_config, load_project_config
-from bathos.query import list_runs, find_runs, get_run, run_sql
-from bathos.checker import check_runs
-from bathos.sync import sync_catalog
 from bathos.init import init_project
+from bathos.query import find_runs, get_run, list_runs, run_sql
 from bathos.runner import run_script
-
+from bathos.sync import sync_catalog
 
 app = FastMCP("bathos")
 
 
-def _get_catalog_dir(catalog_dir: Optional[str] = None) -> Path:
+def _get_catalog_dir(catalog_dir: str | None = None) -> Path:
     """Resolve catalog directory from parameter or environment."""
     if catalog_dir:
         return Path(catalog_dir)
@@ -42,6 +41,7 @@ def _get_catalog_dir(catalog_dir: Optional[str] = None) -> Path:
 # ============================================================================
 # Core tool implementations (testable functions)
 # ============================================================================
+
 
 def list_runs_tool(
     catalog_dir: str = "",
@@ -71,10 +71,7 @@ def list_runs_tool(
             }
             for r in runs
         ]
-        return json.dumps(
-            {"runs": runs_json, "count": len(runs_json)},
-            indent=2
-        )
+        return json.dumps({"runs": runs_json, "count": len(runs_json)}, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)})
 
@@ -205,7 +202,6 @@ def compact_tool(
 def archive_tool(
     catalog_dir: str = "",
     project: str = "",
-    keep_cool: bool = False,
 ) -> str:
     """Archive warm-tier DuckDB to cold-tier Parquet.
 
@@ -332,12 +328,15 @@ def init_tool(
             slurm_partition=slurm_partition or None,
         )
         init_catalog(cat_dir)
-        return json.dumps({
-            "initialized": True,
-            "catalog_dir": str(cat_dir),
-            "project_root": str(root),
-            "slug": slug,
-        }, indent=2)
+        return json.dumps(
+            {
+                "initialized": True,
+                "catalog_dir": str(cat_dir),
+                "project_root": str(root),
+                "slug": slug,
+            },
+            indent=2,
+        )
     except Exception as e:
         return json.dumps({"error": str(e)})
 
@@ -369,11 +368,14 @@ def run_tool(
             output_paths=[],
             tags=[],
         )
-        return json.dumps({
-            "script_path": script_path,
-            "exit_code": exit_code,
-            "success": exit_code == 0,
-        }, indent=2)
+        return json.dumps(
+            {
+                "script_path": script_path,
+                "exit_code": exit_code,
+                "success": exit_code == 0,
+            },
+            indent=2,
+        )
     except Exception as e:
         return json.dumps({"error": str(e)})
 
@@ -381,6 +383,7 @@ def run_tool(
 # ============================================================================
 # MCP server tool registrations
 # ============================================================================
+
 
 @app.tool("list_runs")
 def mcp_list_runs_tool(
@@ -443,7 +446,9 @@ def mcp_check_tool(
     status_filter: str = "",
 ) -> str:
     """Check run freshness vs git HEAD."""
-    return check_tool(catalog_dir=catalog_dir, project_root=project_root, status_filter=status_filter)
+    return check_tool(
+        catalog_dir=catalog_dir, project_root=project_root, status_filter=status_filter
+    )
 
 
 @app.tool("sync")

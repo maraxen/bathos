@@ -1,7 +1,8 @@
 from __future__ import annotations
+
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-import subprocess
 
 
 @dataclass
@@ -21,12 +22,16 @@ def capture_git_state(cwd: Path = Path.cwd()) -> GitState:
         ).strip()
         branch = subprocess.check_output(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=cwd, text=True, stderr=subprocess.DEVNULL,
+            cwd=cwd,
+            text=True,
+            stderr=subprocess.DEVNULL,
         ).strip()
         dirty = bool(
             subprocess.check_output(
                 ["git", "status", "--porcelain"],
-                cwd=cwd, text=True, stderr=subprocess.DEVNULL,
+                cwd=cwd,
+                text=True,
+                stderr=subprocess.DEVNULL,
             ).strip()
         )
         return GitState(hash=hash_, branch=branch, dirty=dirty)

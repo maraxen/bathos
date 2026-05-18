@@ -1,25 +1,41 @@
-from datetime import datetime, timezone
-from bathos.schema import Run, COOL_SCHEMA, WARM_SCHEMA
+from datetime import datetime
+
 import pyarrow as pa
+
+from bathos.schema import COOL_SCHEMA, WARM_SCHEMA, Run
 
 
 def test_run_has_generated_id():
-    r = Run(project_slug="proj", command="python foo.py", argv=["python", "foo.py"],
-            git_hash="abc123", git_branch="main", git_dirty=False)
+    r = Run(
+        project_slug="proj",
+        command="python foo.py",
+        argv=["python", "foo.py"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+    )
     assert len(r.id) == 36  # UUID4
 
 
 def test_two_runs_have_different_ids():
-    r1 = Run(project_slug="p", command="x", argv=["x"],
-             git_hash="a", git_branch="main", git_dirty=False)
-    r2 = Run(project_slug="p", command="x", argv=["x"],
-             git_hash="a", git_branch="main", git_dirty=False)
+    r1 = Run(
+        project_slug="p", command="x", argv=["x"], git_hash="a", git_branch="main", git_dirty=False
+    )
+    r2 = Run(
+        project_slug="p", command="x", argv=["x"], git_hash="a", git_branch="main", git_dirty=False
+    )
     assert r1.id != r2.id
 
 
 def test_run_defaults():
-    r = Run(project_slug="proj", command="python foo.py", argv=["python", "foo.py"],
-            git_hash="abc123", git_branch="main", git_dirty=False)
+    r = Run(
+        project_slug="proj",
+        command="python foo.py",
+        argv=["python", "foo.py"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+    )
     assert r.status == "running"
     assert r.exit_code == -1
     assert r.duration_s == 0.0
@@ -33,18 +49,33 @@ def test_run_defaults():
 
 
 def test_run_to_arrow_table():
-    r = Run(project_slug="proj", command="python foo.py", argv=["python", "foo.py"],
-            git_hash="abc123", git_branch="main", git_dirty=False)
+    r = Run(
+        project_slug="proj",
+        command="python foo.py",
+        argv=["python", "foo.py"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+    )
     table = r.to_arrow()
     assert table.schema.equals(COOL_SCHEMA)
     assert table.num_rows == 1
 
 
 def test_run_roundtrip_via_arrow():
-    r = Run(project_slug="proj", command="python foo.py", argv=["python", "foo.py"],
-            git_hash="abc123", git_branch="main", git_dirty=False,
-            status="completed", exit_code=0, duration_s=1.5,
-            output_paths=["/tmp/out.parquet"], tags=["tip3p"])
+    r = Run(
+        project_slug="proj",
+        command="python foo.py",
+        argv=["python", "foo.py"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+        status="completed",
+        exit_code=0,
+        duration_s=1.5,
+        output_paths=["/tmp/out.parquet"],
+        tags=["tip3p"],
+    )
     table = r.to_arrow()
     r2 = Run.from_arrow_row(table.to_pydict(), 0)
     assert r2.id == r.id
@@ -59,8 +90,14 @@ def test_run_roundtrip_via_arrow():
 
 def test_schema_version_in_cool_parquet():
     """Verify schema_version field is written to cool Parquet."""
-    r = Run(project_slug="proj", command="python foo.py", argv=["python", "foo.py"],
-            git_hash="abc123", git_branch="main", git_dirty=False)
+    r = Run(
+        project_slug="proj",
+        command="python foo.py",
+        argv=["python", "foo.py"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+    )
     table = r.to_arrow()
     assert "schema_version" in table.column_names
     assert table.column("schema_version")[0].as_py() == "2"
@@ -68,9 +105,15 @@ def test_schema_version_in_cool_parquet():
 
 def test_slurm_job_id_captured_from_env(monkeypatch):
     """Verify slurm_job_id can be set and round-trips through Parquet."""
-    r = Run(project_slug="proj", command="python foo.py", argv=["python", "foo.py"],
-            git_hash="abc123", git_branch="main", git_dirty=False,
-            slurm_job_id="12345678")
+    r = Run(
+        project_slug="proj",
+        command="python foo.py",
+        argv=["python", "foo.py"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+        slurm_job_id="12345678",
+    )
     table = r.to_arrow()
     assert "slurm_job_id" in table.column_names
     assert table.column("slurm_job_id")[0].as_py() == "12345678"
@@ -82,9 +125,15 @@ def test_slurm_job_id_captured_from_env(monkeypatch):
 
 def test_metadata_not_in_cool_parquet():
     """Verify metadata field is NOT written to cool Parquet."""
-    r = Run(project_slug="proj", command="python foo.py", argv=["python", "foo.py"],
-            git_hash="abc123", git_branch="main", git_dirty=False,
-            metadata='{"key": "value"}')
+    r = Run(
+        project_slug="proj",
+        command="python foo.py",
+        argv=["python", "foo.py"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+        metadata='{"key": "value"}',
+    )
     table = r.to_arrow()
     assert "metadata" not in table.column_names
 
@@ -113,9 +162,15 @@ def test_cool_schema_has_new_fields():
 
 def test_run_with_custom_metadata():
     """Verify metadata is stored in Run but not serialized to cool Parquet."""
-    r = Run(project_slug="proj", command="python foo.py", argv=["python", "foo.py"],
-            git_hash="abc123", git_branch="main", git_dirty=False,
-            metadata='{"hypothesis": "test", "outcome": "pass"}')
+    r = Run(
+        project_slug="proj",
+        command="python foo.py",
+        argv=["python", "foo.py"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+        metadata='{"hypothesis": "test", "outcome": "pass"}',
+    )
     assert r.metadata == '{"hypothesis": "test", "outcome": "pass"}'
     table = r.to_arrow()
     assert "metadata" not in table.column_names
@@ -137,16 +192,28 @@ def test_warm_schema_has_hostname_field():
 
 def test_run_hostname_default_empty_string():
     """Verify Run hostname defaults to empty string."""
-    r = Run(project_slug="proj", command="python foo.py", argv=["python", "foo.py"],
-            git_hash="abc123", git_branch="main", git_dirty=False)
+    r = Run(
+        project_slug="proj",
+        command="python foo.py",
+        argv=["python", "foo.py"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+    )
     assert r.hostname == ""
 
 
 def test_hostname_roundtrip_via_arrow():
     """Verify hostname is serialized to Parquet and round-trips correctly."""
-    r = Run(project_slug="proj", command="python foo.py", argv=["python", "foo.py"],
-            git_hash="abc123", git_branch="main", git_dirty=False,
-            hostname="compute-node-42")
+    r = Run(
+        project_slug="proj",
+        command="python foo.py",
+        argv=["python", "foo.py"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+        hostname="compute-node-42",
+    )
     table = r.to_arrow()
     assert "hostname" in table.column_names
     assert table.column("hostname")[0].as_py() == "compute-node-42"
@@ -159,13 +226,17 @@ def test_hostname_roundtrip_via_arrow():
 def test_schema_version_defaults_to_2():
     """Verify new runs default to schema_version='2'."""
     r = Run(
-        project_slug="test", command="python foo.py", argv=["python", "foo.py"],
-        git_hash="abc123", git_branch="main", git_dirty=False
+        project_slug="test",
+        command="python foo.py",
+        argv=["python", "foo.py"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
     )
     assert r.schema_version == "2"
 
 
 def test_sample_run_fixture_has_hostname(sample_run):
     """Verify sample_run fixture includes hostname field."""
-    assert hasattr(sample_run, 'hostname')
+    assert hasattr(sample_run, "hostname")
     assert sample_run.hostname == "test-host"
