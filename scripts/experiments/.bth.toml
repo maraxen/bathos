@@ -1,0 +1,18 @@
+[experiment]
+hypothesis = "bathos correctly captures run provenance (git state, command, args, timing) and stores atomically as Parquet"
+
+[outcomes.pass]
+condition = "all_test_fields_present"        # All required fields present in run record
+decision = "proceed to warmth tier (compact)"
+
+[outcomes.fail]
+condition = "missing_fields OR exit_code != 0"
+decision = "debug schema or execution wrapper"
+
+[result_schema]
+run_id = "str"
+project_slug = "str"
+git_hash = "str"
+exit_code = "int"
+duration_s = "float"
+status = "str"

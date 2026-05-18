@@ -1,0 +1,12 @@
+[benchmark]
+baseline_ref = "baseline_run_id_placeholder"
+metric = "cool_fragment_count"
+regression_threshold = 0.10                 # ±10%
+
+target = "Cool-tier Parquet writes scale linearly (no performance regression)"
+
+[result_schema]
+fragment_count = "int"
+avg_fragment_size_bytes = "int"
+write_time_ms = "float"
+query_time_ms = "float"
