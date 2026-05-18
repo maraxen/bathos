@@ -18,7 +18,7 @@ from fastmcp import FastMCP
 from bathos.archive import archive as archive_runs
 from bathos.catalog import init_catalog
 from bathos.compact import compact as compact_catalog
-from bathos.config import default_catalog_dir
+from bathos.config import default_catalog_dir, find_project_config, load_project_config
 from bathos.query import list_runs, find_runs, get_run, run_sql
 from bathos.checker import check_runs
 from bathos.sync import sync_catalog
@@ -221,9 +221,12 @@ def archive_tool(
         if not project:
             return json.dumps({"error": "project parameter is required"})
         cat_dir = _get_catalog_dir(catalog_dir or None)
-        result = archive_runs(cat_dir, project_slug=project, dry_run=False)
+        archive_root = cat_dir / "archive"
+        result = archive_runs(cat_dir, archive_root=archive_root, project_slug=project)
         result_dict = {
-            "archived": result.archived,
+            "runs_archived": result.runs_archived,
+            "partitions_created": result.partitions_created,
+            "archive_size_bytes": result.archive_size_bytes,
             "duration_s": result.duration_s,
         }
         return json.dumps(result_dict, indent=2)
@@ -254,7 +257,6 @@ def check_tool(
             {
                 "run_id": r.run_id,
                 "status": r.status,
-                "reason": r.reason,
             }
             for r in results
         ]
@@ -282,7 +284,12 @@ def sync_tool(
         if not remote_name:
             return json.dumps({"error": "remote_name parameter is required"})
         cat_dir = _get_catalog_dir(catalog_dir or None)
-        result = sync_catalog(cat_dir, remote_name, pull=pull)
+        # Load ProjectConfig from .bth.toml in project root
+        config_path = find_project_config(Path.cwd())
+        if not config_path:
+            return json.dumps({"error": "Could not find .bth.toml in project hierarchy"})
+        config = load_project_config(config_path)
+        result = sync_catalog(remote_name, config, cat_dir, pull=pull)
         result_dict = {
             "transferred": result.transferred,
             "duration_s": result.duration_s,
@@ -337,7 +344,7 @@ def init_tool(
 
 def run_tool(
     script_path: str = "",
-    args: list[str] = None,
+    args: list[str] | None = None,
 ) -> str:
     """Run a script and record provenance.
 
@@ -470,7 +477,7 @@ def mcp_init_tool(
 @app.tool("run")
 def mcp_run_tool(
     script_path: str = "",
-    args: list[str] = None,
+    args: list[str] | None = None,
 ) -> str:
     """Run a script and record provenance."""
     return run_tool(script_path=script_path, args=args)
@@ -481,10 +488,8 @@ def mcp_server():
 
     Called by pyproject.toml entry point: bth-mcp
     """
-    import sys
-    app.run(sys.stdin.buffer, sys.stdout.buffer, sys.stderr)
+    app.run()
 
 
 if __name__ == "__main__":
-    import sys
-    app.run(sys.stdin.buffer, sys.stdout.buffer, sys.stderr)
+    app.run()

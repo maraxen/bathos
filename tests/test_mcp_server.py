@@ -228,9 +228,13 @@ class TestArchiveTool:
         )
 
         data = json.loads(result)
-        # Archive may return error if archive_root not set, but should be valid JSON
+        # Archive should return valid JSON with runs_archived field
         assert isinstance(data, dict)
-        assert "archived" in data or "error" in data
+        assert "runs_archived" in data or "error" in data
+        if "runs_archived" in data:
+            assert "partitions_created" in data
+            assert "archive_size_bytes" in data
+            assert "duration_s" in data
 
     def test_archive_tool_error_handling(self):
         """Verify archive handles errors gracefully."""
@@ -278,9 +282,18 @@ class TestSyncTool:
         assert "error" in data
 
     @patch("bathos.mcp.sync_catalog")
-    def test_sync_tool_calls_sync_module(self, mock_sync):
+    @patch("bathos.mcp.load_project_config")
+    @patch("bathos.mcp.find_project_config")
+    def test_sync_tool_calls_sync_module(self, mock_find_config, mock_load_config, mock_sync):
         """Verify sync tool calls sync module."""
         from bathos.sync import SyncResult
+        from bathos.config import ProjectConfig
+
+        mock_config_path = Path("/tmp/.bth.toml")
+        mock_config = ProjectConfig(slug="test", root=Path("/tmp"), remotes={"origin": {}})
+        mock_find_config.return_value = mock_config_path
+        mock_load_config.return_value = mock_config
+
         mock_result = SyncResult(transferred=10, duration_s=1.5, remote="origin")
         mock_sync.return_value = mock_result
 
