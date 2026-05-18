@@ -1,5 +1,10 @@
 # bathos
 
+[![PyPI](https://img.shields.io/pypi/v/bathos.svg)](https://pypi.org/project/bathos/)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/mariellerossi/bathos/blob/main/LICENSE)
+[![Documentation](https://img.shields.io/readthedocs/bathos.svg)](https://bathos.readthedocs.io)
+
 Local-first, zero-server experiment tracking for researchers working across multiple projects and SLURM clusters.
 
 Never lose track of what ran, what it produced, or whether results are still valid.
@@ -65,3 +70,12 @@ def main(n_steps: int, out: Path):
 ## Catalog
 
 All runs land in `~/.bth/catalog/` as DuckDB + Parquet. Query with `bth ls`, `bth find`, or raw `bth sql`.
+
+## Documentation
+
+Full documentation is available at [https://bathos.readthedocs.io](https://bathos.readthedocs.io).
+
+- [Installation guide](https://bathos.readthedocs.io/en/stable/install/)
+- [Design and architecture](https://bathos.readthedocs.io/en/stable/design/)
+- [API reference](https://bathos.readthedocs.io/en/stable/api/)
+- [SLURM integration](https://bathos.readthedocs.io/en/stable/slurm/)
