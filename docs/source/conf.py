@@ -32,10 +32,16 @@ autodoc_default_options = {
     "show-inheritance": True,
 }
 
+# Suppress harmless warnings
+suppress_warnings = [
+    "ref.class",  # pathlib.Path and similar stdlib types
+    "autodoc",    # Suppress autodoc import errors for modules still under development
+]
+
 # Options for HTML output
-html_theme = "pydata_sphinx_theme"
+html_theme = "alabaster"
 html_static_path = ["_static"]
 html_theme_options = {
-    "github_url": "https://github.com/marielle-russo/bathos",
-    "use_edit_button": True,
+    "github_user": "marielle-russo",
+    "github_repo": "bathos",
 }
