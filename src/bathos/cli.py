@@ -418,6 +418,38 @@ def export_cmd(
         typer.echo(f"Registered MCP at:   {mcp_target}")
 
 
+@app.command("catalog-version")
+def catalog_version_cmd():
+    """Show schema version status of the catalog."""
+    from bathos.schema import CURRENT_SCHEMA_VERSION
+    from bathos.migrate import migrate_catalog
+
+    catalog_dir = _catalog_dir()
+    typer.echo(f"Current schema version: {CURRENT_SCHEMA_VERSION}")
+
+    result = migrate_catalog(catalog_dir, dry_run=True)
+    typer.echo(f"Cool-tier fragments: {result.scanned} scanned, {result.migrated} need migration.")
+
+    db_path = catalog_dir / "bathos.db"
+    if db_path.exists():
+        import duckdb
+        con = duckdb.connect(str(db_path), read_only=True)
+        try:
+            rows = con.execute(
+                "SELECT warm_version, migrated_at FROM _schema_migrations ORDER BY migrated_at DESC LIMIT 1"
+            ).fetchall()
+            if rows:
+                typer.echo(f"Warm DB version: {rows[0][0]} (last migration: {rows[0][1]})")
+            else:
+                typer.echo("Warm DB: no migration history found.")
+        except Exception:
+            typer.echo("Warm DB: no migration history found.")
+        finally:
+            con.close()
+    else:
+        typer.echo("Warm DB: not yet created (run bth compact).")
+
+
 def _parse_since(since: str | None) -> datetime | None:
     if since is None:
         return None

@@ -7,7 +7,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from bathos.schema import COOL_SCHEMA
+from bathos.schema import COOL_SCHEMA, CURRENT_SCHEMA_VERSION
 
 
 @dataclass
@@ -40,6 +40,14 @@ def migrate_catalog(catalog_dir: Path, dry_run: bool = False) -> MigrateResult:
         for field in COOL_SCHEMA:
             if field.name not in existing:
                 tbl = tbl.append_column(field, _default_array(field.type, len(tbl)))
+        # Stamp schema_version to current on all upgraded fragments
+        schema_version_idx = tbl.schema.get_field_index("schema_version")
+        if schema_version_idx >= 0:
+            tbl = tbl.set_column(
+                schema_version_idx,
+                "schema_version",
+                pa.array([CURRENT_SCHEMA_VERSION] * len(tbl), type=pa.string()),
+            )
         tbl = tbl.select([f.name for f in COOL_SCHEMA]).cast(COOL_SCHEMA)
         tmp = frag.with_suffix(".tmp")
         pq.write_table(tbl, tmp)

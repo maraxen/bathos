@@ -116,3 +116,19 @@ def test_cli_migrate_writes(tmp_path, monkeypatch):
 
     tbl = pq.read_table(runs_dir / "run_ddd.parquet")
     assert "outcome" in tbl.schema.names
+
+
+def test_migrate_writes_schema_version_on_upgraded_fragments(tmp_path):
+    """migrate_catalog sets schema_version = CURRENT_SCHEMA_VERSION on upgraded fragments."""
+    from bathos.migrate import migrate_catalog
+    from bathos.schema import CURRENT_SCHEMA_VERSION
+
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    _write_old_fragment(runs_dir, "ver_test")
+
+    migrate_catalog(tmp_path, dry_run=False)
+
+    tbl = pq.read_table(runs_dir / "run_ver_test.parquet")
+    versions = tbl.column("schema_version").to_pylist()
+    assert all(v == CURRENT_SCHEMA_VERSION for v in versions)
