@@ -1,3 +1,8 @@
+---
+name: using-bathos
+description: "Use when working in any bathos-tracked research project — experiment execution, run tracking, SLURM job submission, querying results, syncing to cluster, or managing remotes."
+---
+
 # SKILL: Using bathos for Experiment Tracking
 
 ## Overview

@@ -20,15 +20,15 @@ class ExportResult:
 
 
 _CLAUDE_TARGETS: dict[str, Path] = {
-    "user": Path.home() / ".claude" / "skills" / "using-bathos.md",
-    "workspace": Path(".claude") / "skills" / "using-bathos.md",
-    "system": Path("/etc/claude/skills/using-bathos.md"),
+    "user": Path.home() / ".claude" / "skills" / "using-bathos" / "SKILL.md",
+    "workspace": Path(".claude") / "skills" / "using-bathos" / "SKILL.md",
+    "system": Path("/etc/claude/skills/using-bathos/SKILL.md"),
 }
 
 _GEMINI_TARGETS: dict[str, Path] = {
-    "user": Path.home() / ".gemini" / "skills" / "using-bathos.md",
-    "workspace": Path(".gemini") / "skills" / "using-bathos.md",
-    "system": Path("/etc/gemini/skills/using-bathos.md"),
+    "user": Path.home() / ".gemini" / "skills" / "using-bathos" / "SKILL.md",
+    "workspace": Path(".gemini") / "skills" / "using-bathos" / "SKILL.md",
+    "system": Path("/etc/gemini/skills/using-bathos/SKILL.md"),
 }
 
 
@@ -124,8 +124,14 @@ def export_skill(target: Path, dry_run: bool) -> ExportResult:
     source = get_skill_source_path()
     version = getattr(bathos, "__version__", "unknown")
     timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    header = f"<!-- bathos v{version} | exported {timestamp} -->\n"
-    content = header + source.read_text()
+    stamp = f"<!-- bathos v{version} | exported {timestamp} -->\n"
+    raw = source.read_text()
+    # Insert version stamp after the closing --- of the frontmatter so parsers see clean YAML
+    if raw.startswith("---"):
+        end = raw.index("---", 3) + 3
+        content = raw[: end + 1] + stamp + raw[end + 1 :]
+    else:
+        content = stamp + raw
 
     if dry_run:
         return ExportResult(target=target, written=False, dry_run=True)
