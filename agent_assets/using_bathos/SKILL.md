@@ -8,8 +8,7 @@
 
 **Scope:** Single researcher, 10+ projects, SLURM cluster integration.
 
-**v0.1 status:** ✅ Shipped (CLI + query + compaction, 44 tests passing).  
-**v0.2 preview:** check, archive, sync, pre-registration enforcement (backlog items #130–141).
+**Status:** ✅ v0.2 shipped — 207 tests passing. Full CLI + MCP server available.
 
 ---
 
@@ -19,28 +18,29 @@
 - **Tracking provenance** (git state, command, timing, outputs, SLURM job ID)
 - **SLURM job submission** and atomic recording
 - **Analyzing results** across multiple runs (filtering, aggregation)
-- **Verifying validity** of past runs (git drift detection — v0.2)
-- **Preparing results** for publication or sharing (archiving — v0.2)
+- **Verifying validity** of past runs (`bth check` — git drift detection)
+- **Preparing results** for publication or sharing (`bth archive` — cold-tier export)
 - **Multi-project analysis** via DuckDB queries
 
 ---
 
-## FIX #1: Version-Status Reference Table
+## Command Reference
 
-| Command | Arguments | v0.1 | v0.2 | Notes |
-|---------|-----------|------|------|-------|
-| bth init | --slug, --remote, --slurm-partition | ✅ | — | Project initialization |
-| bth run | <script> [-- args], --tag, --out | ✅ | — | Execute + provenance capture |
-| bth ls | --since, --status, --limit | ✅ | — | List recent runs |
-| bth show | <run-id> | ✅ | — | Full run details + git state |
-| bth find | --project, --since, --status, --tag, --output-file | ✅ | — | Flexible filtered query |
-| bth sql | "<query>" | ✅ | — | DuckDB escape hatch (cool/warm) |
-| bth compact | (no args) | ✅ | — | cool→warm consolidation |
-| bth check | [run-id] | — | ⏳ | Git drift detection (backlog #130) |
-| bth archive | --project, --year, --month | — | ⏳ | Cold-tier export (backlog #141) |
-| bth sync | --remote, --pull | — | ⏳ | Cluster sync (backlog #138) |
-
-**Key:** ✅ = shipped and usable now; ⏳ = backlog item, do not attempt; — = not planned.
+| Command | Arguments | Status | Notes |
+|---------|-----------|--------|-------|
+| bth init | --slug, --remote, --slurm-partition | ✅ | Project initialization |
+| bth run | <script> [-- args], --tag, --out | ✅ | Execute + provenance capture |
+| bth ls | --since, --status, --limit, --project | ✅ | List recent runs + OUTCOME column |
+| bth show | <run-id> | ✅ | Full run details + git state |
+| bth find | --project, --since, --status, --tag, --output-file | ✅ | Flexible filtered query |
+| bth sql | "<query>" | ✅ | DuckDB escape hatch (cool/warm) |
+| bth compact | (no args) | ✅ | cool→warm consolidation |
+| bth check | --status | ✅ | Git drift detection |
+| bth archive | --project, --archive-dir, --dry-run | ✅ | Cold-tier partitioned export |
+| bth sync | --remote, --pull | ✅ | Cluster rsync |
+| bth migrate | --dry-run | ✅ | Upgrade cool-tier fragments to current schema |
+| bth new-experiment | NAME, --force | ✅ | Scaffold script + sidecar |
+| bth export | --tool, --level, --dry-run | ✅ | Install skill + MCP server |
 
 ---
 
@@ -78,7 +78,7 @@ tags                | Comma-sep labels (e.g., "nvt,tip3p,equilibration")
 slurm_job_id        | If present in environment
 ```
 
-**v0.2 extensions** (backlog #140): `hostname`, `outcome` (pass/fail/marginal), `schema_version`, `metadata` (JSON).
+**v0.2 additions:** `hostname`, `outcome` (pass/fail/marginal), `schema_version`, `metadata` (JSON).
 
 ## Pre-Registration (Sidecars) — Core Discipline
 
@@ -166,8 +166,8 @@ fix = "str"
 
 | Directory | Schema | Sidecar | Tracked | Naming |
 |-----------|--------|---------|---------|--------|
-| `scripts/experiments/` | experiment | required (v0.2) | Yes | `verb_noun.py` |
-| `scripts/benchmarks/` | benchmark | required (v0.2) | Yes | `verb_noun.py` |
+| `scripts/experiments/` | experiment | required | Yes | `verb_noun.py` |
+| `scripts/benchmarks/` | benchmark | required | Yes | `verb_noun.py` |
 | `scripts/validation/` | property+ref+tolerance | optional | Optional | `verb_noun.py` |
 | `scripts/analysis/` | none | none | Optional | `verb_noun.py` |
 | `scripts/data/` | none | none | No | `verb_noun.py` |
@@ -193,9 +193,7 @@ uv pip install -e .
 uv tool install --from . bathos
 ```
 
-### v0.2+ (Future)
-
-PyPI release (backlog #133):
+### PyPI / uv tool
 
 ```bash
 uv tool install bathos
@@ -237,7 +235,7 @@ bth init --slug myproject [--remote engaging:~/projects/myproject] [--slurm-part
 ## Basic Workflow
 
 1. **Write a script** in `scripts/experiments/measure_nvt_stability.py`
-2. **(v0.2) Create sidecar** `scripts/experiments/measure_nvt_stability.bth.toml` with `[experiment]` section
+2. **Create sidecar** `scripts/experiments/measure_nvt_stability.bth.toml` with `[experiment]` section
 3. **Run with bathos:**
    ```bash
    bth run python scripts/experiments/measure_nvt_stability.py -- --n-steps 1000 --dt 0.5 --out results.json
@@ -317,25 +315,6 @@ bth run python scripts/experiments/measure_nvt.py --out nvt_out.json -- --n-step
 
 ---
 
-## Planned (v0.2+) ⏳
-
-**Do not attempt these; they are backlog items not yet available.**
-
-**`bth check [OUTPUT_FILE]`** *(backlog #130)*
-- Verify run validity: has `git_hash` != current HEAD? → mark status='stale'
-- Validate that output files still present on disk
-- Useful after code changes to flag which runs need re-running
-
-**`bth archive --project P --year Y --month M`** *(backlog #141)*
-- Export warm tier runs to cold-tier partitioned Parquet
-- Enables time-bucketed archival, publication-ready datasets
-- Sync-safe for cluster storage
-
-**`bth sync --remote <host> [--pull]`** *(backlog #138)*
-- rsync cool-tier catalog to/from cluster
-- Requires `[remotes.<host>]` section in `.bth.toml`
-- `--pull`: download from remote; default is upload
-
 ---
 
 # SECTION 4: Common Agent Tasks
@@ -349,7 +328,7 @@ Steps:
    ls .bth.toml || bth init --slug myproject
    ```
 2. **Create script** in `scripts/experiments/equilibrate_nvt_water.py` (naming: `verb_noun.py`)
-3. **(v0.2) Create sidecar** `scripts/experiments/equilibrate_nvt_water.bth.toml` with `[experiment]` section, outcomes, and result schema
+3. **Create sidecar** `scripts/experiments/equilibrate_nvt_water.bth.toml` with `[experiment]` section, outcomes, and result schema
 4. **Record dry-run:**
    ```bash
    bth run python scripts/experiments/equilibrate_nvt_water.py --dry-run
@@ -396,7 +375,7 @@ Steps:
    ```bash
    git add -A && git commit -m "Fix temperature control coupling"
    ```
-2. **(v0.2) Verify stale runs:**
+2. **Verify stale runs:**
    ```bash
    bth check
    # Compares recorded git_hash against current HEAD
@@ -468,7 +447,7 @@ squeue -u marielle                                  # Watch job status
 ssh engaging "tail -f ~/projects/myproject/outputs/logs/slurm/<jobid>.out"  # Live tail
 
 # Step 5: Retrieve results (back on laptop)
-bth sync --remote engaging                         # (v0.2) Pull cool fragments
+bth sync --remote engaging                         # pull cool fragments
 # OR manually:
 rsync -azP --dry-run engaging:~/.bth/catalog/runs/ ~/.bth/catalog/runs/
 rsync -azP engaging:~/.bth/catalog/runs/ ~/.bth/catalog/runs/
@@ -529,7 +508,7 @@ RESEARCH_CONTEXT:
   bathos initialized: verify with `ls .bth.toml`
   Script directory: scripts/experiments/ (or benchmarks/, debug/)
   Script naming: verb_noun.py
-  (v0.2) Sidecar required: scripts/experiments/<stem>.bth.toml with [experiment] section
+  Sidecar required: scripts/experiments/<stem>.bth.toml with [experiment] section
   
 BATHOS COMMANDS:
   bth run <script> -- <args> [--tag X] [--out PATH]
@@ -600,7 +579,7 @@ These decisions constrain implementation and enable agent safety:
 - Always use `bth find` / `bth sql` (not raw file access)
 - After SLURM jobs: verify with `bth ls` (not polling logs)
 - Before dispatching analyzer: ensure runs have status='completed'
-- For cluster workflows: use `bth sync` (v0.2) or manual rsync before analysis
+- For cluster workflows: use `bth sync` or manual rsync before analysis
 
 ---
 
@@ -718,7 +697,7 @@ bth run python scripts/experiments/measure_x.py --out results.json -- <same args
 
 ### Q: Can I run experiments on two different machines?
 
-**A:** Yes, if sharing catalog via `bth sync` (v0.2) or NFS. Cool tier is SLURM-safe (atomic) but not network-FS-safe (multiple writers can corrupt). Warm tier is single-writer (DuckDB).
+**A:** Yes, if sharing catalog via `bth sync` or NFS. Cool tier is SLURM-safe (atomic) but not network-FS-safe (multiple writers can corrupt). Warm tier is single-writer (DuckDB).
 
 ### Q: How do I delete a run?
 
@@ -734,7 +713,7 @@ bth run python scripts/experiments/measure_x.py --out results.json -- <same args
 
 ### Q: My SQL query broke after I upgraded bathos. Why?
 
-**A:** Schema evolution lands in v0.2 (backlog #140). Pin your bathos version or check schema version compatibility before upgrading. `bth show <run-id>` will include `schema_version` in v0.2.
+**A:** Schema evolution is handled automatically. `bth migrate` upgrades cool-tier Parquet fragments to the current schema. `bth compact` applies migration logic during warm-tier ingestion. `bth show <run-id>` includes `schema_version` so you can verify what version a run was recorded with.
 
 ### Q: Can I use bathos with notebooks (Jupyter)?
 
@@ -750,13 +729,13 @@ bth run python scripts/experiments/measure_x.py --out results.json -- <same args
 - **SLURM jobs without `_bth_env.sh`**: `SLURM_JOB_ID` isn't captured. Can't link runs to job logs later.
 - **Missing sidecars**: v0.1 warns; v0.2 enforces. Start writing them now to avoid surprises.
 - **Running `bth compact` in parallel**: DuckDB is single-writer. Serialize `bth compact` calls.
-- **Assuming cool fragments auto-cleanup**: They don't. Older versions remain until `bth archive` (v0.2).
+- **Assuming cool fragments auto-cleanup**: They don't. Older versions remain until `bth archive`.
 
 ---
 
 # SECTION 9: MCP Tool Reference (v0.1 Shipped; v0.2 Backlog)
 
-**Status:** FastMCP server (backlog #128) provides tool-for-tool parity with CLI. If MCP tools unavailable in your environment, use CLI commands instead. Semantics are identical.
+**Status:** FastMCP server provides tool-for-tool parity with CLI. If MCP tools unavailable in your environment, use CLI commands instead. Semantics are identical.
 
 ### Shipped (v0.1) ✅
 
@@ -770,13 +749,9 @@ bth run python scripts/experiments/measure_x.py --out results.json -- <same args
 | `run_script` | argv, project_slug, catalog_dir, output_paths, tags | {run_id: str, exit_code: int} | `bth run` |
 | `compact` | catalog_dir | {ingested: int, skipped: int} | `bth compact` |
 
-### Planned (v0.2+) ⏳
-
-| Tool | Arguments | Notes | Backlog |
-|------|-----------|-------|---------|
-| `check` | run_id?, catalog_dir | Git drift detection | #130 |
-| `archive` | project, year, month, catalog_dir | Cold-tier export | #141 |
-| `sync` | remote, pull, catalog_dir | Cluster rsync | #138 |
+| `check` | catalog_dir, project_root, status_filter | {results: [], total: int} | `bth check` |
+| `archive` | project, archive_dir, dry_run, catalog_dir | {runs: int, partitions: int} | `bth archive` |
+| `sync` | remote, pull, catalog_dir | {transferred: int, duration_s: float} | `bth sync` |
 
 ---
 
@@ -819,9 +794,9 @@ Request: "Create benchmark sidecar for my script"
 
 # APPENDIX A: Future Scenarios (v0.2 Preview)
 
-These scenarios require features not yet shipped (backlog items #130, #138, #141).
 
-### Scenario I: Pre-Registration Validation (v0.2)
+
+### Scenario I: Pre-Registration Validation
 
 ```bash
 # Agent creates script
@@ -854,12 +829,12 @@ temp_std = "float"
 n_steps = "int"
 EOF
 
-# Agent runs (v0.2): CLI validates sidecar before execution
+# CLI validates sidecar before execution
 bth run python scripts/experiments/validate_nvt.py -- --n-steps 1000
 # v0.2 output captures outcome = 'pass' or 'marginal' or 'fail' automatically
 ```
 
-### Scenario J: Metadata Enrichment & Analysis (v0.2)
+### Scenario J: Metadata Enrichment & Analysis
 
 ```bash
 # After warm compaction, outcome evaluated and stored
@@ -928,7 +903,7 @@ bth sql "
 **Use it to:**
 1. Execute scripts with provenance: `bth run`
 2. Query results: `bth ls`, `bth find`, `bth sql`
-3. Maintain catalogs: `bth compact`, `bth check` (v0.2), `bth sync` (v0.2)
+3. Maintain catalogs: `bth compact`, `bth check`, `bth sync`
 4. Track outputs and validity across projects
 
 **Integration points:**
