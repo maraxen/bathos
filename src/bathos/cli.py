@@ -7,8 +7,13 @@ from pathlib import Path
 import typer
 
 from bathos.archive import archive
+from bathos.config import find_project_config, load_project_config
+from bathos.sync import sync_catalog
 
 app = typer.Typer(help="bathos — local-first experiment tracking")
+
+remote_app = typer.Typer(help="Manage remote hosts for sync.")
+app.add_typer(remote_app, name="remote")
 
 
 def _catalog_dir() -> Path:
@@ -297,21 +302,136 @@ def check(
         raise typer.Exit(1)
 
 
+@remote_app.command("add")
+def remote_add(
+    name: str = typer.Argument(..., help="Remote name (e.g. 'engaging')"),
+    url: str = typer.Argument(..., help="host:path (e.g. 'engaging:~/projects/myproject')"),
+) -> None:
+    """Add a remote host for sync."""
+    from bathos.remote import add_remote
+
+    cfg_path = find_project_config()
+    if cfg_path is None:
+        typer.echo("No .bth.toml found. Run 'bth init' first.")
+        raise typer.Exit(1)
+
+    if ":" not in url:
+        typer.echo(f"Invalid URL '{url}': expected 'host:path' format")
+        raise typer.Exit(1)
+
+    host, path = url.split(":", 1)
+
+    try:
+        add_remote(cfg_path, name, host, path)
+        typer.echo(f"Remote '{name}' added ({host}:{path})")
+    except ValueError as e:
+        typer.echo(str(e))
+        raise typer.Exit(1)
+
+
+@remote_app.command("list")
+def remote_list() -> None:
+    """List configured remotes."""
+    from bathos.remote import list_remotes
+
+    cfg_path = find_project_config()
+    if cfg_path is None:
+        typer.echo("No .bth.toml found. Run 'bth init' first.")
+        raise typer.Exit(1)
+
+    config = load_project_config(cfg_path)
+    remotes = list_remotes(config)
+
+    if not remotes:
+        typer.echo("No remotes configured. Use 'bth remote add' to add one.")
+        return
+
+    # Calculate column widths
+    name_width = max(len("NAME"), max((len(r[0]) for r in remotes), default=0), 10)
+    host_path_width = max(len("HOST:PATH"), max((len(f"{r[1]}:{r[2]}") for r in remotes), default=0), 9)
+
+    # Print header
+    typer.echo(f"{'NAME':<{name_width}}  {'HOST:PATH':<{host_path_width}}")
+    typer.echo("-" * name_width + "  " + "-" * host_path_width)
+
+    # Print rows
+    for name, host, remote_root in remotes:
+        host_path = f"{host}:{remote_root}"
+        typer.echo(f"{name:<{name_width}}  {host_path:<{host_path_width}}")
+
+
+@remote_app.command("remove")
+def remote_remove(
+    name: str = typer.Argument(..., help="Remote name to remove"),
+) -> None:
+    """Remove a configured remote."""
+    from bathos.remote import remove_remote
+
+    cfg_path = find_project_config()
+    if cfg_path is None:
+        typer.echo("No .bth.toml found. Run 'bth init' first.")
+        raise typer.Exit(1)
+
+    try:
+        remove_remote(cfg_path, name)
+        typer.echo(f"Remote '{name}' removed.")
+    except ValueError as e:
+        typer.echo(str(e))
+        raise typer.Exit(1)
+
+
+@remote_app.command("test")
+def remote_test(
+    name: str = typer.Argument(..., help="Remote name to test"),
+) -> None:
+    """Test SSH connectivity to a remote."""
+    from bathos.remote import test_remote
+
+    cfg_path = find_project_config()
+    if cfg_path is None:
+        typer.echo("No .bth.toml found. Run 'bth init' first.")
+        raise typer.Exit(1)
+
+    config = load_project_config(cfg_path)
+
+    try:
+        result = test_remote(config, name)
+    except ValueError as e:
+        typer.echo(str(e))
+        raise typer.Exit(1)
+
+    if result.success:
+        typer.echo(f"{name}: ok ({result.latency_ms:.0f}ms)")
+    else:
+        typer.echo(f"{name}: unreachable — {result.error}")
+        raise typer.Exit(1)
+
+
 @app.command()
 def sync(
-    remote: str = typer.Argument(..., help="Remote name from .bth.toml"),
+    remote: str | None = typer.Argument(None, help="Remote name from .bth.toml (auto-selected if only one configured)"),
     pull: bool = typer.Option(False, "--pull", help="Pull from remote (default: push)"),
 ):
     """Sync cool-tier catalog to/from remote."""
-    from bathos.config import find_project_config, load_project_config
-    from bathos.sync import sync_catalog
-
     cfg_path = find_project_config()
     if cfg_path is None:
         typer.echo("No .bth.toml found. Run `bth init` first.", err=True)
         raise typer.Exit(1)
 
     config = load_project_config(cfg_path)
+
+    if remote is None:
+        remotes = list(config.remotes.keys())
+        if len(remotes) == 0:
+            typer.echo("No remotes configured. Use 'bth remote add' to add one.")
+            raise typer.Exit(1)
+        elif len(remotes) == 1:
+            remote = remotes[0]
+        else:
+            names = ", ".join(f"'{r}'" for r in sorted(remotes))
+            typer.echo(f"Multiple remotes configured ({names}). Specify one explicitly.")
+            raise typer.Exit(1)
+
     catalog_dir = _catalog_dir()
 
     try:
