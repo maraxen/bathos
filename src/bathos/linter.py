@@ -92,7 +92,7 @@ def lint_project(project_root: Path) -> list[LintIssue]:
             continue
 
         for script in sorted(dir_path.iterdir()):
-            if script.name.startswith(".") or script.is_dir():
+            if script.name.startswith(".") or script.name.startswith("_") or script.is_dir():
                 continue
 
             # Skip sidecar files
