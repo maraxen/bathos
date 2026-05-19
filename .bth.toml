@@ -1,3 +1,7 @@
 [project]
-slug = "test_smoke"
+slug = "prolix"
 root = "/home/marielle/projects/bathos"
+
+[remotes.engaging]
+host = "engaging"
+remote_root = "~/projects/prolix"
