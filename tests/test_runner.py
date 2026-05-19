@@ -90,3 +90,78 @@ def test_run_duration_is_positive(tmp_catalog: Path):
     )
     runs = read_runs(tmp_catalog)
     assert runs[0].duration_s >= 0.05
+
+
+def test_run_blocks_enforced_dir_without_sidecar(tmp_path):
+    """bth run must raise SystemExit(1) if script in enforced dir has no sidecar."""
+    import subprocess, sys
+    from bathos.runner import run_script
+
+    (tmp_path / "catalog").mkdir()
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    script = enforced / "run_nvt.py"
+    script.write_text("print('hi')")
+    # No sidecar present
+
+    result = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="proj",
+        catalog_dir=tmp_path / "catalog",
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert result == 1  # blocked
+
+
+def test_run_allows_enforced_dir_with_sidecar(tmp_path):
+    """bth run proceeds if script in enforced dir has a valid sidecar."""
+    import sys, textwrap
+    from bathos.runner import run_script
+
+    (tmp_path / "catalog").mkdir()
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    script = enforced / "run_nvt.py"
+    script.write_text("print('hi')")
+    sidecar = enforced / "run_nvt.bth.toml"
+    sidecar.write_text(textwrap.dedent("""
+        [experiment]
+        hypothesis = "test"
+        [result_schema]
+        x = "float"
+    """))
+
+    result = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="proj",
+        catalog_dir=tmp_path / "catalog",
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert result == 0
+
+
+def test_run_skips_enforcement_for_scratch(tmp_path):
+    """bth run does not enforce sidecars for scripts/scratch/."""
+    import sys
+    from bathos.runner import run_script
+
+    (tmp_path / "catalog").mkdir()
+    scratch = tmp_path / "scripts" / "scratch"
+    scratch.mkdir(parents=True)
+    script = scratch / "explore.py"
+    script.write_text("print('hi')")
+    # No sidecar — should still run
+
+    result = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="proj",
+        catalog_dir=tmp_path / "catalog",
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert result == 0
