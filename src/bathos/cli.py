@@ -328,6 +328,43 @@ def sync(
         raise typer.Exit(1)
 
 
+@app.command()
+def migrate(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be migrated without writing"),
+):
+    """Migrate cool-tier Parquet fragments to current schema."""
+    from bathos.migrate import migrate_catalog
+
+    result = migrate_catalog(_catalog_dir(), dry_run=dry_run)
+    typer.echo(f"Scanned {result.scanned} fragments.")
+    typer.echo(f"  {result.already_current} already at current schema")
+    if result.migrated:
+        action = "Would migrate" if dry_run else "Migrated"
+        typer.echo(f"  {action} {result.migrated} fragment(s).")
+    else:
+        typer.echo("  Nothing to migrate.")
+
+
+@app.command("new-experiment")
+def new_experiment_cmd(
+    name: str = typer.Argument(..., help="Experiment name (verb_noun style, e.g. run_nvt_stability)"),
+    force: bool = typer.Option(False, "--force", help="Overwrite existing files"),
+):
+    """Scaffold a new experiment script and sidecar in scripts/experiments/."""
+    from bathos.new_experiment import scaffold_experiment
+
+    try:
+        result = scaffold_experiment(name=name, project_root=Path.cwd(), force=force)
+    except FileExistsError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+
+    if result.name_warning:
+        typer.echo(f"Warning: {result.name_warning}")
+    typer.echo(f"Created: {result.script}")
+    typer.echo(f"Created: {result.sidecar}")
+
+
 @app.command("export")
 def export_cmd(
     tool: str = typer.Option("claude", "--tool", "-t", help="Target tool: claude or gemini"),
