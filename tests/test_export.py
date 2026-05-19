@@ -75,7 +75,8 @@ def test_register_mcp_claude_user_creates_mcp_json(tmp_path, monkeypatch):
     import json
     data = json.loads(mcp_path.read_text())
     assert "bathos" in data["mcpServers"]
-    assert data["mcpServers"]["bathos"]["command"] == "uv"
+    assert "bth-mcp" in data["mcpServers"]["bathos"].get("command", "") or \
+           "bth-mcp" in " ".join(data["mcpServers"]["bathos"].get("args", []))
 
 
 def test_register_mcp_merges_existing_servers(tmp_path, monkeypatch):

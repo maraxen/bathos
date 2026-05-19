@@ -67,10 +67,12 @@ def get_skill_source_path() -> Path:
     )
 
 
-_MCP_ENTRY = {
-    "command": "uv",
-    "args": ["run", "--with", "bathos[mcp]", "bth-mcp"],
-}
+def _mcp_entry() -> dict:
+    import shutil
+    exe = shutil.which("bth-mcp")
+    if exe:
+        return {"command": exe}
+    return {"command": "uv", "args": ["run", "--with", "bathos[mcp]", "bth-mcp"]}
 
 
 def _claude_mcp_path(level: str) -> Path:
@@ -115,7 +117,7 @@ def register_mcp(tool: str, level: str, dry_run: bool) -> Path:
             data = json.loads(target.read_text())
         except json.JSONDecodeError:
             data = {"mcpServers": {}}
-    data.setdefault("mcpServers", {})["bathos"] = _MCP_ENTRY
+    data.setdefault("mcpServers", {})["bathos"] = _mcp_entry()
     target.write_text(json.dumps(data, indent=2))
     return target
 
