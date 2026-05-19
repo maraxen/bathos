@@ -14,7 +14,7 @@ runner = CliRunner()
 def test_version():
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert "0.1.0" in result.output
+    assert "bathos" in result.output
 
 
 def test_init_creates_dirs(tmp_path: Path, monkeypatch):
@@ -570,7 +570,7 @@ def test_export_writes_file(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["export", "--tool", "claude", "--level", "workspace"])
     assert result.exit_code == 0
-    target = tmp_path / ".claude" / "skills" / "using-bathos.md"
+    target = tmp_path / ".claude" / "skills" / "using-bathos" / "SKILL.md"
     assert target.exists()
 
 

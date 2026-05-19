@@ -5,6 +5,8 @@
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/mariellerossi/bathos/blob/main/LICENSE)
 [![Documentation](https://img.shields.io/readthedocs/bathos.svg)](https://bathos.readthedocs.io)
 
+> **Public alpha — experimental software.** bathos is under active development and should be considered a work in progress. APIs, catalog schema, and CLI commands may change between releases without a deprecation period. It is used in production by the author, but expect rough edges and missing features. Feedback and bug reports welcome.
+
 Local-first, zero-server experiment tracking for researchers working across multiple projects and SLURM clusters.
 
 Never lose track of what ran, what it produced, or whether results are still valid.

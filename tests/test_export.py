@@ -29,24 +29,28 @@ def test_export_skill_dry_run_does_not_write(tmp_path):
 
 def test_export_skill_stamps_version_header(tmp_path):
     from bathos.export import export_skill
-    target = tmp_path / "using-bathos.md"
+    target = tmp_path / "using-bathos" / "SKILL.md"
     export_skill(target=target, dry_run=False)
-    first_line = target.read_text().splitlines()[0]
-    assert first_line.startswith("<!-- bathos")
+    content = target.read_text()
+    assert "<!-- bathos" in content
+    # version stamp must come after the frontmatter, not before it
+    assert content.startswith("---")
 
 
 def test_resolve_target_claude_user():
     from bathos.export import resolve_target
     t = resolve_target(tool="claude", level="user")
     assert "claude" in str(t).lower()
-    assert t.name == "using-bathos.md"
+    assert t.name == "SKILL.md"
+    assert "using-bathos" in str(t)
 
 
 def test_resolve_target_gemini_workspace():
     from bathos.export import resolve_target
     t = resolve_target(tool="gemini", level="workspace")
     assert ".gemini" in str(t)
-    assert t.name == "using-bathos.md"
+    assert t.name == "SKILL.md"
+    assert "using-bathos" in str(t)
 
 
 def test_resolve_target_invalid_tool():

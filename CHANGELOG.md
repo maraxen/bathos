@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-05-19
+
+### Fixed
+
+- **Skill export** — skill is now written as `using-bathos/SKILL.md` (directory format) with proper YAML frontmatter, matching the Claude Code skill loader convention; previously exported as a flat `.md` file with no frontmatter
+- **Version stamp placement** — HTML version comment is now inserted after the frontmatter closing `---` rather than before it, so frontmatter parsers see clean YAML
+- **Wheel packaging** — `agent_assets/` is now bundled into the wheel via `force-include`, so `bth export` works from an installed (non-editable) copy
+
+### Added
+
+- **Public alpha notice** — README now prominently notes that bathos is experimental, WIP, and should be treated as a public alpha
+
+---
+
+## [0.2.0] - 2026-05-19
+
+### Added
+
+- **`bth remote`** — new subcommand group for managing sync remotes
+  - `bth remote add <name> <host:path>` — add a remote, written to `.bth.toml` via `tomlkit` (preserves comments and formatting)
+  - `bth remote list` — tabular display of configured remotes
+  - `bth remote remove <name>` — remove a remote, cleans up empty `[remotes]` section
+  - `bth remote test <name>` — SSH connectivity check with latency measurement
+- **`bth sync` optional remote** — remote argument is now optional; auto-selected when exactly one remote is configured, error with names listed when multiple are present
+- **`@bth.experiment` decorator** — provenance-capturing decorator for Typer-based scripts; records git state, timing, exit code, and output paths without modifying script behaviour
+- **`bth lint`** — naming convention and sidecar enforcement checker across all `scripts/` subdirectories
+- **`bth new-experiment`** — scaffolds a new experiment script and companion sidecar in `scripts/experiments/`
+- **`bth migrate`** — upgrades cool-tier Parquet fragments to current schema without data loss
+- **`bth catalog-version`** — reports current schema version and migration status of cool and warm tiers
+- **`bth export`** — exports the `using-bathos` Claude Code / Gemini skill and registers the MCP server in the tool's config file (`~/.claude.json` for Claude Code user level)
+- **Schema versioning** — `CURRENT_SCHEMA_VERSION` constant centralised in `schema.py`; `_schema_migrations` audit table written on every `bth compact`
+
+---
+
 ## [0.1.0] - 2026-05-18
 
 ### Added
