@@ -75,12 +75,11 @@ _MCP_ENTRY = {
 
 def _claude_mcp_path(level: str) -> Path:
     paths = {
-        "user": Path.home() / ".claude" / "mcp.json",
+        "user": Path.home() / ".claude.json",
         "workspace": Path(".mcp.json"),
-        "system": Path("/etc/claude/mcp.json"),
     }
     if level not in paths:
-        raise ExportError(f"Unknown level: {level!r}")
+        raise ExportError(f"Unknown level: {level!r}. Claude supports: user, workspace")
     return paths[level]
 
 

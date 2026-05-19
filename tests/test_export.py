@@ -62,11 +62,11 @@ def test_resolve_target_invalid_level():
 
 
 def test_register_mcp_claude_user_creates_mcp_json(tmp_path, monkeypatch):
-    """register_mcp writes mcpServers.bathos into ~/.claude/mcp.json."""
+    """register_mcp writes mcpServers.bathos into ~/.claude.json."""
     from bathos.export import register_mcp
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     register_mcp(tool="claude", level="user", dry_run=False)
-    mcp_path = tmp_path / ".claude" / "mcp.json"
+    mcp_path = tmp_path / ".claude.json"
     assert mcp_path.exists()
     import json
     data = json.loads(mcp_path.read_text())
@@ -79,8 +79,7 @@ def test_register_mcp_merges_existing_servers(tmp_path, monkeypatch):
     import json
     from bathos.export import register_mcp
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-    mcp_path = tmp_path / ".claude" / "mcp.json"
-    mcp_path.parent.mkdir(parents=True)
+    mcp_path = tmp_path / ".claude.json"
     mcp_path.write_text(json.dumps({"mcpServers": {"other": {"command": "npx"}}}))
     register_mcp(tool="claude", level="user", dry_run=False)
     data = json.loads(mcp_path.read_text())
@@ -107,7 +106,7 @@ def test_register_mcp_dry_run_does_not_write(tmp_path, monkeypatch):
     from bathos.export import register_mcp
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     register_mcp(tool="claude", level="user", dry_run=True)
-    assert not (tmp_path / ".claude" / "mcp.json").exists()
+    assert not (tmp_path / ".claude.json").exists()
 
 
 def test_register_mcp_workspace_uses_cwd(tmp_path, monkeypatch):

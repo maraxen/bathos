@@ -766,7 +766,7 @@ bth export --tool gemini --level user
 ```
 
 Both skill and MCP server are registered in one command. The MCP entry:
-- **Claude Code:** written to `~/.claude/mcp.json` (user) or `.mcp.json` in CWD (workspace)
+- **Claude Code:** written to `~/.claude.json` (user) or `.mcp.json` in CWD (workspace)
 - **Gemini CLI:** merged into `~/.gemini/settings.json` (user) or `.gemini/settings.json` (workspace)
 
 ---
