@@ -52,7 +52,9 @@ bth-mcp = "bathos.mcp:mcp_server"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/bathos"]
-artifacts = ["agent_assets/**"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"agent_assets" = "bathos/agent_assets"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
