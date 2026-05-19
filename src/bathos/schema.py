@@ -122,4 +122,5 @@ class Run:
             else "1",
             slurm_job_id=pydict.get("slurm_job_id", [""])[i] if "slurm_job_id" in pydict else "",
             hostname=pydict.get("hostname", [""])[i] if "hostname" in pydict else "",
+            outcome=pydict["outcome"][i] or "" if "outcome" in pydict else "",
         )

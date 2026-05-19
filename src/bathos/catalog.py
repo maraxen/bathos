@@ -32,7 +32,7 @@ def read_runs(catalog_dir: Path) -> list[Run]:
     if not parquet_files:
         return []
     tables = [pq.read_table(f) for f in parquet_files]
-    combined = pa.concat_tables(tables)
+    combined = pa.concat_tables(tables, promote_options="permissive")
     order = pc.sort_indices(combined, sort_keys=[("timestamp", "descending")])
     combined = combined.take(order)
     pydict = combined.to_pydict()
