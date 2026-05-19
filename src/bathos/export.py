@@ -67,6 +67,60 @@ def get_skill_source_path() -> Path:
     )
 
 
+_MCP_ENTRY = {
+    "command": "uv",
+    "args": ["run", "--with", "bathos[mcp]", "bth-mcp"],
+}
+
+
+def _claude_mcp_path(level: str) -> Path:
+    paths = {
+        "user": Path.home() / ".claude" / "mcp.json",
+        "workspace": Path(".mcp.json"),
+        "system": Path("/etc/claude/mcp.json"),
+    }
+    if level not in paths:
+        raise ExportError(f"Unknown level: {level!r}")
+    return paths[level]
+
+
+def _gemini_settings_path(level: str) -> Path:
+    paths = {
+        "user": Path.home() / ".gemini" / "settings.json",
+        "workspace": Path(".gemini") / "settings.json",
+        "system": Path("/etc/gemini/settings.json"),
+    }
+    if level not in paths:
+        raise ExportError(f"Unknown level: {level!r}")
+    return paths[level]
+
+
+def register_mcp(tool: str, level: str, dry_run: bool) -> Path:
+    """Merge mcpServers.bathos into the tool's MCP config file."""
+    import json
+
+    if tool == "claude":
+        target = _claude_mcp_path(level)
+    elif tool == "gemini":
+        target = _gemini_settings_path(level)
+    else:
+        raise ExportError(f"Unknown tool: {tool!r}")
+
+    if dry_run:
+        return target
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    data: dict = {"mcpServers": {}}
+    if target.exists():
+        try:
+            data = json.loads(target.read_text())
+        except json.JSONDecodeError:
+            data = {"mcpServers": {}}
+    data.setdefault("mcpServers", {})["bathos"] = _MCP_ENTRY
+    target.write_text(json.dumps(data, indent=2))
+    return target
+
+
 def export_skill(target: Path, dry_run: bool) -> ExportResult:
     source = get_skill_source_path()
     version = getattr(bathos, "__version__", "unknown")

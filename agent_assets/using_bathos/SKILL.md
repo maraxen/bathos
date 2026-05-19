@@ -733,25 +733,41 @@ bth run python scripts/experiments/measure_x.py --out results.json -- <same args
 
 ---
 
-# SECTION 9: MCP Tool Reference (v0.1 Shipped; v0.2 Backlog)
+# SECTION 9: MCP Tool Reference (v0.2 — Fully Shipped)
 
-**Status:** FastMCP server provides tool-for-tool parity with CLI. If MCP tools unavailable in your environment, use CLI commands instead. Semantics are identical.
+**Status:** FastMCP server ships with bathos. Start with `bth-mcp` (stdio transport). Register automatically via `bth export --tool claude --level user` (writes skill + wires MCP server). If MCP tools unavailable in your environment, use CLI commands instead. Semantics are identical.
 
-### Shipped (v0.1) ✅
+### All Shipped Tools ✅
 
-| Tool | Arguments | Return | CLI Equivalent |
-|------|-----------|--------|---|
-| `list_runs` | catalog_dir, limit, since, status | {runs: [], count: int} | `bth ls` |
-| `find_runs` | catalog_dir, project, since, status, tag, output_file | {runs: [], count: int} | `bth find` |
-| `get_run` | run_id, catalog_dir | {run: {id, command, git_hash, ...}} | `bth show` |
-| `run_sql` | query, catalog_dir | {rows: []} | `bth sql` |
-| `init_project` | project_root, slug, remote, slurm_partition | {success: bool, msg: str} | `bth init` |
-| `run_script` | argv, project_slug, catalog_dir, output_paths, tags | {run_id: str, exit_code: int} | `bth run` |
-| `compact` | catalog_dir | {ingested: int, skipped: int} | `bth compact` |
+| MCP Tool | Arguments | Return | CLI Equivalent |
+|----------|-----------|--------|----------------|
+| `list_runs` | `catalog_dir, limit, since, status` | `{runs: [], count: int}` | `bth ls` |
+| `find_runs` | `catalog_dir, project, since, status, tag, output_file` | `{runs: [], count: int}` | `bth find` |
+| `get_run` | `run_id, catalog_dir` | `{run: {id, command, git_hash, outcome, ...}}` | `bth show` |
+| `run_sql` | `query, catalog_dir` | `{rows: []}` | `bth sql` |
+| `init_project` | `project_root, slug, remote, slurm_partition` | `{success: bool, msg: str}` | `bth init` |
+| `run` | `script_path, args, project_slug, catalog_dir, output_paths, tags` | `{run_id: str, exit_code: int}` | `bth run` |
+| `compact` | `catalog_dir` | `{ingested: int, skipped: int}` | `bth compact` |
+| `archive` | `project, archive_dir, dry_run, catalog_dir` | `{runs: int, partitions: int}` | `bth archive` |
+| `check` | `catalog_dir, project_root, status_filter` | `{results: [], total: int}` | `bth check` |
+| `sync` | `remote, pull, catalog_dir` | `{transferred: int, duration_s: float}` | `bth sync` |
 
-| `check` | catalog_dir, project_root, status_filter | {results: [], total: int} | `bth check` |
-| `archive` | project, archive_dir, dry_run, catalog_dir | {runs: int, partitions: int} | `bth archive` |
-| `sync` | remote, pull, catalog_dir | {transferred: int, duration_s: float} | `bth sync` |
+### Registration
+
+```bash
+# Claude Code — user level (all projects)
+bth export --tool claude --level user
+
+# Claude Code — workspace level (this project only)
+bth export --tool claude --level workspace
+
+# Gemini CLI — user level
+bth export --tool gemini --level user
+```
+
+Both skill and MCP server are registered in one command. The MCP entry:
+- **Claude Code:** written to `~/.claude/mcp.json` (user) or `.mcp.json` in CWD (workspace)
+- **Gemini CLI:** merged into `~/.gemini/settings.json` (user) or `.gemini/settings.json` (workspace)
 
 ---
 

@@ -345,6 +345,33 @@ def migrate(
         typer.echo("  Nothing to migrate.")
 
 
+@app.command()
+def lint(
+    project_root: Path = typer.Option(Path("."), "--project-root", "-p", help="Project root to lint"),
+):
+    """Check scripts/ for naming conventions and missing sidecars."""
+    from bathos.linter import lint_project, IssueSeverity
+
+    issues = lint_project(project_root.resolve())
+
+    if not issues:
+        typer.echo("No issues found.")
+        return
+
+    errors = [i for i in issues if i.severity == IssueSeverity.ERROR]
+    warnings = [i for i in issues if i.severity == IssueSeverity.WARNING]
+
+    for issue in issues:
+        prefix = "error" if issue.severity == IssueSeverity.ERROR else "warning"
+        typer.echo(f"{prefix}: {issue.path.relative_to(project_root.resolve())} — {issue.issue}: {issue.detail}")
+
+    typer.echo()
+    typer.echo(f"{len(errors)} error(s), {len(warnings)} warning(s).")
+
+    if errors:
+        raise typer.Exit(1)
+
+
 @app.command("new-experiment")
 def new_experiment_cmd(
     name: str = typer.Argument(..., help="Experiment name (verb_noun style, e.g. run_nvt_stability)"),
@@ -371,8 +398,8 @@ def export_cmd(
     level: str = typer.Option("user", "--level", "-l", help="Install level: user, workspace, or system"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print what would happen without writing"),
 ):
-    """Export the using-bathos skill to a code tool (Claude Code or Gemini CLI)."""
-    from bathos.export import export_skill, resolve_target, ExportError
+    """Export the using-bathos skill and register MCP server for a code tool."""
+    from bathos.export import export_skill, resolve_target, register_mcp, ExportError
 
     try:
         target = resolve_target(tool=tool, level=level)
@@ -381,11 +408,14 @@ def export_cmd(
         raise typer.Exit(1)
 
     result = export_skill(target=target, dry_run=dry_run)
+    mcp_target = register_mcp(tool=tool, level=level, dry_run=dry_run)
 
     if dry_run:
-        typer.echo(f"Dry run — would write skill to: {result.target}")
+        typer.echo(f"Dry run — would write skill to:  {result.target}")
+        typer.echo(f"Dry run — would register MCP at: {mcp_target}")
     else:
-        typer.echo(f"Exported using-bathos skill to: {result.target}")
+        typer.echo(f"Exported skill to:    {result.target}")
+        typer.echo(f"Registered MCP at:   {mcp_target}")
 
 
 def _parse_since(since: str | None) -> datetime | None:
