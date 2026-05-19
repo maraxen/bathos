@@ -240,3 +240,23 @@ def test_sample_run_fixture_has_hostname(sample_run):
     """Verify sample_run fixture includes hostname field."""
     assert hasattr(sample_run, "hostname")
     assert sample_run.hostname == "test-host"
+
+
+def test_run_has_outcome_field():
+    r = Run(project_slug="p", command="c", argv=["c"], git_hash="abc",
+            git_branch="main", git_dirty=False)
+    assert r.outcome == ""
+
+
+def test_run_outcome_can_be_set():
+    r = Run(project_slug="p", command="c", argv=["c"], git_hash="abc",
+            git_branch="main", git_dirty=False, outcome="pass")
+    assert r.outcome == "pass"
+
+
+def test_run_to_arrow_includes_outcome():
+    r = Run(project_slug="p", command="c", argv=["c"], git_hash="abc",
+            git_branch="main", git_dirty=False, outcome="pass")
+    tbl = r.to_arrow()
+    assert "outcome" in tbl.schema.names
+    assert tbl.column("outcome")[0].as_py() == "pass"

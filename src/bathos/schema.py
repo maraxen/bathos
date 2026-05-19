@@ -24,6 +24,7 @@ COOL_SCHEMA = pa.schema(
         pa.field("schema_version", pa.string()),
         pa.field("slurm_job_id", pa.string()),
         pa.field("hostname", pa.string()),
+        pa.field("outcome", pa.string()),
     ]
 )
 
@@ -71,6 +72,7 @@ class Run:
     slurm_job_id: str = ""
     hostname: str = ""
     metadata: str = "{}"
+    outcome: str = ""
 
     def to_arrow(self) -> pa.Table:
         return pa.table(
@@ -91,6 +93,7 @@ class Run:
                 "schema_version": [self.schema_version],
                 "slurm_job_id": [self.slurm_job_id],
                 "hostname": [self.hostname],
+                "outcome": [self.outcome],
             },
             schema=COOL_SCHEMA,
         )
