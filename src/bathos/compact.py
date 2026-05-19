@@ -10,7 +10,7 @@ from pathlib import Path
 import duckdb
 
 from bathos.catalog import read_runs
-from bathos.schema import Run
+from bathos.schema import CURRENT_SCHEMA_VERSION, Run
 
 
 def _collect_output_metadata(output_path: str) -> dict:
@@ -81,7 +81,7 @@ def _migrate_v1(run_dict: dict) -> dict:
     This migration adds hostname (defaults to "") and updates version.
     """
     run_dict["hostname"] = ""
-    run_dict["schema_version"] = "2"
+    run_dict["schema_version"] = CURRENT_SCHEMA_VERSION
     return run_dict
 
 
@@ -187,6 +187,15 @@ def compact(catalog_dir: Path) -> CompactResult:
     # Initialize schema meta table if it doesn't exist
     con.execute("CREATE TABLE IF NOT EXISTS _schema_meta (key TEXT PRIMARY KEY, value TEXT)")
 
+    # Initialize schema migrations audit table if it doesn't exist
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS _schema_migrations (
+            warm_version TEXT NOT NULL,
+            migrated_at TIMESTAMPTZ DEFAULT now(),
+            notes TEXT
+        )
+    """)
+
     # Initialize runs table if it doesn't exist
     con.execute(_RUNS_TABLE_SCHEMA)
 
@@ -253,7 +262,13 @@ def compact(catalog_dir: Path) -> CompactResult:
     # Update schema_meta table
     con.execute(
         "INSERT OR REPLACE INTO _schema_meta (key, value) VALUES (?, ?)",
-        ["warm_version", "2"],
+        ["warm_version", CURRENT_SCHEMA_VERSION],
+    )
+
+    # Record migration in audit table
+    con.execute(
+        "INSERT INTO _schema_migrations (warm_version, notes) VALUES (?, ?)",
+        [CURRENT_SCHEMA_VERSION, "compact"],
     )
 
     # Commit and close

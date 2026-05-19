@@ -390,3 +390,38 @@ def test_compact_handles_empty_output_paths(tmp_catalog: Path, sample_run: Run):
 
     metadata = json.loads(rows[0][0])
     assert metadata == []
+
+
+def test_compact_creates_schema_migrations_table(tmp_path):
+    """bth compact creates _schema_migrations table in warm DuckDB."""
+    from bathos.catalog import write_run
+    from bathos.compact import compact
+    from bathos.schema import Run
+
+    r = Run(project_slug="p", command="c", argv=["c"],
+            git_hash="abc", git_branch="main", git_dirty=False)
+    write_run(r, tmp_path)
+    compact(tmp_path)
+
+    con = duckdb.connect(str(tmp_path / "bathos.db"))
+    tables = [row[0] for row in con.execute("SHOW TABLES").fetchall()]
+    con.close()
+    assert "_schema_migrations" in tables
+
+
+def test_schema_migrations_has_record(tmp_path):
+    """_schema_migrations contains a record after compact."""
+    from bathos.catalog import write_run
+    from bathos.compact import compact
+    from bathos.schema import Run, CURRENT_SCHEMA_VERSION
+
+    r = Run(project_slug="p", command="c", argv=["c"],
+            git_hash="abc", git_branch="main", git_dirty=False)
+    write_run(r, tmp_path)
+    compact(tmp_path)
+
+    con = duckdb.connect(str(tmp_path / "bathos.db"))
+    rows = con.execute("SELECT warm_version FROM _schema_migrations").fetchall()
+    con.close()
+    assert len(rows) >= 1
+    assert rows[-1][0] == CURRENT_SCHEMA_VERSION

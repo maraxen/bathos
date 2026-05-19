@@ -6,6 +6,8 @@ from uuid import uuid4
 
 import pyarrow as pa
 
+CURRENT_SCHEMA_VERSION = "2"
+
 COOL_SCHEMA = pa.schema(
     [
         pa.field("id", pa.string()),
@@ -68,7 +70,7 @@ class Run:
     status: str = "running"
     output_paths: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
-    schema_version: str = "2"
+    schema_version: str = CURRENT_SCHEMA_VERSION
     slurm_job_id: str = ""
     hostname: str = ""
     metadata: str = "{}"
