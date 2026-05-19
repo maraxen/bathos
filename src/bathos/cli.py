@@ -101,13 +101,14 @@ def ls_cmd(
     if not runs:
         typer.echo("No runs found.")
         return
-    header = f"{'ID':38} {'PROJECT':12} {'STATUS':10} {'EXIT':5} {'DURATION':8} COMMAND"
+    header = f"{'ID':38} {'PROJECT':12} {'STATUS':10} {'EXIT':5} {'OUTCOME':10} {'DURATION':8} COMMAND"
     typer.echo(header)
     typer.echo("-" * len(header))
     for r in runs:
+        outcome_str = r.outcome if r.outcome else "-"
         typer.echo(
             f"{r.id:38} {r.project_slug:12} {r.status:10} {r.exit_code:5} "
-            f"{r.duration_s:7.1f}s {r.command[:40]}"
+            f"{outcome_str:10} {r.duration_s:7.1f}s {r.command[:40]}"
         )
 
     # Check if compaction is recommended and show banner if needed
@@ -325,6 +326,29 @@ def sync(
     except RuntimeError as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(1)
+
+
+@app.command("export")
+def export_cmd(
+    tool: str = typer.Option("claude", "--tool", "-t", help="Target tool: claude or gemini"),
+    level: str = typer.Option("user", "--level", "-l", help="Install level: user, workspace, or system"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print what would happen without writing"),
+):
+    """Export the using-bathos skill to a code tool (Claude Code or Gemini CLI)."""
+    from bathos.export import export_skill, resolve_target, ExportError
+
+    try:
+        target = resolve_target(tool=tool, level=level)
+    except ExportError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+
+    result = export_skill(target=target, dry_run=dry_run)
+
+    if dry_run:
+        typer.echo(f"Dry run — would write skill to: {result.target}")
+    else:
+        typer.echo(f"Exported using-bathos skill to: {result.target}")
 
 
 def _parse_since(since: str | None) -> datetime | None:

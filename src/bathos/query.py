@@ -107,6 +107,7 @@ def _row_to_run(row: tuple) -> Run | None:
             slurm_job_id=slurm_job_id if slurm_job_id else "",
             hostname=hostname if hostname else "",
             metadata=metadata if metadata else "{}",
+            outcome=outcome if outcome else "",
         )
     except (ValueError, TypeError) as e:
         raise RuntimeError(f"Failed to convert DuckDB row to Run: {e}") from e

@@ -555,3 +555,44 @@ def test_check_command_with_check_outputs(tmp_path: Path, monkeypatch):
     assert "Output File Status" in result.output
     assert "present" in result.output
     assert str(output_file) in result.output
+
+
+def test_export_dry_run_claude_user(monkeypatch):
+    """bth export --tool claude --level user --dry-run prints target path without writing."""
+    result = runner.invoke(app, ["export", "--tool", "claude", "--level", "user", "--dry-run"])
+    assert result.exit_code == 0
+    assert "claude" in result.output.lower()
+    assert "dry-run" in result.output.lower() or "dry run" in result.output.lower()
+
+
+def test_export_writes_file(tmp_path, monkeypatch):
+    """bth export --tool claude --level workspace writes skill to .claude/skills/."""
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["export", "--tool", "claude", "--level", "workspace"])
+    assert result.exit_code == 0
+    target = tmp_path / ".claude" / "skills" / "using-bathos.md"
+    assert target.exists()
+
+
+def test_ls_shows_outcome_column(tmp_path, monkeypatch):
+    """ls output includes OUTCOME column header."""
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_path))
+    monkeypatch.setenv("BTH_PROJECT_SLUG", "proj")
+    from bathos.schema import Run
+    from bathos.catalog import write_run
+    from bathos.compact import compact
+    import duckdb
+
+    r = Run(project_slug="proj", command="echo hi", argv=["echo", "hi"],
+            git_hash="abc", git_branch="main", git_dirty=False,
+            status="completed", exit_code=0)
+    write_run(r, tmp_path)
+    compact(tmp_path)
+
+    con = duckdb.connect(str(tmp_path / "bathos.db"))
+    con.execute(f"UPDATE runs SET outcome = 'pass' WHERE id = '{r.id}'")
+    con.close()
+
+    result = runner.invoke(app, ["ls"])
+    assert "OUTCOME" in result.output
+    assert "pass" in result.output

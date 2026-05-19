@@ -248,3 +248,28 @@ def test_filter_ignores_missing_output_files():
 
     filtered = _filter_runs_by_output_file([run], pattern="*.json")
     assert len(filtered) == 0
+
+
+def test_list_runs_includes_outcome(tmp_path):
+    """Runs compacted into warm DuckDB expose outcome field via list_runs."""
+    import duckdb
+    from bathos.compact import compact
+    from bathos.query import list_runs
+    from bathos.schema import Run
+    from bathos.catalog import write_run
+
+    r = Run(project_slug="proj", command="echo hi", argv=["echo", "hi"],
+            git_hash="abc", git_branch="main", git_dirty=False,
+            status="completed", exit_code=0)
+    write_run(r, tmp_path)
+    compact(tmp_path)
+
+    # Manually set outcome in DuckDB
+    db_path = tmp_path / "bathos.db"
+    con = duckdb.connect(str(db_path))
+    con.execute(f"UPDATE runs SET outcome = 'pass' WHERE id = '{r.id}'")
+    con.close()
+
+    runs = list_runs(tmp_path)
+    assert len(runs) == 1
+    assert runs[0].outcome == "pass"
