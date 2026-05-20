@@ -30,12 +30,51 @@ bth run scripts/experiments/benchmark_tip3p.py -- --n-steps 1000 --out outputs/r
 bth ls --since 7d
 bth show <run-id>
 
-# Check if a result is still valid (compares recorded git hash to HEAD)
-bth check outputs/run1.parquet
+# Check catalog runs for git-drift freshness
+bth check [--status <status>] [--check-outputs]
 
 # Escape hatch: raw DuckDB SQL against the catalog
 bth sql "SELECT project_slug, count(*) FROM runs GROUP BY 1"
 ```
+
+### `bth run` flags
+
+**v0.3+ flags:**
+- `--agent-mode collaborative|autonomous` — declare whether this run is agent-driven
+- `--derived-from <run-id>` — record parent run for lineage tracking
+- `--campaign <campaign-id>` — associate this run with a campaign
+- `--no-sidecar` — bypass sidecar enforcement (use for ad-hoc runs)
+
+## CLI Reference
+
+**Core commands:**
+- `bth init` — initialize bathos in a project
+- `bth run` — execute and track an experiment
+- `bth ls` — list recent runs
+- `bth show <run-id>` — display run details
+- `bth find` — search runs by criteria
+- `bth sql` — raw DuckDB query against catalog
+- `bth check` — check catalog runs for git-drift freshness
+- `bth lineage <run-id>` — show ancestor chain following parent_run_id links
+- `bth sprint-audit [--hours N]` — audit recent runs across all registered projects
+- `bth lint [--project-root PATH]` — check scripts/ for naming conventions and missing sidecars
+- `bth new-experiment <name>` — scaffold a new experiment script and sidecar
+- `bth migrate` — upgrade cool-tier Parquet fragments to current schema version
+- `bth export` — export the using-bathos skill and register MCP server
+
+**`bth remote`** — Manage sync remotes
+- `bth remote add <name> <url>` — add an SSH remote for catalog sync
+- `bth remote list` — list configured remotes
+- `bth remote remove <name>` — remove a remote
+- `bth remote test <name>` — test SSH connectivity to a remote
+
+**`bth campaign`** — Manage experiment campaigns (v0.3+)
+- `bth campaign create <id> --hypothesis <text>` — create a new campaign
+- `bth campaign add <run-id> --campaign <id>` — associate a run with a campaign
+- `bth campaign ls` — list campaigns
+- `bth campaign show <id>` — show campaign details and runs
+- `bth campaign review <id>` — statistical summary and anomaly detection
+- `bth campaign conclude <id> --outcome <label>` — close campaign with outcome
 
 ## Script conventions
 

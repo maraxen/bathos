@@ -10,15 +10,19 @@ bathos is a standalone experiment tracking CLI for a single researcher across 10
 
 ---
 
-## Current Status (as of 2026-05-15)
+## Current Status (as of 2026-05-20)
 
-**v0.1: complete and merged to main.** 44 tests passing.
+**v0.3.0: complete and merged to main.** 254 tests passing.
 
 - Full design spec: `.praxia/specs/bathos-design.md`
 - v0.1 implementation plan: `.praxia/specs/bathos-v01-plan.md`
-- Backlog: items #124–139 in praxia DB (see below); #124–127 done
+- Backlog: items #124–142 in praxia DB (see below); #124–141 done
 
-**Next sprint candidates (P2):** #128 (FastMCP), #130 (bth check) + #128 unblocked once 130 done, #138 (bth sync), #139 (bth compact / warm tier), #131 (SLURM integration), #132 (bth new-experiment).
+**Shipped in v0.2:** FastMCP server (#128), `@bth.experiment` decorator (#129), `bth check` (#130), SLURM `_bth_env.sh` (#131), `bth new-experiment` (#132), `uv tool` packaging (#133), `bth lint` (#134), `bth migrate` (#135), `bth sync` (#138), schema versioning v2 (#140), `bth archive` (#141), `bth remote` subcommands, `bth export`, `bth catalog-version`.
+
+**Shipped in v0.3:** Agentic integrity gate (`--agent-mode`, `--no-sidecar`, `--derived-from`), lineage tracking (`bth lineage`), campaigns (`bth campaign` subcommands + MCP tools), sprint audit (`bth sprint-audit`), Tier-2 lint checks, schema v3 with campaign/lineage/integrity fields, `--campaign` flag on `bth run`.
+
+**Remaining backlog:** #136 (bth-migrate praxia workflow), #137 (global instruction portability), #142 (results management design).
 
 ---
 
@@ -52,7 +56,7 @@ Cool schema is intentionally minimal (13 provenance fields). Warm adds `metadata
 
 ### Pre-Registration Schemas (per script directory)
 
-Every script in `scripts/experiments/` and `scripts/benchmarks/` must have a companion sidecar **`<script-stem>.bth.toml`** declaring its hypothesis, expected outcomes, and result schema before `bth run` will execute it.
+Every script in `scripts/experiments/` and `scripts/benchmarks/` should have a companion sidecar **`<script-stem>.bth.toml`** declaring its hypothesis, expected outcomes, and result schema. In v0.2+, `bth run` enforces this by default; pass `--no-sidecar` to bypass.
 
 **Sidecar format (experiments):**
 ```toml
@@ -118,7 +122,7 @@ fix = "str"
 | Catalog storage | **DuckDB + Parquet** (not pyiceberg) | pyiceberg is for distributed data lakes; DuckDB+Parquet is simpler, no overhead |
 | FastMCP | Mirror CLI tool-for-tool | `cli.py` and `mcp.py` both thin layers over same core modules |
 
-### Source Layout (planned)
+### Source Layout
 
 ```
 src/bathos/
@@ -133,8 +137,20 @@ src/bathos/
   init.py         # bth init logic
   runner.py       # bth run subprocess wrapper
   query.py        # list_runs, get_run, find_runs, run_sql
-  checker.py      # bth check — git-drift validity (v0.2)
-  sidecar.py      # .bth.toml sidecar parse, content-hash, outcome eval (v0.2)
+  checker.py      # bth check — git-drift freshness gate
+  sidecar.py      # .bth.toml sidecar parse, content-hash, outcome eval
+  campaigns.py    # bth campaign subcommands + Campaign dataclass
+  sprint_audit.py # bth sprint-audit cross-project audit
+  linter.py       # bth lint — Tier-1 and Tier-2 checks
+  migrate.py      # bth migrate — schema version upgrades
+  new_experiment.py # bth new-experiment scaffold
+  export.py       # bth export — skill + MCP registration
+  validate.py     # sidecar structural validation
+  remote.py       # bth remote subcommands
+  sync.py         # bth sync rsync wrapper
+  archive.py      # bth archive warm→cold export
+  prereg.py       # agentic integrity pre-registration gate
+  decorators.py   # @bth.experiment provenance decorator
   templates/
     _bth_env.sh   # SLURM env helper template
     experiment.py # bth new-experiment script skeleton
@@ -150,25 +166,24 @@ src/bathos/
 | 125 | `bth init` — dirs, .bth.toml, catalog bootstrap, SLURM config | P1 | 124 |
 | 126 | `bth run` — CLI wrapper, provenance capture | P1 | 124 |
 | 127 | `bth ls` / `show` / `find` / `sql` — query interface | P1 | 126 |
-| 128 | FastMCP server — mirrors CLI tool-for-tool | P1 | 126, 127, 130 |
-| 129 | `@bth.experiment` — provenance decorator for Typer scripts | P2 | 124 |
-| 130 | `bth check` — freshness/validity vs git HEAD | P2 | 126 |
-| 131 | SLURM `_bth_env.sh` integration | P2 | 125, 126 |
-| 132 | `bth new-experiment` — Typer + sidecar scaffold | P2 | 125 |
-| 133 | `uv tool` packaging + release | P3 | 126–130 |
-| 134 | Script convention linter | P3 | — |
-| 135 | `bth migrate` — Phase 1 mechanical (existing projects) | P2 | 125 |
-| 136 | `bth-migrate` praxia workflow — agentic classification + git mv plan | P2 | 135 |
-| 137 | Global instruction portability (separate design session needed) | P2 | — |
-| 138 | `bth sync` — rsync cool-tier catalog to/from cluster remote | P2 | 125, v0.1 done |
-| 139 | `bth compact` + warm-tier DuckDB (`bth sql` catalog queries) | P2 | v0.1 done |
-| 140 | Schema versioning + extended provenance (hostname, slurm_job_id, metadata JSON, migrations) | P2 | 139 |
-| 141 | `bth archive` — warm→cold partitioned Parquet export | P3 | 139, 140 |
-| 142 | Results management — output convention, file-count utilities, direct management interface design | P2 | 139 |
+| 128 | FastMCP server — mirrors CLI tool-for-tool | P1 ✓ done (v0.2) | 126, 127, 130 |
+| 129 | `@bth.experiment` — provenance decorator for Typer scripts | P2 ✓ done (v0.2) | 124 |
+| 130 | `bth check` — freshness/validity vs git HEAD | P2 ✓ done (v0.1/v0.2) | 126 |
+| 131 | SLURM `_bth_env.sh` integration | P2 ✓ done (v0.1) | 125, 126 |
+| 132 | `bth new-experiment` — Typer + sidecar scaffold | P2 ✓ done (v0.2) | 125 |
+| 133 | `uv tool` packaging + release | P3 ✓ done (v0.2) | 126–130 |
+| 134 | Script convention linter | P3 ✓ done (v0.2) | — |
+| 135 | `bth migrate` — Phase 1 mechanical (existing projects) | P2 ✓ done (v0.2) | 125 |
+| 136 | `bth-migrate` praxia workflow — agentic classification + git mv plan | P2 (not started) | 135 |
+| 137 | Global instruction portability (separate design session needed) | P2 (not started) | — |
+| 138 | `bth sync` — rsync cool-tier catalog to/from cluster remote | P2 ✓ done (v0.2) | 125, v0.1 done |
+| 139 | `bth compact` + warm-tier DuckDB (`bth sql` catalog queries) | P2 ✓ done (v0.1) | v0.1 done |
+| 140 | Schema versioning + extended provenance (hostname, slurm_job_id, metadata JSON, migrations) | P2 ✓ done (v0.2) | 139 |
+| 141 | `bth archive` — warm→cold partitioned Parquet export | P3 ✓ done (v0.2) | 139, 140 |
+| 142 | Results management — output convention, file-count utilities, direct management interface design | P2 (not started) | 139 |
 
 **Not yet backlogged:**
-- Sidecar pre-registration enforcement in `bth run` (add as P2, depends on 126)
-- Outcome evaluation + `runs.outcome` column in warm DuckDB (add as P2, depends on 139)
+- *(none — sidecar enforcement and outcome evaluation shipped in v0.2/v0.3)*
 
 ---
 
