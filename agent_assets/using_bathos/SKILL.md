@@ -13,7 +13,7 @@ description: "Use when working in any bathos-tracked research project — experi
 
 **Scope:** Single researcher, 10+ projects, SLURM cluster integration.
 
-**Status:** ✅ v0.2 shipped — 207 tests passing. Full CLI + MCP server available.
+**Status:** ✅ v0.3.0 shipped — 254 tests passing. Full CLI + MCP server available, including campaigns and agentic integrity gates.
 
 ---
 
@@ -34,7 +34,7 @@ description: "Use when working in any bathos-tracked research project — experi
 | Command | Arguments | Status | Notes |
 |---------|-----------|--------|-------|
 | bth init | --slug, --remote, --slurm-partition | ✅ | Project initialization |
-| bth run | <script> [-- args], --tag, --out, --campaign, --agent-mode, --no-sidecar | ✅ | Execute + provenance capture |
+| bth run | <script> [-- args], --tag, --out, --campaign, --agent-mode, --derived-from, --no-sidecar | ✅ | Execute + provenance capture; v0.3: `--agent-mode` (collaborative/autonomous), `--derived-from` (lineage), `--campaign` (campaign association), `--no-sidecar` (bypass enforcement) |
 | bth ls | --since, --status, --limit, --project | ✅ | List recent runs + OUTCOME column |
 | bth show | <run-id> | ✅ | Full run details + git state |
 | bth find | --project, --since, --status, --tag, --output-file | ✅ | Flexible filtered query |

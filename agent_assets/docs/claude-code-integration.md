@@ -38,14 +38,18 @@ The skill is loaded automatically at session start in Claude Code. In a new sess
 
 | MCP Tool | CLI equivalent | Status |
 |----------|---------------|--------|
-| `run_script` | `bth run` | ✅ Available |
+| `run` | `bth run` | ✅ Available |
 | `list_runs` | `bth ls` | ✅ Available |
 | `get_run` | `bth show <id>` | ✅ Available |
 | `find_runs` | `bth find` | ✅ Available |
 | `run_sql` | `bth sql` | ✅ Available |
 | `compact_catalog` | `bth compact` | ✅ Available |
-| `check_runs` | `bth check` | 🔜 Coming in v0.2 |
-| `archive_runs` | `bth archive` | 🔜 Coming in v0.2 |
+| `check` | `bth check` | ✅ Available |
+| `archive` | `bth archive` | ✅ Available |
+| `campaign_create` | `bth campaign create` | ✅ Available |
+| `campaign_list` | `bth campaign ls` | ✅ Available |
+| `campaign_review` | `bth campaign review` | ✅ Available |
+| `campaign_conclude` | `bth campaign conclude` | ✅ Available |
 
 ## Update
 
