@@ -68,3 +68,8 @@ def init_project(
 
     # Catalog
     init_catalog(catalog_dir)
+
+    # Register in global project registry
+    from bathos.config import register_project
+
+    register_project(slug=slug, catalog_dir=catalog_dir)

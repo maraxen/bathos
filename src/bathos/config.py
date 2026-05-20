@@ -4,6 +4,8 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+PROJECTS_REGISTRY = Path.home() / ".bth" / "projects.toml"
+
 
 @dataclass
 class ProjectConfig:
@@ -37,3 +39,32 @@ def load_project_config(path: Path) -> ProjectConfig:
         remotes=data.get("remotes", {}),
         slurm=data.get("slurm", {}),
     )
+
+
+def register_project(slug: str, catalog_dir: Path) -> None:
+    """Register project in global registry at ~/.bth/projects.toml."""
+    try:
+        import toml  # type: ignore
+
+        registry: dict = {}
+        if PROJECTS_REGISTRY.exists():
+            registry = tomllib.loads(PROJECTS_REGISTRY.read_text())
+        projects = registry.setdefault("projects", [])
+        # Avoid duplicates
+        existing_slugs = [p.get("slug") for p in projects]
+        if slug not in existing_slugs:
+            projects.append({"slug": slug, "catalog_dir": str(catalog_dir)})
+        PROJECTS_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+        PROJECTS_REGISTRY.write_text(toml.dumps(registry))
+    except Exception:
+        pass  # Registry is best-effort; never block init
+
+
+def list_registered_projects() -> list[dict]:
+    """List all registered projects from global registry."""
+    if not PROJECTS_REGISTRY.exists():
+        return []
+    try:
+        return tomllib.loads(PROJECTS_REGISTRY.read_text()).get("projects", [])
+    except Exception:
+        return []

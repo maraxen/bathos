@@ -28,6 +28,7 @@ dependencies = [
     "pyarrow>=16",
     "pytz>=2026.2",
     "tomlkit>=0.12",
+    "toml>=0.10",
 ]
 
 [project.optional-dependencies]

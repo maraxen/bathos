@@ -381,3 +381,42 @@ def run_sql(sql: str, catalog_dir: Path | None = None) -> list[tuple]:
         raise
 
     return result
+
+
+def lineage(run_id: str, catalog_dir: Path) -> list[Run]:
+    """Return ancestor chain of run_id following parent_run_id links (recursive CTE).
+
+    Args:
+        run_id: The run ID to trace ancestry for.
+        catalog_dir: Path to catalog directory.
+
+    Returns:
+        List of Run objects in chronological order (oldest ancestor first).
+        Returns empty list if run not found or catalog doesn't exist.
+    """
+    db_path = catalog_dir / "bathos.db"
+    if not db_path.exists():
+        return []
+
+    db = duckdb.connect(str(db_path), read_only=True)
+    db.execute("SET TimeZone='UTC'")
+    try:
+        # Use recursive CTE to find all ancestors
+        rows = db.execute(
+            """
+            WITH RECURSIVE ancestors AS (
+                SELECT * FROM runs WHERE id = ?
+                UNION ALL
+                SELECT r.* FROM runs r
+                INNER JOIN ancestors a ON r.id = a.parent_run_id
+                WHERE r.parent_run_id != ''
+            )
+            SELECT * FROM ancestors ORDER BY timestamp
+        """,
+            [run_id],
+        ).fetchall()
+        return [_row_to_run(row) for row in rows if _row_to_run(row) is not None]
+    except Exception:
+        return []
+    finally:
+        db.close()
