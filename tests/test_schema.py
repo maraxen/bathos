@@ -43,7 +43,7 @@ def test_run_defaults():
     assert r.tags == []
     assert isinstance(r.timestamp, datetime)
     assert r.timestamp.tzinfo is not None
-    assert r.schema_version == "2"
+    assert r.schema_version == "3"
     assert r.slurm_job_id == ""
     assert r.metadata == "{}"
 
@@ -84,7 +84,7 @@ def test_run_roundtrip_via_arrow():
     assert r2.duration_s == 1.5
     assert r2.output_paths == ["/tmp/out.parquet"]
     assert r2.tags == ["tip3p"]
-    assert r2.schema_version == "2"
+    assert r2.schema_version == "3"
     assert r2.slurm_job_id == ""
 
 
@@ -100,7 +100,7 @@ def test_schema_version_in_cool_parquet():
     )
     table = r.to_arrow()
     assert "schema_version" in table.column_names
-    assert table.column("schema_version")[0].as_py() == "2"
+    assert table.column("schema_version")[0].as_py() == "3"
 
 
 def test_slurm_job_id_captured_from_env():
@@ -223,8 +223,8 @@ def test_hostname_roundtrip_via_arrow():
     assert r2.hostname == "compute-node-42"
 
 
-def test_schema_version_defaults_to_2():
-    """Verify new runs default to schema_version='2'."""
+def test_schema_version_defaults_to_3():
+    """Verify new runs default to schema_version='3'."""
     r = Run(
         project_slug="test",
         command="python foo.py",
@@ -233,7 +233,7 @@ def test_schema_version_defaults_to_2():
         git_branch="main",
         git_dirty=False,
     )
-    assert r.schema_version == "2"
+    assert r.schema_version == "3"
 
 
 def test_sample_run_fixture_has_hostname(sample_run):
@@ -260,3 +260,86 @@ def test_run_to_arrow_includes_outcome():
     tbl = r.to_arrow()
     assert "outcome" in tbl.schema.names
     assert tbl.column("outcome")[0].as_py() == "pass"
+
+
+def test_run_v3_fields_have_defaults():
+    """Verify all 8 v3 fields have correct defaults when not specified."""
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+    )
+    assert r.sidecar_sha256 == ""
+    assert r.sidecar_path == ""
+    assert r.parent_run_id == ""
+    assert r.agent_mode == ""
+    assert r.sidecar_mode == ""
+    assert r.outcome_is_residual is False
+    assert r.skill_sha256 == ""
+    assert r.campaign_id == ""
+
+
+def test_run_v3_fields_round_trip_arrow():
+    """Verify all 8 v3 fields round-trip through Arrow serialization."""
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        sidecar_sha256="sha256_test_value",
+        sidecar_path="/path/to/sidecar.toml",
+        parent_run_id="parent_uuid_123",
+        agent_mode="auto",
+        sidecar_mode="declared",
+        outcome_is_residual=True,
+        skill_sha256="skill_sha_789",
+        campaign_id="campaign_xyz",
+    )
+    table = r.to_arrow()
+    r2 = Run.from_arrow_row(table.to_pydict(), 0)
+
+    assert r2.sidecar_sha256 == "sha256_test_value"
+    assert r2.sidecar_path == "/path/to/sidecar.toml"
+    assert r2.parent_run_id == "parent_uuid_123"
+    assert r2.agent_mode == "auto"
+    assert r2.sidecar_mode == "declared"
+    assert r2.outcome_is_residual is True
+    assert r2.skill_sha256 == "skill_sha_789"
+    assert r2.campaign_id == "campaign_xyz"
+
+
+def test_cool_schema_has_v3_fields():
+    """Verify COOL_SCHEMA contains all 8 v3 fields."""
+    v3_fields = [
+        "sidecar_sha256",
+        "sidecar_path",
+        "parent_run_id",
+        "agent_mode",
+        "sidecar_mode",
+        "outcome_is_residual",
+        "skill_sha256",
+        "campaign_id",
+    ]
+    for field_name in v3_fields:
+        assert field_name in COOL_SCHEMA.names
+
+
+def test_warm_schema_has_v3_fields():
+    """Verify WARM_SCHEMA contains all 8 v3 fields."""
+    v3_fields = [
+        "sidecar_sha256",
+        "sidecar_path",
+        "parent_run_id",
+        "agent_mode",
+        "sidecar_mode",
+        "outcome_is_residual",
+        "skill_sha256",
+        "campaign_id",
+    ]
+    for field_name in v3_fields:
+        assert field_name in WARM_SCHEMA.names
