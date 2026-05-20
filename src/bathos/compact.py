@@ -136,6 +136,41 @@ CREATE TABLE IF NOT EXISTS runs (
 )
 """
 
+_CAMPAIGNS_TABLE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS campaigns (
+    id TEXT PRIMARY KEY,
+    project_slug TEXT NOT NULL,
+    name TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    question TEXT,
+    hypothesis TEXT,
+    status TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    concluded_at TEXT,
+    conclusion TEXT,
+    outcome_label TEXT,
+    parent_campaign_id TEXT
+)
+"""
+
+_CAMPAIGN_RUNS_TABLE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS campaign_runs (
+    campaign_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    PRIMARY KEY (campaign_id, run_id)
+)
+"""
+
+_AMENDMENTS_TABLE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS amendments (
+    run_id TEXT NOT NULL,
+    amended_at TEXT NOT NULL,
+    old_sidecar_sha256 TEXT,
+    new_sidecar_sha256 TEXT,
+    reason TEXT NOT NULL
+)
+"""
+
 
 COMPACTION_THRESHOLD = 50  # Public constant for compaction trigger threshold
 
@@ -222,6 +257,11 @@ def compact(catalog_dir: Path) -> CompactResult:
     # Initialize runs table if it doesn't exist
     con.execute(_RUNS_TABLE_SCHEMA)
 
+    # Initialize campaign tables if they don't exist
+    con.execute(_CAMPAIGNS_TABLE_SCHEMA)
+    con.execute(_CAMPAIGN_RUNS_TABLE_SCHEMA)
+    con.execute(_AMENDMENTS_TABLE_SCHEMA)
+
     # Track ingested and skipped counts
     ingested = 0
     skipped = 0
@@ -290,6 +330,15 @@ def compact(catalog_dir: Path) -> CompactResult:
         )
 
         ingested += 1
+
+    # Populate campaign_runs from runs with campaign_id set
+    for run in cool_runs:
+        if run.campaign_id:
+            con.execute("""
+                INSERT INTO campaign_runs (campaign_id, run_id)
+                VALUES (?, ?)
+                ON CONFLICT DO NOTHING
+            """, [run.campaign_id, run.id])
 
     # Update schema_meta table
     con.execute(

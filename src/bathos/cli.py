@@ -15,6 +15,9 @@ app = typer.Typer(help="bathos — local-first experiment tracking")
 remote_app = typer.Typer(help="Manage remote hosts for sync.")
 app.add_typer(remote_app, name="remote")
 
+campaign_app = typer.Typer(help="Manage experiment campaigns")
+app.add_typer(campaign_app, name="campaign")
+
 
 def _catalog_dir() -> Path:
     override = os.environ.get("BTH_CATALOG_DIR")
@@ -386,6 +389,136 @@ def remote_remove(
     except ValueError as e:
         typer.echo(str(e))
         raise typer.Exit(1)
+
+
+@campaign_app.command("create")
+def campaign_create(
+    name: str = typer.Argument(...),
+    mode: str = typer.Option("exploration", "--mode", help="exploration|confirmation"),
+    question: str | None = typer.Option(None, "--question"),
+    hypothesis: str | None = typer.Option(None, "--hypothesis"),
+    parent: str | None = typer.Option(None, "--parent", help="Parent campaign ID"),
+):
+    """Create a new campaign."""
+    import duckdb
+    from bathos.campaigns import create_campaign
+    slug = _require_project_slug()
+    db = duckdb.connect(str(_catalog_dir() / "bathos.db"))
+    try:
+        campaign = create_campaign(db, name=name, project_slug=slug, mode=mode, question=question, hypothesis=hypothesis, parent_campaign_id=parent)
+        typer.echo(f"Created campaign {campaign.id[:8]} — {campaign.name} ({campaign.mode})")
+    finally:
+        db.close()
+
+
+@campaign_app.command("add")
+def campaign_add(
+    run_id: str = typer.Argument(..., help="Run ID to add"),
+    campaign: str = typer.Option(..., "--campaign", "-c", help="Campaign ID"),
+):
+    """Add a run to a campaign."""
+    import duckdb
+    from bathos.campaigns import add_run_to_campaign, CampaignError
+    db = duckdb.connect(str(_catalog_dir() / "bathos.db"))
+    try:
+        add_run_to_campaign(db, campaign, run_id)
+        typer.echo(f"Added run {run_id[:8]} to campaign {campaign[:8]}")
+    except CampaignError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+    finally:
+        db.close()
+
+
+@campaign_app.command("conclude")
+def campaign_conclude(
+    campaign_id: str = typer.Argument(..., help="Campaign ID"),
+    outcome: str = typer.Option(..., "--outcome", help="Outcome label (e.g. pass, fail, inconclusive)"),
+    note: str = typer.Option("", "--note", help="Conclusion narrative"),
+):
+    """Conclude a campaign with an outcome label."""
+    import duckdb
+    from bathos.campaigns import conclude_campaign, CampaignError
+    db = duckdb.connect(str(_catalog_dir() / "bathos.db"))
+    try:
+        conclude_campaign(db, campaign_id, outcome, note)
+        typer.echo(f"Concluded campaign {campaign_id[:8]} — outcome: {outcome}")
+    except CampaignError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+    finally:
+        db.close()
+
+
+@campaign_app.command("ls")
+def campaign_ls(
+    status: str | None = typer.Option(None, "--status", help="Filter by status: open|concluded"),
+):
+    """List campaigns."""
+    import duckdb
+    from bathos.campaigns import list_campaigns
+    db = duckdb.connect(str(_catalog_dir() / "bathos.db"), read_only=True)
+    try:
+        campaigns = list_campaigns(db, status=status)
+        if not campaigns:
+            typer.echo("No campaigns found.")
+            return
+        for c in campaigns:
+            typer.echo(f"{c.id[:8]} {c.name:30} {c.mode:12} {c.status}")
+    finally:
+        db.close()
+
+
+@campaign_app.command("show")
+def campaign_show(
+    campaign_id: str = typer.Argument(..., help="Campaign ID (or prefix)"),
+):
+    """Show campaign details."""
+    import duckdb
+    from bathos.campaigns import get_campaign
+    db = duckdb.connect(str(_catalog_dir() / "bathos.db"), read_only=True)
+    try:
+        campaign = get_campaign(db, campaign_id)
+        if not campaign:
+            typer.echo(f"Campaign not found: {campaign_id}", err=True)
+            raise typer.Exit(1)
+        typer.echo(f"Campaign: {campaign.name} ({campaign.id})")
+        typer.echo(f"Mode:     {campaign.mode}")
+        typer.echo(f"Status:   {campaign.status}")
+        if campaign.question:
+            typer.echo(f"Question: {campaign.question}")
+        if campaign.hypothesis:
+            typer.echo(f"Hypothesis: {campaign.hypothesis}")
+        if campaign.concluded_at:
+            typer.echo(f"Concluded: {campaign.concluded_at} — {campaign.outcome_label}")
+            if campaign.conclusion:
+                typer.echo(f"Conclusion: {campaign.conclusion}")
+    finally:
+        db.close()
+
+
+@campaign_app.command("review")
+def campaign_review(
+    campaign_id: str = typer.Argument(..., help="Campaign ID"),
+):
+    """Review campaign: residual rate, bypass rate, outcome distribution."""
+    import duckdb
+    from bathos.campaigns import review_campaign
+    db = duckdb.connect(str(_catalog_dir() / "bathos.db"), read_only=True)
+    try:
+        review = review_campaign(db, campaign_id)
+        if "error" in review:
+            typer.echo(review["error"], err=True)
+            raise typer.Exit(1)
+        typer.echo(f"Runs: {review['total_runs']}")
+        typer.echo(f"Residual rate: {review['residual_rate']:.1%}")
+        typer.echo(f"Bypass rate: {review['bypass_rate']:.1%}")
+        typer.echo(f"Unknown rate: {review['unknown_rate']:.1%}")
+        typer.echo(f"Outcomes: {review['outcome_distribution']}")
+        for anomaly in review["anomalies"]:
+            typer.echo(f"  WARNING: {anomaly}")
+    finally:
+        db.close()
 
 
 @remote_app.command("test")
