@@ -16,6 +16,14 @@ from fastmcp import FastMCP
 
 # Import core modules
 from bathos.archive import archive as archive_runs
+from bathos.campaigns import (
+    conclude_campaign,
+    create_campaign,
+    CampaignError,
+    get_campaign,
+    list_campaigns,
+    review_campaign,
+)
 from bathos.catalog import init_catalog
 from bathos.checker import check_runs
 from bathos.compact import compact as compact_catalog
@@ -36,6 +44,24 @@ def _get_catalog_dir(catalog_dir: str | None = None) -> Path:
     if override:
         return Path(override)
     return default_catalog_dir()
+
+
+def _get_project_slug(project_slug: str = "") -> str:
+    """Resolve project slug from parameter or environment."""
+    if project_slug:
+        return project_slug
+    override = os.environ.get("BTH_PROJECT_SLUG")
+    if override:
+        return override
+    # Try to load from .bth.toml
+    try:
+        config_path = find_project_config(Path.cwd())
+        if config_path:
+            config = load_project_config(config_path)
+            return config.slug
+    except Exception:
+        pass
+    return "default"
 
 
 # ============================================================================
@@ -344,30 +370,60 @@ def init_tool(
 def run_tool(
     script_path: str = "",
     args: list[str] | None = None,
+    project_slug: str = "",
+    catalog_dir: str = "",
+    output_paths: list[str] | None = None,
+    tags: list[str] | None = None,
+    agent_mode: str = "",
+    derived_from: str = "",
+    campaign_id: str = "",
+    no_sidecar: bool = False,
 ) -> str:
     """Run a script and record provenance.
 
     Args:
         script_path: Path to script
         args: Command-line arguments
+        project_slug: Project slug (default: 'default')
+        catalog_dir: Catalog directory (empty = use default)
+        output_paths: Registered output files
+        tags: Search tags
+        agent_mode: Agent mode ('collaborative', 'autonomous', or '')
+        derived_from: Parent run ID (for parametric sweeps)
+        campaign_id: Campaign ID to associate run with
+        no_sidecar: Skip sidecar requirement (for exploratory runs)
 
     Returns:
-        JSON string with run result
+        JSON string with run result or structured gate error
     """
     try:
         if not script_path:
             return json.dumps({"error": "script_path parameter is required"})
         if args is None:
             args = []
+        if output_paths is None:
+            output_paths = []
+        if tags is None:
+            tags = []
+
         # Construct argv: ['python', script_path, ...args]
         argv = ["python", script_path] + args
+
+        # Resolve parameters
+        cat_dir = _get_catalog_dir(catalog_dir or None)
+        slug = project_slug or "default"
+
+        # Call run_script with new parameters
         exit_code = run_script(
             argv=argv,
-            project_slug="default",
-            catalog_dir=_get_catalog_dir(None),
-            output_paths=[],
-            tags=[],
+            project_slug=slug,
+            catalog_dir=cat_dir,
+            output_paths=output_paths,
+            tags=tags,
+            agent_mode=agent_mode or None,
+            no_sidecar=no_sidecar,
         )
+
         return json.dumps(
             {
                 "script_path": script_path,
@@ -376,6 +432,192 @@ def run_tool(
             },
             indent=2,
         )
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+def campaign_create_tool(
+    name: str = "",
+    mode: str = "exploration",
+    project_slug: str = "",
+    catalog_dir: str = "",
+    question: str = "",
+    hypothesis: str = "",
+) -> str:
+    """Create a new experiment campaign.
+
+    Args:
+        name: Campaign name
+        mode: Campaign mode ('exploration' or 'confirmation')
+        project_slug: Project slug (default: from config or 'default')
+        catalog_dir: Catalog directory (empty = use default)
+        question: Research question (optional)
+        hypothesis: Research hypothesis (optional)
+
+    Returns:
+        JSON string with campaign details or error
+    """
+    try:
+        if not name:
+            return json.dumps({"error": "name parameter is required"})
+        if mode not in ("exploration", "confirmation"):
+            return json.dumps(
+                {
+                    "error": f"mode must be 'exploration' or 'confirmation', got {mode!r}"
+                }
+            )
+
+        cat_dir = _get_catalog_dir(catalog_dir or None)
+        slug = project_slug or _get_project_slug()
+
+        import duckdb
+
+        db = duckdb.connect(str(cat_dir / "bathos.db"))
+        try:
+            campaign = create_campaign(
+                db,
+                name=name,
+                project_slug=slug,
+                mode=mode,
+                question=question or None,
+                hypothesis=hypothesis or None,
+            )
+            return json.dumps(
+                {
+                    "campaign_id": campaign.id,
+                    "name": campaign.name,
+                    "mode": campaign.mode,
+                    "status": campaign.status,
+                    "started_at": campaign.started_at,
+                },
+                indent=2,
+            )
+        finally:
+            db.close()
+    except CampaignError as e:
+        return json.dumps({"error": str(e)})
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+def campaign_list_tool(
+    catalog_dir: str = "",
+    project_slug: str = "",
+    status: str = "",
+) -> str:
+    """List campaigns with optional filters.
+
+    Args:
+        catalog_dir: Catalog directory (empty = use default)
+        project_slug: Filter by project slug
+        status: Filter by status ('open', 'concluded')
+
+    Returns:
+        JSON string with campaigns array
+    """
+    try:
+        cat_dir = _get_catalog_dir(catalog_dir or None)
+        slug = project_slug or _get_project_slug()
+
+        import duckdb
+
+        db = duckdb.connect(str(cat_dir / "bathos.db"), read_only=True)
+        try:
+            campaigns = list_campaigns(db, project_slug=slug, status=status or None)
+            campaigns_json = [
+                {
+                    "id": c.id,
+                    "name": c.name,
+                    "mode": c.mode,
+                    "status": c.status,
+                    "started_at": c.started_at,
+                    "concluded_at": c.concluded_at,
+                    "outcome_label": c.outcome_label,
+                }
+                for c in campaigns
+            ]
+            return json.dumps({"campaigns": campaigns_json, "count": len(campaigns_json)}, indent=2)
+        finally:
+            db.close()
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+def campaign_review_tool(
+    campaign_id: str = "",
+    catalog_dir: str = "",
+) -> str:
+    """Review campaign statistics and anomalies.
+
+    Args:
+        campaign_id: Campaign ID to review
+        catalog_dir: Catalog directory (empty = use default)
+
+    Returns:
+        JSON string with campaign review (residual rate, outcome distribution, anomalies)
+    """
+    try:
+        if not campaign_id:
+            return json.dumps({"error": "campaign_id parameter is required"})
+
+        cat_dir = _get_catalog_dir(catalog_dir or None)
+
+        import duckdb
+
+        db = duckdb.connect(str(cat_dir / "bathos.db"), read_only=True)
+        try:
+            review = review_campaign(db, campaign_id)
+            return json.dumps(review, indent=2)
+        finally:
+            db.close()
+    except CampaignError as e:
+        return json.dumps({"error": str(e)})
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+def campaign_conclude_tool(
+    campaign_id: str = "",
+    outcome_label: str = "",
+    conclusion: str = "",
+    catalog_dir: str = "",
+) -> str:
+    """Conclude a campaign with an outcome label.
+
+    Args:
+        campaign_id: Campaign ID to conclude
+        outcome_label: Outcome label (e.g., 'success', 'inconclusive', 'failed')
+        conclusion: Summary conclusion text
+        catalog_dir: Catalog directory (empty = use default)
+
+    Returns:
+        JSON string with conclusion confirmation
+    """
+    try:
+        if not campaign_id:
+            return json.dumps({"error": "campaign_id parameter is required"})
+        if not outcome_label:
+            return json.dumps({"error": "outcome_label parameter is required"})
+
+        cat_dir = _get_catalog_dir(catalog_dir or None)
+
+        import duckdb
+
+        db = duckdb.connect(str(cat_dir / "bathos.db"))
+        try:
+            conclude_campaign(db, campaign_id, outcome_label, conclusion or "")
+            return json.dumps(
+                {
+                    "status": "concluded",
+                    "campaign_id": campaign_id,
+                    "outcome_label": outcome_label,
+                },
+                indent=2,
+            )
+        finally:
+            db.close()
+    except CampaignError as e:
+        return json.dumps({"error": str(e)})
     except Exception as e:
         return json.dumps({"error": str(e)})
 
@@ -483,9 +725,90 @@ def mcp_init_tool(
 def mcp_run_tool(
     script_path: str = "",
     args: list[str] | None = None,
+    project_slug: str = "",
+    catalog_dir: str = "",
+    output_paths: list[str] | None = None,
+    tags: list[str] | None = None,
+    agent_mode: str = "",
+    derived_from: str = "",
+    campaign_id: str = "",
+    no_sidecar: bool = False,
 ) -> str:
     """Run a script and record provenance."""
-    return run_tool(script_path=script_path, args=args)
+    return run_tool(
+        script_path=script_path,
+        args=args,
+        project_slug=project_slug,
+        catalog_dir=catalog_dir,
+        output_paths=output_paths,
+        tags=tags,
+        agent_mode=agent_mode,
+        derived_from=derived_from,
+        campaign_id=campaign_id,
+        no_sidecar=no_sidecar,
+    )
+
+
+@app.tool("campaign_create")
+def mcp_campaign_create_tool(
+    name: str = "",
+    mode: str = "exploration",
+    project_slug: str = "",
+    catalog_dir: str = "",
+    question: str = "",
+    hypothesis: str = "",
+) -> str:
+    """Create a new experiment campaign."""
+    return campaign_create_tool(
+        name=name,
+        mode=mode,
+        project_slug=project_slug,
+        catalog_dir=catalog_dir,
+        question=question,
+        hypothesis=hypothesis,
+    )
+
+
+@app.tool("campaign_list")
+def mcp_campaign_list_tool(
+    catalog_dir: str = "",
+    project_slug: str = "",
+    status: str = "",
+) -> str:
+    """List campaigns with optional filters."""
+    return campaign_list_tool(
+        catalog_dir=catalog_dir,
+        project_slug=project_slug,
+        status=status,
+    )
+
+
+@app.tool("campaign_review")
+def mcp_campaign_review_tool(
+    campaign_id: str = "",
+    catalog_dir: str = "",
+) -> str:
+    """Review campaign statistics and anomalies."""
+    return campaign_review_tool(
+        campaign_id=campaign_id,
+        catalog_dir=catalog_dir,
+    )
+
+
+@app.tool("campaign_conclude")
+def mcp_campaign_conclude_tool(
+    campaign_id: str = "",
+    outcome_label: str = "",
+    conclusion: str = "",
+    catalog_dir: str = "",
+) -> str:
+    """Conclude a campaign with an outcome label."""
+    return campaign_conclude_tool(
+        campaign_id=campaign_id,
+        outcome_label=outcome_label,
+        conclusion=conclusion,
+        catalog_dir=catalog_dir,
+    )
 
 
 def mcp_server():

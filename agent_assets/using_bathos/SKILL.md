@@ -34,7 +34,7 @@ description: "Use when working in any bathos-tracked research project — experi
 | Command | Arguments | Status | Notes |
 |---------|-----------|--------|-------|
 | bth init | --slug, --remote, --slurm-partition | ✅ | Project initialization |
-| bth run | <script> [-- args], --tag, --out | ✅ | Execute + provenance capture |
+| bth run | <script> [-- args], --tag, --out, --campaign, --agent-mode, --no-sidecar | ✅ | Execute + provenance capture |
 | bth ls | --since, --status, --limit, --project | ✅ | List recent runs + OUTCOME column |
 | bth show | <run-id> | ✅ | Full run details + git state |
 | bth find | --project, --since, --status, --tag, --output-file | ✅ | Flexible filtered query |
@@ -44,6 +44,11 @@ description: "Use when working in any bathos-tracked research project — experi
 | bth archive | --project, --archive-dir, --dry-run | ✅ | Cold-tier partitioned export |
 | bth sync | --remote, --pull | ✅ | Cluster rsync |
 | bth migrate | --dry-run | ✅ | Upgrade cool-tier fragments to current schema |
+| bth campaign create | --name, --mode, --question, --hypothesis | ✅ | Create exploration/confirmation campaign |
+| bth campaign list | --status | ✅ | List open/concluded campaigns |
+| bth campaign review | <id> | ✅ | Outcome distribution + anomaly flags |
+| bth campaign conclude | <id>, --outcome, --note | ✅ | Mark campaign concluded |
+| bth lint | --project, --since | ✅ | Residual/bypass/drift rate analysis |
 | bth new-experiment | NAME, --force | ✅ | Scaffold script + sidecar |
 | bth export | --tool, --level, --dry-run | ✅ | Install skill + MCP server |
 
@@ -180,6 +185,126 @@ fix = "str"
 | `scripts/debug/` | debug | optional | No | `YYMMDD_desc.py` |
 | `scripts/explore/` | none | none | No | `YYMMDD_desc.py` |
 | `scripts/scratch/` | none | none | No (gitignored) | `YYMMDD_desc.py` |
+
+---
+
+## Agentic Integrity — Three-Tier Validation & Governance
+
+bathos enforces a three-tier validation discipline for autonomous and collaborative agent workflows. The tiers work together to prevent drift and unsafe execution.
+
+### Tier 1: Machine-Enforced Invariants (Gate Layer)
+
+**Pre-execution validation — blocks unsafe runs.** Evaluated at `bth run` time before subprocess starts.
+
+- **Sidecar presence:** Every script in `scripts/experiments/` and `scripts/benchmarks/` MUST have a `<stem>.bth.toml` file (fail fast).
+- **Sidecar validity:** TOML must parse; all sections required: `[experiment]`/`[benchmark]`, `[outcomes.*]`, `[result_schema]`.
+- **Outcome structure:** Each outcome block MUST include:
+  - `condition`: DuckDB SQL fragment (validated at gate time, not runtime)
+  - `decision`: What to do if this outcome fires
+  - `reasoning`: Why this threshold/condition makes sense (cite mechanistic expectations or references, never bare narrative)
+  - Exactly one outcome MUST have `is_residual = true` (fallback branch)
+- **Agent mode constraints:** Autonomous mode blocks execution on iterative scripts (scripts with prior runs in catalog) unless `--no-sidecar` is explicitly passed.
+- **Gate errors:** When validation fails, `bth run` returns exit code 1 and writes structured JSON to stderr with `gate_schema_version=1`, `errors[]`, and `remediation` field. MCP layer surfaces this as a structured tool result (not an exception).
+
+**Agent response to gate failure:** Read `errors[]` and `remediation` fields. Fix sidecar (most common: missing `reasoning` field or invalid SQL condition). Never use `--no-sidecar` to bypass; reserve that flag for exploratory runs in `scripts/explore/`.
+
+### Tier 2: Warm-Catalog Analytics (Lint Layer)
+
+**Post-run monitoring — flags suspicious patterns.** Evaluated by `bth lint` on accumulated runs.
+
+- **Residual rate:** Warn if >10% of runs in a campaign map to the residual outcome (suggests outcomes are too strict or sidecar reasoning is misaligned with empirical results).
+- **Bypass rate:** Warn if >10% of runs used `--no-sidecar` (suggests scripts are exploratory and should not be in experiments/ directory).
+- **Outcome drift:** Warn if all runs in a campaign map to a single outcome branch (suggests other branches are unreachable or sidecar was over-fitted).
+- **Unfired branches:** Warn if an outcome `condition` has never evaluated to true (dead code in sidecar logic).
+
+**Agent response to lint warnings:** Use `bth campaign review <id>` to inspect outcome distribution and anomalies. Adjust `condition` thresholds or `reasoning` fields if empirical results diverge from predictions. If exploratory, move script to `scripts/explore/` and re-run without sidecar.
+
+### Tier 3: Agentic Principles (Workflow Guidance)
+
+**Human+agent decision-making — prose discipline for collaborative workflows.**
+
+- **Hypothesis articulation (pre-run):** State what measurement you expect and why, BEFORE executing. Do not post-hoc rationalize results. Use sidecar `[experiment]` section; cite literature or prior work.
+- **Outcome reasoning fields:** Must cite specific thresholds, mechanistic expectations, or reference data — not vague narratives. Example (good): "temp_std < 5K per Berendsen et al. validation on TIP3P in 4nm box at 300K." Example (bad): "stable temperature because it looks right."
+- **Autonomous vs. collaborative modes:**
+  - **Autonomous:** Only for well-understood experiment types with >5 prior successful runs and consistent outcome patterns. Gate enforces first-of-kind check.
+  - **Collaborative:** Default for novel territory. Requires human review before `bth run` proceeds; agent cites sidecar reasoning in dispatch context.
+- **Campaign discipline:** Use `exploration` campaigns for discovery (outcome distribution is uncertain). Switch to `confirmation` campaigns when ready to validate a specific hypothesis (tight outcome thresholds, clear success criteria). `bth campaign review` provides anomaly feedback.
+- **Unknown outcomes:** If a run's outcome is 'unknown' after completion, check that the script wrote results via `$BTH_RESULTS_PATH` env var and that result schema in sidecar matches script output.
+- **When gate fails:** Never retry with `--no-sidecar`. Fix the sidecar: add missing `reasoning`, fix SQL syntax in `condition`, or split overly-strict outcome into marginal + fail branches.
+
+---
+
+## Campaign Workflow (Two-Mode Design)
+
+bathos campaigns enable organized, accountable parametric exploration and hypothesis testing.
+
+### Mode: Exploration
+
+For discovery phase — outcome distribution is uncertain, multiple branches expected to fire.
+
+```bash
+bth campaign create "nvt-thermostat-search" --mode exploration \
+  --question "Which Langevin coupling strength gives best stability?" \
+  --project myproject
+
+bth run python scripts/experiments/nvt_stability.py --campaign <id> \
+  -- --gamma 0.1
+bth run python scripts/experiments/nvt_stability.py --campaign <id> \
+  -- --gamma 0.5
+bth run python scripts/experiments/nvt_stability.py --campaign <id> \
+  -- --gamma 1.0
+
+bth campaign review <id>
+# Output: outcome distribution, residual rate, anomalies
+# Interpret results → decide next phase (confirmation or pivot)
+```
+
+### Mode: Confirmation
+
+For validation phase — hypothesis is specific, outcomes are pre-registered, success criteria are tight.
+
+```bash
+bth campaign create "nvt-validation" --mode confirmation \
+  --hypothesis "Langevin gamma=0.5 maintains ±5K stability for 100ps NVT" \
+  --project myproject
+
+bth run python scripts/experiments/nvt_stability_100ps.py --campaign <id> \
+  -- --gamma 0.5 --seed 1
+bth run python scripts/experiments/nvt_stability_100ps.py --campaign <id> \
+  -- --gamma 0.5 --seed 2
+bth run python scripts/experiments/nvt_stability_100ps.py --campaign <id> \
+  -- --gamma 0.5 --seed 3
+
+# All runs should fire the same outcome (pass/marginal/fail)
+bth campaign review <id>
+
+# Conclude with outcome label and summary
+bth campaign conclude <id> \
+  --outcome pass \
+  --note "All 3 seeds showed temp_std < 3K; proceeds to NPT phase"
+```
+
+### CLI Usage Sequence
+
+```bash
+# 1. Create campaign (exploration or confirmation mode)
+CAMPAIGN=$(bth campaign create "my-sweep" --mode exploration | jq -r .campaign_id)
+
+# 2. Run experiments, associating each with campaign
+bth run python scripts/experiments/script.py --campaign $CAMPAIGN -- --param value
+
+# 3. Monitor accumulated runs
+bth campaign review $CAMPAIGN
+
+# 4. Analyze outcome distribution, refine sidecar if needed
+bth campaign list --status open
+
+# 5. Conclude when done
+bth campaign conclude $CAMPAIGN --outcome success --note "Hypothesis validated"
+
+# 6. Query concluded campaigns
+bth campaign list --status concluded
+```
 
 ---
 
@@ -750,12 +875,16 @@ bth run python scripts/experiments/measure_x.py --out results.json -- <same args
 | `find_runs` | `catalog_dir, project, since, status, tag, output_file` | `{runs: [], count: int}` | `bth find` |
 | `get_run` | `run_id, catalog_dir` | `{run: {id, command, git_hash, outcome, ...}}` | `bth show` |
 | `run_sql` | `query, catalog_dir` | `{rows: []}` | `bth sql` |
-| `init_project` | `project_root, slug, remote, slurm_partition` | `{success: bool, msg: str}` | `bth init` |
-| `run` | `script_path, args, project_slug, catalog_dir, output_paths, tags` | `{run_id: str, exit_code: int}` | `bth run` |
+| `init` | `project_root, slug, remote, slurm_partition` | `{success: bool, msg: str}` | `bth init` |
+| `run` | `script_path, args, project_slug, catalog_dir, output_paths, tags, agent_mode, campaign_id, no_sidecar` | `{script_path, exit_code, success}` or gate error | `bth run` |
 | `compact` | `catalog_dir` | `{ingested: int, skipped: int}` | `bth compact` |
 | `archive` | `project, archive_dir, dry_run, catalog_dir` | `{runs: int, partitions: int}` | `bth archive` |
 | `check` | `catalog_dir, project_root, status_filter` | `{results: [], total: int}` | `bth check` |
 | `sync` | `remote, pull, catalog_dir` | `{transferred: int, duration_s: float}` | `bth sync` |
+| `campaign_create` | `name, mode, project_slug, catalog_dir, question, hypothesis` | `{campaign_id, name, mode, status, started_at}` | `bth campaign create` |
+| `campaign_list` | `catalog_dir, project_slug, status` | `{campaigns: [], count: int}` | `bth campaign list` |
+| `campaign_review` | `campaign_id, catalog_dir` | `{total_runs, residual_rate, outcome_distribution, anomalies}` | `bth campaign review` |
+| `campaign_conclude` | `campaign_id, outcome_label, conclusion, catalog_dir` | `{status: 'concluded', campaign_id, outcome_label}` | `bth campaign conclude` |
 
 ### Registration
 
