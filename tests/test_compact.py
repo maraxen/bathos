@@ -137,7 +137,7 @@ def test_compact_is_idempotent_with_new_fragments(tmp_catalog: Path, sample_run:
 
 
 def test_compact_upgrades_v0_fragments(tmp_catalog: Path, sample_run: Run):
-    """compact() should migrate v0 fragments (missing schema_version) to v2 via v1."""
+    """compact() should migrate v0 fragments (missing schema_version) to v3 via v1→v2→v3."""
     init_catalog(tmp_catalog)
 
     # Write a v0 fragment (no schema_version field)
@@ -148,10 +148,10 @@ def test_compact_upgrades_v0_fragments(tmp_catalog: Path, sample_run: Run):
     result = compact(tmp_catalog)
     assert result.ingested == 1
 
-    # Verify in DuckDB: should have schema_version="2" (migrated through v0→v1→v2)
+    # Verify in DuckDB: should have schema_version="3" (migrated through v0→v1→v2→v3)
     con = duckdb.connect(str(tmp_catalog / "bathos.db"))
     rows = con.execute("SELECT schema_version FROM runs").fetchall()
-    assert rows[0][0] == "2"
+    assert rows[0][0] == "3"
 
 
 def test_compact_tracks_warm_schema_version(tmp_catalog: Path, sample_run: Run):
@@ -166,7 +166,7 @@ def test_compact_tracks_warm_schema_version(tmp_catalog: Path, sample_run: Run):
     con = duckdb.connect(str(tmp_catalog / "bathos.db"))
     rows = con.execute("SELECT value FROM _schema_meta WHERE key = 'warm_version'").fetchall()
     assert len(rows) == 1
-    assert rows[0][0] == "2"
+    assert rows[0][0] == "3"
 
 
 def test_fragment_count_helper(tmp_catalog: Path, sample_run: Run):
@@ -239,8 +239,8 @@ def test_compact_preserves_run_data(tmp_catalog: Path, sample_run: Run):
     assert rows[0][3] == "{}"
 
 
-def test_compact_migrates_v1_to_v2(sample_run: Run):
-    """Verify v1 fragments are upgraded to v2 during compact."""
+def test_compact_migrates_v1_to_v3(sample_run: Run):
+    """Verify v1 fragments are upgraded to v3 during compact."""
     from bathos.compact import _apply_migrations
 
     # Create a v1 run (explicitly set schema_version="1")
@@ -249,37 +249,37 @@ def test_compact_migrates_v1_to_v2(sample_run: Run):
     # Apply migrations
     result = _apply_migrations(v1_run)
 
-    # Verify upgraded to v2 with hostname
-    assert result.schema_version == "2"
+    # Verify upgraded to v3 with hostname
+    assert result.schema_version == "3"
     assert result.hostname == ""
 
 
-def test_compact_v0_chain_to_v2(sample_run: Run):
-    """Verify v0 fragments chain through v1→v2 migrations."""
+def test_compact_v0_chain_to_v3(sample_run: Run):
+    """Verify v0 fragments chain through v1→v2→v3 migrations."""
     from bathos.compact import _apply_migrations
 
     # Create a v0 run
     v0_run = dataclasses.replace(sample_run, schema_version="0")
 
-    # Apply migrations (should walk 0→1→2)
+    # Apply migrations (should walk 0→1→2→3)
     result = _apply_migrations(v0_run)
 
-    # Verify final state is v2
-    assert result.schema_version == "2"
+    # Verify final state is v3
+    assert result.schema_version == "3"
     assert result.hostname == ""
 
 
-def test_apply_migrations_v2_is_noop(sample_run: Run):
-    """Verify v2 fragment is unchanged by migrations."""
+def test_apply_migrations_v3_is_noop(sample_run: Run):
+    """Verify v3 fragment is unchanged by migrations."""
     from bathos.compact import _apply_migrations
 
-    v2_run = dataclasses.replace(sample_run, schema_version="2", hostname="testhost")
+    v3_run = dataclasses.replace(sample_run, schema_version="3", hostname="testhost")
 
-    # Apply migrations (should be no-op for v2)
-    result = _apply_migrations(v2_run)
+    # Apply migrations (should be no-op for v3)
+    result = _apply_migrations(v3_run)
 
     # Verify unchanged
-    assert result.schema_version == "2"
+    assert result.schema_version == "3"
     assert result.hostname == "testhost"
 
 
