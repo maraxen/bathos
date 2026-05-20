@@ -128,7 +128,16 @@ def test_run_allows_enforced_dir_with_sidecar(tmp_path):
     sidecar = enforced / "run_nvt.bth.toml"
     sidecar.write_text(textwrap.dedent("""
         [experiment]
-        hypothesis = "test"
+        hypothesis = "test hypothesis"
+        [outcomes.pass]
+        condition = "x == 1"
+        decision = "good"
+        reasoning = "expected behavior"
+        [outcomes.fallback]
+        condition = "1==1"
+        decision = "other"
+        reasoning = "catch-all"
+        is_residual = true
         [result_schema]
         x = "float"
     """))
@@ -193,9 +202,16 @@ def test_result_emission_via_env_var(tmp_catalog: Path, tmp_path: Path):
         [outcomes.pass]
         condition = "temp_std < 5"
         decision = "good"
+        reasoning = "stable temperature"
         [outcomes.marginal]
         condition = "temp_std >= 5 AND temp_std < 10"
         decision = "borderline"
+        reasoning = "marginal stability"
+        [outcomes.fail]
+        condition = "temp_std >= 10"
+        decision = "unstable"
+        reasoning = "poor stability"
+        is_residual = true
         [result_schema]
         temp_mean = "float"
         temp_std = "float"
@@ -245,6 +261,12 @@ def test_result_emission_fallback_path(tmp_catalog: Path, tmp_path: Path):
         [outcomes.pass]
         condition = "metric_a == 42"
         decision = "correct"
+        reasoning = "expected value"
+        [outcomes.fallback]
+        condition = "1==1"
+        decision = "other"
+        reasoning = "catch-all"
+        is_residual = true
         [result_schema]
         metric_a = "int"
         metric_b = "float"
@@ -311,3 +333,148 @@ def test_result_emission_invalid_json(tmp_catalog: Path, tmp_path: Path):
     assert len(runs) == 1
     # Invalid JSON should result in empty outcome
     assert runs[0].outcome == ""
+
+
+def test_gate_fires_in_enforced_dir_missing_sidecar(tmp_path):
+    """Gate layer blocks enforced dir script without sidecar via gate_check()."""
+    import sys
+    from bathos.runner import run_script
+
+    (tmp_path / "catalog").mkdir()
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    script = enforced / "run_nvt.py"
+    script.write_text("print('hi')")
+    # No sidecar present
+
+    result = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="proj",
+        catalog_dir=tmp_path / "catalog",
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert result == 1  # blocked by gate
+
+
+def test_gate_passes_with_valid_sidecar(tmp_path):
+    """Gate layer passes with valid sidecar in enforced dir."""
+    import sys
+    import textwrap
+    from bathos.runner import run_script
+
+    (tmp_path / "catalog").mkdir()
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    script = enforced / "run_nvt.py"
+    script.write_text("print('hi')")
+    sidecar = enforced / "run_nvt.bth.toml"
+    sidecar.write_text(textwrap.dedent("""
+        [experiment]
+        hypothesis = "test hypothesis"
+        [outcomes.pass]
+        condition = "x == 1"
+        decision = "proceed"
+        reasoning = "expected behavior"
+        [outcomes.fallback]
+        condition = "1==1"
+        decision = "other"
+        reasoning = "catch-all"
+        is_residual = true
+        [result_schema]
+        x = "float"
+    """))
+
+    result = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="proj",
+        catalog_dir=tmp_path / "catalog",
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert result == 0  # gate passes
+
+
+def test_no_sidecar_flag_bypasses_gate(tmp_path):
+    """no_sidecar=True bypasses gate even in enforced dir (sidecar_mode='bypassed')."""
+    import sys
+    from bathos.catalog import read_runs
+    from bathos.runner import run_script
+
+    (tmp_path / "catalog").mkdir()
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    script = enforced / "run_nvt.py"
+    script.write_text("print('hi')")
+    # No sidecar present, but bypassed via flag
+
+    result = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="proj",
+        catalog_dir=tmp_path / "catalog",
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+        no_sidecar=True,
+    )
+    assert result == 0  # bypassed
+    runs = read_runs(tmp_path / "catalog")
+    assert len(runs) == 1
+    assert runs[0].sidecar_mode == "bypassed"
+
+
+def test_outcome_is_residual_populated(tmp_catalog: Path, tmp_path: Path):
+    """outcome_is_residual is set to True when outcome spec has is_residual=True."""
+    import json
+    import textwrap
+    from bathos.runner import run_script
+
+    # Create enforced directory with script and sidecar where fallback outcome has is_residual=True
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    script = enforced / "run_test.py"
+    script.write_text(textwrap.dedent("""
+        import os
+        import json
+
+        # This outcome doesn't match the pass condition
+        results_path = os.environ.get("BTH_RESULTS_PATH")
+        if results_path:
+            with open(results_path, "w") as f:
+                json.dump({"x": 10}, f)
+    """))
+
+    sidecar = enforced / "run_test.bth.toml"
+    sidecar.write_text(textwrap.dedent("""
+        [experiment]
+        hypothesis = "test hypothesis"
+        [outcomes.pass]
+        condition = "x == 5"
+        decision = "good"
+        reasoning = "expected value"
+        [outcomes.fallback]
+        condition = "1==1"
+        decision = "fallback"
+        reasoning = "catch-all"
+        is_residual = true
+        [result_schema]
+        x = "int"
+    """))
+
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 0
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    # outcome should be "fallback" because x==10, not x==5
+    assert runs[0].outcome == "fallback"
+    # outcome_is_residual should be True because fallback has is_residual=true
+    assert runs[0].outcome_is_residual == True

@@ -73,6 +73,10 @@ def run(
     argv: list[str] = typer.Argument(...),
     out: list[str] = typer.Option([], "--out", help="Output path to register"),
     tag: list[str] = typer.Option([], "--tag", "-t"),
+    agent_mode: str | None = typer.Option(None, "--agent-mode", help="collaborative|autonomous"),
+    no_sidecar: bool = typer.Option(False, "--no-sidecar", help="Bypass sidecar enforcement (logs BYPASSED)"),
+    derived_from: str | None = typer.Option(None, "--derived-from", help="Parent run ID for lineage"),
+    campaign: str | None = typer.Option(None, "--campaign", help="Campaign ID to associate this run with"),
 ):
     """Run a script and record provenance."""
     from bathos.runner import run_script
@@ -84,6 +88,10 @@ def run(
         catalog_dir=_catalog_dir(),
         output_paths=out,
         tags=tag,
+        agent_mode=agent_mode,
+        no_sidecar=no_sidecar,
+        derived_from=derived_from,
+        campaign_id=campaign,
     )
     raise typer.Exit(exit_code)
 

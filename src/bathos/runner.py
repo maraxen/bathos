@@ -6,6 +6,7 @@ import os
 import subprocess
 import tempfile
 import time
+import tomllib
 from pathlib import Path
 
 import typer
@@ -14,6 +15,7 @@ from bathos.catalog import write_run
 from bathos.git import capture_git_state
 from bathos.schema import Run
 from bathos.sidecar import find_sidecar, is_in_enforced_dir, parse_sidecar, evaluate_outcome, SidecarError
+from bathos.prereg import resolve_sidecar, resolve_agent_mode, gate_check
 
 
 def _find_script_path(argv: list[str], cwd: Path) -> Path | None:
@@ -90,28 +92,76 @@ def run_script(
     output_paths: list[str],
     tags: list[str],
     cwd: Path = Path.cwd(),
+    agent_mode: str | None = None,
+    no_sidecar: bool = False,
+    derived_from: str | None = None,
+    campaign_id: str | None = None,
 ) -> int:
     script_path = _find_script_path(argv, cwd)
 
-    # Pre-registration enforcement
+    # Sidecar resolution
+    bundle = None
     sidecar = None
-    if script_path is not None and is_in_enforced_dir(script_path):
-        sidecar_path = find_sidecar(script_path)
-        if sidecar_path is None:
-            typer.echo(
-                f"Error: {script_path.name} is in an enforced directory "
-                f"({script_path.parent.name}/) but has no sidecar.\n"
-                f"Create {script_path.stem}.bth.toml next to the script before running.",
-                err=True,
-            )
-            return 1
-        try:
-            sidecar = parse_sidecar(sidecar_path)
-        except SidecarError as e:
-            typer.echo(f"Error: invalid sidecar — {e}", err=True)
-            return 1
+    if script_path is not None:
+        bundle = resolve_sidecar(script_path)
+        if bundle.found:
+            try:
+                sidecar = parse_sidecar(bundle.path)
+            except SidecarError as e:
+                typer.echo(f"Error: invalid sidecar — {e}", err=True)
+                return 1
+
+    # Resolve agent mode
+    sidecar_agent_mode = sidecar.agent_mode if sidecar else ""
+
+    # Read project config for agent_mode default
+    project_config_mode = ""
+    try:
+        bth_config_path = cwd / ".bth.toml"
+        if bth_config_path.exists():
+            project_config = tomllib.loads(bth_config_path.read_text()).get("defaults", {})
+            project_config_mode = project_config.get("agent_mode", "")
+    except Exception:
+        pass
+
+    global_config_mode = ""
+    try:
+        global_config_path = Path.home() / ".bth" / "config.toml"
+        if global_config_path.exists():
+            global_config = tomllib.loads(global_config_path.read_text()).get("defaults", {})
+            global_config_mode = global_config.get("agent_mode", "")
+    except Exception:
+        pass
+
+    resolved_mode = resolve_agent_mode(
+        cli_flag=agent_mode,
+        sidecar=sidecar,
+        project_config=None,
+        global_config={"agent_mode": global_config_mode} if global_config_mode else None,
+    )
 
     git = capture_git_state(cwd)
+
+    # Run gate check for enforced dirs
+    if script_path is not None and is_in_enforced_dir(script_path) and not no_sidecar:
+        gate_result = gate_check(
+            script_path=script_path,
+            bundle=bundle,
+            mode=resolved_mode,
+            catalog_dir=catalog_dir,
+            git_hash=git.hash,
+        )
+        if not gate_result.ok:
+            typer.echo(json.dumps(gate_result.error_payload), err=True)
+            return 1
+
+    # Determine sidecar_mode string
+    if no_sidecar:
+        sidecar_mode_str = "bypassed"
+    elif bundle and bundle.found:
+        sidecar_mode_str = "declared"
+    else:
+        sidecar_mode_str = ""
     run = Run(
         project_slug=project_slug,
         command=" ".join(argv),
@@ -123,6 +173,12 @@ def run_script(
         tags=tags,
         status="running",
         slurm_job_id=os.environ.get("SLURM_JOB_ID", ""),
+        sidecar_sha256=bundle.sha256 if bundle and bundle.found else "",
+        sidecar_path=str(bundle.path) if bundle and bundle.path else "",
+        parent_run_id=derived_from or "",
+        agent_mode=resolved_mode,
+        sidecar_mode=sidecar_mode_str,
+        campaign_id=campaign_id or "",
     )
     catalog_dir.mkdir(parents=True, exist_ok=True)
     write_run(run, catalog_dir)
@@ -156,6 +212,13 @@ def run_script(
             meta = {}
         outcome = evaluate_outcome(sidecar, meta)
 
+    # Populate outcome_is_residual flag
+    outcome_is_residual = False
+    if sidecar and outcome and outcome not in ("unknown", ""):
+        spec = sidecar.outcomes.get(outcome)
+        if spec:
+            outcome_is_residual = getattr(spec, "is_residual", False)
+
     run = dataclasses.replace(
         run,
         duration_s=time.monotonic() - start,
@@ -163,6 +226,7 @@ def run_script(
         status=status,
         metadata=metadata,
         outcome=outcome,
+        outcome_is_residual=outcome_is_residual,
     )
     write_run(run, catalog_dir)
 
