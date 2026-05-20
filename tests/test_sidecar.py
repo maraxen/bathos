@@ -159,3 +159,46 @@ def test_evaluate_outcome_bool_result(tmp_path):
     s = parse_sidecar(path)
     label = evaluate_outcome(s, {"reproduced": True})
     assert label == "reproduced"
+
+
+def test_sidecar_agent_mode_parsed(tmp_path):
+    from bathos.sidecar import parse_sidecar
+    path = _write_toml(tmp_path, """
+        [experiment]
+        hypothesis = "Test hypothesis"
+        agent_mode = "autonomous"
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good value"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Catch-all"
+        is_residual = true
+        [result_schema]
+        value = "float"
+    """)
+    sidecar = parse_sidecar(path)
+    assert sidecar.agent_mode == "autonomous"
+
+
+def test_sidecar_agent_mode_default(tmp_path):
+    from bathos.sidecar import parse_sidecar
+    path = _write_toml(tmp_path, """
+        [experiment]
+        hypothesis = "Test hypothesis"
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        value = "float"
+    """)
+    sidecar = parse_sidecar(path)
+    assert sidecar.agent_mode == ""

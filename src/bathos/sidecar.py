@@ -47,6 +47,8 @@ class Sidecar:
     symptom: str = ""
     suspected_cause: str = ""
     verification: str = ""
+    # agent mode field (all kinds)
+    agent_mode: str = ""
 
 
 ENFORCED_DIRS = {"experiments", "benchmarks", "validation"}
@@ -67,6 +69,7 @@ def parse_sidecar(path: Path) -> Sidecar:
             hypothesis=section.get("hypothesis", ""),
             outcomes=outcomes,
             result_schema=data.get("result_schema", {}),
+            agent_mode=section.get("agent_mode", ""),
         )
     elif "benchmark" in data:
         kind = SidecarKind.BENCHMARK
@@ -78,6 +81,7 @@ def parse_sidecar(path: Path) -> Sidecar:
             regression_threshold=section.get("regression_threshold", 0.0),
             target=section.get("target", ""),
             result_schema=data.get("result_schema", {}),
+            agent_mode=section.get("agent_mode", ""),
         )
     elif "validation" in data:
         kind = SidecarKind.VALIDATION
@@ -90,6 +94,7 @@ def parse_sidecar(path: Path) -> Sidecar:
             tolerance=section.get("tolerance", ""),
             outcomes=outcomes,
             result_schema=data.get("result_schema", {}),
+            agent_mode=section.get("agent_mode", ""),
         )
     elif "debug" in data:
         kind = SidecarKind.DEBUG
@@ -102,6 +107,7 @@ def parse_sidecar(path: Path) -> Sidecar:
             verification=section.get("verification", ""),
             outcomes=outcomes,
             result_schema=data.get("result_schema", {}) or data.get("verdict_schema", {}),
+            agent_mode=section.get("agent_mode", ""),
         )
     else:
         raise SidecarError(
