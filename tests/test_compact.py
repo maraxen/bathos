@@ -425,3 +425,81 @@ def test_schema_migrations_has_record(tmp_path):
     con.close()
     assert len(rows) >= 1
     assert rows[-1][0] == CURRENT_SCHEMA_VERSION
+
+
+def test_migration_v2_to_v3(tmp_catalog: Path, sample_run: Run):
+    """Verify that a v2 fragment (no v3 fields) migrates to v3 with empty defaults."""
+    init_catalog(tmp_catalog)
+
+    # Write a v2 fragment (has hostname, no agentic integrity fields)
+    v2_run = dataclasses.replace(
+        sample_run,
+        schema_version="2",
+        sidecar_sha256="",
+        sidecar_path="",
+        parent_run_id="",
+        agent_mode="",
+        sidecar_mode="",
+        outcome_is_residual=False,
+        skill_sha256="",
+        campaign_id="",
+    )
+    write_run(v2_run, tmp_catalog)
+
+    # Compact
+    result = compact(tmp_catalog)
+    assert result.ingested == 1
+
+    # Verify in DuckDB: should have schema_version="3" and all v3 fields set to defaults
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    rows = con.execute(
+        "SELECT schema_version, sidecar_sha256, sidecar_path, parent_run_id, agent_mode, sidecar_mode, outcome_is_residual, skill_sha256, campaign_id FROM runs"
+    ).fetchall()
+    con.close()
+
+    assert len(rows) == 1
+    assert rows[0][0] == "3"  # schema_version
+    assert rows[0][1] == ""  # sidecar_sha256
+    assert rows[0][2] == ""  # sidecar_path
+    assert rows[0][3] == ""  # parent_run_id
+    assert rows[0][4] == ""  # agent_mode
+    assert rows[0][5] == ""  # sidecar_mode
+    assert rows[0][6] is False  # outcome_is_residual
+    assert rows[0][7] == ""  # skill_sha256
+    assert rows[0][8] == ""  # campaign_id
+
+
+def test_migration_chain_v0_to_v3(tmp_catalog: Path, sample_run: Run):
+    """Verify that a v0 fragment chains through v0→v1→v2→v3 with all v3 fields."""
+    init_catalog(tmp_catalog)
+
+    # Write a v0 fragment (missing schema_version field entirely)
+    # Manually construct a minimal run dict that would be missing all new fields
+    v0_run = dataclasses.replace(
+        sample_run,
+        schema_version="0",
+    )
+    write_run(v0_run, tmp_catalog)
+
+    # Compact
+    result = compact(tmp_catalog)
+    assert result.ingested == 1
+
+    # Verify in DuckDB: should have schema_version="3" and all v3 fields with defaults
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    rows = con.execute(
+        "SELECT schema_version, hostname, sidecar_sha256, sidecar_path, parent_run_id, agent_mode, sidecar_mode, outcome_is_residual, skill_sha256, campaign_id FROM runs"
+    ).fetchall()
+    con.close()
+
+    assert len(rows) == 1
+    assert rows[0][0] == "3"  # schema_version
+    assert rows[0][1] == ""  # hostname (from v1 migration)
+    assert rows[0][2] == ""  # sidecar_sha256 (from v2 migration)
+    assert rows[0][3] == ""  # sidecar_path
+    assert rows[0][4] == ""  # parent_run_id
+    assert rows[0][5] == ""  # agent_mode
+    assert rows[0][6] == ""  # sidecar_mode
+    assert rows[0][7] is False  # outcome_is_residual
+    assert rows[0][8] == ""  # skill_sha256
+    assert rows[0][9] == ""  # campaign_id

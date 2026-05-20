@@ -64,7 +64,9 @@ def _row_to_run(row: tuple) -> Run | None:
     DuckDB returns rows as tuples; we need to map back to Run dataclass.
     Column order must match: id, project_slug, command, argv, git_hash, git_branch,
     git_dirty, timestamp, duration_s, exit_code, status, output_paths, tags,
-    schema_version, slurm_job_id, hostname, metadata, outcome, output_metadata
+    schema_version, slurm_job_id, hostname, metadata, outcome, output_metadata,
+    sidecar_sha256, sidecar_path, parent_run_id, agent_mode, sidecar_mode,
+    outcome_is_residual, skill_sha256, campaign_id
     """
     try:
         (
@@ -87,6 +89,14 @@ def _row_to_run(row: tuple) -> Run | None:
             metadata,
             outcome,
             output_metadata,
+            sidecar_sha256,
+            sidecar_path,
+            parent_run_id,
+            agent_mode,
+            sidecar_mode,
+            outcome_is_residual,
+            skill_sha256,
+            campaign_id,
         ) = row
 
         return Run(
@@ -108,6 +118,14 @@ def _row_to_run(row: tuple) -> Run | None:
             hostname=hostname if hostname else "",
             metadata=metadata if metadata else "{}",
             outcome=outcome if outcome else "",
+            sidecar_sha256=sidecar_sha256 if sidecar_sha256 else "",
+            sidecar_path=sidecar_path if sidecar_path else "",
+            parent_run_id=parent_run_id if parent_run_id else "",
+            agent_mode=agent_mode if agent_mode else "",
+            sidecar_mode=sidecar_mode if sidecar_mode else "",
+            outcome_is_residual=outcome_is_residual if outcome_is_residual is not None else False,
+            skill_sha256=skill_sha256 if skill_sha256 else "",
+            campaign_id=campaign_id if campaign_id else "",
         )
     except (ValueError, TypeError) as e:
         raise RuntimeError(f"Failed to convert DuckDB row to Run: {e}") from e

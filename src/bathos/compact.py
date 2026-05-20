@@ -81,12 +81,27 @@ def _migrate_v1(run_dict: dict) -> dict:
     This migration adds hostname (defaults to "") and updates version.
     """
     run_dict["hostname"] = ""
-    run_dict["schema_version"] = CURRENT_SCHEMA_VERSION
+    run_dict["schema_version"] = "2"  # hardcoded: v1→v2 always
+    return run_dict
+
+
+def _migrate_v2(run_dict: dict) -> dict:
+    """Migrate v2 fragment (no agentic integrity fields) to v3."""
+    run_dict["sidecar_sha256"] = ""
+    run_dict["sidecar_path"] = ""
+    run_dict["parent_run_id"] = ""
+    run_dict["agent_mode"] = ""
+    run_dict["sidecar_mode"] = ""
+    run_dict["outcome_is_residual"] = False
+    run_dict["skill_sha256"] = ""
+    run_dict["campaign_id"] = ""
+    run_dict["schema_version"] = "3"
     return run_dict
 
 
 MIGRATIONS["0"] = _migrate_v0
 MIGRATIONS["1"] = _migrate_v1
+MIGRATIONS["2"] = _migrate_v2
 
 
 _RUNS_TABLE_SCHEMA = """
@@ -109,7 +124,15 @@ CREATE TABLE IF NOT EXISTS runs (
     hostname TEXT,
     metadata TEXT,
     outcome TEXT,
-    output_metadata TEXT
+    output_metadata TEXT,
+    sidecar_sha256 TEXT,
+    sidecar_path TEXT,
+    parent_run_id TEXT,
+    agent_mode TEXT,
+    sidecar_mode TEXT,
+    outcome_is_residual BOOLEAN,
+    skill_sha256 TEXT,
+    campaign_id TEXT
 )
 """
 
@@ -231,8 +254,9 @@ def compact(catalog_dir: Path) -> CompactResult:
             INSERT INTO runs (
                 id, project_slug, command, argv, git_hash, git_branch,
                 git_dirty, timestamp, duration_s, exit_code, status,
-                output_paths, tags, schema_version, slurm_job_id, hostname, metadata, outcome, output_metadata
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                output_paths, tags, schema_version, slurm_job_id, hostname, metadata, outcome, output_metadata,
+                sidecar_sha256, sidecar_path, parent_run_id, agent_mode, sidecar_mode, outcome_is_residual, skill_sha256, campaign_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 run.id,
@@ -254,6 +278,14 @@ def compact(catalog_dir: Path) -> CompactResult:
                 run.metadata,
                 None,  # outcome is not set during compact
                 output_metadata_json,
+                run.sidecar_sha256,
+                run.sidecar_path,
+                run.parent_run_id,
+                run.agent_mode,
+                run.sidecar_mode,
+                run.outcome_is_residual,
+                run.skill_sha256,
+                run.campaign_id,
             ],
         )
 
