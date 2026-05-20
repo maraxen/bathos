@@ -158,6 +158,24 @@ def show(run_id: str = typer.Argument(...)):
 
 
 @app.command()
+def lineage(run_id: str = typer.Argument(...)):
+    """Show ancestor chain of a run following parent_run_id links."""
+    from bathos.query import lineage as get_lineage
+
+    ancestors = get_lineage(run_id, _catalog_dir())
+    if not ancestors:
+        typer.echo(f"Run not found or no lineage: {run_id}", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"Lineage for {run_id[:8]}:")
+    for r in ancestors:
+        outcome_str = r.outcome if r.outcome else "-"
+        typer.echo(
+            f"  {r.id[:8]} {r.timestamp.isoformat()[:19]} "
+            f"outcome={outcome_str} {r.command[:40]}"
+        )
+
+
+@app.command()
 def find(
     project: str | None = typer.Option(None, "--project", "-p"),
     since: str | None = typer.Option(None, "--since"),
@@ -606,14 +624,52 @@ def migrate(
         typer.echo("  Nothing to migrate.")
 
 
+@app.command("sprint-audit")
+def sprint_audit_cmd(
+    hours: int = typer.Option(24, "--hours", help="Lookback window in hours"),
+):
+    """Audit recent runs and campaigns across all registered projects."""
+    from bathos.sprint_audit import sprint_audit
+
+    result = sprint_audit(hours)
+    if result["warnings"]:
+        typer.echo("Warnings:")
+        for w in result["warnings"]:
+            typer.echo(f"  WARNING: {w}")
+        typer.echo()
+    if not result["audit_results"]:
+        typer.echo("No projects found. Run 'bth init' in each project first.")
+        return
+    for slug, data in result["audit_results"].items():
+        typer.echo(
+            f"{slug}: {data['runs']} runs, {data['campaigns']} campaigns"
+        )
+        for anomaly in data["anomalies"]:
+            typer.echo(f"  WARNING: {anomaly}")
+
+
 @app.command()
 def lint(
     project_root: Path = typer.Option(Path("."), "--project-root", "-p", help="Project root to lint"),
 ):
     """Check scripts/ for naming conventions and missing sidecars."""
-    from bathos.linter import lint_project, IssueSeverity
+    from bathos.linter import (
+        lint_project,
+        IssueSeverity,
+        check_residual_rates,
+        check_bypass_trend,
+        check_unfired_branches,
+    )
 
     issues = lint_project(project_root.resolve())
+
+    # Add warm-catalog Tier-2 checks if catalog exists
+    catalog_dir = _catalog_dir()
+    db_path = catalog_dir / "bathos.db"
+    if db_path.exists():
+        issues.extend(check_residual_rates(catalog_dir))
+        issues.extend(check_bypass_trend(catalog_dir))
+        issues.extend(check_unfired_branches(catalog_dir))
 
     if not issues:
         typer.echo("No issues found.")

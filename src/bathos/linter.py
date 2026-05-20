@@ -162,12 +162,12 @@ def check_residual_rates(catalog_dir: Path, threshold: float = 0.10) -> list[Lin
             rows = db.execute(
                 """
                 SELECT
-                    COALESCE(cr.campaign_id, '') as campaign_id,
+                    COALESCE(cr.campaign_id, r.campaign_id, '') as campaign_id,
                     COUNT(*) as total,
                     SUM(CASE WHEN r.outcome_is_residual THEN 1 ELSE 0 END) as residual_count
                 FROM runs r
                 LEFT JOIN campaign_runs cr ON r.id = cr.run_id
-                GROUP BY campaign_id
+                GROUP BY COALESCE(cr.campaign_id, r.campaign_id, '')
                 HAVING total > 0
             """
             ).fetchall()

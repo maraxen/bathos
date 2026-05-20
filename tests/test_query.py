@@ -273,3 +273,68 @@ def test_list_runs_includes_outcome(tmp_path):
     runs = list_runs(tmp_path)
     assert len(runs) == 1
     assert runs[0].outcome == "pass"
+
+
+def test_lineage_returns_ancestor_chain(tmp_path):
+    """Test that lineage() returns ancestor chain following parent_run_id."""
+    from bathos.compact import compact
+    from bathos.query import lineage
+
+    init_catalog(tmp_path)
+
+    # Create 3 runs where run3.parent_run_id=run2.id, run2.parent_run_id=run1.id
+    base = datetime(2026, 5, 10, 12, 0, 0, tzinfo=UTC)
+
+    run1 = Run(
+        project_slug="test",
+        command="python test1.py",
+        argv=["python", "test1.py"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        timestamp=base,
+        status="completed",
+        exit_code=0,
+    )
+    write_run(run1, tmp_path)
+
+    run2 = Run(
+        project_slug="test",
+        command="python test2.py",
+        argv=["python", "test2.py"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        timestamp=base + timedelta(seconds=1),
+        status="completed",
+        exit_code=0,
+        parent_run_id=run1.id,
+    )
+    write_run(run2, tmp_path)
+
+    run3 = Run(
+        project_slug="test",
+        command="python test3.py",
+        argv=["python", "test3.py"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        timestamp=base + timedelta(seconds=2),
+        status="completed",
+        exit_code=0,
+        parent_run_id=run2.id,
+    )
+    write_run(run3, tmp_path)
+
+    # Compact to warm DB
+    compact(tmp_path)
+
+    # Query lineage of run3
+    ancestors = lineage(run3.id, tmp_path)
+
+    # Should return [run1, run2, run3] in chronological order
+    assert len(ancestors) == 3
+    assert ancestors[0].id == run1.id
+    assert ancestors[1].id == run2.id
+    assert ancestors[2].id == run3.id
+    assert ancestors[0].timestamp < ancestors[1].timestamp < ancestors[2].timestamp

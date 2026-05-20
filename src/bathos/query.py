@@ -409,7 +409,7 @@ def lineage(run_id: str, catalog_dir: Path) -> list[Run]:
                 UNION ALL
                 SELECT r.* FROM runs r
                 INNER JOIN ancestors a ON r.id = a.parent_run_id
-                WHERE r.parent_run_id != ''
+                WHERE a.parent_run_id != ''
             )
             SELECT * FROM ancestors ORDER BY timestamp
         """,

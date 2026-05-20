@@ -102,3 +102,102 @@ def test_cli_lint_exits_1_with_issues(tmp_path, monkeypatch):
     result = runner.invoke(app, ["lint"])
     assert result.exit_code == 1
     assert "error" in result.output.lower() or "issue" in result.output.lower()
+
+
+def test_check_residual_rates_detects_high_rate(tmp_path):
+    """Test that check_residual_rates detects high residual rates in uncampaigned runs."""
+    from datetime import UTC, datetime
+    import duckdb
+    from bathos.catalog import init_catalog, write_run
+    from bathos.compact import compact
+    from bathos.linter import check_residual_rates
+    from bathos.schema import Run
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    init_catalog(catalog_dir)
+
+    # Create runs where some are residual
+    base_time = datetime.now(UTC)
+    for i in range(10):
+        r = Run(
+            project_slug="test",
+            command="python test.py",
+            argv=["python", "test.py"],
+            git_hash="abc",
+            git_branch="main",
+            git_dirty=False,
+            timestamp=base_time + __import__("datetime").timedelta(seconds=i),
+            status="completed",
+            exit_code=0,
+            outcome="pass",
+            outcome_is_residual=i < 2,  # 2/10 = 20% residual
+        )
+        write_run(r, catalog_dir)
+
+    compact(catalog_dir)
+
+    # Manually set outcome in warm DB to test the check
+    db_path = catalog_dir / "bathos.db"
+    db = duckdb.connect(str(db_path))
+    db.execute("UPDATE runs SET outcome = 'pass' WHERE outcome IS NULL OR outcome = ''")
+    db.close()
+
+    issues = check_residual_rates(catalog_dir, threshold=0.10)
+    assert len(issues) > 0
+    assert any("high_residual_rate" in str(i.issue) for i in issues)
+
+
+def test_check_bypass_trend_returns_empty_for_no_data(tmp_path):
+    """Test that check_bypass_trend returns empty list for empty/missing catalog."""
+    from bathos.linter import check_bypass_trend
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+
+    issues = check_bypass_trend(catalog_dir)
+    assert issues == []
+
+
+def test_check_unfired_branches_detects_single_outcome(tmp_path):
+    """Test that check_unfired_branches detects branches with single outcome."""
+    from datetime import UTC, datetime
+    import duckdb
+    from bathos.catalog import init_catalog, write_run
+    from bathos.compact import compact
+    from bathos.linter import check_unfired_branches
+    from bathos.schema import Run
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    init_catalog(catalog_dir)
+
+    # Create 6 runs with same command, same sidecar_sha256, same outcome
+    base_time = datetime.now(UTC)
+    for i in range(6):
+        r = Run(
+            project_slug="test",
+            command="python test_stable.py",
+            argv=["python", "test_stable.py"],
+            git_hash="abc",
+            git_branch="main",
+            git_dirty=False,
+            timestamp=base_time + __import__("datetime").timedelta(seconds=i),
+            status="completed",
+            exit_code=0,
+            outcome="pass",
+            sidecar_sha256="sha256_abc",
+        )
+        write_run(r, catalog_dir)
+
+    compact(catalog_dir)
+
+    # Manually set outcome in warm DB (compact doesn't preserve it)
+    db_path = catalog_dir / "bathos.db"
+    db = duckdb.connect(str(db_path))
+    db.execute("UPDATE runs SET outcome = 'pass'")
+    db.close()
+
+    issues = check_unfired_branches(catalog_dir, min_runs=5)
+    assert len(issues) > 0
+    assert any("single_outcome_branch_fired" in str(i.issue) for i in issues)
