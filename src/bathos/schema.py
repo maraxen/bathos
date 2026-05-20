@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pyarrow as pa
 
-CURRENT_SCHEMA_VERSION = "2"
+CURRENT_SCHEMA_VERSION = "3"
 
 COOL_SCHEMA = pa.schema(
     [
@@ -27,6 +27,14 @@ COOL_SCHEMA = pa.schema(
         pa.field("slurm_job_id", pa.string()),
         pa.field("hostname", pa.string()),
         pa.field("outcome", pa.string()),
+        pa.field("sidecar_sha256", pa.string()),
+        pa.field("sidecar_path", pa.string()),
+        pa.field("parent_run_id", pa.string()),
+        pa.field("agent_mode", pa.string()),
+        pa.field("sidecar_mode", pa.string()),
+        pa.field("outcome_is_residual", pa.bool_()),
+        pa.field("skill_sha256", pa.string()),
+        pa.field("campaign_id", pa.string()),
     ]
 )
 
@@ -51,6 +59,14 @@ WARM_SCHEMA = pa.schema(
         pa.field("metadata", pa.string()),
         pa.field("outcome", pa.string()),
         pa.field("output_metadata", pa.string()),
+        pa.field("sidecar_sha256", pa.string()),
+        pa.field("sidecar_path", pa.string()),
+        pa.field("parent_run_id", pa.string()),
+        pa.field("agent_mode", pa.string()),
+        pa.field("sidecar_mode", pa.string()),
+        pa.field("outcome_is_residual", pa.bool_()),
+        pa.field("skill_sha256", pa.string()),
+        pa.field("campaign_id", pa.string()),
     ]
 )
 
@@ -75,6 +91,14 @@ class Run:
     hostname: str = ""
     metadata: str = "{}"
     outcome: str = ""
+    sidecar_sha256: str = ""
+    sidecar_path: str = ""
+    parent_run_id: str = ""
+    agent_mode: str = ""
+    sidecar_mode: str = ""
+    outcome_is_residual: bool = False
+    skill_sha256: str = ""
+    campaign_id: str = ""
 
     def to_arrow(self) -> pa.Table:
         return pa.table(
