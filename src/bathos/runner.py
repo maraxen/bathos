@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -46,6 +48,39 @@ def _find_script_path(argv: list[str], cwd: Path) -> Path | None:
             return None
         i += 1
     return None
+
+
+def _read_result_emission(env_var_path: Path, script_path: Path | None) -> str:
+    """
+    Read result emission from either:
+    1. env_var_path (set by BTH_RESULTS_PATH env var)
+    2. <script_stem>.bth-results.json adjacent to script (fallback)
+
+    Returns JSON string, or "{}" if neither exists or if JSON is invalid.
+    """
+    # Try env var path first
+    if env_var_path.exists():
+        try:
+            content = env_var_path.read_text()
+            # Validate it's valid JSON
+            json.loads(content)
+            return content
+        except (json.JSONDecodeError, OSError):
+            return "{}"
+
+    # Try fallback path adjacent to script
+    if script_path is not None:
+        fallback_path = script_path.parent / f"{script_path.stem}.bth-results.json"
+        if fallback_path.exists():
+            try:
+                content = fallback_path.read_text()
+                # Validate it's valid JSON
+                json.loads(content)
+                return content
+            except (json.JSONDecodeError, OSError):
+                return "{}"
+
+    return "{}"
 
 
 def run_script(
@@ -92,21 +127,31 @@ def run_script(
     catalog_dir.mkdir(parents=True, exist_ok=True)
     write_run(run, catalog_dir)
 
+    # Create temporary results file path for subprocess to write to
+    results_temp_dir = Path(tempfile.gettempdir())
+    results_temp_path = results_temp_dir / f"{run.id}.bth-results.json"
+
+    # Set up environment with results path
+    env = os.environ.copy()
+    env["BTH_RESULTS_PATH"] = str(results_temp_path)
+
     start = time.monotonic()
     try:
-        result = subprocess.run(argv, cwd=cwd)
+        result = subprocess.run(argv, cwd=cwd, env=env)
         exit_code = result.returncode
         status = "completed" if exit_code == 0 else "failed"
     except KeyboardInterrupt:
         exit_code = 130
         status = "killed"
 
+    # Read result emission from BTH_RESULTS_PATH or fallback path
+    metadata = _read_result_emission(results_temp_path, script_path)
+
     outcome = ""
     if sidecar is not None:
         # Outcome evaluation: read result_schema fields from metadata
-        import json
         try:
-            meta = json.loads(run.metadata)
+            meta = json.loads(metadata)
         except (json.JSONDecodeError, TypeError):
             meta = {}
         outcome = evaluate_outcome(sidecar, meta)
@@ -116,7 +161,16 @@ def run_script(
         duration_s=time.monotonic() - start,
         exit_code=exit_code,
         status=status,
+        metadata=metadata,
         outcome=outcome,
     )
     write_run(run, catalog_dir)
+
+    # Clean up temp results file if it exists
+    if results_temp_path.exists():
+        try:
+            results_temp_path.unlink()
+        except OSError:
+            pass  # Silent fail on cleanup
+
     return exit_code
