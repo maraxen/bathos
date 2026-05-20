@@ -92,7 +92,7 @@ slurm_job_id        | If present in environment
 
 ## Pre-Registration (Sidecars) — Core Discipline
 
-**Every script in tracked directories (`scripts/experiments/`, `scripts/benchmarks/`, `scripts/debug/`) must have a companion `.bth.toml` sidecar** declaring hypothesis, expected outcomes, and result schema.
+**Every script in tracked directories (`scripts/experiments/`, `scripts/benchmarks/`, `scripts/validation/`) must have a companion `.bth.toml` sidecar** declaring hypothesis, expected outcomes, and result schema.
 
 - **v0.1:** Warns if sidecar missing; does not block execution.
 - **v0.2:** Enforces; blocks execution without valid sidecar.

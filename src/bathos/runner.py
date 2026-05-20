@@ -136,8 +136,8 @@ def run_script(
     resolved_mode = resolve_agent_mode(
         cli_flag=agent_mode,
         sidecar=sidecar,
-        project_config=None,
-        global_config={"agent_mode": global_config_mode} if global_config_mode else None,
+        project_config={"defaults": {"agent_mode": project_config_mode}} if project_config_mode else None,
+        global_config={"defaults": {"agent_mode": global_config_mode}} if global_config_mode else None,
     )
 
     git = capture_git_state(cwd)

@@ -402,16 +402,18 @@ def lineage(run_id: str, catalog_dir: Path) -> list[Run]:
     db.execute("SET TimeZone='UTC'")
     try:
         # Use recursive CTE to find all ancestors
+        # COALESCE handles both NULL and empty string for parent_run_id
+        # depth < 50 prevents runaway cycles
         rows = db.execute(
             """
             WITH RECURSIVE ancestors AS (
-                SELECT * FROM runs WHERE id = ?
+                SELECT *, 0 AS depth FROM runs WHERE id = ?
                 UNION ALL
-                SELECT r.* FROM runs r
+                SELECT r.*, a.depth + 1 FROM runs r
                 INNER JOIN ancestors a ON r.id = a.parent_run_id
-                WHERE a.parent_run_id != ''
+                WHERE COALESCE(a.parent_run_id, '') != '' AND a.depth < 50
             )
-            SELECT * FROM ancestors ORDER BY timestamp
+            SELECT * EXCLUDE (depth) FROM ancestors ORDER BY timestamp
         """,
             [run_id],
         ).fetchall()

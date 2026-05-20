@@ -422,6 +422,8 @@ def run_tool(
             tags=tags,
             agent_mode=agent_mode or None,
             no_sidecar=no_sidecar,
+            derived_from=derived_from or None,
+            campaign_id=campaign_id or None,
         )
 
         return json.dumps(

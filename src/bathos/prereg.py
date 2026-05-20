@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+import duckdb
+
 from bathos.sidecar import Sidecar, find_sidecar, parse_sidecar
 from bathos.validate import ValidationResult, validate_sidecar
 
@@ -67,17 +69,25 @@ def check_first_of_kind(script_path: Path, catalog_dir: Path, git_hash: str) -> 
     is semantically consistent with what the catalog contains.
     Q5 resolution: first-of-kind = no prior run with same (command LIKE script_path%, git_hash).
     """
-    from bathos.query import _resolve_backend, run_sql
+    from bathos.query import _resolve_backend
 
     # Normalize script path to a comparable string
     script_str = str(script_path.resolve())
     try:
         if _resolve_backend(catalog_dir) == "warm":
-            rows = run_sql(
-                f"SELECT COUNT(*) FROM runs WHERE command LIKE '%{script_str}%' AND git_hash = '{git_hash}'",
-                catalog_dir,
-            )
-            return rows[0][0] == 0
+            db_path = catalog_dir / "bathos.db"
+            if db_path.exists():
+                con = duckdb.connect(str(db_path), read_only=True)
+                try:
+                    rows = con.execute(
+                        "SELECT COUNT(*) FROM runs WHERE command LIKE ? AND git_hash = ?",
+                        [f"%{script_str}%", git_hash]
+                    ).fetchall()
+                    con.close()
+                    return rows[0][0] == 0
+                finally:
+                    if not con.closed:
+                        con.close()
     except Exception:
         pass
     # If warm tier unavailable, scan cool tier

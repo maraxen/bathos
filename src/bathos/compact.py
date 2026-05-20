@@ -316,7 +316,7 @@ def compact(catalog_dir: Path) -> CompactResult:
                 run.slurm_job_id,
                 run.hostname,
                 run.metadata,
-                None,  # outcome is not set during compact
+                run.outcome or None,  # preserve evaluated outcome label from cool fragment
                 output_metadata_json,
                 run.sidecar_sha256,
                 run.sidecar_path,

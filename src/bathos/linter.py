@@ -328,7 +328,7 @@ def check_unfired_branches(catalog_dir: Path, min_runs: int = 5) -> list[LintIss
                     severity=IssueSeverity.WARNING,
                     detail=f"Branch fired consistently ({total} runs, "
                     f"1 outcome) — consider hypothesis validated: "
-                    f"{command[:40][:8]}...",
+                    f"Script {command[:40]} (sidecar: {sidecar_sha256[:8]})",
                 )
             )
 

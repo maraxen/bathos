@@ -58,13 +58,25 @@ def add_run_to_campaign(db, campaign_id: str, run_id: str) -> None:
 
     # Enforce temporal ordering for confirmation campaigns
     if campaign_mode == "confirmation":
-        # Parse both as strings for comparison (both are ISO strings)
-        run_ts_str = run_timestamp.isoformat() if hasattr(run_timestamp, "isoformat") else str(run_timestamp)
-        if run_ts_str < campaign_started_at:
-            raise CampaignError(
-                f"Cannot add run {run_id} to confirmation campaign {campaign_id}: "
-                f"run timestamp ({run_ts_str}) predates campaign creation ({campaign_started_at})"
-            )
+        # Parse campaign_started_at as datetime
+        try:
+            campaign_dt = datetime.fromisoformat(campaign_started_at)
+            if campaign_dt.tzinfo is None:
+                campaign_dt = campaign_dt.replace(tzinfo=UTC)
+        except (ValueError, TypeError):
+            campaign_dt = None
+
+        # Get run timestamp as datetime
+        run_dt = run_timestamp if isinstance(run_timestamp, datetime) else None
+        if run_dt is not None and run_dt.tzinfo is None:
+            run_dt = run_dt.replace(tzinfo=UTC)
+
+        if campaign_dt is not None and run_dt is not None:
+            if run_dt < campaign_dt:
+                raise CampaignError(
+                    f"Cannot add run {run_id} to confirmation campaign {campaign_id}: "
+                    f"run timestamp ({run_dt.isoformat()}) predates campaign creation ({campaign_dt.isoformat()})"
+                )
 
     db.execute(
         "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
