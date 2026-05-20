@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-05-20
+
+### Added
+
+- **Agentic integrity gate layer** — `prereg.py` enforces sidecar presence and structural validity before any run in `scripts/experiments/`, `scripts/benchmarks/`, or `scripts/validation/`; structured JSON gate errors returned on failure with `gate_schema_version: 1`, `errors[]`, and `remediation` guidance
+- **Run modes: collaborative / autonomous** — `bth run --agent-mode <mode>`; priority chain: CLI flag → sidecar `[experiment] agent_mode` → project `.bth.toml` `[defaults]` → global config → `"collaborative"`; autonomous mode enforces first-of-kind check (blocks re-running the same script at the same git HEAD)
+- **Sidecar structural validator** (`validate.py`) — checks `[outcomes.*]` blocks for `condition`, `decision`, `reasoning` fields; validates DuckDB SQL conditions; requires at least one `is_residual = true` fallback branch; requires at least one `result_schema` field referenced in conditions
+- **Schema v3** — 8 new fields on `Run`: `sidecar_sha256`, `sidecar_path`, `parent_run_id`, `agent_mode`, `sidecar_mode`, `outcome_is_residual`, `skill_sha256`, `campaign_id`; full migration chain v0→v1→v2→v3
+- **Result emission pipeline** — `$BTH_RESULTS_PATH` env var (or `<stem>.bth-results.json` fallback) connects script output to outcome evaluation; `run.outcome` now populated from sidecar conditions at run-end
+- **Lineage tracking** — `bth run --derived-from <run-id>` links runs into a DAG; `bth lineage <run-id>` shows ancestor chain via recursive CTE with cycle protection
+- **Campaigns** — `bth campaign create/add/conclude/ls/show/review`; two modes: `exploration` (no temporal constraint) and `confirmation` (enforces runs must postdate campaign creation); campaign membership written to cool fragment at run time and auto-populated to warm `campaign_runs` table at compaction
+- **Sprint audit** — `bth sprint-audit [--hours N]` cross-project audit across all registered projects; skips projects with incompatible schema version with warning; detects unknown outcomes, bypass spikes, residual rate anomalies
+- **Tier-2 lint checks** (`bth lint` extended) — `check_residual_rates` (warn >10% per campaign), `check_bypass_trend` (warn if bypass rate increasing week-over-week), `check_unfired_branches` (warn if all runs in a group map to same outcome)
+- **MCP campaign tools** — `campaign_create`, `campaign_list`, `campaign_review`, `campaign_conclude` exposed as MCP tools; `run` tool extended with `agent_mode`, `campaign_id`, `derived_from`, `no_sidecar` parameters; gate failures returned as structured tool results
+- **CLI flags** — `bth run --agent-mode`, `--no-sidecar`, `--derived-from`, `--campaign`; `bth ls --outcome`, `--sidecar-mode`
+- **SKILL.md agentic integrity section** — three-tier taxonomy (Tier 1: validate, Tier 2: lint, Tier 3: principles) + campaign workflow examples
+
+### Fixed
+
+- `compact.py` — outcome labels from cool fragments now preserved during warm-tier promotion (previously silently set to NULL)
+- `prereg.py` — `check_first_of_kind()` SQL query now parameterised (previously used f-string interpolation, SQL injection risk)
+- `compact.py` — `_migrate_v1()` now hardcodes target version `"2"` (previously referenced `CURRENT_SCHEMA_VERSION` dynamically, which would cause v1→v3 skip when version bumped)
+- `query.py` — `lineage()` CTE now handles NULL `parent_run_id` via `COALESCE` and guards against cycles with `depth < 50` limit
+- `campaigns.py` — temporal ordering comparison now uses parsed datetimes with timezone normalisation (previously compared heterogeneous types as strings)
+
+---
+
 ## [0.2.1] - 2026-05-19
 
 ### Fixed
