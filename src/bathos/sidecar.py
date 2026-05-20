@@ -23,6 +23,8 @@ class SidecarKind(str, Enum):
 class OutcomeSpec:
     condition: str
     decision: str
+    reasoning: str = ""
+    is_residual: bool = False
 
 
 @dataclass
@@ -113,6 +115,8 @@ def _parse_outcomes(data: dict) -> dict[str, OutcomeSpec]:
         label: OutcomeSpec(
             condition=spec.get("condition", ""),
             decision=spec.get("decision", ""),
+            reasoning=spec.get("reasoning", ""),
+            is_residual=bool(spec.get("is_residual", False)),
         )
         for label, spec in outcomes_data.items()
     }

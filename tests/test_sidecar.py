@@ -17,9 +17,12 @@ def test_parse_experiment_sidecar(tmp_path):
         [outcomes.pass]
         condition = "temp_std < 5"
         decision = "proceed"
+        reasoning = "Temperature within tolerance"
         [outcomes.fail]
         condition = "temp_std >= 5"
         decision = "debug"
+        reasoning = "Temperature stability issue"
+        is_residual = true
         [result_schema]
         temp_std = "float"
     """)
@@ -97,9 +100,12 @@ def test_evaluate_outcome_pass(tmp_path):
         [outcomes.pass]
         condition = "temp_std < 5"
         decision = "proceed"
+        reasoning = "Good stability"
         [outcomes.fail]
         condition = "temp_std >= 5"
         decision = "debug"
+        reasoning = "Poor stability"
+        is_residual = true
         [result_schema]
         temp_std = "float"
     """)
@@ -116,6 +122,12 @@ def test_evaluate_outcome_no_match(tmp_path):
         [outcomes.pass]
         condition = "temp_std < 5"
         decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Catch-all for unclassified results"
+        is_residual = true
         [result_schema]
         temp_std = "float"
     """)
@@ -135,9 +147,12 @@ def test_evaluate_outcome_bool_result(tmp_path):
         [outcomes.reproduced]
         condition = "reproduced = TRUE"
         decision = "confirmed bug"
+        reasoning = "Issue reproducible with smaller box"
         [outcomes.not_reproduced]
         condition = "reproduced = FALSE"
         decision = "environment issue"
+        reasoning = "Cannot reproduce with current setup"
+        is_residual = true
         [verdict_schema]
         reproduced = "bool"
     """)
