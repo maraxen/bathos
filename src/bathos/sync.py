@@ -7,6 +7,8 @@ from pathlib import Path
 
 from bathos.config import ProjectConfig
 
+_SYNC_TIMEOUT_S = 120  # rsync kill switch: fail if no completion within 2 minutes
+
 
 @dataclass
 class SyncResult:
@@ -53,17 +55,30 @@ def sync_catalog(
         src = str(local_runs) + "/"
         dst = remote_runs
 
-    # Construct rsync command
+    # ConnectTimeout=10: fail in 10s if host is unreachable rather than hanging
+    # BatchMode=yes: never prompt for a password — fail immediately instead
+    ssh_opts = "ssh -o ConnectTimeout=10 -o BatchMode=yes"
+
     cmd = [
         "rsync",
-        "-azP",
+        "-az",
+        "--partial",
+        f"-e{ssh_opts}",
         "--ignore-existing",
         src,
         dst,
     ]
 
     start_time = time.time()
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=_SYNC_TIMEOUT_S
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"bth sync timed out after {_SYNC_TIMEOUT_S}s — "
+            "check that the remote host is reachable and SSH keys are configured"
+        )
     duration_s = time.time() - start_time
 
     if result.returncode != 0:

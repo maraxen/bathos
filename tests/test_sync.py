@@ -40,12 +40,57 @@ def test_sync_constructs_correct_rsync_command_push(tmp_path: Path):
 
         # Should be rsync command
         assert cmd[0] == "rsync"
-        # Should have -azP flags
-        assert "-azP" in cmd
+        # Should have -az flags (no -P: progress is useless when output is captured)
+        assert "-az" in cmd
+        # Should pass SSH options for fast failure: ConnectTimeout + BatchMode
+        assert any("ConnectTimeout" in str(a) for a in cmd)
+        assert any("BatchMode=yes" in str(a) for a in cmd)
         # Should have --ignore-existing flag
         assert "--ignore-existing" in cmd
         # Should reference runs directories
         assert any("runs/" in str(arg) for arg in cmd)
+
+
+def test_sync_passes_timeout_to_subprocess(tmp_path: Path):
+    """sync_catalog passes a timeout to subprocess.run so it cannot hang forever."""
+    config = ProjectConfig(
+        slug="test",
+        root=Path("/home/user/test"),
+        remotes={"engaging": {"host": "engaging", "remote_root": "~/projects/test"}},
+    )
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    (catalog_dir / "runs").mkdir()
+
+    with patch("bathos.sync.subprocess.run") as mock_run:
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = ""
+
+        sync_catalog("engaging", config, catalog_dir, pull=False)
+
+        call_kwargs = mock_run.call_args[1]
+        assert "timeout" in call_kwargs, "subprocess.run must have a timeout to prevent indefinite hangs"
+        assert call_kwargs["timeout"] > 0
+
+
+def test_sync_raises_on_timeout(tmp_path: Path):
+    """sync_catalog raises RuntimeError with clear message when rsync times out."""
+    import subprocess as _subprocess
+
+    config = ProjectConfig(
+        slug="test",
+        root=Path("/home/user/test"),
+        remotes={"engaging": {"host": "engaging", "remote_root": "~/projects/test"}},
+    )
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    (catalog_dir / "runs").mkdir()
+
+    with patch("bathos.sync.subprocess.run") as mock_run:
+        mock_run.side_effect = _subprocess.TimeoutExpired(cmd=["rsync"], timeout=120)
+
+        with pytest.raises(RuntimeError, match="timed out"):
+            sync_catalog("engaging", config, catalog_dir, pull=False)
 
 
 def test_sync_pull_reverses_direction(tmp_path: Path):

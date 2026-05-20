@@ -177,7 +177,7 @@ remote_root = "~/projects/testproj"
 
         # Verify rsync command structure
         assert cmd[0] == "rsync"
-        assert "-azP" in cmd
+        assert "-az" in cmd
         assert "--ignore-existing" in cmd
         # Should have source and destination with runs/ directories
         assert any("runs/" in str(arg) for arg in cmd)
