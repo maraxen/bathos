@@ -6,13 +6,12 @@ from unittest.mock import patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-import pytest
 
 from bathos.catalog import write_run
 from bathos.config import ProjectConfig
 from bathos.migrate import migrate_to_project_subdirs
 from bathos.schema import Run
-from bathos.sync import SyncResult, sync_catalog
+from bathos.sync import sync_catalog
 
 
 def _make_run(slug: str, suffix: str = "") -> Run:
@@ -65,7 +64,7 @@ def test_sync_filters_by_slug(tmp_path: Path):
 
         cmd = mock_run.call_args[0][0]
         # Source should be the project-slug subdir
-        assert any(f"runs/asr/" in str(a) for a in cmd), f"Expected runs/asr/ in cmd: {cmd}"
+        assert any("runs/asr/" in str(a) for a in cmd), f"Expected runs/asr/ in cmd: {cmd}"
         # Should NOT reference prolix
         assert not any("prolix" in str(a) for a in cmd)
         # Filtered count: 1 prolix run

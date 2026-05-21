@@ -419,6 +419,7 @@ def campaign_create(
 ):
     """Create a new campaign."""
     import duckdb
+
     from bathos.campaigns import create_campaign
     slug = _require_project_slug()
     db = duckdb.connect(str(_catalog_dir() / "bathos.db"))
@@ -436,7 +437,8 @@ def campaign_add(
 ):
     """Add a run to a campaign."""
     import duckdb
-    from bathos.campaigns import add_run_to_campaign, CampaignError
+
+    from bathos.campaigns import CampaignError, add_run_to_campaign
     db = duckdb.connect(str(_catalog_dir() / "bathos.db"))
     try:
         add_run_to_campaign(db, campaign, run_id)
@@ -456,7 +458,8 @@ def campaign_conclude(
 ):
     """Conclude a campaign with an outcome label."""
     import duckdb
-    from bathos.campaigns import conclude_campaign, CampaignError
+
+    from bathos.campaigns import CampaignError, conclude_campaign
     db = duckdb.connect(str(_catalog_dir() / "bathos.db"))
     try:
         conclude_campaign(db, campaign_id, outcome, note)
@@ -474,6 +477,7 @@ def campaign_ls(
 ):
     """List campaigns."""
     import duckdb
+
     from bathos.campaigns import list_campaigns
     db = duckdb.connect(str(_catalog_dir() / "bathos.db"), read_only=True)
     try:
@@ -493,6 +497,7 @@ def campaign_show(
 ):
     """Show campaign details."""
     import duckdb
+
     from bathos.campaigns import get_campaign
     db = duckdb.connect(str(_catalog_dir() / "bathos.db"), read_only=True)
     try:
@@ -521,6 +526,7 @@ def campaign_review(
 ):
     """Review campaign: residual rate, bypass rate, outcome distribution."""
     import duckdb
+
     from bathos.campaigns import review_campaign
     db = duckdb.connect(str(_catalog_dir() / "bathos.db"), read_only=True)
     try:
@@ -676,11 +682,11 @@ def lint(
 ):
     """Check scripts/ for naming conventions and missing sidecars."""
     from bathos.linter import (
-        lint_project,
         IssueSeverity,
-        check_residual_rates,
         check_bypass_trend,
+        check_residual_rates,
         check_unfired_branches,
+        lint_project,
     )
 
     issues = lint_project(project_root.resolve())
@@ -738,7 +744,7 @@ def export_cmd(
     dry_run: bool = typer.Option(False, "--dry-run", help="Print what would happen without writing"),
 ):
     """Export the using-bathos skill and register MCP server for a code tool."""
-    from bathos.export import export_skill, resolve_target, register_mcp, ExportError
+    from bathos.export import ExportError, export_skill, register_mcp, resolve_target
 
     try:
         target = resolve_target(tool=tool, level=level)
@@ -760,8 +766,8 @@ def export_cmd(
 @app.command("catalog-version")
 def catalog_version_cmd():
     """Show schema version status of the catalog."""
-    from bathos.schema import CURRENT_SCHEMA_VERSION
     from bathos.migrate import migrate_catalog
+    from bathos.schema import CURRENT_SCHEMA_VERSION
 
     catalog_dir = _catalog_dir()
     typer.echo(f"Current schema version: {CURRENT_SCHEMA_VERSION}")
