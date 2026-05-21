@@ -7,11 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.4.1] - 2026-05-21
+
+### Added
+
+- **Postmortem tracking** — `*.bth.postmortem.toml` format for capturing experiment retrospectives; tracked in git (not gitignored); supports `[postmortem]`, `[decisions]`, `[asset_links]`, and `[anomalies]` sections
+- **`bth postmortem validate <file>`** — CLI command to validate a postmortem TOML file; checks refutation consistency, asset path containment, sha256 checksums, and git drift; exits non-zero on violations with structured error output
+- **`postmortem_scaffold` MCP tool** — scaffolds a new `*.bth.postmortem.toml` with pre-populated sections from the associated run record
+- **`postmortem_validate` MCP tool** — validates a postmortem file, returning structured violations for agentic workflows
+- **`postmortem_get` MCP tool** — retrieves postmortem data for a run by run ID or file path
+- **Schema v4** — 10 new DuckDB columns for postmortem metadata; `compact` syncs postmortem data via both INSERT and UPDATE paths
+- **`script_sha256`** — SHA-256 hash of the script file computed in `runner.py` at experiment launch and stored in the run record
+
 ### Fixed
 
-- **`bth sync` indefinite hang** — `sync_catalog()` now passes SSH options (`ConnectTimeout=10`, `BatchMode=yes`) to rsync so unreachable hosts fail in ≤10 s instead of blocking forever; adds `subprocess.run(timeout=120)` as a safety net; raises `RuntimeError` with actionable message on timeout; drops silent `--progress` flag (output was captured, not displayed)
+- **`bth sync` indefinite hang** — `sync_catalog()` now passes SSH options (`ConnectTimeout=10`, `BatchMode=yes`) to rsync so unreachable hosts fail in ≤10 s instead of blocking forever; adds `subprocess.run(timeout=120)` as a safety net; raises `RuntimeError` with actionable message on timeout
+- **Parquet timestamp timezone-aware** — timestamps loaded from Parquet are now always timezone-aware (UTC) to prevent `TypeError` when comparing with aware datetimes in query functions
 
-- **Parquet timestamp timezone-aware fix** — Ensure timestamps loaded from Parquet are timezone-aware (UTC) to avoid comparisons between naive and aware datetimes in query functions; prevents TypeError and incorrect filtering.
+---
+
+## [0.4.0] - 2026-05-21
+
+### Added
+
+- **Per-project sync filtering** — `bth sync` now pushes/pulls only the current project's runs; output reports filtered count (e.g., `Pushed 47 runs (filtered 275 from other projects)`)
+- **`bth migrate-to-project-subdirs`** — migrates flat cool-tier catalogs to the `runs/<slug>/run_<uuid>.parquet` layout
+- **`sync_filter` config knob** — set `sync_filter = "none"` in `.bth.toml` to disable per-project filtering and sync all projects
+
+### Changed
+
+- **Cool-tier layout** — per-run Parquet fragments now stored at `runs/<slug>/run_<uuid>.parquet` instead of flat `runs/run_<uuid>.parquet`; old layout still readable, use `bth migrate-to-project-subdirs` to upgrade
 
 ---
 

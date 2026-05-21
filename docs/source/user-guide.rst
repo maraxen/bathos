@@ -179,6 +179,37 @@ Synchronize catalog between local machine and cluster.
 - ``--pull``: Download from cluster (default: upload)
 - ``--dry-run``: Preview without changes
 
+**bth postmortem**
+
+Validate a postmortem file for a completed experiment.
+
+.. code-block:: bash
+
+    bth postmortem validate <FILE>
+
+- ``FILE``: Path to a ``*.bth.postmortem.toml`` file
+
+Postmortem files are plain TOML tracked in git alongside experiment scripts. They capture retrospective notes, decisions, asset checksums, and anomalies. The validator checks refutation consistency, asset path containment, sha256 checksums, and git drift, exiting non-zero if violations are found.
+
+Example postmortem file:
+
+.. code-block:: toml
+
+    [postmortem]
+    run_id = "run_abc123"
+    summary = "NVT equilibration stable at 300K ± 2K over 50ps"
+    outcome = "pass"
+
+    [decisions]
+    dt_choice = "0.5 fs chosen for SETTLE+Langevin stability"
+
+    [asset_links]
+    trajectory = "outputs/run_abc123/traj.dcd"
+    log = "outputs/run_abc123/md.log"
+
+    [anomalies]
+    # none observed
+
 Script Directory Convention
 ---------------------------
 

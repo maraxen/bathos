@@ -75,6 +75,9 @@ bth sql "SELECT project_slug, count(*) FROM runs GROUP BY 1"
 - `bth remote remove <name>` — remove a remote
 - `bth remote test <name>` — test SSH connectivity to a remote
 
+**`bth postmortem`** — Retrospective tracking for completed experiments (v0.4.1+)
+- `bth postmortem validate <file>` — validate a `*.bth.postmortem.toml` file (refutation consistency, asset checksums, git drift)
+
 **`bth campaign`** — Manage experiment campaigns (v0.3+)
 - `bth campaign create <id> --hypothesis <text>` — create a new campaign
 - `bth campaign add <run-id> --campaign <id>` — associate a run with a campaign
