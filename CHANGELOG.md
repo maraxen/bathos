@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`bth sync` indefinite hang** — `sync_catalog()` now passes SSH options (`ConnectTimeout=10`, `BatchMode=yes`) to rsync so unreachable hosts fail in ≤10 s instead of blocking forever; adds `subprocess.run(timeout=120)` as a safety net; raises `RuntimeError` with actionable message on timeout; drops silent `--progress` flag (output was captured, not displayed)
 
+- **Parquet timestamp timezone-aware fix** — Ensure timestamps loaded from Parquet are timezone-aware (UTC) to avoid comparisons between naive and aware datetimes in query functions; prevents TypeError and incorrect filtering.
+
 ---
 
 ## [0.3.0] - 2026-05-20

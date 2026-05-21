@@ -137,6 +137,9 @@ class Run:
         ts = pydict["timestamp"][i]
         if not isinstance(ts, datetime):
             ts = ts.as_py()
+        # Ensure timestamp is timezone-aware in UTC for internal comparisons
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
         return cls(
             id=pydict["id"][i],
             project_slug=pydict["project_slug"][i],
