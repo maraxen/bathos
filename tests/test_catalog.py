@@ -24,7 +24,7 @@ def test_write_and_read_single_run(tmp_catalog: Path, sample_run: Run):
 def test_write_creates_parquet_file(tmp_catalog: Path, sample_run: Run):
     init_catalog(tmp_catalog)
     write_run(sample_run, tmp_catalog)
-    files = list((tmp_catalog / "runs").glob("*.parquet"))
+    files = list((tmp_catalog / "runs").rglob("*.parquet"))
     assert len(files) == 1
     assert sample_run.id in files[0].name
 

@@ -13,7 +13,7 @@ description: "Use when working in any bathos-tracked research project — experi
 
 **Scope:** Single researcher, 10+ projects, SLURM cluster integration.
 
-**Status:** ✅ v0.3.0 shipped — 254 tests passing. Full CLI + MCP server available, including campaigns and agentic integrity gates.
+**Status:** ✅ v0.4.0 shipped — 333 tests passing. Full CLI + MCP server available, including campaigns, agentic integrity gates, and per-project sync filtering.
 
 ---
 

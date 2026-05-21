@@ -61,8 +61,8 @@ def test_full_workflow(tmp_path: Path, monkeypatch):
     assert run_id in r.output
     assert "intproj" in r.output
 
-    # 7. sql escape hatch (cool tier)
-    glob = str(catalog / "runs" / "run_*.parquet")
+    # 7. sql escape hatch (cool tier; runs are in per-project subdirs)
+    glob = str(catalog / "runs" / "intproj" / "run_*.parquet")
     r = runner.invoke(app, ["sql", f"SELECT count(*) FROM read_parquet('{glob}')"])
     assert r.exit_code == 0
     assert "2" in r.output

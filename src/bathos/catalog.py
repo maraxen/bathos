@@ -15,7 +15,7 @@ def init_catalog(catalog_dir: Path) -> None:
 
 def write_run(run: Run, catalog_dir: Path) -> None:
     """Write (or overwrite) a run record atomically."""
-    runs_dir = catalog_dir / "runs"
+    runs_dir = catalog_dir / "runs" / run.project_slug
     runs_dir.mkdir(parents=True, exist_ok=True)
     target = runs_dir / f"run_{run.id}.parquet"
     tmp = runs_dir / f"run_{run.id}.tmp.parquet"
@@ -28,7 +28,7 @@ def read_runs(catalog_dir: Path) -> list[Run]:
     runs_dir = catalog_dir / "runs"
     if not runs_dir.exists():
         return []
-    parquet_files = list(runs_dir.glob("run_*.parquet"))
+    parquet_files = list(runs_dir.rglob("run_*.parquet"))
     if not parquet_files:
         return []
     tables = [pq.read_table(f) for f in parquet_files]

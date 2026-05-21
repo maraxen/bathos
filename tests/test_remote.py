@@ -615,7 +615,7 @@ class TestSyncAutoSelection:
                 mock_load.return_value = config
 
                 with patch("bathos.cli.sync_catalog") as mock_sync:
-                    mock_sync.return_value = MagicMock(transferred=3, remote="engaging", duration_s=0.8)
+                    mock_sync.return_value = MagicMock(transferred=3, remote="engaging", duration_s=0.8, filtered=0)
 
                     result = cli_runner.invoke(app, ["sync"])
 

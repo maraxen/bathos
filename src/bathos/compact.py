@@ -180,7 +180,7 @@ def _fragment_count(catalog_dir: Path) -> int:
     runs_dir = catalog_dir / "runs"
     if not runs_dir.exists():
         return 0
-    return len(list(runs_dir.glob("run_*.parquet")))
+    return len(list(runs_dir.rglob("run_*.parquet")))
 
 
 def should_compact(catalog_dir: Path) -> bool:

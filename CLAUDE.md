@@ -10,9 +10,9 @@ bathos is a standalone experiment tracking CLI for a single researcher across 10
 
 ---
 
-## Current Status (as of 2026-05-20)
+## Current Status (as of 2026-05-21)
 
-**v0.3.0: complete and merged to main.** 254 tests passing.
+**v0.4.0: complete and merged to main.** 333 tests passing.
 
 - Full design spec: `.praxia/specs/bathos-design.md`
 - v0.1 implementation plan: `.praxia/specs/bathos-v01-plan.md`
@@ -21,6 +21,8 @@ bathos is a standalone experiment tracking CLI for a single researcher across 10
 **Shipped in v0.2:** FastMCP server (#128), `@bth.experiment` decorator (#129), `bth check` (#130), SLURM `_bth_env.sh` (#131), `bth new-experiment` (#132), `uv tool` packaging (#133), `bth lint` (#134), `bth migrate` (#135), `bth sync` (#138), schema versioning v2 (#140), `bth archive` (#141), `bth remote` subcommands, `bth export`, `bth catalog-version`.
 
 **Shipped in v0.3:** Agentic integrity gate (`--agent-mode`, `--no-sidecar`, `--derived-from`), lineage tracking (`bth lineage`), campaigns (`bth campaign` subcommands + MCP tools), sprint audit (`bth sprint-audit`), Tier-2 lint checks, schema v3 with campaign/lineage/integrity fields, `--campaign` flag on `bth run`.
+
+**Shipped in v0.4:** Per-project sync filtering — `bth sync` now pushes/pulls only the current project's runs (no cross-project contamination). Cool-tier layout changed to `runs/<slug>/run_<uuid>.parquet`. New command `bth migrate-to-project-subdirs` migrates flat catalogs. `sync_filter` config knob; `--no-project-filter` opt-out planned.
 
 **Remaining backlog:** #136 (bth-migrate praxia workflow), #137 (global instruction portability), #142 (results management design).
 
@@ -34,7 +36,7 @@ bathos is a standalone experiment tracking CLI for a single researcher across 10
 SLURM job / bth run
       │
       ▼  atomic write-then-rename
- cool/   ~/.bth/catalog/runs/run_<uuid>.parquet   ← minimal schema, SLURM-safe
+ cool/   ~/.bth/catalog/runs/<slug>/run_<uuid>.parquet   ← minimal schema, SLURM-safe
       │
  bth compact  (lazy on query or explicit)
       │

@@ -119,7 +119,7 @@ remote_root = "~/projects/testproj"
     write_run(run2, catalog)
 
     # Verify we have 2 cool fragments
-    run_files = list((catalog / "runs").glob("run_*.parquet"))
+    run_files = list((catalog / "runs").rglob("run_*.parquet"))
     assert len(run_files) == 2, f"Expected 2 run files, got {len(run_files)}"
 
     # Step 3: Compact cool fragments → warm DuckDB
@@ -238,7 +238,7 @@ def test_cluster_workflow_with_slurm_job_id(git_repo: Path, monkeypatch):
     write_run(run, catalog)
 
     # Verify SLURM_JOB_ID is in the written fragment
-    run_files = list((catalog / "runs").glob("run_*.parquet"))
+    run_files = list((catalog / "runs").rglob("run_*.parquet"))
     assert len(run_files) == 1
 
     # Compact and verify slurm_job_id is preserved in warm tier

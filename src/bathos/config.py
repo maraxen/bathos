@@ -14,6 +14,7 @@ class ProjectConfig:
     catalog_dir: Path = field(default_factory=lambda: Path.home() / ".bth" / "catalog")
     remotes: dict[str, dict] = field(default_factory=dict)
     slurm: dict = field(default_factory=dict)
+    sync_filter: str = "project_slug"
 
 
 def default_catalog_dir() -> Path:
@@ -38,6 +39,7 @@ def load_project_config(path: Path) -> ProjectConfig:
         catalog_dir=Path(project["catalog_dir"]) if "catalog_dir" in project else default_catalog_dir(),
         remotes=data.get("remotes", {}),
         slurm=data.get("slurm", {}),
+        sync_filter=project.get("sync_filter", "project_slug"),
     )
 
 

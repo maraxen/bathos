@@ -71,7 +71,7 @@ def test_find_runs_since(populated_catalog: Path):
 
 
 def test_run_sql_returns_rows(populated_catalog: Path):
-    glob = str(populated_catalog / "runs" / "run_*.parquet")
+    glob = str(populated_catalog / "runs" / "**" / "run_*.parquet")
     rows = run_sql(
         f"SELECT project_slug, count(*) as n FROM read_parquet('{glob}') GROUP BY 1 ORDER BY 1"
     )

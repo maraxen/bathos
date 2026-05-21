@@ -17,6 +17,7 @@ class SyncResult:
     transferred: int
     duration_s: float
     remote: str
+    filtered: int = 0
 
 
 def sync_catalog(
@@ -45,8 +46,27 @@ def sync_catalog(
     host = remote_config["host"]
     remote_root = remote_config["remote_root"]
 
-    local_runs = catalog_dir / "runs"
-    remote_runs = f"{host}:{remote_root}/.bth/catalog/runs/"
+    project_slug = config.slug
+    sync_filter = getattr(config, "sync_filter", "project_slug")
+
+    if sync_filter == "project_slug":
+        local_runs = catalog_dir / "runs" / project_slug
+        remote_runs = f"{host}:{remote_root}/.bth/catalog/runs/{project_slug}/"
+        # Count filtered runs (total in catalog minus this project's runs)
+        runs_root = catalog_dir / "runs"
+        if not pull and runs_root.exists():
+            total = len(list(runs_root.rglob("run_*.parquet")))
+            project_count = len(list(local_runs.glob("run_*.parquet"))) if local_runs.exists() else 0
+            filtered = total - project_count
+        else:
+            filtered = 0
+    else:
+        local_runs = catalog_dir / "runs"
+        remote_runs = f"{host}:{remote_root}/.bth/catalog/runs/"
+        filtered = 0
+
+    if not pull:
+        local_runs.mkdir(parents=True, exist_ok=True)
 
     if pull:
         src = remote_runs
@@ -88,7 +108,7 @@ def sync_catalog(
     # rsync outputs something like "Number of regular files transferred: 42"
     transferred = _parse_transferred_count(result.stdout)
 
-    return SyncResult(transferred=transferred, duration_s=duration_s, remote=remote_name)
+    return SyncResult(transferred=transferred, duration_s=duration_s, remote=remote_name, filtered=filtered)
 
 
 def _parse_transferred_count(rsync_output: str) -> int:

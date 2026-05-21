@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bathos"
-version = "0.3.1"
+version = "0.4.0"
 description = "Local-first, zero-server experiment tracking for researchers"
 readme = "README.md"
 requires-python = ">=3.12"

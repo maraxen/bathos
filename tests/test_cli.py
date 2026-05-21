@@ -186,8 +186,8 @@ def test_sql_allows_arbitrary_queries(tmp_path: Path, monkeypatch):
     # Create a run to have Parquet files
     runner.invoke(app, ["run", sys.executable, "--", "-c", "pass"])
 
-    # Query using read_parquet should work without warm DB
-    glob = str(catalog / "runs" / "run_*.parquet")
+    # Query using read_parquet should work without warm DB (runs are in per-project subdir)
+    glob = str(catalog / "runs" / "testproj" / "run_*.parquet")
     result = runner.invoke(app, ["sql", f"SELECT COUNT(*) FROM read_parquet('{glob}')"])
     assert result.exit_code == 0
     assert "1" in result.output

@@ -316,6 +316,7 @@ def sync_tool(
             "transferred": result.transferred,
             "duration_s": result.duration_s,
             "remote": result.remote,
+            "filtered": result.filtered,
         }
         return json.dumps(result_dict, indent=2)
     except Exception as e:

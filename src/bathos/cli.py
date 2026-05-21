@@ -595,9 +595,10 @@ def sync(
 
     try:
         result = sync_catalog(remote, config, catalog_dir, pull=pull)
-        direction = "pulled" if pull else "pushed"
+        direction = "Pulled" if pull else "Pushed"
+        filter_msg = f" (filtered {result.filtered} from other projects)" if result.filtered > 0 else ""
         typer.echo(
-            f"{direction.capitalize()} {result.transferred} runs to/from '{result.remote}' in {result.duration_s:.1f}s"
+            f"{direction} {result.transferred} runs{filter_msg} to/from '{result.remote}' in {result.duration_s:.1f}s"
         )
     except ValueError as e:
         typer.echo(str(e), err=True)
@@ -622,6 +623,27 @@ def migrate(
         typer.echo(f"  {action} {result.migrated} fragment(s).")
     else:
         typer.echo("  Nothing to migrate.")
+
+
+@app.command("migrate-to-project-subdirs")
+def migrate_to_subdirs_cmd(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be moved without writing"),
+):
+    """Move flat cool-tier run parquets into per-project subdirectories.
+
+    Reads each run's project_slug and moves it to runs/<slug>/run_<uuid>.parquet.
+    Run this on both local and remote before using per-project sync filtering.
+    """
+    from bathos.migrate import migrate_to_project_subdirs
+
+    result = migrate_to_project_subdirs(_catalog_dir(), dry_run=dry_run)
+    action = "Would move" if dry_run else "Moved"
+    typer.echo(f"{action} {result.moved} run(s) into per-project subdirectories.")
+    if result.skipped:
+        typer.echo(f"  {result.skipped} already in place (skipped).")
+    if result.by_slug:
+        for slug, count in sorted(result.by_slug.items()):
+            typer.echo(f"  {slug}: {count}")
 
 
 @app.command("sprint-audit")

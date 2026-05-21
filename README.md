@@ -60,7 +60,14 @@ bth sql "SELECT project_slug, count(*) FROM runs GROUP BY 1"
 - `bth lint [--project-root PATH]` — check scripts/ for naming conventions and missing sidecars
 - `bth new-experiment <name>` — scaffold a new experiment script and sidecar
 - `bth migrate` — upgrade cool-tier Parquet fragments to current schema version
+- `bth migrate-to-project-subdirs [--dry-run]` — move flat catalog runs into `runs/<slug>/` subdirs (v0.4+)
 - `bth export` — export the using-bathos skill and register MCP server
+
+**`bth sync`** — Sync cool-tier catalog to/from cluster (v0.4+: per-project filtered)
+- `bth sync [<remote>]` — push only this project's runs to the remote (filtered by `project_slug`)
+- `bth sync [<remote>] --pull` — pull only this project's runs from the remote
+- Output: `Pushed 47 runs (filtered 275 from other projects) to 'engaging' in 1.2s`
+- Config: `sync_filter = "none"` in `.bth.toml` disables filtering (pushes all projects)
 
 **`bth remote`** — Manage sync remotes
 - `bth remote add <name> <url>` — add an SSH remote for catalog sync
