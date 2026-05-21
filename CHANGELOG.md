@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`catalog_dir` tilde not expanded** — `load_project_config` now calls `.expanduser()` on `root` and `catalog_dir` paths; previously `Path("~/projects/asr/.bth/catalog")` was treated as a relative path starting with a literal `~`, causing `bth compact` to report "Compacted 0 runs", `bth sql` to report "No warm catalog", and `bth find` to stall — all despite the catalog existing at the correct absolute path
 - **`bth sync` indefinite hang** — `sync_catalog()` now passes SSH options (`ConnectTimeout=10`, `BatchMode=yes`) to rsync so unreachable hosts fail in ≤10 s instead of blocking forever; adds `subprocess.run(timeout=120)` as a safety net; raises `RuntimeError` with actionable message on timeout
 - **Parquet timestamp timezone-aware** — timestamps loaded from Parquet are now always timezone-aware (UTC) to prevent `TypeError` when comparing with aware datetimes in query functions
 

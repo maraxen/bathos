@@ -37,8 +37,8 @@ def load_project_config(path: Path) -> ProjectConfig:
     project = data["project"]
     return ProjectConfig(
         slug=project["slug"],
-        root=Path(project["root"]),
-        catalog_dir=Path(project["catalog_dir"]) if "catalog_dir" in project else default_catalog_dir(),
+        root=Path(project["root"]).expanduser(),
+        catalog_dir=Path(project["catalog_dir"]).expanduser() if "catalog_dir" in project else default_catalog_dir(),
         remotes=data.get("remotes", {}),
         slurm=data.get("slurm", {}),
         sync_filter=project.get("sync_filter", "project_slug"),
