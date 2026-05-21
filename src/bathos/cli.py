@@ -972,3 +972,36 @@ def show(
     typer.echo(f"Summary: {pm.summary}")
     if pm.asset_links:
         typer.echo(f"Asset Links: {pm.asset_links}")
+
+
+@postmortem_app.command()
+def validate(
+    file: Path = typer.Argument(..., help="Path to .bth.postmortem.toml file to validate"),
+    strict: bool = typer.Option(False, "--strict", help="Treat missing run ID as error"),
+    strict_files: bool = typer.Option(False, "--strict-files", help="Treat missing asset files as error"),
+):
+    """Validate a postmortem TOML file for structural and logical correctness."""
+    from bathos.postmortem import parse_postmortem, validate_postmortem
+    from bathos.config import find_project_config, load_project_config
+
+    if not file.exists():
+        typer.echo(f"File not found: {file}", err=True)
+        raise typer.Exit(1)
+
+    try:
+        pm = parse_postmortem(file)
+    except Exception as e:
+        typer.echo(f"Parse error: {e}", err=True)
+        raise typer.Exit(1)
+
+    config_path = find_project_config(Path.cwd())
+    workspace_root = load_project_config(config_path).root if config_path else Path.cwd()
+
+    result = validate_postmortem(pm, workspace_root=workspace_root, strict=strict, strict_files=strict_files)
+    if result.ok:
+        typer.echo(f"✓ {file.name} is valid")
+    else:
+        typer.echo(f"✗ Validation failed for {file.name}:", err=True)
+        for err in result.errors:
+            typer.echo(f"  - {err.message}", err=True)
+        raise typer.Exit(1)

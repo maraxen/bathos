@@ -814,6 +814,134 @@ def mcp_campaign_conclude_tool(
     )
 
 
+@app.tool()
+def postmortem_scaffold(
+    run_id: str,
+    catalog_dir: str | None = None,
+    workspace_root: str | None = None,
+) -> dict:
+    """Scaffold a new postmortem TOML template for the given run ID.
+
+    Returns the path where the template was written.
+    """
+    import shlex
+    from bathos.query import get_run as _get_run
+
+    cat_dir = _get_catalog_dir(catalog_dir)
+    run = _get_run(run_id, cat_dir)
+    if not run:
+        return {"error": f"Run '{run_id}' not found"}
+
+    ws = Path(workspace_root) if workspace_root else Path.cwd()
+    config_path = find_project_config(ws)
+    if config_path:
+        ws = load_project_config(config_path).root
+
+    # Derive script path from command
+    parts = shlex.split(run.command)
+    script_path = None
+    for part in parts:
+        p = Path(part)
+        if p.suffix == ".py":
+            script_path = ws / p
+            break
+    if not script_path:
+        script_path = ws / "run.py"
+
+    script_path.parent.mkdir(parents=True, exist_ok=True)
+    postmortem_path = script_path.parent / f"{script_path.name}.{run_id}.bth.postmortem.toml"
+
+    toml_content = f"""run_id = "{run_id}"
+
+[postmortem]
+hypothesis_status = "unassigned"
+summary = ""
+unexpected_observations = ""
+root_cause = ""
+verdict_override = "none"
+next_steps = ""
+author = ""
+status = "draft"
+
+[asset_links]
+"""
+    postmortem_path.write_text(toml_content)
+    return {"path": str(postmortem_path), "run_id": run_id}
+
+
+@app.tool()
+def postmortem_validate(
+    path: str,
+    workspace_root: str | None = None,
+    strict_files: bool = False,
+) -> dict:
+    """Validate a postmortem TOML file.
+
+    Returns {'ok': True} on success or {'ok': False, 'errors': [...]} on failure.
+    """
+    from bathos.postmortem import parse_postmortem, validate_postmortem
+
+    pm_path = Path(path)
+    if not pm_path.exists():
+        return {"ok": False, "errors": [f"File not found: {path}"]}
+
+    try:
+        pm = parse_postmortem(pm_path)
+    except Exception as e:
+        return {"ok": False, "errors": [f"Parse error: {e}"]}
+
+    ws = Path(workspace_root) if workspace_root else Path.cwd()
+    config_path = find_project_config(ws)
+    if config_path:
+        ws = load_project_config(config_path).root
+
+    result = validate_postmortem(pm, workspace_root=ws, strict_files=strict_files)
+    if result.ok:
+        return {"ok": True, "run_id": pm.run_id, "hypothesis_status": pm.hypothesis_status}
+    return {"ok": False, "errors": [e.message for e in result.errors]}
+
+
+@app.tool()
+def postmortem_get(
+    run_id: str,
+    workspace_root: str | None = None,
+) -> dict:
+    """Retrieve postmortem data for the given run ID by scanning for matching TOML files.
+
+    Returns the parsed postmortem fields or an error dict if not found.
+    """
+    from bathos.postmortem import parse_postmortem
+
+    ws = Path(workspace_root) if workspace_root else Path.cwd()
+    config_path = find_project_config(ws)
+    if config_path:
+        ws = load_project_config(config_path).root
+
+    for pm_file in ws.rglob("*.bth.postmortem.toml"):
+        try:
+            pm = parse_postmortem(pm_file)
+            if pm.run_id == run_id:
+                return {
+                    "run_id": pm.run_id,
+                    "status": pm.status,
+                    "hypothesis_status": pm.hypothesis_status,
+                    "verdict_override": pm.verdict_override,
+                    "summary": pm.summary,
+                    "root_cause": pm.root_cause,
+                    "unexpected_observations": pm.unexpected_observations,
+                    "next_steps": pm.next_steps,
+                    "author": pm.author,
+                    "asset_links": pm.asset_links,
+                    "anomalies": pm.anomalies,
+                    "refutation_criteria_met": pm.refutation_criteria_met,
+                    "path": str(pm_file),
+                }
+        except Exception:
+            continue
+
+    return {"error": f"No postmortem found for run_id '{run_id}'"}
+
+
 def mcp_server():
     """Entry point for MCP server (stdio transport).
 
