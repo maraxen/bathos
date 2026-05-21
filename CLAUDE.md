@@ -12,7 +12,7 @@ bathos is a standalone experiment tracking CLI for a single researcher across 10
 
 ## Current Status (as of 2026-05-21)
 
-**v0.4.0: complete and merged to main.** 333 tests passing.
+**v0.4.1: complete and merged to main.** 348 tests passing.
 
 - Full design spec: `.praxia/specs/bathos-design.md`
 - v0.1 implementation plan: `.praxia/specs/bathos-v01-plan.md`
@@ -23,6 +23,8 @@ bathos is a standalone experiment tracking CLI for a single researcher across 10
 **Shipped in v0.3:** Agentic integrity gate (`--agent-mode`, `--no-sidecar`, `--derived-from`), lineage tracking (`bth lineage`), campaigns (`bth campaign` subcommands + MCP tools), sprint audit (`bth sprint-audit`), Tier-2 lint checks, schema v3 with campaign/lineage/integrity fields, `--campaign` flag on `bth run`.
 
 **Shipped in v0.4:** Per-project sync filtering — `bth sync` now pushes/pulls only the current project's runs (no cross-project contamination). Cool-tier layout changed to `runs/<slug>/run_<uuid>.parquet`. New command `bth migrate-to-project-subdirs` migrates flat catalogs. `sync_filter` config knob; `--no-project-filter` opt-out planned.
+
+**Shipped in v0.4.1:** Postmortem tracking — `*.bth.postmortem.toml` format, `bth postmortem validate` CLI command, `postmortem_scaffold`/`postmortem_validate`/`postmortem_get` MCP tools. Schema v4 with 10 new DuckDB columns; `compact` syncs postmortem metadata. Validation covers refutation consistency, asset path containment, sha256 checksums, and git drift detection. `script_sha256` computed in `runner.py` at experiment launch.
 
 **Remaining backlog:** #136 (bth-migrate praxia workflow), #137 (global instruction portability), #142 (results management design).
 
