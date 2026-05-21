@@ -5,7 +5,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from bathos.catalog import init_catalog, write_run
-from bathos.cli import app
+from bathos.cli import app, _catalog_dir
 from bathos.schema import Run
 
 runner = CliRunner()
@@ -596,3 +596,35 @@ def test_ls_shows_outcome_column(tmp_path, monkeypatch):
     result = runner.invoke(app, ["ls"])
     assert "OUTCOME" in result.output
     assert "pass" in result.output
+
+
+def test_catalog_dir_reads_project_config(tmp_path: Path, monkeypatch):
+    """_catalog_dir() must honor catalog_dir from .bth.toml, not just fall back to ~/.bth/catalog."""
+    custom_catalog = tmp_path / "custom_catalog"
+    cfg = tmp_path / ".bth.toml"
+    cfg.write_text(
+        f'[project]\nslug = "myproj"\nroot = "{tmp_path}"\ncatalog_dir = "{custom_catalog}"\n'
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("BTH_CATALOG_DIR", raising=False)
+    assert _catalog_dir() == custom_catalog
+
+
+def test_catalog_dir_env_var_takes_precedence(tmp_path: Path, monkeypatch):
+    """BTH_CATALOG_DIR env var overrides even a config-specified catalog_dir."""
+    env_catalog = tmp_path / "env_catalog"
+    custom_catalog = tmp_path / "custom_catalog"
+    cfg = tmp_path / ".bth.toml"
+    cfg.write_text(
+        f'[project]\nslug = "myproj"\nroot = "{tmp_path}"\ncatalog_dir = "{custom_catalog}"\n'
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(env_catalog))
+    assert _catalog_dir() == env_catalog
+
+
+def test_catalog_dir_falls_back_to_default_when_no_config(tmp_path: Path, monkeypatch):
+    """With no .bth.toml and no env var, _catalog_dir() returns the default ~/.bth/catalog."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("BTH_CATALOG_DIR", raising=False)
+    assert _catalog_dir() == Path.home() / ".bth" / "catalog"

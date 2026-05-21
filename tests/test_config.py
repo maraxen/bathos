@@ -51,3 +51,13 @@ def test_default_catalog_dir():
 
     d = default_catalog_dir()
     assert d == Path.home() / ".bth" / "catalog"
+
+
+def test_load_config_with_custom_catalog_dir(tmp_path: Path):
+    custom_catalog = tmp_path / "my_custom_catalog"
+    cfg = tmp_path / ".bth.toml"
+    cfg.write_text(
+        f'[project]\nslug = "prolix"\nroot = "{tmp_path}"\ncatalog_dir = "{custom_catalog}"\n'
+    )
+    pc = load_project_config(cfg)
+    assert pc.catalog_dir == custom_catalog

@@ -26,8 +26,11 @@ def _catalog_dir() -> Path:
     override = os.environ.get("BTH_CATALOG_DIR")
     if override:
         return Path(override)
-    from bathos.config import default_catalog_dir
+    from bathos.config import find_project_config, load_project_config, default_catalog_dir
 
+    cfg_path = find_project_config()
+    if cfg_path is not None:
+        return load_project_config(cfg_path).catalog_dir
     return default_catalog_dir()
 
 
@@ -711,7 +714,11 @@ def lint(
 
     for issue in issues:
         prefix = "error" if issue.severity == IssueSeverity.ERROR else "warning"
-        typer.echo(f"{prefix}: {issue.path.relative_to(project_root.resolve())} — {issue.issue}: {issue.detail}")
+        try:
+            display_path = issue.path.relative_to(project_root.resolve())
+        except ValueError:
+            display_path = issue.path
+        typer.echo(f"{prefix}: {display_path} — {issue.issue}: {issue.detail}")
 
     typer.echo()
     typer.echo(f"{len(errors)} error(s), {len(warnings)} warning(s).")

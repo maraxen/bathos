@@ -99,6 +99,19 @@ def run_script(
 ) -> int:
     script_path = _find_script_path(argv, cwd)
 
+    # Calculate script SHA-256 at runtime
+    script_sha256_val = ""
+    if script_path is not None and script_path.exists():
+        try:
+            import hashlib
+            h = hashlib.sha256()
+            with open(script_path, "rb") as f:
+                while chunk := f.read(8192):
+                    h.update(chunk)
+            script_sha256_val = h.hexdigest()
+        except Exception:
+            pass
+
     # Sidecar resolution
     bundle = None
     sidecar = None
@@ -179,6 +192,7 @@ def run_script(
         agent_mode=resolved_mode,
         sidecar_mode=sidecar_mode_str,
         campaign_id=campaign_id or "",
+        script_sha256=script_sha256_val,
     )
     catalog_dir.mkdir(parents=True, exist_ok=True)
     write_run(run, catalog_dir)

@@ -87,6 +87,10 @@ def test_missing_scripts_dir_returns_empty(tmp_path):
 
 def test_cli_lint_exits_0_clean(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    # Isolate from user's real catalog to prevent warm-tier warnings leaking in
+    catalog_dir = tmp_path / ".bth" / "catalog"
+    catalog_dir.mkdir(parents=True)
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
     s = _make_script(tmp_path, "experiments", "run_nvt.py")
     _make_sidecar(s)
     from bathos.cli import app

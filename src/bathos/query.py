@@ -62,42 +62,50 @@ def _row_to_run(row: tuple) -> Run | None:
     """Convert a DuckDB row (from runs table) to a Run object.
 
     DuckDB returns rows as tuples; we need to map back to Run dataclass.
-    Column order must match: id, project_slug, command, argv, git_hash, git_branch,
-    git_dirty, timestamp, duration_s, exit_code, status, output_paths, tags,
-    schema_version, slurm_job_id, hostname, metadata, outcome, output_metadata,
-    sidecar_sha256, sidecar_path, parent_run_id, agent_mode, sidecar_mode,
-    outcome_is_residual, skill_sha256, campaign_id
+    Supports dynamic schema lengths by providing fallback defaults.
     """
     try:
-        (
-            id_,
-            project_slug,
-            command,
-            argv,
-            git_hash,
-            git_branch,
-            git_dirty,
-            timestamp,
-            duration_s,
-            exit_code,
-            status,
-            output_paths,
-            tags,
-            schema_version,
-            slurm_job_id,
-            hostname,
-            metadata,
-            outcome,
-            output_metadata,
-            sidecar_sha256,
-            sidecar_path,
-            parent_run_id,
-            agent_mode,
-            sidecar_mode,
-            outcome_is_residual,
-            skill_sha256,
-            campaign_id,
-        ) = row
+        # Extract fields sequentially, using defaults if row has fewer elements
+        id_ = row[0]
+        project_slug = row[1]
+        command = row[2]
+        argv = row[3]
+        git_hash = row[4]
+        git_branch = row[5]
+        git_dirty = row[6]
+        timestamp = row[7]
+        duration_s = row[8]
+        exit_code = row[9]
+        status = row[10]
+        output_paths = row[11]
+        tags = row[12]
+        schema_version = row[13]
+        
+        slurm_job_id = row[14] if len(row) > 14 else ""
+        hostname = row[15] if len(row) > 15 else ""
+        metadata = row[16] if len(row) > 16 else "{}"
+        outcome = row[17] if len(row) > 17 else ""
+        output_metadata = row[18] if len(row) > 18 else "[]"
+        
+        sidecar_sha256 = row[19] if len(row) > 19 else ""
+        sidecar_path = row[20] if len(row) > 20 else ""
+        parent_run_id = row[21] if len(row) > 21 else ""
+        agent_mode = row[22] if len(row) > 22 else ""
+        sidecar_mode = row[23] if len(row) > 23 else ""
+        outcome_is_residual = row[24] if len(row) > 24 else False
+        skill_sha256 = row[25] if len(row) > 25 else ""
+        campaign_id = row[26] if len(row) > 26 else ""
+        
+        script_sha256 = row[27] if len(row) > 27 else ""
+        postmortem_status = row[28] if len(row) > 28 else "unassigned"
+        postmortem_override = row[29] if len(row) > 29 else "none"
+        postmortem_verdict_override = row[30] if len(row) > 30 else "none"
+        postmortem_author = row[31] if len(row) > 31 else ""
+        postmortem_path = row[32] if len(row) > 32 else ""
+        postmortem_hypothesis_status = row[33] if len(row) > 33 else "unassigned"
+        postmortem_has_anomalies = row[34] if len(row) > 34 else False
+        postmortem_summary = row[35] if len(row) > 35 else ""
+        postmortem_asset_links = row[36] if len(row) > 36 else "{}"
 
         return Run(
             id=id_,
@@ -126,9 +134,20 @@ def _row_to_run(row: tuple) -> Run | None:
             outcome_is_residual=outcome_is_residual if outcome_is_residual is not None else False,
             skill_sha256=skill_sha256 if skill_sha256 else "",
             campaign_id=campaign_id if campaign_id else "",
+            script_sha256=script_sha256 if script_sha256 else "",
+            postmortem_status=postmortem_status if postmortem_status else "unassigned",
+            postmortem_override=postmortem_override if postmortem_override else "none",
+            postmortem_verdict_override=postmortem_verdict_override if postmortem_verdict_override else "none",
+            postmortem_author=postmortem_author if postmortem_author else "",
+            postmortem_path=postmortem_path if postmortem_path else "",
+            postmortem_hypothesis_status=postmortem_hypothesis_status if postmortem_hypothesis_status else "unassigned",
+            postmortem_has_anomalies=postmortem_has_anomalies if postmortem_has_anomalies is not None else False,
+            postmortem_summary=postmortem_summary if postmortem_summary else "",
+            postmortem_asset_links=postmortem_asset_links if postmortem_asset_links else "{}",
         )
-    except (ValueError, TypeError) as e:
+    except (ValueError, TypeError, IndexError) as e:
         raise RuntimeError(f"Failed to convert DuckDB row to Run: {e}") from e
+
 
 
 def _resolve_backend(catalog_dir: Path) -> Literal["cool", "warm"]:

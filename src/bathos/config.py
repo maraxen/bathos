@@ -21,7 +21,9 @@ def default_catalog_dir() -> Path:
     return Path.home() / ".bth" / "catalog"
 
 
-def find_project_config(start: Path = Path.cwd()) -> Path | None:
+def find_project_config(start: Path | None = None) -> Path | None:
+    if start is None:
+        start = Path.cwd()
     for directory in [start, *start.parents]:
         candidate = directory / ".bth.toml"
         if candidate.exists():

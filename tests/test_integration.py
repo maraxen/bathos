@@ -178,9 +178,10 @@ def test_full_workflow_140_141_142(tmp_path: Path, monkeypatch):
 
     warm_runs = list_runs(catalog_dir)
     assert len(warm_runs) == 2, "Should have 2 runs via warm tier"
+    from bathos.schema import CURRENT_SCHEMA_VERSION
     for run in warm_runs:
-        # After migration, all runs should be v3 in the database
-        assert run.schema_version == "3", f"Run {run.id} should be v3 in warm DB after compact"
+        # After migration, all runs should be at current schema version in the database
+        assert run.schema_version == CURRENT_SCHEMA_VERSION, f"Run {run.id} should be at current schema version in warm DB after compact"
         assert hasattr(run, "hostname"), "Run should have hostname field"
 
     # Verify output metadata was collected

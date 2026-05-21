@@ -137,7 +137,7 @@ def test_compact_is_idempotent_with_new_fragments(tmp_catalog: Path, sample_run:
 
 
 def test_compact_upgrades_v0_fragments(tmp_catalog: Path, sample_run: Run):
-    """compact() should migrate v0 fragments (missing schema_version) to v3 via v1→v2→v3."""
+    """compact() should migrate v0 fragments (missing schema_version) to v4 via v1→v2→v3→v4."""
     init_catalog(tmp_catalog)
 
     # Write a v0 fragment (no schema_version field)
@@ -148,10 +148,10 @@ def test_compact_upgrades_v0_fragments(tmp_catalog: Path, sample_run: Run):
     result = compact(tmp_catalog)
     assert result.ingested == 1
 
-    # Verify in DuckDB: should have schema_version="3" (migrated through v0→v1→v2→v3)
+    # Verify in DuckDB: should have schema_version="4" (migrated through v0→v1→v2→v3→v4)
     con = duckdb.connect(str(tmp_catalog / "bathos.db"))
     rows = con.execute("SELECT schema_version FROM runs").fetchall()
-    assert rows[0][0] == "3"
+    assert rows[0][0] == "4"
 
 
 def test_compact_tracks_warm_schema_version(tmp_catalog: Path, sample_run: Run):
@@ -166,7 +166,7 @@ def test_compact_tracks_warm_schema_version(tmp_catalog: Path, sample_run: Run):
     con = duckdb.connect(str(tmp_catalog / "bathos.db"))
     rows = con.execute("SELECT value FROM _schema_meta WHERE key = 'warm_version'").fetchall()
     assert len(rows) == 1
-    assert rows[0][0] == "3"
+    assert rows[0][0] == "4"
 
 
 def test_fragment_count_helper(tmp_catalog: Path, sample_run: Run):
@@ -239,8 +239,8 @@ def test_compact_preserves_run_data(tmp_catalog: Path, sample_run: Run):
     assert rows[0][3] == "{}"
 
 
-def test_compact_migrates_v1_to_v3(sample_run: Run):
-    """Verify v1 fragments are upgraded to v3 during compact."""
+def test_compact_migrates_v1_to_v4(sample_run: Run):
+    """Verify v1 fragments are upgraded to v4 during compact."""
     from bathos.compact import _apply_migrations
 
     # Create a v1 run (explicitly set schema_version="1")
@@ -249,37 +249,37 @@ def test_compact_migrates_v1_to_v3(sample_run: Run):
     # Apply migrations
     result = _apply_migrations(v1_run)
 
-    # Verify upgraded to v3 with hostname
-    assert result.schema_version == "3"
+    # Verify upgraded to v4 with hostname
+    assert result.schema_version == "4"
     assert result.hostname == ""
 
 
-def test_compact_v0_chain_to_v3(sample_run: Run):
-    """Verify v0 fragments chain through v1→v2→v3 migrations."""
+def test_compact_v0_chain_to_v4(sample_run: Run):
+    """Verify v0 fragments chain through v1→v2→v3→v4 migrations."""
     from bathos.compact import _apply_migrations
 
     # Create a v0 run
     v0_run = dataclasses.replace(sample_run, schema_version="0")
 
-    # Apply migrations (should walk 0→1→2→3)
+    # Apply migrations (should walk 0→1→2→3→4)
     result = _apply_migrations(v0_run)
 
-    # Verify final state is v3
-    assert result.schema_version == "3"
+    # Verify final state is v4
+    assert result.schema_version == "4"
     assert result.hostname == ""
 
 
-def test_apply_migrations_v3_is_noop(sample_run: Run):
-    """Verify v3 fragment is unchanged by migrations."""
+def test_apply_migrations_v4_is_noop(sample_run: Run):
+    """Verify v4 fragment is unchanged by migrations."""
     from bathos.compact import _apply_migrations
 
-    v3_run = dataclasses.replace(sample_run, schema_version="3", hostname="testhost")
+    v4_run = dataclasses.replace(sample_run, schema_version="4", hostname="testhost")
 
-    # Apply migrations (should be no-op for v3)
-    result = _apply_migrations(v3_run)
+    # Apply migrations (should be no-op for v4)
+    result = _apply_migrations(v4_run)
 
     # Verify unchanged
-    assert result.schema_version == "3"
+    assert result.schema_version == "4"
     assert result.hostname == "testhost"
 
 
@@ -427,8 +427,8 @@ def test_schema_migrations_has_record(tmp_path):
     assert rows[-1][0] == CURRENT_SCHEMA_VERSION
 
 
-def test_migration_v2_to_v3(tmp_catalog: Path, sample_run: Run):
-    """Verify that a v2 fragment (no v3 fields) migrates to v3 with empty defaults."""
+def test_migration_v2_to_v4(tmp_catalog: Path, sample_run: Run):
+    """Verify that a v2 fragment (no v3/v4 fields) migrates to v4 with empty defaults."""
     init_catalog(tmp_catalog)
 
     # Write a v2 fragment (has hostname, no agentic integrity fields)
@@ -450,15 +450,15 @@ def test_migration_v2_to_v3(tmp_catalog: Path, sample_run: Run):
     result = compact(tmp_catalog)
     assert result.ingested == 1
 
-    # Verify in DuckDB: should have schema_version="3" and all v3 fields set to defaults
+    # Verify in DuckDB: should have schema_version="4" and all fields set to defaults
     con = duckdb.connect(str(tmp_catalog / "bathos.db"))
     rows = con.execute(
-        "SELECT schema_version, sidecar_sha256, sidecar_path, parent_run_id, agent_mode, sidecar_mode, outcome_is_residual, skill_sha256, campaign_id FROM runs"
+        "SELECT schema_version, sidecar_sha256, sidecar_path, parent_run_id, agent_mode, sidecar_mode, outcome_is_residual, skill_sha256, campaign_id, script_sha256 FROM runs"
     ).fetchall()
     con.close()
 
     assert len(rows) == 1
-    assert rows[0][0] == "3"  # schema_version
+    assert rows[0][0] == "4"  # schema_version
     assert rows[0][1] == ""  # sidecar_sha256
     assert rows[0][2] == ""  # sidecar_path
     assert rows[0][3] == ""  # parent_run_id
@@ -467,14 +467,14 @@ def test_migration_v2_to_v3(tmp_catalog: Path, sample_run: Run):
     assert rows[0][6] is False  # outcome_is_residual
     assert rows[0][7] == ""  # skill_sha256
     assert rows[0][8] == ""  # campaign_id
+    assert rows[0][9] == ""  # script_sha256
 
 
-def test_migration_chain_v0_to_v3(tmp_catalog: Path, sample_run: Run):
-    """Verify that a v0 fragment chains through v0→v1→v2→v3 with all v3 fields."""
+def test_migration_chain_v0_to_v4(tmp_catalog: Path, sample_run: Run):
+    """Verify that a v0 fragment chains through v0→v1→v2→v3→v4 with all v3/v4 fields."""
     init_catalog(tmp_catalog)
 
     # Write a v0 fragment (missing schema_version field entirely)
-    # Manually construct a minimal run dict that would be missing all new fields
     v0_run = dataclasses.replace(
         sample_run,
         schema_version="0",
@@ -485,15 +485,15 @@ def test_migration_chain_v0_to_v3(tmp_catalog: Path, sample_run: Run):
     result = compact(tmp_catalog)
     assert result.ingested == 1
 
-    # Verify in DuckDB: should have schema_version="3" and all v3 fields with defaults
+    # Verify in DuckDB: should have schema_version="4" and all fields with defaults
     con = duckdb.connect(str(tmp_catalog / "bathos.db"))
     rows = con.execute(
-        "SELECT schema_version, hostname, sidecar_sha256, sidecar_path, parent_run_id, agent_mode, sidecar_mode, outcome_is_residual, skill_sha256, campaign_id FROM runs"
+        "SELECT schema_version, hostname, sidecar_sha256, sidecar_path, parent_run_id, agent_mode, sidecar_mode, outcome_is_residual, skill_sha256, campaign_id, script_sha256 FROM runs"
     ).fetchall()
     con.close()
 
     assert len(rows) == 1
-    assert rows[0][0] == "3"  # schema_version
+    assert rows[0][0] == "4"  # schema_version
     assert rows[0][1] == ""  # hostname (from v1 migration)
     assert rows[0][2] == ""  # sidecar_sha256 (from v2 migration)
     assert rows[0][3] == ""  # sidecar_path
@@ -503,3 +503,4 @@ def test_migration_chain_v0_to_v3(tmp_catalog: Path, sample_run: Run):
     assert rows[0][7] is False  # outcome_is_residual
     assert rows[0][8] == ""  # skill_sha256
     assert rows[0][9] == ""  # campaign_id
+    assert rows[0][10] == ""  # script_sha256
