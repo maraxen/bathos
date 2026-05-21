@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pyarrow as pa
 
-CURRENT_SCHEMA_VERSION = "3"
+CURRENT_SCHEMA_VERSION = "4"
 
 COOL_SCHEMA = pa.schema(
     [
@@ -35,6 +35,16 @@ COOL_SCHEMA = pa.schema(
         pa.field("outcome_is_residual", pa.bool_()),
         pa.field("skill_sha256", pa.string()),
         pa.field("campaign_id", pa.string()),
+        pa.field("script_sha256", pa.string()),
+        pa.field("postmortem_status", pa.string()),
+        pa.field("postmortem_override", pa.string()),
+        pa.field("postmortem_verdict_override", pa.string()),
+        pa.field("postmortem_author", pa.string()),
+        pa.field("postmortem_path", pa.string()),
+        pa.field("postmortem_hypothesis_status", pa.string()),
+        pa.field("postmortem_has_anomalies", pa.bool_()),
+        pa.field("postmortem_summary", pa.string()),
+        pa.field("postmortem_asset_links", pa.string()),
     ]
 )
 
@@ -67,6 +77,16 @@ WARM_SCHEMA = pa.schema(
         pa.field("outcome_is_residual", pa.bool_()),
         pa.field("skill_sha256", pa.string()),
         pa.field("campaign_id", pa.string()),
+        pa.field("script_sha256", pa.string()),
+        pa.field("postmortem_status", pa.string()),
+        pa.field("postmortem_override", pa.string()),
+        pa.field("postmortem_verdict_override", pa.string()),
+        pa.field("postmortem_author", pa.string()),
+        pa.field("postmortem_path", pa.string()),
+        pa.field("postmortem_hypothesis_status", pa.string()),
+        pa.field("postmortem_has_anomalies", pa.bool_()),
+        pa.field("postmortem_summary", pa.string()),
+        pa.field("postmortem_asset_links", pa.string()),
     ]
 )
 
@@ -99,6 +119,16 @@ class Run:
     outcome_is_residual: bool = False
     skill_sha256: str = ""
     campaign_id: str = ""
+    script_sha256: str = ""
+    postmortem_status: str = "unassigned"
+    postmortem_override: str = "none"
+    postmortem_verdict_override: str = "none"
+    postmortem_author: str = ""
+    postmortem_path: str = ""
+    postmortem_hypothesis_status: str = "unassigned"
+    postmortem_has_anomalies: bool = False
+    postmortem_summary: str = ""
+    postmortem_asset_links: str = "{}"
 
     def to_arrow(self) -> pa.Table:
         return pa.table(
@@ -128,6 +158,16 @@ class Run:
                 "outcome_is_residual": [self.outcome_is_residual],
                 "skill_sha256": [self.skill_sha256],
                 "campaign_id": [self.campaign_id],
+                "script_sha256": [self.script_sha256],
+                "postmortem_status": [self.postmortem_status],
+                "postmortem_override": [self.postmortem_override],
+                "postmortem_verdict_override": [self.postmortem_verdict_override],
+                "postmortem_author": [self.postmortem_author],
+                "postmortem_path": [self.postmortem_path],
+                "postmortem_hypothesis_status": [self.postmortem_hypothesis_status],
+                "postmortem_has_anomalies": [self.postmortem_has_anomalies],
+                "postmortem_summary": [self.postmortem_summary],
+                "postmortem_asset_links": [self.postmortem_asset_links],
             },
             schema=COOL_SCHEMA,
         )
@@ -168,4 +208,14 @@ class Run:
             outcome_is_residual=bool(pydict.get("outcome_is_residual", [False])[i]) if "outcome_is_residual" in pydict else False,
             skill_sha256=pydict.get("skill_sha256", [""])[i] if "skill_sha256" in pydict else "",
             campaign_id=pydict.get("campaign_id", [""])[i] if "campaign_id" in pydict else "",
+            script_sha256=pydict.get("script_sha256", [""])[i] if "script_sha256" in pydict else "",
+            postmortem_status=pydict.get("postmortem_status", ["unassigned"])[i] if "postmortem_status" in pydict else "unassigned",
+            postmortem_override=pydict.get("postmortem_override", ["none"])[i] if "postmortem_override" in pydict else "none",
+            postmortem_verdict_override=pydict.get("postmortem_verdict_override", ["none"])[i] if "postmortem_verdict_override" in pydict else "none",
+            postmortem_author=pydict.get("postmortem_author", [""])[i] if "postmortem_author" in pydict else "",
+            postmortem_path=pydict.get("postmortem_path", [""])[i] if "postmortem_path" in pydict else "",
+            postmortem_hypothesis_status=pydict.get("postmortem_hypothesis_status", ["unassigned"])[i] if "postmortem_hypothesis_status" in pydict else "unassigned",
+            postmortem_has_anomalies=bool(pydict.get("postmortem_has_anomalies", [False])[i]) if "postmortem_has_anomalies" in pydict else False,
+            postmortem_summary=pydict.get("postmortem_summary", [""])[i] if "postmortem_summary" in pydict else "",
+            postmortem_asset_links=pydict.get("postmortem_asset_links", ["{}"])[i] if "postmortem_asset_links" in pydict else "{}",
         )

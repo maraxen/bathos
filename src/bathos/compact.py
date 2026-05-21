@@ -99,9 +99,26 @@ def _migrate_v2(run_dict: dict) -> dict:
     return run_dict
 
 
+def _migrate_v3(run_dict: dict) -> dict:
+    """Migrate v3 fragment to v4 by adding postmortem fields."""
+    run_dict["script_sha256"] = ""
+    run_dict["postmortem_status"] = "unassigned"
+    run_dict["postmortem_override"] = "none"
+    run_dict["postmortem_verdict_override"] = "none"
+    run_dict["postmortem_author"] = ""
+    run_dict["postmortem_path"] = ""
+    run_dict["postmortem_hypothesis_status"] = "unassigned"
+    run_dict["postmortem_has_anomalies"] = False
+    run_dict["postmortem_summary"] = ""
+    run_dict["postmortem_asset_links"] = "{}"
+    run_dict["schema_version"] = "4"
+    return run_dict
+
+
 MIGRATIONS["0"] = _migrate_v0
 MIGRATIONS["1"] = _migrate_v1
 MIGRATIONS["2"] = _migrate_v2
+MIGRATIONS["3"] = _migrate_v3
 
 
 _RUNS_TABLE_SCHEMA = """
@@ -132,7 +149,17 @@ CREATE TABLE IF NOT EXISTS runs (
     sidecar_mode TEXT,
     outcome_is_residual BOOLEAN,
     skill_sha256 TEXT,
-    campaign_id TEXT
+    campaign_id TEXT,
+    script_sha256 TEXT,
+    postmortem_status TEXT,
+    postmortem_override TEXT,
+    postmortem_verdict_override TEXT,
+    postmortem_author TEXT,
+    postmortem_path TEXT,
+    postmortem_hypothesis_status TEXT,
+    postmortem_has_anomalies BOOLEAN,
+    postmortem_summary TEXT,
+    postmortem_asset_links TEXT
 )
 """
 
@@ -238,6 +265,28 @@ def compact(catalog_dir: Path) -> CompactResult:
     # Read all runs from cool fragments (read_runs snapshots file list internally)
     cool_runs = read_runs(catalog_dir)
 
+    # Parse all postmortems in workspace
+    from bathos.config import find_project_config, load_project_config
+    from bathos.postmortem import parse_postmortem
+
+    postmortem_map = {}
+    config_path = find_project_config(Path.cwd())
+    if config_path:
+        project_config = load_project_config(config_path)
+        workspace_root = project_config.root
+    else:
+        workspace_root = Path.cwd()
+
+    if workspace_root.exists():
+        for pm_file in workspace_root.rglob("*.bth.postmortem.toml"):
+            try:
+                pm = parse_postmortem(pm_file)
+                if pm.status != "draft":
+                    rel_path = str(pm_file.relative_to(workspace_root))
+                    postmortem_map[pm.run_id] = (pm, rel_path)
+            except Exception:
+                pass
+
     # Open DuckDB connection
     db_path = catalog_dir / "bathos.db"
     con = duckdb.connect(str(db_path))
@@ -273,10 +322,62 @@ def compact(catalog_dir: Path) -> CompactResult:
 
         if existing:
             skipped += 1
+            if run.id in postmortem_map:
+                pm, rel_path = postmortem_map[run.id]
+                postmortem_verdict_override = pm.verdict_override
+                postmortem_has_anomalies = any(v and str(v).lower() != "none" for v in getattr(pm, "anomalies", {}).values())
+                
+                curr_outcome = con.execute("SELECT outcome FROM runs WHERE id = ?", [run.id]).fetchone()[0] or ""
+                outcome = postmortem_verdict_override if postmortem_verdict_override != "none" else curr_outcome
+                
+                con.execute(
+                    """
+                    UPDATE runs SET
+                        outcome = ?,
+                        postmortem_status = ?,
+                        postmortem_override = ?,
+                        postmortem_verdict_override = ?,
+                        postmortem_author = ?,
+                        postmortem_path = ?,
+                        postmortem_hypothesis_status = ?,
+                        postmortem_has_anomalies = ?,
+                        postmortem_summary = ?,
+                        postmortem_asset_links = ?
+                    WHERE id = ?
+                    """,
+                    [
+                        outcome,
+                        pm.status,
+                        pm.verdict_override,
+                        pm.verdict_override,
+                        pm.author,
+                        rel_path,
+                        pm.hypothesis_status,
+                        postmortem_has_anomalies,
+                        pm.summary,
+                        json.dumps(pm.asset_links),
+                        run.id
+                    ]
+                )
             continue
 
         # Apply migrations if needed
         run = _apply_migrations(run)
+
+        # Apply postmortem updates to run object if present
+        if run.id in postmortem_map:
+            pm, rel_path = postmortem_map[run.id]
+            run.postmortem_status = pm.status
+            run.postmortem_override = pm.verdict_override
+            run.postmortem_verdict_override = pm.verdict_override
+            run.postmortem_author = pm.author
+            run.postmortem_path = rel_path
+            run.postmortem_hypothesis_status = pm.hypothesis_status
+            run.postmortem_has_anomalies = any(v and str(v).lower() != "none" for v in getattr(pm, "anomalies", {}).values())
+            run.postmortem_summary = pm.summary
+            run.postmortem_asset_links = json.dumps(pm.asset_links)
+            if pm.verdict_override != "none":
+                run.outcome = pm.verdict_override
 
         # Collect output metadata
         output_metadata = []
@@ -295,8 +396,10 @@ def compact(catalog_dir: Path) -> CompactResult:
                 id, project_slug, command, argv, git_hash, git_branch,
                 git_dirty, timestamp, duration_s, exit_code, status,
                 output_paths, tags, schema_version, slurm_job_id, hostname, metadata, outcome, output_metadata,
-                sidecar_sha256, sidecar_path, parent_run_id, agent_mode, sidecar_mode, outcome_is_residual, skill_sha256, campaign_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                sidecar_sha256, sidecar_path, parent_run_id, agent_mode, sidecar_mode, outcome_is_residual, skill_sha256, campaign_id,
+                script_sha256, postmortem_status, postmortem_override, postmortem_verdict_override, postmortem_author, postmortem_path,
+                postmortem_hypothesis_status, postmortem_has_anomalies, postmortem_summary, postmortem_asset_links
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 run.id,
@@ -326,6 +429,16 @@ def compact(catalog_dir: Path) -> CompactResult:
                 run.outcome_is_residual,
                 run.skill_sha256,
                 run.campaign_id,
+                run.script_sha256,
+                run.postmortem_status,
+                run.postmortem_override,
+                run.postmortem_verdict_override,
+                run.postmortem_author,
+                run.postmortem_path,
+                run.postmortem_hypothesis_status,
+                run.postmortem_has_anomalies,
+                run.postmortem_summary,
+                run.postmortem_asset_links,
             ],
         )
 

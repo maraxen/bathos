@@ -18,6 +18,9 @@ app.add_typer(remote_app, name="remote")
 campaign_app = typer.Typer(help="Manage experiment campaigns")
 app.add_typer(campaign_app, name="campaign")
 
+postmortem_app = typer.Typer(help="Manage postmortem reviews")
+app.add_typer(postmortem_app, name="postmortem")
+
 
 def _catalog_dir() -> Path:
     override = os.environ.get("BTH_CATALOG_DIR")
@@ -803,3 +806,162 @@ def _parse_since(since: str | None) -> datetime | None:
     if since.endswith("h"):
         return datetime.now(UTC) - timedelta(hours=float(since[:-1]))
     return None
+
+
+@postmortem_app.command()
+def scaffold(
+    run_id: str = typer.Argument(..., help="Run ID to scaffold a postmortem template for"),
+):
+    """Scaffold a new postmortem template for the given Run ID."""
+    from bathos.config import find_project_config, load_project_config
+    from bathos.catalog import read_runs
+    import duckdb
+    import shlex
+
+    # 1. Search for run in DB
+    run_row = None
+    db_path = _catalog_dir() / "bathos.db"
+    if db_path.exists():
+        con = duckdb.connect(str(db_path))
+        try:
+            run_row = con.execute("SELECT command, project_slug FROM runs WHERE id = ?", [run_id]).fetchone()
+        except Exception:
+            pass
+        finally:
+            con.close()
+
+    if not run_row:
+        # Check cool fragments
+        cool_runs = read_runs(_catalog_dir())
+        for r in cool_runs:
+            if r.id == run_id:
+                run_row = (r.command, r.project_slug)
+                break
+
+    if not run_row:
+        typer.echo("Run not found", err=True)
+        raise typer.Exit(1)
+
+    command = run_row[0]
+
+    # Get workspace root
+    config_path = find_project_config(Path.cwd())
+    if config_path:
+        workspace_root = load_project_config(config_path).root
+    else:
+        workspace_root = Path.cwd()
+
+    # Parse command to find the script
+    parts = shlex.split(command)
+    script_path = None
+    for part in parts:
+        p = Path(part)
+        if p.suffix == ".py":
+            script_path = workspace_root / p
+            break
+        if (workspace_root / p).is_file():
+            script_path = workspace_root / p
+            break
+
+    if not script_path:
+        # Fallback to run.py in workspace root
+        script_path = workspace_root / "run.py"
+
+    script_path.parent.mkdir(parents=True, exist_ok=True)
+    postmortem_path = script_path.parent / f"{script_path.name}.{run_id}.bth.postmortem.toml"
+
+    # Scaffold content
+    toml_content = f"""run_id = "{run_id}"
+
+[postmortem]
+hypothesis_status = "unassigned"
+summary = ""
+unexpected_observations = ""
+root_cause = ""
+verdict_override = "none"
+next_steps = ""
+author = ""
+status = "draft"
+
+[asset_links]
+"""
+    postmortem_path.write_text(toml_content)
+    typer.echo(f"Scaffolded postmortem template at {postmortem_path}")
+
+
+@postmortem_app.command()
+def show(
+    run_id: str = typer.Argument(..., help="Run ID of the postmortem to show"),
+    strict_files: bool = typer.Option(False, "--strict-files", help="Fail if files in asset_links do not exist"),
+):
+    """Display and validate the postmortem for the given Run ID."""
+    from bathos.config import find_project_config, load_project_config
+    from bathos.postmortem import parse_postmortem, validate_postmortem
+    from bathos.schema import Run
+    import duckdb
+
+    config_path = find_project_config(Path.cwd())
+    if config_path:
+        workspace_root = load_project_config(config_path).root
+    else:
+        workspace_root = Path.cwd()
+
+    # Find the postmortem TOML file in workspace
+    postmortem_file = None
+    if workspace_root.exists():
+        for pm_file in workspace_root.rglob("*.bth.postmortem.toml"):
+            try:
+                pm = parse_postmortem(pm_file)
+                if pm.run_id == run_id:
+                    postmortem_file = pm_file
+                    break
+            except Exception:
+                pass
+
+    if not postmortem_file:
+        typer.echo("Postmortem not found", err=True)
+        raise typer.Exit(1)
+
+    pm = parse_postmortem(postmortem_file)
+
+    # Search for run in DB
+    run_obj = None
+    db_path = _catalog_dir() / "bathos.db"
+    if db_path.exists():
+        con = duckdb.connect(str(db_path))
+        try:
+            arrow_tbl = con.execute("SELECT * FROM runs WHERE id = ?", [run_id]).arrow()
+            if arrow_tbl.num_rows > 0:
+                pydict = arrow_tbl.to_pydict()
+                run_obj = Run.from_arrow_row(pydict, 0)
+        except Exception:
+            pass
+        finally:
+            con.close()
+
+    if not run_obj:
+        # Check cool fragments
+        from bathos.catalog import read_runs
+        cool_runs = read_runs(_catalog_dir())
+        for r in cool_runs:
+            if r.id == run_id:
+                run_obj = r
+                break
+
+    # Perform validation
+    result = validate_postmortem(pm, workspace_root=workspace_root, run=run_obj, strict_files=strict_files)
+    if not result.ok:
+        typer.echo("Validation failed", err=True)
+        for err in result.errors:
+            typer.echo(f"- {err.message}", err=True)
+        typer.echo(f"Hypothesis status: {pm.hypothesis_status}", err=True)
+        typer.echo(f"Verdict override: {pm.verdict_override}", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"Run ID: {pm.run_id}")
+    typer.echo(f"Status: {pm.status}")
+    typer.echo(f"Hypothesis Status: {pm.hypothesis_status}")
+    typer.echo(f"Verdict Override: {pm.verdict_override}")
+    typer.echo(f"Summary: {pm.summary}")
+    if pm.asset_links:
+        typer.echo(f"Asset Links: {pm.asset_links}")
