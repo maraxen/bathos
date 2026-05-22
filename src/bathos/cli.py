@@ -120,18 +120,12 @@ def ls_cmd(
     catalog_dir = _catalog_dir()
     runs = find_runs(catalog_dir, since=since_dt, project=project, status=status)
     runs = runs[:limit]
+    from bathos.rich_fmt import render_runs_table
+
     if not runs:
         typer.echo("No runs found.")
         return
-    header = f"{'ID':38} {'PROJECT':12} {'STATUS':10} {'EXIT':5} {'OUTCOME':10} {'DURATION':8} COMMAND"
-    typer.echo(header)
-    typer.echo("-" * len(header))
-    for r in runs:
-        outcome_str = r.outcome if r.outcome else "-"
-        typer.echo(
-            f"{r.id:38} {r.project_slug:12} {r.status:10} {r.exit_code:5} "
-            f"{outcome_str:10} {r.duration_s:7.1f}s {r.command[:40]}"
-        )
+    render_runs_table(runs)
 
     # Check if compaction is recommended and show banner if needed
     if should_compact(catalog_dir):
@@ -144,23 +138,13 @@ def ls_cmd(
 def show(run_id: str = typer.Argument(...)):
     """Show full details of a run."""
     from bathos.query import get_run
+    from bathos.rich_fmt import render_run_detail
 
     r = get_run(run_id, _catalog_dir())
     if r is None:
         typer.echo(f"Run not found: {run_id}", err=True)
         raise typer.Exit(1)
-    typer.echo(f"id:           {r.id}")
-    typer.echo(f"project:      {r.project_slug}")
-    typer.echo(f"status:       {r.status}")
-    typer.echo(f"exit_code:    {r.exit_code}")
-    typer.echo(f"duration:     {r.duration_s:.2f}s")
-    typer.echo(f"git_hash:     {r.git_hash}")
-    typer.echo(f"git_branch:   {r.git_branch}")
-    typer.echo(f"git_dirty:    {r.git_dirty}")
-    typer.echo(f"timestamp:    {r.timestamp.isoformat()}")
-    typer.echo(f"command:      {r.command}")
-    typer.echo(f"output_paths: {r.output_paths}")
-    typer.echo(f"tags:         {r.tags}")
+    render_run_detail(r)
 
 
 @app.command()
@@ -483,16 +467,13 @@ def campaign_ls(
 ):
     """List campaigns."""
     import duckdb
-
     from bathos.campaigns import list_campaigns
+    from bathos.rich_fmt import render_campaign_table
+
     db = duckdb.connect(str(_catalog_dir() / "bathos.db"), read_only=True)
     try:
         campaigns = list_campaigns(db, status=status)
-        if not campaigns:
-            typer.echo("No campaigns found.")
-            return
-        for c in campaigns:
-            typer.echo(f"{c.id[:8]} {c.name:30} {c.mode:12} {c.status}")
+        render_campaign_table(campaigns)
     finally:
         db.close()
 
@@ -532,21 +513,20 @@ def campaign_review(
 ):
     """Review campaign: residual rate, bypass rate, outcome distribution."""
     import duckdb
+    from bathos.campaigns import get_campaign, review_campaign
+    from bathos.rich_fmt import render_campaign_review
 
-    from bathos.campaigns import review_campaign
     db = duckdb.connect(str(_catalog_dir() / "bathos.db"), read_only=True)
     try:
+        campaign = get_campaign(db, campaign_id)
+        if campaign is None:
+            typer.echo(f"Campaign not found: {campaign_id}", err=True)
+            raise typer.Exit(1)
         review = review_campaign(db, campaign_id)
         if "error" in review:
             typer.echo(review["error"], err=True)
             raise typer.Exit(1)
-        typer.echo(f"Runs: {review['total_runs']}")
-        typer.echo(f"Residual rate: {review['residual_rate']:.1%}")
-        typer.echo(f"Bypass rate: {review['bypass_rate']:.1%}")
-        typer.echo(f"Unknown rate: {review['unknown_rate']:.1%}")
-        typer.echo(f"Outcomes: {review['outcome_distribution']}")
-        for anomaly in review["anomalies"]:
-            typer.echo(f"  WARNING: {anomaly}")
+        render_campaign_review(campaign, review)
     finally:
         db.close()
 
@@ -752,8 +732,39 @@ def export_cmd(
     tool: str = typer.Option("claude", "--tool", "-t", help="Target tool: claude or gemini"),
     level: str = typer.Option("user", "--level", "-l", help="Install level: user, workspace, or system"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print what would happen without writing"),
+    html: bool = typer.Option(False, "--html", help="Export catalog as a self-contained HTML report"),
+    out: str = typer.Option("report.html", "--out", "-o", help="Output file for --html export"),
+    project: str | None = typer.Option(None, "--project", help="Filter by project (--html only)"),
+    campaign: str | None = typer.Option(None, "--campaign", help="Filter by campaign (--html only)"),
 ):
-    """Export the using-bathos skill and register MCP server for a code tool."""
+    """Export the using-bathos skill and register MCP server, or export catalog as HTML."""
+    if html:
+        try:
+            from bathos.viz.html import export_html as do_export
+        except ImportError:
+            typer.echo(
+                "Error: bathos[viz] is not installed.\n"
+                "Install with: uv tool install 'bathos[viz]'",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+        from bathos.query import list_runs
+
+        catalog = _catalog_dir()
+        runs = list_runs(catalog, project=project)
+        if campaign:
+            runs = [r for r in runs if r.campaign_id == campaign]
+
+        if not runs:
+            typer.echo(f"No matching runs. Writing empty report to {out}.", err=True)
+
+        path, size_warned = do_export(runs, output_path=out, catalog_dir=catalog)
+        typer.echo(f"Exported to {path}")
+        if size_warned:
+            typer.echo("(Use --project or --campaign to reduce file size)", err=True)
+        return
+
     from bathos.export import ExportError, export_skill, register_mcp, resolve_target
 
     try:
@@ -771,6 +782,38 @@ def export_cmd(
     else:
         typer.echo(f"Exported skill to:    {result.target}")
         typer.echo(f"Registered MCP at:   {mcp_target}")
+
+
+@app.command()
+def view(
+    port: int = typer.Option(8080, "--port", "-p", help="Port to bind to"),
+    host: str = typer.Option("127.0.0.1", "--host", help="Host to bind to"),
+    no_open: bool = typer.Option(False, "--no-open", help="Do not open browser automatically"),
+    project: str | None = typer.Option(None, "--project", help="Scope to single project"),
+):
+    """Launch a local FastAPI dashboard to visualize runs and campaigns."""
+    try:
+        from bathos.viz.server import run_server
+    except ImportError:
+        typer.echo(
+            "Error: bathos[viz] is not installed.\n"
+            "Install with: uv tool install 'bathos[viz]'",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    from bathos.query import list_runs
+
+    catalog = _catalog_dir()
+    runs = list_runs(catalog, project=project, limit=1001)
+    total_run_count = len(runs)
+    runs = runs[:1000]
+
+    try:
+        run_server(runs, total_run_count=total_run_count, host=host, port=port, open_browser=not no_open)
+    except OSError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
 
 
 @app.command("catalog-version")
