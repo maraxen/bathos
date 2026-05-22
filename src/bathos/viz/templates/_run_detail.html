@@ -1,0 +1,134 @@
+<div class="detail-panel">
+  <div class="detail-grid">
+
+    {# Execution section #}
+    <div class="detail-section">
+      <h4>Execution</h4>
+      <dl class="detail-kv">
+        <dt>Command</dt>
+        <dd>{{ run.command or '—' }}</dd>
+        <dt>Hostname</dt>
+        <dd>{{ run.hostname or '—' }}</dd>
+        {% if run.slurm_job_id %}
+        <dt>SLURM Job ID</dt>
+        <dd>{{ run.slurm_job_id }}</dd>
+        {% endif %}
+        <dt>Duration</dt>
+        <dd>{{ run.duration_display }}</dd>
+        <dt>Exit Code</dt>
+        <dd>{{ run.exit_code }}</dd>
+      </dl>
+    </div>
+
+    {# Provenance section #}
+    <div class="detail-section">
+      <h4>Provenance</h4>
+      <dl class="detail-kv">
+        <dt>Git Commit</dt>
+        <dd>
+          {{ run.git_hash_short or '—' }}
+          {% if run.git_branch %} ({{ run.git_branch }}){% endif %}
+          {% if run.git_dirty %}
+            <span class="badge badge-orange" style="margin-left:0.25rem;">dirty</span>
+          {% endif %}
+        </dd>
+        {% if run.script_sha256 %}
+        <dt>Script SHA256</dt>
+        <dd>{{ run.script_sha256[:16] }}…</dd>
+        {% endif %}
+        {% if run.sidecar_mode %}
+        <dt>Sidecar Mode</dt>
+        <dd>{{ run.sidecar_mode }}</dd>
+        {% endif %}
+        {% if run.sidecar_path %}
+        <dt>Sidecar Path</dt>
+        <dd>{{ run.sidecar_path }}</dd>
+        {% endif %}
+        {% if run.agent_mode %}
+        <dt>Agent Mode</dt>
+        <dd>{{ run.agent_mode }}</dd>
+        {% endif %}
+        {% if run.parent_run_id %}
+        <dt>Parent Run</dt>
+        <dd>{{ run.parent_run_id[:8] }}</dd>
+        {% endif %}
+      </dl>
+    </div>
+
+    {# Outcome section #}
+    <div class="detail-section">
+      <h4>Outcome</h4>
+      <dl class="detail-kv">
+        <dt>Status</dt>
+        <dd>{{ run.status or '—' }}</dd>
+        <dt>Outcome</dt>
+        <dd>
+          {{ run.outcome or '—' }}
+          {% if run.outcome_is_residual %}
+            <span class="badge badge-gray" style="margin-left:0.25rem;">residual</span>
+          {% endif %}
+        </dd>
+        {% if run.tags %}
+        <dt>Tags</dt>
+        <dd>{{ run.tags | join(', ') }}</dd>
+        {% endif %}
+        {% if run.output_paths %}
+        <dt>Output Paths</dt>
+        <dd>
+          <ul class="output-list">
+            {% for path in run.output_paths %}
+            <li>{{ path }}</li>
+            {% endfor %}
+          </ul>
+        </dd>
+        {% endif %}
+      </dl>
+    </div>
+
+    {# Postmortem section — only when assigned #}
+    {% if run.postmortem_status != 'unassigned' %}
+    <div class="detail-section">
+      <h4>Postmortem</h4>
+      <dl class="detail-kv">
+        <dt>Status</dt>
+        <dd>{{ run.postmortem_status }}</dd>
+        {% if run.postmortem_hypothesis_status %}
+        <dt>Hypothesis</dt>
+        <dd>{{ run.postmortem_hypothesis_status }}</dd>
+        {% endif %}
+        {% if run.postmortem_verdict_override %}
+        <dt>Verdict Override</dt>
+        <dd>{{ run.postmortem_verdict_override }}</dd>
+        {% endif %}
+        {% if run.postmortem_author %}
+        <dt>Author</dt>
+        <dd>{{ run.postmortem_author }}</dd>
+        {% endif %}
+        {% if run.postmortem_summary %}
+        <dt>Summary</dt>
+        <dd style="white-space: pre-wrap; font-family: inherit;">{{ run.postmortem_summary }}</dd>
+        {% endif %}
+        {% if run.postmortem_path %}
+        <dt>Path</dt>
+        <dd>{{ run.postmortem_path }}</dd>
+        {% endif %}
+        {% if run.postmortem_asset_links %}
+        <dt>Asset Links</dt>
+        <dd>
+          <ul class="output-list">
+            {% for key, value in run.postmortem_asset_links.items() %}
+            <li><strong>{{ key }}</strong>: {{ value }}</li>
+            {% endfor %}
+          </ul>
+        </dd>
+        {% endif %}
+        {% if run.postmortem_has_anomalies %}
+        <dt>Anomalies</dt>
+        <dd><span class="badge badge-orange">anomalies detected</span></dd>
+        {% endif %}
+      </dl>
+    </div>
+    {% endif %}
+
+  </div>
+</div>
