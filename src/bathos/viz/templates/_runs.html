@@ -1,0 +1,80 @@
+{% macro status_badge(status) %}
+  {% if status == 'completed' %}
+    <span class="badge badge-green">{{ status }}</span>
+  {% elif status == 'failed' %}
+    <span class="badge badge-red">{{ status }}</span>
+  {% elif status == 'running' %}
+    <span class="badge badge-orange">{{ status }}</span>
+  {% else %}
+    <span class="badge badge-gray">{{ status or '—' }}</span>
+  {% endif %}
+{% endmacro %}
+
+{% macro outcome_badge(outcome) %}
+  {% if outcome == 'pass' %}
+    <span class="badge badge-green">{{ outcome }}</span>
+  {% elif outcome == 'fail' %}
+    <span class="badge badge-red">{{ outcome }}</span>
+  {% elif outcome == 'marginal' %}
+    <span class="badge badge-orange">{{ outcome }}</span>
+  {% elif outcome %}
+    <span class="badge badge-gray">{{ outcome }}</span>
+  {% else %}
+    <span class="badge badge-gray">—</span>
+  {% endif %}
+{% endmacro %}
+
+{% if not runs %}
+  <div class="empty-state">
+    <h2>No Runs Found</h2>
+    <p>No experiment runs are recorded in this catalog.</p>
+    <p>To get started:</p>
+    <ol style="display:inline-block; text-align:left;">
+      <li>Initialize a project: <code>bth init</code></li>
+      <li>Run an experiment: <code>bth run uv run python scripts/experiments/my_script.py</code></li>
+      <li>Refresh this page.</li>
+    </ol>
+  </div>
+{% else %}
+
+{% if total_run_count > 1000 %}
+<div class="large-table-notice">
+  Showing 1000 of {{ total_run_count }} runs. Use <code>bth find</code> or <code>bth sql</code> to filter.
+</div>
+{% endif %}
+
+<table>
+  <thead>
+    <tr>
+      <th>ID</th>
+      <th>Project</th>
+      <th>Status</th>
+      <th>Outcome</th>
+      <th>Duration</th>
+      <th>Campaign</th>
+      <th>Branch</th>
+      <th>Timestamp</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for run in runs %}
+    <tr class="run-row" @click="toggleRun('{{ run.id }}')">
+      <td class="font-mono">{{ run.id_short }}</td>
+      <td>{{ run.project_slug or '—' }}</td>
+      <td>{{ status_badge(run.status) }}</td>
+      <td>{{ outcome_badge(run.outcome) }}</td>
+      <td class="font-mono">{{ run.duration_display }}</td>
+      <td>{{ run.campaign_name or '—' }}</td>
+      <td class="font-mono">{{ run.git_branch or '—' }}</td>
+      <td class="font-mono">{{ run.timestamp }}</td>
+    </tr>
+    <tr x-show="expandedRuns['{{ run.id }}']" x-cloak class="detail-row">
+      <td colspan="8">
+        {% include '_run_detail.html' %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% endif %}

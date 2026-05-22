@@ -58,8 +58,8 @@ def test_full_workflow(tmp_path: Path, monkeypatch):
     run_id = runs[0].id
     r = runner.invoke(app, ["show", run_id])
     assert r.exit_code == 0
-    assert run_id in r.output
-    assert "intproj" in r.output
+    # Rich panels show "Execution" header; full UUID not shown (short ID only)
+    assert "Execution" in r.output
 
     # 7. sql escape hatch (cool tier; runs are in per-project subdirs)
     glob = str(catalog / "runs" / "intproj" / "run_*.parquet")

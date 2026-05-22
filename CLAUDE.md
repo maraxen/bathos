@@ -10,7 +10,11 @@ bathos is a standalone experiment tracking CLI for a single researcher across 10
 
 ---
 
-## Current Status (as of 2026-05-21)
+## Current Status (as of 2026-05-22)
+
+**v0.5 (viz suite): in progress on `worktree-viz-suite` branch.** 346 tests passing.
+
+**Shipped in v0.5:** Rich CLI formatters (`bth ls`, `bth show`, `bth campaign ls`, `bth campaign review`), `bth view` local FastAPI dashboard, `bth export --html` static report, `bathos[viz]` optional extra. See design spec: `docs/superpowers/specs/2026-05-21-viz-suite-design.md`.
 
 **v0.4.1: complete and merged to main.** 348 tests passing.
 
@@ -148,17 +152,35 @@ src/bathos/
   linter.py       # bth lint — Tier-1 and Tier-2 checks
   migrate.py      # bth migrate — schema version upgrades
   new_experiment.py # bth new-experiment scaffold
-  export.py       # bth export — skill + MCP registration
+  export.py       # bth export — skill + MCP registration (UNCHANGED — do not touch)
   validate.py     # sidecar structural validation
   remote.py       # bth remote subcommands
   sync.py         # bth sync rsync wrapper
   archive.py      # bth archive warm→cold export
   prereg.py       # agentic integrity pre-registration gate
   decorators.py   # @bth.experiment provenance decorator
+  rich_fmt.py     # Rich CLI formatters (base dep) — render_runs_table, render_run_detail, render_campaign_table, render_campaign_review
+  viz/            # Optional extra: bathos[viz]
+    __init__.py
+    data.py       # RunDisplay/CampaignDisplay TypedDicts; project_run(), project_campaign()
+    html.py       # render_html_report(), export_html() — static HTML renderer
+    server.py     # create_app(), run_server() — FastAPI local dashboard
+    templates/    # Jinja2 templates (SPA: index.html, _runs.html, _run_detail.html, _campaign.html)
+    static/       # Vendored Alpine.js + Pico CSS (both MIT); VERSIONS.md with checksums
   templates/
     _bth_env.sh   # SLURM env helper template
     experiment.py # bth new-experiment script skeleton
 ```
+
+### Viz Suite Architecture (v0.5)
+
+- `rich_fmt.py` is a **base dependency** — always imported by CLI, no viz/ imports
+- `viz/` is an **optional extra** (`bathos[viz]`) — lazy-imported inside command bodies only
+- `viz/data.py` consumes only `query.py` + `campaigns.py` — never imports `catalog.py` or `compact.py`
+- `bth view` cap: query `limit=1001`, slice `[:1000]`, show sticky banner if count > 1000
+- `bth export --html` warns to stderr if rendered HTML > 5 MB
+- `bth view` is read-only; never triggers compaction
+- `importlib.resources.files("bathos.viz")` used to load templates and static assets at runtime
 
 ---
 

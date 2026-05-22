@@ -17,7 +17,7 @@ def render_runs_table(runs: list[Run], console: Console | None = None) -> None:
         console: Rich Console instance. If None, creates a default Console.
     """
     if console is None:
-        console = Console(width=200)
+        console = Console()
 
     if not runs:
         console.print("[dim]No runs to display.[/dim]")
@@ -25,13 +25,13 @@ def render_runs_table(runs: list[Run], console: Console | None = None) -> None:
 
     table = Table(title="Runs")
     table.add_column("ID", style="cyan")
-    table.add_column("PROJECT", style="magenta")
-    table.add_column("STATUS", style="yellow")
-    table.add_column("OUTCOME", style="green")
-    table.add_column("DURATION", style="blue")
-    table.add_column("CAMPAIGN", style="white")
-    table.add_column("BRANCH", style="green")
-    table.add_column("TIMESTAMP", style="dim")
+    table.add_column("Project", style="magenta")
+    table.add_column("Status", style="yellow")
+    table.add_column("Outcome", style="green")
+    table.add_column("Duration", style="blue")
+    table.add_column("Campaign", style="white")
+    table.add_column("Branch", style="green")
+    table.add_column("Timestamp", style="dim")
 
     for run in runs:
         # Format ID as first 8 chars
@@ -76,11 +76,10 @@ def render_run_detail(run: Run, console: Console | None = None) -> None:
         console: Rich Console instance. If None, creates a default Console.
     """
     if console is None:
-        console = Console(width=200)
+        console = Console()
 
     # Execution Panel
     execution_info = (
-        f"[bold]ID:[/bold] {run.id}\n"
         f"[bold]Command:[/bold] {run.command}\n"
         f"[bold]Args:[/bold] {' '.join(run.argv)}\n"
         f"[bold]Hostname:[/bold] {run.hostname or '—'}\n"
@@ -150,7 +149,7 @@ def render_campaign_table(campaigns: list[Campaign], console: Console | None = N
         console: Rich Console instance. If None, creates a default Console.
     """
     if console is None:
-        console = Console(width=200)
+        console = Console()
 
     if not campaigns:
         console.print("[dim]No campaigns to display.[/dim]")
@@ -192,7 +191,7 @@ def render_campaign_review(
         console: Rich Console instance. If None, creates a default Console.
     """
     if console is None:
-        console = Console(width=200)
+        console = Console()
 
     # Campaign header
     header = f"{campaign.name} ({campaign.mode})"

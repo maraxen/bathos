@@ -1,0 +1,139 @@
+{% if not campaigns %}
+  <div class="empty-state">
+    <h2>No Campaigns Yet</h2>
+    <p>Campaigns group related experiment runs under a shared question and hypothesis.</p>
+    <p>Create one with: <code>bth campaign create "my-campaign"</code></p>
+  </div>
+{% else %}
+
+<table>
+  <thead>
+    <tr>
+      <th>ID</th>
+      <th>Name</th>
+      <th>Mode</th>
+      <th>Status</th>
+      <th>Started</th>
+      <th>Runs</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for campaign in campaigns %}
+    <tr class="run-row" @click="toggleCampaign('{{ campaign.id }}')">
+      <td class="font-mono">{{ campaign.id_short }}</td>
+      <td><strong>{{ campaign.name }}</strong></td>
+      <td>
+        <span class="badge badge-gray">{{ campaign.mode or '—' }}</span>
+      </td>
+      <td>
+        {% if campaign.status == 'active' %}
+          <span class="badge badge-green">{{ campaign.status }}</span>
+        {% elif campaign.status == 'concluded' %}
+          <span class="badge badge-gray">{{ campaign.status }}</span>
+        {% elif campaign.status == 'failed' %}
+          <span class="badge badge-red">{{ campaign.status }}</span>
+        {% else %}
+          <span class="badge badge-gray">{{ campaign.status or '—' }}</span>
+        {% endif %}
+      </td>
+      <td class="font-mono">{{ campaign.started_at or '—' }}</td>
+      <td>{{ campaign.run_count }}</td>
+    </tr>
+
+    <tr x-show="expandedCampaigns['{{ campaign.id }}']" x-cloak>
+      <td colspan="6" style="background: #f9fafb;">
+        <div class="detail-panel">
+          <div class="detail-grid">
+
+            <div class="detail-section">
+              <h4>Research Context</h4>
+              <dl class="detail-kv">
+                {% if campaign.question %}
+                <dt>Question</dt>
+                <dd style="font-family: inherit; white-space: pre-wrap;">{{ campaign.question }}</dd>
+                {% endif %}
+                {% if campaign.hypothesis %}
+                <dt>Hypothesis</dt>
+                <dd style="font-family: inherit; white-space: pre-wrap;">{{ campaign.hypothesis }}</dd>
+                {% endif %}
+                {% if campaign.conclusion %}
+                <dt>Conclusion</dt>
+                <dd style="font-family: inherit; white-space: pre-wrap;">{{ campaign.conclusion }}</dd>
+                {% endif %}
+                {% if campaign.outcome_label %}
+                <dt>Outcome Label</dt>
+                <dd>{{ campaign.outcome_label }}</dd>
+                {% endif %}
+                {% if campaign.concluded_at %}
+                <dt>Concluded At</dt>
+                <dd>{{ campaign.concluded_at }}</dd>
+                {% endif %}
+                {% if campaign.parent_campaign_id %}
+                <dt>Parent Campaign</dt>
+                <dd class="font-mono">{{ campaign.parent_campaign_id[:8] }}</dd>
+                {% endif %}
+              </dl>
+            </div>
+
+            <div class="detail-section">
+              <h4>Outcome Distribution</h4>
+              {% if campaign.outcome_distribution %}
+              <table style="width: auto; font-size: 0.8rem;">
+                <thead>
+                  <tr>
+                    <th>Outcome</th>
+                    <th style="text-align: right;">Count</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for label, count in campaign.outcome_distribution.items() %}
+                  <tr>
+                    <td>
+                      {% if label == 'pass' %}
+                        <span class="badge badge-green">{{ label }}</span>
+                      {% elif label == 'fail' %}
+                        <span class="badge badge-red">{{ label }}</span>
+                      {% elif label == 'marginal' %}
+                        <span class="badge badge-orange">{{ label }}</span>
+                      {% else %}
+                        <span class="badge badge-gray">{{ label }}</span>
+                      {% endif %}
+                    </td>
+                    <td style="text-align: right; font-family: monospace;">{{ count }}</td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+              <dl class="detail-kv" style="margin-top: 0.5rem;">
+                <dt>Residual Rate</dt>
+                <dd>{{ "%.1f"|format(campaign.residual_rate * 100) }}%</dd>
+                <dt>Bypass Rate</dt>
+                <dd>{{ "%.1f"|format(campaign.bypass_rate * 100) }}%</dd>
+                <dt>Unknown Rate</dt>
+                <dd>{{ "%.1f"|format(campaign.unknown_rate * 100) }}%</dd>
+              </dl>
+              {% else %}
+              <p style="color: #9ca3af; font-size: 0.875rem;">No outcome data yet.</p>
+              {% endif %}
+            </div>
+
+            {% if campaign.anomalies %}
+            <div class="detail-section" style="border-color: #f59e0b;">
+              <h4 style="color: #92400e;">Anomalies</h4>
+              <ul style="margin: 0; padding-left: 1.25rem; font-size: 0.875rem;">
+                {% for anomaly in campaign.anomalies %}
+                <li style="color: #92400e; margin-bottom: 0.25rem;">{{ anomaly }}</li>
+                {% endfor %}
+              </ul>
+            </div>
+            {% endif %}
+
+          </div>
+        </div>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% endif %}

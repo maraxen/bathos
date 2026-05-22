@@ -14,7 +14,8 @@ Never lose track of what ran, what it produced, or whether results are still val
 ## Install
 
 ```bash
-uv tool install bathos
+uv tool install bathos           # base install (includes Rich CLI)
+uv tool install 'bathos[viz]'    # adds bth view + bth export --html
 ```
 
 ## Quick start
@@ -62,6 +63,8 @@ bth sql "SELECT project_slug, count(*) FROM runs GROUP BY 1"
 - `bth migrate` — upgrade cool-tier Parquet fragments to current schema version
 - `bth migrate-to-project-subdirs [--dry-run]` — move flat catalog runs into `runs/<slug>/` subdirs (v0.4+)
 - `bth export` — export the using-bathos skill and register MCP server
+- `bth export --html [--out report.html] [--project slug] [--campaign id]` — self-contained HTML report (requires `bathos[viz]`)
+- `bth view [--port 8080] [--project slug] [--no-open]` — local FastAPI dashboard (requires `bathos[viz]`)
 
 **`bth sync`** — Sync cool-tier catalog to/from cluster (v0.4+: per-project filtered)
 - `bth sync [<remote>]` — push only this project's runs to the remote (filtered by `project_slug`)
