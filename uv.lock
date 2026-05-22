@@ -82,6 +82,7 @@ mcp = [
 ]
 viz = [
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "jinja2" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -100,6 +101,7 @@ requires-dist = [
     { name = "duckdb", specifier = ">=1.0" },
     { name = "fastapi", marker = "extra == 'viz'", specifier = ">=0.110" },
     { name = "fastmcp", marker = "extra == 'mcp'", specifier = ">=2.0,<3.0" },
+    { name = "httpx", marker = "extra == 'viz'", specifier = ">=0.28.1" },
     { name = "jinja2", marker = "extra == 'viz'", specifier = ">=3.1" },
     { name = "pyarrow", specifier = ">=16" },
     { name = "pyright", marker = "extra == 'dev'", specifier = ">=1.1" },
