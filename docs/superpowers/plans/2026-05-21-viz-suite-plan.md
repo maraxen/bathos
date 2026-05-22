@@ -1738,7 +1738,7 @@ def render_html_report(
             total_run_count=total_run_count if total_run_count is not None else len(run_displays),
         )
     except TemplateError as e:
-        print(f"Template error: {e.filename}:{e.lineno}: {e.message}", file=sys.stderr)
+        print(f"Template error: {e}", file=sys.stderr)
         raise
     
     # Inject data blob as JavaScript
@@ -2183,7 +2183,7 @@ def view(
     
     catalog = _catalog_dir()
     # Query 1001 so we can detect truncation without an extra COUNT query
-    runs = list_runs(catalog, project_slug=project, limit=1001)
+    runs = list_runs(catalog, project=project, limit=1001)
     total_run_count = len(runs)
     runs = runs[:1000]  # cap at 1000 for client-side rendering
     
@@ -2230,7 +2230,7 @@ def export_cmd(
         from bathos.query import list_runs
 
         catalog = _catalog_dir()
-        runs = list_runs(catalog, project_slug=project)
+        runs = list_runs(catalog, project=project)
         if campaign:
             runs = [r for r in runs if r.campaign_id == campaign]
 
@@ -2362,7 +2362,7 @@ def show(run_id: str = typer.Argument(..., help="Run ID")):
     from bathos.rich_fmt import render_run_detail
     
     catalog = _catalog_dir()
-    run = get_run(catalog, run_id)
+    run = get_run(run_id, catalog)
     
     if run is None:
         typer.echo(f"Run {run_id} not found.", err=True)
