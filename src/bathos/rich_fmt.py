@@ -1,8 +1,5 @@
 """Rich console formatters for runs, campaigns, and reviews."""
 
-from datetime import datetime
-from typing import Optional
-
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
