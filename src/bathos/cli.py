@@ -410,10 +410,14 @@ def campaign_create(
     """Create a new campaign."""
     import duckdb
 
-    from bathos.campaigns import create_campaign
+    from bathos.campaigns import create_campaign, list_campaigns
     slug = _require_project_slug()
     db = duckdb.connect(str(_catalog_dir() / "bathos.db"))
     try:
+        existing = [c for c in list_campaigns(db, project_slug=slug, status="open") if c.name == name]
+        if existing:
+            ids = ", ".join(c.id[:8] for c in existing)
+            typer.echo(f"Warning: {len(existing)} open campaign(s) named {name!r} already exist: {ids}", err=True)
         campaign = create_campaign(db, name=name, project_slug=slug, mode=mode, question=question, hypothesis=hypothesis, parent_campaign_id=parent)
         typer.echo(f"Created campaign {campaign.id[:8]} — {campaign.name} ({campaign.mode})")
     finally:

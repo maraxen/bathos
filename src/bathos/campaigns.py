@@ -84,21 +84,41 @@ def add_run_to_campaign(db, campaign_id: str, run_id: str) -> None:
     )
 
 
+def _resolve_campaign_id(db, campaign_id: str) -> str:
+    """Resolve a full or short (prefix) campaign ID to a full UUID.
+
+    Tries exact match first; falls back to prefix match. Raises CampaignError
+    if no match or if the prefix is ambiguous (matches multiple campaigns).
+    """
+    rows = db.execute("SELECT id FROM campaigns WHERE id = ?", [campaign_id]).fetchall()
+    if rows:
+        return rows[0][0]
+    prefix_rows = db.execute("SELECT id FROM campaigns WHERE id LIKE ?", [campaign_id + "%"]).fetchall()
+    if not prefix_rows:
+        raise CampaignError(f"Campaign not found: {campaign_id}")
+    if len(prefix_rows) > 1:
+        matches = ", ".join(r[0][:8] for r in prefix_rows)
+        raise CampaignError(f"Ambiguous campaign ID prefix {campaign_id!r} matches: {matches}")
+    return prefix_rows[0][0]
+
+
 def conclude_campaign(db, campaign_id: str, outcome_label: str, conclusion: str) -> None:
     """Mark campaign as concluded."""
-    rows = db.execute("SELECT id FROM campaigns WHERE id = ?", [campaign_id]).fetchall()
-    if not rows:
-        raise CampaignError(f"Campaign not found: {campaign_id}")
+    full_id = _resolve_campaign_id(db, campaign_id)
     concluded_at = datetime.now(UTC).isoformat()
     db.execute(
         "UPDATE campaigns SET status = 'concluded', concluded_at = ?, outcome_label = ?, conclusion = ? WHERE id = ?",
-        [concluded_at, outcome_label, conclusion, campaign_id]
+        [concluded_at, outcome_label, conclusion, full_id]
     )
 
 
 def get_campaign(db, campaign_id: str) -> Campaign | None:
     """Fetch campaign by ID."""
-    rows = db.execute("SELECT id, project_slug, name, mode, question, hypothesis, status, started_at, concluded_at, conclusion, outcome_label, parent_campaign_id FROM campaigns WHERE id = ?", [campaign_id]).fetchall()
+    try:
+        full_id = _resolve_campaign_id(db, campaign_id)
+    except CampaignError:
+        return None
+    rows = db.execute("SELECT id, project_slug, name, mode, question, hypothesis, status, started_at, concluded_at, conclusion, outcome_label, parent_campaign_id FROM campaigns WHERE id = ?", [full_id]).fetchall()
     if not rows:
         return None
     r = rows[0]

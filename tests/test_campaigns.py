@@ -271,3 +271,51 @@ def test_create_campaign_with_parent(populated_warm_catalog: Path):
         assert rows[0][0] == parent.id
     finally:
         db.close()
+
+
+def test_conclude_campaign_accepts_short_id(populated_warm_catalog: Path):
+    """conclude_campaign should accept 8-char short IDs as displayed by bth campaign ls."""
+    db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
+    try:
+        campaign = create_campaign(db, name="Short ID Test", project_slug="prolix", mode="exploration")
+        short_id = campaign.id[:8]
+        conclude_campaign(db, short_id, "pass", "concluded via short ID")
+
+        rows = db.execute("SELECT status, outcome_label FROM campaigns WHERE id = ?", [campaign.id]).fetchall()
+        assert rows[0][0] == "concluded"
+        assert rows[0][1] == "pass"
+    finally:
+        db.close()
+
+
+def test_get_campaign_accepts_short_id(populated_warm_catalog: Path):
+    """get_campaign should resolve 8-char short IDs."""
+    db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
+    try:
+        campaign = create_campaign(db, name="Short ID Fetch", project_slug="prolix", mode="exploration")
+        short_id = campaign.id[:8]
+        fetched = get_campaign(db, short_id)
+        assert fetched is not None
+        assert fetched.id == campaign.id
+    finally:
+        db.close()
+
+
+def test_conclude_campaign_raises_on_ambiguous_prefix(populated_warm_catalog: Path):
+    """conclude_campaign should raise CampaignError if a prefix matches multiple campaigns."""
+    import uuid
+    db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
+    try:
+        # Force two campaigns with the same 4-char prefix by setting IDs directly
+        shared_prefix = "aaaa"
+        id1 = shared_prefix + str(uuid.uuid4())[4:]
+        id2 = shared_prefix + str(uuid.uuid4())[4:]
+        for cid in (id1, id2):
+            db.execute(
+                "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at) VALUES (?, 'prolix', 'Ambig', 'exploration', 'open', ?)",
+                [cid, datetime.now(UTC).isoformat()],
+            )
+        with pytest.raises(CampaignError, match="Ambiguous"):
+            conclude_campaign(db, shared_prefix, "pass", "")
+    finally:
+        db.close()
