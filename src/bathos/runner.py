@@ -25,17 +25,22 @@ def _find_script_path(argv: list[str], cwd: Path) -> Path | None:
 
     # If first arg is not python/python3, assume it's the script
     first = argv[0].lower()
-    if not any(first.endswith(exe) for exe in ("python", "python3")):
+    if not any(first.endswith(exe) for exe in ("python", "python3", "uv")):
         candidate = cwd / argv[0] if not Path(argv[0]).is_absolute() else Path(argv[0])
         if candidate.exists() and candidate.suffix == ".py":
             return candidate.resolve()
         return None
 
-    # First arg is python; look for script file in subsequent args
+    # First arg is python/uv; look for script file in subsequent args
     # Handle: python script.py, python -c "...", python -m module, etc.
+    # Also handle: uv run python script.py (skip 'run' and 'python' tokens)
+    _UV_PASSTHROUGH = {"run", "python", "python3"}
     i = 1
     while i < len(argv):
         arg = argv[i]
+        if arg in _UV_PASSTHROUGH:
+            i += 1
+            continue
         if arg in ("-c", "-m", "-W"):
             # These take an argument but don't point to a file
             i += 2
