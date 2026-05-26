@@ -20,3 +20,4 @@ tmp/
 # Ephemeral caches and praxia state (do not commit)
 .fastembed_cache/
 .praxia/
+.claude/
