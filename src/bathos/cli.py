@@ -740,8 +740,15 @@ def export_cmd(
     out: str = typer.Option("report.html", "--out", "-o", help="Output file for --html export"),
     project: str | None = typer.Option(None, "--project", help="Filter by project (--html only)"),
     campaign: str | None = typer.Option(None, "--campaign", help="Filter by campaign (--html only)"),
+    surface: str | None = typer.Option(None, "--surface", help="Plugin surface (e.g., claude_code)"),
 ):
     """Export the using-bathos skill and register MCP server, or export catalog as HTML."""
+    # Phase 3: plugin surface post-step hook
+    if surface:
+        from bathos import __version__
+        typer.echo(f"Plugin export hook: surface={surface}, level={level}, bathos v{__version__}")
+        raise typer.Exit(0)
+
     if html:
         try:
             from bathos.viz.html import export_html as do_export
