@@ -838,7 +838,8 @@ async def mcp_campaign_create_tool(
 
 
 @app.tool("campaign_list")
-def mcp_campaign_list_tool(
+@traced_tool
+async def mcp_campaign_list_tool(
     catalog_dir: str = "",
     project_slug: str = "",
     status: str = "",
@@ -852,7 +853,8 @@ def mcp_campaign_list_tool(
 
 
 @app.tool("campaign_review")
-def mcp_campaign_review_tool(
+@traced_tool
+async def mcp_campaign_review_tool(
     campaign_id: str = "",
     catalog_dir: str = "",
 ) -> str:
@@ -864,7 +866,8 @@ def mcp_campaign_review_tool(
 
 
 @app.tool("campaign_conclude")
-def mcp_campaign_conclude_tool(
+@traced_tool
+async def mcp_campaign_conclude_tool(
     campaign_id: str = "",
     outcome_label: str = "",
     conclusion: str = "",
@@ -880,7 +883,8 @@ def mcp_campaign_conclude_tool(
 
 
 @app.tool()
-def postmortem_scaffold(
+@traced_tool
+async def postmortem_scaffold(
     run_id: str,
     catalog_dir: str | None = None,
     workspace_root: str | None = None,
@@ -935,7 +939,8 @@ status = "draft"
 
 
 @app.tool()
-def postmortem_validate(
+@traced_tool
+async def postmortem_validate(
     path: str,
     workspace_root: str | None = None,
     strict_files: bool = False,
@@ -967,7 +972,8 @@ def postmortem_validate(
 
 
 @app.tool()
-def postmortem_get(
+@traced_tool
+async def postmortem_get(
     run_id: str,
     workspace_root: str | None = None,
 ) -> dict:
@@ -1012,8 +1018,10 @@ def mcp_server():
 
     Called by pyproject.toml entry point: bth-mcp
     """
+    init_telemetry()
     app.run()
 
 
 if __name__ == "__main__":
+    init_telemetry()
     app.run()

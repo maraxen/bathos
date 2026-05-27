@@ -1,8 +1,9 @@
 """End-to-end cluster workflow: init → run → compact → check → mutate → check → sync."""
 
 import subprocess
+from io import StringIO
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from typer.testing import CliRunner
@@ -14,6 +15,17 @@ from bathos.compact import compact
 from bathos.config import load_project_config
 from bathos.schema import Run
 from bathos.sync import sync_catalog
+
+
+def _make_mock_popen(returncode=0, stderr_output="", stdout_output=""):
+    """Create a mock Popen object."""
+    mock_proc = MagicMock()
+    mock_proc.returncode = returncode
+    mock_proc.wait.return_value = returncode
+    mock_proc.poll.return_value = None  # Process is still running
+    mock_proc.stderr = StringIO(stderr_output)
+    mock_proc.stdout = StringIO(stdout_output)
+    return mock_proc
 
 runner = CliRunner()
 
@@ -161,18 +173,18 @@ remote_root = "~/projects/testproj"
 
     # Step 7: bth sync command constructed correctly (mock rsync)
     config = load_project_config(git_repo / ".bth.toml")
-    with patch("bathos.sync.subprocess.run") as mock_run:
-        mock_run.return_value.returncode = 0
+    with patch("bathos.sync.subprocess.Popen") as mock_popen:
         # Provide realistic rsync output with file transfer info
-        mock_run.return_value.stdout = (
+        stdout_output = (
             "sent 1000 bytes  received 500 bytes\nNumber of regular files transferred: 2"
         )
+        mock_popen.return_value = _make_mock_popen(stdout_output=stdout_output)
 
         result = sync_catalog("engaging", config, catalog, pull=False)
 
         # Verify mock was called
-        assert mock_run.called
-        call_args = mock_run.call_args
+        assert mock_popen.called
+        call_args = mock_popen.call_args
         cmd = call_args[0][0]
 
         # Verify rsync command structure
@@ -188,15 +200,15 @@ remote_root = "~/projects/testproj"
         assert result.duration_s > 0
 
     # Step 7b: Test pull direction (rsync with remote as source)
-    with patch("bathos.sync.subprocess.run") as mock_run:
-        mock_run.return_value.returncode = 0
-        mock_run.return_value.stdout = (
+    with patch("bathos.sync.subprocess.Popen") as mock_popen:
+        stdout_output = (
             "sent 500 bytes  received 1000 bytes\nNumber of regular files transferred: 2"
         )
+        mock_popen.return_value = _make_mock_popen(stdout_output=stdout_output)
 
         result = sync_catalog("engaging", config, catalog, pull=True)
 
-        call_args = mock_run.call_args
+        call_args = mock_popen.call_args
         cmd = call_args[0][0]
 
         # Pull should have engaging: as source

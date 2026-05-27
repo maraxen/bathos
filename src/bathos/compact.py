@@ -11,6 +11,7 @@ import duckdb
 
 from bathos.catalog import read_runs
 from bathos.schema import CURRENT_SCHEMA_VERSION, Run
+from bathos.telemetry import event
 
 
 def _collect_output_metadata(output_path: str) -> dict:
@@ -262,6 +263,9 @@ def compact(catalog_dir: Path) -> CompactResult:
     """
     start_time = time.time()
 
+    # Count cool files at start for telemetry
+    cool_files = _fragment_count(catalog_dir)
+
     # Read all runs from cool fragments (read_runs snapshots file list internally)
     cool_runs = read_runs(catalog_dir)
 
@@ -287,9 +291,27 @@ def compact(catalog_dir: Path) -> CompactResult:
             except Exception:
                 pass
 
-    # Open DuckDB connection
+    # Get warm-tier row count before compaction (if DB exists)
+    warm_rows_before = 0
     db_path = catalog_dir / "bathos.db"
+    if db_path.exists():
+        temp_con = duckdb.connect(str(db_path), read_only=True)
+        try:
+            warm_rows_before = temp_con.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+        except Exception:
+            warm_rows_before = 0
+        finally:
+            temp_con.close()
+
+    # Emit compact start event
+    event("catalog.compact_start", cool_files=cool_files, warm_rows_before=warm_rows_before)
+
+    # Open DuckDB connection (time the connect call to detect lock waits)
+    t_connect = time.monotonic()
     con = duckdb.connect(str(db_path))
+    waited_ms = (time.monotonic() - t_connect) * 1000
+    if waited_ms > 500:
+        event("catalog.duckdb_lock_wait", waited_ms=int(waited_ms), db_path=str(db_path))
 
     # Initialize schema meta table if it doesn't exist
     con.execute("CREATE TABLE IF NOT EXISTS _schema_meta (key TEXT PRIMARY KEY, value TEXT)")
@@ -469,6 +491,25 @@ def compact(catalog_dir: Path) -> CompactResult:
     con.close()
 
     duration_s = time.time() - start_time
+    duration_ms = duration_s * 1000
+
+    # Get final warm-tier row count for telemetry
+    warm_rows_after = 0
+    try:
+        temp_con = duckdb.connect(str(db_path), read_only=True)
+        warm_rows_after = temp_con.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+        temp_con.close()
+    except Exception:
+        warm_rows_after = 0
+
+    # Emit compact end event
+    event(
+        "catalog.compact_end",
+        cool_files=cool_files,
+        warm_rows_before=warm_rows_before,
+        warm_rows_after=warm_rows_after,
+        duration_ms=int(duration_ms),
+    )
 
     return CompactResult(
         ingested=ingested,

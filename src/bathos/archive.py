@@ -10,6 +10,8 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from bathos.telemetry import event
+
 
 @dataclass
 class ArchiveResult:
@@ -108,6 +110,8 @@ def archive(
         partition_path = archive_root / f"project={project}" / f"year={year}" / f"month={month}"
         output_file = partition_path / "runs.parquet"
 
+        partition_start_time = time.time()
+
         if not dry_run:
             partition_path.mkdir(parents=True, exist_ok=True)
 
@@ -125,6 +129,17 @@ def archive(
             total_size += file_size
         else:
             file_size = 0
+
+        partition_duration_ms = (time.time() - partition_start_time) * 1000
+
+        # Emit telemetry: archive.export per partition
+        partition_key = f"project={project}/year={year}/month={month}"
+        event(
+            "archive.export",
+            partition=partition_key,
+            rows=len(indices),
+            duration_ms=partition_duration_ms,
+        )
 
         manifest_entries.append(
             {

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -10,6 +11,7 @@ import duckdb
 
 from bathos.catalog import read_runs
 from bathos.schema import Run
+from bathos.telemetry import event
 
 
 def _filter_runs_by_output_file(
@@ -198,6 +200,8 @@ def _warm_list_runs(
     limit: int = 50,
 ) -> list[Run]:
     """List runs using warm tier (DuckDB)."""
+    t_start = time.monotonic()
+
     db_path = catalog_dir / "bathos.db"
     con = duckdb.connect(str(db_path))
     con.execute("SET TimeZone='UTC'")
@@ -229,6 +233,11 @@ def _warm_list_runs(
             runs.append(run)
 
     con.close()
+
+    # Emit telemetry event
+    duration_ms = (time.monotonic() - t_start) * 1000
+    event("catalog.query", query_kind="ls", duration_ms=int(duration_ms), rows=len(runs))
+
     return runs
 
 
@@ -254,6 +263,8 @@ def get_run(run_id: str, catalog_dir: Path) -> Run | None:
 
 def _warm_get_run(run_id: str, catalog_dir: Path) -> Run | None:
     """Get a single run by ID using warm tier (DuckDB)."""
+    t_start = time.monotonic()
+
     db_path = catalog_dir / "bathos.db"
     con = duckdb.connect(str(db_path))
     con.execute("SET TimeZone='UTC'")
@@ -262,10 +273,18 @@ def _warm_get_run(run_id: str, catalog_dir: Path) -> Run | None:
 
     if not rows:
         con.close()
+        # Emit telemetry event (0 rows found)
+        duration_ms = (time.monotonic() - t_start) * 1000
+        event("catalog.query", query_kind="get", duration_ms=int(duration_ms), rows=0)
         return None
 
     run = _row_to_run(rows[0])
     con.close()
+
+    # Emit telemetry event
+    duration_ms = (time.monotonic() - t_start) * 1000
+    event("catalog.query", query_kind="get", duration_ms=int(duration_ms), rows=len(rows))
+
     return run
 
 
@@ -333,6 +352,8 @@ def _warm_find_runs(
     slurm_job_id: str | None = None,
 ) -> list[Run]:
     """Find runs using warm tier (DuckDB)."""
+    t_start = time.monotonic()
+
     db_path = catalog_dir / "bathos.db"
     con = duckdb.connect(str(db_path))
     con.execute("SET TimeZone='UTC'")
@@ -369,6 +390,11 @@ def _warm_find_runs(
             runs.append(run)
 
     con.close()
+
+    # Emit telemetry event
+    duration_ms = (time.monotonic() - t_start) * 1000
+    event("catalog.query", query_kind="find", duration_ms=int(duration_ms), rows=len(runs))
+
     return runs
 
 
@@ -380,6 +406,9 @@ def run_sql(sql: str, catalog_dir: Path | None = None) -> list[tuple]:
     DuckDB will raise an appropriate error.
     Otherwise, connects to DuckDB without a specific catalog (for arbitrary queries).
     """
+    t_start = time.monotonic()
+    result = []
+
     if catalog_dir is not None:
         db_path = catalog_dir / "bathos.db"
         con = duckdb.connect(str(db_path) if db_path.exists() else "")
@@ -398,6 +427,12 @@ def run_sql(sql: str, catalog_dir: Path | None = None) -> list[tuple]:
         ):
             raise RuntimeError("No warm catalog. Run `bth compact` first.") from e
         raise
+    finally:
+        con.close()
+
+    # Emit telemetry event
+    duration_ms = (time.monotonic() - t_start) * 1000
+    event("catalog.query", query_kind="sql", duration_ms=int(duration_ms), rows=len(result))
 
     return result
 

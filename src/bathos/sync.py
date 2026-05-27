@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import re
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from bathos.config import ProjectConfig
+from bathos.telemetry import event
 
 _SYNC_TIMEOUT_S = 120  # rsync kill switch: fail if no completion within 2 minutes
+_RSYNC_STALL_SECONDS = 30  # Stall detection: no progress for N seconds
 
 
 @dataclass
@@ -79,34 +83,172 @@ def sync_catalog(
     # BatchMode=yes: never prompt for a password — fail immediately instead
     ssh_opts = "ssh -o ConnectTimeout=10 -o BatchMode=yes"
 
+    # Build rsync command with --info=progress2 for streaming progress
     cmd = [
         "rsync",
         "-az",
         "--partial",
         f"-e{ssh_opts}",
         "--ignore-existing",
+        "--info=progress2",
         src,
         dst,
     ]
 
+    # Determine direction (push vs pull)
+    direction = "pull" if pull else "push"
+
+    # Emit telemetry: sync.rsync_start
+    event(
+        "sync.rsync_start",
+        direction=direction,
+        remote=remote_name,
+        src=src,
+        dst=dst,
+        filters="project_slug" if sync_filter == "project_slug" else "none",
+    )
+
     start_time = time.time()
+    t0_ns = time.monotonic_ns()
+    last_progress_ts = time.monotonic()
+    total_bytes = 0
+    total_files = 0
+    proc = None
+    stdout_output = ""
+
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=_SYNC_TIMEOUT_S
+        proc = subprocess.Popen(
+            cmd,
+            stderr=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
         )
+
+        # Watchdog thread to detect hangs
+        def watchdog():
+            try:
+                proc.wait(timeout=_SYNC_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            except Exception:
+                # Ignore other exceptions (e.g., if proc is already dead)
+                pass
+
+        watchdog_thread = threading.Thread(target=watchdog, daemon=True)
+        watchdog_thread.start()
+
+        # Stream-read stderr for progress2 format and stdout for completion info
+        for line in iter(proc.stderr.readline, ""):
+            if not line:
+                break
+            line = line.strip()
+
+            # Parse progress2 format: "   1,234 100%    1.23MB/s    0:00:01 (xfr#1, to-chk=0/1)"
+            m = re.match(
+                r"\s*([\d,]+)\s+(\d+)%\s+([\d.]+\S*)\s+\S+",
+                line,
+            )
+            if m:
+                bytes_str = m.group(1).replace(",", "")
+                pct_str = m.group(2)
+                rate_str = m.group(3)
+
+                try:
+                    bytes_xfr = int(bytes_str)
+                    pct = int(pct_str)
+                    total_bytes = bytes_xfr
+                    last_progress_ts = time.monotonic()
+
+                    event(
+                        "sync.rsync_progress",
+                        bytes_transferred=bytes_xfr,
+                        pct=pct,
+                        xfer_rate=rate_str,
+                    )
+                except (ValueError, IndexError):
+                    pass
+            else:
+                # Check for stall: no progress line for N seconds while proc alive
+                elapsed_since = (time.monotonic() - last_progress_ts) * 1000
+                if (
+                    elapsed_since > (_RSYNC_STALL_SECONDS * 1000)
+                    and proc.poll() is None
+                ):
+                    event(
+                        "sync.rsync_stall",
+                        elapsed_since_progress_ms=int(elapsed_since),
+                    )
+                    # Reset so we don't spam stall events
+                    last_progress_ts = time.monotonic()
+
+        # Read any remaining stdout (e.g., final stats)
+        remaining_stdout = proc.stdout.read()
+        if remaining_stdout:
+            stdout_output = remaining_stdout
+
+        # Wait for process to complete
+        try:
+            exit_code = proc.wait()
+        except subprocess.TimeoutExpired:
+            # Watchdog timed out, process was killed
+            proc.kill()
+            try:
+                proc.wait()
+            except subprocess.TimeoutExpired:
+                # Already timed out, can't wait further
+                pass
+            raise
+
     except subprocess.TimeoutExpired:
+        if proc:
+            proc.kill()
+            try:
+                proc.wait()
+            except subprocess.TimeoutExpired:
+                pass
+        duration_s = time.time() - start_time
+        event(
+            "sync.rsync_end",
+            exit_code=-1,
+            duration_ms=duration_s * 1000,
+            bytes_transferred=total_bytes,
+            files_transferred=total_files,
+        )
         raise RuntimeError(
             f"bth sync timed out after {_SYNC_TIMEOUT_S}s — "
             "check that the remote host is reachable and SSH keys are configured"
         )
+    except Exception as e:
+        duration_s = time.time() - start_time
+        event(
+            "sync.rsync_end",
+            exit_code=-1,
+            duration_ms=duration_s * 1000,
+            bytes_transferred=total_bytes,
+            files_transferred=total_files,
+        )
+        raise
+
     duration_s = time.time() - start_time
+    duration_ms = duration_s * 1000
 
-    if result.returncode != 0:
-        raise RuntimeError(f"rsync failed with exit code {result.returncode}: {result.stderr}")
+    # Parse transferred count from stdout if we didn't get it from progress2
+    if total_bytes == 0:
+        transferred = _parse_transferred_count(stdout_output)
+    else:
+        transferred = total_bytes
 
-    # Parse transferred count from rsync output
-    # rsync outputs something like "Number of regular files transferred: 42"
-    transferred = _parse_transferred_count(result.stdout)
+    # Emit telemetry: sync.rsync_end
+    event(
+        "sync.rsync_end",
+        exit_code=exit_code,
+        duration_ms=duration_ms,
+        bytes_transferred=total_bytes,
+        files_transferred=total_files,
+    )
+
+    if exit_code != 0:
+        raise RuntimeError(f"rsync failed with exit code {exit_code}")
 
     return SyncResult(transferred=transferred, duration_s=duration_s, remote=remote_name, filtered=filtered)
 

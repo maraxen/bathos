@@ -1,8 +1,9 @@
 """Tests for per-project sync filtering and migration to project subdirectories."""
 from __future__ import annotations
 
+from io import StringIO
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -12,6 +13,17 @@ from bathos.config import ProjectConfig
 from bathos.migrate import migrate_to_project_subdirs
 from bathos.schema import Run
 from bathos.sync import sync_catalog
+
+
+def _make_mock_popen(returncode=0, stderr_output="", stdout_output=""):
+    """Create a mock Popen object."""
+    mock_proc = MagicMock()
+    mock_proc.returncode = returncode
+    mock_proc.wait.return_value = returncode
+    mock_proc.poll.return_value = None  # Process is still running
+    mock_proc.stderr = StringIO(stderr_output)
+    mock_proc.stdout = StringIO(stdout_output)
+    return mock_proc
 
 
 def _make_run(slug: str, suffix: str = "") -> Run:
@@ -56,13 +68,12 @@ def test_sync_filters_by_slug(tmp_path: Path):
     write_run(_make_run("asr", "_2"), catalog)
     write_run(_make_run("prolix"), catalog)
 
-    with patch("bathos.sync.subprocess.run") as mock_run:
-        mock_run.return_value.returncode = 0
-        mock_run.return_value.stdout = "Number of regular files transferred: 2"
+    with patch("bathos.sync.subprocess.Popen") as mock_popen:
+        mock_popen.return_value = _make_mock_popen(stdout_output="Number of regular files transferred: 2")
 
         result = sync_catalog("engaging", config, catalog, pull=False)
 
-        cmd = mock_run.call_args[0][0]
+        cmd = mock_popen.call_args[0][0]
         # Source should be the project-slug subdir
         assert any("runs/asr/" in str(a) for a in cmd), f"Expected runs/asr/ in cmd: {cmd}"
         # Should NOT reference prolix
@@ -82,13 +93,12 @@ def test_sync_no_filter_mode_preserves_current_behavior(tmp_path: Path):
     write_run(_make_run("asr"), catalog)
     write_run(_make_run("prolix"), catalog)
 
-    with patch("bathos.sync.subprocess.run") as mock_run:
-        mock_run.return_value.returncode = 0
-        mock_run.return_value.stdout = ""
+    with patch("bathos.sync.subprocess.Popen") as mock_popen:
+        mock_popen.return_value = _make_mock_popen()
 
         result = sync_catalog("engaging", config, catalog, pull=False)
 
-        cmd = mock_run.call_args[0][0]
+        cmd = mock_popen.call_args[0][0]
         # Source should be the flat runs/ dir (no slug subdir)
         assert any(str(catalog / "runs") + "/" in str(a) for a in cmd), f"Expected flat runs/ in cmd: {cmd}"
         assert not any("asr" in str(a) and "runs/asr" in str(a) for a in cmd)
@@ -103,13 +113,12 @@ def test_sync_pull_targets_project_subdir(tmp_path: Path):
     catalog = tmp_path / "catalog"
     config = _config(tmp_path, "asr")
 
-    with patch("bathos.sync.subprocess.run") as mock_run:
-        mock_run.return_value.returncode = 0
-        mock_run.return_value.stdout = ""
+    with patch("bathos.sync.subprocess.Popen") as mock_popen:
+        mock_popen.return_value = _make_mock_popen()
 
         sync_catalog("engaging", config, catalog, pull=True)
 
-        cmd = mock_run.call_args[0][0]
+        cmd = mock_popen.call_args[0][0]
         # Remote source should include the slug subdir
         assert any("runs/asr/" in str(a) for a in cmd), f"Expected runs/asr/ in cmd: {cmd}"
         # Local destination should also include the slug subdir

@@ -8,6 +8,7 @@ from pathlib import Path
 import tomlkit
 
 from bathos.config import ProjectConfig
+from bathos.telemetry import event
 
 
 @dataclass
@@ -158,13 +159,16 @@ def test_remote(config: ProjectConfig, name: str) -> TestResult:
 
         # Check if successful
         if result.returncode == 0 and result.stdout.strip() == "ok":
+            event("sync.remote_test", remote=name, success=True, latency_ms=int(elapsed_ms))
             return TestResult(success=True, latency_ms=elapsed_ms, error="")
         else:
             # Return stderr if available, otherwise stdout
             error_msg = result.stderr.strip() or result.stdout.strip()
+            event("sync.remote_test", remote=name, success=False, error=error_msg)
             return TestResult(success=False, latency_ms=None, error=error_msg)
 
     except subprocess.TimeoutExpired:
+        event("sync.remote_test", remote=name, success=False, error="Connection timed out after 10s")
         return TestResult(
             success=False,
             latency_ms=None,
