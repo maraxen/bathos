@@ -136,7 +136,13 @@ class JsonFormatter(logging.Formatter):
                 "mcp_request_id",
                 "task_id",
             ):
-                envelope[key] = getattr(record, key)
+                value = getattr(record, key)
+                # Rename campaign_name to name for telemetry schema compatibility
+                # (needed because logging.LogRecord reserves 'name' for logger name)
+                if key == "campaign_name":
+                    envelope["name"] = value
+                else:
+                    envelope[key] = value
 
         # Serialize with fallback for non-serializable values
         try:
@@ -315,13 +321,13 @@ def _wait_for_queue_drain(timeout_s: float = 2.0) -> None:
         time.sleep(0.01)
 
 
-def event(name: str, **fields) -> None:
+def event(event_name: str, **fields) -> None:
     """Emit a structured event with optional fields.
 
     If telemetry not yet initialized, lazy-inits with defaults and warns once to stderr.
 
     Args:
-        name: event name (e.g., 'run.start', 'catalog.write'). Becomes the LogRecord name.
+        event_name: event name (e.g., 'run.start', 'catalog.write'). Becomes the LogRecord name.
         **fields: arbitrary key-value pairs to include in the JSONL record.
     """
     global _lazy_init_warning_shown
@@ -336,9 +342,9 @@ def event(name: str, **fields) -> None:
             _lazy_init_warning_shown = True
         init_telemetry()
 
-    # Use the name directly as the logger name (event name)
+    # Use the event_name directly as the logger name (event name)
     # Logger will propagate to root which has the QueueHandler
-    logger = logging.getLogger(name)
+    logger = logging.getLogger(event_name)
     # Log with extra fields (empty message)
     logger.info("", extra=fields)
 

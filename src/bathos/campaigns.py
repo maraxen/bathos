@@ -43,6 +43,7 @@ def create_campaign(db, name: str, project_slug: str, mode: str, question: str |
         "INSERT INTO campaigns (id, project_slug, name, mode, question, hypothesis, status, started_at, parent_campaign_id) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)",
         [campaign_id, project_slug, name, mode, question, hypothesis, started_at, parent_campaign_id]
     )
+    # Use campaign_name field since 'name' is reserved by logging.LogRecord
     event("campaign.create", campaign_id=campaign_id, campaign_name=name)
     return Campaign(id=campaign_id, project_slug=project_slug, name=name, mode=mode, question=question, hypothesis=hypothesis, status="open", started_at=started_at, parent_campaign_id=parent_campaign_id)
 

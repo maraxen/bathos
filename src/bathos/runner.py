@@ -129,6 +129,7 @@ def run_script(
             try:
                 sidecar = parse_sidecar(bundle.path)
             except SidecarError as e:
+                event("run.error", phase="validate", exc_type=type(e).__name__, exc_msg=str(e))
                 typer.echo(f"Error: invalid sidecar — {e}", err=True)
                 return 1
 
@@ -218,7 +219,11 @@ def run_script(
             event("lineage.resolve_error", child_run_uuid=run.id, derived_from=derived_from, reason=str(e))
 
     catalog_dir.mkdir(parents=True, exist_ok=True)
-    write_run(run, catalog_dir)
+    try:
+        write_run(run, catalog_dir)
+    except Exception as e:
+        event("run.error", phase="persist", exc_type=type(e).__name__, exc_msg=str(e))
+        raise
 
     # Create temporary results file path for subprocess to write to
     results_temp_dir = Path(tempfile.gettempdir())
@@ -245,7 +250,7 @@ def run_script(
                 if elapsed_wall > 60:
                     elapsed_ms = int((time.monotonic() - start) * 1000)
                     event("run.heartbeat", pid=proc.pid, elapsed_ms=elapsed_ms)
-                time.sleep(60)
+                heartbeat_stop.wait(60)
         heartbeat_thread = threading.Thread(target=emit_heartbeat, daemon=True)
         heartbeat_thread.start()
 
@@ -267,7 +272,7 @@ def run_script(
             heartbeat_stop.set()
 
     duration_ms = int((time.monotonic() - start) * 1000)
-    event("run.subprocess_exit", exit_code=exit_code, duration_ms=duration_ms, stdout_bytes=0, stderr_bytes=0)
+    event("run.subprocess_exit", exit_code=exit_code, duration_ms=duration_ms)
 
     # Read result emission from BTH_RESULTS_PATH or fallback path
     metadata = _read_result_emission(results_temp_path, script_path)
@@ -279,7 +284,11 @@ def run_script(
             meta = json.loads(metadata)
         except (json.JSONDecodeError, TypeError):
             meta = {}
-        outcome = evaluate_outcome(sidecar, meta)
+        try:
+            outcome = evaluate_outcome(sidecar, meta)
+        except Exception as e:
+            event("run.error", phase="evaluate", exc_type=type(e).__name__, exc_msg=str(e))
+            raise
 
     # Populate outcome_is_residual flag
     outcome_is_residual = False
@@ -300,7 +309,11 @@ def run_script(
 
     # Record parquet write with telemetry
     parquet_start = time.monotonic()
-    write_run(run, catalog_dir)
+    try:
+        write_run(run, catalog_dir)
+    except Exception as e:
+        event("run.error", phase="persist", exc_type=type(e).__name__, exc_msg=str(e))
+        raise
     parquet_duration_ms = int((time.monotonic() - parquet_start) * 1000)
     parquet_path = catalog_dir / "runs" / run.project_slug / f"run_{run.id}.parquet"
     parquet_bytes = parquet_path.stat().st_size if parquet_path.exists() else 0

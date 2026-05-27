@@ -111,10 +111,13 @@ def sync_catalog(
     start_time = time.time()
     t0_ns = time.monotonic_ns()
     last_progress_ts = time.monotonic()
+    last_progress_ts_lock = threading.Lock()
+    last_progress_ts_ref = [last_progress_ts]  # mutable container for thread sharing
     total_bytes = 0
     total_files = 0
     proc = None
     stdout_output = ""
+    _watchdog_fired = threading.Event()
 
     try:
         proc = subprocess.Popen(
@@ -129,6 +132,7 @@ def sync_catalog(
             try:
                 proc.wait(timeout=_SYNC_TIMEOUT_S)
             except subprocess.TimeoutExpired:
+                _watchdog_fired.set()
                 proc.kill()
             except Exception:
                 # Ignore other exceptions (e.g., if proc is already dead)
@@ -136,6 +140,18 @@ def sync_catalog(
 
         watchdog_thread = threading.Thread(target=watchdog, daemon=True)
         watchdog_thread.start()
+
+        # Stall monitor thread: detect silent hangs where no output is produced
+        def stall_monitor():
+            while not _watchdog_fired.is_set() and proc.poll() is None:
+                time.sleep(5)
+                with last_progress_ts_lock:
+                    elapsed_since = (time.monotonic() - last_progress_ts_ref[0]) * 1000
+                if elapsed_since > _RSYNC_STALL_SECONDS * 1000 and proc.poll() is None:
+                    event("sync.rsync_stall", elapsed_since_progress_ms=int(elapsed_since))
+
+        stall_thread = threading.Thread(target=stall_monitor, daemon=True)
+        stall_thread.start()
 
         # Stream-read stderr for progress2 format and stdout for completion info
         for line in iter(proc.stderr.readline, ""):
@@ -157,7 +173,8 @@ def sync_catalog(
                     bytes_xfr = int(bytes_str)
                     pct = int(pct_str)
                     total_bytes = bytes_xfr
-                    last_progress_ts = time.monotonic()
+                    with last_progress_ts_lock:
+                        last_progress_ts_ref[0] = time.monotonic()
 
                     event(
                         "sync.rsync_progress",
@@ -167,19 +184,6 @@ def sync_catalog(
                     )
                 except (ValueError, IndexError):
                     pass
-            else:
-                # Check for stall: no progress line for N seconds while proc alive
-                elapsed_since = (time.monotonic() - last_progress_ts) * 1000
-                if (
-                    elapsed_since > (_RSYNC_STALL_SECONDS * 1000)
-                    and proc.poll() is None
-                ):
-                    event(
-                        "sync.rsync_stall",
-                        elapsed_since_progress_ms=int(elapsed_since),
-                    )
-                    # Reset so we don't spam stall events
-                    last_progress_ts = time.monotonic()
 
         # Read any remaining stdout (e.g., final stats)
         remaining_stdout = proc.stdout.read()
@@ -187,25 +191,21 @@ def sync_catalog(
             stdout_output = remaining_stdout
 
         # Wait for process to complete
-        try:
-            exit_code = proc.wait()
-        except subprocess.TimeoutExpired:
-            # Watchdog timed out, process was killed
-            proc.kill()
-            try:
-                proc.wait()
-            except subprocess.TimeoutExpired:
-                # Already timed out, can't wait further
-                pass
-            raise
+        exit_code = proc.wait()
 
+        # Check if watchdog killed the process
+        if _watchdog_fired.is_set():
+            duration_s = time.time() - start_time
+            event(
+                "sync.rsync_end",
+                exit_code=-1,
+                duration_ms=duration_s * 1000,
+                bytes_transferred=total_bytes,
+                files_transferred=total_files,
+            )
+            raise RuntimeError(f"rsync timed out after {_SYNC_TIMEOUT_S}s and was killed")
     except subprocess.TimeoutExpired:
-        if proc:
-            proc.kill()
-            try:
-                proc.wait()
-            except subprocess.TimeoutExpired:
-                pass
+        # Main thread's wait() timed out
         duration_s = time.time() - start_time
         event(
             "sync.rsync_end",
@@ -214,10 +214,7 @@ def sync_catalog(
             bytes_transferred=total_bytes,
             files_transferred=total_files,
         )
-        raise RuntimeError(
-            f"bth sync timed out after {_SYNC_TIMEOUT_S}s — "
-            "check that the remote host is reachable and SSH keys are configured"
-        )
+        raise RuntimeError(f"rsync timed out after {_SYNC_TIMEOUT_S}s and was killed")
     except Exception as e:
         duration_s = time.time() - start_time
         event(
