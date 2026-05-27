@@ -8,11 +8,17 @@ Provides 10 tools that mirror the CLI:
 
 from __future__ import annotations
 
+import functools
 import json
 import os
+import time
+import uuid
 from pathlib import Path
 
 from fastmcp import FastMCP
+
+# Telemetry imports
+from bathos.telemetry import event, init_telemetry, mcp_request_id_var
 
 # Import core modules
 from bathos.archive import archive as archive_runs
@@ -34,6 +40,54 @@ from bathos.runner import run_script
 from bathos.sync import sync_catalog
 
 app = FastMCP("bathos")
+
+
+# ============================================================================
+# Telemetry instrumentation
+# ============================================================================
+
+
+def traced_tool(fn):
+    """Wrap a FastMCP tool function to emit mcp.call_start / mcp.call_end / mcp.call_error events.
+
+    Each tool invocation emits:
+    - mcp.call_start when the tool is entered
+    - mcp.call_end on successful return (with duration_ms and result_bytes)
+    - mcp.call_error on exception (with exc_type, exc_msg, traceback)
+
+    The mcp_request_id_var contextvar is set to a fresh UUID and automatically
+    scoped to the tool call (each FastMCP tool runs as its own asyncio.Task
+    with a fresh context copy).
+    """
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        request_id = uuid.uuid4().hex
+        token = mcp_request_id_var.set(request_id)
+        tool_name = fn.__name__
+
+        # Emit call_start with arg keys only (never values, to avoid leaking payloads)
+        event("mcp.call_start", tool=tool_name, request_id=request_id,
+              arg_keys=list(kwargs.keys()))
+
+        t0 = time.monotonic_ns()
+        try:
+            result = await fn(*args, **kwargs)
+            duration_ms = (time.monotonic_ns() - t0) / 1e6
+            result_bytes = len(str(result).encode()) if result is not None else 0
+            event("mcp.call_end", tool=tool_name, request_id=request_id,
+                  duration_ms=duration_ms, ok=True, result_bytes=result_bytes)
+            return result
+        except Exception as exc:
+            import traceback as tb
+            duration_ms = (time.monotonic_ns() - t0) / 1e6
+            event("mcp.call_error", tool=tool_name, request_id=request_id,
+                  duration_ms=duration_ms, exc_type=type(exc).__name__,
+                  exc_msg=str(exc), traceback=tb.format_exc()[:8192])
+            raise
+        finally:
+            mcp_request_id_var.reset(token)
+
+    return wrapper
 
 
 def _get_catalog_dir(catalog_dir: str | None = None) -> Path:
@@ -631,7 +685,8 @@ def campaign_conclude_tool(
 
 
 @app.tool("list_runs")
-def mcp_list_runs_tool(
+@traced_tool
+async def mcp_list_runs_tool(
     catalog_dir: str = "",
     limit: int = 10,
 ) -> str:
@@ -640,7 +695,8 @@ def mcp_list_runs_tool(
 
 
 @app.tool("find_runs")
-def mcp_find_runs_tool(
+@traced_tool
+async def mcp_find_runs_tool(
     catalog_dir: str = "",
     pattern: str = "",
 ) -> str:
@@ -649,7 +705,8 @@ def mcp_find_runs_tool(
 
 
 @app.tool("get_run")
-def mcp_get_run_tool(
+@traced_tool
+async def mcp_get_run_tool(
     catalog_dir: str = "",
     run_id: str = "",
 ) -> str:
@@ -658,7 +715,8 @@ def mcp_get_run_tool(
 
 
 @app.tool("run_sql")
-def mcp_run_sql_tool(
+@traced_tool
+async def mcp_run_sql_tool(
     catalog_dir: str = "",
     sql: str = "",
 ) -> str:
@@ -667,7 +725,8 @@ def mcp_run_sql_tool(
 
 
 @app.tool("compact")
-def mcp_compact_tool(
+@traced_tool
+async def mcp_compact_tool(
     catalog_dir: str = "",
 ) -> str:
     """Compact cool-tier Parquet to warm-tier DuckDB."""
@@ -675,7 +734,8 @@ def mcp_compact_tool(
 
 
 @app.tool("archive")
-def mcp_archive_tool(
+@traced_tool
+async def mcp_archive_tool(
     catalog_dir: str = "",
     project: str = "",
     keep_cool: bool = False,
@@ -685,7 +745,8 @@ def mcp_archive_tool(
 
 
 @app.tool("check")
-def mcp_check_tool(
+@traced_tool
+async def mcp_check_tool(
     catalog_dir: str = "",
     project_root: str = "",
     status_filter: str = "",
@@ -697,7 +758,8 @@ def mcp_check_tool(
 
 
 @app.tool("sync")
-def mcp_sync_tool(
+@traced_tool
+async def mcp_sync_tool(
     catalog_dir: str = "",
     remote_name: str = "",
     pull: bool = False,
@@ -707,7 +769,8 @@ def mcp_sync_tool(
 
 
 @app.tool("init")
-def mcp_init_tool(
+@traced_tool
+async def mcp_init_tool(
     project_root: str = "",
     catalog_dir: str = "",
     slug: str = "",
@@ -725,7 +788,8 @@ def mcp_init_tool(
 
 
 @app.tool("run")
-def mcp_run_tool(
+@traced_tool
+async def mcp_run_tool(
     script_path: str = "",
     args: list[str] | None = None,
     project_slug: str = "",
@@ -753,7 +817,8 @@ def mcp_run_tool(
 
 
 @app.tool("campaign_create")
-def mcp_campaign_create_tool(
+@traced_tool
+async def mcp_campaign_create_tool(
     name: str = "",
     mode: str = "exploration",
     project_slug: str = "",
