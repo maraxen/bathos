@@ -6,6 +6,8 @@ from uuid import uuid4
 
 import duckdb
 
+from bathos.telemetry import event
+
 
 class CampaignError(Exception):
     pass
@@ -41,6 +43,7 @@ def create_campaign(db, name: str, project_slug: str, mode: str, question: str |
         "INSERT INTO campaigns (id, project_slug, name, mode, question, hypothesis, status, started_at, parent_campaign_id) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)",
         [campaign_id, project_slug, name, mode, question, hypothesis, started_at, parent_campaign_id]
     )
+    event("campaign.create", campaign_id=campaign_id, campaign_name=name)
     return Campaign(id=campaign_id, project_slug=project_slug, name=name, mode=mode, question=question, hypothesis=hypothesis, status="open", started_at=started_at, parent_campaign_id=parent_campaign_id)
 
 
@@ -110,6 +113,7 @@ def conclude_campaign(db, campaign_id: str, outcome_label: str, conclusion: str)
         "UPDATE campaigns SET status = 'concluded', concluded_at = ?, outcome_label = ?, conclusion = ? WHERE id = ?",
         [concluded_at, outcome_label, conclusion, full_id]
     )
+    event("campaign.conclude", campaign_id=full_id, verdict=outcome_label)
 
 
 def get_campaign(db, campaign_id: str) -> Campaign | None:

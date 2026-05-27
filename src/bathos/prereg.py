@@ -9,6 +9,7 @@ import duckdb
 
 from bathos.sidecar import Sidecar, find_sidecar, parse_sidecar
 from bathos.validate import ValidationResult, validate_sidecar
+from bathos.telemetry import event
 
 AgentMode = Literal["collaborative", "autonomous"]
 
@@ -121,10 +122,11 @@ def gate_check(
             mode=mode,
             script_path=script_path,
         )
+        event("prereg.gate_deny", script_path=str(script_path), reason="sidecar_missing", agent_mode=mode)
         return GateResult(ok=False, mode=mode, bundle=bundle, error_payload=payload)
 
     sidecar = parse_sidecar(bundle.path)
-    validation = validate_sidecar(sidecar)
+    validation = validate_sidecar(sidecar, sidecar_path=bundle.path)
 
     if not validation.ok:
         payload = _gate_failure_payload(
@@ -133,6 +135,7 @@ def gate_check(
             mode=mode,
             script_path=script_path,
         )
+        event("prereg.gate_deny", script_path=str(script_path), reason="sidecar_invalid", agent_mode=mode)
         return GateResult(ok=False, mode=mode, bundle=bundle, validation=validation, error_payload=payload)
 
     # Autonomous mode: enforce first-of-kind
@@ -144,8 +147,10 @@ def gate_check(
                 mode=mode,
                 script_path=script_path,
             )
+            event("prereg.gate_deny", script_path=str(script_path), reason="not_first_of_kind", agent_mode=mode)
             return GateResult(ok=False, mode=mode, bundle=bundle, validation=validation, error_payload=payload)
 
+    event("prereg.gate_pass", script_path=str(script_path), sidecar_sha256=bundle.sha256, agent_mode=mode)
     return GateResult(ok=True, mode=mode, bundle=bundle, validation=validation)
 
 

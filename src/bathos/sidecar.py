@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import tomllib
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
 import duckdb
+
+from bathos.telemetry import event
 
 
 class SidecarError(Exception):
@@ -58,13 +61,15 @@ def parse_sidecar(path: Path) -> Sidecar:
     try:
         data = tomllib.loads(path.read_text())
     except Exception as e:
+        event("sidecar.parse_error", path=str(path), exc_type=type(e).__name__, exc_msg=str(e))
         raise SidecarError(f"Failed to parse {path}: {e}") from e
 
+    sidecar = None
     if "experiment" in data:
         kind = SidecarKind.EXPERIMENT
         section = data["experiment"]
         outcomes = _parse_outcomes(data)
-        return Sidecar(
+        sidecar = Sidecar(
             kind=kind,
             hypothesis=section.get("hypothesis", ""),
             outcomes=outcomes,
@@ -74,7 +79,7 @@ def parse_sidecar(path: Path) -> Sidecar:
     elif "benchmark" in data:
         kind = SidecarKind.BENCHMARK
         section = data["benchmark"]
-        return Sidecar(
+        sidecar = Sidecar(
             kind=kind,
             baseline_ref=section.get("baseline_ref", ""),
             metric=section.get("metric", ""),
@@ -87,7 +92,7 @@ def parse_sidecar(path: Path) -> Sidecar:
         kind = SidecarKind.VALIDATION
         section = data["validation"]
         outcomes = _parse_outcomes(data)
-        return Sidecar(
+        sidecar = Sidecar(
             kind=kind,
             property=section.get("property", ""),
             reference=section.get("reference", ""),
@@ -100,7 +105,7 @@ def parse_sidecar(path: Path) -> Sidecar:
         kind = SidecarKind.DEBUG
         section = data["debug"]
         outcomes = _parse_outcomes(data)
-        return Sidecar(
+        sidecar = Sidecar(
             kind=kind,
             symptom=section.get("symptom", ""),
             suspected_cause=section.get("suspected_cause", ""),
@@ -113,6 +118,13 @@ def parse_sidecar(path: Path) -> Sidecar:
         raise SidecarError(
             f"{path}: must have one of [experiment], [benchmark], [validation], [debug] sections"
         )
+
+    if sidecar:
+        sha256_val = hashlib.sha256(path.read_bytes()).hexdigest()
+        outcome_labels = list(sidecar.outcomes.keys())
+        event("sidecar.parsed", path=str(path), sha256=sha256_val, outcomes=outcome_labels, kind=sidecar.kind.value)
+
+    return sidecar
 
 
 def _parse_outcomes(data: dict) -> dict[str, OutcomeSpec]:
