@@ -249,6 +249,7 @@ Events from `sync.py`, `remote.py`, and `archive.py` covering catalog synchroniz
 | `sync.rsync_progress` | `bytes_transferred`, `files_transferred`, `pct`, `xfer_rate` | Progress update parsed from `--info=progress2` stream |
 | `sync.rsync_stall` | `elapsed_since_progress_ms` | No progress line received for N seconds (hang detection) |
 | `sync.rsync_end` | `exit_code`, `duration_ms`, `bytes_transferred`, `files_transferred` | Rsync operation complete |
+| `sync.remote_test` | `remote`, `success`, `latency_ms`? (success only), `error`? (failure only) | SSH connectivity probe via `bth remote test` |
 | `archive.export` | `partition`, `rows`, `duration_ms` | Parquet partition exported to cold storage |
 
 **Example:**
@@ -266,6 +267,23 @@ Events from `sync.py`, `remote.py`, and `archive.py` covering catalog synchroniz
   "files_transferred": 342,
   "pct": 45,
   "xfer_rate": "12.5 MB/s"
+}
+```
+
+**`sync.remote_test` example (success):**
+```json
+{
+  "ts": "2026-05-27T19:45:00.000000+00:00",
+  "level": "info",
+  "pid": 12345,
+  "tid": 123456789,
+  "host": "laptop.local",
+  "surface": "sync",
+  "event": "sync.remote_test",
+  "msg": "",
+  "remote": "engaging",
+  "success": true,
+  "latency_ms": 42
 }
 ```
 
