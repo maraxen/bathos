@@ -6,6 +6,7 @@ from pathlib import Path
 import duckdb
 
 from bathos.sidecar import Sidecar, SidecarKind
+from bathos.telemetry import event
 
 
 def _map_type_to_sql(python_type: str) -> str:
@@ -31,7 +32,7 @@ class ValidationResult:
     errors: list[ValidationError] = field(default_factory=list)
 
 
-def validate_sidecar(sidecar: Sidecar) -> ValidationResult:
+def validate_sidecar(sidecar: Sidecar, sidecar_path: Path | None = None) -> ValidationResult:
     """Validate a parsed Sidecar for structural integrity and logical consistency.
 
     Checks:
@@ -50,29 +51,34 @@ def validate_sidecar(sidecar: Sidecar) -> ValidationResult:
         errors.append(
             ValidationError("outcomes", "No [outcomes] section found")
         )
+        if sidecar_path:
+            event("sidecar.validate_error", path=str(sidecar_path), field="outcomes", reason="No [outcomes] section found")
         return ValidationResult(ok=False, errors=errors)
 
     # Each branch must have condition, decision, reasoning
     for label, spec in sidecar.outcomes.items():
         if not spec.condition:
-            errors.append(
-                ValidationError(
-                    f"outcomes.{label}", "Missing 'condition' field"
-                )
+            err = ValidationError(
+                f"outcomes.{label}", "Missing 'condition' field"
             )
+            errors.append(err)
+            if sidecar_path:
+                event("sidecar.validate_error", path=str(sidecar_path), field=f"outcomes.{label}", reason="Missing 'condition' field")
         if not spec.decision:
-            errors.append(
-                ValidationError(
-                    f"outcomes.{label}", "Missing 'decision' field"
-                )
+            err = ValidationError(
+                f"outcomes.{label}", "Missing 'decision' field"
             )
+            errors.append(err)
+            if sidecar_path:
+                event("sidecar.validate_error", path=str(sidecar_path), field=f"outcomes.{label}", reason="Missing 'decision' field")
         if not spec.reasoning:
-            errors.append(
-                ValidationError(
-                    f"outcomes.{label}",
-                    "Missing 'reasoning' field",
-                )
+            err = ValidationError(
+                f"outcomes.{label}",
+                "Missing 'reasoning' field",
             )
+            errors.append(err)
+            if sidecar_path:
+                event("sidecar.validate_error", path=str(sidecar_path), field=f"outcomes.{label}", reason="Missing 'reasoning' field")
 
         # DuckDB SQL must parse
         if spec.condition:
@@ -92,12 +98,13 @@ def validate_sidecar(sidecar: Sidecar) -> ValidationResult:
                     con.execute(f"SELECT ({spec.condition})")
                 con.close()
             except Exception as e:
-                errors.append(
-                    ValidationError(
-                        f"outcomes.{label}.condition",
-                        f"DuckDB parse error: {e}",
-                    )
+                err = ValidationError(
+                    f"outcomes.{label}.condition",
+                    f"DuckDB parse error: {e}",
                 )
+                errors.append(err)
+                if sidecar_path:
+                    event("sidecar.validate_error", path=str(sidecar_path), field=f"outcomes.{label}.condition", reason=f"DuckDB parse error: {e}")
 
     # At least one result_schema field must appear in conditions
     if sidecar.result_schema:
@@ -106,21 +113,23 @@ def validate_sidecar(sidecar: Sidecar) -> ValidationResult:
             s.condition for s in sidecar.outcomes.values() if s.condition
         )
         if not any(key in all_conditions for key in schema_keys):
-            errors.append(
-                ValidationError(
-                    "result_schema",
-                    "No result_schema fields referenced in any outcome condition",
-                )
+            err = ValidationError(
+                "result_schema",
+                "No result_schema fields referenced in any outcome condition",
             )
+            errors.append(err)
+            if sidecar_path:
+                event("sidecar.validate_error", path=str(sidecar_path), field="result_schema", reason="No result_schema fields referenced in any outcome condition")
 
     # Must have at least one is_residual=true fallback branch
     has_residual = any(s.is_residual for s in sidecar.outcomes.values())
     if not has_residual:
-        errors.append(
-            ValidationError(
-                "outcomes",
-                "No fallback branch with is_residual=true — add a catch-all outcome",
-            )
+        err = ValidationError(
+            "outcomes",
+            "No fallback branch with is_residual=true — add a catch-all outcome",
         )
+        errors.append(err)
+        if sidecar_path:
+            event("sidecar.validate_error", path=str(sidecar_path), field="outcomes", reason="No fallback branch with is_residual=true")
 
     return ValidationResult(ok=len(errors) == 0, errors=errors)

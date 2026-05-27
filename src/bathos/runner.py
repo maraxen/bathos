@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 import time
 import tomllib
 from pathlib import Path
@@ -16,6 +17,7 @@ from bathos.git import capture_git_state
 from bathos.schema import Run
 from bathos.sidecar import find_sidecar, is_in_enforced_dir, parse_sidecar, evaluate_outcome, SidecarError
 from bathos.prereg import resolve_sidecar, resolve_agent_mode, gate_check
+from bathos.telemetry import init_telemetry, event, run_uuid_var
 
 
 def _find_script_path(argv: list[str], cwd: Path) -> Path | None:
@@ -102,6 +104,7 @@ def run_script(
     derived_from: str | None = None,
     campaign_id: str | None = None,
 ) -> int:
+    init_telemetry()
     script_path = _find_script_path(argv, cwd)
 
     # Calculate script SHA-256 at runtime
@@ -199,6 +202,21 @@ def run_script(
         campaign_id=campaign_id or "",
         script_sha256=script_sha256_val,
     )
+    run_uuid_var.set(run.id)
+    event("run.start", run_uuid=run.id, script_path=str(script_path) if script_path else "", script_sha256=script_sha256_val, argv=argv, cwd=str(cwd), campaign_id=campaign_id or "", agent_mode=resolved_mode)
+
+    # Lineage: resolve derived_from to parent run_uuid if provided
+    if derived_from:
+        try:
+            from bathos.query import get_run
+            parent_run = get_run(catalog_dir, derived_from)
+            if parent_run:
+                event("lineage.resolved", child_run_uuid=run.id, parent_run_uuid=parent_run.id)
+            else:
+                event("lineage.resolve_error", child_run_uuid=run.id, derived_from=derived_from, reason="parent run not found")
+        except Exception as e:
+            event("lineage.resolve_error", child_run_uuid=run.id, derived_from=derived_from, reason=str(e))
+
     catalog_dir.mkdir(parents=True, exist_ok=True)
     write_run(run, catalog_dir)
 
@@ -211,13 +229,45 @@ def run_script(
     env["BTH_RESULTS_PATH"] = str(results_temp_path)
 
     start = time.monotonic()
+    exit_code = 1
+    status = "failed"
+    heartbeat_stop = None
     try:
-        result = subprocess.run(argv, cwd=cwd, env=env)
-        exit_code = result.returncode
+        proc = subprocess.Popen(argv, cwd=cwd, env=env)
+        event("run.subprocess_spawn", pid=proc.pid, cmd=argv)
+
+        # Heartbeat thread: emit every 60s after initial 60s wall-clock
+        heartbeat_stop = threading.Event()
+        def emit_heartbeat():
+            wall_start = time.time()
+            while not heartbeat_stop.is_set():
+                elapsed_wall = time.time() - wall_start
+                if elapsed_wall > 60:
+                    elapsed_ms = int((time.monotonic() - start) * 1000)
+                    event("run.heartbeat", pid=proc.pid, elapsed_ms=elapsed_ms)
+                time.sleep(60)
+        heartbeat_thread = threading.Thread(target=emit_heartbeat, daemon=True)
+        heartbeat_thread.start()
+
+        exit_code = proc.wait()
         status = "completed" if exit_code == 0 else "failed"
     except KeyboardInterrupt:
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except (AttributeError, subprocess.TimeoutExpired):
+            pass
         exit_code = 130
         status = "killed"
+    except Exception as e:
+        event("run.error", phase="spawn", exc_type=type(e).__name__, exc_msg=str(e))
+        return 1
+    finally:
+        if heartbeat_stop:
+            heartbeat_stop.set()
+
+    duration_ms = int((time.monotonic() - start) * 1000)
+    event("run.subprocess_exit", exit_code=exit_code, duration_ms=duration_ms, stdout_bytes=0, stderr_bytes=0)
 
     # Read result emission from BTH_RESULTS_PATH or fallback path
     metadata = _read_result_emission(results_temp_path, script_path)
@@ -247,7 +297,14 @@ def run_script(
         outcome=outcome,
         outcome_is_residual=outcome_is_residual,
     )
+
+    # Record parquet write with telemetry
+    parquet_start = time.monotonic()
     write_run(run, catalog_dir)
+    parquet_duration_ms = int((time.monotonic() - parquet_start) * 1000)
+    parquet_path = catalog_dir / "runs" / run.project_slug / f"run_{run.id}.parquet"
+    parquet_bytes = parquet_path.stat().st_size if parquet_path.exists() else 0
+    event("run.parquet_written", path=str(parquet_path), bytes=parquet_bytes, duration_ms=parquet_duration_ms)
 
     # Clean up temp results file if it exists
     if results_temp_path.exists():

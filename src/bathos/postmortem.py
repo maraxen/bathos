@@ -5,6 +5,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from bathos.schema import Run
 from bathos.git import capture_git_state
+from bathos.telemetry import event
 
 @dataclass
 class ValidationError:
@@ -105,6 +106,7 @@ def validate_postmortem(
     catalog_dir: Path | None = None,
     strict: bool = False,
     strict_files: bool = False,
+    postmortem_path: Path | None = None,
 ) -> ValidationResult:
     errors = []
 
@@ -114,8 +116,12 @@ def validate_postmortem(
     # inconclusive and marginal -> valid
     if postmortem.hypothesis_status == "refuted" and postmortem.verdict_override == "pass":
         errors.append(ValidationError("Hypothesis status is refuted but verdict override is pass"))
+        if postmortem_path:
+            event("postmortem.validate_error", path=str(postmortem_path), reason="Hypothesis status is refuted but verdict override is pass")
     if postmortem.hypothesis_status == "held" and postmortem.verdict_override == "fail":
         errors.append(ValidationError("Hypothesis status is held but verdict override is fail"))
+        if postmortem_path:
+            event("postmortem.validate_error", path=str(postmortem_path), reason="Hypothesis status is held but verdict override is fail")
 
     # 2. Check asset links paths and checksums
     if postmortem.asset_links and workspace_root:
@@ -132,22 +138,31 @@ def validate_postmortem(
                 path = Path(path_str)
                 # Check absolute path
                 if path.is_absolute():
-                    errors.append(ValidationError(f"Asset link '{key}' is an absolute path: '{path_str}'"))
+                    err = ValidationError(f"Asset link '{key}' is an absolute path: '{path_str}'")
+                    errors.append(err)
+                    if postmortem_path:
+                        event("postmortem.validate_error", path=str(postmortem_path), reason=err.message)
                     continue
-                
+
                 # Check escaping workspace
                 resolved_path = (workspace_root / path).resolve()
                 try:
                     resolved_path.relative_to(workspace_root.resolve())
                 except ValueError:
-                    errors.append(ValidationError(f"Asset link '{key}' escapes the workspace (escape the workspace): '{path_str}'"))
+                    err = ValidationError(f"Asset link '{key}' escapes the workspace (escape the workspace): '{path_str}'")
+                    errors.append(err)
+                    if postmortem_path:
+                        event("postmortem.validate_error", path=str(postmortem_path), reason=err.message)
                     continue
-                
+
                 # Check file existence and checksum if sha256_val is provided
                 file_path = workspace_root / path
                 if not file_path.exists():
                     if sha256_val or strict_files:
-                        errors.append(ValidationError(f"Asset link '{key}' does not exist: '{path_str}'"))
+                        err = ValidationError(f"Asset link '{key}' does not exist: '{path_str}'")
+                        errors.append(err)
+                        if postmortem_path:
+                            event("postmortem.validate_error", path=str(postmortem_path), reason=err.message)
                 else:
                     if sha256_val:
                         # calculate checksum
@@ -158,20 +173,34 @@ def validate_postmortem(
                                     h.update(chunk)
                             actual_sha = h.hexdigest()
                             if actual_sha != sha256_val:
-                                errors.append(ValidationError(f"Asset link '{key}' checksum mismatch: expected '{sha256_val}', got '{actual_sha}'"))
+                                err = ValidationError(f"Asset link '{key}' checksum mismatch: expected '{sha256_val}', got '{actual_sha}'")
+                                errors.append(err)
+                                if postmortem_path:
+                                    event("postmortem.validate_error", path=str(postmortem_path), reason=err.message)
                         except Exception as e:
-                            errors.append(ValidationError(f"Asset link '{key}' could not compute checksum: {e}"))
+                            err = ValidationError(f"Asset link '{key}' could not compute checksum: {e}")
+                            errors.append(err)
+                            if postmortem_path:
+                                event("postmortem.validate_error", path=str(postmortem_path), reason=err.message)
 
     # 3. Drift detection if run is provided
     if run:
         # Check dirty state
         if run.git_dirty:
-            errors.append(ValidationError("Run was recorded with git_dirty = True"))
+            err = ValidationError("Run was recorded with git_dirty = True")
+            errors.append(err)
+            if postmortem_path:
+                event("postmortem.validate_error", path=str(postmortem_path), reason=err.message)
         # Check git hash drift (warn or error?)
         if workspace_root:
             git_state = capture_git_state(workspace_root)
             if git_state.hash != "unknown" and run.git_hash != git_state.hash:
-                errors.append(ValidationError(f"Code drift detected: run git_hash '{run.git_hash}' differs from workspace HEAD '{git_state.hash}'"))
+                err = ValidationError(f"Code drift detected: run git_hash '{run.git_hash}' differs from workspace HEAD '{git_state.hash}'")
+                errors.append(err)
+                if postmortem_path:
+                    event("postmortem.validate_error", path=str(postmortem_path), reason=err.message)
 
     ok = len(errors) == 0
+    if ok and postmortem_path:
+        event("postmortem.validated", path=str(postmortem_path), run_id=postmortem.run_id, sprint_id=None)
     return ValidationResult(ok=ok, errors=errors)
