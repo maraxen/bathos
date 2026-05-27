@@ -10,11 +10,13 @@ bathos is a standalone experiment tracking CLI for a single researcher across 10
 
 ---
 
-## Current Status (as of 2026-05-22)
+## Current Status (as of 2026-05-27)
 
-**v0.5 (viz suite): in progress on `worktree-viz-suite` branch.** 346 tests passing.
+**v0.5 (viz suite + telemetry): viz suite in progress on `worktree-viz-suite` branch; telemetry merged to main.** 368 tests passing.
 
-**Shipped in v0.5:** Rich CLI formatters (`bth ls`, `bth show`, `bth campaign ls`, `bth campaign review`), `bth view` local FastAPI dashboard, `bth export --html` static report, `bathos[viz]` optional extra. See design spec: `docs/superpowers/specs/2026-05-21-viz-suite-design.md`.
+**Shipped in v0.5 (main):** Structured JSONL telemetry — `src/bathos/telemetry.py` substrate (QueueHandler→QueueListener→RotatingFileHandler, contextvar correlation, per-process SLURM-safe files); 9 event surfaces instrumented (run, sidecar, prereg, postmortem, campaign, lineage, mcp, sync, catalog); `docs/telemetry-schema.md` public schema doc with query recipes. Design spec: `.praxia/docs/specs/260527_telemetry-design.md`.
+
+**Shipped in v0.5 (viz suite branch):** Rich CLI formatters (`bth ls`, `bth show`, `bth campaign ls`, `bth campaign review`), `bth view` local FastAPI dashboard, `bth export --html` static report, `bathos[viz]` optional extra. See design spec: `docs/superpowers/specs/2026-05-21-viz-suite-design.md`.
 
 **v0.4.1: complete and merged to main.** 348 tests passing.
 
