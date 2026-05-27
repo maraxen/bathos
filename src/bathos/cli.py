@@ -9,6 +9,7 @@ import typer
 from bathos.archive import archive
 from bathos.config import find_project_config, load_project_config
 from bathos.sync import sync_catalog
+from bathos.telemetry import init_telemetry
 
 app = typer.Typer(help="bathos — local-first experiment tracking")
 
@@ -51,6 +52,7 @@ def _require_project_slug() -> str:
 def main(
     version: bool = typer.Option(False, "--version", "-V", is_eager=True),
 ):
+    init_telemetry()
     if version:
         from bathos import __version__
 
