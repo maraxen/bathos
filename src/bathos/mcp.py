@@ -714,6 +714,66 @@ async def mcp_get_run_tool(
     return get_run_tool(catalog_dir=catalog_dir, run_id=run_id)
 
 
+@app.tool("cite_run")
+@traced_tool
+async def mcp_cite_run_tool(
+    run_id: str,
+    catalog_dir: str = "",
+    format: str = "markdown",
+) -> str:
+    """Return a structured citation for a run linking output to hypothesis and manifest.
+
+    Args:
+        run_id: The run ID to cite.
+        catalog_dir: Path to catalog directory (uses default if empty).
+        format: Output format ('markdown' or 'json').
+
+    Returns:
+        Formatted citation string.
+    """
+    from bathos.cite import format_citation
+    from bathos.query import get_run as _get_run
+
+    cat_dir = _get_catalog_dir(catalog_dir)
+    run = _get_run(run_id, cat_dir)
+    if run is None:
+        return json.dumps({"error": f"Run not found: {run_id}"})
+    return format_citation(run, fmt=format)
+
+
+@app.tool("lineage_prov")
+@traced_tool
+async def mcp_lineage_prov_tool(
+    run_id: str,
+    catalog_dir: str = "",
+    depth: int = 10,
+) -> str:
+    """Return W3C PROV-JSON lineage for a run.
+
+    Args:
+        run_id: The run ID to trace ancestry for.
+        catalog_dir: Path to catalog directory (uses default if empty).
+        depth: Maximum lineage depth to traverse.
+
+    Returns:
+        W3C PROV-JSON formatted lineage as a JSON string.
+    """
+    from bathos.query import lineage as get_lineage, CatalogError
+    from bathos.provenance import format_prov_json
+
+    cat_dir = _get_catalog_dir(catalog_dir)
+    try:
+        ancestors = get_lineage(run_id, cat_dir)
+    except CatalogError as e:
+        return json.dumps({"error": str(e)})
+
+    if not ancestors:
+        return json.dumps({"error": f"Run not found or no lineage: {run_id}"})
+
+    prov_output = format_prov_json(ancestors)
+    return json.dumps(prov_output, indent=2)
+
+
 @app.tool("run_sql")
 @traced_tool
 async def mcp_run_sql_tool(
