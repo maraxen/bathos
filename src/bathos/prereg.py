@@ -224,16 +224,23 @@ def gate_check(
             event("prereg.gate_deny", script_path=str(script_path), reason="not_first_of_kind", agent_mode=mode)
             return GateResult(ok=False, mode=mode, bundle=bundle, validation=validation, error_payload=payload)
 
+    # Adversarial check enforcement (required for agent-mode)
+    if mode == "autonomous":
+        missing_adversarial = [
+            label for label, outcome in sidecar.outcomes.items()
+            if label == "pass" and outcome.adversarial_check is None
+        ]
+        if missing_adversarial:
+            payload = _gate_failure_payload(
+                error_code=GateErrorCode.ADVERSARIAL_CHECK_MISSING,
+                phase="pre_execution",
+                errors=[f"outcomes.{label}.adversarial_check is missing" for label in missing_adversarial],
+                agent_mode=mode,
+            )
+            event("prereg.gate_deny", script_path=str(script_path), reason="adversarial_check_missing", agent_mode=mode)
+            raise GateError("adversarial_check required in agent mode", payload=payload)
+
     event("prereg.gate_pass", script_path=str(script_path), sidecar_sha256=bundle.sha256, agent_mode=mode)
     return GateResult(ok=True, mode=mode, bundle=bundle, validation=validation)
 
 
-def _gate_failure_payload(gate: str, errors: list[str], mode: str, script_path: Path) -> dict:
-    return {
-        "status": "gate_failure",
-        "gate": gate,
-        "errors": errors,
-        "agent_mode": mode,
-        "remediation": f"Create {script_path.stem}.bth.toml with [experiment], [outcomes.*], [result_schema] sections. Each outcome needs condition (DuckDB SQL), decision, and reasoning. One outcome must have is_residual=true.",
-        "gate_schema_version": 1,
-    }
