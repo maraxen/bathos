@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Literal
 
@@ -17,9 +18,38 @@ AgentMode = Literal["collaborative", "autonomous"]
 logger = logging.getLogger(__name__)
 
 
+class GateErrorCode(str, Enum):
+    """Enumeration of structured error codes for pre-registration gate failures."""
+    SIDECAR_MISSING = "sidecar_missing"
+    SIDECAR_INVALID = "sidecar_invalid"
+    SIDECAR_HASH_MISMATCH = "sidecar_hash_mismatch"
+    NOT_FIRST_OF_KIND = "not_first_of_kind"
+    MANIFEST_WRITE_FAILED = "manifest_write_failed"
+    ADVERSARIAL_CHECK_MISSING = "adversarial_check_missing"
+    HYPOTHESIS_LOCK_MISSING = "hypothesis_lock_missing"
+    OUTCOME_EVALUATION_ERROR = "outcome_evaluation_error"
+    RESULT_SCHEMA_MISMATCH = "result_schema_mismatch"
+    OUTCOME_AMBIGUOUS = "outcome_ambiguous"
+    INTERNAL = "internal"
+
+
+@dataclass
+class GateErrorPayload:
+    """Structured payload for gate check failures, ready for MCP serialization."""
+    error_code: GateErrorCode
+    phase: Literal["pre_execution", "post_execution"]
+    taxonomy_label: str
+    errors: list[str]
+    agent_mode: str
+    resolution_hint: str
+    gate_schema_version: int = 2
+
+
 class GateError(Exception):
     """Exception raised when a pre-registration gate check fails."""
-    pass
+    def __init__(self, message: str, payload: GateErrorPayload | None = None):
+        super().__init__(message)
+        self.payload = payload
 
 
 @dataclass
@@ -36,7 +66,41 @@ class GateResult:
     mode: AgentMode
     bundle: SidecarBundle
     validation: ValidationResult | None = None
-    error_payload: dict | None = None  # structured MCP-ready error
+    error_payload: GateErrorPayload | None = None  # structured MCP-ready error
+
+
+_RESOLUTION_HINTS: dict[GateErrorCode, str] = {
+    GateErrorCode.SIDECAR_MISSING: "Create a .bth.toml sidecar adjacent to the script",
+    GateErrorCode.SIDECAR_INVALID: "Fix the sidecar TOML syntax or missing required sections",
+    GateErrorCode.SIDECAR_HASH_MISMATCH: "Re-run 'bth hypothesis lock' to regenerate the manifest",
+    GateErrorCode.NOT_FIRST_OF_KIND: "Use --derived-from to link to the parent run",
+    GateErrorCode.MANIFEST_WRITE_FAILED: "Check write permissions in the script directory",
+    GateErrorCode.ADVERSARIAL_CHECK_MISSING: "Add adversarial_check to all outcomes.pass blocks in the sidecar",
+    GateErrorCode.HYPOTHESIS_LOCK_MISSING: "Run 'bth hypothesis lock <script>' before executing",
+    GateErrorCode.OUTCOME_EVALUATION_ERROR: "Fix the DuckDB SQL condition in the sidecar outcomes block",
+    GateErrorCode.RESULT_SCHEMA_MISMATCH: "Ensure script output JSON matches the result_schema in the sidecar",
+    GateErrorCode.OUTCOME_AMBIGUOUS: "Ensure exactly one outcome condition evaluates to true",
+    GateErrorCode.INTERNAL: "File a bug report with the full error message",
+}
+
+
+def _gate_failure_payload(
+    error_code: GateErrorCode,
+    phase: Literal["pre_execution", "post_execution"],
+    errors: list[str],
+    agent_mode: str,
+    taxonomy_label: str = "",
+) -> GateErrorPayload:
+    """Generate structured error payload for gate check failures."""
+    return GateErrorPayload(
+        error_code=error_code,
+        phase=phase,
+        taxonomy_label=taxonomy_label or error_code.value,
+        errors=errors,
+        agent_mode=agent_mode,
+        resolution_hint=_RESOLUTION_HINTS.get(error_code, ""),
+        gate_schema_version=2,
+    )
 
 
 def resolve_sidecar(script_path: Path) -> SidecarBundle:
@@ -127,10 +191,10 @@ def gate_check(
 
     if not bundle.found:
         payload = _gate_failure_payload(
-            gate="sidecar_missing",
+            error_code=GateErrorCode.SIDECAR_MISSING,
+            phase="pre_execution",
             errors=[f"No sidecar found: {script_path.stem}.bth.toml"],
-            mode=mode,
-            script_path=script_path,
+            agent_mode=mode,
         )
         event("prereg.gate_deny", script_path=str(script_path), reason="sidecar_missing", agent_mode=mode)
         return GateResult(ok=False, mode=mode, bundle=bundle, error_payload=payload)
@@ -140,10 +204,10 @@ def gate_check(
 
     if not validation.ok:
         payload = _gate_failure_payload(
-            gate="sidecar_invalid",
+            error_code=GateErrorCode.SIDECAR_INVALID,
+            phase="pre_execution",
             errors=[f"[{e.field}] {e.message}" for e in validation.errors],
-            mode=mode,
-            script_path=script_path,
+            agent_mode=mode,
         )
         event("prereg.gate_deny", script_path=str(script_path), reason="sidecar_invalid", agent_mode=mode)
         return GateResult(ok=False, mode=mode, bundle=bundle, validation=validation, error_payload=payload)
@@ -152,10 +216,10 @@ def gate_check(
     if mode == "autonomous" and catalog_dir and git_hash:
         if not check_first_of_kind(script_path, catalog_dir, git_hash):
             payload = _gate_failure_payload(
-                gate="not_first_of_kind",
+                error_code=GateErrorCode.NOT_FIRST_OF_KIND,
+                phase="pre_execution",
                 errors=["Script has prior runs — autonomous sidecar generation disallowed for iterated scripts"],
-                mode=mode,
-                script_path=script_path,
+                agent_mode=mode,
             )
             event("prereg.gate_deny", script_path=str(script_path), reason="not_first_of_kind", agent_mode=mode)
             return GateResult(ok=False, mode=mode, bundle=bundle, validation=validation, error_payload=payload)
