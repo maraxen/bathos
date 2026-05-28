@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import tomllib
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -336,3 +337,44 @@ def check_unfired_branches(catalog_dir: Path, min_runs: int = 5) -> list[LintIss
         return issues
     except Exception:
         return []
+
+
+def check_adversarial_checks(project_root: Path) -> list[LintIssue]:
+    """Tier-2: Warn when adversarial_check is absent from outcomes.pass blocks.
+
+    Scans all .bth.toml files in the project and checks for missing adversarial_check
+    fields in outcomes.pass blocks.
+
+    Args:
+        project_root: Root directory of the project.
+
+    Returns:
+        List of LintIssue objects with severity WARNING.
+    """
+    issues: list[LintIssue] = []
+
+    # Find all .bth.toml files in the project
+    for sidecar_path in project_root.rglob("*.bth.toml"):
+        try:
+            with open(sidecar_path, "rb") as f:
+                data = tomllib.load(f)
+        except Exception:
+            # Skip files that can't be parsed
+            continue
+
+        outcomes = data.get("outcomes", {})
+        for label, outcome in outcomes.items():
+            if label == "pass" and "adversarial_check" not in outcome:
+                issues.append(LintIssue(
+                    path=sidecar_path,
+                    directory="sidecar",
+                    issue="missing_adversarial_check",
+                    severity=IssueSeverity.WARNING,
+                    detail=(
+                        f"outcomes.{label} missing adversarial_check — "
+                        "add a condition designed to falsify the hypothesis "
+                        "(syntactic proxy only; verify it actually strengthens the claim)"
+                    ),
+                ))
+
+    return issues
