@@ -478,3 +478,104 @@ def test_outcome_is_residual_populated(tmp_catalog: Path, tmp_path: Path):
     assert runs[0].outcome == "fallback"
     # outcome_is_residual should be True because fallback has is_residual=true
     assert runs[0].outcome_is_residual == True
+
+
+def test_outcome_error_on_nonzero_exit(tmp_catalog: Path, tmp_path: Path):
+    """When exit_code != 0, outcome should be set to 'error'."""
+    import textwrap
+
+    init_catalog(tmp_catalog)
+    # Create a script that fails with exit code 1
+    exit_code = run_script(
+        argv=[sys.executable, "-c", "raise SystemExit(1)"],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 1
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert runs[0].outcome == "error"
+    assert runs[0].outcome_error_reason == "exit_code=1"
+
+
+def test_evaluate_outcome_not_called_on_error(tmp_catalog: Path, tmp_path: Path):
+    """When exit_code != 0, evaluate_outcome is not called even with a sidecar."""
+    import textwrap
+
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    script = enforced / "run_test.py"
+    script.write_text(textwrap.dedent("""
+        raise SystemExit(1)
+    """))
+
+    sidecar = enforced / "run_test.bth.toml"
+    sidecar.write_text(textwrap.dedent("""
+        [experiment]
+        hypothesis = "test hypothesis"
+        [outcomes.pass]
+        condition = "temp_std < 5"
+        decision = "good"
+        reasoning = "stable temperature"
+        is_residual = true
+        [result_schema]
+        temp_std = "float"
+    """))
+
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 1
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    # outcome should be "error", not evaluated against sidecar outcomes
+    assert runs[0].outcome == "error"
+    assert runs[0].outcome_error_reason == "exit_code=1"
+
+
+def test_manifest_sha256_populated(tmp_catalog: Path, tmp_path: Path):
+    """After a normal run, run.manifest_sha256 and run.manifest_path are populated."""
+    import textwrap
+
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    script = enforced / "run_test.py"
+    script.write_text("pass")
+
+    sidecar = enforced / "run_test.bth.toml"
+    sidecar.write_text(textwrap.dedent("""
+        [experiment]
+        hypothesis = "test"
+        [outcomes.pass]
+        condition = "x == 1"
+        decision = "good"
+        reasoning = "x is 1"
+        is_residual = true
+        [result_schema]
+        x = "int"
+    """))
+
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 0
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    # After normal run, manifest_sha256 should be non-empty
+    assert runs[0].manifest_sha256 != ""
+    assert runs[0].manifest_path != ""

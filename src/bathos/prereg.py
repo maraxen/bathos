@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -12,6 +13,13 @@ from bathos.validate import ValidationResult, validate_sidecar
 from bathos.telemetry import event
 
 AgentMode = Literal["collaborative", "autonomous"]
+
+logger = logging.getLogger(__name__)
+
+
+class GateError(Exception):
+    """Exception raised when a pre-registration gate check fails."""
+    pass
 
 
 @dataclass
@@ -69,6 +77,8 @@ def check_first_of_kind(script_path: Path, catalog_dir: Path, git_hash: str) -> 
     Uses HEAD hash (same value runner.py writes as run.git_hash) so the check
     is semantically consistent with what the catalog contains.
     Q5 resolution: first-of-kind = no prior run with same (command LIKE script_path%, git_hash).
+
+    Raises GateError if warm DB check fails (not merely absent).
     """
     from bathos.query import _resolve_backend
 
@@ -89,8 +99,8 @@ def check_first_of_kind(script_path: Path, catalog_dir: Path, git_hash: str) -> 
                 finally:
                     if not con.closed:
                         con.close()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Warm tier gate check failed: {e}")
     # If warm tier unavailable, scan cool tier
     from bathos.query import list_runs
 

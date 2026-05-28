@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pyarrow as pa
 
-CURRENT_SCHEMA_VERSION = "4"
+CURRENT_SCHEMA_VERSION = "5"
 
 COOL_SCHEMA = pa.schema(
     [
@@ -45,6 +45,10 @@ COOL_SCHEMA = pa.schema(
         pa.field("postmortem_has_anomalies", pa.bool_()),
         pa.field("postmortem_summary", pa.string()),
         pa.field("postmortem_asset_links", pa.string()),
+        pa.field("manifest_sha256", pa.string()),
+        pa.field("manifest_path", pa.string()),
+        pa.field("outcome_error_reason", pa.string()),
+        pa.field("adversarial_check_status", pa.string()),
     ]
 )
 
@@ -87,6 +91,10 @@ WARM_SCHEMA = pa.schema(
         pa.field("postmortem_has_anomalies", pa.bool_()),
         pa.field("postmortem_summary", pa.string()),
         pa.field("postmortem_asset_links", pa.string()),
+        pa.field("manifest_sha256", pa.string()),
+        pa.field("manifest_path", pa.string()),
+        pa.field("outcome_error_reason", pa.string()),
+        pa.field("adversarial_check_status", pa.string()),
     ]
 )
 
@@ -129,6 +137,10 @@ class Run:
     postmortem_has_anomalies: bool = False
     postmortem_summary: str = ""
     postmortem_asset_links: str = "{}"
+    manifest_sha256: str = ""
+    manifest_path: str = ""
+    outcome_error_reason: str = ""
+    adversarial_check_status: str = ""
 
     def to_arrow(self) -> pa.Table:
         return pa.table(
@@ -168,6 +180,10 @@ class Run:
                 "postmortem_has_anomalies": [self.postmortem_has_anomalies],
                 "postmortem_summary": [self.postmortem_summary],
                 "postmortem_asset_links": [self.postmortem_asset_links],
+                "manifest_sha256": [self.manifest_sha256],
+                "manifest_path": [self.manifest_path],
+                "outcome_error_reason": [self.outcome_error_reason],
+                "adversarial_check_status": [self.adversarial_check_status],
             },
             schema=COOL_SCHEMA,
         )
@@ -218,4 +234,8 @@ class Run:
             postmortem_has_anomalies=bool(pydict.get("postmortem_has_anomalies", [False])[i]) if "postmortem_has_anomalies" in pydict else False,
             postmortem_summary=pydict.get("postmortem_summary", [""])[i] if "postmortem_summary" in pydict else "",
             postmortem_asset_links=pydict.get("postmortem_asset_links", ["{}"])[i] if "postmortem_asset_links" in pydict else "{}",
+            manifest_sha256=pydict.get("manifest_sha256", [""])[i] if "manifest_sha256" in pydict else "",
+            manifest_path=pydict.get("manifest_path", [""])[i] if "manifest_path" in pydict else "",
+            outcome_error_reason=pydict.get("outcome_error_reason", [""])[i] if "outcome_error_reason" in pydict else "",
+            adversarial_check_status=pydict.get("adversarial_check_status", [""])[i] if "adversarial_check_status" in pydict else "",
         )

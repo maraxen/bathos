@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 PROJECTS_REGISTRY = Path.home() / ".bth" / "projects.toml"
 
@@ -60,8 +63,8 @@ def register_project(slug: str, catalog_dir: Path) -> None:
             projects.append({"slug": slug, "catalog_dir": str(catalog_dir)})
         PROJECTS_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
         PROJECTS_REGISTRY.write_text(toml.dumps(registry))
-    except Exception:
-        pass  # Registry is best-effort; never block init
+    except Exception as e:
+        logger.warning(f"Failed to register project {slug} in global registry: {e}")  # Registry is best-effort; never block init
 
 
 def list_registered_projects() -> list[dict]:
@@ -70,5 +73,6 @@ def list_registered_projects() -> list[dict]:
         return []
     try:
         return tomllib.loads(PROJECTS_REGISTRY.read_text()).get("projects", [])
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Failed to read projects registry {PROJECTS_REGISTRY}: {e}")
         return []

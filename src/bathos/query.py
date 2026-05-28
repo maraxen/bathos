@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import logging
 import time
 from datetime import datetime
 from pathlib import Path
@@ -12,6 +13,13 @@ import duckdb
 from bathos.catalog import read_runs
 from bathos.schema import Run
 from bathos.telemetry import event
+
+logger = logging.getLogger(__name__)
+
+
+class CatalogError(Exception):
+    """Exception raised when catalog operations fail."""
+    pass
 
 
 def _filter_runs_by_output_file(
@@ -447,6 +455,9 @@ def lineage(run_id: str, catalog_dir: Path) -> list[Run]:
     Returns:
         List of Run objects in chronological order (oldest ancestor first).
         Returns empty list if run not found or catalog doesn't exist.
+
+    Raises:
+        CatalogError: If the query fails due to a schema or database error.
     """
     db_path = catalog_dir / "bathos.db"
     if not db_path.exists():
@@ -472,7 +483,7 @@ def lineage(run_id: str, catalog_dir: Path) -> list[Run]:
             [run_id],
         ).fetchall()
         return [_row_to_run(row) for row in rows if _row_to_run(row) is not None]
-    except Exception:
-        return []
+    except Exception as e:
+        raise CatalogError(f"Failed to query lineage for run {run_id}: {e}") from e
     finally:
         db.close()

@@ -152,9 +152,13 @@ def show(run_id: str = typer.Argument(...)):
 @app.command()
 def lineage(run_id: str = typer.Argument(...)):
     """Show ancestor chain of a run following parent_run_id links."""
-    from bathos.query import lineage as get_lineage
+    from bathos.query import lineage as get_lineage, CatalogError
 
-    ancestors = get_lineage(run_id, _catalog_dir())
+    try:
+        ancestors = get_lineage(run_id, _catalog_dir())
+    except CatalogError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
     if not ancestors:
         typer.echo(f"Run not found or no lineage: {run_id}", err=True)
         raise typer.Exit(1)

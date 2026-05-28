@@ -239,6 +239,8 @@ def _get_outcome_color(outcome: str) -> str:
         return "green"
     elif outcome == "fail":
         return "red"
+    elif outcome == "error":
+        return "bold red"
     elif outcome == "marginal":
         return "yellow"
     else:

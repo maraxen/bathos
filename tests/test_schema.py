@@ -43,7 +43,7 @@ def test_run_defaults():
     assert r.tags == []
     assert isinstance(r.timestamp, datetime)
     assert r.timestamp.tzinfo is not None
-    assert r.schema_version == "4"
+    assert r.schema_version == "5"
     assert r.slurm_job_id == ""
     assert r.metadata == "{}"
 
@@ -84,7 +84,7 @@ def test_run_roundtrip_via_arrow():
     assert r2.duration_s == 1.5
     assert r2.output_paths == ["/tmp/out.parquet"]
     assert r2.tags == ["tip3p"]
-    assert r2.schema_version == "4"
+    assert r2.schema_version == "5"
     assert r2.slurm_job_id == ""
 
 
@@ -100,7 +100,7 @@ def test_schema_version_in_cool_parquet():
     )
     table = r.to_arrow()
     assert "schema_version" in table.column_names
-    assert table.column("schema_version")[0].as_py() == "4"
+    assert table.column("schema_version")[0].as_py() == "5"
 
 
 def test_slurm_job_id_captured_from_env():
@@ -233,7 +233,7 @@ def test_schema_version_defaults_to_4():
         git_branch="main",
         git_dirty=False,
     )
-    assert r.schema_version == "4"
+    assert r.schema_version == "5"
 
 
 def test_sample_run_fixture_has_hostname(sample_run):
@@ -343,3 +343,78 @@ def test_warm_schema_has_v3_fields():
     ]
     for field_name in v3_fields:
         assert field_name in WARM_SCHEMA.names
+
+
+def test_schema_v5_fields_exist():
+    """Verify schema v5 adds manifest_sha256, manifest_path, outcome_error_reason, adversarial_check_status."""
+    from bathos.schema import CURRENT_SCHEMA_VERSION, Run
+
+    # Current version should be "5"
+    assert CURRENT_SCHEMA_VERSION == "5"
+
+    # Run should have all 4 new fields
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+    )
+    assert hasattr(r, "manifest_sha256")
+    assert hasattr(r, "manifest_path")
+    assert hasattr(r, "outcome_error_reason")
+    assert hasattr(r, "adversarial_check_status")
+
+    # Check defaults
+    assert r.manifest_sha256 == ""
+    assert r.manifest_path == ""
+    assert r.outcome_error_reason == ""
+    assert r.adversarial_check_status == ""
+
+
+def test_schema_v5_fields_in_cool_schema():
+    """Verify COOL_SCHEMA includes all 4 v5 fields."""
+    v5_fields = [
+        "manifest_sha256",
+        "manifest_path",
+        "outcome_error_reason",
+        "adversarial_check_status",
+    ]
+    for field_name in v5_fields:
+        assert field_name in COOL_SCHEMA.names, f"Missing {field_name} in COOL_SCHEMA"
+
+
+def test_schema_v5_fields_in_warm_schema():
+    """Verify WARM_SCHEMA includes all 4 v5 fields."""
+    v5_fields = [
+        "manifest_sha256",
+        "manifest_path",
+        "outcome_error_reason",
+        "adversarial_check_status",
+    ]
+    for field_name in v5_fields:
+        assert field_name in WARM_SCHEMA.names, f"Missing {field_name} in WARM_SCHEMA"
+
+
+def test_v5_fields_round_trip_arrow():
+    """Verify v5 fields round-trip through Arrow serialization."""
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        manifest_sha256="abc123def456",
+        manifest_path="/path/to/manifest.toml",
+        outcome_error_reason="exit_code=1",
+        adversarial_check_status="present",
+    )
+    table = r.to_arrow()
+    r2 = Run.from_arrow_row(table.to_pydict(), 0)
+
+    assert r2.manifest_sha256 == "abc123def456"
+    assert r2.manifest_path == "/path/to/manifest.toml"
+    assert r2.outcome_error_reason == "exit_code=1"
+    assert r2.adversarial_check_status == "present"

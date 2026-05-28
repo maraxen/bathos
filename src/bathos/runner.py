@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import os
 import subprocess
 import tempfile
@@ -18,6 +19,8 @@ from bathos.schema import Run
 from bathos.sidecar import find_sidecar, is_in_enforced_dir, parse_sidecar, evaluate_outcome, SidecarError
 from bathos.prereg import resolve_sidecar, resolve_agent_mode, gate_check
 from bathos.telemetry import init_telemetry, event, run_uuid_var
+
+logger = logging.getLogger(__name__)
 
 
 def _find_script_path(argv: list[str], cwd: Path) -> Path | None:
@@ -92,6 +95,55 @@ def _read_result_emission(env_var_path: Path, script_path: Path | None) -> str:
     return "{}"
 
 
+def _write_manifest(
+    run: Run,
+    sidecar_path: Path | None,
+    sidecar_sha256: str,
+    catalog_dir: Path,
+) -> tuple[str, str]:
+    """Write pre-execution manifest file and return (manifest_sha256, manifest_path).
+
+    Manifest is written adjacent to the sidecar (same directory).
+    Format: <script_stem>.<run_id>.bth.lock.toml
+
+    Returns:
+        Tuple of (manifest_sha256 hex string, manifest_path absolute string)
+
+    Raises:
+        RuntimeError if write fails in --agent-mode; logs warning otherwise.
+    """
+    import hashlib
+    from datetime import UTC, datetime
+
+    if sidecar_path is None:
+        return "", ""
+
+    manifest_filename = f"{sidecar_path.stem}.{run.id}.bth.lock.toml"
+    manifest_path = sidecar_path.parent / manifest_filename
+
+    manifest_content = (
+        f"# {sidecar_path.stem}.{run.id}.bth.lock.toml — written at run time, never modified\n"
+        f"[manifest]\n"
+        f'written_at = "{datetime.now(UTC).isoformat()}"\n'
+        f'sidecar_sha256 = "{sidecar_sha256}"\n'
+        f'sidecar_path = "{str(sidecar_path.resolve())}"\n'
+        f'git_sha = "{run.git_hash}"\n'
+        f'script_sha256 = "{run.script_sha256}"\n'
+        f'run_id = "{run.id}"\n'
+        f'agent_id = null\n'
+    )
+
+    try:
+        manifest_path.write_text(manifest_content)
+        manifest_sha = hashlib.sha256(manifest_content.encode()).hexdigest()
+        return manifest_sha, str(manifest_path.resolve())
+    except Exception as e:
+        if run.agent_mode == "autonomous":
+            raise RuntimeError(f"Failed to write manifest: {e}") from e
+        logger.warning(f"Failed to write manifest {manifest_path}: {e}")
+        return "", ""
+
+
 def run_script(
     argv: list[str],
     project_slug: str,
@@ -117,8 +169,8 @@ def run_script(
                 while chunk := f.read(8192):
                     h.update(chunk)
             script_sha256_val = h.hexdigest()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to compute script SHA-256 for {script_path}: {e}")
 
     # Sidecar resolution
     bundle = None
@@ -225,6 +277,20 @@ def run_script(
         event("run.error", phase="persist", exc_type=type(e).__name__, exc_msg=str(e))
         raise
 
+    # Write pre-execution manifest (before subprocess)
+    if bundle and bundle.found:
+        try:
+            manifest_sha256, manifest_path = _write_manifest(
+                run, bundle.path, bundle.sha256, catalog_dir
+            )
+            # Update run object with manifest info
+            run.manifest_sha256 = manifest_sha256
+            run.manifest_path = manifest_path
+        except RuntimeError as e:
+            # In autonomous mode, manifest write failure is fatal
+            event("run.error", phase="manifest", exc_type=type(e).__name__, exc_msg=str(e))
+            raise
+
     # Create temporary results file path for subprocess to write to
     results_temp_dir = Path(tempfile.gettempdir())
     results_temp_path = results_temp_dir / f"{run.id}.bth-results.json"
@@ -278,7 +344,13 @@ def run_script(
     metadata = _read_result_emission(results_temp_path, script_path)
 
     outcome = ""
-    if sidecar is not None:
+    outcome_error_reason = ""
+
+    # Exit code guard: if exit_code != 0, outcome is "error"
+    if exit_code != 0:
+        outcome = "error"
+        outcome_error_reason = f"exit_code={exit_code}"
+    elif sidecar is not None:
         # Outcome evaluation: read result_schema fields from metadata
         try:
             meta = json.loads(metadata)
@@ -286,13 +358,17 @@ def run_script(
             meta = {}
         try:
             outcome = evaluate_outcome(sidecar, meta)
+        except SidecarError as e:
+            outcome = "error"
+            outcome_error_reason = f"outcome_evaluation_error: {str(e)}"
+            event("run.error", phase="evaluate", exc_type=type(e).__name__, exc_msg=str(e))
         except Exception as e:
             event("run.error", phase="evaluate", exc_type=type(e).__name__, exc_msg=str(e))
             raise
 
     # Populate outcome_is_residual flag
     outcome_is_residual = False
-    if sidecar and outcome and outcome not in ("unknown", ""):
+    if sidecar and outcome and outcome not in ("unknown", "", "error"):
         spec = sidecar.outcomes.get(outcome)
         if spec:
             outcome_is_residual = getattr(spec, "is_residual", False)
@@ -304,6 +380,7 @@ def run_script(
         status=status,
         metadata=metadata,
         outcome=outcome,
+        outcome_error_reason=outcome_error_reason,
         outcome_is_residual=outcome_is_residual,
     )
 

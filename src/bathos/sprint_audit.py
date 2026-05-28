@@ -98,12 +98,17 @@ def sprint_audit(hours: int = 24) -> dict:
             for campaign_id, runs in by_campaign.items():
                 total = len(runs)
                 unknown_count = sum(1 for r in runs if r["outcome"] in ("unknown", "", None))
+                error_count = sum(1 for r in runs if r["outcome"] == "error")
                 bypassed_count = sum(1 for r in runs if r["sidecar_mode"] == "bypassed")
                 residual_count = sum(1 for r in runs if r["is_residual"])
 
                 if unknown_count > 0:
                     anomalies.append(
                         f"Campaign {campaign_id}: {unknown_count} runs with unknown outcome"
+                    )
+                if error_count > 0:
+                    anomalies.append(
+                        f"Campaign {campaign_id}: {error_count} runs with outcome=error"
                     )
                 if total > 0 and bypassed_count / total > 0.1:
                     anomalies.append(

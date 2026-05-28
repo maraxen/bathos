@@ -202,3 +202,23 @@ def test_sidecar_agent_mode_default(tmp_path):
     """)
     sidecar = parse_sidecar(path)
     assert sidecar.agent_mode == ""
+
+
+def test_evaluate_outcome_raises_sidecar_error_on_bad_sql(tmp_path):
+    """When outcome condition has invalid SQL, evaluate_outcome raises SidecarError."""
+    from bathos.sidecar import parse_sidecar, evaluate_outcome, SidecarError
+    path = _write_toml(tmp_path, """
+        [experiment]
+        hypothesis = "test"
+        [outcomes.bad]
+        condition = "INVALID SQL ][["
+        decision = "bad"
+        reasoning = "This condition has invalid SQL"
+        is_residual = true
+        [result_schema]
+        x = "float"
+    """)
+    s = parse_sidecar(path)
+    # Should raise SidecarError because SQL is invalid
+    with pytest.raises(SidecarError):
+        evaluate_outcome(s, {"x": 1.0})

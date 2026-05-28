@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -12,6 +13,8 @@ import duckdb
 from bathos.catalog import read_runs
 from bathos.schema import CURRENT_SCHEMA_VERSION, Run
 from bathos.telemetry import event
+
+logger = logging.getLogger(__name__)
 
 
 def _collect_output_metadata(output_path: str) -> dict:
@@ -116,10 +119,21 @@ def _migrate_v3(run_dict: dict) -> dict:
     return run_dict
 
 
+def _migrate_v4(run_dict: dict) -> dict:
+    """Migrate v4 fragment to v5 by adding manifest and outcome_error fields."""
+    run_dict["manifest_sha256"] = ""
+    run_dict["manifest_path"] = ""
+    run_dict["outcome_error_reason"] = ""
+    run_dict["adversarial_check_status"] = ""
+    run_dict["schema_version"] = "5"
+    return run_dict
+
+
 MIGRATIONS["0"] = _migrate_v0
 MIGRATIONS["1"] = _migrate_v1
 MIGRATIONS["2"] = _migrate_v2
 MIGRATIONS["3"] = _migrate_v3
+MIGRATIONS["4"] = _migrate_v4
 
 
 _RUNS_TABLE_SCHEMA = """
@@ -160,7 +174,11 @@ CREATE TABLE IF NOT EXISTS runs (
     postmortem_hypothesis_status TEXT,
     postmortem_has_anomalies BOOLEAN,
     postmortem_summary TEXT,
-    postmortem_asset_links TEXT
+    postmortem_asset_links TEXT,
+    manifest_sha256 TEXT,
+    manifest_path TEXT,
+    outcome_error_reason TEXT,
+    adversarial_check_status TEXT
 )
 """
 
@@ -288,8 +306,8 @@ def compact(catalog_dir: Path) -> CompactResult:
                 if pm.status != "draft":
                     rel_path = str(pm_file.relative_to(workspace_root))
                     postmortem_map[pm.run_id] = (pm, rel_path)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Skipping postmortem parse: {pm_file}: {e}")
 
     # Get warm-tier row count before compaction (if DB exists)
     warm_rows_before = 0

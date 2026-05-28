@@ -152,7 +152,10 @@ def is_in_enforced_dir(script_path: Path) -> bool:
 
 
 def evaluate_outcome(sidecar: Sidecar, result: dict) -> str:
-    """Evaluate DuckDB SQL fragments against result dict; return matching label or 'unknown'."""
+    """Evaluate DuckDB SQL fragments against result dict; return matching label or 'unknown'.
+
+    Raises SidecarError if a SQL condition is malformed.
+    """
     if not sidecar.outcomes or not result:
         return "unknown"
 
@@ -169,6 +172,6 @@ def evaluate_outcome(sidecar: Sidecar, result: dict) -> str:
             rows = duckdb.execute(f"SELECT ({spec.condition}) FROM (SELECT {cols})").fetchall()
             if rows and rows[0][0]:
                 return label
-        except Exception:
-            continue
+        except Exception as e:
+            raise SidecarError(f"Failed to evaluate outcome '{label}': {e}") from e
     return "unknown"
