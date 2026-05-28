@@ -226,7 +226,9 @@ def run_script(
             git_hash=git.hash,
         )
         if not gate_result.ok:
-            typer.echo(json.dumps(gate_result.error_payload), err=True)
+            # Serialize error payload to dict for JSON output
+            payload_dict = dataclasses.asdict(gate_result.error_payload) if gate_result.error_payload else {}
+            typer.echo(json.dumps(payload_dict), err=True)
             return 1
 
     # Determine sidecar_mode string
@@ -373,6 +375,18 @@ def run_script(
         if spec:
             outcome_is_residual = getattr(spec, "is_residual", False)
 
+    # Populate adversarial_check_status
+    adversarial_check_status = ""
+    if sidecar is None:
+        adversarial_check_status = "n/a"
+    elif any(
+        getattr(outcome_spec, "adversarial_check", None) is not None
+        for outcome_spec in sidecar.outcomes.values()
+    ):
+        adversarial_check_status = "present"
+    else:
+        adversarial_check_status = "missing"
+
     run = dataclasses.replace(
         run,
         duration_s=time.monotonic() - start,
@@ -382,6 +396,7 @@ def run_script(
         outcome=outcome,
         outcome_error_reason=outcome_error_reason,
         outcome_is_residual=outcome_is_residual,
+        adversarial_check_status=adversarial_check_status,
     )
 
     # Record parquet write with telemetry
