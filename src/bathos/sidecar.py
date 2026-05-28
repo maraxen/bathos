@@ -28,6 +28,7 @@ class OutcomeSpec:
     decision: str
     reasoning: str = ""
     is_residual: bool = False
+    adversarial_check: str | None = None
 
 
 @dataclass
@@ -135,6 +136,7 @@ def _parse_outcomes(data: dict) -> dict[str, OutcomeSpec]:
             decision=spec.get("decision", ""),
             reasoning=spec.get("reasoning", ""),
             is_residual=bool(spec.get("is_residual", False)),
+            adversarial_check=spec.get("adversarial_check"),
         )
         for label, spec in outcomes_data.items()
     }
