@@ -96,7 +96,7 @@ class TestGateFailurePayload:
             errors=["sidecar not found"],
             agent_mode="autonomous",
         )
-        assert "Create a .bth.toml" in payload.resolution_hint.lower()
+        assert "create a .bth.toml" in payload.resolution_hint.lower()
 
     def test_gate_failure_payload_adversarial_check_hint(self):
         """Test adversarial_check error code hint."""

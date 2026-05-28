@@ -128,7 +128,7 @@ def test_gate_check_ungated_dir_passes(tmp_path):
 
 
 def test_gate_check_missing_sidecar_fails(tmp_path):
-    from bathos.prereg import gate_check, resolve_sidecar
+    from bathos.prereg import gate_check, resolve_sidecar, GateErrorCode
 
     script = tmp_path / "scripts" / "experiments" / "run_nvt.py"
     script.parent.mkdir(parents=True)
@@ -139,8 +139,8 @@ def test_gate_check_missing_sidecar_fails(tmp_path):
 
     assert result.ok is False
     assert result.error_payload is not None
-    assert result.error_payload["gate"] == "sidecar_missing"
-    assert "No sidecar found" in result.error_payload["errors"][0]
+    assert result.error_payload.error_code == GateErrorCode.SIDECAR_MISSING
+    assert "No sidecar found" in result.error_payload.errors[0]
 
 
 def test_gate_check_valid_sidecar_passes(tmp_path):
@@ -162,7 +162,7 @@ def test_gate_check_valid_sidecar_passes(tmp_path):
 
 
 def test_gate_check_invalid_sidecar_fails(tmp_path):
-    from bathos.prereg import gate_check, resolve_sidecar
+    from bathos.prereg import gate_check, resolve_sidecar, GateErrorCode
 
     script = tmp_path / "scripts" / "experiments" / "run_nvt.py"
     script.parent.mkdir(parents=True)
@@ -184,8 +184,8 @@ def test_gate_check_invalid_sidecar_fails(tmp_path):
 
     assert result.ok is False
     assert result.error_payload is not None
-    assert result.error_payload["gate"] == "sidecar_invalid"
-    assert any("reasoning" in e.lower() for e in result.error_payload["errors"])
+    assert result.error_payload.error_code == GateErrorCode.SIDECAR_INVALID
+    assert any("reasoning" in e.lower() for e in result.error_payload.errors)
 
 
 def test_check_first_of_kind_no_prior_runs(tmp_path):
