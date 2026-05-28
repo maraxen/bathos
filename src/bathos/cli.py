@@ -150,9 +150,25 @@ def show(run_id: str = typer.Argument(...)):
 
 
 @app.command()
-def lineage(run_id: str = typer.Argument(...)):
+def lineage(
+    run_id: str = typer.Argument(...),
+    format: str = typer.Option(
+        "text",
+        "--format",
+        "-f",
+        help="Output format: text, prov, or dot",
+    ),
+    depth: int = typer.Option(
+        10,
+        "--depth",
+        help="Maximum lineage depth to traverse",
+    ),
+):
     """Show ancestor chain of a run following parent_run_id links."""
+    import json
+
     from bathos.query import lineage as get_lineage, CatalogError
+    from bathos.provenance import format_prov_json
 
     try:
         ancestors = get_lineage(run_id, _catalog_dir())
@@ -162,13 +178,45 @@ def lineage(run_id: str = typer.Argument(...)):
     if not ancestors:
         typer.echo(f"Run not found or no lineage: {run_id}", err=True)
         raise typer.Exit(1)
-    typer.echo(f"Lineage for {run_id[:8]}:")
-    for r in ancestors:
-        outcome_str = r.outcome if r.outcome else "-"
-        typer.echo(
-            f"  {r.id[:8]} {r.timestamp.isoformat()[:19]} "
-            f"outcome={outcome_str} {r.command[:40]}"
-        )
+
+    if format == "prov":
+        # W3C PROV-JSON output
+        prov_output = format_prov_json(ancestors)
+        typer.echo(json.dumps(prov_output, indent=2))
+    elif format == "dot":
+        # TODO: Graphviz DOT format (future)
+        typer.echo("dot format not yet implemented", err=True)
+        raise typer.Exit(1)
+    else:
+        # text (default)
+        typer.echo(f"Lineage for {run_id[:8]}:")
+        for r in ancestors:
+            outcome_str = r.outcome if r.outcome else "-"
+            typer.echo(
+                f"  {r.id[:8]} {r.timestamp.isoformat()[:19]} "
+                f"outcome={outcome_str} {r.command[:40]}"
+            )
+
+
+@app.command()
+def cite(
+    run_id: str = typer.Argument(..., help="Run ID to cite (full or prefix)"),
+    format: str = typer.Option(
+        "markdown",
+        "--format",
+        "-f",
+        help="Output format: markdown or json",
+    ),
+):
+    """Emit a structured citation for a run linking output to hypothesis and manifest."""
+    from bathos.cite import format_citation
+    from bathos.query import get_run
+
+    run = get_run(run_id, _catalog_dir())
+    if run is None:
+        typer.echo(f"Run not found: {run_id}", err=True)
+        raise typer.Exit(1)
+    typer.echo(format_citation(run, fmt=format))
 
 
 @app.command()
@@ -679,6 +727,7 @@ def lint(
     """Check scripts/ for naming conventions and missing sidecars."""
     from bathos.linter import (
         IssueSeverity,
+        check_adversarial_checks,
         check_bypass_trend,
         check_residual_rates,
         check_unfired_branches,
@@ -686,6 +735,9 @@ def lint(
     )
 
     issues = lint_project(project_root.resolve())
+
+    # Add Tier-2 file-based checks
+    issues.extend(check_adversarial_checks(project_root.resolve()))
 
     # Add warm-catalog Tier-2 checks if catalog exists
     catalog_dir = _catalog_dir()
