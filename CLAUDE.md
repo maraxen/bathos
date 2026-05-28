@@ -10,13 +10,13 @@ bathos is a standalone experiment tracking CLI for a single researcher across 10
 
 ---
 
-## Current Status (as of 2026-05-27)
+## Current Status (as of 2026-05-28)
 
-**v0.5 (viz suite + telemetry): viz suite in progress on `worktree-viz-suite` branch; telemetry merged to main.** 368 tests passing.
+**v0.5 complete and merged to main.** 368 tests passing.
 
-**Shipped in v0.5 (main):** Structured JSONL telemetry — `src/bathos/telemetry.py` substrate (QueueHandler→QueueListener→RotatingFileHandler, contextvar correlation, per-process SLURM-safe files); 9 event surfaces instrumented (run, sidecar, prereg, postmortem, campaign, lineage, mcp, sync, catalog); `docs/telemetry-schema.md` public schema doc with query recipes. Design spec: `.praxia/docs/specs/260527_telemetry-design.md`.
+**Shipped in v0.5:** Structured JSONL telemetry (`telemetry.py`, 9 event surfaces, SLURM-safe per-process files); Rich CLI formatters (`bth ls`, `bth show`, `bth campaign ls/review`); `bth view` local FastAPI dashboard; `bth export --html` static report; `bathos[viz]` optional extra (`src/bathos/viz/`). Design specs: `.praxia/docs/specs/260527_telemetry-design.md` · `docs/superpowers/specs/2026-05-21-viz-suite-design.md`.
 
-**Shipped in v0.5 (viz suite branch):** Rich CLI formatters (`bth ls`, `bth show`, `bth campaign ls`, `bth campaign review`), `bth view` local FastAPI dashboard, `bth export --html` static report, `bathos[viz]` optional extra. See design spec: `docs/superpowers/specs/2026-05-21-viz-suite-design.md`.
+**v0.6 sprint (agentic science evolution): in progress.** Sprint plan: `.praxia/docs/plans/260526_v06-sprint-composition.md`. Spec: `.praxia/docs/specs/260526_agentic-science-v06-evolution-spec.md`. 12 items across 5 phases — exception-swallowing remediation, pre-execution manifest, `outcome="error"` first-class, structured MCP error taxonomy, sprint-audit 7-signal extension, `adversarial_check` field + enforcement, `bth cite`, `bth lineage --format prov`, NLM hook, Rust gate error enum, sprint-composer locate spike, loop step budget. ADRs: `.praxia/docs/decisions/260526_*.md`.
 
 **v0.4.1: complete and merged to main.** 348 tests passing.
 
