@@ -12,11 +12,15 @@ bathos is a standalone experiment tracking CLI for a single researcher across 10
 
 ## Current Status (as of 2026-05-28)
 
+**v0.6 (agentic science evolution): complete.** 425 tests passing.
+
+**Shipped in v0.6 (bathos):** Exception-swallowing remediation (10 sites — `sidecar.py`, `prereg.py`, `compact.py`, `runner.py`, `config.py`, `mcp.py`, `query.py`); pre-execution manifest (`.bth.lock.toml` written before subprocess, schema v5 `manifest_sha256`/`manifest_path`); `outcome="error"` first-class with `outcome_error_reason`; `GateErrorCode` enum + `GateErrorPayload` dataclass (11 codes, `phase` field, `resolution_hint`); `adversarial_check` field on `OutcomeSpec` + Tier-2 lint check + agent-mode enforcement; `bth cite <run_id>` + `mcp__bathos__cite_run`; `bth lineage --format prov` (W3C PROV-JSON 1.0) + `mcp__bathos__lineage_prov`; sprint-audit 7-signal extension (`error_rate`, `bypass_explicit`, `bypass_in_agent_mode`, `outcome_entropy`, `unfired_branches`, `schema_overflow_rate`, `post_hoc_bias_flag`); schema v5 migration (`_migrate_v4()`). Design spec: `.praxia/docs/specs/260526_agentic-science-v06-evolution-spec.md`. ADRs: `.praxia/docs/decisions/260526_*.md`.
+
+**Shipped in v0.6 (praxia Rust):** `GateErrorCode`/`GateErrorPayload`/`GatePhase` in `praxia-types`; loop step budget + consecutive-tool detection in `praxia-fsm` (108 tests). NLM PostToolUse hook script at `scripts/posttool-nlm.sh` — requires manual `.claude/settings.json` wiring. Sprint-composer locate finding: `crates/praxia-pcw/src/sprint_composer.rs:124` — gate wiring (11b–11d) deferred to v0.6.1.
+
 **v0.5 complete and merged to main.** 368 tests passing.
 
 **Shipped in v0.5:** Structured JSONL telemetry (`telemetry.py`, 9 event surfaces, SLURM-safe per-process files); Rich CLI formatters (`bth ls`, `bth show`, `bth campaign ls/review`); `bth view` local FastAPI dashboard; `bth export --html` static report; `bathos[viz]` optional extra (`src/bathos/viz/`). Design specs: `.praxia/docs/specs/260527_telemetry-design.md` · `docs/superpowers/specs/2026-05-21-viz-suite-design.md`.
-
-**v0.6 sprint (agentic science evolution): in progress.** Sprint plan: `.praxia/docs/plans/260526_v06-sprint-composition.md`. Spec: `.praxia/docs/specs/260526_agentic-science-v06-evolution-spec.md`. 12 items across 5 phases — exception-swallowing remediation, pre-execution manifest, `outcome="error"` first-class, structured MCP error taxonomy, sprint-audit 7-signal extension, `adversarial_check` field + enforcement, `bth cite`, `bth lineage --format prov`, NLM hook, Rust gate error enum, sprint-composer locate spike, loop step budget. ADRs: `.praxia/docs/decisions/260526_*.md`.
 
 **v0.4.1: complete and merged to main.** 348 tests passing.
 
