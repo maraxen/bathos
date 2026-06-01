@@ -89,6 +89,7 @@ def validate_sidecar(sidecar: Sidecar, sidecar_path: Path | None = None) -> Vali
                     cols = ", ".join(
                         f"{k} {_map_type_to_sql(v)}"
                         for k, v in sidecar.result_schema.items()
+                        if isinstance(v, str)  # skip nested tables (e.g. [result_schema.provenance])
                     )
                     dummy_table = f"CREATE TEMP TABLE _dummy ({cols})"
                     con.execute(dummy_table)
