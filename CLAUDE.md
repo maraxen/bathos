@@ -217,6 +217,7 @@ src/bathos/
 | 140 | Schema versioning + extended provenance (hostname, slurm_job_id, metadata JSON, migrations) | P2 ✓ done (v0.2) | 139 |
 | 141 | `bth archive` — warm→cold partitioned Parquet export | P3 ✓ done (v0.2) | 139, 140 |
 | 142 | Results management — output convention, file-count utilities, direct management interface design | P2 (not started) | 139 |
+| 143 | Threshold epistemic hygiene — sidecar lint + skill instructions to flag unjustified cutoffs | P2 (not started) | 134 |
 
 **Not yet backlogged:**
 - *(none — sidecar enforcement and outcome evaluation shipped in v0.2/v0.3)*
