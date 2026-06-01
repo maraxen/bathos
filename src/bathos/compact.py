@@ -316,24 +316,53 @@ def _open_db(db_path: Path) -> duckdb.DuckDBPyConnection:
     return con
 
 
-def compact(catalog_dir: Path) -> CompactResult:
+def compact(
+    catalog_dir: Path, force_rebuild: bool = False
+) -> CompactResult:
     """Ingest all cool fragments into bathos.db DuckDB database.
 
     - Snapshots file list at start (ignores fragments written after snapshot)
     - Inserts new runs into DuckDB `runs` table; skips any runs already present (keyed on `id`)
     - Tracks warm-tier schema version in `_schema_meta` table
     - Does NOT remove cool fragments after ingest (safe default)
+    - Enforces transactional safety: all INSERTs in a transaction or none
+    - Detects corruption on connect and post-connect
 
     Args:
         catalog_dir: Path to catalog root (contains runs/ and bathos.db target)
+        force_rebuild: If True, rename corrupt bathos.db and rebuild from cool fragments
 
     Returns:
         CompactResult with ingested count, skipped count, and duration
+
+    Raises:
+        CorruptDatabaseError: If database is corrupt and force_rebuild is False
+        CompactionLockedError: If another compact process is already running
     """
     start_time = time.time()
 
-    # Count cool files at start for telemetry
-    cool_files = _fragment_count(catalog_dir)
+    # Acquire advisory lock to prevent concurrent compaction
+    lock_path = catalog_dir / ".bth_compact.lock"
+    try:
+        with open(lock_path, "x") as f:
+            f.write(str(os.getpid()))
+    except FileExistsError:
+        # Check for stale lock
+        try:
+            pid = int(lock_path.read_text().strip())
+            os.kill(pid, 0)  # raises ProcessLookupError if process is gone
+            raise CompactionLockedError(
+                f"Another bth compact is running (PID {pid}). "
+                f"If that process is gone, delete {lock_path} and retry."
+            )
+        except (ProcessLookupError, ValueError):
+            lock_path.unlink(missing_ok=True)
+            with open(lock_path, "x") as f:
+                f.write(str(os.getpid()))
+
+    try:
+        # Count cool files at start for telemetry
+        cool_files = _fragment_count(catalog_dir)
 
     # Read all runs from cool fragments (read_runs snapshots file list internally)
     cool_runs = read_runs(catalog_dir)
