@@ -10,7 +10,9 @@ bathos is a standalone experiment tracking CLI for a single researcher across 10
 
 ---
 
-## Current Status (as of 2026-05-28)
+## Current Status (as of 2026-06-01)
+
+**Cluster submission integration (Phase 2, 2026-06-01): complete.** 440 tests passing. New `bth submit` command submits jobs to SLURM cluster via myxcel (supports `--push-first`, `--wait`, `--then-pull`, `--then-sync`); schema extended with `slurm_array_task_id` field for SLURM array task tracking; `src/bathos/cluster.py` (new module) contains `ClusterConfig`, `resolve_cluster_config()`, and subprocess wrappers for myxcel CLI.
 
 **v0.6 (agentic science evolution): complete.** 425 tests passing.
 
