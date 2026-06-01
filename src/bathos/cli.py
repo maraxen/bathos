@@ -659,6 +659,161 @@ def sync(
 
 
 @app.command()
+def submit(
+    command: list[str] = typer.Argument(..., help="Command to submit (after --)"),
+    preset: str | None = typer.Option(None, "--preset", help="Override preset"),
+    remote: str | None = typer.Option(None, "--remote", help="Override remote"),
+    array: str = typer.Option("", "--array", help="SLURM array spec e.g. 0-9%4"),
+    dependency: str = typer.Option("", "--dependency", help="SLURM dependency e.g. afterok:12345"),
+    name: str = typer.Option("", "--name", help="Job name (default: first token of command)"),
+    sbatch_arg: list[str] = typer.Option([], "--sbatch-arg", help="Passthrough raw sbatch arg; repeatable"),
+    sidecar: str | None = typer.Option(None, "--sidecar", help="Explicit path to experiment sidecar (.bth.toml)"),
+    push_first: bool = typer.Option(True, "--push-first/--no-push-first", help="Push project before submitting"),
+    wait: bool = typer.Option(False, "--wait/--no-wait", help="Block until job reaches terminal state"),
+    then_pull: bool = typer.Option(False, "--then-pull", help="Pull results after job completes (implies --wait)"),
+    then_sync: bool = typer.Option(False, "--then-sync", help="Run bth sync after pull (implies --then-pull --wait)"),
+):
+    """Submit a command to the cluster using a configured preset."""
+    import tomllib
+
+    from bathos.config import find_project_config, load_project_config
+    from bathos.cluster import (
+        resolve_cluster_config,
+        push_project,
+        submit_job,
+        job_wait,
+        pull_project,
+    )
+
+    # 1. Validate flag implications
+    if then_sync:
+        then_pull = True
+    if then_pull:
+        wait = True
+
+    # 2. Load project config
+    cfg_path = find_project_config()
+    if cfg_path is None:
+        typer.echo("No .bth.toml found. Run `bth init` first.", err=True)
+        raise typer.Exit(1)
+    config = load_project_config(cfg_path)
+
+    # 3. Load sidecar [cluster] override (optional)
+    sidecar_data = None
+    if sidecar:
+        try:
+            with open(sidecar, "rb") as f:
+                sidecar_data = tomllib.load(f)
+        except (FileNotFoundError, OSError) as e:
+            typer.echo(f"Failed to parse sidecar: {e}", err=True)
+            raise typer.Exit(1)
+    else:
+        # Scan command list for .py file
+        for cmd_token in command:
+            if cmd_token.endswith(".py"):
+                candidate_py = Path(cmd_token)
+                if candidate_py.exists():
+                    candidate_sidecar = candidate_py.with_suffix(".bth.toml")
+                    if candidate_sidecar.exists():
+                        try:
+                            with open(candidate_sidecar, "rb") as f:
+                                sidecar_data = tomllib.load(f)
+                        except (FileNotFoundError, OSError):
+                            pass  # Silently continue
+                break
+
+    # 4. Resolve cluster config
+    try:
+        cluster = resolve_cluster_config(
+            config,
+            sidecar_data=sidecar_data,
+            cli_remote=remote,
+            cli_preset=preset,
+        )
+    except ValueError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1)
+
+    # 5. Derive job_name
+    job_name = name or (command[0].split("/")[-1] if command else "bth-submit")
+
+    # 6. Push if requested
+    if push_first:
+        try:
+            push_project(cluster.remote, cluster.project)
+        except RuntimeError as e:
+            typer.echo(str(e), err=True)
+            raise typer.Exit(1)
+
+    # 7. Submit
+    cmd_str = " ".join(command)
+    try:
+        result = submit_job(
+            cluster.remote,
+            cluster.project,
+            cluster.preset,
+            cmd_str,
+            job_name=job_name,
+            array=array,
+            dependency=dependency,
+            sbatch_args=sbatch_arg or None,
+        )
+    except RuntimeError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1)
+
+    slurm_job_id = result["slurm_job_id"]
+    typer.echo(
+        f"Submitted {slurm_job_id} on {cluster.remote} using preset {cluster.preset}"
+    )
+
+    # 8. Exit if not waiting
+    if not wait:
+        raise typer.Exit(0)
+
+    # 9. Wait for completion
+    try:
+        wait_result_dict = job_wait(cluster.remote, slurm_job_id)
+    except RuntimeError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1)
+
+    # 10. Pull if requested
+    if then_pull:
+        try:
+            pull_project(cluster.remote, cluster.project)
+        except RuntimeError as e:
+            typer.echo(str(e), err=True)
+            raise typer.Exit(1)
+
+    # 11. Sync if requested
+    if then_sync:
+        try:
+            sync_catalog(cluster.remote, config, _catalog_dir(), pull=True)
+        except (ValueError, RuntimeError) as e:
+            typer.echo(str(e), err=True)
+            raise typer.Exit(1)
+
+    # 12. Handle exit codes
+    wait_result = wait_result_dict.get("wait_result", "")
+    failure_class = wait_result_dict.get("failure_class", "")
+
+    if wait_result == "timeout":
+        typer.echo(
+            f"Job {slurm_job_id} still running on {cluster.remote}. "
+            f"Re-run with --wait --no-push-first to resume polling, or cancel with: "
+            f"myxcel cancel-job --remote {cluster.remote} {slurm_job_id}",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    if failure_class and failure_class != "SUCCESS":
+        raise typer.Exit(1)
+
+    raise typer.Exit(0)
+
+
+@app.command()
 def migrate(
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be migrated without writing"),
 ):

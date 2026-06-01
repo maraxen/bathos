@@ -25,6 +25,7 @@ COOL_SCHEMA = pa.schema(
         pa.field("tags", pa.list_(pa.string())),
         pa.field("schema_version", pa.string()),
         pa.field("slurm_job_id", pa.string()),
+        pa.field("slurm_array_task_id", pa.string()),
         pa.field("hostname", pa.string()),
         pa.field("outcome", pa.string()),
         pa.field("sidecar_sha256", pa.string()),
@@ -69,6 +70,7 @@ WARM_SCHEMA = pa.schema(
         pa.field("tags", pa.list_(pa.string())),
         pa.field("schema_version", pa.string()),
         pa.field("slurm_job_id", pa.string()),
+        pa.field("slurm_array_task_id", pa.string()),
         pa.field("hostname", pa.string()),
         pa.field("metadata", pa.string()),
         pa.field("outcome", pa.string()),
@@ -116,6 +118,7 @@ class Run:
     tags: list[str] = field(default_factory=list)
     schema_version: str = CURRENT_SCHEMA_VERSION
     slurm_job_id: str = ""
+    slurm_array_task_id: str = ""
     hostname: str = ""
     metadata: str = "{}"
     outcome: str = ""
@@ -160,6 +163,7 @@ class Run:
                 "tags": [self.tags],
                 "schema_version": [self.schema_version],
                 "slurm_job_id": [self.slurm_job_id],
+                "slurm_array_task_id": [self.slurm_array_task_id],
                 "hostname": [self.hostname],
                 "outcome": [self.outcome],
                 "sidecar_sha256": [self.sidecar_sha256],
@@ -214,6 +218,7 @@ class Run:
             if "schema_version" in pydict
             else "1",
             slurm_job_id=pydict.get("slurm_job_id", [""])[i] if "slurm_job_id" in pydict else "",
+            slurm_array_task_id=pydict.get("slurm_array_task_id", [""])[i] if "slurm_array_task_id" in pydict else "",
             hostname=pydict.get("hostname", [""])[i] if "hostname" in pydict else "",
             outcome=pydict["outcome"][i] or "" if "outcome" in pydict else "",
             sidecar_sha256=pydict.get("sidecar_sha256", [""])[i] if "sidecar_sha256" in pydict else "",

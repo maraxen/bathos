@@ -249,6 +249,7 @@ def run_script(
         tags=tags,
         status="running",
         slurm_job_id=os.environ.get("SLURM_JOB_ID", ""),
+        slurm_array_task_id=os.environ.get("SLURM_ARRAY_TASK_ID", ""),
         sidecar_sha256=bundle.sha256 if bundle and bundle.found else "",
         sidecar_path=str(bundle.path) if bundle and bundle.path else "",
         parent_run_id=derived_from or "",
