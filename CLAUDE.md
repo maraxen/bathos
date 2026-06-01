@@ -12,6 +12,8 @@ bathos is a standalone experiment tracking CLI for a single researcher across 10
 
 ## Current Status (as of 2026-06-01)
 
+**v0.6.1 (audit fixes): complete.** 458 tests passing. Two post-audit WARNING fixes: `validate.py` all-nested `result_schema` guard (empty `cols` falls through to expression-only DuckDB path); `sprint_audit.py` `_load_sidecar_schema_keys` returns `None` on parse failure and excludes those runs from the `schema_overflow_rate` denominator. GateErrorCode taxonomy: 5 dead codes annotated `# reserved`; `ADVERSARIAL_CHECK_MISSING` returns `GateResult` instead of raising; adversarial enforcement broadened to all non-residual outcomes. ADR: `.praxia/docs/decisions/260601_sprint-audit-threshold-rationale.md`.
+
 **Cluster submission integration (Phase 2, 2026-06-01): complete.** 440 tests passing. New `bth submit` command submits jobs to SLURM cluster via myxcel (supports `--push-first`, `--wait`, `--then-pull`, `--then-sync`); schema extended with `slurm_array_task_id` field for SLURM array task tracking; `src/bathos/cluster.py` (new module) contains `ClusterConfig`, `resolve_cluster_config()`, and subprocess wrappers for myxcel CLI.
 
 **v0.6 (agentic science evolution): complete.** 425 tests passing.
