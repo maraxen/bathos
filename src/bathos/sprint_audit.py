@@ -68,6 +68,25 @@ def _load_sidecar_outcomes(sidecar_path: str) -> set[str]:
     except Exception:
         return set()
 
+def _load_sidecar_schema_keys(sidecar_path: str) -> set[str]:
+    """Load result_schema field names declared in a sidecar file.
+
+    Args:
+        sidecar_path: Path to .bth.toml file.
+
+    Returns:
+        Set of declared result_schema field names, or empty set if unable to load.
+    """
+    try:
+        import tomllib
+
+        path = Path(sidecar_path)
+        if not path.exists():
+            return set()
+        data = tomllib.loads(path.read_text())
+        return set(data.get("result_schema", {}).keys())
+    except Exception:
+        return set()
 
 def sprint_audit(hours: int = 24) -> dict:
     """Cross-project audit of recent runs and campaigns.
@@ -224,20 +243,34 @@ def sprint_audit(hours: int = 24) -> dict:
                 signals["unfired_branches"] = 0.0
 
             # Signal 6: schema_overflow_rate
-            # Parse metadata JSON for each run; check if extra keys beyond empty/standard fields
+            # Counts runs where metadata contains keys NOT declared in result_schema.
+            # metadata is the script's primary output channel (runner.py:_read_result_emission);
+            # result_schema in the sidecar declares which keys are expected.
+            # Any metadata key NOT in result_schema = genuine schema overflow
+            # (possible metric substitution — arXiv 2510.21652 AstaBench).
+            # Runs without sidecar_path are skipped (no schema to compare against);
+            # those are already tracked by bypass_explicit / bypass_in_agent_mode.
+            # Denominator is runs_with_sidecar, not total_all.
             if total_all > 0:
                 overflow_count = 0
+                runs_with_sidecar = 0
                 for run in all_runs_flat:
+                    sidecar_path_run = run.get("sidecar_path", "")
+                    if not sidecar_path_run:
+                        continue
+                    runs_with_sidecar += 1
                     try:
-                        metadata = json.loads(run.get("metadata", "{}") or "{}")
-                        # If metadata has any keys at all, consider it overflow
-                        # (expected is empty dict for standard runs)
-                        if metadata:
+                        meta = json.loads(run.get("metadata", "{}") or "{}")
+                        declared_keys = _load_sidecar_schema_keys(sidecar_path_run)
+                        undeclared_keys = set(meta.keys()) - declared_keys
+                        if undeclared_keys:
                             overflow_count += 1
                     except (json.JSONDecodeError, TypeError):
-                        # Parse error; don't count as overflow
                         pass
-                signals["schema_overflow_rate"] = overflow_count / total_all
+                if runs_with_sidecar > 0:
+                    signals["schema_overflow_rate"] = overflow_count / runs_with_sidecar
+                else:
+                    signals["schema_overflow_rate"] = 0.0
             else:
                 signals["schema_overflow_rate"] = 0.0
 
@@ -255,31 +288,48 @@ def sprint_audit(hours: int = 24) -> dict:
                 if early_worst_count > 0.1 * len(all_outcomes):
                     signals["post_hoc_bias_flag"] = True
 
-            # Check signal thresholds and add anomalies
+            # Check signal thresholds and add anomalies.
+            # All thresholds are CALIBRATION TARGETS (v0.6), not hard gates.
+            # See ADR .praxia/docs/decisions/260601_sprint-audit-threshold-rationale.md
+            # error_rate > 0.10: >10% error outcomes indicates infrastructure/env problems;
+            #   uncalibrated — domain reasoning, no empirical study (spec Item 5)
             if signals["error_rate"] > 0.10:
                 anomalies.append(
                     f"Project: error_rate {signals['error_rate']:.1%} > 10%"
                 )
+            # bypass_explicit > 0.30: arXiv 2509.08713 constraint violation rates (1.3–71.4%);
+            #   0.30 is midpoint heuristic, not derived from bypass-rate empirical data
             if signals["bypass_explicit"] > 0.30:
                 anomalies.append(
                     f"Project: bypass_explicit {signals['bypass_explicit']:.1%} > 30%"
                 )
+            # bypass_in_agent_mode > 0.05: tighter than bypass_explicit; agents have zero
+            #   incremental cost to include a sidecar, so agent-mode bypass is harder to justify
+            #   (ADR 260526_bypass-rate-split, spec D4)
             if signals["bypass_in_agent_mode"] > 0.05:
                 anomalies.append(
                     f"Project: bypass_in_agent_mode {signals['bypass_in_agent_mode']:.1%} > 5%"
                 )
+            # outcome_entropy < 0.5 nats: arXiv 2501.10421 hivemind experiment;
+            #   0.5 nats < ln(2)=0.693 nats (balanced 2-outcome); flags label compression
             if signals["outcome_entropy"] < 0.5:
                 anomalies.append(
                     f"Project: outcome_entropy {signals['outcome_entropy']:.2f} nats < 0.5"
                 )
+            # unfired_branches > 0.40: arXiv 2509.08713 revision-agent unfired branches;
+            #   >40% unfired suggests hypothesis space not fully tested
             if signals["unfired_branches"] > 0.40:
                 anomalies.append(
                     f"Project: unfired_branches {signals['unfired_branches']:.1%} > 40%"
                 )
+            # schema_overflow_rate > 0.20: arXiv 2510.21652 AstaBench metric misuse;
+            #   counts runs where metadata has keys NOT in result_schema (see ADR 260601 bug fix)
             if signals["schema_overflow_rate"] > 0.20:
                 anomalies.append(
                     f"Project: schema_overflow_rate {signals['schema_overflow_rate']:.1%} > 20%"
                 )
+            # post_hoc_bias_flag: arXiv 2510.21652 AstaBench chi2(4,200)=61.99, p<1e-10;
+            #   worst-label count in first third > 10% of total flags post-hoc experiment culling
             if signals["post_hoc_bias_flag"]:
                 anomalies.append(
                     f"Project: post_hoc_bias_flag detected"
