@@ -4,7 +4,7 @@ import re
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from bathos.config import ProjectConfig
@@ -22,6 +22,7 @@ class SyncResult:
     duration_s: float
     remote: str
     filtered: int = 0
+    truncated_candidates: list[str] = field(default_factory=list)
 
 
 def sync_catalog(
@@ -247,7 +248,28 @@ def sync_catalog(
     if exit_code != 0:
         raise RuntimeError(f"rsync failed with exit code {exit_code}")
 
-    return SyncResult(transferred=transferred, duration_s=duration_s, remote=remote_name, filtered=filtered)
+    # Post-pull truncation scan (Fix 6)
+    truncated_candidates = []
+    if pull:
+        import pyarrow.parquet as pq
+        scan_window_start = start_time - 5.0  # 5s buffer for clock skew
+        for parquet_file in Path(dst.rstrip("/ ")).rglob("run_*.parquet"):
+            if parquet_file.stat().st_mtime < scan_window_start:
+                continue  # skip files that predate this pull
+            try:
+                pq.read_metadata(str(parquet_file))
+            except Exception:
+                truncated_candidates.append(str(parquet_file))
+                logger.warning("Truncated or corrupt Parquet after sync: %s", parquet_file)
+                event("sync.truncated_fragment", path=str(parquet_file))
+
+    return SyncResult(
+        transferred=transferred, 
+        duration_s=duration_s, 
+        remote=remote_name, 
+        filtered=filtered,
+        truncated_candidates=truncated_candidates,
+    )
 
 
 def _parse_transferred_count(rsync_output: str) -> int:

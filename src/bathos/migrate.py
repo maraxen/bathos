@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import shutil
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -8,6 +10,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from bathos.schema import COOL_SCHEMA, CURRENT_SCHEMA_VERSION
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -49,9 +53,36 @@ def migrate_catalog(catalog_dir: Path, dry_run: bool = False) -> MigrateResult:
                 pa.array([CURRENT_SCHEMA_VERSION] * len(tbl), type=pa.string()),
             )
         tbl = tbl.select([f.name for f in COOL_SCHEMA]).cast(COOL_SCHEMA)
-        tmp = frag.with_suffix(".tmp")
-        pq.write_table(tbl, tmp)
-        tmp.replace(frag)
+        
+        # Fix 3: Pre-migration backup + restore on failure
+        bak = frag.with_suffix(".bak")
+        tmp_path = frag.with_suffix(".tmp")
+        shutil.copy2(frag, bak)
+        try:
+            pq.write_table(tbl, tmp_path)
+            tmp_path.replace(frag)
+            bak.unlink(missing_ok=True)
+        except Exception as original_exc:
+            # Remove partial tmp if it exists
+            tmp_path.unlink(missing_ok=True)
+            # Restore original from backup
+            if bak.exists():
+                try:
+                    bak.replace(frag)
+                except Exception as restore_exc:
+                    logger.critical(
+                        "MANUAL RECOVERY REQUIRED: original fragment at %s could not be "
+                        "restored from backup at %s. Both paths may be in an indeterminate "
+                        "state. Error: %s",
+                        frag,
+                        bak,
+                        restore_exc,
+                    )
+                    raise RuntimeError(
+                        f"Original at {bak} could not be restored to {frag}; "
+                        f"manual recovery required."
+                    ) from restore_exc
+            raise
 
     already_current = len(fragments) - migrated
     return MigrateResult(

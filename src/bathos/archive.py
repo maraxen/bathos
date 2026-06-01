@@ -13,6 +13,17 @@ import pyarrow.parquet as pq
 from bathos.telemetry import event
 
 
+
+import hashlib
+def _sha256_file(path: Path) -> str:
+    """Compute SHA256 hex digest of a file."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(65536):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 @dataclass
 class ArchiveResult:
     """Result of an archive operation."""
@@ -126,9 +137,11 @@ def archive(
             temp_file.rename(output_file)
 
             file_size = output_file.stat().st_size
+            file_sha256 = _sha256_file(output_file)
             total_size += file_size
         else:
             file_size = 0
+            file_sha256 = 
 
         partition_duration_ms = (time.time() - partition_start_time) * 1000
 
@@ -146,6 +159,7 @@ def archive(
                 "partition": f"project={project}/year={year}/month={month}",
                 "rows": len(indices),
                 "size_bytes": file_size if not dry_run else 0,
+                "sha256": file_sha256,
             }
         )
 
@@ -157,6 +171,7 @@ def archive(
     if not dry_run:
         manifest = {
             "timestamp": datetime.now(UTC).isoformat(),
+            "schema_version": "2",
             "runs_archived": total_archived,
             "partitions": partitions_created,
             "total_size_bytes": total_size,

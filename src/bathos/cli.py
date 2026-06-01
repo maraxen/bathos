@@ -261,14 +261,64 @@ def sql(query: str = typer.Argument(...)):
 
 
 @app.command()
-def compact():
+def compact(
+    force_rebuild: bool = typer.Option(
+        False, "--force-rebuild", help="Rebuild bathos.db from cool fragments if corrupt"
+    ),
+):
     """Compact cool fragments into warm DuckDB catalog."""
     from bathos.compact import compact as compact_catalog
 
     catalog_dir = _catalog_dir()
-    result = compact_catalog(catalog_dir)
+    result = compact_catalog(catalog_dir, force_rebuild=force_rebuild)
     typer.echo(f"Compacted {result.ingested} runs into bathos.db in {result.duration_s:.1f}s")
 
+
+
+
+@app.command()
+def verify(
+    tier: str = typer.Option(
+        "all",
+        "--tier",
+        "-t",
+        help="Tier to verify: cool, warm, archive, or all",
+    ),
+    archive_dir: Path | None = typer.Option(
+        None, "--archive-dir", "-d", help="Archive root (default: ~/.bth/archive)"
+    ),
+):
+    """Verify catalog integrity across cool, warm, and archive tiers."""
+    from bathos.verify import verify_all, verify_cool, verify_warm, verify_archive
+
+    catalog_dir = _catalog_dir()
+    archive_root = archive_dir or (Path.home() / ".bth" / "archive")
+
+    if tier == "cool":
+        results = [verify_cool(catalog_dir)]
+    elif tier == "warm":
+        results = [verify_warm(catalog_dir)]
+    elif tier == "archive":
+        results = [verify_archive(archive_root)]
+    elif tier == "all":
+        results = verify_all(catalog_dir, archive_root)
+    else:
+        typer.echo(f"Unknown tier: {tier!r}. Choose cool, warm, archive, or all.", err=True)
+        raise typer.Exit(1)
+
+    any_errors = False
+    for result in results:
+        status = "OK" if result.ok else "FAIL"
+        color = "green" if result.ok else "red"
+        typer.secho(f"[{result.tier}] {status}", fg=color)
+        for w in result.warnings:
+            typer.secho(f"  WARN  {w}", fg="yellow")
+        for e in result.errors:
+            typer.secho(f"  ERROR {e}", fg="red")
+            any_errors = True
+
+    if any_errors:
+        raise typer.Exit(1)
 
 @app.command("archive")
 def archive_cmd(
