@@ -141,7 +141,7 @@ def archive(
             total_size += file_size
         else:
             file_size = 0
-            file_sha256 = 
+            file_sha256 = ""  
 
         partition_duration_ms = (time.time() - partition_start_time) * 1000
 
