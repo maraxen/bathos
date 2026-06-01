@@ -316,7 +316,7 @@ def _open_db(db_path: Path) -> duckdb.DuckDBPyConnection:
     return con
 
 
-def compact(catalog_dir: Path) -> CompactResult:
+def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
     """Ingest all cool fragments into bathos.db DuckDB database.
 
     - Snapshots file list at start (ignores fragments written after snapshot)
@@ -326,6 +326,7 @@ def compact(catalog_dir: Path) -> CompactResult:
 
     Args:
         catalog_dir: Path to catalog root (contains runs/ and bathos.db target)
+        force_rebuild: If True, remove existing bathos.db before compacting (for recovery from corruption)
 
     Returns:
         CompactResult with ingested count, skipped count, and duration
@@ -363,6 +364,8 @@ def compact(catalog_dir: Path) -> CompactResult:
     # Get warm-tier row count before compaction (if DB exists)
     warm_rows_before = 0
     db_path = catalog_dir / "bathos.db"
+    if db_path.exists() and force_rebuild:
+        db_path.unlink()
     if db_path.exists():
         temp_con = duckdb.connect(str(db_path), read_only=True)
         try:
