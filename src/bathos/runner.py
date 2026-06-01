@@ -17,7 +17,7 @@ from bathos.catalog import write_run
 from bathos.git import capture_git_state
 from bathos.schema import Run
 from bathos.sidecar import find_sidecar, is_in_enforced_dir, parse_sidecar, evaluate_outcome, SidecarError
-from bathos.prereg import resolve_sidecar, resolve_agent_mode, gate_check
+from bathos.prereg import resolve_sidecar, resolve_agent_mode, gate_check, GateErrorCode, _gate_failure_payload
 from bathos.telemetry import init_telemetry, event, run_uuid_var
 
 logger = logging.getLogger(__name__)
@@ -363,7 +363,13 @@ def run_script(
             outcome = evaluate_outcome(sidecar, meta)
         except SidecarError as e:
             outcome = "error"
-            outcome_error_reason = f"outcome_evaluation_error: {str(e)}"
+            payload = _gate_failure_payload(
+                error_code=GateErrorCode.OUTCOME_EVALUATION_ERROR,
+                phase="post_execution",
+                errors=[str(e)],
+                agent_mode=resolved_mode,
+            )
+            outcome_error_reason = json.dumps(dataclasses.asdict(payload))
             event("run.error", phase="evaluate", exc_type=type(e).__name__, exc_msg=str(e))
         except Exception as e:
             event("run.error", phase="evaluate", exc_type=type(e).__name__, exc_msg=str(e))

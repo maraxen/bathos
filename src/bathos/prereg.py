@@ -22,14 +22,14 @@ class GateErrorCode(str, Enum):
     """Enumeration of structured error codes for pre-registration gate failures."""
     SIDECAR_MISSING = "sidecar_missing"
     SIDECAR_INVALID = "sidecar_invalid"
-    SIDECAR_HASH_MISMATCH = "sidecar_hash_mismatch"
+    SIDECAR_HASH_MISMATCH = "sidecar_hash_mismatch"  # reserved: manifest versioning and drift detection
     NOT_FIRST_OF_KIND = "not_first_of_kind"
-    MANIFEST_WRITE_FAILED = "manifest_write_failed"
+    MANIFEST_WRITE_FAILED = "manifest_write_failed"  # reserved: manifest write permission checks on cluster
     ADVERSARIAL_CHECK_MISSING = "adversarial_check_missing"
-    HYPOTHESIS_LOCK_MISSING = "hypothesis_lock_missing"
+    HYPOTHESIS_LOCK_MISSING = "hypothesis_lock_missing"  # reserved: hypothesis lock file validation
     OUTCOME_EVALUATION_ERROR = "outcome_evaluation_error"
-    RESULT_SCHEMA_MISMATCH = "result_schema_mismatch"
-    OUTCOME_AMBIGUOUS = "outcome_ambiguous"
+    RESULT_SCHEMA_MISMATCH = "result_schema_mismatch"  # reserved: strict schema enforcement in v0.7
+    OUTCOME_AMBIGUOUS = "outcome_ambiguous"  # reserved: multiple outcome conditions evaluating true
     INTERNAL = "internal"
 
 
@@ -224,11 +224,11 @@ def gate_check(
             event("prereg.gate_deny", script_path=str(script_path), reason="not_first_of_kind", agent_mode=mode)
             return GateResult(ok=False, mode=mode, bundle=bundle, validation=validation, error_payload=payload)
 
-    # Adversarial check enforcement (required for agent-mode)
+    # Adversarial check enforcement (required for all non-residual outcomes in autonomous mode)
     if mode == "autonomous":
         missing_adversarial = [
             label for label, outcome in sidecar.outcomes.items()
-            if label == "pass" and outcome.adversarial_check is None
+            if not getattr(outcome, "is_residual", False) and outcome.adversarial_check is None
         ]
         if missing_adversarial:
             payload = _gate_failure_payload(
@@ -238,7 +238,7 @@ def gate_check(
                 agent_mode=mode,
             )
             event("prereg.gate_deny", script_path=str(script_path), reason="adversarial_check_missing", agent_mode=mode)
-            raise GateError("adversarial_check required in agent mode", payload=payload)
+            return GateResult(ok=False, mode=mode, bundle=bundle, validation=validation, error_payload=payload)
 
     event("prereg.gate_pass", script_path=str(script_path), sidecar_sha256=bundle.sha256, agent_mode=mode)
     return GateResult(ok=True, mode=mode, bundle=bundle, validation=validation)
