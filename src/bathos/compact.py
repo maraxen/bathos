@@ -3,9 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 import duckdb
@@ -15,6 +17,24 @@ from bathos.schema import CURRENT_SCHEMA_VERSION, Run
 from bathos.telemetry import event
 
 logger = logging.getLogger(__name__)
+
+
+class CorruptDatabaseError(RuntimeError):
+    """Raised when bathos.db cannot be opened or fails a post-connect check.
+
+    Attributes:
+        db_path: Path to the database file that failed the check.
+    """
+
+    def __init__(self, message: str, db_path: Path | None = None) -> None:
+        super().__init__(message)
+        self.db_path = db_path
+
+
+class CompactionLockedError(RuntimeError):
+    """Raised when compact() cannot acquire the advisory lock."""
+
+    pass
 
 
 def _collect_output_metadata(output_path: str) -> dict:
@@ -263,6 +283,37 @@ def _apply_migrations(run: Run) -> Run:
         current_version = run_dict.get("schema_version")
 
     return Run(**run_dict)
+
+
+def _open_db(db_path: Path) -> duckdb.DuckDBPyConnection:
+    """Open bathos.db, detecting corruption at connect and post-connect.
+
+    Raises:
+        CorruptDatabaseError: If the file header is unreadable (IOException at
+            connect time) or if _schema_meta is inaccessible after a successful
+            connect (structural corruption).
+    """
+    try:
+        con = duckdb.connect(str(db_path))
+    except duckdb.IOException as exc:
+        raise CorruptDatabaseError(
+            f"DuckDB could not open {db_path}: {exc}",
+            db_path=db_path,
+        ) from exc
+
+    # Post-connect structural check: _schema_meta must be accessible in any
+    # valid bathos.db that has been through at least one compact().
+    if db_path.exists() and db_path.stat().st_size > 0:
+        try:
+            con.execute("SELECT COUNT(*) FROM _schema_meta").fetchone()
+        except Exception as exc:
+            con.close()
+            raise CorruptDatabaseError(
+                f"DuckDB opened {db_path} but _schema_meta is inaccessible: {exc}",
+                db_path=db_path,
+            ) from exc
+
+    return con
 
 
 def compact(catalog_dir: Path) -> CompactResult:
