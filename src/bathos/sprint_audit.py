@@ -68,14 +68,16 @@ def _load_sidecar_outcomes(sidecar_path: str) -> set[str]:
     except Exception:
         return set()
 
-def _load_sidecar_schema_keys(sidecar_path: str) -> set[str]:
+def _load_sidecar_schema_keys(sidecar_path: str) -> set[str] | None:
     """Load result_schema field names declared in a sidecar file.
 
     Args:
         sidecar_path: Path to .bth.toml file.
 
     Returns:
-        Set of declared result_schema field names, or empty set if unable to load.
+        Set of declared result_schema field names, or None if the sidecar
+        could not be read or parsed (caller should exclude this run from the
+        schema_overflow_rate denominator rather than counting it as clean).
     """
     try:
         import tomllib
@@ -85,8 +87,10 @@ def _load_sidecar_schema_keys(sidecar_path: str) -> set[str]:
             return set()
         data = tomllib.loads(path.read_text())
         return set(data.get("result_schema", {}).keys())
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
     except Exception:
-        return set()
+        return None
 
 def sprint_audit(hours: int = 24) -> dict:
     """Cross-project audit of recent runs and campaigns.
@@ -258,10 +262,14 @@ def sprint_audit(hours: int = 24) -> dict:
                     sidecar_path_run = run.get("sidecar_path", "")
                     if not sidecar_path_run:
                         continue
+                    declared_keys = _load_sidecar_schema_keys(sidecar_path_run)
+                    if declared_keys is None:
+                        # Sidecar exists but could not be parsed; exclude from denominator
+                        # rather than inflating overflow_rate by treating all keys as undeclared.
+                        continue
                     runs_with_sidecar += 1
                     try:
                         meta = json.loads(run.get("metadata", "{}") or "{}")
-                        declared_keys = _load_sidecar_schema_keys(sidecar_path_run)
                         undeclared_keys = set(meta.keys()) - declared_keys
                         if undeclared_keys:
                             overflow_count += 1

@@ -91,9 +91,12 @@ def validate_sidecar(sidecar: Sidecar, sidecar_path: Path | None = None) -> Vali
                         for k, v in sidecar.result_schema.items()
                         if isinstance(v, str)  # skip nested tables (e.g. [result_schema.provenance])
                     )
-                    dummy_table = f"CREATE TEMP TABLE _dummy ({cols})"
-                    con.execute(dummy_table)
-                    con.execute(f"SELECT ({spec.condition}) FROM _dummy LIMIT 0")
+                    if cols:
+                        con.execute(f"CREATE TEMP TABLE _dummy ({cols})")
+                        con.execute(f"SELECT ({spec.condition}) FROM _dummy LIMIT 0")
+                    else:
+                        # result_schema has only nested sub-tables (e.g. [result_schema.provenance])
+                        con.execute(f"SELECT ({spec.condition})")
                 else:
                     # If no schema, just validate as boolean expression
                     con.execute(f"SELECT ({spec.condition})")
