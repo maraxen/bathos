@@ -3,6 +3,9 @@
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from datetime import datetime
+from pathlib import Path
+
 from rich.text import Text
 
 from bathos.schema import Run
@@ -319,3 +322,178 @@ def render_popper_summary(popper_data: dict | None, console: Console | None = No
         )
     else:
         console.print(Text("  Campaign conclusion: NO RUNS YET", style="dim"))
+
+
+
+def render_output_list(run_id: str, files: list[dict], live: bool = False) -> None:
+    """Render a list of output files for a run.
+
+    Each file dict contains: path, status, size_bytes, mtime_unix, sha256.
+    Status values: "present", "missing", "unreadable".
+    If live=True, re-stat each file from filesystem (display only, not persistent).
+
+    Args:
+        run_id: Run ID for context
+        files: List of file dicts from output_metadata
+        live: If True, re-stat files from filesystem
+    """
+    console = Console()
+
+    if not files:
+        console.print(f"[dim]Run {run_id[:8]} has no registered output files.[/dim]")
+        return
+
+    # If live, re-stat files
+    if live:
+        for f in files:
+            path_obj = Path(f.get("path", ""))
+            try:
+                if path_obj.exists():
+                    stat = path_obj.stat()
+                    f["status"] = "present"
+                    f["size_bytes"] = stat.st_size
+                    f["mtime_unix"] = stat.st_mtime
+                else:
+                    f["status"] = "missing"
+                    f["size_bytes"] = 0
+            except (PermissionError, OSError):
+                f["status"] = "unreadable"
+                f["size_bytes"] = 0
+
+    # Build table
+    table = Table(title=f"Output Files: {run_id[:8]}")
+    table.add_column("Path", style="cyan")
+    table.add_column("Status", style="yellow")
+    table.add_column("Size", style="blue")
+    table.add_column("Modified", style="dim")
+    table.add_column("SHA256", style="white")
+
+    for f in files:
+        path = f.get("path", "")
+        path_obj = Path(path)
+        # Truncate path: show parent dir + basename
+        if len(path) > 50:
+            basename = path_obj.name
+            parent = path_obj.parent.name
+            path_display = f".../{parent}/{basename}"
+        else:
+            path_display = path
+
+        status = f.get("status", "unknown")
+        # Color code status
+        if status == "present":
+            status_text = Text(status, style="green")
+        elif status == "missing":
+            status_text = Text(status, style="red")
+        elif status == "unreadable":
+            status_text = Text(status, style="yellow")
+        else:
+            status_text = Text(status, style="dim")
+
+        # Format size
+        size_bytes = f.get("size_bytes", 0)
+        if size_bytes < 1024:
+            size_str = f"{size_bytes}B"
+        elif size_bytes < 1024 * 1024:
+            size_str = f"{size_bytes / 1024:.1f}KB"
+        else:
+            size_str = f"{size_bytes / (1024 * 1024):.1f}MB"
+
+        # Format mtime
+        mtime_unix = f.get("mtime_unix", 0)
+        if mtime_unix > 0:
+            mtime_str = datetime.fromtimestamp(mtime_unix).isoformat()[:19]
+        else:
+            mtime_str = "—"
+
+        # Format SHA256
+        sha256 = f.get("sha256")
+        if sha256:
+            sha256_display = str(sha256)[:8]
+        else:
+            sha256_display = "—"
+
+        table.add_row(path_display, status_text, size_str, mtime_str, sha256_display)
+
+    console.print(table)
+
+
+def render_outputs_summary(rows: list[dict], since: str | None = None) -> None:
+    """Render a summary of output files across runs.
+
+    Each row: {project: str, run_count: int, file_count: int, total_bytes: int, missing_count: int}
+
+    Args:
+        rows: List of aggregated output rows
+        since: Time filter description (e.g. "7d", "30d") for context
+    """
+    console = Console()
+
+    if not rows:
+        console.print("[yellow]No output data found.[/yellow]")
+        console.print("[dim]Hint: Run 'bth compact' to aggregate output metadata into the warm tier.[/dim]")
+        return
+
+    # Build table
+    since_str = f" (since {since})" if since else ""
+    table = Table(title=f"Output Summary{since_str}")
+    table.add_column("Project", style="cyan")
+    table.add_column("Runs", style="magenta")
+    table.add_column("Files", style="blue")
+    table.add_column("Total Size", style="green")
+    table.add_column("Missing", style="red")
+
+    total_runs = 0
+    total_files = 0
+    total_bytes = 0
+    total_missing = 0
+
+    for row in rows:
+        project = row.get("project", "?")
+        run_count = row.get("run_count", 0)
+        file_count = row.get("file_count", 0)
+        total_b = row.get("total_bytes", 0)
+        missing_count = row.get("missing_count", 0)
+
+        total_runs += run_count
+        total_files += file_count
+        total_bytes += total_b
+        total_missing += missing_count
+
+        # Format size
+        if total_b < 1024:
+            size_str = f"{total_b}B"
+        elif total_b < 1024 * 1024:
+            size_str = f"{total_b / 1024:.1f}KB"
+        elif total_b < 1024 * 1024 * 1024:
+            size_str = f"{total_b / (1024 * 1024):.1f}MB"
+        else:
+            size_str = f"{total_b / (1024 * 1024 * 1024):.1f}GB"
+
+        missing_text = Text(str(missing_count), style="red" if missing_count > 0 else "green")
+
+        table.add_row(project, str(run_count), str(file_count), size_str, missing_text)
+
+    # Add footer with totals
+    if len(rows) > 1:
+        if total_bytes < 1024:
+            total_size_str = f"{total_bytes}B"
+        elif total_bytes < 1024 * 1024:
+            total_size_str = f"{total_bytes / 1024:.1f}KB"
+        elif total_bytes < 1024 * 1024 * 1024:
+            total_size_str = f"{total_bytes / (1024 * 1024):.1f}MB"
+        else:
+            total_size_str = f"{total_bytes / (1024 * 1024 * 1024):.1f}GB"
+
+        total_missing_text = Text(
+            str(total_missing), style="red" if total_missing > 0 else "green"
+        )
+        table.add_row(
+            "[bold]TOTAL[/bold]",
+            str(total_runs),
+            str(total_files),
+            total_size_str,
+            total_missing_text,
+        )
+
+    console.print(table)

@@ -1073,6 +1073,151 @@ async def postmortem_get(
     return {"error": f"No postmortem found for run_id '{run_id}'"}
 
 
+def list_outputs_tool(
+    run_id: str,
+    workspace_root: str | None = None,
+    live: bool = False,
+) -> dict:
+    """List output files for a given run ID.
+
+    Returns parsed output metadata from the run, optionally re-stated if live=True.
+    """
+    from bathos.query import get_run
+    from bathos.config import find_project_config, load_project_config, default_catalog_dir
+    import json
+
+    if workspace_root:
+        ws = Path(workspace_root)
+        config_path = find_project_config(ws)
+        if config_path:
+            catalog_dir = load_project_config(config_path).catalog_dir
+        else:
+            catalog_dir = default_catalog_dir()
+    else:
+        config_path = find_project_config()
+        if config_path:
+            catalog_dir = load_project_config(config_path).catalog_dir
+        else:
+            catalog_dir = default_catalog_dir()
+
+    run = get_run(run_id, catalog_dir)
+    if not run:
+        return {"error": f"Run not found: {run_id}"}
+
+    # Parse output_metadata
+    try:
+        if run.output_metadata and run.output_metadata != "[]":
+            files = json.loads(run.output_metadata)
+        else:
+            files = []
+    except (json.JSONDecodeError, TypeError):
+        files = []
+
+    # If live, re-stat files
+    if live:
+        for f in files:
+            path_obj = Path(f.get("path", ""))
+            try:
+                if path_obj.exists():
+                    stat = path_obj.stat()
+                    f["status"] = "present"
+                    f["size_bytes"] = stat.st_size
+                    f["mtime_unix"] = stat.st_mtime
+                else:
+                    f["status"] = "missing"
+                    f["size_bytes"] = 0
+            except (PermissionError, OSError):
+                f["status"] = "unreadable"
+                f["size_bytes"] = 0
+
+    return {"run_id": run_id, "files": files, "live": live}
+
+
+def outputs_summary_tool(
+    workspace_root: str | None = None,
+    project: str | None = None,
+    since: str | None = None,
+) -> dict:
+    """Aggregate output file statistics across runs.
+
+    Returns summary rows grouped by project.
+    """
+    from bathos.config import find_project_config, load_project_config, default_catalog_dir
+    import json
+    import duckdb
+
+    if workspace_root:
+        ws = Path(workspace_root)
+        config_path = find_project_config(ws)
+        if config_path:
+            catalog_dir = load_project_config(config_path).catalog_dir
+        else:
+            catalog_dir = default_catalog_dir()
+    else:
+        config_path = find_project_config()
+        if config_path:
+            catalog_dir = load_project_config(config_path).catalog_dir
+        else:
+            catalog_dir = default_catalog_dir()
+
+    db_path = catalog_dir / "bathos.db"
+    if not db_path.exists():
+        return {"rows": [], "since": since, "note": "Catalog not yet compacted. Run 'bth compact' first."}
+
+    # Query warm tier
+    con = duckdb.connect(str(db_path))
+    con.execute("SET TimeZone='UTC'")
+
+    query = "SELECT project_slug, id, output_metadata FROM runs WHERE output_metadata IS NOT NULL AND output_metadata != '[]'"
+    params = []
+
+    if project:
+        query += " AND project_slug = ?"
+        params.append(project)
+
+    if since:
+        import re
+        match = re.match(r"(\d+)([dhm])", since)
+        if match:
+            num, unit = match.groups()
+            num = int(num)
+            if unit == "d":
+                hours = num * 24
+            elif unit == "h":
+                hours = num
+            elif unit == "m":
+                hours = num / 60
+            else:
+                hours = num * 24
+            query += " AND timestamp > now() - interval '" + str(int(hours)) + " hour'"
+
+    rows_data = con.execute(query, params).fetchall()
+    con.close()
+
+    # Aggregate by project
+    aggregated = {}
+    for project_slug, run_id, output_metadata_json in rows_data:
+        try:
+            files = json.loads(output_metadata_json) if output_metadata_json else []
+            if project_slug not in aggregated:
+                aggregated[project_slug] = {
+                    "project": project_slug,
+                    "run_count": 0,
+                    "file_count": 0,
+                    "total_bytes": 0,
+                    "missing_count": 0,
+                }
+            agg = aggregated[project_slug]
+            agg["run_count"] += 1
+            agg["file_count"] += len(files)
+            agg["total_bytes"] += sum(f.get("size_bytes", 0) for f in files)
+            agg["missing_count"] += sum(1 for f in files if f.get("status") == "missing")
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    return {"rows": list(aggregated.values()), "since": since}
+
+
 def mcp_server():
     """Entry point for MCP server (stdio transport).
 

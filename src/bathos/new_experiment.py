@@ -29,6 +29,13 @@ def main(
     }}
     print(json.dumps(results))
 
+    # --- Output artifacts (optional) ---
+    # To register output files with the catalog, pass --out to `bth run`:
+    #   bth run scripts/experiments/{name}.py --out outputs/my_run/results.json
+    # bathos records path + size + sha256 at compact time. Query with:
+    #   bth outputs list <run_id>
+    #   bth outputs summary
+
 
 if __name__ == "__main__":
     app()

@@ -22,6 +22,9 @@ app.add_typer(campaign_app, name="campaign")
 postmortem_app = typer.Typer(help="Manage postmortem reviews")
 app.add_typer(postmortem_app, name="postmortem")
 
+outputs_app = typer.Typer(help="Inspect and summarise run output files.")
+app.add_typer(outputs_app, name="outputs")
+
 
 def _catalog_dir() -> Path:
     override = os.environ.get("BTH_CATALOG_DIR")
@@ -1536,3 +1539,117 @@ def validate(
         for err in result.errors:
             typer.echo(f"  - {err.message}", err=True)
         raise typer.Exit(1)
+
+
+@outputs_app.command("list")
+def outputs_list(
+    run_id: str = typer.Argument(..., help="Run ID to display outputs for"),
+    live: bool = typer.Option(False, "--live", help="Re-stat files from filesystem instead of using catalog snapshot."),
+):
+    """Display output files registered for a run."""
+    from bathos.query import get_run
+    import json
+
+    catalog = _catalog_dir()
+    run = get_run(run_id, catalog)
+
+    if not run:
+        typer.echo(f"Run not found: {run_id}", err=True)
+        raise typer.Exit(1)
+
+    # Parse output_metadata JSON
+    try:
+        if run.output_metadata and run.output_metadata != "[]":
+            files = json.loads(run.output_metadata)
+        else:
+            files = []
+    except (json.JSONDecodeError, TypeError):
+        files = []
+
+    if not files:
+        typer.echo(f"Run {run_id[:8]} has no registered output files.")
+        return
+
+    from bathos.rich_fmt import render_output_list
+    render_output_list(run_id, files, live=live)
+
+
+@outputs_app.command("summary")
+def outputs_summary(
+    project: str | None = typer.Option(None, "--project", help="Filter by project slug"),
+    since: str | None = typer.Option(None, "--since", help="Time filter (e.g. 30d, 7d, 1d)"),
+):
+    """Display summary of output files across runs."""
+    import json
+    import duckdb
+
+    catalog = _catalog_dir()
+    db_path = catalog / "bathos.db"
+
+    if not db_path.exists():
+        typer.echo("[yellow]Catalog not yet compacted.[/yellow]")
+        typer.echo("[dim]Run 'bth compact' to aggregate output metadata into the warm tier.[/dim]")
+        return
+
+    # Query warm tier
+    con = duckdb.connect(str(db_path))
+    con.execute("SET TimeZone='UTC'")
+
+    # Build query
+    query = "SELECT project_slug, id, output_metadata FROM runs WHERE output_metadata IS NOT NULL AND output_metadata != '[]'"
+    params = []
+
+    # Add project filter
+    if project:
+        query += " AND project_slug = ?"
+        params.append(project)
+
+    # Add time filter
+    if since:
+        import re as regex_mod
+        match = regex_mod.match(r"(\d+)([dhm])", since)
+        if match:
+            num, unit = match.groups()
+            num = int(num)
+            if unit == "d":
+                hours = num * 24
+            elif unit == "h":
+                hours = num
+            elif unit == "m":
+                hours = num / 60
+            else:
+                hours = num * 24  # default to days
+            
+            query += " AND timestamp > now() - interval '" + str(int(hours)) + " hour'"
+
+    rows = con.execute(query, params).fetchall()
+    con.close()
+
+    if not rows:
+        from bathos.rich_fmt import render_outputs_summary
+        render_outputs_summary([], since=since)
+        return
+
+    # Aggregate by project
+    aggregated = {}
+    for project_slug, run_id, output_metadata_json in rows:
+        try:
+            files = json.loads(output_metadata_json) if output_metadata_json else []
+            if project_slug not in aggregated:
+                aggregated[project_slug] = {
+                    "project": project_slug,
+                    "run_count": 0,
+                    "file_count": 0,
+                    "total_bytes": 0,
+                    "missing_count": 0,
+                }
+            agg = aggregated[project_slug]
+            agg["run_count"] += 1
+            agg["file_count"] += len(files)
+            agg["total_bytes"] += sum(f.get("size_bytes", 0) for f in files)
+            agg["missing_count"] += sum(1 for f in files if f.get("status") == "missing")
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    from bathos.rich_fmt import render_outputs_summary
+    render_outputs_summary(list(aggregated.values()), since=since)
