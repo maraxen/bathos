@@ -149,11 +149,18 @@ def _migrate_v4(run_dict: dict) -> dict:
     return run_dict
 
 
+def _migrate_v5(run_dict: dict) -> dict:
+    """Migrate v5 fragment to v6 — no new run-level fields; version stamp only."""
+    run_dict["schema_version"] = "6"
+    return run_dict
+
+
 MIGRATIONS["0"] = _migrate_v0
 MIGRATIONS["1"] = _migrate_v1
 MIGRATIONS["2"] = _migrate_v2
 MIGRATIONS["3"] = _migrate_v3
 MIGRATIONS["4"] = _migrate_v4
+MIGRATIONS["5"] = _migrate_v5
 
 
 _RUNS_TABLE_SCHEMA = """
@@ -215,7 +222,8 @@ CREATE TABLE IF NOT EXISTS campaigns (
     concluded_at TEXT,
     conclusion TEXT,
     outcome_label TEXT,
-    parent_campaign_id TEXT
+    parent_campaign_id TEXT,
+    stopping_threshold REAL
 )
 """
 
@@ -223,6 +231,8 @@ _CAMPAIGN_RUNS_TABLE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS campaign_runs (
     campaign_id TEXT NOT NULL,
     run_id TEXT NOT NULL,
+    evalue REAL CHECK (evalue IS NULL OR evalue > 0),
+    seq_position INTEGER,
     PRIMARY KEY (campaign_id, run_id)
 )
 """
@@ -404,6 +414,21 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
     con.execute(_CAMPAIGNS_TABLE_SCHEMA)
     con.execute(_CAMPAIGN_RUNS_TABLE_SCHEMA)
     con.execute(_AMENDMENTS_TABLE_SCHEMA)
+
+    # Idempotent column additions for POPPER (handles existing warm DBs)
+    for _alter_sql in [
+        "ALTER TABLE campaign_runs ADD COLUMN IF NOT EXISTS evalue REAL",
+        "ALTER TABLE campaign_runs ADD COLUMN IF NOT EXISTS seq_position INTEGER",
+        "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS stopping_threshold REAL",
+    ]:
+        try:
+            con.execute(_alter_sql)
+        except Exception:
+            pass
+
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_campaigns_mode_status ON campaigns (mode, status)"
+    )
 
     # Track ingested and skipped counts
     ingested = 0

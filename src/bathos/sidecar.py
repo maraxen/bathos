@@ -159,6 +159,50 @@ def _parse_outcomes(data: dict) -> dict[str, OutcomeSpec]:
     }
 
 
+def compute_evalue(
+    sidecar: Sidecar,
+    outcome_label: str,
+    pass_labels: set[str] | None = None,
+) -> float:
+    """Compute the likelihood-ratio e-value for a single run outcome.
+
+    Returns 1.0 (neutral) if the sidecar has no [popper] block.
+    Error and unknown outcomes always return 1.0 (non-overridable).
+    """
+    if sidecar.popper_null_pass_rate is None:
+        return 1.0
+
+    if outcome_label in ("error", "unknown"):
+        return 1.0
+
+    # Explicit weight override takes priority
+    if outcome_label in sidecar.popper_weights:
+        return float(sidecar.popper_weights[outcome_label])
+
+    null = sidecar.popper_null_pass_rate
+    alt = sidecar.popper_alt_pass_rate
+
+    # Marginal: hard default 1.0
+    if outcome_label == "marginal":
+        return 1.0
+
+    # Determine pass-direction labels if not provided
+    if pass_labels is None:
+        pass_labels = {
+            label
+            for label, spec in sidecar.outcomes.items()
+            if not spec.is_residual and label not in ("marginal", "error", "unknown")
+        }
+
+    if outcome_label in pass_labels:
+        evalue = alt / null
+    else:
+        evalue = (1.0 - alt) / (1.0 - null)
+
+    assert evalue > 0, f"compute_evalue produced non-positive value {evalue} for outcome '{outcome_label}'"
+    return evalue
+
+
 def find_sidecar(script_path: Path) -> Path | None:
     """Return the .bth.toml adjacent to script_path, or None if absent."""
     candidate = script_path.parent / f"{script_path.stem}.bth.toml"
