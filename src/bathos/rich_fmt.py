@@ -255,3 +255,67 @@ def _format_duration(duration_s: float) -> str:
         minutes = int(duration_s // 60)
         seconds = int(duration_s % 60)
         return f"{minutes}m {seconds}s"
+
+
+def render_popper_summary(popper_data: dict | None, console: Console | None = None) -> None:
+    """Render POPPER sequential test summary table.
+
+    Prints nothing if popper_data is None (non-sequential campaign).
+
+    Args:
+        popper_data: Dictionary with keys 'mode', 'stopping_threshold', 'threshold_met', 'scripts'
+        console: Rich Console instance. If None, creates a default Console.
+    """
+    if popper_data is None:
+        return
+
+    if console is None:
+        console = Console()
+
+    threshold = popper_data.get("stopping_threshold")
+    scripts = popper_data.get("scripts", [])
+    overall_met = popper_data.get("threshold_met", False)
+
+    alpha_str = f"≈ {1.0/threshold:.3f}" if threshold and threshold > 0 else "?"
+
+    table = Table(title="POPPER Sequential Test", show_header=True, header_style="bold cyan")
+    table.add_column("script_key", style="dim", no_wrap=True, max_width=20)
+    table.add_column("n_eff", justify="right")
+    table.add_column("n_excl", justify="right")
+    table.add_column("E_n", justify="right")
+    table.add_column("threshold_met", justify="center")
+
+    for s in scripts:
+        ep = s.get("evalue_product", 1.0)
+        met = s.get("threshold_met", False)
+        met_text = Text("YES", style="bold green") if met else Text("NO", style="bold red")
+        key = str(s.get("script_key", ""))
+        key_display = key[:18] + ".." if len(key) > 20 else key
+        table.add_row(
+            key_display,
+            str(s.get("n_effective", 0)),
+            str(s.get("n_excluded", 0)),
+            f"{ep:.2f}" if ep is not None else "—",
+            met_text,
+        )
+
+    console.print(table)
+
+    if threshold is not None:
+        console.print(f"  Stopping threshold : {threshold:.1f}  (alpha {alpha_str})")
+        console.print(f"  Scripts in campaign: {len(scripts)}")
+
+    if overall_met:
+        console.print(
+            Text("  Campaign conclusion: THRESHOLD REACHED — eligible to conclude", style="bold green")
+        )
+    elif scripts:
+        below = sum(1 for s in scripts if not s.get("threshold_met", False))
+        console.print(
+            Text(
+                f"  Campaign conclusion: NOT YET REACHED ({below} of {len(scripts)} script(s) below threshold)",
+                style="yellow",
+            )
+        )
+    else:
+        console.print(Text("  Campaign conclusion: NO RUNS YET", style="dim"))
