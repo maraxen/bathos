@@ -57,10 +57,11 @@ wheels = [
 
 [[package]]
 name = "bathos"
-version = "0.4.1"
+version = "0.7.0"
 source = { editable = "." }
 dependencies = [
     { name = "duckdb" },
+    { name = "fastmcp" },
     { name = "pyarrow" },
     { name = "pytz" },
     { name = "rich" },
@@ -76,9 +77,6 @@ dev = [
     { name = "pytest-json-report" },
     { name = "pytest-tmp-files" },
     { name = "ruff" },
-]
-mcp = [
-    { name = "fastmcp" },
 ]
 viz = [
     { name = "fastapi" },
@@ -100,7 +98,7 @@ dev = [
 requires-dist = [
     { name = "duckdb", specifier = ">=1.0" },
     { name = "fastapi", marker = "extra == 'viz'", specifier = ">=0.110" },
-    { name = "fastmcp", marker = "extra == 'mcp'", specifier = ">=2.0,<3.0" },
+    { name = "fastmcp", specifier = ">=2.0,<3.0" },
     { name = "httpx", marker = "extra == 'viz'", specifier = ">=0.28.1" },
     { name = "jinja2", marker = "extra == 'viz'", specifier = ">=3.1" },
     { name = "pyarrow", specifier = ">=16" },
@@ -116,7 +114,7 @@ requires-dist = [
     { name = "typer", specifier = ">=0.12" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'viz'", specifier = ">=0.27" },
 ]
-provides-extras = ["mcp", "viz", "dev"]
+provides-extras = ["viz", "dev"]
 
 [package.metadata.requires-dev]
 dev = [
