@@ -10,37 +10,17 @@ bathos is a standalone experiment tracking CLI for a single researcher across 10
 
 ---
 
-## Current Status (as of 2026-06-01)
+## Current Status (as of 2026-06-02)
 
-**v0.6.1 (audit fixes): complete.** 458 tests passing. Two post-audit WARNING fixes: `validate.py` all-nested `result_schema` guard (empty `cols` falls through to expression-only DuckDB path); `sprint_audit.py` `_load_sidecar_schema_keys` returns `None` on parse failure and excludes those runs from the `schema_overflow_rate` denominator. GateErrorCode taxonomy: 5 dead codes annotated `# reserved`; `ADVERSARIAL_CHECK_MISSING` returns `GateResult` instead of raising; adversarial enforcement broadened to all non-residual outcomes. ADR: `.praxia/docs/decisions/260601_sprint-audit-threshold-rationale.md`.
+**v0.7 (backup/recovery hardening): complete.** 498 tests passing. `fastmcp` promoted to main dependency.
 
-**Cluster submission integration (Phase 2, 2026-06-01): complete.** 440 tests passing. New `bth submit` command submits jobs to SLURM cluster via myxcel (supports `--push-first`, `--wait`, `--then-pull`, `--then-sync`); schema extended with `slurm_array_task_id` field for SLURM array task tracking; `src/bathos/cluster.py` (new module) contains `ClusterConfig`, `resolve_cluster_config()`, and subprocess wrappers for myxcel CLI.
+**Shipped in v0.7:** `compact` wraps ingest in BEGIN/COMMIT/ROLLBACK transaction + PRAGMA integrity_check on every DuckDB connection open; `compact` `force_rebuild` parameter; `migrate` writes `.bak` backup of cool fragments before in-place rewrite; `archive` SHA256 checksums per file in `manifest.json`; new `bth verify` command (`--tier cool/warm/archive/all`); `sync` post-rsync truncation detection via `--itemize-changes`.
 
-**v0.6 (agentic science evolution): complete.** 425 tests passing.
+**v0.6 / v0.6.1:** Agentic science evolution — exception-swallowing remediation, pre-execution manifest (`.bth.lock.toml`, schema v5), `outcome="error"` first-class, `GateErrorCode`/`GateErrorPayload` (11 codes), `adversarial_check` field + Tier-2 lint, `bth cite`, `bth lineage --format prov` (W3C PROV-JSON 1.0), sprint-audit 7-signal extension, cluster submission integration (`bth submit` via myxcel, `slurm_array_task_id` field). ADRs: `.praxia/docs/decisions/260526_*.md`, `.praxia/docs/decisions/260601_sprint-audit-threshold-rationale.md`.
 
-**Shipped in v0.6 (bathos):** Exception-swallowing remediation (10 sites — `sidecar.py`, `prereg.py`, `compact.py`, `runner.py`, `config.py`, `mcp.py`, `query.py`); pre-execution manifest (`.bth.lock.toml` written before subprocess, schema v5 `manifest_sha256`/`manifest_path`); `outcome="error"` first-class with `outcome_error_reason`; `GateErrorCode` enum + `GateErrorPayload` dataclass (11 codes, `phase` field, `resolution_hint`); `adversarial_check` field on `OutcomeSpec` + Tier-2 lint check + agent-mode enforcement; `bth cite <run_id>` + `mcp__bathos__cite_run`; `bth lineage --format prov` (W3C PROV-JSON 1.0) + `mcp__bathos__lineage_prov`; sprint-audit 7-signal extension (`error_rate`, `bypass_explicit`, `bypass_in_agent_mode`, `outcome_entropy`, `unfired_branches`, `schema_overflow_rate`, `post_hoc_bias_flag`); schema v5 migration (`_migrate_v4()`). Design spec: `.praxia/docs/specs/260526_agentic-science-v06-evolution-spec.md`. ADRs: `.praxia/docs/decisions/260526_*.md`.
+**v0.1–v0.5:** Core schema + catalog (v0.1); FastMCP, `@bth.experiment`, `bth lint/migrate/sync/archive` (v0.2); agentic integrity gate, campaigns, sprint audit (v0.3); per-project sync filtering, cool-tier layout, postmortem tracking (v0.4–v0.4.1); telemetry, Rich formatters, `bth view`, `bth export --html`, `bathos[viz]` (v0.5).
 
-**Shipped in v0.6 (praxia Rust):** `GateErrorCode`/`GateErrorPayload`/`GatePhase` in `praxia-types`; loop step budget + consecutive-tool detection in `praxia-fsm` (108 tests). NLM PostToolUse hook script at `scripts/posttool-nlm.sh` — requires manual `.claude/settings.json` wiring. Sprint-composer locate finding: `crates/praxia-pcw/src/sprint_composer.rs:124` — gate wiring (11b–11d) deferred to v0.6.1.
-
-**v0.5 complete and merged to main.** 368 tests passing.
-
-**Shipped in v0.5:** Structured JSONL telemetry (`telemetry.py`, 9 event surfaces, SLURM-safe per-process files); Rich CLI formatters (`bth ls`, `bth show`, `bth campaign ls/review`); `bth view` local FastAPI dashboard; `bth export --html` static report; `bathos[viz]` optional extra (`src/bathos/viz/`). Design specs: `.praxia/docs/specs/260527_telemetry-design.md` · `docs/superpowers/specs/2026-05-21-viz-suite-design.md`.
-
-**v0.4.1: complete and merged to main.** 348 tests passing.
-
-- Full design spec: `.praxia/specs/bathos-design.md`
-- v0.1 implementation plan: `.praxia/specs/bathos-v01-plan.md`
-- Backlog: items #124–142 in praxia DB (see below); #124–141 done
-
-**Shipped in v0.2:** FastMCP server (#128), `@bth.experiment` decorator (#129), `bth check` (#130), SLURM `_bth_env.sh` (#131), `bth new-experiment` (#132), `uv tool` packaging (#133), `bth lint` (#134), `bth migrate` (#135), `bth sync` (#138), schema versioning v2 (#140), `bth archive` (#141), `bth remote` subcommands, `bth export`, `bth catalog-version`.
-
-**Shipped in v0.3:** Agentic integrity gate (`--agent-mode`, `--no-sidecar`, `--derived-from`), lineage tracking (`bth lineage`), campaigns (`bth campaign` subcommands + MCP tools), sprint audit (`bth sprint-audit`), Tier-2 lint checks, schema v3 with campaign/lineage/integrity fields, `--campaign` flag on `bth run`.
-
-**Shipped in v0.4:** Per-project sync filtering — `bth sync` now pushes/pulls only the current project's runs (no cross-project contamination). Cool-tier layout changed to `runs/<slug>/run_<uuid>.parquet`. New command `bth migrate-to-project-subdirs` migrates flat catalogs. `sync_filter` config knob; `--no-project-filter` opt-out planned.
-
-**Shipped in v0.4.1:** Postmortem tracking — `*.bth.postmortem.toml` format, `bth postmortem validate` CLI command, `postmortem_scaffold`/`postmortem_validate`/`postmortem_get` MCP tools. Schema v4 with 10 new DuckDB columns; `compact` syncs postmortem metadata. Validation covers refutation consistency, asset path containment, sha256 checksums, and git drift detection. `script_sha256` computed in `runner.py` at experiment launch.
-
-**Remaining backlog:** #136 (bth-migrate praxia workflow), #137 (global instruction portability), #142 (results management design).
+**Open backlog:** #136 (bth-migrate praxia workflow), #137 (global instruction portability), #142 (results management design), #143 (threshold epistemic hygiene).
 
 ---
 
@@ -167,9 +147,15 @@ src/bathos/
   remote.py       # bth remote subcommands
   sync.py         # bth sync rsync wrapper
   archive.py      # bth archive warm→cold export
-  prereg.py       # agentic integrity pre-registration gate
+  cite.py         # bth cite — run citation generation
+  cluster.py      # bth submit — ClusterConfig, resolve_cluster_config(), myxcel wrappers
   decorators.py   # @bth.experiment provenance decorator
+  postmortem.py   # bth postmortem — *.bth.postmortem.toml validation + MCP tools
+  prereg.py       # agentic integrity pre-registration gate
+  provenance.py   # W3C PROV-JSON lineage serialization
   rich_fmt.py     # Rich CLI formatters (base dep) — render_runs_table, render_run_detail, render_campaign_table, render_campaign_review
+  telemetry.py    # structured JSONL telemetry (9 event surfaces, SLURM-safe per-process files)
+  verify.py       # bth verify — catalog integrity checks (--tier cool/warm/archive/all)
   viz/            # Optional extra: bathos[viz]
     __init__.py
     data.py       # RunDisplay/CampaignDisplay TypedDicts; project_run(), project_campaign()
@@ -194,33 +180,14 @@ src/bathos/
 
 ---
 
-## Backlog (praxia DB)
+## Open Backlog (praxia DB)
 
 | ID | Title | Priority | Depends on |
 |---|---|---|---|
-| 124 | Core schema + DuckDB catalog init | P1 | — |
-| 125 | `bth init` — dirs, .bth.toml, catalog bootstrap, SLURM config | P1 | 124 |
-| 126 | `bth run` — CLI wrapper, provenance capture | P1 | 124 |
-| 127 | `bth ls` / `show` / `find` / `sql` — query interface | P1 | 126 |
-| 128 | FastMCP server — mirrors CLI tool-for-tool | P1 ✓ done (v0.2) | 126, 127, 130 |
-| 129 | `@bth.experiment` — provenance decorator for Typer scripts | P2 ✓ done (v0.2) | 124 |
-| 130 | `bth check` — freshness/validity vs git HEAD | P2 ✓ done (v0.1/v0.2) | 126 |
-| 131 | SLURM `_bth_env.sh` integration | P2 ✓ done (v0.1) | 125, 126 |
-| 132 | `bth new-experiment` — Typer + sidecar scaffold | P2 ✓ done (v0.2) | 125 |
-| 133 | `uv tool` packaging + release | P3 ✓ done (v0.2) | 126–130 |
-| 134 | Script convention linter | P3 ✓ done (v0.2) | — |
-| 135 | `bth migrate` — Phase 1 mechanical (existing projects) | P2 ✓ done (v0.2) | 125 |
-| 136 | `bth-migrate` praxia workflow — agentic classification + git mv plan | P2 (not started) | 135 |
-| 137 | Global instruction portability (separate design session needed) | P2 (not started) | — |
-| 138 | `bth sync` — rsync cool-tier catalog to/from cluster remote | P2 ✓ done (v0.2) | 125, v0.1 done |
-| 139 | `bth compact` + warm-tier DuckDB (`bth sql` catalog queries) | P2 ✓ done (v0.1) | v0.1 done |
-| 140 | Schema versioning + extended provenance (hostname, slurm_job_id, metadata JSON, migrations) | P2 ✓ done (v0.2) | 139 |
-| 141 | `bth archive` — warm→cold partitioned Parquet export | P3 ✓ done (v0.2) | 139, 140 |
-| 142 | Results management — output convention, file-count utilities, direct management interface design | P2 (not started) | 139 |
-| 143 | Threshold epistemic hygiene — sidecar lint + skill instructions to flag unjustified cutoffs | P2 (not started) | 134 |
-
-**Not yet backlogged:**
-- *(none — sidecar enforcement and outcome evaluation shipped in v0.2/v0.3)*
+| 136 | `bth-migrate` praxia workflow — agentic classification + git mv plan | P2 | 135 |
+| 137 | Global instruction portability (separate design session needed) | P2 | — |
+| 142 | Results management — output convention, file-count utilities, direct management interface design | P2 | 139 |
+| 143 | Threshold epistemic hygiene — sidecar lint + skill instructions to flag unjustified cutoffs | P2 | 134 |
 
 ---
 
@@ -247,4 +214,4 @@ src/bathos/
 - `BTH_PROJECT_SLUG` env var overrides `.bth.toml` lookup (used in SLURM jobs)
 - Outcome conditions are DuckDB SQL; validate they parse at `bth run` start before job runs
 - Content-hash sidecars at run time: store parsed declaration in run record or `declarations` table keyed by SHA256
-- `bth run` on a script in `scripts/experiments/` without a sidecar: warn but don't block in v0.1; enforce in v0.2
+- `bth run` on a script in `scripts/experiments/` without a sidecar: enforced by default; pass `--no-sidecar` to bypass
