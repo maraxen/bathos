@@ -30,7 +30,7 @@ dependencies = [
     "tomlkit>=0.12",
     "toml>=0.10",
     "rich>=13",
-    "fastmcp>=2.0,<3.0",
+    "fastmcp>=3.3.1",
 ]
 
 [project.optional-dependencies]
