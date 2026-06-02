@@ -296,6 +296,27 @@ def sprint_audit(hours: int = 24) -> dict:
                 if early_worst_count > 0.1 * len(all_outcomes):
                     signals["post_hoc_bias_flag"] = True
 
+            # Signal 8: premature_stopping_rate
+            # Fraction of concluded sequential campaigns where final E_n < stopping_threshold.
+            # Domain rationale: POPPER (arXiv 2502.09858) — sequential stopping below pre-specified
+            # threshold invalidates the anytime-valid guarantee.
+            # Calibration-target warning, consistent with threshold ADR
+            # (260601_sprint-audit-threshold-rationale.md).
+            n_sequential_concluded = 0
+            n_premature = 0
+            try:
+                seq_rows = db.execute(
+                    "SELECT id, stopping_threshold FROM campaigns WHERE mode='sequential' AND status='concluded' AND stopping_threshold IS NOT NULL"
+                ).fetchall()
+                n_sequential_concluded = len(seq_rows)
+                from bathos.campaigns import _campaign_threshold_met
+                for camp_id, camp_threshold in seq_rows:
+                    if not _campaign_threshold_met(db, camp_id, camp_threshold):
+                        n_premature += 1
+            except Exception:
+                pass
+            signals["premature_stopping_rate"] = n_premature / max(n_sequential_concluded, 1) if n_sequential_concluded > 0 else 0.0
+
             # Check signal thresholds and add anomalies.
             # All thresholds are CALIBRATION TARGETS (v0.6), not hard gates.
             # See ADR .praxia/docs/decisions/260601_sprint-audit-threshold-rationale.md

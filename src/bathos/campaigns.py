@@ -216,7 +216,7 @@ def list_campaigns(db, project_slug: str | None = None, status: str | None = Non
 
 
 def review_campaign(db, campaign_id: str) -> dict:
-    """Generate campaign review: residual rate, bypass rate, outcome distribution, anomalies."""
+    """Generate campaign review: residual rate, bypass rate, outcome distribution, anomalies, and POPPER summary."""
     rows = db.execute("""
         SELECT r.id, r.sidecar_mode, r.outcome, r.outcome_is_residual
         FROM campaign_runs cr
@@ -247,6 +247,51 @@ def review_campaign(db, campaign_id: str) -> dict:
     if unknown_count > 0:
         anomalies.append(f"{unknown_count} runs with unknown outcome")
 
+    # POPPER sequential test summary
+    popper_data = None
+    campaign_meta = db.execute(
+        "SELECT mode, stopping_threshold FROM campaigns WHERE id = ?",
+        [campaign_id]
+    ).fetchone()
+    if campaign_meta and campaign_meta[0] == "sequential":
+        stopping_threshold = campaign_meta[1]
+        script_rows = db.execute("""
+            SELECT
+                COALESCE(NULLIF(r.script_sha256, ''), r.sidecar_path, '_ungrouped') AS script_key,
+                COUNT(*) FILTER (WHERE r.outcome != 'error' AND r.outcome != 'unknown') AS n_effective,
+                COUNT(*) FILTER (WHERE r.outcome = 'error' OR r.outcome = 'unknown') AS n_excluded,
+                EXP(SUM(LN(cr.evalue)) FILTER (WHERE r.outcome != 'error' AND r.outcome != 'unknown')) AS evalue_product
+            FROM campaign_runs cr
+            INNER JOIN runs r ON cr.run_id = r.id
+            WHERE cr.campaign_id = ? AND cr.evalue IS NOT NULL
+            GROUP BY script_key
+            ORDER BY script_key
+        """, [campaign_id]).fetchall()
+
+        scripts = []
+        for sr in script_rows:
+            ep = sr[3] if sr[3] is not None else 1.0
+            met = (stopping_threshold is not None and ep >= stopping_threshold)
+            scripts.append({
+                "script_key": sr[0],
+                "n_effective": sr[1],
+                "n_excluded": sr[2],
+                "evalue_product": ep,
+                "threshold_met": met,
+            })
+
+        threshold_met = (
+            len(scripts) > 0
+            and stopping_threshold is not None
+            and all(s["threshold_met"] for s in scripts)
+        )
+        popper_data = {
+            "mode": "sequential",
+            "stopping_threshold": stopping_threshold,
+            "threshold_met": threshold_met,
+            "scripts": scripts,
+        }
+
     return {
         "total_runs": total,
         "residual_rate": residual_rate,
@@ -254,4 +299,5 @@ def review_campaign(db, campaign_id: str) -> dict:
         "unknown_rate": unknown_rate,
         "outcome_distribution": outcome_dist,
         "anomalies": anomalies,
+        "popper": popper_data,
     }
