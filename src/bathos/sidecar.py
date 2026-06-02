@@ -29,6 +29,7 @@ class OutcomeSpec:
     reasoning: str = ""
     is_residual: bool = False
     adversarial_check: str | None = None
+    source: str = ""
 
 
 @dataclass
@@ -42,6 +43,7 @@ class Sidecar:
     baseline_ref: str = ""
     metric: str = ""
     regression_threshold: float = 0.0
+    regression_threshold_basis: str = ""
     target: str = ""
     # validation fields
     property: str = ""
@@ -85,6 +87,7 @@ def parse_sidecar(path: Path) -> Sidecar:
             baseline_ref=section.get("baseline_ref", ""),
             metric=section.get("metric", ""),
             regression_threshold=section.get("regression_threshold", 0.0),
+            regression_threshold_basis=section.get("regression_threshold_basis", ""),
             target=section.get("target", ""),
             result_schema=data.get("result_schema", {}),
             agent_mode=section.get("agent_mode", ""),
@@ -137,6 +140,7 @@ def _parse_outcomes(data: dict) -> dict[str, OutcomeSpec]:
             reasoning=spec.get("reasoning", ""),
             is_residual=bool(spec.get("is_residual", False)),
             adversarial_check=spec.get("adversarial_check"),
+            source=spec.get("source", ""),
         )
         for label, spec in outcomes_data.items()
     }

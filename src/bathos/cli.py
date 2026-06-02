@@ -935,6 +935,7 @@ def lint(
         check_adversarial_checks,
         check_bypass_trend,
         check_residual_rates,
+        check_threshold_basis,
         check_unfired_branches,
         lint_project,
     )
@@ -943,6 +944,7 @@ def lint(
 
     # Add Tier-2 file-based checks
     issues.extend(check_adversarial_checks(project_root.resolve()))
+    issues.extend(check_threshold_basis(project_root.resolve()))
 
     # Add warm-catalog Tier-2 checks if catalog exists
     catalog_dir = _catalog_dir()

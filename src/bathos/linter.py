@@ -29,6 +29,7 @@ class LintIssue:
 _VERB_NOUN_RE = re.compile(r"^[a-z][a-z0-9]*_[a-z][a-z0-9_]*$")
 _YYMMDD_RE = re.compile(r"^\d{6}_[a-z][a-z0-9_]*$")
 _SLURM_VERB_NOUN_RE = re.compile(r"^[a-z][a-z0-9]*_[a-z][a-z0-9_]*$")
+_NUMERIC_LITERAL_RE = re.compile(r"(?<![a-zA-Z_])\b-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b")
 
 
 _DIR_RULES: dict[str, dict] = {
@@ -374,6 +375,75 @@ def check_adversarial_checks(project_root: Path) -> list[LintIssue]:
                         f"outcomes.{label} missing adversarial_check — "
                         "add a condition designed to falsify the hypothesis "
                         "(syntactic proxy only; verify it actually strengthens the claim)"
+                    ),
+                ))
+
+    return issues
+
+
+def check_threshold_basis(project_root: Path) -> list[LintIssue]:
+    """Tier-2: Warn when numeric thresholds lack justification.
+
+    Scans all .bth.toml files in the project. For each numeric literal found in:
+    - outcome.condition (experiment, validation, debug sidecars)
+    - benchmark.regression_threshold (if set and non-zero)
+
+    Returns WARNING if numeric found AND corresponding justification field is empty.
+
+    Consistent with check_adversarial_checks — no worktree/venv exclusion.
+
+    Args:
+        project_root: Root directory of the project.
+
+    Returns:
+        List of LintIssue objects with severity WARNING.
+    """
+    issues: list[LintIssue] = []
+
+    # Find all .bth.toml files in the project
+    for sidecar_path in project_root.rglob("*.bth.toml"):
+        try:
+            with open(sidecar_path, "rb") as f:
+                data = tomllib.load(f)
+        except Exception:
+            # Skip files that can't be parsed (consistent with check_adversarial_checks)
+            continue
+
+        # Check outcome conditions for numeric literals
+        outcomes = data.get("outcomes", {})
+        for label, outcome in outcomes.items():
+            condition = outcome.get("condition", "")
+            source = outcome.get("source", "")
+
+            # Check if condition contains numeric literal
+            if condition and _NUMERIC_LITERAL_RE.search(condition) and not source:
+                issues.append(LintIssue(
+                    path=sidecar_path,
+                    directory="sidecar",
+                    issue="unjustified_threshold",
+                    severity=IssueSeverity.WARNING,
+                    detail=(
+                        f"outcomes.{label}.condition contains numeric literal without justification — "
+                        "add source = 'explanation' field to document the threshold basis"
+                    ),
+                ))
+
+        # Check benchmark regression_threshold
+        benchmark = data.get("benchmark", {})
+        if benchmark:
+            regression_threshold = benchmark.get("regression_threshold", 0.0)
+            regression_threshold_basis = benchmark.get("regression_threshold_basis", "")
+
+            # Warn if threshold is set (non-zero) but has no basis
+            if regression_threshold > 0 and not regression_threshold_basis:
+                issues.append(LintIssue(
+                    path=sidecar_path,
+                    directory="sidecar",
+                    issue="unjustified_threshold",
+                    severity=IssueSeverity.WARNING,
+                    detail=(
+                        f"[benchmark] regression_threshold = {regression_threshold} "
+                        "without justification — add regression_threshold_basis field to document the threshold basis"
                     ),
                 ))
 

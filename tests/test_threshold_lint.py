@@ -1,8 +1,7 @@
 """Tests for Tier-2 threshold epistemic hygiene lint check (#760).
 
-All tests are marked xfail(strict=True) because check_threshold_basis does not
-exist yet in linter.py.  Once the implementation is merged the xfail markers
-must be removed and all tests should pass.
+Tests validate that check_threshold_basis warns when numeric thresholds lack
+documented justification via source (outcomes) or regression_threshold_basis (benchmarks).
 """
 
 import pytest
@@ -22,7 +21,6 @@ def _make_sidecar_toml(path: Path, content: str) -> Path:
 # TC-1: Bare numeric literal in condition, no source → WARNING
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="check_threshold_basis not yet implemented (#760)")
 def test_check_threshold_basis_bare_numeric_warns(tmp_path):
     from bathos.linter import check_threshold_basis, IssueSeverity
 
@@ -56,7 +54,6 @@ temp_std = "float"
 # TC-2: Numeric literal in condition WITH source → no warning
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="check_threshold_basis not yet implemented (#760)")
 def test_check_threshold_basis_source_suppresses_warning(tmp_path):
     from bathos.linter import check_threshold_basis
 
@@ -88,13 +85,80 @@ temp_std = "float"
 
 
 # ---------------------------------------------------------------------------
-# TC-3: adversarial_check has numeric literal, no source → WARNING
+# TC-2b: 1=1 residual pattern fires; must suppress with source or use "true"
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="check_threshold_basis not yet implemented (#760)")
-def test_check_threshold_basis_adversarial_check_numeric_warns(tmp_path):
-    """adversarial_check strings contain numerics; the condition on the same
-    outcome block also has a numeric literal and no source — warning must fire."""
+def test_check_threshold_basis_one_equals_one_residual_warns(tmp_path):
+    """Test accept-by-design: condition = '1=1' is a catch-all residual pattern.
+    The regex intentionally matches the '1' in '1=1'. Users must either use
+    condition = 'true' (scaffold default) or add source = 'trivial residual'."""
+    from bathos.linter import check_threshold_basis, IssueSeverity
+
+    toml_content = """
+[experiment]
+hypothesis = "test 1=1 pattern"
+
+[outcomes.pass]
+condition = "success = true"
+decision = "proceed"
+reasoning = "succeeded"
+is_residual = false
+
+[outcomes.fail]
+condition = "1=1"
+decision = "fallback"
+reasoning = "catch-all"
+is_residual = true
+
+[result_schema]
+success = "bool"
+"""
+    _make_sidecar_toml(tmp_path / "run_catchall.bth.toml", toml_content)
+    issues = check_threshold_basis(tmp_path)
+    threshold_issues = [i for i in issues if i.issue == "unjustified_threshold"]
+    # Should warn because '1' matches numeric literal regex
+    assert len(threshold_issues) >= 1
+    assert all(i.severity == IssueSeverity.WARNING for i in threshold_issues)
+
+
+def test_check_threshold_basis_one_equals_one_with_source_suppressed(tmp_path):
+    """Users can suppress '1=1' warning by adding source field."""
+    from bathos.linter import check_threshold_basis
+
+    toml_content = """
+[experiment]
+hypothesis = "test 1=1 pattern with source"
+
+[outcomes.pass]
+condition = "success = true"
+decision = "proceed"
+reasoning = "succeeded"
+is_residual = false
+
+[outcomes.fail]
+condition = "1=1"
+decision = "fallback"
+reasoning = "catch-all"
+source = "trivial residual"
+is_residual = true
+
+[result_schema]
+success = "bool"
+"""
+    _make_sidecar_toml(tmp_path / "run_catchall.bth.toml", toml_content)
+    issues = check_threshold_basis(tmp_path)
+    threshold_issues = [i for i in issues if i.issue == "unjustified_threshold"]
+    assert threshold_issues == []
+
+
+# ---------------------------------------------------------------------------
+# TC-3: numeric in condition fires regardless of adversarial_check field
+# ---------------------------------------------------------------------------
+
+def test_numeric_in_condition_warns_regardless_of_adversarial_check_field(tmp_path):
+    """Test that the condition field is scanned for numeric literals even when
+    adversarial_check is present. The numeric literal in condition (0.90) should
+    trigger a warning because there is no source field."""
     from bathos.linter import check_threshold_basis, IssueSeverity
 
     toml_content = """
@@ -129,7 +193,6 @@ accuracy = "float"
 # TC-4a: Non-numeric condition (boolean) → no warning
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="check_threshold_basis not yet implemented (#760)")
 def test_check_threshold_basis_boolean_condition_no_warning(tmp_path):
     from bathos.linter import check_threshold_basis
 
@@ -162,7 +225,6 @@ reproduced = "bool"
 # TC-4b: Non-numeric condition (NULL check) → no warning
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="check_threshold_basis not yet implemented (#760)")
 def test_check_threshold_basis_null_check_no_warning(tmp_path):
     from bathos.linter import check_threshold_basis
 
@@ -195,7 +257,6 @@ output_path = "str"
 # TC-5: Benchmark regression_threshold without basis → WARNING
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="check_threshold_basis not yet implemented (#760)")
 def test_check_threshold_basis_benchmark_threshold_warns(tmp_path):
     from bathos.linter import check_threshold_basis, IssueSeverity
 
@@ -221,7 +282,6 @@ ns_per_day = "float"
 # TC-6: Benchmark regression_threshold WITH basis → no warning
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="check_threshold_basis not yet implemented (#760)")
 def test_check_threshold_basis_benchmark_with_basis_suppresses_warning(tmp_path):
     from bathos.linter import check_threshold_basis
 
@@ -246,7 +306,6 @@ ns_per_day = "float"
 # TC-7: Benchmark regression_threshold = 0.0 (default/unset) → no warning
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="check_threshold_basis not yet implemented (#760)")
 def test_check_threshold_basis_benchmark_zero_threshold_no_warning(tmp_path):
     """regression_threshold = 0.0 is the dataclass default and means 'not set'.
     It must not trigger a warning even without regression_threshold_basis."""
@@ -272,7 +331,6 @@ ns_per_day = "float"
 # TC-8: Unparseable TOML → silent skip, no crash
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="check_threshold_basis not yet implemented (#760)")
 def test_check_threshold_basis_invalid_toml_skips(tmp_path):
     from bathos.linter import check_threshold_basis
 
@@ -287,7 +345,6 @@ def test_check_threshold_basis_invalid_toml_skips(tmp_path):
 # TC-9: Multiple sidecars, mixed — only bare-numeric ones produce warnings
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="check_threshold_basis not yet implemented (#760)")
 def test_check_threshold_basis_multiple_sidecars_mixed(tmp_path):
     from bathos.linter import check_threshold_basis
 
@@ -341,7 +398,6 @@ accuracy = "float"
 # TC-10: Integer literal fires (count > 0 intentional per spec)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="check_threshold_basis not yet implemented (#760)")
 def test_check_threshold_basis_integer_literal_fires(tmp_path):
     """Conservative regex intentionally fires on small integers like 'count > 0'.
     The researcher must add source = 'zero is the natural lower bound' to suppress."""
@@ -377,7 +433,6 @@ count = "int"
 # TC-11: Integer with source suppresses integer literal warning
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="check_threshold_basis not yet implemented (#760)")
 def test_check_threshold_basis_integer_with_source_suppressed(tmp_path):
     """Researcher explicitly justifies count > 0 via source field."""
     from bathos.linter import check_threshold_basis
@@ -413,7 +468,6 @@ count = "int"
 # TC-12: Scientific notation literal fires
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="check_threshold_basis not yet implemented (#760)")
 def test_check_threshold_basis_scientific_notation_fires(tmp_path):
     """Scientific notation (e.g. 1e-3) must be caught by the regex."""
     from bathos.linter import check_threshold_basis, IssueSeverity
@@ -484,7 +538,6 @@ accuracy = "float"
 # TC-14: CLI bth lint surfaces unjustified_threshold warnings
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="check_threshold_basis not yet implemented (#760)")
 def test_cli_lint_threshold_warning_appears(tmp_path, monkeypatch):
     from bathos.cli import app
     from typer.testing import CliRunner
