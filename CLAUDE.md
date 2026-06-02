@@ -12,14 +12,15 @@ bathos is a standalone experiment tracking CLI for a single researcher across 10
 
 ## Current Status (as of 2026-06-02)
 
-**Latest: v0.8 (POPPER sequential campaigns) — 573 tests passing.**
+**Latest: v0.9 (bth outputs Phase 1) — 570 tests passing (4 skipped).**
 
 Full version history is in [`CHANGELOG.md`](CHANGELOG.md). Summary of current version:
 
 - POPPER e-value sequential campaigns (`mode="sequential"`, `[popper]` sidecar block, likelihood-ratio e-values, threshold lock, sprint-audit signal 8, Tier-2 lint advisory)
 - Schema v6; campaign_runs gains `evalue` + `seq_position`; campaigns gains `stopping_threshold`
+- `bth outputs list / summary` — per-file output catalog with `--live` re-stat; fix `output_metadata` key bug in query.py; MCP mirrors
 
-**Open backlog:** #791 (results management — `bth outputs` Phase 1), #137 (global instruction portability — deferred to praxia).
+**Open backlog:** #137 (global instruction portability — deferred to praxia). Debt #71 (output_metadata refresh-on-compact + changelog).
 
 ---
 
