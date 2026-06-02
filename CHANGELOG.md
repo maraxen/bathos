@@ -9,6 +9,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.8.0] - 2026-06-02
+
+### Added
+
+- **POPPER sequential campaigns** — `mode="sequential"` for `bth campaign create --sequential`; converts Campaign into an anytime-valid sequential test based on e-value products (arXiv 2502.09858)
+- **`[popper]` sidecar block** — `null_pass_rate`, `alt_pass_rate`, `stopping_threshold` (all required); optional `[popper.weights]` per-label likelihood-ratio overrides
+- **`compute_evalue()`** in `sidecar.py` — likelihood-ratio e-value per run: alt/null for pass-direction, (1-alt)/(1-null) for fail-direction, 1.0 hard default for marginal/error/unknown
+- **`campaign_runs` schema extension** — `evalue REAL CHECK (evalue IS NULL OR evalue > 0)`, `seq_position INTEGER`
+- **`campaigns` schema extension** — `stopping_threshold REAL`; schema v6
+- **Threshold lock** — `stopping_threshold` locks after the first non-error run is added; `CampaignError` on mismatch with restart-via-parent instructions
+- **`bth campaign conclude --force` / `--abort-if-below-threshold`** — soft and strict premature-stopping guards
+- **`bth campaign review` POPPER table** — per-script E_n product, n_effective, n_excluded, threshold_met via `render_popper_summary()`
+- **Sprint-audit signal 8** — `premature_stopping_rate`: fraction of concluded sequential campaigns where final E_n < stopping_threshold
+- **`check_popper_adversarial()`** — Tier-2 lint advisory for POPPER sidecars missing `adversarial_check` in all outcome branches
+- **`validate_popper_block()`** — structural validation: range checks, null≠alt guard, threshold < 10.0 WARNING, weight key/value constraints
+
+---
+
+## [0.7.0] - 2026-06-01
+
+### Added
+
+- **`bth verify`** — catalog integrity command; `--tier cool/warm/archive/all`
+- **`compact` transaction safety** — `BEGIN`/`COMMIT`/`ROLLBACK` wrapping; `PRAGMA integrity_check` on every DuckDB connect
+- **`compact force_rebuild`** — removes existing `bathos.db` before compacting (corruption recovery)
+- **Pre-migration `.bak` backup** — `bth migrate` writes a `.bak` before in-place rewrite
+- **Archive SHA256 checksums** — per-file in `manifest.json`
+- **`sync` truncation detection** — post-rsync check via `--itemize-changes`
+
+### Changed
+
+- **`fastmcp` promoted to main dependency**
+
+---
+
+## [0.6.1] - 2026-06-01
+
+### Added
+
+- **Sprint-audit threshold ADR** — domain rationale for all 7 signal thresholds; fixes `schema_overflow_rate` semantics
+- **Tier-2 lint: `check_threshold_basis`** — warns for `regression_threshold` without `regression_threshold_basis`
+- **`OutcomeSpec.source`** and **`Sidecar.regression_threshold_basis`** fields
+
+---
+
+## [0.6.0] - 2026-05-29
+
+### Added
+
+- **`outcome="error"` first-class** — `GateErrorCode` / `GateErrorPayload` taxonomy (11 codes)
+- **Pre-execution manifest** — `.bth.lock.toml` schema v5; content-hashes sidecar + script at run start
+- **`adversarial_check` field** — per-outcome text field; Tier-2 lint enforcement in `--agent-mode`
+- **`bth cite`** — structured run citations (BibTeX / plain text)
+- **`bth lineage --format prov`** — W3C PROV-JSON 1.0 lineage export
+- **Sprint-audit 7-signal extension** — `error_rate`, `bypass_explicit`, `bypass_in_agent_mode`, `outcome_entropy`, `unfired_branches`, `schema_overflow_rate`, `post_hoc_bias_flag`
+- **Cluster submission** — `bth submit` via myxcel; `slurm_array_task_id` field; `ClusterConfig`
+- **Schema v5** — `manifest_sha256`, `manifest_path`, `outcome_error_reason`, `adversarial_check_status`
+
+---
+
+## [0.5.0] - 2026-05-25
+
+### Added
+
+- **Telemetry** — structured JSONL with 9 event surfaces; SLURM-safe per-process files; rides `bth sync`
+- **`bth view`** — local FastAPI dashboard (`bathos[viz]`); read-only; 1000-run cap
+- **`bth export --html`** — static HTML report from warm catalog
+- **`bathos[viz]` optional extra** — FastAPI + Jinja2 + Alpine.js + Pico CSS (vendored MIT)
+- **Rich formatters** (`rich_fmt.py`) — `render_runs_table`, `render_run_detail`, `render_campaign_table`, `render_campaign_review`
+
+---
+
 ## [0.4.1] - 2026-05-21
 
 ### Added

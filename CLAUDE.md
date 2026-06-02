@@ -12,17 +12,12 @@ bathos is a standalone experiment tracking CLI for a single researcher across 10
 
 ## Current Status (as of 2026-06-02)
 
-**v0.8 (POPPER sequential campaigns): complete.** 573 tests passing.
+**Latest: v0.8 (POPPER sequential campaigns) — 573 tests passing.**
 
-**Shipped in v0.8:** POPPER e-value multi-run campaign primitive — `mode="sequential"` campaigns; `[popper]` sidecar block (`null_pass_rate`, `alt_pass_rate`, `stopping_threshold`, optional `[popper.weights]`); likelihood-ratio e-value computation in `sidecar.py`; `campaign_runs` schema extended (`evalue REAL`, `seq_position INTEGER`); `campaigns` schema extended (`stopping_threshold REAL`); schema v5→v6; threshold lock after first non-error run; `bth campaign create --sequential`; `bth campaign review` POPPER text table; `bth campaign conclude --force/--abort-if-below-threshold`; sprint-audit signal 8 (`premature_stopping_rate`); Tier-2 lint advisory for POPPER runs missing `adversarial_check`.
+Full version history is in [`CHANGELOG.md`](CHANGELOG.md). Summary of current version:
 
-**v0.7 (backup/recovery hardening): complete.** 498 tests passing. `fastmcp` promoted to main dependency.
-
-**Shipped in v0.7:** `compact` wraps ingest in BEGIN/COMMIT/ROLLBACK transaction + PRAGMA integrity_check on every DuckDB connection open; `compact` `force_rebuild` parameter; `migrate` writes `.bak` backup of cool fragments before in-place rewrite; `archive` SHA256 checksums per file in `manifest.json`; new `bth verify` command (`--tier cool/warm/archive/all`); `sync` post-rsync truncation detection via `--itemize-changes`.
-
-**v0.6 / v0.6.1:** Agentic science evolution — exception-swallowing remediation, pre-execution manifest (`.bth.lock.toml`, schema v5), `outcome="error"` first-class, `GateErrorCode`/`GateErrorPayload` (11 codes), `adversarial_check` field + Tier-2 lint, `bth cite`, `bth lineage --format prov` (W3C PROV-JSON 1.0), sprint-audit 7-signal extension, cluster submission integration (`bth submit` via myxcel, `slurm_array_task_id` field). ADRs: `.praxia/docs/decisions/260526_*.md`, `.praxia/docs/decisions/260601_sprint-audit-threshold-rationale.md`.
-
-**v0.1–v0.5:** Core schema + catalog (v0.1); FastMCP, `@bth.experiment`, `bth lint/migrate/sync/archive` (v0.2); agentic integrity gate, campaigns, sprint audit (v0.3); per-project sync filtering, cool-tier layout, postmortem tracking (v0.4–v0.4.1); telemetry, Rich formatters, `bth view`, `bth export --html`, `bathos[viz]` (v0.5).
+- POPPER e-value sequential campaigns (`mode="sequential"`, `[popper]` sidecar block, likelihood-ratio e-values, threshold lock, sprint-audit signal 8, Tier-2 lint advisory)
+- Schema v6; campaign_runs gains `evalue` + `seq_position`; campaigns gains `stopping_threshold`
 
 **Open backlog:** #136 (bth-migrate praxia workflow), #137 (global instruction portability), #142 (results management design), #143 (threshold epistemic hygiene).
 
