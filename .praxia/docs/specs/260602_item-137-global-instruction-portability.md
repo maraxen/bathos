@@ -1,6 +1,6 @@
 # Item #137: Global Instruction Portability — Design Document
 
-**Status:** Design / Exploration (not ready to implement)
+**Status:** Problem Decomposition — all hard decisions deferred to user; not ready to spec
 **Backlog item:** #137 — Global instruction portability — composable snippets for multi-surface export
 **Date:** 2026-06-02
 **Author:** spec-agent (task 260602_bathos-v08-sprint)

@@ -2,6 +2,8 @@
 
 **Date:** 2026-06-02
 **Status:** Design / Exploratory
+
+> **Cross-cutting note (oracle, 260602):** The destructive `bth outputs prune` design must be deferred until backlog #792 (POPPER e-value campaign) storage decisions are locked. Pruning a POPPER campaign run's output artifacts invalidates the e-value product audit trail. The read-only phase (`bth outputs list <run_id>`) is unaffected and can ship independently.
 **Track:** design (no implementation in this document)
 **Item:** Results management — output convention, file-count utilities, management interface
 

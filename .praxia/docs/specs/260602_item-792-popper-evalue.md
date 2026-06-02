@@ -5,6 +5,8 @@
 **Task ID:** 260602_bathos-v08-sprint
 **Status:** Open for review
 
+> **Cross-cutting note (oracle, 260602):** POPPER campaigns require per-run output artifact provenance for the e-value audit trail. The expected CLI surface is `bth outputs list <run_id>` (from backlog #791 results management). Do not design POPPER storage in isolation — coordinate with #791 before either ships. Specifically: `bth outputs prune` must not be implemented until POPPER's storage model is locked.
+
 ---
 
 ## 1. Motivation
