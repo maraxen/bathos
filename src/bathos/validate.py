@@ -32,6 +32,84 @@ class ValidationResult:
     errors: list[ValidationError] = field(default_factory=list)
 
 
+def validate_popper_block(sidecar: Sidecar, sidecar_path: Path | None = None) -> list[ValidationError]:
+    """Validate [popper] block fields per the spec (Section 2.3 of #792 spec).
+
+    Returns a list of ValidationError (empty if valid).
+    WARNING-level entries use message prefixed with "WARNING:".
+    """
+    errors: list[ValidationError] = []
+
+    if sidecar.popper_null_pass_rate is None:
+        return errors  # No [popper] block — nothing to validate
+
+    # [popper] is only valid on experiment sidecars
+    if sidecar.kind != SidecarKind.EXPERIMENT:
+        errors.append(ValidationError(
+            "popper",
+            "[popper] block is only valid in [experiment] sidecars",
+        ))
+        return errors  # No point validating further
+
+    null = sidecar.popper_null_pass_rate
+    alt = sidecar.popper_alt_pass_rate
+    threshold = sidecar.popper_stopping_threshold
+
+    # null_pass_rate range
+    if null is None or not (0 < null < 1):
+        errors.append(ValidationError(
+            "popper.null_pass_rate",
+            f"null_pass_rate must be in (0, 1), got {null!r}",
+        ))
+
+    # alt_pass_rate range
+    if alt is None or not (0 < alt < 1):
+        errors.append(ValidationError(
+            "popper.alt_pass_rate",
+            f"alt_pass_rate must be in (0, 1), got {alt!r}",
+        ))
+
+    # null != alt (no test power if equal)
+    if null is not None and alt is not None and null == alt:
+        errors.append(ValidationError(
+            "popper",
+            "null_pass_rate and alt_pass_rate are identical; no test power",
+        ))
+
+    # stopping_threshold >= 1.0
+    if threshold is None or threshold < 1.0:
+        errors.append(ValidationError(
+            "popper.stopping_threshold",
+            f"stopping_threshold must be >= 1.0, got {threshold!r}",
+        ))
+    elif threshold < 10.0:
+        errors.append(ValidationError(
+            "popper.stopping_threshold",
+            f"WARNING: stopping_threshold < 10.0 — consider a stricter threshold (alpha < 0.10)",
+        ))
+
+    # Validate [popper.weights] if present
+    declared_labels = set(sidecar.outcomes.keys())
+    for key, val in sidecar.popper_weights.items():
+        if key not in declared_labels and key not in ("error", "unknown", "marginal"):
+            errors.append(ValidationError(
+                f"popper.weights.{key}",
+                f"Unknown outcome label {key!r} in [popper.weights] — not declared in [outcomes]",
+            ))
+        if val <= 0:
+            errors.append(ValidationError(
+                f"popper.weights.{key}",
+                f"Weight for {key!r} must be > 0, got {val!r}",
+            ))
+        if key == "error" and val != 1.0:
+            errors.append(ValidationError(
+                "popper.weights.error",
+                f"Weight for 'error' must be exactly 1.0 (non-overridable), got {val!r}",
+            ))
+
+    return errors
+
+
 def validate_sidecar(sidecar: Sidecar, sidecar_path: Path | None = None) -> ValidationResult:
     """Validate a parsed Sidecar for structural integrity and logical consistency.
 
@@ -135,5 +213,9 @@ def validate_sidecar(sidecar: Sidecar, sidecar_path: Path | None = None) -> Vali
         errors.append(err)
         if sidecar_path:
             event("sidecar.validate_error", path=str(sidecar_path), field="outcomes", reason="No fallback branch with is_residual=true")
+
+    # Validate [popper] block if present
+    popper_errors = validate_popper_block(sidecar, sidecar_path)
+    errors.extend(popper_errors)
 
     return ValidationResult(ok=len(errors) == 0, errors=errors)
