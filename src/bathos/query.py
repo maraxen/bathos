@@ -28,7 +28,7 @@ def _filter_runs_by_output_file(
 ) -> list[Run]:
     """Filter runs by output file glob pattern.
 
-    Checks both cool-tier output_paths and warm-tier metadata output_files.
+    Checks both cool-tier output_paths and warm-tier output_metadata.
     Missing output files are ignored (status != 'present' is filtered out).
 
     Args:
@@ -50,14 +50,14 @@ def _filter_runs_by_output_file(
                 filtered.append(run)
                 continue
 
-        # Then check warm-tier metadata if no match in output_paths
-        if run.metadata and run.metadata != "{}":
+        # Then check warm-tier output_metadata if no match in output_paths
+        if run.output_metadata and run.output_metadata != "[]":
             try:
-                metadata = json.loads(run.metadata)
-                if isinstance(metadata, dict) and "output_files" in metadata:
+                output_files = json.loads(run.output_metadata)
+                if isinstance(output_files, list):
                     matches = any(
                         fnmatch.fnmatch(f.get("path", ""), pattern)
-                        for f in metadata.get("output_files", [])
+                        for f in output_files
                         if f.get("status") == "present"
                     )
                     if matches:
@@ -135,6 +135,7 @@ def _row_to_run(row: tuple) -> Run | None:
             slurm_job_id=slurm_job_id if slurm_job_id else "",
             hostname=hostname if hostname else "",
             metadata=metadata if metadata else "{}",
+            output_metadata=output_metadata if output_metadata else "[]",
             outcome=outcome if outcome else "",
             sidecar_sha256=sidecar_sha256 if sidecar_sha256 else "",
             sidecar_path=sidecar_path if sidecar_path else "",

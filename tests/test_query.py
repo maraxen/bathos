@@ -219,9 +219,9 @@ def test_filter_runs_with_warm_metadata():
         git_hash="abc",
         git_branch="main",
         git_dirty=False,
-    )
-    run.metadata = json.dumps(
-        {"output_files": [{"path": "/results/analysis.json", "status": "present"}]}
+        output_metadata=json.dumps([
+            {"path": "/results/analysis.json", "status": "present"}
+        ]),
     )
 
     filtered = _filter_runs_by_output_file([run], pattern="*.json")
@@ -241,9 +241,9 @@ def test_filter_ignores_missing_output_files():
         git_hash="abc",
         git_branch="main",
         git_dirty=False,
-    )
-    run.metadata = json.dumps(
-        {"output_files": [{"path": "/results/missing.json", "status": "missing"}]}
+        output_metadata=json.dumps([
+            {"path": "/results/missing.json", "status": "missing"}
+        ]),
     )
 
     filtered = _filter_runs_by_output_file([run], pattern="*.json")
@@ -338,3 +338,52 @@ def test_lineage_returns_ancestor_chain(tmp_path):
     assert ancestors[1].id == run2.id
     assert ancestors[2].id == run3.id
     assert ancestors[0].timestamp < ancestors[1].timestamp < ancestors[2].timestamp
+
+
+def test_filter_runs_by_output_metadata_warm_tier():
+    """Verify filtering works via warm-tier output_metadata when output_paths is empty."""
+    import json
+    from bathos.query import _filter_runs_by_output_file
+
+    run_with_warm = Run(
+        project_slug="test",
+        command="cmd",
+        argv=["cmd"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        output_paths=[],  # no cool-tier paths
+        output_metadata=json.dumps([
+            {"path": "/outputs/result.json", "status": "present", "size_bytes": 42},
+        ]),
+    )
+    run_without = Run(
+        project_slug="test",
+        command="cmd2",
+        argv=["cmd2"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        output_paths=[],
+        output_metadata=json.dumps([
+            {"path": "/outputs/result.csv", "status": "present", "size_bytes": 10},
+        ]),
+    )
+    run_missing = Run(
+        project_slug="test",
+        command="cmd3",
+        argv=["cmd3"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        output_paths=[],
+        output_metadata=json.dumps([
+            {"path": "/outputs/result.json", "status": "missing", "size_bytes": 0},
+        ]),
+    )
+
+    filtered = _filter_runs_by_output_file(
+        [run_with_warm, run_without, run_missing], pattern="*.json"
+    )
+    assert len(filtered) == 1
+    assert filtered[0].id == run_with_warm.id

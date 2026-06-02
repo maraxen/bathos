@@ -121,6 +121,7 @@ class Run:
     slurm_array_task_id: str = ""
     hostname: str = ""
     metadata: str = "{}"
+    output_metadata: str = "[]"
     outcome: str = ""
     sidecar_sha256: str = ""
     sidecar_path: str = ""
