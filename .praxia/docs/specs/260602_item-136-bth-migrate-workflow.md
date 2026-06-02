@@ -1,7 +1,7 @@
 # Item #136: bth-migrate Phase 2 — Agentic Script Classification and git mv Plan
 
 **Date:** 2026-06-02
-**Status:** Draft — 10 open questions; NOT ready to implement (see §Open Questions before dispatching fixer)
+**Status:** Draft — 7 open questions remaining (Q3/Q6/Q7 decided 260602); review remaining Qs before dispatching fixer
 **Task ID:** 260602_bathos-v08-sprint
 **Depends on:** #135 (Phase 1 — catalog schema migration, shipped in v0.7)
 
@@ -447,15 +447,15 @@ The following questions need resolution before implementation can begin:
 
 2. **Ambiguous `validate_*` vs `verify_*` vs `check_*`:** The prolix corpus has `validate_adaptive_rattle_temperature.py`, `verify_openmm_physics.py`, `verify_pme_parity.py`, and `check_py2dmol.py`. Should `verify_*` map to `validation/` (sidecar required at WARNING level) or to `analysis/` (no sidecar)? Is the decision purely lexical (all `verify_*` → `validation/`) or do we need a size/content gate?
 
-3. **`simulate_*` classification:** The prolix corpus has 5 `simulate_*.py` scripts. The natural mapping is `experiments/` (they test a hypothesis about a physical system). But `experiments/` requires a sidecar at ERROR level, and writing hypothesis pre-registrations for simulation scripts is significant authorship work. Should `simulate_*` map to `experiments/` (correct semantically, high friction) or `analysis/` (lower friction, semantically imprecise)? This decision determines how many sidecar stubs the classify step generates for prolix.
+3. ~~**`simulate_*` classification:**~~ **DECIDED (260602):** `simulate_*` → `experiments/`. Semantically correct; sidecar stubs are generated at ERROR level. The authorship burden is accepted — filling in hypothesis pre-registrations for simulation scripts is the researcher's responsibility post-classification.
 
 4. **`phase1_*` and composite-name scripts:** `phase1_diagnostic_runner.py` and `phase1_plotting_and_verdict.py` do not match any prefix heuristic. They would fall to LOW confidence and be routed to `analysis/`. Is that correct, or do they belong in `debug/`? Should "phase" be a recognized classification hint?
 
 5. **`__init__.py` handling:** `scripts/__init__.py` is present in prolix, making `scripts/` a Python package. Should `bth classify` skip files starting with `_` unconditionally (consistent with the linter), or emit a WARNING that `__init__.py` presence may complicate `git mv` (removing it breaks import paths if anything imports from `scripts` as a package)?
 
-6. **Uncommitted files and git mv:** If a flat script has never been committed to git (untracked state), `git mv` will fail. Should `bth classify --apply` detect untracked files and use `os.rename` instead, or require the user to commit/stage first? The latter (hard block on untracked files) is safer from a git-history-preservation standpoint but is more friction.
+6. ~~**Uncommitted files and git mv:**~~ **DECIDED (260602):** Hard block. `bth classify --apply` aborts if any target script is untracked. User must `git add` (or commit) before applying. Rationale: git history preservation takes priority; `os.rename` fallback is a silent footgun.
 
-7. **`--apply` atomicity:** Should all `git mv` operations be pre-validated before any are executed, aborting the entire apply if any would fail? If one `git mv` fails mid-sequence, the working tree is in a partially-migrated state. Options: (a) pre-validate all moves before executing any; (b) run `git mv` for each and abort on first failure with a recovery hint; (c) stage in a temporary branch. This needs a firm decision before implementation.
+7. ~~**`--apply` atomicity:**~~ **DECIDED (260602):** Pre-validate all moves before executing any (Option a). Validate every `MoveAction` for conflicts, untracked sources, and destination availability; abort entire apply if any would fail. Working tree is never left in a partial state.
 
 8. **Sidecar scaffold TODO lint rule:** Without a Tier-2 lint rule that flags `TODO` strings in sidecar hypothesis and outcome fields, scaffolded stubs will silently pass `bth lint` even though they are unfilled. Should this lint rule be in #136 scope, or tracked as a separate backlog item?
 
