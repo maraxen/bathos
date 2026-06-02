@@ -866,8 +866,31 @@ def submit(
 @app.command()
 def migrate(
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be migrated without writing"),
+    classify: bool = typer.Option(False, "--classify", help="Classify flat scripts into subdirs (Phase 2)"),
 ):
-    """Migrate cool-tier Parquet fragments to current schema."""
+    """Migrate cool-tier Parquet fragments to current schema, optionally classifying scripts."""
+    if classify:
+        # Delegate to classify command
+        from bathos.classifier import classify_flat_scripts, build_move_plan, apply_classify_plan
+
+        project_root = Path.cwd()
+        if not (project_root / "scripts").exists():
+            typer.echo(f"Error: no scripts/ directory found at {project_root}", err=True)
+            raise typer.Exit(1)
+
+        results = classify_flat_scripts(project_root)
+        if results:
+            plan = build_move_plan(project_root, results)
+            try:
+                apply_classify_plan(plan, scaffold_sidecars=True)
+                typer.echo(f"Classified and moved {len(plan.actions)} script(s).")
+            except RuntimeError as e:
+                typer.echo(f"Error: {e}", err=True)
+                raise typer.Exit(1)
+        else:
+            typer.echo("No flat scripts found to classify.")
+        return
+
     from bathos.migrate import migrate_catalog
 
     result = migrate_catalog(_catalog_dir(), dry_run=dry_run)
@@ -899,6 +922,148 @@ def migrate_to_subdirs_cmd(
     if result.by_slug:
         for slug, count in sorted(result.by_slug.items()):
             typer.echo(f"  {slug}: {count}")
+
+
+@app.command()
+def classify(
+    min_confidence: str = typer.Option(
+        "low", "--min-confidence", help="Only include classifications at or above this level (high|medium|low)"
+    ),
+    no_content: bool = typer.Option(False, "--no-content", help="Skip content-augmented classification"),
+    no_scaffold: bool = typer.Option(False, "--no-scaffold", help="Do not scaffold sidecar stubs when applying"),
+    apply: bool = typer.Option(False, "--apply", help="Execute git mv commands and write sidecars"),
+    project: Path = typer.Option(Path.cwd(), "--project", help="Project root (defaults to cwd)"),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON (machine-readable)"),
+):
+    """Classify flat scripts into the correct scripts/ subdirectory.
+
+    Scans scripts/ root for .py files not already in a subdirectory,
+    infers the correct target directory, and prints a git mv plan.
+    Apply the plan with --apply.
+    """
+    from bathos.classifier import classify_flat_scripts, build_move_plan, apply_classify_plan, ClassificationConfidence
+    from rich.table import Table
+    from rich import print as rprint
+    import json
+
+    if min_confidence.lower() not in ("high", "medium", "low"):
+        typer.echo(f"Error: min-confidence must be high, medium, or low (got {min_confidence!r})", err=True)
+        raise typer.Exit(1)
+
+    project_root = project.resolve()
+    if not (project_root / "scripts").exists():
+        typer.echo(f"Error: no scripts/ directory found at {project_root}", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"Scanning {project_root / 'scripts'} for unclassified files...")
+
+    # Classify all flat scripts
+    results = classify_flat_scripts(project_root)
+
+    if not results:
+        typer.echo("No flat scripts found.")
+        raise typer.Exit(0)
+
+    # Build move plan
+    plan = build_move_plan(project_root, results)
+
+    # Filter by min_confidence if needed
+    min_conf_enum = ClassificationConfidence(min_confidence.lower())
+    confidence_order = [ClassificationConfidence.HIGH, ClassificationConfidence.MEDIUM, ClassificationConfidence.LOW]
+    min_conf_idx = confidence_order.index(min_conf_enum)
+
+    filtered_actions = [
+        a for a in plan.actions
+        if confidence_order.index(a.classification.confidence) <= min_conf_idx
+    ]
+
+    if not filtered_actions:
+        typer.echo(f"No classifications found at or above {min_confidence} confidence.")
+        raise typer.Exit(0)
+
+    # Output as JSON if requested
+    if json_output:
+        from dataclasses import asdict
+        output = {
+            "project_root": str(project_root),
+            "total_files": len(results),
+            "high_confidence": plan.high_confidence,
+            "medium_confidence": plan.medium_confidence,
+            "low_confidence": plan.low_confidence,
+            "conflicts": plan.conflicts,
+            "sidecars_to_scaffold": plan.sidecars_to_scaffold,
+            "actions": [
+                {
+                    "source": str(a.source),
+                    "destination": str(a.destination),
+                    "confidence": a.classification.confidence.value,
+                    "rationale": a.classification.rationale,
+                    "rename_required": a.classification.rename_required,
+                    "suggested_stem": a.classification.suggested_stem,
+                    "sidecar_required": a.classification.sidecar_required,
+                    "conflict": a.conflict,
+                }
+                for a in filtered_actions
+            ]
+        }
+        typer.echo(json.dumps(output, indent=2))
+        raise typer.Exit(0)
+
+    # Build and display table
+    table = Table(title="Script Classification Plan")
+    table.add_column("Source", style="cyan")
+    table.add_column("Target", style="green")
+    table.add_column("Confidence", style="yellow")
+    table.add_column("Rename", style="magenta")
+    table.add_column("Sidecar", style="blue")
+
+    for action in filtered_actions:
+        rename_str = "yes" if action.classification.rename_required else "no"
+        sidecar_str = "scaffold" if action.classification.sidecar_required else "no"
+        table.add_row(
+            str(action.source),
+            f"scripts/{action.classification.target_dir}/",
+            action.classification.confidence.value,
+            rename_str,
+            sidecar_str,
+        )
+
+    rprint(table)
+    typer.echo()
+
+    # Summary line
+    summary_parts = [
+        f"{len(filtered_actions)} script(s)",
+        f"{plan.high_confidence} HIGH",
+        f"{plan.medium_confidence} MEDIUM",
+        f"{plan.low_confidence} LOW",
+    ]
+    if plan.conflicts:
+        summary_parts.append(f"{plan.conflicts} conflict(s)")
+    if plan.sidecars_to_scaffold:
+        summary_parts.append(f"{plan.sidecars_to_scaffold} sidecar(s) to scaffold")
+
+    typer.echo(" | ".join(summary_parts))
+
+    if apply:
+        if plan.conflicts:
+            typer.echo(
+                f"Error: {plan.conflicts} conflict(s) detected. Resolve them manually before retrying.",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+        scaffold = not no_scaffold
+        try:
+            apply_classify_plan(plan, scaffold_sidecars=scaffold)
+            typer.echo(f"Applied: moved {len(filtered_actions)} script(s).")
+            if scaffold:
+                typer.echo(f"Scaffolded: {plan.sidecars_to_scaffold} sidecar(s).")
+        except RuntimeError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1)
+    else:
+        typer.echo("Run with --apply to execute.")
 
 
 @app.command("sprint-audit")
