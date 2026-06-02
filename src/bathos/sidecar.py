@@ -55,6 +55,11 @@ class Sidecar:
     verification: str = ""
     # agent mode field (all kinds)
     agent_mode: str = ""
+    # popper sequential test fields (experiment sidecars only)
+    popper_null_pass_rate: float | None = None
+    popper_alt_pass_rate: float | None = None
+    popper_stopping_threshold: float | None = None
+    popper_weights: dict[str, float] = field(default_factory=dict)
 
 
 ENFORCED_DIRS = {"experiments", "benchmarks", "validation"}
@@ -79,6 +84,14 @@ def parse_sidecar(path: Path) -> Sidecar:
             result_schema=data.get("result_schema", {}),
             agent_mode=section.get("agent_mode", ""),
         )
+        popper = data.get("popper", {})
+        if popper:
+            sidecar.popper_null_pass_rate = popper.get("null_pass_rate")
+            sidecar.popper_alt_pass_rate = popper.get("alt_pass_rate")
+            sidecar.popper_stopping_threshold = popper.get("stopping_threshold")
+            weights = popper.get("weights", {})
+            if isinstance(weights, dict):
+                sidecar.popper_weights = {k: float(v) for k, v in weights.items()}
     elif "benchmark" in data:
         kind = SidecarKind.BENCHMARK
         section = data["benchmark"]

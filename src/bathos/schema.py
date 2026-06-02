@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pyarrow as pa
 
-CURRENT_SCHEMA_VERSION = "5"
+CURRENT_SCHEMA_VERSION = "6"
 
 COOL_SCHEMA = pa.schema(
     [
