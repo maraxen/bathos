@@ -506,7 +506,8 @@ def remote_remove(
 @campaign_app.command("create")
 def campaign_create(
     name: str = typer.Argument(...),
-    mode: str = typer.Option("exploration", "--mode", help="exploration|confirmation"),
+    mode: str = typer.Option("exploration", "--mode", help="exploration|confirmation|sequential"),
+    sequential: bool = typer.Option(False, "--sequential", help="Shorthand for --mode sequential"),
     question: str | None = typer.Option(None, "--question"),
     hypothesis: str | None = typer.Option(None, "--hypothesis"),
     parent: str | None = typer.Option(None, "--parent", help="Parent campaign ID"),
@@ -515,6 +516,13 @@ def campaign_create(
     import duckdb
 
     from bathos.campaigns import create_campaign, list_campaigns
+
+    # Resolve effective mode from --sequential shorthand
+    if sequential and mode != "exploration":
+        raise typer.BadParameter("--sequential and --mode are mutually exclusive", param_hint="--mode/--sequential")
+    if sequential:
+        mode = "sequential"
+
     slug = _require_project_slug()
     db = duckdb.connect(str(_catalog_dir() / "bathos.db"))
     try:
@@ -553,13 +561,51 @@ def campaign_conclude(
     campaign_id: str = typer.Argument(..., help="Campaign ID"),
     outcome: str = typer.Option(..., "--outcome", help="Outcome label (e.g. pass, fail, inconclusive)"),
     note: str = typer.Option("", "--note", help="Conclusion narrative"),
+    force: bool = typer.Option(False, "--force", help="Skip threshold warning for sequential campaigns"),
+    abort_if_below_threshold: bool = typer.Option(False, "--abort-if-below-threshold", help="Exit 1 if threshold not met"),
 ):
     """Conclude a campaign with an outcome label."""
     import duckdb
 
-    from bathos.campaigns import CampaignError, conclude_campaign
+    from bathos.campaigns import CampaignError, conclude_campaign, get_campaign, _campaign_threshold_met
     db = duckdb.connect(str(_catalog_dir() / "bathos.db"))
     try:
+        campaign = get_campaign(db, campaign_id)
+        if campaign is None:
+            typer.echo(f"Campaign not found: {campaign_id}", err=True)
+            raise typer.Exit(1)
+
+        # For sequential campaigns, check threshold before concluding
+        if campaign.mode == "sequential" and campaign.stopping_threshold is not None:
+            threshold_met = _campaign_threshold_met(db, campaign.id, campaign.stopping_threshold)
+            if not threshold_met:
+                if abort_if_below_threshold:
+                    ep_rows = db.execute("""
+                        SELECT EXP(SUM(LN(cr.evalue)) FILTER (WHERE r.outcome != 'error' AND r.outcome != 'unknown'))
+                        FROM campaign_runs cr INNER JOIN runs r ON cr.run_id = r.id
+                        WHERE cr.campaign_id = ? AND cr.evalue IS NOT NULL
+                    """, [campaign.id]).fetchone()
+                    ep = ep_rows[0] if ep_rows and ep_rows[0] is not None else 1.0
+                    typer.echo(
+                        f"Error: E_n has not reached stopping_threshold "
+                        f"({ep:.1f} < {campaign.stopping_threshold:.1f}). Aborting.",
+                        err=True,
+                    )
+                    raise typer.Exit(1)
+                if not force:
+                    ep_rows = db.execute("""
+                        SELECT EXP(SUM(LN(cr.evalue)) FILTER (WHERE r.outcome != 'error' AND r.outcome != 'unknown'))
+                        FROM campaign_runs cr INNER JOIN runs r ON cr.run_id = r.id
+                        WHERE cr.campaign_id = ? AND cr.evalue IS NOT NULL
+                    """, [campaign.id]).fetchone()
+                    ep = ep_rows[0] if ep_rows and ep_rows[0] is not None else 1.0
+                    typer.echo(
+                        f"WARNING: E_n has not reached stopping_threshold "
+                        f"({ep:.1f} < {campaign.stopping_threshold:.1f}). "
+                        f"This will be flagged as premature stopping in sprint-audit.",
+                        err=True,
+                    )
+
         conclude_campaign(db, campaign_id, outcome, note)
         typer.echo(f"Concluded campaign {campaign_id[:8]} — outcome: {outcome}")
     except CampaignError as e:
@@ -622,7 +668,7 @@ def campaign_review(
     """Review campaign: residual rate, bypass rate, outcome distribution."""
     import duckdb
     from bathos.campaigns import get_campaign, review_campaign
-    from bathos.rich_fmt import render_campaign_review
+    from bathos.rich_fmt import render_campaign_review, render_popper_summary
 
     db = duckdb.connect(str(_catalog_dir() / "bathos.db"), read_only=True)
     try:
@@ -635,6 +681,7 @@ def campaign_review(
             typer.echo(review["error"], err=True)
             raise typer.Exit(1)
         render_campaign_review(campaign, review)
+        render_popper_summary(review.get("popper"))
     finally:
         db.close()
 
