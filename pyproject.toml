@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bathos"
-version = "0.4.1"
+version = "0.7.0"
 description = "Local-first, zero-server experiment tracking for researchers"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -30,10 +30,10 @@ dependencies = [
     "tomlkit>=0.12",
     "toml>=0.10",
     "rich>=13",
+    "fastmcp>=2.0,<3.0",
 ]
 
 [project.optional-dependencies]
-mcp = ["fastmcp>=2.0,<3.0"]
 viz = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.27",
