@@ -278,6 +278,55 @@ def check_bypass_trend(catalog_dir: Path) -> list[LintIssue]:
         return []
 
 
+def check_popper_adversarial(project_root: Path) -> list[LintIssue]:
+    """Tier-2 advisory: warn for POPPER sidecars missing adversarial_check in all outcome branches.
+
+    Scans scripts/experiments/**/*.bth.toml for sidecars with a [popper] block.
+    Issues WARNING if none of the [outcomes.*] branches declare adversarial_check.
+
+    Args:
+        project_root: Path to project root.
+
+    Returns:
+        List of LintIssue objects with severity WARNING.
+    """
+    scripts_dir = project_root / "scripts" / "experiments"
+    if not scripts_dir.exists():
+        return []
+
+    issues: list[LintIssue] = []
+    for sidecar_path in sorted(scripts_dir.rglob("*.bth.toml")):
+        try:
+            data = tomllib.loads(sidecar_path.read_text())
+        except Exception:
+            continue
+
+        # Only process sidecars with [experiment] + [popper] blocks
+        if "experiment" not in data or "popper" not in data:
+            continue
+
+        outcomes = data.get("outcomes", {})
+        has_adversarial = any(
+            branch.get("adversarial_check") for branch in outcomes.values()
+            if isinstance(branch, dict)
+        )
+        if not has_adversarial:
+            issues.append(
+                LintIssue(
+                    path=sidecar_path,
+                    directory="experiments",
+                    issue="popper_missing_adversarial_check",
+                    severity=IssueSeverity.WARNING,
+                    detail=(
+                        "POPPER sidecar has no adversarial_check in any [outcomes.*] branch — "
+                        "add adversarial_check to at least one outcome for stronger validity"
+                    ),
+                )
+            )
+
+    return issues
+
+
 def check_unfired_branches(catalog_dir: Path, min_runs: int = 5) -> list[LintIssue]:
     """Check for branches (command+sidecar_sha256) that always produce same outcome.
 
