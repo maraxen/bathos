@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.0] - 2026-06-02
+
+### Added
+
+- **`bth outputs list <run_id> [--live]`** — per-file listing of registered output artifacts (path, status, size, sha256) from the compact-time snapshot; `--live` re-stats from filesystem without writing back to catalog
+- **`bth outputs summary [--project <slug>] [--since <period>]`** — aggregate output file counts, total bytes, and missing-file rate across all projects (or filtered); requires warm catalog (`bth compact` first)
+- **`render_output_list` / `render_outputs_summary`** in `rich_fmt.py` — Rich-formatted output tables for the new commands
+- **MCP mirrors** — `list_outputs(run_id, live=False)` and `outputs_summary(project=None, since=None)` in `mcp.py`
+- **Scaffold two-phase comment** in `bth new-experiment` template — documents scalar-metrics (stdout JSON) vs. artifact-files (`--out` / `bth outputs`) distinction
+
+### Fixed
+
+- **`output_metadata` key inconsistency** in `query.py` — `_filter_runs_by_output_file` was checking `metadata.output_files` as a warm-tier fallback key; corrected to `output_metadata`
+
+### Notes
+
+- Output metadata is a point-in-time snapshot captured once at first compact. Use `--live` for current filesystem state. Refresh-on-compact with change history is tracked as debt #71.
+
+---
+
 ## [0.8.0] - 2026-06-02
 
 ### Added
