@@ -19,7 +19,7 @@ Full version history is in [`CHANGELOG.md`](CHANGELOG.md). Summary of current ve
 - POPPER e-value sequential campaigns (`mode="sequential"`, `[popper]` sidecar block, likelihood-ratio e-values, threshold lock, sprint-audit signal 8, Tier-2 lint advisory)
 - Schema v6; campaign_runs gains `evalue` + `seq_position`; campaigns gains `stopping_threshold`
 
-**Open backlog:** #136 (bth-migrate praxia workflow), #137 (global instruction portability), #142 (results management design), #143 (threshold epistemic hygiene).
+**Open backlog:** #791 (results management — `bth outputs` Phase 1), #137 (global instruction portability — deferred to praxia).
 
 ---
 
