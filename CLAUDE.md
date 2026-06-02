@@ -12,6 +12,10 @@ bathos is a standalone experiment tracking CLI for a single researcher across 10
 
 ## Current Status (as of 2026-06-02)
 
+**v0.8 (POPPER sequential campaigns): complete.** 573 tests passing.
+
+**Shipped in v0.8:** POPPER e-value multi-run campaign primitive — `mode="sequential"` campaigns; `[popper]` sidecar block (`null_pass_rate`, `alt_pass_rate`, `stopping_threshold`, optional `[popper.weights]`); likelihood-ratio e-value computation in `sidecar.py`; `campaign_runs` schema extended (`evalue REAL`, `seq_position INTEGER`); `campaigns` schema extended (`stopping_threshold REAL`); schema v5→v6; threshold lock after first non-error run; `bth campaign create --sequential`; `bth campaign review` POPPER text table; `bth campaign conclude --force/--abort-if-below-threshold`; sprint-audit signal 8 (`premature_stopping_rate`); Tier-2 lint advisory for POPPER runs missing `adversarial_check`.
+
 **v0.7 (backup/recovery hardening): complete.** 498 tests passing. `fastmcp` promoted to main dependency.
 
 **Shipped in v0.7:** `compact` wraps ingest in BEGIN/COMMIT/ROLLBACK transaction + PRAGMA integrity_check on every DuckDB connection open; `compact` `force_rebuild` parameter; `migrate` writes `.bak` backup of cool fragments before in-place rewrite; `archive` SHA256 checksums per file in `manifest.json`; new `bth verify` command (`--tier cool/warm/archive/all`); `sync` post-rsync truncation detection via `--itemize-changes`.
