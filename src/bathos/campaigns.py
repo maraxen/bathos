@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import duckdb
 
+from bathos.sidecar import compute_evalue
 from bathos.telemetry import event
 
 
@@ -18,7 +19,7 @@ class Campaign:
     id: str
     project_slug: str
     name: str
-    mode: str  # "exploration" | "confirmation"
+    mode: str  # "exploration" | "confirmation" | "sequential"
     question: str | None = None
     hypothesis: str | None = None
     status: str = "open"
@@ -27,6 +28,7 @@ class Campaign:
     conclusion: str | None = None
     outcome_label: str | None = None
     parent_campaign_id: str | None = None
+    stopping_threshold: float | None = None
 
 
 def _open_db(catalog_dir) -> duckdb.DuckDBPyConnection:
@@ -35,8 +37,8 @@ def _open_db(catalog_dir) -> duckdb.DuckDBPyConnection:
 
 
 def create_campaign(db, name: str, project_slug: str, mode: str, question: str | None = None, hypothesis: str | None = None, parent_campaign_id: str | None = None) -> Campaign:
-    if mode not in ("exploration", "confirmation"):
-        raise CampaignError(f"mode must be 'exploration' or 'confirmation', got {mode!r}")
+    if mode not in ("exploration", "confirmation", "sequential"):
+        raise CampaignError(f"mode must be 'exploration', 'confirmation', or 'sequential', got {mode!r}")
     campaign_id = str(uuid4())
     started_at = datetime.now(UTC).isoformat()
     db.execute(
@@ -49,20 +51,25 @@ def create_campaign(db, name: str, project_slug: str, mode: str, question: str |
 
 
 def add_run_to_campaign(db, campaign_id: str, run_id: str) -> None:
-    """Add run to campaign (idempotent). Enforces temporal ordering for confirmation campaigns."""
-    campaign_rows = db.execute("SELECT mode, started_at FROM campaigns WHERE id = ?", [campaign_id]).fetchall()
+    """Add run to campaign (idempotent). For sequential campaigns, computes e-value and applies threshold lock."""
+    campaign_rows = db.execute(
+        "SELECT mode, started_at, stopping_threshold FROM campaigns WHERE id = ?",
+        [campaign_id]
+    ).fetchall()
     if not campaign_rows:
         raise CampaignError(f"Campaign not found: {campaign_id}")
-    campaign_mode, campaign_started_at = campaign_rows[0]
+    campaign_mode, campaign_started_at, campaign_threshold = campaign_rows[0]
 
-    run_rows = db.execute("SELECT timestamp FROM runs WHERE id = ?", [run_id]).fetchall()
+    run_rows = db.execute(
+        "SELECT timestamp, outcome, sidecar_path FROM runs WHERE id = ?",
+        [run_id]
+    ).fetchall()
     if not run_rows:
         raise CampaignError(f"Run not found: {run_id}")
-    run_timestamp = run_rows[0][0]
+    run_timestamp, run_outcome, run_sidecar_path = run_rows[0]
 
     # Enforce temporal ordering for confirmation campaigns
     if campaign_mode == "confirmation":
-        # Parse campaign_started_at as datetime
         try:
             campaign_dt = datetime.fromisoformat(campaign_started_at)
             if campaign_dt.tzinfo is None:
@@ -70,7 +77,6 @@ def add_run_to_campaign(db, campaign_id: str, run_id: str) -> None:
         except (ValueError, TypeError):
             campaign_dt = None
 
-        # Get run timestamp as datetime
         run_dt = run_timestamp if isinstance(run_timestamp, datetime) else None
         if run_dt is not None and run_dt.tzinfo is None:
             run_dt = run_dt.replace(tzinfo=UTC)
@@ -82,10 +88,75 @@ def add_run_to_campaign(db, campaign_id: str, run_id: str) -> None:
                     f"run timestamp ({run_dt.isoformat()}) predates campaign creation ({campaign_dt.isoformat()})"
                 )
 
-    db.execute(
-        "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
-        [campaign_id, run_id]
-    )
+    if campaign_mode == "sequential":
+        # Compute e-value from sidecar
+        evalue = 1.0
+        sidecar_stopping_threshold = None
+        if run_sidecar_path:
+            from pathlib import Path
+            from bathos.sidecar import parse_sidecar, SidecarError
+            try:
+                sidecar_path_obj = Path(run_sidecar_path)
+                if sidecar_path_obj.exists():
+                    sidecar = parse_sidecar(sidecar_path_obj)
+                    evalue = compute_evalue(sidecar, run_outcome or "unknown")
+                    sidecar_stopping_threshold = sidecar.popper_stopping_threshold
+            except SidecarError:
+                evalue = 1.0
+
+        # Assign seq_position (1-based, monotonically increasing per campaign)
+        pos_row = db.execute(
+            "SELECT COALESCE(MAX(seq_position), 0) + 1 FROM campaign_runs WHERE campaign_id = ?",
+            [campaign_id]
+        ).fetchone()
+        seq_position = pos_row[0] if pos_row else 1
+
+        # Threshold lock logic (only locks for non-error/non-unknown outcomes)
+        is_neutral_outcome = run_outcome in ("error", "unknown", None, "")
+        if not is_neutral_outcome:
+            if campaign_threshold is None and sidecar_stopping_threshold is not None:
+                # Lock threshold from this sidecar
+                db.execute(
+                    "UPDATE campaigns SET stopping_threshold = ? WHERE id = ?",
+                    [sidecar_stopping_threshold, campaign_id]
+                )
+                campaign_threshold = sidecar_stopping_threshold
+            elif campaign_threshold is not None and sidecar_stopping_threshold is not None:
+                if sidecar_stopping_threshold != campaign_threshold:
+                    n_runs = db.execute(
+                        "SELECT COUNT(*) FROM campaign_runs WHERE campaign_id = ? AND seq_position IS NOT NULL",
+                        [campaign_id]
+                    ).fetchone()[0]
+                    raise CampaignError(
+                        f"Cannot change stopping_threshold for campaign {campaign_id[:8]}: "
+                        f"{n_runs} non-error run(s) already added (threshold locked at {campaign_threshold}). "
+                        f"To use a different threshold, create a new campaign with "
+                        f"--parent {campaign_id[:8]} to preserve lineage."
+                    )
+
+        db.execute(
+            "INSERT INTO campaign_runs (campaign_id, run_id, evalue, seq_position) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
+            [campaign_id, run_id, evalue, seq_position]
+        )
+    else:
+        db.execute(
+            "INSERT INTO campaign_runs (campaign_id, run_id, evalue, seq_position) VALUES (?, ?, NULL, NULL) ON CONFLICT DO NOTHING",
+            [campaign_id, run_id]
+        )
+
+
+def _campaign_threshold_met(db, campaign_id: str, stopping_threshold: float) -> bool:
+    """Return True if all scripts in the campaign have E_n >= stopping_threshold."""
+    rows = db.execute("""
+        SELECT EXP(SUM(LN(cr.evalue)) FILTER (WHERE r.outcome != 'error' AND r.outcome != 'unknown'))
+        FROM campaign_runs cr
+        INNER JOIN runs r ON cr.run_id = r.id
+        WHERE cr.campaign_id = ?
+        GROUP BY COALESCE(NULLIF(r.script_sha256, ''), r.sidecar_path, '_ungrouped')
+    """, [campaign_id]).fetchall()
+    if not rows:
+        return False
+    return all((row[0] is not None and row[0] >= stopping_threshold) for row in rows)
 
 
 def _resolve_campaign_id(db, campaign_id: str) -> str:
@@ -123,16 +194,16 @@ def get_campaign(db, campaign_id: str) -> Campaign | None:
         full_id = _resolve_campaign_id(db, campaign_id)
     except CampaignError:
         return None
-    rows = db.execute("SELECT id, project_slug, name, mode, question, hypothesis, status, started_at, concluded_at, conclusion, outcome_label, parent_campaign_id FROM campaigns WHERE id = ?", [full_id]).fetchall()
+    rows = db.execute("SELECT id, project_slug, name, mode, question, hypothesis, status, started_at, concluded_at, conclusion, outcome_label, parent_campaign_id, stopping_threshold FROM campaigns WHERE id = ?", [full_id]).fetchall()
     if not rows:
         return None
     r = rows[0]
-    return Campaign(id=r[0], project_slug=r[1], name=r[2], mode=r[3], question=r[4], hypothesis=r[5], status=r[6], started_at=r[7], concluded_at=r[8], conclusion=r[9], outcome_label=r[10], parent_campaign_id=r[11])
+    return Campaign(id=r[0], project_slug=r[1], name=r[2], mode=r[3], question=r[4], hypothesis=r[5], status=r[6], started_at=r[7], concluded_at=r[8], conclusion=r[9], outcome_label=r[10], parent_campaign_id=r[11], stopping_threshold=r[12])
 
 
 def list_campaigns(db, project_slug: str | None = None, status: str | None = None) -> list[Campaign]:
     """List campaigns with optional filters."""
-    query = "SELECT id, project_slug, name, mode, question, hypothesis, status, started_at, concluded_at, conclusion, outcome_label, parent_campaign_id FROM campaigns WHERE 1=1"
+    query = "SELECT id, project_slug, name, mode, question, hypothesis, status, started_at, concluded_at, conclusion, outcome_label, parent_campaign_id, stopping_threshold FROM campaigns WHERE 1=1"
     params = []
     if project_slug:
         query += " AND project_slug = ?"
@@ -141,7 +212,7 @@ def list_campaigns(db, project_slug: str | None = None, status: str | None = Non
         query += " AND status = ?"
         params.append(status)
     rows = db.execute(query, params).fetchall()
-    return [Campaign(id=r[0], project_slug=r[1], name=r[2], mode=r[3], question=r[4], hypothesis=r[5], status=r[6], started_at=r[7], concluded_at=r[8], conclusion=r[9], outcome_label=r[10], parent_campaign_id=r[11]) for r in rows]
+    return [Campaign(id=r[0], project_slug=r[1], name=r[2], mode=r[3], question=r[4], hypothesis=r[5], status=r[6], started_at=r[7], concluded_at=r[8], conclusion=r[9], outcome_label=r[10], parent_campaign_id=r[11], stopping_threshold=r[12]) for r in rows]
 
 
 def review_campaign(db, campaign_id: str) -> dict:
