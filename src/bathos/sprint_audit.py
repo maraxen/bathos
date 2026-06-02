@@ -363,6 +363,14 @@ def sprint_audit(hours: int = 24) -> dict:
                 anomalies.append(
                     f"Project: post_hoc_bias_flag detected"
                 )
+            # premature_stopping_rate: arXiv 2502.09858 POPPER;
+            #   any concluded sequential campaign below threshold invalidates anytime-valid guarantee
+            if signals["premature_stopping_rate"] > 0.0:
+                anomalies.append(
+                    f"Project: premature_stopping_rate {signals['premature_stopping_rate']:.1%} — "
+                    f"{n_premature} sequential campaign(s) concluded before reaching stopping_threshold "
+                    f"(sequential test validity compromised)"
+                )
 
             # Legacy anomalies per campaign (kept for backward compatibility)
             for campaign_id, runs in by_campaign.items():
