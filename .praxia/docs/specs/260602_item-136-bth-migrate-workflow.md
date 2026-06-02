@@ -1,7 +1,7 @@
 # Item #136: bth-migrate Phase 2 — Agentic Script Classification and git mv Plan
 
 **Date:** 2026-06-02
-**Status:** Draft — 7 open questions remaining (Q3/Q6/Q7 decided 260602); review remaining Qs before dispatching fixer
+**Status:** All questions resolved (260602) — ready to implement
 **Task ID:** 260602_bathos-v08-sprint
 **Depends on:** #135 (Phase 1 — catalog schema migration, shipped in v0.7)
 
@@ -443,25 +443,25 @@ No bathos code changes required for this phase. The workflow YAML is consumed by
 
 The following questions need resolution before implementation can begin:
 
-1. **Content-augment threshold:** For the content-augmented tiebreaker, what signals are definitive enough to override a filename-pattern LOW classification? Is "contains `time.perf_counter`" enough to promote `compare_minimizers.py` to `benchmarks/`, or does this risk false positives? The implementer needs a firm policy, not a best-effort judgment.
+1. ~~**Content-augment threshold:**~~ **DECIDED (260602):** No content signals. Filename pattern is the sole classifier; LOW confidence stays LOW. Users review the dry-run output and manually reclassify if needed. No content-augment tiebreaker in the implementation.
 
-2. **Ambiguous `validate_*` vs `verify_*` vs `check_*`:** The prolix corpus has `validate_adaptive_rattle_temperature.py`, `verify_openmm_physics.py`, `verify_pme_parity.py`, and `check_py2dmol.py`. Should `verify_*` map to `validation/` (sidecar required at WARNING level) or to `analysis/` (no sidecar)? Is the decision purely lexical (all `verify_*` → `validation/`) or do we need a size/content gate?
+2. ~~**Ambiguous `validate_*` vs `verify_*` vs `check_*`:**~~ **DECIDED (260602):** Both `verify_*` and `check_*` → `analysis/` (no sidecar). Lower friction; most verify/check scripts in real corpora are sanity checks. `validate_*` continues to map to `validation/` as already specified.
 
 3. ~~**`simulate_*` classification:**~~ **DECIDED (260602):** `simulate_*` → `experiments/`. Semantically correct; sidecar stubs are generated at ERROR level. The authorship burden is accepted — filling in hypothesis pre-registrations for simulation scripts is the researcher's responsibility post-classification.
 
-4. **`phase1_*` and composite-name scripts:** `phase1_diagnostic_runner.py` and `phase1_plotting_and_verdict.py` do not match any prefix heuristic. They would fall to LOW confidence and be routed to `analysis/`. Is that correct, or do they belong in `debug/`? Should "phase" be a recognized classification hint?
+4. ~~**`phase1_*` and composite-name scripts:**~~ **DECIDED (260602):** `analysis/` at LOW confidence. No prefix match → `analysis/` with LOW confidence flag, highlighted in dry-run for human review. `phase` is not added as a recognized keyword.
 
-5. **`__init__.py` handling:** `scripts/__init__.py` is present in prolix, making `scripts/` a Python package. Should `bth classify` skip files starting with `_` unconditionally (consistent with the linter), or emit a WARNING that `__init__.py` presence may complicate `git mv` (removing it breaks import paths if anything imports from `scripts` as a package)?
+5. ~~**`__init__.py` handling:**~~ **DECIDED (260602):** Skip silently. All files starting with `_` or `__` are skipped unconditionally, consistent with existing linter behavior. No warning about package import implications.
 
 6. ~~**Uncommitted files and git mv:**~~ **DECIDED (260602):** Hard block. `bth classify --apply` aborts if any target script is untracked. User must `git add` (or commit) before applying. Rationale: git history preservation takes priority; `os.rename` fallback is a silent footgun.
 
 7. ~~**`--apply` atomicity:**~~ **DECIDED (260602):** Pre-validate all moves before executing any (Option a). Validate every `MoveAction` for conflicts, untracked sources, and destination availability; abort entire apply if any would fail. Working tree is never left in a partial state.
 
-8. **Sidecar scaffold TODO lint rule:** Without a Tier-2 lint rule that flags `TODO` strings in sidecar hypothesis and outcome fields, scaffolded stubs will silently pass `bth lint` even though they are unfilled. Should this lint rule be in #136 scope, or tracked as a separate backlog item?
+8. ~~**Sidecar scaffold TODO lint rule:**~~ **DECIDED (260602):** Separate backlog item (#798). The rule is useful beyond `bth classify` (applies to any hand-written sidecar). #136 ships without it; #798 tracks it independently.
 
-9. **Workflow YAML placement and capability declaration:** The `bth-migrate.yaml` workflow lives in the praxia repo. Does the praxia plugin system need a new capability declaration (e.g., a `[capabilities.bth_migrate]` section in `manifest.toml`) so the orchestrator knows this workflow is applicable to bathos projects, or is the `trigger_predicates.keywords` field sufficient?
+9. ~~**Workflow YAML placement and capability declaration:**~~ **DECIDED (260602):** `trigger_predicates.keywords` is sufficient. No `manifest.toml` capability declaration needed; the orchestrator matches on keywords (`bth`, `classify`, `migrate`).
 
-10. **Confirm preferred CLI surface:** This spec recommends a separate `bth classify` command with a `--classify` alias on `bth migrate`. If the user prefers the alias pattern exclusively (no separate command), the implementation changes slightly. Confirm preferred surface before implementation.
+10. ~~**Confirm preferred CLI surface:**~~ **DECIDED (260602):** Separate `bth classify` command. Clean separation: `bth migrate` = catalog operations, `bth classify` = script filesystem operations. Thin `--classify` alias on `bth migrate` for discoverability only.
 
 ---
 
