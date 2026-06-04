@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.9.0] - 2026-06-02
+## [0.9.0] - 2026-06-04
 
 ### Added
 
@@ -18,10 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`render_output_list` / `render_outputs_summary`** in `rich_fmt.py` — Rich-formatted output tables for the new commands
 - **MCP mirrors** — `list_outputs(run_id, live=False)` and `outputs_summary(project=None, since=None)` in `mcp.py`
 - **Scaffold two-phase comment** in `bth new-experiment` template — documents scalar-metrics (stdout JSON) vs. artifact-files (`--out` / `bth outputs`) distinction
+- **`docs` optional extra** in `pyproject.toml` — `pip install bathos[docs]` installs Sphinx for building documentation; required by Read the Docs
 
 ### Fixed
 
 - **`output_metadata` key inconsistency** in `query.py` — `_filter_runs_by_output_file` was checking `metadata.output_files` as a warm-tier fallback key; corrected to `output_metadata`
+- **`.readthedocs.yaml` invalid key** — removed `python.version` (not valid in RTD config v2; version already specified under `build.tools.python`)
+- **`docs/source/conf.py` stale release string** — updated from `0.1.0` to `0.9.0`
+- **`pyproject.toml` stale version** — bumped from `0.7.0` to `0.9.0` to match CHANGELOG
 
 ### Notes
 

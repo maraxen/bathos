@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 project = "bathos"
 copyright = "2026, Marielle Russo"
 author = "Marielle Russo"
-release = "0.1.0"
+release = "0.9.0"
 
 # General configuration
 extensions = [
