@@ -42,7 +42,7 @@ Creates `.bth.toml` and initializes catalog. Defines project slug (required for 
 ### Basic Tracking
 
 ```bash
-bth run -- python scripts/experiments/train_model.py --epochs 10 --out /tmp/result.json
+bth run -- uv run python scripts/experiments/train_model.py --epochs 10 --out outputs/result.json
 ```
 
 Runs script, captures git state, and records run in catalog with auto-generated UUID.
@@ -51,7 +51,7 @@ Runs script, captures git state, and records run in catalog with auto-generated 
 
 ```bash
 bth run \
-  --out /tmp/result.json \
+  --out outputs/result.json \
   --tag experiment:baseline \
   --tag date:2026-06-01 \
   --campaign my-campaign-id \
@@ -67,6 +67,28 @@ bth run \
 - `--no-sidecar` — Bypass sidecar enforcement (logs `BYPASSED`)
 
 Exit code is script's exit code.
+
+## Output Path Convention
+
+Output JSON files registered with `bth run --out` must **never** be in ephemeral directories (`/tmp`, `/var/tmp`, or `$TMPDIR`). Bathos catalogs these paths as durable references; a temp-dir path will be lost on reboot or system cleanup, making the catalog entry unreproducible.
+
+```bash
+# ✓ Correct — persistent project-relative path
+bth run --out outputs/run_abc.json -- uv run python scripts/experiments/train.py
+
+# ✗ Wrong — /tmp is ephemeral; catalog entry becomes invalid after reboot
+bth run --out /tmp/result.json -- uv run python scripts/experiments/train.py
+```
+
+Smoke-test validation runs (pre-flight checks before a real run) should be executed **directly**, not via `bth run`, so they are not tracked:
+
+```bash
+# ✓ Correct — smoke test run directly, not cataloged
+uv run python scripts/experiments/train.py --smoke --out /tmp/test.json
+
+# Then the real tracked run uses a persistent path
+bth run --out outputs/run_abc.json -- uv run python scripts/experiments/train.py
+```
 
 ## Sidecar Pre-Registration
 
@@ -454,7 +476,7 @@ bth new-experiment --name baseline_training
 
 # 3. Validate locally
 bth check --path scripts/experiments/baseline_training.bth.toml
-uv run python scripts/experiments/baseline_training.py --smoke --out /tmp/test.json
+uv run python scripts/experiments/baseline_training.py --smoke --out /tmp/test.json  # NOT via bth run — smoke outputs are ephemeral, not tracked
 
 # 4. Run locally or submit to cluster
 bth run -- uv run python scripts/experiments/baseline_training.py --out outputs/run.json

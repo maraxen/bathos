@@ -21,8 +21,8 @@ bth run -- python scripts/experiments/my_experiment.py --seed 42
 `bth run` arguments end before the script command. Arguments for the script are forwarded as-is. Do NOT use `--` to separate bath args from script args unless the script itself expects positional arguments after named flags.
 
 ```bash
-# ✓ Correct — bth sees --smoke, forwards --out
-bth run -- uv run python script.py --smoke --out /tmp/result.json
+# ✓ Correct — smoke test run directly (not via bth run; /tmp is ok for smoke-only validation)
+uv run python script.py --smoke --out /tmp/result.json
 
 # ✗ Wrong — script sees an extra "--" argument
 bth run -- -- uv run python script.py --smoke --out /tmp/result.json
@@ -65,3 +65,24 @@ Treat `--no-sidecar` as an exceptional case. The sidecar enforces pre-registrati
 
 Prefer fixing the sidecar over bypassing it. If the sidecar is hard to write, that's a signal the experiment design needs clarification.
 
+## Output Path Convention
+
+Never pass a temp-directory path to `bth run --out`. Bathos catalogs `--out` paths as durable references.
+
+```bash
+# ✓ Correct — persistent, project-relative
+bth run --out outputs/result.json -- uv run python scripts/experiments/train.py
+
+# ✗ Wrong — /tmp is ephemeral; catalog entry becomes stale after reboot
+bth run --out /tmp/result.json -- uv run python scripts/experiments/train.py
+```
+
+Smoke-test validation runs should be executed directly (not via `bth run`) so they are never cataloged:
+
+```bash
+# ✓ Correct — smoke test is direct, not tracked
+uv run python scripts/experiments/train.py --smoke --out /tmp/test.json
+```
+
+`bth lint` will warn if the warm catalog contains runs with ephemeral output paths.
+`bth run` will warn at execution time if `--out` points to a temp directory.

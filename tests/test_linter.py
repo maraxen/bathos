@@ -205,3 +205,68 @@ def test_check_unfired_branches_detects_single_outcome(tmp_path):
     issues = check_unfired_branches(catalog_dir, min_runs=5)
     assert len(issues) > 0
     assert any("single_outcome_branch_fired" in str(i.issue) for i in issues)
+
+
+def test_check_ephemeral_output_paths_detects_tmp(tmp_path):
+    """Test that check_ephemeral_output_paths detects /tmp output paths in catalog."""
+    from datetime import UTC, datetime
+    from bathos.catalog import init_catalog, write_run
+    from bathos.compact import compact
+    from bathos.linter import check_ephemeral_output_paths
+    from bathos.schema import Run
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    init_catalog(catalog_dir)
+
+    base_time = datetime.now(UTC)
+    r = Run(
+        project_slug="test",
+        command="python train.py",
+        argv=["python", "train.py"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        timestamp=base_time,
+        status="completed",
+        exit_code=0,
+        output_paths=["/tmp/result.json"],
+    )
+    write_run(r, catalog_dir)
+    compact(catalog_dir)
+
+    issues = check_ephemeral_output_paths(catalog_dir)
+    assert len(issues) > 0
+    assert any(i.issue == "ephemeral_output_path" for i in issues)
+
+
+def test_check_ephemeral_output_paths_clean_for_persistent(tmp_path):
+    """Test that check_ephemeral_output_paths passes for persistent output paths."""
+    from datetime import UTC, datetime
+    from bathos.catalog import init_catalog, write_run
+    from bathos.compact import compact
+    from bathos.linter import check_ephemeral_output_paths
+    from bathos.schema import Run
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    init_catalog(catalog_dir)
+
+    base_time = datetime.now(UTC)
+    r = Run(
+        project_slug="test",
+        command="python train.py",
+        argv=["python", "train.py"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        timestamp=base_time,
+        status="completed",
+        exit_code=0,
+        output_paths=["/home/user/projects/myproject/outputs/result.json"],
+    )
+    write_run(r, catalog_dir)
+    compact(catalog_dir)
+
+    issues = check_ephemeral_output_paths(catalog_dir)
+    assert issues == []

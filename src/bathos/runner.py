@@ -144,6 +144,25 @@ def _write_manifest(
         return "", ""
 
 
+def _is_ephemeral_path(path: str) -> bool:
+    """Return True if path resolves under a system temp directory."""
+    p = Path(path)
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    try:
+        p.resolve().relative_to(temp_root)
+        return True
+    except ValueError:
+        pass
+    for root in (Path("/tmp"), Path("/var/tmp")):
+        if root.exists():
+            try:
+                p.resolve().relative_to(root.resolve())
+                return True
+            except ValueError:
+                pass
+    return False
+
+
 def run_script(
     argv: list[str],
     project_slug: str,
@@ -157,6 +176,17 @@ def run_script(
     campaign_id: str | None = None,
 ) -> int:
     init_telemetry()
+
+    # Warn if any registered output path is ephemeral
+    ephemeral_outs = [p for p in output_paths if _is_ephemeral_path(p)]
+    if ephemeral_outs:
+        for ep in ephemeral_outs:
+            typer.echo(
+                f"Warning: --out {ep!r} is in a temp directory and will be lost on reboot. "
+                "Use a persistent project path (e.g. outputs/) instead.",
+                err=True,
+            )
+
     script_path = _find_script_path(argv, cwd)
 
     # Calculate script SHA-256 at runtime
