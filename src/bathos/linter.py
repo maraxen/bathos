@@ -497,3 +497,68 @@ def check_threshold_basis(project_root: Path) -> list[LintIssue]:
                 ))
 
     return issues
+
+
+def check_ephemeral_output_paths(catalog_dir: Path) -> list[LintIssue]:
+    """Check for runs that registered ephemeral output paths.
+
+    Scans the warm catalog for runs where output_paths contains paths under
+    /tmp, /var/tmp, or the system temp directory.
+
+    Args:
+        catalog_dir: Path to catalog directory.
+
+    Returns:
+        List of LintIssue objects with severity WARNING.
+    """
+    import duckdb
+    import tempfile
+
+    db_path = catalog_dir / "bathos.db"
+    if not db_path.exists():
+        return []
+
+    temp_root = str(Path(tempfile.gettempdir()).resolve())
+    temp_patterns = list({"/tmp/%", "/var/tmp/%", temp_root + "/%"})
+
+    try:
+        db = duckdb.connect(str(db_path), read_only=True)
+        db.execute("SET TimeZone='UTC'")
+
+        like_clauses = " OR ".join(f"p LIKE '{pat}'" for pat in temp_patterns)
+        query = f"""
+            SELECT id, command
+            FROM runs
+            WHERE output_paths IS NOT NULL
+              AND len(output_paths) > 0
+              AND EXISTS (
+                  SELECT 1 FROM UNNEST(output_paths) AS t(p)
+                  WHERE {like_clauses}
+              )
+            LIMIT 50
+        """
+        try:
+            rows = db.execute(query).fetchall()
+        except Exception:
+            db.close()
+            return []
+
+        issues: list[LintIssue] = []
+        for run_id, command in rows:
+            issues.append(
+                LintIssue(
+                    path=catalog_dir / "bathos.db",
+                    directory="catalog",
+                    issue="ephemeral_output_path",
+                    severity=IssueSeverity.WARNING,
+                    detail=(
+                        f"Run {run_id[:8]} ({command[:40]!r}) registered a temp-dir output — "
+                        "outputs in /tmp are lost on reboot; use a persistent project path"
+                    ),
+                )
+            )
+
+        db.close()
+        return issues
+    except Exception:
+        return []
