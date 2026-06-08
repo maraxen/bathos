@@ -251,7 +251,7 @@ def repair(
 
     # Check for warm rebuild without acknowledgment
     warm_rebuild_actions = [a for a in actions if a.action == "rebuild_warm"]
-    if warm_rebuild_actions and not dry_run and not acknowledge_warm_loss:
+    if warm_rebuild_actions and not acknowledge_warm_loss:
         # Check if warm DB has postmortem annotations or output_metadata
         warn_msg = (
             "WARNING: Warm database rebuild will destroy postmortem annotations and output_metadata.\n"
