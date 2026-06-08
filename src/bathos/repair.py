@@ -980,7 +980,7 @@ def _handle_quarantine_archive(
     manifest_json_path = archive_root / "manifest.json"
     if manifest_json_path.exists():
         try:
-            with open(manifest_json_path, "r") as f:
+            with open(manifest_json_path) as f:
                 manifest_data = json.load(f)
             for entry in manifest_data.get("entries", []):
                 if entry.get("partition") == partition_path:
@@ -1017,7 +1017,7 @@ def _handle_quarantine_archive(
     manifest_json_path = archive_root / "manifest.json"
     if manifest_json_path.exists():
         try:
-            with open(manifest_json_path, "r") as f:
+            with open(manifest_json_path) as f:
                 manifest = json.load(f)
 
             # Find the entry matching this partition and mark it quarantined

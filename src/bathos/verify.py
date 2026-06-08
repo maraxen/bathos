@@ -6,7 +6,6 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import duckdb
 import pyarrow.parquet as pq
 
 logger = logging.getLogger(__name__)

@@ -44,7 +44,7 @@ def _mock_rebuild_warm_action():
 
     from bathos.repair import RepairAction
 
-    def mock_scan(cd, _tier, from_warm=False):
+    def mock_scan(cd, _tier, from_warm=False, archive_root=None):
         # Return a fake rebuild_warm action
         return [
             RepairAction(
