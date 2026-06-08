@@ -189,18 +189,17 @@ def _actions_from_cool_verify(result) -> tuple[list[RepairAction], list[str]]:
         elif "Unreadable fragment" in error:
             # Extract path and reason
             # "Unreadable fragment /path: <exception>"
-            if " " in error:
-                parts = error.split(" ", 2)
-                if len(parts) >= 3:
-                    path_part = parts[2].rstrip(":")
-                    detail = f"Quarantine corrupt fragment: {path_part}"
-                    actions.append(
-                        RepairAction(
-                            action="quarantine_corrupt",
-                            path=path_part,
-                            detail=detail,
-                        )
+            # Split on ": " to separate path from error message
+            if ": " in error:
+                path_part = error.split(": ", 1)[0].replace("Unreadable fragment ", "").strip()
+                detail = f"Quarantine corrupt fragment: {path_part}"
+                actions.append(
+                    RepairAction(
+                        action="quarantine_corrupt",
+                        path=path_part,
+                        detail=detail,
                     )
+                )
 
     return actions, warnings
 
@@ -364,6 +363,85 @@ def _handle_quarantine_bak(action: RepairAction, catalog_dir: Path) -> None:
         raise
 
 
+def _handle_quarantine_corrupt(action: RepairAction, catalog_dir: Path) -> None:
+    """Quarantine a corrupt fragment (non-empty, unreadable Parquet file).
+
+    Moves the corrupt fragment to .bth/quarantine/<slug>/YYMMDD_HHMMSS_<basename>
+    and appends a JSON manifest entry. Attempts to re-read the file after move;
+    if it succeeds, sets transient=True (likely a transient filesystem error).
+    """
+    import pyarrow.parquet as pq
+
+    path = Path(action.path)
+    if not path.exists():
+        logger.warning(f"Quarantine target not found: {path}")
+        return
+
+    # Extract project slug from path: catalog_dir/runs/<slug>/...
+    try:
+        slug = path.parent.name
+    except Exception:
+        slug = "unknown"
+
+    # Create quarantine directory
+    quarantine_dir = catalog_dir / "quarantine" / slug
+    quarantine_dir.mkdir(parents=True, exist_ok=True)
+
+    # Generate timestamped quarantine filename
+    ts_str = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+    quarantine_path = quarantine_dir / f"{ts_str}_{path.name}"
+
+    # Capture original file stat before move
+    try:
+        stat = path.stat()
+        original_size = stat.st_size
+        original_mtime = stat.st_mtime
+    except Exception:
+        original_size = -1
+        original_mtime = -1
+
+    # Move the file
+    transient = False
+    error_type = "unknown"
+    error_msg = ""
+
+    try:
+        path.rename(quarantine_path)
+        logger.info(f"Quarantined {path} → {quarantine_path}")
+
+        # Try to re-read after move; if it succeeds, mark as transient
+        try:
+            pq.read_table(str(quarantine_path))
+            transient = True
+            error_type = "transient_filesystem"
+            logger.info(f"Re-read successful after move; marking {quarantine_path} as transient")
+        except Exception as reread_error:
+            transient = False
+            error_type = type(reread_error).__name__
+            error_msg = str(reread_error)
+            logger.debug(f"Re-read failed: {error_type}: {error_msg}")
+
+        # Append manifest entry
+        manifest_entry = {
+            "ts": datetime.now(UTC).isoformat(),
+            "tier": "cool",
+            "action": "quarantine_corrupt",
+            "original_path": str(path),
+            "moved_to": str(quarantine_path),
+            "mtime_s": original_mtime,
+            "size_bytes": original_size,
+            "slug": slug,
+            "error_type": error_type,
+            "error_msg": error_msg,
+            "schema_valid": not transient,  # Schema is valid if error was transient
+            "transient": transient,
+        }
+        _append_quarantine_manifest(catalog_dir, slug, manifest_entry)
+    except Exception as e:
+        logger.error(f"Failed to quarantine {path}: {e}")
+        raise
+
+
 def _append_quarantine_manifest(catalog_dir: Path, slug: str, entry: dict) -> None:
     """Append a JSON line to the quarantine manifest for a slug."""
     manifest_path = catalog_dir / "quarantine" / slug / "manifest.jsonl"
@@ -393,17 +471,7 @@ def _execute_repair_action(action: RepairAction, catalog_dir: Path) -> None:
         _handle_quarantine_bak(action, catalog_dir)
 
     elif action.action == "quarantine_corrupt":
-        # Guard: if path ends with .tmp.parquet, re-dispatch as delete_tmp
-        # (these should have been caught as sentinels, but if mis-classified, delete them)
-        if action.path.endswith(".tmp.parquet"):
-            path = Path(action.path)
-            if path.exists():
-                path.unlink()
-                logger.info(f"Deleted mis-classified .tmp.parquet: {path}")
-        else:
-            raise NotImplementedError(
-                "TODO: implemented in downstream track C — quarantine_corrupt action handler"
-            )
+        _handle_quarantine_corrupt(action, catalog_dir)
 
     elif action.action == "backup_warm":
         raise NotImplementedError(
