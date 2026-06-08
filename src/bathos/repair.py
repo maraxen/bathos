@@ -91,7 +91,7 @@ def scan(
 
     if tier == "warm" or tier == "all":
         warm_result = verify_warm(catalog_dir)
-        warm_actions, warm_warnings = _actions_from_warm_verify(warm_result)
+        warm_actions, warm_warnings = _actions_from_warm_verify(warm_result, catalog_dir)
         actions.extend(warm_actions)
         warnings.extend(warm_warnings)
 
@@ -205,16 +205,22 @@ def _actions_from_cool_verify(result) -> tuple[list[RepairAction], list[str]]:
     return actions, warnings
 
 
-def _actions_from_warm_verify(result) -> tuple[list[RepairAction], list[str]]:
-    """Convert verify_warm errors to RepairAction objects and warnings."""
+def _actions_from_warm_verify(result, catalog_dir: Path) -> tuple[list[RepairAction], list[str]]:
+    """Convert verify_warm errors to RepairAction objects and warnings.
+
+    Args:
+        result: VerifyResult from verify_warm()
+        catalog_dir: Path to catalog directory (used to locate bathos.db)
+
+    Returns:
+        Tuple of (list of RepairAction objects, list of warning strings)
+    """
     actions: list[RepairAction] = []
     warnings: list[str] = []
+    db_path = catalog_dir / "bathos.db"
 
     for error in result.errors:
         if "Database integrity check failed" in error or "Could not open database" in error:
-            db_path = Path(result.stats.get("db_path", "") or "").resolve()
-            if not db_path.exists():
-                db_path = Path.cwd() / "bathos.db"
             detail = f"Warm database corrupt; rebuild needed: {db_path}"
             actions.append(
                 RepairAction(
@@ -226,10 +232,6 @@ def _actions_from_warm_verify(result) -> tuple[list[RepairAction], list[str]]:
 
     # Also check if warm DB is present and would fail on open (preemptive detection)
     if not actions and "db_exists" in result.stats and result.stats["db_exists"]:
-        db_path = Path(result.stats.get("db_path", "") or "").resolve()
-        if not db_path.exists():
-            db_path = Path.cwd() / "bathos.db"
-
         # Try to detect corruption by attempting to open DB
         if db_path.exists():
             from bathos.compact import CorruptDatabaseError, _open_db

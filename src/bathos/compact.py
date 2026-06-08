@@ -42,7 +42,7 @@ def _backup_warm_db(db_path: Path) -> None:
     """Create a timestamped backup of bathos.db before force_rebuild deletion.
 
     Copies bathos.db to bathos.db.bak-<YYYYMMDD_HHMMSS>. Rotates old backups,
-    keeping at most 3 files. Deletes oldest backup if count exceeds 3.
+    keeping at most 1 file. Deletes any previous backup if a new one is created.
 
     Best-effort: logs warning on failure but does not raise (compaction continues).
     """
@@ -57,18 +57,19 @@ def _backup_warm_db(db_path: Path) -> None:
         shutil.copy2(db_path, backup_path)
         logger.info(f"Created backup: {backup_path}")
 
-        # Rotate: keep only 3 most recent backups
+        # Rotate: keep only 1 backup (previous one)
         # List all .bak-* files, sorted by modification time (oldest first)
         bak_files = sorted(
             db_path.parent.glob("bathos.db.bak-*"),
             key=lambda p: p.stat().st_mtime,
         )
 
-        # If more than 3 backups, delete the oldest
-        if len(bak_files) > 3:
-            oldest = bak_files[0]
-            oldest.unlink()
-            logger.info(f"Rotated out old backup: {oldest}")
+        # If more than 1 backup exists, delete older ones
+        if len(bak_files) > 1:
+            # Keep only the newest; delete all others
+            for old_backup in bak_files[:-1]:
+                old_backup.unlink()
+                logger.info(f"Rotated out old backup: {old_backup}")
 
     except Exception as e:
         logger.warning(f"Failed to backup bathos.db before force_rebuild: {e}")
