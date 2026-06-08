@@ -26,7 +26,7 @@ class RepairAction:
 
     Attributes:
         action: Action type: "delete_tmp", "quarantine_bak", "quarantine_corrupt",
-                "backup_warm", "rebuild_warm"
+                "backup_warm", "rebuild_warm", "reexport_from_warm"
         path: Source path of the file/database affected
         detail: Human-readable description of the action
         dry_run: Always True for scan(); can be False for repair()
@@ -62,6 +62,7 @@ class RepairManifest:
 def scan(
     catalog_dir: Path | str | None = None,
     tier: str = "all",
+    from_warm: bool = False,
 ) -> tuple[list[RepairAction], list[str]]:
     """Scan the catalog and identify repair actions needed.
 
@@ -71,6 +72,7 @@ def scan(
     Args:
         catalog_dir: Catalog directory (default: ~/.bth/catalog/)
         tier: "cool", "warm", "archive", or "all"
+        from_warm: If True, detect runs present in warm DB but missing from cool fragments
 
     Returns:
         Tuple of (list of RepairAction objects, list of warning strings), actions sorted by path
@@ -103,6 +105,12 @@ def scan(
         archive_actions, archive_warnings = _actions_from_archive_verify(archive_result)
         actions.extend(archive_actions)
         warnings.extend(archive_warnings)
+
+    # Detect warm-only runs (present in warm DB but missing from cool fragments)
+    if from_warm and (tier == "warm" or tier == "all"):
+        warm_only_actions, warm_only_warnings = _actions_from_warm_only_runs(catalog_dir)
+        actions.extend(warm_only_actions)
+        warnings.extend(warm_only_warnings)
 
     # All actions from scan have dry_run=True
     for action in actions:
@@ -263,11 +271,72 @@ def _actions_from_archive_verify(_result) -> tuple[list[RepairAction], list[str]
     return [], []
 
 
+def _actions_from_warm_only_runs(catalog_dir: Path) -> tuple[list[RepairAction], list[str]]:
+    """Detect runs present in warm DB but missing from cool fragments.
+
+    Returns RepairAction objects with action="reexport_from_warm" for each warm-only run.
+
+    Returns:
+        Tuple of (list of RepairAction objects, list of warning strings)
+    """
+    import duckdb
+
+    actions: list[RepairAction] = []
+    warnings: list[str] = []
+
+    db_path = catalog_dir / "bathos.db"
+    if not db_path.exists():
+        # No warm DB; nothing to re-export
+        return [], []
+
+    # Read all cool fragment UUIDs
+    try:
+        from bathos.catalog import read_runs
+
+        cool_runs = read_runs(catalog_dir)
+        cool_uuids = {run.id for run in cool_runs}
+    except Exception as e:
+        warnings.append(f"Could not read cool fragments for warm-only detection: {e}")
+        return [], warnings
+
+    # Query warm DB for all run UUIDs
+    try:
+        con = duckdb.connect(str(db_path), read_only=True)
+        try:
+            warm_rows = con.execute("SELECT id FROM runs").fetchall()
+            warm_uuids = {row[0] for row in warm_rows}
+        finally:
+            con.close()
+    except Exception as e:
+        warnings.append(f"Could not query warm DB for run UUIDs: {e}")
+        return [], warnings
+
+    # Find warm-only UUIDs
+    warm_only_uuids = warm_uuids - cool_uuids
+
+    if not warm_only_uuids:
+        return [], []
+
+    # Create an action for each warm-only run
+    for run_uuid in sorted(warm_only_uuids):
+        detail = f"Re-export warm run {run_uuid} to cool fragments"
+        actions.append(
+            RepairAction(
+                action="reexport_from_warm",
+                path=str(db_path),
+                detail=detail,
+            )
+        )
+
+    return actions, warnings
+
+
 def repair(
     catalog_dir: Path | str | None = None,
     tier: str = "all",
     dry_run: bool = False,
     acknowledge_warm_loss: bool = False,
+    from_warm: bool = False,
 ) -> RepairManifest:
     """Execute repair actions on the catalog.
 
@@ -281,6 +350,7 @@ def repair(
         tier: "cool", "warm", "archive", or "all"
         dry_run: If True, plan actions but don't execute them
         acknowledge_warm_loss: If True and warm rebuild is needed, proceed anyway
+        from_warm: If True, detect and re-export runs present in warm DB but missing from cool
 
     Returns:
         RepairManifest with actions taken and any warnings
@@ -295,7 +365,7 @@ def repair(
     run_ts = datetime.now(UTC).isoformat()
 
     # Scan for actions needed
-    actions, scan_warnings = scan(catalog_dir, tier)
+    actions, scan_warnings = scan(catalog_dir, tier, from_warm=from_warm)
 
     # Check for warm rebuild without acknowledgment
     warm_rebuild_actions = [a for a in actions if a.action == "rebuild_warm"]
@@ -554,6 +624,9 @@ def _execute_repair_action(action: RepairAction, catalog_dir: Path) -> None:
     elif action.action == "rebuild_warm":
         _handle_rebuild_warm(action, catalog_dir)
 
+    elif action.action == "reexport_from_warm":
+        _handle_reexport_from_warm(action, catalog_dir)
+
     else:
         raise ValueError(f"Unknown repair action: {action.action}")
 
@@ -578,3 +651,154 @@ def _handle_rebuild_warm(action: RepairAction, catalog_dir: Path) -> None:
     except Exception as e:
         logger.error(f"Failed to rebuild warm database: {e}")
         raise
+
+
+def _handle_reexport_from_warm(action: RepairAction, catalog_dir: Path) -> None:
+    """Re-export warm runs back to cool fragments.
+
+    Scans warm DB (bathos.db) for runs missing from cool fragments, reconstructs
+    Run dataclass objects from warm rows, and writes them back to cool-tier Parquet
+    fragments using catalog.write_run().
+
+    Skips runs with NULL metadata or other warm-only fields, logging warnings.
+    Does not overwrite existing cool fragments (checks first).
+
+    Args:
+        action: RepairAction with action="reexport_from_warm"
+        catalog_dir: Catalog directory
+    """
+    import duckdb
+
+    from bathos.catalog import read_runs, write_run
+    from bathos.schema import Run
+
+    db_path = Path(action.path)
+    logger.info(f"Re-exporting warm runs to cool fragments from {db_path}")
+
+    if not db_path.exists():
+        logger.warning(f"Warm database not found: {db_path}")
+        return
+
+    # Read all cool fragment UUIDs
+    try:
+        cool_runs = read_runs(catalog_dir)
+        cool_uuids = {run.id for run in cool_runs}
+    except Exception as e:
+        logger.error(f"Could not read cool fragments for re-export: {e}")
+        raise
+
+    # Get column names for reconstruction (to handle schema variations)
+    try:
+        con = duckdb.connect(str(db_path), read_only=True)
+        try:
+            col_info = con.execute("PRAGMA table_info(runs)").fetchall()
+            col_names = [col[1] for col in col_info]  # col[1] is the column name
+        finally:
+            con.close()
+    except Exception as e:
+        logger.error(f"Could not get warm DB column names: {e}")
+        raise
+
+    # Open warm DB and query all runs
+    try:
+        con = duckdb.connect(str(db_path), read_only=True)
+        try:
+            # Fetch all columns from runs table
+            warm_rows = con.execute(
+                f"SELECT {', '.join(col_names)} FROM runs ORDER BY timestamp DESC"
+            ).fetchall()
+        finally:
+            con.close()
+    except Exception as e:
+        logger.error(f"Could not query warm DB for re-export: {e}")
+        raise
+
+    reexported = 0
+    skipped_existing = 0
+    skipped_null_metadata = 0
+
+    # Process each warm run
+    for warm_row in warm_rows:
+        # Create dict from row
+        row_dict = dict(zip(col_names, warm_row))
+        run_uuid = row_dict.get("id")
+
+        # Skip runs already in cool tier
+        if run_uuid in cool_uuids:
+            skipped_existing += 1
+            continue
+
+        # Skip runs with NULL metadata (warm-only data that can't be safely re-exported)
+        if row_dict.get("metadata") is None:
+            skipped_null_metadata += 1
+            logger.warning(f"Skipped run {run_uuid}: NULL metadata (warm-only data)")
+            continue
+
+        # Reconstruct Run object from warm row
+        # Only include fields that exist in cool schema (exclude metadata and output_metadata)
+        try:
+            run = Run(
+                id=run_uuid,
+                project_slug=row_dict.get("project_slug", ""),
+                command=row_dict.get("command", ""),
+                argv=row_dict.get("argv", []),
+                git_hash=row_dict.get("git_hash", ""),
+                git_branch=row_dict.get("git_branch", ""),
+                git_dirty=bool(row_dict.get("git_dirty", False)),
+                timestamp=row_dict.get("timestamp") or datetime.now(UTC),
+                duration_s=float(row_dict.get("duration_s", 0.0)),
+                exit_code=int(row_dict.get("exit_code", -1)),
+                status=row_dict.get("status", ""),
+                output_paths=row_dict.get("output_paths", []),
+                tags=row_dict.get("tags", []),
+                schema_version=row_dict.get("schema_version", "6"),
+                slurm_job_id=row_dict.get("slurm_job_id", ""),
+                slurm_array_task_id=row_dict.get("slurm_array_task_id", ""),
+                hostname=row_dict.get("hostname", ""),
+                outcome=row_dict.get("outcome", ""),
+                sidecar_sha256=row_dict.get("sidecar_sha256", ""),
+                sidecar_path=row_dict.get("sidecar_path", ""),
+                parent_run_id=row_dict.get("parent_run_id", ""),
+                agent_mode=row_dict.get("agent_mode", ""),
+                sidecar_mode=row_dict.get("sidecar_mode", ""),
+                outcome_is_residual=bool(row_dict.get("outcome_is_residual", False)),
+                skill_sha256=row_dict.get("skill_sha256", ""),
+                campaign_id=row_dict.get("campaign_id", ""),
+                script_sha256=row_dict.get("script_sha256", ""),
+                postmortem_status=row_dict.get("postmortem_status", "unassigned"),
+                postmortem_override=row_dict.get("postmortem_override", "none"),
+                postmortem_verdict_override=row_dict.get("postmortem_verdict_override", "none"),
+                postmortem_author=row_dict.get("postmortem_author", ""),
+                postmortem_path=row_dict.get("postmortem_path", ""),
+                postmortem_hypothesis_status=row_dict.get("postmortem_hypothesis_status", "unassigned"),
+                postmortem_has_anomalies=bool(row_dict.get("postmortem_has_anomalies", False)),
+                postmortem_summary=row_dict.get("postmortem_summary", ""),
+                postmortem_asset_links=row_dict.get("postmortem_asset_links", "{}"),
+                manifest_sha256=row_dict.get("manifest_sha256", ""),
+                manifest_path=row_dict.get("manifest_path", ""),
+                outcome_error_reason=row_dict.get("outcome_error_reason", ""),
+                adversarial_check_status=row_dict.get("adversarial_check_status", ""),
+            )
+
+            # Check if cool fragment already exists (safety check)
+            cool_fragment_path = catalog_dir / "runs" / run.project_slug / f"run_{run.id}.parquet"
+            if cool_fragment_path.exists():
+                logger.warning(f"Cool fragment already exists for run {run.id}; skipping")
+                skipped_existing += 1
+                continue
+
+            # Write the run to cool tier
+            write_run(run, catalog_dir)
+            logger.info(f"Re-exported run {run.id} to {cool_fragment_path}")
+            reexported += 1
+
+        except Exception as e:
+            logger.error(f"Failed to re-export run {run_uuid}: {e}")
+            # Continue processing other runs on error
+
+    # Update action detail
+    action.detail = (
+        f"Re-exported {reexported} warm runs to cool fragments "
+        f"(skipped {skipped_existing} existing, {skipped_null_metadata} with null metadata)"
+    )
+    logger.info(action.detail)
