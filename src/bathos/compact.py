@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
-import os
 import shutil
 import time
 from collections.abc import Callable
@@ -460,10 +460,8 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
         "ALTER TABLE campaign_runs ADD COLUMN IF NOT EXISTS seq_position INTEGER",
         "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS stopping_threshold REAL",
     ]:
-        try:
+        with contextlib.suppress(Exception):
             con.execute(_alter_sql)
-        except Exception:
-            pass
 
     con.execute(
         "CREATE INDEX IF NOT EXISTS idx_campaigns_mode_status ON campaigns (mode, status)"
@@ -484,10 +482,10 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                 pm, rel_path = postmortem_map[run.id]
                 postmortem_verdict_override = pm.verdict_override
                 postmortem_has_anomalies = any(v and str(v).lower() != "none" for v in getattr(pm, "anomalies", {}).values())
-                
+
                 curr_outcome = con.execute("SELECT outcome FROM runs WHERE id = ?", [run.id]).fetchone()[0] or ""
                 outcome = postmortem_verdict_override if postmortem_verdict_override != "none" else curr_outcome
-                
+
                 con.execute(
                     """
                     UPDATE runs SET

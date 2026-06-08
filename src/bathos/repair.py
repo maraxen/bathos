@@ -231,23 +231,22 @@ def _actions_from_warm_verify(result, catalog_dir: Path) -> tuple[list[RepairAct
             )
 
     # Also check if warm DB is present and would fail on open (preemptive detection)
-    if not actions and "db_exists" in result.stats and result.stats["db_exists"]:
+    if not actions and "db_exists" in result.stats and result.stats["db_exists"] and db_path.exists():
         # Try to detect corruption by attempting to open DB
-        if db_path.exists():
-            from bathos.compact import CorruptDatabaseError, _open_db
+        from bathos.compact import CorruptDatabaseError, _open_db
 
-            try:
-                con = _open_db(db_path)
-                con.close()
-            except CorruptDatabaseError:
-                detail = f"Warm database corrupt; rebuild needed: {db_path}"
-                actions.append(
-                    RepairAction(
-                        action="rebuild_warm",
-                        path=str(db_path),
-                        detail=detail,
-                    )
+        try:
+            con = _open_db(db_path)
+            con.close()
+        except CorruptDatabaseError:
+            detail = f"Warm database corrupt; rebuild needed: {db_path}"
+            actions.append(
+                RepairAction(
+                    action="rebuild_warm",
+                    path=str(db_path),
+                    detail=detail,
                 )
+            )
 
     return actions, warnings
 
@@ -301,15 +300,6 @@ def repair(
     # Check for warm rebuild without acknowledgment
     warm_rebuild_actions = [a for a in actions if a.action == "rebuild_warm"]
     if warm_rebuild_actions and not acknowledge_warm_loss:
-        # Get list of affected run UUIDs from cool fragments
-        from bathos.catalog import read_runs
-
-        try:
-            cool_runs = read_runs(catalog_dir)
-            run_uuids = [run.id for run in cool_runs]
-        except Exception:
-            run_uuids = []
-
         # Check if warm DB has postmortem annotations or output_metadata
         postmortem_count = 0
         output_metadata_count = 0
@@ -336,20 +326,34 @@ def repair(
             except Exception as e:
                 logger.debug(f"Could not query warm DB for at-risk data: {e}")
 
-        # Print the warning message with concrete counts
-        warn_msg = (
-            f"WARNING: Warm database rebuild will destroy warm-only data:\n"
-            f"  - {postmortem_count} postmortem annotation(s)\n"
-            f"  - {output_metadata_count} output_metadata entry(ies)\n"
-            f"  - {len(run_uuids)} run(s) affected: {', '.join(run_uuids[:5])}"
-        )
-        if len(run_uuids) > 5:
-            warn_msg += f" ... and {len(run_uuids) - 5} more"
+        # Only raise gate if there's actual warm-only data to lose
+        if postmortem_count > 0 or output_metadata_count > 0:
+            # Get list of affected run UUIDs from cool fragments for context
+            from bathos.catalog import read_runs
 
-        warn_msg += "\n\nTo proceed, pass --acknowledge-warm-loss"
-        print(warn_msg, file=sys.stderr)
-        logger.error(warn_msg)
-        raise SystemExit(1)
+            try:
+                cool_runs = read_runs(catalog_dir)
+                run_uuids = [run.id for run in cool_runs]
+            except Exception:
+                run_uuids = []
+
+            # Print the warning message with concrete counts
+            warn_msg = (
+                f"WARNING: Warm database rebuild will destroy warm-only data:\n"
+                f"  - {postmortem_count} postmortem annotation(s)\n"
+                f"  - {output_metadata_count} output_metadata entry(ies)\n"
+                f"  - {len(run_uuids)} run(s) affected: {', '.join(run_uuids[:5])}"
+            )
+            if len(run_uuids) > 5:
+                warn_msg += f" ... and {len(run_uuids) - 5} more"
+
+            warn_msg += "\n\nTo proceed, pass --acknowledge-warm-loss"
+            print(warn_msg, file=sys.stderr)
+            logger.error(warn_msg)
+            raise SystemExit(1)
+        else:
+            # No warm-only data at risk; proceed silently
+            logger.info("Warm database rebuild will not lose any warm-only data (postmortem_count=0, output_metadata_count=0); proceeding")
 
     manifest = RepairManifest(
         run_ts=run_ts,
