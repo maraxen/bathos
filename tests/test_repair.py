@@ -398,7 +398,8 @@ class TestCorruptQuarantineGWT45:
         actions, warnings = scan(tmp_catalog, tier="cool")
 
         corrupt_actions = [a for a in actions if a.action == "quarantine_corrupt"]
-        assert len(corrupt_actions) >= 1, f"Expected at least 1 quarantine_corrupt action, got {len(corrupt_actions)}"
+        assert len(corrupt_actions) == 1, f"Expected exactly 1 quarantine_corrupt action, got {len(corrupt_actions)}"
+        assert str(corrupt_frag) in corrupt_actions[0].path, f"Expected corrupt_frag in action path, got {corrupt_actions[0].path}"
 
     def test_dry_run_leaves_corrupt_file_in_place(self, tmp_catalog: Path):
         """GWT-4.2: dry_run=True leaves corrupt fragment untouched."""

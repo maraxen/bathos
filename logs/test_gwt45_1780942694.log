@@ -1,0 +1,12 @@
+[1m============================= test session starts ==============================[0m
+platform linux -- Python 3.12.3, pytest-9.0.3, pluggy-1.6.0
+rootdir: /home/marielle/projects/bathos/.claude/worktrees/repair-spec-260608
+configfile: pyproject.toml
+plugins: metadata-3.1.1, anyio-4.13.0, pytest_tmp_files-0.0.2, json-report-1.5.0
+collected 7 items
+
+tests/test_repair.py [32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m                                             [100%][0m
+
+--------------------------------- JSON report ----------------------------------
+report saved to: tmp/pytest.json
+[32m============================== [32m[1m7 passed[0m[32m in 0.36s[0m[32m ===============================[0m

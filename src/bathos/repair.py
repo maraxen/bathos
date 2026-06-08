@@ -226,7 +226,7 @@ def _actions_from_warm_verify(result) -> tuple[list[RepairAction], list[str]]:
     return actions, warnings
 
 
-def _actions_from_archive_verify(result) -> tuple[list[RepairAction], list[str]]:
+def _actions_from_archive_verify(_result) -> tuple[list[RepairAction], list[str]]:
     """Convert verify_archive errors to RepairAction objects and warnings.
 
     Archive repair is a P2 backlog item; for MVP scope, we only log errors.
