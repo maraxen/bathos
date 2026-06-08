@@ -441,9 +441,10 @@ def repair(
     warm_rebuild_actions = [a for a in actions if a.action == "rebuild_warm"]
     if warm_rebuild_actions and not acknowledge_warm_loss:
         # Check if warm DB has postmortem annotations or output_metadata
+        db_path = catalog_dir / "bathos.db"
+        db_queryable = False
         postmortem_count = 0
         output_metadata_count = 0
-        db_path = catalog_dir / "bathos.db"
         if db_path.exists():
             try:
                 import duckdb
@@ -461,13 +462,15 @@ def repair(
                         "SELECT COUNT(*) FROM runs WHERE output_metadata IS NOT NULL AND output_metadata != '[]'"
                     ).fetchone()
                     output_metadata_count = om_result[0] if om_result else 0
+                    db_queryable = True
                 finally:
                     con.close()
             except Exception as e:
                 logger.debug(f"Could not query warm DB for at-risk data: {e}")
+                # db_queryable remains False — treat unreadable DB as data-at-risk
 
-        # Only raise gate if there's actual warm-only data to lose
-        if postmortem_count > 0 or output_metadata_count > 0:
+        # Gate fires when: DB unreadable (cannot verify safety) OR known warm-only data at risk
+        if not db_queryable or postmortem_count > 0 or output_metadata_count > 0:
             # Get list of affected run UUIDs from cool fragments for context
             from bathos.catalog import read_runs
 
@@ -492,7 +495,7 @@ def repair(
             logger.error(warn_msg)
             raise SystemExit(1)
         else:
-            # No warm-only data at risk; proceed silently
+            # DB is queryable and no warm-only data at risk; proceed safely
             logger.info("Warm database rebuild will not lose any warm-only data (postmortem_count=0, output_metadata_count=0); proceeding")
 
     manifest = RepairManifest(

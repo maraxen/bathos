@@ -5,6 +5,7 @@ Covers cool-tier sentinel cleanup, corrupt fragment quarantine, and warm-tier
 database corruption detection and backup/rebuild.
 """
 
+import contextlib
 import json
 import os
 from datetime import UTC, datetime
@@ -15,13 +16,10 @@ import pytest
 
 from bathos.catalog import init_catalog, write_run
 from bathos.repair import (
-    RepairAction,
-    RepairManifest,
     repair,
     scan,
 )
 from bathos.schema import Run
-
 
 # =============================================================================
 # FIXTURES
@@ -40,7 +38,7 @@ def clean_catalog(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def catalog_with_sentinels(tmp_path: Path, sample_run: Run) -> Path:
+def catalog_with_sentinels(tmp_path: Path) -> Path:
     """Create runs/myslug/ with:
     - run_abc.parquet (valid fragment)
     - run_old.parquet.tmp (orphaned atomic write, old mtime)
@@ -96,7 +94,7 @@ def catalog_with_sentinels(tmp_path: Path, sample_run: Run) -> Path:
 
 
 @pytest.fixture
-def catalog_with_corrupt_fragment(tmp_path: Path, sample_run: Run) -> Path:
+def catalog_with_corrupt_fragment(tmp_path: Path) -> Path:
     """Create a catalog with:
     - one valid fragment
     - one zero-byte (corrupt) fragment with old mtime
@@ -139,7 +137,7 @@ def catalog_with_corrupt_fragment(tmp_path: Path, sample_run: Run) -> Path:
 
 
 @pytest.fixture
-def catalog_with_corrupt_warm_db(tmp_path: Path, sample_run: Run) -> Path:
+def catalog_with_corrupt_warm_db(tmp_path: Path) -> Path:
     """Create valid cool fragments and a corrupt warm DB."""
     catalog = tmp_path / ".bth" / "catalog"
     catalog.mkdir(parents=True)
@@ -263,6 +261,9 @@ class TestSentinelCleanup:
         assert quarantine_dir.exists()
         assert (quarantine_dir / "manifest.jsonl").exists()
 
+        # Should have warning about quarantining stale backup
+        assert any("in-flight" in w or "fresh" in w.lower() for w in manifest.warnings)
+
 
 # =============================================================================
 # TESTS: CORRUPT FRAGMENT QUARANTINE
@@ -313,6 +314,8 @@ class TestCorruptFragmentQuarantine:
         manifest2 = repair(catalog_with_corrupt_fragment, tier="cool", dry_run=False)
         actions2_count = len(manifest2.actions)
 
+        # First repair should have found actions
+        assert actions1_count >= 1
         # Second repair should find nothing to do
         assert actions2_count == 0
 
@@ -326,22 +329,19 @@ class TestWarmTierProtection:
     """Test warm-tier corruption detection and --acknowledge-warm-loss gate."""
 
     def test_warm_loss_gate_exits_1(self, catalog_with_corrupt_warm_db: Path):
-        """Repair on corrupt DB without warm-only data should proceed without error.
+        """Repair on corrupt DB raises gate even without warm-only data.
 
-        The gate only raises SystemExit if there's warm-only data (postmortem or output_metadata).
-        If the warm DB is corrupted and has no warm-only data, repair proceeds automatically.
+        The gate raises SystemExit if DB is unqueryable OR there's warm-only data.
+        A corrupt DB is treated as data-at-risk (conservative approach).
         """
-        # Should proceed without raising SystemExit (no warm-only data at risk)
-        manifest = repair(
-            catalog_with_corrupt_warm_db,
-            tier="all",
-            dry_run=False,
-            acknowledge_warm_loss=False,
-        )
-
-        # Repair should succeed
-        assert manifest is not None
-        assert isinstance(manifest, RepairManifest)
+        # Should raise SystemExit due to unqueryable DB
+        with pytest.raises(SystemExit):
+            repair(
+                catalog_with_corrupt_warm_db,
+                tier="all",
+                dry_run=False,
+                acknowledge_warm_loss=False,
+            )
 
     def test_warm_loss_gate_rebuilds_with_ack(self, catalog_with_corrupt_warm_db: Path):
         """Repair with acknowledge_warm_loss=True rebuilds the warm DB."""
@@ -366,20 +366,25 @@ class TestWarmTierProtection:
         con.close()
 
     def test_bak_rotation_cap(self, catalog_with_corrupt_warm_db: Path):
-        """Multiple rebuilds keep at most 1 .bak file (rotation cap)."""
+        """Multiple rebuilds keep exactly 3 .bak files (rotation cap)."""
+        import time
+
+        db_path = catalog_with_corrupt_warm_db / "bathos.db"
         for i in range(4):
-            try:
+            # Corrupt the DB before each repair to ensure rebuild is triggered
+            db_path.write_bytes(b"NOTADB" * 100)
+            with contextlib.suppress(Exception):
                 repair(
                     catalog_with_corrupt_warm_db,
                     tier="all",
                     dry_run=False,
                     acknowledge_warm_loss=True,
                 )
-            except Exception:
-                pass
+            # Sleep to ensure different backup timestamp (second granularity)
+            time.sleep(1.1)
 
         bak_files = list(catalog_with_corrupt_warm_db.glob("bathos.db.bak*"))
-        assert len(bak_files) <= 1
+        assert len(bak_files) == 3
 
 
 # =============================================================================
@@ -415,7 +420,7 @@ class TestMCPMirror:
 class TestIntegration:
     """Integration tests combining multiple repair operations."""
 
-    def test_integration_sentinel_plus_corrupt(self, tmp_path: Path, sample_run: Run):
+    def test_integration_sentinel_plus_corrupt(self, tmp_path: Path):
         """Both sentinel and corrupt fragment repairs applied, then compact succeeds.
 
         This test verifies that after repair cleans up sentinels and quarantines
@@ -470,7 +475,7 @@ class TestIntegration:
             from bathos.compact import compact
 
             try:
-                compact_result = compact(catalog)
+                compact(catalog)
                 # Compact should succeed and create the DB
                 assert (catalog / "bathos.db").exists()
             except Exception as e:
@@ -488,7 +493,7 @@ class TestIntegration:
 class TestReexportFromWarm:
     """Test warm->cool re-export: runs present in warm DB but missing from cool."""
 
-    def test_detect_warm_only_runs_in_scan(self, tmp_path: Path, sample_run: Run):
+    def test_detect_warm_only_runs_in_scan(self, tmp_path: Path):
         """Scan with from_warm=True detects runs in warm DB but missing from cool.
 
         Setup:
@@ -628,7 +633,7 @@ class TestReexportFromWarm:
             if "BTH_CATALOG_DIR" in os.environ:
                 del os.environ["BTH_CATALOG_DIR"]
 
-    def test_reexport_from_warm_executes(self, tmp_path: Path, sample_run: Run):
+    def test_reexport_from_warm_executes(self, tmp_path: Path):
         """Repair with reexport_from_warm action writes missing runs back to cool.
 
         Setup:
@@ -778,7 +783,7 @@ class TestReexportFromWarm:
             if "BTH_CATALOG_DIR" in os.environ:
                 del os.environ["BTH_CATALOG_DIR"]
 
-    def test_reexport_compact_preserves_run_count(self, tmp_path: Path, sample_run: Run):
+    def test_reexport_compact_preserves_run_count(self, tmp_path: Path):
         """Spec check 3: After repair(from_warm=True), compact() must produce the same run count as original warm DB.
 
         Setup:
@@ -923,11 +928,11 @@ class TestReexportFromWarm:
             uuid1_fragment.unlink()
 
             # Run repair(from_warm=True) to re-export uuid2
-            manifest = repair(catalog, tier="warm", dry_run=False, from_warm=True)
+            repair(catalog, tier="warm", dry_run=False, from_warm=True)
 
             # Compact to rebuild warm from cool
             from bathos.compact import compact
-            result = compact(catalog, force_rebuild=False)
+            compact(catalog, force_rebuild=False)
 
             # Count warm DB runs after compact
             con = duckdb.connect(str(db_path), read_only=True)
@@ -937,8 +942,8 @@ class TestReexportFromWarm:
             # Both uuid1 and uuid2 should be in cool fragments now (uuid2 via re-export)
             uuid1_fragment = slug_dir / f"run_{uuid1}.parquet"
             uuid2_fragment = slug_dir / f"run_{uuid2}.parquet"
-            assert uuid1_fragment.exists(), f"uuid1 fragment should exist after re-export"
-            assert uuid2_fragment.exists(), f"uuid2 fragment should exist after re-export"
+            assert uuid1_fragment.exists(), "uuid1 fragment should exist after re-export"
+            assert uuid2_fragment.exists(), "uuid2 fragment should exist after re-export"
 
             # Warm DB should have the same count
             assert final_count == initial_count, f"Expected {initial_count} runs after compact, got {final_count}"
@@ -946,7 +951,7 @@ class TestReexportFromWarm:
             if "BTH_CATALOG_DIR" in os.environ:
                 del os.environ["BTH_CATALOG_DIR"]
 
-    def test_reexport_idempotent(self, tmp_path: Path, sample_run: Run):
+    def test_reexport_idempotent(self, tmp_path: Path):
         """Spec check 4: Re-running repair(from_warm=True) must be a no-op.
 
         Setup:
@@ -1086,7 +1091,7 @@ class TestReexportFromWarm:
 
             # uuid2 fragment should now exist
             uuid2_fragment = slug_dir / f"run_{uuid2}.parquet"
-            assert uuid2_fragment.exists(), f"uuid2 fragment should be written by first repair"
+            assert uuid2_fragment.exists(), "uuid2 fragment should be written by first repair"
 
             # Second repair call - should find no warm-only runs
             manifest2 = repair(catalog, tier="warm", dry_run=False, from_warm=True)
@@ -1096,7 +1101,7 @@ class TestReexportFromWarm:
             if "BTH_CATALOG_DIR" in os.environ:
                 del os.environ["BTH_CATALOG_DIR"]
 
-    def test_reexport_null_metadata_warning(self, tmp_path: Path, sample_run: Run):
+    def test_reexport_null_metadata_warning(self, tmp_path: Path):
         """Spec check 5: Runs with NULL metadata should be skipped and added to manifest.warnings.
 
         Setup:
@@ -1225,6 +1230,121 @@ class TestReexportFromWarm:
             # uuid_null should NOT be re-exported
             uuid_null_fragment = slug_dir / f"run_{uuid_null}.parquet"
             assert not uuid_null_fragment.exists(), f"NULL-metadata run {uuid_null} should NOT be re-exported"
+        finally:
+            if "BTH_CATALOG_DIR" in os.environ:
+                del os.environ["BTH_CATALOG_DIR"]
+
+    def test_reexport_dry_run_no_files_created(self, tmp_path: Path):
+        """Spec: dry_run=True for reexport does not create cool fragments.
+
+        Setup:
+        - Create warm DB with one warm-only run
+        - Call repair(from_warm=True, dry_run=True)
+        Expected: No cool fragments created, dry_run=True in manifest, reexport action in manifest
+        """
+        from uuid import uuid4
+
+        catalog = tmp_path / ".bth" / "catalog"
+        catalog.mkdir(parents=True)
+        init_catalog(catalog)
+
+        slug_dir = catalog / "runs" / "testproj"
+        slug_dir.mkdir(parents=True, exist_ok=True)
+
+        uuid_warm_only = str(uuid4())
+
+        # Create warm DB with one warm-only UUID (no cool fragments)
+        db_path = catalog / "bathos.db"
+        con = duckdb.connect(str(db_path))
+        try:
+            con.execute(
+                """
+                CREATE TABLE _schema_meta (key TEXT PRIMARY KEY, value TEXT)
+                """
+            )
+            con.execute(
+                """
+                CREATE TABLE runs (
+                    id TEXT PRIMARY KEY,
+                    project_slug TEXT,
+                    command TEXT,
+                    argv TEXT[],
+                    git_hash TEXT,
+                    git_branch TEXT,
+                    git_dirty BOOLEAN,
+                    timestamp TIMESTAMP WITH TIME ZONE,
+                    duration_s DOUBLE,
+                    exit_code INTEGER,
+                    status TEXT,
+                    output_paths TEXT[],
+                    tags TEXT[],
+                    schema_version TEXT,
+                    slurm_job_id TEXT,
+                    slurm_array_task_id TEXT,
+                    hostname TEXT,
+                    metadata TEXT,
+                    outcome TEXT,
+                    output_metadata TEXT,
+                    sidecar_sha256 TEXT,
+                    sidecar_path TEXT,
+                    parent_run_id TEXT,
+                    agent_mode TEXT,
+                    sidecar_mode TEXT,
+                    outcome_is_residual BOOLEAN,
+                    skill_sha256 TEXT,
+                    campaign_id TEXT,
+                    script_sha256 TEXT,
+                    postmortem_status TEXT,
+                    postmortem_override TEXT,
+                    postmortem_verdict_override TEXT,
+                    postmortem_author TEXT,
+                    postmortem_path TEXT,
+                    postmortem_hypothesis_status TEXT,
+                    postmortem_has_anomalies BOOLEAN,
+                    postmortem_summary TEXT,
+                    postmortem_asset_links TEXT,
+                    manifest_sha256 TEXT,
+                    manifest_path TEXT,
+                    outcome_error_reason TEXT,
+                    adversarial_check_status TEXT
+                )
+                """
+            )
+
+            # Insert one warm-only run
+            con.execute(
+                f"""
+                INSERT INTO runs VALUES (
+                    '{uuid_warm_only}', 'testproj', 'python run.py', ['python', 'run.py'],
+                    'deadbeef', 'main', false,
+                    '2026-01-01 00:00:00+00:00'::TIMESTAMP WITH TIME ZONE,
+                    1.0, 0, 'completed', [], [], '6',
+                    '', '', '', '{{}}', '', '[]',
+                    '', '', '', '', '', false, '', '',
+                    '', 'unassigned', 'none', 'none', '', '',
+                    'unassigned', false, '', '{{}}', '', '', '', ''
+                )
+                """
+            )
+        finally:
+            con.close()
+
+        os.environ["BTH_CATALOG_DIR"] = str(catalog)
+
+        try:
+            # Call repair with from_warm=True and dry_run=True
+            manifest = repair(catalog, tier="warm", dry_run=True, from_warm=True)
+
+            # Cool fragment should NOT be created (dry_run=True)
+            uuid_fragment = slug_dir / f"run_{uuid_warm_only}.parquet"
+            assert not uuid_fragment.exists(), "dry_run=True should not create cool fragments"
+
+            # Manifest should have dry_run=True
+            assert manifest.dry_run is True
+
+            # Manifest should have reexport_from_warm action
+            reexport_actions = [a for a in manifest.actions if a.action == "reexport_from_warm"]
+            assert len(reexport_actions) > 0, "Should have reexport_from_warm action in manifest"
         finally:
             if "BTH_CATALOG_DIR" in os.environ:
                 del os.environ["BTH_CATALOG_DIR"]
