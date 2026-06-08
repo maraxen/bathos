@@ -145,6 +145,26 @@ def _actions_from_cool_verify(result) -> list[RepairAction]:
         elif "Interrupted migration: backup file exists" in error:
             # Extract path
             path_part = error.split(" at ", 1)[-1]
+            path_obj = Path(path_part)
+
+            # Check mtime guard: skip files with mtime < 60s (migration in progress)
+            try:
+                mtime_unix = path_obj.stat().st_mtime
+                age_s = (datetime.now(UTC).timestamp() - mtime_unix)
+                if age_s < 60:
+                    detail = f"Skip: {path_part} (in-flight migration, age {age_s:.0f}s)"
+                    actions.append(
+                        RepairAction(
+                            action="skip_bak_young",
+                            path=path_part,
+                            detail=detail,
+                        )
+                    )
+                    continue
+            except (OSError, ValueError):
+                pass
+
+            # Old .bak files should be quarantined
             detail = f"Quarantine .bak file: {path_part}"
             actions.append(
                 RepairAction(
@@ -292,6 +312,68 @@ def repair(
     return manifest
 
 
+def _handle_quarantine_bak(action: RepairAction, catalog_dir: Path) -> None:
+    """Quarantine a .bak file (orphaned migration backup).
+
+    Moves the .bak file to .bth/quarantine/<slug>/YYMMDD_HHMMSS_<basename>
+    and appends a JSON manifest entry.
+    """
+    path = Path(action.path)
+    if not path.exists():
+        logger.warning(f"Quarantine target not found: {path}")
+        return
+
+    # Extract project slug from path: catalog_dir/runs/<slug>/...
+    try:
+        slug = path.parent.name
+    except Exception:
+        slug = "unknown"
+
+    # Create quarantine directory
+    quarantine_dir = catalog_dir / "quarantine" / slug
+    quarantine_dir.mkdir(parents=True, exist_ok=True)
+
+    # Generate timestamped quarantine filename
+    ts_str = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+    quarantine_path = quarantine_dir / f"{ts_str}_{path.name}"
+
+    # Move the file
+    try:
+        stat = path.stat()
+        path.rename(quarantine_path)
+        logger.info(f"Quarantined {path} → {quarantine_path}")
+
+        # Append manifest entry
+        manifest_entry = {
+            "ts": datetime.now(UTC).isoformat(),
+            "tier": "cool",
+            "action": "quarantine_bak",
+            "original_path": str(path),
+            "moved_to": str(quarantine_path),
+            "mtime_s": stat.st_mtime,
+            "size_bytes": stat.st_size,
+            "slug": slug,
+        }
+        _append_quarantine_manifest(catalog_dir, slug, manifest_entry)
+    except Exception as e:
+        logger.error(f"Failed to quarantine {path}: {e}")
+        raise
+
+
+def _append_quarantine_manifest(catalog_dir: Path, slug: str, entry: dict) -> None:
+    """Append a JSON line to the quarantine manifest for a slug."""
+    manifest_path = catalog_dir / "quarantine" / slug / "manifest.jsonl"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with open(manifest_path, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+        logger.info(f"Appended manifest entry to {manifest_path}")
+    except Exception as e:
+        logger.error(f"Failed to append manifest entry: {e}")
+        raise
+
+
 def _execute_repair_action(action: RepairAction, catalog_dir: Path) -> None:
     """Execute a single repair action.
 
@@ -304,9 +386,7 @@ def _execute_repair_action(action: RepairAction, catalog_dir: Path) -> None:
             logger.info(f"Deleted: {path}")
 
     elif action.action == "quarantine_bak":
-        raise NotImplementedError(
-            "TODO: implemented in downstream track B — quarantine_bak action handler"
-        )
+        _handle_quarantine_bak(action, catalog_dir)
 
     elif action.action == "quarantine_corrupt":
         raise NotImplementedError(
@@ -325,7 +405,11 @@ def _execute_repair_action(action: RepairAction, catalog_dir: Path) -> None:
 
     elif action.action == "skip_tmp_young":
         # Skip action: do nothing
-        logger.info(f"Skipped: {action.path} (in-flight)")
+        logger.info(f"Skipped: {action.path} (in-flight .tmp)")
+
+    elif action.action == "skip_bak_young":
+        # Skip action: do nothing
+        logger.info(f"Skipped: {action.path} (in-flight .bak)")
 
     else:
         raise ValueError(f"Unknown repair action: {action.action}")
