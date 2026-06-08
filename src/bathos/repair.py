@@ -441,7 +441,7 @@ def repair(
     # Execute each action
     for action in actions:
         try:
-            _execute_repair_action(action, catalog_dir)
+            _execute_repair_action(action, catalog_dir, manifest)
             action.dry_run = False  # Mark action as executed
         except NotImplementedError as e:
             manifest.warnings.append(str(e))
@@ -599,10 +599,15 @@ def _append_quarantine_manifest(catalog_dir: Path, slug: str, entry: dict) -> No
         raise
 
 
-def _execute_repair_action(action: RepairAction, catalog_dir: Path) -> None:
+def _execute_repair_action(action: RepairAction, catalog_dir: Path, manifest: RepairManifest | None = None) -> None:
     """Execute a single repair action.
 
     Raises NotImplementedError for actions not yet implemented in tracks B/C/D.
+
+    Args:
+        action: The repair action to execute
+        catalog_dir: Catalog directory
+        manifest: Optional RepairManifest to collect warnings and messages
     """
     if action.action == "delete_tmp":
         path = Path(action.path)
@@ -625,7 +630,7 @@ def _execute_repair_action(action: RepairAction, catalog_dir: Path) -> None:
         _handle_rebuild_warm(action, catalog_dir)
 
     elif action.action == "reexport_from_warm":
-        _handle_reexport_from_warm(action, catalog_dir)
+        _handle_reexport_from_warm(action, catalog_dir, manifest)
 
     else:
         raise ValueError(f"Unknown repair action: {action.action}")
@@ -653,7 +658,7 @@ def _handle_rebuild_warm(action: RepairAction, catalog_dir: Path) -> None:
         raise
 
 
-def _handle_reexport_from_warm(action: RepairAction, catalog_dir: Path) -> None:
+def _handle_reexport_from_warm(action: RepairAction, catalog_dir: Path, manifest: RepairManifest | None = None) -> None:
     """Re-export warm runs back to cool fragments.
 
     Scans warm DB (bathos.db) for runs missing from cool fragments, reconstructs
@@ -666,6 +671,7 @@ def _handle_reexport_from_warm(action: RepairAction, catalog_dir: Path) -> None:
     Args:
         action: RepairAction with action="reexport_from_warm"
         catalog_dir: Catalog directory
+        manifest: Optional RepairManifest to collect warnings about NULL-metadata runs
     """
     import duckdb
 
@@ -716,6 +722,7 @@ def _handle_reexport_from_warm(action: RepairAction, catalog_dir: Path) -> None:
     reexported = 0
     skipped_existing = 0
     skipped_null_metadata = 0
+    null_metadata_warnings: list[str] = []
 
     # Process each warm run
     for warm_row in warm_rows:
@@ -731,7 +738,9 @@ def _handle_reexport_from_warm(action: RepairAction, catalog_dir: Path) -> None:
         # Skip runs with NULL metadata (warm-only data that can't be safely re-exported)
         if row_dict.get("metadata") is None:
             skipped_null_metadata += 1
-            logger.warning(f"Skipped run {run_uuid}: NULL metadata (warm-only data)")
+            warning_msg = f"Skipped run {run_uuid}: NULL metadata (warm-only data)"
+            logger.warning(warning_msg)
+            null_metadata_warnings.append(run_uuid)
             continue
 
         # Reconstruct Run object from warm row
@@ -795,6 +804,11 @@ def _handle_reexport_from_warm(action: RepairAction, catalog_dir: Path) -> None:
         except Exception as e:
             logger.error(f"Failed to re-export run {run_uuid}: {e}")
             # Continue processing other runs on error
+
+    # Append NULL-metadata UUIDs to manifest warnings
+    if null_metadata_warnings and manifest:
+        for uuid in null_metadata_warnings:
+            manifest.warnings.append(f"Skipped re-export of run {uuid}: NULL metadata (warm-only data)")
 
     # Update action detail
     action.detail = (

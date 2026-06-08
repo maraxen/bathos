@@ -340,6 +340,9 @@ def repair(
         "--acknowledge-warm-loss",
         help="Acknowledge that warm DB rebuild will destroy postmortem annotations and output_metadata",
     ),
+    from_warm: bool = typer.Option(
+        False, "--from-warm", help="Detect runs in warm DB missing from cool fragments"
+    ),
 ):
     """Scan for catalog corruption and repair it.
 
@@ -347,12 +350,11 @@ def repair(
     Pass --apply to execute the repairs.
     """
     from bathos.repair import scan, repair as repair_catalog
-    from bathos.rich_fmt import render_runs_table
 
     catalog_dir = _catalog_dir()
 
     # First, scan to get the plan
-    actions = scan(catalog_dir, tier)
+    actions, warnings = scan(catalog_dir, tier, from_warm=from_warm)
 
     if not actions:
         typer.echo("No repair actions needed.")
@@ -364,6 +366,11 @@ def repair(
         status_symbol = "→" if not action.detail.startswith("Skip") else "⊘"
         typer.echo(f"  {status_symbol} {action.action}: {action.detail}")
 
+    if warnings:
+        typer.echo("\nWarnings:")
+        for warn in warnings:
+            typer.secho(f"  ⚠  {warn}", fg="yellow")
+
     if dry_run:
         typer.echo("\n(dry-run mode — no changes made)")
         typer.echo("To execute repairs, run: bth repair --apply")
@@ -372,7 +379,7 @@ def repair(
     # Execute repairs
     typer.echo("\nExecuting repairs...")
     try:
-        manifest = repair_catalog(catalog_dir, tier, dry_run=False, acknowledge_warm_loss=acknowledge_warm_loss)
+        manifest = repair_catalog(catalog_dir, tier, dry_run=False, acknowledge_warm_loss=acknowledge_warm_loss, from_warm=from_warm)
         typer.echo(f"\n✓ Repair completed at {manifest.run_ts}")
         typer.echo(f"  Actions taken: {len([a for a in manifest.actions if not a.detail.startswith('Skip')])}")
         if manifest.warnings:

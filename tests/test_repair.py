@@ -777,3 +777,454 @@ class TestReexportFromWarm:
         finally:
             if "BTH_CATALOG_DIR" in os.environ:
                 del os.environ["BTH_CATALOG_DIR"]
+
+    def test_reexport_compact_preserves_run_count(self, tmp_path: Path, sample_run: Run):
+        """Spec check 3: After repair(from_warm=True), compact() must produce the same run count as original warm DB.
+
+        Setup:
+        - Create cool fragments with uuid1 (only)
+        - Create warm DB with uuid1 and uuid2 (uuid2 warm-only)
+        - Delete uuid1 cool fragment to simulate missing cool fragment
+        - Call repair(from_warm=True) to re-export uuid2
+        - Call compact() to rebuild warm DB from cool
+        Expected: After compact, warm DB has N=2 runs (same as before)
+        """
+        from uuid import uuid4
+
+        catalog = tmp_path / ".bth" / "catalog"
+        catalog.mkdir(parents=True)
+        init_catalog(catalog)
+
+        slug_dir = catalog / "runs" / "testproj"
+        slug_dir.mkdir(parents=True, exist_ok=True)
+
+        uuid1 = str(uuid4())
+        uuid2 = str(uuid4())
+
+        # Create cool fragment for uuid1
+        run_a = Run(
+            id=uuid1,
+            project_slug="testproj",
+            command="python run.py",
+            argv=["python", "run.py"],
+            git_hash="deadbeef",
+            git_branch="main",
+            git_dirty=False,
+            status="completed",
+            exit_code=0,
+            duration_s=1.0,
+            output_paths=[],
+            tags=[],
+            hostname="test-host",
+        )
+        write_run(run_a, catalog)
+
+        # Create warm DB with uuid1 and uuid2
+        db_path = catalog / "bathos.db"
+        con = duckdb.connect(str(db_path))
+        try:
+            con.execute(
+                """
+                CREATE TABLE _schema_meta (key TEXT PRIMARY KEY, value TEXT)
+                """
+            )
+            con.execute(
+                """
+                CREATE TABLE runs (
+                    id TEXT PRIMARY KEY,
+                    project_slug TEXT,
+                    command TEXT,
+                    argv TEXT[],
+                    git_hash TEXT,
+                    git_branch TEXT,
+                    git_dirty BOOLEAN,
+                    timestamp TIMESTAMP WITH TIME ZONE,
+                    duration_s DOUBLE,
+                    exit_code INTEGER,
+                    status TEXT,
+                    output_paths TEXT[],
+                    tags TEXT[],
+                    schema_version TEXT,
+                    slurm_job_id TEXT,
+                    slurm_array_task_id TEXT,
+                    hostname TEXT,
+                    metadata TEXT,
+                    outcome TEXT,
+                    output_metadata TEXT,
+                    sidecar_sha256 TEXT,
+                    sidecar_path TEXT,
+                    parent_run_id TEXT,
+                    agent_mode TEXT,
+                    sidecar_mode TEXT,
+                    outcome_is_residual BOOLEAN,
+                    skill_sha256 TEXT,
+                    campaign_id TEXT,
+                    script_sha256 TEXT,
+                    postmortem_status TEXT,
+                    postmortem_override TEXT,
+                    postmortem_verdict_override TEXT,
+                    postmortem_author TEXT,
+                    postmortem_path TEXT,
+                    postmortem_hypothesis_status TEXT,
+                    postmortem_has_anomalies BOOLEAN,
+                    postmortem_summary TEXT,
+                    postmortem_asset_links TEXT,
+                    manifest_sha256 TEXT,
+                    manifest_path TEXT,
+                    outcome_error_reason TEXT,
+                    adversarial_check_status TEXT
+                )
+                """
+            )
+
+            # Insert both uuid1 and uuid2
+            con.execute(
+                f"""
+                INSERT INTO runs VALUES (
+                    '{uuid1}', 'testproj', 'python run.py', ['python', 'run.py'],
+                    'deadbeef', 'main', false,
+                    '2026-01-01 00:00:00+00:00'::TIMESTAMP WITH TIME ZONE,
+                    1.0, 0, 'completed', [], [], '6',
+                    '', '', '', '{{}}', '', '[]',
+                    '', '', '', '', '', false, '', '',
+                    '', 'unassigned', 'none', 'none', '', '',
+                    'unassigned', false, '', '{{}}', '', '', '', ''
+                )
+                """
+            )
+            con.execute(
+                f"""
+                INSERT INTO runs VALUES (
+                    '{uuid2}', 'testproj', 'python run.py', ['python', 'run.py'],
+                    'deadbeef', 'main', false,
+                    '2026-01-02 00:00:00+00:00'::TIMESTAMP WITH TIME ZONE,
+                    2.0, 0, 'completed', [], [], '6',
+                    '', '', '', '{{}}', '', '[]',
+                    '', '', '', '', '', false, '', '',
+                    '', 'unassigned', 'none', 'none', '', '',
+                    'unassigned', false, '', '{{}}', '', '', '', ''
+                )
+                """
+            )
+        finally:
+            con.close()
+
+        os.environ["BTH_CATALOG_DIR"] = str(catalog)
+
+        try:
+            # Count warm DB runs before deletion
+            con = duckdb.connect(str(db_path), read_only=True)
+            initial_count = con.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+            con.close()
+            assert initial_count == 2, f"Expected 2 runs in warm DB, got {initial_count}"
+
+            # Delete uuid1 cool fragment to simulate missing state
+            uuid1_fragment = slug_dir / f"run_{uuid1}.parquet"
+            uuid1_fragment.unlink()
+
+            # Run repair(from_warm=True) to re-export uuid2
+            manifest = repair(catalog, tier="warm", dry_run=False, from_warm=True)
+
+            # Compact to rebuild warm from cool
+            from bathos.compact import compact
+            result = compact(catalog, force_rebuild=False)
+
+            # Count warm DB runs after compact
+            con = duckdb.connect(str(db_path), read_only=True)
+            final_count = con.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+            con.close()
+
+            # Both uuid1 and uuid2 should be in cool fragments now (uuid2 via re-export)
+            uuid1_fragment = slug_dir / f"run_{uuid1}.parquet"
+            uuid2_fragment = slug_dir / f"run_{uuid2}.parquet"
+            assert uuid1_fragment.exists(), f"uuid1 fragment should exist after re-export"
+            assert uuid2_fragment.exists(), f"uuid2 fragment should exist after re-export"
+
+            # Warm DB should have the same count
+            assert final_count == initial_count, f"Expected {initial_count} runs after compact, got {final_count}"
+        finally:
+            if "BTH_CATALOG_DIR" in os.environ:
+                del os.environ["BTH_CATALOG_DIR"]
+
+    def test_reexport_idempotent(self, tmp_path: Path, sample_run: Run):
+        """Spec check 4: Re-running repair(from_warm=True) must be a no-op.
+
+        Setup:
+        - Create cool fragment for uuid1
+        - Create warm DB with uuid1 and uuid2 (uuid2 warm-only)
+        - Call repair(from_warm=True, dry_run=False) once
+        - Call repair(from_warm=True, dry_run=False) again
+        Expected: Second run produces zero reexport_from_warm actions
+        """
+        from uuid import uuid4
+
+        catalog = tmp_path / ".bth" / "catalog"
+        catalog.mkdir(parents=True)
+        init_catalog(catalog)
+
+        slug_dir = catalog / "runs" / "testproj"
+        slug_dir.mkdir(parents=True, exist_ok=True)
+
+        uuid1 = str(uuid4())
+        uuid2 = str(uuid4())
+
+        # Create cool fragment for uuid1
+        run_a = Run(
+            id=uuid1,
+            project_slug="testproj",
+            command="python run.py",
+            argv=["python", "run.py"],
+            git_hash="deadbeef",
+            git_branch="main",
+            git_dirty=False,
+            status="completed",
+            exit_code=0,
+            duration_s=1.0,
+            output_paths=[],
+            tags=[],
+            hostname="test-host",
+        )
+        write_run(run_a, catalog)
+
+        # Create warm DB with uuid1 and uuid2
+        db_path = catalog / "bathos.db"
+        con = duckdb.connect(str(db_path))
+        try:
+            con.execute(
+                """
+                CREATE TABLE _schema_meta (key TEXT PRIMARY KEY, value TEXT)
+                """
+            )
+            con.execute(
+                """
+                CREATE TABLE runs (
+                    id TEXT PRIMARY KEY,
+                    project_slug TEXT,
+                    command TEXT,
+                    argv TEXT[],
+                    git_hash TEXT,
+                    git_branch TEXT,
+                    git_dirty BOOLEAN,
+                    timestamp TIMESTAMP WITH TIME ZONE,
+                    duration_s DOUBLE,
+                    exit_code INTEGER,
+                    status TEXT,
+                    output_paths TEXT[],
+                    tags TEXT[],
+                    schema_version TEXT,
+                    slurm_job_id TEXT,
+                    slurm_array_task_id TEXT,
+                    hostname TEXT,
+                    metadata TEXT,
+                    outcome TEXT,
+                    output_metadata TEXT,
+                    sidecar_sha256 TEXT,
+                    sidecar_path TEXT,
+                    parent_run_id TEXT,
+                    agent_mode TEXT,
+                    sidecar_mode TEXT,
+                    outcome_is_residual BOOLEAN,
+                    skill_sha256 TEXT,
+                    campaign_id TEXT,
+                    script_sha256 TEXT,
+                    postmortem_status TEXT,
+                    postmortem_override TEXT,
+                    postmortem_verdict_override TEXT,
+                    postmortem_author TEXT,
+                    postmortem_path TEXT,
+                    postmortem_hypothesis_status TEXT,
+                    postmortem_has_anomalies BOOLEAN,
+                    postmortem_summary TEXT,
+                    postmortem_asset_links TEXT,
+                    manifest_sha256 TEXT,
+                    manifest_path TEXT,
+                    outcome_error_reason TEXT,
+                    adversarial_check_status TEXT
+                )
+                """
+            )
+
+            # Insert both uuid1 and uuid2
+            con.execute(
+                f"""
+                INSERT INTO runs VALUES (
+                    '{uuid1}', 'testproj', 'python run.py', ['python', 'run.py'],
+                    'deadbeef', 'main', false,
+                    '2026-01-01 00:00:00+00:00'::TIMESTAMP WITH TIME ZONE,
+                    1.0, 0, 'completed', [], [], '6',
+                    '', '', '', '{{}}', '', '[]',
+                    '', '', '', '', '', false, '', '',
+                    '', 'unassigned', 'none', 'none', '', '',
+                    'unassigned', false, '', '{{}}', '', '', '', ''
+                )
+                """
+            )
+            con.execute(
+                f"""
+                INSERT INTO runs VALUES (
+                    '{uuid2}', 'testproj', 'python run.py', ['python', 'run.py'],
+                    'deadbeef', 'main', false,
+                    '2026-01-02 00:00:00+00:00'::TIMESTAMP WITH TIME ZONE,
+                    2.0, 0, 'completed', [], [], '6',
+                    '', '', '', '{{}}', '', '[]',
+                    '', '', '', '', '', false, '', '',
+                    '', 'unassigned', 'none', 'none', '', '',
+                    'unassigned', false, '', '{{}}', '', '', '', ''
+                )
+                """
+            )
+        finally:
+            con.close()
+
+        os.environ["BTH_CATALOG_DIR"] = str(catalog)
+
+        try:
+            # First repair call - should find uuid2 warm-only and re-export it
+            manifest1 = repair(catalog, tier="warm", dry_run=False, from_warm=True)
+            reexport_actions1 = [a for a in manifest1.actions if a.action == "reexport_from_warm"]
+            assert len(reexport_actions1) > 0, "First repair should find warm-only run"
+
+            # uuid2 fragment should now exist
+            uuid2_fragment = slug_dir / f"run_{uuid2}.parquet"
+            assert uuid2_fragment.exists(), f"uuid2 fragment should be written by first repair"
+
+            # Second repair call - should find no warm-only runs
+            manifest2 = repair(catalog, tier="warm", dry_run=False, from_warm=True)
+            reexport_actions2 = [a for a in manifest2.actions if a.action == "reexport_from_warm"]
+            assert len(reexport_actions2) == 0, "Second repair should be a no-op (no warm-only runs)"
+        finally:
+            if "BTH_CATALOG_DIR" in os.environ:
+                del os.environ["BTH_CATALOG_DIR"]
+
+    def test_reexport_null_metadata_warning(self, tmp_path: Path, sample_run: Run):
+        """Spec check 5: Runs with NULL metadata should be skipped and added to manifest.warnings.
+
+        Setup:
+        - Create warm DB with one run having NULL metadata and one with valid metadata
+        - Call repair(from_warm=True, dry_run=False)
+        Expected: NULL-metadata run appears in manifest.warnings
+        """
+        from uuid import uuid4
+
+        catalog = tmp_path / ".bth" / "catalog"
+        catalog.mkdir(parents=True)
+        init_catalog(catalog)
+
+        slug_dir = catalog / "runs" / "testproj"
+        slug_dir.mkdir(parents=True, exist_ok=True)
+
+        uuid_null = str(uuid4())
+        uuid_valid = str(uuid4())
+
+        # Create warm DB with uuid_null (NULL metadata) and uuid_valid (valid metadata)
+        db_path = catalog / "bathos.db"
+        con = duckdb.connect(str(db_path))
+        try:
+            con.execute(
+                """
+                CREATE TABLE _schema_meta (key TEXT PRIMARY KEY, value TEXT)
+                """
+            )
+            con.execute(
+                """
+                CREATE TABLE runs (
+                    id TEXT PRIMARY KEY,
+                    project_slug TEXT,
+                    command TEXT,
+                    argv TEXT[],
+                    git_hash TEXT,
+                    git_branch TEXT,
+                    git_dirty BOOLEAN,
+                    timestamp TIMESTAMP WITH TIME ZONE,
+                    duration_s DOUBLE,
+                    exit_code INTEGER,
+                    status TEXT,
+                    output_paths TEXT[],
+                    tags TEXT[],
+                    schema_version TEXT,
+                    slurm_job_id TEXT,
+                    slurm_array_task_id TEXT,
+                    hostname TEXT,
+                    metadata TEXT,
+                    outcome TEXT,
+                    output_metadata TEXT,
+                    sidecar_sha256 TEXT,
+                    sidecar_path TEXT,
+                    parent_run_id TEXT,
+                    agent_mode TEXT,
+                    sidecar_mode TEXT,
+                    outcome_is_residual BOOLEAN,
+                    skill_sha256 TEXT,
+                    campaign_id TEXT,
+                    script_sha256 TEXT,
+                    postmortem_status TEXT,
+                    postmortem_override TEXT,
+                    postmortem_verdict_override TEXT,
+                    postmortem_author TEXT,
+                    postmortem_path TEXT,
+                    postmortem_hypothesis_status TEXT,
+                    postmortem_has_anomalies BOOLEAN,
+                    postmortem_summary TEXT,
+                    postmortem_asset_links TEXT,
+                    manifest_sha256 TEXT,
+                    manifest_path TEXT,
+                    outcome_error_reason TEXT,
+                    adversarial_check_status TEXT
+                )
+                """
+            )
+
+            # Insert run with NULL metadata
+            con.execute(
+                f"""
+                INSERT INTO runs VALUES (
+                    '{uuid_null}', 'testproj', 'python run.py', ['python', 'run.py'],
+                    'deadbeef', 'main', false,
+                    '2026-01-01 00:00:00+00:00'::TIMESTAMP WITH TIME ZONE,
+                    1.0, 0, 'completed', [], [], '6',
+                    '', '', '', NULL, '', '[]',
+                    '', '', '', '', '', false, '', '',
+                    '', 'unassigned', 'none', 'none', '', '',
+                    'unassigned', false, '', '{{}}', '', '', '', ''
+                )
+                """
+            )
+
+            # Insert run with valid metadata
+            con.execute(
+                f"""
+                INSERT INTO runs VALUES (
+                    '{uuid_valid}', 'testproj', 'python run.py', ['python', 'run.py'],
+                    'deadbeef', 'main', false,
+                    '2026-01-02 00:00:00+00:00'::TIMESTAMP WITH TIME ZONE,
+                    2.0, 0, 'completed', [], [], '6',
+                    '', '', '', '{{}}', '', '[]',
+                    '', '', '', '', '', false, '', '',
+                    '', 'unassigned', 'none', 'none', '', '',
+                    'unassigned', false, '', '{{}}', '', '', '', ''
+                )
+                """
+            )
+        finally:
+            con.close()
+
+        os.environ["BTH_CATALOG_DIR"] = str(catalog)
+
+        try:
+            # Run repair with from_warm=True
+            manifest = repair(catalog, tier="warm", dry_run=False, from_warm=True)
+
+            # uuid_null should appear in warnings
+            null_warnings = [w for w in manifest.warnings if uuid_null in w]
+            assert len(null_warnings) > 0, f"Expected warning about NULL-metadata run {uuid_null} in manifest.warnings"
+
+            # uuid_valid should be re-exported successfully
+            uuid_valid_fragment = slug_dir / f"run_{uuid_valid}.parquet"
+            assert uuid_valid_fragment.exists(), f"Valid metadata run {uuid_valid} should be re-exported"
+
+            # uuid_null should NOT be re-exported
+            uuid_null_fragment = slug_dir / f"run_{uuid_null}.parquet"
+            assert not uuid_null_fragment.exists(), f"NULL-metadata run {uuid_null} should NOT be re-exported"
+        finally:
+            if "BTH_CATALOG_DIR" in os.environ:
+                del os.environ["BTH_CATALOG_DIR"]
