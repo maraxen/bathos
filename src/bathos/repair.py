@@ -61,40 +61,47 @@ class RepairManifest:
 def scan(
     catalog_dir: Path | str | None = None,
     tier: str = "all",
-) -> list[RepairAction]:
+) -> tuple[list[RepairAction], list[str]]:
     """Scan the catalog and identify repair actions needed.
 
     Calls verify.verify_all() (or tier-specific variant) and converts findings
-    into RepairAction objects. This is a read-only operation; dry_run is always True.
+    into RepairAction objects and warnings. This is a read-only operation; dry_run is always True.
 
     Args:
         catalog_dir: Catalog directory (default: ~/.bth/catalog/)
         tier: "cool", "warm", "archive", or "all"
 
     Returns:
-        List of RepairAction objects, sorted by path
+        Tuple of (list of RepairAction objects, list of warning strings), actions sorted by path
     """
     if catalog_dir is None:
         catalog_dir = default_catalog_dir()
     catalog_dir = Path(catalog_dir)
 
     actions: list[RepairAction] = []
+    warnings: list[str] = []
 
     # Run verify based on tier
     if tier == "cool" or tier == "all":
         cool_result = verify_cool(catalog_dir)
-        actions.extend(_actions_from_cool_verify(cool_result))
+        cool_actions, cool_warnings = _actions_from_cool_verify(cool_result)
+        actions.extend(cool_actions)
+        warnings.extend(cool_warnings)
 
     if tier == "warm" or tier == "all":
         warm_result = verify_warm(catalog_dir)
-        actions.extend(_actions_from_warm_verify(warm_result))
+        warm_actions, warm_warnings = _actions_from_warm_verify(warm_result)
+        actions.extend(warm_actions)
+        warnings.extend(warm_warnings)
 
     if tier == "archive" or tier == "all":
         archive_root = Path.home() / ".bth" / "archive"
         from bathos.verify import verify_archive
 
         archive_result = verify_archive(archive_root)
-        actions.extend(_actions_from_archive_verify(archive_result))
+        archive_actions, archive_warnings = _actions_from_archive_verify(archive_result)
+        actions.extend(archive_actions)
+        warnings.extend(archive_warnings)
 
     # All actions from scan have dry_run=True
     for action in actions:
@@ -102,12 +109,17 @@ def scan(
 
     # Sort by path for deterministic output
     actions.sort(key=lambda a: a.path)
-    return actions
+    return actions, warnings
 
 
-def _actions_from_cool_verify(result) -> list[RepairAction]:
-    """Convert verify_cool errors to RepairAction objects."""
+def _actions_from_cool_verify(result) -> tuple[list[RepairAction], list[str]]:
+    """Convert verify_cool errors to RepairAction objects and warnings.
+
+    Returns:
+        Tuple of (list of RepairAction objects, list of warning strings)
+    """
     actions: list[RepairAction] = []
+    warnings: list[str] = []
 
     for error in result.errors:
         if "Interrupted write: temporary file exists" in error:
@@ -120,14 +132,8 @@ def _actions_from_cool_verify(result) -> list[RepairAction]:
                 mtime_unix = path_obj.stat().st_mtime
                 age_s = (datetime.now(UTC).timestamp() - mtime_unix)
                 if age_s < 60:
-                    detail = f"Skip: {path_part} (in-flight, age {age_s:.0f}s)"
-                    actions.append(
-                        RepairAction(
-                            action="skip_tmp_young",
-                            path=path_part,
-                            detail=detail,
-                        )
-                    )
+                    warning = f"Skipped .tmp file (in-flight write): {path_part} (age {age_s:.0f}s)"
+                    warnings.append(warning)
                     continue
             except (OSError, ValueError):
                 pass
@@ -152,14 +158,8 @@ def _actions_from_cool_verify(result) -> list[RepairAction]:
                 mtime_unix = path_obj.stat().st_mtime
                 age_s = (datetime.now(UTC).timestamp() - mtime_unix)
                 if age_s < 60:
-                    detail = f"Skip: {path_part} (in-flight migration, age {age_s:.0f}s)"
-                    actions.append(
-                        RepairAction(
-                            action="skip_bak_young",
-                            path=path_part,
-                            detail=detail,
-                        )
-                    )
+                    warning = f"Skipped .bak file (in-flight migration): {path_part} (age {age_s:.0f}s)"
+                    warnings.append(warning)
                     continue
             except (OSError, ValueError):
                 pass
@@ -202,12 +202,13 @@ def _actions_from_cool_verify(result) -> list[RepairAction]:
                         )
                     )
 
-    return actions
+    return actions, warnings
 
 
-def _actions_from_warm_verify(result) -> list[RepairAction]:
-    """Convert verify_warm errors to RepairAction objects."""
+def _actions_from_warm_verify(result) -> tuple[list[RepairAction], list[str]]:
+    """Convert verify_warm errors to RepairAction objects and warnings."""
     actions: list[RepairAction] = []
+    warnings: list[str] = []
 
     for error in result.errors:
         if "Database integrity check failed" in error or "Could not open database" in error:
@@ -223,16 +224,19 @@ def _actions_from_warm_verify(result) -> list[RepairAction]:
                 )
             )
 
-    return actions
+    return actions, warnings
 
 
-def _actions_from_archive_verify(result) -> list[RepairAction]:
-    """Convert verify_archive errors to RepairAction objects.
+def _actions_from_archive_verify(result) -> tuple[list[RepairAction], list[str]]:
+    """Convert verify_archive errors to RepairAction objects and warnings.
 
     Archive repair is a P2 backlog item; for MVP scope, we only log errors.
+
+    Returns:
+        Tuple of (empty list, empty list) — archive repair deferred
     """
     # Archive repair is deferred to immediate follow-on; not in MVP scope
-    return []
+    return [], []
 
 
 def repair(
@@ -267,7 +271,7 @@ def repair(
     run_ts = datetime.now(UTC).isoformat()
 
     # Scan for actions needed
-    actions = scan(catalog_dir, tier)
+    actions, scan_warnings = scan(catalog_dir, tier)
 
     # Check for warm rebuild without acknowledgment
     warm_rebuild_actions = [a for a in actions if a.action == "rebuild_warm"]
@@ -286,7 +290,7 @@ def repair(
         dry_run=dry_run,
         tier=tier,
         actions=actions,
-        warnings=[],
+        warnings=scan_warnings,
     )
 
     # If dry_run, return manifest without executing
@@ -410,14 +414,6 @@ def _execute_repair_action(action: RepairAction, catalog_dir: Path) -> None:
         raise NotImplementedError(
             "TODO: implemented in downstream track D — rebuild_warm action handler"
         )
-
-    elif action.action == "skip_tmp_young":
-        # Skip action: do nothing
-        logger.info(f"Skipped: {action.path} (in-flight .tmp)")
-
-    elif action.action == "skip_bak_young":
-        # Skip action: do nothing
-        logger.info(f"Skipped: {action.path} (in-flight .bak)")
 
     else:
         raise ValueError(f"Unknown repair action: {action.action}")
