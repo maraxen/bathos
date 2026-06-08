@@ -259,16 +259,72 @@ def _actions_from_warm_verify(result, catalog_dir: Path) -> tuple[list[RepairAct
     return actions, warnings
 
 
-def _actions_from_archive_verify(_result) -> tuple[list[RepairAction], list[str]]:
+def _actions_from_archive_verify(result) -> tuple[list[RepairAction], list[str]]:
     """Convert verify_archive errors to RepairAction objects and warnings.
 
-    Archive repair is a P2 backlog item; for MVP scope, we only log errors.
+    Maps SHA256/row-count mismatches to quarantine_archive actions.
+    Missing partition files are logged as warnings (data is already gone).
 
     Returns:
-        Tuple of (empty list, empty list) — archive repair deferred
+        Tuple of (list of RepairAction objects, list of warning strings)
     """
-    # Archive repair is deferred to immediate follow-on; not in MVP scope
-    return [], []
+    actions: list[RepairAction] = []
+    warnings: list[str] = []
+
+    for error in result.errors:
+        if "SHA256 mismatch in" in error:
+            # Parse: "SHA256 mismatch in project=X/year=Y/month=Z: expected ABC, got DEF"
+            parts = error.split("SHA256 mismatch in ", 1)
+            if len(parts) == 2:
+                remaining = parts[1]
+                # Extract partition and checksums
+                if ": expected " in remaining:
+                    partition = remaining.split(": expected ", 1)[0]
+                    checksums = remaining.split(": expected ", 1)[1]
+                    detail = f"Quarantine archive partition with SHA256 mismatch: {partition} ({checksums})"
+                    actions.append(
+                        RepairAction(
+                            action="quarantine_archive",
+                            path=partition,  # Store partition path (relative to archive root)
+                            detail=detail,
+                        )
+                    )
+
+        elif "Row count mismatch in" in error:
+            # Parse: "Row count mismatch in project=X/year=Y/month=Z: expected N, got M"
+            parts = error.split("Row count mismatch in ", 1)
+            if len(parts) == 2:
+                remaining = parts[1]
+                if ": expected " in remaining:
+                    partition = remaining.split(": expected ", 1)[0]
+                    counts = remaining.split(": expected ", 1)[1]
+                    detail = f"Quarantine archive partition with row count mismatch: {partition} ({counts})"
+                    actions.append(
+                        RepairAction(
+                            action="quarantine_archive",
+                            path=partition,
+                            detail=detail,
+                        )
+                    )
+
+        elif "Missing archived Parquet:" in error:
+            # Archive partition is missing; data is already lost, just warn
+            partition = error.split("Missing archived Parquet: ", 1)[-1]
+            warnings.append(f"Archive partition missing: {partition}")
+
+        elif "Could not verify" in error:
+            # Some other error reading the partition
+            partition = error.split("Could not verify ", 1)[-1].split(": ")[0]
+            detail = f"Quarantine archive partition (read error): {partition}"
+            actions.append(
+                RepairAction(
+                    action="quarantine_archive",
+                    path=partition,
+                    detail=detail,
+                )
+            )
+
+    return actions, warnings
 
 
 def _actions_from_warm_only_runs(catalog_dir: Path) -> tuple[list[RepairAction], list[str]]:
@@ -629,6 +685,9 @@ def _execute_repair_action(action: RepairAction, catalog_dir: Path, manifest: Re
     elif action.action == "rebuild_warm":
         _handle_rebuild_warm(action, catalog_dir)
 
+    elif action.action == "quarantine_archive":
+        _handle_quarantine_archive(action, catalog_dir)
+
     elif action.action == "reexport_from_warm":
         _handle_reexport_from_warm(action, catalog_dir, manifest)
 
@@ -816,3 +875,125 @@ def _handle_reexport_from_warm(action: RepairAction, catalog_dir: Path, manifest
         f"(skipped {skipped_existing} existing, {skipped_null_metadata} with null metadata)"
     )
     logger.info(action.detail)
+
+
+def _handle_quarantine_archive(action: RepairAction, catalog_dir: Path) -> None:
+    """Quarantine an archive partition file with SHA256 or row-count mismatch.
+
+    Moves the partition file to .bth/quarantine/archive/<year>/<month>/<basename>
+    (path structure extracted from the partition path), appends a JSON manifest entry,
+    and atomically updates the archive manifest.json to mark the entry as "quarantined": true.
+
+    Args:
+        action: RepairAction with action="quarantine_archive" and path as partition path
+                (e.g., "project=foo/year=2026/month=06")
+        catalog_dir: Catalog directory (used to locate .bth/quarantine/)
+    """
+    archive_root = Path.home() / ".bth" / "archive"
+    partition_path = action.path  # Relative path like "project=foo/year=2026/month=06"
+
+    # Construct full path to the partition's runs.parquet file
+    parquet_path = archive_root / partition_path / "runs.parquet"
+
+    if not parquet_path.exists():
+        logger.warning(f"Archive partition file not found: {parquet_path}")
+        return
+
+    # Extract year and month from partition path for quarantine directory
+    # Path format: "project=X/year=Y/month=Z"
+    try:
+        parts = partition_path.split("/")
+        month = None
+        year = None
+        for part in parts:
+            if part.startswith("year="):
+                year = part.split("=", 1)[1]
+            elif part.startswith("month="):
+                month = part.split("=", 1)[1]
+
+        if not year or not month:
+            # Fallback: use current date
+            now = datetime.now(UTC)
+            year = str(now.year)
+            month = f"{now.month:02d}"
+    except Exception:
+        now = datetime.now(UTC)
+        year = str(now.year)
+        month = f"{now.month:02d}"
+
+    # Create quarantine directory: .bth/quarantine/archive/<year>/<month>/
+    quarantine_dir = catalog_dir / "quarantine" / "archive" / year / month
+    quarantine_dir.mkdir(parents=True, exist_ok=True)
+
+    # Generate timestamped quarantine filename with run_uuid if available
+    ts_str = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+    quarantine_path = quarantine_dir / f"{ts_str}_{parquet_path.name}"
+
+    # Capture file stats before move
+    try:
+        stat = parquet_path.stat()
+        original_size = stat.st_size
+        original_mtime = stat.st_mtime
+    except Exception:
+        original_size = -1
+        original_mtime = -1
+
+    # Move the file
+    try:
+        parquet_path.rename(quarantine_path)
+        logger.info(f"Quarantined archive partition: {parquet_path} → {quarantine_path}")
+    except Exception as e:
+        logger.error(f"Failed to move archive partition {parquet_path}: {e}")
+        raise
+
+    # Append manifest entry to .bth/quarantine/archive/manifest.jsonl
+    manifest_entry = {
+        "ts": datetime.now(UTC).isoformat(),
+        "tier": "archive",
+        "action": "quarantine_archive",
+        "original_path": str(parquet_path),
+        "moved_to": str(quarantine_path),
+        "partition": partition_path,
+        "mtime_s": original_mtime,
+        "size_bytes": original_size,
+    }
+    quarantine_manifest_path = catalog_dir / "quarantine" / "archive" / "manifest.jsonl"
+    quarantine_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with open(quarantine_manifest_path, "a") as f:
+            f.write(json.dumps(manifest_entry) + "\n")
+        logger.info(f"Appended manifest entry to {quarantine_manifest_path}")
+    except Exception as e:
+        logger.error(f"Failed to append quarantine manifest entry: {e}")
+        raise
+
+    # Update archive manifest.json to mark entry as "quarantined": true
+    manifest_json_path = archive_root / "manifest.json"
+    if manifest_json_path.exists():
+        try:
+            with open(manifest_json_path, "r") as f:
+                manifest = json.load(f)
+
+            # Find the entry matching this partition and mark it quarantined
+            updated = False
+            for entry in manifest.get("entries", []):
+                if entry.get("partition") == partition_path:
+                    entry["quarantined"] = True
+                    updated = True
+                    break
+
+            if updated:
+                # Atomic write: write to .tmp, then rename
+                tmp_path = manifest_json_path.parent / f".{manifest_json_path.name}.tmp"
+                with open(tmp_path, "w") as f:
+                    json.dump(manifest, f, indent=2)
+                tmp_path.rename(manifest_json_path)
+                logger.info(f"Updated archive manifest.json to mark {partition_path} as quarantined")
+            else:
+                logger.warning(f"Partition {partition_path} not found in archive manifest.json")
+
+        except Exception as e:
+            logger.error(f"Failed to update archive manifest.json: {e}")
+            # Non-fatal: the file is already quarantined; manifest update is nice-to-have
+            raise
