@@ -63,6 +63,7 @@ def scan(
     catalog_dir: Path | str | None = None,
     tier: str = "all",
     from_warm: bool = False,
+    archive_root: Path | str | None = None,
 ) -> tuple[list[RepairAction], list[str]]:
     """Scan the catalog and identify repair actions needed.
 
@@ -73,6 +74,7 @@ def scan(
         catalog_dir: Catalog directory (default: ~/.bth/catalog/)
         tier: "cool", "warm", "archive", or "all"
         from_warm: If True, detect runs present in warm DB but missing from cool fragments
+        archive_root: Archive root directory (default: ~/.bth/archive)
 
     Returns:
         Tuple of (list of RepairAction objects, list of warning strings), actions sorted by path
@@ -98,10 +100,13 @@ def scan(
         warnings.extend(warm_warnings)
 
     if tier == "archive" or tier == "all":
-        archive_root = Path.home() / ".bth" / "archive"
+        if archive_root is None:
+            archive_root_path = Path.home() / ".bth" / "archive"
+        else:
+            archive_root_path = Path(archive_root)
         from bathos.verify import verify_archive
 
-        archive_result = verify_archive(archive_root)
+        archive_result = verify_archive(archive_root_path)
         archive_actions, archive_warnings = _actions_from_archive_verify(archive_result)
         actions.extend(archive_actions)
         warnings.extend(archive_warnings)
@@ -393,6 +398,7 @@ def repair(
     dry_run: bool = False,
     acknowledge_warm_loss: bool = False,
     from_warm: bool = False,
+    archive_root: Path | str | None = None,
 ) -> RepairManifest:
     """Execute repair actions on the catalog.
 
@@ -407,6 +413,7 @@ def repair(
         dry_run: If True, plan actions but don't execute them
         acknowledge_warm_loss: If True and warm rebuild is needed, proceed anyway
         from_warm: If True, detect and re-export runs present in warm DB but missing from cool
+        archive_root: Archive root directory (default: ~/.bth/archive)
 
     Returns:
         RepairManifest with actions taken and any warnings
@@ -418,10 +425,17 @@ def repair(
         catalog_dir = default_catalog_dir()
     catalog_dir = Path(catalog_dir)
 
+    # Convert archive_root to Path if provided
+    archive_root_path = None
+    if archive_root is not None:
+        archive_root_path = Path(archive_root)
+
     run_ts = datetime.now(UTC).isoformat()
 
     # Scan for actions needed
-    actions, scan_warnings = scan(catalog_dir, tier, from_warm=from_warm)
+    actions, scan_warnings = scan(
+        catalog_dir, tier, from_warm=from_warm, archive_root=archive_root_path
+    )
 
     # Check for warm rebuild without acknowledgment
     warm_rebuild_actions = [a for a in actions if a.action == "rebuild_warm"]
@@ -497,7 +511,7 @@ def repair(
     # Execute each action
     for action in actions:
         try:
-            _execute_repair_action(action, catalog_dir, manifest)
+            _execute_repair_action(action, catalog_dir, manifest, archive_root_path)
             action.dry_run = False  # Mark action as executed
         except NotImplementedError as e:
             manifest.warnings.append(str(e))
@@ -655,7 +669,12 @@ def _append_quarantine_manifest(catalog_dir: Path, slug: str, entry: dict) -> No
         raise
 
 
-def _execute_repair_action(action: RepairAction, catalog_dir: Path, manifest: RepairManifest | None = None) -> None:
+def _execute_repair_action(
+    action: RepairAction,
+    catalog_dir: Path,
+    manifest: RepairManifest | None = None,
+    archive_root: Path | None = None,
+) -> None:
     """Execute a single repair action.
 
     Raises NotImplementedError for actions not yet implemented in tracks B/C/D.
@@ -664,6 +683,7 @@ def _execute_repair_action(action: RepairAction, catalog_dir: Path, manifest: Re
         action: The repair action to execute
         catalog_dir: Catalog directory
         manifest: Optional RepairManifest to collect warnings and messages
+        archive_root: Archive root directory for archive-tier repairs (default: ~/.bth/archive)
     """
     if action.action == "delete_tmp":
         path = Path(action.path)
@@ -686,7 +706,7 @@ def _execute_repair_action(action: RepairAction, catalog_dir: Path, manifest: Re
         _handle_rebuild_warm(action, catalog_dir)
 
     elif action.action == "quarantine_archive":
-        _handle_quarantine_archive(action, catalog_dir)
+        _handle_quarantine_archive(action, catalog_dir, archive_root)
 
     elif action.action == "reexport_from_warm":
         _handle_reexport_from_warm(action, catalog_dir, manifest)
@@ -877,7 +897,9 @@ def _handle_reexport_from_warm(action: RepairAction, catalog_dir: Path, manifest
     logger.info(action.detail)
 
 
-def _handle_quarantine_archive(action: RepairAction, catalog_dir: Path) -> None:
+def _handle_quarantine_archive(
+    action: RepairAction, catalog_dir: Path, archive_root: Path | None = None
+) -> None:
     """Quarantine an archive partition file with SHA256 or row-count mismatch.
 
     Moves the partition file to .bth/quarantine/archive/<year>/<month>/<basename>
@@ -888,8 +910,10 @@ def _handle_quarantine_archive(action: RepairAction, catalog_dir: Path) -> None:
         action: RepairAction with action="quarantine_archive" and path as partition path
                 (e.g., "project=foo/year=2026/month=06")
         catalog_dir: Catalog directory (used to locate .bth/quarantine/)
+        archive_root: Archive root directory (default: ~/.bth/archive)
     """
-    archive_root = Path.home() / ".bth" / "archive"
+    if archive_root is None:
+        archive_root = Path.home() / ".bth" / "archive"
     partition_path = action.path  # Relative path like "project=foo/year=2026/month=06"
 
     # Construct full path to the partition's runs.parquet file
@@ -946,6 +970,25 @@ def _handle_quarantine_archive(action: RepairAction, catalog_dir: Path) -> None:
         logger.error(f"Failed to move archive partition {parquet_path}: {e}")
         raise
 
+    # Compute actual SHA256 of the quarantined file
+    from bathos.verify import _sha256_file
+
+    actual_sha256 = _sha256_file(quarantine_path)
+
+    # Read archive manifest to extract expected SHA256
+    expected_sha256 = ""
+    manifest_json_path = archive_root / "manifest.json"
+    if manifest_json_path.exists():
+        try:
+            with open(manifest_json_path, "r") as f:
+                manifest_data = json.load(f)
+            for entry in manifest_data.get("entries", []):
+                if entry.get("partition") == partition_path:
+                    expected_sha256 = entry.get("sha256", "")
+                    break
+        except Exception as e:
+            logger.debug(f"Could not extract expected SHA256 from manifest: {e}")
+
     # Append manifest entry to .bth/quarantine/archive/manifest.jsonl
     manifest_entry = {
         "ts": datetime.now(UTC).isoformat(),
@@ -956,6 +999,8 @@ def _handle_quarantine_archive(action: RepairAction, catalog_dir: Path) -> None:
         "partition": partition_path,
         "mtime_s": original_mtime,
         "size_bytes": original_size,
+        "expected_sha256": expected_sha256,
+        "actual_sha256": actual_sha256,
     }
     quarantine_manifest_path = catalog_dir / "quarantine" / "archive" / "manifest.jsonl"
     quarantine_manifest_path.parent.mkdir(parents=True, exist_ok=True)
