@@ -389,9 +389,17 @@ def _execute_repair_action(action: RepairAction, catalog_dir: Path) -> None:
         _handle_quarantine_bak(action, catalog_dir)
 
     elif action.action == "quarantine_corrupt":
-        raise NotImplementedError(
-            "TODO: implemented in downstream track C — quarantine_corrupt action handler"
-        )
+        # Guard: if path ends with .tmp.parquet, re-dispatch as delete_tmp
+        # (these should have been caught as sentinels, but if mis-classified, delete them)
+        if action.path.endswith(".tmp.parquet"):
+            path = Path(action.path)
+            if path.exists():
+                path.unlink()
+                logger.info(f"Deleted mis-classified .tmp.parquet: {path}")
+        else:
+            raise NotImplementedError(
+                "TODO: implemented in downstream track C — quarantine_corrupt action handler"
+            )
 
     elif action.action == "backup_warm":
         raise NotImplementedError(
