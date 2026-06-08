@@ -40,6 +40,7 @@ from bathos.runner import run_script
 from bathos.sync import sync_catalog
 
 app = FastMCP("bathos")
+mcp = app  # Alias for import compatibility
 
 
 # ============================================================================
@@ -308,6 +309,7 @@ def archive_tool(
         return json.dumps(result_dict, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)})
+
 
 
 def check_tool(
@@ -1216,6 +1218,95 @@ def outputs_summary_tool(
             pass
 
     return {"rows": list(aggregated.values()), "since": since}
+
+
+@app.tool("repair_scan")
+@traced_tool
+async def mcp_repair_scan_tool(
+    catalog_dir: str | None = None,
+    tier: str = "all",
+) -> dict:
+    """Scan the catalog for repairable issues without making any changes.
+
+    Returns a list of findings with action type, path, and detail.
+
+    Args:
+        catalog_dir: Catalog directory (empty = use default)
+        tier: Scan scope: 'cool', 'warm', 'archive', or 'all'
+
+    Returns:
+        JSON dict with findings (list of action dicts) and count
+    """
+    from bathos.repair import scan
+
+    cat_dir = _get_catalog_dir(catalog_dir)
+    try:
+        actions, warnings = scan(catalog_dir=cat_dir, tier=tier)
+        findings = [vars(a) for a in actions]
+        return {
+            "findings": findings,
+            "count": len(findings),
+            "warnings": warnings,
+        }
+    except Exception as e:
+        return {"error": str(e), "findings": [], "count": 0}
+
+
+@app.tool("repair")
+@traced_tool
+async def mcp_repair_tool(
+    catalog_dir: str | None = None,
+    tier: str = "all",
+    dry_run: bool = True,
+    acknowledge_warm_loss: bool = False,
+) -> dict:
+    """Run catalog repair. dry_run=True (default) is safe; set dry_run=False to apply.
+
+    Pass acknowledge_warm_loss=True only when warm-tier data loss is acceptable.
+
+    Args:
+        catalog_dir: Catalog directory (empty = use default)
+        tier: Repair scope: 'cool', 'warm', 'archive', or 'all'
+        dry_run: If True (default), plan actions without executing
+        acknowledge_warm_loss: If True, proceed with warm DB rebuild even if data loss
+
+    Returns:
+        JSON dict with manifest (actions and metadata) or error
+    """
+    from bathos.repair import repair as _repair
+
+    cat_dir = _get_catalog_dir(catalog_dir)
+    try:
+        manifest = _repair(
+            catalog_dir=cat_dir,
+            tier=tier,
+            dry_run=dry_run,
+            acknowledge_warm_loss=acknowledge_warm_loss,
+        )
+        manifest_dict = {
+            "run_ts": manifest.run_ts,
+            "catalog_dir": manifest.catalog_dir,
+            "dry_run": manifest.dry_run,
+            "tier": manifest.tier,
+            "actions": [vars(a) for a in manifest.actions],
+            "warnings": manifest.warnings,
+            "action_count": len(manifest.actions),
+        }
+        return manifest_dict
+    except SystemExit as e:
+        # repair() raises SystemExit(1) when warm rebuild needed but not acknowledged
+        return {
+            "error": "Warm database rebuild required but not acknowledged",
+            "exit_code": e.code,
+            "actions": [],
+            "warnings": [],
+        }
+    except Exception as e:
+        return {
+            "error": str(e),
+            "actions": [],
+            "warnings": [],
+        }
 
 
 def mcp_server():

@@ -4,6 +4,9 @@ import pytest
 
 from bathos.schema import Run
 
+# Guard repair module import for test collection — repair.py is optional at collection time
+pytest.importorskip("bathos.repair")
+
 
 @pytest.fixture
 def tmp_catalog(tmp_path: Path) -> Path:

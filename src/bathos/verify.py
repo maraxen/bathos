@@ -6,7 +6,6 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import duckdb
 import pyarrow.parquet as pq
 
 logger = logging.getLogger(__name__)
@@ -42,7 +41,7 @@ def verify_cool(catalog_dir: Path) -> VerifyResult:
 
     # Check for .bak and .tmp files (signals of interrupted operations)
     bak_files = list(runs_dir.rglob("*.bak"))
-    tmp_files = list(runs_dir.rglob("*.tmp"))
+    tmp_files = list(runs_dir.rglob("*.tmp.parquet"))
 
     for bak_file in bak_files:
         errors.append(f"Interrupted migration: backup file exists at {bak_file}")
@@ -52,8 +51,8 @@ def verify_cool(catalog_dir: Path) -> VerifyResult:
         errors.append(f"Interrupted write: temporary file exists at {tmp_file}")
         logger.error(f"Interrupted write: {tmp_file}")
 
-    # Check each fragment
-    fragments = list(runs_dir.rglob("run_*.parquet"))
+    # Check each fragment (exclude .tmp.parquet files which are sentinel markers)
+    fragments = [f for f in runs_dir.rglob("run_*.parquet") if not f.name.endswith(".tmp.parquet")]
     for frag in fragments:
         stats["fragments_checked"] += 1
         try:

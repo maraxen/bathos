@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
-import os
 import shutil
 import time
 from collections.abc import Callable
@@ -42,7 +42,7 @@ def _backup_warm_db(db_path: Path) -> None:
     """Create a timestamped backup of bathos.db before force_rebuild deletion.
 
     Copies bathos.db to bathos.db.bak-<YYYYMMDD_HHMMSS>. Rotates old backups,
-    keeping at most 1 file. Deletes any previous backup if a new one is created.
+    keeping at most 3 files. Deletes older backups beyond the limit.
 
     Best-effort: logs warning on failure but does not raise (compaction continues).
     """
@@ -57,17 +57,16 @@ def _backup_warm_db(db_path: Path) -> None:
         shutil.copy2(db_path, backup_path)
         logger.info(f"Created backup: {backup_path}")
 
-        # Rotate: keep only 1 backup (previous one)
+        # Rotate: keep at most 3 backups
         # List all .bak-* files, sorted by modification time (oldest first)
         bak_files = sorted(
             db_path.parent.glob("bathos.db.bak-*"),
             key=lambda p: p.stat().st_mtime,
         )
 
-        # If more than 1 backup exists, delete older ones
-        if len(bak_files) > 1:
-            # Keep only the newest; delete all others
-            for old_backup in bak_files[:-1]:
+        MAX_WARM_BACKUPS = 3
+        if len(bak_files) > MAX_WARM_BACKUPS:
+            for old_backup in bak_files[:-MAX_WARM_BACKUPS]:
                 old_backup.unlink()
                 logger.info(f"Rotated out old backup: {old_backup}")
 
@@ -460,10 +459,8 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
         "ALTER TABLE campaign_runs ADD COLUMN IF NOT EXISTS seq_position INTEGER",
         "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS stopping_threshold REAL",
     ]:
-        try:
+        with contextlib.suppress(Exception):
             con.execute(_alter_sql)
-        except Exception:
-            pass
 
     con.execute(
         "CREATE INDEX IF NOT EXISTS idx_campaigns_mode_status ON campaigns (mode, status)"
@@ -484,10 +481,10 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                 pm, rel_path = postmortem_map[run.id]
                 postmortem_verdict_override = pm.verdict_override
                 postmortem_has_anomalies = any(v and str(v).lower() != "none" for v in getattr(pm, "anomalies", {}).values())
-                
+
                 curr_outcome = con.execute("SELECT outcome FROM runs WHERE id = ?", [run.id]).fetchone()[0] or ""
                 outcome = postmortem_verdict_override if postmortem_verdict_override != "none" else curr_outcome
-                
+
                 con.execute(
                     """
                     UPDATE runs SET
