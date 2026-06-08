@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from bathos.verify import verify_all, verify_cool, verify_warm
 from bathos.config import default_catalog_dir
+from bathos.verify import verify_cool, verify_warm
 
 logger = logging.getLogger(__name__)
 
@@ -433,7 +433,7 @@ def _handle_quarantine_corrupt(action: RepairAction, catalog_dir: Path) -> None:
             "slug": slug,
             "error_type": error_type,
             "error_msg": error_msg,
-            "schema_valid": not transient,  # Schema is valid if error was transient
+            "schema_valid": transient,  # Schema is valid iff error was transient (re-read succeeded)
             "transient": transient,
         }
         _append_quarantine_manifest(catalog_dir, slug, manifest_entry)

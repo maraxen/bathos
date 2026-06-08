@@ -9,13 +9,24 @@ Tests cover:
 """
 
 import json
-import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-import pytest
+from bathos.repair import RepairManifest, repair, scan
 
-from bathos.repair import scan, repair, RepairAction, RepairManifest
+
+def _create_test_run():
+    """Helper to create a minimal valid Run for testing."""
+    from bathos.schema import Run
+
+    return Run(
+        project_slug="test_slug",
+        command="test_command",
+        argv=["--flag"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+    )
 
 
 class TestScanAndRepairBasics:
@@ -174,7 +185,7 @@ class TestQuarantineManifest:
         os.utime(bak_file, (stale_mtime, stale_mtime))
 
         # Execute repair
-        manifest = repair(tmp_catalog, tier="cool", dry_run=False)
+        repair(tmp_catalog, tier="cool", dry_run=False)
 
         # Check quarantine directory exists
         quarantine_dir = tmp_catalog / "quarantine" / "slug"
@@ -351,7 +362,7 @@ class TestEdgeCases:
         os.utime(bak2, (stale_mtime, stale_mtime))
 
         # Execute repair
-        manifest = repair(tmp_catalog, tier="cool", dry_run=False)
+        repair(tmp_catalog, tier="cool", dry_run=False)
 
         # Check manifest entries
         manifest_file = tmp_catalog / "quarantine" / "slug" / "manifest.jsonl"
@@ -360,3 +371,200 @@ class TestEdgeCases:
         with open(manifest_file) as f:
             entries = [json.loads(line) for line in f]
             assert len(entries) == 2, f"Expected 2 quarantine entries, got {len(entries)}"
+
+
+class TestCorruptQuarantineGWT45:
+    """GWT-4/GWT-5: Test corrupt fragment quarantine with all 6 checks."""
+
+    def test_scan_detects_zero_byte_corrupt_fragment(self, tmp_catalog: Path):
+        """GWT-4.1: scan() detects zero-byte fragment as corrupt and returns quarantine_corrupt action."""
+        from bathos.catalog import write_run
+
+        runs_dir = tmp_catalog / "runs" / "test_slug"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create a valid fragment using write_run() so catalog.py can work with it
+        run = _create_test_run()
+        valid_frag = runs_dir / "run_valid.parquet"
+        write_run(run, valid_frag)
+        assert valid_frag.exists() and valid_frag.stat().st_size > 0
+
+        # Create a zero-byte corrupt fragment alongside the valid one
+        corrupt_frag = runs_dir / "run_corrupt.parquet"
+        corrupt_frag.write_text("")  # Zero-byte file
+        assert corrupt_frag.stat().st_size == 0
+
+        # Scan should detect the corrupt fragment
+        actions, warnings = scan(tmp_catalog, tier="cool")
+
+        corrupt_actions = [a for a in actions if a.action == "quarantine_corrupt"]
+        assert len(corrupt_actions) >= 1, f"Expected at least 1 quarantine_corrupt action, got {len(corrupt_actions)}"
+
+    def test_dry_run_leaves_corrupt_file_in_place(self, tmp_catalog: Path):
+        """GWT-4.2: dry_run=True leaves corrupt fragment untouched."""
+        from bathos.catalog import write_run
+
+        runs_dir = tmp_catalog / "runs" / "test_slug"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create valid and corrupt fragments
+        run = _create_test_run()
+        valid_frag = runs_dir / "run_valid.parquet"
+        write_run(run, valid_frag)
+
+        corrupt_frag = runs_dir / "run_corrupt.parquet"
+        corrupt_frag.write_text("")
+
+        # Dry-run repair
+        manifest = repair(tmp_catalog, tier="cool", dry_run=True)
+
+        # Corrupt file should still exist
+        assert corrupt_frag.exists(), "Dry-run should not delete corrupt file"
+        assert manifest.dry_run is True
+
+    def test_repair_moves_corrupt_file_leaves_valid(self, tmp_catalog: Path):
+        """GWT-4.3: repair(dry_run=False) moves corrupt fragment, valid fragment stays."""
+        from bathos.catalog import write_run
+
+        runs_dir = tmp_catalog / "runs" / "test_slug"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create valid and corrupt fragments
+        run = _create_test_run()
+        valid_frag = runs_dir / "run_valid.parquet"
+        valid_size_before = None
+        write_run(run, valid_frag)
+        valid_size_before = valid_frag.stat().st_size
+
+        corrupt_frag = runs_dir / "run_corrupt.parquet"
+        corrupt_frag.write_text("")
+
+        # Execute repair
+        repair(tmp_catalog, tier="cool", dry_run=False)
+
+        # Valid fragment should still exist with same size
+        assert valid_frag.exists(), "Valid fragment should still exist"
+        assert valid_frag.stat().st_size == valid_size_before, "Valid fragment size changed"
+
+        # Corrupt fragment should be gone
+        assert not corrupt_frag.exists(), "Corrupt fragment should be moved"
+
+        # Verify quarantine directory has the file
+        quarantine_dir = tmp_catalog / "quarantine" / "test_slug"
+        assert quarantine_dir.exists(), "Quarantine directory should exist"
+        quarantined_files = [f for f in quarantine_dir.glob("*") if f.name != "manifest.jsonl"]
+        assert len(quarantined_files) >= 1, f"Corrupt file should be in quarantine, found {[f.name for f in quarantine_dir.glob('*')]}"
+
+    def test_manifest_has_four_corrupt_specific_fields(self, tmp_catalog: Path):
+        """GWT-4.4: Quarantine manifest entry has error_type, error_msg, schema_valid, transient."""
+        from bathos.catalog import write_run
+
+        runs_dir = tmp_catalog / "runs" / "test_slug"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create valid and corrupt fragments
+        run = _create_test_run()
+        valid_frag = runs_dir / "run_valid.parquet"
+        write_run(run, valid_frag)
+
+        corrupt_frag = runs_dir / "run_corrupt.parquet"
+        corrupt_frag.write_text("")
+
+        # Execute repair
+        repair(tmp_catalog, tier="cool", dry_run=False)
+
+        # Read manifest
+        manifest_file = tmp_catalog / "quarantine" / "test_slug" / "manifest.jsonl"
+        assert manifest_file.exists()
+
+        with open(manifest_file) as f:
+            entries = [json.loads(line) for line in f]
+            corrupt_entries = [e for e in entries if e.get("action") == "quarantine_corrupt"]
+            assert len(corrupt_entries) >= 1, "Should have at least one quarantine_corrupt entry"
+
+            entry = corrupt_entries[0]
+            # Verify the four corrupt-specific fields exist
+            assert "error_type" in entry, "Missing error_type field"
+            assert "error_msg" in entry, "Missing error_msg field"
+            assert "schema_valid" in entry, "Missing schema_valid field"
+            assert "transient" in entry, "Missing transient field"
+
+    def test_zero_byte_file_has_schema_valid_false_transient_false(self, tmp_catalog: Path):
+        """GWT-4.5: Zero-byte corrupt file → schema_valid=False, transient=False."""
+        from bathos.catalog import write_run
+
+        runs_dir = tmp_catalog / "runs" / "test_slug"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create valid and corrupt fragments
+        run = _create_test_run()
+        valid_frag = runs_dir / "run_valid.parquet"
+        write_run(run, valid_frag)
+
+        corrupt_frag = runs_dir / "run_corrupt.parquet"
+        corrupt_frag.write_text("")
+
+        # Execute repair
+        repair(tmp_catalog, tier="cool", dry_run=False)
+
+        # Read manifest
+        manifest_file = tmp_catalog / "quarantine" / "test_slug" / "manifest.jsonl"
+        with open(manifest_file) as f:
+            entries = [json.loads(line) for line in f]
+            corrupt_entries = [e for e in entries if e.get("action") == "quarantine_corrupt"]
+            assert len(corrupt_entries) >= 1
+
+            entry = corrupt_entries[0]
+            # For a genuinely corrupt file, schema_valid should be False and transient should be False
+            assert entry["schema_valid"] is False, f"schema_valid should be False for corrupt file, got {entry['schema_valid']}"
+            assert entry["transient"] is False, f"transient should be False for genuinely corrupt file, got {entry['transient']}"
+
+    def test_compact_succeeds_after_quarantine_repair(self, tmp_catalog: Path):
+        """GWT-4.6: compact() succeeds after quarantine_corrupt repair."""
+        from bathos.catalog import write_run
+        from bathos.compact import compact
+
+        runs_dir = tmp_catalog / "runs" / "test_slug"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create valid and corrupt fragments
+        run = _create_test_run()
+        valid_frag = runs_dir / "run_valid.parquet"
+        write_run(run, valid_frag)
+
+        corrupt_frag = runs_dir / "run_corrupt.parquet"
+        corrupt_frag.write_text("")
+
+        # Execute repair to move corrupt file
+        repair(tmp_catalog, tier="cool", dry_run=False)
+
+        # Now compact should succeed without crashing
+        try:
+            compact(tmp_catalog)
+        except Exception as e:
+            raise AssertionError(f"compact() should succeed after quarantine repair, but got {e}")
+
+    def test_scan_post_repair_has_zero_quarantine_actions(self, tmp_catalog: Path):
+        """GWT-5.1: After repair, re-run scan() returns zero quarantine_corrupt actions."""
+        from bathos.catalog import write_run
+
+        runs_dir = tmp_catalog / "runs" / "test_slug"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create valid and corrupt fragments
+        run = _create_test_run()
+        valid_frag = runs_dir / "run_valid.parquet"
+        write_run(run, valid_frag)
+
+        corrupt_frag = runs_dir / "run_corrupt.parquet"
+        corrupt_frag.write_text("")
+
+        # Execute repair
+        repair(tmp_catalog, tier="cool", dry_run=False)
+
+        # Re-scan
+        actions, warnings = scan(tmp_catalog, tier="cool")
+
+        # Should have zero quarantine_corrupt actions
+        corrupt_actions = [a for a in actions if a.action == "quarantine_corrupt"]
+        assert len(corrupt_actions) == 0, f"Expected 0 quarantine_corrupt actions after repair, got {len(corrupt_actions)}"
