@@ -36,11 +36,11 @@ from bathos.compact import compact as compact_catalog
 from bathos.config import default_catalog_dir, find_project_config, load_project_config
 from bathos.init import init_project
 from bathos.query import find_runs, get_run, list_runs, run_sql
-from bathos.repair import repair as repair_catalog, scan as scan_repairs
 from bathos.runner import run_script
 from bathos.sync import sync_catalog
 
 app = FastMCP("bathos")
+mcp = app  # Alias for import compatibility
 
 
 # ============================================================================
@@ -310,93 +310,6 @@ def archive_tool(
     except Exception as e:
         return json.dumps({"error": str(e)})
 
-
-def repair_scan_tool(
-    catalog_dir: str = "",
-    tier: str = "all",
-) -> str:
-    """Scan catalog for corruption and return repair actions needed.
-
-    Args:
-        catalog_dir: Catalog directory (empty = use default)
-        tier: Tier to scan: cool, warm, archive, or all
-
-    Returns:
-        JSON string with repair actions
-    """
-    try:
-        cat_dir = _get_catalog_dir(catalog_dir or None)
-        actions = scan_repairs(cat_dir, tier=tier)
-        actions_json = [
-            {
-                "action": a.action,
-                "path": a.path,
-                "detail": a.detail,
-                "dry_run": a.dry_run,
-            }
-            for a in actions
-        ]
-        return json.dumps(
-            {"actions": actions_json, "count": len(actions_json), "tier": tier},
-            indent=2,
-        )
-    except Exception as e:
-        return json.dumps({"error": str(e)})
-
-
-def repair_tool(
-    catalog_dir: str = "",
-    tier: str = "all",
-    dry_run: bool = True,
-    acknowledge_warm_loss: bool = False,
-) -> str:
-    """Scan and repair catalog corruption.
-
-    Args:
-        catalog_dir: Catalog directory (empty = use default)
-        tier: Tier to repair: cool, warm, archive, or all
-        dry_run: If True, plan actions without executing them
-        acknowledge_warm_loss: If True, allow warm DB rebuild
-
-    Returns:
-        JSON string with repair manifest
-    """
-    try:
-        cat_dir = _get_catalog_dir(catalog_dir or None)
-        manifest = repair_catalog(
-            cat_dir,
-            tier=tier,
-            dry_run=dry_run,
-            acknowledge_warm_loss=acknowledge_warm_loss,
-        )
-        actions_json = [
-            {
-                "action": a.action,
-                "path": a.path,
-                "detail": a.detail,
-                "dry_run": a.dry_run,
-            }
-            for a in manifest.actions
-        ]
-        result_dict = {
-            "run_ts": manifest.run_ts,
-            "catalog_dir": manifest.catalog_dir,
-            "dry_run": manifest.dry_run,
-            "tier": manifest.tier,
-            "actions": actions_json,
-            "warnings": manifest.warnings,
-        }
-        return json.dumps(result_dict, indent=2)
-    except SystemExit as e:
-        if e.code == 1:
-            return json.dumps(
-                {
-                    "error": "Warm database rebuild would destroy warm-only data. Pass --acknowledge-warm-loss to proceed."
-                }
-            )
-        raise
-    except Exception as e:
-        return json.dumps({"error": str(e)})
 
 
 def check_tool(
@@ -891,33 +804,6 @@ async def mcp_archive_tool(
 ) -> str:
     """Archive warm-tier DuckDB to cold-tier Parquet."""
     return archive_tool(catalog_dir=catalog_dir, project=project, keep_cool=keep_cool)
-
-
-@app.tool("repair_scan")
-@traced_tool
-async def mcp_repair_scan_tool(
-    catalog_dir: str = "",
-    tier: str = "all",
-) -> str:
-    """Scan catalog for corruption and return repair actions needed."""
-    return repair_scan_tool(catalog_dir=catalog_dir, tier=tier)
-
-
-@app.tool("repair")
-@traced_tool
-async def mcp_repair_tool(
-    catalog_dir: str = "",
-    tier: str = "all",
-    dry_run: bool = True,
-    acknowledge_warm_loss: bool = False,
-) -> str:
-    """Scan and repair catalog corruption."""
-    return repair_tool(
-        catalog_dir=catalog_dir,
-        tier=tier,
-        dry_run=dry_run,
-        acknowledge_warm_loss=acknowledge_warm_loss,
-    )
 
 
 @app.tool("check")
