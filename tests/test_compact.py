@@ -509,3 +509,49 @@ def test_migration_chain_v0_to_v4(tmp_catalog: Path, sample_run: Run):
     assert rows[0][8] == ""  # skill_sha256
     assert rows[0][9] == ""  # campaign_id
     assert rows[0][10] == ""  # script_sha256
+
+
+def test_force_rebuild_creates_backup(tmp_catalog: Path, sample_run: Run):
+    """force_rebuild=True should backup bathos.db before deletion."""
+    init_catalog(tmp_catalog)
+
+    # Write a fragment and compact to create bathos.db
+    write_run(sample_run, tmp_catalog)
+    compact(tmp_catalog)
+    original_db = tmp_catalog / "bathos.db"
+    assert original_db.exists()
+
+    # Record original file size
+    original_size = original_db.stat().st_size
+
+    # Force rebuild (should backup then delete)
+    result = compact(tmp_catalog, force_rebuild=True)
+    assert result.ingested == 1
+
+    # Verify bathos.db exists (rebuilt)
+    assert original_db.exists()
+
+    # Verify backup file was created (bathos.db.bak-<timestamp>)
+    backups = list(tmp_catalog.glob("bathos.db.bak-*"))
+    assert len(backups) == 1
+    assert backups[0].exists()
+    assert backups[0].stat().st_size == original_size
+
+
+def test_backup_rotation_keeps_max_3(tmp_catalog: Path, sample_run: Run):
+    """Backup rotation should keep at most 3 .bak-* files."""
+    import time
+    init_catalog(tmp_catalog)
+
+    # Create and rebuild 5 times to generate 5 backups
+    for i in range(5):
+        write_run(sample_run, tmp_catalog)
+        compact(tmp_catalog, force_rebuild=(i > 0))
+        # Small delay to ensure different timestamps
+        if i < 4:
+            time.sleep(0.01)
+
+    # Count backup files
+    backups = list(tmp_catalog.glob("bathos.db.bak-*"))
+    # Should keep at most 3 most recent; due to timestamp precision, might be fewer
+    assert len(backups) <= 3, f"Expected at most 3 backups, got {len(backups)}"

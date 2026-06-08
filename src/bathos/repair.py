@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -223,6 +224,29 @@ def _actions_from_warm_verify(result) -> tuple[list[RepairAction], list[str]]:
                 )
             )
 
+    # Also check if warm DB is present and would fail on open (preemptive detection)
+    if not actions and "db_exists" in result.stats and result.stats["db_exists"]:
+        db_path = Path(result.stats.get("db_path", "") or "").resolve()
+        if not db_path.exists():
+            db_path = Path.cwd() / "bathos.db"
+
+        # Try to detect corruption by attempting to open DB
+        if db_path.exists():
+            from bathos.compact import CorruptDatabaseError, _open_db
+
+            try:
+                con = _open_db(db_path)
+                con.close()
+            except CorruptDatabaseError:
+                detail = f"Warm database corrupt; rebuild needed: {db_path}"
+                actions.append(
+                    RepairAction(
+                        action="rebuild_warm",
+                        path=str(db_path),
+                        detail=detail,
+                    )
+                )
+
     return actions, warnings
 
 
@@ -275,11 +299,53 @@ def repair(
     # Check for warm rebuild without acknowledgment
     warm_rebuild_actions = [a for a in actions if a.action == "rebuild_warm"]
     if warm_rebuild_actions and not acknowledge_warm_loss:
+        # Get list of affected run UUIDs from cool fragments
+        from bathos.catalog import read_runs
+
+        try:
+            cool_runs = read_runs(catalog_dir)
+            run_uuids = [run.id for run in cool_runs]
+        except Exception:
+            run_uuids = []
+
         # Check if warm DB has postmortem annotations or output_metadata
+        postmortem_count = 0
+        output_metadata_count = 0
+        db_path = catalog_dir / "bathos.db"
+        if db_path.exists():
+            try:
+                import duckdb
+
+                con = duckdb.connect(str(db_path), read_only=True)
+                try:
+                    # Count postmortem annotations (any postmortem_status != 'unassigned')
+                    pm_result = con.execute(
+                        "SELECT COUNT(*) FROM runs WHERE postmortem_status != 'unassigned'"
+                    ).fetchone()
+                    postmortem_count = pm_result[0] if pm_result else 0
+
+                    # Count output_metadata entries (non-empty JSON arrays)
+                    om_result = con.execute(
+                        "SELECT COUNT(*) FROM runs WHERE output_metadata IS NOT NULL AND output_metadata != '[]'"
+                    ).fetchone()
+                    output_metadata_count = om_result[0] if om_result else 0
+                finally:
+                    con.close()
+            except Exception as e:
+                logger.debug(f"Could not query warm DB for at-risk data: {e}")
+
+        # Print the warning message with concrete counts
         warn_msg = (
-            "WARNING: Warm database rebuild will destroy postmortem annotations and output_metadata.\n"
-            "To proceed, pass --acknowledge-warm-loss"
+            f"WARNING: Warm database rebuild will destroy warm-only data:\n"
+            f"  - {postmortem_count} postmortem annotation(s)\n"
+            f"  - {output_metadata_count} output_metadata entry(ies)\n"
+            f"  - {len(run_uuids)} run(s) affected: {', '.join(run_uuids[:5])}"
         )
+        if len(run_uuids) > 5:
+            warn_msg += f" ... and {len(run_uuids) - 5} more"
+
+        warn_msg += "\n\nTo proceed, pass --acknowledge-warm-loss"
+        print(warn_msg, file=sys.stderr)
         logger.error(warn_msg)
         raise SystemExit(1)
 
@@ -300,6 +366,7 @@ def repair(
     for action in actions:
         try:
             _execute_repair_action(action, catalog_dir)
+            action.dry_run = False  # Mark action as executed
         except NotImplementedError as e:
             manifest.warnings.append(str(e))
             logger.warning(f"Action {action.action} not yet implemented: {e}")
@@ -479,9 +546,29 @@ def _execute_repair_action(action: RepairAction, catalog_dir: Path) -> None:
         )
 
     elif action.action == "rebuild_warm":
-        raise NotImplementedError(
-            "TODO: implemented in downstream track D — rebuild_warm action handler"
-        )
+        _handle_rebuild_warm(action, catalog_dir)
 
     else:
         raise ValueError(f"Unknown repair action: {action.action}")
+
+
+def _handle_rebuild_warm(action: RepairAction, catalog_dir: Path) -> None:
+    """Rebuild warm database (bathos.db) from cool fragments.
+
+    Calls compact(catalog_dir, force_rebuild=True), which creates a backup
+    of bathos.db before deletion and rebuilds the database from cool fragments.
+    """
+    from bathos.compact import compact
+
+    db_path = Path(action.path)
+    logger.info(f"Rebuilding warm database: {db_path}")
+
+    try:
+        result = compact(catalog_dir, force_rebuild=True)
+        logger.info(
+            f"Warm database rebuilt: {result.ingested} ingested, {result.skipped} skipped"
+        )
+        action.detail = f"Warm database rebuilt from cool fragments: {result.ingested} rows ingested"
+    except Exception as e:
+        logger.error(f"Failed to rebuild warm database: {e}")
+        raise

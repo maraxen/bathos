@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -35,6 +36,42 @@ class CompactionLockedError(RuntimeError):
     """Raised when compact() cannot acquire the advisory lock."""
 
     pass
+
+
+def _backup_warm_db(db_path: Path) -> None:
+    """Create a timestamped backup of bathos.db before force_rebuild deletion.
+
+    Copies bathos.db to bathos.db.bak-<YYYYMMDD_HHMMSS>. Rotates old backups,
+    keeping at most 3 files. Deletes oldest backup if count exceeds 3.
+
+    Best-effort: logs warning on failure but does not raise (compaction continues).
+    """
+    if not db_path.exists():
+        return
+
+    try:
+        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+        backup_path = db_path.parent / f"bathos.db.bak-{timestamp}"
+
+        # Copy the file
+        shutil.copy2(db_path, backup_path)
+        logger.info(f"Created backup: {backup_path}")
+
+        # Rotate: keep only 3 most recent backups
+        # List all .bak-* files, sorted by modification time (oldest first)
+        bak_files = sorted(
+            db_path.parent.glob("bathos.db.bak-*"),
+            key=lambda p: p.stat().st_mtime,
+        )
+
+        # If more than 3 backups, delete the oldest
+        if len(bak_files) > 3:
+            oldest = bak_files[0]
+            oldest.unlink()
+            logger.info(f"Rotated out old backup: {oldest}")
+
+    except Exception as e:
+        logger.warning(f"Failed to backup bathos.db before force_rebuild: {e}")
 
 
 def _collect_output_metadata(output_path: str) -> dict:
@@ -375,6 +412,7 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
     warm_rows_before = 0
     db_path = catalog_dir / "bathos.db"
     if db_path.exists() and force_rebuild:
+        _backup_warm_db(db_path)
         db_path.unlink()
     if db_path.exists():
         temp_con = duckdb.connect(str(db_path), read_only=True)
