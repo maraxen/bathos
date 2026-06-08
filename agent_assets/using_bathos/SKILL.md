@@ -44,6 +44,7 @@ description: "Use when working in any bathos-tracked research project — experi
 | bth archive | --project, --archive-dir, --dry-run | ✅ | Cold-tier partitioned export |
 | bth sync | --remote, --pull | ✅ | Cluster rsync |
 | bth migrate | --dry-run | ✅ | Upgrade cool-tier fragments to current schema |
+| bth repair | --tier, --dry-run/--apply, --from-warm, --acknowledge-warm-loss | ✅ | Scan & repair catalog corruption (sentinel cleanup, fragment/archive quarantine, warm rebuild) |
 | bth campaign create | --name, --mode, --question, --hypothesis | ✅ | Create exploration/confirmation campaign |
 | bth campaign list | --status | ✅ | List open/concluded campaigns |
 | bth campaign review | <id> | ✅ | Outcome distribution + anomaly flags |
@@ -442,6 +443,22 @@ bth run python scripts/experiments/measure_nvt.py --out nvt_out.json -- --n-step
 - Idempotent; safe to run repeatedly
 - Dramatically speeds up `ls`, `find`, `sql` on large catalogs
 - No data loss; cool fragments remain (optional v0.2 cleanup)
+
+**`bth repair [--tier cool|warm|archive|all] [--dry-run|--apply] [--from-warm] [--acknowledge-warm-loss]`**
+- Scan for and repair catalog corruption across storage tiers. **Dry-run by default** — pass `--apply` to execute.
+- `--tier` (default `all`): restrict to one tier (`cool`, `warm`, `archive`).
+- **Cool tier:** removes stale write-in-progress sentinel files; quarantines unreadable Parquet fragments so they no longer block `bth compact`.
+- **Warm tier:** backs up `bathos.db` to `bathos.db.bak-<timestamp>` (keeps the 3 most recent) before any `force_rebuild`. A rebuild that would destroy warm-only data (postmortem annotations, `output_metadata`) is gated behind `--acknowledge-warm-loss`. An unreadable warm DB is treated as data-at-risk and aborts unless acknowledged.
+- `--from-warm`: detect runs present in the warm DB but missing from cool fragments and re-export them back to the cool tier.
+- **Archive tier:** quarantines partitions failing SHA256 or row-count verification, recording them in the archive `manifest.json`.
+- Safe first step on any "catalog looks wrong" symptom: run `bth repair` (dry-run) to see the plan before applying.
+
+Example:
+```bash
+bth repair                         # dry-run scan of all tiers
+bth repair --tier cool --apply     # clean sentinels + quarantine bad fragments
+bth repair --from-warm --apply     # rebuild missing cool fragments from warm DB
+```
 
 ---
 
@@ -880,6 +897,8 @@ bth run python scripts/experiments/measure_x.py --out results.json -- <same args
 | `compact` | `catalog_dir` | `{ingested: int, skipped: int}` | `bth compact` |
 | `archive` | `project, archive_dir, dry_run, catalog_dir` | `{runs: int, partitions: int}` | `bth archive` |
 | `check` | `catalog_dir, project_root, status_filter` | `{results: [], total: int}` | `bth check` |
+| `repair_scan` | `catalog_dir, tier, from_warm` | `{actions: [], warnings: []}` | `bth repair` (dry-run) |
+| `repair` | `catalog_dir, tier, dry_run, from_warm, acknowledge_warm_loss` | `{manifest: {...}}` | `bth repair --apply` |
 | `sync` | `remote, pull, catalog_dir` | `{transferred: int, duration_s: float}` | `bth sync` |
 | `campaign_create` | `name, mode, project_slug, catalog_dir, question, hypothesis` | `{campaign_id, name, mode, status, started_at}` | `bth campaign create` |
 | `campaign_list` | `catalog_dir, project_slug, status` | `{campaigns: [], count: int}` | `bth campaign list` |

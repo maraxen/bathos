@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.10.0] - 2026-06-08
+
+### Added
+
+- **`bth repair`** — catalog corruption scanner and repairer across all storage tiers. Runs in dry-run mode by default (`--dry-run`); pass `--apply` to execute. Flags: `--tier {cool,warm,archive,all}` (default `all`), `--from-warm` (detect runs present in the warm DB but missing from cool fragments), `--acknowledge-warm-loss` (required gate before a warm-DB rebuild that would destroy postmortem annotations or `output_metadata`).
+  - **Sentinel cleanup** — removes stale write-in-progress sentinel files left by interrupted cool-tier writes.
+  - **Corrupt-fragment quarantine** — unreadable cool Parquet fragments are moved aside to a quarantine directory instead of blocking compaction.
+  - **Warm backup + loss gate** — before a `force_rebuild`, `bathos.db` is backed up to `bathos.db.bak-<timestamp>` (rotation keeps the most recent 3); the rebuild is gated behind `--acknowledge-warm-loss` whenever warm-only data is at risk. An unreadable warm DB is treated as data-at-risk and triggers the gate (`SystemExit(1)`) rather than silently proceeding.
+  - **Warm→cool re-export** — `--from-warm` reconstructs missing cool fragments from warm-DB rows.
+  - **Archive-tier quarantine** — archive partitions failing SHA256 or row-count verification are quarantined and recorded in the archive `manifest.json`.
+- **MCP mirrors** — `repair_scan` (read-only scan) and `repair` (apply) tools in `mcp.py`, mirroring the CLI.
+- **Test suite** — `tests/test_repair.py`, `tests/test_gwt1112_review.py`, and `tests/test_repair_archive_quarantine.py` covering all repair tracks (sentinel, quarantine, warm-loss gate, re-export, archive verification).
+
+### Notes
+
+- Supersedes the undocumented `0.9.1` tag, whose commits were an earlier parallel pass of the repair module now folded into this release. Total suite: 620 tests passing.
+
+---
+
 ## [0.9.0] - 2026-06-04
 
 ### Added
