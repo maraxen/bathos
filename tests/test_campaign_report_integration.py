@@ -10,9 +10,9 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from bathos.campaigns import create_campaign, add_run_to_campaign, emit_campaign_report
-from bathos.schema import COOL_SCHEMA, Run
 from bathos.campaign_report import CampaignReport
+from bathos.campaigns import add_run_to_campaign, create_campaign, emit_campaign_report
+from bathos.schema import Run
 
 
 @pytest.fixture
@@ -308,8 +308,8 @@ class TestEmitCampaignReport:
         report = CampaignReport.read_report(report_path)
         assert report.figure_manifest_ref == manifest_ref
 
-    def test_emit_campaign_report_zero_runs_error(self, temp_catalog):
-        """Given a campaign with zero runs, emit_campaign_report raises an error."""
+    def test_emit_campaign_report_zero_runs_succeeds(self, temp_catalog):
+        """Given a campaign with zero runs, emit_campaign_report succeeds with defaults."""
         catalog_dir, db = temp_catalog
 
         campaign = create_campaign(
@@ -319,9 +319,23 @@ class TestEmitCampaignReport:
             mode="exploration",
         )
 
-        from bathos.campaigns import CampaignError
-        with pytest.raises(CampaignError, match="not found or has no runs"):
-            emit_campaign_report(db, str(catalog_dir), campaign.id)
+        # Zero-run campaign should emit successfully with default values
+        emit_campaign_report(db, str(catalog_dir), campaign.id)
+
+        # Verify the report was written
+        report_path = catalog_dir / "sidecars" / campaign.id / "campaign_report.json"
+        assert report_path.exists()
+
+        # Verify the report has correct defaults
+        report_data = json.loads(report_path.read_text())
+        assert report_data["total_runs"] == 0
+        assert report_data["residual_rate"] == 0.0
+        assert report_data["bypass_rate"] == 0.0
+        assert report_data["unknown_rate"] == 0.0
+        assert report_data["outcome_distribution"] == {}
+        assert report_data["anomalies"] == []
+        assert report_data["popper"] is None
+        assert report_data["stage_breakdown"] == {}
 
     def test_emit_campaign_report_missing_campaign_error(self, temp_catalog):
         """Given a nonexistent campaign, emit_campaign_report raises an error."""

@@ -27,9 +27,6 @@ import json
 import tempfile
 from pathlib import Path
 
-from pydantic import ValidationError
-from pytest import raises
-
 from bathos.campaign_report import CampaignReport
 
 

@@ -333,26 +333,41 @@ def emit_campaign_report(db, catalog_dir: str, campaign_id: str, figure_manifest
 
     campaign_conclusion = campaign_rows[0][0]
 
-    # Generate the review stats (includes total_runs, residual_rate, etc.)
-    review_data = review_campaign(db, campaign_id)
+    # Check if campaign has any runs
+    run_count = db.execute(
+        "SELECT COUNT(*) FROM campaign_runs WHERE campaign_id = ?",
+        [campaign_id]
+    ).fetchone()[0]
 
-    # Handle campaign with no runs (review_campaign returns an error dict)
-    if "error" in review_data:
-        raise CampaignError(review_data["error"])
+    # Handle zero-run campaign: emit a valid report with defaults
+    if run_count == 0:
+        review_data = {
+            "total_runs": 0,
+            "residual_rate": 0.0,
+            "bypass_rate": 0.0,
+            "unknown_rate": 0.0,
+            "outcome_distribution": {},
+            "anomalies": [],
+            "popper": None,
+        }
+        stage_breakdown = {}
+    else:
+        # Generate the review stats (includes total_runs, residual_rate, etc.)
+        review_data = review_campaign(db, campaign_id)
 
-    # Build stage_breakdown: count runs by stage_name with None as explicit bucket
-    stage_rows = db.execute("""
-        SELECT COALESCE(NULLIF(r.stage_name, ''), NULL) AS stage_key, COUNT(*) AS count
-        FROM campaign_runs cr
-        INNER JOIN runs r ON cr.run_id = r.id
-        WHERE cr.campaign_id = ?
-        GROUP BY stage_key
-    """, [campaign_id]).fetchall()
+        # Build stage_breakdown: count runs by stage_name with None as explicit bucket
+        stage_rows = db.execute("""
+            SELECT COALESCE(NULLIF(r.stage_name, ''), NULL) AS stage_key, COUNT(*) AS count
+            FROM campaign_runs cr
+            INNER JOIN runs r ON cr.run_id = r.id
+            WHERE cr.campaign_id = ?
+            GROUP BY stage_key
+        """, [campaign_id]).fetchall()
 
-    stage_breakdown = {}
-    for stage_key, count in stage_rows:
-        # Use None as the key for null/empty stage_name (explicit bucket)
-        stage_breakdown[stage_key] = count
+        stage_breakdown = {}
+        for stage_key, count in stage_rows:
+            # Use None as the key for null/empty stage_name (explicit bucket)
+            stage_breakdown[stage_key] = count
 
     # Create the campaign report
     report = CampaignReport(
