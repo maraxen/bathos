@@ -43,7 +43,7 @@ def migrate_catalog(catalog_dir: Path, dry_run: bool = False) -> MigrateResult:
             continue
         for field in COOL_SCHEMA:
             if field.name not in existing:
-                tbl = tbl.append_column(field, _default_array(field.type, len(tbl)))
+                tbl = tbl.append_column(field, _default_array(field.type, len(tbl), field.name))
         # Stamp schema_version to current on all upgraded fragments
         schema_version_idx = tbl.schema.get_field_index("schema_version")
         if schema_version_idx >= 0:
@@ -148,7 +148,10 @@ def _read_project_slug(parquet: Path) -> str | None:
     return None
 
 
-def _default_array(arrow_type: pa.DataType, n: int) -> pa.Array:
+def _default_array(arrow_type: pa.DataType, n: int, field_name: str = "") -> pa.Array:
+    # Special case: stage_name must be null (not empty string) for optional/optional semantic
+    if field_name == "stage_name" and (pa.types.is_string(arrow_type) or pa.types.is_large_string(arrow_type)):
+        return pa.array([None] * n, type=arrow_type)
     if pa.types.is_string(arrow_type) or pa.types.is_large_string(arrow_type):
         return pa.array([""] * n, type=arrow_type)
     if pa.types.is_boolean(arrow_type):

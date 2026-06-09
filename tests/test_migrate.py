@@ -132,3 +132,65 @@ def test_migrate_writes_schema_version_on_upgraded_fragments(tmp_path):
     tbl = pq.read_table(runs_dir / "run_ver_test.parquet")
     versions = tbl.column("schema_version").to_pylist()
     assert all(v == CURRENT_SCHEMA_VERSION for v in versions)
+
+
+def test_migrate_v6_to_v7_stage_name_null_backfill(tmp_path):
+    """Test v6→v7 migration: stage_name missing from v6 parquet is backfilled with None (null), not empty string.
+
+    This test exercises the parquet-level migration path (migrate_catalog), not the dict/Run level.
+    Verifies:
+    - schema_version is updated to CURRENT_SCHEMA_VERSION (7)
+    - stage_name column is added
+    - stage_name values are all None (null), not empty strings
+    - row count is unchanged (no data loss)
+    """
+    from bathos.migrate import migrate_catalog
+    from bathos.schema import COOL_SCHEMA, CURRENT_SCHEMA_VERSION
+
+    # Create a v6-equivalent schema (COOL_SCHEMA minus stage_name)
+    v6_schema = pa.schema([f for f in COOL_SCHEMA if f.name != "stage_name"])
+
+    # Create a sample Run and export to v6 schema
+    r = Run(
+        project_slug="test-project",
+        command="python test.py",
+        argv=["python", "test.py"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+    )
+    full_tbl = r.to_arrow()
+    v6_tbl = full_tbl.select([f.name for f in v6_schema])
+
+    # Write v6 parquet to temp catalog
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    fragment_path = runs_dir / "run_v6_test.parquet"
+    pq.write_table(v6_tbl, fragment_path)
+
+    # Verify precondition: stage_name does not exist
+    tbl_before = pq.read_table(fragment_path)
+    assert "stage_name" not in tbl_before.schema.names
+    assert tbl_before.num_rows == 1
+
+    # Run migrate_catalog
+    result = migrate_catalog(tmp_path, dry_run=False)
+    assert result.scanned == 1
+    assert result.migrated == 1
+
+    # Read back the migrated table
+    tbl_after = pq.read_table(fragment_path)
+
+    # Verify stage_name column was added
+    assert "stage_name" in tbl_after.schema.names
+
+    # Verify stage_name values are None (null), not empty strings
+    stage_name_col = tbl_after.column("stage_name").to_pylist()
+    assert all(v is None for v in stage_name_col), f"Expected all None, got {stage_name_col}"
+
+    # Verify row count unchanged
+    assert tbl_after.num_rows == 1
+
+    # Verify schema_version is CURRENT_SCHEMA_VERSION
+    schema_versions = tbl_after.column("schema_version").to_pylist()
+    assert all(v == CURRENT_SCHEMA_VERSION for v in schema_versions)
