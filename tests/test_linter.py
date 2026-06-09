@@ -270,3 +270,117 @@ def test_check_ephemeral_output_paths_clean_for_persistent(tmp_path):
 
     issues = check_ephemeral_output_paths(catalog_dir)
     assert issues == []
+
+
+def test_check_canonical_stage_names_warns_non_canonical(tmp_path):
+    """Test that check_canonical_stage_names warns on non-canonical stage_name values."""
+    from datetime import UTC, datetime
+    from bathos.catalog import init_catalog, write_run
+    from bathos.compact import compact
+    from bathos.linter import check_canonical_stage_names, IssueSeverity
+    from bathos.schema import Run
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    init_catalog(catalog_dir)
+
+    # Create runs with various stage_name values
+    base_time = datetime.now(UTC)
+
+    # Canonical stages (should not warn)
+    for stage in ["exploration", "calibration", "validation", "ablation", "production"]:
+        r = Run(
+            project_slug="test",
+            command="python test.py",
+            argv=["python", "test.py"],
+            git_hash="abc",
+            git_branch="main",
+            git_dirty=False,
+            timestamp=base_time,
+            status="completed",
+            exit_code=0,
+            stage_name=stage,
+        )
+        write_run(r, catalog_dir)
+
+    # Non-canonical stages (should warn)
+    for stage in ["exploration-phase", "custom-stage", "VALIDATION", "validation_final"]:
+        r = Run(
+            project_slug="test",
+            command="python test.py",
+            argv=["python", "test.py"],
+            git_hash="abc",
+            git_branch="main",
+            git_dirty=False,
+            timestamp=base_time,
+            status="completed",
+            exit_code=0,
+            stage_name=stage,
+        )
+        write_run(r, catalog_dir)
+
+    # NULL stage_name (should not warn)
+    r = Run(
+        project_slug="test",
+        command="python test.py",
+        argv=["python", "test.py"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        timestamp=base_time,
+        status="completed",
+        exit_code=0,
+        stage_name=None,
+    )
+    write_run(r, catalog_dir)
+
+    compact(catalog_dir)
+
+    issues = check_canonical_stage_names(catalog_dir)
+    assert len(issues) >= 4, f"Expected at least 4 warnings, got {len(issues)}"
+    assert all(i.issue == "non_canonical_stage_name" for i in issues)
+    assert all(i.severity == IssueSeverity.WARNING for i in issues)
+
+
+def test_check_canonical_stage_names_all_advisory_passes(tmp_path):
+    """Test that check_canonical_stage_names returns empty for canonical stages."""
+    from datetime import UTC, datetime
+    from bathos.catalog import init_catalog, write_run
+    from bathos.compact import compact
+    from bathos.linter import check_canonical_stage_names
+    from bathos.schema import Run
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    init_catalog(catalog_dir)
+
+    # Create runs with only canonical stage_name values
+    base_time = datetime.now(UTC)
+    for i, stage in enumerate(["exploration", "calibration", "validation", "ablation", "production"]):
+        r = Run(
+            project_slug="test",
+            command="python test.py",
+            argv=["python", "test.py"],
+            git_hash="abc",
+            git_branch="main",
+            git_dirty=False,
+            timestamp=base_time + __import__("datetime").timedelta(seconds=i),
+            status="completed",
+            exit_code=0,
+            stage_name=stage,
+        )
+        write_run(r, catalog_dir)
+
+    compact(catalog_dir)
+
+    issues = check_canonical_stage_names(catalog_dir)
+    assert issues == []
+
+
+def test_check_canonical_stage_names_no_catalog(tmp_path):
+    """Test that check_canonical_stage_names returns empty for missing catalog."""
+    from bathos.linter import check_canonical_stage_names
+
+    catalog_dir = tmp_path / "nonexistent_catalog"
+    issues = check_canonical_stage_names(catalog_dir)
+    assert issues == []

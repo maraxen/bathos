@@ -562,3 +562,85 @@ def check_ephemeral_output_paths(catalog_dir: Path) -> list[LintIssue]:
         return issues
     except Exception:
         return []
+
+
+def check_canonical_stage_names(catalog_dir: Path) -> list[LintIssue]:
+    """ADVISORY: warn on non-canonical stage_name values in runs.
+
+    Scans the warm catalog for runs where stage_name does not match the
+    canonical set (exploration, calibration, validation, ablation, production).
+    This is an ADVISORY-only lint that ALWAYS exits 0 — never blocks runs or builds.
+
+    Canonical set is maintained as lint config (not schema), allowing the vocabulary
+    to evolve independently of the schema and supporting future tightening to an enum
+    once real stage data exists (see ops-systematization spec, decision (c)-FREEFORM-NOW).
+
+    Args:
+        catalog_dir: Path to catalog directory.
+
+    Returns:
+        List of LintIssue objects with severity WARNING for non-canonical stage_name values.
+        Returns empty list if no runs or no non-canonical stages found.
+        Always returns (never raises), so lint can continue even if DB unreachable.
+    """
+    import duckdb
+    from bathos.schema import STAGE_NAME_REGEX
+
+    db_path = catalog_dir / "bathos.db"
+    if not db_path.exists():
+        return []
+
+    # Canonical set: the advisory vocabulary for stage_name values.
+    # These are best-practice values discovered from real stage_name usage.
+    # Not enforced in the schema — only advisory in CI lint.
+    # Promotion to enforced enum deferred until real data reveals true vocabulary.
+    CANONICAL_STAGES = {
+        "exploration",
+        "calibration",
+        "validation",
+        "ablation",
+        "production",
+    }
+
+    try:
+        db = duckdb.connect(str(db_path), read_only=True)
+        db.execute("SET TimeZone='UTC'")
+
+        try:
+            rows = db.execute(
+                """
+                SELECT id, stage_name, command
+                FROM runs
+                WHERE stage_name IS NOT NULL AND stage_name != ''
+                LIMIT 1000
+            """
+            ).fetchall()
+        except Exception:
+            db.close()
+            return []
+
+        issues: list[LintIssue] = []
+        for run_id, stage_name, command in rows:
+            # Check if stage_name is NOT in canonical set
+            if stage_name not in CANONICAL_STAGES:
+                issues.append(
+                    LintIssue(
+                        path=catalog_dir / "bathos.db",
+                        directory="catalog",
+                        issue="non_canonical_stage_name",
+                        severity=IssueSeverity.WARNING,
+                        detail=(
+                            f"Run {run_id[:8]} has stage_name='{stage_name}' — "
+                            f"not in canonical set {CANONICAL_STAGES}. "
+                            f"This is advisory only and does not block runs. "
+                            f"Consider using one of the canonical stages, or this value will be "
+                            f"proposed for canonicalization after real data accumulates."
+                        ),
+                    )
+                )
+
+        db.close()
+        return issues
+    except Exception:
+        # Always return (never raise), so lint continues
+        return []

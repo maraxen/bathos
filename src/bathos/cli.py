@@ -1221,6 +1221,7 @@ def lint(
         IssueSeverity,
         check_adversarial_checks,
         check_bypass_trend,
+        check_canonical_stage_names,
         check_ephemeral_output_paths,
         check_residual_rates,
         check_threshold_basis,
@@ -1242,6 +1243,7 @@ def lint(
         issues.extend(check_bypass_trend(catalog_dir))
         issues.extend(check_unfired_branches(catalog_dir))
         issues.extend(check_ephemeral_output_paths(catalog_dir))
+        issues.extend(check_canonical_stage_names(catalog_dir))
 
     if not issues:
         typer.echo("No issues found.")
