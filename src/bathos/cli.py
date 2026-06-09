@@ -25,6 +25,9 @@ app.add_typer(postmortem_app, name="postmortem")
 outputs_app = typer.Typer(help="Inspect and summarise run output files.")
 app.add_typer(outputs_app, name="outputs")
 
+report_app = typer.Typer(help="Generate and emit campaign reports and manifests")
+app.add_typer(report_app, name="report")
+
 
 def _catalog_dir() -> Path:
     override = os.environ.get("BTH_CATALOG_DIR")
@@ -757,6 +760,48 @@ def campaign_review(
             raise typer.Exit(1)
         render_campaign_review(campaign, review)
         render_popper_summary(review.get("popper"))
+    finally:
+        db.close()
+
+
+@report_app.command("emit")
+def report_emit(
+    campaign_id: str = typer.Argument(..., help="Campaign ID"),
+):
+    """Generate and emit campaign report and figure manifest sidecars.
+
+    Creates both campaign_report.json and figure_manifest.json at
+    <catalog>/sidecars/<campaign_id>/ for a concluded campaign.
+    """
+    import duckdb
+    from bathos.campaigns import emit_campaign_report, emit_figure_manifest, get_campaign, CampaignError
+
+    catalog_dir = _catalog_dir()
+    db = duckdb.connect(str(catalog_dir / "bathos.db"))
+    try:
+        # Verify campaign exists and is concluded
+        campaign = get_campaign(db, campaign_id)
+        if campaign is None:
+            typer.echo(f"Campaign not found: {campaign_id}", err=True)
+            raise typer.Exit(1)
+        if campaign.status != "concluded":
+            typer.echo(f"Campaign {campaign_id[:8]} is not concluded (status: {campaign.status})", err=True)
+            raise typer.Exit(1)
+
+        # Emit both artifacts
+        manifest_ref = f"sidecars/{campaign_id}/figure_manifest.json"
+        emit_figure_manifest(db, str(catalog_dir), campaign_id)
+        emit_campaign_report(db, str(catalog_dir), campaign_id, figure_manifest_ref=manifest_ref)
+
+        # Report success
+        report_path = catalog_dir / "sidecars" / campaign_id / "campaign_report.json"
+        manifest_path = catalog_dir / "sidecars" / campaign_id / "figure_manifest.json"
+        typer.echo(f"✓ Emitted campaign report and manifest for {campaign_id[:8]}")
+        typer.echo(f"  Report:   {report_path}")
+        typer.echo(f"  Manifest: {manifest_path}")
+    except CampaignError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
     finally:
         db.close()
 

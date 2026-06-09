@@ -391,3 +391,48 @@ def emit_campaign_report(db, catalog_dir: str, campaign_id: str, figure_manifest
     report.write_report(report_path)
 
     event("campaign.report.emit", campaign_id=campaign_id, report_path=str(report_path))
+
+
+def emit_figure_manifest(db, catalog_dir: str, campaign_id: str) -> None:
+    """Emit an empty figure manifest JSON sidecar at <catalog>/sidecars/<campaign_id>/figure_manifest.json.
+
+    This function generates a truth-only figure manifest that declares figure INTENT
+    (which runs/data a figure derives from) without rendering artifacts. Rendering remains
+    maraxiom's concern.
+
+    For now, bathos emits an empty manifest (zero figures) since all rendering is delegated
+    to maraxiom. The manifest structure is prepared for future figure pinning if needed.
+
+    Args:
+        db: DuckDB connection.
+        catalog_dir: Path to the bathos catalog root (where sidecars/ lives).
+        campaign_id: Campaign ID to generate the manifest for.
+
+    Raises:
+        CampaignError: If campaign not found.
+    """
+    from pathlib import Path
+
+    from bathos.figure_manifest import FigureManifest
+
+    # Verify campaign exists
+    campaign_rows = db.execute(
+        "SELECT id FROM campaigns WHERE id = ?",
+        [campaign_id]
+    ).fetchall()
+    if not campaign_rows:
+        raise CampaignError(f"Campaign {campaign_id} not found")
+
+    # Create an empty figure manifest (bathos truth-only: no rendering)
+    manifest = FigureManifest(
+        manifest_version="1.0",
+        campaign_id=campaign_id,
+        figures=[],  # Empty: all rendering delegated to maraxiom
+    )
+
+    # Write the manifest to the sidecar path
+    sidecar_dir = Path(catalog_dir) / "sidecars" / campaign_id
+    manifest_path = sidecar_dir / "figure_manifest.json"
+    manifest.write_manifest(manifest_path)
+
+    event("campaign.manifest.emit", campaign_id=campaign_id, manifest_path=str(manifest_path))
