@@ -301,3 +301,78 @@ def review_campaign(db, campaign_id: str) -> dict:
         "anomalies": anomalies,
         "popper": popper_data,
     }
+
+
+def emit_campaign_report(db, catalog_dir: str, campaign_id: str, figure_manifest_ref: str | None = None) -> None:
+    """Emit a campaign report JSON sidecar at <catalog>/sidecars/<campaign_id>/campaign_report.json.
+
+    This function generates a truth-only report capturing summary stats from the campaign,
+    closing the recon gap where campaign_review renders stats to console and discards them.
+
+    Args:
+        db: DuckDB connection.
+        catalog_dir: Path to the bathos catalog root (where sidecars/ lives).
+        campaign_id: Campaign ID to generate the report for.
+        figure_manifest_ref: Optional path reference to the figure manifest
+            (e.g., "sidecars/<campaign_id>/figure_manifest.json").
+
+    Raises:
+        CampaignError: If campaign not found or has no runs.
+    """
+    from pathlib import Path
+
+    from bathos.campaign_report import CampaignReport
+
+    # Fetch campaign metadata
+    campaign_rows = db.execute(
+        "SELECT conclusion FROM campaigns WHERE id = ?",
+        [campaign_id]
+    ).fetchall()
+    if not campaign_rows:
+        raise CampaignError(f"Campaign {campaign_id} not found")
+
+    campaign_conclusion = campaign_rows[0][0]
+
+    # Generate the review stats (includes total_runs, residual_rate, etc.)
+    review_data = review_campaign(db, campaign_id)
+
+    # Handle campaign with no runs (review_campaign returns an error dict)
+    if "error" in review_data:
+        raise CampaignError(review_data["error"])
+
+    # Build stage_breakdown: count runs by stage_name with None as explicit bucket
+    stage_rows = db.execute("""
+        SELECT COALESCE(NULLIF(r.stage_name, ''), NULL) AS stage_key, COUNT(*) AS count
+        FROM campaign_runs cr
+        INNER JOIN runs r ON cr.run_id = r.id
+        WHERE cr.campaign_id = ?
+        GROUP BY stage_key
+    """, [campaign_id]).fetchall()
+
+    stage_breakdown = {}
+    for stage_key, count in stage_rows:
+        # Use None as the key for null/empty stage_name (explicit bucket)
+        stage_breakdown[stage_key] = count
+
+    # Create the campaign report
+    report = CampaignReport(
+        report_version="1.0",
+        campaign_id=campaign_id,
+        total_runs=review_data["total_runs"],
+        residual_rate=review_data["residual_rate"],
+        bypass_rate=review_data["bypass_rate"],
+        unknown_rate=review_data["unknown_rate"],
+        outcome_distribution=review_data["outcome_distribution"],
+        anomalies=review_data["anomalies"],
+        popper=review_data["popper"],
+        conclude=campaign_conclusion,
+        figure_manifest_ref=figure_manifest_ref,
+        stage_breakdown=stage_breakdown,
+    )
+
+    # Write the report to the sidecar path
+    sidecar_dir = Path(catalog_dir) / "sidecars" / campaign_id
+    report_path = sidecar_dir / "campaign_report.json"
+    report.write_report(report_path)
+
+    event("campaign.report.emit", campaign_id=campaign_id, report_path=str(report_path))
