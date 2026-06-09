@@ -108,6 +108,52 @@ def test_cli_lint_exits_1_with_issues(tmp_path, monkeypatch):
     assert "error" in result.output.lower() or "issue" in result.output.lower()
 
 
+def test_cli_lint_exits_0_with_canonical_warnings(tmp_path, monkeypatch):
+    """Advisory lint warns on non-canonical stage_name but always exits 0."""
+    from datetime import UTC, datetime
+    from bathos.catalog import init_catalog, write_run
+    from bathos.compact import compact
+    from bathos.schema import Run
+
+    monkeypatch.chdir(tmp_path)
+    # Create catalog with advisory issue (non-canonical stage_name)
+    catalog_dir = tmp_path / ".bth" / "catalog"
+    catalog_dir.mkdir(parents=True)
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
+
+    init_catalog(catalog_dir)
+
+    # Create a run with non-canonical stage_name
+    r = Run(
+        project_slug="test",
+        command="python test.py",
+        argv=["python", "test.py"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        timestamp=datetime.now(UTC),
+        status="completed",
+        exit_code=0,
+        outcome="pass",
+        stage_name="custom-stage",  # Non-canonical but valid format
+    )
+    write_run(r, catalog_dir)
+
+    # Compact to create the bathos.db warm catalog
+    compact(catalog_dir)
+
+    # Also create a script to avoid naming issues
+    s = _make_script(tmp_path, "experiments", "run_test.py")
+    _make_sidecar(s)
+
+    from bathos.cli import app
+    result = runner.invoke(app, ["lint"])
+    # Must exit 0 (advisory, never blocks)
+    assert result.exit_code == 0
+    # Must contain warning about canonical stage
+    assert "warning" in result.output.lower() or "non_canonical_stage_name" in result.output.lower()
+
+
 def test_check_residual_rates_detects_high_rate(tmp_path):
     """Test that check_residual_rates detects high residual rates in uncampaigned runs."""
     from datetime import UTC, datetime
@@ -303,8 +349,24 @@ def test_check_canonical_stage_names_warns_non_canonical(tmp_path):
         )
         write_run(r, catalog_dir)
 
-    # Non-canonical stages (should warn)
-    for stage in ["exploration-phase", "custom-stage", "VALIDATION", "validation_final"]:
+    # Non-canonical stages with VALID format (should warn on canonical, not format)
+    for stage in ["exploration-phase", "custom-stage", "my-stage"]:
+        r = Run(
+            project_slug="test",
+            command="python test.py",
+            argv=["python", "test.py"],
+            git_hash="abc",
+            git_branch="main",
+            git_dirty=False,
+            timestamp=base_time,
+            status="completed",
+            exit_code=0,
+            stage_name=stage,
+        )
+        write_run(r, catalog_dir)
+
+    # Invalid format stages (should warn on format violation)
+    for stage in ["VALIDATION", "validation_final"]:
         r = Run(
             project_slug="test",
             command="python test.py",
@@ -337,8 +399,16 @@ def test_check_canonical_stage_names_warns_non_canonical(tmp_path):
     compact(catalog_dir)
 
     issues = check_canonical_stage_names(catalog_dir)
-    assert len(issues) >= 4, f"Expected at least 4 warnings, got {len(issues)}"
-    assert all(i.issue == "non_canonical_stage_name" for i in issues)
+    assert len(issues) >= 5, f"Expected at least 5 warnings, got {len(issues)}"
+
+    # Separate format violations from canonical violations
+    format_issues = [i for i in issues if i.issue == "invalid_stage_name_format"]
+    canonical_issues = [i for i in issues if i.issue == "non_canonical_stage_name"]
+
+    # Should have 2 format violations (VALIDATION, validation_final)
+    assert len(format_issues) == 2, f"Expected 2 format violations, got {len(format_issues)}"
+    # Should have 3 canonical violations (exploration-phase, custom-stage, my-stage)
+    assert len(canonical_issues) == 3, f"Expected 3 canonical violations, got {len(canonical_issues)}"
     assert all(i.severity == IssueSeverity.WARNING for i in issues)
 
 

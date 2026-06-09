@@ -621,8 +621,24 @@ def check_canonical_stage_names(catalog_dir: Path) -> list[LintIssue]:
 
         issues: list[LintIssue] = []
         for run_id, stage_name, command in rows:
-            # Check if stage_name is NOT in canonical set
-            if stage_name not in CANONICAL_STAGES:
+            # First: validate format against STAGE_NAME_REGEX (single source of truth)
+            if not STAGE_NAME_REGEX.match(stage_name):
+                issues.append(
+                    LintIssue(
+                        path=catalog_dir / "bathos.db",
+                        directory="catalog",
+                        issue="invalid_stage_name_format",
+                        severity=IssueSeverity.WARNING,
+                        detail=(
+                            f"Run {run_id[:8]} has stage_name='{stage_name}' — "
+                            f"does not match required format: lowercase letters, digits, hyphens only. "
+                            f"Must start with a letter (e.g., 'exploration', 'my-stage'). "
+                            f"This is advisory only and does not block runs."
+                        ),
+                    )
+                )
+            # Second: check if stage_name is NOT in canonical set (advisory)
+            elif stage_name not in CANONICAL_STAGES:
                 issues.append(
                     LintIssue(
                         path=catalog_dir / "bathos.db",
