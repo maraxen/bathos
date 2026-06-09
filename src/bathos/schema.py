@@ -1,12 +1,34 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from uuid import uuid4
 
 import pyarrow as pa
 
-CURRENT_SCHEMA_VERSION = "6"
+CURRENT_SCHEMA_VERSION = "7"
+
+# Regex validator for stage_name: lowercase kebab-case, leading letter required, 3-40 chars
+# Pattern: starts with lowercase letter, followed by lowercase letters/digits/hyphens, no trailing hyphen
+# This regex validates: ^[a-z][a-z0-9]*(-[a-z0-9]+)*$ AND length 3-40
+def _validate_stage_name(name: str | None) -> bool:
+    """Validate stage_name format: lowercase kebab-case, 3-40 chars, leading letter required.
+
+    Args:
+        name: stage_name to validate, or None (valid)
+
+    Returns:
+        True if valid, False otherwise
+    """
+    if name is None:
+        return True
+    if not isinstance(name, str) or len(name) < 3 or len(name) > 40:
+        return False
+    # Pattern: starts with lowercase letter, followed by lowercase/digits/hyphens, no trailing hyphen
+    return bool(re.match(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$", name))
+
+STAGE_NAME_REGEX = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
 
 COOL_SCHEMA = pa.schema(
     [
@@ -50,6 +72,7 @@ COOL_SCHEMA = pa.schema(
         pa.field("manifest_path", pa.string()),
         pa.field("outcome_error_reason", pa.string()),
         pa.field("adversarial_check_status", pa.string()),
+        pa.field("stage_name", pa.string()),
     ]
 )
 
@@ -97,6 +120,7 @@ WARM_SCHEMA = pa.schema(
         pa.field("manifest_path", pa.string()),
         pa.field("outcome_error_reason", pa.string()),
         pa.field("adversarial_check_status", pa.string()),
+        pa.field("stage_name", pa.string()),
     ]
 )
 
@@ -145,6 +169,7 @@ class Run:
     manifest_path: str = ""
     outcome_error_reason: str = ""
     adversarial_check_status: str = ""
+    stage_name: str | None = None
 
     def to_arrow(self) -> pa.Table:
         return pa.table(
@@ -189,6 +214,7 @@ class Run:
                 "manifest_path": [self.manifest_path],
                 "outcome_error_reason": [self.outcome_error_reason],
                 "adversarial_check_status": [self.adversarial_check_status],
+                "stage_name": [self.stage_name],
             },
             schema=COOL_SCHEMA,
         )
@@ -244,4 +270,5 @@ class Run:
             manifest_path=pydict.get("manifest_path", [""])[i] if "manifest_path" in pydict else "",
             outcome_error_reason=pydict.get("outcome_error_reason", [""])[i] if "outcome_error_reason" in pydict else "",
             adversarial_check_status=pydict.get("adversarial_check_status", [""])[i] if "adversarial_check_status" in pydict else "",
+            stage_name=pydict.get("stage_name", [None])[i] if "stage_name" in pydict else None,
         )

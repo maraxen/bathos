@@ -192,12 +192,24 @@ def _migrate_v5(run_dict: dict) -> dict:
     return run_dict
 
 
+def _migrate_v6(run_dict: dict) -> dict:
+    """Migrate v6 fragment to v7 by adding stage_name field.
+
+    stage_name is an optional field that defaults to None for existing runs.
+    Validation (regex + length) is applied at set-time (run capture), not backfill.
+    """
+    run_dict["stage_name"] = None
+    run_dict["schema_version"] = "7"
+    return run_dict
+
+
 MIGRATIONS["0"] = _migrate_v0
 MIGRATIONS["1"] = _migrate_v1
 MIGRATIONS["2"] = _migrate_v2
 MIGRATIONS["3"] = _migrate_v3
 MIGRATIONS["4"] = _migrate_v4
 MIGRATIONS["5"] = _migrate_v5
+MIGRATIONS["6"] = _migrate_v6
 
 
 _RUNS_TABLE_SCHEMA = """
@@ -242,7 +254,8 @@ CREATE TABLE IF NOT EXISTS runs (
     manifest_sha256 TEXT,
     manifest_path TEXT,
     outcome_error_reason TEXT,
-    adversarial_check_status TEXT
+    adversarial_check_status TEXT,
+    stage_name TEXT
 )
 """
 
@@ -553,8 +566,8 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                 output_paths, tags, schema_version, slurm_job_id, hostname, metadata, outcome, output_metadata,
                 sidecar_sha256, sidecar_path, parent_run_id, agent_mode, sidecar_mode, outcome_is_residual, skill_sha256, campaign_id,
                 script_sha256, postmortem_status, postmortem_override, postmortem_verdict_override, postmortem_author, postmortem_path,
-                postmortem_hypothesis_status, postmortem_has_anomalies, postmortem_summary, postmortem_asset_links
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                postmortem_hypothesis_status, postmortem_has_anomalies, postmortem_summary, postmortem_asset_links, stage_name
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 run.id,
@@ -594,6 +607,7 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                 run.postmortem_has_anomalies,
                 run.postmortem_summary,
                 run.postmortem_asset_links,
+                run.stage_name,
             ],
         )
 

@@ -151,7 +151,7 @@ def test_compact_upgrades_v0_fragments(tmp_catalog: Path, sample_run: Run):
     # Verify in DuckDB: should have schema_version="6" (migrated through v0→v1→v2→v3→v4→v5→v6)
     con = duckdb.connect(str(tmp_catalog / "bathos.db"))
     rows = con.execute("SELECT schema_version FROM runs").fetchall()
-    assert rows[0][0] == "6"
+    assert rows[0][0] == "7"
 
 
 def test_compact_tracks_warm_schema_version(tmp_catalog: Path, sample_run: Run):
@@ -166,7 +166,7 @@ def test_compact_tracks_warm_schema_version(tmp_catalog: Path, sample_run: Run):
     con = duckdb.connect(str(tmp_catalog / "bathos.db"))
     rows = con.execute("SELECT value FROM _schema_meta WHERE key = 'warm_version'").fetchall()
     assert len(rows) == 1
-    assert rows[0][0] == "6"
+    assert rows[0][0] == "7"
 
 
 def test_fragment_count_helper(tmp_catalog: Path, sample_run: Run):
@@ -250,7 +250,7 @@ def test_compact_migrates_v1_to_v4(sample_run: Run):
     result = _apply_migrations(v1_run)
 
     # Verify upgraded to v6 with hostname
-    assert result.schema_version == "6"
+    assert result.schema_version == "7"
     assert result.hostname == ""
 
 
@@ -265,7 +265,7 @@ def test_compact_v0_chain_to_v4(sample_run: Run):
     result = _apply_migrations(v0_run)
 
     # Verify final state is v6
-    assert result.schema_version == "6"
+    assert result.schema_version == "7"
     assert result.hostname == ""
 
 
@@ -279,7 +279,7 @@ def test_apply_migrations_v4_upgrades_to_v5(sample_run: Run):
     result = _apply_migrations(v4_run)
 
     # Verify upgraded
-    assert result.schema_version == "6"
+    assert result.schema_version == "7"
     assert result.hostname == "testhost"
     # Verify fields added during v5 migration are present
     assert result.manifest_sha256 == ""
@@ -463,7 +463,7 @@ def test_migration_v2_to_v4(tmp_catalog: Path, sample_run: Run):
     con.close()
 
     assert len(rows) == 1
-    assert rows[0][0] == "6"  # schema_version
+    assert rows[0][0] == "7"  # schema_version
     assert rows[0][1] == ""  # sidecar_sha256
     assert rows[0][2] == ""  # sidecar_path
     assert rows[0][3] == ""  # parent_run_id
@@ -498,7 +498,7 @@ def test_migration_chain_v0_to_v4(tmp_catalog: Path, sample_run: Run):
     con.close()
 
     assert len(rows) == 1
-    assert rows[0][0] == "6"  # schema_version
+    assert rows[0][0] == "7"  # schema_version
     assert rows[0][1] == ""  # hostname (from v1 migration)
     assert rows[0][2] == ""  # sidecar_sha256 (from v2 migration)
     assert rows[0][3] == ""  # sidecar_path
@@ -509,6 +509,36 @@ def test_migration_chain_v0_to_v4(tmp_catalog: Path, sample_run: Run):
     assert rows[0][8] == ""  # skill_sha256
     assert rows[0][9] == ""  # campaign_id
     assert rows[0][10] == ""  # script_sha256
+
+
+def test_migration_v6_to_v7_adds_stage_name(sample_run: Run):
+    """Verify v6 fragments are upgraded to v7 with stage_name=None."""
+    from bathos.compact import _apply_migrations
+
+    # Create a v6 run (explicitly set schema_version="6")
+    v6_run = dataclasses.replace(sample_run, schema_version="6", stage_name=None)
+
+    # Apply migrations
+    result = _apply_migrations(v6_run)
+
+    # Verify upgraded to v7 with stage_name=None
+    assert result.schema_version == "7"
+    assert result.stage_name is None
+
+
+def test_migration_chain_v0_to_v7_includes_stage_name(sample_run: Run):
+    """Verify v0 fragments chain through all migrations to v7 with stage_name=None."""
+    from bathos.compact import _apply_migrations
+
+    # Create a v0 run
+    v0_run = dataclasses.replace(sample_run, schema_version="0")
+
+    # Apply migrations (should walk 0→1→2→3→4→5→6→7)
+    result = _apply_migrations(v0_run)
+
+    # Verify final state is v7 with stage_name=None
+    assert result.schema_version == "7"
+    assert result.stage_name is None
 
 
 def test_force_rebuild_creates_backup(tmp_catalog: Path, sample_run: Run):

@@ -43,7 +43,7 @@ def test_run_defaults():
     assert r.tags == []
     assert isinstance(r.timestamp, datetime)
     assert r.timestamp.tzinfo is not None
-    assert r.schema_version == "6"
+    assert r.schema_version == "7"
     assert r.slurm_job_id == ""
     assert r.metadata == "{}"
 
@@ -84,7 +84,7 @@ def test_run_roundtrip_via_arrow():
     assert r2.duration_s == 1.5
     assert r2.output_paths == ["/tmp/out.parquet"]
     assert r2.tags == ["tip3p"]
-    assert r2.schema_version == "6"
+    assert r2.schema_version == "7"
     assert r2.slurm_job_id == ""
 
 
@@ -100,7 +100,7 @@ def test_schema_version_in_cool_parquet():
     )
     table = r.to_arrow()
     assert "schema_version" in table.column_names
-    assert table.column("schema_version")[0].as_py() == "6"
+    assert table.column("schema_version")[0].as_py() == "7"
 
 
 def test_slurm_job_id_captured_from_env():
@@ -223,8 +223,8 @@ def test_hostname_roundtrip_via_arrow():
     assert r2.hostname == "compute-node-42"
 
 
-def test_schema_version_defaults_to_4():
-    """Verify new runs default to schema_version='4'."""
+def test_schema_version_defaults_to_7():
+    """Verify new runs default to schema_version='7'."""
     r = Run(
         project_slug="test",
         command="python foo.py",
@@ -233,7 +233,7 @@ def test_schema_version_defaults_to_4():
         git_branch="main",
         git_dirty=False,
     )
-    assert r.schema_version == "6"
+    assert r.schema_version == "7"
 
 
 def test_sample_run_fixture_has_hostname(sample_run):
@@ -349,8 +349,8 @@ def test_schema_v5_fields_exist():
     """Verify schema v5 fields exist: manifest_sha256, manifest_path, outcome_error_reason, adversarial_check_status."""
     from bathos.schema import CURRENT_SCHEMA_VERSION, Run
 
-    # Current version should be "6" (v5 fields still present)
-    assert CURRENT_SCHEMA_VERSION == "6"
+    # Current version should be "7" (v5 fields still present)
+    assert CURRENT_SCHEMA_VERSION == "7"
 
     # Run should have all 4 new fields
     r = Run(
@@ -418,3 +418,144 @@ def test_v5_fields_round_trip_arrow():
     assert r2.manifest_path == "/path/to/manifest.toml"
     assert r2.outcome_error_reason == "exit_code=1"
     assert r2.adversarial_check_status == "present"
+
+
+def test_schema_version_is_7():
+    """Verify CURRENT_SCHEMA_VERSION is now '7'."""
+    from bathos.schema import CURRENT_SCHEMA_VERSION
+
+    assert CURRENT_SCHEMA_VERSION == "7"
+
+
+def test_run_stage_name_default_none():
+    """Verify Run stage_name defaults to None."""
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+    )
+    assert r.stage_name is None
+
+
+def test_run_stage_name_optional():
+    """Verify stage_name can be set and defaults to None."""
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        stage_name="calibration",
+    )
+    assert r.stage_name == "calibration"
+
+
+def test_stage_name_in_cool_schema():
+    """Verify stage_name is in COOL_SCHEMA."""
+    assert "stage_name" in COOL_SCHEMA.names
+    stage_name_field = next(f for f in COOL_SCHEMA if f.name == "stage_name")
+    assert stage_name_field.type == pa.string()
+
+
+def test_stage_name_in_warm_schema():
+    """Verify stage_name is in WARM_SCHEMA."""
+    assert "stage_name" in WARM_SCHEMA.names
+    stage_name_field = next(f for f in WARM_SCHEMA if f.name == "stage_name")
+    assert stage_name_field.type == pa.string()
+
+
+def test_stage_name_round_trip_arrow():
+    """Verify stage_name round-trips through Arrow serialization."""
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        stage_name="exploration",
+    )
+    table = r.to_arrow()
+    assert "stage_name" in table.schema.names
+    assert table.column("stage_name")[0].as_py() == "exploration"
+
+    r2 = Run.from_arrow_row(table.to_pydict(), 0)
+    assert r2.stage_name == "exploration"
+
+
+def test_stage_name_none_round_trip_arrow():
+    """Verify stage_name=None round-trips through Arrow serialization."""
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        stage_name=None,
+    )
+    table = r.to_arrow()
+    assert "stage_name" in table.schema.names
+    assert table.column("stage_name")[0].as_py() is None
+
+    r2 = Run.from_arrow_row(table.to_pydict(), 0)
+    assert r2.stage_name is None
+
+
+def test_stage_name_regex_valid_kebab():
+    """Verify stage_name regex accepts valid kebab-case names."""
+    from bathos.schema import STAGE_NAME_REGEX
+
+    assert STAGE_NAME_REGEX.match("exploration") is not None
+    assert STAGE_NAME_REGEX.match("final-validation") is not None
+    assert STAGE_NAME_REGEX.match("phase1-calibration") is not None
+    assert STAGE_NAME_REGEX.match("abc") is not None
+
+
+def test_stage_name_regex_rejects_invalid():
+    """Verify stage_name regex rejects invalid names."""
+    from bathos.schema import STAGE_NAME_REGEX
+
+    assert STAGE_NAME_REGEX.match("") is None  # empty
+    assert STAGE_NAME_REGEX.match("1exploration") is None  # leading digit
+    assert STAGE_NAME_REGEX.match("Exploration") is None  # uppercase
+    assert STAGE_NAME_REGEX.match("final-") is None  # trailing dash
+    assert STAGE_NAME_REGEX.match("final--validation") is None  # consecutive dashes
+    assert STAGE_NAME_REGEX.match("final validation") is None  # space
+
+
+def test_stage_name_validator_valid():
+    """Verify stage_name validator accepts valid names."""
+    from bathos.schema import _validate_stage_name
+
+    assert _validate_stage_name("exploration") is True
+    assert _validate_stage_name("final-validation") is True
+    assert _validate_stage_name("phase1-calibration") is True
+    assert _validate_stage_name("abc") is True  # exactly 3 chars
+    assert _validate_stage_name(None) is True  # None is valid
+
+
+def test_stage_name_validator_rejects_invalid():
+    """Verify stage_name validator rejects invalid names."""
+    from bathos.schema import _validate_stage_name
+
+    assert _validate_stage_name("") is False  # empty
+    assert _validate_stage_name("ab") is False  # too short (2 chars)
+    assert _validate_stage_name("1exploration") is False  # leading digit
+    assert _validate_stage_name("Exploration") is False  # uppercase
+    assert _validate_stage_name("final-") is False  # trailing dash
+    assert _validate_stage_name("final--validation") is False  # consecutive dashes
+    assert _validate_stage_name("final validation") is False  # space
+    assert _validate_stage_name("a" * 41) is False  # too long (41 chars)
+
+
+def test_stage_name_validator_allows_40_chars():
+    """Verify stage_name validator allows exactly 40 characters."""
+    from bathos.schema import _validate_stage_name
+
+    name_40 = "a" * 40  # exactly 40 lowercase letters
+    assert _validate_stage_name(name_40) is True
