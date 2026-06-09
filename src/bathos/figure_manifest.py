@@ -13,6 +13,24 @@ Key design principles:
    rendering blocked by owner-only data), and empty (zero figures).
 
 Path: <catalog>/sidecars/<campaign_id>/figure_manifest.json
+
+Example usage (from maraxiom consumer):
+    from bathos.figure_manifest import FigureManifest
+
+    # Read manifest at end of campaign
+    manifest = FigureManifest.read_manifest(
+        Path("<catalog>/sidecars/camp_123/figure_manifest.json")
+    )
+
+    # Iterate over figures and their provenance
+    for fig in manifest.figures:
+        print(f"Figure: {fig.figure_id}")
+        print(f"  Intent: {fig.intent}")
+        print(f"  Render state: {fig.render_state}")
+        for pin in fig.input_pins:
+            print(f"    Data from run {pin.run_id}: {pin.output_path}")
+            # Verify immutability via sha256
+            assert pin.sha256 == compute_sha256(pin.output_path)
 """
 
 from enum import Enum
