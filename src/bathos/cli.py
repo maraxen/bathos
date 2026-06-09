@@ -33,7 +33,7 @@ def _catalog_dir() -> Path:
     override = os.environ.get("BTH_CATALOG_DIR")
     if override:
         return Path(override)
-    from bathos.config import find_project_config, load_project_config, default_catalog_dir
+    from bathos.config import default_catalog_dir, find_project_config, load_project_config
 
     cfg_path = find_project_config()
     if cfg_path is not None:
@@ -173,8 +173,9 @@ def lineage(
     """Show ancestor chain of a run following parent_run_id links."""
     import json
 
-    from bathos.query import lineage as get_lineage, CatalogError
     from bathos.provenance import format_prov_json
+    from bathos.query import CatalogError
+    from bathos.query import lineage as get_lineage
 
     try:
         ancestors = get_lineage(run_id, _catalog_dir())
@@ -295,7 +296,7 @@ def verify(
     ),
 ):
     """Verify catalog integrity across cool, warm, and archive tiers."""
-    from bathos.verify import verify_all, verify_cool, verify_warm, verify_archive
+    from bathos.verify import verify_all, verify_archive, verify_cool, verify_warm
 
     catalog_dir = _catalog_dir()
     archive_root = archive_dir or (Path.home() / ".bth" / "archive")
@@ -352,7 +353,8 @@ def repair(
     By default, runs in dry-run mode (--dry-run) and shows what would be repaired.
     Pass --apply to execute the repairs.
     """
-    from bathos.repair import scan, repair as repair_catalog
+    from bathos.repair import repair as repair_catalog
+    from bathos.repair import scan
 
     catalog_dir = _catalog_dir()
 
@@ -645,7 +647,12 @@ def campaign_conclude(
     """Conclude a campaign with an outcome label."""
     import duckdb
 
-    from bathos.campaigns import CampaignError, conclude_campaign, get_campaign, _campaign_threshold_met
+    from bathos.campaigns import (
+        CampaignError,
+        _campaign_threshold_met,
+        conclude_campaign,
+        get_campaign,
+    )
     db = duckdb.connect(str(_catalog_dir() / "bathos.db"))
     try:
         campaign = get_campaign(db, campaign_id)
@@ -699,6 +706,7 @@ def campaign_ls(
 ):
     """List campaigns."""
     import duckdb
+
     from bathos.campaigns import list_campaigns
     from bathos.rich_fmt import render_campaign_table
 
@@ -745,6 +753,7 @@ def campaign_review(
 ):
     """Review campaign: residual rate, bypass rate, outcome distribution."""
     import duckdb
+
     from bathos.campaigns import get_campaign, review_campaign
     from bathos.rich_fmt import render_campaign_review, render_popper_summary
 
@@ -774,7 +783,13 @@ def report_emit(
     <catalog>/sidecars/<campaign_id>/ for a concluded campaign.
     """
     import duckdb
-    from bathos.campaigns import emit_campaign_report, emit_figure_manifest, get_campaign, CampaignError
+
+    from bathos.campaigns import (
+        CampaignError,
+        emit_campaign_report,
+        emit_figure_manifest,
+        get_campaign,
+    )
 
     catalog_dir = _catalog_dir()
     db = duckdb.connect(str(catalog_dir / "bathos.db"))
@@ -893,14 +908,14 @@ def submit(
     """Submit a command to the cluster using a configured preset."""
     import tomllib
 
-    from bathos.config import find_project_config, load_project_config
     from bathos.cluster import (
-        resolve_cluster_config,
-        push_project,
-        submit_job,
         job_wait,
         pull_project,
+        push_project,
+        resolve_cluster_config,
+        submit_job,
     )
+    from bathos.config import find_project_config, load_project_config
 
     # 1. Validate flag implications
     if then_sync:
@@ -1038,7 +1053,7 @@ def migrate(
     """Migrate cool-tier Parquet fragments to current schema, optionally classifying scripts."""
     if classify:
         # Delegate to classify command
-        from bathos.classifier import classify_flat_scripts, build_move_plan, apply_classify_plan
+        from bathos.classifier import apply_classify_plan, build_move_plan, classify_flat_scripts
 
         project_root = Path.cwd()
         if not (project_root / "scripts").exists():
@@ -1108,10 +1123,17 @@ def classify(
     infers the correct target directory, and prints a git mv plan.
     Apply the plan with --apply.
     """
-    from bathos.classifier import classify_flat_scripts, build_move_plan, apply_classify_plan, ClassificationConfidence
-    from rich.table import Table
-    from rich import print as rprint
     import json
+
+    from rich import print as rprint
+    from rich.table import Table
+
+    from bathos.classifier import (
+        ClassificationConfidence,
+        apply_classify_plan,
+        build_move_plan,
+        classify_flat_scripts,
+    )
 
     if min_confidence.lower() not in ("high", "medium", "low"):
         typer.echo(f"Error: min-confidence must be high, medium, or low (got {min_confidence!r})", err=True)
@@ -1150,7 +1172,6 @@ def classify(
 
     # Output as JSON if requested
     if json_output:
-        from dataclasses import asdict
         output = {
             "project_root": str(project_root),
             "total_files": len(results),
@@ -1475,10 +1496,12 @@ def scaffold(
     run_id: str = typer.Argument(..., help="Run ID to scaffold a postmortem template for"),
 ):
     """Scaffold a new postmortem template for the given Run ID."""
-    from bathos.config import find_project_config, load_project_config
-    from bathos.catalog import read_runs
-    import duckdb
     import shlex
+
+    import duckdb
+
+    from bathos.catalog import read_runs
+    from bathos.config import find_project_config, load_project_config
 
     # 1. Search for run in DB
     run_row = None
@@ -1557,10 +1580,11 @@ def show(
     strict_files: bool = typer.Option(False, "--strict-files", help="Fail if files in asset_links do not exist"),
 ):
     """Display and validate the postmortem for the given Run ID."""
+    import duckdb
+
     from bathos.config import find_project_config, load_project_config
     from bathos.postmortem import parse_postmortem, validate_postmortem
     from bathos.schema import Run
-    import duckdb
 
     config_path = find_project_config(Path.cwd())
     if config_path:
@@ -1636,8 +1660,8 @@ def validate(
     strict_files: bool = typer.Option(False, "--strict-files", help="Treat missing asset files as error"),
 ):
     """Validate a postmortem TOML file for structural and logical correctness."""
-    from bathos.postmortem import parse_postmortem, validate_postmortem
     from bathos.config import find_project_config, load_project_config
+    from bathos.postmortem import parse_postmortem, validate_postmortem
 
     if not file.exists():
         typer.echo(f"File not found: {file}", err=True)
@@ -1668,8 +1692,9 @@ def outputs_list(
     live: bool = typer.Option(False, "--live", help="Re-stat files from filesystem instead of using catalog snapshot."),
 ):
     """Display output files registered for a run."""
-    from bathos.query import get_run
     import json
+
+    from bathos.query import get_run
 
     catalog = _catalog_dir()
     run = get_run(run_id, catalog)
@@ -1702,6 +1727,7 @@ def outputs_summary(
 ):
     """Display summary of output files across runs."""
     import json
+
     import duckdb
 
     catalog = _catalog_dir()
@@ -1740,7 +1766,7 @@ def outputs_summary(
                 hours = num / 60
             else:
                 hours = num * 24  # default to days
-            
+
             query += " AND timestamp > now() - interval '" + str(int(hours)) + " hour'"
 
     rows = con.execute(query, params).fetchall()

@@ -630,3 +630,194 @@ def test_catalog_dir_falls_back_to_default_when_no_config(tmp_path: Path, monkey
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("BTH_CATALOG_DIR", raising=False)
     assert _catalog_dir() == Path.home() / ".bth" / "catalog"
+
+
+def test_report_emit_cli_smoke_test(tmp_path: Path, monkeypatch):
+    """CLI-level test: bth report emit on a concluded campaign creates both sidecar files.
+
+    Validates the complete `bth report emit <campaign_id>` flow:
+    - Creates a tmp catalog via BTH_CATALOG_DIR with DuckDB schema
+    - Creates and concludes a campaign
+    - Invokes `runner.invoke(app, ['report', 'emit', campaign_id])`
+    - Asserts exit code == 0
+    - Asserts both sidecar files exist at the pinned path
+    """
+    import duckdb
+    import json
+
+    monkeypatch.chdir(tmp_path)
+    catalog = tmp_path / ".bth" / "catalog"
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
+    monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
+    (tmp_path / ".bth.toml").write_text(f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n')
+
+    # Initialize catalog with DuckDB schema
+    from bathos.catalog import init_catalog
+    from bathos.campaigns import create_campaign, add_run_to_campaign
+    from bathos.compact import _RUNS_TABLE_SCHEMA, _CAMPAIGNS_TABLE_SCHEMA, _CAMPAIGN_RUNS_TABLE_SCHEMA
+
+    init_catalog(catalog)
+    db_path = catalog / "bathos.db"
+    db = duckdb.connect(str(db_path))
+    try:
+        # Initialize schema tables
+        db.execute(_RUNS_TABLE_SCHEMA)
+        db.execute(_CAMPAIGNS_TABLE_SCHEMA)
+        db.execute(_CAMPAIGN_RUNS_TABLE_SCHEMA)
+
+        campaign = create_campaign(
+            db,
+            "testproj",
+            "test-campaign",
+            mode="exploration",
+        )
+        campaign_id = campaign.id
+
+        # Create and add a run using SQL (since create_campaign and campaigns functions expect DB schema)
+        run = Run(
+            project_slug="testproj",
+            command="echo test",
+            argv=["echo", "test"],
+            git_hash="abc123",
+            git_branch="main",
+            git_dirty=False,
+            status="completed",
+            exit_code=0,
+        )
+        db.execute("""
+            INSERT INTO runs (
+                id, project_slug, command, argv, git_hash, git_branch, git_dirty, timestamp,
+                status, exit_code, schema_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, [
+            run.id, run.project_slug, run.command, json.dumps(run.argv),
+            run.git_hash, run.git_branch, run.git_dirty, run.timestamp,
+            run.status, run.exit_code, "7"
+        ])
+        add_run_to_campaign(db, campaign_id, run.id)
+
+        # Conclude the campaign
+        db.execute(
+            "UPDATE campaigns SET conclusion = ?, status = 'concluded' WHERE id = ?",
+            ["Test passed", campaign_id]
+        )
+    finally:
+        db.close()
+
+    # Now invoke bth report emit via CLI
+    result = runner.invoke(app, ["report", "emit", campaign_id])
+
+    # Assertions
+    assert result.exit_code == 0, f"Expected exit code 0, got {result.exit_code}. Output: {result.output}"
+
+    # Both sidecar files must exist at the pinned path
+    report_path = catalog / "sidecars" / campaign_id / "campaign_report.json"
+    manifest_path = catalog / "sidecars" / campaign_id / "figure_manifest.json"
+
+    assert report_path.exists(), f"Campaign report not found at {report_path}"
+    assert manifest_path.exists(), f"Figure manifest not found at {manifest_path}"
+
+
+def test_report_emit_idempotency(tmp_path: Path, monkeypatch):
+    """Test that calling emit_campaign_report and emit_figure_manifest twice is idempotent.
+
+    Verifies that a second run overwrites (not appends) the files, and content is stable.
+    """
+    import duckdb
+    import json
+
+    monkeypatch.chdir(tmp_path)
+    catalog = tmp_path / ".bth" / "catalog"
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
+    monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
+    (tmp_path / ".bth.toml").write_text(f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n')
+
+    # Initialize catalog and create a concluded campaign
+    from bathos.catalog import init_catalog
+    from bathos.campaigns import (
+        create_campaign,
+        add_run_to_campaign,
+        emit_campaign_report,
+        emit_figure_manifest,
+    )
+    from bathos.compact import _RUNS_TABLE_SCHEMA, _CAMPAIGNS_TABLE_SCHEMA, _CAMPAIGN_RUNS_TABLE_SCHEMA
+
+    init_catalog(catalog)
+    db_path = catalog / "bathos.db"
+    db = duckdb.connect(str(db_path))
+    try:
+        # Initialize schema tables
+        db.execute(_RUNS_TABLE_SCHEMA)
+        db.execute(_CAMPAIGNS_TABLE_SCHEMA)
+        db.execute(_CAMPAIGN_RUNS_TABLE_SCHEMA)
+
+        campaign = create_campaign(
+            db,
+            "testproj",
+            "test-campaign",
+            mode="exploration",
+        )
+        campaign_id = campaign.id
+
+        # Create and add a run
+        run = Run(
+            project_slug="testproj",
+            command="echo test",
+            argv=["echo", "test"],
+            git_hash="abc123",
+            git_branch="main",
+            git_dirty=False,
+            status="completed",
+            exit_code=0,
+        )
+        db.execute("""
+            INSERT INTO runs (
+                id, project_slug, command, argv, git_hash, git_branch, git_dirty, timestamp,
+                status, exit_code, schema_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, [
+            run.id, run.project_slug, run.command, json.dumps(run.argv),
+            run.git_hash, run.git_branch, run.git_dirty, run.timestamp,
+            run.status, run.exit_code, "7"
+        ])
+        add_run_to_campaign(db, campaign_id, run.id)
+
+        # Conclude the campaign
+        db.execute(
+            "UPDATE campaigns SET conclusion = ?, status = 'concluded' WHERE id = ?",
+            ["Test passed", campaign_id]
+        )
+
+        # First emission
+        manifest_ref = f"sidecars/{campaign_id}/figure_manifest.json"
+        emit_figure_manifest(db, str(catalog), campaign_id)
+        emit_campaign_report(db, str(catalog), campaign_id, figure_manifest_ref=manifest_ref)
+
+        sidecar_dir = catalog / "sidecars" / campaign_id
+        assert sidecar_dir.is_dir()
+        file_count_first = len(list(sidecar_dir.iterdir()))
+
+        # Read first emission content
+        report_path = sidecar_dir / "campaign_report.json"
+        manifest_path = sidecar_dir / "figure_manifest.json"
+        report_content_first = report_path.read_text()
+        manifest_content_first = manifest_path.read_text()
+
+        # Second emission (should overwrite, not append)
+        emit_figure_manifest(db, str(catalog), campaign_id)
+        emit_campaign_report(db, str(catalog), campaign_id, figure_manifest_ref=manifest_ref)
+
+        file_count_second = len(list(sidecar_dir.iterdir()))
+        report_content_second = report_path.read_text()
+        manifest_content_second = manifest_path.read_text()
+
+        # Assertions
+        assert file_count_first == file_count_second == 2, f"Expected 2 files (not 4). First: {file_count_first}, Second: {file_count_second}"
+        assert report_content_first == report_content_second, "Report content changed on second run"
+        assert manifest_content_first == manifest_content_second, "Manifest content changed on second run"
+
+        # Both files must be valid JSON
+        json.loads(report_content_second)
+        json.loads(manifest_content_second)
+    finally:
+        db.close()
