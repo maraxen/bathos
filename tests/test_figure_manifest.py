@@ -12,9 +12,10 @@ import json
 import tempfile
 from pathlib import Path
 
-import pytest
+from pydantic import ValidationError
+from pytest import raises
 
-from bathos.figure_manifest import FigureManifest, FigureEntry, InputPin, RenderState
+from bathos.figure_manifest import FigureEntry, FigureManifest, InputPin, RenderState
 
 
 class TestFigureManifestSchema:
@@ -221,10 +222,14 @@ class TestFigureManifestFileHandling:
     def test_manifest_read_from_file(self):
         """Given a manifest file, read_manifest reconstructs the manifest."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            manifest_path = Path(tmpdir) / "figure_manifest.json"
+            campaign_id = "camp_read"
+            sidecar_dir = Path(tmpdir) / "sidecars" / campaign_id
+            sidecar_dir.mkdir(parents=True, exist_ok=True)
+
+            manifest_path = sidecar_dir / "figure_manifest.json"
             manifest_data = {
                 "manifest_version": "1.0",
-                "campaign_id": "camp_read",
+                "campaign_id": campaign_id,
                 "figures": [
                     {
                         "figure_id": "fig_read",
@@ -244,13 +249,15 @@ class TestFigureManifestFileHandling:
                 json.dump(manifest_data, f)
 
             manifest = FigureManifest.read_manifest(manifest_path)
-            assert manifest.campaign_id == "camp_read"
+            assert manifest.campaign_id == campaign_id
             assert manifest.figures[0].figure_id == "fig_read"
 
     def test_manifest_roundtrip_via_file(self):
         """Given a manifest, write and read preserves all data."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            manifest_path = Path(tmpdir) / "figure_manifest.json"
+            campaign_id = "camp_roundtrip"
+            sidecar_dir = Path(tmpdir) / "sidecars" / campaign_id
+            manifest_path = sidecar_dir / "figure_manifest.json"
 
             pins = [
                 InputPin(
@@ -271,7 +278,7 @@ class TestFigureManifestFileHandling:
             ]
             original = FigureManifest(
                 manifest_version="1.0",
-                campaign_id="camp_roundtrip",
+                campaign_id=campaign_id,
                 figures=figures,
             )
 
@@ -319,3 +326,20 @@ class TestRenderStateEnum:
                 render_state=state,
             )
             assert figure.render_state in [RenderState.READY, RenderState.DEFERRED]
+
+    def test_render_state_empty_rejected_in_figure_entry(self):
+        """Given render_state=EMPTY in FigureEntry, validation fails."""
+        pin = InputPin(
+            run_id="run_1",
+            output_path="out/fig.json",
+            sha256="hash_1",
+        )
+        with raises(ValidationError) as exc_info:
+            FigureEntry(
+                figure_id="fig_1",
+                intent="test",
+                input_pins=[pin],
+                render_state=RenderState.EMPTY,
+            )
+        # Verify the error mentions EMPTY and the constraint
+        assert "EMPTY" in str(exc_info.value)

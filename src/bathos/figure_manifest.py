@@ -35,9 +35,8 @@ Example usage (from maraxiom consumer):
 
 from enum import Enum
 from pathlib import Path
-from typing import List
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class RenderState(str, Enum):
@@ -80,12 +79,36 @@ class FigureEntry(BaseModel):
     """Human-readable intent: what this figure is meant to show.
     Example: 'main result', 'supplementary ablation', 'owner-side comparison'."""
 
-    input_pins: List[InputPin]
+    input_pins: list[InputPin]
     """List of data sources (bathos run outputs) this figure derives from.
     Typically a single pin for analysis figures; may be multiple for comparisons."""
 
     render_state: RenderState
     """Render state: ready | deferred."""
+
+    @field_validator("render_state")
+    @classmethod
+    def render_state_not_empty(cls, v: RenderState) -> RenderState:
+        """Validate that render_state is not EMPTY.
+
+        RenderState.EMPTY is only valid at the manifest level (when figures list is empty),
+        not per-figure. Per-figure render_state must be ready or deferred.
+
+        Args:
+            v: The render_state value being validated.
+
+        Returns:
+            The validated render_state.
+
+        Raises:
+            ValueError: If render_state is RenderState.EMPTY.
+        """
+        if v == RenderState.EMPTY:
+            raise ValueError(
+                "render_state cannot be EMPTY. EMPTY is semantically at the manifest "
+                "level (when figures list is empty), not per-figure. Use READY or DEFERRED."
+            )
+        return v
 
 
 class FigureManifest(BaseModel):
@@ -101,7 +124,7 @@ class FigureManifest(BaseModel):
     campaign_id: str
     """Campaign ID this manifest belongs to. Must match the sidecar path directory."""
 
-    figures: List[FigureEntry]
+    figures: list[FigureEntry]
     """List of figures in this campaign. Empty list is valid (no figures to render)."""
 
     def write_manifest(self, path: Path) -> None:
