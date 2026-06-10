@@ -83,6 +83,11 @@ class FigureEntry(BaseModel):
     render_state: RenderState
     """Render state: ready | deferred."""
 
+    figure_kind: str | None = None
+    """Optional figure kind: what type of visualization this is.
+    Freeform vocabulary (enum-later). Examples: 'analysis_chart', 'structural'.
+    None (absent) is valid and indicates unclassified or legacy figure."""
+
 
 class FigureManifest(BaseModel):
     """Figure manifest: declarative index of campaign figures and their provenance.
@@ -111,7 +116,7 @@ class FigureManifest(BaseModel):
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w") as f:
-            f.write(self.model_dump_json(indent=2))
+            f.write(self.model_dump_json(indent=2, exclude_none=True))
 
     @classmethod
     def read_manifest(cls, path: Path) -> "FigureManifest":

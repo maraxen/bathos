@@ -115,6 +115,97 @@ class TestFigureManifestSchema:
         assert pin.output_path == "path/to/data.json"
         assert pin.sha256 == "de3f1a2b3c4d5e6f7a8b9c0d1e2f3a4b"
 
+    def test_figure_entry_with_optional_figure_kind(self):
+        """Given a figure with figure_kind set, it is included in the manifest."""
+        pin = InputPin(
+            run_id="run_kind_test",
+            output_path="outputs/analysis.json",
+            sha256="kind_hash_123",
+        )
+        figure = FigureEntry(
+            figure_id="fig_with_kind",
+            intent="show analysis",
+            input_pins=[pin],
+            render_state=RenderState.READY,
+            figure_kind="analysis_chart",
+        )
+        assert figure.figure_kind == "analysis_chart"
+
+        # Round-trip through JSON
+        json_str = figure.model_dump_json()
+        assert "figure_kind" in json_str
+        restored = FigureEntry.model_validate_json(json_str)
+        assert restored.figure_kind == "analysis_chart"
+
+    def test_figure_entry_without_figure_kind_backward_compat(self):
+        """Given a figure without figure_kind (old JSON), it deserializes with kind=None."""
+        pin = InputPin(
+            run_id="run_old",
+            output_path="outputs/old_data.json",
+            sha256="old_hash",
+        )
+        figure = FigureEntry(
+            figure_id="fig_no_kind",
+            intent="old figure",
+            input_pins=[pin],
+            render_state=RenderState.READY,
+        )
+        assert figure.figure_kind is None
+
+        # Serialize with exclude_none: None should be excluded (not "null" in JSON)
+        json_str = figure.model_dump_json(exclude_none=True)
+        parsed = json.loads(json_str)
+        assert "figure_kind" not in parsed, "figure_kind None should be excluded from JSON"
+
+        # Deserialize old JSON without figure_kind field
+        old_json = json.dumps({
+            "figure_id": "fig_old_format",
+            "intent": "legacy figure",
+            "input_pins": [{"run_id": "r1", "output_path": "p1", "sha256": "h1"}],
+            "render_state": "ready",
+        })
+        restored = FigureEntry.model_validate_json(old_json)
+        assert restored.figure_kind is None
+
+    def test_figure_kind_none_excluded_from_json_roundtrip(self):
+        """Given figure_kind=None, JSON serialization excludes the field, preserving backward compat."""
+        pin = InputPin(
+            run_id="run_1",
+            output_path="out/data.json",
+            sha256="hash123",
+        )
+        figure = FigureEntry(
+            figure_id="fig_none_kind",
+            intent="test",
+            input_pins=[pin],
+            render_state=RenderState.READY,
+            figure_kind=None,  # Explicitly None
+        )
+
+        # Serialize with exclude_none to verify None is excluded
+        json_str = figure.model_dump_json(exclude_none=True)
+        parsed = json.loads(json_str)
+        # figure_kind key should NOT appear in JSON when None
+        assert "figure_kind" not in parsed
+
+        # Manifest with such a figure should serialize without changing JSON bytes
+        manifest = FigureManifest(
+            manifest_version="1.0",
+            campaign_id="camp_kind_none",
+            figures=[figure],
+        )
+        # write_manifest uses exclude_none=True internally
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "manifest.json"
+            manifest.write_manifest(path)
+            with open(path) as f:
+                manifest_json = f.read()
+            parsed_manifest = json.loads(manifest_json)
+            # Verify figures[0] does not have figure_kind key
+            assert "figure_kind" not in parsed_manifest["figures"][0]
+
 
 class TestFigureManifestSerialization:
     """Verify JSON serialization round-trips correctly."""
@@ -292,6 +383,65 @@ class TestFigureManifestFileHandling:
                 assert rest_fig.figure_id == orig_fig.figure_id
                 assert rest_fig.render_state == orig_fig.render_state
                 assert len(rest_fig.input_pins) == len(orig_fig.input_pins)
+
+    def test_manifest_roundtrip_with_figure_kind(self):
+        """Given a manifest with figure_kind set, write and read preserves the kind."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            campaign_id = "camp_with_kinds"
+            sidecar_dir = Path(tmpdir) / "sidecars" / campaign_id
+            manifest_path = sidecar_dir / "figure_manifest.json"
+
+            pin = InputPin(
+                run_id="run_kind",
+                output_path="out/analysis.json",
+                sha256="hash_analysis",
+            )
+            figures = [
+                FigureEntry(
+                    figure_id="fig_chart",
+                    intent="analysis chart",
+                    input_pins=[pin],
+                    render_state=RenderState.READY,
+                    figure_kind="analysis_chart",
+                ),
+                FigureEntry(
+                    figure_id="fig_struct",
+                    intent="structural diagram",
+                    input_pins=[pin],
+                    render_state=RenderState.READY,
+                    figure_kind="structural",
+                ),
+                FigureEntry(
+                    figure_id="fig_legacy",
+                    intent="legacy figure",
+                    input_pins=[pin],
+                    render_state=RenderState.READY,
+                    figure_kind=None,  # No kind set
+                ),
+            ]
+            original = FigureManifest(
+                manifest_version="1.0",
+                campaign_id=campaign_id,
+                figures=figures,
+            )
+
+            original.write_manifest(manifest_path)
+            restored = FigureManifest.read_manifest(manifest_path)
+
+            assert len(restored.figures) == 3
+            assert restored.figures[0].figure_kind == "analysis_chart"
+            assert restored.figures[1].figure_kind == "structural"
+            assert restored.figures[2].figure_kind is None
+
+            # Verify JSON excludes None values
+            with open(manifest_path) as f:
+                json_text = f.read()
+                parsed = json.loads(json_text)
+            assert "figure_kind" in parsed["figures"][0]
+            assert parsed["figures"][0]["figure_kind"] == "analysis_chart"
+            assert "figure_kind" in parsed["figures"][1]
+            assert parsed["figures"][1]["figure_kind"] == "structural"
+            assert "figure_kind" not in parsed["figures"][2], "None figure_kind should not appear in JSON"
 
 
 class TestRenderStateEnum:
