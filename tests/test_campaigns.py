@@ -93,11 +93,16 @@ def test_conclude_campaign_updates_status(populated_warm_catalog: Path):
         campaign = create_campaign(db, name="Test", project_slug="prolix", mode="exploration")
         conclude_campaign(db, campaign.id, "pass", "All tests passed")
 
-        # Verify updated
+        # Verify updated in DB
         rows = db.execute("SELECT status, outcome_label, conclusion FROM campaigns WHERE id = ?", [campaign.id]).fetchall()
         assert rows[0][0] == "concluded"
         assert rows[0][1] == "pass"
         assert rows[0][2] == "All tests passed"
+
+        # Verify Campaign dataclass attribute round-trips correctly
+        campaign_reloaded = get_campaign(db, campaign.id)
+        assert campaign_reloaded is not None
+        assert campaign_reloaded.conclusion == "All tests passed"
     finally:
         db.close()
 
