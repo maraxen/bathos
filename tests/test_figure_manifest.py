@@ -305,12 +305,6 @@ class TestRenderStateEnum:
         """Given render_state='deferred', figure intent is pinned but rendering blocked."""
         assert RenderState.DEFERRED.value == "deferred"
 
-    def test_render_state_empty(self):
-        """Given render_state='empty', this is only used at manifest level (zero figures)."""
-        # Note: empty is semantically "the manifest is empty," not per-figure
-        # We use empty render_state to indicate a no-figure scenario
-        assert RenderState.EMPTY.value == "empty"
-
     def test_render_state_in_figure_entry(self):
         """Given a figure, render_state is one of the valid enum values."""
         for state in [RenderState.READY, RenderState.DEFERRED]:
@@ -327,19 +321,16 @@ class TestRenderStateEnum:
             )
             assert figure.render_state in [RenderState.READY, RenderState.DEFERRED]
 
-    def test_render_state_empty_rejected_in_figure_entry(self):
-        """Given render_state=EMPTY in FigureEntry, validation fails."""
-        pin = InputPin(
-            run_id="run_1",
-            output_path="out/fig.json",
-            sha256="hash_1",
+    def test_empty_campaign_uses_empty_figures_list(self):
+        """Given a campaign with no figures, it is expressed as figures=[] (empty list)."""
+        # Empty campaigns do not use a special render_state; they are manifests with zero entries.
+        manifest = FigureManifest(
+            manifest_version="1.0",
+            campaign_id="camp_empty_test",
+            figures=[],
         )
-        with raises(ValidationError) as exc_info:
-            FigureEntry(
-                figure_id="fig_1",
-                intent="test",
-                input_pins=[pin],
-                render_state=RenderState.EMPTY,
-            )
-        # Verify the error mentions EMPTY and the constraint
-        assert "EMPTY" in str(exc_info.value)
+        assert len(manifest.figures) == 0
+        # Should still serialize and deserialize correctly
+        json_str = manifest.model_dump_json()
+        restored = FigureManifest.model_validate_json(json_str)
+        assert len(restored.figures) == 0

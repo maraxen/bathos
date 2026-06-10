@@ -33,13 +33,13 @@ Example usage (from maraxiom consumer):
             assert pin.sha256 == compute_sha256(pin.output_path)
 """
 
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel
 
 
-class RenderState(str, Enum):
+class RenderState(StrEnum):
     """Render state of a figure in the manifest."""
 
     READY = "ready"
@@ -47,9 +47,6 @@ class RenderState(str, Enum):
 
     DEFERRED = "deferred"
     """Figure intent is pinned but rendering is blocked (e.g., needs owner-only data or styling)."""
-
-    EMPTY = "empty"
-    """Manifest is empty (zero figures). Semantically at the manifest level, not per-figure."""
 
 
 class InputPin(BaseModel):
@@ -86,36 +83,14 @@ class FigureEntry(BaseModel):
     render_state: RenderState
     """Render state: ready | deferred."""
 
-    @field_validator("render_state")
-    @classmethod
-    def render_state_not_empty(cls, v: RenderState) -> RenderState:
-        """Validate that render_state is not EMPTY.
-
-        RenderState.EMPTY is only valid at the manifest level (when figures list is empty),
-        not per-figure. Per-figure render_state must be ready or deferred.
-
-        Args:
-            v: The render_state value being validated.
-
-        Returns:
-            The validated render_state.
-
-        Raises:
-            ValueError: If render_state is RenderState.EMPTY.
-        """
-        if v == RenderState.EMPTY:
-            raise ValueError(
-                "render_state cannot be EMPTY. EMPTY is semantically at the manifest "
-                "level (when figures list is empty), not per-figure. Use READY or DEFERRED."
-            )
-        return v
-
 
 class FigureManifest(BaseModel):
     """Figure manifest: declarative index of campaign figures and their provenance.
 
     This sidecar is emitted by bathos at campaign_conclude and consumed by maraxiom
     to scaffold deck seeds and track figure provenance at the campaign level.
+
+    An empty campaign is expressed as figures=[] (an empty list), not a special render_state.
     """
 
     manifest_version: str
