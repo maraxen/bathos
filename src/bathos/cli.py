@@ -1501,7 +1501,6 @@ def scaffold(
     import duckdb
 
     from bathos.catalog import read_runs
-    from bathos.config import find_project_config, load_project_config
 
     # 1. Search for run in DB
     run_row = None
@@ -1529,12 +1528,10 @@ def scaffold(
 
     command = run_row[0]
 
-    # Get workspace root
-    config_path = find_project_config(Path.cwd())
-    if config_path:
-        workspace_root = load_project_config(config_path).root
-    else:
-        workspace_root = Path.cwd()
+    # Get workspace root (live fs_root; worktree-aware, spec 260611)
+    from bathos.workspace import resolve_workspace
+
+    workspace_root = resolve_workspace().fs_root
 
     # Parse command to find the script
     parts = shlex.split(command)
@@ -1582,15 +1579,11 @@ def show(
     """Display and validate the postmortem for the given Run ID."""
     import duckdb
 
-    from bathos.config import find_project_config, load_project_config
     from bathos.postmortem import parse_postmortem, validate_postmortem
     from bathos.schema import Run
+    from bathos.workspace import resolve_workspace
 
-    config_path = find_project_config(Path.cwd())
-    if config_path:
-        workspace_root = load_project_config(config_path).root
-    else:
-        workspace_root = Path.cwd()
+    workspace_root = resolve_workspace().fs_root
 
     # Find the postmortem TOML file in workspace
     postmortem_file = None
@@ -1660,8 +1653,8 @@ def validate(
     strict_files: bool = typer.Option(False, "--strict-files", help="Treat missing asset files as error"),
 ):
     """Validate a postmortem TOML file for structural and logical correctness."""
-    from bathos.config import find_project_config, load_project_config
     from bathos.postmortem import parse_postmortem, validate_postmortem
+    from bathos.workspace import resolve_workspace
 
     if not file.exists():
         typer.echo(f"File not found: {file}", err=True)
@@ -1673,8 +1666,7 @@ def validate(
         typer.echo(f"Parse error: {e}", err=True)
         raise typer.Exit(1)
 
-    config_path = find_project_config(Path.cwd())
-    workspace_root = load_project_config(config_path).root if config_path else Path.cwd()
+    workspace_root = resolve_workspace().fs_root
 
     result = validate_postmortem(pm, workspace_root=workspace_root, strict=strict, strict_files=strict_files)
     if result.ok:

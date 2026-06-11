@@ -399,17 +399,12 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
     # Read all runs from cool fragments (read_runs snapshots file list internally)
     cool_runs = read_runs(catalog_dir)
 
-    # Parse all postmortems in workspace
-    from bathos.config import find_project_config, load_project_config
+    # Parse all postmortems in workspace (live fs_root; worktree-aware, spec 260611)
     from bathos.postmortem import parse_postmortem
+    from bathos.workspace import resolve_workspace
 
     postmortem_map = {}
-    config_path = find_project_config(Path.cwd())
-    if config_path:
-        project_config = load_project_config(config_path)
-        workspace_root = project_config.root
-    else:
-        workspace_root = Path.cwd()
+    workspace_root = resolve_workspace().fs_root
 
     if workspace_root.exists():
         for pm_file in workspace_root.rglob("*.bth.postmortem.toml"):

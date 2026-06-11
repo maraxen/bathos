@@ -7,10 +7,12 @@
 - [260515_v02-sprint-plan](plans/260515_v02-sprint-plan.md)
 - [260526_v06-sprint-composition](plans/260526_v06-sprint-composition.md) — Sprint composition: 12-item v0.6 dispatch DAG with workflow assignments, parallelization batches, exit criteria; flags Items 4+6 prereg.py conflict and sidecar canonical_toml() determinism risk
 - [260601_v061-sprint-composition](plans/260601_v061-sprint-composition.md) — Sprint composition: 4-item v0.6.1 dispatch DAG (validate.py guard commit, GateErrorCode taxonomy cleanup, sprint-audit threshold ADR + boundary tests, NLM hook wiring); defers POPPER e-value and 11b-11d gate wiring
+- [260611_worktree-workspace-resolution-dag](plans/260611_worktree-workspace-resolution-dag.md) — backlog DAG (T1→T3/T3b→T4) for worktree-aware workspace resolution; praxia backlog #1676–#1684
 
 ## Handoffs
 
 ## Specs
+- [260611_worktree-workspace-resolution](specs/260611_worktree-workspace-resolution.md) — `resolve_workspace()` seam so `bth` resolves live-worktree fs_root while keeping catalog identity stable; post adversarial review (challenger/defender); implemented
 - [260515_bathos-design](specs/260515_bathos-design.md)
 - [260515_bathos-v01-plan](specs/260515_bathos-v01-plan.md)
 - [260518_bathos-migration-v1-revised](specs/260518_bathos-migration-v1-revised.md)

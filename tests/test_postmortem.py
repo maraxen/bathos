@@ -602,3 +602,86 @@ def test_cli_postmortem_show(tmp_path: Path, monkeypatch):
     assert "Validation failed" in result.output
     assert "refuted" in result.output
     assert "pass" in result.output
+
+
+# --- Worktree-aware workspace resolution (spec 260611) ---
+
+def _init_repo_pm(path):
+    import subprocess
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=path, check=True, capture_output=True)
+    (path / "seed.txt").write_text("seed")
+    subprocess.run(["git", "add", "."], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=path, check=True, capture_output=True)
+
+
+def test_postmortem_validates_worktree_asset(tmp_path: Path, monkeypatch):  # AC-8
+    """Asset present only in the worktree validates against the LIVE worktree root,
+    not the recorded main-checkout root (the bug this spec fixes)."""
+    import hashlib
+    import subprocess
+    from bathos.postmortem import parse_postmortem, validate_postmortem
+    from bathos.workspace import resolve_workspace
+
+    monkeypatch.delenv("BTH_WORKSPACE_ROOT", raising=False)
+    repo = tmp_path / "repo"
+    _init_repo_pm(repo)
+    # recorded [project] root points at the MAIN checkout
+    (repo / ".bth.toml").write_text(f'[project]\nslug = "proj"\nroot = "{repo}"\n')
+    wt = tmp_path / "wt1"
+    subprocess.run(["git", "worktree", "add", str(wt)], cwd=repo, check=True, capture_output=True)
+
+    # asset exists ONLY in the worktree
+    (wt / "assets").mkdir()
+    asset_bytes = b"figure-bytes"
+    (wt / "assets" / "fig.png").write_bytes(asset_bytes)
+    sha = hashlib.sha256(asset_bytes).hexdigest()
+
+    pm_file = wt / "run.py.r1.bth.postmortem.toml"
+    pm_file.write_text(
+        'run_id = "r1"\n\n[postmortem]\nhypothesis_status = "unassigned"\n'
+        'summary = "s"\nverdict_override = "none"\nstatus = "final"\n\n'
+        f'[asset_links]\nfig = {{ path = "assets/fig.png", sha256 = "{sha}" }}\n'
+    )
+    pm = parse_postmortem(pm_file)
+
+    # resolve_workspace from the worktree yields the live worktree root
+    fs_root = resolve_workspace(wt).fs_root
+    assert fs_root.resolve() == wt.resolve()
+    # validates against the worktree (asset present, checksum matches)
+    assert validate_postmortem(pm, workspace_root=fs_root).ok is True
+    # against the recorded MAIN root the asset is absent -> fails (proves fix is load-bearing)
+    assert validate_postmortem(pm, workspace_root=repo).ok is False
+
+
+def test_mcp_postmortem_validate_explicit_param_wins(tmp_path: Path, monkeypatch):  # AC-11
+    """An explicit workspace_root passed to the MCP mirror takes precedence over a
+    discoverable .bth.toml recorded root (the precedence was inverted in code)."""
+    import asyncio
+    import hashlib
+    from bathos import mcp
+
+    monkeypatch.delenv("BTH_WORKSPACE_ROOT", raising=False)
+    explicit_ws = tmp_path / "explicit"
+    (explicit_ws / "assets").mkdir(parents=True)
+    asset_bytes = b"abc"
+    (explicit_ws / "assets" / "a.png").write_bytes(asset_bytes)
+    sha = hashlib.sha256(asset_bytes).hexdigest()
+    recorded = tmp_path / "recorded"
+    recorded.mkdir()
+    # a .bth.toml in explicit_ws whose recorded root is the (asset-less) `recorded` dir;
+    # old behavior would override ws with this recorded root and FAIL to find the asset.
+    (explicit_ws / ".bth.toml").write_text(f'[project]\nslug = "proj"\nroot = "{recorded}"\n')
+
+    pm_file = explicit_ws / "p.bth.postmortem.toml"
+    pm_file.write_text(
+        'run_id = "r1"\n\n[postmortem]\nhypothesis_status = "unassigned"\n'
+        'summary = "s"\nverdict_override = "none"\nstatus = "final"\n\n'
+        f'[asset_links]\na = {{ path = "assets/a.png", sha256 = "{sha}" }}\n'
+    )
+    res = asyncio.run(
+        mcp.postmortem_validate(path=str(pm_file), workspace_root=str(explicit_ws))
+    )
+    assert res["ok"] is True  # explicit param won; asset resolved under explicit_ws

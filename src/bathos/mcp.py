@@ -963,10 +963,13 @@ async def postmortem_scaffold(
     if not run:
         return {"error": f"Run '{run_id}' not found"}
 
-    ws = Path(workspace_root) if workspace_root else Path.cwd()
-    config_path = find_project_config(ws)
-    if config_path:
-        ws = load_project_config(config_path).root
+    # Explicit workspace_root wins (AC-11); else resolve live fs_root (worktree-aware).
+    if workspace_root:
+        ws = Path(workspace_root).expanduser().resolve()
+    else:
+        from bathos.workspace import resolve_workspace
+
+        ws = resolve_workspace().fs_root
 
     # Derive script path from command
     parts = shlex.split(run.command)
@@ -1022,10 +1025,13 @@ async def postmortem_validate(
     except Exception as e:
         return {"ok": False, "errors": [f"Parse error: {e}"]}
 
-    ws = Path(workspace_root) if workspace_root else Path.cwd()
-    config_path = find_project_config(ws)
-    if config_path:
-        ws = load_project_config(config_path).root
+    # Explicit workspace_root wins (AC-11); else resolve live fs_root (worktree-aware).
+    if workspace_root:
+        ws = Path(workspace_root).expanduser().resolve()
+    else:
+        from bathos.workspace import resolve_workspace
+
+        ws = resolve_workspace().fs_root
 
     result = validate_postmortem(pm, workspace_root=ws, strict_files=strict_files)
     if result.ok:
@@ -1045,10 +1051,13 @@ async def postmortem_get(
     """
     from bathos.postmortem import parse_postmortem
 
-    ws = Path(workspace_root) if workspace_root else Path.cwd()
-    config_path = find_project_config(ws)
-    if config_path:
-        ws = load_project_config(config_path).root
+    # Explicit workspace_root wins (AC-11); else resolve live fs_root (worktree-aware).
+    if workspace_root:
+        ws = Path(workspace_root).expanduser().resolve()
+    else:
+        from bathos.workspace import resolve_workspace
+
+        ws = resolve_workspace().fs_root
 
     for pm_file in ws.rglob("*.bth.postmortem.toml"):
         try:

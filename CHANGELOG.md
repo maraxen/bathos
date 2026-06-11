@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Worktree-aware workspace resolution** (`src/bathos/workspace.py`). New `resolve_workspace(cwd)` returns a `WorkspaceContext` separating stable catalog **identity** (project slug, recorded `[project] root`) from the live **filesystem root** (`fs_root`) used for workspace-relative file operations. When `bth` runs from inside a git worktree, postmortem asset validation/scan now resolve against the live worktree checkout instead of the recorded main-checkout root. `fs_root` precedence: `BTH_WORKSPACE_ROOT` (new env var, must be absolute) → `git rev-parse --show-toplevel` → recorded `[project] root` → `cwd`. No schema change. Spec: `.praxia/docs/specs/260611_worktree-workspace-resolution.md`.
+- **`BTH_WORKSPACE_ROOT`** env override, mirroring `BTH_PROJECT_SLUG`/`BTH_CATALOG_DIR`; now exported by the SLURM env helper (`templates/_bth_env.sh`) so cluster jobs in spool dirs resolve deterministically.
+
+### Changed
+
+- The MCP postmortem mirrors (`postmortem_template`, `postmortem_validate`, `postmortem_get`) now honor an explicit `workspace_root` argument as **top precedence**. Previously a discoverable `.bth.toml` recorded root silently overrode the caller-supplied `workspace_root`.
+
+### Notes
+
+- Identity (slug + catalog dir) is unchanged and stays stable across all worktrees of a repo. Catalog concurrency under simultaneous multi-worktree compaction is out of scope and tracked separately; a recorded `[project] root` that legitimately diverges from the git toplevel (monorepo subdir / symlink) now resolves to the git toplevel by design.
+
 ---
 
 ## [0.10.0] - 2026-06-08
