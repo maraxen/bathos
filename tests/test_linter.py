@@ -850,3 +850,69 @@ energy_error = "float"
     issues = check_novel_or_reproduces_declared(tmp_path)
     novel_issues = [i for i in issues if i.issue == "NOVEL_OR_REPRODUCES_REQUIRED"]
     assert len(novel_issues) == 0
+
+
+def test_check_novel_or_reproduces_declared_fails_empty_reproduction_block(tmp_path):
+    """AC-7: validation stage with empty string fields in [reproduction] block fails.
+
+    Tests the case where a [reproduction] block is present but both reproduces_paper
+    and reproduces_run are empty strings (falsy). This must still trigger
+    NOVEL_OR_REPRODUCES_REQUIRED since empty strings are not valid declarations.
+    """
+    from bathos.linter import check_novel_or_reproduces_declared, IssueSeverity
+
+    s = _make_script(tmp_path, "experiments", "run_test.py")
+    sidecar_path = s.with_suffix(".bth.toml")
+    sidecar_path.write_text("""[experiment]
+hypothesis = "test"
+stage_name = "validation"
+novel = false
+
+[reproduction]
+reproduces_paper = ""
+reproduces_run = ""
+
+[result_schema]
+x = "float"
+
+[outcomes.pass]
+condition = "x > 0"
+decision = "good"
+""")
+
+    issues = check_novel_or_reproduces_declared(tmp_path)
+    novel_issues = [i for i in issues if i.issue == "NOVEL_OR_REPRODUCES_REQUIRED"]
+    assert len(novel_issues) == 1, f"Expected 1 issue, got {len(novel_issues)}: {novel_issues}"
+    assert novel_issues[0].severity == IssueSeverity.ERROR
+
+
+def test_check_novel_or_reproduces_declared_fails_completely_empty_reproduction_block(tmp_path):
+    """AC-7: validation stage with completely empty [reproduction] block fails.
+
+    Tests the case where a [reproduction] block exists but has no keys at all.
+    This covers the falsy-dict path where sidecar.reproduction exists but all
+    its fields are empty/default, making the has_reproduction check fail.
+    """
+    from bathos.linter import check_novel_or_reproduces_declared, IssueSeverity
+
+    s = _make_script(tmp_path, "experiments", "run_test.py")
+    sidecar_path = s.with_suffix(".bth.toml")
+    sidecar_path.write_text("""[experiment]
+hypothesis = "test"
+stage_name = "validation"
+novel = false
+
+[reproduction]
+
+[result_schema]
+x = "float"
+
+[outcomes.pass]
+condition = "x > 0"
+decision = "good"
+""")
+
+    issues = check_novel_or_reproduces_declared(tmp_path)
+    novel_issues = [i for i in issues if i.issue == "NOVEL_OR_REPRODUCES_REQUIRED"]
+    assert len(novel_issues) == 1, f"Expected 1 issue, got {len(novel_issues)}: {novel_issues}"
+    assert novel_issues[0].severity == IssueSeverity.ERROR
