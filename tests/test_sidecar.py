@@ -269,8 +269,9 @@ def test_parse_experiment_sidecar_stage_name_default(tmp_path):
     assert sidecar.stage_name == "exploration"
 
 
-def test_parse_experiment_sidecar_stage_name_invalid_coerces_to_exploration(tmp_path):
+def test_parse_experiment_sidecar_stage_name_invalid_coerces_to_exploration(tmp_path, caplog):
     """Invalid stage_name coerces to 'exploration' with warning."""
+    import logging
     from bathos.sidecar import parse_sidecar
 
     path = _write_toml(tmp_path, """
@@ -290,9 +291,14 @@ def test_parse_experiment_sidecar_stage_name_invalid_coerces_to_exploration(tmp_
         value = "float"
     """)
 
-    sidecar = parse_sidecar(path)
+    with caplog.at_level(logging.WARNING, logger="bathos.sidecar"):
+        sidecar = parse_sidecar(path)
+
     # Should coerce to exploration
     assert sidecar.stage_name == "exploration"
+
+    # Assert warning was logged
+    assert any("invalid-stage-with-numbers-123" in record.message for record in caplog.records)
 
 
 def test_parse_experiment_sidecar_with_novel(tmp_path):
