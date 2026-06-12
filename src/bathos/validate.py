@@ -5,7 +5,7 @@ from pathlib import Path
 
 import duckdb
 
-from bathos.sidecar import Sidecar, SidecarKind, ReproductionBlock
+from bathos.sidecar import Sidecar, SidecarKind, ReproductionBlock, ControlsBlock
 from bathos.telemetry import event
 
 
@@ -148,6 +148,43 @@ def validate_reproduction_block(sidecar: Sidecar, sidecar_path: Path | None = No
     return errors
 
 
+def validate_controls_block(sidecar: Sidecar, sidecar_path: Path | None = None) -> list[ValidationError]:
+    """Validate [controls] block fields.
+
+    Checks that all labels in positive_outcome and negative_outcome exist in [outcomes].
+    Returns a list of ValidationError (empty if valid or no block present).
+    """
+    errors: list[ValidationError] = []
+
+    if sidecar.controls is None:
+        return errors  # No [controls] block — nothing to validate
+
+    controls = sidecar.controls
+    outcome_keys = set(sidecar.outcomes.keys())
+
+    # Check positive_outcome labels exist in outcomes
+    for label in controls.positive_outcome:
+        if label not in outcome_keys:
+            errors.append(ValidationError(
+                f"controls.positive_outcome",
+                f"Label {label!r} not declared in [outcomes]",
+            ))
+            if sidecar_path:
+                event("sidecar.validate_error", path=str(sidecar_path), field="controls.positive_outcome", reason=f"Label {label!r} not found in outcomes")
+
+    # Check negative_outcome labels exist in outcomes
+    for label in controls.negative_outcome:
+        if label not in outcome_keys:
+            errors.append(ValidationError(
+                f"controls.negative_outcome",
+                f"Label {label!r} not declared in [outcomes]",
+            ))
+            if sidecar_path:
+                event("sidecar.validate_error", path=str(sidecar_path), field="controls.negative_outcome", reason=f"Label {label!r} not found in outcomes")
+
+    return errors
+
+
 def validate_sidecar(sidecar: Sidecar, sidecar_path: Path | None = None) -> ValidationResult:
     """Validate a parsed Sidecar for structural integrity and logical consistency.
 
@@ -259,5 +296,9 @@ def validate_sidecar(sidecar: Sidecar, sidecar_path: Path | None = None) -> Vali
     # Validate [reproduction] block if present
     repro_errors = validate_reproduction_block(sidecar, sidecar_path)
     errors.extend(repro_errors)
+
+    # Validate [controls] block if present
+    controls_errors = validate_controls_block(sidecar, sidecar_path)
+    errors.extend(controls_errors)
 
     return ValidationResult(ok=len(errors) == 0, errors=errors)

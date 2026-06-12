@@ -46,6 +46,13 @@ class ReproductionBlock:
 
 
 @dataclass
+class ControlsBlock:
+    """Control arm specification for experiment sidecars (optional [controls] block)."""
+    positive_outcome: list[str] = field(default_factory=list)
+    negative_outcome: list[str] = field(default_factory=list)
+
+
+@dataclass
 class Sidecar:
     kind: SidecarKind
     result_schema: dict[str, str]
@@ -77,6 +84,8 @@ class Sidecar:
     popper_weights: dict[str, float] = field(default_factory=dict)
     # reproduction metadata (experiment sidecars only)
     reproduction: ReproductionBlock | None = None
+    # controls metadata (experiment sidecars only)
+    controls: ControlsBlock | None = None
 
 
 ENFORCED_DIRS = {"experiments", "benchmarks", "validation"}
@@ -149,6 +158,18 @@ def parse_sidecar(path: Path) -> Sidecar:
             for key in repro_data:
                 if key not in {"reproduces_paper", "reproduces_run", "tolerance_pct", "requires_pass_stem"}:
                     logger.warning(f"Unknown key in [reproduction]: {key!r}")
+
+        # Parse [controls] block (optional)
+        if "controls" in data:
+            controls_data = data.get("controls", {})
+            sidecar.controls = ControlsBlock(
+                positive_outcome=controls_data.get("positive_outcome", []),
+                negative_outcome=controls_data.get("negative_outcome", []),
+            )
+            # Warn on unknown keys in [controls]
+            for key in controls_data:
+                if key not in {"positive_outcome", "negative_outcome"}:
+                    logger.warning(f"Unknown key in [controls]: {key!r}")
     elif "benchmark" in data:
         kind = SidecarKind.BENCHMARK
         section = data["benchmark"]

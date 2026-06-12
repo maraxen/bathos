@@ -454,3 +454,106 @@ def test_parse_experiment_sidecar_reproduction_block_unknown_key_warning(tmp_pat
 
     assert sidecar.reproduction is not None
     assert any("Unknown key in [reproduction]" in record.message for record in caplog.records)
+
+
+def test_parse_experiment_sidecar_controls_block(tmp_path):
+    """[controls] block with positive_outcome and negative_outcome is parsed correctly."""
+    from bathos.sidecar import parse_sidecar
+    path = _write_toml(tmp_path, """
+        [experiment]
+        hypothesis = "Test hypothesis"
+        [outcomes.ctrl_pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.ctrl_fail]
+        condition = "value <= 0"
+        decision = "debug"
+        reasoning = "Bad"
+        is_residual = true
+        [result_schema]
+        value = "float"
+        [controls]
+        positive_outcome = ["ctrl_pass"]
+        negative_outcome = ["ctrl_fail"]
+    """)
+    sidecar = parse_sidecar(path)
+    assert sidecar.controls is not None
+    assert sidecar.controls.positive_outcome == ["ctrl_pass"]
+    assert sidecar.controls.negative_outcome == ["ctrl_fail"]
+
+
+def test_parse_experiment_sidecar_controls_block_absent(tmp_path):
+    """When [controls] absent, controls is None."""
+    from bathos.sidecar import parse_sidecar
+    path = _write_toml(tmp_path, """
+        [experiment]
+        hypothesis = "Test hypothesis"
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        value = "float"
+    """)
+    sidecar = parse_sidecar(path)
+    assert sidecar.controls is None
+
+
+def test_parse_experiment_sidecar_controls_block_empty(tmp_path):
+    """Empty [controls] block creates ControlsBlock with empty lists."""
+    from bathos.sidecar import parse_sidecar
+    path = _write_toml(tmp_path, """
+        [experiment]
+        hypothesis = "Test hypothesis"
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        value = "float"
+        [controls]
+    """)
+    sidecar = parse_sidecar(path)
+    assert sidecar.controls is not None
+    assert sidecar.controls.positive_outcome == []
+    assert sidecar.controls.negative_outcome == []
+
+
+def test_parse_experiment_sidecar_controls_block_unknown_key_warning(tmp_path, caplog):
+    """Unknown keys in [controls] emit WARNING."""
+    import logging
+    from bathos.sidecar import parse_sidecar
+    path = _write_toml(tmp_path, """
+        [experiment]
+        hypothesis = "Test hypothesis"
+        [outcomes.ctrl_pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        value = "float"
+        [controls]
+        positive_outcome = ["ctrl_pass"]
+        unknown_field = "should warn"
+    """)
+    with caplog.at_level(logging.WARNING, logger="bathos.sidecar"):
+        sidecar = parse_sidecar(path)
+
+    assert sidecar.controls is not None
+    assert any("Unknown key in [controls]" in record.message for record in caplog.records)

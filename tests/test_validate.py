@@ -482,3 +482,189 @@ def test_reproduction_reproduces_run_empty_string_passes(tmp_path):
     result = validate_sidecar(sidecar)
     assert result.ok is True
     assert len(result.errors) == 0
+
+
+def test_controls_block_valid_positive_outcome(tmp_path):
+    """[controls] block with valid positive_outcome label passes validation."""
+    from bathos.sidecar import parse_sidecar
+    from bathos.validate import validate_sidecar
+
+    path = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "Test hypothesis"
+        [outcomes.ctrl_pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        value = "float"
+        [controls]
+        positive_outcome = ["ctrl_pass"]
+    """,
+    )
+    sidecar = parse_sidecar(path)
+    result = validate_sidecar(sidecar)
+    assert result.ok is True
+    assert len(result.errors) == 0
+
+
+def test_controls_block_valid_negative_outcome(tmp_path):
+    """[controls] block with valid negative_outcome label passes validation."""
+    from bathos.sidecar import parse_sidecar
+    from bathos.validate import validate_sidecar
+
+    path = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "Test hypothesis"
+        [outcomes.ctrl_fail]
+        condition = "value <= 0"
+        decision = "debug"
+        reasoning = "Bad"
+        is_residual = true
+        [result_schema]
+        value = "float"
+        [controls]
+        negative_outcome = ["ctrl_fail"]
+    """,
+    )
+    sidecar = parse_sidecar(path)
+    result = validate_sidecar(sidecar)
+    assert result.ok is True
+    assert len(result.errors) == 0
+
+
+def test_controls_block_valid_both_outcomes(tmp_path):
+    """[controls] block with both positive_outcome and negative_outcome passes validation."""
+    from bathos.sidecar import parse_sidecar
+    from bathos.validate import validate_sidecar
+
+    path = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "Test hypothesis"
+        [outcomes.ctrl_pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.ctrl_fail]
+        condition = "value <= 0"
+        decision = "debug"
+        reasoning = "Bad"
+        is_residual = true
+        [result_schema]
+        value = "float"
+        [controls]
+        positive_outcome = ["ctrl_pass"]
+        negative_outcome = ["ctrl_fail"]
+    """,
+    )
+    sidecar = parse_sidecar(path)
+    result = validate_sidecar(sidecar)
+    assert result.ok is True
+    assert len(result.errors) == 0
+
+
+def test_controls_block_invalid_positive_outcome_label(tmp_path):
+    """[controls] block with invalid positive_outcome label fails validation."""
+    from bathos.sidecar import parse_sidecar
+    from bathos.validate import validate_sidecar
+
+    path = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "Test hypothesis"
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        value = "float"
+        [controls]
+        positive_outcome = ["nonexistent_label"]
+    """,
+    )
+    sidecar = parse_sidecar(path)
+    result = validate_sidecar(sidecar)
+    assert result.ok is False
+    assert any("nonexistent_label" in e.message for e in result.errors)
+
+
+def test_controls_block_invalid_negative_outcome_label(tmp_path):
+    """[controls] block with invalid negative_outcome label fails validation."""
+    from bathos.sidecar import parse_sidecar
+    from bathos.validate import validate_sidecar
+
+    path = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "Test hypothesis"
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        value = "float"
+        [controls]
+        negative_outcome = ["bad_label"]
+    """,
+    )
+    sidecar = parse_sidecar(path)
+    result = validate_sidecar(sidecar)
+    assert result.ok is False
+    assert any("bad_label" in e.message for e in result.errors)
+
+
+def test_controls_block_multiple_invalid_labels(tmp_path):
+    """[controls] block with multiple invalid labels reports all errors."""
+    from bathos.sidecar import parse_sidecar
+    from bathos.validate import validate_sidecar
+
+    path = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "Test hypothesis"
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        value = "float"
+        [controls]
+        positive_outcome = ["nonexistent1", "pass"]
+        negative_outcome = ["nonexistent2"]
+    """,
+    )
+    sidecar = parse_sidecar(path)
+    result = validate_sidecar(sidecar)
+    assert result.ok is False
+    # Should have 2 errors for nonexistent labels
+    nonexistent_errors = [e for e in result.errors if "nonexistent" in e.message]
+    assert len(nonexistent_errors) == 2
