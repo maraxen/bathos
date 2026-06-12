@@ -134,9 +134,9 @@ def validate_reproduction_block(sidecar: Sidecar, sidecar_path: Path | None = No
             if sidecar_path:
                 event("sidecar.validate_error", path=str(sidecar_path), field="reproduction.tolerance_pct", reason=f"tolerance_pct out of range: {repro.tolerance_pct}")
 
-    # reproduces_run: if non-empty, must match UUID regex r'^[0-9a-f-]{36}$'
+    # reproduces_run: if non-empty, must match UUID regex r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
     if repro.reproduces_run:
-        uuid_pattern = r'^[0-9a-f-]{36}$'
+        uuid_pattern = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
         if not re.match(uuid_pattern, repro.reproduces_run):
             errors.append(ValidationError(
                 "reproduction.reproduces_run",

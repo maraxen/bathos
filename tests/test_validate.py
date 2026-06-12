@@ -422,6 +422,37 @@ def test_reproduction_reproduces_run_valid_uuid_passes(tmp_path):
     assert len(result.errors) == 0
 
 
+def test_reproduction_reproduces_run_spec_uuid_passes(tmp_path):
+    """Reproduction with spec UUID format should pass validation."""
+    from bathos.sidecar import parse_sidecar
+    from bathos.validate import validate_sidecar
+
+    path = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "Test"
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fail]
+        condition = "TRUE"
+        decision = "debug"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        value = "float"
+        [reproduction]
+        reproduces_run = "a3f4e5c6-1234-5678-9abc-def012345678"
+    """,
+    )
+    sidecar = parse_sidecar(path)
+    result = validate_sidecar(sidecar)
+    assert result.ok is True
+    assert len(result.errors) == 0
+
+
 def test_reproduction_reproduces_run_empty_string_passes(tmp_path):
     """Reproduction with empty reproduces_run string should pass (not validated)."""
     from bathos.sidecar import parse_sidecar
