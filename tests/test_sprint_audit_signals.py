@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from bathos.catalog import init_catalog, write_run
+from bathos.catalog import init_catalog, write_run, write_submit_provenance
 from bathos.compact import compact
 from bathos.schema import Run
 
@@ -1518,3 +1518,255 @@ class TestControlArmRate:
         assert result.value == pytest.approx(0.0)
         assert result.level == "WARNING"
         assert "no control arm runs found in validation/production campaigns" in result.message
+
+
+class TestSubmitBypassRateSignal:
+    """Test AC-9 signal_submit_bypass_rate — detection of cluster submit bypass."""
+
+    def test_submit_bypass_rate_all_via_bth_submit(self, monkeypatch_registry, tmp_path):
+        """All validation/production runs submitted via bth submit — rate=0%."""
+        from bathos.config import register_project
+        from bathos.sprint_audit import signal_submit_bypass_rate
+
+        catalog_dir = tmp_path / "test_catalog"
+        catalog_dir.mkdir()
+        init_catalog(catalog_dir)
+
+        # Create 3 validation runs with slurm_job_id
+        base_time = datetime.now(UTC)
+        runs = [
+            Run(
+                project_slug="test_project",
+                command=f"python test.py --i {i}",
+                argv=["python", "test.py", "--i", str(i)],
+                git_hash="abc123",
+                git_branch="main",
+                git_dirty=False,
+                timestamp=base_time + timedelta(seconds=i),
+                status="completed",
+                exit_code=0,
+                outcome="pass",
+                sidecar_mode="normal",
+                outcome_is_residual=False,
+                stage_name="validation",
+                slurm_job_id=f"10000{i}",
+            )
+            for i in range(3)
+        ]
+
+        for r in runs:
+            write_run(r, catalog_dir)
+        compact(catalog_dir)
+
+        # Write submit-provenance records for all 3 jobs
+        for i in range(3):
+            write_submit_provenance(
+                project_slug="test_project",
+                command=f"python test.py --i {i}",
+                sidecar_sha256="hash123",
+                myxcel_job_id=f"10000{i}",
+                stage_name="validation",
+                catalog_dir=catalog_dir,
+            )
+
+        db_path = catalog_dir / "bathos.db"
+        result = signal_submit_bypass_rate("test_project", db_path, catalog_dir)
+
+        assert result.signal == "submit_bypass_rate"
+        assert result.value == pytest.approx(0.0)
+        assert result.level == "OK"
+        assert "0/3" in result.message
+
+    def test_submit_bypass_rate_some_bypassed(self, monkeypatch_registry, tmp_path):
+        """Only 2 of 3 validation runs submitted via bth submit — rate=33% > 5% threshold."""
+        from bathos.config import register_project
+        from bathos.sprint_audit import signal_submit_bypass_rate
+
+        catalog_dir = tmp_path / "test_catalog"
+        catalog_dir.mkdir()
+        init_catalog(catalog_dir)
+
+        # Create 3 validation runs with slurm_job_id
+        base_time = datetime.now(UTC)
+        runs = [
+            Run(
+                project_slug="test_project",
+                command=f"python test.py --i {i}",
+                argv=["python", "test.py", "--i", str(i)],
+                git_hash="abc123",
+                git_branch="main",
+                git_dirty=False,
+                timestamp=base_time + timedelta(seconds=i),
+                status="completed",
+                exit_code=0,
+                outcome="pass",
+                sidecar_mode="normal",
+                outcome_is_residual=False,
+                stage_name="validation",
+                slurm_job_id=f"10000{i}",
+            )
+            for i in range(3)
+        ]
+
+        for r in runs:
+            write_run(r, catalog_dir)
+        compact(catalog_dir)
+
+        # Write submit-provenance records for only 2 jobs (0 and 1)
+        for i in range(2):
+            write_submit_provenance(
+                project_slug="test_project",
+                command=f"python test.py --i {i}",
+                sidecar_sha256="hash123",
+                myxcel_job_id=f"10000{i}",
+                stage_name="validation",
+                catalog_dir=catalog_dir,
+            )
+
+        db_path = catalog_dir / "bathos.db"
+        result = signal_submit_bypass_rate("test_project", db_path, catalog_dir)
+
+        assert result.signal == "submit_bypass_rate"
+        assert result.value == pytest.approx(1.0 / 3)  # 1 of 3 bypassed
+        assert result.level == "WARNING"  # 33% > 5% threshold
+        assert "1/3" in result.message
+
+    def test_submit_bypass_rate_high_rate_warning(self, monkeypatch_registry, tmp_path):
+        """6 of 10 validation runs bypassed — rate=60% > 5% threshold — WARNING."""
+        from bathos.config import register_project
+        from bathos.sprint_audit import signal_submit_bypass_rate
+
+        catalog_dir = tmp_path / "test_catalog"
+        catalog_dir.mkdir()
+        init_catalog(catalog_dir)
+
+        # Create 10 validation runs with slurm_job_id
+        base_time = datetime.now(UTC)
+        runs = [
+            Run(
+                project_slug="test_project",
+                command=f"python test.py --i {i}",
+                argv=["python", "test.py", "--i", str(i)],
+                git_hash="abc123",
+                git_branch="main",
+                git_dirty=False,
+                timestamp=base_time + timedelta(seconds=i),
+                status="completed",
+                exit_code=0,
+                outcome="pass",
+                sidecar_mode="normal",
+                outcome_is_residual=False,
+                stage_name="validation",
+                slurm_job_id=f"1000{i:02d}",
+            )
+            for i in range(10)
+        ]
+
+        for r in runs:
+            write_run(r, catalog_dir)
+        compact(catalog_dir)
+
+        # Write submit-provenance records for only 4 jobs (0,1,2,3)
+        for i in range(4):
+            write_submit_provenance(
+                project_slug="test_project",
+                command=f"python test.py --i {i}",
+                sidecar_sha256="hash123",
+                myxcel_job_id=f"1000{i:02d}",
+                stage_name="validation",
+                catalog_dir=catalog_dir,
+            )
+
+        db_path = catalog_dir / "bathos.db"
+        result = signal_submit_bypass_rate("test_project", db_path, catalog_dir)
+
+        assert result.signal == "submit_bypass_rate"
+        assert result.value == pytest.approx(6.0 / 10)  # 6 of 10 bypassed
+        assert result.level == "WARNING"
+        assert "60.00%" in result.message or "6/10" in result.message
+
+    def test_submit_bypass_rate_no_validation_runs(self, monkeypatch_registry, tmp_path):
+        """No validation/production runs — rate=0%, level=INFO."""
+        from bathos.config import register_project
+        from bathos.sprint_audit import signal_submit_bypass_rate
+
+        catalog_dir = tmp_path / "test_catalog"
+        catalog_dir.mkdir()
+        init_catalog(catalog_dir)
+
+        # Create only exploration runs (no validation/production)
+        base_time = datetime.now(UTC)
+        runs = [
+            Run(
+                project_slug="test_project",
+                command=f"python test.py --i {i}",
+                argv=["python", "test.py", "--i", str(i)],
+                git_hash="abc123",
+                git_branch="main",
+                git_dirty=False,
+                timestamp=base_time + timedelta(seconds=i),
+                status="completed",
+                exit_code=0,
+                outcome="pass",
+                sidecar_mode="normal",
+                outcome_is_residual=False,
+                stage_name="exploration",
+                slurm_job_id=f"20000{i}",
+            )
+            for i in range(3)
+        ]
+
+        for r in runs:
+            write_run(r, catalog_dir)
+        compact(catalog_dir)
+
+        db_path = catalog_dir / "bathos.db"
+        result = signal_submit_bypass_rate("test_project", db_path, catalog_dir)
+
+        assert result.signal == "submit_bypass_rate"
+        assert result.value == pytest.approx(0.0)
+        assert result.level == "INFO"
+        assert "no validation/production cluster runs found" in result.message
+
+    def test_submit_bypass_rate_no_provenance_records(self, monkeypatch_registry, tmp_path):
+        """Validation runs exist but no provenance records yet — all are bypassed."""
+        from bathos.config import register_project
+        from bathos.sprint_audit import signal_submit_bypass_rate
+
+        catalog_dir = tmp_path / "test_catalog"
+        catalog_dir.mkdir()
+        init_catalog(catalog_dir)
+
+        # Create validation runs but do NOT write provenance records
+        base_time = datetime.now(UTC)
+        runs = [
+            Run(
+                project_slug="test_project",
+                command=f"python test.py --i {i}",
+                argv=["python", "test.py", "--i", str(i)],
+                git_hash="abc123",
+                git_branch="main",
+                git_dirty=False,
+                timestamp=base_time + timedelta(seconds=i),
+                status="completed",
+                exit_code=0,
+                outcome="pass",
+                sidecar_mode="normal",
+                outcome_is_residual=False,
+                stage_name="validation",
+                slurm_job_id=f"30000{i}",
+            )
+            for i in range(2)
+        ]
+
+        for r in runs:
+            write_run(r, catalog_dir)
+        compact(catalog_dir)
+
+        db_path = catalog_dir / "bathos.db"
+        result = signal_submit_bypass_rate("test_project", db_path, catalog_dir)
+
+        assert result.signal == "submit_bypass_rate"
+        assert result.value == pytest.approx(1.0)  # All bypassed
+        assert result.level == "WARNING"
+        assert "100.00%" in result.message or "2/2" in result.message
