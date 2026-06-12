@@ -456,6 +456,19 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
     # Initialize runs table if it doesn't exist
     con.execute(_RUNS_TABLE_SCHEMA)
 
+    # Idempotent column additions for columns added after the initial schema.
+    # CREATE TABLE IF NOT EXISTS is a no-op on existing tables, so pre-existing
+    # warm catalogs need explicit ALTER TABLE to gain newer columns.
+    for _runs_alter_sql in [
+        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS manifest_sha256 TEXT",
+        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS manifest_path TEXT",
+        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS outcome_error_reason TEXT",
+        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS adversarial_check_status TEXT",
+        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS stage_name TEXT",
+    ]:
+        with contextlib.suppress(Exception):
+            con.execute(_runs_alter_sql)
+
     # Initialize campaign tables if they don't exist
     con.execute(_CAMPAIGNS_TABLE_SCHEMA)
     con.execute(_CAMPAIGN_RUNS_TABLE_SCHEMA)
