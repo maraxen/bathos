@@ -1286,6 +1286,7 @@ def lint(
     from bathos.linter import (
         IssueSeverity,
         check_adversarial_checks,
+        check_baseline_ref_exists,
         check_bypass_trend,
         check_canonical_stage_names,
         check_ephemeral_output_paths,
@@ -1310,6 +1311,7 @@ def lint(
         issues.extend(check_unfired_branches(catalog_dir))
         issues.extend(check_ephemeral_output_paths(catalog_dir))
         issues.extend(check_canonical_stage_names(catalog_dir))
+        issues.extend(check_baseline_ref_exists(project_root.resolve(), catalog_dir, db_path))
 
     if not issues:
         typer.echo("No issues found.")

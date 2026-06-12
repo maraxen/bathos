@@ -660,3 +660,91 @@ def check_canonical_stage_names(catalog_dir: Path) -> list[LintIssue]:
     except Exception:
         # Always return (never raise), so lint continues
         return []
+
+
+def check_baseline_ref_exists(project_root: Path, catalog_dir: Path, db_path: Path) -> list[LintIssue]:
+    """Tier-2: Validate that baseline_ref values exist in the warm catalog.
+
+    Scans all benchmark sidecars in scripts/benchmarks/ for baseline_ref fields.
+    For each non-empty baseline_ref, queries the warm-tier DuckDB catalog using:
+      SELECT outcome, started_at FROM runs WHERE id = ? OR id LIKE ? LIMIT 1
+
+    Supports both full UUIDs and short prefixes (e.g., "abc12345%").
+
+    If baseline_ref not found: WARNING
+    If baseline_ref found: returns issue with baseline outcome info for audit purposes
+
+    Args:
+        project_root: Path to project root.
+        catalog_dir: Path to catalog directory (for scanning).
+        db_path: Path to bathos.db warm catalog.
+
+    Returns:
+        List of LintIssue objects with severity WARNING (not found) or informational details.
+    """
+    import duckdb
+
+    if not db_path.exists():
+        return []
+
+    scripts_dir = project_root / "scripts" / "benchmarks"
+    if not scripts_dir.exists():
+        return []
+
+    issues: list[LintIssue] = []
+
+    for sidecar_path in sorted(scripts_dir.rglob("*.bth.toml")):
+        try:
+            data = tomllib.loads(sidecar_path.read_text())
+        except Exception:
+            continue
+
+        # Only process sidecars with [benchmark] block
+        if "benchmark" not in data:
+            continue
+
+        benchmark_section = data.get("benchmark", {})
+        baseline_ref = benchmark_section.get("baseline_ref", "") or ""
+
+        if not baseline_ref:
+            continue
+
+        # Query warm DuckDB for the baseline run
+        try:
+            db = duckdb.connect(str(db_path), read_only=True)
+            db.execute("SET TimeZone='UTC'")
+
+            row = db.execute(
+                "SELECT outcome, timestamp FROM runs WHERE id = ? OR id LIKE ? LIMIT 1",
+                [baseline_ref, baseline_ref + "%"]
+            ).fetchone()
+
+            db.close()
+        except Exception:
+            # Database error, skip
+            continue
+
+        if row is None:
+            issues.append(
+                LintIssue(
+                    path=sidecar_path,
+                    directory="benchmarks",
+                    issue="baseline_ref_not_found",
+                    severity=IssueSeverity.WARNING,
+                    detail=f"baseline_ref {baseline_ref!r} not found in warm-tier catalog",
+                )
+            )
+        else:
+            outcome, started_at = row
+            # Emit informational issue showing the baseline was found
+            issues.append(
+                LintIssue(
+                    path=sidecar_path,
+                    directory="benchmarks",
+                    issue="baseline_ref_ok",
+                    severity=IssueSeverity.WARNING,  # Severity WARNING used for visibility
+                    detail=f"baseline_ref {baseline_ref!r}: outcome={outcome}, started_at={started_at}",
+                )
+            )
+
+    return issues

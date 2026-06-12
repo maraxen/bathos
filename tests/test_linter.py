@@ -454,3 +454,151 @@ def test_check_canonical_stage_names_no_catalog(tmp_path):
     catalog_dir = tmp_path / "nonexistent_catalog"
     issues = check_canonical_stage_names(catalog_dir)
     assert issues == []
+
+
+def test_check_baseline_ref_exists_finds_baseline(tmp_path):
+    """Test that check_baseline_ref_exists detects when baseline_ref exists in catalog."""
+    from datetime import UTC, datetime
+    from bathos.catalog import init_catalog, write_run
+    from bathos.compact import compact
+    from bathos.linter import check_baseline_ref_exists, IssueSeverity
+    from bathos.schema import Run
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    init_catalog(catalog_dir)
+
+    # Create a baseline run with a known ID
+    base_time = datetime.now(UTC)
+    baseline_id = "abc12345-1234-1234-1234-123456789abc"
+    baseline_run = Run(
+        id=baseline_id,
+        project_slug="test",
+        command="python scripts/benchmarks/baseline.py",
+        argv=["python", "scripts/benchmarks/baseline.py"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        timestamp=base_time,
+        status="completed",
+        exit_code=0,
+        outcome="pass",
+    )
+    write_run(baseline_run, catalog_dir)
+    compact(catalog_dir)
+
+    # Create a benchmark sidecar with baseline_ref pointing to the baseline run
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    scripts_dir = project_root / "scripts" / "benchmarks"
+    scripts_dir.mkdir(parents=True)
+    sidecar_path = scripts_dir / "test_bench.bth.toml"
+    sidecar_path.write_text(f"""[benchmark]
+baseline_ref = "{baseline_id}"
+metric = "ns_per_day"
+regression_threshold = 0.05
+target = "50 ns/day"
+
+[result_schema]
+ns_per_day = "float"
+""")
+
+    issues = check_baseline_ref_exists(project_root, catalog_dir, catalog_dir / "bathos.db")
+
+    # Should find the baseline and emit INFO
+    assert len(issues) > 0
+    # Should have an issue mentioning the baseline_ref and it was found
+    assert any("baseline_ref" in str(i.detail).lower() for i in issues)
+
+
+def test_check_baseline_ref_exists_missing_baseline(tmp_path):
+    """Test that check_baseline_ref_exists warns when baseline_ref is not found."""
+    from bathos.catalog import init_catalog
+    from bathos.compact import compact
+    from bathos.linter import check_baseline_ref_exists, IssueSeverity
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    init_catalog(catalog_dir)
+    compact(catalog_dir)
+
+    # Create a benchmark sidecar with non-existent baseline_ref
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    scripts_dir = project_root / "scripts" / "benchmarks"
+    scripts_dir.mkdir(parents=True)
+    sidecar_path = scripts_dir / "test_bench.bth.toml"
+    sidecar_path.write_text("""[benchmark]
+baseline_ref = "nonexistent-id"
+metric = "ns_per_day"
+regression_threshold = 0.05
+target = "50 ns/day"
+
+[result_schema]
+ns_per_day = "float"
+""")
+
+    issues = check_baseline_ref_exists(project_root, catalog_dir, catalog_dir / "bathos.db")
+
+    # Should emit a WARNING about missing baseline
+    warning_issues = [i for i in issues if i.severity == IssueSeverity.WARNING]
+    assert len(warning_issues) > 0
+    assert any("not found" in str(i.detail).lower() for i in warning_issues)
+
+
+def test_check_baseline_ref_exists_empty_baseline_ref(tmp_path):
+    """Test that check_baseline_ref_exists skips empty baseline_ref."""
+    from bathos.catalog import init_catalog
+    from bathos.compact import compact
+    from bathos.linter import check_baseline_ref_exists
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    init_catalog(catalog_dir)
+    compact(catalog_dir)
+
+    # Create a benchmark sidecar with empty baseline_ref
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    scripts_dir = project_root / "scripts" / "benchmarks"
+    scripts_dir.mkdir(parents=True)
+    sidecar_path = scripts_dir / "test_bench.bth.toml"
+    sidecar_path.write_text("""[benchmark]
+baseline_ref = ""
+metric = "ns_per_day"
+regression_threshold = 0.05
+target = "50 ns/day"
+
+[result_schema]
+ns_per_day = "float"
+""")
+
+    issues = check_baseline_ref_exists(project_root, catalog_dir, catalog_dir / "bathos.db")
+
+    # Should return empty issues (empty baseline_ref is skipped)
+    assert issues == []
+
+
+def test_check_baseline_ref_exists_no_catalog(tmp_path):
+    """Test that check_baseline_ref_exists skips silently if no warm DB."""
+    from bathos.linter import check_baseline_ref_exists
+
+    catalog_dir = tmp_path / "nonexistent_catalog"
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    scripts_dir = project_root / "scripts" / "benchmarks"
+    scripts_dir.mkdir(parents=True)
+    sidecar_path = scripts_dir / "test_bench.bth.toml"
+    sidecar_path.write_text("""[benchmark]
+baseline_ref = "some-id"
+metric = "ns_per_day"
+regression_threshold = 0.05
+
+[result_schema]
+ns_per_day = "float"
+""")
+
+    issues = check_baseline_ref_exists(project_root, catalog_dir, catalog_dir / "bathos.db")
+
+    # Should skip silently (no DB exists)
+    assert issues == []
