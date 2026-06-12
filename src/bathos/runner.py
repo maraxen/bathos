@@ -287,6 +287,7 @@ def run_script(
         sidecar_mode=sidecar_mode_str,
         campaign_id=campaign_id or "",
         script_sha256=script_sha256_val,
+        stage_name=sidecar.stage_name if sidecar else None,
     )
     run_uuid_var.set(run.id)
     event("run.start", run_uuid=run.id, script_path=str(script_path) if script_path else "", script_sha256=script_sha256_val, argv=argv, cwd=str(cwd), campaign_id=campaign_id or "", agent_mode=resolved_mode)

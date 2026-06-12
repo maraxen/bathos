@@ -222,3 +222,119 @@ def test_evaluate_outcome_raises_sidecar_error_on_bad_sql(tmp_path):
     # Should raise SidecarError because SQL is invalid
     with pytest.raises(SidecarError):
         evaluate_outcome(s, {"x": 1.0})
+
+
+def test_parse_experiment_sidecar_with_stage_name(tmp_path):
+    """Parse stage_name from [experiment] block."""
+    from bathos.sidecar import parse_sidecar
+    path = _write_toml(tmp_path, """
+        [experiment]
+        hypothesis = "Test hypothesis"
+        stage_name = "validation"
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good value"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Catch-all"
+        is_residual = true
+        [result_schema]
+        value = "float"
+    """)
+    sidecar = parse_sidecar(path)
+    assert sidecar.stage_name == "validation"
+
+
+def test_parse_experiment_sidecar_stage_name_default(tmp_path):
+    """When stage_name absent, default to 'exploration'."""
+    from bathos.sidecar import parse_sidecar
+    path = _write_toml(tmp_path, """
+        [experiment]
+        hypothesis = "Test hypothesis"
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        value = "float"
+    """)
+    sidecar = parse_sidecar(path)
+    assert sidecar.stage_name == "exploration"
+
+
+def test_parse_experiment_sidecar_stage_name_invalid_coerces_to_exploration(tmp_path):
+    """Invalid stage_name coerces to 'exploration' with warning."""
+    from bathos.sidecar import parse_sidecar
+
+    path = _write_toml(tmp_path, """
+        [experiment]
+        hypothesis = "Test hypothesis"
+        stage_name = "invalid-stage-with-numbers-123"
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        value = "float"
+    """)
+
+    sidecar = parse_sidecar(path)
+    # Should coerce to exploration
+    assert sidecar.stage_name == "exploration"
+
+
+def test_parse_experiment_sidecar_with_novel(tmp_path):
+    """Parse novel field from [experiment] block."""
+    from bathos.sidecar import parse_sidecar
+    path = _write_toml(tmp_path, """
+        [experiment]
+        hypothesis = "Test hypothesis"
+        novel = true
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        value = "float"
+    """)
+    sidecar = parse_sidecar(path)
+    assert sidecar.novel is True
+
+
+def test_parse_experiment_sidecar_novel_default(tmp_path):
+    """When novel absent, default to False."""
+    from bathos.sidecar import parse_sidecar
+    path = _write_toml(tmp_path, """
+        [experiment]
+        hypothesis = "Test hypothesis"
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        value = "float"
+    """)
+    sidecar = parse_sidecar(path)
+    assert sidecar.novel is False

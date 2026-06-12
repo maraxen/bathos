@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import logging
+import re
 import tomllib
 from dataclasses import dataclass, field
 from enum import Enum
@@ -9,6 +11,8 @@ from pathlib import Path
 import duckdb
 
 from bathos.telemetry import event
+
+logger = logging.getLogger(__name__)
 
 
 class SidecarError(Exception):
@@ -39,6 +43,8 @@ class Sidecar:
     outcomes: dict[str, OutcomeSpec] = field(default_factory=dict)
     # experiment fields
     hypothesis: str = ""
+    stage_name: str = "exploration"
+    novel: bool = False
     # benchmark fields
     baseline_ref: str = ""
     metric: str = ""
@@ -64,6 +70,17 @@ class Sidecar:
 
 ENFORCED_DIRS = {"experiments", "benchmarks", "validation"}
 
+# Canonical set: the advisory vocabulary for stage_name values.
+# These are best-practice values discovered from real stage_name usage.
+# Not enforced in the schema — only advisory in CI lint.
+CANONICAL_STAGES = {
+    "exploration",
+    "calibration",
+    "validation",
+    "ablation",
+    "production",
+}
+
 
 def parse_sidecar(path: Path) -> Sidecar:
     try:
@@ -77,9 +94,24 @@ def parse_sidecar(path: Path) -> Sidecar:
         kind = SidecarKind.EXPERIMENT
         section = data["experiment"]
         outcomes = _parse_outcomes(data)
+
+        # Parse stage_name with validation and coercion
+        stage_name = section.get("stage_name", "exploration")
+        if stage_name not in CANONICAL_STAGES:
+            logger.warning(
+                f"Invalid stage_name '{stage_name}' in {path}; must be one of {CANONICAL_STAGES}. "
+                "Coercing to 'exploration'."
+            )
+            stage_name = "exploration"
+
+        # Parse novel field
+        novel = bool(section.get("novel", False))
+
         sidecar = Sidecar(
             kind=kind,
             hypothesis=section.get("hypothesis", ""),
+            stage_name=stage_name,
+            novel=novel,
             outcomes=outcomes,
             result_schema=data.get("result_schema", {}),
             agent_mode=section.get("agent_mode", ""),
