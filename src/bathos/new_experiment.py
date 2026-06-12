@@ -29,10 +29,16 @@ def main(
     }}
     print(json.dumps(results))
 
-    # --- Output artifacts (optional) ---
-    # To register output files with the catalog, pass --out to `bth run`:
-    #   bth run scripts/experiments/{name}.py --out outputs/my_run/results.json
-    # bathos records path + size + sha256 at compact time. Query with:
+    # --- Output artifacts ---
+    # bathos sets BTH_OUTPUT_DIR to a per-run directory (outputs/<run_id_short>/)
+    # before launching this script. Any files written there are auto-registered.
+    #
+    #   import os; out_dir = os.environ["BTH_OUTPUT_DIR"]
+    #   Path(out_dir, "results.json").write_text(json.dumps(results))
+    #
+    # For files outside BTH_OUTPUT_DIR, pass --out to `bth run` explicitly:
+    #   bth run scripts/experiments/{name}.py --out path/to/file.json
+    # Query registered outputs with:
     #   bth outputs list <run_id>
     #   bth outputs summary
 

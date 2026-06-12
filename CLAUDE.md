@@ -10,17 +10,18 @@ bathos is a standalone experiment tracking CLI for a single researcher across 10
 
 ---
 
-## Current Status (as of 2026-06-02)
+## Current Status (as of 2026-06-12)
 
-**Latest: v0.9 (bth outputs Phase 1) — 570 tests passing (4 skipped).**
+**Latest: v0.10.1 — 677 tests passing (4 skipped).**
 
 Full version history is in [`CHANGELOG.md`](CHANGELOG.md). Summary of current version:
 
 - POPPER e-value sequential campaigns (`mode="sequential"`, `[popper]` sidecar block, likelihood-ratio e-values, threshold lock, sprint-audit signal 8, Tier-2 lint advisory)
 - Schema v6; campaign_runs gains `evalue` + `seq_position`; campaigns gains `stopping_threshold`
 - `bth outputs list / summary` — per-file output catalog with `--live` re-stat; fix `output_metadata` key bug in query.py; MCP mirrors
+- v0.10.1: fix `bth compact` BinderException on pre-existing catalogs (idempotent `ALTER TABLE runs ADD COLUMN IF NOT EXISTS` for 5 post-initial-schema columns)
 
-**Open backlog:** #137 (global instruction portability — deferred to praxia). Debt #71 (output_metadata refresh-on-compact + changelog).
+**Open backlog:** #137 (global instruction portability — deferred to praxia). Debt #71 (output_metadata refresh-on-compact). #142 Phase 2 (BTH_OUTPUT_DIR output convention).
 
 ---
 
@@ -182,12 +183,13 @@ src/bathos/
 
 ## Open Backlog (praxia DB)
 
-| ID | Title | Priority | Depends on |
-|---|---|---|---|
-| 136 | `bth-migrate` praxia workflow — agentic classification + git mv plan | P2 | 135 |
-| 137 | Global instruction portability (separate design session needed) | P2 | — |
-| 142 | Results management — output convention, file-count utilities, direct management interface design | P2 | 139 |
-| 143 | Threshold epistemic hygiene — sidecar lint + skill instructions to flag unjustified cutoffs | P2 | 134 |
+| ID | Title | Priority | Depends on | Status |
+|---|---|---|---|---|
+| 136 | `bth-migrate` praxia workflow — agentic classification + git mv plan | P2 | — | Bathos code complete (classifier.py, `bth classify`, 26 tests); praxia `bth-migrate.yaml` workflow DAG pending in praxia repo |
+| 137 | Global instruction portability (separate design session needed) | P2 | — | Deferred |
+| 142 | Results management — output convention, file-count utilities, direct management interface design | P2 | — | Phase 1 shipped (v0.9: list/summary/MCP). Phase 2 (BTH_OUTPUT_DIR) in progress. Phase 3 (prune/link) blocked on #792 (POPPER) |
+| ~~143~~ | ~~Threshold epistemic hygiene~~ | ~~P2~~ | ~~134~~ | **DONE** — shipped v0.6.1 (ticket #760): `check_threshold_basis()`, `OutcomeSpec.source`, `Sidecar.regression_threshold_basis`, 14 tests |
+| Debt #71 | output_metadata refresh-on-compact | P2 | — | Open — metadata is point-in-time snapshot; `--live` is escape hatch only |
 
 ---
 

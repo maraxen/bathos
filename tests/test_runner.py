@@ -579,3 +579,97 @@ def test_manifest_sha256_populated(tmp_catalog: Path, tmp_path: Path):
     # After normal run, manifest_sha256 should be non-empty
     assert runs[0].manifest_sha256 != ""
     assert runs[0].manifest_path != ""
+
+
+def test_bth_output_dir_injected(tmp_catalog: Path, tmp_path: Path):
+    """BTH_OUTPUT_DIR env var is set and points to a writable per-run dir."""
+    import sys, os
+    from bathos.catalog import init_catalog, read_runs
+    from bathos.runner import run_script
+
+    init_catalog(tmp_catalog)
+    script = tmp_path / "check_env.py"
+    script.write_text(
+        "import os, json, pathlib\n"
+        "d = os.environ['BTH_OUTPUT_DIR']\n"
+        "assert pathlib.Path(d).is_dir(), f'BTH_OUTPUT_DIR not a dir: {d!r}'\n"
+        "print(json.dumps({'out_dir': d}))\n"
+    )
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="p",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 0
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert runs[0].id[:8] in runs[0].output_paths[0] if runs[0].output_paths else True
+
+
+def test_bth_output_dir_files_auto_registered(tmp_catalog: Path, tmp_path: Path):
+    """Files written to BTH_OUTPUT_DIR are auto-registered in output_paths."""
+    import sys
+    from bathos.catalog import init_catalog, read_runs
+    from bathos.runner import run_script
+
+    init_catalog(tmp_catalog)
+    script = tmp_path / "write_output.py"
+    script.write_text(
+        "import os, pathlib, json\n"
+        "out_dir = pathlib.Path(os.environ['BTH_OUTPUT_DIR'])\n"
+        "(out_dir / 'result.json').write_text(json.dumps({'x': 42}))\n"
+        "(out_dir / 'model.pt').write_bytes(b'fake')\n"
+        "print(json.dumps({}))\n"
+    )
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="p",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 0
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    registered = runs[0].output_paths
+    assert len(registered) == 2
+    names = {p.split("/")[-1] for p in registered}
+    assert names == {"result.json", "model.pt"}
+
+
+def test_explicit_out_and_output_dir_merged(tmp_catalog: Path, tmp_path: Path):
+    """Explicit --out paths and BTH_OUTPUT_DIR files are merged, no duplicates."""
+    import sys
+    from bathos.catalog import init_catalog, read_runs
+    from bathos.runner import run_script
+
+    explicit_file = tmp_path / "explicit.json"
+    explicit_file.write_text("{}")
+
+    init_catalog(tmp_catalog)
+    script = tmp_path / "write_both.py"
+    script.write_text(
+        "import os, pathlib, json\n"
+        "out_dir = pathlib.Path(os.environ['BTH_OUTPUT_DIR'])\n"
+        "(out_dir / 'auto.txt').write_text('auto')\n"
+        "print(json.dumps({}))\n"
+    )
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="p",
+        catalog_dir=tmp_catalog,
+        output_paths=[str(explicit_file)],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 0
+    runs = read_runs(tmp_catalog)
+    registered = runs[0].output_paths
+    names = {p.split("/")[-1] for p in registered}
+    assert "explicit.json" in names
+    assert "auto.txt" in names
+    assert len(registered) == len(set(registered))  # no duplicates

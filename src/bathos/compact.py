@@ -498,6 +498,39 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
 
         if existing:
             skipped += 1
+
+            # Refresh output_metadata on every compact so the catalog reflects
+            # the current filesystem state (Debt #71). Re-stat is cheap; we only
+            # re-hash files whose mtime changed since the stored snapshot.
+            if run.output_paths:
+                stored_row = con.execute(
+                    "SELECT output_metadata FROM runs WHERE id = ?", [run.id]
+                ).fetchone()
+                stored_json = stored_row[0] if stored_row else "[]"
+                try:
+                    stored_meta = {m["path"]: m for m in json.loads(stored_json or "[]")}
+                except (json.JSONDecodeError, TypeError, KeyError):
+                    stored_meta = {}
+
+                refreshed = []
+                for output_path in run.output_paths:
+                    prev = stored_meta.get(output_path, {})
+                    fresh = _collect_output_metadata(output_path)
+                    # Re-use stored sha256 if mtime unchanged (skip expensive rehash)
+                    if (
+                        fresh.get("status") == "present"
+                        and prev.get("status") == "present"
+                        and fresh.get("mtime_unix") == prev.get("mtime_unix")
+                        and prev.get("sha256") is not None
+                    ):
+                        fresh["sha256"] = prev["sha256"]
+                    refreshed.append({"path": output_path, **fresh})
+
+                con.execute(
+                    "UPDATE runs SET output_metadata = ? WHERE id = ?",
+                    [json.dumps(refreshed), run.id],
+                )
+
             if run.id in postmortem_map:
                 pm, rel_path = postmortem_map[run.id]
                 postmortem_verdict_override = pm.verdict_override

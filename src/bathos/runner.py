@@ -328,9 +328,12 @@ def run_script(
     results_temp_dir = Path(tempfile.gettempdir())
     results_temp_path = results_temp_dir / f"{run.id}.bth-results.json"
 
-    # Set up environment with results path
+    # Set up environment with results path and per-run output directory
     env = os.environ.copy()
     env["BTH_RESULTS_PATH"] = str(results_temp_path)
+    bth_output_dir = cwd / "outputs" / run.id[:8]
+    bth_output_dir.mkdir(parents=True, exist_ok=True)
+    env["BTH_OUTPUT_DIR"] = str(bth_output_dir)
 
     start = time.monotonic()
     exit_code = 1
@@ -405,6 +408,14 @@ def run_script(
             event("run.error", phase="evaluate", exc_type=type(e).__name__, exc_msg=str(e))
             raise
 
+    # Auto-register any files written to BTH_OUTPUT_DIR that weren't in --out
+    registered_paths = set(output_paths)
+    discovered = sorted(str(p) for p in bth_output_dir.rglob("*") if p.is_file())
+    new_paths = [p for p in discovered if p not in registered_paths]
+    if new_paths:
+        output_paths = list(output_paths) + new_paths
+        event("run.output_dir_discovered", count=len(new_paths), bth_output_dir=str(bth_output_dir))
+
     # Populate outcome_is_residual flag
     outcome_is_residual = False
     if sidecar and outcome and outcome not in ("unknown", "", "error"):
@@ -434,6 +445,7 @@ def run_script(
         outcome_error_reason=outcome_error_reason,
         outcome_is_residual=outcome_is_residual,
         adversarial_check_status=adversarial_check_status,
+        output_paths=output_paths,
     )
 
     # Record parquet write with telemetry
