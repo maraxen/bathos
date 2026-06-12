@@ -696,6 +696,14 @@ value = "float"
     sidecar_hash = table.column("sidecar_sha256")[0].as_py()
     assert len(sidecar_hash) == 64, f"SHA256 should be 64 hex chars, got {len(sidecar_hash)}"
 
+    # Fix #1: Verify bth_submit_version value equals importlib.metadata.version('bathos')
+    from importlib.metadata import version
+    assert table.column("bth_submit_version")[0].as_py() == version("bathos")
+
+    # Fix #3: Verify no .tmp file left behind after atomic rename
+    tmp_files = list(submit_dir.glob("*.tmp"))
+    assert len(tmp_files) == 0, f"Expected no .tmp files, found {tmp_files}"
+
 
 def test_submit_ac9_provenance_defaults_stage_name_to_exploration(tmp_path: Path, monkeypatch):
     """AC-9: submit-provenance defaults stage_name to 'exploration' if not in sidecar."""

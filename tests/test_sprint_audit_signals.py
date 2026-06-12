@@ -1770,3 +1770,22 @@ class TestSubmitBypassRateSignal:
         assert result.value == pytest.approx(1.0)  # All bypassed
         assert result.level == "WARNING"
         assert "100.00%" in result.message or "2/2" in result.message
+
+    def test_submit_bypass_rate_no_warm_db(self, monkeypatch_registry, tmp_path):
+        """When warm DB doesn't exist, signal returns INFO with value=None (coverage for line 238-244)."""
+        from bathos.config import register_project
+        from bathos.sprint_audit import signal_submit_bypass_rate
+
+        catalog_dir = tmp_path / "test_catalog"
+        catalog_dir.mkdir()
+        init_catalog(catalog_dir)
+
+        # Deliberately use a non-existent db_path
+        db_path = catalog_dir / "nonexistent.db"
+
+        result = signal_submit_bypass_rate("test_project", db_path, catalog_dir)
+
+        assert result.signal == "submit_bypass_rate"
+        assert result.value is None
+        assert result.level == "INFO"
+        assert "warm DB not available" in result.message
