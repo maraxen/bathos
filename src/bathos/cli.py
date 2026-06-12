@@ -1353,6 +1353,30 @@ def new_experiment_cmd(
     typer.echo(f"Created: {result.sidecar}")
 
 
+@app.command("validate-sidecar")
+def validate_sidecar_cmd(
+    path: Path = typer.Argument(..., help="Path to .bth.toml sidecar file"),
+):
+    """Validate a sidecar TOML file for structural integrity."""
+    from bathos.sidecar import parse_sidecar, SidecarError
+    from bathos.validate import validate_sidecar
+
+    try:
+        sidecar = parse_sidecar(path)
+    except SidecarError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+
+    result = validate_sidecar(sidecar, sidecar_path=path)
+
+    if result.errors:
+        for error in result.errors:
+            typer.echo(f"{error.field}: {error.message}")
+        raise typer.Exit(1)
+
+    typer.echo(f"✓ {path} is valid")
+
+
 @app.command("export")
 def export_cmd(
     tool: str = typer.Option("claude", "--tool", "-t", help="Target tool: claude or gemini"),

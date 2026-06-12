@@ -1084,6 +1084,40 @@ async def postmortem_get(
     return {"error": f"No postmortem found for run_id '{run_id}'"}
 
 
+@app.tool()
+@traced_tool
+async def validate_sidecar(
+    path: str,
+) -> dict:
+    """Validate a sidecar TOML file for structural integrity.
+
+    Args:
+        path: Path to .bth.toml sidecar file
+
+    Returns:
+        {'ok': True} on success or {'ok': False, 'errors': [...]} on failure.
+    """
+    from bathos.sidecar import parse_sidecar, SidecarError
+    from bathos.validate import validate_sidecar as validate_sidecar_impl
+
+    sidecar_path = Path(path)
+    if not sidecar_path.exists():
+        return {"ok": False, "errors": [f"File not found: {path}"]}
+
+    try:
+        sidecar = parse_sidecar(sidecar_path)
+    except SidecarError as e:
+        return {"ok": False, "errors": [str(e)]}
+
+    result = validate_sidecar_impl(sidecar, sidecar_path=sidecar_path)
+
+    if result.errors:
+        error_msgs = [f"{e.field}: {e.message}" for e in result.errors]
+        return {"ok": False, "errors": error_msgs}
+
+    return {"ok": True, "path": path}
+
+
 def list_outputs_tool(
     run_id: str,
     workspace_root: str | None = None,
