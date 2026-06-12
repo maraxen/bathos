@@ -50,17 +50,42 @@ if __name__ == "__main__":
 _SIDECAR_TEMPLATE = """\
 [experiment]
 hypothesis = "TODO: state your hypothesis"
+stage_name = "exploration"
+novel = false
 
 [outcomes.pass]
-condition = "TODO: DuckDB SQL fragment, e.g. metric < 5"
-decision = "TODO: what to do if this outcome is reached"
+condition = "metric < 5.0"
+decision = "TODO: next step if pass"
+reasoning = "metric below threshold indicates convergence"
+is_residual = false
+adversarial_check = "metric >= 5.0"
+
+[outcomes.marginal]
+condition = "metric >= 5.0 AND metric < 10.0"
+decision = "TODO: next step if marginal"
+reasoning = "metric in marginal range — tune parameters"
+is_residual = false
 
 [outcomes.fail]
-condition = "TODO: DuckDB SQL fragment, e.g. metric >= 5"
-decision = "TODO: what to do if this outcome is reached"
+condition = "metric >= 10.0"
+decision = "TODO: next step if fail"
+reasoning = "metric above threshold indicates failure"
+is_residual = true
 
 [result_schema]
-# metric_name = "float"  # or "int", "str", "bool"
+metric = "float"
+
+# Uncomment and fill in if this experiment reproduces a prior result:
+# [reproduction]
+# reproduces_paper = ""   # DOI or citation
+# reproduces_run = ""     # UUID of the run being reproduced
+# tolerance_pct = 5.0     # acceptable deviation (%)
+# requires_pass_stem = "" # script stem that must have outcome='pass' first
+
+# Uncomment if using control arms (outcome labels prefixed ctrl_ declared in [outcomes]):
+# [controls]
+# positive_outcome = ["ctrl_pass"]
+# negative_outcome = ["ctrl_fail"]
 """
 
 
