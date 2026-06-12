@@ -166,21 +166,21 @@ def validate_controls_block(sidecar: Sidecar, sidecar_path: Path | None = None) 
     for label in controls.positive_outcome:
         if label not in outcome_keys:
             errors.append(ValidationError(
-                f"controls.positive_outcome",
+                "CONTROLS_LABEL_NOT_FOUND",
                 f"Label {label!r} not declared in [outcomes]",
             ))
             if sidecar_path:
-                event("sidecar.validate_error", path=str(sidecar_path), field="controls.positive_outcome", reason=f"Label {label!r} not found in outcomes")
+                event("sidecar.validate_error", path=str(sidecar_path), field="CONTROLS_LABEL_NOT_FOUND", reason=f"Label {label!r} not found in outcomes")
 
     # Check negative_outcome labels exist in outcomes
     for label in controls.negative_outcome:
         if label not in outcome_keys:
             errors.append(ValidationError(
-                f"controls.negative_outcome",
+                "CONTROLS_LABEL_NOT_FOUND",
                 f"Label {label!r} not declared in [outcomes]",
             ))
             if sidecar_path:
-                event("sidecar.validate_error", path=str(sidecar_path), field="controls.negative_outcome", reason=f"Label {label!r} not found in outcomes")
+                event("sidecar.validate_error", path=str(sidecar_path), field="CONTROLS_LABEL_NOT_FOUND", reason=f"Label {label!r} not found in outcomes")
 
     return errors
 

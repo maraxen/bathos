@@ -603,6 +603,7 @@ def test_controls_block_invalid_positive_outcome_label(tmp_path):
     result = validate_sidecar(sidecar)
     assert result.ok is False
     assert any("nonexistent_label" in e.message for e in result.errors)
+    assert any(e.field == "CONTROLS_LABEL_NOT_FOUND" for e in result.errors)
 
 
 def test_controls_block_invalid_negative_outcome_label(tmp_path):
@@ -634,6 +635,7 @@ def test_controls_block_invalid_negative_outcome_label(tmp_path):
     result = validate_sidecar(sidecar)
     assert result.ok is False
     assert any("bad_label" in e.message for e in result.errors)
+    assert any(e.field == "CONTROLS_LABEL_NOT_FOUND" for e in result.errors)
 
 
 def test_controls_block_multiple_invalid_labels(tmp_path):
@@ -668,3 +670,5 @@ def test_controls_block_multiple_invalid_labels(tmp_path):
     # Should have 2 errors for nonexistent labels
     nonexistent_errors = [e for e in result.errors if "nonexistent" in e.message]
     assert len(nonexistent_errors) == 2
+    # All errors should have field='CONTROLS_LABEL_NOT_FOUND'
+    assert all(e.field == "CONTROLS_LABEL_NOT_FOUND" for e in nonexistent_errors)
