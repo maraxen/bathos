@@ -4,12 +4,30 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import duckdb
 
 from bathos.schema import CURRENT_SCHEMA_VERSION
+
+
+@dataclass
+class SignalResult:
+    """Result of a single sprint-audit signal computation.
+
+    Attributes:
+        signal: Signal name (e.g., 'control_arm_rate').
+        value: Numeric value (float or None if unavailable).
+        level: Severity level ('INFO', 'OK', or 'WARNING').
+        message: Human-readable message describing the result.
+    """
+
+    signal: str
+    value: float | None
+    level: str
+    message: str
 
 
 def _compute_outcome_entropy(outcomes: list[str]) -> float:
@@ -91,6 +109,84 @@ def _load_sidecar_schema_keys(sidecar_path: str) -> set[str] | None:
         return None
     except Exception:
         return None
+
+
+def signal_control_arm_rate(project_slug: str, db_path: Path) -> SignalResult:
+    """Signal 9: control_arm_rate — fraction of runs with ctrl_* outcome labels.
+
+    Args:
+        project_slug: Project identifier.
+        db_path: Path to warm DB (bathos.db).
+
+    Returns:
+        SignalResult with value (control_arm_rate as float or None),
+        level ('INFO', 'OK', or 'WARNING'), and message.
+
+    Semantics:
+        - If warm DB does not exist: value=None, level='INFO'
+        - If no runs exist: value=0.0, level='INFO'
+        - If control_arm_rate > 0.0: level='OK'
+        - If control_arm_rate == 0.0 AND validation/production runs exist: level='WARNING'
+          (no control arm found in validation/production campaigns)
+    """
+    if not db_path.exists():
+        return SignalResult(
+            signal="control_arm_rate",
+            value=None,
+            level="INFO",
+            message="warm DB not available",
+        )
+
+    try:
+        with duckdb.connect(str(db_path), read_only=True) as conn:
+            # Count total runs
+            total = conn.execute(
+                "SELECT COUNT(*) FROM runs WHERE project_slug = ?", [project_slug]
+            ).fetchone()[0]
+
+            if total == 0:
+                return SignalResult(
+                    signal="control_arm_rate",
+                    value=0.0,
+                    level="INFO",
+                    message="no runs in project",
+                )
+
+            # Count control arm runs (outcome LIKE 'ctrl_%')
+            ctrl_count = conn.execute(
+                "SELECT COUNT(*) FROM runs WHERE project_slug = ? AND outcome LIKE 'ctrl_%'",
+                [project_slug],
+            ).fetchone()[0]
+
+            rate = ctrl_count / total
+
+            # Check if any validation/production campaign runs exist
+            has_val_prod = conn.execute(
+                "SELECT 1 FROM runs WHERE project_slug = ? AND stage_name IN ('validation','production') LIMIT 1",
+                [project_slug],
+            ).fetchone()
+
+            level = "OK"
+            message = f"control_arm_rate={rate:.2%} ({ctrl_count}/{total} runs with ctrl_* outcomes)"
+
+            if rate == 0.0 and has_val_prod:
+                level = "WARNING"
+                message += " — no control arm runs found in validation/production campaigns"
+
+            return SignalResult(
+                signal="control_arm_rate",
+                value=rate,
+                level=level,
+                message=message,
+            )
+    except Exception as e:
+        return SignalResult(
+            signal="control_arm_rate",
+            value=None,
+            level="INFO",
+            message=f"error computing control_arm_rate: {e}",
+        )
+
 
 def sprint_audit(hours: int = 24) -> dict:
     """Cross-project audit of recent runs and campaigns.
@@ -320,14 +416,9 @@ def sprint_audit(hours: int = 24) -> dict:
             signals["premature_stopping_rate"] = n_premature / max(n_sequential_concluded, 1) if n_sequential_concluded > 0 else 0.0
 
             # Signal 9: control_arm_rate
-            # Fraction of runs with outcome labels beginning with 'ctrl_' (control arm runs).
-            # Domain rationale: AC-5 — experimental controls discipline, tracking control arm
-            # coverage for validation/production stages.
-            if total_all > 0:
-                ctrl_count = sum(1 for r in all_runs_flat if r["outcome"] and str(r["outcome"]).startswith("ctrl_"))
-                signals["control_arm_rate"] = ctrl_count / total_all
-            else:
-                signals["control_arm_rate"] = 0.0
+            # Compute via standalone function for atomic SignalResult + testability.
+            signal_result = signal_control_arm_rate(project["slug"], db_path)
+            signals["control_arm_rate"] = signal_result.value if signal_result.value is not None else 0.0
 
             # Check signal thresholds and add anomalies.
             # All thresholds are CALIBRATION TARGETS (v0.6), not hard gates.
@@ -383,20 +474,10 @@ def sprint_audit(hours: int = 24) -> dict:
                     f"{n_premature} sequential campaign(s) concluded before reaching stopping_threshold "
                     f"(sequential test validity compromised)"
                 )
-            # control_arm_rate == 0.0 with validation/production runs: AC-5
-            #   no control arm runs found while validation/production campaigns are running
-            #   flags potential missing control discipline in mature stages
-            if signals["control_arm_rate"] == 0.0 and total_all > 0:
-                # Check if any validation/production stage runs exist
-                val_prod_count = sum(
-                    1 for r in all_runs_flat
-                    if r.get("stage_name") and str(r.get("stage_name", "")).lower() in ("validation", "production")
-                )
-                if val_prod_count > 0:
-                    anomalies.append(
-                        f"Project: control_arm_rate 0.0% with {val_prod_count} validation/production stage run(s) — "
-                        f"no control arm runs found"
-                    )
+            # control_arm_rate: AC-5 experimental controls discipline
+            #   WARNING when rate==0.0 and validation/production campaigns exist
+            if signal_result.level == "WARNING":
+                anomalies.append(signal_result.message)
 
             # Legacy anomalies per campaign (kept for backward compatibility)
             for campaign_id, runs in by_campaign.items():

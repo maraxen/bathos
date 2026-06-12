@@ -622,8 +622,8 @@ class TestPostHocBiasFlagAndIntegration:
         signals = result["audit_results"]["test_project"]["signals"]
         assert signals["post_hoc_bias_flag"] is False
 
-    def test_signals_dict_contains_all_seven(self, monkeypatch_registry, tmp_path):
-        """Test that all 7 signals are present in output."""
+    def test_signals_dict_contains_all_nine(self, monkeypatch_registry, tmp_path):
+        """Test that all 9 signals are present in output."""
         from bathos.config import register_project
         from bathos.sprint_audit import sprint_audit
 
@@ -659,7 +659,7 @@ class TestPostHocBiasFlagAndIntegration:
         assert "test_project" in result["audit_results"]
         audit_data = result["audit_results"]["test_project"]
 
-        # All 7 signals must be present
+        # All 9 signals must be present
         expected_signals = {
             "error_rate",
             "bypass_explicit",
@@ -668,6 +668,8 @@ class TestPostHocBiasFlagAndIntegration:
             "unfired_branches",
             "schema_overflow_rate",
             "post_hoc_bias_flag",
+            "premature_stopping_rate",
+            "control_arm_rate",
         }
         signals = audit_data["signals"]
         for signal_name in expected_signals:
@@ -1413,3 +1415,106 @@ class TestControlArmRate:
         assert signals["control_arm_rate"] == pytest.approx(0.0)
         # Should have a warning about control arm rate
         assert any("control_arm_rate" in str(a) for a in anomalies)
+
+    def test_signal_control_arm_rate_no_db(self):
+        """Test signal_control_arm_rate returns INFO when warm DB does not exist."""
+        from bathos.sprint_audit import signal_control_arm_rate
+
+        result = signal_control_arm_rate("any_project", Path("/nonexistent/bathos.db"))
+        assert result.signal == "control_arm_rate"
+        assert result.value is None
+        assert result.level == "INFO"
+        assert "warm DB not available" in result.message
+
+    def test_signal_control_arm_rate_no_runs(self, tmp_path):
+        """Test signal_control_arm_rate returns INFO when project has no runs."""
+        from bathos.sprint_audit import signal_control_arm_rate
+
+        catalog_dir = tmp_path / "test_catalog"
+        catalog_dir.mkdir()
+        init_catalog(catalog_dir)
+        # Compact to create warm DB (no runs written, so table is empty)
+        compact(catalog_dir)
+
+        db_path = catalog_dir / "bathos.db"
+        result = signal_control_arm_rate("test_project", db_path)
+        assert result.signal == "control_arm_rate"
+        assert result.value == 0.0
+        assert result.level == "INFO"
+        assert "no runs in project" in result.message
+
+    def test_signal_control_arm_rate_ok_with_controls(self, tmp_path):
+        """Test signal_control_arm_rate returns OK when control runs exist."""
+        from bathos.sprint_audit import signal_control_arm_rate
+
+        catalog_dir = tmp_path / "test_catalog"
+        catalog_dir.mkdir()
+        init_catalog(catalog_dir)
+
+        base_time = datetime.now(UTC)
+        runs = [
+            Run(
+                project_slug="test_project",
+                command="python test.py",
+                argv=["python", "test.py"],
+                git_hash="abc123",
+                git_branch="main",
+                git_dirty=False,
+                timestamp=base_time + timedelta(seconds=i),
+                status="completed",
+                exit_code=0,
+                outcome="ctrl_pass" if i < 2 else "pass",
+                sidecar_mode="normal",
+                outcome_is_residual=False,
+            )
+            for i in range(5)
+        ]
+
+        for r in runs:
+            write_run(r, catalog_dir)
+        compact(catalog_dir)
+
+        db_path = catalog_dir / "bathos.db"
+        result = signal_control_arm_rate("test_project", db_path)
+        assert result.signal == "control_arm_rate"
+        assert result.value == pytest.approx(0.4)
+        assert result.level == "OK"
+
+    def test_signal_control_arm_rate_warning_zero_with_validation(self, tmp_path):
+        """Test signal_control_arm_rate returns WARNING when rate==0.0 with validation runs."""
+        from bathos.sprint_audit import signal_control_arm_rate
+
+        catalog_dir = tmp_path / "test_catalog"
+        catalog_dir.mkdir()
+        init_catalog(catalog_dir)
+
+        base_time = datetime.now(UTC)
+        runs = [
+            Run(
+                project_slug="test_project",
+                command="python test.py",
+                argv=["python", "test.py"],
+                git_hash="abc123",
+                git_branch="main",
+                git_dirty=False,
+                timestamp=base_time + timedelta(seconds=i),
+                status="completed",
+                exit_code=0,
+                outcome="pass",
+                sidecar_mode="normal",
+                outcome_is_residual=False,
+                stage_name="validation",  # AC-0: stage_name populated
+            )
+            for i in range(3)
+        ]
+
+        for r in runs:
+            write_run(r, catalog_dir)
+        compact(catalog_dir)
+
+        db_path = catalog_dir / "bathos.db"
+        result = signal_control_arm_rate("test_project", db_path)
+        assert result.signal == "control_arm_rate"
+        assert result.value == pytest.approx(0.0)
+        assert result.level == "WARNING"
+        assert "no control arm runs found in validation/production campaigns" in result.message
