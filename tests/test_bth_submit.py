@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pyarrow.parquet as pq
 import pytest
 from typer.testing import CliRunner
 
@@ -611,3 +612,143 @@ value = "float"
     assert result.exit_code == 0, result.output
     assert "WARNING" in result.output or "advisory" in result.output
     assert "Submitted 12345" in result.output
+
+
+# ---------------------------------------------------------------------------
+# AC-9 — Submit-provenance write tests
+# ---------------------------------------------------------------------------
+
+
+def test_submit_ac9_writes_submit_provenance_record(tmp_path: Path, monkeypatch):
+    """AC-9 Part 1: bth submit writes submit-provenance Parquet record after successful submit."""
+    monkeypatch.chdir(tmp_path)
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
+
+    # Write project config
+    _write_project_toml(tmp_path)
+
+    # Create scripts/experiments directory with a sidecar
+    scripts_dir = tmp_path / "scripts" / "experiments"
+    scripts_dir.mkdir(parents=True)
+
+    script = scripts_dir / "my_experiment.py"
+    script.touch()
+
+    sidecar = scripts_dir / "my_experiment.bth.toml"
+    sidecar.write_text(
+        """
+[experiment]
+hypothesis = "Test hypothesis"
+stage_name = "validation"
+
+[outcomes.pass]
+condition = "value > 0"
+decision = "proceed"
+reasoning = "Good result"
+
+[outcomes.fail]
+condition = "TRUE"
+decision = "investigate"
+reasoning = "Default"
+is_residual = true
+
+[result_schema]
+value = "float"
+"""
+    )
+
+    with (
+        patch("bathos.cluster.push_project"),
+        patch("bathos.cluster.submit_job", return_value=_SUBMIT_RESULT),
+    ):
+        result = runner.invoke(app, ["submit", "--no-wait", "python", "scripts/experiments/my_experiment.py"])
+
+    # Should succeed
+    assert result.exit_code == 0, result.output
+    assert "Submitted 12345" in result.output
+
+    # Check submit-provenance was written
+    submit_dir = catalog_dir / "submits" / "myproject"
+    assert submit_dir.is_dir(), "submits/<project_slug>/ directory should exist"
+
+    parquet_files = list(submit_dir.glob("*.parquet"))
+    assert len(parquet_files) == 1, f"Expected 1 provenance file, found {len(parquet_files)}"
+
+    # Check schema and data
+    table = pq.read_table(parquet_files[0])
+    assert table.num_rows == 1
+    assert "project_slug" in table.column_names
+    assert "command" in table.column_names
+    assert "sidecar_sha256" in table.column_names
+    assert "bth_submit_version" in table.column_names
+    assert "submitted_at" in table.column_names
+    assert "myxcel_job_id" in table.column_names
+    assert "stage_name" in table.column_names
+
+    # Verify field values
+    assert table.column("project_slug")[0].as_py() == "myproject"
+    assert "my_experiment.py" in table.column("command")[0].as_py()
+    assert table.column("myxcel_job_id")[0].as_py() == "12345"
+    assert table.column("stage_name")[0].as_py() == "validation"
+    # sidecar_sha256 should be a hex string (non-empty for found sidecar)
+    sidecar_hash = table.column("sidecar_sha256")[0].as_py()
+    assert len(sidecar_hash) == 64, f"SHA256 should be 64 hex chars, got {len(sidecar_hash)}"
+
+
+def test_submit_ac9_provenance_defaults_stage_name_to_exploration(tmp_path: Path, monkeypatch):
+    """AC-9: submit-provenance defaults stage_name to 'exploration' if not in sidecar."""
+    monkeypatch.chdir(tmp_path)
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
+
+    # Write project config
+    _write_project_toml(tmp_path)
+
+    # Create scripts/experiments directory with a sidecar WITHOUT stage_name
+    scripts_dir = tmp_path / "scripts" / "experiments"
+    scripts_dir.mkdir(parents=True)
+
+    script = scripts_dir / "my_experiment.py"
+    script.touch()
+
+    sidecar = scripts_dir / "my_experiment.bth.toml"
+    sidecar.write_text(
+        """
+[experiment]
+hypothesis = "Test hypothesis"
+
+[outcomes.pass]
+condition = "value > 0"
+decision = "proceed"
+reasoning = "Good result"
+
+[outcomes.fail]
+condition = "TRUE"
+decision = "investigate"
+reasoning = "Default"
+is_residual = true
+
+[result_schema]
+value = "float"
+"""
+    )
+
+    with (
+        patch("bathos.cluster.push_project"),
+        patch("bathos.cluster.submit_job", return_value=_SUBMIT_RESULT),
+    ):
+        result = runner.invoke(app, ["submit", "--no-wait", "python", "scripts/experiments/my_experiment.py"])
+
+    assert result.exit_code == 0, result.output
+
+    # Check provenance record
+    submit_dir = catalog_dir / "submits" / "myproject"
+    parquet_files = list(submit_dir.glob("*.parquet"))
+    assert len(parquet_files) == 1
+
+    table = pq.read_table(parquet_files[0])
+    # Should default to exploration
+    assert table.column("stage_name")[0].as_py() == "exploration"

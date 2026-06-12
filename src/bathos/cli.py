@@ -1043,6 +1043,40 @@ def submit(
         f"Submitted {slurm_job_id} on {cluster.remote} using preset {cluster.preset}"
     )
 
+    # 7a. Write submit-provenance record (AC-9 Part 1)
+    try:
+        import hashlib
+        from bathos.catalog import write_submit_provenance
+
+        sidecar_sha256 = ""
+        stage_name = "exploration"
+
+        if sidecar_path and sidecar_path.exists():
+            # Compute SHA256 of sidecar file
+            sha256_hash = hashlib.sha256()
+            with open(sidecar_path, "rb") as f:
+                sha256_hash.update(f.read())
+            sidecar_sha256 = sha256_hash.hexdigest()
+
+        # Extract stage_name from sidecar if available
+        if sidecar_data:
+            experiment_section = sidecar_data.get("experiment", {})
+            if isinstance(experiment_section, dict):
+                stage_name = experiment_section.get("stage_name", "exploration")
+
+        # Write submit provenance to catalog
+        write_submit_provenance(
+            project_slug=cluster.project,
+            command=cmd_str,
+            sidecar_sha256=sidecar_sha256,
+            myxcel_job_id=slurm_job_id,
+            stage_name=stage_name,
+            catalog_dir=_catalog_dir(),
+        )
+    except Exception as e:
+        # Log but don't fail on provenance write errors
+        typer.echo(f"Warning: submit-provenance write failed: {e}", err=True)
+
     # 8. Exit if not waiting
     if not wait:
         raise typer.Exit(0)
