@@ -12,6 +12,7 @@ from bathos.sidecar import find_sidecar
 class IssueSeverity(str, Enum):
     ERROR = "error"
     WARNING = "warning"
+    INFO = "info"
 
 
 @dataclass
@@ -742,7 +743,7 @@ def check_baseline_ref_exists(project_root: Path, catalog_dir: Path, db_path: Pa
                     path=sidecar_path,
                     directory="benchmarks",
                     issue="baseline_ref_ok",
-                    severity=IssueSeverity.WARNING,  # Severity WARNING used for visibility
+                    severity=IssueSeverity.INFO,
                     detail=f"baseline_ref {baseline_ref!r}: outcome={outcome}, started_at={started_at}",
                 )
             )

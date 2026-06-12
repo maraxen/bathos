@@ -509,6 +509,8 @@ ns_per_day = "float"
     assert len(issues) > 0
     # Should have an issue mentioning the baseline_ref and it was found
     assert any("baseline_ref" in str(i.detail).lower() for i in issues)
+    # Verify the severity is INFO (not WARNING)
+    assert all(i.severity == IssueSeverity.INFO for i in issues)
 
 
 def test_check_baseline_ref_exists_missing_baseline(tmp_path):
@@ -602,3 +604,58 @@ ns_per_day = "float"
 
     # Should skip silently (no DB exists)
     assert issues == []
+
+
+def test_check_baseline_ref_exists_prefix_match(tmp_path):
+    """Test that check_baseline_ref_exists matches short UUID prefixes."""
+    from datetime import UTC, datetime
+    from bathos.catalog import init_catalog, write_run
+    from bathos.compact import compact
+    from bathos.linter import check_baseline_ref_exists, IssueSeverity
+    from bathos.schema import Run
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    init_catalog(catalog_dir)
+
+    # Create a baseline run with a known full UUID
+    base_time = datetime.now(UTC)
+    baseline_id = "abc12345-1234-1234-1234-123456789abc"
+    baseline_run = Run(
+        id=baseline_id,
+        project_slug="test",
+        command="python scripts/benchmarks/baseline.py",
+        argv=["python", "scripts/benchmarks/baseline.py"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        timestamp=base_time,
+        status="completed",
+        exit_code=0,
+        outcome="pass",
+    )
+    write_run(baseline_run, catalog_dir)
+    compact(catalog_dir)
+
+    # Create a benchmark sidecar using only the prefix of the baseline_id
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    scripts_dir = project_root / "scripts" / "benchmarks"
+    scripts_dir.mkdir(parents=True)
+    sidecar_path = scripts_dir / "test_bench.bth.toml"
+    sidecar_path.write_text("""[benchmark]
+baseline_ref = "abc123"
+metric = "ns_per_day"
+regression_threshold = 0.05
+target = "50 ns/day"
+
+[result_schema]
+ns_per_day = "float"
+""")
+
+    issues = check_baseline_ref_exists(project_root, catalog_dir, catalog_dir / "bathos.db")
+
+    # Should find the baseline by prefix match and emit INFO
+    assert len(issues) == 1
+    assert issues[0].severity == IssueSeverity.INFO
+    assert "baseline_ref_ok" == issues[0].issue

@@ -1319,9 +1319,15 @@ def lint(
 
     errors = [i for i in issues if i.severity == IssueSeverity.ERROR]
     warnings = [i for i in issues if i.severity == IssueSeverity.WARNING]
+    infos = [i for i in issues if i.severity == IssueSeverity.INFO]
 
     for issue in issues:
-        prefix = "error" if issue.severity == IssueSeverity.ERROR else "warning"
+        if issue.severity == IssueSeverity.ERROR:
+            prefix = "error"
+        elif issue.severity == IssueSeverity.WARNING:
+            prefix = "warning"
+        else:
+            prefix = "info"
         try:
             display_path = issue.path.relative_to(project_root.resolve())
         except ValueError:
