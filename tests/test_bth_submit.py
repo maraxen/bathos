@@ -317,3 +317,297 @@ def test_resolve_cluster_config_project_defaults_to_slug():
     )
     result = resolve_cluster_config(config)
     assert result.project == "my-unique-slug"
+
+
+# ---------------------------------------------------------------------------
+# AC-3 and AC-4 — Reproduction prerequisite gate tests
+# ---------------------------------------------------------------------------
+
+
+def test_submit_ac3_hard_gate_validation_stage_prerequisite_not_found(tmp_path: Path, monkeypatch):
+    """AC-3: bth submit exits 1 when validation stage missing reproduction prerequisite."""
+    monkeypatch.chdir(tmp_path)
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
+
+    # Write project config
+    _write_project_toml(tmp_path)
+
+    # Create scripts/experiments directory with a sidecar
+    scripts_dir = tmp_path / "scripts" / "experiments"
+    scripts_dir.mkdir(parents=True)
+
+    script = scripts_dir / "my_experiment.py"
+    script.touch()
+
+    sidecar = scripts_dir / "my_experiment.bth.toml"
+    sidecar.write_text(
+        """
+[experiment]
+hypothesis = "Test hypothesis"
+stage_name = "validation"
+
+[reproduction]
+requires_pass_stem = "baseline_script"
+
+[outcomes.pass]
+condition = "value > 0"
+decision = "proceed"
+reasoning = "Good result"
+
+[outcomes.fail]
+condition = "TRUE"
+decision = "investigate"
+reasoning = "Default"
+is_residual = true
+
+[result_schema]
+value = "float"
+"""
+    )
+
+    with (
+        patch("bathos.cluster.push_project"),
+        patch("bathos.cluster.submit_job", return_value=_SUBMIT_RESULT),
+    ):
+        result = runner.invoke(app, ["submit", "--no-wait", "python", "scripts/experiments/my_experiment.py"])
+
+    # Should exit 1 due to missing prerequisite
+    assert result.exit_code == 1, result.output
+    assert "REPRODUCTION_PREREQUISITE_UNMET" in result.output or "no passing run" in result.output
+
+
+def test_submit_ac3_hard_gate_production_stage_prerequisite_not_found(tmp_path: Path, monkeypatch):
+    """AC-3: bth submit exits 1 when production stage missing reproduction prerequisite."""
+    monkeypatch.chdir(tmp_path)
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
+
+    # Write project config
+    _write_project_toml(tmp_path)
+
+    # Create scripts/experiments directory with a sidecar
+    scripts_dir = tmp_path / "scripts" / "experiments"
+    scripts_dir.mkdir(parents=True)
+
+    script = scripts_dir / "my_experiment.py"
+    script.touch()
+
+    sidecar = scripts_dir / "my_experiment.bth.toml"
+    sidecar.write_text(
+        """
+[experiment]
+hypothesis = "Test hypothesis"
+stage_name = "production"
+
+[reproduction]
+requires_pass_stem = "baseline_script"
+
+[outcomes.pass]
+condition = "value > 0"
+decision = "proceed"
+reasoning = "Good result"
+
+[outcomes.fail]
+condition = "TRUE"
+decision = "investigate"
+reasoning = "Default"
+is_residual = true
+
+[result_schema]
+value = "float"
+"""
+    )
+
+    with (
+        patch("bathos.cluster.push_project"),
+        patch("bathos.cluster.submit_job", return_value=_SUBMIT_RESULT),
+    ):
+        result = runner.invoke(app, ["submit", "--no-wait", "python", "scripts/experiments/my_experiment.py"])
+
+    # Should exit 1 due to missing prerequisite
+    assert result.exit_code == 1, result.output
+    assert "REPRODUCTION_PREREQUISITE_UNMET" in result.output or "no passing run" in result.output
+
+
+def test_submit_ac3_hard_gate_validation_stage_prerequisite_found(tmp_path: Path, monkeypatch):
+    """AC-3: bth submit succeeds when validation stage prerequisite is found."""
+    from bathos.schema import Run
+    from bathos.catalog import write_run
+    from bathos.compact import compact
+
+    monkeypatch.chdir(tmp_path)
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
+
+    # Write project config
+    _write_project_toml(tmp_path)
+
+    # Create prerequisite run
+    prereq_run = Run(
+        project_slug="myproject",
+        command="python scripts/experiments/baseline_script.py",
+        argv=["python", "scripts/experiments/baseline_script.py"],
+        outcome="pass",
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+    )
+    write_run(prereq_run, catalog_dir)
+    compact(catalog_dir)
+
+    # Create scripts/experiments directory with a sidecar
+    scripts_dir = tmp_path / "scripts" / "experiments"
+    scripts_dir.mkdir(parents=True)
+
+    script = scripts_dir / "my_experiment.py"
+    script.touch()
+
+    sidecar = scripts_dir / "my_experiment.bth.toml"
+    sidecar.write_text(
+        """
+[experiment]
+hypothesis = "Test hypothesis"
+stage_name = "validation"
+
+[reproduction]
+requires_pass_stem = "baseline_script"
+
+[outcomes.pass]
+condition = "value > 0"
+decision = "proceed"
+reasoning = "Good result"
+
+[outcomes.fail]
+condition = "TRUE"
+decision = "investigate"
+reasoning = "Default"
+is_residual = true
+
+[result_schema]
+value = "float"
+"""
+    )
+
+    with (
+        patch("bathos.cluster.push_project"),
+        patch("bathos.cluster.submit_job", return_value=_SUBMIT_RESULT),
+    ):
+        result = runner.invoke(app, ["submit", "--no-wait", "python", "scripts/experiments/my_experiment.py"])
+
+    # Should succeed (exit 0)
+    assert result.exit_code == 0, result.output
+    assert "Submitted 12345" in result.output
+
+
+def test_submit_ac4_advisory_exploration_stage_prerequisite_not_found(tmp_path: Path, monkeypatch):
+    """AC-4: bth submit warns but exits 0 when exploration stage missing prerequisite."""
+    monkeypatch.chdir(tmp_path)
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
+
+    # Write project config
+    _write_project_toml(tmp_path)
+
+    # Create scripts/experiments directory with a sidecar
+    scripts_dir = tmp_path / "scripts" / "experiments"
+    scripts_dir.mkdir(parents=True)
+
+    script = scripts_dir / "my_experiment.py"
+    script.touch()
+
+    sidecar = scripts_dir / "my_experiment.bth.toml"
+    sidecar.write_text(
+        """
+[experiment]
+hypothesis = "Test hypothesis"
+stage_name = "exploration"
+
+[reproduction]
+requires_pass_stem = "baseline_script"
+
+[outcomes.pass]
+condition = "value > 0"
+decision = "proceed"
+reasoning = "Good result"
+
+[outcomes.fail]
+condition = "TRUE"
+decision = "investigate"
+reasoning = "Default"
+is_residual = true
+
+[result_schema]
+value = "float"
+"""
+    )
+
+    with (
+        patch("bathos.cluster.push_project"),
+        patch("bathos.cluster.submit_job", return_value=_SUBMIT_RESULT),
+    ):
+        result = runner.invoke(app, ["submit", "--no-wait", "python", "scripts/experiments/my_experiment.py"])
+
+    # Should succeed (exit 0) but print warning
+    assert result.exit_code == 0, result.output
+    assert "WARNING" in result.output or "advisory" in result.output
+    assert "Submitted 12345" in result.output
+
+
+def test_submit_ac4_advisory_calibration_stage_prerequisite_not_found(tmp_path: Path, monkeypatch):
+    """AC-4: bth submit warns but exits 0 when calibration stage missing prerequisite."""
+    monkeypatch.chdir(tmp_path)
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
+
+    # Write project config
+    _write_project_toml(tmp_path)
+
+    # Create scripts/experiments directory with a sidecar
+    scripts_dir = tmp_path / "scripts" / "experiments"
+    scripts_dir.mkdir(parents=True)
+
+    script = scripts_dir / "my_experiment.py"
+    script.touch()
+
+    sidecar = scripts_dir / "my_experiment.bth.toml"
+    sidecar.write_text(
+        """
+[experiment]
+hypothesis = "Test hypothesis"
+stage_name = "calibration"
+
+[reproduction]
+requires_pass_stem = "baseline_script"
+
+[outcomes.pass]
+condition = "value > 0"
+decision = "proceed"
+reasoning = "Good result"
+
+[outcomes.fail]
+condition = "TRUE"
+decision = "investigate"
+reasoning = "Default"
+is_residual = true
+
+[result_schema]
+value = "float"
+"""
+    )
+
+    with (
+        patch("bathos.cluster.push_project"),
+        patch("bathos.cluster.submit_job", return_value=_SUBMIT_RESULT),
+    ):
+        result = runner.invoke(app, ["submit", "--no-wait", "python", "scripts/experiments/my_experiment.py"])
+
+    # Should succeed (exit 0) but print warning
+    assert result.exit_code == 0, result.output
+    assert "WARNING" in result.output or "advisory" in result.output
+    assert "Submitted 12345" in result.output

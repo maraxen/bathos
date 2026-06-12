@@ -991,6 +991,9 @@ def submit(
                             f"WARNING: no passing run of '{requires_pass_stem}' found (advisory for {stage_name} stage)",
                             err=True,
                         )
+        except typer.Exit:
+            # Let typer.Exit exceptions through (hard gate failures)
+            raise
         except Exception as e:
             # Log but don't fail on gate check exceptions
             typer.echo(f"Warning: reproduction prerequisite check failed: {e}", err=True)
