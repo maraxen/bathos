@@ -37,6 +37,15 @@ class OutcomeSpec:
 
 
 @dataclass
+class ReproductionBlock:
+    """Reproduction metadata for experiment sidecars (optional [reproduction] block)."""
+    reproduces_paper: str = ""       # DOI or citation string
+    reproduces_run: str = ""         # run UUID
+    tolerance_pct: float | None = None
+    requires_pass_stem: str = ""     # script stem that must have outcome='pass' first
+
+
+@dataclass
 class Sidecar:
     kind: SidecarKind
     result_schema: dict[str, str]
@@ -66,6 +75,8 @@ class Sidecar:
     popper_alt_pass_rate: float | None = None
     popper_stopping_threshold: float | None = None
     popper_weights: dict[str, float] = field(default_factory=dict)
+    # reproduction metadata (experiment sidecars only)
+    reproduction: ReproductionBlock | None = None
 
 
 ENFORCED_DIRS = {"experiments", "benchmarks", "validation"}
@@ -124,6 +135,20 @@ def parse_sidecar(path: Path) -> Sidecar:
             weights = popper.get("weights", {})
             if isinstance(weights, dict):
                 sidecar.popper_weights = {k: float(v) for k, v in weights.items()}
+
+        # Parse [reproduction] block (optional)
+        repro_data = data.get("reproduction", {})
+        if repro_data:
+            sidecar.reproduction = ReproductionBlock(
+                reproduces_paper=repro_data.get("reproduces_paper", ""),
+                reproduces_run=repro_data.get("reproduces_run", ""),
+                tolerance_pct=repro_data.get("tolerance_pct", None),
+                requires_pass_stem=repro_data.get("requires_pass_stem", ""),
+            )
+            # Warn on unknown keys in [reproduction]
+            for key in repro_data:
+                if key not in {"reproduces_paper", "reproduces_run", "tolerance_pct", "requires_pass_stem"}:
+                    logger.warning(f"Unknown key in [reproduction]: {key!r}")
     elif "benchmark" in data:
         kind = SidecarKind.BENCHMARK
         section = data["benchmark"]

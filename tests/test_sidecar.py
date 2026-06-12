@@ -344,3 +344,113 @@ def test_parse_experiment_sidecar_novel_default(tmp_path):
     """)
     sidecar = parse_sidecar(path)
     assert sidecar.novel is False
+
+
+def test_parse_experiment_sidecar_with_reproduction_block(tmp_path):
+    """Parse [reproduction] block with all four fields."""
+    from bathos.sidecar import parse_sidecar
+    path = _write_toml(tmp_path, """
+        [experiment]
+        hypothesis = "Test hypothesis"
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        value = "float"
+        [reproduction]
+        reproduces_paper = "10.1234/example.doi"
+        reproduces_run = "12345678-1234-5678-1234-567812345678"
+        tolerance_pct = 5.0
+        requires_pass_stem = "baseline_run"
+    """)
+    sidecar = parse_sidecar(path)
+    assert sidecar.reproduction is not None
+    assert sidecar.reproduction.reproduces_paper == "10.1234/example.doi"
+    assert sidecar.reproduction.reproduces_run == "12345678-1234-5678-1234-567812345678"
+    assert sidecar.reproduction.tolerance_pct == 5.0
+    assert sidecar.reproduction.requires_pass_stem == "baseline_run"
+
+
+def test_parse_experiment_sidecar_reproduction_block_partial(tmp_path):
+    """[reproduction] block with only some fields set."""
+    from bathos.sidecar import parse_sidecar
+    path = _write_toml(tmp_path, """
+        [experiment]
+        hypothesis = "Test hypothesis"
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        value = "float"
+        [reproduction]
+        reproduces_paper = "Smith et al. 2023"
+    """)
+    sidecar = parse_sidecar(path)
+    assert sidecar.reproduction is not None
+    assert sidecar.reproduction.reproduces_paper == "Smith et al. 2023"
+    assert sidecar.reproduction.reproduces_run == ""
+    assert sidecar.reproduction.tolerance_pct is None
+    assert sidecar.reproduction.requires_pass_stem == ""
+
+
+def test_parse_experiment_sidecar_reproduction_block_absent(tmp_path):
+    """When [reproduction] absent, reproduction is None."""
+    from bathos.sidecar import parse_sidecar
+    path = _write_toml(tmp_path, """
+        [experiment]
+        hypothesis = "Test hypothesis"
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        value = "float"
+    """)
+    sidecar = parse_sidecar(path)
+    assert sidecar.reproduction is None
+
+
+def test_parse_experiment_sidecar_reproduction_block_unknown_key_warning(tmp_path, caplog):
+    """Unknown keys in [reproduction] emit WARNING."""
+    import logging
+    from bathos.sidecar import parse_sidecar
+    path = _write_toml(tmp_path, """
+        [experiment]
+        hypothesis = "Test hypothesis"
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        value = "float"
+        [reproduction]
+        reproduces_paper = "test"
+        unknown_field = "should warn"
+    """)
+    with caplog.at_level(logging.WARNING, logger="bathos.sidecar"):
+        sidecar = parse_sidecar(path)
+
+    assert sidecar.reproduction is not None
+    assert any("Unknown key in [reproduction]" in record.message for record in caplog.records)

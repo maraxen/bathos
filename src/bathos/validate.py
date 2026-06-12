@@ -5,7 +5,7 @@ from pathlib import Path
 
 import duckdb
 
-from bathos.sidecar import Sidecar, SidecarKind
+from bathos.sidecar import Sidecar, SidecarKind, ReproductionBlock
 from bathos.telemetry import event
 
 
@@ -106,6 +106,44 @@ def validate_popper_block(sidecar: Sidecar, sidecar_path: Path | None = None) ->
                 "popper.weights.error",
                 f"Weight for 'error' must be exactly 1.0 (non-overridable), got {val!r}",
             ))
+
+    return errors
+
+
+def validate_reproduction_block(sidecar: Sidecar, sidecar_path: Path | None = None) -> list[ValidationError]:
+    """Validate [reproduction] block fields.
+
+    Returns a list of ValidationError (empty if valid or no block present).
+    """
+    import re
+
+    errors: list[ValidationError] = []
+
+    if sidecar.reproduction is None:
+        return errors  # No [reproduction] block — nothing to validate
+
+    repro = sidecar.reproduction
+
+    # tolerance_pct: if set, must be 0.0 <= v <= 100.0
+    if repro.tolerance_pct is not None:
+        if not (0.0 <= repro.tolerance_pct <= 100.0):
+            errors.append(ValidationError(
+                "reproduction.tolerance_pct",
+                f"tolerance_pct must be in [0.0, 100.0], got {repro.tolerance_pct!r}",
+            ))
+            if sidecar_path:
+                event("sidecar.validate_error", path=str(sidecar_path), field="reproduction.tolerance_pct", reason=f"tolerance_pct out of range: {repro.tolerance_pct}")
+
+    # reproduces_run: if non-empty, must match UUID regex r'^[0-9a-f-]{36}$'
+    if repro.reproduces_run:
+        uuid_pattern = r'^[0-9a-f-]{36}$'
+        if not re.match(uuid_pattern, repro.reproduces_run):
+            errors.append(ValidationError(
+                "reproduction.reproduces_run",
+                f"reproduces_run must be a valid UUID, got {repro.reproduces_run!r}",
+            ))
+            if sidecar_path:
+                event("sidecar.validate_error", path=str(sidecar_path), field="reproduction.reproduces_run", reason=f"Invalid UUID format: {repro.reproduces_run}")
 
     return errors
 
@@ -217,5 +255,9 @@ def validate_sidecar(sidecar: Sidecar, sidecar_path: Path | None = None) -> Vali
     # Validate [popper] block if present
     popper_errors = validate_popper_block(sidecar, sidecar_path)
     errors.extend(popper_errors)
+
+    # Validate [reproduction] block if present
+    repro_errors = validate_reproduction_block(sidecar, sidecar_path)
+    errors.extend(repro_errors)
 
     return ValidationResult(ok=len(errors) == 0, errors=errors)

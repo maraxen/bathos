@@ -262,3 +262,192 @@ def test_valid_with_residual_branch_passes(tmp_path):
     result = validate_sidecar(sidecar)
     assert result.ok is True
     assert len(result.errors) == 0
+
+
+def test_valid_reproduction_block_passes(tmp_path):
+    """Sidecar with valid [reproduction] block should pass."""
+    from bathos.sidecar import parse_sidecar
+    from bathos.validate import validate_sidecar
+
+    path = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "Test"
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fail]
+        condition = "TRUE"
+        decision = "debug"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        value = "float"
+        [reproduction]
+        reproduces_paper = "10.1234/test.doi"
+        reproduces_run = "12345678-1234-5678-1234-567812345678"
+        tolerance_pct = 5.0
+        requires_pass_stem = "baseline"
+    """,
+    )
+    sidecar = parse_sidecar(path)
+    result = validate_sidecar(sidecar)
+    assert result.ok is True
+    assert len(result.errors) == 0
+
+
+def test_reproduction_tolerance_pct_out_of_range_fails(tmp_path):
+    """Reproduction with tolerance_pct outside [0, 100] should fail."""
+    from bathos.sidecar import parse_sidecar
+    from bathos.validate import validate_sidecar
+
+    path = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "Test"
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fail]
+        condition = "TRUE"
+        decision = "debug"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        value = "float"
+        [reproduction]
+        tolerance_pct = 105.5
+    """,
+    )
+    sidecar = parse_sidecar(path)
+    result = validate_sidecar(sidecar)
+    assert result.ok is False
+    assert any("tolerance_pct must be in [0.0, 100.0]" in e.message for e in result.errors)
+
+
+def test_reproduction_tolerance_pct_negative_fails(tmp_path):
+    """Reproduction with negative tolerance_pct should fail."""
+    from bathos.sidecar import parse_sidecar
+    from bathos.validate import validate_sidecar
+
+    path = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "Test"
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fail]
+        condition = "TRUE"
+        decision = "debug"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        value = "float"
+        [reproduction]
+        tolerance_pct = -0.5
+    """,
+    )
+    sidecar = parse_sidecar(path)
+    result = validate_sidecar(sidecar)
+    assert result.ok is False
+    assert any("tolerance_pct must be in [0.0, 100.0]" in e.message for e in result.errors)
+
+
+def test_reproduction_reproduces_run_invalid_uuid_fails(tmp_path):
+    """Reproduction with invalid UUID format should fail."""
+    from bathos.sidecar import parse_sidecar
+    from bathos.validate import validate_sidecar
+
+    path = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "Test"
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fail]
+        condition = "TRUE"
+        decision = "debug"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        value = "float"
+        [reproduction]
+        reproduces_run = "not-a-valid-uuid"
+    """,
+    )
+    sidecar = parse_sidecar(path)
+    result = validate_sidecar(sidecar)
+    assert result.ok is False
+    assert any("reproduces_run must be a valid UUID" in e.message for e in result.errors)
+
+
+def test_reproduction_reproduces_run_valid_uuid_passes(tmp_path):
+    """Reproduction with valid UUID format should pass."""
+    from bathos.sidecar import parse_sidecar
+    from bathos.validate import validate_sidecar
+
+    path = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "Test"
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fail]
+        condition = "TRUE"
+        decision = "debug"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        value = "float"
+        [reproduction]
+        reproduces_run = "12345678-1234-5678-1234-567812345678"
+    """,
+    )
+    sidecar = parse_sidecar(path)
+    result = validate_sidecar(sidecar)
+    assert result.ok is True
+    assert len(result.errors) == 0
+
+
+def test_reproduction_reproduces_run_empty_string_passes(tmp_path):
+    """Reproduction with empty reproduces_run string should pass (not validated)."""
+    from bathos.sidecar import parse_sidecar
+    from bathos.validate import validate_sidecar
+
+    path = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "Test"
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fail]
+        condition = "TRUE"
+        decision = "debug"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        value = "float"
+        [reproduction]
+        reproduces_paper = "test paper"
+    """,
+    )
+    sidecar = parse_sidecar(path)
+    result = validate_sidecar(sidecar)
+    assert result.ok is True
+    assert len(result.errors) == 0
