@@ -1,7 +1,9 @@
 import dataclasses
 from pathlib import Path
 
-from bathos.catalog import init_catalog, read_runs, write_run
+import pyarrow.parquet as pq
+
+from bathos.catalog import init_catalog, read_runs, write_run, write_submit_provenance
 from bathos.schema import Run
 
 
@@ -70,3 +72,60 @@ def test_parallel_writes_do_not_collide(tmp_catalog: Path):
     write_run(r2, tmp_catalog)
     runs = read_runs(tmp_catalog)
     assert len(runs) == 2
+
+
+def test_write_submit_provenance_creates_file(tmp_catalog: Path):
+    """Test write_submit_provenance creates a Parquet file with correct schema."""
+    init_catalog(tmp_catalog)
+    write_submit_provenance(
+        project_slug="myproject",
+        command="scripts/experiments/foo.py",
+        sidecar_sha256="abc123def456",
+        myxcel_job_id="12345",
+        stage_name="validation",
+        catalog_dir=tmp_catalog,
+    )
+
+    # Check file was created
+    submit_dir = tmp_catalog / "submits" / "myproject"
+    assert submit_dir.is_dir()
+    parquet_files = list(submit_dir.glob("*.parquet"))
+    assert len(parquet_files) == 1
+
+    # Check schema and data
+    table = pq.read_table(parquet_files[0])
+    assert table.num_rows == 1
+    assert "project_slug" in table.column_names
+    assert "command" in table.column_names
+    assert "sidecar_sha256" in table.column_names
+    assert "bth_submit_version" in table.column_names
+    assert "submitted_at" in table.column_names
+    assert "myxcel_job_id" in table.column_names
+    assert "stage_name" in table.column_names
+
+    # Check field values
+    assert table.column("project_slug")[0].as_py() == "myproject"
+    assert table.column("command")[0].as_py() == "scripts/experiments/foo.py"
+    assert table.column("sidecar_sha256")[0].as_py() == "abc123def456"
+    assert table.column("myxcel_job_id")[0].as_py() == "12345"
+    assert table.column("stage_name")[0].as_py() == "validation"
+
+
+def test_write_submit_provenance_atomic_rename(tmp_catalog: Path):
+    """Test that write_submit_provenance uses atomic rename (no .tmp file left behind)."""
+    init_catalog(tmp_catalog)
+    write_submit_provenance(
+        project_slug="proj",
+        command="scripts/experiments/test.py",
+        sidecar_sha256="hash",
+        myxcel_job_id="999",
+        stage_name="exploration",
+        catalog_dir=tmp_catalog,
+    )
+
+    submit_dir = tmp_catalog / "submits" / "proj"
+    tmp_files = list(submit_dir.glob("*.tmp.parquet"))
+    final_files = list(submit_dir.glob("*.parquet"))
+
+    assert len(tmp_files) == 0, "Temporary .tmp.parquet file should not exist after atomic rename"
+    assert len(final_files) == 1, "Should have exactly one final Parquet file"
