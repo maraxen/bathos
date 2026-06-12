@@ -1250,3 +1250,166 @@ class TestSchemaOverflowSemantics:
         signals = result["audit_results"]["test_project"]["signals"]
         # denominator = 5 (sidecar runs), overflow_count = 0 -> rate = 0.0
         assert signals["schema_overflow_rate"] == pytest.approx(0.0)
+
+
+class TestControlArmRate:
+    """Test control_arm_rate signal (AC-5)."""
+
+    def test_control_arm_rate_zero_no_ctrl_runs(self, monkeypatch_registry, tmp_path):
+        """Test control_arm_rate is 0 when no runs have ctrl_* outcomes."""
+        from bathos.config import register_project
+        from bathos.sprint_audit import sprint_audit
+
+        catalog_dir = tmp_path / "test_catalog"
+        catalog_dir.mkdir()
+        init_catalog(catalog_dir)
+
+        base_time = datetime.now(UTC)
+        runs = [
+            Run(
+                project_slug="test_project",
+                command="python test.py",
+                argv=["python", "test.py"],
+                git_hash="abc123",
+                git_branch="main",
+                git_dirty=False,
+                timestamp=base_time + timedelta(seconds=i),
+                status="completed",
+                exit_code=0,
+                outcome="pass",
+                sidecar_mode="normal",
+                outcome_is_residual=False,
+            )
+            for i in range(5)
+        ]
+
+        for r in runs:
+            write_run(r, catalog_dir)
+        compact(catalog_dir)
+        register_project(slug="test_project", catalog_dir=catalog_dir)
+
+        result = sprint_audit(hours=24)
+        signals = result["audit_results"]["test_project"]["signals"]
+        assert signals["control_arm_rate"] == pytest.approx(0.0)
+
+    def test_control_arm_rate_nonzero_with_ctrl_passes(self, monkeypatch_registry, tmp_path):
+        """Test control_arm_rate > 0 when runs have ctrl_pass outcomes."""
+        from bathos.config import register_project
+        from bathos.sprint_audit import sprint_audit
+
+        catalog_dir = tmp_path / "test_catalog"
+        catalog_dir.mkdir()
+        init_catalog(catalog_dir)
+
+        base_time = datetime.now(UTC)
+        runs = [
+            Run(
+                project_slug="test_project",
+                command="python test.py",
+                argv=["python", "test.py"],
+                git_hash="abc123",
+                git_branch="main",
+                git_dirty=False,
+                timestamp=base_time + timedelta(seconds=i),
+                status="completed",
+                exit_code=0,
+                outcome="ctrl_pass" if i < 2 else "pass",
+                sidecar_mode="normal",
+                outcome_is_residual=False,
+            )
+            for i in range(5)
+        ]
+
+        for r in runs:
+            write_run(r, catalog_dir)
+        compact(catalog_dir)
+        register_project(slug="test_project", catalog_dir=catalog_dir)
+
+        result = sprint_audit(hours=24)
+        signals = result["audit_results"]["test_project"]["signals"]
+        # 2 out of 5 have ctrl_* outcomes
+        assert signals["control_arm_rate"] == pytest.approx(0.4)
+
+    def test_control_arm_rate_mixed_ctrl_outcomes(self, monkeypatch_registry, tmp_path):
+        """Test control_arm_rate counts both ctrl_pass and ctrl_fail."""
+        from bathos.config import register_project
+        from bathos.sprint_audit import sprint_audit
+
+        catalog_dir = tmp_path / "test_catalog"
+        catalog_dir.mkdir()
+        init_catalog(catalog_dir)
+
+        base_time = datetime.now(UTC)
+        outcomes = [
+            "ctrl_pass", "ctrl_pass", "ctrl_fail", "pass", "pass"
+        ]
+        runs = [
+            Run(
+                project_slug="test_project",
+                command="python test.py",
+                argv=["python", "test.py"],
+                git_hash="abc123",
+                git_branch="main",
+                git_dirty=False,
+                timestamp=base_time + timedelta(seconds=i),
+                status="completed",
+                exit_code=0,
+                outcome=outcomes[i],
+                sidecar_mode="normal",
+                outcome_is_residual=False,
+            )
+            for i in range(5)
+        ]
+
+        for r in runs:
+            write_run(r, catalog_dir)
+        compact(catalog_dir)
+        register_project(slug="test_project", catalog_dir=catalog_dir)
+
+        result = sprint_audit(hours=24)
+        signals = result["audit_results"]["test_project"]["signals"]
+        # 3 out of 5 have ctrl_* outcomes
+        assert signals["control_arm_rate"] == pytest.approx(0.6)
+
+    def test_control_arm_rate_warning_zero_with_validation_stage(self, monkeypatch_registry, tmp_path):
+        """Test WARNING when control_arm_rate==0.0 and validation/production runs exist."""
+        from bathos.config import register_project
+        from bathos.sprint_audit import sprint_audit
+
+        catalog_dir = tmp_path / "test_catalog"
+        catalog_dir.mkdir()
+        init_catalog(catalog_dir)
+
+        base_time = datetime.now(UTC)
+        runs = [
+            Run(
+                project_slug="test_project",
+                command="python test.py",
+                argv=["python", "test.py"],
+                git_hash="abc123",
+                git_branch="main",
+                git_dirty=False,
+                timestamp=base_time + timedelta(seconds=i),
+                status="completed",
+                exit_code=0,
+                outcome="pass",
+                sidecar_mode="normal",
+                outcome_is_residual=False,
+                stage_name="validation",  # AC-0: stage_name populated
+            )
+            for i in range(3)
+        ]
+
+        for r in runs:
+            write_run(r, catalog_dir)
+        compact(catalog_dir)
+        register_project(slug="test_project", catalog_dir=catalog_dir)
+
+        result = sprint_audit(hours=24)
+        signals = result["audit_results"]["test_project"]["signals"]
+        anomalies = result["audit_results"]["test_project"]["anomalies"]
+
+        # Rate should be 0.0 (no ctrl_* runs)
+        assert signals["control_arm_rate"] == pytest.approx(0.0)
+        # Should have a warning about control arm rate
+        assert any("control_arm_rate" in str(a) for a in anomalies)

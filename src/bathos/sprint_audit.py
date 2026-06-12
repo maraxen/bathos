@@ -153,7 +153,7 @@ def sprint_audit(hours: int = 24) -> dict:
             rows = db.execute(
                 """
                 SELECT id, campaign_id, sidecar_mode, outcome, outcome_is_residual, timestamp,
-                       agent_mode, metadata, sidecar_path
+                       agent_mode, metadata, sidecar_path, stage_name
                 FROM runs
                 WHERE timestamp > ?
                 ORDER BY timestamp ASC
@@ -173,6 +173,7 @@ def sprint_audit(hours: int = 24) -> dict:
                 agent_mode,
                 metadata,
                 sidecar_path,
+                stage_name,
             ) in rows:
                 key = campaign_id or "_uncampaigned"
                 if key not in by_campaign:
@@ -186,6 +187,7 @@ def sprint_audit(hours: int = 24) -> dict:
                         "agent_mode": agent_mode or "",
                         "metadata": metadata or "{}",
                         "sidecar_path": sidecar_path or "",
+                        "stage_name": stage_name or "",
                     }
                 )
 
@@ -317,6 +319,16 @@ def sprint_audit(hours: int = 24) -> dict:
                 pass
             signals["premature_stopping_rate"] = n_premature / max(n_sequential_concluded, 1) if n_sequential_concluded > 0 else 0.0
 
+            # Signal 9: control_arm_rate
+            # Fraction of runs with outcome labels beginning with 'ctrl_' (control arm runs).
+            # Domain rationale: AC-5 — experimental controls discipline, tracking control arm
+            # coverage for validation/production stages.
+            if total_all > 0:
+                ctrl_count = sum(1 for r in all_runs_flat if r["outcome"] and str(r["outcome"]).startswith("ctrl_"))
+                signals["control_arm_rate"] = ctrl_count / total_all
+            else:
+                signals["control_arm_rate"] = 0.0
+
             # Check signal thresholds and add anomalies.
             # All thresholds are CALIBRATION TARGETS (v0.6), not hard gates.
             # See ADR .praxia/docs/decisions/260601_sprint-audit-threshold-rationale.md
@@ -371,6 +383,20 @@ def sprint_audit(hours: int = 24) -> dict:
                     f"{n_premature} sequential campaign(s) concluded before reaching stopping_threshold "
                     f"(sequential test validity compromised)"
                 )
+            # control_arm_rate == 0.0 with validation/production runs: AC-5
+            #   no control arm runs found while validation/production campaigns are running
+            #   flags potential missing control discipline in mature stages
+            if signals["control_arm_rate"] == 0.0 and total_all > 0:
+                # Check if any validation/production stage runs exist
+                val_prod_count = sum(
+                    1 for r in all_runs_flat
+                    if r.get("stage_name") and str(r.get("stage_name", "")).lower() in ("validation", "production")
+                )
+                if val_prod_count > 0:
+                    anomalies.append(
+                        f"Project: control_arm_rate 0.0% with {val_prod_count} validation/production stage run(s) — "
+                        f"no control arm runs found"
+                    )
 
             # Legacy anomalies per campaign (kept for backward compatibility)
             for campaign_id, runs in by_campaign.items():
