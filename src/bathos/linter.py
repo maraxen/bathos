@@ -134,6 +134,75 @@ def lint_project(project_root: Path) -> list[LintIssue]:
                     detail=f"create {stem}.bth.toml next to this script",
                 ))
 
+    # Tier-1 checks for validation/production experiments
+    issues.extend(check_novel_or_reproduces_declared(project_root))
+
+    return issues
+
+
+def check_novel_or_reproduces_declared(project_root: Path) -> list[LintIssue]:
+    """Check that validation/production experiments declare [reproduction] or novel=true (AC-7, Tier-1).
+
+    Filesystem-only check: reads sidecars directly from disk.
+    Error-severity for validation/production stage_name values.
+
+    Args:
+        project_root: Path to project root.
+
+    Returns:
+        List of LintIssue objects with severity ERROR for validation/production violations.
+    """
+    from bathos.sidecar import parse_sidecar, SidecarKind
+
+    scripts_dir = project_root / "scripts"
+    if not scripts_dir.exists():
+        return []
+
+    issues: list[LintIssue] = []
+
+    # Only check experiments and validation sidecars
+    for dir_name in ["experiments", "validation"]:
+        dir_path = scripts_dir / dir_name
+        if not dir_path.exists():
+            continue
+
+        for script in sorted(dir_path.iterdir()):
+            if script.name.startswith(".") or script.name.startswith("_") or script.is_dir():
+                continue
+
+            # Skip non-sidecar files
+            if not (script.suffix == ".toml" and script.name.endswith(".bth.toml")):
+                continue
+
+            # Parse sidecar
+            try:
+                sidecar = parse_sidecar(script)
+            except Exception:
+                # Silently skip unparseable sidecars — other lint checks will catch them
+                continue
+
+            # Only enforce for experiment sidecars in validation/production stages
+            if sidecar.kind != SidecarKind.EXPERIMENT:
+                continue
+
+            if sidecar.stage_name not in ("validation", "production"):
+                continue
+
+            # Check: must have [reproduction] or novel=true
+            has_reproduction = (
+                sidecar.reproduction is not None
+                and (sidecar.reproduction.reproduces_paper or sidecar.reproduction.reproduces_run)
+            )
+
+            if not has_reproduction and not sidecar.novel:
+                issues.append(LintIssue(
+                    path=script,
+                    directory=dir_name,
+                    issue="NOVEL_OR_REPRODUCES_REQUIRED",
+                    severity=IssueSeverity.ERROR,
+                    detail=f"validation/production experiment must declare [reproduction] or novel=true",
+                ))
+
     return issues
 
 

@@ -659,3 +659,194 @@ ns_per_day = "float"
     assert len(issues) == 1
     assert issues[0].severity == IssueSeverity.INFO
     assert "baseline_ref_ok" == issues[0].issue
+
+
+def test_check_novel_or_reproduces_declared_passes_exploration(tmp_path):
+    """AC-7: exploration stage experiments are not checked."""
+    from bathos.linter import check_novel_or_reproduces_declared, IssueSeverity
+
+    s = _make_script(tmp_path, "experiments", "run_test.py")
+    sidecar_path = s.with_suffix(".bth.toml")
+    sidecar_path.write_text("""[experiment]
+hypothesis = "test"
+stage_name = "exploration"
+novel = false
+
+[result_schema]
+x = "float"
+
+[outcomes.pass]
+condition = "x > 0"
+decision = "good"
+""")
+
+    issues = check_novel_or_reproduces_declared(tmp_path)
+    assert all(i.issue != "NOVEL_OR_REPRODUCES_REQUIRED" for i in issues)
+
+
+def test_check_novel_or_reproduces_declared_validation_requires_reproduction(tmp_path):
+    """AC-7: validation stage experiments must declare [reproduction] or novel=true."""
+    from bathos.linter import check_novel_or_reproduces_declared, IssueSeverity
+
+    s = _make_script(tmp_path, "experiments", "run_test.py")
+    sidecar_path = s.with_suffix(".bth.toml")
+    sidecar_path.write_text("""[experiment]
+hypothesis = "test"
+stage_name = "validation"
+novel = false
+
+[result_schema]
+x = "float"
+
+[outcomes.pass]
+condition = "x > 0"
+decision = "good"
+""")
+
+    issues = check_novel_or_reproduces_declared(tmp_path)
+    novel_issues = [i for i in issues if i.issue == "NOVEL_OR_REPRODUCES_REQUIRED"]
+    assert len(novel_issues) == 1
+    assert novel_issues[0].severity == IssueSeverity.ERROR
+
+
+def test_check_novel_or_reproduces_declared_passes_with_novel_true(tmp_path):
+    """AC-7: validation stage with novel=true passes."""
+    from bathos.linter import check_novel_or_reproduces_declared
+
+    s = _make_script(tmp_path, "experiments", "run_test.py")
+    sidecar_path = s.with_suffix(".bth.toml")
+    sidecar_path.write_text("""[experiment]
+hypothesis = "test"
+stage_name = "validation"
+novel = true
+
+[result_schema]
+x = "float"
+
+[outcomes.pass]
+condition = "x > 0"
+decision = "good"
+""")
+
+    issues = check_novel_or_reproduces_declared(tmp_path)
+    novel_issues = [i for i in issues if i.issue == "NOVEL_OR_REPRODUCES_REQUIRED"]
+    assert len(novel_issues) == 0
+
+
+def test_check_novel_or_reproduces_declared_passes_with_reproduction_paper(tmp_path):
+    """AC-7: validation stage with [reproduction].reproduces_paper passes."""
+    from bathos.linter import check_novel_or_reproduces_declared
+
+    s = _make_script(tmp_path, "experiments", "run_test.py")
+    sidecar_path = s.with_suffix(".bth.toml")
+    sidecar_path.write_text("""[experiment]
+hypothesis = "test"
+stage_name = "validation"
+novel = false
+
+[reproduction]
+reproduces_paper = "10.1234/example"
+
+[result_schema]
+x = "float"
+
+[outcomes.pass]
+condition = "x > 0"
+decision = "good"
+""")
+
+    issues = check_novel_or_reproduces_declared(tmp_path)
+    novel_issues = [i for i in issues if i.issue == "NOVEL_OR_REPRODUCES_REQUIRED"]
+    assert len(novel_issues) == 0
+
+
+def test_check_novel_or_reproduces_declared_passes_with_reproduction_run(tmp_path):
+    """AC-7: validation stage with [reproduction].reproduces_run passes."""
+    from bathos.linter import check_novel_or_reproduces_declared
+
+    s = _make_script(tmp_path, "experiments", "run_test.py")
+    sidecar_path = s.with_suffix(".bth.toml")
+    sidecar_path.write_text("""[experiment]
+hypothesis = "test"
+stage_name = "validation"
+novel = false
+
+[reproduction]
+reproduces_run = "12345678-1234-1234-1234-123456789012"
+
+[result_schema]
+x = "float"
+
+[outcomes.pass]
+condition = "x > 0"
+decision = "good"
+""")
+
+    issues = check_novel_or_reproduces_declared(tmp_path)
+    novel_issues = [i for i in issues if i.issue == "NOVEL_OR_REPRODUCES_REQUIRED"]
+    assert len(novel_issues) == 0
+
+
+def test_check_novel_or_reproduces_declared_production_requires_reproduction(tmp_path):
+    """AC-7: production stage experiments must declare [reproduction] or novel=true."""
+    from bathos.linter import check_novel_or_reproduces_declared, IssueSeverity
+
+    s = _make_script(tmp_path, "experiments", "run_test.py")
+    sidecar_path = s.with_suffix(".bth.toml")
+    sidecar_path.write_text("""[experiment]
+hypothesis = "test"
+stage_name = "production"
+novel = false
+
+[result_schema]
+x = "float"
+
+[outcomes.pass]
+condition = "x > 0"
+decision = "good"
+""")
+
+    issues = check_novel_or_reproduces_declared(tmp_path)
+    novel_issues = [i for i in issues if i.issue == "NOVEL_OR_REPRODUCES_REQUIRED"]
+    assert len(novel_issues) == 1
+    assert novel_issues[0].severity == IssueSeverity.ERROR
+
+
+def test_check_novel_or_reproduces_declared_ignores_benchmarks(tmp_path):
+    """AC-7: benchmark sidecars are not checked (only experiments)."""
+    from bathos.linter import check_novel_or_reproduces_declared
+
+    s = _make_script(tmp_path, "experiments", "bench_test.py")
+    sidecar_path = s.with_suffix(".bth.toml")
+    sidecar_path.write_text("""[benchmark]
+baseline_ref = "12345678"
+metric = "ns_per_day"
+target = "50 ns/day"
+
+[result_schema]
+ns_per_day = "float"
+""")
+
+    issues = check_novel_or_reproduces_declared(tmp_path)
+    novel_issues = [i for i in issues if i.issue == "NOVEL_OR_REPRODUCES_REQUIRED"]
+    assert len(novel_issues) == 0
+
+
+def test_check_novel_or_reproduces_declared_ignores_validation_scripts(tmp_path):
+    """AC-7: validation/ dir scripts (SidecarKind.VALIDATION) are not checked (only EXPERIMENT)."""
+    from bathos.linter import check_novel_or_reproduces_declared
+
+    s = _make_script(tmp_path, "validation", "check_energy.py")
+    sidecar_path = s.with_suffix(".bth.toml")
+    sidecar_path.write_text("""[validation]
+property = "energy conservation"
+reference = "+-1 kcal/mol"
+tolerance = "1"
+
+[result_schema]
+energy_error = "float"
+""")
+
+    issues = check_novel_or_reproduces_declared(tmp_path)
+    novel_issues = [i for i in issues if i.issue == "NOVEL_OR_REPRODUCES_REQUIRED"]
+    assert len(novel_issues) == 0
