@@ -175,6 +175,66 @@ def check_first_of_kind(script_path: Path, catalog_dir: Path, git_hash: str) -> 
     )
 
 
+def check_reproduction_prerequisite(
+    requires_pass_stem: str,
+    catalog_dir: Path,
+) -> bool:
+    """Check if a passing run of requires_pass_stem exists in the catalog.
+
+    Returns True if a matching run exists. False otherwise.
+
+    Uses warm-then-cool fallback pattern:
+    - Warm path: DuckDB query on bathos.db (fast)
+    - Cool-tier fallback: PyArrow glob scan of runs/**/*.parquet (slower)
+
+    Args:
+        requires_pass_stem: Script stem to search for (e.g. 'alanine_dipeptide')
+        catalog_dir: Path to catalog directory (~/.bth/catalog)
+
+    Returns:
+        True if a passing run is found, False otherwise.
+    """
+    import pyarrow.parquet as pq
+
+    db_path = catalog_dir / "bathos.db"
+
+    # Warm path: query DuckDB if available
+    if db_path.exists():
+        try:
+            with duckdb.connect(str(db_path), read_only=True) as conn:
+                rows = conn.execute(
+                    "SELECT 1 FROM runs WHERE command LIKE ? AND outcome = 'pass' LIMIT 1",
+                    [f"%{requires_pass_stem}%"]
+                ).fetchall()
+                if rows:
+                    return True
+        except Exception as e:
+            logger.warning(f"Warm tier reproduction prerequisite check failed: {e}")
+
+    # Cool-tier fallback: scan Parquet files
+    try:
+        runs_dir = catalog_dir / "runs"
+        if not runs_dir.exists():
+            return False
+
+        for parquet_file in sorted(runs_dir.glob("**/*.parquet")):
+            try:
+                table = pq.read_table(str(parquet_file), columns=["command", "outcome"])
+                cmds = table.column("command").to_pylist()
+                outcomes = table.column("outcome").to_pylist()
+
+                for cmd, outcome in zip(cmds, outcomes):
+                    if cmd and requires_pass_stem in cmd and outcome == "pass":
+                        return True
+            except Exception as e:
+                logger.warning(f"Failed to read {parquet_file}: {e}")
+                continue
+    except Exception as e:
+        logger.warning(f"Cool tier reproduction prerequisite check failed: {e}")
+
+    return False
+
+
 def gate_check(
     script_path: Path,
     bundle: SidecarBundle,

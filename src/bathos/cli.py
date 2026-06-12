@@ -932,8 +932,10 @@ def submit(
 
     # 3. Load sidecar [cluster] override (optional)
     sidecar_data = None
+    sidecar_path = None
     if sidecar:
         try:
+            sidecar_path = Path(sidecar)
             with open(sidecar, "rb") as f:
                 sidecar_data = tomllib.load(f)
         except (FileNotFoundError, OSError) as e:
@@ -948,11 +950,50 @@ def submit(
                     candidate_sidecar = candidate_py.with_suffix(".bth.toml")
                     if candidate_sidecar.exists():
                         try:
+                            sidecar_path = candidate_sidecar
                             with open(candidate_sidecar, "rb") as f:
                                 sidecar_data = tomllib.load(f)
                         except (FileNotFoundError, OSError):
                             pass  # Silently continue
                 break
+
+    # 3a. Check reproduction prerequisite gate (before cluster submission)
+    if sidecar_data:
+        from bathos.prereg import check_reproduction_prerequisite
+        from bathos.sidecar import parse_sidecar
+
+        try:
+            # Parse sidecar to get reproduction and stage_name
+            if sidecar_path:
+                parsed_sidecar = parse_sidecar(sidecar_path)
+            else:
+                # If we couldn't locate the sidecar file, skip the gate check
+                parsed_sidecar = None
+
+            if parsed_sidecar and parsed_sidecar.reproduction:
+                requires_pass_stem = parsed_sidecar.reproduction.requires_pass_stem
+                stage_name = parsed_sidecar.stage_name or "exploration"
+
+                # Only enforce hard gate for validation/production stages
+                if requires_pass_stem and stage_name in ("validation", "production"):
+                    found = check_reproduction_prerequisite(requires_pass_stem, _catalog_dir())
+                    if not found:
+                        typer.echo(
+                            f"REPRODUCTION_PREREQUISITE_UNMET: no passing run of '{requires_pass_stem}' found",
+                            err=True,
+                        )
+                        raise typer.Exit(1)
+                # Advisory warning for exploration/calibration stages
+                elif requires_pass_stem and stage_name in ("exploration", "calibration"):
+                    found = check_reproduction_prerequisite(requires_pass_stem, _catalog_dir())
+                    if not found:
+                        typer.echo(
+                            f"WARNING: no passing run of '{requires_pass_stem}' found (advisory for {stage_name} stage)",
+                            err=True,
+                        )
+        except Exception as e:
+            # Log but don't fail on gate check exceptions
+            typer.echo(f"Warning: reproduction prerequisite check failed: {e}", err=True)
 
     # 4. Resolve cluster config
     try:
