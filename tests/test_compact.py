@@ -585,3 +585,96 @@ def test_backup_rotation_keeps_max_3(tmp_catalog: Path, sample_run: Run):
     backups = list(tmp_catalog.glob("bathos.db.bak-*"))
     # Should keep at most 3 most recent; due to timestamp precision, might be fewer
     assert len(backups) <= 3, f"Expected at most 3 backups, got {len(backups)}"
+
+
+def test_output_metadata_refreshed_on_recompact(tmp_catalog: Path, sample_run: Run, tmp_path: Path):
+    """output_metadata for existing runs is re-statted on subsequent compacts (Debt #71)."""
+    import dataclasses
+    import json
+    import duckdb
+    from bathos.catalog import init_catalog, write_run
+    from bathos.compact import compact
+
+    init_catalog(tmp_catalog)
+    out_file = tmp_path / "result.json"
+    out_file.write_text('{"x": 1}')
+
+    run = dataclasses.replace(sample_run, output_paths=[str(out_file)])
+    write_run(run, tmp_catalog)
+    compact(tmp_catalog)
+
+    # Verify initial metadata captured
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"), read_only=True)
+    meta_json = con.execute("SELECT output_metadata FROM runs WHERE id = ?", [run.id]).fetchone()[0]
+    con.close()
+    meta = json.loads(meta_json)
+    assert meta[0]["status"] == "present"
+    initial_size = meta[0]["size_bytes"]
+
+    # Mutate the file so size changes
+    out_file.write_text('{"x": 1, "y": 2, "extra": "padding to change size"}')
+
+    # Second compact should refresh the metadata
+    compact(tmp_catalog)
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"), read_only=True)
+    meta_json2 = con.execute("SELECT output_metadata FROM runs WHERE id = ?", [run.id]).fetchone()[0]
+    con.close()
+    meta2 = json.loads(meta_json2)
+    assert meta2[0]["size_bytes"] != initial_size, "size_bytes should reflect updated file"
+
+
+def test_output_metadata_refresh_detects_deleted_file(tmp_catalog: Path, sample_run: Run, tmp_path: Path):
+    """output_metadata refresh marks deleted files as 'missing' on next compact."""
+    import dataclasses
+    import json
+    import duckdb
+    from bathos.catalog import init_catalog, write_run
+    from bathos.compact import compact
+
+    init_catalog(tmp_catalog)
+    out_file = tmp_path / "will_delete.json"
+    out_file.write_text('{}')
+
+    run = dataclasses.replace(sample_run, output_paths=[str(out_file)])
+    write_run(run, tmp_catalog)
+    compact(tmp_catalog)
+
+    # Delete the file
+    out_file.unlink()
+
+    # Next compact should mark it missing
+    compact(tmp_catalog)
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"), read_only=True)
+    meta_json = con.execute("SELECT output_metadata FROM runs WHERE id = ?", [run.id]).fetchone()[0]
+    con.close()
+    meta = json.loads(meta_json)
+    assert meta[0]["status"] == "missing"
+
+
+def test_output_metadata_sha256_reused_when_mtime_unchanged(tmp_catalog: Path, sample_run: Run, tmp_path: Path):
+    """sha256 is reused from stored metadata when mtime is unchanged (skip rehash)."""
+    import dataclasses
+    import json
+    import duckdb
+    from bathos.catalog import init_catalog, write_run
+    from bathos.compact import compact
+
+    init_catalog(tmp_catalog)
+    out_file = tmp_path / "stable.bin"
+    out_file.write_bytes(b"stable content")
+
+    run = dataclasses.replace(sample_run, output_paths=[str(out_file)])
+    write_run(run, tmp_catalog)
+    compact(tmp_catalog)
+
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"), read_only=True)
+    meta1 = json.loads(con.execute("SELECT output_metadata FROM runs WHERE id = ?", [run.id]).fetchone()[0])
+    con.close()
+    sha_before = meta1[0].get("sha256")
+
+    # Compact again without touching the file — mtime unchanged, sha256 should be reused
+    compact(tmp_catalog)
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"), read_only=True)
+    meta2 = json.loads(con.execute("SELECT output_metadata FROM runs WHERE id = ?", [run.id]).fetchone()[0])
+    con.close()
+    assert meta2[0].get("sha256") == sha_before
