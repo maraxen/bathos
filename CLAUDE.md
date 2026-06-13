@@ -10,18 +10,17 @@ bathos is a standalone experiment tracking CLI for a single researcher across 10
 
 ---
 
-## Current Status (as of 2026-06-12)
+## Current Status (as of 2026-06-13)
 
-**Latest: v0.10.1 — 677 tests passing (4 skipped).**
+**Latest: v0.11.0 — 753 tests passing (4 skipped).**
 
 Full version history is in [`CHANGELOG.md`](CHANGELOG.md). Summary of current version:
 
-- POPPER e-value sequential campaigns (`mode="sequential"`, `[popper]` sidecar block, likelihood-ratio e-values, threshold lock, sprint-audit signal 8, Tier-2 lint advisory)
-- Schema v6; campaign_runs gains `evalue` + `seq_position`; campaigns gains `stopping_threshold`
-- `bth outputs list / summary` — per-file output catalog with `--live` re-stat; fix `output_metadata` key bug in query.py; MCP mirrors
-- v0.10.1: fix `bth compact` BinderException on pre-existing catalogs (idempotent `ALTER TABLE runs ADD COLUMN IF NOT EXISTS` for 5 post-initial-schema columns)
+- **Experimental controls discipline** — `stage_name` write path, `[reproduction]`/`[controls]` sidecar blocks, reproduction prerequisite gate at `bth submit` (hard exit for validation/production; advisory for exploration/calibration), `control_arm_rate` sprint-audit Signal 9, `baseline_ref` Tier-2 lint, novel/reproduces Tier-1 lint, scaffold fix, submit-provenance Parquet, bypass-rate Signal 10
+- **Worktree-aware workspace resolution** — `resolve_workspace(cwd)` separates catalog identity from live `fs_root`; `BTH_WORKSPACE_ROOT` env override for SLURM jobs
+- v0.10.x: `bth repair` (catalog corruption recovery), POPPER e-value sequential campaigns, `bth outputs list/summary`, schema v6
 
-**Open backlog:** #137 (global instruction portability — deferred to praxia). Debt #71 (output_metadata refresh-on-compact). #142 Phase 2 (BTH_OUTPUT_DIR output convention).
+**Open backlog:** #137 (global instruction portability — deferred to praxia). Debt #71 (output_metadata refresh-on-compact). #142 Phase 2 (BTH_OUTPUT_DIR output convention). #798 (lint Tier-2: flag TODO strings in scaffolded sidecars).
 
 ---
 
