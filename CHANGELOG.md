@@ -7,8 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.11.0] - 2026-06-13
+
 ### Added
 
+- **Experimental controls discipline** — enforcement of scientific controls at the sidecar, lint, submit, and sprint-audit levels:
+  - **`stage_name` write path** — parsed from `[experiment].stage_name`, written to `Run` record at `runner.py`; non-canonical values coerced to `exploration`
+  - **`[reproduction]` sidecar block** — `ReproductionBlock` dataclass with `tolerance_pct`, `reproduces_run`, and `requires_pass_stem` fields; structural validation in `validate.py`
+  - **`[controls]` sidecar block** — `ControlsBlock` dataclass; `positive_outcome`/`negative_outcome` labels cross-validated against `[outcomes]` keys
+  - **Reproduction prerequisite gate** (`bth submit`) — hard exit `REPRODUCTION_PREREQUISITE_UNMET` for `validation`/`production` stage experiments when a required predecessor run with `outcome=pass` is not found; advisory WARNING (no exit) for `exploration`/`calibration` stage
+  - **`control_arm_rate` sprint-audit signal** (Signal 9) — flags campaigns at `validation`/`production` stage with zero `ctrl_*` outcome runs
+  - **`baseline_ref` Tier-2 lint check** — queries warm-tier for referenced benchmark run UUID; emits WARNING if not found
+  - **Novel/reproduces Tier-1 lint enforcement** — `ERROR` for `validation`/`production` sidecars missing `[reproduction]` block or `novel=true`
+  - **`bth new-experiment` scaffold fix** — generated sidecar now passes `validate_sidecar` out of the box (fixed `reasoning`, `is_residual`, SQL conditions, `result_schema`, `stage_name`, `novel`, commented `[reproduction]`/`[controls]`)
+  - **Submit-provenance Parquet** — atomic write to `submits/<slug>/` at `bth submit` time; accumulates all submission metadata
+  - **`signal_submit_bypass_rate`** sprint-audit Signal 10 — fraction of campaigns where `bth submit` was bypassed (no matching provenance record)
 - **Worktree-aware workspace resolution** (`src/bathos/workspace.py`). New `resolve_workspace(cwd)` returns a `WorkspaceContext` separating stable catalog **identity** (project slug, recorded `[project] root`) from the live **filesystem root** (`fs_root`) used for workspace-relative file operations. When `bth` runs from inside a git worktree, postmortem asset validation/scan now resolve against the live worktree checkout instead of the recorded main-checkout root. `fs_root` precedence: `BTH_WORKSPACE_ROOT` (new env var, must be absolute) → `git rev-parse --show-toplevel` → recorded `[project] root` → `cwd`. No schema change. Spec: `.praxia/docs/specs/260611_worktree-workspace-resolution.md`.
 - **`BTH_WORKSPACE_ROOT`** env override, mirroring `BTH_PROJECT_SLUG`/`BTH_CATALOG_DIR`; now exported by the SLURM env helper (`templates/_bth_env.sh`) so cluster jobs in spool dirs resolve deterministically.
 
@@ -18,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Notes
 
-- Identity (slug + catalog dir) is unchanged and stays stable across all worktrees of a repo. Catalog concurrency under simultaneous multi-worktree compaction is out of scope and tracked separately; a recorded `[project] root` that legitimately diverges from the git toplevel (monorepo subdir / symlink) now resolves to the git toplevel by design.
+- Total suite: 753 tests passing (4 skipped). Controls discipline spec: `.praxia/docs/specs/260612_experimental-controls-discipline-for-in.md`. Workspace resolution spec: `.praxia/docs/specs/260611_worktree-workspace-resolution.md`.
 
 ---
 
