@@ -916,3 +916,85 @@ decision = "good"
     novel_issues = [i for i in issues if i.issue == "NOVEL_OR_REPRODUCES_REQUIRED"]
     assert len(novel_issues) == 1, f"Expected 1 issue, got {len(novel_issues)}: {novel_issues}"
     assert novel_issues[0].severity == IssueSeverity.ERROR
+
+
+def test_check_todo_strings_in_scaffold_hypothesis_todo(tmp_path):
+    """Tier-2: Warn when hypothesis contains TODO placeholder."""
+    from bathos.linter import check_todo_strings_in_scaffold, IssueSeverity
+
+    s = _make_script(tmp_path, "experiments", "run_test.py")
+    sidecar_path = s.with_suffix(".bth.toml")
+    sidecar_path.write_text("""[experiment]
+hypothesis = "TODO: state your hypothesis"
+stage_name = "exploration"
+
+[outcomes.pass]
+condition = "x > 0"
+decision = "next step if pass"
+
+[result_schema]
+x = "float"
+""")
+
+    issues = check_todo_strings_in_scaffold(tmp_path)
+    todo_issues = [i for i in issues if i.issue == "todo_in_scaffold"]
+    assert len(todo_issues) > 0
+    assert any(i.severity == IssueSeverity.WARNING for i in todo_issues)
+    assert any("hypothesis" in str(i.detail).lower() for i in todo_issues)
+
+
+def test_check_todo_strings_in_scaffold_decision_todo(tmp_path):
+    """Tier-2: Warn when outcome decision contains TODO placeholder."""
+    from bathos.linter import check_todo_strings_in_scaffold, IssueSeverity
+
+    s = _make_script(tmp_path, "experiments", "run_test.py")
+    sidecar_path = s.with_suffix(".bth.toml")
+    sidecar_path.write_text("""[experiment]
+hypothesis = "my real hypothesis"
+stage_name = "exploration"
+
+[outcomes.pass]
+condition = "x > 0"
+decision = "TODO: next step if pass"
+
+[outcomes.fail]
+condition = "x <= 0"
+decision = "TODO: next step if fail"
+
+[result_schema]
+x = "float"
+""")
+
+    issues = check_todo_strings_in_scaffold(tmp_path)
+    todo_issues = [i for i in issues if i.issue == "todo_in_scaffold"]
+    assert len(todo_issues) == 2  # Both outcomes have TODO
+    assert all(i.severity == IssueSeverity.WARNING for i in todo_issues)
+    assert any("pass" in str(i.detail) for i in todo_issues)
+    assert any("fail" in str(i.detail) for i in todo_issues)
+
+
+def test_check_todo_strings_in_scaffold_clean(tmp_path):
+    """Tier-2: Clean sidecar with no TODO strings should pass."""
+    from bathos.linter import check_todo_strings_in_scaffold
+
+    s = _make_script(tmp_path, "experiments", "run_test.py")
+    sidecar_path = s.with_suffix(".bth.toml")
+    sidecar_path.write_text("""[experiment]
+hypothesis = "my real hypothesis"
+stage_name = "exploration"
+
+[outcomes.pass]
+condition = "x > 0"
+decision = "move to validation phase"
+
+[outcomes.fail]
+condition = "x <= 0"
+decision = "debug parameters and retry"
+
+[result_schema]
+x = "float"
+""")
+
+    issues = check_todo_strings_in_scaffold(tmp_path)
+    todo_issues = [i for i in issues if i.issue == "todo_in_scaffold"]
+    assert len(todo_issues) == 0

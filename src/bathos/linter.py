@@ -569,6 +569,68 @@ def check_threshold_basis(project_root: Path) -> list[LintIssue]:
     return issues
 
 
+def check_todo_strings_in_scaffold(project_root: Path) -> list[LintIssue]:
+    """Tier-2: Warn when sidecar hypothesis or outcome decisions contain TODO placeholders.
+
+    Scans all .bth.toml files in the project for remnants of the scaffold template.
+    Checks:
+    - [experiment].hypothesis for "TODO" substring
+    - Each [outcomes.*].decision for "TODO" substring
+
+    Returns WARNING if TODO found in either location.
+
+    Args:
+        project_root: Root directory of the project.
+
+    Returns:
+        List of LintIssue objects with severity WARNING.
+    """
+    issues: list[LintIssue] = []
+
+    # Find all .bth.toml files in the project
+    for sidecar_path in project_root.rglob("*.bth.toml"):
+        try:
+            with open(sidecar_path, "rb") as f:
+                data = tomllib.load(f)
+        except Exception:
+            # Skip files that can't be parsed
+            continue
+
+        # Check hypothesis field
+        experiment = data.get("experiment", {})
+        hypothesis = experiment.get("hypothesis", "")
+        if hypothesis and "TODO" in hypothesis:
+            issues.append(LintIssue(
+                path=sidecar_path,
+                directory="sidecar",
+                issue="todo_in_scaffold",
+                severity=IssueSeverity.WARNING,
+                detail=(
+                    "hypothesis contains TODO placeholder — replace with actual hypothesis"
+                ),
+            ))
+
+        # Check decision fields in outcomes
+        outcomes = data.get("outcomes", {})
+        for label, outcome in outcomes.items():
+            if not isinstance(outcome, dict):
+                continue
+            decision = outcome.get("decision", "")
+            if decision and "TODO" in decision:
+                issues.append(LintIssue(
+                    path=sidecar_path,
+                    directory="sidecar",
+                    issue="todo_in_scaffold",
+                    severity=IssueSeverity.WARNING,
+                    detail=(
+                        f"outcome '{label}' decision contains TODO placeholder — "
+                        "replace with actual next step"
+                    ),
+                ))
+
+    return issues
+
+
 def check_ephemeral_output_paths(catalog_dir: Path) -> list[LintIssue]:
     """Check for runs that registered ephemeral output paths.
 
