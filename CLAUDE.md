@@ -20,7 +20,7 @@ Full version history is in [`CHANGELOG.md`](CHANGELOG.md). Summary of current ve
 - **Worktree-aware workspace resolution** — `resolve_workspace(cwd)` separates catalog identity from live `fs_root`; `BTH_WORKSPACE_ROOT` env override for SLURM jobs
 - v0.10.x: `bth repair` (catalog corruption recovery), POPPER e-value sequential campaigns, `bth outputs list/summary`, schema v6
 
-**Open backlog:** #137 (global instruction portability — deferred to praxia). Debt #71 (output_metadata refresh-on-compact). #142 Phase 2 (BTH_OUTPUT_DIR output convention). #798 (lint Tier-2: flag TODO strings in scaffolded sidecars).
+**Open backlog:** #137 (global instruction portability — deferred to praxia). Debt #71 (output_metadata refresh-on-compact). #142 Phase 2 (BTH_OUTPUT_DIR output convention). #793 (structured gate error taxonomy in MCP tools — needs spec). #1774 (submit-provenance pruning — P3).
 
 ---
 
