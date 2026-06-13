@@ -932,8 +932,10 @@ def submit(
 
     # 3. Load sidecar [cluster] override (optional)
     sidecar_data = None
+    sidecar_path = None
     if sidecar:
         try:
+            sidecar_path = Path(sidecar)
             with open(sidecar, "rb") as f:
                 sidecar_data = tomllib.load(f)
         except (FileNotFoundError, OSError) as e:
@@ -948,11 +950,53 @@ def submit(
                     candidate_sidecar = candidate_py.with_suffix(".bth.toml")
                     if candidate_sidecar.exists():
                         try:
+                            sidecar_path = candidate_sidecar
                             with open(candidate_sidecar, "rb") as f:
                                 sidecar_data = tomllib.load(f)
                         except (FileNotFoundError, OSError):
                             pass  # Silently continue
                 break
+
+    # 3a. Check reproduction prerequisite gate (before cluster submission)
+    if sidecar_data:
+        from bathos.prereg import check_reproduction_prerequisite
+        from bathos.sidecar import parse_sidecar
+
+        try:
+            # Parse sidecar to get reproduction and stage_name
+            if sidecar_path:
+                parsed_sidecar = parse_sidecar(sidecar_path)
+            else:
+                # If we couldn't locate the sidecar file, skip the gate check
+                parsed_sidecar = None
+
+            if parsed_sidecar and parsed_sidecar.reproduction:
+                requires_pass_stem = parsed_sidecar.reproduction.requires_pass_stem
+                stage_name = parsed_sidecar.stage_name or "exploration"
+
+                # Only enforce hard gate for validation/production stages
+                if requires_pass_stem and stage_name in ("validation", "production"):
+                    found = check_reproduction_prerequisite(requires_pass_stem, _catalog_dir())
+                    if not found:
+                        typer.echo(
+                            f"REPRODUCTION_PREREQUISITE_UNMET: no passing run of '{requires_pass_stem}' found",
+                            err=True,
+                        )
+                        raise typer.Exit(1)
+                # Advisory warning for exploration/calibration stages
+                elif requires_pass_stem and stage_name in ("exploration", "calibration"):
+                    found = check_reproduction_prerequisite(requires_pass_stem, _catalog_dir())
+                    if not found:
+                        typer.echo(
+                            f"WARNING: no passing run of '{requires_pass_stem}' found (advisory for {stage_name} stage)",
+                            err=True,
+                        )
+        except typer.Exit:
+            # Let typer.Exit exceptions through (hard gate failures)
+            raise
+        except Exception as e:
+            # Log but don't fail on gate check exceptions
+            typer.echo(f"Warning: reproduction prerequisite check failed: {e}", err=True)
 
     # 4. Resolve cluster config
     try:
@@ -998,6 +1042,40 @@ def submit(
     typer.echo(
         f"Submitted {slurm_job_id} on {cluster.remote} using preset {cluster.preset}"
     )
+
+    # 7a. Write submit-provenance record (AC-9 Part 1)
+    try:
+        import hashlib
+        from bathos.catalog import write_submit_provenance
+
+        sidecar_sha256 = ""
+        stage_name = "exploration"
+
+        if sidecar_path and sidecar_path.exists():
+            # Compute SHA256 of sidecar file
+            sha256_hash = hashlib.sha256()
+            with open(sidecar_path, "rb") as f:
+                sha256_hash.update(f.read())
+            sidecar_sha256 = sha256_hash.hexdigest()
+
+        # Extract stage_name from sidecar if available
+        if sidecar_data:
+            experiment_section = sidecar_data.get("experiment", {})
+            if isinstance(experiment_section, dict):
+                stage_name = experiment_section.get("stage_name", "exploration")
+
+        # Write submit provenance to catalog
+        write_submit_provenance(
+            project_slug=cluster.project,
+            command=cmd_str,
+            sidecar_sha256=sidecar_sha256,
+            myxcel_job_id=slurm_job_id,
+            stage_name=stage_name,
+            catalog_dir=_catalog_dir(),
+        )
+    except Exception as e:
+        # Log but don't fail on provenance write errors
+        typer.echo(f"Warning: submit-provenance write failed: {e}", err=True)
 
     # 8. Exit if not waiting
     if not wait:

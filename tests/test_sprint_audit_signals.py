@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from bathos.catalog import init_catalog, write_run
+from bathos.catalog import init_catalog, write_run, write_submit_provenance
 from bathos.compact import compact
 from bathos.schema import Run
 
@@ -622,8 +622,8 @@ class TestPostHocBiasFlagAndIntegration:
         signals = result["audit_results"]["test_project"]["signals"]
         assert signals["post_hoc_bias_flag"] is False
 
-    def test_signals_dict_contains_all_seven(self, monkeypatch_registry, tmp_path):
-        """Test that all 7 signals are present in output."""
+    def test_signals_dict_contains_all_nine(self, monkeypatch_registry, tmp_path):
+        """Test that all 9 signals are present in output."""
         from bathos.config import register_project
         from bathos.sprint_audit import sprint_audit
 
@@ -659,7 +659,7 @@ class TestPostHocBiasFlagAndIntegration:
         assert "test_project" in result["audit_results"]
         audit_data = result["audit_results"]["test_project"]
 
-        # All 7 signals must be present
+        # All 9 signals must be present
         expected_signals = {
             "error_rate",
             "bypass_explicit",
@@ -668,6 +668,8 @@ class TestPostHocBiasFlagAndIntegration:
             "unfired_branches",
             "schema_overflow_rate",
             "post_hoc_bias_flag",
+            "premature_stopping_rate",
+            "control_arm_rate",
         }
         signals = audit_data["signals"]
         for signal_name in expected_signals:
@@ -1250,3 +1252,540 @@ class TestSchemaOverflowSemantics:
         signals = result["audit_results"]["test_project"]["signals"]
         # denominator = 5 (sidecar runs), overflow_count = 0 -> rate = 0.0
         assert signals["schema_overflow_rate"] == pytest.approx(0.0)
+
+
+class TestControlArmRate:
+    """Test control_arm_rate signal (AC-5)."""
+
+    def test_control_arm_rate_zero_no_ctrl_runs(self, monkeypatch_registry, tmp_path):
+        """Test control_arm_rate is 0 when no runs have ctrl_* outcomes."""
+        from bathos.config import register_project
+        from bathos.sprint_audit import sprint_audit
+
+        catalog_dir = tmp_path / "test_catalog"
+        catalog_dir.mkdir()
+        init_catalog(catalog_dir)
+
+        base_time = datetime.now(UTC)
+        runs = [
+            Run(
+                project_slug="test_project",
+                command="python test.py",
+                argv=["python", "test.py"],
+                git_hash="abc123",
+                git_branch="main",
+                git_dirty=False,
+                timestamp=base_time + timedelta(seconds=i),
+                status="completed",
+                exit_code=0,
+                outcome="pass",
+                sidecar_mode="normal",
+                outcome_is_residual=False,
+            )
+            for i in range(5)
+        ]
+
+        for r in runs:
+            write_run(r, catalog_dir)
+        compact(catalog_dir)
+        register_project(slug="test_project", catalog_dir=catalog_dir)
+
+        result = sprint_audit(hours=24)
+        signals = result["audit_results"]["test_project"]["signals"]
+        assert signals["control_arm_rate"] == pytest.approx(0.0)
+
+    def test_control_arm_rate_nonzero_with_ctrl_passes(self, monkeypatch_registry, tmp_path):
+        """Test control_arm_rate > 0 when runs have ctrl_pass outcomes."""
+        from bathos.config import register_project
+        from bathos.sprint_audit import sprint_audit
+
+        catalog_dir = tmp_path / "test_catalog"
+        catalog_dir.mkdir()
+        init_catalog(catalog_dir)
+
+        base_time = datetime.now(UTC)
+        runs = [
+            Run(
+                project_slug="test_project",
+                command="python test.py",
+                argv=["python", "test.py"],
+                git_hash="abc123",
+                git_branch="main",
+                git_dirty=False,
+                timestamp=base_time + timedelta(seconds=i),
+                status="completed",
+                exit_code=0,
+                outcome="ctrl_pass" if i < 2 else "pass",
+                sidecar_mode="normal",
+                outcome_is_residual=False,
+            )
+            for i in range(5)
+        ]
+
+        for r in runs:
+            write_run(r, catalog_dir)
+        compact(catalog_dir)
+        register_project(slug="test_project", catalog_dir=catalog_dir)
+
+        result = sprint_audit(hours=24)
+        signals = result["audit_results"]["test_project"]["signals"]
+        # 2 out of 5 have ctrl_* outcomes
+        assert signals["control_arm_rate"] == pytest.approx(0.4)
+
+    def test_control_arm_rate_mixed_ctrl_outcomes(self, monkeypatch_registry, tmp_path):
+        """Test control_arm_rate counts both ctrl_pass and ctrl_fail."""
+        from bathos.config import register_project
+        from bathos.sprint_audit import sprint_audit
+
+        catalog_dir = tmp_path / "test_catalog"
+        catalog_dir.mkdir()
+        init_catalog(catalog_dir)
+
+        base_time = datetime.now(UTC)
+        outcomes = [
+            "ctrl_pass", "ctrl_pass", "ctrl_fail", "pass", "pass"
+        ]
+        runs = [
+            Run(
+                project_slug="test_project",
+                command="python test.py",
+                argv=["python", "test.py"],
+                git_hash="abc123",
+                git_branch="main",
+                git_dirty=False,
+                timestamp=base_time + timedelta(seconds=i),
+                status="completed",
+                exit_code=0,
+                outcome=outcomes[i],
+                sidecar_mode="normal",
+                outcome_is_residual=False,
+            )
+            for i in range(5)
+        ]
+
+        for r in runs:
+            write_run(r, catalog_dir)
+        compact(catalog_dir)
+        register_project(slug="test_project", catalog_dir=catalog_dir)
+
+        result = sprint_audit(hours=24)
+        signals = result["audit_results"]["test_project"]["signals"]
+        # 3 out of 5 have ctrl_* outcomes
+        assert signals["control_arm_rate"] == pytest.approx(0.6)
+
+    def test_control_arm_rate_warning_zero_with_validation_stage(self, monkeypatch_registry, tmp_path):
+        """Test WARNING when control_arm_rate==0.0 and validation/production runs exist."""
+        from bathos.config import register_project
+        from bathos.sprint_audit import sprint_audit
+
+        catalog_dir = tmp_path / "test_catalog"
+        catalog_dir.mkdir()
+        init_catalog(catalog_dir)
+
+        base_time = datetime.now(UTC)
+        runs = [
+            Run(
+                project_slug="test_project",
+                command="python test.py",
+                argv=["python", "test.py"],
+                git_hash="abc123",
+                git_branch="main",
+                git_dirty=False,
+                timestamp=base_time + timedelta(seconds=i),
+                status="completed",
+                exit_code=0,
+                outcome="pass",
+                sidecar_mode="normal",
+                outcome_is_residual=False,
+                stage_name="validation",  # AC-0: stage_name populated
+            )
+            for i in range(3)
+        ]
+
+        for r in runs:
+            write_run(r, catalog_dir)
+        compact(catalog_dir)
+        register_project(slug="test_project", catalog_dir=catalog_dir)
+
+        result = sprint_audit(hours=24)
+        signals = result["audit_results"]["test_project"]["signals"]
+        anomalies = result["audit_results"]["test_project"]["anomalies"]
+
+        # Rate should be 0.0 (no ctrl_* runs)
+        assert signals["control_arm_rate"] == pytest.approx(0.0)
+        # Should have a warning about control arm rate
+        assert any("control_arm_rate" in str(a) for a in anomalies)
+
+    def test_signal_control_arm_rate_no_db(self):
+        """Test signal_control_arm_rate returns INFO when warm DB does not exist."""
+        from bathos.sprint_audit import signal_control_arm_rate
+
+        result = signal_control_arm_rate("any_project", Path("/nonexistent/bathos.db"))
+        assert result.signal == "control_arm_rate"
+        assert result.value is None
+        assert result.level == "INFO"
+        assert "warm DB not available" in result.message
+
+    def test_signal_control_arm_rate_no_runs(self, tmp_path):
+        """Test signal_control_arm_rate returns INFO when project has no runs."""
+        from bathos.sprint_audit import signal_control_arm_rate
+
+        catalog_dir = tmp_path / "test_catalog"
+        catalog_dir.mkdir()
+        init_catalog(catalog_dir)
+        # Compact to create warm DB (no runs written, so table is empty)
+        compact(catalog_dir)
+
+        db_path = catalog_dir / "bathos.db"
+        result = signal_control_arm_rate("test_project", db_path)
+        assert result.signal == "control_arm_rate"
+        assert result.value == 0.0
+        assert result.level == "INFO"
+        assert "no runs in project" in result.message
+
+    def test_signal_control_arm_rate_ok_with_controls(self, tmp_path):
+        """Test signal_control_arm_rate returns OK when control runs exist."""
+        from bathos.sprint_audit import signal_control_arm_rate
+
+        catalog_dir = tmp_path / "test_catalog"
+        catalog_dir.mkdir()
+        init_catalog(catalog_dir)
+
+        base_time = datetime.now(UTC)
+        runs = [
+            Run(
+                project_slug="test_project",
+                command="python test.py",
+                argv=["python", "test.py"],
+                git_hash="abc123",
+                git_branch="main",
+                git_dirty=False,
+                timestamp=base_time + timedelta(seconds=i),
+                status="completed",
+                exit_code=0,
+                outcome="ctrl_pass" if i < 2 else "pass",
+                sidecar_mode="normal",
+                outcome_is_residual=False,
+            )
+            for i in range(5)
+        ]
+
+        for r in runs:
+            write_run(r, catalog_dir)
+        compact(catalog_dir)
+
+        db_path = catalog_dir / "bathos.db"
+        result = signal_control_arm_rate("test_project", db_path)
+        assert result.signal == "control_arm_rate"
+        assert result.value == pytest.approx(0.4)
+        assert result.level == "OK"
+
+    def test_signal_control_arm_rate_warning_zero_with_validation(self, tmp_path):
+        """Test signal_control_arm_rate returns WARNING when rate==0.0 with validation runs."""
+        from bathos.sprint_audit import signal_control_arm_rate
+
+        catalog_dir = tmp_path / "test_catalog"
+        catalog_dir.mkdir()
+        init_catalog(catalog_dir)
+
+        base_time = datetime.now(UTC)
+        runs = [
+            Run(
+                project_slug="test_project",
+                command="python test.py",
+                argv=["python", "test.py"],
+                git_hash="abc123",
+                git_branch="main",
+                git_dirty=False,
+                timestamp=base_time + timedelta(seconds=i),
+                status="completed",
+                exit_code=0,
+                outcome="pass",
+                sidecar_mode="normal",
+                outcome_is_residual=False,
+                stage_name="validation",  # AC-0: stage_name populated
+            )
+            for i in range(3)
+        ]
+
+        for r in runs:
+            write_run(r, catalog_dir)
+        compact(catalog_dir)
+
+        db_path = catalog_dir / "bathos.db"
+        result = signal_control_arm_rate("test_project", db_path)
+        assert result.signal == "control_arm_rate"
+        assert result.value == pytest.approx(0.0)
+        assert result.level == "WARNING"
+        assert "no control arm runs found in validation/production campaigns" in result.message
+
+
+class TestSubmitBypassRateSignal:
+    """Test AC-9 signal_submit_bypass_rate — detection of cluster submit bypass."""
+
+    def test_submit_bypass_rate_all_via_bth_submit(self, monkeypatch_registry, tmp_path):
+        """All validation/production runs submitted via bth submit — rate=0%."""
+        from bathos.config import register_project
+        from bathos.sprint_audit import signal_submit_bypass_rate
+
+        catalog_dir = tmp_path / "test_catalog"
+        catalog_dir.mkdir()
+        init_catalog(catalog_dir)
+
+        # Create 3 validation runs with slurm_job_id
+        base_time = datetime.now(UTC)
+        runs = [
+            Run(
+                project_slug="test_project",
+                command=f"python test.py --i {i}",
+                argv=["python", "test.py", "--i", str(i)],
+                git_hash="abc123",
+                git_branch="main",
+                git_dirty=False,
+                timestamp=base_time + timedelta(seconds=i),
+                status="completed",
+                exit_code=0,
+                outcome="pass",
+                sidecar_mode="normal",
+                outcome_is_residual=False,
+                stage_name="validation",
+                slurm_job_id=f"10000{i}",
+            )
+            for i in range(3)
+        ]
+
+        for r in runs:
+            write_run(r, catalog_dir)
+        compact(catalog_dir)
+
+        # Write submit-provenance records for all 3 jobs
+        for i in range(3):
+            write_submit_provenance(
+                project_slug="test_project",
+                command=f"python test.py --i {i}",
+                sidecar_sha256="hash123",
+                myxcel_job_id=f"10000{i}",
+                stage_name="validation",
+                catalog_dir=catalog_dir,
+            )
+
+        db_path = catalog_dir / "bathos.db"
+        result = signal_submit_bypass_rate("test_project", db_path, catalog_dir)
+
+        assert result.signal == "submit_bypass_rate"
+        assert result.value == pytest.approx(0.0)
+        assert result.level == "OK"
+        assert "0/3" in result.message
+
+    def test_submit_bypass_rate_some_bypassed(self, monkeypatch_registry, tmp_path):
+        """Only 2 of 3 validation runs submitted via bth submit — rate=33% > 5% threshold."""
+        from bathos.config import register_project
+        from bathos.sprint_audit import signal_submit_bypass_rate
+
+        catalog_dir = tmp_path / "test_catalog"
+        catalog_dir.mkdir()
+        init_catalog(catalog_dir)
+
+        # Create 3 validation runs with slurm_job_id
+        base_time = datetime.now(UTC)
+        runs = [
+            Run(
+                project_slug="test_project",
+                command=f"python test.py --i {i}",
+                argv=["python", "test.py", "--i", str(i)],
+                git_hash="abc123",
+                git_branch="main",
+                git_dirty=False,
+                timestamp=base_time + timedelta(seconds=i),
+                status="completed",
+                exit_code=0,
+                outcome="pass",
+                sidecar_mode="normal",
+                outcome_is_residual=False,
+                stage_name="validation",
+                slurm_job_id=f"10000{i}",
+            )
+            for i in range(3)
+        ]
+
+        for r in runs:
+            write_run(r, catalog_dir)
+        compact(catalog_dir)
+
+        # Write submit-provenance records for only 2 jobs (0 and 1)
+        for i in range(2):
+            write_submit_provenance(
+                project_slug="test_project",
+                command=f"python test.py --i {i}",
+                sidecar_sha256="hash123",
+                myxcel_job_id=f"10000{i}",
+                stage_name="validation",
+                catalog_dir=catalog_dir,
+            )
+
+        db_path = catalog_dir / "bathos.db"
+        result = signal_submit_bypass_rate("test_project", db_path, catalog_dir)
+
+        assert result.signal == "submit_bypass_rate"
+        assert result.value == pytest.approx(1.0 / 3)  # 1 of 3 bypassed
+        assert result.level == "WARNING"  # 33% > 5% threshold
+        assert "1/3" in result.message
+
+    def test_submit_bypass_rate_high_rate_warning(self, monkeypatch_registry, tmp_path):
+        """6 of 10 validation runs bypassed — rate=60% > 5% threshold — WARNING."""
+        from bathos.config import register_project
+        from bathos.sprint_audit import signal_submit_bypass_rate
+
+        catalog_dir = tmp_path / "test_catalog"
+        catalog_dir.mkdir()
+        init_catalog(catalog_dir)
+
+        # Create 10 validation runs with slurm_job_id
+        base_time = datetime.now(UTC)
+        runs = [
+            Run(
+                project_slug="test_project",
+                command=f"python test.py --i {i}",
+                argv=["python", "test.py", "--i", str(i)],
+                git_hash="abc123",
+                git_branch="main",
+                git_dirty=False,
+                timestamp=base_time + timedelta(seconds=i),
+                status="completed",
+                exit_code=0,
+                outcome="pass",
+                sidecar_mode="normal",
+                outcome_is_residual=False,
+                stage_name="validation",
+                slurm_job_id=f"1000{i:02d}",
+            )
+            for i in range(10)
+        ]
+
+        for r in runs:
+            write_run(r, catalog_dir)
+        compact(catalog_dir)
+
+        # Write submit-provenance records for only 4 jobs (0,1,2,3)
+        for i in range(4):
+            write_submit_provenance(
+                project_slug="test_project",
+                command=f"python test.py --i {i}",
+                sidecar_sha256="hash123",
+                myxcel_job_id=f"1000{i:02d}",
+                stage_name="validation",
+                catalog_dir=catalog_dir,
+            )
+
+        db_path = catalog_dir / "bathos.db"
+        result = signal_submit_bypass_rate("test_project", db_path, catalog_dir)
+
+        assert result.signal == "submit_bypass_rate"
+        assert result.value == pytest.approx(6.0 / 10)  # 6 of 10 bypassed
+        assert result.level == "WARNING"
+        assert "60.00%" in result.message or "6/10" in result.message
+
+    def test_submit_bypass_rate_no_validation_runs(self, monkeypatch_registry, tmp_path):
+        """No validation/production runs — rate=0%, level=INFO."""
+        from bathos.config import register_project
+        from bathos.sprint_audit import signal_submit_bypass_rate
+
+        catalog_dir = tmp_path / "test_catalog"
+        catalog_dir.mkdir()
+        init_catalog(catalog_dir)
+
+        # Create only exploration runs (no validation/production)
+        base_time = datetime.now(UTC)
+        runs = [
+            Run(
+                project_slug="test_project",
+                command=f"python test.py --i {i}",
+                argv=["python", "test.py", "--i", str(i)],
+                git_hash="abc123",
+                git_branch="main",
+                git_dirty=False,
+                timestamp=base_time + timedelta(seconds=i),
+                status="completed",
+                exit_code=0,
+                outcome="pass",
+                sidecar_mode="normal",
+                outcome_is_residual=False,
+                stage_name="exploration",
+                slurm_job_id=f"20000{i}",
+            )
+            for i in range(3)
+        ]
+
+        for r in runs:
+            write_run(r, catalog_dir)
+        compact(catalog_dir)
+
+        db_path = catalog_dir / "bathos.db"
+        result = signal_submit_bypass_rate("test_project", db_path, catalog_dir)
+
+        assert result.signal == "submit_bypass_rate"
+        assert result.value == pytest.approx(0.0)
+        assert result.level == "INFO"
+        assert "no validation/production cluster runs found" in result.message
+
+    def test_submit_bypass_rate_no_provenance_records(self, monkeypatch_registry, tmp_path):
+        """Validation runs exist but no provenance records yet — all are bypassed."""
+        from bathos.config import register_project
+        from bathos.sprint_audit import signal_submit_bypass_rate
+
+        catalog_dir = tmp_path / "test_catalog"
+        catalog_dir.mkdir()
+        init_catalog(catalog_dir)
+
+        # Create validation runs but do NOT write provenance records
+        base_time = datetime.now(UTC)
+        runs = [
+            Run(
+                project_slug="test_project",
+                command=f"python test.py --i {i}",
+                argv=["python", "test.py", "--i", str(i)],
+                git_hash="abc123",
+                git_branch="main",
+                git_dirty=False,
+                timestamp=base_time + timedelta(seconds=i),
+                status="completed",
+                exit_code=0,
+                outcome="pass",
+                sidecar_mode="normal",
+                outcome_is_residual=False,
+                stage_name="validation",
+                slurm_job_id=f"30000{i}",
+            )
+            for i in range(2)
+        ]
+
+        for r in runs:
+            write_run(r, catalog_dir)
+        compact(catalog_dir)
+
+        db_path = catalog_dir / "bathos.db"
+        result = signal_submit_bypass_rate("test_project", db_path, catalog_dir)
+
+        assert result.signal == "submit_bypass_rate"
+        assert result.value == pytest.approx(1.0)  # All bypassed
+        assert result.level == "WARNING"
+        assert "100.00%" in result.message or "2/2" in result.message
+
+    def test_submit_bypass_rate_no_warm_db(self, monkeypatch_registry, tmp_path):
+        """When warm DB doesn't exist, signal returns INFO with value=None (coverage for line 238-244)."""
+        from bathos.config import register_project
+        from bathos.sprint_audit import signal_submit_bypass_rate
+
+        catalog_dir = tmp_path / "test_catalog"
+        catalog_dir.mkdir()
+        init_catalog(catalog_dir)
+
+        # Deliberately use a non-existent db_path
+        db_path = catalog_dir / "nonexistent.db"
+
+        result = signal_submit_bypass_rate("test_project", db_path, catalog_dir)
+
+        assert result.signal == "submit_bypass_rate"
+        assert result.value is None
+        assert result.level == "INFO"
+        assert "warm DB not available" in result.message

@@ -4,12 +4,30 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import duckdb
 
 from bathos.schema import CURRENT_SCHEMA_VERSION
+
+
+@dataclass
+class SignalResult:
+    """Result of a single sprint-audit signal computation.
+
+    Attributes:
+        signal: Signal name (e.g., 'control_arm_rate').
+        value: Numeric value (float or None if unavailable).
+        level: Severity level ('INFO', 'OK', or 'WARNING').
+        message: Human-readable message describing the result.
+    """
+
+    signal: str
+    value: float | None
+    level: str
+    message: str
 
 
 def _compute_outcome_entropy(outcomes: list[str]) -> float:
@@ -92,6 +110,182 @@ def _load_sidecar_schema_keys(sidecar_path: str) -> set[str] | None:
     except Exception:
         return None
 
+
+def signal_control_arm_rate(project_slug: str, db_path: Path) -> SignalResult:
+    """Signal 9: control_arm_rate — fraction of runs with ctrl_* outcome labels.
+
+    Args:
+        project_slug: Project identifier.
+        db_path: Path to warm DB (bathos.db).
+
+    Returns:
+        SignalResult with value (control_arm_rate as float or None),
+        level ('INFO', 'OK', or 'WARNING'), and message.
+
+    Semantics:
+        - If warm DB does not exist: value=None, level='INFO'
+        - If no runs exist: value=0.0, level='INFO'
+        - If control_arm_rate > 0.0: level='OK'
+        - If control_arm_rate == 0.0 AND validation/production runs exist: level='WARNING'
+          (no control arm found in validation/production campaigns)
+    """
+    if not db_path.exists():
+        return SignalResult(
+            signal="control_arm_rate",
+            value=None,
+            level="INFO",
+            message="warm DB not available",
+        )
+
+    try:
+        with duckdb.connect(str(db_path), read_only=True) as conn:
+            # Count total runs
+            total = conn.execute(
+                "SELECT COUNT(*) FROM runs WHERE project_slug = ?", [project_slug]
+            ).fetchone()[0]
+
+            if total == 0:
+                return SignalResult(
+                    signal="control_arm_rate",
+                    value=0.0,
+                    level="INFO",
+                    message="no runs in project",
+                )
+
+            # Count control arm runs (outcome LIKE 'ctrl_%')
+            ctrl_count = conn.execute(
+                "SELECT COUNT(*) FROM runs WHERE project_slug = ? AND outcome LIKE 'ctrl_%'",
+                [project_slug],
+            ).fetchone()[0]
+
+            rate = ctrl_count / total
+
+            # Check if any validation/production campaign runs exist
+            has_val_prod = conn.execute(
+                "SELECT 1 FROM runs WHERE project_slug = ? AND stage_name IN ('validation','production') LIMIT 1",
+                [project_slug],
+            ).fetchone()
+
+            level = "OK"
+            message = f"control_arm_rate={rate:.2%} ({ctrl_count}/{total} runs with ctrl_* outcomes)"
+
+            if rate == 0.0 and has_val_prod:
+                level = "WARNING"
+                message += " — no control arm runs found in validation/production campaigns"
+
+            return SignalResult(
+                signal="control_arm_rate",
+                value=rate,
+                level=level,
+                message=message,
+            )
+    except Exception as e:
+        return SignalResult(
+            signal="control_arm_rate",
+            value=None,
+            level="INFO",
+            message=f"error computing control_arm_rate: {e}",
+        )
+
+
+def signal_submit_bypass_rate(project_slug: str, db_path: Path, catalog_dir: Path) -> SignalResult:
+    """Signal 10: submit_bypass_rate — fraction of validation/production runs not submitted via bth submit.
+
+    Args:
+        project_slug: Project identifier.
+        db_path: Path to warm DB (bathos.db).
+        catalog_dir: Path to catalog directory (~/.bth/catalog).
+
+    Returns:
+        SignalResult with value (submit_bypass_rate as float or None),
+        level ('INFO', 'OK', or 'WARNING'), and message.
+
+    Semantics:
+        - Loads all submit-provenance records from ~/.bth/catalog/submits/<project_slug>/**/*.parquet.
+        - For each validation/production run with slurm_job_id populated, checks if matching
+          submit-provenance exists (joined on runs.slurm_job_id = submits.myxcel_job_id).
+        - If match found: run was submitted via bth submit.
+        - If no match: run bypassed bth submit (e.g., direct sbatch call).
+        - value = (bypassed runs) / (total validation/production runs with slurm_job_id).
+        - WARNING if rate > 5% (threshold: submit_bypass_rate > 0.05).
+        - OK if rate <= 5%.
+        - INFO if no runs or no provenance records found yet.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq_lib
+
+    # Load provenance records
+    provenance_dir = catalog_dir / "submits" / project_slug
+    provenance_files = []
+    if provenance_dir.exists():
+        provenance_files = list(provenance_dir.glob("**/*.parquet"))
+
+    submitted_job_ids: set[str] = set()
+    if provenance_files:
+        try:
+            tables = [pq_lib.read_table(str(f)) for f in provenance_files]
+            if tables:
+                combined = pa.concat_tables(tables)
+                submitted_job_ids = set(
+                    jid for jid in combined.column("myxcel_job_id").to_pylist() if jid
+                )
+        except Exception as e:
+            # Silently continue if provenance read fails
+            # (but could log: f"Warning reading provenance: {e}")
+            pass
+
+    # Query warm DB for validation/production runs with slurm_job_id
+    if not db_path.exists():
+        return SignalResult(
+            signal="submit_bypass_rate",
+            value=None,
+            level="INFO",
+            message="warm DB not available",
+        )
+
+    try:
+        with duckdb.connect(str(db_path), read_only=True) as conn:
+            rows = conn.execute(
+                "SELECT slurm_job_id FROM runs"
+                " WHERE project_slug = ?"
+                " AND stage_name IN ('validation', 'production')"
+                " AND slurm_job_id IS NOT NULL AND slurm_job_id != ''",
+                [project_slug],
+            ).fetchall()
+
+            if not rows:
+                return SignalResult(
+                    signal="submit_bypass_rate",
+                    value=0.0,
+                    level="INFO",
+                    message="no validation/production cluster runs found",
+                )
+
+            total = len(rows)
+            bypassed = sum(1 for (jid,) in rows if jid not in submitted_job_ids)
+            rate = bypassed / total
+
+            level = "WARNING" if rate > 0.05 else "OK"
+            message = (
+                f"submit_bypass_rate={rate:.2%} ({bypassed}/{total} "
+                f"validation/production runs bypassed bth submit)"
+            )
+
+            return SignalResult(
+                signal="submit_bypass_rate",
+                value=rate,
+                level=level,
+                message=message,
+            )
+    except Exception as e:
+        return SignalResult(
+            signal="submit_bypass_rate",
+            value=None,
+            level="INFO",
+            message=f"error computing submit_bypass_rate: {e}",
+        )
+
+
 def sprint_audit(hours: int = 24) -> dict:
     """Cross-project audit of recent runs and campaigns.
 
@@ -153,7 +347,7 @@ def sprint_audit(hours: int = 24) -> dict:
             rows = db.execute(
                 """
                 SELECT id, campaign_id, sidecar_mode, outcome, outcome_is_residual, timestamp,
-                       agent_mode, metadata, sidecar_path
+                       agent_mode, metadata, sidecar_path, stage_name
                 FROM runs
                 WHERE timestamp > ?
                 ORDER BY timestamp ASC
@@ -173,6 +367,7 @@ def sprint_audit(hours: int = 24) -> dict:
                 agent_mode,
                 metadata,
                 sidecar_path,
+                stage_name,
             ) in rows:
                 key = campaign_id or "_uncampaigned"
                 if key not in by_campaign:
@@ -186,6 +381,7 @@ def sprint_audit(hours: int = 24) -> dict:
                         "agent_mode": agent_mode or "",
                         "metadata": metadata or "{}",
                         "sidecar_path": sidecar_path or "",
+                        "stage_name": stage_name or "",
                     }
                 )
 
@@ -317,6 +513,16 @@ def sprint_audit(hours: int = 24) -> dict:
                 pass
             signals["premature_stopping_rate"] = n_premature / max(n_sequential_concluded, 1) if n_sequential_concluded > 0 else 0.0
 
+            # Signal 9: control_arm_rate
+            # Compute via standalone function for atomic SignalResult + testability.
+            signal_result = signal_control_arm_rate(project["slug"], db_path)
+            signals["control_arm_rate"] = signal_result.value if signal_result.value is not None else 0.0
+
+            # Signal 10: submit_bypass_rate
+            # Compute via standalone function for atomic SignalResult + testability.
+            signal_result_submit_bypass = signal_submit_bypass_rate(project["slug"], db_path, catalog_dir)
+            signals["submit_bypass_rate"] = signal_result_submit_bypass.value if signal_result_submit_bypass.value is not None else 0.0
+
             # Check signal thresholds and add anomalies.
             # All thresholds are CALIBRATION TARGETS (v0.6), not hard gates.
             # See ADR .praxia/docs/decisions/260601_sprint-audit-threshold-rationale.md
@@ -371,6 +577,15 @@ def sprint_audit(hours: int = 24) -> dict:
                     f"{n_premature} sequential campaign(s) concluded before reaching stopping_threshold "
                     f"(sequential test validity compromised)"
                 )
+            # control_arm_rate: AC-5 experimental controls discipline
+            #   WARNING when rate==0.0 and validation/production campaigns exist
+            if signal_result.level == "WARNING":
+                anomalies.append(signal_result.message)
+
+            # submit_bypass_rate: AC-9 submit provenance discipline
+            #   WARNING when rate > 5% in validation/production stage
+            if signal_result_submit_bypass.level == "WARNING":
+                anomalies.append(signal_result_submit_bypass.message)
 
             # Legacy anomalies per campaign (kept for backward compatibility)
             for campaign_id, runs in by_campaign.items():

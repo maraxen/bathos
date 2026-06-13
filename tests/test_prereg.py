@@ -252,3 +252,102 @@ def test_check_first_of_kind_prior_run_different_hash(tmp_path):
 
     result = check_first_of_kind(script, catalog_dir, "new_hash_abc123")
     assert result is True
+
+
+def test_check_reproduction_prerequisite_cool_tier_found(tmp_path):
+    """Test finding a passing run in cool-tier Parquet (no warm DB)."""
+    from bathos.prereg import check_reproduction_prerequisite
+    from bathos.schema import Run
+    from bathos.catalog import write_run
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+
+    # Write a passing run with a specific stem in the command
+    run = Run(
+        project_slug="test",
+        command="python scripts/experiments/alanine_dipeptide.py",
+        argv=["python", "scripts/experiments/alanine_dipeptide.py"],
+        outcome="pass",
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+    )
+    write_run(run, catalog_dir)
+
+    # Check for that stem
+    found = check_reproduction_prerequisite("alanine_dipeptide", catalog_dir)
+    assert found is True
+
+
+def test_check_reproduction_prerequisite_cool_tier_not_found(tmp_path):
+    """Test not finding a passing run in cool-tier Parquet."""
+    from bathos.prereg import check_reproduction_prerequisite
+    from bathos.schema import Run
+    from bathos.catalog import write_run
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+
+    # Write a failing run with a different stem
+    run = Run(
+        project_slug="test",
+        command="python scripts/experiments/other_script.py",
+        argv=["python", "scripts/experiments/other_script.py"],
+        outcome="fail",
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+    )
+    write_run(run, catalog_dir)
+
+    # Check for a stem that doesn't exist
+    found = check_reproduction_prerequisite("alanine_dipeptide", catalog_dir)
+    assert found is False
+
+
+def test_check_reproduction_prerequisite_cool_tier_failing_run_not_matched(tmp_path):
+    """Test that a run with matching stem but failing outcome is not matched."""
+    from bathos.prereg import check_reproduction_prerequisite
+    from bathos.schema import Run
+    from bathos.catalog import write_run
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+
+    # Write a failing run with the target stem
+    run = Run(
+        project_slug="test",
+        command="python scripts/experiments/alanine_dipeptide.py",
+        argv=["python", "scripts/experiments/alanine_dipeptide.py"],
+        outcome="fail",
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+    )
+    write_run(run, catalog_dir)
+
+    # Check for that stem (should not find, since outcome is fail)
+    found = check_reproduction_prerequisite("alanine_dipeptide", catalog_dir)
+    assert found is False
+
+
+def test_check_reproduction_prerequisite_empty_catalog(tmp_path):
+    """Test that an empty catalog returns False."""
+    from bathos.prereg import check_reproduction_prerequisite
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+
+    found = check_reproduction_prerequisite("some_stem", catalog_dir)
+    assert found is False
+
+
+def test_check_reproduction_prerequisite_no_catalog_dir(tmp_path):
+    """Test that a non-existent catalog directory returns False."""
+    from bathos.prereg import check_reproduction_prerequisite
+
+    catalog_dir = tmp_path / "nonexistent_catalog"
+
+    found = check_reproduction_prerequisite("some_stem", catalog_dir)
+    assert found is False
