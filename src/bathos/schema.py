@@ -9,26 +9,20 @@ import pyarrow as pa
 
 CURRENT_SCHEMA_VERSION = "7"
 
-# Regex validator for stage_name: lowercase kebab-case, leading letter required, 3-40 chars
-# Pattern: starts with lowercase letter, followed by lowercase letters/digits/hyphens, no trailing hyphen
-# This regex validates: ^[a-z][a-z0-9]*(-[a-z0-9]+)*$ AND length 3-40
+# Format validator for stage_name values — used by linter.check_canonical_stage_names.
+# Enforcement at parse time uses CANONICAL_STAGES set-membership (parse_sidecar); this
+# regex validates free-form stage names entered via other paths.
+STAGE_NAME_REGEX = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
+
+
 def _validate_stage_name(name: str | None) -> bool:
-    """Validate stage_name format: lowercase kebab-case, 3-40 chars, leading letter required.
-
-    Args:
-        name: stage_name to validate, or None (valid)
-
-    Returns:
-        True if valid, False otherwise
-    """
+    """Return True if name is a valid stage_name (lowercase kebab-case, 3-40 chars)."""
     if name is None:
         return True
     if not isinstance(name, str) or len(name) < 3 or len(name) > 40:
         return False
-    # Pattern: starts with lowercase letter, followed by lowercase/digits/hyphens, no trailing hyphen
-    return bool(re.match(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$", name))
+    return bool(STAGE_NAME_REGEX.match(name))
 
-STAGE_NAME_REGEX = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
 
 COOL_SCHEMA = pa.schema(
     [
