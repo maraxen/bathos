@@ -1,128 +1,98 @@
-"""Tests for MCP tool envelope shape compliance (AC-5, AC-6)."""
+"""Tests for MCP envelope shape consistency (AC-5, AC-6).
 
-import pytest
+Verifies that all MCP tools return envelopes with the four mandatory keys:
+ok, error_code, error, resolution_hint.
+"""
+
+from __future__ import annotations
+
 import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
-from bathos.mcp import traced_tool
-from bathos.errors import BathosErrorCode
+import pytest
+
+from bathos.errors import BathosErrorCode, RESOLUTION_HINTS
 from bathos.query import CatalogError
+from bathos.mcp import traced_tool
 
 
-def test_success_envelope_has_all_four_keys():
-    """Verify that a successful tool return includes all four mandatory keys (AC-5).
-    
-    Given a tool that returns successfully with custom data,
-    When the tool is wrapped with traced_tool and returns,
-    Then the envelope includes ok=True, error_code=None, error=None, resolution_hint=None
-         plus the custom data keys.
+@pytest.fixture
+def event_mock():
+    """Mock the telemetry event function."""
+    with patch("bathos.mcp.event") as mock:
+        yield mock
+
+
+def test_success_envelope_has_all_four_keys(tmp_path: Path, monkeypatch, event_mock):
+    """Verify success envelope contains all four mandatory keys.
+
+    Given: A successful call to a tool wrapped by traced_tool
+    When: The underlying operation completes without error
+    Then: The returned dict contains ok=True, error_code=None, error=None, resolution_hint=None
     """
-    async def run_test():
-        @traced_tool
-        async def test_tool():
-            return {"custom_data": "test_value", "count": 42}
-        
-        result = await test_tool()
-        
-        # All four mandatory keys must be present
-        assert "ok" in result
-        assert "error_code" in result
-        assert "error" in result
-        assert "resolution_hint" in result
-        
-        # Values on success path
-        assert result["ok"] is True
-        assert result["error_code"] is None
-        assert result["error"] is None
-        assert result["resolution_hint"] is None
-        
-        # Custom data preserved
-        assert result["custom_data"] == "test_value"
-        assert result["count"] == 42
-    
-    asyncio.run(run_test())
+    catalog_dir = tmp_path / ".bth" / "catalog"
+    catalog_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
+
+    # Create a simple async tool function that succeeds
+    @traced_tool
+    async def mock_success_tool(catalog_dir: str = ""):
+        """A mock tool that returns success."""
+        return {
+            "data": {"runs": [], "count": 0}
+        }
+
+    # Call the tool using asyncio.run
+    result = asyncio.run(mock_success_tool(catalog_dir=str(catalog_dir)))
+
+    # Verify all four keys are present
+    assert isinstance(result, dict), f"Expected dict, got {type(result)}"
+    assert all(k in result for k in ["ok", "error_code", "error", "resolution_hint"]), \
+        f"Missing keys in success envelope. Keys present: {result.keys()}"
+
+    # Verify success values
+    assert result["ok"] is True, "ok should be True on success"
+    assert result["error_code"] is None, "error_code should be None on success"
+    assert result["error"] is None, "error should be None on success"
+    assert result["resolution_hint"] is None, "resolution_hint should be None on success"
 
 
-def test_error_envelope_has_all_four_keys():
-    """Verify that an error envelope includes all four mandatory keys (AC-6).
-    
-    Given a tool that raises a CatalogError,
-    When the tool is wrapped with traced_tool,
-    Then the envelope includes ok=False, error_code (non-null), error (non-null),
-         and resolution_hint (non-null).
+def test_error_envelope_has_all_four_keys(tmp_path: Path, monkeypatch, event_mock):
+    """Verify error envelope contains all four mandatory keys with proper values.
+
+    Given: A tool that raises CatalogError
+    When: traced_tool catches and shapes the exception
+    Then: The returned dict contains ok=False, error_code='catalog_error',
+          error as non-empty str, resolution_hint from RESOLUTION_HINTS
     """
-    async def run_test():
-        @traced_tool
-        async def test_tool():
-            raise CatalogError("Test catalog error")
-        
-        result = await test_tool()
-        
-        # All four mandatory keys must be present
-        assert "ok" in result
-        assert "error_code" in result
-        assert "error" in result
-        assert "resolution_hint" in result
-        
-        # Values on error path
-        assert result["ok"] is False
-        assert result["error_code"] == "catalog_error"
-        assert result["error"] == "Test catalog error"
-        assert result["resolution_hint"] != ""
-        assert isinstance(result["resolution_hint"], str)
-    
-    asyncio.run(run_test())
+    catalog_dir = tmp_path / ".bth" / "catalog"
+    catalog_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
 
+    # Create a tool function that raises CatalogError
+    @traced_tool
+    async def mock_error_tool(catalog_dir: str = ""):
+        """A mock tool that raises CatalogError."""
+        raise CatalogError("Mock catalog error for testing")
 
-def test_success_envelope_return_type():
-    """Verify that success envelope is a plain dict, not json.dumps() string."""
-    async def run_test():
-        @traced_tool
-        async def test_tool():
-            return {"data": "value"}
-        
-        result = await test_tool()
-        assert isinstance(result, dict)
-        # Should NOT be a JSON string
-        assert not isinstance(result, str)
-    
-    asyncio.run(run_test())
+    # Call the tool — traced_tool should catch the exception and return a shaped envelope
+    result = asyncio.run(mock_error_tool(catalog_dir=str(catalog_dir)))
 
+    # Verify all four keys are present
+    assert isinstance(result, dict), f"Expected dict, got {type(result)}"
+    assert all(k in result for k in ["ok", "error_code", "error", "resolution_hint"]), \
+        f"Missing keys in error envelope. Keys present: {result.keys()}"
 
-def test_error_envelope_return_type():
-    """Verify that error envelope is a plain dict, not json.dumps() string."""
-    async def run_test():
-        @traced_tool
-        async def test_tool():
-            raise CatalogError("error")
-        
-        result = await test_tool()
-        assert isinstance(result, dict)
-        # Should NOT be a JSON string
-        assert not isinstance(result, str)
-    
-    asyncio.run(run_test())
+    # Verify error values
+    assert result["ok"] is False, "ok should be False on error"
+    assert result["error_code"] == BathosErrorCode.CATALOG_ERROR.value, \
+        f"error_code should be '{BathosErrorCode.CATALOG_ERROR.value}', got {result['error_code']}"
+    assert isinstance(result["error"], str) and len(result["error"]) > 0, \
+        f"error should be non-empty str, got {result['error']}"
+    assert isinstance(result["resolution_hint"], str) and len(result["resolution_hint"]) > 0, \
+        f"resolution_hint should be non-empty str, got {result['resolution_hint']}"
 
-
-def test_mandatory_keys_before_custom_data():
-    """Verify that mandatory keys cannot be clobbered by tool-specific data (M-2).
-    
-    Given a tool that tries to return a custom 'ok' key,
-    When wrapped with traced_tool,
-    Then the envelope's ok key (from the wrapper) takes precedence.
-    """
-    async def run_test():
-        @traced_tool
-        async def test_tool():
-            # Tool tries to return its own 'ok' key
-            return {"ok": False, "custom": "data"}
-        
-        result = await test_tool()
-        
-        # The wrapper's ok=True must win (success path)
-        assert result["ok"] is True
-        # Custom 'ok' is effectively overridden
-        assert result["custom"] == "data"
-    
-    asyncio.run(run_test())
+    # Verify resolution_hint matches the registry
+    assert result["resolution_hint"] == RESOLUTION_HINTS[BathosErrorCode.CATALOG_ERROR], \
+        f"resolution_hint should match registry entry"

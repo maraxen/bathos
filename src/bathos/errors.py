@@ -1,30 +1,24 @@
-"""Structured error codes for bathos MCP tools.
+"""Error codes and resolution hints for bathos MCP tools.
 
-This module defines BathosErrorCode as a flat enum that:
-- Aliases all GateErrorCode members (11 codes from prereg.py)
-- Adds 5 new domain exception codes (catalog, campaign, sidecar, export, invalid_param)
-- Provides a centralized RESOLUTION_HINTS registry keyed by error code
-- Supports traced_tool's exception-to-code mapping and telemetry emission
+Provides a unified BathosErrorCode enum that includes:
+- 11 aliased codes from GateErrorCode (pre-registration gate failures)
+- 5 new codes for domain exceptions (catalog, campaign, sidecar, export, invalid params)
 
-BathosErrorCode.SIDECAR_MISSING and GateErrorCode.SIDECAR_MISSING have the same
-.value string ("sidecar_missing"), making them wire-compatible aliases.
+All MCP tools return envelopes with error_code values from this enum.
 """
+
+from __future__ import annotations
 
 from enum import Enum
 
 
 class BathosErrorCode(str, Enum):
-    """Enumeration of structured error codes for all bathos MCP tool failures.
+    """Unified error code enumeration for all bathos MCP tools.
 
-    Members are split into:
-    - 11 aliased from GateErrorCode (pre-registration gate failures)
-    - 5 new codes for domain exceptions (catalog, campaign, sidecar, export, param validation)
-    - 1 catch-all internal error code
-
-    Total: 16 codes, all strings for use in JSON envelopes and telemetry.
+    Aliases 11 codes from GateErrorCode, plus 5 new codes for domain exceptions.
+    All codes are lowercase snake_case strings.
     """
-
-    # Aliased from GateErrorCode (11 codes, same .value strings)
+    # Aliased from GateErrorCode (11 members)
     SIDECAR_MISSING = "sidecar_missing"
     SIDECAR_INVALID = "sidecar_invalid"
     SIDECAR_HASH_MISMATCH = "sidecar_hash_mismatch"
@@ -37,7 +31,7 @@ class BathosErrorCode(str, Enum):
     OUTCOME_AMBIGUOUS = "outcome_ambiguous"
     INTERNAL = "internal"
 
-    # New domain exception codes (5 codes)
+    # New codes for domain exceptions (5 members)
     CATALOG_ERROR = "catalog_error"
     CAMPAIGN_ERROR = "campaign_error"
     SIDECAR_ERROR = "sidecar_error"
@@ -45,11 +39,9 @@ class BathosErrorCode(str, Enum):
     INVALID_PARAM = "invalid_param"
 
 
-# Static registry of resolution hints keyed by BathosErrorCode.
-# Every member of BathosErrorCode must have a non-empty entry.
-# These hints are returned to agentic callers in the MCP envelope.
+# Resolution hints registry: every BathosErrorCode member must have a non-empty entry
 RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
-    # Aliased from GateErrorCode (same text as prereg._RESOLUTION_HINTS)
+    # Aliased from GateErrorCode (copied from prereg._RESOLUTION_HINTS)
     BathosErrorCode.SIDECAR_MISSING: "Create a .bth.toml sidecar adjacent to the script",
     BathosErrorCode.SIDECAR_INVALID: "Fix the sidecar TOML syntax or missing required sections",
     BathosErrorCode.SIDECAR_HASH_MISMATCH: "Re-run 'bth hypothesis lock' to regenerate the manifest",
@@ -61,24 +53,28 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.RESULT_SCHEMA_MISMATCH: "Ensure script output JSON matches the result_schema in the sidecar",
     BathosErrorCode.OUTCOME_AMBIGUOUS: "Ensure exactly one outcome condition evaluates to true",
     BathosErrorCode.INTERNAL: "File a bug report with the full error message",
-    # New domain exception codes
-    BathosErrorCode.CATALOG_ERROR: "Check catalog state with 'bth verify' and repair with 'bth repair'",
-    BathosErrorCode.CAMPAIGN_ERROR: "Verify campaign state and ensure all runs are persisted",
-    BathosErrorCode.SIDECAR_ERROR: "Check sidecar file format and permissions",
-    BathosErrorCode.EXPORT_ERROR: "Verify export destination and permissions",
-    BathosErrorCode.INVALID_PARAM: "Check required parameters and types in the MCP tool call",
+
+    # New codes for domain exceptions
+    BathosErrorCode.CATALOG_ERROR: "Check catalog integrity with 'bth verify'",
+    BathosErrorCode.CAMPAIGN_ERROR: "Verify campaign state and re-run the campaign operation",
+    BathosErrorCode.SIDECAR_ERROR: "Verify sidecar file exists and is valid TOML",
+    BathosErrorCode.EXPORT_ERROR: "Check write permissions and available disk space",
+    BathosErrorCode.INVALID_PARAM: "Verify all required parameters are provided with correct types",
 }
 
 
-# Mapping of exception class names (from raise statements) to BathosErrorCode.
-# Used by AC-7 CI test to verify all domain exceptions have registered codes.
-# Builtin exceptions (ValueError, RuntimeError, etc.) are not subject to this registry —
-# they implicitly map to INTERNAL at traced_tool dispatch time.
+# Exception class name to BathosErrorCode registry (AC-7 maintenance trap).
+# Maps domain exception class names to their error codes for CI assertion.
 EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
+    # Gate errors
     "GateError": BathosErrorCode.INTERNAL,
+    # Catalog errors
     "CatalogError": BathosErrorCode.CATALOG_ERROR,
-    "CampaignError": BathosErrorCode.CAMPAIGN_ERROR,
-    "SidecarError": BathosErrorCode.SIDECAR_ERROR,
-    "ExportError": BathosErrorCode.EXPORT_ERROR,
     "CorruptDatabaseError": BathosErrorCode.CATALOG_ERROR,
+    # Campaign errors
+    "CampaignError": BathosErrorCode.CAMPAIGN_ERROR,
+    # Sidecar errors
+    "SidecarError": BathosErrorCode.SIDECAR_ERROR,
+    # Export errors
+    "ExportError": BathosErrorCode.EXPORT_ERROR,
 }
