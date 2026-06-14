@@ -34,10 +34,14 @@ from bathos.catalog import init_catalog
 from bathos.checker import check_runs
 from bathos.compact import compact as compact_catalog
 from bathos.config import default_catalog_dir, find_project_config, load_project_config
+from bathos.errors import BathosErrorCode, RESOLUTION_HINTS
 from bathos.init import init_project
-from bathos.query import find_runs, get_run, list_runs, run_sql
+from bathos.prereg import GateError
+from bathos.query import CatalogError, find_runs, get_run, list_runs, run_sql
 from bathos.runner import run_script
+from bathos.sidecar import SidecarError
 from bathos.sync import sync_catalog
+from bathos.export import ExportError
 
 app = FastMCP("bathos")
 mcp = app  # Alias for import compatibility
@@ -48,17 +52,36 @@ mcp = app  # Alias for import compatibility
 # ============================================================================
 
 
+def _shape_error(tool_name: str, code: BathosErrorCode, exc: BaseException) -> dict:
+    """Shape an exception into a structured MCP error envelope.
+
+    Emits mcp.tool_error telemetry event and returns a dict with mandatory keys.
+    The four mandatory keys (ok, error_code, error, resolution_hint) always come first
+    so tool-specific data keys cannot clobber them.
+    """
+    event("mcp.tool_error", tool_name=tool_name, error_code=code.value,
+          error_class=type(exc).__name__)
+    return {
+        "ok": False,
+        "error_code": code.value,
+        "error": str(exc),
+        "resolution_hint": RESOLUTION_HINTS.get(code, ""),
+    }
+
+
 def traced_tool(fn):
-    """Wrap a FastMCP tool function to emit mcp.call_start / mcp.call_end / mcp.call_error events.
+    """Wrap a FastMCP tool function to catch and shape all exceptions into structured envelopes.
 
-    Each tool invocation emits:
-    - mcp.call_start when the tool is entered
-    - mcp.call_end on successful return (with duration_ms and result_bytes)
-    - mcp.call_error on exception (with exc_type, exc_msg, traceback)
+    Each tool invocation:
+    - Emits mcp.call_start when entered
+    - On success: returns a dict with mandatory keys (ok=True, error_code=None, error=None,
+      resolution_hint=None) plus tool-specific data
+    - On exception: catches and shapes to a structured error envelope (ok=False, error_code,
+      error, resolution_hint), emits mcp.tool_error telemetry, and returns the dict
+    - Emits mcp.call_end with duration and result size
+    - Never re-raises exceptions to the FastMCP transport layer
 
-    The mcp_request_id_var contextvar is set to a fresh UUID and automatically
-    scoped to the tool call (each FastMCP tool runs as its own asyncio.Task
-    with a fresh context copy).
+    The mcp_request_id_var contextvar is set to a fresh UUID for this call.
     """
     @functools.wraps(fn)
     async def wrapper(*args, **kwargs):
@@ -73,19 +96,49 @@ def traced_tool(fn):
         t0 = time.monotonic_ns()
         try:
             result = await fn(*args, **kwargs)
-            duration_ms = (time.monotonic_ns() - t0) / 1e6
-            result_bytes = len(str(result).encode()) if result is not None else 0
-            event("mcp.call_end", tool=tool_name, request_id=request_id,
-                  duration_ms=duration_ms, ok=True, result_bytes=result_bytes)
-            return result
-        except Exception as exc:
-            import traceback as tb
-            duration_ms = (time.monotonic_ns() - t0) / 1e6
-            event("mcp.call_error", tool=tool_name, request_id=request_id,
-                  duration_ms=duration_ms, exc_type=type(exc).__name__,
-                  exc_msg=str(exc), traceback=tb.format_exc()[:8192])
-            raise
+
+            # Gate failure detection: runner returns dataclasses.asdict(GateErrorPayload)
+            # which has keys: error_code, phase, taxonomy_label, errors, agent_mode,
+            # resolution_hint, gate_schema_version. Detect by "phase" key (unique to gate payloads).
+            if isinstance(result, dict) and "phase" in result and "error_code" in result:
+                gate_code_str = result.get("error_code", "internal")
+                try:
+                    bathos_code = BathosErrorCode(gate_code_str)
+                except ValueError:
+                    bathos_code = BathosErrorCode.INTERNAL
+                hint = result.get("resolution_hint") or RESOLUTION_HINTS.get(bathos_code, "")
+                err_msgs = result.get("errors") or []
+                return {
+                    "ok": False,
+                    "error_code": bathos_code.value,
+                    "error": err_msgs[0] if err_msgs else gate_code_str,
+                    "resolution_hint": hint,
+                }
+
+            # Success path: ensure four mandatory keys present, AFTER **result so they win
+            if isinstance(result, dict):
+                return {**result, "ok": True, "error_code": None, "error": None,
+                        "resolution_hint": None}
+            return {"ok": True, "error_code": None, "error": None, "resolution_hint": None}
+
+        except GateError as e:
+            return _shape_error(tool_name, BathosErrorCode.INTERNAL, e)
+        except CatalogError as e:
+            return _shape_error(tool_name, BathosErrorCode.CATALOG_ERROR, e)
+        except CampaignError as e:
+            return _shape_error(tool_name, BathosErrorCode.CAMPAIGN_ERROR, e)
+        except SidecarError as e:
+            return _shape_error(tool_name, BathosErrorCode.SIDECAR_ERROR, e)
+        except ExportError as e:
+            return _shape_error(tool_name, BathosErrorCode.EXPORT_ERROR, e)
+        except SystemExit as e:
+            return _shape_error(tool_name, BathosErrorCode.INTERNAL, e)
+        except BaseException as e:
+            return _shape_error(tool_name, BathosErrorCode.INTERNAL, e)
         finally:
+            duration_ms = (time.monotonic_ns() - t0) / 1e6
+            event("mcp.call_end", tool=tool_name, request_id=request_id,
+                  duration_ms=duration_ms)
             mcp_request_id_var.reset(token)
 
     return wrapper
