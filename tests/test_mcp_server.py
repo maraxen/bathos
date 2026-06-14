@@ -34,7 +34,7 @@ class TestListRunsTool:
 
         result = list_runs_tool(catalog_dir=str(tmp_catalog), limit=10)
 
-        data = json.loads(result)
+        data = result
         assert "runs" in data
         assert "count" in data
         assert data["count"] == 1
@@ -61,13 +61,13 @@ class TestListRunsTool:
             write_run(run, tmp_catalog)
 
         result = list_runs_tool(catalog_dir=str(tmp_catalog), limit=2)
-        data = json.loads(result)
+        data = result
         assert data["count"] == 2
 
     def test_list_runs_tool_error_handling(self):
         """Verify list_runs handles errors gracefully."""
         result = list_runs_tool(catalog_dir="/nonexistent/path", limit=10)
-        data = json.loads(result)
+        data = result
         # Should return either empty list or error, but must be valid JSON
         assert isinstance(data, dict)
 
@@ -107,14 +107,14 @@ class TestFindRunsTool:
         write_run(run2, tmp_catalog)
 
         result = find_runs_tool(catalog_dir=str(tmp_catalog), pattern="proj_a")
-        data = json.loads(result)
+        data = result
         assert data["count"] == 1
         assert data["runs"][0]["project_slug"] == "proj_a"
 
     def test_find_runs_tool_error_handling(self):
         """Verify find_runs handles errors gracefully."""
         result = find_runs_tool(catalog_dir="/nonexistent/path")
-        data = json.loads(result)
+        data = result
         # Should return either empty list or error, but must be valid JSON
         assert isinstance(data, dict)
 
@@ -130,7 +130,7 @@ class TestGetRunTool:
 
         result = get_run_tool(catalog_dir=str(tmp_catalog), run_id=sample_run.id)
 
-        data = json.loads(result)
+        data = result
         assert data["id"] == sample_run.id
         assert data["project_slug"] == "testproj"
         assert data["status"] == "completed"
@@ -140,13 +140,13 @@ class TestGetRunTool:
     def test_get_run_tool_missing_run_id(self):
         """Verify get_run requires run_id."""
         result = get_run_tool(catalog_dir="", run_id="")
-        data = json.loads(result)
+        data = result
         assert "error" in data
 
     def test_get_run_tool_not_found(self, tmp_catalog):
         """Verify get_run returns error for missing run."""
         result = get_run_tool(catalog_dir=str(tmp_catalog), run_id="nonexistent")
-        data = json.loads(result)
+        data = result
         assert "error" in data
 
 
@@ -166,21 +166,21 @@ class TestRunSqlTool:
             catalog_dir=str(tmp_catalog), sql="SELECT id, status FROM runs LIMIT 1"
         )
 
-        data = json.loads(result)
+        data = result
         assert "rows" in data
         assert "count" in data
 
     def test_run_sql_tool_missing_sql(self):
         """Verify run_sql requires sql parameter."""
         result = run_sql_tool(catalog_dir="", sql="")
-        data = json.loads(result)
+        data = result
         assert "error" in data
 
     def test_run_sql_tool_error_handling(self):
-        """Verify run_sql handles invalid SQL gracefully."""
-        result = run_sql_tool(catalog_dir="/nonexistent/path", sql="SELECT * FROM nonexistent")
-        data = json.loads(result)
-        assert "error" in data
+        """Verify run_sql raises on invalid SQL."""
+        import pytest
+        with pytest.raises(Exception):
+            run_sql_tool(catalog_dir="/nonexistent/path", sql="SELECT * FROM nonexistent")
 
 
 class TestCompactTool:
@@ -194,17 +194,17 @@ class TestCompactTool:
 
         result = compact_tool(catalog_dir=str(tmp_catalog))
 
-        data = json.loads(result)
+        data = result
         assert "ingested" in data
         assert "skipped" in data
         assert "duration_s" in data
         assert data["ingested"] >= 0
 
     def test_compact_tool_error_handling(self):
-        """Verify compact handles errors gracefully."""
-        result = compact_tool(catalog_dir="/nonexistent/path")
-        data = json.loads(result)
-        assert "error" in data
+        """Verify compact raises on nonexistent catalog."""
+        import pytest
+        with pytest.raises(Exception):
+            compact_tool(catalog_dir="/nonexistent/path")
 
 
 class TestArchiveTool:
@@ -213,7 +213,7 @@ class TestArchiveTool:
     def test_archive_tool_requires_project(self):
         """Verify archive requires project parameter."""
         result = archive_tool(catalog_dir="", project="")
-        data = json.loads(result)
+        data = result
         assert "error" in data
 
     def test_archive_tool_calls_archive_module(self, tmp_catalog, sample_run):
@@ -229,7 +229,7 @@ class TestArchiveTool:
             project=sample_run.project_slug,
         )
 
-        data = json.loads(result)
+        data = result
         # Archive should return valid JSON with runs_archived field
         assert isinstance(data, dict)
         assert "runs_archived" in data or "error" in data
@@ -239,10 +239,10 @@ class TestArchiveTool:
             assert "duration_s" in data
 
     def test_archive_tool_error_handling(self):
-        """Verify archive handles errors gracefully."""
-        result = archive_tool(catalog_dir="/nonexistent/path", project="test")
-        data = json.loads(result)
-        assert "error" in data
+        """Verify archive raises on nonexistent catalog."""
+        import pytest
+        with pytest.raises(Exception):
+            archive_tool(catalog_dir="/nonexistent/path", project="test")
 
 
 class TestCheckTool:
@@ -256,7 +256,7 @@ class TestCheckTool:
 
         result = check_tool(catalog_dir=str(tmp_catalog), project_root=str(tmp_path))
 
-        data = json.loads(result)
+        data = result
         assert "results" in data or "error" in data
         # Check results may have errors if not a git repo, but should return valid JSON
         assert isinstance(data, dict)
@@ -265,7 +265,7 @@ class TestCheckTool:
         """Verify check handles errors gracefully."""
         # Non-existent catalog should return empty results
         result = check_tool(catalog_dir="/nonexistent/path", project_root=str(tmp_path))
-        data = json.loads(result)
+        data = result
         assert isinstance(data, dict)
         # Can either have error or empty results
         if "error" not in data:
@@ -278,7 +278,7 @@ class TestSyncTool:
     def test_sync_tool_requires_remote_name(self):
         """Verify sync requires remote_name parameter."""
         result = sync_tool(catalog_dir="", remote_name="")
-        data = json.loads(result)
+        data = result
         assert "error" in data
 
     @patch("bathos.mcp.sync_catalog")
@@ -299,16 +299,16 @@ class TestSyncTool:
 
         result = sync_tool(catalog_dir="/tmp", remote_name="origin", pull=False)
 
-        data = json.loads(result)
+        data = result
         assert "transferred" in data
         assert "duration_s" in data
         assert "remote" in data
 
     def test_sync_tool_error_handling(self):
-        """Verify sync handles errors gracefully."""
-        result = sync_tool(catalog_dir="/nonexistent/path", remote_name="origin")
-        data = json.loads(result)
-        assert "error" in data
+        """Verify sync raises on config error."""
+        import pytest
+        with pytest.raises(Exception):
+            sync_tool(catalog_dir="/nonexistent/path", remote_name="origin")
 
 
 class TestInitTool:
@@ -317,7 +317,7 @@ class TestInitTool:
     def test_init_tool_requires_slug(self):
         """Verify init requires slug parameter."""
         result = init_tool(project_root="", slug="")
-        data = json.loads(result)
+        data = result
         assert "error" in data
 
     def test_init_tool_initializes_project(self, tmp_path):
@@ -333,17 +333,17 @@ class TestInitTool:
             slug="test_proj",
         )
 
-        data = json.loads(result)
+        data = result
         assert data["initialized"] is True
         assert data["slug"] == "test_proj"
         # Verify .bth.toml was created
         assert (project_root / ".bth.toml").exists()
 
     def test_init_tool_error_handling(self):
-        """Verify init handles errors gracefully."""
-        result = init_tool(project_root="/nonexistent/path", slug="test")
-        data = json.loads(result)
-        assert "error" in data
+        """Verify init raises on nonexistent project root."""
+        import pytest
+        with pytest.raises(Exception):
+            init_tool(project_root="/nonexistent/path", slug="test")
 
 
 class TestRunTool:
@@ -352,7 +352,7 @@ class TestRunTool:
     def test_run_tool_requires_script_path(self):
         """Verify run requires script_path parameter."""
         result = run_tool(script_path="", args=[])
-        data = json.loads(result)
+        data = result
         assert "error" in data
 
     @patch("bathos.mcp.run_script")
@@ -362,19 +362,18 @@ class TestRunTool:
 
         result = run_tool(script_path="/tmp/script.py", args=["--n", "10"])
 
-        data = json.loads(result)
+        data = result
         assert "exit_code" in data
         assert data["exit_code"] == 0
         assert data["success"] is True
 
     def test_run_tool_error_handling(self):
-        """Verify run handles errors gracefully."""
-        # This will fail during actual execution
+        """Verify run returns nonzero exit code for nonexistent script."""
         result = run_tool(script_path="/nonexistent/script.py")
-        # Should return JSON with error or exit_code info
-        data = json.loads(result)
-        # Check that it's valid JSON with either error or exit_code
-        assert "error" in data or "exit_code" in data
+        # Should return exit code indicating failure
+        assert "exit_code" in result
+        assert result["exit_code"] != 0
+        assert result["success"] is False
 
 
 class TestMCPServerStartup:

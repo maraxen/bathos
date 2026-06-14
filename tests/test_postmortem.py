@@ -684,4 +684,4 @@ def test_mcp_postmortem_validate_explicit_param_wins(tmp_path: Path, monkeypatch
     res = asyncio.run(
         mcp.postmortem_validate(path=str(pm_file), workspace_root=str(explicit_ws))
     )
-    assert res["ok"] is True  # explicit param won; asset resolved under explicit_ws
+    assert res["validation_ok"] is True  # explicit param won; asset resolved under explicit_ws
