@@ -950,7 +950,7 @@ async def postmortem_validate(
 ) -> dict:
     """Validate a postmortem TOML file.
 
-    Returns {'ok': True} on success or {'ok': False, 'errors': [...]} on failure.
+    Returns {'validation_ok': True} on success or {'validation_ok': False, 'errors': [...]} on failure.
     """
     from bathos.postmortem import parse_postmortem, validate_postmortem
 
@@ -1030,7 +1030,7 @@ async def validate_sidecar(
         path: Path to .bth.toml sidecar file
 
     Returns:
-        {'ok': True} on success or {'ok': False, 'errors': [...]} on failure.
+        {'validation_ok': True} on success or {'validation_ok': False, 'errors': [...]} on failure.
     """
     from bathos.sidecar import parse_sidecar, SidecarError
     from bathos.validate import validate_sidecar as validate_sidecar_impl
