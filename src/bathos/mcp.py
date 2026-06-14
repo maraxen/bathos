@@ -730,8 +730,8 @@ async def mcp_cite_run_tool(
     cat_dir = _get_catalog_dir(catalog_dir)
     run = _get_run(run_id, cat_dir)
     if run is None:
-        return json.dumps({"error": f"Run not found: {run_id}"})
-    return format_citation(run, fmt=format)
+        raise CatalogError(f"Run not found: {run_id}")
+    return {"citation": format_citation(run, fmt=format)}
 
 
 @app.tool("lineage_prov")
@@ -749,22 +749,19 @@ async def mcp_lineage_prov_tool(
         depth: Maximum lineage depth to traverse.
 
     Returns:
-        W3C PROV-JSON formatted lineage as a JSON string.
+        W3C PROV-JSON formatted lineage (dict).
     """
     from bathos.query import lineage as get_lineage, CatalogError
     from bathos.provenance import format_prov_json
 
     cat_dir = _get_catalog_dir(catalog_dir)
-    try:
-        ancestors = get_lineage(run_id, cat_dir)
-    except CatalogError as e:
-        return json.dumps({"error": str(e)})
+    ancestors = get_lineage(run_id, cat_dir)
 
     if not ancestors:
-        return json.dumps({"error": f"Run not found or no lineage: {run_id}"})
+        raise CatalogError(f"Run not found or no lineage: {run_id}")
 
     prov_output = format_prov_json(ancestors)
-    return json.dumps(prov_output, indent=2)
+    return {"prov": prov_output}
 
 
 @app.tool("run_sql")
