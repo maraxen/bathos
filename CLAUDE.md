@@ -20,7 +20,7 @@ Full version history is in [`CHANGELOG.md`](CHANGELOG.md). Summary of current ve
 - **Worktree-aware workspace resolution** — `resolve_workspace(cwd)` separates catalog identity from live `fs_root`; `BTH_WORKSPACE_ROOT` env override for SLURM jobs
 - v0.10.x: `bth repair` (catalog corruption recovery), POPPER e-value sequential campaigns, `bth outputs list/summary`, schema v6
 
-**Open backlog:** #137 (global instruction portability — deferred to praxia). Debt #71 (output_metadata refresh-on-compact). #142 Phase 2 (BTH_OUTPUT_DIR output convention). #793 (structured gate error taxonomy in MCP tools — needs spec). #1774 (submit-provenance pruning — P3).
+**Open backlog:** #137 (global instruction portability — deferred to praxia). #142 Phase 2 (BTH_OUTPUT_DIR output convention). #793 (structured gate error taxonomy in MCP tools — needs spec). #1774 (submit-provenance pruning — P3).
 
 ---
 
@@ -188,7 +188,6 @@ src/bathos/
 | 137 | Global instruction portability (separate design session needed) | P2 | — | Deferred |
 | 142 | Results management — output convention, file-count utilities, direct management interface design | P2 | — | Phase 1 shipped (v0.9: list/summary/MCP). Phase 2 (BTH_OUTPUT_DIR) in progress. Phase 3 (prune/link) blocked on #792 (POPPER) |
 | ~~143~~ | ~~Threshold epistemic hygiene~~ | ~~P2~~ | ~~134~~ | **DONE** — shipped v0.6.1 (ticket #760): `check_threshold_basis()`, `OutcomeSpec.source`, `Sidecar.regression_threshold_basis`, 14 tests |
-| Debt #71 | output_metadata refresh-on-compact | P2 | — | Open — metadata is point-in-time snapshot; `--live` is escape hatch only |
 
 ---
 
