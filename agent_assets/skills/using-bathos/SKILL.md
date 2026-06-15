@@ -72,6 +72,8 @@ Exit code is script's exit code.
 
 Output JSON files registered with `bth run --out` must **never** be in ephemeral directories (`/tmp`, `/var/tmp`, or `$TMPDIR`). Bathos catalogs these paths as durable references; a temp-dir path will be lost on reboot or system cleanup, making the catalog entry unreproducible.
 
+Non-JSON files (PNG, SVG, PDF figures) are equally valid `--out` targets; bathos stores them in `output_paths` as opaque file references alongside result JSON. Repeat the flag for each path.
+
 ```bash
 # ✓ Correct — persistent project-relative path
 bth run --out outputs/run_abc.json -- uv run python scripts/experiments/train.py
@@ -332,6 +334,69 @@ bth campaign conclude <campaign-id>
 
 Marks campaign closed; queries still work but status is `concluded`.
 
+## Figure Manifest (Campaign → Maraxiom)
+
+When a campaign concludes, bathos emits `figure_manifest.json` at
+`~/.bth/catalog/sidecars/<campaign_id>/figure_manifest.json`. Maraxiom reads this
+during `mrx check` freshness sweeps (F7/F8 signals) to confirm figure pins are current.
+
+### Register figure outputs during a run
+
+Pass figure file paths alongside the result JSON using repeated `--out` flags (any file type is valid; repeat the flag for each path):
+
+```bash
+bth run \
+  --out outputs/results/my_run.json \
+  --out outputs/figures/scatter.svg \
+  --out outputs/figures/barplot.png \
+  --campaign <campaign-id> \
+  -- uv run python scripts/experiments/my_experiment.py
+```
+
+To make figure paths queryable from outcome conditions or postmortems, declare them in
+`[result_schema]` and write them to the result JSON alongside scalar metrics:
+
+```toml
+[result_schema]
+my_metric            = "float"
+figure_path_scatter  = "str"   # e.g., "outputs/figures/scatter.svg"
+figure_path_barplot  = "str"
+```
+
+### Populate the figure manifest after runs finish
+
+`bth campaign conclude` emits an empty manifest by default. Populate it programmatically:
+
+```python
+from bathos.figure_manifest import FigureManifest, FigureEntry, InputPin
+
+manifest = FigureManifest(
+    campaign_id="<campaign-id>",
+    figures=[
+        FigureEntry(
+            figure_id="scatter_cross_model_r",
+            intent="Cross-model energy correlation — mismatch-ceiling verification",
+            figure_kind="analysis_chart",   # optional
+            render_state="ready",           # "ready" | "deferred"
+            input_pins=[InputPin(
+                run_id="<bathos-run-id>",
+                output_path="outputs/results/my_run.json",
+                sha256="<sha256-of-data-file>",  # hash of the DATA file, not the figure
+            )],
+        ),
+    ],
+)
+manifest.write_manifest()
+```
+
+`render_state` values:
+- `"ready"` — figure is rendered; maraxiom can reference its asset path
+- `"deferred"` — figure intent is registered but rendering is pending (use for stubs before figures are generated)
+
+### Key rule
+
+Populate `figure_manifest.json` before presenting. `mrx check` reads it during freshness sweeps (F7/F8 signals) to confirm figure pins are current. `mrx context` ingests run records from the bathos catalog independently — the manifest does not gate `mrx context`.
+
 ## Lineage and Citation
 
 ### Lineage Graph
@@ -493,6 +558,12 @@ bth postmortem validate scripts/experiments/baseline_training.bth.postmortem.tom
 
 # 7. Export report
 bth export --html --out ~/reports/latest.html
+
+# 8. Populate figure manifest (if campaign produced figures for maraxiom)
+# from bathos.figure_manifest import FigureManifest, FigureEntry, InputPin
+# manifest = FigureManifest(campaign_id="...", figures=[FigureEntry(...)])
+# manifest.write_manifest()
+# Then mrx check reads it during freshness sweeps; mrx context ingests run records independently
 ```
 
 ## Related
