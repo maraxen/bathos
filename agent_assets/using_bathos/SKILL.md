@@ -1,1082 +1,957 @@
 ---
 name: using-bathos
-description: "Use when working in any bathos-tracked research project — experiment execution, run tracking, SLURM job submission, querying results, syncing to cluster, or managing remotes."
+description: Experiment tracking with bathos — run tracking, sidecar pre-registration, cluster submission, catalog queries
+triggers: [bathos, bth, experiment, run, sidecar, cluster, submit, slurm, catalog, campaign]
 ---
 
-# SKILL: Using bathos for Experiment Tracking
+# using-bathos
 
-## Overview
+bathos (`bth`) is a standalone experiment tracking CLI for researchers running 10+ projects across local and SLURM cluster environments. It tracks script runs, pre-registers hypotheses via sidecars, syncs results to/from clusters, and provides rich query and reporting interfaces.
 
-**bathos** is a local-first, zero-server experiment tracking CLI for researchers working across multiple projects and SLURM clusters.
+## Core Concepts
 
-**Core promise:** Never lose track of what ran, where results live, or whether they're still valid.
+**Run** — A single script execution tracked in the catalog. Fields: `id`, `project_slug`, `command`, `argv`, `git_hash`, `git_branch`, `timestamp`, `duration_s`, `exit_code`, `status`, `output_paths`, `tags`, `outcome`, `sidecar_sha256`, `campaign_id`, `slurm_job_id`, `slurm_array_task_id`, postmortem metadata.
 
-**Scope:** Single researcher, 10+ projects, SLURM cluster integration.
+**Sidecar** — A `.bth.toml` file alongside a script that pre-registers hypothesis, expected outcome conditions (DuckDB SQL), and result schema. Enforced by default at `bth run` time (use `--no-sidecar` to bypass, logs `BYPASSED`).
 
-**Status:** ✅ v0.4.0 shipped — 333 tests passing. Full CLI + MCP server available, including campaigns, agentic integrity gates, and per-project sync filtering.
+**Outcome** — Evaluated at run-end by matching result JSON against DuckDB SQL conditions in the sidecar. Values: `pass`, `marginal`, `fail`, `error`. One outcome must be marked `is_residual = true`.
 
----
+**Campaign** — A named group of related runs. Accessible via `bth campaign` subcommands; queries via `campaign_id` field.
 
-## When to Use This Skill
+**Catalog** — Tiered Parquet + DuckDB store at `~/.bth/catalog/` (or `.bth.toml` `[project].catalog_dir`). Cool tier (per-run fragments) → compacted to warm tier (DuckDB database) → optionally archived to cold tier (partitioned Parquet).
 
-- **Executing/planning experiments** in research projects with custom scripts
-- **Tracking provenance** (git state, command, timing, outputs, SLURM job ID)
-- **SLURM job submission** and atomic recording
-- **Analyzing results** across multiple runs (filtering, aggregation)
-- **Verifying validity** of past runs (`bth check` — git drift detection)
-- **Preparing results** for publication or sharing (`bth archive` — cold-tier export)
-- **Multi-project analysis** via DuckDB queries
+**Sync** — Push/pull catalog between local and cluster remote via myxcel. Uses `bth sync [remote] [--pull]` or cluster submission flags `--push-first`, `--then-pull`, `--then-sync`.
 
----
+## Installation
 
-## Command Reference
-
-| Command | Arguments | Status | Notes |
-|---------|-----------|--------|-------|
-| bth init | --slug, --remote, --slurm-partition | ✅ | Project initialization |
-| bth run | <script> [-- args], --tag, --out, --campaign, --agent-mode, --derived-from, --no-sidecar | ✅ | Execute + provenance capture; v0.3: `--agent-mode` (collaborative/autonomous), `--derived-from` (lineage), `--campaign` (campaign association), `--no-sidecar` (bypass enforcement) |
-| bth ls | --since, --status, --limit, --project | ✅ | List recent runs + OUTCOME column |
-| bth show | <run-id> | ✅ | Full run details + git state |
-| bth find | --project, --since, --status, --tag, --output-file | ✅ | Flexible filtered query |
-| bth sql | "<query>" | ✅ | DuckDB escape hatch (cool/warm) |
-| bth compact | (no args) | ✅ | cool→warm consolidation |
-| bth check | --status | ✅ | Git drift detection |
-| bth archive | --project, --archive-dir, --dry-run | ✅ | Cold-tier partitioned export |
-| bth sync | --remote, --pull | ✅ | Cluster rsync |
-| bth migrate | --dry-run | ✅ | Upgrade cool-tier fragments to current schema |
-| bth repair | --tier, --dry-run/--apply, --from-warm, --acknowledge-warm-loss | ✅ | Scan & repair catalog corruption (sentinel cleanup, fragment/archive quarantine, warm rebuild) |
-| bth campaign create | --name, --mode, --question, --hypothesis | ✅ | Create exploration/confirmation campaign |
-| bth campaign list | --status | ✅ | List open/concluded campaigns |
-| bth campaign review | <id> | ✅ | Outcome distribution + anomaly flags |
-| bth campaign conclude | <id>, --outcome, --note | ✅ | Mark campaign concluded |
-| bth lint | --project, --since | ✅ | Residual/bypass/drift rate analysis |
-| bth new-experiment | NAME, --force | ✅ | Scaffold script + sidecar |
-| bth export | --tool, --level, --dry-run | ✅ | Install skill + MCP server |
-
----
-
-# SECTION 1: Core Concepts
-
-## Tiered Storage Model
-
-bathos operates on a **four-tier storage system** optimized for SLURM safety and query performance:
-
-- **Hot (memory):** In-process `Run` object during script execution. Lost on exit.
-- **Cool (~/.bth/catalog/runs/):** Per-run Parquet fragments, atomic write-then-rename. **SLURM-safe for parallel job arrays.** Survives process termination. Query-slow, but storage-cheap.
-- **Warm (~/.bth/catalog/bathos.db):** DuckDB database created by `bth compact` when cool fragments accumulate (>50 files). Primary interactive query target. Fast queries; human-friendly schema.
-- **Cold (optional, ~/.bth/catalog/archive/):** Partitioned Parquet (project/year/month) for long-term storage and sharing. v0.2 feature.
-
-**Design rationale:** Cool tier's atomic write-then-rename lets 100 parallel SLURM jobs safely append without locking. Warm tier consolidates on-demand via `bth compact`, avoiding constant I/O. Cold tier enables time-bucketed archival and publication.
-
-## Run Record Structure
-
-Every run is stored as a Parquet row with these **core provenance fields** (13 total):
-
-```
-id (UUID)           | Unique identifier, content-addressed
-project_slug        | From .bth.toml
-command             | Full command line (e.g., "python measure_nvt.py")
-argv                | Parsed argument list
-git_hash            | SHA1 at run time
-git_branch          | Active branch (e.g., "main", "feature-x")
-git_dirty           | Boolean (true if uncommitted changes)
-timestamp           | ISO 8601, UTC
-duration_s          | Wall-clock seconds
-exit_code           | Process exit code (0=success)
-status              | pending | running | completed | failed
-output_paths        | JSON array of registered output files
-tags                | Comma-sep labels (e.g., "nvt,tip3p,equilibration")
-slurm_job_id        | If present in environment
+```bash
+uv tool install bathos
+bth --version
 ```
 
-**v0.2 additions:** `hostname`, `outcome` (pass/fail/marginal), `schema_version`, `metadata` (JSON).
+## Project Initialization
 
-## Pre-Registration (Sidecars) — Core Discipline
+```bash
+bth init --slug myproject --slurm-partition mit_normal
+```
 
-**Every script in tracked directories (`scripts/experiments/`, `scripts/benchmarks/`, `scripts/validation/`) must have a companion `.bth.toml` sidecar** declaring hypothesis, expected outcomes, and result schema.
+Creates `.bth.toml` and initializes catalog. Defines project slug (required for all other commands), cluster remote, and SLURM defaults.
 
-- **v0.1:** Warns if sidecar missing; does not block execution.
-- **v0.2:** Enforces; blocks execution without valid sidecar.
+## Run Tracking
 
-**Start writing sidecars now.** They are content-addressed by SHA256; renaming scripts is safe.
+### Basic Tracking
 
-### Experiment Schema
+```bash
+bth run -- uv run python scripts/experiments/train_model.py --epochs 10 --out outputs/result.json
+```
 
-File: `scripts/experiments/<stem>.bth.toml`
+Runs script, captures git state, and records run in catalog with auto-generated UUID.
+
+### With Metadata
+
+```bash
+bth run \
+  --out outputs/result.json \
+  --tag experiment:baseline \
+  --tag date:2026-06-01 \
+  --campaign my-campaign-id \
+  -- uv run python scripts/train.py
+```
+
+**Options:**
+- `--out PATH` — Register output file path (can repeat)
+- `--tag TAG` — Add tag (can repeat)
+- `--campaign ID` — Associate with campaign
+- `--agent-mode collaborative|autonomous` — Mark collaborative (human-in-loop) or autonomous runs
+- `--derived-from RUN_ID` — Link lineage to parent run
+- `--no-sidecar` — Bypass sidecar enforcement (logs `BYPASSED`)
+
+Exit code is script's exit code.
+
+## Output Path Convention
+
+Output JSON files registered with `bth run --out` must **never** be in ephemeral directories (`/tmp`, `/var/tmp`, or `$TMPDIR`). Bathos catalogs these paths as durable references; a temp-dir path will be lost on reboot or system cleanup, making the catalog entry unreproducible.
+
+Non-JSON files (PNG, SVG, PDF figures) are equally valid `--out` targets; bathos stores them in `output_paths` as opaque file references alongside result JSON. Repeat the flag for each path.
+
+```bash
+# ✓ Correct — persistent project-relative path
+bth run --out outputs/run_abc.json -- uv run python scripts/experiments/train.py
+
+# ✗ Wrong — /tmp is ephemeral; catalog entry becomes invalid after reboot
+bth run --out /tmp/result.json -- uv run python scripts/experiments/train.py
+```
+
+Smoke-test validation runs (pre-flight checks before a real run) should be executed **directly**, not via `bth run`, so they are not tracked:
+
+```bash
+# ✓ Correct — smoke test run directly, not cataloged
+uv run python scripts/experiments/train.py --smoke --out /tmp/test.json
+
+# Then the real tracked run uses a persistent path
+bth run --out outputs/run_abc.json -- uv run python scripts/experiments/train.py
+```
+
+## Sidecar Pre-Registration
+
+Every script in `scripts/experiments/` and `scripts/benchmarks/` should have a sidecar `.bth.toml` declaring hypothesis and expected outcomes.
+
+### Experiment Sidecar Format
 
 ```toml
 [experiment]
-hypothesis = "Clear, falsifiable statement describing system behavior under conditions"
+hypothesis = "NVT with dt=0.5fs maintains ±5K temperature stability over 50ps"
 
 [outcomes.pass]
-condition = "temp_std < 5"              # DuckDB SQL fragment
-decision = "Proceed to NPT equilibration"
+condition = "temp_std < 5"
+is_residual = false
 
 [outcomes.marginal]
 condition = "temp_std >= 5 AND temp_std < 10"
-decision = "Tune Langevin gamma; re-run with different seed"
+is_residual = false
 
 [outcomes.fail]
 condition = "temp_std >= 10"
-decision = "Investigate thermostat coupling; check PME settings"
+is_residual = true
 
 [result_schema]
 temp_mean = "float"
 temp_std = "float"
 n_steps = "int"
-dt_fs = "float"
-ensemble = "str"
 ```
 
-**Key points:**
-- `condition` is evaluated by DuckDB at run-end; no custom DSL.
-- Multiple outcome branches allow nuanced decisions (not just pass/fail).
-- `result_schema` documents what the script writes.
+**Key Rules:**
+- Outcome `condition` fields are DuckDB SQL fragments evaluated on result JSON
+- Exactly one outcome must have `is_residual = true`
+- `result_schema` declares all columns referenced by outcome conditions
+- No Python-style chained comparisons: use `AND` instead of `0.4 <= x < 0.7`
+- Script outputs JSON to path registered with `bth run --out`
 
-### Benchmark Schema
-
-File: `scripts/benchmarks/<stem>.bth.toml`
+### Benchmark Sidecar Format
 
 ```toml
 [benchmark]
-baseline_ref = "run_<uuid_of_reference>"
+baseline_ref = "run_abc123"
 metric = "ns_per_day"
-regression_threshold = 0.05             # ±5%
-target = "Qualitative goal or reference (e.g., >50 ns/day on pi_so3 GPU)"
+regression_threshold = 0.05
+target = "> 50 ns/day on pi_so3"
 
 [result_schema]
 ns_per_day = "float"
 system = "str"
-atom_count = "int"
-ensemble = "str"
-dt_fs = "float"
-hardware_tag = "str"
+n_atoms = "int"
 ```
 
-**Rationale:** Benchmarks compare against a baseline (UUID-based, rename-safe). Regression threshold sets tolerance. Multiple metrics trackable via `result_schema`.
+### Scaffold a Template
 
-### Debug Schema
+```bash
+bth new-experiment --name my_experiment
+```
 
-File: `scripts/debug/<stem>.bth.toml`
+Creates `scripts/experiments/my_experiment.py` and `scripts/experiments/my_experiment.bth.toml` skeleton.
+
+### Validate Sidecar
+
+```bash
+bth check --path scripts/experiments/train.bth.toml
+```
+
+Checks TOML syntax, schema completeness, DuckDB condition validity, and residual outcome presence.
+
+## Controls Discipline (v0.11.0)
+
+### Stage Classification
+
+Every experiment sidecar can declare a `stage_name` field (default: `"exploration"`) to classify the maturity and intent of the run. Canonical values are advisory — non-canonical values are logged as a warning and coerced to `"exploration"` at parse time.
+
+**Canonical stages:**
+- `exploration` — hypothesis generation, parameter sensitivity, proof-of-concept (default)
+- `calibration` — tuning hyperparameters before validation; outcome refinement
+- `validation` — testing hypothesis with controlled parameters; reproducibility required
+- `ablation` — isolating contributions of components
+- `production` — final tested run ready for publication
 
 ```toml
-[debug]
-symptom = "Concrete symptom (e.g., 'NaN forces after step 847', 'NPT diverges to 10^115 K')"
-suspected_cause = "Initial hypothesis (e.g., 'PME grid aliasing when box < 2*cutoff')"
-verification = "Concrete reproduction steps (e.g., 'reproduce with box=4nm, compare box=6nm')"
-
-[verdict_schema]
-reproduced = "bool"
-root_cause = "str"
-fix = "str"
-```
-
-**Use case:** Isolate bug symptoms, trace causes, document fixes. Not for publication; for debugging workflows.
-
-## Directory Convention
-
-| Directory | Schema | Sidecar | Tracked | Naming |
-|-----------|--------|---------|---------|--------|
-| `scripts/experiments/` | experiment | required | Yes | `verb_noun.py` |
-| `scripts/benchmarks/` | benchmark | required | Yes | `verb_noun.py` |
-| `scripts/validation/` | property+ref+tolerance | optional | Optional | `verb_noun.py` |
-| `scripts/analysis/` | none | none | Optional | `verb_noun.py` |
-| `scripts/data/` | none | none | No | `verb_noun.py` |
-| `scripts/slurm/` | none | none | Via wrapper | `verb_noun.slurm` |
-| `scripts/debug/` | debug | optional | No | `YYMMDD_desc.py` |
-| `scripts/explore/` | none | none | No | `YYMMDD_desc.py` |
-| `scripts/scratch/` | none | none | No (gitignored) | `YYMMDD_desc.py` |
-
----
-
-## Agentic Integrity — Three-Tier Validation & Governance
-
-bathos enforces a three-tier validation discipline for autonomous and collaborative agent workflows. The tiers work together to prevent drift and unsafe execution.
-
-### Tier 1: Machine-Enforced Invariants (Gate Layer)
-
-**Pre-execution validation — blocks unsafe runs.** Evaluated at `bth run` time before subprocess starts.
-
-- **Sidecar presence:** Every script in `scripts/experiments/` and `scripts/benchmarks/` MUST have a `<stem>.bth.toml` file (fail fast).
-- **Sidecar validity:** TOML must parse; all sections required: `[experiment]`/`[benchmark]`, `[outcomes.*]`, `[result_schema]`.
-- **Outcome structure:** Each outcome block MUST include:
-  - `condition`: DuckDB SQL fragment (validated at gate time, not runtime)
-  - `decision`: What to do if this outcome fires
-  - `reasoning`: Why this threshold/condition makes sense (cite mechanistic expectations or references, never bare narrative)
-  - Exactly one outcome MUST have `is_residual = true` (fallback branch)
-- **Agent mode constraints:** Autonomous mode blocks execution on iterative scripts (scripts with prior runs in catalog) unless `--no-sidecar` is explicitly passed.
-- **Gate errors:** When validation fails, `bth run` returns exit code 1 and writes structured JSON to stderr with `gate_schema_version=1`, `errors[]`, and `remediation` field. MCP layer surfaces this as a structured tool result (not an exception).
-
-**Agent response to gate failure:** Read `errors[]` and `remediation` fields. Fix sidecar (most common: missing `reasoning` field or invalid SQL condition). Never use `--no-sidecar` to bypass; reserve that flag for exploratory runs in `scripts/explore/`.
-
-### Tier 2: Warm-Catalog Analytics (Lint Layer)
-
-**Post-run monitoring — flags suspicious patterns.** Evaluated by `bth lint` on accumulated runs.
-
-- **Residual rate:** Warn if >10% of runs in a campaign map to the residual outcome (suggests outcomes are too strict or sidecar reasoning is misaligned with empirical results).
-- **Bypass rate:** Warn if >10% of runs used `--no-sidecar` (suggests scripts are exploratory and should not be in experiments/ directory).
-- **Outcome drift:** Warn if all runs in a campaign map to a single outcome branch (suggests other branches are unreachable or sidecar was over-fitted).
-- **Unfired branches:** Warn if an outcome `condition` has never evaluated to true (dead code in sidecar logic).
-
-**Agent response to lint warnings:** Use `bth campaign review <id>` to inspect outcome distribution and anomalies. Adjust `condition` thresholds or `reasoning` fields if empirical results diverge from predictions. If exploratory, move script to `scripts/explore/` and re-run without sidecar.
-
-### Tier 3: Agentic Principles (Workflow Guidance)
-
-**Human+agent decision-making — prose discipline for collaborative workflows.**
-
-- **Hypothesis articulation (pre-run):** State what measurement you expect and why, BEFORE executing. Do not post-hoc rationalize results. Use sidecar `[experiment]` section; cite literature or prior work.
-- **Outcome reasoning fields:** Must cite specific thresholds, mechanistic expectations, or reference data — not vague narratives. Example (good): "temp_std < 5K per Berendsen et al. validation on TIP3P in 4nm box at 300K." Example (bad): "stable temperature because it looks right."
-- **Autonomous vs. collaborative modes:**
-  - **Autonomous:** Only for well-understood experiment types with >5 prior successful runs and consistent outcome patterns. Gate enforces first-of-kind check.
-  - **Collaborative:** Default for novel territory. Requires human review before `bth run` proceeds; agent cites sidecar reasoning in dispatch context.
-- **Campaign discipline:** Use `exploration` campaigns for discovery (outcome distribution is uncertain). Switch to `confirmation` campaigns when ready to validate a specific hypothesis (tight outcome thresholds, clear success criteria). `bth campaign review` provides anomaly feedback.
-- **Unknown outcomes:** If a run's outcome is 'unknown' after completion, check that the script wrote results via `$BTH_RESULTS_PATH` env var and that result schema in sidecar matches script output.
-- **When gate fails:** Never retry with `--no-sidecar`. Fix the sidecar: add missing `reasoning`, fix SQL syntax in `condition`, or split overly-strict outcome into marginal + fail branches.
-
----
-
-## Campaign Workflow (Two-Mode Design)
-
-bathos campaigns enable organized, accountable parametric exploration and hypothesis testing.
-
-### Mode: Exploration
-
-For discovery phase — outcome distribution is uncertain, multiple branches expected to fire.
-
-```bash
-bth campaign create "nvt-thermostat-search" --mode exploration \
-  --question "Which Langevin coupling strength gives best stability?" \
-  --project myproject
-
-bth run python scripts/experiments/nvt_stability.py --campaign <id> \
-  -- --gamma 0.1
-bth run python scripts/experiments/nvt_stability.py --campaign <id> \
-  -- --gamma 0.5
-bth run python scripts/experiments/nvt_stability.py --campaign <id> \
-  -- --gamma 1.0
-
-bth campaign review <id>
-# Output: outcome distribution, residual rate, anomalies
-# Interpret results → decide next phase (confirmation or pivot)
-```
-
-### Mode: Confirmation
-
-For validation phase — hypothesis is specific, outcomes are pre-registered, success criteria are tight.
-
-```bash
-bth campaign create "nvt-validation" --mode confirmation \
-  --hypothesis "Langevin gamma=0.5 maintains ±5K stability for 100ps NVT" \
-  --project myproject
-
-bth run python scripts/experiments/nvt_stability_100ps.py --campaign <id> \
-  -- --gamma 0.5 --seed 1
-bth run python scripts/experiments/nvt_stability_100ps.py --campaign <id> \
-  -- --gamma 0.5 --seed 2
-bth run python scripts/experiments/nvt_stability_100ps.py --campaign <id> \
-  -- --gamma 0.5 --seed 3
-
-# All runs should fire the same outcome (pass/marginal/fail)
-bth campaign review <id>
-
-# Conclude with outcome label and summary
-bth campaign conclude <id> \
-  --outcome pass \
-  --note "All 3 seeds showed temp_std < 3K; proceeds to NPT phase"
-```
-
-### CLI Usage Sequence
-
-```bash
-# 1. Create campaign (exploration or confirmation mode)
-CAMPAIGN=$(bth campaign create "my-sweep" --mode exploration | jq -r .campaign_id)
-
-# 2. Run experiments, associating each with campaign
-bth run python scripts/experiments/script.py --campaign $CAMPAIGN -- --param value
-
-# 3. Monitor accumulated runs
-bth campaign review $CAMPAIGN
-
-# 4. Analyze outcome distribution, refine sidecar if needed
-bth campaign list --status open
-
-# 5. Conclude when done
-bth campaign conclude $CAMPAIGN --outcome success --note "Hypothesis validated"
-
-# 6. Query concluded campaigns
-bth campaign list --status concluded
-```
-
----
-
-# SECTION 2: Getting Started
-
-## Installation
-
-### v0.1 (Current)
-
-Install from source:
-
-```bash
-cd /home/marielle/projects/bathos
-uv pip install -e .
-# or
-uv tool install --from . bathos
-```
-
-### PyPI / uv tool
-
-```bash
-uv tool install bathos
-```
-
-## Environment Variables
-
-bathos respects these environment variables to control behavior:
-
-| Variable | Default | Usage | Context |
-|----------|---------|-------|---------|
-| `BTH_CATALOG_DIR` | `~/.bth/catalog/` | Override catalog location | Testing; multi-catalog setups |
-| `BTH_PROJECT_SLUG` | From `.bth.toml` | Override project name | SLURM jobs; multi-project repos |
-| `SLURM_JOB_ID` | (not set) | SLURM job identifier | Auto-captured by `bth run` |
-
-**Example (SLURM batch script):**
-
-```bash
-#!/bin/bash
-source scripts/slurm/_bth_env.sh       # Sets BTH_PROJECT_SLUG, BTH_CATALOG_DIR
-echo "Running in project: $BTH_PROJECT_SLUG"
-uv run bth run python scripts/experiments/measure_nvt.py -- --n-steps 1000
-# Automatically captures $SLURM_JOB_ID in run record
-```
-
-## Project Setup (First Time)
-
-```bash
-cd /path/to/your/research/project
-bth init --slug myproject [--remote engaging:~/projects/myproject] [--slurm-partition pi_so3]
-```
-
-**Creates:**
-- `.bth.toml` — project metadata
-- `scripts/` — 9 subdirectories with README
-- `.bth/catalog/` — local run storage
-- `.gitignore` entry for `.bth/`
-
-## Basic Workflow
-
-1. **Write a script** in `scripts/experiments/measure_nvt_stability.py`
-2. **Create sidecar** `scripts/experiments/measure_nvt_stability.bth.toml` with `[experiment]` section
-3. **Run with bathos:**
-   ```bash
-   bth run python scripts/experiments/measure_nvt_stability.py -- --n-steps 1000 --dt 0.5 --out results.json
-   ```
-4. **List recent runs:**
-   ```bash
-   bth ls [--since 7d]
-   ```
-5. **Query results:**
-   ```bash
-   bth find --status completed --tag tip3p
-   ```
-6. **Maintain warm tier** (after 50+ runs):
-   ```bash
-   bth compact
-   ```
-
----
-
-# SECTION 3: CLI Commands Reference
-
-## Available Now (v0.1) ✅
-
-### Setup
-
-**`bth init --slug <name> [--remote host:path] [--slurm-partition P]`**
-- Register a project, scaffold directories, initialize catalog
-- Creates `.bth.toml` with metadata
-- Creates 9 script directories (experiments, benchmarks, validation, analysis, data, slurm, debug, explore, scratch)
-- One project per `.bth.toml` per repository
-
-### Execution
-
-**`bth run <script> [-- <args>]`**
-- Execute any script; capture provenance atomically to cool tier
-- `--out <path>`: register output file(s) for filtering (e.g., `--out results.json`)
-- `--tag <label>`: add search tags (repeatable; e.g., `--tag tip3p --tag nvt`)
-- Captures `SLURM_JOB_ID` if set in environment
-- **Atomicity:** write-then-rename Parquet ensures parallel SLURM safety
-
-Example:
-```bash
-bth run python scripts/experiments/measure_nvt.py --out nvt_out.json -- --n-steps 1000 --dt 0.5
-```
-
-### Query Commands (Hot)
-
-**`bth ls [--since <time>] [--status S] [--limit N]`**
-- List recent runs (default 20)
-- `--since 7d | 24h | 30m` for relative time filtering
-- `--status pending | running | completed | failed`
-- Shows: ID, project, status, exit_code, duration_s, command
-
-**`bth show <run-id>`**
-- Full details: timestamps, git state (hash, branch, dirty), command, argv, output paths, tags, SLURM job ID
-
-**`bth find --project P --since TIME --status S --tag TAG --output-file GLOB`**
-- Flexible filtered query over cool or warm tier
-- `--project myproject`: filter by project slug
-- `--status pending|running|completed|failed`
-- `--tag equilibration`: filter by tag (single)
-- `--output-file *.json`: filter by registered output file glob
-- All filters AND together
-
-**`bth sql "<query>"`**
-- Arbitrary DuckDB query (escape hatch)
-- **Cool tier** (before compact): `SELECT * FROM read_parquet('~/.bth/catalog/runs/run_*.parquet')`
-- **Warm tier** (after compact): `SELECT * FROM runs` (auto-populated by `bth compact`)
-
-### Maintenance
-
-**`bth compact`**
-- Consolidate cool Parquet fragments (>50 files) into warm DuckDB (`bathos.db`)
-- Idempotent; safe to run repeatedly
-- Dramatically speeds up `ls`, `find`, `sql` on large catalogs
-- No data loss; cool fragments remain (optional v0.2 cleanup)
-
-**`bth repair [--tier cool|warm|archive|all] [--dry-run|--apply] [--from-warm] [--acknowledge-warm-loss]`**
-- Scan for and repair catalog corruption across storage tiers. **Dry-run by default** — pass `--apply` to execute.
-- `--tier` (default `all`): restrict to one tier (`cool`, `warm`, `archive`).
-- **Cool tier:** removes stale write-in-progress sentinel files; quarantines unreadable Parquet fragments so they no longer block `bth compact`.
-- **Warm tier:** backs up `bathos.db` to `bathos.db.bak-<timestamp>` (keeps the 3 most recent) before any `force_rebuild`. A rebuild that would destroy warm-only data (postmortem annotations, `output_metadata`) is gated behind `--acknowledge-warm-loss`. An unreadable warm DB is treated as data-at-risk and aborts unless acknowledged.
-- `--from-warm`: detect runs present in the warm DB but missing from cool fragments and re-export them back to the cool tier.
-- **Archive tier:** quarantines partitions failing SHA256 or row-count verification, recording them in the archive `manifest.json`.
-- Safe first step on any "catalog looks wrong" symptom: run `bth repair` (dry-run) to see the plan before applying.
-
-Example:
-```bash
-bth repair                         # dry-run scan of all tiers
-bth repair --tier cool --apply     # clean sentinels + quarantine bad fragments
-bth repair --from-warm --apply     # rebuild missing cool fragments from warm DB
-```
-
----
-
----
-
-# SECTION 4: Common Agent Tasks
-
-### Task 1: Seed a New Experiment
-
-Steps:
-
-1. **Verify project initialized:**
-   ```bash
-   ls .bth.toml || bth init --slug myproject
-   ```
-2. **Create script** in `scripts/experiments/equilibrate_nvt_water.py` (naming: `verb_noun.py`)
-3. **Create sidecar** `scripts/experiments/equilibrate_nvt_water.bth.toml` with `[experiment]` section, outcomes, and result schema
-4. **Record dry-run:**
-   ```bash
-   bth run python scripts/experiments/equilibrate_nvt_water.py --dry-run
-   ```
-5. **Run full experiment:**
-   ```bash
-   bth run python scripts/experiments/equilibrate_nvt_water.py --out nvt_results.json -- --n-steps 1000 --dt 0.5
-   ```
-6. **Verify completion:**
-   ```bash
-   bth ls --since 5m | grep completed
-   ```
-
-### Task 2: Analyze All Runs for a Project
-
-Steps:
-
-1. **List recent runs:**
-   ```bash
-   bth ls --project myproject --since 7d
-   ```
-2. **If >50 fragments, compact:**
-   ```bash
-   bth compact
-   ```
-3. **Query warm tier:**
-   ```bash
-   bth sql "SELECT id, exit_code, duration_s FROM runs WHERE project_slug='myproject' AND status='completed' ORDER BY timestamp DESC LIMIT 20"
-   ```
-4. **Filter by tags:**
-   ```bash
-   bth find --project myproject --tag equilibration --status completed
-   ```
-5. **Inspect run:**
-   ```bash
-   bth show <run-id>
-   ```
-
-### Task 3: Check Run Validity After Code Changes (v0.2 Preview)
-
-Steps:
-
-1. **Make code changes, commit:**
-   ```bash
-   git add -A && git commit -m "Fix temperature control coupling"
-   ```
-2. **Verify stale runs:**
-   ```bash
-   bth check
-   # Compares recorded git_hash against current HEAD
-   ```
-3. **Find stale runs:**
-   ```bash
-   bth find --status stale
-   ```
-4. **Decision:** Re-run or note limitations in analysis
-
-### Task 4: Submit Experiment to SLURM Cluster
-
-**Prerequisites:**
-- Project initialized: `bth init --slug myproject --remote engaging:~/projects/myproject`
-- Script validated locally with L1/L2/L3 gates (see CLUSTER.md §7)
-- Output directory created: `mkdir -p outputs/logs/slurm`
-
-**Local Validation Gates (CLUSTER.md §7, mandatory before any submission):**
-
-| Gate | Check | Command |
-|------|-------|---------|
-| L1 dry-run | Paths, imports, no remote fetches at runtime | `uv run python scripts/benchmarks/measure_tip3p.py --dry-run` |
-| L2 smoke test | End-to-end CPU run < 60s | `uv run python scripts/benchmarks/measure_tip3p.py --smoke` |
-| L3 cluster smoke test | Single reduced-budget task on cluster | `sbatch --array=0-0 --time=0:10:00 scripts/slurm/bench.slurm` |
-
-**Concrete sbatch Template** (`scripts/slurm/bench_tip3p.slurm`):
-
-```bash
-#!/bin/bash
-#SBATCH --job-name=bench_tip3p
-#SBATCH --partition=pi_so3
-#SBATCH --time=23:00:00                    # 10% under 24h max (CLUSTER.md §1)
-#SBATCH --output=outputs/logs/slurm/%j.out
-#SBATCH --error=outputs/logs/slurm/%j.err
-
-# Load bathos environment (v0.2 feature)
-source scripts/slurm/_bth_env.sh
-# Exports: BTH_PROJECT_SLUG, BTH_CATALOG_DIR, SLURM_JOB_ID
-
-# Verify setup
-echo "Project: $BTH_PROJECT_SLUG, Catalog: $BTH_CATALOG_DIR, Job: $SLURM_JOB_ID"
-
-# Execute with bathos (captures SLURM_JOB_ID automatically)
-uv run bth run python scripts/benchmarks/measure_tip3p_ns_per_day.py \
-  --out bench_results.json \
-  --tag cluster \
-  -- \
-  --n-steps 1000 \
-  --dt 0.5
-```
-
-**Execution Flow:**
-
-```bash
-# Step 1: Local gates (required)
-uv run python scripts/benchmarks/measure_tip3p_ns_per_day.py --dry-run      # L1
-uv run python scripts/benchmarks/measure_tip3p_ns_per_day.py --smoke        # L2
-
-# Step 2: Cluster smoke test (single task)
-sbatch --array=0-0 --time=0:10:00 scripts/slurm/bench_tip3p.slurm
-# Wait for completion; check output/logs/slurm/<jobid>.out
-
-# Step 3: Scale to full array (after smoke test passes)
-sbatch --array=0-9%5 scripts/slurm/bench_tip3p.slurm
-# %5 = 5 concurrent tasks (CLUSTER.md §2: keep %M ≤ 10-16)
-
-# Step 4: Monitor runs
-squeue -u marielle                                  # Watch job status
-ssh engaging "tail -f ~/projects/myproject/outputs/logs/slurm/<jobid>.out"  # Live tail
-
-# Step 5: Retrieve results (back on laptop)
-bth sync --remote engaging                         # pull cool fragments
-# OR manually:
-rsync -azP --dry-run engaging:~/.bth/catalog/runs/ ~/.bth/catalog/runs/
-rsync -azP engaging:~/.bth/catalog/runs/ ~/.bth/catalog/runs/
-
-# Step 6: Analyze
-bth ls --since 1h                                  # See cluster runs
-bth compact                                        # Consolidate if >50
-bth find --tag cluster --status completed         # Filter cluster runs
-```
-
-**SLURM Integration Notes:**
-
-- `_bth_env.sh` is v0.2; in v0.1, set `BTH_PROJECT_SLUG` manually in script
-- `SLURM_JOB_ID` is auto-set by sbatch; `bth run` captures it → queryable later
-- **CLUSTER.md reference:** Consult §1 (partition walltime limits), §2 (job submission, array sizing), §3 (rsync safety), §4 (queue monitoring), §6 (environment setup, no `module load`)
-- Omit `module load` directives; use `uv` for Python
-- Test script locally first with all three gates before scaling
-
-### Task 5: Multi-Run Analysis Across Projects
-
-Steps:
-
-1. **Initialize bathos in each project:**
-   ```bash
-   cd /path/to/proj_A && bth init --slug proj_A
-   cd /path/to/proj_B && bth init --slug proj_B
-   ```
-2. **Compact each project:**
-   ```bash
-   # In proj_A: bth compact
-   # In proj_B: bth compact
-   ```
-3. **Query across projects:**
-   ```bash
-   # Cool tier (before compact):
-   bth sql "SELECT project_slug, COUNT(*), AVG(duration_s) FROM read_parquet('~/.bth/catalog/runs/run_*.parquet') GROUP BY project_slug"
-   
-   # Warm tier (after compact):
-   bth sql "SELECT project_slug, COUNT(*), AVG(duration_s) FROM runs GROUP BY project_slug"
-   ```
-4. **Compare outcomes manually:**
-   ```bash
-   bth find --project proj_A --status completed | wc -l
-   bth find --project proj_B --status completed | wc -l
-   ```
-
----
-
-# SECTION 5: Integration with Agent Workflows
-
-### Dispatch Context for Orchestrators
-
-When dispatching a sub-agent for experiment execution, include:
-
-```
-RESEARCH_CONTEXT:
-  Project root: /home/marielle/projects/myproject
-  bathos initialized: verify with `ls .bth.toml`
-  Script directory: scripts/experiments/ (or benchmarks/, debug/)
-  Script naming: verb_noun.py
-  Sidecar required: scripts/experiments/<stem>.bth.toml with [experiment] section
-  
-BATHOS COMMANDS:
-  bth run <script> -- <args> [--tag X] [--out PATH]
-  bth ls [--since 7d]
-  bth find --status failed --tag <label>
-  bth show <run-id>
-  bth sql "<query>"
-```
-
-### Verification Gates Before Task Completion
-
-**Before claiming "experiment submitted":**
-```bash
-bth ls --since 5m
-# Must show 1 row with status='running' or 'completed'
-```
-
-**Before claiming "results analyzed":**
-```bash
-count=$(bth sql "SELECT COUNT(*) FROM runs WHERE project_slug='X' AND status='completed'")
-# Must match expected count (e.g., 10 for 10-parameter sweep)
-```
-
-### Distinguishing bathos Runs from OODA Logging
-
-**bathos:** Tracks individual **script executions** (provenance: git state, command, exit code, output paths, duration). Results live in `~/.bth/catalog/runs/` (cool tier, per-run Parquet) and `bathos.db` (warm tier, consolidated DuckDB).
-
-**OODA logging** (`.praxia/*.jsonl`): Tracks **agent decision phases** (recon, plan, audit, research). Records agent reasoning and phase transitions.
-
-**Complementary, not redundant:** An agent dispatched to run an experiment will create BOTH a bathos run record AND OODA phase records. Query bathos for research results; query OODA for agent reasoning.
-
-### Query Patterns
-
-**Find failed experiments:**
-```bash
-bth find --status failed --tag myexp
-bth show <run-id>  # Inspect exit_code and stderr
-```
-
-**Aggregate performance across runs:**
-```bash
-bth compact
-bth sql "SELECT tag, AVG(duration_s), MIN(duration_s), MAX(duration_s) FROM runs WHERE status='completed' GROUP BY tag"
-```
-
-**Track output files:**
-```bash
-bth find --output-file "*.json" --status completed
-```
-
----
-
-# SECTION 6: Architecture Decision Locks
-
-These decisions constrain implementation and enable agent safety:
-
-| Decision | Choice | Agent Implication |
-|----------|--------|-------------------|
-| Pre-registration | **Sidecar TOML** (not decorators) | Agents can validate sidecars without importing Python |
-| Outcome eval | **DuckDB SQL fragments** (not custom DSL) | Agents write outcome logic in plain SQL |
-| Atomicity | **write-then-rename Parquet** (not locking) | Agents can dispatch 100+ parallel SLURM jobs safely |
-| Storage | **Cool + Warm tiers** (not single tier) | Agents query warm DB fast; jobs write cool fragments atomically |
-| Addressing | **Content-addressed runs** (not path-based) | Runs don't break if scripts are moved/renamed |
-| Query | **DuckDB + SQL** (not custom filters) | Agents reuse SQL knowledge; no new DSL |
-
-**Implications for agents:**
-- Always use `bth run` (not manual Parquet writes)
-- Always use `bth find` / `bth sql` (not raw file access)
-- After SLURM jobs: verify with `bth ls` (not polling logs)
-- Before dispatching analyzer: ensure runs have status='completed'
-- For cluster workflows: use `bth sync` or manual rsync before analysis
-
----
-
-# SECTION 7: Example Scenarios
-
-### Scenario A: Run Single Experiment (v0.1)
-
-```bash
-bth run python scripts/experiments/test_nvt.py -- --n-steps 1000
-# Expected: Exit 0, status='completed'
-bth ls | grep completed
-```
-
-### Scenario B: Submit 10 Parameter Sweeps to SLURM (v0.1+v0.2)
-
-```bash
-for param in $(seq 0.1 0.1 1.0); do
-  sbatch --job-name=sweep_$param scripts/slurm/sweep.slurm $param
-done
-
-# Later:
-bth ls --since 1h | wc -l
-# Should show ~10 runs
-```
-
-### Scenario C: Check Result Validity (v0.2 Preview)
-
-```bash
-# Make code change, commit
-git commit -am "Fix temperature thermostat"
-
-# Check stale runs
-bth check
-bth find --status stale
-# Decision: which runs to repeat?
-```
-
-### Scenario D: Analyze Outcomes (v0.2 Preview)
-
-```bash
-bth compact
-bth sql "SELECT outcome, COUNT(*) as count FROM runs WHERE outcome IS NOT NULL GROUP BY outcome"
-# Shows: pass:45, marginal:8, fail:2
-```
-
-### Scenario E: Export for Publication (v0.2 Preview)
-
-```bash
-bth archive --project X --year 2026 --month 05
-ls ~/.bth/catalog/archive/project=X/year=2026/month=05/
-# Partitioned, shareable Parquet ready for zenodo/figshare
-```
-
-### Scenario F: Compare Two Projects (v0.1)
-
-```bash
-bth find --project proj_A --status completed | wc -l
-# → 87 runs
-
-bth find --project proj_B --status completed | wc -l
-# → 62 runs
-
-# Aggregate:
-bth sql "SELECT project_slug, COUNT(*) FROM read_parquet('~/.bth/catalog/runs/run_*.parquet') GROUP BY project_slug"
-```
-
-### Scenario G: Cluster Sync Workflow (v0.2 Preview)
-
-```bash
-# On cluster, in SLURM job:
-source scripts/slurm/_bth_env.sh
-bth run python scripts/benchmarks/measure_nvt.py -- --n-steps 1000
-
-# At home, after job completes:
-bth sync --remote engaging --pull
-# OR manually: rsync -azP engaging:~/.bth/catalog/runs/ ~/.bth/catalog/runs/
-
-bth ls --since 1h
-# See runs recorded on cluster
-```
-
-### Scenario H: Rerun Failed Experiment (v0.1)
-
-```bash
-bth find --status failed --tag variant_A
-# → shows failed run ID
-
-bth show <run-id>
-# Inspect exit_code, command, git state
-
-# Make code changes, commit
-git commit -am "Fix NaN handling in force calculation"
-
-# Rerun with same arguments
-bth run python scripts/experiments/measure_x.py --out results.json -- <same args>
-# New run created; old one remains for comparison
-```
-
----
-
-# SECTION 8: FAQ & Common Pitfalls
-
-### Q: I ran a script but bathos didn't record it. Why?
-
-**A:**
-- Verify `.bth.toml` exists: `ls .bth.toml`
-- Verify env var in SLURM jobs: `echo $BTH_PROJECT_SLUG`
-- Use `bth run <script>`, not `python <script>` directly
-- Check: `bth ls | head` should show the run
-- Check `.bth/catalog/runs/` for Parquet fragments
-
-### Q: My cool tier has 500 fragments. Performance issue?
-
-**A:** Not broken, but queries are slow. Run `bth compact` to consolidate into warm-tier DuckDB. Then `bth ls`, `bth find`, `bth sql` are fast again.
-
-### Q: Can I run experiments on two different machines?
-
-**A:** Yes, if sharing catalog via `bth sync` or NFS. Cool tier is SLURM-safe (atomic) but not network-FS-safe (multiple writers can corrupt). Warm tier is single-writer (DuckDB).
-
-### Q: How do I delete a run?
-
-**A:** Currently impossible (intentional: audit trail). Filter it out in queries or mark invalid in metadata (v0.2 feature). Runs are immutable records.
-
-### Q: Can I use bathos for hyperparameter tuning?
-
-**A:** No. Use Optuna, Ray Tune, or similar. bathos is provenance tracking, not optimization. It records hyperparameter sweeps you run; it doesn't search the space.
-
-### Q: My script has no output files. Can I still track it?
-
-**A:** Yes. Just `bth run script.py` and query provenance (command, exit_code, duration, git state). Output file registration (`--out`) is optional.
-
-### Q: My SQL query broke after I upgraded bathos. Why?
-
-**A:** Schema evolution is handled automatically. `bth migrate` upgrades cool-tier Parquet fragments to the current schema. `bth compact` applies migration logic during warm-tier ingestion. `bth show <run-id>` includes `schema_version` so you can verify what version a run was recorded with.
-
-### Q: Can I use bathos with notebooks (Jupyter)?
-
-**A:** Not yet. Scripts only. Notebooks will be addressed in v0.3 (future roadmap).
-
-### Q: How do I query across multiple projects with different .bth.toml files?
-
-**A:** Each project has its own `.bth.toml` and catalog. Use `bth sql` with manual path globs (cool tier) or union queries if all projects compact to the same warm DB (future: `bth sync` handles this). v0.2 multi-catalog feature will simplify this.
-
-### Common Pitfalls
-
-- **Forgetting `--out`**: Output files aren't tracked. Queries with `--output-file GLOB` won't find them. Register all results.
-- **SLURM jobs without `_bth_env.sh`**: `SLURM_JOB_ID` isn't captured. Can't link runs to job logs later.
-- **Missing sidecars**: v0.1 warns; v0.2 enforces. Start writing them now to avoid surprises.
-- **Running `bth compact` in parallel**: DuckDB is single-writer. Serialize `bth compact` calls.
-- **Assuming cool fragments auto-cleanup**: They don't. Older versions remain until `bth archive`.
-
----
-
-# SECTION 9: MCP Tool Reference (v0.2 — Fully Shipped)
-
-**Status:** FastMCP server ships with bathos. Start with `bth-mcp` (stdio transport). Register automatically via `bth export --tool claude --level user` (writes skill + wires MCP server). If MCP tools unavailable in your environment, use CLI commands instead. Semantics are identical.
-
-### All Shipped Tools ✅
-
-| MCP Tool | Arguments | Return | CLI Equivalent |
-|----------|-----------|--------|----------------|
-| `list_runs` | `catalog_dir, limit, since, status` | `{runs: [], count: int}` | `bth ls` |
-| `find_runs` | `catalog_dir, project, since, status, tag, output_file` | `{runs: [], count: int}` | `bth find` |
-| `get_run` | `run_id, catalog_dir` | `{run: {id, command, git_hash, outcome, ...}}` | `bth show` |
-| `run_sql` | `query, catalog_dir` | `{rows: []}` | `bth sql` |
-| `init` | `project_root, slug, remote, slurm_partition` | `{success: bool, msg: str}` | `bth init` |
-| `run` | `script_path, args, project_slug, catalog_dir, output_paths, tags, agent_mode, campaign_id, no_sidecar` | `{script_path, exit_code, success}` or gate error | `bth run` |
-| `compact` | `catalog_dir` | `{ingested: int, skipped: int}` | `bth compact` |
-| `archive` | `project, archive_dir, dry_run, catalog_dir` | `{runs: int, partitions: int}` | `bth archive` |
-| `check` | `catalog_dir, project_root, status_filter` | `{results: [], total: int}` | `bth check` |
-| `repair_scan` | `catalog_dir, tier, from_warm` | `{actions: [], warnings: []}` | `bth repair` (dry-run) |
-| `repair` | `catalog_dir, tier, dry_run, from_warm, acknowledge_warm_loss` | `{manifest: {...}}` | `bth repair --apply` |
-| `sync` | `remote, pull, catalog_dir` | `{transferred: int, duration_s: float}` | `bth sync` |
-| `campaign_create` | `name, mode, project_slug, catalog_dir, question, hypothesis` | `{campaign_id, name, mode, status, started_at}` | `bth campaign create` |
-| `campaign_list` | `catalog_dir, project_slug, status` | `{campaigns: [], count: int}` | `bth campaign list` |
-| `campaign_review` | `campaign_id, catalog_dir` | `{total_runs, residual_rate, outcome_distribution, anomalies}` | `bth campaign review` |
-| `campaign_conclude` | `campaign_id, outcome_label, conclusion, catalog_dir` | `{status: 'concluded', campaign_id, outcome_label}` | `bth campaign conclude` |
-
-### Registration
-
-```bash
-# Claude Code — user level (all projects)
-bth export --tool claude --level user
-
-# Claude Code — workspace level (this project only)
-bth export --tool claude --level workspace
-
-# Gemini CLI — user level
-bth export --tool gemini --level user
-```
-
-Both skill and MCP server are registered in one command. The MCP entry:
-- **Claude Code:** written to `~/.claude.json` (user) or `.mcp.json` in CWD (workspace)
-- **Gemini CLI:** merged into `~/.gemini/settings.json` (user) or `.gemini/settings.json` (workspace)
-
----
-
-# SECTION 10: When to Dispatch vs. Manual Execution
-
-### Dispatch a Sub-Agent When
-
-- Task requires **custom Python/Rust script** (write experiment code, data processing)
-- Task involves **file I/O and argument parsing** (use `bth run`, not manual scripting)
-- Task requires **git workflow awareness** (commit before/after runs, branch tracking)
-- Task needs **SLURM job submission** (create + submit .slurm script, monitor)
-- Task involves **sidecar creation** (write TOML schemas)
-
-### Execute bathos CLI Directly When
-
-- Querying existing runs (`bth ls`, `bth find`)
-- Inspecting a single run (`bth show`)
-- Compacting or archiving (housekeeping, v0.2)
-- Checking git validity (`bth check`) — v0.2
-- Ad-hoc SQL queries (`bth sql`)
-
-### Decision Flow
-
-```
-Request: "Run measure_stability.py on 5 parameters"
-  → Multiple parameters + loop
-  → Needs git awareness (commit parameter files)
-  → Dispatch sub-agent (write script, loop, bth run, commit)
-
-Request: "Show me all failed runs from today"
-  → Pure query, no side effects
-  → Execute directly: bth find --since 24h --status failed
-
-Request: "Create benchmark sidecar for my script"
-  → TOML creation (text; no execution)
-  → Can execute directly or dispatch depending on scope
-```
-
----
-
-# APPENDIX A: Future Scenarios (v0.2 Preview)
-
-
-
-### Scenario I: Pre-Registration Validation
-
-```bash
-# Agent creates script
-cat > scripts/experiments/validate_nvt.py << 'EOF'
-#!/usr/bin/env python
-# ... experiment code ...
-print('{"temp_mean": 300.5, "temp_std": 2.3, "n_steps": 1000}')
-EOF
-
-# Agent creates sidecar
-cat > scripts/experiments/validate_nvt.bth.toml << 'EOF'
 [experiment]
-hypothesis = "NVT with Langevin coupling maintains ±5K stability"
+hypothesis = "..."
+stage_name = "validation"  # optional, defaults to "exploration"
+```
 
-[outcomes.pass]
-condition = "temp_std < 5"
-decision = "Proceed to NPT"
+Non-canonical values (e.g., `"pilot"`, `"final"`) trigger a warning and are coerced to `"exploration"`:
+```
+WARNING: Invalid stage_name 'pilot' in scripts/experiments/train.bth.toml; must be one of {'exploration', 'calibration', 'validation', 'ablation', 'production'}. Coercing to 'exploration'.
+```
 
-[outcomes.marginal]
-condition = "temp_std >= 5 AND temp_std < 10"
-decision = "Tune gamma, re-run"
+### Novel Flag
 
-[outcomes.fail]
-condition = "temp_std >= 10"
-decision = "Debug thermostat"
+Mark a run as novel (a new claim, not reproduction of prior work) with the `novel` flag:
 
+```toml
+[experiment]
+hypothesis = "..."
+novel = true
+```
+
+Setting `novel = true` satisfies Tier-1 lint requirements for validation/production experiments (see Lint Checks below).
+
+### Reproduction Block
+
+Declare reproduction metadata (optional `[reproduction]` block) to link your experiment to prior work or control runs:
+
+```toml
+[reproduction]
+reproduces_paper = "doi:10.1234/example"    # DOI or citation string (or "")
+reproduces_run = "run_abc123"               # Bathos run UUID (or "")
+tolerance_pct = 5.0                         # Allowed deviation in outcome metrics (optional)
+requires_pass_stem = "baseline_train"       # Script stem that must pass first (optional)
+```
+
+**Fields:**
+- `reproduces_paper` — DOI or full citation if this experiment reproduces published work. Leave empty if not reproducing a paper.
+- `reproduces_run` — Bathos run UUID if this experiment reproduces a prior bathos run. Leave empty if not reproducing a bathos run.
+- `tolerance_pct` — Allowed percentage deviation in outcome metrics when comparing to the reproduced reference. Optional; omit if not doing quantitative reproduction.
+- `requires_pass_stem` — Script stem (e.g., `"baseline_train"`) that must have at least one passing run before this script can be submitted. Enforced at `bth submit` time. Optional; omit if no prerequisite.
+
+### Controls Block
+
+Declare which outcome labels count as "control arm success" and "control arm failure" (optional `[controls]` block):
+
+```toml
+[controls]
+positive_outcome = ["pass"]
+negative_outcome = ["fail", "marginal"]
+```
+
+**Fields:**
+- `positive_outcome` — List of outcome labels that indicate the control arm succeeded (e.g., `["pass"]`).
+- `negative_outcome` — List of outcome labels that indicate the control arm failed (e.g., `["fail", "marginal"]`).
+
+The control block is declarative; it feeds Sprint Audit Signal 9 (see below).
+
+### bth submit Gate
+
+Two separate gate mechanisms protect experimental discipline:
+
+**1. Run-time gate** (`gate_check()` in `bth run`) — happens automatically at run start, validates sidecar presence, hash, and first-of-kind properties. Does NOT touch `stage_name`, `novel`, or `[reproduction]` fields.
+
+**2. Submit-time gate** (at `bth submit`) — keyed ONLY on `[reproduction].requires_pass_stem`. Operates in two modes:
+
+**Hard gate for validation/production:**
+- If `requires_pass_stem` is set AND `stage_name` is in `("validation", "production")`, **exit with error** if no passing run of that script stem exists.
+- Error code: `REPRODUCTION_PREREQUISITE_UNMET`
+
+```bash
+$ bth submit --preset gpu -- bth run uv run python scripts/validate.py
+REPRODUCTION_PREREQUISITE_UNMET: no passing run of 'baseline_train' found
+# Exit 1 — submission blocked
+```
+
+**Advisory warning for exploration/calibration:**
+- If `requires_pass_stem` is set AND `stage_name` is in `("exploration", "calibration")`, **warn but continue**.
+
+```bash
+$ bth submit --preset gpu -- bth run uv run python scripts/calibrate.py
+WARNING: no passing run of 'baseline_train' found (advisory for calibration stage)
+# Exit 0 — submission proceeds
+```
+
+**Silent skip:**
+- If `[reproduction]` block is absent or `requires_pass_stem` is empty, gate is skipped silently.
+
+### Lint Checks
+
+#### Tier-1 (Error)
+
+**`check_novel_or_reproduces_declared`** — Enforces reproducibility documentation for validation/production runs.
+
+Triggered by: `bth lint` (Tier-1 block)
+
+**Rule:** Any experiment with `stage_name` in `{"validation", "production"}` must have either:
+- `[reproduction]` block with non-empty `reproduces_paper` or `reproduces_run`, OR
+- `novel = true`
+
+**Example violations:**
+```toml
+[experiment]
+hypothesis = "Testing X"
+stage_name = "validation"
+# ✗ FAIL: No [reproduction] block, no novel=true
+```
+
+**Fixes:**
+```toml
+# Option 1: Declare reproduction
+[experiment]
+hypothesis = "Testing X"
+stage_name = "validation"
+
+[reproduction]
+reproduces_paper = "doi:10.1234/example"
+
+# Option 2: Declare as novel
+[experiment]
+hypothesis = "Testing X"
+stage_name = "validation"
+novel = true
+```
+
+#### Tier-2 (Warning)
+
+**`check_bypass_trend`** — Flags increasing use of `--no-sidecar` (tracked as `sidecar_mode='bypassed'`).
+
+Triggered by: `bth lint` (Tier-2 advisory)
+
+Warns if latest week's bypass rate is higher than prior week's.
+
+**`check_canonical_stage_names`** — Flags non-canonical `stage_name` values already in the warm catalog.
+
+Triggered by: `bth lint` (Tier-2 advisory)
+
+Example:
+```
+WARNING: Non-canonical stage_name 'pilot' in warm catalog (1 run). Consider renaming to one of: exploration, calibration, validation, ablation, production
+```
+
+### Sprint Audit Signals
+
+Run sprint audit to check project health across controls:
+
+```bash
+bth sprint-audit
+```
+
+#### Signal 9: control_arm_rate
+
+**Definition:** Fraction of all runs in the project with outcome labels matching the pattern `ctrl_%` (e.g., `ctrl_pass`, `ctrl_fail`).
+
+**Status values:**
+- **OK** if `control_arm_rate > 0.0` (at least some control runs exist)
+- **WARNING** if `control_arm_rate == 0.0` AND validation/production runs exist (no control runs despite having main runs)
+- **INFO** if no runs exist or catalog unavailable
+
+**Usage:** Not based on `[controls]` sidecar block presence; it scans actual outcome values across the catalog.
+
+```bash
+$ bth sprint-audit
+Signal 9 (control_arm_rate): control_arm_rate=12.5% (5/40 runs with ctrl_* outcome)
+Status: OK
+```
+
+#### Signal 10: submit_bypass_rate
+
+**Definition:** Fraction of validation/production cluster runs (those with `slurm_job_id` populated) that **lack** a matching submit-provenance record.
+
+Provenance stored at: `~/.bth/catalog/submits/<project_slug>/**/*.parquet`
+
+**Status values:**
+- **OK** if `submit_bypass_rate <= 5%` (0.05)
+- **WARNING** if `submit_bypass_rate > 5%` (more than 1 in 20 V/P jobs lack provenance)
+- **INFO** if no validation/production cluster runs exist
+
+**Usage:** Detects when jobs are submitted outside `bth submit` workflow (e.g., raw `sbatch`), bypassing provenance tracking.
+
+```bash
+$ bth sprint-audit
+Signal 10 (submit_bypass_rate): submit_bypass_rate=3.0% (1/34 validation/production cluster runs without provenance)
+Status: OK
+```
+
+## Query and Inspect
+
+### List Recent Runs
+
+```bash
+bth ls --limit 20 --since 7d
+bth ls --status completed --project myproject
+```
+
+Shows table of recent runs (project, command, outcome, duration, timestamp).
+
+### Show Run Details
+
+```bash
+bth show abc123-uuid
+```
+
+Full run metadata, git state, outcome, sidecar hash, postmortem status.
+
+### Find Runs by Condition
+
+```bash
+bth find --filter "outcome='pass' AND project_slug='myproject'"
+bth find --filter "campaign_id='my-campaign' AND slurm_job_id IS NOT NULL"
+bth find --limit 100
+```
+
+DuckDB WHERE clause over catalog. Returns table of matching runs.
+
+### Run Arbitrary SQL
+
+```bash
+bth sql "SELECT outcome, COUNT(*) FROM runs WHERE project_slug='myproject' GROUP BY outcome"
+```
+
+Query catalog directly. Useful for analytics and audits.
+
+## Catalog Management
+
+### Compact Cool Tier → Warm Tier
+
+```bash
+bth compact
+```
+
+Merges per-run Parquet fragments into DuckDB database. Automatic on `bth ls` if fragmentation is high.
+
+### Archive Old Runs
+
+```bash
+bth archive --before 90d --out ~/backups/archive.tar.zst
+```
+
+Exports cold-tier Parquet (partitioned by project/year/month) and compresses. Reduces catalog size.
+
+### Migrate Schema
+
+```bash
+bth migrate
+```
+
+Upgrades catalog schema to current version. Run after updating bathos.
+
+### Project Subdirectories (v0.4+)
+
+```bash
+bth migrate-to-project-subdirs
+```
+
+Reorganizes flat catalog to per-project subdirectories (`runs/<slug>/run_<uuid>.parquet`). Enables per-project filtering in `bth sync`.
+
+## Cluster Submission (Phase 2)
+
+### Submit Job to SLURM
+
+```bash
+bth submit \
+  --preset gpu-h200 \
+  --array 0-19%4 \
+  --then-sync \
+  -- bth run uv run python scripts/train.py --epochs 100
+```
+
+Submits to SLURM via myxcel, waits for completion, syncs results back. Records `slurm_job_id` and `slurm_array_task_id` in run record.
+
+**Options:**
+- `--preset NAME` — SLURM preset (gpu, gpu-h200, cpu, quicktest, etc.)
+- `--remote NAME` — Override myxcel remote (default: from `.bth.toml`)
+- `--array SPEC` — SLURM array spec (e.g., `0-9%4`)
+- `--dependency SPEC` — SLURM dependency (e.g., `afterok:12345`)
+- `--name NAME` — Job name
+- `--push-first / --no-push-first` — Push project before submit (default: push)
+- `--wait / --no-wait` — Block until completion (default: no-wait)
+- `--then-pull` — Pull results after completion (implies `--wait`)
+- `--then-sync` — Run `bth sync` after pull (implies `--then-pull --wait`)
+
+Exit codes: 0 = success or no-wait, 1 = job failure, 2 = timeout.
+
+### Override Preset in Sidecar
+
+```toml
+[cluster]
+preset = "gpu-h200"
+remote = "engaging"
+project = "myproject"
+```
+
+Sidecar `[cluster]` section overrides `.bth.toml` defaults. CLI flags override sidecar.
+
+## Sync Catalog
+
+### Push to Remote
+
+```bash
+bth sync engaging
+```
+
+Uses myxcel to rsync local catalog to cluster remote. Only syncs current project (v0.4+).
+
+### Pull from Remote
+
+```bash
+bth sync engaging --pull
+```
+
+Fetches latest catalog fragments from cluster. Merges with local catalog.
+
+### Full Workflow
+
+```bash
+bth sync engaging --pull  # Get latest cluster results
+bth find --filter "slurm_job_id = '12345'"  # Query locally
+```
+
+## Campaigns
+
+### Create Campaign
+
+```bash
+bth campaign create --name "baseline sweep" --description "Hyperparameter space exploration"
+```
+
+Returns campaign ID.
+
+### List Campaigns
+
+```bash
+bth campaign ls
+```
+
+Shows campaign names, descriptions, associated run counts.
+
+### Add Runs to Campaign
+
+```bash
+bth campaign add --id <campaign-id> --runs <run-id-1> <run-id-2>
+```
+
+Links runs to campaign.
+
+### Review Campaign Results
+
+```bash
+bth campaign review <campaign-id>
+```
+
+Summary table: outcome counts, average duration, tags, sample runs.
+
+### Conclude Campaign
+
+```bash
+bth campaign conclude <campaign-id>
+```
+
+Marks campaign closed; queries still work but status is `concluded`.
+
+## Figure Manifest (Campaign → Maraxiom)
+
+When a campaign concludes, bathos emits `figure_manifest.json` at
+`~/.bth/catalog/sidecars/<campaign_id>/figure_manifest.json`. Maraxiom reads this
+during `mrx check` freshness sweeps (F7/F8 signals) to confirm figure pins are current.
+
+### Register figure outputs during a run
+
+Pass figure file paths alongside the result JSON using repeated `--out` flags (any file type is valid; repeat the flag for each path):
+
+```bash
+bth run \
+  --out outputs/results/my_run.json \
+  --out outputs/figures/scatter.svg \
+  --out outputs/figures/barplot.png \
+  --campaign <campaign-id> \
+  -- uv run python scripts/experiments/my_experiment.py
+```
+
+To make figure paths queryable from outcome conditions or postmortems, declare them in
+`[result_schema]` and write them to the result JSON alongside scalar metrics:
+
+```toml
 [result_schema]
-temp_mean = "float"
-temp_std = "float"
-n_steps = "int"
-EOF
-
-# CLI validates sidecar before execution
-bth run python scripts/experiments/validate_nvt.py -- --n-steps 1000
-# v0.2 output captures outcome = 'pass' or 'marginal' or 'fail' automatically
+my_metric            = "float"
+figure_path_scatter  = "str"   # e.g., "outputs/figures/scatter.svg"
+figure_path_barplot  = "str"
 ```
 
-### Scenario J: Metadata Enrichment & Analysis
+### Populate the figure manifest after runs finish
+
+`bth campaign conclude` emits an empty manifest by default. Populate it programmatically:
+
+```python
+from bathos.figure_manifest import FigureManifest, FigureEntry, InputPin
+
+manifest = FigureManifest(
+    campaign_id="<campaign-id>",
+    figures=[
+        FigureEntry(
+            figure_id="scatter_cross_model_r",
+            intent="Cross-model energy correlation — mismatch-ceiling verification",
+            figure_kind="analysis_chart",   # optional
+            render_state="ready",           # "ready" | "deferred"
+            input_pins=[InputPin(
+                run_id="<bathos-run-id>",
+                output_path="outputs/results/my_run.json",
+                sha256="<sha256-of-data-file>",  # hash of the DATA file, not the figure
+            )],
+        ),
+    ],
+)
+manifest.write_manifest()
+```
+
+`render_state` values:
+- `"ready"` — figure is rendered; maraxiom can reference its asset path
+- `"deferred"` — figure intent is registered but rendering is pending (use for stubs before figures are generated)
+
+### Key rule
+
+Populate `figure_manifest.json` before presenting. `mrx check` reads it during freshness sweeps (F7/F8 signals) to confirm figure pins are current. `mrx context` ingests run records from the bathos catalog independently — the manifest does not gate `mrx context`.
+
+### Figure Manifest Schema
+
+The manifest is a structured JSON sidecar stored at `<catalog>/sidecars/<campaign_id>/figure_manifest.json`.
+
+**Root schema:**
+```json
+{
+  "manifest_version": "1.0",
+  "campaign_id": "<campaign-id>",
+  "figures": [...]
+}
+```
+
+**Fields:**
+- `manifest_version` (str) — Schema version (e.g., `"1.0"`). Used for backward-compatibility.
+- `campaign_id` (str) — Campaign ID this manifest belongs to. Must match the sidecar directory name.
+- `figures` (list[FigureEntry]) — List of figures. Empty list `[]` is valid (no figures to render).
+
+**FigureEntry schema:**
+```json
+{
+  "figure_id": "scatter_cross_model_r",
+  "intent": "Cross-model energy correlation — mismatch-ceiling verification",
+  "input_pins": [...],
+  "render_state": "ready",
+  "figure_kind": "analysis_chart"
+}
+```
+
+**Fields:**
+- `figure_id` (str) — Unique figure identifier (slug format, e.g., `"scatter_cross_model_r"`).
+- `intent` (str) — Human-readable intent describing what the figure is meant to show. Example: `"main result"`, `"supplementary ablation"`, `"owner-side comparison"`.
+- `input_pins` (list[InputPin]) — Data sources this figure derives from (see InputPin schema below). Typically one pin for analysis figures; may be multiple for comparisons.
+- `render_state` (str) — One of `"ready"` or `"deferred"`.
+  - `"ready"` — Figure is fully rendered and available.
+  - `"deferred"` — Figure intent is pinned but rendering is blocked (e.g., needs owner-only data or styling).
+- `figure_kind` (str | None) — Optional figure kind (freeform vocabulary). Examples: `"analysis_chart"`, `"structural"`. `null`/absent indicates unclassified or legacy figure.
+
+**InputPin schema:**
+```json
+{
+  "run_id": "run_abc123",
+  "output_path": "outputs/results/my_run.json",
+  "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}
+```
+
+**Fields:**
+- `run_id` (str) — Bathos run ID that produced the data product.
+- `output_path` (str) — Path to the data file within the bathos catalog (typically registered via `bth run --out`).
+- `sha256` (str) — SHA256 hash of the data product (immutability guarantee). This is the hash of the **DATA file** (e.g., JSON result), not the rendered figure.
+
+### Consuming the Manifest
+
+Import and read the manifest programmatically:
+
+```python
+from bathos.figure_manifest import FigureManifest
+
+manifest = FigureManifest.read_manifest(
+    Path("~/.bth/catalog/sidecars/camp_abc123/figure_manifest.json")
+)
+
+for fig in manifest.figures:
+    print(f"{fig.figure_id}: {fig.intent} ({fig.render_state})")
+    for pin in fig.input_pins:
+        print(f"  run {pin.run_id} -> {pin.output_path}")
+        # Verify immutability via sha256
+        assert pin.sha256 == compute_sha256(pin.output_path)
+```
+
+## Lineage and Citation
+
+### Lineage Graph
 
 ```bash
-# After warm compaction, outcome evaluated and stored
-bth compact
-
-bth sql "SELECT id, outcome, metadata FROM runs WHERE outcome IS NOT NULL LIMIT 5"
-# metadata is JSON string; parse for custom fields
-# e.g., {"temperature": 300, "box_size": 4.0, "algorithm": "PME"}
-
-# Agent processes outcomes
-bth sql "
-  SELECT outcome, COUNT(*) as count, AVG(duration_s) as avg_time
-  FROM runs
-  WHERE project_slug = 'myproject'
-    AND status = 'completed'
-  GROUP BY outcome
-"
-# Result: pass:123, marginal:8, fail:2
+bth lineage <run-id>
+bth lineage <run-id> --format prov
 ```
 
-### Scenario G: Cluster Sync Workflow (v0.2 Preview, Extended)
+Shows parent-child run relationships. `--format prov` outputs W3C PROV-JSON.
+
+### Citation String
 
 ```bash
-# On cluster, in SLURM job:
-source scripts/slurm/_bth_env.sh
-uv run bth run python scripts/benchmarks/measure_tip3p.py \
-  --out bench.json \
-  --tag cluster \
-  -- \
-  --n-steps 1000
-
-# After job completes, cool-tier Parquet written to:
-# ~/.bth/catalog/runs/run_<uuid>.parquet (on cluster)
-
-# At home, sync catalog:
-bth sync --remote engaging --pull
-# Downloads ~/.bth/catalog/runs/run_*.parquet from cluster
-
-# Query synced runs:
-bth ls --since 1h | grep cluster
-bth find --tag cluster --status completed
-
-# Compact if needed:
-bth compact
-
-# Analyze:
-bth sql "
-  SELECT slurm_job_id, duration_s, exit_code
-  FROM runs
-  WHERE tag LIKE '%cluster%'
-    AND status = 'completed'
-"
+bth cite <run-id>
 ```
 
----
+BibTeX/APA-style citation for reproducibility documentation.
 
-## Summary for Agents
+## Postmortems
 
-**bathos is:**
-- A **provenance tracker** for experiments across projects
-- **SLURM-safe** via atomic write-then-rename storage
-- **Query-first** with DuckDB backend
-- **Low-ceremony** (no server, no auth, local-first)
-- **Extensible** via sidecars (TOML pre-registration)
+### Scaffold Postmortem
 
-**Use it to:**
-1. Execute scripts with provenance: `bth run`
-2. Query results: `bth ls`, `bth find`, `bth sql`
-3. Maintain catalogs: `bth compact`, `bth check`, `bth sync`
-4. Track outputs and validity across projects
+```bash
+bth postmortem scaffold <run-id>
+```
 
-**Integration points:**
-- Dispatch agents to write/test scripts; verify with `bth ls`
-- Dispatch agents to analyze runs; use `bth find` / `bth sql`
-- Verify SLURM submissions with `bth ls --since 1h`
-- Track sidecar creation in pre-registration workflows
+Creates `<script>.bth.postmortem.toml` template for run review.
+
+### Validate Postmortem
+
+```bash
+bth postmortem validate <path>
+```
+
+Checks TOML syntax, required fields, git drift detection, and asset integrity.
+
+### Get Postmortem
+
+```bash
+bth postmortem get <run-id>
+```
+
+Retrieves and displays postmortem metadata.
+
+## Visualization (v0.5+)
+
+### Local Dashboard
+
+```bash
+bth view
+```
+
+Opens FastAPI dashboard (default: `http://localhost:8000`) with interactive run browser, campaign summaries, outcome histograms.
+
+### Static HTML Export
+
+```bash
+bth export --html --out ~/reports/report.html
+```
+
+Generates self-contained HTML report of all runs. Warns if > 5 MB.
+
+## Remote Profiles
+
+### Add Remote
+
+```bash
+bth remote add engaging --host engaging.csail.mit.edu --path ~/projects/myproject
+```
+
+Registers cluster host for sync and submission.
+
+### List Remotes
+
+```bash
+bth remote ls
+```
+
+Shows configured remotes.
+
+### Test Connectivity
+
+```bash
+bth remote test engaging
+```
+
+Verifies SSH access to remote.
+
+## Linting and Validation
+
+### Lint Catalog and Scripts
+
+```bash
+bth lint
+```
+
+Tier-1 checks: missing sidecars, schema violations, outcome condition validity.
+Tier-2 checks: adversarial conditions (always true/false), unbound columns, drift detection.
+
+### Linting in Agent Mode
+
+Scripts run with `--agent-mode` enforce stricter validation and flag adversarial conditions.
+
+## Project Configuration (`.bth.toml`)
+
+```toml
+[project]
+slug = "myproject"
+root = "."
+catalog_dir = "~/.bth/catalog"
+
+[slurm]
+remote = "engaging"
+preset = "gpu"
+project = "myproject"
+
+[remotes.engaging]
+host = "engaging"
+path = "~/projects/myproject"
+```
+
+## Key Rules
+
+- **Always use `uv run python`** in sbatch scripts, never bare `python` (cluster nodes have no global python)
+- **Verify sidecar before submission** — run `bth check` to validate outcome conditions (DuckDB SQL must parse)
+- **Result schema must include all outcome columns** — if `condition = "metric >= 0.9"`, declare `metric = "float"` in `[result_schema]`
+- **Exactly one residual outcome** — one outcome must have `is_residual = true` for gate evaluation
+- **No `--no-sidecar` in production** — bypassing logs `BYPASSED` and breaks pre-registration discipline
+- **Test measurement pipeline on synthetic data** — verify metrics work before trusting research conclusions
+- **Postmortem colocated with script** — `<script>.bth.postmortem.toml` alongside `<script>.py`
+
+## Typical Workflow
+
+```bash
+# 1. Initialize project
+bth init --slug myproject --slurm-partition mit_normal
+
+# 2. Create experiment
+bth new-experiment --name baseline_training
+# Edit scripts/experiments/baseline_training.py and .bth.toml
+
+# 3. Validate locally
+bth check --path scripts/experiments/baseline_training.bth.toml
+uv run python scripts/experiments/baseline_training.py --smoke --out /tmp/test.json  # NOT via bth run — smoke outputs are ephemeral, not tracked
+
+# 4. Run locally or submit to cluster
+bth run -- uv run python scripts/experiments/baseline_training.py --out outputs/run.json
+# OR
+bth submit --preset gpu --then-sync -- bth run uv run python scripts/experiments/baseline_training.py
+
+# 5. Query results
+bth find --filter "outcome='pass' AND project_slug='myproject'"
+bth campaign review <campaign-id>
+
+# 6. Review postmortem
+bth postmortem scaffold <run-id>
+bth postmortem validate scripts/experiments/baseline_training.bth.postmortem.toml
+
+# 7. Export report
+bth export --html --out ~/reports/latest.html
+
+# 8. Populate figure manifest (if campaign produced figures for maraxiom)
+# from bathos.figure_manifest import FigureManifest, FigureEntry, InputPin
+# manifest = FigureManifest(campaign_id="...", figures=[FigureEntry(...)])
+# manifest.write_manifest()
+# Then mrx check reads it during freshness sweeps; mrx context ingests run records independently
+```
+
+## MCP Error Envelope
+
+All 22 bathos MCP tools return a typed envelope with consistent structure. Understanding the envelope shape and error codes is essential for robust integrations.
+
+### Envelope Shape
+
+Every successful or failed MCP call returns a dictionary with these four keys (always present; KeyError is impossible):
+
+```json
+{
+  "ok": true,
+  "error_code": null,
+  "error": null,
+  "resolution_hint": null,
+  "data_field_1": "...",
+  "data_field_2": "..."
+}
+```
+
+**Fields:**
+- `ok` (bool) — `true` if call succeeded; `false` if error
+- `error_code` (str | null) — `null` on success; one of 16 BathosErrorCode values on error
+- `error` (str | null) — `null` on success; human-readable error message on error
+- `resolution_hint` (str | null) — `null` on success; actionable fix suggestion on error
+- Additional fields vary by tool (on success only)
+
+### BathosErrorCode Values (16 total)
+
+**Gate-derived codes (11, aliased from GateErrorCode):**
+- `sidecar_missing` — Sidecar `.bth.toml` not found
+- `sidecar_invalid` — TOML syntax error or missing required sections
+- `sidecar_hash_mismatch` — Sidecar content changed; hash mismatch detected
+- `not_first_of_kind` — Run of this script already exists; use `--derived-from`
+- `manifest_write_failed` — Failed to write `.bth.postmortem.toml` manifest
+- `adversarial_check_missing` — Missing `adversarial_check` in `outcomes.pass` blocks
+- `hypothesis_lock_missing` — Hypothesis lock file not found
+- `outcome_evaluation_error` — DuckDB SQL condition parsing or evaluation failed
+- `result_schema_mismatch` — Result JSON doesn't match declared schema
+- `outcome_ambiguous` — Multiple outcome conditions matched (exactly one expected)
+- `internal` — Unexpected internal error
+
+**Domain-specific codes (5):**
+- `catalog_error` — Database or Parquet I/O failure
+- `campaign_error` — Campaign query or update failure
+- `sidecar_error` — Sidecar parsing or content validation error
+- `export_error` — Export (HTML, archive) generation failure
+- `invalid_param` — Invalid parameter or argument
+
+### Caller Pattern (Standard Case)
+
+For most tools, check `ok` and extract data:
+
+```python
+result = await session.call_tool("bathos", "list_runs", {"project_slug": "myproject"})
+if not result["ok"]:
+    raise RuntimeError(
+        f"[{result['error_code']}] {result['error']}\n"
+        f"Hint: {result['resolution_hint']}"
+    )
+
+# On success, access tool-specific data
+runs = result["runs"]
+for run in runs:
+    print(f"{run['id']}: {run['outcome']}")
+```
+
+### Special Case: validation_ok (postmortem_validate, validate_sidecar)
+
+Two tools use a different validation result field:
+
+```python
+result = await session.call_tool("bathos", "validate_sidecar", {"script_path": "scripts/experiments/train.bth.toml"})
+
+# Transport always succeeds (ok=True)
+assert result["ok"] is True
+
+# Validation result is in validation_ok (NOT ok)
+if not result["validation_ok"]:
+    for error_msg in result.get("errors", []):
+        print(f"Validation error: {error_msg}")
+else:
+    print("Sidecar is valid")
+```
+
+**Envelope shape for these tools (success):**
+```json
+{
+  "ok": true,
+  "error_code": null,
+  "error": null,
+  "resolution_hint": null,
+  "validation_ok": true,
+  "path": "..."
+}
+```
+
+**Envelope shape for these tools (failure):**
+```json
+{
+  "ok": true,
+  "error_code": null,
+  "error": null,
+  "resolution_hint": null,
+  "validation_ok": false,
+  "errors": ["field1: error message", "field2: error message"]
+}
+```
+
+**Why two validation fields?**
+- `ok` indicates transport success (the MCP call itself worked)
+- `validation_ok` indicates semantic success (the sidecar/postmortem is structurally valid)
+- `errors` is absent on success; present as a list of human-readable validation issues on failure
+
+If a validation fails for reasons outside the tool (missing file, permission denied), both `ok` and `validation_ok` are `false`, and the error message is in `error`, not `errors`.
+
+## Related
+
+- **CLAUDE.md**: Bathos architecture, schema versions, backlog
+- **Global rules**: `~/.claude/rules/BATHOS.md` — `uv run python` discipline, sidecar validation, DuckDB conditions
+- **Cluster rules**: `~/.claude/rules/CLUSTER.md` — SLURM partition limits, job submission, local validation gates
