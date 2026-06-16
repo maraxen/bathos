@@ -43,7 +43,7 @@ def test_run_defaults():
     assert r.tags == []
     assert isinstance(r.timestamp, datetime)
     assert r.timestamp.tzinfo is not None
-    assert r.schema_version == "7"
+    assert r.schema_version == "8"
     assert r.slurm_job_id == ""
     assert r.metadata == "{}"
 
@@ -84,7 +84,7 @@ def test_run_roundtrip_via_arrow():
     assert r2.duration_s == 1.5
     assert r2.output_paths == ["/tmp/out.parquet"]
     assert r2.tags == ["tip3p"]
-    assert r2.schema_version == "7"
+    assert r2.schema_version == "8"
     assert r2.slurm_job_id == ""
 
 
@@ -100,7 +100,7 @@ def test_schema_version_in_cool_parquet():
     )
     table = r.to_arrow()
     assert "schema_version" in table.column_names
-    assert table.column("schema_version")[0].as_py() == "7"
+    assert table.column("schema_version")[0].as_py() == "8"
 
 
 def test_slurm_job_id_captured_from_env():
@@ -233,7 +233,7 @@ def test_schema_version_defaults_to_7():
         git_branch="main",
         git_dirty=False,
     )
-    assert r.schema_version == "7"
+    assert r.schema_version == "8"
 
 
 def test_sample_run_fixture_has_hostname(sample_run):
@@ -350,7 +350,7 @@ def test_schema_v5_fields_exist():
     from bathos.schema import CURRENT_SCHEMA_VERSION, Run
 
     # Current version should be "7" (v5 fields still present)
-    assert CURRENT_SCHEMA_VERSION == "7"
+    assert CURRENT_SCHEMA_VERSION == "8"
 
     # Run should have all 4 new fields
     r = Run(
@@ -424,7 +424,7 @@ def test_schema_version_is_7():
     """Verify CURRENT_SCHEMA_VERSION is now '7'."""
     from bathos.schema import CURRENT_SCHEMA_VERSION
 
-    assert CURRENT_SCHEMA_VERSION == "7"
+    assert CURRENT_SCHEMA_VERSION == "8"
 
 
 def test_run_stage_name_default_none():

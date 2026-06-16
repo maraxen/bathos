@@ -1071,6 +1071,104 @@ async def postmortem_get(
 
 @app.tool()
 @traced_tool
+async def claim_scaffold(
+    campaign_id: str,
+    catalog_dir: str | None = None,
+    workspace_root: str | None = None,
+) -> dict:
+    """Scaffold a new claim TOML template for the given campaign ID.
+
+    Returns the path where the template was written.
+    """
+    from bathos.claim import scaffold_claim
+
+    cat_dir = _get_catalog_dir(catalog_dir)
+    db_path = cat_dir / "bathos.db"
+
+    if not db_path.exists():
+        return {"error": f"Catalog database not found at {db_path}"}
+
+    # Explicit workspace_root wins; else resolve live fs_root (worktree-aware).
+    if workspace_root:
+        ws = Path(workspace_root).expanduser().resolve()
+    else:
+        from bathos.workspace import resolve_workspace
+
+        ws = resolve_workspace().fs_root
+
+    try:
+        import duckdb
+
+        db = duckdb.connect(str(db_path), read_only=False)
+        claim_path = scaffold_claim(campaign_id, db, ws)
+        db.close()
+        return {
+            "ok": True,
+            "path": str(claim_path),
+            "campaign_id": campaign_id,
+            "message": f"Claim template created at {claim_path}",
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e), "error_code": "scaffold_failed"}
+
+
+@app.tool()
+@traced_tool
+async def claim_validate(
+    path: str,
+    catalog_dir: str | None = None,
+) -> dict:
+    """Validate a claim TOML file.
+
+    Returns {'ok': True} on success or {'ok': False, 'errors': [...]} on failure.
+    """
+    from bathos.claim import parse_claim, validate_claim
+
+    claim_path = Path(path)
+    if not claim_path.exists():
+        return {"ok": False, "error": f"File not found: {path}"}
+
+    try:
+        claim = parse_claim(claim_path)
+    except FileNotFoundError as e:
+        return {"ok": False, "error": str(e), "error_code": "file_not_found"}
+    except ValueError as e:
+        return {"ok": False, "error": str(e), "error_code": "parse_error"}
+
+    # Optionally query catalog for regime coverage (Phase 2)
+    db = None
+    if catalog_dir:
+        try:
+            import duckdb
+
+            cat_dir = Path(catalog_dir).expanduser().resolve()
+            db_path = cat_dir / "bathos.db"
+            if db_path.exists():
+                db = duckdb.connect(str(db_path), read_only=True)
+        except Exception:
+            pass
+
+    result = validate_claim(claim, db=db)
+
+    if db:
+        db.close()
+
+    if result.ok:
+        return {
+            "ok": True,
+            "path": path,
+            "headline": claim.headline,
+            "hypotheses_count": len(claim.hypotheses),
+        }
+    return {
+        "ok": False,
+        "errors": [e.message for e in result.errors],
+        "error_code": "validation_failed",
+    }
+
+
+@app.tool()
+@traced_tool
 async def validate_sidecar(
     path: str,
 ) -> dict:

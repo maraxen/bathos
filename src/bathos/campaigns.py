@@ -177,14 +177,95 @@ def _resolve_campaign_id(db, campaign_id: str) -> str:
     return prefix_rows[0][0]
 
 
-def conclude_campaign(db, campaign_id: str, outcome_label: str, conclusion: str) -> None:
-    """Mark campaign as concluded."""
+def conclude_campaign(
+    db,
+    campaign_id: str,
+    outcome_label: str,
+    conclusion: str,
+    workspace_root=None,
+    force_verdict: bool = False,
+) -> None:
+    """Mark campaign as concluded.
+
+    If campaign has a registered claim file, runs Union Gate to validate discriminability.
+    Union Gate behavior depends on campaign mode:
+    - exploration: checks run, prints warning if uncovered
+    - confirmation/sequential: downgrades verdict to 'confounded' if uncovered (unless force_verdict)
+    - claim_path IS NULL: skips Union Gate entirely (opt-in model)
+
+    Args:
+        db: DuckDB connection
+        campaign_id: Campaign ID (prefix or full UUID)
+        outcome_label: Verdict to record
+        conclusion: Summary text
+        workspace_root: Path to workspace (defaults to resolve_workspace().fs_root)
+        force_verdict: If True, bypass Union Gate confounded downgrade (records claim_mode='bypassed')
+    """
+    from bathos.claim import parse_claim, run_union_gate, check_sha
+    from bathos.workspace import resolve_workspace
+    from pathlib import Path
+
     full_id = _resolve_campaign_id(db, campaign_id)
+
+    # Check if campaign has a registered claim
+    row = db.execute(
+        "SELECT claim_path, claim_sha256, mode FROM campaigns WHERE id=?", [full_id]
+    ).fetchone()
+
+    claim_path_rel = None
+    registered_sha = None
+    campaign_mode = None
+
+    if row:
+        claim_path_rel, registered_sha, campaign_mode = row[0], row[1], row[2]
+
+    # AC-08: Union Gate short-circuits if claim_path IS NULL (opt-in adoption ladder)
+    if claim_path_rel and registered_sha:
+        # Resolve workspace root if not provided
+        if workspace_root is None:
+            workspace_root = resolve_workspace(Path.cwd()).fs_root
+
+        abs_path = workspace_root / claim_path_rel
+
+        # AC-08: File-not-found is always an error, never a silent bypass
+        if not abs_path.exists():
+            raise RuntimeError(
+                f"claim.bth.toml not found at {abs_path} — file may have been moved or deleted. "
+                "Set BTH_WORKSPACE_ROOT or pass workspace_root to locate it."
+            )
+
+        # AC-11: SHA integrity check at conclude
+        check_sha(claim_path_rel, registered_sha, workspace_root)
+
+        # Parse and run Union Gate
+        claim = parse_claim(abs_path)
+        verdict, uncovered = run_union_gate(db, full_id, claim)
+
+        # AC-08: Gate behavior by campaign mode
+        if uncovered:
+            if campaign_mode in ("confirmation", "sequential"):
+                if force_verdict:
+                    # AC-09: Bypass with audit trail
+                    print(f"Union Gate bypassed — unmapped clauses: {uncovered}")
+                    outcome_label = outcome_label  # Keep researcher's label
+                    db.execute(
+                        "UPDATE campaigns SET claim_mode='bypassed' WHERE id=?", [full_id]
+                    )
+                else:
+                    # AC-08: Soft-block downgrade to confounded
+                    print(f"Union Gate: verdict downgraded to 'confounded' — unmapped clauses: {uncovered}")
+                    outcome_label = "confounded"
+            elif campaign_mode == "exploration":
+                # AC-08: Warning-only for exploration
+                print(f"WARNING: Union Gate — unmapped clauses: {uncovered} (exploration mode, no downgrade)")
+
+    # Final update
     concluded_at = datetime.now(UTC).isoformat()
     db.execute(
         "UPDATE campaigns SET status = 'concluded', concluded_at = ?, outcome_label = ?, conclusion = ? WHERE id = ?",
         [concluded_at, outcome_label, conclusion, full_id]
     )
+    db.commit()
     event("campaign.conclude", campaign_id=full_id, verdict=outcome_label)
 
 
