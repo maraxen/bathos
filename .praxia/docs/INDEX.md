@@ -29,6 +29,7 @@
 ## Research
 - [260526_agentic-science-nlm-research-plan](research/260526_agentic-science-nlm-research-plan.md) — NLM research prompts (3 Deep Research + 6 Queries) for agentic science sources beyond May-2026 synthesis
 - [260526_agentic-science-nlm-synthesis](research/260526_agentic-science-nlm-synthesis.md) — Oracle-approved synthesis: agentic science rigor findings + bathos v0.6+ / maraxiom / praxia implications
+- [260616_bathos-long-horizon-rigor](research/260616_bathos-long-horizon-rigor.md) — **SEED for claim-level rigor systematization** (from asr worked example): claim-tier pre-registration above the sidecar (Objective-Drift fix); Claim Ledger / Discriminability Map / Confound Register / Union Gate; enforcement ladder L0→L5 + rigor-item→mechanism map; §10 baseline/literature-reimpl fidelity + signal-discrimination probes. Input for research → brainstorm → spec → coherence → backlog DAG.
 
 ## Decisions
 - [260526_manifest-hash-granularity](decisions/260526_manifest-hash-granularity.md) — D2: pre-execution manifest hashes full sidecar (hypothesis + outcomes + adversarial_check + schema); outcome refinement becomes tracked REVISION
