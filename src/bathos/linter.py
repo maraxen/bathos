@@ -880,3 +880,71 @@ def check_baseline_ref_exists(project_root: Path, catalog_dir: Path, db_path: Pa
             )
 
     return issues
+
+
+def check_single_cell_gate(
+    claim_discriminability: list[dict],
+    campaign_id: str,
+    db: "duckdb.DuckDBPyConnection",
+) -> list[LintIssue]:
+    """AC-06: warn if all confirmatory runs in a campaign share identical metadata values.
+
+    Args:
+        claim_discriminability: List of discriminability entries from claim
+        campaign_id: Campaign ID to check
+        db: DuckDB connection
+
+    Returns:
+        List of LintIssue objects with severity WARNING if single-cell pattern detected
+    """
+    import json
+    import duckdb
+
+    issues = []
+    try:
+        rows = db.execute(
+            "SELECT r.metadata FROM runs r JOIN campaign_runs cr ON r.id = cr.run_id WHERE cr.campaign_id = ? AND r.metadata IS NOT NULL",
+            [campaign_id],
+        ).fetchall()
+    except Exception:
+        return issues  # DB not available or table missing — skip silently
+
+    if len(rows) < 2:
+        return issues  # need >= 2 runs to detect single-cell
+
+    # Parse all metadata blobs
+    metas = []
+    for (meta_str,) in rows:
+        try:
+            metas.append(json.loads(meta_str))
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    if len(metas) < 2:
+        return issues
+
+    # Find keys present in ALL runs
+    common_keys = set(metas[0].keys())
+    for m in metas[1:]:
+        common_keys &= set(m.keys())
+
+    if not common_keys:
+        return issues
+
+    # Check if all runs have the same value for every common key
+    uniform_keys = [
+        k for k in common_keys
+        if len({str(m.get(k)) for m in metas}) == 1
+    ]
+
+    if uniform_keys and len(uniform_keys) == len(common_keys):
+        issues.append(
+            LintIssue(
+                path=Path(campaign_id),
+                directory="campaign",
+                issue="single-cell-gate smell",
+                severity=IssueSeverity.WARNING,
+                detail=f"all {len(metas)} confirmatory runs use identical values for: {sorted(uniform_keys)[:5]}; claim.regime may not be covered",
+            )
+        )
+    return issues

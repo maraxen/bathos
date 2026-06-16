@@ -21,6 +21,7 @@ from bathos.claim import (
     run_union_gate,
 )
 from bathos.compact import compact
+from bathos.linter import check_single_cell_gate
 from bathos.catalog import write_run
 from bathos.schema import Run
 
@@ -820,3 +821,656 @@ equivalence_bound = 5.0
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+class TestAdvisoryLints:
+    """Tests for AC-04, AC-05, AC-06 advisory lint checks."""
+
+    def test_ac04_zero_power_single_label_warns(self, tmp_path):
+        """AC-04: warn when all entries for a label have same predicted_outcome."""
+        claim_path = tmp_path / "test.claim.toml"
+        claim_path.write_text("""[claim]
+headline = "Test"
+kill_condition = "test"
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null"
+
+[[claim.discriminability]]
+hypothesis_a = "H_primary"
+hypothesis_b = "H_null"
+planned_run_label = "main"
+predicted_outcome = "same_result"
+
+[[claim.discriminability]]
+hypothesis_a = "H_primary"
+hypothesis_b = "H_null"
+planned_run_label = "main"
+predicted_outcome = "same_result"
+""")
+        claim = parse_claim(claim_path)
+        result = validate_claim(claim)
+        assert result.ok is True
+        assert len(result.warnings) >= 1
+        assert any("zero discriminative power" in w for w in result.warnings)
+
+    def test_ac04_zero_power_no_fire_with_different_outcomes(self, tmp_path):
+        """AC-04: no warn when entries for same label have different outcomes."""
+        claim_path = tmp_path / "test.claim.toml"
+        claim_path.write_text("""[claim]
+headline = "Test"
+kill_condition = "test"
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null"
+
+[[claim.discriminability]]
+hypothesis_a = "H_primary"
+hypothesis_b = "H_null"
+planned_run_label = "main"
+predicted_outcome = "outcome_a"
+
+[[claim.discriminability]]
+hypothesis_a = "H_primary"
+hypothesis_b = "H_null"
+planned_run_label = "main"
+predicted_outcome = "outcome_b"
+""")
+        claim = parse_claim(claim_path)
+        result = validate_claim(claim)
+        assert result.ok is True
+        assert not any("zero discriminative power" in w for w in result.warnings)
+
+    def test_ac04_zero_power_no_fire_single_entry_per_label(self, tmp_path):
+        """AC-04: no warn when only 1 entry per label (guard fires)."""
+        claim_path = tmp_path / "test.claim.toml"
+        claim_path.write_text("""[claim]
+headline = "Test"
+kill_condition = "test"
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null"
+
+[[claim.discriminability]]
+hypothesis_a = "H_primary"
+hypothesis_b = "H_null"
+planned_run_label = "main"
+predicted_outcome = "outcome_a"
+""")
+        claim = parse_claim(claim_path)
+        result = validate_claim(claim)
+        assert result.ok is True
+        assert not any("zero discriminative power" in w for w in result.warnings)
+
+    def test_ac05_positive_bias_warns(self, tmp_path):
+        """AC-05: warn when all entries predict same outcome."""
+        claim_path = tmp_path / "test.claim.toml"
+        claim_path.write_text("""[claim]
+headline = "Test"
+kill_condition = "test"
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null"
+
+[[claim.discriminability]]
+hypothesis_a = "H_primary"
+hypothesis_b = "H_null"
+planned_run_label = "run1"
+predicted_outcome = "supports_primary"
+
+[[claim.discriminability]]
+hypothesis_a = "H_primary"
+hypothesis_b = "H_null"
+planned_run_label = "run2"
+predicted_outcome = "supports_primary"
+
+[[claim.discriminability]]
+hypothesis_a = "H_primary"
+hypothesis_b = "H_null"
+planned_run_label = "run3"
+predicted_outcome = "supports_primary"
+""")
+        claim = parse_claim(claim_path)
+        result = validate_claim(claim)
+        assert result.ok is True
+        assert len(result.warnings) >= 1
+        assert any("positive-testing bias" in w for w in result.warnings)
+
+    def test_ac05_positive_bias_no_fire_single_entry(self, tmp_path):
+        """AC-05: no warn with only 1 entry."""
+        claim_path = tmp_path / "test.claim.toml"
+        claim_path.write_text("""[claim]
+headline = "Test"
+kill_condition = "test"
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null"
+
+[[claim.discriminability]]
+hypothesis_a = "H_primary"
+hypothesis_b = "H_null"
+planned_run_label = "run1"
+predicted_outcome = "supports_primary"
+""")
+        claim = parse_claim(claim_path)
+        result = validate_claim(claim)
+        assert result.ok is True
+        assert not any("positive-testing bias" in w for w in result.warnings)
+
+    def test_ac05_no_fire_mixed_outcomes(self, tmp_path):
+        """AC-05: no warn when entries have different outcomes."""
+        claim_path = tmp_path / "test.claim.toml"
+        claim_path.write_text("""[claim]
+headline = "Test"
+kill_condition = "test"
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null"
+
+[[claim.discriminability]]
+hypothesis_a = "H_primary"
+hypothesis_b = "H_null"
+planned_run_label = "run1"
+predicted_outcome = "outcome_a"
+
+[[claim.discriminability]]
+hypothesis_a = "H_primary"
+hypothesis_b = "H_null"
+planned_run_label = "run2"
+predicted_outcome = "outcome_b"
+""")
+        claim = parse_claim(claim_path)
+        result = validate_claim(claim)
+        assert result.ok is True
+        assert not any("positive-testing bias" in w for w in result.warnings)
+
+    def test_ac06_single_cell_gate_warns(self, temp_db):
+        """AC-06: warn if all runs in campaign share identical metadata values."""
+        from bathos.linter import check_single_cell_gate
+
+        campaign_id = "test_campaign"
+
+        # Insert campaign
+        temp_db.execute(
+            "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at) VALUES (?, ?, ?, ?, ?, ?)",
+            [campaign_id, "test", "test_campaign", "confirmation", "open", "2026-01-01T00:00:00Z"]
+        )
+
+        # Insert 2 runs with identical metadata
+        metadata = json.dumps({"temperature": "300K", "pressure": "1atm"})
+        temp_db.execute(
+            "INSERT INTO runs (id, campaign_id, metadata) VALUES (?, ?, ?)",
+            ["run1", campaign_id, metadata]
+        )
+        temp_db.execute(
+            "INSERT INTO runs (id, campaign_id, metadata) VALUES (?, ?, ?)",
+            ["run2", campaign_id, metadata]
+        )
+
+        # Link to campaign
+        temp_db.execute(
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
+            [campaign_id, "run1"]
+        )
+        temp_db.execute(
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
+            [campaign_id, "run2"]
+        )
+        temp_db.commit()
+
+        claim_disc = []
+        issues = check_single_cell_gate(claim_disc, campaign_id, temp_db)
+        assert len(issues) >= 1
+        assert any("single-cell-gate" in i.issue for i in issues)
+
+    def test_ac06_no_fire_different_metadata(self, temp_db):
+        """AC-06: no warn when runs have differing metadata values."""
+        from bathos.linter import check_single_cell_gate
+
+        campaign_id = "test_campaign"
+
+        # Insert campaign
+        temp_db.execute(
+            "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at) VALUES (?, ?, ?, ?, ?, ?)",
+            [campaign_id, "test", "test_campaign", "confirmation", "open", "2026-01-01T00:00:00Z"]
+        )
+
+        # Insert 2 runs with different metadata values
+        metadata1 = json.dumps({"temperature": "300K", "pressure": "1atm"})
+        metadata2 = json.dumps({"temperature": "310K", "pressure": "1atm"})
+        temp_db.execute(
+            "INSERT INTO runs (id, campaign_id, metadata) VALUES (?, ?, ?)",
+            ["run1", campaign_id, metadata1]
+        )
+        temp_db.execute(
+            "INSERT INTO runs (id, campaign_id, metadata) VALUES (?, ?, ?)",
+            ["run2", campaign_id, metadata2]
+        )
+
+        # Link to campaign
+        temp_db.execute(
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
+            [campaign_id, "run1"]
+        )
+        temp_db.execute(
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
+            [campaign_id, "run2"]
+        )
+        temp_db.commit()
+
+        claim_disc = []
+        issues = check_single_cell_gate(claim_disc, campaign_id, temp_db)
+        assert not any("single-cell-gate" in i.issue for i in issues)
+
+    def test_ac06_no_fire_single_run(self, temp_db):
+        """AC-06: no warn with only 1 run."""
+        from bathos.linter import check_single_cell_gate
+
+        campaign_id = "test_campaign"
+
+        # Insert campaign
+        temp_db.execute(
+            "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at) VALUES (?, ?, ?, ?, ?, ?)",
+            [campaign_id, "test", "test_campaign", "confirmation", "open", "2026-01-01T00:00:00Z"]
+        )
+
+        # Insert only 1 run
+        metadata = json.dumps({"temperature": "300K", "pressure": "1atm"})
+        temp_db.execute(
+            "INSERT INTO runs (id, campaign_id, metadata) VALUES (?, ?, ?)",
+            ["run1", campaign_id, metadata]
+        )
+
+        # Link to campaign
+        temp_db.execute(
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
+            [campaign_id, "run1"]
+        )
+        temp_db.commit()
+
+        claim_disc = []
+        issues = check_single_cell_gate(claim_disc, campaign_id, temp_db)
+        assert not any("single-cell-gate" in i.issue for i in issues)
+
+    def test_warnings_dont_set_ok_false(self, tmp_path):
+        """CRITICAL: AC-04 or AC-05 warnings must NOT set ok=False."""
+        claim_path = tmp_path / "test.claim.toml"
+        claim_path.write_text("""[claim]
+headline = "Test"
+kill_condition = "test"
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null"
+
+[[claim.discriminability]]
+hypothesis_a = "H_primary"
+hypothesis_b = "H_null"
+planned_run_label = "run1"
+predicted_outcome = "same"
+
+[[claim.discriminability]]
+hypothesis_a = "H_primary"
+hypothesis_b = "H_null"
+planned_run_label = "run1"
+predicted_outcome = "same"
+""")
+        claim = parse_claim(claim_path)
+        result = validate_claim(claim)
+        assert result.ok is True
+        assert len(result.warnings) > 0
+        assert len(result.errors) == 0
+
+    def test_ac04_three_plus_entries_warns(self, tmp_path):
+        """AC-04: warn with 3+ entries all same outcome (not just 2)."""
+        claim_path = tmp_path / "test.claim.toml"
+        claim_path.write_text("""[claim]
+headline = "Test"
+kill_condition = "test"
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary"
+
+[[hypotheses]]
+id = "H_alt"
+label = "Alternative"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null"
+
+[[claim.discriminability]]
+hypothesis_a = "H_primary"
+hypothesis_b = "H_null"
+planned_run_label = "main"
+predicted_outcome = "all_same"
+
+[[claim.discriminability]]
+hypothesis_a = "H_primary"
+hypothesis_b = "H_alt"
+planned_run_label = "main"
+predicted_outcome = "all_same"
+
+[[claim.discriminability]]
+hypothesis_a = "H_alt"
+hypothesis_b = "H_null"
+planned_run_label = "main"
+predicted_outcome = "all_same"
+""")
+        claim = parse_claim(claim_path)
+        result = validate_claim(claim)
+        assert result.ok is True
+        assert any("zero discriminative power" in w for w in result.warnings)
+        assert any("all 3" in w for w in result.warnings)
+
+    def test_ac04_ac05_simultaneous(self, tmp_path):
+        """AC-04 and AC-05 fire simultaneously on same claim."""
+        claim_path = tmp_path / "test.claim.toml"
+        claim_path.write_text("""[claim]
+headline = "Test"
+kill_condition = "test"
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null"
+
+[[claim.discriminability]]
+hypothesis_a = "H_primary"
+hypothesis_b = "H_null"
+planned_run_label = "run1"
+predicted_outcome = "same"
+
+[[claim.discriminability]]
+hypothesis_a = "H_primary"
+hypothesis_b = "H_null"
+planned_run_label = "run1"
+predicted_outcome = "same"
+
+[[claim.discriminability]]
+hypothesis_a = "H_primary"
+hypothesis_b = "H_null"
+planned_run_label = "run2"
+predicted_outcome = "same"
+""")
+        claim = parse_claim(claim_path)
+        result = validate_claim(claim)
+        assert result.ok is True
+        # Both AC-04 and AC-05 should fire
+        assert any("zero discriminative power" in w for w in result.warnings)
+        assert any("positive-testing bias" in w for w in result.warnings)
+        assert len(result.warnings) >= 2
+
+    def test_ac05_boundary_two_entries(self, tmp_path):
+        """AC-05: boundary test with exactly 2 entries, same outcome."""
+        claim_path = tmp_path / "test.claim.toml"
+        claim_path.write_text("""[claim]
+headline = "Test"
+kill_condition = "test"
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null"
+
+[[claim.discriminability]]
+hypothesis_a = "H_primary"
+hypothesis_b = "H_null"
+planned_run_label = "run1"
+predicted_outcome = "outcome_x"
+
+[[claim.discriminability]]
+hypothesis_a = "H_primary"
+hypothesis_b = "H_null"
+planned_run_label = "run2"
+predicted_outcome = "outcome_x"
+""")
+        claim = parse_claim(claim_path)
+        result = validate_claim(claim)
+        assert result.ok is True
+        assert any("positive-testing bias" in w for w in result.warnings)
+
+    def test_ac06_single_cell_db_exception_returns_empty(self, temp_db, tmp_path):
+        """AC-06: DB exception returns empty list, doesn't crash."""
+        campaign_id = "test_campaign_001"
+
+        # Create broken DB without campaign_runs table
+        bad_db = duckdb.connect(":memory:")
+        bad_db.execute("CREATE TABLE runs (id TEXT PRIMARY KEY, metadata TEXT)")
+
+        claim_disc = []
+        issues = check_single_cell_gate(claim_disc, campaign_id, bad_db)
+        assert issues == []
+
+    def test_ac06_single_cell_zero_metadata_runs(self, temp_db):
+        """AC-06: no issue when runs have no metadata."""
+        campaign_id = "test_campaign_002"
+        temp_db.execute(
+            "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at) VALUES (?, ?, ?, ?, ?, ?)",
+            [campaign_id, "test", "test_camp", "confirmation", "concluded", "2026-01-01T00:00:00"]
+        )
+
+        # Add runs with NULL metadata
+        temp_db.execute(
+            "INSERT INTO runs (id, campaign_id, claim_discriminates, metadata) VALUES (?, ?, ?, ?)",
+            ["run1", campaign_id, None, None]
+        )
+        temp_db.execute(
+            "INSERT INTO runs (id, campaign_id, claim_discriminates, metadata) VALUES (?, ?, ?, ?)",
+            ["run2", campaign_id, None, None]
+        )
+
+        temp_db.execute(
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
+            [campaign_id, "run1"]
+        )
+        temp_db.execute(
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
+            [campaign_id, "run2"]
+        )
+        temp_db.commit()
+
+        claim_disc = []
+        issues = check_single_cell_gate(claim_disc, campaign_id, temp_db)
+        # Should not flag as issue since metadata is missing
+        assert not any("single-cell-gate" in i.issue for i in issues)
+
+    def test_ac06_partial_metadata_coverage(self, temp_db):
+        """AC-06: some runs have metadata, some don't."""
+        campaign_id = "test_campaign_003"
+        temp_db.execute(
+            "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at) VALUES (?, ?, ?, ?, ?, ?)",
+            [campaign_id, "test", "test_camp3", "confirmation", "concluded", "2026-01-01T00:00:00"]
+        )
+
+        # Run 1 with metadata
+        temp_db.execute(
+            "INSERT INTO runs (id, campaign_id, metadata) VALUES (?, ?, ?)",
+            ["run1", campaign_id, json.dumps({"param": 1.0, "metric": 100.0})]
+        )
+        # Run 2 without metadata
+        temp_db.execute(
+            "INSERT INTO runs (id, campaign_id, metadata) VALUES (?, ?, ?)",
+            ["run2", campaign_id, None]
+        )
+
+        temp_db.execute(
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
+            [campaign_id, "run1"]
+        )
+        temp_db.execute(
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
+            [campaign_id, "run2"]
+        )
+        temp_db.commit()
+
+        issues = check_single_cell_gate([], campaign_id, temp_db)
+        # Only 1 run with metadata, so shouldn't detect single-cell (need >= 2)
+        assert not any("single-cell-gate" in i.issue for i in issues)
+
+    def test_ac04_multiple_labels_different_outcomes(self, tmp_path):
+        """AC-04: different labels with different outcomes should not warn."""
+        claim_path = tmp_path / "test.claim.toml"
+        claim_path.write_text("""[claim]
+headline = "Test"
+kill_condition = "test"
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null"
+
+[[claim.discriminability]]
+hypothesis_a = "H_primary"
+hypothesis_b = "H_null"
+planned_run_label = "label_a"
+predicted_outcome = "outcome_1"
+
+[[claim.discriminability]]
+hypothesis_a = "H_primary"
+hypothesis_b = "H_null"
+planned_run_label = "label_b"
+predicted_outcome = "outcome_2"
+""")
+        claim = parse_claim(claim_path)
+        result = validate_claim(claim)
+        assert result.ok is True
+        # Each label has only 1 entry, so no zero-power warning
+        assert not any("zero discriminative power" in w for w in result.warnings)
+        # Only 2 entries total with different outcomes, so no positive-bias
+        assert not any("positive-testing bias" in w for w in result.warnings)
+
+    def test_ac06_differing_metadata_values(self, temp_db):
+        """AC-06: runs with differing metadata values should not flag."""
+        campaign_id = "test_campaign_004"
+        temp_db.execute(
+            "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at) VALUES (?, ?, ?, ?, ?, ?)",
+            [campaign_id, "test", "test_camp4", "confirmation", "concluded", "2026-01-01T00:00:00"]
+        )
+
+        # Run 1
+        temp_db.execute(
+            "INSERT INTO runs (id, campaign_id, metadata) VALUES (?, ?, ?)",
+            ["run1", campaign_id, json.dumps({"param": 1.0, "metric": 100.0})]
+        )
+        # Run 2 with different param value
+        temp_db.execute(
+            "INSERT INTO runs (id, campaign_id, metadata) VALUES (?, ?, ?)",
+            ["run2", campaign_id, json.dumps({"param": 2.0, "metric": 100.0})]
+        )
+
+        temp_db.execute(
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
+            [campaign_id, "run1"]
+        )
+        temp_db.execute(
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
+            [campaign_id, "run2"]
+        )
+        temp_db.commit()
+
+        issues = check_single_cell_gate([], campaign_id, temp_db)
+        # param differs, so not single-cell
+        assert not any("single-cell-gate" in i.issue for i in issues)
+
+    def test_ac03_opaque_id_requires_label(self, tmp_path):
+        """AC-03: opaque hypothesis IDs like 'H1' require descriptive label."""
+        claim_path = tmp_path / "test.claim.toml"
+        claim_path.write_text("""[claim]
+headline = "Test"
+kill_condition = "test"
+
+[[hypotheses]]
+id = "H1"
+label = ""
+
+[[hypotheses]]
+id = "H_null"
+label = "Null"
+""")
+        claim = parse_claim(claim_path)
+        result = validate_claim(claim)
+        assert not result.ok
+        assert any("Opaque hypothesis id" in str(e.message) for e in result.errors)
+
+    def test_ac06_all_identical_metadata_warns(self, temp_db):
+        """AC-06: single-cell-gate warns when all runs have identical metadata values."""
+        campaign_id = "test_campaign_005"
+        temp_db.execute(
+            "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at) VALUES (?, ?, ?, ?, ?, ?)",
+            [campaign_id, "test", "test_camp5", "confirmation", "concluded", "2026-01-01T00:00:00"]
+        )
+
+        # Both runs with identical metadata
+        metadata_same = json.dumps({"param": 1.0, "metric": 100.0})
+        temp_db.execute(
+            "INSERT INTO runs (id, campaign_id, metadata) VALUES (?, ?, ?)",
+            ["run1", campaign_id, metadata_same]
+        )
+        temp_db.execute(
+            "INSERT INTO runs (id, campaign_id, metadata) VALUES (?, ?, ?)",
+            ["run2", campaign_id, metadata_same]
+        )
+
+        temp_db.execute(
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
+            [campaign_id, "run1"]
+        )
+        temp_db.execute(
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
+            [campaign_id, "run2"]
+        )
+        temp_db.commit()
+
+        issues = check_single_cell_gate([], campaign_id, temp_db)
+        # Should flag single-cell-gate smell when all metadata values are identical
+        assert any("single-cell-gate" in i.issue for i in issues)
+        assert any(i.severity.value == "warning" for i in issues)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
+
