@@ -10,17 +10,16 @@ bathos is a standalone experiment tracking CLI for a single researcher across 10
 
 ---
 
-## Current Status (as of 2026-06-13)
+## Current Status (as of 2026-06-16)
 
-**Latest: v0.11.0 — 753 tests passing (4 skipped).**
+**Latest: v0.11.0 — 796 tests passing (4 skipped).**
 
 Full version history is in [`CHANGELOG.md`](CHANGELOG.md). Summary of current version:
 
+- **Claim-tier rigor** — `claim.py` (`bth claim scaffold/register/validate`), `claim.bth.toml` pre-registration, Union Gate at `bth campaign conclude` (clause-coverage check), `claim_coverage_<id>.json` sidecar, AC-13 `[baseline_parity]` confound lint, Signal 12 in sprint-audit, schema v8 (`claim_discriminates`, `claim_isolates` columns)
 - **Experimental controls discipline** — `stage_name` write path, `[reproduction]`/`[controls]` sidecar blocks, reproduction prerequisite gate at `bth submit` (hard exit for validation/production; advisory for exploration/calibration), `control_arm_rate` sprint-audit Signal 9, `baseline_ref` Tier-2 lint, novel/reproduces Tier-1 lint, scaffold fix, submit-provenance Parquet, bypass-rate Signal 10
 - **Worktree-aware workspace resolution** — `resolve_workspace(cwd)` separates catalog identity from live `fs_root`; `BTH_WORKSPACE_ROOT` env override for SLURM jobs
 - v0.10.x: `bth repair` (catalog corruption recovery), POPPER e-value sequential campaigns, `bth outputs list/summary`, schema v6
-
-**Open backlog:** #137 (global instruction portability — deferred to praxia). #142 Phase 2 (BTH_OUTPUT_DIR output convention). #793 (structured gate error taxonomy in MCP tools — needs spec). #1774 (submit-provenance pruning — P3).
 
 ---
 
@@ -151,6 +150,7 @@ src/bathos/
   cluster.py      # bth submit — ClusterConfig, resolve_cluster_config(), myxcel wrappers
   decorators.py   # @bth.experiment provenance decorator
   postmortem.py   # bth postmortem — *.bth.postmortem.toml validation + MCP tools
+  claim.py       # bth claim scaffold/register/validate — claim-tier pre-registration and Union Gate
   prereg.py       # agentic integrity pre-registration gate
   provenance.py   # W3C PROV-JSON lineage serialization
   rich_fmt.py     # Rich CLI formatters (base dep) — render_runs_table, render_run_detail, render_campaign_table, render_campaign_review
@@ -177,17 +177,6 @@ src/bathos/
 - `bth export --html` warns to stderr if rendered HTML > 5 MB
 - `bth view` is read-only; never triggers compaction
 - `importlib.resources.files("bathos.viz")` used to load templates and static assets at runtime
-
----
-
-## Open Backlog (praxia DB)
-
-| ID | Title | Priority | Depends on | Status |
-|---|---|---|---|---|
-| 136 | `bth-migrate` praxia workflow — agentic classification + git mv plan | P2 | — | Bathos code complete (classifier.py, `bth classify`, 26 tests); praxia `bth-migrate.yaml` workflow DAG pending in praxia repo |
-| 137 | Global instruction portability (separate design session needed) | P2 | — | Deferred |
-| 142 | Results management — output convention, file-count utilities, direct management interface design | P2 | — | Phase 1 shipped (v0.9: list/summary/MCP). Phase 2 (BTH_OUTPUT_DIR) in progress. Phase 3 (prune/link) blocked on #792 (POPPER) |
-| ~~143~~ | ~~Threshold epistemic hygiene~~ | ~~P2~~ | ~~134~~ | **DONE** — shipped v0.6.1 (ticket #760): `check_threshold_basis()`, `OutcomeSpec.source`, `Sidecar.regression_threshold_basis`, 14 tests |
 
 ---
 
