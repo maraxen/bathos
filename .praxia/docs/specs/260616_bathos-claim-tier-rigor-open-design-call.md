@@ -117,7 +117,7 @@ The success condition is: after this session, each of the five questions has a s
 
 | # | Question | Notes |
 |---|---|---|
-| TBD-1 | DuckDB migration version (v7 or v8) | Depends on intervening PRs between now and implementation sprint |
+| TBD-1 | DuckDB migration version | **RESOLVED: v8** — `schema.py:10` has `CURRENT_SCHEMA_VERSION="7"` (taken by stage_name migration in `compact.py:_migrate_v6`). New claim columns require a `_migrate_v7()` function in `compact.py` that bumps schema to v8. |
 | TBD-2 | `bth claim register` as standalone subcommand vs `--claim <path>` flag on `bth campaign create` | Standalone is cleaner; flag avoids a new command surface. Either works — decide at PR time. |
 | TBD-3 | `bth lint --fix-discriminates` scope | MVP: enumerate affected sidecar files (informational). Post-MVP: auto-patch sidecar files when hypothesis IDs change. |
 | TBD-4 | Claim amendment log | When a claim regime expands between sprints, there is no amendment log mechanism. Proposal: `bth claim amend <path> --reason "..."` writes a dated amendment record + new SHA. Design deferred. |
@@ -167,7 +167,7 @@ The success condition is: after this session, each of the five questions has a s
   - Fewer than 2 `[[hypotheses]]` entries → ERROR
   - No `[[hypotheses]]` entry with id containing "null" or "misspec" → WARNING
   - Any `[[hypotheses]]` or `[[confounds]]` entry with `id` matching `/^[A-Z][0-9]+$/` and no `label` field, or blank `label` → WARNING
-  - Blank matrix cell in `[[claim.discriminability]]` (asserted hypothesis-pair × outcome-label with no `verdict`) → ERROR
+  - Any `[[claim.discriminability]]` entry missing `predicted_outcome` → ERROR: "blank discriminability cell — hypothesis-pair × planned_run_label entry has no predicted_outcome"
 
 ### AC-04 — discriminability zero-power lint
 - Given a `[[claim.discriminability]]` block, when `bth claim validate` or `bth lint` is called, then any `planned_run_label` where all `(hypothesis_a, hypothesis_b)` pairs have the same `predicted_outcome` → WARNING: "zero discriminative power for run X — all hypothesis pairs predict identical outcome."
@@ -182,10 +182,29 @@ The success condition is: after this session, each of the five questions has a s
 - Given a claim with `regime` specifying a parameter range, when `bth lint` is called, then if the union of result_schema grid values across campaign runs does not span the stated regime → WARNING: "disconfirming regime excluded — claim.regime [X] not covered by any run."
 
 ### AC-08 — Union Gate at conclude
-- Given a **confirmation/validation/production** campaign with a registered `claim_path`:
-  - Any clause in `[union_gate.clauses]` with no run having that clause_id in its `discriminates` field and non-null outcome → verdict downgraded to `confounded` (not `pass`)
-  - Two runs mapping to the same clause with contradictory outcomes (one pass, one fail) → WARNING: "contradicted clause C1 — runs R1 and R2 disagree" (not blocked at MVP; hard-block post-MVP)
-- Given an **exploration/calibration** campaign: same checks run but → WARNING only, no downgrade
+**`[union_gate.clauses]` TOML schema** (required for implementation):
+```toml
+[union_gate]
+[[union_gate.clauses]]
+id = "C_main_effect"           # machine-stable descriptive string, not opaque code
+description = "Primary hypothesis distinguishable from null on target metric"
+hypothesis_ids = ["H_info_sym", "H_null"]  # cross-ref to [[hypotheses]] short IDs
+```
+A clause is **covered** when at least one run in the campaign has ALL of `clause.hypothesis_ids` present in its `claim_discriminates` JSON array (e.g. `'["H_info_sym","H_null"]'`). Lint bridge query: `json_contains(claim_discriminates, '"H_info_sym"') AND json_contains(claim_discriminates, '"H_null"')`.
+
+**`conclude_campaign()` new signature**: `(db, campaign_id, outcome_label, conclusion, workspace_root=None)`.
+Resolve flow when `campaigns.claim_path IS NOT NULL`:
+1. If `claim_path` is absolute → use as-is; if relative → resolve against `workspace_root` (or `resolve_workspace(cwd).fs_root` if `workspace_root` is None).
+2. If resolved path does not exist → ERROR: "claim.bth.toml not found at <path> — file may have been moved or deleted" (follows `postmortem.py:160` pattern).
+3. Compute SHA256 of current file; compare to `campaigns.claim_sha256` (see AC-11).
+4. Run Union Gate check; emit coverage report (see AC-12).
+
+**Gate behavior by campaign mode** (campaign modes are ONLY `exploration | confirmation | sequential`):
+- Given a **confirmation/sequential** campaign with a registered `claim_path`:
+  - Any clause in `[union_gate.clauses]` with no run covering it → verdict downgraded to `confounded` (not `pass`)
+  - Two runs covering the same clause with contradictory outcomes → WARNING: "contradicted clause C1 — runs R1 and R2 disagree" (not blocked at MVP; hard-block post-MVP)
+  - `mode=sequential` is treated as confirmation-tier (pre-mortem record, failure mode 2)
+- Given an **exploration** campaign with a registered `claim_path`: same checks run but → WARNING only, no downgrade
 - Given ANY campaign with `claim_path IS NULL`: Union Gate short-circuits (no check, no message)
 
 ### AC-09 — Union Gate bypass
@@ -213,3 +232,14 @@ The success condition is: after this session, each of the five questions has a s
 
 ### AC-15 — §10.3 skill update
 - Given the `/using-bathos` skill, when updated, a "Signal discrimination and probe design" section is present covering probe vocabulary: scaled-divergence probes, planted-mode probes, null-injection probes, information-ablation probes — each with expected signature and what it discriminates.
+
+### AC-16 — schema v8 migration
+- Given `CURRENT_SCHEMA_VERSION = "7"` in `schema.py:10` (taken by stage_name migration), when `bth migrate` runs the claim-tier migration step:
+  - New function `_migrate_v7(conn)` added to `compact.py` (naming follows `_migrate_v6` pattern) — this is the v7→v8 migration step
+  - `campaigns` warm-tier (DuckDB): `ALTER TABLE campaigns ADD COLUMN claim_path TEXT` (nullable), `ADD COLUMN claim_sha256 TEXT` (nullable), `ADD COLUMN claim_mode TEXT` (nullable — records `'bypassed'` when Union Gate is bypassed via `--force-verdict`)
+  - `runs` cool-tier Parquet schema (`schema.py` `RUN_SCHEMA` and `Run` dataclass): add `claim_discriminates: pa.string()` (nullable, JSON array e.g. `'["H_info_sym","H_topology"]'`) and `claim_isolates: pa.string()` (nullable, same format)
+  - `runs` warm-tier (DuckDB `compact.py`): corresponding `ADD COLUMN claim_discriminates TEXT` and `ADD COLUMN claim_isolates TEXT`
+  - `CURRENT_SCHEMA_VERSION` increments from `"7"` to `"8"` in `schema.py:10`
+  - `MIGRATION_STEPS` dict in `compact.py` gains entry `7: _migrate_v7`
+  - Migration is additive-only; existing campaigns and runs gain NULL for new columns; no data is deleted or transformed
+
