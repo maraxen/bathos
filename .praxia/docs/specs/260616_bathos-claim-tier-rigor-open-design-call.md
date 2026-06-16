@@ -102,6 +102,26 @@ The success condition is: after this session, each of the five questions has a s
 - [ACCEPT] Q5-A MINOR condition: null metric extraction from failed parity check = lint ERROR not WARNING: check_baseline_parity_verified Tier-2 lint distinguishes: (a) baseline_ref run exists but parity_metric key not found in run metadata JSON → ERROR "parity_metric key not found in baseline run metadata" (misconfiguration that would silently validate); (b) baseline_ref exists, parity_metric found, value within tolerance → PASS; (c) value outside tolerance → WARNING (researcher may intend to investigate regression). Null metric extraction case (a) is a lint ERROR because a parity_metric field name that matches nothing in the metadata JSON silently validates, which is worse than no check — the researcher believes parity was verified when it was not. Natural extension of existing check_baseline_ref_exists in linter.py.
 - [ACCEPT] INVEST gate — winner: integrated claim-tier rigor system (Q1-A + Q2-D + Q3 two-location + Q4-A + Q5-A + Q5-B + command triad): INVEST assessment: I (Independent) — PASS: claim-tier system is additive over existing campaign/sidecar/lint infrastructure; no unfinished dependencies. N (Negotiable) — PASS: scope described in flexible terms; adoption-ladder opt-in defers enforcement timeline. V (Valuable) — PASS: prevents EPIC-6-class confounding errors; delivers auditable campaign records for confirmatory science. E (Estimable) — PASS: five well-scoped design questions answered; implementation analogous to postmortem.py pattern (known cost). S (Small) — BORDERLINE: the full system (5 Q answers + command triad + Signal 12 + migration + lint extensions) spans multiple PRs; the spec must define MVP scope as a bounded first PR (claim scaffold/register/validate + schema v7 migration + discriminability matrix TOML + Union Gate Q2-D + Signal 12). S criterion is satisfiable if PR scope is defined as MVP only. T (Testable) — PASS: 10 Given-When-Then ACs specified covering all major surfaces. Gap: S criterion requires explicit MVP PR scope boundary in spec — logged here.
 
+## MVP Scope: Phase 1 vs Phase 2
+
+**Phase 1 (must ship together — closes the EPIC-6 structural hole):**
+- AC-01 scaffold, AC-02 register, AC-03 validate (the triad is useless without all three)
+- AC-07 disconfirming-regime lint (promoted from Phase 2 — this is the direct EPIC-6 countermeasure: checks that the claim's declared `regime` is actually covered by the union of campaign runs; the other heuristic lints are general hygiene, but AC-07 is why this feature exists)
+- AC-08 Union Gate core (clause coverage → confounded downgrade)
+- AC-09 bypass (`--force-verdict`; required for SLURM survivability per Constraint 2)
+- AC-10 Signal 12 (HARD co-ship constraint — without it the opt-in model is invisible)
+- AC-11 SHA integrity at conclude
+- AC-14 descriptive labels in human output (cheap, ride-along)
+- AC-16 schema v8 migration (foundational; all columns read in Phase 1)
+
+**Phase 2 (deferrable — heuristic lints, tune against real catalog data before shipping):**
+- AC-04 zero-power lint, AC-05 positive-testing-bias, AC-06 single-cell-gate — advisory WARNINGs, highest false-positive risk; defer until tuning against real campaigns is possible
+- AC-12 claim-coverage JSON report (useful for audit, not required for the gate to function)
+- AC-13 `[baseline_parity]` benchmark sidecar lint (orthogonal concern — benchmark sidecars, not claim files; ship as its own standalone slice)
+- AC-15 `/using-bathos` skill update (docs-only, no code coupling)
+
+**Phase 1 is the minimal system that prevents the EPIC-6 mechanism.** Phase 2 items improve epistemic hygiene but each carries false-positive tuning cost that warrants real-catalog validation before shipping.
+
 ## Assumptions
 
 1. Single researcher using campaigns across 10+ projects; campaign `mode` is set once at creation and is authoritative — no mode changes after runs start.
@@ -118,7 +138,7 @@ The success condition is: after this session, each of the five questions has a s
 | # | Question | Notes |
 |---|---|---|
 | TBD-1 | DuckDB migration version | **RESOLVED: v8** — `schema.py:10` has `CURRENT_SCHEMA_VERSION="7"` (taken by stage_name migration in `compact.py:_migrate_v6`). New claim columns require a `_migrate_v7()` function in `compact.py` that bumps schema to v8. |
-| TBD-2 | `bth claim register` as standalone subcommand vs `--claim <path>` flag on `bth campaign create` | Standalone is cleaner; flag avoids a new command surface. Either works — decide at PR time. |
+| TBD-2 | `bth claim register` command surface | **RESOLVED: standalone subcommand** `bth claim register <path> [--campaign <id>]`. The Decision Log marks register as load-bearing for the adoption-ladder opt-in model (the SHA is recorded at registration time, not conclude time). A flag on `bth campaign create` would conflate campaign creation with claim pre-registration and cannot support mid-campaign claim authoring. |
 | TBD-3 | `bth lint --fix-discriminates` scope | MVP: enumerate affected sidecar files (informational). Post-MVP: auto-patch sidecar files when hypothesis IDs change. |
 | TBD-4 | Claim amendment log | When a claim regime expands between sprints, there is no amendment log mechanism. Proposal: `bth claim amend <path> --reason "..."` writes a dated amendment record + new SHA. Design deferred. |
 | TBD-5 | Catalog copy of claim.bth.toml | Two-location model includes a catalog sidecar copy for cross-project sprint-audit reports. If cross-project report self-containment proves unnecessary in practice, SHA-only is simpler. Phase 2 decision. |
@@ -126,6 +146,7 @@ The success condition is: after this session, each of the five questions has a s
 | TBD-7 | L4 provenance DAG | claim→hypothesis→run→outcome queryable graph in DuckDB. Post-MVP. |
 | TBD-8 | L5 adversarial reviewer agent | `bth campaign review --adversarial` dispatches an agent to verify eval actually tested the claim. Post-MVP. |
 | TBD-9 | EIG-based discriminability scoring | Rank planned experiments by expected information gain. Requires LLM integration. Post-MVP L5. |
+| TBD-10 | Campaign-name uniqueness enforcement | **RESOLVED by design**: `campaigns` table has no `UNIQUE(project_slug, name)` constraint (`compact.py:263`); adding one in the v8 migration would violate additive-only fixed-constraint 3 if existing duplicate names exist. Resolution: `campaign_id` is the authoritative catalog key for claim linkage; `campaign_name` is a discovery convenience with collision detection at register time (AC-02). No schema change needed. |
 
 ## Pre-mortem Record
 **User:** Q2-D has been in production 6 months and has definitively failed. Three failure modes: (1) Researchers routinely set mode=exploration on what are effectively confirmation campaigns — Signal 12 was never prioritized and ships 2 sprints late, so there is no audit pressure. The union gate fires for zero campaigns. Mitigation: Signal 12 is a co-ship constraint, not a follow-up item. (2) Mode=sequential is used as a dodge because sequential campaigns in practice combine exploration and confirmation phases — the mode semantics are underspecified. Mitigation: spec explicitly defines mode=sequential as confirmation-tier for the conclude gate (same enforcement as confirmation). (3) The claim.bth.toml on disk drifts from the registered SHA — the project-tree file is amended after registration and the catalog SHA check is never run because bth lint is not part of any automated gate. Mitigation: bth lint must be surfaced in the sprint audit and the SHA check is mandatory at conclude (not optional).
@@ -157,6 +178,9 @@ The success condition is: after this session, each of the five questions has a s
 
 ### AC-02 — bth claim register
 - Given a valid claim.bth.toml path, when `bth claim register <path> --campaign <id>` is called, then `campaigns.claim_path` and `campaigns.claim_sha256` are written to the DuckDB campaigns table.
+- **Campaign-id is the authoritative catalog key.** `claim_path` is stored relative to `fs_root` (never as an absolute path) to ensure SLURM/repo-move portability. AC-08 resolve-flow uses the stored relative path resolved against the conclude-time `fs_root`.
+- **Name-based auto-discovery** at `bth claim register` (when `--campaign` is omitted and only a claim file path is given): bathos looks up campaigns by matching `<campaign_name>` (derived from claim filename stem) against `campaigns.name` in the current project's catalog. If exactly one match → proceed. If multiple campaigns share the name → ERROR: "multiple campaigns named X — pass `--campaign <id>` to disambiguate." (The campaigns table has no UNIQUE(project_slug, name) constraint; name collision is a known edge case.)
+- **Absolute path rejection:** if `<path>` is an absolute filesystem path, register stores it as relative to `resolve_workspace(cwd).fs_root` — it does not store absolute paths. If the resolved relative path escapes `fs_root`, → ERROR: "claim file must be within the project workspace."
 - Re-registering an already-registered claim requires `--force`; the re-registration writes an audit event with timestamp and reason.
 - `claim_sha256` is computed at registration time (not at conclude time) — this is the tamper-evidence anchor.
 
@@ -195,7 +219,7 @@ A clause is **covered** when at least one run in the campaign has ALL of `clause
 **`conclude_campaign()` new signature**: `(db, campaign_id, outcome_label, conclusion, workspace_root=None)`.
 Resolve flow when `campaigns.claim_path IS NOT NULL`:
 1. If `claim_path` is absolute → use as-is; if relative → resolve against `workspace_root` (or `resolve_workspace(cwd).fs_root` if `workspace_root` is None).
-2. If resolved path does not exist → ERROR: "claim.bth.toml not found at <path> — file may have been moved or deleted" (follows `postmortem.py:160` pattern).
+2. If resolved path does not exist → ERROR: "claim.bth.toml not found at <path> — file may have been moved or deleted. Set BTH_WORKSPACE_ROOT or pass --claim <path> to locate it." Do NOT silently downgrade the verdict to `confounded` for a path-resolution failure — `confounded` is a scientific verdict (insufficient clause coverage), not an environment error. The researcher must resolve the path issue before conclude can run the Union Gate. This follows the precedent at `postmortem.py:160` (file-not-found is always an error, never a silent bypass).
 3. Compute SHA256 of current file; compare to `campaigns.claim_sha256` (see AC-11).
 4. Run Union Gate check; emit coverage report (see AC-12).
 
@@ -223,7 +247,7 @@ Resolve flow when `campaigns.claim_path IS NOT NULL`:
 ### AC-13 — [baseline_parity] in confound register
 - Given a `[[confounds]]` entry with a `[confounds.reference_parity]` sub-block (fields: `reference_paper`, `reference_metric`, `reference_value`, `equivalence_bound`, `parity_run_id`):
   - `parity_run_id` empty → WARNING: "baseline admissibility not established for <confound_label>"
-  - `parity_run_id` set but `reference_metric` key not found in run metadata JSON → ERROR: "parity_metric key not found in baseline run metadata — check field name"
+  - `parity_run_id` set but `reference_metric` key not found in run metadata JSON → ERROR: "parity_metric key not found in baseline run metadata — check field name" (misconfiguration that would silently validate; ERROR prevents false PASS). **Implementation note:** `check_baseline_parity` must NOT follow `linter.py`'s surrounding `except Exception: continue` convention for this case. The three states must be explicitly dispatched: (a) warm catalog absent entirely → INFO/skip (acceptable advisory); (b) parity run found but key absent from metadata JSON → hard ERROR (not swallowed by exception handler); (c) parity run not yet compacted (exists in cool tier but not warm) → WARNING "parity run exists but not compacted — run `bth compact`", never silent PASS.
   - `parity_run_id` set, metric found, `|result - reference_value| < equivalence_bound` → PASS (confound status transitions to `controlled`)
   - `|result - reference_value| >= equivalence_bound` → WARNING: "parity run <id> does not satisfy equivalence bound"
 
@@ -233,13 +257,21 @@ Resolve flow when `campaigns.claim_path IS NOT NULL`:
 ### AC-15 — §10.3 skill update
 - Given the `/using-bathos` skill, when updated, a "Signal discrimination and probe design" section is present covering probe vocabulary: scaled-divergence probes, planted-mode probes, null-injection probes, information-ablation probes — each with expected signature and what it discriminates.
 
-### AC-16 — schema v8 migration
-- Given `CURRENT_SCHEMA_VERSION = "7"` in `schema.py:10` (taken by stage_name migration), when `bth migrate` runs the claim-tier migration step:
-  - New function `_migrate_v7(conn)` added to `compact.py` (naming follows `_migrate_v6` pattern) — this is the v7→v8 migration step
-  - `campaigns` warm-tier (DuckDB): `ALTER TABLE campaigns ADD COLUMN claim_path TEXT` (nullable), `ADD COLUMN claim_sha256 TEXT` (nullable), `ADD COLUMN claim_mode TEXT` (nullable — records `'bypassed'` when Union Gate is bypassed via `--force-verdict`)
-  - `runs` cool-tier Parquet schema (`schema.py` `RUN_SCHEMA` and `Run` dataclass): add `claim_discriminates: pa.string()` (nullable, JSON array e.g. `'["H_info_sym","H_topology"]'`) and `claim_isolates: pa.string()` (nullable, same format)
-  - `runs` warm-tier (DuckDB `compact.py`): corresponding `ADD COLUMN claim_discriminates TEXT` and `ADD COLUMN claim_isolates TEXT`
-  - `CURRENT_SCHEMA_VERSION` increments from `"7"` to `"8"` in `schema.py:10`
-  - `MIGRATION_STEPS` dict in `compact.py` gains entry `7: _migrate_v7`
-  - Migration is additive-only; existing campaigns and runs gain NULL for new columns; no data is deleted or transformed
+### AC-16 — schema v8 migration (three-touchpoint pattern)
+
+The migration touches three separate mechanisms — all must be updated together:
+
+**Touchpoint A — Cool-tier schema (`schema.py`)**
+- Add `claim_discriminates: pa.field("claim_discriminates", pa.string(), nullable=True)` and `claim_isolates: pa.field("claim_isolates", pa.string(), nullable=True)` to `COOL_SCHEMA` (PyArrow schema constant).
+- Add `claim_discriminates: Optional[str] = None` and `claim_isolates: Optional[str] = None` to the `Run` dataclass.
+- `CURRENT_SCHEMA_VERSION` increments from `"7"` to `"8"` in `schema.py:10`.
+
+**Touchpoint B — Cool-tier backfill for existing fragments (`migrate.py`)**
+- `_default_array()` in `migrate.py` currently special-cases `stage_name` → `None` (not `""`). Add `claim_discriminates` and `claim_isolates` to the same special-case so they default to `None`, not `""` (JSON-array string columns must be NULL-default; an empty-string `""` passed to `json_contains()` produces wrong results silently).
+- New function `_migrate_v7(run_dict: dict) -> dict` in `compact.py` that stamps `run_dict["schema_version"] = "8"` and sets `run_dict.setdefault("claim_discriminates", None)` and `run_dict.setdefault("claim_isolates", None)`. Register as `MIGRATIONS["7"] = _migrate_v7` (the `MIGRATIONS` dict in `compact.py` uses schema-version-string keys and `run_dict: dict` → `dict` callables — this matches `_migrate_v6` shape exactly).
+
+**Touchpoint C — Warm-tier schema evolution (`compact.py` ALTER TABLE loops)**
+- `runs` warm table: `ALTER TABLE runs ADD COLUMN IF NOT EXISTS claim_discriminates TEXT` and `ADD COLUMN IF NOT EXISTS claim_isolates TEXT` in the existing ALTER loops (lines 462-484).
+- `campaigns` warm table: `ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS claim_path TEXT`, `ADD COLUMN IF NOT EXISTS claim_sha256 TEXT`, and `ADD COLUMN IF NOT EXISTS claim_mode TEXT` (records `'bypassed'` when Union Gate bypassed via `--force-verdict`).
+- All five columns are nullable; existing rows gain NULL. Migration is additive-only; no data deleted or transformed.
 
