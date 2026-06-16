@@ -30,6 +30,8 @@ class ValidationResult:
 
     ok: bool
     errors: list[ValidationError] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    infos: list[str] = field(default_factory=list)
 
 
 _OPAQUE_ID_RE = re.compile(r"^[A-Z][0-9]+$")
@@ -115,6 +117,8 @@ def validate_claim(claim: ClaimFile, db: duckdb.DuckDBPyConnection | None = None
         ValidationResult with ok=True if no errors, False otherwise
     """
     errors = []
+    warnings = []
+    infos = []
 
     # AC-03: Missing headline
     if not claim.headline or claim.headline.strip() == "":
@@ -175,7 +179,32 @@ def validate_claim(claim: ClaimFile, db: duckdb.DuckDBPyConnection | None = None
                 )
             )
 
-    return ValidationResult(ok=len(errors) == 0, errors=errors)
+    # AC-04: zero-power lint — planned_run_label where all hypothesis pairs predict identical outcome
+    from collections import defaultdict
+    outcomes_by_label: dict[str, set[str]] = defaultdict(set)
+    count_by_label: dict[str, int] = defaultdict(int)
+    for disc in claim.discriminability:
+        label = disc.get("planned_run_label", "")
+        outcome = disc.get("predicted_outcome", "")
+        if label and outcome:
+            outcomes_by_label[label].add(outcome)
+            count_by_label[label] += 1
+    for label, outcome_set in outcomes_by_label.items():
+        # Only fire if there are >=2 discriminability entries for that label
+        if count_by_label[label] >= 2 and len(outcome_set) == 1:
+            warnings.append(
+                f"zero discriminative power for run '{label}' — all {count_by_label[label]} "
+                f"hypothesis pairs predict identical outcome '{next(iter(outcome_set))}'"
+            )
+
+    # AC-05: positive-testing-bias lint — all rows predict the same outcome
+    all_outcomes = {disc.get("predicted_outcome", "") for disc in claim.discriminability if disc.get("predicted_outcome")}
+    if len(claim.discriminability) >= 2 and len(all_outcomes) == 1:
+        warnings.append(
+            f"positive-testing bias detected — all {len(claim.discriminability)} discriminability entries predict the same outcome '{next(iter(all_outcomes))}'; no run in the matrix challenges the primary hypothesis"
+        )
+
+    return ValidationResult(ok=len(errors) == 0, errors=errors, warnings=warnings, infos=infos)
 
 
 def scaffold_claim(campaign_id: str, db: duckdb.DuckDBPyConnection, workspace_root: Path) -> Path:
