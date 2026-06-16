@@ -1,54 +1,79 @@
+"""Claim-tier rigor: discriminability maps and union gates for confirmatory campaigns."""
+
 from __future__ import annotations
 
-import tomllib
 import hashlib
 import json
-from pathlib import Path
+import re
+import tomllib
 from dataclasses import dataclass, field
-from typing import Optional
+from pathlib import Path
 
-@dataclass
+import duckdb
+
+from bathos.telemetry import event
+
+
 class ValidationError:
-    message: str
+    """Single validation error."""
+
+    def __init__(self, message: str):
+        self.message = message
+
+    def __repr__(self):
+        return f"ValidationError({self.message!r})"
+
 
 @dataclass
 class ValidationResult:
+    """Result of claim validation."""
+
     ok: bool
     errors: list[ValidationError] = field(default_factory=list)
 
+
+_OPAQUE_ID_RE = re.compile(r"^[A-Z][0-9]+$")
+
+
 @dataclass
 class ClaimFile:
-    """Represents a parsed claim.bth.toml file."""
+    """Parsed claim.bth.toml file."""
+
     headline: str
     kill_condition: str
-    regime: Optional[str]
-    hypotheses: list[dict]
+    regime: str | None
+    hypotheses: list[dict]  # {id, label, predicted_signature?}
     assumptions: list[dict]
     confounds: list[dict]
-    discriminability: list[dict]
-    union_gate_clauses: list[dict]
+    discriminability: list[dict]  # {hypothesis_a, hypothesis_b, planned_run_label, predicted_outcome}
+    union_gate_clauses: list[dict]  # {id, description, hypothesis_ids}
     path: Path
     sha256: str
 
 
 def parse_claim(path: Path) -> ClaimFile:
-    """Parse a claim.bth.toml file and compute its SHA256 hash.
+    """Parse a claim.bth.toml file.
+
+    Args:
+        path: Path to claim.bth.toml
+
+    Returns:
+        ClaimFile dataclass
 
     Raises:
-        ValueError: If the file cannot be parsed or required sections are missing.
-        FileNotFoundError: If the file does not exist.
+        ValueError: If file cannot be parsed or is malformed
+        FileNotFoundError: If file does not exist
     """
     if not path.exists():
-        raise FileNotFoundError(f"Claim file not found: {path}")
+        raise FileNotFoundError(f"Claim file not found at {path}")
 
     try:
         with open(path, "rb") as f:
             content = f.read()
-        data = tomllib.loads(content.decode('utf-8'))
+            data = tomllib.loads(content.decode("utf-8"))
     except Exception as e:
-        raise ValueError(f"Failed to parse TOML: {e}") from e
+        raise ValueError(f"Failed to parse claim TOML at {path}: {e}") from e
 
-    # Extract claim section
     claim_section = data.get("claim", {})
 
     headline = claim_section.get("headline", "")
@@ -60,10 +85,10 @@ def parse_claim(path: Path) -> ClaimFile:
     confounds = data.get("confounds", [])
     discriminability = claim_section.get("discriminability", [])
     union_gate = claim_section.get("union_gate", {})
-    union_gate_clauses = union_gate.get("clauses", []) if isinstance(union_gate, dict) else []
+    union_gate_clauses = union_gate.get("clauses", [])
 
     # Compute SHA256 of file content
-    sha256_hash = hashlib.sha256(content).hexdigest()
+    sha256_hex = hashlib.sha256(content).hexdigest()
 
     return ClaimFile(
         headline=headline,
@@ -75,19 +100,19 @@ def parse_claim(path: Path) -> ClaimFile:
         discriminability=discriminability,
         union_gate_clauses=union_gate_clauses,
         path=path,
-        sha256=sha256_hash,
+        sha256=sha256_hex,
     )
 
 
-def validate_claim(claim: ClaimFile, db=None) -> ValidationResult:
-    """Validate the structural integrity of a claim file.
+def validate_claim(claim: ClaimFile, db: duckdb.DuckDBPyConnection | None = None) -> ValidationResult:
+    """Validate a parsed claim file.
 
     Args:
-        claim: Parsed ClaimFile object
-        db: Optional DuckDB connection for regime coverage checks
+        claim: ClaimFile to validate
+        db: Optional DuckDB connection for regime coverage check (AC-07)
 
     Returns:
-        ValidationResult with list of errors (empty list if valid)
+        ValidationResult with ok=True if no errors, False otherwise
     """
     errors = []
 
@@ -97,11 +122,11 @@ def validate_claim(claim: ClaimFile, db=None) -> ValidationResult:
 
     # AC-03: Blank kill_condition
     if not claim.kill_condition or claim.kill_condition.strip() == "":
-        errors.append(ValidationError("kill_condition is mandatory and cannot be blank"))
+        errors.append(ValidationError("kill_condition is required and must not be blank"))
 
     # AC-03: Fewer than 2 hypotheses
     if len(claim.hypotheses) < 2:
-        errors.append(ValidationError("At least 2 hypotheses are required"))
+        errors.append(ValidationError(f"At least 2 hypotheses required, found {len(claim.hypotheses)}"))
 
     # AC-03: No null/misspec hypothesis
     has_null_or_misspec = any(
@@ -109,273 +134,282 @@ def validate_claim(claim: ClaimFile, db=None) -> ValidationResult:
         for h in claim.hypotheses
     )
     if not has_null_or_misspec:
-        errors.append(ValidationError("No hypothesis with id containing 'null' or 'misspec'"))
+        errors.append(
+            ValidationError(
+                "No hypothesis with 'null' or 'misspec' in id — expected a null/misspecification hypothesis"
+            )
+        )
 
-    # AC-03: Opaque IDs (matching /^[A-Z][0-9]+$/) without label
-    for h in claim.hypotheses + claim.confounds:
+    # AC-03/AC-14: Check for opaque IDs with no label (using corrected regex pattern)
+    for h in claim.hypotheses:
         h_id = h.get("id", "")
         h_label = h.get("label", "")
-        # Check if ID matches pattern ^[A-Z][0-9]+$
-        if h_id and len(h_id) >= 2 and h_id[0].isupper() and h_id[1].isdigit():
-            # Only digits and first char uppercase
-            if all(c.isdigit() or c.isupper() for c in h_id):
-                if not h_label or h_label.strip() == "":
-                    errors.append(ValidationError(
-                        f"Opaque ID '{h_id}' requires mandatory label field with non-blank value"
-                    ))
+        if _OPAQUE_ID_RE.match(h_id):
+            if not h_label or h_label.strip() == "":
+                errors.append(
+                    ValidationError(
+                        f"Opaque hypothesis id '{h_id}' must have a descriptive label field (found blank)"
+                    )
+                )
 
-    # AC-03: Missing predicted_outcome in discriminability
-    for disc_entry in claim.discriminability:
-        if "predicted_outcome" not in disc_entry or disc_entry["predicted_outcome"] is None:
-            errors.append(ValidationError(
-                "Discriminability entry missing predicted_outcome: "
-                f"hypothesis_a={disc_entry.get('hypothesis_a')}, "
-                f"hypothesis_b={disc_entry.get('hypothesis_b')}, "
-                f"planned_run_label={disc_entry.get('planned_run_label')}"
-            ))
+    for c in claim.confounds:
+        c_id = c.get("id", "")
+        c_label = c.get("label", "")
+        if _OPAQUE_ID_RE.match(c_id):
+            if not c_label or c_label.strip() == "":
+                errors.append(
+                    ValidationError(
+                        f"Opaque confound id '{c_id}' must have a descriptive label field (found blank)"
+                    )
+                )
 
-    # AC-07: Disconfirming regime lint (requires db)
-    if db and claim.regime:
-        try:
-            # Query the union of result_schema values for this campaign
-            # This is deferred to Phase 2 when we have full campaign context
-            pass
-        except Exception:
-            pass
+    # AC-03: Check discriminability entries for missing predicted_outcome
+    for disc in claim.discriminability:
+        if "predicted_outcome" not in disc or not disc.get("predicted_outcome"):
+            h_a = disc.get("hypothesis_a", "?")
+            h_b = disc.get("hypothesis_b", "?")
+            label = disc.get("planned_run_label", "?")
+            errors.append(
+                ValidationError(
+                    f"Discriminability entry for {h_a} vs {h_b} (run {label}) missing predicted_outcome"
+                )
+            )
 
-    ok = len(errors) == 0
-    return ValidationResult(ok=ok, errors=errors)
+    return ValidationResult(ok=len(errors) == 0, errors=errors)
 
 
-def scaffold_claim(campaign_id: str, db, workspace_root: Path) -> Path:
-    """Generate a pre-populated claim.bth.toml template for a campaign.
+def scaffold_claim(campaign_id: str, db: duckdb.DuckDBPyConnection, workspace_root: Path) -> Path:
+    """Create a claim.bth.toml template for a campaign.
 
     Args:
-        campaign_id: UUID of the campaign
+        campaign_id: Campaign ID (short or full UUID)
         db: DuckDB connection
-        workspace_root: Root of the workspace
+        workspace_root: Root of project workspace
 
     Returns:
-        Path to the created claim file
+        Path to created claim.bth.toml file
 
     Raises:
-        RuntimeError: If campaign not found or .bth/claims dir cannot be created
+        RuntimeError: If campaign not found or directory cannot be created
     """
+    from bathos.campaigns import _resolve_campaign_id, CampaignError
+
     try:
-        row = db.execute(
-            "SELECT name, mode FROM campaigns WHERE id=?", [campaign_id]
-        ).fetchone()
-    except Exception as e:
-        raise RuntimeError(f"Failed to query campaign: {e}") from e
+        full_id = _resolve_campaign_id(db, campaign_id)
+    except CampaignError as e:
+        raise RuntimeError(f"Campaign not found: {e}") from e
 
-    if not row:
-        raise RuntimeError(f"Campaign not found: {campaign_id}")
+    # Get campaign details
+    rows = db.execute(
+        "SELECT name, hypothesis FROM campaigns WHERE id = ?", [full_id]
+    ).fetchall()
+    if not rows:
+        raise RuntimeError(f"Campaign {campaign_id} not found")
 
-    campaign_name, campaign_mode = row
+    campaign_name, campaign_hypothesis = rows[0]
 
     # Create .bth/claims directory
     claims_dir = workspace_root / ".bth" / "claims"
-    try:
-        claims_dir.mkdir(parents=True, exist_ok=True)
-    except Exception as e:
-        raise RuntimeError(f"Failed to create claims directory: {e}") from e
+    claims_dir.mkdir(parents=True, exist_ok=True)
 
-    claim_path = claims_dir / f"{campaign_name}.claim.toml"
-
-    # Generate template with 2 placeholder hypotheses
-    template = f"""# Claim file for campaign: {campaign_name}
-# Mode: {campaign_mode}
+    # Generate template
+    template = f"""# Claim for campaign: {campaign_name}
+# Generated via bth claim scaffold
 
 [claim]
-headline = "TODO: State the primary claim being tested"
-kill_condition = "TODO: Define the outcome that would falsify this claim"
-regime = "TODO: Specify the parameter range or conditions under which claim applies"
+headline = "REQUIRED: One-sentence summary of what this campaign tests"
+kill_condition = "REQUIRED: Under what conditions would the result contradict the hypothesis?"
+regime = "Optional: Parameter ranges or conditions claimed to be covered"
 
 [[hypotheses]]
 id = "H_primary"
-label = "Primary hypothesis (the effect you expect to observe)"
-predicted_signature = "TODO: metric values when this hypothesis is true"
+label = "REQUIRED: Descriptive label for primary hypothesis"
+predicted_signature = "Optional: Expected metric fingerprint"
 
 [[hypotheses]]
 id = "H_null"
-label = "Null hypothesis (no effect)"
-predicted_signature = "TODO: metric values under null"
+label = "REQUIRED: Null or misspecification hypothesis"
+predicted_signature = "Optional: Expected metric fingerprint if null hypothesis is true"
 
 [[assumptions]]
-id = "A1"
-label = "TODO: Key assumption that could invalidate the result"
+id = "A_1"
+label = "REQUIRED: Descriptive assumption label"
 
 [[confounds]]
-id = "C1"
-label = "TODO: Known confound and how you control for it"
+id = "C_1"
+label = "REQUIRED: Confound label"
+[confounds.reference_parity]
+reference_paper = "Optional: Citation if baseline from literature"
+reference_metric = "Optional: metric key in baseline run"
+reference_value = 1.0
+equivalence_bound = 0.05
 
+[claim.discriminability]
+# Matrix indexed by hypothesis-pair × outcome-label
+# predicted_outcome: any outcome label from the runs, or "??" for unspecified
 [[claim.discriminability]]
 hypothesis_a = "H_primary"
 hypothesis_b = "H_null"
-planned_run_label = "main"
-predicted_outcome = "discriminates"
+planned_run_label = "outcome_1"
+predicted_outcome = "??  # EDIT: assign expected outcome if run exists"
 
 [claim.union_gate]
 [[claim.union_gate.clauses]]
 id = "C_main"
-description = "Primary hypothesis distinguishable from null"
+description = "REQUIRED: What does this clause discriminate?"
 hypothesis_ids = ["H_primary", "H_null"]
 """
 
-    try:
-        with open(claim_path, "w") as f:
-            f.write(template)
-    except Exception as e:
-        raise RuntimeError(f"Failed to write claim template: {e}") from e
+    claim_path = claims_dir / f"{campaign_name}.claim.toml"
+    claim_path.write_text(template)
 
-    # Print sidecar snippets for the researcher to copy
-    sidecar_snippet = f"""# Add these lines to your sidecar files for runs testing this campaign:
-
-[run]
-# discriminates: list of hypothesis IDs this run distinguishes
-# isolates: list of hypothesis IDs this run isolates as primary causal factor
-discriminates = ["H_primary", "H_null"]
-isolates = []
-"""
-    print(sidecar_snippet)
+    event("claim.scaffold", campaign_id=full_id, claim_path=str(claim_path))
 
     return claim_path
 
 
-def register_claim(path: Path, campaign_id: str, db, workspace_root: Path, force: bool = False) -> None:
-    """Register a claim file with a campaign (stores path and SHA256).
+def register_claim(
+    path: Path,
+    campaign_id: str,
+    db: duckdb.DuckDBPyConnection,
+    workspace_root: Path,
+    force: bool = False,
+) -> None:
+    """Register a claim file with a campaign.
 
     Args:
-        path: Path to claim file (relative to workspace_root)
-        campaign_id: UUID of the campaign
+        path: Path to claim.bth.toml (relative or absolute)
+        campaign_id: Campaign ID
         db: DuckDB connection
-        workspace_root: Root of the workspace
-        force: If True, allow re-registration with audit event
+        workspace_root: Project workspace root
+        force: If True, allow re-registration and write audit event
 
     Raises:
-        ValueError: If path is absolute, does not exist, or escapes workspace
-        RuntimeError: If campaign not found or file already registered (without --force)
+        RuntimeError: If path is absolute or escapes workspace, or campaign not found
     """
-    # AC-02: Reject absolute paths
+    from bathos.campaigns import _resolve_campaign_id, CampaignError
+
+    # Resolve path to relative if absolute
     if path.is_absolute():
-        raise ValueError("claim file must be stored relative to workspace root (not absolute path)")
+        try:
+            rel_path = path.relative_to(workspace_root)
+        except ValueError:
+            raise RuntimeError(
+                f"Claim file must be within workspace root. Path {path} escapes {workspace_root}"
+            )
+    else:
+        rel_path = path
 
-    # Resolve relative path
-    abs_path = workspace_root / path
-
-    # Check that file exists
+    # Verify file exists
+    abs_path = workspace_root / rel_path
     if not abs_path.exists():
-        raise FileNotFoundError(f"Claim file not found: {abs_path}")
+        raise FileNotFoundError(f"Claim file not found at {abs_path}")
 
-    # Check that path doesn't escape workspace
     try:
-        abs_path.resolve().relative_to(workspace_root.resolve())
-    except ValueError:
-        raise ValueError(f"Claim file escapes workspace root: {path}")
+        full_id = _resolve_campaign_id(db, campaign_id)
+    except CampaignError as e:
+        raise RuntimeError(f"Campaign not found: {e}") from e
 
     # Compute SHA256
-    sha256_hash = hashlib.sha256(abs_path.read_bytes()).hexdigest()
+    claim_content = abs_path.read_bytes()
+    claim_sha256 = hashlib.sha256(claim_content).hexdigest()
 
     # Check if already registered
-    try:
-        existing = db.execute(
-            "SELECT claim_sha256 FROM campaigns WHERE id=?", [campaign_id]
-        ).fetchone()
-    except Exception as e:
-        raise RuntimeError(f"Failed to query campaign: {e}") from e
-
-    if existing and existing[0] is not None:
+    existing = db.execute(
+        "SELECT claim_sha256 FROM campaigns WHERE id = ?", [full_id]
+    ).fetchall()
+    if existing and existing[0][0] is not None:
         if not force:
             raise RuntimeError(
-                f"Campaign already has a registered claim. "
-                f"Re-register with `bth claim register --force` to update."
+                f"Campaign {campaign_id[:8]} already has a registered claim. "
+                "Use --force to re-register."
             )
-        # Write audit event for forced re-registration
-        try:
-            db.execute(
-                "INSERT INTO amendments (run_id, amended_at, reason) VALUES (?, ?, ?)",
-                [campaign_id, str(Path.cwd()), "claim re-registration (forced)"]
-            )
-        except Exception:
-            pass
+        # Write audit event for re-registration
+        event("claim.register_force", campaign_id=full_id, claim_path=str(rel_path))
 
-    # Store relative path and SHA256 in campaigns table
-    try:
-        db.execute(
-            "UPDATE campaigns SET claim_path=?, claim_sha256=? WHERE id=?",
-            [str(path), sha256_hash, campaign_id]
-        )
-        db.commit()
-    except Exception as e:
-        raise RuntimeError(f"Failed to register claim: {e}") from e
+    # Update campaigns table
+    db.execute(
+        "UPDATE campaigns SET claim_path = ?, claim_sha256 = ? WHERE id = ?",
+        [str(rel_path), claim_sha256, full_id],
+    )
+
+    event("claim.register", campaign_id=full_id, claim_path=str(rel_path), claim_sha256=claim_sha256)
 
 
 def check_sha(path_relative: str, registered_sha: str, workspace_root: Path) -> None:
-    """Verify that a claim file's SHA256 matches the registered value.
+    """Check that claim file SHA256 matches registered value.
+
+    Args:
+        path_relative: Relative path to claim file (from campaigns.claim_path)
+        registered_sha: SHA256 registered at claim_register time
+        workspace_root: Project workspace root
 
     Raises:
-        FileNotFoundError: If file does not exist
-        ValueError: If SHA256 does not match
+        FileNotFoundError: If claim file not found
+        ValueError: If SHA256 mismatch
     """
     abs_path = workspace_root / path_relative
-
     if not abs_path.exists():
         raise FileNotFoundError(f"Claim file not found at {abs_path}")
 
     current_sha = hashlib.sha256(abs_path.read_bytes()).hexdigest()
-
     if current_sha != registered_sha:
         raise ValueError(
-            "claim.bth.toml has been modified since registration — "
-            "re-register with `bth claim register --force` to acknowledge the amendment."
+            f"Claim file SHA256 mismatch. File has been modified since registration. "
+            f"Re-register with `bth claim register --force` to acknowledge the amendment."
         )
 
 
-def run_union_gate(db, campaign_id: str, claim: ClaimFile) -> tuple[str, list[str]]:
-    """Check if all union gate clauses are covered by runs in the campaign.
+def run_union_gate(
+    db: duckdb.DuckDBPyConnection, campaign_id: str, claim: ClaimFile
+) -> tuple[str, list[str]]:
+    """Run the union gate check for a campaign.
 
     Args:
         db: DuckDB connection
-        campaign_id: UUID of the campaign
-        claim: Parsed ClaimFile
+        campaign_id: Campaign ID
+        claim: Parsed claim file
 
     Returns:
-        Tuple of (verdict, uncovered_clause_ids) where:
-        - verdict is "covered" or "confounded"
-        - uncovered_clause_ids is list of clause IDs with no covering run
+        Tuple of (verdict, uncovered_clause_ids) where verdict is 'covered' or 'confounded'
+        and uncovered_clause_ids is a list of clause IDs that have no covering runs
     """
-    uncovered = []
+    uncovered_clauses = []
 
     for clause in claim.union_gate_clauses:
-        clause_id = clause.get("id", "")
+        clause_id = clause.get("id", "?")
         hypothesis_ids = clause.get("hypothesis_ids", [])
 
-        if not hypothesis_ids:
-            continue
+        # Find a run that covers ALL hypothesis_ids in this clause
+        covered_runs = db.execute(
+            """
+            SELECT cr.run_id FROM campaign_runs cr
+            JOIN runs r ON cr.run_id = r.id
+            WHERE cr.campaign_id = ?
+              AND r.claim_discriminates IS NOT NULL
+            """,
+            [campaign_id],
+        ).fetchall()
 
-        # Build query: find run where claim_discriminates contains all hypothesis_ids
-        # claim_discriminates is a JSON array string like '["H1","H2"]'
-        try:
-            # Query for a run that has all hypothesis IDs in its discriminates field
-            conditions = []
-            for h_id in hypothesis_ids:
-                conditions.append(f"json_contains(claim_discriminates, '{json.dumps(h_id)}')")
+        covered = False
+        for (run_id,) in covered_runs:
+            # Get claim_discriminates JSON array
+            rows = db.execute(
+                "SELECT claim_discriminates FROM runs WHERE id = ?", [run_id]
+            ).fetchall()
+            if rows and rows[0][0]:
+                try:
+                    disc_list = json.loads(rows[0][0])
+                    if isinstance(disc_list, list):
+                        # Check if ALL hypothesis_ids are in this run
+                        if all(h_id in disc_list for h_id in hypothesis_ids):
+                            covered = True
+                            break
+                except (json.JSONDecodeError, TypeError):
+                    pass
 
-            where_clause = " AND ".join(conditions) if conditions else "1=1"
+        if not covered:
+            uncovered_clauses.append(clause_id)
 
-            matching_runs = db.execute(
-                f"SELECT COUNT(*) FROM runs WHERE campaign_id=? AND {where_clause}",
-                [campaign_id]
-            ).fetchone()
-
-            if matching_runs and matching_runs[0] > 0:
-                # Clause is covered
-                pass
-            else:
-                uncovered.append(clause_id)
-        except Exception:
-            # Query failed; mark clause as uncovered
-            uncovered.append(clause_id)
-
-    verdict = "confounded" if uncovered else "covered"
-    return verdict, uncovered
+    verdict = "covered" if not uncovered_clauses else "confounded"
+    return (verdict, uncovered_clauses)

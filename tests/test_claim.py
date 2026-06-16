@@ -120,6 +120,17 @@ def temp_db(tmp_path):
         )
     """)
 
+    # Create campaign_runs table for union gate tests
+    db.execute("""
+        CREATE TABLE campaign_runs (
+            campaign_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            evalue REAL,
+            seq_position INTEGER,
+            PRIMARY KEY (campaign_id, run_id)
+        )
+    """)
+
     db.commit()
     yield db
     db.close()
@@ -307,7 +318,7 @@ class TestRegisterClaim:
         assert len(row[1]) == 64  # SHA256
 
     def test_register_claim_rejects_absolute_path(self, temp_claim_file, temp_db, tmp_path):
-        """AC-02: register rejects absolute paths."""
+        """AC-02: register rejects absolute paths that escape workspace."""
         campaign_id = "test_campaign_id"
         temp_db.execute(
             "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at) "
@@ -316,9 +327,15 @@ class TestRegisterClaim:
         )
         temp_db.commit()
 
-        # Try to register with absolute path
-        with pytest.raises(ValueError, match="relative"):
-            register_claim(temp_claim_file, campaign_id, temp_db, tmp_path, force=False)
+        # Create a file outside workspace
+        other_dir = Path("/tmp/outside_workspace")
+        other_dir.mkdir(exist_ok=True)
+        outside_file = other_dir / "outside.claim.toml"
+        outside_file.write_text("[claim]\nheadline='test'")
+
+        # Try to register with absolute path that escapes workspace
+        with pytest.raises(RuntimeError, match="escapes"):
+            register_claim(outside_file, campaign_id, temp_db, tmp_path, force=False)
 
     def test_register_claim_file_not_found(self, temp_db, tmp_path):
         """register raises FileNotFoundError for missing file."""
@@ -369,6 +386,11 @@ class TestUnionGate:
             "INSERT INTO runs (id, campaign_id, claim_discriminates) VALUES (?, ?, ?)",
             ["run1", campaign_id, json.dumps(["H_primary", "H_null"])]
         )
+        # Add to campaign_runs
+        temp_db.execute(
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
+            [campaign_id, "run1"]
+        )
         temp_db.commit()
 
         verdict, uncovered = run_union_gate(temp_db, campaign_id, claim)
@@ -384,6 +406,11 @@ class TestUnionGate:
         temp_db.execute(
             "INSERT INTO runs (id, campaign_id, claim_discriminates) VALUES (?, ?, ?)",
             ["run1", campaign_id, json.dumps(["H_primary"])]  # Missing H_null
+        )
+        # Add to campaign_runs
+        temp_db.execute(
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
+            [campaign_id, "run1"]
         )
         temp_db.commit()
 

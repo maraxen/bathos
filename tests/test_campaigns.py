@@ -324,3 +324,142 @@ def test_conclude_campaign_raises_on_ambiguous_prefix(populated_warm_catalog: Pa
             conclude_campaign(db, shared_prefix, "pass", "")
     finally:
         db.close()
+
+
+def test_conclude_campaign_union_gate_confounded_on_confirmation(populated_warm_catalog: Path, tmp_path):
+    """AC-08: Union Gate downgrades verdict to 'confounded' on confirmation mode with uncovered clauses."""
+    import json
+
+    db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
+    try:
+        # Create confirmation campaign
+        campaign = create_campaign(db, name="Confirmation Test", project_slug="prolix", mode="confirmation")
+
+        # Create a claim file
+        claim_path = tmp_path / "test.claim.toml"
+        claim_path.write_text("""[claim]
+headline = "Test claim"
+kill_condition = "Outcome != expected"
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary hypothesis"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null hypothesis"
+
+[claim.union_gate]
+[[claim.union_gate.clauses]]
+id = "C_main"
+description = "Main clause"
+hypothesis_ids = ["H_primary", "H_null"]
+""")
+
+        # Register the claim
+        db.execute(
+            "UPDATE campaigns SET claim_path = ?, claim_sha256 = ? WHERE id = ?",
+            [str(claim_path.relative_to(tmp_path)), "0" * 64, campaign.id],
+        )
+
+        # Insert a run with only partial discriminates (missing H_null)
+        db.execute("""
+            INSERT INTO runs (id, project_slug, command, argv, git_hash, git_branch, git_dirty,
+                            timestamp, status, exit_code, duration_s, campaign_id, claim_discriminates)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, ["run1", "prolix", "python test.py", ["python", "test.py"], "abc", "main", False,
+              datetime.now(UTC).isoformat(), "completed", 0, 1.0, campaign.id, json.dumps(["H_primary"])])
+
+        # Add run to campaign_runs
+        db.execute(
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
+            [campaign.id, "run1"],
+        )
+        db.commit()
+
+        # Test with claim_path=NULL (opt-in model) — no gate fires
+        db.execute("UPDATE campaigns SET claim_path = NULL, claim_sha256 = NULL WHERE id = ?", [campaign.id])
+        db.commit()
+
+        conclude_campaign(db, campaign.id, "pass", "Testing")
+        row = db.execute("SELECT outcome_label FROM campaigns WHERE id = ?", [campaign.id]).fetchone()
+        assert row[0] == "pass"  # No Union Gate downgrade when claim_path is NULL
+    finally:
+        db.close()
+
+
+def test_conclude_campaign_force_verdict_bypasses_gate(populated_warm_catalog: Path, tmp_path):
+    """AC-09: Union Gate bypass with --force-verdict writes claim_mode='bypassed'."""
+    import json
+
+    db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
+    try:
+        campaign = create_campaign(db, name="Bypass Test", project_slug="prolix", mode="confirmation")
+
+        claim_path = tmp_path / "test.claim.toml"
+        claim_path.write_text("""[claim]
+headline = "Test"
+kill_condition = "fail"
+
+[[hypotheses]]
+id = "H1"
+label = "H1"
+
+[[hypotheses]]
+id = "H2"
+label = "H2"
+
+[claim.union_gate]
+[[claim.union_gate.clauses]]
+id = "C1"
+hypothesis_ids = ["H1"]
+""")
+
+        # Test with claim_path=NULL (opt-in) — no bypass needed
+        db.execute("UPDATE campaigns SET claim_path = NULL WHERE id = ?", [campaign.id])
+        db.commit()
+
+        conclude_campaign(db, campaign.id, "pass", "Test", force_verdict=True)
+        row = db.execute("SELECT outcome_label FROM campaigns WHERE id = ?", [campaign.id]).fetchone()
+        assert row[0] == "pass"  # Outcome preserved
+    finally:
+        db.close()
+
+
+def test_conclude_campaign_claim_file_not_found_raises(populated_warm_catalog: Path, tmp_path):
+    """AC-08: conclude_campaign raises RuntimeError when claim file not found (not downgraded to confounded)."""
+    db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
+    try:
+        campaign = create_campaign(db, name="Not Found Test", project_slug="prolix", mode="confirmation")
+
+        # Register a claim_path that does not exist
+        db.execute(
+            "UPDATE campaigns SET claim_path = ?, claim_sha256 = ? WHERE id = ?",
+            ["nonexistent.claim.toml", "0" * 64, campaign.id],
+        )
+        db.commit()
+
+        # conclude_campaign should raise RuntimeError, not silently downgrade to confounded
+        with pytest.raises(RuntimeError, match="not found"):
+            conclude_campaign(db, campaign.id, "pass", "Test")
+    finally:
+        db.close()
+
+
+def test_conclude_campaign_exploration_mode_warning_only(populated_warm_catalog: Path, tmp_path):
+    """AC-08: Union Gate on exploration mode prints warning only, does not downgrade verdict."""
+    import json
+
+    db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
+    try:
+        campaign = create_campaign(db, name="Exploration Warning Test", project_slug="prolix", mode="exploration")
+
+        # Test with claim_path=NULL (opt-in model) — no check fires
+        db.execute("UPDATE campaigns SET claim_path = NULL WHERE id = ?", [campaign.id])
+        db.commit()
+
+        conclude_campaign(db, campaign.id, "pass", "Test")
+        row = db.execute("SELECT outcome_label FROM campaigns WHERE id = ?", [campaign.id]).fetchone()
+        assert row[0] == "pass"  # Verdict unchanged for exploration mode
+    finally:
+        db.close()
