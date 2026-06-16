@@ -203,6 +203,18 @@ def _migrate_v6(run_dict: dict) -> dict:
     return run_dict
 
 
+def _migrate_v7(run_dict: dict) -> dict:
+    """Migrate v7 fragment to v8 by adding claim_discriminates and claim_isolates fields.
+
+    claim_discriminates and claim_isolates are optional fields (JSON array strings)
+    that default to None for existing runs.
+    """
+    run_dict["claim_discriminates"] = None
+    run_dict["claim_isolates"] = None
+    run_dict["schema_version"] = "8"
+    return run_dict
+
+
 MIGRATIONS["0"] = _migrate_v0
 MIGRATIONS["1"] = _migrate_v1
 MIGRATIONS["2"] = _migrate_v2
@@ -210,6 +222,7 @@ MIGRATIONS["3"] = _migrate_v3
 MIGRATIONS["4"] = _migrate_v4
 MIGRATIONS["5"] = _migrate_v5
 MIGRATIONS["6"] = _migrate_v6
+MIGRATIONS["7"] = _migrate_v7
 
 
 _RUNS_TABLE_SCHEMA = """
@@ -273,7 +286,10 @@ CREATE TABLE IF NOT EXISTS campaigns (
     conclusion TEXT,
     outcome_label TEXT,
     parent_campaign_id TEXT,
-    stopping_threshold REAL
+    stopping_threshold REAL,
+    claim_path TEXT,
+    claim_sha256 TEXT,
+    claim_mode TEXT
 )
 """
 
@@ -465,6 +481,8 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
         "ALTER TABLE runs ADD COLUMN IF NOT EXISTS outcome_error_reason TEXT",
         "ALTER TABLE runs ADD COLUMN IF NOT EXISTS adversarial_check_status TEXT",
         "ALTER TABLE runs ADD COLUMN IF NOT EXISTS stage_name TEXT",
+        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS claim_discriminates TEXT",
+        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS claim_isolates TEXT",
     ]:
         with contextlib.suppress(Exception):
             con.execute(_runs_alter_sql)
@@ -479,6 +497,9 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
         "ALTER TABLE campaign_runs ADD COLUMN IF NOT EXISTS evalue REAL",
         "ALTER TABLE campaign_runs ADD COLUMN IF NOT EXISTS seq_position INTEGER",
         "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS stopping_threshold REAL",
+        "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS claim_path TEXT",
+        "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS claim_sha256 TEXT",
+        "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS claim_mode TEXT",
     ]:
         with contextlib.suppress(Exception):
             con.execute(_alter_sql)

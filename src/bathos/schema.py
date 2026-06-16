@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pyarrow as pa
 
-CURRENT_SCHEMA_VERSION = "7"
+CURRENT_SCHEMA_VERSION = "8"
 
 # Format validator for stage_name values — used by linter.check_canonical_stage_names.
 # Enforcement at parse time uses CANONICAL_STAGES set-membership (parse_sidecar); this
@@ -67,6 +67,8 @@ COOL_SCHEMA = pa.schema(
         pa.field("outcome_error_reason", pa.string()),
         pa.field("adversarial_check_status", pa.string()),
         pa.field("stage_name", pa.string()),
+        pa.field("claim_discriminates", pa.string(), nullable=True),
+        pa.field("claim_isolates", pa.string(), nullable=True),
     ]
 )
 
@@ -115,6 +117,8 @@ WARM_SCHEMA = pa.schema(
         pa.field("outcome_error_reason", pa.string()),
         pa.field("adversarial_check_status", pa.string()),
         pa.field("stage_name", pa.string()),
+        pa.field("claim_discriminates", pa.string(), nullable=True),
+        pa.field("claim_isolates", pa.string(), nullable=True),
     ]
 )
 
@@ -164,6 +168,8 @@ class Run:
     outcome_error_reason: str = ""
     adversarial_check_status: str = ""
     stage_name: str | None = None
+    claim_discriminates: str | None = None
+    claim_isolates: str | None = None
 
     def to_arrow(self) -> pa.Table:
         return pa.table(
@@ -209,6 +215,8 @@ class Run:
                 "outcome_error_reason": [self.outcome_error_reason],
                 "adversarial_check_status": [self.adversarial_check_status],
                 "stage_name": [self.stage_name],
+                "claim_discriminates": [self.claim_discriminates],
+                "claim_isolates": [self.claim_isolates],
             },
             schema=COOL_SCHEMA,
         )
@@ -265,4 +273,6 @@ class Run:
             outcome_error_reason=pydict.get("outcome_error_reason", [""])[i] if "outcome_error_reason" in pydict else "",
             adversarial_check_status=pydict.get("adversarial_check_status", [""])[i] if "adversarial_check_status" in pydict else "",
             stage_name=pydict.get("stage_name", [None])[i] if "stage_name" in pydict else None,
+            claim_discriminates=pydict.get("claim_discriminates", [None])[i] if "claim_discriminates" in pydict else None,
+            claim_isolates=pydict.get("claim_isolates", [None])[i] if "claim_isolates" in pydict else None,
         )

@@ -523,6 +523,22 @@ def sprint_audit(hours: int = 24) -> dict:
             signal_result_submit_bypass = signal_submit_bypass_rate(project["slug"], db_path, catalog_dir)
             signals["submit_bypass_rate"] = signal_result_submit_bypass.value if signal_result_submit_bypass.value is not None else 0.0
 
+            # Signal 12: unregistered claims on confirmation campaigns
+            # AC-10: Flag confirmation campaigns without a registered claim
+            try:
+                unregistered = db.execute(
+                    "SELECT name, id FROM campaigns "
+                    "WHERE mode='confirmation' AND (claim_path IS NULL OR claim_path='') "
+                    "AND status NOT IN ('abandoned','open')"
+                ).fetchall()
+                for cname, cid in unregistered:
+                    anomalies.append(
+                        f"Confirmation campaign '{cname}' ({cid[:8]}) has no registered claim — "
+                        "Union Gate will not fire at conclude."
+                    )
+            except Exception:
+                pass  # claim_path column absent on pre-v8 catalogs
+
             # Check signal thresholds and add anomalies.
             # All thresholds are CALIBRATION TARGETS (v0.6), not hard gates.
             # See ADR .praxia/docs/decisions/260601_sprint-audit-threshold-rationale.md
