@@ -517,3 +517,71 @@ def emit_figure_manifest(db, catalog_dir: str, campaign_id: str) -> None:
     manifest.write_manifest(manifest_path)
 
     event("campaign.manifest.emit", campaign_id=campaign_id, manifest_path=str(manifest_path))
+
+
+def emit_claim_coverage_report(
+    db,
+    catalog_dir: str | Path,
+    campaign_id: str,
+    verdict: str,
+    uncovered_clauses: list[str],
+    claim,
+    bypass_reason: str | None = None,
+) -> None:
+    """Emit a claim-coverage JSON report to the catalog sidecar directory.
+
+    AC-12 implementation: Creates a JSON report documenting union gate clause coverage.
+
+    Args:
+        db: DuckDB connection (not used in this implementation, kept for signature compatibility)
+        catalog_dir: Path to the bathos catalog root (where sidecars/ lives)
+        campaign_id: Campaign ID
+        verdict: Result of union gate check ('covered' or 'confounded')
+        uncovered_clauses: List of clause IDs that were not covered by any run
+        claim: ClaimFile object parsed from claim.bth.toml
+        bypass_reason: Optional reason if verdict was bypassed (e.g., "force_verdict flag")
+
+    Raises:
+        None (errors are raised for directory creation failures)
+    """
+    from pathlib import Path
+    import json
+
+    # Compute coverage fraction
+    total_clauses = len(claim.union_gate_clauses)
+    covered_clauses = [
+        c["id"] for c in claim.union_gate_clauses
+        if c["id"] not in uncovered_clauses
+    ]
+    coverage_fraction = (
+        len(covered_clauses) / total_clauses if total_clauses > 0 else 1.0
+    )
+
+    # Determine if verdict was blocked (confounded with no bypass)
+    verdict_blocked = (verdict == "confounded" and bypass_reason is None)
+
+    # Build JSON payload
+    payload = {
+        "coverage_fraction": coverage_fraction,
+        "covered_clauses": covered_clauses,
+        "uncovered_clauses": uncovered_clauses,
+        "contradicted_clauses": [],  # AC-12: placeholder for future
+        "verdict_blocked": verdict_blocked,
+        "bypass_reason": bypass_reason,
+    }
+
+    # Write to sidecar directory with atomic write-then-rename
+    catalog_path = Path(catalog_dir)
+    sidecar_dir = catalog_path / "sidecars" / campaign_id
+    sidecar_dir.mkdir(parents=True, exist_ok=True)
+
+    filename = f"claim_coverage_{campaign_id}.json"
+    tmp_path = sidecar_dir / (filename + ".tmp")
+    final_path = sidecar_dir / filename
+
+    # Atomic write
+    with open(tmp_path, "w") as f:
+        json.dump(payload, f, indent=2)
+    tmp_path.rename(final_path)
+
+    event("claim.coverage_report.emit", campaign_id=campaign_id, report_path=str(final_path))

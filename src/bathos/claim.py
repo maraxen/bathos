@@ -30,6 +30,7 @@ class ValidationResult:
 
     ok: bool
     errors: list[ValidationError] = field(default_factory=list)
+    infos: list[str] = field(default_factory=list)  # AC-13: informational messages
 
 
 _OPAQUE_ID_RE = re.compile(r"^[A-Z][0-9]+$")
@@ -175,7 +176,81 @@ def validate_claim(claim: ClaimFile, db: duckdb.DuckDBPyConnection | None = None
                 )
             )
 
-    return ValidationResult(ok=len(errors) == 0, errors=errors)
+    # AC-13: Validate [baseline_parity] sub-blocks in confounds
+    infos = []
+    for confound in claim.confounds:
+        ref_par = confound.get("reference_parity", {})
+        if not ref_par:
+            # No parity block for this confound
+            continue
+
+        parity_run_id = ref_par.get("parity_run_id", "")
+        reference_metric = ref_par.get("reference_metric", "")
+        reference_value = ref_par.get("reference_value")
+        equivalence_bound = ref_par.get("equivalence_bound")
+        confound_label = confound.get("label", confound.get("id", "unknown"))
+
+        # State 1: parity_run_id empty or missing
+        if not parity_run_id:
+            errors.append(
+                ValidationError(f"baseline admissibility not established for '{confound_label}'")
+            )
+            continue
+
+        # State 2: parity_run_id set AND db is not None
+        if db is not None:
+            row = db.execute(
+                "SELECT metadata FROM runs WHERE id=? OR id LIKE ?",
+                [parity_run_id, parity_run_id + "%"]
+            ).fetchone()
+
+            if row is None:
+                # Run not compacted (not in warm DB)
+                errors.append(
+                    ValidationError(
+                        f"parity run '{parity_run_id}' not compacted — run `bth compact` to enable baseline parity check"
+                    )
+                )
+            else:
+                # Row found, check metadata
+                try:
+                    meta = json.loads(row[0] or "{}")
+                except json.JSONDecodeError as e:
+                    errors.append(
+                        ValidationError(f"failed to parse run metadata for parity check: {e}")
+                    )
+                    continue
+
+                # State 2b: metric missing from metadata (HARD ERROR, not swallowed by exception)
+                if reference_metric not in meta:
+                    errors.append(
+                        ValidationError(
+                            f"parity_metric key '{reference_metric}' not found in baseline run metadata — check field name"
+                        )
+                    )
+                else:
+                    # Metric found, check equivalence bound
+                    try:
+                        result_val = float(meta[reference_metric])
+                        if abs(result_val - reference_value) < equivalence_bound:
+                            infos.append(
+                                f"baseline parity PASS for '{confound_label}' (|{result_val:.4f} - {reference_value}| < {equivalence_bound})"
+                            )
+                        else:
+                            errors.append(
+                                ValidationError(
+                                    f"parity run '{parity_run_id}' does not satisfy equivalence bound for '{confound_label}'"
+                                )
+                            )
+                    except (ValueError, TypeError) as e:
+                        errors.append(
+                            ValidationError(f"failed to compare parity metric: {e}")
+                        )
+        else:
+            # State 3: parity_run_id set, db is None
+            infos.append(f"skipping baseline parity check for '{confound_label}' — no catalog connection")
+
+    return ValidationResult(ok=len(errors) == 0, errors=errors, infos=infos)
 
 
 def scaffold_claim(campaign_id: str, db: duckdb.DuckDBPyConnection, workspace_root: Path) -> Path:

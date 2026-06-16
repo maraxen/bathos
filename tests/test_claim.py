@@ -111,12 +111,13 @@ def temp_db(tmp_path):
         )
     """)
 
-    # Create runs table for union gate tests
+    # Create runs table for union gate and baseline parity tests
     db.execute("""
         CREATE TABLE runs (
             id TEXT PRIMARY KEY,
             campaign_id TEXT,
-            claim_discriminates TEXT
+            claim_discriminates TEXT,
+            metadata TEXT
         )
     """)
 
@@ -426,6 +427,395 @@ class TestUnionGate:
         verdict, uncovered = run_union_gate(temp_db, campaign_id, claim)
         assert verdict == "confounded"
         assert len(uncovered) > 0
+
+
+class TestClaimCoverageReport:
+    """Tests for AC-12: claim-coverage JSON report emission."""
+
+    def test_ac12_coverage_report_emitted(self, temp_claim_file, tmp_path):
+        """AC-12: emit_claim_coverage_report writes JSON to correct path."""
+        from bathos.campaigns import emit_claim_coverage_report
+
+        claim = parse_claim(temp_claim_file)
+        campaign_id = "test_campaign"
+        catalog_dir = str(tmp_path / "catalog")
+        uncovered_clauses = []
+        verdict = "covered"
+        bypass_reason = None
+
+        # Create report
+        emit_claim_coverage_report(
+            db=None,
+            catalog_dir=catalog_dir,
+            campaign_id=campaign_id,
+            verdict=verdict,
+            uncovered_clauses=uncovered_clauses,
+            claim=claim,
+            bypass_reason=bypass_reason,
+        )
+
+        # Verify file exists at correct path
+        report_path = Path(catalog_dir) / "sidecars" / campaign_id / f"claim_coverage_{campaign_id}.json"
+        assert report_path.exists()
+
+        # Verify JSON structure
+        with open(report_path) as f:
+            data = json.load(f)
+        assert "coverage_fraction" in data
+        assert "covered_clauses" in data
+        assert "uncovered_clauses" in data
+        assert "verdict_blocked" in data
+        assert "bypass_reason" in data
+
+    def test_ac12_coverage_fraction_full(self, temp_claim_file, tmp_path):
+        """AC-12: coverage_fraction == 1.0 when all clauses covered."""
+        from bathos.campaigns import emit_claim_coverage_report
+
+        claim = parse_claim(temp_claim_file)
+        campaign_id = "test_campaign"
+        catalog_dir = str(tmp_path / "catalog")
+        uncovered_clauses = []  # No uncovered clauses
+
+        emit_claim_coverage_report(
+            db=None,
+            catalog_dir=catalog_dir,
+            campaign_id=campaign_id,
+            verdict="covered",
+            uncovered_clauses=uncovered_clauses,
+            claim=claim,
+            bypass_reason=None,
+        )
+
+        report_path = Path(catalog_dir) / "sidecars" / campaign_id / f"claim_coverage_{campaign_id}.json"
+        with open(report_path) as f:
+            data = json.load(f)
+
+        # With 1 clause and 0 uncovered, coverage should be 1.0
+        assert data["coverage_fraction"] == 1.0
+
+    def test_ac12_coverage_fraction_half(self, temp_claim_file, tmp_path):
+        """AC-12: coverage_fraction == 0.5 when 1 of 2 clauses uncovered."""
+        from bathos.campaigns import emit_claim_coverage_report
+
+        # Create claim with 2 clauses
+        claim_path = tmp_path / "test_2clause.claim.toml"
+        claim_path.write_text("""[claim]
+headline = "Test claim"
+kill_condition = "Outcome != expected"
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null"
+
+[[claim.discriminability]]
+hypothesis_a = "H_primary"
+hypothesis_b = "H_null"
+planned_run_label = "main"
+predicted_outcome = "pass"
+
+[claim.union_gate]
+[[claim.union_gate.clauses]]
+id = "C_main"
+description = "Main clause"
+hypothesis_ids = ["H_primary"]
+
+[[claim.union_gate.clauses]]
+id = "C_secondary"
+description = "Secondary clause"
+hypothesis_ids = ["H_null"]
+""")
+        claim = parse_claim(claim_path)
+        campaign_id = "test_campaign"
+        catalog_dir = str(tmp_path / "catalog")
+        uncovered_clauses = ["C_secondary"]  # 1 of 2 uncovered
+
+        emit_claim_coverage_report(
+            db=None,
+            catalog_dir=catalog_dir,
+            campaign_id=campaign_id,
+            verdict="confounded",
+            uncovered_clauses=uncovered_clauses,
+            claim=claim,
+            bypass_reason=None,
+        )
+
+        report_path = Path(catalog_dir) / "sidecars" / campaign_id / f"claim_coverage_{campaign_id}.json"
+        with open(report_path) as f:
+            data = json.load(f)
+
+        assert data["coverage_fraction"] == 0.5
+        assert len(data["uncovered_clauses"]) == 1
+        assert "C_secondary" in data["uncovered_clauses"]
+
+    def test_ac12_no_clauses_fraction_one(self, tmp_path):
+        """AC-12: coverage_fraction == 1.0 when claim has no union_gate clauses."""
+        from bathos.campaigns import emit_claim_coverage_report
+
+        # Create claim with no clauses
+        claim_path = tmp_path / "no_clauses.claim.toml"
+        claim_path.write_text("""[claim]
+headline = "Test claim"
+kill_condition = "Outcome != expected"
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null"
+
+[claim.union_gate]
+""")
+        claim = parse_claim(claim_path)
+        campaign_id = "test_campaign"
+        catalog_dir = str(tmp_path / "catalog")
+
+        emit_claim_coverage_report(
+            db=None,
+            catalog_dir=catalog_dir,
+            campaign_id=campaign_id,
+            verdict="covered",
+            uncovered_clauses=[],
+            claim=claim,
+            bypass_reason=None,
+        )
+
+        report_path = Path(catalog_dir) / "sidecars" / campaign_id / f"claim_coverage_{campaign_id}.json"
+        with open(report_path) as f:
+            data = json.load(f)
+
+        assert data["coverage_fraction"] == 1.0
+
+    def test_ac12_bypass_reason_in_report(self, temp_claim_file, tmp_path):
+        """AC-12: bypass_reason appears in JSON when provided."""
+        from bathos.campaigns import emit_claim_coverage_report
+
+        claim = parse_claim(temp_claim_file)
+        campaign_id = "test_campaign"
+        catalog_dir = str(tmp_path / "catalog")
+        bypass_reason = "force_verdict flag"
+
+        emit_claim_coverage_report(
+            db=None,
+            catalog_dir=catalog_dir,
+            campaign_id=campaign_id,
+            verdict="confounded",
+            uncovered_clauses=["C_main"],
+            claim=claim,
+            bypass_reason=bypass_reason,
+        )
+
+        report_path = Path(catalog_dir) / "sidecars" / campaign_id / f"claim_coverage_{campaign_id}.json"
+        with open(report_path) as f:
+            data = json.load(f)
+
+        assert data["bypass_reason"] == bypass_reason
+
+
+class TestBaselineParity:
+    """Tests for AC-13: [baseline_parity] sub-block validation."""
+
+    def test_ac13_parity_run_id_empty_warning(self, tmp_path, temp_db):
+        """AC-13: confound with empty parity_run_id → WARNING."""
+        claim_path = tmp_path / "test.claim.toml"
+        claim_path.write_text("""[claim]
+headline = "Test"
+kill_condition = "test"
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null"
+
+[[confounds]]
+id = "C_1"
+label = "Test confound"
+[confounds.reference_parity]
+parity_run_id = ""
+reference_metric = "metric1"
+reference_value = 100.0
+equivalence_bound = 5.0
+""")
+        claim = parse_claim(claim_path)
+        result = validate_claim(claim, db=None)
+
+        # Should have error/warning
+        assert not result.ok
+        assert any("baseline admissibility" in str(e.message).lower() for e in result.errors)
+
+    def test_ac13_metric_missing_is_error(self, tmp_path, temp_db):
+        """AC-13: parity_run_id set but metric key missing from metadata → ERROR."""
+        claim_path = tmp_path / "test.claim.toml"
+        claim_path.write_text("""[claim]
+headline = "Test"
+kill_condition = "test"
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null"
+
+[[confounds]]
+id = "C_1"
+label = "Test confound"
+[confounds.reference_parity]
+parity_run_id = "run_12345"
+reference_metric = "nonexistent_metric"
+reference_value = 100.0
+equivalence_bound = 5.0
+""")
+        claim = parse_claim(claim_path)
+
+        # Create a run in the DB without the parity_metric in metadata
+        temp_db.execute("""
+            CREATE TABLE IF NOT EXISTS runs (
+                id TEXT PRIMARY KEY,
+                metadata TEXT
+            )
+        """)
+        temp_db.execute(
+            "INSERT INTO runs (id, metadata) VALUES (?, ?)",
+            ["run_12345", json.dumps({"other_metric": 50.0})]
+        )
+        temp_db.commit()
+
+        result = validate_claim(claim, db=temp_db)
+
+        # Should have error for missing metric key
+        assert not result.ok
+        assert any("parity_metric key" in str(e.message) for e in result.errors)
+
+    def test_ac13_parity_run_not_compacted(self, tmp_path, temp_db):
+        """AC-13: parity_run_id set but run not in DB → WARNING."""
+        claim_path = tmp_path / "test.claim.toml"
+        claim_path.write_text("""[claim]
+headline = "Test"
+kill_condition = "test"
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null"
+
+[[confounds]]
+id = "C_1"
+label = "Test confound"
+[confounds.reference_parity]
+parity_run_id = "run_not_in_db"
+reference_metric = "metric1"
+reference_value = 100.0
+equivalence_bound = 5.0
+""")
+        claim = parse_claim(claim_path)
+
+        result = validate_claim(claim, db=temp_db)
+
+        # Should have error/warning about not being compacted
+        assert not result.ok
+        assert any("bth compact" in str(e.message) for e in result.errors)
+
+    def test_ac13_parity_pass(self, tmp_path, temp_db):
+        """AC-13: parity check passes when |result - ref| < bound."""
+        claim_path = tmp_path / "test.claim.toml"
+        claim_path.write_text("""[claim]
+headline = "Test"
+kill_condition = "test"
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null"
+
+[[confounds]]
+id = "C_1"
+label = "Test confound"
+[confounds.reference_parity]
+parity_run_id = "baseline_run"
+reference_metric = "metric1"
+reference_value = 100.0
+equivalence_bound = 10.0
+""")
+        claim = parse_claim(claim_path)
+
+        # Create baseline run with matching metric within bound
+        temp_db.execute("""
+            CREATE TABLE IF NOT EXISTS runs (
+                id TEXT PRIMARY KEY,
+                metadata TEXT
+            )
+        """)
+        temp_db.execute(
+            "INSERT INTO runs (id, metadata) VALUES (?, ?)",
+            ["baseline_run", json.dumps({"metric1": 102.0})]
+        )
+        temp_db.commit()
+
+        result = validate_claim(claim, db=temp_db)
+
+        # Should pass (have PASS in output) or be ok
+        assert any("PASS" in str(e.message) for e in result.errors) or result.ok
+
+    def test_ac13_parity_fail(self, tmp_path, temp_db):
+        """AC-13: parity check fails when |result - ref| >= bound → WARNING."""
+        claim_path = tmp_path / "test.claim.toml"
+        claim_path.write_text("""[claim]
+headline = "Test"
+kill_condition = "test"
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null"
+
+[[confounds]]
+id = "C_1"
+label = "Test confound"
+[confounds.reference_parity]
+parity_run_id = "baseline_run"
+reference_metric = "metric1"
+reference_value = 100.0
+equivalence_bound = 5.0
+""")
+        claim = parse_claim(claim_path)
+
+        # Create baseline run with metric outside bound
+        temp_db.execute("""
+            CREATE TABLE IF NOT EXISTS runs (
+                id TEXT PRIMARY KEY,
+                metadata TEXT
+            )
+        """)
+        temp_db.execute(
+            "INSERT INTO runs (id, metadata) VALUES (?, ?)",
+            ["baseline_run", json.dumps({"metric1": 110.0})]
+        )
+        temp_db.commit()
+
+        result = validate_claim(claim, db=temp_db)
+
+        # Should have error/warning about equivalence bound
+        assert not result.ok
+        assert any("equivalence bound" in str(e.message) for e in result.errors)
 
 
 if __name__ == "__main__":
