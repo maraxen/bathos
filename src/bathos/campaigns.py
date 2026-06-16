@@ -259,6 +259,19 @@ def conclude_campaign(
                 # AC-08: Warning-only for exploration
                 print(f"WARNING: Union Gate — unmapped clauses: {uncovered} (exploration mode, no downgrade)")
 
+        # AC-12: emit claim-coverage JSON sidecar after union gate
+        verdict_str = "covered" if not uncovered else "confounded"
+        bypass_reason = "force_verdict flag" if force_verdict else None
+        emit_claim_coverage_report(
+            db,
+            Path.home() / ".bth" / "catalog",
+            full_id,
+            verdict_str,
+            uncovered,
+            claim,
+            bypass_reason=bypass_reason,
+        )
+
     # Final update
     concluded_at = datetime.now(UTC).isoformat()
     db.execute(
