@@ -23,6 +23,7 @@
 - [260602_item-760-threshold-lint](specs/260602_item-760-threshold-lint.md) — Implementation spec: backlog item #760 threshold epistemic hygiene — OutcomeSpec.source field, Sidecar.regression_threshold_basis field, check_threshold_basis Tier-2 linter, 9 test cases
 - [260602_item-137-global-instruction-portability](specs/260602_item-137-global-instruction-portability.md) — Design doc: backlog item #137 global instruction portability — explores multi-surface snippet export, rules vs. skill distinction, scope semantics, manifest awareness, and composition model; identifies 10 open questions before implementation
 - [260602_item-792-popper-evalue](specs/260602_item-792-popper-evalue.md) — Implementable spec: POPPER e-value multi-run campaign primitive — mode="sequential", [popper] sidecar block, likelihood-ratio e-values, per-script E_n products, threshold lock, premature_stopping_rate sprint-audit signal; 10 fixer tasks
+- [260616_bathos-claim-tier-rigor-open-design-call](specs/260616_bathos-claim-tier-rigor-open-design-call.md) — Claim-tier pre-registration and enforcement: discriminability matrix, union gate, claim placement, sidecar fields, baseline parity
 
 ## Audits
 
