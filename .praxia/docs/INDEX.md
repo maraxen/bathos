@@ -10,6 +10,7 @@
 - [260611_worktree-workspace-resolution-dag](plans/260611_worktree-workspace-resolution-dag.md) — backlog DAG (T1→T3/T3b→T4) for worktree-aware workspace resolution; praxia backlog #1676–#1684
 
 ## Handoffs
+- [260616_worktree-prune-backlog-assess](handoffs/260616_worktree-prune-backlog-assess.md) — repo consolidated to single main worktree; bathos backlog drained (only #1774 P3 remains)
 
 ## Specs
 - [260611_worktree-workspace-resolution](specs/260611_worktree-workspace-resolution.md) — `resolve_workspace()` seam so `bth` resolves live-worktree fs_root while keeping catalog identity stable; post adversarial review (challenger/defender); implemented
