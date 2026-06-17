@@ -12,7 +12,7 @@ bathos is a standalone experiment tracking CLI for a single researcher across 10
 
 ## Current Status (as of 2026-06-16)
 
-**Latest: v0.11.0 — 806 tests passing (4 skipped).**
+**Latest: v0.11.0 — 825 tests passing (4 skipped).**
 
 Full version history is in [`CHANGELOG.md`](CHANGELOG.md). Summary of current version:
 
