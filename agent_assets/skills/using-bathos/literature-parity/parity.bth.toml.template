@@ -1,0 +1,67 @@
+# parity.bth.toml — Pre-registration for literature-parity validation workflows
+#
+# Copy this template alongside your validation script and fill in the fields below.
+# This sidecar declares the paper you are validating against, the implementation paths,
+# and the configuration parameters for the 5-phase validation protocol.
+#
+# See also: agent_assets/skills/using-bathos/literature-parity/ for phase templates.
+
+[parity]
+
+# REQUIRED FIELDS
+
+# Source of truth: the paper PDF (path relative to project root or absolute)
+paper_pdf = "path/to/paper.pdf"
+
+# Your implementation file(s) to validate (list of paths relative to project root)
+impl_paths = [
+  "src/myproject/method.py",
+  "src/myproject/baseline.py"
+]
+
+# OPTIONAL FIELDS (with sensible defaults)
+
+# Optional: if the paper published reference code, path to it (or null if text-only)
+reference_code = null
+# reference_code = "path/to/reference_implementation.py"
+
+# Optional: clarification for humans reading the parity report
+# e.g., "arXiv:1234.5678 describes the method in §3.2–3.4"
+citation_note = ""
+
+# Optional: lenses for Phase 1 blind reconstruction
+# Default: ["mathematical_formulation", "algorithmic_detail", "experimental_protocol"]
+recon_lenses = [
+  "mathematical_formulation",
+  "algorithmic_detail",
+  "experimental_protocol"
+]
+
+# Optional: attack lenses for Phase 3 adversarial refutation
+# Default: ["statistical_correctness", "hyperparameter_fidelity", "algorithmic_structure"]
+attack_lenses = [
+  "statistical_correctness",
+  "hyperparameter_fidelity",
+  "algorithmic_structure"
+]
+
+# Optional: your upfront hypotheses about what could go wrong
+# These are proposed to the refutation agents as high-confidence targets.
+# Example: if you suspect metric readout is incorrect, list it here.
+hypotheses = [
+  "core mechanism (coevolution reshuffle) is implemented faithfully",
+  "metric readout captures the intended signal",
+  "hyperparameters match the paper specifications"
+]
+
+# Optional: tolerance for numeric equivalence
+# Used if reproducibility depends on matching numeric values within a tolerance.
+# Default: 0.05 (5%)
+equivalence_bound = 0.05
+
+# Optional: redundancy parameters (Zeinaty 2026 case used 3+3)
+# N = number of independent Phase 1 reconstructors
+# M = number of independent Phase 3 refutation attackers
+# Default: both 3
+N = 3
+M = 3
