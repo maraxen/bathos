@@ -424,7 +424,7 @@ class TestAC20_SHADriftDetection:
         #
         # For now, this serves as a marker that AC-20 is documented and ready
         # for implementation when output_paths and SHA verification are added.
-        pass
+        pytest.skip("AC-20 deferred to T8 — SHA-drift detection is a separate feature, not shipped in the B1 remediation")
 
 
 class TestStep5_ValidateClaimGradedPath:
