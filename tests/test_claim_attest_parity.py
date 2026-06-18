@@ -367,15 +367,123 @@ class TestAtomicity:
         self, temp_db, tmp_path, temp_claim_file_with_parity
     ):
         """
-        AC-21: if attest_parity fails, the file and DB SHA remain synchronized.
-        This test verifies atomicity by checking that after a successful attest_parity,
-        check_sha does NOT raise (proving file-DB consistency).
+        AC-21 (Real Failure Injection): attest_parity rolls back the file on DB-update failure,
+        ensuring file SHA == DB SHA (never diverged).
 
-        The atomic guarantee is that either:
-        1. Both file and DB are updated successfully, OR
-        2. Both remain unchanged (if failure occurs before/during rename)
+        This test injects a RuntimeError during the DB UPDATE to simulate a crash after os.replace.
+        It verifies:
+        1. attest_parity raises (propagates the DB error)
+        2. On-disk file is rolled back to original content
+        3. File SHA == original DB SHA (no divergence)
+        4. check_sha does NOT raise after rollback (proving consistency)
+        """
+        from unittest.mock import patch, MagicMock
+        import bathos.claim
 
-        This proves no divergence state where file SHA != DB SHA.
+        campaign_id = "test_campaign"
+        campaign_name = "test_campaign"
+
+        # Create campaign
+        temp_db.execute(
+            "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at, claim_path) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [campaign_id, "test", campaign_name, "confirmation", "open",
+             datetime.now(UTC).isoformat(), str(Path("test_parity.claim.toml"))]
+        )
+
+        # Create a valid PARITY run
+        parity_run_id = "run_parity_001"
+        parity_metadata = json.dumps({
+            "metric_key": 1.0,
+            "parity_run_type": "literature_parity"
+        })
+        temp_db.execute(
+            "INSERT INTO runs (id, campaign_id, outcome, metadata) VALUES (?, ?, ?, ?)",
+            [parity_run_id, campaign_id, "pass", parity_metadata]
+        )
+
+        # Register the initial claim
+        from bathos.claim import register_claim
+        register_claim(
+            Path("test_parity.claim.toml"),
+            campaign_id,
+            temp_db,
+            tmp_path,
+            force=False
+        )
+
+        temp_db.commit()
+
+        # Get initial state: file content and DB SHA
+        original_file_content = (tmp_path / "test_parity.claim.toml").read_bytes()
+        original_file_sha = __import__("hashlib").sha256(original_file_content).hexdigest()
+
+        initial_row = temp_db.execute(
+            "SELECT claim_sha256 FROM campaigns WHERE id = ?", [campaign_id]
+        ).fetchone()
+        initial_db_sha = initial_row[0]
+
+        assert original_file_sha == initial_db_sha, \
+            "Initial file and DB SHAs should match"
+
+        # Create a wrapper DB that injects failure
+        class FailingDB:
+            def __init__(self, real_db):
+                self._db = real_db
+                self.fail_on_update = True
+
+            def execute(self, query, params=None):
+                # Fail only on the UPDATE campaigns SET claim_sha256 call
+                if self.fail_on_update and "UPDATE campaigns SET claim_sha256" in query:
+                    raise RuntimeError("Simulated DB update failure (crash during attest_parity)")
+                return self._db.execute(query, params)
+
+            def __getattr__(self, name):
+                return getattr(self._db, name)
+
+        failing_db = FailingDB(temp_db)
+
+        # Attempt attest_parity with injected failure
+        with pytest.raises(RuntimeError, match="Simulated DB update failure"):
+            attest_parity(
+                campaign_id=campaign_id,
+                parity_run_id=parity_run_id,
+                db=failing_db,
+                workspace_root=tmp_path
+            )
+
+        # VERIFY ROLLBACK: file should be rolled back to original content
+        file_content_after_failure = (tmp_path / "test_parity.claim.toml").read_bytes()
+        file_sha_after_failure = __import__("hashlib").sha256(file_content_after_failure).hexdigest()
+
+        assert file_content_after_failure == original_file_content, \
+            "File should be rolled back to original content after DB failure"
+        assert file_sha_after_failure == original_file_sha, \
+            "File SHA should match original SHA after rollback"
+
+        # VERIFY NO DIVERGENCE: file SHA == DB SHA (DB was never updated due to error)
+        db_row = temp_db.execute(
+            "SELECT claim_sha256 FROM campaigns WHERE id = ?", [campaign_id]
+        ).fetchone()
+        db_sha_after_failure = db_row[0]
+
+        assert file_sha_after_failure == db_sha_after_failure, \
+            f"After rollback, file SHA ({file_sha_after_failure}) should match DB SHA ({db_sha_after_failure}) — no divergence"
+
+        # VERIFY check_sha does NOT raise (proving consistency is maintained)
+        check_sha(
+            path_relative="test_parity.claim.toml",
+            registered_sha=db_sha_after_failure,
+            workspace_root=tmp_path
+        )
+
+    def test_ac21_attest_parity_recovery_by_rerun(
+        self, temp_db, tmp_path, temp_claim_file_with_parity
+    ):
+        """
+        AC-21 (Recovery): After a crashed attest_parity with rollback, re-running
+        attest_parity (without the injected failure) succeeds and binds the run,
+        proving the crash is recoverable.
         """
         campaign_id = "test_campaign"
         campaign_name = "test_campaign"
@@ -411,44 +519,63 @@ class TestAtomicity:
 
         temp_db.commit()
 
-        # Get initial SHA and file content
-        initial_row = temp_db.execute(
-            "SELECT claim_sha256 FROM campaigns WHERE id = ?", [campaign_id]
-        ).fetchone()
-        initial_sha = initial_row[0]
+        # Create a wrapper DB that injects failure on first call, then succeeds
+        class FailingDBOnce:
+            def __init__(self, real_db):
+                self._db = real_db
+                self.fail_once = True
 
-        # Successfully attest (no failure)
+            def execute(self, query, params=None):
+                # Fail only on the first UPDATE campaigns SET claim_sha256 call
+                if self.fail_once and "UPDATE campaigns SET claim_sha256" in query:
+                    self.fail_once = False  # Disable for next call
+                    raise RuntimeError("Simulated DB update failure")
+                return self._db.execute(query, params)
+
+            def __getattr__(self, name):
+                return getattr(self._db, name)
+
+        failing_db = FailingDBOnce(temp_db)
+
+        # First attempt: inject failure
+        with pytest.raises(RuntimeError, match="Simulated DB update failure"):
+            attest_parity(
+                campaign_id=campaign_id,
+                parity_run_id=parity_run_id,
+                db=failing_db,
+                workspace_root=tmp_path
+            )
+
+        # RECOVERY: Re-run attest_parity without injected failure — should succeed
         attest_parity(
             campaign_id=campaign_id,
             parity_run_id=parity_run_id,
-            db=temp_db,
+            db=failing_db,
             workspace_root=tmp_path
         )
 
-        # Verify file and DB are in sync after attest_parity
-        file_content = (tmp_path / "test_parity.claim.toml").read_text()
-        file_sha = __import__("hashlib").sha256(file_content.encode()).hexdigest()
+        # Verify the binding succeeded
+        claim = parse_claim(tmp_path / "test_parity.claim.toml")
+        ref_parity = claim.confounds[0].get("reference_parity", {})
+        assert ref_parity.get("parity_run_id") == parity_run_id, \
+            "After recovery, parity_run_id should be bound in the claim"
 
-        # Re-fetch the DB SHA
+        # Verify file and DB are in sync
+        file_sha = claim.sha256
         db_row = temp_db.execute(
             "SELECT claim_sha256 FROM campaigns WHERE id = ?", [campaign_id]
         ).fetchone()
         db_sha = db_row[0]
 
-        # File and DB should be in sync
         assert file_sha == db_sha, \
-            f"After attest_parity, file SHA ({file_sha}) should match DB SHA ({db_sha})"
+            "After recovery, file and DB SHAs should be synchronized"
 
-        # check_sha should NOT raise, proving no divergence
+        # check_sha should NOT raise
         check_sha(
             path_relative="test_parity.claim.toml",
             registered_sha=db_sha,
             workspace_root=tmp_path
         )
-
-        # Verify SHA changed (indicating mutation occurred)
-        assert file_sha != initial_sha, \
-            "File SHA should have changed after binding parity_run_id"
 
 
 class TestParityConfoundCheck:

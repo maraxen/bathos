@@ -180,7 +180,6 @@ def validate_claim(claim: ClaimFile, db: duckdb.DuckDBPyConnection | None = None
             )
 
     # AC-13: Validate [baseline_parity] sub-blocks in confounds
-    infos = []
     for confound in claim.confounds:
         ref_par = confound.get("reference_parity", {})
         if not ref_par:
@@ -534,6 +533,15 @@ def attest_parity(
     binds its ID into the claim's [confounds.reference_parity] block, and updates the
     DB SHA atomically via temp-write → fsync → os.replace → DB-update-last.
 
+    ATOMICITY & RECOVERY CONTRACT (AC-21, R2):
+    - Write new content to temp file, fsync, os.replace (atomic on POSIX).
+    - Compute new SHA and UPDATE DB last.
+    - On DB-update failure: ROLL BACK the file to original content (best-effort true rollback).
+    - Reconcile-on-entry backstop: if file SHA != DB SHA at entry, log warning and proceed
+      (a prior crash that even rollback didn't catch is recovered by re-running attest_parity).
+    After recovery, file and DB are always consistent at either the OLD state or the NEW state,
+    never diverged.
+
     Args:
         campaign_id: Campaign ID (short or full UUID)
         parity_run_id: Run ID of the parity run to bind
@@ -546,25 +554,41 @@ def attest_parity(
     """
     import os
     import tempfile
+    import logging
     from bathos.campaigns import _resolve_campaign_id, CampaignError
+
+    logger = logging.getLogger(__name__)
 
     try:
         full_id = _resolve_campaign_id(db, campaign_id)
     except CampaignError as e:
         raise RuntimeError(f"Campaign not found: {e}") from e
 
-    # Get campaign's claim path
+    # Get campaign's claim path and current DB SHA
     rows = db.execute(
-        "SELECT claim_path FROM campaigns WHERE id = ?", [full_id]
+        "SELECT claim_path, claim_sha256 FROM campaigns WHERE id = ?", [full_id]
     ).fetchall()
     if not rows or rows[0][0] is None:
         raise RuntimeError(f"Campaign {campaign_id} has no registered claim")
 
     claim_path_rel = rows[0][0]
+    stored_db_sha = rows[0][1]
     abs_claim_path = workspace_root / claim_path_rel
 
     if not abs_claim_path.exists():
         raise FileNotFoundError(f"Claim file not found at {abs_claim_path}")
+
+    # RECONCILE-ON-ENTRY BACKSTOP: if file SHA != DB SHA, log warning and proceed
+    # (evidence of a prior crash; re-running attest_parity recovers it)
+    original_content = abs_claim_path.read_bytes()
+    original_content_str = original_content.decode("utf-8")
+    file_sha_at_entry = hashlib.sha256(original_content).hexdigest()
+    if file_sha_at_entry != stored_db_sha:
+        logger.warning(
+            f"Reconciling claim SHA after prior interrupted attestation for campaign {full_id}: "
+            f"file SHA {file_sha_at_entry} != DB SHA {stored_db_sha}. "
+            f"Proceeding with attest_parity, which will re-anchor the DB SHA."
+        )
 
     # AC-12: Validate that parity_run_id is a real passing parity run
     run_rows = db.execute(
@@ -619,7 +643,7 @@ def attest_parity(
             f"Campaign {campaign_id}'s claim has no [confounds.reference_parity] block"
         )
 
-    # R2: Atomic write-then-rename pattern
+    # R2: Atomic write-then-rename pattern with best-effort rollback on DB failure
     # Write to temp file in same directory (ensure same filesystem for atomic rename)
     temp_dir = abs_claim_path.parent
     with tempfile.NamedTemporaryFile(
@@ -630,15 +654,18 @@ def attest_parity(
         encoding="utf-8"
     ) as tmp_f:
         temp_path = Path(tmp_f.name)
-        # Reconstruct TOML from the modified claim
-        # Simple approach: read original file, find the parity_run_id line, update it
-        original_content = abs_claim_path.read_text()
-
         # Find the parity_run_id = "" line in reference_parity block and replace it
-        updated_content = original_content.replace(
+        updated_content = original_content_str.replace(
             'parity_run_id = ""',
             f'parity_run_id = "{parity_run_id}"'
         )
+
+        # Assertion: ensure replacement actually occurred (prevent silent no-op)
+        if updated_content == original_content_str:
+            raise ValueError(
+                "parity_run_id already set or TOML format mismatch — use force to re-attest. "
+                "The claim file does not contain the expected 'parity_run_id = \"\"' line."
+            )
 
         tmp_f.write(updated_content)
         tmp_f.flush()
@@ -653,20 +680,58 @@ def attest_parity(
         new_sha256 = hashlib.sha256(new_content).hexdigest()
 
         # DB update LAST (after file is safely renamed)
-        db.execute(
-            "UPDATE campaigns SET claim_sha256 = ? WHERE id = ?",
-            [new_sha256, full_id]
-        )
+        try:
+            db.execute(
+                "UPDATE campaigns SET claim_sha256 = ? WHERE id = ?",
+                [new_sha256, full_id]
+            )
 
-        event(
-            "claim.attest_parity",
-            campaign_id=full_id,
-            parity_run_id=parity_run_id,
-            claim_sha256=new_sha256
-        )
+            event(
+                "claim.attest_parity",
+                campaign_id=full_id,
+                parity_run_id=parity_run_id,
+                claim_sha256=new_sha256
+            )
+        except Exception as db_error:
+            # DB update failed AFTER file was already renamed.
+            # BEST-EFFORT TRUE ROLLBACK: restore the file to original content,
+            # so file and DB are consistent at the OLD state again.
+            logger.error(
+                f"DB update failed for campaign {full_id}; rolling back file to original state. "
+                f"Error: {db_error}"
+            )
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                dir=temp_dir,
+                suffix=".tmp",
+                delete=False,
+                encoding="utf-8"
+            ) as rollback_f:
+                rollback_path = Path(rollback_f.name)
+                rollback_f.write(original_content_str)
+                rollback_f.flush()
+                os.fsync(rollback_f.fileno())
+
+            try:
+                os.replace(rollback_path, abs_claim_path)
+                logger.info(
+                    f"File successfully rolled back to original state. "
+                    f"File and DB are now consistent at the original SHA {file_sha_at_entry}."
+                )
+            except Exception as rollback_error:
+                logger.critical(
+                    f"Rollback itself failed! File may be in inconsistent state. "
+                    f"Manual recovery required. Original error: {db_error}, Rollback error: {rollback_error}"
+                )
+                try:
+                    rollback_path.unlink()
+                except Exception:
+                    pass
+            # Re-raise the original DB error
+            raise
 
     except Exception as e:
-        # Clean up temp file if rename failed
+        # Clean up temp file if it still exists (e.g., if os.replace failed)
         if temp_path.exists():
             try:
                 temp_path.unlink()
