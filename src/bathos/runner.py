@@ -436,6 +436,17 @@ def run_script(
     else:
         adversarial_check_status = "missing"
 
+    # Step 4: Extract parity_run_type from doubly-nested metadata (AC-19)
+    # parity_validate.py emits result["metadata"]["parity_run_type"] = "literature_parity"
+    # We extract it to the Run column for gates (F2, F3) to query
+    parity_run_type = None
+    try:
+        meta = json.loads(metadata) if metadata else {}
+        parity_run_type = (meta or {}).get("metadata", {}).get("parity_run_type")
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        # If metadata is invalid/empty JSON, parity_run_type stays None
+        pass
+
     run = dataclasses.replace(
         run,
         duration_s=time.monotonic() - start,
@@ -447,6 +458,7 @@ def run_script(
         outcome_is_residual=outcome_is_residual,
         adversarial_check_status=adversarial_check_status,
         output_paths=output_paths,
+        parity_run_type=parity_run_type,
     )
 
     # Record parquet write with telemetry

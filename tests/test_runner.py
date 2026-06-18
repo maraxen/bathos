@@ -673,3 +673,72 @@ def test_explicit_out_and_output_dir_merged(tmp_catalog: Path, tmp_path: Path):
     assert "explicit.json" in names
     assert "auto.txt" in names
     assert len(registered) == len(set(registered))  # no duplicates
+
+
+def test_parity_run_type_extracted_from_doubly_nested_metadata(tmp_catalog: Path, tmp_path: Path):
+    """Step 4 (AC-19 integration): runner.py extracts parity_run_type from metadata and sets Run column.
+    
+    parity_validate.py emits metadata.parity_run_type doubly-nested (result["metadata"]["parity_run_type"]).
+    runner.py should extract this and set Run.parity_run_type for the gates (F2, F3) to query.
+    """
+    import json
+    import textwrap
+
+    # Create script that emits metadata.parity_run_type (doubly-nested per AC-19)
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    script = enforced / "check_parity.py"
+    script.write_text(textwrap.dedent("""
+        import os
+        import json
+
+        results_path = os.environ.get("BTH_RESULTS_PATH")
+        if results_path:
+            # Emit with doubly-nested metadata structure
+            result = {
+                "grade": "PARITY",
+                "metric": 99,
+                "metadata": {
+                    "parity_run_type": "literature_parity",
+                },
+            }
+            with open(results_path, "w") as f:
+                json.dump(result, f)
+    """))
+
+    sidecar = enforced / "check_parity.bth.toml"
+    sidecar.write_text(textwrap.dedent("""
+        [experiment]
+        hypothesis = "Verify parity_run_type extraction"
+        [outcomes.pass]
+        condition = "metric > 50"
+        decision = "good"
+        reasoning = "high metric"
+        [outcomes.fail]
+        condition = "metric <= 50"
+        decision = "bad"
+        reasoning = "low metric"
+        is_residual = true
+        [result_schema]
+        grade = "str"
+        metric = "int"
+    """))
+
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 0
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+
+    # Core assertion: parity_run_type must be extracted and set
+    run = runs[0]
+    assert run.parity_run_type == "literature_parity", (
+        f"Expected Run.parity_run_type='literature_parity', got {run.parity_run_type!r}. "
+        "Runner.py must extract using: (json.loads(metadata) or {}).get('metadata', {}).get('parity_run_type')"
+    )
