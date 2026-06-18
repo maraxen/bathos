@@ -201,8 +201,12 @@ def validate_claim(claim: ClaimFile, db: duckdb.DuckDBPyConnection | None = None
 
         # State 2: parity_run_id set AND db is not None
         if db is not None:
+            # F-1 graded-parity-run check: query BOTH metadata (for numeric metric, legacy path)
+            # AND parity_run_type column (for graded path). The column is authoritative for
+            # literature_parity runs; the legacy equivalence-bound path is retained for confounds
+            # that use reference_metric/equivalence_bound without a parity run type.
             row = db.execute(
-                "SELECT metadata FROM runs WHERE id=? OR id LIKE ?",
+                "SELECT outcome, parity_run_type FROM runs WHERE id=? OR id LIKE ?",
                 [parity_run_id, parity_run_id + "%"]
             ).fetchone()
 
@@ -214,40 +218,74 @@ def validate_claim(claim: ClaimFile, db: duckdb.DuckDBPyConnection | None = None
                     )
                 )
             else:
-                # Row found, check metadata
-                try:
-                    meta = json.loads(row[0] or "{}")
-                except json.JSONDecodeError as e:
-                    errors.append(
-                        ValidationError(f"failed to parse run metadata for parity check: {e}")
-                    )
-                    continue
+                run_outcome, run_parity_type = row
 
-                # State 2b: metric missing from metadata (HARD ERROR, not swallowed by exception)
-                if reference_metric not in meta:
+                # GRADED PATH (F-1): if the run is a literature_parity run, use graded verdict
+                # (controlled/controlled-by-protocol/uncontrolled). This fires beside the legacy path.
+                if run_parity_type == "literature_parity":
+                    if run_outcome in ("pass", "partial"):
+                        status = "controlled" if run_outcome == "pass" else "controlled-by-protocol"
+                        infos.append(
+                            f"reference_parity {status} for '{confound_label}' "
+                            f"(parity_run_type='literature_parity', outcome='{run_outcome}')"
+                        )
+                    else:
+                        errors.append(
+                            ValidationError(
+                                f"parity run '{parity_run_id}' is a literature_parity run but outcome='{run_outcome}' "
+                                f"— not controlled for '{confound_label}'"
+                            )
+                        )
+                    continue  # graded path handled; skip legacy equivalence-bound path
+
+                # LEGACY PATH: numeric reference_metric / equivalence_bound check.
+                # Only fires when parity_run_type != 'literature_parity' (non-parity or NULL).
+                # Requires metadata JSON for numeric comparison.
+                meta_row = db.execute(
+                    "SELECT metadata FROM runs WHERE id=? OR id LIKE ?",
+                    [parity_run_id, parity_run_id + "%"]
+                ).fetchone()
+
+                if meta_row is None:
                     errors.append(
                         ValidationError(
-                            f"parity_metric key '{reference_metric}' not found in baseline run metadata — check field name"
+                            f"parity run '{parity_run_id}' not compacted — run `bth compact` to enable baseline parity check"
                         )
                     )
                 else:
-                    # Metric found, check equivalence bound
                     try:
-                        result_val = float(meta[reference_metric])
-                        if abs(result_val - reference_value) < equivalence_bound:
-                            infos.append(
-                                f"baseline parity PASS for '{confound_label}' (|{result_val:.4f} - {reference_value}| < {equivalence_bound})"
-                            )
-                        else:
-                            errors.append(
-                                ValidationError(
-                                    f"parity run '{parity_run_id}' does not satisfy equivalence bound for '{confound_label}'"
-                                )
-                            )
-                    except (ValueError, TypeError) as e:
+                        meta = json.loads(meta_row[0] or "{}")
+                    except json.JSONDecodeError as e:
                         errors.append(
-                            ValidationError(f"failed to compare parity metric: {e}")
+                            ValidationError(f"failed to parse run metadata for parity check: {e}")
                         )
+                        continue
+
+                    # State 2b: metric missing from metadata (HARD ERROR, not swallowed by exception)
+                    if reference_metric not in meta:
+                        errors.append(
+                            ValidationError(
+                                f"parity_metric key '{reference_metric}' not found in baseline run metadata — check field name"
+                            )
+                        )
+                    else:
+                        # Metric found, check equivalence bound
+                        try:
+                            result_val = float(meta[reference_metric])
+                            if abs(result_val - reference_value) < equivalence_bound:
+                                infos.append(
+                                    f"baseline parity PASS for '{confound_label}' (|{result_val:.4f} - {reference_value}| < {equivalence_bound})"
+                                )
+                            else:
+                                errors.append(
+                                    ValidationError(
+                                        f"parity run '{parity_run_id}' does not satisfy equivalence bound for '{confound_label}'"
+                                    )
+                                )
+                        except (ValueError, TypeError) as e:
+                            errors.append(
+                                ValidationError(f"failed to compare parity metric: {e}")
+                            )
         else:
             # State 3: parity_run_id set, db is None
             infos.append(f"skipping baseline parity check for '{confound_label}' — no catalog connection")
@@ -787,11 +825,9 @@ def parity_confound_check(
                 confound_info["status"] = "uncontrolled"
             else:
                 outcome, metadata_json, parity_run_type_col = run_rows[0]
-                try:
-                    meta = json.loads(metadata_json or "{}")
-                    parity_type = meta.get("parity_run_type", "")
-                except json.JSONDecodeError:
-                    parity_type = ""
+                # Use the parity_run_type COLUMN as authoritative — it survives cool→warm
+                # compaction. The metadata JSON path is unreliable (NULL after compact).
+                parity_type = parity_run_type_col or ""
 
                 # Infer status from outcome and parity_type
                 if parity_type == "literature_parity":

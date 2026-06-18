@@ -256,10 +256,13 @@ def check_parity_confounds_for_submit(sidecar, catalog_dir: Path) -> dict:
     if db_path.exists():
         try:
             with duckdb.connect(str(db_path), read_only=True) as conn:
-                # Query for a passing parity run matching the stem, with parity_run_type='literature_parity'
+                # Query for a passing parity run matching the stem.
+                # Use the parity_run_type COLUMN (not json_extract on metadata —
+                # metadata JSON is NULL after cool→warm compaction, making the old
+                # json_extract path always fail on compacted runs).
                 rows = conn.execute(
                     "SELECT 1 FROM runs WHERE command LIKE ? AND outcome = 'pass' AND "
-                    "json_extract(metadata, '$.parity_run_type') = 'literature_parity' LIMIT 1",
+                    "parity_run_type = 'literature_parity' LIMIT 1",
                     [f"%{requires_parity_stem}%"]
                 ).fetchall()
                 if rows:
@@ -273,39 +276,48 @@ def check_parity_confounds_for_submit(sidecar, catalog_dir: Path) -> dict:
         except Exception as e:
             logger.warning(f"Warm tier parity prerequisite check failed: {e}")
 
-    # Cool-tier fallback: scan Parquet files (only if warm DB not available)
+    # Cool-tier fallback: scan Parquet files (only if warm DB not available).
+    # AC-22 restructure: track fragments_read_ok to distinguish:
+    #   - "no readable fragments" (unsearchable → fail open, satisfied=None)
+    #   - "scanned clean, no match" (determinable → satisfied=False)
+    # The old inner except…continue could not make this distinction.
+    fragments_read_ok = 0
     try:
         runs_dir = catalog_dir / "runs"
         if runs_dir.exists():
             for parquet_file in sorted(runs_dir.glob("**/*.parquet")):
                 try:
+                    # Read parity_run_type as a first-class column (v9 schema).
+                    # The metadata column does NOT exist in cool-tier fragments —
+                    # attempting to read it raises on every real fragment (which was
+                    # the spurious hard-block bug the AC-22 restructure fixes).
                     table = pq.read_table(
                         str(parquet_file),
-                        columns=["command", "outcome", "metadata"]
+                        columns=["command", "outcome", "parity_run_type"]
                     )
+                    fragments_read_ok += 1
                     cmds = table.column("command").to_pylist()
                     outcomes = table.column("outcome").to_pylist()
-                    metadatas = table.column("metadata").to_pylist()
+                    parity_types = table.column("parity_run_type").to_pylist()
 
-                    for cmd, outcome, metadata_json in zip(cmds, outcomes, metadatas):
-                        if outcome == "pass" and cmd and requires_parity_stem in cmd:
-                            # Parse metadata JSON and check parity_run_type
-                            try:
-                                metadata = json.loads(metadata_json) if metadata_json else {}
-                                if metadata.get("parity_run_type") == "literature_parity":
-                                    return {"satisfied": True, "tier_enforced": False}
-                            except (json.JSONDecodeError, TypeError):
-                                pass
+                    for cmd, outcome, parity_type in zip(cmds, outcomes, parity_types):
+                        if (outcome == "pass"
+                                and cmd
+                                and requires_parity_stem in cmd
+                                and parity_type == "literature_parity"):
+                            return {"satisfied": True, "tier_enforced": False}
                 except Exception as e:
                     logger.warning(f"Failed to read {parquet_file}: {e}")
                     continue
-            # Cool tier exists but no match found -> prerequisite unmet, determinable
-            return {
-                "satisfied": False,
-                "tier_enforced": is_validation_or_production
-            }
     except Exception as e:
         logger.warning(f"Cool tier parity prerequisite check failed: {e}")
 
-    # Both warm and cool tiers unavailable/unsearchable (AC-22) -> fail open
-    return {"satisfied": None, "tier_enforced": False}
+    # AC-22: if no fragment could be read → unsearchable → fail open (advisory, never hard-block)
+    if fragments_read_ok == 0:
+        return {"satisfied": None, "tier_enforced": False}
+
+    # ≥1 fragment read OK with no match → determinable, prerequisite unmet
+    return {
+        "satisfied": False,
+        "tier_enforced": is_validation_or_production
+    }
