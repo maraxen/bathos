@@ -148,7 +148,7 @@ def test_compact_upgrades_v0_fragments(tmp_catalog: Path, sample_run: Run):
     result = compact(tmp_catalog)
     assert result.ingested == 1
 
-    # Verify in DuckDB: should have schema_version="8" (migrated through v0→v1→v2→v3→v4→v5→v6→v7→v8)
+    # Verify in DuckDB: should have schema_version="9" (migrated through v0→v1→v2→v3→v4→v5→v6→v7→v8→v9)
     con = duckdb.connect(str(tmp_catalog / "bathos.db"))
     rows = con.execute("SELECT schema_version FROM runs").fetchall()
     assert rows[0][0] == "9"
@@ -249,7 +249,7 @@ def test_compact_migrates_v1_to_v4(sample_run: Run):
     # Apply migrations
     result = _apply_migrations(v1_run)
 
-    # Verify upgraded to v8 with hostname
+    # Verify upgraded to v9 with hostname
     assert result.schema_version == "9"
     assert result.hostname == ""
 
@@ -264,7 +264,7 @@ def test_compact_v0_chain_to_v4(sample_run: Run):
     # Apply migrations (should walk 0→1→2→3→4→5→6)
     result = _apply_migrations(v0_run)
 
-    # Verify final state is v8
+    # Verify final state is v9
     assert result.schema_version == "9"
     assert result.hostname == ""
 
