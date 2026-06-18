@@ -566,6 +566,156 @@ bth export --html --out ~/reports/latest.html
 # Then mrx check reads it during freshness sweeps; mrx context ingests run records independently
 ```
 
+## Claim-Tier Pre-Registration (confirmatory campaigns)
+
+The sidecar pre-registers a single *run*. A **claim** pre-registers the *campaign* — the headline a set of
+runs is meant to establish, what would falsify it, and which runs discriminate which hypotheses. It exists to
+prevent the failure where several narrow gates each pass but their union does not establish the headline.
+Use it for `confirmation` / `sequential` campaigns; `exploration` campaigns are exempt.
+
+**The discipline is: author and *register* the claim before the confirmatory runs.** The Union Gate at
+`bth campaign conclude` only fires when a claim is registered — an unregistered claim provides no enforcement
+at all (`bth sprint-audit` Signal 12 flags exactly this).
+
+### Workflow
+
+```bash
+# 1. Scaffold a claim template (pulls hypotheses / outcome labels from the catalog)
+bth claim scaffold <campaign-id>
+#    -> writes .bth/claims/<campaign-name>.claim.toml + per-run sidecar snippets
+
+# 2. Author it (headline, kill_condition, hypotheses, confounds, discriminability, clauses), then validate
+bth claim validate .bth/claims/<campaign-name>.claim.toml
+
+# 3. Register BEFORE any confirmatory run — records claim_path + claim_sha256 (the tamper anchor)
+bth claim register .bth/claims/<campaign-name>.claim.toml --campaign <campaign-id>
+#    amending a registered claim and re-registering requires --force (writes an audit event)
+
+# 4. Run the campaign; each confirmatory sidecar declares which hypotheses it discriminates / isolates
+#    (see "Signal discrimination and probe design" below for how to design those runs)
+
+# 5. Conclude — the Union Gate checks clause coverage
+bth campaign conclude <campaign-id> --outcome pass
+```
+
+`bth claim scaffold` and `bth claim validate` are also exposed as MCP tools (`claim_scaffold`, `claim_validate`).
+
+### `claim.bth.toml` anatomy
+
+```toml
+[claim]
+headline       = "<falsifiable proposition the campaign must establish>"
+kill_condition = "<result that would falsify it>"        # mandatory; no bypass
+regime         = "<parameter range the claim ranges over; runs must cover it>"
+
+# >= 2 hypotheses, each with a descriptive id + label; ONE must be a null / misspecified alternative
+[[hypotheses]]
+id    = "H_main_effect"
+label = "the proposed mechanism drives the effect"
+predicted_signature = "monotone improvement with signal"
+[[hypotheses]]
+id    = "H_null_misspec"
+label = "both wrong / measurement misspecified"
+predicted_signature = "flat or non-monotone response"
+
+# load-bearing assumptions; the campaign halts if one is falsified
+[[assumptions]]
+id      = "A_info_symmetry"
+label   = "method and baseline have symmetric access to the signal"
+halt_if = "one method uses information the other lacks"
+status  = "untested"
+
+# one row per confound; status must reach "controlled" for a pass verdict
+[[confounds]]
+id            = "C_baseline"
+label         = "baseline is the published method, not a weak reimplementation"
+control       = "reference-parity gate"
+isolating_run = ""
+status        = "uncontrolled"
+# optional sub-block when the baseline is a reimplementation of a published method:
+[confounds.reference_parity]
+reference_paper   = "Author YEAR"
+reference_metric  = "recovery_hamming"
+reference_value   = 0.0
+equivalence_bound = 0.0
+parity_run_id     = ""                                    # the run that establishes parity
+
+# which planned run separates which hypothesis pair (every row needs a predicted_outcome)
+[[claim.discriminability]]
+hypothesis_a      = "H_main_effect"
+hypothesis_b      = "H_null_misspec"
+planned_run_label = "sweet_spot"
+predicted_outcome = "advantage_ci_lower_gt_0"
+
+[union_gate]
+[[union_gate.clauses]]
+id             = "C_main_effect"
+description    = "primary hypothesis distinguishable from the null on the target metric"
+hypothesis_ids = ["H_main_effect", "H_null_misspec"]      # cross-ref to [[hypotheses]] ids
+```
+
+Confirmatory **sidecars** cross-reference the claim by short id:
+
+```toml
+[experiment]
+claim_discriminates = ["H_main_effect", "H_null_misspec"]  # hypotheses this run separates
+claim_isolates      = ["C_baseline"]                        # confound / variable this run isolates
+```
+
+### The Union Gate at `conclude`
+
+- A clause is **covered** when some run has all of its `hypothesis_ids` in its `claim_discriminates`.
+- **confirmation / sequential** campaign: an uncovered clause downgrades the verdict to `confounded`
+  (not `pass`). `bth campaign conclude --force-verdict` bypasses, recording `claim_mode='bypassed'`.
+- **exploration** campaign: the checks still run but are warn-only — no downgrade.
+- Modifying the claim file after registration → `conclude` errors on the SHA mismatch; re-register with `--force`.
+- **Signal 12** (`bth sprint-audit`) flags a confirmation campaign with no registered claim — the one case
+  where the gate silently does nothing.
+
+## Signal discrimination and probe design
+
+Before submitting a confirmatory campaign, design runs that actively discriminate between competing
+hypotheses. Each probe type targets a different failure mode.
+
+### Probe types
+
+**Scaled-divergence probe**
+Purpose: Confirm the effect scales with the signal — rules out ceiling/floor effects masking the null.
+Design: Run the same experiment at 3+ signal levels (e.g., K=2, K=4, K=8 for an information-content claim).
+Expected signature: monotonic improvement tracking the signal; flat response falsifies the claim.
+Discriminates: Genuine causal effect vs. threshold artifact or capacity bottleneck.
+Sidecar field: `claim_discriminates = ["H_main_effect", "H_scaling"]`
+
+**Planted-mode probe**
+Purpose: Verify the model actually uses the planted information — rules out spurious correlation.
+Design: Run with the planted signal deliberately corrupted or ablated; model must fail.
+Expected signature: performance degrades to chance on the ablated version.
+Discriminates: Information-use vs. pattern matching on surface cues unrelated to the planted signal.
+Sidecar field: `claim_discriminates = ["H_information_use", "H_null"]`
+
+**Null-injection probe**
+Purpose: Confirm the null hypothesis is actually falsifiable by the eval.
+Design: Submit a known-bad model or a random-output baseline through the full eval pipeline.
+Expected signature: null model scores at chance; if it scores above chance, the eval is miscalibrated.
+Discriminates: Eval sensitivity vs. leakage from training data or shared artifacts.
+Sidecar field: `claim_discriminates = ["H_null", "H_eval_validity"]`
+
+**Information-ablation probe**
+Purpose: Isolate which specific information channel drives the result.
+Design: Ablate one information source at a time (sequence identity, structural context, coevolution signal).
+Expected signature: performance drops precisely when the claimed channel is removed; other ablations leave performance intact.
+Discriminates: Channel-specific contribution vs. redundancy or compensation across channels.
+Sidecar field: `claim_isolates = ["V_sequence_identity"]`
+
+### Connecting probes to the Union Gate
+
+Each probe maps to one or more `[[union_gate.clauses]]` in `claim.bth.toml`.
+A clause is covered when at least one run has all of its `hypothesis_ids` in `claim_discriminates`.
+
+Typical pattern: one scaled-divergence probe covers the main-effect clause; one null-injection probe covers the eval-validity clause; one information-ablation probe covers each isolation clause.
+
+Signal 12 (`bth sprint-audit`): fires when a confirmation campaign has no `claim_path` registered — the Union Gate will not run at conclude, and the probe design above will have no enforcement.
+
 ## Related
 
 - **CLAUDE.md**: Bathos architecture, schema versions, backlog
