@@ -149,7 +149,8 @@ def main():
         "--out",
         type=Path,
         required=True,
-        help="Output path for result JSON",
+        help="Output path for result JSON. For SHA-anchored triple to be auto-registered "
+             "by runner.py, place this inside $BTH_OUTPUT_DIR.",
     )
     parser.add_argument(
         "--log-level",
