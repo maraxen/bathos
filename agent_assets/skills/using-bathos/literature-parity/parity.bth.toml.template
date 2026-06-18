@@ -30,19 +30,19 @@ reference_code = null
 citation_note = ""
 
 # Optional: lenses for Phase 1 blind reconstruction
-# Default: ["mathematical_formulation", "algorithmic_detail", "experimental_protocol"]
+# Default: ["math", "algo", "protocol"]
 recon_lenses = [
-  "mathematical_formulation",
-  "algorithmic_detail",
-  "experimental_protocol"
+  "math",
+  "algo",
+  "protocol"
 ]
 
 # Optional: attack lenses for Phase 3 adversarial refutation
-# Default: ["statistical_correctness", "hyperparameter_fidelity", "algorithmic_structure"]
+# Default: ["stats", "hyper", "struct"]
 attack_lenses = [
-  "statistical_correctness",
-  "hyperparameter_fidelity",
-  "algorithmic_structure"
+  "stats",
+  "hyper",
+  "struct"
 ]
 
 # Optional: your upfront hypotheses about what could go wrong

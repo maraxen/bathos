@@ -250,7 +250,7 @@ class TestComputeGrade:
         assert result_r1.grade == "PARITY"
 
     def test_compute_grade_fails_when_adversarial_not_survived(self):
-        """Adversarial refutation failure should cap or fail the grade."""
+        """Adversarial refutation failure (landed refutation) is a FAIL ceiling by design."""
         evidence = ParityEvidence(
             clause_parity_pct=1.0,
             adversarial_survived=False,
@@ -259,9 +259,8 @@ class TestComputeGrade:
             ambiguity_load="none",
         )
         result = compute_grade(evidence)
-        # Per design, adversarial_survived=False caps toward FAIL or PARTIAL
-        # Document the ceiling in result
-        assert result.grade in ("FAIL", "PARTIAL")
+        # Per design contract: landed refutation (adversarial_survived=False) negates a core claim → FAIL ceiling
+        assert result.grade == "FAIL"
 
     def test_compute_grade_includes_ceiling_breakdown(self):
         """Result includes ceilings dict for auditability."""
@@ -339,7 +338,8 @@ class TestEvidenceFromResult:
         assert evidence.ambiguity_load == "load_bearing"  # Most conservative
 
     def test_evidence_from_result_from_json_string(self):
-        """evidence_from_result can parse a JSON string metadata blob."""
+        """evidence_from_result correctly maps flat dict keys to evidence fields."""
+        # Test the flat-dict → evidence mapping with a subset of keys
         metadata_json = json.dumps(
             {
                 "clause_parity_pct": 0.92,
@@ -349,15 +349,14 @@ class TestEvidenceFromResult:
                 "ambiguity_load": "non_load_bearing",
             }
         )
-        result = {"parity_metadata": metadata_json}
-        # If result is a JSON string, decode it
-        if isinstance(result.get("parity_metadata"), str):
-            parity_data = json.loads(result["parity_metadata"])
-        else:
-            parity_data = result
+        parity_data = json.loads(metadata_json)
         evidence = evidence_from_result(parity_data)
+        # Verify that all fields map correctly
         assert evidence.clause_parity_pct == 0.92
+        assert evidence.adversarial_survived is True
+        assert evidence.invariant_pass is True
         assert evidence.reproduction_rung == "R1"
+        assert evidence.ambiguity_load == "non_load_bearing"
 
     def test_evidence_from_result_empty_dict(self):
         """evidence_from_result handles completely empty result."""
