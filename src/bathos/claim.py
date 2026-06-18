@@ -592,14 +592,14 @@ def attest_parity(
 
     # AC-12: Validate that parity_run_id is a real passing parity run
     run_rows = db.execute(
-        "SELECT outcome, metadata FROM runs WHERE id = ? OR id LIKE ?",
+        "SELECT outcome, metadata, parity_run_type FROM runs WHERE id = ? OR id LIKE ?",
         [parity_run_id, parity_run_id + "%"]
     ).fetchall()
 
     if not run_rows:
         raise ValueError(f"Parity run '{parity_run_id}' not found in catalog")
 
-    outcome, metadata_json = run_rows[0]
+    outcome, metadata_json, parity_run_type_col = run_rows[0]
 
     # Validate outcome is pass or partial
     if outcome not in ("pass", "partial"):
@@ -608,13 +608,9 @@ def attest_parity(
             "expected 'pass' or 'partial'"
         )
 
-    # Parse metadata and check for parity_run_type
-    try:
-        meta = json.loads(metadata_json or "{}")
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Failed to parse metadata for run '{parity_run_id}': {e}") from e
-
-    parity_type = meta.get("parity_run_type")
+    # Step 6a: Use parity_run_type column instead of metadata JSON
+    # The column is now authoritative; metadata JSON is kept for readability
+    parity_type = parity_run_type_col
     if not parity_type:
         raise ValueError(
             f"Run '{parity_run_id}' metadata missing 'parity_run_type' key. "
@@ -782,7 +778,7 @@ def parity_confound_check(
         elif db is not None:
             # Query the run
             run_rows = db.execute(
-                "SELECT outcome, metadata FROM runs WHERE id = ? OR id LIKE ?",
+                "SELECT outcome, metadata, parity_run_type FROM runs WHERE id = ? OR id LIKE ?",
                 [parity_run_id, parity_run_id + "%"]
             ).fetchall()
 
@@ -790,7 +786,7 @@ def parity_confound_check(
                 # Run not found
                 confound_info["status"] = "uncontrolled"
             else:
-                outcome, metadata_json = run_rows[0]
+                outcome, metadata_json, parity_run_type_col = run_rows[0]
                 try:
                     meta = json.loads(metadata_json or "{}")
                     parity_type = meta.get("parity_run_type", "")

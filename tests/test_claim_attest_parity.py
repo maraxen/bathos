@@ -47,14 +47,15 @@ def temp_db(tmp_path):
         )
     """)
 
-    # Create runs table with metadata column for parity_run_type
+    # Create runs table with metadata and parity_run_type columns (AC-19)
     db.execute("""
         CREATE TABLE runs (
             id TEXT PRIMARY KEY,
             campaign_id TEXT,
             claim_discriminates TEXT,
             outcome TEXT,
-            metadata TEXT
+            metadata TEXT,
+            parity_run_type TEXT
         )
     """)
 
@@ -138,8 +139,8 @@ class TestAttestParityBasic:
             "parity_run_type": "literature_parity"
         })
         temp_db.execute(
-            "INSERT INTO runs (id, campaign_id, outcome, metadata) VALUES (?, ?, ?, ?)",
-            [parity_run_id, campaign_id, "pass", parity_metadata]
+            "INSERT INTO runs (id, campaign_id, outcome, metadata, parity_run_type) VALUES (?, ?, ?, ?, ?)",
+            [parity_run_id, campaign_id, "pass", parity_metadata, "literature_parity"]
         )
 
         # Register the initial claim (empty parity_run_id)
@@ -219,8 +220,8 @@ class TestAttestParityValidation:
         bad_run_id = "run_bad_001"
         bad_metadata = json.dumps({"metric_key": 1.0})  # No parity_run_type
         temp_db.execute(
-            "INSERT INTO runs (id, campaign_id, outcome, metadata) VALUES (?, ?, ?, ?)",
-            [bad_run_id, campaign_id, "pass", bad_metadata]
+            "INSERT INTO runs (id, campaign_id, outcome, metadata, parity_run_type) VALUES (?, ?, ?, ?, ?)",
+            [bad_run_id, campaign_id, "pass", bad_metadata, None]
         )
 
         # Register the initial claim
@@ -274,8 +275,8 @@ class TestAttestParityValidation:
             "parity_run_type": "partial_parity"  # Wrong type
         })
         temp_db.execute(
-            "INSERT INTO runs (id, campaign_id, outcome, metadata) VALUES (?, ?, ?, ?)",
-            [bad_run_id, campaign_id, "pass", bad_metadata]
+            "INSERT INTO runs (id, campaign_id, outcome, metadata, parity_run_type) VALUES (?, ?, ?, ?, ?)",
+            [bad_run_id, campaign_id, "pass", bad_metadata, "partial_parity"]
         )
 
         # Register the initial claim
@@ -324,8 +325,8 @@ class TestAttestParityValidation:
             "parity_run_type": "literature_parity"
         })
         temp_db.execute(
-            "INSERT INTO runs (id, campaign_id, outcome, metadata) VALUES (?, ?, ?, ?)",
-            [partial_run_id, campaign_id, "partial", partial_metadata]
+            "INSERT INTO runs (id, campaign_id, outcome, metadata, parity_run_type) VALUES (?, ?, ?, ?, ?)",
+            [partial_run_id, campaign_id, "partial", partial_metadata, "literature_parity"]
         )
 
         # Register the initial claim
@@ -398,8 +399,8 @@ class TestAtomicity:
             "parity_run_type": "literature_parity"
         })
         temp_db.execute(
-            "INSERT INTO runs (id, campaign_id, outcome, metadata) VALUES (?, ?, ?, ?)",
-            [parity_run_id, campaign_id, "pass", parity_metadata]
+            "INSERT INTO runs (id, campaign_id, outcome, metadata, parity_run_type) VALUES (?, ?, ?, ?, ?)",
+            [parity_run_id, campaign_id, "pass", parity_metadata, "literature_parity"]
         )
 
         # Register the initial claim
@@ -503,8 +504,8 @@ class TestAtomicity:
             "parity_run_type": "literature_parity"
         })
         temp_db.execute(
-            "INSERT INTO runs (id, campaign_id, outcome, metadata) VALUES (?, ?, ?, ?)",
-            [parity_run_id, campaign_id, "pass", parity_metadata]
+            "INSERT INTO runs (id, campaign_id, outcome, metadata, parity_run_type) VALUES (?, ?, ?, ?, ?)",
+            [parity_run_id, campaign_id, "pass", parity_metadata, "literature_parity"]
         )
 
         # Register the initial claim
