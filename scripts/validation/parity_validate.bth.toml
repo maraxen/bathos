@@ -1,0 +1,18 @@
+[validation]
+property = "Literature-parity grading produces consistent verdict across phases"
+reference = "parity.bth.toml configuration and 5-phase evidence assembly"
+tolerance = "All ceilings computed correctly per X1 cap-lattice specification"
+
+[outcomes.pass]
+condition = "grade IN ('PARITY', 'PARTIAL')"
+decision = "Verdict emitted successfully; run suitable for campaign submission"
+
+[outcomes.fail]
+condition = "grade = 'FAIL'"
+decision = "Implementation parity failed; debug mechanism divergence before retry"
+
+[result_schema]
+grade = "str"
+ceilings = "str"
+output_paths = "str"
+output_shas = "str"
