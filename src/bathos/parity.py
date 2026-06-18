@@ -6,13 +6,18 @@ This module provides:
 - ParityGradeResult: Result of grading (PARITY/PARTIAL/FAIL)
 - compute_grade(): X1 cap-lattice grader implementation
 - evidence_from_result(): Builds evidence from a result dict
+- check_parity_confounds_for_submit(): F3 submit-gate for parity prerequisite
 """
 
 from __future__ import annotations
 
+import json
+import logging
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -199,3 +204,108 @@ def parse_parity_toml(path: Path) -> dict:
         "N": parity_section.get("N", 3),
         "M": parity_section.get("M", 3),
     }
+
+
+def check_parity_confounds_for_submit(sidecar, catalog_dir: Path) -> dict:
+    """F3 submit-gate: check if required parity run exists.
+
+    If the sidecar declares a parity prerequisite (requires_parity_stem),
+    look for a PASSING parity run for that stem in the catalog.
+
+    Uses warm-then-cool fallback pattern (mirroring prereg.py:178):
+    - Warm path: DuckDB query on bathos.db (fast)
+    - Cool-tier fallback: PyArrow glob scan of runs/**/*.parquet (slower)
+
+    Returns a structured result dict:
+        satisfied (bool|None): True if a passing parity run found; False if not found;
+                               None if indeterminate (both tiers unavailable).
+        tier_enforced (bool): True if hard-block should apply (validation/production tier
+                             and prerequisite unmet); False otherwise (advisory or satisfied).
+
+    AC-09/AC-10: tier logic—
+        - validation/production + unmet + determinable -> tier_enforced=True (hard block)
+        - exploration/calibration + unmet -> tier_enforced=False (advisory)
+        - satisfied (regardless of tier) -> tier_enforced=False (no block)
+
+    AC-22: If warm DB doesn't exist AND we can't search cool tier, return satisfied=None
+           and tier_enforced=False (fail open, never hard-block).
+
+    Args:
+        sidecar: Parsed Sidecar object with optional reproduction block
+        catalog_dir: Path to catalog directory (~/.bth/catalog)
+
+    Returns:
+        Dict with keys: satisfied (bool|None), tier_enforced (bool)
+    """
+    import duckdb
+    import pyarrow.parquet as pq
+
+    # If no reproduction block or no requires_parity_stem, gate is satisfied (no check needed)
+    if not sidecar.reproduction or not sidecar.reproduction.requires_parity_stem:
+        return {"satisfied": True, "tier_enforced": False}
+
+    requires_parity_stem = sidecar.reproduction.requires_parity_stem
+    stage_name = sidecar.stage_name or "exploration"
+
+    # Determine if tier is enforced (validation/production = enforced, others = advisory)
+    is_validation_or_production = stage_name in ("validation", "production")
+
+    db_path = catalog_dir / "bathos.db"
+
+    # Warm path: query DuckDB if available
+    if db_path.exists():
+        try:
+            with duckdb.connect(str(db_path), read_only=True) as conn:
+                # Query for a passing parity run matching the stem, with parity_run_type='literature_parity'
+                rows = conn.execute(
+                    "SELECT 1 FROM runs WHERE command LIKE ? AND outcome = 'pass' AND "
+                    "json_extract(metadata, '$.parity_run_type') = 'literature_parity' LIMIT 1",
+                    [f"%{requires_parity_stem}%"]
+                ).fetchall()
+                if rows:
+                    # Found a passing parity run
+                    return {"satisfied": True, "tier_enforced": False}
+                # Warm DB exists but no match found -> prerequisite unmet, determinable
+                return {
+                    "satisfied": False,
+                    "tier_enforced": is_validation_or_production
+                }
+        except Exception as e:
+            logger.warning(f"Warm tier parity prerequisite check failed: {e}")
+
+    # Cool-tier fallback: scan Parquet files (only if warm DB not available)
+    try:
+        runs_dir = catalog_dir / "runs"
+        if runs_dir.exists():
+            for parquet_file in sorted(runs_dir.glob("**/*.parquet")):
+                try:
+                    table = pq.read_table(
+                        str(parquet_file),
+                        columns=["command", "outcome", "metadata"]
+                    )
+                    cmds = table.column("command").to_pylist()
+                    outcomes = table.column("outcome").to_pylist()
+                    metadatas = table.column("metadata").to_pylist()
+
+                    for cmd, outcome, metadata_json in zip(cmds, outcomes, metadatas):
+                        if outcome == "pass" and cmd and requires_parity_stem in cmd:
+                            # Parse metadata JSON and check parity_run_type
+                            try:
+                                metadata = json.loads(metadata_json) if metadata_json else {}
+                                if metadata.get("parity_run_type") == "literature_parity":
+                                    return {"satisfied": True, "tier_enforced": False}
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+                except Exception as e:
+                    logger.warning(f"Failed to read {parquet_file}: {e}")
+                    continue
+            # Cool tier exists but no match found -> prerequisite unmet, determinable
+            return {
+                "satisfied": False,
+                "tier_enforced": is_validation_or_production
+            }
+    except Exception as e:
+        logger.warning(f"Cool tier parity prerequisite check failed: {e}")
+
+    # Both warm and cool tiers unavailable/unsearchable (AC-22) -> fail open
+    return {"satisfied": None, "tier_enforced": False}
