@@ -237,8 +237,31 @@ def conclude_campaign(
         # AC-11: SHA integrity check at conclude
         check_sha(claim_path_rel, registered_sha, workspace_root)
 
-        # Parse and run Union Gate
+        # Parse the claim
         claim = parse_claim(abs_path)
+
+        # F2 PARITY CONFOUND CHECK (before Union Gate)
+        # Check for uncontrolled reference_parity confounds and downgrade if needed
+        from bathos.claim import parity_confound_check
+        parity_result = parity_confound_check(abs_path, db)
+        parity_confounds = parity_result.get("confounds", [])
+
+        # Downgrade verdict to 'confounded' if any parity confound is uncontrolled
+        # (except for exploration mode, which only warns)
+        parity_uncontrolled = [c for c in parity_confounds if c["status"] == "uncontrolled"]
+        if parity_uncontrolled:
+            if campaign_mode in ("confirmation", "sequential"):
+                # Hard downgrade for confirmation/sequential
+                for confound in parity_uncontrolled:
+                    print(f"Parity confound check: '{confound['label']}' is uncontrolled")
+                print(f"Parity confound check: verdict downgraded to 'confounded'")
+                outcome_label = "confounded"
+            elif campaign_mode == "exploration":
+                # Advisory warning for exploration
+                for confound in parity_uncontrolled:
+                    print(f"WARNING: Parity confound '{confound['label']}' is uncontrolled (exploration mode, no downgrade)")
+
+        # Run Union Gate (which may also downgrade if clauses are uncovered)
         verdict, uncovered = run_union_gate(db, full_id, claim)
 
         # AC-08: Gate behavior by campaign mode
