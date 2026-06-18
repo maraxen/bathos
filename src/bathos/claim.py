@@ -348,6 +348,7 @@ reference_paper = "Optional: Citation if baseline from literature"
 reference_metric = "Optional: metric key in baseline run"
 reference_value = 1.0
 equivalence_bound = 0.05
+parity_run_id = ""
 
 [claim.discriminability]
 # Matrix indexed by hypothesis-pair × outcome-label
@@ -518,3 +519,233 @@ def run_union_gate(
 
     verdict = "covered" if not uncovered_clauses else "confounded"
     return (verdict, uncovered_clauses)
+
+
+def attest_parity(
+    campaign_id: str,
+    parity_run_id: str,
+    db: duckdb.DuckDBPyConnection,
+    workspace_root: Path,
+) -> None:
+    """Bind a parity run to a campaign's claim and re-anchor the claim SHA (atomic).
+
+    AC-11, AC-12, AC-13, AC-21: Validates that the cited run is a real passing
+    parity run (outcome='pass' or 'partial', metadata.parity_run_type='literature_parity'),
+    binds its ID into the claim's [confounds.reference_parity] block, and updates the
+    DB SHA atomically via temp-write → fsync → os.replace → DB-update-last.
+
+    Args:
+        campaign_id: Campaign ID (short or full UUID)
+        parity_run_id: Run ID of the parity run to bind
+        db: DuckDB connection
+        workspace_root: Project workspace root
+
+    Raises:
+        ValueError: If run not found, missing parity_run_type, wrong type, or outcome not pass/partial
+        RuntimeError: If claim file not found or campaign not found
+    """
+    import os
+    import tempfile
+    from bathos.campaigns import _resolve_campaign_id, CampaignError
+
+    try:
+        full_id = _resolve_campaign_id(db, campaign_id)
+    except CampaignError as e:
+        raise RuntimeError(f"Campaign not found: {e}") from e
+
+    # Get campaign's claim path
+    rows = db.execute(
+        "SELECT claim_path FROM campaigns WHERE id = ?", [full_id]
+    ).fetchall()
+    if not rows or rows[0][0] is None:
+        raise RuntimeError(f"Campaign {campaign_id} has no registered claim")
+
+    claim_path_rel = rows[0][0]
+    abs_claim_path = workspace_root / claim_path_rel
+
+    if not abs_claim_path.exists():
+        raise FileNotFoundError(f"Claim file not found at {abs_claim_path}")
+
+    # AC-12: Validate that parity_run_id is a real passing parity run
+    run_rows = db.execute(
+        "SELECT outcome, metadata FROM runs WHERE id = ? OR id LIKE ?",
+        [parity_run_id, parity_run_id + "%"]
+    ).fetchall()
+
+    if not run_rows:
+        raise ValueError(f"Parity run '{parity_run_id}' not found in catalog")
+
+    outcome, metadata_json = run_rows[0]
+
+    # Validate outcome is pass or partial
+    if outcome not in ("pass", "partial"):
+        raise ValueError(
+            f"Parity run '{parity_run_id}' has outcome='{outcome}', "
+            "expected 'pass' or 'partial'"
+        )
+
+    # Parse metadata and check for parity_run_type
+    try:
+        meta = json.loads(metadata_json or "{}")
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Failed to parse metadata for run '{parity_run_id}': {e}") from e
+
+    parity_type = meta.get("parity_run_type")
+    if not parity_type:
+        raise ValueError(
+            f"Run '{parity_run_id}' metadata missing 'parity_run_type' key. "
+            "Ensure run was executed with parity_run_type set."
+        )
+
+    if parity_type != "literature_parity":
+        raise ValueError(
+            f"Run '{parity_run_id}' has parity_run_type='{parity_type}', "
+            "expected 'literature_parity'"
+        )
+
+    # Parse the current claim
+    claim = parse_claim(abs_claim_path)
+
+    # Find the confound with reference_parity and update it
+    updated = False
+    for confound in claim.confounds:
+        if "reference_parity" in confound:
+            confound["reference_parity"]["parity_run_id"] = parity_run_id
+            updated = True
+            break
+
+    if not updated:
+        raise ValueError(
+            f"Campaign {campaign_id}'s claim has no [confounds.reference_parity] block"
+        )
+
+    # R2: Atomic write-then-rename pattern
+    # Write to temp file in same directory (ensure same filesystem for atomic rename)
+    temp_dir = abs_claim_path.parent
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        dir=temp_dir,
+        suffix=".tmp",
+        delete=False,
+        encoding="utf-8"
+    ) as tmp_f:
+        temp_path = Path(tmp_f.name)
+        # Reconstruct TOML from the modified claim
+        # Simple approach: read original file, find the parity_run_id line, update it
+        original_content = abs_claim_path.read_text()
+
+        # Find the parity_run_id = "" line in reference_parity block and replace it
+        updated_content = original_content.replace(
+            'parity_run_id = ""',
+            f'parity_run_id = "{parity_run_id}"'
+        )
+
+        tmp_f.write(updated_content)
+        tmp_f.flush()
+        os.fsync(tmp_f.fileno())
+
+    try:
+        # Atomic rename (this is atomic on POSIX systems)
+        os.replace(temp_path, abs_claim_path)
+
+        # Now compute the new SHA256
+        new_content = abs_claim_path.read_bytes()
+        new_sha256 = hashlib.sha256(new_content).hexdigest()
+
+        # DB update LAST (after file is safely renamed)
+        db.execute(
+            "UPDATE campaigns SET claim_sha256 = ? WHERE id = ?",
+            [new_sha256, full_id]
+        )
+
+        event(
+            "claim.attest_parity",
+            campaign_id=full_id,
+            parity_run_id=parity_run_id,
+            claim_sha256=new_sha256
+        )
+
+    except Exception as e:
+        # Clean up temp file if rename failed
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except Exception:
+                pass
+        raise
+
+
+def parity_confound_check(
+    claim_path: Path,
+    db: duckdb.DuckDBPyConnection | None = None,
+) -> dict:
+    """Check confounds with reference_parity blocks and infer their status from live runs.
+
+    For each confound with a [confounds.reference_parity] block carrying a parity_run_id,
+    queries the run's outcome and metadata.parity_run_type to infer:
+    - 'controlled' if outcome='pass' and parity_run_type='literature_parity'
+    - 'controlled-by-protocol' if outcome='partial' and parity_run_type='literature_parity'
+    - 'uncontrolled' if parity_run_id is empty or run not found
+
+    Args:
+        claim_path: Path to claim.bth.toml
+        db: Optional DuckDB connection (if None, all parity confounds marked 'uncontrolled')
+
+    Returns:
+        Dict with 'confounds' key containing list of confound dicts with 'status' inferred
+    """
+    claim = parse_claim(claim_path)
+    result_confounds = []
+
+    for confound in claim.confounds:
+        ref_par = confound.get("reference_parity", {})
+        if not ref_par:
+            # No parity block, skip
+            continue
+
+        confound_info = {
+            "id": confound.get("id", "unknown"),
+            "label": confound.get("label", ""),
+            "status": "uncontrolled",  # default
+        }
+
+        parity_run_id = ref_par.get("parity_run_id", "")
+
+        if not parity_run_id:
+            # Empty parity_run_id
+            confound_info["status"] = "uncontrolled"
+        elif db is not None:
+            # Query the run
+            run_rows = db.execute(
+                "SELECT outcome, metadata FROM runs WHERE id = ? OR id LIKE ?",
+                [parity_run_id, parity_run_id + "%"]
+            ).fetchall()
+
+            if not run_rows:
+                # Run not found
+                confound_info["status"] = "uncontrolled"
+            else:
+                outcome, metadata_json = run_rows[0]
+                try:
+                    meta = json.loads(metadata_json or "{}")
+                    parity_type = meta.get("parity_run_type", "")
+                except json.JSONDecodeError:
+                    parity_type = ""
+
+                # Infer status from outcome and parity_type
+                if parity_type == "literature_parity":
+                    if outcome == "pass":
+                        confound_info["status"] = "controlled"
+                    elif outcome == "partial":
+                        confound_info["status"] = "controlled-by-protocol"
+                    else:
+                        confound_info["status"] = "uncontrolled"
+                else:
+                    confound_info["status"] = "uncontrolled"
+        else:
+            # DB is None, mark as uncontrolled
+            confound_info["status"] = "uncontrolled"
+
+        result_confounds.append(confound_info)
+
+    return {"confounds": result_confounds}
