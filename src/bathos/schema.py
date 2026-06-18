@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pyarrow as pa
 
-CURRENT_SCHEMA_VERSION = "8"
+CURRENT_SCHEMA_VERSION = "9"
 
 # Format validator for stage_name values — used by linter.check_canonical_stage_names.
 # Enforcement at parse time uses CANONICAL_STAGES set-membership (parse_sidecar); this
@@ -69,6 +69,7 @@ COOL_SCHEMA = pa.schema(
         pa.field("stage_name", pa.string()),
         pa.field("claim_discriminates", pa.string(), nullable=True),
         pa.field("claim_isolates", pa.string(), nullable=True),
+        pa.field("parity_run_type", pa.string(), nullable=True),
     ]
 )
 
@@ -119,6 +120,7 @@ WARM_SCHEMA = pa.schema(
         pa.field("stage_name", pa.string()),
         pa.field("claim_discriminates", pa.string(), nullable=True),
         pa.field("claim_isolates", pa.string(), nullable=True),
+        pa.field("parity_run_type", pa.string(), nullable=True),
     ]
 )
 
@@ -170,6 +172,7 @@ class Run:
     stage_name: str | None = None
     claim_discriminates: str | None = None
     claim_isolates: str | None = None
+    parity_run_type: str | None = None
 
     def to_arrow(self) -> pa.Table:
         return pa.table(
@@ -217,6 +220,7 @@ class Run:
                 "stage_name": [self.stage_name],
                 "claim_discriminates": [self.claim_discriminates],
                 "claim_isolates": [self.claim_isolates],
+                "parity_run_type": [self.parity_run_type],
             },
             schema=COOL_SCHEMA,
         )
@@ -275,4 +279,5 @@ class Run:
             stage_name=pydict.get("stage_name", [None])[i] if "stage_name" in pydict else None,
             claim_discriminates=pydict.get("claim_discriminates", [None])[i] if "claim_discriminates" in pydict else None,
             claim_isolates=pydict.get("claim_isolates", [None])[i] if "claim_isolates" in pydict else None,
+            parity_run_type=pydict.get("parity_run_type", [None])[i] if "parity_run_type" in pydict else None,
         )

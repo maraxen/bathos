@@ -215,6 +215,16 @@ def _migrate_v7(run_dict: dict) -> dict:
     return run_dict
 
 
+def _migrate_v8(run_dict: dict) -> dict:
+    """Migrate v8 fragment to v9 by adding parity_run_type field.
+
+    parity_run_type is an optional field that defaults to None for existing runs.
+    """
+    run_dict["parity_run_type"] = None
+    run_dict["schema_version"] = "9"
+    return run_dict
+
+
 MIGRATIONS["0"] = _migrate_v0
 MIGRATIONS["1"] = _migrate_v1
 MIGRATIONS["2"] = _migrate_v2
@@ -223,6 +233,7 @@ MIGRATIONS["4"] = _migrate_v4
 MIGRATIONS["5"] = _migrate_v5
 MIGRATIONS["6"] = _migrate_v6
 MIGRATIONS["7"] = _migrate_v7
+MIGRATIONS["8"] = _migrate_v8
 
 
 _RUNS_TABLE_SCHEMA = """
@@ -268,7 +279,10 @@ CREATE TABLE IF NOT EXISTS runs (
     manifest_path TEXT,
     outcome_error_reason TEXT,
     adversarial_check_status TEXT,
-    stage_name TEXT
+    stage_name TEXT,
+    claim_discriminates TEXT,
+    claim_isolates TEXT,
+    parity_run_type TEXT
 )
 """
 
@@ -483,6 +497,7 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
         "ALTER TABLE runs ADD COLUMN IF NOT EXISTS stage_name TEXT",
         "ALTER TABLE runs ADD COLUMN IF NOT EXISTS claim_discriminates TEXT",
         "ALTER TABLE runs ADD COLUMN IF NOT EXISTS claim_isolates TEXT",
+        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS parity_run_type TEXT",
     ]:
         with contextlib.suppress(Exception):
             con.execute(_runs_alter_sql)
@@ -628,8 +643,9 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                 output_paths, tags, schema_version, slurm_job_id, hostname, metadata, outcome, output_metadata,
                 sidecar_sha256, sidecar_path, parent_run_id, agent_mode, sidecar_mode, outcome_is_residual, skill_sha256, campaign_id,
                 script_sha256, postmortem_status, postmortem_override, postmortem_verdict_override, postmortem_author, postmortem_path,
-                postmortem_hypothesis_status, postmortem_has_anomalies, postmortem_summary, postmortem_asset_links, stage_name
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                postmortem_hypothesis_status, postmortem_has_anomalies, postmortem_summary, postmortem_asset_links, stage_name,
+                claim_discriminates, claim_isolates, parity_run_type
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 run.id,
@@ -670,6 +686,9 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                 run.postmortem_summary,
                 run.postmortem_asset_links,
                 run.stage_name,
+                run.claim_discriminates,
+                run.claim_isolates,
+                run.parity_run_type,
             ],
         )
 

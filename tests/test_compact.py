@@ -151,7 +151,7 @@ def test_compact_upgrades_v0_fragments(tmp_catalog: Path, sample_run: Run):
     # Verify in DuckDB: should have schema_version="8" (migrated through v0→v1→v2→v3→v4→v5→v6→v7→v8)
     con = duckdb.connect(str(tmp_catalog / "bathos.db"))
     rows = con.execute("SELECT schema_version FROM runs").fetchall()
-    assert rows[0][0] == "8"
+    assert rows[0][0] == "9"
 
 
 def test_compact_tracks_warm_schema_version(tmp_catalog: Path, sample_run: Run):
@@ -166,7 +166,7 @@ def test_compact_tracks_warm_schema_version(tmp_catalog: Path, sample_run: Run):
     con = duckdb.connect(str(tmp_catalog / "bathos.db"))
     rows = con.execute("SELECT value FROM _schema_meta WHERE key = 'warm_version'").fetchall()
     assert len(rows) == 1
-    assert rows[0][0] == "8"
+    assert rows[0][0] == "9"
 
 
 def test_fragment_count_helper(tmp_catalog: Path, sample_run: Run):
@@ -250,7 +250,7 @@ def test_compact_migrates_v1_to_v4(sample_run: Run):
     result = _apply_migrations(v1_run)
 
     # Verify upgraded to v8 with hostname
-    assert result.schema_version == "8"
+    assert result.schema_version == "9"
     assert result.hostname == ""
 
 
@@ -265,7 +265,7 @@ def test_compact_v0_chain_to_v4(sample_run: Run):
     result = _apply_migrations(v0_run)
 
     # Verify final state is v8
-    assert result.schema_version == "8"
+    assert result.schema_version == "9"
     assert result.hostname == ""
 
 
@@ -279,7 +279,7 @@ def test_apply_migrations_v4_upgrades_to_v5(sample_run: Run):
     result = _apply_migrations(v4_run)
 
     # Verify upgraded
-    assert result.schema_version == "8"
+    assert result.schema_version == "9"
     assert result.hostname == "testhost"
     # Verify fields added during v5 migration are present
     assert result.manifest_sha256 == ""
@@ -463,7 +463,7 @@ def test_migration_v2_to_v4(tmp_catalog: Path, sample_run: Run):
     con.close()
 
     assert len(rows) == 1
-    assert rows[0][0] == "8"  # schema_version
+    assert rows[0][0] == "9"  # schema_version
     assert rows[0][1] == ""  # sidecar_sha256
     assert rows[0][2] == ""  # sidecar_path
     assert rows[0][3] == ""  # parent_run_id
@@ -498,7 +498,7 @@ def test_migration_chain_v0_to_v4(tmp_catalog: Path, sample_run: Run):
     con.close()
 
     assert len(rows) == 1
-    assert rows[0][0] == "8"  # schema_version
+    assert rows[0][0] == "9"  # schema_version
     assert rows[0][1] == ""  # hostname (from v1 migration)
     assert rows[0][2] == ""  # sidecar_sha256 (from v2 migration)
     assert rows[0][3] == ""  # sidecar_path
@@ -522,7 +522,7 @@ def test_migration_v6_to_v7_adds_stage_name(sample_run: Run):
     result = _apply_migrations(v6_run)
 
     # Verify upgraded to v7 with stage_name=None
-    assert result.schema_version == "8"
+    assert result.schema_version == "9"
     assert result.stage_name is None
 
 
@@ -537,7 +537,7 @@ def test_migration_chain_v0_to_v7_includes_stage_name(sample_run: Run):
     result = _apply_migrations(v0_run)
 
     # Verify final state is v7 with stage_name=None
-    assert result.schema_version == "8"
+    assert result.schema_version == "9"
     assert result.stage_name is None
 
 
@@ -678,3 +678,69 @@ def test_output_metadata_sha256_reused_when_mtime_unchanged(tmp_catalog: Path, s
     meta2 = json.loads(con.execute("SELECT output_metadata FROM runs WHERE id = ?", [run.id]).fetchone()[0])
     con.close()
     assert meta2[0].get("sha256") == sha_before
+
+
+def test_runner_compact_warm_roundtrip_three_columns(tmp_catalog: Path, sample_run: Run):
+    """Test that parity_run_type, claim_discriminates, claim_isolates survive cool→warm roundtrip non-null."""
+    from bathos.catalog import init_catalog
+    import json
+
+    init_catalog(tmp_catalog)
+
+    # Create a run with all three columns set to non-null values
+    run = dataclasses.replace(
+        sample_run,
+        parity_run_type="literature_parity",
+        claim_discriminates='["AC-04"]',
+        claim_isolates='["AC-05"]',
+    )
+    write_run(run, tmp_catalog)
+
+    # Compact to warm tier
+    result = compact(tmp_catalog)
+    assert result.ingested == 1
+
+    # Read back from warm and verify all three columns are non-null
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    rows = con.execute(
+        "SELECT parity_run_type, claim_discriminates, claim_isolates FROM runs WHERE id = ?",
+        [run.id],
+    ).fetchall()
+    con.close()
+
+    assert len(rows) == 1
+    assert rows[0][0] == "literature_parity"
+    assert rows[0][1] == '["AC-04"]'
+    assert rows[0][2] == '["AC-05"]'
+
+
+def test_migration_v8_to_v9_adds_parity_run_type(sample_run: Run):
+    """Verify v8 fragments are upgraded to v9 with parity_run_type=None."""
+    from bathos.compact import _apply_migrations
+
+    # Create a v8 run (without parity_run_type field)
+    v8_run = dataclasses.replace(sample_run, schema_version="8")
+    # Ensure parity_run_type is not set
+    assert v8_run.parity_run_type is None
+
+    # Apply migrations
+    result = _apply_migrations(v8_run)
+
+    # Verify upgraded to v9 with parity_run_type=None
+    assert result.schema_version == "9"
+    assert result.parity_run_type is None
+
+
+def test_migration_chain_v0_to_v9_includes_parity_run_type(sample_run: Run):
+    """Verify v0 fragments chain through all migrations to v9 with parity_run_type=None."""
+    from bathos.compact import _apply_migrations
+
+    # Create a v0 run
+    v0_run = dataclasses.replace(sample_run, schema_version="0")
+
+    # Apply migrations (should walk 0→1→...→9)
+    result = _apply_migrations(v0_run)
+
+    # Verify final state is v9 with parity_run_type=None
+    assert result.schema_version == "9"
+    assert result.parity_run_type is None
