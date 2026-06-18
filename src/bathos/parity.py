@@ -50,8 +50,7 @@ class ParityGradeResult:
 # Ceiling thresholds (documented as provisional, tunable)
 # These encode the cap-lattice logic: each dimension has a ceiling that caps the final grade.
 _CLAUSE_PARITY_FAIL_THRESHOLD = 0.5  # < 0.5 -> FAIL ceiling
-_CLAUSE_PARITY_PARTIAL_THRESHOLD = 1.0  # < 1.0 -> PARTIAL ceiling
-_ADVERSARIAL_FAIL_CEILING = True  # adversarial_survived=False -> FAIL ceiling
+_CLAUSE_PARITY_PARTIAL_THRESHOLD = 1.0  # < 1.0 -> PARTIAL ceiling; intentional v1 conservatism — only perfect clause parity (==1.0) scores PARITY on this dimension; threshold is provisional/tunable
 
 
 def compute_grade(evidence: ParityEvidence) -> ParityGradeResult:
@@ -88,6 +87,7 @@ def compute_grade(evidence: ParityEvidence) -> ParityGradeResult:
         ceilings["clause_parity"] = "PARITY"
 
     # Dimension 3: Adversarial Survival
+    # A landed refutation (adversarial_survived=False) is a FAIL ceiling by design: it negates a core claim.
     if not evidence.adversarial_survived:
         # Refutation that lands is serious; treat as FAIL ceiling (conservative)
         ceilings["adversarial"] = "FAIL"
@@ -171,8 +171,7 @@ def parse_parity_toml(path: Path) -> dict:
 
     try:
         with open(path, "rb") as f:
-            content = f.read()
-            data = tomllib.loads(content.decode("utf-8"))
+            data = tomllib.load(f)
     except Exception as e:
         raise ValueError(f"Failed to parse parity TOML at {path}: {e}") from e
 

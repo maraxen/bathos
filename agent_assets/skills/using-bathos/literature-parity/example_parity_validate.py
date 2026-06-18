@@ -17,6 +17,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from bathos.parity import ParityEvidence, compute_grade
+
 
 def load_parity_config(config_path: str) -> dict[str, Any]:
     """Load parity.bth.toml configuration."""
@@ -25,8 +27,8 @@ def load_parity_config(config_path: str) -> dict[str, Any]:
     example_config = {
         "paper_pdf": "path/to/paper.pdf",
         "impl_paths": ["src/method.py"],
-        "recon_lenses": ["mathematical_formulation", "algorithmic_detail"],
-        "attack_lenses": ["statistical_correctness", "hyperparameter_fidelity"],
+        "recon_lenses": ["math", "algo", "protocol"],
+        "attack_lenses": ["stats", "hyper", "struct"],
         "N": 3,  # reconstructors
         "M": 3,  # refutation attackers
         "equivalence_bound": 0.05,
@@ -148,30 +150,32 @@ def phase5_graded_verdict(config: dict, checklist: dict, adjudication: dict) -> 
     """
     Phase 5: Compute grade and produce verdict.
 
-    Uses cap-lattice to compute final grade from:
-      - Clause-parity % (MATCH count)
-      - Adversarial survival (defects found)
-      - Ambiguity load (unresolved core ambiguities)
-      - Reproduction rung
+    Uses the official cap-lattice grader (compute_grade) from bathos.parity.
+    Demonstrates the correct API: build ParityEvidence from evidence dimensions,
+    call compute_grade(), and extract grade and ceilings.
     """
-    # Compute clause-parity %
-    match_pct = (checklist["match_count"] / checklist["total"]) * 100
+    # Compute clause-parity as a fraction (0-1)
+    match_pct_fraction = checklist["match_count"] / checklist["total"]
 
-    # Apply ceilings
-    grade = "PARITY"  # start optimistic
-    if adjudication.get("verdict_direction") == "FAIL":
-        grade = "FAIL"
-    elif match_pct < 70:
-        grade = "FAIL"
-    elif match_pct < 90:
-        grade = "PARTIAL"
-    elif checklist["ambiguous_count"] > 0 and "mechanism" in [c["element"] for c in checklist["clauses"]]:
-        # Ambiguity in core mechanism caps to PARTIAL
-        grade = "PARTIAL"
+    # Determine adversarial survival from adjudication findings
+    adversarial_survived = not (adjudication.get("verdict_direction") == "FAIL")
 
+    # Build evidence and call the official grader
+    evidence = ParityEvidence(
+        clause_parity_pct=match_pct_fraction,
+        adversarial_survived=adversarial_survived,
+        invariant_pass=True,  # placeholder; would be set from orchestrator-run tests
+        reproduction_rung="R0",  # placeholder; depends on context
+        ambiguity_load="load_bearing" if checklist["ambiguous_count"] > 0 else "none",
+    )
+    grade_result = compute_grade(evidence)
+
+    # Extract final grade and ceilings for auditability
+    match_pct = match_pct_fraction * 100
     verdict = {
-        "grade": grade,
+        "grade": grade_result.grade,
         "clause_parity_pct": match_pct,
+        "ceilings": grade_result.ceilings,
         "defects_confirmed": adjudication.get("defects_confirmed", []),
         "invariant_tests": "tests/test_method_invariants.py (PASS)",
         "reproduce_plan": "See YYMMDD_paper-parity-verdict.md",

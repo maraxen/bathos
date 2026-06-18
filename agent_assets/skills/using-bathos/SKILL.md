@@ -777,14 +777,14 @@ impl_paths             = [
 reference_code         = null                          # Optional: if the paper published code, path to it
 citation_note          = "arXiv:1234.5678 describes the method in §3.2–3.4"
 recon_lenses           = [
-  "mathematical_formulation",
-  "algorithmic_detail",
-  "experimental_protocol"
+  "math",
+  "algo",
+  "protocol"
 ]                                                      # Default if omitted; customize for your paper
 attack_lenses          = [
-  "statistical_correctness",
-  "hyperparameter_fidelity",
-  "algorithmic_structure"
+  "stats",
+  "hyper",
+  "struct"
 ]                                                      # Default if omitted
 hypotheses             = [
   "core mechanism (coevolution reshuffle) is implemented faithfully",
