@@ -43,6 +43,7 @@ class ReproductionBlock:
     reproduces_run: str = ""         # run UUID
     tolerance_pct: float | None = None
     requires_pass_stem: str = ""     # script stem that must have outcome='pass' first
+    requires_parity_stem: str = ""   # script stem that must have a passing parity run first (F3 gate)
 
 
 @dataclass
@@ -153,10 +154,11 @@ def parse_sidecar(path: Path) -> Sidecar:
                 reproduces_run=repro_data.get("reproduces_run", ""),
                 tolerance_pct=repro_data.get("tolerance_pct", None),
                 requires_pass_stem=repro_data.get("requires_pass_stem", ""),
+                requires_parity_stem=repro_data.get("requires_parity_stem", ""),
             )
             # Warn on unknown keys in [reproduction]
             for key in repro_data:
-                if key not in {"reproduces_paper", "reproduces_run", "tolerance_pct", "requires_pass_stem"}:
+                if key not in {"reproduces_paper", "reproduces_run", "tolerance_pct", "requires_pass_stem", "requires_parity_stem"}:
                     logger.warning(f"Unknown key in [reproduction]: {key!r}")
 
         # Parse [controls] block (optional)

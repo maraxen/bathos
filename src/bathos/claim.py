@@ -179,7 +179,7 @@ def validate_claim(claim: ClaimFile, db: duckdb.DuckDBPyConnection | None = None
                 )
             )
 
-    # AC-13: Validate [baseline_parity] sub-blocks in confounds
+    # AC-13: Validate [confounds.reference_parity] sub-blocks in confounds
     for confound in claim.confounds:
         ref_par = confound.get("reference_parity", {})
         if not ref_par:

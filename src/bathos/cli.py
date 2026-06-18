@@ -958,6 +958,7 @@ def submit(
                 break
 
     # 3a. Check reproduction prerequisite gate (before cluster submission)
+    parsed_sidecar = None
     if sidecar_data:
         from bathos.prereg import check_reproduction_prerequisite
         from bathos.sidecar import parse_sidecar
@@ -997,6 +998,39 @@ def submit(
         except Exception as e:
             # Log but don't fail on gate check exceptions
             typer.echo(f"Warning: reproduction prerequisite check failed: {e}", err=True)
+
+    # 3b. Check parity confound gate (F3 submit-gate, mirrors reproduction gate)
+    if parsed_sidecar:
+        from bathos.parity import check_parity_confounds_for_submit
+
+        try:
+            result = check_parity_confounds_for_submit(parsed_sidecar, _catalog_dir())
+            stage_name = parsed_sidecar.stage_name or "exploration"
+
+            # Hard-block for validation/production if not satisfied and determinable
+            if result["satisfied"] is False and result["tier_enforced"]:
+                typer.echo(
+                    f"PARITY_PREREQUISITE_UNMET: no passing parity run for '{parsed_sidecar.reproduction.requires_parity_stem}' found",
+                    err=True,
+                )
+                raise typer.Exit(1)
+            # Advisory warning for exploration/calibration if not satisfied
+            elif result["satisfied"] is False and not result["tier_enforced"]:
+                typer.echo(
+                    f"WARNING: no passing parity run for '{parsed_sidecar.reproduction.requires_parity_stem}' found (advisory for {stage_name} stage)",
+                    err=True,
+                )
+            # Indeterminate case (warm DB absent): fail open with advisory
+            elif result["satisfied"] is None:
+                typer.echo(
+                    f"WARNING: could not determine parity prerequisite status for '{parsed_sidecar.reproduction.requires_parity_stem}' (warm DB absent); proceeding with caution",
+                    err=True,
+                )
+        except typer.Exit:
+            raise
+        except Exception as e:
+            # Log but don't fail on gate check exceptions
+            typer.echo(f"Warning: parity prerequisite check failed: {e}", err=True)
 
     # 4. Resolve cluster config
     try:
