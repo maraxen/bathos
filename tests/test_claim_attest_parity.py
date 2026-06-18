@@ -598,14 +598,13 @@ class TestParityConfoundCheck:
              datetime.now(UTC).isoformat(), str(Path("test_parity.claim.toml"))]
         )
 
-        # Create a passing PARITY run
+        # Create a passing PARITY run.
+        # Set parity_run_type via the column (authoritative), not metadata JSON
+        # (metadata JSON is NULL/unreliable after cool→warm compaction).
         parity_run_id = "run_parity_pass"
-        parity_metadata = json.dumps({
-            "parity_run_type": "literature_parity"
-        })
         temp_db.execute(
-            "INSERT INTO runs (id, campaign_id, outcome, metadata) VALUES (?, ?, ?, ?)",
-            [parity_run_id, campaign_id, "pass", parity_metadata]
+            "INSERT INTO runs (id, campaign_id, outcome, parity_run_type, metadata) VALUES (?, ?, ?, ?, ?)",
+            [parity_run_id, campaign_id, "pass", "literature_parity", "{}"]
         )
 
         # Manually update the claim file with parity_run_id bound
@@ -642,14 +641,12 @@ class TestParityConfoundCheck:
              datetime.now(UTC).isoformat(), str(Path("test_parity.claim.toml"))]
         )
 
-        # Create a PARTIAL run
+        # Create a PARTIAL run.
+        # Set parity_run_type via the column (authoritative), not metadata JSON.
         partial_run_id = "run_partial"
-        partial_metadata = json.dumps({
-            "parity_run_type": "literature_parity"
-        })
         temp_db.execute(
-            "INSERT INTO runs (id, campaign_id, outcome, metadata) VALUES (?, ?, ?, ?)",
-            [partial_run_id, campaign_id, "partial", partial_metadata]
+            "INSERT INTO runs (id, campaign_id, outcome, parity_run_type, metadata) VALUES (?, ?, ?, ?, ?)",
+            [partial_run_id, campaign_id, "partial", "literature_parity", "{}"]
         )
 
         # Manually update the claim file

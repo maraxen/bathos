@@ -112,12 +112,16 @@ def temp_db(tmp_path):
         )
     """)
 
-    # Create runs table for union gate and baseline parity tests
+    # Create runs table for union gate and baseline parity tests.
+    # Include outcome and parity_run_type (v9 schema) so the graded-path query
+    # in validate_claim (claim.py AC-13 block) works correctly.
     db.execute("""
         CREATE TABLE runs (
             id TEXT PRIMARY KEY,
             campaign_id TEXT,
             claim_discriminates TEXT,
+            outcome TEXT,
+            parity_run_type TEXT,
             metadata TEXT
         )
     """)
@@ -678,16 +682,21 @@ equivalence_bound = 5.0
 """)
         claim = parse_claim(claim_path)
 
-        # Create a run in the DB without the parity_metric in metadata
+        # Create a run in the DB without the parity_metric in metadata.
+        # Include outcome and parity_run_type columns (v9 schema) so the graded-path
+        # query succeeds; parity_run_type=NULL means this is a legacy run → graded path
+        # skips and the legacy equivalence-bound path fires.
         temp_db.execute("""
             CREATE TABLE IF NOT EXISTS runs (
                 id TEXT PRIMARY KEY,
+                outcome TEXT,
+                parity_run_type TEXT,
                 metadata TEXT
             )
         """)
         temp_db.execute(
-            "INSERT INTO runs (id, metadata) VALUES (?, ?)",
-            ["run_12345", json.dumps({"other_metric": 50.0})]
+            "INSERT INTO runs (id, outcome, parity_run_type, metadata) VALUES (?, ?, ?, ?)",
+            ["run_12345", "pass", None, json.dumps({"other_metric": 50.0})]
         )
         temp_db.commit()
 
@@ -755,16 +764,19 @@ equivalence_bound = 10.0
 """)
         claim = parse_claim(claim_path)
 
-        # Create baseline run with matching metric within bound
+        # Create baseline run with matching metric within bound.
+        # Include outcome and parity_run_type (v9 schema); NULL parity_run_type → legacy path.
         temp_db.execute("""
             CREATE TABLE IF NOT EXISTS runs (
                 id TEXT PRIMARY KEY,
+                outcome TEXT,
+                parity_run_type TEXT,
                 metadata TEXT
             )
         """)
         temp_db.execute(
-            "INSERT INTO runs (id, metadata) VALUES (?, ?)",
-            ["baseline_run", json.dumps({"metric1": 102.0})]
+            "INSERT INTO runs (id, outcome, parity_run_type, metadata) VALUES (?, ?, ?, ?)",
+            ["baseline_run", "pass", None, json.dumps({"metric1": 102.0})]
         )
         temp_db.commit()
 
@@ -799,16 +811,19 @@ equivalence_bound = 5.0
 """)
         claim = parse_claim(claim_path)
 
-        # Create baseline run with metric outside bound
+        # Create baseline run with metric outside bound.
+        # Include outcome and parity_run_type (v9 schema); NULL parity_run_type → legacy path.
         temp_db.execute("""
             CREATE TABLE IF NOT EXISTS runs (
                 id TEXT PRIMARY KEY,
+                outcome TEXT,
+                parity_run_type TEXT,
                 metadata TEXT
             )
         """)
         temp_db.execute(
-            "INSERT INTO runs (id, metadata) VALUES (?, ?)",
-            ["baseline_run", json.dumps({"metric1": 110.0})]
+            "INSERT INTO runs (id, outcome, parity_run_type, metadata) VALUES (?, ?, ?, ?)",
+            ["baseline_run", "pass", None, json.dumps({"metric1": 110.0})]
         )
         temp_db.commit()
 
