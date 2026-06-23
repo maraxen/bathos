@@ -56,13 +56,12 @@ def test_render_runs_table_basic(sample_run):
     render_runs_table([sample_run], console=console)
 
     result = output.getvalue()
-    assert "ID" in result
-    assert "Project" in result
-    assert "Status" in result
-    assert "Outcome" in result
-    assert "Duration" in result
-    assert "run-001" in result or "abc123d" in result  # ID or git short
-    assert "test_proj" in result
+    assert "Runs" in result
+    # Rich truncates wide tables with ellipsis; assert stable cell values, not headers.
+    assert "run-001" in result
+    assert "45.3s" in result
+    assert "pass" in result
+    assert "main" in result
 
 
 def test_render_runs_table_empty():
