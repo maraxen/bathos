@@ -28,6 +28,9 @@ app.add_typer(outputs_app, name="outputs")
 report_app = typer.Typer(help="Generate and emit campaign reports and manifests")
 app.add_typer(report_app, name="report")
 
+claim_app = typer.Typer(help="Manage claim-tier pre-registration files")
+app.add_typer(claim_app, name="claim")
+
 
 def _catalog_dir() -> Path:
     override = os.environ.get("BTH_CATALOG_DIR")
@@ -725,6 +728,104 @@ def campaign_conclude(
         raise typer.Exit(1)
     finally:
         db.close()
+
+
+@claim_app.command("scaffold")
+def claim_scaffold_cmd(
+    campaign_id: str = typer.Argument(..., help="Campaign ID (or prefix)"),
+):
+    """Scaffold a claim.bth.toml template for a campaign."""
+    import duckdb
+
+    from bathos.claim import scaffold_claim
+    from bathos.workspace import resolve_workspace
+
+    catalog_dir = _catalog_dir()
+    db_path = catalog_dir / "bathos.db"
+    if not db_path.exists():
+        typer.echo(f"Catalog database not found at {db_path}. Run 'bth compact' first.", err=True)
+        raise typer.Exit(1)
+
+    ws = resolve_workspace().fs_root
+    db = duckdb.connect(str(db_path), read_only=False)
+    try:
+        claim_path = scaffold_claim(campaign_id, db, ws)
+        typer.echo(f"Created: {claim_path}")
+    except RuntimeError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+    finally:
+        db.close()
+
+
+@claim_app.command("register")
+def claim_register_cmd(
+    path: Path = typer.Argument(..., help="Path to claim .toml file"),
+    campaign: str = typer.Option(..., "--campaign", "-c", help="Campaign ID (or prefix)"),
+    force: bool = typer.Option(False, "--force", help="Re-register if claim already bound"),
+):
+    """Register a claim file with a campaign (records path + SHA256 anchor)."""
+    import duckdb
+
+    from bathos.claim import register_claim
+    from bathos.workspace import resolve_workspace
+
+    catalog_dir = _catalog_dir()
+    db_path = catalog_dir / "bathos.db"
+    if not db_path.exists():
+        typer.echo(f"Catalog database not found at {db_path}. Run 'bth compact' first.", err=True)
+        raise typer.Exit(1)
+
+    ws = resolve_workspace().fs_root
+    db = duckdb.connect(str(db_path), read_only=False)
+    try:
+        register_claim(path, campaign, db, ws, force=force)
+        typer.echo(f"Registered claim for campaign {campaign[:8]}")
+    except (RuntimeError, FileNotFoundError) as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+    finally:
+        db.close()
+
+
+@claim_app.command("validate")
+def claim_validate_cmd(
+    path: Path = typer.Argument(..., help="Path to claim .toml file"),
+):
+    """Validate a claim TOML file (structural + optional catalog-backed checks)."""
+    import duckdb
+
+    from bathos.claim import parse_claim, validate_claim
+
+    try:
+        claim = parse_claim(path)
+    except FileNotFoundError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+
+    db = None
+    db_path = _catalog_dir() / "bathos.db"
+    if db_path.exists():
+        db = duckdb.connect(str(db_path), read_only=True)
+    try:
+        result = validate_claim(claim, db=db)
+    finally:
+        if db is not None:
+            db.close()
+
+    for info in result.infos:
+        typer.secho(f"info: {info}", fg="cyan")
+    for warning in result.warnings:
+        typer.secho(f"warning: {warning}", fg="yellow")
+    if result.errors:
+        for error in result.errors:
+            typer.echo(f"error: {error.message}", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"✓ {path} is valid")
 
 
 @campaign_app.command("attest-parity")

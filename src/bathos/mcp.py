@@ -1,9 +1,7 @@
 """FastMCP server for bathos experiment tracking.
 
-Provides 10 tools that mirror the CLI:
-- Query: list_runs, find_runs, get_run, run_sql
-- Compact/Archive: compact, archive
-- Check/Sync/Init/Run: check, sync, init, run
+Mirrors the CLI surface for agent use: query, compact/archive, check/sync/init/run,
+campaigns, claims, postmortem, outputs, repair, verify, and lint.
 """
 
 from __future__ import annotations
@@ -27,6 +25,7 @@ from bathos.campaigns import (
     conclude_campaign,
     create_campaign,
     CampaignError,
+    add_run_to_campaign,
     get_campaign,
     list_campaigns,
     review_campaign,
@@ -1160,12 +1159,58 @@ async def claim_validate(
             "path": path,
             "headline": claim.headline,
             "hypotheses_count": len(claim.hypotheses),
+            "warnings": result.warnings,
+            "infos": result.infos,
         }
     return {
         "ok": False,
         "errors": [e.message for e in result.errors],
+        "warnings": result.warnings,
+        "infos": result.infos,
         "error_code": "validation_failed",
     }
+
+
+@app.tool()
+@traced_tool
+async def claim_register(
+    path: str,
+    campaign_id: str,
+    catalog_dir: str | None = None,
+    workspace_root: str | None = None,
+    force: bool = False,
+) -> dict:
+    """Register a claim TOML file with a campaign (path + SHA256 anchor)."""
+    from bathos.claim import register_claim
+
+    cat_dir = _get_catalog_dir(catalog_dir)
+    db_path = cat_dir / "bathos.db"
+
+    if not db_path.exists():
+        return {"ok": False, "error": f"Catalog database not found at {db_path}"}
+
+    if workspace_root:
+        ws = Path(workspace_root).expanduser().resolve()
+    else:
+        from bathos.workspace import resolve_workspace
+
+        ws = resolve_workspace().fs_root
+
+    try:
+        import duckdb
+
+        db = duckdb.connect(str(db_path), read_only=False)
+        register_claim(Path(path), campaign_id, db, ws, force=force)
+        db.close()
+        return {
+            "ok": True,
+            "path": path,
+            "campaign_id": campaign_id,
+            "force": force,
+            "message": f"Registered claim for campaign {campaign_id}",
+        }
+    except (RuntimeError, FileNotFoundError) as e:
+        return {"ok": False, "error": str(e), "error_code": "register_failed"}
 
 
 @app.tool()
@@ -1251,6 +1296,7 @@ def list_outputs_tool(
     run_id: str,
     workspace_root: str | None = None,
     live: bool = False,
+    catalog_dir: str | None = None,
 ) -> dict:
     """List output files for a given run ID.
 
@@ -1260,21 +1306,23 @@ def list_outputs_tool(
     from bathos.config import find_project_config, load_project_config, default_catalog_dir
     import json
 
-    if workspace_root:
+    if catalog_dir:
+        cat = Path(catalog_dir).expanduser().resolve()
+    elif workspace_root:
         ws = Path(workspace_root)
         config_path = find_project_config(ws)
         if config_path:
-            catalog_dir = load_project_config(config_path).catalog_dir
+            cat = load_project_config(config_path).catalog_dir
         else:
-            catalog_dir = default_catalog_dir()
+            cat = default_catalog_dir()
     else:
         config_path = find_project_config()
         if config_path:
-            catalog_dir = load_project_config(config_path).catalog_dir
+            cat = load_project_config(config_path).catalog_dir
         else:
-            catalog_dir = default_catalog_dir()
+            cat = default_catalog_dir()
 
-    run = get_run(run_id, catalog_dir)
+    run = get_run(run_id, cat)
     if not run:
         return {"error": f"Run not found: {run_id}"}
 
@@ -1311,6 +1359,7 @@ def outputs_summary_tool(
     workspace_root: str | None = None,
     project: str | None = None,
     since: str | None = None,
+    catalog_dir: str | None = None,
 ) -> dict:
     """Aggregate output file statistics across runs.
 
@@ -1320,21 +1369,23 @@ def outputs_summary_tool(
     import json
     import duckdb
 
-    if workspace_root:
+    if catalog_dir:
+        cat = Path(catalog_dir).expanduser().resolve()
+    elif workspace_root:
         ws = Path(workspace_root)
         config_path = find_project_config(ws)
         if config_path:
-            catalog_dir = load_project_config(config_path).catalog_dir
+            cat = load_project_config(config_path).catalog_dir
         else:
-            catalog_dir = default_catalog_dir()
+            cat = default_catalog_dir()
     else:
         config_path = find_project_config()
         if config_path:
-            catalog_dir = load_project_config(config_path).catalog_dir
+            cat = load_project_config(config_path).catalog_dir
         else:
-            catalog_dir = default_catalog_dir()
+            cat = default_catalog_dir()
 
-    db_path = catalog_dir / "bathos.db"
+    db_path = cat / "bathos.db"
     if not db_path.exists():
         return {"rows": [], "since": since, "note": "Catalog not yet compacted. Run 'bth compact' first."}
 
@@ -1390,6 +1441,227 @@ def outputs_summary_tool(
             pass
 
     return {"rows": list(aggregated.values()), "since": since}
+
+
+@app.tool("list_outputs")
+@traced_tool
+async def mcp_list_outputs_tool(
+    run_id: str,
+    catalog_dir: str | None = None,
+    workspace_root: str | None = None,
+    live: bool = False,
+) -> dict:
+    """List output files registered for a run."""
+    return list_outputs_tool(
+        run_id=run_id,
+        catalog_dir=catalog_dir,
+        workspace_root=workspace_root,
+        live=live,
+    )
+
+
+@app.tool("outputs_summary")
+@traced_tool
+async def mcp_outputs_summary_tool(
+    workspace_root: str | None = None,
+    project: str | None = None,
+    since: str | None = None,
+    catalog_dir: str | None = None,
+) -> dict:
+    """Aggregate output file statistics across runs."""
+    return outputs_summary_tool(
+        workspace_root=workspace_root,
+        project=project,
+        since=since,
+        catalog_dir=catalog_dir,
+    )
+
+
+def campaign_add_tool(
+    run_id: str = "",
+    campaign_id: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Add a run to a campaign."""
+    if not run_id:
+        return {"error": "run_id parameter is required"}
+    if not campaign_id:
+        return {"error": "campaign_id parameter is required"}
+
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    import duckdb
+
+    db = duckdb.connect(str(cat_dir / "bathos.db"))
+    try:
+        add_run_to_campaign(db, campaign_id, run_id)
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "campaign_id": campaign_id,
+            "message": f"Added run {run_id} to campaign {campaign_id}",
+        }
+    except CampaignError as e:
+        return {"ok": False, "error": str(e)}
+    finally:
+        db.close()
+
+
+def campaign_show_tool(
+    campaign_id: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Show campaign details."""
+    if not campaign_id:
+        return {"error": "campaign_id parameter is required"}
+
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    import duckdb
+
+    db = duckdb.connect(str(cat_dir / "bathos.db"), read_only=True)
+    try:
+        campaign = get_campaign(db, campaign_id)
+        if campaign is None:
+            return {"ok": False, "error": f"Campaign not found: {campaign_id}"}
+        return {
+            "ok": True,
+            "campaign_id": campaign.id,
+            "name": campaign.name,
+            "mode": campaign.mode,
+            "status": campaign.status,
+            "question": campaign.question,
+            "hypothesis": campaign.hypothesis,
+            "started_at": campaign.started_at,
+            "concluded_at": campaign.concluded_at,
+            "outcome_label": campaign.outcome_label,
+            "conclusion": campaign.conclusion,
+        }
+    finally:
+        db.close()
+
+
+def verify_tool(
+    tier: str = "all",
+    catalog_dir: str = "",
+    archive_dir: str = "",
+) -> dict:
+    """Verify catalog integrity across cool, warm, and archive tiers."""
+    from bathos.verify import verify_all, verify_archive, verify_cool, verify_warm
+
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    archive_root = Path(archive_dir).expanduser() if archive_dir else Path.home() / ".bth" / "archive"
+
+    if tier == "cool":
+        results = [verify_cool(cat_dir)]
+    elif tier == "warm":
+        results = [verify_warm(cat_dir)]
+    elif tier == "archive":
+        results = [verify_archive(archive_root)]
+    elif tier == "all":
+        results = verify_all(cat_dir, archive_root)
+    else:
+        return {"ok": False, "error": f"Unknown tier: {tier!r}"}
+
+    payload = {
+        "ok": all(r.ok for r in results),
+        "results": [
+            {"tier": r.tier, "ok": r.ok, "warnings": r.warnings, "errors": r.errors}
+            for r in results
+        ],
+    }
+    return payload
+
+
+def lint_tool(project_root: str = "") -> dict:
+    """Lint scripts/ and claim files for naming and structural issues."""
+    from bathos.linter import (
+        IssueSeverity,
+        check_adversarial_checks,
+        check_baseline_ref_exists,
+        check_bypass_trend,
+        check_canonical_stage_names,
+        check_claim_opaque_labels,
+        check_ephemeral_output_paths,
+        check_residual_rates,
+        check_threshold_basis,
+        check_todo_strings_in_scaffold,
+        check_unfired_branches,
+        lint_project,
+    )
+
+    root = Path(project_root) if project_root else Path.cwd()
+    issues = lint_project(root.resolve())
+    issues.extend(check_claim_opaque_labels(root.resolve()))
+    issues.extend(check_adversarial_checks(root.resolve()))
+    issues.extend(check_threshold_basis(root.resolve()))
+    issues.extend(check_todo_strings_in_scaffold(root.resolve()))
+
+    catalog_dir = _get_catalog_dir(None)
+    db_path = catalog_dir / "bathos.db"
+    if db_path.exists():
+        issues.extend(check_residual_rates(catalog_dir))
+        issues.extend(check_bypass_trend(catalog_dir))
+        issues.extend(check_unfired_branches(catalog_dir))
+        issues.extend(check_ephemeral_output_paths(catalog_dir))
+        issues.extend(check_canonical_stage_names(catalog_dir))
+        issues.extend(check_baseline_ref_exists(root.resolve(), catalog_dir, db_path))
+
+    errors = [i for i in issues if i.severity == IssueSeverity.ERROR]
+    warnings = [i for i in issues if i.severity == IssueSeverity.WARNING]
+    return {
+        "ok": len(errors) == 0,
+        "error_count": len(errors),
+        "warning_count": len(warnings),
+        "issues": [
+            {
+                "severity": i.severity.value,
+                "path": str(i.path),
+                "issue": i.issue,
+                "detail": i.detail,
+            }
+            for i in issues
+        ],
+    }
+
+
+@app.tool("campaign_add")
+@traced_tool
+async def mcp_campaign_add_tool(
+    run_id: str = "",
+    campaign_id: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Add a run to a campaign."""
+    return campaign_add_tool(run_id=run_id, campaign_id=campaign_id, catalog_dir=catalog_dir)
+
+
+@app.tool("campaign_show")
+@traced_tool
+async def mcp_campaign_show_tool(
+    campaign_id: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Show campaign details."""
+    return campaign_show_tool(campaign_id=campaign_id, catalog_dir=catalog_dir)
+
+
+@app.tool("verify")
+@traced_tool
+async def mcp_verify_tool(
+    tier: str = "all",
+    catalog_dir: str = "",
+    archive_dir: str = "",
+) -> dict:
+    """Verify catalog integrity."""
+    return verify_tool(tier=tier, catalog_dir=catalog_dir, archive_dir=archive_dir)
+
+
+@app.tool("lint")
+@traced_tool
+async def mcp_lint_tool(
+    project_root: str = "",
+) -> dict:
+    """Lint project scripts and claim files."""
+    return lint_tool(project_root=project_root)
 
 
 @app.tool("repair_scan")
