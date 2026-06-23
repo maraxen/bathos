@@ -451,7 +451,7 @@ def check(
     ),
 ):
     """Check runs for git-drift validity against current HEAD."""
-    from bathos.checker import check_output_files, check_runs
+    from bathos.checker import check_output_files, check_output_sha_drift, check_runs
     from bathos.query import get_run
 
     catalog_dir = _catalog_dir()
@@ -480,6 +480,8 @@ def check(
         if result.status == "STALE":
             stale_count += 1
 
+    drift_count = 0
+
     # Check output files if requested
     if check_outputs:
         typer.secho("\n[Output File Status]", fg="cyan")
@@ -498,10 +500,35 @@ def check(
             else:
                 typer.secho(f"  {result.run_id}: no output files", fg="dim")
 
-    # Exit with error if any STALE runs found
-    if stale_count > 0:
+        typer.secho("\n[Output SHA Drift]", fg="cyan")
+        for result in results:
+            run = get_run(result.run_id, catalog_dir)
+            if run is None:
+                continue
+            drift_results = check_output_sha_drift(run)
+            recorded = [d for d in drift_results if d.status != "UNRECORDED"]
+            if not recorded:
+                continue
+            for drift in recorded:
+                if drift.status == "OK":
+                    typer.secho(
+                        f"  {result.run_id}: {drift.path} (sha ok)",
+                        fg="green",
+                    )
+                else:
+                    drift_count += 1
+                    typer.secho(
+                        f"  {result.run_id}: {drift.path} ({drift.status.lower()})",
+                        fg="red",
+                    )
+
+    # Exit with error if any STALE runs or SHA drift found
+    if stale_count > 0 or drift_count > 0:
         typer.echo()
-        typer.echo(f"Warning: {stale_count} stale run(s) detected", err=True)
+        if stale_count > 0:
+            typer.echo(f"Warning: {stale_count} stale run(s) detected", err=True)
+        if drift_count > 0:
+            typer.echo(f"Warning: {drift_count} output SHA drift(s) detected", err=True)
         raise typer.Exit(1)
 
 

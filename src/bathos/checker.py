@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -26,6 +27,16 @@ class OutputCheckResult:
     path: str
     status: str  # "present", "missing", "unreadable"
     size_bytes: int = 0
+
+
+@dataclass
+class OutputShaDriftResult:
+    """Result of comparing catalogued output SHA256 to the file on disk."""
+
+    path: str
+    recorded_sha256: str
+    current_sha256: str | None
+    status: Literal["OK", "DRIFT", "MISSING", "UNRECORDED", "UNREADABLE"]
 
 
 def check_runs(
@@ -105,3 +116,116 @@ def check_output_files(run: Run) -> list[OutputCheckResult]:
         )
 
     return results
+
+
+def check_output_sha_drift(run: Run) -> list[OutputShaDriftResult]:
+    """Compare warm-tier output_metadata SHA256 hashes to on-disk files.
+
+    Args:
+        run: Run object with output_metadata JSON (warm tier)
+
+    Returns:
+        List of OutputShaDriftResult for each catalogued output with a recorded hash
+    """
+    from bathos.compact import _collect_output_metadata
+
+    if not run.output_metadata or run.output_metadata == "[]":
+        return []
+
+    try:
+        entries = json.loads(run.output_metadata)
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+    if not isinstance(entries, list):
+        return []
+
+    results: list[OutputShaDriftResult] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        path = entry.get("path", "")
+        recorded = entry.get("sha256")
+        if not path:
+            continue
+        if not recorded:
+            results.append(
+                OutputShaDriftResult(
+                    path=path,
+                    recorded_sha256="",
+                    current_sha256=None,
+                    status="UNRECORDED",
+                )
+            )
+            continue
+
+        fresh = _collect_output_metadata(path)
+        if fresh["status"] == "missing":
+            results.append(
+                OutputShaDriftResult(
+                    path=path,
+                    recorded_sha256=recorded,
+                    current_sha256=None,
+                    status="MISSING",
+                )
+            )
+        elif fresh["status"] == "unreadable":
+            results.append(
+                OutputShaDriftResult(
+                    path=path,
+                    recorded_sha256=recorded,
+                    current_sha256=None,
+                    status="UNREADABLE",
+                )
+            )
+        else:
+            current = fresh.get("sha256")
+            if current and current != recorded:
+                results.append(
+                    OutputShaDriftResult(
+                        path=path,
+                        recorded_sha256=recorded,
+                        current_sha256=current,
+                        status="DRIFT",
+                    )
+                )
+            elif current and current == recorded:
+                results.append(
+                    OutputShaDriftResult(
+                        path=path,
+                        recorded_sha256=recorded,
+                        current_sha256=current,
+                        status="OK",
+                    )
+                )
+            else:
+                results.append(
+                    OutputShaDriftResult(
+                        path=path,
+                        recorded_sha256=recorded,
+                        current_sha256=None,
+                        status="UNREADABLE",
+                    )
+                )
+
+    return results
+
+
+def output_metadata_has_sha_drift(output_metadata_json: str | None) -> bool:
+    """Return True if any catalogued output SHA no longer matches disk."""
+    if not output_metadata_json or output_metadata_json == "[]":
+        return False
+    return any(
+        r.status in ("DRIFT", "MISSING", "UNREADABLE")
+        for r in check_output_sha_drift(
+            Run(
+                project_slug="",
+                command="",
+                argv=[],
+                git_hash="",
+                git_branch="",
+                git_dirty=False,
+                output_metadata=output_metadata_json,
+            )
+        )
+    )

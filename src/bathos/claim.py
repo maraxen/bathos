@@ -784,7 +784,7 @@ def parity_confound_check(
     queries the run's outcome and metadata.parity_run_type to infer:
     - 'controlled' if outcome='pass' and parity_run_type='literature_parity'
     - 'controlled-by-protocol' if outcome='partial' and parity_run_type='literature_parity'
-    - 'uncontrolled' if parity_run_id is empty or run not found
+    - 'uncontrolled' if parity_run_id is empty, run not found, or output SHA drifted (AC-20)
 
     Args:
         claim_path: Path to claim.bth.toml
@@ -814,17 +814,29 @@ def parity_confound_check(
             # Empty parity_run_id
             confound_info["status"] = "uncontrolled"
         elif db is not None:
-            # Query the run
-            run_rows = db.execute(
-                "SELECT outcome, metadata, parity_run_type FROM runs WHERE id = ? OR id LIKE ?",
-                [parity_run_id, parity_run_id + "%"]
-            ).fetchall()
+            # Query the run (output_metadata column may be absent in minimal test schemas)
+            output_metadata_json: str | None = None
+            try:
+                run_rows = db.execute(
+                    "SELECT outcome, metadata, parity_run_type, output_metadata FROM runs WHERE id = ? OR id LIKE ?",
+                    [parity_run_id, parity_run_id + "%"],
+                ).fetchall()
+                if run_rows:
+                    outcome, metadata_json, parity_run_type_col, output_metadata_json = run_rows[0]
+            except Exception:
+                run_rows = db.execute(
+                    "SELECT outcome, metadata, parity_run_type FROM runs WHERE id = ? OR id LIKE ?",
+                    [parity_run_id, parity_run_id + "%"],
+                ).fetchall()
+                if run_rows:
+                    outcome, metadata_json, parity_run_type_col = run_rows[0]
+                else:
+                    run_rows = []
 
             if not run_rows:
                 # Run not found
                 confound_info["status"] = "uncontrolled"
             else:
-                outcome, metadata_json, parity_run_type_col = run_rows[0]
                 # Use the parity_run_type COLUMN as authoritative — it survives cool→warm
                 # compaction. The metadata JSON path is unreliable (NULL after compact).
                 parity_type = parity_run_type_col or ""
@@ -839,6 +851,13 @@ def parity_confound_check(
                         confound_info["status"] = "uncontrolled"
                 else:
                     confound_info["status"] = "uncontrolled"
+
+                # AC-20: downgrade controlled parity when verdict artifacts drift on disk
+                if confound_info["status"] in ("controlled", "controlled-by-protocol"):
+                    from bathos.checker import output_metadata_has_sha_drift
+
+                    if output_metadata_has_sha_drift(output_metadata_json):
+                        confound_info["status"] = "uncontrolled"
         else:
             # DB is None, mark as uncontrolled
             confound_info["status"] = "uncontrolled"

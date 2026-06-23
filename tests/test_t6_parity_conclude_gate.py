@@ -410,21 +410,101 @@ class TestAC08_ControlledParity:
 class TestAC20_SHADriftDetection:
     """AC-20: SHA-drift detection — parity run artifact modified → confound NOT controlled."""
 
-    def test_ac20_placeholder(self, tmp_catalog):
-        """Placeholder for AC-20 SHA-drift detection test."""
-        # AC-20 requires that if a parity run's output artifact SHA drifts
-        # (the artifact on disk doesn't match the recorded SHA), the confound
-        # is treated as uncontrolled.
-        #
-        # This is implemented in the F2 conclude-gate via parity_confound_check().
-        # The test would:
-        # 1. Create a parity run with output_shas recorded
-        # 2. Modify the artifact file so its SHA changes
-        # 3. Conclude a campaign and verify confound is uncontrolled
-        #
-        # For now, this serves as a marker that AC-20 is documented and ready
-        # for implementation when output_paths and SHA verification are added.
-        pytest.skip("AC-20 deferred to T8 — SHA-drift detection is a separate feature, not shipped in the B1 remediation")
+    def _make_parity_run_with_output(
+        self,
+        tmp_catalog,
+        project_slug: str,
+        outcome: str,
+        timestamp: datetime,
+        artifact: Path,
+    ) -> str:
+        run = Run(
+            project_slug=project_slug,
+            command="python parity_validate.py",
+            argv=["python", "parity_validate.py"],
+            git_hash="def456",
+            git_branch="main",
+            git_dirty=False,
+            timestamp=timestamp,
+            status="completed",
+            exit_code=0,
+            outcome=outcome,
+            parity_run_type="literature_parity",
+            output_paths=[str(artifact)],
+        )
+        write_run(run, tmp_catalog)
+        return run.id
+
+    def test_ac20_sha_drift_marks_parity_uncontrolled_and_downgrades_conclude(
+        self, tmp_catalog, tmp_path, clean_db, claim_with_parity_confound
+    ):
+        """Parity artifact SHA drift after compact → uncontrolled + confirmation downgrade."""
+        db = clean_db
+        artifact = tmp_path / "parity_verdict.md"
+        artifact.write_text("# PARITY\n\nGrade: PARITY")
+
+        parity_run_id = self._make_parity_run_with_output(
+            tmp_catalog,
+            "test_proj",
+            "pass",
+            datetime(2026, 6, 1, 14, 0, 0, tzinfo=UTC),
+            artifact,
+        )
+
+        db.close()
+        compact(tmp_catalog)
+        db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+
+        claim_with_run_id = tmp_path / "claim_with_parity_sha.bth.toml"
+        updated = claim_with_parity_confound.read_text().replace(
+            'parity_run_id = ""', f'parity_run_id = "{parity_run_id}"'
+        )
+        claim_with_run_id.write_text(updated)
+
+        before = parity_confound_check(claim_with_run_id, db)
+        assert any(c["status"] == "controlled" for c in before["confounds"]), before
+
+        campaign = create_campaign(
+            db,
+            name="AC20 SHA Drift",
+            project_slug="test_proj",
+            mode="confirmation",
+        )
+        register_claim(claim_with_run_id, campaign.id, db, tmp_path)
+
+        campaign_time = datetime.fromisoformat(campaign.started_at)
+        run_time = campaign_time.replace(microsecond=0) + dt.timedelta(minutes=1)
+        run = Run(
+            project_slug="test_proj",
+            command="python test.py",
+            argv=["python", "test.py"],
+            git_hash="abc123",
+            git_branch="main",
+            git_dirty=False,
+            timestamp=run_time,
+            status="completed",
+            exit_code=0,
+        )
+        write_run(run, tmp_catalog)
+        db.close()
+        compact(tmp_catalog)
+        db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+        add_run_to_campaign(db, campaign.id, run.id)
+
+        # Mutate parity artifact after catalog snapshot (no further compact)
+        artifact.write_text("# MODIFIED\n\nGrade: PARTIAL")
+
+        after = parity_confound_check(claim_with_run_id, db)
+        assert all(c["status"] == "uncontrolled" for c in after["confounds"]), after
+
+        conclude_campaign(
+            db, campaign.id, "pass", "Artifact drifted", workspace_root=tmp_path
+        )
+
+        rows = db.execute(
+            "SELECT outcome_label FROM campaigns WHERE id = ?", [campaign.id]
+        ).fetchall()
+        assert rows[0][0] == "confounded"
 
 
 class TestStep5_ValidateClaimGradedPath:

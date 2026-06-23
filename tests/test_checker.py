@@ -317,3 +317,65 @@ def test_check_output_files_multiple(tmp_path: Path):
     assert results[0].status == "present"
     assert results[1].status == "present"
     assert results[2].status == "missing"
+
+
+def test_check_output_sha_drift_ok(tmp_path: Path):
+    """Verify check_output_sha_drift reports OK when hashes match."""
+    import json
+
+    from bathos.checker import check_output_sha_drift
+    from bathos.compact import _collect_output_metadata
+
+    output_file = tmp_path / "parity_verdict.md"
+    output_file.write_text("# PARITY")
+
+    meta = _collect_output_metadata(str(output_file))
+    output_metadata = json.dumps([{"path": str(output_file), **meta}])
+
+    run = Run(
+        project_slug="test",
+        command="test",
+        argv=["test"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+        output_metadata=output_metadata,
+    )
+
+    results = check_output_sha_drift(run)
+
+    assert len(results) == 1
+    assert results[0].status == "OK"
+    assert results[0].recorded_sha256 == results[0].current_sha256
+
+
+def test_check_output_sha_drift_detects_mutation(tmp_path: Path):
+    """Verify check_output_sha_drift reports DRIFT after file mutation."""
+    import json
+
+    from bathos.checker import check_output_sha_drift, output_metadata_has_sha_drift
+    from bathos.compact import _collect_output_metadata
+
+    output_file = tmp_path / "parity_verdict.md"
+    output_file.write_text("# PARITY")
+
+    meta = _collect_output_metadata(str(output_file))
+    output_metadata = json.dumps([{"path": str(output_file), **meta}])
+
+    output_file.write_text("# MODIFIED")
+
+    run = Run(
+        project_slug="test",
+        command="test",
+        argv=["test"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+        output_metadata=output_metadata,
+    )
+
+    results = check_output_sha_drift(run)
+
+    assert len(results) == 1
+    assert results[0].status == "DRIFT"
+    assert output_metadata_has_sha_drift(output_metadata)
