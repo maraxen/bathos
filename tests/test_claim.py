@@ -1486,6 +1486,79 @@ label = "Null"
         assert any(i.severity.value == "warning" for i in issues)
 
 
+class TestClaimDisplayLabels:
+    """Tests for display_label / format_hypothesis_ref helpers (#2604)."""
+
+    def test_display_label_prefers_label(self):
+        from bathos.claim import display_label
+
+        assert display_label({"id": "H1", "label": "Main effect"}) == "Main effect"
+
+    def test_display_label_falls_back_to_id(self):
+        from bathos.claim import display_label
+
+        assert display_label({"id": "H_main", "label": ""}) == "H_main"
+
+    def test_format_hypothesis_ref_unknown_id(self, temp_claim_file):
+        from bathos.claim import format_hypothesis_ref
+
+        claim = parse_claim(temp_claim_file)
+        assert format_hypothesis_ref(claim, "H_missing") == "H_missing"
+
+    def test_format_hypothesis_ref_includes_label(self, tmp_path):
+        from bathos.claim import format_hypothesis_ref
+
+        claim_path = tmp_path / "labels.claim.toml"
+        claim_path.write_text("""[claim]
+headline = "Test"
+kill_condition = "test"
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary mechanism"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null"
+
+[[claim.discriminability]]
+hypothesis_a = "H_primary"
+hypothesis_b = "H_null"
+planned_run_label = "run_a"
+predicted_outcome = ""
+""")
+        claim = parse_claim(claim_path)
+        result = validate_claim(claim)
+        assert not result.ok
+        msg = str(result.errors[0].message)
+        assert "Primary mechanism (H_primary)" in msg
+        assert "Null (H_null)" in msg
+
+    def test_ac12_coverage_report_includes_clause_labels(self, temp_claim_file, tmp_path):
+        from bathos.campaigns import emit_claim_coverage_report
+
+        claim = parse_claim(temp_claim_file)
+        campaign_id = "test_campaign"
+        catalog_dir = str(tmp_path / "catalog")
+
+        emit_claim_coverage_report(
+            db=None,
+            catalog_dir=catalog_dir,
+            campaign_id=campaign_id,
+            verdict="covered",
+            uncovered_clauses=[],
+            claim=claim,
+            bypass_reason=None,
+        )
+
+        report_path = Path(catalog_dir) / "sidecars" / campaign_id / f"claim_coverage_{campaign_id}.json"
+        with open(report_path) as f:
+            data = json.load(f)
+
+        assert "clause_labels" in data
+        assert data["clause_labels"]["C_main"]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 

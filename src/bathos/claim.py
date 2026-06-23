@@ -35,6 +35,52 @@ class ValidationResult:
 
 
 _OPAQUE_ID_RE = re.compile(r"^[A-Z][0-9]+$")
+_PLACEHOLDER_LABEL_RE = re.compile(r"^REQUIRED:\s*", re.IGNORECASE)
+
+
+def display_label(entity: dict) -> str:
+    """Return human-facing label for a claim entity, falling back to id."""
+    label = str(entity.get("label") or "").strip()
+    entity_id = str(entity.get("id") or "").strip()
+    if label:
+        return label
+    return entity_id if entity_id else "unknown"
+
+
+def format_hypothesis_ref(claim: ClaimFile, hypothesis_id: str) -> str:
+    """Resolve a hypothesis id to a human-readable reference string."""
+    for hypothesis in claim.hypotheses:
+        if hypothesis.get("id") == hypothesis_id:
+            label = str(hypothesis.get("label") or "").strip()
+            if label and label != hypothesis_id:
+                return f"{label} ({hypothesis_id})"
+            return display_label(hypothesis)
+    return hypothesis_id
+
+
+def format_clause_ref(clause: dict) -> str:
+    """Return human-facing union-gate clause reference."""
+    clause_id = str(clause.get("id") or "?").strip()
+    description = str(clause.get("description") or "").strip()
+    if description and description != clause_id:
+        return f"{description} ({clause_id})"
+    return description if description else clause_id
+
+
+def format_clause_list(claim: ClaimFile, clause_ids: list[str]) -> list[str]:
+    """Map union-gate clause ids to human-readable references."""
+    by_id = {c.get("id"): c for c in claim.union_gate_clauses}
+    return [format_clause_ref(by_id.get(cid, {"id": cid})) for cid in clause_ids]
+
+
+def is_placeholder_label(entity_id: str, label: str) -> bool:
+    """True when label is still a scaffold placeholder."""
+    stripped = label.strip()
+    if not stripped:
+        return False
+    if stripped == entity_id:
+        return True
+    return bool(_PLACEHOLDER_LABEL_RE.match(stripped))
 
 
 @dataclass
@@ -170,8 +216,8 @@ def validate_claim(claim: ClaimFile, db: duckdb.DuckDBPyConnection | None = None
     # AC-03: Check discriminability entries for missing predicted_outcome
     for disc in claim.discriminability:
         if "predicted_outcome" not in disc or not disc.get("predicted_outcome"):
-            h_a = disc.get("hypothesis_a", "?")
-            h_b = disc.get("hypothesis_b", "?")
+            h_a = format_hypothesis_ref(claim, disc.get("hypothesis_a", "?"))
+            h_b = format_hypothesis_ref(claim, disc.get("hypothesis_b", "?"))
             label = disc.get("planned_run_label", "?")
             errors.append(
                 ValidationError(
@@ -190,7 +236,7 @@ def validate_claim(claim: ClaimFile, db: duckdb.DuckDBPyConnection | None = None
         reference_metric = ref_par.get("reference_metric", "")
         reference_value = ref_par.get("reference_value")
         equivalence_bound = ref_par.get("equivalence_bound")
-        confound_label = confound.get("label", confound.get("id", "unknown"))
+        confound_label = display_label(confound)
 
         # State 1: parity_run_id empty or missing
         if not parity_run_id:
@@ -364,21 +410,21 @@ kill_condition = "REQUIRED: Under what conditions would the result contradict th
 regime = "Optional: Parameter ranges or conditions claimed to be covered"
 
 [[hypotheses]]
-id = "H_primary"
+id = "H_information_symmetry"
 label = "REQUIRED: Descriptive label for primary hypothesis"
 predicted_signature = "Optional: Expected metric fingerprint"
 
 [[hypotheses]]
-id = "H_null"
+id = "H_null_misspec"
 label = "REQUIRED: Null or misspecification hypothesis"
 predicted_signature = "Optional: Expected metric fingerprint if null hypothesis is true"
 
 [[assumptions]]
-id = "A_1"
+id = "A_measurement_valid"
 label = "REQUIRED: Descriptive assumption label"
 
 [[confounds]]
-id = "C_1"
+id = "C_topology_coupling"
 label = "REQUIRED: Confound label"
 [confounds.reference_parity]
 reference_paper = "Optional: Citation if baseline from literature"
@@ -391,8 +437,8 @@ parity_run_id = ""
 # Matrix indexed by hypothesis-pair × outcome-label
 # predicted_outcome: any outcome label from the runs, or "??" for unspecified
 [[claim.discriminability]]
-hypothesis_a = "H_primary"
-hypothesis_b = "H_null"
+hypothesis_a = "H_information_symmetry"
+hypothesis_b = "H_null_misspec"
 planned_run_label = "outcome_1"
 predicted_outcome = "??  # EDIT: assign expected outcome if run exists"
 
@@ -400,7 +446,7 @@ predicted_outcome = "??  # EDIT: assign expected outcome if run exists"
 [[claim.union_gate.clauses]]
 id = "C_main"
 description = "REQUIRED: What does this clause discriminate?"
-hypothesis_ids = ["H_primary", "H_null"]
+hypothesis_ids = ["H_information_symmetry", "H_null_misspec"]
 """
 
     claim_path = claims_dir / f"{campaign_name}.claim.toml"
@@ -804,7 +850,7 @@ def parity_confound_check(
 
         confound_info = {
             "id": confound.get("id", "unknown"),
-            "label": confound.get("label", ""),
+            "label": display_label(confound),
             "status": "uncontrolled",  # default
         }
 

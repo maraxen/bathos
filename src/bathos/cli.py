@@ -1453,6 +1453,7 @@ def lint(
         check_baseline_ref_exists,
         check_bypass_trend,
         check_canonical_stage_names,
+        check_claim_opaque_labels,
         check_ephemeral_output_paths,
         check_residual_rates,
         check_threshold_basis,
@@ -1462,6 +1463,9 @@ def lint(
     )
 
     issues = lint_project(project_root.resolve())
+
+    # Tier-1 claim label checks under .bth/claims/
+    issues.extend(check_claim_opaque_labels(project_root.resolve()))
 
     # Add Tier-2 file-based checks
     issues.extend(check_adversarial_checks(project_root.resolve()))

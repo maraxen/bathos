@@ -569,6 +569,71 @@ def check_threshold_basis(project_root: Path) -> list[LintIssue]:
     return issues
 
 
+def check_claim_opaque_labels(project_root: Path) -> list[LintIssue]:
+    """Tier-1: Warn on opaque claim IDs with missing or placeholder labels.
+
+    Scans `.bth/claims/**/*.toml` for hypothesis/confound entries matching
+    the same opaque-id rule used by validate_claim (AC-03/AC-14).
+    """
+    from bathos.claim import _OPAQUE_ID_RE, is_placeholder_label
+
+    issues: list[LintIssue] = []
+    claims_dir = project_root / ".bth" / "claims"
+    if not claims_dir.exists():
+        return issues
+
+    for claim_path in sorted(claims_dir.rglob("*.toml")):
+        try:
+            with open(claim_path, "rb") as f:
+                data = tomllib.load(f)
+        except Exception as exc:
+            issues.append(
+                LintIssue(
+                    path=claim_path,
+                    directory="claims",
+                    issue="claim_parse_error",
+                    severity=IssueSeverity.WARNING,
+                    detail=f"failed to parse claim TOML: {exc}",
+                )
+            )
+            continue
+
+        for section, entity_kind in (("hypotheses", "hypothesis"), ("confounds", "confound")):
+            for entity in data.get(section, []):
+                entity_id = str(entity.get("id", "")).strip()
+                if not entity_id or not _OPAQUE_ID_RE.match(entity_id):
+                    continue
+                label = str(entity.get("label", "")).strip()
+                if not label:
+                    issues.append(
+                        LintIssue(
+                            path=claim_path,
+                            directory="claims",
+                            issue=f"opaque_{entity_kind}_label",
+                            severity=IssueSeverity.WARNING,
+                            detail=(
+                                f"opaque {entity_kind} id '{entity_id}' missing descriptive label "
+                                "(bth claim validate will error at register/conclude)"
+                            ),
+                        )
+                    )
+                elif is_placeholder_label(entity_id, label):
+                    issues.append(
+                        LintIssue(
+                            path=claim_path,
+                            directory="claims",
+                            issue=f"placeholder_{entity_kind}_label",
+                            severity=IssueSeverity.WARNING,
+                            detail=(
+                                f"opaque {entity_kind} id '{entity_id}' still has placeholder label "
+                                f"'{label}'"
+                            ),
+                        )
+                    )
+
+    return issues
+
+
 def check_todo_strings_in_scaffold(project_root: Path) -> list[LintIssue]:
     """Tier-2: Warn when sidecar hypothesis or outcome decisions contain TODO placeholders.
 

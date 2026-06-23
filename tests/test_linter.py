@@ -998,3 +998,201 @@ x = "float"
     issues = check_todo_strings_in_scaffold(tmp_path)
     todo_issues = [i for i in issues if i.issue == "todo_in_scaffold"]
     assert len(todo_issues) == 0
+
+
+def test_check_claim_opaque_labels_missing_label(tmp_path):
+    from bathos.linter import check_claim_opaque_labels, IssueSeverity
+
+    claims_dir = tmp_path / ".bth" / "claims"
+    claims_dir.mkdir(parents=True)
+    (claims_dir / "bad.claim.toml").write_text("""[claim]
+headline = "Test"
+kill_condition = "test"
+
+[[hypotheses]]
+id = "H1"
+label = ""
+
+[[hypotheses]]
+id = "H_null"
+label = "Null hypothesis"
+""")
+
+    issues = check_claim_opaque_labels(tmp_path)
+    assert any(i.issue == "opaque_hypothesis_label" for i in issues)
+    assert all(i.severity == IssueSeverity.WARNING for i in issues)
+
+
+def test_check_claim_opaque_labels_placeholder_label(tmp_path):
+    from bathos.linter import check_claim_opaque_labels
+
+    claims_dir = tmp_path / ".bth" / "claims"
+    claims_dir.mkdir(parents=True)
+    (claims_dir / "placeholder.claim.toml").write_text("""[claim]
+headline = "Test"
+kill_condition = "test"
+
+[[hypotheses]]
+id = "H1"
+label = "REQUIRED: fill me in"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null"
+""")
+
+    issues = check_claim_opaque_labels(tmp_path)
+    assert any(i.issue == "placeholder_hypothesis_label" for i in issues)
+
+
+def test_check_claim_opaque_labels_confound_missing(tmp_path):
+    from bathos.linter import check_claim_opaque_labels
+
+    claims_dir = tmp_path / ".bth" / "claims"
+    claims_dir.mkdir(parents=True)
+    (claims_dir / "confound.claim.toml").write_text("""[claim]
+headline = "Test"
+kill_condition = "test"
+
+[[hypotheses]]
+id = "H_main"
+label = "Main"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null"
+
+[[confounds]]
+id = "C1"
+label = ""
+""")
+
+    issues = check_claim_opaque_labels(tmp_path)
+    assert any(i.issue == "opaque_confound_label" for i in issues)
+
+
+def test_check_claim_opaque_labels_descriptive_id_ok(tmp_path):
+    from bathos.linter import check_claim_opaque_labels
+
+    claims_dir = tmp_path / ".bth" / "claims"
+    claims_dir.mkdir(parents=True)
+    (claims_dir / "good.claim.toml").write_text("""[claim]
+headline = "Test"
+kill_condition = "test"
+
+[[hypotheses]]
+id = "H_information_symmetry"
+label = "Information symmetry holds"
+
+[[hypotheses]]
+id = "H_null_misspec"
+label = "Null"
+""")
+
+    issues = check_claim_opaque_labels(tmp_path)
+    assert issues == []
+
+
+def test_check_claim_opaque_labels_no_claims_dir(tmp_path):
+    from bathos.linter import check_claim_opaque_labels
+
+    assert check_claim_opaque_labels(tmp_path) == []
+
+
+def test_check_claim_opaque_labels_missing_label(tmp_path):
+    from bathos.linter import check_claim_opaque_labels, IssueSeverity
+
+    claims_dir = tmp_path / ".bth" / "claims"
+    claims_dir.mkdir(parents=True)
+    (claims_dir / "bad.claim.toml").write_text("""[claim]
+headline = "Test"
+kill_condition = "test"
+
+[[hypotheses]]
+id = "H1"
+label = ""
+
+[[hypotheses]]
+id = "H_null"
+label = "Null hypothesis"
+""")
+
+    issues = check_claim_opaque_labels(tmp_path)
+    assert any(i.issue == "opaque_hypothesis_label" for i in issues)
+    assert all(i.severity == IssueSeverity.WARNING for i in issues)
+
+
+def test_check_claim_opaque_labels_placeholder_label(tmp_path):
+    from bathos.linter import check_claim_opaque_labels
+
+    claims_dir = tmp_path / ".bth" / "claims"
+    claims_dir.mkdir(parents=True)
+    (claims_dir / "placeholder.claim.toml").write_text("""[claim]
+headline = "Test"
+kill_condition = "test"
+
+[[hypotheses]]
+id = "H1"
+label = "REQUIRED: fill me in"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null"
+""")
+
+    issues = check_claim_opaque_labels(tmp_path)
+    assert any(i.issue == "placeholder_hypothesis_label" for i in issues)
+
+
+def test_check_claim_opaque_labels_confound_missing(tmp_path):
+    from bathos.linter import check_claim_opaque_labels
+
+    claims_dir = tmp_path / ".bth" / "claims"
+    claims_dir.mkdir(parents=True)
+    (claims_dir / "confound.claim.toml").write_text("""[claim]
+headline = "Test"
+kill_condition = "test"
+
+[[hypotheses]]
+id = "H_main"
+label = "Main"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null"
+
+[[confounds]]
+id = "C1"
+label = ""
+""")
+
+    issues = check_claim_opaque_labels(tmp_path)
+    assert any(i.issue == "opaque_confound_label" for i in issues)
+
+
+def test_check_claim_opaque_labels_descriptive_id_ok(tmp_path):
+    from bathos.linter import check_claim_opaque_labels
+
+    claims_dir = tmp_path / ".bth" / "claims"
+    claims_dir.mkdir(parents=True)
+    (claims_dir / "good.claim.toml").write_text("""[claim]
+headline = "Test"
+kill_condition = "test"
+
+[[hypotheses]]
+id = "H_information_symmetry"
+label = "Information symmetry holds"
+
+[[hypotheses]]
+id = "H_null_misspec"
+label = "Null"
+""")
+
+    issues = check_claim_opaque_labels(tmp_path)
+    assert issues == []
+
+
+def test_check_claim_opaque_labels_no_claims_dir(tmp_path):
+    from bathos.linter import check_claim_opaque_labels
+
+    assert check_claim_opaque_labels(tmp_path) == []

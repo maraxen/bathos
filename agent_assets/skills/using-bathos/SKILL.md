@@ -600,6 +600,10 @@ bth campaign conclude <campaign-id> --outcome pass
 
 `bth claim scaffold` and `bth claim validate` are also exposed as MCP tools (`claim_scaffold`, `claim_validate`).
 
+### Descriptive labels (opaque IDs)
+
+Claim entities use short **ids** for machine cross-referencing (`H_information_symmetry`, `C_topology_coupling`) and a required **`label`** field for human-readable output. If an id matches the opaque pattern `/^[A-Z][0-9]+$/` (e.g. `H1`, `C2`), `bth claim validate` **errors** when `label` is blank. `bth lint` scans `.bth/claims/*.toml` and emits **warnings** for missing or placeholder labels (`REQUIRED: …`) before you register. Conclude-gate messages, parity confound checks, and `claim_coverage_*.json` (`clause_labels`) prefer labels over raw ids where available.
+
 ### `claim.bth.toml` anatomy
 
 ```toml

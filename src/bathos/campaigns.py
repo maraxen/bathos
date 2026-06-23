@@ -254,33 +254,45 @@ def conclude_campaign(
                 # Hard downgrade for confirmation/sequential
                 for confound in parity_uncontrolled:
                     print(f"Parity confound check: '{confound['label']}' is uncontrolled")
-                print(f"Parity confound check: verdict downgraded to 'confounded'")
+                print("Parity confound check: verdict downgraded to 'confounded'")
                 outcome_label = "confounded"
             elif campaign_mode == "exploration":
                 # Advisory warning for exploration
                 for confound in parity_uncontrolled:
-                    print(f"WARNING: Parity confound '{confound['label']}' is uncontrolled (exploration mode, no downgrade)")
+                    print(
+                        f"WARNING: Parity confound '{confound['label']}' is uncontrolled "
+                        "(exploration mode, no downgrade)"
+                    )
 
         # Run Union Gate (which may also downgrade if clauses are uncovered)
+        from bathos.claim import format_clause_list
+
         verdict, uncovered = run_union_gate(db, full_id, claim)
+        uncovered_display = format_clause_list(claim, uncovered)
 
         # AC-08: Gate behavior by campaign mode
         if uncovered:
             if campaign_mode in ("confirmation", "sequential"):
                 if force_verdict:
                     # AC-09: Bypass with audit trail
-                    print(f"Union Gate bypassed — unmapped clauses: {uncovered}")
+                    print(f"Union Gate bypassed — unmapped clauses: {uncovered_display}")
                     outcome_label = outcome_label  # Keep researcher's label
                     db.execute(
                         "UPDATE campaigns SET claim_mode='bypassed' WHERE id=?", [full_id]
                     )
                 else:
                     # AC-08: Soft-block downgrade to confounded
-                    print(f"Union Gate: verdict downgraded to 'confounded' — unmapped clauses: {uncovered}")
+                    print(
+                        "Union Gate: verdict downgraded to 'confounded' — "
+                        f"unmapped clauses: {uncovered_display}"
+                    )
                     outcome_label = "confounded"
             elif campaign_mode == "exploration":
                 # AC-08: Warning-only for exploration
-                print(f"WARNING: Union Gate — unmapped clauses: {uncovered} (exploration mode, no downgrade)")
+                print(
+                    f"WARNING: Union Gate — unmapped clauses: {uncovered_display} "
+                    "(exploration mode, no downgrade)"
+                )
 
         # AC-12: emit claim-coverage JSON sidecar after union gate
         verdict_str = "covered" if not uncovered else "confounded"
@@ -597,10 +609,19 @@ def emit_claim_coverage_report(
     verdict_blocked = (verdict == "confounded" and bypass_reason is None)
 
     # Build JSON payload
+    from bathos.claim import format_clause_ref
+
+    clause_labels = {
+        clause.get("id"): format_clause_ref(clause)
+        for clause in claim.union_gate_clauses
+        if clause.get("id")
+    }
+
     payload = {
         "coverage_fraction": coverage_fraction,
         "covered_clauses": covered_clauses,
         "uncovered_clauses": uncovered_clauses,
+        "clause_labels": clause_labels,
         "contradicted_clauses": [],  # AC-12: placeholder for future
         "verdict_blocked": verdict_blocked,
         "bypass_reason": bypass_reason,
