@@ -10,16 +10,18 @@ bathos is a standalone experiment tracking CLI for a single researcher across 10
 
 ---
 
-## Current Status (as of 2026-06-16)
+## Current Status (as of 2026-06-23)
 
-**Latest: v0.11.0 — 825 tests passing (4 skipped).**
+**Latest: v0.12.0 — 918 tests passing.**
 
 Full version history is in [`CHANGELOG.md`](CHANGELOG.md). Summary of current version:
 
-- **Claim-tier rigor** — `claim.py` (`bth claim scaffold/register/validate`), `claim.bth.toml` pre-registration, Union Gate at `bth campaign conclude` (clause-coverage check), `claim_coverage_<id>.json` sidecar, AC-13 `[baseline_parity]` confound lint, Signal 12 in sprint-audit, schema v8 (`claim_discriminates`, `claim_isolates` columns)
-- **Experimental controls discipline** — `stage_name` write path, `[reproduction]`/`[controls]` sidecar blocks, reproduction prerequisite gate at `bth submit` (hard exit for validation/production; advisory for exploration/calibration), `control_arm_rate` sprint-audit Signal 9, `baseline_ref` Tier-2 lint, novel/reproduces Tier-1 lint, scaffold fix, submit-provenance Parquet, bypass-rate Signal 10
-- **Worktree-aware workspace resolution** — `resolve_workspace(cwd)` separates catalog identity from live `fs_root`; `BTH_WORKSPACE_ROOT` env override for SLURM jobs
-- v0.10.x: `bth repair` (catalog corruption recovery), POPPER e-value sequential campaigns, `bth outputs list/summary`, schema v6
+- **Claim-tier rigor** — `bth claim scaffold/register/validate`, Union Gate at `bth campaign conclude`, `claim_coverage_<id>.json` sidecar (with `clause_labels`), AC-04/05/06 discriminability advisories, AC-13 `[baseline_parity]` confound lint, Signal 12 in sprint-audit, descriptive-label lint (`bth lint` on `.bth/claims/`), schema v8 (`claim_discriminates`, `claim_isolates`)
+- **Literature-parity v1** — `parity_validate.py`, `attest_parity()` / `bth campaign attest-parity`, F2 conclude-gate + F3 submit-gate, `parity_confound_check()`, Signal 13, schema v9 (`parity_run_type` COOL column), skill protocol in `/using-bathos`
+- **AC-20 SHA-drift** — `check_output_sha_drift()`; `bth check --check-outputs` flags drift; parity confound downgrades on artifact mutation
+- **Experimental controls discipline** — `stage_name` write path, `[reproduction]`/`[controls]` sidecar blocks, reproduction prerequisite gate at `bth submit`, `control_arm_rate` Signal 9, `baseline_ref` Tier-2 lint, novel/reproduces Tier-1 lint, submit-provenance Parquet, bypass-rate Signal 10
+- **Worktree-aware workspace resolution** — `resolve_workspace(cwd)`; `BTH_WORKSPACE_ROOT` env override for SLURM jobs
+- v0.10.x: `bth repair`, POPPER e-value sequential campaigns, `bth outputs list/summary`, structured MCP error taxonomy (#793)
 
 ---
 
