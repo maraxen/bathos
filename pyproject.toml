@@ -50,6 +50,19 @@ dev = [
     "ruff>=0.6",
     "pyright>=1.1",
 ]
+cisterna = ["cisterna; python_version >= '3.13'"]
+
+[tool.uv.sources]
+cisterna = { path = "../cisterna", editable = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-tmp-files>=0.0.2",
+    "pytest-json-report>=1.5",
+    "ruff>=0.6",
+    "pyright>=1.1",
+]
 
 [project.urls]
 Homepage = "https://github.com/mariellerossi/bathos"
@@ -91,12 +104,3 @@ ignore = ["E501"]
 [tool.pyright]
 typeCheckingMode = "strict"
 exclude = ["tests"]
-
-[dependency-groups]
-dev = [
-    "pytest>=8",
-    "pytest-tmp-files>=0.0.2",
-    "pytest-json-report>=1.5",
-    "ruff>=0.6",
-    "pyright>=1.1",
-]

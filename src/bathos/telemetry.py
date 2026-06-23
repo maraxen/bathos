@@ -213,6 +213,16 @@ def init_telemetry(
     if _INITIALIZED:
         return
 
+    from bathos.telemetry_bridge import init_via_cisterna
+
+    if init_via_cisterna(
+        level=level,
+        log_dir=log_dir,
+        max_bytes=max_bytes,
+        backup_count=backup_count,
+    ):
+        return
+
     # Initialize queue and handler tracking.
     _queue = queue.Queue(-1)  # unbounded
     _handlers.clear()
@@ -330,6 +340,11 @@ def event(event_name: str, **fields) -> None:
         event_name: event name (e.g., 'run.start', 'catalog.write'). Becomes the LogRecord name.
         **fields: arbitrary key-value pairs to include in the JSONL record.
     """
+    from bathos.telemetry_bridge import emit_via_cisterna
+
+    if emit_via_cisterna(event_name, **fields):
+        return
+
     global _lazy_init_warning_shown
 
     if not _INITIALIZED:
@@ -367,6 +382,12 @@ def span(name: str, **fields):
     Raises:
         Re-raises any exception caught during the span.
     """
+    from bathos.telemetry_bridge import span_via_cisterna
+
+    cisterna_span = span_via_cisterna(name, **fields)
+    if cisterna_span is not None:
+        return cisterna_span
+
     span_id = uuid.uuid4().hex
     t0 = time.monotonic_ns()
 

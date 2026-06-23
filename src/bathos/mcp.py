@@ -18,7 +18,8 @@ from pathlib import Path
 from fastmcp import FastMCP
 
 # Telemetry imports
-from bathos.telemetry import event, init_telemetry, mcp_request_id_var
+from bathos.telemetry import event, mcp_request_id_var
+from bathos.telemetry_bridge import init_server_telemetry
 
 # Import core modules
 from bathos.archive import archive as archive_runs
@@ -1476,10 +1477,10 @@ def mcp_server():
 
     Called by pyproject.toml entry point: bth-mcp
     """
-    init_telemetry()
+    init_server_telemetry()
     app.run()
 
 
 if __name__ == "__main__":
-    init_telemetry()
+    init_server_telemetry()
     app.run()
