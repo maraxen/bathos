@@ -9,7 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.11.0] - 2026-06-13
+## [0.12.0] - 2026-06-23
+
+### Added
+
+- **Claim-tier rigor** — pre-registered `claim.bth.toml` workflow for confirmation campaigns:
+  - **`bth claim scaffold/register/validate`** — campaign-linked claim files with SHA integrity at register/conclude
+  - **Union Gate** at `bth campaign conclude` — clause-coverage check; soft-block downgrade to `confounded` for confirmation/sequential modes
+  - **`claim_coverage_<id>.json` sidecar** (AC-12) — emitted after conclude with covered/uncovered clause lists
+  - **Heuristic discriminability lints** (AC-04/05/06) — zero-power, positive-testing-bias, and single-cell-gate advisories in `validate_claim` / `linter.py`
+  - **AC-13 `[baseline_parity]` confound lint** — baseline admissibility and equivalence-bound checks
+  - **Signal 12** in sprint-audit — flags confirmation campaigns with missing/unregistered claims
+  - **Schema v8** — `claim_discriminates` and `claim_isolates` columns on warm tier (compact INSERT fix verified in #2276)
+- **Literature-parity v1** — reusable cross-project baseline validation workflow (epic #2214):
+  - **`parity.bth.toml` schema** + validator; **X1 cap-lattice grader** (`compute_grade`)
+  - **`parity_validate.py`** runner + companion sidecar; **`attest_parity()`** atomic claim binding with R2 rollback (AC-21)
+  - **`parity_confound_check()`** — infers `controlled` / `controlled-by-protocol` / `uncontrolled` from `parity_run_type` column + run outcome
+  - **F2 conclude-gate** — downgrades confirmation verdict when `reference_parity` is uncontrolled
+  - **F3 submit-gate** — `check_parity_confounds_for_submit()` for sidecar-declared parity prerequisites
+  - **`bth campaign attest-parity`** + MCP **`claim_attest_parity`** (T8)
+  - **Signal 13** — flags uncontrolled `reference_parity` on confirmation campaigns with registered claims (T9)
+  - **Schema v9** — `parity_run_type` promoted to first-class COOL column (survives cool→warm compaction)
+  - **Skill section** — literature-parity protocol in `/using-bathos`
+- **AC-20 SHA-drift detection** (`#2580`) — `check_output_sha_drift()` compares catalog `output_metadata` SHA256 to on-disk files; `parity_confound_check()` downgrades controlled parity on drift; `bth check --check-outputs` reports drift and exits non-zero
+- **Structured MCP error taxonomy** (#793) — `BathosErrorCode`, `traced_tool` catch-and-shape envelope, `tests/test_mcp_envelope.py`
+
+### Fixed
+
+- **`claim_discriminates` / `claim_isolates` NULL-on-ingest** in compact INSERT (#2276)
+- **Parity gate remediation (B1)** — graded-path vs legacy equivalence-bound routing; `validate_claim` and conclude/submit gates aligned
+- **`rich_fmt` test stability** — assert cell values instead of Rich-truncated column headers (debt #237)
+
+### Notes
+
+- Total suite: 908 tests passing. Literature-parity spec: `.praxia/docs/specs/260618_literature-parity-v1-design.md`. Claim-tier spec: `.praxia/docs/specs/260616_bathos-claim-tier-rigor-open-design-call.md`.
+
+---
 
 ### Added
 
