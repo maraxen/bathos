@@ -539,6 +539,61 @@ def sprint_audit(hours: int = 24) -> dict:
             except Exception:
                 pass  # claim_path column absent on pre-v8 catalogs
 
+            # Signal 13: uncontrolled reference_parity on confirmation campaigns
+            # AC-14: flag confirmation campaigns with a published-method baseline
+            # that lacks a controlled literature-parity attestation.
+            project_root = Path(project.get("root", "."))
+            try:
+                confirmation_with_claims = db.execute(
+                    "SELECT name, id, claim_path FROM campaigns "
+                    "WHERE mode='confirmation' "
+                    "AND claim_path IS NOT NULL AND claim_path != '' "
+                    "AND status NOT IN ('abandoned','open')"
+                ).fetchall()
+                from bathos.claim import parse_claim, parity_confound_check
+
+                for cname, cid, claim_path_rel in confirmation_with_claims:
+                    abs_claim_path = project_root / claim_path_rel
+                    if not abs_claim_path.exists():
+                        anomalies.append(
+                            f"Confirmation campaign '{cname}' ({cid[:8]}) claim file "
+                            f"missing at {claim_path_rel} — reference_parity cannot be verified."
+                        )
+                        continue
+
+                    try:
+                        claim = parse_claim(abs_claim_path)
+                    except (FileNotFoundError, ValueError) as e:
+                        anomalies.append(
+                            f"Confirmation campaign '{cname}' ({cid[:8]}) claim file "
+                            f"unreadable: {e}"
+                        )
+                        continue
+
+                    has_reference_parity = any(
+                        "reference_parity" in c for c in claim.confounds
+                    )
+                    if not has_reference_parity:
+                        continue
+
+                    parity_result = parity_confound_check(abs_claim_path, db)
+                    uncontrolled = [
+                        c
+                        for c in parity_result.get("confounds", [])
+                        if c.get("status") == "uncontrolled"
+                    ]
+                    for confound in uncontrolled:
+                        anomalies.append(
+                            f"Confirmation campaign '{cname}' ({cid[:8]}) has "
+                            f"uncontrolled reference_parity confound "
+                            f"'{confound.get('label', confound.get('id', '?'))}' — "
+                            "run `bth campaign attest-parity` or conclude will downgrade."
+                        )
+            except Exception as e:
+                warnings.append(
+                    f"Project {project['slug']}: Signal 13 check failed — {e}"
+                )
+
             # Check signal thresholds and add anomalies.
             # All thresholds are CALIBRATION TARGETS (v0.6), not hard gates.
             # See ADR .praxia/docs/decisions/260601_sprint-audit-threshold-rationale.md

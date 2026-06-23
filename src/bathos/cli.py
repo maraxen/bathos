@@ -700,6 +700,31 @@ def campaign_conclude(
         db.close()
 
 
+@campaign_app.command("attest-parity")
+def campaign_attest_parity(
+    campaign_id: str = typer.Argument(..., help="Campaign ID (or prefix)"),
+    parity_run_id: str = typer.Argument(..., help="Parity run ID to bind to the campaign claim"),
+):
+    """Bind a passing literature-parity run to the campaign's claim (F4)."""
+    import duckdb
+
+    from bathos.claim import attest_parity
+    from bathos.workspace import resolve_workspace
+
+    workspace_root = resolve_workspace().fs_root
+    db = duckdb.connect(str(_catalog_dir() / "bathos.db"))
+    try:
+        attest_parity(campaign_id, parity_run_id, db, workspace_root)
+        typer.echo(
+            f"Attested parity run {parity_run_id[:8]} on campaign {campaign_id[:8]}"
+        )
+    except (ValueError, RuntimeError, FileNotFoundError) as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+    finally:
+        db.close()
+
+
 @campaign_app.command("ls")
 def campaign_ls(
     status: str | None = typer.Option(None, "--status", help="Filter by status: open|concluded"),

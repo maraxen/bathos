@@ -1169,6 +1169,51 @@ async def claim_validate(
 
 @app.tool()
 @traced_tool
+async def claim_attest_parity(
+    campaign_id: str,
+    parity_run_id: str,
+    catalog_dir: str | None = None,
+    workspace_root: str | None = None,
+) -> dict:
+    """Bind a passing literature-parity run to a campaign's registered claim (F4).
+
+    Wraps attest_parity(): validates the run, updates the claim file atomically,
+    and re-anchors the campaign claim_sha256 in the warm catalog.
+    """
+    from bathos.claim import attest_parity
+
+    cat_dir = _get_catalog_dir(catalog_dir)
+    db_path = cat_dir / "bathos.db"
+
+    if not db_path.exists():
+        return {"ok": False, "error": f"Catalog database not found at {db_path}"}
+
+    if workspace_root:
+        ws = Path(workspace_root).expanduser().resolve()
+    else:
+        from bathos.workspace import resolve_workspace
+
+        ws = resolve_workspace().fs_root
+
+    try:
+        import duckdb
+
+        db = duckdb.connect(str(db_path), read_only=False)
+        attest_parity(campaign_id, parity_run_id, db, ws)
+        db.close()
+        return {
+            "campaign_id": campaign_id,
+            "parity_run_id": parity_run_id,
+            "message": (
+                f"Attested parity run {parity_run_id} on campaign {campaign_id}"
+            ),
+        }
+    except (ValueError, RuntimeError, FileNotFoundError) as e:
+        raise ValueError(str(e)) from e
+
+
+@app.tool()
+@traced_tool
 async def validate_sidecar(
     path: str,
 ) -> dict:
