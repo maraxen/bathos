@@ -204,3 +204,79 @@ def validate_postmortem(
     if ok and postmortem_path:
         event("postmortem.validated", path=str(postmortem_path), run_id=postmortem.run_id, sprint_id=None)
     return ValidationResult(ok=ok, errors=errors)
+
+
+def find_run_for_scaffold(run_id: str, catalog_dir: Path) -> tuple[str, str] | None:
+    """Find (command, project_slug) for run_id, checking the warm DB then cool fragments.
+
+    Unlike query.get_run(), this always checks both tiers regardless of whether a
+    warm DB file exists — a freshly-run script only lives in the cool tier until
+    the next `bth compact`, and callers here (postmortem scaffold) must still find it.
+    """
+    import duckdb
+
+    from bathos.catalog import read_runs
+
+    db_path = catalog_dir / "bathos.db"
+    if db_path.exists():
+        con = duckdb.connect(str(db_path))
+        try:
+            row = con.execute(
+                "SELECT command, project_slug FROM runs WHERE id = ?", [run_id]
+            ).fetchone()
+            if row:
+                return row[0], row[1]
+        except Exception:
+            pass
+        finally:
+            con.close()
+
+    for r in read_runs(catalog_dir):
+        if r.id == run_id:
+            return r.command, r.project_slug
+    return None
+
+
+def scaffold_postmortem_template(command: str, run_id: str, workspace_root: Path) -> Path:
+    """Resolve the script path from a run's command string and write a draft postmortem TOML.
+
+    Shared by the CLI (`bth postmortem scaffold`) and the MCP tool
+    (`postmortem_scaffold`) so the two surfaces cannot diverge (regression: debt #479).
+
+    Returns the path to the written template.
+    """
+    import shlex
+
+    parts = shlex.split(command) if command else []
+    script_path = None
+    for part in parts:
+        p = Path(part)
+        if p.suffix == ".py":
+            script_path = workspace_root / p
+            break
+        if (workspace_root / p).is_file():
+            script_path = workspace_root / p
+            break
+
+    if script_path is None:
+        script_path = workspace_root / "run.py"
+
+    script_path.parent.mkdir(parents=True, exist_ok=True)
+    postmortem_path = script_path.parent / f"{script_path.name}.{run_id}.bth.postmortem.toml"
+
+    toml_content = f"""run_id = "{run_id}"
+
+[postmortem]
+hypothesis_status = "unassigned"
+summary = ""
+unexpected_observations = ""
+root_cause = ""
+verdict_override = "none"
+next_steps = ""
+author = ""
+status = "draft"
+
+[asset_links]
+"""
+    postmortem_path.write_text(toml_content)
+    return postmortem_path

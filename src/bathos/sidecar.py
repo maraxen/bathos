@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 import tomllib
@@ -303,11 +304,21 @@ def evaluate_outcome(sidecar: Sidecar, result: dict) -> str:
         return "unknown"
 
     def _sql_literal(v: object, k: str) -> str:
+        if v is None:
+            return f"NULL AS {k}"
         if isinstance(v, bool):
             return f"{'TRUE' if v else 'FALSE'} AS {k}"
         if isinstance(v, float):
             return f"{v!r}::DOUBLE AS {k}"
-        return f"{v!r} AS {k}"
+        if isinstance(v, int):
+            return f"{v!r} AS {k}"
+        if isinstance(v, (dict, list)):
+            # Nested structures can never be addressed by a scalar SQL condition
+            # anyway; encode as an inert JSON string so the row still evaluates
+            # instead of raising on Python-repr syntax (e.g. dict {} / None).
+            v = json.dumps(v)
+        escaped = str(v).replace("'", "''")
+        return f"'{escaped}' AS {k}"
 
     cols = ", ".join(_sql_literal(v, k) for k, v in result.items())
     for label, spec in sidecar.outcomes.items():

@@ -169,6 +169,48 @@ class TestEmitCampaignReport:
         assert report.stage_breakdown == {"exploration": 1}
         assert report.conclude == "Test campaign completed successfully."
 
+    def test_emit_campaign_report_accepts_short_prefix(self, temp_catalog):
+        """emit_campaign_report must resolve an 8-char campaign-id prefix (regression: debt #477)."""
+        catalog_dir, db = temp_catalog
+
+        campaign = create_campaign(
+            db,
+            name="test_campaign",
+            project_slug="test_project",
+            mode="exploration",
+        )
+
+        run = Run(
+            project_slug="test_project",
+            command="python script.py",
+            argv=["python", "script.py"],
+            git_hash="abc123",
+            git_branch="main",
+            git_dirty=False,
+        )
+        db.execute("""
+            INSERT INTO runs (
+                id, project_slug, command, argv, git_hash, git_branch, git_dirty, timestamp,
+                outcome, outcome_is_residual, sidecar_mode, stage_name
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, [
+            run.id, run.project_slug, run.command, json.dumps(run.argv),
+            run.git_hash, run.git_branch, run.git_dirty, run.timestamp,
+            "success", False, "normal", "exploration"
+        ])
+        add_run_to_campaign(db, campaign.id, run.id)
+        db.execute(
+            "UPDATE campaigns SET conclusion = ?, status = 'concluded' WHERE id = ?",
+            ["Test conclusion", campaign.id]
+        )
+
+        emit_campaign_report(db, str(catalog_dir), campaign.id[:8])
+
+        report_path = Path(catalog_dir) / "sidecars" / campaign.id / "campaign_report.json"
+        assert report_path.exists(), f"Report not found at {report_path}"
+        report = CampaignReport.read_report(report_path)
+        assert report.total_runs == 1
+
     def test_emit_campaign_report_with_stage_breakdown(self, temp_catalog):
         """Given a campaign with multiple stages, stage_breakdown is correct."""
         catalog_dir, db = temp_catalog

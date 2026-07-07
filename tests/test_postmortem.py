@@ -517,6 +517,65 @@ def test_cli_postmortem_scaffold(tmp_path: Path, monkeypatch):
     toml_content = expected_toml_path.read_text()
     assert f'run_id = "{run.id}"' in toml_content
     assert "[postmortem]" in toml_content
+
+
+def test_mcp_postmortem_scaffold_matches_cli(tmp_path: Path, monkeypatch):
+    """The MCP mirror must find un-compacted (cool-tier-only) runs and write the same
+    template CLI does, instead of diverging (regression: debt #479)."""
+    import asyncio
+
+    from bathos import mcp
+
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    monkeypatch.delenv("BTH_WORKSPACE_ROOT", raising=False)
+
+    init_catalog(catalog_dir)
+
+    # 1. Nonexistent run_id must return an error, not create anything on disk.
+    result = asyncio.run(
+        mcp.postmortem_scaffold(
+            run_id="nonexistent", catalog_dir=str(catalog_dir), workspace_root=str(workspace_root)
+        )
+    )
+    assert result.get("error")
+    assert not any(workspace_root.iterdir())
+
+    # 2. A run that only exists in the cool tier (never compacted) must still be found —
+    # this is exactly the case the old query.get_run()-based lookup silently missed.
+    run = Run(
+        project_slug="testproj",
+        command="python scripts/experiments/run_nvt.py --n 10",
+        argv=["python", "scripts/experiments/run_nvt.py", "--n", "10"],
+        git_hash="hash123",
+        git_branch="main",
+        git_dirty=False,
+    )
+    write_run(run, catalog_dir)
+    assert not (catalog_dir / "bathos.db").exists()  # confirm: cool tier only, no compaction yet
+
+    script_dir = workspace_root / "scripts" / "experiments"
+    script_dir.mkdir(parents=True)
+    (script_dir / "run_nvt.py").write_text("pass")
+
+    result = asyncio.run(
+        mcp.postmortem_scaffold(
+            run_id=run.id, catalog_dir=str(catalog_dir), workspace_root=str(workspace_root)
+        )
+    )
+    assert not result.get("error")
+
+    expected_toml_path = script_dir / f"run_nvt.py.{run.id}.bth.postmortem.toml"
+    assert expected_toml_path.exists()
+    assert result["path"] == str(expected_toml_path)
+    # No stray directory named after the run_id at the workspace root.
+    assert not (workspace_root / run.id).exists()
+
+    toml_content = expected_toml_path.read_text()
+    assert f'run_id = "{run.id}"' in toml_content
+    assert "[postmortem]" in toml_content
     assert "hypothesis_status =" in toml_content
     assert "[asset_links]" in toml_content
 

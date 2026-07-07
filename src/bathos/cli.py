@@ -1799,78 +1799,17 @@ def scaffold(
     run_id: str = typer.Argument(..., help="Run ID to scaffold a postmortem template for"),
 ):
     """Scaffold a new postmortem template for the given Run ID."""
-    import shlex
+    from bathos.postmortem import find_run_for_scaffold, scaffold_postmortem_template
+    from bathos.workspace import resolve_workspace
 
-    import duckdb
-
-    from bathos.catalog import read_runs
-
-    # 1. Search for run in DB
-    run_row = None
-    db_path = _catalog_dir() / "bathos.db"
-    if db_path.exists():
-        con = duckdb.connect(str(db_path))
-        try:
-            run_row = con.execute("SELECT command, project_slug FROM runs WHERE id = ?", [run_id]).fetchone()
-        except Exception:
-            pass
-        finally:
-            con.close()
-
-    if not run_row:
-        # Check cool fragments
-        cool_runs = read_runs(_catalog_dir())
-        for r in cool_runs:
-            if r.id == run_id:
-                run_row = (r.command, r.project_slug)
-                break
-
+    run_row = find_run_for_scaffold(run_id, _catalog_dir())
     if not run_row:
         typer.echo("Run not found", err=True)
         raise typer.Exit(1)
 
-    command = run_row[0]
-
-    # Get workspace root (live fs_root; worktree-aware, spec 260611)
-    from bathos.workspace import resolve_workspace
-
+    command, _project_slug = run_row
     workspace_root = resolve_workspace().fs_root
-
-    # Parse command to find the script
-    parts = shlex.split(command)
-    script_path = None
-    for part in parts:
-        p = Path(part)
-        if p.suffix == ".py":
-            script_path = workspace_root / p
-            break
-        if (workspace_root / p).is_file():
-            script_path = workspace_root / p
-            break
-
-    if not script_path:
-        # Fallback to run.py in workspace root
-        script_path = workspace_root / "run.py"
-
-    script_path.parent.mkdir(parents=True, exist_ok=True)
-    postmortem_path = script_path.parent / f"{script_path.name}.{run_id}.bth.postmortem.toml"
-
-    # Scaffold content
-    toml_content = f"""run_id = "{run_id}"
-
-[postmortem]
-hypothesis_status = "unassigned"
-summary = ""
-unexpected_observations = ""
-root_cause = ""
-verdict_override = "none"
-next_steps = ""
-author = ""
-status = "draft"
-
-[asset_links]
-"""
-    postmortem_path.write_text(toml_content)
+    postmortem_path = scaffold_postmortem_template(command, run_id, workspace_root)
     typer.echo(f"Scaffolded postmortem template at {postmortem_path}")
 
 

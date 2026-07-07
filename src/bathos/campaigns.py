@@ -52,6 +52,7 @@ def create_campaign(db, name: str, project_slug: str, mode: str, question: str |
 
 def add_run_to_campaign(db, campaign_id: str, run_id: str) -> None:
     """Add run to campaign (idempotent). For sequential campaigns, computes e-value and applies threshold lock."""
+    campaign_id = _resolve_campaign_id(db, campaign_id)
     campaign_rows = db.execute(
         "SELECT mode, started_at, stopping_threshold FROM campaigns WHERE id = ?",
         [campaign_id]
@@ -346,6 +347,10 @@ def list_campaigns(db, project_slug: str | None = None, status: str | None = Non
 
 def review_campaign(db, campaign_id: str) -> dict:
     """Generate campaign review: residual rate, bypass rate, outcome distribution, anomalies, and POPPER summary."""
+    try:
+        campaign_id = _resolve_campaign_id(db, campaign_id)
+    except CampaignError as e:
+        return {"error": str(e)}
     rows = db.execute("""
         SELECT r.id, r.sidecar_mode, r.outcome, r.outcome_is_residual
         FROM campaign_runs cr
@@ -452,6 +457,8 @@ def emit_campaign_report(db, catalog_dir: str, campaign_id: str, figure_manifest
 
     from bathos.campaign_report import CampaignReport
 
+    campaign_id = _resolve_campaign_id(db, campaign_id)
+
     # Fetch campaign metadata
     campaign_rows = db.execute(
         "SELECT conclusion FROM campaigns WHERE id = ?",
@@ -543,6 +550,8 @@ def emit_figure_manifest(db, catalog_dir: str, campaign_id: str) -> None:
     from pathlib import Path
 
     from bathos.figure_manifest import FigureManifest
+
+    campaign_id = _resolve_campaign_id(db, campaign_id)
 
     # Verify campaign exists
     campaign_rows = db.execute(

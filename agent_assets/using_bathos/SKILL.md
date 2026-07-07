@@ -125,7 +125,34 @@ n_steps = "int"
 - Exactly one outcome must have `is_residual = true`
 - `result_schema` declares all columns referenced by outcome conditions
 - No Python-style chained comparisons: use `AND` instead of `0.4 <= x < 0.7`
-- Script outputs JSON to path registered with `bth run --out`
+
+**How outcome evaluation actually finds your result JSON** — `bth run` reads it from, in order:
+1. `$BTH_RESULTS_PATH` — an env var `bth run` sets for the subprocess. **This is the
+   reliable mechanism; write your result dict here.**
+2. `<script_stem>.bth-results.json` adjacent to the script (fallback).
+3. A single registered `--out` JSON path (fallback) — only used when *exactly one*
+   `--out` path ends in `.json`; with zero or multiple candidates this is skipped
+   rather than guessing, and outcome stays `unknown`.
+
+Writing only to `--out` and never to `$BTH_RESULTS_PATH` is a common mistake that
+silently leaves `outcome='unknown'` for every run, even when the run completes
+successfully and the sidecar conditions would otherwise evaluate to `pass`. Prefer
+writing to both:
+
+```python
+import json
+import os
+
+result = {"temp_mean": 300.5, "temp_std": 2.3, "n_steps": 1000}
+
+with open(args.out, "w") as f:
+    json.dump(result, f)
+
+results_path = os.environ.get("BTH_RESULTS_PATH")
+if results_path:
+    with open(results_path, "w") as f:
+        json.dump(result, f)
+```
 
 ### Benchmark Sidecar Format
 

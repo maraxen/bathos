@@ -115,10 +115,16 @@ def traced_tool(fn):
                     "resolution_hint": hint,
                 }
 
-            # Success path: ensure four mandatory keys present, AFTER **result so they win
+            # Success path: fill in the four mandatory keys as defaults, but let the
+            # wrapped function's own values win where it explicitly set them — a tool
+            # that returns its own {"ok": False, "error": "..."} (rather than raising)
+            # must not have that silently clobbered into a fake success.
             if isinstance(result, dict):
-                return {**result, "ok": True, "error_code": None, "error": None,
-                        "resolution_hint": None}
+                merged = {"ok": True, "error_code": None, "error": None,
+                          "resolution_hint": None, **result}
+                if "ok" not in result and result.get("error") is not None:
+                    merged["ok"] = False
+                return merged
             return {"ok": True, "error_code": None, "error": None, "resolution_hint": None}
 
         except GateError as e:
@@ -943,13 +949,13 @@ async def postmortem_scaffold(
 
     Returns the path where the template was written.
     """
-    import shlex
-    from bathos.query import get_run as _get_run
+    from bathos.postmortem import find_run_for_scaffold, scaffold_postmortem_template
 
     cat_dir = _get_catalog_dir(catalog_dir)
-    run = _get_run(run_id, cat_dir)
-    if not run:
+    run_row = find_run_for_scaffold(run_id, cat_dir)
+    if not run_row:
         return {"error": f"Run '{run_id}' not found"}
+    command, _project_slug = run_row
 
     # Explicit workspace_root wins (AC-11); else resolve live fs_root (worktree-aware).
     if workspace_root:
@@ -959,35 +965,7 @@ async def postmortem_scaffold(
 
         ws = resolve_workspace().fs_root
 
-    # Derive script path from command
-    parts = shlex.split(run.command)
-    script_path = None
-    for part in parts:
-        p = Path(part)
-        if p.suffix == ".py":
-            script_path = ws / p
-            break
-    if not script_path:
-        script_path = ws / "run.py"
-
-    script_path.parent.mkdir(parents=True, exist_ok=True)
-    postmortem_path = script_path.parent / f"{script_path.name}.{run_id}.bth.postmortem.toml"
-
-    toml_content = f"""run_id = "{run_id}"
-
-[postmortem]
-hypothesis_status = "unassigned"
-summary = ""
-unexpected_observations = ""
-root_cause = ""
-verdict_override = "none"
-next_steps = ""
-author = ""
-status = "draft"
-
-[asset_links]
-"""
-    postmortem_path.write_text(toml_content)
+    postmortem_path = scaffold_postmortem_template(command, run_id, ws)
     return {"path": str(postmortem_path), "run_id": run_id}
 
 

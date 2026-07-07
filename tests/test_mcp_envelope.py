@@ -96,3 +96,47 @@ def test_error_envelope_has_all_four_keys(tmp_path: Path, monkeypatch, event_moc
     # Verify resolution_hint matches the registry
     assert result["resolution_hint"] == RESOLUTION_HINTS[BathosErrorCode.CATALOG_ERROR], \
         f"resolution_hint should match registry entry"
+
+
+def test_self_reported_error_dict_is_not_clobbered_to_success(tmp_path: Path, monkeypatch, event_mock):
+    """A tool that returns its own {"ok": False, "error": ...} dict (rather than
+    raising) must not have that silently overwritten into a fake success.
+
+    Regression: traced_tool's success-path merge used to do
+    `{**result, "ok": True, "error": None, ...}`, which put the defaults AFTER
+    **result and so always won — turning every self-reported failure dict into
+    {"ok": True, "error": None}. This is the root cause behind debt #477's report
+    of `campaign_add` returning {"ok": true} via MCP despite writing nothing.
+    """
+    catalog_dir = tmp_path / ".bth" / "catalog"
+    catalog_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
+
+    @traced_tool
+    async def mock_self_reported_error_tool(catalog_dir: str = ""):
+        """Mimics campaign_add_tool's except-block return shape."""
+        return {"ok": False, "error": "Campaign not found: deadbeef"}
+
+    result = asyncio.run(mock_self_reported_error_tool(catalog_dir=str(catalog_dir)))
+
+    assert result["ok"] is False, f"Expected ok=False to survive, got envelope: {result}"
+    assert result["error"] == "Campaign not found: deadbeef", \
+        f"Expected the real error message to survive, got envelope: {result}"
+
+
+def test_self_reported_bare_error_key_infers_ok_false(tmp_path: Path, monkeypatch, event_mock):
+    """A tool that returns only {"error": "..."} (no explicit "ok" key) must still
+    surface as ok=False, not the default ok=True."""
+    catalog_dir = tmp_path / ".bth" / "catalog"
+    catalog_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
+
+    @traced_tool
+    async def mock_bare_error_tool(catalog_dir: str = ""):
+        """Mimics run_tool's `if not script_path: return {"error": "..."}` pattern."""
+        return {"error": "script_path parameter is required"}
+
+    result = asyncio.run(mock_bare_error_tool(catalog_dir=str(catalog_dir)))
+
+    assert result["ok"] is False, f"Expected ok=False to be inferred, got envelope: {result}"
+    assert result["error"] == "script_path parameter is required"

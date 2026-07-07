@@ -1,6 +1,8 @@
 import sys
 from pathlib import Path
 
+import duckdb
+
 from bathos.catalog import init_catalog, read_runs
 from bathos.runner import run_script
 
@@ -285,6 +287,103 @@ def test_result_emission_fallback_path(tmp_catalog: Path, tmp_path: Path):
     assert len(runs) == 1
     # Outcome should be evaluated based on metadata from fallback file
     assert runs[0].outcome == "pass"
+
+
+def test_result_emission_falls_back_to_single_out_json(tmp_catalog: Path, tmp_path: Path):
+    """A script that only writes its result to --out (never $BTH_RESULTS_PATH) must
+    still get real outcome evaluation (regression: root cause of debt #485/#487/#369)."""
+    import textwrap
+
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    script = enforced / "run_test.py"
+    out_path = tmp_path / "results.json"
+    script.write_text(textwrap.dedent(f"""
+        import json
+        with open(r"{out_path}", "w") as f:
+            json.dump({{"temp_mean": 300.5, "temp_std": 2.3}}, f)
+    """))
+
+    sidecar = enforced / "run_test.bth.toml"
+    sidecar.write_text(textwrap.dedent("""
+        [experiment]
+        hypothesis = "test hypothesis"
+        [outcomes.pass]
+        condition = "temp_std < 5"
+        decision = "good"
+        reasoning = "stable temperature"
+        [outcomes.fail]
+        condition = "temp_std >= 5"
+        decision = "unstable"
+        reasoning = "poor stability"
+        is_residual = true
+        [result_schema]
+        temp_mean = "float"
+        temp_std = "float"
+    """))
+
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[str(out_path)],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 0
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert runs[0].outcome == "pass"
+
+
+def test_result_emission_does_not_guess_with_multiple_out_json(tmp_catalog: Path, tmp_path: Path):
+    """With more than one --out JSON path, the fallback must not guess which one is
+    the result file — outcome stays unevaluated rather than risking a wrong pick."""
+    import textwrap
+
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    script = enforced / "run_test.py"
+    out_a = tmp_path / "a.json"
+    out_b = tmp_path / "b.json"
+    script.write_text(textwrap.dedent(f"""
+        import json
+        with open(r"{out_a}", "w") as f:
+            json.dump({{"temp_mean": 300.5, "temp_std": 2.3}}, f)
+        with open(r"{out_b}", "w") as f:
+            json.dump({{"other": "data"}}, f)
+    """))
+
+    sidecar = enforced / "run_test.bth.toml"
+    sidecar.write_text(textwrap.dedent("""
+        [experiment]
+        hypothesis = "test hypothesis"
+        [outcomes.pass]
+        condition = "temp_std < 5"
+        decision = "good"
+        reasoning = "stable temperature"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "catch-all"
+        is_residual = true
+        [result_schema]
+        temp_mean = "float"
+        temp_std = "float"
+    """))
+
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[str(out_a), str(out_b)],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 0
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert runs[0].outcome == "unknown"
 
 
 def test_result_emission_missing_file(tmp_catalog: Path):
@@ -742,3 +841,119 @@ def test_parity_run_type_extracted_from_doubly_nested_metadata(tmp_catalog: Path
         f"Expected Run.parity_run_type='literature_parity', got {run.parity_run_type!r}. "
         "Runner.py must extract using: (json.loads(metadata) or {}).get('metadata', {}).get('parity_run_type')"
     )
+
+
+def test_run_with_campaign_populates_campaign_runs(tmp_catalog: Path):
+    """bth run --campaign must insert into campaign_runs, not just set runs.campaign_id (regression: debt #491)."""
+    from bathos.campaigns import create_campaign
+    from bathos.compact import compact
+
+    init_catalog(tmp_catalog)
+    compact(tmp_catalog)  # initializes warm schema (campaigns/runs/campaign_runs tables)
+
+    db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        campaign = create_campaign(db, name="test", project_slug="testproj", mode="exploration")
+    finally:
+        db.close()
+
+    exit_code = run_script(
+        argv=[sys.executable, "-c", "pass"],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        campaign_id=campaign.id,
+    )
+    assert exit_code == 0
+
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert runs[0].campaign_id == campaign.id
+
+    db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        rows = db.execute(
+            "SELECT run_id FROM campaign_runs WHERE campaign_id = ?", [campaign.id]
+        ).fetchall()
+    finally:
+        db.close()
+    assert [r[0] for r in rows] == [runs[0].id]
+
+
+def test_run_with_campaign_short_prefix_resolves_to_full_id(tmp_catalog: Path):
+    """bth run --campaign <prefix> must resolve+store the full UUID, not the raw prefix (regression: debt #491)."""
+    from bathos.campaigns import create_campaign
+    from bathos.compact import compact
+
+    init_catalog(tmp_catalog)
+    compact(tmp_catalog)
+
+    db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        campaign = create_campaign(db, name="test", project_slug="testproj", mode="exploration")
+    finally:
+        db.close()
+
+    exit_code = run_script(
+        argv=[sys.executable, "-c", "pass"],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        campaign_id=campaign.id[:8],
+    )
+    assert exit_code == 0
+
+    runs = read_runs(tmp_catalog)
+    assert runs[0].campaign_id == campaign.id
+
+    db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        rows = db.execute(
+            "SELECT run_id FROM campaign_runs WHERE campaign_id = ?", [campaign.id]
+        ).fetchall()
+    finally:
+        db.close()
+    assert [r[0] for r in rows] == [runs[0].id]
+
+
+def test_run_with_campaign_before_any_catalog_fails_fast(tmp_catalog: Path, tmp_path: Path):
+    """--campaign with no warm catalog yet must fail before running the subprocess (regression: debt #491)."""
+    init_catalog(tmp_catalog)
+    marker = tmp_path / "marker.txt"
+
+    exit_code = run_script(
+        argv=[sys.executable, "-c", f"open(r'{marker}', 'w').write('ran')"],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        campaign_id="nonexistent",
+    )
+
+    assert exit_code == 1
+    assert not marker.exists(), "subprocess must not run when --campaign cannot be resolved"
+    assert read_runs(tmp_catalog) == []
+
+
+def test_run_with_nonexistent_campaign_fails_fast(tmp_catalog: Path, tmp_path: Path):
+    """--campaign with a warm catalog but no matching campaign must fail before running (regression: debt #491)."""
+    from bathos.compact import compact
+
+    init_catalog(tmp_catalog)
+    compact(tmp_catalog)  # warm DB now exists, but has zero campaigns
+    marker = tmp_path / "marker.txt"
+
+    exit_code = run_script(
+        argv=[sys.executable, "-c", f"open(r'{marker}', 'w').write('ran')"],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        campaign_id="deadbeef",
+    )
+
+    assert exit_code == 1
+    assert not marker.exists(), "subprocess must not run when --campaign cannot be resolved"
+    assert read_runs(tmp_catalog) == []

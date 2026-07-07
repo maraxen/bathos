@@ -161,6 +161,77 @@ def test_evaluate_outcome_bool_result(tmp_path):
     assert label == "reproduced"
 
 
+def test_evaluate_outcome_none_field_does_not_crash(tmp_path):
+    """A None-valued result field must not crash evaluation (regression: debt #478)."""
+    from bathos.sidecar import parse_sidecar, evaluate_outcome
+    path = _write_toml(tmp_path, """
+        [experiment]
+        hypothesis = "h"
+        [outcomes.pass]
+        condition = "temp_std < 5"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Catch-all"
+        is_residual = true
+        [result_schema]
+        temp_std = "float"
+        seed_override = "int"
+    """)
+    s = parse_sidecar(path)
+    label = evaluate_outcome(s, {"temp_std": 2.1, "seed_override": None})
+    assert label == "pass"
+
+
+def test_evaluate_outcome_nested_dict_field_does_not_crash(tmp_path):
+    """A nested-dict result field (e.g. an 'args' blob) must not crash evaluation (regression: debt #478)."""
+    from bathos.sidecar import parse_sidecar, evaluate_outcome
+    path = _write_toml(tmp_path, """
+        [experiment]
+        hypothesis = "h"
+        [outcomes.pass]
+        condition = "temp_std < 5"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Catch-all"
+        is_residual = true
+        [result_schema]
+        temp_std = "float"
+    """)
+    s = parse_sidecar(path)
+    label = evaluate_outcome(s, {"temp_std": 2.1, "args": {"accuracy": 0.9, "loss": None}})
+    assert label == "pass"
+
+
+def test_evaluate_outcome_string_with_apostrophe_does_not_crash(tmp_path):
+    """A string result field containing an apostrophe must not break the generated SQL literal."""
+    from bathos.sidecar import parse_sidecar, evaluate_outcome
+    path = _write_toml(tmp_path, """
+        [experiment]
+        hypothesis = "h"
+        [outcomes.pass]
+        condition = "temp_std < 5"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Catch-all"
+        is_residual = true
+        [result_schema]
+        temp_std = "float"
+        note = "str"
+    """)
+    s = parse_sidecar(path)
+    label = evaluate_outcome(s, {"temp_std": 2.1, "note": "it's fine"})
+    assert label == "pass"
+
+
 def test_sidecar_agent_mode_parsed(tmp_path):
     from bathos.sidecar import parse_sidecar
     path = _write_toml(tmp_path, """

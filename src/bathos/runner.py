@@ -62,13 +62,20 @@ def _find_script_path(argv: list[str], cwd: Path) -> Path | None:
     return None
 
 
-def _read_result_emission(env_var_path: Path, script_path: Path | None) -> str:
+def _read_result_emission(
+    env_var_path: Path,
+    script_path: Path | None,
+    output_paths: list[str] | None = None,
+) -> str:
     """
-    Read result emission from either:
+    Read result emission from, in order:
     1. env_var_path (set by BTH_RESULTS_PATH env var)
     2. <script_stem>.bth-results.json adjacent to script (fallback)
+    3. a single registered --out JSON path (fallback for scripts that only write
+       their result to --out and never to $BTH_RESULTS_PATH — this was the root
+       cause of outcome staying 'unknown' for otherwise-passing runs; debt #485/#487/#369)
 
-    Returns JSON string, or "{}" if neither exists or if JSON is invalid.
+    Returns JSON string, or "{}" if none exist or none parse as valid JSON.
     """
     # Try env var path first
     if env_var_path.exists():
@@ -91,6 +98,21 @@ def _read_result_emission(env_var_path: Path, script_path: Path | None) -> str:
                 return content
             except (json.JSONDecodeError, OSError):
                 return "{}"
+
+    # Try a single registered --out JSON path. Only applied when exactly one
+    # candidate exists — with zero or multiple, guessing which one is "the"
+    # result file would be more likely to mislead than help.
+    if output_paths:
+        json_outs = [p for p in output_paths if p.endswith(".json")]
+        if len(json_outs) == 1:
+            out_path = Path(json_outs[0])
+            if out_path.exists():
+                try:
+                    content = out_path.read_text()
+                    json.loads(content)
+                    return content
+                except (json.JSONDecodeError, OSError):
+                    return "{}"
 
     return "{}"
 
@@ -176,6 +198,31 @@ def run_script(
     campaign_id: str | None = None,
 ) -> int:
     init_telemetry()
+
+    # Resolve --campaign up front (fail fast, before running the subprocess) and
+    # store the full UUID — never the raw prefix — on the run record.
+    resolved_campaign_id: str | None = None
+    if campaign_id:
+        import duckdb
+
+        from bathos.campaigns import CampaignError, _resolve_campaign_id
+
+        db_path = catalog_dir / "bathos.db"
+        if not db_path.exists():
+            typer.echo(
+                f"Error: --campaign {campaign_id!r} given but no campaign catalog exists yet "
+                "(run `bth campaign create` first)",
+                err=True,
+            )
+            return 1
+        campaign_db = duckdb.connect(str(db_path))
+        try:
+            resolved_campaign_id = _resolve_campaign_id(campaign_db, campaign_id)
+        except CampaignError as e:
+            typer.echo(f"Error: {e}", err=True)
+            return 1
+        finally:
+            campaign_db.close()
 
     # Warn if any registered output path is ephemeral
     ephemeral_outs = [p for p in output_paths if _is_ephemeral_path(p)]
@@ -285,12 +332,12 @@ def run_script(
         parent_run_id=derived_from or "",
         agent_mode=resolved_mode,
         sidecar_mode=sidecar_mode_str,
-        campaign_id=campaign_id or "",
+        campaign_id=resolved_campaign_id or "",
         script_sha256=script_sha256_val,
         stage_name=sidecar.stage_name if sidecar else None,
     )
     run_uuid_var.set(run.id)
-    event("run.start", run_uuid=run.id, script_path=str(script_path) if script_path else "", script_sha256=script_sha256_val, argv=argv, cwd=str(cwd), campaign_id=campaign_id or "", agent_mode=resolved_mode)
+    event("run.start", run_uuid=run.id, script_path=str(script_path) if script_path else "", script_sha256=script_sha256_val, argv=argv, cwd=str(cwd), campaign_id=resolved_campaign_id or "", agent_mode=resolved_mode)
 
     # Lineage: resolve derived_from to parent run_uuid if provided
     if derived_from:
@@ -377,8 +424,8 @@ def run_script(
     duration_ms = int((time.monotonic() - start) * 1000)
     event("run.subprocess_exit", exit_code=exit_code, duration_ms=duration_ms)
 
-    # Read result emission from BTH_RESULTS_PATH or fallback path
-    metadata = _read_result_emission(results_temp_path, script_path)
+    # Read result emission from BTH_RESULTS_PATH, script-adjacent fallback, or --out
+    metadata = _read_result_emission(results_temp_path, script_path, output_paths)
 
     outcome = ""
     outcome_error_reason = ""
@@ -479,5 +526,31 @@ def run_script(
             results_temp_path.unlink()
         except OSError:
             pass  # Silent fail on cleanup
+
+    # Link this run into campaign_runs (the table campaign review/conclude actually
+    # read from). The run only exists in the cool tier until compacted, so compact
+    # first — add_run_to_campaign looks the run up in the warm `runs` table.
+    if resolved_campaign_id:
+        import duckdb
+
+        from bathos.campaigns import CampaignError, add_run_to_campaign
+        from bathos.compact import compact
+
+        try:
+            compact(catalog_dir)
+            campaign_db = duckdb.connect(str(catalog_dir / "bathos.db"))
+            try:
+                add_run_to_campaign(campaign_db, resolved_campaign_id, run.id)
+                campaign_db.commit()
+            finally:
+                campaign_db.close()
+        except Exception as e:
+            event("run.error", phase="campaign_link", exc_type=type(e).__name__, exc_msg=str(e))
+            typer.echo(
+                f"Warning: run {run.id[:8]} completed but failed to link to campaign "
+                f"{resolved_campaign_id[:8]}: {e}. Recover with: "
+                f"bth campaign add {run.id} --campaign {resolved_campaign_id}",
+                err=True,
+            )
 
     return exit_code
