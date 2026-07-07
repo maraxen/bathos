@@ -13,6 +13,7 @@
 - [260616_worktree-prune-backlog-assess](handoffs/260616_worktree-prune-backlog-assess.md) — repo consolidated to single main worktree; bathos backlog drained (only #1774 P3 remains)
 
 ## Specs
+- [260707_scientific-validity-gates](specs/260707_scientific-validity-gates.md) — debt #200: `[invariants]` sidecar block (hard-fail on violated result assertions, reuses `[outcomes.*]` DuckDB-condition machinery), optional cross-run differential extension, `[sanity]` pre-flight block; not yet planned/implemented
 - [260611_worktree-workspace-resolution](specs/260611_worktree-workspace-resolution.md) — `resolve_workspace()` seam so `bth` resolves live-worktree fs_root while keeping catalog identity stable; post adversarial review (challenger/defender); implemented
 - [260515_bathos-design](specs/260515_bathos-design.md)
 - [260515_bathos-v01-plan](specs/260515_bathos-v01-plan.md)
