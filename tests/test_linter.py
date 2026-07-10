@@ -1,5 +1,5 @@
-import pytest
 from pathlib import Path
+
 from typer.testing import CliRunner
 
 runner = CliRunner()
@@ -21,6 +21,7 @@ def _make_sidecar(script: Path) -> Path:
 
 def test_clean_project_returns_no_issues(tmp_path):
     from bathos.linter import lint_project
+
     s = _make_script(tmp_path, "experiments", "run_nvt.py")
     _make_sidecar(s)
     issues = lint_project(tmp_path)
@@ -29,6 +30,7 @@ def test_clean_project_returns_no_issues(tmp_path):
 
 def test_bad_name_in_experiments(tmp_path):
     from bathos.linter import lint_project
+
     s = _make_script(tmp_path, "experiments", "RunNVT.py")
     _make_sidecar(s)
     issues = lint_project(tmp_path)
@@ -38,13 +40,15 @@ def test_bad_name_in_experiments(tmp_path):
 
 def test_missing_sidecar_is_error(tmp_path):
     from bathos.linter import lint_project
+
     _make_script(tmp_path, "experiments", "run_nvt.py")
     issues = lint_project(tmp_path)
     assert any(i.issue == "missing_sidecar" for i in issues)
 
 
 def test_validation_missing_sidecar_is_warning(tmp_path):
-    from bathos.linter import lint_project, IssueSeverity
+    from bathos.linter import IssueSeverity, lint_project
+
     _make_script(tmp_path, "validation", "check_energy.py")
     issues = lint_project(tmp_path)
     sidecar_issues = [i for i in issues if i.issue == "missing_sidecar"]
@@ -53,6 +57,7 @@ def test_validation_missing_sidecar_is_warning(tmp_path):
 
 def test_debug_yymmdd_pattern(tmp_path):
     from bathos.linter import lint_project
+
     _make_script(tmp_path, "debug", "260519_nan_forces.py")
     issues = lint_project(tmp_path)
     assert issues == []
@@ -60,6 +65,7 @@ def test_debug_yymmdd_pattern(tmp_path):
 
 def test_debug_bad_name(tmp_path):
     from bathos.linter import lint_project
+
     _make_script(tmp_path, "debug", "nan_forces.py")
     issues = lint_project(tmp_path)
     assert any(i.issue == "naming" for i in issues)
@@ -67,6 +73,7 @@ def test_debug_bad_name(tmp_path):
 
 def test_slurm_pattern(tmp_path):
     from bathos.linter import lint_project
+
     _make_script(tmp_path, "slurm", "run_md.slurm")
     issues = lint_project(tmp_path)
     assert issues == []
@@ -74,6 +81,7 @@ def test_slurm_pattern(tmp_path):
 
 def test_slurm_bad_extension(tmp_path):
     from bathos.linter import lint_project
+
     _make_script(tmp_path, "slurm", "run_md.sh")
     issues = lint_project(tmp_path)
     assert any(i.issue == "naming" for i in issues)
@@ -81,6 +89,7 @@ def test_slurm_bad_extension(tmp_path):
 
 def test_missing_scripts_dir_returns_empty(tmp_path):
     from bathos.linter import lint_project
+
     issues = lint_project(tmp_path)
     assert issues == []
 
@@ -94,6 +103,7 @@ def test_cli_lint_exits_0_clean(tmp_path, monkeypatch):
     s = _make_script(tmp_path, "experiments", "run_nvt.py")
     _make_sidecar(s)
     from bathos.cli import app
+
     result = runner.invoke(app, ["lint"])
     assert result.exit_code == 0
     assert "No issues" in result.output
@@ -103,6 +113,7 @@ def test_cli_lint_exits_1_with_issues(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _make_script(tmp_path, "experiments", "RunNVT.py")
     from bathos.cli import app
+
     result = runner.invoke(app, ["lint"])
     assert result.exit_code == 1
     assert "error" in result.output.lower() or "issue" in result.output.lower()
@@ -111,6 +122,7 @@ def test_cli_lint_exits_1_with_issues(tmp_path, monkeypatch):
 def test_cli_lint_exits_0_with_canonical_warnings(tmp_path, monkeypatch):
     """Advisory lint warns on non-canonical stage_name but always exits 0."""
     from datetime import UTC, datetime
+
     from bathos.catalog import init_catalog, write_run
     from bathos.compact import compact
     from bathos.schema import Run
@@ -147,6 +159,7 @@ def test_cli_lint_exits_0_with_canonical_warnings(tmp_path, monkeypatch):
     _make_sidecar(s)
 
     from bathos.cli import app
+
     result = runner.invoke(app, ["lint"])
     # Must exit 0 (advisory, never blocks)
     assert result.exit_code == 0
@@ -157,7 +170,9 @@ def test_cli_lint_exits_0_with_canonical_warnings(tmp_path, monkeypatch):
 def test_check_residual_rates_detects_high_rate(tmp_path):
     """Test that check_residual_rates detects high residual rates in uncampaigned runs."""
     from datetime import UTC, datetime
+
     import duckdb
+
     from bathos.catalog import init_catalog, write_run
     from bathos.compact import compact
     from bathos.linter import check_residual_rates
@@ -212,7 +227,9 @@ def test_check_bypass_trend_returns_empty_for_no_data(tmp_path):
 def test_check_unfired_branches_detects_single_outcome(tmp_path):
     """Test that check_unfired_branches detects branches with single outcome."""
     from datetime import UTC, datetime
+
     import duckdb
+
     from bathos.catalog import init_catalog, write_run
     from bathos.compact import compact
     from bathos.linter import check_unfired_branches
@@ -253,9 +270,96 @@ def test_check_unfired_branches_detects_single_outcome(tmp_path):
     assert any("single_outcome_branch_fired" in str(i.issue) for i in issues)
 
 
+def _write_concentration_runs(catalog_dir, campaign_id, n, outcome=""):
+    """Write n runs into catalog_dir under campaign_id with the given outcome (default unvalidated).
+
+    Each run gets a distinct script_sha256 so the per-script aggregation never collides
+    across runs in this helper — tests target the per-campaign_id bucket in isolation.
+    """
+    from datetime import UTC, datetime, timedelta
+    from uuid import uuid4
+
+    from bathos.catalog import write_run
+    from bathos.schema import Run
+
+    base_time = datetime.now(UTC)
+    for i in range(n):
+        r = Run(
+            project_slug="test",
+            command="python concentrated.py",
+            argv=["python", "concentrated.py"],
+            git_hash="abc",
+            git_branch="main",
+            git_dirty=False,
+            timestamp=base_time + timedelta(seconds=i),
+            status="completed",
+            exit_code=0,
+            outcome=outcome,
+            campaign_id=campaign_id,
+            script_sha256=f"sha_{campaign_id}_{uuid4().hex}",
+        )
+        write_run(r, catalog_dir)
+
+
+def test_check_run_concentration_flags_over_cap(tmp_path):
+    """A bucket of N+1 unvalidated runs -> one WARNING."""
+    from bathos.catalog import init_catalog
+    from bathos.compact import compact
+    from bathos.linter import IssueSeverity, check_run_concentration
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    init_catalog(catalog_dir)
+
+    _write_concentration_runs(catalog_dir, "camp-over", n=4, outcome="")
+    compact(catalog_dir)
+
+    issues = check_run_concentration(catalog_dir, threshold=3)
+    assert len(issues) == 1
+    assert issues[0].issue == "run-concentration"
+    assert issues[0].severity == IssueSeverity.WARNING
+    assert "camp-over" in issues[0].detail
+    assert "4/4" in issues[0].detail
+
+
+def test_check_run_concentration_boundary_is_strict(tmp_path):
+    """A bucket of exactly N unvalidated runs -> no issue (strict >)."""
+    from bathos.catalog import init_catalog
+    from bathos.compact import compact
+    from bathos.linter import check_run_concentration
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    init_catalog(catalog_dir)
+
+    _write_concentration_runs(catalog_dir, "camp-exact", n=3, outcome="")
+    compact(catalog_dir)
+
+    issues = check_run_concentration(catalog_dir, threshold=3)
+    assert issues == []
+
+
+def test_check_run_concentration_all_validated_no_flag(tmp_path):
+    """A bucket of N+1 runs that ALL carry a real outcome -> no issue (predicate correctness)."""
+    from bathos.catalog import init_catalog
+    from bathos.compact import compact
+    from bathos.linter import check_run_concentration
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    init_catalog(catalog_dir)
+
+    _write_concentration_runs(catalog_dir, "camp-validated", n=4, outcome="pass")
+    compact(catalog_dir)
+
+    issues = check_run_concentration(catalog_dir, threshold=3)
+    assert issues == []
+
+
 def test_check_ephemeral_output_paths_detects_tmp(tmp_path):
     """Test that check_ephemeral_output_paths detects /tmp output paths in catalog."""
     from datetime import UTC, datetime
+
     from bathos.catalog import init_catalog, write_run
     from bathos.compact import compact
     from bathos.linter import check_ephemeral_output_paths
@@ -289,6 +393,7 @@ def test_check_ephemeral_output_paths_detects_tmp(tmp_path):
 def test_check_ephemeral_output_paths_clean_for_persistent(tmp_path):
     """Test that check_ephemeral_output_paths passes for persistent output paths."""
     from datetime import UTC, datetime
+
     from bathos.catalog import init_catalog, write_run
     from bathos.compact import compact
     from bathos.linter import check_ephemeral_output_paths
@@ -321,9 +426,10 @@ def test_check_ephemeral_output_paths_clean_for_persistent(tmp_path):
 def test_check_canonical_stage_names_warns_non_canonical(tmp_path):
     """Test that check_canonical_stage_names warns on non-canonical stage_name values."""
     from datetime import UTC, datetime
+
     from bathos.catalog import init_catalog, write_run
     from bathos.compact import compact
-    from bathos.linter import check_canonical_stage_names, IssueSeverity
+    from bathos.linter import IssueSeverity, check_canonical_stage_names
     from bathos.schema import Run
 
     catalog_dir = tmp_path / "catalog"
@@ -408,13 +514,16 @@ def test_check_canonical_stage_names_warns_non_canonical(tmp_path):
     # Should have 2 format violations (VALIDATION, validation_final)
     assert len(format_issues) == 2, f"Expected 2 format violations, got {len(format_issues)}"
     # Should have 3 canonical violations (exploration-phase, custom-stage, my-stage)
-    assert len(canonical_issues) == 3, f"Expected 3 canonical violations, got {len(canonical_issues)}"
+    assert len(canonical_issues) == 3, (
+        f"Expected 3 canonical violations, got {len(canonical_issues)}"
+    )
     assert all(i.severity == IssueSeverity.WARNING for i in issues)
 
 
 def test_check_canonical_stage_names_all_advisory_passes(tmp_path):
     """Test that check_canonical_stage_names returns empty for canonical stages."""
     from datetime import UTC, datetime
+
     from bathos.catalog import init_catalog, write_run
     from bathos.compact import compact
     from bathos.linter import check_canonical_stage_names
@@ -426,7 +535,9 @@ def test_check_canonical_stage_names_all_advisory_passes(tmp_path):
 
     # Create runs with only canonical stage_name values
     base_time = datetime.now(UTC)
-    for i, stage in enumerate(["exploration", "calibration", "validation", "ablation", "production"]):
+    for i, stage in enumerate(
+        ["exploration", "calibration", "validation", "ablation", "production"]
+    ):
         r = Run(
             project_slug="test",
             command="python test.py",
@@ -459,9 +570,10 @@ def test_check_canonical_stage_names_no_catalog(tmp_path):
 def test_check_baseline_ref_exists_finds_baseline(tmp_path):
     """Test that check_baseline_ref_exists detects when baseline_ref exists in catalog."""
     from datetime import UTC, datetime
+
     from bathos.catalog import init_catalog, write_run
     from bathos.compact import compact
-    from bathos.linter import check_baseline_ref_exists, IssueSeverity
+    from bathos.linter import IssueSeverity, check_baseline_ref_exists
     from bathos.schema import Run
 
     catalog_dir = tmp_path / "catalog"
@@ -517,7 +629,7 @@ def test_check_baseline_ref_exists_missing_baseline(tmp_path):
     """Test that check_baseline_ref_exists warns when baseline_ref is not found."""
     from bathos.catalog import init_catalog
     from bathos.compact import compact
-    from bathos.linter import check_baseline_ref_exists, IssueSeverity
+    from bathos.linter import IssueSeverity, check_baseline_ref_exists
 
     catalog_dir = tmp_path / "catalog"
     catalog_dir.mkdir()
@@ -609,9 +721,10 @@ ns_per_day = "float"
 def test_check_baseline_ref_exists_prefix_match(tmp_path):
     """Test that check_baseline_ref_exists matches short UUID prefixes."""
     from datetime import UTC, datetime
+
     from bathos.catalog import init_catalog, write_run
     from bathos.compact import compact
-    from bathos.linter import check_baseline_ref_exists, IssueSeverity
+    from bathos.linter import IssueSeverity, check_baseline_ref_exists
     from bathos.schema import Run
 
     catalog_dir = tmp_path / "catalog"
@@ -658,12 +771,12 @@ ns_per_day = "float"
     # Should find the baseline by prefix match and emit INFO
     assert len(issues) == 1
     assert issues[0].severity == IssueSeverity.INFO
-    assert "baseline_ref_ok" == issues[0].issue
+    assert issues[0].issue == "baseline_ref_ok"
 
 
 def test_check_novel_or_reproduces_declared_passes_exploration(tmp_path):
     """AC-7: exploration stage experiments are not checked."""
-    from bathos.linter import check_novel_or_reproduces_declared, IssueSeverity
+    from bathos.linter import check_novel_or_reproduces_declared
 
     s = _make_script(tmp_path, "experiments", "run_test.py")
     sidecar_path = s.with_suffix(".bth.toml")
@@ -686,7 +799,7 @@ decision = "good"
 
 def test_check_novel_or_reproduces_declared_validation_requires_reproduction(tmp_path):
     """AC-7: validation stage experiments must declare [reproduction] or novel=true."""
-    from bathos.linter import check_novel_or_reproduces_declared, IssueSeverity
+    from bathos.linter import IssueSeverity, check_novel_or_reproduces_declared
 
     s = _make_script(tmp_path, "experiments", "run_test.py")
     sidecar_path = s.with_suffix(".bth.toml")
@@ -789,7 +902,7 @@ decision = "good"
 
 def test_check_novel_or_reproduces_declared_production_requires_reproduction(tmp_path):
     """AC-7: production stage experiments must declare [reproduction] or novel=true."""
-    from bathos.linter import check_novel_or_reproduces_declared, IssueSeverity
+    from bathos.linter import IssueSeverity, check_novel_or_reproduces_declared
 
     s = _make_script(tmp_path, "experiments", "run_test.py")
     sidecar_path = s.with_suffix(".bth.toml")
@@ -859,7 +972,7 @@ def test_check_novel_or_reproduces_declared_fails_empty_reproduction_block(tmp_p
     and reproduces_run are empty strings (falsy). This must still trigger
     NOVEL_OR_REPRODUCES_REQUIRED since empty strings are not valid declarations.
     """
-    from bathos.linter import check_novel_or_reproduces_declared, IssueSeverity
+    from bathos.linter import IssueSeverity, check_novel_or_reproduces_declared
 
     s = _make_script(tmp_path, "experiments", "run_test.py")
     sidecar_path = s.with_suffix(".bth.toml")
@@ -893,7 +1006,7 @@ def test_check_novel_or_reproduces_declared_fails_completely_empty_reproduction_
     This covers the falsy-dict path where sidecar.reproduction exists but all
     its fields are empty/default, making the has_reproduction check fail.
     """
-    from bathos.linter import check_novel_or_reproduces_declared, IssueSeverity
+    from bathos.linter import IssueSeverity, check_novel_or_reproduces_declared
 
     s = _make_script(tmp_path, "experiments", "run_test.py")
     sidecar_path = s.with_suffix(".bth.toml")
@@ -920,7 +1033,7 @@ decision = "good"
 
 def test_check_todo_strings_in_scaffold_hypothesis_todo(tmp_path):
     """Tier-2: Warn when hypothesis contains TODO placeholder."""
-    from bathos.linter import check_todo_strings_in_scaffold, IssueSeverity
+    from bathos.linter import IssueSeverity, check_todo_strings_in_scaffold
 
     s = _make_script(tmp_path, "experiments", "run_test.py")
     sidecar_path = s.with_suffix(".bth.toml")
@@ -945,7 +1058,7 @@ x = "float"
 
 def test_check_todo_strings_in_scaffold_decision_todo(tmp_path):
     """Tier-2: Warn when outcome decision contains TODO placeholder."""
-    from bathos.linter import check_todo_strings_in_scaffold, IssueSeverity
+    from bathos.linter import IssueSeverity, check_todo_strings_in_scaffold
 
     s = _make_script(tmp_path, "experiments", "run_test.py")
     sidecar_path = s.with_suffix(".bth.toml")
@@ -1001,7 +1114,7 @@ x = "float"
 
 
 def test_check_claim_opaque_labels_missing_label(tmp_path):
-    from bathos.linter import check_claim_opaque_labels, IssueSeverity
+    from bathos.linter import IssueSeverity, check_claim_opaque_labels
 
     claims_dir = tmp_path / ".bth" / "claims"
     claims_dir.mkdir(parents=True)
@@ -1100,7 +1213,7 @@ def test_check_claim_opaque_labels_no_claims_dir(tmp_path):
 
 
 def test_check_claim_opaque_labels_missing_label(tmp_path):
-    from bathos.linter import check_claim_opaque_labels, IssueSeverity
+    from bathos.linter import IssueSeverity, check_claim_opaque_labels
 
     claims_dir = tmp_path / ".bth" / "claims"
     claims_dir.mkdir(parents=True)

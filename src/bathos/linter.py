@@ -106,33 +106,43 @@ def lint_project(project_root: Path) -> list[LintIssue]:
             ext = script.suffix
 
             if ext not in rules["extensions"]:
-                issues.append(LintIssue(
-                    path=script,
-                    directory=dir_name,
-                    issue="naming",
-                    severity=IssueSeverity.ERROR,
-                    detail=f"expected extension {rules['extensions']}, got {ext!r}",
-                ))
+                issues.append(
+                    LintIssue(
+                        path=script,
+                        directory=dir_name,
+                        issue="naming",
+                        severity=IssueSeverity.ERROR,
+                        detail=f"expected extension {rules['extensions']}, got {ext!r}",
+                    )
+                )
                 continue
 
             if not rules["pattern"].match(stem):
-                expected = "verb_noun" if dir_name not in ("debug", "explore", "scratch") else "YYMMDD_desc"
-                issues.append(LintIssue(
-                    path=script,
-                    directory=dir_name,
-                    issue="naming",
-                    severity=IssueSeverity.ERROR,
-                    detail=f"expected {expected} style, got {stem!r}",
-                ))
+                expected = (
+                    "verb_noun"
+                    if dir_name not in ("debug", "explore", "scratch")
+                    else "YYMMDD_desc"
+                )
+                issues.append(
+                    LintIssue(
+                        path=script,
+                        directory=dir_name,
+                        issue="naming",
+                        severity=IssueSeverity.ERROR,
+                        detail=f"expected {expected} style, got {stem!r}",
+                    )
+                )
 
             if rules["sidecar"] is not None and find_sidecar(script) is None:
-                issues.append(LintIssue(
-                    path=script,
-                    directory=dir_name,
-                    issue="missing_sidecar",
-                    severity=rules["sidecar"],
-                    detail=f"create {stem}.bth.toml next to this script",
-                ))
+                issues.append(
+                    LintIssue(
+                        path=script,
+                        directory=dir_name,
+                        issue="missing_sidecar",
+                        severity=rules["sidecar"],
+                        detail=f"create {stem}.bth.toml next to this script",
+                    )
+                )
 
     # Tier-1 checks for validation/production experiments
     issues.extend(check_novel_or_reproduces_declared(project_root))
@@ -152,7 +162,7 @@ def check_novel_or_reproduces_declared(project_root: Path) -> list[LintIssue]:
     Returns:
         List of LintIssue objects with severity ERROR for validation/production violations.
     """
-    from bathos.sidecar import parse_sidecar, SidecarKind
+    from bathos.sidecar import SidecarKind, parse_sidecar
 
     scripts_dir = project_root / "scripts"
     if not scripts_dir.exists():
@@ -189,19 +199,20 @@ def check_novel_or_reproduces_declared(project_root: Path) -> list[LintIssue]:
                 continue
 
             # Check: must have [reproduction] or novel=true
-            has_reproduction = (
-                sidecar.reproduction is not None
-                and (sidecar.reproduction.reproduces_paper or sidecar.reproduction.reproduces_run)
+            has_reproduction = sidecar.reproduction is not None and (
+                sidecar.reproduction.reproduces_paper or sidecar.reproduction.reproduces_run
             )
 
             if not has_reproduction and not sidecar.novel:
-                issues.append(LintIssue(
-                    path=script,
-                    directory=dir_name,
-                    issue="NOVEL_OR_REPRODUCES_REQUIRED",
-                    severity=IssueSeverity.ERROR,
-                    detail=f"validation/production experiment must declare [reproduction] or novel=true",
-                ))
+                issues.append(
+                    LintIssue(
+                        path=script,
+                        directory=dir_name,
+                        issue="NOVEL_OR_REPRODUCES_REQUIRED",
+                        severity=IssueSeverity.ERROR,
+                        detail="validation/production experiment must declare [reproduction] or novel=true",
+                    )
+                )
 
     return issues
 
@@ -282,8 +293,9 @@ def check_bypass_trend(catalog_dir: Path) -> list[LintIssue]:
     Returns:
         List of LintIssue objects with severity WARNING.
     """
-    import duckdb
     from datetime import UTC, datetime, timedelta
+
+    import duckdb
 
     db_path = catalog_dir / "bathos.db"
     if not db_path.exists():
@@ -377,7 +389,8 @@ def check_popper_adversarial(project_root: Path) -> list[LintIssue]:
 
         outcomes = data.get("outcomes", {})
         has_adversarial = any(
-            branch.get("adversarial_check") for branch in outcomes.values()
+            branch.get("adversarial_check")
+            for branch in outcomes.values()
             if isinstance(branch, dict)
         )
         if not has_adversarial:
@@ -459,6 +472,104 @@ def check_unfired_branches(catalog_dir: Path, min_runs: int = 5) -> list[LintIss
         return []
 
 
+def check_run_concentration(catalog_dir: Path, threshold: int = 20) -> list[LintIssue]:
+    """Check for campaigns or scripts accumulating unvalidated runs past a soft cap (C3).
+
+    Two aggregations over the runs table:
+    - per campaign_id (COALESCE empty -> an '<uncampaigned>' bucket),
+    - per script_sha256 (with a command label).
+    Counts runs where outcome is unset/unknown/none. Emits one WARNING LintIssue per bucket
+    whose unvalidated count is strictly greater than threshold — silent accumulation of
+    unvalidated work is a forced-checkpoint signal, not a hard failure.
+
+    Args:
+        catalog_dir: Path to catalog directory.
+        threshold: Unvalidated-run count threshold (default 20; strict `>`).
+
+    Returns:
+        List of LintIssue objects with severity WARNING.
+    """
+    import duckdb
+
+    db_path = catalog_dir / "bathos.db"
+    if not db_path.exists():
+        return []
+
+    unvalidated = "(outcome IS NULL OR trim(outcome) IN ('', 'unknown', 'none'))"
+
+    try:
+        db = duckdb.connect(str(db_path), read_only=True)
+        db.execute("SET TimeZone='UTC'")
+
+        issues: list[LintIssue] = []
+
+        try:
+            campaign_rows = db.execute(
+                f"""
+                SELECT
+                    COALESCE(NULLIF(campaign_id, ''), '<uncampaigned>') AS bucket,
+                    COUNT(*) FILTER (WHERE {unvalidated}) AS noout,
+                    COUNT(*) AS total
+                FROM runs
+                GROUP BY 1
+                HAVING COUNT(*) FILTER (WHERE {unvalidated}) > ?
+                ORDER BY 2 DESC
+                """,
+                [threshold],
+            ).fetchall()
+        except Exception:
+            db.close()
+            return []
+
+        for bucket, noout, total in campaign_rows:
+            issues.append(
+                LintIssue(
+                    path=catalog_dir / "bathos.db",
+                    directory="catalog",
+                    issue="run-concentration",
+                    severity=IssueSeverity.WARNING,
+                    detail=f"{bucket}: {noout}/{total} unvalidated",
+                )
+            )
+
+        try:
+            script_rows = db.execute(
+                f"""
+                SELECT
+                    COALESCE(NULLIF(script_sha256, ''), '<no-script-hash>') AS bucket,
+                    any_value(command) AS cmd,
+                    COUNT(*) FILTER (WHERE {unvalidated}) AS noout,
+                    COUNT(*) AS total
+                FROM runs
+                GROUP BY 1
+                HAVING COUNT(*) FILTER (WHERE {unvalidated}) > ?
+                ORDER BY 3 DESC
+                """,
+                [threshold],
+            ).fetchall()
+        except Exception:
+            db.close()
+            return issues
+
+        for bucket, cmd, noout, total in script_rows:
+            label = bucket[:16] if bucket != "<no-script-hash>" else bucket
+            cmd_label = (cmd or "")[:48]
+            issues.append(
+                LintIssue(
+                    path=catalog_dir / "bathos.db",
+                    directory="catalog",
+                    issue="run-concentration",
+                    severity=IssueSeverity.WARNING,
+                    detail=f"{label} ({cmd_label}): {noout}/{total} unvalidated",
+                )
+            )
+
+        db.close()
+        return issues
+    except Exception:
+        return []
+
+
 def check_adversarial_checks(project_root: Path) -> list[LintIssue]:
     """Tier-2: Warn when adversarial_check is absent from outcomes.pass blocks.
 
@@ -485,17 +596,19 @@ def check_adversarial_checks(project_root: Path) -> list[LintIssue]:
         outcomes = data.get("outcomes", {})
         for label, outcome in outcomes.items():
             if label == "pass" and "adversarial_check" not in outcome:
-                issues.append(LintIssue(
-                    path=sidecar_path,
-                    directory="sidecar",
-                    issue="missing_adversarial_check",
-                    severity=IssueSeverity.WARNING,
-                    detail=(
-                        f"outcomes.{label} missing adversarial_check — "
-                        "add a condition designed to falsify the hypothesis "
-                        "(syntactic proxy only; verify it actually strengthens the claim)"
-                    ),
-                ))
+                issues.append(
+                    LintIssue(
+                        path=sidecar_path,
+                        directory="sidecar",
+                        issue="missing_adversarial_check",
+                        severity=IssueSeverity.WARNING,
+                        detail=(
+                            f"outcomes.{label} missing adversarial_check — "
+                            "add a condition designed to falsify the hypothesis "
+                            "(syntactic proxy only; verify it actually strengthens the claim)"
+                        ),
+                    )
+                )
 
     return issues
 
@@ -536,16 +649,18 @@ def check_threshold_basis(project_root: Path) -> list[LintIssue]:
 
             # Check if condition contains numeric literal
             if condition and _NUMERIC_LITERAL_RE.search(condition) and not source:
-                issues.append(LintIssue(
-                    path=sidecar_path,
-                    directory="sidecar",
-                    issue="unjustified_threshold",
-                    severity=IssueSeverity.WARNING,
-                    detail=(
-                        f"outcomes.{label}.condition contains numeric literal without justification — "
-                        "add source = 'explanation' field to document the threshold basis"
-                    ),
-                ))
+                issues.append(
+                    LintIssue(
+                        path=sidecar_path,
+                        directory="sidecar",
+                        issue="unjustified_threshold",
+                        severity=IssueSeverity.WARNING,
+                        detail=(
+                            f"outcomes.{label}.condition contains numeric literal without justification — "
+                            "add source = 'explanation' field to document the threshold basis"
+                        ),
+                    )
+                )
 
         # Check benchmark regression_threshold
         benchmark = data.get("benchmark", {})
@@ -555,16 +670,18 @@ def check_threshold_basis(project_root: Path) -> list[LintIssue]:
 
             # Warn if threshold is set (non-zero) but has no basis
             if regression_threshold > 0 and not regression_threshold_basis:
-                issues.append(LintIssue(
-                    path=sidecar_path,
-                    directory="sidecar",
-                    issue="unjustified_threshold",
-                    severity=IssueSeverity.WARNING,
-                    detail=(
-                        f"[benchmark] regression_threshold = {regression_threshold} "
-                        "without justification — add regression_threshold_basis field to document the threshold basis"
-                    ),
-                ))
+                issues.append(
+                    LintIssue(
+                        path=sidecar_path,
+                        directory="sidecar",
+                        issue="unjustified_threshold",
+                        severity=IssueSeverity.WARNING,
+                        detail=(
+                            f"[benchmark] regression_threshold = {regression_threshold} "
+                            "without justification — add regression_threshold_basis field to document the threshold basis"
+                        ),
+                    )
+                )
 
     return issues
 
@@ -665,15 +782,17 @@ def check_todo_strings_in_scaffold(project_root: Path) -> list[LintIssue]:
         experiment = data.get("experiment", {})
         hypothesis = experiment.get("hypothesis", "")
         if hypothesis and "TODO" in hypothesis:
-            issues.append(LintIssue(
-                path=sidecar_path,
-                directory="sidecar",
-                issue="todo_in_scaffold",
-                severity=IssueSeverity.WARNING,
-                detail=(
-                    "hypothesis contains TODO placeholder — replace with actual hypothesis"
-                ),
-            ))
+            issues.append(
+                LintIssue(
+                    path=sidecar_path,
+                    directory="sidecar",
+                    issue="todo_in_scaffold",
+                    severity=IssueSeverity.WARNING,
+                    detail=(
+                        "hypothesis contains TODO placeholder — replace with actual hypothesis"
+                    ),
+                )
+            )
 
         # Check decision fields in outcomes
         outcomes = data.get("outcomes", {})
@@ -682,16 +801,18 @@ def check_todo_strings_in_scaffold(project_root: Path) -> list[LintIssue]:
                 continue
             decision = outcome.get("decision", "")
             if decision and "TODO" in decision:
-                issues.append(LintIssue(
-                    path=sidecar_path,
-                    directory="sidecar",
-                    issue="todo_in_scaffold",
-                    severity=IssueSeverity.WARNING,
-                    detail=(
-                        f"outcome '{label}' decision contains TODO placeholder — "
-                        "replace with actual next step"
-                    ),
-                ))
+                issues.append(
+                    LintIssue(
+                        path=sidecar_path,
+                        directory="sidecar",
+                        issue="todo_in_scaffold",
+                        severity=IssueSeverity.WARNING,
+                        detail=(
+                            f"outcome '{label}' decision contains TODO placeholder — "
+                            "replace with actual next step"
+                        ),
+                    )
+                )
 
     return issues
 
@@ -708,8 +829,9 @@ def check_ephemeral_output_paths(catalog_dir: Path) -> list[LintIssue]:
     Returns:
         List of LintIssue objects with severity WARNING.
     """
-    import duckdb
     import tempfile
+
+    import duckdb
 
     db_path = catalog_dir / "bathos.db"
     if not db_path.exists():
@@ -781,6 +903,7 @@ def check_canonical_stage_names(catalog_dir: Path) -> list[LintIssue]:
         Always returns (never raises), so lint can continue even if DB unreachable.
     """
     import duckdb
+
     from bathos.schema import STAGE_NAME_REGEX
 
     db_path = catalog_dir / "bathos.db"
@@ -859,7 +982,9 @@ def check_canonical_stage_names(catalog_dir: Path) -> list[LintIssue]:
         return []
 
 
-def check_baseline_ref_exists(project_root: Path, catalog_dir: Path, db_path: Path) -> list[LintIssue]:
+def check_baseline_ref_exists(
+    project_root: Path, catalog_dir: Path, db_path: Path
+) -> list[LintIssue]:
     """Tier-2: Validate that baseline_ref values exist in the warm catalog.
 
     Scans all benchmark sidecars in scripts/benchmarks/ for baseline_ref fields.
@@ -913,7 +1038,7 @@ def check_baseline_ref_exists(project_root: Path, catalog_dir: Path, db_path: Pa
 
             row = db.execute(
                 "SELECT outcome, timestamp FROM runs WHERE id = ? OR id LIKE ? LIMIT 1",
-                [baseline_ref, baseline_ref + "%"]
+                [baseline_ref, baseline_ref + "%"],
             ).fetchone()
 
             db.close()
@@ -950,7 +1075,7 @@ def check_baseline_ref_exists(project_root: Path, catalog_dir: Path, db_path: Pa
 def check_single_cell_gate(
     claim_discriminability: list[dict],
     campaign_id: str,
-    db: "duckdb.DuckDBPyConnection",
+    db: duckdb.DuckDBPyConnection,
 ) -> list[LintIssue]:
     """AC-06: warn if all confirmatory runs in a campaign share identical metadata values.
 
@@ -963,7 +1088,6 @@ def check_single_cell_gate(
         List of LintIssue objects with severity WARNING if single-cell pattern detected
     """
     import json
-    import duckdb
 
     issues = []
     try:
@@ -997,10 +1121,7 @@ def check_single_cell_gate(
         return issues
 
     # Check if all runs have the same value for every common key
-    uniform_keys = [
-        k for k in common_keys
-        if len({str(m.get(k)) for m in metas}) == 1
-    ]
+    uniform_keys = [k for k in common_keys if len({str(m.get(k)) for m in metas}) == 1]
 
     if uniform_keys and len(uniform_keys) == len(common_keys):
         issues.append(

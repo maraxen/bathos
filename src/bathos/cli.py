@@ -94,9 +94,15 @@ def run(
     out: list[str] = typer.Option([], "--out", help="Output path to register"),
     tag: list[str] = typer.Option([], "--tag", "-t"),
     agent_mode: str | None = typer.Option(None, "--agent-mode", help="collaborative|autonomous"),
-    no_sidecar: bool = typer.Option(False, "--no-sidecar", help="Bypass sidecar enforcement (logs BYPASSED)"),
-    derived_from: str | None = typer.Option(None, "--derived-from", help="Parent run ID for lineage"),
-    campaign: str | None = typer.Option(None, "--campaign", help="Campaign ID to associate this run with"),
+    no_sidecar: bool = typer.Option(
+        False, "--no-sidecar", help="Bypass sidecar enforcement (logs BYPASSED)"
+    ),
+    derived_from: str | None = typer.Option(
+        None, "--derived-from", help="Parent run ID for lineage"
+    ),
+    campaign: str | None = typer.Option(
+        None, "--campaign", help="Campaign ID to associate this run with"
+    ),
 ):
     """Run a script and record provenance."""
     from bathos.runner import run_script
@@ -284,8 +290,6 @@ def compact(
     typer.echo(f"Compacted {result.ingested} runs into bathos.db in {result.duration_s:.1f}s")
 
 
-
-
 @app.command()
 def verify(
     tier: str = typer.Option(
@@ -387,9 +391,17 @@ def repair(
     # Execute repairs
     typer.echo("\nExecuting repairs...")
     try:
-        manifest = repair_catalog(catalog_dir, tier, dry_run=False, acknowledge_warm_loss=acknowledge_warm_loss, from_warm=from_warm)
+        manifest = repair_catalog(
+            catalog_dir,
+            tier,
+            dry_run=False,
+            acknowledge_warm_loss=acknowledge_warm_loss,
+            from_warm=from_warm,
+        )
         typer.echo(f"\n✓ Repair completed at {manifest.run_ts}")
-        typer.echo(f"  Actions taken: {len([a for a in manifest.actions if not a.detail.startswith('Skip')])}")
+        typer.echo(
+            f"  Actions taken: {len([a for a in manifest.actions if not a.detail.startswith('Skip')])}"
+        )
         if manifest.warnings:
             for warn in manifest.warnings:
                 typer.secho(f"  ⚠  {warn}", fg="yellow")
@@ -398,7 +410,7 @@ def repair(
             typer.echo(
                 "Warm database rebuild would destroy warm-only data.\n"
                 "Review the loss, then pass --acknowledge-warm-loss to proceed.",
-                err=True
+                err=True,
             )
         raise
 
@@ -581,7 +593,9 @@ def remote_list() -> None:
 
     # Calculate column widths
     name_width = max(len("NAME"), max((len(r[0]) for r in remotes), default=0), 10)
-    host_path_width = max(len("HOST:PATH"), max((len(f"{r[1]}:{r[2]}") for r in remotes), default=0), 9)
+    host_path_width = max(
+        len("HOST:PATH"), max((len(f"{r[1]}:{r[2]}") for r in remotes), default=0), 9
+    )
 
     # Print header
     typer.echo(f"{'NAME':<{name_width}}  {'HOST:PATH':<{host_path_width}}")
@@ -629,18 +643,33 @@ def campaign_create(
 
     # Resolve effective mode from --sequential shorthand
     if sequential and mode != "exploration":
-        raise typer.BadParameter("--sequential and --mode are mutually exclusive", param_hint="--mode/--sequential")
+        raise typer.BadParameter(
+            "--sequential and --mode are mutually exclusive", param_hint="--mode/--sequential"
+        )
     if sequential:
         mode = "sequential"
 
     slug = _require_project_slug()
     db = duckdb.connect(str(_catalog_dir() / "bathos.db"))
     try:
-        existing = [c for c in list_campaigns(db, project_slug=slug, status="open") if c.name == name]
+        existing = [
+            c for c in list_campaigns(db, project_slug=slug, status="open") if c.name == name
+        ]
         if existing:
             ids = ", ".join(c.id[:8] for c in existing)
-            typer.echo(f"Warning: {len(existing)} open campaign(s) named {name!r} already exist: {ids}", err=True)
-        campaign = create_campaign(db, name=name, project_slug=slug, mode=mode, question=question, hypothesis=hypothesis, parent_campaign_id=parent)
+            typer.echo(
+                f"Warning: {len(existing)} open campaign(s) named {name!r} already exist: {ids}",
+                err=True,
+            )
+        campaign = create_campaign(
+            db,
+            name=name,
+            project_slug=slug,
+            mode=mode,
+            question=question,
+            hypothesis=hypothesis,
+            parent_campaign_id=parent,
+        )
         typer.echo(f"Created campaign {campaign.id[:8]} — {campaign.name} ({campaign.mode})")
     finally:
         db.close()
@@ -655,6 +684,7 @@ def campaign_add(
     import duckdb
 
     from bathos.campaigns import CampaignError, add_run_to_campaign
+
     db = duckdb.connect(str(_catalog_dir() / "bathos.db"))
     try:
         add_run_to_campaign(db, campaign, run_id)
@@ -669,10 +699,16 @@ def campaign_add(
 @campaign_app.command("conclude")
 def campaign_conclude(
     campaign_id: str = typer.Argument(..., help="Campaign ID"),
-    outcome: str = typer.Option(..., "--outcome", help="Outcome label (e.g. pass, fail, inconclusive)"),
+    outcome: str = typer.Option(
+        ..., "--outcome", help="Outcome label (e.g. pass, fail, inconclusive)"
+    ),
     note: str = typer.Option("", "--note", help="Conclusion narrative"),
-    force: bool = typer.Option(False, "--force", help="Skip threshold warning for sequential campaigns"),
-    abort_if_below_threshold: bool = typer.Option(False, "--abort-if-below-threshold", help="Exit 1 if threshold not met"),
+    force: bool = typer.Option(
+        False, "--force", help="Skip threshold warning for sequential campaigns"
+    ),
+    abort_if_below_threshold: bool = typer.Option(
+        False, "--abort-if-below-threshold", help="Exit 1 if threshold not met"
+    ),
 ):
     """Conclude a campaign with an outcome label."""
     import duckdb
@@ -683,6 +719,7 @@ def campaign_conclude(
         conclude_campaign,
         get_campaign,
     )
+
     db = duckdb.connect(str(_catalog_dir() / "bathos.db"))
     try:
         campaign = get_campaign(db, campaign_id)
@@ -695,11 +732,14 @@ def campaign_conclude(
             threshold_met = _campaign_threshold_met(db, campaign.id, campaign.stopping_threshold)
             if not threshold_met:
                 if abort_if_below_threshold:
-                    ep_rows = db.execute("""
+                    ep_rows = db.execute(
+                        """
                         SELECT EXP(SUM(LN(cr.evalue)) FILTER (WHERE r.outcome != 'error' AND r.outcome != 'unknown'))
                         FROM campaign_runs cr INNER JOIN runs r ON cr.run_id = r.id
                         WHERE cr.campaign_id = ? AND cr.evalue IS NOT NULL
-                    """, [campaign.id]).fetchone()
+                    """,
+                        [campaign.id],
+                    ).fetchone()
                     ep = ep_rows[0] if ep_rows and ep_rows[0] is not None else 1.0
                     typer.echo(
                         f"Error: E_n has not reached stopping_threshold "
@@ -708,11 +748,14 @@ def campaign_conclude(
                     )
                     raise typer.Exit(1)
                 if not force:
-                    ep_rows = db.execute("""
+                    ep_rows = db.execute(
+                        """
                         SELECT EXP(SUM(LN(cr.evalue)) FILTER (WHERE r.outcome != 'error' AND r.outcome != 'unknown'))
                         FROM campaign_runs cr INNER JOIN runs r ON cr.run_id = r.id
                         WHERE cr.campaign_id = ? AND cr.evalue IS NOT NULL
-                    """, [campaign.id]).fetchone()
+                    """,
+                        [campaign.id],
+                    ).fetchone()
                     ep = ep_rows[0] if ep_rows and ep_rows[0] is not None else 1.0
                     typer.echo(
                         f"WARNING: E_n has not reached stopping_threshold "
@@ -843,9 +886,7 @@ def campaign_attest_parity(
     db = duckdb.connect(str(_catalog_dir() / "bathos.db"))
     try:
         attest_parity(campaign_id, parity_run_id, db, workspace_root)
-        typer.echo(
-            f"Attested parity run {parity_run_id[:8]} on campaign {campaign_id[:8]}"
-        )
+        typer.echo(f"Attested parity run {parity_run_id[:8]} on campaign {campaign_id[:8]}")
     except (ValueError, RuntimeError, FileNotFoundError) as e:
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(1)
@@ -879,6 +920,7 @@ def campaign_show(
     import duckdb
 
     from bathos.campaigns import get_campaign
+
     db = duckdb.connect(str(_catalog_dir() / "bathos.db"), read_only=True)
     try:
         campaign = get_campaign(db, campaign_id)
@@ -953,7 +995,9 @@ def report_emit(
             typer.echo(f"Campaign not found: {campaign_id}", err=True)
             raise typer.Exit(1)
         if campaign.status != "concluded":
-            typer.echo(f"Campaign {campaign_id[:8]} is not concluded (status: {campaign.status})", err=True)
+            typer.echo(
+                f"Campaign {campaign_id[:8]} is not concluded (status: {campaign.status})", err=True
+            )
             raise typer.Exit(1)
 
         # Emit both artifacts
@@ -1003,7 +1047,9 @@ def remote_test(
 
 @app.command()
 def sync(
-    remote: str | None = typer.Argument(None, help="Remote name from .bth.toml (auto-selected if only one configured)"),
+    remote: str | None = typer.Argument(
+        None, help="Remote name from .bth.toml (auto-selected if only one configured)"
+    ),
     pull: bool = typer.Option(False, "--pull", help="Pull from remote (default: push)"),
 ):
     """Sync cool-tier catalog to/from remote."""
@@ -1031,7 +1077,9 @@ def sync(
     try:
         result = sync_catalog(remote, config, catalog_dir, pull=pull)
         direction = "Pulled" if pull else "Pushed"
-        filter_msg = f" (filtered {result.filtered} from other projects)" if result.filtered > 0 else ""
+        filter_msg = (
+            f" (filtered {result.filtered} from other projects)" if result.filtered > 0 else ""
+        )
         typer.echo(
             f"{direction} {result.transferred} runs{filter_msg} to/from '{result.remote}' in {result.duration_s:.1f}s"
         )
@@ -1051,12 +1099,24 @@ def submit(
     array: str = typer.Option("", "--array", help="SLURM array spec e.g. 0-9%4"),
     dependency: str = typer.Option("", "--dependency", help="SLURM dependency e.g. afterok:12345"),
     name: str = typer.Option("", "--name", help="Job name (default: first token of command)"),
-    sbatch_arg: list[str] = typer.Option([], "--sbatch-arg", help="Passthrough raw sbatch arg; repeatable"),
-    sidecar: str | None = typer.Option(None, "--sidecar", help="Explicit path to experiment sidecar (.bth.toml)"),
-    push_first: bool = typer.Option(True, "--push-first/--no-push-first", help="Push project before submitting"),
-    wait: bool = typer.Option(False, "--wait/--no-wait", help="Block until job reaches terminal state"),
-    then_pull: bool = typer.Option(False, "--then-pull", help="Pull results after job completes (implies --wait)"),
-    then_sync: bool = typer.Option(False, "--then-sync", help="Run bth sync after pull (implies --then-pull --wait)"),
+    sbatch_arg: list[str] = typer.Option(
+        [], "--sbatch-arg", help="Passthrough raw sbatch arg; repeatable"
+    ),
+    sidecar: str | None = typer.Option(
+        None, "--sidecar", help="Explicit path to experiment sidecar (.bth.toml)"
+    ),
+    push_first: bool = typer.Option(
+        True, "--push-first/--no-push-first", help="Push project before submitting"
+    ),
+    wait: bool = typer.Option(
+        False, "--wait/--no-wait", help="Block until job reaches terminal state"
+    ),
+    then_pull: bool = typer.Option(
+        False, "--then-pull", help="Pull results after job completes (implies --wait)"
+    ),
+    then_sync: bool = typer.Option(
+        False, "--then-sync", help="Run bth sync after pull (implies --then-pull --wait)"
+    ),
 ):
     """Submit a command to the cluster using a configured preset."""
     import tomllib
@@ -1226,13 +1286,12 @@ def submit(
         raise typer.Exit(1)
 
     slurm_job_id = result["slurm_job_id"]
-    typer.echo(
-        f"Submitted {slurm_job_id} on {cluster.remote} using preset {cluster.preset}"
-    )
+    typer.echo(f"Submitted {slurm_job_id} on {cluster.remote} using preset {cluster.preset}")
 
     # 7a. Write submit-provenance record (AC-9 Part 1)
     try:
         import hashlib
+
         from bathos.catalog import write_submit_provenance
 
         sidecar_sha256 = ""
@@ -1312,8 +1371,12 @@ def submit(
 
 @app.command()
 def migrate(
-    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be migrated without writing"),
-    classify: bool = typer.Option(False, "--classify", help="Classify flat scripts into subdirs (Phase 2)"),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show what would be migrated without writing"
+    ),
+    classify: bool = typer.Option(
+        False, "--classify", help="Classify flat scripts into subdirs (Phase 2)"
+    ),
 ):
     """Migrate cool-tier Parquet fragments to current schema, optionally classifying scripts."""
     if classify:
@@ -1352,7 +1415,9 @@ def migrate(
 
 @app.command("migrate-to-project-subdirs")
 def migrate_to_subdirs_cmd(
-    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be moved without writing"),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show what would be moved without writing"
+    ),
 ):
     """Move flat cool-tier run parquets into per-project subdirectories.
 
@@ -1374,10 +1439,16 @@ def migrate_to_subdirs_cmd(
 @app.command()
 def classify(
     min_confidence: str = typer.Option(
-        "low", "--min-confidence", help="Only include classifications at or above this level (high|medium|low)"
+        "low",
+        "--min-confidence",
+        help="Only include classifications at or above this level (high|medium|low)",
     ),
-    no_content: bool = typer.Option(False, "--no-content", help="Skip content-augmented classification"),
-    no_scaffold: bool = typer.Option(False, "--no-scaffold", help="Do not scaffold sidecar stubs when applying"),
+    no_content: bool = typer.Option(
+        False, "--no-content", help="Skip content-augmented classification"
+    ),
+    no_scaffold: bool = typer.Option(
+        False, "--no-scaffold", help="Do not scaffold sidecar stubs when applying"
+    ),
     apply: bool = typer.Option(False, "--apply", help="Execute git mv commands and write sidecars"),
     project: Path = typer.Option(Path.cwd(), "--project", help="Project root (defaults to cwd)"),
     json_output: bool = typer.Option(False, "--json", help="Output as JSON (machine-readable)"),
@@ -1401,7 +1472,9 @@ def classify(
     )
 
     if min_confidence.lower() not in ("high", "medium", "low"):
-        typer.echo(f"Error: min-confidence must be high, medium, or low (got {min_confidence!r})", err=True)
+        typer.echo(
+            f"Error: min-confidence must be high, medium, or low (got {min_confidence!r})", err=True
+        )
         raise typer.Exit(1)
 
     project_root = project.resolve()
@@ -1423,11 +1496,16 @@ def classify(
 
     # Filter by min_confidence if needed
     min_conf_enum = ClassificationConfidence(min_confidence.lower())
-    confidence_order = [ClassificationConfidence.HIGH, ClassificationConfidence.MEDIUM, ClassificationConfidence.LOW]
+    confidence_order = [
+        ClassificationConfidence.HIGH,
+        ClassificationConfidence.MEDIUM,
+        ClassificationConfidence.LOW,
+    ]
     min_conf_idx = confidence_order.index(min_conf_enum)
 
     filtered_actions = [
-        a for a in plan.actions
+        a
+        for a in plan.actions
         if confidence_order.index(a.classification.confidence) <= min_conf_idx
     ]
 
@@ -1457,7 +1535,7 @@ def classify(
                     "conflict": a.conflict,
                 }
                 for a in filtered_actions
-            ]
+            ],
         }
         typer.echo(json.dumps(output, indent=2))
         raise typer.Exit(0)
@@ -1536,16 +1614,21 @@ def sprint_audit_cmd(
         typer.echo("No projects found. Run 'bth init' in each project first.")
         return
     for slug, data in result["audit_results"].items():
-        typer.echo(
-            f"{slug}: {data['runs']} runs, {data['campaigns']} campaigns"
-        )
+        typer.echo(f"{slug}: {data['runs']} runs, {data['campaigns']} campaigns")
         for anomaly in data["anomalies"]:
             typer.echo(f"  WARNING: {anomaly}")
 
 
 @app.command()
 def lint(
-    project_root: Path = typer.Option(Path("."), "--project-root", "-p", help="Project root to lint"),
+    project_root: Path = typer.Option(
+        Path("."), "--project-root", "-p", help="Project root to lint"
+    ),
+    concentration_threshold: int = typer.Option(
+        20,
+        "--concentration-threshold",
+        help="Unvalidated-run count threshold for run-concentration lint (strict >)",
+    ),
 ):
     """Check scripts/ for naming conventions and missing sidecars."""
     from bathos.linter import (
@@ -1557,6 +1640,7 @@ def lint(
         check_claim_opaque_labels,
         check_ephemeral_output_paths,
         check_residual_rates,
+        check_run_concentration,
         check_threshold_basis,
         check_todo_strings_in_scaffold,
         check_unfired_branches,
@@ -1580,6 +1664,7 @@ def lint(
         issues.extend(check_residual_rates(catalog_dir))
         issues.extend(check_bypass_trend(catalog_dir))
         issues.extend(check_unfired_branches(catalog_dir))
+        issues.extend(check_run_concentration(catalog_dir, threshold=concentration_threshold))
         issues.extend(check_ephemeral_output_paths(catalog_dir))
         issues.extend(check_canonical_stage_names(catalog_dir))
         issues.extend(check_baseline_ref_exists(project_root.resolve(), catalog_dir, db_path))
@@ -1614,7 +1699,9 @@ def lint(
 
 @app.command("new-experiment")
 def new_experiment_cmd(
-    name: str = typer.Argument(..., help="Experiment name (verb_noun style, e.g. run_nvt_stability)"),
+    name: str = typer.Argument(
+        ..., help="Experiment name (verb_noun style, e.g. run_nvt_stability)"
+    ),
     force: bool = typer.Option(False, "--force", help="Overwrite existing files"),
 ):
     """Scaffold a new experiment script and sidecar in scripts/experiments/."""
@@ -1637,7 +1724,7 @@ def validate_sidecar_cmd(
     path: Path = typer.Argument(..., help="Path to .bth.toml sidecar file"),
 ):
     """Validate a sidecar TOML file for structural integrity."""
-    from bathos.sidecar import parse_sidecar, SidecarError
+    from bathos.sidecar import SidecarError, parse_sidecar
     from bathos.validate import validate_sidecar
 
     try:
@@ -1659,18 +1746,29 @@ def validate_sidecar_cmd(
 @app.command("export")
 def export_cmd(
     tool: str = typer.Option("claude", "--tool", "-t", help="Target tool: claude or gemini"),
-    level: str = typer.Option("user", "--level", "-l", help="Install level: user, workspace, or system"),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Print what would happen without writing"),
-    html: bool = typer.Option(False, "--html", help="Export catalog as a self-contained HTML report"),
+    level: str = typer.Option(
+        "user", "--level", "-l", help="Install level: user, workspace, or system"
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Print what would happen without writing"
+    ),
+    html: bool = typer.Option(
+        False, "--html", help="Export catalog as a self-contained HTML report"
+    ),
     out: str = typer.Option("report.html", "--out", "-o", help="Output file for --html export"),
     project: str | None = typer.Option(None, "--project", help="Filter by project (--html only)"),
-    campaign: str | None = typer.Option(None, "--campaign", help="Filter by campaign (--html only)"),
-    surface: str | None = typer.Option(None, "--surface", help="Plugin surface (e.g., claude_code)"),
+    campaign: str | None = typer.Option(
+        None, "--campaign", help="Filter by campaign (--html only)"
+    ),
+    surface: str | None = typer.Option(
+        None, "--surface", help="Plugin surface (e.g., claude_code)"
+    ),
 ):
     """Export the using-bathos skill and register MCP server, or export catalog as HTML."""
     # Phase 3: plugin surface post-step hook
     if surface:
         from bathos import __version__
+
         typer.echo(f"Plugin export hook: surface={surface}, level={level}, bathos v{__version__}")
         raise typer.Exit(0)
 
@@ -1679,8 +1777,7 @@ def export_cmd(
             from bathos.viz.html import export_html as do_export
         except ImportError:
             typer.echo(
-                "Error: bathos[viz] is not installed.\n"
-                "Install with: uv tool install 'bathos[viz]'",
+                "Error: bathos[viz] is not installed.\nInstall with: uv tool install 'bathos[viz]'",
                 err=True,
             )
             raise typer.Exit(1)
@@ -1732,8 +1829,7 @@ def view(
         from bathos.viz.server import run_server
     except ImportError:
         typer.echo(
-            "Error: bathos[viz] is not installed.\n"
-            "Install with: uv tool install 'bathos[viz]'",
+            "Error: bathos[viz] is not installed.\nInstall with: uv tool install 'bathos[viz]'",
             err=True,
         )
         raise typer.Exit(1)
@@ -1746,7 +1842,9 @@ def view(
     runs = runs[:1000]
 
     try:
-        run_server(runs, total_run_count=total_run_count, host=host, port=port, open_browser=not no_open)
+        run_server(
+            runs, total_run_count=total_run_count, host=host, port=port, open_browser=not no_open
+        )
     except OSError as e:
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(1)
@@ -1767,6 +1865,7 @@ def catalog_version_cmd():
     db_path = catalog_dir / "bathos.db"
     if db_path.exists():
         import duckdb
+
         con = duckdb.connect(str(db_path), read_only=True)
         try:
             rows = con.execute(
@@ -1816,7 +1915,9 @@ def scaffold(
 @postmortem_app.command()
 def show(
     run_id: str = typer.Argument(..., help="Run ID of the postmortem to show"),
-    strict_files: bool = typer.Option(False, "--strict-files", help="Fail if files in asset_links do not exist"),
+    strict_files: bool = typer.Option(
+        False, "--strict-files", help="Fail if files in asset_links do not exist"
+    ),
 ):
     """Display and validate the postmortem for the given Run ID."""
     import duckdb
@@ -1863,6 +1964,7 @@ def show(
     if not run_obj:
         # Check cool fragments
         from bathos.catalog import read_runs
+
         cool_runs = read_runs(_catalog_dir())
         for r in cool_runs:
             if r.id == run_id:
@@ -1870,7 +1972,9 @@ def show(
                 break
 
     # Perform validation
-    result = validate_postmortem(pm, workspace_root=workspace_root, run=run_obj, strict_files=strict_files)
+    result = validate_postmortem(
+        pm, workspace_root=workspace_root, run=run_obj, strict_files=strict_files
+    )
     if not result.ok:
         typer.echo("Validation failed", err=True)
         for err in result.errors:
@@ -1892,7 +1996,9 @@ def show(
 def validate(
     file: Path = typer.Argument(..., help="Path to .bth.postmortem.toml file to validate"),
     strict: bool = typer.Option(False, "--strict", help="Treat missing run ID as error"),
-    strict_files: bool = typer.Option(False, "--strict-files", help="Treat missing asset files as error"),
+    strict_files: bool = typer.Option(
+        False, "--strict-files", help="Treat missing asset files as error"
+    ),
 ):
     """Validate a postmortem TOML file for structural and logical correctness."""
     from bathos.postmortem import parse_postmortem, validate_postmortem
@@ -1910,7 +2016,9 @@ def validate(
 
     workspace_root = resolve_workspace().fs_root
 
-    result = validate_postmortem(pm, workspace_root=workspace_root, strict=strict, strict_files=strict_files)
+    result = validate_postmortem(
+        pm, workspace_root=workspace_root, strict=strict, strict_files=strict_files
+    )
     if result.ok:
         typer.echo(f"✓ {file.name} is valid")
     else:
@@ -1923,7 +2031,9 @@ def validate(
 @outputs_app.command("list")
 def outputs_list(
     run_id: str = typer.Argument(..., help="Run ID to display outputs for"),
-    live: bool = typer.Option(False, "--live", help="Re-stat files from filesystem instead of using catalog snapshot."),
+    live: bool = typer.Option(
+        False, "--live", help="Re-stat files from filesystem instead of using catalog snapshot."
+    ),
 ):
     """Display output files registered for a run."""
     import json
@@ -1951,6 +2061,7 @@ def outputs_list(
         return
 
     from bathos.rich_fmt import render_output_list
+
     render_output_list(run_id, files, live=live)
 
 
@@ -1988,6 +2099,7 @@ def outputs_summary(
     # Add time filter
     if since:
         import re as regex_mod
+
         match = regex_mod.match(r"(\d+)([dhm])", since)
         if match:
             num, unit = match.groups()
@@ -2008,6 +2120,7 @@ def outputs_summary(
 
     if not rows:
         from bathos.rich_fmt import render_outputs_summary
+
         render_outputs_summary([], since=since)
         return
 
@@ -2033,4 +2146,5 @@ def outputs_summary(
             pass
 
     from bathos.rich_fmt import render_outputs_summary
+
     render_outputs_summary(list(aggregated.values()), since=since)
