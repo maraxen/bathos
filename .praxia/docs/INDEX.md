@@ -8,6 +8,7 @@
 - [260526_v06-sprint-composition](plans/260526_v06-sprint-composition.md) — Sprint composition: 12-item v0.6 dispatch DAG with workflow assignments, parallelization batches, exit criteria; flags Items 4+6 prereg.py conflict and sidecar canonical_toml() determinism risk
 - [260601_v061-sprint-composition](plans/260601_v061-sprint-composition.md) — Sprint composition: 4-item v0.6.1 dispatch DAG (validate.py guard commit, GateErrorCode taxonomy cleanup, sprint-audit threshold ADR + boundary tests, NLM hook wiring); defers POPPER e-value and 11b-11d gate wiring
 - [260611_worktree-workspace-resolution-dag](plans/260611_worktree-workspace-resolution-dag.md) — backlog DAG (T1→T3/T3b→T4) for worktree-aware workspace resolution; praxia backlog #1676–#1684
+- [260710_asr-rigor-ports-sprint-composition](plans/260710_asr-rigor-ports-sprint-composition.md) — port asr's C1–C5 rigor mechanisms into bathos core: BP-1 C3 concentration lint (`linter.py`), BP-2 C1 `[confounds.synthetic_recovery]` gate (`claim.py` AC-13 + `parity.py` submit-gate templates), BP-3 C5 negative-claim check (`validate_claim`); C2 needs a schema field (Appendix A), C4 stays in asr (Appendix B)
 
 ## Handoffs
 - [260616_worktree-prune-backlog-assess](handoffs/260616_worktree-prune-backlog-assess.md) — repo consolidated to single main worktree; bathos backlog drained (only #1774 P3 remains)
