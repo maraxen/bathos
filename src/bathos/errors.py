@@ -88,4 +88,8 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     # Trust ledger errors (S3, item 3491): a graduation was refused because the
     # ratchet invariant (a PASS attestation must exist) was not satisfied.
     "GraduationRefused": BathosErrorCode.GRADUATION_REFUSED,
+    # Attestation errors (S4, item 3492; debt #638 fix): register_attestation
+    # rejected an attestation that failed validate_attestation (e.g. missing
+    # required evidence fields) rather than silently anchoring it.
+    "AttestationValidationFailed": BathosErrorCode.SIDECAR_INVALID,
 }
