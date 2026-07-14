@@ -31,6 +31,9 @@ app.add_typer(report_app, name="report")
 claim_app = typer.Typer(help="Manage claim-tier pre-registration files")
 app.add_typer(claim_app, name="claim")
 
+query_app = typer.Typer(help="Read-back/query API (S1): pins, trust state, attestations, figures")
+app.add_typer(query_app, name="query")
+
 
 def _catalog_dir() -> Path:
     override = os.environ.get("BTH_CATALOG_DIR")
@@ -1016,6 +1019,121 @@ def report_emit(
         raise typer.Exit(1)
     finally:
         db.close()
+
+
+@report_app.command("show")
+def report_show(
+    campaign_id: str = typer.Argument(..., help="Campaign ID (full, exact match)"),
+):
+    """Read the campaign_report.json sidecar for a campaign (S1 read-back API; real).
+
+    Thin CLI wrapper over bathos.readback.read_campaign_report. Emit the sidecar first
+    with `bth report emit <campaign_id>`.
+    """
+    import json as json_mod
+
+    from bathos.readback import read_campaign_report
+
+    try:
+        report = read_campaign_report(_catalog_dir(), campaign_id)
+    except FileNotFoundError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+    typer.echo(json_mod.dumps(report.model_dump(), indent=2))
+
+
+@report_app.command("show-manifest")
+def report_show_manifest(
+    campaign_id: str = typer.Argument(..., help="Campaign ID (full, exact match)"),
+):
+    """Read the figure_manifest.json sidecar for a campaign (S1 read-back API; real).
+
+    Thin CLI wrapper over bathos.readback.read_figure_manifest. Emit the sidecar first
+    with `bth report emit <campaign_id>`.
+    """
+    import json as json_mod
+
+    from bathos.readback import read_figure_manifest
+
+    try:
+        manifest = read_figure_manifest(_catalog_dir(), campaign_id)
+    except FileNotFoundError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+    typer.echo(json_mod.dumps(manifest.model_dump(), indent=2))
+
+
+@query_app.command("resolve-pin")
+def query_resolve_pin(
+    run_id: str = typer.Argument(..., help="Run ID that produced the output"),
+    output_path: str = typer.Argument(..., help="Output path as recorded on the run"),
+):
+    """Resolve a run_id + output_path pin to content_hash/trust_state/freshness (S1; real)."""
+    import dataclasses
+    import json as json_mod
+
+    from bathos.query import CatalogError
+    from bathos.readback import resolve_pin
+
+    try:
+        pin = resolve_pin(_catalog_dir(), run_id, output_path)
+    except CatalogError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+    typer.echo(json_mod.dumps(dataclasses.asdict(pin), indent=2))
+
+
+@query_app.command("trust-state")
+def query_trust_state(
+    content_hash: str = typer.Argument(..., help="Content hash of the product"),
+):
+    """Look up trust_state for a content_hash (S1; null-stub pending trust ledger S3)."""
+    from bathos.readback import get_trust_state
+
+    typer.echo(str(get_trust_state(_catalog_dir(), content_hash)))
+
+
+@query_app.command("attestation")
+def query_attestation_cmd(
+    content_hash: str = typer.Argument(..., help="Content hash of the attested product"),
+    min_strength: str | None = typer.Option(
+        None, "--min-strength", help="'oracle_match' or 'repro_floor'"
+    ),
+):
+    """Query attestation for a content_hash (S1; null-stub pending attestation store S4)."""
+    import json as json_mod
+
+    from bathos.readback import query_attestation
+
+    result = query_attestation(_catalog_dir(), content_hash, min_strength)
+    typer.echo(json_mod.dumps(result, indent=2) if result is not None else "null")
+
+
+@query_app.command("figures")
+def query_figures(
+    asset_sha256: str | None = typer.Option(None, "--asset-sha256"),
+    input_hash: str | None = typer.Option(None, "--input-hash"),
+):
+    """Look up figure registry entries (S1; null-stub pending figure registry S7)."""
+    import json as json_mod
+
+    from bathos.readback import figure_lookup
+
+    figures = figure_lookup(_catalog_dir(), asset_sha256=asset_sha256, input_hash=input_hash)
+    typer.echo(json_mod.dumps(figures, indent=2))
+
+
+@query_app.command("candidates")
+def query_candidates(
+    campaign_id: str = typer.Argument(..., help="Campaign ID to list candidates for"),
+):
+    """List candidate-tier products for a campaign (S1; null-stub pending trust ledger S3)."""
+    import json as json_mod
+
+    from bathos.readback import list_candidates
+
+    candidates = list_candidates(_catalog_dir(), campaign_id)
+    typer.echo(json_mod.dumps(candidates, indent=2))
 
 
 @remote_app.command("test")

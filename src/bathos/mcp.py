@@ -6,6 +6,7 @@ campaigns, claims, postmortem, outputs, repair, verify, and lint.
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import json
 import os
@@ -38,6 +39,15 @@ from bathos.errors import BathosErrorCode, RESOLUTION_HINTS
 from bathos.init import init_project
 from bathos.prereg import GateError
 from bathos.query import CatalogError, find_runs, get_run, list_runs, run_sql
+from bathos.readback import (
+    figure_lookup as readback_figure_lookup,
+    get_trust_state as readback_get_trust_state,
+    list_candidates as readback_list_candidates,
+    query_attestation as readback_query_attestation,
+    read_campaign_report as readback_read_campaign_report,
+    read_figure_manifest as readback_read_figure_manifest,
+    resolve_pin as readback_resolve_pin,
+)
 from bathos.runner import run_script
 from bathos.sidecar import SidecarError
 from bathos.sync import sync_catalog
@@ -301,6 +311,191 @@ def run_sql_tool(
     rows = run_sql(sql, cat_dir)
     rows_json = [list(row) for row in rows]
     return {"rows": rows_json, "count": len(rows_json)}
+
+
+# ============================================================================
+# Read-back / query API (S1) — bathos.readback adapter
+#
+# resolve_pin / read_campaign_report / read_figure_manifest are REAL (wrap existing
+# catalog + disk readers). get_trust_state / query_attestation / figure_lookup /
+# list_candidates are intentional null-stubs pending their backing stores (S3/S4/S7) —
+# see bathos.readback module docstring.
+# ============================================================================
+
+
+def resolve_pin_tool(
+    run_id: str = "",
+    output_path: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Resolve a run_id + output_path pin to content_hash/trust_state/freshness.
+
+    Args:
+        run_id: Run ID that produced (or is expected to produce) the output.
+        output_path: Path to the output file, as recorded in the run.
+        catalog_dir: Catalog directory (empty = use default)
+
+    Returns:
+        Dict with content_hash, trust_state, fresh (plus run_id/output_path echoed back).
+    """
+    if not run_id:
+        return {"error": "run_id is required"}
+    if not output_path:
+        return {"error": "output_path is required"}
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    try:
+        pin = readback_resolve_pin(cat_dir, run_id, output_path)
+    except CatalogError as e:
+        return {"error": str(e)}
+    return dataclasses.asdict(pin)
+
+
+def get_trust_state_tool(
+    content_hash: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Look up the trust_state (candidate/promoted) of a product by content_hash.
+
+    NULL-STUB pending the trust ledger (build seam S3) — always returns "unknown".
+
+    Args:
+        content_hash: Content hash of the product to look up.
+        catalog_dir: Catalog directory (empty = use default)
+
+    Returns:
+        Dict with content_hash and trust_state.
+    """
+    if not content_hash:
+        return {"error": "content_hash is required"}
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    return {
+        "content_hash": content_hash,
+        "trust_state": str(readback_get_trust_state(cat_dir, content_hash)),
+    }
+
+
+def query_attestation_tool(
+    content_hash: str = "",
+    min_strength: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Look up a verdict-checked attestation for a product by content_hash.
+
+    NULL-STUB pending the attestation sidecar store (build seam S4) — always returns
+    attestation=None.
+
+    Args:
+        content_hash: Content hash of the attested product.
+        min_strength: Minimum required certification strength ('oracle_match' or
+            'repro_floor'); empty = no minimum.
+        catalog_dir: Catalog directory (empty = use default)
+
+    Returns:
+        Dict with content_hash and attestation (None until S4 ships).
+    """
+    if not content_hash:
+        return {"error": "content_hash is required"}
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    attestation = readback_query_attestation(cat_dir, content_hash, min_strength or None)
+    return {"content_hash": content_hash, "attestation": attestation}
+
+
+def read_campaign_report_tool(
+    campaign_id: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Read the campaign_report.json sidecar for a campaign.
+
+    Real: wraps CampaignReport.read_report (previously Python-only, no tool surface).
+
+    Args:
+        campaign_id: Full campaign ID (must match the sidecar directory name exactly).
+        catalog_dir: Catalog directory (empty = use default)
+
+    Returns:
+        Dict with the campaign report fields, or an error if not yet emitted.
+    """
+    if not campaign_id:
+        return {"error": "campaign_id is required"}
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    try:
+        report = readback_read_campaign_report(cat_dir, campaign_id)
+    except FileNotFoundError as e:
+        return {"error": str(e)}
+    return report.model_dump()
+
+
+def read_figure_manifest_tool(
+    campaign_id: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Read the figure_manifest.json sidecar for a campaign.
+
+    Real: wraps FigureManifest.read_manifest (previously Python-only, no tool surface).
+
+    Args:
+        campaign_id: Full campaign ID (must match the sidecar directory name exactly).
+        catalog_dir: Catalog directory (empty = use default)
+
+    Returns:
+        Dict with the figure manifest fields, or an error if not yet emitted.
+    """
+    if not campaign_id:
+        return {"error": "campaign_id is required"}
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    try:
+        manifest = readback_read_figure_manifest(cat_dir, campaign_id)
+    except FileNotFoundError as e:
+        return {"error": str(e)}
+    return manifest.model_dump()
+
+
+def figure_lookup_tool(
+    asset_sha256: str = "",
+    input_hash: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Look up figure registry entries by asset_sha256 or input_hash.
+
+    NULL-STUB pending the figure registry (build seam S7) — always returns [].
+
+    Args:
+        asset_sha256: Anchor key of the rendered figure asset.
+        input_hash: Content hash of the underlying data product.
+        catalog_dir: Catalog directory (empty = use default)
+
+    Returns:
+        Dict with figures array (empty until S7 ships).
+    """
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    figures = readback_figure_lookup(
+        cat_dir,
+        asset_sha256=asset_sha256 or None,
+        input_hash=input_hash or None,
+    )
+    return {"figures": figures, "count": len(figures)}
+
+
+def list_candidates_tool(
+    campaign_id: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """List candidate-tier (not-yet-promoted) products for a campaign.
+
+    NULL-STUB pending the trust ledger (build seam S3) — always returns [].
+
+    Args:
+        campaign_id: Campaign ID to list candidates for.
+        catalog_dir: Catalog directory (empty = use default)
+
+    Returns:
+        Dict with candidates array (empty until S3 ships).
+    """
+    if not campaign_id:
+        return {"error": "campaign_id is required"}
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    candidates = readback_list_candidates(cat_dir, campaign_id)
+    return {"campaign_id": campaign_id, "candidates": candidates, "count": len(candidates)}
 
 
 def compact_tool(
@@ -778,6 +973,83 @@ async def mcp_run_sql_tool(
 ) -> dict:
     """Execute SQL query against catalog."""
     return run_sql_tool(catalog_dir=catalog_dir, sql=sql)
+
+
+@app.tool("resolve_pin")
+@traced_tool
+async def mcp_resolve_pin_tool(
+    run_id: str = "",
+    output_path: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Resolve a run_id + output_path pin to content_hash/trust_state/freshness (S1)."""
+    return resolve_pin_tool(run_id=run_id, output_path=output_path, catalog_dir=catalog_dir)
+
+
+@app.tool("get_trust_state")
+@traced_tool
+async def mcp_get_trust_state_tool(
+    content_hash: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Look up trust_state for a content_hash (S1; null-stub pending trust ledger S3)."""
+    return get_trust_state_tool(content_hash=content_hash, catalog_dir=catalog_dir)
+
+
+@app.tool("query_attestation")
+@traced_tool
+async def mcp_query_attestation_tool(
+    content_hash: str = "",
+    min_strength: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Query attestation for a content_hash (S1; null-stub pending attestation store S4)."""
+    return query_attestation_tool(
+        content_hash=content_hash, min_strength=min_strength, catalog_dir=catalog_dir
+    )
+
+
+@app.tool("read_campaign_report")
+@traced_tool
+async def mcp_read_campaign_report_tool(
+    campaign_id: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Read the campaign_report.json sidecar for a campaign (S1; real)."""
+    return read_campaign_report_tool(campaign_id=campaign_id, catalog_dir=catalog_dir)
+
+
+@app.tool("read_figure_manifest")
+@traced_tool
+async def mcp_read_figure_manifest_tool(
+    campaign_id: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Read the figure_manifest.json sidecar for a campaign (S1; real)."""
+    return read_figure_manifest_tool(campaign_id=campaign_id, catalog_dir=catalog_dir)
+
+
+@app.tool("figure_lookup")
+@traced_tool
+async def mcp_figure_lookup_tool(
+    asset_sha256: str = "",
+    input_hash: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Look up figure registry entries (S1; null-stub pending figure registry S7)."""
+    return figure_lookup_tool(
+        asset_sha256=asset_sha256, input_hash=input_hash, catalog_dir=catalog_dir
+    )
+
+
+@app.tool("list_candidates")
+@traced_tool
+async def mcp_list_candidates_tool(
+    campaign_id: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """List candidate-tier products for a campaign (S1; null-stub pending trust ledger S3)."""
+    return list_candidates_tool(campaign_id=campaign_id, catalog_dir=catalog_dir)
 
 
 @app.tool("compact")
