@@ -76,6 +76,13 @@ def main(
     version: bool = typer.Option(False, "--version", "-V", is_eager=True),
 ):
     init_telemetry()
+    # Ensure the local MCP write-seam token (~/.bth/mcp_token, mode 0600)
+    # exists on first `bth` CLI use, so it's ready before any MCP client
+    # spawns bth-mcp (debt #619). CLI commands call core functions directly
+    # and never check this token themselves — see bathos.mcp_auth.
+    from bathos.mcp_auth import get_or_create_token
+
+    get_or_create_token()
     if version:
         from bathos import __version__
 

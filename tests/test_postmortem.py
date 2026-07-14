@@ -525,19 +525,25 @@ def test_mcp_postmortem_scaffold_matches_cli(tmp_path: Path, monkeypatch):
     import asyncio
 
     from bathos import mcp
+    from bathos.mcp_auth import get_or_create_token
 
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
     catalog_dir = tmp_path / "catalog"
     catalog_dir.mkdir()
     monkeypatch.delenv("BTH_WORKSPACE_ROOT", raising=False)
+    monkeypatch.setenv("BTH_MCP_TOKEN_PATH", str(tmp_path / "mcp_token"))
+    token = get_or_create_token()
 
     init_catalog(catalog_dir)
 
     # 1. Nonexistent run_id must return an error, not create anything on disk.
     result = asyncio.run(
         mcp.postmortem_scaffold(
-            run_id="nonexistent", catalog_dir=str(catalog_dir), workspace_root=str(workspace_root)
+            run_id="nonexistent",
+            catalog_dir=str(catalog_dir),
+            workspace_root=str(workspace_root),
+            token=token,
         )
     )
     assert result.get("error")
@@ -562,7 +568,10 @@ def test_mcp_postmortem_scaffold_matches_cli(tmp_path: Path, monkeypatch):
 
     result = asyncio.run(
         mcp.postmortem_scaffold(
-            run_id=run.id, catalog_dir=str(catalog_dir), workspace_root=str(workspace_root)
+            run_id=run.id,
+            catalog_dir=str(catalog_dir),
+            workspace_root=str(workspace_root),
+            token=token,
         )
     )
     assert not result.get("error")

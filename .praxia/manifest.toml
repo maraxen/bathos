@@ -5,7 +5,14 @@ description     = "Experiment tracking — pre-registration, provenance, campaig
 requires_praxia = ">=1.0"
 
 [plugin.mcp]
-command = ["bth", "serve"]
+# `bth serve` never existed as a CLI subcommand — the real MCP launch
+# mechanism is the `bth-mcp` console-script entry point (pyproject.toml
+# [project.scripts]), which starts bathos.mcp:mcp_server() on stdio
+# transport. bathos.export.register_mcp() resolves the same binary
+# (shutil.which("bth-mcp"), falling back to `uv run --with bathos[mcp]
+# bth-mcp`) when writing mcpServers.bathos into a caller's MCP config.
+# Fixed as part of debt #619 (MCP write-seam auth hardening).
+command = ["bth-mcp"]
 
 [[plugin.skills]]
 name     = "using-bathos"

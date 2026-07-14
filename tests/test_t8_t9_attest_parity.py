@@ -215,8 +215,12 @@ class TestT8MCPAttestParity:
     """MCP claim_attest_parity wraps attest_parity."""
 
     def test_mcp_attest_parity_ok(
-        self, tmp_path, catalog_with_tables, claim_file, parity_run_id
+        self, tmp_path, catalog_with_tables, claim_file, parity_run_id, monkeypatch
     ):
+        from bathos.mcp_auth import get_or_create_token
+
+        monkeypatch.setenv("BTH_MCP_TOKEN_PATH", str(tmp_path / "mcp_token"))
+        token = get_or_create_token()
         catalog_dir = catalog_with_tables
         db = duckdb.connect(str(catalog_dir / "bathos.db"))
         claim_rel, claim_sha, claim_path = claim_file
@@ -257,6 +261,7 @@ class TestT8MCPAttestParity:
                 parity_run_id=parity_run_id,
                 catalog_dir=str(catalog_dir),
                 workspace_root=str(tmp_path),
+                token=token,
             )
         )
 
@@ -265,8 +270,12 @@ class TestT8MCPAttestParity:
         assert f'parity_run_id = "{parity_run_id}"' in claim_path.read_text()
 
     def test_mcp_attest_parity_rejects_missing_run(
-        self, tmp_path, catalog_with_tables, claim_file
+        self, tmp_path, catalog_with_tables, claim_file, monkeypatch
     ):
+        from bathos.mcp_auth import get_or_create_token
+
+        monkeypatch.setenv("BTH_MCP_TOKEN_PATH", str(tmp_path / "mcp_token"))
+        token = get_or_create_token()
         catalog_dir = catalog_with_tables
         db = duckdb.connect(str(catalog_dir / "bathos.db"))
         claim_rel, claim_sha, _claim_path = claim_file
@@ -296,6 +305,7 @@ class TestT8MCPAttestParity:
                 parity_run_id="run_does_not_exist",
                 catalog_dir=str(catalog_dir),
                 workspace_root=str(tmp_path),
+                token=token,
             )
         )
 
