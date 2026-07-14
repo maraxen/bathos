@@ -1297,6 +1297,50 @@ def anchor_find_cmd(
     typer.echo(json_mod.dumps([dataclasses.asdict(r) for r in records], indent=2))
 
 
+@anchor_app.command("figure-register")
+def anchor_figure_register_cmd(
+    asset_sha256: str = typer.Argument(..., help="Anchor key: SHA256 of the rendered figure asset"),
+    sidecar_ref: str = typer.Argument(..., help="Pointer to the .figure.toml sidecar"),
+    figure_kind: str = typer.Option(..., "--figure-kind", "-k", help="Free-form figure kind, e.g. 'chord_diagram'"),
+    render_state: str = typer.Option("ready", "--render-state", help="'ready' or 'deferred'"),
+    fig_trust_state: str = typer.Option("draft", "--fig-trust-state", help="'draft' or 'final'"),
+    attestation_ref: str | None = typer.Option(
+        None, "--attestation-ref", help="Optional POINTER (sha256) to a bathos-side attestation"
+    ),
+    input_hash: str | None = typer.Option(
+        None, "--input-hash", help="Optional hash of the underlying data product (query key only)"
+    ),
+    campaign_id: str | None = typer.Option(
+        None, "--campaign-id", help="Optional campaign this figure belongs to"
+    ),
+):
+    """Register a typed figure_entry, anchored by asset_sha256 (S7 write seam; real).
+
+    Builds on `bth anchor insert` (S2) with a dedicated kind="figure_entry" and a
+    schema that REJECTS any inline verdict/strength/content_hash/outcome/gate field —
+    a figure carries only a POINTER (--attestation-ref) to a bathos-side attestation,
+    never the verdict itself (spec 260713 §3.3/§7). Defaults to DurableAnchorStore, so
+    the entry survives a warm-cache force-rebuild.
+    """
+    import dataclasses
+    import json as json_mod
+
+    from bathos.figure_registry import register_figure_entry
+
+    entry = register_figure_entry(
+        _catalog_dir(),
+        asset_sha256=asset_sha256,
+        sidecar_ref=sidecar_ref,
+        figure_kind=figure_kind,
+        render_state=render_state,
+        fig_trust_state=fig_trust_state,
+        attestation_ref=attestation_ref,
+        input_hash=input_hash,
+        campaign_id=campaign_id,
+    )
+    typer.echo(json_mod.dumps(dataclasses.asdict(entry), indent=2))
+
+
 @remote_app.command("test")
 def remote_test(
     name: str = typer.Argument(..., help="Remote name to test"),

@@ -51,6 +51,14 @@ ledger (S3, backlog #3491) is what would consume a PASS result to move a product
 ``candidate`` to ``promoted``. Until S3 exists, ``get_trust_state`` still always returns
 ``UNKNOWN`` regardless of what ``query_attestation`` returns for the same content_hash —
 a recorded PASS attestation is inert on its own.
+
+UPDATE (backlog item 3490, seam S7, ``bathos.figure_registry``): ``figure_lookup`` now
+ALSO resolves the typed, pointer-only ``figure_entry`` registry (spec §3.3), composing
+its results alongside the pre-existing S2-era minimal anchor shape rather than
+replacing it — see ``figure_lookup``'s own docstring below for the reconciliation.
+``get_trust_state`` and ``list_candidates`` remain null-stubs (their backing store, S3,
+still does not exist); ``query_attestation`` remains the S4-backed real implementation
+described above — neither reverted to a stub by this update.
 """
 
 from __future__ import annotations
@@ -315,12 +323,21 @@ def figure_lookup(
 ) -> list[dict]:
     """Look up figure registry entries by asset_sha256 or input_hash.
 
-    REAL (as of seam S2, ``bathos.anchor``, backlog item 3483): backed by the generic
-    sidecar-anchor store, filtered to ``kind="figure"``. This is a minimal figure
-    registry, not the dedicated build seam S7 originally anticipated in this module's
-    docstring — S7 may still supersede it with a richer schema. Until a producer calls
-    ``bathos.anchor.register_anchor(..., kind="figure", ...)`` for a given
-    asset_sha256/input_hash, this returns ``[]``, which is observably identical to the
+    REAL, composed from two sources:
+
+    - The S2-era minimal shape (``bathos.anchor``, item 3483): generic
+      sidecar-anchors with ``kind="figure"``, returned as a dict of ``path``/
+      ``sha256``/``content_hash``/``campaign_id``/``anchored_at``/``figure_id``.
+    - The S7 typed figure registry (``bathos.figure_registry``, item 3490): typed,
+      pointer-only ``figure_entry`` records (``asset_sha256``/``sidecar_ref``/
+      ``figure_kind``/``render_state``/``fig_trust_state``/``attestation_ref``),
+      registered via ``bathos.figure_registry.register_figure_entry``.
+
+    These are NOT unified into one shape — S7 is additive, composed alongside the
+    older S2 shape rather than replacing it (see ``bathos.figure_registry`` module
+    docstring, "Reconciling with the S1-era figure_lookup shape"). A caller
+    distinguishes the two by their key sets. Until a producer registers via either
+    path for a given asset_sha256/input_hash, this returns ``[]``, identical to the
     pre-S2 null-stub behavior.
 
     Args:
@@ -330,20 +347,21 @@ def figure_lookup(
             from (matches an anchor's ``content_hash``, not its ``sha256``).
 
     Returns:
-        A list of dicts (one per matching anchor): ``path``, ``sha256``,
-        ``content_hash``, ``campaign_id``, ``anchored_at``, and ``figure_id`` (the
-        anchor's label if set, else its path). ``[]`` if neither filter is given or
-        nothing matches.
+        A list of dicts, one per matching record from either source (may be a mix of
+        both shapes). ``[]`` if neither filter is given or nothing matches.
     """
     if asset_sha256 is None and input_hash is None:
         return []
 
+    import dataclasses
+
     from bathos.anchor import find_anchors
+    from bathos.figure_registry import find_figure_entries
 
     records = find_anchors(
         catalog_dir, kind="figure", sha256=asset_sha256, content_hash=input_hash
     )
-    return [
+    legacy = [
         {
             "figure_id": record.label or record.path,
             "path": record.path,
@@ -354,6 +372,13 @@ def figure_lookup(
         }
         for record in records
     ]
+
+    typed_entries = find_figure_entries(
+        catalog_dir, asset_sha256=asset_sha256, input_hash=input_hash
+    )
+    typed = [dataclasses.asdict(entry) for entry in typed_entries]
+
+    return legacy + typed
 
 
 def list_candidates(catalog_dir: Path | str, campaign_id: str) -> list[dict]:

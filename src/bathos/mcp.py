@@ -39,6 +39,7 @@ from bathos.errors import BathosErrorCode, RESOLUTION_HINTS
 from bathos.init import init_project
 from bathos.prereg import GateError
 from bathos.anchor import find_anchors, get_anchor, register_anchor
+from bathos.figure_registry import FigureEntrySchemaError, register_figure_entry
 from bathos.query import CatalogError, find_runs, get_run, list_runs, run_sql
 from bathos.readback import (
     figure_lookup as readback_figure_lookup,
@@ -612,6 +613,69 @@ def anchor_find_tool(
     )
     anchors = [dataclasses.asdict(r) for r in records]
     return {"anchors": anchors, "count": len(anchors)}
+
+
+# ============================================================================
+# Figure registry WRITE API (S7) — bathos.figure_registry adapter (backlog item 3490)
+#
+# Typed, pointer-only figure_entry, built on the S2 anchor-insert seam. Registers
+# under kind="figure_entry" (distinct from S2's bare kind="figure"); figure_lookup
+# (above) composes both. Rejects any inline verdict/strength/content_hash/outcome/gate
+# field — see bathos.figure_registry module docstring.
+# ============================================================================
+
+
+def figure_entry_register_tool(
+    asset_sha256: str = "",
+    sidecar_ref: str = "",
+    figure_kind: str = "",
+    render_state: str = "ready",
+    fig_trust_state: str = "draft",
+    attestation_ref: str = "",
+    input_hash: str = "",
+    campaign_id: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Register a typed figure_entry, anchored by asset_sha256 (S7 write seam; real).
+
+    Args:
+        asset_sha256: Anchor key — SHA256 of the rendered figure asset.
+        sidecar_ref: Pointer to the `.figure.toml` sidecar describing this figure.
+        figure_kind: Free-form figure kind (e.g. 'chord_diagram').
+        render_state: 'ready' or 'deferred'.
+        fig_trust_state: 'draft' or 'final'.
+        attestation_ref: Optional POINTER (sha256) to a bathos-side attestation.
+        input_hash: Optional hash of the underlying data product (query key only —
+            never a field of the returned entry).
+        campaign_id: Optional campaign this figure belongs to.
+        catalog_dir: Catalog directory (empty = use default)
+
+    Returns:
+        Dict with ok + the registered figure_entry, or ok=False + error (e.g. a
+        rejected forbidden inline field).
+    """
+    if not asset_sha256:
+        return {"ok": False, "error": "asset_sha256 is required"}
+    if not sidecar_ref:
+        return {"ok": False, "error": "sidecar_ref is required"}
+    if not figure_kind:
+        return {"ok": False, "error": "figure_kind is required"}
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    try:
+        entry = register_figure_entry(
+            cat_dir,
+            asset_sha256=asset_sha256,
+            sidecar_ref=sidecar_ref,
+            figure_kind=figure_kind,
+            render_state=render_state,
+            fig_trust_state=fig_trust_state,
+            attestation_ref=attestation_ref or None,
+            input_hash=input_hash or None,
+            campaign_id=campaign_id or None,
+        )
+    except (FigureEntrySchemaError, TypeError, ValueError) as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "figure_entry": dataclasses.asdict(entry)}
 
 
 # ============================================================================
@@ -1334,6 +1398,33 @@ async def mcp_anchor_find_tool(
         kind=kind,
         sha256=sha256,
         content_hash=content_hash,
+        campaign_id=campaign_id,
+        catalog_dir=catalog_dir,
+    )
+
+
+@app.tool("figure_entry_register")
+@traced_tool
+async def mcp_figure_entry_register_tool(
+    asset_sha256: str = "",
+    sidecar_ref: str = "",
+    figure_kind: str = "",
+    render_state: str = "ready",
+    fig_trust_state: str = "draft",
+    attestation_ref: str = "",
+    input_hash: str = "",
+    campaign_id: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Register a typed figure_entry, anchored by asset_sha256 (S7 write seam; real)."""
+    return figure_entry_register_tool(
+        asset_sha256=asset_sha256,
+        sidecar_ref=sidecar_ref,
+        figure_kind=figure_kind,
+        render_state=render_state,
+        fig_trust_state=fig_trust_state,
+        attestation_ref=attestation_ref,
+        input_hash=input_hash,
         campaign_id=campaign_id,
         catalog_dir=catalog_dir,
     )

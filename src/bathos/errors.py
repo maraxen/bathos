@@ -77,4 +77,7 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     "SidecarError": BathosErrorCode.SIDECAR_ERROR,
     # Export errors
     "ExportError": BathosErrorCode.EXPORT_ERROR,
+    # Figure registry errors (S7, item 3490): a figure_entry payload carried a
+    # forbidden inline field (verdict/strength/content_hash/outcome/gate).
+    "FigureEntrySchemaError": BathosErrorCode.INVALID_PARAM,
 }
