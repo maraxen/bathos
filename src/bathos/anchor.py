@@ -48,10 +48,27 @@ registry (build seam S7 in that module's original docstring). This seam gives it
 real, if minimal, backing store: figures anchored here with ``kind="figure"`` become
 visible through ``figure_lookup`` immediately, without waiting for a dedicated S7
 build. See ``bathos.readback.figure_lookup`` and ``tests/test_readback.py``.
+
+UPDATE (gate 2b-A DE-RISK spike, #3485, branch ``figure-eda-2bA-durability-spike`` —
+NOT on main, NOT merged): the durability gap called out above is now prototyped, not
+just diagnosed. :class:`DurableAnchorStore` (a thin :class:`CatalogAnchorStore`
+subclass) plus :func:`write_anchor_fragment` / :func:`read_anchor_fragments` add a
+cool-tier Parquet fragment layer for anchors, identical in shape to
+``bathos.catalog.write_run`` / ``read_runs`` for runs. ``bathos.compact.compact`` gained
+a matching anchor-ingest step (mirroring its existing runs-ingest loop) so anchors
+written through ``DurableAnchorStore`` survive ``force_rebuild=True`` and remain
+queryable via the S1 read-back API (``bathos.readback.figure_lookup``). See
+``tests/test_anchor_durability.py`` and
+``.praxia/docs/decisions/260714_spike-2bA-anchor-durability.md`` (maraxiom repo) for the
+force-rebuild proof and RECOMMENDED verdict. ``CatalogAnchorStore`` itself is
+unchanged and remains non-durable (see ``TestNoDurabilityGuarantee`` in
+``tests/test_anchor.py``, still passing) — this is additive, not a default-behavior
+change, pending owner sign-off on gate #3485.
 """
 
 from __future__ import annotations
 
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -59,6 +76,10 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 import duckdb
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+from bathos.telemetry import event
 
 _ANCHORS_TABLE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS sidecar_anchors (
@@ -265,6 +286,136 @@ class CatalogAnchorStore:
             return [AnchorRecord(*row) for row in rows]
         finally:
             con.close()
+
+
+_ANCHOR_FRAGMENTS_DIRNAME = "anchors"
+
+_ANCHOR_FRAGMENT_SCHEMA = pa.schema(
+    [
+        pa.field("id", pa.string()),
+        pa.field("path", pa.string()),
+        pa.field("sha256", pa.string()),
+        pa.field("kind", pa.string()),
+        pa.field("label", pa.string()),
+        pa.field("content_hash", pa.string()),
+        pa.field("campaign_id", pa.string()),
+        pa.field("anchored_at", pa.string()),
+    ]
+)
+
+
+def _anchor_fragments_dir(catalog_dir: Path | str) -> Path:
+    return Path(catalog_dir) / _ANCHOR_FRAGMENTS_DIRNAME
+
+
+def write_anchor_fragment(record: AnchorRecord, catalog_dir: Path | str) -> None:
+    """Write an immutable cool-tier Parquet fragment for one anchor record.
+
+    DE-RISK SPIKE (gate 2b-A, #3485): mirrors ``bathos.catalog.write_run`` exactly —
+    one fragment per record, atomic tmp-write + POSIX rename, keyed by a fresh
+    fragment id (not the anchor's own (path, sha256) identity, so re-anchoring the
+    same (path, sha256) appends a new fragment rather than overwriting one; the
+    latest-by-``anchored_at`` fragment for a given (path, sha256) wins on read-back,
+    matching the upsert semantics ``CatalogAnchorStore.insert`` already provides for
+    the warm tier).
+
+    This is the durable substrate: fragments here are never deleted or rewritten by
+    ``bathos.compact.compact``, including under ``force_rebuild=True`` (which only
+    deletes the warm ``bathos.db`` file, never ``<catalog_dir>/anchors/``). Compare
+    ``bathos.catalog.write_run`` / the ``runs/`` cool tier, which is durable for the
+    identical reason.
+    """
+    frag_dir = _anchor_fragments_dir(catalog_dir)
+    frag_dir.mkdir(parents=True, exist_ok=True)
+    frag_id = str(uuid.uuid4())
+    target = frag_dir / f"anchor_{frag_id}.parquet"
+    tmp = frag_dir / f"anchor_{frag_id}.tmp.parquet"
+
+    t_start = time.monotonic()
+    table = pa.table(
+        {
+            "id": [frag_id],
+            "path": [record.path],
+            "sha256": [record.sha256],
+            "kind": [record.kind],
+            "label": [record.label],
+            "content_hash": [record.content_hash],
+            "campaign_id": [record.campaign_id],
+            "anchored_at": [record.anchored_at],
+        },
+        schema=_ANCHOR_FRAGMENT_SCHEMA,
+    )
+    pq.write_table(table, tmp)
+    tmp.rename(target)  # atomic on POSIX
+    duration_ms = (time.monotonic() - t_start) * 1000
+
+    event("anchor.write_fragment", path=str(target), rows=1, duration_ms=int(duration_ms))
+
+
+def read_anchor_fragments(catalog_dir: Path | str) -> list[AnchorRecord]:
+    """Read all cool-tier anchor fragments, folded latest-wins per (path, sha256).
+
+    Mirrors ``bathos.catalog.read_runs``: reads every ``anchor_*.parquet`` fragment,
+    concatenates, and (unlike read_runs, which is keyed on a unique run id) folds
+    multiple fragments for the same (path, sha256) identity down to the one with the
+    latest ``anchored_at`` — re-anchoring the same sidecar writes a new fragment, and
+    read-back must reproduce the warm tier's upsert-wins-on-latest semantics.
+    """
+    frag_dir = _anchor_fragments_dir(catalog_dir)
+    if not frag_dir.exists():
+        return []
+    parquet_files = list(frag_dir.glob("anchor_*.parquet"))
+    if not parquet_files:
+        return []
+
+    tables = [pq.read_table(f) for f in parquet_files]
+    combined = pa.concat_tables(tables, promote_options="permissive")
+    pydict = combined.to_pydict()
+
+    latest: dict[tuple[str, str], AnchorRecord] = {}
+    for i in range(combined.num_rows):
+        record = AnchorRecord(
+            path=pydict["path"][i],
+            sha256=pydict["sha256"][i],
+            kind=pydict["kind"][i],
+            label=pydict["label"][i],
+            content_hash=pydict["content_hash"][i],
+            campaign_id=pydict["campaign_id"][i],
+            anchored_at=pydict["anchored_at"][i],
+        )
+        key = (record.path, record.sha256)
+        existing = latest.get(key)
+        if existing is None or record.anchored_at >= existing.anchored_at:
+            latest[key] = record
+    return list(latest.values())
+
+
+class DurableAnchorStore(CatalogAnchorStore):
+    """DE-RISK SPIKE (gate 2b-A, #3485) prototype: an AnchorStore that survives
+    ``bathos.compact.compact(catalog_dir, force_rebuild=True)``.
+
+    Identical read path to :class:`CatalogAnchorStore` (get/find both query the warm
+    ``sidecar_anchors`` table) — the only difference is ``insert``, which additionally
+    appends an immutable cool-tier fragment via :func:`write_anchor_fragment`. The
+    warm-tier row this class also writes (via the inherited ``CatalogAnchorStore.insert``)
+    is disposable, exactly like the warm ``runs`` rows: it gets wiped by
+    ``force_rebuild=True`` and must be re-derived from cool fragments before it is
+    queryable again. That re-derivation is NOT automatic on every ``compact()`` call
+    from this class alone — it requires the ``compact.py`` ingestion step added
+    alongside this spike (see ``compact._ingest_anchor_fragments``), which reads
+    :func:`read_anchor_fragments` and repopulates ``sidecar_anchors`` the same way the
+    existing runs-ingest loop repopulates ``runs`` from cool Parquet.
+
+    NOT a claim that this is the final production design for S3 (#3491) — it is the
+    minimal proof that bathos's existing durable-append machinery (cool Parquet
+    fragment + compact-time re-ingest) generalizes to anchors/ledger records. See the
+    force-rebuild test and decision memo for the verdict.
+    """
+
+    def insert(self, record: AnchorRecord) -> AnchorRecord:
+        written = super().insert(record)
+        write_anchor_fragment(written, self._catalog_dir)
+        return written
 
 
 def get_anchor_store(catalog_dir: Path | str) -> AnchorStore:

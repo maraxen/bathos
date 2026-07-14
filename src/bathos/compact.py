@@ -17,6 +17,11 @@ from bathos.catalog import read_runs
 from bathos.schema import CURRENT_SCHEMA_VERSION, Run
 from bathos.telemetry import event
 
+# DE-RISK SPIKE (gate 2b-A, #3485, branch figure-eda-2bA-durability-spike — NOT on
+# main): anchor cool-tier schema, imported lazily inside _ingest_anchor_fragments to
+# avoid a hard import-time dependency of compact.py on anchor.py for callers that
+# never anchor anything. See bathos.anchor module docstring "UPDATE" section.
+
 logger = logging.getLogger(__name__)
 
 
@@ -406,6 +411,72 @@ def _open_db(db_path: Path) -> duckdb.DuckDBPyConnection:
     return con
 
 
+def _ingest_anchor_fragments(con: duckdb.DuckDBPyConnection, catalog_dir: Path) -> int:
+    """Re-derive the warm ``sidecar_anchors`` table from cool-tier anchor fragments.
+
+    DE-RISK SPIKE (gate 2b-A, #3485, branch figure-eda-2bA-durability-spike — NOT on
+    main, NOT merged). Mirrors the runs-ingest loop in :func:`compact` exactly: reads
+    every immutable fragment under ``<catalog_dir>/anchors/`` (written by
+    ``bathos.anchor.write_anchor_fragment`` / ``DurableAnchorStore``) and upserts each
+    into the warm ``sidecar_anchors`` table, keyed on the same ``(path, sha256)``
+    identity ``CatalogAnchorStore`` uses. This is what makes anchors written through
+    ``DurableAnchorStore`` survive ``compact(catalog_dir, force_rebuild=True)``: the
+    cool fragments are never touched by force_rebuild (only ``bathos.db`` is deleted),
+    and this step runs on every compact — including the rebuild itself, since
+    force_rebuild deletes then falls through to the normal compact body.
+
+    No-op (imports nothing, touches nothing) if ``<catalog_dir>/anchors/`` does not
+    exist — anchors are an optional, additive feature; catalogs that never anchor
+    anything pay zero cost here.
+
+    Returns the number of fragment-derived records ingested (post latest-wins fold).
+    """
+    from bathos.anchor import _ANCHORS_TABLE_SCHEMA, read_anchor_fragments
+
+    records = read_anchor_fragments(catalog_dir)
+    if not records:
+        return 0
+
+    con.execute(_ANCHORS_TABLE_SCHEMA)
+    for record in records:
+        existing = con.execute(
+            "SELECT id FROM sidecar_anchors WHERE path = ? AND sha256 = ?",
+            [record.path, record.sha256],
+        ).fetchone()
+        if existing:
+            con.execute(
+                "UPDATE sidecar_anchors SET kind = ?, label = ?, content_hash = ?, "
+                "campaign_id = ?, anchored_at = ? WHERE id = ?",
+                [
+                    record.kind,
+                    record.label,
+                    record.content_hash,
+                    record.campaign_id,
+                    record.anchored_at,
+                    existing[0],
+                ],
+            )
+        else:
+            import uuid as _uuid
+
+            con.execute(
+                "INSERT INTO sidecar_anchors "
+                "(id, path, sha256, kind, label, content_hash, campaign_id, anchored_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    str(_uuid.uuid4()),
+                    record.path,
+                    record.sha256,
+                    record.kind,
+                    record.label,
+                    record.content_hash,
+                    record.campaign_id,
+                    record.anchored_at,
+                ],
+            )
+    return len(records)
+
+
 def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
     """Ingest all cool fragments into bathos.db DuckDB database.
 
@@ -522,6 +593,12 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
     con.execute(
         "CREATE INDEX IF NOT EXISTS idx_campaigns_mode_status ON campaigns (mode, status)"
     )
+
+    # DE-RISK SPIKE (gate 2b-A, #3485, branch figure-eda-2bA-durability-spike — NOT
+    # on main): re-derive sidecar_anchors from cool-tier anchor fragments, same as
+    # runs are re-derived from cool_runs below. This runs unconditionally (cheap
+    # no-op if no anchors/ fragments exist) so it also fires on force_rebuild.
+    _ingest_anchor_fragments(con, catalog_dir)
 
     # Track ingested and skipped counts
     ingested = 0
