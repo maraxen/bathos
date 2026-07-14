@@ -101,6 +101,18 @@ class AttestationValidationError:
         return f"AttestationValidationError({self.message!r})"
 
 
+class AttestationValidationFailed(ValueError):
+    """Raised by `register_attestation` (debt #638, escalates #629) when the
+    attestation at `path` fails `validate_attestation` — e.g. an `oracle_match`
+    attestation missing required evidence fields (`oracle_sha256`,
+    `harness_run_ref`, `max_discrepancy`, `tolerance_policy`). No anchor is
+    written and no ledger promotion can be backed by the rejected attestation:
+    this is the fix for the promotion ratchet's evidence-free-attestation gap
+    (spec §5.1 — "nothing reaches promoted without an evaluator PASS
+    attestation" requires the attestation itself to be internally coherent,
+    not just verdict == "PASS")."""
+
+
 @dataclass
 class AttestationValidationResult:
     """Result of `validate_attestation`. Deliberately NOT `bathos.claim.ValidationResult`."""
@@ -350,8 +362,31 @@ def register_attestation(
       human-readable label, and how `query_attestation` cheaply pre-filters before
       reading the full canonical file back.
 
-    Does NOT itself call `validate_attestation` — like `bathos.claim.register_claim`,
-    registration and validation are separate steps (see `bth attestation validate`).
+    Enforces validity at registration time (debt #638, escalates #629; fixes a
+    confirmed promotion-ratchet defeat found by adversarial audit 260714):
+    internally calls `validate_attestation` and REJECTS — raising
+    `AttestationValidationFailed`, writing nothing — an attestation that fails
+    validation (e.g. an `oracle_match` attestation missing required evidence
+    fields). This used to be a separate, optional step (mirroring
+    `bathos.claim.register_claim`'s registration/validation split), but nothing in
+    the read/promote path (`bathos.readback.query_attestation`,
+    `bathos.trust_ledger.graduate_product`) re-validates on the way out — both
+    trust `register_attestation` to have anchored only internally-coherent
+    evidence. A well-behaved caller could always call `validate_attestation`
+    first, but an evidence-free or malformed attestation registered by a
+    careless or adversarial caller was silently anchored and then accepted by
+    `query_attestation`/`graduate_product` to promote a fabricated content_hash.
+    So `register_attestation` now enforces the invariant itself rather than
+    assuming a separate validate step ran. The `bth attestation scaffold` /
+    `bth attestation validate` tools remain useful for iterating on a draft
+    attestation *before* registering it — `attestation_validate_tool` is the
+    dry-run check; this function is the enforced gate at the actual write seam.
+
+    Note (debt #619, tracked separately, NOT fixed here): this only checks that
+    the attestation is internally coherent (real evidence fields, correct
+    shape) — it does not authenticate WHO is allowed to call this function or
+    the `attestation_register_tool` MCP wrapper. A caller could still construct
+    a fully-valid-*shaped* attestation for a run they don't actually control.
 
     Args:
         path: Path to the attestation TOML file to register.
@@ -370,8 +405,19 @@ def register_attestation(
     Raises:
         FileNotFoundError: If `path` does not exist.
         ValueError: If `path` cannot be parsed as TOML.
+        AttestationValidationFailed: If the attestation fails
+            `validate_attestation` (subclass of ValueError). No anchor is
+            written and no canonical copy is created.
     """
     attestation = parse_attestation(path)
+
+    validation = validate_attestation(attestation)
+    if not validation.ok:
+        messages = "; ".join(e.message for e in validation.errors)
+        raise AttestationValidationFailed(
+            f"Attestation at {path} failed validation and was NOT registered: "
+            f"{messages}"
+        )
 
     canonical_path = _canonical_attestation_path(catalog_dir, attestation.sha256)
     canonical_path.parent.mkdir(parents=True, exist_ok=True)
