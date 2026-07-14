@@ -34,6 +34,11 @@ app.add_typer(claim_app, name="claim")
 query_app = typer.Typer(help="Read-back/query API (S1): pins, trust state, attestations, figures")
 app.add_typer(query_app, name="query")
 
+anchor_app = typer.Typer(
+    help="Anchor-insert WRITE seam (S2): anchor arbitrary sidecars by path+sha256"
+)
+app.add_typer(anchor_app, name="anchor")
+
 
 def _catalog_dir() -> Path:
     override = os.environ.get("BTH_CATALOG_DIR")
@@ -1114,7 +1119,7 @@ def query_figures(
     asset_sha256: str | None = typer.Option(None, "--asset-sha256"),
     input_hash: str | None = typer.Option(None, "--input-hash"),
 ):
-    """Look up figure registry entries (S1; null-stub pending figure registry S7)."""
+    """Look up figure registry entries (S1; real, backed by the S2 anchor store)."""
     import json as json_mod
 
     from bathos.readback import figure_lookup
@@ -1134,6 +1139,82 @@ def query_candidates(
 
     candidates = list_candidates(_catalog_dir(), campaign_id)
     typer.echo(json_mod.dumps(candidates, indent=2))
+
+
+@anchor_app.command("insert")
+def anchor_insert_cmd(
+    path: str = typer.Argument(..., help="Sidecar path to anchor (not resolved/verified against disk)"),
+    sha256: str = typer.Argument(..., help="SHA256 of the sidecar file's contents"),
+    kind: str = typer.Option(..., "--kind", "-k", help="Free-form anchor kind, e.g. 'figure', 'attestation'"),
+    label: str | None = typer.Option(None, "--label", help="Optional human-readable label"),
+    content_hash: str | None = typer.Option(
+        None, "--content-hash", help="Optional hash of the underlying data product"
+    ),
+    campaign_id: str | None = typer.Option(
+        None, "--campaign-id", help="Optional campaign this anchor belongs to"
+    ),
+):
+    """Anchor a sidecar by (path, sha256) into the catalog (S2 write seam; real).
+
+    Re-anchoring the same (path, sha256) upserts the other fields — there is no
+    --force gate, unlike `bth claim register`, because this seam makes no durability
+    claim in the first place (see bathos.anchor module docstring).
+    """
+    import dataclasses
+    import json as json_mod
+
+    from bathos.anchor import register_anchor
+
+    record = register_anchor(
+        _catalog_dir(),
+        path,
+        sha256,
+        kind,
+        label=label,
+        content_hash=content_hash,
+        campaign_id=campaign_id,
+    )
+    typer.echo(json_mod.dumps(dataclasses.asdict(record), indent=2))
+
+
+@anchor_app.command("get")
+def anchor_get_cmd(
+    path: str = typer.Argument(..., help="Path used at anchor time"),
+    sha256: str = typer.Argument(..., help="SHA256 used at anchor time"),
+):
+    """Read back an anchored sidecar by (path, sha256) (S2; real; round-trips insert)."""
+    import dataclasses
+    import json as json_mod
+
+    from bathos.anchor import get_anchor
+
+    record = get_anchor(_catalog_dir(), path, sha256)
+    typer.echo(json_mod.dumps(dataclasses.asdict(record), indent=2) if record else "null")
+
+
+@anchor_app.command("find")
+def anchor_find_cmd(
+    kind: str | None = typer.Option(None, "--kind", "-k", help="Filter by anchor kind"),
+    sha256: str | None = typer.Option(None, "--sha256", help="Filter by the anchor's own sha256"),
+    content_hash: str | None = typer.Option(
+        None, "--content-hash", help="Filter by the underlying data product's hash"
+    ),
+    campaign_id: str | None = typer.Option(None, "--campaign-id", help="Filter by campaign"),
+):
+    """Find anchored sidecars matching filters (S2; real)."""
+    import dataclasses
+    import json as json_mod
+
+    from bathos.anchor import find_anchors
+
+    records = find_anchors(
+        _catalog_dir(),
+        kind=kind,
+        sha256=sha256,
+        content_hash=content_hash,
+        campaign_id=campaign_id,
+    )
+    typer.echo(json_mod.dumps([dataclasses.asdict(r) for r in records], indent=2))
 
 
 @remote_app.command("test")

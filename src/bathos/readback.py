@@ -40,6 +40,12 @@ This "ships before its stores exist, returns empty cleanly" behavior is the acce
 requirement for this item: callers (praxia's FSM, maraxiom's Flow V) can call the full S1
 surface today, and the null-stubs can be swapped for real implementations later without
 changing call sites — ``resolve_pin`` already composes with ``get_trust_state`` this way.
+
+UPDATE (backlog item 3483, seam S2, ``bathos.anchor``): ``figure_lookup`` is no longer a
+pure null-stub. The generic sidecar-anchor store built in S2 gives it a real, minimal
+backing store — see ``figure_lookup``'s own docstring below. ``get_trust_state``,
+``query_attestation``, and ``list_candidates`` remain null-stubs (their backing stores,
+S3/S4, still do not exist).
 """
 
 from __future__ import annotations
@@ -240,19 +246,45 @@ def figure_lookup(
 ) -> list[dict]:
     """Look up figure registry entries by asset_sha256 or input_hash.
 
-    NULL-STUB: the figure registry (build seam S7, spec §3.3 — anchored figure sidecars,
-    pointer-only) does not exist yet. Always returns ``[]`` until S7 ships.
+    REAL (as of seam S2, ``bathos.anchor``, backlog item 3483): backed by the generic
+    sidecar-anchor store, filtered to ``kind="figure"``. This is a minimal figure
+    registry, not the dedicated build seam S7 originally anticipated in this module's
+    docstring — S7 may still supersede it with a richer schema. Until a producer calls
+    ``bathos.anchor.register_anchor(..., kind="figure", ...)`` for a given
+    asset_sha256/input_hash, this returns ``[]``, which is observably identical to the
+    pre-S2 null-stub behavior.
 
     Args:
-        catalog_dir: Path to the bathos catalog root (unused until S7 exists).
-        asset_sha256: Anchor key of the rendered figure asset (unused until S7 exists).
-        input_hash: Content hash of the underlying data product (unused until S7 exists).
+        catalog_dir: Path to the bathos catalog root.
+        asset_sha256: Anchor key (sha256) of the rendered figure asset/sidecar itself.
+        input_hash: Content hash of the underlying data product the figure derives
+            from (matches an anchor's ``content_hash``, not its ``sha256``).
 
     Returns:
-        ``[]``, always, until S7 ships.
+        A list of dicts (one per matching anchor): ``path``, ``sha256``,
+        ``content_hash``, ``campaign_id``, ``anchored_at``, and ``figure_id`` (the
+        anchor's label if set, else its path). ``[]`` if neither filter is given or
+        nothing matches.
     """
-    del catalog_dir, asset_sha256, input_hash  # unused until the figure registry (S7) exists
-    return []
+    if asset_sha256 is None and input_hash is None:
+        return []
+
+    from bathos.anchor import find_anchors
+
+    records = find_anchors(
+        catalog_dir, kind="figure", sha256=asset_sha256, content_hash=input_hash
+    )
+    return [
+        {
+            "figure_id": record.label or record.path,
+            "path": record.path,
+            "sha256": record.sha256,
+            "content_hash": record.content_hash,
+            "campaign_id": record.campaign_id,
+            "anchored_at": record.anchored_at,
+        }
+        for record in records
+    ]
 
 
 def list_candidates(catalog_dir: Path | str, campaign_id: str) -> list[dict]:

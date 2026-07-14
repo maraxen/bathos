@@ -38,6 +38,7 @@ from bathos.config import default_catalog_dir, find_project_config, load_project
 from bathos.errors import BathosErrorCode, RESOLUTION_HINTS
 from bathos.init import init_project
 from bathos.prereg import GateError
+from bathos.anchor import find_anchors, get_anchor, register_anchor
 from bathos.query import CatalogError, find_runs, get_run, list_runs, run_sql
 from bathos.readback import (
     figure_lookup as readback_figure_lookup,
@@ -317,9 +318,10 @@ def run_sql_tool(
 # Read-back / query API (S1) — bathos.readback adapter
 #
 # resolve_pin / read_campaign_report / read_figure_manifest are REAL (wrap existing
-# catalog + disk readers). get_trust_state / query_attestation / figure_lookup /
-# list_candidates are intentional null-stubs pending their backing stores (S3/S4/S7) —
-# see bathos.readback module docstring.
+# catalog + disk readers). figure_lookup is now REAL too, backed by the S2 sidecar
+# anchor store (bathos.anchor, item 3483) — see below. get_trust_state /
+# query_attestation / list_candidates remain intentional null-stubs pending their
+# backing stores (S3/S4) — see bathos.readback module docstring.
 # ============================================================================
 
 
@@ -457,7 +459,9 @@ def figure_lookup_tool(
 ) -> dict:
     """Look up figure registry entries by asset_sha256 or input_hash.
 
-    NULL-STUB pending the figure registry (build seam S7) — always returns [].
+    REAL as of seam S2 (bathos.anchor, item 3483): backed by the generic sidecar
+    anchor store, filtered to kind="figure". Returns [] until a producer anchors a
+    matching figure — see bathos.readback.figure_lookup docstring.
 
     Args:
         asset_sha256: Anchor key of the rendered figure asset.
@@ -465,7 +469,7 @@ def figure_lookup_tool(
         catalog_dir: Catalog directory (empty = use default)
 
     Returns:
-        Dict with figures array (empty until S7 ships).
+        Dict with figures array (empty if nothing anchored/matching yet).
     """
     cat_dir = _get_catalog_dir(catalog_dir or None)
     figures = readback_figure_lookup(
@@ -496,6 +500,114 @@ def list_candidates_tool(
     cat_dir = _get_catalog_dir(catalog_dir or None)
     candidates = readback_list_candidates(cat_dir, campaign_id)
     return {"campaign_id": campaign_id, "candidates": candidates, "count": len(candidates)}
+
+
+# ============================================================================
+# Anchor-insert WRITE API (S2) — bathos.anchor adapter (backlog item 3483)
+#
+# Generic sidecar anchor by (path, sha256), mirroring the claim_register pattern
+# (bathos.claim.register_claim) but not tied to the claim schema. Composes with the
+# S1 read-back seam: figure_lookup now resolves kind="figure" anchors registered here.
+# Makes NO durability or cross-boundary-callability guarantee — see bathos.anchor
+# module docstring.
+# ============================================================================
+
+
+def anchor_insert_tool(
+    path: str = "",
+    sha256: str = "",
+    kind: str = "",
+    label: str = "",
+    content_hash: str = "",
+    campaign_id: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Anchor a sidecar by (path, sha256) into the catalog (S2 write seam; real).
+
+    Args:
+        path: Path to the sidecar file (not resolved/verified against disk).
+        sha256: SHA256 of the sidecar file's contents.
+        kind: Free-form anchor kind, e.g. "figure", "attestation".
+        label: Optional human-readable label.
+        content_hash: Optional hash of the underlying data product.
+        campaign_id: Optional campaign this anchor belongs to.
+        catalog_dir: Catalog directory (empty = use default)
+
+    Returns:
+        Dict with ok + the inserted anchor record, or ok=False + error.
+    """
+    if not path:
+        return {"ok": False, "error": "path is required"}
+    if not sha256:
+        return {"ok": False, "error": "sha256 is required"}
+    if not kind:
+        return {"ok": False, "error": "kind is required"}
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    record = register_anchor(
+        cat_dir,
+        path,
+        sha256,
+        kind,
+        label=label or None,
+        content_hash=content_hash or None,
+        campaign_id=campaign_id or None,
+    )
+    return {"ok": True, "anchor": dataclasses.asdict(record)}
+
+
+def anchor_get_tool(
+    path: str = "",
+    sha256: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Read back an anchored sidecar by (path, sha256) (S2; real; round-trips insert).
+
+    Args:
+        path: Path used at anchor time.
+        sha256: SHA256 used at anchor time.
+        catalog_dir: Catalog directory (empty = use default)
+
+    Returns:
+        Dict with ok + anchor (None if not found), or ok=False + error.
+    """
+    if not path:
+        return {"ok": False, "error": "path is required"}
+    if not sha256:
+        return {"ok": False, "error": "sha256 is required"}
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    record = get_anchor(cat_dir, path, sha256)
+    return {"ok": True, "anchor": dataclasses.asdict(record) if record else None}
+
+
+def anchor_find_tool(
+    kind: str = "",
+    sha256: str = "",
+    content_hash: str = "",
+    campaign_id: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Find anchored sidecars matching filters (S2; real).
+
+    Args:
+        kind: Filter by anchor kind (e.g. "figure"); empty = no filter.
+        sha256: Filter by the anchor's own sha256; empty = no filter.
+        content_hash: Filter by the underlying data product's hash; empty = no filter.
+        campaign_id: Filter by campaign; empty = no filter.
+        catalog_dir: Catalog directory (empty = use default)
+
+    Returns:
+        Dict with anchors array + count.
+    """
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    records = find_anchors(
+        cat_dir,
+        kind=kind or None,
+        sha256=sha256 or None,
+        content_hash=content_hash or None,
+        campaign_id=campaign_id or None,
+    )
+    anchors = [dataclasses.asdict(r) for r in records]
+    return {"anchors": anchors, "count": len(anchors)}
 
 
 def compact_tool(
@@ -1036,7 +1148,7 @@ async def mcp_figure_lookup_tool(
     input_hash: str = "",
     catalog_dir: str = "",
 ) -> dict:
-    """Look up figure registry entries (S1; null-stub pending figure registry S7)."""
+    """Look up figure registry entries (S1; real, backed by the S2 anchor store)."""
     return figure_lookup_tool(
         asset_sha256=asset_sha256, input_hash=input_hash, catalog_dir=catalog_dir
     )
@@ -1050,6 +1162,59 @@ async def mcp_list_candidates_tool(
 ) -> dict:
     """List candidate-tier products for a campaign (S1; null-stub pending trust ledger S3)."""
     return list_candidates_tool(campaign_id=campaign_id, catalog_dir=catalog_dir)
+
+
+@app.tool("anchor_insert")
+@traced_tool
+async def mcp_anchor_insert_tool(
+    path: str = "",
+    sha256: str = "",
+    kind: str = "",
+    label: str = "",
+    content_hash: str = "",
+    campaign_id: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Anchor a sidecar by (path, sha256) into the catalog (S2 write seam; real)."""
+    return anchor_insert_tool(
+        path=path,
+        sha256=sha256,
+        kind=kind,
+        label=label,
+        content_hash=content_hash,
+        campaign_id=campaign_id,
+        catalog_dir=catalog_dir,
+    )
+
+
+@app.tool("anchor_get")
+@traced_tool
+async def mcp_anchor_get_tool(
+    path: str = "",
+    sha256: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Read back an anchored sidecar by (path, sha256) (S2; real)."""
+    return anchor_get_tool(path=path, sha256=sha256, catalog_dir=catalog_dir)
+
+
+@app.tool("anchor_find")
+@traced_tool
+async def mcp_anchor_find_tool(
+    kind: str = "",
+    sha256: str = "",
+    content_hash: str = "",
+    campaign_id: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Find anchored sidecars matching filters (S2; real)."""
+    return anchor_find_tool(
+        kind=kind,
+        sha256=sha256,
+        content_hash=content_hash,
+        campaign_id=campaign_id,
+        catalog_dir=catalog_dir,
+    )
 
 
 @app.tool("compact")
