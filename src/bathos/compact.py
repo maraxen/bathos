@@ -411,6 +411,57 @@ def _open_db(db_path: Path) -> duckdb.DuckDBPyConnection:
     return con
 
 
+def _ingest_ledger_fragments(con: duckdb.DuckDBPyConnection, catalog_dir: Path) -> int:
+    """Re-derive the warm ``trust_ledger`` table from cool-tier ledger fragments.
+
+    S3 (backlog #3491). Mirrors :func:`_ingest_anchor_fragments`, adapted for the
+    ledger's append-only semantics: unlike anchors (upsert-on-(path, sha256)),
+    every ledger fragment is a distinct, immutable record keyed by its own id, so
+    re-ingestion is skip-if-present rather than update-if-present. This is what
+    makes ``bathos.trust_ledger.append_ledger_record`` durable across
+    ``compact(catalog_dir, force_rebuild=True)``: the cool ``ledger/`` fragments are
+    never touched by force_rebuild (only ``bathos.db`` is deleted), and this step
+    runs on every compact, including the rebuild itself.
+
+    No-op if ``<catalog_dir>/ledger/`` does not exist — catalogs that never
+    graduate anything pay zero cost here.
+
+    Returns the number of fragment records ingested (post skip-if-present).
+    """
+    from bathos.trust_ledger import _LEDGER_TABLE_SCHEMA, read_ledger_fragments
+
+    records = read_ledger_fragments(catalog_dir)
+    if not records:
+        return 0
+
+    con.execute(_LEDGER_TABLE_SCHEMA)
+    ingested = 0
+    for record in records:
+        existing = con.execute(
+            "SELECT id FROM trust_ledger WHERE id = ?", [record.id]
+        ).fetchone()
+        if existing:
+            continue
+        con.execute(
+            "INSERT INTO trust_ledger "
+            "(id, run_id, output_path, content_hash, from_state, to_state, "
+            "attestation_ref, amended_at, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                record.id,
+                record.run_id,
+                record.output_path,
+                record.content_hash,
+                record.from_state,
+                record.to_state,
+                record.attestation_ref,
+                record.amended_at,
+                record.reason,
+            ],
+        )
+        ingested += 1
+    return ingested
+
+
 def _ingest_anchor_fragments(con: duckdb.DuckDBPyConnection, catalog_dir: Path) -> int:
     """Re-derive the warm ``sidecar_anchors`` table from cool-tier anchor fragments.
 
@@ -599,6 +650,11 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
     # runs are re-derived from cool_runs below. This runs unconditionally (cheap
     # no-op if no anchors/ fragments exist) so it also fires on force_rebuild.
     _ingest_anchor_fragments(con, catalog_dir)
+
+    # S3 (backlog #3491): re-derive trust_ledger from cool-tier ledger fragments,
+    # same pattern as anchors above. Unconditional, cheap no-op if no ledger/
+    # fragments exist, fires on force_rebuild too.
+    _ingest_ledger_fragments(con, catalog_dir)
 
     # Track ingested and skipped counts
     ingested = 0

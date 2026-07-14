@@ -15,7 +15,7 @@ Seven functions, per spec §3.4::
     figure_lookup(asset_sha256 | input_hash) -> [figure_entry, ...]
     list_candidates(campaign_id) -> [candidate, ...]
 
-Three are REAL today:
+All seven are REAL as of seam S3 (``bathos.trust_ledger``, backlog item 3491):
 
 - ``resolve_pin`` reads the existing run catalog (``bathos.query.get_run``) and the
   existing warm-tier ``output_metadata`` recorded at run time, and re-hashes the on-disk
@@ -24,41 +24,46 @@ Three are REAL today:
 - ``read_campaign_report`` / ``read_figure_manifest`` are thin wrappers over the existing
   ``CampaignReport.read_report`` / ``FigureManifest.read_manifest`` disk readers, which
   previously had no callable tool surface (Python-only, direct filesystem access).
-
-Two remain intentional NULL-STUBS, because their backing stores do not exist yet:
-
-- ``get_trust_state`` -> trust ledger (build seam S3, spec §3.1). Always returns
-  ``ProductTrustState.UNKNOWN`` until S3 ships.
-- ``list_candidates`` -> candidate tier of the trust ledger (build seam S3). Always
-  returns ``[]`` until S3 ships.
-
-This "ships before its stores exist, returns empty cleanly" behavior is the acceptance
-requirement for this item: callers (praxia's FSM, maraxiom's Flow V) can call the full S1
-surface today, and the null-stubs can be swapped for real implementations later without
-changing call sites — ``resolve_pin`` already composes with ``get_trust_state`` this way.
+- ``get_trust_state`` and ``list_candidates`` are now backed by the durable trust ledger
+  (``bathos.trust_ledger``, S3) composed with the S2 anchor store and the run catalog —
+  see their own docstrings below for the exact fold.
 
 UPDATE (backlog item 3483, seam S2, ``bathos.anchor``): ``figure_lookup`` is no longer a
 pure null-stub. The generic sidecar-anchor store built in S2 gives it a real, minimal
-backing store — see ``figure_lookup``'s own docstring below. ``get_trust_state`` and
-``list_candidates`` remain null-stubs (their backing store, S3, still does not exist).
+backing store — see ``figure_lookup``'s own docstring below.
 
 UPDATE (backlog item 3492, seam S4, ``bathos.attestation``): ``query_attestation`` is no
 longer a null-stub either. It is now backed by the attestation sidecar kind
 (``oracle_match`` / ``repro_floor``, anchored via the S2 seam's ``DurableAnchorStore``) —
 see ``query_attestation``'s own docstring below. Note the seam boundary this preserves:
 a PASS attestation is *query-answerable evidence*, not a promotion by itself — the trust
-ledger (S3, backlog #3491) is what would consume a PASS result to move a product from
-``candidate`` to ``promoted``. Until S3 exists, ``get_trust_state`` still always returns
-``UNKNOWN`` regardless of what ``query_attestation`` returns for the same content_hash —
-a recorded PASS attestation is inert on its own.
+ledger (S3, backlog #3491) is what consumes a PASS result (via
+``bathos.trust_ledger.graduate_product``) to move a product from ``candidate`` to
+``promoted``. A recorded PASS attestation with no corresponding ledger promotion record
+remains inert: ``get_trust_state`` returns ``candidate`` (not ``promoted``) for such a
+product until something actually calls ``graduate_product``.
 
 UPDATE (backlog item 3490, seam S7, ``bathos.figure_registry``): ``figure_lookup`` now
 ALSO resolves the typed, pointer-only ``figure_entry`` registry (spec §3.3), composing
 its results alongside the pre-existing S2-era minimal anchor shape rather than
 replacing it — see ``figure_lookup``'s own docstring below for the reconciliation.
-``get_trust_state`` and ``list_candidates`` remain null-stubs (their backing store, S3,
-still does not exist); ``query_attestation`` remains the S4-backed real implementation
-described above — neither reverted to a stub by this update.
+
+UPDATE (backlog item 3491, seam S3, ``bathos.trust_ledger``): ``get_trust_state`` and
+``list_candidates`` are no longer null-stubs. ``get_trust_state`` now implements the
+owner-confirmed implicit 3-state model:
+
+- ``unknown`` — the content_hash has never been anchored or produced by any run.
+- ``candidate`` — the content_hash IS anchored (``bathos.anchor.find_anchors(sha256=...)``)
+  or IS a run's recorded output sha256, but has no ``promoted`` ledger record.
+- ``promoted`` — the trust ledger (``bathos.trust_ledger.fold_trust_state``) has a
+  ``promoted`` record for this content_hash (appended only by
+  ``bathos.trust_ledger.graduate_product``, which itself enforces the ratchet
+  invariant — a PASS attestation must exist before promotion).
+
+``list_candidates`` joins anchors (excluding attestation-kind anchors, which are
+evidence records pointing AT a product via their ``content_hash`` field, not products
+themselves) and run output hashes for a campaign, filtered to those without a
+``promoted`` ledger record.
 """
 
 from __future__ import annotations
@@ -160,23 +165,116 @@ def resolve_pin(catalog_dir: Path | str, run_id: str, output_path: str) -> Resol
     )
 
 
-def get_trust_state(catalog_dir: Path | str, content_hash: str | None) -> str:
-    """Look up the trust_state (candidate/promoted) of a product by content_hash.
+def _is_registered_product(catalog_dir: Path | str, content_hash: str) -> bool:
+    """True if ``content_hash`` is anchored by its own identity (a product anchor,
+    e.g. ``kind="figure"``) or is a run's recorded output sha256.
 
-    NULL-STUB: the trust-ledger backing store (build seam S3, spec §3.1 — an
-    append+supersede ledger folded latest-wins) does not exist yet. Until S3 ships, this
-    always returns :attr:`ProductTrustState.UNKNOWN` so callers such as
-    :func:`resolve_pin` can compose against a stable, always-callable surface. Swap the
-    body for a real ledger query once S3 lands; call sites do not need to change.
+    Deliberately searches anchors by ``sha256`` (the anchor's own identity), NOT by
+    ``content_hash`` (the anchor's optional pointer-to-an-upstream-input field) — an
+    attestation anchor sets its OWN sha256 to the attestation TOML's hash and its
+    ``content_hash`` field to the *attested product's* hash, so searching by
+    ``content_hash`` here would incorrectly treat "this product has an attestation
+    pointing at it" as "this product is itself a registered/anchored product",
+    which would make a PASS-attested-but-never-graduated product look identical to
+    a promoted one. Searching by ``sha256`` avoids that: it only matches anchors
+    whose own identity IS the product (e.g. a figure asset anchored by its own
+    hash), never an attestation merely referencing it.
+    """
+    from bathos.anchor import find_anchors
+
+    if find_anchors(catalog_dir, sha256=content_hash):
+        return True
+
+    return _find_run_with_output_sha256(catalog_dir, content_hash) is not None
+
+
+def _find_run_with_output_sha256(
+    catalog_dir: Path | str, content_hash: str
+) -> tuple[str, str] | None:
+    """Scan the warm run catalog's ``output_metadata`` for a matching sha256.
+
+    Returns ``(run_id, output_path)`` for the first match, or ``None``. Mirrors the
+    direct-DuckDB-scan pattern already used by ``bathos.mcp``'s outputs-summary tool
+    (``SELECT ... FROM runs WHERE output_metadata IS NOT NULL``) rather than
+    ``bathos.query.list_runs``, which caps results at a default ``limit``.
+    """
+    import duckdb
+
+    db_path = Path(catalog_dir) / "bathos.db"
+    if not db_path.exists():
+        return None
+
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        rows = con.execute(
+            "SELECT id, output_metadata FROM runs "
+            "WHERE output_metadata IS NOT NULL AND output_metadata != '[]'"
+        ).fetchall()
+    except duckdb.Error:
+        return None
+    finally:
+        con.close()
+
+    for run_id, output_metadata_json in rows:
+        try:
+            entries = json.loads(output_metadata_json) if output_metadata_json else []
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("sha256") == content_hash:
+                return run_id, entry.get("path", "")
+    return None
+
+
+def get_trust_state(catalog_dir: Path | str, content_hash: str | None) -> str:
+    """Look up the trust_state (unknown/candidate/promoted) of a product by content_hash.
+
+    REAL (as of seam S3, ``bathos.trust_ledger``, backlog item 3491). Implements the
+    owner-confirmed implicit 3-state model:
+
+    1. ``content_hash is None`` -> :attr:`ProductTrustState.UNKNOWN` (nothing to
+       look up against).
+    2. Otherwise, fold the durable trust ledger
+       (``bathos.trust_ledger.fold_trust_state``) for ``content_hash``. If it
+       resolves to ``"promoted"`` -> :attr:`ProductTrustState.PROMOTED`.
+    3. Otherwise, check whether the product is registered at all — anchored by its
+       own identity (``bathos.anchor.find_anchors(sha256=content_hash)``) or
+       produced as a run's recorded output (:func:`_find_run_with_output_sha256`).
+       If either matches -> :attr:`ProductTrustState.CANDIDATE`.
+    4. Otherwise -> :attr:`ProductTrustState.UNKNOWN` — this content_hash has never
+       been seen by this catalog at all.
+
+    The only way to reach ``promoted`` is via ``bathos.trust_ledger.graduate_product``,
+    which itself refuses to append a promotion record without a PASS attestation
+    (the ratchet invariant, spec §5.1 step 4). Note that registering an attestation
+    anchors the attestation sidecar's OWN sha256 (with ``content_hash`` merely
+    pointing at the attested product) — it does not register the product itself.
+    So a PASS attestation alone, with no accompanying anchor/run for the product
+    and no graduation call, leaves this function returning ``unknown``, not
+    ``candidate`` — see ``tests/test_readback_attestation.py::TestInertEvidenceUntilTrustLedger``
+    and this module's own test suite for the pinned regression.
 
     Args:
-        catalog_dir: Path to the bathos catalog root (unused until S3 exists).
-        content_hash: Content hash of the product to look up (unused until S3 exists).
+        catalog_dir: Path to the bathos catalog root.
+        content_hash: Content hash of the product to look up.
 
     Returns:
-        ``ProductTrustState.UNKNOWN``, always, until S3 ships.
+        One of ``ProductTrustState.UNKNOWN`` / ``CANDIDATE`` / ``PROMOTED``.
     """
-    del catalog_dir, content_hash  # unused until the trust ledger (S3) exists
+    if content_hash is None:
+        return ProductTrustState.UNKNOWN
+
+    from bathos.trust_ledger import fold_trust_state
+
+    to_state = fold_trust_state(catalog_dir, content_hash)
+    if to_state == ProductTrustState.PROMOTED:
+        return ProductTrustState.PROMOTED
+
+    if _is_registered_product(catalog_dir, content_hash):
+        return ProductTrustState.CANDIDATE
+
     return ProductTrustState.UNKNOWN
 
 
@@ -382,17 +480,99 @@ def figure_lookup(
 
 
 def list_candidates(catalog_dir: Path | str, campaign_id: str) -> list[dict]:
-    """List candidate-tier (not-yet-promoted) products for a campaign.
+    """List candidate-tier (registered, not-yet-promoted) products for a campaign.
 
-    NULL-STUB: candidate tiering is derived from the trust ledger (build seam S3, spec
-    §3.1), which does not exist yet. Always returns ``[]`` until S3 ships.
+    REAL (as of seam S3, ``bathos.trust_ledger``, backlog item 3491). Joins two
+    sources of "registered" products scoped to ``campaign_id``, then filters out
+    anything with a ``promoted`` trust-ledger record:
+
+    - Anchors with ``campaign_id`` set to this campaign, EXCLUDING attestation-kind
+      anchors (``oracle_match`` / ``repro_floor`` — evidence records whose
+      ``content_hash`` field points AT a product rather than being one; see
+      ``bathos.readback._is_registered_product`` for the identical reasoning
+      applied to single-product lookups). Each qualifying anchor's own ``sha256``
+      is the product's content_hash.
+    - Runs with ``campaign_id`` set to this campaign: every ``output_metadata``
+      entry's ``sha256`` is a candidate product's content_hash.
 
     Args:
-        catalog_dir: Path to the bathos catalog root (unused until S3 exists).
-        campaign_id: Campaign ID to list candidates for (unused until S3 exists).
+        catalog_dir: Path to the bathos catalog root.
+        campaign_id: Campaign ID to list candidates for.
 
     Returns:
-        ``[]``, always, until S3 ships.
+        A list of dicts, each with ``content_hash``, ``trust_state`` (always
+        ``"candidate"`` — anything ``promoted`` is filtered out), ``source``
+        (``"anchor"`` or ``"run"``), and source-specific identifying fields
+        (``path``/``anchored_at`` for anchors; ``run_id``/``output_path`` for runs).
+        ``[]`` if nothing is registered for this campaign, or everything registered
+        has already been promoted.
     """
-    del catalog_dir, campaign_id  # unused until the trust ledger (S3) exists
-    return []
+    import duckdb
+
+    from bathos.anchor import find_anchors
+    from bathos.attestation import VALID_KINDS as ATTESTATION_KINDS
+    from bathos.trust_ledger import fold_trust_state
+
+    candidates: list[dict] = []
+    seen_hashes: set[str] = set()
+
+    for anchor in find_anchors(catalog_dir, campaign_id=campaign_id):
+        if anchor.kind in ATTESTATION_KINDS:
+            continue
+        content_hash = anchor.sha256
+        if content_hash in seen_hashes:
+            continue
+        if fold_trust_state(catalog_dir, content_hash) == ProductTrustState.PROMOTED:
+            continue
+        seen_hashes.add(content_hash)
+        candidates.append(
+            {
+                "content_hash": content_hash,
+                "trust_state": ProductTrustState.CANDIDATE,
+                "source": "anchor",
+                "path": anchor.path,
+                "anchored_at": anchor.anchored_at,
+            }
+        )
+
+    db_path = Path(catalog_dir) / "bathos.db"
+    if db_path.exists():
+        con = duckdb.connect(str(db_path), read_only=True)
+        try:
+            rows = con.execute(
+                "SELECT id, output_metadata FROM runs WHERE campaign_id = ? "
+                "AND output_metadata IS NOT NULL AND output_metadata != '[]'",
+                [campaign_id],
+            ).fetchall()
+        except duckdb.Error:
+            rows = []
+        finally:
+            con.close()
+
+        for run_id, output_metadata_json in rows:
+            try:
+                entries = json.loads(output_metadata_json) if output_metadata_json else []
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                content_hash = entry.get("sha256")
+                if not content_hash or content_hash in seen_hashes:
+                    continue
+                if fold_trust_state(catalog_dir, content_hash) == ProductTrustState.PROMOTED:
+                    continue
+                seen_hashes.add(content_hash)
+                candidates.append(
+                    {
+                        "content_hash": content_hash,
+                        "trust_state": ProductTrustState.CANDIDATE,
+                        "source": "run",
+                        "run_id": run_id,
+                        "output_path": entry.get("path", ""),
+                    }
+                )
+
+    return candidates

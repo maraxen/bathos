@@ -322,8 +322,8 @@ def run_sql_tool(
 # catalog + disk readers). figure_lookup is now REAL too, backed by the S2 sidecar
 # anchor store (bathos.anchor, item 3483). query_attestation is now REAL too, backed by
 # the S4 attestation sidecar store (bathos.attestation, item 3492) — see below.
-# get_trust_state / list_candidates remain intentional null-stubs pending the trust
-# ledger (S3) — see bathos.readback module docstring.
+# get_trust_state / list_candidates are now REAL too, backed by the durable trust
+# ledger (bathos.trust_ledger, S3, item 3491) — see bathos.readback module docstring.
 # ============================================================================
 
 
@@ -358,9 +358,10 @@ def get_trust_state_tool(
     content_hash: str = "",
     catalog_dir: str = "",
 ) -> dict:
-    """Look up the trust_state (candidate/promoted) of a product by content_hash.
+    """Look up the trust_state (unknown/candidate/promoted) of a product by content_hash.
 
-    NULL-STUB pending the trust ledger (build seam S3) — always returns "unknown".
+    REAL as of seam S3 (bathos.trust_ledger, backlog item 3491) — see
+    bathos.readback.get_trust_state's docstring for the 3-state model.
 
     Args:
         content_hash: Content hash of the product to look up.
@@ -491,7 +492,8 @@ def list_candidates_tool(
 ) -> dict:
     """List candidate-tier (not-yet-promoted) products for a campaign.
 
-    NULL-STUB pending the trust ledger (build seam S3) — always returns [].
+    REAL as of seam S3 (bathos.trust_ledger, backlog item 3491) — see
+    bathos.readback.list_candidates's docstring for the anchors+runs join.
 
     Args:
         campaign_id: Campaign ID to list candidates for.

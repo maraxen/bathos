@@ -38,6 +38,10 @@ class BathosErrorCode(str, Enum):
     EXPORT_ERROR = "export_error"
     INVALID_PARAM = "invalid_param"
 
+    # Trust ledger (S3, item 3491): a candidate->promoted graduation was refused
+    # because the ratchet invariant was not satisfied (no PASS attestation).
+    GRADUATION_REFUSED = "graduation_refused"
+
 
 # Resolution hints registry: every BathosErrorCode member must have a non-empty entry
 RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
@@ -60,6 +64,7 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.SIDECAR_ERROR: "Verify sidecar file exists and is valid TOML",
     BathosErrorCode.EXPORT_ERROR: "Check write permissions and available disk space",
     BathosErrorCode.INVALID_PARAM: "Verify all required parameters are provided with correct types",
+    BathosErrorCode.GRADUATION_REFUSED: "Register a PASS attestation for the product (bth attestation register) before graduating it to promoted",
 }
 
 
@@ -80,4 +85,7 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     # Figure registry errors (S7, item 3490): a figure_entry payload carried a
     # forbidden inline field (verdict/strength/content_hash/outcome/gate).
     "FigureEntrySchemaError": BathosErrorCode.INVALID_PARAM,
+    # Trust ledger errors (S3, item 3491): a graduation was refused because the
+    # ratchet invariant (a PASS attestation must exist) was not satisfied.
+    "GraduationRefused": BathosErrorCode.GRADUATION_REFUSED,
 }

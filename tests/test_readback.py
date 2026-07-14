@@ -9,26 +9,23 @@ implemented once in bathos.readback and re-exposed from there. Per spec
     read_campaign_report, read_figure_manifest,
     figure_lookup, list_candidates
 
-Three are REAL today (resolve_pin, read_campaign_report, read_figure_manifest) — they
-wrap the existing run catalog / output_metadata and the existing campaign_report.py /
-figure_manifest.py disk readers, which previously had no callable tool surface.
+All seven are REAL as of seam S3 (bathos.trust_ledger, backlog item 3491) — they wrap
+the existing run catalog / output_metadata, the existing campaign_report.py /
+figure_manifest.py disk readers, the S2 anchor store, the S4 attestation store, and now
+the durable trust ledger.
 
-Four are intentional NULL-STUBS: their backing stores (trust ledger S3, attestation
-sidecar S4, figure registry S7) do not exist yet. This module ships *before* those
-stores exist and must return a well-defined empty/null result rather than raising —
-that is the acceptance requirement for this item.
+UPDATE (backlog item 3483, seam S2, bathos.anchor): figure_lookup is backed by the
+generic sidecar-anchor store — figures anchored with kind="figure" are visible here.
+See TestFigureLookupComposesWithAnchorStore below.
 
-UPDATE (backlog item 3483, seam S2, bathos.anchor): figure_lookup is no longer a pure
-null-stub. The generic sidecar-anchor store built in S2 gives it a real, minimal
-backing store — figures anchored with kind="figure" are now visible here. It still
-returns [] for any catalog with no matching anchors, which is observably identical to
-the old null-stub behavior until a producer actually anchors a figure — see
-TestFigureLookupComposesWithAnchorStore below. get_trust_state, query_attestation, and
-list_candidates remain null-stubs (their stores, S3/S4, still don't exist).
+UPDATE (backlog item 3491, seam S3, bathos.trust_ledger): get_trust_state and
+list_candidates are no longer null-stubs. get_trust_state now returns the
+owner-confirmed implicit 3-state model (unknown/candidate/promoted, see
+TestGetTrustStateThreeStates below); list_candidates joins anchors + run outputs for a
+campaign, filtered to not-yet-promoted (see TestListCandidatesRealBehavior below).
 
 This test file asserts all seven functions are callable against a live bathos catalog
-fixture, that the real functions return real data, and that the null-stubs return their
-documented empty/null sentinel.
+fixture and that each returns real, correctly-composed data.
 """
 
 from __future__ import annotations
@@ -132,8 +129,9 @@ class TestReadbackRealFunctions:
         assert pin.output_path == output_path
         assert pin.content_hash == sha256
         assert pin.fresh is True
-        # trust_state is delegated to get_trust_state, which is a null-stub pending S3.
-        assert pin.trust_state == ProductTrustState.UNKNOWN
+        # trust_state is delegated to get_trust_state (S3, real): a run's recorded
+        # output sha256 is a registered-but-not-promoted product, i.e. "candidate".
+        assert pin.trust_state == ProductTrustState.CANDIDATE
 
     def test_resolve_pin_detects_drift(self, catalog_with_run):
         catalog_dir, run, output_path, _sha256 = catalog_with_run
@@ -198,23 +196,11 @@ class TestReadbackRealFunctions:
             read_figure_manifest(catalog_dir, "no-such-campaign")
 
 
-class TestReadbackNullStubs:
-    """get_trust_state, query_attestation, list_candidates ship before their backing
-    stores exist (S3/S4). Acceptance requirement: callable today, well-defined
-    empty/null result, never raise. figure_lookup is exercised here too (empty-catalog
-    case) — it now composes with the S2 anchor store (see
-    TestFigureLookupComposesWithAnchorStore) but is observably empty for any catalog
-    that has no matching anchors, same as before S2 shipped."""
-
-    def test_get_trust_state_returns_unknown(self, catalog_with_run):
-        catalog_dir, _run, _output_path, sha256 = catalog_with_run
-
-        assert get_trust_state(catalog_dir, sha256) == ProductTrustState.UNKNOWN
-
-    def test_get_trust_state_handles_none_hash(self, catalog_with_run):
-        catalog_dir, _run, _output_path, _sha256 = catalog_with_run
-
-        assert get_trust_state(catalog_dir, None) == ProductTrustState.UNKNOWN
+class TestReadbackEmptyCatalogBehavior:
+    """query_attestation and figure_lookup return well-defined empty/null results
+    against a catalog with nothing registered for the hash/campaign in question —
+    this is unchanged by S3 landing (get_trust_state/list_candidates moved to their
+    own real-behavior test classes below, since they are no longer null-stubs)."""
 
     def test_query_attestation_returns_none(self, catalog_with_run):
         catalog_dir, _run, _output_path, sha256 = catalog_with_run
@@ -229,10 +215,217 @@ class TestReadbackNullStubs:
         assert figure_lookup(catalog_dir, input_hash="deadbeef") == []
         assert figure_lookup(catalog_dir) == []
 
-    def test_list_candidates_returns_empty_list(self, catalog_with_campaign_sidecars):
+    def test_list_candidates_returns_empty_list_when_nothing_registered(
+        self, catalog_with_campaign_sidecars
+    ):
         catalog_dir, campaign_id = catalog_with_campaign_sidecars
 
         assert list_candidates(catalog_dir, campaign_id) == []
+
+
+class TestGetTrustStateThreeStates:
+    """get_trust_state (S3, backlog #3491) implements the owner-confirmed implicit
+    3-state model: unknown (never seen) / candidate (registered, not promoted) /
+    promoted (has a promotion ledger record)."""
+
+    def test_never_anchored_or_seen_is_unknown(self, catalog_with_campaign_sidecars):
+        catalog_dir, _campaign_id = catalog_with_campaign_sidecars
+
+        assert get_trust_state(catalog_dir, "f" * 64) == ProductTrustState.UNKNOWN
+
+    def test_none_content_hash_is_unknown(self, catalog_with_run):
+        catalog_dir, _run, _output_path, _sha256 = catalog_with_run
+
+        assert get_trust_state(catalog_dir, None) == ProductTrustState.UNKNOWN
+
+    def test_run_output_sha256_with_no_promotion_is_candidate(self, catalog_with_run):
+        """A run's recorded output sha256 is a registered product (has a run) but
+        has no trust-ledger promotion record — candidate, not unknown."""
+        catalog_dir, _run, _output_path, sha256 = catalog_with_run
+
+        assert get_trust_state(catalog_dir, sha256) == ProductTrustState.CANDIDATE
+
+    def test_anchored_figure_with_no_promotion_is_candidate(self, catalog_with_campaign_sidecars):
+        catalog_dir, campaign_id = catalog_with_campaign_sidecars
+        register_anchor(
+            catalog_dir, "fig.svg", "a" * 64, "figure", campaign_id=campaign_id
+        )
+
+        assert get_trust_state(catalog_dir, "a" * 64) == ProductTrustState.CANDIDATE
+
+    def test_graduated_product_is_promoted(self, tmp_path, catalog_with_campaign_sidecars):
+        """graduate_product (the only candidate->promoted path) must actually flip
+        get_trust_state's answer once a PASS attestation backs the graduation."""
+        from bathos.attestation import register_attestation
+        from bathos.trust_ledger import graduate_product
+
+        catalog_dir, _campaign_id = catalog_with_campaign_sidecars
+        content_hash = "b" * 64
+
+        attestation_path = tmp_path / "pass.attestation.bth.toml"
+        attestation_path.write_text(f"""
+[attestation]
+kind = "oracle_match"
+verdict = "PASS"
+attested = {{ run_id = "run-x", output_path = "out/x.zarr", content_hash = "{content_hash}" }}
+oracle_sha256 = "{"c" * 64}"
+harness_run_ref = "run-harness-x"
+max_discrepancy = 0.0
+tolerance_policy = "exact"
+created_by = "test-suite"
+created_at = "2026-07-14T00:00:00Z"
+""")
+        register_attestation(attestation_path, catalog_dir)
+
+        # Registering an attestation anchors the attestation TOML by ITS OWN
+        # sha256, with content_hash pointing at the attested product — it does not
+        # anchor the product itself. So the product stays UNKNOWN (never
+        # registered) until something actually anchors/produces it or graduates it.
+        assert get_trust_state(catalog_dir, content_hash) == ProductTrustState.UNKNOWN
+
+        graduate_product(catalog_dir, content_hash, "attn-ref")
+
+        assert get_trust_state(catalog_dir, content_hash) == ProductTrustState.PROMOTED
+
+    def test_pass_attestation_alone_without_graduation_never_promotes(
+        self, tmp_path, catalog_with_campaign_sidecars
+    ):
+        """Regression guard for the S4 inert-evidence contract (see
+        tests/test_readback_attestation.py::TestInertEvidenceUntilTrustLedger): a
+        registered PASS attestation, by itself, must never flip trust_state to
+        promoted — only graduate_product does that. The attestation anchors ITS
+        OWN sha256 (the TOML), not the attested product's, so the product itself
+        stays UNKNOWN (never registered/anchored) exactly as it did before S3."""
+        from bathos.attestation import register_attestation
+
+        catalog_dir, _campaign_id = catalog_with_campaign_sidecars
+        content_hash = "d" * 64
+
+        attestation_path = tmp_path / "pass2.attestation.bth.toml"
+        attestation_path.write_text(f"""
+[attestation]
+kind = "oracle_match"
+verdict = "PASS"
+attested = {{ run_id = "run-y", output_path = "out/y.zarr", content_hash = "{content_hash}" }}
+oracle_sha256 = "{"e" * 64}"
+harness_run_ref = "run-harness-y"
+max_discrepancy = 0.0
+tolerance_policy = "exact"
+created_by = "test-suite"
+created_at = "2026-07-14T00:00:00Z"
+""")
+        register_attestation(attestation_path, catalog_dir)
+
+        assert get_trust_state(catalog_dir, content_hash) == ProductTrustState.UNKNOWN
+
+
+class TestListCandidatesRealBehavior:
+    """list_candidates (S3, backlog #3491) joins anchors + run outputs for a
+    campaign, excluding attestation-kind anchors and anything already promoted."""
+
+    def test_lists_anchored_figure_not_yet_promoted(self, catalog_with_campaign_sidecars):
+        catalog_dir, campaign_id = catalog_with_campaign_sidecars
+        register_anchor(
+            catalog_dir, "fig.svg", "1" * 64, "figure", campaign_id=campaign_id
+        )
+
+        candidates = list_candidates(catalog_dir, campaign_id)
+
+        assert len(candidates) == 1
+        assert candidates[0]["content_hash"] == "1" * 64
+        assert candidates[0]["trust_state"] == ProductTrustState.CANDIDATE
+        assert candidates[0]["source"] == "anchor"
+
+    def test_excludes_attestation_kind_anchors(self, tmp_path, catalog_with_campaign_sidecars):
+        from bathos.attestation import register_attestation
+
+        catalog_dir, campaign_id = catalog_with_campaign_sidecars
+        attestation_path = tmp_path / "a.attestation.bth.toml"
+        attestation_path.write_text(f"""
+[attestation]
+kind = "oracle_match"
+verdict = "PASS"
+attested = {{ run_id = "run-z", output_path = "out/z.zarr", content_hash = "{"9" * 64}" }}
+oracle_sha256 = "{"8" * 64}"
+harness_run_ref = "run-harness-z"
+max_discrepancy = 0.0
+tolerance_policy = "exact"
+created_by = "test-suite"
+created_at = "2026-07-14T00:00:00Z"
+""")
+        register_attestation(attestation_path, catalog_dir, campaign_id=campaign_id)
+
+        candidates = list_candidates(catalog_dir, campaign_id)
+
+        assert candidates == [], (
+            "an attestation anchor's own sha256 is the TOML's hash, not a product — "
+            "it must never appear in the candidate list"
+        )
+
+    def test_excludes_promoted_products(self, tmp_path, catalog_with_campaign_sidecars):
+        from bathos.attestation import register_attestation
+        from bathos.trust_ledger import graduate_product
+
+        catalog_dir, campaign_id = catalog_with_campaign_sidecars
+        content_hash = "2" * 64
+        register_anchor(
+            catalog_dir, "fig2.svg", content_hash, "figure", campaign_id=campaign_id
+        )
+
+        attestation_path = tmp_path / "b.attestation.bth.toml"
+        attestation_path.write_text(f"""
+[attestation]
+kind = "oracle_match"
+verdict = "PASS"
+attested = {{ run_id = "run-w", output_path = "out/w.zarr", content_hash = "{content_hash}" }}
+oracle_sha256 = "{"7" * 64}"
+harness_run_ref = "run-harness-w"
+max_discrepancy = 0.0
+tolerance_policy = "exact"
+created_by = "test-suite"
+created_at = "2026-07-14T00:00:00Z"
+""")
+        register_attestation(attestation_path, catalog_dir)
+        graduate_product(catalog_dir, content_hash, "attn-ref")
+
+        candidates = list_candidates(catalog_dir, campaign_id)
+
+        assert candidates == [], "promoted products must not appear in list_candidates"
+
+    def test_lists_run_output_for_campaign(self, catalog_with_run):
+        catalog_dir, run, _output_path, sha256 = catalog_with_run
+
+        # catalog_with_run's Run has no campaign_id set; give it one directly via a
+        # fresh run + compact so list_candidates has a campaign-scoped run to find.
+        import hashlib
+
+        from bathos.catalog import write_run
+        from bathos.compact import compact as compact_catalog
+        from bathos.schema import Run
+
+        output_file = catalog_dir.parent / "result2.json"
+        output_file.write_text('{"metric": 2.0}')
+        sha256_2 = hashlib.sha256(output_file.read_bytes()).hexdigest()
+
+        campaign_run = Run(
+            project_slug="test_project",
+            command="python analyze2.py",
+            argv=["python", "analyze2.py"],
+            git_hash="abc124",
+            git_branch="main",
+            git_dirty=False,
+            output_paths=[str(output_file)],
+            campaign_id="camp-with-run",
+        )
+        write_run(campaign_run, catalog_dir)
+        compact_catalog(catalog_dir)
+
+        candidates = list_candidates(catalog_dir, "camp-with-run")
+
+        assert len(candidates) == 1
+        assert candidates[0]["content_hash"] == sha256_2
+        assert candidates[0]["source"] == "run"
+        assert candidates[0]["run_id"] == campaign_run.id
 
 
 class TestFigureLookupComposesWithAnchorStore:
@@ -297,7 +490,7 @@ class TestReadbackSurfaceIsFullyCallable:
         pin = resolve_pin(run_catalog_dir, run.id, output_path)
         assert pin.content_hash == sha256
 
-        assert get_trust_state(run_catalog_dir, sha256) == ProductTrustState.UNKNOWN
+        assert get_trust_state(run_catalog_dir, sha256) == ProductTrustState.CANDIDATE
         assert query_attestation(run_catalog_dir, sha256) is None
 
         report = read_campaign_report(report_catalog_dir, campaign_id)
