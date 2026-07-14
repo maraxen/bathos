@@ -25,14 +25,10 @@ Three are REAL today:
   ``CampaignReport.read_report`` / ``FigureManifest.read_manifest`` disk readers, which
   previously had no callable tool surface (Python-only, direct filesystem access).
 
-Four are intentional NULL-STUBS, because their backing stores do not exist yet:
+Two remain intentional NULL-STUBS, because their backing stores do not exist yet:
 
 - ``get_trust_state`` -> trust ledger (build seam S3, spec §3.1). Always returns
   ``ProductTrustState.UNKNOWN`` until S3 ships.
-- ``query_attestation`` -> attestation sidecar store (build seam S4, spec §3.2). Always
-  returns ``None`` until S4 ships.
-- ``figure_lookup`` -> figure registry (build seam S7, spec §3.3). Always returns ``[]``
-  until S7 ships.
 - ``list_candidates`` -> candidate tier of the trust ledger (build seam S3). Always
   returns ``[]`` until S3 ships.
 
@@ -43,9 +39,18 @@ changing call sites — ``resolve_pin`` already composes with ``get_trust_state`
 
 UPDATE (backlog item 3483, seam S2, ``bathos.anchor``): ``figure_lookup`` is no longer a
 pure null-stub. The generic sidecar-anchor store built in S2 gives it a real, minimal
-backing store — see ``figure_lookup``'s own docstring below. ``get_trust_state``,
-``query_attestation``, and ``list_candidates`` remain null-stubs (their backing stores,
-S3/S4, still do not exist).
+backing store — see ``figure_lookup``'s own docstring below. ``get_trust_state`` and
+``list_candidates`` remain null-stubs (their backing store, S3, still does not exist).
+
+UPDATE (backlog item 3492, seam S4, ``bathos.attestation``): ``query_attestation`` is no
+longer a null-stub either. It is now backed by the attestation sidecar kind
+(``oracle_match`` / ``repro_floor``, anchored via the S2 seam's ``DurableAnchorStore``) —
+see ``query_attestation``'s own docstring below. Note the seam boundary this preserves:
+a PASS attestation is *query-answerable evidence*, not a promotion by itself — the trust
+ledger (S3, backlog #3491) is what would consume a PASS result to move a product from
+``candidate`` to ``promoted``. Until S3 exists, ``get_trust_state`` still always returns
+``UNKNOWN`` regardless of what ``query_attestation`` returns for the same content_hash —
+a recorded PASS attestation is inert on its own.
 """
 
 from __future__ import annotations
@@ -172,24 +177,88 @@ def query_attestation(
     content_hash: str,
     min_strength: str | None = None,
 ) -> dict | None:
-    """Look up an attestation (verdict-checked) for a product by content_hash.
+    """Look up a verdict-checked attestation for a product by content_hash.
 
-    NULL-STUB: the attestation sidecar store (build seam S4, spec §3.2 — ``oracle_match``
-    / ``repro_floor`` attestation sidecars anchored by sha256) does not exist yet. Always
-    returns ``None`` until S4 ships. Once implemented, this should confirm
-    ``verdict == "PASS"`` and strength >= ``min_strength`` before returning a non-null
-    result (spec §5.1 step 4).
+    REAL (as of seam S4, ``bathos.attestation``, backlog item 3492): backed by the
+    attestation sidecar kind (``oracle_match`` / ``repro_floor``), anchored via the S2
+    seam's ``DurableAnchorStore`` so this composes correctly even after a
+    ``bathos.compact.compact(force_rebuild=True)``.
+
+    Confirms **verdict == "PASS"** (spec §5.1 step 4) before returning a non-null
+    result — a WARN or FAIL attestation may exist (registered via
+    ``bathos.attestation.register_attestation``) but is never returned by this
+    function; it is present in the catalog as a distinct, queryable-by-anchor record
+    (``bathos.anchor.find_anchors(..., content_hash=content_hash)`` would still surface
+    it), but ``query_attestation`` is a verdict-gated view over that store, not a raw
+    passthrough.
+
+    ``min_strength`` distinguishes ``oracle_match`` (independent-oracle-verified,
+    stronger) from ``repro_floor`` (seed-pinned determinism only, weaker) —
+    see ``bathos.attestation.STRENGTH_RANK``. If multiple PASS attestations of
+    qualifying strength exist for the same content_hash, the strongest one wins, tied
+    by most-recently-anchored.
+
+    IMPORTANT — inert-evidence note (spec item 9 acceptance, backlog #3492): a PASS
+    result from this function is evidence only. It does not itself promote anything —
+    the trust ledger (build seam S3, backlog #3491) is what would consume a PASS
+    result to append a ``candidate -> promoted`` record (spec §5.1 step 4). Until S3
+    exists (or has no ledger entry for this content_hash), ``get_trust_state`` for the
+    same content_hash still returns ``UNKNOWN`` regardless of what this function
+    returns — a PASS attestation recorded before S3 exists is inert.
 
     Args:
-        catalog_dir: Path to the bathos catalog root (unused until S4 exists).
-        content_hash: Content hash of the attested product (unused until S4 exists).
+        catalog_dir: Path to the bathos catalog root.
+        content_hash: Content hash of the attested product.
         min_strength: Minimum required certification strength, ``"oracle_match"`` or
-            ``"repro_floor"`` (unused until S4 exists).
+            ``"repro_floor"``; ``None`` = no minimum (either strength qualifies).
 
     Returns:
-        ``None``, always, until S4 ships.
+        A dict shaped per spec §3.2 (``kind``, ``attested``, ``verdict``,
+        kind-specific fields, ``attestation_sha256``, ``campaign_id``, ``anchored_at``)
+        if a matching-strength PASS attestation exists, else ``None``.
     """
-    del catalog_dir, content_hash, min_strength  # unused until the attestation store (S4) exists
+    from bathos.anchor import find_anchors
+    from bathos.attestation import STRENGTH_RANK, parse_attestation
+
+    if min_strength is not None and min_strength not in STRENGTH_RANK:
+        return None
+
+    required_rank = STRENGTH_RANK.get(min_strength, 0) if min_strength else 0
+
+    candidates = [
+        anchor
+        for anchor in find_anchors(catalog_dir, content_hash=content_hash)
+        if anchor.kind in STRENGTH_RANK and STRENGTH_RANK[anchor.kind] >= required_rank
+    ]
+    # Strongest first, then most-recently-anchored first.
+    candidates.sort(key=lambda a: (STRENGTH_RANK[a.kind], a.anchored_at), reverse=True)
+
+    for anchor in candidates:
+        try:
+            attestation = parse_attestation(Path(anchor.path))
+        except (FileNotFoundError, ValueError):
+            continue
+        if attestation.verdict != "PASS":
+            continue
+        return {
+            "kind": attestation.kind,
+            "attested": attestation.attested,
+            "verdict": attestation.verdict,
+            "oracle_sha256": attestation.oracle_sha256,
+            "harness_run_ref": attestation.harness_run_ref,
+            "max_discrepancy": attestation.max_discrepancy,
+            "tolerance_policy": attestation.tolerance_policy,
+            "seed_pin": attestation.seed_pin,
+            "rerun_count": attestation.rerun_count,
+            "rerun_digests": attestation.rerun_digests,
+            "created_by": attestation.created_by,
+            "created_at": attestation.created_at,
+            "attestation_sha256": anchor.sha256,
+            "content_hash": anchor.content_hash,
+            "campaign_id": anchor.campaign_id,
+            "anchored_at": anchor.anchored_at,
+        }
+
     return None
 
 

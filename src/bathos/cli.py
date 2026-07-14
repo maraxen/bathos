@@ -39,6 +39,12 @@ anchor_app = typer.Typer(
 )
 app.add_typer(anchor_app, name="anchor")
 
+attestation_app = typer.Typer(
+    help="Attestation sidecar (S4): oracle_match/repro_floor, anchored by sha256 "
+    "(a separate kind from `bth claim` — see gate #3488)"
+)
+app.add_typer(attestation_app, name="attestation")
+
 
 def _catalog_dir() -> Path:
     override = os.environ.get("BTH_CATALOG_DIR")
@@ -879,6 +885,80 @@ def claim_validate_cmd(
     typer.echo(f"✓ {path} is valid")
 
 
+@attestation_app.command("scaffold")
+def attestation_scaffold_cmd(
+    kind: str = typer.Argument(..., help="'oracle_match' or 'repro_floor'"),
+    label: str | None = typer.Option(None, "--label", help="Optional filename label"),
+):
+    """Scaffold an attestation.bth.toml template (S4; separate kind from `bth claim`)."""
+    from bathos.attestation import scaffold_attestation
+    from bathos.workspace import resolve_workspace
+
+    ws = resolve_workspace().fs_root
+    try:
+        path = scaffold_attestation(kind, ws, label=label)
+        typer.echo(f"Created: {path}")
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+
+
+@attestation_app.command("validate")
+def attestation_validate_cmd(
+    path: Path = typer.Argument(..., help="Path to attestation .toml file"),
+):
+    """Validate an attestation TOML file's kind-specific required fields."""
+    from bathos.attestation import parse_attestation, validate_attestation
+
+    try:
+        attestation = parse_attestation(path)
+    except FileNotFoundError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+
+    result = validate_attestation(attestation)
+
+    for warning in result.warnings:
+        typer.secho(f"warning: {warning}", fg="yellow")
+    if result.errors:
+        for error in result.errors:
+            typer.echo(f"error: {error.message}", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"✓ {path} is valid ({attestation.kind}, verdict={attestation.verdict})")
+
+
+@attestation_app.command("register")
+def attestation_register_cmd(
+    path: Path = typer.Argument(..., help="Path to attestation .toml file"),
+    campaign_id: str | None = typer.Option(
+        None, "--campaign-id", help="Optional campaign this attestation belongs to"
+    ),
+):
+    """Register an attestation file: anchor it by its own SHA256 (durable by default).
+
+    Anchors kind=oracle_match|repro_floor, content_hash=attested product's
+    content_hash, label=verdict — a SEPARATE anchored sidecar kind from `bth claim`
+    (see gate #3488 sign-off); reuses the S2 anchor-insert seam via
+    `bathos.anchor.DurableAnchorStore` so the attestation survives
+    `bth compact --force-rebuild`.
+    """
+    import dataclasses
+    import json as json_mod
+
+    from bathos.attestation import register_attestation
+
+    try:
+        record = register_attestation(path, _catalog_dir(), campaign_id=campaign_id)
+        typer.echo(json_mod.dumps(dataclasses.asdict(record), indent=2))
+    except (FileNotFoundError, ValueError) as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+
+
 @campaign_app.command("attest-parity")
 def campaign_attest_parity(
     campaign_id: str = typer.Argument(..., help="Campaign ID (or prefix)"),
@@ -1105,7 +1185,7 @@ def query_attestation_cmd(
         None, "--min-strength", help="'oracle_match' or 'repro_floor'"
     ),
 ):
-    """Query attestation for a content_hash (S1; null-stub pending attestation store S4)."""
+    """Query attestation for a content_hash (S1; real, backed by the S4 attestation store)."""
     import json as json_mod
 
     from bathos.readback import query_attestation
