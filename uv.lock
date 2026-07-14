@@ -362,6 +362,7 @@ requires-dist = [
     { name = "fastmcp", specifier = ">=3.4.2" },
     { name = "opentelemetry-api", specifier = ">=1.42.1" },
     { name = "opentelemetry-exporter-otlp-proto-grpc", marker = "extra == 'otlp'", specifier = ">=1.42.1" },
+    { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'otlp'", specifier = ">=1.42.1" },
     { name = "opentelemetry-sdk", marker = "extra == 'otlp'", specifier = ">=1.42.1" },
     { name = "opentelemetry-semantic-conventions", marker = "extra == 'otlp'", specifier = ">=0.63b1" },
 ]
@@ -369,6 +370,10 @@ provides-extras = ["otlp"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "opentelemetry-exporter-otlp-proto-grpc", specifier = ">=1.42.1" },
+    { name = "opentelemetry-exporter-otlp-proto-http", specifier = ">=1.42.1" },
+    { name = "opentelemetry-sdk", specifier = ">=1.42.1" },
+    { name = "opentelemetry-semantic-conventions", specifier = ">=0.63b1" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "pytest-asyncio", specifier = ">=0.24.0" },
     { name = "pytest-cov", specifier = ">=7.1.0" },

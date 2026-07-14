@@ -320,9 +320,10 @@ def run_sql_tool(
 #
 # resolve_pin / read_campaign_report / read_figure_manifest are REAL (wrap existing
 # catalog + disk readers). figure_lookup is now REAL too, backed by the S2 sidecar
-# anchor store (bathos.anchor, item 3483) — see below. get_trust_state /
-# query_attestation / list_candidates remain intentional null-stubs pending their
-# backing stores (S3/S4) — see bathos.readback module docstring.
+# anchor store (bathos.anchor, item 3483). query_attestation is now REAL too, backed by
+# the S4 attestation sidecar store (bathos.attestation, item 3492) — see below.
+# get_trust_state / list_candidates remain intentional null-stubs pending the trust
+# ledger (S3) — see bathos.readback module docstring.
 # ============================================================================
 
 
@@ -384,8 +385,11 @@ def query_attestation_tool(
 ) -> dict:
     """Look up a verdict-checked attestation for a product by content_hash.
 
-    NULL-STUB pending the attestation sidecar store (build seam S4) — always returns
-    attestation=None.
+    REAL as of seam S4 (bathos.attestation, backlog item 3492): backed by the
+    attestation sidecar kind (oracle_match / repro_floor). Returns attestation=None
+    unless a matching-strength PASS attestation has been registered (WARN/FAIL
+    attestations are present in the catalog but never satisfy this query) — see
+    bathos.readback.query_attestation docstring.
 
     Args:
         content_hash: Content hash of the attested product.
@@ -394,7 +398,7 @@ def query_attestation_tool(
         catalog_dir: Catalog directory (empty = use default)
 
     Returns:
-        Dict with content_hash and attestation (None until S4 ships).
+        Dict with content_hash and attestation (None if no qualifying PASS exists).
     """
     if not content_hash:
         return {"error": "content_hash is required"}
@@ -672,6 +676,124 @@ def figure_entry_register_tool(
     except (FigureEntrySchemaError, TypeError, ValueError) as e:
         return {"ok": False, "error": str(e)}
     return {"ok": True, "figure_entry": dataclasses.asdict(entry)}
+
+
+# ============================================================================
+# Attestation sidecar (S4) — bathos.attestation adapter (backlog item 3492)
+#
+# A SEPARATE, analogous anchored sidecar kind (oracle_match / repro_floor), NOT an
+# extension of the claim system's literature_parity attestation path (bathos.claim) —
+# see gate #3488 sign-off
+# (`.praxia/docs/decisions/260714_spike-claim-schema-extensibility.md`, maraxiom repo)
+# and the bathos.attestation module docstring. Reuses the scaffold/register/validate
+# pattern + SHA256-anchor-at-registration shape, and the S2 anchor-insert seam
+# (register_anchor via DurableAnchorStore for durability), but shares no code, table,
+# or column with bathos.claim. These are plain, synchronously-callable functions (the
+# @app.tool-decorated async wrappers below just forward to them), mirroring the S2
+# anchor tool convention (anchor_insert_tool / anchor_get_tool / anchor_find_tool)
+# rather than the claim tools' async-only style, per the dispatch brief ("Wire
+# register + query on MCP + CLI following the anchor/query patterns").
+# ============================================================================
+
+
+def attestation_scaffold_tool(
+    kind: str = "",
+    workspace_root: str = "",
+    label: str = "",
+) -> dict:
+    """Scaffold a new attestation.bth.toml template (S4; real).
+
+    Args:
+        kind: "oracle_match" or "repro_floor".
+        workspace_root: Project workspace root (empty = resolve live fs_root).
+        label: Optional filename label.
+
+    Returns:
+        Dict with ok + path, or ok=False + error.
+    """
+    from bathos.attestation import scaffold_attestation
+
+    if workspace_root:
+        ws = Path(workspace_root).expanduser().resolve()
+    else:
+        from bathos.workspace import resolve_workspace
+
+        ws = resolve_workspace().fs_root
+
+    try:
+        path = scaffold_attestation(kind, ws, label=label or None)
+        return {"ok": True, "path": str(path), "kind": kind}
+    except ValueError as e:
+        return {"ok": False, "error": str(e), "error_code": "invalid_kind"}
+
+
+def attestation_validate_tool(
+    path: str = "",
+) -> dict:
+    """Validate an attestation TOML file's kind-specific required fields (S4; real).
+
+    Args:
+        path: Path to the attestation TOML file.
+
+    Returns:
+        Dict with ok + kind/verdict/warnings, or ok=False + errors.
+    """
+    from bathos.attestation import parse_attestation, validate_attestation
+
+    attestation_path = Path(path)
+    if not attestation_path.exists():
+        return {"ok": False, "error": f"File not found: {path}"}
+
+    try:
+        attestation = parse_attestation(attestation_path)
+    except FileNotFoundError as e:
+        return {"ok": False, "error": str(e), "error_code": "file_not_found"}
+    except ValueError as e:
+        return {"ok": False, "error": str(e), "error_code": "parse_error"}
+
+    result = validate_attestation(attestation)
+    if result.ok:
+        return {
+            "ok": True,
+            "path": path,
+            "kind": attestation.kind,
+            "verdict": attestation.verdict,
+            "warnings": result.warnings,
+        }
+    return {
+        "ok": False,
+        "errors": [e.message for e in result.errors],
+        "warnings": result.warnings,
+        "error_code": "validation_failed",
+    }
+
+
+def attestation_register_tool(
+    path: str = "",
+    catalog_dir: str = "",
+    campaign_id: str = "",
+) -> dict:
+    """Register an attestation file: anchor it by its own SHA256 (S4; real; durable by
+    default via DurableAnchorStore).
+
+    Args:
+        path: Path to the attestation TOML file to register.
+        catalog_dir: Catalog directory (empty = use default).
+        campaign_id: Optional campaign this attestation belongs to.
+
+    Returns:
+        Dict with ok + the inserted anchor record, or ok=False + error.
+    """
+    from bathos.attestation import register_attestation
+
+    if not path:
+        return {"ok": False, "error": "path is required"}
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    try:
+        record = register_attestation(Path(path), cat_dir, campaign_id=campaign_id or None)
+        return {"ok": True, "anchor": dataclasses.asdict(record)}
+    except (FileNotFoundError, ValueError) as e:
+        return {"ok": False, "error": str(e), "error_code": "register_failed"}
 
 
 def compact_tool(
@@ -1179,7 +1301,7 @@ async def mcp_query_attestation_tool(
     min_strength: str = "",
     catalog_dir: str = "",
 ) -> dict:
-    """Query attestation for a content_hash (S1; null-stub pending attestation store S4)."""
+    """Query attestation for a content_hash (S1; real, backed by the S4 attestation store)."""
     return query_attestation_tool(
         content_hash=content_hash, min_strength=min_strength, catalog_dir=catalog_dir
     )
@@ -1306,6 +1428,39 @@ async def mcp_figure_entry_register_tool(
         campaign_id=campaign_id,
         catalog_dir=catalog_dir,
     )
+
+
+@app.tool("attestation_scaffold")
+@traced_tool
+async def mcp_attestation_scaffold_tool(
+    kind: str = "",
+    workspace_root: str = "",
+    label: str = "",
+) -> dict:
+    """Scaffold a new attestation.bth.toml template (S4; real; separate kind from
+    `bath.claim` — see gate #3488)."""
+    return attestation_scaffold_tool(kind=kind, workspace_root=workspace_root, label=label)
+
+
+@app.tool("attestation_validate")
+@traced_tool
+async def mcp_attestation_validate_tool(
+    path: str = "",
+) -> dict:
+    """Validate an attestation TOML file's kind-specific required fields (S4; real)."""
+    return attestation_validate_tool(path=path)
+
+
+@app.tool("attestation_register")
+@traced_tool
+async def mcp_attestation_register_tool(
+    path: str = "",
+    catalog_dir: str = "",
+    campaign_id: str = "",
+) -> dict:
+    """Register an attestation file: anchor it by its own SHA256 (S4; real; durable by
+    default via DurableAnchorStore)."""
+    return attestation_register_tool(path=path, catalog_dir=catalog_dir, campaign_id=campaign_id)
 
 
 @app.tool("compact")
