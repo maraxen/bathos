@@ -529,15 +529,83 @@ def emit_campaign_report(db, catalog_dir: str, campaign_id: str, figure_manifest
     event("campaign.report.emit", campaign_id=campaign_id, report_path=str(report_path))
 
 
+def _figure_id_from_sidecar_ref(sidecar_ref: str) -> str:
+    """Derive a manifest `figure_id` from a registry entry's `sidecar_ref`.
+
+    The S7 figure registry (`bathos.figure_registry.FigureEntry`) is pointer-only and
+    has no `figure_id` field of its own (spec 260713 §3.3) — `sidecar_ref` is the only
+    identity-bearing string available. Strip the filename's `.figure.toml` suffix (the
+    convention used throughout `tests/test_figure_registry.py`); fall back to the bare
+    stem if some other extension is ever used.
+    """
+    from pathlib import Path
+
+    name = Path(sidecar_ref).name
+    if name.endswith(".figure.toml"):
+        return name[: -len(".figure.toml")]
+    return Path(name).stem
+
+
+def _figure_manifest_entry_from_registry(entry) -> "ManifestFigureEntry":  # noqa: F821
+    """Bridge one S7 `figure_registry.FigureEntry` (pointer-only) into a
+    `figure_manifest.FigureEntry` (intent-focused), per spec 260713 §3.4/§6.
+
+    The two shapes serve different purposes and do not share a 1:1 field mapping:
+
+    Faithful fields (real source, passed through):
+      - `figure_kind` -> `figure_kind` (same free-form vocabulary in both schemas).
+      - `render_state` -> `render_state` (both source from
+        `bathos.figure_manifest.RenderState`; the registry's own `__post_init__`
+        validates against that same enum, so this passthrough cannot desync).
+      - `figure_id`: NOT a registry field — derived deterministically from
+        `sidecar_ref`'s filename (see `_figure_id_from_sidecar_ref`).
+
+    Flagged gaps (no clean source on the pointer-only registry entry — NOT
+    fabricated as if they were real data):
+      - `intent`: the registry entry carries no human-readable intent at all (by
+        design — it is pointer-only, see `bathos.figure_registry` module
+        docstring). The manifest schema requires a non-null `intent` string, so we
+        synthesize an explicitly-derived placeholder from `figure_kind` rather than
+        inventing prose; a caller that wants the real authorial intent must resolve
+        `sidecar_ref` (maraxiom's `FigureSidecar`, which DOES carry `intent`).
+      - `input_pins`: the registry entry carries no `run_id`/`output_path` (it
+        identifies the figure by `asset_sha256` and points at the sidecar, not at
+        the sidecar's own input pins). Left as `[]` rather than fabricated; the real
+        input_pins live in the maraxiom-owned `.figure.toml` `sidecar_ref` points to.
+
+    Dropped (registry-only, no manifest slot): `fig_trust_state`, `attestation_ref`
+    (spec §3.3's certification-pointer fields) — a caller needing those still goes
+    to `bathos.figure_registry`/`bathos.readback.figure_lookup` directly; the
+    manifest is item 3496's intent index, not the S7 certification pointer.
+    """
+    from bathos.figure_manifest import FigureEntry as ManifestFigureEntry
+
+    figure_id = _figure_id_from_sidecar_ref(entry.sidecar_ref)
+    return ManifestFigureEntry(
+        figure_id=figure_id,
+        intent=f"(intent not tracked by figure registry; see {entry.sidecar_ref})",
+        input_pins=[],
+        render_state=entry.render_state,
+        figure_kind=entry.figure_kind,
+    )
+
+
 def emit_figure_manifest(db, catalog_dir: str, campaign_id: str) -> None:
-    """Emit an empty figure manifest JSON sidecar at <catalog>/sidecars/<campaign_id>/figure_manifest.json.
+    """Emit a figure manifest JSON sidecar at <catalog>/sidecars/<campaign_id>/figure_manifest.json.
 
     This function generates a truth-only figure manifest that declares figure INTENT
     (which runs/data a figure derives from) without rendering artifacts. Rendering remains
     maraxiom's concern.
 
-    For now, bathos emits an empty manifest (zero figures) since all rendering is delegated
-    to maraxiom. The manifest structure is prepared for future figure pinning if needed.
+    UPDATE (backlog item 3496, seam S8): `figures[]` is no longer hardcoded empty. It is
+    now populated from the S7 figure registry (`bathos.figure_registry.find_figure_entries`,
+    item 3490, merged to main) — every `figure_entry` anchored for this campaign_id is
+    bridged into a manifest `FigureEntry` via `_figure_manifest_entry_from_registry` (see
+    that function's docstring for the exact field mapping and the fields with no clean
+    source). A campaign with no registered figure_entry records still emits `figures=[]`
+    cleanly — this is not an error path, matching the pre-existing empty-manifest contract
+    (`figure_manifest.FigureManifest` module docstring: "An empty campaign is expressed as
+    figures=[] ... not a special render_state").
 
     Args:
         db: DuckDB connection.
@@ -550,6 +618,7 @@ def emit_figure_manifest(db, catalog_dir: str, campaign_id: str) -> None:
     from pathlib import Path
 
     from bathos.figure_manifest import FigureManifest
+    from bathos.figure_registry import find_figure_entries
 
     campaign_id = _resolve_campaign_id(db, campaign_id)
 
@@ -561,11 +630,14 @@ def emit_figure_manifest(db, catalog_dir: str, campaign_id: str) -> None:
     if not campaign_rows:
         raise CampaignError(f"Campaign {campaign_id} not found")
 
-    # Create an empty figure manifest (bathos truth-only: no rendering)
+    # Populate figures[] from the S7 figure registry, anchored per campaign_id.
+    registry_entries = find_figure_entries(catalog_dir, campaign_id=campaign_id)
+    figures = [_figure_manifest_entry_from_registry(entry) for entry in registry_entries]
+
     manifest = FigureManifest(
         manifest_version="1.0",
         campaign_id=campaign_id,
-        figures=[],  # Empty: all rendering delegated to maraxiom
+        figures=figures,
     )
 
     # Write the manifest to the sidecar path
@@ -573,7 +645,12 @@ def emit_figure_manifest(db, catalog_dir: str, campaign_id: str) -> None:
     manifest_path = sidecar_dir / "figure_manifest.json"
     manifest.write_manifest(manifest_path)
 
-    event("campaign.manifest.emit", campaign_id=campaign_id, manifest_path=str(manifest_path))
+    event(
+        "campaign.manifest.emit",
+        campaign_id=campaign_id,
+        manifest_path=str(manifest_path),
+        figure_count=len(figures),
+    )
 
 
 def emit_claim_coverage_report(
