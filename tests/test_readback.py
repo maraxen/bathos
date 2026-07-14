@@ -18,6 +18,14 @@ sidecar S4, figure registry S7) do not exist yet. This module ships *before* tho
 stores exist and must return a well-defined empty/null result rather than raising —
 that is the acceptance requirement for this item.
 
+UPDATE (backlog item 3483, seam S2, bathos.anchor): figure_lookup is no longer a pure
+null-stub. The generic sidecar-anchor store built in S2 gives it a real, minimal
+backing store — figures anchored with kind="figure" are now visible here. It still
+returns [] for any catalog with no matching anchors, which is observably identical to
+the old null-stub behavior until a producer actually anchors a figure — see
+TestFigureLookupComposesWithAnchorStore below. get_trust_state, query_attestation, and
+list_candidates remain null-stubs (their stores, S3/S4, still don't exist).
+
 This test file asserts all seven functions are callable against a live bathos catalog
 fixture, that the real functions return real data, and that the null-stubs return their
 documented empty/null sentinel.
@@ -30,6 +38,7 @@ from pathlib import Path
 
 import pytest
 
+from bathos.anchor import register_anchor
 from bathos.campaign_report import CampaignReport
 from bathos.catalog import init_catalog, write_run
 from bathos.compact import compact as compact_catalog
@@ -190,9 +199,12 @@ class TestReadbackRealFunctions:
 
 
 class TestReadbackNullStubs:
-    """get_trust_state, query_attestation, figure_lookup, list_candidates ship before their
-    backing stores exist (S3/S4/S7). Acceptance requirement: callable today, well-defined
-    empty/null result, never raise."""
+    """get_trust_state, query_attestation, list_candidates ship before their backing
+    stores exist (S3/S4). Acceptance requirement: callable today, well-defined
+    empty/null result, never raise. figure_lookup is exercised here too (empty-catalog
+    case) — it now composes with the S2 anchor store (see
+    TestFigureLookupComposesWithAnchorStore) but is observably empty for any catalog
+    that has no matching anchors, same as before S2 shipped."""
 
     def test_get_trust_state_returns_unknown(self, catalog_with_run):
         catalog_dir, _run, _output_path, sha256 = catalog_with_run
@@ -221,6 +233,56 @@ class TestReadbackNullStubs:
         catalog_dir, campaign_id = catalog_with_campaign_sidecars
 
         assert list_candidates(catalog_dir, campaign_id) == []
+
+
+class TestFigureLookupComposesWithAnchorStore:
+    """S2 (bathos.anchor, item 3483) gives figure_lookup a real backing store: an
+    anchor registered with kind="figure" becomes visible via figure_lookup by either
+    its own sha256 (asset_sha256) or its content_hash (input_hash, the underlying
+    data product's hash)."""
+
+    def test_figure_lookup_finds_anchor_by_asset_sha256(self, catalog_with_campaign_sidecars):
+        catalog_dir, campaign_id = catalog_with_campaign_sidecars
+        register_anchor(
+            catalog_dir,
+            f"sidecars/{campaign_id}/figure_manifest.json",
+            "a" * 64,
+            "figure",
+            content_hash="b" * 64,
+            campaign_id=campaign_id,
+        )
+
+        results = figure_lookup(catalog_dir, asset_sha256="a" * 64)
+
+        assert len(results) == 1
+        assert results[0]["sha256"] == "a" * 64
+        assert results[0]["content_hash"] == "b" * 64
+        assert results[0]["campaign_id"] == campaign_id
+
+    def test_figure_lookup_finds_anchor_by_input_hash(self, catalog_with_campaign_sidecars):
+        catalog_dir, campaign_id = catalog_with_campaign_sidecars
+        register_anchor(
+            catalog_dir, "fig.png", "a" * 64, "figure", content_hash="b" * 64
+        )
+
+        results = figure_lookup(catalog_dir, input_hash="b" * 64)
+
+        assert len(results) == 1
+        assert results[0]["path"] == "fig.png"
+
+    def test_figure_lookup_ignores_non_figure_anchors(self, catalog_with_campaign_sidecars):
+        catalog_dir, _campaign_id = catalog_with_campaign_sidecars
+        register_anchor(catalog_dir, "attest.json", "a" * 64, "attestation")
+
+        assert figure_lookup(catalog_dir, asset_sha256="a" * 64) == []
+
+    def test_figure_lookup_still_empty_with_no_matching_anchor(
+        self, catalog_with_campaign_sidecars
+    ):
+        catalog_dir, _campaign_id = catalog_with_campaign_sidecars
+        register_anchor(catalog_dir, "fig.png", "a" * 64, "figure")
+
+        assert figure_lookup(catalog_dir, asset_sha256="nonmatching") == []
 
 
 class TestReadbackSurfaceIsFullyCallable:
