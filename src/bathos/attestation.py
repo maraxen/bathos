@@ -153,7 +153,7 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def parse_attestation(path: Path) -> AttestationFile:
+def parse_attestation(path: Path, *, content: bytes | None = None) -> AttestationFile:
     """Parse a ``*.attestation.bth.toml`` file.
 
     Mirrors `bathos.claim.parse_claim`'s leniency: does not itself enforce required
@@ -162,19 +162,27 @@ def parse_attestation(path: Path) -> AttestationFile:
 
     Args:
         path: Path to the attestation TOML file.
+        content: Optional pre-read file bytes. When given, ``path`` is not read again
+            (debt #640, fix TOCTOU double file-read) — the caller (e.g.
+            ``register_attestation``) already read the file once and passes those
+            same bytes through so the parse and the hash are computed from the exact
+            bytes the caller has in hand, and no second filesystem read occurs.
+            When omitted (the default, and the only path any pre-#640 caller used),
+            behavior is unchanged: ``path`` is read from disk here.
 
     Returns:
         AttestationFile dataclass.
 
     Raises:
-        FileNotFoundError: If the file does not exist.
-        ValueError: If the file cannot be parsed as TOML.
+        FileNotFoundError: If the file does not exist and ``content`` was not given.
+        ValueError: If the content cannot be parsed as TOML.
     """
-    if not path.exists():
-        raise FileNotFoundError(f"Attestation file not found at {path}")
+    if content is None:
+        if not path.exists():
+            raise FileNotFoundError(f"Attestation file not found at {path}")
+        content = path.read_bytes()
 
     try:
-        content = path.read_bytes()
         data = tomllib.loads(content.decode("utf-8"))
     except Exception as e:
         raise ValueError(f"Failed to parse attestation TOML at {path}: {e}") from e
@@ -409,7 +417,16 @@ def register_attestation(
             `validate_attestation` (subclass of ValueError). No anchor is
             written and no canonical copy is created.
     """
-    attestation = parse_attestation(path)
+    # Read the file exactly once (debt #640, fix TOCTOU double file-read): the same
+    # `content` bytes back both the hash/parse below (via `parse_attestation`'s
+    # `content=` override) and the canonical-copy write, instead of re-reading `path`
+    # from disk a second time (which used to open a window for the file to change
+    # between the two reads, and was simply wasteful I/O either way).
+    if not path.exists():
+        raise FileNotFoundError(f"Attestation file not found at {path}")
+    content = path.read_bytes()
+
+    attestation = parse_attestation(path, content=content)
 
     validation = validate_attestation(attestation)
     if not validation.ok:
@@ -421,7 +438,7 @@ def register_attestation(
 
     canonical_path = _canonical_attestation_path(catalog_dir, attestation.sha256)
     canonical_path.parent.mkdir(parents=True, exist_ok=True)
-    canonical_path.write_bytes(path.read_bytes())
+    canonical_path.write_bytes(content)
 
     active_store = store if store is not None else DurableAnchorStore(catalog_dir)
 

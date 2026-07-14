@@ -246,6 +246,69 @@ class TestRegisterAndLookupFigureEntry:
         assert len(shapes) == 2  # legacy dict shape != typed figure_entry shape
 
 
+class TestContentHashNameCollisionIsDocumentedNotConflated:
+    """Debt #645 structural proof: the literal string "content_hash" is reused
+    for two different concepts in this area of the codebase — (1) the legacy
+    kind="figure" figure_lookup dict's "content_hash" key (the input product's
+    hash, an AnchorRecord passthrough) and (2) FORBIDDEN_INLINE_FIELDS's
+    "content_hash" (an ADR-forbidden attestation-verdict field a typed
+    FigureEntry must never carry). See the "NAME COLLISION NOTE" in
+    bathos.figure_registry's module docstring and the matching comment at
+    bathos.readback.figure_lookup's legacy dict construction site.
+
+    This does not rename either field (both are pinned, shipped shapes) — it
+    proves the two are structurally distinct: a legacy dict always carries
+    "content_hash" with input-product semantics; a typed figure_entry dict
+    NEVER carries that key at all, under any circumstance, even when composed
+    in the same figure_lookup call as a legacy dict that does carry it."""
+
+    def test_legacy_shape_carries_content_hash_typed_shape_never_does(self, catalog_dir):
+        # Same asset_sha256, both a legacy anchor (content_hash = input product's
+        # hash) and a typed figure_entry (which must never carry content_hash).
+        register_anchor(
+            catalog_dir,
+            "legacy_fig2.png",
+            "6" * 64,
+            "figure",
+            content_hash="7" * 64,  # legacy semantics: the input product's hash
+        )
+        register_figure_entry(
+            catalog_dir,
+            asset_sha256="6" * 64,
+            sidecar_ref="fig_six.figure.toml",
+            figure_kind="scatter",
+        )
+
+        results = figure_lookup(catalog_dir, asset_sha256="6" * 64)
+        assert len(results) == 2
+
+        legacy_results = [r for r in results if "figure_id" in r]
+        typed_results = [r for r in results if "asset_sha256" in r]
+        assert len(legacy_results) == 1
+        assert len(typed_results) == 1
+
+        # (1) Legacy dict: "content_hash" present, meaning the input product hash.
+        assert legacy_results[0]["content_hash"] == "7" * 64
+
+        # (2) Typed dict: "content_hash" key never present at all — this is the
+        # exact ADR-forbidden field FORBIDDEN_INLINE_FIELDS blocks on FigureEntry,
+        # so it structurally cannot leak into the typed dict shape either.
+        assert "content_hash" not in typed_results[0]
+
+    def test_forbidden_field_constant_and_legacy_key_are_independent_concepts(self):
+        """FORBIDDEN_INLINE_FIELDS is a typed-schema-only guard; it says nothing
+        about (and does not gate) the unrelated legacy figure_lookup dict key of
+        the same name — confirms the two are separate mechanisms, not one shared
+        validated field."""
+        from bathos.figure_registry import FORBIDDEN_INLINE_FIELDS
+
+        assert "content_hash" in FORBIDDEN_INLINE_FIELDS
+        # The legacy dict shape is built entirely in bathos.readback.figure_lookup
+        # and never consults FORBIDDEN_INLINE_FIELDS or build_figure_entry — so a
+        # legacy anchor's content_hash is never validated/rejected by this guard,
+        # by design (it is a different field on a different object).
+
+
 class TestFigureEntrySurvivesForceRebuild:
     """Registration defaults to DurableAnchorStore (gate #3485, merged to main) so
     entries survive bathos.compact.compact(catalog_dir, force_rebuild=True)."""

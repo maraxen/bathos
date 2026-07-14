@@ -12,6 +12,8 @@ structural proof that this module shares no code path with bathos.claim.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from bathos.anchor import CatalogAnchorStore, get_anchor
@@ -321,6 +323,34 @@ class TestRegisterAttestation:
         record = register_attestation(path, catalog_dir, campaign_id="camp-xyz")
 
         assert record.campaign_id == "camp-xyz"
+
+    def test_register_reads_source_file_exactly_once(self, tmp_path, catalog_dir, monkeypatch):
+        """Debt #640 regression (TOCTOU double file-read): register_attestation
+        used to read `path` from disk TWICE — once inside parse_attestation to
+        compute attestation.sha256, and again independently (`path.read_bytes()`)
+        to populate the canonical durable copy. Spy on Path.read_bytes to confirm
+        the caller's original `path` is now read exactly once per call — the same
+        bytes are reused for both the parse/hash and the canonical-copy write."""
+        content_hash = "7" * 64
+        toml_text = ORACLE_MATCH_TOML.format(content_hash=content_hash, oracle_sha="8" * 64)
+        path = _write_attestation(tmp_path, toml_text, name="toctou.attestation.bth.toml")
+
+        original_read_bytes = Path.read_bytes
+        reads_of_source: list[Path] = []
+
+        def spy_read_bytes(self):
+            if self == path:
+                reads_of_source.append(self)
+            return original_read_bytes(self)
+
+        monkeypatch.setattr(Path, "read_bytes", spy_read_bytes)
+
+        register_attestation(path, catalog_dir)
+
+        assert len(reads_of_source) == 1, (
+            f"expected exactly one read of the source attestation file, got "
+            f"{len(reads_of_source)}"
+        )
 
 
 class TestStrengthRank:

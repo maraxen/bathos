@@ -71,6 +71,30 @@ attestation's own content_hash, never inlined. This is a different concept from
 ``find_figure_entries``/``figure_lookup`` can filter by it — but the returned
 :class:`FigureEntry` never exposes a ``content_hash`` (or ``input_hash``) attribute.
 input_hash is a query key, not a field of the typed entry.
+
+NAME COLLISION NOTE (debt #645): the pre-existing legacy ``kind="figure"`` dict shape
+returned alongside typed entries by ``bathos.readback.figure_lookup`` (see
+"Reconciling with the S1-era figure_lookup shape" above) uses the KEY NAME
+``"content_hash"`` for something else entirely again — there, it is the
+:class:`bathos.anchor.AnchorRecord`'s own ``content_hash`` column, i.e. the input
+product's hash (the same concept this module calls ``input_hash``), NOT the
+attestation-verdict field :data:`FORBIDDEN_INLINE_FIELDS` blocks. So the literal
+string ``"content_hash"`` denotes THREE distinct things across this codebase
+depending on context: (1) here in :data:`FORBIDDEN_INLINE_FIELDS`, an ADR-forbidden
+attestation-verdict field a typed ``FigureEntry`` must never carry; (2) this
+module's own registration parameter is instead spelled ``input_hash`` precisely to
+avoid colliding with (1); (3) the unrelated legacy dict key in
+``bathos.readback.figure_lookup``'s ``kind="figure"`` branch, which is the input
+product's hash (same *concept* as this module's ``input_hash``, different *object*
+and pre-dating this module). No field is renamed here — the legacy dict key is a
+shipped JSON-shaped output (CLI ``bth query figures`` / the ``figure_lookup`` MCP
+tool) and multiple tests pin it (``tests/test_readback.py::TestFigureLookupComposesWithAnchorStore``,
+``tests/test_anchor_durability.py``) — so this docstring plus the matching comment
+at the legacy dict's construction site in ``bathos.readback.figure_lookup`` are the
+disambiguation, not a rename. See
+``tests/test_figure_registry.py::TestContentHashNameCollisionIsDocumentedNotConflated``
+for the structural proof that a typed ``FigureEntry``/dict never carries this key
+while the legacy dict always does.
 """
 
 from __future__ import annotations
