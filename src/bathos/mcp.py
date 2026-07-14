@@ -37,6 +37,7 @@ from bathos.compact import compact as compact_catalog
 from bathos.config import default_catalog_dir, find_project_config, load_project_config
 from bathos.errors import BathosErrorCode, RESOLUTION_HINTS
 from bathos.init import init_project
+from bathos.mcp_auth import McpAuthError, check_token
 from bathos.prereg import GateError
 from bathos.anchor import find_anchors, get_anchor, register_anchor
 from bathos.figure_registry import FigureEntrySchemaError, register_figure_entry
@@ -139,6 +140,8 @@ def traced_tool(fn):
                 return merged
             return {"ok": True, "error_code": None, "error": None, "resolution_hint": None}
 
+        except McpAuthError as e:
+            return _shape_error(tool_name, BathosErrorCode.AUTH_ERROR, e)
         except GateError as e:
             return _shape_error(tool_name, BathosErrorCode.INTERNAL, e)
         except CatalogError as e:
@@ -159,6 +162,37 @@ def traced_tool(fn):
                   duration_ms=duration_ms)
             mcp_request_id_var.reset(token)
 
+    return wrapper
+
+
+def require_write_token(fn):
+    """Require a valid shared-secret MCP token on a write-verb tool (debt #619).
+
+    Applied to every mutating MCP tool (anchor_insert, attestation_register,
+    figure_entry_register, run, init, compact, archive, sync, repair, the
+    scaffold/register/conclude family, etc. — see mcp_auth module docstring
+    for why this is a token check rather than full RBAC). Read-only tools
+    (figure_lookup, anchor_get, anchor_find, query_attestation, list_runs,
+    ...) are NOT wrapped with this decorator and remain token-free.
+
+    Must sit closer to the wrapped function than @traced_tool so that a
+    missing/invalid token raises McpAuthError *inside* traced_tool's
+    try/except, producing a normal structured error envelope
+    (error_code="auth_error") instead of an unhandled exception.
+
+    The decorated function must declare its own `token: str = ""` parameter
+    so FastMCP's schema introspection (which follows `__wrapped__` through
+    functools.wraps, same as traced_tool relies on today) exposes it to
+    callers.
+    """
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        if not check_token(kwargs.get("token", "")):
+            raise McpAuthError(
+                "Missing or invalid MCP write token. Write-verb MCP tools require "
+                "token= to match the local ~/.bth/mcp_token file (debt #619)."
+            )
+        return await fn(*args, **kwargs)
     return wrapper
 
 
@@ -1354,6 +1388,7 @@ async def mcp_list_candidates_tool(
 
 @app.tool("anchor_insert")
 @traced_tool
+@require_write_token
 async def mcp_anchor_insert_tool(
     path: str = "",
     sha256: str = "",
@@ -1362,8 +1397,11 @@ async def mcp_anchor_insert_tool(
     content_hash: str = "",
     campaign_id: str = "",
     catalog_dir: str = "",
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
-    """Anchor a sidecar by (path, sha256) into the catalog (S2 write seam; real)."""
+    """Anchor a sidecar by (path, sha256) into the catalog (S2 write seam; real).
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
     return anchor_insert_tool(
         path=path,
         sha256=sha256,
@@ -1407,6 +1445,7 @@ async def mcp_anchor_find_tool(
 
 @app.tool("figure_entry_register")
 @traced_tool
+@require_write_token
 async def mcp_figure_entry_register_tool(
     asset_sha256: str = "",
     sidecar_ref: str = "",
@@ -1417,8 +1456,11 @@ async def mcp_figure_entry_register_tool(
     input_hash: str = "",
     campaign_id: str = "",
     catalog_dir: str = "",
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
-    """Register a typed figure_entry, anchored by asset_sha256 (S7 write seam; real)."""
+    """Register a typed figure_entry, anchored by asset_sha256 (S7 write seam; real).
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
     return figure_entry_register_tool(
         asset_sha256=asset_sha256,
         sidecar_ref=sidecar_ref,
@@ -1434,13 +1476,17 @@ async def mcp_figure_entry_register_tool(
 
 @app.tool("attestation_scaffold")
 @traced_tool
+@require_write_token
 async def mcp_attestation_scaffold_tool(
     kind: str = "",
     workspace_root: str = "",
     label: str = "",
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
     """Scaffold a new attestation.bth.toml template (S4; real; separate kind from
-    `bath.claim` — see gate #3488)."""
+    `bath.claim` — see gate #3488).
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
     return attestation_scaffold_tool(kind=kind, workspace_root=workspace_root, label=label)
 
 
@@ -1455,33 +1501,45 @@ async def mcp_attestation_validate_tool(
 
 @app.tool("attestation_register")
 @traced_tool
+@require_write_token
 async def mcp_attestation_register_tool(
     path: str = "",
     catalog_dir: str = "",
     campaign_id: str = "",
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
     """Register an attestation file: anchor it by its own SHA256 (S4; real; durable by
-    default via DurableAnchorStore)."""
+    default via DurableAnchorStore).
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
     return attestation_register_tool(path=path, catalog_dir=catalog_dir, campaign_id=campaign_id)
 
 
 @app.tool("compact")
 @traced_tool
+@require_write_token
 async def mcp_compact_tool(
     catalog_dir: str = "",
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
-    """Compact cool-tier Parquet to warm-tier DuckDB."""
+    """Compact cool-tier Parquet to warm-tier DuckDB.
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
     return compact_tool(catalog_dir=catalog_dir)
 
 
 @app.tool("archive")
 @traced_tool
+@require_write_token
 async def mcp_archive_tool(
     catalog_dir: str = "",
     project: str = "",
     keep_cool: bool = False,
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
-    """Archive warm-tier DuckDB to cold-tier Parquet."""
+    """Archive warm-tier DuckDB to cold-tier Parquet.
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
     return archive_tool(catalog_dir=catalog_dir, project=project, keep_cool=keep_cool)
 
 
@@ -1500,25 +1558,33 @@ async def mcp_check_tool(
 
 @app.tool("sync")
 @traced_tool
+@require_write_token
 async def mcp_sync_tool(
     catalog_dir: str = "",
     remote_name: str = "",
     pull: bool = False,
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
-    """Sync catalog to/from remote."""
+    """Sync catalog to/from remote.
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
     return sync_tool(catalog_dir=catalog_dir, remote_name=remote_name, pull=pull)
 
 
 @app.tool("init")
 @traced_tool
+@require_write_token
 async def mcp_init_tool(
     project_root: str = "",
     catalog_dir: str = "",
     slug: str = "",
     remote: str = "",
     slurm_partition: str = "",
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
-    """Initialize project with bathos."""
+    """Initialize project with bathos.
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
     return init_tool(
         project_root=project_root,
         catalog_dir=catalog_dir,
@@ -1530,6 +1596,7 @@ async def mcp_init_tool(
 
 @app.tool("run")
 @traced_tool
+@require_write_token
 async def mcp_run_tool(
     script_path: str = "",
     args: list[str] | None = None,
@@ -1541,8 +1608,11 @@ async def mcp_run_tool(
     derived_from: str = "",
     campaign_id: str = "",
     no_sidecar: bool = False,
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
-    """Run a script and record provenance."""
+    """Run a script and record provenance.
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
     return run_tool(
         script_path=script_path,
         args=args,
@@ -1559,6 +1629,7 @@ async def mcp_run_tool(
 
 @app.tool("campaign_create")
 @traced_tool
+@require_write_token
 async def mcp_campaign_create_tool(
     name: str = "",
     mode: str = "exploration",
@@ -1566,8 +1637,11 @@ async def mcp_campaign_create_tool(
     catalog_dir: str = "",
     question: str = "",
     hypothesis: str = "",
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
-    """Create a new experiment campaign."""
+    """Create a new experiment campaign.
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
     return campaign_create_tool(
         name=name,
         mode=mode,
@@ -1608,13 +1682,17 @@ async def mcp_campaign_review_tool(
 
 @app.tool("campaign_conclude")
 @traced_tool
+@require_write_token
 async def mcp_campaign_conclude_tool(
     campaign_id: str = "",
     outcome_label: str = "",
     conclusion: str = "",
     catalog_dir: str = "",
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
-    """Conclude a campaign with an outcome label."""
+    """Conclude a campaign with an outcome label.
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
     return campaign_conclude_tool(
         campaign_id=campaign_id,
         outcome_label=outcome_label,
@@ -1625,14 +1703,18 @@ async def mcp_campaign_conclude_tool(
 
 @app.tool()
 @traced_tool
+@require_write_token
 async def postmortem_scaffold(
     run_id: str,
     catalog_dir: str | None = None,
     workspace_root: str | None = None,
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
     """Scaffold a new postmortem TOML template for the given run ID.
 
     Returns the path where the template was written.
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619).
     """
     from bathos.postmortem import find_run_for_scaffold, scaffold_postmortem_template
 
@@ -1734,14 +1816,18 @@ async def postmortem_get(
 
 @app.tool()
 @traced_tool
+@require_write_token
 async def claim_scaffold(
     campaign_id: str,
     catalog_dir: str | None = None,
     workspace_root: str | None = None,
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
     """Scaffold a new claim TOML template for the given campaign ID.
 
     Returns the path where the template was written.
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619).
     """
     from bathos.claim import scaffold_claim
 
@@ -1836,14 +1922,18 @@ async def claim_validate(
 
 @app.tool()
 @traced_tool
+@require_write_token
 async def claim_register(
     path: str,
     campaign_id: str,
     catalog_dir: str | None = None,
     workspace_root: str | None = None,
     force: bool = False,
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
-    """Register a claim TOML file with a campaign (path + SHA256 anchor)."""
+    """Register a claim TOML file with a campaign (path + SHA256 anchor).
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
     from bathos.claim import register_claim
 
     cat_dir = _get_catalog_dir(catalog_dir)
@@ -1878,16 +1968,20 @@ async def claim_register(
 
 @app.tool()
 @traced_tool
+@require_write_token
 async def claim_attest_parity(
     campaign_id: str,
     parity_run_id: str,
     catalog_dir: str | None = None,
     workspace_root: str | None = None,
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
     """Bind a passing literature-parity run to a campaign's registered claim (F4).
 
     Wraps attest_parity(): validates the run, updates the claim file atomically,
     and re-anchors the campaign claim_sha256 in the warm catalog.
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619).
     """
     from bathos.claim import attest_parity
 
@@ -2288,12 +2382,16 @@ def lint_tool(project_root: str = "") -> dict:
 
 @app.tool("campaign_add")
 @traced_tool
+@require_write_token
 async def mcp_campaign_add_tool(
     run_id: str = "",
     campaign_id: str = "",
     catalog_dir: str = "",
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
-    """Add a run to a campaign."""
+    """Add a run to a campaign.
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
     return campaign_add_tool(run_id=run_id, campaign_id=campaign_id, catalog_dir=catalog_dir)
 
 
@@ -2358,11 +2456,13 @@ async def mcp_repair_scan_tool(
 
 @app.tool("repair")
 @traced_tool
+@require_write_token
 async def mcp_repair_tool(
     catalog_dir: str | None = None,
     tier: str = "all",
     dry_run: bool = True,
     acknowledge_warm_loss: bool = False,
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
     """Run catalog repair. dry_run=True (default) is safe; set dry_run=False to apply.
 
@@ -2376,6 +2476,9 @@ async def mcp_repair_tool(
 
     Returns:
         JSON dict with manifest (actions and metadata) or error
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619) — including
+    for dry_run=True scans, since the same tool can also apply real changes.
     """
     from bathos.repair import repair as _repair
 

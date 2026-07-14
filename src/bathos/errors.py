@@ -42,6 +42,10 @@ class BathosErrorCode(str, Enum):
     # because the ratchet invariant was not satisfied (no PASS attestation).
     GRADUATION_REFUSED = "graduation_refused"
 
+    # MCP write-seam auth (debt #619): a write-verb MCP tool call was missing
+    # or carried an invalid shared-secret token (bathos.mcp_auth).
+    AUTH_ERROR = "auth_error"
+
 
 # Resolution hints registry: every BathosErrorCode member must have a non-empty entry
 RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
@@ -65,6 +69,7 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.EXPORT_ERROR: "Check write permissions and available disk space",
     BathosErrorCode.INVALID_PARAM: "Verify all required parameters are provided with correct types",
     BathosErrorCode.GRADUATION_REFUSED: "Register a PASS attestation for the product (bth attestation register) before graduating it to promoted",
+    BathosErrorCode.AUTH_ERROR: "Supply a valid token= matching ~/.bth/mcp_token (run any `bth` command locally to create it if missing)",
 }
 
 
@@ -92,4 +97,7 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     # rejected an attestation that failed validate_attestation (e.g. missing
     # required evidence fields) rather than silently anchoring it.
     "AttestationValidationFailed": BathosErrorCode.SIDECAR_INVALID,
+    # MCP write-seam auth (debt #619): missing/invalid shared-secret token on a
+    # write-verb MCP tool call.
+    "McpAuthError": BathosErrorCode.AUTH_ERROR,
 }
