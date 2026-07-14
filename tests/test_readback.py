@@ -318,6 +318,61 @@ created_at = "2026-07-14T00:00:00Z"
 
         assert get_trust_state(catalog_dir, content_hash) == ProductTrustState.UNKNOWN
 
+    def test_attestation_kind_anchor_sha256_is_not_a_registered_product(
+        self, catalog_with_campaign_sidecars
+    ):
+        """Debt #639 regression: _is_registered_product used to search anchors by
+        `sha256` WITHOUT excluding attestation-kind anchors (`oracle_match` /
+        `repro_floor`), unlike list_candidates, which already excluded them (see
+        TestListCandidatesRealBehavior.test_excludes_attestation_kind_anchors).
+        Repro from the audit: an oracle_match-kind anchor whose OWN sha256 happens
+        to equal some content_hash that was NEVER actually produced as a product
+        (no run output, no product anchor, no graduation) must still report
+        UNKNOWN, not CANDIDATE — an attestation anchor's own identity is evidence
+        ABOUT a product, not the product itself.
+
+        Registers the anchor directly via `register_anchor` (rather than through
+        `register_attestation`) so the anchor's `sha256` is a value we control
+        exactly, matching the audit's "caller-declared sha256" repro."""
+        catalog_dir, campaign_id = catalog_with_campaign_sidecars
+        never_produced_hash = "9" * 64
+        register_anchor(
+            catalog_dir,
+            "some/attestation.bth.toml",
+            never_produced_hash,
+            "oracle_match",
+            campaign_id=campaign_id,
+        )
+
+        assert get_trust_state(catalog_dir, never_produced_hash) == ProductTrustState.UNKNOWN
+
+    def test_is_registered_product_agrees_with_list_candidates_on_attestation_kind(
+        self, catalog_with_campaign_sidecars
+    ):
+        """Debt #639 acceptance: _is_registered_product and list_candidates must
+        AGREE on an attestation-kind anchor — both exclude it. Before the fix,
+        list_candidates already excluded attestation-kind anchors (line ~520) but
+        _is_registered_product did not, so the same anchor could be simultaneously
+        "not a candidate" (via list_candidates) and "a registered candidate" (via
+        get_trust_state -> _is_registered_product) — a direct contradiction this
+        test pins closed."""
+        from bathos.readback import _is_registered_product, list_candidates
+
+        catalog_dir, campaign_id = catalog_with_campaign_sidecars
+        never_produced_hash = "8" * 64
+        register_anchor(
+            catalog_dir,
+            "some/other-attestation.bth.toml",
+            never_produced_hash,
+            "repro_floor",
+            campaign_id=campaign_id,
+        )
+
+        assert _is_registered_product(catalog_dir, never_produced_hash) is False
+        assert never_produced_hash not in {
+            c["content_hash"] for c in list_candidates(catalog_dir, campaign_id)
+        }
+
 
 class TestListCandidatesRealBehavior:
     """list_candidates (S3, backlog #3491) joins anchors + run outputs for a

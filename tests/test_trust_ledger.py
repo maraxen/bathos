@@ -211,6 +211,37 @@ created_at = "2026-07-14T00:00:00Z"
         record = graduate_product(catalog_dir, content_hash, "ref", min_strength="repro_floor")
         assert record.to_state == "promoted"
 
+    def test_graduating_an_already_promoted_product_twice_is_idempotent(
+        self, tmp_path, catalog_dir
+    ):
+        """Debt #640 regression: calling graduate_product twice for the same
+        content_hash used to append TWO distinct ledger records (a fresh UUID each
+        time, no existing-promotion check) — wasteful, a data-hygiene smell (not a
+        correctness bug per se, since fold_trust_state still resolves correctly
+        via latest-wins either way). graduate_product must now no-op on the second
+        call: no second record appended, and it returns successfully (the existing
+        promotion record) rather than erroring or silently duplicating."""
+        from bathos.trust_ledger import read_ledger_fragments
+
+        content_hash = "a" * 64
+        _register_attestation(tmp_path, catalog_dir, content_hash, "PASS", "idempotent.attestation.bth.toml")
+
+        first = graduate_product(catalog_dir, content_hash, "first-ref")
+        second = graduate_product(catalog_dir, content_hash, "second-ref")
+
+        assert second.to_state == "promoted"
+        assert second.id == first.id, (
+            "second call must return the EXISTING promotion record, not mint a new one"
+        )
+
+        all_records = read_ledger_fragments(catalog_dir)
+        matching = [r for r in all_records if r.content_hash == content_hash]
+        assert len(matching) == 1, (
+            "graduate_product must not append a second ledger record for an "
+            "already-promoted content_hash"
+        )
+        assert fold_trust_state(catalog_dir, content_hash) == "promoted"
+
 
 class TestGraduationSurvivesForceRebuild:
     """Durability proof, templated from

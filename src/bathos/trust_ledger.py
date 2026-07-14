@@ -330,7 +330,22 @@ def graduate_product(
     Raises:
         GraduationRefused: If no PASS attestation (at the requested min_strength)
             exists for ``content_hash``. No ledger record is appended.
+
+    Idempotency (debt #640): if ``content_hash`` is already ``promoted`` (per
+    :func:`fold_trust_state`), this is a no-op — it returns the EXISTING latest
+    ledger record for ``content_hash`` instead of appending a second, distinct
+    ``candidate -> promoted`` record. Two prior calls with the same
+    ``content_hash`` used to each mint a fresh-UUID ledger record; `fold_trust_state`
+    still resolved correctly either way (latest-wins), so this was a data-hygiene
+    smell rather than a correctness bug, but callers relying on "call this exactly
+    once per graduation" now get that guarantee. The returned record's
+    ``attestation_ref``/``run_id``/``output_path``/``reason`` reflect whichever
+    call actually performed the promotion, not necessarily this call's arguments.
     """
+    existing = latest_ledger_record(catalog_dir, content_hash)
+    if existing is not None and existing.to_state == "promoted":
+        return existing
+
     from bathos.readback import query_attestation
 
     attestation = query_attestation(catalog_dir, content_hash, min_strength=min_strength)

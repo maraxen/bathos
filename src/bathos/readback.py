@@ -179,10 +179,23 @@ def _is_registered_product(catalog_dir: Path | str, content_hash: str) -> bool:
     a promoted one. Searching by ``sha256`` avoids that: it only matches anchors
     whose own identity IS the product (e.g. a figure asset anchored by its own
     hash), never an attestation merely referencing it.
+
+    Also EXCLUDES attestation-kind anchors (``oracle_match`` / ``repro_floor``) from
+    the ``sha256`` match itself, mirroring ``list_candidates``'s identical filter
+    (debt #639): an attestation TOML's own sha256 could, in principle, collide with
+    or equal some other content_hash the caller passes in that was never actually
+    produced as a product. Without this exclusion, ``find_anchors(sha256=content_hash)``
+    would still match on the attestation anchor's own identity and report the
+    (never-produced) product as "registered" — inconsistent with ``list_candidates``,
+    which already excludes attestation-kind anchors when scanning by campaign. See
+    ``tests/test_readback.py`` (or ``test_readback_attestation.py``) for the pinned
+    regression reproducing the audit's exact scenario.
     """
     from bathos.anchor import find_anchors
+    from bathos.attestation import VALID_KINDS as ATTESTATION_KINDS
 
-    if find_anchors(catalog_dir, sha256=content_hash):
+    matches = find_anchors(catalog_dir, sha256=content_hash)
+    if any(anchor.kind not in ATTESTATION_KINDS for anchor in matches):
         return True
 
     return _find_run_with_output_sha256(catalog_dir, content_hash) is not None
@@ -464,6 +477,18 @@ def figure_lookup(
             "figure_id": record.label or record.path,
             "path": record.path,
             "sha256": record.sha256,
+            # NAME COLLISION NOTE (debt #645): this "content_hash" key is the
+            # underlying AnchorRecord's own content_hash column — the input data
+            # product's hash (what bathos.figure_registry, the S7 typed schema,
+            # instead calls "input_hash" precisely to avoid this collision). It is
+            # UNRELATED to bathos.figure_registry.FORBIDDEN_INLINE_FIELDS's
+            # "content_hash" (an ADR-forbidden attestation-verdict field a typed
+            # FigureEntry must never carry) — same literal key name, different
+            # object, different semantics. Not renamed here: this legacy dict shape
+            # is a shipped JSON output (CLI `bth query figures` / the figure_lookup
+            # MCP tool) pinned by tests/test_readback.py and
+            # tests/test_anchor_durability.py. See bathos.figure_registry's module
+            # docstring ("NAME COLLISION NOTE") for the full disambiguation.
             "content_hash": record.content_hash,
             "campaign_id": record.campaign_id,
             "anchored_at": record.anchored_at,
