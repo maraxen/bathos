@@ -40,6 +40,9 @@ viz = [
     "jinja2>=3.1",
     "httpx>=0.28.1",
 ]
+stats = [
+    "scipy>=1.11",
+]
 docs = [
     "sphinx>=7",
 ]
