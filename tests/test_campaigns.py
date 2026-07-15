@@ -512,3 +512,89 @@ def test_conclude_campaign_exploration_mode_warning_only(populated_warm_catalog:
         assert row[0] == "pass"  # Verdict unchanged for exploration mode
     finally:
         db.close()
+
+
+@pytest.fixture
+def catalog_with_seeded_runs(tmp_catalog: Path) -> Path:
+    """A catalog with 4 runs of one script_sha256 (3 distinct seeds, one repeat) and
+    1 run of a different script_sha256 — B2-02 seed-counting helper coverage."""
+    init_catalog(tmp_catalog)
+    base = datetime(2026, 5, 10, 12, 0, 0, tzinfo=UTC)
+    for i, seed in enumerate([1, 2, 3, 3]):  # seed 3 repeated -> 3 distinct seeds, 4 runs
+        r = Run(
+            project_slug="prolix",
+            command=f"python run.py --seed {seed}",
+            argv=["python", "run.py", "--seed", str(seed)],
+            git_hash="abc",
+            git_branch="main",
+            git_dirty=False,
+            timestamp=base + timedelta(hours=i),
+            script_sha256="script_a_sha",
+            seed=seed,
+        )
+        write_run(r, tmp_catalog)
+    # A run of a different script — must not be counted for script_a_sha
+    other = Run(
+        project_slug="prolix",
+        command="python other.py",
+        argv=["python", "other.py"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        timestamp=base + timedelta(hours=10),
+        script_sha256="script_b_sha",
+        seed=99,
+    )
+    write_run(other, tmp_catalog)
+    compact(tmp_catalog)
+    return tmp_catalog
+
+
+def test_count_seeds_for_script(catalog_with_seeded_runs: Path):
+    from bathos.campaigns import count_seeds_for_script
+
+    db = duckdb.connect(str(catalog_with_seeded_runs / "bathos.db"))
+    try:
+        assert count_seeds_for_script(db, "script_a_sha") == 3  # distinct: 1, 2, 3
+        assert count_seeds_for_script(db, "script_b_sha") == 1
+        assert count_seeds_for_script(db, "no_such_script") == 0
+    finally:
+        db.close()
+
+
+def test_count_runs_for_script(catalog_with_seeded_runs: Path):
+    from bathos.campaigns import count_runs_for_script
+
+    db = duckdb.connect(str(catalog_with_seeded_runs / "bathos.db"))
+    try:
+        assert count_runs_for_script(db, "script_a_sha") == 4  # 4 runs, one seed repeated
+        assert count_runs_for_script(db, "script_b_sha") == 1
+        assert count_runs_for_script(db, "no_such_script") == 0
+    finally:
+        db.close()
+
+
+def test_count_seeds_for_script_ignores_null_seed(tmp_catalog: Path):
+    """A run with no seed recorded must not count toward the distinct-seed total."""
+    from bathos.campaigns import count_runs_for_script, count_seeds_for_script
+
+    init_catalog(tmp_catalog)
+    r = Run(
+        project_slug="prolix",
+        command="python run.py",
+        argv=["python", "run.py"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        script_sha256="script_c_sha",
+        seed=None,
+    )
+    write_run(r, tmp_catalog)
+    compact(tmp_catalog)
+
+    db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        assert count_seeds_for_script(db, "script_c_sha") == 0
+        assert count_runs_for_script(db, "script_c_sha") == 1
+    finally:
+        db.close()

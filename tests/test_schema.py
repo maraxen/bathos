@@ -43,7 +43,7 @@ def test_run_defaults():
     assert r.tags == []
     assert isinstance(r.timestamp, datetime)
     assert r.timestamp.tzinfo is not None
-    assert r.schema_version == "9"
+    assert r.schema_version == "10"
     assert r.slurm_job_id == ""
     assert r.metadata == "{}"
 
@@ -84,7 +84,7 @@ def test_run_roundtrip_via_arrow():
     assert r2.duration_s == 1.5
     assert r2.output_paths == ["/tmp/out.parquet"]
     assert r2.tags == ["tip3p"]
-    assert r2.schema_version == "9"
+    assert r2.schema_version == "10"
     assert r2.slurm_job_id == ""
 
 
@@ -100,7 +100,7 @@ def test_schema_version_in_cool_parquet():
     )
     table = r.to_arrow()
     assert "schema_version" in table.column_names
-    assert table.column("schema_version")[0].as_py() == "9"
+    assert table.column("schema_version")[0].as_py() == "10"
 
 
 def test_slurm_job_id_captured_from_env():
@@ -233,7 +233,7 @@ def test_schema_version_defaults_to_7():
         git_branch="main",
         git_dirty=False,
     )
-    assert r.schema_version == "9"
+    assert r.schema_version == "10"
 
 
 def test_sample_run_fixture_has_hostname(sample_run):
@@ -350,7 +350,7 @@ def test_schema_v5_fields_exist():
     from bathos.schema import CURRENT_SCHEMA_VERSION, Run
 
     # Current version should be "7" (v5 fields still present)
-    assert CURRENT_SCHEMA_VERSION == "9"
+    assert CURRENT_SCHEMA_VERSION == "10"
 
     # Run should have all 4 new fields
     r = Run(
@@ -421,10 +421,10 @@ def test_v5_fields_round_trip_arrow():
 
 
 def test_schema_version_is_7():
-    """Verify CURRENT_SCHEMA_VERSION is now '7'."""
+    """Verify CURRENT_SCHEMA_VERSION is now '10'."""
     from bathos.schema import CURRENT_SCHEMA_VERSION
 
-    assert CURRENT_SCHEMA_VERSION == "9"
+    assert CURRENT_SCHEMA_VERSION == "10"
 
 
 def test_run_stage_name_default_none():
@@ -559,3 +559,80 @@ def test_stage_name_validator_allows_40_chars():
 
     name_40 = "a" * 40  # exactly 40 lowercase letters
     assert _validate_stage_name(name_40) is True
+
+
+def test_run_seed_fields_default_none():
+    """Verify B2-02 fields (seed, baseline_hpo_trials, baseline_hpo_compute_budget) default to None."""
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+    )
+    assert r.seed is None
+    assert r.baseline_hpo_trials is None
+    assert r.baseline_hpo_compute_budget is None
+
+
+def test_seed_fields_in_cool_schema():
+    """Verify B2-02 fields are in COOL_SCHEMA as nullable numeric types."""
+    seed_field = next(f for f in COOL_SCHEMA if f.name == "seed")
+    trials_field = next(f for f in COOL_SCHEMA if f.name == "baseline_hpo_trials")
+    compute_field = next(f for f in COOL_SCHEMA if f.name == "baseline_hpo_compute_budget")
+    assert seed_field.type == pa.int64()
+    assert seed_field.nullable
+    assert trials_field.type == pa.int64()
+    assert compute_field.type == pa.float64()
+
+
+def test_seed_fields_in_warm_schema():
+    """Verify B2-02 fields are in WARM_SCHEMA as nullable numeric types."""
+    for field_name in ("seed", "baseline_hpo_trials", "baseline_hpo_compute_budget"):
+        assert field_name in WARM_SCHEMA.names, f"Missing {field_name} in WARM_SCHEMA"
+
+
+def test_seed_fields_round_trip_arrow():
+    """Verify seed/baseline_hpo_trials/baseline_hpo_compute_budget round-trip through Arrow."""
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        seed=42,
+        baseline_hpo_trials=50,
+        baseline_hpo_compute_budget=3600.5,
+    )
+    table = r.to_arrow()
+    assert table.column("seed")[0].as_py() == 42
+    assert table.column("baseline_hpo_trials")[0].as_py() == 50
+    assert table.column("baseline_hpo_compute_budget")[0].as_py() == 3600.5
+
+    r2 = Run.from_arrow_row(table.to_pydict(), 0)
+    assert r2.seed == 42
+    assert r2.baseline_hpo_trials == 50
+    assert r2.baseline_hpo_compute_budget == 3600.5
+
+
+def test_seed_fields_none_round_trip_arrow():
+    """Verify seed=None (not seed=0) round-trips through Arrow serialization."""
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+    )
+    table = r.to_arrow()
+    assert table.column("seed")[0].as_py() is None
+    assert table.column("baseline_hpo_trials")[0].as_py() is None
+    assert table.column("baseline_hpo_compute_budget")[0].as_py() is None
+
+    r2 = Run.from_arrow_row(table.to_pydict(), 0)
+    assert r2.seed is None
+    assert r2.baseline_hpo_trials is None
+    assert r2.baseline_hpo_compute_budget is None
