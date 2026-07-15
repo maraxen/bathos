@@ -655,3 +655,128 @@ def test_verify_run_manifest_no_manifest_recorded():
     assert run.manifest_sha256 == ""
     assert run.manifest_path == ""
     assert verify_run_manifest(run) is False
+
+
+def test_check_component_sidecar_drift_no_prior_runs(tmp_path):
+    from bathos.prereg import check_component_sidecar_drift
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+
+    result = check_component_sidecar_drift(
+        "stage_bundle.preprocess", catalog_dir, "current_sha_abc123"
+    )
+    assert result is False
+
+
+def test_check_component_sidecar_drift_matches_first_run(tmp_path):
+    from bathos.catalog import write_run
+    from bathos.prereg import check_component_sidecar_drift
+    from bathos.schema import Run
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+
+    run = Run(
+        project_slug="test",
+        command="python run.py",
+        argv=["python", "run.py"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+        component_id="stage_bundle.preprocess",
+        component_sidecar_sha256="stable_sha_abc",
+    )
+    write_run(run, catalog_dir)
+
+    result = check_component_sidecar_drift(
+        "stage_bundle.preprocess", catalog_dir, "stable_sha_abc"
+    )
+    assert result is False
+
+
+def test_check_component_sidecar_drift_diverges_from_first_run(tmp_path):
+    from bathos.catalog import write_run
+    from bathos.prereg import check_component_sidecar_drift
+    from bathos.schema import Run
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+
+    run = Run(
+        project_slug="test",
+        command="python run.py",
+        argv=["python", "run.py"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+        component_id="stage_bundle.preprocess",
+        component_sidecar_sha256="original_sha_abc",
+    )
+    write_run(run, catalog_dir)
+
+    result = check_component_sidecar_drift(
+        "stage_bundle.preprocess", catalog_dir, "edited_sha_xyz"
+    )
+    assert result is True
+
+
+def test_check_component_sidecar_drift_ignores_other_components(tmp_path):
+    """A prior run recorded under a DIFFERENT component_id is not a valid baseline."""
+    from bathos.catalog import write_run
+    from bathos.prereg import check_component_sidecar_drift
+    from bathos.schema import Run
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+
+    run = Run(
+        project_slug="test",
+        command="python run.py",
+        argv=["python", "run.py"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+        component_id="stage_bundle.other_stage",
+        component_sidecar_sha256="original_sha_abc",
+    )
+    write_run(run, catalog_dir)
+
+    result = check_component_sidecar_drift(
+        "stage_bundle.preprocess", catalog_dir, "current_sha_abc123"
+    )
+    assert result is False
+
+
+def test_check_component_sidecar_drift_empty_current_hash_never_drifts(tmp_path):
+    from bathos.catalog import write_run
+    from bathos.prereg import check_component_sidecar_drift
+    from bathos.schema import Run
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+
+    run = Run(
+        project_slug="test",
+        command="python run.py",
+        argv=["python", "run.py"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+        component_id="stage_bundle.preprocess",
+        component_sidecar_sha256="original_sha_abc",
+    )
+    write_run(run, catalog_dir)
+
+    result = check_component_sidecar_drift("stage_bundle.preprocess", catalog_dir, "")
+    assert result is False
+
+
+def test_check_component_sidecar_drift_empty_component_id_never_drifts(tmp_path):
+    from bathos.prereg import check_component_sidecar_drift
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+
+    result = check_component_sidecar_drift("", catalog_dir, "current_sha_abc123")
+    assert result is False

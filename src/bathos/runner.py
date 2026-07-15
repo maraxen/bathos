@@ -196,6 +196,8 @@ def run_script(
     no_sidecar: bool = False,
     derived_from: str | None = None,
     campaign_id: str | None = None,
+    component_id: str | None = None,
+    component_sidecar_sha256: str | None = None,
 ) -> int:
     init_telemetry()
 
@@ -335,6 +337,8 @@ def run_script(
         campaign_id=resolved_campaign_id or "",
         script_sha256=script_sha256_val,
         stage_name=sidecar.stage_name if sidecar else None,
+        component_id=component_id,
+        component_sidecar_sha256=component_sidecar_sha256,
     )
     run_uuid_var.set(run.id)
     event("run.start", run_uuid=run.id, script_path=str(script_path) if script_path else "", script_sha256=script_sha256_val, argv=argv, cwd=str(cwd), campaign_id=resolved_campaign_id or "", agent_mode=resolved_mode)

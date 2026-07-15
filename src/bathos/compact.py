@@ -255,6 +255,19 @@ def _migrate_v10(run_dict: dict) -> dict:
     return run_dict
 
 
+def _migrate_v11(run_dict: dict) -> dict:
+    """Migrate v11 fragment to v12 by adding component_id and component_sidecar_sha256
+    fields (B2-08, AC-8).
+
+    Both optional, default to None for existing runs -- a run predating the xtrax<->bathos
+    bridge has no component binding, a different fact from an empty-string binding.
+    """
+    run_dict["component_id"] = None
+    run_dict["component_sidecar_sha256"] = None
+    run_dict["schema_version"] = "12"
+    return run_dict
+
+
 MIGRATIONS["0"] = _migrate_v0
 MIGRATIONS["1"] = _migrate_v1
 MIGRATIONS["2"] = _migrate_v2
@@ -266,6 +279,7 @@ MIGRATIONS["7"] = _migrate_v7
 MIGRATIONS["8"] = _migrate_v8
 MIGRATIONS["9"] = _migrate_v9
 MIGRATIONS["10"] = _migrate_v10
+MIGRATIONS["11"] = _migrate_v11
 
 
 _RUNS_TABLE_SCHEMA = """
@@ -318,7 +332,9 @@ CREATE TABLE IF NOT EXISTS runs (
     seed BIGINT,
     baseline_hpo_trials BIGINT,
     baseline_hpo_compute_budget DOUBLE,
-    stdout_sha256 TEXT
+    stdout_sha256 TEXT,
+    component_id TEXT,
+    component_sidecar_sha256 TEXT
 )
 """
 
@@ -671,6 +687,8 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
         "ALTER TABLE runs ADD COLUMN IF NOT EXISTS baseline_hpo_trials BIGINT",
         "ALTER TABLE runs ADD COLUMN IF NOT EXISTS baseline_hpo_compute_budget DOUBLE",
         "ALTER TABLE runs ADD COLUMN IF NOT EXISTS stdout_sha256 TEXT",
+        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS component_id TEXT",
+        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS component_sidecar_sha256 TEXT",
     ]:
         with contextlib.suppress(Exception):
             con.execute(_runs_alter_sql)
@@ -831,8 +849,8 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                 script_sha256, postmortem_status, postmortem_override, postmortem_verdict_override, postmortem_author, postmortem_path,
                 postmortem_hypothesis_status, postmortem_has_anomalies, postmortem_summary, postmortem_asset_links, stage_name,
                 claim_discriminates, claim_isolates, parity_run_type, seed, baseline_hpo_trials, baseline_hpo_compute_budget,
-                stdout_sha256
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                stdout_sha256, component_id, component_sidecar_sha256
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 run.id,
@@ -880,6 +898,8 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                 run.baseline_hpo_trials,
                 run.baseline_hpo_compute_budget,
                 run.stdout_sha256,
+                run.component_id,
+                run.component_sidecar_sha256,
             ],
         )
 
