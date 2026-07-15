@@ -124,6 +124,16 @@ def run(
     campaign: str | None = typer.Option(
         None, "--campaign", help="Campaign ID to associate this run with"
     ),
+    component_id: str | None = typer.Option(
+        None,
+        "--component-id",
+        help="xtrax composition-node/StageBundle-slot ID this run binds to (B2-08 bridge)",
+    ),
+    component_sidecar_sha256: str | None = typer.Option(
+        None,
+        "--component-sidecar-sha256",
+        help="SHA256 of the component-level sidecar for --component-id (B2-08 bridge)",
+    ),
 ):
     """Run a script and record provenance."""
     from bathos.runner import run_script
@@ -139,6 +149,8 @@ def run(
         no_sidecar=no_sidecar,
         derived_from=derived_from,
         campaign_id=campaign,
+        component_id=component_id,
+        component_sidecar_sha256=component_sidecar_sha256,
     )
     raise typer.Exit(exit_code)
 

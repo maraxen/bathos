@@ -234,6 +234,65 @@ def check_sidecar_drift(script_path: Path, catalog_dir: Path, current_sidecar_sh
     return baseline != current_sidecar_sha256
 
 
+def check_component_sidecar_drift(
+    component_id: str, catalog_dir: Path, current_component_sidecar_sha256: str
+) -> bool:
+    """B2-08 analog of `check_sidecar_drift`, keyed by `component_id` instead of `script_path`.
+
+    xtrax's component-level sidecars (StageBundle/composition-node slots, not script files —
+    B2-08's own framing) bind by an opaque `component_id` string, not a filesystem path, so
+    this queries the `component_id` column directly rather than substring-matching `command`
+    (the pattern `check_sidecar_drift` uses because a script path IS embedded in `command`;
+    a component ID is not).
+
+    Returns False (no drift) if `component_id` has no prior run carrying a component sidecar
+    hash yet — the current run establishes the baseline.
+
+    Same warm-then-cool fallback and never-raises-on-backend-failure contract as
+    `check_sidecar_drift` — see that function's docstring.
+    """
+    if not current_component_sidecar_sha256 or not component_id:
+        return False
+
+    from bathos.query import _resolve_backend
+
+    baseline: str | None = None
+    try:
+        if _resolve_backend(catalog_dir) == "warm":
+            db_path = catalog_dir / "bathos.db"
+            if db_path.exists():
+                con = duckdb.connect(str(db_path), read_only=True)
+                try:
+                    rows = con.execute(
+                        "SELECT component_sidecar_sha256 FROM runs WHERE component_id = ? "
+                        "AND component_sidecar_sha256 IS NOT NULL AND component_sidecar_sha256 != '' "
+                        "ORDER BY timestamp ASC LIMIT 1",
+                        [component_id],
+                    ).fetchall()
+                    if rows:
+                        baseline = rows[0][0]
+                finally:
+                    if not con.closed:
+                        con.close()
+        if baseline is None:
+            from bathos.query import list_runs
+
+            candidates = [
+                r
+                for r in list_runs(catalog_dir, limit=100_000)
+                if r.component_id == component_id and r.component_sidecar_sha256
+            ]
+            if candidates:
+                baseline = min(candidates, key=lambda r: r.timestamp).component_sidecar_sha256
+    except Exception as e:
+        logger.warning(f"Component sidecar drift check failed: {e}")
+        return False
+
+    if baseline is None:
+        return False
+    return baseline != current_component_sidecar_sha256
+
+
 def check_reproduction_prerequisite(
     requires_pass_stem: str,
     catalog_dir: Path,

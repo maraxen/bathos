@@ -43,7 +43,7 @@ def test_run_defaults():
     assert r.tags == []
     assert isinstance(r.timestamp, datetime)
     assert r.timestamp.tzinfo is not None
-    assert r.schema_version == "11"
+    assert r.schema_version == "12"
     assert r.slurm_job_id == ""
     assert r.metadata == "{}"
 
@@ -84,7 +84,7 @@ def test_run_roundtrip_via_arrow():
     assert r2.duration_s == 1.5
     assert r2.output_paths == ["/tmp/out.parquet"]
     assert r2.tags == ["tip3p"]
-    assert r2.schema_version == "11"
+    assert r2.schema_version == "12"
     assert r2.slurm_job_id == ""
 
 
@@ -100,7 +100,7 @@ def test_schema_version_in_cool_parquet():
     )
     table = r.to_arrow()
     assert "schema_version" in table.column_names
-    assert table.column("schema_version")[0].as_py() == "11"
+    assert table.column("schema_version")[0].as_py() == "12"
 
 
 def test_slurm_job_id_captured_from_env():
@@ -233,7 +233,7 @@ def test_schema_version_defaults_to_7():
         git_branch="main",
         git_dirty=False,
     )
-    assert r.schema_version == "11"
+    assert r.schema_version == "12"
 
 
 def test_sample_run_fixture_has_hostname(sample_run):
@@ -350,7 +350,7 @@ def test_schema_v5_fields_exist():
     from bathos.schema import CURRENT_SCHEMA_VERSION, Run
 
     # Current version should be "7" (v5 fields still present)
-    assert CURRENT_SCHEMA_VERSION == "11"
+    assert CURRENT_SCHEMA_VERSION == "12"
 
     # Run should have all 4 new fields
     r = Run(
@@ -424,7 +424,7 @@ def test_schema_version_is_7():
     """Verify CURRENT_SCHEMA_VERSION is now '11'."""
     from bathos.schema import CURRENT_SCHEMA_VERSION
 
-    assert CURRENT_SCHEMA_VERSION == "11"
+    assert CURRENT_SCHEMA_VERSION == "12"
 
 
 def test_run_stage_name_default_none():
@@ -693,3 +693,67 @@ def test_stdout_sha256_none_round_trip_arrow():
 
     r2 = Run.from_arrow_row(table.to_pydict(), 0)
     assert r2.stdout_sha256 is None
+
+
+def test_run_component_fields_default_none():
+    """Verify B2-08's component_id/component_sidecar_sha256 fields default to None."""
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+    )
+    assert r.component_id is None
+    assert r.component_sidecar_sha256 is None
+
+
+def test_component_fields_in_cool_and_warm_schema():
+    """Verify component_id/component_sidecar_sha256 are in both COOL_SCHEMA and WARM_SCHEMA."""
+    for schema in (COOL_SCHEMA, WARM_SCHEMA):
+        for field_name in ("component_id", "component_sidecar_sha256"):
+            assert field_name in schema.names
+            field_obj = next(f for f in schema if f.name == field_name)
+            assert field_obj.type == pa.string()
+            assert field_obj.nullable
+
+
+def test_component_fields_round_trip_arrow():
+    """Verify component_id/component_sidecar_sha256 round-trip through Arrow serialization."""
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        component_id="stage_bundle.preprocess",
+        component_sidecar_sha256="cafebabe" * 8,
+    )
+    table = r.to_arrow()
+    assert table.column("component_id")[0].as_py() == "stage_bundle.preprocess"
+    assert table.column("component_sidecar_sha256")[0].as_py() == "cafebabe" * 8
+
+    r2 = Run.from_arrow_row(table.to_pydict(), 0)
+    assert r2.component_id == "stage_bundle.preprocess"
+    assert r2.component_sidecar_sha256 == "cafebabe" * 8
+
+
+def test_component_fields_none_round_trip_arrow():
+    """Verify component fields default to None (not empty string) through Arrow serialization."""
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+    )
+    table = r.to_arrow()
+    assert table.column("component_id")[0].as_py() is None
+    assert table.column("component_sidecar_sha256")[0].as_py() is None
+
+    r2 = Run.from_arrow_row(table.to_pydict(), 0)
+    assert r2.component_id is None
+    assert r2.component_sidecar_sha256 is None

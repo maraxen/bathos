@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pyarrow as pa
 
-CURRENT_SCHEMA_VERSION = "11"
+CURRENT_SCHEMA_VERSION = "12"
 
 # Format validator for stage_name values — used by linter.check_canonical_stage_names.
 # Enforcement at parse time uses CANONICAL_STAGES set-membership (parse_sidecar); this
@@ -74,6 +74,8 @@ COOL_SCHEMA = pa.schema(
         pa.field("baseline_hpo_trials", pa.int64(), nullable=True),
         pa.field("baseline_hpo_compute_budget", pa.float64(), nullable=True),
         pa.field("stdout_sha256", pa.string(), nullable=True),
+        pa.field("component_id", pa.string(), nullable=True),
+        pa.field("component_sidecar_sha256", pa.string(), nullable=True),
     ]
 )
 
@@ -129,6 +131,8 @@ WARM_SCHEMA = pa.schema(
         pa.field("baseline_hpo_trials", pa.int64(), nullable=True),
         pa.field("baseline_hpo_compute_budget", pa.float64(), nullable=True),
         pa.field("stdout_sha256", pa.string(), nullable=True),
+        pa.field("component_id", pa.string(), nullable=True),
+        pa.field("component_sidecar_sha256", pa.string(), nullable=True),
     ]
 )
 
@@ -185,6 +189,8 @@ class Run:
     baseline_hpo_trials: int | None = None
     baseline_hpo_compute_budget: float | None = None
     stdout_sha256: str | None = None
+    component_id: str | None = None
+    component_sidecar_sha256: str | None = None
 
     def to_arrow(self) -> pa.Table:
         return pa.table(
@@ -237,6 +243,8 @@ class Run:
                 "baseline_hpo_trials": [self.baseline_hpo_trials],
                 "baseline_hpo_compute_budget": [self.baseline_hpo_compute_budget],
                 "stdout_sha256": [self.stdout_sha256],
+                "component_id": [self.component_id],
+                "component_sidecar_sha256": [self.component_sidecar_sha256],
             },
             schema=COOL_SCHEMA,
         )
@@ -300,4 +308,8 @@ class Run:
             baseline_hpo_trials=pydict.get("baseline_hpo_trials", [None])[i] if "baseline_hpo_trials" in pydict else None,
             baseline_hpo_compute_budget=pydict.get("baseline_hpo_compute_budget", [None])[i] if "baseline_hpo_compute_budget" in pydict else None,
             stdout_sha256=pydict.get("stdout_sha256", [None])[i] if "stdout_sha256" in pydict else None,
+            component_id=pydict.get("component_id", [None])[i] if "component_id" in pydict else None,
+            component_sidecar_sha256=pydict.get("component_sidecar_sha256", [None])[i]
+            if "component_sidecar_sha256" in pydict
+            else None,
         )
