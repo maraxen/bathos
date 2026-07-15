@@ -152,6 +152,13 @@ def _default_array(arrow_type: pa.DataType, n: int, field_name: str = "") -> pa.
     # Special case: stage_name, claim_discriminates, claim_isolates, parity_run_type must be null (not empty string) for JSON-array and optional semantic
     if field_name in ("stage_name", "claim_discriminates", "claim_isolates", "parity_run_type") and (pa.types.is_string(arrow_type) or pa.types.is_large_string(arrow_type)):
         return pa.array([None] * n, type=arrow_type)
+    # B2-02: seed/baseline_hpo_trials/baseline_hpo_compute_budget must backfill as null, not
+    # 0 — a fragment written before this field existed has no recorded seed, which is a
+    # different fact from "seed 0 was used" (0 is a valid seed value).
+    if field_name in ("seed", "baseline_hpo_trials", "baseline_hpo_compute_budget") and (
+        pa.types.is_integer(arrow_type) or pa.types.is_floating(arrow_type)
+    ):
+        return pa.array([None] * n, type=arrow_type)
     if pa.types.is_string(arrow_type) or pa.types.is_large_string(arrow_type):
         return pa.array([""] * n, type=arrow_type)
     if pa.types.is_boolean(arrow_type):

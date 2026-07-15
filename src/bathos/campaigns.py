@@ -178,6 +178,33 @@ def _resolve_campaign_id(db, campaign_id: str) -> str:
     return prefix_rows[0][0]
 
 
+def count_seeds_for_script(db, script_sha256: str) -> int:
+    """Count distinct non-null seeds recorded across runs of a given script_sha256.
+
+    B2-02 (AC-16): the data the stats-battery gate (B2-01) needs to enforce ">=3-seed
+    ICC replication" at conclude. This function only counts; the hard-block enforcement
+    itself lives in B2-01's stats_gates.py, not here.
+    """
+    rows = db.execute(
+        "SELECT COUNT(DISTINCT seed) FROM runs WHERE script_sha256 = ? AND seed IS NOT NULL",
+        [script_sha256],
+    ).fetchall()
+    return rows[0][0] if rows else 0
+
+
+def count_runs_for_script(db, script_sha256: str) -> int:
+    """Count total runs recorded for a given script_sha256.
+
+    B2-02 (AC-16): the data the stats-battery gate (B2-01) needs to enforce the
+    "N>=29-per-script_sha256" power floor at conclude.
+    """
+    rows = db.execute(
+        "SELECT COUNT(*) FROM runs WHERE script_sha256 = ?",
+        [script_sha256],
+    ).fetchall()
+    return rows[0][0] if rows else 0
+
+
 def conclude_campaign(
     db,
     campaign_id: str,
