@@ -22,7 +22,7 @@ class GateErrorCode(str, Enum):
     """Enumeration of structured error codes for pre-registration gate failures."""
     SIDECAR_MISSING = "sidecar_missing"
     SIDECAR_INVALID = "sidecar_invalid"
-    SIDECAR_HASH_MISMATCH = "sidecar_hash_mismatch"  # reserved: manifest versioning and drift detection
+    SIDECAR_HASH_MISMATCH = "sidecar_hash_mismatch"  # drift vs. the first-run manifest (B2-04)
     NOT_FIRST_OF_KIND = "not_first_of_kind"
     MANIFEST_WRITE_FAILED = "manifest_write_failed"  # reserved: manifest write permission checks on cluster
     ADVERSARIAL_CHECK_MISSING = "adversarial_check_missing"
@@ -175,6 +175,64 @@ def check_first_of_kind(script_path: Path, catalog_dir: Path, git_hash: str) -> 
     )
 
 
+def check_sidecar_drift(script_path: Path, catalog_dir: Path, current_sidecar_sha256: str) -> bool:
+    """Return True if `current_sidecar_sha256` drifted from the script's first-run manifest.
+
+    B2-04 (AC-18): the sidecar hash recorded on a script's earliest catalog run (by
+    timestamp) is that script's "first-run manifest" — every later run's sidecar hash
+    must match it, or the pre-registration has silently changed after evidence started
+    accumulating under it (the cheapest, highest-leverage immutable-evaluator safeguard).
+
+    Returns False (no drift) if the script has no prior run carrying a sidecar hash yet —
+    the current run establishes the baseline, nothing to compare against.
+
+    Mirrors check_first_of_kind's warm (DuckDB) → cool (Parquet, via list_runs) fallback;
+    unlike check_first_of_kind this never raises on backend failure, since B2-04's own
+    call site chooses deny-vs-warn by agent_mode after this returns, not on a gate-internal
+    error.
+    """
+    if not current_sidecar_sha256:
+        return False
+
+    from bathos.query import _resolve_backend
+
+    script_str = str(script_path.resolve())
+    baseline: str | None = None
+    try:
+        if _resolve_backend(catalog_dir) == "warm":
+            db_path = catalog_dir / "bathos.db"
+            if db_path.exists():
+                con = duckdb.connect(str(db_path), read_only=True)
+                try:
+                    rows = con.execute(
+                        "SELECT sidecar_sha256 FROM runs WHERE command LIKE ? AND sidecar_sha256 != '' "
+                        "ORDER BY timestamp ASC LIMIT 1",
+                        [f"%{script_str}%"],
+                    ).fetchall()
+                    if rows:
+                        baseline = rows[0][0]
+                finally:
+                    if not con.closed:
+                        con.close()
+        if baseline is None:
+            from bathos.query import list_runs
+
+            candidates = [
+                r
+                for r in list_runs(catalog_dir, limit=100_000)
+                if script_str in (r.command or "") and r.sidecar_sha256
+            ]
+            if candidates:
+                baseline = min(candidates, key=lambda r: r.timestamp).sidecar_sha256
+    except Exception as e:
+        logger.warning(f"Sidecar drift check failed: {e}")
+        return False
+
+    if baseline is None:
+        return False
+    return baseline != current_sidecar_sha256
+
+
 def check_reproduction_prerequisite(
     requires_pass_stem: str,
     catalog_dir: Path,
@@ -271,6 +329,24 @@ def gate_check(
         )
         event("prereg.gate_deny", script_path=str(script_path), reason="sidecar_invalid", agent_mode=mode)
         return GateResult(ok=False, mode=mode, bundle=bundle, validation=validation, error_payload=payload)
+
+    # Sidecar drift (B2-04, AC-18): deny in autonomous mode, warn (non-blocking) in
+    # collaborative mode — a human is presumed to have a reason for the edit, an
+    # autonomous agent is not.
+    if catalog_dir and check_sidecar_drift(script_path, catalog_dir, bundle.sha256):
+        if mode == "autonomous":
+            payload = _gate_failure_payload(
+                error_code=GateErrorCode.SIDECAR_HASH_MISMATCH,
+                phase="pre_execution",
+                errors=[f"Sidecar hash for {script_path.stem} differs from its first-run manifest"],
+                agent_mode=mode,
+            )
+            event("prereg.gate_deny", script_path=str(script_path), reason="sidecar_hash_mismatch", agent_mode=mode)
+            return GateResult(ok=False, mode=mode, bundle=bundle, validation=validation, error_payload=payload)
+        logger.warning(
+            f"Sidecar hash drift detected for {script_path}: differs from its first-run manifest"
+        )
+        event("prereg.gate_warn", script_path=str(script_path), reason="sidecar_hash_mismatch", agent_mode=mode)
 
     # Autonomous mode: enforce first-of-kind
     if mode == "autonomous" and catalog_dir and git_hash:
