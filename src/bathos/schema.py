@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pyarrow as pa
 
-CURRENT_SCHEMA_VERSION = "10"
+CURRENT_SCHEMA_VERSION = "11"
 
 # Format validator for stage_name values — used by linter.check_canonical_stage_names.
 # Enforcement at parse time uses CANONICAL_STAGES set-membership (parse_sidecar); this
@@ -73,6 +73,7 @@ COOL_SCHEMA = pa.schema(
         pa.field("seed", pa.int64(), nullable=True),
         pa.field("baseline_hpo_trials", pa.int64(), nullable=True),
         pa.field("baseline_hpo_compute_budget", pa.float64(), nullable=True),
+        pa.field("stdout_sha256", pa.string(), nullable=True),
     ]
 )
 
@@ -127,6 +128,7 @@ WARM_SCHEMA = pa.schema(
         pa.field("seed", pa.int64(), nullable=True),
         pa.field("baseline_hpo_trials", pa.int64(), nullable=True),
         pa.field("baseline_hpo_compute_budget", pa.float64(), nullable=True),
+        pa.field("stdout_sha256", pa.string(), nullable=True),
     ]
 )
 
@@ -182,6 +184,7 @@ class Run:
     seed: int | None = None
     baseline_hpo_trials: int | None = None
     baseline_hpo_compute_budget: float | None = None
+    stdout_sha256: str | None = None
 
     def to_arrow(self) -> pa.Table:
         return pa.table(
@@ -233,6 +236,7 @@ class Run:
                 "seed": [self.seed],
                 "baseline_hpo_trials": [self.baseline_hpo_trials],
                 "baseline_hpo_compute_budget": [self.baseline_hpo_compute_budget],
+                "stdout_sha256": [self.stdout_sha256],
             },
             schema=COOL_SCHEMA,
         )
@@ -295,4 +299,5 @@ class Run:
             seed=pydict.get("seed", [None])[i] if "seed" in pydict else None,
             baseline_hpo_trials=pydict.get("baseline_hpo_trials", [None])[i] if "baseline_hpo_trials" in pydict else None,
             baseline_hpo_compute_budget=pydict.get("baseline_hpo_compute_budget", [None])[i] if "baseline_hpo_compute_budget" in pydict else None,
+            stdout_sha256=pydict.get("stdout_sha256", [None])[i] if "stdout_sha256" in pydict else None,
         )

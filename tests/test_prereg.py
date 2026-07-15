@@ -574,3 +574,84 @@ def test_check_reproduction_prerequisite_no_catalog_dir(tmp_path):
 
     found = check_reproduction_prerequisite("some_stem", catalog_dir)
     assert found is False
+
+
+def test_verify_run_manifest_matching_hash(tmp_path):
+    """A manifest file whose current hash matches the recorded hash verifies True."""
+    import hashlib
+
+    from bathos.prereg import verify_run_manifest
+    from bathos.schema import Run
+
+    manifest_path = tmp_path / "run_test.abc123.bth.lock.toml"
+    manifest_path.write_text('sidecar_sha256 = "abc"\n')
+    actual_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+
+    run = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        manifest_path=str(manifest_path),
+        manifest_sha256=actual_sha256,
+    )
+    assert verify_run_manifest(run) is True
+
+
+def test_verify_run_manifest_tampered_file(tmp_path):
+    """A manifest file edited after the recorded hash was taken verifies False."""
+    from bathos.prereg import verify_run_manifest
+    from bathos.schema import Run
+
+    manifest_path = tmp_path / "run_test.abc123.bth.lock.toml"
+    manifest_path.write_text('sidecar_sha256 = "abc"\n')
+
+    run = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        manifest_path=str(manifest_path),
+        manifest_sha256="not_the_real_hash",
+    )
+    assert verify_run_manifest(run) is False
+
+
+def test_verify_run_manifest_missing_file(tmp_path):
+    """A recorded manifest_path that no longer exists on disk verifies False."""
+    from bathos.prereg import verify_run_manifest
+    from bathos.schema import Run
+
+    run = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        manifest_path=str(tmp_path / "does_not_exist.bth.lock.toml"),
+        manifest_sha256="some_hash",
+    )
+    assert verify_run_manifest(run) is False
+
+
+def test_verify_run_manifest_no_manifest_recorded():
+    """A run with no manifest recorded at all (manifest_sha256/path empty) verifies False."""
+    from bathos.prereg import verify_run_manifest
+    from bathos.schema import Run
+
+    run = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+    )
+    assert run.manifest_sha256 == ""
+    assert run.manifest_path == ""
+    assert verify_run_manifest(run) is False

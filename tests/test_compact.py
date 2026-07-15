@@ -148,10 +148,10 @@ def test_compact_upgrades_v0_fragments(tmp_catalog: Path, sample_run: Run):
     result = compact(tmp_catalog)
     assert result.ingested == 1
 
-    # Verify in DuckDB: should have schema_version="10" (migrated through v0→v1→v2→v3→v4→v5→v6→v7→v8→v9→v10)
+    # Verify in DuckDB: should have schema_version="11" (migrated through v0→v1→v2→v3→v4→v5→v6→v7→v8→v9→v10→v11)
     con = duckdb.connect(str(tmp_catalog / "bathos.db"))
     rows = con.execute("SELECT schema_version FROM runs").fetchall()
-    assert rows[0][0] == "10"
+    assert rows[0][0] == "11"
 
 
 def test_compact_tracks_warm_schema_version(tmp_catalog: Path, sample_run: Run):
@@ -166,7 +166,7 @@ def test_compact_tracks_warm_schema_version(tmp_catalog: Path, sample_run: Run):
     con = duckdb.connect(str(tmp_catalog / "bathos.db"))
     rows = con.execute("SELECT value FROM _schema_meta WHERE key = 'warm_version'").fetchall()
     assert len(rows) == 1
-    assert rows[0][0] == "10"
+    assert rows[0][0] == "11"
 
 
 def test_fragment_count_helper(tmp_catalog: Path, sample_run: Run):
@@ -250,7 +250,7 @@ def test_compact_migrates_v1_to_v4(sample_run: Run):
     result = _apply_migrations(v1_run)
 
     # Verify upgraded to v9 with hostname
-    assert result.schema_version == "10"
+    assert result.schema_version == "11"
     assert result.hostname == ""
 
 
@@ -265,7 +265,7 @@ def test_compact_v0_chain_to_v4(sample_run: Run):
     result = _apply_migrations(v0_run)
 
     # Verify final state is v9
-    assert result.schema_version == "10"
+    assert result.schema_version == "11"
     assert result.hostname == ""
 
 
@@ -279,7 +279,7 @@ def test_apply_migrations_v4_upgrades_to_v5(sample_run: Run):
     result = _apply_migrations(v4_run)
 
     # Verify upgraded
-    assert result.schema_version == "10"
+    assert result.schema_version == "11"
     assert result.hostname == "testhost"
     # Verify fields added during v5 migration are present
     assert result.manifest_sha256 == ""
@@ -463,7 +463,7 @@ def test_migration_v2_to_v4(tmp_catalog: Path, sample_run: Run):
     con.close()
 
     assert len(rows) == 1
-    assert rows[0][0] == "10"  # schema_version
+    assert rows[0][0] == "11"  # schema_version
     assert rows[0][1] == ""  # sidecar_sha256
     assert rows[0][2] == ""  # sidecar_path
     assert rows[0][3] == ""  # parent_run_id
@@ -498,7 +498,7 @@ def test_migration_chain_v0_to_v4(tmp_catalog: Path, sample_run: Run):
     con.close()
 
     assert len(rows) == 1
-    assert rows[0][0] == "10"  # schema_version
+    assert rows[0][0] == "11"  # schema_version
     assert rows[0][1] == ""  # hostname (from v1 migration)
     assert rows[0][2] == ""  # sidecar_sha256 (from v2 migration)
     assert rows[0][3] == ""  # sidecar_path
@@ -522,7 +522,7 @@ def test_migration_v6_to_v7_adds_stage_name(sample_run: Run):
     result = _apply_migrations(v6_run)
 
     # Verify upgraded to v7 with stage_name=None
-    assert result.schema_version == "10"
+    assert result.schema_version == "11"
     assert result.stage_name is None
 
 
@@ -537,7 +537,7 @@ def test_migration_chain_v0_to_v7_includes_stage_name(sample_run: Run):
     result = _apply_migrations(v0_run)
 
     # Verify final state is v7 with stage_name=None
-    assert result.schema_version == "10"
+    assert result.schema_version == "11"
     assert result.stage_name is None
 
 
@@ -727,7 +727,7 @@ def test_migration_v8_to_v9_adds_parity_run_type(sample_run: Run):
     result = _apply_migrations(v8_run)
 
     # Verify upgraded to v9 with parity_run_type=None
-    assert result.schema_version == "10"
+    assert result.schema_version == "11"
     assert result.parity_run_type is None
 
 
@@ -742,7 +742,7 @@ def test_migration_chain_v0_to_v9_includes_parity_run_type(sample_run: Run):
     result = _apply_migrations(v0_run)
 
     # Verify final state is v9 with parity_run_type=None
-    assert result.schema_version == "10"
+    assert result.schema_version == "11"
     assert result.parity_run_type is None
 
 
@@ -760,7 +760,7 @@ def test_migration_v9_to_v10_adds_seed_fields(sample_run: Run):
     result = _apply_migrations(v9_run)
 
     # Verify upgraded to v10 with all three B2-02 fields None
-    assert result.schema_version == "10"
+    assert result.schema_version == "11"
     assert result.seed is None
     assert result.baseline_hpo_trials is None
     assert result.baseline_hpo_compute_budget is None
@@ -773,7 +773,7 @@ def test_migration_chain_v0_to_v10_includes_seed_fields(sample_run: Run):
     v0_run = dataclasses.replace(sample_run, schema_version="0")
     result = _apply_migrations(v0_run)
 
-    assert result.schema_version == "10"
+    assert result.schema_version == "11"
     assert result.seed is None
     assert result.baseline_hpo_trials is None
     assert result.baseline_hpo_compute_budget is None
@@ -797,3 +797,43 @@ def test_compact_persists_seed_to_warm(tmp_catalog: Path, sample_run: Run):
     con.close()
 
     assert rows[0] == (7, 25, 120.0)
+
+
+def test_migration_v10_to_v11_adds_stdout_sha256(sample_run: Run):
+    """Verify v10 fragments are upgraded to v11 with stdout_sha256 None (B2-07)."""
+    from bathos.compact import _apply_migrations
+
+    v10_run = dataclasses.replace(sample_run, schema_version="10")
+    assert v10_run.stdout_sha256 is None
+
+    result = _apply_migrations(v10_run)
+
+    assert result.schema_version == "11"
+    assert result.stdout_sha256 is None
+
+
+def test_migration_chain_v0_to_v11_includes_stdout_sha256(sample_run: Run):
+    """Verify v0 fragments chain through all migrations to v11 with stdout_sha256 None."""
+    from bathos.compact import _apply_migrations
+
+    v0_run = dataclasses.replace(sample_run, schema_version="0")
+    result = _apply_migrations(v0_run)
+
+    assert result.schema_version == "11"
+    assert result.stdout_sha256 is None
+
+
+def test_compact_persists_stdout_sha256_to_warm(tmp_catalog: Path, sample_run: Run):
+    """Verify a run's stdout_sha256 persists through cool-tier write + compact into warm."""
+    init_catalog(tmp_catalog)
+    run_with_stdout_hash = dataclasses.replace(sample_run, stdout_sha256="cafef00d" * 8)
+    write_run(run_with_stdout_hash, tmp_catalog)
+
+    result = compact(tmp_catalog)
+    assert result.ingested == 1
+
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    rows = con.execute("SELECT stdout_sha256 FROM runs").fetchall()
+    con.close()
+
+    assert rows[0][0] == "cafef00d" * 8
