@@ -149,8 +149,9 @@ def _read_project_slug(parquet: Path) -> str | None:
 
 
 def _default_array(arrow_type: pa.DataType, n: int, field_name: str = "") -> pa.Array:
-    # Special case: stage_name, claim_discriminates, claim_isolates, parity_run_type must be null (not empty string) for JSON-array and optional semantic
-    if field_name in ("stage_name", "claim_discriminates", "claim_isolates", "parity_run_type") and (pa.types.is_string(arrow_type) or pa.types.is_large_string(arrow_type)):
+    # Special case: stage_name, claim_discriminates, claim_isolates, parity_run_type, stdout_sha256
+    # must be null (not empty string) for JSON-array and optional semantic
+    if field_name in ("stage_name", "claim_discriminates", "claim_isolates", "parity_run_type", "stdout_sha256") and (pa.types.is_string(arrow_type) or pa.types.is_large_string(arrow_type)):
         return pa.array([None] * n, type=arrow_type)
     # B2-02: seed/baseline_hpo_trials/baseline_hpo_compute_budget must backfill as null, not
     # 0 — a fragment written before this field existed has no recorded seed, which is a

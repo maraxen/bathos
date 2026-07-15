@@ -244,6 +244,17 @@ def _migrate_v9(run_dict: dict) -> dict:
     return run_dict
 
 
+def _migrate_v10(run_dict: dict) -> dict:
+    """Migrate v10 fragment to v11 by adding stdout_sha256 field (B2-07, AC-19).
+
+    Optional, defaults to None for existing runs — no captured stdout hash is a
+    different fact from an empty-string hash.
+    """
+    run_dict["stdout_sha256"] = None
+    run_dict["schema_version"] = "11"
+    return run_dict
+
+
 MIGRATIONS["0"] = _migrate_v0
 MIGRATIONS["1"] = _migrate_v1
 MIGRATIONS["2"] = _migrate_v2
@@ -254,6 +265,7 @@ MIGRATIONS["6"] = _migrate_v6
 MIGRATIONS["7"] = _migrate_v7
 MIGRATIONS["8"] = _migrate_v8
 MIGRATIONS["9"] = _migrate_v9
+MIGRATIONS["10"] = _migrate_v10
 
 
 _RUNS_TABLE_SCHEMA = """
@@ -305,7 +317,8 @@ CREATE TABLE IF NOT EXISTS runs (
     parity_run_type TEXT,
     seed BIGINT,
     baseline_hpo_trials BIGINT,
-    baseline_hpo_compute_budget DOUBLE
+    baseline_hpo_compute_budget DOUBLE,
+    stdout_sha256 TEXT
 )
 """
 
@@ -641,6 +654,7 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
         "ALTER TABLE runs ADD COLUMN IF NOT EXISTS seed BIGINT",
         "ALTER TABLE runs ADD COLUMN IF NOT EXISTS baseline_hpo_trials BIGINT",
         "ALTER TABLE runs ADD COLUMN IF NOT EXISTS baseline_hpo_compute_budget DOUBLE",
+        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS stdout_sha256 TEXT",
     ]:
         with contextlib.suppress(Exception):
             con.execute(_runs_alter_sql)
@@ -798,8 +812,9 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                 sidecar_sha256, sidecar_path, parent_run_id, agent_mode, sidecar_mode, outcome_is_residual, skill_sha256, campaign_id,
                 script_sha256, postmortem_status, postmortem_override, postmortem_verdict_override, postmortem_author, postmortem_path,
                 postmortem_hypothesis_status, postmortem_has_anomalies, postmortem_summary, postmortem_asset_links, stage_name,
-                claim_discriminates, claim_isolates, parity_run_type, seed, baseline_hpo_trials, baseline_hpo_compute_budget
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                claim_discriminates, claim_isolates, parity_run_type, seed, baseline_hpo_trials, baseline_hpo_compute_budget,
+                stdout_sha256
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 run.id,
@@ -846,6 +861,7 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                 run.seed,
                 run.baseline_hpo_trials,
                 run.baseline_hpo_compute_budget,
+                run.stdout_sha256,
             ],
         )
 

@@ -9,6 +9,7 @@ from typing import Literal
 
 import duckdb
 
+from bathos.schema import Run
 from bathos.sidecar import Sidecar, find_sidecar, parse_sidecar
 from bathos.validate import ValidationResult, validate_sidecar
 from bathos.telemetry import event
@@ -291,6 +292,42 @@ def check_reproduction_prerequisite(
         logger.warning(f"Cool tier reproduction prerequisite check failed: {e}")
 
     return False
+
+
+def verify_run_manifest(run: Run) -> bool:
+    """Verify a run's self-signed manifest hasn't been tampered with post-hoc (B2-07, AC-19).
+
+    "Signed" here means the existing self-signed-manifest scheme (content-hash + git-
+    commit-bound, per ADR `.praxia/docs/decisions/260526_nonrepudiation-v06.md`) — there
+    is no cryptographic signature key anywhere in this codebase, and that ADR explicitly
+    defers full K-Veritas RSA-PSS + hardware telemetry. This function verifies exactly
+    what the existing scheme can verify: that the manifest file recorded at run time
+    (`run.manifest_path`) still hashes to the value recorded at run time
+    (`run.manifest_sha256`). It does not attempt to verify `run.stdout_sha256` against
+    anything — bathos does not persist raw stdout for a general run, so there is nothing
+    to re-hash; that field exists for a caller (e.g. a harness-style wrapper that *does*
+    capture stdout, mirroring `bathos.harness_run`'s existing narrower stdout_hash) to
+    populate and independently verify against its own stored artifact.
+
+    Returns:
+        False if there is no manifest recorded (`manifest_sha256` or `manifest_path`
+        empty), the file is missing/unreadable, or the current file hash does not match
+        the recorded hash — any of these means the run's evidence is not admissible
+        (AC-19's "unverifiable run excluded from evidence, loud" — the caller is
+        responsible for the "loud" part; this function only answers the yes/no question).
+        True iff the manifest file exists and its hash matches exactly.
+    """
+    if not run.manifest_sha256 or not run.manifest_path:
+        return False
+    manifest_file = Path(run.manifest_path)
+    try:
+        if not manifest_file.exists():
+            return False
+        actual_sha256 = hashlib.sha256(manifest_file.read_bytes()).hexdigest()
+    except OSError as e:
+        logger.warning(f"Manifest verification failed to read {manifest_file}: {e}")
+        return False
+    return actual_sha256 == run.manifest_sha256
 
 
 def gate_check(
