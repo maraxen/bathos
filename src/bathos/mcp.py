@@ -31,6 +31,7 @@ from bathos.campaigns import (
     list_campaigns,
     review_campaign,
 )
+from bathos.capability import probe_capabilities
 from bathos.catalog import init_catalog
 from bathos.checker import check_runs
 from bathos.compact import compact as compact_catalog
@@ -910,6 +911,31 @@ def check_tool(
     return {"results": results_json, "count": len(results_json)}
 
 
+def capability_probe_tool(catalog_dir: str = "") -> dict:
+    """Machine-checkable liveness of Run.seed + the stats battery (B2-06, AC-20).
+
+    REAL, catalog-specific probe (not a hand-maintained attestation) — a loop controller can
+    call this before starting a confirmatory campaign to check whether this bathos instance
+    can actually support seed-tracking (B2-02, requires a compacted warm DB carrying the
+    seed/baseline_hpo_* columns) and the statistical battery (B2-01, requires scipy installed).
+
+    Args:
+        catalog_dir: Catalog directory (empty = use default)
+
+    Returns:
+        Dict with seed_live, missing_seed_columns, stats_battery_live,
+        stats_unavailable_reason.
+    """
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    report = probe_capabilities(cat_dir)
+    return {
+        "seed_live": report.seed_live,
+        "missing_seed_columns": list(report.missing_seed_columns),
+        "stats_battery_live": report.stats_battery_live,
+        "stats_unavailable_reason": report.stats_unavailable_reason,
+    }
+
+
 def sync_tool(
     catalog_dir: str = "",
     remote_name: str = "",
@@ -1554,6 +1580,15 @@ async def mcp_check_tool(
     return check_tool(
         catalog_dir=catalog_dir, project_root=project_root, status_filter=status_filter
     )
+
+
+@app.tool("capability_probe")
+@traced_tool
+async def mcp_capability_probe_tool(
+    catalog_dir: str = "",
+) -> dict:
+    """Machine-checkable liveness of Run.seed + the stats battery (B2-06, AC-20; real)."""
+    return capability_probe_tool(catalog_dir=catalog_dir)
 
 
 @app.tool("sync")
