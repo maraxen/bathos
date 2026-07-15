@@ -3,6 +3,14 @@ name            = "bathos"
 version         = "0.5.0"
 description     = "Experiment tracking — pre-registration, provenance, campaigns"
 requires_praxia = ">=1.0"
+# Declares bathos as a provider of the generic praxia "readback" capability
+# (praxia-plugin-readback: resolve_pin/get_trust_state/query_attestation/
+# figure_lookup — all already live MCP tools on bth-mcp below, S1/S4/S7).
+# Consumers resolve this via
+# praxia_workflows::plugin_cli::resolve_plugin_mcp_command_for_capability
+# ("readback") rather than naming "bathos" directly — see praxia backlog
+# #3499 / PR maraxen/praxia#22.
+provides = ["readback"]
 
 [plugin.mcp]
 # `bth serve` never existed as a CLI subcommand — the real MCP launch
