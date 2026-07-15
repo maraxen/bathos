@@ -363,6 +363,22 @@ CREATE TABLE IF NOT EXISTS amendments (
 )
 """
 
+_CAMPAIGN_EDGES_TABLE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS campaign_edges (
+    child_campaign_id TEXT NOT NULL,
+    parent_campaign_id TEXT NOT NULL,
+    PRIMARY KEY (child_campaign_id, parent_campaign_id)
+)
+"""
+
+_RUN_EDGES_TABLE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS run_edges (
+    child_run_id TEXT NOT NULL,
+    parent_run_id TEXT NOT NULL,
+    PRIMARY KEY (child_run_id, parent_run_id)
+)
+"""
+
 
 COMPACTION_THRESHOLD = 50  # Public constant for compaction trigger threshold
 
@@ -663,6 +679,8 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
     con.execute(_CAMPAIGNS_TABLE_SCHEMA)
     con.execute(_CAMPAIGN_RUNS_TABLE_SCHEMA)
     con.execute(_AMENDMENTS_TABLE_SCHEMA)
+    con.execute(_CAMPAIGN_EDGES_TABLE_SCHEMA)
+    con.execute(_RUN_EDGES_TABLE_SCHEMA)
 
     # Idempotent column additions for POPPER (handles existing warm DBs)
     for _alter_sql in [
