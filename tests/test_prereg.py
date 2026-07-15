@@ -254,6 +254,229 @@ def test_check_first_of_kind_prior_run_different_hash(tmp_path):
     assert result is True
 
 
+def test_check_sidecar_drift_no_prior_runs(tmp_path):
+    from bathos.prereg import check_sidecar_drift
+
+    script = tmp_path / "scripts" / "experiments" / "run_nvt.py"
+    script.parent.mkdir(parents=True)
+    script.touch()
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+
+    result = check_sidecar_drift(script, catalog_dir, "current_sha_abc123")
+    assert result is False
+
+
+def test_check_sidecar_drift_matches_first_run(tmp_path):
+    from bathos.schema import Run
+    from bathos.catalog import write_run
+    from bathos.prereg import check_sidecar_drift
+
+    script = tmp_path / "scripts" / "experiments" / "run_nvt.py"
+    script.parent.mkdir(parents=True)
+    script.touch()
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+
+    run = Run(
+        project_slug="test",
+        command=f"python {script}",
+        argv=["python", str(script)],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+        sidecar_sha256="stable_sha_abc",
+    )
+    write_run(run, catalog_dir)
+
+    result = check_sidecar_drift(script, catalog_dir, "stable_sha_abc")
+    assert result is False
+
+
+def test_check_sidecar_drift_diverges_from_first_run(tmp_path):
+    from bathos.schema import Run
+    from bathos.catalog import write_run
+    from bathos.prereg import check_sidecar_drift
+
+    script = tmp_path / "scripts" / "experiments" / "run_nvt.py"
+    script.parent.mkdir(parents=True)
+    script.touch()
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+
+    run = Run(
+        project_slug="test",
+        command=f"python {script}",
+        argv=["python", str(script)],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+        sidecar_sha256="original_sha_abc",
+    )
+    write_run(run, catalog_dir)
+
+    result = check_sidecar_drift(script, catalog_dir, "edited_sha_xyz")
+    assert result is True
+
+
+def test_check_sidecar_drift_ignores_runs_without_sidecar_hash(tmp_path):
+    """A prior run recorded before B2-04 (no sidecar_sha256 yet) is not a valid baseline."""
+    from bathos.schema import Run
+    from bathos.catalog import write_run
+    from bathos.prereg import check_sidecar_drift
+
+    script = tmp_path / "scripts" / "experiments" / "run_nvt.py"
+    script.parent.mkdir(parents=True)
+    script.touch()
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+
+    run = Run(
+        project_slug="test",
+        command=f"python {script}",
+        argv=["python", str(script)],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+        sidecar_sha256="",
+    )
+    write_run(run, catalog_dir)
+
+    result = check_sidecar_drift(script, catalog_dir, "current_sha_abc123")
+    assert result is False
+
+
+def test_check_sidecar_drift_empty_current_hash_never_drifts(tmp_path):
+    from bathos.schema import Run
+    from bathos.catalog import write_run
+    from bathos.prereg import check_sidecar_drift
+
+    script = tmp_path / "scripts" / "experiments" / "run_nvt.py"
+    script.parent.mkdir(parents=True)
+    script.touch()
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+
+    run = Run(
+        project_slug="test",
+        command=f"python {script}",
+        argv=["python", str(script)],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+        sidecar_sha256="original_sha_abc",
+    )
+    write_run(run, catalog_dir)
+
+    result = check_sidecar_drift(script, catalog_dir, "")
+    assert result is False
+
+
+def test_gate_check_sidecar_drift_denies_autonomous(tmp_path):
+    from bathos.schema import Run
+    from bathos.catalog import write_run
+    from bathos.prereg import gate_check, resolve_sidecar, GateErrorCode
+
+    script = tmp_path / "scripts" / "experiments" / "run_nvt.py"
+    script.parent.mkdir(parents=True)
+    script.touch()
+    _write_valid_sidecar(script.parent, "run_nvt")
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+
+    bundle = resolve_sidecar(script)
+
+    run = Run(
+        project_slug="test",
+        command=f"python {script}",
+        argv=["python", str(script)],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+        sidecar_sha256="a_prior_first_run_sha_that_differs",
+    )
+    write_run(run, catalog_dir)
+
+    result = gate_check(script, bundle, "autonomous", catalog_dir=catalog_dir, git_hash="new_hash")
+
+    assert result.ok is False
+    assert result.error_payload is not None
+    assert result.error_payload.error_code == GateErrorCode.SIDECAR_HASH_MISMATCH
+    assert "first-run manifest" in result.error_payload.errors[0]
+
+
+def test_gate_check_sidecar_drift_warns_but_passes_collaborative(tmp_path, caplog):
+    from bathos.schema import Run
+    from bathos.catalog import write_run
+    from bathos.prereg import gate_check, resolve_sidecar
+
+    script = tmp_path / "scripts" / "experiments" / "run_nvt.py"
+    script.parent.mkdir(parents=True)
+    script.touch()
+    _write_valid_sidecar(script.parent, "run_nvt")
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+
+    bundle = resolve_sidecar(script)
+
+    run = Run(
+        project_slug="test",
+        command=f"python {script}",
+        argv=["python", str(script)],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+        sidecar_sha256="a_prior_first_run_sha_that_differs",
+    )
+    write_run(run, catalog_dir)
+
+    with caplog.at_level("WARNING"):
+        result = gate_check(script, bundle, "collaborative", catalog_dir=catalog_dir)
+
+    assert result.ok is True
+    assert result.error_payload is None
+    assert any("drift" in message.lower() for message in caplog.messages)
+
+
+def test_gate_check_sidecar_drift_matching_hash_passes_silently(tmp_path):
+    from bathos.schema import Run
+    from bathos.catalog import write_run
+    from bathos.prereg import gate_check, resolve_sidecar
+
+    script = tmp_path / "scripts" / "experiments" / "run_nvt.py"
+    script.parent.mkdir(parents=True)
+    script.touch()
+    _write_valid_sidecar(script.parent, "run_nvt")
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+
+    bundle = resolve_sidecar(script)
+
+    run = Run(
+        project_slug="test",
+        command=f"python {script}",
+        argv=["python", str(script)],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+        sidecar_sha256=bundle.sha256,
+    )
+    write_run(run, catalog_dir)
+
+    result = gate_check(script, bundle, "collaborative", catalog_dir=catalog_dir)
+
+    assert result.ok is True
+    assert result.error_payload is None
+
+
 def test_check_reproduction_prerequisite_cool_tier_found(tmp_path):
     """Test finding a passing run in cool-tier Parquet (no warm DB)."""
     from bathos.prereg import check_reproduction_prerequisite
