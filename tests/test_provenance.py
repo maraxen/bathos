@@ -163,3 +163,53 @@ def test_prov_json_multiple_runs_creates_multiple_entities(mock_run_with_parent)
     result = format_prov_json(runs)
     assert len(result["entity"]) == 2
     assert len(result["activity"]) == 2
+
+
+class TestMultiParentWasDerivedFrom:
+    """B2-03: run_parent_edges enables multiple wasDerivedFrom links per run."""
+
+    def _make_run(self, run_id: str, parent_run_id: str = ""):
+        return Run(
+            id=run_id,
+            project_slug="test_project",
+            command=f"uv run python {run_id}.py",
+            argv=["uv", "run", "python", f"{run_id}.py"],
+            git_hash="abc123",
+            git_branch="main",
+            git_dirty=False,
+            timestamp=datetime(2026, 5, 28, 12, 0, 0, tzinfo=UTC),
+            outcome="pass",
+            manifest_sha256="sha256_x",
+            parent_run_id=parent_run_id,
+            agent_mode="human",
+        )
+
+    def test_run_with_two_parents_emits_two_links(self):
+        parent_a = self._make_run("aaaaaaaa-0000-0000-0000-000000000000")
+        parent_b = self._make_run("bbbbbbbb-0000-0000-0000-000000000000")
+        child = self._make_run("cccccccc-0000-0000-0000-000000000000")
+        runs = [parent_a, parent_b, child]
+
+        result = format_prov_json(
+            runs,
+            run_parent_edges={child.id: [parent_a.id, parent_b.id]},
+        )
+        assert len(result["wasDerivedFrom"]) == 2
+        used_entities = {v["prov:usedEntity"] for v in result["wasDerivedFrom"].values()}
+        assert used_entities == {f"bth:run_{parent_a.id[:8]}", f"bth:run_{parent_b.id[:8]}"}
+
+    def test_run_absent_from_edges_falls_back_to_parent_run_id(self):
+        # run_parent_edges is supplied but does NOT mention this run -- must fall back to
+        # the existing single parent_run_id field, not silently drop the link.
+        parent = self._make_run("aaaaaaaa-0000-0000-0000-000000000000")
+        child = self._make_run("cccccccc-0000-0000-0000-000000000000", parent_run_id=parent.id)
+        runs = [parent, child]
+
+        result = format_prov_json(runs, run_parent_edges={})
+        assert len(result["wasDerivedFrom"]) == 1
+
+    def test_omitting_run_parent_edges_is_byte_identical_to_pre_b2_03(self, mock_run_with_parent):
+        runs = [mock_run_with_parent["parent"], mock_run_with_parent["child"]]
+        with_default = format_prov_json(runs)
+        with_explicit_none = format_prov_json(runs, run_parent_edges=None)
+        assert with_default == with_explicit_none
