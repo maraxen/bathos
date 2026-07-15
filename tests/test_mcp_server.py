@@ -9,6 +9,7 @@ from unittest.mock import patch
 from bathos.mcp import (
     app,
     archive_tool,
+    capability_probe_tool,
     check_tool,
     compact_tool,
     find_runs_tool,
@@ -270,6 +271,35 @@ class TestCheckTool:
         # Can either have error or empty results
         if "error" not in data:
             assert "results" in data
+
+
+class TestCapabilityProbeTool:
+    """Test capability_probe MCP tool (B2-06, AC-20)."""
+
+    def test_capability_probe_on_compacted_catalog(self, tmp_catalog, sample_run):
+        import pytest
+
+        pytest.importorskip("scipy")
+        from bathos.catalog import write_run
+        from bathos.compact import compact
+
+        write_run(sample_run, tmp_catalog)
+        compact(tmp_catalog)
+
+        result = capability_probe_tool(catalog_dir=str(tmp_catalog))
+        assert result["seed_live"] is True
+        assert result["missing_seed_columns"] == []
+        assert result["stats_battery_live"] is True
+        assert result["stats_unavailable_reason"] == ""
+
+    def test_capability_probe_on_empty_catalog(self, tmp_catalog):
+        result = capability_probe_tool(catalog_dir=str(tmp_catalog))
+        assert result["seed_live"] is False
+        assert set(result["missing_seed_columns"]) == {
+            "seed",
+            "baseline_hpo_trials",
+            "baseline_hpo_compute_budget",
+        }
 
 
 class TestSyncTool:
