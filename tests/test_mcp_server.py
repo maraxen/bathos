@@ -21,6 +21,7 @@ from bathos.mcp import (
     sync_tool,
 )
 from bathos.schema import Run
+from bathos.telemetry import run_uuid_var
 
 
 class TestListRunsTool:
@@ -118,6 +119,45 @@ class TestFindRunsTool:
         data = result
         # Should return either empty list or error, but must be valid JSON
         assert isinstance(data, dict)
+
+    def test_find_runs_tool_filters_by_tags(self, tmp_catalog):
+        """Verify find_runs filters by tags, independent of pattern/project."""
+        from bathos.catalog import write_run
+
+        tagged = Run(
+            project_slug="same_proj",
+            command="cmd1",
+            argv=["python", "s1.py"],
+            git_hash="h1",
+            git_branch="main",
+            git_dirty=False,
+            status="completed",
+            exit_code=0,
+            duration_s=1.0,
+            hostname="test",
+            tags=["figure-eda:node-p2"],
+        )
+        untagged = Run(
+            project_slug="same_proj",
+            command="cmd2",
+            argv=["python", "s2.py"],
+            git_hash="h2",
+            git_branch="main",
+            git_dirty=False,
+            status="completed",
+            exit_code=0,
+            duration_s=1.0,
+            hostname="test",
+            tags=["unrelated"],
+        )
+        write_run(tagged, tmp_catalog)
+        write_run(untagged, tmp_catalog)
+
+        result = find_runs_tool(catalog_dir=str(tmp_catalog), tags=["figure-eda:node-p2"])
+        data = result
+        assert data["count"] == 1
+        assert data["runs"][0]["id"] == tagged.id
+        assert data["runs"][0]["tags"] == ["figure-eda:node-p2"]
 
 
 class TestGetRunTool:
@@ -388,7 +428,11 @@ class TestRunTool:
     @patch("bathos.mcp.run_script")
     def test_run_tool_executes_script(self, mock_run):
         """Verify run tool executes script."""
-        mock_run.return_value = 0
+        def fake_run_script(**kwargs):
+            run_uuid_var.set("11111111-1111-1111-1111-111111111111")
+            return 0
+
+        mock_run.side_effect = fake_run_script
 
         result = run_tool(script_path="/tmp/script.py", args=["--n", "10"])
 
@@ -396,6 +440,32 @@ class TestRunTool:
         assert "exit_code" in data
         assert data["exit_code"] == 0
         assert data["success"] is True
+        assert data["run_id"] == "11111111-1111-1111-1111-111111111111"
+
+    @patch("bathos.mcp.run_script")
+    def test_run_tool_does_not_leak_a_stale_run_id(self, mock_run):
+        """A call whose run_script never sets run_uuid_var (e.g. an early-return
+        gate/sidecar failure, which bails before any Run is constructed) must not
+        report a previous call's run_id in the same context."""
+        # First call: succeeds, sets run_uuid_var to a real id.
+        def succeeding_run(**kwargs):
+            run_uuid_var.set("22222222-2222-2222-2222-222222222222")
+            return 0
+
+        mock_run.side_effect = succeeding_run
+        first = run_tool(script_path="/tmp/script.py")
+        assert first["run_id"] == "22222222-2222-2222-2222-222222222222"
+
+        # Second call: simulates an early-return failure that never sets
+        # run_uuid_var at all (mirrors runner.py's invalid-sidecar/gate-check
+        # paths, which `return 1` before touching the var).
+        def failing_run_no_run_created(**kwargs):
+            return 1
+
+        mock_run.side_effect = failing_run_no_run_created
+        second = run_tool(script_path="/tmp/script.py")
+        assert second["exit_code"] == 1
+        assert second["run_id"] == "", "must not leak the prior call's run_id"
 
     def test_run_tool_error_handling(self):
         """Verify run returns nonzero exit code for nonexistent script."""

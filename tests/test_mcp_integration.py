@@ -7,10 +7,12 @@ import json
 from bathos.catalog import write_run
 from bathos.mcp import (
     compact_tool,
+    find_runs_tool,
     get_run_tool,
     init_tool,
     list_runs_tool,
     run_sql_tool,
+    run_tool,
 )
 from bathos.schema import Run
 
@@ -71,6 +73,38 @@ class TestFullMCPWorkflow:
         get_result = get_run_tool(catalog_dir=str(catalog_dir), run_id=run_id)
         assert get_result["id"] == run_id
         assert get_result["status"] == "completed"
+
+    def test_run_tool_run_id_findable_by_tag(self, tmp_path):
+        """End-to-end: run_tool() -> run_id -> find_runs_tool(tags=...) -> get_run_tool().
+
+        Exercises the real run_script path (no mocking) to prove run_tool's run_id
+        actually corresponds to a persisted, tag-queryable run — not just that the
+        contextvar plumbing type-checks.
+        """
+        catalog_dir = tmp_path / "catalog"
+        catalog_dir.mkdir()
+        script_path = tmp_path / "trivial.py"
+        script_path.write_text("pass\n")
+
+        run_result = run_tool(
+            script_path=str(script_path),
+            catalog_dir=str(catalog_dir),
+            project_slug="write_node_e2e",
+            tags=["figure-eda:node-p2"],
+            no_sidecar=True,
+        )
+        assert run_result["success"] is True
+        run_id = run_result["run_id"]
+        assert run_id, "run_tool must return a non-empty run_id for a successful run"
+
+        find_result = find_runs_tool(catalog_dir=str(catalog_dir), tags=["figure-eda:node-p2"])
+        assert find_result["count"] == 1
+        assert find_result["runs"][0]["id"] == run_id
+        assert find_result["runs"][0]["tags"] == ["figure-eda:node-p2"]
+
+        get_result = get_run_tool(catalog_dir=str(catalog_dir), run_id=run_id)
+        assert get_result["id"] == run_id
+        assert get_result["tags"] == ["figure-eda:node-p2"]
 
     def test_mcp_workflow_with_multiple_runs(self, tmp_path):
         """Test workflow with multiple runs."""
