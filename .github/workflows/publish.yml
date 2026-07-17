@@ -20,6 +20,22 @@ jobs:
           enable-cache: true
       - name: Set up Python
         run: uv python install 3.12
+      - name: Stub the cisterna sibling path dependency
+        # tool.uv.sources.cisterna points at a local ../cisterna checkout (marker-gated to
+        # python>=3.13, so never actually installed on this job's 3.12 interpreter). uv still
+        # needs the path to exist to validate the universal lock; CI has no such sibling repo.
+        run: |
+          mkdir -p ../cisterna
+          cat > ../cisterna/pyproject.toml <<'EOF'
+          [project]
+          name = "cisterna"
+          version = "0.0.0"
+          requires-python = ">=3.13"
+
+          [build-system]
+          requires = ["hatchling"]
+          build-backend = "hatchling.build"
+          EOF
       - name: Install dependencies
         run: uv sync
       - name: Build distribution

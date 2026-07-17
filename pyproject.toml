@@ -56,7 +56,7 @@ dev = [
 cisterna = ["cisterna; python_version >= '3.13'"]
 
 [tool.uv.sources]
-cisterna = { path = "../cisterna", editable = true }
+cisterna = { path = "../cisterna", editable = true, marker = "python_version >= '3.13'" }
 
 [dependency-groups]
 dev = [
