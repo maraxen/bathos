@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.13.0a1] - 2026-07-17
+
+**Alpha pre-release.** Ships work merged since 0.12.0 that had accumulated without a
+version bump; see the README's alpha notice — APIs here may still change without a
+deprecation period.
+
+### Added
+
+- **Statistical battery + baseline-budget gates (B2-01, `stats_gates.py`)** — `run_stats_battery`
+  (Wilcoxon/Friedman+Nemenyi, alpha=0.05 Holm; Cohen's d, win-rate, breakdown-point, ICC) and
+  `check_baseline_budget_equivalence`, plus `wilcoxon_signed_rank`/`win_rate`/`breakdown_point`
+  primitives.
+- **`Run.seed` + HPO budget schema (B2-02)** — `Run.seed`, `Run.baseline_hpo_trials`,
+  `Run.baseline_hpo_compute_budget` columns, and `campaigns.count_seeds_for_script`/
+  `count_runs_for_script` conclude-time counting helpers (feed the seed/trial power floor).
+- **Capability probe MCP endpoint (B2-06)** — liveness check for `Run.seed` + stats-battery
+  availability, for callers gating on capability before dispatch.
+- **Multi-parent campaign & run DAG + PROV emission (B2-03, `campaign_edges.py`)**.
+- **Sidecar drift detection (B2-04)** — promotes `SIDECAR_HASH_MISMATCH` to a first-class check.
+- **`stdout_sha256` + self-signed manifest verification (B2-07)**.
+- **Bathos-side component-level sidecar binding (B2-08)** — cross-repo bridge support for
+  component-granular attestation.
+- **Bathos declared as a readback capability provider** (plugin registration).
+- **S1-S7 readback/anchor/attestation/figure-registry/harness series** — read-back/query API
+  (`resolve_pin`, campaign/figure sidecar readers), generic sidecar anchor insert-by-`(path,
+  sha256)`, attestation sidecar kind + verdict-aware query, harness-as-bathos-run wrapper for
+  `port/` T1-T5, typed pointer-only `figure_entry` schema, S3 durable (S3-backed) trust ledger
+  with ratchet-enforced graduation, C3 concentration-alarm catalog-backed lint check.
+- **`bth claim` subcommands** closing CLI/MCP parity gaps; env-gated cisterna telemetry cutover.
+
+### Fixed
+
+- Shared-secret token auth on write-verb MCP tools (debt #619).
+- `validate_attestation` now enforced at register time (debt #638).
+- Three audit debts closed in readback/attestation/trust-ledger (#639, #640, #645).
+- Five cross-project bathos debt items resolved (#478, #477, #491, #479, #485/#487/#369).
+
+---
+
 ## [0.12.0] - 2026-06-23
 
 ### Added
