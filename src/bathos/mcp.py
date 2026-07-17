@@ -17,7 +17,7 @@ from pathlib import Path
 from fastmcp import FastMCP
 
 # Telemetry imports
-from bathos.telemetry import event, mcp_request_id_var
+from bathos.telemetry import event, mcp_request_id_var, run_uuid_var
 from bathos.telemetry_bridge import init_server_telemetry
 
 # Import core modules
@@ -263,19 +263,24 @@ def list_runs_tool(
 def find_runs_tool(
     catalog_dir: str = "",
     pattern: str = "",
+    tags: list[str] | None = None,
 ) -> dict:
-    """Find runs by pattern (project, status, tag, etc).
+    """Find runs by pattern (project) and/or tags.
 
     Args:
         catalog_dir: Catalog directory (empty = use default)
-        pattern: Filter pattern (e.g., project name)
+        pattern: Project-slug filter (exact match against project_slug — despite the
+            name, this is not a glob/substring/tag match; see `tags` for tag filtering)
+        tags: Optional tag filter — matches runs with any of these tags. Independent
+            of `pattern`; the underlying query layer already supports this on both
+            the cool (Parquet) and warm (DuckDB) tiers, it just wasn't plumbed through
+            this MCP wrapper until now.
 
     Returns:
         Dict with matching runs
     """
     cat_dir = _get_catalog_dir(catalog_dir or None)
-    # For simplicity, treat pattern as project filter
-    runs = find_runs(cat_dir, project=pattern if pattern else None)
+    runs = find_runs(cat_dir, project=pattern if pattern else None, tags=tags or None)
     runs_json = [
         {
             "id": r.id,
@@ -285,6 +290,7 @@ def find_runs_tool(
             "exit_code": r.exit_code,
             "duration_s": r.duration_s,
             "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+            "tags": r.tags,
         }
         for r in runs
     ]
@@ -1053,6 +1059,12 @@ def run_tool(
     cat_dir = _get_catalog_dir(catalog_dir or None)
     slug = project_slug or "default"
 
+    # Clear any stale value before calling run_script: two early-return paths in
+    # run_script (invalid sidecar, gate-check failure) bail before a Run is ever
+    # constructed/persisted, and thus never touch run_uuid_var themselves — without
+    # this reset a failed call in the same context could report a prior call's ID.
+    run_uuid_var.set(None)
+
     # Call run_script with new parameters
     exit_code = run_script(
         argv=argv,
@@ -1066,8 +1078,16 @@ def run_tool(
         campaign_id=campaign_id or None,
     )
 
+    # run_script doesn't return the Run it creates (its return type is a plain
+    # exit_code int, relied on elsewhere — cli.py's typer.Exit(exit_code) and 29
+    # assertions in tests/test_runner.py), but it does stash the run's id in this
+    # contextvar as a side effect (runner.py) — the same mechanism harness_run.py
+    # already reads post-call to recover the id without changing run_script's shape.
+    run_id = run_uuid_var.get(None) or ""
+
     return {
         "script_path": script_path,
+        "run_id": run_id,
         "exit_code": exit_code,
         "success": exit_code == 0,
     }
@@ -1253,9 +1273,10 @@ async def mcp_list_runs_tool(
 async def mcp_find_runs_tool(
     catalog_dir: str = "",
     pattern: str = "",
+    tags: list[str] | None = None,
 ) -> dict:
-    """Find runs by pattern."""
-    return find_runs_tool(catalog_dir=catalog_dir, pattern=pattern)
+    """Find runs by pattern (project) and/or tags."""
+    return find_runs_tool(catalog_dir=catalog_dir, pattern=pattern, tags=tags)
 
 
 @app.tool("get_run")
