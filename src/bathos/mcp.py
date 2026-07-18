@@ -839,6 +839,54 @@ def attestation_register_tool(
         return {"ok": False, "error": str(e), "error_code": "register_failed"}
 
 
+def graduate_product_tool(
+    content_hash: str = "",
+    attestation_ref: str = "",
+    catalog_dir: str = "",
+    min_strength: str = "",
+    run_id: str = "",
+    output_path: str = "",
+    reason: str = "",
+) -> dict:
+    """Graduate a product from candidate to promoted in the trust ledger (S3; real).
+
+    Args:
+        content_hash: Content hash of the product to graduate.
+        attestation_ref: Caller-supplied reference recorded on the ledger entry for
+            audit purposes (e.g. the attestation's own sha256) — NOT itself trusted
+            as proof; graduate_product independently re-queries query_attestation.
+        catalog_dir: Catalog directory (empty = use default).
+        min_strength: Minimum attestation strength required ("oracle_match" or
+            "repro_floor"); empty = either strength qualifies.
+        run_id: Optional run_id to record on the ledger entry.
+        output_path: Optional output_path to record on the ledger entry.
+        reason: Optional free-form reason/justification to record.
+
+    Returns:
+        Dict with ok + the appended (or, if already promoted, existing) ledger
+        record, or ok=False + error_code="graduation_refused" if no PASS
+        attestation exists for content_hash at the requested min_strength.
+    """
+    from bathos.trust_ledger import GraduationRefused, graduate_product
+
+    if not content_hash or not attestation_ref:
+        return {"ok": False, "error": "content_hash and attestation_ref are required"}
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    try:
+        record = graduate_product(
+            cat_dir,
+            content_hash,
+            attestation_ref,
+            min_strength=min_strength or None,
+            run_id=run_id or None,
+            output_path=output_path or None,
+            reason=reason or None,
+        )
+        return {"ok": True, "record": dataclasses.asdict(record)}
+    except GraduationRefused as e:
+        return {"ok": False, "error": str(e), "error_code": "graduation_refused"}
+
+
 def compact_tool(
     catalog_dir: str = "",
 ) -> dict:
@@ -1560,6 +1608,37 @@ async def mcp_attestation_register_tool(
 
     Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
     return attestation_register_tool(path=path, catalog_dir=catalog_dir, campaign_id=campaign_id)
+
+
+@app.tool("graduate_product")
+@traced_tool
+@require_write_token
+async def mcp_graduate_product_tool(
+    content_hash: str = "",
+    attestation_ref: str = "",
+    catalog_dir: str = "",
+    min_strength: str = "",
+    run_id: str = "",
+    output_path: str = "",
+    reason: str = "",
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
+) -> dict:
+    """Graduate a product from candidate to promoted in the trust ledger (S3; real).
+
+    Refuses (error_code="graduation_refused") unless a PASS attestation already
+    exists for content_hash at the requested min_strength — the ratchet invariant
+    (bathos.trust_ledger.graduate_product's own docstring).
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    return graduate_product_tool(
+        content_hash=content_hash,
+        attestation_ref=attestation_ref,
+        catalog_dir=catalog_dir,
+        min_strength=min_strength,
+        run_id=run_id,
+        output_path=output_path,
+        reason=reason,
+    )
 
 
 @app.tool("compact")
