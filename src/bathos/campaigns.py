@@ -29,6 +29,7 @@ class Campaign:
     outcome_label: str | None = None
     parent_campaign_id: str | None = None
     stopping_threshold: float | None = None
+    negative_check: str | None = None
 
 
 def _open_db(catalog_dir) -> duckdb.DuckDBPyConnection:
@@ -212,6 +213,8 @@ def conclude_campaign(
     conclusion: str,
     workspace_root=None,
     force_verdict: bool = False,
+    negative_check: str | None = None,
+    negative_outcome_pattern=None,
 ) -> None:
     """Mark campaign as concluded.
 
@@ -221,6 +224,11 @@ def conclude_campaign(
     - confirmation/sequential: downgrades verdict to 'confounded' if uncovered (unless force_verdict)
     - claim_path IS NULL: skips Union Gate entirely (opt-in model)
 
+    BP-3: if a claim is registered AND outcome_label matches the negative-outcome vocabulary
+    (see bathos.claim.is_negative_outcome), negative_check must be non-blank or this raises.
+    Like Union Gate, this is opt-in on claim registration (claim_path IS NULL skips it too) --
+    a campaign with no claim-tier adoption is unaffected.
+
     Args:
         db: DuckDB connection
         campaign_id: Campaign ID (prefix or full UUID)
@@ -228,8 +236,14 @@ def conclude_campaign(
         conclusion: Summary text
         workspace_root: Path to workspace (defaults to resolve_workspace().fs_root)
         force_verdict: If True, bypass Union Gate confounded downgrade (records claim_mode='bypassed')
+        negative_check: Falsification backing / hedge for a negative outcome_label (BP-3)
+        negative_outcome_pattern: Optional compiled regex override for the negative-outcome vocabulary
+
+    Raises:
+        CampaignError: If a claim is registered, outcome_label is a negative claim, and
+            negative_check is blank.
     """
-    from bathos.claim import parse_claim, run_union_gate, check_sha
+    from bathos.claim import parse_claim, run_union_gate, check_sha, is_negative_outcome
     from bathos.workspace import resolve_workspace
     from pathlib import Path
 
@@ -268,6 +282,14 @@ def conclude_campaign(
         # Parse the claim
         claim = parse_claim(abs_path)
 
+        # BP-3: negative-claim backing check (opt-in via claim registration, same as Union Gate)
+        if is_negative_outcome(outcome_label, negative_outcome_pattern) and not (negative_check or "").strip():
+            raise CampaignError(
+                f"outcome '{outcome_label}' is a negative claim — provide --negative-check with "
+                "the falsification backing or hedge for this conclusion, or use a less definitive "
+                "outcome label"
+            )
+
         # F2 PARITY CONFOUND CHECK (before Union Gate)
         # Check for uncontrolled reference_parity confounds and downgrade if needed
         from bathos.claim import parity_confound_check
@@ -289,6 +311,34 @@ def conclude_campaign(
                 for confound in parity_uncontrolled:
                     print(
                         f"WARNING: Parity confound '{confound['label']}' is uncontrolled "
+                        "(exploration mode, no downgrade)"
+                    )
+
+        # BP-2 SYNTHETIC_RECOVERY CONFOUND CHECK (before Union Gate)
+        # Check for uncontrolled synthetic_recovery confounds (stale/red/unknown gate) and downgrade if needed
+        from bathos.gate import synthetic_recovery_confound_check
+        synth_result = synthetic_recovery_confound_check(claim, workspace_root)
+        synth_confounds = synth_result.get("confounds", [])
+
+        # Downgrade verdict to 'confounded' if any synthetic_recovery confound is uncontrolled
+        # (except for exploration mode, which only warns) -- same pattern as parity confounds above
+        synth_uncontrolled = [c for c in synth_confounds if c["status"] == "uncontrolled"]
+        if synth_uncontrolled:
+            if campaign_mode in ("confirmation", "sequential"):
+                # Hard downgrade for confirmation/sequential
+                for confound in synth_uncontrolled:
+                    print(
+                        f"Synthetic-recovery confound check: '{confound['label']}' is uncontrolled "
+                        f"(gate '{confound['gate_name']}' is {confound['gate_state']})"
+                    )
+                print("Synthetic-recovery confound check: verdict downgraded to 'confounded'")
+                outcome_label = "confounded"
+            elif campaign_mode == "exploration":
+                # Advisory warning for exploration
+                for confound in synth_uncontrolled:
+                    print(
+                        f"WARNING: Synthetic-recovery confound '{confound['label']}' is uncontrolled "
+                        f"(gate '{confound['gate_name']}' is {confound['gate_state']}) "
                         "(exploration mode, no downgrade)"
                     )
 
@@ -338,8 +388,8 @@ def conclude_campaign(
     # Final update
     concluded_at = datetime.now(UTC).isoformat()
     db.execute(
-        "UPDATE campaigns SET status = 'concluded', concluded_at = ?, outcome_label = ?, conclusion = ? WHERE id = ?",
-        [concluded_at, outcome_label, conclusion, full_id]
+        "UPDATE campaigns SET status = 'concluded', concluded_at = ?, outcome_label = ?, conclusion = ?, negative_check = ? WHERE id = ?",
+        [concluded_at, outcome_label, conclusion, negative_check, full_id]
     )
     db.commit()
     event("campaign.conclude", campaign_id=full_id, verdict=outcome_label)
@@ -351,16 +401,16 @@ def get_campaign(db, campaign_id: str) -> Campaign | None:
         full_id = _resolve_campaign_id(db, campaign_id)
     except CampaignError:
         return None
-    rows = db.execute("SELECT id, project_slug, name, mode, question, hypothesis, status, started_at, concluded_at, conclusion, outcome_label, parent_campaign_id, stopping_threshold FROM campaigns WHERE id = ?", [full_id]).fetchall()
+    rows = db.execute("SELECT id, project_slug, name, mode, question, hypothesis, status, started_at, concluded_at, conclusion, outcome_label, parent_campaign_id, stopping_threshold, negative_check FROM campaigns WHERE id = ?", [full_id]).fetchall()
     if not rows:
         return None
     r = rows[0]
-    return Campaign(id=r[0], project_slug=r[1], name=r[2], mode=r[3], question=r[4], hypothesis=r[5], status=r[6], started_at=r[7], concluded_at=r[8], conclusion=r[9], outcome_label=r[10], parent_campaign_id=r[11], stopping_threshold=r[12])
+    return Campaign(id=r[0], project_slug=r[1], name=r[2], mode=r[3], question=r[4], hypothesis=r[5], status=r[6], started_at=r[7], concluded_at=r[8], conclusion=r[9], outcome_label=r[10], parent_campaign_id=r[11], stopping_threshold=r[12], negative_check=r[13])
 
 
 def list_campaigns(db, project_slug: str | None = None, status: str | None = None) -> list[Campaign]:
     """List campaigns with optional filters."""
-    query = "SELECT id, project_slug, name, mode, question, hypothesis, status, started_at, concluded_at, conclusion, outcome_label, parent_campaign_id, stopping_threshold FROM campaigns WHERE 1=1"
+    query = "SELECT id, project_slug, name, mode, question, hypothesis, status, started_at, concluded_at, conclusion, outcome_label, parent_campaign_id, stopping_threshold, negative_check FROM campaigns WHERE 1=1"
     params = []
     if project_slug:
         query += " AND project_slug = ?"
@@ -369,7 +419,7 @@ def list_campaigns(db, project_slug: str | None = None, status: str | None = Non
         query += " AND status = ?"
         params.append(status)
     rows = db.execute(query, params).fetchall()
-    return [Campaign(id=r[0], project_slug=r[1], name=r[2], mode=r[3], question=r[4], hypothesis=r[5], status=r[6], started_at=r[7], concluded_at=r[8], conclusion=r[9], outcome_label=r[10], parent_campaign_id=r[11], stopping_threshold=r[12]) for r in rows]
+    return [Campaign(id=r[0], project_slug=r[1], name=r[2], mode=r[3], question=r[4], hypothesis=r[5], status=r[6], started_at=r[7], concluded_at=r[8], conclusion=r[9], outcome_label=r[10], parent_campaign_id=r[11], stopping_threshold=r[12], negative_check=r[13]) for r in rows]
 
 
 def review_campaign(db, campaign_id: str) -> dict:

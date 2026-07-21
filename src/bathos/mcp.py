@@ -1268,6 +1268,7 @@ def campaign_conclude_tool(
     outcome_label: str = "",
     conclusion: str = "",
     catalog_dir: str = "",
+    negative_check: str = "",
 ) -> dict:
     """Conclude a campaign with an outcome label.
 
@@ -1276,6 +1277,8 @@ def campaign_conclude_tool(
         outcome_label: Outcome label (e.g., 'success', 'inconclusive', 'failed')
         conclusion: Summary conclusion text
         catalog_dir: Catalog directory (empty = use default)
+        negative_check: Falsification backing / hedge for a negative outcome label (BP-3);
+            required when outcome_label is a negative claim and a claim is registered.
 
     Returns:
         Dict with conclusion confirmation
@@ -1291,7 +1294,9 @@ def campaign_conclude_tool(
 
     db = duckdb.connect(str(cat_dir / "bathos.db"))
     try:
-        conclude_campaign(db, campaign_id, outcome_label, conclusion or "")
+        conclude_campaign(
+            db, campaign_id, outcome_label, conclusion or "", negative_check=negative_check or None
+        )
         return {
             "status": "concluded",
             "campaign_id": campaign_id,
@@ -1823,6 +1828,7 @@ async def mcp_campaign_conclude_tool(
     outcome_label: str = "",
     conclusion: str = "",
     catalog_dir: str = "",
+    negative_check: str = "",
     token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
     """Conclude a campaign with an outcome label.
@@ -1833,6 +1839,7 @@ async def mcp_campaign_conclude_tool(
         outcome_label=outcome_label,
         conclusion=conclusion,
         catalog_dir=catalog_dir,
+        negative_check=negative_check,
     )
 
 
@@ -2032,7 +2039,10 @@ async def claim_validate(
         except Exception:
             pass
 
-    result = validate_claim(claim, db=db)
+    from bathos.workspace import resolve_workspace
+
+    ws_root = resolve_workspace().fs_root
+    result = validate_claim(claim, db=db, workspace_root=ws_root)
 
     if db:
         db.close()
@@ -2099,6 +2109,67 @@ async def claim_register(
         }
     except (RuntimeError, FileNotFoundError) as e:
         return {"ok": False, "error": str(e), "error_code": "register_failed"}
+
+
+@app.tool()
+@traced_tool
+@require_write_token
+async def gate_stamp(
+    gate_name: str,
+    result: str,
+    workspace_root: str | None = None,
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
+) -> dict:
+    """Record a self-attested pass/fail for a BP-2 synthetic-recovery gate at current git HEAD.
+
+    bathos does not run the test itself — run your project's own invariant test first, then
+    stamp the result here. Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    from bathos.gate import stamp_gate
+    from bathos.git import capture_git_state
+
+    if result not in ("pass", "fail"):
+        return {"ok": False, "error": f"result must be 'pass' or 'fail', got {result!r}"}
+
+    if workspace_root:
+        ws = Path(workspace_root).expanduser().resolve()
+    else:
+        from bathos.workspace import resolve_workspace
+
+        ws = resolve_workspace().fs_root
+
+    git_state = capture_git_state(ws)
+    if git_state.hash == "unknown":
+        return {"ok": False, "error": "could not resolve git HEAD sha — is this a git repository?"}
+
+    entry = stamp_gate(ws, gate_name, result, git_state.hash)
+    return {
+        "ok": True,
+        "gate_name": entry.gate_name,
+        "result": entry.result,
+        "sha": entry.sha,
+        "dirty_worktree": git_state.dirty,
+    }
+
+
+@app.tool()
+@traced_tool
+async def gate_status(
+    gate_name: str,
+    guards: list[str],
+    workspace_root: str | None = None,
+) -> dict:
+    """Report GREEN/STALE/RED/UNKNOWN for a named BP-2 synthetic-recovery gate."""
+    from bathos.gate import gate_state
+
+    if workspace_root:
+        ws = Path(workspace_root).expanduser().resolve()
+    else:
+        from bathos.workspace import resolve_workspace
+
+        ws = resolve_workspace().fs_root
+
+    state = gate_state(ws, gate_name, guards)
+    return {"ok": True, "gate_name": gate_name, "state": state}
 
 
 @app.tool()

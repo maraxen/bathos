@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`[confounds.synthetic_recovery]` claim-tier gate (BP-2)** — ports asr's C1 pre-run
+  synthetic-invariant gate into a native, project-agnostic bathos primitive. New `bathos.gate`
+  module: a self-attested pass/fail ledger (`.bth/synthetic_recovery_ledger.json`, `bth gate
+  stamp <name> --result pass|fail`) plus a GREEN/STALE/RED/UNKNOWN staleness state machine
+  (`bth gate status`) keyed on whether a gate's declared guarded source paths changed since the
+  last recorded pass (`git.paths_changed_since`). Wired into `bth claim validate` (diagnostic),
+  `bth claim register` (advisory warning), and `bth campaign conclude` (hard downgrade to
+  `'confounded'` for confirmation/sequential campaigns, warning-only for exploration — same
+  pattern as the existing `[confounds.reference_parity]` check). See
+  `.praxia/docs/decisions/260721_bp2-bp3-claim-tier-gate-ports.md`.
+- **`campaigns.negative_check` + `bth campaign conclude --negative-check` (BP-3)** — ports asr's
+  C5 negative-claim falsification check as a structured attestation field (not a regex-heuristic
+  port, per the asr design doc's own stated preference). A registered claim's `conclude` call with
+  a negative-sounding `--outcome` (configurable vocabulary, default ported from asr's C5 wordlist,
+  overridable via `.bth.toml [claim] negative_outcome_pattern`) now requires a non-blank
+  `--negative-check` backing/hedge, mirroring Union Gate's opt-in-on-claim-registration adoption
+  ladder — campaigns with no claim attached are unaffected.
+
 ---
 
 ## [0.13.0a1] - 2026-07-17

@@ -31,6 +31,12 @@ app.add_typer(report_app, name="report")
 claim_app = typer.Typer(help="Manage claim-tier pre-registration files")
 app.add_typer(claim_app, name="claim")
 
+gate_app = typer.Typer(
+    help="Synthetic-recovery gate ledger (BP-2): stamp/inspect pipeline-soundness attestations "
+    "referenced by [confounds.synthetic_recovery] in claim files"
+)
+app.add_typer(gate_app, name="gate")
+
 query_app = typer.Typer(help="Read-back/query API (S1): pins, trust state, attestations, figures")
 app.add_typer(query_app, name="query")
 
@@ -742,8 +748,16 @@ def campaign_conclude(
     abort_if_below_threshold: bool = typer.Option(
         False, "--abort-if-below-threshold", help="Exit 1 if threshold not met"
     ),
+    negative_check: str = typer.Option(
+        "",
+        "--negative-check",
+        help="Falsification backing / hedge for a negative outcome label (BP-3; required when "
+        "--outcome is a negative claim and a claim is registered)",
+    ),
 ):
     """Conclude a campaign with an outcome label."""
+    import re
+
     import duckdb
 
     from bathos.campaigns import (
@@ -752,6 +766,14 @@ def campaign_conclude(
         conclude_campaign,
         get_campaign,
     )
+
+    negative_outcome_pattern = None
+    cfg_path = find_project_config()
+    if cfg_path is not None:
+        cfg = load_project_config(cfg_path)
+        raw_pattern = cfg.claim.get("negative_outcome_pattern")
+        if raw_pattern:
+            negative_outcome_pattern = re.compile(raw_pattern, re.IGNORECASE)
 
     db = duckdb.connect(str(_catalog_dir() / "bathos.db"))
     try:
@@ -797,7 +819,14 @@ def campaign_conclude(
                         err=True,
                     )
 
-        conclude_campaign(db, campaign_id, outcome, note)
+        conclude_campaign(
+            db,
+            campaign_id,
+            outcome,
+            note,
+            negative_check=negative_check or None,
+            negative_outcome_pattern=negative_outcome_pattern,
+        )
         typer.echo(f"Concluded campaign {campaign_id[:8]} — outcome: {outcome}")
     except CampaignError as e:
         typer.echo(f"Error: {e}", err=True)
@@ -872,6 +901,7 @@ def claim_validate_cmd(
     import duckdb
 
     from bathos.claim import parse_claim, validate_claim
+    from bathos.workspace import resolve_workspace
 
     try:
         claim = parse_claim(path)
@@ -887,7 +917,8 @@ def claim_validate_cmd(
     if db_path.exists():
         db = duckdb.connect(str(db_path), read_only=True)
     try:
-        result = validate_claim(claim, db=db)
+        ws_root = resolve_workspace().fs_root
+        result = validate_claim(claim, db=db, workspace_root=ws_root)
     finally:
         if db is not None:
             db.close()
@@ -902,6 +933,58 @@ def claim_validate_cmd(
         raise typer.Exit(1)
 
     typer.echo(f"✓ {path} is valid")
+
+
+@gate_app.command("stamp")
+def gate_stamp_cmd(
+    gate_name: str = typer.Argument(..., help="Gate name (matches a claim's synthetic_recovery.gate_name)"),
+    result: str = typer.Option(..., "--result", help="'pass' or 'fail' — the outcome of your own test run"),
+):
+    """Record a self-attested pass/fail for a synthetic-recovery gate at the current git HEAD.
+
+    bathos does not run the test itself — run your project's own invariant test first, then
+    stamp the result here. This is self-attested; see the BP-2 design note for the trust model.
+    """
+    from bathos.gate import stamp_gate
+    from bathos.git import capture_git_state
+    from bathos.workspace import resolve_workspace
+
+    if result not in ("pass", "fail"):
+        typer.echo(f"Error: --result must be 'pass' or 'fail', got {result!r}", err=True)
+        raise typer.Exit(1)
+
+    ws_root = resolve_workspace().fs_root
+    git_state = capture_git_state(ws_root)
+    if git_state.hash == "unknown":
+        typer.echo("Error: could not resolve git HEAD sha — is this a git repository?", err=True)
+        raise typer.Exit(1)
+    if git_state.dirty:
+        typer.echo(
+            "Warning: working tree has uncommitted changes — the stamped sha will not reflect "
+            "them, so an immediate re-check may show STALE.",
+            err=True,
+        )
+
+    entry = stamp_gate(ws_root, gate_name, result, git_state.hash)
+    typer.echo(f"Stamped gate '{gate_name}': {entry.result} @ {entry.sha[:9]}")
+
+
+@gate_app.command("status")
+def gate_status_cmd(
+    gate_name: str = typer.Argument(..., help="Gate name to check"),
+    guards: list[str] = typer.Option(
+        ..., "--guard", help="Guarded source path (repeatable) — invalidates the stamp if changed"
+    ),
+):
+    """Report GREEN/STALE/RED/UNKNOWN for a named synthetic-recovery gate."""
+    from bathos.gate import gate_state
+    from bathos.workspace import resolve_workspace
+
+    ws_root = resolve_workspace().fs_root
+    state = gate_state(ws_root, gate_name, guards)
+    typer.echo(f"{gate_name}: {state}")
+    if state != "GREEN":
+        raise typer.Exit(1)
 
 
 @attestation_app.command("scaffold")

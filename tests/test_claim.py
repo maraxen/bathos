@@ -108,7 +108,8 @@ def temp_db(tmp_path):
             stopping_threshold REAL,
             claim_path TEXT,
             claim_sha256 TEXT,
-            claim_mode TEXT
+            claim_mode TEXT,
+            negative_check TEXT
         )
     """)
 
@@ -832,6 +833,123 @@ equivalence_bound = 5.0
         # Should have error/warning about equivalence bound
         assert not result.ok
         assert any("equivalence bound" in str(e.message) for e in result.errors)
+
+
+class TestSyntheticRecovery:
+    """Tests for BP-2: [confounds.synthetic_recovery] sub-block validation."""
+
+    def _claim_with_synth(self, tmp_path, gate_name="g", guards=None):
+        guards = guards if guards is not None else ["src/component.py"]
+        guards_toml = ", ".join(f'"{g}"' for g in guards)
+        claim_path = tmp_path / "test.claim.toml"
+        claim_path.write_text(f"""[claim]
+headline = "Test"
+kill_condition = "test"
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null"
+
+[[confounds]]
+id = "C_1"
+label = "Pipeline soundness"
+[confounds.synthetic_recovery]
+gate_name = "{gate_name}"
+guards = [{guards_toml}]
+""")
+        return claim_path
+
+    def test_missing_gate_name_is_error(self, tmp_path):
+        claim_path = tmp_path / "test.claim.toml"
+        claim_path.write_text("""[claim]
+headline = "Test"
+kill_condition = "test"
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null"
+
+[[confounds]]
+id = "C_1"
+label = "Pipeline soundness"
+[confounds.synthetic_recovery]
+guards = ["src/component.py"]
+""")
+        claim = parse_claim(claim_path)
+        result = validate_claim(claim, db=None)
+        assert not result.ok
+        assert any("gate_name" in str(e.message) for e in result.errors)
+
+    def test_missing_guards_is_error(self, tmp_path):
+        claim_path = tmp_path / "test.claim.toml"
+        claim_path.write_text("""[claim]
+headline = "Test"
+kill_condition = "test"
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null"
+
+[[confounds]]
+id = "C_1"
+label = "Pipeline soundness"
+[confounds.synthetic_recovery]
+gate_name = "g"
+""")
+        claim = parse_claim(claim_path)
+        result = validate_claim(claim, db=None)
+        assert not result.ok
+        assert any("guards" in str(e.message) for e in result.errors)
+
+    def test_no_workspace_root_skips_gate_state_with_info(self, tmp_path):
+        claim_path = self._claim_with_synth(tmp_path)
+        claim = parse_claim(claim_path)
+        result = validate_claim(claim, db=None, workspace_root=None)
+        assert result.ok
+        assert any("skipping synthetic_recovery" in i for i in result.infos)
+
+    def test_unknown_gate_warns(self, tmp_path):
+        claim_path = self._claim_with_synth(tmp_path)
+        claim = parse_claim(claim_path)
+        result = validate_claim(claim, db=None, workspace_root=tmp_path)
+        assert result.ok  # warning, not error
+        assert any("UNKNOWN" in w for w in result.warnings)
+
+    def test_green_gate_infos(self, tmp_path):
+        import subprocess
+        from bathos.gate import stamp_gate
+
+        subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "config", "user.name", "T"], cwd=tmp_path, check=True)
+        guarded = tmp_path / "src" / "component.py"
+        guarded.parent.mkdir(parents=True)
+        guarded.write_text("x = 1\n")
+        subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+        claim_path = self._claim_with_synth(tmp_path)
+        claim = parse_claim(claim_path)
+        stamp_gate(tmp_path, "g", "pass", sha)
+
+        result = validate_claim(claim, db=None, workspace_root=tmp_path)
+        assert result.ok
+        assert any("GREEN" in i for i in result.infos)
 
 
 if __name__ == "__main__":
