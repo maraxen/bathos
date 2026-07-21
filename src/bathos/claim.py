@@ -37,6 +37,26 @@ class ValidationResult:
 _OPAQUE_ID_RE = re.compile(r"^[A-Z][0-9]+$")
 _PLACEHOLDER_LABEL_RE = re.compile(r"^REQUIRED:\s*", re.IGNORECASE)
 
+# BP-3: default vocabulary of outcome labels considered a "strong negative" claim, requiring a
+# --negative-check attestation at `bth campaign conclude`. Ported from asr's C5 NEGATIVE_PAT
+# (scripts/gates/claim_hygiene.py); override per-project via `.bth.toml` [claim] negative_outcome_pattern.
+DEFAULT_NEGATIVE_OUTCOME_PATTERN = re.compile(
+    r"\b(fail(?:ed)?|falsified|void|no-?go|not-a-fair-test|dead[- ]?end|reversed|null|neutral|marginal)\b",
+    re.IGNORECASE,
+)
+
+
+def is_negative_outcome(outcome_label: str, pattern: re.Pattern | None = None) -> bool:
+    """True if outcome_label matches the negative-outcome vocabulary (BP-3, C5 port).
+
+    Args:
+        outcome_label: The --outcome value passed to `bth campaign conclude`
+        pattern: Optional compiled override pattern (from .bth.toml [claim] negative_outcome_pattern);
+            defaults to DEFAULT_NEGATIVE_OUTCOME_PATTERN
+    """
+    effective = pattern or DEFAULT_NEGATIVE_OUTCOME_PATTERN
+    return bool(effective.search(outcome_label or ""))
+
 
 def display_label(entity: dict) -> str:
     """Return human-facing label for a claim entity, falling back to id."""
@@ -152,12 +172,18 @@ def parse_claim(path: Path) -> ClaimFile:
     )
 
 
-def validate_claim(claim: ClaimFile, db: duckdb.DuckDBPyConnection | None = None) -> ValidationResult:
+def validate_claim(
+    claim: ClaimFile,
+    db: duckdb.DuckDBPyConnection | None = None,
+    workspace_root: Path | None = None,
+) -> ValidationResult:
     """Validate a parsed claim file.
 
     Args:
         claim: ClaimFile to validate
         db: Optional DuckDB connection for regime coverage check (AC-07)
+        workspace_root: Optional project workspace root, enables the BP-2
+            [confounds.synthetic_recovery] gate-state check
 
     Returns:
         ValidationResult with ok=True if no errors, False otherwise
@@ -336,6 +362,59 @@ def validate_claim(claim: ClaimFile, db: duckdb.DuckDBPyConnection | None = None
             # State 3: parity_run_id set, db is None
             infos.append(f"skipping baseline parity check for '{confound_label}' — no catalog connection")
 
+    # BP-2: Validate [confounds.synthetic_recovery] sub-blocks in confounds
+    for confound in claim.confounds:
+        synth = confound.get("synthetic_recovery", {})
+        if not synth:
+            # No synthetic_recovery block for this confound
+            continue
+
+        confound_label = display_label(confound)
+        gate_name = synth.get("gate_name", "")
+        guards = synth.get("guards", [])
+
+        if not gate_name:
+            errors.append(
+                ValidationError(
+                    f"synthetic_recovery block for '{confound_label}' missing required 'gate_name'"
+                )
+            )
+            continue
+        if not guards:
+            errors.append(
+                ValidationError(
+                    f"synthetic_recovery block for '{confound_label}' (gate '{gate_name}') "
+                    "missing required 'guards' (list of guarded source paths)"
+                )
+            )
+            continue
+
+        if workspace_root is not None:
+            from bathos.gate import gate_state
+
+            state = gate_state(workspace_root, gate_name, guards)
+            if state == "GREEN":
+                infos.append(f"synthetic_recovery gate '{gate_name}' GREEN for '{confound_label}'")
+            elif state == "STALE":
+                warnings.append(
+                    f"synthetic_recovery gate '{gate_name}' STALE for '{confound_label}' — "
+                    "a guarded source path changed since the last recorded pass; re-stamp with "
+                    "`bth gate stamp` after re-verifying"
+                )
+            elif state == "RED":
+                warnings.append(
+                    f"synthetic_recovery gate '{gate_name}' RED for '{confound_label}' — "
+                    "last recorded result was a failure"
+                )
+            else:
+                warnings.append(
+                    f"synthetic_recovery gate '{gate_name}' UNKNOWN for '{confound_label}' — "
+                    "never stamped; run `bth gate stamp` after verifying the pipeline component"
+                )
+        else:
+            infos.append(
+                f"skipping synthetic_recovery gate-state check for '{confound_label}' — no workspace root"
+            )
 
     # AC-04: zero-power lint — planned_run_label where all hypothesis pairs predict identical outcome
     from collections import defaultdict
@@ -433,6 +512,14 @@ reference_value = 1.0
 equivalence_bound = 0.05
 parity_run_id = ""
 
+[[confounds]]
+id = "C_pipeline_soundness"
+label = "REQUIRED: which pipeline component this campaign's runs depend on"
+[confounds.synthetic_recovery]
+gate_name = "REQUIRED: a name for the known-answer invariant test that proves this component sound"
+guards = ["REQUIRED: source paths whose change invalidates a recorded green stamp"]
+# Prove the invariant test passes yourself, then: bth gate stamp <gate_name> --result pass
+
 [claim.discriminability]
 # Matrix indexed by hypothesis-pair × outcome-label
 # predicted_outcome: any outcome label from the runs, or "??" for unspecified
@@ -523,6 +610,22 @@ def register_claim(
     )
 
     event("claim.register", campaign_id=full_id, claim_path=str(rel_path), claim_sha256=claim_sha256)
+
+    # BP-2: advisory-only synthetic_recovery gate check at register time. This is NOT a hard
+    # block -- register has no run-history context to judge downgrade severity from -- it just
+    # surfaces a not-yet-GREEN gate as early as possible, well before conclude time.
+    from bathos.gate import synthetic_recovery_confound_check
+
+    claim = parse_claim(abs_path)
+    synth_result = synthetic_recovery_confound_check(claim, workspace_root)
+    for confound in synth_result.get("confounds", []):
+        if confound["status"] == "uncontrolled":
+            print(
+                f"WARNING: synthetic_recovery gate '{confound['gate_name']}' is "
+                f"{confound['gate_state']} for '{confound['label']}' — this will downgrade the "
+                "verdict at `bth campaign conclude` unless re-stamped GREEN with `bth gate stamp` "
+                "before then."
+            )
 
 
 def check_sha(path_relative: str, registered_sha: str, workspace_root: Path) -> None:

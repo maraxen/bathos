@@ -355,7 +355,8 @@ CREATE TABLE IF NOT EXISTS campaigns (
     stopping_threshold REAL,
     claim_path TEXT,
     claim_sha256 TEXT,
-    claim_mode TEXT
+    claim_mode TEXT,
+    negative_check TEXT
 )
 """
 
@@ -708,6 +709,7 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
         "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS claim_path TEXT",
         "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS claim_sha256 TEXT",
         "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS claim_mode TEXT",
+        "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS negative_check TEXT",
     ]:
         with contextlib.suppress(Exception):
             con.execute(_alter_sql)
