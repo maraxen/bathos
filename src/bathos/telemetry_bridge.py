@@ -1,4 +1,4 @@
-"""Telemetry cutover bridge — legacy bathos JSONL vs cisterna pipeline (M6)."""
+"""Telemetry cutover bridge — legacy bathos JSONL vs cisternal pipeline (M6)."""
 
 from __future__ import annotations
 
@@ -11,9 +11,9 @@ from typing import Any
 _ENABLED_VALUES = frozenset({"1", "true", "yes", "all"})
 
 
-def cisterna_cutover_enabled() -> bool:
-    """True when ``CISTERNA_TELEMETRY`` enables bathos cutover."""
-    raw = os.environ.get("CISTERNA_TELEMETRY", "").strip().lower()
+def cisternal_cutover_enabled() -> bool:
+    """True when ``CISTERNAL_TELEMETRY`` enables bathos cutover."""
+    raw = os.environ.get("CISTERNAL_TELEMETRY", "").strip().lower()
     if not raw:
         return False
     if raw in _ENABLED_VALUES:
@@ -38,21 +38,21 @@ def init_server_telemetry(
     )
 
 
-def init_via_cisterna(
+def init_via_cisternal(
     level: str | int | None = None,
     log_dir: str | Path | None = None,
     max_bytes: int = 10_485_760,
     backup_count: int = 5,
 ) -> bool:
-    """Initialize cisterna pipeline when cutover flag is set."""
-    if not cisterna_cutover_enabled():
+    """Initialize cisternal pipeline when cutover flag is set."""
+    if not cisternal_cutover_enabled():
         return False
 
-    import cisterna
+    import cisternal
     from bathos.telemetry import _get_default_log_dir, task_id_var
 
     resolved = Path(log_dir) if log_dir is not None else _get_default_log_dir()
-    cisterna.init(
+    cisternal.init(
         log_dir=resolved,
         max_bytes=max_bytes,
         backup_count=backup_count,
@@ -65,18 +65,18 @@ def init_via_cisterna(
 
     task_id = os.environ.get("BTH_TASK_ID")
     if task_id:
-        from cisterna.telemetry.context import task_id_var as cisterna_task_id_var
+        from cisternal.telemetry.context import task_id_var as cisternal_task_id_var
 
         task_id_var.set(task_id)
-        cisterna_task_id_var.set(task_id)
+        cisternal_task_id_var.set(task_id)
 
     return True
 
 
-def _sync_context_to_cisterna() -> None:
-    """Copy bathos contextvars into cisterna before emit (best-effort)."""
+def _sync_context_to_cisternal() -> None:
+    """Copy bathos contextvars into cisternal before emit (best-effort)."""
     from bathos.telemetry import mcp_request_id_var, run_uuid_var, task_id_var
-    from cisterna.telemetry.context import (
+    from cisternal.telemetry.context import (
         mcp_request_id_var as c_mcp_request_id_var,
         run_uuid_var as c_run_uuid_var,
         task_id_var as c_task_id_var,
@@ -92,31 +92,31 @@ def _sync_context_to_cisterna() -> None:
             dst.set(value)
 
 
-def emit_via_cisterna(event_name: str, **fields: Any) -> bool:
-    """Emit through cisterna when cutover flag is set."""
-    if not cisterna_cutover_enabled():
+def emit_via_cisternal(event_name: str, **fields: Any) -> bool:
+    """Emit through cisternal when cutover flag is set."""
+    if not cisternal_cutover_enabled():
         return False
 
-    import cisterna
+    import cisternal
 
-    if cisterna.get_pipeline() is None:
-        init_via_cisterna()
+    if cisternal.get_pipeline() is None:
+        init_via_cisternal()
 
-    _sync_context_to_cisterna()
-    cisterna.emit_event(event_name, **fields)
+    _sync_context_to_cisternal()
+    cisternal.emit_event(event_name, **fields)
     return True
 
 
-def span_via_cisterna(
+def span_via_cisternal(
     name: str, **fields: Any
 ) -> AbstractContextManager[None] | None:
-    """Return cisterna span context manager when cutover flag is set."""
-    if not cisterna_cutover_enabled():
+    """Return cisternal span context manager when cutover flag is set."""
+    if not cisternal_cutover_enabled():
         return None
 
-    import cisterna
+    import cisternal
 
-    if cisterna.get_pipeline() is None:
-        init_via_cisterna()
+    if cisternal.get_pipeline() is None:
+        init_via_cisternal()
 
-    return cisterna.span(name, **fields)
+    return cisternal.span(name, **fields)

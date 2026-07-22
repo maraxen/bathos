@@ -1,4 +1,4 @@
-"""Tests for CISTERNA_TELEMETRY=bathos cutover bridge (M6)."""
+"""Tests for CISTERNAL_TELEMETRY=bathos cutover bridge (M6)."""
 
 from __future__ import annotations
 
@@ -8,15 +8,15 @@ from pathlib import Path
 import pytest
 
 from bathos.telemetry_bridge import (
-    cisterna_cutover_enabled,
-    emit_via_cisterna,
+    cisternal_cutover_enabled,
+    emit_via_cisternal,
     init_server_telemetry,
 )
 
 
 @pytest.fixture(autouse=True)
 def _reset_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Reset bathos + cisterna telemetry state between tests."""
+    """Reset bathos + cisternal telemetry state between tests."""
     import sys
 
     import bathos.telemetry as tel
@@ -28,11 +28,11 @@ def _reset_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
     tel._lazy_init_warning_shown = False
     tel._DEFAULT_LOG_DIR = None
 
-    monkeypatch.delenv("CISTERNA_TELEMETRY", raising=False)
+    monkeypatch.delenv("CISTERNAL_TELEMETRY", raising=False)
 
     try:
-        import cisterna
-        from cisterna.telemetry.pipeline import shutdown_pipeline
+        import cisternal
+        from cisternal.telemetry.pipeline import shutdown_pipeline
 
         shutdown_pipeline()
     except ImportError:
@@ -41,7 +41,7 @@ def _reset_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
     yield
 
     try:
-        from cisterna.telemetry.pipeline import shutdown_pipeline
+        from cisternal.telemetry.pipeline import shutdown_pipeline
 
         shutdown_pipeline()
     except ImportError:
@@ -54,14 +54,14 @@ def _reset_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
         mod._queue = None
 
 
-def test_cisterna_cutover_disabled_by_default() -> None:
-    assert cisterna_cutover_enabled() is False
+def test_cisternal_cutover_disabled_by_default() -> None:
+    assert cisternal_cutover_enabled() is False
 
 
 @pytest.mark.parametrize("value", ["bathos", "all", "1", "true", "yes"])
-def test_cisterna_cutover_enabled_values(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
-    monkeypatch.setenv("CISTERNA_TELEMETRY", value)
-    assert cisterna_cutover_enabled() is True
+def test_cisternal_cutover_enabled_values(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("CISTERNAL_TELEMETRY", value)
+    assert cisternal_cutover_enabled() is True
 
 
 def test_legacy_event_writes_jsonl(tmp_path: Path) -> None:
@@ -75,21 +75,16 @@ def test_legacy_event_writes_jsonl(tmp_path: Path) -> None:
     assert len(files) >= 1
 
 
-def test_cisterna_event_when_flag_set(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    import sys
-
-    if sys.version_info < (3, 13):
-        pytest.skip("cisterna cutover requires Python >=3.13")
-
-    pytest.importorskip("cisterna")
-    monkeypatch.setenv("CISTERNA_TELEMETRY", "bathos")
+def test_cisternal_event_when_flag_set(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    pytest.importorskip("cisternal")
+    monkeypatch.setenv("CISTERNAL_TELEMETRY", "bathos")
 
     init_server_telemetry(log_dir=tmp_path)
-    assert emit_via_cisterna("mcp.call_start", tool="demo_tool", request_id="r1")
+    assert emit_via_cisternal("mcp.call_start", tool="demo_tool", request_id="r1")
 
-    import cisterna
+    import cisternal
 
-    pipeline = cisterna.get_pipeline()
+    pipeline = cisternal.get_pipeline()
     assert pipeline is not None
     assert pipeline.events_emitted >= 1
 
