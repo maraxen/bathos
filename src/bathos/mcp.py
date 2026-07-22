@@ -16,6 +16,8 @@ from pathlib import Path
 
 from fastmcp import FastMCP
 
+import cisternal
+
 # Telemetry imports
 from bathos.telemetry import event, mcp_request_id_var, run_uuid_var
 from bathos.telemetry_bridge import init_server_telemetry
@@ -732,7 +734,7 @@ def figure_entry_register_tool(
 # pattern + SHA256-anchor-at-registration shape, and the S2 anchor-insert seam
 # (register_anchor via DurableAnchorStore for durability), but shares no code, table,
 # or column with bathos.claim. These are plain, synchronously-callable functions (the
-# @app.tool-decorated async wrappers below just forward to them), mirroring the S2
+# @cisternal.tool-decorated async wrappers below just forward to them), mirroring the S2
 # anchor tool convention (anchor_insert_tool / anchor_get_tool / anchor_find_tool)
 # rather than the claim tools' async-only style, per the dispatch brief ("Wire
 # register + query on MCP + CLI following the anchor/query patterns").
@@ -1311,7 +1313,7 @@ def campaign_conclude_tool(
 # ============================================================================
 
 
-@app.tool("list_runs")
+@cisternal.tool(registry="bathos", name="list_runs")
 @traced_tool
 async def mcp_list_runs_tool(
     catalog_dir: str = "",
@@ -1321,7 +1323,7 @@ async def mcp_list_runs_tool(
     return list_runs_tool(catalog_dir=catalog_dir, limit=limit)
 
 
-@app.tool("find_runs")
+@cisternal.tool(registry="bathos", name="find_runs")
 @traced_tool
 async def mcp_find_runs_tool(
     catalog_dir: str = "",
@@ -1332,7 +1334,7 @@ async def mcp_find_runs_tool(
     return find_runs_tool(catalog_dir=catalog_dir, pattern=pattern, tags=tags)
 
 
-@app.tool("get_run")
+@cisternal.tool(registry="bathos", name="get_run")
 @traced_tool
 async def mcp_get_run_tool(
     catalog_dir: str = "",
@@ -1342,7 +1344,7 @@ async def mcp_get_run_tool(
     return get_run_tool(catalog_dir=catalog_dir, run_id=run_id)
 
 
-@app.tool("cite_run")
+@cisternal.tool(registry="bathos", name="cite_run")
 @traced_tool
 async def mcp_cite_run_tool(
     run_id: str,
@@ -1369,7 +1371,7 @@ async def mcp_cite_run_tool(
     return {"citation": format_citation(run, fmt=format)}
 
 
-@app.tool("lineage_prov")
+@cisternal.tool(registry="bathos", name="lineage_prov")
 @traced_tool
 async def mcp_lineage_prov_tool(
     run_id: str,
@@ -1399,7 +1401,7 @@ async def mcp_lineage_prov_tool(
     return {"prov": prov_output}
 
 
-@app.tool("run_sql")
+@cisternal.tool(registry="bathos", name="run_sql")
 @traced_tool
 async def mcp_run_sql_tool(
     catalog_dir: str = "",
@@ -1409,7 +1411,7 @@ async def mcp_run_sql_tool(
     return run_sql_tool(catalog_dir=catalog_dir, sql=sql)
 
 
-@app.tool("resolve_pin")
+@cisternal.tool(registry="bathos", name="resolve_pin")
 @traced_tool
 async def mcp_resolve_pin_tool(
     run_id: str = "",
@@ -1420,7 +1422,7 @@ async def mcp_resolve_pin_tool(
     return resolve_pin_tool(run_id=run_id, output_path=output_path, catalog_dir=catalog_dir)
 
 
-@app.tool("get_trust_state")
+@cisternal.tool(registry="bathos", name="get_trust_state")
 @traced_tool
 async def mcp_get_trust_state_tool(
     content_hash: str = "",
@@ -1430,7 +1432,7 @@ async def mcp_get_trust_state_tool(
     return get_trust_state_tool(content_hash=content_hash, catalog_dir=catalog_dir)
 
 
-@app.tool("query_attestation")
+@cisternal.tool(registry="bathos", name="query_attestation")
 @traced_tool
 async def mcp_query_attestation_tool(
     content_hash: str = "",
@@ -1443,7 +1445,7 @@ async def mcp_query_attestation_tool(
     )
 
 
-@app.tool("read_campaign_report")
+@cisternal.tool(registry="bathos", name="read_campaign_report")
 @traced_tool
 async def mcp_read_campaign_report_tool(
     campaign_id: str = "",
@@ -1453,7 +1455,7 @@ async def mcp_read_campaign_report_tool(
     return read_campaign_report_tool(campaign_id=campaign_id, catalog_dir=catalog_dir)
 
 
-@app.tool("read_figure_manifest")
+@cisternal.tool(registry="bathos", name="read_figure_manifest")
 @traced_tool
 async def mcp_read_figure_manifest_tool(
     campaign_id: str = "",
@@ -1463,7 +1465,7 @@ async def mcp_read_figure_manifest_tool(
     return read_figure_manifest_tool(campaign_id=campaign_id, catalog_dir=catalog_dir)
 
 
-@app.tool("figure_lookup")
+@cisternal.tool(registry="bathos", name="figure_lookup")
 @traced_tool
 async def mcp_figure_lookup_tool(
     asset_sha256: str = "",
@@ -1476,7 +1478,7 @@ async def mcp_figure_lookup_tool(
     )
 
 
-@app.tool("list_candidates")
+@cisternal.tool(registry="bathos", name="list_candidates")
 @traced_tool
 async def mcp_list_candidates_tool(
     campaign_id: str = "",
@@ -1486,7 +1488,7 @@ async def mcp_list_candidates_tool(
     return list_candidates_tool(campaign_id=campaign_id, catalog_dir=catalog_dir)
 
 
-@app.tool("anchor_insert")
+@cisternal.tool(registry="bathos", name="anchor_insert")
 @traced_tool
 @require_write_token
 async def mcp_anchor_insert_tool(
@@ -1513,7 +1515,7 @@ async def mcp_anchor_insert_tool(
     )
 
 
-@app.tool("anchor_get")
+@cisternal.tool(registry="bathos", name="anchor_get")
 @traced_tool
 async def mcp_anchor_get_tool(
     path: str = "",
@@ -1524,7 +1526,7 @@ async def mcp_anchor_get_tool(
     return anchor_get_tool(path=path, sha256=sha256, catalog_dir=catalog_dir)
 
 
-@app.tool("anchor_find")
+@cisternal.tool(registry="bathos", name="anchor_find")
 @traced_tool
 async def mcp_anchor_find_tool(
     kind: str = "",
@@ -1543,7 +1545,7 @@ async def mcp_anchor_find_tool(
     )
 
 
-@app.tool("figure_entry_register")
+@cisternal.tool(registry="bathos", name="figure_entry_register")
 @traced_tool
 @require_write_token
 async def mcp_figure_entry_register_tool(
@@ -1574,7 +1576,7 @@ async def mcp_figure_entry_register_tool(
     )
 
 
-@app.tool("attestation_scaffold")
+@cisternal.tool(registry="bathos", name="attestation_scaffold")
 @traced_tool
 @require_write_token
 async def mcp_attestation_scaffold_tool(
@@ -1590,7 +1592,7 @@ async def mcp_attestation_scaffold_tool(
     return attestation_scaffold_tool(kind=kind, workspace_root=workspace_root, label=label)
 
 
-@app.tool("attestation_validate")
+@cisternal.tool(registry="bathos", name="attestation_validate")
 @traced_tool
 async def mcp_attestation_validate_tool(
     path: str = "",
@@ -1599,7 +1601,7 @@ async def mcp_attestation_validate_tool(
     return attestation_validate_tool(path=path)
 
 
-@app.tool("attestation_register")
+@cisternal.tool(registry="bathos", name="attestation_register")
 @traced_tool
 @require_write_token
 async def mcp_attestation_register_tool(
@@ -1615,7 +1617,7 @@ async def mcp_attestation_register_tool(
     return attestation_register_tool(path=path, catalog_dir=catalog_dir, campaign_id=campaign_id)
 
 
-@app.tool("graduate_product")
+@cisternal.tool(registry="bathos", name="graduate_product")
 @traced_tool
 @require_write_token
 async def mcp_graduate_product_tool(
@@ -1646,7 +1648,7 @@ async def mcp_graduate_product_tool(
     )
 
 
-@app.tool("compact")
+@cisternal.tool(registry="bathos", name="compact")
 @traced_tool
 @require_write_token
 async def mcp_compact_tool(
@@ -1659,7 +1661,7 @@ async def mcp_compact_tool(
     return compact_tool(catalog_dir=catalog_dir)
 
 
-@app.tool("archive")
+@cisternal.tool(registry="bathos", name="archive")
 @traced_tool
 @require_write_token
 async def mcp_archive_tool(
@@ -1674,7 +1676,7 @@ async def mcp_archive_tool(
     return archive_tool(catalog_dir=catalog_dir, project=project, keep_cool=keep_cool)
 
 
-@app.tool("check")
+@cisternal.tool(registry="bathos", name="check")
 @traced_tool
 async def mcp_check_tool(
     catalog_dir: str = "",
@@ -1687,7 +1689,7 @@ async def mcp_check_tool(
     )
 
 
-@app.tool("capability_probe")
+@cisternal.tool(registry="bathos", name="capability_probe")
 @traced_tool
 async def mcp_capability_probe_tool(
     catalog_dir: str = "",
@@ -1696,7 +1698,7 @@ async def mcp_capability_probe_tool(
     return capability_probe_tool(catalog_dir=catalog_dir)
 
 
-@app.tool("sync")
+@cisternal.tool(registry="bathos", name="sync")
 @traced_tool
 @require_write_token
 async def mcp_sync_tool(
@@ -1711,7 +1713,7 @@ async def mcp_sync_tool(
     return sync_tool(catalog_dir=catalog_dir, remote_name=remote_name, pull=pull)
 
 
-@app.tool("init")
+@cisternal.tool(registry="bathos", name="init")
 @traced_tool
 @require_write_token
 async def mcp_init_tool(
@@ -1734,7 +1736,7 @@ async def mcp_init_tool(
     )
 
 
-@app.tool("run")
+@cisternal.tool(registry="bathos", name="run")
 @traced_tool
 @require_write_token
 async def mcp_run_tool(
@@ -1767,7 +1769,7 @@ async def mcp_run_tool(
     )
 
 
-@app.tool("campaign_create")
+@cisternal.tool(registry="bathos", name="campaign_create")
 @traced_tool
 @require_write_token
 async def mcp_campaign_create_tool(
@@ -1792,7 +1794,7 @@ async def mcp_campaign_create_tool(
     )
 
 
-@app.tool("campaign_list")
+@cisternal.tool(registry="bathos", name="campaign_list")
 @traced_tool
 async def mcp_campaign_list_tool(
     catalog_dir: str = "",
@@ -1807,7 +1809,7 @@ async def mcp_campaign_list_tool(
     )
 
 
-@app.tool("campaign_review")
+@cisternal.tool(registry="bathos", name="campaign_review")
 @traced_tool
 async def mcp_campaign_review_tool(
     campaign_id: str = "",
@@ -1820,7 +1822,7 @@ async def mcp_campaign_review_tool(
     )
 
 
-@app.tool("campaign_conclude")
+@cisternal.tool(registry="bathos", name="campaign_conclude")
 @traced_tool
 @require_write_token
 async def mcp_campaign_conclude_tool(
@@ -1843,7 +1845,7 @@ async def mcp_campaign_conclude_tool(
     )
 
 
-@app.tool()
+@cisternal.tool(registry="bathos")
 @traced_tool
 @require_write_token
 async def postmortem_scaffold(
@@ -1878,7 +1880,7 @@ async def postmortem_scaffold(
     return {"path": str(postmortem_path), "run_id": run_id}
 
 
-@app.tool()
+@cisternal.tool(registry="bathos")
 @traced_tool
 async def postmortem_validate(
     path: str,
@@ -1911,7 +1913,7 @@ async def postmortem_validate(
     return {"validation_ok": False, "errors": [e.message for e in result.errors]}
 
 
-@app.tool()
+@cisternal.tool(registry="bathos")
 @traced_tool
 async def postmortem_get(
     run_id: str,
@@ -1956,7 +1958,7 @@ async def postmortem_get(
     return {"error": f"No postmortem found for run_id '{run_id}'"}
 
 
-@app.tool()
+@cisternal.tool(registry="bathos")
 @traced_tool
 @require_write_token
 async def claim_scaffold(
@@ -2003,7 +2005,7 @@ async def claim_scaffold(
         return {"ok": False, "error": str(e), "error_code": "scaffold_failed"}
 
 
-@app.tool()
+@cisternal.tool(registry="bathos")
 @traced_tool
 async def claim_validate(
     path: str,
@@ -2065,7 +2067,7 @@ async def claim_validate(
     }
 
 
-@app.tool()
+@cisternal.tool(registry="bathos")
 @traced_tool
 @require_write_token
 async def claim_register(
@@ -2111,7 +2113,7 @@ async def claim_register(
         return {"ok": False, "error": str(e), "error_code": "register_failed"}
 
 
-@app.tool()
+@cisternal.tool(registry="bathos")
 @traced_tool
 @require_write_token
 async def gate_stamp(
@@ -2151,7 +2153,7 @@ async def gate_stamp(
     }
 
 
-@app.tool()
+@cisternal.tool(registry="bathos")
 @traced_tool
 async def gate_status(
     gate_name: str,
@@ -2172,7 +2174,7 @@ async def gate_status(
     return {"ok": True, "gate_name": gate_name, "state": state}
 
 
-@app.tool()
+@cisternal.tool(registry="bathos")
 @traced_tool
 @require_write_token
 async def claim_attest_parity(
@@ -2221,7 +2223,7 @@ async def claim_attest_parity(
         raise ValueError(str(e)) from e
 
 
-@app.tool()
+@cisternal.tool(registry="bathos")
 @traced_tool
 async def validate_sidecar(
     path: str,
@@ -2406,7 +2408,7 @@ def outputs_summary_tool(
     return {"rows": list(aggregated.values()), "since": since}
 
 
-@app.tool("list_outputs")
+@cisternal.tool(registry="bathos", name="list_outputs")
 @traced_tool
 async def mcp_list_outputs_tool(
     run_id: str,
@@ -2423,7 +2425,7 @@ async def mcp_list_outputs_tool(
     )
 
 
-@app.tool("outputs_summary")
+@cisternal.tool(registry="bathos", name="outputs_summary")
 @traced_tool
 async def mcp_outputs_summary_tool(
     workspace_root: str | None = None,
@@ -2586,7 +2588,7 @@ def lint_tool(project_root: str = "") -> dict:
     }
 
 
-@app.tool("campaign_add")
+@cisternal.tool(registry="bathos", name="campaign_add")
 @traced_tool
 @require_write_token
 async def mcp_campaign_add_tool(
@@ -2601,7 +2603,7 @@ async def mcp_campaign_add_tool(
     return campaign_add_tool(run_id=run_id, campaign_id=campaign_id, catalog_dir=catalog_dir)
 
 
-@app.tool("campaign_show")
+@cisternal.tool(registry="bathos", name="campaign_show")
 @traced_tool
 async def mcp_campaign_show_tool(
     campaign_id: str = "",
@@ -2611,7 +2613,7 @@ async def mcp_campaign_show_tool(
     return campaign_show_tool(campaign_id=campaign_id, catalog_dir=catalog_dir)
 
 
-@app.tool("verify")
+@cisternal.tool(registry="bathos", name="verify")
 @traced_tool
 async def mcp_verify_tool(
     tier: str = "all",
@@ -2622,7 +2624,7 @@ async def mcp_verify_tool(
     return verify_tool(tier=tier, catalog_dir=catalog_dir, archive_dir=archive_dir)
 
 
-@app.tool("lint")
+@cisternal.tool(registry="bathos", name="lint")
 @traced_tool
 async def mcp_lint_tool(
     project_root: str = "",
@@ -2631,7 +2633,7 @@ async def mcp_lint_tool(
     return lint_tool(project_root=project_root)
 
 
-@app.tool("repair_scan")
+@cisternal.tool(registry="bathos", name="repair_scan")
 @traced_tool
 async def mcp_repair_scan_tool(
     catalog_dir: str | None = None,
@@ -2660,7 +2662,7 @@ async def mcp_repair_scan_tool(
     }
 
 
-@app.tool("repair")
+@cisternal.tool(registry="bathos", name="repair")
 @traced_tool
 @require_write_token
 async def mcp_repair_tool(
@@ -2714,6 +2716,40 @@ async def mcp_repair_tool(
             "actions": [],
             "warnings": [],
         }
+
+
+# ============================================================================
+# Wire the "bathos" registry snapshot onto the FastMCP server.
+#
+# Must run after every @cisternal.tool registration above (C6 snapshot
+# semantics: cisternal.wire() only sees tools registered before this call).
+# `expected=` lists every tool name so a missing/misspelled registration
+# raises CisternalWireError at import time instead of silently dropping a
+# tool. Telemetry and error-shaping remain owned by @traced_tool — no
+# CisternalMiddleware is installed on `app`, so wire()'s own zero-telemetry
+# passthrough invariant is a no-op here, not a behavior change from the
+# previous @app.tool(...) registrations.
+# ============================================================================
+
+_WIRED = cisternal.wire(
+    app,
+    registry="bathos",
+    expected=[
+        "list_runs", "find_runs", "get_run", "cite_run", "lineage_prov",
+        "run_sql", "resolve_pin", "get_trust_state", "query_attestation",
+        "read_campaign_report", "read_figure_manifest", "figure_lookup",
+        "list_candidates", "anchor_insert", "anchor_get", "anchor_find",
+        "figure_entry_register", "attestation_scaffold", "attestation_validate",
+        "attestation_register", "graduate_product", "compact", "archive",
+        "check", "capability_probe", "sync", "init", "run", "campaign_create",
+        "campaign_list", "campaign_review", "campaign_conclude",
+        "postmortem_scaffold", "postmortem_validate", "postmortem_get",
+        "claim_scaffold", "claim_validate", "claim_register", "gate_stamp",
+        "gate_status", "claim_attest_parity", "validate_sidecar",
+        "list_outputs", "outputs_summary", "campaign_add", "campaign_show",
+        "verify", "lint", "repair_scan", "repair",
+    ],
+)
 
 
 def mcp_server():
