@@ -7,7 +7,7 @@ name = "bathos"
 version = "0.13.0a1"
 description = "Local-first, zero-server experiment tracking for researchers"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 authors = [
     { name = "Marielle Russo", email = "mariellexr@gmail.com" },
 ]
@@ -19,7 +19,7 @@ classifiers = [
     "Topic :: System :: Monitoring",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Operating System :: OS Independent",
 ]
 dependencies = [
@@ -31,6 +31,7 @@ dependencies = [
     "toml>=0.10",
     "rich>=13",
     "fastmcp>=3.3.1",
+    "cisternal>=0.1.0a1",
 ]
 
 [project.optional-dependencies]
@@ -53,11 +54,6 @@ dev = [
     "ruff>=0.6",
     "pyright>=1.1",
 ]
-cisterna = ["cisterna; python_version >= '3.13'"]
-
-[tool.uv.sources]
-cisterna = { path = "../cisterna", editable = true, marker = "python_version >= '3.13'" }
-
 [dependency-groups]
 dev = [
     "pytest>=8",
@@ -98,7 +94,7 @@ addopts = "--json-report --json-report-file=tmp/pytest.json -q"
 
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "ARG", "SIM"]

@@ -1,6 +1,6 @@
 # bathos CLAUDE.md
 
-CLI tool: `bth` | Install: `uv tool install bathos` | Stack: Python 3.12, Typer, DuckDB, PyArrow
+CLI tool: `bth` | Install: `uv tool install bathos` | Stack: Python 3.13, Typer, DuckDB, PyArrow, cisternal
 
 ## What This Is
 

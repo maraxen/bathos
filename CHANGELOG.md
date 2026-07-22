@@ -27,6 +27,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--negative-check` backing/hedge, mirroring Union Gate's opt-in-on-claim-registration adoption
   ladder — campaigns with no claim attached are unaffected.
 
+### Changed
+
+- **Rebase onto `cisternal`** — the sibling telemetry/export dependency was renamed
+  upstream from `cisterna` to `cisternal` (PyPI name collision with an unrelated
+  package). Bathos now depends on the real, published `cisternal>=0.1.0a1` from
+  PyPI unconditionally (dropped the `python_version >= '3.13'` marker and the local
+  `../cisterna` editable path override — the CI stub workaround from #22 is no
+  longer needed). Python floor bumped `>=3.12` → `>=3.13` to match. Telemetry bridge
+  (`telemetry_bridge.py`) renamed `cisterna_*` → `cisternal_*`; cutover env var
+  renamed `CISTERNA_TELEMETRY` → `CISTERNAL_TELEMETRY`.
+
 ---
 
 ## [0.13.0a1] - 2026-07-17
