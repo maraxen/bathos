@@ -2186,15 +2186,37 @@ def export_cmd(
         None, "--campaign", help="Filter by campaign (--html only)"
     ),
     surface: str | None = typer.Option(
-        None, "--surface", help="Plugin surface (e.g., claude_code)"
+        None, "--surface", help="Plugin surface: claude, cursor, copilot, or antigravity"
+    ),
+    plugin_out: str = typer.Option(
+        ".claude-plugin-dist",
+        "--plugin-out",
+        help="Output directory for the plugin bundle (--surface only)",
     ),
 ):
     """Export the using-bathos skill and register MCP server, or export catalog as HTML."""
-    # Phase 3: plugin surface post-step hook
     if surface:
-        from bathos import __version__
+        from pathlib import Path
 
-        typer.echo(f"Plugin export hook: surface={surface}, level={level}, bathos v{__version__}")
+        from bathos.plugin_export import PluginExportError, export_plugin_bundle
+
+        # "claude_code" was this flag's original (unimplemented) placeholder
+        # value; keep accepting it as an alias for "claude" so any existing
+        # callers using the old name don't silently break.
+        resolved_surface = "claude" if surface == "claude_code" else surface
+
+        try:
+            result = export_plugin_bundle(
+                surface=resolved_surface, out=Path(plugin_out), dry_run=dry_run
+            )
+        except PluginExportError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1)
+
+        if dry_run:
+            typer.echo(result.stdout, nl=False)
+        else:
+            typer.echo(f"Exported {result.surface} plugin bundle to {result.out}")
         raise typer.Exit(0)
 
     if html:
