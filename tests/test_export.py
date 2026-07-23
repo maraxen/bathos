@@ -1,5 +1,10 @@
 from pathlib import Path
 import pytest
+from typer.testing import CliRunner
+
+from bathos.cli import app
+
+runner = CliRunner()
 
 
 def test_get_skill_source_path_returns_existing_file():
@@ -124,3 +129,17 @@ def test_register_mcp_workspace_uses_cwd(tmp_path, monkeypatch):
     assert mcp_path.exists()
     data = json.loads(mcp_path.read_text())
     assert "bathos" in data["mcpServers"]
+
+
+def test_export_cmd_surface_writes_plugin_bundle(tmp_path):
+    """bth export --surface claude produces a real plugin bundle, not the old skill-copy path."""
+    out = tmp_path / "plugin-dist"
+    result = runner.invoke(app, ["export", "--surface", "claude", "--plugin-out", str(out)])
+    assert result.exit_code == 0, result.output
+    assert (out / ".claude-plugin" / "plugin.json").exists()
+
+
+def test_export_cmd_surface_unknown_surface_errors():
+    result = runner.invoke(app, ["export", "--surface", "bogus"])
+    assert result.exit_code == 1
+    assert "Unknown surface" in result.output

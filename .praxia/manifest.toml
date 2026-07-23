@@ -1,6 +1,6 @@
 [plugin]
 name            = "bathos"
-version         = "0.5.0"
+version         = "0.13.0a1"
 description     = "Experiment tracking — pre-registration, provenance, campaigns"
 requires_praxia = ">=1.0"
 # Declares bathos as a provider of the generic praxia "readback" capability
@@ -24,22 +24,19 @@ command = ["bth-mcp"]
 
 [[plugin.skills]]
 name     = "using-bathos"
-path     = "agent_assets/skills/using-bathos/SKILL.md"
+path     = "../agent_assets/skills/using-bathos/SKILL.md"
 triggers = ["bth run", "sidecar", "campaign", "experiment", "bth check"]
 
 [[plugin.snippets]]
 name           = "bathos-rules"
-path           = "agent_assets/snippets/rules.md"
+path           = "../agent_assets/snippets/rules.md"
 scope          = "project"
 scope_detector = "glob:scripts/**/*.bth.toml"
 
 [[plugin.agents]]
 name  = "experiment-runner"
-path  = "agent_assets/agents/experiment-runner.md"
+path  = "../agent_assets/agents/experiment-runner.md"
 tools = ["run", "campaign_create", "campaign_review", "check"]
 
 [plugin.dependencies]
 myxcel = ">=0.3"
-
-[plugin.export_command]
-claude_code = ["bth", "export", "--surface", "claude_code", "--level", "user"]
