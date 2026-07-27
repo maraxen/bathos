@@ -185,7 +185,51 @@ def validate_controls_block(sidecar: Sidecar, sidecar_path: Path | None = None) 
     return errors
 
 
-def validate_sidecar(sidecar: Sidecar, sidecar_path: Path | None = None) -> ValidationResult:
+def validate_claim_discriminability(sidecar: Sidecar, claim, sidecar_path: Path | None = None) -> list[ValidationError]:
+    """Cross-check sidecar claim_discriminates/claim_isolates against a registered claim. (#3719)
+
+    Only meaningful for EXPERIMENT-kind sidecars (the fields are experiment-only). `claim` is
+    typed loosely (avoid a validate.py -> claim.py import cycle; callers pass a `ClaimFile` from
+    `bathos.claim.load_registered_claim`) and duck-typed against its `.hypotheses`/`.confounds`
+    attributes, each a list of dicts with an `id` key.
+
+    Catches exactly the #3717 authoring mistake at validate time instead of at conclude time:
+    the sidecar's claim_discriminates was set to outcome labels instead of hypothesis ids, and
+    `bth validate-sidecar` had no way to notice because it never saw the claim at all.
+    """
+    errors: list[ValidationError] = []
+    if sidecar.kind != SidecarKind.EXPERIMENT:
+        return errors
+
+    valid_hypothesis_ids = {h.get("id") for h in claim.hypotheses}
+    valid_confound_ids = {c.get("id") for c in claim.confounds}
+
+    for disc_id in sidecar.claim_discriminates:
+        if disc_id not in valid_hypothesis_ids:
+            err = ValidationError(
+                "claim_discriminates",
+                f"{disc_id!r} is not a hypothesis id in the registered claim "
+                f"(valid: {sorted(i for i in valid_hypothesis_ids if i)})",
+            )
+            errors.append(err)
+            if sidecar_path:
+                event("sidecar.validate_error", path=str(sidecar_path), field="claim_discriminates", reason=f"unknown hypothesis id {disc_id!r}")
+
+    for iso_id in sidecar.claim_isolates:
+        if iso_id not in valid_confound_ids:
+            err = ValidationError(
+                "claim_isolates",
+                f"{iso_id!r} is not a confound id in the registered claim "
+                f"(valid: {sorted(i for i in valid_confound_ids if i)})",
+            )
+            errors.append(err)
+            if sidecar_path:
+                event("sidecar.validate_error", path=str(sidecar_path), field="claim_isolates", reason=f"unknown confound id {iso_id!r}")
+
+    return errors
+
+
+def validate_sidecar(sidecar: Sidecar, sidecar_path: Path | None = None, claim=None) -> ValidationResult:
     """Validate a parsed Sidecar for structural integrity and logical consistency.
 
     Checks:
@@ -194,6 +238,9 @@ def validate_sidecar(sidecar: Sidecar, sidecar_path: Path | None = None) -> Vali
     - DuckDB SQL conditions parse correctly
     - At least one result_schema field is referenced in conditions
     - At least one outcome branch has is_residual=true (catch-all fallback)
+    - If `claim` is given (a `bathos.claim.ClaimFile`): claim_discriminates/claim_isolates
+      resolve to real hypothesis/confound ids in it (#3719). Omitting `claim` skips this check
+      entirely — a sidecar authored before a campaign/claim exists must still validate.
 
     Returns ValidationResult with ok=True and errors=[] if valid, or ok=False with a list of errors.
     """
@@ -300,5 +347,9 @@ def validate_sidecar(sidecar: Sidecar, sidecar_path: Path | None = None) -> Vali
     # Validate [controls] block if present
     controls_errors = validate_controls_block(sidecar, sidecar_path)
     errors.extend(controls_errors)
+
+    # Cross-check claim_discriminates/claim_isolates if a registered claim was supplied (#3719)
+    if claim is not None:
+        errors.extend(validate_claim_discriminability(sidecar, claim, sidecar_path))
 
     return ValidationResult(ok=len(errors) == 0, errors=errors)

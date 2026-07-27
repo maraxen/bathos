@@ -152,6 +152,54 @@ def parse_claim(path: Path) -> ClaimFile:
     )
 
 
+def load_registered_claim(
+    db: duckdb.DuckDBPyConnection, campaign_id: str, workspace_root: Path | None = None
+) -> ClaimFile | None:
+    """Resolve + load the claim registered to a campaign, or None if it has none. (#3719)
+
+    Mirrors the resolution `conclude_campaign` already does inline (campaigns.claim_path /
+    claim_sha256 -> check_sha -> parse_claim), factored out so other call sites -- like
+    `validate_sidecar`'s new claim-discriminability cross-check -- don't duplicate it.
+
+    Args:
+        db: DuckDB connection
+        campaign_id: Campaign ID (prefix or full UUID)
+        workspace_root: Project workspace root; defaults to resolve_workspace().fs_root
+
+    Returns:
+        The parsed ClaimFile, or None if the campaign has no registered claim
+        (claim_path IS NULL — the opt-in adoption ladder, same as conclude_campaign).
+
+    Raises:
+        CampaignError: If campaign_id does not resolve
+        FileNotFoundError: If the registered claim file is missing
+        ValueError: If the claim file's SHA256 no longer matches the registered value
+    """
+    from bathos.campaigns import _resolve_campaign_id
+    from bathos.workspace import resolve_workspace
+
+    full_id = _resolve_campaign_id(db, campaign_id)
+
+    row = db.execute(
+        "SELECT claim_path, claim_sha256 FROM campaigns WHERE id=?", [full_id]
+    ).fetchone()
+    if not row or not row[0] or not row[1]:
+        return None
+    claim_path_rel, registered_sha = row[0], row[1]
+
+    if workspace_root is None:
+        workspace_root = resolve_workspace(Path.cwd()).fs_root
+
+    abs_path = workspace_root / claim_path_rel
+    if not abs_path.exists():
+        raise FileNotFoundError(
+            f"claim.bth.toml not found at {abs_path} — file may have been moved or deleted."
+        )
+
+    check_sha(claim_path_rel, registered_sha, workspace_root)
+    return parse_claim(abs_path)
+
+
 def validate_claim(claim: ClaimFile, db: duckdb.DuckDBPyConnection | None = None) -> ValidationResult:
     """Validate a parsed claim file.
 
