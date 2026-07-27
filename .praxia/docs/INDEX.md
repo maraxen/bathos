@@ -1,4 +1,4 @@
-# praxia Internal Docs
+# bathos Internal Docs
 
 ## Daily
 
