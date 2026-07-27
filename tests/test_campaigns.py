@@ -437,6 +437,89 @@ hypothesis_ids = ["H_primary", "H_null"]
         db.close()
 
 
+def test_conclude_campaign_union_gate_downgrades_with_real_registered_claim(
+    populated_warm_catalog: Path, tmp_path, monkeypatch
+):
+    """AC-08: Union Gate downgrades verdict to 'confounded' via the real conclude_campaign path.
+
+    Unlike test_conclude_campaign_union_gate_confounded_on_confirmation above (which nulls
+    claim_path right before calling conclude_campaign), this registers the claim for real via
+    register_claim — so check_sha's integrity check and run_union_gate's coverage check both
+    actually execute — and verifies the clause is genuinely uncovered rather than short-circuited
+    by the claim_path IS NULL opt-in path.
+    """
+    import json
+
+    from bathos.claim import register_claim
+
+    # emit_claim_coverage_report (campaigns.py) hardcodes Path.home() / ".bth" / "catalog" instead
+    # of deriving the sidecar dir from workspace_root/catalog_dir — redirect Path.home() so this
+    # test doesn't write into the real user home directory.
+    fake_home = tmp_path / "fake_home"
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+    db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
+    try:
+        campaign = create_campaign(db, name="Real Claim Gate Test", project_slug="prolix", mode="confirmation")
+
+        claim_path = tmp_path / "test.claim.toml"
+        claim_path.write_text("""[claim]
+headline = "Test claim"
+kill_condition = "Outcome != expected"
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary hypothesis"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null hypothesis"
+
+[claim.union_gate]
+[[claim.union_gate.clauses]]
+id = "C_main"
+description = "Main clause"
+hypothesis_ids = ["H_primary", "H_null"]
+""")
+        register_claim(claim_path, campaign.id, db, tmp_path)
+
+        # Run only discriminates H_primary — H_null is missing, so clause C_main is uncovered.
+        campaign_time = datetime.fromisoformat(campaign.started_at)
+        run = Run(
+            project_slug="prolix",
+            command="python test.py",
+            argv=["python", "test.py"],
+            git_hash="abc",
+            git_branch="main",
+            git_dirty=False,
+            timestamp=campaign_time + timedelta(minutes=1),
+            status="completed",
+            exit_code=0,
+            claim_discriminates=json.dumps(["H_primary"]),
+        )
+        db.close()
+        write_run(run, populated_warm_catalog)
+        compact(populated_warm_catalog)
+        db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
+
+        add_run_to_campaign(db, campaign.id, run.id)
+
+        conclude_campaign(db, campaign.id, "pass", "Should be downgraded", workspace_root=tmp_path)
+
+        row = db.execute("SELECT outcome_label FROM campaigns WHERE id = ?", [campaign.id]).fetchone()
+        assert row[0] == "confounded"
+
+        report_path = (
+            fake_home / ".bth" / "catalog" / "sidecars" / campaign.id / f"claim_coverage_{campaign.id}.json"
+        )
+        assert report_path.exists(), "expected claim-coverage sidecar report to be emitted"
+        report = json.loads(report_path.read_text())
+        assert report["uncovered_clauses"] == ["C_main"]
+        assert report["verdict_blocked"] is True
+    finally:
+        db.close()
+
+
 def test_conclude_campaign_force_verdict_bypasses_gate(populated_warm_catalog: Path, tmp_path):
     """AC-09: Union Gate bypass with --force-verdict writes claim_mode='bypassed'."""
     import json
