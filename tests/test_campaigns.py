@@ -520,6 +520,97 @@ hypothesis_ids = ["H_primary", "H_null"]
         db.close()
 
 
+def test_conclude_campaign_union_gate_covered_via_real_sidecar_origin(
+    populated_warm_catalog: Path, tmp_path
+):
+    """#3717: the clause is genuinely COVERED end-to-end from a real sidecar, not a hand-built Run.
+
+    AC-08 (above) proves the DOWNGRADE path with a Run constructed directly with
+    claim_discriminates set by hand — it never exercises the ORIGIN (sidecar parsing) that #3717
+    found broken, nor the full chain a real `bth run` takes: sidecar -> Sidecar.claim_discriminates
+    -> Run.claim_discriminates -> cool parquet (write_run) -> compact() -> warm `runs` table ->
+    run_union_gate. #3717 was exactly a bug where the pieces looked right in isolation but the
+    composition was broken (correcting the sidecar and re-running still left the clause unmapped),
+    so a test that only exercises one half at a time cannot catch a regression in the seam between
+    them. This runs the real path and asserts the clause comes out COVERED, not confounded.
+    """
+    import json
+    import sys
+    import textwrap
+
+    from bathos.claim import register_claim
+    from bathos.runner import run_script
+
+    db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
+    try:
+        campaign = create_campaign(
+            db, name="Real Sidecar Origin Gate Test", project_slug="prolix", mode="confirmation"
+        )
+
+        claim_path = tmp_path / "test.claim.toml"
+        claim_path.write_text("""[claim]
+headline = "Test claim"
+kill_condition = "Outcome != expected"
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary hypothesis"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null hypothesis"
+
+[claim.union_gate]
+[[claim.union_gate.clauses]]
+id = "C_main"
+description = "Main clause"
+hypothesis_ids = ["H_primary", "H_null"]
+""")
+        db.close()
+        register_claim(claim_path, campaign.id, duckdb.connect(str(populated_warm_catalog / "bathos.db")), tmp_path)
+
+        enforced = tmp_path / "scripts" / "experiments"
+        enforced.mkdir(parents=True)
+        script = enforced / "run_x.py"
+        script.write_text("print('hi')")
+        (enforced / "run_x.bth.toml").write_text(textwrap.dedent("""
+            [experiment]
+            hypothesis = "test hypothesis"
+            claim_discriminates = ["H_primary", "H_null"]
+            [outcomes.pass]
+            condition = "x == 1"
+            decision = "good"
+            reasoning = "expected behavior"
+            [outcomes.fallback]
+            condition = "1==1"
+            decision = "other"
+            reasoning = "catch-all"
+            is_residual = true
+            [result_schema]
+            x = "float"
+        """))
+        rc = run_script(
+            argv=[sys.executable, str(script)],
+            project_slug="prolix",
+            catalog_dir=populated_warm_catalog,
+            output_paths=[],
+            tags=[],
+            cwd=tmp_path,
+            campaign_id=campaign.id,
+        )
+        assert rc == 0
+
+        compact(populated_warm_catalog)
+        db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
+
+        conclude_campaign(db, campaign.id, "pass", "Should be covered", workspace_root=tmp_path)
+
+        row = db.execute("SELECT outcome_label FROM campaigns WHERE id = ?", [campaign.id]).fetchone()
+        assert row[0] == "pass", f"expected the clause to be COVERED (outcome stays 'pass'), got {row[0]!r}"
+    finally:
+        db.close()
+
+
 def test_conclude_campaign_force_verdict_bypasses_gate(populated_warm_catalog: Path, tmp_path):
     """AC-09: Union Gate bypass with --force-verdict writes claim_mode='bypassed'."""
     import json
