@@ -79,6 +79,12 @@ class Sidecar:
     verification: str = ""
     # agent mode field (all kinds)
     agent_mode: str = ""
+    # claim-tier discriminability (experiment sidecars only). These carry the hypothesis /
+    # confound ids the run discriminates or isolates, and are what the Union Gate maps a run
+    # onto a claim clause with. Parsed here and propagated to Run in runner.py -- without both
+    # halves the gate reads an always-NULL column and downgrades every confirmation campaign. (#3717)
+    claim_discriminates: list[str] = field(default_factory=list)
+    claim_isolates: list[str] = field(default_factory=list)
     # popper sequential test fields (experiment sidecars only)
     popper_null_pass_rate: float | None = None
     popper_alt_pass_rate: float | None = None
@@ -102,6 +108,21 @@ CANONICAL_STAGES = {
     "ablation",
     "production",
 }
+
+
+def _str_list(value) -> list[str]:
+    """Coerce a sidecar list-of-ids field to list[str], tolerating a bare string. (#3717)
+
+    Returns [] for None/absent so an unset field is indistinguishable from an empty one --
+    both mean "this run declares no clause coverage".
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [str(v) for v in value]
+    return []
 
 
 def parse_sidecar(path: Path) -> Sidecar:
@@ -137,6 +158,8 @@ def parse_sidecar(path: Path) -> Sidecar:
             outcomes=outcomes,
             result_schema=data.get("result_schema", {}),
             agent_mode=section.get("agent_mode", ""),
+            claim_discriminates=_str_list(section.get("claim_discriminates")),
+            claim_isolates=_str_list(section.get("claim_isolates")),
         )
         popper = data.get("popper", {})
         if popper:

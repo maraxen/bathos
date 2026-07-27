@@ -337,6 +337,20 @@ def run_script(
         campaign_id=resolved_campaign_id or "",
         script_sha256=script_sha256_val,
         stage_name=sidecar.stage_name if sidecar else None,
+        # (#3717) Propagate claim-tier discriminability from the sidecar. The warm columns and
+        # the cool->warm compact path already existed (#2276), but nothing ever populated them
+        # AT THE ORIGIN, so runs.claim_discriminates was NULL for all 1418 runs in the catalog
+        # and the Union Gate -- which maps a run onto a claim clause via this field -- found
+        # every clause unmapped and downgraded every confirmation campaign to `confounded`
+        # regardless of design. Stored as a JSON array string to match the warm schema.
+        claim_discriminates=(
+            json.dumps(sidecar.claim_discriminates)
+            if sidecar and sidecar.claim_discriminates
+            else None
+        ),
+        claim_isolates=(
+            json.dumps(sidecar.claim_isolates) if sidecar and sidecar.claim_isolates else None
+        ),
         component_id=component_id,
         component_sidecar_sha256=component_sidecar_sha256,
     )
