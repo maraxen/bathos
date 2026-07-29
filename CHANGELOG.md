@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Instrument-sensitivity discipline (debt #1071)** — schema v13 (`differential_status`,
+  `differential_off_value`, `differential_on_value`, `differential_effect`,
+  `dependency_lock_sha256`):
+  - `[differential]` sidecar block + `bth run` pre-flight: runs the script once with a
+    declared knob off, once on, and asserts the results `differ`/are `identical` before
+    trusting the main run. A failed invariant records the run with the new reserved outcome
+    `invalid_measurement` instead of a misleading pass/fail/null result.
+  - `check_positive_control_missing` lint (WARNING) for null-capable outcomes with no
+    `[differential]`/`[controls]` positive control declared.
+  - Claim-tier AC-23: `kill_condition_satisfiable_by_null` is now required; when `true`, a
+    `union_gate` clause must be tagged `positive_control = true` — schema-enforced instead of
+    an ad hoc clause-naming convention.
+  - `differential_confound_check()` re-derives positive-control clause coverage live at
+    Union-Gate time, downgrading to `uncontrolled` if the covering run's own dependency-lock
+    hash has drifted from the current `uv.lock` since its differential pre-flight passed.
+  - Sprint-audit Signal 11 (`differential_staleness_count`), filling the numbering gap
+    between Signal 10 and 12.
+  - Static `bth lint` check for sidecar outcome conditions OR-ing together 3+ uncorrected
+    significance-test comparisons (`OutcomeSpec.multiple_comparisons_correction` escape hatch).
+
 ---
 
 ## [0.13.0a1] - 2026-07-17
