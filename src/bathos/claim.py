@@ -89,6 +89,7 @@ class ClaimFile:
 
     headline: str
     kill_condition: str
+    kill_condition_satisfiable_by_null: bool | None  # debt #1071, AC-23
     regime: str | None
     hypotheses: list[dict]  # {id, label, predicted_signature?}
     assumptions: list[dict]
@@ -126,6 +127,7 @@ def parse_claim(path: Path) -> ClaimFile:
 
     headline = claim_section.get("headline", "")
     kill_condition = claim_section.get("kill_condition", "")
+    kill_condition_satisfiable_by_null = claim_section.get("kill_condition_satisfiable_by_null")
     regime = claim_section.get("regime")
 
     hypotheses = data.get("hypotheses", [])
@@ -141,6 +143,7 @@ def parse_claim(path: Path) -> ClaimFile:
     return ClaimFile(
         headline=headline,
         kill_condition=kill_condition,
+        kill_condition_satisfiable_by_null=kill_condition_satisfiable_by_null,
         regime=regime,
         hypotheses=hypotheses,
         assumptions=assumptions,
@@ -384,6 +387,28 @@ def validate_claim(claim: ClaimFile, db: duckdb.DuckDBPyConnection | None = None
             # State 3: parity_run_id set, db is None
             infos.append(f"skipping baseline parity check for '{confound_label}' — no catalog connection")
 
+    # AC-23: kill_condition_satisfiable_by_null must be declared, and if true, a union_gate
+    # clause tagged positive_control=true must exist (debt #1071). Schema-enforced instead of
+    # remembered -- previously this was an ad hoc clause-naming convention with zero validation.
+    if claim.kill_condition_satisfiable_by_null is None:
+        errors.append(
+            ValidationError(
+                "kill_condition_satisfiable_by_null is required (AC-23) — declare whether a "
+                "null result is a live possibility this claim's kill_condition needs to rule out"
+            )
+        )
+    elif claim.kill_condition_satisfiable_by_null:
+        has_positive_control_clause = any(
+            clause.get("positive_control") is True for clause in claim.union_gate_clauses
+        )
+        if not has_positive_control_clause:
+            errors.append(
+                ValidationError(
+                    "kill_condition_satisfiable_by_null=true but no union_gate clause is marked "
+                    "positive_control=true (AC-23) — add one proving the instrument can detect a "
+                    "known-real effect via the [differential] pre-flight"
+                )
+            )
 
     # AC-04: zero-power lint — planned_run_label where all hypothesis pairs predict identical outcome
     from collections import defaultdict
@@ -455,6 +480,12 @@ def scaffold_claim(campaign_id: str, db: duckdb.DuckDBPyConnection, workspace_ro
 [claim]
 headline = "REQUIRED: One-sentence summary of what this campaign tests"
 kill_condition = "REQUIRED: Under what conditions would the result contradict the hypothesis?"
+# REQUIRED (debt #1071): is a null result a live possibility this kill_condition needs to
+# rule out? If true, at least one [[claim.union_gate.clauses]] entry below must set
+# positive_control = true, proving (via a [differential] pre-flight) that the instrument
+# can actually detect a known-real effect -- otherwise a null result is unfalsifiable-by-
+# instrument-failure.
+kill_condition_satisfiable_by_null = false
 regime = "Optional: Parameter ranges or conditions claimed to be covered"
 
 [[hypotheses]]
@@ -495,6 +526,8 @@ predicted_outcome = "??  # EDIT: assign expected outcome if run exists"
 id = "C_main"
 description = "REQUIRED: What does this clause discriminate?"
 hypothesis_ids = ["H_information_symmetry", "H_null_misspec"]
+# positive_control = true  # set true (+ kill_condition_satisfiable_by_null=true above) if
+                           # this clause is proven by a [differential] pre-flight run
 """
 
     claim_path = claims_dir / f"{campaign_name}.claim.toml"
@@ -597,8 +630,96 @@ def check_sha(path_relative: str, registered_sha: str, workspace_root: Path) -> 
         )
 
 
+def differential_confound_check(
+    db: duckdb.DuckDBPyConnection,
+    campaign_id: str,
+    claim: ClaimFile,
+    workspace_root: Path | None = None,
+) -> dict:
+    """Check positive_control union_gate clauses for live instrument-sensitivity proof (debt #1071).
+
+    Same output shape as `parity_confound_check`: one status per relevant clause, re-derived
+    from live run state at call time (not cached at register time), so a clause that was
+    "controlled" when a run first covered it can go "uncontrolled" later if the dependency
+    environment has since drifted -- exactly the failure mode this debt was filed after (a
+    package re-pin silently invalidating every prior differential/SC result).
+
+    A clause tagged `positive_control = true` is "controlled" iff at least one run covering
+    its `hypothesis_ids` (same covering-run search `run_union_gate` uses) has BOTH:
+      - `differential_status == "passed"` (its own inline [differential] pre-flight fired
+        the declared invariant -- proof the instrument could detect a real effect at run time)
+      - a `dependency_lock_sha256` that still matches the current `uv.lock` (not stale)
+    Otherwise "uncontrolled". Clauses not tagged `positive_control` are omitted entirely.
+
+    Args:
+        db: DuckDB connection
+        campaign_id: Campaign ID (full or prefix)
+        claim: Parsed claim file
+        workspace_root: Project workspace root for dependency-lock drift comparison; defaults
+            to `resolve_workspace(Path.cwd()).fs_root`
+
+    Returns:
+        {"clauses": [{"id": str, "label": str, "status": "controlled"|"uncontrolled"}, ...]}
+    """
+    from bathos.checker import check_dependency_lock_drift
+
+    if workspace_root is None:
+        from bathos.workspace import resolve_workspace
+
+        workspace_root = resolve_workspace(Path.cwd()).fs_root
+
+    results = []
+    for clause in claim.union_gate_clauses:
+        if clause.get("positive_control") is not True:
+            continue
+
+        clause_id = clause.get("id", "?")
+        hypothesis_ids = clause.get("hypothesis_ids", [])
+        label = format_clause_ref(clause)
+
+        covered_runs = db.execute(
+            """
+            SELECT cr.run_id FROM campaign_runs cr
+            JOIN runs r ON cr.run_id = r.id
+            WHERE cr.campaign_id = ?
+              AND r.claim_discriminates IS NOT NULL
+            """,
+            [campaign_id],
+        ).fetchall()
+
+        status = "uncontrolled"
+        for (run_id,) in covered_runs:
+            rows = db.execute(
+                "SELECT claim_discriminates, differential_status, dependency_lock_sha256 "
+                "FROM runs WHERE id = ?",
+                [run_id],
+            ).fetchall()
+            if not rows or not rows[0][0]:
+                continue
+            disc_json, differential_status, dependency_lock_sha256 = rows[0]
+            try:
+                disc_list = json.loads(disc_json)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(disc_list, list) or not all(h in disc_list for h in hypothesis_ids):
+                continue
+            if differential_status != "passed":
+                continue
+            if check_dependency_lock_drift(dependency_lock_sha256, workspace_root):
+                continue
+            status = "controlled"
+            break
+
+        results.append({"id": clause_id, "label": label, "status": status})
+
+    return {"clauses": results}
+
+
 def run_union_gate(
-    db: duckdb.DuckDBPyConnection, campaign_id: str, claim: ClaimFile
+    db: duckdb.DuckDBPyConnection,
+    campaign_id: str,
+    claim: ClaimFile,
+    workspace_root: Path | None = None,
 ) -> tuple[str, list[str]]:
     """Run the union gate check for a campaign.
 
@@ -606,16 +727,35 @@ def run_union_gate(
         db: DuckDB connection
         campaign_id: Campaign ID
         claim: Parsed claim file
+        workspace_root: Project workspace root, threaded to `differential_confound_check`
+            for clauses tagged `positive_control` (debt #1071); defaults to cwd-resolved
+            workspace when omitted.
 
     Returns:
         Tuple of (verdict, uncovered_clause_ids) where verdict is 'covered' or 'confounded'
         and uncovered_clause_ids is a list of clause IDs that have no covering runs
     """
     uncovered_clauses = []
+    positive_control_status: dict[str, str] | None = None
 
     for clause in claim.union_gate_clauses:
         clause_id = clause.get("id", "?")
         hypothesis_ids = clause.get("hypothesis_ids", [])
+
+        if clause.get("positive_control") is True:
+            # Lazily computed once, memoized across however many positive_control clauses
+            # this claim declares (usually one) -- avoids re-running the covering-run query
+            # per clause.
+            if positive_control_status is None:
+                positive_control_status = {
+                    c["id"]: c["status"]
+                    for c in differential_confound_check(db, campaign_id, claim, workspace_root)[
+                        "clauses"
+                    ]
+                }
+            if positive_control_status.get(clause_id) != "controlled":
+                uncovered_clauses.append(clause_id)
+            continue
 
         # Find a run that covers ALL hypothesis_ids in this clause
         covered_runs = db.execute(

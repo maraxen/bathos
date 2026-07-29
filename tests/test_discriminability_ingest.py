@@ -26,6 +26,7 @@ from bathos.schema import Run
 _UNION_GATE_CLAIM = """[claim]
 headline = "Discriminability ingest check"
 kill_condition = "fail"
+kill_condition_satisfiable_by_null = false
 
 [[hypotheses]]
 id = "H_primary"
@@ -132,6 +133,7 @@ def test_ac04_ac05_read_claim_file_not_warm_discriminates_column(tmp_path: Path)
         """[claim]
 headline = "Bias check"
 kill_condition = "fail"
+kill_condition_satisfiable_by_null = false
 
 [[hypotheses]]
 id = "H_primary"

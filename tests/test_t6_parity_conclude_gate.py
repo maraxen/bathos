@@ -507,6 +507,128 @@ class TestAC20_SHADriftDetection:
         assert rows[0][0] == "confounded"
 
 
+class TestPositiveControlDependencyDrift:
+    """Debt #1071 acceptance criterion: a positive_control clause's coverage must be
+    invalidated when the dependency environment drifts since the covering run's
+    [differential] pre-flight passed -- the AC-20 SHA-drift pattern, applied to
+    instrument-sensitivity proof instead of parity artifacts."""
+
+    @staticmethod
+    def _claim_with_positive_control(tmp_path: Path) -> Path:
+        claim_path = tmp_path / "claim_positive_control.bth.toml"
+        claim_path.write_text("""[claim]
+headline = "Test claim with positive control"
+kill_condition = "Outcome != expected"
+kill_condition_satisfiable_by_null = true
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary hypothesis"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null hypothesis"
+
+[[claim.discriminability]]
+hypothesis_a = "H_primary"
+hypothesis_b = "H_null"
+planned_run_label = "main"
+predicted_outcome = "discriminates"
+
+[claim.union_gate]
+[[claim.union_gate.clauses]]
+id = "C_sensitivity"
+description = "Instrument proven sensitive via differential pre-flight"
+hypothesis_ids = ["H_primary", "H_null"]
+positive_control = true
+""")
+        return claim_path
+
+    def test_dependency_lock_drift_invalidates_positive_control_and_downgrades_conclude(
+        self, tmp_catalog, tmp_path, clean_db, monkeypatch
+    ):
+        """A covering run's differential-verified proof goes stale when uv.lock changes,
+        downgrading the confirmation campaign's conclude verdict to 'confounded' -- exactly
+        what was missing when a dependency re-pin silently invalidated prior differential
+        results (debt #1071)."""
+        from bathos.claim import differential_confound_check, parse_claim
+
+        # emit_claim_coverage_report (campaigns.py) hardcodes Path.home() / ".bth" / "catalog"
+        # instead of deriving the sidecar dir from catalog_dir -- redirect Path.home() so this
+        # test doesn't write into the real user home directory (same workaround as
+        # test_conclude_campaign_union_gate_downgrades_with_real_registered_claim in
+        # test_campaigns.py).
+        fake_home = tmp_path / "fake_home"
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+        db = clean_db
+        (tmp_path / "uv.lock").write_text("version = 1\nname = \"bathos\"\n")
+
+        claim_path = self._claim_with_positive_control(tmp_path)
+        claim = parse_claim(claim_path)
+
+        campaign = create_campaign(
+            db,
+            name="Positive Control Drift",
+            project_slug="test_proj",
+            mode="confirmation",
+        )
+        register_claim(claim_path, campaign.id, db, tmp_path)
+
+        # A run that covers C_sensitivity's hypothesis pair, whose own [differential]
+        # pre-flight passed, recorded with the current uv.lock hash.
+        from bathos.checker import hash_dependency_lock
+
+        run = Run(
+            project_slug="test_proj",
+            command="python test.py",
+            argv=["python", "test.py"],
+            git_hash="abc123",
+            git_branch="main",
+            git_dirty=False,
+            status="completed",
+            exit_code=0,
+            claim_discriminates=json.dumps(["H_primary", "H_null"]),
+            differential_status="passed",
+            dependency_lock_sha256=hash_dependency_lock(tmp_path),
+        )
+        write_run(run, tmp_catalog)
+        db.close()
+        compact(tmp_catalog)
+        db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+        add_run_to_campaign(db, campaign.id, run.id)
+
+        before = differential_confound_check(db, campaign.id, claim, workspace_root=tmp_path)
+        assert before["clauses"] == [
+            {"id": "C_sensitivity", "label": "Instrument proven sensitive via differential pre-flight (C_sensitivity)", "status": "controlled"}
+        ]
+
+        # The "a22 re-pin": the dependency environment changes after the differential
+        # pre-flight ran, with no new run to re-verify instrument sensitivity.
+        (tmp_path / "uv.lock").write_text("version = 2\nname = \"bathos\"\n")
+
+        after = differential_confound_check(db, campaign.id, claim, workspace_root=tmp_path)
+        assert after["clauses"][0]["status"] == "uncontrolled"
+
+        conclude_campaign(
+            db, campaign.id, "pass", "Dependency drifted since differential verification",
+            workspace_root=tmp_path,
+        )
+
+        rows = db.execute(
+            "SELECT outcome_label FROM campaigns WHERE id = ?", [campaign.id]
+        ).fetchall()
+        assert rows[0][0] == "confounded"
+
+        coverage_path = (
+            fake_home / ".bth" / "catalog" / "sidecars" / campaign.id / f"claim_coverage_{campaign.id}.json"
+        )
+        assert coverage_path.exists()
+        coverage = json.loads(coverage_path.read_text())
+        assert "C_sensitivity" in coverage["uncovered_clauses"]
+        assert coverage["verdict_blocked"] is True
+
+
 class TestStep5_ValidateClaimGradedPath:
     """Step 5: validate_claim graded-parity-run check alongside the legacy equivalence path (F-1).
 
@@ -522,6 +644,7 @@ class TestStep5_ValidateClaimGradedPath:
         content = """[claim]
 headline = "Claim with graded parity"
 kill_condition = "Outcome != expected"
+kill_condition_satisfiable_by_null = false
 
 [[hypotheses]]
 id = "H_primary"

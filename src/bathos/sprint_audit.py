@@ -523,6 +523,57 @@ def sprint_audit(hours: int = 24) -> dict:
             signal_result_submit_bypass = signal_submit_bypass_rate(project["slug"], db_path, catalog_dir)
             signals["submit_bypass_rate"] = signal_result_submit_bypass.value if signal_result_submit_bypass.value is not None else 0.0
 
+            # Signal 11: differential-staleness — positive_control union_gate clauses reported
+            # uncontrolled by differential_confound_check (instrument-sensitivity proof missing,
+            # invalid_measurement outcome on the covering run, or dependency-lock drift since
+            # the differential ran) on confirmation campaigns (debt #1071). Mirrors Signal 13's
+            # confirmation-only scope and try/except-wrapped, non-fatal-on-error shape.
+            differential_staleness_count = 0
+            project_root = Path(project.get("root", "."))
+            try:
+                confirmation_with_claims = db.execute(
+                    "SELECT name, id, claim_path FROM campaigns "
+                    "WHERE mode='confirmation' "
+                    "AND claim_path IS NOT NULL AND claim_path != '' "
+                    "AND status NOT IN ('abandoned','open')"
+                ).fetchall()
+                from bathos.claim import parse_claim as _parse_claim_s11, differential_confound_check
+
+                for cname, cid, claim_path_rel in confirmation_with_claims:
+                    abs_claim_path = project_root / claim_path_rel
+                    if not abs_claim_path.exists():
+                        continue  # Signal 13 already flags a missing claim file
+                    try:
+                        claim = _parse_claim_s11(abs_claim_path)
+                    except (FileNotFoundError, ValueError):
+                        continue  # Signal 13 already flags an unreadable claim file
+
+                    has_positive_control = any(
+                        clause.get("positive_control") is True
+                        for clause in claim.union_gate_clauses
+                    )
+                    if not has_positive_control:
+                        continue
+
+                    pc_result = differential_confound_check(db, cid, claim, project_root)
+                    uncontrolled = [
+                        c for c in pc_result.get("clauses", []) if c.get("status") == "uncontrolled"
+                    ]
+                    for clause in uncontrolled:
+                        differential_staleness_count += 1
+                        anomalies.append(
+                            f"Confirmation campaign '{cname}' ({cid[:8]}) positive-control "
+                            f"clause '{clause.get('label', clause.get('id', '?'))}' is "
+                            "uncontrolled — instrument-sensitivity proof missing, invalidated "
+                            "by dependency drift, or covering run failed invalid_measurement "
+                            "(debt #1071)."
+                        )
+            except Exception as e:
+                warnings.append(
+                    f"Project {project['slug']}: Signal 11 check failed — {e}"
+                )
+            signals["differential_staleness_count"] = differential_staleness_count
+
             # Signal 12: unregistered claims on confirmation campaigns
             # AC-10: Flag confirmation campaigns without a registered claim
             try:
@@ -542,7 +593,7 @@ def sprint_audit(hours: int = 24) -> dict:
             # Signal 13: uncontrolled reference_parity on confirmation campaigns
             # AC-14: flag confirmation campaigns with a published-method baseline
             # that lacks a controlled literature-parity attestation.
-            project_root = Path(project.get("root", "."))
+            # (project_root already resolved above, by Signal 11)
             try:
                 confirmation_with_claims = db.execute(
                     "SELECT name, id, claim_path FROM campaigns "

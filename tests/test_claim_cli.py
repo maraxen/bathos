@@ -62,6 +62,7 @@ def test_claim_validate_ok_on_minimal_claim(tmp_path):
     claim_path.write_text("""[claim]
 headline = "Test headline"
 kill_condition = "Fails if wrong"
+kill_condition_satisfiable_by_null = false
 
 [[hypotheses]]
 id = "H_main_effect"

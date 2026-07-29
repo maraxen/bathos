@@ -681,6 +681,7 @@ def _fake_claim(hypotheses=None, confounds=None):
     return ClaimFile(
         headline="Test claim",
         kill_condition="Outcome != expected",
+        kill_condition_satisfiable_by_null=False,
         regime=None,
         hypotheses=hypotheses if hypotheses is not None else [
             {"id": "H_primary", "label": "Primary"},

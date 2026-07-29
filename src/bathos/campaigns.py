@@ -295,7 +295,7 @@ def conclude_campaign(
         # Run Union Gate (which may also downgrade if clauses are uncovered)
         from bathos.claim import format_clause_list
 
-        verdict, uncovered = run_union_gate(db, full_id, claim)
+        verdict, uncovered = run_union_gate(db, full_id, claim, workspace_root=workspace_root)
         uncovered_display = format_clause_list(claim, uncovered)
 
         # AC-08: Gate behavior by campaign mode
