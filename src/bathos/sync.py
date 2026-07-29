@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import subprocess
 import threading
@@ -9,6 +10,8 @@ from pathlib import Path
 
 from bathos.config import ProjectConfig
 from bathos.telemetry import event
+
+logger = logging.getLogger(__name__)
 
 _SYNC_TIMEOUT_S = 120  # rsync kill switch: fail if no completion within 2 minutes
 _RSYNC_STALL_SECONDS = 30  # Stall detection: no progress for N seconds
@@ -216,7 +219,7 @@ def sync_catalog(
             files_transferred=total_files,
         )
         raise RuntimeError(f"rsync timed out after {_SYNC_TIMEOUT_S}s and was killed")
-    except Exception as e:
+    except Exception:
         duration_s = time.time() - start_time
         event(
             "sync.rsync_end",
@@ -264,9 +267,9 @@ def sync_catalog(
                 event("sync.truncated_fragment", path=str(parquet_file))
 
     return SyncResult(
-        transferred=transferred, 
-        duration_s=duration_s, 
-        remote=remote_name, 
+        transferred=transferred,
+        duration_s=duration_s,
+        remote=remote_name,
         filtered=filtered,
         truncated_candidates=truncated_candidates,
     )
