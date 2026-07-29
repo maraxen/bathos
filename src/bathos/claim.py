@@ -434,6 +434,7 @@ def validate_claim(
                     "positive_control=true (AC-23) — add one proving the instrument can detect a "
                     "known-real effect via the [differential] pre-flight"
                 )
+            )
     # BP-2: Validate [confounds.synthetic_recovery] sub-blocks in confounds
     for confound in claim.confounds:
         synth = confound.get("synthetic_recovery", {})
