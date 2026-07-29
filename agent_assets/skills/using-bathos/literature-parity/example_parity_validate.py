@@ -14,7 +14,6 @@ This example shows:
 
 import json
 import sys
-from pathlib import Path
 from typing import Any
 
 from bathos.parity import ParityEvidence, compute_grade

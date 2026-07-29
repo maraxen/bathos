@@ -6,8 +6,7 @@ from __future__ import annotations
 
 import datetime as dt
 import subprocess
-from datetime import UTC, datetime
-from pathlib import Path
+from datetime import datetime
 
 import duckdb
 import pytest

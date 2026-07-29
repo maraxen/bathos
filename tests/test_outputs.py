@@ -1,13 +1,9 @@
 """Tests for bth outputs subcommand group."""
 
 import json
-import os
-from datetime import UTC, datetime
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from rich.console import Console
 
 from bathos.rich_fmt import render_output_list, render_outputs_summary
 from bathos.schema import Run

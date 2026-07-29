@@ -2,7 +2,8 @@
 
 import ast
 from pathlib import Path
-from bathos.errors import BathosErrorCode, EXCEPTION_TO_CODE, RESOLUTION_HINTS
+
+from bathos.errors import EXCEPTION_TO_CODE, RESOLUTION_HINTS, BathosErrorCode
 
 BUILTIN_EXCEPTIONS = {
     "ValueError", "RuntimeError", "KeyError", "NotImplementedError", "TypeError",

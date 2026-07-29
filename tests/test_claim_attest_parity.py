@@ -3,19 +3,17 @@
 from __future__ import annotations
 
 import json
-import os
-import tempfile
-from pathlib import Path
 from datetime import UTC, datetime
+from pathlib import Path
 
 import duckdb
 import pytest
 
 from bathos.claim import (
-    parse_claim,
     attest_parity,
-    parity_confound_check,
     check_sha,
+    parity_confound_check,
+    parse_claim,
 )
 
 
@@ -378,8 +376,6 @@ class TestAtomicity:
         3. File SHA == original DB SHA (no divergence)
         4. check_sha does NOT raise after rollback (proving consistency)
         """
-        from unittest.mock import patch, MagicMock
-        import bathos.claim
 
         campaign_id = "test_campaign"
         campaign_name = "test_campaign"

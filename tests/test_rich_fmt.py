@@ -1,17 +1,17 @@
 import io
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 
 import pytest
 from rich.console import Console
 
-from bathos.schema import Run
 from bathos.campaigns import Campaign
 from bathos.rich_fmt import (
-    render_runs_table,
-    render_run_detail,
-    render_campaign_table,
     render_campaign_review,
+    render_campaign_table,
+    render_run_detail,
+    render_runs_table,
 )
+from bathos.schema import Run
 
 
 @pytest.fixture

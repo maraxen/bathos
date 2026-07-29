@@ -53,7 +53,7 @@ def migrate_catalog(catalog_dir: Path, dry_run: bool = False) -> MigrateResult:
                 pa.array([CURRENT_SCHEMA_VERSION] * len(tbl), type=pa.string()),
             )
         tbl = tbl.select([f.name for f in COOL_SCHEMA]).cast(COOL_SCHEMA)
-        
+
         # Fix 3: Pre-migration backup + restore on failure
         bak = frag.with_suffix(".bak")
         tmp_path = frag.with_suffix(".tmp")
@@ -62,7 +62,7 @@ def migrate_catalog(catalog_dir: Path, dry_run: bool = False) -> MigrateResult:
             pq.write_table(tbl, tmp_path)
             tmp_path.replace(frag)
             bak.unlink(missing_ok=True)
-        except Exception as original_exc:
+        except Exception:
             # Remove partial tmp if it exists
             tmp_path.unlink(missing_ok=True)
             # Restore original from backup

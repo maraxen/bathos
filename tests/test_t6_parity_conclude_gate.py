@@ -2,28 +2,26 @@
 
 from __future__ import annotations
 
-import json
 import datetime as dt
-from pathlib import Path
+import json
 from datetime import UTC, datetime
-from unittest.mock import patch
+from pathlib import Path
 
 import duckdb
 import pytest
 
-from bathos.claim import (
-    parse_claim,
-    validate_claim,
-    register_claim,
-    check_sha,
-    parity_confound_check,
-)
 from bathos.campaigns import (
-    create_campaign,
     add_run_to_campaign,
     conclude_campaign,
+    create_campaign,
 )
 from bathos.catalog import init_catalog, write_run
+from bathos.claim import (
+    parity_confound_check,
+    parse_claim,
+    register_claim,
+    validate_claim,
+)
 from bathos.compact import compact
 from bathos.schema import Run
 

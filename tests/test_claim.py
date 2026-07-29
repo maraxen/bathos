@@ -3,27 +3,20 @@
 from __future__ import annotations
 
 import json
-import tempfile
-from pathlib import Path
 from datetime import UTC, datetime
+from pathlib import Path
 
 import duckdb
 import pytest
 
 from bathos.claim import (
-    ClaimFile,
-    ValidationError,
-    ValidationResult,
-    parse_claim,
-    validate_claim,
-    register_claim,
     check_sha,
+    parse_claim,
+    register_claim,
     run_union_gate,
+    validate_claim,
 )
-from bathos.compact import compact
 from bathos.linter import check_single_cell_gate
-from bathos.catalog import write_run
-from bathos.schema import Run
 
 
 @pytest.fixture
@@ -1159,6 +1152,7 @@ gate_name = "g"
 
     def test_green_gate_infos(self, tmp_path):
         import subprocess
+
         from bathos.gate import stamp_gate
 
         subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
@@ -1866,7 +1860,6 @@ class TestClaimDisplayLabels:
         assert format_hypothesis_ref(claim, "H_missing") == "H_missing"
 
     def test_format_hypothesis_ref_includes_label(self, tmp_path):
-        from bathos.claim import format_hypothesis_ref
 
         claim_path = tmp_path / "labels.claim.toml"
         claim_path.write_text("""[claim]

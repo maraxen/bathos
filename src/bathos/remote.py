@@ -55,7 +55,7 @@ def add_remote(config_path: Path, name: str, host: str, path: str) -> None:
         raise FileNotFoundError(f"Config file not found: {config_path}")
 
     # Load the TOML file
-    with open(config_path, "r") as f:
+    with open(config_path) as f:
         doc = tomlkit.load(f)
 
     # Check if remotes section exists, if not create it
@@ -96,7 +96,7 @@ def remove_remote(config_path: Path, name: str) -> None:
         raise FileNotFoundError(f"Config file not found: {config_path}")
 
     # Load the TOML file
-    with open(config_path, "r") as f:
+    with open(config_path) as f:
         doc = tomlkit.load(f)
 
     # Check if remotes section exists and remote exists

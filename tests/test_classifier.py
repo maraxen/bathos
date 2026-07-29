@@ -10,13 +10,11 @@ import pytest
 
 from bathos.classifier import (
     ClassificationConfidence,
-    ClassificationResult,
-    MoveAction,
-    classify_flat_scripts,
-    build_move_plan,
-    apply_classify_plan,
-    _infer_date_prefix,
     _build_classification_result,
+    _infer_date_prefix,
+    apply_classify_plan,
+    build_move_plan,
+    classify_flat_scripts,
 )
 
 

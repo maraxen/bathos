@@ -33,9 +33,9 @@ import logging
 from pathlib import Path
 
 from bathos.parity import (
-    parse_parity_toml,
-    evidence_from_result,
     compute_grade,
+    evidence_from_result,
+    parse_parity_toml,
 )
 
 logger = logging.getLogger(__name__)
@@ -235,7 +235,7 @@ def main():
     try:
         args.out.write_text(json.dumps(result, indent=2))
         logger.info(f"Result written to {args.out}")
-    except (OSError, IOError) as e:
+    except OSError as e:
         logger.error(f"Failed to write result JSON: {e}")
         return 1
 

@@ -5,7 +5,11 @@ from pathlib import Path
 
 import duckdb
 
-from bathos.sidecar import Sidecar, SidecarKind, ReproductionBlock, ControlsBlock, RESERVED_OUTCOME_LABELS
+from bathos.sidecar import (
+    RESERVED_OUTCOME_LABELS,
+    Sidecar,
+    SidecarKind,
+)
 from bathos.telemetry import event
 
 
@@ -85,7 +89,7 @@ def validate_popper_block(sidecar: Sidecar, sidecar_path: Path | None = None) ->
     elif threshold < 10.0:
         errors.append(ValidationError(
             "popper.stopping_threshold",
-            f"WARNING: stopping_threshold < 10.0 — consider a stricter threshold (alpha < 0.10)",
+            "WARNING: stopping_threshold < 10.0 — consider a stricter threshold (alpha < 0.10)",
         ))
 
     # Validate [popper.weights] if present

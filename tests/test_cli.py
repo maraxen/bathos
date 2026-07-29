@@ -5,7 +5,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from bathos.catalog import init_catalog, write_run
-from bathos.cli import app, _catalog_dir
+from bathos.cli import _catalog_dir, app
 from bathos.schema import Run
 
 runner = CliRunner()
@@ -580,10 +580,11 @@ def test_ls_shows_outcome_column(tmp_path, monkeypatch):
     """ls output includes OUTCOME column header."""
     monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_path))
     monkeypatch.setenv("BTH_PROJECT_SLUG", "proj")
-    from bathos.schema import Run
+    import duckdb
+
     from bathos.catalog import write_run
     from bathos.compact import compact
-    import duckdb
+    from bathos.schema import Run
 
     r = Run(project_slug="proj", command="echo hi", argv=["echo", "hi"],
             git_hash="abc", git_branch="main", git_dirty=False,
@@ -642,8 +643,9 @@ def test_report_emit_cli_smoke_test(tmp_path: Path, monkeypatch):
     - Asserts exit code == 0
     - Asserts both sidecar files exist at the pinned path
     """
-    import duckdb
     import json
+
+    import duckdb
 
     monkeypatch.chdir(tmp_path)
     catalog = tmp_path / ".bth" / "catalog"
@@ -652,9 +654,13 @@ def test_report_emit_cli_smoke_test(tmp_path: Path, monkeypatch):
     (tmp_path / ".bth.toml").write_text(f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n')
 
     # Initialize catalog with DuckDB schema
+    from bathos.campaigns import add_run_to_campaign, create_campaign
     from bathos.catalog import init_catalog
-    from bathos.campaigns import create_campaign, add_run_to_campaign
-    from bathos.compact import _RUNS_TABLE_SCHEMA, _CAMPAIGNS_TABLE_SCHEMA, _CAMPAIGN_RUNS_TABLE_SCHEMA
+    from bathos.compact import (
+        _CAMPAIGN_RUNS_TABLE_SCHEMA,
+        _CAMPAIGNS_TABLE_SCHEMA,
+        _RUNS_TABLE_SCHEMA,
+    )
 
     init_catalog(catalog)
     db_path = catalog / "bathos.db"
@@ -723,8 +729,9 @@ def test_report_emit_idempotency(tmp_path: Path, monkeypatch):
 
     Verifies that a second run overwrites (not appends) the files, and content is stable.
     """
-    import duckdb
     import json
+
+    import duckdb
 
     monkeypatch.chdir(tmp_path)
     catalog = tmp_path / ".bth" / "catalog"
@@ -733,14 +740,18 @@ def test_report_emit_idempotency(tmp_path: Path, monkeypatch):
     (tmp_path / ".bth.toml").write_text(f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n')
 
     # Initialize catalog and create a concluded campaign
-    from bathos.catalog import init_catalog
     from bathos.campaigns import (
-        create_campaign,
         add_run_to_campaign,
+        create_campaign,
         emit_campaign_report,
         emit_figure_manifest,
     )
-    from bathos.compact import _RUNS_TABLE_SCHEMA, _CAMPAIGNS_TABLE_SCHEMA, _CAMPAIGN_RUNS_TABLE_SCHEMA
+    from bathos.catalog import init_catalog
+    from bathos.compact import (
+        _CAMPAIGN_RUNS_TABLE_SCHEMA,
+        _CAMPAIGNS_TABLE_SCHEMA,
+        _RUNS_TABLE_SCHEMA,
+    )
 
     init_catalog(catalog)
     db_path = catalog / "bathos.db"

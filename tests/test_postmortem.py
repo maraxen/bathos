@@ -1,19 +1,20 @@
 import json
 import textwrap
 from pathlib import Path
-import pytest
+
 import duckdb
+import pytest
 from typer.testing import CliRunner
 
 from bathos.catalog import init_catalog, write_run
 from bathos.cli import app
-from bathos.schema import Run
 from bathos.compact import compact
+from bathos.schema import Run
 
 # We import the postmortem functions which we expect to be implemented in bathos.postmortem.
 # Since we are in the RED phase, this import or the tests will fail, which is correct.
 try:
-    from bathos.postmortem import parse_postmortem, validate_postmortem, Postmortem
+    from bathos.postmortem import Postmortem, parse_postmortem, validate_postmortem
 except ImportError:
     # We define dummy place-holders if we want pytest to parse the file without immediate ImportError,
     # or we can let it raise ImportError immediately. Raising ImportError immediately is a perfectly valid
@@ -37,7 +38,7 @@ runner = CliRunner()
 
 def test_parse_postmortem_valid(tmp_path: Path):
     """Test parsing a valid postmortem TOML file."""
-    from bathos.postmortem import parse_postmortem, Postmortem
+    from bathos.postmortem import Postmortem, parse_postmortem
 
     postmortem_content = """
     run_id = "test-run-123"
@@ -58,7 +59,7 @@ def test_parse_postmortem_valid(tmp_path: Path):
     toml_path.write_text(textwrap.dedent(postmortem_content))
 
     postmortem = parse_postmortem(toml_path)
-    
+
     assert isinstance(postmortem, Postmortem)
     assert postmortem.run_id == "test-run-123"
     assert postmortem.hypothesis_status == "held"
@@ -67,7 +68,7 @@ def test_parse_postmortem_valid(tmp_path: Path):
     assert postmortem.root_cause == "Thermostat damping parameter was too low initially."
     assert postmortem.verdict_override == "pass"
     assert postmortem.next_steps == "Proceed to NPT validation."
-    
+
     assert isinstance(postmortem.asset_links, dict)
     assert postmortem.asset_links["checkpoint"] == "outputs/checkpoint.pt"
     assert isinstance(postmortem.asset_links["log_file"], dict)
@@ -171,13 +172,13 @@ def test_validation_cryptographic_checksums(tmp_path: Path):
 
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
-    
+
     # Create a dummy asset file
     asset_rel_path = Path("outputs/checkpoint.pt")
     asset_abs_path = workspace_root / asset_rel_path
     asset_abs_path.parent.mkdir(parents=True, exist_ok=True)
     asset_abs_path.write_text("dummy-checkpoint-data")
-    
+
     # Calculate sha256 of "dummy-checkpoint-data"
     import hashlib
     correct_sha = hashlib.sha256(b"dummy-checkpoint-data").hexdigest()
@@ -241,7 +242,7 @@ def test_validation_cryptographic_checksums(tmp_path: Path):
 def test_validation_code_drift(tmp_path: Path):
     """Test validation detects code-drift and dirty git states between workspace and run."""
     from bathos.postmortem import Postmortem, validate_postmortem
-    
+
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
 
@@ -450,11 +451,11 @@ def test_compact_updates_postmortem(tmp_path: Path, monkeypatch):
     db_path = catalog_dir / "bathos.db"
     assert db_path.exists()
     con = duckdb.connect(str(db_path))
-    
+
     # Query the runs table
     row = con.execute("SELECT outcome, postmortem_hypothesis_status, postmortem_summary, postmortem_verdict_override, postmortem_asset_links FROM runs WHERE id = ?", [run.id]).fetchone()
     assert row is not None
-    
+
     # outcome must be overridden to 'pass'
     assert row[0] == "pass"
     # Postmortem columns should be populated
@@ -690,6 +691,7 @@ def test_postmortem_validates_worktree_asset(tmp_path: Path, monkeypatch):  # AC
     not the recorded main-checkout root (the bug this spec fixes)."""
     import hashlib
     import subprocess
+
     from bathos.postmortem import parse_postmortem, validate_postmortem
     from bathos.workspace import resolve_workspace
 
@@ -729,6 +731,7 @@ def test_mcp_postmortem_validate_explicit_param_wins(tmp_path: Path, monkeypatch
     discoverable .bth.toml recorded root (the precedence was inverted in code)."""
     import asyncio
     import hashlib
+
     from bathos import mcp
 
     monkeypatch.delenv("BTH_WORKSPACE_ROOT", raising=False)

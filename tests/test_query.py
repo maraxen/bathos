@@ -253,10 +253,11 @@ def test_filter_ignores_missing_output_files():
 def test_list_runs_includes_outcome(tmp_path):
     """Runs compacted into warm DuckDB expose outcome field via list_runs."""
     import duckdb
+
+    from bathos.catalog import write_run
     from bathos.compact import compact
     from bathos.query import list_runs
     from bathos.schema import Run
-    from bathos.catalog import write_run
 
     r = Run(project_slug="proj", command="echo hi", argv=["echo", "hi"],
             git_hash="abc", git_branch="main", git_dirty=False,
@@ -343,6 +344,7 @@ def test_lineage_returns_ancestor_chain(tmp_path):
 def test_filter_runs_by_output_metadata_warm_tier():
     """Verify filtering works via warm-tier output_metadata when output_paths is empty."""
     import json
+
     from bathos.query import _filter_runs_by_output_file
 
     run_with_warm = Run(

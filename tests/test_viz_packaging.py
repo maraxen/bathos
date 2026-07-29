@@ -1,6 +1,7 @@
 """Tests for viz module packaging and asset availability."""
 
 import importlib.resources
+
 import pytest
 
 
@@ -41,7 +42,7 @@ def test_viz_versions_md_exists():
 
 def test_viz_data_imports():
     """Verify viz.data module exports required TypedDicts."""
-    from bathos.viz.data import RunDisplay, CampaignDisplay, project_run, project_campaign
+    from bathos.viz.data import CampaignDisplay, RunDisplay, project_campaign, project_run
 
     assert RunDisplay is not None
     assert CampaignDisplay is not None
@@ -52,7 +53,7 @@ def test_viz_data_imports():
 def test_viz_html_imports():
     """Verify viz.html module is importable and functional."""
     pytest.importorskip("jinja2")
-    from bathos.viz.html import render_html_report, export_html
+    from bathos.viz.html import export_html, render_html_report
 
     assert callable(render_html_report)
     assert callable(export_html)

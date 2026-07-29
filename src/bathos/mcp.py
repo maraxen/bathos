@@ -14,21 +14,18 @@ import time
 import uuid
 from pathlib import Path
 
+import cisternal
 from fastmcp import FastMCP
 
-import cisternal
-
-# Telemetry imports
-from bathos.telemetry import event, mcp_request_id_var, run_uuid_var
-from bathos.telemetry_bridge import init_server_telemetry
+from bathos.anchor import find_anchors, get_anchor, register_anchor
 
 # Import core modules
 from bathos.archive import archive as archive_runs
 from bathos.campaigns import (
-    conclude_campaign,
-    create_campaign,
     CampaignError,
     add_run_to_campaign,
+    conclude_campaign,
+    create_campaign,
     get_campaign,
     list_campaigns,
     review_campaign,
@@ -38,26 +35,41 @@ from bathos.catalog import init_catalog
 from bathos.checker import check_runs
 from bathos.compact import compact as compact_catalog
 from bathos.config import default_catalog_dir, find_project_config, load_project_config
-from bathos.errors import BathosErrorCode, RESOLUTION_HINTS
+from bathos.errors import RESOLUTION_HINTS, BathosErrorCode
+from bathos.export import ExportError
+from bathos.figure_registry import FigureEntrySchemaError, register_figure_entry
 from bathos.init import init_project
 from bathos.mcp_auth import McpAuthError, check_token
 from bathos.prereg import GateError
-from bathos.anchor import find_anchors, get_anchor, register_anchor
-from bathos.figure_registry import FigureEntrySchemaError, register_figure_entry
 from bathos.query import CatalogError, find_runs, get_run, list_runs, run_sql
 from bathos.readback import (
     figure_lookup as readback_figure_lookup,
+)
+from bathos.readback import (
     get_trust_state as readback_get_trust_state,
+)
+from bathos.readback import (
     list_candidates as readback_list_candidates,
+)
+from bathos.readback import (
     query_attestation as readback_query_attestation,
+)
+from bathos.readback import (
     read_campaign_report as readback_read_campaign_report,
+)
+from bathos.readback import (
     read_figure_manifest as readback_read_figure_manifest,
+)
+from bathos.readback import (
     resolve_pin as readback_resolve_pin,
 )
 from bathos.runner import run_script
 from bathos.sidecar import SidecarError
 from bathos.sync import sync_catalog
-from bathos.export import ExportError
+
+# Telemetry imports
+from bathos.telemetry import event, mcp_request_id_var, run_uuid_var
+from bathos.telemetry_bridge import init_server_telemetry
 
 app = FastMCP("bathos")
 mcp = app  # Alias for import compatibility
@@ -1388,8 +1400,9 @@ async def mcp_lineage_prov_tool(
     Returns:
         W3C PROV-JSON formatted lineage (dict).
     """
-    from bathos.query import lineage as get_lineage, CatalogError
     from bathos.provenance import format_prov_json
+    from bathos.query import CatalogError
+    from bathos.query import lineage as get_lineage
 
     cat_dir = _get_catalog_dir(catalog_dir)
     ancestors = get_lineage(run_id, cat_dir)
@@ -2241,7 +2254,7 @@ async def validate_sidecar(
     """
     from bathos.campaigns import CampaignError
     from bathos.claim import load_registered_claim
-    from bathos.sidecar import parse_sidecar, SidecarError
+    from bathos.sidecar import SidecarError, parse_sidecar
     from bathos.validate import validate_sidecar as validate_sidecar_impl
 
     sidecar_path = Path(path)
@@ -2286,9 +2299,8 @@ def list_outputs_tool(
 
     Returns parsed output metadata from the run, optionally re-stated if live=True.
     """
+    from bathos.config import default_catalog_dir, find_project_config, load_project_config
     from bathos.query import get_run
-    from bathos.config import find_project_config, load_project_config, default_catalog_dir
-    import json
 
     if catalog_dir:
         cat = Path(catalog_dir).expanduser().resolve()
@@ -2349,9 +2361,9 @@ def outputs_summary_tool(
 
     Returns summary rows grouped by project.
     """
-    from bathos.config import find_project_config, load_project_config, default_catalog_dir
-    import json
     import duckdb
+
+    from bathos.config import default_catalog_dir, find_project_config, load_project_config
 
     if catalog_dir:
         cat = Path(catalog_dir).expanduser().resolve()

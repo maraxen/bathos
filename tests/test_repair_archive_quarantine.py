@@ -11,15 +11,12 @@ Tests cover:
 """
 
 import json
-from datetime import UTC, datetime
 from pathlib import Path
-
-import pytest
 
 from bathos.archive import archive
 from bathos.catalog import init_catalog, write_run
 from bathos.compact import compact
-from bathos.repair import RepairAction, _actions_from_archive_verify, repair, scan
+from bathos.repair import repair, scan
 from bathos.schema import Run
 from bathos.verify import verify_archive
 

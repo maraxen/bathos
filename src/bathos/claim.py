@@ -532,7 +532,7 @@ def scaffold_claim(campaign_id: str, db: duckdb.DuckDBPyConnection, workspace_ro
     Raises:
         RuntimeError: If campaign not found or directory cannot be created
     """
-    from bathos.campaigns import _resolve_campaign_id, CampaignError
+    from bathos.campaigns import CampaignError, _resolve_campaign_id
 
     try:
         full_id = _resolve_campaign_id(db, campaign_id)
@@ -644,7 +644,7 @@ def register_claim(
     Raises:
         RuntimeError: If path is absolute or escapes workspace, or campaign not found
     """
-    from bathos.campaigns import _resolve_campaign_id, CampaignError
+    from bathos.campaigns import CampaignError, _resolve_campaign_id
 
     # Resolve path to relative if absolute
     if path.is_absolute():
@@ -728,8 +728,8 @@ def check_sha(path_relative: str, registered_sha: str, workspace_root: Path) -> 
     current_sha = hashlib.sha256(abs_path.read_bytes()).hexdigest()
     if current_sha != registered_sha:
         raise ValueError(
-            f"Claim file SHA256 mismatch. File has been modified since registration. "
-            f"Re-register with `bth claim register --force` to acknowledge the amendment."
+            "Claim file SHA256 mismatch. File has been modified since registration. "
+            "Re-register with `bth claim register --force` to acknowledge the amendment."
         )
 
 
@@ -927,10 +927,11 @@ def attest_parity(
         ValueError: If run not found, missing parity_run_type, wrong type, or outcome not pass/partial
         RuntimeError: If claim file not found or campaign not found
     """
+    import logging
     import os
     import tempfile
-    import logging
-    from bathos.campaigns import _resolve_campaign_id, CampaignError
+
+    from bathos.campaigns import CampaignError, _resolve_campaign_id
 
     logger = logging.getLogger(__name__)
 
@@ -1101,7 +1102,7 @@ def attest_parity(
             # Re-raise the original DB error
             raise
 
-    except Exception as e:
+    except Exception:
         # Clean up temp file if it still exists (e.g., if os.replace failed)
         if temp_path.exists():
             try:

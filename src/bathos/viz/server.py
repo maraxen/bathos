@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import threading
 import webbrowser
+
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
-from bathos.schema import Run
 from bathos.campaigns import Campaign
+from bathos.schema import Run
 from bathos.viz.html import render_html_report
 
 

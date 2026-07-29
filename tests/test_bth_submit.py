@@ -265,7 +265,7 @@ def test_resolve_cluster_config_sidecar_overrides_preset():
 
 def test_resolve_cluster_config_cli_flags_override_sidecar():
     """CLI flags beat sidecar and project config."""
-    from bathos.cluster import ClusterConfig, resolve_cluster_config
+    from bathos.cluster import resolve_cluster_config
     from bathos.config import ProjectConfig
 
     config = ProjectConfig(
@@ -435,9 +435,9 @@ value = "float"
 
 def test_submit_ac3_hard_gate_validation_stage_prerequisite_found(tmp_path: Path, monkeypatch):
     """AC-3: bth submit succeeds when validation stage prerequisite is found."""
-    from bathos.schema import Run
     from bathos.catalog import write_run
     from bathos.compact import compact
+    from bathos.schema import Run
 
     monkeypatch.chdir(tmp_path)
     catalog_dir = tmp_path / "catalog"

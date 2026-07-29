@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
 from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any
@@ -49,6 +48,7 @@ def init_via_cisternal(
         return False
 
     import cisternal
+
     from bathos.telemetry import _get_default_log_dir, task_id_var
 
     resolved = Path(log_dir) if log_dir is not None else _get_default_log_dir()
@@ -75,12 +75,17 @@ def init_via_cisternal(
 
 def _sync_context_to_cisternal() -> None:
     """Copy bathos contextvars into cisternal before emit (best-effort)."""
-    from bathos.telemetry import mcp_request_id_var, run_uuid_var, task_id_var
     from cisternal.telemetry.context import (
         mcp_request_id_var as c_mcp_request_id_var,
+    )
+    from cisternal.telemetry.context import (
         run_uuid_var as c_run_uuid_var,
+    )
+    from cisternal.telemetry.context import (
         task_id_var as c_task_id_var,
     )
+
+    from bathos.telemetry import mcp_request_id_var, run_uuid_var, task_id_var
 
     for src, dst in (
         (run_uuid_var, c_run_uuid_var),

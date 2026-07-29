@@ -1,11 +1,9 @@
 """Tests for bth lineage --format flag and backward compatibility."""
 
 from datetime import UTC, datetime
-from uuid import uuid4
 
 import pytest
 
-from bathos.query import lineage as get_lineage_runs
 from bathos.provenance import format_prov_json
 from bathos.schema import Run
 

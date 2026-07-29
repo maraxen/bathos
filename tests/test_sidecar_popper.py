@@ -2,10 +2,8 @@
 import textwrap
 from pathlib import Path
 
-import pytest
-
-from bathos.sidecar import Sidecar, SidecarKind, OutcomeSpec, parse_sidecar, compute_evalue
-from bathos.validate import validate_popper_block, validate_sidecar, ValidationError
+from bathos.sidecar import OutcomeSpec, Sidecar, SidecarKind, compute_evalue, parse_sidecar
+from bathos.validate import validate_popper_block
 
 
 def _write_toml(tmp_path: Path, content: str) -> Path:

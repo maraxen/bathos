@@ -96,7 +96,8 @@ def test_run_duration_is_positive(tmp_catalog: Path):
 
 def test_run_blocks_enforced_dir_without_sidecar(tmp_path):
     """bth run must raise SystemExit(1) if script in enforced dir has no sidecar."""
-    import subprocess, sys
+    import sys
+
     from bathos.runner import run_script
 
     (tmp_path / "catalog").mkdir()
@@ -119,7 +120,9 @@ def test_run_blocks_enforced_dir_without_sidecar(tmp_path):
 
 def test_run_allows_enforced_dir_with_sidecar(tmp_path):
     """bth run proceeds if script in enforced dir has a valid sidecar."""
-    import sys, textwrap
+    import sys
+    import textwrap
+
     from bathos.runner import run_script
 
     (tmp_path / "catalog").mkdir()
@@ -158,6 +161,7 @@ def test_run_allows_enforced_dir_with_sidecar(tmp_path):
 def test_run_skips_enforcement_for_scratch(tmp_path):
     """bth run does not enforce sidecars for scripts/scratch/."""
     import sys
+
     from bathos.runner import run_script
 
     (tmp_path / "catalog").mkdir()
@@ -180,7 +184,6 @@ def test_run_skips_enforcement_for_scratch(tmp_path):
 
 def test_result_emission_via_env_var(tmp_catalog: Path, tmp_path: Path):
     """Sets BTH_RESULTS_PATH, script writes JSON, outcome is evaluated."""
-    import json
     import textwrap
 
     # Create enforced directory with script and sidecar
@@ -237,7 +240,6 @@ def test_result_emission_via_env_var(tmp_catalog: Path, tmp_path: Path):
 
 def test_result_emission_fallback_path(tmp_catalog: Path, tmp_path: Path):
     """No env var, fallback .bth-results.json adjacent to script is used."""
-    import json
     import textwrap
 
     # Create enforced directory with script and sidecar
@@ -437,6 +439,7 @@ def test_result_emission_invalid_json(tmp_catalog: Path, tmp_path: Path):
 def test_gate_fires_in_enforced_dir_missing_sidecar(tmp_path):
     """Gate layer blocks enforced dir script without sidecar via gate_check()."""
     import sys
+
     from bathos.runner import run_script
 
     (tmp_path / "catalog").mkdir()
@@ -461,6 +464,7 @@ def test_gate_passes_with_valid_sidecar(tmp_path):
     """Gate layer passes with valid sidecar in enforced dir."""
     import sys
     import textwrap
+
     from bathos.runner import run_script
 
     (tmp_path / "catalog").mkdir()
@@ -499,6 +503,7 @@ def test_gate_passes_with_valid_sidecar(tmp_path):
 def test_no_sidecar_flag_bypasses_gate(tmp_path):
     """no_sidecar=True bypasses gate even in enforced dir (sidecar_mode='bypassed')."""
     import sys
+
     from bathos.catalog import read_runs
     from bathos.runner import run_script
 
@@ -526,8 +531,8 @@ def test_no_sidecar_flag_bypasses_gate(tmp_path):
 
 def test_outcome_is_residual_populated(tmp_catalog: Path, tmp_path: Path):
     """outcome_is_residual is set to True when outcome spec has is_residual=True."""
-    import json
     import textwrap
+
     from bathos.runner import run_script
 
     # Create enforced directory with script and sidecar where fallback outcome has is_residual=True
@@ -581,7 +586,6 @@ def test_outcome_is_residual_populated(tmp_catalog: Path, tmp_path: Path):
 
 def test_outcome_error_on_nonzero_exit(tmp_catalog: Path, tmp_path: Path):
     """When exit_code != 0, outcome should be set to 'error'."""
-    import textwrap
 
     init_catalog(tmp_catalog)
     # Create a script that fails with exit code 1
@@ -682,7 +686,8 @@ def test_manifest_sha256_populated(tmp_catalog: Path, tmp_path: Path):
 
 def test_bth_output_dir_injected(tmp_catalog: Path, tmp_path: Path):
     """BTH_OUTPUT_DIR env var is set and points to a writable per-run dir."""
-    import sys, os
+    import sys
+
     from bathos.catalog import init_catalog, read_runs
     from bathos.runner import run_script
 
@@ -711,6 +716,7 @@ def test_bth_output_dir_injected(tmp_catalog: Path, tmp_path: Path):
 def test_bth_output_dir_files_auto_registered(tmp_catalog: Path, tmp_path: Path):
     """Files written to BTH_OUTPUT_DIR are auto-registered in output_paths."""
     import sys
+
     from bathos.catalog import init_catalog, read_runs
     from bathos.runner import run_script
 
@@ -743,6 +749,7 @@ def test_bth_output_dir_files_auto_registered(tmp_catalog: Path, tmp_path: Path)
 def test_explicit_out_and_output_dir_merged(tmp_catalog: Path, tmp_path: Path):
     """Explicit --out paths and BTH_OUTPUT_DIR files are merged, no duplicates."""
     import sys
+
     from bathos.catalog import init_catalog, read_runs
     from bathos.runner import run_script
 
@@ -780,7 +787,6 @@ def test_parity_run_type_extracted_from_doubly_nested_metadata(tmp_catalog: Path
     parity_validate.py emits metadata.parity_run_type doubly-nested (result["metadata"]["parity_run_type"]).
     runner.py should extract this and set Run.parity_run_type for the gates (F2, F3) to query.
     """
-    import json
     import textwrap
 
     # Create script that emits metadata.parity_run_type (doubly-nested per AC-19)

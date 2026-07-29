@@ -90,13 +90,13 @@ def _row_to_run(row: tuple) -> Run | None:
         output_paths = row[11]
         tags = row[12]
         schema_version = row[13]
-        
+
         slurm_job_id = row[14] if len(row) > 14 else ""
         hostname = row[15] if len(row) > 15 else ""
         metadata = row[16] if len(row) > 16 else "{}"
         outcome = row[17] if len(row) > 17 else ""
         output_metadata = row[18] if len(row) > 18 else "[]"
-        
+
         sidecar_sha256 = row[19] if len(row) > 19 else ""
         sidecar_path = row[20] if len(row) > 20 else ""
         parent_run_id = row[21] if len(row) > 21 else ""
@@ -105,7 +105,7 @@ def _row_to_run(row: tuple) -> Run | None:
         outcome_is_residual = row[24] if len(row) > 24 else False
         skill_sha256 = row[25] if len(row) > 25 else ""
         campaign_id = row[26] if len(row) > 26 else ""
-        
+
         script_sha256 = row[27] if len(row) > 27 else ""
         postmortem_status = row[28] if len(row) > 28 else "unassigned"
         postmortem_override = row[29] if len(row) > 29 else "none"

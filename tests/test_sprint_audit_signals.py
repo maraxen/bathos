@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import math
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -32,7 +31,6 @@ class TestBypassSignals:
     def test_error_rate_zero(self, monkeypatch_registry, tmp_path):
         """Test error_rate is 0 when no error outcomes."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         catalog_dir = tmp_path / "test_catalog"
         catalog_dir.mkdir()
@@ -83,7 +81,6 @@ class TestBypassSignals:
     def test_error_rate_nonzero(self, monkeypatch_registry, tmp_path):
         """Test error_rate > 0 when error outcomes present."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         catalog_dir = tmp_path / "test_catalog"
         catalog_dir.mkdir()
@@ -147,7 +144,6 @@ class TestBypassSignals:
     def test_bypass_explicit_and_agent_mode_are_separate(self, monkeypatch_registry, tmp_path):
         """Test that bypass_explicit and bypass_in_agent_mode are distinct signals."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         catalog_dir = tmp_path / "test_catalog"
         catalog_dir.mkdir()
@@ -248,7 +244,6 @@ class TestOutcomeEntropy:
     def test_outcome_entropy_zero_for_single_label(self, monkeypatch_registry, tmp_path):
         """Test outcome_entropy is 0 when all runs have same outcome."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         catalog_dir = tmp_path / "test_catalog"
         catalog_dir.mkdir()
@@ -285,7 +280,6 @@ class TestOutcomeEntropy:
     def test_outcome_entropy_positive_for_mixed(self, monkeypatch_registry, tmp_path):
         """Test outcome_entropy > 0 for mixed outcomes."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         catalog_dir = tmp_path / "test_catalog"
         catalog_dir.mkdir()
@@ -326,7 +320,6 @@ class TestOutcomeEntropy:
     def test_warn_when_entropy_below_threshold(self, monkeypatch_registry, tmp_path):
         """Test [WARN] annotation when outcome_entropy < 0.5 nats."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         catalog_dir = tmp_path / "test_catalog"
         catalog_dir.mkdir()
@@ -373,7 +366,6 @@ class TestUnfiredBranches:
     def test_unfired_branches_zero_when_all_outcomes_used(self, monkeypatch_registry, tmp_path):
         """Test unfired_branches is 0 when all sidecar outcomes are used."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         catalog_dir = tmp_path / "test_catalog"
         catalog_dir.mkdir()
@@ -438,7 +430,6 @@ result = "str"
     def test_unfired_branches_positive_when_outcomes_unused(self, monkeypatch_registry, tmp_path):
         """Test unfired_branches > 0 when some sidecar outcomes are never used."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         catalog_dir = tmp_path / "test_catalog"
         catalog_dir.mkdir()
@@ -507,7 +498,6 @@ class TestSchemaOverflowRate:
     def test_schema_overflow_rate_zero_when_no_overflow(self, monkeypatch_registry, tmp_path):
         """Test schema_overflow_rate is 0 when metadata is empty."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         catalog_dir = tmp_path / "test_catalog"
         catalog_dir.mkdir()
@@ -545,7 +535,6 @@ class TestSchemaOverflowRate:
     def test_schema_overflow_rate_always_zero_for_standard_runs(self, monkeypatch_registry, tmp_path):
         """Test schema_overflow_rate is 0 for standard runs (metadata computed during compact)."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         catalog_dir = tmp_path / "test_catalog"
         catalog_dir.mkdir()
@@ -588,7 +577,6 @@ class TestPostHocBiasFlagAndIntegration:
     def test_post_hoc_bias_flag_false_when_no_bias(self, monkeypatch_registry, tmp_path):
         """Test post_hoc_bias_flag is False when worst outcome is not concentrated early."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         catalog_dir = tmp_path / "test_catalog"
         catalog_dir.mkdir()
@@ -627,7 +615,6 @@ class TestPostHocBiasFlagAndIntegration:
     def test_signals_dict_contains_all_nine(self, monkeypatch_registry, tmp_path):
         """Test that all 9 signals are present in output."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         catalog_dir = tmp_path / "test_catalog"
         catalog_dir.mkdir()
@@ -721,7 +708,6 @@ class TestErrorRateBoundary:
     def test_error_rate_below_threshold(self, monkeypatch_registry, tmp_path):
         """9 runs, 0 errors -> error_rate = 0.0, no anomaly fired."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         base_time = datetime.now(UTC)
         runs = [_make_run(base_time, i, outcome="pass") for i in range(9)]
@@ -738,7 +724,6 @@ class TestErrorRateBoundary:
     def test_error_rate_above_threshold(self, monkeypatch_registry, tmp_path):
         """10 runs, 2 errors (20%) -> anomaly fires."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         base_time = datetime.now(UTC)
         outcomes = ["error", "error"] + ["pass"] * 8
@@ -760,7 +745,6 @@ class TestBypassExplicitBoundary:
     def test_bypass_explicit_below_threshold(self, monkeypatch_registry, tmp_path):
         """10 runs, 2 bypassed non-agent (20%) -> no anomaly."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         base_time = datetime.now(UTC)
         runs = (
@@ -780,7 +764,6 @@ class TestBypassExplicitBoundary:
     def test_bypass_explicit_above_threshold(self, monkeypatch_registry, tmp_path):
         """10 runs, 4 bypassed non-agent (40%) -> anomaly fires."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         base_time = datetime.now(UTC)
         runs = (
@@ -804,7 +787,6 @@ class TestBypassAgentModeBoundary:
     def test_bypass_agent_mode_below_threshold(self, monkeypatch_registry, tmp_path):
         """20 agent-mode runs, 0 bypassed -> no anomaly."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         base_time = datetime.now(UTC)
         runs = [
@@ -824,7 +806,6 @@ class TestBypassAgentModeBoundary:
     def test_bypass_agent_mode_above_threshold(self, monkeypatch_registry, tmp_path):
         """20 agent-mode runs, 2 bypassed (10%) -> anomaly fires."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         base_time = datetime.now(UTC)
         runs = (
@@ -854,7 +835,6 @@ class TestOutcomeEntropyBoundary:
     def test_outcome_entropy_above_threshold(self, monkeypatch_registry, tmp_path):
         """Balanced 4-label distribution -> entropy ~ ln(4) ~ 1.386 > 0.5, no anomaly."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         base_time = datetime.now(UTC)
         # 4 labels, 3 runs each -> entropy = ln(4) ~ 1.386
@@ -873,7 +853,6 @@ class TestOutcomeEntropyBoundary:
     def test_outcome_entropy_below_threshold(self, monkeypatch_registry, tmp_path):
         """Highly skewed: 9 pass, 1 fail -> H ~ 0.325 < 0.5, anomaly fires."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         base_time = datetime.now(UTC)
         # H = -(0.9*ln(0.9) + 0.1*ln(0.1)) ~ 0.325
@@ -908,7 +887,6 @@ class TestUnfiredBranchesBoundary:
     def test_unfired_branches_below_threshold(self, monkeypatch_registry, tmp_path):
         """10 declared outcomes, 3 never fired (30%) -> no anomaly."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         sidecar_path, labels = self._make_sidecar(tmp_path, 10)
         fired_labels = labels[:7]  # fire 7 of 10 -> 3 unfired = 30%
@@ -938,7 +916,6 @@ class TestUnfiredBranchesBoundary:
     def test_unfired_branches_above_threshold(self, monkeypatch_registry, tmp_path):
         """10 declared outcomes, 5 never fired (50%) -> anomaly fires."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         sidecar_path, labels = self._make_sidecar(tmp_path, 10)
         fired_labels = labels[:5]  # fire only 5 of 10 -> 5 unfired = 50%
@@ -1004,7 +981,6 @@ class TestSchemaOverflowBoundary:
     def test_schema_overflow_below_threshold(self, monkeypatch_registry, tmp_path):
         """10 sidecar runs, all metadata keys declared -> rate = 0.0, no anomaly."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         sidecar_path = tmp_path / "exp.bth.toml"
         self._make_sidecar_with_keys(sidecar_path, ["temp_std", "temp_mean"])
@@ -1035,7 +1011,6 @@ class TestSchemaOverflowBoundary:
     def test_schema_overflow_above_threshold(self, monkeypatch_registry, tmp_path):
         """10 sidecar runs, 3 have undeclared keys (30%) -> anomaly fires."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         sidecar_path = tmp_path / "exp.bth.toml"
         self._make_sidecar_with_keys(sidecar_path, ["temp_std"])
@@ -1081,7 +1056,6 @@ class TestPostHocBiasFlagBoundary:
     def test_post_hoc_bias_not_flagged(self, monkeypatch_registry, tmp_path):
         """12 runs, 'fail' only in last third -> flag = False."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         base_time = datetime.now(UTC)
         # first third = indices 0-3 (4 runs), all "pass"
@@ -1100,7 +1074,6 @@ class TestPostHocBiasFlagBoundary:
     def test_post_hoc_bias_flagged(self, monkeypatch_registry, tmp_path):
         """12 runs, 2 'fail' in first 4 (first third) -> 2/12 = 16.7% > 10%, flag = True."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         base_time = datetime.now(UTC)
         # first third = indices 0-3 (4 runs): 2 "fail" there
@@ -1139,7 +1112,6 @@ class TestSchemaOverflowSemantics:
     def test_schema_overflow_declared_keys_only(self, monkeypatch_registry, tmp_path):
         """metadata = {temp_std: 1.0} with sidecar declaring temp_std -> overflow_rate == 0.0."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         sidecar_path = tmp_path / "exp.bth.toml"
         self._write_sidecar(sidecar_path, ["temp_std"])
@@ -1167,7 +1139,6 @@ class TestSchemaOverflowSemantics:
     def test_schema_overflow_undeclared_key(self, monkeypatch_registry, tmp_path):
         """metadata has undeclared_debug not in sidecar -> overflow_rate > 0."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         sidecar_path = tmp_path / "exp.bth.toml"
         self._write_sidecar(sidecar_path, ["temp_std"])
@@ -1195,7 +1166,6 @@ class TestSchemaOverflowSemantics:
     def test_schema_overflow_no_sidecar_skipped(self, monkeypatch_registry, tmp_path):
         """All runs have no sidecar_path -> denominator = 0, overflow_rate == 0.0."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         base_time = datetime.now(UTC)
         runs = [
@@ -1219,7 +1189,6 @@ class TestSchemaOverflowSemantics:
     def test_schema_overflow_denominator_is_sidecar_runs(self, monkeypatch_registry, tmp_path):
         """5 sidecar runs (all clean) + 5 no-sidecar runs -> denominator = 5, not 10."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         sidecar_path = tmp_path / "exp.bth.toml"
         self._write_sidecar(sidecar_path, ["temp_std"])
@@ -1262,7 +1231,6 @@ class TestControlArmRate:
     def test_control_arm_rate_zero_no_ctrl_runs(self, monkeypatch_registry, tmp_path):
         """Test control_arm_rate is 0 when no runs have ctrl_* outcomes."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         catalog_dir = tmp_path / "test_catalog"
         catalog_dir.mkdir()
@@ -1299,7 +1267,6 @@ class TestControlArmRate:
     def test_control_arm_rate_nonzero_with_ctrl_passes(self, monkeypatch_registry, tmp_path):
         """Test control_arm_rate > 0 when runs have ctrl_pass outcomes."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         catalog_dir = tmp_path / "test_catalog"
         catalog_dir.mkdir()
@@ -1337,7 +1304,6 @@ class TestControlArmRate:
     def test_control_arm_rate_mixed_ctrl_outcomes(self, monkeypatch_registry, tmp_path):
         """Test control_arm_rate counts both ctrl_pass and ctrl_fail."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         catalog_dir = tmp_path / "test_catalog"
         catalog_dir.mkdir()
@@ -1378,7 +1344,6 @@ class TestControlArmRate:
     def test_control_arm_rate_warning_zero_with_validation_stage(self, monkeypatch_registry, tmp_path):
         """Test WARNING when control_arm_rate==0.0 and validation/production runs exist."""
         from bathos.config import register_project
-        from bathos.sprint_audit import sprint_audit
 
         catalog_dir = tmp_path / "test_catalog"
         catalog_dir.mkdir()
@@ -1527,7 +1492,6 @@ class TestSubmitBypassRateSignal:
 
     def test_submit_bypass_rate_all_via_bth_submit(self, monkeypatch_registry, tmp_path):
         """All validation/production runs submitted via bth submit — rate=0%."""
-        from bathos.config import register_project
         from bathos.sprint_audit import signal_submit_bypass_rate
 
         catalog_dir = tmp_path / "test_catalog"
@@ -1581,7 +1545,6 @@ class TestSubmitBypassRateSignal:
 
     def test_submit_bypass_rate_some_bypassed(self, monkeypatch_registry, tmp_path):
         """Only 2 of 3 validation runs submitted via bth submit — rate=33% > 5% threshold."""
-        from bathos.config import register_project
         from bathos.sprint_audit import signal_submit_bypass_rate
 
         catalog_dir = tmp_path / "test_catalog"
@@ -1635,7 +1598,6 @@ class TestSubmitBypassRateSignal:
 
     def test_submit_bypass_rate_high_rate_warning(self, monkeypatch_registry, tmp_path):
         """6 of 10 validation runs bypassed — rate=60% > 5% threshold — WARNING."""
-        from bathos.config import register_project
         from bathos.sprint_audit import signal_submit_bypass_rate
 
         catalog_dir = tmp_path / "test_catalog"
@@ -1689,7 +1651,6 @@ class TestSubmitBypassRateSignal:
 
     def test_submit_bypass_rate_no_validation_runs(self, monkeypatch_registry, tmp_path):
         """No validation/production runs — rate=0%, level=INFO."""
-        from bathos.config import register_project
         from bathos.sprint_audit import signal_submit_bypass_rate
 
         catalog_dir = tmp_path / "test_catalog"
@@ -1732,7 +1693,6 @@ class TestSubmitBypassRateSignal:
 
     def test_submit_bypass_rate_no_provenance_records(self, monkeypatch_registry, tmp_path):
         """Validation runs exist but no provenance records yet — all are bypassed."""
-        from bathos.config import register_project
         from bathos.sprint_audit import signal_submit_bypass_rate
 
         catalog_dir = tmp_path / "test_catalog"
@@ -1775,7 +1735,6 @@ class TestSubmitBypassRateSignal:
 
     def test_submit_bypass_rate_no_warm_db(self, monkeypatch_registry, tmp_path):
         """When warm DB doesn't exist, signal returns INFO with value=None (coverage for line 238-244)."""
-        from bathos.config import register_project
         from bathos.sprint_audit import signal_submit_bypass_rate
 
         catalog_dir = tmp_path / "test_catalog"
@@ -1859,7 +1818,6 @@ def test_signal_12_tolerance_on_pre_v8_schema():
     #     pass  # claim_path column absent on pre-v8 catalogs
     #
     # We verify this behavior by checking the code exists and is properly guarded.
-    from bathos.sprint_audit import sprint_audit
     import inspect
 
     source = inspect.getsource(sprint_audit)
@@ -1871,7 +1829,6 @@ def test_signal_12_tolerance_on_pre_v8_schema():
 
 def test_signal_11_source_present():
     """debt #1071: Signal 11 exists and reports differential-staleness."""
-    from bathos.sprint_audit import sprint_audit
     import inspect
 
     source = inspect.getsource(sprint_audit)
@@ -1884,7 +1841,7 @@ def test_signal_11_confirmation_campaign_with_uncontrolled_positive_control(tmp_
     """debt #1071: a confirmation campaign whose positive_control clause is uncontrolled
     (no covering run has passed its differential pre-flight) surfaces via differential_confound_check
     -- the same building block sprint_audit's Signal 11 block consumes."""
-    from bathos.claim import parse_claim, differential_confound_check
+    from bathos.claim import differential_confound_check, parse_claim
 
     claim_dir = tmp_path / ".bth" / "claims"
     claim_dir.mkdir(parents=True)

@@ -1,8 +1,6 @@
 import textwrap
 from pathlib import Path
 
-import pytest
-
 
 def _write_toml(tmp_path: Path, content: str) -> Path:
     p = tmp_path / "run_test.bth.toml"
@@ -71,8 +69,8 @@ def test_resolve_agent_mode_cli_precedence():
 
 
 def test_resolve_agent_mode_sidecar_precedence(tmp_path):
-    from bathos.sidecar import parse_sidecar
     from bathos.prereg import resolve_agent_mode
+    from bathos.sidecar import parse_sidecar
 
     path = _write_toml(tmp_path, """
         [experiment]
@@ -128,7 +126,7 @@ def test_gate_check_ungated_dir_passes(tmp_path):
 
 
 def test_gate_check_missing_sidecar_fails(tmp_path):
-    from bathos.prereg import gate_check, resolve_sidecar, GateErrorCode
+    from bathos.prereg import GateErrorCode, gate_check, resolve_sidecar
 
     script = tmp_path / "scripts" / "experiments" / "run_nvt.py"
     script.parent.mkdir(parents=True)
@@ -162,7 +160,7 @@ def test_gate_check_valid_sidecar_passes(tmp_path):
 
 
 def test_gate_check_invalid_sidecar_fails(tmp_path):
-    from bathos.prereg import gate_check, resolve_sidecar, GateErrorCode
+    from bathos.prereg import GateErrorCode, gate_check, resolve_sidecar
 
     script = tmp_path / "scripts" / "experiments" / "run_nvt.py"
     script.parent.mkdir(parents=True)
@@ -203,9 +201,9 @@ def test_check_first_of_kind_no_prior_runs(tmp_path):
 
 
 def test_check_first_of_kind_prior_run_same_hash(tmp_path):
-    from bathos.schema import Run
     from bathos.catalog import write_run
     from bathos.prereg import check_first_of_kind
+    from bathos.schema import Run
 
     script = tmp_path / "scripts" / "experiments" / "run_nvt.py"
     script.parent.mkdir(parents=True)
@@ -229,9 +227,9 @@ def test_check_first_of_kind_prior_run_same_hash(tmp_path):
 
 
 def test_check_first_of_kind_prior_run_different_hash(tmp_path):
-    from bathos.schema import Run
     from bathos.catalog import write_run
     from bathos.prereg import check_first_of_kind
+    from bathos.schema import Run
 
     script = tmp_path / "scripts" / "experiments" / "run_nvt.py"
     script.parent.mkdir(parents=True)
@@ -269,9 +267,9 @@ def test_check_sidecar_drift_no_prior_runs(tmp_path):
 
 
 def test_check_sidecar_drift_matches_first_run(tmp_path):
-    from bathos.schema import Run
     from bathos.catalog import write_run
     from bathos.prereg import check_sidecar_drift
+    from bathos.schema import Run
 
     script = tmp_path / "scripts" / "experiments" / "run_nvt.py"
     script.parent.mkdir(parents=True)
@@ -296,9 +294,9 @@ def test_check_sidecar_drift_matches_first_run(tmp_path):
 
 
 def test_check_sidecar_drift_diverges_from_first_run(tmp_path):
-    from bathos.schema import Run
     from bathos.catalog import write_run
     from bathos.prereg import check_sidecar_drift
+    from bathos.schema import Run
 
     script = tmp_path / "scripts" / "experiments" / "run_nvt.py"
     script.parent.mkdir(parents=True)
@@ -324,9 +322,9 @@ def test_check_sidecar_drift_diverges_from_first_run(tmp_path):
 
 def test_check_sidecar_drift_ignores_runs_without_sidecar_hash(tmp_path):
     """A prior run recorded before B2-04 (no sidecar_sha256 yet) is not a valid baseline."""
-    from bathos.schema import Run
     from bathos.catalog import write_run
     from bathos.prereg import check_sidecar_drift
+    from bathos.schema import Run
 
     script = tmp_path / "scripts" / "experiments" / "run_nvt.py"
     script.parent.mkdir(parents=True)
@@ -351,9 +349,9 @@ def test_check_sidecar_drift_ignores_runs_without_sidecar_hash(tmp_path):
 
 
 def test_check_sidecar_drift_empty_current_hash_never_drifts(tmp_path):
-    from bathos.schema import Run
     from bathos.catalog import write_run
     from bathos.prereg import check_sidecar_drift
+    from bathos.schema import Run
 
     script = tmp_path / "scripts" / "experiments" / "run_nvt.py"
     script.parent.mkdir(parents=True)
@@ -378,9 +376,9 @@ def test_check_sidecar_drift_empty_current_hash_never_drifts(tmp_path):
 
 
 def test_gate_check_sidecar_drift_denies_autonomous(tmp_path):
-    from bathos.schema import Run
     from bathos.catalog import write_run
-    from bathos.prereg import gate_check, resolve_sidecar, GateErrorCode
+    from bathos.prereg import GateErrorCode, gate_check, resolve_sidecar
+    from bathos.schema import Run
 
     script = tmp_path / "scripts" / "experiments" / "run_nvt.py"
     script.parent.mkdir(parents=True)
@@ -412,9 +410,9 @@ def test_gate_check_sidecar_drift_denies_autonomous(tmp_path):
 
 
 def test_gate_check_sidecar_drift_warns_but_passes_collaborative(tmp_path, caplog):
-    from bathos.schema import Run
     from bathos.catalog import write_run
     from bathos.prereg import gate_check, resolve_sidecar
+    from bathos.schema import Run
 
     script = tmp_path / "scripts" / "experiments" / "run_nvt.py"
     script.parent.mkdir(parents=True)
@@ -446,9 +444,9 @@ def test_gate_check_sidecar_drift_warns_but_passes_collaborative(tmp_path, caplo
 
 
 def test_gate_check_sidecar_drift_matching_hash_passes_silently(tmp_path):
-    from bathos.schema import Run
     from bathos.catalog import write_run
     from bathos.prereg import gate_check, resolve_sidecar
+    from bathos.schema import Run
 
     script = tmp_path / "scripts" / "experiments" / "run_nvt.py"
     script.parent.mkdir(parents=True)
@@ -479,9 +477,9 @@ def test_gate_check_sidecar_drift_matching_hash_passes_silently(tmp_path):
 
 def test_check_reproduction_prerequisite_cool_tier_found(tmp_path):
     """Test finding a passing run in cool-tier Parquet (no warm DB)."""
+    from bathos.catalog import write_run
     from bathos.prereg import check_reproduction_prerequisite
     from bathos.schema import Run
-    from bathos.catalog import write_run
 
     catalog_dir = tmp_path / "catalog"
     catalog_dir.mkdir()
@@ -505,9 +503,9 @@ def test_check_reproduction_prerequisite_cool_tier_found(tmp_path):
 
 def test_check_reproduction_prerequisite_cool_tier_not_found(tmp_path):
     """Test not finding a passing run in cool-tier Parquet."""
+    from bathos.catalog import write_run
     from bathos.prereg import check_reproduction_prerequisite
     from bathos.schema import Run
-    from bathos.catalog import write_run
 
     catalog_dir = tmp_path / "catalog"
     catalog_dir.mkdir()
@@ -531,9 +529,9 @@ def test_check_reproduction_prerequisite_cool_tier_not_found(tmp_path):
 
 def test_check_reproduction_prerequisite_cool_tier_failing_run_not_matched(tmp_path):
     """Test that a run with matching stem but failing outcome is not matched."""
+    from bathos.catalog import write_run
     from bathos.prereg import check_reproduction_prerequisite
     from bathos.schema import Run
-    from bathos.catalog import write_run
 
     catalog_dir = tmp_path / "catalog"
     catalog_dir.mkdir()

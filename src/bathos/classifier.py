@@ -124,7 +124,6 @@ def _infer_date_prefix(script_path: Path) -> str:
 
     # Fallback: use file mtime
     try:
-        import stat
         from datetime import datetime
 
         mtime = script_path.stat().st_mtime
@@ -404,7 +403,7 @@ def apply_classify_plan(plan: ClassifyPlanResult, scaffold_sidecars: bool = True
             )
             if result.returncode != 0:
                 untracked_files.append(action.source)
-        except Exception as e:
+        except Exception:
             untracked_files.append(action.source)
 
     if untracked_files:

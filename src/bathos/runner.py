@@ -16,10 +16,22 @@ import typer
 from bathos.catalog import write_run
 from bathos.checker import hash_dependency_lock
 from bathos.git import capture_git_state
+from bathos.prereg import (
+    GateErrorCode,
+    _gate_failure_payload,
+    gate_check,
+    resolve_agent_mode,
+    resolve_sidecar,
+)
 from bathos.schema import Run
-from bathos.sidecar import find_sidecar, is_in_enforced_dir, parse_sidecar, evaluate_outcome, DifferentialBlock, SidecarError
-from bathos.prereg import resolve_sidecar, resolve_agent_mode, gate_check, GateErrorCode, _gate_failure_payload
-from bathos.telemetry import init_telemetry, event, run_uuid_var
+from bathos.sidecar import (
+    DifferentialBlock,
+    SidecarError,
+    evaluate_outcome,
+    is_in_enforced_dir,
+    parse_sidecar,
+)
+from bathos.telemetry import event, init_telemetry, run_uuid_var
 
 logger = logging.getLogger(__name__)
 

@@ -229,7 +229,7 @@ def signal_submit_bypass_rate(project_slug: str, db_path: Path, catalog_dir: Pat
                 submitted_job_ids = set(
                     jid for jid in combined.column("myxcel_job_id").to_pylist() if jid
                 )
-        except Exception as e:
+        except Exception:
             # Silently continue if provenance read fails
             # (but could log: f"Warning reading provenance: {e}")
             pass
@@ -537,7 +537,8 @@ def sprint_audit(hours: int = 24) -> dict:
                     "AND claim_path IS NOT NULL AND claim_path != '' "
                     "AND status NOT IN ('abandoned','open')"
                 ).fetchall()
-                from bathos.claim import parse_claim as _parse_claim_s11, differential_confound_check
+                from bathos.claim import differential_confound_check
+                from bathos.claim import parse_claim as _parse_claim_s11
 
                 for cname, cid, claim_path_rel in confirmation_with_claims:
                     abs_claim_path = project_root / claim_path_rel
@@ -601,7 +602,7 @@ def sprint_audit(hours: int = 24) -> dict:
                     "AND claim_path IS NOT NULL AND claim_path != '' "
                     "AND status NOT IN ('abandoned','open')"
                 ).fetchall()
-                from bathos.claim import parse_claim, parity_confound_check
+                from bathos.claim import parity_confound_check, parse_claim
 
                 for cname, cid, claim_path_rel in confirmation_with_claims:
                     abs_claim_path = project_root / claim_path_rel
@@ -689,7 +690,7 @@ def sprint_audit(hours: int = 24) -> dict:
             #   worst-label count in first third > 10% of total flags post-hoc experiment culling
             if signals["post_hoc_bias_flag"]:
                 anomalies.append(
-                    f"Project: post_hoc_bias_flag detected"
+                    "Project: post_hoc_bias_flag detected"
                 )
             # premature_stopping_rate: arXiv 2502.09858 POPPER;
             #   any concluded sequential campaign below threshold invalidates anytime-valid guarantee

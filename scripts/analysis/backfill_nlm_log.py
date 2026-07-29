@@ -10,7 +10,7 @@ import json
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 
 def load_transcript(transcript_path: str) -> list[dict]:
@@ -117,7 +117,7 @@ def extract_output_text(result_block: dict) -> str:
     return ""
 
 
-def parse_output_json(output_text: str) -> Optional[dict]:
+def parse_output_json(output_text: str) -> dict | None:
     """Try to parse output as JSON, return dict or None."""
     if not output_text:
         return None
@@ -128,8 +128,8 @@ def parse_output_json(output_text: str) -> Optional[dict]:
 
 
 def extract_notebook_id(
-    tool_input: dict, output_json: Optional[dict]
-) -> Optional[str]:
+    tool_input: dict, output_json: dict | None
+) -> str | None:
     """Extract notebook_id from input or output."""
     # Check input
     if "notebook_id" in tool_input:
@@ -146,7 +146,7 @@ def extract_notebook_id(
     return None
 
 
-def extract_query_text(tool_input: dict) -> Optional[str]:
+def extract_query_text(tool_input: dict) -> str | None:
     """Extract query text from input."""
     return tool_input.get("query")
 
@@ -157,7 +157,7 @@ def build_nlm_entry(
     transcript_file: str,
     paired_info: dict[str, Any],
     existing_ids: set[str],
-) -> Optional[dict]:
+) -> dict | None:
     """Build an nlm.jsonl entry from paired tool call and result."""
     if not tool_use_id or tool_use_id in existing_ids:
         return None

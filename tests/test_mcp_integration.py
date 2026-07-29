@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 from bathos.catalog import write_run
 from bathos.mcp import (
     compact_tool,

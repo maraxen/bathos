@@ -12,9 +12,9 @@ from unittest.mock import patch
 
 import pytest
 
-from bathos.errors import BathosErrorCode, RESOLUTION_HINTS
-from bathos.query import CatalogError
+from bathos.errors import RESOLUTION_HINTS, BathosErrorCode
 from bathos.mcp import traced_tool
+from bathos.query import CatalogError
 
 
 @pytest.fixture
@@ -95,7 +95,7 @@ def test_error_envelope_has_all_four_keys(tmp_path: Path, monkeypatch, event_moc
 
     # Verify resolution_hint matches the registry
     assert result["resolution_hint"] == RESOLUTION_HINTS[BathosErrorCode.CATALOG_ERROR], \
-        f"resolution_hint should match registry entry"
+        "resolution_hint should match registry entry"
 
 
 def test_self_reported_error_dict_is_not_clobbered_to_success(tmp_path: Path, monkeypatch, event_mock):

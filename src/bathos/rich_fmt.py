@@ -1,15 +1,15 @@
 """Rich console formatters for runs, campaigns, and reviews."""
 
-from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
 from datetime import datetime
 from pathlib import Path
 
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
 from rich.text import Text
 
-from bathos.schema import Run
 from bathos.campaigns import Campaign
+from bathos.schema import Run
 
 
 def render_runs_table(runs: list[Run], console: Console | None = None) -> None:

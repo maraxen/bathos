@@ -4,9 +4,7 @@ Tests validate that check_threshold_basis warns when numeric thresholds lack
 documented justification via source (outcomes) or regression_threshold_basis (benchmarks).
 """
 
-import pytest
 from pathlib import Path
-
 
 # ---------------------------------------------------------------------------
 # Helper
@@ -22,7 +20,7 @@ def _make_sidecar_toml(path: Path, content: str) -> Path:
 # ---------------------------------------------------------------------------
 
 def test_check_threshold_basis_bare_numeric_warns(tmp_path):
-    from bathos.linter import check_threshold_basis, IssueSeverity
+    from bathos.linter import IssueSeverity, check_threshold_basis
 
     toml_content = """
 [experiment]
@@ -92,7 +90,7 @@ def test_check_threshold_basis_one_equals_one_residual_warns(tmp_path):
     """Test accept-by-design: condition = '1=1' is a catch-all residual pattern.
     The regex intentionally matches the '1' in '1=1'. Users must either use
     condition = 'true' (scaffold default) or add source = 'trivial residual'."""
-    from bathos.linter import check_threshold_basis, IssueSeverity
+    from bathos.linter import IssueSeverity, check_threshold_basis
 
     toml_content = """
 [experiment]
@@ -159,7 +157,7 @@ def test_numeric_in_condition_warns_regardless_of_adversarial_check_field(tmp_pa
     """Test that the condition field is scanned for numeric literals even when
     adversarial_check is present. The numeric literal in condition (0.90) should
     trigger a warning because there is no source field."""
-    from bathos.linter import check_threshold_basis, IssueSeverity
+    from bathos.linter import IssueSeverity, check_threshold_basis
 
     toml_content = """
 [experiment]
@@ -258,7 +256,7 @@ output_path = "str"
 # ---------------------------------------------------------------------------
 
 def test_check_threshold_basis_benchmark_threshold_warns(tmp_path):
-    from bathos.linter import check_threshold_basis, IssueSeverity
+    from bathos.linter import IssueSeverity, check_threshold_basis
 
     toml_content = """
 [benchmark]
@@ -401,7 +399,7 @@ accuracy = "float"
 def test_check_threshold_basis_integer_literal_fires(tmp_path):
     """Conservative regex intentionally fires on small integers like 'count > 0'.
     The researcher must add source = 'zero is the natural lower bound' to suppress."""
-    from bathos.linter import check_threshold_basis, IssueSeverity
+    from bathos.linter import IssueSeverity, check_threshold_basis
 
     toml_content = """
 [experiment]
@@ -470,7 +468,7 @@ count = "int"
 
 def test_check_threshold_basis_scientific_notation_fires(tmp_path):
     """Scientific notation (e.g. 1e-3) must be caught by the regex."""
-    from bathos.linter import check_threshold_basis, IssueSeverity
+    from bathos.linter import IssueSeverity, check_threshold_basis
 
     toml_content = """
 [experiment]
@@ -506,7 +504,7 @@ def test_existing_tier2_check_adversarial_checks_still_passes(tmp_path):
     """Ensure check_adversarial_checks continues to work after the new check is wired in.
     A sidecar with outcomes.pass missing adversarial_check must still produce
     a missing_adversarial_check WARNING — unaffected by the threshold check."""
-    from bathos.linter import check_adversarial_checks, IssueSeverity
+    from bathos.linter import IssueSeverity, check_adversarial_checks
 
     toml_content = """
 [experiment]
@@ -539,8 +537,9 @@ accuracy = "float"
 # ---------------------------------------------------------------------------
 
 def test_cli_lint_threshold_warning_appears(tmp_path, monkeypatch):
-    from bathos.cli import app
     from typer.testing import CliRunner
+
+    from bathos.cli import app
 
     monkeypatch.chdir(tmp_path)
     catalog_dir = tmp_path / ".bth" / "catalog"

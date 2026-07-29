@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from dataclasses import dataclass
@@ -13,8 +14,6 @@ import pyarrow.parquet as pq
 from bathos.telemetry import event
 
 
-
-import hashlib
 def _sha256_file(path: Path) -> str:
     """Compute SHA256 hex digest of a file."""
     h = hashlib.sha256()
@@ -141,7 +140,7 @@ def archive(
             total_size += file_size
         else:
             file_size = 0
-            file_sha256 = ""  
+            file_sha256 = ""
 
         partition_duration_ms = (time.time() - partition_start_time) * 1000
 

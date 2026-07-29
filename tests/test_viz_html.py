@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -11,9 +11,9 @@ import pytest
 # Skip all tests in this module if jinja2 is not available
 pytest.importorskip("jinja2")
 
-from bathos.schema import Run
 from bathos.campaigns import Campaign
-from bathos.viz.html import render_html_report, export_html, estimate_html_size
+from bathos.schema import Run
+from bathos.viz.html import estimate_html_size, export_html, render_html_report
 
 
 def _make_test_run(
@@ -34,7 +34,7 @@ def _make_test_run(
         status="completed",
         exit_code=0,
         duration_s=42.5,
-        timestamp=datetime(2026, 5, 21, 13, 47, 23, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 5, 21, 13, 47, 23, tzinfo=UTC),
         tags=[],
         output_paths=[],
         campaign_id="",

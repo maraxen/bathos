@@ -317,8 +317,9 @@ class TestT9Signal13:
     """AC-14: Signal 13 flags uncontrolled reference_parity."""
 
     def test_signal_13_source_present(self):
-        from bathos.sprint_audit import sprint_audit as _sprint_audit
         import inspect
+
+        from bathos.sprint_audit import sprint_audit as _sprint_audit
 
         source = inspect.getsource(_sprint_audit)
         assert "Signal 13" in source

@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import re
 import tomllib
 from dataclasses import dataclass, field
 from enum import Enum

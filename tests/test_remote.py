@@ -1,16 +1,12 @@
 from __future__ import annotations
 
 import subprocess
-import tempfile
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 from typer.testing import CliRunner
 
 from bathos.cli import app
-from bathos.config import ProjectConfig
-
 
 # Test fixtures and constants
 
@@ -101,8 +97,8 @@ class TestListRemotes:
 
     def test_list_remotes_empty_config(self, tmp_config):
         """Empty config returns empty list."""
-        from bathos.remote import list_remotes
         from bathos.config import load_project_config
+        from bathos.remote import list_remotes
 
         config = load_project_config(tmp_config)
         remotes = list_remotes(config)
@@ -111,8 +107,8 @@ class TestListRemotes:
 
     def test_list_remotes_single_remote(self, tmp_config_with_remote):
         """Single remote returns list with one tuple."""
-        from bathos.remote import list_remotes
         from bathos.config import load_project_config
+        from bathos.remote import list_remotes
 
         config = load_project_config(tmp_config_with_remote)
         remotes = list_remotes(config)
@@ -122,8 +118,8 @@ class TestListRemotes:
 
     def test_list_remotes_multiple_sorted(self, tmp_config_with_multiple_remotes):
         """Multiple remotes returned sorted alphabetically by name."""
-        from bathos.remote import list_remotes
         from bathos.config import load_project_config
+        from bathos.remote import list_remotes
 
         config = load_project_config(tmp_config_with_multiple_remotes)
         remotes = list_remotes(config)
@@ -147,8 +143,8 @@ class TestAddRemote:
 
     def test_add_remote_success(self, tmp_config):
         """Successfully adds remote to config file."""
-        from bathos.remote import add_remote, list_remotes
         from bathos.config import load_project_config
+        from bathos.remote import add_remote, list_remotes
 
         add_remote(tmp_config, "engaging", "engaging", "~/projects/bathos")
 
@@ -175,8 +171,7 @@ class TestAddRemote:
 
     def test_add_remote_preserves_comments(self, tmp_path):
         """Round-trip preserves existing comments in TOML."""
-        from bathos.remote import add_remote, list_remotes
-        from bathos.config import load_project_config
+        from bathos.remote import add_remote
 
         config_path = tmp_path / ".bth.toml"
         config_path.write_text(BTH_TOML_WITH_COMMENT)
@@ -236,8 +231,8 @@ class TestRemoveRemote:
 
     def test_remove_remote_success(self, tmp_config_with_remote):
         """Successfully removes remote from config."""
-        from bathos.remote import remove_remote, list_remotes
         from bathos.config import load_project_config
+        from bathos.remote import list_remotes, remove_remote
 
         remove_remote(tmp_config_with_remote, "engaging")
 
@@ -262,8 +257,8 @@ class TestRemoveRemote:
 
     def test_remove_remote_preserves_other_remotes(self, tmp_config_with_multiple_remotes):
         """Removing one remote preserves others."""
-        from bathos.remote import remove_remote, list_remotes
         from bathos.config import load_project_config
+        from bathos.remote import list_remotes, remove_remote
 
         remove_remote(tmp_config_with_multiple_remotes, "engaging")
 
@@ -300,8 +295,8 @@ class TestRemoteTest:
 
     def test_test_remote_success(self, tmp_config_with_remote):
         """SSH success returns TestResult with success=True and latency_ms."""
-        from bathos.remote import test_remote
         from bathos.config import load_project_config
+        from bathos.remote import test_remote
 
         config = load_project_config(tmp_config_with_remote)
 
@@ -321,8 +316,8 @@ class TestRemoteTest:
 
     def test_test_remote_failure(self, tmp_config_with_remote):
         """SSH failure returns TestResult with success=False and error."""
-        from bathos.remote import test_remote
         from bathos.config import load_project_config
+        from bathos.remote import test_remote
 
         config = load_project_config(tmp_config_with_remote)
 
@@ -341,8 +336,8 @@ class TestRemoteTest:
 
     def test_test_remote_timeout(self, tmp_config_with_remote):
         """Timeout returns TestResult with appropriate error message."""
-        from bathos.remote import test_remote
         from bathos.config import load_project_config
+        from bathos.remote import test_remote
 
         config = load_project_config(tmp_config_with_remote)
 
@@ -357,8 +352,8 @@ class TestRemoteTest:
 
     def test_test_remote_name_not_found(self, tmp_config_with_remote):
         """Raises ValueError when remote name not found."""
-        from bathos.remote import test_remote
         from bathos.config import load_project_config
+        from bathos.remote import test_remote
 
         config = load_project_config(tmp_config_with_remote)
 
@@ -367,8 +362,8 @@ class TestRemoteTest:
 
     def test_test_remote_ssh_command_format(self, tmp_config_with_remote):
         """SSH command uses correct format with BatchMode and ConnectTimeout."""
-        from bathos.remote import test_remote
         from bathos.config import load_project_config
+        from bathos.remote import test_remote
 
         config = load_project_config(tmp_config_with_remote)
 
@@ -395,8 +390,8 @@ class TestRemoteTest:
 
     def test_test_remote_stdout_empty_on_failure(self, tmp_config_with_remote):
         """Returns stderr if stdout is empty on failure."""
-        from bathos.remote import test_remote
         from bathos.config import load_project_config
+        from bathos.remote import test_remote
 
         config = load_project_config(tmp_config_with_remote)
 

@@ -5,11 +5,8 @@ AC-10: exploration/calibration tier with unmet parity prereq -> advisory only
 AC-22: warm DB absent (simulate) -> fail open (advisory)
 Plus: satisfied case (passing parity run exists) -> gate passes for all tiers
 """
-import json
 import textwrap
 from pathlib import Path
-
-import pytest
 
 
 def _write_sidecar_with_parity_prereq(
@@ -49,12 +46,10 @@ def _write_passing_parity_run(
 
     Uses parity_run_type as a first-class column (v9 schema), NOT the metadata JSON blob.
     """
-    import pyarrow.parquet as pq
-    import pyarrow as pa
-    from bathos.catalog import init_catalog, write_run
-    from bathos.compact import compact
-    from bathos.schema import Run
     from datetime import UTC, datetime
+
+    from bathos.catalog import init_catalog, write_run
+    from bathos.schema import Run
 
     # Use the real Run→write_run path so the cool Parquet has the correct v9 schema
     init_catalog(tmp_path)
@@ -79,10 +74,11 @@ def _write_passing_parity_run_to_warm(
     stem: str = "baseline_parity",
 ) -> None:
     """Write a passing parity run into the warm DuckDB (for tests that need warm-path check)."""
+    from datetime import UTC, datetime
+
     from bathos.catalog import init_catalog, write_run
     from bathos.compact import compact
     from bathos.schema import Run
-    from datetime import UTC, datetime
 
     init_catalog(catalog_dir)
     run = Run(
@@ -111,9 +107,10 @@ class TestParitySubmitGate:
         This ensures fragments_read_ok >= 1 (determinable: no match), which is required
         for AC-09/AC-10 to produce satisfied=False rather than the AC-22 fail-open (satisfied=None).
         """
+        from datetime import UTC, datetime
+
         from bathos.catalog import init_catalog, write_run
         from bathos.schema import Run
-        from datetime import UTC, datetime
 
         init_catalog(catalog_dir)
         run = Run(
@@ -375,11 +372,9 @@ class TestAC22Variants:
         self, tmp_path, monkeypatch
     ):
         """AC-22(a): cool fragment readable with parity_run_type column, no match → determinable, validation = hard block."""
+
         from bathos.parity import check_parity_confounds_for_submit
         from bathos.sidecar import parse_sidecar
-        import pyarrow as pa
-        import pyarrow.parquet as pq
-        from bathos.schema import COOL_SCHEMA
 
         monkeypatch.chdir(tmp_path)
         catalog_dir = tmp_path / ".bth" / "catalog"
@@ -389,9 +384,10 @@ class TestAC22Variants:
 
         # Write a cool fragment with parity_run_type column but NO matching parity run
         # (parity_run_type=None → not a parity run)
+        from datetime import UTC, datetime
+
         from bathos.catalog import init_catalog, write_run
         from bathos.schema import Run
-        from datetime import UTC, datetime
 
         init_catalog(catalog_dir)
         run = Run(

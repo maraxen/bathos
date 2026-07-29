@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 
-import pytest
-
-from bathos.schema import Run
 from bathos.campaigns import Campaign
-from bathos.viz.data import project_run, project_campaign, RunDisplay, CampaignDisplay
+from bathos.schema import Run
+from bathos.viz.data import project_campaign, project_run
 
 
 class TestProjectRunBasic:

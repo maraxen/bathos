@@ -1,5 +1,6 @@
 import textwrap
 from pathlib import Path
+
 import pytest
 
 
@@ -10,7 +11,7 @@ def _write_toml(tmp_path: Path, content: str) -> Path:
 
 
 def test_parse_experiment_sidecar(tmp_path):
-    from bathos.sidecar import parse_sidecar, SidecarKind
+    from bathos.sidecar import SidecarKind, parse_sidecar
     path = _write_toml(tmp_path, """
         [experiment]
         hypothesis = "NVT maintains ±5K over 50ps"
@@ -35,7 +36,7 @@ def test_parse_experiment_sidecar(tmp_path):
 
 
 def test_parse_benchmark_sidecar(tmp_path):
-    from bathos.sidecar import parse_sidecar, SidecarKind
+    from bathos.sidecar import SidecarKind, parse_sidecar
     path = _write_toml(tmp_path, """
         [benchmark]
         baseline_ref = "run_abc123"
@@ -93,7 +94,7 @@ def test_is_in_enforced_dir_false(tmp_path):
 
 
 def test_evaluate_outcome_pass(tmp_path):
-    from bathos.sidecar import parse_sidecar, evaluate_outcome
+    from bathos.sidecar import evaluate_outcome, parse_sidecar
     path = _write_toml(tmp_path, """
         [experiment]
         hypothesis = "h"
@@ -115,7 +116,7 @@ def test_evaluate_outcome_pass(tmp_path):
 
 
 def test_evaluate_outcome_no_match(tmp_path):
-    from bathos.sidecar import parse_sidecar, evaluate_outcome
+    from bathos.sidecar import evaluate_outcome, parse_sidecar
     path = _write_toml(tmp_path, """
         [experiment]
         hypothesis = "h"
@@ -138,7 +139,7 @@ def test_evaluate_outcome_no_match(tmp_path):
 
 
 def test_evaluate_outcome_bool_result(tmp_path):
-    from bathos.sidecar import parse_sidecar, evaluate_outcome
+    from bathos.sidecar import evaluate_outcome, parse_sidecar
     path = _write_toml(tmp_path, """
         [debug]
         symptom = "NaN forces"
@@ -163,7 +164,7 @@ def test_evaluate_outcome_bool_result(tmp_path):
 
 def test_evaluate_outcome_none_field_does_not_crash(tmp_path):
     """A None-valued result field must not crash evaluation (regression: debt #478)."""
-    from bathos.sidecar import parse_sidecar, evaluate_outcome
+    from bathos.sidecar import evaluate_outcome, parse_sidecar
     path = _write_toml(tmp_path, """
         [experiment]
         hypothesis = "h"
@@ -187,7 +188,7 @@ def test_evaluate_outcome_none_field_does_not_crash(tmp_path):
 
 def test_evaluate_outcome_nested_dict_field_does_not_crash(tmp_path):
     """A nested-dict result field (e.g. an 'args' blob) must not crash evaluation (regression: debt #478)."""
-    from bathos.sidecar import parse_sidecar, evaluate_outcome
+    from bathos.sidecar import evaluate_outcome, parse_sidecar
     path = _write_toml(tmp_path, """
         [experiment]
         hypothesis = "h"
@@ -210,7 +211,7 @@ def test_evaluate_outcome_nested_dict_field_does_not_crash(tmp_path):
 
 def test_evaluate_outcome_string_with_apostrophe_does_not_crash(tmp_path):
     """A string result field containing an apostrophe must not break the generated SQL literal."""
-    from bathos.sidecar import parse_sidecar, evaluate_outcome
+    from bathos.sidecar import evaluate_outcome, parse_sidecar
     path = _write_toml(tmp_path, """
         [experiment]
         hypothesis = "h"
@@ -277,7 +278,7 @@ def test_sidecar_agent_mode_default(tmp_path):
 
 def test_evaluate_outcome_raises_sidecar_error_on_bad_sql(tmp_path):
     """When outcome condition has invalid SQL, evaluate_outcome raises SidecarError."""
-    from bathos.sidecar import parse_sidecar, evaluate_outcome, SidecarError
+    from bathos.sidecar import SidecarError, evaluate_outcome, parse_sidecar
     path = _write_toml(tmp_path, """
         [experiment]
         hypothesis = "test"
@@ -343,6 +344,7 @@ def test_parse_experiment_sidecar_stage_name_default(tmp_path):
 def test_parse_experiment_sidecar_stage_name_invalid_coerces_to_exploration(tmp_path, caplog):
     """Invalid stage_name coerces to 'exploration' with warning."""
     import logging
+
     from bathos.sidecar import parse_sidecar
 
     path = _write_toml(tmp_path, """
@@ -501,6 +503,7 @@ def test_parse_experiment_sidecar_reproduction_block_absent(tmp_path):
 def test_parse_experiment_sidecar_reproduction_block_unknown_key_warning(tmp_path, caplog):
     """Unknown keys in [reproduction] emit WARNING."""
     import logging
+
     from bathos.sidecar import parse_sidecar
     path = _write_toml(tmp_path, """
         [experiment]
@@ -604,6 +607,7 @@ def test_parse_experiment_sidecar_controls_block_empty(tmp_path):
 def test_parse_experiment_sidecar_controls_block_unknown_key_warning(tmp_path, caplog):
     """Unknown keys in [controls] emit WARNING."""
     import logging
+
     from bathos.sidecar import parse_sidecar
     path = _write_toml(tmp_path, """
         [experiment]
@@ -719,6 +723,7 @@ def test_parse_experiment_sidecar_differential_block_defaults(tmp_path):
 def test_parse_experiment_sidecar_differential_block_unknown_key_warning(tmp_path, caplog):
     """Unknown keys in [differential] emit WARNING."""
     import logging
+
     from bathos.sidecar import parse_sidecar
     path = _write_toml(tmp_path, """
         [experiment]

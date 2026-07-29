@@ -1,4 +1,3 @@
-from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
@@ -59,13 +58,13 @@ def test_resolve_target_gemini_workspace():
 
 
 def test_resolve_target_invalid_tool():
-    from bathos.export import resolve_target, ExportError
+    from bathos.export import ExportError, resolve_target
     with pytest.raises(ExportError, match="Unknown tool"):
         resolve_target(tool="vscode", level="user")
 
 
 def test_resolve_target_invalid_level():
-    from bathos.export import resolve_target, ExportError
+    from bathos.export import ExportError, resolve_target
     with pytest.raises(ExportError, match="Unknown level"):
         resolve_target(tool="claude", level="global")
 
@@ -87,6 +86,7 @@ def test_register_mcp_claude_user_creates_mcp_json(tmp_path, monkeypatch):
 def test_register_mcp_merges_existing_servers(tmp_path, monkeypatch):
     """register_mcp preserves existing mcpServers entries."""
     import json
+
     from bathos.export import register_mcp
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     mcp_path = tmp_path / ".claude.json"
@@ -100,6 +100,7 @@ def test_register_mcp_merges_existing_servers(tmp_path, monkeypatch):
 def test_register_mcp_gemini_merges_settings(tmp_path, monkeypatch):
     """register_mcp merges into ~/.gemini/settings.json preserving other keys."""
     import json
+
     from bathos.export import register_mcp
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     settings_path = tmp_path / ".gemini" / "settings.json"
@@ -122,6 +123,7 @@ def test_register_mcp_dry_run_does_not_write(tmp_path, monkeypatch):
 def test_register_mcp_workspace_uses_cwd(tmp_path, monkeypatch):
     """register_mcp workspace level writes to CWD-relative path."""
     import json
+
     from bathos.export import register_mcp
     monkeypatch.chdir(tmp_path)
     register_mcp(tool="claude", level="workspace", dry_run=False)

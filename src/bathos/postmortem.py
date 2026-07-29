@@ -1,11 +1,14 @@
 from __future__ import annotations
-import tomllib
+
 import hashlib
-from pathlib import Path
+import tomllib
 from dataclasses import dataclass, field
-from bathos.schema import Run
+from pathlib import Path
+
 from bathos.git import capture_git_state
+from bathos.schema import Run
 from bathos.telemetry import event
+
 
 @dataclass
 class ValidationError:
@@ -47,15 +50,15 @@ def parse_postmortem(path: Path) -> Postmortem:
     postmortem_section = data.get("postmortem", {})
     if not run_id:
         run_id = postmortem_section.get("run_id")
-    
+
     if not run_id:
         raise ValueError("Missing run_id")
-        
+
     if "hypothesis_status" not in postmortem_section:
         raise ValueError("Missing hypothesis_status in [postmortem]")
-        
+
     hypothesis_status = postmortem_section.get("hypothesis_status")
-    
+
     summary = postmortem_section.get("summary", "")
     unexpected_observations = postmortem_section.get("unexpected_observations", "")
     root_cause = postmortem_section.get("root_cause", "")
@@ -68,18 +71,18 @@ def parse_postmortem(path: Path) -> Postmortem:
     git_dirty = postmortem_section.get("git_dirty", False)
     script_sha256 = postmortem_section.get("script_sha256", "")
     refutation_criteria_met = postmortem_section.get("refutation_criteria_met", [])
-    
+
     # Decisions section can also have verdict_override and next_steps
     decisions = data.get("decisions", {})
     if not verdict_override or verdict_override == "none":
         verdict_override = decisions.get("verdict_override", "none")
     if not next_steps:
         next_steps = decisions.get("next_steps", "")
-    
+
     # Parse asset_links
     asset_links = data.get("asset_links", {})
     anomalies = data.get("anomalies", {})
-    
+
     return Postmortem(
         run_id=run_id,
         hypothesis_status=hypothesis_status,
@@ -133,7 +136,7 @@ def validate_postmortem(
             elif isinstance(link_val, dict):
                 path_str = link_val.get("path")
                 sha256_val = link_val.get("sha256")
-            
+
             if path_str:
                 path = Path(path_str)
                 # Check absolute path

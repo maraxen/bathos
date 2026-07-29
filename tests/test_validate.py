@@ -1,8 +1,6 @@
 import textwrap
 from pathlib import Path
 
-import pytest
-
 
 def _write_toml(tmp_path: Path, content: str) -> Path:
     p = tmp_path / "run_test.bth.toml"

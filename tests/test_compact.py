@@ -418,7 +418,7 @@ def test_schema_migrations_has_record(tmp_path):
     """_schema_migrations contains a record after compact."""
     from bathos.catalog import write_run
     from bathos.compact import compact
-    from bathos.schema import Run, CURRENT_SCHEMA_VERSION
+    from bathos.schema import CURRENT_SCHEMA_VERSION, Run
 
     r = Run(project_slug="p", command="c", argv=["c"],
             git_hash="abc", git_branch="main", git_dirty=False)
@@ -591,7 +591,9 @@ def test_output_metadata_refreshed_on_recompact(tmp_catalog: Path, sample_run: R
     """output_metadata for existing runs is re-statted on subsequent compacts (Debt #71)."""
     import dataclasses
     import json
+
     import duckdb
+
     from bathos.catalog import init_catalog, write_run
     from bathos.compact import compact
 
@@ -627,7 +629,9 @@ def test_output_metadata_refresh_detects_deleted_file(tmp_catalog: Path, sample_
     """output_metadata refresh marks deleted files as 'missing' on next compact."""
     import dataclasses
     import json
+
     import duckdb
+
     from bathos.catalog import init_catalog, write_run
     from bathos.compact import compact
 
@@ -655,7 +659,9 @@ def test_output_metadata_sha256_reused_when_mtime_unchanged(tmp_catalog: Path, s
     """sha256 is reused from stored metadata when mtime is unchanged (skip rehash)."""
     import dataclasses
     import json
+
     import duckdb
+
     from bathos.catalog import init_catalog, write_run
     from bathos.compact import compact
 
@@ -682,8 +688,8 @@ def test_output_metadata_sha256_reused_when_mtime_unchanged(tmp_catalog: Path, s
 
 def test_runner_compact_warm_roundtrip_three_columns(tmp_catalog: Path, sample_run: Run):
     """Test that parity_run_type, claim_discriminates, claim_isolates survive cool→warm roundtrip non-null."""
+
     from bathos.catalog import init_catalog
-    import json
 
     init_catalog(tmp_catalog)
 

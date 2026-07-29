@@ -1,9 +1,9 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import duckdb
 import pytest
 
-from bathos.catalog import init_catalog, write_run
 from bathos.campaigns import (
     CampaignError,
     add_run_to_campaign,
@@ -13,9 +13,9 @@ from bathos.campaigns import (
     list_campaigns,
     review_campaign,
 )
+from bathos.catalog import init_catalog, write_run
 from bathos.compact import compact
 from bathos.schema import Run
-import duckdb
 
 
 @pytest.fixture
@@ -534,7 +534,6 @@ def test_conclude_campaign_union_gate_covered_via_real_sidecar_origin(
     so a test that only exercises one half at a time cannot catch a regression in the seam between
     them. This runs the real path and asserts the clause comes out COVERED, not confounded.
     """
-    import json
     import sys
     import textwrap
 
@@ -613,7 +612,6 @@ hypothesis_ids = ["H_primary", "H_null"]
 
 def test_conclude_campaign_force_verdict_bypasses_gate(populated_warm_catalog: Path, tmp_path):
     """AC-09: Union Gate bypass with --force-verdict writes claim_mode='bypassed'."""
-    import json
 
     db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
     try:
@@ -671,7 +669,6 @@ def test_conclude_campaign_claim_file_not_found_raises(populated_warm_catalog: P
 
 def test_conclude_campaign_exploration_mode_warning_only(populated_warm_catalog: Path, tmp_path):
     """AC-08: Union Gate on exploration mode prints warning only, does not downgrade verdict."""
-    import json
 
     db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
     try:

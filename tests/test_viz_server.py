@@ -2,13 +2,11 @@
 from __future__ import annotations
 
 import pytest
-from datetime import UTC, datetime
 
 # Skip if fastapi not available
 pytest.importorskip("fastapi")
 
 from bathos.schema import Run
-from bathos.campaigns import Campaign
 from bathos.viz.server import create_app
 
 

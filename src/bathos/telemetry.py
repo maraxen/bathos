@@ -36,14 +36,12 @@ import os
 import queue
 import socket
 import sys
-import threading
 import time
 import traceback
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 from pathlib import Path
-from typing import Any
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Contextvars — set by callers (runner.py, mcp.py, cli.py)
@@ -89,7 +87,7 @@ class JsonFormatter(logging.Formatter):
         """Convert LogRecord to JSON line."""
         # Envelope: required on every record
         envelope = {
-            "ts": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(
+            "ts": datetime.fromtimestamp(record.created, tz=UTC).isoformat(
                 timespec="microseconds"
             ),
             "level": record.levelname.lower(),
@@ -235,7 +233,7 @@ def init_telemetry(
     # Ensure log_dir exists
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
+    except OSError:
         # Fall back to temp dir if not writable
         import tempfile
 

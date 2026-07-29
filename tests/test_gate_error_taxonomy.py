@@ -2,9 +2,8 @@
 from __future__ import annotations
 
 import dataclasses
-import pytest
 
-from bathos.prereg import GateErrorCode, GateErrorPayload, _gate_failure_payload, GateError
+from bathos.prereg import GateError, GateErrorCode, GateErrorPayload, _gate_failure_payload
 
 
 class TestGateErrorCode:

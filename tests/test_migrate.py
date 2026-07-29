@@ -1,11 +1,11 @@
+from pathlib import Path
+
 import pyarrow as pa
 import pyarrow.parquet as pq
-import pytest
-from pathlib import Path
 from typer.testing import CliRunner
 
-from bathos.schema import COOL_SCHEMA, Run
 from bathos.catalog import write_run
+from bathos.schema import COOL_SCHEMA, Run
 
 runner = CliRunner()
 

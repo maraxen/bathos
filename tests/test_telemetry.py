@@ -56,7 +56,6 @@ def _reset_telemetry_module():
     Pokes _INITIALIZED=False so tests that need a fresh pipeline can call
     init_telemetry() without side-effects from a prior test's init.
     """
-    import importlib
     import sys
 
     if "bathos.telemetry" in sys.modules:
@@ -185,9 +184,8 @@ class TestModuleAPISurface:
         _reset_telemetry_module()
         init_telemetry(log_dir=tmp_path)
 
-        with pytest.raises(ValueError, match="boom"):
-            with span("runner.exec"):
-                raise ValueError("boom")
+        with pytest.raises(ValueError, match="boom"), span("runner.exec"):
+            raise ValueError("boom")
 
         records = _drain_and_read_jsonl(tmp_path)
         end_records = [r for r in records if r.get("event") == "runner.exec.end"]
@@ -399,8 +397,8 @@ def _worker_emit_events(log_dir: str, n_events: int) -> None:
     import sys
 
     sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-    from bathos.telemetry import _INITIALIZED  # noqa: F401 — check importable
     import bathos.telemetry as tel
+    from bathos.telemetry import _INITIALIZED  # noqa: F401 — check importable
 
     tel._INITIALIZED = False
     tel.init_telemetry(log_dir=Path(log_dir))

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import duckdb
@@ -96,7 +96,8 @@ def add_run_to_campaign(db, campaign_id: str, run_id: str) -> None:
         sidecar_stopping_threshold = None
         if run_sidecar_path:
             from pathlib import Path
-            from bathos.sidecar import parse_sidecar, SidecarError
+
+            from bathos.sidecar import SidecarError, parse_sidecar
             try:
                 sidecar_path_obj = Path(run_sidecar_path)
                 if sidecar_path_obj.exists():
@@ -243,9 +244,10 @@ def conclude_campaign(
         CampaignError: If a claim is registered, outcome_label is a negative claim, and
             negative_check is blank.
     """
-    from bathos.claim import parse_claim, run_union_gate, check_sha, is_negative_outcome
-    from bathos.workspace import resolve_workspace
     from pathlib import Path
+
+    from bathos.claim import check_sha, is_negative_outcome, parse_claim, run_union_gate
+    from bathos.workspace import resolve_workspace
 
     full_id = _resolve_campaign_id(db, campaign_id)
 
@@ -678,8 +680,8 @@ def emit_claim_coverage_report(
     Raises:
         None (errors are raised for directory creation failures)
     """
-    from pathlib import Path
     import json
+    from pathlib import Path
 
     # Compute coverage fraction
     total_clauses = len(claim.union_gate_clauses)

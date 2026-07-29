@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any, TypedDict
 
-from bathos.schema import Run
 from bathos.campaigns import Campaign
+from bathos.schema import Run
 
 
 class RunDisplay(TypedDict):

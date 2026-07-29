@@ -1,25 +1,21 @@
 """Tests for POPPER e-value sequential campaign primitives (#792)."""
 import textwrap
 import uuid
-from datetime import UTC, datetime
 from pathlib import Path
 
 import duckdb
 import pytest
 
-from bathos.catalog import init_catalog, write_run
 from bathos.campaigns import (
-    Campaign,
     CampaignError,
     _campaign_threshold_met,
     add_run_to_campaign,
-    conclude_campaign,
     create_campaign,
     review_campaign,
 )
+from bathos.catalog import init_catalog, write_run
 from bathos.compact import compact
 from bathos.schema import Run
-
 
 # ---------------------------------------------------------------------------
 # Helpers

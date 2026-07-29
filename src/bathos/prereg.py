@@ -11,8 +11,8 @@ import duckdb
 
 from bathos.schema import Run
 from bathos.sidecar import Sidecar, find_sidecar, parse_sidecar
-from bathos.validate import ValidationResult, validate_sidecar
 from bathos.telemetry import event
+from bathos.validate import ValidationResult, validate_sidecar
 
 AgentMode = Literal["collaborative", "autonomous"]
 

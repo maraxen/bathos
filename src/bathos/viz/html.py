@@ -6,11 +6,11 @@ import json
 import sys
 from pathlib import Path
 
-from jinja2 import Environment, PackageLoader, TemplateError
+from jinja2 import Environment, PackageLoader
 
-from bathos.schema import Run
 from bathos.campaigns import Campaign
-from bathos.viz.data import project_run, project_campaign, RunDisplay, CampaignDisplay
+from bathos.schema import Run
+from bathos.viz.data import CampaignDisplay, RunDisplay, project_campaign, project_run
 
 
 def _load_static_asset(filename: str) -> str:
