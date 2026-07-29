@@ -1031,6 +1031,140 @@ decision = "good"
     assert novel_issues[0].severity == IssueSeverity.ERROR
 
 
+def test_check_positive_control_missing_null_capable_no_control_warns(tmp_path):
+    """debt #1071: fail/is_residual outcome with no [differential]/[controls] -> WARNING."""
+    from bathos.linter import IssueSeverity, check_positive_control_missing
+
+    s = _make_script(tmp_path, "experiments", "run_test.py")
+    sidecar_path = s.with_suffix(".bth.toml")
+    sidecar_path.write_text("""[experiment]
+hypothesis = "test"
+
+[result_schema]
+signal = "float"
+
+[outcomes.pass]
+condition = "signal > 0"
+decision = "good"
+reasoning = "positive"
+
+[outcomes.fail]
+condition = "signal <= 0"
+decision = "bad"
+reasoning = "non-positive"
+is_residual = true
+""")
+
+    issues = check_positive_control_missing(tmp_path)
+    pc_issues = [i for i in issues if i.issue == "POSITIVE_CONTROL_MISSING"]
+    assert len(pc_issues) == 1
+    assert pc_issues[0].severity == IssueSeverity.WARNING
+
+
+def test_check_positive_control_missing_with_differential_block_passes(tmp_path):
+    """A [differential] block satisfies the positive-control requirement."""
+    from bathos.linter import check_positive_control_missing
+
+    s = _make_script(tmp_path, "experiments", "run_test.py")
+    sidecar_path = s.with_suffix(".bth.toml")
+    sidecar_path.write_text("""[experiment]
+hypothesis = "test"
+
+[result_schema]
+signal = "float"
+
+[outcomes.fail]
+condition = "signal <= 0"
+decision = "bad"
+reasoning = "non-positive"
+is_residual = true
+
+[differential]
+knob = "some_knob"
+off = "0.0"
+on = "1.0"
+metric = "signal"
+min_effect = 0.05
+""")
+
+    issues = check_positive_control_missing(tmp_path)
+    assert all(i.issue != "POSITIVE_CONTROL_MISSING" for i in issues)
+
+
+def test_check_positive_control_missing_with_controls_positive_outcome_passes(tmp_path):
+    """A [controls].positive_outcome declaration satisfies the requirement."""
+    from bathos.linter import check_positive_control_missing
+
+    s = _make_script(tmp_path, "experiments", "run_test.py")
+    sidecar_path = s.with_suffix(".bth.toml")
+    sidecar_path.write_text("""[experiment]
+hypothesis = "test"
+
+[result_schema]
+signal = "float"
+
+[outcomes.ctrl_pass]
+condition = "signal > 0"
+decision = "good"
+reasoning = "positive"
+
+[outcomes.fail]
+condition = "signal <= 0"
+decision = "bad"
+reasoning = "non-positive"
+is_residual = true
+
+[controls]
+positive_outcome = ["ctrl_pass"]
+""")
+
+    issues = check_positive_control_missing(tmp_path)
+    assert all(i.issue != "POSITIVE_CONTROL_MISSING" for i in issues)
+
+
+def test_check_positive_control_missing_no_null_capable_outcome_passes(tmp_path):
+    """No fail/is_residual outcome at all -> rule doesn't apply."""
+    from bathos.linter import check_positive_control_missing
+
+    s = _make_script(tmp_path, "experiments", "run_test.py")
+    sidecar_path = s.with_suffix(".bth.toml")
+    sidecar_path.write_text("""[experiment]
+hypothesis = "test"
+
+[result_schema]
+signal = "float"
+
+[outcomes.pass]
+condition = "signal > 0"
+decision = "good"
+reasoning = "positive"
+""")
+
+    issues = check_positive_control_missing(tmp_path)
+    assert all(i.issue != "POSITIVE_CONTROL_MISSING" for i in issues)
+
+
+def test_check_positive_control_missing_ignores_benchmarks(tmp_path):
+    """Only EXPERIMENT-kind sidecars are checked."""
+    from bathos.linter import check_positive_control_missing
+
+    s = _make_script(tmp_path, "experiments", "run_bench.py")
+    sidecar_path = s.with_suffix(".bth.toml")
+    sidecar_path.write_text("""[benchmark]
+baseline_ref = "v1.0"
+metric = "latency_ms"
+regression_threshold = 10.0
+regression_threshold_basis = "arbitrary"
+target = "some_function"
+
+[result_schema]
+latency_ms = "float"
+""")
+
+    issues = check_positive_control_missing(tmp_path)
+    assert all(i.issue != "POSITIVE_CONTROL_MISSING" for i in issues)
+
+
 def test_check_todo_strings_in_scaffold_hypothesis_todo(tmp_path):
     """Tier-2: Warn when hypothesis contains TODO placeholder."""
     from bathos.linter import IssueSeverity, check_todo_strings_in_scaffold

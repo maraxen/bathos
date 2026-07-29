@@ -268,6 +268,23 @@ def _migrate_v11(run_dict: dict) -> dict:
     return run_dict
 
 
+def _migrate_v12(run_dict: dict) -> dict:
+    """Migrate v12 fragment to v13 by adding differential-preflight and
+    dependency-lock-provenance fields (debt #1071).
+
+    All optional, default to None for existing runs -- a run predating the
+    [differential] pre-flight gate has no recorded differential status or
+    dependency-lock hash, a different fact from an empty-string/zero value.
+    """
+    run_dict["differential_status"] = None
+    run_dict["differential_off_value"] = None
+    run_dict["differential_on_value"] = None
+    run_dict["differential_effect"] = None
+    run_dict["dependency_lock_sha256"] = None
+    run_dict["schema_version"] = "13"
+    return run_dict
+
+
 MIGRATIONS["0"] = _migrate_v0
 MIGRATIONS["1"] = _migrate_v1
 MIGRATIONS["2"] = _migrate_v2
@@ -280,6 +297,7 @@ MIGRATIONS["8"] = _migrate_v8
 MIGRATIONS["9"] = _migrate_v9
 MIGRATIONS["10"] = _migrate_v10
 MIGRATIONS["11"] = _migrate_v11
+MIGRATIONS["12"] = _migrate_v12
 
 
 _RUNS_TABLE_SCHEMA = """
@@ -334,7 +352,12 @@ CREATE TABLE IF NOT EXISTS runs (
     baseline_hpo_compute_budget DOUBLE,
     stdout_sha256 TEXT,
     component_id TEXT,
-    component_sidecar_sha256 TEXT
+    component_sidecar_sha256 TEXT,
+    differential_status TEXT,
+    differential_off_value TEXT,
+    differential_on_value TEXT,
+    differential_effect DOUBLE,
+    dependency_lock_sha256 TEXT
 )
 """
 
@@ -689,6 +712,11 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
         "ALTER TABLE runs ADD COLUMN IF NOT EXISTS stdout_sha256 TEXT",
         "ALTER TABLE runs ADD COLUMN IF NOT EXISTS component_id TEXT",
         "ALTER TABLE runs ADD COLUMN IF NOT EXISTS component_sidecar_sha256 TEXT",
+        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS differential_status TEXT",
+        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS differential_off_value TEXT",
+        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS differential_on_value TEXT",
+        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS differential_effect DOUBLE",
+        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS dependency_lock_sha256 TEXT",
     ]:
         with contextlib.suppress(Exception):
             con.execute(_runs_alter_sql)
@@ -849,8 +877,9 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                 script_sha256, postmortem_status, postmortem_override, postmortem_verdict_override, postmortem_author, postmortem_path,
                 postmortem_hypothesis_status, postmortem_has_anomalies, postmortem_summary, postmortem_asset_links, stage_name,
                 claim_discriminates, claim_isolates, parity_run_type, seed, baseline_hpo_trials, baseline_hpo_compute_budget,
-                stdout_sha256, component_id, component_sidecar_sha256
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                stdout_sha256, component_id, component_sidecar_sha256,
+                differential_status, differential_off_value, differential_on_value, differential_effect, dependency_lock_sha256
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 run.id,
@@ -900,6 +929,11 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                 run.stdout_sha256,
                 run.component_id,
                 run.component_sidecar_sha256,
+                run.differential_status,
+                run.differential_off_value,
+                run.differential_on_value,
+                run.differential_effect,
+                run.dependency_lock_sha256,
             ],
         )
 

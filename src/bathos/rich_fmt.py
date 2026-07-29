@@ -246,6 +246,11 @@ def _get_outcome_color(outcome: str) -> str:
         return "bold red"
     elif outcome == "marginal":
         return "yellow"
+    elif outcome == "invalid_measurement":
+        # Distinct from fail/error (debt #1071): the harness didn't crash and the domain
+        # isn't showing "no effect" -- the [differential] pre-flight proved the measurement
+        # itself can't be trusted. Must read visually distinct from a legitimate result.
+        return "bold magenta"
     else:
         return "dim"
 

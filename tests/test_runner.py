@@ -937,6 +937,252 @@ def test_run_with_campaign_before_any_catalog_fails_fast(tmp_catalog: Path, tmp_
     assert read_runs(tmp_catalog) == []
 
 
+def _write_differential_fixture(
+    tmp_path: Path,
+    counter_path: Path,
+    *,
+    sensitive: bool,
+    outcomes_toml: str,
+    differential_toml: str,
+) -> Path:
+    """Write an experiment script + sidecar exercising the [differential] pre-flight.
+
+    `sensitive=True` makes `signal` genuinely responsive to BTH_DIFFERENTIAL_VALUE
+    (real instrument-sensitivity ground truth, per BATHOS.md's synthetic-check rule);
+    `sensitive=False` hardcodes `signal` regardless of the knob (reproducing the
+    debt #1071 incident: a measurement pipeline insensitive to its own input). Every
+    invocation appends its BTH_DIFFERENTIAL_PHASE ("off"/"on", or "main" when unset)
+    to `counter_path`, so tests can assert exactly which phases actually executed.
+    """
+    import textwrap
+
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True, exist_ok=True)
+    script = enforced / "run_test.py"
+    signal_expr = (
+        'float(os.environ.get("BTH_DIFFERENTIAL_VALUE", "1.0")) * 10.0'
+        if sensitive
+        else "5.0"
+    )
+    script.write_text(textwrap.dedent(f"""
+        import os
+        import json
+
+        phase = os.environ.get("BTH_DIFFERENTIAL_PHASE", "main")
+        with open(r"{counter_path}", "a") as cf:
+            cf.write(phase + "\\n")
+
+        signal = {signal_expr}
+
+        results_path = os.environ.get("BTH_RESULTS_PATH")
+        if results_path:
+            with open(results_path, "w") as f:
+                json.dump({{"signal": signal}}, f)
+    """))
+
+    sidecar = enforced / "run_test.bth.toml"
+    sidecar.write_text(textwrap.dedent(f"""
+        [experiment]
+        hypothesis = "test hypothesis"
+        {outcomes_toml}
+        [result_schema]
+        signal = "float"
+        [differential]
+        {differential_toml}
+    """))
+    return script
+
+
+def test_differential_gate_blocks_broken_pipeline(tmp_catalog: Path, tmp_path: Path):
+    """expect=differs against a knob-insensitive pipeline -> invalid_measurement, main never runs."""
+    counter_path = tmp_path / "invocations.log"
+    script = _write_differential_fixture(
+        tmp_path,
+        counter_path,
+        sensitive=False,
+        outcomes_toml="""
+        [outcomes.pass]
+        condition = "signal > 0"
+        decision = "good"
+        reasoning = "positive signal"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "other"
+        reasoning = "catch-all"
+        is_residual = true
+        """,
+        differential_toml="""
+        knob = "sidechain_conditioning"
+        off = "0.0"
+        on = "1.0"
+        expect = "differs"
+        metric = "signal"
+        min_effect = 0.05
+        """,
+    )
+
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 1
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert runs[0].outcome == "invalid_measurement"
+    assert runs[0].differential_status == "invalid_measurement"
+    assert runs[0].status == "completed"
+    assert runs[0].exit_code == 0
+
+    invocations = counter_path.read_text().splitlines()
+    assert invocations == ["off", "on"], "main run must never execute when the invariant fails"
+
+
+def test_differential_gate_passes_fixed_pipeline(tmp_catalog: Path, tmp_path: Path):
+    """expect=differs against a genuinely knob-sensitive pipeline -> normal outcome, main runs."""
+    counter_path = tmp_path / "invocations.log"
+    script = _write_differential_fixture(
+        tmp_path,
+        counter_path,
+        sensitive=True,
+        outcomes_toml="""
+        [outcomes.pass]
+        condition = "signal >= 5"
+        decision = "good"
+        reasoning = "strong signal"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "other"
+        reasoning = "catch-all"
+        is_residual = true
+        """,
+        differential_toml="""
+        knob = "sidechain_conditioning"
+        off = "0.0"
+        on = "1.0"
+        expect = "differs"
+        metric = "signal"
+        min_effect = 0.05
+        """,
+    )
+
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert runs[0].outcome == "pass"
+    assert runs[0].differential_status == "passed"
+    assert runs[0].differential_off_value == "0.0"
+    assert runs[0].differential_on_value == "1.0"
+
+    invocations = counter_path.read_text().splitlines()
+    assert invocations == ["off", "on", "main"]
+
+
+def test_differential_expect_identical_flags_unexpected_sensitivity(tmp_catalog: Path, tmp_path: Path):
+    """expect=identical against a knob-sensitive pipeline -> invalid_measurement (inverse check)."""
+    counter_path = tmp_path / "invocations.log"
+    script = _write_differential_fixture(
+        tmp_path,
+        counter_path,
+        sensitive=True,
+        outcomes_toml="""
+        [outcomes.pass]
+        condition = "signal >= 5"
+        decision = "good"
+        reasoning = "strong signal"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "other"
+        reasoning = "catch-all"
+        is_residual = true
+        """,
+        differential_toml="""
+        knob = "unrelated_knob"
+        off = "0.0"
+        on = "1.0"
+        expect = "identical"
+        metric = "signal"
+        min_effect = 0.05
+        """,
+    )
+
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 1
+    runs = read_runs(tmp_catalog)
+    assert runs[0].outcome == "invalid_measurement"
+    assert runs[0].differential_status == "invalid_measurement"
+    invocations = counter_path.read_text().splitlines()
+    assert invocations == ["off", "on"]
+
+
+def test_differential_absent_no_op(tmp_catalog: Path, tmp_path: Path):
+    """No [differential] block -> differential_status stays None, behaves as before (regression guard)."""
+    import textwrap
+
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    script = enforced / "run_test.py"
+    script.write_text(textwrap.dedent("""
+        import os
+        import json
+        results_path = os.environ.get("BTH_RESULTS_PATH")
+        if results_path:
+            with open(results_path, "w") as f:
+                json.dump({"signal": 10.0}, f)
+    """))
+    sidecar = enforced / "run_test.bth.toml"
+    sidecar.write_text(textwrap.dedent("""
+        [experiment]
+        hypothesis = "test hypothesis"
+        [outcomes.pass]
+        condition = "signal >= 5"
+        decision = "good"
+        reasoning = "strong signal"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "other"
+        reasoning = "catch-all"
+        is_residual = true
+        [result_schema]
+        signal = "float"
+    """))
+
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    runs = read_runs(tmp_catalog)
+    assert runs[0].outcome == "pass"
+    assert runs[0].differential_status is None
+
+
 def test_run_with_nonexistent_campaign_fails_fast(tmp_catalog: Path, tmp_path: Path):
     """--campaign with a warm catalog but no matching campaign must fail before running (regression: debt #491)."""
     from bathos.compact import compact

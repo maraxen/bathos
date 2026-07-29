@@ -5,7 +5,7 @@ from pathlib import Path
 
 import duckdb
 
-from bathos.sidecar import Sidecar, SidecarKind, ReproductionBlock, ControlsBlock
+from bathos.sidecar import Sidecar, SidecarKind, ReproductionBlock, ControlsBlock, RESERVED_OUTCOME_LABELS
 from bathos.telemetry import event
 
 
@@ -185,6 +185,78 @@ def validate_controls_block(sidecar: Sidecar, sidecar_path: Path | None = None) 
     return errors
 
 
+def validate_differential_block(sidecar: Sidecar, sidecar_path: Path | None = None) -> list[ValidationError]:
+    """Validate [differential] block fields (debt #1071).
+
+    Returns a list of ValidationError (empty if valid or no block present).
+    """
+    errors: list[ValidationError] = []
+
+    if sidecar.differential is None:
+        return errors  # No [differential] block — nothing to validate
+
+    diff = sidecar.differential
+
+    if not diff.knob:
+        errors.append(ValidationError(
+            "differential.knob",
+            "knob must be non-empty",
+        ))
+        if sidecar_path:
+            event("sidecar.validate_error", path=str(sidecar_path), field="differential.knob", reason="knob is empty")
+
+    if diff.off == diff.on:
+        errors.append(ValidationError(
+            "differential",
+            f"off and on must differ, both are {diff.off!r} — no invariant to check",
+        ))
+        if sidecar_path:
+            event("sidecar.validate_error", path=str(sidecar_path), field="differential", reason=f"off == on == {diff.off!r}")
+
+    if diff.expect not in ("differs", "identical"):
+        errors.append(ValidationError(
+            "differential.expect",
+            f"expect must be 'differs' or 'identical', got {diff.expect!r}",
+        ))
+        if sidecar_path:
+            event("sidecar.validate_error", path=str(sidecar_path), field="differential.expect", reason=f"invalid expect {diff.expect!r}")
+
+    if diff.metric:
+        if diff.metric not in sidecar.result_schema:
+            errors.append(ValidationError(
+                "differential.metric",
+                f"metric {diff.metric!r} not declared in [result_schema]",
+            ))
+            if sidecar_path:
+                event("sidecar.validate_error", path=str(sidecar_path), field="differential.metric", reason=f"{diff.metric!r} not in result_schema")
+        elif sidecar.result_schema.get(diff.metric) in ("int", "float") and diff.min_effect is None:
+            errors.append(ValidationError(
+                "differential.min_effect",
+                f"min_effect is required when metric {diff.metric!r} is numeric",
+            ))
+            if sidecar_path:
+                event("sidecar.validate_error", path=str(sidecar_path), field="differential.min_effect", reason="min_effect missing for numeric metric")
+        if diff.min_effect is not None and diff.min_effect < 0:
+            errors.append(ValidationError(
+                "differential.min_effect",
+                f"min_effect must be >= 0, got {diff.min_effect!r}",
+            ))
+            if sidecar_path:
+                event("sidecar.validate_error", path=str(sidecar_path), field="differential.min_effect", reason=f"negative min_effect {diff.min_effect!r}")
+    elif diff.min_effect is not None:
+        # Whole-dict-diff mode: an effect-size threshold isn't well-defined over an
+        # arbitrary dict, so requiring min_effect without a metric is a validation error
+        # rather than a silently-ignored field.
+        errors.append(ValidationError(
+            "differential.min_effect",
+            "min_effect requires metric to be set (whole-dict comparison has no effect size)",
+        ))
+        if sidecar_path:
+            event("sidecar.validate_error", path=str(sidecar_path), field="differential.min_effect", reason="min_effect set without metric")
+
+    return errors
+
+
 def validate_claim_discriminability(sidecar: Sidecar, claim, sidecar_path: Path | None = None) -> list[ValidationError]:
     """Cross-check sidecar claim_discriminates/claim_isolates against a registered claim. (#3719)
 
@@ -257,6 +329,15 @@ def validate_sidecar(sidecar: Sidecar, sidecar_path: Path | None = None, claim=N
 
     # Each branch must have condition, decision, reasoning
     for label, spec in sidecar.outcomes.items():
+        if label in RESERVED_OUTCOME_LABELS:
+            err = ValidationError(
+                f"outcomes.{label}",
+                f"{label!r} is a reserved outcome label (bathos sets it automatically) — "
+                "choose a different outcome name",
+            )
+            errors.append(err)
+            if sidecar_path:
+                event("sidecar.validate_error", path=str(sidecar_path), field=f"outcomes.{label}", reason=f"{label!r} is reserved")
         if not spec.condition:
             err = ValidationError(
                 f"outcomes.{label}", "Missing 'condition' field"
@@ -347,6 +428,10 @@ def validate_sidecar(sidecar: Sidecar, sidecar_path: Path | None = None, claim=N
     # Validate [controls] block if present
     controls_errors = validate_controls_block(sidecar, sidecar_path)
     errors.extend(controls_errors)
+
+    # Validate [differential] block if present (debt #1071)
+    differential_errors = validate_differential_block(sidecar, sidecar_path)
+    errors.extend(differential_errors)
 
     # Cross-check claim_discriminates/claim_isolates if a registered claim was supplied (#3719)
     if claim is not None:

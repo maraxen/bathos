@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -209,6 +210,41 @@ def check_output_sha_drift(run: Run) -> list[OutputShaDriftResult]:
                 )
 
     return results
+
+
+def hash_dependency_lock(workspace_root: Path) -> str | None:
+    """SHA256 of <workspace_root>/uv.lock, or None if it doesn't exist (debt #1071).
+
+    Captured unconditionally on every run (runner.py) -- cheap, and the incident this
+    guards against (a dependency re-pin silently invalidating every prior differential/SC
+    result) is a general provenance gap, not something specific to differential runs.
+    """
+    lock_path = workspace_root / "uv.lock"
+    if not lock_path.exists():
+        return None
+    try:
+        h = hashlib.sha256()
+        with open(lock_path, "rb") as f:
+            while chunk := f.read(8192):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def check_dependency_lock_drift(recorded_sha256: str | None, workspace_root: Path) -> bool:
+    """Return True iff the current uv.lock hash differs from recorded_sha256 (debt #1071).
+
+    Fails open (False, "no drift") if recorded_sha256 is falsy (e.g. a run predating this
+    field) or if the current lockfile is itself absent -- nothing to compare against, and
+    a missing baseline shouldn't be treated as evidence of change.
+    """
+    if not recorded_sha256:
+        return False
+    current = hash_dependency_lock(workspace_root)
+    if current is None:
+        return False
+    return current != recorded_sha256
 
 
 def output_metadata_has_sha_drift(output_metadata_json: str | None) -> bool:

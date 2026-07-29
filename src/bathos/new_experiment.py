@@ -86,6 +86,17 @@ metric = "float"
 # [controls]
 # positive_outcome = ["ctrl_pass"]
 # negative_outcome = ["ctrl_fail"]
+
+# Uncomment if a null/fail result must be distinguishable from a broken measurement pipeline:
+# bth run executes this pre-flight before the main run, and refuses to run (recording
+# outcome='invalid_measurement' instead) if the instrument doesn't discriminate as expected.
+# [differential]
+# knob = ""          # TODO: the input parameter this experiment varies
+# off = ""           # value representing "effect absent"
+# on = ""            # value representing "effect present"
+# expect = "differs" # or "identical"
+# metric = "metric"  # must be a key in [result_schema]
+# min_effect = 0.05  # required when metric is numeric
 """
 
 

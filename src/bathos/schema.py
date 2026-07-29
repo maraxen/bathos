@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pyarrow as pa
 
-CURRENT_SCHEMA_VERSION = "12"
+CURRENT_SCHEMA_VERSION = "13"
 
 # Format validator for stage_name values — used by linter.check_canonical_stage_names.
 # Enforcement at parse time uses CANONICAL_STAGES set-membership (parse_sidecar); this
@@ -76,6 +76,11 @@ COOL_SCHEMA = pa.schema(
         pa.field("stdout_sha256", pa.string(), nullable=True),
         pa.field("component_id", pa.string(), nullable=True),
         pa.field("component_sidecar_sha256", pa.string(), nullable=True),
+        pa.field("differential_status", pa.string(), nullable=True),
+        pa.field("differential_off_value", pa.string(), nullable=True),
+        pa.field("differential_on_value", pa.string(), nullable=True),
+        pa.field("differential_effect", pa.float64(), nullable=True),
+        pa.field("dependency_lock_sha256", pa.string(), nullable=True),
     ]
 )
 
@@ -133,6 +138,11 @@ WARM_SCHEMA = pa.schema(
         pa.field("stdout_sha256", pa.string(), nullable=True),
         pa.field("component_id", pa.string(), nullable=True),
         pa.field("component_sidecar_sha256", pa.string(), nullable=True),
+        pa.field("differential_status", pa.string(), nullable=True),
+        pa.field("differential_off_value", pa.string(), nullable=True),
+        pa.field("differential_on_value", pa.string(), nullable=True),
+        pa.field("differential_effect", pa.float64(), nullable=True),
+        pa.field("dependency_lock_sha256", pa.string(), nullable=True),
     ]
 )
 
@@ -191,6 +201,11 @@ class Run:
     stdout_sha256: str | None = None
     component_id: str | None = None
     component_sidecar_sha256: str | None = None
+    differential_status: str | None = None
+    differential_off_value: str | None = None
+    differential_on_value: str | None = None
+    differential_effect: float | None = None
+    dependency_lock_sha256: str | None = None
 
     def to_arrow(self) -> pa.Table:
         return pa.table(
@@ -245,6 +260,11 @@ class Run:
                 "stdout_sha256": [self.stdout_sha256],
                 "component_id": [self.component_id],
                 "component_sidecar_sha256": [self.component_sidecar_sha256],
+                "differential_status": [self.differential_status],
+                "differential_off_value": [self.differential_off_value],
+                "differential_on_value": [self.differential_on_value],
+                "differential_effect": [self.differential_effect],
+                "dependency_lock_sha256": [self.dependency_lock_sha256],
             },
             schema=COOL_SCHEMA,
         )
@@ -311,5 +331,20 @@ class Run:
             component_id=pydict.get("component_id", [None])[i] if "component_id" in pydict else None,
             component_sidecar_sha256=pydict.get("component_sidecar_sha256", [None])[i]
             if "component_sidecar_sha256" in pydict
+            else None,
+            differential_status=pydict.get("differential_status", [None])[i]
+            if "differential_status" in pydict
+            else None,
+            differential_off_value=pydict.get("differential_off_value", [None])[i]
+            if "differential_off_value" in pydict
+            else None,
+            differential_on_value=pydict.get("differential_on_value", [None])[i]
+            if "differential_on_value" in pydict
+            else None,
+            differential_effect=pydict.get("differential_effect", [None])[i]
+            if "differential_effect" in pydict
+            else None,
+            dependency_lock_sha256=pydict.get("dependency_lock_sha256", [None])[i]
+            if "dependency_lock_sha256" in pydict
             else None,
         )

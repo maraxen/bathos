@@ -628,3 +628,120 @@ def test_parse_experiment_sidecar_controls_block_unknown_key_warning(tmp_path, c
 
     assert sidecar.controls is not None
     assert any("Unknown key in [controls]" in record.message for record in caplog.records)
+
+
+def test_parse_experiment_sidecar_differential_block(tmp_path):
+    """[differential] block with all fields is parsed correctly (debt #1071)."""
+    from bathos.sidecar import parse_sidecar
+    path = _write_toml(tmp_path, """
+        [experiment]
+        hypothesis = "Test hypothesis"
+        [outcomes.pass]
+        condition = "signal > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        signal = "float"
+        [differential]
+        knob = "sidechain_conditioning"
+        off = "0.0"
+        on = "1.0"
+        expect = "differs"
+        metric = "signal"
+        min_effect = 0.05
+    """)
+    sidecar = parse_sidecar(path)
+    assert sidecar.differential is not None
+    assert sidecar.differential.knob == "sidechain_conditioning"
+    assert sidecar.differential.off == "0.0"
+    assert sidecar.differential.on == "1.0"
+    assert sidecar.differential.expect == "differs"
+    assert sidecar.differential.metric == "signal"
+    assert sidecar.differential.min_effect == 0.05
+
+
+def test_parse_experiment_sidecar_differential_block_absent(tmp_path):
+    """When [differential] absent, differential is None."""
+    from bathos.sidecar import parse_sidecar
+    path = _write_toml(tmp_path, """
+        [experiment]
+        hypothesis = "Test hypothesis"
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        value = "float"
+    """)
+    sidecar = parse_sidecar(path)
+    assert sidecar.differential is None
+
+
+def test_parse_experiment_sidecar_differential_block_defaults(tmp_path):
+    """[differential] with only knob/off/on set defaults expect='differs', no metric/min_effect."""
+    from bathos.sidecar import parse_sidecar
+    path = _write_toml(tmp_path, """
+        [experiment]
+        hypothesis = "Test hypothesis"
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        value = "float"
+        [differential]
+        knob = "some_knob"
+        off = "0"
+        on = "1"
+    """)
+    sidecar = parse_sidecar(path)
+    assert sidecar.differential is not None
+    assert sidecar.differential.expect == "differs"
+    assert sidecar.differential.metric == ""
+    assert sidecar.differential.min_effect is None
+
+
+def test_parse_experiment_sidecar_differential_block_unknown_key_warning(tmp_path, caplog):
+    """Unknown keys in [differential] emit WARNING."""
+    import logging
+    from bathos.sidecar import parse_sidecar
+    path = _write_toml(tmp_path, """
+        [experiment]
+        hypothesis = "Test hypothesis"
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        value = "float"
+        [differential]
+        knob = "some_knob"
+        off = "0"
+        on = "1"
+        unknown_field = "should warn"
+    """)
+    with caplog.at_level(logging.WARNING, logger="bathos.sidecar"):
+        sidecar = parse_sidecar(path)
+
+    assert sidecar.differential is not None
+    assert any("Unknown key in [differential]" in record.message for record in caplog.records)

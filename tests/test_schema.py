@@ -43,7 +43,7 @@ def test_run_defaults():
     assert r.tags == []
     assert isinstance(r.timestamp, datetime)
     assert r.timestamp.tzinfo is not None
-    assert r.schema_version == "12"
+    assert r.schema_version == "13"
     assert r.slurm_job_id == ""
     assert r.metadata == "{}"
 
@@ -84,7 +84,7 @@ def test_run_roundtrip_via_arrow():
     assert r2.duration_s == 1.5
     assert r2.output_paths == ["/tmp/out.parquet"]
     assert r2.tags == ["tip3p"]
-    assert r2.schema_version == "12"
+    assert r2.schema_version == "13"
     assert r2.slurm_job_id == ""
 
 
@@ -100,7 +100,7 @@ def test_schema_version_in_cool_parquet():
     )
     table = r.to_arrow()
     assert "schema_version" in table.column_names
-    assert table.column("schema_version")[0].as_py() == "12"
+    assert table.column("schema_version")[0].as_py() == "13"
 
 
 def test_slurm_job_id_captured_from_env():
@@ -233,7 +233,7 @@ def test_schema_version_defaults_to_7():
         git_branch="main",
         git_dirty=False,
     )
-    assert r.schema_version == "12"
+    assert r.schema_version == "13"
 
 
 def test_sample_run_fixture_has_hostname(sample_run):
@@ -350,7 +350,7 @@ def test_schema_v5_fields_exist():
     from bathos.schema import CURRENT_SCHEMA_VERSION, Run
 
     # Current version should be "7" (v5 fields still present)
-    assert CURRENT_SCHEMA_VERSION == "12"
+    assert CURRENT_SCHEMA_VERSION == "13"
 
     # Run should have all 4 new fields
     r = Run(
@@ -424,7 +424,7 @@ def test_schema_version_is_7():
     """Verify CURRENT_SCHEMA_VERSION is now '11'."""
     from bathos.schema import CURRENT_SCHEMA_VERSION
 
-    assert CURRENT_SCHEMA_VERSION == "12"
+    assert CURRENT_SCHEMA_VERSION == "13"
 
 
 def test_run_stage_name_default_none():
@@ -757,3 +757,90 @@ def test_component_fields_none_round_trip_arrow():
     r2 = Run.from_arrow_row(table.to_pydict(), 0)
     assert r2.component_id is None
     assert r2.component_sidecar_sha256 is None
+
+
+_DIFFERENTIAL_STRING_FIELDS = (
+    "differential_status",
+    "differential_off_value",
+    "differential_on_value",
+    "dependency_lock_sha256",
+)
+
+
+def test_run_differential_fields_default_none():
+    """Verify debt #1071's differential/dependency-lock fields default to None."""
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+    )
+    for field_name in _DIFFERENTIAL_STRING_FIELDS:
+        assert getattr(r, field_name) is None
+    assert r.differential_effect is None
+
+
+def test_differential_fields_in_cool_and_warm_schema():
+    """Verify differential_*/dependency_lock_sha256 are in both COOL_SCHEMA and WARM_SCHEMA."""
+    for schema in (COOL_SCHEMA, WARM_SCHEMA):
+        for field_name in _DIFFERENTIAL_STRING_FIELDS:
+            assert field_name in schema.names
+            field_obj = next(f for f in schema if f.name == field_name)
+            assert field_obj.type == pa.string()
+            assert field_obj.nullable
+        effect_field = next(f for f in schema if f.name == "differential_effect")
+        assert effect_field.type == pa.float64()
+        assert effect_field.nullable
+
+
+def test_differential_fields_round_trip_arrow():
+    """Verify differential_*/dependency_lock_sha256 round-trip through Arrow serialization."""
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        differential_status="passed",
+        differential_off_value="0.0",
+        differential_on_value="1.0",
+        differential_effect=0.42,
+        dependency_lock_sha256="deadbeef" * 8,
+    )
+    table = r.to_arrow()
+    assert table.column("differential_status")[0].as_py() == "passed"
+    assert table.column("differential_off_value")[0].as_py() == "0.0"
+    assert table.column("differential_on_value")[0].as_py() == "1.0"
+    assert table.column("differential_effect")[0].as_py() == 0.42
+    assert table.column("dependency_lock_sha256")[0].as_py() == "deadbeef" * 8
+
+    r2 = Run.from_arrow_row(table.to_pydict(), 0)
+    assert r2.differential_status == "passed"
+    assert r2.differential_off_value == "0.0"
+    assert r2.differential_on_value == "1.0"
+    assert r2.differential_effect == 0.42
+    assert r2.dependency_lock_sha256 == "deadbeef" * 8
+
+
+def test_differential_fields_none_round_trip_arrow():
+    """Verify differential fields default to None (not '' / 0.0) through Arrow serialization."""
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+    )
+    table = r.to_arrow()
+    for field_name in _DIFFERENTIAL_STRING_FIELDS:
+        assert table.column(field_name)[0].as_py() is None
+    assert table.column("differential_effect")[0].as_py() is None
+
+    r2 = Run.from_arrow_row(table.to_pydict(), 0)
+    for field_name in _DIFFERENTIAL_STRING_FIELDS:
+        assert getattr(r2, field_name) is None
+    assert r2.differential_effect is None
