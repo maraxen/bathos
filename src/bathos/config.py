@@ -18,6 +18,7 @@ class ProjectConfig:
     remotes: dict[str, dict] = field(default_factory=dict)
     slurm: dict = field(default_factory=dict)
     sync_filter: str = "project_slug"
+    claim: dict = field(default_factory=dict)
 
 
 def default_catalog_dir() -> Path:
@@ -45,6 +46,7 @@ def load_project_config(path: Path) -> ProjectConfig:
         remotes=data.get("remotes", {}),
         slurm=data.get("slurm", {}),
         sync_filter=project.get("sync_filter", "project_slug"),
+        claim=data.get("claim", {}),
     )
 
 

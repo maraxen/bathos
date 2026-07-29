@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from unittest.mock import patch
 
 from bathos.mcp import (
+    _WIRED,
     app,
     archive_tool,
     capability_probe_tool,
@@ -498,3 +500,22 @@ class TestMCPServerStartup:
         assert callable(sync_tool)
         assert callable(init_tool)
         assert callable(run_tool)
+
+    def test_wired_mcp_tool_names_match_expected(self):
+        """Every tool actually registered on the FastMCP server (via
+        cisternal.wire()) must be exposed under its intended short name,
+        not the Python wrapper function's own name (e.g. list_runs, not
+        mcp_list_runs_tool). Regression test: cisternal.wire() previously
+        dropped the @cisternal.tool(name=...) override when registering on
+        FastMCP, silently exposing 40 of the 50 tools under their raw
+        mcp_x_tool wrapper name instead (maraxen/cisternal#6)."""
+        tools = asyncio.run(app.list_tools())
+        wired_names = sorted(t.name for t in tools)
+
+        assert wired_names == sorted(_WIRED.mcp_tools), (
+            "FastMCP-registered tool names diverge from cisternal.wire()'s "
+            f"own registry snapshot. Wired on server: {wired_names}"
+        )
+        # No mcp_x_tool wrapper names should ever leak onto the server.
+        leaked = [n for n in wired_names if n.startswith("mcp_") and n.endswith("_tool")]
+        assert not leaked, f"Raw wrapper function names leaked as tool names: {leaked}"

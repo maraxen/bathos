@@ -1,7 +1,7 @@
 # bathos
 
 [![PyPI](https://img.shields.io/pypi/v/bathos.svg)](https://pypi.org/project/bathos/)
-[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/mariellerossi/bathos/blob/main/LICENSE)
 [![Documentation](https://img.shields.io/readthedocs/bathos.svg)](https://bathos.readthedocs.io)
 
