@@ -1443,3 +1443,88 @@ def test_check_claim_opaque_labels_no_claims_dir(tmp_path):
     from bathos.linter import check_claim_opaque_labels
 
     assert check_claim_opaque_labels(tmp_path) == []
+
+
+def _sidecar_with_condition(tmp_path, condition: str, extra: str = "") -> Path:
+    s = _make_script(tmp_path, "experiments", "run_test.py")
+    sidecar_path = s.with_suffix(".bth.toml")
+    sidecar_path.write_text(f"""[experiment]
+hypothesis = "test"
+
+[result_schema]
+p_1 = "float"
+
+[outcomes.significant]
+condition = "{condition}"
+decision = "flag"
+reasoning = "significance detected"
+{extra}
+
+[outcomes.fallback]
+condition = "TRUE"
+decision = "none"
+reasoning = "catch-all"
+is_residual = true
+""")
+    return sidecar_path
+
+
+def test_check_multiple_comparisons_ors_at_or_above_threshold_warns(tmp_path):
+    """debt #1071: OR-chain of >= min_tests p-value comparisons with no correction -> WARNING."""
+    from bathos.linter import IssueSeverity, check_multiple_comparisons
+
+    condition = " OR ".join(f"p_{i} < 0.05" for i in range(3))
+    _sidecar_with_condition(tmp_path, condition)
+
+    issues = check_multiple_comparisons(tmp_path, min_tests=3)
+    mc_issues = [i for i in issues if i.issue == "UNCORRECTED_MULTIPLE_COMPARISONS"]
+    assert len(mc_issues) == 1
+    assert mc_issues[0].severity == IssueSeverity.WARNING
+
+
+def test_check_multiple_comparisons_below_threshold_passes(tmp_path):
+    """Fewer than min_tests OR'd comparisons -> no issue."""
+    from bathos.linter import check_multiple_comparisons
+
+    condition = " OR ".join(f"p_{i} < 0.05" for i in range(2))
+    _sidecar_with_condition(tmp_path, condition)
+
+    issues = check_multiple_comparisons(tmp_path, min_tests=3)
+    assert all(i.issue != "UNCORRECTED_MULTIPLE_COMPARISONS" for i in issues)
+
+
+def test_check_multiple_comparisons_and_joined_passes(tmp_path):
+    """AND-joined comparisons are conservative, not the anti-pattern -> no issue."""
+    from bathos.linter import check_multiple_comparisons
+
+    condition = " AND ".join(f"p_{i} < 0.05" for i in range(5))
+    _sidecar_with_condition(tmp_path, condition)
+
+    issues = check_multiple_comparisons(tmp_path, min_tests=3)
+    assert all(i.issue != "UNCORRECTED_MULTIPLE_COMPARISONS" for i in issues)
+
+
+def test_check_multiple_comparisons_correction_set_suppresses_warning(tmp_path):
+    """multiple_comparisons_correction set on the outcome suppresses the warning."""
+    from bathos.linter import check_multiple_comparisons
+
+    condition = " OR ".join(f"p_{i} < 0.05" for i in range(5))
+    _sidecar_with_condition(tmp_path, condition, extra='multiple_comparisons_correction = "holm"')
+
+    issues = check_multiple_comparisons(tmp_path, min_tests=3)
+    assert all(i.issue != "UNCORRECTED_MULTIPLE_COMPARISONS" for i in issues)
+
+
+def test_check_multiple_comparisons_90_or_terms_regression(tmp_path):
+    """Regression test literally reproducing the incident: a gate that ran 90 tests and
+    initially fired on one uncorrected p=0.0497 (debt #1071)."""
+    from bathos.linter import check_multiple_comparisons
+
+    condition = " OR ".join(f"p_{i} < 0.05" for i in range(90))
+    _sidecar_with_condition(tmp_path, condition)
+
+    issues = check_multiple_comparisons(tmp_path, min_tests=3)
+    mc_issues = [i for i in issues if i.issue == "UNCORRECTED_MULTIPLE_COMPARISONS"]
+    assert len(mc_issues) == 1
+    assert "90" in mc_issues[0].detail
+    assert "Holm" in mc_issues[0].detail

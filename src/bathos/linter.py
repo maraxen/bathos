@@ -31,6 +31,8 @@ _VERB_NOUN_RE = re.compile(r"^[a-z][a-z0-9]*_[a-z][a-z0-9_]*$")
 _YYMMDD_RE = re.compile(r"^\d{6}_[a-z][a-z0-9_]*$")
 _SLURM_VERB_NOUN_RE = re.compile(r"^[a-z][a-z0-9]*_[a-z][a-z0-9_]*$")
 _NUMERIC_LITERAL_RE = re.compile(r"(?<![a-zA-Z_])\b-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b")
+_PVALUE_TERM_RE = re.compile(r"\bp[\w]*\s*(?:<=|<)\s*0?\.\d+", re.IGNORECASE)
+_OR_SPLIT_RE = re.compile(r"\bOR\b", re.IGNORECASE)
 
 
 _DIR_RULES: dict[str, dict] = {
@@ -149,6 +151,9 @@ def lint_project(project_root: Path) -> list[LintIssue]:
 
     # Tier-1 check: null-capable outcomes need a positive control (debt #1071)
     issues.extend(check_positive_control_missing(project_root))
+
+    # Tier-1 check: uncorrected multiple-comparisons in outcome conditions (debt #1071)
+    issues.extend(check_multiple_comparisons(project_root))
 
     return issues
 
@@ -291,6 +296,80 @@ def check_positive_control_missing(project_root: Path) -> list[LintIssue]:
                     ),
                 )
             )
+
+    return issues
+
+
+def check_multiple_comparisons(project_root: Path, min_tests: int = 3) -> list[LintIssue]:
+    """Flag sidecar outcome conditions OR-ing together >= min_tests apparent significance
+    tests with no visible multiple-comparison correction (debt #1071 statistical corollary).
+
+    Filesystem-only, static heuristic (Tier-1): a naive "any of N tests significant" union
+    inflates the family-wise false-positive rate to roughly 1-(1-alpha)^N. This is exactly
+    the shape of the incident that motivated this check -- a gate that ran 90 tests and
+    initially fired on a single uncorrected p=0.0497. AND-joined comparisons are excluded:
+    ANDing tests is conservative (every one must fire), not the anti-pattern; only OR-chains
+    are flagged.
+
+    A live runtime check over actually-recorded p-values (e.g. wiring
+    bathos.stats_gates.holm_correction into a battery of real per-run results) is explicitly
+    out of scope here -- nothing today persists per-run p-values anywhere queryable, so that
+    would need new capture plumbing comparable in size to this debt's other pieces.
+
+    Suppressed per-outcome by setting `multiple_comparisons_correction` to a non-empty value
+    (e.g. "holm") once a real correction has actually been applied upstream to that outcome's
+    underlying test battery.
+    """
+    from bathos.sidecar import parse_sidecar
+
+    scripts_dir = project_root / "scripts"
+    if not scripts_dir.exists():
+        return []
+
+    issues: list[LintIssue] = []
+
+    for dir_name in ["experiments", "benchmarks", "validation"]:
+        dir_path = scripts_dir / dir_name
+        if not dir_path.exists():
+            continue
+
+        for script in sorted(dir_path.iterdir()):
+            if script.name.startswith(".") or script.name.startswith("_") or script.is_dir():
+                continue
+            if not (script.suffix == ".toml" and script.name.endswith(".bth.toml")):
+                continue
+
+            try:
+                sidecar = parse_sidecar(script)
+            except Exception:
+                # Silently skip unparseable sidecars — other lint checks will catch them
+                continue
+
+            for label, spec in sidecar.outcomes.items():
+                if spec.multiple_comparisons_correction:
+                    continue
+
+                segments = _OR_SPLIT_RE.split(spec.condition or "")
+                test_count = sum(1 for seg in segments if _PVALUE_TERM_RE.search(seg))
+                if test_count < min_tests:
+                    continue
+
+                issues.append(
+                    LintIssue(
+                        path=script,
+                        directory=dir_name,
+                        issue="UNCORRECTED_MULTIPLE_COMPARISONS",
+                        severity=IssueSeverity.WARNING,
+                        detail=(
+                            f"outcome '{label}' ORs together {test_count} apparent "
+                            "significance tests with no visible multiple-comparison "
+                            "correction — a naive 'any of N' union inflates the family-wise "
+                            "false-positive rate to ~1-(1-alpha)^N; apply Holm-Bonferroni "
+                            "(bathos.stats_gates.holm_correction) or set "
+                            "multiple_comparisons_correction on this outcome"
+                        ),
+                    )
+                )
 
     return issues
 

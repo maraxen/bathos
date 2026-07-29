@@ -35,6 +35,10 @@ class OutcomeSpec:
     is_residual: bool = False
     adversarial_check: str | None = None
     source: str = ""
+    # Escape hatch for the multiple-comparisons lint (debt #1071): set to e.g. "holm" once
+    # a real correction (bathos.stats_gates.holm_correction) has been applied upstream to
+    # this outcome's underlying test battery, to suppress the static OR-chain heuristic.
+    multiple_comparisons_correction: str = ""
 
 
 @dataclass
@@ -304,6 +308,7 @@ def _parse_outcomes(data: dict) -> dict[str, OutcomeSpec]:
             is_residual=bool(spec.get("is_residual", False)),
             adversarial_check=spec.get("adversarial_check"),
             source=spec.get("source", ""),
+            multiple_comparisons_correction=spec.get("multiple_comparisons_correction", ""),
         )
         for label, spec in outcomes_data.items()
     }
