@@ -2147,8 +2147,18 @@ def new_experiment_cmd(
 @app.command("validate-sidecar")
 def validate_sidecar_cmd(
     path: Path = typer.Argument(..., help="Path to .bth.toml sidecar file"),
+    campaign: str | None = typer.Option(
+        None,
+        "--campaign",
+        help="Campaign ID (or prefix). If given, cross-checks claim_discriminates/"
+        "claim_isolates against the campaign's registered claim (#3719).",
+    ),
 ):
     """Validate a sidecar TOML file for structural integrity."""
+    import duckdb
+
+    from bathos.campaigns import CampaignError
+    from bathos.claim import load_registered_claim
     from bathos.sidecar import SidecarError, parse_sidecar
     from bathos.validate import validate_sidecar
 
@@ -2158,7 +2168,27 @@ def validate_sidecar_cmd(
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(1)
 
-    result = validate_sidecar(sidecar, sidecar_path=path)
+    claim = None
+    if campaign:
+        db = duckdb.connect(str(_catalog_dir() / "bathos.db"))
+        try:
+            claim = load_registered_claim(db, campaign)
+            if claim is None:
+                typer.echo(
+                    f"Warning: campaign {campaign!r} has no registered claim — "
+                    "skipping claim-discriminability cross-check.",
+                    err=True,
+                )
+        except CampaignError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1)
+        except (FileNotFoundError, ValueError) as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1)
+        finally:
+            db.close()
+
+    result = validate_sidecar(sidecar, sidecar_path=path, claim=claim)
 
     if result.errors:
         for error in result.errors:

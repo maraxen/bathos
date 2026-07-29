@@ -131,3 +131,11 @@ def test_render_campaign_review_with_anomalies(sample_campaign):
     result = output.getvalue()
     assert "Anomalies" in result or "anomal" in result.lower()
     assert "320K" in result or "Run 5" in result
+
+
+def test_invalid_measurement_outcome_color_distinct_from_fail_and_error():
+    """debt #1071: invalid_measurement must read as visually distinct from fail/error."""
+    from bathos.rich_fmt import _get_outcome_color
+
+    invalid_color = _get_outcome_color("invalid_measurement")
+    assert invalid_color not in (_get_outcome_color("fail"), _get_outcome_color("error"))

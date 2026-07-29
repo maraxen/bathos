@@ -160,12 +160,21 @@ def _default_array(arrow_type: pa.DataType, n: int, field_name: str = "") -> pa.
         "stdout_sha256",
         "component_id",
         "component_sidecar_sha256",
+        "differential_status",
+        "differential_off_value",
+        "differential_on_value",
+        "dependency_lock_sha256",
     ) and (pa.types.is_string(arrow_type) or pa.types.is_large_string(arrow_type)):
         return pa.array([None] * n, type=arrow_type)
-    # B2-02: seed/baseline_hpo_trials/baseline_hpo_compute_budget must backfill as null, not
-    # 0 — a fragment written before this field existed has no recorded seed, which is a
-    # different fact from "seed 0 was used" (0 is a valid seed value).
-    if field_name in ("seed", "baseline_hpo_trials", "baseline_hpo_compute_budget") and (
+    # B2-02: seed/baseline_hpo_trials/baseline_hpo_compute_budget/differential_effect must
+    # backfill as null, not 0 — a fragment written before this field existed has no recorded
+    # value, which is a different fact from "0 was the value" (0 is a valid seed/effect size).
+    if field_name in (
+        "seed",
+        "baseline_hpo_trials",
+        "baseline_hpo_compute_budget",
+        "differential_effect",
+    ) and (
         pa.types.is_integer(arrow_type) or pa.types.is_floating(arrow_type)
     ):
         return pa.array([None] * n, type=arrow_type)

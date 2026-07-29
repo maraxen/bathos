@@ -14,9 +14,10 @@ from pathlib import Path
 import typer
 
 from bathos.catalog import write_run
+from bathos.checker import hash_dependency_lock
 from bathos.git import capture_git_state
 from bathos.schema import Run
-from bathos.sidecar import find_sidecar, is_in_enforced_dir, parse_sidecar, evaluate_outcome, SidecarError
+from bathos.sidecar import find_sidecar, is_in_enforced_dir, parse_sidecar, evaluate_outcome, DifferentialBlock, SidecarError
 from bathos.prereg import resolve_sidecar, resolve_agent_mode, gate_check, GateErrorCode, _gate_failure_payload
 from bathos.telemetry import init_telemetry, event, run_uuid_var
 
@@ -166,6 +167,101 @@ def _write_manifest(
         return "", ""
 
 
+@dataclasses.dataclass
+class DifferentialResult:
+    """Outcome of the [differential] instrument-sensitivity pre-flight (debt #1071)."""
+    ok: bool
+    off_metadata: str
+    on_metadata: str
+    effect: float | None
+    reason: str
+
+
+def _run_differential_preflight(
+    differential: DifferentialBlock,
+    argv: list[str],
+    cwd: Path,
+    base_env: dict,
+    results_temp_dir: Path,
+    run_id: str,
+) -> DifferentialResult:
+    """Run `argv` once with the [differential] knob set to `off`, once to `on`, and assert
+    the results `expect` (differ / are identical).
+
+    Neither sub-execution becomes a catalogued Run row -- they are plumbing to prove the
+    measurement can detect a real effect, not scientific results in their own right, and
+    would otherwise pollute `bth ls`/first-of-kind/residual-rate logic that assumes every
+    catalog Run is a real experiment attempt.
+    """
+
+    def _run_phase(value: str, phase: str, results_path: Path, output_dir: Path) -> dict:
+        env = base_env.copy()
+        env["BTH_RESULTS_PATH"] = str(results_path)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        env["BTH_OUTPUT_DIR"] = str(output_dir)
+        env["BTH_DIFFERENTIAL_KNOB"] = differential.knob
+        env["BTH_DIFFERENTIAL_VALUE"] = value
+        env["BTH_DIFFERENTIAL_PHASE"] = phase
+        proc = subprocess.Popen(argv, cwd=cwd, env=env)
+        exit_code = proc.wait()
+        raw = _read_result_emission(results_path, None, None)
+        try:
+            meta = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            meta = {}
+        results_path.unlink(missing_ok=True)
+        return {"exit_code": exit_code, "metadata": meta, "raw": raw}
+
+    off_path = results_temp_dir / f"{run_id}.differential-off.bth-results.json"
+    on_path = results_temp_dir / f"{run_id}.differential-on.bth-results.json"
+    off_output_dir = results_temp_dir / f"{run_id}.differential-off-outputs"
+    on_output_dir = results_temp_dir / f"{run_id}.differential-on-outputs"
+
+    off_result = _run_phase(differential.off, "off", off_path, off_output_dir)
+    on_result = _run_phase(differential.on, "on", on_path, on_output_dir)
+
+    effect: float | None = None
+    if differential.metric:
+        off_val = off_result["metadata"].get(differential.metric)
+        on_val = on_result["metadata"].get(differential.metric)
+        is_numeric = (
+            isinstance(off_val, (int, float)) and not isinstance(off_val, bool)
+            and isinstance(on_val, (int, float)) and not isinstance(on_val, bool)
+        )
+        if is_numeric:
+            effect = abs(float(on_val) - float(off_val))
+            differs = effect >= (differential.min_effect or 0.0)
+        else:
+            differs = off_val != on_val
+    else:
+        differs = json.dumps(off_result["metadata"], sort_keys=True) != json.dumps(
+            on_result["metadata"], sort_keys=True
+        )
+
+    ok = differs if differential.expect == "differs" else not differs
+
+    reason = ""
+    if not ok:
+        reason = (
+            f"[differential] knob={differential.knob!r} expect={differential.expect!r} "
+            f"off={differential.off!r} on={differential.on!r}"
+        )
+        if differential.metric:
+            reason += (
+                f" metric={differential.metric!r} effect={effect!r} "
+                f"min_effect={differential.min_effect!r}"
+            )
+        reason += f" — invariant did not fire (differs={differs})"
+
+    return DifferentialResult(
+        ok=ok,
+        off_metadata=off_result["raw"],
+        on_metadata=on_result["raw"],
+        effect=effect,
+        reason=reason,
+    )
+
+
 def _is_ephemeral_path(path: str) -> bool:
     """Return True if path resolves under a system temp directory."""
     p = Path(path)
@@ -295,6 +391,11 @@ def run_script(
 
     git = capture_git_state(cwd)
 
+    # Dependency-lock provenance (debt #1071): captured unconditionally on every run, not
+    # just differential ones -- the incident this guards against (a package re-pin silently
+    # invalidating every prior differential/SC result) is a general provenance gap.
+    dependency_lock_sha256 = hash_dependency_lock(cwd)
+
     # Run gate check for enforced dirs
     if script_path is not None and is_in_enforced_dir(script_path) and not no_sidecar:
         gate_result = gate_check(
@@ -337,8 +438,23 @@ def run_script(
         campaign_id=resolved_campaign_id or "",
         script_sha256=script_sha256_val,
         stage_name=sidecar.stage_name if sidecar else None,
+        # (#3717) Propagate claim-tier discriminability from the sidecar. The warm columns and
+        # the cool->warm compact path already existed (#2276), but nothing ever populated them
+        # AT THE ORIGIN, so runs.claim_discriminates was NULL for all 1418 runs in the catalog
+        # and the Union Gate -- which maps a run onto a claim clause via this field -- found
+        # every clause unmapped and downgraded every confirmation campaign to `confounded`
+        # regardless of design. Stored as a JSON array string to match the warm schema.
+        claim_discriminates=(
+            json.dumps(sidecar.claim_discriminates)
+            if sidecar and sidecar.claim_discriminates
+            else None
+        ),
+        claim_isolates=(
+            json.dumps(sidecar.claim_isolates) if sidecar and sidecar.claim_isolates else None
+        ),
         component_id=component_id,
         component_sidecar_sha256=component_sidecar_sha256,
+        dependency_lock_sha256=dependency_lock_sha256,
     )
     run_uuid_var.set(run.id)
     event("run.start", run_uuid=run.id, script_path=str(script_path) if script_path else "", script_sha256=script_sha256_val, argv=argv, cwd=str(cwd), campaign_id=resolved_campaign_id or "", agent_mode=resolved_mode)
@@ -362,6 +478,51 @@ def run_script(
         event("run.error", phase="persist", exc_type=type(e).__name__, exc_msg=str(e))
         raise
 
+    results_temp_dir = Path(tempfile.gettempdir())
+
+    # Instrument-sensitivity pre-flight (debt #1071): before the main run, prove the
+    # measurement can actually detect a real effect by running the script once with the
+    # [differential] knob set to "off" and once to "on". If the declared invariant doesn't
+    # fire, the main subprocess never executes -- the run is recorded with
+    # outcome="invalid_measurement" instead, so a broken measurement can never masquerade
+    # as a legitimate pass/fail result.
+    if sidecar is not None and sidecar.differential is not None:
+        preflight = _run_differential_preflight(
+            differential=sidecar.differential,
+            argv=argv,
+            cwd=cwd,
+            base_env=os.environ.copy(),
+            results_temp_dir=results_temp_dir,
+            run_id=run.id,
+        )
+        if not preflight.ok:
+            event("run.differential_preflight_failed", run_uuid=run.id, reason=preflight.reason)
+            payload = _gate_failure_payload(
+                error_code=GateErrorCode.DIFFERENTIAL_INVARIANT_VIOLATED,
+                phase="pre_execution",
+                errors=[preflight.reason],
+                agent_mode=resolved_mode,
+            )
+            run = dataclasses.replace(
+                run,
+                status="completed",
+                exit_code=0,
+                outcome="invalid_measurement",
+                outcome_error_reason=json.dumps(dataclasses.asdict(payload)),
+                differential_status="invalid_measurement",
+                differential_off_value=sidecar.differential.off,
+                differential_on_value=sidecar.differential.on,
+                differential_effect=preflight.effect,
+            )
+            try:
+                write_run(run, catalog_dir)
+            except Exception as e:
+                event("run.error", phase="persist", exc_type=type(e).__name__, exc_msg=str(e))
+                raise
+            typer.echo(json.dumps(dataclasses.asdict(payload)), err=True)
+            return 1
+        event("run.differential_preflight_passed", run_uuid=run.id)
+
     # Write pre-execution manifest (before subprocess)
     if bundle and bundle.found:
         try:
@@ -377,7 +538,6 @@ def run_script(
             raise
 
     # Create temporary results file path for subprocess to write to
-    results_temp_dir = Path(tempfile.gettempdir())
     results_temp_path = results_temp_dir / f"{run.id}.bth-results.json"
 
     # Set up environment with results path and per-run output directory
@@ -510,6 +670,14 @@ def run_script(
         adversarial_check_status=adversarial_check_status,
         output_paths=output_paths,
         parity_run_type=parity_run_type,
+        # (debt #1071) The differential pre-flight already ran and passed by this point --
+        # its short-circuit (outcome="invalid_measurement") returns before this code is ever
+        # reached. Recording "passed" (not just leaving it None) is what lets a later Union
+        # Gate/lint distinguish "instrument sensitivity was verified for this run" from
+        # "no [differential] block was declared at all".
+        differential_status=("passed" if sidecar and sidecar.differential else None),
+        differential_off_value=(sidecar.differential.off if sidecar and sidecar.differential else None),
+        differential_on_value=(sidecar.differential.on if sidecar and sidecar.differential else None),
     )
 
     # Record parquet write with telemetry

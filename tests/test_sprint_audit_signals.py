@@ -1867,3 +1867,81 @@ def test_signal_12_tolerance_on_pre_v8_schema():
     assert "claim_path IS NULL OR claim_path=''" in source
     assert "except Exception:" in source
     assert "claim_path column absent on pre-v8 catalogs" in source
+
+
+def test_signal_11_source_present():
+    """debt #1071: Signal 11 exists and reports differential-staleness."""
+    from bathos.sprint_audit import sprint_audit
+    import inspect
+
+    source = inspect.getsource(sprint_audit)
+    assert "Signal 11" in source
+    assert "differential_staleness_count" in source
+    assert "differential_confound_check" in source
+
+
+def test_signal_11_confirmation_campaign_with_uncontrolled_positive_control(tmp_path):
+    """debt #1071: a confirmation campaign whose positive_control clause is uncontrolled
+    (no covering run has passed its differential pre-flight) surfaces via differential_confound_check
+    -- the same building block sprint_audit's Signal 11 block consumes."""
+    from bathos.claim import parse_claim, differential_confound_check
+
+    claim_dir = tmp_path / ".bth" / "claims"
+    claim_dir.mkdir(parents=True)
+    claim_path = claim_dir / "test.claim.toml"
+    claim_path.write_text("""[claim]
+headline = "Test claim"
+kill_condition = "fail"
+kill_condition_satisfiable_by_null = true
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null"
+
+[claim.union_gate]
+[[claim.union_gate.clauses]]
+id = "C_sensitivity"
+description = "Instrument can detect a known-real effect"
+hypothesis_ids = ["H_primary", "H_null"]
+positive_control = true
+""")
+    claim = parse_claim(claim_path)
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    init_catalog(catalog_dir)
+    # Write a throwaway run + compact so compact.py's schema bootstrap creates
+    # campaign_runs (init_catalog alone does not).
+    write_run(
+        Run(
+            project_slug="testproj", command="python test.py", argv=["python", "test.py"],
+            git_hash="abc", git_branch="main", git_dirty=False, status="completed", exit_code=0,
+        ),
+        catalog_dir,
+    )
+    compact(catalog_dir)
+
+    db = duckdb.connect(str(catalog_dir / "bathos.db"))
+    try:
+        db.execute(
+            """INSERT INTO campaigns (id, project_slug, name, mode, status, started_at, claim_path)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [
+                "camp1", "testproj", "Confirmation Campaign", "confirmation", "concluded",
+                datetime.now(UTC).isoformat(), str(claim_path.relative_to(tmp_path)),
+            ],
+        )
+        db.commit()
+
+        # No covering run at all -- exactly what a fresh confirmation campaign with an
+        # unproven positive-control clause looks like.
+        result = differential_confound_check(db, "camp1", claim, workspace_root=tmp_path)
+        uncontrolled = [c for c in result["clauses"] if c["status"] == "uncontrolled"]
+        assert len(uncontrolled) == 1
+        assert uncontrolled[0]["id"] == "C_sensitivity"
+    finally:
+        db.close()

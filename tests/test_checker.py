@@ -379,3 +379,51 @@ def test_check_output_sha_drift_detects_mutation(tmp_path: Path):
     assert len(results) == 1
     assert results[0].status == "DRIFT"
     assert output_metadata_has_sha_drift(output_metadata)
+
+
+def test_hash_dependency_lock_returns_none_when_absent(tmp_path: Path):
+    from bathos.checker import hash_dependency_lock
+
+    assert hash_dependency_lock(tmp_path) is None
+
+
+def test_hash_dependency_lock_stable_and_content_sensitive(tmp_path: Path):
+    from bathos.checker import hash_dependency_lock
+
+    lock = tmp_path / "uv.lock"
+    lock.write_text("version = 1\nname = \"foo\"\n")
+    h1 = hash_dependency_lock(tmp_path)
+    h2 = hash_dependency_lock(tmp_path)
+    assert h1 is not None
+    assert h1 == h2
+
+    lock.write_text("version = 2\nname = \"foo\"\n")
+    h3 = hash_dependency_lock(tmp_path)
+    assert h3 != h1
+
+
+def test_check_dependency_lock_drift_fails_open_on_missing_recorded(tmp_path: Path):
+    from bathos.checker import check_dependency_lock_drift
+
+    (tmp_path / "uv.lock").write_text("version = 1\n")
+    assert check_dependency_lock_drift(None, tmp_path) is False
+    assert check_dependency_lock_drift("", tmp_path) is False
+
+
+def test_check_dependency_lock_drift_fails_open_when_current_lockfile_missing(tmp_path: Path):
+    from bathos.checker import check_dependency_lock_drift
+
+    assert check_dependency_lock_drift("deadbeef", tmp_path) is False
+
+
+def test_check_dependency_lock_drift_detects_match_and_mismatch(tmp_path: Path):
+    from bathos.checker import check_dependency_lock_drift, hash_dependency_lock
+
+    lock = tmp_path / "uv.lock"
+    lock.write_text("version = 1\n")
+    recorded = hash_dependency_lock(tmp_path)
+
+    assert check_dependency_lock_drift(recorded, tmp_path) is False
+
+    lock.write_text("version = 2\n")
+    assert check_dependency_lock_drift(recorded, tmp_path) is True

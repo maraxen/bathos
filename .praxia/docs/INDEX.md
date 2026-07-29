@@ -2,61 +2,83 @@
 
 ## Daily
 
-## Plans
-- [260515_v01-pypi-rtd-plan](plans/260515_v01-pypi-rtd-plan.md)
-- [260515_v02-sprint-plan](plans/260515_v02-sprint-plan.md)
-- [260526_v06-sprint-composition](plans/260526_v06-sprint-composition.md) — Sprint composition: 12-item v0.6 dispatch DAG with workflow assignments, parallelization batches, exit criteria; flags Items 4+6 prereg.py conflict and sidecar canonical_toml() determinism risk
-- [260601_v061-sprint-composition](plans/260601_v061-sprint-composition.md) — Sprint composition: 4-item v0.6.1 dispatch DAG (validate.py guard commit, GateErrorCode taxonomy cleanup, sprint-audit threshold ADR + boundary tests, NLM hook wiring); defers POPPER e-value and 11b-11d gate wiring
-- [260611_worktree-workspace-resolution-dag](plans/260611_worktree-workspace-resolution-dag.md) — backlog DAG (T1→T3/T3b→T4) for worktree-aware workspace resolution; praxia backlog #1676–#1684
-- [260710_asr-rigor-ports-sprint-composition](plans/260710_asr-rigor-ports-sprint-composition.md) — port asr's C1–C5 rigor mechanisms into bathos core: BP-1 C3 concentration lint (`linter.py`), BP-2 C1 `[confounds.synthetic_recovery]` gate (`claim.py` AC-13 + `parity.py` submit-gate templates), BP-3 C5 negative-claim check (`validate_claim`); C2 needs a schema field (Appendix A), C4 stays in asr (Appendix B)
-
 ## Handoffs
 - [260616_worktree-prune-backlog-assess](handoffs/260616_worktree-prune-backlog-assess.md) — repo consolidated to single main worktree; bathos backlog drained (only #1774 P3 remains)
+- [260601_v061-audit-close](handoffs/260601_v061-audit-close.md)
+- [260601_v061-sprint-close](handoffs/260601_v061-sprint-close.md)
+
+## Plans
+- [260710_asr-rigor-ports-sprint-composition](plans/260710_asr-rigor-ports-sprint-composition.md) — port asr's C1–C5 rigor mechanisms into bathos core: BP-1 C3 concentration lint (`linter.py`), BP-2 C1 `[confounds.synthetic_recovery]` gate (`claim.py` AC-13 + `parity.py` submit-gate templates), BP-3 C5 negative-claim check (`validate_claim`); C2 needs a schema field (Appendix A), C4 stays in asr (Appendix B)
+- [260623_claim-labels-lint-sprint-composition](plans/260623_claim-labels-lint-sprint-composition.md)
+- [260611_worktree-workspace-resolution-dag](plans/260611_worktree-workspace-resolution-dag.md) — backlog DAG (T1→T3/T3b→T4) for worktree-aware workspace resolution; praxia backlog #1676–#1684
+- [260601_v061-sprint-composition](plans/260601_v061-sprint-composition.md) — Sprint composition: 4-item v0.6.1 dispatch DAG (validate.py guard commit, GateErrorCode taxonomy cleanup, sprint-audit threshold ADR + boundary tests, NLM hook wiring); defers POPPER e-value and 11b-11d gate wiring
+- [260526_v06-sprint-composition](plans/260526_v06-sprint-composition.md) — Sprint composition: 12-item v0.6 dispatch DAG with workflow assignments, parallelization batches, exit criteria; flags Items 4+6 prereg.py conflict and sidecar canonical_toml() determinism risk
+- [260515_v01-pypi-rtd-plan](plans/260515_v01-pypi-rtd-plan.md)
+- [260515_v02-sprint-plan](plans/260515_v02-sprint-plan.md)
 
 ## Specs
 - [260707_scientific-validity-gates](specs/260707_scientific-validity-gates.md) — debt #200: `[invariants]` sidecar block (hard-fail on violated result assertions, reuses `[outcomes.*]` DuckDB-condition machinery), optional cross-run differential extension, `[sanity]` pre-flight block; not yet planned/implemented
+- [260618_abstraction-boundary-open-design-questio](specs/260618_abstraction-boundary-open-design-questio.md)
+- [260618_literature-parity-v1-design](specs/260618_literature-parity-v1-design.md) — Literature-Parity v1 — Technical Design + Child-Task DAG (post-adversarial-review)
+- [260616_bathos-claim-tier-rigor-open-design-call](specs/260616_bathos-claim-tier-rigor-open-design-call.md) — Claim-tier pre-registration and enforcement: discriminability matrix, union gate, claim placement, sidecar fields, baseline parity
+- [260613_structured-gate-error-taxonomy-in-mcp-to](specs/260613_structured-gate-error-taxonomy-in-mcp-to.md)
+- [260612_experimental-controls-discipline-for-in](specs/260612_experimental-controls-discipline-for-in.md)
 - [260611_worktree-workspace-resolution](specs/260611_worktree-workspace-resolution.md) — `resolve_workspace()` seam so `bth` resolves live-worktree fs_root while keeping catalog identity stable; post adversarial review (challenger/defender); implemented
+- [260608_spec-for-bathos-repair-tooling-what-shou](specs/260608_spec-for-bathos-repair-tooling-what-shou.md)
+- [260602_item-136-bth-migrate-workflow](specs/260602_item-136-bth-migrate-workflow.md)
+- [260602_item-137-global-instruction-portability](specs/260602_item-137-global-instruction-portability.md) — Design doc: backlog item #137 global instruction portability — explores multi-surface snippet export, rules vs. skill distinction, scope semantics, manifest awareness, and composition model; identifies 10 open questions before implementation
+- [260602_item-760-threshold-lint](specs/260602_item-760-threshold-lint.md) — Implementation spec: backlog item #760 threshold epistemic hygiene — OutcomeSpec.source field, Sidecar.regression_threshold_basis field, check_threshold_basis Tier-2 linter, 9 test cases
+- [260602_item-791-results-management](specs/260602_item-791-results-management.md)
+- [260602_item-792-popper-evalue](specs/260602_item-792-popper-evalue.md) — Implementable spec: POPPER e-value multi-run campaign primitive — mode="sequential", [popper] sidecar block, likelihood-ratio e-values, per-script E_n products, threshold lock, premature_stopping_rate sprint-audit signal; 10 fixer tasks
+- [260601_bathos-backup-recovery-spec](specs/260601_bathos-backup-recovery-spec.md) — Implementation spec: v0.7 backup/recovery hardening (6 fixes) — compact.py transaction safety, DuckDB integrity check on connect, pre-migration .bak backup, archive SHA256 checksums, bth verify command, sync truncation detection
+- [260527_telemetry-design](specs/260527_telemetry-design.md) — Telemetry/audit layer: stdlib logging + QueueHandler → per-process JSONL under <catalog_dir>/logs/ (rides bth sync); covers runner/sidecar/prereg/postmortem/campaign/lineage/mcp/sync/catalog; rejects aiologger
+- [260526_agentic-science-v06-evolution-spec](specs/260526_agentic-science-v06-evolution-spec.md) — Implementation spec: v0.6 evolution (12 items, 5 phases) — exception-swallow remediation, pre-execution manifest, outcome=error, adversarial_check, sprint-audit signals, bth cite/lineage --format prov, praxia NLM hook + Rust gate work
+- [260520_agentic-science-design](specs/260520_agentic-science-design.md)
+- [260518_bathos-migration-v1-revised](specs/260518_bathos-migration-v1-revised.md)
 - [260515_bathos-design](specs/260515_bathos-design.md)
 - [260515_bathos-v01-plan](specs/260515_bathos-v01-plan.md)
-- [260518_bathos-migration-v1-revised](specs/260518_bathos-migration-v1-revised.md)
-- [260520_agentic-science-design](specs/260520_agentic-science-design.md)
-- [260526_agentic-science-v06-evolution-spec](specs/260526_agentic-science-v06-evolution-spec.md) — Implementation spec: v0.6 evolution (12 items, 5 phases) — exception-swallow remediation, pre-execution manifest, outcome=error, adversarial_check, sprint-audit signals, bth cite/lineage --format prov, praxia NLM hook + Rust gate work
-- [260527_telemetry-design](specs/260527_telemetry-design.md) — Telemetry/audit layer: stdlib logging + QueueHandler → per-process JSONL under <catalog_dir>/logs/ (rides bth sync); covers runner/sidecar/prereg/postmortem/campaign/lineage/mcp/sync/catalog; rejects aiologger
-- [260601_bathos-backup-recovery-spec](specs/260601_bathos-backup-recovery-spec.md) — Implementation spec: v0.7 backup/recovery hardening (6 fixes) — compact.py transaction safety, DuckDB integrity check on connect, pre-migration .bak backup, archive SHA256 checksums, bth verify command, sync truncation detection
-- [260602_item-760-threshold-lint](specs/260602_item-760-threshold-lint.md) — Implementation spec: backlog item #760 threshold epistemic hygiene — OutcomeSpec.source field, Sidecar.regression_threshold_basis field, check_threshold_basis Tier-2 linter, 9 test cases
-- [260602_item-137-global-instruction-portability](specs/260602_item-137-global-instruction-portability.md) — Design doc: backlog item #137 global instruction portability — explores multi-surface snippet export, rules vs. skill distinction, scope semantics, manifest awareness, and composition model; identifies 10 open questions before implementation
-- [260602_item-792-popper-evalue](specs/260602_item-792-popper-evalue.md) — Implementable spec: POPPER e-value multi-run campaign primitive — mode="sequential", [popper] sidecar block, likelihood-ratio e-values, per-script E_n products, threshold lock, premature_stopping_rate sprint-audit signal; 10 fixer tasks
-- [260616_bathos-claim-tier-rigor-open-design-call](specs/260616_bathos-claim-tier-rigor-open-design-call.md) — Claim-tier pre-registration and enforcement: discriminability matrix, union gate, claim placement, sidecar fields, baseline parity
+
+## Actuation Surfaces
 
 ## Audits
 
 ## Research
+- [260617_literature-parity-workflow-seed](research/260617_literature-parity-workflow-seed.md) — **SEED for the `literature-parity` workflow** (reference-parity-by-text for reimplemented methods; operationalizes the §10.1 track of the rigor doc). Validated build-by-doing on asr/Zeinaty (caught a mechanism-nullifying defect 3 sprints of unit tests missed). Pattern: blind reconstruction ×N → reconcile → adversarial refutation ×M → adjudicate → graded verdict + runnable invariant-test lock. Input for a brainstorm → adversarial-spec → impl sprint (named bathos workflow + skill section + claim-tier wiring).
+- [260616_bathos-long-horizon-rigor](research/260616_bathos-long-horizon-rigor.md) — **SEED for claim-level rigor systematization** (from asr worked example): claim-tier pre-registration above the sidecar (Objective-Drift fix); Claim Ledger / Discriminability Map / Confound Register / Union Gate; enforcement ladder L0→L5 + rigor-item→mechanism map; §10 baseline/literature-reimpl fidelity + signal-discrimination probes. Input for research → brainstorm → spec → coherence → backlog DAG.
 - [260526_agentic-science-nlm-research-plan](research/260526_agentic-science-nlm-research-plan.md) — NLM research prompts (3 Deep Research + 6 Queries) for agentic science sources beyond May-2026 synthesis
 - [260526_agentic-science-nlm-synthesis](research/260526_agentic-science-nlm-synthesis.md) — Oracle-approved synthesis: agentic science rigor findings + bathos v0.6+ / maraxiom / praxia implications
-- [260616_bathos-long-horizon-rigor](research/260616_bathos-long-horizon-rigor.md) — **SEED for claim-level rigor systematization** (from asr worked example): claim-tier pre-registration above the sidecar (Objective-Drift fix); Claim Ledger / Discriminability Map / Confound Register / Union Gate; enforcement ladder L0→L5 + rigor-item→mechanism map; §10 baseline/literature-reimpl fidelity + signal-discrimination probes. Input for research → brainstorm → spec → coherence → backlog DAG.
-- [260617_literature-parity-workflow-seed](research/260617_literature-parity-workflow-seed.md) — **SEED for the `literature-parity` workflow** (reference-parity-by-text for reimplemented methods; operationalizes the §10.1 track of the rigor doc). Validated build-by-doing on asr/Zeinaty (caught a mechanism-nullifying defect 3 sprints of unit tests missed). Pattern: blind reconstruction ×N → reconcile → adversarial refutation ×M → adjudicate → graded verdict + runnable invariant-test lock. Input for a brainstorm → adversarial-spec → impl sprint (named bathos workflow + skill section + claim-tier wiring).
 
 ## Decisions
-- [260526_manifest-hash-granularity](decisions/260526_manifest-hash-granularity.md) — D2: pre-execution manifest hashes full sidecar (hypothesis + outcomes + adversarial_check + schema); outcome refinement becomes tracked REVISION
+- [260721_bp-2-bp-3-synthetic_recovery-confound-negative_check-field-claim-tier-gate-ports](decisions/260721_bp-2-bp-3-synthetic_recovery-confound-negative_check-field-claim-tier-gate-ports.md) — Design decisions for porting asr's C1 invariant gate and C5 negative-claim check into bathos's native claim tier
+- [260601_sprint-audit-threshold-rationale](decisions/260601_sprint-audit-threshold-rationale.md) — Documents domain rationale for all 7 sprint-audit signal thresholds; resolves schema_overflow_rate semantics (any-key check was a bug; fix: cross-reference against result_schema declared keys) — D5: v0.6 ships self-signed manifest only (content-hash + git-commit-bound); external TSA / OSF deferred to v0.7+
 - [260526_adversarial-check-policy](decisions/260526_adversarial-check-policy.md) — D3: `adversarial_check` required for --agent-mode, warn-only for human runs; rationale for asymmetric enforcement
 - [260526_bypass-rate-split](decisions/260526_bypass-rate-split.md) — D4: bypass_rate reported as two metrics (bypass_explicit, bypass_in_agent_mode); rationale for not conflating populations
+- [260526_manifest-hash-granularity](decisions/260526_manifest-hash-granularity.md) — D2: pre-execution manifest hashes full sidecar (hypothesis + outcomes + adversarial_check + schema); outcome refinement becomes tracked REVISION
 - [260526_nonrepudiation-v06](decisions/260526_nonrepudiation-v06.md)
+
+## Preregistration
+- [260520_prereg-nonrepudiation-design](preregistration/260520_prereg-nonrepudiation-design.md)
 - [260601_sprint-audit-threshold-rationale](decisions/260601_sprint-audit-threshold-rationale.md) — Documents domain rationale for all 7 sprint-audit signal thresholds; resolves schema_overflow_rate semantics (any-key check was a bug; fix: cross-reference against result_schema declared keys) — D5: v0.6 ships self-signed manifest only (content-hash + git-commit-bound); external TSA / OSF deferred to v0.7+
 - [260721_bp2-bp3-claim-tier-gate-ports](decisions/260721_bp2-bp3-claim-tier-gate-ports.md) — Design decisions for porting asr's C1 invariant gate and C5 negative-claim check into bathos's native claim tier
+
 
 ## Reference
 
 ## Roadmaps
-
-## Preregistration
-- [260520_prereg-nonrepudiation-design](preregistration/260520_prereg-nonrepudiation-design.md)
 
 ## Archive
 
 ## Misc
 - [260515_mission](misc/260515_mission.md)
 
+## Active (legacy)
+
+## Notes (legacy)
+
+## Designs (legacy)
+
 ## Superpowers
-> Skill outputs live in `.praxia/docs/superpowers/plans/` and `.praxia/docs/superpowers/specs/`.
+> Skill outputs live in `.praxia/docs/superpowers/plans/` and `.praxia/docs/superpowers/specs/.
 - [plans](superpowers/plans/) — brainstorming + writing-plans outputs
 - [specs](superpowers/specs/) — specification outputs
+

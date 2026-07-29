@@ -2227,15 +2227,20 @@ async def claim_attest_parity(
 @traced_tool
 async def validate_sidecar(
     path: str,
+    campaign_id: str | None = None,
 ) -> dict:
     """Validate a sidecar TOML file for structural integrity.
 
     Args:
         path: Path to .bth.toml sidecar file
+        campaign_id: Optional campaign ID (or prefix). If given, cross-checks
+            claim_discriminates/claim_isolates against the campaign's registered claim (#3719).
 
     Returns:
         {'validation_ok': True} on success or {'validation_ok': False, 'errors': [...]} on failure.
     """
+    from bathos.campaigns import CampaignError
+    from bathos.claim import load_registered_claim
     from bathos.sidecar import parse_sidecar, SidecarError
     from bathos.validate import validate_sidecar as validate_sidecar_impl
 
@@ -2248,7 +2253,21 @@ async def validate_sidecar(
     except SidecarError as e:
         return {"validation_ok": False, "errors": [str(e)]}
 
-    result = validate_sidecar_impl(sidecar, sidecar_path=sidecar_path)
+    claim = None
+    if campaign_id:
+        import duckdb
+
+        from bathos.config import default_catalog_dir
+
+        db = duckdb.connect(str(default_catalog_dir() / "bathos.db"))
+        try:
+            claim = load_registered_claim(db, campaign_id)
+        except (CampaignError, FileNotFoundError, ValueError) as e:
+            return {"validation_ok": False, "errors": [str(e)]}
+        finally:
+            db.close()
+
+    result = validate_sidecar_impl(sidecar, sidecar_path=sidecar_path, claim=claim)
 
     if result.errors:
         error_msgs = [f"{e.field}: {e.message}" for e in result.errors]

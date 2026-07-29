@@ -31,6 +31,7 @@ class GateErrorCode(str, Enum):
     OUTCOME_EVALUATION_ERROR = "outcome_evaluation_error"
     RESULT_SCHEMA_MISMATCH = "result_schema_mismatch"  # reserved: strict schema enforcement in v0.7
     OUTCOME_AMBIGUOUS = "outcome_ambiguous"  # reserved: multiple outcome conditions evaluating true
+    DIFFERENTIAL_INVARIANT_VIOLATED = "differential_invariant_violated"  # debt #1071
     INTERNAL = "internal"
 
 
@@ -81,6 +82,7 @@ _RESOLUTION_HINTS: dict[GateErrorCode, str] = {
     GateErrorCode.OUTCOME_EVALUATION_ERROR: "Fix the DuckDB SQL condition in the sidecar outcomes block",
     GateErrorCode.RESULT_SCHEMA_MISMATCH: "Ensure script output JSON matches the result_schema in the sidecar",
     GateErrorCode.OUTCOME_AMBIGUOUS: "Ensure exactly one outcome condition evaluates to true",
+    GateErrorCode.DIFFERENTIAL_INVARIANT_VIOLATED: "Investigate why the measurement pipeline produces the same/different result regardless of the [differential] knob",
     GateErrorCode.INTERNAL: "File a bug report with the full error message",
 }
 

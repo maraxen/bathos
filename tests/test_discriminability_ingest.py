@@ -26,6 +26,7 @@ from bathos.schema import Run
 _UNION_GATE_CLAIM = """[claim]
 headline = "Discriminability ingest check"
 kill_condition = "fail"
+kill_condition_satisfiable_by_null = false
 
 [[hypotheses]]
 id = "H_primary"
@@ -132,6 +133,7 @@ def test_ac04_ac05_read_claim_file_not_warm_discriminates_column(tmp_path: Path)
         """[claim]
 headline = "Bias check"
 kill_condition = "fail"
+kill_condition_satisfiable_by_null = false
 
 [[hypotheses]]
 id = "H_primary"
@@ -188,3 +190,91 @@ def test_metadata_not_preserved_from_cool_fragments(tmp_catalog: Path, sample_ru
         assert row[0] == "{}"
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# #3717: the ORIGIN link -- sidecar [experiment] -> Sidecar -> Run.
+#
+# The tests above cover cool->warm (the #2276 "B1" compact fix). They all build a
+# Run with claim_discriminates set BY HAND, so they could not and did not catch
+# that NOTHING EVER SET IT in the production path: `SELECT count(*),
+# count(claim_discriminates) FROM runs` returned 1418 and 0 against the live asr
+# catalog. The Union Gate maps a run onto a claim clause via this field, so an
+# always-NULL column left every clause unmapped and downgraded every
+# confirmation-mode campaign to `confounded` regardless of design -- a gate that
+# returns the same verdict for every possible input. Only surfaced when asr ran
+# its first confirmation campaign; exploration mode is warn-only.
+# ---------------------------------------------------------------------------
+
+
+def _experiment_sidecar(claim_lines: str) -> str:
+    import textwrap
+
+    return textwrap.dedent(f"""
+        [experiment]
+        hypothesis = "test hypothesis"
+{claim_lines}
+        [outcomes.pass]
+        condition = "x == 1"
+        decision = "good"
+        reasoning = "expected behavior"
+        [outcomes.fallback]
+        condition = "1==1"
+        decision = "other"
+        reasoning = "catch-all"
+        is_residual = true
+        [result_schema]
+        x = "float"
+    """)
+
+
+def _run_with_sidecar(tmp_path: Path, sidecar_text: str):
+    import sys
+
+    from bathos.catalog import read_runs
+    from bathos.runner import run_script
+
+    (tmp_path / "catalog").mkdir()
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    script = enforced / "run_x.py"
+    script.write_text("print('hi')")
+    (enforced / "run_x.bth.toml").write_text(sidecar_text)
+
+    rc = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="proj",
+        catalog_dir=tmp_path / "catalog",
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert rc == 0
+    return read_runs(tmp_path / "catalog")
+
+
+def test_claim_discriminates_reaches_run_record_from_sidecar(tmp_path: Path):
+    """A sidecar declaring claim_discriminates/claim_isolates must populate the run record."""
+    runs = _run_with_sidecar(
+        tmp_path,
+        _experiment_sidecar(
+            '        claim_discriminates = ["H_primary", "H_null"]\n'
+            '        claim_isolates = ["C_batch_effect"]'
+        ),
+    )
+    assert len(runs) == 1
+    assert json.loads(runs[0].claim_discriminates) == ["H_primary", "H_null"]
+    assert json.loads(runs[0].claim_isolates) == ["C_batch_effect"]
+
+
+def test_claim_discriminates_absent_stays_null(tmp_path: Path):
+    """A sidecar declaring nothing leaves both columns NULL.
+
+    Absent must stay absent: an empty list would read as "this run declares coverage of no
+    clauses", which is the same thing, but NULL is what the warm schema and every existing
+    consumer expect. This also pins that the fix did not start writing '[]' everywhere.
+    """
+    runs = _run_with_sidecar(tmp_path, _experiment_sidecar(""))
+    assert len(runs) == 1
+    assert runs[0].claim_discriminates is None
+    assert runs[0].claim_isolates is None

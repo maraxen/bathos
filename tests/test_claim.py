@@ -33,6 +33,7 @@ def temp_claim_file(tmp_path):
     content = """[claim]
 headline = "Test claim"
 kill_condition = "Outcome != expected"
+kill_condition_satisfiable_by_null = false
 regime = "param=1.0..2.0"
 
 [[hypotheses]]
@@ -123,7 +124,9 @@ def temp_db(tmp_path):
             claim_discriminates TEXT,
             outcome TEXT,
             parity_run_type TEXT,
-            metadata TEXT
+            metadata TEXT,
+            differential_status TEXT,
+            dependency_lock_sha256 TEXT
         )
     """)
 
@@ -192,6 +195,7 @@ label = "Test2"
         claim_path = tmp_path / "test.claim.toml"
         claim_path.write_text("""[claim]
 kill_condition = "test"
+kill_condition_satisfiable_by_null = false
 
 [[hypotheses]]
 id = "H1"
@@ -212,6 +216,7 @@ label = "Test2"
         claim_path.write_text("""[claim]
 headline = "Test"
 kill_condition = "test"
+kill_condition_satisfiable_by_null = false
 
 [[hypotheses]]
 id = "H1"
@@ -228,6 +233,7 @@ label = "Only one hypothesis"
         claim_path.write_text("""[claim]
 headline = "Test"
 kill_condition = "test"
+kill_condition_satisfiable_by_null = false
 
 [[hypotheses]]
 id = "H_primary"
@@ -248,6 +254,7 @@ label = "Alternative"
         claim_path.write_text("""[claim]
 headline = "Test"
 kill_condition = "test"
+kill_condition_satisfiable_by_null = false
 
 [[hypotheses]]
 id = "H_primary"
@@ -270,6 +277,7 @@ id = "C1"
         claim_path.write_text("""[claim]
 headline = "Test"
 kill_condition = "test"
+kill_condition_satisfiable_by_null = false
 
 [[hypotheses]]
 id = "H_primary"
@@ -433,6 +441,222 @@ class TestUnionGate:
         verdict, uncovered = run_union_gate(temp_db, campaign_id, claim)
         assert verdict == "confounded"
         assert len(uncovered) > 0
+
+
+def _write_ac23_claim(
+    tmp_path,
+    *,
+    kill_condition_satisfiable_by_null,
+    positive_control_clause=True,
+):
+    """Claim fixture for AC-23 / positive-control tests (debt #1071).
+
+    `kill_condition_satisfiable_by_null` is emitted verbatim as TOML (True/False/None ->
+    omitted entirely, to test the "field absent" case). `positive_control_clause` controls
+    whether the C_main clause is tagged positive_control = true.
+    """
+    claim_path = tmp_path / "test.claim.toml"
+    field_line = (
+        ""
+        if kill_condition_satisfiable_by_null is None
+        else f"kill_condition_satisfiable_by_null = {str(kill_condition_satisfiable_by_null).lower()}\n"
+    )
+    pc_line = "positive_control = true\n" if positive_control_clause else ""
+    content = f"""[claim]
+headline = "Test claim"
+kill_condition = "Outcome != expected"
+{field_line}
+[[hypotheses]]
+id = "H_primary"
+label = "Primary"
+
+[[hypotheses]]
+id = "H_null_misspec"
+label = "Null"
+
+[[claim.discriminability]]
+hypothesis_a = "H_primary"
+hypothesis_b = "H_null_misspec"
+planned_run_label = "main"
+predicted_outcome = "discriminates"
+
+[claim.union_gate]
+[[claim.union_gate.clauses]]
+id = "C_main"
+description = "Main clause"
+hypothesis_ids = ["H_primary", "H_null_misspec"]
+{pc_line}"""
+    claim_path.write_text(content)
+    return claim_path
+
+
+class TestAC23PositiveControl:
+    """AC-23: kill_condition_satisfiable_by_null + positive_control clause requirement (debt #1071)."""
+
+    def test_field_absent_errors(self, tmp_path):
+        path = _write_ac23_claim(tmp_path, kill_condition_satisfiable_by_null=None)
+        claim = parse_claim(path)
+        result = validate_claim(claim)
+        assert result.ok is False
+        assert any("kill_condition_satisfiable_by_null" in e.message for e in result.errors)
+
+    def test_true_without_positive_control_clause_errors(self, tmp_path):
+        path = _write_ac23_claim(
+            tmp_path, kill_condition_satisfiable_by_null=True, positive_control_clause=False
+        )
+        claim = parse_claim(path)
+        result = validate_claim(claim)
+        assert result.ok is False
+        assert any("positive_control" in e.message for e in result.errors)
+
+    def test_true_with_positive_control_clause_passes(self, tmp_path):
+        path = _write_ac23_claim(
+            tmp_path, kill_condition_satisfiable_by_null=True, positive_control_clause=True
+        )
+        claim = parse_claim(path)
+        result = validate_claim(claim)
+        assert result.ok is True
+
+    def test_false_passes_unconditionally(self, tmp_path):
+        path = _write_ac23_claim(
+            tmp_path, kill_condition_satisfiable_by_null=False, positive_control_clause=False
+        )
+        claim = parse_claim(path)
+        result = validate_claim(claim)
+        assert result.ok is True
+
+
+class TestDifferentialConfoundCheck:
+    """Tests for differential_confound_check() (debt #1071)."""
+
+    @staticmethod
+    def _seed_covering_run(temp_db, campaign_id, run_id, *, differential_status, dependency_lock_sha256):
+        temp_db.execute(
+            "INSERT INTO runs (id, campaign_id, claim_discriminates, differential_status, "
+            "dependency_lock_sha256) VALUES (?, ?, ?, ?, ?)",
+            [
+                run_id,
+                campaign_id,
+                json.dumps(["H_primary", "H_null_misspec"]),
+                differential_status,
+                dependency_lock_sha256,
+            ],
+        )
+        temp_db.execute(
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
+            [campaign_id, run_id],
+        )
+        temp_db.commit()
+
+    def test_no_covering_run_uncontrolled(self, tmp_path, temp_db):
+        from bathos.claim import differential_confound_check
+
+        path = _write_ac23_claim(tmp_path, kill_condition_satisfiable_by_null=True)
+        claim = parse_claim(path)
+
+        result = differential_confound_check(temp_db, "camp1", claim, workspace_root=tmp_path)
+        assert result["clauses"] == [{"id": "C_main", "label": "Main clause (C_main)", "status": "uncontrolled"}]
+
+    def test_covering_run_passed_and_lock_matches_controlled(self, tmp_path, temp_db):
+        from bathos.checker import hash_dependency_lock
+        from bathos.claim import differential_confound_check
+
+        (tmp_path / "uv.lock").write_text("version = 1\n")
+        lock_hash = hash_dependency_lock(tmp_path)
+
+        path = _write_ac23_claim(tmp_path, kill_condition_satisfiable_by_null=True)
+        claim = parse_claim(path)
+        self._seed_covering_run(
+            temp_db, "camp1", "run1", differential_status="passed", dependency_lock_sha256=lock_hash
+        )
+
+        result = differential_confound_check(temp_db, "camp1", claim, workspace_root=tmp_path)
+        assert result["clauses"][0]["status"] == "controlled"
+
+    def test_covering_run_invalid_measurement_uncontrolled(self, tmp_path, temp_db):
+        from bathos.checker import hash_dependency_lock
+        from bathos.claim import differential_confound_check
+
+        (tmp_path / "uv.lock").write_text("version = 1\n")
+        lock_hash = hash_dependency_lock(tmp_path)
+
+        path = _write_ac23_claim(tmp_path, kill_condition_satisfiable_by_null=True)
+        claim = parse_claim(path)
+        self._seed_covering_run(
+            temp_db,
+            "camp1",
+            "run1",
+            differential_status="invalid_measurement",
+            dependency_lock_sha256=lock_hash,
+        )
+
+        result = differential_confound_check(temp_db, "camp1", claim, workspace_root=tmp_path)
+        assert result["clauses"][0]["status"] == "uncontrolled"
+
+    def test_covering_run_dependency_drift_uncontrolled(self, tmp_path, temp_db):
+        from bathos.checker import hash_dependency_lock
+        from bathos.claim import differential_confound_check
+
+        (tmp_path / "uv.lock").write_text("version = 1\n")
+        lock_hash = hash_dependency_lock(tmp_path)
+
+        path = _write_ac23_claim(tmp_path, kill_condition_satisfiable_by_null=True)
+        claim = parse_claim(path)
+        self._seed_covering_run(
+            temp_db, "camp1", "run1", differential_status="passed", dependency_lock_sha256=lock_hash
+        )
+
+        # Dependency environment changes after the run -- the recorded hash is now stale.
+        (tmp_path / "uv.lock").write_text("version = 2\n")
+
+        result = differential_confound_check(temp_db, "camp1", claim, workspace_root=tmp_path)
+        assert result["clauses"][0]["status"] == "uncontrolled"
+
+    def test_ignores_clauses_not_tagged_positive_control(self, tmp_path, temp_db):
+        from bathos.claim import differential_confound_check
+
+        path = _write_ac23_claim(
+            tmp_path, kill_condition_satisfiable_by_null=False, positive_control_clause=False
+        )
+        claim = parse_claim(path)
+
+        result = differential_confound_check(temp_db, "camp1", claim, workspace_root=tmp_path)
+        assert result["clauses"] == []
+
+
+class TestRunUnionGatePositiveControl:
+    """run_union_gate()'s positive_control clause branch (debt #1071)."""
+
+    def test_uncovered_when_positive_control_uncontrolled(self, tmp_path, temp_db):
+        path = _write_ac23_claim(tmp_path, kill_condition_satisfiable_by_null=True)
+        claim = parse_claim(path)
+
+        verdict, uncovered = run_union_gate(temp_db, "camp1", claim, workspace_root=tmp_path)
+        assert verdict == "confounded"
+        assert "C_main" in uncovered
+
+    def test_covered_when_positive_control_controlled(self, tmp_path, temp_db):
+        from bathos.checker import hash_dependency_lock
+
+        (tmp_path / "uv.lock").write_text("version = 1\n")
+        lock_hash = hash_dependency_lock(tmp_path)
+
+        path = _write_ac23_claim(tmp_path, kill_condition_satisfiable_by_null=True)
+        claim = parse_claim(path)
+
+        temp_db.execute(
+            "INSERT INTO runs (id, campaign_id, claim_discriminates, differential_status, "
+            "dependency_lock_sha256) VALUES (?, ?, ?, ?, ?)",
+            ["run1", "camp1", json.dumps(["H_primary", "H_null_misspec"]), "passed", lock_hash],
+        )
+        temp_db.execute(
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)", ["camp1", "run1"]
+        )
+        temp_db.commit()
+
+        verdict, uncovered = run_union_gate(temp_db, "camp1", claim, workspace_root=tmp_path)
+        assert verdict == "covered"
+        assert uncovered == []
 
 
 class TestClaimCoverageReport:
@@ -632,6 +856,7 @@ class TestBaselineParity:
         claim_path.write_text("""[claim]
 headline = "Test"
 kill_condition = "test"
+kill_condition_satisfiable_by_null = false
 
 [[hypotheses]]
 id = "H_primary"
@@ -663,6 +888,7 @@ equivalence_bound = 5.0
         claim_path.write_text("""[claim]
 headline = "Test"
 kill_condition = "test"
+kill_condition_satisfiable_by_null = false
 
 [[hypotheses]]
 id = "H_primary"
@@ -713,6 +939,7 @@ equivalence_bound = 5.0
         claim_path.write_text("""[claim]
 headline = "Test"
 kill_condition = "test"
+kill_condition_satisfiable_by_null = false
 
 [[hypotheses]]
 id = "H_primary"
@@ -745,6 +972,7 @@ equivalence_bound = 5.0
         claim_path.write_text("""[claim]
 headline = "Test"
 kill_condition = "test"
+kill_condition_satisfiable_by_null = false
 
 [[hypotheses]]
 id = "H_primary"
@@ -792,6 +1020,7 @@ equivalence_bound = 10.0
         claim_path.write_text("""[claim]
 headline = "Test"
 kill_condition = "test"
+kill_condition_satisfiable_by_null = false
 
 [[hypotheses]]
 id = "H_primary"
@@ -964,6 +1193,7 @@ class TestAdvisoryLints:
         claim_path.write_text("""[claim]
 headline = "Test"
 kill_condition = "test"
+kill_condition_satisfiable_by_null = false
 
 [[hypotheses]]
 id = "H_primary"
@@ -997,6 +1227,7 @@ predicted_outcome = "same_result"
         claim_path.write_text("""[claim]
 headline = "Test"
 kill_condition = "test"
+kill_condition_satisfiable_by_null = false
 
 [[hypotheses]]
 id = "H_primary"
@@ -1029,6 +1260,7 @@ predicted_outcome = "outcome_b"
         claim_path.write_text("""[claim]
 headline = "Test"
 kill_condition = "test"
+kill_condition_satisfiable_by_null = false
 
 [[hypotheses]]
 id = "H_primary"
@@ -1055,6 +1287,7 @@ predicted_outcome = "outcome_a"
         claim_path.write_text("""[claim]
 headline = "Test"
 kill_condition = "test"
+kill_condition_satisfiable_by_null = false
 
 [[hypotheses]]
 id = "H_primary"
@@ -1094,6 +1327,7 @@ predicted_outcome = "supports_primary"
         claim_path.write_text("""[claim]
 headline = "Test"
 kill_condition = "test"
+kill_condition_satisfiable_by_null = false
 
 [[hypotheses]]
 id = "H_primary"
@@ -1120,6 +1354,7 @@ predicted_outcome = "supports_primary"
         claim_path.write_text("""[claim]
 headline = "Test"
 kill_condition = "test"
+kill_condition_satisfiable_by_null = false
 
 [[hypotheses]]
 id = "H_primary"
@@ -1260,6 +1495,7 @@ predicted_outcome = "outcome_b"
         claim_path.write_text("""[claim]
 headline = "Test"
 kill_condition = "test"
+kill_condition_satisfiable_by_null = false
 
 [[hypotheses]]
 id = "H_primary"
@@ -1293,6 +1529,7 @@ predicted_outcome = "same"
         claim_path.write_text("""[claim]
 headline = "Test"
 kill_condition = "test"
+kill_condition_satisfiable_by_null = false
 
 [[hypotheses]]
 id = "H_primary"
@@ -1336,6 +1573,7 @@ predicted_outcome = "all_same"
         claim_path.write_text("""[claim]
 headline = "Test"
 kill_condition = "test"
+kill_condition_satisfiable_by_null = false
 
 [[hypotheses]]
 id = "H_primary"
@@ -1377,6 +1615,7 @@ predicted_outcome = "same"
         claim_path.write_text("""[claim]
 headline = "Test"
 kill_condition = "test"
+kill_condition_satisfiable_by_null = false
 
 [[hypotheses]]
 id = "H_primary"
@@ -1487,6 +1726,7 @@ predicted_outcome = "outcome_x"
         claim_path.write_text("""[claim]
 headline = "Test"
 kill_condition = "test"
+kill_condition_satisfiable_by_null = false
 
 [[hypotheses]]
 id = "H_primary"
@@ -1555,6 +1795,7 @@ predicted_outcome = "outcome_2"
         claim_path.write_text("""[claim]
 headline = "Test"
 kill_condition = "test"
+kill_condition_satisfiable_by_null = false
 
 [[hypotheses]]
 id = "H1"
@@ -1630,6 +1871,7 @@ class TestClaimDisplayLabels:
         claim_path.write_text("""[claim]
 headline = "Test"
 kill_condition = "test"
+kill_condition_satisfiable_by_null = false
 
 [[hypotheses]]
 id = "H_primary"

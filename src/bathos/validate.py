@@ -5,7 +5,7 @@ from pathlib import Path
 
 import duckdb
 
-from bathos.sidecar import Sidecar, SidecarKind, ReproductionBlock, ControlsBlock
+from bathos.sidecar import Sidecar, SidecarKind, ReproductionBlock, ControlsBlock, RESERVED_OUTCOME_LABELS
 from bathos.telemetry import event
 
 
@@ -185,7 +185,123 @@ def validate_controls_block(sidecar: Sidecar, sidecar_path: Path | None = None) 
     return errors
 
 
-def validate_sidecar(sidecar: Sidecar, sidecar_path: Path | None = None) -> ValidationResult:
+def validate_differential_block(sidecar: Sidecar, sidecar_path: Path | None = None) -> list[ValidationError]:
+    """Validate [differential] block fields (debt #1071).
+
+    Returns a list of ValidationError (empty if valid or no block present).
+    """
+    errors: list[ValidationError] = []
+
+    if sidecar.differential is None:
+        return errors  # No [differential] block — nothing to validate
+
+    diff = sidecar.differential
+
+    if not diff.knob:
+        errors.append(ValidationError(
+            "differential.knob",
+            "knob must be non-empty",
+        ))
+        if sidecar_path:
+            event("sidecar.validate_error", path=str(sidecar_path), field="differential.knob", reason="knob is empty")
+
+    if diff.off == diff.on:
+        errors.append(ValidationError(
+            "differential",
+            f"off and on must differ, both are {diff.off!r} — no invariant to check",
+        ))
+        if sidecar_path:
+            event("sidecar.validate_error", path=str(sidecar_path), field="differential", reason=f"off == on == {diff.off!r}")
+
+    if diff.expect not in ("differs", "identical"):
+        errors.append(ValidationError(
+            "differential.expect",
+            f"expect must be 'differs' or 'identical', got {diff.expect!r}",
+        ))
+        if sidecar_path:
+            event("sidecar.validate_error", path=str(sidecar_path), field="differential.expect", reason=f"invalid expect {diff.expect!r}")
+
+    if diff.metric:
+        if diff.metric not in sidecar.result_schema:
+            errors.append(ValidationError(
+                "differential.metric",
+                f"metric {diff.metric!r} not declared in [result_schema]",
+            ))
+            if sidecar_path:
+                event("sidecar.validate_error", path=str(sidecar_path), field="differential.metric", reason=f"{diff.metric!r} not in result_schema")
+        elif sidecar.result_schema.get(diff.metric) in ("int", "float") and diff.min_effect is None:
+            errors.append(ValidationError(
+                "differential.min_effect",
+                f"min_effect is required when metric {diff.metric!r} is numeric",
+            ))
+            if sidecar_path:
+                event("sidecar.validate_error", path=str(sidecar_path), field="differential.min_effect", reason="min_effect missing for numeric metric")
+        if diff.min_effect is not None and diff.min_effect < 0:
+            errors.append(ValidationError(
+                "differential.min_effect",
+                f"min_effect must be >= 0, got {diff.min_effect!r}",
+            ))
+            if sidecar_path:
+                event("sidecar.validate_error", path=str(sidecar_path), field="differential.min_effect", reason=f"negative min_effect {diff.min_effect!r}")
+    elif diff.min_effect is not None:
+        # Whole-dict-diff mode: an effect-size threshold isn't well-defined over an
+        # arbitrary dict, so requiring min_effect without a metric is a validation error
+        # rather than a silently-ignored field.
+        errors.append(ValidationError(
+            "differential.min_effect",
+            "min_effect requires metric to be set (whole-dict comparison has no effect size)",
+        ))
+        if sidecar_path:
+            event("sidecar.validate_error", path=str(sidecar_path), field="differential.min_effect", reason="min_effect set without metric")
+
+    return errors
+
+
+def validate_claim_discriminability(sidecar: Sidecar, claim, sidecar_path: Path | None = None) -> list[ValidationError]:
+    """Cross-check sidecar claim_discriminates/claim_isolates against a registered claim. (#3719)
+
+    Only meaningful for EXPERIMENT-kind sidecars (the fields are experiment-only). `claim` is
+    typed loosely (avoid a validate.py -> claim.py import cycle; callers pass a `ClaimFile` from
+    `bathos.claim.load_registered_claim`) and duck-typed against its `.hypotheses`/`.confounds`
+    attributes, each a list of dicts with an `id` key.
+
+    Catches exactly the #3717 authoring mistake at validate time instead of at conclude time:
+    the sidecar's claim_discriminates was set to outcome labels instead of hypothesis ids, and
+    `bth validate-sidecar` had no way to notice because it never saw the claim at all.
+    """
+    errors: list[ValidationError] = []
+    if sidecar.kind != SidecarKind.EXPERIMENT:
+        return errors
+
+    valid_hypothesis_ids = {h.get("id") for h in claim.hypotheses}
+    valid_confound_ids = {c.get("id") for c in claim.confounds}
+
+    for disc_id in sidecar.claim_discriminates:
+        if disc_id not in valid_hypothesis_ids:
+            err = ValidationError(
+                "claim_discriminates",
+                f"{disc_id!r} is not a hypothesis id in the registered claim "
+                f"(valid: {sorted(i for i in valid_hypothesis_ids if i)})",
+            )
+            errors.append(err)
+            if sidecar_path:
+                event("sidecar.validate_error", path=str(sidecar_path), field="claim_discriminates", reason=f"unknown hypothesis id {disc_id!r}")
+
+    for iso_id in sidecar.claim_isolates:
+        if iso_id not in valid_confound_ids:
+            err = ValidationError(
+                "claim_isolates",
+                f"{iso_id!r} is not a confound id in the registered claim "
+                f"(valid: {sorted(i for i in valid_confound_ids if i)})",
+            )
+            errors.append(err)
+            if sidecar_path:
+                event("sidecar.validate_error", path=str(sidecar_path), field="claim_isolates", reason=f"unknown confound id {iso_id!r}")
+
+    return errors
+
+
+def validate_sidecar(sidecar: Sidecar, sidecar_path: Path | None = None, claim=None) -> ValidationResult:
     """Validate a parsed Sidecar for structural integrity and logical consistency.
 
     Checks:
@@ -194,6 +310,9 @@ def validate_sidecar(sidecar: Sidecar, sidecar_path: Path | None = None) -> Vali
     - DuckDB SQL conditions parse correctly
     - At least one result_schema field is referenced in conditions
     - At least one outcome branch has is_residual=true (catch-all fallback)
+    - If `claim` is given (a `bathos.claim.ClaimFile`): claim_discriminates/claim_isolates
+      resolve to real hypothesis/confound ids in it (#3719). Omitting `claim` skips this check
+      entirely — a sidecar authored before a campaign/claim exists must still validate.
 
     Returns ValidationResult with ok=True and errors=[] if valid, or ok=False with a list of errors.
     """
@@ -210,6 +329,15 @@ def validate_sidecar(sidecar: Sidecar, sidecar_path: Path | None = None) -> Vali
 
     # Each branch must have condition, decision, reasoning
     for label, spec in sidecar.outcomes.items():
+        if label in RESERVED_OUTCOME_LABELS:
+            err = ValidationError(
+                f"outcomes.{label}",
+                f"{label!r} is a reserved outcome label (bathos sets it automatically) — "
+                "choose a different outcome name",
+            )
+            errors.append(err)
+            if sidecar_path:
+                event("sidecar.validate_error", path=str(sidecar_path), field=f"outcomes.{label}", reason=f"{label!r} is reserved")
         if not spec.condition:
             err = ValidationError(
                 f"outcomes.{label}", "Missing 'condition' field"
@@ -300,5 +428,13 @@ def validate_sidecar(sidecar: Sidecar, sidecar_path: Path | None = None) -> Vali
     # Validate [controls] block if present
     controls_errors = validate_controls_block(sidecar, sidecar_path)
     errors.extend(controls_errors)
+
+    # Validate [differential] block if present (debt #1071)
+    differential_errors = validate_differential_block(sidecar, sidecar_path)
+    errors.extend(differential_errors)
+
+    # Cross-check claim_discriminates/claim_isolates if a registered claim was supplied (#3719)
+    if claim is not None:
+        errors.extend(validate_claim_discriminability(sidecar, claim, sidecar_path))
 
     return ValidationResult(ok=len(errors) == 0, errors=errors)

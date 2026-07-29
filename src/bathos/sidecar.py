@@ -35,6 +35,10 @@ class OutcomeSpec:
     is_residual: bool = False
     adversarial_check: str | None = None
     source: str = ""
+    # Escape hatch for the multiple-comparisons lint (debt #1071): set to e.g. "holm" once
+    # a real correction (bathos.stats_gates.holm_correction) has been applied upstream to
+    # this outcome's underlying test battery, to suppress the static OR-chain heuristic.
+    multiple_comparisons_correction: str = ""
 
 
 @dataclass
@@ -52,6 +56,23 @@ class ControlsBlock:
     """Control arm specification for experiment sidecars (optional [controls] block)."""
     positive_outcome: list[str] = field(default_factory=list)
     negative_outcome: list[str] = field(default_factory=list)
+
+
+@dataclass
+class DifferentialBlock:
+    """Instrument-sensitivity pre-flight spec for experiment sidecars (optional [differential]
+    block, debt #1071). `bth run` executes this before the main run: run the script once with
+    `knob` set to `off` and once to `on`, then assert the results `expect` (differ/are identical).
+    If the invariant doesn't fire, the main run is recorded with outcome='invalid_measurement'
+    instead of executing -- proof the measurement can actually detect a real effect, not just
+    that it produced *a* result.
+    """
+    knob: str = ""
+    off: str = ""
+    on: str = ""
+    expect: str = "differs"           # "differs" or "identical"
+    metric: str = ""                  # optional: a result_schema key to compare numerically
+    min_effect: float | None = None   # required when metric is set and numeric
 
 
 @dataclass
@@ -79,6 +100,12 @@ class Sidecar:
     verification: str = ""
     # agent mode field (all kinds)
     agent_mode: str = ""
+    # claim-tier discriminability (experiment sidecars only). These carry the hypothesis /
+    # confound ids the run discriminates or isolates, and are what the Union Gate maps a run
+    # onto a claim clause with. Parsed here and propagated to Run in runner.py -- without both
+    # halves the gate reads an always-NULL column and downgrades every confirmation campaign. (#3717)
+    claim_discriminates: list[str] = field(default_factory=list)
+    claim_isolates: list[str] = field(default_factory=list)
     # popper sequential test fields (experiment sidecars only)
     popper_null_pass_rate: float | None = None
     popper_alt_pass_rate: float | None = None
@@ -88,9 +115,22 @@ class Sidecar:
     reproduction: ReproductionBlock | None = None
     # controls metadata (experiment sidecars only)
     controls: ControlsBlock | None = None
+    # instrument-sensitivity pre-flight (experiment sidecars only, debt #1071)
+    differential: DifferentialBlock | None = None
 
 
 ENFORCED_DIRS = {"experiments", "benchmarks", "validation"}
+
+# Outcome labels bathos assigns itself out-of-band, never via evaluate_outcome's condition
+# matching against a user-authored [outcomes.<label>] block. Note "error"/"unknown" are NOT
+# in this set despite also being runner.py fallback values -- both are long-standing,
+# user-declarable outcome labels (e.g. a sidecar's own catch-all residual branch is
+# conventionally named [outcomes.unknown]; see tests/test_validate.py), so reserving them
+# here would be a breaking change to existing sidecars. invalid_measurement (debt #1071) is
+# new and bathos-exclusive: set only by the [differential] pre-flight short-circuit in
+# runner.py when the instrument-sensitivity invariant fails to fire -- declaring it yourself
+# would let a sidecar silently redefine what "the measurement is broken" means.
+RESERVED_OUTCOME_LABELS = {"invalid_measurement"}
 
 # Canonical set: the advisory vocabulary for stage_name values.
 # These are best-practice values discovered from real stage_name usage.
@@ -102,6 +142,21 @@ CANONICAL_STAGES = {
     "ablation",
     "production",
 }
+
+
+def _str_list(value) -> list[str]:
+    """Coerce a sidecar list-of-ids field to list[str], tolerating a bare string. (#3717)
+
+    Returns [] for None/absent so an unset field is indistinguishable from an empty one --
+    both mean "this run declares no clause coverage".
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [str(v) for v in value]
+    return []
 
 
 def parse_sidecar(path: Path) -> Sidecar:
@@ -137,6 +192,8 @@ def parse_sidecar(path: Path) -> Sidecar:
             outcomes=outcomes,
             result_schema=data.get("result_schema", {}),
             agent_mode=section.get("agent_mode", ""),
+            claim_discriminates=_str_list(section.get("claim_discriminates")),
+            claim_isolates=_str_list(section.get("claim_isolates")),
         )
         popper = data.get("popper", {})
         if popper:
@@ -173,6 +230,22 @@ def parse_sidecar(path: Path) -> Sidecar:
             for key in controls_data:
                 if key not in {"positive_outcome", "negative_outcome"}:
                     logger.warning(f"Unknown key in [controls]: {key!r}")
+
+        # Parse [differential] block (optional, debt #1071)
+        if "differential" in data:
+            diff_data = data.get("differential", {})
+            sidecar.differential = DifferentialBlock(
+                knob=diff_data.get("knob", ""),
+                off=str(diff_data.get("off", "")),
+                on=str(diff_data.get("on", "")),
+                expect=diff_data.get("expect", "differs"),
+                metric=diff_data.get("metric", ""),
+                min_effect=diff_data.get("min_effect", None),
+            )
+            # Warn on unknown keys in [differential]
+            for key in diff_data:
+                if key not in {"knob", "off", "on", "expect", "metric", "min_effect"}:
+                    logger.warning(f"Unknown key in [differential]: {key!r}")
     elif "benchmark" in data:
         kind = SidecarKind.BENCHMARK
         section = data["benchmark"]
@@ -235,6 +308,7 @@ def _parse_outcomes(data: dict) -> dict[str, OutcomeSpec]:
             is_residual=bool(spec.get("is_residual", False)),
             adversarial_check=spec.get("adversarial_check"),
             source=spec.get("source", ""),
+            multiple_comparisons_correction=spec.get("multiple_comparisons_correction", ""),
         )
         for label, spec in outcomes_data.items()
     }
