@@ -1074,6 +1074,7 @@ class TestSyntheticRecovery:
         claim_path.write_text(f"""[claim]
 headline = "Test"
 kill_condition = "test"
+kill_condition_satisfiable_by_null = false
 
 [[hypotheses]]
 id = "H_primary"
