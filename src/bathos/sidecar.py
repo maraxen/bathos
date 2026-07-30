@@ -313,6 +313,40 @@ def _parse_outcomes(data: dict) -> dict[str, OutcomeSpec]:
     }
 
 
+def single_row_projection(row: dict) -> str:
+    """Render a dict as a DuckDB single-row SELECT projection.
+
+    Produces the `{cols}` of `SELECT (<condition>) FROM (SELECT {cols})` — the shape used
+    to evaluate a scalar SQL fragment against one row of in-memory facts, with no table
+    or catalog access.
+
+    Promoted to module level so the corpus's `applies_when` fragments evaluate through the
+    *same* mechanism as `[outcomes].condition` rather than a copy of it. Note the two share
+    the mechanism only: the columns differ entirely, because outcome conditions see a
+    script's `result` dict while `applies_when` sees facts about a script and its sidecar.
+
+    Values are rendered as SQL literals. Nested structures (dict/list) cannot be addressed
+    by a scalar condition anyway, so they are encoded as inert JSON strings — the row still
+    evaluates instead of raising on Python-repr syntax.
+    """
+
+    def _sql_literal(v: object, k: str) -> str:
+        if v is None:
+            return f"NULL AS {k}"
+        if isinstance(v, bool):
+            return f"{'TRUE' if v else 'FALSE'} AS {k}"
+        if isinstance(v, float):
+            return f"{v!r}::DOUBLE AS {k}"
+        if isinstance(v, int):
+            return f"{v!r} AS {k}"
+        if isinstance(v, (dict, list)):
+            v = json.dumps(v)
+        escaped = str(v).replace("'", "''")
+        return f"'{escaped}' AS {k}"
+
+    return ", ".join(_sql_literal(v, k) for k, v in row.items())
+
+
 def compute_evalue(
     sidecar: Sidecar,
     outcome_label: str,
@@ -376,24 +410,7 @@ def evaluate_outcome(sidecar: Sidecar, result: dict) -> str:
     if not sidecar.outcomes or not result:
         return "unknown"
 
-    def _sql_literal(v: object, k: str) -> str:
-        if v is None:
-            return f"NULL AS {k}"
-        if isinstance(v, bool):
-            return f"{'TRUE' if v else 'FALSE'} AS {k}"
-        if isinstance(v, float):
-            return f"{v!r}::DOUBLE AS {k}"
-        if isinstance(v, int):
-            return f"{v!r} AS {k}"
-        if isinstance(v, (dict, list)):
-            # Nested structures can never be addressed by a scalar SQL condition
-            # anyway; encode as an inert JSON string so the row still evaluates
-            # instead of raising on Python-repr syntax (e.g. dict {} / None).
-            v = json.dumps(v)
-        escaped = str(v).replace("'", "''")
-        return f"'{escaped}' AS {k}"
-
-    cols = ", ".join(_sql_literal(v, k) for k, v in result.items())
+    cols = single_row_projection(result)
     for label, spec in sidecar.outcomes.items():
         try:
             rows = duckdb.execute(f"SELECT ({spec.condition}) FROM (SELECT {cols})").fetchall()
