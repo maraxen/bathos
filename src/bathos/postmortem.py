@@ -14,15 +14,22 @@ from bathos.telemetry import event
 class ValidationError:
     message: str
 
+
 @dataclass
 class ValidationResult:
     ok: bool
     errors: list[ValidationError] = field(default_factory=list)
 
+
 @dataclass
 class Postmortem:
-    run_id: str
-    hypothesis_status: str
+    # Exactly one of run_id / campaign_id must be set. campaign_id exists because D1 puts
+    # the only binding site at conclude, which is campaign-scoped — a run-scoped postmortem
+    # cannot discharge a campaign-level obligation without letting an unrelated run's
+    # write-up clear it (spec §8b objection 4).
+    run_id: str = ""
+    campaign_id: str = ""
+    hypothesis_status: str = ""
     summary: str = ""
     unexpected_observations: str = ""
     root_cause: str = ""
@@ -36,7 +43,10 @@ class Postmortem:
     git_dirty: bool = False
     script_sha256: str = ""
     refutation_criteria_met: list[str] = field(default_factory=list)
+    #: obligation ids this postmortem discharges (build-order step 4)
+    discharges: list[str] = field(default_factory=list)
     anomalies: dict = field(default_factory=dict)
+
 
 def parse_postmortem(path: Path) -> Postmortem:
     try:
@@ -51,8 +61,15 @@ def parse_postmortem(path: Path) -> Postmortem:
     if not run_id:
         run_id = postmortem_section.get("run_id")
 
-    if not run_id:
-        raise ValueError("Missing run_id")
+    campaign_id = data.get("campaign_id") or postmortem_section.get("campaign_id") or ""
+
+    # Exactly one of run_id / campaign_id. Replaces the previous unconditional run_id raise;
+    # every existing postmortem stays valid because run_id is still accepted — only the error
+    # message changes, not the accepted input.
+    if not run_id and not campaign_id:
+        raise ValueError("Missing run_id (or campaign_id for a campaign-scoped postmortem)")
+    if run_id and campaign_id:
+        raise ValueError("Set exactly one of run_id or campaign_id, not both")
 
     if "hypothesis_status" not in postmortem_section:
         raise ValueError("Missing hypothesis_status in [postmortem]")
@@ -84,7 +101,9 @@ def parse_postmortem(path: Path) -> Postmortem:
     anomalies = data.get("anomalies", {})
 
     return Postmortem(
-        run_id=run_id,
+        run_id=run_id or "",
+        campaign_id=campaign_id,
+        discharges=list(postmortem_section.get("discharges", []) or []),
         hypothesis_status=hypothesis_status,
         summary=summary,
         unexpected_observations=unexpected_observations,
@@ -101,6 +120,7 @@ def parse_postmortem(path: Path) -> Postmortem:
         refutation_criteria_met=refutation_criteria_met,
         anomalies=anomalies,
     )
+
 
 def validate_postmortem(
     postmortem: Postmortem,
@@ -120,11 +140,19 @@ def validate_postmortem(
     if postmortem.hypothesis_status == "refuted" and postmortem.verdict_override == "pass":
         errors.append(ValidationError("Hypothesis status is refuted but verdict override is pass"))
         if postmortem_path:
-            event("postmortem.validate_error", path=str(postmortem_path), reason="Hypothesis status is refuted but verdict override is pass")
+            event(
+                "postmortem.validate_error",
+                path=str(postmortem_path),
+                reason="Hypothesis status is refuted but verdict override is pass",
+            )
     if postmortem.hypothesis_status == "held" and postmortem.verdict_override == "fail":
         errors.append(ValidationError("Hypothesis status is held but verdict override is fail"))
         if postmortem_path:
-            event("postmortem.validate_error", path=str(postmortem_path), reason="Hypothesis status is held but verdict override is fail")
+            event(
+                "postmortem.validate_error",
+                path=str(postmortem_path),
+                reason="Hypothesis status is held but verdict override is fail",
+            )
 
     # 2. Check asset links paths and checksums
     if postmortem.asset_links and workspace_root:
@@ -144,7 +172,11 @@ def validate_postmortem(
                     err = ValidationError(f"Asset link '{key}' is an absolute path: '{path_str}'")
                     errors.append(err)
                     if postmortem_path:
-                        event("postmortem.validate_error", path=str(postmortem_path), reason=err.message)
+                        event(
+                            "postmortem.validate_error",
+                            path=str(postmortem_path),
+                            reason=err.message,
+                        )
                     continue
 
                 # Check escaping workspace
@@ -152,10 +184,16 @@ def validate_postmortem(
                 try:
                     resolved_path.relative_to(workspace_root.resolve())
                 except ValueError:
-                    err = ValidationError(f"Asset link '{key}' escapes the workspace (escape the workspace): '{path_str}'")
+                    err = ValidationError(
+                        f"Asset link '{key}' escapes the workspace (escape the workspace): '{path_str}'"
+                    )
                     errors.append(err)
                     if postmortem_path:
-                        event("postmortem.validate_error", path=str(postmortem_path), reason=err.message)
+                        event(
+                            "postmortem.validate_error",
+                            path=str(postmortem_path),
+                            reason=err.message,
+                        )
                     continue
 
                 # Check file existence and checksum if sha256_val is provided
@@ -165,7 +203,11 @@ def validate_postmortem(
                         err = ValidationError(f"Asset link '{key}' does not exist: '{path_str}'")
                         errors.append(err)
                         if postmortem_path:
-                            event("postmortem.validate_error", path=str(postmortem_path), reason=err.message)
+                            event(
+                                "postmortem.validate_error",
+                                path=str(postmortem_path),
+                                reason=err.message,
+                            )
                 else:
                     if sha256_val:
                         # calculate checksum
@@ -176,15 +218,27 @@ def validate_postmortem(
                                     h.update(chunk)
                             actual_sha = h.hexdigest()
                             if actual_sha != sha256_val:
-                                err = ValidationError(f"Asset link '{key}' checksum mismatch: expected '{sha256_val}', got '{actual_sha}'")
+                                err = ValidationError(
+                                    f"Asset link '{key}' checksum mismatch: expected '{sha256_val}', got '{actual_sha}'"
+                                )
                                 errors.append(err)
                                 if postmortem_path:
-                                    event("postmortem.validate_error", path=str(postmortem_path), reason=err.message)
+                                    event(
+                                        "postmortem.validate_error",
+                                        path=str(postmortem_path),
+                                        reason=err.message,
+                                    )
                         except Exception as e:
-                            err = ValidationError(f"Asset link '{key}' could not compute checksum: {e}")
+                            err = ValidationError(
+                                f"Asset link '{key}' could not compute checksum: {e}"
+                            )
                             errors.append(err)
                             if postmortem_path:
-                                event("postmortem.validate_error", path=str(postmortem_path), reason=err.message)
+                                event(
+                                    "postmortem.validate_error",
+                                    path=str(postmortem_path),
+                                    reason=err.message,
+                                )
 
     # 3. Drift detection if run is provided
     if run:
@@ -198,14 +252,23 @@ def validate_postmortem(
         if workspace_root:
             git_state = capture_git_state(workspace_root)
             if git_state.hash != "unknown" and run.git_hash != git_state.hash:
-                err = ValidationError(f"Code drift detected: run git_hash '{run.git_hash}' differs from workspace HEAD '{git_state.hash}'")
+                err = ValidationError(
+                    f"Code drift detected: run git_hash '{run.git_hash}' differs from workspace HEAD '{git_state.hash}'"
+                )
                 errors.append(err)
                 if postmortem_path:
-                    event("postmortem.validate_error", path=str(postmortem_path), reason=err.message)
+                    event(
+                        "postmortem.validate_error", path=str(postmortem_path), reason=err.message
+                    )
 
     ok = len(errors) == 0
     if ok and postmortem_path:
-        event("postmortem.validated", path=str(postmortem_path), run_id=postmortem.run_id, sprint_id=None)
+        event(
+            "postmortem.validated",
+            path=str(postmortem_path),
+            run_id=postmortem.run_id,
+            sprint_id=None,
+        )
     return ValidationResult(ok=ok, errors=errors)
 
 
