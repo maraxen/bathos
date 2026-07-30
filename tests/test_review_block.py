@@ -218,3 +218,49 @@ def test_bears_on_must_resolve_when_a_claim_is_supplied(tmp_path):
     )
     res_ok = validate_sidecar(sc_ok, claim=FakeClaim())
     assert [e for e in res_ok.errors if e.field.startswith("review.")] == []
+
+
+# ── regression: [review] must work on every sidecar kind ─────────────────────
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        '[experiment]\nhypothesis = "h"\n',
+        '[benchmark]\nbaseline_ref = "abc"\nmetric = "ns_per_day"\n',
+        '[validation]\nproperty = "p"\nreference = "r"\ntolerance = "1%"\n',
+        '[debug]\nsymptom = "s"\nsuspected_cause = "c"\nverification = "v"\n',
+    ],
+)
+def test_review_parses_for_every_sidecar_kind(tmp_path, header):
+    """Regression: [review] parsing was nested inside the experiment-only branch, so a
+    benchmark/validation/debug sidecar silently parsed it to None — contradicting the design
+    ("a benchmark or validation script can equally rest on prior work")."""
+    p = tmp_path / "s.bth.toml"
+    p.write_text(
+        header + '\n[[review.literature]]\nref = "10.1/x"\nclaim = "c"\n' + BASE_OUTCOMES,
+        encoding="utf-8",
+    )
+    sc = parse_sidecar(p)
+    assert sc.review is not None, "review block was dropped for this sidecar kind"
+    assert len(sc.review.literature) == 1
+
+
+def test_non_table_review_is_ignored_not_a_crash(tmp_path):
+    """`review = "text"` is legal TOML; calling .get() on it raised AttributeError."""
+    p = tmp_path / "s.bth.toml"
+    p.write_text(
+        '[experiment]\nhypothesis = "h"\nreview = "not a table"\n' + BASE_OUTCOMES,
+        encoding="utf-8",
+    )
+    sc = parse_sidecar(p)  # must not raise
+    assert sc.review is None or sc.review.is_empty()
+
+
+def test_review_as_array_is_ignored_not_a_crash(tmp_path):
+    p = tmp_path / "s.bth.toml"
+    p.write_text(
+        '[experiment]\nhypothesis = "h"\nreview = [1, 2]\n' + BASE_OUTCOMES, encoding="utf-8"
+    )
+    sc = parse_sidecar(p)
+    assert sc.review is None or sc.review.is_empty()

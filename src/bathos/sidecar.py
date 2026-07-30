@@ -310,37 +310,6 @@ def parse_sidecar(path: Path) -> Sidecar:
                 if key not in {"positive_outcome", "negative_outcome"}:
                     logger.warning(f"Unknown key in [controls]: {key!r}")
 
-        # Parse [review] block (optional, build-order step 2). Applies to every sidecar kind,
-        # not just experiments: a benchmark or validation script can equally rest on prior work.
-        if "review" in data:
-            review_data = data.get("review", {}) or {}
-            lit = [
-                LiteratureReview(
-                    ref=str(e.get("ref", "")),
-                    claim=str(e.get("claim", "")),
-                    bears_on=str(e.get("bears_on", "")),
-                    disposition=str(e.get("disposition", "")),
-                    checked=str(e.get("checked", "")),
-                )
-                for e in review_data.get("literature", [])
-                if isinstance(e, dict)
-            ]
-            impl = [
-                ImplementationReview(
-                    source=str(e.get("source", "")),
-                    commit=str(e.get("commit", "")),
-                    what_was_checked=str(e.get("what_was_checked", "")),
-                    bears_on=str(e.get("bears_on", "")),
-                    disposition=str(e.get("disposition", "")),
-                )
-                for e in review_data.get("implementation", [])
-                if isinstance(e, dict)
-            ]
-            sidecar.review = ReviewBlock(literature=lit, implementation=impl)
-            for key in review_data:
-                if key not in {"literature", "implementation"}:
-                    logger.warning(f"Unknown key in [review]: {key!r}")
-
         # Parse [differential] block (optional, debt #1071)
         if "differential" in data:
             diff_data = data.get("differential", {})
@@ -410,6 +379,43 @@ def parse_sidecar(path: Path) -> Sidecar:
             outcomes=outcome_labels,
             kind=sidecar.kind.value,
         )
+
+    # Parse [review] block (optional, build-order step 2). Applies to every sidecar kind,
+    # not just experiments: a benchmark or validation script can equally rest on prior work.
+    if "review" in data:
+        review_data = data.get("review") or {}
+        # A bare scalar/array `review = "..."` is legal TOML and satisfies the `in` test;
+        # calling .get() on it would raise AttributeError out of parse_sidecar rather than
+        # SidecarError. Treat a non-table as absent.
+        if not isinstance(review_data, dict):
+            logger.warning("[review] is not a table; ignoring")
+            review_data = {}
+        lit = [
+            LiteratureReview(
+                ref=str(e.get("ref", "")),
+                claim=str(e.get("claim", "")),
+                bears_on=str(e.get("bears_on", "")),
+                disposition=str(e.get("disposition", "")),
+                checked=str(e.get("checked", "")),
+            )
+            for e in review_data.get("literature", [])
+            if isinstance(e, dict)
+        ]
+        impl = [
+            ImplementationReview(
+                source=str(e.get("source", "")),
+                commit=str(e.get("commit", "")),
+                what_was_checked=str(e.get("what_was_checked", "")),
+                bears_on=str(e.get("bears_on", "")),
+                disposition=str(e.get("disposition", "")),
+            )
+            for e in review_data.get("implementation", [])
+            if isinstance(e, dict)
+        ]
+        sidecar.review = ReviewBlock(literature=lit, implementation=impl)
+        for key in review_data:
+            if key not in {"literature", "implementation"}:
+                logger.warning(f"Unknown key in [review]: {key!r}")
 
     return sidecar
 

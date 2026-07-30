@@ -361,8 +361,14 @@ def conclude_campaign(
         # confirmation/sequential downgrade, exploration warns only.
         from bathos.claim import review_coverage_check
 
-        review_result = review_coverage_check(db, full_id, claim, workspace_root=workspace_root)
-        if review_result["verdict"] != "covered":
+        # §7 scopes this gate to confirmation/sequential only. Running it on exploration
+        # campaigns would add a warning line to a mode the spec never asked it to touch.
+        review_result = (
+            review_coverage_check(db, full_id, claim, workspace_root=workspace_root)
+            if campaign_mode in ("confirmation", "sequential")
+            else None
+        )
+        if review_result is not None and review_result["verdict"] != "covered":
             detail = (
                 "claim declares no hypotheses or confounds to cover"
                 if review_result["verdict"] == "empty_slate"
@@ -380,20 +386,18 @@ def conclude_campaign(
                 "true",
                 "yes",
             )
-            if enforcing and campaign_mode in ("confirmation", "sequential"):
+            if enforcing:
                 print(f"Review coverage gate: {detail}")
                 print("Review coverage gate: verdict downgraded to 'confounded'")
                 outcome_label = "confounded"
             else:
-                mode_note = (
-                    "advisory until BTH_REVIEW_COVERAGE_ENFORCE=1"
-                    if campaign_mode in ("confirmation", "sequential")
-                    else f"{campaign_mode} mode, no downgrade"
+                print(
+                    f"WARNING: Review coverage gate: {detail} "
+                    "(advisory until BTH_REVIEW_COVERAGE_ENFORCE=1)"
                 )
-                print(f"WARNING: Review coverage gate: {detail} ({mode_note})")
         # Reported unconditionally: a sidecar that could not be read is NOT evidence that
         # review is absent, and the reader must be able to tell those apart.
-        if review_result["sidecars_unreadable"]:
+        if review_result is not None and review_result["sidecars_unreadable"]:
             print(
                 f"WARNING: Review coverage gate: {review_result['sidecars_unreadable']} member "
                 f"sidecar(s) could not be read; coverage was computed from "
