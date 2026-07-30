@@ -18,3 +18,5 @@
 {"hook":"worktree-create","error":"git worktree add failed for /home/marielle/projects/bathos/.claude/worktrees/wt-20260729-002212","ts":"2026-07-29T00:22:12Z"}
 {"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-07-30T02:41:45Z"}
 {"hook":"worktree-create","error":"git worktree add failed for /home/marielle/projects/bathos/.claude/worktrees/wt-20260730-024707","ts":"2026-07-30T02:47:07Z"}
+{"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-07-30T13:40:04Z"}
+{"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-07-30T14:04:23Z"}
