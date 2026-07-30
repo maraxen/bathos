@@ -126,6 +126,42 @@ def scaffold_experiment(name: str, project_root: Path, force: bool = False) -> S
 
     script.write_text(_SCRIPT_TEMPLATE.format(name=name))
     script.chmod(0o755)
-    sidecar.write_text(_SIDECAR_TEMPLATE)
+    sidecar.write_text(_SIDECAR_TEMPLATE + _corpus_guidance())
 
     return ScaffoldResult(script=script, sidecar=sidecar, name_warning=warning)
+
+
+def _corpus_guidance() -> str:
+    """Append the shipped rule cards as commented guidance in the scaffolded sidecar.
+
+    This is where the corpus earns its keep: at authoring time, in the file the researcher is
+    already editing, rather than in documentation they would have to go find.
+
+    Every card is listed rather than only those whose `applies_when` fires, because a fresh
+    scaffold has no outcomes, no stage and no history — every context flag is at its default,
+    so `applies_when` evaluation here would say almost nothing. `bth ref applicable <script>`
+    is the targeted view once the sidecar has real content.
+
+    Failure is silent by design: a scaffold must not break because the corpus is unreadable.
+    """
+    try:
+        from bathos.corpus import load_corpus
+
+        load = load_corpus()
+    except Exception:
+        return ""
+    if not load.cards:
+        return ""
+
+    lines = [
+        "",
+        "# ─────────────────────────────────────────────────────────────────────────",
+        "# Rule cards shipped with bathos. Cite one by id in a threshold's `source`,",
+        "# or in a post-mortem's `violated_cards`. Full text: `bth ref show <id>`.",
+        "# Targeted to this script once it has content: `bth ref applicable <script>`.",
+        "#",
+    ]
+    for card in load.cards:
+        lines.append(f"#   {card.id:<12} [{card.severity:<7}] {card.title}")
+    lines.append("# ─────────────────────────────────────────────────────────────────────────")
+    return "\n".join(lines) + "\n"
