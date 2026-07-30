@@ -114,7 +114,9 @@ class ClaimFile:
     hypotheses: list[dict]  # {id, label, predicted_signature?}
     assumptions: list[dict]
     confounds: list[dict]
-    discriminability: list[dict]  # {hypothesis_a, hypothesis_b, planned_run_label, predicted_outcome}
+    discriminability: list[
+        dict
+    ]  # {hypothesis_a, hypothesis_b, planned_run_label, predicted_outcome}
     union_gate_clauses: list[dict]  # {id, description, hypothesis_ids}
     path: Path
     sha256: str
@@ -253,7 +255,9 @@ def validate_claim(
 
     # AC-03: Fewer than 2 hypotheses
     if len(claim.hypotheses) < 2:
-        errors.append(ValidationError(f"At least 2 hypotheses required, found {len(claim.hypotheses)}"))
+        errors.append(
+            ValidationError(f"At least 2 hypotheses required, found {len(claim.hypotheses)}")
+        )
 
     # AC-03: No null/misspec hypothesis
     has_null_or_misspec = any(
@@ -330,7 +334,7 @@ def validate_claim(
             # that use reference_metric/equivalence_bound without a parity run type.
             row = db.execute(
                 "SELECT outcome, parity_run_type FROM runs WHERE id=? OR id LIKE ?",
-                [parity_run_id, parity_run_id + "%"]
+                [parity_run_id, parity_run_id + "%"],
             ).fetchone()
 
             if row is None:
@@ -366,7 +370,7 @@ def validate_claim(
                 # Requires metadata JSON for numeric comparison.
                 meta_row = db.execute(
                     "SELECT metadata FROM runs WHERE id=? OR id LIKE ?",
-                    [parity_run_id, parity_run_id + "%"]
+                    [parity_run_id, parity_run_id + "%"],
                 ).fetchone()
 
                 if meta_row is None:
@@ -406,12 +410,12 @@ def validate_claim(
                                     )
                                 )
                         except (ValueError, TypeError) as e:
-                            errors.append(
-                                ValidationError(f"failed to compare parity metric: {e}")
-                            )
+                            errors.append(ValidationError(f"failed to compare parity metric: {e}"))
         else:
             # State 3: parity_run_id set, db is None
-            infos.append(f"skipping baseline parity check for '{confound_label}' — no catalog connection")
+            infos.append(
+                f"skipping baseline parity check for '{confound_label}' — no catalog connection"
+            )
 
     # AC-23: kill_condition_satisfiable_by_null must be declared, and if true, a union_gate
     # clause tagged positive_control=true must exist (debt #1071). Schema-enforced instead of
@@ -491,6 +495,7 @@ def validate_claim(
 
     # AC-04: zero-power lint — planned_run_label where all hypothesis pairs predict identical outcome
     from collections import defaultdict
+
     outcomes_by_label: dict[str, set[str]] = defaultdict(set)
     count_by_label: dict[str, int] = defaultdict(int)
     for disc in claim.discriminability:
@@ -508,12 +513,15 @@ def validate_claim(
             )
 
     # AC-05: positive-testing-bias lint — all rows predict the same outcome
-    all_outcomes = {disc.get("predicted_outcome", "") for disc in claim.discriminability if disc.get("predicted_outcome")}
+    all_outcomes = {
+        disc.get("predicted_outcome", "")
+        for disc in claim.discriminability
+        if disc.get("predicted_outcome")
+    }
     if len(claim.discriminability) >= 2 and len(all_outcomes) == 1:
         warnings.append(
             f"positive-testing bias detected — all {len(claim.discriminability)} discriminability entries predict the same outcome '{next(iter(all_outcomes))}'; no run in the matrix challenges the primary hypothesis"
         )
-
 
     return ValidationResult(ok=len(errors) == 0, errors=errors, warnings=warnings, infos=infos)
 
@@ -540,9 +548,7 @@ def scaffold_claim(campaign_id: str, db: duckdb.DuckDBPyConnection, workspace_ro
         raise RuntimeError(f"Campaign not found: {e}") from e
 
     # Get campaign details
-    rows = db.execute(
-        "SELECT name, hypothesis FROM campaigns WHERE id = ?", [full_id]
-    ).fetchall()
+    rows = db.execute("SELECT name, hypothesis FROM campaigns WHERE id = ?", [full_id]).fetchall()
     if not rows:
         raise RuntimeError(f"Campaign {campaign_id} not found")
 
@@ -672,9 +678,7 @@ def register_claim(
     claim_sha256 = hashlib.sha256(claim_content).hexdigest()
 
     # Check if already registered
-    existing = db.execute(
-        "SELECT claim_sha256 FROM campaigns WHERE id = ?", [full_id]
-    ).fetchall()
+    existing = db.execute("SELECT claim_sha256 FROM campaigns WHERE id = ?", [full_id]).fetchall()
     if existing and existing[0][0] is not None:
         if not force:
             raise RuntimeError(
@@ -690,7 +694,9 @@ def register_claim(
         [str(rel_path), claim_sha256, full_id],
     )
 
-    event("claim.register", campaign_id=full_id, claim_path=str(rel_path), claim_sha256=claim_sha256)
+    event(
+        "claim.register", campaign_id=full_id, claim_path=str(rel_path), claim_sha256=claim_sha256
+    )
 
     # BP-2: advisory-only synthetic_recovery gate check at register time. This is NOT a hard
     # block -- register has no run-history context to judge downgrade severity from -- it just
@@ -969,7 +975,7 @@ def attest_parity(
     # AC-12: Validate that parity_run_id is a real passing parity run
     run_rows = db.execute(
         "SELECT outcome, metadata, parity_run_type FROM runs WHERE id = ? OR id LIKE ?",
-        [parity_run_id, parity_run_id + "%"]
+        [parity_run_id, parity_run_id + "%"],
     ).fetchall()
 
     if not run_rows:
@@ -980,8 +986,7 @@ def attest_parity(
     # Validate outcome is pass or partial
     if outcome not in ("pass", "partial"):
         raise ValueError(
-            f"Parity run '{parity_run_id}' has outcome='{outcome}', "
-            "expected 'pass' or 'partial'"
+            f"Parity run '{parity_run_id}' has outcome='{outcome}', expected 'pass' or 'partial'"
         )
 
     # Step 6a: Use parity_run_type column instead of metadata JSON
@@ -1019,17 +1024,12 @@ def attest_parity(
     # Write to temp file in same directory (ensure same filesystem for atomic rename)
     temp_dir = abs_claim_path.parent
     with tempfile.NamedTemporaryFile(
-        mode="w",
-        dir=temp_dir,
-        suffix=".tmp",
-        delete=False,
-        encoding="utf-8"
+        mode="w", dir=temp_dir, suffix=".tmp", delete=False, encoding="utf-8"
     ) as tmp_f:
         temp_path = Path(tmp_f.name)
         # Find the parity_run_id = "" line in reference_parity block and replace it
         updated_content = original_content_str.replace(
-            'parity_run_id = ""',
-            f'parity_run_id = "{parity_run_id}"'
+            'parity_run_id = ""', f'parity_run_id = "{parity_run_id}"'
         )
 
         # Assertion: ensure replacement actually occurred (prevent silent no-op)
@@ -1053,16 +1053,13 @@ def attest_parity(
 
         # DB update LAST (after file is safely renamed)
         try:
-            db.execute(
-                "UPDATE campaigns SET claim_sha256 = ? WHERE id = ?",
-                [new_sha256, full_id]
-            )
+            db.execute("UPDATE campaigns SET claim_sha256 = ? WHERE id = ?", [new_sha256, full_id])
 
             event(
                 "claim.attest_parity",
                 campaign_id=full_id,
                 parity_run_id=parity_run_id,
-                claim_sha256=new_sha256
+                claim_sha256=new_sha256,
             )
         except Exception as db_error:
             # DB update failed AFTER file was already renamed.
@@ -1073,11 +1070,7 @@ def attest_parity(
                 f"Error: {db_error}"
             )
             with tempfile.NamedTemporaryFile(
-                mode="w",
-                dir=temp_dir,
-                suffix=".tmp",
-                delete=False,
-                encoding="utf-8"
+                mode="w", dir=temp_dir, suffix=".tmp", delete=False, encoding="utf-8"
             ) as rollback_f:
                 rollback_path = Path(rollback_f.name)
                 rollback_f.write(original_content_str)
@@ -1203,3 +1196,92 @@ def parity_confound_check(
         result_confounds.append(confound_info)
 
     return {"confounds": result_confounds}
+
+
+def review_coverage_check(db, campaign_id: str, claim, workspace_root=None) -> dict:
+    """Review Coverage Gate (build-order step 3).
+
+    Walks the claim's hypotheses and confounds and requires each to be covered by at least one
+    `[review]` entry — literature or implementation — whose `bears_on` names it, drawn from the
+    sidecars of the campaign's member runs.
+
+    Returns ``{"verdict": "covered"|"uncovered"|"empty_slate", "uncovered": [...],
+    "covered": [...], "entries_seen": int, "sidecars_read": int, "sidecars_unreadable": int}``.
+
+    Binary by construction — there is no threshold to calibrate. §7 gated this step behind
+    observing real `[review]` data specifically so a *numeric* gate would not be guessed; a
+    covered/not-covered gate has no such parameter, so building it now introduces no
+    uncalibrated constant.
+
+    An EMPTY slate returns ``empty_slate``, never ``covered``. §4: "A campaign in a gated mode
+    whose claim declares zero hypotheses and zero confounds satisfies 'each is covered'
+    trivially. The gate must treat an empty required-set as uncovered/error, not covered."
+
+    `sidecars_unreadable` is reported rather than swallowed: a sidecar that could not be parsed
+    is not evidence of absent review, and a caller must be able to tell the two apart.
+    """
+    from pathlib import Path
+
+    from bathos.sidecar import parse_sidecar
+
+    required: list[tuple[str, str]] = []
+    for h in claim.hypotheses:
+        if isinstance(h, dict) and h.get("id"):
+            required.append(("hypothesis", h["id"]))
+    for c in claim.confounds:
+        if isinstance(c, dict) and c.get("id"):
+            required.append(("confound", c["id"]))
+
+    if not required:
+        return {
+            "verdict": "empty_slate",
+            "uncovered": [],
+            "covered": [],
+            "entries_seen": 0,
+            "sidecars_read": 0,
+            "sidecars_unreadable": 0,
+        }
+
+    rows = db.execute(
+        "SELECT DISTINCT r.sidecar_path FROM runs r "
+        "JOIN campaign_runs cr ON r.id = cr.run_id "
+        "WHERE cr.campaign_id = ? AND r.sidecar_path IS NOT NULL AND r.sidecar_path != ''",
+        [campaign_id],
+    ).fetchall()
+
+    seen_ids: set[str] = set()
+    entries_seen = 0
+    read = 0
+    unreadable = 0
+
+    for (sidecar_path,) in rows:
+        p = Path(sidecar_path)
+        if workspace_root and not p.is_absolute():
+            p = Path(workspace_root) / p
+        if not p.exists():
+            unreadable += 1
+            continue
+        try:
+            sc = parse_sidecar(p)
+        except Exception:
+            unreadable += 1
+            continue
+        read += 1
+        if sc.review is None:
+            continue
+        for entry in list(sc.review.literature) + list(sc.review.implementation):
+            entries_seen += 1
+            if entry.bears_on:
+                seen_ids.add(entry.bears_on)
+
+    covered = [f"{kind}:{rid}" for kind, rid in required if rid in seen_ids]
+    uncovered = [f"{kind}:{rid}" for kind, rid in required if rid not in seen_ids]
+
+    return {
+        "verdict": "covered" if not uncovered else "uncovered",
+        "uncovered": uncovered,
+        "covered": covered,
+        "entries_seen": entries_seen,
+        "sidecars_read": read,
+        "sidecars_unreadable": unreadable,
+    }
