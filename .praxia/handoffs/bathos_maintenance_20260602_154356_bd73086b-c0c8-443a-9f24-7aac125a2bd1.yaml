@@ -1,0 +1,26 @@
+---
+workspace: bathos
+session_id: 0d1bf896-7e30-4f73-aea6-1bf066c37abe
+status: complete
+immediately_relevant:
+- file: CLAUDE.md
+  lines:
+  - 13
+  - 44
+  reason: Current Status section — now reflects v0.7; use this as the authoritative version anchor at session start
+active_dispatches: []
+task_id: 260602_claude-md-update
+phase: maintenance
+goal_statement: Keep CLAUDE.md current with shipped code so future sessions orient correctly without reading git log
+context_refs: []
+failed_attempts: []
+open_questions: []
+deferred:
+- description: '#143 threshold epistemic hygiene — sidecar lint to flag unjustified numeric cutoffs'
+  rationale: Backlogged; no sprint assigned yet
+  recommended_phase: next sprint
+- description: '#142 results management — output convention, file-count utilities, direct management interface'
+  rationale: Requires design session before implementation
+  recommended_phase: next sprint
+lessons_refs: []
+---

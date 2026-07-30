@@ -1,0 +1,831 @@
+[sprint]
+sprint_id = "260612_controls-discipline-v1"
+sprint_num = 1
+name = "experimental controls discipline v1"
+description = "Implement experimental controls discipline for bathos: stage_name write path, [reproduction]/[controls] sidecar blocks, submit-time prerequisite gate, lint enforcement, sprint-audit signals 9+10, scaffold fix, and submit-provenance."
+max_fix_retries = 2
+context = """
+SPEC: .praxia/docs/specs/260612_experimental-controls-discipline-for-in.md
+task_id: 260612_controls-discipline
+
+DECISION SUMMARY
+  Winner: Faction A (Sidecar-centric), modified — additive [reproduction] and [controls] blocks on
+  existing sidecar types; enforcement boundary at bth submit time (warm-tier DuckDB, pre-sbatch);
+  stage-name-gated severity (exploration=advisory, validation/production=hard gate);
+  ctrl_pass/ctrl_fail outcome label convention for control arm sprint-audit tracking.
+
+KEY SOURCE FILES
+  src/bathos/sidecar.py       — parse_sidecar(), Sidecar dataclass; [popper] block precedent at :87-94
+  src/bathos/schema.py        — Run.stage_name: str|None at :172; STAGE_NAME_REGEX at :31; slurm_job_id at :49
+  src/bathos/runner.py        — Run(...) constructor at :271; sidecar_sha256 written at :283
+  src/bathos/validate.py      — validate_sidecar() at :113; validate_popper_block at :35
+                                reasoning check :152-159; SQL parse :162; is_residual :206-216
+  src/bathos/linter.py        — lint_project() Tier-1 at :84; CANONICAL_STAGES at :597
+                                Tier-2 DuckDB opened at :159,:223,:351,:525,:606
+  src/bathos/cli.py           — submit command at :894; reads sidecar at :933-955
+  src/bathos/prereg.py        — check_first_of_kind warm-then-cool at :151-175
+                                command LIKE ? query at :158 (canonical pattern for AC-3)
+  src/bathos/catalog.py       — write_run() atomic tmp->rename at :18-32
+  src/bathos/sprint_audit.py  — sprint-audit signals
+  src/bathos/new_experiment.py — _SIDECAR_TEMPLATE at :50-64 (fails validate_sidecar today)
+  src/bathos/campaigns.py     — Campaign dataclass
+
+CRITICAL CONSTRAINTS
+  - All new sidecar fields are additive — no breaking changes to existing schemas
+  - [reproduction] and [controls] blocks must be explicitly parsed (not silently dropped)
+  - Gate at bth submit (not bth run) — SLURM array jobs make per-run gate unenforceable
+  - stage_name at submit time is read from sidecar TOML directly (Run record doesn't exist yet)
+  - Cool-tier fallback: pyarrow.parquet.read_table glob+filter (NOT DuckDB re-spin)
+  - command LIKE '%stem%' is the correct query pattern (script_stem is NOT a Run column)
+  - submit-provenance goes to separate Parquet files, NOT compacted into Run table
+
+DAG STRUCTURE
+  a (1708+1709) — AC-0 + AC-8, no deps [PREREQUISITE for b,c,d,f]
+  b (1710+1711) — AC-1 + AC-2, after a
+  c (1712+1713) — AC-6 + AC-7, after a, parallel with b
+  d (1714+1715) — AC-3 + AC-4, after b
+  e (1716)      — AC-5, after d
+  f (1717)      — AC-9, after a
+"""
+
+[[tracks]]
+id = "a"
+is_research = false
+
+[[tracks.items]]
+backlog_id = "1708"
+phase_name = "Track A1 — AC-0: stage_name write path (prerequisite for all stage-gated ACs)"
+fixer_prompt = """
+task_id: 260612_controls-discipline
+
+SPEC: .praxia/docs/specs/260612_experimental-controls-discipline-for-in.md AC-0
+
+Add stage_name write path — the field exists in schema.py:172 and COOL/WARM schemas but
+has no write path today (always NULL). This is the prerequisite for every stage-gated AC.
+
+CHANGE 1 — sidecar.py: parse_sidecar reads stage_name from [experiment] block
+  - Read `sidecar_data.get("experiment", {}).get("stage_name", "exploration")`
+  - Store on Sidecar dataclass as `stage_name: str = "exploration"`
+  - Validation: if stage_name is set but not in CANONICAL_STAGES (from linter.py:597:
+    {'exploration','calibration','validation','ablation','production'}):
+    emit WARNING via logger.warning and coerce to 'exploration'.
+    (Coercing to 'exploration' is the safe direction: falls through to advisory path, not hard gate.)
+  - If key absent, default = 'exploration'
+
+CANONICAL_STAGES (mirror what linter.py:597 defines): exploration | calibration | validation | ablation | production
+
+CHANGE 2 — runner.py: Run(...) constructor at :271 passes stage_name kwarg
+  - After reading sidecar (already done), pass stage_name=sidecar.stage_name to Run(...)
+  - The field already exists; no schema change needed
+
+CHANGE 3 — sidecar.py: parse_sidecar also reads novel field from [experiment] block (needed by AC-7)
+  - Read `sidecar_data.get("experiment", {}).get("novel", False)`
+  - Store on Sidecar dataclass as `novel: bool = False`
+
+KEY FILES:
+  src/bathos/sidecar.py     — add Sidecar.stage_name + Sidecar.novel; parse from [experiment]
+  src/bathos/runner.py      — pass stage_name= at Run(...) call :271
+
+DO NOT touch: schema.py (field already there), COOL/WARM schemas (already accept stage_name), linter.py
+"""
+reviewer_prompt = """
+task_id: 260612_controls-discipline
+
+Verify AC-0 (stage_name write path):
+
+CHECKS:
+1. parse_sidecar() reads stage_name from [experiment].stage_name; absent → 'exploration'
+2. Non-canonical value (e.g. 'my-stage') → WARNING logged, coerced to 'exploration'
+3. runner.py Run(...) call passes stage_name=sidecar.stage_name kwarg
+4. Sidecar dataclass has stage_name: str = 'exploration' and novel: bool = False fields
+5. uv run pytest tests/ -x -q passes (no regressions)
+6. Write a sidecar with stage_name="validation", run parse_sidecar, assert stage_name=="validation"
+7. Write a sidecar with stage_name="typo", assert WARNING emitted and stage_name coerced to 'exploration'
+
+FAIL if: stage_name not passed to Run(...); non-canonical values silently assigned (they must coerce);
+novel field absent on Sidecar dataclass.
+"""
+return_key = "1708"
+
+[[tracks.items]]
+backlog_id = "1709"
+phase_name = "Track A2 — AC-8: bth new-experiment scaffold completeness (fixes latent validation failure)"
+fixer_prompt = """
+task_id: 260612_controls-discipline
+
+SPEC: .praxia/docs/specs/260612_experimental-controls-discipline-for-in.md AC-8
+
+Fix the scaffold template in new_experiment.py:_SIDECAR_TEMPLATE so the generated sidecar
+passes `bth validate-sidecar` out of the box. Current template fails on three validate.py checks.
+
+CURRENT FAILURES (from validate.py):
+  1. reasoning check (:152-159): outcome branches lack `reasoning` field
+  2. is_residual check (:206-216): outcome branches lack `is_residual` field
+  3. SQL parse check (:162): condition strings are TODO placeholders (not valid DuckDB SQL)
+  4. schema-ref check (:197): result_schema field absent so conditions can't reference schema fields
+
+REQUIRED SIDECAR TEMPLATE (replace _SIDECAR_TEMPLATE at new_experiment.py:50-64):
+
+```toml
+[experiment]
+hypothesis = "TODO: state your hypothesis"
+stage_name = "exploration"
+novel = false
+
+[outcomes.pass]
+condition = "metric < 5.0"
+decision = "TODO: next step if pass"
+reasoning = "metric below threshold indicates convergence"
+is_residual = false
+adversarial_check = "metric >= 5.0"
+
+[outcomes.marginal]
+condition = "metric >= 5.0 AND metric < 10.0"
+decision = "TODO: next step if marginal"
+reasoning = "metric in marginal range — tune parameters"
+is_residual = false
+
+[outcomes.fail]
+condition = "metric >= 10.0"
+decision = "TODO: next step if fail"
+reasoning = "metric above threshold indicates failure"
+is_residual = true
+
+[result_schema]
+metric = "float"
+
+# Uncomment and fill in if this experiment reproduces a prior result:
+# [reproduction]
+# reproduces_paper = ""   # DOI or citation
+# reproduces_run = ""     # UUID of the run being reproduced
+# tolerance_pct = 5.0     # acceptable deviation (%)
+# requires_pass_stem = "" # script stem that must have outcome='pass' first
+
+# Uncomment if using control arms (outcome labels prefixed ctrl_ declared in [outcomes]):
+# [controls]
+# positive_outcome = ["ctrl_pass"]
+# negative_outcome = ["ctrl_fail"]
+```
+
+CONSTRAINTS:
+  - Conditions must reference 'metric' (defined in result_schema) so schema-ref check passes
+  - adversarial_check must be valid DuckDB SQL (not a TODO string)
+  - pass/marginal/fail conditions together must cover all numeric cases (no gaps, no overlaps)
+  - All three: reasoning, is_residual, and valid SQL conditions must be present
+
+KEY FILE: src/bathos/new_experiment.py — replace _SIDECAR_TEMPLATE constant only
+"""
+reviewer_prompt = """
+task_id: 260612_controls-discipline
+
+Verify AC-8 (scaffold completeness):
+
+CHECKS:
+1. `bth new-experiment foo_bar` generates a sidecar at expected path
+2. Generated sidecar passes `bth validate-sidecar <path>` with exit 0
+3. Generated sidecar has: reasoning on all outcome branches, is_residual on all branches,
+   valid SQL conditions referencing result_schema fields, adversarial_check on pass branch
+4. Commented-out [reproduction] and [controls] blocks are present in generated sidecar
+5. stage_name = "exploration" and novel = false present in [experiment]
+6. uv run pytest tests/ -x -q passes (no regressions)
+
+FAIL if: bth validate-sidecar exits non-zero on the generated sidecar; reasoning/is_residual absent;
+adversarial_check contains TODO string.
+"""
+return_key = "1709"
+
+[[tracks]]
+id = "b"
+is_research = false
+
+[[tracks.items]]
+backlog_id = "1710"
+phase_name = "Track B1 — AC-1: [reproduction] block parse, dataclass, validate"
+fixer_prompt = """
+task_id: 260612_controls-discipline
+
+SPEC: .praxia/docs/specs/260612_experimental-controls-discipline-for-in.md AC-1
+
+Add [reproduction] block parsing to sidecar.py following [popper] block precedent at :87-94.
+Track B depends on Track A (AC-0) being complete — stage_name + novel fields on Sidecar.
+
+NEW DATACLASS — ReproductionBlock (add to sidecar.py before Sidecar):
+  @dataclass
+  class ReproductionBlock:
+      reproduces_paper: str = ""       # DOI or citation string
+      reproduces_run: str = ""         # run UUID
+      tolerance_pct: float | None = None
+      requires_pass_stem: str = ""     # script stem that must have outcome='pass' first
+
+PARSE — in parse_sidecar():
+  repro_data = sidecar_data.get("reproduction", {})
+  if repro_data:
+      sidecar.reproduction = ReproductionBlock(
+          reproduces_paper=repro_data.get("reproduces_paper", ""),
+          reproduces_run=repro_data.get("reproduces_run", ""),
+          tolerance_pct=repro_data.get("tolerance_pct", None),
+          requires_pass_stem=repro_data.get("requires_pass_stem", ""),
+      )
+      for key in repro_data:
+          if key not in {"reproduces_paper", "reproduces_run", "tolerance_pct", "requires_pass_stem"}:
+              logger.warning(f"Unknown key in [reproduction]: {key!r}")
+
+VALIDATE — in validate_sidecar() (validate.py):
+  If sidecar.reproduction is not None:
+    - tolerance_pct: if set, must be 0.0 <= v <= 100.0, else VALIDATION_ERROR
+    - reproduces_run: if non-empty, must match UUID regex r'^[0-9a-f-]{36}$', else VALIDATION_ERROR
+
+UPDATE Sidecar dataclass:
+  reproduction: ReproductionBlock | None = None
+
+KEY FILES:
+  src/bathos/sidecar.py  — ReproductionBlock dataclass, parse_sidecar() extension
+  src/bathos/validate.py — validate_sidecar() extension for [reproduction] validation
+"""
+reviewer_prompt = """
+task_id: 260612_controls-discipline
+
+Verify AC-1 ([reproduction] block):
+
+CHECKS:
+1. ReproductionBlock dataclass in sidecar.py with four named fields
+2. parse_sidecar on sidecar with [reproduction] block → Sidecar.reproduction populated
+3. parse_sidecar on sidecar WITHOUT [reproduction] → Sidecar.reproduction is None
+4. validate_sidecar: tolerance_pct=150.0 raises/returns VALIDATION_ERROR
+5. validate_sidecar: reproduces_run="not-a-uuid" raises/returns VALIDATION_ERROR
+6. validate_sidecar: reproduces_run="a3f4e5c6-1234-5678-9abc-def012345678" is valid
+7. Unknown key in [reproduction] → WARNING logged
+8. uv run pytest tests/ -x -q passes
+
+FAIL if: ReproductionBlock fields mismatch spec; tolerance_pct not range-checked; UUID pattern too loose.
+"""
+return_key = "1710"
+
+[[tracks.items]]
+backlog_id = "1711"
+phase_name = "Track B2 — AC-2: [controls] block parse, validate, label cross-reference"
+fixer_prompt = """
+task_id: 260612_controls-discipline
+
+SPEC: .praxia/docs/specs/260612_experimental-controls-discipline-for-in.md AC-2
+
+Add [controls] block parsing to sidecar.py following same pattern as [reproduction] (AC-1).
+
+NEW DATACLASS — ControlsBlock (add to sidecar.py):
+  @dataclass
+  class ControlsBlock:
+      positive_outcome: list[str] = field(default_factory=list)
+      negative_outcome: list[str] = field(default_factory=list)
+
+PARSE — in parse_sidecar():
+  controls_data = sidecar_data.get("controls", {})
+  if controls_data:
+      sidecar.controls = ControlsBlock(
+          positive_outcome=controls_data.get("positive_outcome", []),
+          negative_outcome=controls_data.get("negative_outcome", []),
+      )
+
+VALIDATE — in validate_sidecar() (validate.py):
+  If sidecar.controls is not None:
+    outcome_keys = set(sidecar.outcomes.keys())  # [outcomes.X] labels from sidecar
+    for label in sidecar.controls.positive_outcome + sidecar.controls.negative_outcome:
+        if label not in outcome_keys:
+            raise/return error: CONTROLS_LABEL_NOT_FOUND
+            message: f"[controls] label {label!r} not declared in [outcomes]"
+
+COMPATIBILITY NOTE (from spec):
+  ctrl_* outcome label naming (AC-5 sprint-audit signal) and [controls] label references are compatible.
+  A sidecar declares 'ctrl_pass' in [outcomes] and references it in [controls].positive_outcome.
+  No enforcement of ctrl_ prefix in [controls] labels — any declared outcome label is valid.
+
+UPDATE Sidecar dataclass:
+  controls: ControlsBlock | None = None
+
+KEY FILES:
+  src/bathos/sidecar.py  — ControlsBlock dataclass, parse_sidecar() extension
+  src/bathos/validate.py — validate_sidecar() extension for CONTROLS_LABEL_NOT_FOUND check
+"""
+reviewer_prompt = """
+task_id: 260612_controls-discipline
+
+Verify AC-2 ([controls] block):
+
+CHECKS:
+1. ControlsBlock dataclass in sidecar.py with positive_outcome + negative_outcome list fields
+2. parse_sidecar with [controls] block → Sidecar.controls populated
+3. parse_sidecar without [controls] → Sidecar.controls is None
+4. validate_sidecar: positive_outcome label not in [outcomes] → CONTROLS_LABEL_NOT_FOUND error
+5. validate_sidecar: positive_outcome=["ctrl_pass"] where [outcomes.ctrl_pass] exists → valid
+6. validate_sidecar: empty [controls] block (no labels) → valid (no cross-ref to check)
+7. uv run pytest tests/ -x -q passes
+
+FAIL if: [controls] labels not cross-referenced against [outcomes]; CONTROLS_LABEL_NOT_FOUND not raised.
+"""
+return_key = "1711"
+
+[[tracks]]
+id = "c"
+is_research = false
+
+[[tracks.items]]
+backlog_id = "1712"
+phase_name = "Track C1 — AC-6: baseline_ref validation at lint time (Tier-2)"
+fixer_prompt = """
+task_id: 260612_controls-discipline
+
+SPEC: .praxia/docs/specs/260612_experimental-controls-discipline-for-in.md AC-6
+
+Add Tier-2 lint check for baseline_ref validation. Track C depends on Track A (AC-0).
+Tier-2 functions already open warm DuckDB at linter.py :159,:223,:351,:525,:606 — this is the sixth.
+
+ADD NEW FUNCTION to linter.py (following pattern of existing Tier-2 functions):
+
+def check_baseline_ref_exists(project_slug: str, catalog_dir: Path, db_path: Path) -> list[LintIssue]:
+    issues = []
+    # Scan all benchmark sidecars for non-empty baseline_ref
+    for sidecar_path in find_benchmark_sidecars(project_slug, catalog_dir):
+        sidecar = parse_sidecar(sidecar_path)
+        baseline_ref = getattr(sidecar, "baseline_ref", "") or ""
+        if not baseline_ref:
+            continue
+        # Query warm DuckDB: SELECT outcome, started_at FROM runs WHERE id = ? OR id LIKE ? LIMIT 1
+        # with parameters: (baseline_ref, baseline_ref + '%')  — supports full UUIDs and short prefixes
+        with duckdb.connect(str(db_path), read_only=True) as conn:
+            row = conn.execute(
+                "SELECT outcome, started_at FROM runs WHERE id = ? OR id LIKE ? LIMIT 1",
+                [baseline_ref, baseline_ref + "%"]
+            ).fetchone()
+        if row is None:
+            issues.append(LintIssue(
+                level="WARNING",
+                code="BASELINE_REF_NOT_FOUND",
+                message=f"baseline_ref {baseline_ref!r} not found in warm-tier catalog",
+                sidecar_path=str(sidecar_path),
+            ))
+        else:
+            # Emit INFO confirming the baseline run exists
+            issues.append(LintIssue(
+                level="INFO",
+                code="BASELINE_REF_OK",
+                message=f"baseline_ref {baseline_ref!r}: outcome={row[0]}, started_at={row[1]}",
+                sidecar_path=str(sidecar_path),
+            ))
+    return issues
+
+Call check_baseline_ref_exists from lint_project_tier2() (where other Tier-2 checks are called).
+
+KEY FILES:
+  src/bathos/linter.py    — add check_baseline_ref_exists, call from Tier-2 runner
+  src/bathos/sidecar.py   — parse_sidecar already parses benchmark.baseline_ref
+
+NOTE: db_path guard — if db_path does not exist (no warm DB yet), skip silently (same pattern as
+existing Tier-2 checks that guard with `if not db_path.exists(): return []`).
+"""
+reviewer_prompt = """
+task_id: 260612_controls-discipline
+
+Verify AC-6 (baseline_ref lint):
+
+CHECKS:
+1. check_baseline_ref_exists function exists in linter.py
+2. Called from Tier-2 lint runner
+3. Benchmark sidecar with valid baseline_ref UUID present in warm DB → INFO issue emitted
+4. Benchmark sidecar with baseline_ref not in warm DB → WARNING BASELINE_REF_NOT_FOUND
+5. Benchmark sidecar with empty baseline_ref → no issue emitted (skip)
+6. No warm DB present (db_path missing) → function returns [] without crashing
+7. Short prefix match: baseline_ref = "abc123" matches run id "abc12345-..." → INFO (not WARNING)
+8. uv run pytest tests/ -x -q passes
+
+FAIL if: crash when warm DB absent; UUID prefix match not supported; INFO not emitted on valid ref.
+"""
+return_key = "1712"
+
+[[tracks.items]]
+backlog_id = "1713"
+phase_name = "Track C2 — AC-7: novel/reproduces declaration discipline (Tier-1 lint, validation/production)"
+fixer_prompt = """
+task_id: 260612_controls-discipline
+
+SPEC: .praxia/docs/specs/260612_experimental-controls-discipline-for-in.md AC-7
+
+Add Tier-1 lint check for validation/production experiments missing [reproduction] or novel=true.
+Track C depends on Track A (AC-0) — both stage_name and novel fields must be on Sidecar.
+
+AC-7 reads stage_name from the SIDECAR TOML directly (not from Run record), so it is a
+filesystem-only Tier-1 check consistent with lint_project() at linter.py:84.
+
+ADD NEW FUNCTION to linter.py (Tier-1, filesystem-only, follows existing Tier-1 pattern):
+
+def check_novel_or_reproduces_declared(project_slug: str, catalog_dir: Path) -> list[LintIssue]:
+    issues = []
+    for sidecar_path in find_experiment_sidecars(project_slug, catalog_dir):
+        sidecar = parse_sidecar(sidecar_path)
+        if sidecar.stage_name not in ("validation", "production"):
+            continue
+        has_reproduction = (
+            sidecar.reproduction is not None
+            and (sidecar.reproduction.reproduces_paper or sidecar.reproduction.reproduces_run)
+        )
+        if not has_reproduction and not sidecar.novel:
+            issues.append(LintIssue(
+                level="ERROR",
+                code="NOVEL_OR_REPRODUCES_REQUIRED",
+                message=(
+                    "validation/production experiment must declare [reproduction] or novel=true"
+                ),
+                sidecar_path=str(sidecar_path),
+            ))
+    return issues
+
+Call check_novel_or_reproduces_declared from lint_project() Tier-1 runner.
+
+DEPENDENCY: Sidecar.reproduction (ReproductionBlock | None) from AC-1 and Sidecar.novel (bool) from AC-0.
+
+KEY FILES:
+  src/bathos/linter.py    — add check_novel_or_reproduces_declared, call from Tier-1 runner
+"""
+reviewer_prompt = """
+task_id: 260612_controls-discipline
+
+Verify AC-7 (novel/reproduces Tier-1 lint):
+
+CHECKS:
+1. check_novel_or_reproduces_declared in linter.py, called from Tier-1 runner
+2. validation/production sidecar with no [reproduction] and novel=false → ERROR NOVEL_OR_REPRODUCES_REQUIRED
+3. validation/production sidecar with [reproduction].reproduces_paper set → no error
+4. validation/production sidecar with [reproduction].reproduces_run set → no error
+5. validation/production sidecar with novel=true → no error
+6. exploration/calibration sidecar with no [reproduction] and novel=false → no error (not in scope)
+7. uv run pytest tests/ -x -q passes
+
+FAIL if: exploration stages flagged; both reproduces_paper and reproduces_run empty but block present
+is accepted (it shouldn't be — at least one must be non-empty).
+"""
+return_key = "1713"
+
+[[tracks]]
+id = "d"
+is_research = false
+
+[[tracks.items]]
+backlog_id = "1714"
+phase_name = "Track D1 — AC-3: reproduction prerequisite hard gate at bth submit (validation/production)"
+fixer_prompt = """
+task_id: 260612_controls-discipline
+
+SPEC: .praxia/docs/specs/260612_experimental-controls-discipline-for-in.md AC-3
+
+Add reproduction prerequisite gate to bth submit (cli.py:submit). This MUST run at submit time
+(pre-sbatch), NOT at bth run time — SLURM array jobs start concurrently, making per-run
+enforcement of order requirements meaningless.
+
+Track D depends on Track B (AC-1) being complete — requires_pass_stem on ReproductionBlock.
+
+GATE LOGIC — add check_reproduction_prerequisite() function to prereg.py:
+
+def check_reproduction_prerequisite(
+    requires_pass_stem: str,
+    catalog_dir: Path,
+) -> bool:
+    # Returns True if a passing run of requires_pass_stem exists. False otherwise.
+    db_path = catalog_dir / "bathos.db"
+    if db_path.exists():
+        # Warm path — exact same idiom as check_first_of_kind at prereg.py:158
+        try:
+            with duckdb.connect(str(db_path), read_only=True) as conn:
+                row = conn.execute(
+                    "SELECT 1 FROM runs WHERE command LIKE ? AND outcome = 'pass' LIMIT 1",
+                    ["%" + requires_pass_stem + "%"]
+                ).fetchone()
+                if row:
+                    return True
+        except Exception:
+            pass  # fall through to cool-tier
+    # Cool-tier fallback — pyarrow glob scan (following catalog.py:43 + prereg.py:168-175)
+    import pyarrow.parquet as pq
+    for fragment in sorted(catalog_dir.glob("runs/**/*.parquet")):
+        try:
+            tbl = pq.read_table(str(fragment), columns=["command", "outcome"])
+            for row in tbl.to_pydict()["command"]:
+                pass  # just to validate it reads
+            # Filter rows where command contains stem and outcome == 'pass'
+            cmds = tbl.column("command").to_pylist()
+            outcomes = tbl.column("outcome").to_pylist()
+            for cmd, outcome in zip(cmds, outcomes):
+                if cmd and requires_pass_stem in cmd and outcome == "pass":
+                    return True
+        except Exception:
+            continue
+    return False
+
+WIRE INTO cli.py:submit — after sidecar is read (:933-955), before myxcel submit call:
+
+  requires_pass_stem = ""
+  if sidecar and sidecar.reproduction:
+      requires_pass_stem = sidecar.reproduction.requires_pass_stem or ""
+
+  if requires_pass_stem:
+      stage = sidecar.stage_name if sidecar else "exploration"
+      if stage in ("validation", "production"):
+          found = check_reproduction_prerequisite(requires_pass_stem, catalog_dir)
+          if not found:
+              typer.echo(
+                  f"REPRODUCTION_PREREQUISITE_UNMET: no passing run of '{requires_pass_stem}' found",
+                  err=True,
+              )
+              raise typer.Exit(code=1)
+
+IMPORT: add `from bathos.prereg import check_reproduction_prerequisite` to cli.py submit section.
+
+KEY FILES:
+  src/bathos/prereg.py  — add check_reproduction_prerequisite function
+  src/bathos/cli.py     — wire gate in submit command after sidecar read
+"""
+reviewer_prompt = """
+task_id: 260612_controls-discipline
+
+Verify AC-3 (reproduction prerequisite hard gate):
+
+CHECKS:
+1. check_reproduction_prerequisite in prereg.py
+2. Warm path: DuckDB query uses command LIKE '%stem%' AND outcome='pass' idiom
+3. Cool path: pyarrow glob scan, filters command contains stem AND outcome=='pass'
+4. bth submit with requires_pass_stem set and stage=validation, no matching run → exit 1
+   with message containing REPRODUCTION_PREREQUISITE_UNMET
+5. bth submit with requires_pass_stem set and matching passing run in warm DB → proceeds
+6. bth submit with requires_pass_stem set and stage=exploration → no hard gate (advisory only, AC-4)
+7. bth submit with no [reproduction] block → gate not triggered
+8. uv run pytest tests/ -x -q passes
+
+FAIL if: gate runs at bth run time (not submit); hard exit on exploration stage; command LIKE idiom
+not used (must not use script_stem column — it doesn't exist on Run).
+"""
+return_key = "1714"
+
+[[tracks.items]]
+backlog_id = "1715"
+phase_name = "Track D2 — AC-4: reproduction prerequisite advisory in exploration/calibration stages"
+fixer_prompt = """
+task_id: 260612_controls-discipline
+
+SPEC: .praxia/docs/specs/260612_experimental-controls-discipline-for-in.md AC-4
+
+Add advisory WARNING path for exploration/calibration stages (same query as AC-3, different response).
+This is a small extension of the AC-3 gate logic already wired in Track D1.
+
+CHANGE — extend the gate block in cli.py:submit to add the advisory branch:
+
+  if requires_pass_stem:
+      stage = sidecar.stage_name if sidecar else "exploration"
+      if stage in ("validation", "production"):
+          found = check_reproduction_prerequisite(requires_pass_stem, catalog_dir)
+          if not found:
+              typer.echo(
+                  f"REPRODUCTION_PREREQUISITE_UNMET: no passing run of '{requires_pass_stem}' found",
+                  err=True,
+              )
+              raise typer.Exit(code=1)
+      elif stage in ("exploration", "calibration"):
+          found = check_reproduction_prerequisite(requires_pass_stem, catalog_dir)
+          if not found:
+              typer.echo(
+                  f"WARNING: prerequisite '{requires_pass_stem}' has no passing run — "
+                  f"proceeding anyway (exploration/calibration stage)",
+                  err=True,
+              )
+              # NO raise typer.Exit — advisory only
+
+KEY FILE: src/bathos/cli.py — extend existing gate block from AC-3
+"""
+reviewer_prompt = """
+task_id: 260612_controls-discipline
+
+Verify AC-4 (advisory warning):
+
+CHECKS:
+1. bth submit with requires_pass_stem, stage=exploration, no matching run → WARNING to stderr, exit 0
+2. bth submit with requires_pass_stem, stage=calibration, no matching run → WARNING to stderr, exit 0
+3. bth submit with requires_pass_stem, stage=exploration, passing run exists → no warning, exit 0
+4. Gate in validation/production still exits 1 (AC-3 not broken)
+5. Warning message mentions 'exploration/calibration stage' to distinguish from hard-gate message
+6. uv run pytest tests/ -x -q passes
+
+FAIL if: advisory path exits non-zero; hard gate path emits only warning (must exit 1).
+"""
+return_key = "1715"
+
+[[tracks]]
+id = "e"
+is_research = false
+
+[[tracks.items]]
+backlog_id = "1716"
+phase_name = "Track E — AC-5: ctrl_* outcome label convention (sprint-audit Signal 9)"
+fixer_prompt = """
+task_id: 260612_controls-discipline
+
+SPEC: .praxia/docs/specs/260612_experimental-controls-discipline-for-in.md AC-5
+
+Add sprint-audit signal 9 (control_arm_rate) to sprint_audit.py.
+Track E depends on Track D (AC-3+AC-4 complete, which depends on AC-0 stage_name write path).
+
+SIGNAL DEFINITION:
+  control_arm_rate = (runs with outcome LIKE 'ctrl_%') / (total runs in project)
+  WARNING threshold: rate == 0.0 AND any campaign has validation/production stage runs
+
+ADD FUNCTION to sprint_audit.py (following existing signal pattern):
+
+def signal_control_arm_rate(project_slug: str, db_path: Path) -> SignalResult:
+    # Signal 9: control_arm_rate — fraction of runs with ctrl_* outcome labels.
+    if not db_path.exists():
+        return SignalResult(signal="control_arm_rate", value=None, level="INFO",
+                           message="warm DB not available")
+    with duckdb.connect(str(db_path), read_only=True) as conn:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM runs WHERE project_slug = ?", [project_slug]
+        ).fetchone()[0]
+        if total == 0:
+            return SignalResult(signal="control_arm_rate", value=0.0, level="INFO",
+                               message="no runs in project")
+        ctrl_count = conn.execute(
+            "SELECT COUNT(*) FROM runs WHERE project_slug = ? AND outcome LIKE 'ctrl_%'",
+            [project_slug]
+        ).fetchone()[0]
+        rate = ctrl_count / total
+
+        # Check if any validation/production campaign runs exist (uses stage_name from AC-0)
+        has_val_prod = conn.execute(
+            "SELECT 1 FROM runs WHERE project_slug = ? AND stage_name IN ('validation','production') LIMIT 1",
+            [project_slug]
+        ).fetchone()
+
+        level = "OK"
+        message = f"control_arm_rate={rate:.2%} ({ctrl_count}/{total} runs with ctrl_* outcomes)"
+        if rate == 0.0 and has_val_prod:
+            level = "WARNING"
+            message += " — no control arm runs found in validation/production campaigns"
+
+    return SignalResult(signal="control_arm_rate", value=rate, level=level, message=message)
+
+Register signal_control_arm_rate in the sprint_audit signal runner alongside existing signals.
+
+KEY FILE: src/bathos/sprint_audit.py — add signal function and register
+"""
+reviewer_prompt = """
+task_id: 260612_controls-discipline
+
+Verify AC-5 (control_arm_rate signal):
+
+CHECKS:
+1. signal_control_arm_rate function in sprint_audit.py
+2. Project with no ctrl_* runs, no validation/production runs → rate=0.0, level=OK
+3. Project with no ctrl_* runs, HAS validation/production runs → rate=0.0, level=WARNING
+4. Project with some ctrl_* runs → rate > 0.0, level=OK
+5. Signal registered and appears in bth sprint-audit output
+6. No warm DB → returns INFO (not crash)
+7. uv run pytest tests/ -x -q passes
+
+FAIL if: WARNING fires when no validation/production stage runs exist; crash when DB absent;
+signal not registered in sprint-audit runner.
+"""
+return_key = "1716"
+
+[[tracks]]
+id = "f"
+is_research = false
+
+[[tracks.items]]
+backlog_id = "1717"
+phase_name = "Track F — AC-9: submit-provenance Parquet emission + sprint-audit Signal 10"
+fixer_prompt = """
+task_id: 260612_controls-discipline
+
+SPEC: .praxia/docs/specs/260612_experimental-controls-discipline-for-in.md AC-9
+
+Track F depends on Track A (AC-0 stage_name write path). Runs independently of Tracks B-E.
+
+AC-9 has two parts:
+  Part 1: bth submit writes a submit-provenance Parquet record after successful myxcel submit
+  Part 2: bth sprint-audit signal 10 (submit_bypass_rate) using provenance records
+
+PART 1 — Submit-provenance write (cli.py:submit, after myxcel returns slurm_job_id ~:997):
+
+PyArrow schema for submit-provenance:
+  import pyarrow as pa
+  SUBMIT_SCHEMA = pa.schema([
+      pa.field("project_slug", pa.string()),
+      pa.field("command", pa.string()),
+      pa.field("sidecar_sha256", pa.string()),
+      pa.field("bth_submit_version", pa.string()),
+      pa.field("submitted_at", pa.timestamp("us", tz="UTC")),
+      pa.field("myxcel_job_id", pa.string()),
+      pa.field("stage_name", pa.string()),
+  ])
+
+Write function (add to a new helper in cli.py or catalog.py):
+
+def write_submit_provenance(
+    project_slug: str, command: str, sidecar_sha256: str,
+    myxcel_job_id: str, stage_name: str, catalog_dir: Path,
+) -> None:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    import importlib.metadata
+    from datetime import datetime, timezone
+
+    submit_dir = catalog_dir / "submits" / project_slug
+    submit_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc)
+    ts_str = ts.strftime("%Y%m%dT%H%M%S")
+    tmp_path = submit_dir / f"{ts_str}_submit.parquet.tmp"
+    final_path = submit_dir / f"{ts_str}_submit.parquet"
+
+    table = pa.table(
+        {
+            "project_slug": [project_slug],
+            "command": [command],
+            "sidecar_sha256": [sidecar_sha256 or ""],
+            "bth_submit_version": [importlib.metadata.version("bathos")],
+            "submitted_at": pa.array([ts], type=pa.timestamp("us", tz="UTC")),
+            "myxcel_job_id": [myxcel_job_id or ""],
+            "stage_name": [stage_name or "exploration"],
+        },
+        schema=SUBMIT_SCHEMA,
+    )
+    pq.write_table(table, str(tmp_path))
+    tmp_path.rename(final_path)  # atomic rename (POSIX-safe)
+
+Call write_submit_provenance in cli.py:submit after slurm_job_id is returned. The sidecar_sha256
+comes from the sidecar already read at :933-955.
+
+PART 2 — Signal 10 submit_bypass_rate (sprint_audit.py):
+
+def signal_submit_bypass_rate(project_slug: str, db_path: Path, catalog_dir: Path) -> SignalResult:
+    # Signal 10: submit_bypass_rate — fraction of validation/production runs with no submit provenance.
+    import pyarrow.parquet as pq as pq_mod
+    provenance_dir = catalog_dir / "submits" / project_slug
+    if not provenance_dir.exists() or not db_path.exists():
+        return SignalResult(signal="submit_bypass_rate", value=None, level="INFO",
+                           message="no submit provenance records yet")
+
+    # Load all provenance records
+    prov_files = list(provenance_dir.glob("**/*.parquet"))
+    if not prov_files:
+        return SignalResult(...)
+
+    prov_table = pq_mod.read_table([str(f) for f in prov_files])
+    submitted_job_ids = set(prov_table.column("myxcel_job_id").to_pylist())
+
+    with duckdb.connect(str(db_path), read_only=True) as conn:
+        # Get validation/production runs with slurm_job_id populated
+        sql = (
+            "SELECT slurm_job_id FROM runs"
+            " WHERE project_slug = ?"
+            " AND stage_name IN ('validation', 'production')"
+            " AND slurm_job_id IS NOT NULL AND slurm_job_id != ''"
+        )
+        rows = conn.execute(sql, [project_slug]).fetchall()
+
+    if not rows:
+        return SignalResult(signal="submit_bypass_rate", value=0.0, level="OK",
+                           message="no validation/production cluster runs found")
+
+    total = len(rows)
+    bypassed = sum(1 for (jid,) in rows if jid not in submitted_job_ids)
+    rate = bypassed / total
+
+    level = "WARNING" if rate > 0.05 else "OK"
+    message = f"submit_bypass_rate={rate:.2%} ({bypassed}/{total} validation/production runs bypassed bth submit)"
+    return SignalResult(signal="submit_bypass_rate", value=rate, level=level, message=message)
+
+Register signal_submit_bypass_rate in sprint-audit signal runner.
+
+KEY FILES:
+  src/bathos/cli.py          — write_submit_provenance call after slurm_job_id returned
+  src/bathos/sprint_audit.py — add signal_submit_bypass_rate, register
+"""
+reviewer_prompt = """
+task_id: 260612_controls-discipline
+
+Verify AC-9 (submit-provenance + bypass signal):
+
+CHECKS:
+1. bth submit (with a mock myxcel call) creates a Parquet file under ~/.bth/catalog/submits/<slug>/
+2. Parquet file schema has all 7 required columns: project_slug, command, sidecar_sha256,
+   bth_submit_version, submitted_at, myxcel_job_id, stage_name
+3. Atomic write: tmp file renamed (no .tmp files left after write)
+4. bth_submit_version field equals importlib.metadata.version("bathos")
+5. signal_submit_bypass_rate in sprint_audit.py and registered
+6. Signal with all runs having provenance → rate=0.0, level=OK
+7. Signal with some runs missing provenance in validation stage → level=WARNING if rate > 0.05
+8. Signal with no provenance dir → returns INFO (not crash)
+9. uv run pytest tests/ -x -q passes
+
+FAIL if: .tmp file left behind; SUBMIT_SCHEMA missing any of the 7 fields; slurm_job_id-based join
+replaced with time-window join (spec explicitly forbids time-window joins).
+"""
+return_key = "1717"
+
+[orchestration]
+sequential = ["a", "b", "c", "d", "e", "f"]
+concurrent = []

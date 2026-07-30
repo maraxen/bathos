@@ -17,7 +17,48 @@ scripts/scratch/
 .vscode/
 tmp/
 
-# Ephemeral caches and praxia state (do not commit)
+# Ephemeral caches
 .fastembed_cache/
-.praxia/
 .claude/
+
+# praxia agent state is TRACKED by design — docs, handoffs, specs, sprint plans and the
+# JSONL phase stores are project history, not scratch. Mirrors how the praxia repo itself
+# treats .praxia/ (~1300 files tracked there).
+#
+# Tracking .praxia/ also fixes two concrete failures caused by ignoring it:
+#   - `praxia docs index` run from a git worktree saw only the force-added subset and
+#     silently rewrote INDEX.md with 28 entries missing (debt #1097).
+#   - every praxia MCP tool failed from a worktree with "workspace_id is empty", because
+#     .praxia/workspace.id was never materialised there.
+#
+# Only genuinely ephemeral, machine-local, or large-and-regenerable artifacts stay ignored.
+# NOTE: gitignore has no inline comments — a trailing "# ..." becomes part of the pattern
+# and silently matches nothing. Keep every comment on its own line.
+#
+# 17M embedding/query cache, regenerable
+.praxia/cache/
+# rolling event log
+.praxia/history/
+# explicitly ephemeral scratch
+.praxia/eph/
+# local snapshots
+.praxia/backups/
+# per-run agent trace: large, low value at rest
+.praxia/harness_trace.jsonl
+# hook debug capture
+.praxia/hook_input_debug.jsonl
+# machine-local identity
+.praxia/identity.json
+# absolute paths, machine-local
+.praxia/worktree_registry.json
+# transient write locks and temp files
+.praxia/*.lock
+.praxia/*.tmp
+# raw per-run subagent transcripts: hash-named .raw dumps, 404 files / 2.6M,
+# not referenced by any doc, handoff or sprint plan
+.praxia/subagent_outputs/
+# byte-offset cursor state for incremental extraction — machine-local
+.praxia/tools/
+# records local worktree branch names from a past sprint — machine-local and
+# transient (the worktrees it names are long gone)
+.praxia/worktree_manifests/

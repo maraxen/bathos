@@ -1,0 +1,316 @@
+[sprint]
+sprint_id = "260616_claim-tier-phase1"
+sprint_num = 1
+name = "260616_claim-tier-phase1"
+description = "Claim-tier rigor Phase 1: scaffold/register/validate + Union Gate + Signal 12 + schema v8"
+context = """
+RECON ANCHORS (verified against live codebase 2026-06-16):
+
+schema.py:10  — CURRENT_SCHEMA_VERSION = "7" (must bump to "8")
+schema.py:27  — COOL_SCHEMA (PyArrow schema; add claim_discriminates, claim_isolates nullable string fields)
+schema.py:73  — WARM_SCHEMA (add same two fields)
+schema.py:122 — Run dataclass (add claim_discriminates: Optional[str] = None, claim_isolates: Optional[str] = None)
+
+compact.py:206-212  — MIGRATIONS dict; keys are schema-version strings; callables are run_dict: dict → dict
+compact.py:195-213  — _migrate_v6(run_dict) pattern to follow for _migrate_v7
+compact.py:262-278  — campaigns table DDL (3 new cols: claim_path, claim_sha256, claim_mode)
+compact.py:462-484  — ALTER TABLE warm-tier loops pattern (add 5 new nullable columns here)
+
+migrate.py:25-93   — migrate_catalog() (cool-tier schema backfill)
+migrate.py:151-167 — _default_array() — stage_name special-cased to None; add claim_discriminates/claim_isolates here too
+
+campaigns.py:18    — Campaign dataclass (11 fields; add claim_path, claim_sha256, claim_mode)
+campaigns.py:40    — create_campaign(); mode enum: exploration|confirmation|sequential ONLY
+campaigns.py:180   — conclude_campaign(db, campaign_id, outcome_label, conclusion) — add workspace_root=None param
+campaigns.py:306   — emit_campaign_report()
+
+postmortem.py:38   — parse_postmortem + ValidationResult: proven scaffold/validate model
+postmortem.py:160  — file-not-found handling pattern: hard ERROR when file missing
+
+linter.py:12       — IssueSeverity enum (ERROR/WARNING/INFO)
+linter.py:18       — LintIssue dataclass
+linter.py:85       — lint_project() entry point
+linter.py:797-879  — check_baseline_ref_exists() — Tier-2 pattern with DuckDB query
+
+sprint_audit.py:11      — direct duckdb import
+sprint_audit.py:114     — SignalResult shape
+sprint_audit.py:301-309 — list_registered_projects() iteration per project
+sprint_audit.py:505     — campaign query pattern (mode filter) — Signal 12 mirrors this
+
+mcp.py:72   — @traced_tool decorator; mandatory keys: ok, error_code, error, resolution_hint
+mcp.py:937  — postmortem_scaffold: model for claim_scaffold MCP tool
+mcp.py:996  — postmortem_validate: model for claim_validate MCP tool
+
+SPEC: .praxia/docs/specs/260616_bathos-claim-tier-rigor-open-design-call.md
+  AC-01 scaffold, AC-02 register, AC-03 validate, AC-07 disconfirming-regime lint,
+  AC-08 Union Gate, AC-09 bypass, AC-10 Signal 12, AC-11 SHA integrity,
+  AC-14 label output, AC-16 schema v8 migration
+"""
+max_fix_retries = 1
+worktree_shadow_mode = false
+
+[[tracks]]
+id = "a"
+is_research = false
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "2010"
+phase_name = "Track A — claim-tier rigor Phase 1 (#2010)"
+fixer_prompt = """
+You are implementing the claim-tier rigor Phase 1 for bathos. The spec is at:
+  .praxia/docs/specs/260616_bathos-claim-tier-rigor-open-design-call.md
+
+Read the FULL spec — especially AC-01 through AC-16 Phase 1 scope, the MVP Scope section, and the
+[union_gate.clauses] TOML schema in AC-08 — before writing any code. Also read postmortem.py
+in full before implementing claim.py (it is the exact model to follow).
+
+Implement in this order (each step depends on the previous):
+
+## Step 1 — Schema v8 migration (AC-16, three-touchpoint pattern)
+
+**schema.py**
+- Add to COOL_SCHEMA (PyArrow): `pa.field("claim_discriminates", pa.string(), nullable=True)` and
+  `pa.field("claim_isolates", pa.string(), nullable=True)` — JSON array strings e.g. '["H_info_sym"]'
+- Add to Run dataclass: `claim_discriminates: Optional[str] = None` and `claim_isolates: Optional[str] = None`
+- Bump `CURRENT_SCHEMA_VERSION` from "7" to "8"
+- Also add to WARM_SCHEMA if it exists separately
+
+**migrate.py** — _default_array()
+- Add `claim_discriminates` and `claim_isolates` to the stage_name special-case branch so they
+  default to None (not ""), because these are JSON-array string fields; empty-string breaks json_contains()
+
+**compact.py** — three sub-tasks:
+1. Add `_migrate_v7(run_dict: dict) -> dict` (same shape as _migrate_v6): stamps schema_version="8"
+   and does `run_dict.setdefault("claim_discriminates", None)` and `run_dict.setdefault("claim_isolates", None)`.
+   Register as `MIGRATIONS["7"] = _migrate_v7`.
+2. In the campaigns DDL section (lines 262-278): add `claim_path TEXT`, `claim_sha256 TEXT`,
+   `claim_mode TEXT` columns to the CREATE TABLE statement.
+3. In the ALTER TABLE warm-tier loops (lines 462-484): add ALTER TABLE lines for all five
+   new columns: campaigns.claim_path, campaigns.claim_sha256, campaigns.claim_mode,
+   runs.claim_discriminates, runs.claim_isolates — all `ADD COLUMN IF NOT EXISTS`.
+
+## Step 2 — New claim.py module (AC-01, AC-02, AC-03, AC-07)
+
+Create `src/bathos/claim.py` following the exact structure of `postmortem.py`.
+
+**ClaimFile dataclass** (mirrors PostmortemFile):
+```python
+@dataclass
+class ClaimFile:
+    headline: str
+    kill_condition: str
+    regime: Optional[str]
+    hypotheses: list[dict]  # each: {id, label, predicted_signature?}
+    assumptions: list[dict]
+    confounds: list[dict]
+    discriminability: list[dict]  # [[claim.discriminability]] entries
+    union_gate_clauses: list[dict]  # each: {id, description, hypothesis_ids: list[str]}
+    path: Path
+    sha256: str
+```
+
+**parse_claim(path: Path) -> ClaimFile** — reads TOML, extracts all sections,
+computes SHA256 of file content.
+
+**validate_claim(claim: ClaimFile, db=None) -> ValidationResult** (mirrors validate_postmortem):
+- Missing headline → ERROR
+- Blank kill_condition → ERROR
+- Fewer than 2 [[hypotheses]] entries → ERROR
+- No hypothesis with id containing "null" or "misspec" → WARNING
+- Any [[hypotheses]] or [[confounds]] entry with id matching r'^[A-Z][0-9]+$' and
+  no label field or blank label → WARNING (use label in warning message text, AC-14)
+- Any [[claim.discriminability]] entry missing predicted_outcome → ERROR
+- If db provided (AC-07 regime check):
+  - Read claim.regime; if set, query warm catalog for union of result_schema grid values
+    across runs in campaigns linked to this claim file path
+  - If union does not cover regime → WARNING "disconfirming regime excluded — claim.regime [X] not covered by any run"
+
+**scaffold_claim(campaign_id: str, db, workspace_root: Path) -> Path**:
+- Look up campaign by id in db (name, mode)
+- Create .bth/claims/ dir if needed
+- Write .bth/claims/<campaign_name>.claim.toml template with all required sections stubbed
+- Print sidecar snippet showing discriminates and isolates fields pre-populated with hypothesis ID placeholders
+- Return the created path
+
+**register_claim(path: Path, campaign_id: str, db, workspace_root: Path, force: bool = False)**:
+- Reject absolute paths: if path.is_absolute() → ERROR "store relative to workspace root"
+- Resolve against workspace_root for existence check
+- SHA256 = hashlib.sha256((workspace_root / path).read_bytes()).hexdigest()
+- If campaigns.claim_sha256 already set and not force → raise error with re-register instruction
+- If force → insert audit event into amendments table (keyed by campaign_id + timestamp)
+- UPDATE campaigns SET claim_path=str(path), claim_sha256=sha256 WHERE id=campaign_id
+
+**run_union_gate(db, campaign_id: str, claim: ClaimFile) -> tuple[str, list[str]]**:
+- For each clause in claim.union_gate_clauses:
+  - For each h_id in clause["hypothesis_ids"]:
+    - Query runs WHERE campaign_id=... AND json_contains(claim_discriminates, '"<h_id>"')
+  - If no single run covers ALL hypothesis_ids → uncovered_clauses.append(clause["id"])
+- Return ("confounded", uncovered) if uncovered else ("covered", [])
+
+**check_sha(path_relative: str, registered_sha: str, workspace_root: Path) -> None**:
+- abs_path = workspace_root / path_relative
+- If not abs_path.exists() → raise FileNotFoundError(f"claim.bth.toml not found at {abs_path}")
+- current_sha = hashlib.sha256(abs_path.read_bytes()).hexdigest()
+- If current_sha != registered_sha → raise ValueError(
+    "claim.bth.toml has been modified since registration — re-register with `bth claim register --force`")
+
+## Step 3 — conclude_campaign() extension (AC-08, AC-09, AC-11)
+
+In campaigns.py, extend conclude_campaign signature:
+  conclude_campaign(db, campaign_id, outcome_label, conclusion, workspace_root=None, force_verdict=False)
+
+After existing logic (before writing the final UPDATE), add:
+
+```python
+from bathos.claim import parse_claim, run_union_gate, check_sha, FileNotFoundError as ClaimNotFound
+from bathos.workspace import resolve_workspace
+
+row = db.execute(
+    "SELECT claim_path, claim_sha256, mode FROM campaigns WHERE id=?", [campaign_id]
+).fetchone()
+if row and row[0]:
+    claim_path_rel, registered_sha, mode = row[0], row[1], row[2]
+    if workspace_root is None:
+        workspace_root = resolve_workspace(Path.cwd()).fs_root
+    abs_path = workspace_root / claim_path_rel
+    if not abs_path.exists():
+        raise RuntimeError(
+            f"claim.bth.toml not found at {abs_path} — file may have been moved or deleted. "
+            "Set BTH_WORKSPACE_ROOT or pass workspace_root to locate it."
+        )
+    check_sha(claim_path_rel, registered_sha, workspace_root)  # raises ValueError on mismatch
+    claim = parse_claim(abs_path)
+    verdict, uncovered = run_union_gate(db, campaign_id, claim)
+    if uncovered:
+        if force_verdict:
+            db.execute("UPDATE campaigns SET claim_mode='bypassed' WHERE id=?", [campaign_id])
+            print(f"WARNING: Union Gate bypassed — unmapped clauses: {uncovered}")
+        elif mode in ("confirmation", "sequential"):
+            outcome_label = "confounded"
+            print(f"Union Gate: verdict downgraded to 'confounded' — unmapped clauses: {uncovered}")
+        else:
+            print(f"WARNING: Union Gate — unmapped clauses: {uncovered} (exploration mode, no downgrade)")
+```
+
+Expose `--force-verdict / --no-force-verdict` flag on the `bth campaign conclude` Typer command in cli.py.
+
+## Step 4 — Signal 12 in sprint_audit.py (AC-10)
+
+Add Signal 12 to the per-project signal collection loop (alongside Signals 9-10).
+Wrap in try/except so it is tolerant of pre-v8 catalogs:
+
+```python
+try:
+    rows = db.execute(
+        "SELECT name, id FROM campaigns "
+        "WHERE mode='confirmation' AND (claim_path IS NULL OR claim_path='') "
+        "AND status NOT IN ('abandoned','open')"
+    ).fetchall()
+    for cname, cid in rows:
+        signals.append(SignalResult(
+            signal_id=12,
+            severity="WARNING",
+            project=project_slug,
+            message=(
+                f"Confirmation campaign '{cname}' ({cid[:8]}) has no registered claim — "
+                "Union Gate will not fire at conclude."
+            ),
+        ))
+except Exception:
+    pass  # claim_path column absent on pre-v8 catalogs
+```
+
+## Step 5 — MCP tools in mcp.py (mirrors postmortem_scaffold / postmortem_validate)
+
+Add two @traced_tool decorated async functions to mcp.py:
+
+```python
+@traced_tool
+async def claim_scaffold(campaign_id: str) -> dict:
+    # resolve db + workspace from context, call claim.scaffold_claim()
+    # return {"ok": True, "path": str(path), "message": "..."}
+
+@traced_tool
+async def claim_validate(path: str) -> dict:
+    # parse_claim(Path(path)), validate_claim(claim)
+    # return {"ok": True, "issues": [{"severity": ..., "message": ...}, ...]}
+```
+
+## Tests to write
+
+Add `tests/test_claim.py` covering:
+1. validate_claim: ERROR for blank kill_condition
+2. validate_claim: ERROR for <2 hypotheses
+3. validate_claim: WARNING for opaque id (matches /^[A-Z][0-9]+$/) with no label
+4. validate_claim: ERROR for discriminability entry missing predicted_outcome
+5. register_claim: rejects absolute paths
+6. register_claim: writes claim_path (relative) and claim_sha256 to campaigns table
+7. check_sha: raises on mismatch
+8. run_union_gate: returns confounded when clause not covered
+9. run_union_gate: returns covered when all clauses have covering runs
+10. conclude_campaign: short-circuits when claim_path IS NULL
+11. conclude_campaign: raises RuntimeError when claim file not found (not confounded)
+12. conclude_campaign: downgrades to confounded on uncovered clause + confirmation mode
+13. conclude_campaign: force_verdict writes claim_mode='bypassed'
+14. signal_12: fires for confirmation campaign with null claim_path
+
+After all changes, confirm:
+  uv run pytest tests/ -x
+passes (all existing 753+ tests plus new ones).
+"""
+reviewer_prompt = """
+You are reviewing the claim-tier rigor Phase 1 implementation for bathos.
+
+Spec: .praxia/docs/specs/260616_bathos-claim-tier-rigor-open-design-call.md
+Read the MVP Scope section and AC-01 through AC-16 Phase 1 ACs.
+
+## Run tests
+
+  uv run pytest tests/ -x --tb=short 2>&1 | tail -40
+
+All existing 753+ tests must pass. New tests in tests/test_claim.py must also pass.
+
+## Verification checklist
+
+VERIFY: `from bathos.schema import CURRENT_SCHEMA_VERSION; assert CURRENT_SCHEMA_VERSION == "8"`
+VERIFY: Run dataclass has `claim_discriminates: Optional[str] = None` and `claim_isolates: Optional[str] = None`
+VERIFY: compact.py MIGRATIONS dict has key "7" with a callable accepting run_dict: dict
+VERIFY: _default_array() in migrate.py returns None (not "") for claim_discriminates and claim_isolates
+VERIFY: src/bathos/claim.py exists with ClaimFile, parse_claim, validate_claim, scaffold_claim, register_claim, run_union_gate, check_sha
+VERIFY: validate_claim() raises/returns ERROR for blank kill_condition
+VERIFY: validate_claim() raises/returns ERROR for <2 hypotheses
+VERIFY: validate_claim() raises/returns WARNING for opaque id (r'^[A-Z][0-9]+$') with no label
+VERIFY: validate_claim() raises/returns ERROR for [[claim.discriminability]] entry missing predicted_outcome
+VERIFY: register_claim() rejects absolute paths with an error
+VERIFY: register_claim() stores claim_path as relative string in campaigns table
+VERIFY: conclude_campaign() accepts workspace_root and force_verdict parameters
+VERIFY: conclude_campaign() does NOT downgrade to confounded when claim_path IS NULL (short-circuit)
+VERIFY: conclude_campaign() raises RuntimeError (not confounded) when claim file not found at resolved path
+VERIFY: conclude_campaign() sets outcome_label="confounded" when clause uncovered + mode=confirmation
+VERIFY: conclude_campaign() sets outcome_label="confounded" when clause uncovered + mode=sequential
+VERIFY: conclude_campaign() issues WARNING (no downgrade) when uncovered + mode=exploration
+VERIFY: conclude_campaign(force_verdict=True) writes claim_mode='bypassed' to campaigns table
+VERIFY: sprint_audit Signal 12 fires for confirmation campaign with null claim_path
+VERIFY: Signal 12 query is wrapped in try/except (tolerant of pre-v8 catalogs without claim_path column)
+VERIFY: mcp.py has claim_scaffold and claim_validate @traced_tool functions
+VERIFY: claim.py does NOT import from campaigns.py (campaigns → claim dependency arrow only)
+
+## Grade
+
+PASS if all VERIFY items are true and uv run pytest exits 0.
+FAIL if any of:
+- Any existing test breaks
+- CURRENT_SCHEMA_VERSION != "8"
+- claim.py missing any required function
+- conclude_campaign() silently downgrades on file-not-found (must be RuntimeError)
+- claim_discriminates/claim_isolates default to "" in _default_array
+- claim.py imports campaigns (circular dependency)
+- Signal 12 query absent or not guarded with try/except
+"""
+return_key = "2010"
+
+[orchestration]
+sequential = []
+concurrent = []

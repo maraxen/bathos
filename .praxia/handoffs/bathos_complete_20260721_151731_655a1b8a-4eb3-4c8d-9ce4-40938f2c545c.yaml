@@ -1,0 +1,17 @@
+---
+workspace: bathos
+session_id: 44ecd517-1210-4e4b-93de-6ffc1686c041
+status: complete
+immediately_relevant: []
+active_dispatches: []
+task_id: 260721_bp2-bp3-bathos-port
+phase: complete
+goal_statement: 'Port asr''s C1 synthetic-invariant gate (BP-2) and C5 negative-claim falsification check (BP-3) into bathos''s native claim tier, per asr backlog #3413/#3414. BP-2 shipped as [confounds.synthetic_recovery] + new bathos.gate module (self-attested ledger, GREEN/STALE/RED/UNKNOWN staleness state machine) wired into bth claim validate/register and bth campaign conclude. BP-3 shipped as a structured campaigns.negative_check field + bth campaign conclude --negative-check, opt-in on claim registration -- deliberately NOT the regex-heuristic port, per the asr design doc''s own stated preference. PR #25 merged to main (squash commit b48a0bd6). asr backlog #3413/#3414 closed. No follow-up required.'
+context_refs: []
+failed_attempts: []
+open_questions: []
+deferred: []
+lessons_refs:
+- .praxia/docs/decisions/260721_bp2-bp3-claim-tier-gate-ports.md
+next_steps: []
+---

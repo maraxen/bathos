@@ -1,0 +1,222 @@
+[sprint]
+sprint_id = "260616_claim-tier-phase2b"
+sprint_num = 1
+name = "260616_claim-tier-phase2b"
+description = "claim-tier Phase 2b: AC-04/05/06 heuristic discriminability lints"
+context = """
+Recon anchors:
+
+src/bathos/claim.py:36-38      — ValidationResult dataclass: ok, errors: list[ValidationError], infos: list[str]
+                                  MISSING: no warnings field — must add warnings: list[str] here
+src/bathos/claim.py:107        — validate_claim(claim: ClaimFile, db=None) -> ValidationResult
+src/bathos/claim.py:87         — claim.discriminability: list[dict] — each dict has hypothesis_a, hypothesis_b, planned_run_label, predicted_outcome
+src/bathos/claim.py:167-177    — existing discriminability loop (AC-03 check) — AC-04/05 hooks go after this
+src/bathos/linter.py:14        — IssueSeverity.WARNING = "warning"
+src/bathos/linter.py:16-27     — LintIssue dataclass: path, directory, issue, severity, detail
+src/bathos/linter.py:503       — check_threshold_basis — model for a standalone advisory lint function
+src/bathos/linter.py:797       — check_baseline_ref_exists — model for a DB-backed lint (takes db_path)
+tests/test_claim.py            — 29 tests; do not break
+
+All three ACs are advisory WARNINGs only — they must NOT set ok=False and must NOT append to errors.
+They go in warnings. This is the primary constraint: false-positive risk is high; these are hints, not blocks.
+"""
+max_fix_retries = 1
+worktree_shadow_mode = false
+
+[[tracks]]
+id = "a"
+is_research = false
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "2032"
+phase_name = "Track A — AC-04/05/06 heuristic discriminability lints"
+fixer_prompt = """
+You are implementing three advisory lint checks from the bathos claim-tier Phase 2b spec.
+Spec file: .praxia/docs/specs/260616_bathos-claim-tier-rigor-open-design-call.md
+
+CONSTRAINT: All three are WARNINGs only. They must NOT set ok=False. They must NOT append to errors.
+HIGH FALSE-POSITIVE RISK — when in doubt, prefer narrower conditions over broad ones.
+
+== STEP 1: Add warnings field to ValidationResult ==
+
+In src/bathos/claim.py, update the ValidationResult dataclass (around line 36):
+
+  @dataclass
+  class ValidationResult:
+      ok: bool
+      errors: list[ValidationError] = field(default_factory=list)
+      warnings: list[str] = field(default_factory=list)
+      infos: list[str] = field(default_factory=list)
+
+Also update the return statement at the bottom of validate_claim() to pass warnings:
+  return ValidationResult(ok=len(errors) == 0, errors=errors, warnings=warnings, infos=infos)
+
+Initialize warnings = [] alongside errors = [] at the top of validate_claim().
+
+== STEP 2: AC-04 — zero-power lint ==
+
+After the existing discriminability loop (AC-03 check, around line 167-177), add:
+
+  # AC-04: zero-power lint — planned_run_label where all hypothesis pairs predict identical outcome
+  from collections import defaultdict
+  outcomes_by_label: dict[str, set[str]] = defaultdict(set)
+  for disc in claim.discriminability:
+      label = disc.get("planned_run_label", "")
+      outcome = disc.get("predicted_outcome", "")
+      if label and outcome:
+          outcomes_by_label[label].add(outcome)
+  for label, outcome_set in outcomes_by_label.items():
+      if len(outcome_set) == 1:  # all pairs predict the same outcome for this run label
+          warnings.append(
+              f"zero discriminative power for run '{label}' — all hypothesis pairs predict identical outcome '{next(iter(outcome_set))}'"
+          )
+
+Only fire if there are >=2 discriminability entries for that label (otherwise a single entry is trivially "all the same").
+Update the loop to track count_by_label too, and only fire if count_by_label[label] >= 2.
+
+== STEP 3: AC-05 — positive-testing-bias lint ==
+
+After AC-04 block, add:
+
+  # AC-05: positive-testing-bias — all rows predict the same outcome (entire matrix is uniform)
+  all_outcomes = {disc.get("predicted_outcome", "") for disc in claim.discriminability if disc.get("predicted_outcome")}
+  if len(claim.discriminability) >= 2 and len(all_outcomes) == 1:
+      warnings.append(
+          f"positive-testing bias detected — all {len(claim.discriminability)} discriminability entries predict the same outcome '{next(iter(all_outcomes))}'; no run in the matrix challenges the primary hypothesis"
+      )
+
+Guard: only fire when len(claim.discriminability) >= 2. A single entry cannot demonstrate bias.
+
+== STEP 4: AC-06 — single-cell-gate lint in linter.py ==
+
+AC-06 requires DB access and a campaign_id, so it lives in linter.py, not validate_claim().
+
+Add a new function in src/bathos/linter.py:
+
+  def check_single_cell_gate(
+      claim_discriminability: list[dict],
+      campaign_id: str,
+      db: "duckdb.DuckDBPyConnection",
+  ) -> list[LintIssue]:
+      \\"\\"\\"AC-06: warn if all confirmatory runs in a campaign share identical metadata values.\\"\\"\\"
+      import json
+      issues = []
+      try:
+          rows = db.execute(
+              "SELECT r.metadata FROM runs r JOIN campaign_runs cr ON r.id = cr.run_id WHERE cr.campaign_id = ? AND r.metadata IS NOT NULL",
+              [campaign_id],
+          ).fetchall()
+      except Exception:
+          return issues  # DB not available or table missing — skip silently
+
+      if len(rows) < 2:
+          return issues  # need >= 2 runs to detect single-cell
+
+      # Parse all metadata blobs
+      metas = []
+      for (meta_str,) in rows:
+          try:
+              metas.append(json.loads(meta_str))
+          except (json.JSONDecodeError, TypeError):
+              pass
+
+      if len(metas) < 2:
+          return issues
+
+      # Find keys present in ALL runs
+      common_keys = set(metas[0].keys())
+      for m in metas[1:]:
+          common_keys &= set(m.keys())
+
+      # Check if all runs have the same value for every common key
+      uniform_keys = [
+          k for k in common_keys
+          if len({str(m.get(k)) for m in metas}) == 1
+      ]
+
+      if uniform_keys and len(uniform_keys) == len(common_keys) and common_keys:
+          issues.append(
+              LintIssue(
+                  path=Path(campaign_id),
+                  directory="campaign",
+                  issue="single-cell-gate smell",
+                  severity=IssueSeverity.WARNING,
+                  detail=f"all {len(metas)} confirmatory runs use identical values for: {sorted(uniform_keys)[:5]}; claim.regime may not be covered",
+              )
+          )
+      return issues
+
+Do NOT call check_single_cell_gate from validate_claim — it stays in linter.py only. The CLI surface (bth lint --campaign) is post-MVP; the function just needs to exist and be testable.
+
+== STEP 5: Tests ==
+
+Add tests (to tests/test_claim.py or new tests/test_claim_lints.py):
+
+1. test_ac04_zero_power_single_label_warns() — 2 entries for same label, same predicted_outcome → warning with "zero discriminative power"
+2. test_ac04_zero_power_no_fire_with_different_outcomes() — 2 entries for same label, different predicted_outcomes → no AC-04 warning
+3. test_ac04_zero_power_no_fire_single_entry_per_label() — only 1 entry per label → no AC-04 warning (guard fires)
+4. test_ac05_positive_bias_warns() — 3 entries all with same predicted_outcome → warning with "positive-testing bias"
+5. test_ac05_positive_bias_no_fire_single_entry() — 1 entry → no AC-05 warning
+6. test_ac05_no_fire_mixed_outcomes() — entries with different outcomes → no AC-05 warning
+7. test_ac06_single_cell_gate_warns() — in-memory DuckDB with 2 runs sharing identical metadata → LintIssue returned
+8. test_ac06_no_fire_different_metadata() — 2 runs with differing values → no issue
+9. test_ac06_no_fire_single_run() — 1 run → no issue
+10. test_warnings_dont_set_ok_false() — AC-04 or AC-05 fires → result.ok is still True, result.warnings non-empty
+
+CRITICAL: test 10 enforces the core constraint. If any test shows ok=False when only a warning fires, that is a bug.
+
+Run: uv run pytest tests/ -x -q
+All 796 existing tests must remain green.
+"""
+reviewer_prompt = """
+You are reviewing bathos claim-tier Phase 2b: AC-04/05/06 heuristic discriminability lints.
+
+Run first: uv run pytest tests/ -x -q 2>&1 | tail -10
+
+VERIFY 1: All tests pass (>=806 passed, 0 failed).
+  Run: uv run pytest tests/ --tb=no -q 2>&1 | tail -3
+
+VERIFY 2: warnings field added to ValidationResult and initialized in validate_claim.
+  Run: grep -n "warnings" src/bathos/claim.py
+  Expect: field definition, initialization (warnings = []), and return statement all present.
+
+VERIFY 3: AC-04 only fires when >=2 entries share the same planned_run_label AND all predict identical outcomes.
+  Check: Read the AC-04 block. Must see a count/len guard preventing single-entry false positives.
+
+VERIFY 4: AC-05 only fires when len(claim.discriminability) >= 2 AND all predicted_outcomes are identical.
+  Check: Read the AC-05 block.
+
+VERIFY 5: Neither AC-04 nor AC-05 appends to errors. Both append to warnings only.
+  Run: grep -A3 "AC-04\\|AC-05" src/bathos/claim.py | grep -c "errors.append"
+  Expect: 0.
+
+VERIFY 6: ok remains True when only warnings fire (no errors).
+  Run: grep -n "ok=len(errors)" src/bathos/claim.py
+  Expect: ok is determined by errors only, not warnings.
+
+VERIFY 7: check_single_cell_gate exists in linter.py and returns list[LintIssue].
+  Run: grep -n "def check_single_cell_gate" src/bathos/linter.py
+  Expect: 1 match.
+
+VERIFY 8: AC-06 never raises — all DB access is inside try/except and returns [] on failure.
+  Check: Read check_single_cell_gate — must have a try/except around the db.execute call.
+
+VERIFY 9: New tests include test_warnings_dont_set_ok_false (the core constraint test).
+  Run: grep -rn "test_warnings_dont_set_ok_false\\|ok.*True.*warn" tests/
+  Expect: >=1 match.
+
+VERIFY 10: All 10 new test functions exist.
+  Run: grep -c "def test_ac0[456]" tests/test_claim*.py
+  Expect: >=9 (excluding the ok=True constraint test which may have a different name).
+
+PASS if all 10 VERIFY items satisfied.
+NEEDS_WORK if any fail — list which and why.
+FAIL if warnings append to errors, ok is set False by warnings, or check_single_cell_gate raises on DB failure.
+"""
+return_key = "2032"
+
+[orchestration]
+sequential = []
+concurrent = []

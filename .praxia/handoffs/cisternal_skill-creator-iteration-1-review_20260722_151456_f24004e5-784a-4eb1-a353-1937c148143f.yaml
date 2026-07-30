@@ -1,0 +1,54 @@
+---
+workspace: cisternal
+session_id: 7ea51043-5b2c-48db-9588-97f6717eecd9
+status: in_progress
+immediately_relevant:
+- file: .praxia/skills/developing-cisternal-tools/SKILL.md
+  lines:
+  - 26
+  - 28
+  reason: The 'When NOT to patch upstream' section that caused the eval-2 regression -- this is what needs revising first
+- file: .praxia/skills/developing-cisternal-tools-workspace/iteration-1/ANALYSIS.md
+  lines:
+  - 1
+  - 30
+  reason: Full root-cause analysis of the iteration-1 regression and the specific fix direction
+- file: .praxia/skills/developing-cisternal-tools/evals/evals.json
+  lines:
+  - 1
+  - 25
+  reason: The 2 eval prompts (bug-report-root-cause, consumer-workaround-temptation) -- reuse verbatim for iteration 2 unless the user's feedback suggests changing them
+- file: .praxia/skills/developing-cisternal-tools-workspace/setup_sandbox.sh
+  lines:
+  - 1
+  - 40
+  reason: Regenerates a fresh, isolated toy_cisternal/toy_consumer sandbox pair for each eval run -- run once per with_skill/without_skill run directory before dispatching iteration-2 agents
+active_dispatches: []
+task_id: 260722_developing-cisternal-tools-skill
+phase: skill-creator iteration 1 review
+goal_statement: 'Build a developing-cisternal-tools skill (via /skill-creator:skill-creator) that codifies this session''s cisternal maintenance loop: root-cause bugs in the shared substrate rather than working around them in a consumer, prove fixes with a fail-then-pass regression test at the transport boundary, and release properly (two commits, verify PyPI landed, close the loop in every dependent project).'
+context_refs: []
+failed_attempts:
+- attempt_id: a1
+  description: aggregate_benchmark.py run with grading.json/timing.json placed directly under with_skill/ and without_skill/ (no run-N/ subdirectory)
+  outcome: Produced an all-zero benchmark.json/md (0% pass rate, 0s, 0 tokens for both configs) with no warning that files weren't found
+  reason_failed: aggregate_benchmark.py's supported layout requires eval-N/{with_skill,without_skill}/run-N/grading.json -- it silently skips configs whose grading.json isn't nested one level deeper under a run-N/ directory
+  do_not_retry: true
+  evidence_ref: Fixed by moving each run's outputs/, grading.json, timing.json, sandbox/ into a run-1/ subdirectory before re-running the aggregator; see iteration-1 directory structure as the template for iteration-2
+open_questions:
+- Has the user reviewed iteration-1/review.html yet, and if so what did they say (paste feedback or read a downloaded feedback.json)?
+deferred:
+- description: Description-trigger optimization (scripts/run_loop.py) for SKILL.md's frontmatter
+  rationale: Skill-creator's own process defers this until after the user is satisfied with functional iteration -- premature before the eval-2 regression is fixed
+  recommended_phase: after iteration 2 (or later) passes review
+- description: Deciding whether to push skill/developing-cisternal-tools and open a PR in maraxen/cisternal, or keep it purely local/project-internal
+  rationale: Not yet asked; the skill isn't finished iterating
+  recommended_phase: after the user signs off on a final iteration
+lessons_refs: []
+next_steps:
+- Check whether the user replied with feedback on review.html, or whether a feedback.json was downloaded to their Downloads folder (static viewer, no live server) -- if not yet, wait rather than proceeding blind
+- 'Revise SKILL.md''s ''When NOT to patch upstream'' section per iteration-1/ANALYSIS.md: make honoring an explicit, unambiguous user instruction to defer/scope a fix a first-class non-negotiable rule (not one soft criterion to weigh against ''fix at the root''), while still requiring the workaround to leave a clear trace'
+- 'Also fold in the sandbox-permission-bypass finding from eval 1''s with-skill run: add guidance to ask before disabling sandbox/permission restrictions in a dev/rehearsal context rather than silently overriding'
+- Rerun both eval scenarios (setup_sandbox.sh regenerates fresh sandboxes; reuse eval_metadata.json assertions) as iteration-2, using iteration-1 as --previous-workspace when regenerating the review viewer
+- Once the user is satisfied, run the description-optimization loop (scripts/run_loop.py) to harden SKILL.md's frontmatter triggering, then decide whether to push the skill/developing-cisternal-tools branch / open a PR in maraxen/cisternal
+---

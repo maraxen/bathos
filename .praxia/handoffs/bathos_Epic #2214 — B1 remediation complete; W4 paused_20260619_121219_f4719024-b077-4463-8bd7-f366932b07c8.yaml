@@ -1,0 +1,80 @@
+---
+workspace: bathos
+session_id: 0a8cb6ab-76db-498a-acb6-55a738d49801
+status: in_progress
+immediately_relevant:
+- file: .praxia/docs/specs/260618_literature-parity-v1-design.md
+  lines:
+  - 160
+  - 198
+  reason: Authoritative design. The 'B1 Resolution (post-W3-audit) — RECONCILED' section near the end is the implemented change set + the 22 ACs; AC-20 is deferred to T8.
+- file: src/bathos/claim.py
+  lines:
+  - 205
+  - 245
+  reason: 'F-1 graded-parity check in validate_claim (beside legacy equivalence-bound). attest_parity ~595-640 reads parity_run_type column; parity_confound_check ~739-833 is F2''s data source. T8 #2222 wraps attest_parity for the CLI/MCP surface.'
+- file: src/bathos/parity.py
+  lines:
+  - 255
+  - 322
+  reason: 'F3 submit-gate check_parity_confounds_for_submit: warm column predicate + cool fallback with fragments_read_ok AC-22 fail-open restructure.'
+- file: src/bathos/schema.py
+  lines:
+  - 10
+  - 282
+  reason: 'schema v9: parity_run_type in COOL_SCHEMA(:72)/WARM_SCHEMA(:123)/Run(:175)/to_arrow(:223)/from_arrow_row(:282); CURRENT_SCHEMA_VERSION=9 (:10).'
+- file: src/bathos/compact.py
+  lines:
+  - 625
+  - 691
+  reason: INSERT now writes all 3 cols (claim_discriminates, claim_isolates, parity_run_type) — the sibling-bug fix. _migrate_v8 ~206-226.
+- file: src/bathos/mcp.py
+  lines:
+  - 1117
+  - 1117
+  reason: 'T8 #2222: insert the claim_attest_parity MCP tool after the existing tool here.'
+- file: src/bathos/sprint_audit.py
+  lines:
+  - 526
+  - 526
+  reason: 'T9 #2223: add Signal 13 after Signal 12 here.'
+active_dispatches: []
+task_id: 260618_lit-parity-b1-remediation
+phase: 'Epic #2214 — B1 remediation complete; W4 paused'
+goal_statement: 'Literature-parity v1 epic (#2214): reusable cross-project baseline-validation workflow. This session fixed the W3 gate-failure; W4 (CLI/MCP surface + sprint-audit signal) remains.'
+context_refs:
+- phase: W1-W3
+  task_id: 260618_lit-parity-waves
+  summary: Skill + X1 grader + parity_validate runner + attest_parity + F2/F3 gates implemented and merged (commits up to 874bec7/68db90f).
+failed_attempts:
+- attempt_id: b1-metadata-json
+  description: 'Design decision B1: store parity_run_type in the run metadata JSON blob, query via json_extract(metadata,''$.parity_run_type'').'
+  outcome: Gates read NULL in production; W3 audit FAIL.
+  reason_failed: 'The cool tier (SLURM-safe atomic write) intentionally excludes the metadata column (warm-only). metadata never survives cool->warm compaction, so the value is always NULL. Fixed by R-A: parity_run_type as a first-class cool column (schema v9). DO NOT revert to metadata-JSON storage for any gate-queryable field — use a cool column (mirror stage_name).'
+  do_not_retry: true
+  evidence_ref: null
+- attempt_id: haiku-interlocking-impl
+  description: Used Haiku fixers for the interlocking multi-step gate remediation (schema v9 + 6 gate-rewrite steps).
+  outcome: Two consecutive Haiku fixers each did ~1/3 of the steps and reported full completion ('all tests passing'); one committed directly to main bypassing its worktree. Green suite was a FALSE green (un-done steps were behavior-preserving).
+  reason_failed: 'Haiku loses track of long interlocking checklists and over-claims completion. Escalating to Sonnet succeeded cleanly. For #2214 impl use Sonnet; always independently verify (grep/diff/tests), never trust the fixer summary. See memory feedback-haiku-multistep-overclaim.'
+  do_not_retry: true
+  evidence_ref: null
+open_questions:
+- '#2276: Are the Phase-2b claim-tier lints (AC-04/05/06) silently operating on NULL claim_discriminates/claim_isolates for runs compacted before the INSERT fix? Needs verification + possible backfill.'
+deferred:
+- description: 'W4 — T8 #2222 (bth campaign attest-parity CLI + MCP) and T9 #2223 (Signal 13 sprint-audit).'
+  rationale: PI chose to hold the epic after the B1 remediation passed audit (wave-by-wave cadence).
+  recommended_phase: W4 (next session, with PI go-ahead)
+- description: AC-20 — SHA-drift detection of parity verdict artifacts via bth check.
+  rationale: Orthogonal new feature, not a B1 fix; currently a visible pytest.skip in test_t6_parity_conclude_gate.py.
+  recommended_phase: T8
+lessons_refs:
+- .praxia/loop_state.toml
+next_steps:
+- W4 is PAUSED by PI choice — do NOT start without explicit PI go-ahead (mode=hitl_semi_autonomous, wave-by-wave).
+- 'When W4 resumes: T8 #2222 — implement F4 CLI `bth campaign attest-parity` in cli.py + MCP `claim_attest_parity` in mcp.py (insert after the existing tool ~mcp.py:1117), both thin wrappers over the existing claim.py attest_parity().'
+- 'When W4 resumes: T9 #2223 — add Signal 13 to sprint_audit.py (after Signal 12 ~line 526).'
+- 'Use SONNET (claude-sonnet-4-6) for #2214 implementation, NOT Haiku (PI directive; see failed_attempts).'
+- 'Follow-up #2276: verify the Phase-2b claim-tier discriminability lints (AC-04/05/06 in linter.py / sprint_audit Signal 12) were not silently operating on the previously-NULL claim_discriminates/claim_isolates columns.'
+- 'After W4: run /epic-audit to close out epic #2214.'
+---

@@ -1,0 +1,59 @@
+---
+workspace: bathos
+session_id: 25061fcd-ea22-4b90-b5bf-4eebbf90d6af
+status: complete
+immediately_relevant:
+- file: src/bathos/workspace.py
+  lines:
+  - 40
+  - 119
+  reason: resolve_workspace() seam + 4-rung ladder + dual-anchor is_worktree; the canonical API any new consumer (sidecar/sync/export) should route through
+- file: .praxia/docs/specs/260611_worktree-workspace-resolution.md
+  lines:
+  - 1
+  - 60
+  reason: Hardened spec (ACs, edge matrix, risk table, TBD-1..6) — source of truth for the deferred items
+- file: .praxia/docs/plans/260611_worktree-workspace-resolution-dag.md
+  lines:
+  - 50
+  - 72
+  reason: Backlog DAG + the 4 out-of-DAG items (D1 concurrency, D2 non-nested identity, D3 schema tagging, D4 monorepo scan_root)
+active_dispatches: []
+task_id: 260611_worktree-workspace-resolution
+phase: Complete + backlog reconciled
+goal_statement: Make bth resolve workspace filesystem root correctly when invoked from a git worktree, while keeping catalog identity (slug) stable across worktrees of one repo.
+context_refs:
+- phase: Design (contemplex)
+  task_id: 260611_worktree-workspace-resolution
+  summary: 'Contemplex session a5491650: frame -> 11-idea divergence -> oracle critic lenses -> winner I4+I11+I10+I1-ladder -> INVEST -> finalize; hardened via spec-challenger/spec-defender'
+failed_attempts:
+- attempt_id: a1
+  description: Update praxia backlog by hand-spawning a fresh praxia-mcp process over JSON-RPC while the MCP server was disconnected
+  outcome: Debug binary connected but returned 'PostgreSQL not connected. Set DATABASE_URL'; harvesting DATABASE_URL from .env was correctly blocked by the auto-mode classifier
+  reason_failed: Praxia backlog is Postgres-backed; a hand-spawned process lacks the DATABASE_URL the real MCP server gets from its registration env. praxia release binary (target/release/praxia-mcp) was MISSING — only target/debug exists — which is why the server disconnected.
+  do_not_retry: true
+  evidence_ref: null
+open_questions: []
+deferred:
+- description: 'D1 / I7-I8: shared bathos.db compaction race under simultaneous multi-worktree compaction (compact.py). Pre-mortem item #3.'
+  rationale: Resolution intentionally did not touch catalog concurrency; per-worktree live roots make the latent same-machine race attractive to hit.
+  recommended_phase: New design session (own spec)
+- description: 'D2 / I5: schema-tagged worktree provenance (v7->v8 columns).'
+  rationale: git_branch/git_hash already identify a worktree; worktree_path is ephemeral and a v8 stamp has low reversibility.
+  recommended_phase: Revisit on concrete query need
+- description: 'D3 / I9: first-class Workspace entity (also fixes TBD-5: identity for worktrees outside the repo tree via --git-common-dir).'
+  rationale: Far beyond current defect; only justified for multi-workspace/multi-agent workflows.
+  recommended_phase: Future major version
+- description: 'T7 / #1684 (still OPEN): CI grep guard for project_config.root usage outside workspace.py.'
+  rationale: Optional drift-prevention; low value until the pattern recurs.
+  recommended_phase: Opportunistic
+- description: 'TBD-6 / D4: monorepo [project] scan_root override (AC-12 widens scan scope by design when recorded root is a subdir of git toplevel).'
+  rationale: No real monorepo bathos user exists yet.
+  recommended_phase: When a monorepo user appears
+lessons_refs:
+- /home/marielle/.claude/projects/-home-marielle-projects-bathos/memory/contemplex-midsession-indexing-workaround.md
+next_steps:
+- 'OPTIONAL: implement backlog #1684 (T7 / RISK-4) — CI grep guard that project_config.root is not used as a filesystem root outside workspace.py'
+- 'NEW design session for deferred D1: shared bathos.db compaction race (ideas I7/I8), now exercise-able via concurrent multi-worktree compaction'
+- 'If desired, resolve spec TBD-1: emit a one-time stderr warning when git toplevel diverges from recorded [project] root (monorepo subdir / symlink, AC-12)'
+---

@@ -1,0 +1,80 @@
+[sprint]
+sprint_id = "260623_claim-labels-lint"
+sprint_num = 1
+name = "claim-tier descriptive labels UX"
+description = "Backlog #2604: human-facing claim output prefers descriptive labels; Tier-1 lint for opaque IDs in .bth/claims/"
+context = """
+Backlog: #2604 (promoted from idea-001, PM triage 2026-06-23 P2)
+
+ALREADY SHIPPED (do not re-implement):
+  src/bathos/claim.py:37       — _OPAQUE_ID_RE = re.compile(r"^[A-Z][0-9]+$")
+  src/bathos/claim.py:147-168  — validate_claim ERROR on opaque id without label (AC-03/AC-14)
+  tests/test_claim.py          — test_ac03_opaque_id_requires_label, test_validate_claim_opaque_id_without_label
+
+GAP (this sprint):
+  - Human-facing messages still print raw IDs (discriminability errors, conclude parity prints)
+  - bth lint does not scan .bth/claims/*.toml
+  - scaffold_claim seeds H_primary/H_null/C_1 opaque IDs
+  - claim_coverage JSON has clause ids only, no display labels
+
+KEY FILES
+  src/bathos/claim.py       — display_label(), format_hypothesis_ref(), validate messages
+  src/bathos/linter.py      — check_claim_opaque_labels()
+  src/bathos/cli.py         — lint() wiring
+  src/bathos/campaigns.py   — conclude prints, emit_claim_coverage_report
+  tests/test_claim.py       — helper + message tests
+  tests/test_linter.py      — Tier-1 claim lint tests
+  agent_assets/skills/using-bathos/SKILL.md
+
+PLAN DOC: .praxia/docs/plans/260623_claim-labels-lint-sprint-composition.md
+"""
+max_fix_retries = 1
+worktree_shadow_mode = false
+
+[[tracks]]
+id = "a"
+is_research = false
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "2604"
+phase_name = "Track A — descriptive labels helper + lint + human-facing wiring"
+fixer_prompt = """
+Implement backlog #2604 per .praxia/docs/plans/260623_claim-labels-lint-sprint-composition.md (S1–S4).
+
+CONSTRAINTS:
+  - Do NOT weaken validate_claim AC-03/AC-14 (errors stay errors)
+  - Lint additions are WARNING only
+  - claim_coverage JSON changes must be additive (clause_labels map)
+
+DELIVERABLES:
+  1. display_label() + format_hypothesis_ref() in claim.py with tests
+  2. Wire discriminability errors + campaigns conclude prints + emit_claim_coverage_report clause_labels
+  3. check_claim_opaque_labels() in linter.py + bth lint wiring + tests
+  4. Update scaffold_claim template IDs to descriptive examples
+  5. SKILL.md subsection under claim-tier
+
+Run: uv run pytest tests/ -x -q
+All tests must pass.
+"""
+reviewer_prompt = """
+Review sprint 260623_claim-labels-lint (#2604).
+
+Run: uv run pytest tests/ --tb=no -q 2>&1 | tail -5
+
+VERIFY:
+  1. display_label / format_hypothesis_ref exist and are tested
+  2. validate_claim opaque-id errors unchanged (still errors, not warnings)
+  3. check_claim_opaque_labels wired into bth lint
+  4. scaffold uses descriptive example IDs
+  5. claim_coverage JSON includes clause_labels when union gate clauses present
+  6. No regression in test_t6_parity_conclude_gate or test_claim
+
+PASS if all VERIFY items satisfied and tests green.
+"""
+return_key = "2604"
+
+[orchestration]
+sequential = []
+concurrent = []

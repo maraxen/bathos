@@ -1,0 +1,288 @@
+[sprint]
+sprint_id = "260616_claim-tier-phase2"
+sprint_num = 1
+name = "260616_claim-tier-phase2"
+description = "claim-tier Phase 2: AC-12 claim-coverage report, AC-13 baseline_parity lint, AC-15 skill update"
+context = """
+Recon anchors (bathos Phase 1 is already on main — schema v8, claim.py, campaigns.py updated):
+
+src/bathos/claim.py:85         — confounds parsed as list[dict] from TOML into ClaimFile.confounds
+src/bathos/claim.py:99         — confounds stored in ClaimFile dataclass
+src/bathos/claim.py:107        — validate_claim(claim: ClaimFile, db=None) -> ValidationResult
+src/bathos/claim.py:363        — run_union_gate(db, campaign_id, claim) -> tuple[str, list[str]]
+src/bathos/campaigns.py:180    — conclude_campaign signature (workspace_root, force_verdict params)
+src/bathos/campaigns.py:212    — SELECT claim_path, claim_sha256, mode FROM campaigns WHERE id=?
+src/bathos/campaigns.py:388    — emit_campaign_report() — sidecar pattern to follow for AC-12
+src/bathos/campaigns.py:470    — sidecar_dir = Path(catalog_dir) / "sidecars" / campaign_id (path pattern)
+tests/test_claim.py            — 19 Phase 1 tests; extend, do not break
+
+Schema: ~/.bth/catalog/bathos.db — campaigns table has claim_path, claim_sha256, claim_mode columns.
+Skill file: /home/marielle/.claude/skills/using-bathos/SKILL.md (AC-15 target).
+"""
+max_fix_retries = 1
+worktree_shadow_mode = false
+
+[[tracks]]
+id = "a"
+is_research = false
+worktree = true
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "2031"
+phase_name = "Track A — AC-12 claim-coverage JSON report + AC-13 baseline_parity lint"
+fixer_prompt = """
+You are implementing two acceptance criteria from the bathos claim-tier Phase 2 spec.
+Spec file: .praxia/docs/specs/260616_bathos-claim-tier-rigor-open-design-call.md
+
+== AC-12: claim-coverage JSON report ==
+
+Add a new function to campaigns.py:
+
+  emit_claim_coverage_report(
+      db,
+      catalog_dir: str | Path,
+      campaign_id: str,
+      verdict: str,
+      uncovered_clauses: list[str],
+      claim: ClaimFile,
+      bypass_reason: str | None = None,
+  ) -> None
+
+Logic:
+- covered_clauses = [c["id"] for c in claim.union_gate_clauses if c["id"] not in uncovered_clauses]
+- total = len(claim.union_gate_clauses)
+- coverage_fraction = len(covered_clauses) / total if total > 0 else 1.0
+- verdict_blocked = (verdict == "confounded" and bypass_reason is None)
+- JSON payload:
+    {
+      "coverage_fraction": coverage_fraction,
+      "covered_clauses": covered_clauses,
+      "uncovered_clauses": uncovered_clauses,
+      "contradicted_clauses": [],
+      "verdict_blocked": verdict_blocked,
+      "bypass_reason": bypass_reason
+    }
+- sidecar_dir = Path(catalog_dir) / "sidecars" / campaign_id
+- sidecar_dir.mkdir(parents=True, exist_ok=True)
+- filename = f"claim_coverage_{campaign_id}.json"
+- atomic write: write to tmp_path = sidecar_dir / (filename + ".tmp"), then tmp_path.rename(sidecar_dir / filename)
+
+Call this from conclude_campaign() (campaigns.py:180) immediately after the union gate block
+(after writing claim_mode='bypassed' if applicable). Pass:
+- catalog_dir = Path.home() / ".bth" / "catalog"  (or get from compact.get_catalog_dir() if available)
+- uncovered from run_union_gate() return value
+- bypass_reason = "force_verdict flag" if force_verdict else None
+
+Only call emit_claim_coverage_report when claim_path_rel is set (same guard as the existing union gate block).
+
+== AC-13: [baseline_parity] sub-block lint in validate_claim ==
+
+In src/bathos/claim.py, extend validate_claim() after existing confound checks to handle reference_parity.
+For each confound in claim.confounds that has a "reference_parity" key:
+
+  ref_par = confound["reference_parity"]
+  parity_run_id = ref_par.get("parity_run_id", "")
+  reference_metric = ref_par.get("reference_metric", "")
+  reference_value = ref_par.get("reference_value")
+  equivalence_bound = ref_par.get("equivalence_bound")
+  confound_label = confound.get("label", confound.get("id", "unknown"))
+
+  Three-state dispatch — CRITICAL: do NOT use broad except Exception wrappers that swallow state 2b:
+
+  State 1 — parity_run_id empty or missing:
+    result.warnings.append(f"baseline admissibility not established for '{confound_label}'")
+
+  State 2 — parity_run_id set AND db is not None:
+    row = db.execute("SELECT metadata FROM runs WHERE id=? OR id LIKE ?",
+                     [parity_run_id, parity_run_id + "%"]).fetchone()
+    if row is None:
+      result.warnings.append(
+        f"parity run '{parity_run_id}' not compacted — run `bth compact` to enable baseline parity check"
+      )
+    else:
+      try:
+        meta = json.loads(row[0] or "{}")
+      except json.JSONDecodeError as e:
+        result.errors.append(f"failed to parse run metadata for parity check: {e}")
+        continue
+      # State 2b — metric missing: hard ERROR, NOT inside broad except
+      if reference_metric not in meta:
+        result.errors.append(
+          f"parity_metric key '{reference_metric}' not found in baseline run metadata — check field name"
+        )
+      else:
+        result_val = float(meta[reference_metric])
+        if abs(result_val - reference_value) < equivalence_bound:
+          result.infos.append(
+            f"baseline parity PASS for '{confound_label}' (|{result_val:.4f} - {reference_value}| < {equivalence_bound})"
+          )
+        else:
+          result.warnings.append(
+            f"parity run '{parity_run_id}' does not satisfy equivalence bound for '{confound_label}'"
+          )
+
+  State 3 — parity_run_id set, db is None:
+    result.infos.append(f"skipping baseline parity check for '{confound_label}' — no catalog connection")
+
+Check whether ValidationResult already has an infos list; add it if not.
+
+== Tests ==
+
+Add to tests/test_claim.py (or new tests/test_claim_phase2.py):
+1. test_ac12_coverage_report_emitted() — call emit_claim_coverage_report, verify JSON written at correct path
+2. test_ac12_coverage_fraction() — 2 clauses, 1 uncovered → coverage_fraction == 0.5
+3. test_ac12_no_clauses_fraction_one() — no union_gate clauses → coverage_fraction == 1.0
+4. test_ac12_bypass_reason_in_report() — bypass_reason="force_verdict flag" → appears in JSON
+5. test_ac13_parity_run_id_empty_warning() — confound with empty parity_run_id → WARNING in result
+6. test_ac13_metric_missing_is_error() — run in in-memory DB, metadata without the key → ERROR (not WARNING)
+7. test_ac13_parity_run_not_compacted() — run not in DB → WARNING contains "bth compact"
+8. test_ac13_parity_pass() — |result - ref| < bound → infos contains "PASS"
+9. test_ac13_parity_fail() — |result - ref| >= bound → WARNING
+
+Run: uv run pytest tests/ -x -q
+All 786 existing tests must remain green.
+"""
+reviewer_prompt = """
+You are reviewing a bathos Phase 2 implementation: AC-12 (claim-coverage report) and AC-13 (baseline_parity lint).
+
+Run first: uv run pytest tests/ -x -q 2>&1 | tail -20
+
+VERIFY 1: All tests pass (≥795 passed, 0 failed).
+  Run: uv run pytest tests/ -q 2>&1 | grep -E "passed|failed"
+
+VERIFY 2: emit_claim_coverage_report function exists in campaigns.py and is called from conclude_campaign.
+  Run: grep -n "emit_claim_coverage_report" src/bathos/campaigns.py
+  Expect: ≥2 matches (definition + call site).
+
+VERIFY 3: Coverage JSON is written with atomic rename (tmp + rename pattern).
+  Check: Read emit_claim_coverage_report — must see .tmp write then .rename().
+
+VERIFY 4: coverage_fraction == 1.0 when union_gate_clauses is empty (no clauses case).
+  Check: Read the emit_claim_coverage_report implementation for the total==0 guard.
+
+VERIFY 5: AC-13 three-state dispatch is explicit — metric-missing check is NOT inside a broad except Exception block.
+  Run: grep -n "reference_parity\\|parity_run_id\\|parity_metric\\|not in meta" src/bathos/claim.py
+  Expect: metric-missing check is an explicit "if reference_metric not in meta" that appends to result.errors.
+
+VERIFY 6: State 2 (parity run not in warm DB) appends WARNING containing "bth compact".
+  Check: Read the relevant branch in validate_claim.
+
+VERIFY 7: New tests cover all 9 test cases (test_ac12_* and test_ac13_*).
+  Run: grep -n "def test_ac12\\|def test_ac13" tests/test_claim*.py
+  Expect: ≥9 matches.
+
+VERIFY 8: conclude_campaign still writes outcome_label and conclusion to the DB (no regression).
+  Run: grep -n "UPDATE campaigns" src/bathos/campaigns.py
+  Expect: existing UPDATE statement still present.
+
+PASS if all 8 VERIFY items satisfied.
+NEEDS_WORK if any fail — list which and why.
+FAIL if metric-missing case is swallowed by broad except, or if coverage JSON is not emitted.
+"""
+return_key = "2031"
+
+[[tracks]]
+id = "b"
+is_research = false
+worktree = true
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "2033"
+phase_name = "Track B — AC-15 /using-bathos skill probe vocabulary section"
+fixer_prompt = """
+You are adding a 'Signal discrimination and probe design' section to the bathos /using-bathos skill.
+
+Target file: /home/marielle/.claude/skills/using-bathos/SKILL.md
+
+Read the file first. Append the following section at the END of the file (before any trailing newline).
+Do NOT modify any existing content.
+
+---
+
+## Signal discrimination and probe design
+
+Before submitting a confirmatory campaign, design runs that actively discriminate between competing
+hypotheses. Each probe type targets a different failure mode.
+
+### Probe types
+
+**Scaled-divergence probe**
+Purpose: Confirm the effect scales with the signal — rules out ceiling/floor effects masking the null.
+Design: Run the same experiment at 3+ signal levels (e.g., K=2, K=4, K=8 for an information-content claim).
+Expected signature: monotonic improvement tracking the signal; flat response falsifies the claim.
+Discriminates: Genuine causal effect vs. threshold artifact or capacity bottleneck.
+Sidecar field: `claim_discriminates = ["H_main_effect", "H_scaling"]`
+
+**Planted-mode probe**
+Purpose: Verify the model actually uses the planted information — rules out spurious correlation.
+Design: Run with the planted signal deliberately corrupted or ablated; model must fail.
+Expected signature: performance degrades to chance on the ablated version.
+Discriminates: Information-use vs. pattern matching on surface cues unrelated to the planted signal.
+Sidecar field: `claim_discriminates = ["H_information_use", "H_null"]`
+
+**Null-injection probe**
+Purpose: Confirm the null hypothesis is actually falsifiable by the eval.
+Design: Submit a known-bad model or a random-output baseline through the full eval pipeline.
+Expected signature: null model scores at chance; if it scores above chance, the eval is miscalibrated.
+Discriminates: Eval sensitivity vs. leakage from training data or shared artifacts.
+Sidecar field: `claim_discriminates = ["H_null", "H_eval_validity"]`
+
+**Information-ablation probe**
+Purpose: Isolate which specific information channel drives the result.
+Design: Ablate one information source at a time (sequence identity, structural context, coevolution signal).
+Expected signature: performance drops precisely when the claimed channel is removed; other ablations leave performance intact.
+Discriminates: Channel-specific contribution vs. redundancy or compensation across channels.
+Sidecar field: `claim_isolates = ["V_sequence_identity"]`
+
+### Connecting probes to the Union Gate
+
+Each probe maps to one or more `[[union_gate.clauses]]` in `claim.bth.toml`.
+A clause is covered when at least one run has all of its `hypothesis_ids` in `claim_discriminates`.
+
+Typical pattern: one scaled-divergence probe covers the main-effect clause; one null-injection probe covers the eval-validity clause; one information-ablation probe covers each isolation clause.
+
+Signal 12 (`bth sprint-audit`): fires when a confirmation campaign has no `claim_path` registered — the Union Gate will not run at conclude, and the probe design above will have no enforcement.
+
+---
+
+After editing, verify: grep -c "Signal discrimination" /home/marielle/.claude/skills/using-bathos/SKILL.md
+Expect: 1
+"""
+reviewer_prompt = """
+You are reviewing the AC-15 /using-bathos skill update. No code changes — docs only.
+
+VERIFY 1: Section header present.
+  Run: grep -n "Signal discrimination and probe design" /home/marielle/.claude/skills/using-bathos/SKILL.md
+  Expect: 1 match.
+
+VERIFY 2: All four probe types present.
+  Run: grep -c "Scaled-divergence probe\\|Planted-mode probe\\|Null-injection probe\\|Information-ablation probe" /home/marielle/.claude/skills/using-bathos/SKILL.md
+  Expect: 4.
+
+VERIFY 3: Each probe type has Expected signature and Discriminates fields.
+  Run: grep -c "Expected signature:\\|Discriminates:" /home/marielle/.claude/skills/using-bathos/SKILL.md
+  Expect: ≥8.
+
+VERIFY 4: Union Gate connection paragraph present.
+  Run: grep -n "Union Gate" /home/marielle/.claude/skills/using-bathos/SKILL.md
+  Expect: ≥1 match in the newly added section.
+
+VERIFY 5: Signal 12 cross-reference present.
+  Run: grep -n "Signal 12" /home/marielle/.claude/skills/using-bathos/SKILL.md
+  Expect: ≥1 match.
+
+VERIFY 6: No existing content removed (line count strictly increased).
+  Run: wc -l /home/marielle/.claude/skills/using-bathos/SKILL.md
+  Expect: line count > original (section only added, never subtracted).
+
+PASS if all 6 VERIFY items satisfied.
+NEEDS_WORK if any fail — list which and why.
+FAIL if any existing skill content was modified or removed.
+"""
+return_key = "2033"
+
+[orchestration]
+sequential = []
+concurrent = ["a", "b"]

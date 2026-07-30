@@ -1,0 +1,65 @@
+---
+workspace: bathos
+session_id: fcccf033-eaba-4542-9121-b6ed666a279b
+status: in_progress
+immediately_relevant:
+- file: src/bathos/claim.py
+  lines:
+  - 426
+  - 438
+  reason: 'AC-23 positive-control check PR #31 introduced with the unclosed-paren bug (now fixed at f4d1ac8) — if touching this function again, note it''s fragile/newly-added'
+- file: src/bathos/sync.py
+  lines:
+  - 1
+  - 16
+  reason: logger now defined here (ac07c97) — was previously undefined, would NameError on real corrupt-Parquet-fragment handling
+- file: tests/test_claim.py
+  lines:
+  - 1070
+  - 1093
+  reason: _claim_with_synth fixture now declares kill_condition_satisfiable_by_null=false (9a60e7e) to satisfy AC-23
+active_dispatches: []
+task_id: 260729_bathos_pr_triage
+phase: PR triage & main hotfix
+goal_statement: 'Triage bathos''s 3 open GitHub PRs (#9, #29, #30): review full diffs, scope rebases against origin/main, close/merge/rebase as appropriate. Expanded mid-session into fixing CI-blocking bugs discovered on main (PR #31''s merge broke main outright).'
+context_refs: []
+failed_attempts:
+- attempt_id: a1
+  description: Ran `git fetch`/`git push` to github.com directly inside the default sandbox
+  outcome: Failed with 'Failed to connect to localhost port 3128' (a local proxy)
+  reason_failed: Sandbox network restriction, not a real connectivity issue — gh CLI calls worked fine via a different path, but raw git network I/O needs the sandbox disabled
+  do_not_retry: true
+  evidence_ref: null
+- attempt_id: a2
+  description: Ran `git checkout -b <name> <target>` inside the default sandbox to create a branch for rebasing
+  outcome: 'Failed with ''could not lock config file .git/config: File exists'' after partially applying the checkout (working tree/index updated but branch ref/HEAD not switched)'
+  reason_failed: .git/config.lock in this environment is a sandboxed device-file stand-in (character device, not a real stale lock) that blocks writes to .git/config — any git operation needing to write config (e.g. upstream-tracking setup after checkout -b) fails inside the sandbox. Left the tree in a half-applied state requiring `git reset --hard` to recover.
+  do_not_retry: true
+  evidence_ref: null
+- attempt_id: a3
+  description: After a2's partial failure, immediately re-ran `git checkout -b pr30-rebase-preview ...` and then `git rebase origin/main` without checking which branch was actually active
+  outcome: 'checkout -b failed again with ''branch already exists'' (from a2''s partial creation), silently left HEAD on the worktree''s original branch, and the subsequent rebase operated on the WRONG branch — surfaced PR #29''s conflicts instead of PR #30''s'
+  reason_failed: Didn't verify `git branch --show-current` after a failed checkout before proceeding to rebase
+  do_not_retry: true
+  evidence_ref: null
+open_questions:
+- 'Should PR #30''s rebased branch be force-pushed to update the open PR, or left as a local-only preview?'
+- 'Is main''s CI ''Lint with ruff'' step actually a merge-blocking gate, or has it been silently red for a while without blocking merges (PR #31 merged despite the same failure)? Worth confirming before assuming debt #1077 is urgent vs. just overdue.'
+deferred:
+- description: 'Apply ruff --unsafe-fixes tier (39 more errors: F401/F811/F841/SIM117)'
+  rationale: Not verified safe by ruff itself; wanted a deliberate look rather than blanket-apply this session
+  recommended_phase: 'tracked in debt #1077'
+- description: Triage ~110 ARG001/ARG002 unused-argument errors
+  rationale: Needs per-call-site judgment (protocol conformance vs. genuinely dead params), not mechanical
+  recommended_phase: 'tracked in debt #1077'
+- description: 'Rebase/rework PR #9'
+  rationale: Mechanically clean rebase but author's own PR body flags an incomplete intent/input_pins design gap needing a decision first
+  recommended_phase: 'tracked in debt #1075'
+lessons_refs: []
+next_steps:
+- 'Decide whether to push/force-push PR #30''s rebased branch (currently only local in this worktree, tip on top of ac07c97+73bd7f9) — or just note the shrunk diff and let the PR author rebase it themselves via GitHub'
+- 'Review debt #1077 and decide on the --unsafe-fixes tier (39 more mechanical fixes: F401/F811/F841/SIM117) — spot-check a sample diff before blanket-applying'
+- 'Triage debt #1077''s ARG001/ARG002 backlog (~110 of the ~170 remaining ruff errors) in batches by module — verify with `ruff check . --statistics` that CI''s Lint step is actually green before assuming pytest runs in CI again'
+- 'Pick up debt #1075 (PR #9 rebase) — mechanically clean per merge-tree, but the PR''s own body flags an incomplete design (intent/input_pins placeholders) that needs a decision, not just a fast-forward'
+- This worktree (.claude/worktrees/wt-20260729-104810) still exists with 3 stray branches (pr30-rebase-preview, fix-main-claim-syntax, fix-main-ac23-test-fixture, fix-main-ruff-safe-fix) layered on each other — clean up or consolidate once the above decisions land
+---
