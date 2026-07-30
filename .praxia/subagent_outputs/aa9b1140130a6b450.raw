@@ -1,0 +1,347 @@
+I don't have file-writing tools in this session. The complete deliverable content is produced above as the specification output. Here is the structured summary for the parent orchestrator:
+
+---
+
+# Specification: Sprint-Audit Threshold ADR + schema_overflow_rate Fix
+
+## Summary
+
+All research is complete. The schema_overflow_rate ambiguity is resolved. Below are the exact, application-ready contents for all four deliverables.
+
+---
+
+## schema_overflow_rate Resolution
+
+**Verdict: the current code is a bug.** `metadata` in `Run` is the script's primary output channel — it holds whatever the script writes to `BTH_RESULTS_PATH` / `<stem>.bth-results.json`. The `[result_schema]` sidecar section declares which keys are *expected*. The correct definition of "schema overflow" is: metadata keys that are NOT declared in `result_schema`. The current `if metadata:` check counts any result-emitting experiment as overflow, which makes the signal permanently near-100% for all correctly-behaved experiments.
+
+The fix requires adding `_load_sidecar_schema_keys(sidecar_path: str) -> set[str]` and replacing the overflow check with an undeclared-key cross-reference. Existing tests in `TestSchemaOverflowRate` all use empty metadata and will remain green.
+
+---
+
+## Deliverable 1: ADR file
+
+**Write to:** `/home/marielle/projects/bathos/.praxia/docs/decisions/260601_sprint-audit-threshold-rationale.md`
+
+```markdown
+# ADR: Sprint-Audit Signal Threshold Rationale
+
+**Date:** 2026-06-01
+**Status:** Accepted
+**task_id:** 260601_v061_S2A
+**Sprint item:** S2-A — sprint-audit threshold documentation + schema_overflow_rate resolution
+
+---
+
+## Context
+
+`bth sprint-audit` computes 7 rigor signals across a project's recent run history and emits `[WARN]` anomalies when signals cross threshold values. These thresholds were introduced in v0.6 as **calibration targets** (spec Item 5, `260526_agentic-science-v06-evolution-spec.md`) — meaning they are starting points derived from empirical studies, not validated project-specific gates. This ADR records the domain rationale for each threshold, the literature source it derives from, and the calibration status.
+
+Additionally, the `schema_overflow_rate` signal has a semantic ambiguity in its implementation (`sprint_audit.py:233–235`) that this ADR resolves.
+
+### What the signals protect against
+
+The synthesis (`260526_agentic-science-nlm-synthesis.md §1.5`) identifies the failure modes each signal is designed to detect:
+
+- **Diversity compression / Hypothesis Hivemind** — an agent drives all outcomes to the same label, hiding genuine uncertainty.
+- **Constraint drop / objective drift** — sidecar bypass removes the pre-registration anchor that distinguishes a genuine finding from a post-hoc selection.
+- **Overexcitement / premature conclusions** — outcome branches the researcher declared but never observed suggest the experiment hasn't tested the full hypothesis space.
+- **Metric substitution / outcome switching** — script emits results outside the declared schema, allowing outcome switching after the fact.
+- **Post-hoc experiment culling** — worst outcomes concentrated in the early portion of a time-ordered sequence are a signature of retroactive experiment selection.
+
+---
+
+## Decision: `schema_overflow_rate` semantics
+
+### The ambiguity
+
+`sprint_audit.py:233–235` currently reads:
+
+```python
+metadata = json.loads(run.get("metadata", "{}") or "{}")
+# If metadata has any keys at all, consider it overflow
+if metadata:
+    overflow_count += 1
+```
+
+This counts **any run with non-empty metadata as overflow**. The question is whether this is the correct definition.
+
+### Resolution: the current behavior is a bug
+
+**`metadata` is the script's primary output channel.** `runner.py:_read_result_emission()` reads the script's result JSON from `BTH_RESULTS_PATH` (or `<stem>.bth-results.json`) and stores it in `Run.metadata`. The `[result_schema]` section of the sidecar declares which keys the script is *expected* to emit.
+
+Therefore:
+- A run where `metadata = {"temp_std": 3.2}` and the sidecar declares `temp_std = "float"` → **no overflow** (declared key, expected output).
+- A run where `metadata = {"temp_std": 3.2, "undeclared_debug": 42}` and the sidecar does not declare `undeclared_debug` → **overflow** (undeclared key, possible metric substitution).
+- A run where `metadata = {}` (script emitted nothing) → **no overflow** (trivially).
+- A run with no `sidecar_path` (`sidecar_mode = "bypassed"`) → **skip** (no schema to compare against; these runs are already tracked by `bypass_explicit` / `bypass_in_agent_mode`).
+
+The current behavior flags **every well-behaved experiment** that emits declared results as overflow, making the signal permanently near-100% for any project that uses sidecars correctly. This defeats the signal's purpose.
+
+### Required fix
+
+Add `_load_sidecar_schema_keys(sidecar_path: str) -> set[str]` in `sprint_audit.py` adjacent to `_load_sidecar_outcomes`. In the Signal 6 computation block, replace the `if metadata:` check with:
+
+```python
+sidecar_path_run = run.get("sidecar_path", "")
+if not sidecar_path_run:
+    continue  # No sidecar to compare against; skip
+declared_keys = _load_sidecar_schema_keys(sidecar_path_run)
+undeclared_keys = set(meta.keys()) - declared_keys
+if undeclared_keys:
+    overflow_count += 1
+```
+
+Also change the denominator from `total_all` to `runs_with_sidecar` (runs where a sidecar is present), because the signal is only meaningful for the sidecar-using population.
+
+### Why existing tests still pass
+
+All existing `TestSchemaOverflowRate` tests use `metadata="{}"` or default `metadata=None` (becomes `{}`). Empty metadata has no keys; `set({}) - declared_keys = empty set`; no overflow counted. Both tests remain green.
+
+---
+
+## Signal threshold table
+
+| Signal | Threshold | Direction | Formula | Failure mode | Literature source | Calibration status |
+|--------|-----------|-----------|---------|--------------|-------------------|-------------------|
+| `error_rate` | 0.10 | `> 0.10` flags | `count(outcome="error") / total` | Systematic script failures obscuring research signal | Internal (spec Item 5; synthesis §2.2) | **Uncalibrated.** Domain reasoning: >10% indicates infrastructure or environment problems, not hypothesis failures. No empirical study directly supports this level. |
+| `bypass_explicit` | 0.30 | `> 0.30` flags | `sidecar_mode="bypassed" AND no agent_mode / total` | Constraint drop / objective drift | arXiv 2509.08713 constraint violation rates (1.3%–71.4% across 12 LLMs) | **Loosely calibrated.** 30% is a midpoint heuristic from the LLM constraint-violation distribution, not derived from bypass-rate studies. |
+| `bypass_in_agent_mode` | 0.05 | `> 0.05` flags | `bypassed AND agent_mode / agent_mode_total` | Unexpected agentic bypass — stronger integrity signal than human bypass | Internal (ADR 260526_bypass-rate-split, spec D4) | **Uncalibrated.** Deliberately 6× tighter than `bypass_explicit`. Rationale: agents have zero incremental cost to include a sidecar; any agent-mode bypass is harder to justify than a human deliberate choice. |
+| `outcome_entropy` | 0.5 nats | `< 0.5` flags | Shannon entropy H = -Σ p_i·ln(p_i) of outcome label distribution | Diversity compression / Hypothesis Hivemind | arXiv 2501.10421 hivemind experiment | **Loosely calibrated.** 0.5 nats < ln(2)≈0.693 (balanced 2-outcome). Flags distributions more compressed than a 2-class balanced split. |
+| `unfired_branches` | 0.40 | `> 0.40` flags | `(declared-but-never-fired outcomes) / total declared outcomes` | Overexcitement / premature conclusions | arXiv 2509.08713 revision-agent unfired branches | **Loosely calibrated.** From arXiv 2509.08713 observation that >40% of revision-agent decision branches were never triggered. |
+| `schema_overflow_rate` | 0.20 | `> 0.20` flags | `runs with undeclared metadata keys / runs with sidecar` (after bug fix) | Metric substitution / outcome switching | arXiv 2510.21652 AstaBench metric misuse analysis | **Loosely calibrated** (and meaningless before the bug fix documented above). AstaBench §5 shows ~20% of manipulated-condition runs used out-of-schema metrics. |
+| `post_hoc_bias_flag` | worst-label count in first third > 10% of total | Boolean `True` flags | worst-outcome labels in `runs[:len//3]` > 0.10·total | Post-hoc experiment culling / test-set leakage | arXiv 2510.21652 AstaBench §4: χ²(4,200)=61.99, p<10⁻¹⁰, Cramér's V=0.39 | **Best-calibrated.** The 10% figure comes directly from the AstaBench manipulated-vs-control comparison. Note spec footnote m6: "the χ² metric is illustrative." |
+
+### Calibration debt summary
+
+All 7 thresholds are calibration targets. Three signals have meaningful empirical grounding:
+- `outcome_entropy`, `unfired_branches` — arXiv 2509.08713 direct observations
+- `post_hoc_bias_flag` — AstaBench χ² measurement
+
+Four signals are domain-reasoned or loosely analogized from literature:
+- `error_rate`, `bypass_in_agent_mode` — internal reasoning
+- `bypass_explicit` — LLM constraint-violation midpoint analogy
+- `schema_overflow_rate` — AstaBench metric-misuse observation (meaningful only after bug fix)
+
+**v0.6 policy:** all signals emit `[WARN]` only. "Calibrate first, gate later."
+
+---
+
+## Rationale comments for sprint_audit.py
+
+Inline comments to add at each threshold check. Comments appear on the line immediately preceding the `if signals[...]` check.
+
+```python
+# All thresholds are CALIBRATION TARGETS (v0.6), not hard gates.
+# See ADR 260601_sprint-audit-threshold-rationale.md for domain rationale per signal.
+# error_rate > 0.10: >10% error outcomes indicates infrastructure/env problems;
+#   uncalibrated — domain reasoning, no empirical study (spec Item 5)
+if signals["error_rate"] > 0.10:
+
+# bypass_explicit > 0.30: arXiv 2509.08713 constraint violation rates (1.3–71.4%);
+#   0.30 is midpoint heuristic, not derived from bypass-rate empirical data
+if signals["bypass_explicit"] > 0.30:
+
+# bypass_in_agent_mode > 0.05: tighter than bypass_explicit; agents have zero
+#   incremental cost to include a sidecar, so agent-mode bypass is harder to justify
+#   (ADR 260526_bypass-rate-split, spec D4)
+if signals["bypass_in_agent_mode"] > 0.05:
+
+# outcome_entropy < 0.5 nats: arXiv 2501.10421 hivemind experiment;
+#   0.5 nats < ln(2)=0.693 nats (balanced 2-outcome); flags label compression
+if signals["outcome_entropy"] < 0.5:
+
+# unfired_branches > 0.40: arXiv 2509.08713 revision-agent unfired branches;
+#   >40% unfired suggests hypothesis space not fully tested
+if signals["unfired_branches"] > 0.40:
+
+# schema_overflow_rate > 0.20: arXiv 2510.21652 AstaBench metric misuse;
+#   counts runs where metadata has keys NOT in result_schema (see ADR 260601 bug fix)
+if signals["schema_overflow_rate"] > 0.20:
+
+# post_hoc_bias_flag: arXiv 2510.21652 AstaBench chi2(4,200)=61.99, p<1e-10;
+#   worst-label count in first third > 10% of total flags post-hoc experiment culling
+if signals["post_hoc_bias_flag"]:
+```
+
+---
+
+## Consequences
+
+**Positive:**
+- Every threshold has a traceable literature source or explicit "uncalibrated reasoning" label.
+- The `schema_overflow_rate` bug fix makes the signal meaningful: it drops to near-zero for well-behaved projects and fires only when scripts emit undeclared keys.
+- Inline comments link threshold decisions to this ADR, making calibration debt visible at the code level.
+
+**Negative:**
+- `schema_overflow_rate` will drop dramatically for existing projects (from near-100% to near-0%) after the fix. This is the correct behavior — the old value was wrong.
+- The existing `TestSchemaOverflowRate` tests cover only the empty-metadata case. Phase B boundary tests must add "metadata with declared keys → 0.0" and "metadata with undeclared keys → nonzero" coverage.
+- Calibration debt is documented but not resolved. Project-specific calibration requires real run-history analysis.
+
+---
+
+## References
+
+- `260526_agentic-science-nlm-synthesis.md` §1.5 (signal calibration table with literature sources)
+- `260526_agentic-science-v06-evolution-spec.md` §4 Item 5 (7-signal extension)
+- Spec §7 risks: "Three of seven sprint-audit signals may fire on legitimate calibrated workloads"
+- `260526_bypass-rate-split.md` (D4 rationale for two-metric bypass)
+- arXiv 2501.10421 — outcome entropy / hivemind experiment
+- arXiv 2509.08713 — bypass rate / unfired branches / constraint violation data
+- arXiv 2510.21652 — schema overflow / post-hoc bias AstaBench χ²
+- `src/bathos/runner.py:_read_result_emission()` — confirms metadata = script output JSON
+- `src/bathos/schema.py:Run.metadata` — `str = "{}"` default, raw JSON blob
+```
+
+---
+
+## Deliverable 2: Changes to `/home/marielle/projects/bathos/src/bathos/sprint_audit.py`
+
+**Change A — Insert `_load_sidecar_schema_keys` after line 69 (after the `return set()` closing `_load_sidecar_outcomes`):**
+
+```python
+def _load_sidecar_schema_keys(sidecar_path: str) -> set[str]:
+    """Load result_schema field names declared in a sidecar file.
+
+    Args:
+        sidecar_path: Path to .bth.toml file.
+
+    Returns:
+        Set of declared result_schema field names, or empty set if unable to load.
+    """
+    try:
+        import tomllib
+
+        path = Path(sidecar_path)
+        if not path.exists():
+            return set()
+        data = tomllib.loads(path.read_text())
+        return set(data.get("result_schema", {}).keys())
+    except Exception:
+        return set()
+```
+
+**Change B — Replace lines 226–242 (Signal 6: schema_overflow_rate computation):**
+
+Replace the existing block with:
+
+```python
+            # Signal 6: schema_overflow_rate
+            # Counts runs where metadata contains keys NOT declared in result_schema.
+            # metadata is the script's primary output channel (runner.py:_read_result_emission);
+            # result_schema in the sidecar declares which keys are expected.
+            # Any metadata key NOT in result_schema = genuine schema overflow
+            # (possible metric substitution — arXiv 2510.21652 AstaBench).
+            # Runs without sidecar_path are skipped (no schema to compare against);
+            # those are already tracked by bypass_explicit / bypass_in_agent_mode.
+            # Denominator is runs_with_sidecar, not total_all.
+            if total_all > 0:
+                overflow_count = 0
+                runs_with_sidecar = 0
+                for run in all_runs_flat:
+                    sidecar_path_run = run.get("sidecar_path", "")
+                    if not sidecar_path_run:
+                        # No sidecar: can't determine declared schema; skip
+                        continue
+                    runs_with_sidecar += 1
+                    try:
+                        meta = json.loads(run.get("metadata", "{}") or "{}")
+                        declared_keys = _load_sidecar_schema_keys(sidecar_path_run)
+                        undeclared_keys = set(meta.keys()) - declared_keys
+                        if undeclared_keys:
+                            overflow_count += 1
+                    except (json.JSONDecodeError, TypeError):
+                        # Parse error on metadata JSON; don't count as overflow
+                        pass
+                if runs_with_sidecar > 0:
+                    signals["schema_overflow_rate"] = overflow_count / runs_with_sidecar
+                else:
+                    signals["schema_overflow_rate"] = 0.0
+            else:
+                signals["schema_overflow_rate"] = 0.0
+```
+
+**Change C — Replace lines 258–286 (threshold check block) with inline rationale comments:**
+
+```python
+            # Check signal thresholds and add anomalies.
+            # All thresholds are CALIBRATION TARGETS (v0.6), not hard gates.
+            # See ADR .praxia/docs/decisions/260601_sprint-audit-threshold-rationale.md
+            # error_rate > 0.10: >10% error outcomes indicates infrastructure/env problems;
+            #   uncalibrated — domain reasoning, no empirical study (spec Item 5)
+            if signals["error_rate"] > 0.10:
+                anomalies.append(
+                    f"Project: error_rate {signals['error_rate']:.1%} > 10%"
+                )
+            # bypass_explicit > 0.30: arXiv 2509.08713 constraint violation rates (1.3–71.4%);
+            #   0.30 is midpoint heuristic, not derived from bypass-rate empirical data
+            if signals["bypass_explicit"] > 0.30:
+                anomalies.append(
+                    f"Project: bypass_explicit {signals['bypass_explicit']:.1%} > 30%"
+                )
+            # bypass_in_agent_mode > 0.05: tighter than bypass_explicit; agents have zero
+            #   incremental cost to include a sidecar, so agent-mode bypass is harder to justify
+            #   (ADR 260526_bypass-rate-split, spec D4)
+            if signals["bypass_in_agent_mode"] > 0.05:
+                anomalies.append(
+                    f"Project: bypass_in_agent_mode {signals['bypass_in_agent_mode']:.1%} > 5%"
+                )
+            # outcome_entropy < 0.5 nats: arXiv 2501.10421 hivemind experiment;
+            #   0.5 nats < ln(2)=0.693 nats (balanced 2-outcome); flags label compression
+            if signals["outcome_entropy"] < 0.5:
+                anomalies.append(
+                    f"Project: outcome_entropy {signals['outcome_entropy']:.2f} nats < 0.5"
+                )
+            # unfired_branches > 0.40: arXiv 2509.08713 revision-agent unfired branches;
+            #   >40% unfired suggests hypothesis space not fully tested
+            if signals["unfired_branches"] > 0.40:
+                anomalies.append(
+                    f"Project: unfired_branches {signals['unfired_branches']:.1%} > 40%"
+                )
+            # schema_overflow_rate > 0.20: arXiv 2510.21652 AstaBench metric misuse;
+            #   counts runs where metadata has keys NOT in result_schema (see ADR 260601 bug fix)
+            if signals["schema_overflow_rate"] > 0.20:
+                anomalies.append(
+                    f"Project: schema_overflow_rate {signals['schema_overflow_rate']:.1%} > 20%"
+                )
+            # post_hoc_bias_flag: arXiv 2510.21652 AstaBench chi2(4,200)=61.99, p<1e-10;
+            #   worst-label count in first third > 10% of total flags post-hoc experiment culling
+            if signals["post_hoc_bias_flag"]:
+                anomalies.append(
+                    f"Project: post_hoc_bias_flag detected"
+                )
+```
+
+---
+
+## Deliverable 3: INDEX.md update
+
+**File:** `/home/marielle/projects/bathos/.praxia/docs/INDEX.md`
+
+Add the following line to the `## Decisions` section, after the last existing `260526_*` entry:
+
+```markdown
+- [260601_sprint-audit-threshold-rationale](decisions/260601_sprint-audit-threshold-rationale.md) — Documents domain rationale for all 7 sprint-audit signal thresholds; resolves schema_overflow_rate semantics (any-key check is a bug; fix: cross-reference against result_schema declared keys)
+```
+
+---
+
+## Verification gate
+
+After applying all changes, run:
+
+```
+uv run pytest tests/ -k sprint_audit -q
+```
+
+Expected: all existing tests pass. The `schema_overflow_rate` fix does not break existing tests because all existing `TestSchemaOverflowRate` tests use empty metadata (`"{}"` or `None`) which has no keys, so `set({}) - declared_keys = empty set`, no overflow counted.
+
+---
+
+## Notes for Phase B (test-writer)
+
+The test-writer needs the following boundary test cases derived from this ADR:
+
+1. `schema_overflow_rate` — run with `metadata = '{"declared_key": 1}'` and sidecar declaring `declared_key` → `schema_overflow_rate == 0.0` (no overflow)
+2. `schema_overflow_rate` — run with `metadata = '{"declared_key": 1, "undeclared_key": 2}'` and sidecar declaring only `declared_key` → `schema_overflow_rate > 0.0` (overflow detected)
+3. `schema_overflow_rate` — all runs bypassed (no sidecar_path) → `schema_overflow_rate == 0.0` (skip denominator = 0)
+4. The denominator is `runs_with_sidecar`, not `total_all` — test this explicitly with mixed sidecar/non-sidecar runs

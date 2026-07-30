@@ -1,0 +1,1 @@
+Cleaning up stale worktrees to unblock a version bump and reinstall of bathos with mcp,viz extras. Two worktrees need your decision before I can remove everything: merge the backlog #143 commit, and decide whether fastmcp should move from optional to a main dependency.

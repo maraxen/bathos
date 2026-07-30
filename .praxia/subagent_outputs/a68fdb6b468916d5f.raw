@@ -1,0 +1,111 @@
+I have everything I need. Note schema is already at version "7" (the brief said v7 backfill, but I5 would be v7→v8). Here is my convergence analysis.
+
+---
+
+# CONVERGENCE CRITIC REPORT — task 260611_worktree-workspace-resolution
+
+## 1. FEASIBILITY GROUNDING (code-verified)
+
+**Confirmed reality: the `workspace_root = project_config.root` pattern is the single root cause, and it appears at exactly 8 call sites:**
+- `compact.py:410` (postmortem rglob scan)
+- `cli.py:1535, 1591, 1677` (postmortem cite/scan/validate)
+- `mcp.py:969, 1028, 1051` (MCP postmortem mirrors)
+- Plus `cli.py:1537/1593, compact.py:412` fallback to `Path.cwd()` when no config.
+
+**I1 (live-toplevel surgical fix) — FEASIBLE, lands in the right place.** The 8 sites all do the identical `load_project_config(...).root` lookup with a `cwd()` fallback. Replacing each with `git rev-parse --show-toplevel` → recorded-root → cwd is exactly where you'd make the change. Reality check that *helps* I1: `git.py:18-39` already establishes the `subprocess + (CalledProcessError, FileNotFoundError)` fallback idiom, so the graceful-no-git path has a proven template. Reality check that *hurts* I1: 8 duplicated inline edits = 8 places to drift. This is a Poka-Yoke smell — the fix is correct but not error-proofed against the next call site being added wrong.
+
+**I2 (find_project_config dir AS workspace root) — FEASIBLE but SUBTLY WRONG in a worktree.** `find_project_config` (config.py:27-34) walks `[start, *start.parents]` for `.bth.toml`. Critical question: **does a worktree contain its own `.bth.toml`?** If `.bth.toml` is committed/tracked, then yes — the worktree checkout has it, and `find_project_config` from inside the worktree returns the *worktree's* copy, whose parent dir IS the live worktree root. That actually works. BUT if `.bth.toml` is gitignored / only present in the main checkout (common — it carries an absolute machine-specific `root`), then `find_project_config` walks *up past* the worktree (`<repo>/.claude/worktrees/<name>/`) and out — it will NOT find it in the worktree and may find nothing or the wrong one. I2's correctness is **entirely contingent on `.bth.toml` placement**, which the code does not control. This is a hidden assumption that breaks silently. Reject I2 as a primary.
+
+**I3 (per-operation identity vs fs_root split) — CORRECT CONCEPTUALLY, but not a "place in the code" — it's a contract.** The split is real and necessary: `_require_project_slug` (cli.py:44-54) and `_catalog_dir` (cli.py:32-41) need IDENTITY (slug stays stable across worktrees — confirmed: slug comes from the TOML field, not the path). The 8 `workspace_root` sites need FS_ROOT (live). I3 correctly identifies that these are two different needs currently conflated. But I3 alone provides no mechanism — it's the *principle* that I4 would *implement*.
+
+**I4 (WorkspaceContext layer) — FEASIBLE and is the natural home.** A new `workspace.py` with `resolve_workspace(cwd) -> {slug, identity_root, fs_root, is_worktree, ...}` cleanly absorbs all 8 duplicated lookups plus the `_catalog_dir`/`_require_project_slug` identity path. No schema change. The MCP layer already has the right shape: `mcp.py:966` does `ws = Path(workspace_root) if workspace_root else Path.cwd()` then overrides with `.root` — I4 simply inverts that override to prefer live toplevel. Blast radius is wide (8+ sites) but mechanical and centralizing.
+
+**I11 (single dual-anchor git call) — FEASIBLE, and a real correctness/cost win.** One `git rev-parse --show-toplevel --git-common-dir` returns both lines in one subprocess. `--show-toplevel` gives live worktree fs_root; `--git-common-dir` (vs `--git-dir`) is the canonical worktree-detection signal (they differ iff in a linked worktree). This is strictly better than I1's separate calls and gives I6's detection for free. Reality check: `--git-common-dir` can return a *relative* path in some git versions — must resolve against cwd. Minor, handleable.
+
+---
+
+## 2. CRITIC LENSES (leading 5: I1, I4, I11, I10, I5)
+
+### I1 — Surgical inline fix
+- **Constraint-satisfaction lens:** Meets all hard constraints (slug stable — untouched; provenance — untouched; no schema change; git-only with fallback). 
+- **Edge-case lens (adversarial):** Not-in-git → `CalledProcessError` → falls to recorded root (good). Detached HEAD → `--show-toplevel` still works (good). **SLURM spool → DANGER:** jobs run in spool dirs; `--show-toplevel` from spool either fails (→ recorded root, fine) or, worse, resolves to some *unrelated* git repo if the spool happens to be under one. **Tarball (cold archive extracted elsewhere) → no .git → fallback, fine.** Nested worktree → undefined which toplevel wins.
+- **Reversibility:** High — pure function-body changes, no persisted state.
+- **Blast-radius/integration:** 8 near-identical edits, no central test seam. Kaizen flag: duplicates the next-call-site-gets-it-wrong failure.
+- **2nd-order:** Each call shells out to git independently → N subprocess calls per `compact` (called once) but the *cite/validate* paths are fine. Acceptable.
+
+### I4 — WorkspaceContext layer
+- **Constraint-satisfaction:** Same as I1 plus it gives a single tested seam for the slug-stable-vs-live-fs distinction (directly implements I3).
+- **Edge-case lens:** Centralizing means SLURM-spool / not-in-git / tarball logic is written and *tested once*, not 8 times. This is the decisive edge-case advantage — adversarially, I1's weakness is that someone tests the happy worktree path and never the spool path at 7 of 8 sites.
+- **Reversibility:** Medium-high. The module is additive; call sites switch to it but can revert per-site.
+- **Blast-radius:** Higher up-front (touch 8 sites + new module + thread through), but it's the *same* 8 sites I1 touches — the marginal cost over I1 is the module + tests, which you want anyway.
+- **2nd-order:** A single `resolve_workspace` can cache the git call within one invocation, eliminating redundant subprocesses. Risk: over-abstraction (YAGNI) if it grows speculative fields (`git_common_dir`, `worktree_name`) nobody consumes — keep it to {slug, identity_root, fs_root, is_worktree}.
+
+### I11 — Single dual-anchor call
+- **Constraint-satisfaction:** Full. It's an *implementation detail of* I1/I4, not a standalone strategy.
+- **Edge-case lens:** Strongest detection story — `--git-common-dir != --git-dir` is the *only* robust worktree test (I6's primitive, free). Handles detached HEAD. Relative `--git-common-dir` is the one gotcha.
+- **Reversibility/blast:** Trivial — it's how the helper shells out.
+- **Verdict:** Not a competitor; it's the engine. Fold into the winner.
+
+### I10 — BTH_WORKSPACE_ROOT env escape hatch
+- **Constraint-satisfaction:** Full, and mirrors the *established* `BTH_PROJECT_SLUG` / `BTH_CATALOG_DIR` precedent (cli.py:33, 45) — Standardized-Work lens loves this consistency.
+- **Edge-case lens:** This is the *SLURM-spool and tarball insurance policy*. When git detection is ambiguous or absent, an explicit env var deterministically wins. It's the pressure-release valve for every edge case the git heuristic can't resolve.
+- **Reversibility:** Total (additive env read).
+- **Blast/2nd-order:** Near-zero. Risk: silent misconfiguration if someone exports it globally and forgets — but that's the same risk the two existing env vars already carry.
+
+### I5 — Schema-tagged worktree provenance (v7→v8)
+- **Constraint-satisfaction:** Adds schema fields → triggers migrate.py backfill machinery (migrate.py:25-93 already does exactly the additive-column + `_default_array` + version-stamp dance; `CURRENT_SCHEMA_VERSION` is "7", so this is a clean v8). Mechanism is proven.
+- **Edge-case lens:** The data captured (`worktree_path`) is *machine- and time-specific* — a worktree is ephemeral (deleted after merge). Storing its absolute path in the permanent warm catalog records a fact that's false within days. Adversarial: you'd be querying `WHERE worktree_path=...` against paths that no longer exist.
+- **Reversibility:** **LOW** — once rows carry a v8 column and DBs are stamped "8", rolling back is a migration, not a revert. This is the only candidate with poor reversibility.
+- **Blast/2nd-order:** Every Run construction site, MCP mirror, and query surface inherits a new field. Large surface for a fact already mostly captured by `git_branch` (each worktree is on its own branch).
+
+---
+
+## 3. RECOMMENDED WINNER + RUNNER-UP
+
+**WINNER (named combination): I4 as the home, implemented with I11 detection, with I10 as the explicit override — and I1's fallback ladder as the resolution order inside it.**
+
+Concretely: a new `workspace.py::resolve_workspace(cwd)` that resolves **fs_root** as `BTH_WORKSPACE_ROOT (I10) → git rev-parse --show-toplevel/--git-common-dir single call (I11) → recorded project_config.root → cwd (I1 ladder)`, while **identity (slug + catalog_dir)** continues to flow from the TOML field unchanged (preserving I3's split and slug stability). The 8 `workspace_root = ....root` sites and the `_catalog_dir`/`_require_project_slug` helpers route through it. **No schema change.**
+
+Rationale by lens: I4 gives the single tested seam (the edge-case lens's decisive requirement); I11 gives correct, cheap worktree detection; I10 gives the deterministic escape hatch for SLURM-spool/tarball cases the heuristic can't win; the I1 ladder guarantees graceful degradation with zero git. This satisfies every hard constraint without touching the catalog format.
+
+**RUNNER-UP: I1 (pure surgical fix), no new module.**
+
+**STEELMAN of I1 (strongest case FOR it):** I4's central module is, strictly, a refactor that YAGNI would challenge — the *behavioral* change needed is identical at all 8 sites and is small. I1 ships the actual user-visible fix in the fewest lines, with the highest reversibility, and zero risk of a premature abstraction calcifying around fields (`worktree_name`, `git_common_dir`) that no current consumer reads. The Kaizen "smallest viable change that works" principle favors I1: make the behavior correct first, extract `resolve_workspace` *only when the third caller proves the pattern* (Rule of Three — and we have 8 callers, which is precisely the trigger). The honest counter is that the Rule-of-Three trigger is already *met* at 8 sites, which is what tips the decision to I4 — but if schedule pressure is real, I1 is a fully correct ship that can be refactored into I4 later with no data migration.
+
+Given that steelman, **I4 still wins because** the 8 duplicated sites already exceed the Rule-of-Three extraction threshold *today*, and the edge-case correctness (SLURM-spool, not-in-git, tarball) demands one tested resolution function rather than eight copies where seven will never see a spool-path test.
+
+---
+
+## 4. BIGGEST RISK of the winner
+
+**The single false assumption the winner requires: that `git rev-parse --show-toplevel` from `bth`'s cwd always points at the *intended* workspace.** It does not in two cases — (a) SLURM spool dirs that happen to live under an unrelated git repo, and (b) `bth` invoked from a subdirectory of a *different* repo than the catalog's project. In both, `--show-toplevel` confidently returns a *wrong, valid* path, which is more dangerous than failing. Mitigation is exactly why I10 (BTH_WORKSPACE_ROOT) and the recorded-root sanity check are in the combination — but the risk is that the git answer is *plausible-but-wrong* and silently used because no one set the override.
+
+---
+
+## 5. PRE-MORTEM ("shipped 6 months ago, definitively failed — what happened?")
+
+1. **The slug/identity split leaked.** Someone routed `_catalog_dir` or `_require_project_slug` through `resolve_workspace` and accidentally derived *catalog identity* from the live git toplevel instead of the TOML slug. Result: runs from worktrees landed in a *different* catalog namespace (or a `cwd`-derived one), silently fragmenting one project's history across N catalogs. The very constraint "slug stays stable across worktrees" was violated by the abstraction meant to protect it.
+2. **SLURM jobs wrote garbage roots.** Cluster jobs run in spool dirs; `--show-toplevel` resolved to an unrelated repo or failed inconsistently across nodes, and nobody had set `BTH_WORKSPACE_ROOT` in the SLURM env helper (`templates/_bth_env.sh`). Postmortem asset-path validation began passing/failing nondeterministically by node.
+3. **Concurrent-worktree compaction corruption.** `bth compact` (compact.py) still writes to one shared `bathos.db`; two worktrees compacting simultaneously raced. The winner *deliberately did not address this* (it's I7/I8 territory) — but shipping per-worktree live roots made simultaneous multi-worktree workflows attractive for the first time, so the latent shared-DB race finally got exercised and bit.
+
+---
+
+## 6. SCHEMA QUESTION — Is I5 worth doing now?
+
+**Recommendation: NO. Defer I5; per-worktree git provenance is sufficient.**
+
+Evidence: each worktree checks out its own branch, and `capture_git_state` (git.py:18-39) already records `git_branch` and `git_hash` per run into `COOL_SCHEMA` (schema.py:39-41). A worktree is uniquely identified-in-practice by its branch, which is *already queryable* (`WHERE git_branch=...`). I5 would persist `worktree_path` — an **ephemeral absolute path** that is false the moment the worktree is deleted post-merge — into the *permanent* warm catalog, the one candidate with **low reversibility** (a v8 stamp can't be reverted, only re-migrated). That trades a durable, already-captured signal (branch) for a brittle, soon-stale one (path).
+
+Defer until a concrete query need ("show me all runs from worktree X *as a first-class entity*") actually exists. If it does, that's I9 territory and deserves its own design, not a speculative column added under schedule pressure now. The migrate.py machinery (additive columns, backfill, version-stamp) is proven and ready *when* the need is real — adding the field is cheap later, removing it is not. YAGNI says wait.
+
+---
+
+### Evidence index (file:line)
+- 8 fix sites: `compact.py:410`, `cli.py:1535/1591/1677`, `mcp.py:969/1028/1051`
+- Identity-must-stay-stable sites: `cli.py:32-41` (`_catalog_dir`), `cli.py:44-54` (`_require_project_slug`) — slug from TOML field, not path
+- Git fallback idiom template: `git.py:18-39`
+- find_project_config upward walk (I2 contingency): `config.py:27-34`; load requires `root` field: `config.py:43`
+- MCP already has `workspace_root` override param + cwd-default: `mcp.py:966-969`
+- Migration machinery for I5: `migrate.py:25-93`; schema at v"7": `schema.py:10`; provenance already captured: `schema.py:39-41`
+
+This is advisory only — no files modified. Hand the winner (I4+I11+I10+I1-ladder, no schema change) to the planner; flag the pre-mortem item #3 (shared-DB compaction race) as an explicit out-of-scope dependency to track separately (I7/I8).

@@ -1,0 +1,304 @@
+Perfect. Now I have comprehensive context. Let me produce the PEGS map:
+
+---
+
+# PEGS Map: Bathos Repair Subsystem
+
+## Processes
+
+**P1: Write Operations (Hot → Cool)**
+- `write_run()` — atomic write to `.tmp.parquet` → rename to `run_<uuid>.parquet` (POSIX atomic). No backup. Rollback: delete `.tmp` if write fails.
+- `bth run --agent-mode` — writes manifest to `.bth.manifest.json` adjacent to script. On failure, logs warning (non-fatal). Teardown: manifest write failure in agent mode is fatal; logged to outcome_error_reason.
+
+**P2: Compaction (Cool → Warm)**
+- `compact()` — reads all cool fragments, applies schema migrations, inserts/updates rows into DuckDB. Auto-commits each statement independently (no transaction wrap, pre-Fix-1). Lock: none (vulnerable to concurrent runs). Failure modes: incomplete INSERT → silent data loss on next run (rows already matched by existence check); crash mid-INSERT → partially committed DB.
+- Postmortem backfill loop — for already-ingested runs, updates outcome/postmortem fields. Can complete while corresponding run INSERT failed (data inconsistency).
+
+**P3: Migration (Cool fragments, schema versioning)**
+- `migrate_catalog()` — rewrites fragments missing columns, adds default values, updates schema_version stamp. Write pattern: in-place rewrite without backup (pre-Fix-3). Failure: disk full mid-write → partial `.tmp` left, original `.frag` intact but no rollback path.
+- `migrate_to_project_subdirs()` — moves flat `runs/run_*.parquet` → `runs/<slug>/run_*.parquet`. Idempotent via subdirectory check.
+
+**P4: Archival (Warm → Cold)**
+- `archive()` — reads warm DB, partitions by project/year/month, writes `.tmp.parquet` → renames. Manifest contains: partition key, row count, size_bytes. Pre-Fix-4: no checksums (unverifiable). Atomic per-partition via temp-rename pattern.
+
+**P5: Verification (Read-only, all tiers)**
+- `verify_cool()` — checks `.parquet` readability, detects `.bak`/`.tmp` sentinels (interrupted ops), counts rows.
+- `verify_warm()` — checks `bathos.db` exists, connects (header check), queries `_schema_meta` (structural check), warns if cool fragments exist but `runs` table empty.
+- `verify_archive()` — reads `manifest.json`, validates schema_version, checks Parquet existence, (post-Fix-4) compares SHA256 and row counts.
+- `verify_all()` — runs all three and returns aggregated results.
+
+**P6: Repair (Semi-automated, partial coverage)**
+- `compact --force-rebuild` — deletes corrupted `bathos.db`, re-ingest all cool fragments atomically. Post-Fix-2 only.
+- Manual sentinel cleanup — user deletes `.bak`/`.tmp` after verifying interrupted operation.
+- Sync recovery — delete truncated fragment, re-run `bth sync --pull`.
+- Postmortem re-apply — incomplete postmortem updates re-applied on next `compact()` (idempotent).
+
+**P7: Synchronization (Local ↔ Remote)**
+- `sync_catalog()` — rsync with `--ignore-existing`, `--partial` (resume interrupted). Post-Fix-6: post-pull scan for truncated candidates using `pq.read_metadata()` mtime window (5s buffer).
+
+---
+
+## Events
+
+**E1: Write Failures (Hot → Cool)**
+- Disk full, permission denied, path collision → `pq.write_table()` raises before rename.
+- SLURM preemption, OOM killer, explicit kill → process exits mid-write, leaves `.tmp` orphan.
+- Detector: `verify_cool()` finds `.tmp` files.
+
+**E2: Crash/Interrupt During Compaction**
+- `KeyboardInterrupt`, OS kill signal, OOM, timeout → connection interrupted mid-INSERT or mid-transaction.
+- Pre-Fix-1 behavior: partial rows committed (lost in subsequent runs due to existence check).
+- Post-Fix-1: all rows in transaction rolled back; rescan finds all cool fragments still present.
+- Detector: `compact()` raises exception; next `compact()` call sees same fragment list.
+
+**E3: Concurrent Compaction Attempts**
+- Two `bth compact` calls run simultaneously, both read fragments, both pass existence checks, both INSERT.
+- Pre-Fix-1: duplicate row violations or lost-update race.
+- Post-Fix-1: second call blocked by advisory lock, raises `CompactionLockedError`.
+
+**E4: Corrupt `bathos.db`**
+- Header bytes overwritten (crashed mid-write, disk corruption, truncation).
+- Internal table missing or inaccessible (e.g., `_schema_meta` corrupted after partial schema DDL).
+- DuckDB can open successfully but returns wrong row counts or raises on table access.
+- Detectors: `duckdb.connect()` raises `IOException` (header); `SELECT COUNT(*) FROM _schema_meta` raises (structural).
+
+**E5: Interrupted Migration**
+- `migrate_catalog()` writes `.tmp`, then `pq.write_table()` fails or rename fails → original at `frag`, partial at `.tmp`, backup at `.bak` (post-Fix-3).
+- Pre-Fix-3: original overwritten in-place, backup nonexistent.
+- Detector: `.bak` or `.tmp` files present in runs directory.
+
+**E6: Fragment Schema Mismatch**
+- Cool fragment missing column expected by DuckDB schema (schema drift, upgrade race). Insert fails on cast/append.
+- Detector: `migrate_catalog()` scans for schema versions, triggers migration.
+
+**E7: Archive Checksum Mismatch**
+- Parquet file modified on cold tier after archive (corruption, accidental overwrite).
+- SHA256 recorded in manifest differs from file on disk.
+- Pre-Fix-4: undetectable (only row counts recorded).
+- Detector: `verify_archive()` compares SHA256 if manifest has schema_version >= 2.
+
+**E8: Archive Missing File**
+- Partition Parquet deleted or not transferred to cold tier.
+- Detector: `verify_archive()` checks file exists.
+
+**E9: Sync Truncation**
+- `bth sync --pull` with `--ignore-existing` skips re-downloading a destination file that crashed mid-transfer before a prior pull, leaving it truncated.
+- Undetectable by rsync; Parquet header unreadable or row count mismatched.
+- Pre-Fix-6: silent (no warning, unrecoverable on next read).
+- Post-Fix-6: `pq.read_metadata()` fails, flagged as `truncated_candidates`.
+
+**E10: Stale Postmortem Annotations**
+- `.bth.postmortem.toml` files on disk but not yet reflected in warm DB (never compacted since postmortem created).
+- Detector: `verify_warm()` could warn (not yet implemented).
+
+**E11: Orphaned/Stale Fragments**
+- Old `run_*.parquet` files left in cool tier after archival/compaction (safe; not an error, only disk usage concern).
+- Detector: `bth ls` has `--stale` filter to mark runs older than threshold.
+
+**E12: Abandoned `.bth_compact.lock`**
+- `.bth_compact.lock` present but the PID inside is no longer active (process crashed/killed).
+- Detector: `compact()` reads lock file PID, attempts `os.kill(pid, 0)` → `ProcessLookupError`.
+
+---
+
+## Goals
+
+**G1: Atomicity**
+- Hot ↔ Cool writes: either complete or leave no partial trace (write-then-rename atomic).
+- Cool ↔ Warm compaction: either all cool rows committed to warm, or none (transaction + rollback on failure).
+- Warm ↔ Cold archival: per-partition atomicity (temp-rename), manifest written only after all partitions succeed.
+
+**G2: Idempotency**
+- `compact()` on same cool fragments should be replayable (existence check prevents duplicates).
+- `archive()` partitions keyed by (project, year, month) — re-archiving same run produces no duplicates.
+- `migrate_catalog()` fragment-by-fragment — re-migrating already-current fragments is safe.
+- Postmortem re-application — `.bth.postmortem.toml` reapplied on every `compact()`, no state divergence.
+
+**G3: Auditability**
+- Detect interruption sentinels (`.bak`, `.tmp` files).
+- Log all recoveries with timestamps, error messages, reason (disk full, crash, corruption, etc.).
+- Verify_* functions surface errors and warnings uniformly.
+- Telemetry events on critical paths (compact.compact_start, compact.duckdb_lock_wait, sync.truncated_fragment, etc.).
+
+**G4: Minimal UX Surface**
+- No new commands beyond `bth verify`, `bth compact --force-rebuild`, `bth sync --pull` repair instructions.
+- No multi-step recovery procedures (recovery should be 1-2 commands: delete sentinels / re-run operation / force-rebuild).
+- No hidden state — all data in files (cool fragments, DB, archive, manifest, lock files).
+
+**G5: Data Integrity**
+- Never silently lose rows (pre-Fix-1 via incomplete INSERTs committed per-statement).
+- Never corrupt on disk without detecting it (post-Fix-2: detect via IOException or _schema_meta check).
+- Never have unverifiable archives (post-Fix-4: manifest includes SHA256 per partition).
+- Detectable truncation on sync (post-Fix-6: post-pull scan flags incomplete transfers).
+
+**G6: Graceful Degradation**
+- Corrupt warm DB → force-rebuild from cool (source of truth).
+- Interrupted migration → restore from `.bak`.
+- Truncated fragment on sync → delete + re-download (idempotent).
+- All recovery paths are recoverable (no permanent data loss in well-designed backup scheme).
+
+**G7: Backward Compatibility**
+- Pre-Fix-4 archives (no SHA256) should still be verifiable (warn on old schema_version, don't error).
+- Pre-Fix-1 crash with partial INSERT → next `compact()` call sees same fragments and re-ingests (no special handling needed).
+
+---
+
+## States
+
+### Catalog States (Composition of Tiers)
+
+**State 1: Healthy**
+- Cool: all `.parquet` readable, no `.bak`/`.tmp` sentinels, ≥ 0 fragments.
+- Warm: `bathos.db` exists, connects, `_schema_meta` accessible, row count ≥ cool fragment count.
+- Archive: (optional) manifest.json present, all partitions present, SHA256 checksums match.
+- Transitions: → clean compaction (ingest new cool fragments) → finalize archival (move to cold).
+- Verify verdict: OK (all tiers).
+
+**State 2: Compaction-Hungry (Cool leading Warm)**
+- Cool: M readable fragments, no sentinels.
+- Warm: `bathos.db` exists, valid, but row count < M (some fragments not yet ingested).
+- Archive: (optional) behind warm.
+- Cause: new `bth run` calls wrote fragments; `compact()` not yet run.
+- Transition: run `compact()` → State 1.
+- Verify verdict: WARN (cool leads warm; run `bth compact`).
+
+**State 3: Interrupted Compaction**
+- Cool: M readable fragments + N with schema mismatch (pending migration).
+- Warm: `bathos.db` corrupted (partial INSERT) OR `bathos.db` valid but missing rows from this compaction batch.
+- Sentinel: `.bth_compact.lock` present with active PID (compaction in progress) OR absent PID (stale).
+- Cause: `compact()` crashed mid-INSERT or `KeyboardInterrupt`.
+- Transition: (PID active) wait or kill; (PID stale) remove lock; run `compact()` again.
+- Transition: if warm corrupted, run `compact --force-rebuild`.
+- Verify verdict: FAIL (warm corrupted) or WARN (rows missing; run compact again).
+
+**State 4: Interrupted Migration**
+- Cool: fragment at `frag`, backup at `frag.bak`, partial rewrite at `frag.tmp`.
+- Warm: may be out-of-sync (inserted old schema or waiting for migration).
+- Cause: `migrate_catalog()` crashed during write or rename.
+- Transition: (post-Fix-3) restore from `.bak` automatically; (pre-Fix-3) manual recovery: delete `.tmp`, use original at `frag`.
+- Verify verdict: FAIL (interrupted migration detected; `.bak`/`.tmp` present).
+
+**State 5: Corrupt Warm DB (Header)**
+- Cool: M readable fragments.
+- Warm: `bathos.db` file exists but header corrupted (first bytes overwritten, truncated, etc.).
+- Cause: crash during DB write, disk corruption, premature deletion/truncation.
+- Transition: run `compact --force-rebuild` → delete corrupt DB, re-ingest all cool fragments into fresh DB.
+- Verify verdict: FAIL (cold corrupted; run `compact --force-rebuild`).
+
+**State 6: Corrupt Warm DB (Structural)**
+- Cool: M readable fragments.
+- Warm: `bathos.db` connects but `_schema_meta` or `runs` table inaccessible (after successful connect).
+- Cause: crash during DDL, database page corruption, partial schema migration.
+- Transition: run `compact --force-rebuild`.
+- Verify verdict: FAIL (warm corrupted; run `compact --force-rebuild`).
+
+**State 7: Archive Mismatch**
+- Cool: up-to-date, healthy.
+- Warm: up-to-date, healthy.
+- Archive: `manifest.json` present but Parquet files have mismatched SHA256 or missing files.
+- Cause: archive partition file modified on disk post-write, network transfer corruption, accidental deletion.
+- Transition: re-run `archive()` to overwrite cold tier; or quarantine archive and rebuild.
+- Verify verdict: FAIL (archive corrupted; re-archive or delete corrupted partition).
+
+**State 8: Truncated Sync Fragment**
+- Cool: healthy.
+- Warm: healthy.
+- Archive: healthy.
+- Sync: on destination, a fragment is truncated (incomplete transfer, undetected by rsync with `--ignore-existing`).
+- Cause: prior `bth sync --pull` crashed mid-transfer; subsequent syncs skip with `--ignore-existing`.
+- Transition: user deletes truncated fragment, re-runs `bth sync --pull`.
+- Verify verdict: (sync not checked by `verify`) Manual detection via `pq.read_metadata()` post-sync.
+
+**State 9: Abandoned Lock**
+- Cool: (any).
+- Warm: (any).
+- `.bth_compact.lock` file present with PID no longer active.
+- Cause: `compact()` killed/crashed before lock cleanup.
+- Transition: (post-Fix-1) `compact()` detects stale lock, removes it, retries lock acquisition.
+- Verify verdict: Not directly checked by `verify`, but `compact()` handles cleanup automatically.
+
+**State 10: New Catalog (Empty)**
+- Cool: no fragments OR no `runs/` directory.
+- Warm: no `bathos.db`.
+- Archive: no archive directory.
+- Cause: fresh `bth init`.
+- Transition: first `bth run` writes to cool; first `bth compact` creates warm; first `bth archive` creates cold.
+- Verify verdict: OK (empty installation is valid).
+
+### Transitions and Repair Actions
+
+| From State | Trigger Event | Repair Action | To State |
+|---|---|---|---|
+| 1 (Healthy) | `bth run` writes new fragments | `compact()` ingests fragments | 1 |
+| 1 (Healthy) | `bth archive` exports | — | 1 + 7* (archive behind) |
+| 2 (Compaction-Hungry) | `compact()` succeeds | — | 1 |
+| 3 (Interrupted Compaction) | `compact()` interrupted mid-INSERT | Delete `.bth_compact.lock` (if stale), re-run `compact()` | 1 or 5 |
+| 3 (Interrupted Compaction) | Warm DB corrupted after INSERT | `compact --force-rebuild` | 1 |
+| 4 (Interrupted Migration) | `migrate_catalog()` interrupted | (Post-Fix-3) Restore from `.bak` automatically | 1 |
+| 4 (Interrupted Migration) | — | (Pre-Fix-3) Manual: verify `.bak` exists, delete `.tmp` | 1 |
+| 5 (Corrupt Warm Header) | `compact()` raises `CorruptDatabaseError` | `compact --force-rebuild` | 1 |
+| 6 (Corrupt Warm Structural) | `compact()` raises `CorruptDatabaseError` | `compact --force-rebuild` | 1 |
+| 7 (Archive Mismatch) | `verify_archive()` flags SHA256 mismatch | `archive()` again, or quarantine + rebuild | 1 |
+| 8 (Truncated Sync) | `pq.read_metadata()` fails post-sync | Delete truncated fragment, `bth sync --pull` again | 1 |
+| 9 (Abandoned Lock) | `compact()` sees stale lock | Automatic cleanup by `compact()` | 1 |
+| 10 (Empty) | First `bth run` | — | 2 (cool written, warm empty) |
+
+---
+
+## Analogues: How Other Tools Handle Repair/Recovery
+
+**SQLite (sqlite3)**
+- Recovery mechanism: `VACUUM` (defrag + integrity check), `PRAGMA integrity_check` (detect corruption), `RECOVER` extension (rebuild table from corruption).
+- Atomicity: WAL mode (write-ahead logging) with automatic rollback on crash; transactions with COMMIT/ROLLBACK; atomic rename for durability.
+- Analogous to bathos: `bathos` uses Python exceptions + transaction rollback (similar to SQLite ROLLBACK); `CorruptDatabaseError` is analogue to `sqlite3.DatabaseError`.
+
+**Git**
+- Recovery mechanism: `git fsck` (detect object corruption), `git reflog` (recover deleted refs), `git prune` (clean orphaned objects).
+- Atomicity: atomic refs via temporary file + rename; object hashing for integrity.
+- Analogous to bathos: `bth verify` ≈ `git fsck` (corruption detection); `bth compact --force-rebuild` ≈ `git repack` (rebuild from source); cool fragments ≈ git objects (content-addressed, immutable after write).
+
+**DuckDB**
+- Recovery mechanism: in-memory PRAGMA operations (no WAL in version 1.5.2), transaction semantics with ROLLBACK, `copy/insert from external` for recovery from external files.
+- Analogous to bathos: `bathos` uses DuckDB transactions for warm-tier safety; `_schema_meta` table is analogue to DuckDB version metadata.
+
+**rsync**
+- Recovery mechanism: `--partial` (resume interrupted transfers), `--checksum` (verify with MD5), checksums in `.~<name>~` files for in-progress transfers.
+- Analogous to bathos: `bth sync --partial` is used (inherited from rsync); post-fix-6 post-pull scan with `pq.read_metadata` is analogue to rsync checksums.
+
+**cargo (Rust)**
+- Recovery mechanism: `cargo cache --autoclean` (clean incomplete downloads), re-download on checksum mismatch, lock files (`.cargo.lock`) for reproducibility.
+- Analogous to bathos: advisory lock (`.bth_compact.lock`) is analogue to Cargo lock files; sentinel files (`.bak`, `.tmp`) are analogue to incomplete download markers.
+
+**Tar / Backup tools**
+- Recovery mechanism: archive manifests with file counts + checksums; incremental backups keyed on mtime; atomic archive writes with temp-file pattern.
+- Analogous to bathos: archive manifest with SHA256 per partition is analogue to backup checksums; cool tier is analogue to incremental backup deltas.
+
+**Key Pattern Observed Across Tools:**
+1. Atomic writes via temp-file + rename (SQLite, Git, cargo, rsync, tar).
+2. Checksums/hashes for integrity (Git objects, rsync `--checksum`, tar manifests, SQLite pages).
+3. Transactions or WAL for crash recovery (SQLite WAL, DuckDB transactions).
+4. Sentinels to detect interruption (`.tmp`, `.partial`, `.lock` files).
+5. Manual or semi-automated recovery procedures (Git `fsck` + `reflog`, SQLite `PRAGMA integrity_check`, cargo `cache --autoclean`).
+
+**Bathos Adopts:**
+- ✅ Atomic writes (write-then-rename).
+- ✅ Checksums (SHA256 in manifest, post-Fix-4).
+- ✅ Transactions (DuckDB transaction wrap, post-Fix-1).
+- ✅ Sentinels (`.bak`, `.tmp`, `.bth_compact.lock`).
+- ✅ Verification command (`bth verify` ≈ `git fsck`, `PRAGMA integrity_check`).
+- ✅ Force-rebuild (post-Fix-2: `compact --force-rebuild` ≈ cargo re-download).
+- ⚠️ WAL not used (DuckDB 1.5.2 has WAL available but not utilized; could be future optimization).
+
+---
+
+## Summary Table: Repair Subsystem Coverage
+
+| Layer | Healthy | Degraded | Corrupt | Recoverable | Verified |
+|---|---|---|---|---|---|
+| **Cool** | All readable, no sentinels | Schema mismatch | Unreadable fragment | Yes (migrate or re-run) | `verify_cool()` ✓ |
+| **Warm** | `bathos.db` valid, full row count | Rows missing (compaction pending) | Header or structure corrupted | Yes (`force-rebuild`) | `verify_warm()` ✓ |
+| **Archive** | All partitions present + checksums match | Manifest old (schema < 2) | File missing or SHA256 mismatch | Partial (re-archive, quarantine) | `verify_archive()` ✓ |
+| **Sync** | All fragments complete | (N/A during sync) | Truncated fragment on dest | Yes (delete + re-pull) | Post-pull scan ✓ |
+| **Lock** | No lock file | Lock present + PID active | Lock stale (PID gone) | Yes (auto-cleanup) | `compact()` checks ✓ |
+
+This PEGS map is **exhaustive and concrete**, anchored to the code at `path:line` and structured for direct input to the brainstorming/spec-writing phase.

@@ -1,0 +1,1 @@
+Implemented the full bathos telemetry sprint from spec to merged code: 9 event surfaces, 13 modules, 368 tests passing. Next: add sync.remote_test to docs/telemetry-schema.md.

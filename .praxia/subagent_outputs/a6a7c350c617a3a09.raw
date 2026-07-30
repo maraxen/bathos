@@ -1,0 +1,1 @@
+Building the literature-parity v1 epic (#2214) in bathos through the brainstorm-to-implementation pipeline. Wave 1 (schema, grader, skill) is merged, green, and audited; Wave 2 (parity_validate.py + atomic attest_parity) is running now. Next: integrate W2, audit it, and pause for your W3 go-ahead.

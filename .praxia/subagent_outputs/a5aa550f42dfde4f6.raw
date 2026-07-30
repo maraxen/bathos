@@ -1,0 +1,32 @@
+**QUARANTINE-C**
+
+1. Most significant thing that could go wrong: the "corrupt non-empty fragment" classification is wrong. A fragment that fails `pq.read_table()` might be a file-system error that clears on retry, not a corrupt write — moving it to quarantine permanently removes a recoverable artifact. The classification is irreversible.
+2. False assumption: that sentinel files are always safe to delete. A .bak created by migrate.py mid-migration, where the migration process crashed before completing, is not "just a backup" — it may be the only copy of the pre-migration data if the migrated file was also partially written.
+
+---
+
+**QUARANTINE-D**
+
+1. Most significant thing that could go wrong: the undo manifest becomes stale the moment any other process writes to the catalog between `bth repair` and `bth repair --undo`. Cool-tier is parallel-write-safe by design (SLURM jobs write simultaneously); if a new fragment lands after the manifest is written, `--undo` silently leaves the catalog in an inconsistent half-restored state with no warning.
+2. False assumption: that the undo operation is simpler than the repair operation. Reversing a quarantine move requires the quarantine directory to still exist, the original path to still be free, and the filesystem to have space — three additional failure modes that the forward path does not have.
+
+---
+
+**MVP-3**
+
+1. Most significant thing that could go wrong: "pre-rebuild DB backup" before compact means backup is taken at exactly the moment the DB is known to be suspect — the backup preserves the corrupt state, not a known-good state. If repair fails partway through, `--undo` restores a corrupt database and the user is no worse off, which defeats the purpose.
+2. False assumption: that gaps 1+2+5 are independent and compose cleanly. Sentinel cleanup and corrupt-fragment quarantine both walk the cool directory; if they run sequentially in one command, a fragment that transitions from "locked" to "readable" between the two passes gets classified differently by each pass, producing a race condition in single-threaded code that looks deterministic.
+
+---
+
+**MVP-4**
+
+1. Most significant thing that could go wrong: introducing `repair.py` with `NotImplementedError` stubs for archive repair and re-export means those code paths exist in the module but are unreachable by tests. The 570-test suite will not cover them, and a future implementer will inherit stubs with no test fixtures, no agreed interface, and no signal about whether the stub contract is even correct.
+2. False assumption: that `bth repair` as a command name is stable. If archive repair and re-export are added later under the same command, the argument surface (`--undo`, `--dry-run`, subcommands vs. flags) will need to be designed twice — once for the stub and once for the real implementation — and the second design may be incompatible with what CLI users already depend on.
+
+---
+
+**MVP-5**
+
+1. Most significant thing that could go wrong: skipping warm→cool re-export means a user who runs `bth repair` after a corrupt compact sees the warm DB restored from backup but the cool tier still contains the fragments that caused the corruption — the next `bth compact` immediately re-corrupts the DB. The repair is not idempotent and the user must know to manually delete the bad fragments before recompacting, which is exactly the manual step repair was supposed to eliminate.
+2. False assumption: that "warm→cool re-export" is separable from the repair correctness guarantee. The invariant bathos depends on is that cool and warm are consistent after any repair operation. Delivering a repair command that leaves them inconsistent by design means the command's postcondition is weaker than the invariant it claims to restore.

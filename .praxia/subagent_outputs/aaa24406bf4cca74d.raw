@@ -1,0 +1,1 @@
+Worktree-aware workspace resolution for bth is fully shipped: designed, hardened, implemented, merged to main (be85939, 677 tests passing), backlog reconciled, and handoff written. Nothing pending; the only optional next action is implementing backlog #1684, the CI grep guard.

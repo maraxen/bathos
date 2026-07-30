@@ -1,0 +1,45 @@
+## Cisterna Public API/Integration Contract — Research Findings
+
+### 1. Emitter registry/protocol (asset export)
+
+`src/cisterna/export/base.py:41-65` — `Emitter` is an ABC with one method: `emit(self, bundle: AssetBundle) -> dict[str,str]`. Contract (documented in the module docstring, lines 1-32): **pure** (zero I/O), **deterministic**, **forward-slash paths**, **never-raise**. A consumer wanting a new export surface subclasses `Emitter`.
+
+`src/cisterna/export/registry.py` — dispatch is via `importlib.metadata` entry points, group `"cisterna.emitters"` (line 18). Built-ins are `claude|cursor|copilot|antigravity` (lines 36-42); `_load_entry_point_factories()` (line 45) merges built-ins with anything a consumer package registers under that entry-point group in its own `pyproject.toml`. `get_emitter(surface, emit_command_bodies=...)` (line 78) is the lookup API; failures degrade to `None` + WARNING log rather than raising.
+
+Bathos would **not** register itself as an emitter — bathos is the manifest *source*, not a rendering *target*. The asset-source side is `src/cisterna/assets/protocol.py:10` — `AssetSource` is a `Protocol` with just `load(self) -> LoadReport` (never-raise). The concrete, ready-made implementation is `src/cisterna/assets/manifest.py:20` `ManifestAssetSource`, which parses a praxia-style `.praxia/manifest.toml` `[plugin]` table (skills/agents/hook_specs/mcp/commands — see `_load_skills`/`_load_agents`/`_load_mcp` lines 82-196) into an `AssetBundle`. This is the manifest schema a project must produce to be a "manifest source" for the claude/cursor/copilot/antigravity emitters — bathos's own `export.py` logic would be replaced/reduced to authoring a `manifest.toml` (or a `CompositeAssetSource`, referenced in `cli.py:187`) rather than hand-writing per-surface exporters.
+
+### 2. Registration subsystem (`registration/*`)
+
+Intended usage is the `@cisterna.tool` decorator (`registration/decorator.py:13,17`) → named-partition registry (`registration/registry.py:47,105`, snapshot semantics C6 at lines 81-97) → `cisterna.wire(server, app, registry=..., expected=[...])` (`registration/wired.py:77`) which snapshots the registry, wraps each tool via `compose_mcp_callable` (`registration/compose.py:41`, guarantees E2 always-async outer form + E1 sync/async dispatch + H1 signature copy), registers on a `fastmcp.FastMCP` and optionally a `cyclopts.App`. **Hard invariant C5**: none of `wire`/`compose`/decorator ever touch telemetry — that's owned exclusively by `CisternaMiddleware`/adapters.
+
+`registration/shim.py` is **not** a migration-compat shim for adapting bathos's *existing* registration code — despite the name, it's the internal `dispatch`/`cli_dispatch` sync↔async plumbing (lines 45-126) used inside `compose_mcp_callable`. There is no dedicated "adapt my existing decorator" helper; adopting `cisterna.tool`/`wire()` means bathos's tool functions get re-decorated/re-registered under cisterna's registry, an actual migration of the registration call sites, not a shim layer.
+
+### 3/3b. Telemetry schema, bridging, and probes
+
+Schema: `telemetry/record.py:7` `Record` (frozen, slotted) — `name, ts, run_uuid, mcp_request_id, task_id, request_id, session_id, phase, fields: dict`. `telemetry/span.py:18,90,136` gives `span()`/`job_span()`/`aspan()` context managers emitting `<name>.start`/`<name>.end` pairs; `job_span` (line 90) reads `MYX_JOB_ID`/`BTH_TASK_ID` and `MYX_RUN_UUID`/`BTH_RUN_UUID` — i.e., it's already aware of bathos's env-var conventions. `telemetry/pipeline.py:78` `EventPipeline` is a bounded-queue fan-out to `ExporterBase` subclasses (JsonlExporter `telemetry/exporter.py:48`, optional `OtlpExporter` `telemetry/otlp_exporter.py:31`, gated by `CISTERNA_OTLP_ENDPOINT`). `telemetry/self_obs.py` provides consumer-side liveness (`StatusReport`, heartbeat write-probe, CH-12).
+
+**Bridging story**: there is no code-level "ingest another tool's existing JSONL" adapter in cisterna itself. Instead the pattern (per `.praxia/docs/runbooks/cisterna-telemetry.md:123-131`) is that **each consumer repo authors its own `telemetry_bridge.py`** (e.g. `bathos/src/bathos/telemetry_bridge.py` — confirmed **not yet present** in bathos, only `export.py` exists) calling `init_server_telemetry()` and routing calls through `cisterna.traced_tool(<Adapter>())`. Cisterna ships a matching per-consumer `AdapterBase` subclass already tailored to bathos's response shape: `src/cisterna/adapters/base.py:115` `BathosAdapter` (dict envelope w/ ok/error_code/error/resolution_hint — matches bathos's Sprint-43 MCP error envelope) plus `ContemplexAdapter`, `XpeririAdapter`, `MyxcelAdapter`. Gate: `probe/telemetry_env.py:10` `consumer_telemetry_enabled()` reads `CISTERNA_TELEMETRY` (unset/off, `all/1/true/yes`, or exact consumer name). `probe/capability_probe.py:32` `CONSUMER_SURFACE` maps bathos → `v3_middleware` (if fastmcp v3 `Middleware` importable) else falls back to `v2_decorator`. Bathos's own 9-JSONL-event-surface telemetry is **not automatically bridged**; bathos would write a bridge module that calls `cisterna.init()`/`traced_tool`/`span()` from its existing call sites (i.e., dual-emit during cutover), not point cisterna at bathos's existing JSONL files.
+
+`probe/telemetry_doctor.py` and `probe/telemetry_env.py` are explicitly meant to be run **against/by** consumer repos during cutover — `_KNOWN_CONSUMERS = ("bathos","contemplex","xperiri","myxcel")` (`telemetry_doctor.py:15`), checks log-dir writability, OTLP config, job-context env, and (added in commit **d4fcaf4**, "m10.4 doctor --consumer scoped gate") a `--consumer`/`CISTERNA_DOCTOR_CONSUMER` filter scoping the `telemetry_gate` check to one consumer, raising `SystemExit(2)` for unknown names before the report runs (`cli.py:113-117`, `telemetry_doctor.py:41-53`).
+
+### 4. CLI surface
+
+`cisterna` (cyclopts app, `cli.py:54`) exposes:
+- `cisterna assets export` (`cli.py:133`, flags `--dry-run --registry --out --import --name --version --manifest --emit-command-bodies --surface`)
+- `cisterna assets inspect` (`cli.py:310`)
+- `cisterna assets validate` (`cli.py:359`)
+- `cisterna telemetry doctor` (`cli.py:68`, flags `--json --strict --consumer`) — this **is** the "consumer scoped gate for cutover" command; CI usage is `cisterna telemetry doctor --json --strict` and sibling-repo cutover adds `--consumer <name>`.
+
+`adapters/cli.py` is unrelated (explicitly flagged as a "coexistence" gotcha in `cli.py:17-20`) — it's `CliAdapter`/`timed_command` for instrumenting Typer/CLI command timing (`cli.cmd_start`/`cli.cmd_end`), not a subcommand tree.
+
+### 5. dogfood_praxia fixture (concrete template)
+
+`tests/fixtures/manifest_dogfood_praxia/manifest.toml` is the best template: a `[plugin]` table with `name/version/description/requires_praxia`, `[[plugin.skills]]` (name+path → `skills/orchestration/SKILL.md`, `skills/handoff/SKILL.md`), `[[plugin.agents]]` (name/path/description/tools), `[[plugin.hook_specs]]` (event/matcher/script/tier/surfaces), `[plugin.export_command]` (per-surface command file lists for claude_code/cursor), plus `[[plugin.workflows]]`, `[[plugin.pipelines]]`, `[[plugin.snippets]]` (extension sections validated by `assets/manifest_extensions.py`, not part of core `AssetBundle`). Golden digests exist per surface at `tests/golden/dogfood_praxia/{claude,cursor,copilot,antigravity}/.../digest.sha256`, used for regression-testing emitter output byte-stability.
+
+### 6. Docs / onboarding
+
+No `.praxia/docs/INDEX.md` and no top-level `docs/` exist in cisterna. The closest thing to consumer-onboarding guidance is `.praxia/docs/runbooks/cisterna-telemetry.md` (telemetry cutover checklist, per-consumer bridge table, verification commands) plus scattered `.praxia/docs/research/*epic-closeout-audit.md` / handoff notes — there is no single authoritative migration guide.
+
+### 7. Python version floor
+
+`pyproject.toml:10` `requires-python = ">=3.13"`; `.python-version` = `3.13`. `export/registry.py:49-51` explicitly notes "Python <3.10 compatibility path not needed (requires-python >=3.13)" — this reads as a **stated project policy**, not evidence of a hard 3.13-only stdlib feature; the `entry_points(group=...)` API used works from 3.10+. No 3.13-specific stdlib feature (e.g. no free-threading, no PEP 703/PEP 667 usage found) was found gating this in the code searched. Since bathos is `>=3.12`, this is a real floor mismatch to resolve (bump bathos's floor, or get cisterna to relax it) rather than a technical impossibility — no compat shim exists in cisterna today.

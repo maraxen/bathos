@@ -1,0 +1,99 @@
+Perfect! Now let me create a comprehensive summary of the implementation:
+
+---
+
+## Summary
+
+**Task**: Implement Phase 1 of backlog item #791: `bth outputs` subcommand group for inspecting and summarizing run output files.
+
+**Status**: ✅ COMPLETE
+
+### Changes Made
+
+**1. `src/bathos/rich_fmt.py` (+178 lines)**
+   - **`render_output_list(run_id, files, live=False)`**: Renders a Rich table showing output files for a single run
+     - Columns: Path (truncated), Status (color-coded: green=present, red=missing, yellow=unreadable), Size (human-readable), Modified (ISO format), SHA256 (first 8 chars)
+     - If `live=True`, re-stats files from filesystem without persisting to catalog
+     - Handles empty file lists with informational message
+   
+   - **`render_outputs_summary(rows, since=None)`**: Renders a Rich table aggregating stats across runs
+     - Columns: Project, Runs, Files, Total Size (human-readable), Missing (count)
+     - Adds footer row with totals when multiple projects present
+     - Prints hint to run `bth compact` if no data found
+
+**2. `src/bathos/cli.py` (+117 lines)**
+   - Created `outputs_app = typer.Typer()` subcommand group
+   - **`bth outputs list <run_id> [--live]`**: Displays output files for a run
+     - Queries catalog, parses `run.output_metadata` JSON, calls `render_output_list()`
+     - Exits with error code 1 if run not found
+   
+   - **`bth outputs summary [--project <slug>] [--since <period>]`**: Aggregates across runs
+     - Queries warm-tier DuckDB (requires `bth compact` to have been run)
+     - Supports `--project` filter by slug
+     - Supports `--since` with formats: `30d`, `7d`, `1d`, `6h`, `30m` (maps to SQL intervals)
+     - Aggregates file counts, total bytes, missing counts by project
+     - Calls `render_outputs_summary()` with aggregated data
+
+**3. `src/bathos/mcp.py` (+145 lines)**
+   - **`list_outputs_tool(run_id, workspace_root=None, live=False)`**: MCP mirror of CLI list command
+     - Returns `{"run_id": ..., "files": [...], "live": bool}`
+     - Handles live re-stat same as CLI version
+   
+   - **`outputs_summary_tool(workspace_root=None, project=None, since=None)`**: MCP mirror of CLI summary command
+     - Returns `{"rows": [...], "since": since}`
+     - Aggregates same way as CLI version
+
+**4. `src/bathos/new_experiment.py` (+7 lines)**
+   - Added comment block documenting the optional output artifacts pattern:
+     ```python
+     # --- Output artifacts (optional) ---
+     # To register output files with the catalog, pass --out to `bth run`:
+     #   bth run scripts/experiments/{name}.py --out outputs/my_run/results.json
+     # bathos records path + size + sha256 at compact time. Query with:
+     #   bth outputs list <run_id>
+     #   bth outputs summary
+     ```
+
+**5. `tests/test_outputs.py` (+178 lines)**
+   - **Test Classes**:
+     - `TestRenderOutputList` (3 tests): Test rendering with empty files, snapshot mode, live re-stat
+     - `TestRenderOutputsSummary` (3 tests): Test rendering across projects, single project, empty data
+     - `TestOutputsListCommand` (2 tests): Verify commands exist and are callable
+     - `TestMCPTools` (2 tests): Verify MCP tools exist and are callable
+   - **Total**: 10 tests, all passing
+
+### Key Design Decisions
+
+1. **No UPDATE to catalog on --live re-stat**: Display updates only, never write back. This maintains catalog as a point-in-time snapshot (addresses debt item #71).
+
+2. **output_metadata structure**: Directly uses the JSON list stored in warm-tier `output_metadata` column. Each entry has: `{path, status, size_bytes, mtime_unix, sha256}`.
+
+3. **Time filtering**: Uses DuckDB SQL interval syntax for filtering by `--since` parameter. Supports `d` (days), `h` (hours), `m` (minutes).
+
+4. **Human-readable formatting**: Sizes shown as B/KB/MB/GB with proper thresholds. Timestamps in ISO format (YYYY-MM-DDTHH:MM:SS).
+
+5. **Status color-coding**: Green (present), red (missing), yellow (unreadable), dim (unknown).
+
+### Verification
+
+✅ **All tests pass**: 570 passed, 4 skipped, no regressions
+✅ **Syntax check**: All source files compile cleanly  
+✅ **Test suite for new features**: 10 tests in `test_outputs.py` covering rendering, commands, and MCP tools
+
+### Files Modified
+
+| File | Changes | Lines |
+|------|---------|-------|
+| `src/bathos/rich_fmt.py` | Added 2 render functions | +178 |
+| `src/bathos/cli.py` | Added outputs_app with 2 commands | +117 |
+| `src/bathos/mcp.py` | Added 2 MCP tools | +145 |
+| `src/bathos/new_experiment.py` | Added documentation comment | +7 |
+| `tests/test_outputs.py` | Created test suite | +178 |
+
+**Total**: 5 files changed, 625 insertions(+)
+
+### Git Commit
+```
+commit a3147a9
+feat(cli): add bth outputs list/summary, render functions (#791)
+```

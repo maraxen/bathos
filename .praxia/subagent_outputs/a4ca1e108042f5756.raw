@@ -1,0 +1,72 @@
+I have enough context. Here's the critique.
+
+---
+
+# Critique: `260527_telemetry-design.md`
+
+## Findings
+
+### F1 — D1/§Architecture: stdlib + QueueListener is correct, but the asyncio claim under-specifies the gotcha
+The spec asserts `QueueHandler.emit()` is sub-microsecond and lock-free. That's true for `Queue.put_nowait`, **but the default `logging.QueueHandler.prepare()` calls `self.format(record)` only when `respect_handler_level` is set on the listener — by default it formats lazily on the listener thread**, which is what you want. Confirm the spec pins `queue_handler.prepare = lambda record: record` (or equivalent) so the event loop never touches the JsonFormatter. Otherwise, formatting can run in the asyncio thread despite the queue.
+
+Also unaddressed: **subprocess fork inheritance**. `bth run` spawns `subprocess.run(argv)` (runner.py:215). When the child is a Python script that *also* uses bathos (e.g., `@bth.experiment`), it inherits the parent's `QueueListener` thread but the listener thread itself is not forked safely (Python's fork+threads is hazardous). Since `subprocess.run` uses `fork+exec` rather than bare fork, the listener dies cleanly in the child via exec — **but this should be stated explicitly in the spec** so no one later swaps in `multiprocessing` with fork-start. One sentence in §Architecture.
+
+aiologger / structlog: rejection of aiologger is sound. **structlog deserves a one-line dismissal in D1** — it's the more idiomatic choice for JSONL with contextvars-style binding and would avoid the custom `JsonFormatter` and the contextvar-capture footgun in F2. Saying "zero new deps" is the right answer, but acknowledge the alternative.
+
+### F2 — §Correlation: this is a real bug as written
+> "ContextVars propagate correctly across asyncio.Task boundaries; threads inherit the calling task's context if logging is initialized via `contextvars.copy_context().run(...)` at the listener boundary (the formatter reads them, the listener thread doesn't need them)."
+
+This is wrong in the direction that matters. The listener thread runs in its **own** context — the ContextVars set in the caller are *not* visible there. `JsonFormatter.format()` running in the listener thread will see empty `run_uuid` / `mcp_request_id` 100% of the time. The fix is **capture at `emit()` time**: either (a) override `QueueHandler.prepare()` to snapshot `run_uuid_var.get()` etc. onto `record.__dict__` before enqueue, or (b) install a `logging.Filter` on the QueueHandler that does the same. The spec hand-waves this with "logging is initialized via `copy_context().run(...)` at the listener boundary" which doesn't actually propagate per-record context.
+
+**Required fix:** rewrite §Correlation to say contextvars are captured on the producer thread in `QueueHandler.prepare()` (or a Filter) and attached to the `LogRecord` as plain attributes. The formatter then reads `record.run_uuid` etc., not the ContextVar.
+
+### F3 — §Event taxonomy: rsync heartbeat is the wrong mechanism
+The spec proposes a background thread polling subprocess liveness every 5s. Two problems:
+
+1. **It detects "subprocess alive" not "subprocess making progress"** — a wedged rsync waiting on a dead TCP connection is "alive" for the full 120s timeout. The heartbeat will faithfully report nothing wrong while you actually hang.
+2. **`sync.py:94` uses `subprocess.run(..., capture_output=True)` which buffers everything to EOF.** A heartbeat thread polling `Popen.poll()` requires switching to `Popen` first — that's a real code change the spec elides ("wrap rsync subprocess").
+
+**Suggested fix:** switch to `Popen` with `--info=progress2 --out-format='%i %n'` on stderr, stream-parse, and emit `sync.rsync_progress` with `bytes_transferred_so_far` and `files_transferred_so_far` parsed from rsync itself. Liveness comes for free (no progress line for N seconds = real hang signal). This also gives you honest hang detection for the existing 120s kill switch.
+
+For `run.*`: yes, add `run.heartbeat` for the subprocess wait loop. A multi-hour MD simulation under `bth run` currently produces a single `run.start` and a single `run.subprocess_exit` — invisible in between. One heartbeat per N seconds (configurable, default 60s) gated on a wall-clock threshold (only fire if `duration > 60s`) closes the audit gap cheaply.
+
+### F4 — §Event taxonomy: missing surfaces the user explicitly cares about
+The taxonomy omits surfaces that *already exist* in the codebase and are exactly the kind of thing the user wants to debug:
+
+- **`prereg.*`** — `runner.py:164` calls `gate_check`; gate denials currently print to stderr and exit 1. A denial event with `phase`, `reason`, `script_path`, `git_hash` is the single most useful thing for "why did my agentic run fail?"
+- **`sidecar.*`** — `runner.py:128` raises `SidecarError`; a `sidecar.parse_error` event is essential.
+- **`postmortem.*`** — `mcp.py:872` writes/validates postmortems; `postmortem.validate_failed` belongs here.
+- **`campaign.*`** — `campaigns.py` mutations (create/conclude). One event per mutation, low volume, high audit value.
+- **`lineage.*`** — `derived_from` resolution failures.
+
+These are not "future polish." They are inside the four surfaces the spec already claims to cover (runner, mcp). Add them to §Event taxonomy.
+
+### F5 — §Operational: SLURM concurrent writes is the real load-bearing risk and the spec doesn't address it
+`~/.bth/logs/events.jsonl` is a single file path. Under N=10 parallel SLURM array tasks on the cluster, all writing to `~/.bth/logs/events.jsonl` via `RotatingFileHandler`:
+
+- `RotatingFileHandler` is **not multi-process safe**. Two processes hitting rotation simultaneously truncate each other's writes. There's an interlock for threads in one process, none across processes.
+- Even without rotation, concurrent `write()` calls > PIPE_BUF (4096 bytes) on most Linux filesystems are not atomic. JSONL records get interleaved mid-line and `jq` chokes.
+
+**Required fix:** spec must say one of (a) per-process file `events.<pid>.<hostname>.jsonl`, concatenated on demand, or (b) use `ConcurrentRotatingFileHandler` (one dep, drop-in), or (c) log directory partitioned by `$SLURM_JOB_ID` when present. Option (a) is YAGNI-friendly and also solves the sync-from-cluster question in F6.
+
+### F6 — §Out of scope: deferring remote-shipping defeats the stated goal
+The user wants "audit bugs and hang-ups in one place." Cluster `bth run` invocations happen on compute nodes. If `events.jsonl` lives at `~/.bth/logs/events.jsonl` on the compute node and is never synced, the user literally cannot see cluster-side events from their laptop. This is the dominant use case (SLURM is in the project rules) and the spec defers the only mechanism that closes it.
+
+**Required fix:** either (a) include `bth sync` extension to ship `~/.bth/logs/*.jsonl` (cheap; sync.py already does rsync), or (b) write logs into `<catalog_dir>/logs/` so existing `bth sync` picks them up via the cool-tier sync path. Option (b) is one path change and zero new code. The spec hints at this ("defaults next to the catalog so `bth sync` semantics extend naturally later") — promote it from a parenthetical to the chosen default.
+
+### F7 — Nit: rotation arithmetic
+§Risks says "50 MB × 5 = 250 MB worst case" but §Architecture says "10 MB × 5". 10 × 5 = 50, not 250. Fix one or the other.
+
+### F8 — Nit: §Risks "ContextVar leakage across MCP requests"
+Mitigation "Decorator uses `contextvars.copy_context()` per call" is correct *only* if the decorator runs the wrapped tool inside the copied context (`ctx.run(fn, ...)`). Setting a ContextVar inside an `async` function via `var.set(...)` is already request-scoped because each `asyncio.Task` gets its own context copy at task creation. State which mechanism you're using — the two have different failure modes.
+
+### F9 — Nit: `event()` and `span()` API are under-specified
+What does `span()` do on uncaught exception — emit `name.end` with `ok=false` or `name.error`? Pick one. What's the timing precision — `time.monotonic_ns()`? What happens when `event()` is called before `init_telemetry()` — silent drop, lazy init, or warn-and-route-to-stderr? These are 3 lines of spec that save a round of bug reports.
+
+## Verdict
+
+**NEEDS_REVISION**
+
+Blocking issues: F2 (contextvar capture is wrong as written — empty correlation fields in production), F3 (heartbeat mechanism doesn't detect real hangs and requires `Popen` refactor not acknowledged), F4 (missing surfaces that already exist), F5 (multi-process SLURM writes will corrupt JSONL), F6 (without log sync, cluster-side audit goal is unmet).
+
+Nits (F1, F7–F9) can ride along with the revision.

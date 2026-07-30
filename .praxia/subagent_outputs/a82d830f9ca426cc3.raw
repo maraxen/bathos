@@ -1,0 +1,1 @@
+Implemented full telemetry instrumentation for bathos across 13 modules and 9 event surfaces, then ran the auditor and fixed findings. Next: update the using-bathos skill file with three small additions.

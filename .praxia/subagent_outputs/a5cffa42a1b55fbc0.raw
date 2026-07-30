@@ -1,0 +1,1 @@
+Designing a unified telemetry layer for bathos (stdlib logging + QueueHandler to JSONL at ~/.bth/logs/, covering run/mcp/sync/catalog surfaces). Architecture and event taxonomy approved; next is your sign-off to draft the JSON schema doc and call-site integration plan.

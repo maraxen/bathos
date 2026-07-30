@@ -1,0 +1,1 @@
+Goal: ship the literature-parity epic (#2214). After the W3 audit failed, we redesigned the broken B1 decision and merged the schema-v9 foundation to main (887 tests green). Next: the gate-layer fixer finishes, then I integrate, Sonnet-audit, and report for your W4 decision.

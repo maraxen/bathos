@@ -1,0 +1,1 @@
+Sprint is adding gate taxonomy fixes and sprint-audit signal tests to bathos v0.6.1. S2-B (18 boundary tests) is running in background — once it completes and tests pass, the sprint is done.

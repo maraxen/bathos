@@ -58,9 +58,6 @@
 
 ## Preregistration
 - [260520_prereg-nonrepudiation-design](preregistration/260520_prereg-nonrepudiation-design.md)
-- [260601_sprint-audit-threshold-rationale](decisions/260601_sprint-audit-threshold-rationale.md) — Documents domain rationale for all 7 sprint-audit signal thresholds; resolves schema_overflow_rate semantics (any-key check was a bug; fix: cross-reference against result_schema declared keys) — D5: v0.6 ships self-signed manifest only (content-hash + git-commit-bound); external TSA / OSF deferred to v0.7+
-- [260721_bp2-bp3-claim-tier-gate-ports](decisions/260721_bp2-bp3-claim-tier-gate-ports.md) — Design decisions for porting asr's C1 invariant gate and C5 negative-claim check into bathos's native claim tier
-
 
 ## Reference
 

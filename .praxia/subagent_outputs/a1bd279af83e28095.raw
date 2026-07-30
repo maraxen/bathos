@@ -1,0 +1,1 @@
+Added output path enforcement to bathos preventing /tmp results from being cataloged. Version bumped to 0.9.1 and installed. No immediate next action needed.

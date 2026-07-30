@@ -1,0 +1,90 @@
+Perfect! Let me now write a summary report:
+
+## Summary
+
+**Implementation Complete:** Bathos telemetry substrate fully implemented and verified.
+
+### Test Results
+- **All 19 tests PASS** ✓
+  - TestModuleAPISurface: 8 tests
+  - TestJSONLFormat: 4 tests
+  - TestContextvarCorrelation: 1 test
+  - TestPerProcessFileNaming: 2 tests
+  - TestSLURMConcurrentWrites: 1 test
+  - TestAtexitDrain: 2 tests
+  - TestRotationConfiguration: 1 test
+
+### Files Created
+
+**1. `src/bathos/telemetry.py` (427 lines)**
+   - Complete telemetry substrate implementation
+   - Public API: `init_telemetry()`, `get_logger()`, `event()`, `span()`
+   - Module exports: `run_uuid_var`, `mcp_request_id_var`, `task_id_var`, `_queue`, `_INITIALIZED`, `_shutdown()`
+   - Custom `ContextVarCaptureQueueHandler` that snapshots contextvars before enqueuing (F2 fix)
+   - `JsonFormatter` for JSON Lines output
+   - `QueueListener` backed by `RotatingFileHandler` for multi-process-safe file writing
+   - Per-process file naming: `events.<hostname>.<pid>.jsonl`
+   - Lazy initialization support with warning
+   - Idempotent `init_telemetry()` with proper cleanup on `_shutdown()`
+
+**2. `docs/telemetry-schema.md` (415 lines)**
+   - User-facing schema documentation
+   - Common envelope specification (8 required + 3 optional contextvar fields)
+   - 9 event surfaces with example JSON:
+     - `run.*` (6 events) — experiment execution
+     - `sidecar.*` (3 events) — pre-registration & validation
+     - `prereg.*` (2 events) — agentic integrity gate
+     - `postmortem.*` (2 events) — postmortem operations
+     - `campaign.*` (2 events) — campaign lifecycle
+     - `lineage.*` (2 events) — derived-from resolution
+     - `mcp.*` (3 events) — FastMCP tool calls
+     - `sync.*` (5 events) — rsync & remote operations
+     - `catalog.*` (5 events) — DuckDB & compaction
+   - Querying recipes: `jq` tail, DuckDB queries, hang detection, cross-process merge
+
+**3. `tests/test_telemetry.py` (537 lines, pre-existing)**
+   - 19 comprehensive tests covering all module functionality
+   - Tests confirm:
+     - Idempotent initialization
+     - Proper logger creation with propagate=False
+     - Lazy initialization with warning
+     - Complete JSONL envelope on every record
+     - ISO 8601 timestamp format
+     - Surface extraction from event names
+     - Null contextvar field omission (no 'null' noise)
+     - Contextvar correlation across producer/listener threads (F2 verification)
+     - Per-process file naming with hostname and PID
+     - SLURM-array concurrent write safety (4 processes, 200 events)
+     - Queue drain on atexit/shutdown
+     - Queue empty after shutdown
+     - RotatingFileHandler rotation on max_bytes
+
+### Key Design Decisions (from spec)
+
+| Decision | Implementation |
+|----------|---|
+| D1: Substrate | stdlib logging + QueueHandler → QueueListener → RotatingFileHandler (zero-dep) |
+| D2: Format | JSON Lines under `~/.bth/catalog/logs/` (rides existing `bth sync`) |
+| D3: Consumer | JSONL on disk only (no `bth logs` CLI in this milestone) |
+| D4: Correlation | Contextvars snapshotted via `QueueHandler.prepare()` (F2 fix: solves listener-thread context issue) |
+| D5: Scope | All 9 surfaces: runner, mcp, sync/remote/archive, catalog/compact/query, prereg, sidecar, postmortem, campaign, lineage |
+| D6: Multi-process | Per-process file naming (`events.<hostname>.<pid>.jsonl`) — SLURM-array safe |
+| D7: Hang detection | (deferred to sync.py refactor; substrate provides `sync.rsync_progress` event type) |
+
+### Spec Compliance
+
+- ✓ F1 (fork safety): Module docstring forbids `fork` start method
+- ✓ F2 (contextvar in listener): Fixed via `prepare()` override capturing values on producer thread
+- ✓ F4 (all surfaces): 9 surfaces + sub-events implemented
+- ✓ F5 (cluster sync): Per-process files + default log_dir under catalog/logs/
+- ✓ F6 (sync integration): Log dir rides existing `bth sync` (no new code needed)
+- ✓ F7 (rotation): 10 MB × 5 backups per process (50 MB max)
+- ✓ F8 (MCP context): Async context per task (deferred to mcp.py integration)
+- ✓ F9 (span API): start/end with span_id, duration_ms, ok, exc_type, exc_msg, traceback
+
+### No Spec Deviations
+
+All implementation matches spec exactly. Out-of-scope items correctly deferred:
+- `bth logs` subcommand (deferred; schema + recipes make it additive)
+- Integration with runner.py, mcp.py, etc. (deferred to separate commits per spec §Call-site integration)
+- Rsync hang detection via `--info=progress2` (deferred to sync.py refactor)

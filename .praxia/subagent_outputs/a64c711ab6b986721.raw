@@ -1,0 +1,31 @@
+The full picture is now clear.
+
+FAIL
+
+**Issues found:**
+
+**Critical: Implementation not present — tests are placeholder stubs only**
+
+The implementation for backlog item #760 has not been written. All three required source files are unmodified:
+
+1. `/home/marielle/projects/bathos/src/bathos/sidecar.py` — `OutcomeSpec.source` field is absent. `Sidecar.regression_threshold_basis` field is absent. `_parse_outcomes` still builds `OutcomeSpec` without `source=`. The benchmark `parse_sidecar` branch does not pass `regression_threshold_basis=`.
+
+2. `/home/marielle/projects/bathos/src/bathos/linter.py` — `_NUMERIC_LITERAL_RE` constant does not exist. `check_threshold_basis()` function does not exist.
+
+3. `/home/marielle/projects/bathos/src/bathos/cli.py` — `check_threshold_basis` is not imported and not called in the `lint` command body.
+
+**Test file exists but is entirely xfail stubs:**
+
+`/home/marielle/projects/bathos/tests/test_threshold_lint.py` was committed with all 14 functional test cases marked `@pytest.mark.xfail(strict=True, reason="check_threshold_basis not yet implemented (#760)")`. The file's own docstring (line 3) states: *"All tests are marked xfail(strict=True) because check_threshold_basis does not exist yet in linter.py. Once the implementation is merged the xfail markers must be removed and all tests should pass."*
+
+**Test suite result breakdown:**
+- 499 passed, **14 xfailed** (all 14 are the #760 threshold lint tests passing only because the function is missing — an `ImportError` on `from bathos.linter import check_threshold_basis` is what causes the expected failure)
+- The suite appears green but it is not: item #760 is unimplemented and all its tests are deliberately disabled
+
+**No regressions** in existing linter or sidecar tests (the 499 non-xfail tests pass cleanly). TC-13 (`test_existing_tier2_check_adversarial_checks_still_passes`) passes because it uses the already-implemented `check_adversarial_checks`.
+
+**Required before verdict can flip to PASS:**
+- Implement the 4 changes in `sidecar.py` per spec §"Data Model Changes"
+- Implement `_NUMERIC_LITERAL_RE` + `check_threshold_basis()` in `linter.py` per spec §"Linter Changes"
+- Wire `check_threshold_basis` into `cli.py` lint command per spec §"CLI Changes"
+- Remove all `@pytest.mark.xfail` markers from `tests/test_threshold_lint.py` (14 occurrences) and verify all 14 tests pass

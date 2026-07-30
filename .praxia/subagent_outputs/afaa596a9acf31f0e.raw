@@ -1,0 +1,157 @@
+Perfect. Now let me create the final recon report with all the findings:
+
+```json
+{
+  "query": "Has global instruction portability (composable snippets for multi-surface export, item #137) been implemented?",
+  "answer": "NOT_STARTED. The feature is declared in `.praxia/manifest.toml` with one snippet entry (`bathos-rules`) but the export infrastructure is entirely stubbed. The `--surface` flag exists but returns immediately with a diagnostic message (cli.py:1226-1227). No `export_snippet()` function, no snippet loader, and no manifest reader in export.py exist.",
+  "scope": {
+    "roots": ["src/bathos", "agent_assets", ".praxia"],
+    "file_types": ["py", "md", "toml"],
+    "excluded": [".venv", ".claude/worktrees"]
+  },
+  "findings": [
+    {
+      "cluster": "Design & Planning",
+      "items": [
+        {
+          "path": ".praxia/docs/specs/260602_item-137-global-instruction-portability.md",
+          "line": 1,
+          "kind": "spec",
+          "symbol": "Item #137 Design Document",
+          "why_relevant": "Complete problem decomposition dated 2026-06-02. States: 'Status: Problem Decomposition — all hard decisions deferred to user; not ready to spec'. Documents 10 open design questions, 5 key decision points (canonical source, surface mapping, scope_detector, manifest awareness, target path convention), and identifies the core divergence: `agent_assets/snippets/rules.md` (invocation discipline) vs `~/.claude/rules/BATHOS.md` (measurement heuristic) with zero automation between them."
+        }
+      ]
+    },
+    {
+      "cluster": "Manifest Declaration",
+      "items": [
+        {
+          "path": ".praxia/manifest.toml",
+          "line": 15,
+          "kind": "config",
+          "symbol": "plugin.snippets[bathos-rules]",
+          "excerpt": "[[plugin.snippets]]\nname           = \"bathos-rules\"\npath           = \"agent_assets/snippets/rules.md\"\nscope          = \"project\"\nscope_detector = \"glob:scripts/**/*.bth.toml\"",
+          "why_relevant": "Declares one snippet entry with scope='project' and scope_detector. No other snippets defined. The export pipeline does not yet read this."
+        },
+        {
+          "path": ".praxia/manifest.toml",
+          "line": 29,
+          "kind": "config",
+          "symbol": "plugin.export_command",
+          "excerpt": "[plugin.export_command]\nclaude_code = [\"bth\", \"export\", \"--surface\", \"claude_code\", \"--level\", \"user\"]",
+          "why_relevant": "Declares the post-install hook that praxia will call. Currently a no-op stub in cli.py."
+        }
+      ]
+    },
+    {
+      "cluster": "Source Files Exist but Not Exported",
+      "items": [
+        {
+          "path": "agent_assets/snippets/rules.md",
+          "line": 1,
+          "kind": "definition",
+          "symbol": "bathos-rules snippet source",
+          "why_relevant": "Source file for the one declared snippet. Contains invocation discipline rules (uv run pattern, DuckDB syntax, bth sync ownership, etc.). No automated export path to `~/.claude/rules/` exists."
+        }
+      ]
+    },
+    {
+      "cluster": "Export Implementation (Stubbed)",
+      "items": [
+        {
+          "path": "src/bathos/export.py",
+          "line": 22,
+          "kind": "definition",
+          "symbol": "_CLAUDE_TARGETS, _GEMINI_TARGETS",
+          "excerpt": "_CLAUDE_TARGETS: dict[str, Path] = {\n    \"user\": Path.home() / \".claude\" / \"skills\" / \"using-bathos\" / \"SKILL.md\",\n    \"workspace\": Path(\".claude\") / \"skills\" / \"using-bathos\" / \"SKILL.md\",\n    \"system\": Path(\"/etc/claude/skills/using-bathos/SKILL.md\"),\n}",
+          "why_relevant": "Export targets exist for skill (procedural) export but NOT for rules (behavioral) export. No targets like `~/.claude/rules/` or `.claude/rules/` defined. No equivalent for snippets."
+        },
+        {
+          "path": "src/bathos/export.py",
+          "line": 125,
+          "kind": "definition",
+          "symbol": "export_skill()",
+          "why_relevant": "Only exports skill (using-bathos/SKILL.md). No counterpart `export_snippet()` function exists. File is marked 'UNCHANGED — do not touch' in CLAUDE.md:144."
+        }
+      ]
+    },
+    {
+      "cluster": "CLI Surface Stub",
+      "items": [
+        {
+          "path": "src/bathos/cli.py",
+          "line": 1220,
+          "kind": "definition",
+          "symbol": "export_cmd() --surface parameter",
+          "excerpt": "surface: str | None = typer.Option(None, \"--surface\", help=\"Plugin surface (e.g., claude_code)\")",
+          "why_relevant": "Parameter declared but not functional."
+        },
+        {
+          "path": "src/bathos/cli.py",
+          "line": 1224,
+          "kind": "definition",
+          "symbol": "export_cmd() surface handler",
+          "excerpt": "if surface:\n    from bathos import __version__\n    typer.echo(f\"Plugin export hook: surface={surface}, level={level}, bathos v{__version__}\")\n    raise typer.Exit(0)",
+          "why_relevant": "The entire `--surface` implementation is a no-op stub that prints a diagnostic and exits 0. No export action taken. This is what praxia calls as a post-install hook."
+        }
+      ]
+    },
+    {
+      "cluster": "Backlog Status",
+      "items": [
+        {
+          "path": "CLAUDE.md",
+          "line": 22,
+          "kind": "config",
+          "symbol": "Open backlog item #137",
+          "excerpt": "| 137 | Global instruction portability (separate design session needed) | P2 | — |",
+          "why_relevant": "Listed as P2, open. The design doc (260602_item-137-...) indicates it is waiting for user decisions on 3 critical questions before implementation can proceed."
+        }
+      ]
+    }
+  ],
+  "patterns": [
+    "Snippet declaration exists in manifest (bathos-rules) but no export infrastructure reads or uses it.",
+    "Export module is hardcoded for skill-only (using-bathos/SKILL.md); no generic snippet export function.",
+    "The `--surface` flag is a named stub in the CLI, designed as a praxia post-install hook, but does nothing.",
+    "Two conceptually separate rule files exist (invocation rules in repo, measurement heuristics in user home) with no automation to reconcile them. The design doc identifies this as the core problem.",
+    "The design space is well-articulated in the spec (5 major decision points, 10 open questions) but blocked on user direction — no implementation can proceed without answers."
+  ],
+  "gaps": [
+    "No `export_snippet()` function in export.py",
+    "No snippet loader (manifest.toml is not read by any export code)",
+    "No rules target path convention (`~/.claude/rules/` + naming schema not implemented)",
+    "No scope_detector evaluation logic",
+    "No conflict detection or idempotency guards for rules export",
+    "Gemini CLI equivalence not explored (design doc marks as Q4/TBD)",
+    "AGENTS.md injection mechanism not designed (design doc marks as Q5/TBD)",
+    "No tests for snippet export (marked as Q8/TBD in design doc)"
+  ],
+  "suggestions": [
+    "This feature requires a design decision phase before implementation. The spec identifies 3 highest-priority user decisions needed: (1) Is measurement-heuristic content in `~/.claude/rules/BATHOS.md` repo-owned or user-owned? (2) Composition model: one merged file or many individual files? (3) Scope: Claude Code rules only for v0.8, or include Gemini + AGENTS.md?",
+    "After those decisions, implementation is straightforward: add `export_snippet()` to export.py, a target path resolver, manifest reading in a thin `snippets.py` module, and wire up the `--surface claude_code` stub.",
+    "Consider this a blocker for item #136 (bth-migrate praxia workflow), which depends on understanding how snippets are classified and exported."
+  ],
+  "confidence": "high",
+  "notes": "Spec was generated 2026-06-02, same date as today's recon task. Export.py is marked 'do not touch' in CLAUDE.md, suggesting it was previously analyzed. The manifest.toml declares the infrastructure (plugin.snippets, plugin.export_command) but no code reads it. The --surface stub was explicitly designed as a placeholder for praxia's post-install hook integration. This is a textbook case of declared-but-unimplemented feature with good design documentation but blocked on upstream decisions."
+}
+```
+
+**Verdict: NOT_STARTED**
+
+**Item #137 — "Global instruction portability — composable snippets for multi-surface export"** has been fully **designed** (excellent spec at `.praxia/docs/specs/260602_item-137-global-instruction-portability.md`) but **zero lines of implementation code** exist.
+
+**What exists:**
+1. ✓ Snippet declared in `.praxia/manifest.toml` (`bathos-rules` with scope=project)
+2. ✓ Source file present (`agent_assets/snippets/rules.md`)
+3. ✓ CLI flag `--surface` stubbed in `cli.py:1220-1227`
+4. ✓ Problem decomposition spec with 5 decision points and 10 open questions
+
+**What does NOT exist:**
+1. ✗ `export_snippet()` function
+2. ✗ Manifest reader in export.py (manifest.toml is never read)
+3. ✗ Rules target path convention (`~/.claude/rules/<name>.md`)
+4. ✗ Scope_detector evaluation
+5. ✗ Any snippet composition logic
+
+**Blocker:** The spec explicitly states **"Status: Problem Decomposition — all hard decisions deferred to user; not ready to spec."** Implementation cannot proceed until you answer three core questions: (1) Is `~/.claude/rules/BATHOS.md` repo-owned content or user-personal? (2) Composition model: one merged file or many coexisting files? (3) Which surfaces for v0.8 (Claude Code only, or include Gemini + AGENTS.md)?

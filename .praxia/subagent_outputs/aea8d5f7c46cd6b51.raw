@@ -1,0 +1,124 @@
+All evidence checked against actual code. Here is my defense, objection by objection.
+
+---
+
+## Defense Report — spec-defender
+
+### O1 [BLOCKER] — off-by-one site count → **CONCEDE (wording)**
+
+**Evidence:** A fresh grep for `.root`-as-fs-root returns exactly **7** sites: `compact.py:410`, `cli.py:1535/1591/1677`, `mcp.py:969/1028/1051`. The §1 table is internally correct (7 numbered rows). But the prose at §1:15 ("**8 call sites**"), §3:62, §12 T3, AC-10 context, and ASM-5 all say "8."
+
+**Verdict:** Challenger is right. Genuine, but it's a pure counting error — the table already enumerates the correct 7. **Required fix:** s/8 sites/7 sites/ everywhere in prose (§1, §3, §12 T3, ASM-5). No design impact.
+
+---
+
+### O2 [BLOCKER] — mcp precedence is REVERSED in code → **CONCEDE (design)**
+
+**Evidence:** mcp.py:966-969 (and 1025-1028, 1048-1051):
+```python
+ws = Path(workspace_root) if workspace_root else Path.cwd()
+config_path = find_project_config(ws)
+if config_path:
+    ws = load_project_config(config_path).root   # overrides param unconditionally
+```
+The explicit `workspace_root` param is the *seed* for config lookup, then **unconditionally clobbered** by the recorded root whenever a `.bth.toml` is found. §5.5 claims these mirrors "already accept… keep that param as the top-precedence explicit override (equivalent to rung 1)." That is factually false against the current code — recorded-root currently wins, not the param.
+
+**Verdict:** Challenger is right, and this is a **design correction**, not wording. The migration must *reverse* the precedence (explicit param → rung-1-equivalent, ABOVE git/config), not "keep" it. **Required fix:** §5.5 must say "the param is currently overridden by recorded root (mcp.py:966-969); migration must invert this so an explicit `workspace_root` takes top precedence." Add an AC for it.
+
+---
+
+### O3 [MAJOR] — outputs tools + `check` are not fs_root sites → **CONCEDE (wording, with a carve-out + a genuine silence)**
+
+**Evidence (two parts):**
+1. `list_outputs_tool` (mcp.py:1091-1097) and `outputs_summary_tool` (mcp.py:1151-1157) take `workspace_root` but use it to resolve **`catalog_dir`** (identity), not fs_root. These must be explicitly listed as **DO-NOT-MIGRATE**. The grep that produced the 7-site list did *not* catch them (they use `.catalog_dir`, not `.root`), so they were never in the migration set — but ASM-5's claim "the enumerated sites are the complete set of `workspace_root` consumers" is overstated: it's the complete set of *fs_root* consumers, not *workspace_root* consumers.
+2. `check_runs` (checker.py:53) → `capture_git_state(project_root)` where `project_root = Path.cwd()` (cli.py:458) and `Path(project_root) if project_root else Path.cwd()` (mcp.py:332). This is a **git op derived from cwd** that the spec is silent on. It already uses cwd (not recorded root), so it's arguably already worktree-correct — but the spec should say so rather than leave it ambiguous.
+
+**Verdict:** Challenger is right on the carve-out (must be stated to prevent RISK-1 leak) and right that `check` is unaddressed. **Required fix:** §1 add a "DO-NOT-MIGRATE (catalog-identity sites): mcp.py:1091, 1151" line; add a one-line note that `check`/`check_runs` already derive git state from cwd and are intentionally untouched. No design change — these are documentation of existing correct behavior.
+
+---
+
+### O4 [BLOCKER] — AC-8 untestable without precondition → **CONCEDE (wording)**
+
+**Evidence:** `bth postmortem validate` takes `file` as an explicit arg (cli.py:1658) and `strict_files` defaults to `False` (cli.py:1660). workspace_root only resolves *relative asset_links* (postmortem.py:148,159). The existence failure is appended **only** `if sha256_val or strict_files` (postmortem.py:160-161). So AC-8's claim "today it fails by checking the main checkout" is **false** in the default path — a missing asset is silently tolerated unless the link carries a sha256 or `--strict-files` is passed.
+
+**Verdict:** Challenger is right. AC-8 as written is untestable. **Required fix:** AC-8 must pin the precondition: "*Given* a postmortem whose asset_link carries a sha256 (or validation runs with `--strict-files`), and the asset present in wt1 but absent from main, *When* validate runs from wt1, *Then* it passes; *And* the same validation run from main fails." Also specify the `.bth.toml` is discoverable from wt1 (nesting) so config resolution doesn't escape the worktree. No design change.
+
+---
+
+### O5 [BLOCKER] — AC-10 regression when toplevel ≠ recorded root → **CONCEDE-PARTIAL (design decision required)**
+
+**Evidence:** The §3 ladder puts **git toplevel (rung 2) ABOVE recorded root (rung 3)**. So for any project where git-toplevel ≠ recorded-root, the migrated `fs_root` *changes* from recorded-root to git-toplevel, and `compact.py:415` / `cli.py:1598` `workspace_root.rglob(...)` silently widens scope. This repo proves identity≠path: `.bth.toml` has `slug="prolix"`, `root="/home/marielle/projects/bathos"` (slug≠dirname). The divergence case the challenger names (recorded root is a monorepo subdir, or a symlinked checkout) is real: git toplevel would be the repo root / realpath, not the recorded subdir/symlink.
+
+But the challenger *overstates* the blast radius slightly: in this specific repo, `root` happens to equal the git toplevel, so this repo is *not* itself a regression case — the slug≠dirname fact proves identity≠path (relevant to RISK-1) but does not itself prove toplevel≠root here. The regression bites only the monorepo-subdir / symlink subset.
+
+**Verdict:** Challenger is right that AC-10's unconditional "observable behavior is identical to pre-change" is false for that subset — and this is a **genuine design decision**, not wording. Two defensible resolutions: (a) **scope the guarantee** — AC-10 becomes "identical *when git-toplevel == recorded root* (the common single-checkout case); when they differ, fs_root follows git toplevel by design, documented in §6"; or (b) **invert rungs 2&3 when both exist and differ** (recorded root wins over git toplevel). I lean toward (a) + the RISK-2 sanity warning, because (b) re-breaks the worktree case (a worktree's recorded root *is* the main checkout, so inverting would defeat the whole spec). **Required fix:** narrow AC-10's Then-clause to the toplevel==root case and add an explicit edge-matrix row + TBD for the subdir/symlink divergence. This is the one objection that forces a conscious rung-order ratification.
+
+---
+
+### O6 [MAJOR] — AC-3 identity-stability only for nested worktrees → **CONCEDE-PARTIAL (wording, bounded)**
+
+**Evidence:** `_catalog_dir` (cli.py:38) and `_require_project_slug` (cli.py:50) call `find_project_config()` with **no arg** → `Path.cwd()` upward walk (config.py:28-29). A nested worktree (`<repo>/.claude/worktrees/wt1`, the spec's own example) walks up to `<repo>/.bth.toml` → correct, stable identity. A worktree created *outside* the tree (`git worktree add /tmp/wt2`) walks up from `/tmp/wt2`, finds no `.bth.toml` → falls to default catalog → **different identity**. AC-3 asserts stability unconditionally.
+
+**Verdict:** Challenger is right, but the gap is bounded: the spec's motivating use case (`<repo>/.claude/worktrees/<name>/`) is always nested, so AC-3 holds for the case that matters. **Required fix (minimal):** add the nesting precondition to AC-3 ("*Given* worktrees nested under the repo such that upward `.bth.toml` discovery reaches the main checkout…"). The challenger's alternative (resolve identity via `--git-common-dir` back to the main `.git`) is a larger design move and is **not required** to ship — recommend it as a TBD/non-goal, not a blocker. No core design change if we bound AC-3.
+
+---
+
+### O7 [MAJOR] — git detection edge cases (bare/env/submodule) → **REBUT-with-note (wording)**
+
+**Evidence:** §5.1 already catches `(CalledProcessError, FileNotFoundError)` and falls through — a bare-repo `--show-toplevel` failure degrades to the next rung (no crash), so the *safety* claim holds. The challenger's substantive point is **submodules**: a submodule also has `--git-dir != --git-common-dir`, so the `is_worktree` discriminator (§5.2) would mis-label a submodule checkout as a worktree. That's a real correctness gap in the *flag* `is_worktree`, but it does **not** corrupt `fs_root` (toplevel is still right) — it only mislabels the boolean. Env overrides (`GIT_DIR`/`GIT_WORK_TREE`) are an exotic, self-inflicted case.
+
+**Verdict:** Partly overstated (no crash, fs_root stays correct), partly valid (submodule mislabels `is_worktree`). **Required fix:** §5.2 / §6 add a note: "submodules also satisfy git-dir≠common-dir; `is_worktree` may report True for a submodule checkout — acceptable because `fs_root` remains the correct submodule toplevel; a first-class submodule-vs-worktree distinction is a non-goal." Wording only; no design change.
+
+---
+
+### O8 [MINOR] — don't copy git.py:18 mutable default → **REBUT-and-accept (wording)**
+
+**Evidence:** git.py:18 indeed uses `cwd: Path = Path.cwd()` (mutable/eval-at-import default). The spec §5.1 says "reuse the exact exception idiom from git.py:18-39" — it scopes the reuse to the *exception idiom*, not the signature. So the spec doesn't actually mandate copying the bad default. But the warning is cheap and correct.
+
+**Verdict:** Not a spec defect (the reuse is scoped to exceptions), but accept the hardening note. **Required fix:** add one line to §5.1: "signature is `cwd: Path | None = None; cwd = cwd or Path.cwd()` — do not replicate git.py's eval-at-import default." Wording.
+
+---
+
+### O9 [MINOR] — confirm fs_root never None → **REBUT (none)**
+
+**Evidence:** The dataclass (§3:48) types `fs_root: Path` (non-optional), and the ladder's rung 4 (`Path.cwd()`) guarantees a value. Challenger concedes "mostly fine." **Verdict:** Already satisfied by the type + terminal rung. Optional one-word doc note ("never None") is harmless but not required.
+
+---
+
+### O10 [MINOR] — rung-1 lacks `.resolve()` → **REBUT-and-accept (wording)**
+
+**Evidence:** §3 rung 1 is `Path(...).expanduser()` with no `.resolve()`. A relative `BTH_WORKSPACE_ROOT` would yield a cwd-dependent fs_root, undercutting the "deterministic escape hatch" framing in the same line. AC-4 only tests an absolute `/tmp/ws`, so the gap is untested.
+
+**Verdict:** Valid, surgical. **Required fix:** §3 rung 1 → `Path(...).expanduser().resolve()`; add "BTH_WORKSPACE_ROOT should be absolute" to §6/docs. Wording.
+
+---
+
+### O11 [MINOR] — memo must key on cwd → **REBUT-and-accept (wording)**
+
+**Evidence:** §5.4 says "may memoize within a single process invocation… No cross-process/global cache." For the long-lived MCP process (mcp.py is one persistent server handling many tool calls with different `workspace_root`/cwd), a naive process-global memo would serve a stale key. §5.4 already forbids a *global* cache, so the spirit is right, but it doesn't explicitly say the memo key must include cwd.
+
+**Verdict:** Valid clarification. **Required fix:** §5.4 add "any memo MUST key on `cwd` (and env state); the long-lived MCP process must not reuse a result across differing cwd." Wording.
+
+---
+
+## Consolidated verdict table
+
+| O# | Verdict | Kind | One-line required fix |
+|----|---------|------|------------------------|
+| O1 | CONCEDE | wording | s/8 sites/7 sites/ in §1:15, §3:62, §12 T3, ASM-5 (table already lists 7) |
+| O2 | **CONCEDE** | **design** | §5.5 wrong: recorded-root currently overrides explicit param (mcp.py:966-969); migration must INVERT to make param top precedence + add AC |
+| O3 | CONCEDE | wording | List mcp.py:1091/1151 as DO-NOT-MIGRATE (catalog-identity); note `check`/`check_runs` already cwd-derived and untouched |
+| O4 | CONCEDE | wording | AC-8 must require sha256-on-link OR `--strict-files`, and pin worktree-discoverable `.bth.toml` |
+| O5 | **CONCEDE-PARTIAL** | **design** | Scope AC-10 to git-toplevel==recorded-root; ratify rung-2-above-rung-3 for the subdir/symlink divergence (do NOT invert globally — would break worktrees) |
+| O6 | CONCEDE-PARTIAL | wording | Add "nested worktree" precondition to AC-3; common-dir identity resolution is an optional TBD, not a blocker |
+| O7 | REBUT (note) | wording | §5.2 note: submodules also trip is_worktree; fs_root stays correct; distinction is a non-goal |
+| O8 | REBUT (accept) | wording | §5.1: mandate `cwd: Path\|None=None; cwd = cwd or Path.cwd()`; reuse is already scoped to exceptions only |
+| O9 | REBUT | none | Already guaranteed by `fs_root: Path` type + terminal cwd rung |
+| O10 | REBUT (accept) | wording | rung 1 → `.expanduser().resolve()`; doc BTH_WORKSPACE_ROOT as absolute |
+| O11 | REBUT (accept) | wording | §5.4: memo MUST key on cwd; long-lived MCP must not reuse across cwd |
+
+**Design-forcing objections: O2 and O5 only.** O2 forces a precedence *inversion* in the mcp mirrors (the spec currently describes the opposite of the code). O5 forces a conscious *ratification* of rung-2-above-rung-3 plus a scoped AC-10 — and notably the challenger's proposed fix for O5 (invert rungs 2&3) must be **rejected** because it would defeat the worktree case the whole spec exists to fix; the correct resolution is to scope the guarantee, not reorder. Everything else (O1, O3, O4, O6) is real but fixable with targeted text additions; O7–O11 are hardening notes.
+
+**Overall verdict: needs_revision.** Two design clarifications (O2 inversion, O5 rung-order ratification + AC-10 scoping) and four wording concessions (O1, O3, O4, O6). None require new recon — all gaps are resolvable by editing the spec text against evidence already in the code. Confidence: high.
+
+Spec file: `/home/marielle/projects/bathos/.claude/worktrees/wt-20260611-212246/.praxia/docs/specs/260611_worktree-workspace-resolution.md`

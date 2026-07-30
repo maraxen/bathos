@@ -1,0 +1,557 @@
+[sprint]
+sprint_id = "260608_bathos-repair-mvp"
+sprint_num = 1
+name = "bathos repair MVP"
+description = "Implement bth repair: sentinel cleanup, corrupt-fragment quarantine, warm-loss gate, MCP mirror, and test suite."
+max_fix_retries = 2
+context = """
+RECON FINDINGS — bathos repair MVP
+===================================
+Spec: .praxia/docs/specs/260608_spec-for-bathos-repair-tooling-what-shou.md
+task_id: 260608_bathos-repair-spec
+
+KEY SOURCE FILES
+  src/bathos/verify.py       — verify_cool(), verify_warm(), verify_archive(), verify_all()
+                               All read-only; returns VerifyResult per tier.
+  src/bathos/compact.py      — compact(catalog_dir, force_rebuild=False)
+                               CorruptDatabaseError, CompactionLockedError raised here.
+                               force_rebuild=True deletes bathos.db BEFORE compacting — no backup currently.
+  src/bathos/migrate.py      — migrate_catalog() uses .bak->.tmp->rename->unlink pattern with rollback.
+                               migrate_to_project_subdirs() moves flat fragments into <slug>/ subdirs.
+  src/bathos/catalog.py      — write_run(): .tmp.parquet -> POSIX rename (atomic, SLURM-safe).
+                               read_runs(): reads all fragments sorted DESC.
+  src/bathos/cli.py          — Typer app; each command calls a core module function.
+                               `bth check`, `bth verify`, `bth compact`, `bth migrate` all follow same pattern.
+  src/bathos/mcp.py          — FastMCP server; each tool mirrors a CLI command.
+
+QUARANTINE LAYOUT (spec decision)
+  .bth/quarantine/<project-slug>/          — cool-tier quarantine (per slug)
+  .bth/quarantine/archive/<year>/<month>/  — archive-tier quarantine
+  Each quarantine write produces a JSON manifest entry appended to
+  .bth/quarantine/<slug>/manifest.jsonl (newline-delimited, append-only).
+
+COOL-TIER SENTINEL STATES (from verify.py findings)
+  .tmp.parquet  — always unsafe; orphaned atomic write; delete unconditionally
+  .bak          — orphaned migration backup; safe to quarantine if mtime > 60s
+
+WARM-TIER GUARD
+  compact.py force_rebuild=True is triggered by CorruptDatabaseError
+  Currently: no backup, no confirmation gate
+
+CATALOG_DIR OVERRIDE
+  BTH_CATALOG_DIR env var or explicit catalog_dir param (used in all tests)
+  Default: ~/.bth/catalog/
+
+DAG STRUCTURE (tracks depend_on)
+  A (1330) scaffold — no deps
+  B (1331) sentinel cleanup — depends A
+  C (1332) corrupt quarantine — depends A
+  D (1333) warm backup/gate — depends A
+  E (1334) MCP mirror — depends B, C, D
+  F (1335) test suite — depends B, C, D
+  G (1336) warm->cool re-export — depends A, C  [P2]
+  H (1337) archive repair — depends B, C  [P2]
+"""
+
+[[tracks]]
+id = "a"
+is_research = false
+
+[[tracks.items]]
+backlog_id = "1330"
+phase_name = "Track A — repair.py module skeleton + bth repair CLI wiring (#1330)"
+fixer_prompt = """
+task_id: 260608_bathos-repair-spec
+
+Create src/bathos/repair.py and wire it into cli.py and mcp.py.
+
+SPEC: .praxia/docs/specs/260608_spec-for-bathos-repair-tooling-what-shou.md
+RELATED FILES:
+  src/bathos/verify.py      — RepairInput: call verify_all()/verify_cool()/verify_warm() for findings
+  src/bathos/compact.py     — CorruptDatabaseError, CompactionLockedError (imported by repair.py)
+  src/bathos/cli.py         — add `bth repair` command following existing Typer patterns
+  src/bathos/mcp.py         — add mcp__bathos__repair stub following existing FastMCP pattern
+
+DELIVERABLES:
+
+1. src/bathos/repair.py — public surface:
+   - RepairAction dataclass: action (str), path (str), detail (str), dry_run (bool)
+   - RepairManifest dataclass: run_ts (str ISO8601), catalog_dir (str), dry_run (bool),
+     tier (str), actions: list[RepairAction], warnings: list[str]
+   - scan(catalog_dir=None, tier="all") -> list[RepairAction]
+     Calls verify.verify_all() (or tier-specific variant), converts findings to RepairActions.
+     action field values: "delete_tmp", "quarantine_bak", "quarantine_corrupt", "backup_warm", "rebuild_warm"
+     dry_run=True always (scan is read-only).
+   - repair(catalog_dir=None, tier="all", dry_run=False, acknowledge_warm_loss=False) -> RepairManifest
+     Dispatches to action handlers (stubs for now — raise NotImplementedError with TODO marker).
+     If acknowledge_warm_loss=False and any RepairAction has action="rebuild_warm": raise SystemExit(1)
+     with message listing affected run IDs. In dry_run=True mode: return manifest with dry_run=True,
+     no filesystem mutations.
+
+2. cli.py — add `repair` command:
+   @app.command()
+   def repair(
+       dry_run: bool = typer.Option(True, "--dry-run/--apply", help="..."),
+       tier: str = typer.Option("all", "--tier", help="cool|warm|all"),
+       acknowledge_warm_loss: bool = typer.Option(False, "--acknowledge-warm-loss"),
+   ):
+   Print findings table (Rich) then manifest summary. Exit 1 if SystemExit raised by repair().
+
+3. mcp.py — add stub tools:
+   @mcp.tool()
+   def repair_scan(catalog_dir: str | None = None, tier: str = "all") -> dict: ...
+   @mcp.tool()
+   def repair(catalog_dir: str | None = None, tier: str = "all",
+              dry_run: bool = True, acknowledge_warm_loss: bool = False) -> dict: ...
+
+CONSTRAINT: All action handler calls inside repair() that aren't implemented yet should
+raise NotImplementedError("TODO: implemented in downstream tracks B/C/D").
+The plumbing (scan->repair dispatch, dry_run guard, warm_loss gate) must be wired end-to-end
+so downstream tracks only need to fill in the handler functions.
+"""
+reviewer_prompt = """
+task_id: 260608_bathos-repair-spec
+
+Verify repair.py scaffold against spec GWT-1, GWT-2:
+
+CHECKS:
+1. repair.py exists; imports cleanly (uv run python -c "from bathos import repair")
+2. RepairAction and RepairManifest dataclasses present with correct fields
+3. scan() returns list[RepairAction] with dry_run=True on all items
+4. repair() with dry_run=True returns RepairManifest, no filesystem mutations on any fixture
+5. repair() with acknowledge_warm_loss=False and a "rebuild_warm" action raises SystemExit(1)
+6. bth repair --help shows --dry-run/--apply, --tier, --acknowledge-warm-loss flags
+7. mcp.py repair_scan and repair tools registered (grep for @mcp.tool)
+8. uv run pytest tests/ -k repair -x passes (if tests exist yet; skip if not)
+
+FAIL if: any dataclass field missing, dry_run default wrong in MCP, SystemExit gate missing.
+"""
+return_key = "1330"
+
+[[tracks]]
+id = "b"
+is_research = false
+
+[[tracks.items]]
+backlog_id = "1331"
+phase_name = "Track B — Cool-tier sentinel cleanup (#1331)"
+fixer_prompt = """
+task_id: 260608_bathos-repair-spec
+
+Implement sentinel cleanup in src/bathos/repair.py (depends on track A scaffold).
+
+SENTINEL RULES (spec gap 1):
+  .tmp.parquet files: always delete — orphaned atomic writes, never valid
+  .bak files mtime <= 60s: SKIP with warning (migration may be in progress)
+  .bak files mtime > 60s: quarantine to .bth/quarantine/<slug>/YYMMDD_HHMMSS_<basename>
+
+QUARANTINE MANIFEST:
+  Append JSON line to .bth/quarantine/<slug>/manifest.jsonl
+  Fields: {"ts": <ISO8601>, "tier": "cool", "action": "quarantine_bak"|"delete_tmp",
+           "original_path": <str>, "moved_to": <str or null>, "mtime_s": <float>,
+           "size_bytes": <int>, "slug": <str>}
+
+IMPLEMENTATION:
+  Fill in the _handle_delete_tmp(action, catalog_dir) and _handle_quarantine_bak(action, catalog_dir)
+  functions stubbed in track A. Both must:
+  - Be no-ops if action.dry_run is True (return action unchanged)
+  - Use atomic write pattern for manifest append (open in append mode is acceptable for JSONL)
+  - Return the action with detail updated to reflect outcome
+
+DISCOVERY:
+  scan() already finds sentinels via verify_cool() findings. The verify_cool() function returns
+  VerifyResult with findings list; sentinel findings have kind "sentinel_tmp" or "sentinel_bak".
+  Map these to RepairActions in scan() if not already done in track A.
+
+KEY FILES:
+  src/bathos/verify.py:verify_cool()  — source of sentinel findings
+  src/bathos/repair.py                — fill handler stubs
+"""
+reviewer_prompt = """
+task_id: 260608_bathos-repair-spec
+
+Verify sentinel cleanup against spec GWT-3:
+
+SETUP: Create fixture catalog with:
+  - One .tmp.parquet file (any content)
+  - One .bak file with mtime > 120s (touch -t in past)
+  - One .bak file with mtime < 30s (fresh)
+
+CHECKS:
+1. repair(dry_run=True) lists sentinels, zero mutations
+2. repair(dry_run=False) deletes .tmp, moves stale .bak to quarantine, leaves fresh .bak
+3. Quarantine dir created under .bth/quarantine/<slug>/
+4. manifest.jsonl exists with valid JSON lines for each quarantined/deleted file
+5. manifest entry has all required fields: ts, tier, action, original_path, moved_to, mtime_s, size_bytes, slug
+6. Fresh .bak not touched — appears in warnings list of RepairManifest
+
+FAIL if: .tmp still present after repair, stale .bak not quarantined, fresh .bak moved.
+"""
+return_key = "1331"
+
+[[tracks]]
+id = "c"
+is_research = false
+
+[[tracks.items]]
+backlog_id = "1332"
+phase_name = "Track C — Corrupt fragment quarantine (#1332)"
+fixer_prompt = """
+task_id: 260608_bathos-repair-spec
+
+Implement corrupt-fragment quarantine in src/bathos/repair.py (depends on track A scaffold).
+
+CORRUPT FRAGMENT RULES (spec gap 2):
+  A fragment is corrupt if pyarrow.parquet.read_table(path) raises any exception.
+  Repair: move to .bth/quarantine/<slug>/YYMMDD_HHMMSS_<basename>
+  Try one re-read after move; if it passes, set transient=True in manifest.
+
+QUARANTINE MANIFEST:
+  Append to .bth/quarantine/<slug>/manifest.jsonl (same file as sentinel cleanup).
+  Fields: {"ts": <ISO8601>, "tier": "cool", "action": "quarantine_corrupt",
+           "original_path": <str>, "moved_to": <str>, "mtime_s": <float>,
+           "size_bytes": <int>, "slug": <str>, "error_type": <str>, "error_msg": <str>,
+           "schema_valid": <bool>, "transient": <bool>}
+
+IMPLEMENTATION:
+  scan() must detect corrupt fragments: in the cool-tier verify loop, try read_table on each
+  fragment; if it raises, add a RepairAction(action="quarantine_corrupt", ...).
+  Fill in _handle_quarantine_corrupt(action, catalog_dir).
+  Do NOT retry read more than once. Do NOT delete — quarantine only.
+
+KEY FILES:
+  src/bathos/verify.py:verify_cool()  — extend or mirror its fragment iteration
+  src/bathos/catalog.py:read_runs()   — reference for how fragments are enumerated
+  src/bathos/repair.py                — fill handler stub
+"""
+reviewer_prompt = """
+task_id: 260608_bathos-repair-spec
+
+Verify corrupt quarantine against spec GWT-4, GWT-5:
+
+SETUP: Fixture catalog with:
+  - One zero-byte .parquet file (unreadable)
+  - One valid .parquet fragment
+
+CHECKS:
+1. scan() returns RepairAction(action="quarantine_corrupt") for zero-byte file only
+2. repair(dry_run=True) lists corrupt fragment, no moves
+3. repair(dry_run=False) moves corrupt file to quarantine, valid file untouched
+4. manifest.jsonl entry has: error_type, error_msg, schema_valid, transient fields
+5. compact() succeeds on catalog after repair (valid fragment compacts, no crash)
+6. Re-running repair() on already-quarantined catalog is a no-op (idempotent)
+
+FAIL if: valid fragments quarantined, manifest missing error fields, compaction fails after repair.
+"""
+return_key = "1332"
+
+[[tracks]]
+id = "d"
+is_research = false
+
+[[tracks.items]]
+backlog_id = "1333"
+phase_name = "Track D — Pre-rebuild warm backup + warm-loss gate (#1333)"
+fixer_prompt = """
+task_id: 260608_bathos-repair-spec
+
+Implement warm-tier backup rotation and --acknowledge-warm-loss gate (spec gap 5).
+
+TWO CHANGES:
+
+1. compact.py — before force_rebuild deletes bathos.db:
+   - Copy bathos.db to bathos.db.bak-<YYYYMMDD_HHMMSS>
+   - Keep at most 3 .bak-* rotation files; delete the oldest if count > 3
+   - Log the backup path via logger (not print)
+   - Wrap in try/except: if backup fails, log warning but continue (backup is best-effort)
+
+2. repair.py — warm-loss gate:
+   - In scan(), if bathos.db is present and CorruptDatabaseError would be raised by compact(),
+     add RepairAction(action="rebuild_warm", detail="bathos.db corrupt — will be rebuilt from cool")
+   - In repair(), if any action.action == "rebuild_warm" and acknowledge_warm_loss is False:
+     print the list of run UUIDs that would be affected (query from cool fragments),
+     print "Re-run with --acknowledge-warm-loss to proceed", raise SystemExit(1)
+   - If acknowledge_warm_loss=True: call compact(catalog_dir, force_rebuild=True)
+     After compact: populate manifest.actions with action="rebuild_warm", detail="rebuilt from N fragments"
+
+   Note: detecting CorruptDatabaseError requires attempting to open bathos.db. Use the same
+   header-check logic already in verify_warm().
+
+KEY FILES:
+  src/bathos/compact.py  — add backup rotation before force_rebuild
+  src/bathos/verify.py   — verify_warm() for corrupt DB detection
+  src/bathos/repair.py   — warm-loss gate in scan() and repair()
+"""
+reviewer_prompt = """
+task_id: 260608_bathos-repair-spec
+
+Verify warm backup + loss gate against spec GWT-11, GWT-12:
+
+SETUP:
+  Fixture A: catalog with corrupt bathos.db (random bytes), valid cool fragments
+  Fixture B: catalog with valid warm DB
+
+CHECKS:
+1. repair() on Fixture A without --acknowledge-warm-loss exits 1, lists run UUIDs
+2. repair(acknowledge_warm_loss=True) on Fixture A creates .bak rotation file, rebuilds warm DB
+3. After rebuild, compact() on same catalog succeeds (DB valid)
+4. Rotation: after 4 repair+rebuild cycles on same catalog, only 3 .bak-* files kept
+5. repair() on Fixture B with valid warm DB does NOT trigger warm-loss path
+6. compact.py backup happens before any delete (even if test interrupts mid-rebuild)
+
+FAIL if: gate missing, rotation exceeds 3 files, backup created after DB deletion.
+"""
+return_key = "1333"
+
+[[tracks]]
+id = "e"
+is_research = false
+
+[[tracks.items]]
+backlog_id = "1334"
+phase_name = "Track E — MCP mirror: mcp__bathos__repair tools (#1334)"
+fixer_prompt = """
+task_id: 260608_bathos-repair-spec
+
+Finalize MCP mirror tools in mcp.py (depends on B, C, D being implemented).
+
+Replace the stubs added in track A with fully wired implementations:
+
+@mcp.tool()
+def repair_scan(catalog_dir: str | None = None, tier: str = "all") -> dict:
+    '''Scan the catalog for repairable issues without making any changes.
+    Returns a list of findings with action type, path, and detail.'''
+    from bathos.repair import scan
+    actions = scan(catalog_dir=catalog_dir, tier=tier)
+    return {"findings": [vars(a) for a in actions], "count": len(actions)}
+
+@mcp.tool()
+def repair(
+    catalog_dir: str | None = None,
+    tier: str = "all",
+    dry_run: bool = True,
+    acknowledge_warm_loss: bool = False,
+) -> dict:
+    '''Run catalog repair. dry_run=True (default) is safe; set dry_run=False to apply.
+    Pass acknowledge_warm_loss=True only when warm-tier data loss is acceptable.'''
+    from bathos.repair import repair as _repair
+    manifest = _repair(
+        catalog_dir=catalog_dir, tier=tier,
+        dry_run=dry_run, acknowledge_warm_loss=acknowledge_warm_loss
+    )
+    return vars(manifest)
+
+CONSTRAINTS:
+- dry_run=True must be the default — safety-critical, per spec
+- Tool description strings must accurately describe the dry_run safety semantic
+- Both tools accept catalog_dir for test isolation (pass-through only)
+- Do not import repair at module level (lazy import inside function body)
+
+KEY FILES:
+  src/bathos/mcp.py      — replace stubs, follow existing @mcp.tool() decorator pattern
+  src/bathos/repair.py   — the module being mirrored (already implemented in A+B+C+D)
+"""
+reviewer_prompt = """
+task_id: 260608_bathos-repair-spec
+
+Verify MCP mirror against spec:
+
+CHECKS:
+1. mcp.py has repair_scan and repair tools with correct signatures
+2. dry_run defaults to True in repair tool (grep for "dry_run: bool = True")
+3. Both tools have non-empty description strings mentioning dry_run semantics
+4. Lazy import pattern used (import inside function body, not at top of mcp.py)
+5. repair_scan(catalog_dir=<fixture>) returns {"findings": [...], "count": N} JSON-serializable
+6. repair(catalog_dir=<fixture>, dry_run=True) returns RepairManifest dict, no mutations
+7. uv run python -c "from bathos.mcp import mcp; print(mcp)" does not error
+
+FAIL if: dry_run default is False, tools import repair at module level, description missing.
+"""
+return_key = "1334"
+
+[[tracks]]
+id = "f"
+is_research = false
+
+[[tracks.items]]
+backlog_id = "1335"
+phase_name = "Track F — Test suite for repair MVP (#1335)"
+fixer_prompt = """
+task_id: 260608_bathos-repair-spec
+
+Write the repair test suite in tests/test_repair.py (depends on B, C, D implemented).
+
+FIXTURES (all use tmp_path / BTH_CATALOG_DIR override):
+
+@pytest.fixture
+def clean_catalog(tmp_path): ...  # empty cool tier, no DB
+
+@pytest.fixture
+def catalog_with_sentinels(tmp_path): ...
+  # create runs/myslug/run_abc.parquet (valid), runs/myslug/run_old.parquet.tmp (any bytes)
+  # runs/myslug/run_stale.parquet.bak (touch with mtime 120s in past)
+  # runs/myslug/run_fresh.parquet.bak (current mtime)
+
+@pytest.fixture
+def catalog_with_corrupt_fragment(tmp_path): ...
+  # one zero-byte .parquet in runs/myslug/, one valid fragment
+
+@pytest.fixture
+def catalog_with_corrupt_warm_db(tmp_path): ...
+  # valid cool fragments + bathos.db overwritten with b"NOTADB" * 100
+
+REQUIRED TEST CASES:
+
+1. test_dry_run_never_mutates[clean] — scan + repair dry_run=True, assert no file changes
+2. test_dry_run_never_mutates[sentinels] — same, sentinel fixture
+3. test_dry_run_never_mutates[corrupt] — same, corrupt fragment fixture
+4. test_sentinel_cleanup_deletes_tmp — repair applied, .tmp gone, stale .bak quarantined
+5. test_sentinel_cleanup_skips_fresh_bak — fresh .bak not moved (in warnings)
+6. test_corrupt_fragment_quarantined — zero-byte fragment moved, valid untouched
+7. test_quarantine_manifest_fields — manifest.jsonl has all required fields
+8. test_quarantine_idempotent — re-running repair on already-repaired catalog is no-op
+9. test_warm_loss_gate_exits_1 — repair on corrupt DB without acknowledge_warm_loss raises SystemExit(1)
+10. test_warm_loss_gate_rebuilds — repair with acknowledge_warm_loss=True rebuilds + .bak rotation file
+11. test_bak_rotation_cap — 4 repair+rebuild cycles -> only 3 .bak-* files kept
+12. test_mcp_dry_run_default — mcp repair tool called without dry_run, assert dry_run=True
+13. test_integration_sentinel_plus_corrupt — combined fixture: both repairs applied, compact succeeds after
+
+PATTERN: All tests use BTH_CATALOG_DIR override via monkeypatch or catalog_dir param.
+Follow the test patterns in tests/test_compact.py and tests/test_verify.py for fixture style.
+"""
+reviewer_prompt = """
+task_id: 260608_bathos-repair-spec
+
+Verify test suite completeness and correctness:
+
+CHECKS:
+1. uv run pytest tests/test_repair.py -v exits 0, all tests pass
+2. All 13 named test cases present (or equivalent coverage)
+3. Fixtures use tmp_path, not hardcoded paths
+4. No test imports repair at module level in a way that breaks collection if repair.py missing
+5. test_dry_run_never_mutates is parametrized (not 3 separate functions or uses fixture list)
+6. test_integration_sentinel_plus_corrupt runs compact() after repair and asserts success
+7. uv run pytest tests/ -x still passes (no regressions in existing tests)
+
+FAIL if: any test uses hardcoded ~/.bth paths, test_integration test missing, existing suite broken.
+"""
+return_key = "1335"
+
+[[tracks]]
+id = "g"
+is_research = false
+
+[[tracks.items]]
+backlog_id = "1336"
+phase_name = "Track G — Warm-to-cool re-export (#1336)"
+fixer_prompt = """
+task_id: 260608_bathos-repair-spec
+
+Implement warm->cool re-export in src/bathos/repair.py (P2 follow-on; depends on A and C).
+
+FEATURE: When cool fragments are missing but warm DB has run records, re-export warm rows
+back to .parquet fragments so compaction can rebuild cleanly.
+
+TRIGGER: scan() detects this when (only if from_warm=True passed):
+  - bathos.db exists and is readable
+  - A run UUID present in bathos.db.runs is NOT found in any cool fragment filename
+  -> RepairAction(action="reexport_from_warm", detail="run <uuid> present in warm, missing from cool")
+
+Add --from-warm flag to `bth repair` CLI (off by default).
+
+ALGORITHM in _handle_reexport_from_warm(action, catalog_dir):
+  1. Query warm DB: SELECT * FROM runs WHERE run_id = <uuid>
+  2. Reconstruct Run dataclass from the row
+  3. Call catalog.write_run(run, catalog_dir=catalog_dir) to write the fragment
+  4. Manifest entry: {action="reexport_from_warm", run_uuid, slug, re_export_source="warm", row_count=1}
+
+EDGE CASES:
+  - Slug dir doesn't exist -> create it (catalog.write_run handles this already)
+  - Runs with NULL metadata in warm -> skip with logged warning, add to RepairManifest.warnings
+  - Don't write over an existing cool fragment (check first; if present, skip with warning)
+
+KEY FILES:
+  src/bathos/catalog.py:write_run()  — use this to write the re-exported fragment
+  src/bathos/compact.py              — reference for how warm DB is queried
+  src/bathos/repair.py               — add _handle_reexport_from_warm and scan detection
+  src/bathos/cli.py                  — add --from-warm flag to repair command
+"""
+reviewer_prompt = """
+task_id: 260608_bathos-repair-spec
+
+Verify warm->cool re-export:
+
+SETUP: Fixture with valid bathos.db (compact a known catalog), then delete one cool fragment.
+
+CHECKS:
+1. scan(from_warm=True) detects the missing fragment, returns RepairAction(action="reexport_from_warm")
+2. repair(from_warm=True) re-creates the missing cool fragment
+3. compact() after re-export produces same run count as original DB
+4. Re-running repair on already-exported catalog is a no-op (fragment exists, no duplicate write)
+5. Run with NULL metadata in warm DB -> skipped, appears in RepairManifest.warnings
+6. bth repair --from-warm --dry-run lists missing runs without creating files
+
+FAIL if: existing cool fragment overwritten, compact fails after re-export, no idempotency guard.
+"""
+return_key = "1336"
+
+[[tracks]]
+id = "h"
+is_research = false
+
+[[tracks.items]]
+backlog_id = "1337"
+phase_name = "Track H — Archive-tier repair: quarantine SHA256 mismatches (#1337)"
+fixer_prompt = """
+task_id: 260608_bathos-repair-spec
+
+Implement archive-tier repair in src/bathos/repair.py (P2 follow-on; depends on B, C).
+
+TRIGGER: scan() detects archive SHA256 mismatches via verify_archive() findings.
+  verify_archive() already returns findings for checksum mismatches (schema_version >= 2).
+  Map these to: RepairAction(action="quarantine_archive", path=<partition_file>, detail=<mismatch info>)
+
+REPAIR ACTION _handle_quarantine_archive(action, catalog_dir):
+  1. Move offending partition file to .bth/quarantine/archive/<year>/<month>/<basename>
+     (year/month derived from the partition path structure)
+  2. Append to .bth/quarantine/archive/manifest.jsonl:
+     {"ts": <ISO8601>, "tier": "archive", "action": "quarantine_archive",
+      "original_path": <str>, "moved_to": <str>, "expected_sha256": <str>,
+      "actual_sha256": <str>, "mtime_s": <float>, "size_bytes": <int>}
+  3. Update the archive manifest.json entry for this partition:
+     - Add "quarantined": true to the matching entry
+     - Use atomic write-then-rename (read->modify->write .tmp->rename) matching archive.py pattern
+     - Do NOT remove the manifest entry (tombstone preservation)
+
+IDEMPOTENCY: If manifest.json entry already has "quarantined": true -> skip, return action with
+  detail="already quarantined (idempotent skip)".
+
+KEY FILES:
+  src/bathos/verify.py:verify_archive()  — source of checksum mismatch findings
+  src/bathos/archive.py                  — reference for manifest.json read/write pattern
+  src/bathos/repair.py                   — add handler and scan detection
+"""
+reviewer_prompt = """
+task_id: 260608_bathos-repair-spec
+
+Verify archive repair:
+
+SETUP: Create a cold-archive partition, compute its SHA256, write to manifest.json,
+then corrupt the partition file bytes.
+
+CHECKS:
+1. scan() returns RepairAction(action="quarantine_archive") for the corrupt partition
+2. repair(dry_run=True) lists the mismatch, no moves
+3. repair(dry_run=False) moves partition to .bth/quarantine/archive/<year>/<month>/
+4. manifest.json updated with "quarantined": true on matching entry (tombstone preserved)
+5. manifest.jsonl in quarantine dir has correct fields including expected/actual sha256
+6. Re-running repair on already-quarantined partition is a no-op (idempotent)
+7. Valid partitions in the same archive are untouched
+
+FAIL if: manifest entry deleted (not tombstoned), quarantine manifest missing sha256 fields, re-run not idempotent.
+"""
+return_key = "1337"
+
+[orchestration]
+sequential = ["a", "b", "c", "d", "e", "f", "g", "h"]
+concurrent = []

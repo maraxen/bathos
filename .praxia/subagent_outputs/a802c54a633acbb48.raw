@@ -1,0 +1,120 @@
+The backlog MCP doesn't support a direct "close" status for unworktree'd items — I'll note the stale items in the sprint doc and recommend bulk closure. Now I have everything I need to produce the sprint recommendation.
+
+---
+
+## Sprint Recommendation: bathos v0.11.0
+
+**Task ID:** `260613_sprint-v011`
+
+---
+
+### Housekeeping (Pre-Sprint, ~10 min — not a sprint item)
+
+**CHANGELOG.md + CLAUDE.md version bump to v0.11.0** should happen at the very start of the next session, before any sprint work begins. It is not a sprint item — it is a session-open ritual. Do it, commit it, then start the sprint.
+
+---
+
+### Stale Items to Close (AC-0 through AC-9)
+
+The following backlog items are complete and should be marked closed before sprint planning runs:
+
+| ID | AC | Note |
+|----|-----|------|
+| 1708 | AC-0 | stage_name write path |
+| 1709 | AC-8 | bth new-experiment scaffold |
+| 1710 | AC-1 | [reproduction] block |
+| 1711 | AC-2 | [controls] block |
+| 1712 | AC-6 | baseline_ref lint validation |
+| 1713 | AC-7 | novel/reproduces lint enforcement |
+| 1714 | AC-3 | hard-exit reproduction gate |
+| 1715 | AC-4 | advisory reproduction gate |
+| 1716 | AC-5 | control_arm_rate sprint-audit signal |
+| 1717 | AC-9 | submit-provenance + bypass-rate signal |
+
+These are currently "open" in the backlog only because the promote/complete workflow was never triggered — they were implemented directly. All 10 should be bulk-closed via `backlog(action: "complete")` once promoted. Until the workflow supports this, they should be annotated as stale.
+
+---
+
+### Sprint v0.11.0: Repair MVP
+
+**Recommended sprint theme:** Catalog repair and integrity recovery.
+
+The Repair MVP (items 1330–1337) is a coherent 7-item suite with a clear internal dependency chain, real user value (recovering from corrupted or missing Parquet fragments), and no dependency on any other open work. It is the most cohesive unit of work in the backlog right now and should ship as a single sprint.
+
+#### Sprint Table
+
+| ID | Title | Priority | Sequencing |
+|----|-------|----------|------------|
+| 1330 | repair.py module skeleton + bth repair CLI wiring | **P1** | First — all others depend on this |
+| 1331 | Cool-tier sentinel cleanup: auto-delete .tmp, quarantine stale .bak | **P1** | After 1330; simplest repair action, validates the scaffold |
+| 1332 | Corrupt fragment quarantine: move unreadable .parquet to quarantine | **P1** | After 1330; pairs naturally with 1331 |
+| 1333 | Pre-rebuild warm backup + --acknowledge-warm-loss gate | **P1** | After 1330; safety gate before any destructive warm rebuild |
+| 1336 | Warm-to-cool re-export: recover run records from warm DB when cool fragments missing | **P2** | After 1333 (backup must exist before re-export can be safe) |
+| 1337 | Archive-tier repair: quarantine-and-log SHA256 mismatches in cold archive | **P2** | After 1330; independent of warm path |
+| 1335 | Test suite for repair MVP: fixture-driven, 5 repair actions + dry-run | **P1** | Runs in parallel with implementation; gate before PR |
+| 1334 | MCP mirror: mcp__bathos__repair tool | **P2** | After all repair actions implemented and tested |
+
+**Dependency chain:**
+```
+1330 (skeleton)
+  ├── 1331 (sentinel cleanup)
+  ├── 1332 (corrupt quarantine)
+  ├── 1337 (archive SHA256 quarantine)
+  └── 1333 (warm backup gate)
+        └── 1336 (warm-to-cool re-export)
+
+1335 (tests) — developed alongside all of the above
+1334 (MCP mirror) — final, after all actions pass tests
+```
+
+---
+
+### Also-In-Sprint: Small Wins
+
+These items are quick enough to include without disrupting the repair MVP theme:
+
+| ID | Title | Priority | Rationale |
+|----|-------|----------|-----------|
+| 1775 | Clarify STAGE_NAME_REGEX / _validate_stage_name role in schema.py | **P2** | The last commit (`19055ec`) already added a docs clarification commit message — this may be partially done. Quick verify + close or 30-min finish. |
+| 798 | bth lint Tier-2: flag TODO strings in scaffolded sidecar fields | **P2** | Small, self-contained lint rule; fits the controls-discipline quality theme already shipped. |
+
+---
+
+### Exclude from This Sprint
+
+| ID | Title | Why Excluded |
+|----|-------|-------------|
+| 796 | Loop step budget enforcement | Agentic discipline feature — different domain, no natural fit with repair theme; defer to a dedicated agentic-discipline sprint |
+| 795 | Sprint-composer pre-registration gate | Same domain as 796; batch these together |
+| 794 | PostToolUse NLM hook coverage | Praxia integration, not bathos proper; different sprint |
+| 793 | Structured gate error taxonomy in MCP tools | Valid P2 work but non-trivial; better as its own sprint after repair establishes the MCP surface |
+| 1774 | submit-provenance pruning/compaction | Explicitly deferred P3; files are small, no urgency |
+| 137 | Global instruction portability | Has been deferred 3+ sprints; needs a dedicated design session (brainstorming + spec phase) before any implementation sprint. Do not include until a spec exists. |
+| 1684 | CI grep guard (RISK-4) | Optional/low-priority; include only if sprint runs short |
+
+---
+
+### Sprint Summary
+
+**Theme:** Repair MVP — catalog integrity and recovery  
+**Target version:** v0.11.0  
+**Item count:** 9 items (7 repair + 2 small wins)  
+**Sequencing constraint:** 1330 must land first; 1335 (tests) co-develops throughout; 1334 (MCP) lands last
+
+**Research integrity alignment:** The repair suite directly supports the core bathos value proposition — "you never lose track of what ran, what it produced, or whether results are still valid." A corrupt or missing cool-tier fragment is a data integrity failure. Repair closes that gap.
+
+**INVEST check on the suite:**
+- Independent: Yes — repair is self-contained from controls-discipline
+- Negotiable: 1334 (MCP mirror) is the most droppable if sprint runs long
+- Valuable: Direct recovery path for catalog corruption
+- Estimable: 1330 is the only uncertain one (scaffolding scope); all others are bounded
+- Small: Each item is a single, testable action
+- Testable: 1335 is the dedicated test item; dry-run invariants are the gate
+
+---
+
+### Items That Need Design Before Next Sprint
+
+- **#137 (global instruction portability):** Schedule a brainstorming session to produce a spec. It will never ship if it keeps being "deferred to next sprint" without a concrete design.
+- **#793 (structured gate error taxonomy):** Worth a brief spec pass before implementation — the MCP surface is load-bearing and getting the taxonomy wrong is expensive to fix.
+- **#795/#796 (agentic discipline features):** Batch these into a dedicated "agentic integrity sprint" alongside any other praxia-side work. They belong together thematically with the controls-discipline already shipped.

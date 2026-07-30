@@ -1,0 +1,105 @@
+All tests pass. I have everything needed for a complete structured report.
+
+---
+
+```json
+{
+  "scope": "git diff 6f15168 5f62c88 — T6 (F2 conclude-gate) + T7 (F3 submit-gate), Wave 3, literature-parity v1 epic",
+  "confidence": "high",
+  "summary": "Both gates are structurally wired and their tests are green, but three foundational assumptions are false: (1) metadata does not survive the cool→warm path, meaning every gate that relies on parity_run_type silently mis-classifies controlled parity runs as uncontrolled; (2) the F-1 'beside-legacy' requirement was not implemented in validate_claim — only the comment was changed; (3) AC-20 is a naked 'pass' stub claimed as AC coverage. The test suite passes because fixtures manually inject metadata into the warm DB after compaction, masking the B1 persistence bug from CI.",
+  "dimensions": {
+    "clarity": {
+      "score": 4,
+      "notes": "Gate logic in campaigns.py and cli.py is readable. parity_confound_check() is well-documented. The one-level-of-indirection (campaign mode checked in campaigns.py, tier checked in parity.py) is clear. Tier naming inconsistency with the reproduction gate (see MINOR below) is the only source of confusion."
+    },
+    "test_coverage": {
+      "score": 2,
+      "notes": "10 tests, all green. But: AC-20 is a bare pass. AC-07 and AC-08 are tautological (both assert no-downgrade, which is the default when no gate exists). AC-22 tests an absent runs_dir but not the real failure mode (Parquet columns missing), which hard-blocks instead of failing open. The cool-tier fallback under real conditions is never exercised."
+    },
+    "documentation": {
+      "score": 3,
+      "notes": "T6 commit message accurately names F-1 beside-legacy as delivered, but the diff proves it was not. The in-code comment 'Cool schema doesn't support metadata' in the test fixture acknowledges the B1 bug without flagging it as blocking. No TODO/FIXME in production code to surface the missing metadata persistence."
+    },
+    "resilience": {
+      "score": 2,
+      "notes": "The cool-tier Parquet read in parity.py requests a column that does not exist in real runs, throws per-file, and silently falls through to 'satisfied=False', which hard-blocks validation-tier submissions. The fail-open contract (AC-22) is violated for all real cool-tier runs. The warm path returns NULL for parity_run_type and marks every controlled run 'uncontrolled'."
+    },
+    "duplication": {
+      "score": 4,
+      "notes": "No significant duplication. parity_confound_check() is correctly reused from T5 in the F2 gate rather than duplicated. The sidecar B2 field mirrors requires_pass_stem cleanly."
+    }
+  },
+  "findings": [
+    {
+      "severity": "BLOCKER",
+      "path": "src/bathos/schema.py",
+      "line": 174,
+      "issue": "Run.to_arrow() does not include the 'metadata' field in the Arrow table it writes to cool Parquet. The field is declared in COOL_SCHEMA (line 94) and set on the Run dataclass (line 145), but is omitted from the pa.table() dict in to_arrow(). Consequence: write_run() silently drops metadata. compact() reads Parquet via from_arrow_row() which also doesn't read metadata (line 225-278 — 'metadata' not in the key list). Every parity run ends up in warm DB with metadata='{}'. json_extract(metadata, '$.parity_run_type') returns NULL. Both F2 (parity_confound_check, claim.py:784-809) and F3 (check_parity_confounds_for_submit, parity.py:253-270) then classify controlled parity runs as 'uncontrolled', causing false-positive downgrades on every conclude_campaign for campaigns with a parity confound.",
+      "fix": "Add 'metadata': [self.metadata] to the pa.table() dict in to_arrow() (immediately before or after 'outcome'). Also add metadata to from_arrow_row() at schema.py:252 alongside the other optional fields: metadata=pydict.get('metadata', ['{}'])[i] if 'metadata' in pydict else '{}'."
+    },
+    {
+      "severity": "BLOCKER",
+      "path": "src/bathos/parity.py",
+      "line": 284,
+      "issue": "The cool-tier fallback in check_parity_confounds_for_submit() requests columns=['command', 'outcome', 'metadata'] from real cool Parquet files, but cool Parquet files (written by Run.to_arrow()) do not contain a 'metadata' column. Every pq.read_table() call throws a field-not-found error, which is caught per-file and logged as a warning. The loop exits normally and hits the 'Cool tier exists but no match found' return at line 302-305: satisfied=False, tier_enforced=is_validation_or_production. For a validation-tier submit with no warm DB, this hard-blocks the user even when the parity run exists but its metadata column cannot be read. This violates AC-22 (fail-open when indeterminate). The T7 test bypasses this by writing a hand-crafted Parquet with a metadata column.",
+      "fix": "After the B1 fix (metadata persisted in cool Parquet via to_arrow()), this path works correctly. As an immediate resilience fix independent of B1: catch the column-not-found case specifically (ArrowInvalid or check schema names before projecting), and fall through to satisfied=None rather than treating column-missing as a determinable miss. Alternatively, read without column projection and check the column list dynamically."
+    },
+    {
+      "severity": "BLOCKER",
+      "path": "src/bathos/claim.py",
+      "line": 182,
+      "issue": "The F-1 'beside-legacy' requirement was NOT implemented in validate_claim. The T6 diff against 6f15168 shows exactly one line changed: the comment at line 182 ('baseline_parity' -> 'reference_parity'). The validate_claim AC-13 block (lines 182-254) is identical to the pre-W3 baseline — it still only does the legacy equivalence-bound check (reference_value/equivalence_bound). It does not check parity_run_type or outcome (the graded-parity-run check). The T6 commit message claims 'Extended to check graded parity runs BESIDE legacy equivalence-bound path' but this is false per the diff. Impact: (a) validate_claim does not recognize a controlled-by-protocol (outcome=partial) confound as controlled; (b) a confound with grade='PARITY' as its reference_metric value will cause 'failed to compare parity metric: could not convert string to float: PARITY'; (c) the F-1 resolution in the spec is undelivered.",
+      "fix": "In validate_claim, after the existing equivalence-bound check, add a graded-parity-run check: if parity_run_id is set and the run exists in DB, check json_extract(metadata, '$.parity_run_type') == 'literature_parity' AND outcome in ('pass', 'partial'). If this check passes, skip the equivalence-bound path and mark the confound controlled (or controlled-by-protocol). Both paths must remain active — a confound is controlled iff its applicable path passes. The cleanest approach: check parity_run_type first; if literature_parity, take the graded path (outcome check only); if absent, fall through to legacy equivalence-bound path."
+    },
+    {
+      "severity": "BLOCKER",
+      "path": "tests/test_t6_parity_conclude_gate.py",
+      "line": 392,
+      "issue": "AC-20 (SHA-drift detection) is a bare 'pass' stub with no assertions. The test class TestAC20_SHADriftDetection contains exactly one method test_ac20_placeholder whose body is `pass` after a multi-line comment describing what the test 'would' do. This counts as AC-20 coverage in CI (10 passed), but provides zero verification. Per the design spec: 'AC-20: bth check detects a drifted parity verdict via SHA mismatch.' Without this, a parity artifact can be mutated after attest-parity and the F2 gate will still classify the confound as controlled, since it queries outcome/parity_run_type from the warm DB rather than re-verifying the on-disk SHA. The T6 commit message explicitly acknowledges deferral to T8, but the PR claimed AC-20 coverage. This is an unimplemented acceptance criterion reported as covered.",
+      "fix": "Remove the test from the AC-06/07/08/20 file and do not claim AC-20 coverage until T8 implements the SHA re-verification in parity_confound_check() and bth check. If the deferral to T8 is accepted, file a tracking issue and ensure the epic's AC-20 status is marked 'deferred' not 'done' in the backlog."
+    },
+    {
+      "severity": "MAJOR",
+      "path": "tests/test_t6_parity_conclude_gate.py",
+      "line": 309,
+      "issue": "test_ac08_controlled_parity_outcome_pass and test_ac08_controlled_by_protocol_partial_outcome are tautological for detecting the absence of the F2 gate. Both assert outcome_label == 'pass', which is also what conclude_campaign produces when NO parity gate exists (the researcher label is 'pass' and nothing downgrades it). The tests confirm that controlled parity does not downgrade, but they would pass even if the entire F2 parity_confound_check() call were deleted from campaigns.py. They test the correct positive case but cannot detect if the gate were removed.",
+      "fix": "Add a paired negative assertion or a mock-based verification. For the positive tests, capture the parity_confound_check() call result and assert it returned status='controlled' (not 'uncontrolled'). Alternatively: in the test, verify the parity_confound_check() returns {confounds: [{status: 'controlled'}]} separately, proving the gate correctly classified the run — then the conclude_campaign test proves the classification drives the correct verdict."
+    },
+    {
+      "severity": "MAJOR",
+      "path": "tests/test_t6_parity_conclude_gate.py",
+      "line": 151,
+      "issue": "test_ac07_exploration_with_uncontrolled_parity_no_downgrade is tautological for detecting the absence of the F2 exploration guard. The test asserts outcome_label == 'pass' for an exploration campaign, which is also the outcome when there is NO parity gate at all. If someone deleted the exploration advisory branch from campaigns.py (leaving only the confirmation/sequential hard-downgrade), this test would still pass because the exploration case simply wouldn't exist to trigger.",
+      "fix": "Add a capsys or mock.patch assertion that the advisory WARNING print was emitted. This verifies the exploration code path was reached, not just that no downgrade occurred."
+    },
+    {
+      "severity": "MINOR",
+      "path": "src/bathos/cli.py",
+      "line": 1002,
+      "issue": "The F3 parity gate (block starting at line 1002) only executes if parsed_sidecar is not None (set inside the reproduction-gate block at line 961-970). If sidecar_data is set but sidecar_path is None (the else branch at line 972 sets parsed_sidecar = None), the parity gate is silently skipped. This mirrors the reproduction gate's behavior but is not documented. A validation-tier script submitted with a sidecar_data dict (loaded from raw TOML without a resolved path) would bypass the F3 gate.",
+      "fix": "Document the skip condition explicitly in a comment, or extend the gate to handle the case where sidecar_data is available but sidecar_path is None (e.g., parse from sidecar_data dict directly)."
+    },
+    {
+      "severity": "MINOR",
+      "path": "src/bathos/parity.py / src/bathos/cli.py",
+      "line": 244,
+      "issue": "Tier enforcement diverges between the reproduction gate and parity gate for unrecognized stage_name values. The reproduction gate (cli.py:979-988) explicitly checks for 'validation'/'production' (hard block) or 'exploration'/'calibration' (advisory) and implicitly ignores other stage names. The parity gate uses stage_name in ('validation', 'production') — everything else is advisory — which is more permissive for unknown stage names. The behavior difference is subtle but produces different semantics for any project using a non-standard stage name.",
+      "fix": "Align behavior: document the intended semantics for unrecognized stage names in a shared docstring or constant, and apply the same logic in both gates."
+    }
+  ],
+  "quality_issues": [
+    "The test fixture comment '# Cool schema doesn't support metadata' (test_t6_parity_conclude_gate.py:220) acknowledges the B1 gap at test-write time but does not flag it as a production bug. The workaround (manual UPDATE after compact) masks the bug from CI and was accepted rather than triaged.",
+    "The T6 commit message contains a false claim ('Extended to check graded parity runs BESIDE legacy equivalence-bound path') that is disproven by the 1-line diff. This creates a misleading audit trail for W4 implementors who may assume F-1 is done.",
+    "parity_confound_check() in claim.py is imported lazily inside conclude_campaign() (line 245 uses a from-import inside a branch). This is fine at runtime but obscures the dependency from static analysis tools.",
+    "print() is used for gate output in campaigns.py (lines 256-262) while the rest of the codebase uses typer.echo or logging. This is inconsistent with the cli.py parity gate which correctly uses typer.echo(err=True)."
+  ],
+  "strengths": [
+    "F2 conclude-gate ordering is correct: parity_confound_check() is inserted before run_union_gate(), so a downgrade from parity takes precedence and cannot be overridden by union gate pass.",
+    "The sidecar B2 field (requires_parity_stem) cleanly mirrors the existing requires_pass_stem pattern — same dataclass, same parser, same unknown-key warning, no new CLI surface. The design is faithful to the spec.",
+    "The fail-open pattern in check_parity_confounds_for_submit() for the case where both warm and cool tiers are truly absent (runs_dir doesn't exist) is correctly implemented and returns satisfied=None, tier_enforced=False as AC-22 requires.",
+    "parity_confound_check() is appropriately reused from T5 in the F2 gate rather than re-implementing the outcome/parity_type logic, keeping the two gate implementations in sync.",
+    "The AC-06 downgrade test (test_ac06_confirmation_with_empty_parity_run_id_downgrades) is non-tautological and would correctly fail if the F2 gate were removed from campaigns.py."
+  ],
+  "next_action": "Three BLOCKERs must be resolved before W4 can build on this foundation: (1) add 'metadata' to Run.to_arrow() and from_arrow_row() so parity_run_type survives cool->warm; (2) implement the graded-parity-run check in validate_claim beside the legacy equivalence-bound path; (3) remove the AC-20 stub or mark it deferred in the backlog. The two MAJOR tautological tests (AC-07, AC-08) should be hardened before W4's T8/T9 add further gates that rely on the same conclude-gate infrastructure."
+}
+```

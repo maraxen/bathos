@@ -1,0 +1,1 @@
+Sorting out separation of concerns between bathos literature parity and xtrax port parity. Waiting for your input on whether the two systems should stay loosely coupled or whether xtrax port parity runs should register in the bathos catalog.

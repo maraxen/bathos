@@ -1,0 +1,1 @@
+Added output path enforcement to bathos (skill docs fixed, bth run warns on temp paths, bth lint detects them in catalog), bumped to 0.9.1, and reinstalled with viz extras. No immediate next action needed.

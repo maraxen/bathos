@@ -1,0 +1,302 @@
+Now let me deliver the structured report answering all 8 questions:
+
+---
+
+## RECON REPORT: Worktree and Workspace Resolution in bathos
+
+**Query:** How does bathos resolve project root, configuration, project slug, catalog directory, and sidecar paths when invoked from git worktrees? What does "workspace" mean in this codebase?
+
+**Answer:** Bathos resolves all configuration by walking up from `cwd` to find `.bth.toml` at the repo root. All worktrees of the same repo share the same `.bth.toml`, project slug, and catalog directory (by default `~/.bth/catalog/`), while git state (branch, hash, dirty) is correctly captured per-worktree. "Workspace" in bathos code refers to the project root directory, not a separate abstraction; the term appears mainly in external tool contexts (Claude Code / Gemini export targets) and postmortem validation.
+
+---
+
+### 1. Project-Root Resolution: Exact Algorithm
+
+**Location:** `src/bathos/config.py:27–34`
+
+```python
+def find_project_config(start: Path | None = None) -> Path | None:
+    if start is None:
+        start = Path.cwd()
+    for directory in [start, *start.parents]:
+        candidate = directory / ".bth.toml"
+        if candidate.exists():
+            return candidate
+    return None
+```
+
+**Algorithm:**
+- Defaults to `Path.cwd()` if no start path given
+- Iterates `[start] + start.parents` (logical parent chain)
+- Stops at **first `.bth.toml` found**
+- Returns `None` if none found
+
+**Stop conditions:** Only `.bth.toml` existence; no `.git` checks, no symlink special handling.
+
+**Worktree implication:** In a git worktree (e.g., `.claude/worktrees/item-136-spec/`), the logical `.parents` chain will reach the repo root where `.bth.toml` lives. **No problem here**—git worktrees are real directories, not symlinks.
+
+---
+
+### 2. Git Worktree Handling: Exact Subprocess Calls
+
+**Location:** `src/bathos/git.py:18–39`
+
+```python
+def capture_git_state(cwd: Path = Path.cwd()) -> GitState:
+    try:
+        hash_ = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=cwd, text=True, stderr=subprocess.DEVNULL
+        ).strip()
+        branch = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=cwd,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        dirty = bool(
+            subprocess.check_output(
+                ["git", "status", "--porcelain"],
+                cwd=cwd,
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+        )
+        return GitState(hash=hash_, branch=branch, dirty=dirty)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return _UNKNOWN
+```
+
+**Exact calls:**
+1. `git rev-parse HEAD` — returns current HEAD hash
+2. `git rev-parse --abbrev-ref HEAD` — returns current branch name
+3. `git status --porcelain` — returns dirty status
+
+**Worktree behavior:** All three commands are delegated to `git`, which **automatically resolves `.git` file pointers** in worktrees. In a worktree, `.git` is a file containing `gitdir: /path/to/.git/worktrees/<name>`, and git command automatically finds the correct metadata. Result: **hash, branch, and dirty status will be worktree-specific, NOT shared with main repo.**
+
+---
+
+### 3. Project Slug: Same or Different Across Worktrees?
+
+**Location:** `src/bathos/cli.py:44–54`
+
+```python
+def _require_project_slug() -> str:
+    slug_env = os.environ.get("BTH_PROJECT_SLUG")
+    if slug_env:
+        return slug_env
+    from bathos.config import find_project_config, load_project_config
+
+    cfg_path = find_project_config()
+    if cfg_path is None:
+        typer.echo("No .bth.toml found. Run `bth init` first.", err=True)
+        raise typer.Exit(1)
+    return load_project_config(cfg_path).slug
+```
+
+**Resolution priority:**
+1. `BTH_PROJECT_SLUG` environment variable (if set)
+2. `slug` field from `.bth.toml` found by `find_project_config()`
+3. Error if not found
+
+**Answer: SAME slug across all worktrees of the same repo.** Why: `find_project_config()` with no arguments walks from `cwd`, finds `.bth.toml` at repo root (same for all worktrees), and loads `[project] slug` from it. The `.bth.toml` is checked into git, so all worktrees share it.
+
+**Location:** `src/bathos/config.py:37–48`
+```python
+def load_project_config(path: Path) -> ProjectConfig:
+    with open(path, "rb") as f:
+        data = tomllib.load(f)
+    project = data["project"]
+    return ProjectConfig(
+        slug=project["slug"],
+        root=Path(project["root"]).expanduser(),
+        ...
+    )
+```
+
+---
+
+### 4. Catalog Directory: Global or Per-Project?
+
+**Location:** `src/bathos/cli.py:32–41`
+
+```python
+def _catalog_dir() -> Path:
+    override = os.environ.get("BTH_CATALOG_DIR")
+    if override:
+        return Path(override)
+    from bathos.config import default_catalog_dir, find_project_config, load_project_config
+
+    cfg_path = find_project_config()
+    if cfg_path is not None:
+        return load_project_config(cfg_path).catalog_dir
+    return default_catalog_dir()
+```
+
+**Resolution priority:**
+1. `BTH_CATALOG_DIR` environment variable (if set)
+2. `catalog_dir` from `.bth.toml` (if `.bth.toml` found)
+3. Default: `~/.bth/catalog/`
+
+**Default:** `src/bathos/config.py:23–24`
+```python
+def default_catalog_dir() -> Path:
+    return Path.home() / ".bth" / "catalog"
+```
+
+**Worktree behavior:** By default, **all worktrees of the same repo write to the same global catalog** (`~/.bth/catalog/`). If a custom `catalog_dir` is set in `.bth.toml`, all worktrees use that same custom path. Worktrees cannot have separate catalogs unless `BTH_CATALOG_DIR` is set differently at invocation time.
+
+---
+
+### 5. Sidecar Resolution: Symlink Handling
+
+**Location:** `src/bathos/sidecar.py:206–209`
+
+```python
+def find_sidecar(script_path: Path) -> Path | None:
+    """Return the .bth.toml adjacent to script_path, or None if absent."""
+    candidate = script_path.parent / f"{script_path.stem}.bth.toml"
+    return candidate if candidate.exists() else None
+```
+
+**Algorithm:** Looks for `<stem>.bth.toml` in the same directory as the script. **No symlink resolution here**—the path is taken as-is.
+
+**Symlink resolution HAPPENS downstream:** `src/bathos/prereg.py:106–112`
+
+```python
+def resolve_sidecar(script_path: Path) -> SidecarBundle:
+    """Find and hash the sidecar adjacent to script_path."""
+    p = find_sidecar(script_path)
+    if p is None:
+        return SidecarBundle(path=None, sha256="", found=False)
+    sha = hashlib.sha256(p.read_bytes()).hexdigest()
+    return SidecarBundle(path=p.resolve(), sha256=sha, found=True)
+```
+
+**Key line:** `return SidecarBundle(path=p.resolve(), ...)` — **`.resolve()` is called on the sidecar path**, which follows symlinks and normalizes the path. Since a git worktree is not a symlink but a real directory, this correctly resolves to the worktree-local path.
+
+**CLAUDE.md reference:** The phrase "resolve real path under symlinks" in CLAUDE.md is about **sidecar discovery**, and it's implemented via `p.resolve()` in `resolve_sidecar()`.
+
+---
+
+### 6. "Workspace" Concept: Bathos-Internal or External?
+
+**Search result:** 94 matches for "workspace" across the codebase. Breakdown:
+
+**Bathos-internal usage (project root, not a separate abstraction):**
+
+| File | Line | Context |
+|------|------|---------|
+| `src/bathos/postmortem.py:104` | `workspace_root: Path \| None` parameter | Postmortem validation; refers to project root |
+| `src/bathos/compact.py:402, 410, 412, 414, 415` | `workspace_root = project_config.root` or `Path.cwd()` | Postmortem scanning; workspace_root = project directory |
+| `src/bathos/cli.py:1532–1537` | `workspace_root = load_project_config(...).root` | Postmortem CLI commands; loads root from `.bth.toml` |
+| `tests/test_postmortem.py:106–559` | `workspace_root` test fixture | Tests validate asset links relative to workspace (project) root |
+
+**External tool usage (Claude Code / Gemini workspace level):**
+
+| File | Line | Context |
+|------|------|---------|
+| `src/bathos/export.py:24` | `"workspace": Path(".claude") / "skills" / "using-bathos"` | Target path for Claude Code workspace-level skill export |
+| `src/bathos/export.py:30, 81, 91` | `"workspace"` export levels | Claude Code / Gemini export target levels (user, workspace, system) |
+| `src/bathos/cli.py:1359` | `--level workspace` option | Export install level (external) |
+| `tests/test_export.py:48–122` | `resolve_target(tool="gemini", level="workspace")` | Export tests |
+| `praxia.toml:2` | `workspace_id:` | Praxia orchestration layer (not bathos) |
+
+**Conclusion:** "Workspace" in bathos means **the project root directory**, not a separate abstraction. When used in postmortem validation, it's the directory where sidecars and assets live. The term also appears in *external* tool contexts (Claude Code / Gemini skill/config installation levels), which is unrelated to bathos's own tracking model.
+
+---
+
+### 7. Tests Covering Resolution, Symlinks, Worktrees
+
+**Direct tests of project-root resolution:**
+
+| File | Test | Coverage |
+|------|------|----------|
+| `tests/test_config.py:6–19` | `test_find_config_in_current_dir`, `test_find_config_walks_up` | Find `.bth.toml` in cwd or parents |
+| `tests/test_config.py:22–24` | `test_find_config_returns_none_when_absent` | Return None if not found |
+| `tests/test_config.py:27–47` | `test_load_*config*` | Load and parse `.bth.toml` |
+
+**Git state tests:**
+
+| File | Test | Coverage |
+|------|------|----------|
+| `tests/test_git.py:7–24` | `test_captures_state_in_git_repo` | Capture hash, branch, dirty in git repo |
+| `tests/test_git.py:27–43` | `test_detects_dirty_state` | Detect dirty files |
+| `tests/test_git.py:46–50` | `test_returns_sentinel_outside_git_repo` | Return unknown sentinel if not in git |
+
+**Gap:** No tests explicitly covering:
+- `.bth.toml` lookup **from within a git worktree**
+- Two worktrees of same repo running `bth` simultaneously
+- Symlink-to-script behavior (though `.resolve()` in `resolve_sidecar()` is tested implicitly in runner tests)
+
+---
+
+### 8. Schema Version & Migration Surface
+
+**Current schema version:** `src/bathos/schema.py:10`
+```python
+CURRENT_SCHEMA_VERSION = "7"
+```
+
+**If worktree path or workspace ID needed in run record:**
+
+**Schema definition:** `src/bathos/schema.py:33–77` (COOL_SCHEMA, PyArrow)
+
+```python
+COOL_SCHEMA = pa.schema([
+    pa.field("id", pa.string()),
+    pa.field("project_slug", pa.string()),
+    # ... 37 fields ...
+    pa.field("stage_name", pa.string()),
+])
+```
+
+**Run dataclass:** `src/bathos/schema.py:128–150`
+```python
+@dataclass
+class Run:
+    project_slug: str
+    command: str
+    argv: list[str]
+    git_hash: str
+    git_branch: str
+    git_dirty: bool
+    # ... many more fields ...
+```
+
+**To add a field:**
+1. Add field to `COOL_SCHEMA` (PyArrow schema definition)
+2. Add field to `Run` dataclass with default value
+3. Update `WARM_SCHEMA` if used in warm tier
+4. Add migration in `src/bathos/migrate.py:migrate_catalog()` to backfill old fragments
+
+**Migration mechanism:** `src/bathos/migrate.py:25–93`
+
+```python
+def migrate_catalog(catalog_dir: Path, dry_run: bool = False) -> MigrateResult:
+    """Scan cool-tier fragments and rewrite any missing COOL_SCHEMA columns."""
+    runs_dir = catalog_dir / "runs"
+    if not runs_dir.exists():
+        return MigrateResult(scanned=0, already_current=0, migrated=0, dry_run=dry_run)
+
+    fragments = list(runs_dir.rglob("run_*.parquet"))
+    current_names = {f.name for f in COOL_SCHEMA}
+    # ...for frag in fragments:
+    #   check existing columns, add missing, rewrite
+```
+
+---
+
+## FINDINGS SUMMARY
+
+| Question | Answer | Risk in Worktrees |
+|----------|--------|-------------------|
+| **1. Project-root resolution** | Upwalk from cwd, stops at first `.bth.toml` | None — same `.bth.toml` at repo root for all worktrees |
+| **2. Git worktree handling** | Git commands auto-resolve `.git` file pointer; hash, branch, dirty are worktree-specific | None — correct behavior, returns per-worktree state |
+| **3. Project slug** | Loaded from `.bth.toml`, shared across repo | None — same slug for all worktrees |
+| **4. Catalog directory** | Default `~/.bth/catalog/`, shared global; can override with `BTH_CATALOG_DIR` or `.bth.toml` | **SHARED BY DEFAULT** — parallel writes from two worktrees may race. Cool tier is SLURM-safe but same-machine concurrency untested. |
+| **5. Sidecar resolution** | Find adjacent `<stem>.bth.toml`, resolve path with `.resolve()` | None — symlink handling works correctly |
+| **6. Workspace concept** | Refers to project root directory in postmortem validation; "workspace level" in export is external (Claude Code / Gemini) | None — no separate workspace abstraction in bathos |
+| **7. Existing tests** | Cover upwalk, git capture, config loading, but NOT explicit worktree scenario | **Gap** — no tests from `.claude/worktrees/` |
+| **8. Schema migration** | Schema v7; migrations backfill missing columns via `migrate_catalog()` | None — migration mechanism is solid |
+
+**Critical observation:** If two worktrees write to the same catalog simultaneously, cool-tier write safety is unknown. Cool Parquet is atomic write-then-rename (SLURM-safe), but concurrent writes from the same machine have not been tested.

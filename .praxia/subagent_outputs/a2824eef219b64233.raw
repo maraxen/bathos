@@ -1,0 +1,19 @@
+The spec has been written successfully. The INVEST gate recorded `invest_passed: false` (expected — E and S overrides are by design for this architectural decomposition session).
+
+VERDICT: PASS  PLAN: /home/marielle/projects/bathos/.praxia/docs/specs/260612_experimental-controls-discipline-for-in.md
+
+---
+
+Session summary:
+
+The session was confirmed in Phase 4 with all non-routine type requirements satisfied: winner set, runner_up and steelman populated, premortem completed. The INVEST gate E and S failures are pre-recorded with override rationale (multi-item architectural spec by design — intended to decompose into a backlog DAG, not a single sprint item).
+
+The exit artifact is at `/home/marielle/projects/bathos/.praxia/docs/specs/260612_experimental-controls-discipline-for-in.md`.
+
+Key decisions captured in the artifact:
+
+- Factions B, C, D, E all rejected on structural grounds (SLURM race condition, campaign-bypass gap, lint-only insufficient, unnecessary schema complexity)
+- Modified Faction A wins: additive `[reproduction]` and `[controls]` blocks on existing sidecar types; enforcement gate at `bth submit` time (warm-tier DuckDB, pre-sbatch, not per-run)
+- Stage-name-gated severity: exploration stages get Tier-2 advisory, validation/production get hard submit gate
+- `ctrl_pass`/`ctrl_fail` outcome label convention for zero-schema-change control arm tracking
+- Five open TBDs identified (stage_name resolution path, stem matching granularity, controls label vs. SQL, bth_submit_version existence, linter DuckDB access pattern) that must resolve before implementation begins

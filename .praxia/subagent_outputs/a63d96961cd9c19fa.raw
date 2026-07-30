@@ -1,0 +1,38 @@
+**Task:** Deep recon of the bathos literature-parity implementation.
+
+---
+
+## Conceptual purpose
+
+Literature parity solves a **confound-control problem**: when a project reimplements a method from a paper that published no code, the reimplementation silently diverges, invalidating any downstream comparison. Bathos enforces a reusable 5-phase protocol (blind reconstruction → reconcile → adversarial refutation → adjudicate → graded verdict) via a declarative `parity.bth.toml` config. The key constraint: zero per-project code; everything is driven by the config and a `parity_validate.py` runner script that any project can execute. `claim.py:570-573`.
+
+## `parity_run_type` column
+
+A first-class `pa.string()` COOL-tier column (`schema.py:72`), nullable, value `'literature_parity'` when set. This is the authoritative discriminator for all gates — metadata JSON is explicitly *not* the source of truth (B1 resolution). Values: `None` (ordinary run) or `'literature_parity'` (a parity validation run). Written by `runner.py` at extraction from doubly-nested `result["metadata"]["parity_run_type"]`.
+
+## `attest_parity` — what it stores and checks
+
+Located at `claim.py:570+`. Given a `campaign_id` and `parity_run_id`, it:
+1. Resolves the campaign's claim file + stored DB SHA (`claim.py:606-614`)
+2. Reconcile-on-entry backstop: if `file_sha != DB_sha`, logs a warning and proceeds (`claim.py:619-629`)
+3. AC-12 validation: queries `SELECT outcome, metadata, parity_run_type FROM runs WHERE id=?` (`claim.py:632-633`); rejects if outcome not in `('pass', 'partial')` or if `parity_run_type != 'literature_parity'`
+4. Binds the run ID into `claim.bth.toml`'s `[confounds.reference_parity]` block
+5. Atomically re-anchors the claim SHA: write-temp → fsync → `os.replace` → DB-update-last; full rollback on DB-update failure (AC-21)
+
+## F2/F3 gates
+
+**F2 (conclude-gate)**: `campaigns.py:244-251` — before `run_union_gate()`, calls `parity_confound_check()` from `claim.py`. For campaigns with `mode='confirmation'` or `'sequential'`, uncontrolled `reference_parity` confounds downgrade the campaign to `confounded`; `mode='exploration'` is warn-only.
+
+**F3 (submit-gate)**: in `bth submit` after the reproduction gate. Sidecar-declared prerequisite (`requires_parity_stem` or `[reproduction].requires_parity`) resolves a prior parity run from the catalog. Hard-blocks `validation`/`production` run types; advisory for `exploration`/`calibration`. Fails open (advisory) when the warm DB is absent (AC-22).
+
+## W4 remaining (T8 + T9 + AC-20)
+
+**T8 (#2222)**: The `attest_parity()` function exists in `claim.py` but has **no CLI or MCP surface**. T8 wires: (a) `bth campaign attest-parity` subcommand in `campaign_app` (`cli.py:19`), (b) `claim_attest_parity` MCP tool after `claim_validate` at `mcp.py:1117`. Self-contained: both are thin call-throughs to the existing function.
+
+**T9 (#2223)**: Signal 13 doesn't exist yet. Signal 12 (`sprint_audit.py:526-540`) flags confirmation campaigns with no registered claim. Signal 13 would flag confirmation campaigns that *have* a claim citing a published-method baseline but where `reference_parity` is uncontrolled (empty `parity_run_id`, or the bound run is not `parity_run_type='literature_parity'`). Placement: after Signal 12, ~line 540.
+
+**AC-20**: `bth check` detecting SHA-drift on a parity verdict artifact (checklist JSON / verdict md / invariant pytest pinned in `output_paths`). Currently a `pytest.skip` in `test_t6_parity_conclude_gate.py`. Deferred to T8 because it requires the `attest-parity` CLI path to exist (so the drift-detection path has something real to check against). No live hole: AC-21 atomic-rollback already guards mid-mutation.
+
+## Design constraints relevant to xtrax interaction
+
+The design is **deliberately generic at the config layer** (`parity.bth.toml`) but **project-local at the evidence layer** (the `parity_validate.py` runner lives in the project). The key seam: bathos only sees `parity_run_type='literature_parity'` + `outcome` in its catalog — it doesn't know *what* was validated. An xtrax parity system could satisfy the F2/F3/F4 gates by registering a run with `parity_run_type='literature_parity'` — bathos would treat it as controlled without knowing any JAX-specific details. The schema is open-world on this dimension.

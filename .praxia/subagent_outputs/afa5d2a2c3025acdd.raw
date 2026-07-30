@@ -1,0 +1,1 @@
+Implemented the full bathos telemetry sprint end to end — spec, substrate, 13 instrumented modules, audit fixes, docs, and skill update. Everything is merged to main and the uv tool is reinstalled; no next action needed.

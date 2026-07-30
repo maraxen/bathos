@@ -1,0 +1,192 @@
+Perfect. Now I have enough context to assemble the briefing. Let me compile the comprehensive briefing pack:
+
+---
+
+## BRIEFING PACK: Oracle Review Context
+### Task: 260526_agentic-science-evolution
+
+---
+
+### 1. TASK CONTEXT
+
+**Task ID:** `260526_agentic-science-evolution`
+
+**What's being designed:** A bathos v0.6+ + praxia evolution sprint, grounded in oracle-approved synthesis from 7 NLM-derived sources + 3 deep research queries. The spec (in draft in parallel) will formalize: pre-execution manifests as auditor-visible artifacts, first-class `outcome="error"` handling, adversarial check fields in sidecars, structured MCP gate error taxonomy, and sprint anomaly signal formalization.
+
+**Where deliverables live:**
+- Spec: TBD (being drafted; oracle awaits this context)
+- ADRs: `.praxia/docs/decisions/` (per project convention, but currently empty; ADRs may be embedded in spec)
+- Research synthesis: `.praxia/docs/research/260526_agentic-science-nlm-synthesis.md` (oracle-approved, 277 lines)
+- Research plan: `.praxia/docs/research/260526_agentic-science-nlm-research-plan.md` (206 lines)
+- Related prior spec: `.praxia/docs/specs/260520_agentic-science-design.md` (139 lines, approved, drives this evolution)
+
+**Transduction log status (CRITICAL):** The MCP `mcp__praxia__transduction_log` is broken for this session (workspace_id empty despite `.praxia/workspace.id` existing). **No MCP log entries for `task_id=260526_agentic-science-evolution` have been persisted.** Oracle must work entirely from on-disk artifacts. All claims in this briefing are anchored to files listed above.
+
+---
+
+### 2. DECISION HISTORY (Locked Decisions)
+
+All decisions below are oracle-approved findings from the synthesis, supported by literature evidence (arXiv IDs in brackets). Locked means they are NOT open for debate in this sprint — they are constraints on the spec writer.
+
+| Decision | Choice | Rationale | Evidence |
+|----------|--------|-----------|----------|
+| **Hypothesis commitment mechanism** | **Pre-execution manifest file** (separate from outcome schema) | Visibility + tamper-evidence: sidecar hash at run time is correct; also add `bth hypothesis lock` artifact written BEFORE subprocess, making commitment explicit and nonrepudiable. Co-Scientist [2502.18864] does NOT pre-commit; minimal viable artifact is write before execution. | §1.1, Q-1 |
+| **Error outcome handling** | **First-class `outcome="error"`** | Errored experiments must NOT evaluate pass/fail/marginal conditions against partial results. Sidecar validator rejects conditions that reference absent fields. POPPER [2502.09858] standardizes: error execution = no result. | §1.2, Q-2 |
+| **Falsification signal** | **`adversarial_check` field in `[outcomes.pass]`** | Required for agent-mode runs (decision deferred to spec writer, but §1.4 clarifies it's operationally specific vs. standalone `[falsification]` block). Sound Agentic Science [2604.22080] shows pre-registration alone doesn't test load-bearing capacity. | §1.4, Q-4 |
+| **Constraint drop detection** | **Exception-swallowing lifted to P1** | Silent failures hide constraint violations. Gate error payloads must be structured taxonomy + raw data, NOT natural language. LoopTrap [exact arXiv unverified] documents 3.57× step amplification when agents re-interpret error descriptions infinitely. | §1.6, Q-6 |
+| **Sidecar bypass rate** | **>30% threshold flags as anomaly** | AstaBench [2510.21652] + "More You Automate" [2509.08713] identify this as discriminating signal. **Proposed starting point requiring project calibration** — not hardcoded enforcement in v0.6. | §1.5, Q-5 |
+| **maraxiom §3 retraction** | **Nonrepudiation integration exploratory only** | K-Veritas [2605.08586] defines requirement (independent signing authority); for solo researcher, self-signed manifests lack author-key separation. Placed in §3.1 as "design direction," not backlog item. Spec writer should note this caveat. | §3.1 |
+| **Query logging async operations** | **PostToolUse hook for NLM** | Current `nlm.jsonl` has gaps in async notebook operations. Hook pattern in praxia settings.json covers future-proofing (§4.2). Low effort; spec writer should propose one-liner integration point. | §4.2 |
+
+---
+
+### 3. REPO STATES
+
+#### bathos (primary mutation target)
+
+- **Branch:** `main` (clean except for report.html, .claude/, scripts/analysis/)
+- **Worktree status:** `git status` shows: `M report.html`, `?? .claude/`, `?? scripts/analysis/` (clean source)
+- **Module map (LOC):**
+  ```
+  src/bathos/
+    schema.py (150 LOC) — Run dataclass, COOL/WARM schemas, v3 fields
+    runner.py (300+ LOC) — bth run wrapper, result emission, sidecar hash at line 194
+    sidecar.py (200+ LOC) — .bth.toml parse, content-hash, outcome eval
+    config.py (150 LOC) — project config + registry (exception swallowing at line 63)
+    compact.py (400+ LOC) — cool→warm compaction, migrations, postmortem map
+    query.py (400+ LOC) — DuckDB queries, lineage CTE (parent_run_id)
+    cli.py (800+ LOC) — 20+ commands (init, run, ls, find, compact, check, archive, sync, campaign_*, lint, sprint-audit, new-experiment, export, migrate, remote_*, lineage)
+    mcp.py (800+ LOC) — FastMCP server, 14+ tools (mirrors most CLI, some gaps)
+    campaigns.py (150 LOC) — Campaign CRUD + review
+    sprint_audit.py (200 LOC) — Cross-project audit
+    linter.py (300 LOC) — Tier-1/Tier-2 checks (outcome uniformity, bypass rate, unfired branches)
+    validate.py (150 LOC) — Sidecar structural validator
+    prereg.py (150 LOC) — Agentic integrity gate
+    viz/ (500 LOC) — Optional viz extra (v0.5 feature)
+  tests/ (3000+ LOC) — 25 test files, 254 test functions
+  ```
+- **Current schema version:** v4 (not v1 as CLAUDE.md claims)
+- **Actual version:** 0.3.0 (not v0.1; CLAUDE.md outdated)
+- **Key file:line anchors from prior recon:**
+  - `runner.py:194` — sidecar_sha256 set before subprocess (commitment happens here)
+  - `runner.py:215` — subprocess.run (execution happens here)
+  - `config.py:63` — exception swallowing on global registry write (260522 recon item)
+  - `compact.py:287` — exception swallowing on postmortem parse (260522 recon item)
+  - `sidecar.py:160` — DuckDB condition eval errors caught silently (260522 recon item)
+
+#### praxia (Rust workspace, secondary mutation scope for sprint-composer)
+
+- **Workspace:** 50+ crates across `crates/`, `apps/`
+- **Relevant crates for this sprint:**
+  - `crates/praxia-fsm` — FSM orchestrator (will need pre-registration gate node)
+  - `crates/praxia-orchestration` — Sprint composer *location not yet confirmed* (§4.3 mentions "sprint-composer should enforce pre-registration gate"; unclear if module exists)
+  - `crates/praxia-core` — Core types
+  - `crates/praxia-agent-assets` — Agent skill distribution (SKILL.md lives here)
+  - `crates/praxia-nlm` — NotebookLM adapter
+- **Hook status:** `.claude/settings.json` is empty JSON `{ "hooks": {}, "worktree": {...} }` — no PostToolUse hooks configured (§4.2 proposes addition)
+- **Sprint-composer location:** **UNKNOWN** — 260526 synthesis mentions "sprint-composer should enforce pre-registration gate as a gate node before experiment execution" but no crate named `sprint-composer` found in workspace. Likely a concept not yet extracted as a module, or part of `praxia-orchestration` or `praxia-fsm`.
+
+#### maraxiom
+
+- **Confirmed out-of-scope for v0.6 sprint:** Only exploratory design directions (§3). Spec writer should note that K-Veritas nonrepudiation (§3.1), adversarial peer review pipeline (§3.2), and W3C PROV export (§3.3) are **NOT** backlog items yet.
+- **What it actually is:** The research manuscript companion tool (citations, reproducibility, provenance). Currently separate project, not in this sprint scope.
+
+---
+
+### 4. RELATED PRIOR DESIGN DOCS
+
+**260520_agentic-science-design.md (139 lines)**
+
+Summary: Strategic design approved by oracle. Establishes bathos as the "audit substrate for agentic experiment orchestration" — not an execution orchestrator, not a public registry, not an MLflow-style dashboard. Core position: tiered serverless storage + sidecar pre-registration + MCP interface. Three sections of leverage:
+- High: provenance graph / lineage (§3: `parent_run_id` field + `--derived-from` flag)
+- High: agentic audit trail (§3: MCP hypothesis capture or sidecar verification)
+- Medium: campaigns, comparison/regression tracking
+
+Open questions locked in §6 overlap directly with §6 of synthesis (hash granularity, adversarial_check optional vs required, bypass rate denominator, nonrepudiation for solo, tournament elo).
+
+**Other specs in `.praxia/docs/specs/`:**
+- `260515_bathos-design.md` — v0.1 core (init, run, catalog, query)
+- `260515_bathos-v01-plan.md` — implementation plan, v0.1 shipped
+- `260518_bathos-migration-v1-revised.md` — migration sprint design (30–40 seed runs across 4 projects)
+
+---
+
+### 5. SYNTHESIS CAVEATS (Oracle should know these)
+
+| Caveat | Location | Impact |
+|--------|----------|--------|
+| **LoopTrap arXiv ID invalid** | §1.6, §4.4 | "ae193ddf" is not a valid arXiv ID. Exact source unverified; defensive measure (step budget enforcement) stands on separate principled rationale. Spec writer should confirm or remove external citation. |
+| **"Hypothesis Hivemind" attribution unverified** | §1.5 | Synthesis cites arXiv 2501.10421; this appears in raw Q-5 note but was **not independently cross-checked** against primary source. Outcome label entropy signal is valid (AstaBench χ² statistic is precise); attribution needs review. |
+| **AstaBench χ² statistic (§1.5)** | §1.5 (line 64) | "χ²(4,200)=61.99, p<10⁻¹⁰, Cramér's V=0.39" only appears in synthesis MD, not in raw Q-5 notes (`nlm.jsonl` line 103). Signal is sound; exact numbers not re-derivable from raw artifacts without NLM re-query. |
+| **Entropic Anchoring not incorporated** | Raw Q-5 (`nlm.jsonl` line 103) | Raw research note mentions "Entropic Anchoring" as a finding; synthesis did not include it as a rigor signal. Spec writer may add if relevant. |
+| **Maraxiom §3 is exploratory** | §3 (all subsections) | Not grounded in §1 findings; explicitly labeled "design directions," not backlog. K-Veritas (2605.08586) is only deep-research paper in maraxiom scope; solo researcher nonrepudiation is open question (§6 Q4). Spec writer should treat §3 as "for future reference," not current sprint scope. |
+
+---
+
+### 6. TRANSDUCTION LOG STATE (what oracle should expect)
+
+| File | Line count | Most recent entry | 1-sentence summary |
+|------|-----------|-------------------|-------------------|
+| `.praxia/synthesis.jsonl` | 2 | 2026-05-26 02:47:33Z | Line 2 is 260526 NLM synthesis; line 1 is earlier 260521 postmortem spec. This session (260526_agentic-science-evolution) HAS NO entry due to MCP bug. |
+| `.praxia/recon.jsonl` | 20 | 2026-05-22 | Line 18 is 260522_improve_gaurdrails (7 exception-swallow call sites). Lines 1–17 map migration, docs, schema, CLI surface. No 260526 entries. |
+| `.praxia/nlm.jsonl` | 100+ lines | 2026-05-26 (async research tasks) | NLM session 0926d03c captured async research_start calls; research_status calls show rejections. Synthesis was manually constructed from NLM notebook, not auto-logged from tool calls. |
+| `.praxia/plans.jsonl` | 10 | 2026-05-22 | Line 10 is 260522_guardrails_spec. Lines 1–9 cover v0.2 post-sprint, PyPI/RTD plan, migration DAG, postmortem spec, viz-suite plans. No 260526 entries. |
+| `.praxia/audits.jsonl` | 9 | 2026-05-22 (plan audits) | Lines cover PyPI RTD plan audit, bathos migration plan audits, viz-suite plan audits. No 260526 entries. |
+| `.praxia/daily.jsonl` | 0 | N/A | Not referenced in task context; assumed empty or minimal. |
+
+**Why this matters:** Oracle must trust ONLY on-disk synthesis.md + research-plan.md + prior specs. MCP logging is broken; no transduction record exists for 260526 yet. Everything oracle sees should come from the briefing markdown or direct file reads — not from "what the log said."
+
+---
+
+### 7. RECOMMENDED ORACLE FOCUS AREAS
+
+Based on the synthesis and prior design, oracle should focus critique on these 7 areas:
+
+1. **File:line stability for sprint atoms** — All 9 P1/P2 changes in §2 (priority ordering) reference code locations (e.g., `runner.py:194`, `sidecar.py:160`). Are these anchors solid across git history, or will they shift during implementation? Can spec writer derive concrete test cases from these?
+
+2. **Exception-swallowing remediation scope** — §1.6 lists 7 silent-fail call sites (260522 recon, line 18). Spec should formally define which are P0 vs. P1 vs. P2. Do all 7 get fixed in v0.6, or only the ones in critical paths (runner, sidecar, compact)?
+
+3. **Full-sidecar hash vs. hypothesis-only hash** — §6 Q1 is OPEN: should pre-execution manifest hash cover only `[experiment].hypothesis` (allowing outcome tuning) or full sidecar (stronger integrity, blocks refinement)? Adversarial_check field adds reason to lock full sidecar. Spec should resolve this explicitly.
+
+4. **Structured error enum values coherence** — §2.5 proposes 7 error codes: `sidecar_parse_error`, `condition_eval_error`, `result_schema_mismatch`, `hypothesis_lock_missing`, `outcome_ambiguous`, `sidecar_hash_mismatch`, `adversarial_check_missing`. No overlap test, no catch-all. Are these exhaustive? What about timeout errors, missing file errors, bad JSON?
+
+5. **praxia sprint-composer location & design** — §4.3 assumes sprint-composer exists and proposes a pre-registration gate node. Code reconnaissance found **no `sprint-composer` crate**. Likely a concept not yet extracted, or part of `praxia-fsm`. Spec should clarify: are we adding a new module, or integrating into existing FSM? Blocking item for praxia scope.
+
+6. **`bth lineage --format prov` design** — §3.3 (maraxiom scope) mentions auto-generating W3C PROV graphs. Spec may omit this, but if bathos implements `bth lineage --format prov`, what's the JSON/RDF shape? PROV-JSON standard, or custom? Deferred or in scope?
+
+7. **Loop step budget enforcement realism** — §4.4 proposes per-task budget (20 steps for science, 50 for complex orchestration). Is this praxia-only, or does bathos track step depth? Who enforces the budget — FSM, runner, or external orchestrator? Spec should clarify scope boundaries.
+
+---
+
+### 8. DATA ARTIFACTS FOR ORACLE
+
+**All files mentioned in this briefing are in `/home/marielle/projects/bathos/` unless otherwise noted.**
+
+Paths oracle can `Read` directly:
+- `.praxia/docs/research/260526_agentic-science-nlm-synthesis.md` — 277 lines, oracle-approved synthesis
+- `.praxia/docs/research/260526_agentic-science-nlm-research-plan.md` — 206 lines, research design
+- `.praxia/docs/specs/260520_agentic-science-design.md` — 139 lines, strategic design
+- `CLAUDE.md` — 240 lines, status section outdated but architecture correct
+- `.praxia/synthesis.jsonl` line 2 — 260526 NLM synthesis metadata (timestamp, source tags)
+- `.praxia/recon.jsonl` line 18 — 260522_improve_gaurdrails audit findings (7 exception call sites)
+
+**Key evidence anchors:**
+- `src/bathos/runner.py` lines 194, 215 — pre/post subprocess sidecar hash (commitment point)
+- `src/bathos/schema.py` lines 9, 22, 42 — schema versions, cool/warm fields
+- `src/bathos/sidecar.py` line 160 — outcome evaluation error handling (silent failure)
+- `src/bathos/config.py` line 63 — registry write exception swallowing
+
+---
+
+## SUMMARY
+
+This oracle-ready briefing provides:
+- **Task context:** What's being designed (bathos v0.6+ + praxia evolution).
+- **7 locked decisions** from oracle-approved synthesis, with evidence arXiv IDs.
+- **3 repo snapshots** (bathos module map, praxia workspace, maraxiom out-of-scope).
+- **Prior design context** (260520 strategic design overlaps; migration, postmortem, viz specs provide scope boundaries).
+- **5 synthesis caveats** (LoopTrap ID unverified, Hivemind attribution unverified, Entropic Anchoring not incorporated, maraxiom exploratory only, AstaBench numbers not re-derivable).
+- **Transduction log gap warning:** MCP is broken; all context is on-disk; no log entries for this task exist yet.
+- **7 oracle focus areas** (file:line stability, exception scope, hash granularity, error enum coherence, sprint-composer location, PROV design, step budget scope).
+
+The spec writer now has clear constraints. Oracle can critique against oracle-approved synthesis and evaluate whether the spec (when ready) coherently addresses the 7 focus areas without re-litigating locked decisions.

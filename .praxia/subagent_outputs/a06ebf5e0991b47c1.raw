@@ -1,0 +1,41 @@
+The MCP session does not exist — the session was either not created yet by the facilitator or the ID differs from what was dispatched. I cannot record decisions into the MCP layer. My findings stand as direct text output, which the orchestrator can read. I will not attempt further MCP writes.
+
+---
+
+```
+CRITIC SUMMARY
+Ideas reviewed: 8
+  PASS (no FATAL): none — all factions have at least a MAJOR finding; none have a FATAL
+    that alone makes them non-viable, but the SLURM array gap is FATAL to any faction
+    that claims per-run enforcement (A, B, C)
+  BLOCKED (FATAL):
+    - Faction B (Campaign-centric): SLURM array concurrent startup makes campaign-level
+      per-run prerequisite checks structurally unenforceable — control and treatment tasks
+      start simultaneously with no ordering guarantee
+    - Faction C (Hybrid): no mechanism links campaign fulfillment records back to specific
+      sidecar intent blocks; enforcement logic is entirely unspecified at the seam that
+      matters most
+    - Cross-cutting / SLURM array gate: explicitly FATAL across all factions — no faction
+      commits to bth submit as the gate boundary, making all per-run enforcement claims
+      hollow under array execution
+  CONDITIONAL (MAJOR only):
+    - Faction A: cold-tier archive blind spot must be resolved (gate must distinguish
+      archived vs. never-run) before viable
+    - Faction D (Lint-only): structurally incapable of covering autonomous agent pipelines;
+      viable only if scope is explicitly limited to human-reviewed workflows
+    - Faction E: directory-scoping assumption conflicts with flat scripts/experiments/
+      namespace and has no grandfather clause for existing scripts; scope definition must
+      be resolved
+    - ctrl_pass/ctrl_fail namespacing: retroactive control designation not supported;
+      must decide at design time whether retrospective re-labeling is in or out of scope
+    - requires_pass stem gate: content-hash architecture is rename-safe but stem gate
+      is not; rename will permanently break downstream gates with no recovery path
+Strongest surviving idea: Faction A (Sidecar-centric) — the cold-tier blind spot is a
+  well-defined problem with a known fix (gate checks warm-tier too, or accepts an archive
+  sentinel); everything else in the design is internally consistent
+Largest unaddressed gap: No faction specifies bth submit (pre-sbatch) as the enforcement
+  boundary, which is the only location where a gate check can be honored under SLURM array
+  parallelism — this gap makes three factions' enforcement claims structurally false
+```
+
+VERDICT: NEEDS_WORK

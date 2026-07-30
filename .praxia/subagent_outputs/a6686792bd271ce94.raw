@@ -1,0 +1,1 @@
+Worktree-aware workspace resolution is built, merged to main, and handed off; only marking the 7 praxia backlog items complete remains. That's blocked because the praxia MCP server is disconnected, so I need you to reconnect it (or approve the DB access) before I can update them.

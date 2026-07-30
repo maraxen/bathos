@@ -1,0 +1,29 @@
+Verification of each finding against the revised spec:
+
+**F1 (subprocess fork + structlog dismissal)** — Addressed. D1 row mentions structlog one-liner; section "Subprocess / fork safety" at line 66-68 names fork+exec semantics and forbids `fork` start method. Adequate.
+
+**F2 (contextvar capture on listener thread)** — Addressed correctly. D4 (line 27), Internals step 3 (line 59), and "Correlation via contextvars" (line 74-82) all specify `QueueHandler.prepare()` snapshot onto `record.__dict__`, with explicit "NOT via `var.get()`" warning. Tests include regression for this in step 1 of integration plan.
+
+**F3 (rsync hang detection)** — Addressed. D7 (line 30) specifies `Popen` + `--info=progress2` stream parsing. `sync.rsync_progress` and `sync.rsync_stall` events defined (line 148-149). Note at line 153 calls out the implementation change at `sync.py:94`. `run.heartbeat` added (line 94). Adequate.
+
+**F4 (missing surfaces)** — Addressed. `sidecar.*`, `prereg.*`, `postmortem.*`, `campaign.*`, `lineage.*` all defined (lines 99-133) with event tables. D5 explicitly enumerates them.
+
+**F5 (multi-process safety)** — Addressed. D6 (line 29) specifies per-process files `events.<hostname>.<pid>.jsonl`. SLURM-array concurrency test is mandatory before substrate merge (line 208).
+
+**F6 (cluster log sync)** — Addressed. Default `log_dir` under `<catalog_dir>/logs/` rides existing `bth sync` (D2, D6, line 61, line 229). Explicit merge recipe documented.
+
+**F7 (rotation arithmetic)** — Addressed. Line 60 now correctly says "10 MB × 5 backups per file (50 MB worst case per process)".
+
+**F8 (contextvar mechanism)** — Addressed. Line 79 explicitly states asyncio.Task gets fresh context copy at creation, so `var.set` inside the wrapper is automatically request-scoped — no `copy_context().run` needed. Risks table reiterates (line 247).
+
+**F9 (event/span API)** — Addressed. Lines 45-54 specify enter/exit/exception semantics, `span_id`, `duration_ms` from `monotonic_ns()`, `ok` flag, traceback truncation, and reserves `name.error` for caller use vs span failure. Lazy-init behavior for `event()` documented.
+
+**New issues check:**
+- Minor internal contradiction: integration plan step 2 (line 198) lists `run.sidecar_validated` but that event is not in the `run.*` taxonomy table (line 88-97) — it likely belongs under `sidecar.*` as `sidecar.parsed`. Nit, easy fix.
+- `JsonFormatter` emits `telemetry.serialise_error` from within the listener thread — risk of recursion if that record itself contains non-serialisable fields. Minor; using `default=repr` should prevent it, but worth a sentence. Nit.
+- `atexit` flush + listener-died fallback "writes synchronously to stderr" (line 245) — fine, but MCP server over stdio could pollute the protocol stream. Nit; stderr is conventional and FastMCP uses stdout.
+- No YAGNI violations introduced. Scope discipline at "Out of scope" is clean.
+
+All blocking findings (F2, F3, F4, F5, F6) have substantive fixes with concrete mechanisms, not gestures. Nits (F1, F7, F8, F9) addressed. Two small new nits noted above are non-blocking polish.
+
+**APPROVED_WITH_NITS**

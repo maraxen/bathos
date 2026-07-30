@@ -1,0 +1,1 @@
+Implementing telemetry logging across 13 bathos modules per an approved spec, with the substrate telemetry.py module as the required first step. Waiting on your choice of execution approach before dispatching.

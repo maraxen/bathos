@@ -1,0 +1,42 @@
+Perfect! All 440 tests pass. Let me create a summary of the changes:
+
+## Summary
+
+I have successfully implemented all four GateErrorCode taxonomy correctness gaps in bathos as specified:
+
+### Change 1: ADVERSARIAL_CHECK_MISSING returns, not raises
+- **File**: `src/bathos/prereg.py`, line 241
+- **What changed**: Replaced `raise GateError(...)` with `return GateResult(ok=False, ...)`
+- **Why**: Makes the gate check path consistent—all denials return a GateResult with error_payload, none raise exceptions
+
+### Change 2: Adversarial check enforcement for all non-residual outcomes  
+- **File**: `src/bathos/prereg.py`, line 231
+- **What changed**: Extended filter from `label == "pass"` to `not getattr(outcome, "is_residual", False)`
+- **Why**: Enforces `adversarial_check` on all non-residual outcomes in autonomous mode, not just "pass". Uses the existing `is_residual` field from `OutcomeSpec` in sidecar.py
+
+### Change 3: Annotated 5 dead GateErrorCode values
+- **File**: `src/bathos/prereg.py`, lines 25, 27, 29, 31, 32
+- **What changed**: Added `# reserved: <future feature>` comments to:
+  - `SIDECAR_HASH_MISMATCH`: manifest versioning and drift detection
+  - `MANIFEST_WRITE_FAILED`: manifest write permission checks on cluster
+  - `HYPOTHESIS_LOCK_MISSING`: hypothesis lock file validation
+  - `RESULT_SCHEMA_MISMATCH`: strict schema enforcement in v0.7
+  - `OUTCOME_AMBIGUOUS`: multiple outcome conditions evaluating true
+
+### Change 4: Wire post-execution error payload into outcome_error_reason
+- **File**: `src/bathos/runner.py`, lines 20, 365-372
+- **What changed**: 
+  - Added imports: `GateErrorCode, _gate_failure_payload` from `bathos.prereg`
+  - When `evaluate_outcome()` raises `SidecarError`, construct `GateErrorPayload` with:
+    - `code=OUTCOME_EVALUATION_ERROR`
+    - `phase="post_execution"`
+    - Serialize to JSON into `outcome_error_reason` field
+- **Why**: Provides structured error information for MCP inspection and debugging
+
+### Verification
+- ✅ `uv run pytest tests/test_gate_error_taxonomy.py tests/test_prereg.py` → **22 passed**
+- ✅ `uv run pytest tests/test_runner.py` → **19 passed**  
+- ✅ Full suite (excluding MCP tests) → **440 passed**
+- ✅ No test count decrease
+
+All changes are minimal, surgical, and focused on the four identified gaps with no scope creep.

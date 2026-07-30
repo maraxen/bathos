@@ -1,0 +1,1 @@
+Designing a bathos telemetry layer (stdlib logging + QueueHandler → JSONL at ~/.bth/logs/events.jsonl, covering run/mcp/sync/catalog surfaces) so bugs and hangs are auditable in one place. Next: write the design to docs/plans/2026-05-27-telemetry-design.md and commit.

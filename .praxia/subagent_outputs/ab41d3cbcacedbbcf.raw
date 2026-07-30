@@ -1,0 +1,1 @@
+We were checking whether bathos has any repair tooling. It has detect-only verify and a warm-tier rebuild via compact --force-rebuild, but no automated fix commands. You asked if we should add a --fix mode or bth repair command.

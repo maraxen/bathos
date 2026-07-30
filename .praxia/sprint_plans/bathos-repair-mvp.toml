@@ -1,0 +1,13 @@
+tracks = []
+
+[sprint]
+sprint_id = "bathos-repair-mvp"
+sprint_num = 1
+name = "bathos-repair-mvp"
+description = ""
+context = "[MANUAL: paste recon findings here before running emit-sprint]"
+max_fix_retries = 1
+
+[orchestration]
+sequential = []
+concurrent = []

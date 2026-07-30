@@ -1,0 +1,3 @@
+Perfect. All 5 edits have been successfully applied and committed to the worktree. Here's the summary:
+
+**Summary:** Fixed the spec by closing 5 identified gaps across 6 targeted edits. TBD-1 resolved to v8 migration, AC-03 field name corrected (verdict→predicted_outcome), AC-08 completely restructured with TOML clause schema + conclude_campaign() signature + mode-gated behavior, AC-13 field renamed (reference_metric→parity_metric) with placement clarified to benchmark sidecars, and new AC-16 migration spec added for schema v7→v8 with 5 nullable columns. All changes committed atomically.

@@ -1,0 +1,15 @@
+Session `8295dc8f` is confirmed in phase 3 (Convergence).
+
+The system has emitted its cognitive forcing beat prompt:
+
+> "Which idea from the pool are you most drawn to? Before we evaluate — name one significant thing that could go wrong with it, or one assumption it requires that might be false."
+
+State summary for the synthesizer:
+- **Phase**: 3 (Convergence)
+- **forcing_beat_done**: false — the synthesizer must answer the forcing beat before calling `brainstorm_set_winner`
+- **premortem_done**: false — this is a `constrained-technical` session; premortem is required before finalization
+- **decision_log**: 26 entries, all key per-question verdicts already recorded by the critic agent
+- **winner**: null — not yet set; synthesizer owns this step
+
+VERDICT: PASS
+PLAN: 8295dc8f

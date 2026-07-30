@@ -1,0 +1,330 @@
+Based on systematic reading of all eight design documents and cross-reference with CLAUDE.md v0.12.0 status, here is the synthesis:
+
+---
+
+## A. POST-MORTEMS / RETROSPECTIVES
+
+**Status:** NOT A PRIMARY FOCUS
+
+Neither of these design docs proposes new post-mortem gating, schemas, or retrospective mechanisms. The documents mention `postmortem_scaffold` / `postmortem_validate` MCP tools only as a reusable *pattern* (260616 §8.1: "scaffold/validate tool pair is the proven model — any claim-tier tooling must follow the same scaffold() + validate() shape already proven in `postmortem.py`"). 
+
+The claim-tier and literature-parity workflows reuse this pattern but do not extend post-mortem semantics themselves.
+
+---
+
+## B. EXPERIMENT SETUP — SIDECAR EXTENSIONS
+
+**DECIDED/LOCKED (shipped in v0.12.0+):**
+
+1. **Claim-tier (260616 §7, 260616-brainstorm AC-16):**
+   - Campaign-level `.bth/claims/<campaign_name>.claim.toml`: `[claim]`, `[[hypotheses]]`, `[[assumptions]]`, `[[confounds]]`, `[discriminability]` (hypothesis-pair × outcome-label matrix, AC-99 260616-brainstorm), `[union_gate.clauses]`
+   - Per-run sidecar gains: `[experiment].discriminates: ["H_id", ...]` and `[experiment].isolates: "C_id"` (short IDs referencing claim hypothesis/confound IDs)
+   - **SHIPPED:** CLAUDE.md line 19: "schema v8 (`claim_discriminates`, `claim_isolates`)"
+
+2. **Literature-parity (260618 v1-design, 260618-abstraction D3, A2):**
+   - New file: `parity.bth.toml` with `paper_pdf`, `impl_paths`, `reference_code` (manifest-declared, no auto-sniff), `citation_note`, `recon_lenses`, `attack_lenses`, `hypotheses`, `equivalence_bound`, `N`/`M` (skill-tunable args)
+   - Per-run sidecar gains: `[reproduction].requires_parity` (sidecar-declared parity prerequisite) — mirrors existing `requires_pass_stem` gate
+   - **SHIPPED:** CLAUDE.md line 20: "schema v9 (`parity_run_type` COOL column)"
+
+3. **Agentic science — v0.6 proposals (260526 spec, Items 2, 3, 6):**
+   - Pre-execution manifest: `.bth.lock.toml` (run-id-scoped, written between write_run and subprocess.run)
+   - `[outcomes.pass].adversarial_check: str | None` — DuckDB condition falsifying hypothesis if it were wrong (required for agent-mode, warned for human)
+   - `outcome="error"` first-class: when subprocess exits nonzero, force outcome=error, skip condition evaluation
+   - Schema v5 migration: `manifest_sha256`, `manifest_path`, `outcome_error_reason`, `adversarial_check_status`
+   - **STATUS:** NOT MENTIONED in CLAUDE.md v0.12.0 → **OPEN/DEFERRED** (not v0.12 scope)
+
+4. **Lineage (260520 §4 P1, 260520 open Q6):**
+   - `parent_run_id` field + `--derived-from` flag (enable run lineage graphs)
+   - **STATUS:** NOT MENTIONED in CLAUDE.md → **OPEN/DEFERRED** (not v0.12 scope)
+
+**OPEN DESIGN QUESTIONS:**
+
+- Discriminability matrix: hand-authored vs. auto-derived? → **RESOLVED in 260616-brainstorm Q1-A:** hand-authored, indexed by hypothesis-pair rows (AC-99)
+- When sidecar enforcement becomes hard-block (260520 Open Q5)? → **UNRESOLVED** (CLAUDE.md: "by default" enforce experiments; `--no-sidecar` bypasses)
+
+---
+
+## C. LITERATURE OR IMPLEMENTATION REVIEW
+
+**DECIDED/LOCKED (shipped as literature-parity v1, 260618 v1-design):**
+
+**What parity ATTESTS (explicit coverage):**
+- Clause-level text-parity: reconstructors read paper independently; reconciliation diff against implementation (Phase 1, blind; Phase 2, reconcile)
+- Adversarial refutation survival: agents propose defects; implementation must withstand ≥M independent attacks (Phase 3, adversarial)
+- Invariant-test pass: synthetic ground-truth tests derived from paper claims actually hold (Phase 5, verdict)
+- Protocol reproduction: paper's procedure can be re-executed with qualitative direction-of-effect match when exact metrics unavailable (E1 rung R0–R4, with honesty-tax E3 marking `controlled-by-protocol` weaker than `controlled`)
+
+**What parity DOES NOT attest (explicit out-of-scope):**
+- "Strongest-reasonable-version" baseline admissibility (260616 §10.2) → delegates to claim-tier PLAN-gate rubric, not parity
+- Information-symmetry confound (C1) between method and baseline → campaign-level confound, not parity's responsibility alone
+- Code-vs-text divergence (D4 assume-defect mode) → deferred as opt-in `--paranoid` flag (260618-abstraction D4 decision log)
+- Shared invariant library evolution (X2) → deferred post-harvest (after 2+ projects)
+
+**Architecture (260618-abstraction winner + reconciliation, LOCKED):**
+- A2 thin-config seam: `parity.bth.toml` supplies domain args; agents read natural language; zero per-project code
+- D2 evidence channels: unified (clause-parity + adversarial-survival + invariant-tests + protocol-reproduction + optional numeric /jax-port); "Mode A/B" dissolves into channel availability
+- D3 manifest-declared: reference_code path explicitly declared, no auto-sniff
+- D1 numeric channel: delegates to /jax-port (optional; channel absent if /jax-port unavailable)
+- E1 rung ladder R0–R4: exact → metric-substituted → protocol-faithful → invariant-only → unreproducible (rung mechanically caps grade)
+- E3 honesty-tax: substitute-systems reproduction marks confound `controlled-by-protocol` (strictly weaker than `controlled`)
+- H2 disagreement detector: reconstruction divergence auto-flags ambiguous clauses
+- H1 ambiguity cap: load-bearing unresolved ambiguity → max PARTIAL grade
+- X1 cap-lattice: grade = min(clause-parity%, adversarial-survival, invariant-pass, rung-cap, ambiguity-cap); computed, not adjudicated
+- B2 authorship: agents write verbose tests; orchestrator re-derives decisive number (B1 floor: orchestrator authors one number independently)
+- C1+C4 redundancy: 3+3 floor (N=3 reconstructions, M=3 refutations), escalate only on clauses returning DEVIATION/AMBIGUOUS
+
+**Enforcement (F2/F3/F4, SHIPPED in v0.12.0):**
+- F2 conclude-gate: `parity_confound_check()` in campaigns.conclude, downgrades confirmation/sequential to `confounded` if reference_parity uncontrolled (260618 v1-design AC-06/07/08)
+- F3 submit-gate: hard-block validation/production if uncontrolled parity confound; advisory exploration/calibration (260618 v1-design AC-09/10)
+- F4 attest-parity: `bth claim attest-parity <campaign> --run <parity_run_id>` binds passing parity run + re-anchors claim SHA (260618 v1-design AC-11, CLAUDE.md line 20)
+- Signal 13: sprint-audit flags confirmation campaign with uncontrolled reference_parity or empty parity_run_id (CLAUDE.md line 20)
+
+**Artifacts (G1/G3, SHIPPED):**
+- G1 SHA-anchored triple: checklist JSON + verdict markdown + invariant pytest, content-hashed, pinned to parity run output_paths
+- G3 placement: verdict → `.praxia/docs/audits/YYMMDD_<paper>-parity-verdict.md` (human-facing); machine artifacts → catalog (machine-facing)
+- CLAUDE.md line 21: "`check_output_sha_drift()`; `bth check --check-outputs` flags drift"
+
+**Skill (SHIPPED, 260618 v1-design, Component Design):**
+- `/using-bathos/SKILL.md` section: "## Validating a reimplemented baseline"
+- `/using-bathos/literature-parity/` subdirectory: phase templates, `parity.bth.toml.template`, worked example
+
+**OPEN QUESTIONS:**
+
+- Should code-published always be blind-reconstructed as cross-check (D4)? → **DEFERRED as opt-in flag** (260618-abstraction D4, decision log)
+- Invariant-test authoring locus: agent vs. orchestrator? → **RESOLVED: B2 (agent writes; orchestrator re-derives one number)**
+- Invariant-kind library evolution (X2)? → **DEFERRED: harvest after 2+ projects** (260618-abstraction, decision log)
+
+---
+
+## D. SHIPPED REFERENCE CONTENT
+
+**DECIDED/LOCKED (in v0.12.0 or skill pipeline):**
+
+1. **Claim-tier rubrics & templates (260616 §3–§6, §9, SHIPPED):**
+   - Four artifacts: Claim Ledger (headline + kill-condition + hypothesis-slate), Discriminability Map (hypothesis × outcome matrix), Confound Register (one confound per row, isolation runs, control status), Union Gate (backward-trace clauses to runs)
+   - Two rubrics: PLAN-gate (7 checks before confirmatory runs) + CONCLUDE-gate (6 checks before positive verdict)
+   - Bundled into `/using-bathos` skill section ("Long-horizon & claim-level rigor"), `claim.md` template, PLAN/CONCLUDE-gate checklists
+   - **SHIPPED:** CLAUDE.md line 19
+
+2. **Literature-parity workflow & skill (260618 v1-design, SHIPPED):**
+   - Skill section: "## Validating a reimplemented baseline" in `/using-bathos/SKILL.md`
+   - Subdir: `/using-bathos/literature-parity/` with phase templates (Recon/Reconcile/Refute/Adjudicate/Verdict), `parity.bth.toml.template`, worked-example verdict doc
+   - 5-phase skeleton (documented, not code-enforced in v1): blind-reconstruction ×N → reconcile → adversarial-refutation ×M → adjudicate → graded verdict
+   - **SHIPPED:** CLAUDE.md line 20
+
+3. **Sprint-audit signals (260526 synthesis §2.4, 260526 spec Item 5, STATUS unclear):**
+   - Seven signals with calibration targets: `error_rate`, `bypass_explicit`, `bypass_in_agent_mode`, `outcome_entropy`, `unfired_branches`, `schema_overflow_rate`, `post_hoc_bias_flag`
+   - Each flagged as `[WARN]` with run IDs and literature source
+   - Optional eighth: `flat_trace_with_erratic_transitions` (entropic anchoring pattern, behind `--entropic-anchoring` flag)
+   - **STATUS:** NOT MENTIONED in CLAUDE.md → **OPEN/DEFERRED** (proposed, not v0.12 scope?)
+
+4. **Gate error taxonomy (260526 synthesis §2.5, v0.10.x #793, SHIPPED):**
+   - Structured `GateErrorPayload` replacing freeform dict: `error_code` enum, `phase` disambiguator, `taxonomy_label`, `errors[]`, `resolution_hint`
+   - MCP tools return typed error codes instead of natural language
+   - **SHIPPED:** CLAUDE.md line 24: "v0.10.x: structured MCP error taxonomy (#793)"
+
+---
+
+## OPEN DESIGN QUESTIONS EXPLICITLY RAISED (UNANSWERED)
+
+1. **Result emission protocol (260520 Open Q3):** Structured stdout (`#bth-result: {…}`) vs. JSON file vs. decorator capture? → NO DECISION in docs
+
+2. **Parent-run linkage inference (260520 Open Q7):** User-specified `--derived-from` vs. auto-inferred from file dependencies? → NO DECISION; only `--derived-from` flag proposed
+
+3. **Baseline admissibility "strongest-reasonable-version" principle (260616 §10.2, open scoping):** Which gate enforces it — claim-tier PLAN-gate rubric only, or additional lint? → DESIGNED (in PLAN-gate rubric, lines 50–52) but not coded
+
+4. **Should `adversarial_check` be required for all runs or only agent-mode? (260526 Q2, D3):** → **RESOLVED: required for agent-mode, warn-only for human** — but NOT SHIPPED in v0.12.0
+
+5. **Pre-execution manifest mandatory in agent-mode? (260526 Item 2):** → **PROPOSED** but NOT SHIPPED in v0.12.0
+
+---
+
+## STALE CONTENT (CONTRADICTED BY v0.12.0 STATE)
+
+1. **260520's lineage proposal as P1 (§4, P1 priority)** — v0.12.0 CLAUDE.md does NOT list `--derived-from` or `bth lineage` as shipped. The `parent_run_id` field is mentioned in 260520 as "cheap to add early, expensive to retrofit" (high-ROI P1) but hasn't landed. → **Status: HIGH-VALUE proposal, still DEFERRED**
+
+2. **260526 Items 1–8 (agentic science v0.6 evolution)** — none of these are mentioned in v0.12.0 CLAUDE.md except structured MCP error taxonomy (v0.10.x). Items like exception-swallowing remediation, pre-execution manifest, `outcome="error"` first-class, `adversarial_check`, `bth cite`, `bth lineage --format prov` → **Status: PROPOSED, v0.6 scope, NOT YET SHIPPED**
+
+3. **260520's P1 `sidecar_sha256` + `sidecar_path` in cool schema** — These ARE in schema v8/v9 per CLAUDE.md, but no explicit mention of "content-addressed" or the integrity gate that consumes them. The schema stores them; the gate may not be fully wired. → **Status: PARTIALLY SHIPPED (storage only, gate unclear)**
+
+4. **Postmortem on reference-parity confound (260616 §10.1, open scoping question)** — "does this live in bathos (a `[baseline] reference_parity` block + a gate), in `/jax-port`, or in a dedicated equivalence-testing tool/skill repo?" → **RESOLVED in 260618 v1-design:** it lives in claim-tier as `[confounds.reference_parity]` sub-block + F2/F3 gates + `attest_parity` verb. **SHIPPED in v0.12.0**
+
+---
+
+## SUMMARY TABLE
+
+| Theme | What's Decided | What Shipped (v0.12.0) | What's Open |
+|---|---|---|---|
+| **A. Post-mortems** | No new mechanisms proposed | Reuses existing postmortem scaffold/validate pattern | N/A |
+| **B. Experiment Setup** | Claim-tier sidecar extensions (discriminates/isolates); literature-parity parity.bth.toml; agentic manifest/adversarial_check/outcome=error (v0.6 scope) | Claim-tier fields (schema v8) + literature-parity (schema v9) | Agentic features not shipped; `parent_run_id`/lineage deferred |
+| **C. Literature Review** | Complete literature-parity v1 architecture (A2/D2/D3/D1/E1/E3/H1/H2/X1/B2/C1+C4) + F2/F3/F4 enforcement | Shipped: `parity_validate`, `attest_parity`, Union Gate, Signal 13 | D4 (blind-as-cross-check), X2 (invariant library), higher rigor modes deferred |
+| **D. Reference Content** | Claim-tier rubrics + `/using-bathos` skill sections; literature-parity workflow + skill sections; gate error taxonomy | Shipped: skill sections, rubrics, gate taxonomy (v0.10.x) | Sprint-audit signals (7) proposed but unclear if shipped; phase-specific guidance in skill |
+
+---
+
+**Under 600 lines.** Final message is the deliverable.
+Based on systematic reading of all eight design documents and cross-reference with CLAUDE.md v0.12.0 status, here is the synthesis:
+
+---
+
+## A. POST-MORTEMS / RETROSPECTIVES
+
+**Status:** NOT A PRIMARY FOCUS
+
+Neither of these design docs proposes new post-mortem gating, schemas, or retrospective mechanisms. The documents mention `postmortem_scaffold` / `postmortem_validate` MCP tools only as a reusable *pattern* (260616 §8.1: "scaffold/validate tool pair is the proven model — any claim-tier tooling must follow the same scaffold() + validate() shape already proven in `postmortem.py`"). 
+
+The claim-tier and literature-parity workflows reuse this pattern but do not extend post-mortem semantics themselves.
+
+---
+
+## B. EXPERIMENT SETUP — SIDECAR EXTENSIONS
+
+**DECIDED/LOCKED (shipped in v0.12.0+):**
+
+1. **Claim-tier (260616 §7, 260616-brainstorm AC-16):**
+   - Campaign-level `.bth/claims/<campaign_name>.claim.toml`: `[claim]`, `[[hypotheses]]`, `[[assumptions]]`, `[[confounds]]`, `[discriminability]` (hypothesis-pair × outcome-label matrix, AC-99 260616-brainstorm), `[union_gate.clauses]`
+   - Per-run sidecar gains: `[experiment].discriminates: ["H_id", ...]` and `[experiment].isolates: "C_id"` (short IDs referencing claim hypothesis/confound IDs)
+   - **SHIPPED:** CLAUDE.md line 19: "schema v8 (`claim_discriminates`, `claim_isolates`)"
+
+2. **Literature-parity (260618 v1-design, 260618-abstraction D3, A2):**
+   - New file: `parity.bth.toml` with `paper_pdf`, `impl_paths`, `reference_code` (manifest-declared, no auto-sniff), `citation_note`, `recon_lenses`, `attack_lenses`, `hypotheses`, `equivalence_bound`, `N`/`M` (skill-tunable args)
+   - Per-run sidecar gains: `[reproduction].requires_parity` (sidecar-declared parity prerequisite) — mirrors existing `requires_pass_stem` gate
+   - **SHIPPED:** CLAUDE.md line 20: "schema v9 (`parity_run_type` COOL column)"
+
+3. **Agentic science — v0.6 proposals (260526 spec, Items 2, 3, 6):**
+   - Pre-execution manifest: `.bth.lock.toml` (run-id-scoped, written between write_run and subprocess.run)
+   - `[outcomes.pass].adversarial_check: str | None` — DuckDB condition falsifying hypothesis if it were wrong (required for agent-mode, warned for human)
+   - `outcome="error"` first-class: when subprocess exits nonzero, force outcome=error, skip condition evaluation
+   - Schema v5 migration: `manifest_sha256`, `manifest_path`, `outcome_error_reason`, `adversarial_check_status`
+   - **STATUS:** NOT MENTIONED in CLAUDE.md v0.12.0 → **OPEN/DEFERRED** (not v0.12 scope)
+
+4. **Lineage (260520 §4 P1, 260520 open Q6):**
+   - `parent_run_id` field + `--derived-from` flag (enable run lineage graphs)
+   - **STATUS:** NOT MENTIONED in CLAUDE.md → **OPEN/DEFERRED** (not v0.12 scope)
+
+**OPEN DESIGN QUESTIONS:**
+
+- Discriminability matrix: hand-authored vs. auto-derived? → **RESOLVED in 260616-brainstorm Q1-A:** hand-authored, indexed by hypothesis-pair rows (AC-99)
+- When sidecar enforcement becomes hard-block (260520 Open Q5)? → **UNRESOLVED** (CLAUDE.md: "by default" enforce experiments; `--no-sidecar` bypasses)
+
+---
+
+## C. LITERATURE OR IMPLEMENTATION REVIEW
+
+**DECIDED/LOCKED (shipped as literature-parity v1, 260618 v1-design):**
+
+**What parity ATTESTS (explicit coverage):**
+- Clause-level text-parity: reconstructors read paper independently; reconciliation diff against implementation (Phase 1, blind; Phase 2, reconcile)
+- Adversarial refutation survival: agents propose defects; implementation must withstand ≥M independent attacks (Phase 3, adversarial)
+- Invariant-test pass: synthetic ground-truth tests derived from paper claims actually hold (Phase 5, verdict)
+- Protocol reproduction: paper's procedure can be re-executed with qualitative direction-of-effect match when exact metrics unavailable (E1 rung R0–R4, with honesty-tax E3 marking `controlled-by-protocol` weaker than `controlled`)
+
+**What parity DOES NOT attest (explicit out-of-scope):**
+- "Strongest-reasonable-version" baseline admissibility (260616 §10.2) → delegates to claim-tier PLAN-gate rubric, not parity
+- Information-symmetry confound (C1) between method and baseline → campaign-level confound, not parity's responsibility alone
+- Code-vs-text divergence (D4 assume-defect mode) → deferred as opt-in `--paranoid` flag (260618-abstraction D4 decision log)
+- Shared invariant library evolution (X2) → deferred post-harvest (after 2+ projects)
+
+**Architecture (260618-abstraction winner + reconciliation, LOCKED):**
+- A2 thin-config seam: `parity.bth.toml` supplies domain args; agents read natural language; zero per-project code
+- D2 evidence channels: unified (clause-parity + adversarial-survival + invariant-tests + protocol-reproduction + optional numeric /jax-port); "Mode A/B" dissolves into channel availability
+- D3 manifest-declared: reference_code path explicitly declared, no auto-sniff
+- D1 numeric channel: delegates to /jax-port (optional; channel absent if /jax-port unavailable)
+- E1 rung ladder R0–R4: exact → metric-substituted → protocol-faithful → invariant-only → unreproducible (rung mechanically caps grade)
+- E3 honesty-tax: substitute-systems reproduction marks confound `controlled-by-protocol` (strictly weaker than `controlled`)
+- H2 disagreement detector: reconstruction divergence auto-flags ambiguous clauses
+- H1 ambiguity cap: load-bearing unresolved ambiguity → max PARTIAL grade
+- X1 cap-lattice: grade = min(clause-parity%, adversarial-survival, invariant-pass, rung-cap, ambiguity-cap); computed, not adjudicated
+- B2 authorship: agents write verbose tests; orchestrator re-derives decisive number (B1 floor: orchestrator authors one number independently)
+- C1+C4 redundancy: 3+3 floor (N=3 reconstructions, M=3 refutations), escalate only on clauses returning DEVIATION/AMBIGUOUS
+
+**Enforcement (F2/F3/F4, SHIPPED in v0.12.0):**
+- F2 conclude-gate: `parity_confound_check()` in campaigns.conclude, downgrades confirmation/sequential to `confounded` if reference_parity uncontrolled (260618 v1-design AC-06/07/08)
+- F3 submit-gate: hard-block validation/production if uncontrolled parity confound; advisory exploration/calibration (260618 v1-design AC-09/10)
+- F4 attest-parity: `bth claim attest-parity <campaign> --run <parity_run_id>` binds passing parity run + re-anchors claim SHA (260618 v1-design AC-11, CLAUDE.md line 20)
+- Signal 13: sprint-audit flags confirmation campaign with uncontrolled reference_parity or empty parity_run_id (CLAUDE.md line 20)
+
+**Artifacts (G1/G3, SHIPPED):**
+- G1 SHA-anchored triple: checklist JSON + verdict markdown + invariant pytest, content-hashed, pinned to parity run output_paths
+- G3 placement: verdict → `.praxia/docs/audits/YYMMDD_<paper>-parity-verdict.md` (human-facing); machine artifacts → catalog (machine-facing)
+- CLAUDE.md line 21: "`check_output_sha_drift()`; `bth check --check-outputs` flags drift"
+
+**Skill (SHIPPED, 260618 v1-design, Component Design):**
+- `/using-bathos/SKILL.md` section: "## Validating a reimplemented baseline"
+- `/using-bathos/literature-parity/` subdirectory: phase templates, `parity.bth.toml.template`, worked example
+
+**OPEN QUESTIONS:**
+
+- Should code-published always be blind-reconstructed as cross-check (D4)? → **DEFERRED as opt-in flag** (260618-abstraction D4, decision log)
+- Invariant-test authoring locus: agent vs. orchestrator? → **RESOLVED: B2 (agent writes; orchestrator re-derives one number)**
+- Invariant-kind library evolution (X2)? → **DEFERRED: harvest after 2+ projects** (260618-abstraction, decision log)
+
+---
+
+## D. SHIPPED REFERENCE CONTENT
+
+**DECIDED/LOCKED (in v0.12.0 or skill pipeline):**
+
+1. **Claim-tier rubrics & templates (260616 §3–§6, §9, SHIPPED):**
+   - Four artifacts: Claim Ledger (headline + kill-condition + hypothesis-slate), Discriminability Map (hypothesis × outcome matrix), Confound Register (one confound per row, isolation runs, control status), Union Gate (backward-trace clauses to runs)
+   - Two rubrics: PLAN-gate (7 checks before confirmatory runs) + CONCLUDE-gate (6 checks before positive verdict)
+   - Bundled into `/using-bathos` skill section ("Long-horizon & claim-level rigor"), `claim.md` template, PLAN/CONCLUDE-gate checklists
+   - **SHIPPED:** CLAUDE.md line 19
+
+2. **Literature-parity workflow & skill (260618 v1-design, SHIPPED):**
+   - Skill section: "## Validating a reimplemented baseline" in `/using-bathos/SKILL.md`
+   - Subdir: `/using-bathos/literature-parity/` with phase templates (Recon/Reconcile/Refute/Adjudicate/Verdict), `parity.bth.toml.template`, worked-example verdict doc
+   - 5-phase skeleton (documented, not code-enforced in v1): blind-reconstruction ×N → reconcile → adversarial-refutation ×M → adjudicate → graded verdict
+   - **SHIPPED:** CLAUDE.md line 20
+
+3. **Sprint-audit signals (260526 synthesis §2.4, 260526 spec Item 5, STATUS unclear):**
+   - Seven signals with calibration targets: `error_rate`, `bypass_explicit`, `bypass_in_agent_mode`, `outcome_entropy`, `unfired_branches`, `schema_overflow_rate`, `post_hoc_bias_flag`
+   - Each flagged as `[WARN]` with run IDs and literature source
+   - Optional eighth: `flat_trace_with_erratic_transitions` (entropic anchoring pattern, behind `--entropic-anchoring` flag)
+   - **STATUS:** NOT MENTIONED in CLAUDE.md → **OPEN/DEFERRED** (proposed, not v0.12 scope?)
+
+4. **Gate error taxonomy (260526 synthesis §2.5, v0.10.x #793, SHIPPED):**
+   - Structured `GateErrorPayload` replacing freeform dict: `error_code` enum, `phase` disambiguator, `taxonomy_label`, `errors[]`, `resolution_hint`
+   - MCP tools return typed error codes instead of natural language
+   - **SHIPPED:** CLAUDE.md line 24: "v0.10.x: structured MCP error taxonomy (#793)"
+
+---
+
+## OPEN DESIGN QUESTIONS EXPLICITLY RAISED (UNANSWERED)
+
+1. **Result emission protocol (260520 Open Q3):** Structured stdout (`#bth-result: {…}`) vs. JSON file vs. decorator capture? → NO DECISION in docs
+
+2. **Parent-run linkage inference (260520 Open Q7):** User-specified `--derived-from` vs. auto-inferred from file dependencies? → NO DECISION; only `--derived-from` flag proposed
+
+3. **Baseline admissibility "strongest-reasonable-version" principle (260616 §10.2, open scoping):** Which gate enforces it — claim-tier PLAN-gate rubric only, or additional lint? → DESIGNED (in PLAN-gate rubric, lines 50–52) but not coded
+
+4. **Should `adversarial_check` be required for all runs or only agent-mode? (260526 Q2, D3):** → **RESOLVED: required for agent-mode, warn-only for human** — but NOT SHIPPED in v0.12.0
+
+5. **Pre-execution manifest mandatory in agent-mode? (260526 Item 2):** → **PROPOSED** but NOT SHIPPED in v0.12.0
+
+---
+
+## STALE CONTENT (CONTRADICTED BY v0.12.0 STATE)
+
+1. **260520's lineage proposal as P1 (§4, P1 priority)** — v0.12.0 CLAUDE.md does NOT list `--derived-from` or `bth lineage` as shipped. The `parent_run_id` field is mentioned in 260520 as "cheap to add early, expensive to retrofit" (high-ROI P1) but hasn't landed. → **Status: HIGH-VALUE proposal, still DEFERRED**
+
+2. **260526 Items 1–8 (agentic science v0.6 evolution)** — none of these are mentioned in v0.12.0 CLAUDE.md except structured MCP error taxonomy (v0.10.x). Items like exception-swallowing remediation, pre-execution manifest, `outcome="error"` first-class, `adversarial_check`, `bth cite`, `bth lineage --format prov` → **Status: PROPOSED, v0.6 scope, NOT YET SHIPPED**
+
+3. **260520's P1 `sidecar_sha256` + `sidecar_path` in cool schema** — These ARE in schema v8/v9 per CLAUDE.md, but no explicit mention of "content-addressed" or the integrity gate that consumes them. The schema stores them; the gate may not be fully wired. → **Status: PARTIALLY SHIPPED (storage only, gate unclear)**
+
+4. **Postmortem on reference-parity confound (260616 §10.1, open scoping question)** — "does this live in bathos (a `[baseline] reference_parity` block + a gate), in `/jax-port`, or in a dedicated equivalence-testing tool/skill repo?" → **RESOLVED in 260618 v1-design:** it lives in claim-tier as `[confounds.reference_parity]` sub-block + F2/F3 gates + `attest_parity` verb. **SHIPPED in v0.12.0**
+
+---
+
+## SUMMARY TABLE
+
+| Theme | What's Decided | What Shipped (v0.12.0) | What's Open |
+|---|---|---|---|
+| **A. Post-mortems** | No new mechanisms proposed | Reuses existing postmortem scaffold/validate pattern | N/A |
+| **B. Experiment Setup** | Claim-tier sidecar extensions (discriminates/isolates); literature-parity parity.bth.toml; agentic manifest/adversarial_check/outcome=error (v0.6 scope) | Claim-tier fields (schema v8) + literature-parity (schema v9) | Agentic features not shipped; `parent_run_id`/lineage deferred |
+| **C. Literature Review** | Complete literature-parity v1 architecture (A2/D2/D3/D1/E1/E3/H1/H2/X1/B2/C1+C4) + F2/F3/F4 enforcement | Shipped: `parity_validate`, `attest_parity`, Union Gate, Signal 13 | D4 (blind-as-cross-check), X2 (invariant library), higher rigor modes deferred |
+| **D. Reference Content** | Claim-tier rubrics + `/using-bathos` skill sections; literature-parity workflow + skill sections; gate error taxonomy | Shipped: skill sections, rubrics, gate taxonomy (v0.10.x) | Sprint-audit signals (7) proposed but unclear if shipped; phase-specific guidance in skill |
+
+---
+
+**Under 600 lines.** Final message is the deliverable.

@@ -1,0 +1,12 @@
+I see. The isolation guard is intentional. Let me stop and ask the user for guidance, since the task says to execute well-defined code changes but I'm blocked by the isolation guard.
+
+**Blocker encountered:**
+
+The task is to apply code changes to `src/bathos/sprint_audit.py`, but the Fixer agent's worktree isolation is blocking writes to the shared checkout. The isolation can be disabled by adding `bgIsolation: "none"` to `.claude/settings.json`, but that itself requires user authorization as it modifies agent behavior controls.
+
+**Options:**
+1. User adds the settings override to allow this agent to write
+2. User runs these edits directly via inline Bash commands
+3. User dispatches this work from the parent orchestrator session with pre-configured settings
+
+Which approach works best for you?

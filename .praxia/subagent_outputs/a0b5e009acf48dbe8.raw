@@ -1,0 +1,180 @@
+Perfect. Now let me create the structured recon output:
+
+---
+
+## Recon Summary: Bathos Telemetry Integration Points
+
+**Task:** Map the exact functions and call sites for telemetry instrumentation across 7 bathos modules per spec at task_id 260527_bathos-telemetry.
+
+**Finding:** All 7 modules successfully mapped with precise line numbers. **`src/bathos/telemetry.py` does not yet exist**. Fresh codebase index: 697 nodes, 3882 edges (v0.5, viz suite merged to main).
+
+---
+
+## 1. **runner.py** — `bth run` lifecycle: 4 critical sites
+
+| Function | Line | Critical Call | What Happens | Spec Event |
+|---|---|---|---|---|
+| `run_script()` | 93 | **Entry point** | Orchestrates entire run lifecycle | `RUN_START` |
+| `run_script()` | 127 | `parse_sidecar(bundle.path)` | Load + parse sidecar TOML | `SIDECAR_LOAD` → `SIDECAR_PARSE` |
+| `run_script()` | 215 | `subprocess.run(argv, cwd, env)` | Execute user script | `SUBPROCESS_START` → `SUBPROCESS_EXIT` |
+| `write_run()` calls | 203, 250 | `write_run(run, catalog_dir)` twice | Write parquet records before/after subprocess | `PARQUET_WRITE` (2 events) |
+
+**Key detail:** `write_run()` itself is in `catalog.py:16` and calls `pq.write_table(run.to_arrow(), tmp)` at line 22. Both calls in runner.py (lines 203 and 250) must be instrumented separately.
+
+---
+
+## 2. **sidecar.py + validate.py** — Parse & validate entry points with error sites
+
+| Module | Function | Line | What It Does | Spec Event |
+|---|---|---|---|---|
+| `sidecar.py` | `parse_sidecar()` | 57 | TOML parsing entry | `SIDECAR_PARSE_START` |
+| `sidecar.py` | `parse_sidecar()` error | 61 | TOML parse failure | `SIDECAR_PARSE_ERROR` |
+| `sidecar.py` | `parse_sidecar()` error | 113 | Invalid section (not experiment/benchmark/validation/debug) | `SIDECAR_VALIDATE_ERROR` |
+| `validate.py` | `validate_sidecar()` | 34 | Structural validation entry | `SIDECAR_VALIDATION_START` |
+| `validate.py` | `validate_sidecar()` DuckDB | 80 | SQL condition parse validation | `DB_QUERY` (with query text) |
+
+**Key detail:** `validate.py:80` calls `duckdb.connect()` to validate outcome conditions as DuckDB SQL. This must emit a `DB_QUERY` event.
+
+---
+
+## 3. **prereg.py** — Gate check: pass/deny paths with 4 failure modes + 1 success
+
+| Path | Line | Code | Spec Event |
+|---|---|---|---|
+| **PASS (ungated)** | 115 | `return GateResult(ok=True, ...)` for non-enforced dirs | `GATE_CHECK_PASS` |
+| **DENY sidecar_missing** | 124 | `return GateResult(ok=False, error_payload=...)` | `GATE_CHECK_DENY` (reason: sidecar_missing) |
+| **DENY sidecar_invalid** | 136 | `return GateResult(ok=False, validation=validation, ...)` | `GATE_CHECK_DENY` (reason: sidecar_invalid, errors array) |
+| **DENY not_first_of_kind** | 147 | `return GateResult(ok=False, error_payload=...)` in autonomous mode | `GATE_CHECK_DENY` (reason: not_first_of_kind) |
+| **DB query in check_first_of_kind** | 80 | `duckdb.connect(str(db_path), read_only=True)` + `con.execute(...)` | `DB_QUERY` (read-only check) |
+
+**Key detail:** All 5 GateResult returns in `gate_check()` must be instrumented individually with distinct reason codes.
+
+---
+
+## 4. **postmortem.py** — Parse & validate & mutations (v0.4.1)
+
+| Function | Line | What It Does | Spec Event |
+|---|---|---|---|
+| `parse_postmortem()` | 37 | TOML parsing entry | `POSTMORTEM_PARSE_START` |
+| `parse_postmortem()` error | 42 | TOML parse failure | `POSTMORTEM_PARSE_ERROR` |
+| `validate_postmortem()` | 101 | Validation entry (refutation consistency, asset checksums, git drift) | `POSTMORTEM_VALIDATION_START` |
+| *mutations during compact* | (see compact.py) | Postmortem updates to runs table happen in `compact.py:325–361` | `DB_UPDATE` (handled in compact.py) |
+
+**Key detail:** Postmortem mutations occur at **compaction time**, not at postmortem parse time. See `compact.py` lines 325–361 for UPDATE statements.
+
+---
+
+## 5. **campaigns.py** — Create/conclude/mutation (DuckDB insert/update)
+
+| Function | Line | SQL Operation | Spec Event |
+|---|---|---|---|
+| `create_campaign()` | 40 | `db.execute("INSERT INTO campaigns ...")` | `DB_INSERT` (campaigns table) |
+| `add_run_to_campaign()` | 81 | `db.execute("INSERT INTO campaign_runs ...")` | `DB_INSERT` (campaign_runs table) |
+| `conclude_campaign()` | 109 | `db.execute("UPDATE campaigns SET status='concluded', ...")` | `DB_UPDATE` (campaigns table) |
+
+---
+
+## 6. **mcp.py** — FastMCP server: 10 tools (all must emit MCP_TOOL_CALL events)
+
+| Tool Name | Function | Line | Notes |
+|---|---|---|---|
+| Server init | `FastMCP("bathos")` | 36 | All subsequent tool calls emit `MCP_TOOL_CALL` |
+| list_runs_tool | 72 | Query wrapper; returns JSON at line 100 |
+| (9 other tools) | 100+ | All mirror CLI commands from cli.py |
+
+**Key detail:** Spec says "all tool names"; there are 10 tools (list, find, get, run_sql for queries; check, sync, init, run for execution; compact, archive for maintenance). Each call needs `MCP_TOOL_CALL` event with `tool_name` and `args`.
+
+---
+
+## 7. **sync.py + remote.py + archive.py** — Network I/O and subprocess
+
+### sync.py
+
+| Location | Line | What It Does | Spec Event |
+|---|---|---|---|
+| `sync_catalog()` entry | 23 | Orchestrates rsync push/pull | `SYNC_START` |
+| **rsync subprocess** | **94** | `subprocess.run([rsync...], capture_output=True, ...)` | `SUBPROCESS_START` → `SUBPROCESS_EXIT` (spec marks for Popen refactor) |
+| post-sync parse | 109 | `_parse_transferred_count(result.stdout)` | `SYNC_COMPLETE` (with transferred count) |
+
+**CRITICAL:** Spec says line 94 needs **Popen refactor** for streaming telemetry. Current code uses `subprocess.run()` with full capture.
+
+### remote.py
+
+| Location | Line | What It Does | Spec Event |
+|---|---|---|---|
+| `test_remote()` entry | 120 | SSH connectivity test | `REMOTE_TEST_START` |
+| SSH subprocess | 151 | `subprocess.run([ssh...], capture_output=True, ...)` | `SUBPROCESS_START` → `SUBPROCESS_EXIT` (with latency_ms) |
+
+### archive.py
+
+| Location | Line | What It Does | Spec Event |
+|---|---|---|---|
+| `archive()` entry | 25 | Archive initialization | `ARCHIVE_START` |
+| DuckDB read | 58, 66 | `duckdb.connect()` + `con.execute()` | `DB_QUERY` |
+| Parquet writes | 121 | `pq.write_table(filtered, str(temp_file))` for each partition | `PARQUET_WRITE` (per partition) |
+| Manifest write | 150 | `json.dump(manifest, f)` | `ARCHIVE_COMPLETE` (with run count, partition count) |
+
+---
+
+## 8. **catalog.py + compact.py + query.py** — DuckDB & Parquet I/O tier breakdown
+
+### catalog.py (cool tier)
+
+| Location | Line | What It Does | Spec Event |
+|---|---|---|---|
+| `write_run()` | 16 | Entry point for cool-tier write | `PARQUET_WRITE_START` |
+| Parquet write | 22 | `pq.write_table(run.to_arrow(), tmp)` | `PARQUET_WRITE` (with run_id, size_bytes) |
+| `read_runs()` | 26 | Cool-tier read entry | `PARQUET_READ_START` |
+| Parquet reads | 34 | `tables = [pq.read_table(f) for f in parquet_files]` | `PARQUET_READ` (per file + total) |
+
+### compact.py (cool→warm aggregation)
+
+| Location | Line | What It Does | Spec Event |
+|---|---|---|---|
+| `compact()` entry | 249 | Cool→warm compaction | `COMPACT_START` |
+| DuckDB connect | 292 | `duckdb.connect(str(db_path))` | `DB_CONNECT` (warm tier init) |
+| Schema init | 307 | `con.execute(_RUNS_TABLE_SCHEMA)` + campaigns/amendments | `DB_SCHEMA_INIT` (with table count) |
+| Run existence check | 321 | `con.execute("SELECT id FROM runs WHERE id = ?", [run.id])` | `DB_QUERY` (read-only check) |
+| Insert new run | 393 | `con.execute("INSERT INTO runs (...)")` | `DB_INSERT` (with run_id) |
+| Update existing (postmortem) | 333 | `con.execute("UPDATE runs SET postmortem_* WHERE id = ?")` | `DB_UPDATE` (with postmortem fields) |
+
+### query.py (warm-tier query operations)
+
+| Location | Line | What It Does | Spec Event |
+|---|---|---|---|
+| `_warm_list_runs()` | 202 | DuckDB connect for list | `DB_CONNECT` |
+| Query execution | 222 | `con.execute(query, params).fetchall()` | `DB_QUERY` (with query text, bound params) |
+| `get_run()` | 258 | Single-run query | `DB_QUERY` (by ID) |
+| `find_runs()` | 327–372 | Multi-filter query | `DB_QUERY` (with all filters) |
+| `run_sql()` | 375 | User-supplied SQL | `DB_QUERY` (with user_sql=true flag) |
+
+---
+
+## Missing: telemetry.py
+
+**Status:** Does NOT exist. Spec requires:
+- `emit(event_type: str, **kwargs)` function
+- Event schema validation
+- Output sink (file, socket, stdout, etc.)
+
+---
+
+## Summary Table: All 7 Modules at a Glance
+
+| Module | Entry Point | Line | Key Calls | Event Count |
+|---|---|---|---|---|
+| **runner.py** | `run_script()` | 93 | subprocess (215), sidecar parse (127), write_run (203, 250) | 6–8 |
+| **sidecar.py** | `parse_sidecar()` | 57 | toml.loads (59), raise errors (61, 113) | 3 |
+| **validate.py** | `validate_sidecar()` | 34 | duckdb.connect (80), .execute (88, 89, 92) | 2–3 |
+| **prereg.py** | `gate_check()` | 103 | 5 GateResult paths (115, 124, 136, 147, +ungated) + DB query (80) | 6 |
+| **postmortem.py** | `parse_postmortem()` | 37 | toml.load (40), raise (42), validate (101) | 3 |
+| **campaigns.py** | `create_campaign()` | 35 | INSERT (40), INSERT (81), UPDATE (109) | 3 |
+| **mcp.py** | FastMCP server | 36 | 10 tool functions + response JSON (100) | 10+ |
+| **sync.py** | `sync_catalog()` | 23 | subprocess.run (94), parse result (109) | 3 |
+| **remote.py** | `test_remote()` | 120 | subprocess.run (151) | 2 |
+| **archive.py** | `archive()` | 25 | duckdb.connect (58), con.execute (66), pq.write_table (121), json.dump (150) | 5 |
+| **catalog.py** | `write_run()` + `read_runs()` | 16, 26 | pq.write_table (22), pq.read_table (34) | 2–4 |
+| **compact.py** | `compact()` | 249 | duckdb.connect (292), schema init (307), queries (321, 333, 393) | 8 |
+| **query.py** | `_warm_list_runs()`, etc. | 202, 244, 327, 375 | duckdb.connect (202), execute (222, 261, 337, 391) | 5–6 |
+
+**Total instrumentation points across all modules:** ~60–70 distinct call sites.

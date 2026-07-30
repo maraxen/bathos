@@ -1,0 +1,44 @@
+Done. Here's the summary:
+
+**File written:** `/home/marielle/projects/bathos/.claude/worktrees/telemetry-phase-a/tests/test_telemetry.py`
+
+**19 tests collected, all failing with `ModuleNotFoundError: No module named 'bathos.telemetry'`**
+
+That is the correct failure reason — `src/bathos/telemetry.py` does not exist yet.
+
+---
+
+Test breakdown by section:
+
+**§1 Module API surface (8 tests)**
+- `test_init_telemetry_is_idempotent` — double-call, no raise, no duplicate handlers
+- `test_get_logger_returns_logging_logger` — returns `logging.Logger` named `bathos.<name>`
+- `test_get_logger_propagate_false` — `propagate=False` enforced
+- `test_event_before_init_lazy_inits` — `event()` before `init_telemetry()` creates file
+- `test_span_emits_start_and_end` — `<name>.start` + `<name>.end` emitted
+- `test_span_end_has_span_id_and_duration` — `span_id` + `duration_ms` present
+- `test_span_start_and_end_share_span_id` — same `span_id` on both records
+- `test_span_on_exception_emits_end_with_ok_false` — `ok=false`, `exc_type`, `exc_msg`, re-raises
+
+**§2 JSONL format (4 tests)**
+- `test_envelope_fields_present` — all 8 envelope fields (`ts`, `level`, `pid`, `tid`, `host`, `surface`, `event`, `msg`)
+- `test_ts_is_iso8601` — `datetime.fromisoformat` parses it
+- `test_surface_derived_from_event_prefix` — `run.start` → `surface="run"`
+- `test_null_contextvar_fields_omitted` — unset `run_uuid_var` produces no key in record
+
+**§3 Contextvar correlation (1 test — critical F2 regression)**
+- `test_run_uuid_propagates_from_producer_to_jsonl` — UUID set on main thread appears in JSONL. Comment explains the bug (listener reads `var.get()` on its own context) and the fix (snapshot into `record.__dict__` before enqueue)
+
+**§4 Per-process file naming (2 tests)**
+- `test_filename_contains_hostname_and_pid` — file named `events.<hostname>.<pid>.jsonl`
+- `test_different_pids_create_separate_files` — two fake PIDs → two separate files
+
+**§5 SLURM concurrent writes (1 test)**
+- `test_concurrent_multiprocess_writes` — 4 `spawn` processes × 50 events → 4 files, 200 total events, all valid JSON
+
+**§6 Atexit drain (2 tests)**
+- `test_atexit_drain_flushes_queue` — `_shutdown()` flushes all 10 queued events to JSONL
+- `test_queue_empty_after_shutdown` — `_queue.empty()` is True after `_shutdown()`
+
+**§7 Rotation (1 test)**
+- `test_rotation_creates_backup_file` — `max_bytes=1024` → `.jsonl.1` backup exists after overflow

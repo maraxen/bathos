@@ -1,0 +1,11 @@
+The verdict is **request_more_recon**. Here is the summary of findings:
+
+**Current state:** The skill export pipeline is fully implemented (`export.py` with `export_skill()` + `register_mcp()`, 13 tests). The praxia manifest declares a `[[plugin.snippets]]` entry for `agent_assets/snippets/rules.md` and a `plugin.export_command` pointing to `bth export --surface claude_code`. But the `--surface` handler in `cli.py` is a no-op stub — it prints a diagnostic and exits. No snippet export logic exists anywhere in the codebase.
+
+**Why request_more_recon rather than advance:** The item description ("composable snippets for multi-surface export") contains at least three undefined design questions that a spec cannot resolve from code alone:
+
+1. **What are the target surfaces?** Claude Code `~/.claude/rules/`, AGENTS.md injection, Gemini CLI equivalent — none specified.
+2. **What does "composable" mean?** Multiple per-topic files assembled into one, selective export by scope_detector, or something else?
+3. **Which content wins for the rules surface?** The snippet source (`rules.md` covers `uv run` discipline and DuckDB syntax) and the manually-authored `~/.claude/rules/BATHOS.md` (measurement heuristic) have already diverged, so even the canonical content is unresolved.
+
+The CLAUDE.md backlog entry itself says: "separate design session needed." This is the right call — a design session is required before a spec can be written.

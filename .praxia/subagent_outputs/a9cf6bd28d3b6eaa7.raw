@@ -1,0 +1,168 @@
+Now I have enough information to render the verdict. Let me compile all findings.
+
+**Summary of findings:**
+
+1. **Fix 1 (Transaction safety)** — `con.begin()` / `con.commit()` / `con.rollback()` are completely absent from `compact.py`. The `CompactionLockedError` class is defined but the advisory lock (`bth_compact.lock`) is never acquired. The spec-required tests (`test_compact_transaction_rollback`, `test_compact_lock_prevents_concurrent_compaction`, `test_compact_stale_lock_is_cleared`) do not exist in `test_compact.py`.
+
+2. **Fix 2 (Integrity check / force-rebuild)** — `_open_db()` is implemented correctly. `force_rebuild` parameter is present. However, `force_rebuild=True` uses `db_path.unlink()` then falls through to bare `duckdb.connect(str(db_path))` — it does NOT call `_open_db(db_path)`, so the integrity check is bypassed on normal (non-rebuild) path too. Also, the spec requires `bathos.db.corrupt.<timestamp>` rename on rebuild; the implementation simply unlinks the file. No `test_compact_raises_on_corrupt_db_header` or `test_compact_force_rebuild_recovers_from_corruption` tests exist.
+
+3. **Fix 3 (migrate .bak)** — Code is correct. Tests missing the spec-required failure path (`test_migrate_fragment_backup_restored_on_write_failure`).
+
+4. **Fix 4 (archive SHA256)** — Code is correct including `file_sha256 = ""` dry-run guard. Tests in `test_archive.py` do not assert `sha256` presence or `schema_version == "2"`.
+
+5. **Fix 5 (bth verify)** — `verify.py` is fully implemented and correct. CLI `bth verify` is wired correctly. MCP `verify_catalog` is **absent** from `mcp.py` — zero matches for `verify_catalog` or `def verify` in `mcp.py`.
+
+6. **Fix 6 (sync truncation)** — `truncated_candidates` field added to `SyncResult`, post-pull scan implemented correctly. CLI `sync` command does NOT emit the WARN message to stderr for truncated candidates (spec AC lines 22+23). Tests for truncation detection are absent.
+
+7. **verify_warm empty-catalog**: Spec AC #15 says exit code 0 and no warnings when no db and no fragments exist. Implementation returns `ok=False` with an error "not found" in that case. Test confirms this — but it contradicts spec requirement #15.
+
+```json
+{
+  "verdict": "FAIL",
+  "confidence": "high",
+  "summary": "The implementation is structurally present for all 6 fixes but has two critical gaps: Fix 1 (the entire transaction wrap and advisory lock) is missing from compact.py, leaving the core safety guarantee unimplemented; and Fix 5's MCP mirror (verify_catalog) is absent from mcp.py. Multiple spec-required tests are missing, and the verify_warm empty-catalog behavior contradicts spec AC #15.",
+  "scores": {
+    "functional_correctness": 2,
+    "security": 3,
+    "code_quality": 4,
+    "test_coverage": 2,
+    "error_handling": 3,
+    "documentation": 4
+  },
+  "verification": {
+    "tests": {
+      "status": "passed",
+      "command": "uv run pytest tests/ -v --tb=short --ignore=tests/test_mcp_integration.py --ignore=tests/test_mcp_server.py",
+      "output_excerpt": "466 passed, 1 warning in 41.76s"
+    },
+    "linting": {
+      "status": "skipped",
+      "command": "n/a",
+      "output_excerpt": "No linter command specified; skipped"
+    },
+    "types": {
+      "status": "skipped",
+      "command": "n/a",
+      "output_excerpt": "No type-check command specified; skipped"
+    }
+  },
+  "findings": [
+    {
+      "severity": "critical",
+      "type": "REQUIRED_FIX",
+      "path": "src/bathos/compact.py",
+      "line": 383,
+      "issue": "Transaction wrap (con.begin/con.commit/con.rollback) is completely absent from the compact() INSERT loop. The spec's core safety guarantee — that all rows for a compaction batch are committed atomically — is not implemented. DuckDB auto-commits each statement, so a crash mid-loop leaves partial rows committed and the silent-skip bug from the spec survives unchanged.",
+      "fix": "After all CREATE TABLE IF NOT EXISTS DDL calls (around line 406) and before the 'ingested = 0' line, add 'con.begin()'. Wrap the existing for-run INSERT loop, campaign_runs back-fill, _schema_meta INSERT, and _schema_migrations INSERT in a try/except block. On success call 'con.commit()'. In the except block call 'con.rollback()' (itself wrapped in try/except to avoid swallowing the original error), then re-raise. Move 'con.close()' into a finally block."
+    },
+    {
+      "severity": "critical",
+      "type": "REQUIRED_FIX",
+      "path": "src/bathos/compact.py",
+      "line": 383,
+      "issue": "Advisory lock (CompactionLockedError + .bth_compact.lock sentinel file) is defined as a class but never acquired. Concurrent compact() calls can produce duplicate rows or a lost-update race as described in the spec.",
+      "fix": "Before the 'con = duckdb.connect(...)' call, implement the lock acquisition block from the spec verbatim: open lock_path with open(..., 'x'), write str(os.getpid()), handle FileExistsError by checking if the PID is live via os.kill(pid, 0), raise CompactionLockedError if live, unlink and retry if stale. Release the lock in a finally block wrapping the entire compact body."
+    },
+    {
+      "severity": "critical",
+      "type": "REQUIRED_FIX",
+      "path": "src/bathos/compact.py",
+      "line": 367,
+      "issue": "force_rebuild=True unlinks bathos.db with db_path.unlink() but does NOT rename it to bathos.db.corrupt.<timestamp>. Spec AC #4 explicitly requires 'a file named bathos.db.corrupt.<timestamp> exists in the catalog dir' and a stderr warning. The forensic copy is destroyed instead of preserved.",
+      "fix": "Replace 'db_path.unlink()' with: corrupt_path = db_path.parent / f'bathos.db.corrupt.{datetime.now(UTC).strftime(\"%Y%m%dT%H%M%S\")}'; db_path.rename(corrupt_path); print(f'Corrupt bathos.db saved to {corrupt_path}. Rebuilding from cool-tier fragments.', file=sys.stderr)."
+    },
+    {
+      "severity": "critical",
+      "type": "REQUIRED_FIX",
+      "path": "src/bathos/compact.py",
+      "line": 383,
+      "issue": "Normal (non-rebuild) compact() opens bathos.db via bare 'duckdb.connect(str(db_path))' at line 383, bypassing _open_db(). CorruptDatabaseError is never raised on a corrupt pre-existing DB during normal compact — only _open_db raises it, and it is never called in the compact() flow.",
+      "fix": "Replace 'con = duckdb.connect(str(db_path))' at line 383 with 'con = _open_db(db_path)'. This makes compact() raise CorruptDatabaseError as required by AC #2 and #3."
+    },
+    {
+      "severity": "critical",
+      "type": "REQUIRED_FIX",
+      "path": "src/bathos/mcp.py",
+      "line": 1,
+      "issue": "verify_catalog MCP tool is completely absent from mcp.py. Spec AC #21 requires 'mcp__bathos__verify is present in mcp.py, accepts tier (str) and archive_dir (str | None), returns a list of result dicts, and raises McpError when any tier fails.' The 'mirrors CLI tool-for-tool' project invariant is violated.",
+      "fix": "Add the verify_catalog MCP tool to mcp.py exactly as specified in Fix 5's 'mcp.py wiring' section of the spec. Import from bathos.verify, delegate to verify_cool/warm/archive/verify_all per the tier argument, raise McpError when any result has ok=False."
+    },
+    {
+      "severity": "warning",
+      "type": "REQUIRED_FIX",
+      "path": "src/bathos/cli.py",
+      "line": 697,
+      "issue": "After sync_catalog() returns, the CLI does not check result.truncated_candidates or emit the WARN message with repair instructions. Spec AC #22 requires the warning to appear in CLI output. Users will not see truncation alerts.",
+      "fix": "After 'result = sync_catalog(...)' and the typer.echo direction line, add: 'for path in result.truncated_candidates: typer.secho(f\"  WARN truncated fragment after pull: {path}\\n       To repair: delete this file and re-run bth sync --pull\", fg=\"yellow\", err=True)'."
+    },
+    {
+      "severity": "warning",
+      "type": "REQUIRED_FIX",
+      "path": "src/bathos/verify.py",
+      "line": 98,
+      "issue": "verify_warm() returns ok=False with error 'not found' when bathos.db does not exist and no cool fragments are present. Spec AC #15 requires: 'bth verify --tier warm exits with code 0 and prints no warnings when bathos.db does not exist and no cool fragments are present (new installation).' The test (test_verify_warm_no_false_positive_on_empty_new_catalog) asserts ok=False, which contradicts the spec.",
+      "fix": "In verify_warm(), after checking db_path.exists(), also check whether any cool fragments exist. If db_path does not exist AND no cool fragments are present, return VerifyResult(tier='warm', ok=True, errors=[], warnings=[], stats=stats) — a fresh installation is valid. Return ok=False only when db_path does not exist BUT cool fragments ARE present (compaction needed). Update the test to assert ok=True in the no-db/no-fragment case."
+    },
+    {
+      "severity": "warning",
+      "type": "REQUIRED_FIX",
+      "path": "tests/test_compact.py",
+      "line": 1,
+      "issue": "Seven spec-required tests are missing from test_compact.py: test_compact_transaction_rollback, test_compact_lock_prevents_concurrent_compaction, test_compact_stale_lock_is_cleared, test_compact_raises_on_corrupt_db_header, test_compact_raises_on_missing_schema_meta, test_compact_integrity_check_passes_on_valid_db, test_compact_force_rebuild_recovers_from_corruption. AC #23 requires at least one failure-path test per fix.",
+      "fix": "Implement all seven tests as specified in the Fix 1 and Fix 2 test scenarios sections. The transaction rollback test requires monkeypatching con.execute to raise on the second INSERT call and asserting zero rows afterward."
+    },
+    {
+      "severity": "warning",
+      "type": "REQUIRED_FIX",
+      "path": "tests/test_migrate.py",
+      "line": 1,
+      "issue": "Spec-required tests test_migrate_fragment_backup_restored_on_write_failure and test_migrate_fragment_no_bak_on_success are missing. The failure-path scenario (pq.write_table raises, original frag restored, no .bak/.tmp left) is not tested.",
+      "fix": "Add both tests: monkeypatch pq.write_table to raise OSError, call migrate_catalog, assert original frag readable and no .bak/.tmp present. Add happy-path test asserting no .bak or .tmp files exist after successful migration."
+    },
+    {
+      "severity": "warning",
+      "type": "REQUIRED_FIX",
+      "path": "tests/test_archive.py",
+      "line": 70,
+      "issue": "Existing archive tests do not assert sha256 presence in manifest entries or schema_version == '2'. AC #11 requires both. The spec-required tests test_archive_manifest_contains_sha256, test_archive_manifest_dry_run_no_sha256, and test_archive_sha256_variable_defined_in_dry_run are absent.",
+      "fix": "Add assertions to existing manifest test: assert manifest['schema_version'] == '2'; for entry in manifest['entries']: assert len(entry['sha256']) == 64. Add dry-run test asserting no NameError. Add SHA256 correctness test recomputing digest and comparing."
+    },
+    {
+      "severity": "warning",
+      "type": "REQUIRED_FIX",
+      "path": "tests/test_sync.py",
+      "line": 1,
+      "issue": "Spec-required tests test_sync_truncated_fragment_detected_after_pull and test_sync_result_has_truncated_candidates_field are absent. The failure-path scenario for truncation detection is untested.",
+      "fix": "Add both tests: create a corrupt parquet in the pull destination with recent mtime, mock rsync subprocess to return exit code 0, call sync_catalog with pull=True, assert result.truncated_candidates contains the path."
+    },
+    {
+      "severity": "suggestion",
+      "type": "SUGGESTION",
+      "path": "src/bathos/verify.py",
+      "line": 202,
+      "issue": "Schema version comparison 'schema_version < \"2\"' is a string comparison. It works for single-digit versions (\"1\" < \"2\") but will break for \"10\" < \"2\" (string ordering: '1' < '2' but '10' > '2' is False in Python). If schema versions ever reach double digits, the check silently misbehaves.",
+      "fix": "Use int(schema_version) < 2 with a try/except for non-numeric values as a defensive guard."
+    }
+  ],
+  "required_fixes": [
+    "Add con.begin()/con.commit()/con.rollback() transaction wrap around the INSERT loop in compact.py — the core safety guarantee is absent (compact.py ~line 406).",
+    "Implement the advisory lock acquisition (CompactionLockedError + .bth_compact.lock) in compact.py — class is defined but never used (compact.py ~line 383).",
+    "Replace db_path.unlink() with db_path.rename(bathos.db.corrupt.<timestamp>) in force_rebuild path and add stderr warning (compact.py line 367).",
+    "Replace bare duckdb.connect(str(db_path)) with _open_db(db_path) in the normal compact() flow so CorruptDatabaseError is actually raised on corrupt DB (compact.py line 383).",
+    "Add verify_catalog MCP tool to mcp.py — completely absent, violates project 'mirrors CLI tool-for-tool' invariant (AC #21).",
+    "Add truncated_candidates warning output to cli.py sync command after result is returned (cli.py line 697).",
+    "Fix verify_warm() to return ok=True (not ok=False) when bathos.db is absent AND no cool fragments exist; update the corresponding test (verify.py line 98, test_verify.py line 92).",
+    "Add seven missing test_compact.py tests for transaction rollback, advisory lock, stale lock, corrupt DB header, missing _schema_meta, integrity pass, and force-rebuild (AC #23).",
+    "Add two missing test_migrate.py failure-path tests for backup/restore behavior (AC #23).",
+    "Add sha256 and schema_version assertions to test_archive.py; add the three spec-required archive tests (AC #11, #12, #23).",
+    "Add two missing test_sync.py tests for truncation detection (AC #22, #23)."
+  ],
+  "suggestions": [
+    "verify.py line 202: use int(schema_version) < 2 instead of string comparison to guard against future double-digit schema versions."
+  ],
+  "next_action": {
+    "kind": "retry",
+    "target": "implementer",
+    "note": "Four critical implementation gaps must be fixed before this can pass: transaction wrap in compact(), advisory lock in compact(), _open_db() not called in compact() normal path, and verify_catalog absent from mcp.py. After fixing those, address the six required-fix test coverage gaps and the verify_warm empty-catalog behavior inversion. Re-review after all required_fixes are addressed."
+  }
+}

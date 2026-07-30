@@ -1,0 +1,59 @@
+# Spec-Defender Report — Literature-Parity v1
+
+## Axis 1 — Anchor accuracy (the design's reuse claims)
+
+Every reuse anchor the design names is real and load-bearing. This is the design's central strength: it is not inventing plumbing, it is extending shipped, tested machinery.
+
+| Design claim | Verified at | Verdict |
+|---|---|---|
+| AC-13 `reference_parity` block to extend | `claim.py:182-254` — parses `confound.get("reference_parity")` at :185, State 1/2/3 ladder present | **rebutted (sound)** |
+| Union Gate at conclude | `claim.py:468` `run_union_gate`; called from `campaigns.py:242` inside `conclude_campaign` (:180) | **rebutted (sound)** — F2 hook point before :242 is real |
+| SHA tamper-anchor | `claim.py:444` `check_sha` → raises `ValueError` on mismatch (:461) | **rebutted (sound)** |
+| Submit reproduction gate to mirror | `cli.py:960-999` — hard-exit validation/production (:978-985), advisory exploration/calibration (:987-993) | **rebutted (sound)** — pattern matches design verbatim |
+| warm+cool fallback | `prereg.py:178` `check_reproduction_prerequisite` — DuckDB then PyArrow glob (:202, :214) | **rebutted (sound)** |
+| Signal 12 / sprint-audit | `sprint_audit.py:526` Signal 12 block; Signal 13 slots after | **rebutted (sound)** |
+| `output_paths` for G1 triple | `schema.py` `output_paths` `list_(string())` | **rebutted (sound)** |
+| Scaffold template fields | `claim.py:346` `[confounds.reference_parity]` with `reference_paper/metric/value/equivalence_bound` | **rebutted (sound)** |
+
+**One cosmetic note, not a design defect:** the code comment at `claim.py:182` reads `[baseline_parity]`, but the parsed key (:185) and scaffold template (:346) are `reference_parity`. The design consistently uses `reference_parity` — it matches the real data key. The stale comment is in the *existing code*, not the spec.
+
+## Axis 2 — Risk severity (R1–R6)
+
+- **R1 (warm-vs-cool at submit)** — *over-stated as open; mitigation suffices.* The design's own answer (fail-open advisory + test) is exactly the shipped posture: `prereg.py:178` already has the warm-then-cool fallback and returns `False` rather than raising when neither tier resolves. **Defend.**
+- **R2 (attest-parity in-place mutation → SHA divergence)** — *genuinely real.* `check_sha` (:461) raises `ValueError` on any file/DB SHA mismatch, and `conclude_campaign` calls it at `campaigns.py:238` before every Union Gate. A mid-mutation crash in `attest_parity()` would brick all future concludes for that campaign. The design correctly rates this high and demands a rollback path + test. **Defend the rating; the mitigation is mandatory, not optional.**
+- **R3 (State-3 silent skip)** — *already satisfied.* `claim.py:254` already emits `"skipping baseline parity check… — no catalog connection"`. The design asks to "confirm it is documented" — it is. **Concede only that R3 is a no-op; no work needed beyond mirroring the existing message.**
+- **R4 (Signal 13 swallows `parse_claim` with `pass`)** — *real but minor.* `sprint_audit.py:539-540` shows Signal 12 uses the same `except Exception: pass`. The design's question (own anomaly vs. fold into Signal 12) is a legitimate small decision. **Defend as low.**
+- **R5 (`parity_status` TOML/DB drift)** — *design decision, not a gap.* The design already recommends option (a) infer-from-DB. That is the correct kaizen/poka-yoke choice (single source of truth). **Defend; fold the recommendation in.**
+- **R6 (campaign_id binding)** — **CONCEDE, and it is worse than the design states.** The design's R6 "fix" is: read `campaign_id` from the `--campaign` CLI arg. But `bth submit()` (`cli.py:894-906`) has **no `--campaign` option at all** — only `--sidecar`, `--preset`, `--remote`, `--array`, etc. The reproduction gate it mirrors never needs a campaign: it resolves entirely through the sidecar's `requires_pass_stem`. But `reference_parity` lives **only** in the claim file, which is associated with a campaign via `campaigns.claim_path` — there is no path from a submit-time sidecar to a campaign's parity confound. **The design's own R6 mitigation references a parameter that does not exist; the F3 binding mechanism is genuinely undecided.**
+
+## Axis 3 — DAG soundness
+
+**Defend.** The waves respect real dependencies. T1 (schema) and T2 (grader) are pure-function, dependency-free — correct. T5 (`attest_parity` + scaffold fields) depends on T1+T2 because it consumes `ParityGradeResult` and writes `parity_run_id`. T6/T7/T8 all depend on T5 because they consume the attested claim state. Critical path T2→T5→T6→T9 is the genuine longest chain (grader → claim mutation → conclude-gate → audit signal). T3 (skill/docs) being dependency-free and floatable is correct — it touches no Python symbol. No false edges, no missing edges.
+
+## Axis 4 — Scope minimality
+
+**Defend.** The "v1 code = X1 grader + F2/F3 + G1 SHA-anchor + schema" boundary is correctly drawn, and nothing in the deferred graduation paths is secretly required for v1 correctness:
+- **A4 callbacks** — not needed; A2 thin-config (`parity.bth.toml` as NL args) carries domain knowledge with zero per-project code. Verified: no plugin interface exists or is referenced.
+- **F1 `bth parity` subcommand family** — not needed; F2 reuses `bth run` + sidecar + Union Gate. The decision log's reasoning holds against the code: the conclude-gate hook at `campaigns.py:242` needs no new command tree.
+- **X2 shared invariant library / D4 / E2 / G2 / H3** — each is an enrichment, none is a correctness precondition. The Union Gate only needs a `parity_run_id` with `outcome='pass'` (the Constraint-7 invariant), which X1+G1+F2 deliver alone.
+
+This is textbook JIT/YAGNI: build the gate that makes the confound machine-legible, defer everything the Union Gate doesn't strictly require.
+
+## Conceded objections
+
+- **R6** — blocking. The binding mechanism for F3 is unresolved and the proposed fix is invalid (no `--campaign` on `bth submit`). **Minimum addition to resolve:** decide F3's reachability path before T7 — either (a) add a `--campaign` option to `submit()` so the parity confound is resolvable, or (b) declare `parity_run_id`/`requires_parity_stem` in the experiment **sidecar** (mirroring `requires_pass_stem`) so F3 stays sidecar-driven exactly like the reproduction gate it copies. Option (b) is the more consistent kaizen choice — it reuses the shipped sidecar-resolution path and needs no new CLI surface.
+- **R2** — blocking-adjacent. Requires an explicit atomic-write/rollback design for `attest_parity()` before T5, plus a mid-mutation-failure test. Not a scope cut; a hardening the spec already names but must specify.
+
+## Verdict
+
+```json
+{
+  "overall_verdict": "needs_revision",
+  "confidence": "high",
+  "summary": "The design's reuse architecture is sound and every anchor verified against real code — the team should NOT over-engineer a revision; X1+F2+G1+schema correctly reuse claim.py:182/444/468, campaigns.py:242, cli.py:960, prereg.py:178, and sprint_audit.py:526. The DAG and the v1/graduation scope boundary are well-drawn and defensible. Two surgical fixes are required before registration: (R6) F3's campaign/claim binding mechanism is genuinely undecided and the design's own fix is invalid because bth submit() has no --campaign arg — resolve by adding the option or, better, by declaring the parity prerequisite in the sidecar like requires_pass_stem; and (R2) attest_parity's in-place SHA re-anchor needs an atomic rollback path since check_sha raises ValueError on divergence and would brick future concludes. With those two folded in, the spec is registerable; it does not need a full rewrite."
+}
+```
+
+**Sound enough to register as-is with the two conceded fixes (R6 binding mechanism + R2 atomic rollback) folded in — not a full revision pass.**
+
+VERDICT: NEEDS_WORK

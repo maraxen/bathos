@@ -1,0 +1,198 @@
+Perfect! Now I have a comprehensive picture. Let me compile my findings:
+
+## Summary Report: Bathos Experimental Control Mechanisms Survey
+
+Based on a thorough search of the bathos codebase, here's the complete picture of control mechanisms in bathos:
+
+### 1. **Types of Controls Distinguished**
+
+Bathos distinguishes **four primary sidecar types** (enum `SidecarKind`):
+
+- **`EXPERIMENT`** — hypothesis-driven tests with outcome conditions and optional POPPER e-value sequential testing
+  - Fields: `hypothesis`, `outcomes`, `result_schema`, optional `[popper]` block
+  
+- **`BENCHMARK`** — regression/baseline tracking with reference run comparison
+  - Fields: `baseline_ref` (UUID of reference run), `metric`, `regression_threshold`, `regression_threshold_basis`, `target`
+  
+- **`VALIDATION`** — deterministic property checks
+  - Fields: `property`, `reference`, `tolerance`, `outcomes`
+  
+- **`DEBUG`** — incident investigation and troubleshooting
+  - Fields: `symptom`, `suspected_cause`, `verification`, `outcomes`
+
+**Control Subtypes** (within experiment outcomes):
+- **Pass outcomes** — confirmatory path (non-residual, `is_residual=false`)
+- **Fail outcomes** — negative evidence path
+- **Marginal outcomes** — borderline/retry conditions
+- **Residual outcomes** — catch-all fallback (`is_residual=true`, required by validation)
+- **Error/Unknown** — framework defaults for crashes or unparseable results
+
+---
+
+### 2. **Enforcement Layers**
+
+#### **A. Lint-time (project-root file checks, `bth lint`)**
+
+Tier-1 structural checks (file `linter.py`):
+- Sidecar requirement by directory (`experiments/`, `benchmarks/` → ERROR; `validation/` → WARNING)
+- File naming pattern enforcement (`verb_noun` style for experiments/benchmarks, `YYMMDD_desc` for debug)
+
+Tier-2 epistemic hygiene checks:
+- **`check_threshold_basis()`** — warns if numeric literals appear in outcome conditions or `regression_threshold` without accompanying `source` or `regression_threshold_basis` justification
+- **`check_adversarial_checks()`** — warns if `outcomes.pass` branches lack an `adversarial_check` field (SQL fragment designed to falsify the hypothesis)
+- **`check_popper_adversarial()`** — warns if POPPER sidecars miss `adversarial_check` in all outcome branches
+- **`check_unfired_branches()`** — warns if a script+sidecar consistently produces only one outcome label (hypothesis may be validated already)
+- **`check_residual_rates()`** — warns if campaigns exceed 10% residual-outcome rate
+- **`check_bypass_trend()`** — warns if bypass rate (sidecars skipped) is increasing week-over-week
+- **`check_ephemeral_output_paths()`** — warns if outputs registered under `/tmp` or `/var/tmp`
+- **`check_canonical_stage_names()`** — advisory-only: suggests using canonical stage names (`exploration`, `calibration`, `validation`, `ablation`, `production`)
+
+#### **B. Pre-execution Runtime (gate checks, `runner.py` + `prereg.py`)**
+
+`gate_check()` function enforces for scripts in enforced directories (`experiments/`, `benchmarks/`):
+
+1. **Sidecar existence** (ERROR if missing)
+2. **Sidecar structural validity** (ERROR if malformed TOML or missing required sections)
+3. **Outcome condition DuckDB parsing** (ERROR if SQL syntax invalid)
+4. **Residual fallback requirement** (ERROR if no `is_residual=true` branch exists)
+5. **Schema reference requirement** (ERROR if `result_schema` fields are never referenced in conditions)
+6. **First-of-kind gate** (AUTONOMOUS mode only: ERROR if script+git_hash combo already has prior runs; prevents blind iteration)
+7. **Adversarial check requirement** (AUTONOMOUS mode only: ERROR if any non-residual outcome lacks `adversarial_check`)
+8. **Manifest lock generation** (writes `.{stem}.{run_id}.bth.lock.toml` adjacent to sidecar at runtime, non-modifiable)
+
+Result fields from gate check:
+- `sidecar_mode`: `"bypassed"` (no sidecar found, `--no-sidecar` flag), `"declared"` (sidecar present & valid), `""` (ungated directory)
+- `outcome_is_residual`: boolean flag stored per run to track catch-all fallback outcomes
+
+#### **C. Post-execution Audit (campaign level, `campaigns.py` + `sprint_audit.py`)**
+
+**Campaign-level enforcement:**
+- **Threshold lock** (`campaigns.py`): Once first non-error run is added to a POPPER sequential campaign, `stopping_threshold` locks and cannot be changed (prevents post-hoc threshold adjustment)
+- **Temporal ordering** (CONFIRMATION mode): Runs must be added after campaign creation timestamp
+- **E-value computation** per run based on outcome label and sidecar `[popper]` block parameters
+
+**Sprint-level signals** (`sprint_audit.py` — 8 cross-project signals):
+1. `error_rate` — fraction of runs with outcome="error" (threshold: >10%)
+2. `bypass_explicit` — fraction with `sidecar_mode="bypassed"` and empty `agent_mode` (threshold: >30%)
+3. `bypass_in_agent_mode` — fraction bypassed within agent-driven runs (threshold: >5%, stricter due to zero incremental cost)
+4. `outcome_entropy` — Shannon entropy of outcome labels (threshold: <0.5 nats, flags label compression)
+5. `unfired_branches` — fraction of declared outcome labels never observed (threshold: >40%)
+6. `schema_overflow_rate` — runs where `metadata` JSON contains keys NOT in `result_schema` (possible metric substitution; threshold not specified in code, advisory)
+7. `post_hoc_bias_flag` — worst-outcome label appears >10% in first third of runs (temporal order anomaly)
+8. `premature_stopping_rate` — fraction of concluded sequential campaigns where final E_n < `stopping_threshold` (POPPER domain: violates anytime-valid guarantee)
+
+**All thresholds are calibration targets (v0.6), not hard gates** — lint exits 0 and reports warnings only.
+
+---
+
+### 3. **Sidecar TOML Schema Fields for Controls**
+
+**Experiment sidecars:**
+```toml
+[experiment]
+hypothesis = "..."
+agent_mode = "collaborative" | "autonomous"  # agent behavior gate
+
+[outcomes.{label}]
+condition = "SQL_FRAGMENT"                    # evaluated at run-end
+decision = "..."                              # human-readable decision path
+reasoning = "..."                             # why this outcome matters
+is_residual = true | false                    # catch-all flag
+adversarial_check = "SQL_FRAGMENT"           # falsification condition (Tier-2 lint warn if missing)
+source = "citation or rationale"              # threshold justification (Tier-2 lint warn if numeric in condition but missing)
+
+[result_schema]
+{field_name} = "float" | "int" | "str" | "bool"  # declared output structure
+
+[popper]  # optional, experiment-only
+null_pass_rate = 0.3                          # baseline pass rate under null hypothesis
+alt_pass_rate = 0.75                          # expected pass rate under intervention
+stopping_threshold = 20.0                     # E_n product threshold (>= 1.0, warn if < 10.0)
+[popper.weights]
+{outcome_label} = 1.5                         # per-label e-value override
+```
+
+**Benchmark sidecars:**
+```toml
+[benchmark]
+baseline_ref = "run_<uuid>"                   # reference run for comparison (no validation of existence)
+metric = "metric_name"                        # which result column to track
+regression_threshold = 0.05                   # allowed degradation (Tier-2: warn if set but regression_threshold_basis missing)
+regression_threshold_basis = "justification"  # why this threshold (Tier-2: warn if numeric threshold but basis missing)
+target = "description"                        # human-readable performance target
+```
+
+---
+
+### 4. **What's Absent (No Built-in Support)**
+
+- **Positive/negative control specimens** — No schema fields to declare "run X is a positive control" or "run Y is a negative control"
+- **Control outcome labels** — The framework doesn't distinguish control outcomes from test outcomes; all are treated equally in outcome evaluation
+- **Explicit false-positive/false-negative thresholds** — Only POPPER's `null_pass_rate` / `alt_pass_rate` approximate Type I/II error rates; no general framework for false-positive/false-negative acceptance criteria
+- **Blind/masked run execution** — No mechanism to prevent the script or sidecar from "knowing" expected results
+- **Post-hoc sidecar modification detection** — Hash-locked manifests exist (`.bth.lock.toml`), but no automated drift-detection query for sidecars changed after `bth run` started
+- **Amendment audit trail** (`bth amend` command is listed as P3 debt, not implemented)
+- **Calibration requirement for numeric thresholds** — `source` field is Tier-2 lint-only (WARNING, not ERROR); researchers can ignore it
+- **Dynamic control specimen selection** — No support for "this run should be compared against the best-performing run from the last month"
+
+---
+
+### 5. **Documentation Coverage**
+
+**Specifications that exist:**
+- `260602_item-792-popper-evalue.md` — E-value sequential testing (comprehensive, locked)
+- `260602_item-760-threshold-lint.md` — Threshold epistemic hygiene (source field rationale)
+- `260520_agentic-science-design.md` — Agentic audit trail and hypothesis drift detection (high-level vision)
+- `CLAUDE.md` (in repo root) — Sidecar format overview and key design decisions
+
+**Documentation gaps:**
+- No formal spec for how baseline_ref is *used* (it's stored but not actively validated or compared against)
+- No decision record on why controls are not explicitly distinguished as a sidecar type
+- No tutorial on designing control conditions within the outcome condition framework
+- No guidance on acceptable residual outcome rates by domain
+
+---
+
+### 6. **Example Real Usage**
+
+From `test_threshold_lint.py`:
+```toml
+[experiment]
+hypothesis = "accuracy above baseline"
+
+[outcomes.pass]
+condition = "accuracy > 0.90"
+decision = "deploy"
+reasoning = "good"
+adversarial_check = "accuracy < 0.50"  # falsification check
+is_residual = false
+
+[outcomes.fail]
+condition = "accuracy <= 0.90"
+decision = "retrain"
+reasoning = "too low"
+is_residual = true
+
+[result_schema]
+accuracy = "float"
+```
+
+From `test_sidecar.py`:
+```toml
+[benchmark]
+baseline_ref = "run_abc123"
+metric = "ns_per_day"
+regression_threshold = 0.05
+regression_threshold_basis = "5% is standard GROMACS regression gate"
+target = "> 50 ns/day"
+```
+
+---
+
+### Key Takeaway
+
+**Bathos treats controls as outcome conditions, not as specimen types.** A "control run" is just a run whose outcome is evaluated by pre-declared conditions (`[outcomes]`). The only distinction that matters is:
+- Non-residual outcomes (pass/fail/marginal) — deliberate confirmatory branches
+- Residual outcomes (catch-all) — fallback for unexpected results
+
+This design reflects bathos's position as an audit substrate for agentic science, where the enforcement mechanism is declarative (DuckDB SQL predicates) rather than imperative (control specimen bookkeeping).

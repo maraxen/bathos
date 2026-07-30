@@ -1,0 +1,31 @@
+---
+
+```
+CRITIC SUMMARY
+Ideas reviewed: 5 leading candidates + 2 runner-ups + 4 cross-cutting (spanning all 5 questions and shared infrastructure)
+  PASS (no FATAL):
+    - Q1-A (hand-authored TOML matrix) — accepted with MAJOR condition on schema indexing
+    - Q2-D (mode-gated escalation) — accepted with MAJOR condition on adoption-ladder gate activation and Signal 12
+    - Q3 two-location model — accepted with MINOR condition on authority hierarchy clarification
+    - Q4-A (sidecar short IDs) — accepted with MAJOR condition on claim scaffold generating sidecar snippets and lint --fix-discriminates
+    - Q5-A ([baseline_parity] Tier-2 lint) — accepted with MINOR condition on null-metric-extraction ERROR semantics
+    - Q5-B (§10.3 skill-only) — accepted, no conditions
+    - Claim command triad (scaffold/register/validate) — accepted with INFO condition on re-registration audit event
+    - Adoption-ladder opt-in — accepted, load-bearing for Q2-D safety
+
+  BLOCKED (FATAL):
+    - Q1-D (flat pair list) — FATAL: invisible-omission failure mode makes confounds structurally undetectable
+    - Q4-B (CLI flag) — FATAL: breaks pre-registration discipline; not version-controlled in interactive context
+    - Q5 runner-up (both §10 concerns skill-only) — FATAL for §10.1 component: no machine-verifiable parity evidence
+
+  CONDITIONAL (MAJOR only):
+    - Q1-A: matrix schema must be indexed by (hypothesis_a, hypothesis_b, outcome_label) — not (outcome_a, outcome_b) — to enable lint bridge query with Q4-A sidecar IDs; partial matrices must fail claim_validate
+    - Q2-D: Union Gate fires only when claim_path IS registered; Signal 12 must ship in same PR for confirmation-mode campaigns with null claim_path
+    - Q4-A: Q1/Q4 two-namespace structural gap is resolved by the matrix schema fix above; claim scaffold must generate per-run sidecar snippets with hypothesis IDs pre-populated; lint must enumerate affected sidecars when hypothesis IDs change
+
+Strongest surviving idea: Q2-D (mode-gated escalation) — most directly prevents EPIC-6 recurrence with minimum friction, correctly scoped by the adoption-ladder opt-in, and aligns with existing bathos bypass-with-log precedent
+
+Largest unaddressed gap: The discriminability matrix schema was specified with outcome-label vocabulary (Q1-A) and the sidecar discrimination field uses hypothesis-ID vocabulary (Q4-A), but no idea explicitly specified the three-field TOML schema (hypothesis_a, hypothesis_b, outcome_label, verdict) that bridges them — this schema definition must appear in the implementable spec or a developer will need a follow-up design meeting to resolve it
+```
+
+VERDICT: PASS

@@ -1,0 +1,25 @@
+**Task:** Recon xtrax for any parity/validation work to compare with bathos literature-parity system.
+
+---
+
+**What xtrax is:** A composable JAX/Equinox training library (`src/xtrax/`) — engines, trainers, tiling strategies, sparsification, distributed helpers. Alpha, author's personal research toolchain.
+
+**xtrax has two distinct parity-adjacent systems:**
+
+**1. Port parity (`port/`) — numerical correctness validation** (`port/tests/conftest.py:1`, `port/tests/test_parity_safe_map.py`)
+A 5-tier graded harness that validates xtrax's JAX implementations against sealed reference numpy oracles:
+- T1: dtype/shape match
+- T2: float64 allclose (rtol=1e-10)
+- T3: float32 allclose (rtol=1e-4, matmul_precision=highest)
+- T4: gradient/AD parity (only when `ad_critical=true`)
+- T5: JIT vs. eager invariance
+
+Configured per-symbol via `port/port_target.toml` (wave_id, oracle_id, tolerance_policy, ad_critical flag). Emits `domain=port` records to `.praxia/audits.jsonl` after each tier via `port/emit/port_emit.py`. Manifests carry a content-hash for freshness (AC-11). Currently Wave 1 covers `xtrax.transforms.map.safe_map` as MVP.
+
+**2. Baseline ratchet (`src/xtrax/devtools/baseline.py`)** — performance metric gating (minimize/maximize/best_ever comparators), stored in `.praxia/audit_baseline.json`. Separate from port parity; this is about performance regression, not numerical correctness.
+
+**How xtrax connects to bathos:** Only lightly. Composition graph nodes have an optional `bathos_sidecar_ref` metadata slot (`capability_registry.toml:80`). `graph_auditor.py:112` emits a *minor* finding if a node with `audit_verdict=PASS/FAIL` has no `bathos_sidecar_ref` — it's advisory, not blocking. No direct imports of bathos in `src/`.
+
+**Natural seam for "xtrax JAX parity":** Port parity tests whether the *code* matches the math (reference oracle). If an experiment run via bathos validates that an xtrax capability reproduces a *published result* (lit parity = `parity_run_type=reproduces`), that bathos run's sidecar would be referenced in `bathos_sidecar_ref` on the xtrax node. These are two distinct layers: port parity = implementation correctness; bathos lit parity = research claim reproducibility.
+
+**No `parity_run_type`, `attest_parity`, or `literature` references anywhere in xtrax src.** The word "parity" in xtrax is exclusively numerical (port parity) or hardware-level (CUDA mbarrier parity from jaxlib). No overlap with bathos's `parity_run_type` concept.

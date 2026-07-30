@@ -1,0 +1,630 @@
+[sprint]
+sprint_id = "43"
+sprint_num = 1
+name = "Structured gate error taxonomy in MCP tools (#793)"
+description = "Replace natural language errors with typed payloads across all 22 MCP tool surfaces. Flat BathosErrorCode enum + plain dict envelope + traced_tool catch-and-shape + RESOLUTION_HINTS registry + CI maintenance-trap AST test + mcp.tool_error telemetry."
+max_fix_retries = 2
+worktree_shadow_mode = false
+context = """
+SPEC: .praxia/docs/specs/260613_structured-gate-error-taxonomy-in-mcp-to.md
+task_id: 260614_793-mcp-error-taxonomy
+
+DESIGN SUMMARY
+  Winner: Flat BathosErrorCode enum (16 members, 11 aliased from GateErrorCode)
+  in new src/bathos/errors.py + plain dict envelope {ok, error_code, error, resolution_hint, **data}
+  + traced_tool rewritten to catch-and-shape (NOT re-raise) + RESOLUTION_HINTS registry
+  + mcp.tool_error telemetry unconditional on ok=False + CI AST maintenance-trap test.
+  Hard cut — no transition window. Internal-only agentic interface.
+
+CRITICAL FACTS (challenger-verified against codebase)
+  - GateErrorCode (prereg.py:21-33) has 11 members with lowercase .value strings:
+    sidecar_missing, sidecar_invalid, sidecar_hash_mismatch, not_first_of_kind,
+    manifest_write_failed, adversarial_check_missing, hypothesis_lock_missing,
+    outcome_evaluation_error, result_schema_mismatch, outcome_ambiguous, internal
+  - GateError (prereg.py:48) is NEVER raised — gate failures are RETURNED as dicts
+    via runner.py:258-260 (dataclasses.asdict(gate_result.error_payload))
+  - All 22 inner *_tool functions currently catch Exception and return json.dumps({"error": str(e)})
+    so traced_tool (mcp.py:51-91) NEVER sees domain exceptions today
+  - postmortem_validate (~mcp.py:1038) and validate_sidecar (~mcp.py:1116) have their own
+    top-level "ok" key with validation semantics -- must rename to "validation_ok"
+  - No FastMCP Context params in any tool signature (grep confirmed)
+  - telemetry.event() uses dotted-lowercase convention (existing: "mcp.call_error" at mcp.py:57)
+  - repair tool path at mcp.py:1340 raises SystemExit(1) -- needs BaseException catch
+
+KEY SOURCE FILES
+  src/bathos/mcp.py       -- 22 tools; traced_tool :51-91; inner catch-alls at ~:157,191,232,256,
+                             280,311,343,379,424,495,557-559,601,633-635,679-681,742,770,964,1294
+                             validation ok collision at :1038,:1116; SystemExit path :1340
+  src/bathos/prereg.py    -- GateErrorCode :21-33; _RESOLUTION_HINTS :72-84; GateError :48
+  src/bathos/runner.py    -- gate failure returned as dict :258-260
+  src/bathos/telemetry.py -- event() :324; existing event names (dotted lowercase)
+  src/bathos/errors.py    -- TO BE CREATED (does not exist yet)
+  tests/test_errors.py    -- TO BE CREATED
+  tests/test_mcp_envelope.py -- TO BE CREATED
+
+DAG STRUCTURE
+  p0 (1811) -- remove inner except catch-alls; no deps [PREREQ for t3, t7]
+  p1 (1812) -- rename ok->validation_ok; no deps [PREREQ for t3]
+  t1 (1813) -- create errors.py; no deps [PREREQ for t2, t3, t6]
+  t2 (1815) -- test_resolution_hints_complete; after t1
+  t6 (1819) -- AST maintenance-trap test; after t1
+  t3 (1816) -- rewrite traced_tool; after p0+p1+t1
+  t4 (1817) -- mcp.tool_error telemetry; after t3
+  t5 (1818) -- envelope shape tests; after t3
+  t7 (1820) -- caller audit grep; after p0
+"""
+
+[[tracks]]
+id = "p0"
+is_research = false
+
+[[tracks.items]]
+backlog_id = "1811"
+phase_name = "Track P0 -- Remove inner except catch-alls from 22 MCP tool bodies"
+fixer_prompt = """
+task_id: 260614_793-mcp-error-taxonomy
+
+SPEC: .praxia/docs/specs/260613_structured-gate-error-taxonomy-in-mcp-to.md AC-3 (prerequisite)
+
+Remove inner exception swallowing from all MCP tool bodies in src/bathos/mcp.py.
+This unblocks traced_tool catch-and-shape (Track T3): until these are removed, traced_tool
+never sees domain exceptions because the inner functions return {"error": str(e)} dicts instead.
+
+SITES TO REMOVE (all follow same pattern: except Exception as e: return json.dumps({"error": str(e)})):
+  list_runs_tool     :~157
+  find_runs_tool     :~191
+  get_run_tool       :~232
+  run_sql_tool       :~256
+  compact_tool       :~280
+  archive_tool       :~311
+  check_tool         :~343
+  sync_tool          :~379
+  init_tool          :~424
+  run_tool           :~495
+  campaign_create    :~557-559 (two except blocks -- CampaignError and Exception)
+  campaign_list      :~601
+  campaign_review    :~633-635
+  campaign_conclude  :~679-681
+  lineage_prov       :~770
+  repair_scan        :~1294-1295
+  plus any remaining json.dumps({"error":...}) sites
+
+ALSO convert all json.dumps(...) return sites to plain dict returns.
+Every tool function must return a plain Python dict (not a json.dumps string) after this track.
+
+NOTE on run_tool gate failure path: runner.py:258-260 returns dataclasses.asdict(error_payload)
+when gate fails. This is a valid structured dict, not a bare error string. DO NOT remove this path.
+Track T3 will detect and reshape it.
+
+NOTE on repair SystemExit: mcp.py:1340 comment -- leave as-is; Track T3 handles it.
+
+DO NOT touch: traced_tool itself (:51-91), postmortem tools (Track P1),
+runner.py gate failure return, or any test files.
+
+After changes: uv run pytest tests/ -x -q must pass (no regressions).
+"""
+reviewer_prompt = """
+task_id: 260614_793-mcp-error-taxonomy
+
+Verify Track P0 (remove inner except catch-alls):
+
+CHECKS:
+1. grep -n 'json.dumps.*error' src/bathos/mcp.py returns zero matches
+2. grep -n 'except Exception as e.*return' src/bathos/mcp.py returns zero matches in tool bodies
+3. All tool return sites return plain dict, not json.dumps() string
+4. runner.py gate failure path (dataclasses.asdict) is untouched
+5. mcp.py:1340 SystemExit comment site is untouched
+6. postmortem_validate and validate_sidecar ok fields are untouched (that is Track P1)
+7. uv run pytest tests/ -x -q passes with no regressions
+
+FAIL if: any json.dumps({"error":...}) remains in a tool body; any tool returns str not dict;
+runner.py:258-260 was modified; test suite regresses.
+"""
+return_key = "1811"
+
+
+[[tracks]]
+id = "p1"
+is_research = false
+
+[[tracks.items]]
+backlog_id = "1812"
+phase_name = "Track P1 -- Rename ok->validation_ok in postmortem_validate and validate_sidecar"
+fixer_prompt = """
+task_id: 260614_793-mcp-error-taxonomy
+
+SPEC: .praxia/docs/specs/260613_structured-gate-error-taxonomy-in-mcp-to.md AC-3 (M-2 collision policy)
+
+Two tools return a top-level "ok" key with validation-specific semantics that collides with the
+transport envelope's "ok" key. Rename their "ok" to "validation_ok":
+
+TARGET 1 -- postmortem_validate (~mcp.py:1038):
+  Currently: {"ok": True/False, "run_id": ..., ...} and {"ok": False, "errors": [...]}
+  Change to: {"validation_ok": True/False, ...}
+
+TARGET 2 -- validate_sidecar (~mcp.py:1116):
+  Currently: {"ok": True/False, ...} in multiple branches
+  Change to: {"validation_ok": True/False, ...}
+
+Also update any tests that assert result["ok"] for these two tools to use result["validation_ok"].
+
+DO NOT rename "ok" in any other tool or in traced_tool.
+After changes: uv run pytest tests/ -x -q must pass.
+"""
+reviewer_prompt = """
+task_id: 260614_793-mcp-error-taxonomy
+
+Verify Track P1 (rename ok->validation_ok):
+
+CHECKS:
+1. postmortem_validate returns "validation_ok" (not "ok") as its boolean key
+2. validate_sidecar returns "validation_ok" (not "ok") as its boolean key
+3. No other tool's return dict was modified
+4. Any tests asserting result["ok"] for these tools now assert result["validation_ok"]
+5. uv run pytest tests/ -x -q passes with no regressions
+
+FAIL if: either tool still returns "ok" as the validation boolean; other tools changed;
+test suite regresses.
+"""
+return_key = "1812"
+
+
+[[tracks]]
+id = "t1"
+is_research = false
+
+[[tracks.items]]
+backlog_id = "1813"
+phase_name = "Track T1 -- Create src/bathos/errors.py with BathosErrorCode, RESOLUTION_HINTS, EXCEPTION_TO_CODE"
+fixer_prompt = """
+task_id: 260614_793-mcp-error-taxonomy
+
+SPEC: .praxia/docs/specs/260613_structured-gate-error-taxonomy-in-mcp-to.md AC-1, AC-2
+
+Create new module src/bathos/errors.py. ONLY create this file -- do not modify any existing files.
+
+REQUIRED CONTENT (implement exactly):
+
+from __future__ import annotations
+from enum import Enum
+from bathos.prereg import GateErrorCode, _RESOLUTION_HINTS as _GATE_HINTS
+
+
+class BathosErrorCode(str, Enum):
+    # 11 aliased from GateErrorCode (same .value strings -- wire-compatible)
+    SIDECAR_MISSING = GateErrorCode.SIDECAR_MISSING.value
+    SIDECAR_INVALID = GateErrorCode.SIDECAR_INVALID.value
+    SIDECAR_HASH_MISMATCH = GateErrorCode.SIDECAR_HASH_MISMATCH.value
+    NOT_FIRST_OF_KIND = GateErrorCode.NOT_FIRST_OF_KIND.value
+    MANIFEST_WRITE_FAILED = GateErrorCode.MANIFEST_WRITE_FAILED.value
+    ADVERSARIAL_CHECK_MISSING = GateErrorCode.ADVERSARIAL_CHECK_MISSING.value
+    HYPOTHESIS_LOCK_MISSING = GateErrorCode.HYPOTHESIS_LOCK_MISSING.value
+    OUTCOME_EVALUATION_ERROR = GateErrorCode.OUTCOME_EVALUATION_ERROR.value
+    RESULT_SCHEMA_MISMATCH = GateErrorCode.RESULT_SCHEMA_MISMATCH.value
+    OUTCOME_AMBIGUOUS = GateErrorCode.OUTCOME_AMBIGUOUS.value
+    INTERNAL = GateErrorCode.INTERNAL.value
+    # 5 new codes for domain exceptions
+    CATALOG_ERROR = "catalog_error"
+    CAMPAIGN_ERROR = "campaign_error"
+    SIDECAR_ERROR = "sidecar_error"
+    EXPORT_ERROR = "export_error"
+    INVALID_PARAM = "invalid_param"
+
+
+RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
+    BathosErrorCode.SIDECAR_MISSING: _GATE_HINTS[GateErrorCode.SIDECAR_MISSING],
+    BathosErrorCode.SIDECAR_INVALID: _GATE_HINTS[GateErrorCode.SIDECAR_INVALID],
+    BathosErrorCode.SIDECAR_HASH_MISMATCH: _GATE_HINTS[GateErrorCode.SIDECAR_HASH_MISMATCH],
+    BathosErrorCode.NOT_FIRST_OF_KIND: _GATE_HINTS[GateErrorCode.NOT_FIRST_OF_KIND],
+    BathosErrorCode.MANIFEST_WRITE_FAILED: _GATE_HINTS[GateErrorCode.MANIFEST_WRITE_FAILED],
+    BathosErrorCode.ADVERSARIAL_CHECK_MISSING: _GATE_HINTS[GateErrorCode.ADVERSARIAL_CHECK_MISSING],
+    BathosErrorCode.HYPOTHESIS_LOCK_MISSING: _GATE_HINTS[GateErrorCode.HYPOTHESIS_LOCK_MISSING],
+    BathosErrorCode.OUTCOME_EVALUATION_ERROR: _GATE_HINTS[GateErrorCode.OUTCOME_EVALUATION_ERROR],
+    BathosErrorCode.RESULT_SCHEMA_MISMATCH: _GATE_HINTS[GateErrorCode.RESULT_SCHEMA_MISMATCH],
+    BathosErrorCode.OUTCOME_AMBIGUOUS: _GATE_HINTS[GateErrorCode.OUTCOME_AMBIGUOUS],
+    BathosErrorCode.INTERNAL: _GATE_HINTS[GateErrorCode.INTERNAL],
+    BathosErrorCode.CATALOG_ERROR: "A catalog read/write operation failed. Check the DuckDB warm store and cool-tier Parquet files.",
+    BathosErrorCode.CAMPAIGN_ERROR: "A campaign operation failed. Call bth_campaign_list to verify campaign state.",
+    BathosErrorCode.SIDECAR_ERROR: "Sidecar parsing or validation failed. Check the .bth.toml file adjacent to the script.",
+    BathosErrorCode.EXPORT_ERROR: "Export operation failed. Check disk space and output path permissions.",
+    BathosErrorCode.INVALID_PARAM: "A required parameter was missing or invalid. Check the tool input schema.",
+}
+
+# Maps exception class name (str) -> BathosErrorCode for traced_tool dispatch and AC-7 AST test
+EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
+    "GateError": BathosErrorCode.INTERNAL,
+    "CatalogError": BathosErrorCode.CATALOG_ERROR,
+    "CampaignError": BathosErrorCode.CAMPAIGN_ERROR,
+    "SidecarError": BathosErrorCode.SIDECAR_ERROR,
+    "ExportError": BathosErrorCode.EXPORT_ERROR,
+    "CorruptDatabaseError": BathosErrorCode.CATALOG_ERROR,
+    "CompactionLockedError": BathosErrorCode.CATALOG_ERROR,
+    "PostmortemError": BathosErrorCode.INVALID_PARAM,
+}
+
+NOTE: If _RESOLUTION_HINTS import fails (name mangling), inline the hint strings from
+prereg.py:72-84 instead. Verify with:
+  uv run python -c "from bathos.errors import BathosErrorCode; print(len(BathosErrorCode))"
+Expected output: 16
+"""
+reviewer_prompt = """
+task_id: 260614_793-mcp-error-taxonomy
+
+Verify Track T1 (create errors.py):
+
+CHECKS:
+1. src/bathos/errors.py exists
+2. len(BathosErrorCode) == 16
+3. BathosErrorCode.SIDECAR_MISSING.value == "sidecar_missing"
+4. BathosErrorCode.INTERNAL.value == "internal"
+5. BathosErrorCode.CATALOG_ERROR.value == "catalog_error"
+6. set(BathosErrorCode) == set(RESOLUTION_HINTS) -- every code has a hint
+7. EXCEPTION_TO_CODE contains CatalogError, CampaignError, SidecarError, ExportError at minimum
+8. No existing files modified
+9. uv run pytest tests/ -x -q passes (no regressions)
+
+FAIL if: BathosErrorCode != 16 members; aliased code has wrong .value; RESOLUTION_HINTS
+missing any member; existing files modified.
+"""
+return_key = "1813"
+
+
+[[tracks]]
+id = "t2"
+is_research = false
+
+[[tracks.items]]
+backlog_id = "1815"
+phase_name = "Track T2 -- tests/test_errors.py: test_resolution_hints_complete"
+fixer_prompt = """
+task_id: 260614_793-mcp-error-taxonomy
+
+SPEC: .praxia/docs/specs/260613_structured-gate-error-taxonomy-in-mcp-to.md AC-2
+
+Create or extend tests/test_errors.py with these two tests:
+
+from bathos.errors import BathosErrorCode, RESOLUTION_HINTS
+
+def test_resolution_hints_complete():
+    missing = set(BathosErrorCode) - set(RESOLUTION_HINTS)
+    assert not missing, f"Missing RESOLUTION_HINTS entries for: {missing}"
+
+def test_resolution_hints_nonempty():
+    for code, hint in RESOLUTION_HINTS.items():
+        assert hint and hint.strip(), f"Empty resolution hint for {code}"
+
+DO NOT add the AST test here -- that is Track T6.
+After adding: uv run pytest tests/test_errors.py -v must show both tests PASSED.
+"""
+reviewer_prompt = """
+task_id: 260614_793-mcp-error-taxonomy
+
+Verify Track T2 (test_resolution_hints_complete):
+
+CHECKS:
+1. tests/test_errors.py contains test_resolution_hints_complete
+2. test asserts set(BathosErrorCode) == set(RESOLUTION_HINTS) or equivalent
+3. test uses assert (not pytest.warns or logging)
+4. test_resolution_hints_nonempty verifies no empty strings
+5. uv run pytest tests/test_errors.py -v passes green
+
+FAIL if: test uses warnings; does not cover all BathosErrorCode members;
+passes vacuously on empty set.
+"""
+return_key = "1815"
+
+
+[[tracks]]
+id = "t6"
+is_research = false
+
+[[tracks.items]]
+backlog_id = "1819"
+phase_name = "Track T6 -- tests/test_errors.py: AST maintenance-trap CI test"
+fixer_prompt = """
+task_id: 260614_793-mcp-error-taxonomy
+
+SPEC: .praxia/docs/specs/260613_structured-gate-error-taxonomy-in-mcp-to.md AC-7
+
+Add test_every_domain_exception_has_registered_code to tests/test_errors.py:
+
+import ast
+from pathlib import Path
+from bathos.errors import EXCEPTION_TO_CODE
+
+BUILTIN_EXCEPTIONS = {
+    "ValueError", "RuntimeError", "KeyError", "NotImplementedError", "TypeError",
+    "AttributeError", "IndexError", "SystemExit", "Exception", "BaseException",
+    "StopIteration", "GeneratorExit",
+}
+EXCLUDED_FILES = {"cli.py"}
+
+def _collect_raised_exception_classes(src_root: Path) -> set[str]:
+    raised = set()
+    for py_file in src_root.rglob("*.py"):
+        if py_file.name in EXCLUDED_FILES:
+            continue
+        tree = ast.parse(py_file.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Raise) and node.exc is not None:
+                exc = node.exc
+                if isinstance(exc, ast.Call) and isinstance(exc.func, ast.Name):
+                    raised.add(exc.func.id)
+                elif isinstance(exc, ast.Name):
+                    raised.add(exc.id)
+    return raised
+
+def test_every_domain_exception_has_registered_code():
+    src_root = Path(__file__).parent.parent / "src" / "bathos"
+    raised = _collect_raised_exception_classes(src_root)
+    domain_exceptions = raised - BUILTIN_EXCEPTIONS
+    unregistered = domain_exceptions - set(EXCEPTION_TO_CODE)
+    assert not unregistered, (
+        f"Domain exceptions raised in src/bathos/ with no EXCEPTION_TO_CODE entry: {unregistered}. "
+        "Add them to EXCEPTION_TO_CODE in src/bathos/errors.py."
+    )
+
+If the test fails (unregistered classes found), update EXCEPTION_TO_CODE in errors.py and re-run.
+After adding: uv run pytest tests/test_errors.py::test_every_domain_exception_has_registered_code -v PASSED.
+"""
+reviewer_prompt = """
+task_id: 260614_793-mcp-error-taxonomy
+
+Verify Track T6 (AST maintenance-trap test):
+
+CHECKS:
+1. tests/test_errors.py contains test_every_domain_exception_has_registered_code
+2. Test scans src/bathos/ via ast.walk excluding cli.py
+3. Test excludes BUILTIN_EXCEPTIONS set (ValueError, RuntimeError, etc.)
+4. Test uses assert -- fails hard on unregistered classes
+5. uv run pytest tests/test_errors.py::test_every_domain_exception_has_registered_code -v PASSED
+6. Spot-check: would the test FAIL if CatalogError removed from EXCEPTION_TO_CODE? (verify yes)
+
+FAIL if: test does not exclude cli.py; passes vacuously; uses warnings; fails to detect
+unregistered domain exceptions.
+"""
+return_key = "1819"
+
+
+[[tracks]]
+id = "t3"
+is_research = false
+
+[[tracks.items]]
+backlog_id = "1816"
+phase_name = "Track T3 -- Rewrite traced_tool to catch-and-shape all exceptions"
+fixer_prompt = """
+task_id: 260614_793-mcp-error-taxonomy
+
+SPEC: .praxia/docs/specs/260613_structured-gate-error-taxonomy-in-mcp-to.md AC-3, AC-4, AC-5, AC-6
+
+Rewrite traced_tool (mcp.py:51-91) from re-raise to catch-and-shape.
+Prerequisites complete: inner catches removed (P0), ok renamed (P1), errors.py exists (T1).
+
+Add _shape_error helper and rewrite the wrapper:
+
+def _shape_error(tool_name: str, code: BathosErrorCode, exc: BaseException) -> dict:
+    from bathos.telemetry import event
+    event("mcp.tool_error", {
+        "tool_name": tool_name,
+        "error_code": code.value,
+        "error_class": type(exc).__name__,
+    })
+    return {
+        "ok": False,
+        "error_code": code.value,
+        "error": str(exc),
+        "resolution_hint": RESOLUTION_HINTS.get(code, ""),
+    }
+
+def traced_tool(tool_name: str):
+    def decorator(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            try:
+                result = await fn(*args, **kwargs)
+                # Gate failure detection: runner returns dataclasses.asdict(GateErrorPayload)
+                # which has keys: error_code, phase, taxonomy_label, errors, agent_mode,
+                # resolution_hint, gate_schema_version. Detect by "phase" key (unique to gate payloads).
+                if isinstance(result, dict) and "phase" in result and "error_code" in result:
+                    gate_code_str = result.get("error_code", "internal")
+                    try:
+                        bathos_code = BathosErrorCode(gate_code_str)
+                    except ValueError:
+                        bathos_code = BathosErrorCode.INTERNAL
+                    hint = result.get("resolution_hint") or RESOLUTION_HINTS.get(bathos_code, "")
+                    err_msgs = result.get("errors") or []
+                    return {
+                        "ok": False,
+                        "error_code": bathos_code.value,
+                        "error": err_msgs[0] if err_msgs else gate_code_str,
+                        "resolution_hint": hint,
+                    }
+                # Success path: ensure four mandatory keys present, BEFORE **result
+                if isinstance(result, dict):
+                    return {"ok": True, "error_code": None, "error": None, "resolution_hint": None, **result}
+                return {"ok": True, "error_code": None, "error": None, "resolution_hint": None}
+            except GateError as e:
+                return _shape_error(tool_name, BathosErrorCode.INTERNAL, e)
+            except CatalogError as e:
+                return _shape_error(tool_name, BathosErrorCode.CATALOG_ERROR, e)
+            except CampaignError as e:
+                return _shape_error(tool_name, BathosErrorCode.CAMPAIGN_ERROR, e)
+            except SidecarError as e:
+                return _shape_error(tool_name, BathosErrorCode.SIDECAR_ERROR, e)
+            except ExportError as e:
+                return _shape_error(tool_name, BathosErrorCode.EXPORT_ERROR, e)
+            except SystemExit as e:
+                return _shape_error(tool_name, BathosErrorCode.INTERNAL, e)
+            except BaseException as e:
+                return _shape_error(tool_name, BathosErrorCode.INTERNAL, e)
+        return wrapper
+    return decorator
+
+Add imports at top of mcp.py:
+  from bathos.errors import BathosErrorCode, RESOLUTION_HINTS
+  from bathos.catalog import CatalogError  (if not already present)
+  from bathos.campaigns import CampaignError  (if not already present)
+  from bathos.sidecar import SidecarError  (if not already present)
+  from bathos.export import ExportError  (check export.py for the actual class name)
+  from bathos.prereg import GateError  (already imported via gate_check, but verify)
+
+CRITICAL: mandatory keys {ok, error_code, error, resolution_hint} must come BEFORE **result
+in the success path dict literal so tool keys cannot clobber them.
+
+After changes: uv run pytest tests/ -x -q must pass.
+"""
+reviewer_prompt = """
+task_id: 260614_793-mcp-error-taxonomy
+
+Verify Track T3 (traced_tool rewrite):
+
+CHECKS:
+1. traced_tool catches exceptions (no bare `raise` in the wrapper body)
+2. Dispatch order: GateError -> CatalogError -> CampaignError -> SidecarError -> ExportError -> SystemExit -> BaseException
+3. On exception: returns dict with ok=False, error_code, error, resolution_hint (all non-null)
+4. On success: returns dict with ok=True, error_code=None, error=None, resolution_hint=None, **tool_data
+5. Mandatory envelope keys come BEFORE **result in success path (tool keys cannot clobber)
+6. Gate failure path (dict with "phase" + "error_code" keys) is detected and reshaped
+7. _shape_error emits mcp.tool_error telemetry event
+8. uv run pytest tests/ -x -q passes
+
+REGRESSION SPOT-CHECKS (manual):
+- Inject CatalogError into a tool body -- verify error_code="catalog_error" in result
+- Confirm bth_list_runs on empty catalog returns ok=True, error_code=None, error=None
+
+FAIL if: traced_tool still re-raises; ok=False missing error_code or resolution_hint;
+success results missing mandatory keys; gate failure passes through unreshaped.
+"""
+return_key = "1816"
+
+
+[[tracks]]
+id = "t4t5"
+is_research = false
+
+[[tracks.items]]
+backlog_id = "1817"
+phase_name = "Track T4 -- Verify and harden mcp.tool_error telemetry"
+fixer_prompt = """
+task_id: 260614_793-mcp-error-taxonomy
+
+SPEC: .praxia/docs/specs/260613_structured-gate-error-taxonomy-in-mcp-to.md AC-4
+
+T3 added _shape_error with telemetry. Verify and harden:
+
+1. _shape_error calls telemetry.event("mcp.tool_error", payload)
+2. Payload includes: tool_name (str), error_code (BathosErrorCode .value str), error_class (type(exc).__name__)
+3. Emission is unconditional -- no flag or config suppresses it
+4. Event name is "mcp.tool_error" (dotted-lowercase, matching existing "mcp.call_error" at mcp.py:57)
+
+If T3 already implements all of the above correctly, this track is a no-op. Confirm by
+reading _shape_error and verifying the four points. Note any corrections made.
+
+DO NOT add telemetry to the success path.
+After changes: uv run pytest tests/ -x -q passes.
+"""
+reviewer_prompt = """
+task_id: 260614_793-mcp-error-taxonomy
+
+Verify Track T4 (mcp.tool_error telemetry):
+
+CHECKS:
+1. _shape_error calls telemetry.event("mcp.tool_error", payload)
+2. payload dict has tool_name, error_code, error_class keys
+3. No conditional flag wrapping the call
+4. Event name is "mcp.tool_error" (not "TOOL_ERROR")
+5. uv run pytest tests/ -x -q passes
+
+FAIL if: telemetry behind a flag; wrong event name; missing payload field.
+"""
+return_key = "1817"
+
+[[tracks.items]]
+backlog_id = "1818"
+phase_name = "Track T5 -- tests/test_mcp_envelope.py: success and error envelope shape tests"
+fixer_prompt = """
+task_id: 260614_793-mcp-error-taxonomy
+
+SPEC: .praxia/docs/specs/260613_structured-gate-error-taxonomy-in-mcp-to.md AC-5, AC-6
+
+Create tests/test_mcp_envelope.py with two tests that verify the four-key envelope invariant.
+
+The tests must:
+1. test_success_envelope_has_all_four_keys: call a tool that succeeds (mock underlying query if
+   needed) and assert all four keys present: ok=True, error_code=None, error=None, resolution_hint=None
+2. test_error_envelope_has_all_four_keys: force a CatalogError through traced_tool and assert
+   ok=False, error_code="catalog_error", error is non-empty str, resolution_hint is non-empty str
+
+Use BTH_CATALOG_DIR=tmp_path to isolate catalog state.
+Mock the underlying domain layer (bathos.query.list_runs, etc.) to control the outcome.
+The key assertion is: assert all(k in result for k in ["ok", "error_code", "error", "resolution_hint"])
+
+Adjust mocking targets to match the actual import paths in mcp.py.
+After adding: uv run pytest tests/test_mcp_envelope.py -v passes.
+"""
+reviewer_prompt = """
+task_id: 260614_793-mcp-error-taxonomy
+
+Verify Track T5 (envelope shape tests):
+
+CHECKS:
+1. tests/test_mcp_envelope.py has both tests
+2. Success test verifies all four keys present and their exact values on success path
+3. Error test forces a domain exception and verifies ok=False + valid error_code + non-null strings
+4. Tests use assert (not pytest.approx or warns)
+5. uv run pytest tests/test_mcp_envelope.py -v passes green
+
+FAIL if: tests skip due to import errors; success test does not verify None values;
+error test does not verify error_code value; tests cannot be imported.
+"""
+return_key = "1818"
+
+
+[[tracks]]
+id = "t7"
+is_research = false
+
+[[tracks.items]]
+backlog_id = "1820"
+phase_name = "Track T7 -- Pre-ship caller audit and full test suite verification"
+fixer_prompt = """
+task_id: 260614_793-mcp-error-taxonomy
+
+SPEC: .praxia/docs/specs/260613_structured-gate-error-taxonomy-in-mcp-to.md AC-8
+
+Final pre-ship gate. Run all 7 audits. Fix anything that fails.
+
+AUDIT 1: grep -rn '.get("error")' src/bathos/ -- expect zero consumer matches
+AUDIT 2: grep -n 'json.dumps' src/bathos/mcp.py -- expect zero tool return sites
+AUDIT 3: uv run pytest tests/test_mcp_envelope.py -v -- must pass
+AUDIT 4: uv run pytest tests/ -q -- record total passing count
+AUDIT 5: uv run python -c "from bathos.errors import BathosErrorCode; print(len(BathosErrorCode))" -- expect 16
+AUDIT 6: uv run pytest tests/test_errors.py::test_resolution_hints_complete -v -- must pass
+AUDIT 7: uv run pytest tests/test_errors.py::test_every_domain_exception_has_registered_code -v -- must pass
+
+If all 7 pass, sprint is complete. Report: "SPRINT 43 PASS: N tests passing."
+If any fail, fix the root cause and re-run that audit.
+"""
+reviewer_prompt = """
+task_id: 260614_793-mcp-error-taxonomy
+
+Verify Track T7 (pre-ship audit):
+
+CHECKS:
+1. .get("error") grep: zero matches
+2. json.dumps grep: zero tool return sites
+3. test_mcp_envelope.py: both tests PASSED
+4. Full test suite: all tests pass; count >= pre-sprint baseline (753)
+5. BathosErrorCode: 16 members
+6. test_resolution_hints_complete: PASSED
+7. test_every_domain_exception_has_registered_code: PASSED
+
+PASS if all 7 green. FAIL if any red or test count regresses.
+"""
+return_key = "1820"
+
+
+[orchestration]
+sequential = ["p0", "p1", "t1", "t2", "t6", "t3", "t4t5", "t7"]
+concurrent = []

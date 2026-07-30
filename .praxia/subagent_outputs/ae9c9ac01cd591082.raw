@@ -1,0 +1,170 @@
+---
+
+## Reconnaissance Summary: bathos Controls Discipline
+
+I've completed a targeted recon of the bathos codebase. Here are the answers to your seven questions:
+
+### **1. Sidecar schema surface**
+
+**Fields supported:**
+- **Experiment sidecars:** `hypothesis` (line 41 in sidecar.py), plus `agent_mode` (line 57)
+- **Benchmark sidecars:** `baseline_ref` (line 43), `metric`, `regression_threshold`, `regression_threshold_basis`, `target`
+- **Validation sidecars:** `property`, `reference`, `tolerance`
+- **Debug sidecars:** `symptom`, `suspected_cause`, `verification`
+- **All kinds:** `result_schema`, `outcomes` (dict with condition, decision, reasoning, is_residual, adversarial_check, source fields), `agent_mode`
+- **Experiment only (POPPER):** `popper_null_pass_rate`, `popper_alt_pass_rate`, `popper_stopping_threshold`, `popper_weights` (lines 58-62)
+
+**What validate.py enforces (validate.py:113-221):**
+- ✅ HARD: outcomes section exists
+- ✅ HARD: Each outcome has condition, decision, AND reasoning fields (not optional)
+- ✅ HARD: DuckDB SQL conditions parse correctly
+- ✅ HARD: At least one result_schema field referenced in conditions
+- ✅ HARD: At least one outcome marked `is_residual=true` (catch-all fallback)
+- ✅ HARD: [popper] block validation if present (validate_popper_block, lines 35-110)
+
+**Optional fields:** agent_mode, source (on outcomes), adversarial_check
+
+**Controls/baseline fields:** None. `baseline_ref` exists but only in **benchmark** sidecars and is **never validated** (just stored as string). No `controls`, `control_run`, `reproduces`, or `control_ref` fields anywhere.
+
+---
+
+### **2. Gate check logic**
+
+**Entry point:** `gate_check()` called in runner.py:251 if script in enforced dir AND not --no-sidecar
+
+**Implementation:** runner.py:250-262 → calls `gate_check(script_path, bundle, mode, catalog_dir, git_hash)` in prereg.py:178-244
+
+**Hard gates (return error_payload):**
+1. **SIDECAR_MISSING** (line 192-200): No adjacent .bth.toml in enforced directory
+2. **SIDECAR_INVALID** (line 205-213): Validation errors from validate_sidecar()
+3. **NOT_FIRST_OF_KIND** (line 216-225): Autonomous mode + prior runs with same script+git_hash exist
+4. **ADVERSARIAL_CHECK_MISSING** (line 228-241): Autonomous mode + any non-residual outcome lacks adversarial_check
+
+**Warnings/Advisory:** None at gate check time; validation errors are reported as ERROR severity only.
+
+**Return value:** `GateResult` with `.ok` (bool), `.mode` (AgentMode), `.bundle` (SidecarBundle), `.validation` (ValidationResult), `.error_payload` (GateErrorPayload with error_code, phase, errors, resolution_hint)
+
+---
+
+### **3. Benchmark baseline_ref storage and usage**
+
+**Storage:** 
+- Parsed from [benchmark] section in sidecar.py:100 as plain string
+- Stored in Sidecar.baseline_ref (sidecar.py:43)
+- Stored in Run.metadata JSON (runner.py emits result JSON, not the sidecar fields)
+
+**Usage:**
+- **Stored:** Yes, in Run.metadata as a JSON field
+- **Fetched from catalog:** NO. No code found in sidecar.py, campaigns.py, or query.py that retrieves baseline_ref and compares it to prior runs
+- **Comparison:** NO. baseline_ref is metadata-only; never used to compute deltas or regressions
+
+**Status:** baseline_ref is **inert**—it's a declared reference run ID, but bathos does not fetch that run and perform comparison. The field exists for documentation purposes.
+
+---
+
+### **4. Linter Tier-2 functions (all emit WARNING, no ERROR)**
+
+| Function | Lines | Checks |
+|----------|-------|--------|
+| `check_residual_rates()` | 139-200 | HIGH residual_count/total > 10% per campaign |
+| `check_bypass_trend()` | 203-278 | Increasing sidecar_mode='bypassed' week-over-week (last 4 weeks) |
+| `check_popper_adversarial()` | 281-327 | POPPER sidecars ([experiment] + [popper]) missing adversarial_check in outcomes |
+| `check_unfired_branches()` | 330-389 | Branches (command+sidecar_sha256) always produce same outcome over 5+ runs |
+| `check_adversarial_checks()` | 392-430 | outcomes.pass lacking adversarial_check field |
+| `check_threshold_basis()` | 433-499 | Numeric literals in outcome.condition or benchmark.regression_threshold without source/regression_threshold_basis |
+| `check_ephemeral_output_paths()` | 502-564 | Runs registering outputs under /tmp, /var/tmp |
+| `check_canonical_stage_names()` | 567-662 | Non-canonical stage_name (advisory only; never blocks) |
+
+**Tier-1 (ERROR):** `lint_project()` (lines 84-136) — sidecar presence + file naming conventions in experiments/benchmarks.
+
+---
+
+### **5. Sprint audit signals (sprint_audit.py:200-318)**
+
+All thresholds are **CALIBRATION TARGETS (v0.6)**, not hard gates. See ADR 260601_sprint-audit-threshold-rationale.md.
+
+| Signal | Threshold | Formula |
+|--------|-----------|---------|
+| **error_rate** | > 0.10 (10%) | error_count / total_all |
+| **bypass_explicit** | > 0.30 (30%) | sidecar_mode='bypassed' AND agent_mode empty / total_all |
+| **bypass_in_agent_mode** | > 0.05 (5%) | sidecar_mode='bypassed' AND agent_mode non-empty / agent_mode_runs |
+| **outcome_entropy** | < 0.5 nats | Shannon entropy of outcome label distribution |
+| **unfired_branches** | > 0.40 (40%) | (declared_outcomes - actual_outcomes) / declared_outcomes |
+| **schema_overflow_rate** | (no hard threshold) | runs with metadata keys NOT in result_schema / runs_with_sidecar |
+| **post_hoc_bias_flag** | worst_outcome > 10% in first 1/3 | Boolean flag (true if fail/error overrepresented early) |
+| **premature_stopping_rate** | (no hard threshold) | sequential campaigns concluded below stopping_threshold / total_sequential_concluded |
+
+---
+
+### **6. bth new-experiment scaffold**
+
+**Generated files:**
+- `scripts/experiments/{name}.py` — Python script template
+- `scripts/experiments/{name}.bth.toml` — Sidecar template
+
+**Generated sidecar content (lines 50-64):**
+```toml
+[experiment]
+hypothesis = "TODO: ..."
+
+[outcomes.pass]
+condition = "TODO: ..."
+decision = "TODO: ..."
+
+[outcomes.fail]
+condition = "TODO: ..."
+decision = "TODO: ..."
+
+[result_schema]
+# metric_name = "float"
+```
+
+**Problem:** Generated template is **incomplete**. It's missing:
+- `[outcomes.pass].reasoning` field (REQUIRED by validate.py:152-159)
+- `[outcomes.pass].is_residual = false` (should be explicit)
+- No adversarial_check in outcomes (REQUIRED for autonomous mode gate)
+- No fallback outcome with `is_residual=true`
+
+**Control fields:** None in generated scaffold.
+
+---
+
+### **7. Campaign structure**
+
+**Campaign dataclass (campaigns.py:17-32):**
+```
+id, project_slug, name, mode, question, hypothesis, status, started_at,
+concluded_at, conclusion, outcome_label, parent_campaign_id, stopping_threshold
+```
+
+**Modes:** "exploration" | "confirmation" | "sequential"
+
+**Lineage/Control concept:**
+- ✅ `parent_campaign_id` enables hierarchical campaigns (line 46 in create_campaign)
+- ✅ `parent_campaign_id` is optional, no enforcement that parent exists
+- ❌ No "required_predecessor_runs" or "control_runs" fields
+- ❌ Campaign does not inherit parent's stopping_threshold (parent ID is advisory only)
+
+**Sequential campaign logic (add_run_to_campaign, lines 53-145):**
+- Computes e-value from sidecar [popper] block and outcome label
+- Assigns `seq_position` (1-based, monotonic per campaign)
+- Enforces threshold lock: first non-error run locks `stopping_threshold` to sidecar's value
+- No baseline or control-run computation
+
+**Result:** Campaign structure has **lineage** (parent_campaign_id) but **no control discipline**. Campaigns are exploration/confirmation/sequential hypothesis-test containers, not treatment-control pairs.
+
+---
+
+## Key Findings for Your Brainstorm
+
+1. **No controls discipline exists yet.** The codebase has `baseline_ref` (benchmarks) and `parent_campaign_id` (campaigns) but neither enforces control/reference-run logic.
+
+2. **Gate check is pre-run validation only.** It enforces sidecar presence, syntax, and outcome branches—not experimental design (controls, randomization, blinding).
+
+3. **Linter focuses on post-hoc quality signals.** Tier-2 checks warn about residual rates, bypass trends, unfired branches, but these are reactive audits, not design enforcement.
+
+4. **Sprint audit signals are calibration targets.** They flag anomalies but don't block runs or campaigns.
+
+5. **new_experiment scaffold is incomplete.** It doesn't generate all required fields (reasoning, is_residual fallback, adversarial_check).
+
+All findings logged to `.praxia/recon.jsonl` with file:line anchors.

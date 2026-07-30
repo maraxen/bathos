@@ -1,0 +1,36 @@
+---
+workspace: bathos
+session_id: f4c42a66-27a1-4866-80e3-65ffcd33570a
+status: complete
+immediately_relevant:
+- file: CLAUDE.md
+  lines:
+  - 13
+  - 22
+  reason: 'Current Status block: v0.11.0, 825 tests, claim-tier shipped'
+- file: src/bathos/claim.py
+  lines:
+  - 182
+  - 290
+  reason: AC-13 reference_parity three-state dispatch + AC-04/05 advisory warnings
+active_dispatches: []
+task_id: 260616_worktree-prune
+phase: Maintenance / post-Phase-2 cleanup
+goal_statement: Consolidate the bathos repo to a single main worktree after claim-tier Phase 2 shipped, and assess what bathos work remains open.
+context_refs:
+- phase: maintenance
+  task_id: 260616_worktree-prune
+  summary: Pruned ~44 merged worktrees/branches; consolidated to single main worktree. File handoff at .praxia/docs/handoffs/260616_worktree-prune-backlog-assess.md
+failed_attempts: []
+open_questions: []
+deferred:
+- description: 'submit-provenance pruning/compaction (backlog #1774)'
+  rationale: P3, not on critical path; bathos backlog otherwise drained
+  recommended_phase: future bathos sprint
+lessons_refs: []
+next_steps:
+- 'Only #1774 (submit-provenance pruning/compaction, P3) remains bathos-side — pick up if/when prioritized'
+- '#137 deferred to praxia; #794 / #796 / #1684 are praxia infra'
+- 'Praxia MCP re-handshaked to /home/marielle/projects/bathos'
+summary: Pruned ~44 merged worktrees/branches; consolidated to single main worktree and branch. Claim-tier Phase 2 already on main (ead8c3a, 825 tests). Bathos backlog drained except #1774 P3. Handoff originally written to file after MCP disconnect; replayed into store this session.
+---

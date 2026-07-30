@@ -1,0 +1,41 @@
+Cognitive forcing beat — risks and false assumptions only:
+
+---
+
+**UX-A: `bth repair` standalone**
+
+Most significant failure: tier boundary logic gets duplicated from `bth verify` and the two diverge silently over time — verify reports one thing broken, repair fixes a different scope.
+
+False assumption: that `--tier` is the right axis for repair. Damage often crosses tiers (a corrupt cool fragment causes a warm compaction gap), so a tier-sliced interface may produce partial fixes that leave the catalog in a worse-than-broken state because the researcher thinks they're done.
+
+---
+
+**UX-B: `bth verify --fix`**
+
+Most significant failure: the flag is too easy to pass reflexively. A researcher running `bth verify --fix` in a CI hook or a habit loop applies destructive operations (deletes, rewrites, re-parquets) without reviewing what would change. The "explicit opt-in" philosophy is violated by how low-friction the flag is.
+
+False assumption: that detection and repair are symmetric operations that belong together. Verify is read-only and safe to run anytime; repair requires knowing what the canonical state should be, which may require user judgment (e.g., two cool fragments with conflicting UUIDs — which wins?).
+
+---
+
+**UX-C: Two-phase plan/apply**
+
+Most significant failure: the repair plan goes stale. The researcher runs `bth verify`, gets a plan file, then runs another experiment before applying it — new cool fragments land, the plan is now incorrect, and `bth repair --apply` executes actions against a catalog state that no longer matches what the plan was computed for. No staleness check is built in.
+
+False assumption: that the researcher will read the plan before applying it. The plan/apply split only adds safety if the intermediate artifact is actually reviewed; in practice a solo researcher will run both commands back-to-back, making the indirection pure friction.
+
+---
+
+**UX-D: Per-command --repair flags**
+
+Most significant failure: the researcher doesn't know which command owns repair for their specific symptom. Warm-tier corruption could plausibly be owned by `compact`, `migrate`, or `verify` — when the answer isn't obvious, the user guesses wrong, gets no result, and concludes repair doesn't work.
+
+False assumption: that tier ownership maps cleanly to existing commands. `bth sync` owns remote/local consistency; `bth compact` owns cool→warm promotion; `bth migrate` owns schema versions — but catalog integrity failures (missing run records, orphaned fragments, broken foreign keys in campaigns) don't clearly belong to any of them.
+
+---
+
+**UX-E: `bth doctor`**
+
+Most significant failure: scope creep makes the command slow and unreliable. `brew doctor` works because Homebrew has a finite, well-defined invariant set; bathos catalog invariants will grow with every new feature (campaigns, postmortems, output metadata, POPPER e-values), and `doctor` becomes a maintenance burden that always lags the actual schema.
+
+False assumption: that a single diagnostic surface is appropriate for a CLI that already has `bth verify --tier`. The researcher already has a detection command — the gap is repair, not a new diagnostic interface. `doctor` solves a discoverability problem that doesn't exist for a solo user who wrote the tool.

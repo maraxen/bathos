@@ -1,0 +1,1 @@
+Goal was a bathos telemetry/audit design covering runner, MCP, sync, and catalog. Spec is written at .praxia/docs/specs/260527_telemetry-design.md, indexed, and oracle-approved after one revision; next action is implementation when you're ready.

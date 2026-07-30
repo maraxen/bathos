@@ -1,0 +1,444 @@
+[sprint]
+sprint_id = "44"
+sprint_num = 44
+name = "Skill documentation catch-up: controls v1, figure_manifest, MCP envelope"
+description = "Document three v0.11.0 additions in /using-bathos skill: controls discipline v1 (stage_name, reproduction/controls blocks, submit gate, lint, sprint-audit signals), figure_manifest sidecar, and MCP error envelope contract. Remove stale Debt #71 entry from CLAUDE.md (already fixed in compact.py)."
+max_fix_retries = 2
+worktree_shadow_mode = false
+context = """
+task_id: 260615_sprint44-skill-docs
+
+CRITICAL CODEBASE FACTS (verified against source, do not deviate):
+
+=== SKILL FILE ===
+Path: /home/marielle/.claude/skills/using-bathos/SKILL.md
+Current coverage: bth run, sidecar format (experiment/benchmark/validation/debug), campaigns, postmortems,
+  lineage, sync, cluster submit. ZERO coverage of controls discipline v1, figure_manifest, or MCP envelope.
+
+=== CONTROLS DISCIPLINE v1 (sidecar.py) ===
+Sidecar dataclass new fields (lines 62-88):
+  stage_name: str = "exploration"
+  novel: bool = False
+  reproduction: ReproductionBlock | None = None
+  controls: ControlsBlock | None = None
+
+CANONICAL_STAGES (sidecar.py:96, advisory -- NOT enforced in schema):
+  {"exploration", "calibration", "validation", "ablation", "production"}
+  Non-canonical values are coerced to "exploration" at parse time with a logged warning.
+
+ReproductionBlock (sidecar.py:39-45):
+  reproduces_paper: str = ""      # DOI or citation string
+  reproduces_run: str = ""        # run UUID
+  tolerance_pct: float | None = None
+  requires_pass_stem: str = ""    # script stem that must have outcome='pass' first
+
+ControlsBlock (sidecar.py:48-52):
+  positive_outcome: list[str] = []   # outcome labels that count as "arm success"
+  negative_outcome: list[str] = []   # outcome labels that count as "arm failure"
+
+Sidecar TOML format (experiment kind only):
+  [experiment]
+  hypothesis = "..."
+  stage_name = "validation"          # optional, defaults to "exploration"
+  novel = true                       # optional, defaults to false
+
+  [reproduction]
+  reproduces_paper = "doi:10.1234/..."    # or ""
+  reproduces_run = "run_abc123"           # or ""
+  tolerance_pct = 5.0                     # or omit
+  requires_pass_stem = "baseline_train"   # or omit
+
+  [controls]
+  positive_outcome = ["pass"]
+  negative_outcome = ["fail", "marginal"]
+
+=== BTH SUBMIT GATE (cli.py:960-999) ===
+IMPORTANT DISTINCTION: There are two separate gate mechanisms.
+
+gate_check() in prereg.py:238 is the RUN-TIME gate (sidecar presence, hash, first-of-kind,
+adversarial-check). It runs at bth run, not bth submit. Does NOT touch stage_name/reproduction/novel.
+
+The SUBMIT-TIME gate fires at bth submit (cli.py:960-999) keyed ONLY on
+[reproduction].requires_pass_stem:
+  - requires_pass_stem set AND stage_name in ("validation", "production"):
+    HARD EXIT with REPRODUCTION_PREREQUISITE_UNMET if no passing run of that script stem exists.
+  - requires_pass_stem set AND stage_name in ("exploration", "calibration"):
+    ADVISORY WARNING -- submission proceeds.
+  - If [reproduction] absent or requires_pass_stem empty: gate is silently skipped.
+
+The "must declare [reproduction] or novel=true for validation/production" rule is
+Tier-1 LINT (linter.py:197), NOT the submit gate. Separate mechanisms.
+
+=== TIER-1 LINT (linter.py:137-203) ===
+Function: check_novel_or_reproduces_declared(project_root)  [linter.py:144]
+  ERROR severity for any experiment sidecar with stage_name in {"validation", "production"}
+  that has neither [reproduction] (with non-empty reproduces_paper or reproduces_run) nor novel=true.
+  Triggered by: bth lint (Tier-1 block, not at run or submit time)
+
+=== TIER-2 LINT (linter.py:273-338, 699-778) ===
+Function: check_bypass_trend()  [linter.py:273]
+  WARNING if latest-week bypass rate (runs with sidecar_mode='bypassed') > prior week's rate.
+
+Function: check_canonical_stage_names()  [linter.py:699]
+  WARNING for run records where stage_name not in CANONICAL_STAGES.
+  Both triggered by: bth lint (Tier-2 advisory)
+
+=== SPRINT AUDIT SIGNALS (sprint_audit.py) ===
+Signal 9 -- control_arm_rate (sprint_audit.py:114-188):
+  Fraction of RUNS in the project with outcome LIKE 'ctrl_%'.
+  OK if rate > 0. WARNING if rate==0.0 AND validation/production runs exist in catalog.
+  INFO if no runs or warm DB unavailable. NOT campaign-level; NOT based on [controls] sidecar presence.
+
+Signal 10 -- submit_bypass_rate (sprint_audit.py:191-286):
+  Fraction of validation/production CLUSTER runs (slurm_job_id populated) that have no
+  matching submit-provenance record (joined on runs.slurm_job_id = submits.myxcel_job_id).
+  Provenance Parquet at: ~/.bth/catalog/submits/<project_slug>/**/*.parquet
+  WARNING if rate > 5% (0.05). OK if <= 5%. INFO if no V/P cluster runs exist.
+
+=== FIGURE MANIFEST (figure_manifest.py, campaigns.py, cli.py) ===
+Emitted at: bth campaign conclude (cli.py:808)
+Path: <catalog>/sidecars/<campaign_id>/figure_manifest.json
+
+Python classes (figure_manifest.py):
+  class RenderState(StrEnum): READY = "ready" / DEFERRED = "deferred"
+
+  class InputPin(BaseModel):
+      run_id: str           # bathos run ID
+      output_path: str      # path to data file in catalog
+      sha256: str           # immutability guarantee
+
+  class FigureEntry(BaseModel):
+      figure_id: str              # unique slug
+      intent: str                 # e.g. "main result", "supplementary ablation"
+      input_pins: list[InputPin]
+      render_state: RenderState   # ready | deferred
+      figure_kind: str | None = None  # e.g. "analysis_chart"; None=unclassified
+
+  class FigureManifest(BaseModel):
+      manifest_version: str       # e.g. "1.0"
+      campaign_id: str
+      figures: list[FigureEntry]  # [] is valid
+
+CampaignReport.figure_manifest_ref: str | None  -- references the manifest path.
+
+=== MCP ERROR ENVELOPE (src/bathos/errors.py, src/bathos/mcp.py) ===
+All 22 MCP tools return envelope: {ok, error_code, error, resolution_hint, **data}
+All 4 keys always present (KeyError impossible).
+
+BathosErrorCode (errors.py, 16 members, str Enum):
+  Gate-derived (11): sidecar_missing, sidecar_invalid, sidecar_hash_mismatch, not_first_of_kind,
+    manifest_write_failed, adversarial_check_missing, hypothesis_lock_missing,
+    outcome_evaluation_error, result_schema_mismatch, outcome_ambiguous, internal
+  New (5): catalog_error, campaign_error, sidecar_error, export_error, invalid_param
+
+Special case: postmortem_validate and validate_sidecar return validation_ok (not ok) and
+  errors (list[str]) as their payload fields (not "ok" and "issues").
+  Shape: {"ok": True, "validation_ok": bool, "errors": [...], ...envelope keys...}
+
+=== STALE DEBT #71 IN CLAUDE.md ===
+Debt #71 (output_metadata refresh-on-compact) is ALREADY FIXED in compact.py:502-532.
+Stale refs to remove:
+  - The table row "| Debt #71 | output_metadata refresh-on-compact | ..."
+  - The inline "Debt #71 (output_metadata refresh-on-compact)" in summary text
+"""
+
+[[tracks]]
+id = "p0"
+is_research = false
+
+[[tracks.items]]
+backlog_id = "1848"
+phase_name = "Track P0 -- Update /using-bathos skill: controls discipline v1 + figure_manifest"
+fixer_prompt = """
+task_id: 260615_sprint44-skill-docs
+backlog_id: 1848
+track: P0 -- Controls discipline v1 + figure_manifest skill update
+
+GOAL: Extend /home/marielle/.claude/skills/using-bathos/SKILL.md with two new sections.
+
+SKILL FILE: /home/marielle/.claude/skills/using-bathos/SKILL.md
+Read this file first. Add content AFTER the existing "Sidecar Pre-Registration" section.
+Do NOT alter any existing content.
+
+=== ADD: Controls Discipline (v0.11.0) ===
+
+Insert "## Controls Discipline (v0.11.0)" with these sub-topics:
+
+**Stage Classification**
+stage_name on [experiment] sidecars (default: "exploration", coerced if non-canonical).
+Canonical values: exploration, calibration, validation, ablation, production.
+Non-canonical values: logged as warning and coerced to "exploration" at parse time.
+  [experiment]
+  hypothesis = "..."
+  stage_name = "validation"
+
+**Novel Flag**
+novel = true marks a new claim (not reproducing prior work). Satisfies Tier-1 lint.
+  [experiment]
+  hypothesis = "..."
+  novel = true
+
+**Reproduction Block**
+  [reproduction]
+  reproduces_paper = "doi:10.1234/..."  # DOI or citation; or ""
+  reproduces_run = "run_abc123"         # bathos run UUID; or ""
+  tolerance_pct = 5.0                   # allowed deviation; or omit
+  requires_pass_stem = "baseline_train" # prerequisite script stem; or omit
+
+**Controls Block**
+  [controls]
+  positive_outcome = ["pass"]           # outcome labels = arm success
+  negative_outcome = ["fail", "marginal"]
+
+**bth submit Gate**
+Two separate gate mechanisms:
+  gate_check() runs at bth RUN time (sidecar presence, hash, first-of-kind checks).
+  Submit-time gate runs at bth SUBMIT (cli.py), keyed ONLY on requires_pass_stem:
+    - requires_pass_stem set AND stage_name in (validation, production):
+      HARD EXIT with REPRODUCTION_PREREQUISITE_UNMET if no passing run found.
+    - requires_pass_stem set AND stage_name in (exploration, calibration):
+      ADVISORY WARNING -- submission proceeds.
+    - requires_pass_stem empty or [reproduction] absent: gate silently skipped.
+
+**Lint Checks**
+Tier-1 (bth lint, ERROR): check_novel_or_reproduces_declared
+  Experiment with stage_name in {validation, production} must have [reproduction]
+  (non-empty reproduces_paper or reproduces_run) OR novel=true.
+  This is lint-time only -- not enforced at submit.
+
+Tier-2 (bth lint, WARNING):
+  check_bypass_trend: increasing bypass rate week-over-week
+  check_canonical_stage_names: non-canonical stage_name in warm catalog
+
+**Sprint Audit Signals**
+Signal 9 -- control_arm_rate: fraction of project RUNS with outcome LIKE 'ctrl_%'.
+  OK if > 0. WARNING if 0.0 AND validation/production runs exist. Run: bth sprint-audit
+
+Signal 10 -- submit_bypass_rate: fraction of V/P cluster runs without submit-provenance.
+  Provenance at: ~/.bth/catalog/submits/<project_slug>/**/*.parquet
+  WARNING if > 5% (0.05). Run: bth sprint-audit
+
+=== ADD: Figure Manifest (Campaign Sidecar) ===
+
+Add "### Figure Manifest" in or near the Campaigns section:
+
+Emitted at bth campaign conclude.
+Path: <catalog>/sidecars/<campaign_id>/figure_manifest.json
+Also referenced in CampaignReport.figure_manifest_ref.
+
+Schema:
+  FigureManifest: manifest_version (str), campaign_id (str), figures (list[FigureEntry])
+  FigureEntry: figure_id (str), intent (str), input_pins (list[InputPin]),
+               render_state (ready|deferred), figure_kind (str|None)
+  InputPin: run_id (str), output_path (str), sha256 (str)
+
+  render_state values:
+    ready -- fully rendered and available
+    deferred -- intent pinned but rendering blocked (owner-only data, etc.)
+
+Consumer pattern:
+  from bathos.figure_manifest import FigureManifest
+  manifest = FigureManifest.read_manifest(
+      Path("~/.bth/catalog/sidecars/camp_abc123/figure_manifest.json")
+  )
+  for fig in manifest.figures:
+      print(f"{fig.figure_id}: {fig.intent} ({fig.render_state})")
+      for pin in fig.input_pins:
+          print(f"  run {pin.run_id} -> {pin.output_path}")
+
+=== VERIFICATION ===
+1. grep -n "stage_name\\|ReproductionBlock\\|ControlsBlock" /home/marielle/projects/bathos/src/bathos/sidecar.py
+   -- confirm field names match documented values
+2. grep -n "requires_pass_stem" /home/marielle/projects/bathos/src/bathos/cli.py | head -5
+   -- confirm submit gate keyed on requires_pass_stem (NOT on novel/reproduces_paper)
+3. grep -n "FigureManifest\\|FigureEntry\\|InputPin" /home/marielle/projects/bathos/src/bathos/figure_manifest.py
+   -- confirm schema names
+4. Skill frontmatter must remain intact (---/name/description/triggers).
+"""
+reviewer_prompt = """
+task_id: 260615_sprint44-skill-docs
+backlog_id: 1848
+track: P0 reviewer
+
+Review P0 additions to /home/marielle/.claude/skills/using-bathos/SKILL.md.
+Return PASS, NEEDS_WORK, or FAIL.
+
+CHECKS:
+1. grep -A8 "CANONICAL_STAGES" /home/marielle/projects/bathos/src/bathos/sidecar.py
+   Confirm skill lists: exploration, calibration, validation, ablation, production. Coercion documented.
+
+2. grep -A8 "class ReproductionBlock" /home/marielle/projects/bathos/src/bathos/sidecar.py
+   Confirm all 4 fields: reproduces_paper, reproduces_run, tolerance_pct, requires_pass_stem.
+
+3. grep -A5 "class ControlsBlock" /home/marielle/projects/bathos/src/bathos/sidecar.py
+   Confirm: positive_outcome, negative_outcome (both list[str]).
+
+4. grep -n "requires_pass_stem\\|REPRODUCTION_PREREQUISITE" /home/marielle/projects/bathos/src/bathos/cli.py | head -10
+   Confirm skill says submit gate is keyed on requires_pass_stem (cli.py), NOT on novel/reproduces_paper.
+   The novel/reproduction->lint rule is bth lint (Tier-1), NOT the submit gate.
+
+5. sed -n '114,188p' /home/marielle/projects/bathos/src/bathos/sprint_audit.py
+   Confirm Signal 9: fraction of RUNS with 'ctrl_%' outcomes; WARN when rate==0 AND V/P runs exist.
+
+6. grep -n "0.05" /home/marielle/projects/bathos/src/bathos/sprint_audit.py | head -3
+   Confirm Signal 10 threshold documented as > 5% (0.05), NOT 20%.
+
+7. grep -A8 "class FigureEntry" /home/marielle/projects/bathos/src/bathos/figure_manifest.py
+   Confirm figure_id, intent, input_pins, render_state, figure_kind(optional).
+
+8. grep -n "emit_figure_manifest" /home/marielle/projects/bathos/src/bathos/cli.py | head -3
+   Confirm figure manifest emitted at bth campaign conclude.
+
+9. Skill frontmatter intact, no broken markdown, no existing content altered.
+
+PASS if all checks pass.
+NEEDS_WORK if field name, gate behavior, or signal threshold wrong.
+FAIL if major section (controls or figure_manifest) absent.
+"""
+return_key = "p0_result"
+
+[[tracks]]
+id = "t1"
+is_research = false
+
+[[tracks.items]]
+backlog_id = "1872"
+phase_name = "Track T1 -- Update /using-bathos skill: MCP error envelope contract"
+fixer_prompt = """
+task_id: 260615_sprint44-skill-docs
+backlog_id: 1872
+track: T1 -- MCP error envelope skill update
+
+PREREQUISITE: P0 has already modified SKILL.md. Read the current file first.
+SKILL FILE: /home/marielle/.claude/skills/using-bathos/SKILL.md
+Add "## MCP Error Envelope" near the end. Do NOT alter existing content.
+
+=== ADD: MCP Error Envelope ===
+
+**Envelope Shape**
+All 22 bathos MCP tools return a typed envelope:
+  {
+    "ok": bool,                  # True = success, False = error
+    "error_code": str | None,    # None on success; BathosErrorCode value on error
+    "error": str | None,         # None on success; human-readable message on error
+    "resolution_hint": str | None, # None on success; actionable fix hint on error
+    ...                          # tool-specific data fields on success
+  }
+All 4 envelope keys are always present -- KeyError is impossible.
+
+**BathosErrorCode Values (16 total)**
+Gate-derived (11, aliased from GateErrorCode):
+  sidecar_missing, sidecar_invalid, sidecar_hash_mismatch, not_first_of_kind,
+  manifest_write_failed, adversarial_check_missing, hypothesis_lock_missing,
+  outcome_evaluation_error, result_schema_mismatch, outcome_ambiguous, internal
+
+New (5):
+  catalog_error, campaign_error, sidecar_error, export_error, invalid_param
+
+**Caller Pattern**
+  result = await session.call_tool("bathos", "list_runs", {"project_slug": "myproject"})
+  if not result["ok"]:
+      raise RuntimeError(
+          f"[{result['error_code']}] {result['error']}\\nHint: {result['resolution_hint']}"
+      )
+  runs = result["runs"]
+
+**Special Case: validation_ok**
+postmortem_validate and validate_sidecar use validation_ok (not ok) for their validation result:
+  result = await session.call_tool("bathos", "validate_sidecar", {"script_path": "..."})
+  # result["ok"] = True         (transport: call succeeded)
+  # result["validation_ok"] = bool  (payload: whether sidecar is valid)
+  # result["errors"] = list[str]    (payload: error messages if invalid)
+  if not result["validation_ok"]:
+      for err in result["errors"]:
+          print(err)
+
+=== VERIFICATION ===
+1. grep -A35 "class BathosErrorCode" /home/marielle/projects/bathos/src/bathos/errors.py
+   -- count 16 members; verify all names match what you documented
+2. grep -n "validation_ok\\|\"errors\"" /home/marielle/projects/bathos/src/bathos/mcp.py | head -15
+   -- confirm both postmortem_validate and validate_sidecar use validation_ok + errors fields
+3. Skill frontmatter intact, no broken markdown.
+"""
+reviewer_prompt = """
+task_id: 260615_sprint44-skill-docs
+backlog_id: 1872
+track: T1 reviewer
+
+Review T1 additions to /home/marielle/.claude/skills/using-bathos/SKILL.md.
+Return PASS, NEEDS_WORK, or FAIL.
+
+CHECKS:
+1. grep -A40 "class BathosErrorCode" /home/marielle/projects/bathos/src/bathos/errors.py
+   Verify EVERY code name listed in the skill matches an actual enum member. Count = 16.
+
+2. Confirm ok, error_code, error, resolution_hint all documented and stated as always present.
+
+3. grep -n "validation_ok\\|\"errors\"" /home/marielle/projects/bathos/src/bathos/mcp.py | head -15
+   Confirm skill names both tools (postmortem_validate and validate_sidecar) as using validation_ok.
+   Confirm skill says payload field is "errors" (list[str]), not "issues".
+
+4. Caller pattern uses result["ok"] as primary transport check.
+
+5. Frontmatter intact, no broken markdown, no existing sections altered.
+
+PASS if all verified.
+NEEDS_WORK if any error_code name wrong or validation_ok section inaccurate.
+FAIL if MCP envelope section absent.
+"""
+return_key = "t1_result"
+
+[[tracks]]
+id = "t2"
+is_research = false
+
+[[tracks.items]]
+backlog_id = "1876"
+phase_name = "Track T2 -- CLAUDE.md hygiene: remove stale Debt #71 entries"
+fixer_prompt = """
+task_id: 260615_sprint44-skill-docs
+track: T2 -- CLAUDE.md hygiene
+
+Remove stale Debt #71 references from /home/marielle/projects/bathos/CLAUDE.md.
+Debt #71 is ALREADY FIXED in compact.py:502-532. These refs are outdated.
+
+CHANGES:
+1. Remove the full table row: "| Debt #71 | output_metadata refresh-on-compact | P2 | -- | Open -- metadata is point-in-time snapshot; `--live` is escape hatch only |"
+2. Remove the inline "Debt #71 (output_metadata refresh-on-compact)" fragment from the
+   open backlog summary text in the current status section. Leave the rest of that line intact.
+3. DO NOT change anything else.
+
+VERIFICATION:
+  grep -n "Debt #71\\|output_metadata\\|point-in-time" /home/marielle/projects/bathos/CLAUDE.md
+  Expect: 0 matches.
+
+  git -C /home/marielle/projects/bathos diff CLAUDE.md
+  Should show only the two Debt #71 removals.
+
+COMMIT:
+  git -C /home/marielle/projects/bathos add CLAUDE.md
+  git -C /home/marielle/projects/bathos commit -m "docs(CLAUDE.md): remove resolved Debt #71 from open backlog (fixed in compact.py:502-532)"
+"""
+reviewer_prompt = """
+task_id: 260615_sprint44-skill-docs
+track: T2 reviewer
+
+CHECKS:
+1. grep -n "Debt #71\\|point-in-time snapshot\\|output_metadata" /home/marielle/projects/bathos/CLAUDE.md
+   Expect: 0 matches.
+
+2. git -C /home/marielle/projects/bathos show HEAD -- CLAUDE.md
+   Confirm only Debt #71 text removed -- no other content changed.
+
+3. grep -n "Debt #71" /home/marielle/projects/bathos/src/bathos/compact.py
+   Expect: line 503 confirms the fix is real.
+
+PASS if all three checks pass.
+NEEDS_WORK if extra content changed or refs remain.
+FAIL if compact.py comment absent (escalate -- fix may not be real).
+"""
+return_key = "t2_result"
+
+[orchestration]
+sequential = ["p0", "t1", "t2"]
+concurrent = []

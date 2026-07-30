@@ -1,0 +1,11 @@
+Migration applied: 2026-05-22T11:50:11.765074
+Project: /home/marielle/projects/bathos
+
+.praxia/mission.md → .praxia/docs/misc/260515_mission.md [git]
+.praxia/specs/agentic-science-design.md → .praxia/docs/specs/260520_agentic-science-design.md [mtime]
+.praxia/specs/bathos-design.md → .praxia/docs/specs/260515_bathos-design.md [git]
+.praxia/specs/bathos-migration-v1-revised.md → .praxia/docs/specs/260518_bathos-migration-v1-revised.md [mtime]
+.praxia/specs/bathos-v01-plan.md → .praxia/docs/specs/260515_bathos-v01-plan.md [git]
+.praxia/specs/prereg-nonrepudiation-design.md → .praxia/docs/preregistration/260520_prereg-nonrepudiation-design.md [mtime]
+.praxia/sprints/2026-05-15-v01-pypi-rtd-plan.md → .praxia/docs/plans/260515_v01-pypi-rtd-plan.md [git]
+.praxia/sprints/2026-05-15-v02-sprint-plan.md → .praxia/docs/plans/260515_v02-sprint-plan.md [git]

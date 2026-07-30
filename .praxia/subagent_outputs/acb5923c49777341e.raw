@@ -1,0 +1,91 @@
+I now have all the data I need. The Q-6 note (nlm.jsonl line 104) contains the LoopTrap arXiv reference: `arXiv ae193ddf` — this is clearly not a standard arXiv ID format (arXiv IDs are `YYMM.NNNNN` format). This is a critical finding. Let me compile the full audit report now.
+
+---
+
+## Synthesis Triangulation Audit — task_id 260526_agentic-science-evolution
+
+### Coverage gaps
+
+No synthesis claims were found to lack any raw-research entry. All six §1 sections map cleanly to identified session notes:
+
+- **§1.1** (hypothesis commitment, four mechanisms) — directly traceable to Q-1 note (nlm.jsonl line 99), DR-1 note (line 74), and DR-2 note (line 62). The four-tier ranking reproduced faithfully.
+- **§1.2** (single-run confirmation) — directly traceable to Q-2 note (nlm.jsonl line 100). The "Research monad treats errors as no-result" attribution to arXiv 2511.06701 is confirmed in the DR-3 note (line 79).
+- **§1.3** (constraint drop, implementation drift) — traceable to Q-3 note (nlm.jsonl line 101) and DR-3 note (line 79). The constraint violation rate range "1.3% to 71.4%" is quoted in the synthesis as a secondary citation from arXiv 2509.08713 and correctly flagged as "specific model name not independently verifiable." No raw artifact independently confirms the specific numbers, consistent with the synthesis's own caveat.
+- **§1.4** (adversarial experiments) — fully traceable to Q-4 note (nlm.jsonl line 102). The NHANES example and near-zero cost argument both appear in the Q-4 note.
+- **§1.5** (rigor signals, thresholds) — traceable to Q-5 note (nlm.jsonl line 103). The AstaBench χ²(4,200)=61.99 / Cramér's V=0.39 statistics appear in the synthesis but are **absent from the Q-5 note**, which only describes the >10% worst-selection threshold without the statistical test values. These numbers could not be independently confirmed in any raw artifact.
+- **§1.6** (gate error payloads, LoopTrap) — traceable to Q-6 note (nlm.jsonl line 104). The step amplification figures (3.57× average, peak 25×) match the Q-6 note verbatim.
+
+**One coverage gap flagged:** The AstaBench χ² statistic (§1.5) appears only in the synthesis MD, not in any raw Q-5/DR note. The synthesis cites arXiv 2510.21652 directly. This is not fabricated — the source was loaded into the notebook and queried — but the specific test statistic was not preserved in any intermediate note, so it cannot be cross-checked against the raw artifact without re-querying the notebook.
+
+---
+
+### Missed findings
+
+Several load-bearing findings in the raw artifacts did not surface in the synthesis:
+
+**1. Entropic Anchoring as a post-hoc rationalization signature (Q-5 note, nlm.jsonl line 103).** The Q-5 note describes "Entropic Anchoring" — "high global uniformity (flat traces) + low local uniformity (erratic transitions as pre-committed answer leaks)" — as a behavioral signature of post-hoc rationalization. This pattern does not appear in the synthesis §1.5 or §2.4 rigor signal table. It is a distinct, measurable catalog signal with a cleaner diagnostic story than outcome entropy alone. The synthesis's five-signal table omits it.
+
+**2. Hypothesis Hivemind cosine similarity data (Q-5 note, nlm.jsonl line 103).** The Q-5 note records that frontier models converge semantically (cosine similarity 0.57–0.73 across providers) on hypothesis generation regardless of freedom given, attributing this to the "Hypothesis Hivemind" finding in arXiv 2501.10421. The synthesis §1.5 mentions "Hypothesis Hivemind" in the threshold table but does not include the cosine similarity range. This quantitative anchor strengthens the outcome entropy signal's rationale and should accompany the 0.5 nats threshold.
+
+**3. Positional bias threshold (Q-5 note, nlm.jsonl line 103).** The Q-5 note flags: "selecting first 4 items >80% of time = superficial heuristic." This is a distinct catalog signal not present in the synthesis's five-flag table, though it may be less relevant to bathos specifically than to multi-step agent reasoning.
+
+**4. System hardening findings from recon (recon.jsonl line 18, task `260522_improve_gaurdrails`).** The recon audit identified systematic exception-swallowing across `config.py`, `compact.py`, `sidecar.py`, and `prereg.py` (7 specific call sites). The synthesis §2.5 recommends structured MCP gate error taxonomy as an external-interface concern, but the pre-existing internal exception-swallowing problem — which would silently corrupt the very integrity signals the synthesis proposes to surface — is not mentioned. This is load-bearing: structured error payloads at the MCP boundary are ineffective if internal errors are swallowed before reaching the gate.
+
+**5. The DR-2 note (nlm.jsonl line 62) mentions a "Snapshot of fields captured by K-Veritas from two training runs" (ResearchGate source imported in line 25).** The synthesis cites K-Veritas (arXiv 2605.08586) for its requirement definition but does not describe what K-Veritas actually captures per run — which would inform the concrete design of the proposed pre-execution manifest. The raw DR-2 note does not include the field list either, but the import record confirms this secondary source was available.
+
+---
+
+### Open-question evidence
+
+**Q1 (Hash granularity — hypothesis-only vs. full sidecar):** The Q-1 note (nlm.jsonl line 99) lists four commitment mechanisms in ascending strength. The second ("Structured API pre-registration") is described as committing to "an execution plan before running." This implies the commitment artifact should cover more than just the hypothesis string — it should include the execution plan, which maps to the full sidecar including outcome conditions. The Q-3 note adds: "Constraint drop is documented — early experimental constraints forgotten in later steps." This is an argument for hashing the full sidecar: if outcome conditions can be the source of constraint drop as much as the hypothesis string, locking only the hypothesis under-captures the commitment. **Partial evidence favors full-sidecar hashing.**
+
+**Q2 (`adversarial_check` — optional/required policy):** The Q-4 note (nlm.jsonl line 102) is explicit: "pre-registration alone CANNOT substitute for adversarial design" and "absence of falsification evidence becomes harder to justify" under near-zero cost. This argues for requiring `adversarial_check` rather than making it optional, at least for agent-mode runs. The synthesis correctly noted this as unresolved but the raw evidence leans toward requirement. **Partial evidence favors required policy.**
+
+**Q3 (`bypass_rate` denominator semantics):** No raw artifact directly addresses this. The Q-5 note discusses bypass rate as a "constraint drop / objective drift" signal but does not distinguish between intentional (`--no-sidecar`) and unexpected (`--agent-mode`) bypasses. **No evidence found.**
+
+**Q4 (Nonrepudiation for solo researcher):** The DR-2 note (nlm.jsonl line 62) identifies OSF pre-registration and quantum-resistant timestamping as potential mechanisms, plus "Quantum-resistant timestamping for open science" as an imported source. The synthesis §6 Q4 names "OSF pre-registration API, a timestamp authority" without referencing the timestamping source — this source provides concrete technical backing for the timestamp authority path. **Partial evidence: timestamp authority is a viable path with dedicated literature; the synthesis correctly identifies OSF as an option but does not mention the timestamping source.**
+
+**Q5 (Co-scientist tournament-elo as hypothesis quality signal):** The Q-1 note is explicit that Co-Scientist does not commit hypotheses pre-execution; it does not address whether tournament-elo correlates with downstream falsification quality. No raw artifact touches this. **No evidence found.**
+
+---
+
+### Citation status
+
+**arXiv 2511.06701 ("Structural Enforcement of Statistical Rigor"):** Confirmed. The DR-3 note (nlm.jsonl line 79) lists it explicitly as a key finding: "arxiv 2511.06701: Structural Enforcement of Statistical Rigor in AI-Driven Discovery — Research monad architectural intervention." Status: **confirmed in raw artifacts**.
+
+**arXiv 2604.22080 ("Sound Agentic Science"):** Confirmed. Source added to notebook successfully (nlm.jsonl line 54 — `source_add` succeeded for `https://arxiv.org/pdf/2604.22080`). Q-4 note content is derived from this source. Status: **confirmed in raw artifacts**.
+
+**arXiv 2602.13855 ("From Fluent to Verifiable"):** Confirmed. DR-3 note (nlm.jsonl line 79) lists "arxiv 2602.13855: From Fluent to Verifiable: Claim-Level Auditability for Deep Research Agents — defines behavioral signatures: objective drift, auditability gaps." Status: **confirmed in raw artifacts**.
+
+**arXiv 2605.08586 (K-Veritas):** Confirmed with two independent confirmations. The DR-2 note (nlm.jsonl line 62) identifies it as the key anchor: "arxiv 2605.08586 'Computer Science Conferences Should Require Nonrepudiable Experimental Results'." The research_import at line 25 lists the NLM source ID `[2605.08586] Computer Science Conferences Should Require Nonrepudiable Experimental Results - arXiv` as imported. Status: **confirmed in raw artifacts, two sources**.
+
+**arXiv 2503.10362 ("Characterizing Faults"):** Confirmed. DR-3 note (nlm.jsonl line 79) lists "arXiv: Characterizing Faults in Agentic AI — taxonomy of types, symptoms, root causes." Status: **confirmed in raw artifacts** (title match; arXiv ID inferred from DR-3 context, not directly stated in the note text).
+
+**arXiv 2601.15808 (DeepVerifier):** Confirmed. DR-3 note (nlm.jsonl line 79) lists "arxiv 2601.15808: Inference-Time Scaling of Verification: Self-Evolving Deep Research Agents via Test-Time Rubric-Guided Verification." Status: **confirmed in raw artifacts**.
+
+**arXiv 2602.14469 (post-hoc rationalization):** Confirmed. DR-1 note (nlm.jsonl line 74) lists "arxiv 2602.14469: Measuring and Mitigating Post-hoc Rationalization in Reverse Chain-of-Thought Generation — empirical evidence that answer-anchoring causes rationalization." Status: **confirmed in raw artifacts**.
+
+**DR-10 LoopTrap (no confirmed arXiv ID):** **Anomaly found.** The Q-6 note (nlm.jsonl line 104) records the LoopTrap reference as `arXiv ae193ddf` — this is not a valid arXiv ID format. ArXiv IDs are `YYMM.NNNNN` (e.g., `2503.10362`). The string `ae193ddf` resembles a UUID fragment or git commit hash, not an arXiv identifier. The synthesis correctly flags the ID as unverified ("arXiv ID not captured in session" / "exact arXiv ID not confirmed"). The raw artifact confirms the 3.57× step amplification figure is sourced from whatever paper was found during DR-3, but the ID in the note is not a real arXiv identifier and cannot be used for external citation. Status: **ID refuted as invalid format; underlying paper exists but correct ID is not captured in any raw artifact**.
+
+---
+
+### Internal contradictions
+
+**1. "Hypothesis Hivemind" source attribution.** The synthesis §1.5 attributes the Hivemind experiment to arXiv 2501.10421 ("Agentic AI Scientists Are Not Built For Autonomous Scientific Discovery"). The Q-5 note does not specify which paper originated the Hivemind finding — it describes it as a finding "from literature" without a specific arXiv anchor in the note text. The synthesis's attribution to 2501.10421 is not independently verified by any other raw artifact. This is a candidate for a secondary-source attribution error — the Hivemind finding may originate in a different paper that the DR-3 or Q-5 queries surfaced. **Severity: low — unverified attribution, not confirmed wrong.**
+
+**2. LoopTrap step amplification figures.** The synthesis §4.4 states "3.57× average step amplification" and cites the source as "NLM-imported, arXiv ID unverified." The Q-6 note (nlm.jsonl line 104) also states "3.57× average step amplification, peak 25×" and cites `arXiv ae193ddf`. The numbers are consistent between note and synthesis, but both trace to the same invalid arXiv ID. No contradiction in the numbers, but both instances share the unverified citation. This is not a contradiction between synthesis and raw artifact — they agree — but the shared invalid ID means neither the synthesis nor the note provides a verifiable source for the figures.
+
+**3. `adversarial_check` policy framing.** The synthesis §2.3 states the `adversarial_check` requirement for `--agent-mode` runs is "the proposed policy, not yet decided." The synthesis §5 priority table lists the `adversarial_check` sidecar field as P3 with "Medium" effort. The raw Q-4 note (nlm.jsonl line 102) presents the argument for requiring adversarial checks as essentially settled ("pre-registration alone CANNOT substitute"). The synthesis correctly hedged the policy as open, but the raw note material does not present it as uncertain — creating a mild tension between what the research shows and how the synthesis frames the design decision. This is not a factual error; the synthesis appropriately treated an implementation decision differently from an empirical finding.
+
+---
+
+### Recommendation
+
+The synthesis holds up well enough to drive sprint decisions. The core empirical claims (§1.1–§1.6) are supported by corresponding raw research notes, the arXiv IDs for all suspect citations except DR-10 LoopTrap are confirmed in the raw artifacts, and the priority ordering is consistent with the evidence. Two items warrant attention before sprint lock: (a) the LoopTrap citation should be treated as unverifiable for external reference — the praxia §4.4 loop-budget enforcement can stand on its own defensive rationale without citing a specific paper, and (b) the missed Entropic Anchoring signal from Q-5 is a plausible addition to the §2.4 anomaly table if the sprint includes `bth sprint-audit` work, as it provides a cleaner diagnostic story for detecting locked-prior execution than outcome entropy alone.
+
+Sources:
+- `/home/marielle/projects/bathos/.praxia/docs/research/260526_agentic-science-nlm-synthesis.md`
+- `/home/marielle/projects/bathos/.praxia/synthesis.jsonl` (lines 1–2)
+- `/home/marielle/projects/bathos/.praxia/nlm.jsonl` (lines 62, 74, 79, 99–104)
+- `/home/marielle/projects/bathos/.praxia/recon.jsonl` (line 18)
+- `/home/marielle/projects/bathos/.praxia/docs/research/260526_agentic-science-nlm-research-plan.md`

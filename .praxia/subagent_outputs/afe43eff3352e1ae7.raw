@@ -1,0 +1,11 @@
+- **Sentinel-only MVP** (gap 1 only): ship `--fix` on `bth verify` to remove `.tmp`/`.bak` files and empty fragments; zero new modules, purely additive to `verify.py`; coherent because it addresses the only corruption class with unambiguous remediation (delete the file)
+
+- **Safety-first MVP** (gaps 1 + 5): sentinel cleanup plus pre-rebuild DB backup before `bth compact --force`; two isolated changes across `verify.py` and `compact.py`; coherent because backup eliminates the highest-consequence silent failure (overwriting warm tier) while sentinel cleanup handles the most common visible corruption
+
+- **Cool-tier complete MVP** (gaps 1 + 2 + 5): sentinel cleanup, quarantine/removal of malformed cool fragments, and DB backup; all three touch only the cool tier and the warm-tier safety net; coherent because the cool tier is the only write path that runs unattended (SLURM), so hardening it end-to-end is a natural unit
+
+- **repair.py stub MVP** (gaps 1 + 2 + 5 + skeleton for 3 + 6): introduce `repair.py` with `--dry-run` default and `bth repair` command wiring; implement gaps 1/2/5 fully, leave archive repair and warm→cool re-export as `NotImplementedError` stubs with clear error messages; coherent because it establishes the module boundary and CLI surface without over-committing on the hard cases
+
+- **Non-re-export MVP** (gaps 1 + 2 + 3 + 5 + 6): everything except warm→cool re-export (gap 4), which requires round-trip fidelity guarantees; archive SHA256 remediation is quarantine-and-log only (no recompute); coherent because re-export is the only gap that mutates the authoritative warm tier with derived data, so excluding it avoids a whole class of consistency risk
+
+- **Minimal-viable-surface MVP** (gaps 1 + 6 shell only): `bth repair` command exists and dispatches to `--fix` on verify; no new repair module, no new logic beyond sentinel cleanup; coherent as a user-facing affordance win — researchers get a memorable entry point (`bth repair`) without the implementation debt of gaps 2-5, which can land incrementally in follow-on PRs

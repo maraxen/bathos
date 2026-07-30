@@ -1,0 +1,239 @@
+The transduction log couldn't write (workspace not initialized here), but that's a logging artifact — the work is complete. Here is the sprint composition document:
+
+<sprint-composition>
+# bathos v0.6 Agentic Science Evolution — Sprint Composition
+
+**Date:** 2026-05-26
+**Task ID:** 260526_agentic-science-evolution
+**Source spec:** `.praxia/docs/specs/260526_agentic-science-v06-evolution-spec.md` (oracle APPROVED pass 2)
+**ADRs locked:** D2 manifest-hash-granularity · D3 adversarial-check-policy · D4 bypass-rate-split · D5 nonrepudiation-v06
+**Status:** DRAFT — orchestrator to dispatch
+
+---
+
+## 1. Workflow Assignment Per Item
+
+| # | Item | Template | Rationale |
+|---|---|---|---|
+| 1 | Exception-Swallowing Remediation | `bugfix_simple` | Mechanically enumerated sites; no new design surface; existing test suite sufficient to validate. `refactor_with_audit` would be overkill for targeted swallow replacements. |
+| 2 | Pre-Execution Manifest | `spec_driven_dev` | Net-new `.bth.lock.toml` write path, schema v5 bump, and CLI command; needs test design for mtime-ordering verification. Too many decisions baked into atoms to treat as a bug fix. |
+| 3 | `outcome="error"` First-Class | `bugfix_simple` | Single guard insertion at `runner.py:225`; atoms 3b–3d are downstream consumers of that guard. Regression risk is low and well-understood. No architectural ambiguity. |
+| 4 | Structured MCP Error Taxonomy | `refactor_with_audit` | Replaces a freeform dict with a typed enum+dataclass; breaking change for any MCP client pattern-matching on the old payload; adversarial audit check ensures the version-2 payload serialization is correct. |
+| 5 | Sprint-Audit Signals Extension | `spec_driven_dev` | Seven signals with entropy math, new DuckDB aggregates over `metadata` JSON column, and calibration thresholds — test design required upfront to avoid shipping uncalibrated signals without a harness. |
+| 6 | `adversarial_check` Field + Lint + Enforcement | `spec_driven_dev` | New dataclass field, gate logic change in agent-mode, Tier-2 linter function with tautology deny-list; test design for asymmetric enforcement (D3) is non-trivial. |
+| 7 | `bth cite <run_id>` | `bugfix_simple` | Net-new module but no architectural ambiguity; reads from warm DB via `query.get_run()`, formats output; atoms are independent and small. Recon + fixer + reviewer is the right shape. |
+| 8 | `bth lineage --format prov` | `spec_driven_dev` | PROV-JSON mapping (6-concept table, `bth:` namespace, spec §4 Item 8) needs test design for backward-compat with `--format text` and single-run edge case. |
+| 9 | PostToolUse NLM Hook (praxia) | `bugfix_simple` | Two atoms: shell script + JSON config patch; verification is a single live test. No design uncertainty. |
+| 10 | Structured Gate Error Taxonomy (Rust) | `refactor_with_audit` | Rust enum mirroring Python enum; crate-placement ambiguity acknowledged in spec (praxia-core vs praxia-fsm); adversarial audit confirms serialization round-trip. |
+| 11 | Locate Sprint-Composer (spike) | `bugfix_simple` | Pure research/locate spike producing a `.praxia/docs/research/` finding; one atom, no implementation; bugfix_simple maps correctly (recon → fixer-as-researcher → reviewer). |
+| 12 | Loop Step Budget Enforcement (Rust) | `spec_driven_dev` | Four atoms spanning FSM state, config schema, loop-signature detection, and exhaustion handler; needs test design for the step-budget trigger before implementation. |
+
+---
+
+## 2. Dependency DAG
+
+**Explicit block relationships:**
+
+- Item 3 blocks on Item 2 (atom-3b requires `outcome_error_reason` column from schema v5 declared in atom-2b)
+- Item 6 blocks on Item 2 (atom-6d requires `adversarial_check_status` column from atom-2b; atom-6b requires `GateErrorCode.ADVERSARIAL_CHECK_MISSING` from Item 4, so Item 6 softly blocks on Item 4 — see cluster below)
+- Item 4 blocks on Item 1 (atom-4b replaces `GateError(message)` introduced in atom-1b; the constructor overload must land on top of atom-1b's simple signature per spec evolution note)
+- Item 5 blocks on Item 3 (`bypass_explicit` / `bypass_in_agent_mode` columns track `--no-sidecar` and `--agent-mode` fields from schema v5; `error_rate` signal requires `outcome="error"` to be populated correctly)
+- Items 7 and 8 block on Item 2 (citation and lineage PROV require `manifest_sha256` and `manifest_path` fields from schema v5)
+- Item 10 is independent of all bathos items (separate Rust crate); it logically precedes Item 12 (`praxia-fsm` step budget consumes `GateErrorCode` from Item 10)
+- Item 12 blocks on Items 10 + 11 (step budget handler emits structured blocker using Item 10's enum; Phase 5 entry is conditional on atom-11a locate outcome)
+- Item 9 and Item 11 have no blocking dependencies — they can ship at any time
+
+**Dependency clusters:**
+
+| Cluster | Items | Shared boundary |
+|---|---|---|
+| Schema foundation | 1 + 2 + 3 | Schema v5 (`schema.py`/`runner.py`); must land together |
+| Error taxonomy | 4 + 6 | `prereg.py` / `GateErrorCode` enum; Item 6 gate check consumes Item 4 enum |
+| Export cluster | 7 + 8 | Both read from warm DB post-v5; `cite.py` and `provenance.py` are net-new |
+| Praxia Rust | 10 + 12 | Separate workspace; internal dependency only |
+| No-dep items | 9 + 11 | Independent; can parallelize with anything |
+
+**Cross-item file conflict — flagged risk:** Items 4 and 6 both modify `prereg.py`. Item 4 adds `GateErrorCode` enum and replaces `_gate_failure_payload`; Item 6 adds a gate check calling `GateErrorCode.ADVERSARIAL_CHECK_MISSING`. If dispatched concurrently they will conflict at `prereg.py`. Sequencing: Item 4 must merge before Item 6 work begins, or both must be dispatched in a single worktree with a combined fixer pass.
+
+---
+
+## 3. Parallelization Batches
+
+### Batch 0 — Stabilization (prerequisite)
+**Items:** Worktree cleanup (no item number; pre-sprint)
+**Blocking deps:** None
+**Duration:** Hours
+**Worktree strategy:** Main checkout; clean `git status` before any dispatch
+**Notes:** Spec §5 Phase 0. Gate: clean `git status` on main.
+
+---
+
+### Batch 1 — Independent Leads (run immediately after Batch 0)
+**Items:** 9 (NLM hook) · 11 (locate spike)
+**Blocking deps:** Batch 0 only
+**Duration:** ½ day each; fully concurrent
+**Worktree strategy:** Two separate worktrees — `worktrees/item-09-nlm-hook` and `worktrees/item-11-locate-spike`. Both are isolated from bathos source; no merge conflict risk.
+**Praxia Rust note:** Item 9 targets praxia's `.claude/settings.json` and `scripts/`; Item 10 also targets praxia independently. Items 9 and 10 can be dispatched concurrently if Batch 3 praxia work begins early.
+
+---
+
+### Batch 2 — Schema Foundation (blocks everything downstream)
+**Items:** 1 + 2 + 3
+**Blocking deps:** Batch 0
+**Duration:** 3–4 days
+**Worktree strategy:** Single worktree `worktrees/v06-schema-foundation`. Items 1, 2, 3 share `runner.py`, `schema.py`, `compact.py`. Sequential within the worktree: atom-2b (schema v5) first (all four columns declared at once per spec), then atom-1a/1b/1c/1d/1e, then atom-3a/3b/3c/3d. Items 1+2+3 merge as one PR.
+**Phase exit gate:** `uv run pytest` full suite green; `bth migrate` on v4 catalog snapshot succeeds; manual verification that failed script yields `outcome="error"` with `outcome_error_reason="exit_code=1"` and `.bth.lock.toml` exists pre-execution.
+
+---
+
+### Batch 3a — Bathos Error Taxonomy + Adversarial (parallel with Batch 3b)
+**Items:** 4 + 6
+**Blocking deps:** Batch 2 merged
+**Duration:** ~1 week
+**Worktree strategy:** Single worktree `worktrees/v06-error-taxonomy` for items 4+6 together. Both items touch `prereg.py`; combined worktree avoids merge conflict. Sequence within: atom-4a → atom-4b → atom-4c → atom-4d → atom-6a → atom-6b → atom-6c → atom-6d.
+**Phase exit gate:** Agent-mode run missing `adversarial_check` returns `GateErrorCode.ADVERSARIAL_CHECK_MISSING`; missing sidecar returns `GateErrorCode.SIDECAR_MISSING` with `phase: "pre_execution"`; MCP error JSON contains `error_code` + `phase` + `resolution_hint` fields.
+
+---
+
+### Batch 3b — Praxia Rust (parallel with Batch 3a)
+**Items:** 10
+**Blocking deps:** None (fully independent of bathos Python)
+**Duration:** ~1 week (overlaps with Batch 3a)
+**Worktree strategy:** Separate praxia worktree `~/projects/praxia/worktrees/v06-gate-error`. No bathos dependency; can begin as early as Batch 1.
+**Phase exit gate:** `cargo nextest run -p praxia-core -E 'test(gate_error)'` passes; MCP error JSON contains `error_code` field with valid enum variant.
+
+---
+
+### Batch 4 — Audit Signals + Export (parallel pair)
+**Items:** 5 (sprint-audit signals) · 7 + 8 (cite + lineage)
+**Blocking deps:** Batch 2 merged (schema v5 required for all three items' new columns)
+**Duration:** ~1 week
+**Worktree strategy:** Two worktrees can be dispatched concurrently:
+- `worktrees/v06-sprint-audit` for Item 5 (touches only `sprint_audit.py`)
+- `worktrees/v06-export` for Items 7+8 (net-new `cite.py` + `provenance.py`; both share `cli.py` and `mcp.py` additions, so combine into one worktree)
+**Phase exit gate:** `bth sprint-audit` emits 7-signal structured report; `bth cite <valid_id>` includes manifest hash; `bth lineage <id> --format prov` produces valid PROV-JSON with `entity` and `wasDerivedFrom` keys; `--format text` backward compat confirmed.
+
+---
+
+### Batch 5 — Loop Budget (conditional on atom-11a)
+**Items:** 12 · 11b-11d (conditional)
+**Blocking deps:** Batches 3a (for `GateErrorCode` from Item 4 in structured blocker output) + 3b (for Item 10 Rust enum) + atom-11a locate verdict
+**Duration:** ~3 days
+**Worktree strategy:** Praxia worktree `~/projects/praxia/worktrees/v06-loop-budget`. If atom-11a finds sprint-composer and items 11b-11d are promoted, expand scope within same worktree.
+**Phase exit gate:** Science task with `step_budget = 3` emits structured blocker after step 3 without infinite retry; consecutive-same-tool loop signature fires on synthetic test case.
+
+---
+
+## 4. Dispatch Sequence (Phase-Ordered)
+
+### Phase 0 (Pre-Sprint, Hours)
+- Worktree stabilization: verify clean `git status` on main
+- Confirm `v06-spec-oracle-cycle` worktree preserved as design history only (no dispatch into it)
+- Branch convention for bathos items: `v06/<item-slug>` (e.g., `v06/schema-foundation`, `v06/error-taxonomy`, `v06/export`)
+- Branch convention for praxia items: `v06/<item-slug>` in praxia repo
+
+### Phase 1 (Day 1, Concurrent)
+- Dispatch Item 9 via `bugfix_simple` → `worktrees/item-09-nlm-hook` (praxia)
+- Dispatch Item 11 via `bugfix_simple` → `worktrees/item-11-locate-spike`
+- These two can run simultaneously; both complete in ½ day
+- Item 11 outcome gates Phase 5 scope decision (see §6)
+
+### Phase 2 (Days 2–5, Sequential Within Worktree)
+- Dispatch Items 1+2+3 as combined `spec_driven_dev` pass in `worktrees/v06-schema-foundation`
+- Atom ordering: 2b (schema columns) → 1a–1e → 3a–3d
+- PR: `v06/schema-foundation` → main
+- Phase exit: see Batch 2 gate above
+
+### Phase 3 (Days 6–10, Concurrent Pair)
+- Dispatch Items 4+6 via `refactor_with_audit` → `worktrees/v06-error-taxonomy` (bathos)
+- Dispatch Item 10 via `refactor_with_audit` → praxia worktree (concurrent, independent)
+- PRs: `v06/error-taxonomy` → bathos main · `v06/gate-error-rust` → praxia main
+- Phase exit: see Batch 3a + 3b gates above
+
+### Phase 4 (Days 11–15, Concurrent Pair)
+- Dispatch Item 5 via `spec_driven_dev` → `worktrees/v06-sprint-audit`
+- Dispatch Items 7+8 via `spec_driven_dev` → `worktrees/v06-export`
+- Both unblock immediately after Phase 2 merge; no Phase 3 dependency
+- PRs: `v06/sprint-audit` · `v06/export` → bathos main
+- Phase exit: see Batch 4 gate above
+
+### Phase 5 (Days 16–18, Conditional)
+- Entry gate: atom-11a verdict + Phase 3 praxia merged
+- Dispatch Item 12 via `spec_driven_dev` → praxia worktree
+- If 11b-11d promoted (see §6): add atoms to same worktree
+- PR: `v06/loop-budget` → praxia main
+
+---
+
+## 5. Cross-Cutting Verification
+
+**Schema v5 migration:**
+- Responsibility: fixer in Batch 2 (`worktrees/v06-schema-foundation`)
+- Test: run `bth migrate` against a copy of the current production catalog before merging Batch 2 PR; verify `manifest_sha256`, `manifest_path`, `outcome_error_reason`, `adversarial_check_status` all set to `""` on migrated rows
+- Confirm `bth show <pre-v5-run-id>` displays "not recorded — pre-v0.6" for manifest fields (not empty string)
+
+**Test files — new or extended:**
+- Items 1–3: extend `tests/test_runner.py` and `tests/test_sidecar.py`; atom-1a specifically requires caller audit before test authorship
+- Item 4: new `tests/test_gate_error_taxonomy.py` (MCP payload serialization round-trip)
+- Item 5: new `tests/test_sprint_audit_signals.py` (entropy, unfired branches, overflow rate)
+- Items 6: extend `tests/test_prereg.py` for agent-mode gate; new `tests/test_linter_adversarial.py`
+- Items 7+8: new `tests/test_cite.py` · `tests/test_provenance.py`
+- Items 10+12: Rust `#[cfg(test)]` inline tests in `gate_error.rs` and `praxia-fsm` step counter
+
+**Manual smoke checklist (before declaring sprint complete):**
+1. `bth run scripts/experiments/<any-stem>.py` — verify `.bth.lock.toml` exists before subprocess pid appears in `ps`
+2. `bth run <script-that-exits-1>` — verify `bth show <id>` reports `outcome="error"` and `outcome_error_reason="exit_code=1"`
+3. `bth run <agent-mode-script-missing-adversarial_check> --agent-mode` — verify `GateErrorCode.ADVERSARIAL_CHECK_MISSING` in MCP response
+4. `bth sprint-audit` — verify 7-signal structured output including `bypass_explicit` and `bypass_in_agent_mode` as separate values
+5. `bth cite <recent-run-id>` — verify manifest hash appears; `bth cite <pre-v5-run-id>` — verify "not recorded" fallback
+6. `bth lineage <run-with-parent> --format prov` — verify `wasDerivedFrom` key in JSON
+7. `bth lineage <run-with-parent> --format text` — verify backward compat unchanged
+8. `bth lint` on sidecar with `adversarial_check` present — no warnings; on sidecar without — WARNING emitted
+
+---
+
+## 6. Open Coordination Questions for Orchestrator
+
+**Q1: Item 11 conditional re-promotion.** If atom-11a locates sprint-composer and it is well-bounded, should items 11b-11d (pre-registration gate node wiring) be folded into this sprint (Phase 5) or deferred to v0.6.1? **Recommendation:** defer to v0.6.1 even if found. Rationale: the locate spike (atom-11a) is ½ day; wiring a pre-registration gate node into an unfamiliar FSM component is L3 work not yet decomposed into atoms; cramming it into Phase 5 alongside Item 12 (loop budget) risks a rushed integration. Ship 12 clean; promote 11b-11d to v0.6.1 with a complete design sprint using the locate-spike output as its input.
+
+**Q2: Item 5 `bth calibrate` helper.** Spec §4 Item 5 marks all thresholds as calibration targets; a `bth calibrate` command to set per-project baselines would let the researcher tune the signals against their own catalog. **Recommendation:** defer `bth calibrate` to v0.6.1. Shipping uncalibrated signals first is correct — you need to observe the noise floor before you can calibrate against it. Including calibration in this sprint adds scope before the signal behavior is understood.
+
+**Q3: Praxia Rust work — separate worktree vs. bathos PR dependency.** Items 10 and 12 live entirely in the praxia repo; they have no hard dependency on bathos Python PRs. **Recommendation:** praxia work proceeds in its own worktrees and PRs on its own merge schedule, completely decoupled from bathos PR ordering. The only sequencing rule is: Item 12 (loop budget) dispatches after Item 10 merges in praxia. Bathos sprint is not blocked on praxia readiness.
+
+**Q4: `linter.py` Tier-2 conflict risk (Items 4+6 combined worktree).** Both items modify `prereg.py` in incompatible ways if dispatched separately (Item 4 changes `GateError` signature; Item 6 adds a call using the new enum value). The combined-worktree approach in Batch 3a resolves this. Ensure the fixer prompt for Batch 3a explicitly describes atom-4b as a prerequisite within the worktree before atom-6b begins. This is not fully captured in the spec's per-item atom ordering — it crosses item boundaries.
+
+**Q5: `schema.py` canonical serialization stability (D2 consequence).** ADR `260526_manifest-hash-granularity` notes that `sidecar.canonical_toml()` must be implementation-stable because any change breaks hash compatibility with prior manifests. There is currently no `canonical_toml()` method in `sidecar.py` (the method must be created in atom-2a). Before shipping Batch 2, the fixer should add a unit test asserting that `canonical_toml()` is deterministic across Python runs (key-ordering stability). This is a correctness invariant not explicitly called out in the spec atoms.
+
+---
+
+## 7. Sprint Exit Criteria
+
+The sprint is complete when all of the following are observable:
+
+1. **12 items merged to main** (or 11 items + item 11 explicitly deferred via `atom-11a` finding document)
+2. **`uv run pytest` passes** with no skips on bathos integration tests
+3. **`cargo nextest run` passes** on praxia crates affected by Items 10+12
+4. **Schema v5 migration verified** on production catalog: `bth show` on a pre-v5 run ID displays graceful "not recorded" for manifest fields
+5. **`bth sprint-audit` emits 7-signal report** including `bypass_explicit` and `bypass_in_agent_mode` as separate named values (D4 verified)
+6. **`bth run <nonzero-exit-script>` produces `outcome="error"`** with `outcome_error_reason="exit_code=1"` — visible in `bth show`
+7. **`bth run <agent-mode-script-no-adversarial-check> --agent-mode` is blocked** with `GateErrorCode.ADVERSARIAL_CHECK_MISSING` in MCP response
+8. **`.bth.lock.toml` written before subprocess** — mtime check confirmed in smoke test
+9. **`bth cite` and `bth lineage --format prov` produce valid output** with manifest_sha256 and PROV-JSON `entity`/`wasDerivedFrom` keys respectively
+10. **PostToolUse NLM hook fires** and appends to `.praxia/nlm.jsonl` on any `mcp__notebooklm__*` tool call from a Claude Code session in praxia
+11. **CHANGELOG.md updated** covering all 12 items (or 11+defer note)
+12. **All four ADR files** (`260526_manifest-hash-granularity.md`, `260526_adversarial-check-policy.md`, `260526_bypass-rate-split.md`, `260526_nonrepudiation-v06.md`) present and linked from spec
+
+---
+
+*Sprint composition authored 2026-05-26. Source spec oracle-approved pass 2. Orchestrator dispatches per §4 phase sequence; worktrees created per §3 batch strategy. Item 11b-11d promotion decision required after atom-11a verdict.*
+</sprint-composition>
+
+---
+
+A few notes on decisions embedded in the document:
+
+**Workflow template summary:** Items 1, 3, 7, 9, 11 get `bugfix_simple` (mechanical, low-ambiguity); Items 2, 5, 6, 8, 12 get `spec_driven_dev` (net-new surface or non-trivial test design); Items 4 and 10 get `refactor_with_audit` (breaking changes to typed interfaces where serialization correctness matters).
+
+**Key risk surfaced that the spec missed:** Items 4 and 6 both modify `prereg.py` in non-commutative ways (atom-4b changes `GateError` constructor; atom-6b calls `GateErrorCode.ADVERSARIAL_CHECK_MISSING` which doesn't exist until atom-4a). The spec lists them in the same phase but different items. The composition resolves this by mandating a combined worktree for Batch 3a with explicit within-worktree sequencing: 4a→4b→4c→4d before 6a→6b→6c→6d.
+
+**New correctness invariant surfaced (§6 Q5):** `sidecar.canonical_toml()` must be created in atom-2a and must have a deterministic key-ordering test before Batch 2 merges. If canonical serialization drifts between Python versions or TOML library updates, every existing manifest hash becomes invalid. The spec specifies the requirement (D2 ADR) but does not specify the test; the fixer prompt for Batch 2 should include this explicitly.

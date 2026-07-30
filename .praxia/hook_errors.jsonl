@@ -1,0 +1,20 @@
+{"hook":"subagent-start","error":"profiles file not found: /home/marielle/projects/bathos/agent_assets/profiles/agent_profiles.json","ts":"2026-05-26T19:10:38Z"}
+{"hook":"subagent-start","error":"profiles file not found: /home/marielle/projects/bathos/agent_assets/profiles/agent_profiles.json","ts":"2026-05-26T19:11:03Z"}
+{"hook":"subagent-start","error":"profiles file not found: /home/marielle/projects/bathos/agent_assets/profiles/agent_profiles.json","ts":"2026-05-26T19:33:40Z"}
+{"hook":"subagent-start","error":"profiles file not found: /home/marielle/projects/bathos/agent_assets/profiles/agent_profiles.json","ts":"2026-05-26T19:34:11Z"}
+{"hook":"subagent-start","error":"profiles file not found: /home/marielle/projects/bathos/agent_assets/profiles/agent_profiles.json","ts":"2026-05-26T20:39:53Z"}
+{"hook":"subagent-start","error":"profiles file not found: /home/marielle/projects/bathos/agent_assets/profiles/agent_profiles.json","ts":"2026-05-27T19:02:31Z"}
+{"hook":"subagent-start","error":"profiles file not found: /home/marielle/projects/bathos/agent_assets/profiles/agent_profiles.json","ts":"2026-05-27T19:09:41Z"}
+{"hook":"subagent-start","error":"profiles file not found: /home/marielle/projects/bathos/agent_assets/profiles/agent_profiles.json","ts":"2026-05-27T19:13:04Z"}
+{"hook":"subagent-start","error":"profiles file not found: /home/marielle/projects/bathos/agent_assets/profiles/agent_profiles.json","ts":"2026-05-27T19:21:18Z"}
+{"hook":"subagent-start","error":"profiles file not found: /home/marielle/projects/bathos/agent_assets/profiles/agent_profiles.json","ts":"2026-05-27T19:25:01Z"}
+{"hook":"subagent-start","error":"profiles file not found: /home/marielle/projects/bathos/agent_assets/profiles/agent_profiles.json","ts":"2026-05-27T20:40:43Z"}
+{"hook":"subagent-start","error":"profiles file not found: /home/marielle/projects/bathos/agent_assets/profiles/agent_profiles.json","ts":"2026-05-27T20:43:38Z"}
+{"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-07-28T22:27:29Z"}
+{"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-07-28T22:27:48Z"}
+{"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-07-28T22:31:30Z"}
+{"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-07-28T22:32:19Z"}
+{"hook":"worktree-create","error":"git worktree add failed for /home/marielle/projects/bathos/.claude/worktrees/wt-20260729-002212","ts":"2026-07-29T00:22:12Z"}
+{"hook":"worktree-create","error":"git worktree add failed for /home/marielle/projects/bathos/.claude/worktrees/wt-20260729-002212","ts":"2026-07-29T00:22:12Z"}
+{"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-07-30T02:41:45Z"}
+{"hook":"worktree-create","error":"git worktree add failed for /home/marielle/projects/bathos/.claude/worktrees/wt-20260730-024707","ts":"2026-07-30T02:47:07Z"}

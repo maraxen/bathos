@@ -1,0 +1,70 @@
+Now I have full picture. Report follows.
+
+## Report
+
+**1. `src/bathos/checker.py` (231 lines) — `bth check` / SHA-drift**
+
+- `check_runs()` (L42-93): compares each catalogued run's `git_hash`/`git_dirty` to current `git rev-parse HEAD` (via `bathos.git.capture_git_state`). Produces `CheckResult.status` ∈ `OK`/`STALE`/`DIRTY_RUN`/`UNKNOWN_CODE`. **Read-only classification** — never mutates the catalog or downgrades an outcome; `bth check` just prints and exits 1 if any STALE/drift found (cli.py L574-580).
+- `check_output_sha_drift(run: Run) -> list[OutputShaDriftResult]` (L121-211): parses `run.output_metadata` JSON (warm tier), and for each entry with a recorded `sha256`, recomputes the on-disk hash via `bathos.compact._collect_output_metadata(path)` and compares. Status ∈ `OK`/`DRIFT`/`MISSING`/`UNRECORDED`/`UNREADABLE`.
+- `output_metadata_has_sha_drift()` (L214-231): boolean helper wrapping the above (`DRIFT`/`MISSING`/`UNREADABLE` → `True`). This is what `parity_confound_check` (claim.py, referenced from Signal 13) uses to downgrade a `reference_parity` confound to `"uncontrolled"` when catalogued output artifacts have mutated post-run — the **only place SHA-drift causes a real downgrade**, and it's mediated through the claim/parity subsystem, not `checker.py` itself.
+- CLI wiring: `cli.py` L492-579, gated by `--check-outputs` flag (L497-499); prints `[Output File Status]` / `[Output SHA Drift]` sections and a final warning if `stale_count>0 or drift_count>0`, exiting nonzero. No auto-invalidation of the run record.
+
+**2. Grep for "re-pin" / "dependency-version" / "invalidate" / "stale"**
+
+No dependency-lockfile-hash or "re-pin" concept exists anywhere in `src/bathos/*.py`. `git.py::capture_git_state()` (L18-39) only shells out to `git rev-parse HEAD`, `--abbrev-ref HEAD`, and `git status --porcelain` — no lockfile (`uv.lock`/`Cargo.lock`/`requirements.txt`) hashing. "invalidate"/"stale" hits are just comments about POPPER's anytime-valid guarantee (sprint_audit.py L498, L644) and the `STALE` check-status string — no code path that invalidates a run because an *upstream dependency* changed. A differential run-id + dependency-version staleness gate would be new territory, not an extension of an existing mechanism.
+
+**3. `src/bathos/sprint_audit.py` (693 lines) — Signals**
+
+Dispatch pattern: `sprint_audit(hours=24) -> dict` (L289) loops `for project in projects:` (L307); most signals are computed **inline** into a `signals: dict[str, float|bool]` dict within the loop body, with threshold checks appending human-readable strings to an `anomalies: list[str]` (L602 onward, e.g. `if signals["error_rate"] > 0.10: anomalies.append(...)`). Two signals (9, 10) are pulled out as standalone testable functions (`signal_control_arm_rate`, `signal_submit_bypass_rate`) called into the same dict. Signals 12/13 skip the dict and append `anomalies` directly from DB queries wrapped in `try/except`.
+
+List: 1 error_rate (L397), 2 bypass_explicit (L404), 3 bypass_in_agent_mode (L404), 4 outcome_entropy (L427), 5 unfired_branches (L430), 6 schema_overflow_rate (L445), 7 post_hoc_bias_flag (L481), 8 premature_stopping_rate (L495), 9 control_arm_rate (L114, dispatched L516-519), 10 submit_bypass_rate (L191, dispatched L521-524), **no Signal 11** (gap in numbering), 12 unregistered claims on confirmation campaigns (L526-540), 13 uncontrolled `reference_parity` on confirmation campaigns (L542-595, uses `bathos.claim.parity_confound_check`).
+
+To add a new signal: add a computation block inline (or a standalone `signal_*()` function for testability), write into `signals[...]`, and append to `anomalies` if a threshold is crossed — following the commented threshold-provenance convention (ADR `.praxia/docs/decisions/260601_sprint-audit-threshold-rationale.md`, cited at L598-599).
+
+**4. `src/bathos/schema.py` / `migrate.py` — schema version**
+
+`CURRENT_SCHEMA_VERSION = "12"` (schema.py L10) — **not v9**; CLAUDE.md is stale (literature-parity's v9 `parity_run_type` was superseded by later additions: `seed`, `baseline_hpo_trials`, `baseline_hpo_compute_budget` (nullable numeric, backfilled `None` not `0`), `stdout_sha256`, `component_id`, `component_sidecar_sha256` — all present in both `COOL_SCHEMA` and `WARM_SCHEMA`, L27-137).
+
+Template for adding a v13 column: (a) add `pa.field("new_col", type, nullable=True)` to both `COOL_SCHEMA` and `WARM_SCHEMA` (schema.py); (b) add the corresponding `Run` dataclass field (default `None` for optional semantics) + wire into `to_arrow()` and `from_arrow_row()` (`pydict.get("new_col", [None])[i] if "new_col" in pydict else None`); (c) bump `CURRENT_SCHEMA_VERSION`; (d) in `migrate.py::_default_array()` (L151-184), add the field name to the null-backfill tuple if it's a string/JSON/optional-semantic field (L155-164) or numeric-optional field (L168-171) — **critical**: omitting this makes `migrate_catalog()`'s generic fallback backfill `""`/`0` instead of `None`, conflating "field didn't exist" with "field has default value" (explicitly flagged as bug class B2-02 in a comment). `migrate_catalog()` itself (L25-93) is schema-diff-driven (`COOL_SCHEMA` field names minus existing fragment columns) — no manual "if v8 then..." branching needed; it's generic across versions, with pre-migration `.bak` backup + restore-on-failure (L57-85).
+
+**5. `src/bathos/campaigns.py` and run-reference precedent**
+
+`campaigns.py` itself has no `baseline_ref`/`parent_run` fields — `campaign_runs` table just joins `run_id` (L139-145, 154, 384, 426, 525). The actual precedents for "this run references/depends on another run" live elsewhere:
+- `Run.parent_run_id` (schema.py L49, L164): single-parent TEXT column, consumed by `bathos.provenance.format_prov_json` for `wasDerivedFrom` PROV emission; set via `runner.py` L334 (`derived_from` param); ancestor-chain query via recursive CTE in `query.py` L450-480 (`bth run ancestors`, cli.py L215).
+- `campaign_edges.py` (152 lines, B2-03/#2181): **multi**-parent DAG tables `campaign_edges(child_campaign_id, parent_campaign_id)` and `run_edges(child_run_id, parent_run_id)`, additive over the single-parent columns (module docstring L1-33 explains this explicitly). `add_run_edge()`/`add_campaign_edge()` (L72-132) do cycle-rejection via BFS ancestor-check (`_would_create_cycle`, L64-69) before insert; `get_run_parents()`/`get_campaign_parents()` (L102-141) read back. This is the closest existing precedent for a "this run depends on that run" typed-edge mechanism — a differential/dependency-staleness gate could plausibly reuse `run_edges` rather than inventing a third parent-reference mechanism.
+- `baseline_ref` (Tier-2 lint) is a **sidecar-only** string field (`sidecar.py` L67, L204; `[benchmark]` section) — not a schema/catalog column. `linter.py::check_baseline_ref_exists()` (L985-1069) validates it against the warm DuckDB catalog via `LIKE` prefix match on run id, returning a `WARNING` issue if not found. It is not linked to `run_edges`/`parent_run_id` — a separate, string-based, best-effort reference.
+Now I have full picture. Report follows.
+
+## Report
+
+**1. `src/bathos/checker.py` (231 lines) — `bth check` / SHA-drift**
+
+- `check_runs()` (L42-93): compares each catalogued run's `git_hash`/`git_dirty` to current `git rev-parse HEAD` (via `bathos.git.capture_git_state`). Produces `CheckResult.status` ∈ `OK`/`STALE`/`DIRTY_RUN`/`UNKNOWN_CODE`. **Read-only classification** — never mutates the catalog or downgrades an outcome; `bth check` just prints and exits 1 if any STALE/drift found (cli.py L574-580).
+- `check_output_sha_drift(run: Run) -> list[OutputShaDriftResult]` (L121-211): parses `run.output_metadata` JSON (warm tier), and for each entry with a recorded `sha256`, recomputes the on-disk hash via `bathos.compact._collect_output_metadata(path)` and compares. Status ∈ `OK`/`DRIFT`/`MISSING`/`UNRECORDED`/`UNREADABLE`.
+- `output_metadata_has_sha_drift()` (L214-231): boolean helper wrapping the above (`DRIFT`/`MISSING`/`UNREADABLE` → `True`). This is what `parity_confound_check` (claim.py, referenced from Signal 13) uses to downgrade a `reference_parity` confound to `"uncontrolled"` when catalogued output artifacts have mutated post-run — the **only place SHA-drift causes a real downgrade**, and it's mediated through the claim/parity subsystem, not `checker.py` itself.
+- CLI wiring: `cli.py` L492-579, gated by `--check-outputs` flag (L497-499); prints `[Output File Status]` / `[Output SHA Drift]` sections and a final warning if `stale_count>0 or drift_count>0`, exiting nonzero. No auto-invalidation of the run record.
+
+**2. Grep for "re-pin" / "dependency-version" / "invalidate" / "stale"**
+
+No dependency-lockfile-hash or "re-pin" concept exists anywhere in `src/bathos/*.py`. `git.py::capture_git_state()` (L18-39) only shells out to `git rev-parse HEAD`, `--abbrev-ref HEAD`, and `git status --porcelain` — no lockfile (`uv.lock`/`Cargo.lock`/`requirements.txt`) hashing. "invalidate"/"stale" hits are just comments about POPPER's anytime-valid guarantee (sprint_audit.py L498, L644) and the `STALE` check-status string — no code path that invalidates a run because an *upstream dependency* changed. A differential run-id + dependency-version staleness gate would be new territory, not an extension of an existing mechanism.
+
+**3. `src/bathos/sprint_audit.py` (693 lines) — Signals**
+
+Dispatch pattern: `sprint_audit(hours=24) -> dict` (L289) loops `for project in projects:` (L307); most signals are computed **inline** into a `signals: dict[str, float|bool]` dict within the loop body, with threshold checks appending human-readable strings to an `anomalies: list[str]` (L602 onward, e.g. `if signals["error_rate"] > 0.10: anomalies.append(...)`). Two signals (9, 10) are pulled out as standalone testable functions (`signal_control_arm_rate`, `signal_submit_bypass_rate`) called into the same dict. Signals 12/13 skip the dict and append `anomalies` directly from DB queries wrapped in `try/except`.
+
+List: 1 error_rate (L397), 2 bypass_explicit (L404), 3 bypass_in_agent_mode (L404), 4 outcome_entropy (L427), 5 unfired_branches (L430), 6 schema_overflow_rate (L445), 7 post_hoc_bias_flag (L481), 8 premature_stopping_rate (L495), 9 control_arm_rate (L114, dispatched L516-519), 10 submit_bypass_rate (L191, dispatched L521-524), **no Signal 11** (gap in numbering), 12 unregistered claims on confirmation campaigns (L526-540), 13 uncontrolled `reference_parity` on confirmation campaigns (L542-595, uses `bathos.claim.parity_confound_check`).
+
+To add a new signal: add a computation block inline (or a standalone `signal_*()` function for testability), write into `signals[...]`, and append to `anomalies` if a threshold is crossed — following the commented threshold-provenance convention (ADR `.praxia/docs/decisions/260601_sprint-audit-threshold-rationale.md`, cited at L598-599).
+
+**4. `src/bathos/schema.py` / `migrate.py` — schema version**
+
+`CURRENT_SCHEMA_VERSION = "12"` (schema.py L10) — **not v9**; CLAUDE.md is stale (literature-parity's v9 `parity_run_type` was superseded by later additions: `seed`, `baseline_hpo_trials`, `baseline_hpo_compute_budget` (nullable numeric, backfilled `None` not `0`), `stdout_sha256`, `component_id`, `component_sidecar_sha256` — all present in both `COOL_SCHEMA` and `WARM_SCHEMA`, L27-137).
+
+Template for adding a v13 column: (a) add `pa.field("new_col", type, nullable=True)` to both `COOL_SCHEMA` and `WARM_SCHEMA` (schema.py); (b) add the corresponding `Run` dataclass field (default `None` for optional semantics) + wire into `to_arrow()` and `from_arrow_row()` (`pydict.get("new_col", [None])[i] if "new_col" in pydict else None`); (c) bump `CURRENT_SCHEMA_VERSION`; (d) in `migrate.py::_default_array()` (L151-184), add the field name to the null-backfill tuple if it's a string/JSON/optional-semantic field (L155-164) or numeric-optional field (L168-171) — **critical**: omitting this makes `migrate_catalog()`'s generic fallback backfill `""`/`0` instead of `None`, conflating "field didn't exist" with "field has default value" (explicitly flagged as bug class B2-02 in a comment). `migrate_catalog()` itself (L25-93) is schema-diff-driven (`COOL_SCHEMA` field names minus existing fragment columns) — no manual "if v8 then..." branching needed; it's generic across versions, with pre-migration `.bak` backup + restore-on-failure (L57-85).
+
+**5. `src/bathos/campaigns.py` and run-reference precedent**
+
+`campaigns.py` itself has no `baseline_ref`/`parent_run` fields — `campaign_runs` table just joins `run_id` (L139-145, 154, 384, 426, 525). The actual precedents for "this run references/depends on another run" live elsewhere:
+- `Run.parent_run_id` (schema.py L49, L164): single-parent TEXT column, consumed by `bathos.provenance.format_prov_json` for `wasDerivedFrom` PROV emission; set via `runner.py` L334 (`derived_from` param); ancestor-chain query via recursive CTE in `query.py` L450-480 (`bth run ancestors`, cli.py L215).
+- `campaign_edges.py` (152 lines, B2-03/#2181): **multi**-parent DAG tables `campaign_edges(child_campaign_id, parent_campaign_id)` and `run_edges(child_run_id, parent_run_id)`, additive over the single-parent columns (module docstring L1-33 explains this explicitly). `add_run_edge()`/`add_campaign_edge()` (L72-132) do cycle-rejection via BFS ancestor-check (`_would_create_cycle`, L64-69) before insert; `get_run_parents()`/`get_campaign_parents()` (L102-141) read back. This is the closest existing precedent for a "this run depends on that run" typed-edge mechanism — a differential/dependency-staleness gate could plausibly reuse `run_edges` rather than inventing a third parent-reference mechanism.
+- `baseline_ref` (Tier-2 lint) is a **sidecar-only** string field (`sidecar.py` L67, L204; `[benchmark]` section) — not a schema/catalog column. `linter.py::check_baseline_ref_exists()` (L985-1069) validates it against the warm DuckDB catalog via `LIKE` prefix match on run id, returning a `WARNING` issue if not found. It is not linked to `run_edges`/`parent_run_id` — a separate, string-based, best-effort reference.

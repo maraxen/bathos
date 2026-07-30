@@ -1,0 +1,1 @@
+Checking whether sprint 260601_bathos-recovery work is on main and whether the uv tool install is correct. Main is current at v0.7, but pyproject.toml still says 0.4.1 and the tool was installed without mcp or viz extras. Waiting for confirmation to bump the version and reinstall.

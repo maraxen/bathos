@@ -1,0 +1,114 @@
+I'll run this brainstorming session following the contemplex protocol. Let me start by loading the relevant skills to understand the tooling, then drive through Phase 0 to the end of Phase 2.
+
+Let me first check the available tools.
+
+I'll start the session. Let me verify I have access to the brainstorm tools.
+
+ToolSearch(query="select:brainstorm_start select:brainstorm_reply select:brainstorm_status select:brainstorm_record_idea select:brainstorm_record_decision select:brainstorm_set_winner select:brainstorm_finalize select:brainstorm_sessions")
+
+system Tool ToolSearch not found. Did you mean one of these instead: TodoWrite, Read, Task, Bash, Edit, ExitPlanMode, Glob, Write, NotebookEdit, BashOutput, WebSearch, KillShell, WebFetch, Grep, MultiEdit?
+
+Assistant Let me check what tools are actually available by listing them.
+
+Bash(which bth && bth --help 2>&1 | head -40)
+description: Check bth CLI availability
+
+system<system-warning>Large output (10k+ chars) truncated. Full output in: /tmp/bath-tooluse-0.txt. Search this file with rg/grep/head to find relevant info.</system-warning>
+
+/home/marielle/.local/bin/bth
+                                                                                
+ Usage: bth [OPTIONS] COMMAND [ARGS]...                                         
+                                                                                
+ bathos — experiment tracking for the solo researcher.                          
+
+system<system-reminder>Warning: the user provided a task that is open ended and the agent halted without completing it. If the agent believes it has completed the task, it should send a message to the user explaining what it did. Otherwise, the agent should continue working on the task.</system-reminder>
+
+Assistant The `brainstorm_*` tools described in my agent definition are MCP tools that are not present in my active tool roster, and the `ToolSearch` mechanism is not available in this environment. The contemplex brainstorming server tools (`brainstorm_start`, `brainstorm_reply`, `brainstorm_record_idea`, etc.) cannot be invoked — they are neither loaded nor discoverable.
+
+Let me verify there's no contemplex MCP surface reachable via the CLI before reporting this.
+
+Bash(bth --help 2>&1 | grep -i -E "brainstorm|contemplex|session" ; echo "---" ; ls ~/.bth/ 2>/dev/null ; echo "---mcp---" ; which contemplex 2>/dev/null ; ls ~/.claude/ 2>/dev/null | grep -i -E "contemplex|brainstorm")
+description: Search for contemplex/brainstorm surface
+
+system---
+config.toml
+---mcp---
+
+Assistant Bash(rg -l -i "brainstorm_start|contemplex" ~/.claude/ 2>/dev/null | head; echo "---"; find ~/.claude -iname "*contemplex*" 2>/dev/null | head; echo "---plugins---"; ls ~/.claude/plugins 2>/dev/null)
+description: Locate contemplex MCP server config
+
+system No matches found
+
+Assistant Bash(cat ~/.claude.json 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(list(d.get('mcpServers',{}).keys())); print('PROJECTS:'); [print(k, list(v.get('mcpServers',{}).keys())) for k,v in d.get('projects',{}).items()]" 2>/dev/null | head -30; echo "---"; find ~ -maxdepth 3 -iname "*.mcp.json" 2>/dev/null | head; find ~/.config -iname "*contemplex*" 2>/dev/null | head)
+description: Inspect MCP server registrations
+
+system Error
+
+Assistant Bash(ls -la ~/.claude.json 2>/dev/null; ls ~/.config/ 2>/dev/null | head -20; echo "---search whole home for contemplex binary/config---"; find ~ -maxdepth 4 -iname "*contemplex*" 2>/dev/null | head -20)
+description: Find contemplex anywhere
+
+system No matches found
+
+Assistant The contemplex brainstorming server is not installed or registered anywhere reachable in this environment. The MCP tools my agent definition depends on (`brainstorm_start`, `brainstorm_reply`, `brainstorm_record_idea`, `brainstorm_record_decision`, `brainstorm_set_winner`, `brainstorm_finalize`, `brainstorm_status`, `brainstorm_sessions`) are:
+
+- Not in my active tool roster
+- Not discoverable (`ToolSearch` is unavailable in this environment)
+- Not exposed via any CLI (`bth` has no brainstorm/contemplex surface)
+- Not registered as an MCP server anywhere under `~/.claude` or the home tree
+
+I cannot fabricate a `session_id` or simulate server-side state (idea IDs, phase counters) — doing so would violate the status-first protocol, which requires trusting actual server state over reconstructed memory. There is no server to read.
+
+Rather than halt with nothing useful, I have done the full intellectual work the session would have produced. Below is exactly what the divergence phase would have recorded, structured so a human can replay it into contemplex the moment the server is available, and so the downstream critic/synthesizer agents have a complete idea pool to work from.
+
+---
+
+## BLOCKER
+
+The contemplex brainstorming MCP server is not reachable in this environment. No `brainstorm_*` tool can be called, so no real `session_id` exists. The artifact below is the equivalent design output, ready to be ingested into contemplex once the server is registered.
+
+## Frame (Phase 0–1 settled, self-answered per autonomous instruction)
+
+**Problem statement (locked):** When `bth` is invoked from inside a git worktree (e.g. `<repo>/.claude/worktrees/<name>/`), it must resolve the *workspace root* and *workspace-relative paths* against the **live worktree checkout**, not against the absolute `[project] root` recorded in `.bth.toml` (which points at the main checkout). Git-derived provenance (branch/hash/dirty) is already correct per-worktree; the concrete bug is in workspace-root-anchored file/asset resolution (postmortem asset validation, postmortem scan in `compact.py`).
+
+**Scope (locked):**
+- IN: workspace-root resolution semantics, worktree detection, what "workspace root" means per-operation (file resolution vs. catalog identity), schema/migration impact, backward compat with existing absolute-`root` sidecars, concurrency exposure of the shared catalog.
+- OUT (deferred to convergence/synthesis): picking a winner, the export.py "install-level workspace" meaning (different concept), redesigning the catalog tiering model.
+
+**Success criteria (the bar any winning idea must clear):**
+1. A postmortem/asset-validation run from a worktree validates against the worktree's files, not the main checkout.
+2. Catalog identity (slug) stays stable across worktrees of one repo (shared history is desirable), while git provenance stays per-worktree.
+3. Backward compatible: existing `.bth.toml` files with absolute `root` and existing catalogs keep working; any schema change goes through the supported v7 migration backfill.
+4. No new same-machine concurrent-write race is *introduced*; if the shared catalog race is merely *surfaced*, it is named, not silently relied upon.
+
+**Key unresolved tension carried into convergence (NOT resolved here):** recorded `[project] root` (stable catalog identity) vs. live worktree path (correct local file resolution) — and crucially *which operations bind to which*. The likely shape is "identity from recorded root, file resolution from live worktree," but that is an evaluation call for the critic.
+
+## Idea Pool (divergence — 9 distinct candidates, probe-only, unranked)
+
+**I1 — Live-toplevel surgical fix (conservative anchor).** Replace `workspace_root = project_config.root` in `compact.py:402,410-415` and `cli.py:1532-1537` with a live value computed from `git rev-parse --show-toplevel` at invocation time; fall back to recorded root / cwd when not in a git tree. Minimal blast radius, no schema change. Directly fixes finding #6. *Source: recon finding #6, design tension "recorded vs live."*
+
+**I2 — `find_project_config` directory as workspace root.** Define workspace root = the directory containing the `.bth.toml` that resolution actually walked up to (`config.py:27-34`), not the absolute `root` field inside that file. Since `.bth.toml` is tracked and present in each worktree, the found-file's parent is already the live worktree root for free. Demotes the `[project] root` field to advisory. *Source: recon finding #1 + #6.*
+
+**I3 — Per-operation resolution policy (split identity vs. filesystem).** Introduce two explicit concepts: `workspace_identity` (slug/catalog binding, sourced from recorded root — stable) and `workspace_fs_root` (file/asset/postmortem resolution, sourced live from worktree). Each call site declares which it needs. Postmortem/asset validation uses `workspace_fs_root`; catalog writes use `workspace_identity`. *Source: design tension "which wins for WHICH operations," recon #3/#4/#6.*
+
+**I4 — `WorkspaceContext` resolution layer (mid-weight abstraction).** New `workspace.py` module exposing a single `resolve_workspace(cwd) -> WorkspaceContext` with fields `{slug, identity_root, fs_root, is_worktree, worktree_name, git_common_dir}`, computed once, threaded through compact/postmortem/sidecar/sync. Centralizes all the git-rev-parse logic that is currently scattered. No schema change required; pure runtime resolution. *Source: recon #7 ("workspace not first-class"), design tension "minimal vs real abstraction."*
+
+**I5 — Schema-tagged worktree provenance.** Add worktree-aware fields to COOL_SCHEMA / Run (`worktree_path`, `git_common_dir`, `is_worktree` flag) via a v7→v8 migration backfill (`migrate.py:25-93`). Runs stay under one slug but are now *queryable/filterable* by worktree. Branch alone (already captured) may be insufficient when two worktrees share a branch or detached HEAD. *Source: recon #2/#8, design tension "tag with worktree identity."*
+
+**I6 — Worktree detection primitive + hardened test matrix (correctness-first, behavior-neutral).** Land a single well-tested detector — `is_worktree(cwd)` via `git rev-parse --git-dir` ≠ `--git-common-dir` (the robust signal, beats the `.git`-is-a-file heuristic) — plus the missing tests: invocation from `.claude/worktrees/`, recorded-root-vs-live divergence, concurrent two-worktree catalog writes. Ships the detection contract and the test net *before* changing resolution behavior. *Source: recon #9 test gaps, design tension "detecting a worktree."*
+
+**I7 — Catalog namespacing by worktree (concurrency-elimination option).** Sub-namespace cool-tier parquet under the worktree (`runs/<slug>/<worktree>/...`) or per-worktree catalog dir, collapsing to the shared warm catalog at compact time. Sidesteps the untested same-machine concurrent-write race (finding #4) by construction rather than hardening it. Heavier; risks fragmenting query/identity. *Source: recon #4, design tension "one shared catalog vs per-worktree namespacing."*
+
+**I8 — Shared-catalog concurrency hardening (orthogonal de-risk).** Keep one shared global catalog but explicitly harden and *test* concurrent two-worktree writes (the atomic write-then-rename is SLURM-safe but same-machine-concurrent is UNTESTED per finding #4). Makes "one catalog, many worktrees" a supported, verified configuration. Pairs with any of I1–I4. *Source: recon #4.*
+
+**I9 — Full first-class Workspace entity (ambitious end of spectrum).** Promote "workspace" to a real bathos abstraction: a `workspace` table/record with its own resolution layer, schema fields, lifecycle (register/list), and a clear split from the export.py "install-level" meaning (finding #7). Worktrees become enumerable children of a project-workspace. Largest change; positions bathos for multi-checkout / multi-agent workflows beyond the immediate bug. *Source: recon #7, design tension "introduce a real workspace abstraction," deliberately the ambitious anchor.*
+
+**Spectrum coverage check:** conservative anchor = I1; ambitious anchor = I9; the rest span surgical→structural with two orthogonal de-risking tracks (I6 detection/tests, I8 concurrency).
+
+## What I need to actually run the session
+
+To execute this through contemplex properly (real `session_id`, server-tracked phase counter and idea IDs, forcing beat, INVEST gate), the brainstorming MCP server must be registered and its tools loaded into the agent roster. Please confirm how `brainstorm_*` is meant to be exposed (MCP server name + registration), and I will re-run Phase 0→2 against the live server and return a genuine `session_id` with server-assigned idea IDs.
+
+Until then I am returning **VERDICT: NEEDS_WORK** because no session was finalized and, more fundamentally, no session could be *started* — the facilitation substrate is absent.
+
+VERDICT: NEEDS_WORK
+Contemplex brainstorming MCP server is unreachable in this environment — no `brainstorm_*` tool is loaded or discoverable, so no real session could be started; the complete frame and 9-idea divergence pool above are ready to replay into contemplex once the server is registered.
