@@ -5,11 +5,21 @@ Post-mortems were an isolated island: `postmortem.py` validated well, but nothin
 them. The result was a system that captured intent (pre-registration is the most heavily gated
 surface in the tool) and learning not at all.
 
-An obligation is the missing link. It opens automatically from events bathos already computes,
-and is discharged by writing a valid post-mortem that names it. Per decision **D1** it never
-blocks: it downgrades a campaign verdict at conclude and warns at submit. Nothing to bypass
-means the bypass metrics stay honest, and the fragile script-stem key never sits behind
-anything binding.
+An obligation is the missing link. It is discharged by writing a valid post-mortem that names
+it. Per decision **D1** the design never blocks: an obligation downgrades a campaign verdict at
+conclude and warns at submit. Nothing to bypass means the bypass metrics stay honest, and the
+fragile script-stem key never sits behind anything binding.
+
+**What is wired, and what is not — read this before relying on it.** This module provides the
+ledger: open, list, discharge, and Signal 11. Nothing yet CALLS `open_obligation`. The four
+§5 triggers are not wired into `bth run` or `bth campaign conclude`, `bth submit` does not warn,
+and conclude does not list open obligations. So obligations exist only when opened explicitly,
+and no verdict or exit code changes anywhere today.
+
+That is deliberate rather than unfinished: auto-opening obligations changes behaviour on every
+run, and doing so without the same opt-in treatment the Review Coverage Gate got would
+retroactively burden every existing script — the failure §7's sequencing constraint exists to
+prevent. Wiring the triggers is the next increment, and should ship behind its own flag.
 
 Ledger layout — `.bth/obligations/<kind>_<entity_id>.json`, one file per (entity, trigger).
 The `kind` prefix is deliberate: §10's open item 3 noted that a flat `<run_or_campaign_id>.json`
