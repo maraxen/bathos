@@ -43,16 +43,20 @@ class OutcomeSpec:
 @dataclass
 class ReproductionBlock:
     """Reproduction metadata for experiment sidecars (optional [reproduction] block)."""
-    reproduces_paper: str = ""       # DOI or citation string
-    reproduces_run: str = ""         # run UUID
+
+    reproduces_paper: str = ""  # DOI or citation string
+    reproduces_run: str = ""  # run UUID
     tolerance_pct: float | None = None
-    requires_pass_stem: str = ""     # script stem that must have outcome='pass' first
-    requires_parity_stem: str = ""   # script stem that must have a passing parity run first (F3 gate)
+    requires_pass_stem: str = ""  # script stem that must have outcome='pass' first
+    requires_parity_stem: str = (
+        ""  # script stem that must have a passing parity run first (F3 gate)
+    )
 
 
 @dataclass
 class ControlsBlock:
     """Control arm specification for experiment sidecars (optional [controls] block)."""
+
     positive_outcome: list[str] = field(default_factory=list)
     negative_outcome: list[str] = field(default_factory=list)
 
@@ -66,12 +70,79 @@ class DifferentialBlock:
     instead of executing -- proof the measurement can actually detect a real effect, not just
     that it produced *a* result.
     """
+
     knob: str = ""
     off: str = ""
     on: str = ""
-    expect: str = "differs"           # "differs" or "identical"
-    metric: str = ""                  # optional: a result_schema key to compare numerically
-    min_effect: float | None = None   # required when metric is set and numeric
+    expect: str = "differs"  # "differs" or "identical"
+    metric: str = ""  # optional: a result_schema key to compare numerically
+    min_effect: float | None = None  # required when metric is set and numeric
+
+
+#: Legal `disposition` values, by review kind. Validated structurally; an unknown value is a
+#: validation error rather than a silent pass, because disposition is what obligation trigger
+#: (4) keys on — a typo would make a citation permanently unable to be contradicted.
+LITERATURE_DISPOSITIONS = frozenset({"supports", "contradicts", "scope-differs"})
+IMPLEMENTATION_DISPOSITIONS = frozenset({"matches", "diverges", "not-applicable"})
+
+
+@dataclass
+class LiteratureReview:
+    """One `[[review.literature]]` entry: a prior result, and what it bears on."""
+
+    ref: str = ""  # DOI, arXiv id, or a bth run UUID
+    claim: str = ""  # what the reference actually reports
+    bears_on: str = ""  # hypothesis/confound id from the claim file (optional pre-claim, D2)
+    disposition: str = ""  # one of LITERATURE_DISPOSITIONS
+    checked: str = ""  # ISO date the author read it
+
+
+@dataclass
+class ImplementationReview:
+    """One `[[review.implementation]]` entry: a reference implementation, read at a pinned commit."""
+
+    source: str = ""  # path or URL
+    commit: str = ""  # pinned revision — makes the attestation falsifiable in principle
+    what_was_checked: str = ""
+    bears_on: str = ""
+    disposition: str = ""  # one of IMPLEMENTATION_DISPOSITIONS
+
+
+@dataclass
+class ReviewBlock:
+    """The optional `[review]` block: targeted literature and implementation review.
+
+    Tier is **derived, never declared** — the spec calls for tiers "mechanically graded", the
+    same posture as parity's cap-lattice, so an author cannot assert a stronger tier than the
+    content supports. See :func:`review_tier`.
+    """
+
+    literature: list[LiteratureReview] = field(default_factory=list)
+    implementation: list[ImplementationReview] = field(default_factory=list)
+
+    def is_empty(self) -> bool:
+        return not self.literature and not self.implementation
+
+
+def review_tier(review: ReviewBlock | None) -> str:
+    """Grade a review block: ``""`` (none) | ``C0`` cited | ``C1`` reviewed.
+
+    C1 requires an entry that is actually checkable: a literature entry carrying both
+    `bears_on` and `disposition`, or an implementation entry read at a pinned `commit` with
+    `what_was_checked` recorded. Anything less is C0 — a citation, not a review.
+
+    C2 (`parity`) is deliberately NOT derivable here. It is earned by the existing five-phase
+    literature-parity audit, not by anything a sidecar can assert about itself.
+    """
+    if review is None or review.is_empty():
+        return ""
+    for entry in review.literature:
+        if entry.bears_on and entry.disposition:
+            return "C1"
+    for entry in review.implementation:
+        if entry.commit and entry.what_was_checked:
+            return "C1"
+    return "C0"
 
 
 @dataclass
@@ -116,6 +187,9 @@ class Sidecar:
     controls: ControlsBlock | None = None
     # instrument-sensitivity pre-flight (experiment sidecars only, debt #1071)
     differential: DifferentialBlock | None = None
+    # targeted literature / implementation review (build-order step 2). Advisory at parse
+    # time; the Review Coverage Gate at campaign conclude is what consumes it.
+    review: ReviewBlock | None = None
 
 
 ENFORCED_DIRS = {"experiments", "benchmarks", "validation"}
@@ -215,7 +289,13 @@ def parse_sidecar(path: Path) -> Sidecar:
             )
             # Warn on unknown keys in [reproduction]
             for key in repro_data:
-                if key not in {"reproduces_paper", "reproduces_run", "tolerance_pct", "requires_pass_stem", "requires_parity_stem"}:
+                if key not in {
+                    "reproduces_paper",
+                    "reproduces_run",
+                    "tolerance_pct",
+                    "requires_pass_stem",
+                    "requires_parity_stem",
+                }:
                     logger.warning(f"Unknown key in [reproduction]: {key!r}")
 
         # Parse [controls] block (optional)
@@ -229,6 +309,37 @@ def parse_sidecar(path: Path) -> Sidecar:
             for key in controls_data:
                 if key not in {"positive_outcome", "negative_outcome"}:
                     logger.warning(f"Unknown key in [controls]: {key!r}")
+
+        # Parse [review] block (optional, build-order step 2). Applies to every sidecar kind,
+        # not just experiments: a benchmark or validation script can equally rest on prior work.
+        if "review" in data:
+            review_data = data.get("review", {}) or {}
+            lit = [
+                LiteratureReview(
+                    ref=str(e.get("ref", "")),
+                    claim=str(e.get("claim", "")),
+                    bears_on=str(e.get("bears_on", "")),
+                    disposition=str(e.get("disposition", "")),
+                    checked=str(e.get("checked", "")),
+                )
+                for e in review_data.get("literature", [])
+                if isinstance(e, dict)
+            ]
+            impl = [
+                ImplementationReview(
+                    source=str(e.get("source", "")),
+                    commit=str(e.get("commit", "")),
+                    what_was_checked=str(e.get("what_was_checked", "")),
+                    bears_on=str(e.get("bears_on", "")),
+                    disposition=str(e.get("disposition", "")),
+                )
+                for e in review_data.get("implementation", [])
+                if isinstance(e, dict)
+            ]
+            sidecar.review = ReviewBlock(literature=lit, implementation=impl)
+            for key in review_data:
+                if key not in {"literature", "implementation"}:
+                    logger.warning(f"Unknown key in [review]: {key!r}")
 
         # Parse [differential] block (optional, debt #1071)
         if "differential" in data:
@@ -292,7 +403,13 @@ def parse_sidecar(path: Path) -> Sidecar:
     if sidecar:
         sha256_val = hashlib.sha256(path.read_bytes()).hexdigest()
         outcome_labels = list(sidecar.outcomes.keys())
-        event("sidecar.parsed", path=str(path), sha256=sha256_val, outcomes=outcome_labels, kind=sidecar.kind.value)
+        event(
+            "sidecar.parsed",
+            path=str(path),
+            sha256=sha256_val,
+            outcomes=outcome_labels,
+            kind=sidecar.kind.value,
+        )
 
     return sidecar
 
@@ -387,7 +504,9 @@ def compute_evalue(
     else:
         evalue = (1.0 - alt) / (1.0 - null)
 
-    assert evalue > 0, f"compute_evalue produced non-positive value {evalue} for outcome '{outcome_label}'"
+    assert evalue > 0, (
+        f"compute_evalue produced non-positive value {evalue} for outcome '{outcome_label}'"
+    )
     return evalue
 
 
