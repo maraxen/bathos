@@ -287,6 +287,25 @@ Steps 1 and 2 touch no existing gate and can land in any order. Nothing after st
 start until step 2 has produced real `[review]` entries on real experiments — the coverage gate
 should be calibrated against observed data, not guessed thresholds.
 
+**Two structural requirements this design initially omitted**, both surfaced by plan audit and
+both required by conventions this repo already enforces everywhere else:
+
+- **A core `corpus.py` module is part of step 1, not an implementation detail.** Every other
+  subsystem here keeps `cli.py` thin over a dedicated core module — `sidecar.py`, `claim.py`,
+  `postmortem.py`, `campaigns.py` all follow it, and CLAUDE.md states it as a rule. Card
+  parsing, search, and `applies_when` evaluation belong in `corpus.py`; `bth ref` is a wrapper.
+  Without naming the module explicitly, the obvious implementation puts business logic in
+  `cli.py` and breaks the convention.
+- **Every new CLI surface needs its `mcp.py` mirror in the same step.** "FastMCP: Mirror CLI
+  tool-for-tool" is a locked decision in CLAUDE.md, and `claim`/`attestation`/`query`/`anchor`
+  all honour it. That means `bth ref show|search|applicable` ships with `reference_get` /
+  `reference_search` / `reference_applicable`, and the obligation and coverage gates surface
+  through MCP too — or the omission is scoped out explicitly with a stated reason.
+
+Each step should also name the `tests/test_*.py` file it extends. The repo's dominant
+verification idiom is a test file, not a CLI invocation; a plan derived from this document that
+verifies only by running commands is under-specifying.
+
 ---
 
 ## 8. Risks, stated plainly
