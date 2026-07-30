@@ -58,8 +58,11 @@ CONTEXT_COLUMNS: dict[str, str] = {
     "n_outcome_branches": "int  — count of [outcomes.*] tables declared",
     "n_pass_branches": "int  — outcome branches that are neither residual nor marginal/error/unknown",
     "has_popper": "bool — a [popper] block is declared",
-    "has_reproduction": "bool — a [reproduction] block is declared",
-    "has_controls": "bool — a [controls] block is declared",
+    "has_reproduction": "bool — [reproduction] declares reproduces_paper or reproduces_run",
+    "has_controls": "bool — [controls].positive_outcome is declared (negative alone does NOT count)",
+    "has_differential": "bool — a [differential] block is declared",
+    "has_null_capable_outcome": "bool — a 'fail' label or any is_residual branch exists",
+    "has_pass_branch": "bool — an outcome labelled exactly 'pass' exists",
     "declares_novel": "bool — [experiment].novel is true",
     "n_adversarial_checks": "int  — outcome branches carrying an adversarial_check",
     "n_threshold_sources": "int  — outcome branches carrying a source justification",
@@ -150,12 +153,25 @@ def parse_card(path: Path) -> Card:
         if not meta.get(required):
             raise ValueError(f"{path}: frontmatter is missing required key '{required}'")
 
+    # The spec states severity "reuses IssueSeverity"; enforce that rather than leaving the
+    # claim unbacked. Imported lazily to keep corpus.py free of a hard dependency on the
+    # linter module. An unknown value raises, so load_corpus skips and reports the card —
+    # consistent with the module's skip-and-report posture, not a new fatal path.
+    from bathos.linter import IssueSeverity
+
+    severity = str(meta.get("severity", IssueSeverity.INFO.value))
+    valid = {s.value for s in IssueSeverity}
+    if severity not in valid:
+        raise ValueError(
+            f"{path}: severity '{severity}' is not one of {sorted(valid)} (see IssueSeverity)"
+        )
+
     return Card(
         id=str(meta["id"]),
         title=str(meta["title"]),
         path=path,
         body=body.rstrip() + "\n",
-        severity=str(meta.get("severity", "info")),
+        severity=severity,
         applies_when=meta.get("applies_when") or None,
         source_check=meta.get("source_check") or None,
         tags=tuple(meta.get("tags", ())),
@@ -172,7 +188,12 @@ def load_corpus(root: Path | None = None) -> CorpusLoad:
     for path in sorted(root.rglob("*.md")):
         try:
             card = parse_card(path)
-        except ValueError as e:
+        except (ValueError, OSError) as e:
+            # OSError too, not just ValueError: read_text can raise PermissionError,
+            # IsADirectoryError, or FileNotFoundError (TOCTOU vs rglob). Letting those
+            # escape would break the whole corpus for one unreadable file, contradicting
+            # this module's stated skip-and-report guarantee. UnicodeDecodeError is already
+            # covered — it subclasses ValueError.
             load.errors.append((path, str(e)))
             continue
         if card.id in seen:
@@ -270,6 +291,9 @@ def build_context(script: Path, catalog_dir: Path | None = None) -> dict:
         "has_popper": False,
         "has_reproduction": False,
         "has_controls": False,
+        "has_differential": False,
+        "has_null_capable_outcome": False,
+        "has_pass_branch": False,
         "declares_novel": False,
         "n_adversarial_checks": 0,
         "n_threshold_sources": 0,
@@ -306,14 +330,32 @@ def build_context(script: Path, catalog_dir: Path | None = None) -> dict:
             1 for spec in outcomes.values() if getattr(spec, "source", "")
         )
         ctx["has_popper"] = getattr(sc, "popper_null_pass_rate", None) is not None
+
+        # Reproduction/controls/differential live in nested blocks, NOT flat attributes. An
+        # earlier version read `sc.reproduces_paper` / `sc.control_positive_outcome`, which do
+        # not exist on Sidecar — getattr silently returned the default, so both flags were
+        # False for every script and DSGN-001/DSGN-002 fired on everything. Mirrors the
+        # canonical form in linter.py:210-212 and :281.
+        repro = sc.reproduction
         ctx["has_reproduction"] = bool(
-            getattr(sc, "reproduces_paper", "") or getattr(sc, "reproduces_run", "")
+            repro is not None and (repro.reproduces_paper or repro.reproduces_run)
         )
-        ctx["has_controls"] = bool(
-            getattr(sc, "control_positive_outcome", None)
-            or getattr(sc, "control_negative_outcome", None)
-        )
+        controls = sc.controls
+        # Only the POSITIVE control satisfies the underlying check (linter.py:281); a negative
+        # control alone must not suppress the card.
+        ctx["has_controls"] = bool(controls is not None and controls.positive_outcome)
+        ctx["has_differential"] = getattr(sc, "differential", None) is not None
         ctx["declares_novel"] = bool(getattr(sc, "novel", False))
+
+        # A "null-capable" outcome could legitimately fire when the effect is genuinely
+        # absent — a `fail` label or any residual catch-all. check_positive_control_missing
+        # only fires for these, so the card must not either.
+        ctx["has_null_capable_outcome"] = any(
+            label == "fail" or getattr(spec, "is_residual", False)
+            for label, spec in outcomes.items()
+        )
+        # check_adversarial_checks only inspects the `pass` branch.
+        ctx["has_pass_branch"] = "pass" in outcomes
 
     if catalog_dir is not None:
         ctx.update(_catalog_counts(script, Path(catalog_dir)))
@@ -342,14 +384,18 @@ def _catalog_counts(script: Path, catalog_dir: Path) -> dict:
     except Exception:
         return {}
     try:
+        # `_` and `%` are LIKE wildcards. Script stems are snake_case by this project's own
+        # naming convention, so an unescaped `fit_model` also matched `fit-model`/`fitXmodel`
+        # and silently inflated the count.
+        pattern = "%" + stem.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         row = con.execute(
-            "SELECT COUNT(*) FROM runs WHERE command LIKE ?", [f"%{stem}%"]
+            "SELECT COUNT(*) FROM runs WHERE command LIKE ? ESCAPE '\\'", [pattern]
         ).fetchone()
         run_count = int(row[0]) if row else 0
         row = con.execute(
             "SELECT COUNT(*) FROM runs WHERE campaign_id IS NOT NULL AND campaign_id != '' "
-            "AND campaign_id IN (SELECT campaign_id FROM runs WHERE command LIKE ?)",
-            [f"%{stem}%"],
+            "AND campaign_id IN (SELECT campaign_id FROM runs WHERE command LIKE ? ESCAPE '\\')",
+            [pattern],
         ).fetchone()
         campaign_run_count = int(row[0]) if row else 0
         return {"run_count": run_count, "campaign_run_count": campaign_run_count}

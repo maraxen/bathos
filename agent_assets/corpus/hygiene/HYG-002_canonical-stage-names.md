@@ -1,7 +1,7 @@
 +++
 id = "HYG-002"
 title = "Stage names outside the canonical set fragment every stage-tiered gate"
-severity = "info"
+severity = "warning"
 source_check = "check_canonical_stage_names"
 tags = ["hygiene", "stages", "gates"]
 see_also = ["DSGN-002"]
@@ -18,4 +18,5 @@ is neither exploratory-lenient nor validation-strict; it is simply unmatched.
 around — the set is meant to be extended from real usage, and a value that recurs is evidence
 for extending it.
 
-**Advisory only.** This never blocks a run, by design.
+**Advisory only — but WARNING severity.** The check emits `IssueSeverity.WARNING` for both of
+its cases; it never blocks a run, but it is not an INFO-level note either.

@@ -327,3 +327,139 @@ def test_cli_ref_applicable_reports_no_match_plainly(tmp_path, monkeypatch):
     res = runner.invoke(app, ["ref", "applicable", str(tmp_path / "absent.py")])
     assert res.exit_code == 0
     assert "No cards fired" in res.stdout
+
+
+def test_invalid_severity_is_rejected_and_skipped(tmp_path):
+    """The spec says severity reuses IssueSeverity; an unknown value must not parse silently."""
+    write_card(tmp_path, "d/OK.md", 'id = "S-OK"\ntitle = "t"\nseverity = "warning"')
+    write_card(tmp_path, "d/BAD.md", 'id = "S-BAD"\ntitle = "t"\nseverity = "critical"')
+
+    load = load_corpus(tmp_path)
+    assert [c.id for c in load.cards] == ["S-OK"]
+    assert any("severity 'critical' is not one of" in e for _, e in load.errors)
+
+
+def test_every_shipped_card_severity_is_a_real_issue_severity():
+    from bathos.linter import IssueSeverity
+
+    valid = {s.value for s in IssueSeverity}
+    bad = [(c.id, c.severity) for c in load_corpus().cards if c.severity not in valid]
+    assert not bad, f"cards with severity outside IssueSeverity: {bad}"
+
+
+# ── regression: nested sidecar blocks must actually be read ──────────────────
+
+
+def _sidecar_with(tmp_path: Path, extra: str) -> Path:
+    exp = tmp_path / "scripts" / "experiments"
+    exp.mkdir(parents=True, exist_ok=True)
+    (exp / "s.py").write_text("print(1)\n", encoding="utf-8")
+    (exp / "s.bth.toml").write_text(
+        '[experiment]\nhypothesis = "h"\nstage_name = "validation"\n\n'
+        '[outcomes.pass]\ncondition = "x < 5"\ndecision = "go"\n\n'
+        '[outcomes.fail]\ncondition = "x >= 5"\ndecision = "stop"\n\n'
+        f'{extra}\n\n[result_schema]\nx = "float"\n',
+        encoding="utf-8",
+    )
+    return exp / "s.py"
+
+
+def test_has_reproduction_reads_the_nested_block():
+    """Regression: read sc.reproduction.*, not a flat sc.reproduces_paper that does not exist.
+
+    The original code used getattr(sc, "reproduces_paper", "") — an attribute Sidecar has
+    never had — so getattr silently returned the default and this flag was False for every
+    script, making the ERROR-severity DSGN-002 fire on everything.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        script = _sidecar_with(Path(d), '[reproduction]\nreproduces_paper = "10.1234/x"')
+        assert build_context(script)["has_reproduction"] is True
+
+    with tempfile.TemporaryDirectory() as d:
+        script = _sidecar_with(Path(d), "")
+        assert build_context(script)["has_reproduction"] is False
+
+
+def test_has_controls_requires_a_positive_control():
+    """A negative control alone must NOT satisfy it — the lint only accepts positive_outcome."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        script = _sidecar_with(Path(d), '[controls]\npositive_outcome = ["pass"]')
+        assert build_context(script)["has_controls"] is True
+
+    with tempfile.TemporaryDirectory() as d:
+        script = _sidecar_with(Path(d), '[controls]\nnegative_outcome = ["fail"]')
+        assert build_context(script)["has_controls"] is False
+
+
+def test_null_capable_and_pass_branch_flags():
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        ctx = build_context(_sidecar_with(Path(d), ""))
+        assert ctx["has_null_capable_outcome"] is True  # a `fail` branch exists
+        assert ctx["has_pass_branch"] is True
+
+
+def test_dsgn002_does_not_fire_when_reproduction_is_declared():
+    """End-to-end guard on the bug: the card must go quiet once [reproduction] is present."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        script = _sidecar_with(Path(d), '[reproduction]\nreproduces_paper = "10.1234/x"')
+        fired, _ = applicable_cards(build_context(script))
+        assert "DSGN-002" not in [c.id for c in fired]
+
+    with tempfile.TemporaryDirectory() as d:
+        script = _sidecar_with(Path(d), "")
+        fired, _ = applicable_cards(build_context(script))
+        assert "DSGN-002" in [c.id for c in fired]
+
+
+def test_unreadable_card_is_skipped_not_fatal(tmp_path):
+    """OSError, not just ValueError — a directory named *.md must not break the whole load."""
+    write_card(tmp_path, "d/OK.md", 'id = "O-1"\ntitle = "t"')
+    (tmp_path / "d" / "trap.md").mkdir()
+    load = load_corpus(tmp_path)
+    assert [c.id for c in load.cards] == ["O-1"]
+    assert len(load.errors) == 1
+
+
+def test_like_wildcards_in_stem_are_escaped():
+    """`_` is a LIKE wildcard; snake_case stems must not match `fit-model`/`fitXmodel`."""
+    import tempfile
+
+    import duckdb
+
+    from bathos.corpus import _catalog_counts
+
+    with tempfile.TemporaryDirectory() as d:
+        db = Path(d) / "bathos.db"
+        con = duckdb.connect(str(db))
+        con.execute("CREATE TABLE runs (command VARCHAR, campaign_id VARCHAR)")
+        con.execute("INSERT INTO runs VALUES ('uv run fit_model.py', 'c1')")
+        con.execute("INSERT INTO runs VALUES ('uv run fit-model.py', 'c2')")
+        con.execute("INSERT INTO runs VALUES ('uv run fitXmodel.py', 'c3')")
+        con.close()
+
+        counts = _catalog_counts(Path("fit_model.py"), Path(d))
+        assert counts["run_count"] == 1, f"wildcard leak: {counts}"
+
+
+def test_mcp_reference_tools_are_actually_exposed_on_the_server():
+    """Registering a @cisternal.tool AFTER cisternal.wire() leaves it invisible to the server.
+
+    The pre-existing wiring test compares app.list_tools() against _WIRED.mcp_tools — both
+    sides exclude a late-registered tool, so it passes either way. This asserts against the
+    literal expected names instead.
+    """
+    import asyncio
+
+    import bathos.mcp as m
+
+    exposed = {t.name for t in asyncio.run(m.app.list_tools())}
+    for name in ("reference_list", "reference_get", "reference_search", "reference_applicable"):
+        assert name in exposed, f"{name} is registered but not wired onto the server"

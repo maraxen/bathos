@@ -16,5 +16,10 @@ A placeholder label (`"TODO"`, `"hypothesis 1"`) is treated the same as a missin
 it conveys the same amount.
 
 **What to do.** Give every opaque id a one-line `label` that states the hypothesis or confound
-in words. This is checked at `bth claim validate` and escalates to an error at register and
-conclude, so it is cheaper to fix at authoring time.
+in words.
+
+**Enforcement, stated precisely.** A *blank or missing* label is an error in `validate_claim`
+(`claim.py`). A *placeholder* label — `"TODO"`, `"hypothesis 1"` — is **only ever a lint
+warning**: `is_placeholder_label` is called from `linter.py` alone, and neither `register_claim`
+nor `conclude_campaign` calls `validate_claim` at all. So nothing downstream will catch a
+placeholder for you. Fix it at authoring time because no gate will.

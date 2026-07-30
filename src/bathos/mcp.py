@@ -2762,35 +2762,6 @@ async def mcp_repair_tool(
 # previous @app.tool(...) registrations.
 # ============================================================================
 
-_WIRED = cisternal.wire(
-    app,
-    registry="bathos",
-    expected=[
-        "list_runs", "find_runs", "get_run", "cite_run", "lineage_prov",
-        "run_sql", "resolve_pin", "get_trust_state", "query_attestation",
-        "read_campaign_report", "read_figure_manifest", "figure_lookup",
-        "list_candidates", "anchor_insert", "anchor_get", "anchor_find",
-        "figure_entry_register", "attestation_scaffold", "attestation_validate",
-        "attestation_register", "graduate_product", "compact", "archive",
-        "check", "capability_probe", "sync", "init", "run", "campaign_create",
-        "campaign_list", "campaign_review", "campaign_conclude",
-        "postmortem_scaffold", "postmortem_validate", "postmortem_get",
-        "claim_scaffold", "claim_validate", "claim_register", "gate_stamp",
-        "gate_status", "claim_attest_parity", "validate_sidecar",
-        "list_outputs", "outputs_summary", "campaign_add", "campaign_show",
-        "verify", "lint", "repair_scan", "repair",
-    ],
-)
-
-
-def mcp_server():
-    """Entry point for MCP server (stdio transport).
-
-    Called by pyproject.toml entry point: bth-mcp
-    """
-    init_server_telemetry()
-    app.run()
-
 
 # ── rule-card corpus (mirrors `bth ref`) ─────────────────────────────────────
 
@@ -2893,5 +2864,37 @@ async def reference_applicable(script: str, catalog_dir: str | None = None) -> d
 
 
 if __name__ == "__main__":
+    init_server_telemetry()
+    app.run()
+
+
+_WIRED = cisternal.wire(
+    app,
+    registry="bathos",
+    expected=[
+        "list_runs", "find_runs", "get_run", "cite_run", "lineage_prov",
+        "run_sql", "resolve_pin", "get_trust_state", "query_attestation",
+        "read_campaign_report", "read_figure_manifest", "figure_lookup",
+        "list_candidates", "anchor_insert", "anchor_get", "anchor_find",
+        "figure_entry_register", "attestation_scaffold", "attestation_validate",
+        "attestation_register", "graduate_product", "compact", "archive",
+        "check", "capability_probe", "sync", "init", "run", "campaign_create",
+        "campaign_list", "campaign_review", "campaign_conclude",
+        "postmortem_scaffold", "postmortem_validate", "postmortem_get",
+        "claim_scaffold", "claim_validate", "claim_register", "gate_stamp",
+        "gate_status", "claim_attest_parity", "validate_sidecar",
+        "list_outputs", "outputs_summary", "campaign_add", "campaign_show",
+        "verify", "lint", "repair_scan", "repair",
+        "reference_list", "reference_get", "reference_search",
+        "reference_applicable",
+    ],
+)
+
+
+def mcp_server():
+    """Entry point for MCP server (stdio transport).
+
+    Called by pyproject.toml entry point: bth-mcp
+    """
     init_server_telemetry()
     app.run()
