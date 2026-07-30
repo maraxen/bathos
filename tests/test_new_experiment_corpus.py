@@ -36,7 +36,7 @@ def test_scaffold_survives_an_unreadable_corpus(tmp_path, monkeypatch):
     """A scaffold must not fail because the corpus cannot be read."""
     import bathos.corpus as corpus_mod
 
-    def boom(*a, **k):
+    def boom(*_a, **_k):
         raise RuntimeError("corpus unavailable")
 
     monkeypatch.setattr(corpus_mod, "load_corpus", boom)
