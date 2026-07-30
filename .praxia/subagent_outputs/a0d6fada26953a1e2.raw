@@ -1,1 +1,0 @@
-Building the literature-parity v1 epic (reference-parity validation workflow) in bathos. Brainstorm, design, and adversarial review are done; epic #2214 plus its 9-task DAG are registered and Wave 1 (parity.py schema, cap-lattice grader, skill section) is implementing now. Next: integrate, run the Sonnet auditor, and report for your Wave 2 go-ahead.

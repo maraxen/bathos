@@ -1,1 +1,0 @@
-Goal: make bth resolve workspace root correctly from git worktrees. Done and merged to main (be85939); full suite 677 passed, handoff written. Next action: close praxia backlog items #1676–#1683 as done.

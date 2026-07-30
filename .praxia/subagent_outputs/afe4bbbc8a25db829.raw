@@ -1,1 +1,0 @@
-Goal was to ship the bathos repair feature: I merged the worktree to main and released v0.10.0 with 620 tests passing, bumped version, updated the changelog and skill, re-exported, and reinstalled the editable tool. Next action is yours: push main when ready.

@@ -1,1 +1,0 @@
-Fixing bathos to prevent output JSONs from going to temp directories. The skill has bad examples teaching /tmp paths — next step is implementing the fix: update the skill examples, add a rule, add a runtime warning, and add a lint check.

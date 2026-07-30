@@ -1,1 +1,0 @@
-fixed: research data is precious and must not be deleted without explicit confirmation; SLURM-safe atomic ops required; DuckDB+PyArrow only. negotiable: command name, whether repair lives as a flag on verify or a standalone subcommand, scope of what's auto-fixable vs requiring user confirmation

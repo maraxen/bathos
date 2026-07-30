@@ -1,1 +1,0 @@
-We're designing a unified telemetry layer for bathos (stdlib logging + QueueHandler → JSONL at ~/.bth/logs/events.jsonl, covering CLI runner, sync, catalog, and async MCP). I just proposed the module layout; next is your sign-off so I can move to event taxonomy and schema.

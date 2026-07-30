@@ -1,1 +1,0 @@
-Implemented full telemetry logging across all 13 bathos modules per the approved spec — 368 tests pass, 6 commits on main. Smoke test by running any bth command and tailing the JSONL log.

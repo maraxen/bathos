@@ -1,1 +1,0 @@
-Composed the v0.6.1 sprint plan covering four items: a validate.py bug fix, gate taxonomy cleanup, sprint-audit threshold tests, and NLM hook wiring. Ready to start dispatching — S0 (commit the validate.py fix) first.

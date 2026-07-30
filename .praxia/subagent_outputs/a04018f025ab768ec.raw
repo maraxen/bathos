@@ -1,7 +1,0 @@
-The recon is complete. Here is the summary of findings for item #792:
-
-**Relevant files:** campaigns.py, schema.py, compact.py, sidecar.py, prereg.py, sprint_audit.py, cli.py, mcp.py, test_campaigns.py, plus the NLM synthesis doc (section 2.6) and the v0.6.1 sprint composition doc (deferred section).
-
-**Current state:** The campaign primitive is purely a bookkeeping construct. Campaigns have two modes (exploration/confirmation), a join table recording (campaign_id, run_id) with no statistical state, and a review function that computes only descriptive rates. Sidecars produce outcome labels via DuckDB SQL conditions — no numeric test statistics or likelihood ratios. There is no e-value accumulation anywhere in the codebase.
-
-**Why "request_more_recon":** The six design questions explicitly documented in the sprint handoff (null model representation, e-value formula per run, mixed-outcome handling, [popper] sidecar placement, schema migration, adversarial_check interaction) are all still open. A seventh gap — no sprint-audit signal for POPPER campaigns — is also unaddressed. This item cannot be specced without a design session that answers at least the null model and per-run formula questions, since every downstream component (sidecar parser, campaign schema DDL, accumulation logic, stopping-rule evaluation, CLI surface) depends on those answers. The research synthesis doc (section 2.6) describes the concept but explicitly labels it "exploratory — needs design work before backlogging."

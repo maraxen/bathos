@@ -1,2 +1,0 @@
-Goal was systematizing bathos post-mortems and review schema while dogfooding praxia's rig-run flows. Design is agreed and shipped as PR #33; praxia fix is PR #61. Next: run `cargo test -p praxia-rig-tools verification_probe --lib` once the box stops thrashing.
-Goal was systematizing bathos post-mortems and review schema while dogfooding praxia's rig-run flows. Design is agreed and shipped as PR #33; praxia fix is PR #61. Next: run `cargo test -p praxia-rig-tools verification_probe --lib` once the box stops thrashing.

@@ -1,1 +1,0 @@
-We audited bathos backup and recovery mechanisms. The warm DB tier has no transaction safety and no restore tooling — the recommended next action is wrapping compact's ingest loop in a DuckDB transaction.

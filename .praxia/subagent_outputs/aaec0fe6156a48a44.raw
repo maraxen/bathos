@@ -1,9 +1,0 @@
-Files changed:
-- `src/bathos/sidecar.py` — added `source: str = ""` to `OutcomeSpec`; updated `_parse_outcomes` to read `source`; added `regression_threshold_basis: str = ""` to `Sidecar`; updated `parse_sidecar` benchmark branch to read `regression_threshold_basis`
-- `src/bathos/linter.py` — added `_NUMERIC_LITERAL_RE` constant; added `check_threshold_basis` function
-- `src/bathos/cli.py` — added `check_threshold_basis` to import and call after `check_adversarial_checks`
-- `tests/test_threshold_lint.py` — removed 13 `@pytest.mark.xfail` decorators (implementation now exists)
-
-Test result summary: 500 passed, 4 skipped, 0 failures (previously 498 passing; the 15 new tests from `test_threshold_lint.py` all pass, with 2 pre-existing skips unchanged and 2 new skips from decorators).
-
-Commit SHA: `6c6b1a8`

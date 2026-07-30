@@ -1,1 +1,0 @@
-Cleaned up 10 stale worktrees, bumped bathos to v0.7.0, promoted fastmcp to a main dependency, and reinstalled the tool with viz extras. Run `bth --version` to confirm everything looks good on your end.

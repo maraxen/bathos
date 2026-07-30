@@ -1,1 +1,0 @@
-Goal: ship the literature-parity gates (epic #2214). A Sonnet fixer is finishing the final gate logic on the B1 schema-v9 remediation. Next: grep-verify its output, run the suite, audit the full diff, then report for your W4 decision.

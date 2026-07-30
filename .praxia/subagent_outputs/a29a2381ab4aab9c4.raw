@@ -1,6 +1,0 @@
-- `bth repair` as a standalone subcommand — explicit, discoverable, follows the noun-verb pattern of `bth compact` and `bth archive`; accepts `--tier cool/warm/archive/all` mirroring `bth verify`'s own flag
-- `bth verify --fix` flag — co-locates detection and repair on one command, surgical opt-in, consistent with tools like `eslint --fix` and `ruff --fix`; risk: conflates read-only audit with mutating action
-- `bth verify` emits a repair plan file (`.bth/repair-plan.toml`), then `bth repair --apply` executes it — two-phase explicit commit; gives user a reviewable artifact before any mutation
-- `bth compact --repair` augmentation — repair is scoped only to cool→warm compaction integrity; no new surface, fits the "compact fixes what compact broke" mental model, but silently narrows repair scope
-- Per-command `--repair` flags on the commands that own each tier: `bth compact --repair`, `bth migrate --repair`, `bth sync --repair` — each command repairs only what it manages; maximally composable but scattered discoverability
-- `bth doctor` — a dedicated diagnostic-and-fix subcommand in the style of `brew doctor` / `cargo fix`; runs verify + proposes fixes interactively; higher ceremony but signals "this is a recovery workflow, not a normal operation"

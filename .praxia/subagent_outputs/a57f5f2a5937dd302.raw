@@ -1,1 +1,0 @@
-Worktree-aware workspace resolution for bathos is fully shipped: designed via contemplex, hardened by spec-challenger/defender, implemented, tested (677 passing), merged to main (be85939), and backlog #1676–1683 marked complete. Next: optionally tackle deferred item D1 (shared-DB compaction race) in a new session.

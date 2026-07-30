@@ -1,2 +1,0 @@
-Goal was systematizing bathos post-mortems and shipping a rule-card corpus, plus dogfooding praxia's rig-run flows. The praxia fix is merged and verified green; bathos PR #33 holds the agreed design. Next: convert linter.py's 12 checks into corpus cards.
-Goal was systematizing bathos post-mortems and shipping a rule-card corpus, plus dogfooding praxia's rig-run flows. The praxia fix is merged and verified green; bathos PR #33 holds the agreed design. Next: convert linter.py's 12 checks into corpus cards.

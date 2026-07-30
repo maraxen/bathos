@@ -54,3 +54,11 @@ tmp/
 # transient write locks and temp files
 .praxia/*.lock
 .praxia/*.tmp
+# raw per-run subagent transcripts: hash-named .raw dumps, 404 files / 2.6M,
+# not referenced by any doc, handoff or sprint plan
+.praxia/subagent_outputs/
+# byte-offset cursor state for incremental extraction — machine-local
+.praxia/tools/
+# records local worktree branch names from a past sprint — machine-local and
+# transient (the worktrees it names are long gone)
+.praxia/worktree_manifests/

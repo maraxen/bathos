@@ -1,1 +1,0 @@
-Building the literature-parity v1 epic (#2214) on bathos through brainstorm→design→review→waved implementation. Wave 2 is mid-flight: T5 (atomic attest_parity) landed with a flagged atomicity risk; waiting on T4 (parity_validate.py). Next: integrate both, run the Sonnet audit, pause for your W3 go-ahead.

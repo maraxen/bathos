@@ -1,9 +1,0 @@
-Audit persisted. Final defense report delivered above.
-
-**Summary for the oracle:**
-
-- **VERDICT: NEEDS_WORK** — R-A is the right resolution and should proceed, but with named amendments, not as-is.
-- **Defended:** the architecture (first-class COOL column), the R-B/R-C rejections (both verified Risk HIGH for the stated reasons), the migration back-compat analysis (idempotent ALTER, NULL=non-parity, no retro-classification), and the AC-20 deferral (genuinely orthogonal verdict-artifact SHA feature; deferring opens no gate hole because the feature is unshipped with no production parity runs).
-- **Conceded D1 (the one that matters):** the note's "exact clone of the `claim_isolates` triple, Risk LOW" framing is materially wrong. `claim_discriminates`/`claim_isolates` are absent from the compact INSERT (`compact.py:625-673`), never set on any Run, and tested only via direct warm `INSERT` (`test_claim.py:388/409/1295/1299`) — i.e. NULL-on-ingest, the exact bug B1 exists to fix. The correct exemplar is `stage_name`, which is complete end-to-end (`runner.py:290` write + `compact.py:631/672/271/483/201`). Re-anchor on it, promote the compact-INSERT edit from a flagged "ALSO/possible bug" to a P0 step, and require a real runner→compact→warm test.
-- **Conceded D2 (minor):** the change-set omits adding `parity_run_type` to the `_default_array` NULL-allowlist at `migrate.py:153`.
-- No `needs_recon` — every gap is closable by editing the note's change-set and the named source lines.

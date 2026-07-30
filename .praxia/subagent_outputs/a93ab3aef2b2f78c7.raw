@@ -1,2 +1,0 @@
-Goal was systematizing bathos post-mortems, review schema, and a shipped corpus; the design is merged (PR #33) and the praxia tooling fix is merged and verified. Next action: convert linter.py's twelve checks into rule cards under agent_assets/corpus/.
-Goal was systematizing bathos post-mortems, review schema, and a shipped corpus; the design is merged (PR #33) and the praxia tooling fix is merged and verified. Next action: convert linter.py's twelve checks into rule cards under agent_assets/corpus/.
