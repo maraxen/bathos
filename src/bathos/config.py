@@ -42,7 +42,9 @@ def load_project_config(path: Path) -> ProjectConfig:
     return ProjectConfig(
         slug=project["slug"],
         root=Path(project["root"]).expanduser(),
-        catalog_dir=Path(project["catalog_dir"]).expanduser() if "catalog_dir" in project else default_catalog_dir(),
+        catalog_dir=Path(project["catalog_dir"]).expanduser()
+        if "catalog_dir" in project
+        else default_catalog_dir(),
         remotes=data.get("remotes", {}),
         slurm=data.get("slurm", {}),
         sync_filter=project.get("sync_filter", "project_slug"),
@@ -66,7 +68,9 @@ def register_project(slug: str, catalog_dir: Path) -> None:
         PROJECTS_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
         PROJECTS_REGISTRY.write_text(toml.dumps(registry))
     except Exception as e:
-        logger.warning(f"Failed to register project {slug} in global registry: {e}")  # Registry is best-effort; never block init
+        logger.warning(
+            f"Failed to register project {slug} in global registry: {e}"
+        )  # Registry is best-effort; never block init
 
 
 def list_registered_projects() -> list[dict]:

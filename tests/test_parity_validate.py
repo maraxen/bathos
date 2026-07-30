@@ -280,7 +280,9 @@ class TestParityValidateParsing:
 class TestParityValidateScriptIntegration:
     """Integration tests for parity_validate.py script."""
 
-    def test_script_produces_result_json(self, sample_parity_toml: Path, sample_evidence: dict, temp_dir: Path):
+    def test_script_produces_result_json(
+        self, sample_parity_toml: Path, sample_evidence: dict, temp_dir: Path
+    ):
         """Verify parity_validate.py script produces valid result JSON."""
         import subprocess
         import sys
@@ -315,7 +317,9 @@ class TestParityValidateScriptIntegration:
         assert "output_shas" in result_data
         assert len(result_data["output_paths"]) == 3
 
-    def test_script_creates_triple_artifacts(self, sample_parity_toml: Path, sample_evidence: dict, temp_dir: Path):
+    def test_script_creates_triple_artifacts(
+        self, sample_parity_toml: Path, sample_evidence: dict, temp_dir: Path
+    ):
         """Verify script creates the three artifact files."""
         import subprocess
         import sys
@@ -357,7 +361,9 @@ class TestParityValidateScriptIntegration:
         invariant_text = invariant.read_text()
         assert "def test_invariant" in invariant_text
 
-    def test_script_registers_shas(self, sample_parity_toml: Path, sample_evidence: dict, temp_dir: Path):
+    def test_script_registers_shas(
+        self, sample_parity_toml: Path, sample_evidence: dict, temp_dir: Path
+    ):
         """Verify script registers correct SHA256 hashes for artifacts."""
         import subprocess
         import sys

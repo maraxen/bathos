@@ -12,7 +12,10 @@ def _write_toml(tmp_path: Path, content: str) -> Path:
 
 def test_parse_experiment_sidecar(tmp_path):
     from bathos.sidecar import SidecarKind, parse_sidecar
-    path = _write_toml(tmp_path, """
+
+    path = _write_toml(
+        tmp_path,
+        """
         [experiment]
         hypothesis = "NVT maintains ±5K over 50ps"
         [outcomes.pass]
@@ -26,7 +29,8 @@ def test_parse_experiment_sidecar(tmp_path):
         is_residual = true
         [result_schema]
         temp_std = "float"
-    """)
+    """,
+    )
     s = parse_sidecar(path)
     assert s.kind == SidecarKind.EXPERIMENT
     assert s.hypothesis == "NVT maintains ±5K over 50ps"
@@ -37,7 +41,10 @@ def test_parse_experiment_sidecar(tmp_path):
 
 def test_parse_benchmark_sidecar(tmp_path):
     from bathos.sidecar import SidecarKind, parse_sidecar
-    path = _write_toml(tmp_path, """
+
+    path = _write_toml(
+        tmp_path,
+        """
         [benchmark]
         baseline_ref = "run_abc123"
         metric = "ns_per_day"
@@ -45,7 +52,8 @@ def test_parse_benchmark_sidecar(tmp_path):
         target = "> 50 ns/day"
         [result_schema]
         ns_per_day = "float"
-    """)
+    """,
+    )
     s = parse_sidecar(path)
     assert s.kind == SidecarKind.BENCHMARK
     assert s.baseline_ref == "run_abc123"
@@ -54,15 +62,18 @@ def test_parse_benchmark_sidecar(tmp_path):
 
 def test_parse_sidecar_invalid_toml(tmp_path):
     from bathos.sidecar import SidecarError
+
     path = tmp_path / "run_test.bth.toml"
     path.write_text("not valid toml ][[[")
     with pytest.raises(SidecarError, match="Failed to parse"):
         from bathos.sidecar import parse_sidecar
+
         parse_sidecar(path)
 
 
 def test_find_sidecar_found(tmp_path):
     from bathos.sidecar import find_sidecar
+
     script = tmp_path / "run_nvt.py"
     script.touch()
     sidecar = tmp_path / "run_nvt.bth.toml"
@@ -72,6 +83,7 @@ def test_find_sidecar_found(tmp_path):
 
 def test_find_sidecar_missing(tmp_path):
     from bathos.sidecar import find_sidecar
+
     script = tmp_path / "run_nvt.py"
     script.touch()
     assert find_sidecar(script) is None
@@ -79,6 +91,7 @@ def test_find_sidecar_missing(tmp_path):
 
 def test_is_in_enforced_dir_true(tmp_path):
     from bathos.sidecar import is_in_enforced_dir
+
     script = tmp_path / "scripts" / "experiments" / "run_nvt.py"
     script.parent.mkdir(parents=True)
     script.touch()
@@ -87,6 +100,7 @@ def test_is_in_enforced_dir_true(tmp_path):
 
 def test_is_in_enforced_dir_false(tmp_path):
     from bathos.sidecar import is_in_enforced_dir
+
     script = tmp_path / "scripts" / "scratch" / "explore_data.py"
     script.parent.mkdir(parents=True)
     script.touch()
@@ -95,7 +109,10 @@ def test_is_in_enforced_dir_false(tmp_path):
 
 def test_evaluate_outcome_pass(tmp_path):
     from bathos.sidecar import evaluate_outcome, parse_sidecar
-    path = _write_toml(tmp_path, """
+
+    path = _write_toml(
+        tmp_path,
+        """
         [experiment]
         hypothesis = "h"
         [outcomes.pass]
@@ -109,7 +126,8 @@ def test_evaluate_outcome_pass(tmp_path):
         is_residual = true
         [result_schema]
         temp_std = "float"
-    """)
+    """,
+    )
     s = parse_sidecar(path)
     label = evaluate_outcome(s, {"temp_std": 2.1})
     assert label == "pass"
@@ -117,7 +135,10 @@ def test_evaluate_outcome_pass(tmp_path):
 
 def test_evaluate_outcome_no_match(tmp_path):
     from bathos.sidecar import evaluate_outcome, parse_sidecar
-    path = _write_toml(tmp_path, """
+
+    path = _write_toml(
+        tmp_path,
+        """
         [experiment]
         hypothesis = "h"
         [outcomes.pass]
@@ -131,7 +152,8 @@ def test_evaluate_outcome_no_match(tmp_path):
         is_residual = true
         [result_schema]
         temp_std = "float"
-    """)
+    """,
+    )
     s = parse_sidecar(path)
     # value that matches no condition (shouldn't happen in well-formed sidecars, but be safe)
     label = evaluate_outcome(s, {})
@@ -140,7 +162,10 @@ def test_evaluate_outcome_no_match(tmp_path):
 
 def test_evaluate_outcome_bool_result(tmp_path):
     from bathos.sidecar import evaluate_outcome, parse_sidecar
-    path = _write_toml(tmp_path, """
+
+    path = _write_toml(
+        tmp_path,
+        """
         [debug]
         symptom = "NaN forces"
         suspected_cause = "PME grid"
@@ -156,7 +181,8 @@ def test_evaluate_outcome_bool_result(tmp_path):
         is_residual = true
         [verdict_schema]
         reproduced = "bool"
-    """)
+    """,
+    )
     s = parse_sidecar(path)
     label = evaluate_outcome(s, {"reproduced": True})
     assert label == "reproduced"
@@ -165,7 +191,10 @@ def test_evaluate_outcome_bool_result(tmp_path):
 def test_evaluate_outcome_none_field_does_not_crash(tmp_path):
     """A None-valued result field must not crash evaluation (regression: debt #478)."""
     from bathos.sidecar import evaluate_outcome, parse_sidecar
-    path = _write_toml(tmp_path, """
+
+    path = _write_toml(
+        tmp_path,
+        """
         [experiment]
         hypothesis = "h"
         [outcomes.pass]
@@ -180,7 +209,8 @@ def test_evaluate_outcome_none_field_does_not_crash(tmp_path):
         [result_schema]
         temp_std = "float"
         seed_override = "int"
-    """)
+    """,
+    )
     s = parse_sidecar(path)
     label = evaluate_outcome(s, {"temp_std": 2.1, "seed_override": None})
     assert label == "pass"
@@ -189,7 +219,10 @@ def test_evaluate_outcome_none_field_does_not_crash(tmp_path):
 def test_evaluate_outcome_nested_dict_field_does_not_crash(tmp_path):
     """A nested-dict result field (e.g. an 'args' blob) must not crash evaluation (regression: debt #478)."""
     from bathos.sidecar import evaluate_outcome, parse_sidecar
-    path = _write_toml(tmp_path, """
+
+    path = _write_toml(
+        tmp_path,
+        """
         [experiment]
         hypothesis = "h"
         [outcomes.pass]
@@ -203,7 +236,8 @@ def test_evaluate_outcome_nested_dict_field_does_not_crash(tmp_path):
         is_residual = true
         [result_schema]
         temp_std = "float"
-    """)
+    """,
+    )
     s = parse_sidecar(path)
     label = evaluate_outcome(s, {"temp_std": 2.1, "args": {"accuracy": 0.9, "loss": None}})
     assert label == "pass"
@@ -212,7 +246,10 @@ def test_evaluate_outcome_nested_dict_field_does_not_crash(tmp_path):
 def test_evaluate_outcome_string_with_apostrophe_does_not_crash(tmp_path):
     """A string result field containing an apostrophe must not break the generated SQL literal."""
     from bathos.sidecar import evaluate_outcome, parse_sidecar
-    path = _write_toml(tmp_path, """
+
+    path = _write_toml(
+        tmp_path,
+        """
         [experiment]
         hypothesis = "h"
         [outcomes.pass]
@@ -227,7 +264,8 @@ def test_evaluate_outcome_string_with_apostrophe_does_not_crash(tmp_path):
         [result_schema]
         temp_std = "float"
         note = "str"
-    """)
+    """,
+    )
     s = parse_sidecar(path)
     label = evaluate_outcome(s, {"temp_std": 2.1, "note": "it's fine"})
     assert label == "pass"
@@ -235,7 +273,10 @@ def test_evaluate_outcome_string_with_apostrophe_does_not_crash(tmp_path):
 
 def test_sidecar_agent_mode_parsed(tmp_path):
     from bathos.sidecar import parse_sidecar
-    path = _write_toml(tmp_path, """
+
+    path = _write_toml(
+        tmp_path,
+        """
         [experiment]
         hypothesis = "Test hypothesis"
         agent_mode = "autonomous"
@@ -250,14 +291,18 @@ def test_sidecar_agent_mode_parsed(tmp_path):
         is_residual = true
         [result_schema]
         value = "float"
-    """)
+    """,
+    )
     sidecar = parse_sidecar(path)
     assert sidecar.agent_mode == "autonomous"
 
 
 def test_sidecar_agent_mode_default(tmp_path):
     from bathos.sidecar import parse_sidecar
-    path = _write_toml(tmp_path, """
+
+    path = _write_toml(
+        tmp_path,
+        """
         [experiment]
         hypothesis = "Test hypothesis"
         [outcomes.pass]
@@ -271,7 +316,8 @@ def test_sidecar_agent_mode_default(tmp_path):
         is_residual = true
         [result_schema]
         value = "float"
-    """)
+    """,
+    )
     sidecar = parse_sidecar(path)
     assert sidecar.agent_mode == ""
 
@@ -279,7 +325,10 @@ def test_sidecar_agent_mode_default(tmp_path):
 def test_evaluate_outcome_raises_sidecar_error_on_bad_sql(tmp_path):
     """When outcome condition has invalid SQL, evaluate_outcome raises SidecarError."""
     from bathos.sidecar import SidecarError, evaluate_outcome, parse_sidecar
-    path = _write_toml(tmp_path, """
+
+    path = _write_toml(
+        tmp_path,
+        """
         [experiment]
         hypothesis = "test"
         [outcomes.bad]
@@ -289,7 +338,8 @@ def test_evaluate_outcome_raises_sidecar_error_on_bad_sql(tmp_path):
         is_residual = true
         [result_schema]
         x = "float"
-    """)
+    """,
+    )
     s = parse_sidecar(path)
     # Should raise SidecarError because SQL is invalid
     with pytest.raises(SidecarError):
@@ -299,7 +349,10 @@ def test_evaluate_outcome_raises_sidecar_error_on_bad_sql(tmp_path):
 def test_parse_experiment_sidecar_with_stage_name(tmp_path):
     """Parse stage_name from [experiment] block."""
     from bathos.sidecar import parse_sidecar
-    path = _write_toml(tmp_path, """
+
+    path = _write_toml(
+        tmp_path,
+        """
         [experiment]
         hypothesis = "Test hypothesis"
         stage_name = "validation"
@@ -314,7 +367,8 @@ def test_parse_experiment_sidecar_with_stage_name(tmp_path):
         is_residual = true
         [result_schema]
         value = "float"
-    """)
+    """,
+    )
     sidecar = parse_sidecar(path)
     assert sidecar.stage_name == "validation"
 
@@ -322,7 +376,10 @@ def test_parse_experiment_sidecar_with_stage_name(tmp_path):
 def test_parse_experiment_sidecar_stage_name_default(tmp_path):
     """When stage_name absent, default to 'exploration'."""
     from bathos.sidecar import parse_sidecar
-    path = _write_toml(tmp_path, """
+
+    path = _write_toml(
+        tmp_path,
+        """
         [experiment]
         hypothesis = "Test hypothesis"
         [outcomes.pass]
@@ -336,7 +393,8 @@ def test_parse_experiment_sidecar_stage_name_default(tmp_path):
         is_residual = true
         [result_schema]
         value = "float"
-    """)
+    """,
+    )
     sidecar = parse_sidecar(path)
     assert sidecar.stage_name == "exploration"
 
@@ -347,7 +405,9 @@ def test_parse_experiment_sidecar_stage_name_invalid_coerces_to_exploration(tmp_
 
     from bathos.sidecar import parse_sidecar
 
-    path = _write_toml(tmp_path, """
+    path = _write_toml(
+        tmp_path,
+        """
         [experiment]
         hypothesis = "Test hypothesis"
         stage_name = "invalid-stage-with-numbers-123"
@@ -362,7 +422,8 @@ def test_parse_experiment_sidecar_stage_name_invalid_coerces_to_exploration(tmp_
         is_residual = true
         [result_schema]
         value = "float"
-    """)
+    """,
+    )
 
     with caplog.at_level(logging.WARNING, logger="bathos.sidecar"):
         sidecar = parse_sidecar(path)
@@ -377,7 +438,10 @@ def test_parse_experiment_sidecar_stage_name_invalid_coerces_to_exploration(tmp_
 def test_parse_experiment_sidecar_with_novel(tmp_path):
     """Parse novel field from [experiment] block."""
     from bathos.sidecar import parse_sidecar
-    path = _write_toml(tmp_path, """
+
+    path = _write_toml(
+        tmp_path,
+        """
         [experiment]
         hypothesis = "Test hypothesis"
         novel = true
@@ -392,7 +456,8 @@ def test_parse_experiment_sidecar_with_novel(tmp_path):
         is_residual = true
         [result_schema]
         value = "float"
-    """)
+    """,
+    )
     sidecar = parse_sidecar(path)
     assert sidecar.novel is True
 
@@ -400,7 +465,10 @@ def test_parse_experiment_sidecar_with_novel(tmp_path):
 def test_parse_experiment_sidecar_novel_default(tmp_path):
     """When novel absent, default to False."""
     from bathos.sidecar import parse_sidecar
-    path = _write_toml(tmp_path, """
+
+    path = _write_toml(
+        tmp_path,
+        """
         [experiment]
         hypothesis = "Test hypothesis"
         [outcomes.pass]
@@ -414,7 +482,8 @@ def test_parse_experiment_sidecar_novel_default(tmp_path):
         is_residual = true
         [result_schema]
         value = "float"
-    """)
+    """,
+    )
     sidecar = parse_sidecar(path)
     assert sidecar.novel is False
 
@@ -422,7 +491,10 @@ def test_parse_experiment_sidecar_novel_default(tmp_path):
 def test_parse_experiment_sidecar_with_reproduction_block(tmp_path):
     """Parse [reproduction] block with all four fields."""
     from bathos.sidecar import parse_sidecar
-    path = _write_toml(tmp_path, """
+
+    path = _write_toml(
+        tmp_path,
+        """
         [experiment]
         hypothesis = "Test hypothesis"
         [outcomes.pass]
@@ -441,7 +513,8 @@ def test_parse_experiment_sidecar_with_reproduction_block(tmp_path):
         reproduces_run = "12345678-1234-5678-1234-567812345678"
         tolerance_pct = 5.0
         requires_pass_stem = "baseline_run"
-    """)
+    """,
+    )
     sidecar = parse_sidecar(path)
     assert sidecar.reproduction is not None
     assert sidecar.reproduction.reproduces_paper == "10.1234/example.doi"
@@ -453,7 +526,10 @@ def test_parse_experiment_sidecar_with_reproduction_block(tmp_path):
 def test_parse_experiment_sidecar_reproduction_block_partial(tmp_path):
     """[reproduction] block with only some fields set."""
     from bathos.sidecar import parse_sidecar
-    path = _write_toml(tmp_path, """
+
+    path = _write_toml(
+        tmp_path,
+        """
         [experiment]
         hypothesis = "Test hypothesis"
         [outcomes.pass]
@@ -469,7 +545,8 @@ def test_parse_experiment_sidecar_reproduction_block_partial(tmp_path):
         value = "float"
         [reproduction]
         reproduces_paper = "Smith et al. 2023"
-    """)
+    """,
+    )
     sidecar = parse_sidecar(path)
     assert sidecar.reproduction is not None
     assert sidecar.reproduction.reproduces_paper == "Smith et al. 2023"
@@ -481,7 +558,10 @@ def test_parse_experiment_sidecar_reproduction_block_partial(tmp_path):
 def test_parse_experiment_sidecar_reproduction_block_absent(tmp_path):
     """When [reproduction] absent, reproduction is None."""
     from bathos.sidecar import parse_sidecar
-    path = _write_toml(tmp_path, """
+
+    path = _write_toml(
+        tmp_path,
+        """
         [experiment]
         hypothesis = "Test hypothesis"
         [outcomes.pass]
@@ -495,7 +575,8 @@ def test_parse_experiment_sidecar_reproduction_block_absent(tmp_path):
         is_residual = true
         [result_schema]
         value = "float"
-    """)
+    """,
+    )
     sidecar = parse_sidecar(path)
     assert sidecar.reproduction is None
 
@@ -505,7 +586,10 @@ def test_parse_experiment_sidecar_reproduction_block_unknown_key_warning(tmp_pat
     import logging
 
     from bathos.sidecar import parse_sidecar
-    path = _write_toml(tmp_path, """
+
+    path = _write_toml(
+        tmp_path,
+        """
         [experiment]
         hypothesis = "Test hypothesis"
         [outcomes.pass]
@@ -522,7 +606,8 @@ def test_parse_experiment_sidecar_reproduction_block_unknown_key_warning(tmp_pat
         [reproduction]
         reproduces_paper = "test"
         unknown_field = "should warn"
-    """)
+    """,
+    )
     with caplog.at_level(logging.WARNING, logger="bathos.sidecar"):
         sidecar = parse_sidecar(path)
 
@@ -533,7 +618,10 @@ def test_parse_experiment_sidecar_reproduction_block_unknown_key_warning(tmp_pat
 def test_parse_experiment_sidecar_controls_block(tmp_path):
     """[controls] block with positive_outcome and negative_outcome is parsed correctly."""
     from bathos.sidecar import parse_sidecar
-    path = _write_toml(tmp_path, """
+
+    path = _write_toml(
+        tmp_path,
+        """
         [experiment]
         hypothesis = "Test hypothesis"
         [outcomes.ctrl_pass]
@@ -550,7 +638,8 @@ def test_parse_experiment_sidecar_controls_block(tmp_path):
         [controls]
         positive_outcome = ["ctrl_pass"]
         negative_outcome = ["ctrl_fail"]
-    """)
+    """,
+    )
     sidecar = parse_sidecar(path)
     assert sidecar.controls is not None
     assert sidecar.controls.positive_outcome == ["ctrl_pass"]
@@ -560,7 +649,10 @@ def test_parse_experiment_sidecar_controls_block(tmp_path):
 def test_parse_experiment_sidecar_controls_block_absent(tmp_path):
     """When [controls] absent, controls is None."""
     from bathos.sidecar import parse_sidecar
-    path = _write_toml(tmp_path, """
+
+    path = _write_toml(
+        tmp_path,
+        """
         [experiment]
         hypothesis = "Test hypothesis"
         [outcomes.pass]
@@ -574,7 +666,8 @@ def test_parse_experiment_sidecar_controls_block_absent(tmp_path):
         is_residual = true
         [result_schema]
         value = "float"
-    """)
+    """,
+    )
     sidecar = parse_sidecar(path)
     assert sidecar.controls is None
 
@@ -582,7 +675,10 @@ def test_parse_experiment_sidecar_controls_block_absent(tmp_path):
 def test_parse_experiment_sidecar_controls_block_empty(tmp_path):
     """Empty [controls] block creates ControlsBlock with empty lists."""
     from bathos.sidecar import parse_sidecar
-    path = _write_toml(tmp_path, """
+
+    path = _write_toml(
+        tmp_path,
+        """
         [experiment]
         hypothesis = "Test hypothesis"
         [outcomes.pass]
@@ -597,7 +693,8 @@ def test_parse_experiment_sidecar_controls_block_empty(tmp_path):
         [result_schema]
         value = "float"
         [controls]
-    """)
+    """,
+    )
     sidecar = parse_sidecar(path)
     assert sidecar.controls is not None
     assert sidecar.controls.positive_outcome == []
@@ -609,7 +706,10 @@ def test_parse_experiment_sidecar_controls_block_unknown_key_warning(tmp_path, c
     import logging
 
     from bathos.sidecar import parse_sidecar
-    path = _write_toml(tmp_path, """
+
+    path = _write_toml(
+        tmp_path,
+        """
         [experiment]
         hypothesis = "Test hypothesis"
         [outcomes.ctrl_pass]
@@ -626,7 +726,8 @@ def test_parse_experiment_sidecar_controls_block_unknown_key_warning(tmp_path, c
         [controls]
         positive_outcome = ["ctrl_pass"]
         unknown_field = "should warn"
-    """)
+    """,
+    )
     with caplog.at_level(logging.WARNING, logger="bathos.sidecar"):
         sidecar = parse_sidecar(path)
 
@@ -637,7 +738,10 @@ def test_parse_experiment_sidecar_controls_block_unknown_key_warning(tmp_path, c
 def test_parse_experiment_sidecar_differential_block(tmp_path):
     """[differential] block with all fields is parsed correctly (debt #1071)."""
     from bathos.sidecar import parse_sidecar
-    path = _write_toml(tmp_path, """
+
+    path = _write_toml(
+        tmp_path,
+        """
         [experiment]
         hypothesis = "Test hypothesis"
         [outcomes.pass]
@@ -658,7 +762,8 @@ def test_parse_experiment_sidecar_differential_block(tmp_path):
         expect = "differs"
         metric = "signal"
         min_effect = 0.05
-    """)
+    """,
+    )
     sidecar = parse_sidecar(path)
     assert sidecar.differential is not None
     assert sidecar.differential.knob == "sidechain_conditioning"
@@ -672,7 +777,10 @@ def test_parse_experiment_sidecar_differential_block(tmp_path):
 def test_parse_experiment_sidecar_differential_block_absent(tmp_path):
     """When [differential] absent, differential is None."""
     from bathos.sidecar import parse_sidecar
-    path = _write_toml(tmp_path, """
+
+    path = _write_toml(
+        tmp_path,
+        """
         [experiment]
         hypothesis = "Test hypothesis"
         [outcomes.pass]
@@ -686,7 +794,8 @@ def test_parse_experiment_sidecar_differential_block_absent(tmp_path):
         is_residual = true
         [result_schema]
         value = "float"
-    """)
+    """,
+    )
     sidecar = parse_sidecar(path)
     assert sidecar.differential is None
 
@@ -694,7 +803,10 @@ def test_parse_experiment_sidecar_differential_block_absent(tmp_path):
 def test_parse_experiment_sidecar_differential_block_defaults(tmp_path):
     """[differential] with only knob/off/on set defaults expect='differs', no metric/min_effect."""
     from bathos.sidecar import parse_sidecar
-    path = _write_toml(tmp_path, """
+
+    path = _write_toml(
+        tmp_path,
+        """
         [experiment]
         hypothesis = "Test hypothesis"
         [outcomes.pass]
@@ -712,7 +824,8 @@ def test_parse_experiment_sidecar_differential_block_defaults(tmp_path):
         knob = "some_knob"
         off = "0"
         on = "1"
-    """)
+    """,
+    )
     sidecar = parse_sidecar(path)
     assert sidecar.differential is not None
     assert sidecar.differential.expect == "differs"
@@ -725,7 +838,10 @@ def test_parse_experiment_sidecar_differential_block_unknown_key_warning(tmp_pat
     import logging
 
     from bathos.sidecar import parse_sidecar
-    path = _write_toml(tmp_path, """
+
+    path = _write_toml(
+        tmp_path,
+        """
         [experiment]
         hypothesis = "Test hypothesis"
         [outcomes.pass]
@@ -744,7 +860,8 @@ def test_parse_experiment_sidecar_differential_block_unknown_key_warning(tmp_pat
         off = "0"
         on = "1"
         unknown_field = "should warn"
-    """)
+    """,
+    )
     with caplog.at_level(logging.WARNING, logger="bathos.sidecar"):
         sidecar = parse_sidecar(path)
 

@@ -27,6 +27,7 @@ def _make_mock_popen(returncode=0, stderr_output="", stdout_output=""):
     mock_proc.stdout = StringIO(stdout_output)
     return mock_proc
 
+
 runner = CliRunner()
 
 

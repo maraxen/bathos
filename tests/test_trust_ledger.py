@@ -62,9 +62,7 @@ def catalog_dir(tmp_path):
 def _register_attestation(tmp_path, catalog_dir, content_hash, verdict, name, oracle_sha="f" * 64):
     path = tmp_path / name
     path.write_text(
-        ORACLE_MATCH_TOML.format(
-            content_hash=content_hash, verdict=verdict, oracle_sha=oracle_sha
-        )
+        ORACLE_MATCH_TOML.format(content_hash=content_hash, verdict=verdict, oracle_sha=oracle_sha)
     )
     return register_attestation(path, catalog_dir)
 
@@ -124,15 +122,21 @@ class TestAppendAndFoldLatestWins:
         content_hash = "d" * 64
         append_ledger_record(
             TrustLedgerRecord(
-                content_hash=content_hash, from_state="candidate", to_state="promoted",
-                attestation_ref="attn-1", amended_at="2026-07-14T00:00:00+00:00",
+                content_hash=content_hash,
+                from_state="candidate",
+                to_state="promoted",
+                attestation_ref="attn-1",
+                amended_at="2026-07-14T00:00:00+00:00",
             ),
             catalog_dir,
         )
         append_ledger_record(
             TrustLedgerRecord(
-                content_hash=content_hash, from_state="candidate", to_state="promoted",
-                attestation_ref="attn-2", amended_at="2026-07-14T01:00:00+00:00",
+                content_hash=content_hash,
+                from_state="candidate",
+                to_state="promoted",
+                attestation_ref="attn-2",
+                amended_at="2026-07-14T01:00:00+00:00",
             ),
             catalog_dir,
         )
@@ -157,7 +161,9 @@ class TestGraduateProductRatchetInvariant:
 
     def test_refuses_when_only_warn_attestation_exists(self, tmp_path, catalog_dir):
         content_hash = "2" * 64
-        _register_attestation(tmp_path, catalog_dir, content_hash, "WARN", "warn.attestation.bth.toml")
+        _register_attestation(
+            tmp_path, catalog_dir, content_hash, "WARN", "warn.attestation.bth.toml"
+        )
 
         with pytest.raises(GraduationRefused):
             graduate_product(catalog_dir, content_hash, "warn-ref")
@@ -166,7 +172,9 @@ class TestGraduateProductRatchetInvariant:
 
     def test_refuses_when_only_fail_attestation_exists(self, tmp_path, catalog_dir):
         content_hash = "3" * 64
-        _register_attestation(tmp_path, catalog_dir, content_hash, "FAIL", "fail.attestation.bth.toml")
+        _register_attestation(
+            tmp_path, catalog_dir, content_hash, "FAIL", "fail.attestation.bth.toml"
+        )
 
         with pytest.raises(GraduationRefused):
             graduate_product(catalog_dir, content_hash, "fail-ref")
@@ -175,7 +183,9 @@ class TestGraduateProductRatchetInvariant:
 
     def test_succeeds_when_pass_attestation_exists(self, tmp_path, catalog_dir):
         content_hash = "4" * 64
-        _register_attestation(tmp_path, catalog_dir, content_hash, "PASS", "pass.attestation.bth.toml")
+        _register_attestation(
+            tmp_path, catalog_dir, content_hash, "PASS", "pass.attestation.bth.toml"
+        )
 
         record = graduate_product(catalog_dir, content_hash, "pass-ref")
 
@@ -224,7 +234,9 @@ created_at = "2026-07-14T00:00:00Z"
         from bathos.trust_ledger import read_ledger_fragments
 
         content_hash = "a" * 64
-        _register_attestation(tmp_path, catalog_dir, content_hash, "PASS", "idempotent.attestation.bth.toml")
+        _register_attestation(
+            tmp_path, catalog_dir, content_hash, "PASS", "idempotent.attestation.bth.toml"
+        )
 
         first = graduate_product(catalog_dir, content_hash, "first-ref")
         second = graduate_product(catalog_dir, content_hash, "second-ref")
@@ -251,7 +263,9 @@ class TestGraduationSurvivesForceRebuild:
 
     def test_graduation_survives_force_rebuild(self, tmp_path, catalog_dir):
         content_hash = "6" * 64
-        _register_attestation(tmp_path, catalog_dir, content_hash, "PASS", "durable.attestation.bth.toml")
+        _register_attestation(
+            tmp_path, catalog_dir, content_hash, "PASS", "durable.attestation.bth.toml"
+        )
         graduate_product(catalog_dir, content_hash, "durable-ref")
 
         assert fold_trust_state(catalog_dir, content_hash) == "promoted"
@@ -267,7 +281,9 @@ class TestGraduationSurvivesForceRebuild:
         from bathos.readback import ProductTrustState, get_trust_state
 
         content_hash = "7" * 64
-        _register_attestation(tmp_path, catalog_dir, content_hash, "PASS", "durable2.attestation.bth.toml")
+        _register_attestation(
+            tmp_path, catalog_dir, content_hash, "PASS", "durable2.attestation.bth.toml"
+        )
         graduate_product(catalog_dir, content_hash, "durable-ref-2")
 
         compact_catalog(catalog_dir, force_rebuild=True)

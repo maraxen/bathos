@@ -5,6 +5,7 @@ AC-10: exploration/calibration tier with unmet parity prereq -> advisory only
 AC-22: warm DB absent (simulate) -> fail open (advisory)
 Plus: satisfied case (passing parity run exists) -> gate passes for all tiers
 """
+
 import textwrap
 from pathlib import Path
 
@@ -17,7 +18,8 @@ def _write_sidecar_with_parity_prereq(
 ) -> Path:
     """Write an experiment sidecar with parity prerequisite."""
     p = tmp_path / f"{script_stem}.bth.toml"
-    p.write_text(textwrap.dedent(f"""
+    p.write_text(
+        textwrap.dedent(f"""
         [experiment]
         hypothesis = "Test hypothesis"
         stage_name = "{stage_name}"
@@ -34,7 +36,8 @@ def _write_sidecar_with_parity_prereq(
         is_residual = true
         [result_schema]
         value = "float"
-    """))
+    """)
+    )
     return p
 
 
@@ -128,9 +131,7 @@ class TestParitySubmitGate:
         )
         write_run(run, catalog_dir)
 
-    def test_ac09_validation_tier_unmet_parity_prereq_hard_blocks(
-        self, tmp_path, monkeypatch
-    ):
+    def test_ac09_validation_tier_unmet_parity_prereq_hard_blocks(self, tmp_path, monkeypatch):
         """AC-09: validation tier with unmet parity prereq -> hard block (non-zero exit).
 
         Scenario: warm DB absent, cool tier has readable fragments but no parity run.
@@ -164,9 +165,7 @@ class TestParitySubmitGate:
         assert result["satisfied"] is False
         assert result["tier_enforced"] is True  # validation tier = enforced
 
-    def test_ac10_exploration_tier_unmet_parity_prereq_advisory(
-        self, tmp_path, monkeypatch
-    ):
+    def test_ac10_exploration_tier_unmet_parity_prereq_advisory(self, tmp_path, monkeypatch):
         """AC-10: exploration tier with unmet parity prereq -> advisory (no hard block).
 
         Scenario: warm DB absent, cool tier has readable fragments but no parity run.
@@ -199,9 +198,7 @@ class TestParitySubmitGate:
         assert result["satisfied"] is False
         assert result["tier_enforced"] is False  # exploration tier = advisory only
 
-    def test_ac22_warm_db_absent_fails_open_advisory(
-        self, tmp_path, monkeypatch
-    ):
+    def test_ac22_warm_db_absent_fails_open_advisory(self, tmp_path, monkeypatch):
         """AC-22: warm DB absent -> gate fails OPEN (advisory), submit not hard-blocked."""
         from bathos.parity import check_parity_confounds_for_submit
         from bathos.sidecar import parse_sidecar
@@ -229,9 +226,7 @@ class TestParitySubmitGate:
         assert result["satisfied"] in (None, False)  # indeterminate or None
         assert result["tier_enforced"] is False  # AC-22: always advisory when indeterminate
 
-    def test_satisfied_case_passing_parity_run_exists(
-        self, tmp_path, monkeypatch
-    ):
+    def test_satisfied_case_passing_parity_run_exists(self, tmp_path, monkeypatch):
         """Satisfied case: passing parity run exists -> gate passes for all tiers."""
         from bathos.parity import check_parity_confounds_for_submit
         from bathos.sidecar import parse_sidecar
@@ -260,9 +255,7 @@ class TestParitySubmitGate:
         assert result["satisfied"] is True
         assert result["tier_enforced"] is False  # satisfied, so enforcement not needed
 
-    def test_no_parity_prereq_declared_passes(
-        self, tmp_path, monkeypatch
-    ):
+    def test_no_parity_prereq_declared_passes(self, tmp_path, monkeypatch):
         """No parity prereq declared -> gate passes (no check needed)."""
         from bathos.parity import check_parity_confounds_for_submit
         from bathos.sidecar import parse_sidecar
@@ -274,7 +267,8 @@ class TestParitySubmitGate:
 
         # Write sidecar WITHOUT parity prereq
         p = tmp_path / "run_test.bth.toml"
-        p.write_text(textwrap.dedent("""
+        p.write_text(
+            textwrap.dedent("""
             [experiment]
             hypothesis = "Test hypothesis"
             [outcomes.pass]
@@ -288,7 +282,8 @@ class TestParitySubmitGate:
             is_residual = true
             [result_schema]
             value = "float"
-        """))
+        """)
+        )
 
         parsed_sidecar = parse_sidecar(p)
 
@@ -368,9 +363,7 @@ class TestAC22Variants:
     (b) Warm absent AND no readable cool fragments → satisfied=None, tier_enforced=False (fail open)
     """
 
-    def test_ac22a_readable_fragment_no_match_validation_is_hard_block(
-        self, tmp_path, monkeypatch
-    ):
+    def test_ac22a_readable_fragment_no_match_validation_is_hard_block(self, tmp_path, monkeypatch):
         """AC-22(a): cool fragment readable with parity_run_type column, no match → determinable, validation = hard block."""
 
         from bathos.parity import check_parity_confounds_for_submit

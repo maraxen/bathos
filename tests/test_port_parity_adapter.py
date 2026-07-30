@@ -49,9 +49,7 @@ class TestCountLines:
 
 
 class TestReadNewPortRecords:
-    def test_flat_schema_filters_by_domain_and_slices_from_start_line(
-        self, tmp_path: Path
-    ) -> None:
+    def test_flat_schema_filters_by_domain_and_slices_from_start_line(self, tmp_path: Path) -> None:
         p = tmp_path / "audits.jsonl"
         _write_jsonl(
             p,
@@ -202,9 +200,7 @@ class TestMainSubprocessSmoke:
             "'tier_verdict': {'status': 'PASS', 'tolerance_policy': 'rtol=1e-4'}}) + chr(10))\n",
             encoding="utf-8",
         )
-        proc, results_path, _ = self._run_adapter(
-            tmp_path, [sys.executable, str(fake_harness)]
-        )
+        proc, results_path, _ = self._run_adapter(tmp_path, [sys.executable, str(fake_harness)])
         assert proc.returncode == 0, proc.stderr
         result = json.loads(results_path.read_text())
         assert result["metadata"]["verdict"] == "PASS"
@@ -223,9 +219,7 @@ class TestMainSubprocessSmoke:
             "sys.exit(1)\n",
             encoding="utf-8",
         )
-        proc, results_path, _ = self._run_adapter(
-            tmp_path, [sys.executable, str(fake_harness)]
-        )
+        proc, results_path, _ = self._run_adapter(tmp_path, [sys.executable, str(fake_harness)])
         # Adapter itself still exits 0: it successfully determined a verdict
         # (FAIL is a real, recorded outcome, not a crash).
         assert proc.returncode == 0, proc.stderr
@@ -242,9 +236,7 @@ class TestMainSubprocessSmoke:
         result = json.loads(results_path.read_text())
         assert result["metadata"]["verdict"] == "ERROR"
 
-    def test_missing_separator_is_an_adapter_error_not_a_silent_noop(
-        self, tmp_path: Path
-    ) -> None:
+    def test_missing_separator_is_an_adapter_error_not_a_silent_noop(self, tmp_path: Path) -> None:
         xtrax_root = tmp_path / "xtrax"
         xtrax_root.mkdir(exist_ok=True)
         results_path = tmp_path / "results.json"

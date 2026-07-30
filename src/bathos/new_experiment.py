@@ -126,7 +126,7 @@ def scaffold_experiment(name: str, project_root: Path, force: bool = False) -> S
 
     script.write_text(_SCRIPT_TEMPLATE.format(name=name))
     script.chmod(0o755)
-    sidecar.write_text(_SIDECAR_TEMPLATE + _corpus_guidance())
+    sidecar.write_text(_SIDECAR_TEMPLATE + _REVIEW_STUB + _corpus_guidance())
 
     return ScaffoldResult(script=script, sidecar=sidecar, name_warning=warning)
 
@@ -162,6 +162,34 @@ def _corpus_guidance() -> str:
         "#",
     ]
     for card in load.cards:
-        lines.append(f"#   {card.id:<12} [{card.severity:<7}] {card.title}")
+        # Collapse any control characters: an embedded newline would split this into a
+        # second physical line with no leading "#", corrupting the sidecar TOML silently.
+        title = " ".join(str(card.title).split())
+        lines.append(f"#   {card.id:<12} [{card.severity:<7}] {title}")
     lines.append("# ─────────────────────────────────────────────────────────────────────────")
     return "\n".join(lines) + "\n"
+
+
+#: §6 requires the scaffold to pre-fill [review] stubs. Commented rather than live so a fresh
+#: sidecar still validates: an uncommented [[review.literature]] with empty ref/claim would be
+#: a validation ERROR on a file the author has not touched yet.
+_REVIEW_STUB = """
+# ── Targeted review (optional; see `bth ref show DSGN-002`) ──────────────────
+# Uncomment and fill in what prior work this experiment rests on. `bears_on`
+# names a hypothesis or confound id from the campaign's claim file; it is only
+# required once a claim exists and the campaign is confirmatory (decision D2).
+#
+# [[review.literature]]
+# ref = "10.1234/example"          # DOI, arXiv id, or a bth run UUID
+# claim = "what that reference actually reports"
+# bears_on = "H1"
+# disposition = "supports"         # supports | contradicts | scope-differs
+# checked = "YYYY-MM-DD"
+#
+# [[review.implementation]]
+# source = "https://github.com/org/repo"
+# commit = "abc1234"               # pin it — an unpinned read grades C0, not C1
+# what_was_checked = "which specific behaviour you read, and where"
+# bears_on = "C1"
+# disposition = "matches"          # matches | diverges | not-applicable
+"""

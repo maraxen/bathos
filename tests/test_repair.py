@@ -183,9 +183,7 @@ class TestDryRun:
     """Test parametrized dry-run behavior: True never mutates, False does."""
 
     @pytest.mark.parametrize("dry_run", [True, False])
-    def test_dry_run_never_mutates(
-        self, catalog_with_sentinels: Path, dry_run: bool
-    ):
+    def test_dry_run_never_mutates(self, catalog_with_sentinels: Path, dry_run: bool):
         """Parametrized test: dry_run=True → no mutations, False → mutations occur.
 
         Args:
@@ -932,6 +930,7 @@ class TestReexportFromWarm:
 
             # Compact to rebuild warm from cool
             from bathos.compact import compact
+
             compact(catalog, force_rebuild=False)
 
             # Count warm DB runs after compact
@@ -946,7 +945,9 @@ class TestReexportFromWarm:
             assert uuid2_fragment.exists(), "uuid2 fragment should exist after re-export"
 
             # Warm DB should have the same count
-            assert final_count == initial_count, f"Expected {initial_count} runs after compact, got {final_count}"
+            assert final_count == initial_count, (
+                f"Expected {initial_count} runs after compact, got {final_count}"
+            )
         finally:
             if "BTH_CATALOG_DIR" in os.environ:
                 del os.environ["BTH_CATALOG_DIR"]
@@ -1096,7 +1097,9 @@ class TestReexportFromWarm:
             # Second repair call - should find no warm-only runs
             manifest2 = repair(catalog, tier="warm", dry_run=False, from_warm=True)
             reexport_actions2 = [a for a in manifest2.actions if a.action == "reexport_from_warm"]
-            assert len(reexport_actions2) == 0, "Second repair should be a no-op (no warm-only runs)"
+            assert len(reexport_actions2) == 0, (
+                "Second repair should be a no-op (no warm-only runs)"
+            )
         finally:
             if "BTH_CATALOG_DIR" in os.environ:
                 del os.environ["BTH_CATALOG_DIR"]
@@ -1221,15 +1224,21 @@ class TestReexportFromWarm:
 
             # uuid_null should appear in warnings
             null_warnings = [w for w in manifest.warnings if uuid_null in w]
-            assert len(null_warnings) > 0, f"Expected warning about NULL-metadata run {uuid_null} in manifest.warnings"
+            assert len(null_warnings) > 0, (
+                f"Expected warning about NULL-metadata run {uuid_null} in manifest.warnings"
+            )
 
             # uuid_valid should be re-exported successfully
             uuid_valid_fragment = slug_dir / f"run_{uuid_valid}.parquet"
-            assert uuid_valid_fragment.exists(), f"Valid metadata run {uuid_valid} should be re-exported"
+            assert uuid_valid_fragment.exists(), (
+                f"Valid metadata run {uuid_valid} should be re-exported"
+            )
 
             # uuid_null should NOT be re-exported
             uuid_null_fragment = slug_dir / f"run_{uuid_null}.parquet"
-            assert not uuid_null_fragment.exists(), f"NULL-metadata run {uuid_null} should NOT be re-exported"
+            assert not uuid_null_fragment.exists(), (
+                f"NULL-metadata run {uuid_null} should NOT be re-exported"
+            )
         finally:
             if "BTH_CATALOG_DIR" in os.environ:
                 del os.environ["BTH_CATALOG_DIR"]

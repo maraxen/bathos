@@ -87,7 +87,9 @@ class TestAttestationSurvivesForceRebuild:
         src.write_text(ORACLE_MATCH_TOML.format(content_hash=content_hash, oracle_sha="6" * 64))
 
         record = register_attestation(src, catalog_dir)
-        canonical = catalog_dir / "sidecars" / "attestations" / f"{record.sha256}.attestation.bth.toml"
+        canonical = (
+            catalog_dir / "sidecars" / "attestations" / f"{record.sha256}.attestation.bth.toml"
+        )
         assert canonical.exists()
 
         compact_catalog(catalog_dir, force_rebuild=True)

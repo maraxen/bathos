@@ -144,7 +144,7 @@ def _actions_from_cool_verify(result) -> tuple[list[RepairAction], list[str]]:
             # Check mtime guard: skip files with mtime < 60s (in-flight writes)
             try:
                 mtime_unix = path_obj.stat().st_mtime
-                age_s = (datetime.now(UTC).timestamp() - mtime_unix)
+                age_s = datetime.now(UTC).timestamp() - mtime_unix
                 if age_s < 60:
                     warning = f"Skipped .tmp file (in-flight write): {path_part} (age {age_s:.0f}s)"
                     warnings.append(warning)
@@ -170,9 +170,11 @@ def _actions_from_cool_verify(result) -> tuple[list[RepairAction], list[str]]:
             # Check mtime guard: skip files with mtime < 60s (migration in progress)
             try:
                 mtime_unix = path_obj.stat().st_mtime
-                age_s = (datetime.now(UTC).timestamp() - mtime_unix)
+                age_s = datetime.now(UTC).timestamp() - mtime_unix
                 if age_s < 60:
-                    warning = f"Skipped .bak file (in-flight migration): {path_part} (age {age_s:.0f}s)"
+                    warning = (
+                        f"Skipped .bak file (in-flight migration): {path_part} (age {age_s:.0f}s)"
+                    )
                     warnings.append(warning)
                     continue
             except (OSError, ValueError):
@@ -244,7 +246,12 @@ def _actions_from_warm_verify(result, catalog_dir: Path) -> tuple[list[RepairAct
             )
 
     # Also check if warm DB is present and would fail on open (preemptive detection)
-    if not actions and "db_exists" in result.stats and result.stats["db_exists"] and db_path.exists():
+    if (
+        not actions
+        and "db_exists" in result.stats
+        and result.stats["db_exists"]
+        and db_path.exists()
+    ):
         # Try to detect corruption by attempting to open DB
         from bathos.compact import CorruptDatabaseError, _open_db
 
@@ -496,7 +503,9 @@ def repair(
             raise SystemExit(1)
         else:
             # DB is queryable and no warm-only data at risk; proceed safely
-            logger.info("Warm database rebuild will not lose any warm-only data (postmortem_count=0, output_metadata_count=0); proceeding")
+            logger.info(
+                "Warm database rebuild will not lose any warm-only data (postmortem_count=0, output_metadata_count=0); proceeding"
+            )
 
     manifest = RepairManifest(
         run_ts=run_ts,
@@ -731,16 +740,18 @@ def _handle_rebuild_warm(action: RepairAction, catalog_dir: Path) -> None:
 
     try:
         result = compact(catalog_dir, force_rebuild=True)
-        logger.info(
-            f"Warm database rebuilt: {result.ingested} ingested, {result.skipped} skipped"
+        logger.info(f"Warm database rebuilt: {result.ingested} ingested, {result.skipped} skipped")
+        action.detail = (
+            f"Warm database rebuilt from cool fragments: {result.ingested} rows ingested"
         )
-        action.detail = f"Warm database rebuilt from cool fragments: {result.ingested} rows ingested"
     except Exception as e:
         logger.error(f"Failed to rebuild warm database: {e}")
         raise
 
 
-def _handle_reexport_from_warm(action: RepairAction, catalog_dir: Path, manifest: RepairManifest | None = None) -> None:
+def _handle_reexport_from_warm(
+    action: RepairAction, catalog_dir: Path, manifest: RepairManifest | None = None
+) -> None:
     """Re-export warm runs back to cool fragments.
 
     Scans warm DB (bathos.db) for runs missing from cool fragments, reconstructs
@@ -861,7 +872,9 @@ def _handle_reexport_from_warm(action: RepairAction, catalog_dir: Path, manifest
                 postmortem_verdict_override=row_dict.get("postmortem_verdict_override", "none"),
                 postmortem_author=row_dict.get("postmortem_author", ""),
                 postmortem_path=row_dict.get("postmortem_path", ""),
-                postmortem_hypothesis_status=row_dict.get("postmortem_hypothesis_status", "unassigned"),
+                postmortem_hypothesis_status=row_dict.get(
+                    "postmortem_hypothesis_status", "unassigned"
+                ),
                 postmortem_has_anomalies=bool(row_dict.get("postmortem_has_anomalies", False)),
                 postmortem_summary=row_dict.get("postmortem_summary", ""),
                 postmortem_asset_links=row_dict.get("postmortem_asset_links", "{}"),
@@ -890,7 +903,9 @@ def _handle_reexport_from_warm(action: RepairAction, catalog_dir: Path, manifest
     # Append NULL-metadata UUIDs to manifest warnings
     if null_metadata_warnings and manifest:
         for uuid in null_metadata_warnings:
-            manifest.warnings.append(f"Skipped re-export of run {uuid}: NULL metadata (warm-only data)")
+            manifest.warnings.append(
+                f"Skipped re-export of run {uuid}: NULL metadata (warm-only data)"
+            )
 
     # Update action detail
     action.detail = (
@@ -1037,7 +1052,9 @@ def _handle_quarantine_archive(
                 with open(tmp_path, "w") as f:
                     json.dump(manifest, f, indent=2)
                 tmp_path.rename(manifest_json_path)
-                logger.info(f"Updated archive manifest.json to mark {partition_path} as quarantined")
+                logger.info(
+                    f"Updated archive manifest.json to mark {partition_path} as quarantined"
+                )
             else:
                 logger.warning(f"Partition {partition_path} not found in archive manifest.json")
 

@@ -264,9 +264,9 @@ class TestRegisterAttestation:
 
     def test_register_records_actual_verdict_not_always_pass(self, tmp_path, catalog_dir):
         content_hash = "c" * 64
-        toml_text = ORACLE_MATCH_TOML.format(content_hash=content_hash, oracle_sha="d" * 64).replace(
-            'verdict = "PASS"', 'verdict = "FAIL"'
-        )
+        toml_text = ORACLE_MATCH_TOML.format(
+            content_hash=content_hash, oracle_sha="d" * 64
+        ).replace('verdict = "PASS"', 'verdict = "FAIL"')
         path = _write_attestation(tmp_path, toml_text)
 
         record = register_attestation(path, catalog_dir)
@@ -294,7 +294,9 @@ class TestRegisterAttestation:
 
         record = register_attestation(path, catalog_dir)
 
-        canonical = catalog_dir / "sidecars" / "attestations" / f"{record.sha256}.attestation.bth.toml"
+        canonical = (
+            catalog_dir / "sidecars" / "attestations" / f"{record.sha256}.attestation.bth.toml"
+        )
         assert canonical.exists()
         assert record.path == str(canonical)
 
@@ -348,8 +350,7 @@ class TestRegisterAttestation:
         register_attestation(path, catalog_dir)
 
         assert len(reads_of_source) == 1, (
-            f"expected exactly one read of the source attestation file, got "
-            f"{len(reads_of_source)}"
+            f"expected exactly one read of the source attestation file, got {len(reads_of_source)}"
         )
 
 
@@ -388,7 +389,9 @@ class TestDistinctFromClaimPath:
             elif isinstance(node, ast.ImportFrom) and node.module:
                 imported_modules.add(node.module)
 
-        assert not any(m == "bathos.claim" or m.startswith("bathos.claim.") for m in imported_modules)
+        assert not any(
+            m == "bathos.claim" or m.startswith("bathos.claim.") for m in imported_modules
+        )
         assert "claim" not in imported_modules  # no "from bathos import claim" either
 
     def test_attestation_module_never_compares_against_literature_parity_string(self):
@@ -429,9 +432,7 @@ class TestDistinctFromClaimPath:
         try:
             tables = {row[0] for row in con.execute("SHOW TABLES").fetchall()}
             if "campaigns" in tables:
-                rows = con.execute(
-                    "SELECT claim_path, claim_sha256 FROM campaigns"
-                ).fetchall()
+                rows = con.execute("SELECT claim_path, claim_sha256 FROM campaigns").fetchall()
                 assert all(r[0] is None and r[1] is None for r in rows)
             # The attestation must be visible in sidecar_anchors, not campaigns.
             anchored = con.execute(

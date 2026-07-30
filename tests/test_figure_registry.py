@@ -67,7 +67,9 @@ class TestFigureEntrySchemaRejectsForbiddenInlineFields:
     itself. verdict/strength/content_hash/outcome/gate must never appear inline.
     """
 
-    @pytest.mark.parametrize("forbidden_field", ["verdict", "strength", "content_hash", "outcome", "gate"])
+    @pytest.mark.parametrize(
+        "forbidden_field", ["verdict", "strength", "content_hash", "outcome", "gate"]
+    )
     def test_build_figure_entry_rejects_each_forbidden_field(self, forbidden_field):
         payload = dict(VALID_FIELDS)
         payload[forbidden_field] = "PASS"
@@ -230,9 +232,7 @@ class TestRegisterAndLookupFigureEntry:
         """Legacy S2 kind="figure" anchors and the new typed figure_entry registry
         both compose into one figure_lookup call, keyed on the same asset_sha256 —
         proving S7 is additive, not a breaking replacement of the S1-era shape."""
-        register_anchor(
-            catalog_dir, "legacy_fig.png", "5" * 64, "figure", label="legacy-label"
-        )
+        register_anchor(catalog_dir, "legacy_fig.png", "5" * 64, "figure", label="legacy-label")
         register_figure_entry(
             catalog_dir,
             asset_sha256="5" * 64,

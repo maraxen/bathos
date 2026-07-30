@@ -942,8 +942,12 @@ def claim_validate_cmd(
 
 @gate_app.command("stamp")
 def gate_stamp_cmd(
-    gate_name: str = typer.Argument(..., help="Gate name (matches a claim's synthetic_recovery.gate_name)"),
-    result: str = typer.Option(..., "--result", help="'pass' or 'fail' — the outcome of your own test run"),
+    gate_name: str = typer.Argument(
+        ..., help="Gate name (matches a claim's synthetic_recovery.gate_name)"
+    ),
+    result: str = typer.Option(
+        ..., "--result", help="'pass' or 'fail' — the outcome of your own test run"
+    ),
 ):
     """Record a self-attested pass/fail for a synthetic-recovery gate at the current git HEAD.
 
@@ -1330,9 +1334,13 @@ def query_candidates(
 
 @anchor_app.command("insert")
 def anchor_insert_cmd(
-    path: str = typer.Argument(..., help="Sidecar path to anchor (not resolved/verified against disk)"),
+    path: str = typer.Argument(
+        ..., help="Sidecar path to anchor (not resolved/verified against disk)"
+    ),
     sha256: str = typer.Argument(..., help="SHA256 of the sidecar file's contents"),
-    kind: str = typer.Option(..., "--kind", "-k", help="Free-form anchor kind, e.g. 'figure', 'attestation'"),
+    kind: str = typer.Option(
+        ..., "--kind", "-k", help="Free-form anchor kind, e.g. 'figure', 'attestation'"
+    ),
     label: str | None = typer.Option(None, "--label", help="Optional human-readable label"),
     content_hash: str | None = typer.Option(
         None, "--content-hash", help="Optional hash of the underlying data product"
@@ -1408,7 +1416,9 @@ def anchor_find_cmd(
 def anchor_figure_register_cmd(
     asset_sha256: str = typer.Argument(..., help="Anchor key: SHA256 of the rendered figure asset"),
     sidecar_ref: str = typer.Argument(..., help="Pointer to the .figure.toml sidecar"),
-    figure_kind: str = typer.Option(..., "--figure-kind", "-k", help="Free-form figure kind, e.g. 'chord_diagram'"),
+    figure_kind: str = typer.Option(
+        ..., "--figure-kind", "-k", help="Free-form figure kind, e.g. 'chord_diagram'"
+    ),
     render_state: str = typer.Option("ready", "--render-state", help="'ready' or 'deferred'"),
     fig_trust_state: str = typer.Option("draft", "--fig-trust-state", help="'draft' or 'final'"),
     attestation_ref: str | None = typer.Option(
@@ -2689,7 +2699,9 @@ def ref_search(query: str = typer.Argument(..., help="Substring to find")) -> No
 @ref_app.command("applicable")
 def ref_applicable(
     script: Path = typer.Argument(..., help="Script whose sidecar to evaluate against"),
-    show_context: bool = typer.Option(False, "--show-context", help="Print the evaluated context row"),
+    show_context: bool = typer.Option(
+        False, "--show-context", help="Print the evaluated context row"
+    ),
 ) -> None:
     """Evaluate every card's applies_when against a script and list those that fire."""
     from bathos.corpus import applicable_cards, build_context

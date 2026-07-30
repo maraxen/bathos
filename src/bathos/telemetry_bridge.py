@@ -112,9 +112,7 @@ def emit_via_cisternal(event_name: str, **fields: Any) -> bool:
     return True
 
 
-def span_via_cisternal(
-    name: str, **fields: Any
-) -> AbstractContextManager[None] | None:
+def span_via_cisternal(name: str, **fields: Any) -> AbstractContextManager[None] | None:
     """Return cisternal span context manager when cutover flag is set."""
     if not cisternal_cutover_enabled():
         return None

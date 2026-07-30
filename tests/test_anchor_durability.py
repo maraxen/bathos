@@ -117,12 +117,8 @@ class TestDurableAnchorSurvivesForceRebuild:
         proving the cool-fragment fold-latest-wins logic matches the warm tier's
         upsert-on-conflict semantics."""
         store = DurableAnchorStore(catalog_dir)
-        register_anchor(
-            catalog_dir, "c.svg", "3" * 64, "figure", label="v1", store=store
-        )
-        register_anchor(
-            catalog_dir, "c.svg", "3" * 64, "figure", label="v2", store=store
-        )
+        register_anchor(catalog_dir, "c.svg", "3" * 64, "figure", label="v1", store=store)
+        register_anchor(catalog_dir, "c.svg", "3" * 64, "figure", label="v2", store=store)
 
         compact_catalog(catalog_dir, force_rebuild=True)
 

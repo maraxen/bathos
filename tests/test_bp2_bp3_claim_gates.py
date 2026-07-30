@@ -117,20 +117,26 @@ class TestBP2SyntheticRecoveryConclude:
     ):
         root, _sha = git_workspace
         db = clean_db
-        campaign = create_campaign(db, name="Confirm", project_slug="test_proj", mode="confirmation")
+        campaign = create_campaign(
+            db, name="Confirm", project_slug="test_proj", mode="confirmation"
+        )
         claim_path = _claim_with_synth(root)
         register_claim(claim_path, campaign.id, db, root)
 
         db = _add_completed_run(tmp_catalog, campaign, db)
         conclude_campaign(db, campaign.id, "pass", "conclusion", workspace_root=root)
 
-        rows = db.execute("SELECT outcome_label FROM campaigns WHERE id=?", [campaign.id]).fetchall()
+        rows = db.execute(
+            "SELECT outcome_label FROM campaigns WHERE id=?", [campaign.id]
+        ).fetchall()
         assert rows[0][0] == "confounded"
 
     def test_confirmation_no_downgrade_when_gate_green(self, tmp_catalog, git_workspace, clean_db):
         root, sha = git_workspace
         db = clean_db
-        campaign = create_campaign(db, name="Confirm", project_slug="test_proj", mode="confirmation")
+        campaign = create_campaign(
+            db, name="Confirm", project_slug="test_proj", mode="confirmation"
+        )
         claim_path = _claim_with_synth(root)
         register_claim(claim_path, campaign.id, db, root)
         stamp_gate(root, "g", "pass", sha)
@@ -138,7 +144,9 @@ class TestBP2SyntheticRecoveryConclude:
         db = _add_completed_run(tmp_catalog, campaign, db)
         conclude_campaign(db, campaign.id, "pass", "conclusion", workspace_root=root)
 
-        rows = db.execute("SELECT outcome_label FROM campaigns WHERE id=?", [campaign.id]).fetchall()
+        rows = db.execute(
+            "SELECT outcome_label FROM campaigns WHERE id=?", [campaign.id]
+        ).fetchall()
         assert rows[0][0] == "pass"
 
     def test_exploration_warns_no_downgrade(self, tmp_catalog, git_workspace, clean_db, capsys):
@@ -151,7 +159,9 @@ class TestBP2SyntheticRecoveryConclude:
         db = _add_completed_run(tmp_catalog, campaign, db)
         conclude_campaign(db, campaign.id, "pass", "conclusion", workspace_root=root)
 
-        rows = db.execute("SELECT outcome_label FROM campaigns WHERE id=?", [campaign.id]).fetchall()
+        rows = db.execute(
+            "SELECT outcome_label FROM campaigns WHERE id=?", [campaign.id]
+        ).fetchall()
         assert rows[0][0] == "pass"
         captured = capsys.readouterr()
         assert "uncontrolled" in captured.out.lower()
@@ -159,7 +169,9 @@ class TestBP2SyntheticRecoveryConclude:
     def test_stale_gate_downgrades_confirmation(self, tmp_catalog, git_workspace, clean_db):
         root, sha = git_workspace
         db = clean_db
-        campaign = create_campaign(db, name="Confirm", project_slug="test_proj", mode="confirmation")
+        campaign = create_campaign(
+            db, name="Confirm", project_slug="test_proj", mode="confirmation"
+        )
         claim_path = _claim_with_synth(root)
         register_claim(claim_path, campaign.id, db, root)
         stamp_gate(root, "g", "pass", sha)
@@ -169,7 +181,9 @@ class TestBP2SyntheticRecoveryConclude:
         db = _add_completed_run(tmp_catalog, campaign, db)
         conclude_campaign(db, campaign.id, "pass", "conclusion", workspace_root=root)
 
-        rows = db.execute("SELECT outcome_label FROM campaigns WHERE id=?", [campaign.id]).fetchall()
+        rows = db.execute(
+            "SELECT outcome_label FROM campaigns WHERE id=?", [campaign.id]
+        ).fetchall()
         assert rows[0][0] == "confounded"
 
 
@@ -203,7 +217,9 @@ label = "Null"
         # Should NOT raise even though outcome is negative and negative_check is blank
         conclude_campaign(db, campaign.id, "failed", "no claim attached", workspace_root=root)
 
-        rows = db.execute("SELECT outcome_label FROM campaigns WHERE id=?", [campaign.id]).fetchall()
+        rows = db.execute(
+            "SELECT outcome_label FROM campaigns WHERE id=?", [campaign.id]
+        ).fetchall()
         assert rows[0][0] == "failed"
 
     def test_negative_outcome_with_claim_and_blank_check_raises(
@@ -211,7 +227,9 @@ label = "Null"
     ):
         root, _sha = git_workspace
         db = clean_db
-        campaign = create_campaign(db, name="Confirm", project_slug="test_proj", mode="confirmation")
+        campaign = create_campaign(
+            db, name="Confirm", project_slug="test_proj", mode="confirmation"
+        )
         claim_path = self._claim_no_confounds(root)
         register_claim(claim_path, campaign.id, db, root)
 
@@ -223,7 +241,9 @@ label = "Null"
     ):
         root, _sha = git_workspace
         db = clean_db
-        campaign = create_campaign(db, name="Confirm", project_slug="test_proj", mode="confirmation")
+        campaign = create_campaign(
+            db, name="Confirm", project_slug="test_proj", mode="confirmation"
+        )
         claim_path = self._claim_no_confounds(root)
         register_claim(claim_path, campaign.id, db, root)
 
@@ -245,14 +265,18 @@ label = "Null"
     ):
         root, _sha = git_workspace
         db = clean_db
-        campaign = create_campaign(db, name="Confirm", project_slug="test_proj", mode="confirmation")
+        campaign = create_campaign(
+            db, name="Confirm", project_slug="test_proj", mode="confirmation"
+        )
         claim_path = self._claim_no_confounds(root)
         register_claim(claim_path, campaign.id, db, root)
 
         # "pass" does not match the negative vocabulary -> no error even with blank negative_check
         conclude_campaign(db, campaign.id, "pass", "worked", workspace_root=root)
 
-        rows = db.execute("SELECT outcome_label FROM campaigns WHERE id=?", [campaign.id]).fetchall()
+        rows = db.execute(
+            "SELECT outcome_label FROM campaigns WHERE id=?", [campaign.id]
+        ).fetchall()
         assert rows[0][0] == "pass"
 
     def test_custom_negative_outcome_pattern_override(self, tmp_catalog, git_workspace, clean_db):
@@ -260,7 +284,9 @@ label = "Null"
 
         root, _sha = git_workspace
         db = clean_db
-        campaign = create_campaign(db, name="Confirm", project_slug="test_proj", mode="confirmation")
+        campaign = create_campaign(
+            db, name="Confirm", project_slug="test_proj", mode="confirmation"
+        )
         claim_path = self._claim_no_confounds(root)
         register_claim(claim_path, campaign.id, db, root)
 
@@ -268,8 +294,14 @@ label = "Null"
 
         # "failed" is not in the custom vocabulary -> passes without negative_check
         conclude_campaign(
-            db, campaign.id, "failed", "ok", workspace_root=root,
+            db,
+            campaign.id,
+            "failed",
+            "ok",
+            workspace_root=root,
             negative_outcome_pattern=custom_pattern,
         )
-        rows = db.execute("SELECT outcome_label FROM campaigns WHERE id=?", [campaign.id]).fetchall()
+        rows = db.execute(
+            "SELECT outcome_label FROM campaigns WHERE id=?", [campaign.id]
+        ).fetchall()
         assert rows[0][0] == "failed"

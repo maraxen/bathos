@@ -403,8 +403,14 @@ def test_compact_creates_schema_migrations_table(tmp_path):
     from bathos.compact import compact
     from bathos.schema import Run
 
-    r = Run(project_slug="p", command="c", argv=["c"],
-            git_hash="abc", git_branch="main", git_dirty=False)
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+    )
     write_run(r, tmp_path)
     compact(tmp_path)
 
@@ -420,8 +426,14 @@ def test_schema_migrations_has_record(tmp_path):
     from bathos.compact import compact
     from bathos.schema import CURRENT_SCHEMA_VERSION, Run
 
-    r = Run(project_slug="p", command="c", argv=["c"],
-            git_hash="abc", git_branch="main", git_dirty=False)
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+    )
     write_run(r, tmp_path)
     compact(tmp_path)
 
@@ -571,6 +583,7 @@ def test_force_rebuild_creates_backup(tmp_catalog: Path, sample_run: Run):
 def test_backup_rotation_keeps_max_3(tmp_catalog: Path, sample_run: Run):
     """Backup rotation should keep at most 3 .bak-* files."""
     import time
+
     init_catalog(tmp_catalog)
 
     # Create and rebuild 5 times to generate 5 backups
@@ -619,13 +632,17 @@ def test_output_metadata_refreshed_on_recompact(tmp_catalog: Path, sample_run: R
     # Second compact should refresh the metadata
     compact(tmp_catalog)
     con = duckdb.connect(str(tmp_catalog / "bathos.db"), read_only=True)
-    meta_json2 = con.execute("SELECT output_metadata FROM runs WHERE id = ?", [run.id]).fetchone()[0]
+    meta_json2 = con.execute("SELECT output_metadata FROM runs WHERE id = ?", [run.id]).fetchone()[
+        0
+    ]
     con.close()
     meta2 = json.loads(meta_json2)
     assert meta2[0]["size_bytes"] != initial_size, "size_bytes should reflect updated file"
 
 
-def test_output_metadata_refresh_detects_deleted_file(tmp_catalog: Path, sample_run: Run, tmp_path: Path):
+def test_output_metadata_refresh_detects_deleted_file(
+    tmp_catalog: Path, sample_run: Run, tmp_path: Path
+):
     """output_metadata refresh marks deleted files as 'missing' on next compact."""
     import dataclasses
     import json
@@ -637,7 +654,7 @@ def test_output_metadata_refresh_detects_deleted_file(tmp_catalog: Path, sample_
 
     init_catalog(tmp_catalog)
     out_file = tmp_path / "will_delete.json"
-    out_file.write_text('{}')
+    out_file.write_text("{}")
 
     run = dataclasses.replace(sample_run, output_paths=[str(out_file)])
     write_run(run, tmp_catalog)
@@ -655,7 +672,9 @@ def test_output_metadata_refresh_detects_deleted_file(tmp_catalog: Path, sample_
     assert meta[0]["status"] == "missing"
 
 
-def test_output_metadata_sha256_reused_when_mtime_unchanged(tmp_catalog: Path, sample_run: Run, tmp_path: Path):
+def test_output_metadata_sha256_reused_when_mtime_unchanged(
+    tmp_catalog: Path, sample_run: Run, tmp_path: Path
+):
     """sha256 is reused from stored metadata when mtime is unchanged (skip rehash)."""
     import dataclasses
     import json
@@ -674,14 +693,18 @@ def test_output_metadata_sha256_reused_when_mtime_unchanged(tmp_catalog: Path, s
     compact(tmp_catalog)
 
     con = duckdb.connect(str(tmp_catalog / "bathos.db"), read_only=True)
-    meta1 = json.loads(con.execute("SELECT output_metadata FROM runs WHERE id = ?", [run.id]).fetchone()[0])
+    meta1 = json.loads(
+        con.execute("SELECT output_metadata FROM runs WHERE id = ?", [run.id]).fetchone()[0]
+    )
     con.close()
     sha_before = meta1[0].get("sha256")
 
     # Compact again without touching the file — mtime unchanged, sha256 should be reused
     compact(tmp_catalog)
     con = duckdb.connect(str(tmp_catalog / "bathos.db"), read_only=True)
-    meta2 = json.loads(con.execute("SELECT output_metadata FROM runs WHERE id = ?", [run.id]).fetchone()[0])
+    meta2 = json.loads(
+        con.execute("SELECT output_metadata FROM runs WHERE id = ?", [run.id]).fetchone()[0]
+    )
     con.close()
     assert meta2[0].get("sha256") == sha_before
 

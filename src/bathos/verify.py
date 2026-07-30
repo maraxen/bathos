@@ -143,9 +143,7 @@ def verify_warm(catalog_dir: Path) -> VerifyResult:
     cool_fragments = list(runs_dir.rglob("run_*.parquet")) if runs_dir.exists() else []
 
     if cool_fragments and stats.get("runs_count", 0) == 0:
-        warnings.append(
-            "Cool fragments exist but runs table is empty — run bth compact"
-        )
+        warnings.append("Cool fragments exist but runs table is empty — run bth compact")
         logger.warning("Cool fragments exist but runs table is empty")
 
     return VerifyResult(
@@ -286,9 +284,7 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def verify_all(
-    catalog_dir: Path, archive_root: Path | None = None
-) -> list[VerifyResult]:
+def verify_all(catalog_dir: Path, archive_root: Path | None = None) -> list[VerifyResult]:
     """Run verify_cool, verify_warm, and verify_archive; return all results."""
     if archive_root is None:
         archive_root = Path.home() / ".bth" / "archive"

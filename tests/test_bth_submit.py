@@ -30,11 +30,11 @@ _WAIT_TIMEOUT = {"wait_result": "timeout", "failure_class": ""}
 def _write_project_toml(tmp_path: Path, remote: str = "engaging", preset: str = "gpu") -> Path:
     """Write a minimal .bth.toml with cluster config."""
     content = (
-        '[project]\n'
+        "[project]\n"
         'slug = "myproject"\n'
         f'root = "{tmp_path}"\n'
-        '\n'
-        '[slurm]\n'
+        "\n"
+        "[slurm]\n"
         f'remote = "{remote}"\n'
         f'preset = "{preset}"\n'
     )
@@ -372,7 +372,9 @@ value = "float"
         patch("bathos.cluster.push_project"),
         patch("bathos.cluster.submit_job", return_value=_SUBMIT_RESULT),
     ):
-        result = runner.invoke(app, ["submit", "--no-wait", "python", "scripts/experiments/my_experiment.py"])
+        result = runner.invoke(
+            app, ["submit", "--no-wait", "python", "scripts/experiments/my_experiment.py"]
+        )
 
     # Should exit 1 due to missing prerequisite
     assert result.exit_code == 1, result.output
@@ -426,7 +428,9 @@ value = "float"
         patch("bathos.cluster.push_project"),
         patch("bathos.cluster.submit_job", return_value=_SUBMIT_RESULT),
     ):
-        result = runner.invoke(app, ["submit", "--no-wait", "python", "scripts/experiments/my_experiment.py"])
+        result = runner.invoke(
+            app, ["submit", "--no-wait", "python", "scripts/experiments/my_experiment.py"]
+        )
 
     # Should exit 1 due to missing prerequisite
     assert result.exit_code == 1, result.output
@@ -497,7 +501,9 @@ value = "float"
         patch("bathos.cluster.push_project"),
         patch("bathos.cluster.submit_job", return_value=_SUBMIT_RESULT),
     ):
-        result = runner.invoke(app, ["submit", "--no-wait", "python", "scripts/experiments/my_experiment.py"])
+        result = runner.invoke(
+            app, ["submit", "--no-wait", "python", "scripts/experiments/my_experiment.py"]
+        )
 
     # Should succeed (exit 0)
     assert result.exit_code == 0, result.output
@@ -551,7 +557,9 @@ value = "float"
         patch("bathos.cluster.push_project"),
         patch("bathos.cluster.submit_job", return_value=_SUBMIT_RESULT),
     ):
-        result = runner.invoke(app, ["submit", "--no-wait", "python", "scripts/experiments/my_experiment.py"])
+        result = runner.invoke(
+            app, ["submit", "--no-wait", "python", "scripts/experiments/my_experiment.py"]
+        )
 
     # Should succeed (exit 0) but print warning
     assert result.exit_code == 0, result.output
@@ -606,7 +614,9 @@ value = "float"
         patch("bathos.cluster.push_project"),
         patch("bathos.cluster.submit_job", return_value=_SUBMIT_RESULT),
     ):
-        result = runner.invoke(app, ["submit", "--no-wait", "python", "scripts/experiments/my_experiment.py"])
+        result = runner.invoke(
+            app, ["submit", "--no-wait", "python", "scripts/experiments/my_experiment.py"]
+        )
 
     # Should succeed (exit 0) but print warning
     assert result.exit_code == 0, result.output
@@ -663,7 +673,9 @@ value = "float"
         patch("bathos.cluster.push_project"),
         patch("bathos.cluster.submit_job", return_value=_SUBMIT_RESULT),
     ):
-        result = runner.invoke(app, ["submit", "--no-wait", "python", "scripts/experiments/my_experiment.py"])
+        result = runner.invoke(
+            app, ["submit", "--no-wait", "python", "scripts/experiments/my_experiment.py"]
+        )
 
     # Should succeed
     assert result.exit_code == 0, result.output
@@ -698,6 +710,7 @@ value = "float"
 
     # Fix #1: Verify bth_submit_version value equals importlib.metadata.version('bathos')
     from importlib.metadata import version
+
     assert table.column("bth_submit_version")[0].as_py() == version("bathos")
 
     # Fix #3: Verify no .tmp file left behind after atomic rename
@@ -748,7 +761,9 @@ value = "float"
         patch("bathos.cluster.push_project"),
         patch("bathos.cluster.submit_job", return_value=_SUBMIT_RESULT),
     ):
-        result = runner.invoke(app, ["submit", "--no-wait", "python", "scripts/experiments/my_experiment.py"])
+        result = runner.invoke(
+            app, ["submit", "--no-wait", "python", "scripts/experiments/my_experiment.py"]
+        )
 
     assert result.exit_code == 0, result.output
 

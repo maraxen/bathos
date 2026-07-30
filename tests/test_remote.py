@@ -92,6 +92,7 @@ def cli_runner():
 
 # Tests for list_remotes (pure function)
 
+
 class TestListRemotes:
     """Tests for bathos.remote.list_remotes pure function."""
 
@@ -138,6 +139,7 @@ class TestListRemotes:
 
 # Tests for add_remote
 
+
 class TestAddRemote:
     """Tests for bathos.remote.add_remote."""
 
@@ -163,6 +165,7 @@ class TestAddRemote:
 
         # Parse directly from TOML
         import tomllib
+
         with open(tmp_config, "rb") as f:
             data = tomllib.load(f)
 
@@ -217,6 +220,7 @@ class TestAddRemote:
         add_remote(tmp_config, "remote1", "user@host.example.com", "~/path/to/data")
 
         import tomllib
+
         with open(tmp_config, "rb") as f:
             data = tomllib.load(f)
 
@@ -225,6 +229,7 @@ class TestAddRemote:
 
 
 # Tests for remove_remote
+
 
 class TestRemoveRemote:
     """Tests for bathos.remote.remove_remote."""
@@ -250,6 +255,7 @@ class TestRemoveRemote:
 
         # Verify [remotes] key removed from file
         import tomllib
+
         with open(tmp_config_with_remote, "rb") as f:
             data = tomllib.load(f)
 
@@ -289,6 +295,7 @@ class TestRemoveRemote:
 
 
 # Tests for test_remote
+
 
 class TestRemoteTest:
     """Tests for bathos.remote.test_remote."""
@@ -409,6 +416,7 @@ class TestRemoteTest:
 
 # CLI Tests
 
+
 class TestRemoteAddCLI:
     """Tests for bth remote add command."""
 
@@ -418,7 +426,9 @@ class TestRemoteAddCLI:
         config_path.write_text(MINIMAL_BTH_TOML)
 
         with patch("bathos.cli.find_project_config", return_value=config_path):
-            result = cli_runner.invoke(app, ["remote", "add", "engaging", "engaging:~/projects/bathos"])
+            result = cli_runner.invoke(
+                app, ["remote", "add", "engaging", "engaging:~/projects/bathos"]
+            )
 
             assert result.exit_code == 0
             assert "Remote 'engaging' added (engaging:~/projects/bathos)" in result.stdout
@@ -606,11 +616,14 @@ class TestSyncAutoSelection:
         with patch("bathos.cli.find_project_config", return_value=config_path):
             with patch("bathos.cli.load_project_config") as mock_load:
                 from bathos.config import load_project_config
+
                 config = load_project_config(config_path)
                 mock_load.return_value = config
 
                 with patch("bathos.cli.sync_catalog") as mock_sync:
-                    mock_sync.return_value = MagicMock(transferred=3, remote="engaging", duration_s=0.8, filtered=0)
+                    mock_sync.return_value = MagicMock(
+                        transferred=3, remote="engaging", duration_s=0.8, filtered=0
+                    )
 
                     result = cli_runner.invoke(app, ["sync"])
 
@@ -626,6 +639,7 @@ class TestSyncAutoSelection:
         with patch("bathos.cli.find_project_config", return_value=config_path):
             with patch("bathos.cli.load_project_config") as mock_load:
                 from bathos.config import load_project_config
+
                 config = load_project_config(config_path)
                 mock_load.return_value = config
 
@@ -642,6 +656,7 @@ class TestSyncAutoSelection:
         with patch("bathos.cli.find_project_config", return_value=config_path):
             with patch("bathos.cli.load_project_config") as mock_load:
                 from bathos.config import load_project_config
+
                 config = load_project_config(config_path)
                 mock_load.return_value = config
 

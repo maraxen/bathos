@@ -11,7 +11,8 @@ def _write_toml(tmp_path: Path, content: str) -> Path:
 def _write_valid_sidecar(tmp_path: Path, script_stem: str = "run_test") -> Path:
     """Write a valid experiment sidecar for testing."""
     p = tmp_path / f"{script_stem}.bth.toml"
-    p.write_text(textwrap.dedent("""
+    p.write_text(
+        textwrap.dedent("""
         [experiment]
         hypothesis = "Test hypothesis"
         [outcomes.pass]
@@ -25,7 +26,8 @@ def _write_valid_sidecar(tmp_path: Path, script_stem: str = "run_test") -> Path:
         is_residual = true
         [result_schema]
         value = "float"
-    """))
+    """)
+    )
     return p
 
 
@@ -72,7 +74,9 @@ def test_resolve_agent_mode_sidecar_precedence(tmp_path):
     from bathos.prereg import resolve_agent_mode
     from bathos.sidecar import parse_sidecar
 
-    path = _write_toml(tmp_path, """
+    path = _write_toml(
+        tmp_path,
+        """
         [experiment]
         hypothesis = "h"
         agent_mode = "autonomous"
@@ -87,7 +91,8 @@ def test_resolve_agent_mode_sidecar_precedence(tmp_path):
         is_residual = true
         [result_schema]
         value = "float"
-    """)
+    """,
+    )
     sidecar = parse_sidecar(path)
 
     mode = resolve_agent_mode(
@@ -167,7 +172,8 @@ def test_gate_check_invalid_sidecar_fails(tmp_path):
     script.touch()
 
     p = script.parent / "run_nvt.bth.toml"
-    p.write_text(textwrap.dedent("""
+    p.write_text(
+        textwrap.dedent("""
         [experiment]
         hypothesis = "h"
         [outcomes.pass]
@@ -175,7 +181,8 @@ def test_gate_check_invalid_sidecar_fails(tmp_path):
         decision = "proceed"
         [result_schema]
         value = "float"
-    """))
+    """)
+    )
 
     bundle = resolve_sidecar(script)
     result = gate_check(script, bundle, "collaborative")
@@ -687,9 +694,7 @@ def test_check_component_sidecar_drift_matches_first_run(tmp_path):
     )
     write_run(run, catalog_dir)
 
-    result = check_component_sidecar_drift(
-        "stage_bundle.preprocess", catalog_dir, "stable_sha_abc"
-    )
+    result = check_component_sidecar_drift("stage_bundle.preprocess", catalog_dir, "stable_sha_abc")
     assert result is False
 
 
@@ -713,9 +718,7 @@ def test_check_component_sidecar_drift_diverges_from_first_run(tmp_path):
     )
     write_run(run, catalog_dir)
 
-    result = check_component_sidecar_drift(
-        "stage_bundle.preprocess", catalog_dir, "edited_sha_xyz"
-    )
+    result = check_component_sidecar_drift("stage_bundle.preprocess", catalog_dir, "edited_sha_xyz")
     assert result is True
 
 

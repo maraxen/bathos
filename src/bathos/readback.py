@@ -469,9 +469,7 @@ def figure_lookup(
     from bathos.anchor import find_anchors
     from bathos.figure_registry import find_figure_entries
 
-    records = find_anchors(
-        catalog_dir, kind="figure", sha256=asset_sha256, content_hash=input_hash
-    )
+    records = find_anchors(catalog_dir, kind="figure", sha256=asset_sha256, content_hash=input_hash)
     legacy = [
         {
             "figure_id": record.label or record.path,

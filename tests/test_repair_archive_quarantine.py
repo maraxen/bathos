@@ -24,9 +24,7 @@ from bathos.verify import verify_archive
 class TestArchiveQuarantine:
     """Test suite for archive partition quarantine repair."""
 
-    def test_scan_returns_quarantine_archive_for_sha256_mismatch(
-        self, tmp_path: Path
-    ) -> None:
+    def test_scan_returns_quarantine_archive_for_sha256_mismatch(self, tmp_path: Path) -> None:
         """Verify scan() detects SHA256 mismatch and returns quarantine_archive action."""
         catalog_dir = tmp_path / "catalog"
         archive_root = tmp_path / "archive"
@@ -71,9 +69,9 @@ class TestArchiveQuarantine:
 
         # Run repair scan and check for quarantine_archive action
         actions, warnings = scan(catalog_dir, tier="archive", archive_root=archive_root)
-        assert any(
-            a.action == "quarantine_archive" for a in actions
-        ), f"Should have quarantine_archive action. Got: {[a.action for a in actions]}"
+        assert any(a.action == "quarantine_archive" for a in actions), (
+            f"Should have quarantine_archive action. Got: {[a.action for a in actions]}"
+        )
 
     def test_dry_run_lists_action_no_move(self, tmp_path: Path) -> None:
         """Verify --dry-run lists actions without moving files."""
@@ -111,13 +109,9 @@ class TestArchiveQuarantine:
 
         assert manifest.dry_run is True
         # In dry-run, the file should still exist at original location
-        assert (
-            bad_file.exists()
-        ), "File should not be moved during dry-run"
+        assert bad_file.exists(), "File should not be moved during dry-run"
 
-    def test_repair_moves_to_quarantine_year_month_path(
-        self, tmp_path: Path
-    ) -> None:
+    def test_repair_moves_to_quarantine_year_month_path(self, tmp_path: Path) -> None:
         """Verify repair() moves partition files to correct subpath."""
         catalog_dir = tmp_path / "catalog"
         archive_root = tmp_path / "archive"
@@ -161,20 +155,16 @@ class TestArchiveQuarantine:
         assert quarantine_root.exists(), "Quarantine archive directory should exist"
 
         # Find the quarantined file
-        quarantined_files = list(
-            quarantine_root.glob("*/*/*.parquet")
+        quarantined_files = list(quarantine_root.glob("*/*/*.parquet"))
+        assert len(quarantined_files) == 1, (
+            f"Should have one quarantined file. Found: {quarantined_files}"
         )
-        assert (
-            len(quarantined_files) == 1
-        ), f"Should have one quarantined file. Found: {quarantined_files}"
 
         quarantined_file = quarantined_files[0]
         # Verify the quarantined file exists and contains original (corrupted) data
         assert quarantined_file.exists(), "Quarantined file should exist"
 
-    def test_manifest_json_tombstoned_not_deleted(
-        self, tmp_path: Path
-    ) -> None:
+    def test_manifest_json_tombstoned_not_deleted(self, tmp_path: Path) -> None:
         """Verify manifest.json entry is marked quarantined, not deleted."""
         catalog_dir = tmp_path / "catalog"
         archive_root = tmp_path / "archive"
@@ -227,16 +217,12 @@ class TestArchiveQuarantine:
                 quarantined_entry = entry
                 break
 
-        assert (
-            quarantined_entry is not None
-        ), "Manifest should have an entry marked quarantined"
-        assert (
-            quarantined_entry["partition"] is not None
-        ), "Quarantined entry should still have partition field"
+        assert quarantined_entry is not None, "Manifest should have an entry marked quarantined"
+        assert quarantined_entry["partition"] is not None, (
+            "Quarantined entry should still have partition field"
+        )
 
-    def test_manifest_jsonl_has_sha256_fields(
-        self, tmp_path: Path
-    ) -> None:
+    def test_manifest_jsonl_has_sha256_fields(self, tmp_path: Path) -> None:
         """Verify manifest.jsonl includes expected_sha256 and actual_sha256."""
         catalog_dir = tmp_path / "catalog"
         archive_root = tmp_path / "archive"
@@ -272,9 +258,7 @@ class TestArchiveQuarantine:
 
         # Check quarantine manifest
         quarantine_manifest = catalog_dir / "quarantine" / "archive" / "manifest.jsonl"
-        assert (
-            quarantine_manifest.exists()
-        ), "Quarantine manifest.jsonl should exist"
+        assert quarantine_manifest.exists(), "Quarantine manifest.jsonl should exist"
 
         entries = []
         with open(quarantine_manifest) as f:
@@ -284,12 +268,8 @@ class TestArchiveQuarantine:
         assert len(entries) > 0, "Should have at least one quarantine entry"
 
         entry = entries[0]
-        assert (
-            "expected_sha256" in entry
-        ), "Entry must have expected_sha256 field"
-        assert (
-            "actual_sha256" in entry
-        ), "Entry must have actual_sha256 field"
+        assert "expected_sha256" in entry, "Entry must have expected_sha256 field"
+        assert "actual_sha256" in entry, "Entry must have actual_sha256 field"
         assert entry["expected_sha256"] != entry["actual_sha256"], (
             "SHA256 hashes should differ for corrupted file"
         )
@@ -339,9 +319,9 @@ class TestArchiveQuarantine:
 
         # Second run should find no actions (partition already quarantined)
         count2 = len([a for a in manifest2.actions if a.action == "quarantine_archive"])
-        assert (
-            count2 == 0
-        ), f"Second repair run should be idempotent; expected 0 actions, got {count2}"
+        assert count2 == 0, (
+            f"Second repair run should be idempotent; expected 0 actions, got {count2}"
+        )
 
     def test_valid_partition_untouched(self, tmp_path: Path) -> None:
         """Verify valid partitions are not affected by repair."""
@@ -381,13 +361,11 @@ class TestArchiveQuarantine:
 
         # Verify the valid partition was not moved
         assert parquet_files[0].exists(), "Valid partition should not be moved"
-        assert (
-            parquet_files[0].read_bytes() == original_content
-        ), "Valid partition content should not change"
+        assert parquet_files[0].read_bytes() == original_content, (
+            "Valid partition content should not change"
+        )
 
-    def test_archive_root_parameter_injected_in_tests(
-        self, tmp_path: Path
-    ) -> None:
+    def test_archive_root_parameter_injected_in_tests(self, tmp_path: Path) -> None:
         """Verify archive_root parameter is injectable for hermetic tests."""
         catalog_dir = tmp_path / "catalog"
         archive_root = tmp_path / "custom_archive"  # Not ~/.bth/archive
@@ -423,6 +401,4 @@ class TestArchiveQuarantine:
 
         # Verify quarantine used catalog_dir, not ~/
         quarantine_dir = catalog_dir / "quarantine" / "archive"
-        assert (
-            quarantine_dir.exists()
-        ), "Quarantine should be under catalog_dir, not home"
+        assert quarantine_dir.exists(), "Quarantine should be under catalog_dir, not home"

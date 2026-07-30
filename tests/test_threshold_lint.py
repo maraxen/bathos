@@ -10,6 +10,7 @@ from pathlib import Path
 # Helper
 # ---------------------------------------------------------------------------
 
+
 def _make_sidecar_toml(path: Path, content: str) -> Path:
     path.write_text(content)
     return path
@@ -18,6 +19,7 @@ def _make_sidecar_toml(path: Path, content: str) -> Path:
 # ---------------------------------------------------------------------------
 # TC-1: Bare numeric literal in condition, no source → WARNING
 # ---------------------------------------------------------------------------
+
 
 def test_check_threshold_basis_bare_numeric_warns(tmp_path):
     from bathos.linter import IssueSeverity, check_threshold_basis
@@ -52,6 +54,7 @@ temp_std = "float"
 # TC-2: Numeric literal in condition WITH source → no warning
 # ---------------------------------------------------------------------------
 
+
 def test_check_threshold_basis_source_suppresses_warning(tmp_path):
     from bathos.linter import check_threshold_basis
 
@@ -85,6 +88,7 @@ temp_std = "float"
 # ---------------------------------------------------------------------------
 # TC-2b: 1=1 residual pattern fires; must suppress with source or use "true"
 # ---------------------------------------------------------------------------
+
 
 def test_check_threshold_basis_one_equals_one_residual_warns(tmp_path):
     """Test accept-by-design: condition = '1=1' is a catch-all residual pattern.
@@ -153,6 +157,7 @@ success = "bool"
 # TC-3: numeric in condition fires regardless of adversarial_check field
 # ---------------------------------------------------------------------------
 
+
 def test_numeric_in_condition_warns_regardless_of_adversarial_check_field(tmp_path):
     """Test that the condition field is scanned for numeric literals even when
     adversarial_check is present. The numeric literal in condition (0.90) should
@@ -191,6 +196,7 @@ accuracy = "float"
 # TC-4a: Non-numeric condition (boolean) → no warning
 # ---------------------------------------------------------------------------
 
+
 def test_check_threshold_basis_boolean_condition_no_warning(tmp_path):
     from bathos.linter import check_threshold_basis
 
@@ -222,6 +228,7 @@ reproduced = "bool"
 # ---------------------------------------------------------------------------
 # TC-4b: Non-numeric condition (NULL check) → no warning
 # ---------------------------------------------------------------------------
+
 
 def test_check_threshold_basis_null_check_no_warning(tmp_path):
     from bathos.linter import check_threshold_basis
@@ -255,6 +262,7 @@ output_path = "str"
 # TC-5: Benchmark regression_threshold without basis → WARNING
 # ---------------------------------------------------------------------------
 
+
 def test_check_threshold_basis_benchmark_threshold_warns(tmp_path):
     from bathos.linter import IssueSeverity, check_threshold_basis
 
@@ -280,6 +288,7 @@ ns_per_day = "float"
 # TC-6: Benchmark regression_threshold WITH basis → no warning
 # ---------------------------------------------------------------------------
 
+
 def test_check_threshold_basis_benchmark_with_basis_suppresses_warning(tmp_path):
     from bathos.linter import check_threshold_basis
 
@@ -303,6 +312,7 @@ ns_per_day = "float"
 # ---------------------------------------------------------------------------
 # TC-7: Benchmark regression_threshold = 0.0 (default/unset) → no warning
 # ---------------------------------------------------------------------------
+
 
 def test_check_threshold_basis_benchmark_zero_threshold_no_warning(tmp_path):
     """regression_threshold = 0.0 is the dataclass default and means 'not set'.
@@ -329,6 +339,7 @@ ns_per_day = "float"
 # TC-8: Unparseable TOML → silent skip, no crash
 # ---------------------------------------------------------------------------
 
+
 def test_check_threshold_basis_invalid_toml_skips(tmp_path):
     from bathos.linter import check_threshold_basis
 
@@ -342,6 +353,7 @@ def test_check_threshold_basis_invalid_toml_skips(tmp_path):
 # ---------------------------------------------------------------------------
 # TC-9: Multiple sidecars, mixed — only bare-numeric ones produce warnings
 # ---------------------------------------------------------------------------
+
 
 def test_check_threshold_basis_multiple_sidecars_mixed(tmp_path):
     from bathos.linter import check_threshold_basis
@@ -396,6 +408,7 @@ accuracy = "float"
 # TC-10: Integer literal fires (count > 0 intentional per spec)
 # ---------------------------------------------------------------------------
 
+
 def test_check_threshold_basis_integer_literal_fires(tmp_path):
     """Conservative regex intentionally fires on small integers like 'count > 0'.
     The researcher must add source = 'zero is the natural lower bound' to suppress."""
@@ -430,6 +443,7 @@ count = "int"
 # ---------------------------------------------------------------------------
 # TC-11: Integer with source suppresses integer literal warning
 # ---------------------------------------------------------------------------
+
 
 def test_check_threshold_basis_integer_with_source_suppressed(tmp_path):
     """Researcher explicitly justifies count > 0 via source field."""
@@ -466,6 +480,7 @@ count = "int"
 # TC-12: Scientific notation literal fires
 # ---------------------------------------------------------------------------
 
+
 def test_check_threshold_basis_scientific_notation_fires(tmp_path):
     """Scientific notation (e.g. 1e-3) must be caught by the regex."""
     from bathos.linter import IssueSeverity, check_threshold_basis
@@ -499,6 +514,7 @@ err = "float"
 # ---------------------------------------------------------------------------
 # TC-13: Existing Tier-2 check_adversarial_checks still passes (regression guard)
 # ---------------------------------------------------------------------------
+
 
 def test_existing_tier2_check_adversarial_checks_still_passes(tmp_path):
     """Ensure check_adversarial_checks continues to work after the new check is wired in.
@@ -535,6 +551,7 @@ accuracy = "float"
 # ---------------------------------------------------------------------------
 # TC-14: CLI bth lint surfaces unjustified_threshold warnings
 # ---------------------------------------------------------------------------
+
 
 def test_cli_lint_threshold_warning_appears(tmp_path, monkeypatch):
     from typer.testing import CliRunner

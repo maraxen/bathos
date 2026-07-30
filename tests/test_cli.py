@@ -586,9 +586,16 @@ def test_ls_shows_outcome_column(tmp_path, monkeypatch):
     from bathos.compact import compact
     from bathos.schema import Run
 
-    r = Run(project_slug="proj", command="echo hi", argv=["echo", "hi"],
-            git_hash="abc", git_branch="main", git_dirty=False,
-            status="completed", exit_code=0)
+    r = Run(
+        project_slug="proj",
+        command="echo hi",
+        argv=["echo", "hi"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        status="completed",
+        exit_code=0,
+    )
     write_run(r, tmp_path)
     compact(tmp_path)
 
@@ -690,22 +697,33 @@ def test_report_emit_cli_smoke_test(tmp_path: Path, monkeypatch):
             status="completed",
             exit_code=0,
         )
-        db.execute("""
+        db.execute(
+            """
             INSERT INTO runs (
                 id, project_slug, command, argv, git_hash, git_branch, git_dirty, timestamp,
                 status, exit_code, schema_version
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, [
-            run.id, run.project_slug, run.command, json.dumps(run.argv),
-            run.git_hash, run.git_branch, run.git_dirty, run.timestamp,
-            run.status, run.exit_code, "7"
-        ])
+        """,
+            [
+                run.id,
+                run.project_slug,
+                run.command,
+                json.dumps(run.argv),
+                run.git_hash,
+                run.git_branch,
+                run.git_dirty,
+                run.timestamp,
+                run.status,
+                run.exit_code,
+                "7",
+            ],
+        )
         add_run_to_campaign(db, campaign_id, run.id)
 
         # Conclude the campaign
         db.execute(
             "UPDATE campaigns SET conclusion = ?, status = 'concluded' WHERE id = ?",
-            ["Test passed", campaign_id]
+            ["Test passed", campaign_id],
         )
     finally:
         db.close()
@@ -714,7 +732,9 @@ def test_report_emit_cli_smoke_test(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["report", "emit", campaign_id])
 
     # Assertions
-    assert result.exit_code == 0, f"Expected exit code 0, got {result.exit_code}. Output: {result.output}"
+    assert result.exit_code == 0, (
+        f"Expected exit code 0, got {result.exit_code}. Output: {result.output}"
+    )
 
     # Both sidecar files must exist at the pinned path
     report_path = catalog / "sidecars" / campaign_id / "campaign_report.json"
@@ -781,22 +801,33 @@ def test_report_emit_idempotency(tmp_path: Path, monkeypatch):
             status="completed",
             exit_code=0,
         )
-        db.execute("""
+        db.execute(
+            """
             INSERT INTO runs (
                 id, project_slug, command, argv, git_hash, git_branch, git_dirty, timestamp,
                 status, exit_code, schema_version
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, [
-            run.id, run.project_slug, run.command, json.dumps(run.argv),
-            run.git_hash, run.git_branch, run.git_dirty, run.timestamp,
-            run.status, run.exit_code, "7"
-        ])
+        """,
+            [
+                run.id,
+                run.project_slug,
+                run.command,
+                json.dumps(run.argv),
+                run.git_hash,
+                run.git_branch,
+                run.git_dirty,
+                run.timestamp,
+                run.status,
+                run.exit_code,
+                "7",
+            ],
+        )
         add_run_to_campaign(db, campaign_id, run.id)
 
         # Conclude the campaign
         db.execute(
             "UPDATE campaigns SET conclusion = ?, status = 'concluded' WHERE id = ?",
-            ["Test passed", campaign_id]
+            ["Test passed", campaign_id],
         )
 
         # First emission
@@ -823,9 +854,13 @@ def test_report_emit_idempotency(tmp_path: Path, monkeypatch):
         manifest_content_second = manifest_path.read_text()
 
         # Assertions
-        assert file_count_first == file_count_second == 2, f"Expected 2 files (not 4). First: {file_count_first}, Second: {file_count_second}"
+        assert file_count_first == file_count_second == 2, (
+            f"Expected 2 files (not 4). First: {file_count_first}, Second: {file_count_second}"
+        )
         assert report_content_first == report_content_second, "Report content changed on second run"
-        assert manifest_content_first == manifest_content_second, "Manifest content changed on second run"
+        assert manifest_content_first == manifest_content_second, (
+            "Manifest content changed on second run"
+        )
 
         # Both files must be valid JSON
         json.loads(report_content_second)

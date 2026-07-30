@@ -270,8 +270,7 @@ def check_positive_control_missing(project_root: Path) -> list[LintIssue]:
                 continue
 
             is_null_capable = any(
-                label == "fail" or spec.is_residual
-                for label, spec in sidecar.outcomes.items()
+                label == "fail" or spec.is_residual for label, spec in sidecar.outcomes.items()
             )
             if not is_null_capable:
                 continue

@@ -42,3 +42,20 @@ def test_scaffold_survives_an_unreadable_corpus(tmp_path, monkeypatch):
     monkeypatch.setattr(corpus_mod, "load_corpus", boom)
     text = _scaffold(tmp_path)
     tomllib.loads(text)  # still valid, just without guidance
+
+
+def test_a_card_title_with_a_newline_cannot_corrupt_the_sidecar(tmp_path, monkeypatch):
+    """An embedded newline would split the comment line, leaving a second line with no '#'."""
+    from bathos.corpus import Card, CorpusLoad
+
+    evil = Card(
+        id="EVIL-1",
+        title="line one\nline two = broken",
+        path=tmp_path / "x" / "EVIL-1.md",
+        body="b",
+        severity="warning",
+    )
+    monkeypatch.setattr("bathos.corpus.load_corpus", lambda *_a, **_k: CorpusLoad(cards=[evil]))
+    text = _scaffold(tmp_path)
+    tomllib.loads(text)  # must still parse
+    assert "line two = broken" in text and "\n line two" not in text

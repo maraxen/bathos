@@ -391,13 +391,13 @@ def test_hash_dependency_lock_stable_and_content_sensitive(tmp_path: Path):
     from bathos.checker import hash_dependency_lock
 
     lock = tmp_path / "uv.lock"
-    lock.write_text("version = 1\nname = \"foo\"\n")
+    lock.write_text('version = 1\nname = "foo"\n')
     h1 = hash_dependency_lock(tmp_path)
     h2 = hash_dependency_lock(tmp_path)
     assert h1 is not None
     assert h1 == h2
 
-    lock.write_text("version = 2\nname = \"foo\"\n")
+    lock.write_text('version = 2\nname = "foo"\n')
     h3 = hash_dependency_lock(tmp_path)
     assert h3 != h1
 

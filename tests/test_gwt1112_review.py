@@ -272,9 +272,7 @@ class TestGWT11WarmLossGate:
         rebuild_actions = [a for a in manifest.actions if a.action == "rebuild_warm"]
         assert len(rebuild_actions) > 0
 
-    def test_rebuild_warm_prints_concrete_warning_with_counts(
-        self, tmp_catalog: Path, capsys
-    ):
+    def test_rebuild_warm_prints_concrete_warning_with_counts(self, tmp_catalog: Path, capsys):
         """Check 5: Warning message includes concrete counts of warm-only data at risk."""
         import duckdb
 

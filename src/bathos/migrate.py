@@ -174,9 +174,7 @@ def _default_array(arrow_type: pa.DataType, n: int, field_name: str = "") -> pa.
         "baseline_hpo_trials",
         "baseline_hpo_compute_budget",
         "differential_effect",
-    ) and (
-        pa.types.is_integer(arrow_type) or pa.types.is_floating(arrow_type)
-    ):
+    ) and (pa.types.is_integer(arrow_type) or pa.types.is_floating(arrow_type)):
         return pa.array([None] * n, type=arrow_type)
     if pa.types.is_string(arrow_type) or pa.types.is_large_string(arrow_type):
         return pa.array([""] * n, type=arrow_type)

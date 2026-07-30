@@ -1,4 +1,5 @@
 """Tests for per-project sync filtering and migration to project subdirectories."""
+
 from __future__ import annotations
 
 from io import StringIO
@@ -59,6 +60,7 @@ def _config(tmp_path: Path, slug: str, sync_filter: str = "project_slug") -> Pro
 # 1. Sync filters by slug: only this project's subdir is pushed
 # ---------------------------------------------------------------------------
 
+
 def test_sync_filters_by_slug(tmp_path: Path):
     catalog = tmp_path / "catalog"
     config = _config(tmp_path, "asr")
@@ -69,7 +71,9 @@ def test_sync_filters_by_slug(tmp_path: Path):
     write_run(_make_run("prolix"), catalog)
 
     with patch("bathos.sync.subprocess.Popen") as mock_popen:
-        mock_popen.return_value = _make_mock_popen(stdout_output="Number of regular files transferred: 2")
+        mock_popen.return_value = _make_mock_popen(
+            stdout_output="Number of regular files transferred: 2"
+        )
 
         result = sync_catalog("engaging", config, catalog, pull=False)
 
@@ -86,6 +90,7 @@ def test_sync_filters_by_slug(tmp_path: Path):
 # 2. sync_filter="none" preserves current flat behavior
 # ---------------------------------------------------------------------------
 
+
 def test_sync_no_filter_mode_preserves_current_behavior(tmp_path: Path):
     catalog = tmp_path / "catalog"
     config = _config(tmp_path, "asr", sync_filter="none")
@@ -100,7 +105,9 @@ def test_sync_no_filter_mode_preserves_current_behavior(tmp_path: Path):
 
         cmd = mock_popen.call_args[0][0]
         # Source should be the flat runs/ dir (no slug subdir)
-        assert any(str(catalog / "runs") + "/" in str(a) for a in cmd), f"Expected flat runs/ in cmd: {cmd}"
+        assert any(str(catalog / "runs") + "/" in str(a) for a in cmd), (
+            f"Expected flat runs/ in cmd: {cmd}"
+        )
         assert not any("asr" in str(a) and "runs/asr" in str(a) for a in cmd)
         assert result.filtered == 0
 
@@ -108,6 +115,7 @@ def test_sync_no_filter_mode_preserves_current_behavior(tmp_path: Path):
 # ---------------------------------------------------------------------------
 # 3. Pull uses project-slug subdir as destination
 # ---------------------------------------------------------------------------
+
 
 def test_sync_pull_targets_project_subdir(tmp_path: Path):
     catalog = tmp_path / "catalog"
@@ -129,6 +137,7 @@ def test_sync_pull_targets_project_subdir(tmp_path: Path):
 # 4. migrate_to_project_subdirs --dry-run reports counts but doesn't move
 # ---------------------------------------------------------------------------
 
+
 def test_migrate_to_project_subdirs_dry_run(tmp_path: Path):
     runs_dir = tmp_path / "runs"
     runs_dir.mkdir()
@@ -148,6 +157,7 @@ def test_migrate_to_project_subdirs_dry_run(tmp_path: Path):
 # ---------------------------------------------------------------------------
 # 5. migrate_to_project_subdirs is idempotent
 # ---------------------------------------------------------------------------
+
 
 def test_migrate_to_project_subdirs_idempotent(tmp_path: Path):
     runs_dir = tmp_path / "runs"
@@ -171,6 +181,7 @@ def test_migrate_to_project_subdirs_idempotent(tmp_path: Path):
 # 6. Migration fallback for parquets without a project_slug
 # ---------------------------------------------------------------------------
 
+
 def test_migrate_fallback_for_runs_without_slug(tmp_path: Path):
     runs_dir = tmp_path / "runs"
     runs_dir.mkdir()
@@ -191,6 +202,7 @@ def test_migrate_fallback_for_runs_without_slug(tmp_path: Path):
 # 7. bth ls finds runs after migration (read_runs uses rglob)
 # ---------------------------------------------------------------------------
 
+
 def test_ls_finds_runs_in_subdirs(tmp_path: Path):
     from bathos.catalog import read_runs
 
@@ -207,6 +219,7 @@ def test_ls_finds_runs_in_subdirs(tmp_path: Path):
 # ---------------------------------------------------------------------------
 # 8. bth run writes new runs under runs/<slug>/
 # ---------------------------------------------------------------------------
+
 
 def test_run_writes_to_project_subdir(tmp_path: Path):
     from bathos.catalog import write_run

@@ -31,15 +31,24 @@ class TestFigureEntryRegisterTool:
         assert looked_up["figures"][0]["figure_kind"] == "chord_diagram"
 
     def test_register_requires_asset_sha256_sidecar_ref_figure_kind(self):
-        assert figure_entry_register_tool(
-            asset_sha256="", sidecar_ref="fig.figure.toml", figure_kind="chord"
-        )["ok"] is False
-        assert figure_entry_register_tool(
-            asset_sha256="a" * 64, sidecar_ref="", figure_kind="chord"
-        )["ok"] is False
-        assert figure_entry_register_tool(
-            asset_sha256="a" * 64, sidecar_ref="fig.figure.toml", figure_kind=""
-        )["ok"] is False
+        assert (
+            figure_entry_register_tool(
+                asset_sha256="", sidecar_ref="fig.figure.toml", figure_kind="chord"
+            )["ok"]
+            is False
+        )
+        assert (
+            figure_entry_register_tool(asset_sha256="a" * 64, sidecar_ref="", figure_kind="chord")[
+                "ok"
+            ]
+            is False
+        )
+        assert (
+            figure_entry_register_tool(
+                asset_sha256="a" * 64, sidecar_ref="fig.figure.toml", figure_kind=""
+            )["ok"]
+            is False
+        )
 
     def test_register_rejects_invalid_render_state(self, tmp_catalog):
         result = figure_entry_register_tool(

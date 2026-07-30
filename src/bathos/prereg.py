@@ -21,11 +21,14 @@ logger = logging.getLogger(__name__)
 
 class GateErrorCode(str, Enum):
     """Enumeration of structured error codes for pre-registration gate failures."""
+
     SIDECAR_MISSING = "sidecar_missing"
     SIDECAR_INVALID = "sidecar_invalid"
     SIDECAR_HASH_MISMATCH = "sidecar_hash_mismatch"  # drift vs. the first-run manifest (B2-04)
     NOT_FIRST_OF_KIND = "not_first_of_kind"
-    MANIFEST_WRITE_FAILED = "manifest_write_failed"  # reserved: manifest write permission checks on cluster
+    MANIFEST_WRITE_FAILED = (
+        "manifest_write_failed"  # reserved: manifest write permission checks on cluster
+    )
     ADVERSARIAL_CHECK_MISSING = "adversarial_check_missing"
     HYPOTHESIS_LOCK_MISSING = "hypothesis_lock_missing"  # reserved: hypothesis lock file validation
     OUTCOME_EVALUATION_ERROR = "outcome_evaluation_error"
@@ -38,6 +41,7 @@ class GateErrorCode(str, Enum):
 @dataclass
 class GateErrorPayload:
     """Structured payload for gate check failures, ready for MCP serialization."""
+
     error_code: GateErrorCode
     phase: Literal["pre_execution", "post_execution"]
     taxonomy_label: str
@@ -49,6 +53,7 @@ class GateErrorPayload:
 
 class GateError(Exception):
     """Exception raised when a pre-registration gate check fails."""
+
     def __init__(self, message: str, payload: GateErrorPayload | None = None):
         super().__init__(message)
         self.payload = payload
@@ -159,7 +164,7 @@ def check_first_of_kind(script_path: Path, catalog_dir: Path, git_hash: str) -> 
                 try:
                     rows = con.execute(
                         "SELECT COUNT(*) FROM runs WHERE command LIKE ? AND git_hash = ?",
-                        [f"%{script_str}%", git_hash]
+                        [f"%{script_str}%", git_hash],
                     ).fetchall()
                     con.close()
                     return rows[0][0] == 0
@@ -172,10 +177,7 @@ def check_first_of_kind(script_path: Path, catalog_dir: Path, git_hash: str) -> 
     from bathos.query import list_runs
 
     runs = list_runs(catalog_dir)
-    return not any(
-        script_str in (r.command or "") and r.git_hash == git_hash
-        for r in runs
-    )
+    return not any(script_str in (r.command or "") and r.git_hash == git_hash for r in runs)
 
 
 def check_sidecar_drift(script_path: Path, catalog_dir: Path, current_sidecar_sha256: str) -> bool:
@@ -324,7 +326,7 @@ def check_reproduction_prerequisite(
             with duckdb.connect(str(db_path), read_only=True) as conn:
                 rows = conn.execute(
                     "SELECT 1 FROM runs WHERE command LIKE ? AND outcome = 'pass' LIMIT 1",
-                    [f"%{requires_pass_stem}%"]
+                    [f"%{requires_pass_stem}%"],
                 ).fetchall()
                 if rows:
                     return True
@@ -412,7 +414,12 @@ def gate_check(
             errors=[f"No sidecar found: {script_path.stem}.bth.toml"],
             agent_mode=mode,
         )
-        event("prereg.gate_deny", script_path=str(script_path), reason="sidecar_missing", agent_mode=mode)
+        event(
+            "prereg.gate_deny",
+            script_path=str(script_path),
+            reason="sidecar_missing",
+            agent_mode=mode,
+        )
         return GateResult(ok=False, mode=mode, bundle=bundle, error_payload=payload)
 
     sidecar = parse_sidecar(bundle.path)
@@ -425,8 +432,15 @@ def gate_check(
             errors=[f"[{e.field}] {e.message}" for e in validation.errors],
             agent_mode=mode,
         )
-        event("prereg.gate_deny", script_path=str(script_path), reason="sidecar_invalid", agent_mode=mode)
-        return GateResult(ok=False, mode=mode, bundle=bundle, validation=validation, error_payload=payload)
+        event(
+            "prereg.gate_deny",
+            script_path=str(script_path),
+            reason="sidecar_invalid",
+            agent_mode=mode,
+        )
+        return GateResult(
+            ok=False, mode=mode, bundle=bundle, validation=validation, error_payload=payload
+        )
 
     # Sidecar drift (B2-04, AC-18): deny in autonomous mode, warn (non-blocking) in
     # collaborative mode — a human is presumed to have a reason for the edit, an
@@ -439,12 +453,24 @@ def gate_check(
                 errors=[f"Sidecar hash for {script_path.stem} differs from its first-run manifest"],
                 agent_mode=mode,
             )
-            event("prereg.gate_deny", script_path=str(script_path), reason="sidecar_hash_mismatch", agent_mode=mode)
-            return GateResult(ok=False, mode=mode, bundle=bundle, validation=validation, error_payload=payload)
+            event(
+                "prereg.gate_deny",
+                script_path=str(script_path),
+                reason="sidecar_hash_mismatch",
+                agent_mode=mode,
+            )
+            return GateResult(
+                ok=False, mode=mode, bundle=bundle, validation=validation, error_payload=payload
+            )
         logger.warning(
             f"Sidecar hash drift detected for {script_path}: differs from its first-run manifest"
         )
-        event("prereg.gate_warn", script_path=str(script_path), reason="sidecar_hash_mismatch", agent_mode=mode)
+        event(
+            "prereg.gate_warn",
+            script_path=str(script_path),
+            reason="sidecar_hash_mismatch",
+            agent_mode=mode,
+        )
 
     # Autonomous mode: enforce first-of-kind
     if mode == "autonomous" and catalog_dir and git_hash:
@@ -452,29 +478,52 @@ def gate_check(
             payload = _gate_failure_payload(
                 error_code=GateErrorCode.NOT_FIRST_OF_KIND,
                 phase="pre_execution",
-                errors=["Script has prior runs — autonomous sidecar generation disallowed for iterated scripts"],
+                errors=[
+                    "Script has prior runs — autonomous sidecar generation disallowed for iterated scripts"
+                ],
                 agent_mode=mode,
             )
-            event("prereg.gate_deny", script_path=str(script_path), reason="not_first_of_kind", agent_mode=mode)
-            return GateResult(ok=False, mode=mode, bundle=bundle, validation=validation, error_payload=payload)
+            event(
+                "prereg.gate_deny",
+                script_path=str(script_path),
+                reason="not_first_of_kind",
+                agent_mode=mode,
+            )
+            return GateResult(
+                ok=False, mode=mode, bundle=bundle, validation=validation, error_payload=payload
+            )
 
     # Adversarial check enforcement (required for all non-residual outcomes in autonomous mode)
     if mode == "autonomous":
         missing_adversarial = [
-            label for label, outcome in sidecar.outcomes.items()
+            label
+            for label, outcome in sidecar.outcomes.items()
             if not getattr(outcome, "is_residual", False) and outcome.adversarial_check is None
         ]
         if missing_adversarial:
             payload = _gate_failure_payload(
                 error_code=GateErrorCode.ADVERSARIAL_CHECK_MISSING,
                 phase="pre_execution",
-                errors=[f"outcomes.{label}.adversarial_check is missing" for label in missing_adversarial],
+                errors=[
+                    f"outcomes.{label}.adversarial_check is missing"
+                    for label in missing_adversarial
+                ],
                 agent_mode=mode,
             )
-            event("prereg.gate_deny", script_path=str(script_path), reason="adversarial_check_missing", agent_mode=mode)
-            return GateResult(ok=False, mode=mode, bundle=bundle, validation=validation, error_payload=payload)
+            event(
+                "prereg.gate_deny",
+                script_path=str(script_path),
+                reason="adversarial_check_missing",
+                agent_mode=mode,
+            )
+            return GateResult(
+                ok=False, mode=mode, bundle=bundle, validation=validation, error_payload=payload
+            )
 
-    event("prereg.gate_pass", script_path=str(script_path), sidecar_sha256=bundle.sha256, agent_mode=mode)
+    event(
+        "prereg.gate_pass",
+        script_path=str(script_path),
+        sidecar_sha256=bundle.sha256,
+        agent_mode=mode,
+    )
     return GateResult(ok=True, mode=mode, bundle=bundle, validation=validation)
-
-

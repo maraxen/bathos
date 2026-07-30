@@ -221,6 +221,7 @@ class TestRunSqlTool:
     def test_run_sql_tool_error_handling(self):
         """Verify run_sql raises on invalid SQL."""
         import pytest
+
         with pytest.raises(Exception):
             run_sql_tool(catalog_dir="/nonexistent/path", sql="SELECT * FROM nonexistent")
 
@@ -245,6 +246,7 @@ class TestCompactTool:
     def test_compact_tool_error_handling(self):
         """Verify compact raises on nonexistent catalog."""
         import pytest
+
         with pytest.raises(Exception):
             compact_tool(catalog_dir="/nonexistent/path")
 
@@ -283,6 +285,7 @@ class TestArchiveTool:
     def test_archive_tool_error_handling(self):
         """Verify archive raises on nonexistent catalog."""
         import pytest
+
         with pytest.raises(Exception):
             archive_tool(catalog_dir="/nonexistent/path", project="test")
 
@@ -378,6 +381,7 @@ class TestSyncTool:
     def test_sync_tool_error_handling(self):
         """Verify sync raises on config error."""
         import pytest
+
         with pytest.raises(Exception):
             sync_tool(catalog_dir="/nonexistent/path", remote_name="origin")
 
@@ -413,6 +417,7 @@ class TestInitTool:
     def test_init_tool_error_handling(self):
         """Verify init raises on nonexistent project root."""
         import pytest
+
         with pytest.raises(Exception):
             init_tool(project_root="/nonexistent/path", slug="test")
 
@@ -429,6 +434,7 @@ class TestRunTool:
     @patch("bathos.mcp.run_script")
     def test_run_tool_executes_script(self, mock_run):
         """Verify run tool executes script."""
+
         def fake_run_script(**kwargs):
             run_uuid_var.set("11111111-1111-1111-1111-111111111111")
             return 0
@@ -448,6 +454,7 @@ class TestRunTool:
         """A call whose run_script never sets run_uuid_var (e.g. an early-return
         gate/sidecar failure, which bails before any Run is constructed) must not
         report a previous call's run_id in the same context."""
+
         # First call: succeeds, sets run_uuid_var to a real id.
         def succeeding_run(**kwargs):
             run_uuid_var.set("22222222-2222-2222-2222-222222222222")

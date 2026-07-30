@@ -87,8 +87,9 @@ def _shape_error(tool_name: str, code: BathosErrorCode, exc: BaseException) -> d
     The four mandatory keys (ok, error_code, error, resolution_hint) always come first
     so tool-specific data keys cannot clobber them.
     """
-    event("mcp.tool_error", tool_name=tool_name, error_code=code.value,
-          error_class=type(exc).__name__)
+    event(
+        "mcp.tool_error", tool_name=tool_name, error_code=code.value, error_class=type(exc).__name__
+    )
     return {
         "ok": False,
         "error_code": code.value,
@@ -111,6 +112,7 @@ def traced_tool(fn):
 
     The mcp_request_id_var contextvar is set to a fresh UUID for this call.
     """
+
     @functools.wraps(fn)
     async def wrapper(*args, **kwargs):
         request_id = uuid.uuid4().hex
@@ -118,8 +120,7 @@ def traced_tool(fn):
         tool_name = fn.__name__
 
         # Emit call_start with arg keys only (never values, to avoid leaking payloads)
-        event("mcp.call_start", tool=tool_name, request_id=request_id,
-              arg_keys=list(kwargs.keys()))
+        event("mcp.call_start", tool=tool_name, request_id=request_id, arg_keys=list(kwargs.keys()))
 
         t0 = time.monotonic_ns()
         try:
@@ -148,8 +149,13 @@ def traced_tool(fn):
             # that returns its own {"ok": False, "error": "..."} (rather than raising)
             # must not have that silently clobbered into a fake success.
             if isinstance(result, dict):
-                merged = {"ok": True, "error_code": None, "error": None,
-                          "resolution_hint": None, **result}
+                merged = {
+                    "ok": True,
+                    "error_code": None,
+                    "error": None,
+                    "resolution_hint": None,
+                    **result,
+                }
                 if "ok" not in result and result.get("error") is not None:
                     merged["ok"] = False
                 return merged
@@ -173,8 +179,7 @@ def traced_tool(fn):
             return _shape_error(tool_name, BathosErrorCode.INTERNAL, e)
         finally:
             duration_ms = (time.monotonic_ns() - t0) / 1e6
-            event("mcp.call_end", tool=tool_name, request_id=request_id,
-                  duration_ms=duration_ms)
+            event("mcp.call_end", tool=tool_name, request_id=request_id, duration_ms=duration_ms)
             mcp_request_id_var.reset(token)
 
     return wrapper
@@ -200,6 +205,7 @@ def require_write_token(fn):
     functools.wraps, same as traced_tool relies on today) exposes it to
     callers.
     """
+
     @functools.wraps(fn)
     async def wrapper(*args, **kwargs):
         if not check_token(kwargs.get("token", "")):
@@ -208,6 +214,7 @@ def require_write_token(fn):
                 "token= to match the local ~/.bth/mcp_token file (debt #619)."
             )
         return await fn(*args, **kwargs)
+
     return wrapper
 
 
@@ -950,7 +957,6 @@ def archive_tool(
     return result_dict
 
 
-
 def check_tool(
     catalog_dir: str = "",
     project_root: str = "",
@@ -1179,9 +1185,7 @@ def campaign_create_tool(
     if not name:
         return {"error": "name parameter is required"}
     if mode not in ("exploration", "confirmation"):
-        return {
-            "error": f"mode must be 'exploration' or 'confirmation', got {mode!r}"
-        }
+        return {"error": f"mode must be 'exploration' or 'confirmation', got {mode!r}"}
 
     cat_dir = _get_catalog_dir(catalog_dir or None)
     slug = project_slug or _get_project_slug()
@@ -1922,7 +1926,12 @@ async def postmortem_validate(
 
     result = validate_postmortem(pm, workspace_root=ws, strict_files=strict_files)
     if result.ok:
-        return {"validation_ok": True, "run_id": pm.run_id, "hypothesis_status": pm.hypothesis_status}
+        return {
+            "validation_ok": True,
+            "run_id": pm.run_id,
+            "campaign_id": pm.campaign_id,
+            "hypothesis_status": pm.hypothesis_status,
+        }
     return {"validation_ok": False, "errors": [e.message for e in result.errors]}
 
 
@@ -2228,9 +2237,7 @@ async def claim_attest_parity(
         return {
             "campaign_id": campaign_id,
             "parity_run_id": parity_run_id,
-            "message": (
-                f"Attested parity run {parity_run_id} on campaign {campaign_id}"
-            ),
+            "message": (f"Attested parity run {parity_run_id} on campaign {campaign_id}"),
         }
     except (ValueError, RuntimeError, FileNotFoundError) as e:
         raise ValueError(str(e)) from e
@@ -2383,7 +2390,11 @@ def outputs_summary_tool(
 
     db_path = cat / "bathos.db"
     if not db_path.exists():
-        return {"rows": [], "since": since, "note": "Catalog not yet compacted. Run 'bth compact' first."}
+        return {
+            "rows": [],
+            "since": since,
+            "note": "Catalog not yet compacted. Run 'bth compact' first.",
+        }
 
     # Query warm tier
     con = duckdb.connect(str(db_path))
@@ -2398,6 +2409,7 @@ def outputs_summary_tool(
 
     if since:
         import re
+
         match = re.match(r"(\d+)([dhm])", since)
         if match:
             num, unit = match.groups()
@@ -2544,7 +2556,9 @@ def verify_tool(
     from bathos.verify import verify_all, verify_archive, verify_cool, verify_warm
 
     cat_dir = _get_catalog_dir(catalog_dir or None)
-    archive_root = Path(archive_dir).expanduser() if archive_dir else Path.home() / ".bth" / "archive"
+    archive_root = (
+        Path(archive_dir).expanduser() if archive_dir else Path.home() / ".bth" / "archive"
+    )
 
     if tier == "cool":
         results = [verify_cool(cat_dir)]
@@ -2833,8 +2847,7 @@ async def reference_search(query: str) -> dict:
         "query": query,
         "count": len(hits),
         "cards": [
-            {"id": c.id, "title": c.title, "severity": c.severity, "domain": c.domain}
-            for c in hits
+            {"id": c.id, "title": c.title, "severity": c.severity, "domain": c.domain} for c in hits
         ],
     }
 
@@ -2872,20 +2885,59 @@ _WIRED = cisternal.wire(
     app,
     registry="bathos",
     expected=[
-        "list_runs", "find_runs", "get_run", "cite_run", "lineage_prov",
-        "run_sql", "resolve_pin", "get_trust_state", "query_attestation",
-        "read_campaign_report", "read_figure_manifest", "figure_lookup",
-        "list_candidates", "anchor_insert", "anchor_get", "anchor_find",
-        "figure_entry_register", "attestation_scaffold", "attestation_validate",
-        "attestation_register", "graduate_product", "compact", "archive",
-        "check", "capability_probe", "sync", "init", "run", "campaign_create",
-        "campaign_list", "campaign_review", "campaign_conclude",
-        "postmortem_scaffold", "postmortem_validate", "postmortem_get",
-        "claim_scaffold", "claim_validate", "claim_register", "gate_stamp",
-        "gate_status", "claim_attest_parity", "validate_sidecar",
-        "list_outputs", "outputs_summary", "campaign_add", "campaign_show",
-        "verify", "lint", "repair_scan", "repair",
-        "reference_list", "reference_get", "reference_search",
+        "list_runs",
+        "find_runs",
+        "get_run",
+        "cite_run",
+        "lineage_prov",
+        "run_sql",
+        "resolve_pin",
+        "get_trust_state",
+        "query_attestation",
+        "read_campaign_report",
+        "read_figure_manifest",
+        "figure_lookup",
+        "list_candidates",
+        "anchor_insert",
+        "anchor_get",
+        "anchor_find",
+        "figure_entry_register",
+        "attestation_scaffold",
+        "attestation_validate",
+        "attestation_register",
+        "graduate_product",
+        "compact",
+        "archive",
+        "check",
+        "capability_probe",
+        "sync",
+        "init",
+        "run",
+        "campaign_create",
+        "campaign_list",
+        "campaign_review",
+        "campaign_conclude",
+        "postmortem_scaffold",
+        "postmortem_validate",
+        "postmortem_get",
+        "claim_scaffold",
+        "claim_validate",
+        "claim_register",
+        "gate_stamp",
+        "gate_status",
+        "claim_attest_parity",
+        "validate_sidecar",
+        "list_outputs",
+        "outputs_summary",
+        "campaign_add",
+        "campaign_show",
+        "verify",
+        "lint",
+        "repair_scan",
+        "repair",
+        "reference_list",
+        "reference_get",
+        "reference_search",
         "reference_applicable",
     ],
 )

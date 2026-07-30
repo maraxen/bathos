@@ -131,7 +131,8 @@ def test_run_allows_enforced_dir_with_sidecar(tmp_path):
     script = enforced / "run_nvt.py"
     script.write_text("print('hi')")
     sidecar = enforced / "run_nvt.bth.toml"
-    sidecar.write_text(textwrap.dedent("""
+    sidecar.write_text(
+        textwrap.dedent("""
         [experiment]
         hypothesis = "test hypothesis"
         [outcomes.pass]
@@ -145,7 +146,8 @@ def test_run_allows_enforced_dir_with_sidecar(tmp_path):
         is_residual = true
         [result_schema]
         x = "float"
-    """))
+    """)
+    )
 
     result = run_script(
         argv=[sys.executable, str(script)],
@@ -190,7 +192,8 @@ def test_result_emission_via_env_var(tmp_catalog: Path, tmp_path: Path):
     enforced = tmp_path / "scripts" / "experiments"
     enforced.mkdir(parents=True)
     script = enforced / "run_test.py"
-    script.write_text(textwrap.dedent("""
+    script.write_text(
+        textwrap.dedent("""
         import os
         import json
 
@@ -198,10 +201,12 @@ def test_result_emission_via_env_var(tmp_catalog: Path, tmp_path: Path):
         if results_path:
             with open(results_path, "w") as f:
                 json.dump({"temp_mean": 300.5, "temp_std": 2.3, "n_steps": 1000}, f)
-    """))
+    """)
+    )
 
     sidecar = enforced / "run_test.bth.toml"
-    sidecar.write_text(textwrap.dedent("""
+    sidecar.write_text(
+        textwrap.dedent("""
         [experiment]
         hypothesis = "test hypothesis"
         [outcomes.pass]
@@ -221,7 +226,8 @@ def test_result_emission_via_env_var(tmp_catalog: Path, tmp_path: Path):
         temp_mean = "float"
         temp_std = "float"
         n_steps = "int"
-    """))
+    """)
+    )
 
     exit_code = run_script(
         argv=[sys.executable, str(script)],
@@ -247,7 +253,8 @@ def test_result_emission_fallback_path(tmp_catalog: Path, tmp_path: Path):
     enforced.mkdir(parents=True)
     script = enforced / "run_test.py"
     # Script must write to absolute path for fallback to work
-    script.write_text(textwrap.dedent("""
+    script.write_text(
+        textwrap.dedent("""
         import json
         import os
 
@@ -256,10 +263,12 @@ def test_result_emission_fallback_path(tmp_catalog: Path, tmp_path: Path):
         fallback_path = os.path.join(script_dir, "run_test.bth-results.json")
         with open(fallback_path, "w") as f:
             json.dump({"metric_a": 42, "metric_b": 3.14}, f)
-    """))
+    """)
+    )
 
     sidecar = enforced / "run_test.bth.toml"
-    sidecar.write_text(textwrap.dedent("""
+    sidecar.write_text(
+        textwrap.dedent("""
         [experiment]
         hypothesis = "test hypothesis"
         [outcomes.pass]
@@ -274,7 +283,8 @@ def test_result_emission_fallback_path(tmp_catalog: Path, tmp_path: Path):
         [result_schema]
         metric_a = "int"
         metric_b = "float"
-    """))
+    """)
+    )
 
     exit_code = run_script(
         argv=[sys.executable, str(script)],
@@ -300,14 +310,17 @@ def test_result_emission_falls_back_to_single_out_json(tmp_catalog: Path, tmp_pa
     enforced.mkdir(parents=True)
     script = enforced / "run_test.py"
     out_path = tmp_path / "results.json"
-    script.write_text(textwrap.dedent(f"""
+    script.write_text(
+        textwrap.dedent(f"""
         import json
         with open(r"{out_path}", "w") as f:
             json.dump({{"temp_mean": 300.5, "temp_std": 2.3}}, f)
-    """))
+    """)
+    )
 
     sidecar = enforced / "run_test.bth.toml"
-    sidecar.write_text(textwrap.dedent("""
+    sidecar.write_text(
+        textwrap.dedent("""
         [experiment]
         hypothesis = "test hypothesis"
         [outcomes.pass]
@@ -322,7 +335,8 @@ def test_result_emission_falls_back_to_single_out_json(tmp_catalog: Path, tmp_pa
         [result_schema]
         temp_mean = "float"
         temp_std = "float"
-    """))
+    """)
+    )
 
     exit_code = run_script(
         argv=[sys.executable, str(script)],
@@ -348,16 +362,19 @@ def test_result_emission_does_not_guess_with_multiple_out_json(tmp_catalog: Path
     script = enforced / "run_test.py"
     out_a = tmp_path / "a.json"
     out_b = tmp_path / "b.json"
-    script.write_text(textwrap.dedent(f"""
+    script.write_text(
+        textwrap.dedent(f"""
         import json
         with open(r"{out_a}", "w") as f:
             json.dump({{"temp_mean": 300.5, "temp_std": 2.3}}, f)
         with open(r"{out_b}", "w") as f:
             json.dump({{"other": "data"}}, f)
-    """))
+    """)
+    )
 
     sidecar = enforced / "run_test.bth.toml"
-    sidecar.write_text(textwrap.dedent("""
+    sidecar.write_text(
+        textwrap.dedent("""
         [experiment]
         hypothesis = "test hypothesis"
         [outcomes.pass]
@@ -372,7 +389,8 @@ def test_result_emission_does_not_guess_with_multiple_out_json(tmp_catalog: Path
         [result_schema]
         temp_mean = "float"
         temp_std = "float"
-    """))
+    """)
+    )
 
     exit_code = run_script(
         argv=[sys.executable, str(script)],
@@ -412,14 +430,16 @@ def test_result_emission_invalid_json(tmp_catalog: Path, tmp_path: Path):
     init_catalog(tmp_catalog)
     # Create script that writes invalid JSON
     script = tmp_path / "bad_json.py"
-    script.write_text(textwrap.dedent("""
+    script.write_text(
+        textwrap.dedent("""
         import os
 
         results_path = os.environ.get("BTH_RESULTS_PATH")
         if results_path:
             with open(results_path, "w") as f:
                 f.write("{invalid json content")
-    """))
+    """)
+    )
 
     exit_code = run_script(
         argv=[sys.executable, str(script)],
@@ -473,7 +493,8 @@ def test_gate_passes_with_valid_sidecar(tmp_path):
     script = enforced / "run_nvt.py"
     script.write_text("print('hi')")
     sidecar = enforced / "run_nvt.bth.toml"
-    sidecar.write_text(textwrap.dedent("""
+    sidecar.write_text(
+        textwrap.dedent("""
         [experiment]
         hypothesis = "test hypothesis"
         [outcomes.pass]
@@ -487,7 +508,8 @@ def test_gate_passes_with_valid_sidecar(tmp_path):
         is_residual = true
         [result_schema]
         x = "float"
-    """))
+    """)
+    )
 
     result = run_script(
         argv=[sys.executable, str(script)],
@@ -539,7 +561,8 @@ def test_outcome_is_residual_populated(tmp_catalog: Path, tmp_path: Path):
     enforced = tmp_path / "scripts" / "experiments"
     enforced.mkdir(parents=True)
     script = enforced / "run_test.py"
-    script.write_text(textwrap.dedent("""
+    script.write_text(
+        textwrap.dedent("""
         import os
         import json
 
@@ -548,10 +571,12 @@ def test_outcome_is_residual_populated(tmp_catalog: Path, tmp_path: Path):
         if results_path:
             with open(results_path, "w") as f:
                 json.dump({"x": 10}, f)
-    """))
+    """)
+    )
 
     sidecar = enforced / "run_test.bth.toml"
-    sidecar.write_text(textwrap.dedent("""
+    sidecar.write_text(
+        textwrap.dedent("""
         [experiment]
         hypothesis = "test hypothesis"
         [outcomes.pass]
@@ -565,7 +590,8 @@ def test_outcome_is_residual_populated(tmp_catalog: Path, tmp_path: Path):
         is_residual = true
         [result_schema]
         x = "int"
-    """))
+    """)
+    )
 
     exit_code = run_script(
         argv=[sys.executable, str(script)],
@@ -611,12 +637,15 @@ def test_evaluate_outcome_not_called_on_error(tmp_catalog: Path, tmp_path: Path)
     enforced = tmp_path / "scripts" / "experiments"
     enforced.mkdir(parents=True)
     script = enforced / "run_test.py"
-    script.write_text(textwrap.dedent("""
+    script.write_text(
+        textwrap.dedent("""
         raise SystemExit(1)
-    """))
+    """)
+    )
 
     sidecar = enforced / "run_test.bth.toml"
-    sidecar.write_text(textwrap.dedent("""
+    sidecar.write_text(
+        textwrap.dedent("""
         [experiment]
         hypothesis = "test hypothesis"
         [outcomes.pass]
@@ -626,7 +655,8 @@ def test_evaluate_outcome_not_called_on_error(tmp_catalog: Path, tmp_path: Path)
         is_residual = true
         [result_schema]
         temp_std = "float"
-    """))
+    """)
+    )
 
     init_catalog(tmp_catalog)
     exit_code = run_script(
@@ -655,7 +685,8 @@ def test_manifest_sha256_populated(tmp_catalog: Path, tmp_path: Path):
     script.write_text("pass")
 
     sidecar = enforced / "run_test.bth.toml"
-    sidecar.write_text(textwrap.dedent("""
+    sidecar.write_text(
+        textwrap.dedent("""
         [experiment]
         hypothesis = "test"
         [outcomes.pass]
@@ -665,7 +696,8 @@ def test_manifest_sha256_populated(tmp_catalog: Path, tmp_path: Path):
         is_residual = true
         [result_schema]
         x = "int"
-    """))
+    """)
+    )
 
     init_catalog(tmp_catalog)
     exit_code = run_script(
@@ -783,7 +815,7 @@ def test_explicit_out_and_output_dir_merged(tmp_catalog: Path, tmp_path: Path):
 
 def test_parity_run_type_extracted_from_doubly_nested_metadata(tmp_catalog: Path, tmp_path: Path):
     """Step 4 (AC-19 integration): runner.py extracts parity_run_type from metadata and sets Run column.
-    
+
     parity_validate.py emits metadata.parity_run_type doubly-nested (result["metadata"]["parity_run_type"]).
     runner.py should extract this and set Run.parity_run_type for the gates (F2, F3) to query.
     """
@@ -793,7 +825,8 @@ def test_parity_run_type_extracted_from_doubly_nested_metadata(tmp_catalog: Path
     enforced = tmp_path / "scripts" / "experiments"
     enforced.mkdir(parents=True)
     script = enforced / "check_parity.py"
-    script.write_text(textwrap.dedent("""
+    script.write_text(
+        textwrap.dedent("""
         import os
         import json
 
@@ -809,10 +842,12 @@ def test_parity_run_type_extracted_from_doubly_nested_metadata(tmp_catalog: Path
             }
             with open(results_path, "w") as f:
                 json.dump(result, f)
-    """))
+    """)
+    )
 
     sidecar = enforced / "check_parity.bth.toml"
-    sidecar.write_text(textwrap.dedent("""
+    sidecar.write_text(
+        textwrap.dedent("""
         [experiment]
         hypothesis = "Verify parity_run_type extraction"
         [outcomes.pass]
@@ -827,7 +862,8 @@ def test_parity_run_type_extracted_from_doubly_nested_metadata(tmp_catalog: Path
         [result_schema]
         grade = "str"
         metric = "int"
-    """))
+    """)
+    )
 
     exit_code = run_script(
         argv=[sys.executable, str(script)],
@@ -966,11 +1002,10 @@ def _write_differential_fixture(
     enforced.mkdir(parents=True, exist_ok=True)
     script = enforced / "run_test.py"
     signal_expr = (
-        'float(os.environ.get("BTH_DIFFERENTIAL_VALUE", "1.0")) * 10.0'
-        if sensitive
-        else "5.0"
+        'float(os.environ.get("BTH_DIFFERENTIAL_VALUE", "1.0")) * 10.0' if sensitive else "5.0"
     )
-    script.write_text(textwrap.dedent(f"""
+    script.write_text(
+        textwrap.dedent(f"""
         import os
         import json
 
@@ -984,10 +1019,12 @@ def _write_differential_fixture(
         if results_path:
             with open(results_path, "w") as f:
                 json.dump({{"signal": signal}}, f)
-    """))
+    """)
+    )
 
     sidecar = enforced / "run_test.bth.toml"
-    sidecar.write_text(textwrap.dedent(f"""
+    sidecar.write_text(
+        textwrap.dedent(f"""
         [experiment]
         hypothesis = "test hypothesis"
         {outcomes_toml}
@@ -995,7 +1032,8 @@ def _write_differential_fixture(
         signal = "float"
         [differential]
         {differential_toml}
-    """))
+    """)
+    )
     return script
 
 
@@ -1097,7 +1135,9 @@ def test_differential_gate_passes_fixed_pipeline(tmp_catalog: Path, tmp_path: Pa
     assert invocations == ["off", "on", "main"]
 
 
-def test_differential_expect_identical_flags_unexpected_sensitivity(tmp_catalog: Path, tmp_path: Path):
+def test_differential_expect_identical_flags_unexpected_sensitivity(
+    tmp_catalog: Path, tmp_path: Path
+):
     """expect=identical against a knob-sensitive pipeline -> invalid_measurement (inverse check)."""
     counter_path = tmp_path / "invocations.log"
     script = _write_differential_fixture(
@@ -1149,16 +1189,19 @@ def test_differential_absent_no_op(tmp_catalog: Path, tmp_path: Path):
     enforced = tmp_path / "scripts" / "experiments"
     enforced.mkdir(parents=True)
     script = enforced / "run_test.py"
-    script.write_text(textwrap.dedent("""
+    script.write_text(
+        textwrap.dedent("""
         import os
         import json
         results_path = os.environ.get("BTH_RESULTS_PATH")
         if results_path:
             with open(results_path, "w") as f:
                 json.dump({"signal": 10.0}, f)
-    """))
+    """)
+    )
     sidecar = enforced / "run_test.bth.toml"
-    sidecar.write_text(textwrap.dedent("""
+    sidecar.write_text(
+        textwrap.dedent("""
         [experiment]
         hypothesis = "test hypothesis"
         [outcomes.pass]
@@ -1172,7 +1215,8 @@ def test_differential_absent_no_op(tmp_catalog: Path, tmp_path: Path):
         is_residual = true
         [result_schema]
         signal = "float"
-    """))
+    """)
+    )
 
     exit_code = run_script(
         argv=[sys.executable, str(script)],

@@ -165,7 +165,7 @@ def _write_manifest(
         f'git_sha = "{run.git_hash}"\n'
         f'script_sha256 = "{run.script_sha256}"\n'
         f'run_id = "{run.id}"\n'
-        f'agent_id = null\n'
+        f"agent_id = null\n"
     )
 
     try:
@@ -182,6 +182,7 @@ def _write_manifest(
 @dataclasses.dataclass
 class DifferentialResult:
     """Outcome of the [differential] instrument-sensitivity pre-flight (debt #1071)."""
+
     ok: bool
     off_metadata: str
     on_metadata: str
@@ -237,8 +238,10 @@ def _run_differential_preflight(
         off_val = off_result["metadata"].get(differential.metric)
         on_val = on_result["metadata"].get(differential.metric)
         is_numeric = (
-            isinstance(off_val, (int, float)) and not isinstance(off_val, bool)
-            and isinstance(on_val, (int, float)) and not isinstance(on_val, bool)
+            isinstance(off_val, (int, float))
+            and not isinstance(off_val, bool)
+            and isinstance(on_val, (int, float))
+            and not isinstance(on_val, bool)
         )
         if is_numeric:
             effect = abs(float(on_val) - float(off_val))
@@ -351,6 +354,7 @@ def run_script(
     if script_path is not None and script_path.exists():
         try:
             import hashlib
+
             h = hashlib.sha256()
             with open(script_path, "rb") as f:
                 while chunk := f.read(8192):
@@ -397,8 +401,12 @@ def run_script(
     resolved_mode = resolve_agent_mode(
         cli_flag=agent_mode,
         sidecar=sidecar,
-        project_config={"defaults": {"agent_mode": project_config_mode}} if project_config_mode else None,
-        global_config={"defaults": {"agent_mode": global_config_mode}} if global_config_mode else None,
+        project_config={"defaults": {"agent_mode": project_config_mode}}
+        if project_config_mode
+        else None,
+        global_config={"defaults": {"agent_mode": global_config_mode}}
+        if global_config_mode
+        else None,
     )
 
     git = capture_git_state(cwd)
@@ -419,7 +427,9 @@ def run_script(
         )
         if not gate_result.ok:
             # Serialize error payload to dict for JSON output
-            payload_dict = dataclasses.asdict(gate_result.error_payload) if gate_result.error_payload else {}
+            payload_dict = (
+                dataclasses.asdict(gate_result.error_payload) if gate_result.error_payload else {}
+            )
             typer.echo(json.dumps(payload_dict), err=True)
             return 1
 
@@ -469,19 +479,39 @@ def run_script(
         dependency_lock_sha256=dependency_lock_sha256,
     )
     run_uuid_var.set(run.id)
-    event("run.start", run_uuid=run.id, script_path=str(script_path) if script_path else "", script_sha256=script_sha256_val, argv=argv, cwd=str(cwd), campaign_id=resolved_campaign_id or "", agent_mode=resolved_mode)
+    event(
+        "run.start",
+        run_uuid=run.id,
+        script_path=str(script_path) if script_path else "",
+        script_sha256=script_sha256_val,
+        argv=argv,
+        cwd=str(cwd),
+        campaign_id=resolved_campaign_id or "",
+        agent_mode=resolved_mode,
+    )
 
     # Lineage: resolve derived_from to parent run_uuid if provided
     if derived_from:
         try:
             from bathos.query import get_run
+
             parent_run = get_run(catalog_dir, derived_from)
             if parent_run:
                 event("lineage.resolved", child_run_uuid=run.id, parent_run_uuid=parent_run.id)
             else:
-                event("lineage.resolve_error", child_run_uuid=run.id, derived_from=derived_from, reason="parent run not found")
+                event(
+                    "lineage.resolve_error",
+                    child_run_uuid=run.id,
+                    derived_from=derived_from,
+                    reason="parent run not found",
+                )
         except Exception as e:
-            event("lineage.resolve_error", child_run_uuid=run.id, derived_from=derived_from, reason=str(e))
+            event(
+                "lineage.resolve_error",
+                child_run_uuid=run.id,
+                derived_from=derived_from,
+                reason=str(e),
+            )
 
     catalog_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -569,6 +599,7 @@ def run_script(
 
         # Heartbeat thread: emit every 60s after initial 60s wall-clock
         heartbeat_stop = threading.Event()
+
         def emit_heartbeat():
             wall_start = time.time()
             while not heartbeat_stop.is_set():
@@ -577,6 +608,7 @@ def run_script(
                     elapsed_ms = int((time.monotonic() - start) * 1000)
                     event("run.heartbeat", pid=proc.pid, elapsed_ms=elapsed_ms)
                 heartbeat_stop.wait(60)
+
         heartbeat_thread = threading.Thread(target=emit_heartbeat, daemon=True)
         heartbeat_thread.start()
 
@@ -688,8 +720,12 @@ def run_script(
         # Gate/lint distinguish "instrument sensitivity was verified for this run" from
         # "no [differential] block was declared at all".
         differential_status=("passed" if sidecar and sidecar.differential else None),
-        differential_off_value=(sidecar.differential.off if sidecar and sidecar.differential else None),
-        differential_on_value=(sidecar.differential.on if sidecar and sidecar.differential else None),
+        differential_off_value=(
+            sidecar.differential.off if sidecar and sidecar.differential else None
+        ),
+        differential_on_value=(
+            sidecar.differential.on if sidecar and sidecar.differential else None
+        ),
     )
 
     # Record parquet write with telemetry
@@ -702,7 +738,12 @@ def run_script(
     parquet_duration_ms = int((time.monotonic() - parquet_start) * 1000)
     parquet_path = catalog_dir / "runs" / run.project_slug / f"run_{run.id}.parquet"
     parquet_bytes = parquet_path.stat().st_size if parquet_path.exists() else 0
-    event("run.parquet_written", path=str(parquet_path), bytes=parquet_bytes, duration_ms=parquet_duration_ms)
+    event(
+        "run.parquet_written",
+        path=str(parquet_path),
+        bytes=parquet_bytes,
+        duration_ms=parquet_duration_ms,
+    )
 
     # Clean up temp results file if it exists
     if results_temp_path.exists():

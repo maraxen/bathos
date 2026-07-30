@@ -138,23 +138,12 @@ def test_remote(config: ProjectConfig, name: str) -> TestResult:
     host = remote_config["host"]
 
     # Build SSH command
-    cmd = [
-        "ssh",
-        "-o", "BatchMode=yes",
-        "-o", "ConnectTimeout=5",
-        host,
-        "echo", "ok"
-    ]
+    cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host, "echo", "ok"]
 
     try:
         # Time the SSH call
         start_time = time.time()
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         elapsed_ms = (time.time() - start_time) * 1000
 
         # Check if successful
@@ -168,9 +157,7 @@ def test_remote(config: ProjectConfig, name: str) -> TestResult:
             return TestResult(success=False, latency_ms=None, error=error_msg)
 
     except subprocess.TimeoutExpired:
-        event("sync.remote_test", remote=name, success=False, error="Connection timed out after 10s")
-        return TestResult(
-            success=False,
-            latency_ms=None,
-            error="Connection timed out after 10s"
+        event(
+            "sync.remote_test", remote=name, success=False, error="Connection timed out after 10s"
         )
+        return TestResult(success=False, latency_ms=None, error="Connection timed out after 10s")

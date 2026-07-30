@@ -25,7 +25,16 @@ def project_with_scripts(tmp_path: Path) -> Path:
     scripts_dir.mkdir()
 
     # Also create subdirectories that linter expects
-    for subdir in ["experiments", "benchmarks", "validation", "analysis", "data", "debug", "explore", "scratch"]:
+    for subdir in [
+        "experiments",
+        "benchmarks",
+        "validation",
+        "analysis",
+        "data",
+        "debug",
+        "explore",
+        "scratch",
+    ]:
         (scripts_dir / subdir).mkdir()
 
     return tmp_path
@@ -274,8 +283,18 @@ def test_untracked_files_block_apply(project_with_scripts: Path, tmp_path: Path)
     import subprocess
 
     subprocess.run(["git", "init"], cwd=project_with_scripts, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=project_with_scripts, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=project_with_scripts, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=project_with_scripts,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=project_with_scripts,
+        check=True,
+        capture_output=True,
+    )
 
     results = classify_flat_scripts(project_with_scripts)
     plan = build_move_plan(project_with_scripts, results)
@@ -291,14 +310,28 @@ def test_infer_date_prefix_from_git_log(project_with_scripts: Path) -> None:
 
     # Initialize git and commit the file
     subprocess.run(["git", "init"], cwd=project_with_scripts, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=project_with_scripts, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=project_with_scripts, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=project_with_scripts,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=project_with_scripts,
+        check=True,
+        capture_output=True,
+    )
     subprocess.run(["git", "add", "."], cwd=project_with_scripts, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=project_with_scripts, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"], cwd=project_with_scripts, check=True, capture_output=True
+    )
 
     date_prefix = _infer_date_prefix(script)
     # Should be in YYMMDD format (6 digits)
-    assert len(date_prefix) == 6, f"Expected YYMMDD format (6 digits), got {date_prefix!r} ({len(date_prefix)} digits)"
+    assert len(date_prefix) == 6, (
+        f"Expected YYMMDD format (6 digits), got {date_prefix!r} ({len(date_prefix)} digits)"
+    )
     assert date_prefix.isdigit()
 
 
@@ -309,8 +342,18 @@ def test_infer_date_prefix_fallback_to_mtime(project_with_scripts: Path) -> None
 
     # Initialize git but don't commit the file
     subprocess.run(["git", "init"], cwd=project_with_scripts, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=project_with_scripts, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=project_with_scripts, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=project_with_scripts,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=project_with_scripts,
+        check=True,
+        capture_output=True,
+    )
 
     date_prefix = _infer_date_prefix(script)
 
@@ -319,7 +362,9 @@ def test_infer_date_prefix_fallback_to_mtime(project_with_scripts: Path) -> None
     assert date_prefix.isdigit()
 
 
-def test_sidecar_scaffold_for_experiments(project_with_scripts: Path, tmp_path: Path, monkeypatch) -> None:
+def test_sidecar_scaffold_for_experiments(
+    project_with_scripts: Path, tmp_path: Path, monkeypatch
+) -> None:
     """Test that apply_classify_plan writes sidecar stub for experiments."""
     # Work in the project directory
     monkeypatch.chdir(project_with_scripts)
@@ -329,10 +374,22 @@ def test_sidecar_scaffold_for_experiments(project_with_scripts: Path, tmp_path: 
 
     # Initialize git
     subprocess.run(["git", "init"], cwd=project_with_scripts, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=project_with_scripts, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=project_with_scripts, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=project_with_scripts,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=project_with_scripts,
+        check=True,
+        capture_output=True,
+    )
     subprocess.run(["git", "add", "."], cwd=project_with_scripts, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=project_with_scripts, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"], cwd=project_with_scripts, check=True, capture_output=True
+    )
 
     results = classify_flat_scripts(project_with_scripts)
     plan = build_move_plan(project_with_scripts, results)
@@ -358,10 +415,22 @@ def test_sidecar_scaffold_for_benchmarks(project_with_scripts: Path, monkeypatch
 
     # Initialize git
     subprocess.run(["git", "init"], cwd=project_with_scripts, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=project_with_scripts, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=project_with_scripts, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=project_with_scripts,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=project_with_scripts,
+        check=True,
+        capture_output=True,
+    )
     subprocess.run(["git", "add", "."], cwd=project_with_scripts, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=project_with_scripts, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"], cwd=project_with_scripts, check=True, capture_output=True
+    )
 
     results = classify_flat_scripts(project_with_scripts)
     plan = build_move_plan(project_with_scripts, results)
@@ -386,10 +455,22 @@ def test_no_scaffold_for_analysis(project_with_scripts: Path, monkeypatch) -> No
 
     # Initialize git
     subprocess.run(["git", "init"], cwd=project_with_scripts, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=project_with_scripts, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=project_with_scripts, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=project_with_scripts,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=project_with_scripts,
+        check=True,
+        capture_output=True,
+    )
     subprocess.run(["git", "add", "."], cwd=project_with_scripts, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=project_with_scripts, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"], cwd=project_with_scripts, check=True, capture_output=True
+    )
 
     results = classify_flat_scripts(project_with_scripts)
     plan = build_move_plan(project_with_scripts, results)
@@ -409,10 +490,22 @@ def test_no_scaffold_when_flag_false(project_with_scripts: Path, monkeypatch) ->
 
     # Initialize git
     subprocess.run(["git", "init"], cwd=project_with_scripts, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=project_with_scripts, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=project_with_scripts, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=project_with_scripts,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=project_with_scripts,
+        check=True,
+        capture_output=True,
+    )
     subprocess.run(["git", "add", "."], cwd=project_with_scripts, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=project_with_scripts, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"], cwd=project_with_scripts, check=True, capture_output=True
+    )
 
     results = classify_flat_scripts(project_with_scripts)
     plan = build_move_plan(project_with_scripts, results)

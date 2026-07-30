@@ -85,6 +85,26 @@ def ledger_dir(workspace_root: Path | str) -> Path:
     return Path(workspace_root) / ".bth" / "obligations"
 
 
+def _median(sorted_ages: list[float]) -> float:
+    """True median of an ascending list."""
+    n = len(sorted_ages)
+    mid = n // 2
+    return sorted_ages[mid] if n % 2 else (sorted_ages[mid - 1] + sorted_ages[mid]) / 2
+
+
+def _atomic_write(path: Path, payload: dict) -> None:
+    """Write-then-rename, matching catalog.py's persistence convention.
+
+    A torn write would leave malformed JSON that `_read` swallows as None, which would make
+    `open_obligation` re-open an already-old obligation with a fresh timestamp — silently
+    breaking the "never resets the age" guarantee this module advertises.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    tmp.rename(path)  # atomic on POSIX
+
+
 def _obligation_id(entity_kind: str, entity_id: str, trigger: str) -> str:
     return f"{entity_kind}_{entity_id}_{trigger}"
 
@@ -121,8 +141,7 @@ def open_obligation(
         detail=detail,
         opened_at=datetime.now(UTC).isoformat(),
     )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(asdict(ob), indent=2) + "\n", encoding="utf-8")
+    _atomic_write(path, asdict(ob))
     return ob
 
 
@@ -164,7 +183,7 @@ def discharge(workspace_root: Path | str, obligation_id: str, by_path: str) -> O
     if ob.is_open:
         ob.discharged_at = datetime.now(UTC).isoformat()
         ob.discharged_by = str(by_path)
-        path.write_text(json.dumps(asdict(ob), indent=2) + "\n", encoding="utf-8")
+        _atomic_write(path, asdict(ob))
     return ob
 
 
@@ -177,6 +196,9 @@ def discharge_from_postmortem(workspace_root: Path | str, postmortem_path: Path 
     """
     from bathos.postmortem import parse_postmortem, validate_postmortem
 
+    # validate_postmortem calls workspace_root.resolve() when asset_links are present;
+    # a plain str (which this signature accepts) would AttributeError there.
+    workspace_root = Path(workspace_root)
     p = Path(postmortem_path)
     pm = parse_postmortem(p)
     result = validate_postmortem(pm, workspace_root=workspace_root)
@@ -202,15 +224,18 @@ def signal_open_obligation_age(workspace_root: Path | str) -> dict:
     is an actual gap rather than an extension.
     """
     obs = list_obligations(workspace_root, open_only=True)
-    ages = sorted((o.age_days() for o in obs), reverse=True)
+    # ASCENDING with a true even/odd median. A descending sort indexed at n//2 returns the
+    # younger side of an even-sized ledger, understating how stale the backlog is — the
+    # one thing this signal exists to report honestly.
+    ages = sorted(o.age_days() for o in obs)
     by_trigger: dict[str, int] = {}
     for o in obs:
         by_trigger[o.trigger] = by_trigger.get(o.trigger, 0) + 1
     return {
         "signal": "open_obligation_age",
         "open_count": len(obs),
-        "max_age_days": round(ages[0], 2) if ages else 0.0,
-        "median_age_days": round(ages[len(ages) // 2], 2) if ages else 0.0,
+        "max_age_days": round(ages[-1], 2) if ages else 0.0,
+        "median_age_days": round(_median(ages), 2) if ages else 0.0,
         "by_trigger": by_trigger,
         "oldest": [
             {

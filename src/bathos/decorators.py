@@ -20,6 +20,7 @@ def experiment(func):
     Reads BTH_PROJECT_SLUG and BTH_CATALOG_DIR from env. If BTH_PROJECT_SLUG
     is not set, skips recording and runs the function unmodified.
     """
+
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         project_slug = os.environ.get("BTH_PROJECT_SLUG", "").strip()

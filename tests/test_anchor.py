@@ -122,9 +122,7 @@ class TestAlternateImplSatisfiesContract:
         return InMemoryAnchorStore()
 
     def test_insert_then_get_round_trips(self, store):
-        record = register_anchor(
-            None, "p.json", "a" * 64, "figure", label="x", store=store
-        )
+        record = register_anchor(None, "p.json", "a" * 64, "figure", label="x", store=store)
         assert record.path == "p.json"
 
         fetched = get_anchor(None, "p.json", "a" * 64, store=store)

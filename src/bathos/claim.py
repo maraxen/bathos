@@ -1285,3 +1285,112 @@ def review_coverage_check(db, campaign_id: str, claim, workspace_root=None) -> d
         "sidecars_read": read,
         "sidecars_unreadable": unreadable,
     }
+
+
+def citation_contradicted(claim, bears_on: str, observed_label: str) -> str:
+    """§8b objection 2's truth table: does an observed outcome contradict a `supports` citation?
+
+    Returns one of:
+
+    - ``"contradicted"`` — a discriminability row for `observed_label` predicts the hypothesis
+      named by `bears_on` is *disfavoured*. The citation said the prior work supports it; the
+      run says otherwise. This is what opens a `citation_contradicted` obligation.
+    - ``"consistent"`` — a row covers the label and does not disfavour the hypothesis.
+    - ``"indeterminate"`` — **no discriminability row covers the observed label**, so nothing
+      can be concluded either way.
+
+    The third case is the point of this function. §8b: "Silence must not read as confirmation,
+    and it must not read as refutation either." `discriminability` is optional
+    (`claim.py` defaults it to `[]`) and AC-04 only lints once there are >=2 entries, so a
+    confirmatory claim can legitimately carry an empty map — for which every citation is
+    indeterminate rather than silently consistent.
+
+    Evaluated at conclude, never at run-end: only conclude has the catalog and the claim in
+    hand (decision D1 puts the sole binding site there).
+    """
+    if not bears_on or not observed_label:
+        return "indeterminate"
+
+    rows = [
+        d
+        for d in (claim.discriminability or [])
+        if isinstance(d, dict) and d.get("planned_run_label") == observed_label
+    ]
+    if not rows:
+        return "indeterminate"
+
+    covers = False
+    for row in rows:
+        a, b = row.get("hypothesis_a"), row.get("hypothesis_b")
+        if bears_on not in (a, b):
+            continue
+        covers = True
+        predicted = row.get("predicted_outcome", "")
+        # The row predicts which hypothesis this label favours. If it names the OTHER
+        # hypothesis, the observed label disfavours the one the citation vouched for.
+        favoured = predicted if predicted in (a, b) else None
+        if favoured is not None and favoured != bears_on:
+            return "contradicted"
+
+    return "consistent" if covers else "indeterminate"
+
+
+def contradicted_citations(db, campaign_id: str, claim, workspace_root=None) -> dict:
+    """Apply :func:`citation_contradicted` across a campaign's member runs.
+
+    Returns ``{"contradicted": [...], "indeterminate": [...], "evaluable": int,
+    "supports_seen": int}``.
+
+    `evaluable` is reported deliberately: §8b requires that a trigger which *cannot* fire is
+    distinguishable from one that fired and found nothing. An empty `discriminability` map
+    makes every citation indeterminate, and that must not look like a clean bill of health.
+    """
+    from pathlib import Path
+
+    from bathos.sidecar import parse_sidecar
+
+    rows = db.execute(
+        "SELECT r.id, r.sidecar_path, r.outcome FROM runs r "
+        "JOIN campaign_runs cr ON r.id = cr.run_id "
+        "WHERE cr.campaign_id = ? AND r.sidecar_path IS NOT NULL AND r.sidecar_path != ''",
+        [campaign_id],
+    ).fetchall()
+
+    contradicted: list[dict] = []
+    indeterminate: list[dict] = []
+    supports_seen = 0
+
+    for run_id, sidecar_path, outcome in rows:
+        p = Path(sidecar_path)
+        if workspace_root and not p.is_absolute():
+            p = Path(workspace_root) / p
+        if not p.exists():
+            continue
+        try:
+            sc = parse_sidecar(p)
+        except Exception:
+            continue
+        if sc.review is None:
+            continue
+        for entry in sc.review.literature:
+            if entry.disposition != "supports" or not entry.bears_on:
+                continue
+            supports_seen += 1
+            verdict = citation_contradicted(claim, entry.bears_on, outcome or "")
+            record = {
+                "run_id": run_id,
+                "ref": entry.ref,
+                "bears_on": entry.bears_on,
+                "observed_outcome": outcome or "",
+            }
+            if verdict == "contradicted":
+                contradicted.append(record)
+            elif verdict == "indeterminate":
+                indeterminate.append(record)
+
+    return {
+        "contradicted": contradicted,
+        "indeterminate": indeterminate,
+        "evaluable": supports_seen - len(indeterminate),
+        "supports_seen": supports_seen,
+    }

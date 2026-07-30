@@ -100,5 +100,6 @@ def test_decorator_no_project_slug_skips_recording(tmp_path, monkeypatch):
 def test_bth_experiment_importable():
     """import bathos; bathos.experiment is the decorator."""
     import bathos
+
     assert hasattr(bathos, "experiment")
     assert callable(bathos.experiment)

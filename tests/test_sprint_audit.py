@@ -54,9 +54,7 @@ def test_sprint_audit_skips_incompatible_schema(monkeypatch_registry, tmp_path, 
         )
     """
     )
-    db.execute(
-        "INSERT INTO _schema_meta (key, value) VALUES ('warm_version', '999')"
-    )
+    db.execute("INSERT INTO _schema_meta (key, value) VALUES ('warm_version', '999')")
     db.close()
 
     result = sprint_audit(hours=24)

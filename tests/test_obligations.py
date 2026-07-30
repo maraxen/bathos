@@ -143,3 +143,46 @@ def test_age_days_uses_the_opened_timestamp():
 def test_age_days_survives_a_malformed_timestamp():
     ob = Obligation("x", "run", "r", "outcome_failed", opened_at="not-a-date")
     assert ob.age_days() == 0.0
+
+
+# ── regressions from independent review ─────────────────────────────────────
+
+
+def test_median_age_is_a_true_median_on_an_even_ledger(tmp_path):
+    """Was sorted DESCENDING and indexed n//2 — returning the younger half of an even ledger
+    and understating exactly the staleness this signal exists to report."""
+    from datetime import timedelta
+
+    import bathos.obligations as ob_mod
+
+    now = datetime.now(UTC)
+    for i, days in enumerate([1, 3, 5, 7]):
+        ob = open_obligation(tmp_path, "run", f"r{i}", "outcome_failed")
+        p = ledger_dir(tmp_path) / f"{ob.obligation_id}.json"
+        d = json.loads(p.read_text())
+        d["opened_at"] = (now - timedelta(days=days)).isoformat()
+        p.write_text(json.dumps(d), encoding="utf-8")
+
+    sig = ob_mod.signal_open_obligation_age(tmp_path)
+    assert 3.9 < sig["median_age_days"] < 4.1, sig  # true median of 1,3,5,7 is 4 (not 3)
+    assert 6.9 < sig["max_age_days"] < 7.1, sig
+
+
+def test_ledger_write_is_atomic(tmp_path):
+    """Write-then-rename, matching catalog.py — a torn write would make _read return None and
+    let open_obligation reset an old obligation's age."""
+    ob = open_obligation(tmp_path, "run", "r1", "outcome_failed")
+    assert (ledger_dir(tmp_path) / f"{ob.obligation_id}.json").exists()
+    assert not list(ledger_dir(tmp_path).glob("*.tmp")), "temp file left behind"
+
+
+def test_discharge_accepts_a_string_workspace_root(tmp_path):
+    """The signature accepts str; validate_postmortem calls .resolve() on it."""
+    ob = open_obligation(tmp_path, "run", "r1", "outcome_failed")
+    pm = tmp_path / "r1.bth.postmortem.toml"
+    pm.write_text(
+        '[postmortem]\nrun_id = "r1"\nhypothesis_status = "refuted"\n'
+        f'discharges = ["{ob.obligation_id}"]\n',
+        encoding="utf-8",
+    )
+    assert discharge_from_postmortem(str(tmp_path), str(pm)) == [ob.obligation_id]

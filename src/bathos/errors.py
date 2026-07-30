@@ -18,6 +18,7 @@ class BathosErrorCode(str, Enum):
     Aliases 11 codes from GateErrorCode, plus 5 new codes for domain exceptions.
     All codes are lowercase snake_case strings.
     """
+
     # Aliased from GateErrorCode (11 members)
     SIDECAR_MISSING = "sidecar_missing"
     SIDECAR_INVALID = "sidecar_invalid"
@@ -61,7 +62,6 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.RESULT_SCHEMA_MISMATCH: "Ensure script output JSON matches the result_schema in the sidecar",
     BathosErrorCode.OUTCOME_AMBIGUOUS: "Ensure exactly one outcome condition evaluates to true",
     BathosErrorCode.INTERNAL: "File a bug report with the full error message",
-
     # New codes for domain exceptions
     BathosErrorCode.CATALOG_ERROR: "Check catalog integrity with 'bth verify'",
     BathosErrorCode.CAMPAIGN_ERROR: "Verify campaign state and re-run the campaign operation",

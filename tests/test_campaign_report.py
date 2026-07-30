@@ -23,6 +23,7 @@ Schema: {
 
 All fields except report_version, campaign_id, and stage_breakdown are optional/additive.
 """
+
 import json
 import tempfile
 from pathlib import Path
@@ -171,7 +172,9 @@ class TestCampaignReportSerialization:
         json_str = report.model_dump_json()
         parsed = json.loads(json_str)
         # Pydantic serializes None key as string "None"
-        assert parsed["stage_breakdown"].get("None") == 1 or parsed["stage_breakdown"].get(None) == 1
+        assert (
+            parsed["stage_breakdown"].get("None") == 1 or parsed["stage_breakdown"].get(None) == 1
+        )
 
     def test_report_with_popper_roundtrip(self):
         """Given popper data in report, JSON roundtrip preserves it."""

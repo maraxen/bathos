@@ -141,3 +141,86 @@ def test_gate_has_no_numeric_threshold():
     src = inspect.getsource(review_coverage_check)
     body = src.split('"""')[2]  # skip the docstring
     assert "0." not in body, "a float literal in the gate body suggests an uncalibrated threshold"
+
+
+# ── §8b objection 2: the contradicted / indeterminate truth table ───────────
+
+
+class DiscClaim:
+    hypotheses = [{"id": "H1"}, {"id": "H2"}]
+    confounds: list = []
+    discriminability = [
+        {
+            "hypothesis_a": "H1",
+            "hypothesis_b": "H2",
+            "planned_run_label": "fail",
+            "predicted_outcome": "H2",
+        },
+        {
+            "hypothesis_a": "H1",
+            "hypothesis_b": "H2",
+            "planned_run_label": "pass",
+            "predicted_outcome": "H1",
+        },
+    ]
+
+
+def test_supports_citation_contradicted_by_the_observed_outcome():
+    from bathos.claim import citation_contradicted
+
+    assert citation_contradicted(DiscClaim(), "H1", "fail") == "contradicted"
+
+
+def test_supports_citation_consistent_with_the_observed_outcome():
+    from bathos.claim import citation_contradicted
+
+    assert citation_contradicted(DiscClaim(), "H1", "pass") == "consistent"
+
+
+def test_uncovered_label_is_indeterminate_not_consistent():
+    """§8b: silence must read as neither confirmation nor refutation."""
+    from bathos.claim import citation_contradicted
+
+    assert citation_contradicted(DiscClaim(), "H1", "marginal") == "indeterminate"
+
+
+def test_empty_discriminability_makes_everything_indeterminate():
+    """discriminability is optional, so a confirmatory claim may carry an empty map."""
+    from bathos.claim import citation_contradicted
+
+    class Empty:
+        discriminability: list = []
+
+    assert citation_contradicted(Empty(), "H1", "fail") == "indeterminate"
+
+
+def test_missing_inputs_are_indeterminate():
+    from bathos.claim import citation_contradicted
+
+    assert citation_contradicted(DiscClaim(), "", "fail") == "indeterminate"
+    assert citation_contradicted(DiscClaim(), "H1", "") == "indeterminate"
+
+
+def test_contradicted_citations_reports_evaluable_separately(db, tmp_path):
+    """A trigger that CANNOT fire must be distinguishable from one that found nothing."""
+    from bathos.claim import contradicted_citations
+
+    db.execute("ALTER TABLE runs ADD COLUMN outcome VARCHAR")
+    p = tmp_path / "r1.bth.toml"
+    p.write_text(
+        '[experiment]\nhypothesis = "h"\n'
+        '[[review.literature]]\nref = "10.1/x"\nclaim = "c"\nbears_on = "H1"\n'
+        'disposition = "supports"\n'
+        '[outcomes.pass]\ncondition = "x < 5"\ndecision = "go"\nreasoning = "r"\n'
+        '[outcomes.fail]\ncondition = "x >= 5"\ndecision = "s"\nreasoning = "r"\nis_residual = true\n'
+        '[result_schema]\nx = "float"\n',
+        encoding="utf-8",
+    )
+    db.execute("INSERT INTO runs VALUES (?, ?, ?)", ["r1", str(p), "fail"])
+    db.execute("INSERT INTO campaign_runs VALUES (?, ?)", ["camp1", "r1"])
+
+    res = contradicted_citations(db, "camp1", DiscClaim())
+    assert res["supports_seen"] == 1
+    assert len(res["contradicted"]) == 1
+    assert res["contradicted"][0]["bears_on"] == "H1"
+    assert res["evaluable"] == 1

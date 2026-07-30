@@ -45,6 +45,11 @@ class Postmortem:
     refutation_criteria_met: list[str] = field(default_factory=list)
     #: obligation ids this postmortem discharges (build-order step 4)
     discharges: list[str] = field(default_factory=list)
+    #: rule-card ids this postmortem judges to have been violated (§5, closing the loop to
+    #: Piece 1). The cards most often cited here are the ones worth promoting from advisory
+    #: prose into a hard lint — this is how the corpus acquires a usage signal instead of
+    #: accreting forever.
+    violated_cards: list[str] = field(default_factory=list)
     anomalies: dict = field(default_factory=dict)
 
 
@@ -104,6 +109,7 @@ def parse_postmortem(path: Path) -> Postmortem:
         run_id=run_id or "",
         campaign_id=campaign_id,
         discharges=list(postmortem_section.get("discharges", []) or []),
+        violated_cards=list(postmortem_section.get("violated_cards", []) or []),
         hypothesis_status=hypothesis_status,
         summary=summary,
         unexpected_observations=unexpected_observations,

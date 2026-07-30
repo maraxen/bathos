@@ -73,11 +73,7 @@ def _normalize_port_record(record: dict[str, Any]) -> dict[str, Any] | None:
     if record.get("domain") == "port" and "tier_verdict" in record:
         return record
     payload = record.get("payload")
-    if (
-        isinstance(payload, dict)
-        and payload.get("domain") == "port"
-        and "tier_verdict" in payload
-    ):
+    if isinstance(payload, dict) and payload.get("domain") == "port" and "tier_verdict" in payload:
         return payload
     return None
 
@@ -140,10 +136,7 @@ def compute_verdict(records: list[dict[str, Any]], exit_code: int) -> str:
 def compute_max_discrepancy(records: list[dict[str, Any]]) -> float | None:
     """Max of all non-null tier_verdict.max_discrepancy values, or None if
     none of the records carry one (e.g. an all-PASS run)."""
-    values = [
-        r.get("tier_verdict", {}).get("max_discrepancy")
-        for r in records
-    ]
+    values = [r.get("tier_verdict", {}).get("max_discrepancy") for r in records]
     numeric = [v for v in values if v is not None]
     return max(numeric) if numeric else None
 
@@ -168,8 +161,7 @@ def _parse_argv(argv: list[str]) -> tuple[Path, Path, Path | None, list[str]]:
     """Parse ``--cwd PATH --audits-path PATH [--result-path PATH] -- <harness argv...>``."""
     if "--" not in argv:
         raise ValueError(
-            "port_parity_adapter argv must contain a '--' separator before the "
-            "harness command"
+            "port_parity_adapter argv must contain a '--' separator before the harness command"
         )
     sep = argv.index("--")
     head, harness_argv = argv[:sep], argv[sep + 1 :]
@@ -268,9 +260,9 @@ def main(argv: list[str] | None = None) -> int:
             text=True,
         )
         stdout_combined = (proc.stdout or "") + (proc.stderr or "")
-        stdout_hash = "sha256:" + hashlib.sha256(
-            stdout_combined.encode("utf-8", "replace")
-        ).hexdigest()
+        stdout_hash = (
+            "sha256:" + hashlib.sha256(stdout_combined.encode("utf-8", "replace")).hexdigest()
+        )
 
         records = read_new_port_records(audits_path, start_line)
         verdict = compute_verdict(records, proc.returncode)

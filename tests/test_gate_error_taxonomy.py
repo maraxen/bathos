@@ -1,4 +1,5 @@
 """Test GateErrorCode enum and GateErrorPayload dataclass."""
+
 from __future__ import annotations
 
 import dataclasses

@@ -13,8 +13,14 @@ runner = CliRunner()
 def _write_old_fragment(runs_dir: Path, stem: str) -> Path:
     """Write a fragment missing the 'outcome' column (pre-v0.2)."""
     old_schema = pa.schema([f for f in COOL_SCHEMA if f.name != "outcome"])
-    r = Run(project_slug="p", command="c", argv=["c"], git_hash="abc",
-            git_branch="main", git_dirty=False)
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+    )
     full_tbl = r.to_arrow()
     old_tbl = full_tbl.select([f.name for f in old_schema])
     path = runs_dir / f"run_{stem}.parquet"
@@ -24,6 +30,7 @@ def _write_old_fragment(runs_dir: Path, stem: str) -> Path:
 
 def test_migrate_upgrades_old_fragment(tmp_path):
     from bathos.migrate import migrate_catalog
+
     runs_dir = tmp_path / "runs"
     runs_dir.mkdir()
     _write_old_fragment(runs_dir, "aaa")
@@ -40,6 +47,7 @@ def test_migrate_upgrades_old_fragment(tmp_path):
 
 def test_migrate_dry_run_does_not_write(tmp_path):
     from bathos.migrate import migrate_catalog
+
     runs_dir = tmp_path / "runs"
     runs_dir.mkdir()
     _write_old_fragment(runs_dir, "bbb")
@@ -54,8 +62,15 @@ def test_migrate_dry_run_does_not_write(tmp_path):
 
 def test_migrate_skips_current_fragments(tmp_path):
     from bathos.migrate import migrate_catalog
-    r = Run(project_slug="p", command="c", argv=["c"], git_hash="abc",
-            git_branch="main", git_dirty=False)
+
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+    )
     write_run(r, tmp_path)
 
     result = migrate_catalog(tmp_path)
@@ -66,6 +81,7 @@ def test_migrate_skips_current_fragments(tmp_path):
 
 def test_migrate_empty_catalog(tmp_path):
     from bathos.migrate import migrate_catalog
+
     result = migrate_catalog(tmp_path)
     assert result.scanned == 0
     assert result.migrated == 0
@@ -73,12 +89,19 @@ def test_migrate_empty_catalog(tmp_path):
 
 def test_migrate_multiple_fragments(tmp_path):
     from bathos.migrate import migrate_catalog
+
     runs_dir = tmp_path / "runs"
     runs_dir.mkdir()
     _write_old_fragment(runs_dir, "old1")
     _write_old_fragment(runs_dir, "old2")
-    r = Run(project_slug="p", command="c", argv=["c"], git_hash="abc",
-            git_branch="main", git_dirty=False)
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+    )
     write_run(r, tmp_path)
 
     result = migrate_catalog(tmp_path)
@@ -94,6 +117,7 @@ def test_cli_migrate_dry_run(tmp_path, monkeypatch):
     _write_old_fragment(runs_dir, "ccc")
 
     from bathos.cli import app
+
     result = runner.invoke(app, ["migrate", "--dry-run"])
     assert result.exit_code == 0
     assert "1" in result.output
@@ -110,6 +134,7 @@ def test_cli_migrate_writes(tmp_path, monkeypatch):
     _write_old_fragment(runs_dir, "ddd")
 
     from bathos.cli import app
+
     result = runner.invoke(app, ["migrate"])
     assert result.exit_code == 0
     assert "Migrated 1" in result.output
