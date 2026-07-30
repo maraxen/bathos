@@ -17,6 +17,7 @@
 - [260515_v02-sprint-plan](plans/260515_v02-sprint-plan.md)
 
 ## Specs
+- [260729_post-mortem-obligations-targeted-review-schema-and-a-shipped-rule-card-corpus](specs/260729_post-mortem-obligations-targeted-review-schema-and-a-shipped-rule-card-corpus.md) — Unifies post-mortem workflow hooks, a [review] sidecar block for targeted literature/implementation review, and a machine-addressable reference corpus shipped in agent_assets/
 - [260707_scientific-validity-gates](specs/260707_scientific-validity-gates.md) — debt #200: `[invariants]` sidecar block (hard-fail on violated result assertions, reuses `[outcomes.*]` DuckDB-condition machinery), optional cross-run differential extension, `[sanity]` pre-flight block; not yet planned/implemented
 - [260618_abstraction-boundary-open-design-questio](specs/260618_abstraction-boundary-open-design-questio.md)
 - [260618_literature-parity-v1-design](specs/260618_literature-parity-v1-design.md) — Literature-Parity v1 — Technical Design + Child-Task DAG (post-adversarial-review)
@@ -50,6 +51,7 @@
 
 ## Decisions
 - [260721_bp-2-bp-3-synthetic_recovery-confound-negative_check-field-claim-tier-gate-ports](decisions/260721_bp-2-bp-3-synthetic_recovery-confound-negative_check-field-claim-tier-gate-ports.md) — Design decisions for porting asr's C1 invariant gate and C5 negative-claim check into bathos's native claim tier
+- [260721_bp2-bp3-claim-tier-gate-ports](decisions/260721_bp2-bp3-claim-tier-gate-ports.md) — Design decisions for porting asr's C1 invariant gate and C5 negative-claim check into bathos's native claim tier
 - [260601_sprint-audit-threshold-rationale](decisions/260601_sprint-audit-threshold-rationale.md) — Documents domain rationale for all 7 sprint-audit signal thresholds; resolves schema_overflow_rate semantics (any-key check was a bug; fix: cross-reference against result_schema declared keys) — D5: v0.6 ships self-signed manifest only (content-hash + git-commit-bound); external TSA / OSF deferred to v0.7+
 - [260526_adversarial-check-policy](decisions/260526_adversarial-check-policy.md) — D3: `adversarial_check` required for --agent-mode, warn-only for human runs; rationale for asymmetric enforcement
 - [260526_bypass-rate-split](decisions/260526_bypass-rate-split.md) — D4: bypass_rate reported as two metrics (bypass_explicit, bypass_in_agent_mode); rationale for not conflating populations
@@ -67,12 +69,6 @@
 
 ## Misc
 - [260515_mission](misc/260515_mission.md)
-
-## Active (legacy)
-
-## Notes (legacy)
-
-## Designs (legacy)
 
 ## Superpowers
 > Skill outputs live in `.praxia/docs/superpowers/plans/` and `.praxia/docs/superpowers/specs/.
