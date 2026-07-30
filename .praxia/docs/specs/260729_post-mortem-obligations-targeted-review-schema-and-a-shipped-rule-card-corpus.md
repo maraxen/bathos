@@ -107,9 +107,23 @@ it matters. A card has an ID, so:
   as freeform text.
 - A post-mortem can record which card was violated (§5), giving the corpus a usage signal.
 
-**Everything here reuses proven machinery.** `applies_when` is a DuckDB SQL fragment — the same
-dialect and evaluation path as `[outcomes].condition`. `severity` reuses `IssueSeverity`
-(`linter.py:12-14`). Packaging reuses the `agent_assets/` force-include. No new concepts.
+**What is genuinely reused, and what is not.** `severity` reuses `IssueSeverity`
+(`linter.py:12-14`). Packaging reuses the `agent_assets/` force-include. Those are real.
+
+`applies_when` is **not** a reuse of the `[outcomes].condition` evaluation path, and an earlier
+draft of this document wrongly claimed it was. `evaluate_outcome()` (`sidecar.py:321-354`)
+builds a *single literal row* out of the script's own `result` dict — `SELECT ({condition}) FROM
+(SELECT {cols})` — with no catalog access and no access to sidecar fields. The worked example
+above references `n_outcome_branches` (a property of the sidecar's `outcomes` table, not a
+`result` field) and `campaign_run_count` (an aggregate over `runs`, which is not a column on
+`Run` at all — `schema.py:27-67`). Only the **SQL dialect** is shared.
+
+So the evaluation context for `applies_when` is **new machinery that this design must specify**,
+not something inherited. It needs a defined row shape joining sidecar-derived fields with
+campaign-level aggregates, and that shape is a prerequisite for Piece 1 rather than a detail.
+`bth ref applicable` is specified below as evaluating "against the sidecar + catalog history",
+which is a categorically different input than `evaluate_outcome` receives — designing that
+context is the first real task in step 1.
 
 **Surface:**
 
@@ -155,23 +169,49 @@ the same way a bad `claim_discriminates` does today.
 
 That in turn yields a **Review Coverage Gate** structurally identical to the existing Union Gate
 (`claim.py:600-652`): walk the claim's hypotheses and confounds, and require each to be covered
-by ≥1 review entry before a **confirmatory** campaign may conclude positively. Uncovered ⇒
-downgrade, exactly as the parity confound check already downgrades.
+by ≥1 review entry before the campaign may conclude positively. Uncovered ⇒ downgrade, exactly
+as the parity confound check already downgrades.
 
-**Three declared rungs, mechanically graded** — the same cap-lattice logic parity already uses:
+Two specifics the gate must pin down, both surfaced by adversarial review:
 
-| Rung | Means | Required at |
+- **"Confirmatory" is not a real concept in the code.** `rg "confirmatory|campaign_type"` over
+  `campaigns.py` returns nothing. The actual field is campaign `mode`, and the value is
+  `"confirmation"` — and `conclude_campaign`'s own downgrade logic groups
+  `confirmation`/`sequential` together (`campaigns.py:221`). Read every "confirmatory" in this
+  document as **`mode in ("confirmation", "sequential")`**, and say so in the implementation.
+- **Empty slates must not pass vacuously.** A campaign in a gated mode whose claim declares zero
+  hypotheses and zero confounds satisfies "each is covered" trivially. The gate must treat an
+  empty required-set as `uncovered`/error, not `covered`.
+
+**Three declared tiers, mechanically graded** — the same cap-lattice logic parity already uses:
+
+| Tier | Means | Required at |
 | --- | --- | --- |
-| R0 `cited` | DOI + claim, unverified | exploration (advisory) |
-| R1 `reviewed` | `bears_on` + disposition, or an implementation read at a pinned commit | validation / production |
-| R2 `parity` | the existing five-phase audit | wherever a confound is `reference_parity` |
+| C0 `cited` | DOI + claim, unverified | exploration (advisory) |
+| C1 `reviewed` | `bears_on` + disposition, or an implementation read at a pinned commit | validation / production |
+| C2 `parity` | the existing five-phase audit | wherever a confound is `reference_parity` |
+
+**Deliberately named C-not-R.** An earlier draft called these R0/R1/R2, which collides badly
+with the existing `reproduction_rung` scale (`parity.py:31,38,103-109`) — that scale runs R0–R4
+and is **inverted relative to this one: its R0 is the _best_ rung** ("R0/R1 → ceiling PARITY"),
+whereas the draft's R0 was the weakest tier. Since this section explicitly borrows parity's
+rung-ladder and cap-lattice idioms, reusing its token with the opposite severity direction was
+a live misreading hazard for anyone moving between the two schemas. Renamed to C0/C1/C2.
 
 This reframes the existing parity subsystem as the **top rung of a ladder** rather than the only
 option — which is the most likely reason it sees little use for ordinary work.
 
-The pinned `commit` is checkable by the existing `check_output_sha_drift()` machinery: if you
-attested to reading `a1b2c3d` and the reference has since moved, that is flaggable staleness,
-not silent rot.
+The pinned `commit` makes the attestation *falsifiable in principle* — but an earlier draft
+wrongly claimed it is "checkable by the existing `check_output_sha_drift()` machinery." It is
+not. `check_output_sha_drift()` (`checker.py:121-159`) compares a run's **own** recorded
+`output_metadata` — files that run wrote, hashed at run time — against on-disk state. It has no
+concept of an external repository, and nothing in the codebase clones or fetches a remote ref.
+
+Checking an external commit pin therefore requires new network- and VCS-aware code that this
+design does not currently specify. Until that exists the `commit` field is a **recorded
+attestation, not a verified one**, and should be described that way. A cheap first version that
+avoids the network entirely: require the reference to be vendored or already present locally,
+and check the pin against the local clone.
 
 ---
 
@@ -182,8 +222,12 @@ obligations from events bathos already computes.
 
 **An obligation opens automatically when:**
 
-1. a run's computed `outcome` label is `fail` (already evaluated at run-end from the sidecar's
-   DuckDB conditions);
+1. a run's computed `outcome` label indicates failure. **Not** a literal match on `"fail"`:
+   unlike `stage_name`, which is constrained to `CANONICAL_STAGES` (`sidecar.py:104-110`),
+   outcome labels have **no canonical set** — the author names each `[outcomes.<label>]` branch
+   freely, so `unstable` / `rejected` / `no-go` are all legal and a string match would silently
+   miss them. Define the trigger against the `pass_labels` set that `compute_evalue`
+   (`sidecar.py:293-299`) already derives, i.e. non-pass and non-residual;
 2. a campaign concludes `confounded`, or is downgraded by the Union Gate or the parity gate;
 3. an `adversarial_check` fires;
 4. **a `[review]` entry with `disposition = "supports"` is contradicted by the run's outcome.**
@@ -268,6 +312,56 @@ either be derived from observed data after step 2, or shipped with an explicit
 acknowledgement that they are conventional. They should not be presented as calibrated.
 
 ---
+
+## 8b. Blocking objections from adversarial review — resolve before cutting tickets
+
+This spec was put through an adversarial review (a `spec_adversarial` rig-run flow plus an
+independent Claude `spec-challenger`, run in parallel as a control). Verdict: **REVISE.** Two
+false reuse-claims were corrected inline above (§3 `applies_when`, §4 `commit` pinning), as was
+the R-rung collision (§4) and the outcome-label and "confirmatory" vocabulary (§4, §5). The
+following remain **open and blocking** — none should be discovered by an implementer:
+
+1. **`bears_on` on claimless runs — the analogy in §4 is backwards.** §4 argues a bad `bears_on`
+   "fails the same way a bad `claim_discriminates` does today." It does not.
+   `validate_sidecar` documents that omitting `claim` *skips the check entirely*
+   (`validate.py:232-243`), and `load_registered_claim` returns `None` whenever
+   `campaigns.claim_path IS NULL` (`claim.py:186-187`). So a bad `claim_discriminates` on a
+   claimless run **passes silently today** — meaning `bears_on` would too. Must specify: is
+   `bears_on` required at all tiers, only C1+, or optional pre-claim — and if optional, what
+   "coverage" means with no slate to cover. This is load-bearing for both the Review Coverage
+   Gate and obligation trigger (4), so Pieces 2 and 3 can only be stubbed until it is closed.
+
+2. **Obligation trigger (4) "contradicted" is not computable as written.** Nothing in bathos
+   maps an outcome label to "contradicts hypothesis H". The only stored expectation is
+   `claim.discriminability`, keyed by `(hypothesis_a, hypothesis_b, planned_run_label)`
+   (`claim.py:96`, validated `claim.py:264-274`) — a different shape than `bears_on` +
+   `disposition`. Must specify which stored value is compared, an explicit truth table, and at
+   which point it evaluates (run-end has only the `result` dict; conclude has the catalog).
+
+3. **Script stem is a fragile gating key, and §5 inherits the fragility silently.** The
+   reproduction gate §5 claims to mirror matches on a substring of the whole recorded command
+   line, on **both** its paths (`prereg.py:296-349`): the warm path runs
+   `SELECT 1 FROM runs WHERE command LIKE ? AND outcome = 'pass'` bound to `%<stem>%`, and the
+   cool-tier Parquet fallback does a plain Python `requires_pass_stem in cmd`. That
+   yields false positives on common stems, orphans history on rename, and cannot distinguish
+   `scripts/experiments/foo.py` from `scripts/debug/foo.py`. Acceptable for an advisory check;
+   this design would put it behind a **blocking** validation/production gate. Specify a stable
+   identity (full relative path, or sidecar content-hash) or explicitly accept the error rate.
+
+4. **The postmortem schema cannot discharge a campaign-scoped obligation.** `Postmortem` is
+   mandatorily `run_id`-keyed — `parse_postmortem` raises on a missing `run_id`
+   (`postmortem.py:51-52`) — and has **no `obligation_id` field at all**. But trigger (2) opens
+   a *campaign*-scoped obligation. Must specify: a new campaign-scoped postmortem kind, or
+   whether one member run's postmortem discharges it, or N-of-M. This is a schema gap, not
+   wiring.
+
+Non-blocking but tracked: the obligation path `.bth/obligations/<run_or_campaign_id>.json`
+conflates two ID namespaces with no discriminator and does not say whether multiple concurrent
+triggers on one entity produce one file or clobber each other; `bth ref applicable` has no
+stated behavior for zero cards firing, no ordering guarantee, and no error contract for a
+malformed card (note `evaluate_outcome` raises `SidecarError` on a bad condition —
+`sidecar.py:352-353` — so one bad card must not abort the whole corpus); and §6's "commented
+guidance" is prose with no testable acceptance criterion.
 
 ## 9. Relationship to prior design work
 
