@@ -51,6 +51,11 @@ attestation_app = typer.Typer(
 )
 app.add_typer(attestation_app, name="attestation")
 
+ref_app = typer.Typer(
+    help="Query the shipped rule-card corpus (methodological guidance with citable ids)"
+)
+app.add_typer(ref_app, name="ref")
+
 
 def _catalog_dir() -> Path:
     override = os.environ.get("BTH_CATALOG_DIR")
@@ -2625,3 +2630,88 @@ def outputs_summary(
     from bathos.rich_fmt import render_outputs_summary
 
     render_outputs_summary(list(aggregated.values()), since=since)
+
+
+# ── bth ref: rule-card corpus ────────────────────────────────────────────────
+
+
+@ref_app.command("list")
+def ref_list() -> None:
+    """List every rule card in the shipped corpus."""
+    from bathos.corpus import load_corpus
+
+    load = load_corpus()
+    for card in load.cards:
+        marker = "*" if card.applies_when else " "
+        typer.echo(f"{marker} {card.id:<12} [{card.severity:<7}] {card.title}")
+    typer.echo(f"\n{len(load.cards)} cards  (* = has applies_when and can fire on a script)")
+    for path, err in load.errors:
+        typer.echo(f"warning: skipped {path}: {err}", err=True)
+
+
+@ref_app.command("show")
+def ref_show(card_id: str = typer.Argument(..., help="Card id, e.g. STAT-001")) -> None:
+    """Print one rule card."""
+    from bathos.corpus import CorpusError, get_card
+
+    try:
+        card = get_card(card_id)
+    except CorpusError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1) from e
+
+    typer.echo(f"{card.id} — {card.title}")
+    typer.echo(f"severity: {card.severity}   domain: {card.domain}")
+    if card.source_check:
+        typer.echo(f"lint:     {card.source_check}")
+    if card.applies_when:
+        typer.echo(f"applies_when: {card.applies_when}")
+    if card.see_also:
+        typer.echo(f"see also: {', '.join(card.see_also)}")
+    typer.echo("")
+    typer.echo(card.body)
+
+
+@ref_app.command("search")
+def ref_search(query: str = typer.Argument(..., help="Substring to find")) -> None:
+    """Search cards by id, title, tag or body text."""
+    from bathos.corpus import search_cards
+
+    hits = search_cards(query)
+    if not hits:
+        typer.echo(f"No card matches {query!r}.")
+        raise typer.Exit(1)
+    for card in hits:
+        typer.echo(f"{card.id:<12} [{card.severity:<7}] {card.title}")
+    typer.echo(f"\n{len(hits)} match(es)")
+
+
+@ref_app.command("applicable")
+def ref_applicable(
+    script: Path = typer.Argument(..., help="Script whose sidecar to evaluate against"),
+    show_context: bool = typer.Option(False, "--show-context", help="Print the evaluated context row"),
+) -> None:
+    """Evaluate every card's applies_when against a script and list those that fire."""
+    from bathos.corpus import applicable_cards, build_context
+
+    ctx = build_context(script, _catalog_dir())
+    if show_context:
+        for k, v in ctx.items():
+            typer.echo(f"  {k} = {v!r}")
+        typer.echo("")
+
+    fired, unevaluable = applicable_cards(ctx)
+
+    if fired:
+        for card in fired:
+            typer.echo(f"{card.id:<12} [{card.severity:<7}] {card.title}")
+    else:
+        typer.echo("No cards fired for this script.")
+
+    # Reported separately and always: a card that could not be checked must never be
+    # indistinguishable from one that was checked and did not match.
+    if unevaluable:
+        typer.echo("", err=True)
+        typer.echo(f"{len(unevaluable)} card(s) could not be evaluated:", err=True)
+        for card, err in unevaluable:
+            typer.echo(f"  {card.id}: {err}", err=True)

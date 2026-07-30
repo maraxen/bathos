@@ -2762,6 +2762,112 @@ async def mcp_repair_tool(
 # previous @app.tool(...) registrations.
 # ============================================================================
 
+
+# ── rule-card corpus (mirrors `bth ref`) ─────────────────────────────────────
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def reference_list() -> dict:
+    """List every rule card in the shipped corpus.
+
+    Returns {'ok': True, 'cards': [{id, title, severity, domain, source_check,
+    has_applies_when}], 'errors': [...]}.
+    """
+    from bathos.corpus import load_corpus
+
+    load = load_corpus()
+    return {
+        "ok": True,
+        "cards": [
+            {
+                "id": c.id,
+                "title": c.title,
+                "severity": c.severity,
+                "domain": c.domain,
+                "source_check": c.source_check,
+                "has_applies_when": bool(c.applies_when),
+            }
+            for c in load.cards
+        ],
+        "errors": [{"path": str(p), "error": e} for p, e in load.errors],
+    }
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def reference_get(card_id: str) -> dict:
+    """Fetch one rule card by id, including its markdown body."""
+    from bathos.corpus import CorpusError, get_card
+
+    try:
+        card = get_card(card_id)
+    except CorpusError as e:
+        return {"ok": False, "error": str(e), "error_code": "not_found"}
+
+    return {
+        "ok": True,
+        "card": {
+            "id": card.id,
+            "title": card.title,
+            "severity": card.severity,
+            "domain": card.domain,
+            "source_check": card.source_check,
+            "applies_when": card.applies_when,
+            "tags": list(card.tags),
+            "see_also": list(card.see_also),
+            "body": card.body,
+        },
+    }
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def reference_search(query: str) -> dict:
+    """Substring search over card id, title, tags and body."""
+    from bathos.corpus import search_cards
+
+    hits = search_cards(query)
+    return {
+        "ok": True,
+        "query": query,
+        "count": len(hits),
+        "cards": [
+            {"id": c.id, "title": c.title, "severity": c.severity, "domain": c.domain}
+            for c in hits
+        ],
+    }
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def reference_applicable(script: str, catalog_dir: str | None = None) -> dict:
+    """Evaluate every card's applies_when against a script's sidecar.
+
+    `unevaluable` is always returned alongside `fired`: a card that could NOT be checked must
+    never be indistinguishable from one that was checked and did not match.
+    """
+    from bathos.corpus import applicable_cards, build_context
+
+    ctx = build_context(Path(script), Path(catalog_dir) if catalog_dir else _get_catalog_dir())
+    fired, unevaluable = applicable_cards(ctx)
+    return {
+        "ok": True,
+        "script": script,
+        "context": ctx,
+        "fired": [
+            {"id": c.id, "title": c.title, "severity": c.severity, "source_check": c.source_check}
+            for c in fired
+        ],
+        "unevaluable": [{"id": c.id, "error": e} for c, e in unevaluable],
+    }
+
+
+if __name__ == "__main__":
+    init_server_telemetry()
+    app.run()
+
+
 _WIRED = cisternal.wire(
     app,
     registry="bathos",
@@ -2779,6 +2885,8 @@ _WIRED = cisternal.wire(
         "gate_status", "claim_attest_parity", "validate_sidecar",
         "list_outputs", "outputs_summary", "campaign_add", "campaign_show",
         "verify", "lint", "repair_scan", "repair",
+        "reference_list", "reference_get", "reference_search",
+        "reference_applicable",
     ],
 )
 
@@ -2788,10 +2896,5 @@ def mcp_server():
 
     Called by pyproject.toml entry point: bth-mcp
     """
-    init_server_telemetry()
-    app.run()
-
-
-if __name__ == "__main__":
     init_server_telemetry()
     app.run()
