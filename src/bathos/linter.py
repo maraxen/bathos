@@ -34,6 +34,45 @@ _NUMERIC_LITERAL_RE = re.compile(r"(?<![a-zA-Z_])\b-?\d+(?:\.\d+)?(?:[eE][+-]?\d
 _PVALUE_TERM_RE = re.compile(r"\bp[\w]*\s*(?:<=|<)\s*0?\.\d+", re.IGNORECASE)
 _OR_SPLIT_RE = re.compile(r"\bOR\b", re.IGNORECASE)
 
+# Run-lock files written by `_write_manifest` (bathos/runner.py): the manifest
+# filename is built from the *sidecar's* stem (which already ends in ".bth"),
+# so the file on disk is "<script_stem>.bth.<run_id>.bth.lock.toml" -- distinct
+# from, and not matched by, the plain "*.bth.toml" sidecar suffix.
+_SIDECAR_SUFFIX = ".bth.toml"
+_LOCK_FILE_SUFFIX = ".bth.lock.toml"
+
+# Directory names that never hold a project's own sidecars/scripts, so a lint
+# walk should neither descend into them nor warn about their contents.
+_WALK_PRUNE_DIRS = {".venv", "venv", "node_modules", "__pycache__", ".git", ".mypy_cache", ".ruff_cache", ".pytest_cache"}
+
+
+def iter_project_sidecars(project_root: Path, under: Path | None = None) -> list[Path]:
+    """Find every "*.bth.toml" sidecar under `project_root` (optionally restricted
+    to the subtree rooted at `under`), without crossing into a nested git boundary
+    (submodule or worktree checkout) or common dependency/cache directories.
+
+    A naive `project_root.rglob("*.bth.toml")` has no concept of repo boundaries:
+    in a project with vendored submodules (each an independent git checkout) and
+    agent-managed worktrees under `.claude/worktrees/` (which may themselves
+    contain nested, possibly-stale worktrees of those same submodules), it
+    re-scans the same physical sidecar files once per nested checkout -- the
+    same handful of lint findings gets reported dozens of times over. A
+    directory is a nested git boundary iff it has its own ".git" entry (a
+    directory for a normal repo/submodule checkout, or a file for a worktree) --
+    that's the same test git itself uses, and it correctly excludes both
+    submodules and worktrees without needing to special-case either.
+    """
+    sidecars: list[Path] = []
+    for dirpath, dirnames, filenames in project_root.walk():
+        if dirpath != project_root and (dirpath / ".git").exists():
+            dirnames.clear()
+            continue
+        dirnames[:] = [d for d in dirnames if d not in _WALK_PRUNE_DIRS]
+        sidecars.extend(dirpath / f for f in filenames if f.endswith(_SIDECAR_SUFFIX))
+    if under is not None:
+        sidecars = [p for p in sidecars if p.is_relative_to(under)]
+    return sidecars
+
 
 _DIR_RULES: dict[str, dict] = {
     "experiments": {
@@ -100,8 +139,12 @@ def lint_project(project_root: Path) -> list[LintIssue]:
             if script.name.startswith(".") or script.name.startswith("_") or script.is_dir():
                 continue
 
-            # Skip sidecar files
-            if script.suffix == ".toml" and script.name.endswith(".bth.toml"):
+            # Skip sidecar and run-lock files (the latter written by `_write_manifest`
+            # in runner.py as "<script_stem>.bth.<run_id>.bth.lock.toml" -- it ends in
+            # ".bth.lock.toml", not ".bth.toml", so needs its own check here).
+            if script.suffix == ".toml" and (
+                script.name.endswith(_SIDECAR_SUFFIX) or script.name.endswith(_LOCK_FILE_SUFFIX)
+            ):
                 continue
 
             stem = script.stem
@@ -534,7 +577,7 @@ def check_popper_adversarial(project_root: Path) -> list[LintIssue]:
         return []
 
     issues: list[LintIssue] = []
-    for sidecar_path in sorted(scripts_dir.rglob("*.bth.toml")):
+    for sidecar_path in sorted(iter_project_sidecars(project_root, under=scripts_dir)):
         try:
             data = tomllib.loads(sidecar_path.read_text())
         except Exception:
@@ -742,7 +785,7 @@ def check_adversarial_checks(project_root: Path) -> list[LintIssue]:
     issues: list[LintIssue] = []
 
     # Find all .bth.toml files in the project
-    for sidecar_path in project_root.rglob("*.bth.toml"):
+    for sidecar_path in iter_project_sidecars(project_root):
         try:
             with open(sidecar_path, "rb") as f:
                 data = tomllib.load(f)
@@ -790,7 +833,7 @@ def check_threshold_basis(project_root: Path) -> list[LintIssue]:
     issues: list[LintIssue] = []
 
     # Find all .bth.toml files in the project
-    for sidecar_path in project_root.rglob("*.bth.toml"):
+    for sidecar_path in iter_project_sidecars(project_root):
         try:
             with open(sidecar_path, "rb") as f:
                 data = tomllib.load(f)
@@ -927,7 +970,7 @@ def check_todo_strings_in_scaffold(project_root: Path) -> list[LintIssue]:
     issues: list[LintIssue] = []
 
     # Find all .bth.toml files in the project
-    for sidecar_path in project_root.rglob("*.bth.toml"):
+    for sidecar_path in iter_project_sidecars(project_root):
         try:
             with open(sidecar_path, "rb") as f:
                 data = tomllib.load(f)
@@ -1172,7 +1215,7 @@ def check_baseline_ref_exists(
 
     issues: list[LintIssue] = []
 
-    for sidecar_path in sorted(scripts_dir.rglob("*.bth.toml")):
+    for sidecar_path in sorted(iter_project_sidecars(project_root, under=scripts_dir)):
         try:
             data = tomllib.loads(sidecar_path.read_text())
         except Exception:
