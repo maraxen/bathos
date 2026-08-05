@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The Review Coverage Gate now requires a *substantive* `[review]` entry, not merely a bound
+  one.** `review_coverage_check` previously added `entry.bears_on` to the covered set without
+  inspecting any other field, so an entry whose only content was `bears_on = "H1"` marked H1
+  covered and let a confirmation campaign conclude — authoring empty placeholders satisfied the
+  gate outright. Coverage is now the C1 tier bar plus the binding, via a new
+  `sidecar.covering_id()`.
+  - **The shapes this actually closes are `disposition` and `commit`.** `validate_sidecar`
+    already required `ref`/`claim` on literature entries and `source`/`what_was_checked` on
+    implementation entries, so the fully-degenerate entry was rejected earlier in the pipeline.
+    But `disposition` is optional there and `commit` is not required at all — so a literature
+    entry citing a real paper against a real hypothesis while recording *no finding*, and an
+    implementation entry naming a repo with *no pinned revision*, both passed validation and
+    both counted as coverage. Those were the gameable shapes.
+  - The gate reads sidecars from disk at conclude time without re-validating them, so requiring
+    `ref`/`source` here as well is deliberate defense-in-depth for sidecars that bypassed or
+    predate validation.
+- **`review_tier()` C1 now also requires `ref` (literature) and `source` (implementation)** — a
+  deliberate tightening beyond the spec's tier table, which states C1 as "`bears_on` +
+  disposition, or an implementation read at a pinned commit". Without it the lattice inverts:
+  C0 is defined as "DOI + claim", so an uncited entry carrying a binding and a verdict would
+  grade C1 while failing C0's own content bar. An attestation about a source nobody can look up
+  is also unfalsifiable in principle — the "review theater" risk §8 of the spec names.
+  - Tier and coverage remain **distinct** standards: `bears_on` is not required for C1 (a pinned
+    implementation read is a genuine review even when it binds to no claim id), but it is
+    required for coverage. `covering_id()` composes the two rather than conflating them.
+  - `review_tier` had no production consumers before this change — only tests. The coverage gate
+    is its first, which is why the standard now lives in one place instead of two.
+
 ### Added
 
 - **Post-mortem obligation triggers, each behind its own opt-in flag** — all four §5 triggers

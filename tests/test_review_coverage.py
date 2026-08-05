@@ -118,6 +118,75 @@ def test_an_entry_without_bears_on_covers_nothing(db, tmp_path):
     assert res["entries_seen"] == 1  # seen, but it covers nothing
 
 
+def test_a_bears_on_only_entry_is_not_coverage(db, tmp_path):
+    """The gate's original defect: `bears_on` alone marked an id covered.
+
+    An entry consisting of nothing but a binding asserts that *something* was reviewed without
+    saying what, what it found, or where to check — so authoring empty placeholders was a way
+    to satisfy the gate outright. Coverage now requires the C1 bar (`sidecar.covering_id`).
+    """
+    add_run(db, tmp_path, "r1", '[[review.literature]]\nbears_on = "H1"\n')
+    res = review_coverage_check(db, "camp1", FakeClaim(hyps=["H1"]))
+    assert res["verdict"] == "uncovered"
+    assert res["uncovered"] == ["hypothesis:H1"]
+    assert res["entries_seen"] == 1  # counted as seen, but it covers nothing
+
+
+def test_an_uncited_literature_entry_is_not_coverage(db, tmp_path):
+    """`bears_on` + `disposition` but no `ref` — a verdict on an unnamed source.
+
+    C0 is "DOI + claim", so without this an entry could grade C1 while failing C0's own content
+    bar. Unfalsifiable in principle: there is nothing to go and check.
+    """
+    add_run(
+        db,
+        tmp_path,
+        "r1",
+        '[[review.literature]]\nclaim = "c"\nbears_on = "H1"\ndisposition = "supports"\n',
+    )
+    res = review_coverage_check(db, "camp1", FakeClaim(hyps=["H1"]))
+    assert res["verdict"] == "uncovered"
+    assert res["entries_seen"] == 1
+
+
+def test_a_literature_entry_without_a_disposition_is_not_coverage(db, tmp_path):
+    """A citation bound to an id but carrying no finding is C0 — it reports no result."""
+    add_run(
+        db, tmp_path, "r1", '[[review.literature]]\nref = "10.1/x"\nclaim = "c"\nbears_on = "H1"\n'
+    )
+    res = review_coverage_check(db, "camp1", FakeClaim(hyps=["H1"]))
+    assert res["verdict"] == "uncovered"
+
+
+def test_an_unpinned_implementation_entry_is_not_coverage(db, tmp_path):
+    """No `commit` — nothing anchors which revision was actually read."""
+    add_run(
+        db,
+        tmp_path,
+        "r1",
+        '[[review.implementation]]\nsource = "u"\nwhat_was_checked = "w"\nbears_on = "H1"\n',
+    )
+    res = review_coverage_check(db, "camp1", FakeClaim(hyps=["H1"]))
+    assert res["verdict"] == "uncovered"
+
+
+def test_a_pinned_implementation_read_that_names_no_id_covers_nothing(db, tmp_path):
+    """C1 on its own merits, but it binds to nothing — a good entry is not automatically coverage.
+
+    This is why `covering_id` exists separately from `implementation_entry_reviewed`: the tier
+    bar and the coverage bar are related but distinct questions.
+    """
+    add_run(
+        db,
+        tmp_path,
+        "r1",
+        '[[review.implementation]]\nsource = "u"\ncommit = "abc"\nwhat_was_checked = "w"\n',
+    )
+    res = review_coverage_check(db, "camp1", FakeClaim(hyps=["H1"]))
+    assert res["verdict"] == "uncovered"
+    assert res["entries_seen"] == 1
+
+
 def test_unreadable_sidecar_is_counted_not_silently_treated_as_absent(db, tmp_path):
     """An unreadable sidecar is not evidence review is missing — the caller must see both."""
     db.execute("INSERT INTO runs VALUES (?, ?)", ["gone", str(tmp_path / "missing.bth.toml")])

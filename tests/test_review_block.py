@@ -113,6 +113,25 @@ def test_implementation_without_a_pinned_commit_stays_c0():
     assert review_tier(r) == "C0"
 
 
+def test_uncited_literature_stays_c0_even_with_bears_on_and_disposition():
+    """C1 requires `ref`, which the spec's tier table does not state — a deliberate tightening.
+
+    Without it the lattice inverts: C0 is defined as "DOI + claim", so an entry with a binding
+    and a verdict but no citation would grade C1 while failing C0's own content bar. It is also
+    unfalsifiable in principle — a verdict on a source nobody can look up.
+    """
+    r = ReviewBlock(literature=[LiteratureReview(claim="c", bears_on="H1", disposition="supports")])
+    assert review_tier(r) == "C0"
+
+
+def test_implementation_without_a_source_stays_c0():
+    """Same tightening on the implementation side: a `commit` with no source pins nothing."""
+    r = ReviewBlock(
+        implementation=[ImplementationReview(commit="abc", what_was_checked="the loss")]
+    )
+    assert review_tier(r) == "C0"
+
+
 def test_tier_cannot_be_declared_by_the_author(tmp_path):
     """A sidecar asserting its own tier must not be able to inflate it."""
     sc = parse_sidecar(

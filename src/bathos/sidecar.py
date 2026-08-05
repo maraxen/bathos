@@ -124,24 +124,67 @@ class ReviewBlock:
         return not self.literature and not self.implementation
 
 
+def literature_entry_reviewed(entry: LiteratureReview) -> bool:
+    """Does one `[[review.literature]]` entry meet the C1 bar?
+
+    Requires `ref` **and** `bears_on` **and** `disposition`. The spec's tier table states C1 as
+    "`bears_on` + disposition" and does not mention `ref`; requiring it here is a deliberate
+    tightening, because without it the lattice inverts. C0 is defined as "DOI + claim,
+    unverified", so an entry carrying `bears_on` + `disposition` but *no citation* would grade
+    C1 while failing C0's own content bar — and an uncited attestation ("I reviewed something
+    unnamed that supports H1") is unfalsifiable in principle, which is the "review theater"
+    failure mode §8 of the spec names explicitly.
+    """
+    return bool(entry.ref and entry.bears_on and entry.disposition)
+
+
+def implementation_entry_reviewed(entry: ImplementationReview) -> bool:
+    """Does one `[[review.implementation]]` entry meet the C1 bar?
+
+    Requires `source` **and** `commit` **and** `what_was_checked` — a pinned read of a named
+    thing. `source` is the same deliberate tightening as `ref` above: a `commit` with no source
+    pins a revision of nothing.
+
+    `bears_on` is deliberately NOT required. The spec grades an implementation read at a pinned
+    commit as C1 on its own; binding it to a claim id is what the *coverage* gate additionally
+    demands, which is a different question from how good the entry is. See :func:`covering_id`.
+    """
+    return bool(entry.source and entry.commit and entry.what_was_checked)
+
+
+def covering_id(entry: LiteratureReview | ImplementationReview) -> str:
+    """The claim id this entry substantively covers, or ``""`` if it covers nothing.
+
+    This is the Review Coverage Gate's definition of "real enough to count", and it is
+    deliberately expressed here — beside the tier standard — rather than in `claim.py`, so
+    there is exactly one notion of a substantive review entry rather than two that can drift.
+
+    Coverage is **C1 plus a binding**: an entry must both meet the tier bar and name the id it
+    bears on. For literature `bears_on` is already part of C1; for implementation it is the
+    extra requirement, since a pinned read that names no hypothesis covers nothing even though
+    it is a perfectly good C1 entry.
+    """
+    if isinstance(entry, ImplementationReview):
+        return entry.bears_on if implementation_entry_reviewed(entry) else ""
+    return entry.bears_on if literature_entry_reviewed(entry) else ""
+
+
 def review_tier(review: ReviewBlock | None) -> str:
     """Grade a review block: ``""`` (none) | ``C0`` cited | ``C1`` reviewed.
 
-    C1 requires an entry that is actually checkable: a literature entry carrying both
-    `bears_on` and `disposition`, or an implementation entry read at a pinned `commit` with
-    `what_was_checked` recorded. Anything less is C0 — a citation, not a review.
+    C1 requires an entry that is actually checkable — see :func:`literature_entry_reviewed` and
+    :func:`implementation_entry_reviewed` for the per-entry bar and why each field is required.
+    Anything less is C0 — a citation, not a review.
 
     C2 (`parity`) is deliberately NOT derivable here. It is earned by the existing five-phase
     literature-parity audit, not by anything a sidecar can assert about itself.
     """
     if review is None or review.is_empty():
         return ""
-    for entry in review.literature:
-        if entry.bears_on and entry.disposition:
-            return "C1"
-    for entry in review.implementation:
-        if entry.commit and entry.what_was_checked:
-            return "C1"
+    if any(literature_entry_reviewed(e) for e in review.literature):
+        return "C1"
+    if any(implementation_entry_reviewed(e) for e in review.implementation):
+        return "C1"
     return "C0"
 
 

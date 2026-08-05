@@ -1202,8 +1202,15 @@ def review_coverage_check(db, campaign_id: str, claim, workspace_root=None) -> d
     """Review Coverage Gate (build-order step 3).
 
     Walks the claim's hypotheses and confounds and requires each to be covered by at least one
-    `[review]` entry — literature or implementation — whose `bears_on` names it, drawn from the
-    sidecars of the campaign's member runs.
+    *substantive* `[review]` entry — literature or implementation — whose `bears_on` names it,
+    drawn from the sidecars of the campaign's member runs.
+
+    "Substantive" is `sidecar.covering_id`, which is the C1 tier bar plus the `bears_on`
+    binding. Reusing it is load-bearing: this gate previously counted any entry carrying a
+    `bears_on` and inspected no other field, so a `[[review.literature]]` entry consisting of
+    nothing but `bears_on = "H1"` marked H1 covered and let a confirmation campaign conclude.
+    Authoring empty placeholders was therefore a way to satisfy the gate outright. The standard
+    lives in `sidecar.py` beside `review_tier` so there is one definition, not two that drift.
 
     Returns ``{"verdict": "covered"|"uncovered"|"empty_slate", "uncovered": [...],
     "covered": [...], "entries_seen": int, "sidecars_read": int, "sidecars_unreadable": int}``.
@@ -1222,7 +1229,7 @@ def review_coverage_check(db, campaign_id: str, claim, workspace_root=None) -> d
     """
     from pathlib import Path
 
-    from bathos.sidecar import parse_sidecar
+    from bathos.sidecar import covering_id, parse_sidecar
 
     required: list[tuple[str, str]] = []
     for h in claim.hypotheses:
@@ -1271,8 +1278,8 @@ def review_coverage_check(db, campaign_id: str, claim, workspace_root=None) -> d
             continue
         for entry in list(sc.review.literature) + list(sc.review.implementation):
             entries_seen += 1
-            if entry.bears_on:
-                seen_ids.add(entry.bears_on)
+            if covered_id := covering_id(entry):
+                seen_ids.add(covered_id)
 
     covered = [f"{kind}:{rid}" for kind, rid in required if rid in seen_ids]
     uncovered = [f"{kind}:{rid}" for kind, rid in required if rid not in seen_ids]
