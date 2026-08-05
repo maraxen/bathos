@@ -50,11 +50,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a shell-only export is honoured locally and silently skipped on the cluster — which would
   produce a ledger where identical work does or does not open obligations depending on where
   it ran. A malformed `.bth.toml` resolves to "not enabled" rather than raising.
-  - bathos's own `.bth.toml` now enables `citation_contradicted` and
-    `adversarial_check_fired`. Both are **inert today** — the first cannot fire without a
-    `[review]` entry (none exist) and the second without a declared `adversarial_check` (no
-    sidecar declares one) — so they are armed for when that data arrives rather than switched
-    on retroactively. `outcome_failed`, `campaign_confounded` and `enforce` stay off.
+  - `[claim] review_coverage_enforce` gives the Review Coverage Gate the same config path,
+    resolved through the shared `config.resolve_flag()` so the two gates cannot drift apart on
+    the subtle half (the tri-state env read). It was previously `os.environ`-only.
+  - **Enforcement is now on in bathos's own `.bth.toml`**: `citation_contradicted`,
+    `adversarial_check_fired`, `outcome_failed`, `obligations.enforce` and
+    `claim.review_coverage_enforce` are all `true`; `campaign_confounded` stays off so the
+    obligation gate and that trigger are not entangled before either is observed. Measured
+    exposure at the time of enabling: 3 open confirmation campaigns carry a registered claim
+    and no sidecar yet carries a `[review]` block, so those three downgrade to `confounded`
+    at conclude until review entries are authored (`--force` bypasses with an audit trail,
+    and `BTH_REVIEW_COVERAGE_ENFORCE=0` disables per-invocation).
+- **Integration test for the Review Coverage Gate's conclude-time seam** — the check was
+  unit-tested but its wiring and flag were not, which the spec audit called out and the
+  handoff carried as deferred. Covers advisory-by-default, config-driven downgrade,
+  env-disables-config, exploration-mode exemption, and — the property failed attempt b1
+  lacked — that a *covered* campaign is not downgraded.
 - **Campaign-scoped post-mortems** — `bth postmortem show|scaffold --campaign-id` and the
   `postmortem_get` / `postmortem_scaffold` MCP mirrors. The `campaign_id` field was previously
   write-only: both retrieval surfaces matched on `run_id`, and scaffolding was hard-keyed to a

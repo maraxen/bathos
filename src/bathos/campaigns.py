@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -381,10 +380,13 @@ def conclude_campaign(
             # can carry a [review] block — which is a retroactive verdict change, not a gate.
             # Set BTH_REVIEW_COVERAGE_ENFORCE=1 once real entries exist. Until then the gate
             # runs, reports, and changes no verdict.
-            enforcing = os.environ.get("BTH_REVIEW_COVERAGE_ENFORCE", "").strip().lower() in (
-                "1",
-                "true",
-                "yes",
+            from bathos.config import resolve_flag
+
+            enforcing = resolve_flag(
+                "BTH_REVIEW_COVERAGE_ENFORCE",
+                "claim",
+                "review_coverage_enforce",
+                workspace_root,
             )
             if enforcing:
                 print(f"Review coverage gate: {detail}")
@@ -393,7 +395,8 @@ def conclude_campaign(
             else:
                 print(
                     f"WARNING: Review coverage gate: {detail} "
-                    "(advisory until BTH_REVIEW_COVERAGE_ENFORCE=1)"
+                    "(advisory until [claim] review_coverage_enforce = true, or "
+                    "BTH_REVIEW_COVERAGE_ENFORCE=1)"
                 )
         # Reported unconditionally: a sidecar that could not be read is NOT evidence that
         # review is absent, and the reader must be able to tell those apart.

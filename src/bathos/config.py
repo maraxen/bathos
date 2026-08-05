@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,6 +29,58 @@ class ProjectConfig:
 
 def default_catalog_dir() -> Path:
     return Path.home() / ".bth" / "catalog"
+
+
+_TRUE = ("1", "true", "yes")
+_FALSE = ("0", "false", "no")
+
+
+def env_override(name: str) -> bool | None:
+    """Tri-state read of a boolean env flag: True / False / None (unset or unrecognised).
+
+    A set-but-false value must be able to turn a config-enabled flag OFF, so this cannot
+    collapse to a plain truthiness test — otherwise `BTH_X=0` would silently mean "fall
+    through to config", i.e. still enabled, which is the opposite of what an override is for.
+    An unrecognised value returns None rather than False so garbage is not read as a
+    deliberate "off" that beats a considered config setting.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    val = raw.strip().lower()
+    if val in _TRUE:
+        return True
+    if val in _FALSE:
+        return False
+    return None
+
+
+def resolve_flag(
+    env_name: str,
+    section: str,
+    key: str,
+    workspace_root: Path | str | None = None,
+) -> bool:
+    """Resolve a boolean gate: env var (both directions) → `.bth.toml [section] key` → False.
+
+    Single implementation so the obligation triggers and the review-coverage gate cannot
+    drift apart on the subtle half (the tri-state env read above).
+
+    The config file is the durable home for these settings: a SLURM job reads the same
+    `.bth.toml`, whereas a shell-only export is honoured locally and silently skipped on the
+    cluster. A malformed or missing config resolves to False — the safe direction for a gate
+    that changes verdicts or writes ledger entries — rather than raising mid-run.
+    """
+    override = env_override(env_name)
+    if override is not None:
+        return override
+    try:
+        cfg_path = find_project_config(Path(workspace_root) if workspace_root else None)
+        if cfg_path is None:
+            return False
+        return bool(getattr(load_project_config(cfg_path), section, {}).get(key, False))
+    except Exception:
+        return False
 
 
 def find_project_config(start: Path | None = None) -> Path | None:

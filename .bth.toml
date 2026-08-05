@@ -18,9 +18,20 @@ citation_contradicted = true
 # Fires only when a declared adversarial_check evaluates false on a run that
 # otherwise landed on that branch. Inert until sidecars declare one.
 adversarial_check_fired = true
-# Left off deliberately — see CHANGELOG. outcome_failed is the widest trigger, and
-# `enforce` changes verdicts rather than just recording, so it waits until the
-# advisory output at conclude has gone quiet and one obligation has been discharged.
-outcome_failed = false
+# The widest trigger: one ledger entry per non-pass run from here on. Forward-only —
+# it does not touch the existing catalog.
+outcome_failed = true
 campaign_confounded = false
-enforce = false
+# ENFORCING: open obligations on a campaign or its member runs now downgrade the
+# verdict to 'confounded' at conclude for confirmation/sequential campaigns.
+# Discharge them by writing a post-mortem that names them in `discharges`
+# (`bth postmortem scaffold --campaign-id <id>` lists the open ones).
+enforce = true
+
+[claim]
+# ENFORCING: a confirmation/sequential campaign whose hypotheses and confounds are not
+# each covered by a [review] entry is downgraded to 'confounded' at conclude.
+# Measured blast radius when enabled: 3 open confirmation campaigns carry a registered
+# claim and no sidecar yet carries a [review] block, so those three will downgrade until
+# review entries are authored. `--force` bypasses with an audit trail.
+review_coverage_enforce = true

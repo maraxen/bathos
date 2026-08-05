@@ -144,19 +144,53 @@ def test_maybe_open_honours_config(tmp_path):
 # ── this repo's own committed configuration ────────────────────────────────
 
 
-def test_this_projects_bth_toml_enables_exactly_the_two_inert_triggers():
-    """Pins the deliberate choice: the two triggers that cannot fire against pre-existing
-    work are armed; the wider ones and `enforce` wait for observed data."""
+def _repo_config() -> dict:
     import tomllib
 
     import bathos
 
     repo_root = Path(bathos.__file__).resolve().parents[2]
-    cfg = tomllib.loads((repo_root / ".bth.toml").read_text())
+    return tomllib.loads((repo_root / ".bth.toml").read_text())
+
+
+def test_this_projects_bth_toml_records_the_enabled_gates():
+    """Pins the deliberate calibration choice, so a change to it is a visible diff rather
+    than a silent shift in what every run and conclude does."""
+    cfg = _repo_config()
     obligations = cfg.get("obligations", {})
 
     assert obligations.get("citation_contradicted") is True
     assert obligations.get("adversarial_check_fired") is True
-    assert obligations.get("outcome_failed") is False
+    assert obligations.get("outcome_failed") is True
+    assert obligations.get("enforce") is True
+    # Still off: fires only on an already-confounded conclude, which the obligation gate
+    # itself can now cause -- left off so the two are not entangled before either is observed.
     assert obligations.get("campaign_confounded") is False
-    assert obligations.get("enforce") is False
+
+    assert cfg.get("claim", {}).get("review_coverage_enforce") is True
+
+
+# ── review-coverage gate shares the same resolver ──────────────────────────
+
+
+def test_review_coverage_enforce_reads_from_config(tmp_path):
+    from bathos.config import resolve_flag
+
+    root = _project(tmp_path, "[claim]\nreview_coverage_enforce = true\n")
+    assert resolve_flag("BTH_REVIEW_COVERAGE_ENFORCE", "claim", "review_coverage_enforce", root)
+
+
+def test_review_coverage_enforce_defaults_off(tmp_path):
+    from bathos.config import resolve_flag
+
+    root = _project(tmp_path, "[claim]\n")
+    assert not resolve_flag("BTH_REVIEW_COVERAGE_ENFORCE", "claim", "review_coverage_enforce", root)
+
+
+def test_review_coverage_env_disables_config(tmp_path, monkeypatch):
+    """The escape hatch that matters while [review] entries are still being authored."""
+    from bathos.config import resolve_flag
+
+    root = _project(tmp_path, "[claim]\nreview_coverage_enforce = true\n")
+    monkeypatch.setenv("BTH_REVIEW_COVERAGE_ENFORCE", "0")
+    assert not resolve_flag("BTH_REVIEW_COVERAGE_ENFORCE", "claim", "review_coverage_enforce", root)
