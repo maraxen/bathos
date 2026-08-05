@@ -84,8 +84,23 @@ project. Any sweep that trusts bare ids will mis-resolve.
 | Trigger-conditioned, not priority-ranked | ~5 | Promote per decision below |
 | Genuinely live, rankable | remainder | Promote to debt |
 
-**15 of 42 entries (36%) carry an explicit id and can be settled mechanically** by resolving it
-against Postgres. That is the cheap first pass, and it needs no judgment.
+**Measured 2026-08-05 by running `scripts/analysis/classify_deferred_items.py`** — this
+supersedes an earlier estimate here that "15 of 42 entries (36%) can be settled mechanically",
+which was too optimistic. 15 entries carry an id, but resolving them splits three ways:
+
+| bucket | n | action |
+| --- | --- | --- |
+| `closed_done_by_id` | 4 | drop — no judgement |
+| `closed_abandoned_by_id` | 6 | drop *after confirming the abandonment was intentional* |
+| `open_by_id` | 3 | keep — tracked and live |
+| `id_unresolved_in_workspace` | 2 | investigate — id wrong or ambiguous |
+| `needs_review` | 27 | premise-verify (15 of these flagged conditional) |
+
+So **4 of 42 (10%) settle with zero judgement**, and 10 of 42 (24%) are drop-eligible once
+abandonment is confirmed. The gap is `archived`/`cancelled`: those rows are terminal for
+tracking but mean "stopped", not "done" — and one entry reads *"#1684 (still OPEN)"* while its
+row is `archived`, so collapsing the two would drop an entry whose own text contradicts the
+status.
 
 Duplication (semantic, not string-equal): `prereg.py` script-stem ×3 · compaction race ×2 ·
 monorepo `scan_root` ×2 · submit-provenance ×2 · statistics corpus batch ×2 (a third near-dupe
