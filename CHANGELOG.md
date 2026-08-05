@@ -43,6 +43,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     conjuncts (`AND 1=1`, `AND TRUE`, `col = col`) and **(b)** distinct-column preference,
     both WARNING. The ADR's Consequences section had described both as shipped mitigations
     since 2026-05-26; neither existed, and only field *presence* was ever checked.
+- **`[obligations]` section in `.bth.toml`** — durable, versioned opt-in for the four triggers
+  plus `enforce`, following the existing `[claim]` precedent. Resolution order is env var
+  (winning in **both** directions, so `BTH_OBLIGATION_X=0` genuinely disables) → config → off.
+  The config file is the durable home because a SLURM job reads the same `.bth.toml`, whereas
+  a shell-only export is honoured locally and silently skipped on the cluster — which would
+  produce a ledger where identical work does or does not open obligations depending on where
+  it ran. A malformed `.bth.toml` resolves to "not enabled" rather than raising.
+  - bathos's own `.bth.toml` now enables `citation_contradicted` and
+    `adversarial_check_fired`. Both are **inert today** — the first cannot fire without a
+    `[review]` entry (none exist) and the second without a declared `adversarial_check` (no
+    sidecar declares one) — so they are armed for when that data arrives rather than switched
+    on retroactively. `outcome_failed`, `campaign_confounded` and `enforce` stay off.
 - **Campaign-scoped post-mortems** — `bth postmortem show|scaffold --campaign-id` and the
   `postmortem_get` / `postmortem_scaffold` MCP mirrors. The `campaign_id` field was previously
   write-only: both retrieval surfaces matched on `run_id`, and scaffolding was hard-keyed to a

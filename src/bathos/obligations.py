@@ -82,20 +82,72 @@ _FLAG_PREFIX = "BTH_OBLIGATION_"
 ENFORCE_FLAG = "BTH_OBLIGATION_ENFORCE"
 
 
-def _truthy(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes")
+_TRUE = ("1", "true", "yes")
+_FALSE = ("0", "false", "no")
 
 
-def trigger_enabled(trigger: str) -> bool:
-    """Is this trigger's opt-in flag set? Unknown triggers are never enabled."""
+def _env_override(name: str) -> bool | None:
+    """Tri-state read of an env flag: True / False / None (unset or unrecognised).
+
+    A set-but-false value must be able to turn a config-enabled flag OFF, so this cannot
+    collapse to a plain truthiness test — otherwise `BTH_OBLIGATION_X=0` would silently mean
+    "fall through to config", i.e. still enabled.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    val = raw.strip().lower()
+    if val in _TRUE:
+        return True
+    if val in _FALSE:
+        return False
+    return None
+
+
+def _config_flag(workspace_root: Path | str | None, key: str) -> bool:
+    """Read `[obligations] <key>` from the project's .bth.toml. Missing/unreadable → False."""
+    from bathos.config import find_project_config, load_project_config
+
+    try:
+        start = Path(workspace_root) if workspace_root else None
+        cfg_path = find_project_config(start)
+        if cfg_path is None:
+            return False
+        return bool(load_project_config(cfg_path).obligations.get(key, False))
+    except Exception:
+        # A malformed .bth.toml must not crash a run; an unreadable config means "not enabled",
+        # which is the safe direction for a flag that opens ledger entries.
+        return False
+
+
+def trigger_enabled(trigger: str, workspace_root: Path | str | None = None) -> bool:
+    """Is this trigger enabled? Unknown triggers are never enabled.
+
+    Resolution order: `BTH_OBLIGATION_<TRIGGER>` env var wins in **both** directions, then
+    `[obligations] <trigger>` in `.bth.toml`, then off.
+
+    The config file is the durable home: a SLURM job reads the same `.bth.toml`, whereas a
+    shell-only export is honoured locally and silently skipped on the cluster — which would
+    produce a ledger where identical work does or does not open obligations depending on where
+    it ran. The env var stays as the per-invocation override.
+    """
     if trigger not in TRIGGERS:
         return False
-    return _truthy(f"{_FLAG_PREFIX}{trigger.upper()}")
+    override = _env_override(f"{_FLAG_PREFIX}{trigger.upper()}")
+    if override is not None:
+        return override
+    return _config_flag(workspace_root, trigger)
 
 
-def enforcement_enabled() -> bool:
-    """Should open obligations downgrade a campaign verdict at conclude?"""
-    return _truthy(ENFORCE_FLAG)
+def enforcement_enabled(workspace_root: Path | str | None = None) -> bool:
+    """Should open obligations downgrade a campaign verdict at conclude?
+
+    Same resolution order as :func:`trigger_enabled`, via `[obligations] enforce`.
+    """
+    override = _env_override(ENFORCE_FLAG)
+    if override is not None:
+        return override
+    return _config_flag(workspace_root, "enforce")
 
 
 def maybe_open(
@@ -111,7 +163,7 @@ def maybe_open(
     "does this trigger write to the ledger today?" has exactly one answer per trigger and it
     is visible in the environment. `open_obligation` stays ungated for explicit/manual use.
     """
-    if not trigger_enabled(trigger):
+    if not trigger_enabled(trigger, workspace_root):
         return None
     return open_obligation(workspace_root, entity_kind, entity_id, trigger, detail)
 

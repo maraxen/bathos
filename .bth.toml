@@ -5,3 +5,22 @@ root = "/home/marielle/projects/bathos"
 [remotes.engaging]
 host = "engaging"
 remote_root = "~/projects/prolix"
+
+# Post-mortem obligation triggers (spec §5). Each opens a ledger entry; none blocks.
+# Enabled here rather than via shell export so SLURM jobs, which read this same file,
+# behave identically to local runs. Override per-invocation with
+# BTH_OBLIGATION_<TRIGGER>=0/1, which wins in both directions.
+[obligations]
+# Highest-value and safest: can only fire where a [review] entry with
+# disposition = "supports" already exists, so it cannot reach anything authored
+# before build-order step 2. Inert until the first review entry lands.
+citation_contradicted = true
+# Fires only when a declared adversarial_check evaluates false on a run that
+# otherwise landed on that branch. Inert until sidecars declare one.
+adversarial_check_fired = true
+# Left off deliberately — see CHANGELOG. outcome_failed is the widest trigger, and
+# `enforce` changes verdicts rather than just recording, so it waits until the
+# advisory output at conclude has gone quiet and one obligation has been discharged.
+outcome_failed = false
+campaign_confounded = false
+enforce = false

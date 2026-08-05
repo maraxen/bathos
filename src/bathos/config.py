@@ -19,6 +19,11 @@ class ProjectConfig:
     slurm: dict = field(default_factory=dict)
     sync_filter: str = "project_slug"
     claim: dict = field(default_factory=dict)
+    #: [obligations] — per-trigger opt-in for the §5 post-mortem obligation triggers,
+    #: plus `enforce`. Lives in .bth.toml so the setting is versioned and reaches SLURM
+    #: jobs, which read the same file; a shell-only env var would be honoured locally and
+    #: silently skipped on the cluster. Env vars still override (see obligations.py).
+    obligations: dict = field(default_factory=dict)
 
 
 def default_catalog_dir() -> Path:
@@ -49,6 +54,7 @@ def load_project_config(path: Path) -> ProjectConfig:
         slurm=data.get("slurm", {}),
         sync_filter=project.get("sync_filter", "project_slug"),
         claim=data.get("claim", {}),
+        obligations=data.get("obligations", {}),
     )
 
 

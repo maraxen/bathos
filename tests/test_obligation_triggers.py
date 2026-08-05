@@ -86,22 +86,28 @@ def test_no_sidecar_is_not_a_failure():
 # ── flag plumbing ───────────────────────────────────────────────────────────
 
 
-def test_every_trigger_defaults_off(monkeypatch):
+# These pin an isolated tmp_path as the workspace: with no .bth.toml above it, config
+# contributes nothing and the env layer is tested on its own. Passing no workspace at all
+# would resolve against the CURRENT project's config (bathos's own .bth.toml now enables two
+# triggers), so these would silently stop testing what they claim to.
+
+
+def test_every_trigger_defaults_off(monkeypatch, tmp_path):
     for trig in TRIGGERS:
         monkeypatch.delenv(f"BTH_OBLIGATION_{trig.upper()}", raising=False)
-        assert trigger_enabled(trig) is False
+        assert trigger_enabled(trig, tmp_path) is False
 
 
 @pytest.mark.parametrize("trig", sorted(TRIGGERS))
-def test_each_flag_enables_only_its_own_trigger(monkeypatch, trig):
+def test_each_flag_enables_only_its_own_trigger(monkeypatch, tmp_path, trig):
     """Independently toggleable: the four differ sharply in blast radius, so enabling the
     safest must not enable the widest."""
     for other in TRIGGERS:
         monkeypatch.delenv(f"BTH_OBLIGATION_{other.upper()}", raising=False)
     monkeypatch.setenv(f"BTH_OBLIGATION_{trig.upper()}", "1")
 
-    assert trigger_enabled(trig) is True
-    assert [t for t in TRIGGERS if trigger_enabled(t)] == [trig]
+    assert trigger_enabled(trig, tmp_path) is True
+    assert [t for t in TRIGGERS if trigger_enabled(t, tmp_path)] == [trig]
 
 
 def test_unknown_trigger_is_never_enabled(monkeypatch):

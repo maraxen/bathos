@@ -470,7 +470,7 @@ def conclude_campaign(
         # and the claim, which is where the discriminability map lives (decision D1).
         from bathos.obligations import maybe_open, trigger_enabled
 
-        if trigger_enabled("citation_contradicted"):
+        if trigger_enabled("citation_contradicted", workspace_root):
             try:
                 from bathos.claim import contradicted_citations
 
@@ -555,7 +555,7 @@ def conclude_campaign(
         # Same split as the Review Coverage Gate: the check always runs and always reports;
         # only the verdict change is opt-in. Enforcing by default would let an obligation
         # opened by a newly-enabled trigger retroactively downgrade an unrelated campaign.
-        if enforcement_enabled():
+        if enforcement_enabled(workspace_root):
             if campaign_mode in ("confirmation", "sequential"):
                 print(
                     f"Obligation gate: {len(open_obs)} open obligation(s) — "
