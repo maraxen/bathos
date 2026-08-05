@@ -1866,24 +1866,28 @@ async def mcp_campaign_conclude_tool(
 @traced_tool
 @require_write_token
 async def postmortem_scaffold(
-    run_id: str,
+    run_id: str = "",
+    campaign_id: str = "",
     catalog_dir: str | None = None,
     workspace_root: str | None = None,
     token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
-    """Scaffold a new postmortem TOML template for the given run ID.
+    """Scaffold a new postmortem TOML template for a run ID or a campaign ID.
 
-    Returns the path where the template was written.
+    Pass exactly one of run_id / campaign_id. Returns the path where the template was written.
 
     Requires token= matching the local ~/.bth/mcp_token (debt #619).
     """
-    from bathos.postmortem import find_run_for_scaffold, scaffold_postmortem_template
+    from bathos.postmortem import (
+        find_run_for_scaffold,
+        scaffold_campaign_postmortem_template,
+        scaffold_postmortem_template,
+    )
+
+    if bool(run_id) == bool(campaign_id):
+        return {"error": "Pass exactly one of run_id or campaign_id"}
 
     cat_dir = _get_catalog_dir(catalog_dir)
-    run_row = find_run_for_scaffold(run_id, cat_dir)
-    if not run_row:
-        return {"error": f"Run '{run_id}' not found"}
-    command, _project_slug = run_row
 
     # Explicit workspace_root wins (AC-11); else resolve live fs_root (worktree-aware).
     if workspace_root:
@@ -1892,6 +1896,39 @@ async def postmortem_scaffold(
         from bathos.workspace import resolve_workspace
 
         ws = resolve_workspace().fs_root
+
+    if campaign_id:
+        import duckdb
+
+        from bathos.campaigns import get_campaign
+        from bathos.obligations import list_obligations
+
+        db_path = cat_dir / "bathos.db"
+        if not db_path.exists():
+            return {"error": f"Campaign '{campaign_id}' not found"}
+        db = duckdb.connect(str(db_path))
+        try:
+            campaign = get_campaign(db, campaign_id)
+            if campaign is None:
+                return {"error": f"Campaign '{campaign_id}' not found"}
+            member_ids = [
+                r[0]
+                for r in db.execute(
+                    "SELECT run_id FROM campaign_runs WHERE campaign_id = ?", [campaign.id]
+                ).fetchall()
+            ]
+        finally:
+            db.close()
+
+        scoped = {campaign.id, *member_ids}
+        open_ids = [o.obligation_id for o in list_obligations(ws) if o.entity_id in scoped]
+        pm_path = scaffold_campaign_postmortem_template(campaign.id, ws, open_ids)
+        return {"path": str(pm_path), "campaign_id": campaign.id, "open_obligations": open_ids}
+
+    run_row = find_run_for_scaffold(run_id, cat_dir)
+    if not run_row:
+        return {"error": f"Run '{run_id}' not found"}
+    command, _project_slug = run_row
 
     postmortem_path = scaffold_postmortem_template(command, run_id, ws)
     return {"path": str(postmortem_path), "run_id": run_id}
@@ -1938,14 +1975,19 @@ async def postmortem_validate(
 @cisternal.tool(registry="bathos")
 @traced_tool
 async def postmortem_get(
-    run_id: str,
+    run_id: str = "",
+    campaign_id: str = "",
     workspace_root: str | None = None,
 ) -> dict:
-    """Retrieve postmortem data for the given run ID by scanning for matching TOML files.
+    """Retrieve postmortem data for a run ID or a campaign ID.
 
-    Returns the parsed postmortem fields or an error dict if not found.
+    Pass exactly one of run_id / campaign_id. Returns the parsed postmortem fields or an
+    error dict if not found.
     """
-    from bathos.postmortem import parse_postmortem
+    from bathos.postmortem import find_postmortem
+
+    if bool(run_id) == bool(campaign_id):
+        return {"error": "Pass exactly one of run_id or campaign_id"}
 
     # Explicit workspace_root wins (AC-11); else resolve live fs_root (worktree-aware).
     if workspace_root:
@@ -1955,29 +1997,30 @@ async def postmortem_get(
 
         ws = resolve_workspace().fs_root
 
-    for pm_file in ws.rglob("*.bth.postmortem.toml"):
-        try:
-            pm = parse_postmortem(pm_file)
-            if pm.run_id == run_id:
-                return {
-                    "run_id": pm.run_id,
-                    "status": pm.status,
-                    "hypothesis_status": pm.hypothesis_status,
-                    "verdict_override": pm.verdict_override,
-                    "summary": pm.summary,
-                    "root_cause": pm.root_cause,
-                    "unexpected_observations": pm.unexpected_observations,
-                    "next_steps": pm.next_steps,
-                    "author": pm.author,
-                    "asset_links": pm.asset_links,
-                    "anomalies": pm.anomalies,
-                    "refutation_criteria_met": pm.refutation_criteria_met,
-                    "path": str(pm_file),
-                }
-        except Exception:
-            continue
+    found = find_postmortem(ws, run_id=run_id, campaign_id=campaign_id)
+    if found is None:
+        scope = f"run_id '{run_id}'" if run_id else f"campaign_id '{campaign_id}'"
+        return {"error": f"No postmortem found for {scope}"}
 
-    return {"error": f"No postmortem found for run_id '{run_id}'"}
+    pm_file, pm = found
+    return {
+        "run_id": pm.run_id,
+        "campaign_id": pm.campaign_id,
+        "status": pm.status,
+        "hypothesis_status": pm.hypothesis_status,
+        "verdict_override": pm.verdict_override,
+        "summary": pm.summary,
+        "root_cause": pm.root_cause,
+        "unexpected_observations": pm.unexpected_observations,
+        "next_steps": pm.next_steps,
+        "author": pm.author,
+        "asset_links": pm.asset_links,
+        "anomalies": pm.anomalies,
+        "refutation_criteria_met": pm.refutation_criteria_met,
+        "discharges": pm.discharges,
+        "violated_cards": pm.violated_cards,
+        "path": str(pm_file),
+    }
 
 
 @cisternal.tool(registry="bathos")

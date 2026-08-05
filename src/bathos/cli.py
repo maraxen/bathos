@@ -2387,61 +2387,112 @@ def _parse_since(since: str | None) -> datetime | None:
 
 @postmortem_app.command()
 def scaffold(
-    run_id: str = typer.Argument(..., help="Run ID to scaffold a postmortem template for"),
+    run_id: str | None = typer.Argument(None, help="Run ID to scaffold a postmortem template for"),
+    campaign_id: str = typer.Option(
+        "",
+        "--campaign-id",
+        help="Scaffold a campaign-scoped postmortem instead of a run-scoped one",
+    ),
 ):
-    """Scaffold a new postmortem template for the given Run ID."""
-    from bathos.postmortem import find_run_for_scaffold, scaffold_postmortem_template
+    """Scaffold a new postmortem template for a Run ID or a Campaign ID."""
+    from bathos.postmortem import (
+        find_run_for_scaffold,
+        scaffold_campaign_postmortem_template,
+        scaffold_postmortem_template,
+    )
     from bathos.workspace import resolve_workspace
 
-    run_row = find_run_for_scaffold(run_id, _catalog_dir())
+    if bool(run_id) == bool(campaign_id):
+        typer.echo("Pass exactly one of RUN_ID or --campaign-id", err=True)
+        raise typer.Exit(1)
+
+    workspace_root = resolve_workspace().fs_root
+
+    if campaign_id:
+        import duckdb
+
+        from bathos.campaigns import get_campaign
+        from bathos.obligations import list_obligations
+
+        db_path = _catalog_dir() / "bathos.db"
+        campaign = None
+        if db_path.exists():
+            db = duckdb.connect(str(db_path))
+            try:
+                campaign = get_campaign(db, campaign_id)
+                member_ids = [
+                    r[0]
+                    for r in db.execute(
+                        "SELECT run_id FROM campaign_runs WHERE campaign_id = ?",
+                        [campaign.id if campaign else campaign_id],
+                    ).fetchall()
+                ]
+            finally:
+                db.close()
+        else:
+            member_ids = []
+
+        if campaign is None:
+            typer.echo(f"Campaign not found: {campaign_id}", err=True)
+            raise typer.Exit(1)
+
+        # The scaffold is keyed on the resolved full id, not the prefix the user typed --
+        # otherwise `discharges` would name obligations the ledger stores under another id.
+        scoped = {campaign.id, *member_ids}
+        open_ids = [
+            o.obligation_id for o in list_obligations(workspace_root) if o.entity_id in scoped
+        ]
+        postmortem_path = scaffold_campaign_postmortem_template(
+            campaign.id, workspace_root, open_ids
+        )
+        typer.echo(f"Scaffolded campaign postmortem template at {postmortem_path}")
+        return
+
+    resolved_run_id = run_id or ""  # the exactly-one guard above proves this is non-empty
+    run_row = find_run_for_scaffold(resolved_run_id, _catalog_dir())
     if not run_row:
         typer.echo("Run not found", err=True)
         raise typer.Exit(1)
 
     command, _project_slug = run_row
-    workspace_root = resolve_workspace().fs_root
-    postmortem_path = scaffold_postmortem_template(command, run_id, workspace_root)
+    postmortem_path = scaffold_postmortem_template(command, resolved_run_id, workspace_root)
     typer.echo(f"Scaffolded postmortem template at {postmortem_path}")
 
 
 @postmortem_app.command()
 def show(
-    run_id: str = typer.Argument(..., help="Run ID of the postmortem to show"),
+    run_id: str | None = typer.Argument(None, help="Run ID of the postmortem to show"),
+    campaign_id: str = typer.Option(
+        "", "--campaign-id", help="Show a campaign-scoped postmortem instead of a run-scoped one"
+    ),
     strict_files: bool = typer.Option(
         False, "--strict-files", help="Fail if files in asset_links do not exist"
     ),
 ):
-    """Display and validate the postmortem for the given Run ID."""
+    """Display and validate the postmortem for a Run ID or a Campaign ID."""
     import duckdb
 
-    from bathos.postmortem import parse_postmortem, validate_postmortem
+    from bathos.postmortem import find_postmortem, validate_postmortem
     from bathos.schema import Run
     from bathos.workspace import resolve_workspace
 
-    workspace_root = resolve_workspace().fs_root
-
-    # Find the postmortem TOML file in workspace
-    postmortem_file = None
-    if workspace_root.exists():
-        for pm_file in workspace_root.rglob("*.bth.postmortem.toml"):
-            try:
-                pm = parse_postmortem(pm_file)
-                if pm.run_id == run_id:
-                    postmortem_file = pm_file
-                    break
-            except Exception:
-                pass
-
-    if not postmortem_file:
-        typer.echo("Postmortem not found", err=True)
+    if bool(run_id) == bool(campaign_id):
+        typer.echo("Pass exactly one of RUN_ID or --campaign-id", err=True)
         raise typer.Exit(1)
 
-    pm = parse_postmortem(postmortem_file)
+    workspace_root = resolve_workspace().fs_root
 
-    # Search for run in DB
+    found = find_postmortem(workspace_root, run_id=run_id or "", campaign_id=campaign_id)
+    if not found:
+        typer.echo("Postmortem not found", err=True)
+        raise typer.Exit(1)
+    postmortem_file, pm = found
+
+    # Drift detection needs the Run row, so it only applies to a run-scoped postmortem.
+    # A campaign has no single git hash or dirty flag to compare against.
     run_obj = None
     db_path = _catalog_dir() / "bathos.db"
-    if db_path.exists():
+    if run_id and db_path.exists():
         con = duckdb.connect(str(db_path))
         try:
             arrow_tbl = con.execute("SELECT * FROM runs WHERE id = ?", [run_id]).arrow()
@@ -2475,7 +2526,8 @@ def show(
         typer.echo(f"Verdict override: {pm.verdict_override}", err=True)
         raise typer.Exit(1)
 
-    typer.echo(f"Run ID: {pm.run_id}")
+    typer.echo(f"Campaign ID: {pm.campaign_id}" if pm.campaign_id else f"Run ID: {pm.run_id}")
+    typer.echo(f"Path: {postmortem_file}")
     typer.echo(f"Status: {pm.status}")
     typer.echo(f"Hypothesis Status: {pm.hypothesis_status}")
     typer.echo(f"Verdict Override: {pm.verdict_override}")

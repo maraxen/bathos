@@ -278,6 +278,96 @@ def validate_postmortem(
     return ValidationResult(ok=ok, errors=errors)
 
 
+def find_postmortem(
+    workspace_root: Path | str,
+    run_id: str = "",
+    campaign_id: str = "",
+) -> tuple[Path, Postmortem] | None:
+    """Locate the postmortem for a run OR a campaign. Returns (path, parsed) or None.
+
+    Exactly one of `run_id` / `campaign_id`, mirroring the `Postmortem` schema itself. Both
+    retrieval surfaces previously matched on `pm.run_id` only, so a campaign-scoped postmortem
+    could be written and validated but never retrieved by id — the `campaign_id` field added
+    for §8b objection 4 was write-only.
+
+    Matching is against the *named* field rather than "either id equals this string": run ids
+    and campaign ids are separate namespaces with no discriminator, the same collision
+    `obligations.py` prefixes its ledger filenames to avoid. An `id` that matched either would
+    reintroduce it here.
+
+    Shared by `bth postmortem show` and the `postmortem_get` MCP tool so the two cannot
+    diverge — the same reason `scaffold_postmortem_template` is shared (debt #479).
+    """
+    if bool(run_id) == bool(campaign_id):
+        raise ValueError("Pass exactly one of run_id or campaign_id")
+
+    root = Path(workspace_root)
+    if not root.exists():
+        return None
+
+    for pm_file in root.rglob("*.bth.postmortem.toml"):
+        try:
+            pm = parse_postmortem(pm_file)
+        except Exception:
+            continue
+        if run_id and pm.run_id == run_id:
+            return pm_file, pm
+        if campaign_id and pm.campaign_id == campaign_id:
+            return pm_file, pm
+    return None
+
+
+def scaffold_campaign_postmortem_template(
+    campaign_id: str,
+    workspace_root: Path,
+    open_obligation_ids: list[str] | tuple[str, ...] = (),
+) -> Path:
+    """Write a draft campaign-scoped postmortem and return its path.
+
+    `find_run_for_scaffold` + `scaffold_postmortem_template` are hard-keyed to a Run row —
+    they resolve the script path out of the run's `command` string — so a campaign-scoped
+    postmortem had to be hand-authored. A campaign has no script and no single directory to
+    sit beside, hence `.bth/postmortems/`, mirroring `.bth/claims/` and `.bth/obligations/`.
+
+    Open obligation ids are emitted as a *commented* checklist and never pre-filled into
+    `discharges`. Naming an obligation there asserts this write-up explains it; a scaffold
+    that pre-filled them would discharge the ledger by default, which inverts the point.
+    """
+    pm_dir = Path(workspace_root) / ".bth" / "postmortems"
+    pm_dir.mkdir(parents=True, exist_ok=True)
+    postmortem_path = pm_dir / f"campaign_{campaign_id}.bth.postmortem.toml"
+
+    if open_obligation_ids:
+        checklist = "\n".join(f"#   {oid}" for oid in open_obligation_ids)
+        obligation_block = (
+            "# Open obligations for this campaign and its member runs. Copy the ids this\n"
+            "# write-up actually explains into `discharges` above — a valid postmortem\n"
+            "# discharges exactly what it names, and nothing else.\n" + checklist + "\n"
+        )
+    else:
+        obligation_block = "# No open obligations recorded for this campaign.\n"
+
+    toml_content = f"""campaign_id = "{campaign_id}"
+
+[postmortem]
+hypothesis_status = "unassigned"
+summary = ""
+unexpected_observations = ""
+root_cause = ""
+verdict_override = "none"
+next_steps = ""
+author = ""
+status = "draft"
+discharges = []
+violated_cards = []
+
+{obligation_block}
+[asset_links]
+"""
+    postmortem_path.write_text(toml_content)
+    return postmortem_path
+
+
 def find_run_for_scaffold(run_id: str, catalog_dir: Path) -> tuple[str, str] | None:
     """Find (command, project_slug) for run_id, checking the warm DB then cool fragments.
 
