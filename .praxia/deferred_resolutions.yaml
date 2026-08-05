@@ -1,0 +1,54 @@
+_note: Confirmed dispositions for deferred handoff entries. Historical handoffs are NEVER edited — they
+  are snapshots of what was true when written, and rewriting them would destroy the audit trail this triage
+  depends on. Resolution is recorded HERE instead, keyed by (source_file, index), which is stable precisely
+  because handoffs are immutable.
+resolutions:
+- source_file: bathos_Complete + backlog reconciled_20260612_134803_c7ff3e56-fe75-4119-91c9-2532d5f29d9d.yaml
+  index: 3
+  description_head: 'T7 / #1684 (still OPEN): CI grep guard for project_config.root usage outside wor'
+  disposition: dropped_repromoted
+  confirmed_at: '2026-08-05'
+  promoted_to: debt#1181
+  evidence: 'backlog#1684 archived 2026-07-08 with reason ''Low regression risk today; pursue when adding
+    CI hardening sprint'' — a park, not a rejection. Verified undone 2026-08-05: no project_config.root
+    reference in .github/.'
+- source_file: bathos_Implementation complete_20260611_225030_d1e08b3a-471b-4476-9f34-16f15627354e.yaml
+  index: 3
+  description_head: 'T7 / RISK-4: CI grep guard asserting project_config.root is not used as a filesy'
+  disposition: dropped_repromoted
+  confirmed_at: '2026-08-05'
+  promoted_to: debt#1181
+  evidence: 'Restatement of the same #1684 concern from the prior session''s handoff.'
+- source_file: bathos_Sprint 6"_20260602_174520_4d82d19a-f2bb-4ba6-98c7-d45d60f889b1.yaml
+  index: 3
+  description_head: '#137 global instruction portability'
+  disposition: dropped_finished
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: 'backlog#137 cancelled: bathos scope complete, remainder is praxia-owned. Verified 2026-08-05:
+    manifest.toml:30-32 declares the bathos-rules snippet and plugin_export.py implements surface support
+    (the row''s description said export.py, which is wrong but immaterial).'
+- source_file: bathos_Sprint 6"_20260602_174520_4d82d19a-f2bb-4ba6-98c7-d45d60f889b1.yaml
+  index: 4
+  description_head: 'Praxia backlog items #793-796'
+  disposition: dropped_finished
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: 'Decomposes to backlog#793 completed, #794 cancelled (not bathos-owned), #795 completed, #796
+    cancelled (not bathos-owned). All four dispositions deliberate and reasoned in their descriptions.'
+- source_file: bathos_controls-discipline v1 complete_20260613_150032_e3c0c9c6-f17f-45d5-a91e-732ce693ff0e.yaml
+  index: 0
+  description_head: 'submit-provenance pruning/compaction (backlog #1774)'
+  disposition: dropped_repromoted
+  confirmed_at: '2026-08-05'
+  promoted_to: debt#1182
+  evidence: 'backlog#1774 archived 2026-07-08 listing remediation options and selecting none — a park,
+    not a rejection. Verified undone 2026-08-05: no prune/compact/archive path for submits/ in src/bathos/.'
+- source_file: bathos_worktree-prune complete_20260616_200000_f4c42a66-27a1-4866-80e3-65ffcd33570a.yaml
+  index: 0
+  description_head: 'submit-provenance pruning/compaction (backlog #1774)'
+  disposition: dropped_repromoted
+  confirmed_at: '2026-08-05'
+  promoted_to: debt#1182
+  evidence: 'backlog#1774 archived 2026-07-08 listing remediation options and selecting none — a park,
+    not a rejection. Verified undone 2026-08-05: no prune/compact/archive path for submits/ in src/bathos/.'

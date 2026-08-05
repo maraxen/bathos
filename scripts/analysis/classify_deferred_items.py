@@ -259,6 +259,28 @@ def load_tracker_json(path: Path) -> list[TrackerRow]:
     return [TrackerRow(**r) for r in data]
 
 
+def load_resolutions(path: Path) -> dict[tuple[str, int], dict]:
+    """Load confirmed dispositions, keyed by `(source_file, index)`.
+
+    Without this the sweep is not idempotent across sessions: an entry confirmed and disposed
+    of by hand would resurface in the same bucket on the next run, and the confirmation work
+    would have to be redone from scratch.
+
+    The key is `(source_file, index)` rather than a content hash *because handoffs are never
+    edited*. They are snapshots of what was true when written; rewriting one to remove a
+    resolved entry would destroy the audit trail this whole triage depends on — and would also
+    invalidate every key here. Immutability is what makes the cheap key correct.
+    """
+    if not path.exists():
+        return {}
+    doc = yaml.safe_load(path.read_text()) or {}
+    out: dict[tuple[str, int], dict] = {}
+    for r in doc.get("resolutions") or []:
+        out[(r["source_file"], int(r["index"]))] = r
+    log.info("loaded %d confirmed resolutions from %s", len(out), path.name)
+    return out
+
+
 # ── classification ───────────────────────────────────────────────────────────
 
 
@@ -287,16 +309,32 @@ def looks_conditional(recommended_phase: str) -> bool:
 
 
 def classify(
-    entries: list[DeferredEntry], rows: list[TrackerRow], workspace_id: str
+    entries: list[DeferredEntry],
+    rows: list[TrackerRow],
+    workspace_id: str,
+    resolutions: dict[tuple[str, int], dict] | None = None,
 ) -> list[DeferredEntry]:
     """Bucket each entry. Id resolution is checked first because it is mechanical."""
     by_id: dict[int, list[TrackerRow]] = {}
     for row in rows:
         by_id.setdefault(row.id, []).append(row)
+    resolutions = resolutions or {}
 
     for entry in entries:
         entry.referenced_ids = extract_ids(entry)
         entry.condition_candidate = looks_conditional(entry.recommended_phase)
+
+        # A hand-confirmed disposition wins over anything inferred. Checked FIRST so a
+        # previously-settled entry can never be re-surfaced by a later change to the
+        # heuristics — the human decision is the more authoritative signal.
+        settled = resolutions.get((entry.source_file, entry.index))
+        if settled:
+            entry.category = "resolved"
+            promoted = settled.get("promoted_to")
+            entry.reason = f"confirmed {settled['disposition']} on {settled['confirmed_at']}" + (
+                f" -> {promoted}" if promoted else ""
+            )
+            continue
 
         own: list[TrackerRow] = []
         foreign: list[TrackerRow] = []
@@ -404,6 +442,7 @@ def find_duplicate_candidates(entries: list[DeferredEntry], threshold: float) ->
 # ── reporting ────────────────────────────────────────────────────────────────
 
 _CATEGORY_ORDER = [
+    "resolved",
     "closed_done_by_id",
     "closed_abandoned_by_id",
     "open_by_id",
@@ -412,6 +451,7 @@ _CATEGORY_ORDER = [
 ]
 
 _CATEGORY_ACTION = {
+    "resolved": "SETTLED — confirmed by hand, nothing to do",
     "closed_done_by_id": "DROP — mechanical, no judgement needed",
     "closed_abandoned_by_id": "DROP after confirming the abandonment was intentional",
     "open_by_id": "KEEP — already tracked and live",
@@ -510,6 +550,15 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     ap.add_argument(
+        "--resolutions",
+        type=Path,
+        default=None,
+        help=(
+            "YAML of hand-confirmed dispositions (default: <praxia-dir>/deferred_resolutions.yaml). "
+            "Entries listed there are reported as `resolved` and excluded from the active buckets."
+        ),
+    )
+    ap.add_argument(
         "--db-timeout",
         type=int,
         default=DB_TIMEOUT_SECONDS,
@@ -559,7 +608,10 @@ def main(argv: list[str] | None = None) -> int:
             log.error("re-run with --no-db to bucket everything as needs_review, or fix access")
             return 3
 
-    classify(entries, rows, workspace_id)
+    res_path = args.resolutions or (args.praxia_dir / "deferred_resolutions.yaml")
+    resolutions = load_resolutions(res_path)
+
+    classify(entries, rows, workspace_id, resolutions)
     clusters = find_duplicate_candidates(entries, args.dupe_threshold)
 
     print(render_report(entries, clusters))
