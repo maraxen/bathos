@@ -691,6 +691,19 @@ def run_script(
     else:
         adversarial_check_status = "missing"
 
+    # Evaluate the selected branch's adversarial_check (v14). Distinct from the status field
+    # above: that records whether a check was DECLARED, this records what happened when it ran.
+    adversarial_check_result = None
+    if sidecar is not None and outcome:
+        try:
+            from bathos.sidecar import evaluate_adversarial_check
+
+            adversarial_check_result = evaluate_adversarial_check(
+                sidecar, outcome, json.loads(metadata) if metadata else {}
+            )
+        except (json.JSONDecodeError, TypeError):
+            adversarial_check_result = None
+
     # Step 4: Extract parity_run_type from doubly-nested metadata (AC-19)
     # parity_validate.py emits result["metadata"]["parity_run_type"] = "literature_parity"
     # We extract it to the Run column for gates (F2, F3) to query
@@ -712,6 +725,7 @@ def run_script(
         outcome_error_reason=outcome_error_reason,
         outcome_is_residual=outcome_is_residual,
         adversarial_check_status=adversarial_check_status,
+        adversarial_check_result=adversarial_check_result,
         output_paths=output_paths,
         parity_run_type=parity_run_type,
         # (debt #1071) The differential pre-flight already ran and passed by this point --
@@ -738,13 +752,28 @@ def run_script(
             from bathos.sidecar import is_failure_outcome
             from bathos.workspace import resolve_workspace
 
+            ws_root = resolve_workspace(cwd).fs_root
             if is_failure_outcome(sidecar, outcome):
                 maybe_open(
-                    resolve_workspace(cwd).fs_root,
+                    ws_root,
                     "run",
                     run.id,
                     "outcome_failed",
                     detail=f"outcome={outcome!r}",
+                )
+            # Trigger 3 (§5.3): the stricter bar failed on a run that otherwise landed on
+            # this branch — the outcome is not to be believed at face value.
+            if adversarial_check_result == "fired":
+                spec = sidecar.outcomes.get(outcome)
+                maybe_open(
+                    ws_root,
+                    "run",
+                    run.id,
+                    "adversarial_check_fired",
+                    detail=(
+                        f"outcome={outcome!r} but adversarial_check failed: "
+                        f"{getattr(spec, 'adversarial_check', '') or ''}"
+                    ),
                 )
         except Exception as e:
             event("run.error", phase="obligation", exc_type=type(e).__name__, exc_msg=str(e))

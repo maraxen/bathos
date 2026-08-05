@@ -58,7 +58,13 @@ condition = "metric < 5.0"
 decision = "TODO: next step if pass"
 reasoning = "metric below threshold indicates convergence"
 is_residual = false
-adversarial_check = "metric >= 5.0"
+# A STRICTER bar the pass must ALSO clear — not the negation of `condition`.
+# It fires (opens a post-mortem obligation) when it evaluates false on a run that
+# otherwise passed, i.e. the pass was too cheap to believe.
+# Reference a variable that `condition` does NOT use: tightening the same one is weak,
+# and negating `condition` outright is a contradiction that fires on every pass.
+# TODO: replace n_samples with your own control variable, and justify the floor.
+adversarial_check = "metric < 5.0 AND n_samples >= 100"
 
 [outcomes.marginal]
 condition = "metric >= 5.0 AND metric < 10.0"
@@ -74,6 +80,7 @@ is_residual = true
 
 [result_schema]
 metric = "float"
+n_samples = "int"
 
 # Uncomment and fill in if this experiment reproduces a prior result:
 # [reproduction]

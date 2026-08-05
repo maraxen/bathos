@@ -726,11 +726,46 @@ def check_run_concentration(catalog_dir: Path, threshold: int = 20) -> list[Lint
         return []
 
 
-def check_adversarial_checks(project_root: Path) -> list[LintIssue]:
-    """Tier-2: Warn when adversarial_check is absent from outcomes.pass blocks.
+#: Tautological conjuncts that make an adversarial_check *look* stronger while adding nothing.
+#: Spec Item 6 heuristic (a). `\btrue\b` is matched only as a bare conjunct so a legitimate
+#: `flag = true` comparison is not swept up.
+_TAUTOLOGY_RES = (
+    re.compile(r"\b1\s*=\s*1\b"),
+    re.compile(r"(?:^|\b(?:and|or)\b)\s*true\s*(?:$|\b(?:and|or)\b)", re.IGNORECASE),
+    re.compile(r"\b(\w+)\s*=\s*\1\b", re.IGNORECASE),  # col = col
+)
 
-    Scans all .bth.toml files in the project and checks for missing adversarial_check
-    fields in outcomes.pass blocks.
+
+def _columns_referenced(fragment: str, known_columns) -> set[str]:
+    """Which declared result_schema columns a SQL fragment mentions.
+
+    Matching against the declared schema rather than parsing SQL: the column set is already
+    known from `[result_schema]`, so a word-boundary search is exact for the names that
+    matter and cannot be confused by SQL syntax it would otherwise have to parse.
+    """
+    return {c for c in known_columns if re.search(rf"\b{re.escape(c)}\b", fragment)}
+
+
+def check_adversarial_checks(project_root: Path) -> list[LintIssue]:
+    """Tier-2: quality checks on `adversarial_check`, per spec Item 6 (a)/(b).
+
+    Three findings, all WARNING:
+
+    - `missing_adversarial_check` — absent from an `[outcomes.pass]` block.
+    - `adversarial_check_tautology` — heuristic (a): contains a conjunct that is always true,
+      so the check adds no strength.
+    - `adversarial_check_same_column` — heuristic (b): every column it references also appears
+      in `condition`. Tightening a threshold on the same variable is weak; a genuine adversarial
+      check "would flip the outcome if the hypothesis were wrong", which typically needs a
+      *different* observed variable.
+
+    (b) is the one that catches the degenerate `condition = "metric < 5.0"` /
+    `adversarial_check = "metric >= 5.0"` shape: as a conjunct that is a contradiction, so it
+    would fire on every single pass.
+
+    **This is a syntactic proxy and nothing more.** Full logical implication is undecidable in
+    SQL, so a determined author can still satisfy every check here with a vacuous condition. A
+    clean lint is not evidence the check strengthens the claim; only a human reading it is.
 
     Args:
         project_root: Root directory of the project.
@@ -749,9 +784,14 @@ def check_adversarial_checks(project_root: Path) -> list[LintIssue]:
             # Skip files that can't be parsed
             continue
 
+        known_columns = list((data.get("result_schema") or {}).keys())
         outcomes = data.get("outcomes", {})
         for label, outcome in outcomes.items():
-            if label == "pass" and "adversarial_check" not in outcome:
+            if not isinstance(outcome, dict):
+                continue
+
+            check = outcome.get("adversarial_check")
+            if label == "pass" and not check:
                 issues.append(
                     LintIssue(
                         path=sidecar_path,
@@ -765,6 +805,45 @@ def check_adversarial_checks(project_root: Path) -> list[LintIssue]:
                         ),
                     )
                 )
+            if not check or not isinstance(check, str):
+                continue
+
+            # (a) tautological conjuncts
+            if any(rx.search(check) for rx in _TAUTOLOGY_RES):
+                issues.append(
+                    LintIssue(
+                        path=sidecar_path,
+                        directory="sidecar",
+                        issue="adversarial_check_tautology",
+                        severity=IssueSeverity.WARNING,
+                        detail=(
+                            f"outcomes.{label}.adversarial_check contains an always-true "
+                            f"conjunct ({check!r}) — it cannot strengthen the outcome"
+                        ),
+                    )
+                )
+
+            # (b) distinct-column preference
+            condition = outcome.get("condition")
+            if known_columns and isinstance(condition, str):
+                check_cols = _columns_referenced(check, known_columns)
+                cond_cols = _columns_referenced(condition, known_columns)
+                if check_cols and not (check_cols - cond_cols):
+                    issues.append(
+                        LintIssue(
+                            path=sidecar_path,
+                            directory="sidecar",
+                            issue="adversarial_check_same_column",
+                            severity=IssueSeverity.WARNING,
+                            detail=(
+                                f"outcomes.{label}.adversarial_check references only column(s) "
+                                f"already in condition ({', '.join(sorted(check_cols))}) — "
+                                "tightening the same variable is weak, and a check that simply "
+                                "negates condition is a contradiction that would fire on every "
+                                f"{label}. Reference a different observed variable."
+                            ),
+                        )
+                    )
 
     return issues
 

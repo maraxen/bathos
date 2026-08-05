@@ -561,6 +561,48 @@ def is_in_enforced_dir(script_path: Path) -> bool:
     return any(part in ENFORCED_DIRS for part in script_path.parts)
 
 
+def evaluate_adversarial_check(sidecar: Sidecar, outcome_label: str, result: dict) -> str | None:
+    """Evaluate the selected branch's `adversarial_check`. Returns "passed" | "fired" | None.
+
+    **Polarity — the check is a stricter bar, so it FIRES when it evaluates FALSE.**
+
+    `adversarial_check` is an *additional* condition the outcome must also clear, not the
+    negation of `condition`. The ADR (`260526_adversarial-check-policy.md`) defines it as a
+    condition that "would flip the outcome if the hypothesis were wrong", and the spec's own
+    example is a strengthened conjunct — `condition = "temp_std < 5"` paired with
+    `adversarial_check = "temp_std < 5 AND n_steps >= 10000 AND dt_fs <= 0.5"`. A wrong
+    hypothesis fails the stricter bar; that failure is the check *catching* something, which
+    is what "fired" means here.
+
+    The problem it exists to solve (ADR Context) is an agent pre-registering "a weak
+    confirmatory test that never genuinely stresses the claim". The remedy for a weak test is
+    a stronger one, so a check that merely negates `condition` is a contradiction that would
+    fire on every single run of that branch — `linter.check_adversarial_checks` flags that
+    shape via the distinct-column heuristic.
+
+    Returns None (not "passed") when there is nothing to evaluate — no branch selected, no
+    check declared, or no result data. Absent must stay distinguishable from cleared.
+
+    A malformed check returns None rather than raising: it is an advisory signal, and a bad
+    SQL fragment must not fail a run whose outcome already evaluated successfully.
+    """
+    if not outcome_label or outcome_label in ("error", "unknown") or not result:
+        return None
+    spec = sidecar.outcomes.get(outcome_label)
+    check = getattr(spec, "adversarial_check", None) if spec else None
+    if not check:
+        return None
+
+    cols = single_row_projection(result)
+    try:
+        rows = duckdb.execute(f"SELECT ({check}) FROM (SELECT {cols})").fetchall()
+    except Exception:
+        return None
+    if not rows or rows[0][0] is None:
+        return None
+    return "passed" if rows[0][0] else "fired"
+
+
 def evaluate_outcome(sidecar: Sidecar, result: dict) -> str:
     """Evaluate DuckDB SQL fragments against result dict; return matching label or 'unknown'.
 

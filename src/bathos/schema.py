@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pyarrow as pa
 
-CURRENT_SCHEMA_VERSION = "13"
+CURRENT_SCHEMA_VERSION = "14"
 
 # Format validator for stage_name values — used by linter.check_canonical_stage_names.
 # Enforcement at parse time uses CANONICAL_STAGES set-membership (parse_sidecar); this
@@ -81,6 +81,7 @@ COOL_SCHEMA = pa.schema(
         pa.field("differential_on_value", pa.string(), nullable=True),
         pa.field("differential_effect", pa.float64(), nullable=True),
         pa.field("dependency_lock_sha256", pa.string(), nullable=True),
+        pa.field("adversarial_check_result", pa.string(), nullable=True),
     ]
 )
 
@@ -143,6 +144,7 @@ WARM_SCHEMA = pa.schema(
         pa.field("differential_on_value", pa.string(), nullable=True),
         pa.field("differential_effect", pa.float64(), nullable=True),
         pa.field("dependency_lock_sha256", pa.string(), nullable=True),
+        pa.field("adversarial_check_result", pa.string(), nullable=True),
     ]
 )
 
@@ -206,6 +208,11 @@ class Run:
     differential_on_value: str | None = None
     differential_effect: float | None = None
     dependency_lock_sha256: str | None = None
+    #: v14. Outcome of EVALUATING the selected branch's adversarial_check:
+    #: "passed" | "fired" | None. Distinct from `adversarial_check_status`, which records
+    #: only whether the field was DECLARED (present/missing/n/a) -- a declaration fact, not
+    #: a measurement. Overloading that column would make every pre-v14 row unreadable.
+    adversarial_check_result: str | None = None
 
     def to_arrow(self) -> pa.Table:
         return pa.table(
@@ -265,6 +272,7 @@ class Run:
                 "differential_on_value": [self.differential_on_value],
                 "differential_effect": [self.differential_effect],
                 "dependency_lock_sha256": [self.dependency_lock_sha256],
+                "adversarial_check_result": [self.adversarial_check_result],
             },
             schema=COOL_SCHEMA,
         )
@@ -389,6 +397,9 @@ class Run:
             else None,
             differential_effect=pydict.get("differential_effect", [None])[i]
             if "differential_effect" in pydict
+            else None,
+            adversarial_check_result=pydict.get("adversarial_check_result", [None])[i]
+            if "adversarial_check_result" in pydict
             else None,
             dependency_lock_sha256=pydict.get("dependency_lock_sha256", [None])[i]
             if "dependency_lock_sha256" in pydict

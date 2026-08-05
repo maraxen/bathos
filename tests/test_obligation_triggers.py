@@ -121,25 +121,20 @@ def test_maybe_open_is_a_noop_while_disabled(monkeypatch, tmp_path):
     assert len(list_obligations(tmp_path)) == 1
 
 
-def test_trigger_3_is_declared_unwired():
-    """`adversarial_check` is parsed and its PRESENCE recorded, but the condition is never
-    evaluated — there is no 'fired' state to key on. Wiring it needs a decided polarity, so
-    it stays out of WIRED_TRIGGERS rather than shipping a guess."""
-    assert "adversarial_check_fired" in TRIGGERS
-    assert "adversarial_check_fired" not in WIRED_TRIGGERS
-    assert WIRED_TRIGGERS < TRIGGERS
+def test_all_four_triggers_are_wired():
+    """Trigger 3's polarity is settled (stricter conjunct → fires when FALSE), so the
+    unwired-by-design carve-out is gone."""
+    assert WIRED_TRIGGERS == TRIGGERS
 
     import bathos
 
     src = Path(bathos.__file__).parent
-    call_sites = [
-        p
+    call_sites = {
+        p.name
         for p in src.rglob("*.py")
         if "adversarial_check_fired" in p.read_text() and p.name != "obligations.py"
-    ]
-    assert call_sites == [], (
-        f"trigger 3 gained a call site without a decided polarity: {call_sites}"
-    )
+    }
+    assert "runner.py" in call_sites
 
 
 # ── conclude-time gate (triggers 2 and 4, and the D1 downgrade) ─────────────

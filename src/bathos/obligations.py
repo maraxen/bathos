@@ -10,14 +10,12 @@ it. Per decision **D1** the design never blocks: an obligation downgrades a camp
 conclude and warns at submit. Nothing to bypass means the bypass metrics stay honest, and the
 fragile script-stem key never sits behind anything binding.
 
-**What is wired, and what is not — read this before relying on it.** Three of the four §5
-triggers have live call sites, each behind its **own** opt-in environment flag and all four
-flags default OFF (see `WIRED_TRIGGERS` and `_FLAG_PREFIX`):
+**What is wired, and what is not — read this before relying on it.** All four §5 triggers
+have live call sites, each behind its **own** opt-in environment flag, and every flag
+defaults OFF (see `WIRED_TRIGGERS` and `_FLAG_PREFIX`):
 
-- `outcome_failed` — `runner.run_script`, at run end.
+- `outcome_failed` and `adversarial_check_fired` — `runner.run_script`, at run end.
 - `campaign_confounded` and `citation_contradicted` — `campaigns.conclude_campaign`.
-- `adversarial_check_fired` — **NOT WIRED.** The event does not exist: the check's condition
-  is never evaluated anywhere, only its presence recorded. See `WIRED_TRIGGERS`.
 
 With every flag unset — the default — nothing calls `open_obligation` automatically, so the
 ledger stays empty and no verdict or exit code changes anywhere. That is the same posture the
@@ -51,24 +49,20 @@ TRIGGERS = frozenset(
     {
         "outcome_failed",  # (1) a run's computed outcome is non-pass
         "campaign_confounded",  # (2) a campaign concluded confounded / was downgraded
-        "adversarial_check_fired",  # (3) NOT WIRED — see below
+        "adversarial_check_fired",  # (3) the selected branch's stricter bar evaluated FALSE
         "citation_contradicted",  # (4) a [review] 'supports' entry the outcome contradicted
     }
 )
 
-#: Triggers with a live call site. Trigger 3 is absent **because the event it names does not
-#: exist yet**: `adversarial_check` is parsed into `OutcomeSpec.adversarial_check` and its
-#: *presence* is recorded as `Run.adversarial_check_status` ∈ {present, missing, n/a}, but the
-#: condition is never evaluated anywhere — grep `adversarial_check` and every hit is parsing,
-#: linting, or presence-recording. There is no "fired" state to key on.
+#: Triggers with a live call site — now all four.
 #:
-#: Wiring it needs outcome-condition evaluation for the check *plus* a decided polarity: an
-#: `adversarial_check` on `[outcomes.pass]` presumably "fires" when it evaluates FALSE while
-#: its branch was selected (the pass is not to be believed), but the inverse reading is just
-#: as available from the code, and guessing wrong opens obligations on exactly the healthy
-#: runs. That is a semantics decision, not an implementation detail, so the trigger stays
-#: unwired rather than shipping a plausible guess.
-WIRED_TRIGGERS = frozenset({"outcome_failed", "campaign_confounded", "citation_contradicted"})
+#: Trigger 3's **polarity is settled**: `adversarial_check` is a *stricter conjunct* the
+#: outcome must also clear, so it FIRES when it evaluates FALSE. See
+#: `sidecar.evaluate_adversarial_check` for the evidence (the D3 ADR's definition, the spec's
+#: strengthened-conjunct example, and the distinct-column lint heuristic all agree). The
+#: inverse reading — a refuter that fires when true — was rejected: it cannot account for the
+#: spec's example, which restates the pass condition and adds requirements to it.
+WIRED_TRIGGERS = frozenset(TRIGGERS)
 
 ENTITY_KINDS = frozenset({"run", "campaign"})
 
