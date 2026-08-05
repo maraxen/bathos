@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -66,6 +67,14 @@ ABANDONED_STATUSES = frozenset({"cancelled", "archived"})
 TERMINAL_STATUSES = DONE_STATUSES | ABANDONED_STATUSES
 
 TRACKER_TABLES = ("backlog", "tech_debt")
+
+# Connect + statement + subprocess cap for tracker lookups.
+#
+# Justified rather than arbitrary: the query is a bounded `id IN (...)` over two tables with a
+# handful of ids, and returns in milliseconds against the real tracker. 30s leaves roughly three
+# orders of magnitude of headroom, so nothing but a genuinely wedged server trips it — which is
+# exactly the case we want converted into a fail-closed error instead of an indefinite hang.
+DB_TIMEOUT_SECONDS = 30
 
 # Matches a bare "#NNN" reference. Deliberately 2-4 digits: shorter matches sweep up things
 # like "#1" in prose, longer ones do not occur in either tracker's id space.
@@ -188,12 +197,19 @@ def read_workspace_id(praxia_dir: Path) -> str:
 # ── tracker resolution ───────────────────────────────────────────────────────
 
 
-def fetch_tracker_rows(db_url: str, ids: set[int]) -> list[TrackerRow]:
+def fetch_tracker_rows(
+    db_url: str, ids: set[int], timeout: int = DB_TIMEOUT_SECONDS
+) -> list[TrackerRow]:
     """Fetch candidate rows for `ids` from BOTH tracker tables, across ALL workspaces.
 
     Deliberately unscoped by workspace: rows belonging to another workspace are what make a
     bare "#NNN" ambiguous, and the caller needs to see them to report the hazard. Scoping the
     query would hide exactly the evidence we are looking for.
+
+    Bounded on both connect and execution. An unresponsive server is a real operating state
+    (this one needed a restart on 2026-08-05), and without a timeout the script would block
+    indefinitely rather than failing closed — which would defeat the whole point of refusing to
+    classify against a tracker it cannot read.
     """
     if not ids:
         return []
@@ -202,11 +218,24 @@ def fetch_tracker_rows(db_url: str, ids: set[int]) -> list[TrackerRow]:
         f"SELECT '{t}' AS src, id, workspace_id, status, title FROM {t} WHERE id IN ({id_list})"
         for t in TRACKER_TABLES
     )
-    proc = subprocess.run(
-        ["psql", db_url, "-t", "-A", "-F", "\t", "-c", sql],
-        capture_output=True,
-        text=True,
-    )
+    env = {
+        **os.environ,
+        "PGCONNECT_TIMEOUT": str(timeout),
+        # Server-side cap too: a client timeout alone leaves a slow query running on the server
+        # after we walk away.
+        "PGOPTIONS": f"-c statement_timeout={timeout * 1000}",
+    }
+    try:
+        proc = subprocess.run(
+            ["psql", db_url, "-t", "-A", "-F", "\t", "-v", "ON_ERROR_STOP=1", "-c", sql],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # Routed into the same fail-closed path as a connection error on purpose.
+        raise RuntimeError(f"psql timed out after {timeout}s — server may be unresponsive") from exc
     if proc.returncode != 0:
         raise RuntimeError(f"psql failed: {proc.stderr.strip()}")
 
@@ -480,6 +509,15 @@ def main(argv: list[str] | None = None) -> int:
             "never a merge decision."
         ),
     )
+    ap.add_argument(
+        "--db-timeout",
+        type=int,
+        default=DB_TIMEOUT_SECONDS,
+        help=(
+            f"seconds to allow for tracker connect + query (default: {DB_TIMEOUT_SECONDS}). "
+            "Exceeding it fails closed rather than hanging."
+        ),
+    )
     ap.add_argument("--json-out", type=Path, help="write the full classification as JSON")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
@@ -513,7 +551,7 @@ def main(argv: list[str] | None = None) -> int:
         rows = load_tracker_json(args.tracker_json)
     else:
         try:
-            rows = fetch_tracker_rows(args.db_url, all_ids)
+            rows = fetch_tracker_rows(args.db_url, all_ids, timeout=args.db_timeout)
         except (RuntimeError, FileNotFoundError) as exc:
             # Fail closed: an unreachable tracker must never look like "resolves to nothing",
             # which would read as droppable. Same rule the automatic rollout needs (debt #1179).
