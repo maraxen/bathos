@@ -131,9 +131,24 @@ wrong verb.
    otherwise record the existing one. The `20260729` handoff already did this informally
    (`recommended_phase: tracked in debt #1077`), so the convention exists and needs only to be
    made explicit and machine-readable.
-2. **At session start:** resolve every carried-forward reference and drop entries whose row is
-   `completed`/`cancelled`/`archived`/`resolved`. This is the step that does not exist today
-   and is the direct cause of the pile.
+2. **At session start:** resolve every carried-forward reference and **report** entries whose
+   row is `completed`/`cancelled`/`archived`/`resolved`. This is the step that does not exist
+   today and is the direct cause of the pile.
+
+   **Advisory, not automatic** — decided 2026-08-05. It reports proposed drops; a human
+   decides. The staged path to automatic dropping is tracked as **debt #1179**, gated on
+   measured agreement rather than elapsed time.
+
+   The reason is asymmetric failure modes. A false *keep* is benign — a stale entry survives
+   one more session, which is exactly today's status quo. A false *drop* silently deletes live
+   work from the only record carrying its rationale, and the handoff is what the next session
+   trusts. The `#142`/`#143` hazard makes that concrete: a naive resolver mis-resolves with
+   full confidence. So the gate is tuned against false-drop, not overall accuracy.
+
+   This is also the pattern every gate in this repo already follows — opening is observation,
+   downgrading is enforcement, and enforcement turns on behind its own flag once real data
+   exists (`review_coverage_enforce`, the four obligation triggers, the `[obligations]` /
+   `[claim]` config precedent).
 
 ### Piece B — drain the existing pile
 
@@ -152,13 +167,19 @@ wrong verb.
 4. **Semantic dedupe** across restatements.
 5. **Promote survivors** to `tech_debt`, applying the `conditional` convention above.
 
+## Sequencing note: Piece B is Piece A's test fixture
+
+Do **B before A's stage 2**. Piece B's one-time sweep classifies all 42 existing deferred
+entries by hand — and that classification *is* the labelled ground-truth set for validating
+automatic reconciliation. Run B first and the shadow-mode comparison in debt #1179 gets a real
+test corpus for free; skip it and stage 2 has nothing to measure agreement against.
+
+This is the cheapest evidence available for the rollout, and it is a by-product of work already
+scoped.
+
 ## Open questions
 
-1. **Should Piece A's start-of-session reconciliation be automatic or advisory?** Automatic
-   dropping is what makes the pile self-limiting, but it silently edits a handoff — and a
-   wrongly-resolved id (see the `#142`/`#143` hazard) would delete live work from the record.
-   Advisory-first is the safer default and matches how every other gate in this repo shipped.
-2. **Do the other 27 non-id-bearing entries deserve retroactive ids?** Cheap for the ~6 already
+1. **Do the other 27 non-id-bearing entries deserve retroactive ids?** Cheap for the ~6 already
    shipped (just close them), less obvious for genuinely live work.
 
 ## Non-goals
