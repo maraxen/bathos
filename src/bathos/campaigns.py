@@ -461,6 +461,50 @@ def conclude_campaign(
                     "(exploration mode, no downgrade)"
                 )
 
+        # OBLIGATION TRIGGER 4 (§5.4): a [review] entry that vouched for a hypothesis the
+        # run's own outcome disfavours. The highest-value trigger and the safest to enable --
+        # it can only fire where a [review] entry already exists, so it cannot reach anything
+        # authored before build-order step 2. Opt-in via BTH_OBLIGATION_CITATION_CONTRADICTED.
+        #
+        # Evaluated here rather than at run end because only conclude holds both the catalog
+        # and the claim, which is where the discriminability map lives (decision D1).
+        from bathos.obligations import maybe_open, trigger_enabled
+
+        if trigger_enabled("citation_contradicted"):
+            try:
+                from bathos.claim import contradicted_citations
+
+                cc = contradicted_citations(db, full_id, claim, workspace_root=workspace_root)
+                # One obligation per run, not per citation: open_obligation is idempotent on
+                # (entity, trigger), so several contradicted refs on one run collapse into a
+                # single obligation whose detail names them all.
+                by_run: dict[str, list[str]] = {}
+                for rec in cc["contradicted"]:
+                    by_run.setdefault(rec["run_id"], []).append(f"{rec['ref']}→{rec['bears_on']}")
+                for rid, refs in by_run.items():
+                    maybe_open(
+                        workspace_root,
+                        "run",
+                        rid,
+                        "citation_contradicted",
+                        detail="contradicted: " + ", ".join(refs),
+                    )
+                if cc["contradicted"]:
+                    print(
+                        f"Citation contradiction: {len(cc['contradicted'])} 'supports' "
+                        f"citation(s) contradicted across {len(by_run)} run(s)"
+                    )
+                # §8b: a trigger that COULD NOT fire must not read as a clean bill of health.
+                if cc["indeterminate"]:
+                    print(
+                        f"WARNING: Citation contradiction: {len(cc['indeterminate'])} of "
+                        f"{cc['supports_seen']} 'supports' citation(s) were indeterminate — no "
+                        "discriminability row covers the observed label, so nothing can be "
+                        "concluded either way"
+                    )
+            except Exception as e:  # never let a trigger break conclude
+                print(f"WARNING: citation contradiction check failed: {e}")
+
         # AC-12: emit claim-coverage JSON sidecar after union gate
         verdict_str = "covered" if not uncovered else "confounded"
         bypass_reason = "force_verdict flag" if force_verdict else None
@@ -473,6 +517,77 @@ def conclude_campaign(
             claim,
             bypass_reason=bypass_reason,
         )
+
+    # ── OBLIGATION GATE (D1: conclude is the only binding site) ──────────────────────────
+    # Runs outside a campaign never reach here, which is the accepted cost §5 names: an
+    # exploratory campaign that is never concluded never pays, and Signal 11 is what makes
+    # that visible rather than silent.
+    from bathos.obligations import (
+        ENFORCE_FLAG,
+        enforcement_enabled,
+        list_obligations_for_scope,
+        maybe_open,
+    )
+
+    # The gate must never be able to break a conclude: a campaign whose verdict is already
+    # decided cannot be lost to a ledger read. Resolution is inside the guard because it is
+    # the only step here that touches config and git.
+    try:
+        if workspace_root is None:
+            workspace_root = resolve_workspace(Path.cwd()).fs_root
+        member_ids = [
+            r[0]
+            for r in db.execute(
+                "SELECT run_id FROM campaign_runs WHERE campaign_id = ?", [full_id]
+            ).fetchall()
+        ]
+        open_obs = list_obligations_for_scope(workspace_root, {full_id, *member_ids})
+    except Exception as e:
+        print(f"WARNING: could not read the obligation ledger: {e}")
+        open_obs = []
+
+    if open_obs:
+        for ob in open_obs:
+            print(
+                f"Open obligation: {ob.obligation_id} ({ob.trigger}, "
+                f"{ob.age_days():.1f}d) — {ob.detail or 'no detail'}"
+            )
+        # Same split as the Review Coverage Gate: the check always runs and always reports;
+        # only the verdict change is opt-in. Enforcing by default would let an obligation
+        # opened by a newly-enabled trigger retroactively downgrade an unrelated campaign.
+        if enforcement_enabled():
+            if campaign_mode in ("confirmation", "sequential"):
+                print(
+                    f"Obligation gate: {len(open_obs)} open obligation(s) — "
+                    "verdict downgraded to 'confounded'"
+                )
+                outcome_label = "confounded"
+            elif campaign_mode == "exploration":
+                print(
+                    f"WARNING: Obligation gate: {len(open_obs)} open obligation(s) "
+                    "(exploration mode, no downgrade)"
+                )
+        else:
+            print(
+                f"WARNING: Obligation gate: {len(open_obs)} open obligation(s) unexplained "
+                f"(advisory until {ENFORCE_FLAG}=1)"
+            )
+
+    # OBLIGATION TRIGGER 2 (§5.2): the campaign concluded 'confounded' — whether the
+    # researcher labelled it so directly, or one of the gates above downgraded it. Opened
+    # AFTER the gate so a campaign cannot downgrade itself on an obligation this same
+    # conclude created.
+    if outcome_label == "confounded" and workspace_root is not None:
+        try:
+            maybe_open(
+                workspace_root,
+                "campaign",
+                full_id,
+                "campaign_confounded",
+                detail=f"concluded confounded: {conclusion[:200]}" if conclusion else "",
+            )
+        except Exception as e:
+            print(f"WARNING: could not open a campaign_confounded obligation: {e}")
 
     # Final update
     concluded_at = datetime.now(UTC).isoformat()

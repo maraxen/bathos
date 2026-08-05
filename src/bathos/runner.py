@@ -728,6 +728,27 @@ def run_script(
         ),
     )
 
+    # Obligation trigger 1 (§5.1): a computed outcome outside the pass direction opens an
+    # obligation to explain it. Opt-in via BTH_OBLIGATION_OUTCOME_FAILED; a no-op otherwise,
+    # which is the default. Opening is deliberately never fatal — a ledger write failure must
+    # not lose a run that already completed and is about to be persisted.
+    if sidecar is not None:
+        try:
+            from bathos.obligations import maybe_open
+            from bathos.sidecar import is_failure_outcome
+            from bathos.workspace import resolve_workspace
+
+            if is_failure_outcome(sidecar, outcome):
+                maybe_open(
+                    resolve_workspace(cwd).fs_root,
+                    "run",
+                    run.id,
+                    "outcome_failed",
+                    detail=f"outcome={outcome!r}",
+                )
+        except Exception as e:
+            event("run.error", phase="obligation", exc_type=type(e).__name__, exc_msg=str(e))
+
     # Record parquet write with telemetry
     parquet_start = time.monotonic()
     try:

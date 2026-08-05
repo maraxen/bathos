@@ -470,6 +470,44 @@ def single_row_projection(row: dict) -> str:
     return ", ".join(_sql_literal(v, k) for k, v in row.items())
 
 
+def derive_pass_labels(sidecar: Sidecar) -> set[str]:
+    """Outcome labels in the *pass* direction.
+
+    Outcome labels have no canonical set — unlike `stage_name`, which is constrained to
+    CANONICAL_STAGES, the author names each `[outcomes.<label>]` branch freely — so this is
+    derived from the sidecar's own declarations rather than matched against a fixed vocabulary.
+
+    Excluded: residual catch-all branches, and the three bookkeeping labels `marginal` /
+    `error` / `unknown`, none of which is a declared scientific outcome.
+    """
+    return {
+        label
+        for label, spec in sidecar.outcomes.items()
+        if not spec.is_residual and label not in ("marginal", "error", "unknown")
+    }
+
+
+def is_failure_outcome(sidecar: Sidecar | None, outcome_label: str) -> bool:
+    """Did this run land outside the pass direction? (obligation trigger 1, spec §5.1)
+
+    **Not** a literal match on ``"fail"``: `unstable`, `rejected` and `no-go` are all legal
+    names for the same thing and a string match would silently miss every one of them. The
+    spec defines the trigger against the same `pass_labels` set `compute_evalue` derives,
+    which is why that derivation now lives in :func:`derive_pass_labels`.
+
+    ``""`` and ``"unknown"`` are **not** failures — they mean no outcome was evaluated at all,
+    which is a different thing from an evaluated non-pass, and an obligation to explain a
+    result that was never computed would be noise.
+
+    `marginal`, `error`, and residual catch-all branches **are** failures here: none of them is
+    a pass. That is the spec's rule applied literally, and it is the widest of the four
+    triggers — see the calibration note in `obligations.TRIGGERS`.
+    """
+    if sidecar is None or outcome_label in ("", "unknown"):
+        return False
+    return outcome_label not in derive_pass_labels(sidecar)
+
+
 def compute_evalue(
     sidecar: Sidecar,
     outcome_label: str,
@@ -499,11 +537,7 @@ def compute_evalue(
 
     # Determine pass-direction labels if not provided
     if pass_labels is None:
-        pass_labels = {
-            label
-            for label, spec in sidecar.outcomes.items()
-            if not spec.is_residual and label not in ("marginal", "error", "unknown")
-        }
+        pass_labels = derive_pass_labels(sidecar)
 
     if outcome_label in pass_labels:
         evalue = alt / null

@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Post-mortem obligation triggers, each behind its own opt-in flag** — three of the four §5
+  triggers now have live call sites: `outcome_failed` (at run end, in `runner.run_script`),
+  and `campaign_confounded` + `citation_contradicted` (at `bth campaign conclude`). Every flag
+  defaults **off**, so with none set nothing writes to the ledger and no verdict changes:
+  - `BTH_OBLIGATION_OUTCOME_FAILED`, `BTH_OBLIGATION_CAMPAIGN_CONFOUNDED`,
+    `BTH_OBLIGATION_CITATION_CONTRADICTED` — independently toggleable, because the three
+    differ sharply in blast radius. `citation_contradicted` can only fire where a `[review]`
+    entry already exists; `outcome_failed` fires on any non-pass run.
+  - `BTH_OBLIGATION_ENFORCE` — separate from the opening flags. Off (default), `conclude`
+    lists open obligations for the campaign and its member runs and warns; on, it downgrades
+    the verdict to `confounded` for confirmation/sequential campaigns. Mirrors
+    `BTH_REVIEW_COVERAGE_ENFORCE`: opening is observation, downgrading is enforcement.
+  - `bth submit` warns about open obligations and never blocks (D1), unflagged but inert
+    while the ledger is empty.
+  - `sidecar.derive_pass_labels()` / `is_failure_outcome()` — trigger 1's predicate, defined
+    against the same pass-label set `compute_evalue` derives rather than a literal `"fail"`
+    match, so freely-named labels like `unstable` or `no-go` are caught.
+  - **`adversarial_check_fired` (trigger 3) is NOT wired**: the check's condition is never
+    evaluated anywhere, only its presence recorded in `Run.adversarial_check_status`, so
+    there is no "fired" state to key on. See `obligations.WIRED_TRIGGERS`.
+- **Campaign-scoped post-mortems** — `bth postmortem show|scaffold --campaign-id` and the
+  `postmortem_get` / `postmortem_scaffold` MCP mirrors. The `campaign_id` field was previously
+  write-only: both retrieval surfaces matched on `run_id`, and scaffolding was hard-keyed to a
+  Run row. Campaign templates land in `.bth/postmortems/` with the campaign's open obligations
+  listed as a commented checklist (never pre-filled into `discharges`).
+
 - **Instrument-sensitivity discipline (debt #1071)** — schema v13 (`differential_status`,
   `differential_off_value`, `differential_on_value`, `differential_effect`,
   `dependency_lock_sha256`):

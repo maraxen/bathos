@@ -1685,6 +1685,28 @@ def submit(
             # Log but don't fail on gate check exceptions
             typer.echo(f"Warning: parity prerequisite check failed: {e}", err=True)
 
+    # 3c. Open-obligation warning (D1: warns only, never blocks, at EVERY stage).
+    # Deliberately unflagged and unconditional. Blocking here was rejected for two independent
+    # reasons -- it would put the fragile script-stem key behind a hard decision, and it would
+    # manufacture bypass pressure against metrics bathos itself relies on (Signals 2, 3, 10).
+    # It is inert by default anyway: with no obligation trigger enabled the ledger is empty,
+    # so this prints nothing.
+    try:
+        from bathos.obligations import list_obligations
+        from bathos.workspace import resolve_workspace
+
+        open_obs = list_obligations(resolve_workspace().fs_root, open_only=True)
+        if open_obs:
+            typer.echo(
+                f"WARNING: {len(open_obs)} open obligation(s) awaiting a post-mortem "
+                f"(oldest {max(o.age_days() for o in open_obs):.1f}d). Submitting anyway.",
+                err=True,
+            )
+            for ob in open_obs[-3:]:
+                typer.echo(f"  - {ob.obligation_id} ({ob.trigger})", err=True)
+    except Exception as e:
+        typer.echo(f"Warning: obligation check failed: {e}", err=True)
+
     # 4. Resolve cluster config
     try:
         cluster = resolve_cluster_config(
