@@ -51,6 +51,7 @@ dev = [
     "pytest>=8",
     "pytest-tmp-files>=0.0.2",
     "pytest-json-report>=1.5",
+    "pytest-cov>=5",
     "ruff>=0.6",
 ]
 [dependency-groups]
@@ -58,6 +59,7 @@ dev = [
     "pytest>=8",
     "pytest-tmp-files>=0.0.2",
     "pytest-json-report>=1.5",
+    "pytest-cov>=5",
     "ruff>=0.6",
 ]
 
