@@ -36,7 +36,10 @@ visibility — the lint step short-circuits the job, so tests never run until it
 | 4080 | ~160 ruff errors (debt #1077) | extended | **done** — `13442f5` (agy, audited — D5/D6) |
 
 **Full suite on titanix after all three: 0 failures** (was 4 at the start of the night).
-All three CI blockers are now closed; CI running on `13442f5` to confirm green end-to-end.
+
+**CI is still not green, and the three items above were not the whole story.** Clearing lint let
+the `pyright` step execute for the first time ever, and it is a fourth blocker nobody could have
+seen — see **D7**. Backlog **#4085**, and it needs your decision, not more overnight work.
 
 Sequencing deviates from the L5 heuristic's "prefer standard over extended" only in that #4080
 is P1: taking the two `standard` items first banks verifiable wins before the long mechanical
@@ -193,6 +196,50 @@ exactly.
 wholesale. The suppressions are the part most worth a skim — 106 ARG noqas is a lot of "this
 parameter is intentionally unused", and while each carries a reason, a human should spot-check a
 sample rather than take that on faith.
+
+### D7 — a fourth blocker: pyright. Hang fixed; the 2624 errors are YOUR call, not mine
+
+**I told you earlier tonight that all three CI blockers were closed and CI should go green. That
+was wrong.** It was true of the three tracked items, but clearing lint made a previously-invisible
+fourth blocker execute for the first time.
+
+**What happened:** the Lint step had always failed first and short-circuited the job, so
+`Type check with pyright` had literally never run on this repo. Once lint passed, CI sat on that
+step for 30+ minutes without completing. A local run behaved identically.
+
+**Cause — fixed in `e61624b`:** `[tool.pyright]` set `typeCheckingMode` and `exclude` but never
+set `include`. `exclude` alone does not bound analysis; without `include`, pyright walks the whole
+tree from cwd — so it was type-checking `.venv/` (duckdb, pyarrow, fastmcp) and the nested
+worktrees under `.claude/`. Adding `include = ["src"]` makes it terminate.
+
+**Correction to my own diagnosis:** I first reported "pyright has no configuration at all", from a
+grep that only surfaced the dependency lines. There *is* a `[tool.pyright]` section; it was
+incomplete, not absent. I nearly committed a duplicate section and a `typeCheckingMode` change on
+that false premise — the TOML parser's duplicate-key error caught it. **I did not touch
+`typeCheckingMode`; strict was set deliberately and reversing it is not mine to do.**
+
+**What remains, and why I stopped:** scoped strict pyright reports **2624 errors on `src` alone**.
+
+| count | rule |
+| --- | --- |
+| 903 | reportUnknownVariableType |
+| 636 | reportUnknownMemberType |
+| 496 | reportUnknownArgumentType |
+| 227 | reportUnknownParameterType |
+| 196 | reportMissingTypeArgument |
+| ~166 | everything else, incl. 24 reportArgumentType, 7 possibly-unbound, 6 optional-member-access |
+
+**2458 of 2624 (94%) are `reportUnknown*` / `reportMissingTypeArgument`** — they fire because
+duckdb, pyarrow and fastmcp ship little or no type information, so every value flowing out of them
+is untyped. No amount of local code quality removes them. Only ~166 describe real problems.
+
+This is a **typing-policy decision** — relax to `standard`, ignore the `reportUnknown*` family,
+write stubs, or drop pyright from CI — and each is a reversal of a deliberate earlier choice.
+Picking one silently at 4am is exactly the kind of call L5 should not make. Filed as backlog
+**#4085** with the four options written out.
+
+**Net:** lint ✓, full test suite ✓ (0 failures), pyright ✗ by policy. PR #38 is one decision away
+from green, and that decision is yours.
 
 ## Notes worth keeping
 
