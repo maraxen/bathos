@@ -36,7 +36,9 @@ class ValidationResult:
     errors: list[ValidationError] = field(default_factory=list)
 
 
-def validate_popper_block(sidecar: Sidecar, sidecar_path: Path | None = None) -> list[ValidationError]:
+def validate_popper_block(
+    sidecar: Sidecar, sidecar_path: Path | None = None
+) -> list[ValidationError]:
     """Validate [popper] block fields per the spec (Section 2.3 of #792 spec).
 
     Returns a list of ValidationError (empty if valid).
@@ -49,10 +51,12 @@ def validate_popper_block(sidecar: Sidecar, sidecar_path: Path | None = None) ->
 
     # [popper] is only valid on experiment sidecars
     if sidecar.kind != SidecarKind.EXPERIMENT:
-        errors.append(ValidationError(
-            "popper",
-            "[popper] block is only valid in [experiment] sidecars",
-        ))
+        errors.append(
+            ValidationError(
+                "popper",
+                "[popper] block is only valid in [experiment] sidecars",
+            )
+        )
         return errors  # No point validating further
 
     null = sidecar.popper_null_pass_rate
@@ -61,60 +65,78 @@ def validate_popper_block(sidecar: Sidecar, sidecar_path: Path | None = None) ->
 
     # null_pass_rate range
     if null is None or not (0 < null < 1):
-        errors.append(ValidationError(
-            "popper.null_pass_rate",
-            f"null_pass_rate must be in (0, 1), got {null!r}",
-        ))
+        errors.append(
+            ValidationError(
+                "popper.null_pass_rate",
+                f"null_pass_rate must be in (0, 1), got {null!r}",
+            )
+        )
 
     # alt_pass_rate range
     if alt is None or not (0 < alt < 1):
-        errors.append(ValidationError(
-            "popper.alt_pass_rate",
-            f"alt_pass_rate must be in (0, 1), got {alt!r}",
-        ))
+        errors.append(
+            ValidationError(
+                "popper.alt_pass_rate",
+                f"alt_pass_rate must be in (0, 1), got {alt!r}",
+            )
+        )
 
     # null != alt (no test power if equal)
     if null is not None and alt is not None and null == alt:
-        errors.append(ValidationError(
-            "popper",
-            "null_pass_rate and alt_pass_rate are identical; no test power",
-        ))
+        errors.append(
+            ValidationError(
+                "popper",
+                "null_pass_rate and alt_pass_rate are identical; no test power",
+            )
+        )
 
     # stopping_threshold >= 1.0
     if threshold is None or threshold < 1.0:
-        errors.append(ValidationError(
-            "popper.stopping_threshold",
-            f"stopping_threshold must be >= 1.0, got {threshold!r}",
-        ))
+        errors.append(
+            ValidationError(
+                "popper.stopping_threshold",
+                f"stopping_threshold must be >= 1.0, got {threshold!r}",
+            )
+        )
     elif threshold < 10.0:
-        errors.append(ValidationError(
-            "popper.stopping_threshold",
-            "WARNING: stopping_threshold < 10.0 — consider a stricter threshold (alpha < 0.10)",
-        ))
+        errors.append(
+            ValidationError(
+                "popper.stopping_threshold",
+                "WARNING: stopping_threshold < 10.0 — consider a stricter threshold (alpha < 0.10)",
+            )
+        )
 
     # Validate [popper.weights] if present
     declared_labels = set(sidecar.outcomes.keys())
     for key, val in sidecar.popper_weights.items():
         if key not in declared_labels and key not in ("error", "unknown", "marginal"):
-            errors.append(ValidationError(
-                f"popper.weights.{key}",
-                f"Unknown outcome label {key!r} in [popper.weights] — not declared in [outcomes]",
-            ))
+            errors.append(
+                ValidationError(
+                    f"popper.weights.{key}",
+                    f"Unknown outcome label {key!r} in [popper.weights] — not declared in [outcomes]",
+                )
+            )
         if val <= 0:
-            errors.append(ValidationError(
-                f"popper.weights.{key}",
-                f"Weight for {key!r} must be > 0, got {val!r}",
-            ))
+            errors.append(
+                ValidationError(
+                    f"popper.weights.{key}",
+                    f"Weight for {key!r} must be > 0, got {val!r}",
+                )
+            )
         if key == "error" and val != 1.0:
-            errors.append(ValidationError(
-                "popper.weights.error",
-                f"Weight for 'error' must be exactly 1.0 (non-overridable), got {val!r}",
-            ))
+            errors.append(
+                ValidationError(
+                    "popper.weights.error",
+                    f"Weight for 'error' must be exactly 1.0 (non-overridable), got {val!r}",
+                )
+            )
 
     return errors
 
 
-def validate_reproduction_block(sidecar: Sidecar, sidecar_path: Path | None = None) -> list[ValidationError]:
+def validate_reproduction_block(
+    sidecar: Sidecar, sidecar_path: Path | None = None
+) -> list[ValidationError]:
     """Validate [reproduction] block fields.
 
     Returns a list of ValidationError (empty if valid or no block present).
@@ -131,28 +153,44 @@ def validate_reproduction_block(sidecar: Sidecar, sidecar_path: Path | None = No
     # tolerance_pct: if set, must be 0.0 <= v <= 100.0
     if repro.tolerance_pct is not None:
         if not (0.0 <= repro.tolerance_pct <= 100.0):
-            errors.append(ValidationError(
-                "reproduction.tolerance_pct",
-                f"tolerance_pct must be in [0.0, 100.0], got {repro.tolerance_pct!r}",
-            ))
+            errors.append(
+                ValidationError(
+                    "reproduction.tolerance_pct",
+                    f"tolerance_pct must be in [0.0, 100.0], got {repro.tolerance_pct!r}",
+                )
+            )
             if sidecar_path:
-                event("sidecar.validate_error", path=str(sidecar_path), field="reproduction.tolerance_pct", reason=f"tolerance_pct out of range: {repro.tolerance_pct}")
+                event(
+                    "sidecar.validate_error",
+                    path=str(sidecar_path),
+                    field="reproduction.tolerance_pct",
+                    reason=f"tolerance_pct out of range: {repro.tolerance_pct}",
+                )
 
     # reproduces_run: if non-empty, must match UUID regex r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
     if repro.reproduces_run:
-        uuid_pattern = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        uuid_pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
         if not re.match(uuid_pattern, repro.reproduces_run):
-            errors.append(ValidationError(
-                "reproduction.reproduces_run",
-                f"reproduces_run must be a valid UUID, got {repro.reproduces_run!r}",
-            ))
+            errors.append(
+                ValidationError(
+                    "reproduction.reproduces_run",
+                    f"reproduces_run must be a valid UUID, got {repro.reproduces_run!r}",
+                )
+            )
             if sidecar_path:
-                event("sidecar.validate_error", path=str(sidecar_path), field="reproduction.reproduces_run", reason=f"Invalid UUID format: {repro.reproduces_run}")
+                event(
+                    "sidecar.validate_error",
+                    path=str(sidecar_path),
+                    field="reproduction.reproduces_run",
+                    reason=f"Invalid UUID format: {repro.reproduces_run}",
+                )
 
     return errors
 
 
-def validate_controls_block(sidecar: Sidecar, sidecar_path: Path | None = None) -> list[ValidationError]:
+def validate_controls_block(
+    sidecar: Sidecar, sidecar_path: Path | None = None
+) -> list[ValidationError]:
     """Validate [controls] block fields.
 
     Checks that all labels in positive_outcome and negative_outcome exist in [outcomes].
@@ -169,27 +207,43 @@ def validate_controls_block(sidecar: Sidecar, sidecar_path: Path | None = None) 
     # Check positive_outcome labels exist in outcomes
     for label in controls.positive_outcome:
         if label not in outcome_keys:
-            errors.append(ValidationError(
-                "CONTROLS_LABEL_NOT_FOUND",
-                f"Label {label!r} not declared in [outcomes]",
-            ))
+            errors.append(
+                ValidationError(
+                    "CONTROLS_LABEL_NOT_FOUND",
+                    f"Label {label!r} not declared in [outcomes]",
+                )
+            )
             if sidecar_path:
-                event("sidecar.validate_error", path=str(sidecar_path), field="CONTROLS_LABEL_NOT_FOUND", reason=f"Label {label!r} not found in outcomes")
+                event(
+                    "sidecar.validate_error",
+                    path=str(sidecar_path),
+                    field="CONTROLS_LABEL_NOT_FOUND",
+                    reason=f"Label {label!r} not found in outcomes",
+                )
 
     # Check negative_outcome labels exist in outcomes
     for label in controls.negative_outcome:
         if label not in outcome_keys:
-            errors.append(ValidationError(
-                "CONTROLS_LABEL_NOT_FOUND",
-                f"Label {label!r} not declared in [outcomes]",
-            ))
+            errors.append(
+                ValidationError(
+                    "CONTROLS_LABEL_NOT_FOUND",
+                    f"Label {label!r} not declared in [outcomes]",
+                )
+            )
             if sidecar_path:
-                event("sidecar.validate_error", path=str(sidecar_path), field="CONTROLS_LABEL_NOT_FOUND", reason=f"Label {label!r} not found in outcomes")
+                event(
+                    "sidecar.validate_error",
+                    path=str(sidecar_path),
+                    field="CONTROLS_LABEL_NOT_FOUND",
+                    reason=f"Label {label!r} not found in outcomes",
+                )
 
     return errors
 
 
-def validate_differential_block(sidecar: Sidecar, sidecar_path: Path | None = None) -> list[ValidationError]:
+def validate_differential_block(
+    sidecar: Sidecar, sidecar_path: Path | None = None
+) -> list[ValidationError]:
     """Validate [differential] block fields (debt #1071).
 
     Returns a list of ValidationError (empty if valid or no block present).
@@ -202,66 +256,117 @@ def validate_differential_block(sidecar: Sidecar, sidecar_path: Path | None = No
     diff = sidecar.differential
 
     if not diff.knob:
-        errors.append(ValidationError(
-            "differential.knob",
-            "knob must be non-empty",
-        ))
+        errors.append(
+            ValidationError(
+                "differential.knob",
+                "knob must be non-empty",
+            )
+        )
         if sidecar_path:
-            event("sidecar.validate_error", path=str(sidecar_path), field="differential.knob", reason="knob is empty")
+            event(
+                "sidecar.validate_error",
+                path=str(sidecar_path),
+                field="differential.knob",
+                reason="knob is empty",
+            )
 
     if diff.off == diff.on:
-        errors.append(ValidationError(
-            "differential",
-            f"off and on must differ, both are {diff.off!r} — no invariant to check",
-        ))
+        errors.append(
+            ValidationError(
+                "differential",
+                f"off and on must differ, both are {diff.off!r} — no invariant to check",
+            )
+        )
         if sidecar_path:
-            event("sidecar.validate_error", path=str(sidecar_path), field="differential", reason=f"off == on == {diff.off!r}")
+            event(
+                "sidecar.validate_error",
+                path=str(sidecar_path),
+                field="differential",
+                reason=f"off == on == {diff.off!r}",
+            )
 
     if diff.expect not in ("differs", "identical"):
-        errors.append(ValidationError(
-            "differential.expect",
-            f"expect must be 'differs' or 'identical', got {diff.expect!r}",
-        ))
+        errors.append(
+            ValidationError(
+                "differential.expect",
+                f"expect must be 'differs' or 'identical', got {diff.expect!r}",
+            )
+        )
         if sidecar_path:
-            event("sidecar.validate_error", path=str(sidecar_path), field="differential.expect", reason=f"invalid expect {diff.expect!r}")
+            event(
+                "sidecar.validate_error",
+                path=str(sidecar_path),
+                field="differential.expect",
+                reason=f"invalid expect {diff.expect!r}",
+            )
 
     if diff.metric:
         if diff.metric not in sidecar.result_schema:
-            errors.append(ValidationError(
-                "differential.metric",
-                f"metric {diff.metric!r} not declared in [result_schema]",
-            ))
+            errors.append(
+                ValidationError(
+                    "differential.metric",
+                    f"metric {diff.metric!r} not declared in [result_schema]",
+                )
+            )
             if sidecar_path:
-                event("sidecar.validate_error", path=str(sidecar_path), field="differential.metric", reason=f"{diff.metric!r} not in result_schema")
+                event(
+                    "sidecar.validate_error",
+                    path=str(sidecar_path),
+                    field="differential.metric",
+                    reason=f"{diff.metric!r} not in result_schema",
+                )
         elif sidecar.result_schema.get(diff.metric) in ("int", "float") and diff.min_effect is None:
-            errors.append(ValidationError(
-                "differential.min_effect",
-                f"min_effect is required when metric {diff.metric!r} is numeric",
-            ))
+            errors.append(
+                ValidationError(
+                    "differential.min_effect",
+                    f"min_effect is required when metric {diff.metric!r} is numeric",
+                )
+            )
             if sidecar_path:
-                event("sidecar.validate_error", path=str(sidecar_path), field="differential.min_effect", reason="min_effect missing for numeric metric")
+                event(
+                    "sidecar.validate_error",
+                    path=str(sidecar_path),
+                    field="differential.min_effect",
+                    reason="min_effect missing for numeric metric",
+                )
         if diff.min_effect is not None and diff.min_effect < 0:
-            errors.append(ValidationError(
-                "differential.min_effect",
-                f"min_effect must be >= 0, got {diff.min_effect!r}",
-            ))
+            errors.append(
+                ValidationError(
+                    "differential.min_effect",
+                    f"min_effect must be >= 0, got {diff.min_effect!r}",
+                )
+            )
             if sidecar_path:
-                event("sidecar.validate_error", path=str(sidecar_path), field="differential.min_effect", reason=f"negative min_effect {diff.min_effect!r}")
+                event(
+                    "sidecar.validate_error",
+                    path=str(sidecar_path),
+                    field="differential.min_effect",
+                    reason=f"negative min_effect {diff.min_effect!r}",
+                )
     elif diff.min_effect is not None:
         # Whole-dict-diff mode: an effect-size threshold isn't well-defined over an
         # arbitrary dict, so requiring min_effect without a metric is a validation error
         # rather than a silently-ignored field.
-        errors.append(ValidationError(
-            "differential.min_effect",
-            "min_effect requires metric to be set (whole-dict comparison has no effect size)",
-        ))
+        errors.append(
+            ValidationError(
+                "differential.min_effect",
+                "min_effect requires metric to be set (whole-dict comparison has no effect size)",
+            )
+        )
         if sidecar_path:
-            event("sidecar.validate_error", path=str(sidecar_path), field="differential.min_effect", reason="min_effect set without metric")
+            event(
+                "sidecar.validate_error",
+                path=str(sidecar_path),
+                field="differential.min_effect",
+                reason="min_effect set without metric",
+            )
 
     return errors
 
 
-def validate_claim_discriminability(sidecar: Sidecar, claim, sidecar_path: Path | None = None) -> list[ValidationError]:
+def validate_claim_discriminability(
+    sidecar: Sidecar, claim, sidecar_path: Path | None = None
+) -> list[ValidationError]:
     """Cross-check sidecar claim_discriminates/claim_isolates against a registered claim. (#3719)
 
     Only meaningful for EXPERIMENT-kind sidecars (the fields are experiment-only). `claim` is
@@ -289,7 +394,12 @@ def validate_claim_discriminability(sidecar: Sidecar, claim, sidecar_path: Path 
             )
             errors.append(err)
             if sidecar_path:
-                event("sidecar.validate_error", path=str(sidecar_path), field="claim_discriminates", reason=f"unknown hypothesis id {disc_id!r}")
+                event(
+                    "sidecar.validate_error",
+                    path=str(sidecar_path),
+                    field="claim_discriminates",
+                    reason=f"unknown hypothesis id {disc_id!r}",
+                )
 
     for iso_id in sidecar.claim_isolates:
         if iso_id not in valid_confound_ids:
@@ -300,12 +410,19 @@ def validate_claim_discriminability(sidecar: Sidecar, claim, sidecar_path: Path 
             )
             errors.append(err)
             if sidecar_path:
-                event("sidecar.validate_error", path=str(sidecar_path), field="claim_isolates", reason=f"unknown confound id {iso_id!r}")
+                event(
+                    "sidecar.validate_error",
+                    path=str(sidecar_path),
+                    field="claim_isolates",
+                    reason=f"unknown confound id {iso_id!r}",
+                )
 
     return errors
 
 
-def validate_sidecar(sidecar: Sidecar, sidecar_path: Path | None = None, claim=None) -> ValidationResult:
+def validate_sidecar(
+    sidecar: Sidecar, sidecar_path: Path | None = None, claim=None
+) -> ValidationResult:
     """Validate a parsed Sidecar for structural integrity and logical consistency.
 
     Checks:
@@ -322,13 +439,90 @@ def validate_sidecar(sidecar: Sidecar, sidecar_path: Path | None = None, claim=N
     """
     errors = []
 
+    # ── [review] block structural validation (build-order step 2) ────────────────
+    # Advisory tier: this validates SHAPE only. Whether the review is adequate is the Review
+    # Coverage Gate's job at conclude, not this function's.
+    if sidecar.review is not None:
+        from bathos.sidecar import IMPLEMENTATION_DISPOSITIONS, LITERATURE_DISPOSITIONS
+
+        for i, entry in enumerate(sidecar.review.literature):
+            where = f"review.literature[{i}]"
+            if not entry.ref:
+                errors.append(
+                    ValidationError(
+                        where, "literature entry needs a 'ref' (DOI, arXiv id, or run UUID)"
+                    )
+                )
+            if not entry.claim:
+                errors.append(
+                    ValidationError(
+                        where, "literature entry needs a 'claim' stating what the reference reports"
+                    )
+                )
+            # disposition is optional, but a WRONG one is an error: obligation trigger (4)
+            # keys on disposition == 'supports', so a typo would make the citation silently
+            # incapable of ever being contradicted.
+            if entry.disposition and entry.disposition not in LITERATURE_DISPOSITIONS:
+                errors.append(
+                    ValidationError(
+                        where,
+                        f"disposition {entry.disposition!r} is not one of {sorted(LITERATURE_DISPOSITIONS)}",
+                    )
+                )
+
+        for i, entry in enumerate(sidecar.review.implementation):
+            where = f"review.implementation[{i}]"
+            if not entry.source:
+                errors.append(
+                    ValidationError(where, "implementation entry needs a 'source' (path or URL)")
+                )
+            if not entry.what_was_checked:
+                errors.append(
+                    ValidationError(where, "implementation entry needs 'what_was_checked'")
+                )
+            if entry.disposition and entry.disposition not in IMPLEMENTATION_DISPOSITIONS:
+                errors.append(
+                    ValidationError(
+                        where,
+                        f"disposition {entry.disposition!r} is not one of {sorted(IMPLEMENTATION_DISPOSITIONS)}",
+                    )
+                )
+
+        # bears_on resolution — only when a claim is supplied. Per decision D2, bears_on is
+        # OPTIONAL until confirmatory: a sidecar authored before any claim exists must still
+        # validate. This mirrors how claim_discriminates is treated below; the gate at
+        # conclude is what requires coverage.
+        if claim is not None:
+            known = {
+                h.get("id", "") for h in getattr(claim, "hypotheses", []) if isinstance(h, dict)
+            }
+            known |= {
+                c.get("id", "") for c in getattr(claim, "confounds", []) if isinstance(c, dict)
+            }
+            known.discard("")
+            for kind, entries in (
+                ("literature", sidecar.review.literature),
+                ("implementation", sidecar.review.implementation),
+            ):
+                for i, entry in enumerate(entries):
+                    if entry.bears_on and entry.bears_on not in known:
+                        errors.append(
+                            ValidationError(
+                                f"review.{kind}[{i}]",
+                                f"bears_on {entry.bears_on!r} is not a hypothesis or confound id in the claim",
+                            )
+                        )
+
     # Must have outcomes
     if not sidecar.outcomes:
-        errors.append(
-            ValidationError("outcomes", "No [outcomes] section found")
-        )
+        errors.append(ValidationError("outcomes", "No [outcomes] section found"))
         if sidecar_path:
-            event("sidecar.validate_error", path=str(sidecar_path), field="outcomes", reason="No [outcomes] section found")
+            event(
+                "sidecar.validate_error",
+                path=str(sidecar_path),
+                field="outcomes",
+                reason="No [outcomes] section found",
+            )
         return ValidationResult(ok=False, errors=errors)
 
     # Each branch must have condition, decision, reasoning
@@ -341,21 +535,32 @@ def validate_sidecar(sidecar: Sidecar, sidecar_path: Path | None = None, claim=N
             )
             errors.append(err)
             if sidecar_path:
-                event("sidecar.validate_error", path=str(sidecar_path), field=f"outcomes.{label}", reason=f"{label!r} is reserved")
+                event(
+                    "sidecar.validate_error",
+                    path=str(sidecar_path),
+                    field=f"outcomes.{label}",
+                    reason=f"{label!r} is reserved",
+                )
         if not spec.condition:
-            err = ValidationError(
-                f"outcomes.{label}", "Missing 'condition' field"
-            )
+            err = ValidationError(f"outcomes.{label}", "Missing 'condition' field")
             errors.append(err)
             if sidecar_path:
-                event("sidecar.validate_error", path=str(sidecar_path), field=f"outcomes.{label}", reason="Missing 'condition' field")
+                event(
+                    "sidecar.validate_error",
+                    path=str(sidecar_path),
+                    field=f"outcomes.{label}",
+                    reason="Missing 'condition' field",
+                )
         if not spec.decision:
-            err = ValidationError(
-                f"outcomes.{label}", "Missing 'decision' field"
-            )
+            err = ValidationError(f"outcomes.{label}", "Missing 'decision' field")
             errors.append(err)
             if sidecar_path:
-                event("sidecar.validate_error", path=str(sidecar_path), field=f"outcomes.{label}", reason="Missing 'decision' field")
+                event(
+                    "sidecar.validate_error",
+                    path=str(sidecar_path),
+                    field=f"outcomes.{label}",
+                    reason="Missing 'decision' field",
+                )
         if not spec.reasoning:
             err = ValidationError(
                 f"outcomes.{label}",
@@ -363,7 +568,12 @@ def validate_sidecar(sidecar: Sidecar, sidecar_path: Path | None = None, claim=N
             )
             errors.append(err)
             if sidecar_path:
-                event("sidecar.validate_error", path=str(sidecar_path), field=f"outcomes.{label}", reason="Missing 'reasoning' field")
+                event(
+                    "sidecar.validate_error",
+                    path=str(sidecar_path),
+                    field=f"outcomes.{label}",
+                    reason="Missing 'reasoning' field",
+                )
 
         # DuckDB SQL must parse
         if spec.condition:
@@ -374,7 +584,9 @@ def validate_sidecar(sidecar: Sidecar, sidecar_path: Path | None = None, claim=N
                     cols = ", ".join(
                         f"{k} {_map_type_to_sql(v)}"
                         for k, v in sidecar.result_schema.items()
-                        if isinstance(v, str)  # skip nested tables (e.g. [result_schema.provenance])
+                        if isinstance(
+                            v, str
+                        )  # skip nested tables (e.g. [result_schema.provenance])
                     )
                     if cols:
                         con.execute(f"CREATE TEMP TABLE _dummy ({cols})")
@@ -393,14 +605,17 @@ def validate_sidecar(sidecar: Sidecar, sidecar_path: Path | None = None, claim=N
                 )
                 errors.append(err)
                 if sidecar_path:
-                    event("sidecar.validate_error", path=str(sidecar_path), field=f"outcomes.{label}.condition", reason=f"DuckDB parse error: {e}")
+                    event(
+                        "sidecar.validate_error",
+                        path=str(sidecar_path),
+                        field=f"outcomes.{label}.condition",
+                        reason=f"DuckDB parse error: {e}",
+                    )
 
     # At least one result_schema field must appear in conditions
     if sidecar.result_schema:
         schema_keys = set(sidecar.result_schema.keys())
-        all_conditions = " ".join(
-            s.condition for s in sidecar.outcomes.values() if s.condition
-        )
+        all_conditions = " ".join(s.condition for s in sidecar.outcomes.values() if s.condition)
         if not any(key in all_conditions for key in schema_keys):
             err = ValidationError(
                 "result_schema",
@@ -408,7 +623,12 @@ def validate_sidecar(sidecar: Sidecar, sidecar_path: Path | None = None, claim=N
             )
             errors.append(err)
             if sidecar_path:
-                event("sidecar.validate_error", path=str(sidecar_path), field="result_schema", reason="No result_schema fields referenced in any outcome condition")
+                event(
+                    "sidecar.validate_error",
+                    path=str(sidecar_path),
+                    field="result_schema",
+                    reason="No result_schema fields referenced in any outcome condition",
+                )
 
     # Must have at least one is_residual=true fallback branch
     has_residual = any(s.is_residual for s in sidecar.outcomes.values())
@@ -419,7 +639,12 @@ def validate_sidecar(sidecar: Sidecar, sidecar_path: Path | None = None, claim=N
         )
         errors.append(err)
         if sidecar_path:
-            event("sidecar.validate_error", path=str(sidecar_path), field="outcomes", reason="No fallback branch with is_residual=true")
+            event(
+                "sidecar.validate_error",
+                path=str(sidecar_path),
+                field="outcomes",
+                reason="No fallback branch with is_residual=true",
+            )
 
     # Validate [popper] block if present
     popper_errors = validate_popper_block(sidecar, sidecar_path)

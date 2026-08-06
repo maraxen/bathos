@@ -3,6 +3,7 @@
 Tests the emit_campaign_report function that writes the campaign report JSON sidecar
 at <catalog>/sidecars/<campaign_id>/campaign_report.json.
 """
+
 import json
 import tempfile
 from pathlib import Path
@@ -135,16 +136,28 @@ class TestEmitCampaignReport:
         run.sidecar_mode = "normal"
         run.stage_name = "exploration"
 
-        db.execute("""
+        db.execute(
+            """
             INSERT INTO runs (
                 id, project_slug, command, argv, git_hash, git_branch, git_dirty, timestamp,
                 outcome, outcome_is_residual, sidecar_mode, stage_name
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, [
-            run.id, run.project_slug, run.command, json.dumps(run.argv),
-            run.git_hash, run.git_branch, run.git_dirty, run.timestamp,
-            run.outcome, run.outcome_is_residual, run.sidecar_mode, run.stage_name
-        ])
+        """,
+            [
+                run.id,
+                run.project_slug,
+                run.command,
+                json.dumps(run.argv),
+                run.git_hash,
+                run.git_branch,
+                run.git_dirty,
+                run.timestamp,
+                run.outcome,
+                run.outcome_is_residual,
+                run.sidecar_mode,
+                run.stage_name,
+            ],
+        )
 
         # Add run to campaign
         add_run_to_campaign(db, campaign.id, run.id)
@@ -152,7 +165,7 @@ class TestEmitCampaignReport:
         # Set conclusion and emit report
         db.execute(
             "UPDATE campaigns SET conclusion = ?, status = 'concluded' WHERE id = ?",
-            ["Test campaign completed successfully.", campaign.id]
+            ["Test campaign completed successfully.", campaign.id],
         )
 
         emit_campaign_report(db, str(catalog_dir), campaign.id)
@@ -188,20 +201,32 @@ class TestEmitCampaignReport:
             git_branch="main",
             git_dirty=False,
         )
-        db.execute("""
+        db.execute(
+            """
             INSERT INTO runs (
                 id, project_slug, command, argv, git_hash, git_branch, git_dirty, timestamp,
                 outcome, outcome_is_residual, sidecar_mode, stage_name
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, [
-            run.id, run.project_slug, run.command, json.dumps(run.argv),
-            run.git_hash, run.git_branch, run.git_dirty, run.timestamp,
-            "success", False, "normal", "exploration"
-        ])
+        """,
+            [
+                run.id,
+                run.project_slug,
+                run.command,
+                json.dumps(run.argv),
+                run.git_hash,
+                run.git_branch,
+                run.git_dirty,
+                run.timestamp,
+                "success",
+                False,
+                "normal",
+                "exploration",
+            ],
+        )
         add_run_to_campaign(db, campaign.id, run.id)
         db.execute(
             "UPDATE campaigns SET conclusion = ?, status = 'concluded' WHERE id = ?",
-            ["Test conclusion", campaign.id]
+            ["Test conclusion", campaign.id],
         )
 
         emit_campaign_report(db, str(catalog_dir), campaign.id[:8])
@@ -237,16 +262,28 @@ class TestEmitCampaignReport:
             run.sidecar_mode = "normal"
             run.stage_name = stage
 
-            db.execute("""
+            db.execute(
+                """
                 INSERT INTO runs (
                     id, project_slug, command, argv, git_hash, git_branch, git_dirty, timestamp,
                     outcome, outcome_is_residual, sidecar_mode, stage_name
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, [
-                run.id, run.project_slug, run.command, json.dumps(run.argv),
-                run.git_hash, run.git_branch, run.git_dirty, run.timestamp,
-                run.outcome, run.outcome_is_residual, run.sidecar_mode, run.stage_name
-            ])
+            """,
+                [
+                    run.id,
+                    run.project_slug,
+                    run.command,
+                    json.dumps(run.argv),
+                    run.git_hash,
+                    run.git_branch,
+                    run.git_dirty,
+                    run.timestamp,
+                    run.outcome,
+                    run.outcome_is_residual,
+                    run.sidecar_mode,
+                    run.stage_name,
+                ],
+            )
 
             add_run_to_campaign(db, campaign.id, run.id)
 
@@ -284,16 +321,28 @@ class TestEmitCampaignReport:
             run.sidecar_mode = "normal"
             run.stage_name = stage
 
-            db.execute("""
+            db.execute(
+                """
                 INSERT INTO runs (
                     id, project_slug, command, argv, git_hash, git_branch, git_dirty, timestamp,
                     outcome, outcome_is_residual, sidecar_mode, stage_name
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, [
-                run.id, run.project_slug, run.command, json.dumps(run.argv),
-                run.git_hash, run.git_branch, run.git_dirty, run.timestamp,
-                run.outcome, run.outcome_is_residual, run.sidecar_mode, run.stage_name
-            ])
+            """,
+                [
+                    run.id,
+                    run.project_slug,
+                    run.command,
+                    json.dumps(run.argv),
+                    run.git_hash,
+                    run.git_branch,
+                    run.git_dirty,
+                    run.timestamp,
+                    run.outcome,
+                    run.outcome_is_residual,
+                    run.sidecar_mode,
+                    run.stage_name,
+                ],
+            )
 
             add_run_to_campaign(db, campaign.id, run.id)
 
@@ -330,16 +379,27 @@ class TestEmitCampaignReport:
         run.outcome_is_residual = False
         run.sidecar_mode = "normal"
 
-        db.execute("""
+        db.execute(
+            """
             INSERT INTO runs (
                 id, project_slug, command, argv, git_hash, git_branch, git_dirty, timestamp,
                 outcome, outcome_is_residual, sidecar_mode
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, [
-            run.id, run.project_slug, run.command, json.dumps(run.argv),
-            run.git_hash, run.git_branch, run.git_dirty, run.timestamp,
-            run.outcome, run.outcome_is_residual, run.sidecar_mode
-        ])
+        """,
+            [
+                run.id,
+                run.project_slug,
+                run.command,
+                json.dumps(run.argv),
+                run.git_hash,
+                run.git_branch,
+                run.git_dirty,
+                run.timestamp,
+                run.outcome,
+                run.outcome_is_residual,
+                run.sidecar_mode,
+            ],
+        )
 
         add_run_to_campaign(db, campaign.id, run.id)
 
@@ -384,5 +444,6 @@ class TestEmitCampaignReport:
         catalog_dir, db = temp_catalog
 
         from bathos.campaigns import CampaignError
+
         with pytest.raises(CampaignError, match="not found"):
             emit_campaign_report(db, str(catalog_dir), "nonexistent_campaign_id")

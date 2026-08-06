@@ -28,7 +28,9 @@ created_at = "2026-07-14T00:00:00Z"
 
 class TestGraduateProductTool:
     def test_requires_content_hash_and_attestation_ref(self, tmp_catalog):
-        result = graduate_product_tool(content_hash="", attestation_ref="", catalog_dir=str(tmp_catalog))
+        result = graduate_product_tool(
+            content_hash="", attestation_ref="", catalog_dir=str(tmp_catalog)
+        )
         assert result["ok"] is False
 
         result = graduate_product_tool(
@@ -76,10 +78,14 @@ class TestGraduateProductTool:
         attestation_sha256 = registered["anchor"]["sha256"]
 
         first = graduate_product_tool(
-            content_hash=content_hash, attestation_ref=attestation_sha256, catalog_dir=str(tmp_catalog)
+            content_hash=content_hash,
+            attestation_ref=attestation_sha256,
+            catalog_dir=str(tmp_catalog),
         )
         second = graduate_product_tool(
-            content_hash=content_hash, attestation_ref=attestation_sha256, catalog_dir=str(tmp_catalog)
+            content_hash=content_hash,
+            attestation_ref=attestation_sha256,
+            catalog_dir=str(tmp_catalog),
         )
         assert first["ok"] is True
         assert second["ok"] is True
@@ -95,7 +101,9 @@ class TestGraduateProductTool:
         attestation_sha256 = registered["anchor"]["sha256"]
 
         result = graduate_product_tool(
-            content_hash=content_hash, attestation_ref=attestation_sha256, catalog_dir=str(tmp_catalog)
+            content_hash=content_hash,
+            attestation_ref=attestation_sha256,
+            catalog_dir=str(tmp_catalog),
         )
         assert result["ok"] is False
         assert result["error_code"] == "graduation_refused"

@@ -6,11 +6,24 @@ from pathlib import Path
 from bathos.errors import EXCEPTION_TO_CODE, RESOLUTION_HINTS, BathosErrorCode
 
 BUILTIN_EXCEPTIONS = {
-    "ValueError", "RuntimeError", "KeyError", "NotImplementedError", "TypeError",
-    "AttributeError", "IndexError", "SystemExit", "Exception", "BaseException",
-    "StopIteration", "GeneratorExit", "FileExistsError", "FileNotFoundError", "OSError",
+    "ValueError",
+    "RuntimeError",
+    "KeyError",
+    "NotImplementedError",
+    "TypeError",
+    "AttributeError",
+    "IndexError",
+    "SystemExit",
+    "Exception",
+    "BaseException",
+    "StopIteration",
+    "GeneratorExit",
+    "FileExistsError",
+    "FileNotFoundError",
+    "OSError",
 }
 EXCLUDED_FILES = {"cli.py"}
+
 
 def _collect_raised_exception_classes(src_root: Path) -> set[str]:
     raised = set()
@@ -26,6 +39,7 @@ def _collect_raised_exception_classes(src_root: Path) -> set[str]:
                 elif isinstance(exc, ast.Name):
                     raised.add(exc.id)
     return raised
+
 
 def test_every_domain_exception_has_registered_code():
     src_root = Path(__file__).parent.parent / "src" / "bathos"

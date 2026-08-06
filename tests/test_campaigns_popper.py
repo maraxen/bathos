@@ -1,4 +1,5 @@
 """Tests for POPPER e-value sequential campaign primitives (#792)."""
+
 import textwrap
 import uuid
 from pathlib import Path
@@ -22,7 +23,9 @@ from bathos.schema import Run
 # ---------------------------------------------------------------------------
 
 
-def _write_popper_sidecar(tmp_path: Path, null: float, alt: float, threshold: float, extra: str = "") -> Path:
+def _write_popper_sidecar(
+    tmp_path: Path, null: float, alt: float, threshold: float, extra: str = ""
+) -> Path:
     """Write a minimal experiment sidecar with a [popper] block to disk."""
     content = textwrap.dedent(f"""
         [experiment]
@@ -95,9 +98,7 @@ def test_create_sequential_campaign(warm_db):
     campaign = create_campaign(warm_db, name="Seq Test", project_slug="test", mode="sequential")
     assert campaign.mode == "sequential"
 
-    rows = warm_db.execute(
-        "SELECT mode FROM campaigns WHERE id = ?", [campaign.id]
-    ).fetchall()
+    rows = warm_db.execute("SELECT mode FROM campaigns WHERE id = ?", [campaign.id]).fetchall()
     assert rows[0][0] == "sequential"
 
 
@@ -330,7 +331,9 @@ def test_evalue_product_calculation(tmp_path, warm_db):
 def test_review_campaign_popper_key_present(tmp_path, warm_db):
     """review_campaign on a sequential campaign returns a 'popper' dict with expected keys."""
     sidecar_path = _write_popper_sidecar(tmp_path, null=0.30, alt=0.75, threshold=20.0)
-    campaign = create_campaign(warm_db, name="Review Popper", project_slug="test", mode="sequential")
+    campaign = create_campaign(
+        warm_db, name="Review Popper", project_slug="test", mode="sequential"
+    )
 
     run_id = str(uuid.uuid4())
     _insert_run(warm_db, run_id, "pass", str(sidecar_path))

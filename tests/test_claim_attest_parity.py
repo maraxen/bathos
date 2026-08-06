@@ -126,30 +126,29 @@ class TestAttestParityBasic:
         temp_db.execute(
             "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at, claim_path) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [campaign_id, "test", campaign_name, "confirmation", "open",
-             datetime.now(UTC).isoformat(), str(Path("test_parity.claim.toml"))]
+            [
+                campaign_id,
+                "test",
+                campaign_name,
+                "confirmation",
+                "open",
+                datetime.now(UTC).isoformat(),
+                str(Path("test_parity.claim.toml")),
+            ],
         )
 
         # Create a passing PARITY run with proper metadata
         parity_run_id = "run_parity_001"
-        parity_metadata = json.dumps({
-            "metric_key": 1.0,
-            "parity_run_type": "literature_parity"
-        })
+        parity_metadata = json.dumps({"metric_key": 1.0, "parity_run_type": "literature_parity"})
         temp_db.execute(
             "INSERT INTO runs (id, campaign_id, outcome, metadata, parity_run_type) VALUES (?, ?, ?, ?, ?)",
-            [parity_run_id, campaign_id, "pass", parity_metadata, "literature_parity"]
+            [parity_run_id, campaign_id, "pass", parity_metadata, "literature_parity"],
         )
 
         # Register the initial claim (empty parity_run_id)
         from bathos.claim import register_claim
-        register_claim(
-            Path("test_parity.claim.toml"),
-            campaign_id,
-            temp_db,
-            tmp_path,
-            force=False
-        )
+
+        register_claim(Path("test_parity.claim.toml"), campaign_id, temp_db, tmp_path, force=False)
 
         temp_db.commit()
 
@@ -164,15 +163,16 @@ class TestAttestParityBasic:
             campaign_id=campaign_id,
             parity_run_id=parity_run_id,
             db=temp_db,
-            workspace_root=tmp_path
+            workspace_root=tmp_path,
         )
 
         # Verify that the claim file has been updated with parity_run_id
         claim = parse_claim(tmp_path / "test_parity.claim.toml")
         parity_confound = claim.confounds[0]
         ref_parity = parity_confound.get("reference_parity", {})
-        assert ref_parity.get("parity_run_id") == parity_run_id, \
+        assert ref_parity.get("parity_run_id") == parity_run_id, (
             "parity_run_id should be bound in the claim file"
+        )
 
         # Verify that the SHA has been re-anchored
         new_sha = claim.sha256
@@ -187,9 +187,7 @@ class TestAttestParityBasic:
 
         # Verify check_sha does NOT raise
         check_sha(
-            path_relative="test_parity.claim.toml",
-            registered_sha=db_sha,
-            workspace_root=tmp_path
+            path_relative="test_parity.claim.toml", registered_sha=db_sha, workspace_root=tmp_path
         )
 
 
@@ -210,8 +208,15 @@ class TestAttestParityValidation:
         temp_db.execute(
             "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at, claim_path) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [campaign_id, "test", campaign_name, "confirmation", "open",
-             datetime.now(UTC).isoformat(), str(Path("test_parity.claim.toml"))]
+            [
+                campaign_id,
+                "test",
+                campaign_name,
+                "confirmation",
+                "open",
+                datetime.now(UTC).isoformat(),
+                str(Path("test_parity.claim.toml")),
+            ],
         )
 
         # Create a passing run WITHOUT parity_run_type in metadata
@@ -219,18 +224,13 @@ class TestAttestParityValidation:
         bad_metadata = json.dumps({"metric_key": 1.0})  # No parity_run_type
         temp_db.execute(
             "INSERT INTO runs (id, campaign_id, outcome, metadata, parity_run_type) VALUES (?, ?, ?, ?, ?)",
-            [bad_run_id, campaign_id, "pass", bad_metadata, None]
+            [bad_run_id, campaign_id, "pass", bad_metadata, None],
         )
 
         # Register the initial claim
         from bathos.claim import register_claim
-        register_claim(
-            Path("test_parity.claim.toml"),
-            campaign_id,
-            temp_db,
-            tmp_path,
-            force=False
-        )
+
+        register_claim(Path("test_parity.claim.toml"), campaign_id, temp_db, tmp_path, force=False)
 
         temp_db.commit()
 
@@ -240,14 +240,15 @@ class TestAttestParityValidation:
                 campaign_id=campaign_id,
                 parity_run_id=bad_run_id,
                 db=temp_db,
-                workspace_root=tmp_path
+                workspace_root=tmp_path,
             )
 
         # Verify claim file is UNCHANGED
         claim = parse_claim(tmp_path / "test_parity.claim.toml")
         ref_parity = claim.confounds[0].get("reference_parity", {})
-        assert ref_parity.get("parity_run_id") == "", \
+        assert ref_parity.get("parity_run_id") == "", (
             "parity_run_id should remain empty after failed attest_parity"
+        )
 
     def test_ac12_attest_parity_rejects_run_with_wrong_parity_type(
         self, temp_db, tmp_path, temp_claim_file_with_parity
@@ -262,30 +263,34 @@ class TestAttestParityValidation:
         temp_db.execute(
             "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at, claim_path) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [campaign_id, "test", campaign_name, "confirmation", "open",
-             datetime.now(UTC).isoformat(), str(Path("test_parity.claim.toml"))]
+            [
+                campaign_id,
+                "test",
+                campaign_name,
+                "confirmation",
+                "open",
+                datetime.now(UTC).isoformat(),
+                str(Path("test_parity.claim.toml")),
+            ],
         )
 
         # Create a run with WRONG parity_run_type
         bad_run_id = "run_bad_002"
-        bad_metadata = json.dumps({
-            "metric_key": 1.0,
-            "parity_run_type": "partial_parity"  # Wrong type
-        })
+        bad_metadata = json.dumps(
+            {
+                "metric_key": 1.0,
+                "parity_run_type": "partial_parity",  # Wrong type
+            }
+        )
         temp_db.execute(
             "INSERT INTO runs (id, campaign_id, outcome, metadata, parity_run_type) VALUES (?, ?, ?, ?, ?)",
-            [bad_run_id, campaign_id, "pass", bad_metadata, "partial_parity"]
+            [bad_run_id, campaign_id, "pass", bad_metadata, "partial_parity"],
         )
 
         # Register the initial claim
         from bathos.claim import register_claim
-        register_claim(
-            Path("test_parity.claim.toml"),
-            campaign_id,
-            temp_db,
-            tmp_path,
-            force=False
-        )
+
+        register_claim(Path("test_parity.claim.toml"), campaign_id, temp_db, tmp_path, force=False)
 
         temp_db.commit()
 
@@ -295,7 +300,7 @@ class TestAttestParityValidation:
                 campaign_id=campaign_id,
                 parity_run_id=bad_run_id,
                 db=temp_db,
-                workspace_root=tmp_path
+                workspace_root=tmp_path,
             )
 
     def test_ac13_attest_parity_partial_run_sets_controlled_by_protocol(
@@ -312,30 +317,29 @@ class TestAttestParityValidation:
         temp_db.execute(
             "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at, claim_path) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [campaign_id, "test", campaign_name, "confirmation", "open",
-             datetime.now(UTC).isoformat(), str(Path("test_parity.claim.toml"))]
+            [
+                campaign_id,
+                "test",
+                campaign_name,
+                "confirmation",
+                "open",
+                datetime.now(UTC).isoformat(),
+                str(Path("test_parity.claim.toml")),
+            ],
         )
 
         # Create a PARTIAL parity run (outcome='partial')
         partial_run_id = "run_partial_001"
-        partial_metadata = json.dumps({
-            "metric_key": 1.0,
-            "parity_run_type": "literature_parity"
-        })
+        partial_metadata = json.dumps({"metric_key": 1.0, "parity_run_type": "literature_parity"})
         temp_db.execute(
             "INSERT INTO runs (id, campaign_id, outcome, metadata, parity_run_type) VALUES (?, ?, ?, ?, ?)",
-            [partial_run_id, campaign_id, "partial", partial_metadata, "literature_parity"]
+            [partial_run_id, campaign_id, "partial", partial_metadata, "literature_parity"],
         )
 
         # Register the initial claim
         from bathos.claim import register_claim
-        register_claim(
-            Path("test_parity.claim.toml"),
-            campaign_id,
-            temp_db,
-            tmp_path,
-            force=False
-        )
+
+        register_claim(Path("test_parity.claim.toml"), campaign_id, temp_db, tmp_path, force=False)
 
         temp_db.commit()
 
@@ -344,19 +348,21 @@ class TestAttestParityValidation:
             campaign_id=campaign_id,
             parity_run_id=partial_run_id,
             db=temp_db,
-            workspace_root=tmp_path
+            workspace_root=tmp_path,
         )
 
         # Verify the binding is recorded (status will be inferred from run)
         claim = parse_claim(tmp_path / "test_parity.claim.toml")
         ref_parity = claim.confounds[0].get("reference_parity", {})
-        assert ref_parity.get("parity_run_id") == partial_run_id, \
+        assert ref_parity.get("parity_run_id") == partial_run_id, (
             "parity_run_id should be bound for PARTIAL runs"
+        )
 
         # Now check via parity_confound_check that status is inferred as controlled-by-protocol
         check_result = parity_confound_check(tmp_path / "test_parity.claim.toml", temp_db)
-        assert check_result["confounds"][0]["status"] == "controlled-by-protocol", \
+        assert check_result["confounds"][0]["status"] == "controlled-by-protocol", (
             "PARTIAL run should infer status as controlled-by-protocol"
+        )
 
 
 class TestAtomicity:
@@ -384,30 +390,29 @@ class TestAtomicity:
         temp_db.execute(
             "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at, claim_path) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [campaign_id, "test", campaign_name, "confirmation", "open",
-             datetime.now(UTC).isoformat(), str(Path("test_parity.claim.toml"))]
+            [
+                campaign_id,
+                "test",
+                campaign_name,
+                "confirmation",
+                "open",
+                datetime.now(UTC).isoformat(),
+                str(Path("test_parity.claim.toml")),
+            ],
         )
 
         # Create a valid PARITY run
         parity_run_id = "run_parity_001"
-        parity_metadata = json.dumps({
-            "metric_key": 1.0,
-            "parity_run_type": "literature_parity"
-        })
+        parity_metadata = json.dumps({"metric_key": 1.0, "parity_run_type": "literature_parity"})
         temp_db.execute(
             "INSERT INTO runs (id, campaign_id, outcome, metadata, parity_run_type) VALUES (?, ?, ?, ?, ?)",
-            [parity_run_id, campaign_id, "pass", parity_metadata, "literature_parity"]
+            [parity_run_id, campaign_id, "pass", parity_metadata, "literature_parity"],
         )
 
         # Register the initial claim
         from bathos.claim import register_claim
-        register_claim(
-            Path("test_parity.claim.toml"),
-            campaign_id,
-            temp_db,
-            tmp_path,
-            force=False
-        )
+
+        register_claim(Path("test_parity.claim.toml"), campaign_id, temp_db, tmp_path, force=False)
 
         temp_db.commit()
 
@@ -420,8 +425,7 @@ class TestAtomicity:
         ).fetchone()
         initial_db_sha = initial_row[0]
 
-        assert original_file_sha == initial_db_sha, \
-            "Initial file and DB SHAs should match"
+        assert original_file_sha == initial_db_sha, "Initial file and DB SHAs should match"
 
         # Create a wrapper DB that injects failure
         class FailingDB:
@@ -446,17 +450,21 @@ class TestAtomicity:
                 campaign_id=campaign_id,
                 parity_run_id=parity_run_id,
                 db=failing_db,
-                workspace_root=tmp_path
+                workspace_root=tmp_path,
             )
 
         # VERIFY ROLLBACK: file should be rolled back to original content
         file_content_after_failure = (tmp_path / "test_parity.claim.toml").read_bytes()
-        file_sha_after_failure = __import__("hashlib").sha256(file_content_after_failure).hexdigest()
+        file_sha_after_failure = (
+            __import__("hashlib").sha256(file_content_after_failure).hexdigest()
+        )
 
-        assert file_content_after_failure == original_file_content, \
+        assert file_content_after_failure == original_file_content, (
             "File should be rolled back to original content after DB failure"
-        assert file_sha_after_failure == original_file_sha, \
+        )
+        assert file_sha_after_failure == original_file_sha, (
             "File SHA should match original SHA after rollback"
+        )
 
         # VERIFY NO DIVERGENCE: file SHA == DB SHA (DB was never updated due to error)
         db_row = temp_db.execute(
@@ -464,14 +472,15 @@ class TestAtomicity:
         ).fetchone()
         db_sha_after_failure = db_row[0]
 
-        assert file_sha_after_failure == db_sha_after_failure, \
+        assert file_sha_after_failure == db_sha_after_failure, (
             f"After rollback, file SHA ({file_sha_after_failure}) should match DB SHA ({db_sha_after_failure}) — no divergence"
+        )
 
         # VERIFY check_sha does NOT raise (proving consistency is maintained)
         check_sha(
             path_relative="test_parity.claim.toml",
             registered_sha=db_sha_after_failure,
-            workspace_root=tmp_path
+            workspace_root=tmp_path,
         )
 
     def test_ac21_attest_parity_recovery_by_rerun(
@@ -489,30 +498,29 @@ class TestAtomicity:
         temp_db.execute(
             "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at, claim_path) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [campaign_id, "test", campaign_name, "confirmation", "open",
-             datetime.now(UTC).isoformat(), str(Path("test_parity.claim.toml"))]
+            [
+                campaign_id,
+                "test",
+                campaign_name,
+                "confirmation",
+                "open",
+                datetime.now(UTC).isoformat(),
+                str(Path("test_parity.claim.toml")),
+            ],
         )
 
         # Create a valid PARITY run
         parity_run_id = "run_parity_001"
-        parity_metadata = json.dumps({
-            "metric_key": 1.0,
-            "parity_run_type": "literature_parity"
-        })
+        parity_metadata = json.dumps({"metric_key": 1.0, "parity_run_type": "literature_parity"})
         temp_db.execute(
             "INSERT INTO runs (id, campaign_id, outcome, metadata, parity_run_type) VALUES (?, ?, ?, ?, ?)",
-            [parity_run_id, campaign_id, "pass", parity_metadata, "literature_parity"]
+            [parity_run_id, campaign_id, "pass", parity_metadata, "literature_parity"],
         )
 
         # Register the initial claim
         from bathos.claim import register_claim
-        register_claim(
-            Path("test_parity.claim.toml"),
-            campaign_id,
-            temp_db,
-            tmp_path,
-            force=False
-        )
+
+        register_claim(Path("test_parity.claim.toml"), campaign_id, temp_db, tmp_path, force=False)
 
         temp_db.commit()
 
@@ -540,7 +548,7 @@ class TestAtomicity:
                 campaign_id=campaign_id,
                 parity_run_id=parity_run_id,
                 db=failing_db,
-                workspace_root=tmp_path
+                workspace_root=tmp_path,
             )
 
         # RECOVERY: Re-run attest_parity without injected failure — should succeed
@@ -548,14 +556,15 @@ class TestAtomicity:
             campaign_id=campaign_id,
             parity_run_id=parity_run_id,
             db=failing_db,
-            workspace_root=tmp_path
+            workspace_root=tmp_path,
         )
 
         # Verify the binding succeeded
         claim = parse_claim(tmp_path / "test_parity.claim.toml")
         ref_parity = claim.confounds[0].get("reference_parity", {})
-        assert ref_parity.get("parity_run_id") == parity_run_id, \
+        assert ref_parity.get("parity_run_id") == parity_run_id, (
             "After recovery, parity_run_id should be bound in the claim"
+        )
 
         # Verify file and DB are in sync
         file_sha = claim.sha256
@@ -564,14 +573,11 @@ class TestAtomicity:
         ).fetchone()
         db_sha = db_row[0]
 
-        assert file_sha == db_sha, \
-            "After recovery, file and DB SHAs should be synchronized"
+        assert file_sha == db_sha, "After recovery, file and DB SHAs should be synchronized"
 
         # check_sha should NOT raise
         check_sha(
-            path_relative="test_parity.claim.toml",
-            registered_sha=db_sha,
-            workspace_root=tmp_path
+            path_relative="test_parity.claim.toml", registered_sha=db_sha, workspace_root=tmp_path
         )
 
 
@@ -590,8 +596,15 @@ class TestParityConfoundCheck:
         temp_db.execute(
             "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at, claim_path) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [campaign_id, "test", "test_campaign", "confirmation", "open",
-             datetime.now(UTC).isoformat(), str(Path("test_parity.claim.toml"))]
+            [
+                campaign_id,
+                "test",
+                "test_campaign",
+                "confirmation",
+                "open",
+                datetime.now(UTC).isoformat(),
+                str(Path("test_parity.claim.toml")),
+            ],
         )
 
         # Create a passing PARITY run.
@@ -600,12 +613,14 @@ class TestParityConfoundCheck:
         parity_run_id = "run_parity_pass"
         temp_db.execute(
             "INSERT INTO runs (id, campaign_id, outcome, parity_run_type, metadata) VALUES (?, ?, ?, ?, ?)",
-            [parity_run_id, campaign_id, "pass", "literature_parity", "{}"]
+            [parity_run_id, campaign_id, "pass", "literature_parity", "{}"],
         )
 
         # Manually update the claim file with parity_run_id bound
         claim_content = (tmp_path / "test_parity.claim.toml").read_text()
-        claim_content = claim_content.replace('parity_run_id = ""', f'parity_run_id = "{parity_run_id}"')
+        claim_content = claim_content.replace(
+            'parity_run_id = ""', f'parity_run_id = "{parity_run_id}"'
+        )
         (tmp_path / "test_parity.claim.toml").write_text(claim_content)
 
         temp_db.commit()
@@ -618,8 +633,9 @@ class TestParityConfoundCheck:
         assert len(result["confounds"]) > 0
         parity_confound = result["confounds"][0]
         assert parity_confound.get("id") == "C_parity"
-        assert parity_confound.get("status") == "controlled", \
+        assert parity_confound.get("status") == "controlled", (
             "PARITY passing run should infer status as controlled"
+        )
 
     def test_parity_confound_check_infers_controlled_by_protocol_from_partial(
         self, temp_db, tmp_path, temp_claim_file_with_parity
@@ -633,8 +649,15 @@ class TestParityConfoundCheck:
         temp_db.execute(
             "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at, claim_path) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [campaign_id, "test", "test_campaign", "confirmation", "open",
-             datetime.now(UTC).isoformat(), str(Path("test_parity.claim.toml"))]
+            [
+                campaign_id,
+                "test",
+                "test_campaign",
+                "confirmation",
+                "open",
+                datetime.now(UTC).isoformat(),
+                str(Path("test_parity.claim.toml")),
+            ],
         )
 
         # Create a PARTIAL run.
@@ -642,12 +665,14 @@ class TestParityConfoundCheck:
         partial_run_id = "run_partial"
         temp_db.execute(
             "INSERT INTO runs (id, campaign_id, outcome, parity_run_type, metadata) VALUES (?, ?, ?, ?, ?)",
-            [partial_run_id, campaign_id, "partial", "literature_parity", "{}"]
+            [partial_run_id, campaign_id, "partial", "literature_parity", "{}"],
         )
 
         # Manually update the claim file
         claim_content = (tmp_path / "test_parity.claim.toml").read_text()
-        claim_content = claim_content.replace('parity_run_id = ""', f'parity_run_id = "{partial_run_id}"')
+        claim_content = claim_content.replace(
+            'parity_run_id = ""', f'parity_run_id = "{partial_run_id}"'
+        )
         (tmp_path / "test_parity.claim.toml").write_text(claim_content)
 
         temp_db.commit()
@@ -656,8 +681,9 @@ class TestParityConfoundCheck:
         result = parity_confound_check(tmp_path / "test_parity.claim.toml", temp_db)
 
         parity_confound = result["confounds"][0]
-        assert parity_confound.get("status") == "controlled-by-protocol", \
+        assert parity_confound.get("status") == "controlled-by-protocol", (
             "PARTIAL run should infer status as controlled-by-protocol"
+        )
 
 
 class TestScaffoldClaimParity:
@@ -677,8 +703,14 @@ class TestScaffoldClaimParity:
         temp_db.execute(
             "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            [campaign_id, "test", campaign_name, "confirmation", "open",
-             datetime.now(UTC).isoformat()]
+            [
+                campaign_id,
+                "test",
+                campaign_name,
+                "confirmation",
+                "open",
+                datetime.now(UTC).isoformat(),
+            ],
         )
         temp_db.commit()
 
@@ -689,12 +721,14 @@ class TestScaffoldClaimParity:
         content = claim_path.read_text()
 
         # Verify parity_run_id field is present
-        assert 'parity_run_id = ""' in content, \
+        assert 'parity_run_id = ""' in content, (
             "Scaffolded claim should include parity_run_id field"
+        )
 
         # Verify parity_status is NOT present
-        assert 'parity_status' not in content, \
+        assert "parity_status" not in content, (
             "Scaffolded claim should NOT include parity_status field (inferred only)"
+        )
 
 
 if __name__ == "__main__":

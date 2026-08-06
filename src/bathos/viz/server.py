@@ -1,4 +1,5 @@
 """FastAPI local visualization server for `bth view`."""
+
 from __future__ import annotations
 
 import threading
@@ -87,7 +88,5 @@ def run_server(
         uvicorn.run(app, host=host, port=port, log_level="info")
     except OSError as e:
         if "Address already in use" in str(e):
-            raise OSError(
-                f"Port {port} is already in use. Try: bth view --port {port + 1}"
-            ) from e
+            raise OSError(f"Port {port} is already in use. Try: bth view --port {port + 1}") from e
         raise

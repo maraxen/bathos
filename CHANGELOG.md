@@ -7,8 +7,180 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The Review Coverage Gate now requires a *substantive* `[review]` entry, not merely a bound
+  one.** `review_coverage_check` previously added `entry.bears_on` to the covered set without
+  inspecting any other field, so an entry whose only content was `bears_on = "H1"` marked H1
+  covered and let a confirmation campaign conclude — authoring empty placeholders satisfied the
+  gate outright. Coverage is now the C1 tier bar plus the binding, via a new
+  `sidecar.covering_id()`.
+  - **The shapes this actually closes are `disposition` and `commit`.** `validate_sidecar`
+    already required `ref`/`claim` on literature entries and `source`/`what_was_checked` on
+    implementation entries, so the fully-degenerate entry was rejected earlier in the pipeline.
+    But `disposition` is optional there and `commit` is not required at all — so a literature
+    entry citing a real paper against a real hypothesis while recording *no finding*, and an
+    implementation entry naming a repo with *no pinned revision*, both passed validation and
+    both counted as coverage. Those were the gameable shapes.
+  - The gate reads sidecars from disk at conclude time without re-validating them, so requiring
+    `ref`/`source` here as well is deliberate defense-in-depth for sidecars that bypassed or
+    predate validation.
+- **`review_tier()` C1 now also requires `ref` (literature) and `source` (implementation)** — a
+  deliberate tightening beyond the spec's tier table, which states C1 as "`bears_on` +
+  disposition, or an implementation read at a pinned commit". Without it the lattice inverts:
+  C0 is defined as "DOI + claim", so an uncited entry carrying a binding and a verdict would
+  grade C1 while failing C0's own content bar. An attestation about a source nobody can look up
+  is also unfalsifiable in principle — the "review theater" risk §8 of the spec names.
+  - Tier and coverage remain **distinct** standards: `bears_on` is not required for C1 (a pinned
+    implementation read is a genuine review even when it binds to no claim id), but it is
+    required for coverage. `covering_id()` composes the two rather than conflating them.
+  - `review_tier` had no production consumers before this change — only tests. The coverage gate
+    is its first, which is why the standard now lives in one place instead of two.
+
 ### Added
 
+- **Rule-card corpus v1 — 16 citable cards, `bth ref`, and MCP mirror** (build-order step 1).
+  A rule card is one rule with an id that other machinery can *cite*; that citability is the
+  point, since prose cannot be referenced by a lint advisory or recorded in a post-mortem.
+  Cards live in `agent_assets/corpus/{stat,design,prereg,hygiene}/` as `<ID>_<slug>.md`.
+  - **v1 converts existing lint checks and invents no methodology** (decision D4). Every card
+    records a `source_check` naming the `linter.py` function it derives from, and two
+    maintenance traps assert that mapping stays honest in *both* directions:
+    `test_every_shipped_card_cites_a_real_lint_check` and `test_every_lint_check_has_a_card`.
+    Coverage is 16/16 each way. Two further traps keep the corpus self-consistent —
+    `test_shipped_applies_when_fragments_all_evaluate` (no typos or unknown columns in any
+    shipped fragment) and `test_shipped_see_also_ids_resolve` (no dangling cross-references).
+    The authored statistics/experimental-design batch lands separately, so "does the mechanism
+    work" and "is this claim about statistics correct" are never argued in the same change.
+  - The design assumed twelve checks; `linter.py` actually defines sixteen. The two extra
+    (`check_positive_control_missing`, `check_multiple_comparisons`, both from debt #1071) are
+    the most statistically substantive in the file, so the spec's count was corrected rather
+    than followed.
+  - **`applies_when`** is an optional DuckDB fragment evaluated against one row of facts about
+    a script and its sidecar (`corpus.CONTEXT_COLUMNS`, 18 documented columns). Only **6 of 16**
+    cards carry one — the other 10 are reference material, because a card with no
+    `applies_when` never fires rather than firing on a bad proxy.
+  - The spec claimed this reuses `[outcomes].condition`'s evaluation path. **That claim was
+    false and was corrected before merge**: the column sets are unrelated. What *is* genuinely
+    shared is the row builder — `sidecar.py`'s nested `_sql_literal` promoted to a module-level
+    `single_row_projection` that both call. The mechanism is shared; the columns are not.
+  - **Failure posture: never fatal.** A malformed card, a duplicate id, or an `applies_when`
+    naming an unknown column is skipped and reported — one bad card must not make `bth ref
+    applicable` useless for every script. `applicable_cards` returns *fired* and *unevaluable*
+    separately, so a card that could not be checked is never indistinguishable from one checked
+    and not matched.
+  - Surfaces: `bth ref list | show <id> | search <query> | applicable <script> [--show-context]`
+    and MCP `reference_list` / `reference_get` / `reference_search` / `reference_applicable`.
+    Core logic in `corpus.py`, with `cli.py` and `mcp.py` as thin layers.
+  - Fixes a bug found while smoke-testing: an empty script stem made the catalog count query
+    `command LIKE '%%'`, matching every run in the catalog instead of returning zero.
+- **`[review]` sidecar block — targeted literature and implementation review** (build-order
+  step 2). Parse and validate only; no gate, so real entries can accumulate before anything
+  depends on them.
+  - `[[review.literature]]` carries `ref` / `claim` / `bears_on` / `disposition` / `checked`;
+    `[[review.implementation]]` carries `source` / `commit` / `what_was_checked` / `bears_on` /
+    `disposition`. Dispositions are validated against closed sets (`supports` / `contradicts` /
+    `scope-differs`, and `matches` / `diverges` / `not-applicable`) — a *wrong* one is an error
+    rather than ignored, because obligation trigger (4) keys on `disposition == "supports"` and
+    a typo would silently disable it.
+  - **Tier is derived, never declared.** `review_tier()` grades `""` / `C0` cited / `C1`
+    reviewed from content, so an author cannot assert a stronger tier than the entry supports —
+    the same posture as parity's cap-lattice. C2 (`parity`) is deliberately *not* derivable
+    here: it is earned by the existing five-phase literature-parity audit, not by anything a
+    sidecar can assert about itself.
+  - Named **C0/C1/C2, not R0/R1/R2**, to avoid colliding with the existing `reproduction_rung`
+    scale (R0–R4) — a live misreading hazard for anyone moving between the two schemas.
+  - `bears_on` is **optional until it can be checked** (D2): it becomes mandatory only when a
+    claim is registered *and* the campaign mode is gated, matching how `validate_sidecar`
+    already skips claim-dependent checks rather than inventing a second rule.
+  - **Applies to every sidecar kind.** The parsing block initially sat nested inside
+    `if "experiment" in data:`, so a benchmark, validation, or debug sidecar silently parsed
+    `[review]` to `None` — and every test went through a helper that always wrote
+    `[experiment]`, so the whole suite passed against the bug. Now lifted out of the kind branch
+    and parametrised across all four kinds.
+  - `review = "text"` is legal TOML and satisfies `"review" in data`, which raised
+    `AttributeError` straight out of `parse_sidecar` instead of the `SidecarError` callers
+    expect. Non-table `review` values are now ignored with a warning.
+- **Review Coverage Gate at `bth campaign conclude`** (build-order step 3) — advisory by
+  default. Walks the claim's hypotheses and confounds and requires each to be covered by at
+  least one `[review]` entry whose `bears_on` names it, drawn from the member runs' sidecars.
+  Structurally identical to the existing Union Gate.
+  - **Scoped to `mode in ("confirmation", "sequential")`.** "Confirmatory" is not a real concept
+    in the code — `rg "confirmatory|campaign_type"` over `campaigns.py` returns nothing; the
+    actual field is campaign `mode`, and `conclude_campaign`'s own downgrade logic already
+    groups those two together. Exploration campaigns are skipped entirely rather than printing
+    an advisory line.
+  - **An empty slate returns `empty_slate`, never `covered`.** A gated campaign whose claim
+    declares zero hypotheses and zero confounds satisfies "each is covered" vacuously, so §4
+    requires the empty required-set be treated as uncovered/error.
+  - **`sidecars_unreadable` is reported, not swallowed** — a sidecar that could not be parsed is
+    not evidence that review is absent, and a caller must be able to tell the two apart.
+  - **Binary by construction**, so there is no threshold to calibrate. §7 gated this step behind
+    observing real `[review]` data specifically so that a *numeric* gate would not be guessed; a
+    covered/not-covered gate has no such parameter, so building it introduced no uncalibrated
+    constant. A test asserts the gate body contains no float literal.
+- **Post-mortem obligation triggers, each behind its own opt-in flag** — all four §5 triggers
+  now have live call sites: `outcome_failed` + `adversarial_check_fired` (at run end, in
+  `runner.run_script`), and `campaign_confounded` + `citation_contradicted` (at `bth campaign
+  conclude`). Every flag defaults **off**, so with none set nothing writes to the ledger and
+  no verdict changes:
+  - `BTH_OBLIGATION_OUTCOME_FAILED`, `BTH_OBLIGATION_CAMPAIGN_CONFOUNDED`,
+    `BTH_OBLIGATION_CITATION_CONTRADICTED`, `BTH_OBLIGATION_ADVERSARIAL_CHECK_FIRED` —
+    independently toggleable, because they differ sharply in blast radius.
+    `citation_contradicted` can only fire where a `[review]` entry already exists;
+    `outcome_failed` fires on any non-pass run.
+  - `BTH_OBLIGATION_ENFORCE` — separate from the opening flags. Off (default), `conclude`
+    lists open obligations for the campaign and its member runs and warns; on, it downgrades
+    the verdict to `confounded` for confirmation/sequential campaigns. Mirrors
+    `BTH_REVIEW_COVERAGE_ENFORCE`: opening is observation, downgrading is enforcement.
+  - `bth submit` warns about open obligations and never blocks (D1), unflagged but inert
+    while the ledger is empty.
+  - `sidecar.derive_pass_labels()` / `is_failure_outcome()` — trigger 1's predicate, defined
+    against the same pass-label set `compute_evalue` derives rather than a literal `"fail"`
+    match, so freely-named labels like `unstable` or `no-go` are caught.
+- **`adversarial_check` is now evaluated, not just declared** — schema v14 adds
+  `adversarial_check_result` (`"passed"` / `"fired"` / `NULL`). It is a **new column, not a
+  widening of `adversarial_check_status`**: that field records whether a check was *declared*
+  (present/missing/n/a), a declaration fact, while this records what happened when it *ran*.
+  Pre-v14 rows migrate to `NULL` rather than `"passed"` — a run that predates evaluation was
+  never checked, which is not the same as having been checked and cleared.
+  - **Polarity: an `adversarial_check` is a stricter conjunct the outcome must ALSO clear, so
+    it FIRES when it evaluates FALSE.** Settled from the D3 ADR (a condition that "would flip
+    the outcome if the hypothesis were wrong"), the v0.6 spec's own strengthened-conjunct
+    example, and the spec's distinct-column lint heuristic — all three agree, and the rival
+    "refuter that fires when true" reading cannot account for the example.
+  - `check_adversarial_checks` finally implements spec Item 6 heuristics **(a)** tautological
+    conjuncts (`AND 1=1`, `AND TRUE`, `col = col`) and **(b)** distinct-column preference,
+    both WARNING. The ADR's Consequences section had described both as shipped mitigations
+    since 2026-05-26; neither existed, and only field *presence* was ever checked.
+- **`[obligations]` section in `.bth.toml`** — durable, versioned opt-in for the four triggers
+  plus `enforce`, following the existing `[claim]` precedent. Resolution order is env var
+  (winning in **both** directions, so `BTH_OBLIGATION_X=0` genuinely disables) → config → off.
+  The config file is the durable home because a SLURM job reads the same `.bth.toml`, whereas
+  a shell-only export is honoured locally and silently skipped on the cluster — which would
+  produce a ledger where identical work does or does not open obligations depending on where
+  it ran. A malformed `.bth.toml` resolves to "not enabled" rather than raising.
+  - `[claim] review_coverage_enforce` gives the Review Coverage Gate the same config path,
+    resolved through the shared `config.resolve_flag()` so the two gates cannot drift apart on
+    the subtle half (the tri-state env read). It was previously `os.environ`-only.
+  - **Enforcement is now on in bathos's own `.bth.toml`**: `citation_contradicted`,
+    `adversarial_check_fired`, `outcome_failed`, `obligations.enforce` and
+    `claim.review_coverage_enforce` are all `true`; `campaign_confounded` stays off so the
+    obligation gate and that trigger are not entangled before either is observed. Measured
+    exposure at the time of enabling: 3 open confirmation campaigns carry a registered claim
+    and no sidecar yet carries a `[review]` block, so those three downgrade to `confounded`
+    at conclude until review entries are authored (`--force` bypasses with an audit trail,
+    and `BTH_REVIEW_COVERAGE_ENFORCE=0` disables per-invocation).
+- **Integration test for the Review Coverage Gate's conclude-time seam** — the check was
+  unit-tested but its wiring and flag were not, which the spec audit called out and the
+  handoff carried as deferred. Covers advisory-by-default, config-driven downgrade,
+  env-disables-config, exploration-mode exemption, and — the property failed attempt b1
+  lacked — that a *covered* campaign is not downgraded.
+- **Campaign-scoped post-mortems** — `bth postmortem show|scaffold --campaign-id` and the
+  `postmortem_get` / `postmortem_scaffold` MCP mirrors. The `campaign_id` field was previously
+  write-only: both retrieval surfaces matched on `run_id`, and scaffolding was hard-keyed to a
+  Run row. Campaign templates land in `.bth/postmortems/` with the campaign's open obligations
+  listed as a commented checklist (never pre-filled into `discharges`).
 - **Instrument-sensitivity discipline (debt #1071)** — schema v13 (`differential_status`,
   `differential_off_value`, `differential_on_value`, `differential_effect`,
   `dependency_lock_sha256`):
@@ -45,6 +217,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overridable via `.bth.toml [claim] negative_outcome_pattern`) now requires a non-blank
   `--negative-check` backing/hedge, mirroring Union Gate's opt-in-on-claim-registration adoption
   ladder — campaigns with no claim attached are unaffected.
+
+### Fixed
+
+- **`bth new-experiment` scaffolded a degenerate `adversarial_check`** — the template paired
+  `condition = "metric < 5.0"` with `adversarial_check = "metric >= 5.0"`, its own negation.
+  As a stricter conjunct that is a contradiction, so once trigger 3 was wired it would have
+  opened an obligation on *every passing run of every scaffolded experiment*. Nothing caught
+  it because lint heuristic (b) had never been implemented. The template now uses a genuine
+  additional bar on a distinct variable, and a regression test asserts it lints clean.
 
 ### Changed
 

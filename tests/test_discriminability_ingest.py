@@ -111,9 +111,7 @@ def test_union_gate_confounded_when_discriminates_null_after_compact(
 
     db = duckdb.connect(str(tmp_catalog / "bathos.db"))
     try:
-        row = db.execute(
-            "SELECT claim_discriminates FROM runs WHERE id = ?", [run.id]
-        ).fetchone()
+        row = db.execute("SELECT claim_discriminates FROM runs WHERE id = ?", [run.id]).fetchone()
         assert row[0] is None
 
         (tmp_path / "claim.toml").write_text(_UNION_GATE_CLAIM)

@@ -942,8 +942,12 @@ def claim_validate_cmd(
 
 @gate_app.command("stamp")
 def gate_stamp_cmd(
-    gate_name: str = typer.Argument(..., help="Gate name (matches a claim's synthetic_recovery.gate_name)"),
-    result: str = typer.Option(..., "--result", help="'pass' or 'fail' — the outcome of your own test run"),
+    gate_name: str = typer.Argument(
+        ..., help="Gate name (matches a claim's synthetic_recovery.gate_name)"
+    ),
+    result: str = typer.Option(
+        ..., "--result", help="'pass' or 'fail' — the outcome of your own test run"
+    ),
 ):
     """Record a self-attested pass/fail for a synthetic-recovery gate at the current git HEAD.
 
@@ -1330,9 +1334,13 @@ def query_candidates(
 
 @anchor_app.command("insert")
 def anchor_insert_cmd(
-    path: str = typer.Argument(..., help="Sidecar path to anchor (not resolved/verified against disk)"),
+    path: str = typer.Argument(
+        ..., help="Sidecar path to anchor (not resolved/verified against disk)"
+    ),
     sha256: str = typer.Argument(..., help="SHA256 of the sidecar file's contents"),
-    kind: str = typer.Option(..., "--kind", "-k", help="Free-form anchor kind, e.g. 'figure', 'attestation'"),
+    kind: str = typer.Option(
+        ..., "--kind", "-k", help="Free-form anchor kind, e.g. 'figure', 'attestation'"
+    ),
     label: str | None = typer.Option(None, "--label", help="Optional human-readable label"),
     content_hash: str | None = typer.Option(
         None, "--content-hash", help="Optional hash of the underlying data product"
@@ -1408,7 +1416,9 @@ def anchor_find_cmd(
 def anchor_figure_register_cmd(
     asset_sha256: str = typer.Argument(..., help="Anchor key: SHA256 of the rendered figure asset"),
     sidecar_ref: str = typer.Argument(..., help="Pointer to the .figure.toml sidecar"),
-    figure_kind: str = typer.Option(..., "--figure-kind", "-k", help="Free-form figure kind, e.g. 'chord_diagram'"),
+    figure_kind: str = typer.Option(
+        ..., "--figure-kind", "-k", help="Free-form figure kind, e.g. 'chord_diagram'"
+    ),
     render_state: str = typer.Option("ready", "--render-state", help="'ready' or 'deferred'"),
     fig_trust_state: str = typer.Option("draft", "--fig-trust-state", help="'draft' or 'final'"),
     attestation_ref: str | None = typer.Option(
@@ -1674,6 +1684,28 @@ def submit(
         except Exception as e:
             # Log but don't fail on gate check exceptions
             typer.echo(f"Warning: parity prerequisite check failed: {e}", err=True)
+
+    # 3c. Open-obligation warning (D1: warns only, never blocks, at EVERY stage).
+    # Deliberately unflagged and unconditional. Blocking here was rejected for two independent
+    # reasons -- it would put the fragile script-stem key behind a hard decision, and it would
+    # manufacture bypass pressure against metrics bathos itself relies on (Signals 2, 3, 10).
+    # It is inert by default anyway: with no obligation trigger enabled the ledger is empty,
+    # so this prints nothing.
+    try:
+        from bathos.obligations import list_obligations
+        from bathos.workspace import resolve_workspace
+
+        open_obs = list_obligations(resolve_workspace().fs_root, open_only=True)
+        if open_obs:
+            typer.echo(
+                f"WARNING: {len(open_obs)} open obligation(s) awaiting a post-mortem "
+                f"(oldest {max(o.age_days() for o in open_obs):.1f}d). Submitting anyway.",
+                err=True,
+            )
+            for ob in open_obs[-3:]:
+                typer.echo(f"  - {ob.obligation_id} ({ob.trigger})", err=True)
+    except Exception as e:
+        typer.echo(f"Warning: obligation check failed: {e}", err=True)
 
     # 4. Resolve cluster config
     try:
@@ -2377,61 +2409,112 @@ def _parse_since(since: str | None) -> datetime | None:
 
 @postmortem_app.command()
 def scaffold(
-    run_id: str = typer.Argument(..., help="Run ID to scaffold a postmortem template for"),
+    run_id: str | None = typer.Argument(None, help="Run ID to scaffold a postmortem template for"),
+    campaign_id: str = typer.Option(
+        "",
+        "--campaign-id",
+        help="Scaffold a campaign-scoped postmortem instead of a run-scoped one",
+    ),
 ):
-    """Scaffold a new postmortem template for the given Run ID."""
-    from bathos.postmortem import find_run_for_scaffold, scaffold_postmortem_template
+    """Scaffold a new postmortem template for a Run ID or a Campaign ID."""
+    from bathos.postmortem import (
+        find_run_for_scaffold,
+        scaffold_campaign_postmortem_template,
+        scaffold_postmortem_template,
+    )
     from bathos.workspace import resolve_workspace
 
-    run_row = find_run_for_scaffold(run_id, _catalog_dir())
+    if bool(run_id) == bool(campaign_id):
+        typer.echo("Pass exactly one of RUN_ID or --campaign-id", err=True)
+        raise typer.Exit(1)
+
+    workspace_root = resolve_workspace().fs_root
+
+    if campaign_id:
+        import duckdb
+
+        from bathos.campaigns import get_campaign
+        from bathos.obligations import list_obligations
+
+        db_path = _catalog_dir() / "bathos.db"
+        campaign = None
+        if db_path.exists():
+            db = duckdb.connect(str(db_path))
+            try:
+                campaign = get_campaign(db, campaign_id)
+                member_ids = [
+                    r[0]
+                    for r in db.execute(
+                        "SELECT run_id FROM campaign_runs WHERE campaign_id = ?",
+                        [campaign.id if campaign else campaign_id],
+                    ).fetchall()
+                ]
+            finally:
+                db.close()
+        else:
+            member_ids = []
+
+        if campaign is None:
+            typer.echo(f"Campaign not found: {campaign_id}", err=True)
+            raise typer.Exit(1)
+
+        # The scaffold is keyed on the resolved full id, not the prefix the user typed --
+        # otherwise `discharges` would name obligations the ledger stores under another id.
+        scoped = {campaign.id, *member_ids}
+        open_ids = [
+            o.obligation_id for o in list_obligations(workspace_root) if o.entity_id in scoped
+        ]
+        postmortem_path = scaffold_campaign_postmortem_template(
+            campaign.id, workspace_root, open_ids
+        )
+        typer.echo(f"Scaffolded campaign postmortem template at {postmortem_path}")
+        return
+
+    resolved_run_id = run_id or ""  # the exactly-one guard above proves this is non-empty
+    run_row = find_run_for_scaffold(resolved_run_id, _catalog_dir())
     if not run_row:
         typer.echo("Run not found", err=True)
         raise typer.Exit(1)
 
     command, _project_slug = run_row
-    workspace_root = resolve_workspace().fs_root
-    postmortem_path = scaffold_postmortem_template(command, run_id, workspace_root)
+    postmortem_path = scaffold_postmortem_template(command, resolved_run_id, workspace_root)
     typer.echo(f"Scaffolded postmortem template at {postmortem_path}")
 
 
 @postmortem_app.command()
 def show(
-    run_id: str = typer.Argument(..., help="Run ID of the postmortem to show"),
+    run_id: str | None = typer.Argument(None, help="Run ID of the postmortem to show"),
+    campaign_id: str = typer.Option(
+        "", "--campaign-id", help="Show a campaign-scoped postmortem instead of a run-scoped one"
+    ),
     strict_files: bool = typer.Option(
         False, "--strict-files", help="Fail if files in asset_links do not exist"
     ),
 ):
-    """Display and validate the postmortem for the given Run ID."""
+    """Display and validate the postmortem for a Run ID or a Campaign ID."""
     import duckdb
 
-    from bathos.postmortem import parse_postmortem, validate_postmortem
+    from bathos.postmortem import find_postmortem, validate_postmortem
     from bathos.schema import Run
     from bathos.workspace import resolve_workspace
 
-    workspace_root = resolve_workspace().fs_root
-
-    # Find the postmortem TOML file in workspace
-    postmortem_file = None
-    if workspace_root.exists():
-        for pm_file in workspace_root.rglob("*.bth.postmortem.toml"):
-            try:
-                pm = parse_postmortem(pm_file)
-                if pm.run_id == run_id:
-                    postmortem_file = pm_file
-                    break
-            except Exception:
-                pass
-
-    if not postmortem_file:
-        typer.echo("Postmortem not found", err=True)
+    if bool(run_id) == bool(campaign_id):
+        typer.echo("Pass exactly one of RUN_ID or --campaign-id", err=True)
         raise typer.Exit(1)
 
-    pm = parse_postmortem(postmortem_file)
+    workspace_root = resolve_workspace().fs_root
 
-    # Search for run in DB
+    found = find_postmortem(workspace_root, run_id=run_id or "", campaign_id=campaign_id)
+    if not found:
+        typer.echo("Postmortem not found", err=True)
+        raise typer.Exit(1)
+    postmortem_file, pm = found
+
+    # Drift detection needs the Run row, so it only applies to a run-scoped postmortem.
+    # A campaign has no single git hash or dirty flag to compare against.
     run_obj = None
     db_path = _catalog_dir() / "bathos.db"
-    if db_path.exists():
+    if run_id and db_path.exists():
         con = duckdb.connect(str(db_path))
         try:
             arrow_tbl = con.execute("SELECT * FROM runs WHERE id = ?", [run_id]).arrow()
@@ -2465,7 +2548,8 @@ def show(
         typer.echo(f"Verdict override: {pm.verdict_override}", err=True)
         raise typer.Exit(1)
 
-    typer.echo(f"Run ID: {pm.run_id}")
+    typer.echo(f"Campaign ID: {pm.campaign_id}" if pm.campaign_id else f"Run ID: {pm.run_id}")
+    typer.echo(f"Path: {postmortem_file}")
     typer.echo(f"Status: {pm.status}")
     typer.echo(f"Hypothesis Status: {pm.hypothesis_status}")
     typer.echo(f"Verdict Override: {pm.verdict_override}")
@@ -2689,7 +2773,9 @@ def ref_search(query: str = typer.Argument(..., help="Substring to find")) -> No
 @ref_app.command("applicable")
 def ref_applicable(
     script: Path = typer.Argument(..., help="Script whose sidecar to evaluate against"),
-    show_context: bool = typer.Option(False, "--show-context", help="Print the evaluated context row"),
+    show_context: bool = typer.Option(
+        False, "--show-context", help="Print the evaluated context row"
+    ),
 ) -> None:
     """Evaluate every card's applies_when against a script and list those that fire."""
     from bathos.corpus import applicable_cards, build_context

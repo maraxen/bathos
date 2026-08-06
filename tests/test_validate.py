@@ -681,12 +681,16 @@ def _fake_claim(hypotheses=None, confounds=None):
         kill_condition="Outcome != expected",
         kill_condition_satisfiable_by_null=False,
         regime=None,
-        hypotheses=hypotheses if hypotheses is not None else [
+        hypotheses=hypotheses
+        if hypotheses is not None
+        else [
             {"id": "H_primary", "label": "Primary"},
             {"id": "H_null", "label": "Null"},
         ],
         assumptions=[],
-        confounds=confounds if confounds is not None else [{"id": "C_batch_effect", "label": "Batch"}],
+        confounds=confounds
+        if confounds is not None
+        else [{"id": "C_batch_effect", "label": "Batch"}],
         discriminability=[],
         union_gate_clauses=[],
         path=Path("test.claim.toml"),
@@ -792,7 +796,9 @@ def test_claim_discriminability_skips_non_experiment_sidecars(tmp_path):
     assert validate_claim_discriminability(sidecar, _fake_claim()) == []
 
     result = validate_sidecar(sidecar, claim=_fake_claim())
-    claim_field_errors = [e for e in result.errors if e.field in ("claim_discriminates", "claim_isolates")]
+    claim_field_errors = [
+        e for e in result.errors if e.field in ("claim_discriminates", "claim_isolates")
+    ]
     assert claim_field_errors == []
 
 

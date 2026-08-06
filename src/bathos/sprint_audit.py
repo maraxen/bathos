@@ -86,6 +86,7 @@ def _load_sidecar_outcomes(sidecar_path: str) -> set[str]:
     except Exception:
         return set()
 
+
 def _load_sidecar_schema_keys(sidecar_path: str) -> set[str] | None:
     """Load result_schema field names declared in a sidecar file.
 
@@ -167,7 +168,9 @@ def signal_control_arm_rate(project_slug: str, db_path: Path) -> SignalResult:
             ).fetchone()
 
             level = "OK"
-            message = f"control_arm_rate={rate:.2%} ({ctrl_count}/{total} runs with ctrl_* outcomes)"
+            message = (
+                f"control_arm_rate={rate:.2%} ({ctrl_count}/{total} runs with ctrl_* outcomes)"
+            )
 
             if rate == 0.0 and has_val_prod:
                 level = "WARNING"
@@ -310,8 +313,7 @@ def sprint_audit(hours: int = 24) -> dict:
 
         if not db_path.exists():
             warnings.append(
-                f"Project {project['slug']}: no warm DB found "
-                f"(run bth compact first). Skipping."
+                f"Project {project['slug']}: no warm DB found (run bth compact first). Skipping."
             )
             continue
 
@@ -333,9 +335,7 @@ def sprint_audit(hours: int = 24) -> dict:
                     )
                     continue
         except Exception as e:
-            warnings.append(
-                f"Project {project['slug']}: failed schema check — {e}. Skipping."
-            )
+            warnings.append(f"Project {project['slug']}: failed schema check — {e}. Skipping.")
             continue
 
         # Safe to query
@@ -506,22 +506,33 @@ def sprint_audit(hours: int = 24) -> dict:
                 ).fetchall()
                 n_sequential_concluded = len(seq_rows)
                 from bathos.campaigns import _campaign_threshold_met
+
                 for camp_id, camp_threshold in seq_rows:
                     if not _campaign_threshold_met(db, camp_id, camp_threshold):
                         n_premature += 1
             except Exception:
                 pass
-            signals["premature_stopping_rate"] = n_premature / max(n_sequential_concluded, 1) if n_sequential_concluded > 0 else 0.0
+            signals["premature_stopping_rate"] = (
+                n_premature / max(n_sequential_concluded, 1) if n_sequential_concluded > 0 else 0.0
+            )
 
             # Signal 9: control_arm_rate
             # Compute via standalone function for atomic SignalResult + testability.
             signal_result = signal_control_arm_rate(project["slug"], db_path)
-            signals["control_arm_rate"] = signal_result.value if signal_result.value is not None else 0.0
+            signals["control_arm_rate"] = (
+                signal_result.value if signal_result.value is not None else 0.0
+            )
 
             # Signal 10: submit_bypass_rate
             # Compute via standalone function for atomic SignalResult + testability.
-            signal_result_submit_bypass = signal_submit_bypass_rate(project["slug"], db_path, catalog_dir)
-            signals["submit_bypass_rate"] = signal_result_submit_bypass.value if signal_result_submit_bypass.value is not None else 0.0
+            signal_result_submit_bypass = signal_submit_bypass_rate(
+                project["slug"], db_path, catalog_dir
+            )
+            signals["submit_bypass_rate"] = (
+                signal_result_submit_bypass.value
+                if signal_result_submit_bypass.value is not None
+                else 0.0
+            )
 
             # Signal 11: differential-staleness — positive_control union_gate clauses reported
             # uncontrolled by differential_confound_check (instrument-sensitivity proof missing,
@@ -570,9 +581,7 @@ def sprint_audit(hours: int = 24) -> dict:
                             "(debt #1071)."
                         )
             except Exception as e:
-                warnings.append(
-                    f"Project {project['slug']}: Signal 11 check failed — {e}"
-                )
+                warnings.append(f"Project {project['slug']}: Signal 11 check failed — {e}")
             signals["differential_staleness_count"] = differential_staleness_count
 
             # Signal 12: unregistered claims on confirmation campaigns
@@ -622,9 +631,7 @@ def sprint_audit(hours: int = 24) -> dict:
                         )
                         continue
 
-                    has_reference_parity = any(
-                        "reference_parity" in c for c in claim.confounds
-                    )
+                    has_reference_parity = any("reference_parity" in c for c in claim.confounds)
                     if not has_reference_parity:
                         continue
 
@@ -642,9 +649,7 @@ def sprint_audit(hours: int = 24) -> dict:
                             "run `bth campaign attest-parity` or conclude will downgrade."
                         )
             except Exception as e:
-                warnings.append(
-                    f"Project {project['slug']}: Signal 13 check failed — {e}"
-                )
+                warnings.append(f"Project {project['slug']}: Signal 13 check failed — {e}")
 
             # Check signal thresholds and add anomalies.
             # All thresholds are CALIBRATION TARGETS (v0.6), not hard gates.
@@ -652,15 +657,11 @@ def sprint_audit(hours: int = 24) -> dict:
             # error_rate > 0.10: >10% error outcomes indicates infrastructure/env problems;
             #   uncalibrated — domain reasoning, no empirical study (spec Item 5)
             if signals["error_rate"] > 0.10:
-                anomalies.append(
-                    f"Project: error_rate {signals['error_rate']:.1%} > 10%"
-                )
+                anomalies.append(f"Project: error_rate {signals['error_rate']:.1%} > 10%")
             # bypass_explicit > 0.30: arXiv 2509.08713 constraint violation rates (1.3–71.4%);
             #   0.30 is midpoint heuristic, not derived from bypass-rate empirical data
             if signals["bypass_explicit"] > 0.30:
-                anomalies.append(
-                    f"Project: bypass_explicit {signals['bypass_explicit']:.1%} > 30%"
-                )
+                anomalies.append(f"Project: bypass_explicit {signals['bypass_explicit']:.1%} > 30%")
             # bypass_in_agent_mode > 0.05: tighter than bypass_explicit; agents have zero
             #   incremental cost to include a sidecar, so agent-mode bypass is harder to justify
             #   (ADR 260526_bypass-rate-split, spec D4)
@@ -689,9 +690,7 @@ def sprint_audit(hours: int = 24) -> dict:
             # post_hoc_bias_flag: arXiv 2510.21652 AstaBench chi2(4,200)=61.99, p<1e-10;
             #   worst-label count in first third > 10% of total flags post-hoc experiment culling
             if signals["post_hoc_bias_flag"]:
-                anomalies.append(
-                    "Project: post_hoc_bias_flag detected"
-                )
+                anomalies.append("Project: post_hoc_bias_flag detected")
             # premature_stopping_rate: arXiv 2502.09858 POPPER;
             #   any concluded sequential campaign below threshold invalidates anytime-valid guarantee
             if signals["premature_stopping_rate"] > 0.0:
@@ -723,13 +722,11 @@ def sprint_audit(hours: int = 24) -> dict:
                     )
                 if total > 0 and bypassed_count / total > 0.1:
                     anomalies.append(
-                        f"Campaign {campaign_id}: {bypassed_count}/{total} "
-                        f"bypassed (>{10:.0f}%)"
+                        f"Campaign {campaign_id}: {bypassed_count}/{total} bypassed (>{10:.0f}%)"
                     )
                 if total > 0 and residual_count / total > 0.1:
                     anomalies.append(
-                        f"Campaign {campaign_id}: residual rate "
-                        f"{residual_count/total:.1%} > 10%"
+                        f"Campaign {campaign_id}: residual rate {residual_count / total:.1%} > 10%"
                     )
 
             audit_results[project["slug"]] = {

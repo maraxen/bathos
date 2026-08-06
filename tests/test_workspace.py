@@ -18,7 +18,9 @@ from bathos.workspace import resolve_workspace
 def _init_repo(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "t@t.com"], cwd=path, check=True, capture_output=True
+    )
     subprocess.run(["git", "config", "user.name", "T"], cwd=path, check=True, capture_output=True)
     (path / "seed.txt").write_text("seed")
     subprocess.run(["git", "add", "."], cwd=path, check=True, capture_output=True)
@@ -26,9 +28,7 @@ def _init_repo(path: Path) -> None:
 
 
 def _write_bth_toml(root: Path, slug: str, recorded_root: Path) -> None:
-    (root / ".bth.toml").write_text(
-        f'[project]\nslug = "{slug}"\nroot = "{recorded_root}"\n'
-    )
+    (root / ".bth.toml").write_text(f'[project]\nslug = "{slug}"\nroot = "{recorded_root}"\n')
 
 
 @pytest.fixture(autouse=True)

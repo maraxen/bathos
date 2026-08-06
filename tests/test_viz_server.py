@@ -1,4 +1,5 @@
 """Tests for FastAPI visualization server."""
+
 from __future__ import annotations
 
 import pytest
@@ -47,9 +48,9 @@ def test_fastapi_app_get_root():
     assert "text/html" in response.headers.get("content-type", "")
     # Verify that the run is represented in the HTML
     # Either the short ID or project slug should appear
-    assert (
-        "run-12345" in response.text or "my-test" in response.text
-    ), "Run info should appear in HTML"
+    assert "run-12345" in response.text or "my-test" in response.text, (
+        "Run info should appear in HTML"
+    )
 
 
 def test_fastapi_app_empty():

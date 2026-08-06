@@ -192,7 +192,9 @@ def test_sync_returns_sync_result(tmp_path: Path):
         # Simulate rsync output with progress2 format
         stderr_output = "   1,234 100%    1.23MB/s    0:00:01 (xfr#1, to-chk=0/1)\n"
         stdout_output = "sent 1000 bytes  received 500 bytes"
-        mock_popen.return_value = _make_mock_popen(stderr_output=stderr_output, stdout_output=stdout_output)
+        mock_popen.return_value = _make_mock_popen(
+            stderr_output=stderr_output, stdout_output=stdout_output
+        )
 
         result = sync_catalog("engaging", config, catalog_dir, pull=False)
 

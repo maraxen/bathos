@@ -1,4 +1,5 @@
 """Tests for bathos.viz.html HTML export functions."""
+
 from __future__ import annotations
 
 import json

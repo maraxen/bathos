@@ -122,7 +122,9 @@ class TestRenderOutputsSummary:
         ]
         render_outputs_summary(rows, since=None)
         captured = capsys.readouterr()
-        assert "proj_a" in captured.out or "proj_b" in captured.out or "Output Summary" in captured.out
+        assert (
+            "proj_a" in captured.out or "proj_b" in captured.out or "Output Summary" in captured.out
+        )
 
     def test_render_outputs_summary_single_project(self, capsys):
         """Test rendering summary for single project."""
@@ -152,11 +154,13 @@ class TestOutputsListCommand:
     def test_outputs_list_exists(self):
         """Test that outputs_list command exists."""
         from bathos.cli import outputs_list
+
         assert callable(outputs_list)
 
     def test_outputs_summary_exists(self):
         """Test that outputs_summary command exists."""
         from bathos.cli import outputs_summary
+
         assert callable(outputs_summary)
 
 
@@ -166,9 +170,11 @@ class TestMCPTools:
     def test_list_outputs_tool_exists(self):
         """Test that list_outputs_tool exists."""
         from bathos.mcp import list_outputs_tool
+
         assert callable(list_outputs_tool)
 
     def test_outputs_summary_tool_exists(self):
         """Test that outputs_summary_tool exists."""
         from bathos.mcp import outputs_summary_tool
+
         assert callable(outputs_summary_tool)

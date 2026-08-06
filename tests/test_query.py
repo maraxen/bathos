@@ -219,9 +219,7 @@ def test_filter_runs_with_warm_metadata():
         git_hash="abc",
         git_branch="main",
         git_dirty=False,
-        output_metadata=json.dumps([
-            {"path": "/results/analysis.json", "status": "present"}
-        ]),
+        output_metadata=json.dumps([{"path": "/results/analysis.json", "status": "present"}]),
     )
 
     filtered = _filter_runs_by_output_file([run], pattern="*.json")
@@ -241,9 +239,7 @@ def test_filter_ignores_missing_output_files():
         git_hash="abc",
         git_branch="main",
         git_dirty=False,
-        output_metadata=json.dumps([
-            {"path": "/results/missing.json", "status": "missing"}
-        ]),
+        output_metadata=json.dumps([{"path": "/results/missing.json", "status": "missing"}]),
     )
 
     filtered = _filter_runs_by_output_file([run], pattern="*.json")
@@ -259,9 +255,16 @@ def test_list_runs_includes_outcome(tmp_path):
     from bathos.query import list_runs
     from bathos.schema import Run
 
-    r = Run(project_slug="proj", command="echo hi", argv=["echo", "hi"],
-            git_hash="abc", git_branch="main", git_dirty=False,
-            status="completed", exit_code=0)
+    r = Run(
+        project_slug="proj",
+        command="echo hi",
+        argv=["echo", "hi"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        status="completed",
+        exit_code=0,
+    )
     write_run(r, tmp_path)
     compact(tmp_path)
 
@@ -355,9 +358,11 @@ def test_filter_runs_by_output_metadata_warm_tier():
         git_branch="main",
         git_dirty=False,
         output_paths=[],  # no cool-tier paths
-        output_metadata=json.dumps([
-            {"path": "/outputs/result.json", "status": "present", "size_bytes": 42},
-        ]),
+        output_metadata=json.dumps(
+            [
+                {"path": "/outputs/result.json", "status": "present", "size_bytes": 42},
+            ]
+        ),
     )
     run_without = Run(
         project_slug="test",
@@ -367,9 +372,11 @@ def test_filter_runs_by_output_metadata_warm_tier():
         git_branch="main",
         git_dirty=False,
         output_paths=[],
-        output_metadata=json.dumps([
-            {"path": "/outputs/result.csv", "status": "present", "size_bytes": 10},
-        ]),
+        output_metadata=json.dumps(
+            [
+                {"path": "/outputs/result.csv", "status": "present", "size_bytes": 10},
+            ]
+        ),
     )
     run_missing = Run(
         project_slug="test",
@@ -379,9 +386,11 @@ def test_filter_runs_by_output_metadata_warm_tier():
         git_branch="main",
         git_dirty=False,
         output_paths=[],
-        output_metadata=json.dumps([
-            {"path": "/outputs/result.json", "status": "missing", "size_bytes": 0},
-        ]),
+        output_metadata=json.dumps(
+            [
+                {"path": "/outputs/result.json", "status": "missing", "size_bytes": 0},
+            ]
+        ),
     )
 
     filtered = _filter_runs_by_output_file(

@@ -58,7 +58,13 @@ condition = "metric < 5.0"
 decision = "TODO: next step if pass"
 reasoning = "metric below threshold indicates convergence"
 is_residual = false
-adversarial_check = "metric >= 5.0"
+# A STRICTER bar the pass must ALSO clear — not the negation of `condition`.
+# It fires (opens a post-mortem obligation) when it evaluates false on a run that
+# otherwise passed, i.e. the pass was too cheap to believe.
+# Reference a variable that `condition` does NOT use: tightening the same one is weak,
+# and negating `condition` outright is a contradiction that fires on every pass.
+# TODO: replace n_samples with your own control variable, and justify the floor.
+adversarial_check = "metric < 5.0 AND n_samples >= 100"
 
 [outcomes.marginal]
 condition = "metric >= 5.0 AND metric < 10.0"
@@ -74,6 +80,7 @@ is_residual = true
 
 [result_schema]
 metric = "float"
+n_samples = "int"
 
 # Uncomment and fill in if this experiment reproduces a prior result:
 # [reproduction]
@@ -126,6 +133,70 @@ def scaffold_experiment(name: str, project_root: Path, force: bool = False) -> S
 
     script.write_text(_SCRIPT_TEMPLATE.format(name=name))
     script.chmod(0o755)
-    sidecar.write_text(_SIDECAR_TEMPLATE)
+    sidecar.write_text(_SIDECAR_TEMPLATE + _REVIEW_STUB + _corpus_guidance())
 
     return ScaffoldResult(script=script, sidecar=sidecar, name_warning=warning)
+
+
+def _corpus_guidance() -> str:
+    """Append the shipped rule cards as commented guidance in the scaffolded sidecar.
+
+    This is where the corpus earns its keep: at authoring time, in the file the researcher is
+    already editing, rather than in documentation they would have to go find.
+
+    Every card is listed rather than only those whose `applies_when` fires, because a fresh
+    scaffold has no outcomes, no stage and no history — every context flag is at its default,
+    so `applies_when` evaluation here would say almost nothing. `bth ref applicable <script>`
+    is the targeted view once the sidecar has real content.
+
+    Failure is silent by design: a scaffold must not break because the corpus is unreadable.
+    """
+    try:
+        from bathos.corpus import load_corpus
+
+        load = load_corpus()
+    except Exception:
+        return ""
+    if not load.cards:
+        return ""
+
+    lines = [
+        "",
+        "# ─────────────────────────────────────────────────────────────────────────",
+        "# Rule cards shipped with bathos. Cite one by id in a threshold's `source`,",
+        "# or in a post-mortem's `violated_cards`. Full text: `bth ref show <id>`.",
+        "# Targeted to this script once it has content: `bth ref applicable <script>`.",
+        "#",
+    ]
+    for card in load.cards:
+        # Collapse any control characters: an embedded newline would split this into a
+        # second physical line with no leading "#", corrupting the sidecar TOML silently.
+        title = " ".join(str(card.title).split())
+        lines.append(f"#   {card.id:<12} [{card.severity:<7}] {title}")
+    lines.append("# ─────────────────────────────────────────────────────────────────────────")
+    return "\n".join(lines) + "\n"
+
+
+#: §6 requires the scaffold to pre-fill [review] stubs. Commented rather than live so a fresh
+#: sidecar still validates: an uncommented [[review.literature]] with empty ref/claim would be
+#: a validation ERROR on a file the author has not touched yet.
+_REVIEW_STUB = """
+# ── Targeted review (optional; see `bth ref show DSGN-002`) ──────────────────
+# Uncomment and fill in what prior work this experiment rests on. `bears_on`
+# names a hypothesis or confound id from the campaign's claim file; it is only
+# required once a claim exists and the campaign is confirmatory (decision D2).
+#
+# [[review.literature]]
+# ref = "10.1234/example"          # DOI, arXiv id, or a bth run UUID
+# claim = "what that reference actually reports"
+# bears_on = "H1"
+# disposition = "supports"         # supports | contradicts | scope-differs
+# checked = "YYYY-MM-DD"
+#
+# [[review.implementation]]
+# source = "https://github.com/org/repo"
+# commit = "abc1234"               # pin it — an unpinned read grades C0, not C1
+# what_was_checked = "which specific behaviour you read, and where"
+# bears_on = "C1"
+# disposition = "matches"          # matches | diverges | not-applicable
+"""

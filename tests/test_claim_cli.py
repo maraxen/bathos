@@ -20,9 +20,7 @@ def claim_cli_env(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
     monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
-    (tmp_path / ".bth.toml").write_text(
-        f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n'
-    )
+    (tmp_path / ".bth.toml").write_text(f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n')
     return catalog
 
 
@@ -44,8 +42,15 @@ def test_claim_scaffold_creates_file(claim_cli_env, tmp_path):
     )
     con.execute(
         "INSERT INTO campaigns VALUES (?, ?, ?, ?, ?, ?, ?)",
-        ["camp-1", "testproj", "parity_test", "confirmation", "open",
-         datetime.now(UTC).isoformat(), "test hypothesis"],
+        [
+            "camp-1",
+            "testproj",
+            "parity_test",
+            "confirmation",
+            "open",
+            datetime.now(UTC).isoformat(),
+            "test hypothesis",
+        ],
     )
     con.close()
 
@@ -99,8 +104,7 @@ label = "Null"
     )
     con.execute(
         "INSERT INTO campaigns VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)",
-        ["camp-1", "testproj", "bind_test", "confirmation", "open",
-         datetime.now(UTC).isoformat()],
+        ["camp-1", "testproj", "bind_test", "confirmation", "open", datetime.now(UTC).isoformat()],
     )
     con.close()
 
@@ -124,7 +128,8 @@ def _register_test_claim(tmp_path, catalog, campaign_id="camp-1"):
     import textwrap
 
     claim_path = tmp_path / "test.claim.toml"
-    claim_path.write_text(textwrap.dedent("""
+    claim_path.write_text(
+        textwrap.dedent("""
         [claim]
         headline = "Test claim"
         kill_condition = "Outcome != expected"
@@ -136,7 +141,8 @@ def _register_test_claim(tmp_path, catalog, campaign_id="camp-1"):
         [[hypotheses]]
         id = "H_null"
         label = "Null"
-    """))
+    """)
+    )
     db_path = catalog / "bathos.db"
     con = duckdb.connect(str(db_path))
     con.execute(
@@ -145,8 +151,14 @@ def _register_test_claim(tmp_path, catalog, campaign_id="camp-1"):
     )
     con.execute(
         "INSERT INTO campaigns VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)",
-        [campaign_id, "testproj", "sidecar_gate_test", "confirmation", "open",
-         datetime.now(UTC).isoformat()],
+        [
+            campaign_id,
+            "testproj",
+            "sidecar_gate_test",
+            "confirmation",
+            "open",
+            datetime.now(UTC).isoformat(),
+        ],
     )
     con.close()
     result = runner.invoke(app, ["claim", "register", str(claim_path), "--campaign", campaign_id])
@@ -163,7 +175,8 @@ def test_validate_sidecar_campaign_flag_catches_wrong_hypothesis_id(claim_cli_en
     _register_test_claim(tmp_path, catalog)
 
     sidecar_path = tmp_path / "run_x.bth.toml"
-    sidecar_path.write_text(textwrap.dedent("""
+    sidecar_path.write_text(
+        textwrap.dedent("""
         [experiment]
         hypothesis = "test hypothesis"
         claim_discriminates = ["beyond_nj_regime_found", "caps_at_nj_no_beyond_nj_regime"]
@@ -178,7 +191,8 @@ def test_validate_sidecar_campaign_flag_catches_wrong_hypothesis_id(claim_cli_en
         is_residual = true
         [result_schema]
         x = "float"
-    """))
+    """)
+    )
 
     result = runner.invoke(app, ["validate-sidecar", str(sidecar_path), "--campaign", "camp-1"])
     assert result.exit_code == 1
@@ -194,7 +208,8 @@ def test_validate_sidecar_campaign_flag_passes_with_correct_ids(claim_cli_env, t
     _register_test_claim(tmp_path, catalog)
 
     sidecar_path = tmp_path / "run_x.bth.toml"
-    sidecar_path.write_text(textwrap.dedent("""
+    sidecar_path.write_text(
+        textwrap.dedent("""
         [experiment]
         hypothesis = "test hypothesis"
         claim_discriminates = ["H_primary", "H_null"]
@@ -209,7 +224,8 @@ def test_validate_sidecar_campaign_flag_passes_with_correct_ids(claim_cli_env, t
         is_residual = true
         [result_schema]
         x = "float"
-    """))
+    """)
+    )
 
     result = runner.invoke(app, ["validate-sidecar", str(sidecar_path), "--campaign", "camp-1"])
     assert result.exit_code == 0, result.output
@@ -220,7 +236,8 @@ def test_validate_sidecar_without_campaign_flag_unaffected(claim_cli_env, tmp_pa
     import textwrap
 
     sidecar_path = tmp_path / "run_x.bth.toml"
-    sidecar_path.write_text(textwrap.dedent("""
+    sidecar_path.write_text(
+        textwrap.dedent("""
         [experiment]
         hypothesis = "test hypothesis"
         claim_discriminates = ["anything at all, no claim to check against"]
@@ -235,7 +252,8 @@ def test_validate_sidecar_without_campaign_flag_unaffected(claim_cli_env, tmp_pa
         is_residual = true
         [result_schema]
         x = "float"
-    """))
+    """)
+    )
 
     result = runner.invoke(app, ["validate-sidecar", str(sidecar_path)])
     assert result.exit_code == 0, result.output

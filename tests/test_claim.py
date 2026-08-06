@@ -308,7 +308,14 @@ class TestRegisterClaim:
         temp_db.execute(
             "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            [campaign_id, "test", "test_campaign", "confirmation", "open", datetime.now(UTC).isoformat()]
+            [
+                campaign_id,
+                "test",
+                "test_campaign",
+                "confirmation",
+                "open",
+                datetime.now(UTC).isoformat(),
+            ],
         )
         temp_db.commit()
 
@@ -318,8 +325,7 @@ class TestRegisterClaim:
 
         # Verify stored
         row = temp_db.execute(
-            "SELECT claim_path, claim_sha256 FROM campaigns WHERE id=?",
-            [campaign_id]
+            "SELECT claim_path, claim_sha256 FROM campaigns WHERE id=?", [campaign_id]
         ).fetchone()
         assert row is not None
         assert row[0] == str(relative_path)
@@ -331,7 +337,14 @@ class TestRegisterClaim:
         temp_db.execute(
             "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            [campaign_id, "test", "test_campaign", "confirmation", "open", datetime.now(UTC).isoformat()]
+            [
+                campaign_id,
+                "test",
+                "test_campaign",
+                "confirmation",
+                "open",
+                datetime.now(UTC).isoformat(),
+            ],
         )
         temp_db.commit()
 
@@ -351,7 +364,14 @@ class TestRegisterClaim:
         temp_db.execute(
             "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            [campaign_id, "test", "test_campaign", "confirmation", "open", datetime.now(UTC).isoformat()]
+            [
+                campaign_id,
+                "test",
+                "test_campaign",
+                "confirmation",
+                "open",
+                datetime.now(UTC).isoformat(),
+            ],
         )
         temp_db.commit()
 
@@ -392,12 +412,11 @@ class TestUnionGate:
         # Insert runs with discriminates covering the clause hypotheses
         temp_db.execute(
             "INSERT INTO runs (id, campaign_id, claim_discriminates) VALUES (?, ?, ?)",
-            ["run1", campaign_id, json.dumps(["H_primary", "H_null"])]
+            ["run1", campaign_id, json.dumps(["H_primary", "H_null"])],
         )
         # Add to campaign_runs
         temp_db.execute(
-            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
-            [campaign_id, "run1"]
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)", [campaign_id, "run1"]
         )
         temp_db.commit()
 
@@ -413,12 +432,11 @@ class TestUnionGate:
         # Insert run without the required hypothesis IDs
         temp_db.execute(
             "INSERT INTO runs (id, campaign_id, claim_discriminates) VALUES (?, ?, ?)",
-            ["run1", campaign_id, json.dumps(["H_primary"])]  # Missing H_null
+            ["run1", campaign_id, json.dumps(["H_primary"])],  # Missing H_null
         )
         # Add to campaign_runs
         temp_db.execute(
-            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
-            [campaign_id, "run1"]
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)", [campaign_id, "run1"]
         )
         temp_db.commit()
 
@@ -523,7 +541,9 @@ class TestDifferentialConfoundCheck:
     """Tests for differential_confound_check() (debt #1071)."""
 
     @staticmethod
-    def _seed_covering_run(temp_db, campaign_id, run_id, *, differential_status, dependency_lock_sha256):
+    def _seed_covering_run(
+        temp_db, campaign_id, run_id, *, differential_status, dependency_lock_sha256
+    ):
         temp_db.execute(
             "INSERT INTO runs (id, campaign_id, claim_discriminates, differential_status, "
             "dependency_lock_sha256) VALUES (?, ?, ?, ?, ?)",
@@ -548,7 +568,9 @@ class TestDifferentialConfoundCheck:
         claim = parse_claim(path)
 
         result = differential_confound_check(temp_db, "camp1", claim, workspace_root=tmp_path)
-        assert result["clauses"] == [{"id": "C_main", "label": "Main clause (C_main)", "status": "uncontrolled"}]
+        assert result["clauses"] == [
+            {"id": "C_main", "label": "Main clause (C_main)", "status": "uncontrolled"}
+        ]
 
     def test_covering_run_passed_and_lock_matches_controlled(self, tmp_path, temp_db):
         from bathos.checker import hash_dependency_lock
@@ -678,7 +700,9 @@ class TestClaimCoverageReport:
         )
 
         # Verify file exists at correct path
-        report_path = Path(catalog_dir) / "sidecars" / campaign_id / f"claim_coverage_{campaign_id}.json"
+        report_path = (
+            Path(catalog_dir) / "sidecars" / campaign_id / f"claim_coverage_{campaign_id}.json"
+        )
         assert report_path.exists()
 
         # Verify JSON structure
@@ -709,7 +733,9 @@ class TestClaimCoverageReport:
             bypass_reason=None,
         )
 
-        report_path = Path(catalog_dir) / "sidecars" / campaign_id / f"claim_coverage_{campaign_id}.json"
+        report_path = (
+            Path(catalog_dir) / "sidecars" / campaign_id / f"claim_coverage_{campaign_id}.json"
+        )
         with open(report_path) as f:
             data = json.load(f)
 
@@ -766,7 +792,9 @@ hypothesis_ids = ["H_null"]
             bypass_reason=None,
         )
 
-        report_path = Path(catalog_dir) / "sidecars" / campaign_id / f"claim_coverage_{campaign_id}.json"
+        report_path = (
+            Path(catalog_dir) / "sidecars" / campaign_id / f"claim_coverage_{campaign_id}.json"
+        )
         with open(report_path) as f:
             data = json.load(f)
 
@@ -808,7 +836,9 @@ label = "Null"
             bypass_reason=None,
         )
 
-        report_path = Path(catalog_dir) / "sidecars" / campaign_id / f"claim_coverage_{campaign_id}.json"
+        report_path = (
+            Path(catalog_dir) / "sidecars" / campaign_id / f"claim_coverage_{campaign_id}.json"
+        )
         with open(report_path) as f:
             data = json.load(f)
 
@@ -833,7 +863,9 @@ label = "Null"
             bypass_reason=bypass_reason,
         )
 
-        report_path = Path(catalog_dir) / "sidecars" / campaign_id / f"claim_coverage_{campaign_id}.json"
+        report_path = (
+            Path(catalog_dir) / "sidecars" / campaign_id / f"claim_coverage_{campaign_id}.json"
+        )
         with open(report_path) as f:
             data = json.load(f)
 
@@ -916,7 +948,7 @@ equivalence_bound = 5.0
         """)
         temp_db.execute(
             "INSERT INTO runs (id, outcome, parity_run_type, metadata) VALUES (?, ?, ?, ?)",
-            ["run_12345", "pass", None, json.dumps({"other_metric": 50.0})]
+            ["run_12345", "pass", None, json.dumps({"other_metric": 50.0})],
         )
         temp_db.commit()
 
@@ -998,7 +1030,7 @@ equivalence_bound = 10.0
         """)
         temp_db.execute(
             "INSERT INTO runs (id, outcome, parity_run_type, metadata) VALUES (?, ?, ?, ?)",
-            ["baseline_run", "pass", None, json.dumps({"metric1": 102.0})]
+            ["baseline_run", "pass", None, json.dumps({"metric1": 102.0})],
         )
         temp_db.commit()
 
@@ -1046,7 +1078,7 @@ equivalence_bound = 5.0
         """)
         temp_db.execute(
             "INSERT INTO runs (id, outcome, parity_run_type, metadata) VALUES (?, ?, ?, ?)",
-            ["baseline_run", "pass", None, json.dumps({"metric1": 110.0})]
+            ["baseline_run", "pass", None, json.dumps({"metric1": 110.0})],
         )
         temp_db.commit()
 
@@ -1162,7 +1194,9 @@ gate_name = "g"
         guarded.parent.mkdir(parents=True)
         guarded.write_text("x = 1\n")
         subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
-        subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True
+        )
         sha = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True
         ).stdout.strip()
@@ -1178,6 +1212,7 @@ gate_name = "g"
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
 
 class TestAdvisoryLints:
     """Tests for AC-04, AC-05, AC-06 advisory lint checks."""
@@ -1385,28 +1420,26 @@ predicted_outcome = "outcome_b"
         # Insert campaign
         temp_db.execute(
             "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at) VALUES (?, ?, ?, ?, ?, ?)",
-            [campaign_id, "test", "test_campaign", "confirmation", "open", "2026-01-01T00:00:00Z"]
+            [campaign_id, "test", "test_campaign", "confirmation", "open", "2026-01-01T00:00:00Z"],
         )
 
         # Insert 2 runs with identical metadata
         metadata = json.dumps({"temperature": "300K", "pressure": "1atm"})
         temp_db.execute(
             "INSERT INTO runs (id, campaign_id, metadata) VALUES (?, ?, ?)",
-            ["run1", campaign_id, metadata]
+            ["run1", campaign_id, metadata],
         )
         temp_db.execute(
             "INSERT INTO runs (id, campaign_id, metadata) VALUES (?, ?, ?)",
-            ["run2", campaign_id, metadata]
+            ["run2", campaign_id, metadata],
         )
 
         # Link to campaign
         temp_db.execute(
-            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
-            [campaign_id, "run1"]
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)", [campaign_id, "run1"]
         )
         temp_db.execute(
-            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
-            [campaign_id, "run2"]
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)", [campaign_id, "run2"]
         )
         temp_db.commit()
 
@@ -1424,7 +1457,7 @@ predicted_outcome = "outcome_b"
         # Insert campaign
         temp_db.execute(
             "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at) VALUES (?, ?, ?, ?, ?, ?)",
-            [campaign_id, "test", "test_campaign", "confirmation", "open", "2026-01-01T00:00:00Z"]
+            [campaign_id, "test", "test_campaign", "confirmation", "open", "2026-01-01T00:00:00Z"],
         )
 
         # Insert 2 runs with different metadata values
@@ -1432,21 +1465,19 @@ predicted_outcome = "outcome_b"
         metadata2 = json.dumps({"temperature": "310K", "pressure": "1atm"})
         temp_db.execute(
             "INSERT INTO runs (id, campaign_id, metadata) VALUES (?, ?, ?)",
-            ["run1", campaign_id, metadata1]
+            ["run1", campaign_id, metadata1],
         )
         temp_db.execute(
             "INSERT INTO runs (id, campaign_id, metadata) VALUES (?, ?, ?)",
-            ["run2", campaign_id, metadata2]
+            ["run2", campaign_id, metadata2],
         )
 
         # Link to campaign
         temp_db.execute(
-            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
-            [campaign_id, "run1"]
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)", [campaign_id, "run1"]
         )
         temp_db.execute(
-            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
-            [campaign_id, "run2"]
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)", [campaign_id, "run2"]
         )
         temp_db.commit()
 
@@ -1463,20 +1494,19 @@ predicted_outcome = "outcome_b"
         # Insert campaign
         temp_db.execute(
             "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at) VALUES (?, ?, ?, ?, ?, ?)",
-            [campaign_id, "test", "test_campaign", "confirmation", "open", "2026-01-01T00:00:00Z"]
+            [campaign_id, "test", "test_campaign", "confirmation", "open", "2026-01-01T00:00:00Z"],
         )
 
         # Insert only 1 run
         metadata = json.dumps({"temperature": "300K", "pressure": "1atm"})
         temp_db.execute(
             "INSERT INTO runs (id, campaign_id, metadata) VALUES (?, ?, ?)",
-            ["run1", campaign_id, metadata]
+            ["run1", campaign_id, metadata],
         )
 
         # Link to campaign
         temp_db.execute(
-            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
-            [campaign_id, "run1"]
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)", [campaign_id, "run1"]
         )
         temp_db.commit()
 
@@ -1654,26 +1684,24 @@ predicted_outcome = "outcome_x"
         campaign_id = "test_campaign_002"
         temp_db.execute(
             "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at) VALUES (?, ?, ?, ?, ?, ?)",
-            [campaign_id, "test", "test_camp", "confirmation", "concluded", "2026-01-01T00:00:00"]
+            [campaign_id, "test", "test_camp", "confirmation", "concluded", "2026-01-01T00:00:00"],
         )
 
         # Add runs with NULL metadata
         temp_db.execute(
             "INSERT INTO runs (id, campaign_id, claim_discriminates, metadata) VALUES (?, ?, ?, ?)",
-            ["run1", campaign_id, None, None]
+            ["run1", campaign_id, None, None],
         )
         temp_db.execute(
             "INSERT INTO runs (id, campaign_id, claim_discriminates, metadata) VALUES (?, ?, ?, ?)",
-            ["run2", campaign_id, None, None]
+            ["run2", campaign_id, None, None],
         )
 
         temp_db.execute(
-            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
-            [campaign_id, "run1"]
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)", [campaign_id, "run1"]
         )
         temp_db.execute(
-            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
-            [campaign_id, "run2"]
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)", [campaign_id, "run2"]
         )
         temp_db.commit()
 
@@ -1687,27 +1715,25 @@ predicted_outcome = "outcome_x"
         campaign_id = "test_campaign_003"
         temp_db.execute(
             "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at) VALUES (?, ?, ?, ?, ?, ?)",
-            [campaign_id, "test", "test_camp3", "confirmation", "concluded", "2026-01-01T00:00:00"]
+            [campaign_id, "test", "test_camp3", "confirmation", "concluded", "2026-01-01T00:00:00"],
         )
 
         # Run 1 with metadata
         temp_db.execute(
             "INSERT INTO runs (id, campaign_id, metadata) VALUES (?, ?, ?)",
-            ["run1", campaign_id, json.dumps({"param": 1.0, "metric": 100.0})]
+            ["run1", campaign_id, json.dumps({"param": 1.0, "metric": 100.0})],
         )
         # Run 2 without metadata
         temp_db.execute(
             "INSERT INTO runs (id, campaign_id, metadata) VALUES (?, ?, ?)",
-            ["run2", campaign_id, None]
+            ["run2", campaign_id, None],
         )
 
         temp_db.execute(
-            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
-            [campaign_id, "run1"]
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)", [campaign_id, "run1"]
         )
         temp_db.execute(
-            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
-            [campaign_id, "run2"]
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)", [campaign_id, "run2"]
         )
         temp_db.commit()
 
@@ -1756,27 +1782,25 @@ predicted_outcome = "outcome_2"
         campaign_id = "test_campaign_004"
         temp_db.execute(
             "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at) VALUES (?, ?, ?, ?, ?, ?)",
-            [campaign_id, "test", "test_camp4", "confirmation", "concluded", "2026-01-01T00:00:00"]
+            [campaign_id, "test", "test_camp4", "confirmation", "concluded", "2026-01-01T00:00:00"],
         )
 
         # Run 1
         temp_db.execute(
             "INSERT INTO runs (id, campaign_id, metadata) VALUES (?, ?, ?)",
-            ["run1", campaign_id, json.dumps({"param": 1.0, "metric": 100.0})]
+            ["run1", campaign_id, json.dumps({"param": 1.0, "metric": 100.0})],
         )
         # Run 2 with different param value
         temp_db.execute(
             "INSERT INTO runs (id, campaign_id, metadata) VALUES (?, ?, ?)",
-            ["run2", campaign_id, json.dumps({"param": 2.0, "metric": 100.0})]
+            ["run2", campaign_id, json.dumps({"param": 2.0, "metric": 100.0})],
         )
 
         temp_db.execute(
-            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
-            [campaign_id, "run1"]
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)", [campaign_id, "run1"]
         )
         temp_db.execute(
-            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
-            [campaign_id, "run2"]
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)", [campaign_id, "run2"]
         )
         temp_db.commit()
 
@@ -1810,27 +1834,25 @@ label = "Null"
         campaign_id = "test_campaign_005"
         temp_db.execute(
             "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at) VALUES (?, ?, ?, ?, ?, ?)",
-            [campaign_id, "test", "test_camp5", "confirmation", "concluded", "2026-01-01T00:00:00"]
+            [campaign_id, "test", "test_camp5", "confirmation", "concluded", "2026-01-01T00:00:00"],
         )
 
         # Both runs with identical metadata
         metadata_same = json.dumps({"param": 1.0, "metric": 100.0})
         temp_db.execute(
             "INSERT INTO runs (id, campaign_id, metadata) VALUES (?, ?, ?)",
-            ["run1", campaign_id, metadata_same]
+            ["run1", campaign_id, metadata_same],
         )
         temp_db.execute(
             "INSERT INTO runs (id, campaign_id, metadata) VALUES (?, ?, ?)",
-            ["run2", campaign_id, metadata_same]
+            ["run2", campaign_id, metadata_same],
         )
 
         temp_db.execute(
-            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
-            [campaign_id, "run1"]
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)", [campaign_id, "run1"]
         )
         temp_db.execute(
-            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)",
-            [campaign_id, "run2"]
+            "INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)", [campaign_id, "run2"]
         )
         temp_db.commit()
 
@@ -1905,7 +1927,9 @@ predicted_outcome = ""
             bypass_reason=None,
         )
 
-        report_path = Path(catalog_dir) / "sidecars" / campaign_id / f"claim_coverage_{campaign_id}.json"
+        report_path = (
+            Path(catalog_dir) / "sidecars" / campaign_id / f"claim_coverage_{campaign_id}.json"
+        )
         with open(report_path) as f:
             data = json.load(f)
 
@@ -1915,4 +1939,3 @@ predicted_outcome = ""
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
-

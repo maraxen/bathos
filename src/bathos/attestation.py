@@ -432,8 +432,7 @@ def register_attestation(
     if not validation.ok:
         messages = "; ".join(e.message for e in validation.errors)
         raise AttestationValidationFailed(
-            f"Attestation at {path} failed validation and was NOT registered: "
-            f"{messages}"
+            f"Attestation at {path} failed validation and was NOT registered: {messages}"
         )
 
     canonical_path = _canonical_attestation_path(catalog_dir, attestation.sha256)

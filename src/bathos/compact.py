@@ -285,6 +285,19 @@ def _migrate_v12(run_dict: dict) -> dict:
     return run_dict
 
 
+def _migrate_v13(run_dict: dict) -> dict:
+    """Migrate v13 fragment to v14 by adding adversarial_check_result.
+
+    Defaults to None, not "passed" -- a run predating adversarial-check EVALUATION never had
+    its check evaluated, which is a different fact from having been evaluated and cleared.
+    Defaulting to "passed" would retroactively certify every historical run against a gate
+    that did not exist when it ran.
+    """
+    run_dict["adversarial_check_result"] = None
+    run_dict["schema_version"] = "14"
+    return run_dict
+
+
 MIGRATIONS["0"] = _migrate_v0
 MIGRATIONS["1"] = _migrate_v1
 MIGRATIONS["2"] = _migrate_v2
@@ -298,6 +311,7 @@ MIGRATIONS["9"] = _migrate_v9
 MIGRATIONS["10"] = _migrate_v10
 MIGRATIONS["11"] = _migrate_v11
 MIGRATIONS["12"] = _migrate_v12
+MIGRATIONS["13"] = _migrate_v13
 
 
 _RUNS_TABLE_SCHEMA = """
@@ -357,7 +371,8 @@ CREATE TABLE IF NOT EXISTS runs (
     differential_off_value TEXT,
     differential_on_value TEXT,
     differential_effect DOUBLE,
-    dependency_lock_sha256 TEXT
+    dependency_lock_sha256 TEXT,
+    adversarial_check_result TEXT
 )
 """
 
@@ -524,9 +539,7 @@ def _ingest_ledger_fragments(con: duckdb.DuckDBPyConnection, catalog_dir: Path) 
     con.execute(_LEDGER_TABLE_SCHEMA)
     ingested = 0
     for record in records:
-        existing = con.execute(
-            "SELECT id FROM trust_ledger WHERE id = ?", [record.id]
-        ).fetchone()
+        existing = con.execute("SELECT id FROM trust_ledger WHERE id = ?", [record.id]).fetchone()
         if existing:
             continue
         con.execute(
@@ -651,6 +664,9 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                 pm = parse_postmortem(pm_file)
                 if pm.status != "draft":
                     rel_path = str(pm_file.relative_to(workspace_root))
+                    # Campaign-scoped postmortems have run_id == "" and would all collide
+                # on that key, silently overwriting one another.
+                if pm.run_id:
                     postmortem_map[pm.run_id] = (pm, rel_path)
             except Exception as e:
                 logger.warning(f"Skipping postmortem parse: {pm_file}: {e}")
@@ -718,6 +734,7 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
         "ALTER TABLE runs ADD COLUMN IF NOT EXISTS differential_on_value TEXT",
         "ALTER TABLE runs ADD COLUMN IF NOT EXISTS differential_effect DOUBLE",
         "ALTER TABLE runs ADD COLUMN IF NOT EXISTS dependency_lock_sha256 TEXT",
+        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS adversarial_check_result TEXT",
     ]:
         with contextlib.suppress(Exception):
             con.execute(_runs_alter_sql)
@@ -742,9 +759,7 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
         with contextlib.suppress(Exception):
             con.execute(_alter_sql)
 
-    con.execute(
-        "CREATE INDEX IF NOT EXISTS idx_campaigns_mode_status ON campaigns (mode, status)"
-    )
+    con.execute("CREATE INDEX IF NOT EXISTS idx_campaigns_mode_status ON campaigns (mode, status)")
 
     # DE-RISK SPIKE (gate 2b-A, #3485, branch figure-eda-2bA-durability-spike — NOT
     # on main): re-derive sidecar_anchors from cool-tier anchor fragments, same as
@@ -804,10 +819,19 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
             if run.id in postmortem_map:
                 pm, rel_path = postmortem_map[run.id]
                 postmortem_verdict_override = pm.verdict_override
-                postmortem_has_anomalies = any(v and str(v).lower() != "none" for v in getattr(pm, "anomalies", {}).values())
+                postmortem_has_anomalies = any(
+                    v and str(v).lower() != "none" for v in getattr(pm, "anomalies", {}).values()
+                )
 
-                curr_outcome = con.execute("SELECT outcome FROM runs WHERE id = ?", [run.id]).fetchone()[0] or ""
-                outcome = postmortem_verdict_override if postmortem_verdict_override != "none" else curr_outcome
+                curr_outcome = (
+                    con.execute("SELECT outcome FROM runs WHERE id = ?", [run.id]).fetchone()[0]
+                    or ""
+                )
+                outcome = (
+                    postmortem_verdict_override
+                    if postmortem_verdict_override != "none"
+                    else curr_outcome
+                )
 
                 con.execute(
                     """
@@ -835,8 +859,8 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                         postmortem_has_anomalies,
                         pm.summary,
                         json.dumps(pm.asset_links),
-                        run.id
-                    ]
+                        run.id,
+                    ],
                 )
             continue
 
@@ -852,7 +876,9 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
             run.postmortem_author = pm.author
             run.postmortem_path = rel_path
             run.postmortem_hypothesis_status = pm.hypothesis_status
-            run.postmortem_has_anomalies = any(v and str(v).lower() != "none" for v in getattr(pm, "anomalies", {}).values())
+            run.postmortem_has_anomalies = any(
+                v and str(v).lower() != "none" for v in getattr(pm, "anomalies", {}).values()
+            )
             run.postmortem_summary = pm.summary
             run.postmortem_asset_links = json.dumps(pm.asset_links)
             if pm.verdict_override != "none":
@@ -880,8 +906,9 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                 postmortem_hypothesis_status, postmortem_has_anomalies, postmortem_summary, postmortem_asset_links, stage_name,
                 claim_discriminates, claim_isolates, parity_run_type, seed, baseline_hpo_trials, baseline_hpo_compute_budget,
                 stdout_sha256, component_id, component_sidecar_sha256,
-                differential_status, differential_off_value, differential_on_value, differential_effect, dependency_lock_sha256
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                differential_status, differential_off_value, differential_on_value, differential_effect, dependency_lock_sha256,
+                adversarial_check_result
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 run.id,
@@ -936,6 +963,7 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                 run.differential_on_value,
                 run.differential_effect,
                 run.dependency_lock_sha256,
+                run.adversarial_check_result,
             ],
         )
 
@@ -944,11 +972,14 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
     # Populate campaign_runs from runs with campaign_id set
     for run in cool_runs:
         if run.campaign_id:
-            con.execute("""
+            con.execute(
+                """
                 INSERT INTO campaign_runs (campaign_id, run_id)
                 VALUES (?, ?)
                 ON CONFLICT DO NOTHING
-            """, [run.campaign_id, run.id])
+            """,
+                [run.campaign_id, run.id],
+            )
 
     # Update schema_meta table
     con.execute(

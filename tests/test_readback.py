@@ -247,9 +247,7 @@ class TestGetTrustStateThreeStates:
 
     def test_anchored_figure_with_no_promotion_is_candidate(self, catalog_with_campaign_sidecars):
         catalog_dir, campaign_id = catalog_with_campaign_sidecars
-        register_anchor(
-            catalog_dir, "fig.svg", "a" * 64, "figure", campaign_id=campaign_id
-        )
+        register_anchor(catalog_dir, "fig.svg", "a" * 64, "figure", campaign_id=campaign_id)
 
         assert get_trust_state(catalog_dir, "a" * 64) == ProductTrustState.CANDIDATE
 
@@ -380,9 +378,7 @@ class TestListCandidatesRealBehavior:
 
     def test_lists_anchored_figure_not_yet_promoted(self, catalog_with_campaign_sidecars):
         catalog_dir, campaign_id = catalog_with_campaign_sidecars
-        register_anchor(
-            catalog_dir, "fig.svg", "1" * 64, "figure", campaign_id=campaign_id
-        )
+        register_anchor(catalog_dir, "fig.svg", "1" * 64, "figure", campaign_id=campaign_id)
 
         candidates = list_candidates(catalog_dir, campaign_id)
 
@@ -423,9 +419,7 @@ created_at = "2026-07-14T00:00:00Z"
 
         catalog_dir, campaign_id = catalog_with_campaign_sidecars
         content_hash = "2" * 64
-        register_anchor(
-            catalog_dir, "fig2.svg", content_hash, "figure", campaign_id=campaign_id
-        )
+        register_anchor(catalog_dir, "fig2.svg", content_hash, "figure", campaign_id=campaign_id)
 
         attestation_path = tmp_path / "b.attestation.bth.toml"
         attestation_path.write_text(f"""
@@ -509,9 +503,7 @@ class TestFigureLookupComposesWithAnchorStore:
 
     def test_figure_lookup_finds_anchor_by_input_hash(self, catalog_with_campaign_sidecars):
         catalog_dir, campaign_id = catalog_with_campaign_sidecars
-        register_anchor(
-            catalog_dir, "fig.png", "a" * 64, "figure", content_hash="b" * 64
-        )
+        register_anchor(catalog_dir, "fig.png", "a" * 64, "figure", content_hash="b" * 64)
 
         results = figure_lookup(catalog_dir, input_hash="b" * 64)
 
@@ -536,9 +528,7 @@ class TestFigureLookupComposesWithAnchorStore:
 class TestReadbackSurfaceIsFullyCallable:
     """All seven S1 functions are callable against one live catalog fixture."""
 
-    def test_all_seven_functions_callable(
-        self, catalog_with_run, catalog_with_campaign_sidecars
-    ):
+    def test_all_seven_functions_callable(self, catalog_with_run, catalog_with_campaign_sidecars):
         run_catalog_dir, run, output_path, sha256 = catalog_with_run
         report_catalog_dir, campaign_id = catalog_with_campaign_sidecars
 

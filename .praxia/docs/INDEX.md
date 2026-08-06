@@ -1,4 +1,4 @@
-# bathos Internal Docs
+# praxia Internal Docs
 
 ## Daily
 
@@ -8,6 +8,7 @@
 - [260601_v061-sprint-close](handoffs/260601_v061-sprint-close.md)
 
 ## Plans
+- [260805_deferred-item-triage-reconcile-the-handoff-backlog](plans/260805_deferred-item-triage-reconcile-the-handoff-backlog.md) — Scope for a one-time sweep of 42 deferred handoff entries plus a session-close reconciliation step, after Postgres evidence showed the defect is stale handoffs rather than untracked work
 - [260710_asr-rigor-ports-sprint-composition](plans/260710_asr-rigor-ports-sprint-composition.md) — port asr's C1–C5 rigor mechanisms into bathos core: BP-1 C3 concentration lint (`linter.py`), BP-2 C1 `[confounds.synthetic_recovery]` gate (`claim.py` AC-13 + `parity.py` submit-gate templates), BP-3 C5 negative-claim check (`validate_claim`); C2 needs a schema field (Appendix A), C4 stays in asr (Appendix B)
 - [260623_claim-labels-lint-sprint-composition](plans/260623_claim-labels-lint-sprint-composition.md)
 - [260611_worktree-workspace-resolution-dag](plans/260611_worktree-workspace-resolution-dag.md) — backlog DAG (T1→T3/T3b→T4) for worktree-aware workspace resolution; praxia backlog #1676–#1684

@@ -69,6 +69,7 @@ def get_skill_source_path() -> Path:
 
 def _mcp_entry() -> dict:
     import shutil
+
     exe = shutil.which("bth-mcp")
     if exe:
         return {"command": exe}

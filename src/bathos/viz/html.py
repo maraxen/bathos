@@ -1,4 +1,5 @@
 """Static HTML export for bathos catalog."""
+
 from __future__ import annotations
 
 import importlib.resources
@@ -66,9 +67,7 @@ def _project_campaigns(
             try:
                 import duckdb
 
-                conn = duckdb.connect(
-                    str(catalog_dir / "bathos.db"), read_only=True
-                )
+                conn = duckdb.connect(str(catalog_dir / "bathos.db"), read_only=True)
 
                 agg_sql = """
                     SELECT outcome, COUNT(*) AS n,
@@ -144,9 +143,7 @@ def render_html_report(
 
     # Project runs and campaigns
     run_displays: list[RunDisplay] = [project_run(run) for run in runs]
-    campaign_displays: list[CampaignDisplay] = _project_campaigns(
-        campaigns or [], catalog_dir
-    )
+    campaign_displays: list[CampaignDisplay] = _project_campaigns(campaigns or [], catalog_dir)
 
     # Build data blob for embedding
     data_blob = {
@@ -169,7 +166,9 @@ def render_html_report(
 
     # Inject data blob into head before </head> tag
     data_json = json.dumps(data_blob)
-    script_block = f'\n    <script>\n        window.__BATHOS_DATA__ = {data_json};\n    </script>\n</head>'
+    script_block = (
+        f"\n    <script>\n        window.__BATHOS_DATA__ = {data_json};\n    </script>\n</head>"
+    )
     html = html.replace("</head>", script_block)
 
     return html

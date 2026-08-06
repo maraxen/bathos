@@ -262,16 +262,13 @@ def check_parity_confounds_for_submit(sidecar, catalog_dir: Path) -> dict:
                 rows = conn.execute(
                     "SELECT 1 FROM runs WHERE command LIKE ? AND outcome = 'pass' AND "
                     "parity_run_type = 'literature_parity' LIMIT 1",
-                    [f"%{requires_parity_stem}%"]
+                    [f"%{requires_parity_stem}%"],
                 ).fetchall()
                 if rows:
                     # Found a passing parity run
                     return {"satisfied": True, "tier_enforced": False}
                 # Warm DB exists but no match found -> prerequisite unmet, determinable
-                return {
-                    "satisfied": False,
-                    "tier_enforced": is_validation_or_production
-                }
+                return {"satisfied": False, "tier_enforced": is_validation_or_production}
         except Exception as e:
             logger.warning(f"Warm tier parity prerequisite check failed: {e}")
 
@@ -291,8 +288,7 @@ def check_parity_confounds_for_submit(sidecar, catalog_dir: Path) -> dict:
                     # attempting to read it raises on every real fragment (which was
                     # the spurious hard-block bug the AC-22 restructure fixes).
                     table = pq.read_table(
-                        str(parquet_file),
-                        columns=["command", "outcome", "parity_run_type"]
+                        str(parquet_file), columns=["command", "outcome", "parity_run_type"]
                     )
                     fragments_read_ok += 1
                     cmds = table.column("command").to_pylist()
@@ -300,10 +296,12 @@ def check_parity_confounds_for_submit(sidecar, catalog_dir: Path) -> dict:
                     parity_types = table.column("parity_run_type").to_pylist()
 
                     for cmd, outcome, parity_type in zip(cmds, outcomes, parity_types):
-                        if (outcome == "pass"
-                                and cmd
-                                and requires_parity_stem in cmd
-                                and parity_type == "literature_parity"):
+                        if (
+                            outcome == "pass"
+                            and cmd
+                            and requires_parity_stem in cmd
+                            and parity_type == "literature_parity"
+                        ):
                             return {"satisfied": True, "tier_enforced": False}
                 except Exception as e:
                     logger.warning(f"Failed to read {parquet_file}: {e}")
@@ -316,7 +314,4 @@ def check_parity_confounds_for_submit(sidecar, catalog_dir: Path) -> dict:
         return {"satisfied": None, "tier_enforced": False}
 
     # ≥1 fragment read OK with no match → determinable, prerequisite unmet
-    return {
-        "satisfied": False,
-        "tier_enforced": is_validation_or_production
-    }
+    return {"satisfied": False, "tier_enforced": is_validation_or_production}

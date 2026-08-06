@@ -137,9 +137,7 @@ class TestGenuineAttestationStillPromotes:
 
     def test_genuine_oracle_match_registers_and_promotes(self, tmp_path, catalog_dir):
         content_hash = "d" * 64
-        toml_text = GENUINE_ORACLE_MATCH_TOML.format(
-            content_hash=content_hash, oracle_sha="e" * 64
-        )
+        toml_text = GENUINE_ORACLE_MATCH_TOML.format(content_hash=content_hash, oracle_sha="e" * 64)
         path = tmp_path / "genuine.attestation.bth.toml"
         path.write_text(toml_text)
 

@@ -163,7 +163,5 @@ class TestFullMCPWorkflow:
         assert "error" in get_result
 
         # Try valid SQL query on empty runs table (queries without catalog fail at domain layer)
-        sql_result = run_sql_tool(
-            catalog_dir=str(catalog_dir), sql="SELECT 1 as col"
-        )
+        sql_result = run_sql_tool(catalog_dir=str(catalog_dir), sql="SELECT 1 as col")
         assert "rows" in sql_result

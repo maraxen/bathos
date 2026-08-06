@@ -64,7 +64,9 @@ def sync_catalog(
         runs_root = catalog_dir / "runs"
         if not pull and runs_root.exists():
             total = len(list(runs_root.rglob("run_*.parquet")))
-            project_count = len(list(local_runs.glob("run_*.parquet"))) if local_runs.exists() else 0
+            project_count = (
+                len(list(local_runs.glob("run_*.parquet"))) if local_runs.exists() else 0
+            )
             filtered = total - project_count
         else:
             filtered = 0
@@ -255,6 +257,7 @@ def sync_catalog(
     truncated_candidates = []
     if pull:
         import pyarrow.parquet as pq
+
         scan_window_start = start_time - 5.0  # 5s buffer for clock skew
         for parquet_file in Path(dst.rstrip("/ ")).rglob("run_*.parquet"):
             if parquet_file.stat().st_mtime < scan_window_start:

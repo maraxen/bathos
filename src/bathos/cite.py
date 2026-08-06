@@ -21,19 +21,9 @@ def format_citation(run: Run, fmt: str = "markdown") -> str:
         Formatted citation string.
     """
     # Handle pre-v0.6 runs with missing manifest fields
-    manifest_hash = (
-        run.manifest_sha256
-        if run.manifest_sha256
-        else "not recorded — pre-v0.6"
-    )
-    manifest_path_display = (
-        run.manifest_path if run.manifest_path else "not recorded — pre-v0.6"
-    )
-    sidecar_hash = (
-        run.sidecar_sha256
-        if run.sidecar_sha256
-        else "not recorded — pre-v0.6"
-    )
+    manifest_hash = run.manifest_sha256 if run.manifest_sha256 else "not recorded — pre-v0.6"
+    manifest_path_display = run.manifest_path if run.manifest_path else "not recorded — pre-v0.6"
+    sidecar_hash = run.sidecar_sha256 if run.sidecar_sha256 else "not recorded — pre-v0.6"
 
     if fmt == "json":
         return json.dumps(

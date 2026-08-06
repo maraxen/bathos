@@ -5,3 +5,33 @@ root = "/home/marielle/projects/bathos"
 [remotes.engaging]
 host = "engaging"
 remote_root = "~/projects/prolix"
+
+# Post-mortem obligation triggers (spec §5). Each opens a ledger entry; none blocks.
+# Enabled here rather than via shell export so SLURM jobs, which read this same file,
+# behave identically to local runs. Override per-invocation with
+# BTH_OBLIGATION_<TRIGGER>=0/1, which wins in both directions.
+[obligations]
+# Highest-value and safest: can only fire where a [review] entry with
+# disposition = "supports" already exists, so it cannot reach anything authored
+# before build-order step 2. Inert until the first review entry lands.
+citation_contradicted = true
+# Fires only when a declared adversarial_check evaluates false on a run that
+# otherwise landed on that branch. Inert until sidecars declare one.
+adversarial_check_fired = true
+# The widest trigger: one ledger entry per non-pass run from here on. Forward-only —
+# it does not touch the existing catalog.
+outcome_failed = true
+campaign_confounded = false
+# ENFORCING: open obligations on a campaign or its member runs now downgrade the
+# verdict to 'confounded' at conclude for confirmation/sequential campaigns.
+# Discharge them by writing a post-mortem that names them in `discharges`
+# (`bth postmortem scaffold --campaign-id <id>` lists the open ones).
+enforce = true
+
+[claim]
+# ENFORCING: a confirmation/sequential campaign whose hypotheses and confounds are not
+# each covered by a [review] entry is downgraded to 'confounded' at conclude.
+# Measured blast radius when enabled: 3 open confirmation campaigns carry a registered
+# claim and no sidecar yet carries a [review] block, so those three will downgrade until
+# review entries are authored. `--force` bypasses with an audit trail.
+review_coverage_enforce = true

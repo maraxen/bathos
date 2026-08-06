@@ -97,7 +97,17 @@ def submit_job(
 ) -> dict:
     """Run `myxcel submit-job --json <remote> <project> --preset <preset> --command <command> ...`
     Returns parsed JSON dict with keys: slurm_job_id, script_path, preset_used, job_name."""
-    argv = ["myxcel", "submit-job", "--json", remote, project, "--preset", preset, "--command", command]
+    argv = [
+        "myxcel",
+        "submit-job",
+        "--json",
+        remote,
+        project,
+        "--preset",
+        preset,
+        "--command",
+        command,
+    ]
 
     if job_name:
         argv.extend(["--job-name", job_name])

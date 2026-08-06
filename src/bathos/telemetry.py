@@ -87,9 +87,7 @@ class JsonFormatter(logging.Formatter):
         """Convert LogRecord to JSON line."""
         # Envelope: required on every record
         envelope = {
-            "ts": datetime.fromtimestamp(record.created, tz=UTC).isoformat(
-                timespec="microseconds"
-            ),
+            "ts": datetime.fromtimestamp(record.created, tz=UTC).isoformat(timespec="microseconds"),
             "level": record.levelname.lower(),
             "pid": record.process,
             "tid": record.thread,
@@ -150,13 +148,14 @@ class JsonFormatter(logging.Formatter):
             try:
                 result = json.dumps(envelope, default=repr)
                 # Emit warning about serialization fallback to stderr (not via event() to avoid recursion)
-                print(f"telemetry: serialise_error for field in event {getattr(record, 'event', '?')}", file=sys.stderr)
+                print(
+                    f"telemetry: serialise_error for field in event {getattr(record, 'event', '?')}",
+                    file=sys.stderr,
+                )
                 return result
             except Exception as e:
                 # Last resort: encode as string representation
-                return json.dumps(
-                    {**envelope, "error": f"JSON encode failed: {e}"}, default=str
-                )
+                return json.dumps({**envelope, "error": f"JSON encode failed: {e}"}, default=str)
 
 
 def _extract_surface(logger_name: str) -> str:
@@ -196,7 +195,10 @@ class ContextVarCaptureQueueHandler(QueueHandler):
 
 
 def init_telemetry(
-    level: str | int | None = None, log_dir: str | Path | None = None, max_bytes: int = 10485760, backup_count: int = 5
+    level: str | int | None = None,
+    log_dir: str | Path | None = None,
+    max_bytes: int = 10485760,
+    backup_count: int = 5,
 ) -> None:
     """Initialize telemetry pipeline (idempotent).
 
@@ -262,9 +264,7 @@ def init_telemetry(
     pid = os.getpid()
     log_file = log_dir / f"events.{hostname}.{pid}.jsonl"
 
-    file_handler = RotatingFileHandler(
-        log_file, maxBytes=max_bytes, backupCount=backup_count
-    )
+    file_handler = RotatingFileHandler(log_file, maxBytes=max_bytes, backupCount=backup_count)
     file_handler.setFormatter(JsonFormatter())
 
     # Listener thread (daemon)
@@ -309,7 +309,9 @@ def get_logger(name: str) -> logging.Logger:
     # If telemetry is initialized, ensure the QueueHandler is on this logger
     if _INITIALIZED and _queue is not None:
         # Check if it already has a QueueHandler
-        has_queue_handler = any(isinstance(h, ContextVarCaptureQueueHandler) for h in logger.handlers)
+        has_queue_handler = any(
+            isinstance(h, ContextVarCaptureQueueHandler) for h in logger.handlers
+        )
         if not has_queue_handler:
             queue_handler = ContextVarCaptureQueueHandler(_queue)
             logger.addHandler(queue_handler)

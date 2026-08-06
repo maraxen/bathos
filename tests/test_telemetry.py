@@ -38,6 +38,7 @@ import pytest
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _drain_and_read_jsonl(log_dir: Path, sleep_s: float = 0.2) -> list[dict]:
     """Wait briefly for the async listener, then read all JSONL records."""
     time.sleep(sleep_s)
@@ -446,8 +447,7 @@ class TestSLURMConcurrentWrites:
 
         slurm_events = [r for r in all_records if r.get("event") == "slurm.step"]
         assert len(slurm_events) == n_workers * events_per_worker, (
-            f"Expected {n_workers * events_per_worker} slurm.step events, "
-            f"got {len(slurm_events)}"
+            f"Expected {n_workers * events_per_worker} slurm.step events, got {len(slurm_events)}"
         )
 
 

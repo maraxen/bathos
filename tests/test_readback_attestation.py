@@ -65,8 +65,13 @@ class TestQueryAttestationVerdictGate:
     def test_pass_oracle_match_is_returned(self, tmp_path, catalog_dir):
         content_hash = "a" * 64
         _register(
-            tmp_path, catalog_dir, ORACLE_MATCH_TOML, content_hash, "PASS",
-            "a1.attestation.bth.toml", oracle_sha="b" * 64,
+            tmp_path,
+            catalog_dir,
+            ORACLE_MATCH_TOML,
+            content_hash,
+            "PASS",
+            "a1.attestation.bth.toml",
+            oracle_sha="b" * 64,
         )
 
         result = query_attestation(catalog_dir, content_hash)
@@ -81,8 +86,13 @@ class TestQueryAttestationVerdictGate:
     def test_warn_attestation_is_not_returned(self, tmp_path, catalog_dir):
         content_hash = "b" * 64
         _register(
-            tmp_path, catalog_dir, ORACLE_MATCH_TOML, content_hash, "WARN",
-            "b1.attestation.bth.toml", oracle_sha="c" * 64,
+            tmp_path,
+            catalog_dir,
+            ORACLE_MATCH_TOML,
+            content_hash,
+            "WARN",
+            "b1.attestation.bth.toml",
+            oracle_sha="c" * 64,
         )
 
         assert query_attestation(catalog_dir, content_hash) is None
@@ -90,8 +100,13 @@ class TestQueryAttestationVerdictGate:
     def test_fail_attestation_is_not_returned(self, tmp_path, catalog_dir):
         content_hash = "c" * 64
         _register(
-            tmp_path, catalog_dir, ORACLE_MATCH_TOML, content_hash, "FAIL",
-            "c1.attestation.bth.toml", oracle_sha="d" * 64,
+            tmp_path,
+            catalog_dir,
+            ORACLE_MATCH_TOML,
+            content_hash,
+            "FAIL",
+            "c1.attestation.bth.toml",
+            oracle_sha="d" * 64,
         )
 
         assert query_attestation(catalog_dir, content_hash) is None
@@ -103,8 +118,13 @@ class TestQueryAttestationVerdictGate:
 
         content_hash = "d" * 64
         _register(
-            tmp_path, catalog_dir, ORACLE_MATCH_TOML, content_hash, "WARN",
-            "d1.attestation.bth.toml", oracle_sha="e" * 64,
+            tmp_path,
+            catalog_dir,
+            ORACLE_MATCH_TOML,
+            content_hash,
+            "WARN",
+            "d1.attestation.bth.toml",
+            oracle_sha="e" * 64,
         )
 
         assert query_attestation(catalog_dir, content_hash) is None
@@ -115,7 +135,11 @@ class TestQueryAttestationVerdictGate:
     def test_pass_repro_floor_is_returned(self, tmp_path, catalog_dir):
         content_hash = "e" * 64
         _register(
-            tmp_path, catalog_dir, REPRO_FLOOR_TOML, content_hash, "PASS",
+            tmp_path,
+            catalog_dir,
+            REPRO_FLOOR_TOML,
+            content_hash,
+            "PASS",
             "e1.attestation.bth.toml",
         )
 
@@ -130,7 +154,11 @@ class TestQueryAttestationMinStrength:
     def test_repro_floor_does_not_satisfy_oracle_match_minimum(self, tmp_path, catalog_dir):
         content_hash = "f" * 64
         _register(
-            tmp_path, catalog_dir, REPRO_FLOOR_TOML, content_hash, "PASS",
+            tmp_path,
+            catalog_dir,
+            REPRO_FLOOR_TOML,
+            content_hash,
+            "PASS",
             "f1.attestation.bth.toml",
         )
 
@@ -144,8 +172,13 @@ class TestQueryAttestationMinStrength:
         (repro_floor) minimum requirement too."""
         content_hash = "1" * 64
         _register(
-            tmp_path, catalog_dir, ORACLE_MATCH_TOML, content_hash, "PASS",
-            "g1.attestation.bth.toml", oracle_sha="2" * 64,
+            tmp_path,
+            catalog_dir,
+            ORACLE_MATCH_TOML,
+            content_hash,
+            "PASS",
+            "g1.attestation.bth.toml",
+            oracle_sha="2" * 64,
         )
 
         result = query_attestation(catalog_dir, content_hash, min_strength="repro_floor")
@@ -155,8 +188,13 @@ class TestQueryAttestationMinStrength:
     def test_oracle_match_satisfies_oracle_match_minimum(self, tmp_path, catalog_dir):
         content_hash = "3" * 64
         _register(
-            tmp_path, catalog_dir, ORACLE_MATCH_TOML, content_hash, "PASS",
-            "h1.attestation.bth.toml", oracle_sha="4" * 64,
+            tmp_path,
+            catalog_dir,
+            ORACLE_MATCH_TOML,
+            content_hash,
+            "PASS",
+            "h1.attestation.bth.toml",
+            oracle_sha="4" * 64,
         )
 
         result = query_attestation(catalog_dir, content_hash, min_strength="oracle_match")
@@ -164,15 +202,26 @@ class TestQueryAttestationMinStrength:
 
 
 class TestQueryAttestationPrefersStrongest:
-    def test_prefers_oracle_match_over_repro_floor_for_same_content_hash(self, tmp_path, catalog_dir):
+    def test_prefers_oracle_match_over_repro_floor_for_same_content_hash(
+        self, tmp_path, catalog_dir
+    ):
         content_hash = "5" * 64
         _register(
-            tmp_path, catalog_dir, REPRO_FLOOR_TOML, content_hash, "PASS",
+            tmp_path,
+            catalog_dir,
+            REPRO_FLOOR_TOML,
+            content_hash,
+            "PASS",
             "i1.attestation.bth.toml",
         )
         _register(
-            tmp_path, catalog_dir, ORACLE_MATCH_TOML, content_hash, "PASS",
-            "i2.attestation.bth.toml", oracle_sha="6" * 64,
+            tmp_path,
+            catalog_dir,
+            ORACLE_MATCH_TOML,
+            content_hash,
+            "PASS",
+            "i2.attestation.bth.toml",
+            oracle_sha="6" * 64,
         )
 
         result = query_attestation(catalog_dir, content_hash)
@@ -191,8 +240,13 @@ class TestInertEvidenceUntilTrustLedger:
 
         content_hash = "7" * 64
         _register(
-            tmp_path, catalog_dir, ORACLE_MATCH_TOML, content_hash, "PASS",
-            "j1.attestation.bth.toml", oracle_sha="8" * 64,
+            tmp_path,
+            catalog_dir,
+            ORACLE_MATCH_TOML,
+            content_hash,
+            "PASS",
+            "j1.attestation.bth.toml",
+            oracle_sha="8" * 64,
         )
 
         assert query_attestation(catalog_dir, content_hash) is not None

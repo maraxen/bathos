@@ -197,9 +197,7 @@ def _connect(catalog_dir: Path | str) -> duckdb.DuckDBPyConnection:
 def _insert_warm_row(record: TrustLedgerRecord, catalog_dir: Path | str) -> None:
     con = _connect(catalog_dir)
     try:
-        existing = con.execute(
-            "SELECT id FROM trust_ledger WHERE id = ?", [record.id]
-        ).fetchone()
+        existing = con.execute("SELECT id FROM trust_ledger WHERE id = ?", [record.id]).fetchone()
         if existing:
             return  # append-only: never update an existing ledger row
         con.execute(
@@ -222,9 +220,7 @@ def _insert_warm_row(record: TrustLedgerRecord, catalog_dir: Path | str) -> None
         con.close()
 
 
-def append_ledger_record(
-    record: TrustLedgerRecord, catalog_dir: Path | str
-) -> TrustLedgerRecord:
+def append_ledger_record(record: TrustLedgerRecord, catalog_dir: Path | str) -> TrustLedgerRecord:
     """Durably append one ledger record: cool-tier fragment (durable, survives
     ``compact(force_rebuild=True)``) + warm-tier row (disposable, re-derived from
     cool fragments on every compact via :func:`_ingest_ledger_fragments`).
@@ -246,9 +242,7 @@ def append_ledger_record(
     return record
 
 
-def latest_ledger_record(
-    catalog_dir: Path | str, content_hash: str
-) -> TrustLedgerRecord | None:
+def latest_ledger_record(catalog_dir: Path | str, content_hash: str) -> TrustLedgerRecord | None:
     """Return the latest-by-``amended_at`` ledger record for ``content_hash``, or
     ``None`` if no record exists. This is the full-record counterpart to
     :func:`fold_trust_state`, which returns only the folded ``to_state`` string."""

@@ -34,37 +34,65 @@ class Campaign:
 
 def _open_db(catalog_dir) -> duckdb.DuckDBPyConnection:
     from pathlib import Path
+
     return duckdb.connect(str(Path(catalog_dir) / "bathos.db"))
 
 
-def create_campaign(db, name: str, project_slug: str, mode: str, question: str | None = None, hypothesis: str | None = None, parent_campaign_id: str | None = None) -> Campaign:
+def create_campaign(
+    db,
+    name: str,
+    project_slug: str,
+    mode: str,
+    question: str | None = None,
+    hypothesis: str | None = None,
+    parent_campaign_id: str | None = None,
+) -> Campaign:
     if mode not in ("exploration", "confirmation", "sequential"):
-        raise CampaignError(f"mode must be 'exploration', 'confirmation', or 'sequential', got {mode!r}")
+        raise CampaignError(
+            f"mode must be 'exploration', 'confirmation', or 'sequential', got {mode!r}"
+        )
     campaign_id = str(uuid4())
     started_at = datetime.now(UTC).isoformat()
     db.execute(
         "INSERT INTO campaigns (id, project_slug, name, mode, question, hypothesis, status, started_at, parent_campaign_id) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)",
-        [campaign_id, project_slug, name, mode, question, hypothesis, started_at, parent_campaign_id]
+        [
+            campaign_id,
+            project_slug,
+            name,
+            mode,
+            question,
+            hypothesis,
+            started_at,
+            parent_campaign_id,
+        ],
     )
     # Use campaign_name field since 'name' is reserved by logging.LogRecord
     event("campaign.create", campaign_id=campaign_id, campaign_name=name)
-    return Campaign(id=campaign_id, project_slug=project_slug, name=name, mode=mode, question=question, hypothesis=hypothesis, status="open", started_at=started_at, parent_campaign_id=parent_campaign_id)
+    return Campaign(
+        id=campaign_id,
+        project_slug=project_slug,
+        name=name,
+        mode=mode,
+        question=question,
+        hypothesis=hypothesis,
+        status="open",
+        started_at=started_at,
+        parent_campaign_id=parent_campaign_id,
+    )
 
 
 def add_run_to_campaign(db, campaign_id: str, run_id: str) -> None:
     """Add run to campaign (idempotent). For sequential campaigns, computes e-value and applies threshold lock."""
     campaign_id = _resolve_campaign_id(db, campaign_id)
     campaign_rows = db.execute(
-        "SELECT mode, started_at, stopping_threshold FROM campaigns WHERE id = ?",
-        [campaign_id]
+        "SELECT mode, started_at, stopping_threshold FROM campaigns WHERE id = ?", [campaign_id]
     ).fetchall()
     if not campaign_rows:
         raise CampaignError(f"Campaign not found: {campaign_id}")
     campaign_mode, campaign_started_at, campaign_threshold = campaign_rows[0]
 
     run_rows = db.execute(
-        "SELECT timestamp, outcome, sidecar_path FROM runs WHERE id = ?",
-        [run_id]
+        "SELECT timestamp, outcome, sidecar_path FROM runs WHERE id = ?", [run_id]
     ).fetchall()
     if not run_rows:
         raise CampaignError(f"Run not found: {run_id}")
@@ -98,6 +126,7 @@ def add_run_to_campaign(db, campaign_id: str, run_id: str) -> None:
             from pathlib import Path
 
             from bathos.sidecar import SidecarError, parse_sidecar
+
             try:
                 sidecar_path_obj = Path(run_sidecar_path)
                 if sidecar_path_obj.exists():
@@ -110,7 +139,7 @@ def add_run_to_campaign(db, campaign_id: str, run_id: str) -> None:
         # Assign seq_position (1-based, monotonically increasing per campaign)
         pos_row = db.execute(
             "SELECT COALESCE(MAX(seq_position), 0) + 1 FROM campaign_runs WHERE campaign_id = ?",
-            [campaign_id]
+            [campaign_id],
         ).fetchone()
         seq_position = pos_row[0] if pos_row else 1
 
@@ -121,14 +150,14 @@ def add_run_to_campaign(db, campaign_id: str, run_id: str) -> None:
                 # Lock threshold from this sidecar
                 db.execute(
                     "UPDATE campaigns SET stopping_threshold = ? WHERE id = ?",
-                    [sidecar_stopping_threshold, campaign_id]
+                    [sidecar_stopping_threshold, campaign_id],
                 )
                 campaign_threshold = sidecar_stopping_threshold
             elif campaign_threshold is not None and sidecar_stopping_threshold is not None:
                 if sidecar_stopping_threshold != campaign_threshold:
                     n_runs = db.execute(
                         "SELECT COUNT(*) FROM campaign_runs WHERE campaign_id = ? AND seq_position IS NOT NULL",
-                        [campaign_id]
+                        [campaign_id],
                     ).fetchone()[0]
                     raise CampaignError(
                         f"Cannot change stopping_threshold for campaign {campaign_id[:8]}: "
@@ -139,24 +168,27 @@ def add_run_to_campaign(db, campaign_id: str, run_id: str) -> None:
 
         db.execute(
             "INSERT INTO campaign_runs (campaign_id, run_id, evalue, seq_position) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
-            [campaign_id, run_id, evalue, seq_position]
+            [campaign_id, run_id, evalue, seq_position],
         )
     else:
         db.execute(
             "INSERT INTO campaign_runs (campaign_id, run_id, evalue, seq_position) VALUES (?, ?, NULL, NULL) ON CONFLICT DO NOTHING",
-            [campaign_id, run_id]
+            [campaign_id, run_id],
         )
 
 
 def _campaign_threshold_met(db, campaign_id: str, stopping_threshold: float) -> bool:
     """Return True if all scripts in the campaign have E_n >= stopping_threshold."""
-    rows = db.execute("""
+    rows = db.execute(
+        """
         SELECT EXP(SUM(LN(cr.evalue)) FILTER (WHERE r.outcome != 'error' AND r.outcome != 'unknown'))
         FROM campaign_runs cr
         INNER JOIN runs r ON cr.run_id = r.id
         WHERE cr.campaign_id = ?
         GROUP BY COALESCE(NULLIF(r.script_sha256, ''), r.sidecar_path, '_ungrouped')
-    """, [campaign_id]).fetchall()
+    """,
+        [campaign_id],
+    ).fetchall()
     if not rows:
         return False
     return all((row[0] is not None and row[0] >= stopping_threshold) for row in rows)
@@ -171,7 +203,9 @@ def _resolve_campaign_id(db, campaign_id: str) -> str:
     rows = db.execute("SELECT id FROM campaigns WHERE id = ?", [campaign_id]).fetchall()
     if rows:
         return rows[0][0]
-    prefix_rows = db.execute("SELECT id FROM campaigns WHERE id LIKE ?", [campaign_id + "%"]).fetchall()
+    prefix_rows = db.execute(
+        "SELECT id FROM campaigns WHERE id LIKE ?", [campaign_id + "%"]
+    ).fetchall()
     if not prefix_rows:
         raise CampaignError(f"Campaign not found: {campaign_id}")
     if len(prefix_rows) > 1:
@@ -285,7 +319,10 @@ def conclude_campaign(
         claim = parse_claim(abs_path)
 
         # BP-3: negative-claim backing check (opt-in via claim registration, same as Union Gate)
-        if is_negative_outcome(outcome_label, negative_outcome_pattern) and not (negative_check or "").strip():
+        if (
+            is_negative_outcome(outcome_label, negative_outcome_pattern)
+            and not (negative_check or "").strip()
+        ):
             raise CampaignError(
                 f"outcome '{outcome_label}' is a negative claim — provide --negative-check with "
                 "the falsification backing or hedge for this conclusion, or use a less definitive "
@@ -295,6 +332,7 @@ def conclude_campaign(
         # F2 PARITY CONFOUND CHECK (before Union Gate)
         # Check for uncontrolled reference_parity confounds and downgrade if needed
         from bathos.claim import parity_confound_check
+
         parity_result = parity_confound_check(abs_path, db)
         parity_confounds = parity_result.get("confounds", [])
 
@@ -316,9 +354,63 @@ def conclude_campaign(
                         "(exploration mode, no downgrade)"
                     )
 
+        # REVIEW COVERAGE GATE (build-order step 3, spec §4)
+        # Every hypothesis and confound must be covered by >=1 [review] entry naming it.
+        # Same downgrade posture as the parity/synthetic-recovery checks above:
+        # confirmation/sequential downgrade, exploration warns only.
+        from bathos.claim import review_coverage_check
+
+        # §7 scopes this gate to confirmation/sequential only. Running it on exploration
+        # campaigns would add a warning line to a mode the spec never asked it to touch.
+        review_result = (
+            review_coverage_check(db, full_id, claim, workspace_root=workspace_root)
+            if campaign_mode in ("confirmation", "sequential")
+            else None
+        )
+        if review_result is not None and review_result["verdict"] != "covered":
+            detail = (
+                "claim declares no hypotheses or confounds to cover"
+                if review_result["verdict"] == "empty_slate"
+                else "uncovered: " + ", ".join(review_result["uncovered"])
+            )
+            # ENFORCEMENT IS OPT-IN, and deliberately so. §7 sequences this gate behind step 2
+            # having produced real [review] entries: "the coverage gate should be calibrated
+            # against observed data". Enforcing on day one would downgrade EVERY existing
+            # confirmatory campaign to 'confounded', since no sidecar authored before step 2
+            # can carry a [review] block — which is a retroactive verdict change, not a gate.
+            # Set BTH_REVIEW_COVERAGE_ENFORCE=1 once real entries exist. Until then the gate
+            # runs, reports, and changes no verdict.
+            from bathos.config import resolve_flag
+
+            enforcing = resolve_flag(
+                "BTH_REVIEW_COVERAGE_ENFORCE",
+                "claim",
+                "review_coverage_enforce",
+                workspace_root,
+            )
+            if enforcing:
+                print(f"Review coverage gate: {detail}")
+                print("Review coverage gate: verdict downgraded to 'confounded'")
+                outcome_label = "confounded"
+            else:
+                print(
+                    f"WARNING: Review coverage gate: {detail} "
+                    "(advisory until [claim] review_coverage_enforce = true, or "
+                    "BTH_REVIEW_COVERAGE_ENFORCE=1)"
+                )
+        # Reported unconditionally: a sidecar that could not be read is NOT evidence that
+        # review is absent, and the reader must be able to tell those apart.
+        if review_result is not None and review_result["sidecars_unreadable"]:
+            print(
+                f"WARNING: Review coverage gate: {review_result['sidecars_unreadable']} member "
+                f"sidecar(s) could not be read; coverage was computed from "
+                f"{review_result['sidecars_read']} readable sidecar(s)"
+            )
+
         # BP-2 SYNTHETIC_RECOVERY CONFOUND CHECK (before Union Gate)
         # Check for uncontrolled synthetic_recovery confounds (stale/red/unknown gate) and downgrade if needed
         from bathos.gate import synthetic_recovery_confound_check
+
         synth_result = synthetic_recovery_confound_check(claim, workspace_root)
         synth_confounds = synth_result.get("confounds", [])
 
@@ -357,9 +449,7 @@ def conclude_campaign(
                     # AC-09: Bypass with audit trail
                     print(f"Union Gate bypassed — unmapped clauses: {uncovered_display}")
                     outcome_label = outcome_label  # Keep researcher's label
-                    db.execute(
-                        "UPDATE campaigns SET claim_mode='bypassed' WHERE id=?", [full_id]
-                    )
+                    db.execute("UPDATE campaigns SET claim_mode='bypassed' WHERE id=?", [full_id])
                 else:
                     # AC-08: Soft-block downgrade to confounded
                     print(
@@ -374,6 +464,50 @@ def conclude_campaign(
                     "(exploration mode, no downgrade)"
                 )
 
+        # OBLIGATION TRIGGER 4 (§5.4): a [review] entry that vouched for a hypothesis the
+        # run's own outcome disfavours. The highest-value trigger and the safest to enable --
+        # it can only fire where a [review] entry already exists, so it cannot reach anything
+        # authored before build-order step 2. Opt-in via BTH_OBLIGATION_CITATION_CONTRADICTED.
+        #
+        # Evaluated here rather than at run end because only conclude holds both the catalog
+        # and the claim, which is where the discriminability map lives (decision D1).
+        from bathos.obligations import maybe_open, trigger_enabled
+
+        if trigger_enabled("citation_contradicted", workspace_root):
+            try:
+                from bathos.claim import contradicted_citations
+
+                cc = contradicted_citations(db, full_id, claim, workspace_root=workspace_root)
+                # One obligation per run, not per citation: open_obligation is idempotent on
+                # (entity, trigger), so several contradicted refs on one run collapse into a
+                # single obligation whose detail names them all.
+                by_run: dict[str, list[str]] = {}
+                for rec in cc["contradicted"]:
+                    by_run.setdefault(rec["run_id"], []).append(f"{rec['ref']}→{rec['bears_on']}")
+                for rid, refs in by_run.items():
+                    maybe_open(
+                        workspace_root,
+                        "run",
+                        rid,
+                        "citation_contradicted",
+                        detail="contradicted: " + ", ".join(refs),
+                    )
+                if cc["contradicted"]:
+                    print(
+                        f"Citation contradiction: {len(cc['contradicted'])} 'supports' "
+                        f"citation(s) contradicted across {len(by_run)} run(s)"
+                    )
+                # §8b: a trigger that COULD NOT fire must not read as a clean bill of health.
+                if cc["indeterminate"]:
+                    print(
+                        f"WARNING: Citation contradiction: {len(cc['indeterminate'])} of "
+                        f"{cc['supports_seen']} 'supports' citation(s) were indeterminate — no "
+                        "discriminability row covers the observed label, so nothing can be "
+                        "concluded either way"
+                    )
+            except Exception as e:  # never let a trigger break conclude
+                print(f"WARNING: citation contradiction check failed: {e}")
+
         # AC-12: emit claim-coverage JSON sidecar after union gate
         verdict_str = "covered" if not uncovered else "confounded"
         bypass_reason = "force_verdict flag" if force_verdict else None
@@ -387,11 +521,82 @@ def conclude_campaign(
             bypass_reason=bypass_reason,
         )
 
+    # ── OBLIGATION GATE (D1: conclude is the only binding site) ──────────────────────────
+    # Runs outside a campaign never reach here, which is the accepted cost §5 names: an
+    # exploratory campaign that is never concluded never pays, and Signal 11 is what makes
+    # that visible rather than silent.
+    from bathos.obligations import (
+        ENFORCE_FLAG,
+        enforcement_enabled,
+        list_obligations_for_scope,
+        maybe_open,
+    )
+
+    # The gate must never be able to break a conclude: a campaign whose verdict is already
+    # decided cannot be lost to a ledger read. Resolution is inside the guard because it is
+    # the only step here that touches config and git.
+    try:
+        if workspace_root is None:
+            workspace_root = resolve_workspace(Path.cwd()).fs_root
+        member_ids = [
+            r[0]
+            for r in db.execute(
+                "SELECT run_id FROM campaign_runs WHERE campaign_id = ?", [full_id]
+            ).fetchall()
+        ]
+        open_obs = list_obligations_for_scope(workspace_root, {full_id, *member_ids})
+    except Exception as e:
+        print(f"WARNING: could not read the obligation ledger: {e}")
+        open_obs = []
+
+    if open_obs:
+        for ob in open_obs:
+            print(
+                f"Open obligation: {ob.obligation_id} ({ob.trigger}, "
+                f"{ob.age_days():.1f}d) — {ob.detail or 'no detail'}"
+            )
+        # Same split as the Review Coverage Gate: the check always runs and always reports;
+        # only the verdict change is opt-in. Enforcing by default would let an obligation
+        # opened by a newly-enabled trigger retroactively downgrade an unrelated campaign.
+        if enforcement_enabled(workspace_root):
+            if campaign_mode in ("confirmation", "sequential"):
+                print(
+                    f"Obligation gate: {len(open_obs)} open obligation(s) — "
+                    "verdict downgraded to 'confounded'"
+                )
+                outcome_label = "confounded"
+            elif campaign_mode == "exploration":
+                print(
+                    f"WARNING: Obligation gate: {len(open_obs)} open obligation(s) "
+                    "(exploration mode, no downgrade)"
+                )
+        else:
+            print(
+                f"WARNING: Obligation gate: {len(open_obs)} open obligation(s) unexplained "
+                f"(advisory until {ENFORCE_FLAG}=1)"
+            )
+
+    # OBLIGATION TRIGGER 2 (§5.2): the campaign concluded 'confounded' — whether the
+    # researcher labelled it so directly, or one of the gates above downgraded it. Opened
+    # AFTER the gate so a campaign cannot downgrade itself on an obligation this same
+    # conclude created.
+    if outcome_label == "confounded" and workspace_root is not None:
+        try:
+            maybe_open(
+                workspace_root,
+                "campaign",
+                full_id,
+                "campaign_confounded",
+                detail=f"concluded confounded: {conclusion[:200]}" if conclusion else "",
+            )
+        except Exception as e:
+            print(f"WARNING: could not open a campaign_confounded obligation: {e}")
+
     # Final update
     concluded_at = datetime.now(UTC).isoformat()
     db.execute(
         "UPDATE campaigns SET status = 'concluded', concluded_at = ?, outcome_label = ?, conclusion = ?, negative_check = ? WHERE id = ?",
-        [concluded_at, outcome_label, conclusion, negative_check, full_id]
+        [concluded_at, outcome_label, conclusion, negative_check, full_id],
     )
     db.commit()
     event("campaign.conclude", campaign_id=full_id, verdict=outcome_label)
@@ -403,14 +608,34 @@ def get_campaign(db, campaign_id: str) -> Campaign | None:
         full_id = _resolve_campaign_id(db, campaign_id)
     except CampaignError:
         return None
-    rows = db.execute("SELECT id, project_slug, name, mode, question, hypothesis, status, started_at, concluded_at, conclusion, outcome_label, parent_campaign_id, stopping_threshold, negative_check FROM campaigns WHERE id = ?", [full_id]).fetchall()
+    rows = db.execute(
+        "SELECT id, project_slug, name, mode, question, hypothesis, status, started_at, concluded_at, conclusion, outcome_label, parent_campaign_id, stopping_threshold, negative_check FROM campaigns WHERE id = ?",
+        [full_id],
+    ).fetchall()
     if not rows:
         return None
     r = rows[0]
-    return Campaign(id=r[0], project_slug=r[1], name=r[2], mode=r[3], question=r[4], hypothesis=r[5], status=r[6], started_at=r[7], concluded_at=r[8], conclusion=r[9], outcome_label=r[10], parent_campaign_id=r[11], stopping_threshold=r[12], negative_check=r[13])
+    return Campaign(
+        id=r[0],
+        project_slug=r[1],
+        name=r[2],
+        mode=r[3],
+        question=r[4],
+        hypothesis=r[5],
+        status=r[6],
+        started_at=r[7],
+        concluded_at=r[8],
+        conclusion=r[9],
+        outcome_label=r[10],
+        parent_campaign_id=r[11],
+        stopping_threshold=r[12],
+        negative_check=r[13],
+    )
 
 
-def list_campaigns(db, project_slug: str | None = None, status: str | None = None) -> list[Campaign]:
+def list_campaigns(
+    db, project_slug: str | None = None, status: str | None = None
+) -> list[Campaign]:
     """List campaigns with optional filters."""
     query = "SELECT id, project_slug, name, mode, question, hypothesis, status, started_at, concluded_at, conclusion, outcome_label, parent_campaign_id, stopping_threshold, negative_check FROM campaigns WHERE 1=1"
     params = []
@@ -421,7 +646,25 @@ def list_campaigns(db, project_slug: str | None = None, status: str | None = Non
         query += " AND status = ?"
         params.append(status)
     rows = db.execute(query, params).fetchall()
-    return [Campaign(id=r[0], project_slug=r[1], name=r[2], mode=r[3], question=r[4], hypothesis=r[5], status=r[6], started_at=r[7], concluded_at=r[8], conclusion=r[9], outcome_label=r[10], parent_campaign_id=r[11], stopping_threshold=r[12], negative_check=r[13]) for r in rows]
+    return [
+        Campaign(
+            id=r[0],
+            project_slug=r[1],
+            name=r[2],
+            mode=r[3],
+            question=r[4],
+            hypothesis=r[5],
+            status=r[6],
+            started_at=r[7],
+            concluded_at=r[8],
+            conclusion=r[9],
+            outcome_label=r[10],
+            parent_campaign_id=r[11],
+            stopping_threshold=r[12],
+            negative_check=r[13],
+        )
+        for r in rows
+    ]
 
 
 def review_campaign(db, campaign_id: str) -> dict:
@@ -430,12 +673,15 @@ def review_campaign(db, campaign_id: str) -> dict:
         campaign_id = _resolve_campaign_id(db, campaign_id)
     except CampaignError as e:
         return {"error": str(e)}
-    rows = db.execute("""
+    rows = db.execute(
+        """
         SELECT r.id, r.sidecar_mode, r.outcome, r.outcome_is_residual
         FROM campaign_runs cr
         INNER JOIN runs r ON cr.run_id = r.id
         WHERE cr.campaign_id = ?
-    """, [campaign_id]).fetchall()
+    """,
+        [campaign_id],
+    ).fetchall()
 
     if not rows:
         return {"error": f"Campaign {campaign_id} not found or has no runs"}
@@ -463,12 +709,12 @@ def review_campaign(db, campaign_id: str) -> dict:
     # POPPER sequential test summary
     popper_data = None
     campaign_meta = db.execute(
-        "SELECT mode, stopping_threshold FROM campaigns WHERE id = ?",
-        [campaign_id]
+        "SELECT mode, stopping_threshold FROM campaigns WHERE id = ?", [campaign_id]
     ).fetchone()
     if campaign_meta and campaign_meta[0] == "sequential":
         stopping_threshold = campaign_meta[1]
-        script_rows = db.execute("""
+        script_rows = db.execute(
+            """
             SELECT
                 COALESCE(NULLIF(r.script_sha256, ''), r.sidecar_path, '_ungrouped') AS script_key,
                 COUNT(*) FILTER (WHERE r.outcome != 'error' AND r.outcome != 'unknown') AS n_effective,
@@ -479,19 +725,23 @@ def review_campaign(db, campaign_id: str) -> dict:
             WHERE cr.campaign_id = ? AND cr.evalue IS NOT NULL
             GROUP BY script_key
             ORDER BY script_key
-        """, [campaign_id]).fetchall()
+        """,
+            [campaign_id],
+        ).fetchall()
 
         scripts = []
         for sr in script_rows:
             ep = sr[3] if sr[3] is not None else 1.0
-            met = (stopping_threshold is not None and ep >= stopping_threshold)
-            scripts.append({
-                "script_key": sr[0],
-                "n_effective": sr[1],
-                "n_excluded": sr[2],
-                "evalue_product": ep,
-                "threshold_met": met,
-            })
+            met = stopping_threshold is not None and ep >= stopping_threshold
+            scripts.append(
+                {
+                    "script_key": sr[0],
+                    "n_effective": sr[1],
+                    "n_excluded": sr[2],
+                    "evalue_product": ep,
+                    "threshold_met": met,
+                }
+            )
 
         threshold_met = (
             len(scripts) > 0
@@ -516,7 +766,9 @@ def review_campaign(db, campaign_id: str) -> dict:
     }
 
 
-def emit_campaign_report(db, catalog_dir: str, campaign_id: str, figure_manifest_ref: str | None = None) -> None:
+def emit_campaign_report(
+    db, catalog_dir: str, campaign_id: str, figure_manifest_ref: str | None = None
+) -> None:
     """Emit a campaign report JSON sidecar at <catalog>/sidecars/<campaign_id>/campaign_report.json.
 
     This function generates a truth-only report capturing summary stats from the campaign,
@@ -540,8 +792,7 @@ def emit_campaign_report(db, catalog_dir: str, campaign_id: str, figure_manifest
 
     # Fetch campaign metadata
     campaign_rows = db.execute(
-        "SELECT conclusion FROM campaigns WHERE id = ?",
-        [campaign_id]
+        "SELECT conclusion FROM campaigns WHERE id = ?", [campaign_id]
     ).fetchall()
     if not campaign_rows:
         raise CampaignError(f"Campaign {campaign_id} not found")
@@ -550,8 +801,7 @@ def emit_campaign_report(db, catalog_dir: str, campaign_id: str, figure_manifest
 
     # Check if campaign has any runs
     run_count = db.execute(
-        "SELECT COUNT(*) FROM campaign_runs WHERE campaign_id = ?",
-        [campaign_id]
+        "SELECT COUNT(*) FROM campaign_runs WHERE campaign_id = ?", [campaign_id]
     ).fetchone()[0]
 
     # Handle zero-run campaign: emit a valid report with defaults
@@ -571,13 +821,16 @@ def emit_campaign_report(db, catalog_dir: str, campaign_id: str, figure_manifest
         review_data = review_campaign(db, campaign_id)
 
         # Build stage_breakdown: count runs by stage_name with None as explicit bucket
-        stage_rows = db.execute("""
+        stage_rows = db.execute(
+            """
             SELECT COALESCE(NULLIF(r.stage_name, ''), NULL) AS stage_key, COUNT(*) AS count
             FROM campaign_runs cr
             INNER JOIN runs r ON cr.run_id = r.id
             WHERE cr.campaign_id = ?
             GROUP BY stage_key
-        """, [campaign_id]).fetchall()
+        """,
+            [campaign_id],
+        ).fetchall()
 
         stage_breakdown = {}
         for stage_key, count in stage_rows:
@@ -633,10 +886,7 @@ def emit_figure_manifest(db, catalog_dir: str, campaign_id: str) -> None:
     campaign_id = _resolve_campaign_id(db, campaign_id)
 
     # Verify campaign exists
-    campaign_rows = db.execute(
-        "SELECT id FROM campaigns WHERE id = ?",
-        [campaign_id]
-    ).fetchall()
+    campaign_rows = db.execute("SELECT id FROM campaigns WHERE id = ?", [campaign_id]).fetchall()
     if not campaign_rows:
         raise CampaignError(f"Campaign {campaign_id} not found")
 
@@ -686,15 +936,12 @@ def emit_claim_coverage_report(
     # Compute coverage fraction
     total_clauses = len(claim.union_gate_clauses)
     covered_clauses = [
-        c["id"] for c in claim.union_gate_clauses
-        if c["id"] not in uncovered_clauses
+        c["id"] for c in claim.union_gate_clauses if c["id"] not in uncovered_clauses
     ]
-    coverage_fraction = (
-        len(covered_clauses) / total_clauses if total_clauses > 0 else 1.0
-    )
+    coverage_fraction = len(covered_clauses) / total_clauses if total_clauses > 0 else 1.0
 
     # Determine if verdict was blocked (confounded with no bypass)
-    verdict_blocked = (verdict == "confounded" and bypass_reason is None)
+    verdict_blocked = verdict == "confounded" and bypass_reason is None
 
     # Build JSON payload
     from bathos.claim import format_clause_ref

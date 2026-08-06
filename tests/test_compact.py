@@ -148,10 +148,10 @@ def test_compact_upgrades_v0_fragments(tmp_catalog: Path, sample_run: Run):
     result = compact(tmp_catalog)
     assert result.ingested == 1
 
-    # Verify in DuckDB: should have schema_version="13" (migrated through v0→v1→v2→v3→v4→v5→v6→v7→v8→v9→v10→v11→v12→v13)
+    # Verify in DuckDB: should have schema_version="14" (migrated through v0→v1→…→v13→v14)
     con = duckdb.connect(str(tmp_catalog / "bathos.db"))
     rows = con.execute("SELECT schema_version FROM runs").fetchall()
-    assert rows[0][0] == "13"
+    assert rows[0][0] == "14"
 
 
 def test_compact_tracks_warm_schema_version(tmp_catalog: Path, sample_run: Run):
@@ -166,7 +166,7 @@ def test_compact_tracks_warm_schema_version(tmp_catalog: Path, sample_run: Run):
     con = duckdb.connect(str(tmp_catalog / "bathos.db"))
     rows = con.execute("SELECT value FROM _schema_meta WHERE key = 'warm_version'").fetchall()
     assert len(rows) == 1
-    assert rows[0][0] == "13"
+    assert rows[0][0] == "14"
 
 
 def test_fragment_count_helper(tmp_catalog: Path, sample_run: Run):
@@ -250,7 +250,7 @@ def test_compact_migrates_v1_to_v4(sample_run: Run):
     result = _apply_migrations(v1_run)
 
     # Verify upgraded to v9 with hostname
-    assert result.schema_version == "13"
+    assert result.schema_version == "14"
     assert result.hostname == ""
 
 
@@ -265,7 +265,7 @@ def test_compact_v0_chain_to_v4(sample_run: Run):
     result = _apply_migrations(v0_run)
 
     # Verify final state is v9
-    assert result.schema_version == "13"
+    assert result.schema_version == "14"
     assert result.hostname == ""
 
 
@@ -279,7 +279,7 @@ def test_apply_migrations_v4_upgrades_to_v5(sample_run: Run):
     result = _apply_migrations(v4_run)
 
     # Verify upgraded
-    assert result.schema_version == "13"
+    assert result.schema_version == "14"
     assert result.hostname == "testhost"
     # Verify fields added during v5 migration are present
     assert result.manifest_sha256 == ""
@@ -403,8 +403,14 @@ def test_compact_creates_schema_migrations_table(tmp_path):
     from bathos.compact import compact
     from bathos.schema import Run
 
-    r = Run(project_slug="p", command="c", argv=["c"],
-            git_hash="abc", git_branch="main", git_dirty=False)
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+    )
     write_run(r, tmp_path)
     compact(tmp_path)
 
@@ -420,8 +426,14 @@ def test_schema_migrations_has_record(tmp_path):
     from bathos.compact import compact
     from bathos.schema import CURRENT_SCHEMA_VERSION, Run
 
-    r = Run(project_slug="p", command="c", argv=["c"],
-            git_hash="abc", git_branch="main", git_dirty=False)
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+    )
     write_run(r, tmp_path)
     compact(tmp_path)
 
@@ -463,7 +475,7 @@ def test_migration_v2_to_v4(tmp_catalog: Path, sample_run: Run):
     con.close()
 
     assert len(rows) == 1
-    assert rows[0][0] == "13"  # schema_version
+    assert rows[0][0] == "14"  # schema_version
     assert rows[0][1] == ""  # sidecar_sha256
     assert rows[0][2] == ""  # sidecar_path
     assert rows[0][3] == ""  # parent_run_id
@@ -498,7 +510,7 @@ def test_migration_chain_v0_to_v4(tmp_catalog: Path, sample_run: Run):
     con.close()
 
     assert len(rows) == 1
-    assert rows[0][0] == "13"  # schema_version
+    assert rows[0][0] == "14"  # schema_version
     assert rows[0][1] == ""  # hostname (from v1 migration)
     assert rows[0][2] == ""  # sidecar_sha256 (from v2 migration)
     assert rows[0][3] == ""  # sidecar_path
@@ -522,7 +534,7 @@ def test_migration_v6_to_v7_adds_stage_name(sample_run: Run):
     result = _apply_migrations(v6_run)
 
     # Verify upgraded to v7 with stage_name=None
-    assert result.schema_version == "13"
+    assert result.schema_version == "14"
     assert result.stage_name is None
 
 
@@ -537,7 +549,7 @@ def test_migration_chain_v0_to_v7_includes_stage_name(sample_run: Run):
     result = _apply_migrations(v0_run)
 
     # Verify final state is v7 with stage_name=None
-    assert result.schema_version == "13"
+    assert result.schema_version == "14"
     assert result.stage_name is None
 
 
@@ -571,6 +583,7 @@ def test_force_rebuild_creates_backup(tmp_catalog: Path, sample_run: Run):
 def test_backup_rotation_keeps_max_3(tmp_catalog: Path, sample_run: Run):
     """Backup rotation should keep at most 3 .bak-* files."""
     import time
+
     init_catalog(tmp_catalog)
 
     # Create and rebuild 5 times to generate 5 backups
@@ -619,13 +632,17 @@ def test_output_metadata_refreshed_on_recompact(tmp_catalog: Path, sample_run: R
     # Second compact should refresh the metadata
     compact(tmp_catalog)
     con = duckdb.connect(str(tmp_catalog / "bathos.db"), read_only=True)
-    meta_json2 = con.execute("SELECT output_metadata FROM runs WHERE id = ?", [run.id]).fetchone()[0]
+    meta_json2 = con.execute("SELECT output_metadata FROM runs WHERE id = ?", [run.id]).fetchone()[
+        0
+    ]
     con.close()
     meta2 = json.loads(meta_json2)
     assert meta2[0]["size_bytes"] != initial_size, "size_bytes should reflect updated file"
 
 
-def test_output_metadata_refresh_detects_deleted_file(tmp_catalog: Path, sample_run: Run, tmp_path: Path):
+def test_output_metadata_refresh_detects_deleted_file(
+    tmp_catalog: Path, sample_run: Run, tmp_path: Path
+):
     """output_metadata refresh marks deleted files as 'missing' on next compact."""
     import dataclasses
     import json
@@ -637,7 +654,7 @@ def test_output_metadata_refresh_detects_deleted_file(tmp_catalog: Path, sample_
 
     init_catalog(tmp_catalog)
     out_file = tmp_path / "will_delete.json"
-    out_file.write_text('{}')
+    out_file.write_text("{}")
 
     run = dataclasses.replace(sample_run, output_paths=[str(out_file)])
     write_run(run, tmp_catalog)
@@ -655,7 +672,9 @@ def test_output_metadata_refresh_detects_deleted_file(tmp_catalog: Path, sample_
     assert meta[0]["status"] == "missing"
 
 
-def test_output_metadata_sha256_reused_when_mtime_unchanged(tmp_catalog: Path, sample_run: Run, tmp_path: Path):
+def test_output_metadata_sha256_reused_when_mtime_unchanged(
+    tmp_catalog: Path, sample_run: Run, tmp_path: Path
+):
     """sha256 is reused from stored metadata when mtime is unchanged (skip rehash)."""
     import dataclasses
     import json
@@ -674,14 +693,18 @@ def test_output_metadata_sha256_reused_when_mtime_unchanged(tmp_catalog: Path, s
     compact(tmp_catalog)
 
     con = duckdb.connect(str(tmp_catalog / "bathos.db"), read_only=True)
-    meta1 = json.loads(con.execute("SELECT output_metadata FROM runs WHERE id = ?", [run.id]).fetchone()[0])
+    meta1 = json.loads(
+        con.execute("SELECT output_metadata FROM runs WHERE id = ?", [run.id]).fetchone()[0]
+    )
     con.close()
     sha_before = meta1[0].get("sha256")
 
     # Compact again without touching the file — mtime unchanged, sha256 should be reused
     compact(tmp_catalog)
     con = duckdb.connect(str(tmp_catalog / "bathos.db"), read_only=True)
-    meta2 = json.loads(con.execute("SELECT output_metadata FROM runs WHERE id = ?", [run.id]).fetchone()[0])
+    meta2 = json.loads(
+        con.execute("SELECT output_metadata FROM runs WHERE id = ?", [run.id]).fetchone()[0]
+    )
     con.close()
     assert meta2[0].get("sha256") == sha_before
 
@@ -733,7 +756,7 @@ def test_migration_v8_to_v9_adds_parity_run_type(sample_run: Run):
     result = _apply_migrations(v8_run)
 
     # Verify upgraded to v9 with parity_run_type=None
-    assert result.schema_version == "13"
+    assert result.schema_version == "14"
     assert result.parity_run_type is None
 
 
@@ -748,7 +771,7 @@ def test_migration_chain_v0_to_v9_includes_parity_run_type(sample_run: Run):
     result = _apply_migrations(v0_run)
 
     # Verify final state is v9 with parity_run_type=None
-    assert result.schema_version == "13"
+    assert result.schema_version == "14"
     assert result.parity_run_type is None
 
 
@@ -766,7 +789,7 @@ def test_migration_v9_to_v10_adds_seed_fields(sample_run: Run):
     result = _apply_migrations(v9_run)
 
     # Verify upgraded to v10 with all three B2-02 fields None
-    assert result.schema_version == "13"
+    assert result.schema_version == "14"
     assert result.seed is None
     assert result.baseline_hpo_trials is None
     assert result.baseline_hpo_compute_budget is None
@@ -779,7 +802,7 @@ def test_migration_chain_v0_to_v10_includes_seed_fields(sample_run: Run):
     v0_run = dataclasses.replace(sample_run, schema_version="0")
     result = _apply_migrations(v0_run)
 
-    assert result.schema_version == "13"
+    assert result.schema_version == "14"
     assert result.seed is None
     assert result.baseline_hpo_trials is None
     assert result.baseline_hpo_compute_budget is None
@@ -814,7 +837,7 @@ def test_migration_v10_to_v11_adds_stdout_sha256(sample_run: Run):
 
     result = _apply_migrations(v10_run)
 
-    assert result.schema_version == "13"
+    assert result.schema_version == "14"
     assert result.stdout_sha256 is None
 
 
@@ -825,7 +848,7 @@ def test_migration_chain_v0_to_v11_includes_stdout_sha256(sample_run: Run):
     v0_run = dataclasses.replace(sample_run, schema_version="0")
     result = _apply_migrations(v0_run)
 
-    assert result.schema_version == "13"
+    assert result.schema_version == "14"
     assert result.stdout_sha256 is None
 
 
@@ -856,7 +879,7 @@ def test_migration_v11_to_v12_adds_component_fields(sample_run: Run):
 
     result = _apply_migrations(v11_run)
 
-    assert result.schema_version == "13"
+    assert result.schema_version == "14"
     assert result.component_id is None
     assert result.component_sidecar_sha256 is None
 
@@ -868,7 +891,7 @@ def test_migration_chain_v0_to_v12_includes_component_fields(sample_run: Run):
     v0_run = dataclasses.replace(sample_run, schema_version="0")
     result = _apply_migrations(v0_run)
 
-    assert result.schema_version == "13"
+    assert result.schema_version == "14"
     assert result.component_id is None
     assert result.component_sidecar_sha256 is None
 

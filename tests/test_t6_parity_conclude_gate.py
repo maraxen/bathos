@@ -99,10 +99,7 @@ class TestAC06_ConfirmationDowngradeOnUncontrolled:
 
         # Create a campaign FIRST
         campaign = create_campaign(
-            db,
-            name="Confirmation Test",
-            project_slug="test_proj",
-            mode="confirmation"
+            db, name="Confirmation Test", project_slug="test_proj", mode="confirmation"
         )
 
         # Register the claim
@@ -110,7 +107,9 @@ class TestAC06_ConfirmationDowngradeOnUncontrolled:
 
         # Create a run AFTER campaign (to pass temporal check)
         campaign_time = datetime.fromisoformat(campaign.started_at)
-        run_time = campaign_time.replace(microsecond=0) + __import__('datetime').timedelta(minutes=1)
+        run_time = campaign_time.replace(microsecond=0) + __import__("datetime").timedelta(
+            minutes=1
+        )
 
         run = Run(
             project_slug="test_proj",
@@ -160,10 +159,7 @@ class TestAC07_ExplorationWarnsOnly:
 
         # Create an EXPLORATION campaign
         campaign = create_campaign(
-            db,
-            name="Exploration Test",
-            project_slug="test_proj",
-            mode="exploration"
+            db, name="Exploration Test", project_slug="test_proj", mode="exploration"
         )
 
         # Register the claim
@@ -251,8 +247,7 @@ class TestAC08_ControlledParity:
 
         # Create a parity run with outcome=pass via the real column path
         parity_run_id = self._make_parity_run_with_column(
-            tmp_catalog, "test_proj", "pass",
-            datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+            tmp_catalog, "test_proj", "pass", datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
         )
 
         # Close DB before compact
@@ -278,10 +273,7 @@ class TestAC08_ControlledParity:
 
         # Create campaign
         campaign = create_campaign(
-            db,
-            name="Confirmation Controlled",
-            project_slug="test_proj",
-            mode="confirmation"
+            db, name="Confirmation Controlled", project_slug="test_proj", mode="confirmation"
         )
 
         # Register claim
@@ -334,8 +326,7 @@ class TestAC08_ControlledParity:
 
         # Create a parity run with outcome=partial (controlled-by-protocol) via real column path
         parity_run_id = self._make_parity_run_with_column(
-            tmp_catalog, "test_proj", "partial",
-            datetime(2026, 6, 1, 13, 0, 0, tzinfo=UTC)
+            tmp_catalog, "test_proj", "partial", datetime(2026, 6, 1, 13, 0, 0, tzinfo=UTC)
         )
 
         # Close DB before compact
@@ -351,7 +342,9 @@ class TestAC08_ControlledParity:
 
         parity_result = parity_confound_check(claim_with_run_id, db)
         parity_confounds = parity_result.get("confounds", [])
-        protocol_confounds = [c for c in parity_confounds if c["status"] == "controlled-by-protocol"]
+        protocol_confounds = [
+            c for c in parity_confounds if c["status"] == "controlled-by-protocol"
+        ]
         assert protocol_confounds, (
             f"Expected parity_confound_check to return status='controlled-by-protocol' for a "
             f"partial run with parity_run_type='literature_parity' via column path, "
@@ -360,10 +353,7 @@ class TestAC08_ControlledParity:
 
         # Create campaign
         campaign = create_campaign(
-            db,
-            name="Confirmation Partial",
-            project_slug="test_proj",
-            mode="confirmation"
+            db, name="Confirmation Partial", project_slug="test_proj", mode="confirmation"
         )
 
         # Register claim
@@ -495,9 +485,7 @@ class TestAC20_SHADriftDetection:
         after = parity_confound_check(claim_with_run_id, db)
         assert all(c["status"] == "uncontrolled" for c in after["confounds"]), after
 
-        conclude_campaign(
-            db, campaign.id, "pass", "Artifact drifted", workspace_root=tmp_path
-        )
+        conclude_campaign(db, campaign.id, "pass", "Artifact drifted", workspace_root=tmp_path)
 
         rows = db.execute(
             "SELECT outcome_label FROM campaigns WHERE id = ?", [campaign.id]
@@ -560,7 +548,7 @@ positive_control = true
         monkeypatch.setattr(Path, "home", lambda: fake_home)
 
         db = clean_db
-        (tmp_path / "uv.lock").write_text("version = 1\nname = \"bathos\"\n")
+        (tmp_path / "uv.lock").write_text('version = 1\nname = "bathos"\n')
 
         claim_path = self._claim_with_positive_control(tmp_path)
         claim = parse_claim(claim_path)
@@ -598,18 +586,25 @@ positive_control = true
 
         before = differential_confound_check(db, campaign.id, claim, workspace_root=tmp_path)
         assert before["clauses"] == [
-            {"id": "C_sensitivity", "label": "Instrument proven sensitive via differential pre-flight (C_sensitivity)", "status": "controlled"}
+            {
+                "id": "C_sensitivity",
+                "label": "Instrument proven sensitive via differential pre-flight (C_sensitivity)",
+                "status": "controlled",
+            }
         ]
 
         # The "a22 re-pin": the dependency environment changes after the differential
         # pre-flight ran, with no new run to re-verify instrument sensitivity.
-        (tmp_path / "uv.lock").write_text("version = 2\nname = \"bathos\"\n")
+        (tmp_path / "uv.lock").write_text('version = 2\nname = "bathos"\n')
 
         after = differential_confound_check(db, campaign.id, claim, workspace_root=tmp_path)
         assert after["clauses"][0]["status"] == "uncontrolled"
 
         conclude_campaign(
-            db, campaign.id, "pass", "Dependency drifted since differential verification",
+            db,
+            campaign.id,
+            "pass",
+            "Dependency drifted since differential verification",
             workspace_root=tmp_path,
         )
 
@@ -619,7 +614,12 @@ positive_control = true
         assert rows[0][0] == "confounded"
 
         coverage_path = (
-            fake_home / ".bth" / "catalog" / "sidecars" / campaign.id / f"claim_coverage_{campaign.id}.json"
+            fake_home
+            / ".bth"
+            / "catalog"
+            / "sidecars"
+            / campaign.id
+            / f"claim_coverage_{campaign.id}.json"
         )
         assert coverage_path.exists()
         coverage = json.loads(coverage_path.read_text())
@@ -674,7 +674,9 @@ predicted_outcome = "discriminates"
         claim_path.write_text(content)
         return claim_path
 
-    def test_step5_validate_claim_graded_pass(self, tmp_path, tmp_catalog, claim_with_graded_parity):
+    def test_step5_validate_claim_graded_pass(
+        self, tmp_path, tmp_catalog, claim_with_graded_parity
+    ):
         """validate_claim marks confound controlled when parity_run_type='literature_parity' + outcome='pass'."""
         # Write a parity run with the column set via the real path
         run = Run(

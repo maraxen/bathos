@@ -1,0 +1,325 @@
+_note: Confirmed dispositions for deferred handoff entries. Historical handoffs are NEVER edited — they
+  are snapshots of what was true when written, and rewriting them would destroy the audit trail this triage
+  depends on. Resolution is recorded HERE instead, keyed by (source_file, index), which is stable precisely
+  because handoffs are immutable.
+resolutions:
+- source_file: bathos_Complete + backlog reconciled_20260612_134803_c7ff3e56-fe75-4119-91c9-2532d5f29d9d.yaml
+  index: 3
+  description_head: 'T7 / #1684 (still OPEN): CI grep guard for project_config.root usage outside wor'
+  disposition: dropped_repromoted
+  confirmed_at: '2026-08-05'
+  promoted_to: debt#1181
+  evidence: 'backlog#1684 archived 2026-07-08 with reason ''Low regression risk today; pursue when adding
+    CI hardening sprint'' — a park, not a rejection. Verified undone 2026-08-05: no project_config.root
+    reference in .github/.'
+- source_file: bathos_Implementation complete_20260611_225030_d1e08b3a-471b-4476-9f34-16f15627354e.yaml
+  index: 3
+  description_head: 'T7 / RISK-4: CI grep guard asserting project_config.root is not used as a filesy'
+  disposition: dropped_repromoted
+  confirmed_at: '2026-08-05'
+  promoted_to: debt#1181
+  evidence: 'Restatement of the same #1684 concern from the prior session''s handoff.'
+- source_file: bathos_Sprint 6"_20260602_174520_4d82d19a-f2bb-4ba6-98c7-d45d60f889b1.yaml
+  index: 3
+  description_head: '#137 global instruction portability'
+  disposition: dropped_finished
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: 'backlog#137 cancelled: bathos scope complete, remainder is praxia-owned. Verified 2026-08-05:
+    manifest.toml:30-32 declares the bathos-rules snippet and plugin_export.py implements surface support
+    (the row''s description said export.py, which is wrong but immaterial).'
+- source_file: bathos_Sprint 6"_20260602_174520_4d82d19a-f2bb-4ba6-98c7-d45d60f889b1.yaml
+  index: 4
+  description_head: 'Praxia backlog items #793-796'
+  disposition: dropped_finished
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: 'Decomposes to backlog#793 completed, #794 cancelled (not bathos-owned), #795 completed, #796
+    cancelled (not bathos-owned). All four dispositions deliberate and reasoned in their descriptions.'
+- source_file: bathos_controls-discipline v1 complete_20260613_150032_e3c0c9c6-f17f-45d5-a91e-732ce693ff0e.yaml
+  index: 0
+  description_head: 'submit-provenance pruning/compaction (backlog #1774)'
+  disposition: dropped_repromoted
+  confirmed_at: '2026-08-05'
+  promoted_to: debt#1182
+  evidence: 'backlog#1774 archived 2026-07-08 listing remediation options and selecting none — a park,
+    not a rejection. Verified undone 2026-08-05: no prune/compact/archive path for submits/ in src/bathos/.'
+- source_file: bathos_worktree-prune complete_20260616_200000_f4c42a66-27a1-4866-80e3-65ffcd33570a.yaml
+  index: 0
+  description_head: 'submit-provenance pruning/compaction (backlog #1774)'
+  disposition: dropped_repromoted
+  confirmed_at: '2026-08-05'
+  promoted_to: debt#1182
+  evidence: 'backlog#1774 archived 2026-07-08 listing remediation options and selecting none — a park,
+    not a rejection. Verified undone 2026-08-05: no prune/compact/archive path for submits/ in src/bathos/.'
+- source_file: bathos_Build-order-steps-2-5-implemented--step-4-triggers-unwired_20260730_145047_4394b022-61e9-4149-80ce-e6d0c8b823ed.yaml
+  index: 0
+  description_head: Wiring the four §5 obligation triggers, the conclude-time obligation listing/dow
+  disposition: dropped_finished
+  concern: null
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: 'SHIPPED 20260805. obligations.py: WIRED_TRIGGERS = frozenset(TRIGGERS) — all four live.'
+- source_file: bathos_Build-order-steps-2-5-implemented--step-4-triggers-unwired_20260730_145047_4394b022-61e9-4149-80ce-e6d0c8b823ed.yaml
+  index: 1
+  description_head: Integration test for the BTH_REVIEW_COVERAGE_ENFORCE wiring seam in campaigns.py
+  disposition: dropped_finished
+  concern: null
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: SHIPPED 20260805 as tests/test_review_coverage_seam.py.
+- source_file: bathos_Build-order-steps-2-5-implemented--step-4-triggers-unwired_20260730_145047_4394b022-61e9-4149-80ce-e6d0c8b823ed.yaml
+  index: 2
+  description_head: The authored statistics / experimental-design corpus batch (multiple comparisons
+  disposition: kept_conditional
+  concern: stats-corpus-batch
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: 'PREMISE HOLDS, trigger NOT yet fired. corpus v1 shipped (src/bathos/corpus.py, agent_assets/corpus/{design,hygiene,prereg})
+    but has not been used against real sidecars — zero [review] entries exist anywhere. TRIGGER: corpus
+    v1 exercised on real sidecars.'
+- source_file: bathos_Build-order-steps-2-5-implemented--step-4-triggers-unwired_20260730_145047_4394b022-61e9-4149-80ce-e6d0c8b823ed.yaml
+  index: 3
+  description_head: Fix the fragile script-stem key in the existing reproduction gate (prereg.py:296
+  disposition: kept_live
+  concern: prereg-script-stem
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: 'PREMISE HOLDS, verified 2026-08-05 at prereg.py: warm path is `command LIKE ?` bound to f''%{requires_pass_stem}%'',
+    cool-tier fallback is a plain `requires_pass_stem in cmd`. Both substring matches, exactly as described.
+    Restated in 3 handoffs.'
+- source_file: bathos_Complete + backlog reconciled_20260612_134803_c7ff3e56-fe75-4119-91c9-2532d5f29d9d.yaml
+  index: 0
+  description_head: 'D1 / I7-I8: shared bathos.db compaction race under simultaneous multi-worktree c'
+  disposition: kept_live
+  concern: compaction-race
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: PREMISE HOLDS. No locking exists. CompactionLockedError is DEFINED at compact.py:40 and exported
+    from __init__.py but is NEVER RAISED anywhere, and there is no fcntl/flock/lockfile/O_EXCL in compact.py.
+    The exception is a stub that makes locking look implemented — a trap for anyone who greps for it.
+- source_file: bathos_Complete + backlog reconciled_20260612_134803_c7ff3e56-fe75-4119-91c9-2532d5f29d9d.yaml
+  index: 1
+  description_head: 'D2 / I5: schema-tagged worktree provenance (v7->v8 columns).'
+  disposition: kept_conditional
+  concern: worktree-provenance-columns
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: 'PREMISE HOLDS. No worktree_path/git_common_dir/is_worktree columns in schema.py. Note WorkspaceContext
+    (workspace.py:24) carries is_worktree/worktree_name at RUNTIME, but nothing is persisted to the catalog.
+    TRIGGER: a concrete query need.'
+- source_file: bathos_Complete + backlog reconciled_20260612_134803_c7ff3e56-fe75-4119-91c9-2532d5f29d9d.yaml
+  index: 2
+  description_head: 'D3 / I9: first-class Workspace entity (also fixes TBD-5: identity for worktrees '
+  disposition: kept_conditional
+  concern: workspace-entity
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: 'PREMISE HOLDS. WorkspaceContext exists as a frozen dataclass but there is no workspace record/table,
+    no lifecycle, and no enumerable children — the ask was a first-class entity. TRIGGER: a future major
+    version.'
+- source_file: bathos_Complete + backlog reconciled_20260612_134803_c7ff3e56-fe75-4119-91c9-2532d5f29d9d.yaml
+  index: 4
+  description_head: 'TBD-6 / D4: monorepo [project] scan_root override (AC-12 widens scan scope by de'
+  disposition: kept_conditional
+  concern: monorepo-scan-root
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: 'PREMISE HOLDS. `scan_root` appears nowhere in src/, tests/, or docs/. TRIGGER: a monorepo
+    user appears.'
+- source_file: 'bathos_Epic #2214 — B1 remediation complete; W4 paused_20260619_121219_f4719024-b077-4463-8bd7-f366932b07c8.yaml'
+  index: 1
+  description_head: AC-20 — SHA-drift detection of parity verdict artifacts via bth check.
+  disposition: dropped_finished
+  concern: null
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: SHIPPED. check_output_sha_drift() at src/bathos/checker.py:122.
+- source_file: bathos_Implementation complete_20260611_225030_d1e08b3a-471b-4476-9f34-16f15627354e.yaml
+  index: 0
+  description_head: 'D1 / I7-I8: shared bathos.db compaction race under simultaneous multi-worktree c'
+  disposition: kept_live
+  concern: compaction-race
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: PREMISE HOLDS. No locking exists. CompactionLockedError is DEFINED at compact.py:40 and exported
+    from __init__.py but is NEVER RAISED anywhere, and there is no fcntl/flock/lockfile/O_EXCL in compact.py.
+    The exception is a stub that makes locking look implemented — a trap for anyone who greps for it.
+- source_file: bathos_Implementation complete_20260611_225030_d1e08b3a-471b-4476-9f34-16f15627354e.yaml
+  index: 1
+  description_head: 'D2 / I5: schema-tagged worktree provenance (worktree_path/git_common_dir/is_work'
+  disposition: kept_conditional
+  concern: worktree-provenance-columns
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: 'PREMISE HOLDS. No worktree_path/git_common_dir/is_worktree columns in schema.py. Note WorkspaceContext
+    (workspace.py:24) carries is_worktree/worktree_name at RUNTIME, but nothing is persisted to the catalog.
+    TRIGGER: a concrete query need.'
+- source_file: bathos_Implementation complete_20260611_225030_d1e08b3a-471b-4476-9f34-16f15627354e.yaml
+  index: 2
+  description_head: 'D3 / I9: first-class Workspace entity (workspace record/table, lifecycle, worktr'
+  disposition: kept_conditional
+  concern: workspace-entity
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: 'PREMISE HOLDS. WorkspaceContext exists as a frozen dataclass but there is no workspace record/table,
+    no lifecycle, and no enumerable children — the ask was a first-class entity. TRIGGER: a future major
+    version.'
+- source_file: bathos_Implementation complete_20260611_225030_d1e08b3a-471b-4476-9f34-16f15627354e.yaml
+  index: 4
+  description_head: 'TBD-6 / D4: monorepo [project] scan_root override for users whose recorded root '
+  disposition: kept_conditional
+  concern: monorepo-scan-root
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: 'PREMISE HOLDS. `scan_root` appears nowhere in src/, tests/, or docs/. TRIGGER: a monorepo
+    user appears.'
+- source_file: bathos_Sprint 6"_20260602_174520_4d82d19a-f2bb-4ba6-98c7-d45d60f889b1.yaml
+  index: 0
+  description_head: praxia workflow YAML for bth classify (bth-migrate.yaml)
+  disposition: dropped_rescoped
+  concern: null
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: Not bathos-owned — a praxia workflow artifact. Absent here (no bth-migrate* anywhere in the
+    repo). Same disposition as backlog#794/#796.
+- source_file: bathos_Step-4-wired-and-enforcing--review-blocks-unauthored--coverage-gate-accepts-empty-entries_20260805_174249_6ccb1eb9-1a07-49c4-a803-158456074fd2.yaml
+  index: 0
+  description_head: Authoring the actual [review] block content for tev_design's 10 hypothesis/confo
+  disposition: kept_conditional
+  concern: tev-design-review-content
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: 'PREMISE HOLDS and its TRIGGER HAS NOW FIRED: the stated condition was ''after gate hardening'',
+    which landed 20260805 (commit 00c945a). Now blocked only on user-supplied literature content and explicit
+    go-ahead to edit another repo''s active worktree.'
+- source_file: bathos_Step-4-wired-and-enforcing--review-blocks-unauthored--coverage-gate-accepts-empty-entries_20260805_174249_6ccb1eb9-1a07-49c4-a803-158456074fd2.yaml
+  index: 1
+  description_head: campaign_confounded trigger left disabled in .bth.toml.
+  disposition: kept_conditional
+  concern: campaign-confounded-enable
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: 'PREMISE HOLDS. .bth.toml:24 still reads campaign_confounded = false. TRIGGER: outcome_failed
+    and obligations.enforce have produced real data.'
+- source_file: bathos_Step-4-wired-and-enforcing--review-blocks-unauthored--coverage-gate-accepts-empty-entries_20260805_174249_6ccb1eb9-1a07-49c4-a803-158456074fd2.yaml
+  index: 2
+  description_head: The authored statistics / experimental-design corpus batch (multiple comparisons
+  disposition: kept_conditional
+  concern: stats-corpus-batch
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: 'PREMISE HOLDS, trigger NOT yet fired. corpus v1 shipped (src/bathos/corpus.py, agent_assets/corpus/{design,hygiene,prereg})
+    but has not been used against real sidecars — zero [review] entries exist anywhere. TRIGGER: corpus
+    v1 exercised on real sidecars.'
+- source_file: bathos_Step-4-wired-and-enforcing--review-blocks-unauthored--coverage-gate-accepts-empty-entries_20260805_174249_6ccb1eb9-1a07-49c4-a803-158456074fd2.yaml
+  index: 3
+  description_head: Fix the fragile script-stem key in the existing reproduction gate (prereg.py:296
+  disposition: kept_live
+  concern: prereg-script-stem
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: 'PREMISE HOLDS, verified 2026-08-05 at prereg.py: warm path is `command LIKE ?` bound to f''%{requires_pass_stem}%'',
+    cool-tier fallback is a plain `requires_pass_stem in cmd`. Both substring matches, exactly as described.
+    Restated in 3 handoffs.'
+- source_file: bathos_Step-4-wired-and-enforcing--review-blocks-unauthored--coverage-gate-accepts-empty-entries_20260805_174249_6ccb1eb9-1a07-49c4-a803-158456074fd2.yaml
+  index: 4
+  description_head: CHANGELOG entries for build-order steps 1-3 (rule-card corpus, [review] block, c
+  disposition: kept_tracked
+  concern: changelog-backfill
+  confirmed_at: '2026-08-05'
+  promoted_to: debt#1173
+  evidence: LIVE and already promoted earlier this session.
+- source_file: bathos_controls-discipline v1 complete_20260613_150032_e3c0c9c6-f17f-45d5-a91e-732ce693ff0e.yaml
+  index: 1
+  description_head: hash-pinning for requires_pass_stem (TBD-6 in spec)
+  disposition: kept_live
+  concern: requires-pass-stem-hashpin
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: PREMISE HOLDS. No requires_pass_sha / stem_sha / pass_stem_hash anywhere in src/bathos/. Closely
+    related to prereg-script-stem — consider merging.
+- source_file: bathos_controls-discipline v1 complete_20260613_150032_e3c0c9c6-f17f-45d5-a91e-732ce693ff0e.yaml
+  index: 2
+  description_head: CHANGELOG.md + CLAUDE.md version bump to v0.11.0
+  disposition: dropped_obsolete
+  concern: null
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: SUPERSEDED. pyproject version is 0.13.0a1 — two minors past the requested bump.
+- source_file: bathos_design-agreed-implementation-not-started_20260730_060640_58d9fbae-9072-4901-8bca-c2d4170b3710.yaml
+  index: 0
+  description_head: 'Build-order steps 2-5: the [review] sidecar block (parse+validate, advisory), th'
+  disposition: dropped_finished
+  concern: null
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: SHIPPED across the 20260730 and 20260805 sessions ([review] block, coverage gate, obligation
+    ledger, Postmortem campaign_id/discharges, corpus-aware scaffolding).
+- source_file: bathos_design-agreed-implementation-not-started_20260730_060640_58d9fbae-9072-4901-8bca-c2d4170b3710.yaml
+  index: 1
+  description_head: The hand-authored statistics / experimental-design corpus batch (multiple compar
+  disposition: kept_conditional
+  concern: stats-corpus-batch
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: Restatement of stats-corpus-batch from the design-agreed handoff.
+- source_file: bathos_design-agreed-implementation-not-started_20260730_060640_58d9fbae-9072-4901-8bca-c2d4170b3710.yaml
+  index: 2
+  description_head: Fix the fragile script-stem key in the existing reproduction gate (prereg.py:296
+  disposition: kept_live
+  concern: prereg-script-stem
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: 'PREMISE HOLDS, verified 2026-08-05 at prereg.py: warm path is `command LIKE ?` bound to f''%{requires_pass_stem}%'',
+    cool-tier fallback is a plain `requires_pass_stem in cmd`. Both substring matches, exactly as described.
+    Restated in 3 handoffs.'
+- source_file: bathos_design-agreed-implementation-not-started_20260730_060640_58d9fbae-9072-4901-8bca-c2d4170b3710.yaml
+  index: 3
+  description_head: 'Remaining uncovered rig-run flows for the dogfood: procedural_recall, summarize,'
+  disposition: dropped_rescoped
+  concern: null
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: Not bathos-owned — praxia rig-run flow coverage. Out of this repo's scope entirely; if still
+    wanted it belongs in praxia's tracker.
+- source_file: bathos_v0.8 implementation_20260602_191119_ea1d8727-be7c-410a-a307-f445a99a5596.yaml
+  index: 1
+  description_head: HTML viz for E_n sequence chart in bth export --html / bth view
+  disposition: kept_live
+  concern: viz-en-chart
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: PREMISE HOLDS. No e_value/evalue/E_n reference under src/bathos/viz/. Wishlist-tier ('v0.9
+    or later').
+- source_file: bathos_v0.8 implementation_20260602_191119_ea1d8727-be7c-410a-a307-f445a99a5596.yaml
+  index: 2
+  description_head: Continuous metric e-values (deriving e-values from result_schema float fields)
+  disposition: kept_live
+  concern: continuous-evalues
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: PREMISE HOLDS. No 'continuous' handling in sidecar.py or campaigns.py. Wishlist-tier ('v0.9
+    or later').
+- source_file: bathos_maintenance_20260602_154356_bd73086b-c0c8-443a-9f24-7aac125a2bd1.yaml
+  index: 0
+  description_head: '#143 threshold epistemic hygiene — sidecar lint to flag unjustified numeric cuto'
+  disposition: dropped_finished
+  concern: MISNUMBERED
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: 'Id #143 does not exist in this workspace''s backlog. tech_debt#143 DOES exist but belongs
+    to ws_08031be1 and reads ''Session commits violate main branch protection'' — an unrelated item that
+    a naive resolver would have retrieved with full confidence. The real item is bathos backlog#760 ''Threshold
+    epistemic hygiene — sidecar lint + skill instructions'', status COMPLETED.'
+- source_file: bathos_maintenance_20260602_154356_bd73086b-c0c8-443a-9f24-7aac125a2bd1.yaml
+  index: 1
+  description_head: '#142 results management — output convention, file-count utilities, direct manage'
+  disposition: dropped_finished
+  concern: MISNUMBERED
+  confirmed_at: '2026-08-05'
+  promoted_to: null
+  evidence: 'Id #142 does not exist in this workspace''s backlog. tech_debt#142 belongs to ws_08031be1
+    (''MCP payload schemas undiscoverable'') — unrelated. The described work is bathos backlog#791 ''Results
+    management — output convention, file-count utilities'', status COMPLETED. Note the same handoff separately
+    cites #791 correctly, so this entry is a duplicate under a wrong id.'

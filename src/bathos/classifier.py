@@ -30,7 +30,9 @@ class ClassificationResult:
     confidence: ClassificationConfidence
     rationale: str  # Human-readable explanation
     rename_required: bool  # True if stem doesn't match target naming convention
-    suggested_stem: str | None = None  # New stem if rename required (e.g. "260526_diagnose_fire_nan")
+    suggested_stem: str | None = (
+        None  # New stem if rename required (e.g. "260526_diagnose_fire_nan")
+    )
     sidecar_required: bool = False  # True if target dir has sidecar=ERROR
     sidecar_path: Path | None = None  # Where the sidecar would live post-move
     existing_sidecar: Path | None = None  # Adjacent .bth.toml if one already exists at source
@@ -71,25 +73,120 @@ _CLASSIFICATION_RULES = [
     (r"^validate_", "validation", ClassificationConfidence.HIGH, "matches validate_ prefix"),
     (r"^analyze_", "analysis", ClassificationConfidence.HIGH, "matches analyze_ prefix"),
     (r"^analyse_", "analysis", ClassificationConfidence.HIGH, "matches analyse_ prefix"),
-    (r"^profile_", "analysis", ClassificationConfidence.MEDIUM, "matches profile_ prefix (likely analysis)"),
-    (r"^simulate_", "experiments", ClassificationConfidence.MEDIUM, "matches simulate_ prefix (likely experiment)"),
-    (r"^run_", "experiments", ClassificationConfidence.MEDIUM, "matches run_ prefix (likely experiment)"),
-    (r"^generate_", "data", ClassificationConfidence.MEDIUM, "matches generate_ prefix (likely data processing)"),
-    (r"^export_", "data", ClassificationConfidence.MEDIUM, "matches export_ prefix (likely data processing)"),
-    (r"^convert_", "data", ClassificationConfidence.MEDIUM, "matches convert_ prefix (likely data processing)"),
-    (r"^extract_", "data", ClassificationConfidence.MEDIUM, "matches extract_ prefix (likely data processing)"),
-    (r"^visualize_", "analysis", ClassificationConfidence.MEDIUM, "matches visualize_ prefix (likely analysis)"),
-    (r"^inspect_", "analysis", ClassificationConfidence.MEDIUM, "matches inspect_ prefix (likely analysis)"),
-    (r"^smoke_", "validation", ClassificationConfidence.MEDIUM, "matches smoke_ prefix (likely validation)"),
-    (r"^check_", "analysis", ClassificationConfidence.MEDIUM, "matches check_ prefix (classified as analysis, not validation)"),
-    (r"^verify_", "analysis", ClassificationConfidence.MEDIUM, "matches verify_ prefix (classified as analysis, not validation)"),
-    (r"^test_", "validation", ClassificationConfidence.MEDIUM, "matches test_ prefix (likely validation)"),
-    (r"^ablation_", "experiments", ClassificationConfidence.MEDIUM, "matches ablation_ prefix (likely experiment)"),
-    (r"^compare_", "analysis", ClassificationConfidence.LOW, "matches compare_ prefix (ambiguous: experiment or analysis?)"),
-    (r"^phase\d+_", "analysis", ClassificationConfidence.LOW, "matches phase*_ prefix (ambiguous, defaulting to analysis)"),
-    (r"^update_", "analysis", ClassificationConfidence.LOW, "matches update_ prefix (ambiguous prefix)"),
-    (r"^write_", "analysis", ClassificationConfidence.LOW, "matches write_ prefix (ambiguous prefix)"),
-    (r"^sync_", "analysis", ClassificationConfidence.LOW, "matches sync_ prefix (ambiguous prefix)"),
+    (
+        r"^profile_",
+        "analysis",
+        ClassificationConfidence.MEDIUM,
+        "matches profile_ prefix (likely analysis)",
+    ),
+    (
+        r"^simulate_",
+        "experiments",
+        ClassificationConfidence.MEDIUM,
+        "matches simulate_ prefix (likely experiment)",
+    ),
+    (
+        r"^run_",
+        "experiments",
+        ClassificationConfidence.MEDIUM,
+        "matches run_ prefix (likely experiment)",
+    ),
+    (
+        r"^generate_",
+        "data",
+        ClassificationConfidence.MEDIUM,
+        "matches generate_ prefix (likely data processing)",
+    ),
+    (
+        r"^export_",
+        "data",
+        ClassificationConfidence.MEDIUM,
+        "matches export_ prefix (likely data processing)",
+    ),
+    (
+        r"^convert_",
+        "data",
+        ClassificationConfidence.MEDIUM,
+        "matches convert_ prefix (likely data processing)",
+    ),
+    (
+        r"^extract_",
+        "data",
+        ClassificationConfidence.MEDIUM,
+        "matches extract_ prefix (likely data processing)",
+    ),
+    (
+        r"^visualize_",
+        "analysis",
+        ClassificationConfidence.MEDIUM,
+        "matches visualize_ prefix (likely analysis)",
+    ),
+    (
+        r"^inspect_",
+        "analysis",
+        ClassificationConfidence.MEDIUM,
+        "matches inspect_ prefix (likely analysis)",
+    ),
+    (
+        r"^smoke_",
+        "validation",
+        ClassificationConfidence.MEDIUM,
+        "matches smoke_ prefix (likely validation)",
+    ),
+    (
+        r"^check_",
+        "analysis",
+        ClassificationConfidence.MEDIUM,
+        "matches check_ prefix (classified as analysis, not validation)",
+    ),
+    (
+        r"^verify_",
+        "analysis",
+        ClassificationConfidence.MEDIUM,
+        "matches verify_ prefix (classified as analysis, not validation)",
+    ),
+    (
+        r"^test_",
+        "validation",
+        ClassificationConfidence.MEDIUM,
+        "matches test_ prefix (likely validation)",
+    ),
+    (
+        r"^ablation_",
+        "experiments",
+        ClassificationConfidence.MEDIUM,
+        "matches ablation_ prefix (likely experiment)",
+    ),
+    (
+        r"^compare_",
+        "analysis",
+        ClassificationConfidence.LOW,
+        "matches compare_ prefix (ambiguous: experiment or analysis?)",
+    ),
+    (
+        r"^phase\d+_",
+        "analysis",
+        ClassificationConfidence.LOW,
+        "matches phase*_ prefix (ambiguous, defaulting to analysis)",
+    ),
+    (
+        r"^update_",
+        "analysis",
+        ClassificationConfidence.LOW,
+        "matches update_ prefix (ambiguous prefix)",
+    ),
+    (
+        r"^write_",
+        "analysis",
+        ClassificationConfidence.LOW,
+        "matches write_ prefix (ambiguous prefix)",
+    ),
+    (
+        r"^sync_",
+        "analysis",
+        ClassificationConfidence.LOW,
+        "matches sync_ prefix (ambiguous prefix)",
+    ),
 ]
 
 
@@ -251,7 +348,9 @@ def _classify_single_script(script_path: Path, project_root: Path) -> Classifica
     # Try each classification rule in order
     for prefix_pattern, target_dir, confidence, rationale in _CLASSIFICATION_RULES:
         if re.match(prefix_pattern, stem):
-            return _build_classification_result(script_path, target_dir, confidence, rationale, project_root)
+            return _build_classification_result(
+                script_path, target_dir, confidence, rationale, project_root
+            )
 
     # Fallback: anything else goes to analysis/LOW
     return _build_classification_result(
@@ -439,8 +538,7 @@ def apply_classify_plan(plan: ClassifyPlanResult, scaffold_sidecars: bool = True
             )
         except subprocess.CalledProcessError as e:
             raise RuntimeError(
-                f"git mv failed for {action.source} → {action.destination}:\n"
-                f"{e.stderr}"
+                f"git mv failed for {action.source} → {action.destination}:\n{e.stderr}"
             ) from e
 
     # Scaffold sidecars if requested

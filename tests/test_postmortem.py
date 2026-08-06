@@ -63,7 +63,9 @@ def test_parse_postmortem_valid(tmp_path: Path):
     assert isinstance(postmortem, Postmortem)
     assert postmortem.run_id == "test-run-123"
     assert postmortem.hypothesis_status == "held"
-    assert postmortem.summary == "The NVT simulation successfully maintained the target temperature."
+    assert (
+        postmortem.summary == "The NVT simulation successfully maintained the target temperature."
+    )
     assert postmortem.unexpected_observations == "Slight pressure spike at step 5000, but resolved."
     assert postmortem.root_cause == "Thermostat damping parameter was too low initially."
     assert postmortem.verdict_override == "pass"
@@ -73,7 +75,10 @@ def test_parse_postmortem_valid(tmp_path: Path):
     assert postmortem.asset_links["checkpoint"] == "outputs/checkpoint.pt"
     assert isinstance(postmortem.asset_links["log_file"], dict)
     assert postmortem.asset_links["log_file"]["path"] == "outputs/run.log"
-    assert postmortem.asset_links["log_file"]["sha256"] == "123456abcdef123456abcdef123456abcdef123456abcdef123456abcdef1234"
+    assert (
+        postmortem.asset_links["log_file"]["sha256"]
+        == "123456abcdef123456abcdef123456abcdef123456abcdef123456abcdef1234"
+    )
 
 
 def test_parse_postmortem_invalid_toml(tmp_path: Path):
@@ -163,7 +168,10 @@ def test_validation_relative_paths(tmp_path: Path):
     )
     result = validate_postmortem(pm_escape, workspace_root=workspace_root, run=run)
     assert result.ok is False
-    assert any("escape the workspace" in err.message.lower() or "outside" in err.message.lower() for err in result.errors)
+    assert any(
+        "escape the workspace" in err.message.lower() or "outside" in err.message.lower()
+        for err in result.errors
+    )
 
 
 def test_validation_cryptographic_checksums(tmp_path: Path):
@@ -181,6 +189,7 @@ def test_validation_cryptographic_checksums(tmp_path: Path):
 
     # Calculate sha256 of "dummy-checkpoint-data"
     import hashlib
+
     correct_sha = hashlib.sha256(b"dummy-checkpoint-data").hexdigest()
     wrong_sha = "a" * 64
 
@@ -221,7 +230,10 @@ def test_validation_cryptographic_checksums(tmp_path: Path):
     )
     result = validate_postmortem(pm_wrong, workspace_root=workspace_root, run=run)
     assert result.ok is False
-    assert any("checksum" in err.message.lower() or "sha256" in err.message.lower() for err in result.errors)
+    assert any(
+        "checksum" in err.message.lower() or "sha256" in err.message.lower()
+        for err in result.errors
+    )
 
     # 3. Non-existent file should fail validation
     pm_missing_file = Postmortem(
@@ -236,7 +248,10 @@ def test_validation_cryptographic_checksums(tmp_path: Path):
     )
     result = validate_postmortem(pm_missing_file, workspace_root=workspace_root, run=run)
     assert result.ok is False
-    assert any("not exist" in err.message.lower() or "missing" in err.message.lower() for err in result.errors)
+    assert any(
+        "not exist" in err.message.lower() or "missing" in err.message.lower()
+        for err in result.errors
+    )
 
 
 def test_validation_code_drift(tmp_path: Path):
@@ -248,15 +263,27 @@ def test_validation_code_drift(tmp_path: Path):
 
     # Initialize a mock git repo in workspace
     import subprocess
+
     subprocess.run(["git", "init"], cwd=workspace_root, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=workspace_root, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=workspace_root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=workspace_root,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=workspace_root, check=True, capture_output=True
+    )
     (workspace_root / "file.txt").write_text("hello")
     subprocess.run(["git", "add", "."], cwd=workspace_root, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace_root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"], cwd=workspace_root, check=True, capture_output=True
+    )
 
     # Get HEAD hash of the workspace
-    current_head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=workspace_root, text=True).strip()
+    current_head = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=workspace_root, text=True
+    ).strip()
 
     # 1. Run with matching git state and clean repo -> passes
     run_clean = Run(
@@ -304,7 +331,9 @@ def test_validation_code_drift(tmp_path: Path):
     )
     result = validate_postmortem(pm, workspace_root=workspace_root, run=run_drift)
     assert result.ok is False
-    assert any("drift" in err.message.lower() or "hash" in err.message.lower() for err in result.errors)
+    assert any(
+        "drift" in err.message.lower() or "hash" in err.message.lower() for err in result.errors
+    )
 
 
 def test_validation_refutation_mapping():
@@ -324,7 +353,9 @@ def test_validation_refutation_mapping():
     )
     result = validate_postmortem(pm_refuted_pass, workspace_root=Path("/dummy"), run=None)
     assert result.ok is False
-    assert any("refuted" in err.message.lower() and "pass" in err.message.lower() for err in result.errors)
+    assert any(
+        "refuted" in err.message.lower() and "pass" in err.message.lower() for err in result.errors
+    )
 
     # 2. Invalid: hypothesis is held but verdict is fail
     pm_held_fail = Postmortem(
@@ -339,7 +370,9 @@ def test_validation_refutation_mapping():
     )
     result = validate_postmortem(pm_held_fail, workspace_root=Path("/dummy"), run=None)
     assert result.ok is False
-    assert any("held" in err.message.lower() and "fail" in err.message.lower() for err in result.errors)
+    assert any(
+        "held" in err.message.lower() and "fail" in err.message.lower() for err in result.errors
+    )
 
     # 3. Valid: refuted and fail
     pm_refuted_fail = Postmortem(
@@ -380,7 +413,9 @@ def test_validation_refutation_mapping():
         next_steps="",
         asset_links={},
     )
-    result = validate_postmortem(pm_inconconclusive_marginal, workspace_root=Path("/dummy"), run=None)
+    result = validate_postmortem(
+        pm_inconconclusive_marginal, workspace_root=Path("/dummy"), run=None
+    )
     assert result.ok is True
 
 
@@ -398,12 +433,14 @@ def test_compact_updates_postmortem(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(workspace_root)
 
     # Write project configuration file
-    (workspace_root / ".bth.toml").write_text(textwrap.dedent(f"""
+    (workspace_root / ".bth.toml").write_text(
+        textwrap.dedent(f"""
         [project]
         slug = "testproj"
         root = "{workspace_root}"
         catalog_dir = "{catalog_dir}"
-    """))
+    """)
+    )
 
     init_catalog(catalog_dir)
 
@@ -453,7 +490,10 @@ def test_compact_updates_postmortem(tmp_path: Path, monkeypatch):
     con = duckdb.connect(str(db_path))
 
     # Query the runs table
-    row = con.execute("SELECT outcome, postmortem_hypothesis_status, postmortem_summary, postmortem_verdict_override, postmortem_asset_links FROM runs WHERE id = ?", [run.id]).fetchone()
+    row = con.execute(
+        "SELECT outcome, postmortem_hypothesis_status, postmortem_summary, postmortem_verdict_override, postmortem_asset_links FROM runs WHERE id = ?",
+        [run.id],
+    ).fetchone()
     assert row is not None
 
     # outcome must be overridden to 'pass'
@@ -478,12 +518,14 @@ def test_cli_postmortem_scaffold(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
     monkeypatch.chdir(workspace_root)
 
-    (workspace_root / ".bth.toml").write_text(textwrap.dedent(f"""
+    (workspace_root / ".bth.toml").write_text(
+        textwrap.dedent(f"""
         [project]
         slug = "testproj"
         root = "{workspace_root}"
         catalog_dir = "{catalog_dir}"
-    """))
+    """)
+    )
 
     init_catalog(catalog_dir)
 
@@ -601,12 +643,14 @@ def test_cli_postmortem_show(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
     monkeypatch.chdir(workspace_root)
 
-    (workspace_root / ".bth.toml").write_text(textwrap.dedent(f"""
+    (workspace_root / ".bth.toml").write_text(
+        textwrap.dedent(f"""
         [project]
         slug = "testproj"
         root = "{workspace_root}"
         catalog_dir = "{catalog_dir}"
-    """))
+    """)
+    )
 
     init_catalog(catalog_dir)
 
@@ -675,11 +719,15 @@ def test_cli_postmortem_show(tmp_path: Path, monkeypatch):
 
 # --- Worktree-aware workspace resolution (spec 260611) ---
 
+
 def _init_repo_pm(path):
     import subprocess
+
     path.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "t@t.com"], cwd=path, check=True, capture_output=True
+    )
     subprocess.run(["git", "config", "user.name", "T"], cwd=path, check=True, capture_output=True)
     (path / "seed.txt").write_text("seed")
     subprocess.run(["git", "add", "."], cwd=path, check=True, capture_output=True)
@@ -752,7 +800,5 @@ def test_mcp_postmortem_validate_explicit_param_wins(tmp_path: Path, monkeypatch
         'summary = "s"\nverdict_override = "none"\nstatus = "final"\n\n'
         f'[asset_links]\na = {{ path = "assets/a.png", sha256 = "{sha}" }}\n'
     )
-    res = asyncio.run(
-        mcp.postmortem_validate(path=str(pm_file), workspace_root=str(explicit_ws))
-    )
+    res = asyncio.run(mcp.postmortem_validate(path=str(pm_file), workspace_root=str(explicit_ws)))
     assert res["validation_ok"] is True  # explicit param won; asset resolved under explicit_ws

@@ -43,16 +43,20 @@ class OutcomeSpec:
 @dataclass
 class ReproductionBlock:
     """Reproduction metadata for experiment sidecars (optional [reproduction] block)."""
-    reproduces_paper: str = ""       # DOI or citation string
-    reproduces_run: str = ""         # run UUID
+
+    reproduces_paper: str = ""  # DOI or citation string
+    reproduces_run: str = ""  # run UUID
     tolerance_pct: float | None = None
-    requires_pass_stem: str = ""     # script stem that must have outcome='pass' first
-    requires_parity_stem: str = ""   # script stem that must have a passing parity run first (F3 gate)
+    requires_pass_stem: str = ""  # script stem that must have outcome='pass' first
+    requires_parity_stem: str = (
+        ""  # script stem that must have a passing parity run first (F3 gate)
+    )
 
 
 @dataclass
 class ControlsBlock:
     """Control arm specification for experiment sidecars (optional [controls] block)."""
+
     positive_outcome: list[str] = field(default_factory=list)
     negative_outcome: list[str] = field(default_factory=list)
 
@@ -66,12 +70,122 @@ class DifferentialBlock:
     instead of executing -- proof the measurement can actually detect a real effect, not just
     that it produced *a* result.
     """
+
     knob: str = ""
     off: str = ""
     on: str = ""
-    expect: str = "differs"           # "differs" or "identical"
-    metric: str = ""                  # optional: a result_schema key to compare numerically
-    min_effect: float | None = None   # required when metric is set and numeric
+    expect: str = "differs"  # "differs" or "identical"
+    metric: str = ""  # optional: a result_schema key to compare numerically
+    min_effect: float | None = None  # required when metric is set and numeric
+
+
+#: Legal `disposition` values, by review kind. Validated structurally; an unknown value is a
+#: validation error rather than a silent pass, because disposition is what obligation trigger
+#: (4) keys on — a typo would make a citation permanently unable to be contradicted.
+LITERATURE_DISPOSITIONS = frozenset({"supports", "contradicts", "scope-differs"})
+IMPLEMENTATION_DISPOSITIONS = frozenset({"matches", "diverges", "not-applicable"})
+
+
+@dataclass
+class LiteratureReview:
+    """One `[[review.literature]]` entry: a prior result, and what it bears on."""
+
+    ref: str = ""  # DOI, arXiv id, or a bth run UUID
+    claim: str = ""  # what the reference actually reports
+    bears_on: str = ""  # hypothesis/confound id from the claim file (optional pre-claim, D2)
+    disposition: str = ""  # one of LITERATURE_DISPOSITIONS
+    checked: str = ""  # ISO date the author read it
+
+
+@dataclass
+class ImplementationReview:
+    """One `[[review.implementation]]` entry: a reference implementation, read at a pinned commit."""
+
+    source: str = ""  # path or URL
+    commit: str = ""  # pinned revision — makes the attestation falsifiable in principle
+    what_was_checked: str = ""
+    bears_on: str = ""
+    disposition: str = ""  # one of IMPLEMENTATION_DISPOSITIONS
+
+
+@dataclass
+class ReviewBlock:
+    """The optional `[review]` block: targeted literature and implementation review.
+
+    Tier is **derived, never declared** — the spec calls for tiers "mechanically graded", the
+    same posture as parity's cap-lattice, so an author cannot assert a stronger tier than the
+    content supports. See :func:`review_tier`.
+    """
+
+    literature: list[LiteratureReview] = field(default_factory=list)
+    implementation: list[ImplementationReview] = field(default_factory=list)
+
+    def is_empty(self) -> bool:
+        return not self.literature and not self.implementation
+
+
+def literature_entry_reviewed(entry: LiteratureReview) -> bool:
+    """Does one `[[review.literature]]` entry meet the C1 bar?
+
+    Requires `ref` **and** `bears_on` **and** `disposition`. The spec's tier table states C1 as
+    "`bears_on` + disposition" and does not mention `ref`; requiring it here is a deliberate
+    tightening, because without it the lattice inverts. C0 is defined as "DOI + claim,
+    unverified", so an entry carrying `bears_on` + `disposition` but *no citation* would grade
+    C1 while failing C0's own content bar — and an uncited attestation ("I reviewed something
+    unnamed that supports H1") is unfalsifiable in principle, which is the "review theater"
+    failure mode §8 of the spec names explicitly.
+    """
+    return bool(entry.ref and entry.bears_on and entry.disposition)
+
+
+def implementation_entry_reviewed(entry: ImplementationReview) -> bool:
+    """Does one `[[review.implementation]]` entry meet the C1 bar?
+
+    Requires `source` **and** `commit` **and** `what_was_checked` — a pinned read of a named
+    thing. `source` is the same deliberate tightening as `ref` above: a `commit` with no source
+    pins a revision of nothing.
+
+    `bears_on` is deliberately NOT required. The spec grades an implementation read at a pinned
+    commit as C1 on its own; binding it to a claim id is what the *coverage* gate additionally
+    demands, which is a different question from how good the entry is. See :func:`covering_id`.
+    """
+    return bool(entry.source and entry.commit and entry.what_was_checked)
+
+
+def covering_id(entry: LiteratureReview | ImplementationReview) -> str:
+    """The claim id this entry substantively covers, or ``""`` if it covers nothing.
+
+    This is the Review Coverage Gate's definition of "real enough to count", and it is
+    deliberately expressed here — beside the tier standard — rather than in `claim.py`, so
+    there is exactly one notion of a substantive review entry rather than two that can drift.
+
+    Coverage is **C1 plus a binding**: an entry must both meet the tier bar and name the id it
+    bears on. For literature `bears_on` is already part of C1; for implementation it is the
+    extra requirement, since a pinned read that names no hypothesis covers nothing even though
+    it is a perfectly good C1 entry.
+    """
+    if isinstance(entry, ImplementationReview):
+        return entry.bears_on if implementation_entry_reviewed(entry) else ""
+    return entry.bears_on if literature_entry_reviewed(entry) else ""
+
+
+def review_tier(review: ReviewBlock | None) -> str:
+    """Grade a review block: ``""`` (none) | ``C0`` cited | ``C1`` reviewed.
+
+    C1 requires an entry that is actually checkable — see :func:`literature_entry_reviewed` and
+    :func:`implementation_entry_reviewed` for the per-entry bar and why each field is required.
+    Anything less is C0 — a citation, not a review.
+
+    C2 (`parity`) is deliberately NOT derivable here. It is earned by the existing five-phase
+    literature-parity audit, not by anything a sidecar can assert about itself.
+    """
+    if review is None or review.is_empty():
+        return ""
+    if any(literature_entry_reviewed(e) for e in review.literature):
+        return "C1"
+    if any(implementation_entry_reviewed(e) for e in review.implementation):
+        return "C1"
+    return "C0"
 
 
 @dataclass
@@ -116,6 +230,9 @@ class Sidecar:
     controls: ControlsBlock | None = None
     # instrument-sensitivity pre-flight (experiment sidecars only, debt #1071)
     differential: DifferentialBlock | None = None
+    # targeted literature / implementation review (build-order step 2). Advisory at parse
+    # time; the Review Coverage Gate at campaign conclude is what consumes it.
+    review: ReviewBlock | None = None
 
 
 ENFORCED_DIRS = {"experiments", "benchmarks", "validation"}
@@ -215,7 +332,13 @@ def parse_sidecar(path: Path) -> Sidecar:
             )
             # Warn on unknown keys in [reproduction]
             for key in repro_data:
-                if key not in {"reproduces_paper", "reproduces_run", "tolerance_pct", "requires_pass_stem", "requires_parity_stem"}:
+                if key not in {
+                    "reproduces_paper",
+                    "reproduces_run",
+                    "tolerance_pct",
+                    "requires_pass_stem",
+                    "requires_parity_stem",
+                }:
                     logger.warning(f"Unknown key in [reproduction]: {key!r}")
 
         # Parse [controls] block (optional)
@@ -292,7 +415,50 @@ def parse_sidecar(path: Path) -> Sidecar:
     if sidecar:
         sha256_val = hashlib.sha256(path.read_bytes()).hexdigest()
         outcome_labels = list(sidecar.outcomes.keys())
-        event("sidecar.parsed", path=str(path), sha256=sha256_val, outcomes=outcome_labels, kind=sidecar.kind.value)
+        event(
+            "sidecar.parsed",
+            path=str(path),
+            sha256=sha256_val,
+            outcomes=outcome_labels,
+            kind=sidecar.kind.value,
+        )
+
+    # Parse [review] block (optional, build-order step 2). Applies to every sidecar kind,
+    # not just experiments: a benchmark or validation script can equally rest on prior work.
+    if "review" in data:
+        review_data = data.get("review") or {}
+        # A bare scalar/array `review = "..."` is legal TOML and satisfies the `in` test;
+        # calling .get() on it would raise AttributeError out of parse_sidecar rather than
+        # SidecarError. Treat a non-table as absent.
+        if not isinstance(review_data, dict):
+            logger.warning("[review] is not a table; ignoring")
+            review_data = {}
+        lit = [
+            LiteratureReview(
+                ref=str(e.get("ref", "")),
+                claim=str(e.get("claim", "")),
+                bears_on=str(e.get("bears_on", "")),
+                disposition=str(e.get("disposition", "")),
+                checked=str(e.get("checked", "")),
+            )
+            for e in review_data.get("literature", [])
+            if isinstance(e, dict)
+        ]
+        impl = [
+            ImplementationReview(
+                source=str(e.get("source", "")),
+                commit=str(e.get("commit", "")),
+                what_was_checked=str(e.get("what_was_checked", "")),
+                bears_on=str(e.get("bears_on", "")),
+                disposition=str(e.get("disposition", "")),
+            )
+            for e in review_data.get("implementation", [])
+            if isinstance(e, dict)
+        ]
+        sidecar.review = ReviewBlock(literature=lit, implementation=impl)
+        for key in review_data:
+            if key not in {"literature", "implementation"}:
+                logger.warning(f"Unknown key in [review]: {key!r}")
 
     return sidecar
 
@@ -347,6 +513,44 @@ def single_row_projection(row: dict) -> str:
     return ", ".join(_sql_literal(v, k) for k, v in row.items())
 
 
+def derive_pass_labels(sidecar: Sidecar) -> set[str]:
+    """Outcome labels in the *pass* direction.
+
+    Outcome labels have no canonical set — unlike `stage_name`, which is constrained to
+    CANONICAL_STAGES, the author names each `[outcomes.<label>]` branch freely — so this is
+    derived from the sidecar's own declarations rather than matched against a fixed vocabulary.
+
+    Excluded: residual catch-all branches, and the three bookkeeping labels `marginal` /
+    `error` / `unknown`, none of which is a declared scientific outcome.
+    """
+    return {
+        label
+        for label, spec in sidecar.outcomes.items()
+        if not spec.is_residual and label not in ("marginal", "error", "unknown")
+    }
+
+
+def is_failure_outcome(sidecar: Sidecar | None, outcome_label: str) -> bool:
+    """Did this run land outside the pass direction? (obligation trigger 1, spec §5.1)
+
+    **Not** a literal match on ``"fail"``: `unstable`, `rejected` and `no-go` are all legal
+    names for the same thing and a string match would silently miss every one of them. The
+    spec defines the trigger against the same `pass_labels` set `compute_evalue` derives,
+    which is why that derivation now lives in :func:`derive_pass_labels`.
+
+    ``""`` and ``"unknown"`` are **not** failures — they mean no outcome was evaluated at all,
+    which is a different thing from an evaluated non-pass, and an obligation to explain a
+    result that was never computed would be noise.
+
+    `marginal`, `error`, and residual catch-all branches **are** failures here: none of them is
+    a pass. That is the spec's rule applied literally, and it is the widest of the four
+    triggers — see the calibration note in `obligations.TRIGGERS`.
+    """
+    if sidecar is None or outcome_label in ("", "unknown"):
+        return False
+    return outcome_label not in derive_pass_labels(sidecar)
+
+
 def compute_evalue(
     sidecar: Sidecar,
     outcome_label: str,
@@ -376,18 +580,16 @@ def compute_evalue(
 
     # Determine pass-direction labels if not provided
     if pass_labels is None:
-        pass_labels = {
-            label
-            for label, spec in sidecar.outcomes.items()
-            if not spec.is_residual and label not in ("marginal", "error", "unknown")
-        }
+        pass_labels = derive_pass_labels(sidecar)
 
     if outcome_label in pass_labels:
         evalue = alt / null
     else:
         evalue = (1.0 - alt) / (1.0 - null)
 
-    assert evalue > 0, f"compute_evalue produced non-positive value {evalue} for outcome '{outcome_label}'"
+    assert evalue > 0, (
+        f"compute_evalue produced non-positive value {evalue} for outcome '{outcome_label}'"
+    )
     return evalue
 
 
@@ -400,6 +602,48 @@ def find_sidecar(script_path: Path) -> Path | None:
 def is_in_enforced_dir(script_path: Path) -> bool:
     """Return True if script is inside a directory name in ENFORCED_DIRS."""
     return any(part in ENFORCED_DIRS for part in script_path.parts)
+
+
+def evaluate_adversarial_check(sidecar: Sidecar, outcome_label: str, result: dict) -> str | None:
+    """Evaluate the selected branch's `adversarial_check`. Returns "passed" | "fired" | None.
+
+    **Polarity — the check is a stricter bar, so it FIRES when it evaluates FALSE.**
+
+    `adversarial_check` is an *additional* condition the outcome must also clear, not the
+    negation of `condition`. The ADR (`260526_adversarial-check-policy.md`) defines it as a
+    condition that "would flip the outcome if the hypothesis were wrong", and the spec's own
+    example is a strengthened conjunct — `condition = "temp_std < 5"` paired with
+    `adversarial_check = "temp_std < 5 AND n_steps >= 10000 AND dt_fs <= 0.5"`. A wrong
+    hypothesis fails the stricter bar; that failure is the check *catching* something, which
+    is what "fired" means here.
+
+    The problem it exists to solve (ADR Context) is an agent pre-registering "a weak
+    confirmatory test that never genuinely stresses the claim". The remedy for a weak test is
+    a stronger one, so a check that merely negates `condition` is a contradiction that would
+    fire on every single run of that branch — `linter.check_adversarial_checks` flags that
+    shape via the distinct-column heuristic.
+
+    Returns None (not "passed") when there is nothing to evaluate — no branch selected, no
+    check declared, or no result data. Absent must stay distinguishable from cleared.
+
+    A malformed check returns None rather than raising: it is an advisory signal, and a bad
+    SQL fragment must not fail a run whose outcome already evaluated successfully.
+    """
+    if not outcome_label or outcome_label in ("error", "unknown") or not result:
+        return None
+    spec = sidecar.outcomes.get(outcome_label)
+    check = getattr(spec, "adversarial_check", None) if spec else None
+    if not check:
+        return None
+
+    cols = single_row_projection(result)
+    try:
+        rows = duckdb.execute(f"SELECT ({check}) FROM (SELECT {cols})").fetchall()
+    except Exception:
+        return None
+    if not rows or rows[0][0] is None:
+        return None
+    return "passed" if rows[0][0] else "fired"
 
 
 def evaluate_outcome(sidecar: Sidecar, result: dict) -> str:

@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 class CatalogError(Exception):
     """Exception raised when catalog operations fail."""
+
     pass
 
 
@@ -148,17 +149,22 @@ def _row_to_run(row: tuple) -> Run | None:
             script_sha256=script_sha256 if script_sha256 else "",
             postmortem_status=postmortem_status if postmortem_status else "unassigned",
             postmortem_override=postmortem_override if postmortem_override else "none",
-            postmortem_verdict_override=postmortem_verdict_override if postmortem_verdict_override else "none",
+            postmortem_verdict_override=postmortem_verdict_override
+            if postmortem_verdict_override
+            else "none",
             postmortem_author=postmortem_author if postmortem_author else "",
             postmortem_path=postmortem_path if postmortem_path else "",
-            postmortem_hypothesis_status=postmortem_hypothesis_status if postmortem_hypothesis_status else "unassigned",
-            postmortem_has_anomalies=postmortem_has_anomalies if postmortem_has_anomalies is not None else False,
+            postmortem_hypothesis_status=postmortem_hypothesis_status
+            if postmortem_hypothesis_status
+            else "unassigned",
+            postmortem_has_anomalies=postmortem_has_anomalies
+            if postmortem_has_anomalies is not None
+            else False,
             postmortem_summary=postmortem_summary if postmortem_summary else "",
             postmortem_asset_links=postmortem_asset_links if postmortem_asset_links else "{}",
         )
     except (ValueError, TypeError, IndexError) as e:
         raise RuntimeError(f"Failed to convert DuckDB row to Run: {e}") from e
-
 
 
 def _resolve_backend(catalog_dir: Path) -> Literal["cool", "warm"]:

@@ -71,9 +71,7 @@ def catalog_dir(tmp_path: Path) -> Path:
 
 
 class TestPassVerdict:
-    def test_pass_writes_sidecar_and_anchors_it(
-        self, xtrax_root: Path, catalog_dir: Path
-    ) -> None:
+    def test_pass_writes_sidecar_and_anchors_it(self, xtrax_root: Path, catalog_dir: Path) -> None:
         result = run_harness_as_bathos_run(
             harness_argv=[sys.executable, "-c", PASS_SCRIPT],
             xtrax_root=xtrax_root,

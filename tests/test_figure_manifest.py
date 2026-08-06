@@ -8,6 +8,7 @@ Path: <catalog>/sidecars/<campaign_id>/figure_manifest.json
 Schema: {manifest_version, campaign_id, figures: [{figure_id, intent, input_pins, render_state}]}
 Render states: ready | deferred | empty (on empty figures list, manifest is still valid)
 """
+
 import json
 import tempfile
 from pathlib import Path
@@ -155,12 +156,14 @@ class TestFigureManifestSchema:
         assert "figure_kind" not in parsed, "figure_kind None should be excluded from JSON"
 
         # Deserialize old JSON without figure_kind field
-        old_json = json.dumps({
-            "figure_id": "fig_old_format",
-            "intent": "legacy figure",
-            "input_pins": [{"run_id": "r1", "output_path": "p1", "sha256": "h1"}],
-            "render_state": "ready",
-        })
+        old_json = json.dumps(
+            {
+                "figure_id": "fig_old_format",
+                "intent": "legacy figure",
+                "input_pins": [{"run_id": "r1", "output_path": "p1", "sha256": "h1"}],
+                "render_state": "ready",
+            }
+        )
         restored = FigureEntry.model_validate_json(old_json)
         assert restored.figure_kind is None
 
@@ -194,6 +197,7 @@ class TestFigureManifestSchema:
         # write_manifest uses exclude_none=True internally
         import tempfile
         from pathlib import Path
+
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "manifest.json"
             manifest.write_manifest(path)
@@ -438,7 +442,9 @@ class TestFigureManifestFileHandling:
             assert parsed["figures"][0]["figure_kind"] == "analysis_chart"
             assert "figure_kind" in parsed["figures"][1]
             assert parsed["figures"][1]["figure_kind"] == "structural"
-            assert "figure_kind" not in parsed["figures"][2], "None figure_kind should not appear in JSON"
+            assert "figure_kind" not in parsed["figures"][2], (
+                "None figure_kind should not appear in JSON"
+            )
 
 
 class TestRenderStateEnum:

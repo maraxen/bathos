@@ -50,13 +50,17 @@ def test_create_campaign_stores_to_db(populated_warm_catalog: Path):
     """Test that create_campaign stores campaign to DB."""
     db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
     try:
-        campaign = create_campaign(db, name="Test Campaign", project_slug="prolix", mode="exploration")
+        campaign = create_campaign(
+            db, name="Test Campaign", project_slug="prolix", mode="exploration"
+        )
         assert campaign.name == "Test Campaign"
         assert campaign.mode == "exploration"
         assert campaign.status == "open"
 
         # Verify stored in DB
-        rows = db.execute("SELECT id, name, mode, status FROM campaigns WHERE id = ?", [campaign.id]).fetchall()
+        rows = db.execute(
+            "SELECT id, name, mode, status FROM campaigns WHERE id = ?", [campaign.id]
+        ).fetchall()
         assert len(rows) == 1
         assert rows[0][1] == "Test Campaign"
         assert rows[0][2] == "exploration"
@@ -80,7 +84,10 @@ def test_add_run_to_campaign_idempotent(populated_warm_catalog: Path):
         add_run_to_campaign(db, campaign.id, run_id)
 
         # Verify only one row in campaign_runs
-        rows = db.execute("SELECT COUNT(*) FROM campaign_runs WHERE campaign_id = ? AND run_id = ?", [campaign.id, run_id]).fetchall()
+        rows = db.execute(
+            "SELECT COUNT(*) FROM campaign_runs WHERE campaign_id = ? AND run_id = ?",
+            [campaign.id, run_id],
+        ).fetchall()
         assert rows[0][0] == 1
     finally:
         db.close()
@@ -143,7 +150,9 @@ def test_conclude_campaign_updates_status(populated_warm_catalog: Path):
         conclude_campaign(db, campaign.id, "pass", "All tests passed")
 
         # Verify updated in DB
-        rows = db.execute("SELECT status, outcome_label, conclusion FROM campaigns WHERE id = ?", [campaign.id]).fetchall()
+        rows = db.execute(
+            "SELECT status, outcome_label, conclusion FROM campaigns WHERE id = ?", [campaign.id]
+        ).fetchall()
         assert rows[0][0] == "concluded"
         assert rows[0][1] == "pass"
         assert rows[0][2] == "All tests passed"
@@ -161,7 +170,9 @@ def test_confirmation_campaign_rejects_prior_run(populated_warm_catalog: Path):
     db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
     try:
         # Create campaign at T1
-        campaign = create_campaign(db, name="Confirmation Test", project_slug="prolix", mode="confirmation")
+        campaign = create_campaign(
+            db, name="Confirmation Test", project_slug="prolix", mode="confirmation"
+        )
         campaign_start = campaign.started_at
 
         # Insert a run with prior timestamp directly into DB
@@ -174,15 +185,29 @@ def test_confirmation_campaign_rejects_prior_run(populated_warm_catalog: Path):
             git_hash="abc",
             git_branch="main",
             git_dirty=False,
-            timestamp=datetime.fromisoformat(old_timestamp.replace('Z', '+00:00')),
+            timestamp=datetime.fromisoformat(old_timestamp.replace("Z", "+00:00")),
             status="completed",
             exit_code=0,
         )
-        db.execute("""
+        db.execute(
+            """
             INSERT INTO runs (id, project_slug, command, argv, git_hash, git_branch, git_dirty, timestamp, status, exit_code, duration_s)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, [prior_run.id, prior_run.project_slug, prior_run.command, prior_run.argv, prior_run.git_hash,
-              prior_run.git_branch, prior_run.git_dirty, old_timestamp, prior_run.status, prior_run.exit_code, 0.0])
+        """,
+            [
+                prior_run.id,
+                prior_run.project_slug,
+                prior_run.command,
+                prior_run.argv,
+                prior_run.git_hash,
+                prior_run.git_branch,
+                prior_run.git_dirty,
+                old_timestamp,
+                prior_run.status,
+                prior_run.exit_code,
+                0.0,
+            ],
+        )
 
         # Try to add prior run to confirmation campaign — should fail
         with pytest.raises(CampaignError):
@@ -196,21 +221,40 @@ def test_exploration_campaign_allows_prior_run(populated_warm_catalog: Path):
     db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
     try:
         # Create exploration campaign
-        campaign = create_campaign(db, name="Exploration Test", project_slug="prolix", mode="exploration")
+        campaign = create_campaign(
+            db, name="Exploration Test", project_slug="prolix", mode="exploration"
+        )
 
         # Insert a run with prior timestamp
         old_timestamp = datetime(2026, 5, 9, 12, 0, 0, tzinfo=UTC).isoformat()
-        db.execute("""
+        db.execute(
+            """
             INSERT INTO runs (id, project_slug, command, argv, git_hash, git_branch, git_dirty, timestamp, status, exit_code, duration_s)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, ["prior_run_id", "prolix", "python run.py", ["python", "run.py"], "abc",
-              "main", False, old_timestamp, "completed", 0, 0.0])
+        """,
+            [
+                "prior_run_id",
+                "prolix",
+                "python run.py",
+                ["python", "run.py"],
+                "abc",
+                "main",
+                False,
+                old_timestamp,
+                "completed",
+                0,
+                0.0,
+            ],
+        )
 
         # Should succeed without error
         add_run_to_campaign(db, campaign.id, "prior_run_id")
 
         # Verify added
-        rows = db.execute("SELECT COUNT(*) FROM campaign_runs WHERE campaign_id = ? AND run_id = ?", [campaign.id, "prior_run_id"]).fetchall()
+        rows = db.execute(
+            "SELECT COUNT(*) FROM campaign_runs WHERE campaign_id = ? AND run_id = ?",
+            [campaign.id, "prior_run_id"],
+        ).fetchall()
         assert rows[0][0] == 1
     finally:
         db.close()
@@ -224,7 +268,9 @@ def test_list_campaigns_with_status_filter(populated_warm_catalog: Path):
         open_campaign = create_campaign(db, name="Open", project_slug="prolix", mode="exploration")
 
         # Create and conclude another
-        concluded_campaign = create_campaign(db, name="Concluded", project_slug="prolix", mode="exploration")
+        concluded_campaign = create_campaign(
+            db, name="Concluded", project_slug="prolix", mode="exploration"
+        )
         conclude_campaign(db, concluded_campaign.id, "pass", "Done")
 
         # List all
@@ -247,7 +293,9 @@ def test_review_campaign_computes_rates(populated_warm_catalog: Path):
     """Test review_campaign computes residual/bypass/unknown rates."""
     db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
     try:
-        campaign = create_campaign(db, name="Review Test", project_slug="prolix", mode="exploration")
+        campaign = create_campaign(
+            db, name="Review Test", project_slug="prolix", mode="exploration"
+        )
 
         # Get runs and add to campaign
         runs = db.execute("SELECT id FROM runs WHERE project_slug = 'prolix'").fetchall()
@@ -295,7 +343,9 @@ def test_compact_populates_campaign_runs(tmp_catalog: Path):
     # Verify campaign_runs populated
     db = duckdb.connect(str(tmp_catalog / "bathos.db"))
     try:
-        rows = db.execute("SELECT COUNT(*) FROM campaign_runs WHERE campaign_id = ?", [campaign_id]).fetchall()
+        rows = db.execute(
+            "SELECT COUNT(*) FROM campaign_runs WHERE campaign_id = ?", [campaign_id]
+        ).fetchall()
         assert rows[0][0] == 2
     finally:
         db.close()
@@ -316,12 +366,20 @@ def test_create_campaign_with_parent(populated_warm_catalog: Path):
     db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
     try:
         parent = create_campaign(db, name="Parent", project_slug="prolix", mode="exploration")
-        child = create_campaign(db, name="Child", project_slug="prolix", mode="exploration", parent_campaign_id=parent.id)
+        child = create_campaign(
+            db,
+            name="Child",
+            project_slug="prolix",
+            mode="exploration",
+            parent_campaign_id=parent.id,
+        )
 
         assert child.parent_campaign_id == parent.id
 
         # Verify stored
-        rows = db.execute("SELECT parent_campaign_id FROM campaigns WHERE id = ?", [child.id]).fetchall()
+        rows = db.execute(
+            "SELECT parent_campaign_id FROM campaigns WHERE id = ?", [child.id]
+        ).fetchall()
         assert rows[0][0] == parent.id
     finally:
         db.close()
@@ -331,11 +389,15 @@ def test_conclude_campaign_accepts_short_id(populated_warm_catalog: Path):
     """conclude_campaign should accept 8-char short IDs as displayed by bth campaign ls."""
     db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
     try:
-        campaign = create_campaign(db, name="Short ID Test", project_slug="prolix", mode="exploration")
+        campaign = create_campaign(
+            db, name="Short ID Test", project_slug="prolix", mode="exploration"
+        )
         short_id = campaign.id[:8]
         conclude_campaign(db, short_id, "pass", "concluded via short ID")
 
-        rows = db.execute("SELECT status, outcome_label FROM campaigns WHERE id = ?", [campaign.id]).fetchall()
+        rows = db.execute(
+            "SELECT status, outcome_label FROM campaigns WHERE id = ?", [campaign.id]
+        ).fetchall()
         assert rows[0][0] == "concluded"
         assert rows[0][1] == "pass"
     finally:
@@ -346,7 +408,9 @@ def test_get_campaign_accepts_short_id(populated_warm_catalog: Path):
     """get_campaign should resolve 8-char short IDs."""
     db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
     try:
-        campaign = create_campaign(db, name="Short ID Fetch", project_slug="prolix", mode="exploration")
+        campaign = create_campaign(
+            db, name="Short ID Fetch", project_slug="prolix", mode="exploration"
+        )
         short_id = campaign.id[:8]
         fetched = get_campaign(db, short_id)
         assert fetched is not None
@@ -358,6 +422,7 @@ def test_get_campaign_accepts_short_id(populated_warm_catalog: Path):
 def test_conclude_campaign_raises_on_ambiguous_prefix(populated_warm_catalog: Path):
     """conclude_campaign should raise CampaignError if a prefix matches multiple campaigns."""
     import uuid
+
     db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
     try:
         # Force two campaigns with the same 4-char prefix by setting IDs directly
@@ -375,14 +440,18 @@ def test_conclude_campaign_raises_on_ambiguous_prefix(populated_warm_catalog: Pa
         db.close()
 
 
-def test_conclude_campaign_union_gate_confounded_on_confirmation(populated_warm_catalog: Path, tmp_path):
+def test_conclude_campaign_union_gate_confounded_on_confirmation(
+    populated_warm_catalog: Path, tmp_path
+):
     """AC-08: Union Gate downgrades verdict to 'confounded' on confirmation mode with uncovered clauses."""
     import json
 
     db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
     try:
         # Create confirmation campaign
-        campaign = create_campaign(db, name="Confirmation Test", project_slug="prolix", mode="confirmation")
+        campaign = create_campaign(
+            db, name="Confirmation Test", project_slug="prolix", mode="confirmation"
+        )
 
         # Create a claim file
         claim_path = tmp_path / "test.claim.toml"
@@ -412,12 +481,28 @@ hypothesis_ids = ["H_primary", "H_null"]
         )
 
         # Insert a run with only partial discriminates (missing H_null)
-        db.execute("""
+        db.execute(
+            """
             INSERT INTO runs (id, project_slug, command, argv, git_hash, git_branch, git_dirty,
                             timestamp, status, exit_code, duration_s, campaign_id, claim_discriminates)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, ["run1", "prolix", "python test.py", ["python", "test.py"], "abc", "main", False,
-              datetime.now(UTC).isoformat(), "completed", 0, 1.0, campaign.id, json.dumps(["H_primary"])])
+        """,
+            [
+                "run1",
+                "prolix",
+                "python test.py",
+                ["python", "test.py"],
+                "abc",
+                "main",
+                False,
+                datetime.now(UTC).isoformat(),
+                "completed",
+                0,
+                1.0,
+                campaign.id,
+                json.dumps(["H_primary"]),
+            ],
+        )
 
         # Add run to campaign_runs
         db.execute(
@@ -427,11 +512,16 @@ hypothesis_ids = ["H_primary", "H_null"]
         db.commit()
 
         # Test with claim_path=NULL (opt-in model) — no gate fires
-        db.execute("UPDATE campaigns SET claim_path = NULL, claim_sha256 = NULL WHERE id = ?", [campaign.id])
+        db.execute(
+            "UPDATE campaigns SET claim_path = NULL, claim_sha256 = NULL WHERE id = ?",
+            [campaign.id],
+        )
         db.commit()
 
         conclude_campaign(db, campaign.id, "pass", "Testing")
-        row = db.execute("SELECT outcome_label FROM campaigns WHERE id = ?", [campaign.id]).fetchone()
+        row = db.execute(
+            "SELECT outcome_label FROM campaigns WHERE id = ?", [campaign.id]
+        ).fetchone()
         assert row[0] == "pass"  # No Union Gate downgrade when claim_path is NULL
     finally:
         db.close()
@@ -460,7 +550,9 @@ def test_conclude_campaign_union_gate_downgrades_with_real_registered_claim(
 
     db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
     try:
-        campaign = create_campaign(db, name="Real Claim Gate Test", project_slug="prolix", mode="confirmation")
+        campaign = create_campaign(
+            db, name="Real Claim Gate Test", project_slug="prolix", mode="confirmation"
+        )
 
         claim_path = tmp_path / "test.claim.toml"
         claim_path.write_text("""[claim]
@@ -506,11 +598,18 @@ hypothesis_ids = ["H_primary", "H_null"]
 
         conclude_campaign(db, campaign.id, "pass", "Should be downgraded", workspace_root=tmp_path)
 
-        row = db.execute("SELECT outcome_label FROM campaigns WHERE id = ?", [campaign.id]).fetchone()
+        row = db.execute(
+            "SELECT outcome_label FROM campaigns WHERE id = ?", [campaign.id]
+        ).fetchone()
         assert row[0] == "confounded"
 
         report_path = (
-            fake_home / ".bth" / "catalog" / "sidecars" / campaign.id / f"claim_coverage_{campaign.id}.json"
+            fake_home
+            / ".bth"
+            / "catalog"
+            / "sidecars"
+            / campaign.id
+            / f"claim_coverage_{campaign.id}.json"
         )
         assert report_path.exists(), "expected claim-coverage sidecar report to be emitted"
         report = json.loads(report_path.read_text())
@@ -566,13 +665,19 @@ description = "Main clause"
 hypothesis_ids = ["H_primary", "H_null"]
 """)
         db.close()
-        register_claim(claim_path, campaign.id, duckdb.connect(str(populated_warm_catalog / "bathos.db")), tmp_path)
+        register_claim(
+            claim_path,
+            campaign.id,
+            duckdb.connect(str(populated_warm_catalog / "bathos.db")),
+            tmp_path,
+        )
 
         enforced = tmp_path / "scripts" / "experiments"
         enforced.mkdir(parents=True)
         script = enforced / "run_x.py"
         script.write_text("print('hi')")
-        (enforced / "run_x.bth.toml").write_text(textwrap.dedent("""
+        (enforced / "run_x.bth.toml").write_text(
+            textwrap.dedent("""
             [experiment]
             hypothesis = "test hypothesis"
             claim_discriminates = ["H_primary", "H_null"]
@@ -587,7 +692,8 @@ hypothesis_ids = ["H_primary", "H_null"]
             is_residual = true
             [result_schema]
             x = "float"
-        """))
+        """)
+        )
         rc = run_script(
             argv=[sys.executable, str(script)],
             project_slug="prolix",
@@ -604,8 +710,12 @@ hypothesis_ids = ["H_primary", "H_null"]
 
         conclude_campaign(db, campaign.id, "pass", "Should be covered", workspace_root=tmp_path)
 
-        row = db.execute("SELECT outcome_label FROM campaigns WHERE id = ?", [campaign.id]).fetchone()
-        assert row[0] == "pass", f"expected the clause to be COVERED (outcome stays 'pass'), got {row[0]!r}"
+        row = db.execute(
+            "SELECT outcome_label FROM campaigns WHERE id = ?", [campaign.id]
+        ).fetchone()
+        assert row[0] == "pass", (
+            f"expected the clause to be COVERED (outcome stays 'pass'), got {row[0]!r}"
+        )
     finally:
         db.close()
 
@@ -615,7 +725,9 @@ def test_conclude_campaign_force_verdict_bypasses_gate(populated_warm_catalog: P
 
     db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
     try:
-        campaign = create_campaign(db, name="Bypass Test", project_slug="prolix", mode="confirmation")
+        campaign = create_campaign(
+            db, name="Bypass Test", project_slug="prolix", mode="confirmation"
+        )
 
         claim_path = tmp_path / "test.claim.toml"
         claim_path.write_text("""[claim]
@@ -641,7 +753,9 @@ hypothesis_ids = ["H1"]
         db.commit()
 
         conclude_campaign(db, campaign.id, "pass", "Test", force_verdict=True)
-        row = db.execute("SELECT outcome_label FROM campaigns WHERE id = ?", [campaign.id]).fetchone()
+        row = db.execute(
+            "SELECT outcome_label FROM campaigns WHERE id = ?", [campaign.id]
+        ).fetchone()
         assert row[0] == "pass"  # Outcome preserved
     finally:
         db.close()
@@ -651,7 +765,9 @@ def test_conclude_campaign_claim_file_not_found_raises(populated_warm_catalog: P
     """AC-08: conclude_campaign raises RuntimeError when claim file not found (not downgraded to confounded)."""
     db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
     try:
-        campaign = create_campaign(db, name="Not Found Test", project_slug="prolix", mode="confirmation")
+        campaign = create_campaign(
+            db, name="Not Found Test", project_slug="prolix", mode="confirmation"
+        )
 
         # Register a claim_path that does not exist
         db.execute(
@@ -672,14 +788,18 @@ def test_conclude_campaign_exploration_mode_warning_only(populated_warm_catalog:
 
     db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
     try:
-        campaign = create_campaign(db, name="Exploration Warning Test", project_slug="prolix", mode="exploration")
+        campaign = create_campaign(
+            db, name="Exploration Warning Test", project_slug="prolix", mode="exploration"
+        )
 
         # Test with claim_path=NULL (opt-in model) — no check fires
         db.execute("UPDATE campaigns SET claim_path = NULL WHERE id = ?", [campaign.id])
         db.commit()
 
         conclude_campaign(db, campaign.id, "pass", "Test")
-        row = db.execute("SELECT outcome_label FROM campaigns WHERE id = ?", [campaign.id]).fetchone()
+        row = db.execute(
+            "SELECT outcome_label FROM campaigns WHERE id = ?", [campaign.id]
+        ).fetchone()
         assert row[0] == "pass"  # Verdict unchanged for exploration mode
     finally:
         db.close()

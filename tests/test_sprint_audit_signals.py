@@ -532,7 +532,9 @@ class TestSchemaOverflowRate:
         signals = result["audit_results"]["test_project"]["signals"]
         assert signals["schema_overflow_rate"] == pytest.approx(0.0)
 
-    def test_schema_overflow_rate_always_zero_for_standard_runs(self, monkeypatch_registry, tmp_path):
+    def test_schema_overflow_rate_always_zero_for_standard_runs(
+        self, monkeypatch_registry, tmp_path
+    ):
         """Test schema_overflow_rate is 0 for standard runs (metadata computed during compact)."""
         from bathos.config import register_project
 
@@ -747,10 +749,9 @@ class TestBypassExplicitBoundary:
         from bathos.config import register_project
 
         base_time = datetime.now(UTC)
-        runs = (
-            [_make_run(base_time, i, sidecar_mode="bypassed", agent_mode="") for i in range(2)]
-            + [_make_run(base_time, i + 2, sidecar_mode="normal", agent_mode="") for i in range(8)]
-        )
+        runs = [
+            _make_run(base_time, i, sidecar_mode="bypassed", agent_mode="") for i in range(2)
+        ] + [_make_run(base_time, i + 2, sidecar_mode="normal", agent_mode="") for i in range(8)]
         catalog_dir = _build_catalog(tmp_path, runs)
         register_project(slug="test_project", catalog_dir=catalog_dir)
 
@@ -766,10 +767,9 @@ class TestBypassExplicitBoundary:
         from bathos.config import register_project
 
         base_time = datetime.now(UTC)
-        runs = (
-            [_make_run(base_time, i, sidecar_mode="bypassed", agent_mode="") for i in range(4)]
-            + [_make_run(base_time, i + 4, sidecar_mode="normal", agent_mode="") for i in range(6)]
-        )
+        runs = [
+            _make_run(base_time, i, sidecar_mode="bypassed", agent_mode="") for i in range(4)
+        ] + [_make_run(base_time, i + 4, sidecar_mode="normal", agent_mode="") for i in range(6)]
         catalog_dir = _build_catalog(tmp_path, runs)
         register_project(slug="test_project", catalog_dir=catalog_dir)
 
@@ -790,8 +790,7 @@ class TestBypassAgentModeBoundary:
 
         base_time = datetime.now(UTC)
         runs = [
-            _make_run(base_time, i, sidecar_mode="normal", agent_mode="claude")
-            for i in range(20)
+            _make_run(base_time, i, sidecar_mode="normal", agent_mode="claude") for i in range(20)
         ]
         catalog_dir = _build_catalog(tmp_path, runs)
         register_project(slug="test_project", catalog_dir=catalog_dir)
@@ -808,16 +807,12 @@ class TestBypassAgentModeBoundary:
         from bathos.config import register_project
 
         base_time = datetime.now(UTC)
-        runs = (
-            [
-                _make_run(base_time, i, sidecar_mode="bypassed", agent_mode="claude")
-                for i in range(2)
-            ]
-            + [
-                _make_run(base_time, i + 2, sidecar_mode="normal", agent_mode="claude")
-                for i in range(18)
-            ]
-        )
+        runs = [
+            _make_run(base_time, i, sidecar_mode="bypassed", agent_mode="claude") for i in range(2)
+        ] + [
+            _make_run(base_time, i + 2, sidecar_mode="normal", agent_mode="claude")
+            for i in range(18)
+        ]
         catalog_dir = _build_catalog(tmp_path, runs)
         register_project(slug="test_project", catalog_dir=catalog_dir)
 
@@ -998,7 +993,9 @@ class TestSchemaOverflowBoundary:
         ]
         catalog_dir = _build_catalog(tmp_path, runs)
         # All metadata keys are declared in sidecar; inject after compaction
-        _patch_warm_metadata(catalog_dir, [r.id for r in runs], '{"temp_std": 1.0, "temp_mean": 300.0}')
+        _patch_warm_metadata(
+            catalog_dir, [r.id for r in runs], '{"temp_std": 1.0, "temp_mean": 300.0}'
+        )
         register_project(slug="test_project", catalog_dir=catalog_dir)
 
         result = sprint_audit(hours=24)
@@ -1038,7 +1035,9 @@ class TestSchemaOverflowBoundary:
         ]
         catalog_dir = _build_catalog(tmp_path, overflow_runs + clean_runs)
         # Inject overflow metadata for 3 runs (undeclared key), clean for the rest
-        _patch_warm_metadata(catalog_dir, [r.id for r in overflow_runs], '{"temp_std": 1.0, "debug_flag": 42}')
+        _patch_warm_metadata(
+            catalog_dir, [r.id for r in overflow_runs], '{"temp_std": 1.0, "debug_flag": 42}'
+        )
         _patch_warm_metadata(catalog_dir, [r.id for r in clean_runs], '{"temp_std": 1.0}')
         register_project(slug="test_project", catalog_dir=catalog_dir)
 
@@ -1156,7 +1155,9 @@ class TestSchemaOverflowSemantics:
         ]
         catalog_dir = _build_catalog(tmp_path, runs)
         # Inject metadata with undeclared key after compaction (metadata not in cool tier)
-        _patch_warm_metadata(catalog_dir, [r.id for r in runs], '{"temp_std": 1.0, "undeclared_debug": 42}')
+        _patch_warm_metadata(
+            catalog_dir, [r.id for r in runs], '{"temp_std": 1.0, "undeclared_debug": 42}'
+        )
         register_project(slug="test_project", catalog_dir=catalog_dir)
 
         result = sprint_audit(hours=24)
@@ -1310,9 +1311,7 @@ class TestControlArmRate:
         init_catalog(catalog_dir)
 
         base_time = datetime.now(UTC)
-        outcomes = [
-            "ctrl_pass", "ctrl_pass", "ctrl_fail", "pass", "pass"
-        ]
+        outcomes = ["ctrl_pass", "ctrl_pass", "ctrl_fail", "pass", "pass"]
         runs = [
             Run(
                 project_slug="test_project",
@@ -1341,7 +1340,9 @@ class TestControlArmRate:
         # 3 out of 5 have ctrl_* outcomes
         assert signals["control_arm_rate"] == pytest.approx(0.6)
 
-    def test_control_arm_rate_warning_zero_with_validation_stage(self, monkeypatch_registry, tmp_path):
+    def test_control_arm_rate_warning_zero_with_validation_stage(
+        self, monkeypatch_registry, tmp_path
+    ):
         """Test WARNING when control_arm_rate==0.0 and validation/production runs exist."""
         from bathos.config import register_project
 
@@ -1778,8 +1779,15 @@ def test_signal_12_confirmation_campaign_without_claim(tmp_path):
         db.execute(
             """INSERT INTO campaigns (id, project_slug, name, mode, status, started_at, claim_path)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            ["camp1", "testproj", "Confirmation Campaign", "confirmation", "concluded",
-             datetime.now(UTC).isoformat(), None],
+            [
+                "camp1",
+                "testproj",
+                "Confirmation Campaign",
+                "confirmation",
+                "concluded",
+                datetime.now(UTC).isoformat(),
+                None,
+            ],
         )
         db.commit()
 
@@ -1875,8 +1883,14 @@ positive_control = true
     # campaign_runs (init_catalog alone does not).
     write_run(
         Run(
-            project_slug="testproj", command="python test.py", argv=["python", "test.py"],
-            git_hash="abc", git_branch="main", git_dirty=False, status="completed", exit_code=0,
+            project_slug="testproj",
+            command="python test.py",
+            argv=["python", "test.py"],
+            git_hash="abc",
+            git_branch="main",
+            git_dirty=False,
+            status="completed",
+            exit_code=0,
         ),
         catalog_dir,
     )
@@ -1888,8 +1902,13 @@ positive_control = true
             """INSERT INTO campaigns (id, project_slug, name, mode, status, started_at, claim_path)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
             [
-                "camp1", "testproj", "Confirmation Campaign", "confirmation", "concluded",
-                datetime.now(UTC).isoformat(), str(claim_path.relative_to(tmp_path)),
+                "camp1",
+                "testproj",
+                "Confirmation Campaign",
+                "confirmation",
+                "concluded",
+                datetime.now(UTC).isoformat(),
+                str(claim_path.relative_to(tmp_path)),
             ],
         )
         db.commit()

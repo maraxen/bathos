@@ -284,7 +284,7 @@ def render_popper_summary(popper_data: dict | None, console: Console | None = No
     scripts = popper_data.get("scripts", [])
     overall_met = popper_data.get("threshold_met", False)
 
-    alpha_str = f"≈ {1.0/threshold:.3f}" if threshold and threshold > 0 else "?"
+    alpha_str = f"≈ {1.0 / threshold:.3f}" if threshold and threshold > 0 else "?"
 
     table = Table(title="POPPER Sequential Test", show_header=True, header_style="bold cyan")
     table.add_column("script_key", style="dim", no_wrap=True, max_width=20)
@@ -315,7 +315,10 @@ def render_popper_summary(popper_data: dict | None, console: Console | None = No
 
     if overall_met:
         console.print(
-            Text("  Campaign conclusion: THRESHOLD REACHED — eligible to conclude", style="bold green")
+            Text(
+                "  Campaign conclusion: THRESHOLD REACHED — eligible to conclude",
+                style="bold green",
+            )
         )
     elif scripts:
         below = sum(1 for s in scripts if not s.get("threshold_met", False))
@@ -327,7 +330,6 @@ def render_popper_summary(popper_data: dict | None, console: Console | None = No
         )
     else:
         console.print(Text("  Campaign conclusion: NO RUNS YET", style="dim"))
-
 
 
 def render_output_list(run_id: str, files: list[dict], live: bool = False) -> None:
@@ -436,7 +438,9 @@ def render_outputs_summary(rows: list[dict], since: str | None = None) -> None:
 
     if not rows:
         console.print("[yellow]No output data found.[/yellow]")
-        console.print("[dim]Hint: Run 'bth compact' to aggregate output metadata into the warm tier.[/dim]")
+        console.print(
+            "[dim]Hint: Run 'bth compact' to aggregate output metadata into the warm tier.[/dim]"
+        )
         return
 
     # Build table
@@ -490,9 +494,7 @@ def render_outputs_summary(rows: list[dict], since: str | None = None) -> None:
         else:
             total_size_str = f"{total_bytes / (1024 * 1024 * 1024):.1f}GB"
 
-        total_missing_text = Text(
-            str(total_missing), style="red" if total_missing > 0 else "green"
-        )
+        total_missing_text = Text(str(total_missing), style="red" if total_missing > 0 else "green")
         table.add_row(
             "[bold]TOTAL[/bold]",
             str(total_runs),

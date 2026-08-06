@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pyarrow as pa
 
-CURRENT_SCHEMA_VERSION = "13"
+CURRENT_SCHEMA_VERSION = "14"
 
 # Format validator for stage_name values — used by linter.check_canonical_stage_names.
 # Enforcement at parse time uses CANONICAL_STAGES set-membership (parse_sidecar); this
@@ -81,6 +81,7 @@ COOL_SCHEMA = pa.schema(
         pa.field("differential_on_value", pa.string(), nullable=True),
         pa.field("differential_effect", pa.float64(), nullable=True),
         pa.field("dependency_lock_sha256", pa.string(), nullable=True),
+        pa.field("adversarial_check_result", pa.string(), nullable=True),
     ]
 )
 
@@ -143,6 +144,7 @@ WARM_SCHEMA = pa.schema(
         pa.field("differential_on_value", pa.string(), nullable=True),
         pa.field("differential_effect", pa.float64(), nullable=True),
         pa.field("dependency_lock_sha256", pa.string(), nullable=True),
+        pa.field("adversarial_check_result", pa.string(), nullable=True),
     ]
 )
 
@@ -206,6 +208,11 @@ class Run:
     differential_on_value: str | None = None
     differential_effect: float | None = None
     dependency_lock_sha256: str | None = None
+    #: v14. Outcome of EVALUATING the selected branch's adversarial_check:
+    #: "passed" | "fired" | None. Distinct from `adversarial_check_status`, which records
+    #: only whether the field was DECLARED (present/missing/n/a) -- a declaration fact, not
+    #: a measurement. Overloading that column would make every pre-v14 row unreadable.
+    adversarial_check_result: str | None = None
 
     def to_arrow(self) -> pa.Table:
         return pa.table(
@@ -265,6 +272,7 @@ class Run:
                 "differential_on_value": [self.differential_on_value],
                 "differential_effect": [self.differential_effect],
                 "dependency_lock_sha256": [self.dependency_lock_sha256],
+                "adversarial_check_result": [self.adversarial_check_result],
             },
             schema=COOL_SCHEMA,
         )
@@ -295,40 +303,86 @@ class Run:
             if "schema_version" in pydict
             else "1",
             slurm_job_id=pydict.get("slurm_job_id", [""])[i] if "slurm_job_id" in pydict else "",
-            slurm_array_task_id=pydict.get("slurm_array_task_id", [""])[i] if "slurm_array_task_id" in pydict else "",
+            slurm_array_task_id=pydict.get("slurm_array_task_id", [""])[i]
+            if "slurm_array_task_id" in pydict
+            else "",
             hostname=pydict.get("hostname", [""])[i] if "hostname" in pydict else "",
             outcome=pydict["outcome"][i] or "" if "outcome" in pydict else "",
-            sidecar_sha256=pydict.get("sidecar_sha256", [""])[i] if "sidecar_sha256" in pydict else "",
+            sidecar_sha256=pydict.get("sidecar_sha256", [""])[i]
+            if "sidecar_sha256" in pydict
+            else "",
             sidecar_path=pydict.get("sidecar_path", [""])[i] if "sidecar_path" in pydict else "",
             parent_run_id=pydict.get("parent_run_id", [""])[i] if "parent_run_id" in pydict else "",
             agent_mode=pydict.get("agent_mode", [""])[i] if "agent_mode" in pydict else "",
             sidecar_mode=pydict.get("sidecar_mode", [""])[i] if "sidecar_mode" in pydict else "",
-            outcome_is_residual=bool(pydict.get("outcome_is_residual", [False])[i]) if "outcome_is_residual" in pydict else False,
+            outcome_is_residual=bool(pydict.get("outcome_is_residual", [False])[i])
+            if "outcome_is_residual" in pydict
+            else False,
             skill_sha256=pydict.get("skill_sha256", [""])[i] if "skill_sha256" in pydict else "",
             campaign_id=pydict.get("campaign_id", [""])[i] if "campaign_id" in pydict else "",
             script_sha256=pydict.get("script_sha256", [""])[i] if "script_sha256" in pydict else "",
-            postmortem_status=pydict.get("postmortem_status", ["unassigned"])[i] if "postmortem_status" in pydict else "unassigned",
-            postmortem_override=pydict.get("postmortem_override", ["none"])[i] if "postmortem_override" in pydict else "none",
-            postmortem_verdict_override=pydict.get("postmortem_verdict_override", ["none"])[i] if "postmortem_verdict_override" in pydict else "none",
-            postmortem_author=pydict.get("postmortem_author", [""])[i] if "postmortem_author" in pydict else "",
-            postmortem_path=pydict.get("postmortem_path", [""])[i] if "postmortem_path" in pydict else "",
-            postmortem_hypothesis_status=pydict.get("postmortem_hypothesis_status", ["unassigned"])[i] if "postmortem_hypothesis_status" in pydict else "unassigned",
-            postmortem_has_anomalies=bool(pydict.get("postmortem_has_anomalies", [False])[i]) if "postmortem_has_anomalies" in pydict else False,
-            postmortem_summary=pydict.get("postmortem_summary", [""])[i] if "postmortem_summary" in pydict else "",
-            postmortem_asset_links=pydict.get("postmortem_asset_links", ["{}"])[i] if "postmortem_asset_links" in pydict else "{}",
-            manifest_sha256=pydict.get("manifest_sha256", [""])[i] if "manifest_sha256" in pydict else "",
+            postmortem_status=pydict.get("postmortem_status", ["unassigned"])[i]
+            if "postmortem_status" in pydict
+            else "unassigned",
+            postmortem_override=pydict.get("postmortem_override", ["none"])[i]
+            if "postmortem_override" in pydict
+            else "none",
+            postmortem_verdict_override=pydict.get("postmortem_verdict_override", ["none"])[i]
+            if "postmortem_verdict_override" in pydict
+            else "none",
+            postmortem_author=pydict.get("postmortem_author", [""])[i]
+            if "postmortem_author" in pydict
+            else "",
+            postmortem_path=pydict.get("postmortem_path", [""])[i]
+            if "postmortem_path" in pydict
+            else "",
+            postmortem_hypothesis_status=pydict.get("postmortem_hypothesis_status", ["unassigned"])[
+                i
+            ]
+            if "postmortem_hypothesis_status" in pydict
+            else "unassigned",
+            postmortem_has_anomalies=bool(pydict.get("postmortem_has_anomalies", [False])[i])
+            if "postmortem_has_anomalies" in pydict
+            else False,
+            postmortem_summary=pydict.get("postmortem_summary", [""])[i]
+            if "postmortem_summary" in pydict
+            else "",
+            postmortem_asset_links=pydict.get("postmortem_asset_links", ["{}"])[i]
+            if "postmortem_asset_links" in pydict
+            else "{}",
+            manifest_sha256=pydict.get("manifest_sha256", [""])[i]
+            if "manifest_sha256" in pydict
+            else "",
             manifest_path=pydict.get("manifest_path", [""])[i] if "manifest_path" in pydict else "",
-            outcome_error_reason=pydict.get("outcome_error_reason", [""])[i] if "outcome_error_reason" in pydict else "",
-            adversarial_check_status=pydict.get("adversarial_check_status", [""])[i] if "adversarial_check_status" in pydict else "",
+            outcome_error_reason=pydict.get("outcome_error_reason", [""])[i]
+            if "outcome_error_reason" in pydict
+            else "",
+            adversarial_check_status=pydict.get("adversarial_check_status", [""])[i]
+            if "adversarial_check_status" in pydict
+            else "",
             stage_name=pydict.get("stage_name", [None])[i] if "stage_name" in pydict else None,
-            claim_discriminates=pydict.get("claim_discriminates", [None])[i] if "claim_discriminates" in pydict else None,
-            claim_isolates=pydict.get("claim_isolates", [None])[i] if "claim_isolates" in pydict else None,
-            parity_run_type=pydict.get("parity_run_type", [None])[i] if "parity_run_type" in pydict else None,
+            claim_discriminates=pydict.get("claim_discriminates", [None])[i]
+            if "claim_discriminates" in pydict
+            else None,
+            claim_isolates=pydict.get("claim_isolates", [None])[i]
+            if "claim_isolates" in pydict
+            else None,
+            parity_run_type=pydict.get("parity_run_type", [None])[i]
+            if "parity_run_type" in pydict
+            else None,
             seed=pydict.get("seed", [None])[i] if "seed" in pydict else None,
-            baseline_hpo_trials=pydict.get("baseline_hpo_trials", [None])[i] if "baseline_hpo_trials" in pydict else None,
-            baseline_hpo_compute_budget=pydict.get("baseline_hpo_compute_budget", [None])[i] if "baseline_hpo_compute_budget" in pydict else None,
-            stdout_sha256=pydict.get("stdout_sha256", [None])[i] if "stdout_sha256" in pydict else None,
-            component_id=pydict.get("component_id", [None])[i] if "component_id" in pydict else None,
+            baseline_hpo_trials=pydict.get("baseline_hpo_trials", [None])[i]
+            if "baseline_hpo_trials" in pydict
+            else None,
+            baseline_hpo_compute_budget=pydict.get("baseline_hpo_compute_budget", [None])[i]
+            if "baseline_hpo_compute_budget" in pydict
+            else None,
+            stdout_sha256=pydict.get("stdout_sha256", [None])[i]
+            if "stdout_sha256" in pydict
+            else None,
+            component_id=pydict.get("component_id", [None])[i]
+            if "component_id" in pydict
+            else None,
             component_sidecar_sha256=pydict.get("component_sidecar_sha256", [None])[i]
             if "component_sidecar_sha256" in pydict
             else None,
@@ -343,6 +397,9 @@ class Run:
             else None,
             differential_effect=pydict.get("differential_effect", [None])[i]
             if "differential_effect" in pydict
+            else None,
+            adversarial_check_result=pydict.get("adversarial_check_result", [None])[i]
+            if "adversarial_check_result" in pydict
             else None,
             dependency_lock_sha256=pydict.get("dependency_lock_sha256", [None])[i]
             if "dependency_lock_sha256" in pydict

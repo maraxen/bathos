@@ -17,14 +17,19 @@ class TestVerifyCool:
         runs_dir.mkdir(parents=True)
 
         # Write valid fragment
-        schema = pa.schema([
-            pa.field("id", pa.string()),
-            pa.field("project_slug", pa.string()),
-        ])
-        tbl = pa.table({
-            "id": ["run1"],
-            "project_slug": ["proj"],
-        }, schema=schema)
+        schema = pa.schema(
+            [
+                pa.field("id", pa.string()),
+                pa.field("project_slug", pa.string()),
+            ]
+        )
+        tbl = pa.table(
+            {
+                "id": ["run1"],
+                "project_slug": ["proj"],
+            },
+            schema=schema,
+        )
         pq.write_table(tbl, runs_dir / "run_abc123.parquet")
 
         result = verify_cool(catalog_dir)
@@ -123,6 +128,7 @@ class TestVerifyArchive:
 
         # Compute actual SHA256
         import hashlib
+
         h = hashlib.sha256()
         with open(part_dir / "runs.parquet", "rb") as f:
             h.update(f.read())

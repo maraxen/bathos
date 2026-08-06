@@ -39,17 +39,16 @@ def test_success_envelope_has_all_four_keys(tmp_path: Path, monkeypatch, event_m
     @traced_tool
     async def mock_success_tool(catalog_dir: str = ""):
         """A mock tool that returns success."""
-        return {
-            "data": {"runs": [], "count": 0}
-        }
+        return {"data": {"runs": [], "count": 0}}
 
     # Call the tool using asyncio.run
     result = asyncio.run(mock_success_tool(catalog_dir=str(catalog_dir)))
 
     # Verify all four keys are present
     assert isinstance(result, dict), f"Expected dict, got {type(result)}"
-    assert all(k in result for k in ["ok", "error_code", "error", "resolution_hint"]), \
+    assert all(k in result for k in ["ok", "error_code", "error", "resolution_hint"]), (
         f"Missing keys in success envelope. Keys present: {result.keys()}"
+    )
 
     # Verify success values
     assert result["ok"] is True, "ok should be True on success"
@@ -81,24 +80,31 @@ def test_error_envelope_has_all_four_keys(tmp_path: Path, monkeypatch, event_moc
 
     # Verify all four keys are present
     assert isinstance(result, dict), f"Expected dict, got {type(result)}"
-    assert all(k in result for k in ["ok", "error_code", "error", "resolution_hint"]), \
+    assert all(k in result for k in ["ok", "error_code", "error", "resolution_hint"]), (
         f"Missing keys in error envelope. Keys present: {result.keys()}"
+    )
 
     # Verify error values
     assert result["ok"] is False, "ok should be False on error"
-    assert result["error_code"] == BathosErrorCode.CATALOG_ERROR.value, \
+    assert result["error_code"] == BathosErrorCode.CATALOG_ERROR.value, (
         f"error_code should be '{BathosErrorCode.CATALOG_ERROR.value}', got {result['error_code']}"
-    assert isinstance(result["error"], str) and len(result["error"]) > 0, \
+    )
+    assert isinstance(result["error"], str) and len(result["error"]) > 0, (
         f"error should be non-empty str, got {result['error']}"
-    assert isinstance(result["resolution_hint"], str) and len(result["resolution_hint"]) > 0, \
+    )
+    assert isinstance(result["resolution_hint"], str) and len(result["resolution_hint"]) > 0, (
         f"resolution_hint should be non-empty str, got {result['resolution_hint']}"
+    )
 
     # Verify resolution_hint matches the registry
-    assert result["resolution_hint"] == RESOLUTION_HINTS[BathosErrorCode.CATALOG_ERROR], \
+    assert result["resolution_hint"] == RESOLUTION_HINTS[BathosErrorCode.CATALOG_ERROR], (
         "resolution_hint should match registry entry"
+    )
 
 
-def test_self_reported_error_dict_is_not_clobbered_to_success(tmp_path: Path, monkeypatch, event_mock):
+def test_self_reported_error_dict_is_not_clobbered_to_success(
+    tmp_path: Path, monkeypatch, event_mock
+):
     """A tool that returns its own {"ok": False, "error": ...} dict (rather than
     raising) must not have that silently overwritten into a fake success.
 
@@ -120,8 +126,9 @@ def test_self_reported_error_dict_is_not_clobbered_to_success(tmp_path: Path, mo
     result = asyncio.run(mock_self_reported_error_tool(catalog_dir=str(catalog_dir)))
 
     assert result["ok"] is False, f"Expected ok=False to survive, got envelope: {result}"
-    assert result["error"] == "Campaign not found: deadbeef", \
+    assert result["error"] == "Campaign not found: deadbeef", (
         f"Expected the real error message to survive, got envelope: {result}"
+    )
 
 
 def test_self_reported_bare_error_key_infers_ok_false(tmp_path: Path, monkeypatch, event_mock):
