@@ -136,11 +136,9 @@ class TestArchiveQuarantine:
         parquet_files = list(partition_path.glob("year=*/month=*/runs.parquet"))
         assert len(parquet_files) == 1
         bad_file = parquet_files[0]
-        original_content = bad_file.read_bytes()
         bad_file.write_bytes(b"corrupted")
-
         # Run repair (not dry-run)
-        manifest = repair(
+        repair(
             catalog_dir,
             tier="archive",
             dry_run=False,
@@ -301,13 +299,12 @@ class TestArchiveQuarantine:
         bad_file.write_bytes(b"corrupted")
 
         # Run repair first time
-        manifest1 = repair(
+        repair(
             catalog_dir,
             tier="archive",
             dry_run=False,
             archive_root=archive_root,
         )
-        count1 = len([a for a in manifest1.actions if a.action == "quarantine_archive"])
 
         # Run repair second time
         manifest2 = repair(
@@ -349,7 +346,6 @@ class TestArchiveQuarantine:
         assert len(parquet_files) == 1
 
         original_content = parquet_files[0].read_bytes()
-        original_mtime = parquet_files[0].stat().st_mtime
 
         # Run repair (no corruption)
         repair(

@@ -31,7 +31,6 @@ def _reset_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CISTERNAL_TELEMETRY", raising=False)
 
     try:
-        import cisternal
         from cisternal.telemetry.pipeline import shutdown_pipeline
 
         shutdown_pipeline()

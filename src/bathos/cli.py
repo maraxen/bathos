@@ -217,7 +217,7 @@ def lineage(
         "-f",
         help="Output format: text, prov, or dot",
     ),
-    depth: int = typer.Option(
+    depth: int = typer.Option(  # noqa: ARG001 - Typer CLI command parameter
         10,
         "--depth",
         help="Maximum lineage depth to traverse",
@@ -1618,11 +1618,7 @@ def submit(
 
         try:
             # Parse sidecar to get reproduction and stage_name
-            if sidecar_path:
-                parsed_sidecar = parse_sidecar(sidecar_path)
-            else:
-                # If we couldn't locate the sidecar file, skip the gate check
-                parsed_sidecar = None
+            parsed_sidecar = parse_sidecar(sidecar_path) if sidecar_path else None
 
             if parsed_sidecar and parsed_sidecar.reproduction:
                 requires_pass_stem = parsed_sidecar.reproduction.requires_pass_stem
@@ -1905,7 +1901,7 @@ def classify(
         "--min-confidence",
         help="Only include classifications at or above this level (high|medium|low)",
     ),
-    no_content: bool = typer.Option(
+    no_content: bool = typer.Option(  # noqa: ARG001 - Typer CLI option flag
         False, "--no-content", help="Skip content-augmented classification"
     ),
     no_scaffold: bool = typer.Option(
@@ -2137,7 +2133,6 @@ def lint(
 
     errors = [i for i in issues if i.severity == IssueSeverity.ERROR]
     warnings = [i for i in issues if i.severity == IssueSeverity.WARNING]
-    infos = [i for i in issues if i.severity == IssueSeverity.INFO]
 
     for issue in issues:
         if issue.severity == IssueSeverity.ERROR:
@@ -2481,8 +2476,8 @@ def scaffold(
     typer.echo(f"Scaffolded postmortem template at {postmortem_path}")
 
 
-@postmortem_app.command()
-def show(
+@postmortem_app.command("show")
+def postmortem_show(
     run_id: str | None = typer.Argument(None, help="Run ID of the postmortem to show"),
     campaign_id: str = typer.Option(
         "", "--campaign-id", help="Show a campaign-scoped postmortem instead of a run-scoped one"

@@ -102,7 +102,7 @@ def test_sync_raises_on_timeout(tmp_path: Path):
 
         call_count = [0]
 
-        def wait_side_effect(*args, **kwargs):
+        def wait_side_effect(*args, **kwargs):  # noqa: ARG001 - mock side effect callback signature
             call_count[0] += 1
             # First call is from watchdog thread, second is from main
             if call_count[0] > 1:

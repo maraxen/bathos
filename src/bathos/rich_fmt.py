@@ -226,33 +226,18 @@ def render_campaign_review(
 
 def _get_status_color(status: str) -> str:
     """Return Rich color style for status."""
-    if status == "completed":
-        return "green"
-    elif status == "failed":
-        return "red"
-    elif status == "running":
-        return "yellow"
-    else:
-        return "dim"
+    return {"completed": "green", "failed": "red", "running": "yellow"}.get(status, "dim")
 
 
 def _get_outcome_color(outcome: str) -> str:
     """Return Rich color style for outcome."""
-    if outcome == "pass":
-        return "green"
-    elif outcome == "fail":
-        return "red"
-    elif outcome == "error":
-        return "bold red"
-    elif outcome == "marginal":
-        return "yellow"
-    elif outcome == "invalid_measurement":
-        # Distinct from fail/error (debt #1071): the harness didn't crash and the domain
-        # isn't showing "no effect" -- the [differential] pre-flight proved the measurement
-        # itself can't be trusted. Must read visually distinct from a legitimate result.
-        return "bold magenta"
-    else:
-        return "dim"
+    return {
+        "pass": "green",
+        "fail": "red",
+        "error": "bold red",
+        "marginal": "yellow",
+        "invalid_measurement": "bold magenta",
+    }.get(outcome, "dim")
 
 
 def _format_duration(duration_s: float) -> str:
@@ -408,17 +393,11 @@ def render_output_list(run_id: str, files: list[dict], live: bool = False) -> No
 
         # Format mtime
         mtime_unix = f.get("mtime_unix", 0)
-        if mtime_unix > 0:
-            mtime_str = datetime.fromtimestamp(mtime_unix).isoformat()[:19]
-        else:
-            mtime_str = "—"
+        mtime_str = datetime.fromtimestamp(mtime_unix).isoformat()[:19] if mtime_unix > 0 else "—"
 
         # Format SHA256
         sha256 = f.get("sha256")
-        if sha256:
-            sha256_display = str(sha256)[:8]
-        else:
-            sha256_display = "—"
+        sha256_display = str(sha256)[:8] if sha256 else "—"
 
         table.add_row(path_display, status_text, size_str, mtime_str, sha256_display)
 

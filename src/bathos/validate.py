@@ -37,7 +37,8 @@ class ValidationResult:
 
 
 def validate_popper_block(
-    sidecar: Sidecar, sidecar_path: Path | None = None
+    sidecar: Sidecar,
+    sidecar_path: Path | None = None,  # noqa: ARG001 - kept for validator signature compatibility
 ) -> list[ValidationError]:
     """Validate [popper] block fields per the spec (Section 2.3 of #792 spec).
 
@@ -151,21 +152,20 @@ def validate_reproduction_block(
     repro = sidecar.reproduction
 
     # tolerance_pct: if set, must be 0.0 <= v <= 100.0
-    if repro.tolerance_pct is not None:
-        if not (0.0 <= repro.tolerance_pct <= 100.0):
-            errors.append(
-                ValidationError(
-                    "reproduction.tolerance_pct",
-                    f"tolerance_pct must be in [0.0, 100.0], got {repro.tolerance_pct!r}",
-                )
+    if repro.tolerance_pct is not None and not (0.0 <= repro.tolerance_pct <= 100.0):
+        errors.append(
+            ValidationError(
+                "reproduction.tolerance_pct",
+                f"tolerance_pct must be in [0.0, 100.0], got {repro.tolerance_pct!r}",
             )
-            if sidecar_path:
-                event(
-                    "sidecar.validate_error",
-                    path=str(sidecar_path),
-                    field="reproduction.tolerance_pct",
-                    reason=f"tolerance_pct out of range: {repro.tolerance_pct}",
-                )
+        )
+        if sidecar_path:
+            event(
+                "sidecar.validate_error",
+                path=str(sidecar_path),
+                field="reproduction.tolerance_pct",
+                reason=f"tolerance_pct out of range: {repro.tolerance_pct}",
+            )
 
     # reproduces_run: if non-empty, must match UUID regex r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
     if repro.reproduces_run:

@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import tomllib
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -275,24 +276,22 @@ def validate_claim(
     for h in claim.hypotheses:
         h_id = h.get("id", "")
         h_label = h.get("label", "")
-        if _OPAQUE_ID_RE.match(h_id):
-            if not h_label or h_label.strip() == "":
-                errors.append(
-                    ValidationError(
-                        f"Opaque hypothesis id '{h_id}' must have a descriptive label field (found blank)"
-                    )
+        if _OPAQUE_ID_RE.match(h_id) and (not h_label or h_label.strip() == ""):
+            errors.append(
+                ValidationError(
+                    f"Opaque hypothesis id '{h_id}' must have a descriptive label field (found blank)"
                 )
+            )
 
     for c in claim.confounds:
         c_id = c.get("id", "")
         c_label = c.get("label", "")
-        if _OPAQUE_ID_RE.match(c_id):
-            if not c_label or c_label.strip() == "":
-                errors.append(
-                    ValidationError(
-                        f"Opaque confound id '{c_id}' must have a descriptive label field (found blank)"
-                    )
+        if _OPAQUE_ID_RE.match(c_id) and (not c_label or c_label.strip() == ""):
+            errors.append(
+                ValidationError(
+                    f"Opaque confound id '{c_id}' must have a descriptive label field (found blank)"
                 )
+            )
 
     # AC-03: Check discriminability entries for missing predicted_outcome
     for disc in claim.discriminability:
@@ -886,11 +885,11 @@ def run_union_gate(
             if rows and rows[0][0]:
                 try:
                     disc_list = json.loads(rows[0][0])
-                    if isinstance(disc_list, list):
-                        # Check if ALL hypothesis_ids are in this run
-                        if all(h_id in disc_list for h_id in hypothesis_ids):
-                            covered = True
-                            break
+                    if isinstance(disc_list, list) and all(
+                        h_id in disc_list for h_id in hypothesis_ids
+                    ):
+                        covered = True
+                        break
                 except (json.JSONDecodeError, TypeError):
                     pass
 
@@ -1088,20 +1087,16 @@ def attest_parity(
                     f"Rollback itself failed! File may be in inconsistent state. "
                     f"Manual recovery required. Original error: {db_error}, Rollback error: {rollback_error}"
                 )
-                try:
+                with suppress(Exception):
                     rollback_path.unlink()
-                except Exception:
-                    pass
             # Re-raise the original DB error
             raise
 
     except Exception:
         # Clean up temp file if it still exists (e.g., if os.replace failed)
         if temp_path.exists():
-            try:
+            with suppress(Exception):
                 temp_path.unlink()
-            except Exception:
-                pass
         raise
 
 

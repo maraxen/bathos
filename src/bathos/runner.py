@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import tomllib
+from contextlib import suppress
 from pathlib import Path
 
 import typer
@@ -134,7 +135,7 @@ def _write_manifest(
     run: Run,
     sidecar_path: Path | None,
     sidecar_sha256: str,
-    catalog_dir: Path,
+    catalog_dir: Path,  # noqa: ARG001 - kept for manifest helper interface
 ) -> tuple[str, str]:
     """Write pre-execution manifest file and return (manifest_sha256, manifest_path).
 
@@ -375,9 +376,6 @@ def run_script(
                 event("run.error", phase="validate", exc_type=type(e).__name__, exc_msg=str(e))
                 typer.echo(f"Error: invalid sidecar — {e}", err=True)
                 return 1
-
-    # Resolve agent mode
-    sidecar_agent_mode = sidecar.agent_mode if sidecar else ""
 
     # Read project config for agent_mode default
     project_config_mode = ""
@@ -797,10 +795,8 @@ def run_script(
 
     # Clean up temp results file if it exists
     if results_temp_path.exists():
-        try:
+        with suppress(OSError):
             results_temp_path.unlink()
-        except OSError:
-            pass  # Silent fail on cleanup
 
     # Link this run into campaign_runs (the table campaign review/conclude actually
     # read from). The run only exists in the cool tier until compacted, so compact

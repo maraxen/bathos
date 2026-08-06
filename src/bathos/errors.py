@@ -12,7 +12,7 @@ from __future__ import annotations
 from enum import Enum
 
 
-class BathosErrorCode(str, Enum):
+class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(Enum) returning Enum member value for serialization
     """Unified error code enumeration for all bathos MCP tools.
 
     Aliases 11 codes from GateErrorCode, plus 5 new codes for domain exceptions.

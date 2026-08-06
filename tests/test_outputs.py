@@ -81,7 +81,10 @@ class TestRenderOutputList:
         captured = capsys.readouterr()
         assert "results.json" in captured.out or "present" in captured.out
 
-    def test_render_output_list_live(self, capsys):
+    def test_render_output_list_live(
+        self,
+        capsys,  # noqa: ARG002 - pytest fixture
+    ):
         """Test rendering output list with --live flag."""
         files = [
             {
@@ -92,11 +95,13 @@ class TestRenderOutputList:
                 "sha256": "abc123",
             }
         ]
-        with patch("pathlib.Path.exists", return_value=True):
-            with patch("pathlib.Path.stat") as mock_stat:
-                mock_stat.return_value = MagicMock(st_size=200, st_mtime=1000001.0)
-                render_output_list("test_run", files, live=True)
-                assert True
+        with (
+            patch("pathlib.Path.exists", return_value=True),
+            patch("pathlib.Path.stat") as mock_stat,
+        ):
+            mock_stat.return_value = MagicMock(st_size=200, st_mtime=1000001.0)
+            render_output_list("test_run", files, live=True)
+            assert True
 
 
 class TestRenderOutputsSummary:

@@ -38,10 +38,10 @@ def test_decorator_records_failure(tmp_path, monkeypatch):
     def bad_fn():
         raise ValueError("boom")
 
-    try:
+    from contextlib import suppress
+
+    with suppress(ValueError):
         bad_fn()
-    except ValueError:
-        pass
 
     runs = list_runs(tmp_path)
     assert len(runs) == 1

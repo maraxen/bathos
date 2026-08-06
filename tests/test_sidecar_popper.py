@@ -401,7 +401,7 @@ def test_validate_popper_unknown_weight_key(tmp_path):
     assert any(e.field == "popper.weights.great" for e in errors)
 
 
-def test_validate_popper_on_benchmark_sidecar(tmp_path):
+def test_validate_popper_on_benchmark_sidecar(tmp_path):  # noqa: ARG001 - pytest fixture
     """[popper] block on a [benchmark] sidecar produces a 'popper' validation error."""
     # benchmark sidecars don't have [outcomes] so we build a Sidecar directly
     sidecar = Sidecar(

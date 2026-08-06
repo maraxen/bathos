@@ -68,7 +68,7 @@ def _insert_run(db, run_id: str, outcome: str, sidecar_path: str | None = None):
 
 
 @pytest.fixture
-def warm_db(tmp_path, tmp_catalog):
+def warm_db(tmp_path, tmp_catalog):  # noqa: ARG001 - pytest fixture parameter
     """Return an open DuckDB connection to an initialized warm catalog."""
     init_catalog(tmp_catalog)
     r = Run(

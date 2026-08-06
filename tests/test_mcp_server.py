@@ -435,7 +435,7 @@ class TestRunTool:
     def test_run_tool_executes_script(self, mock_run):
         """Verify run tool executes script."""
 
-        def fake_run_script(**kwargs):
+        def fake_run_script(**kwargs):  # noqa: ARG001 - mock callback signature
             run_uuid_var.set("11111111-1111-1111-1111-111111111111")
             return 0
 
@@ -456,7 +456,7 @@ class TestRunTool:
         report a previous call's run_id in the same context."""
 
         # First call: succeeds, sets run_uuid_var to a real id.
-        def succeeding_run(**kwargs):
+        def succeeding_run(**kwargs):  # noqa: ARG001 - mock callback signature
             run_uuid_var.set("22222222-2222-2222-2222-222222222222")
             return 0
 
@@ -467,7 +467,7 @@ class TestRunTool:
         # Second call: simulates an early-return failure that never sets
         # run_uuid_var at all (mirrors runner.py's invalid-sidecar/gate-check
         # paths, which `return 1` before touching the var).
-        def failing_run_no_run_created(**kwargs):
+        def failing_run_no_run_created(**kwargs):  # noqa: ARG001 - mock callback signature
             return 1
 
         mock_run.side_effect = failing_run_no_run_created

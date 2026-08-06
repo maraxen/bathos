@@ -61,7 +61,11 @@ def sample_evidence() -> dict:
 class TestParityValidateMetadataWrite:
     """AC-19: parity_validate.py writes metadata.parity_run_type='literature_parity'."""
 
-    def test_metadata_contains_parity_run_type(self, sample_evidence: dict, temp_dir: Path):
+    def test_metadata_contains_parity_run_type(
+        self,
+        sample_evidence: dict,
+        temp_dir: Path,  # noqa: ARG002 - pytest fixture
+    ):
         """Verify result JSON contains metadata.parity_run_type='literature_parity'."""
         # Simulate the result that would be emitted by parity_validate.py
         # The script should populate this in the metadata JSON blob
@@ -152,7 +156,11 @@ class TestParityValidateSHATriple:
             assert path in result["output_shas"]
             assert len(result["output_shas"][path]) == 64  # SHA256 is 64 hex chars
 
-    def test_sha_mismatch_detectable(self, sample_evidence: dict, temp_dir: Path):
+    def test_sha_mismatch_detectable(
+        self,
+        sample_evidence: dict,  # noqa: ARG002 - pytest fixture
+        temp_dir: Path,
+    ):
         """Verify SHA drift can be detected (for AC-20: bth check integration)."""
         # Create an artifact
         artifact_path = temp_dir / "parity_verdict.md"

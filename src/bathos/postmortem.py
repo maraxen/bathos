@@ -132,8 +132,8 @@ def validate_postmortem(
     postmortem: Postmortem,
     workspace_root: Path | None = None,
     run: Run | None = None,
-    catalog_dir: Path | None = None,
-    strict: bool = False,
+    catalog_dir: Path | None = None,  # noqa: ARG001 - kept for API signature compatibility
+    strict: bool = False,  # noqa: ARG001 - kept for API signature compatibility
     strict_files: bool = False,
     postmortem_path: Path | None = None,
 ) -> ValidationResult:

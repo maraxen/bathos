@@ -1392,7 +1392,7 @@ async def mcp_cite_run_tool(
 async def mcp_lineage_prov_tool(
     run_id: str,
     catalog_dir: str = "",
-    depth: int = 10,
+    depth: int = 10,  # noqa: ARG001 - MCP tool parameter required for signature and schema generation
 ) -> dict:
     """Return W3C PROV-JSON lineage for a run.
 
@@ -2357,16 +2357,10 @@ def list_outputs_tool(
     elif workspace_root:
         ws = Path(workspace_root)
         config_path = find_project_config(ws)
-        if config_path:
-            cat = load_project_config(config_path).catalog_dir
-        else:
-            cat = default_catalog_dir()
+        cat = load_project_config(config_path).catalog_dir if config_path else default_catalog_dir()
     else:
         config_path = find_project_config()
-        if config_path:
-            cat = load_project_config(config_path).catalog_dir
-        else:
-            cat = default_catalog_dir()
+        cat = load_project_config(config_path).catalog_dir if config_path else default_catalog_dir()
 
     run = get_run(run_id, cat)
     if not run:
@@ -2420,16 +2414,10 @@ def outputs_summary_tool(
     elif workspace_root:
         ws = Path(workspace_root)
         config_path = find_project_config(ws)
-        if config_path:
-            cat = load_project_config(config_path).catalog_dir
-        else:
-            cat = default_catalog_dir()
+        cat = load_project_config(config_path).catalog_dir if config_path else default_catalog_dir()
     else:
         config_path = find_project_config()
-        if config_path:
-            cat = load_project_config(config_path).catalog_dir
-        else:
-            cat = default_catalog_dir()
+        cat = load_project_config(config_path).catalog_dir if config_path else default_catalog_dir()
 
     db_path = cat / "bathos.db"
     if not db_path.exists():

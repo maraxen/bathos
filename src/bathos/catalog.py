@@ -30,7 +30,6 @@ def write_run(run: Run, catalog_dir: Path) -> None:
     duration_ms = (time.monotonic() - t_start) * 1000
 
     # Emit telemetry event
-    target_size = target.stat().st_size
     event("catalog.write_parquet", path=str(target), rows=1, duration_ms=int(duration_ms))
 
 
