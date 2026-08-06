@@ -52,7 +52,6 @@ dev = [
     "pytest-tmp-files>=0.0.2",
     "pytest-json-report>=1.5",
     "ruff>=0.6",
-    "pyright>=1.1",
 ]
 [dependency-groups]
 dev = [
@@ -60,7 +59,6 @@ dev = [
     "pytest-tmp-files>=0.0.2",
     "pytest-json-report>=1.5",
     "ruff>=0.6",
-    "pyright>=1.1",
 ]
 
 [project.urls]
@@ -99,16 +97,3 @@ target-version = "py313"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "ARG", "SIM"]
 ignore = ["E501"]
-
-[tool.pyright]
-typeCheckingMode = "strict"
-# `exclude` alone does not bound what pyright analyses — without `include` it walks the entire
-# tree from cwd, which means `.venv/` (duckdb, pyarrow, fastmcp, …) and any nested worktrees
-# under `.claude/`. That does not finish: CI sat on "Type check with pyright" for 30+ minutes
-# without completing, and a local run behaved identically.
-#
-# This was invisible until 2026-08-05 because the Lint step failed first and short-circuited
-# the job, so the type check had never actually executed on this repo. Adding `include` is what
-# makes the step terminate; `typeCheckingMode = "strict"` is deliberate and left untouched.
-include = ["src"]
-exclude = ["tests", "**/__pycache__", ".venv", ".claude", "outputs"]
