@@ -33,9 +33,10 @@ visibility — the lint step short-circuits the job, so tests never run until it
 | --- | --- | --- | --- |
 | 4077 | Register 5 unregistered domain exceptions | standard | **done** — `a87c783` |
 | 4078 | 3 asset-dependent export tests | standard | **done** — `7f4b493` (not as scoped — see D4) |
-| 4080 | ~160 ruff errors (debt #1077) | extended | next |
+| 4080 | ~160 ruff errors (debt #1077) | extended | **done** — `13442f5` (agy, audited — D5/D6) |
 
-**Full suite on titanix after 4077 + 4078: 0 failures** (was 4 at the start of the night).
+**Full suite on titanix after all three: 0 failures** (was 4 at the start of the night).
+All three CI blockers are now closed; CI running on `13442f5` to confirm green end-to-end.
 
 Sequencing deviates from the L5 heuristic's "prefer standard over extended" only in that #4080
 is P1: taking the two `standard` items first banks verifiable wins before the long mechanical
@@ -152,6 +153,46 @@ shell-level check that refuses to start if cwd is wrong.
 **Lesson worth keeping:** a git worktree is not a sandbox. It constrains *git*, not the agent —
 a tool that resolves its own workspace root will happily walk up out of one. Isolation has to be
 enforced by path placement outside the parent tree, or by an actual sandbox.
+
+### D6 — agy run 2 accepted after audit; ported to the branch as `13442f5`
+
+Re-dispatched into `/home/marielle/wt-agy-ruff` (outside the repo tree). **Containment held**:
+41 files dirty in the correct worktree, 0 new files in your checkout.
+
+Audited before accepting, because "ruff check passes" is weak evidence — the cheap ways to fake
+it are blanket suppression, `pyproject.toml` ignore entries, and deleting the unused parameters
+that are 64% of the batch. None were used:
+
+| check | result |
+| --- | --- |
+| bare `# noqa` / file-level `# ruff: noqa` | 0 / 0 |
+| `pyproject.toml` modified | no |
+| suppressions, all coded + reasoned | 68 ARG002, 38 ARG001, 5 UP042, 1 F401 |
+| UP042 converted to `StrEnum` | 0 — classes stay `(str, Enum)` |
+| test defs removed / added | 65 / 60 → net −5 |
+| asserts removed / added | 18 / 12 → net −6 |
+| my earlier work intact | 3 xfail marks + `CorpusError` registration all present |
+
+The −5/−6 deltas are the same verified-duplicate block from D5: 5 test functions that existed as
+2 byte-identical copies, now 1 each, carrying exactly 6 asserts between them. Nothing lost.
+
+**Two real bugs fixed, not suppressed:** `Path` in `campaigns.py` and `duckdb` in `linter.py`
+were both used-but-never-imported — latent `NameError`s. Run 1 found a third (`logger` in
+`sync.py`); run 2 correctly found only two because that one was already fixed on main by
+`ac07c97`, which is a good sign the difference is real rather than a miss.
+
+**One genuine shadowing bug:** `cli.py` defined `show` twice at module scope —
+`@postmortem_app.command()`'s version was overwriting the top-level `@app.command()` one.
+Renamed the function to `postmortem_show` while keeping `@postmortem_app.command("show")`, so
+`bth postmortem show` is unchanged.
+
+**Behaviour gate:** full suite on titanix, **0 failures**, matching tonight's pre-change baseline
+exactly.
+
+**Backtrack:** the whole cleanup is one commit (`13442f5`), so `git revert 13442f5` undoes it
+wholesale. The suppressions are the part most worth a skim — 106 ARG noqas is a lot of "this
+parameter is intentionally unused", and while each carries a reason, a human should spot-check a
+sample rather than take that on faith.
 
 ## Notes worth keeping
 
