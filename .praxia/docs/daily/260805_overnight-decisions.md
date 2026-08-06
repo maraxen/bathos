@@ -32,8 +32,10 @@ visibility — the lint step short-circuits the job, so tests never run until it
 | # | Item | Difficulty | Status |
 | --- | --- | --- | --- |
 | 4077 | Register 5 unregistered domain exceptions | standard | **done** — `a87c783` |
-| 4078 | 3 asset-dependent export tests | standard | next |
-| 4080 | ~160 ruff errors (debt #1077) | extended | after |
+| 4078 | 3 asset-dependent export tests | standard | **done** — `7f4b493` (not as scoped — see D4) |
+| 4080 | ~160 ruff errors (debt #1077) | extended | next |
+
+**Full suite on titanix after 4077 + 4078: 0 failures** (was 4 at the start of the night).
 
 Sequencing deviates from the L5 heuristic's "prefer standard over extended" only in that #4080
 is P1: taking the two `standard` items first banks verifiable wins before the long mechanical
@@ -72,6 +74,38 @@ sat in the debt tracker, which it does not read. Promoted the three CI blockers 
 
 **Backtrack:** if you consider debt→backlog promotion the PM agent's call rather than setup,
 these three can be cancelled and re-triaged; nothing downstream depends on their ids.
+
+### D4 — #4078's premise was wrong; xfail the tests and file the real bug upstream
+
+**This is the decision most worth your attention in the morning.**
+
+#4078 assumed missing assets and offered two options: commit them, or skipif. **Both are wrong.**
+The assets exist and are tracked at the repo root (`agent_assets/skills/using-bathos/SKILL.md`
+etc.). What is actually broken is `bth export --surface`, and the cause is a path-resolution
+disagreement between the two consumers of `.praxia/manifest.toml`:
+
+- **cisternal** resolves declared paths against the **manifest's own directory** —
+  `cisternal/assets/manifest.py:25`, `self._root = self._manifest_path.parent` — so
+  `agent_assets/skills/...` becomes `.praxia/agent_assets/skills/...`, which does not exist.
+- **praxia** resolves the **same manifest** against the **repo root** (parent-of-parent),
+  deliberately and with a comment saying so: `praxia-workflows/src/plugin_cli.rs:400-405`.
+
+bathos's manifest is correct for praxia and wrong for cisternal, and **no single path string
+satisfies both** — rewriting to `../agent_assets/...` would fix cisternal and break praxia.
+
+**Chose `xfail(strict=True)` over `skipif`.** These tests are correctly detecting a live defect;
+skipping would hide it. `strict=True` means they fail loudly if cisternal ever changes its
+resolution, which is exactly the signal wanted. Filed the root cause as **debt #1189** with the
+upstream fix written out (parent-of-parent for `.praxia/manifest.toml`, or an `--asset-root`
+flag — `cisternal assets export` currently exposes neither).
+
+**Backtrack:** if you disagree that xfail is acceptable in CI, the alternative is leaving the
+three red and accepting that main's CI can never be green until cisternal is fixed. I judged a
+recorded, strict, self-revoking xfail better than a permanently red build — but that is a
+judgement call about your CI policy, not a fact, and it is one line each to revert.
+
+**Scope note:** I did not touch `.praxia/manifest.toml`. Changing it would have made the tests
+pass while breaking `praxia plugin install/export` for bathos — a silent, worse failure.
 
 ## Notes worth keeping
 
