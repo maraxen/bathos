@@ -148,6 +148,16 @@ def test_register_mcp_workspace_uses_cwd(tmp_path, monkeypatch):
     assert "bathos" in data["mcpServers"]
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Upstream cisternal path-resolution bug — see backlog #4078 and the full explanation "
+        "on CISTERNAL_PATH_BUG in tests/test_plugin_export.py. cisternal resolves manifest "
+        "asset paths against the manifest's own directory; praxia resolves the same manifest "
+        "against the repo root. bathos's paths are correct for praxia, so this cannot be "
+        "fixed here."
+    ),
+)
 def test_export_cmd_surface_writes_plugin_bundle(tmp_path):
     """bth export --surface claude produces a real plugin bundle, not the old skill-copy path."""
     out = tmp_path / "plugin-dist"
