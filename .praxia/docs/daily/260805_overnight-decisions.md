@@ -107,6 +107,52 @@ judgement call about your CI policy, not a fact, and it is one line each to reve
 **Scope note:** I did not touch `.praxia/manifest.toml`. Changing it would have made the tests
 pass while breaking `praxia plugin install/export` for bathos — a silent, worse failure.
 
+### D5 — agy escaped its worktree and wrote to your main checkout; work rejected, NOT reverted
+
+**Read this one first in the morning. Your main checkout is dirty and I deliberately left it
+that way.**
+
+Dispatched `agy` (antigravity CLI, `gemini-3.1-pro-high`, `--dangerously-skip-permissions`) on
+the ruff cleanup, in a worktree at `.claude/worktrees/agy-ruff`. Two containment failures:
+
+1. **It wrote to `/home/marielle/projects/bathos` instead of the worktree.** 110 modified files
+   there, **0** in the worktree. The worktree sat *inside* the repo tree, so agy resolved its
+   workspace to the git root and walked up.
+2. **That checkout is on `fix/3717-claim-discriminates-propagation` @ `abcfc0a`** — one of your
+   branches, and **not an ancestor of `origin/main`** (main is 14 commits ahead on a divergent
+   line). So the lint was fixed against a codebase that isn't in main's history. The patch does
+   not apply to `fix/ci-green-overnight`; it conflicts across many files.
+
+**I did NOT revert your main checkout.** Reverting is *recoverable* (I saved the full diff), but
+I cannot distinguish agy's edits from any uncommitted work of your own that may have been there
+before it ran, and it is your active branch. Leaving it dirty is non-destructive; reverting is
+destructive-but-recoverable. I chose the former.
+
+**To clean it yourself:** `git -C /home/marielle/projects/bathos checkout -- src tests uv.lock`
+(note it also modified `uv.lock`, which was out of scope). The full diff is saved at
+`/tmp/claude/agy_ruff.patch` — 539KB, 110 files — but `/tmp` is not durable, and the main
+checkout is currently the only other copy, so grab the patch first if you want to keep it.
+
+**The work itself was good, which is the frustrating part.** Audited before rejecting:
+
+- 0 blanket `# noqa`, 0 file-level `# ruff: noqa`, `pyproject.toml` untouched — no ignore-list cheat
+- every suppression carries a specific code and a reason: 57 ARG002, 36 ARG001, 5 UP042, 3 F401
+- UP042 correctly *suppressed*, not converted — classes remain `(str, Enum)`; the `StrEnum`
+  strings in the diff are comment text in the reasons
+- found **3** real F821 bugs (one more than I flagged) and fixed all three with real imports:
+  `Path` in campaigns.py, `duckdb` in linter.py, and a missing `logger` in sync.py
+- deleted 5 test functions — **verified legitimate**: each had 2 byte-identical copies at HEAD
+  and now has 1. The −6 assert delta is exactly the 6 asserts in those duplicate blocks, so no
+  test lost an assertion.
+
+**Re-dispatched** at a worktree *outside* the repo tree (`/home/marielle/wt-agy-ruff`, branch
+`agy/ruff-v2`, cut from `fix/ci-green-overnight`), with a hard `pwd` guard in the brief and a
+shell-level check that refuses to start if cwd is wrong.
+
+**Lesson worth keeping:** a git worktree is not a sandbox. It constrains *git*, not the agent —
+a tool that resolves its own workspace root will happily walk up out of one. Isolation has to be
+enforced by path placement outside the parent tree, or by an actual sandbox.
+
 ## Notes worth keeping
 
 - The backlog dedup probe reported debt `#1077` as **absent** when adding #4080, because it only
