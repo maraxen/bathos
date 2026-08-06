@@ -100,4 +100,30 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     # MCP write-seam auth (debt #619): missing/invalid shared-secret token on a
     # write-verb MCP tool call.
     "McpAuthError": BathosErrorCode.AUTH_ERROR,
+    # ── backlog #4077 ────────────────────────────────────────────────────────
+    # Five exceptions that were raised in src/bathos/ with no entry here, so
+    # test_every_domain_exception_has_registered_code had been failing on main.
+    #
+    # All five map onto EXISTING codes rather than new enum members. Adding a
+    # code changes the public error taxonomy every MCP caller sees, which is a
+    # design decision, not a test fix — and the two are deliberately not made in
+    # the same change. Where the fit below is imperfect it is called out rather
+    # than papered over.
+    #
+    # Rule-card corpus (step 1): raised for a malformed card *and* for an
+    # unknown card id. The user-facing case is `bth ref show BADID`, hence
+    # INVALID_PARAM; a genuinely corrupt corpus is the rarer path and would read
+    # better as its own code.
+    "CorpusError": BathosErrorCode.INVALID_PARAM,
+    # cisternal plugin-bundle export failure — same family as ExportError.
+    "PluginExportError": BathosErrorCode.EXPORT_ERROR,
+    # Bad caller input to a stats gate (wrong shape, insufficient n).
+    "StatsGateInputError": BathosErrorCode.INVALID_PARAM,
+    # Campaign DAG edge would introduce a cycle (campaign_edges.py).
+    "CycleRejectedError": BathosErrorCode.CAMPAIGN_ERROR,
+    # IMPERFECT FIT, deliberately: the `stats` extra (scipy) is not installed.
+    # That is an environment/packaging condition, not an internal fault, and
+    # INTERNAL is being used as the catch-all because no DEPENDENCY_MISSING code
+    # exists. Worth revisiting alongside any future taxonomy change.
+    "ScipyUnavailableError": BathosErrorCode.INTERNAL,
 }
