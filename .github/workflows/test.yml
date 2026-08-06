@@ -23,7 +23,11 @@ jobs:
       - name: Set up Python
         run: uv python install 3.13
       - name: Install dependencies
-        run: uv sync --dev
+        # --all-extras, not plain --dev: tests/test_stats_gates.py imports the scipy-backed
+        # gates unguarded, so without the `stats` extra 15 tests fail outright. The viz tests
+        # do guard (importorskip), so they silently skipped instead — untested in CI since the
+        # suite was added. Installing every extra keeps new extras from repeating either.
+        run: uv sync --all-extras --dev
       - name: Lint with ruff
         run: uv run ruff check src tests
       - name: Run tests with coverage
