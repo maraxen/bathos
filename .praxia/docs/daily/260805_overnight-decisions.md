@@ -241,6 +241,69 @@ Picking one silently at 4am is exactly the kind of call L5 should not make. File
 **Net:** lint ✓, full test suite ✓ (0 failures), pyright ✗ by policy. PR #38 is one decision away
 from green, and that decision is yours.
 
+---
+
+## 2026-08-06 — resolution: CI is green
+
+You answered D7 in one line: **"We do not use pyright in this project."** That closes #4085 by
+dissolving it rather than deciding it — the four typing-policy options were all answers to a
+question this project never asked. Removing the tool revealed two more never-executed steps
+behind it, in the same pattern as D7 itself.
+
+### D8 — pyright removed (`439544b`, closes #4085)
+
+Evidence it was never used, not merely never green: pyright entered at v0.1.0 scaffolding
+(`73e40a6` for the dep + config, `691a90e` for the CI step) straight from the v0.1 release plan's
+template, and no run has ever reached it — ruff failed first, every time, for the repo's whole
+history. There are no `# pyright:` pragmas anywhere in `src/` or `tests/`, which is what you'd
+expect from a strict-mode checker nobody has ever run.
+
+Removed the CI step, the dep from both dev lists, the `[tool.pyright]` block (including the
+`include` scoping from `e61624b`, now moot), and the contributing-guide references. **This leaves
+CI with no type-check gate** — adding one (astral's `ty`, say) is a separate decision I did not
+make.
+
+### D9 — pytest-cov was missing (`3562ceb`)
+
+With pyright gone, `Run tests with coverage` executed for the first time and failed in under a
+second: `pytest: error: unrecognized arguments: --cov=bathos --cov-report=term-missing`. The
+workflow has always passed `--cov`; `pytest-cov` was never a dependency. Added it rather than
+stripping the flags, because the contributing guide documents `pytest --cov=bathos` and names
+">80% overall coverage" as a review criterion — the intent was there, the wiring wasn't. No
+`--cov-fail-under` is set, so coverage reports without gating.
+
+### D10 — CI installed no extras (`81b6fc8`)
+
+Then the suite ran end-to-end for the first time: **15 failed, 1597 passed, 7 skipped, 3 xfailed.**
+All 15 were one cause — `uv sync --dev` installs no optional extras, so scipy was absent: 10 raised
+`ScipyUnavailableError` outright, and 5 asserted against a verdict that silently degrades to
+`'underpowered'` without it. `tests/test_stats_gates.py` imports the scipy-backed gates unguarded,
+so it assumes an `--all-extras` venv — true locally, false in CI.
+
+Switched to `uv sync --all-extras --dev`, which also closes a quieter gap the same run exposed:
+the **viz tests guard with `importorskip`, so instead of failing they had been silently skipping in
+CI since they were written.** They pass once the extra is installed. Chose `--all-extras` over
+`--extra stats` deliberately, so a future extra cannot repeat either failure mode; the cost is
+sphinx in the test job.
+
+### Result
+
+`31109722314` on `81b6fc8` — every step green: **1628 passed, 3 xfailed, 79% coverage, 0 failures.**
+This is the first passing CI run in the repository's history.
+
+Also confirmed by that run: the 3 strict xfails on the cisternal path bug (#4078) held on a clean
+runner — they failed as expected rather than XPASSing, so debt **#1189 reproduces outside this
+machine** and stays open, correctly.
+
+**The pattern across D7–D10 is worth naming.** Four blockers hid behind each other, each invisible
+until the one before it was cleared, because a failing early step short-circuits every later one.
+Steps that have never executed are not passing steps — and a CI file can look complete while most
+of it has never run. The lint gate had been masking three untested steps for the repo's entire
+history.
+
+**Backtrack:** `git revert 81b6fc8 3562ceb 439544b` restores pyright and the previous install line
+exactly, and re-breaks CI in the way it was broken before.
+
 ## Notes worth keeping
 
 - The backlog dedup probe reported debt `#1077` as **absent** when adding #4080, because it only
