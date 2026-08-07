@@ -7,7 +7,19 @@ on:
       - v*
 
 jobs:
+  # A PyPI version number can be yanked but never reused, so publishing is the one
+  # irreversible thing this repo does — and until now it was also the only workflow
+  # that ran no tests. Pushing a tag went straight to build-and-publish. That was
+  # survivable while main was permanently red (nothing could be trusted anyway), but
+  # main gates properly now, and a release must not be the one path that skips it.
+  #
+  # This calls test.yml rather than repeating its steps: a copy would drift, and the
+  # copy that drifts is the one nobody watches, because it only runs on tags.
+  verify:
+    uses: ./.github/workflows/test.yml
+
   publish:
+    needs: verify
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -20,6 +32,29 @@ jobs:
           enable-cache: true
       - name: Set up Python
         run: uv python install 3.13
+      # The tag is what a human types; the version is what actually gets published.
+      # Nothing tied them together, so tagging v0.13.0a3 against a pyproject.toml
+      # still reading 0.13.0a2 would publish 0.13.0a2 under a tag claiming otherwise
+      # — and burn the wrong version number permanently. tests/test_version_consistency.py
+      # keeps pyproject.toml and bathos.__version__ equal; this closes the last gap
+      # between those two and the git tag.
+      - name: Tag must match the declared version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          # NO_COLOR is required, not cosmetic: `uv version --short` emits ANSI escape
+          # codes even when its stdout is a pipe rather than a TTY, so an uncoloured
+          # comparison sees $'\033[36m0.13.0a2\033[39m' and never matches. Without this
+          # the gate would reject every legitimate release.
+          # --frozen reads the declared version without re-locking or syncing, so this
+          # check stays a pure read and runs before any environment is built.
+          declared=$(NO_COLOR=1 uv version --short --frozen)
+          if [ "$tag" != "$declared" ]; then
+            echo "::error::Tag v${tag} does not match pyproject.toml version ${declared}."
+            echo "Bump the version and re-tag, or delete the tag. Refusing to publish."
+            exit 1
+          fi
+          echo "Tag v${tag} matches the declared version."
       - name: Install dependencies
         run: uv sync
       - name: Build distribution
