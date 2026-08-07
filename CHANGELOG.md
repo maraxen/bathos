@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0a2] - 2026-08-07
+
+**Alpha pre-release.** Still alpha: this release *removes* three CLI flags, an MCP tool
+parameter, and two dead function parameters, and tightens the Review Coverage Gate — so
+APIs here continue to change without a deprecation period, per the 0.13.0a1 notice.
+
+The headline is infrastructural. **CI passes for the first time in the repo's history.**
+Every run before 2026-08-07 was red, and the failure was not one thing but four nested
+ones, each invisible until the one before it cleared. Fixing the reporting so that can
+never recur again is most of what is listed under Added and Changed below.
+
 ### Changed
 
 - **The Review Coverage Gate now requires a *substantive* `[review]` entry, not merely a bound
@@ -218,8 +229,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--negative-check` backing/hedge, mirroring Union Gate's opt-in-on-claim-registration adoption
   ladder — campaigns with no claim attached are unaffected.
 
+- **CI runs, and can fail, for the first time in the repo's history.** Four blockers were
+  nested such that each was invisible until the one before it cleared — an
+  unregistered-exception failure, three export tests broken by an upstream `cisternal` path
+  bug, 160 ruff errors, and a `pyright` step that could not terminate. Clearing them exposed
+  two more: `pytest-cov` was never a dependency, so the coverage step had never run, and
+  `uv sync --dev` omitted the `stats` extra, so 15 tests failed outright while the viz suite
+  silently `importorskip`ped itself into never having been exercised at all. Install is now
+  `uv sync --all-extras --dev`.
+- **A type gate that can fail the build** — `uv run ty check src`, replacing the `pyright`
+  configuration that was added at v0.1.0 scaffolding and never once executed. `src/` carries
+  52 diagnostics, so rather than start the gate non-blocking (precisely how the previous one
+  rotted), every already-clean rule keeps its default severity and gates, while the nine
+  dirty rules are demoted to `warn` with their counts recorded in `[tool.ty.rules]`. Fixing a
+  rule means deleting its line. `error-on-warning = false` makes that split meaningful — ty
+  exits non-zero on any diagnostic otherwise. Scoped to `src/`; `tests/` has 110 and is
+  separate work.
+- **`tests/test_cli_flag_contracts.py`** — CLI-layer contract tests. No test had ever invoked
+  `lineage`, `classify`, or `postmortem validate` through `CliRunner`; every existing test
+  called the library function directly, so a flag that never reached the library was
+  structurally invisible. That is the root cause of all three dead flags below.
+- **`tests/test_mcp_signature_contracts.py`** — pins that no `mcp_<name>_tool` may declare a
+  parameter its `<name>_tool` implementation cannot accept, across all 36 pairs.
+
 ### Fixed
 
+- **`bth lineage --depth` now works, as does the identical dead `depth` on the MCP
+  `lineage_prov` tool.** The recursive CTE already computed a depth column and hardcoded
+  `a.depth < 50` as an anti-cycle guard; that bound is now the caller's limit, bound as a
+  query parameter rather than interpolated. The default is 50 on every surface, so nothing
+  changes unless the flag is passed — the previously *advertised* default of 10 would have
+  silently truncated any chain deeper than 10 had it ever been wired up. The MCP surface
+  mattered more than the CLI: `depth` was already published in the tool schema, so agents
+  could pass it and be ignored.
+- **The MCP `archive` tool had never worked.** `mcp_archive_tool` declared `keep_cool` and
+  forwarded it to `archive_tool`, which has no such parameter, so every authenticated call
+  raised `TypeError`. Three things hid it: `@traced_tool` never re-raises and shapes
+  exceptions into an `ok=False` envelope, making a tool that cannot run indistinguishable
+  from one reporting a domain error; `archive_tool`'s own docstring documented the parameter;
+  and the only test touching the tool exercises the auth-rejection path, which short-circuits
+  before the body.
+- **Telemetry log level is no longer silently dropped on the cisternal path.** On the legacy
+  path `level` is a real severity filter (`init_telemetry` calls `root_logger.setLevel`), but
+  `cisternal.init()` takes no level and cisternal has no severity or filtering mechanism
+  anywhere, so it cannot be forwarded — opting into `CISTERNAL_TELEMETRY` silently disabled
+  `BTH_LOG_LEVEL` as well. It now warns. Upstream gap tracked as debt #1202; the cutover is
+  opt-in and off by default.
+- **`validate_popper_block` now emits `sidecar.validate_error`** like its three siblings,
+  which take the same `sidecar_path` and use it. Popper failures were the only sidecar
+  validation errors with no telemetry trail. The one `WARNING:`-prefixed advisory
+  deliberately emits nothing — labelling it `validate_error` would misreport it.
+- **Registered 5 unregistered domain exceptions** in `EXCEPTION_TO_CODE`, which had been
+  falling through to a generic code.
 - **`bth new-experiment` scaffolded a degenerate `adversarial_check`** — the template paired
   `condition = "metric < 5.0"` with `adversarial_check = "metric >= 5.0"`, its own negation.
   As a stricter conjunct that is a contradiction, so once trigger 3 was wired it would have
@@ -237,6 +298,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer needed). Python floor bumped `>=3.12` → `>=3.13` to match. Telemetry bridge
   (`telemetry_bridge.py`) renamed `cisterna_*` → `cisternal_*`; cutover env var
   renamed `CISTERNA_TELEMETRY` → `CISTERNAL_TELEMETRY`.
+- **Every pull request gets a CI run.** The `pull_request` trigger filtered on
+  `branches: [main]`, so a PR based on anything else got no checks at all — which withholds
+  CI from exactly the stacked PRs that most need it. The filter is gone.
+- **Steps after a failing step now run anyway** (`if: ${{ !cancelled() }}`). A failing step
+  short-circuits the rest, and GitHub renders those as `skipped` — visually identical to a
+  step that passed. That is how the `pyright` step looked healthy for its entire life while
+  never executing once.
+
+### Removed
+
+- **`bth classify --no-content`** — named a feature that was designed and then explicitly
+  rejected before implementation. The flag was copied verbatim from the spec's CLI-surface
+  section, which was never scrubbed; the implementation landed five minutes later without it.
+  Classification is pure regex on the filename stem, with no content I/O in the module.
+- **`bth postmortem validate --strict`** — claimed to "treat missing run ID as error", but
+  that is already enforced unconditionally and upstream: `parse_postmortem` raises before
+  `validate_postmortem` is reached, and a postmortem with `campaign_id` and no `run_id` is
+  valid by design. Unused since the file's first commit. `--strict-files` is genuinely wired
+  and untouched.
+- **`keep_cool` from the MCP `archive` tool** — removed rather than implemented, because
+  `bathos.archive.archive()` only exports warm→cold and never removes cool-tier fragments.
+  There is no deletion for a "keep" switch to suppress.
+- **`pyright`** — this project does not use it. It was configured at v0.1.0 and never ran.
+  Replaced by the `ty` gate above.
+- Dead parameters behind the removed flags: `strict` and `catalog_dir` from
+  `validate_postmortem` (of 21 call sites, zero passed `catalog_dir`), and the redundant
+  `catalog_dir` from `check_baseline_ref_exists`, where `db_path` is derived from it at every
+  call site.
 
 ---
 
