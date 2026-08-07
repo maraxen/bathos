@@ -1,0 +1,101 @@
+---
+workspace: bathos
+session_id: b31d5f9e-1aa0-4349-bb2f-26a3741b91a4
+status: complete
+immediately_relevant:
+- file: pyproject.toml
+  lines:
+  - 103
+  - 142
+  reason: 'The ty ratchet. Comment block explains why the gate blocks rather than advises; [tool.ty.rules] lists the nine demoted rules with counts. error-on-warning=false is load-bearing — ty exits non-zero on ANY diagnostic without it. Closing backlog #4122 means deleting lines here.'
+- file: .github/workflows/publish.yml
+  lines:
+  - 9
+  - 55
+  reason: The publish gate. verify job calls test.yml via workflow_call; publish needs:verify. The tag-match step requires BOTH NO_COLOR (uv emits ANSI even when piped) and --frozen (uv version re-locks as a side effect) — remove either and releases break.
+- file: .github/workflows/test.yml
+  lines:
+  - 3
+  - 20
+  reason: No pull_request branches filter (stacked PRs used to get zero CI) and workflow_call so publish.yml can reuse this exact suite rather than a drifting copy.
+- file: tests/test_mcp_signature_contracts.py
+  lines:
+  - 1
+  - 40
+  reason: 'Pins that no mcp_<name>_tool declares a parameter <name>_tool cannot accept, across 36 pairs. Header documents why the archive tool''s total failure was invisible: @traced_tool shapes TypeError into an ok=False envelope.'
+- file: tests/test_cli_flag_contracts.py
+  lines:
+  - 1
+  - 30
+  reason: The CLI-layer contract tests. Root cause of the three dead flags was that no test ever invoked these commands through CliRunner.
+active_dispatches: []
+task_id: 260807_ci-hardening-and-release
+phase: Phase 1 — CI hardening and release
+goal_statement: Recover the ARG defect fixes stranded by a stacked squash-merge, close the CI holes that let that happen, and cut the first bathos release verified before publication.
+context_refs:
+- phase: Phase 0 — ARG defect remediation
+  task_id: 260806_arg-defect-remediation
+  summary: 'Audited 106 ARG suppressions, fixed the 5 concealed defects; that work is what got stranded and was recovered as PR #40 this session.'
+failed_attempts:
+- attempt_id: a1
+  description: Tagged the release at the version-bump commit 99da265 (considered, caught before executing).
+  outcome: Would have run the OLD ungated publish.yml and published without any verification.
+  reason_failed: GitHub Actions runs the workflow file FROM THE TAGGED COMMIT, not from main's tip. Tagging the release commit executes whatever publish.yml existed there. Tagged 9c6bee1 (the publish-gate commit) instead.
+  do_not_retry: true
+  evidence_ref: null
+- attempt_id: a2
+  description: Compared the git tag against `uv version --short` output without NO_COLOR.
+  outcome: Comparison sees $'\033[36m0.13.0a2\033[39m' and never matches — would have rejected every legitimate release.
+  reason_failed: uv emits ANSI escape codes even when stdout is a pipe rather than a TTY. Verified with od -c. Fails closed, so it would have been caught at the first tag — by blocking it.
+  do_not_retry: true
+  evidence_ref: null
+- attempt_id: a3
+  description: Read the declared version with bare `uv version --short` in a pre-build CI step.
+  outcome: uv re-locks and syncs the project as a side effect, before the intended build step.
+  reason_failed: '`uv version` is not a pure read. --frozen makes it one. (--no-sync also works but is mutually exclusive with --frozen.)'
+  do_not_retry: true
+  evidence_ref: null
+- attempt_id: a4
+  description: Polled `gh pr checks <n>` and parsed the state with awk '{print $2}'.
+  outcome: Wait script exited immediately, reporting 'pending' as a terminal verdict.
+  reason_failed: The check name 'test (3.13)' contains a space, so awk's default splitting makes $2 = '(3.13)', never the bucket. Use `gh pr checks <n> --json bucket --jq '.[0].bucket'` instead.
+  do_not_retry: true
+  evidence_ref: null
+- attempt_id: a5
+  description: Passed a hand-typed/short commit SHA to a background CI-wait script matching on headSha.
+  outcome: Script never matched and would have run to timeout; had to TaskStop and restart twice.
+  reason_failed: Guessed the full SHA instead of reading it from `git rev-parse`, and separately passed a short SHA where the API returns full ones. Always resolve with git rev-parse and match on the full value.
+  do_not_retry: true
+  evidence_ref: null
+- attempt_id: a6
+  description: Asserted archive_tool(project='') raises ValueError in a new test.
+  outcome: 'Test failed: DID NOT RAISE.'
+  reason_failed: 'It returns {''error'': ''project parameter is required''} rather than raising. My own test bug, not a code defect — read the guard clause before asserting on its shape.'
+  do_not_retry: true
+  evidence_ref: null
+open_questions:
+- 'No auditor was dispatched this session. Is CI-green plus a published artifact sufficient closure, or should an auditor review the merged diff of #40-#43 retroactively?'
+- Should the ty gate extend to tests/ (110 diagnostics)? It is currently scoped to src/ only via [tool.ty.src] include.
+- Are the Optional-narrowing warnings in sync.py and cli.py real latent bugs or union noise? They look genuine on inspection but were not run to ground.
+deferred:
+- description: 'Backlog #4122 — clear the 51 warn-demoted ty diagnostics and ratchet the gate to full strength.'
+  rationale: 52 diagnostics was too many to fix while turning the gate on; demoting them kept the gate blocking and honest instead of advisory.
+  recommended_phase: Phase 2
+- description: tests/ has 110 ty diagnostics and is outside the gate entirely.
+  rationale: Separate scope from src/; gating both at once would have blocked the whole hardening effort.
+  recommended_phase: Phase 2
+- description: 'PR #30 and PR #9 need rebasing onto green main; #30 conflicts with #40 in check_baseline_ref_exists.'
+  rationale: User scoped them out of this session; both predate the CI repair so their red badges are meaningless.
+  recommended_phase: Phase 2
+- description: The [0.13.0a2] CHANGELOG section carries two '### Changed' headings.
+  rationale: Duplication predates this work (came in with [Unreleased] content); merging them would reorder existing prose and obscure the release diff.
+  recommended_phase: Phase 2
+lessons_refs:
+- .praxia/docs/daily/260805_overnight-decisions.md
+next_steps:
+- 'Backlog #4122: triage the 51 warn-demoted ty diagnostics in src/, starting with the likely-real ones (sync.py:162/194 .readline/.read on IO|None; cli.py:1665/1672/1678 .requires_parity_stem on ReproductionBlock|None; compact.py:683/827/1006 + sprint_audit.py:144/157 + verify.py:113 subscripting None). Fixing a rule means deleting its line from [tool.ty.rules] in pyproject.toml.'
+- 'Rebase PR #30 onto main — it edits check_baseline_ref_exists at the exact hunk #40 rewrote (catalog_dir param removed), so it WILL conflict. Its red badge is from 2026-07-29 and predates the CI repair, so it carries no signal about its own code.'
+- 'Rebase PR #9 (figure_manifest) onto main for the same reason — last run 2026-07-14, also pre-repair.'
+- Decide whether the ty gate should extend to tests/ (110 diagnostics, currently outside its scope entirely).
+- Clean the dirty main checkout from agy's rejected run on fix/3717-claim-discriminates-propagation — outside this worktree, so untouched.
+---
