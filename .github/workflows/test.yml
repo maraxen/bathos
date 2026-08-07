@@ -10,6 +10,10 @@ on:
   # base branch silently withholds CI from exactly the stacked PRs that most
   # need it, so every PR now gets a run regardless of where it lands.
   pull_request:
+  # Lets publish.yml gate a release on this exact suite rather than a copy of it.
+  # A duplicated set of steps would drift, and the copy that drifts is the one
+  # nobody watches — it only runs on tags.
+  workflow_call:
 
 jobs:
   test:
