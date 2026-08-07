@@ -4,9 +4,12 @@ on:
   push:
     branches:
       - main
+  # No `branches:` filter. It used to be `[main]`, which meant a PR based on
+  # anything else got no checks at all — #39 was stacked on another fix branch
+  # and ran zero times until it was briefly retargeted by hand. Filtering the
+  # base branch silently withholds CI from exactly the stacked PRs that most
+  # need it, so every PR now gets a run regardless of where it lands.
   pull_request:
-    branches:
-      - main
 
 jobs:
   test:
@@ -30,5 +33,15 @@ jobs:
         run: uv sync --all-extras --dev
       - name: Lint with ruff
         run: uv run ruff check src tests
+      # Every check below runs even when an earlier one fails. A failing step
+      # normally short-circuits the rest, and GitHub reports those as `skipped`
+      # — visually identical to a step that was never going to run. That cost
+      # this repo months: the pyright step "passed" for its whole life because
+      # an earlier step always failed first, and nobody could tell. One run
+      # should report every problem it can see, not just the first.
+      - name: Type-check with ty
+        if: ${{ !cancelled() }}
+        run: uv run ty check src
       - name: Run tests with coverage
+        if: ${{ !cancelled() }}
         run: uv run pytest --cov=bathos --cov-report=term-missing -v

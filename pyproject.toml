@@ -53,6 +53,7 @@ dev = [
     "pytest-json-report>=1.5",
     "pytest-cov>=5",
     "ruff>=0.6",
+    "ty>=0.0.1a21",
 ]
 [dependency-groups]
 dev = [
@@ -61,6 +62,7 @@ dev = [
     "pytest-json-report>=1.5",
     "pytest-cov>=5",
     "ruff>=0.6",
+    "ty>=0.0.1a21",
 ]
 
 [project.urls]
@@ -99,3 +101,44 @@ target-version = "py313"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "ARG", "SIM"]
 ignore = ["E501"]
+
+# ty replaces the pyright config removed in #38. pyright was configured at v0.1.0
+# scaffolding and never once executed — an earlier CI step always failed first, so
+# its step reported `skipped` and read as green. The lesson taken from that is that
+# a type gate is worth nothing unless it can fail the build, so this one is wired to
+# block rather than advise.
+#
+# The ratchet: `src/` has 52 diagnostics today, which is too many to fix alongside
+# turning the gate on. Rather than start non-blocking (the failure mode above),
+# every rule that is ALREADY clean is left at its default severity and therefore
+# gates; the nine rules that are currently dirty are demoted to `warn` so they stay
+# visible without blocking. Fixing a rule's backlog means deleting its line here.
+# Counts are as of this commit — see the backlog item for the cleanup.
+#
+# `unknown-argument` is deliberately NOT demoted. Its single occurrence was a real
+# bug (the MCP `archive` tool passed `keep_cool=` to a function with no such
+# parameter, so every call raised TypeError into an error envelope), fixed in this
+# same commit. Passing an argument nothing accepts is the defect class that has now
+# bitten this repo twice — the three dead CLI flags in #39 were the same shape — so
+# it gates from day one.
+[tool.ty.environment]
+python-version = "3.13"
+
+[tool.ty.src]
+include = ["src/**/*.py"]
+
+[tool.ty.terminal]
+# ty exits non-zero on *any* diagnostic by default, warnings included, which would
+# make the demotions below pointless — the gate would fail on all 51 regardless.
+# Warnings stay printed in the CI log and in the editor; only errors block.
+error-on-warning = false
+
+[tool.ty.rules]
+invalid-argument-type = "warn"       # 26
+unresolved-attribute = "warn"        # 9
+not-subscriptable = "warn"           # 6
+unused-type-ignore-comment = "warn"  # 3
+unsupported-operator = "warn"        # 2
+invalid-return-type = "warn"         # 2
+invalid-assignment = "warn"          # 2
+call-non-callable = "warn"           # 1 — `app.run()`; ty cannot resolve the cisternal app type
