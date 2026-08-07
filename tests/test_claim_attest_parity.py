@@ -113,7 +113,10 @@ class TestAttestParityBasic:
     """Tests for attest_parity() basic functionality and AC-11."""
 
     def test_ac11_attest_parity_binds_passing_parity_run(
-        self, temp_db, tmp_path, temp_claim_file_with_parity
+        self,
+        temp_db,
+        tmp_path,
+        temp_claim_file_with_parity,  # noqa: ARG002 - pytest fixture
     ):
         """
         AC-11: attest_parity binds a valid passing PARITY run's id into the claim
@@ -195,7 +198,10 @@ class TestAttestParityValidation:
     """Tests for attest_parity() validation (AC-12, AC-13)."""
 
     def test_ac12_attest_parity_rejects_run_missing_parity_run_type(
-        self, temp_db, tmp_path, temp_claim_file_with_parity
+        self,
+        temp_db,
+        tmp_path,
+        temp_claim_file_with_parity,  # noqa: ARG002 - pytest fixture
     ):
         """
         AC-12: attest_parity REJECTS a run whose metadata lacks parity_run_type
@@ -251,7 +257,10 @@ class TestAttestParityValidation:
         )
 
     def test_ac12_attest_parity_rejects_run_with_wrong_parity_type(
-        self, temp_db, tmp_path, temp_claim_file_with_parity
+        self,
+        temp_db,
+        tmp_path,
+        temp_claim_file_with_parity,  # noqa: ARG002 - pytest fixture
     ):
         """
         AC-12: attest_parity REJECTS a run where parity_run_type is not 'literature_parity'.
@@ -304,7 +313,10 @@ class TestAttestParityValidation:
             )
 
     def test_ac13_attest_parity_partial_run_sets_controlled_by_protocol(
-        self, temp_db, tmp_path, temp_claim_file_with_parity
+        self,
+        temp_db,
+        tmp_path,
+        temp_claim_file_with_parity,  # noqa: ARG002 - pytest fixture
     ):
         """
         AC-13: attest_parity on a PARTIAL parity run sets the confound status
@@ -369,7 +381,10 @@ class TestAtomicity:
     """Tests for atomic write guarantee (AC-21)."""
 
     def test_ac21_attest_parity_rollback_on_db_failure(
-        self, temp_db, tmp_path, temp_claim_file_with_parity
+        self,
+        temp_db,
+        tmp_path,
+        temp_claim_file_with_parity,  # noqa: ARG002 - pytest fixture
     ):
         """
         AC-21 (Real Failure Injection): attest_parity rolls back the file on DB-update failure,
@@ -484,7 +499,10 @@ class TestAtomicity:
         )
 
     def test_ac21_attest_parity_recovery_by_rerun(
-        self, temp_db, tmp_path, temp_claim_file_with_parity
+        self,
+        temp_db,
+        tmp_path,
+        temp_claim_file_with_parity,  # noqa: ARG002 - pytest fixture
     ):
         """
         AC-21 (Recovery): After a crashed attest_parity with rollback, re-running
@@ -585,7 +603,10 @@ class TestParityConfoundCheck:
     """Tests for parity_confound_check() function."""
 
     def test_parity_confound_check_infers_controlled_from_passing_parity_run(
-        self, temp_db, tmp_path, temp_claim_file_with_parity
+        self,
+        temp_db,
+        tmp_path,
+        temp_claim_file_with_parity,  # noqa: ARG002 - pytest fixture
     ):
         """
         parity_confound_check should infer status 'controlled' from a PARITY run.
@@ -638,7 +659,10 @@ class TestParityConfoundCheck:
         )
 
     def test_parity_confound_check_infers_controlled_by_protocol_from_partial(
-        self, temp_db, tmp_path, temp_claim_file_with_parity
+        self,
+        temp_db,
+        tmp_path,
+        temp_claim_file_with_parity,  # noqa: ARG002 - pytest fixture
     ):
         """
         parity_confound_check should infer status 'controlled-by-protocol' from PARTIAL run.

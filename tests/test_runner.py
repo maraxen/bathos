@@ -607,7 +607,7 @@ def test_outcome_is_residual_populated(tmp_catalog: Path, tmp_path: Path):
     # outcome should be "fallback" because x==10, not x==5
     assert runs[0].outcome == "fallback"
     # outcome_is_residual should be True because fallback has is_residual=true
-    assert runs[0].outcome_is_residual == True
+    assert runs[0].outcome_is_residual is True
 
 
 def test_outcome_error_on_nonzero_exit(tmp_catalog: Path, tmp_path: Path):

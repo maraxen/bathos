@@ -13,7 +13,7 @@ from enum import Enum
 from pathlib import Path
 
 
-class ClassificationConfidence(str, Enum):
+class ClassificationConfidence(str, Enum):  # noqa: UP042 - inheriting str preserves str(Enum) returning Enum member value for serialization
     """Confidence level for classification."""
 
     HIGH = "high"
@@ -232,7 +232,11 @@ def _infer_date_prefix(script_path: Path) -> str:
     return "000000"
 
 
-def _scaffold_sidecar(destination: Path, script_path: Path, target_dir: str) -> None:
+def _scaffold_sidecar(
+    destination: Path,
+    script_path: Path,  # noqa: ARG001 - parameter reserved for future sidecar templating
+    target_dir: str,
+) -> None:
     """Write a minimal sidecar stub at the destination.
 
     Creates either experiment, benchmark, or validation sidecar depending on target_dir.
@@ -396,16 +400,15 @@ def _build_classification_result(
     rename_required = False
     suggested_stem = None
 
-    if target_pattern:
-        if not target_pattern.match(stem):
-            # Naming doesn't match target convention
-            rename_required = True
+    if target_pattern and not target_pattern.match(stem):
+        # Naming doesn't match target convention
+        rename_required = True
 
-            # If target uses YYMMDD_desc convention, infer the date
-            if target_dir in ("debug", "explore", "scratch"):
-                date_prefix = _infer_date_prefix(script_path)
-                suggested_stem = f"{date_prefix}_{stem}"
-            # verb_noun directories keep the existing stem (assuming it already follows verb_noun)
+        # If target uses YYMMDD_desc convention, infer the date
+        if target_dir in ("debug", "explore", "scratch"):
+            date_prefix = _infer_date_prefix(script_path)
+            suggested_stem = f"{date_prefix}_{stem}"
+        # verb_noun directories keep the existing stem (assuming it already follows verb_noun)
 
     # Build sidecar paths
     sidecar_required = sidecar_rule is not None and sidecar_rule.value == "error"

@@ -231,7 +231,10 @@ def test_validate_sidecar_campaign_flag_passes_with_correct_ids(claim_cli_env, t
     assert result.exit_code == 0, result.output
 
 
-def test_validate_sidecar_without_campaign_flag_unaffected(claim_cli_env, tmp_path):
+def test_validate_sidecar_without_campaign_flag_unaffected(
+    claim_cli_env,  # noqa: ARG001 - pytest fixture
+    tmp_path,
+):
     """No --campaign given: validates exactly as before #3719, no regression."""
     import textwrap
 

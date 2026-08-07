@@ -19,7 +19,7 @@ class SidecarError(Exception):
     pass
 
 
-class SidecarKind(str, Enum):
+class SidecarKind(str, Enum):  # noqa: UP042 - inheriting str preserves str(Enum) returning Enum member value for serialization
     EXPERIMENT = "experiment"
     BENCHMARK = "benchmark"
     VALIDATION = "validation"
@@ -582,10 +582,7 @@ def compute_evalue(
     if pass_labels is None:
         pass_labels = derive_pass_labels(sidecar)
 
-    if outcome_label in pass_labels:
-        evalue = alt / null
-    else:
-        evalue = (1.0 - alt) / (1.0 - null)
+    evalue = alt / null if outcome_label in pass_labels else (1.0 - alt) / (1.0 - null)
 
     assert evalue > 0, (
         f"compute_evalue produced non-positive value {evalue} for outcome '{outcome_label}'"

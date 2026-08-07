@@ -19,7 +19,7 @@ AgentMode = Literal["collaborative", "autonomous"]
 logger = logging.getLogger(__name__)
 
 
-class GateErrorCode(str, Enum):
+class GateErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(Enum) returning Enum member value for serialization
     """Enumeration of structured error codes for pre-registration gate failures."""
 
     SIDECAR_MISSING = "sidecar_missing"
@@ -473,25 +473,29 @@ def gate_check(
         )
 
     # Autonomous mode: enforce first-of-kind
-    if mode == "autonomous" and catalog_dir and git_hash:
-        if not check_first_of_kind(script_path, catalog_dir, git_hash):
-            payload = _gate_failure_payload(
-                error_code=GateErrorCode.NOT_FIRST_OF_KIND,
-                phase="pre_execution",
-                errors=[
-                    "Script has prior runs — autonomous sidecar generation disallowed for iterated scripts"
-                ],
-                agent_mode=mode,
-            )
-            event(
-                "prereg.gate_deny",
-                script_path=str(script_path),
-                reason="not_first_of_kind",
-                agent_mode=mode,
-            )
-            return GateResult(
-                ok=False, mode=mode, bundle=bundle, validation=validation, error_payload=payload
-            )
+    if (
+        mode == "autonomous"
+        and catalog_dir
+        and git_hash
+        and not check_first_of_kind(script_path, catalog_dir, git_hash)
+    ):
+        payload = _gate_failure_payload(
+            error_code=GateErrorCode.NOT_FIRST_OF_KIND,
+            phase="pre_execution",
+            errors=[
+                "Script has prior runs — autonomous sidecar generation disallowed for iterated scripts"
+            ],
+            agent_mode=mode,
+        )
+        event(
+            "prereg.gate_deny",
+            script_path=str(script_path),
+            reason="not_first_of_kind",
+            agent_mode=mode,
+        )
+        return GateResult(
+            ok=False, mode=mode, bundle=bundle, validation=validation, error_payload=payload
+        )
 
     # Adversarial check enforcement (required for all non-residual outcomes in autonomous mode)
     if mode == "autonomous":

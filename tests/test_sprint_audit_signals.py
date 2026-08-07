@@ -28,7 +28,7 @@ def monkeypatch_registry(monkeypatch, tmp_path) -> None:
 class TestBypassSignals:
     """Test error_rate, bypass_explicit, and bypass_in_agent_mode signals."""
 
-    def test_error_rate_zero(self, monkeypatch_registry, tmp_path):
+    def test_error_rate_zero(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """Test error_rate is 0 when no error outcomes."""
         from bathos.config import register_project
 
@@ -78,7 +78,7 @@ class TestBypassSignals:
         signals = result["audit_results"]["test_project"]["signals"]
         assert signals["error_rate"] == 0.0
 
-    def test_error_rate_nonzero(self, monkeypatch_registry, tmp_path):
+    def test_error_rate_nonzero(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """Test error_rate > 0 when error outcomes present."""
         from bathos.config import register_project
 
@@ -141,7 +141,7 @@ class TestBypassSignals:
         signals = result["audit_results"]["test_project"]["signals"]
         assert signals["error_rate"] == pytest.approx(2 / 3)
 
-    def test_bypass_explicit_and_agent_mode_are_separate(self, monkeypatch_registry, tmp_path):
+    def test_bypass_explicit_and_agent_mode_are_separate(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """Test that bypass_explicit and bypass_in_agent_mode are distinct signals."""
         from bathos.config import register_project
 
@@ -241,7 +241,7 @@ class TestBypassSignals:
 class TestOutcomeEntropy:
     """Test outcome_entropy signal."""
 
-    def test_outcome_entropy_zero_for_single_label(self, monkeypatch_registry, tmp_path):
+    def test_outcome_entropy_zero_for_single_label(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """Test outcome_entropy is 0 when all runs have same outcome."""
         from bathos.config import register_project
 
@@ -277,7 +277,7 @@ class TestOutcomeEntropy:
         signals = result["audit_results"]["test_project"]["signals"]
         assert signals["outcome_entropy"] == pytest.approx(0.0)
 
-    def test_outcome_entropy_positive_for_mixed(self, monkeypatch_registry, tmp_path):
+    def test_outcome_entropy_positive_for_mixed(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """Test outcome_entropy > 0 for mixed outcomes."""
         from bathos.config import register_project
 
@@ -317,7 +317,7 @@ class TestOutcomeEntropy:
         assert signals["outcome_entropy"] > 0.0
         assert signals["outcome_entropy"] == pytest.approx(math.log(2))
 
-    def test_warn_when_entropy_below_threshold(self, monkeypatch_registry, tmp_path):
+    def test_warn_when_entropy_below_threshold(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """Test [WARN] annotation when outcome_entropy < 0.5 nats."""
         from bathos.config import register_project
 
@@ -363,7 +363,7 @@ class TestOutcomeEntropy:
 class TestUnfiredBranches:
     """Test unfired_branches signal."""
 
-    def test_unfired_branches_zero_when_all_outcomes_used(self, monkeypatch_registry, tmp_path):
+    def test_unfired_branches_zero_when_all_outcomes_used(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """Test unfired_branches is 0 when all sidecar outcomes are used."""
         from bathos.config import register_project
 
@@ -427,7 +427,7 @@ result = "str"
         # All declared outcomes are used → unfired_branches = 0
         assert signals["unfired_branches"] == pytest.approx(0.0)
 
-    def test_unfired_branches_positive_when_outcomes_unused(self, monkeypatch_registry, tmp_path):
+    def test_unfired_branches_positive_when_outcomes_unused(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """Test unfired_branches > 0 when some sidecar outcomes are never used."""
         from bathos.config import register_project
 
@@ -495,7 +495,7 @@ result = "str"
 class TestSchemaOverflowRate:
     """Test schema_overflow_rate signal."""
 
-    def test_schema_overflow_rate_zero_when_no_overflow(self, monkeypatch_registry, tmp_path):
+    def test_schema_overflow_rate_zero_when_no_overflow(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """Test schema_overflow_rate is 0 when metadata is empty."""
         from bathos.config import register_project
 
@@ -533,7 +533,9 @@ class TestSchemaOverflowRate:
         assert signals["schema_overflow_rate"] == pytest.approx(0.0)
 
     def test_schema_overflow_rate_always_zero_for_standard_runs(
-        self, monkeypatch_registry, tmp_path
+        self,
+        monkeypatch_registry,  # noqa: ARG002 - pytest fixture needed for side effect
+        tmp_path,
     ):
         """Test schema_overflow_rate is 0 for standard runs (metadata computed during compact)."""
         from bathos.config import register_project
@@ -576,7 +578,7 @@ class TestSchemaOverflowRate:
 class TestPostHocBiasFlagAndIntegration:
     """Test post_hoc_bias_flag and overall signal integration."""
 
-    def test_post_hoc_bias_flag_false_when_no_bias(self, monkeypatch_registry, tmp_path):
+    def test_post_hoc_bias_flag_false_when_no_bias(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """Test post_hoc_bias_flag is False when worst outcome is not concentrated early."""
         from bathos.config import register_project
 
@@ -614,7 +616,7 @@ class TestPostHocBiasFlagAndIntegration:
         signals = result["audit_results"]["test_project"]["signals"]
         assert signals["post_hoc_bias_flag"] is False
 
-    def test_signals_dict_contains_all_nine(self, monkeypatch_registry, tmp_path):
+    def test_signals_dict_contains_all_nine(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """Test that all 9 signals are present in output."""
         from bathos.config import register_project
 
@@ -707,7 +709,7 @@ def _build_catalog(tmp_path, runs):
 class TestErrorRateBoundary:
     """Boundary tests for error_rate signal (threshold 0.10)."""
 
-    def test_error_rate_below_threshold(self, monkeypatch_registry, tmp_path):
+    def test_error_rate_below_threshold(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """9 runs, 0 errors -> error_rate = 0.0, no anomaly fired."""
         from bathos.config import register_project
 
@@ -723,7 +725,7 @@ class TestErrorRateBoundary:
         assert signals["error_rate"] == pytest.approx(0.0)
         assert not any("error_rate" in a for a in anomalies)
 
-    def test_error_rate_above_threshold(self, monkeypatch_registry, tmp_path):
+    def test_error_rate_above_threshold(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """10 runs, 2 errors (20%) -> anomaly fires."""
         from bathos.config import register_project
 
@@ -744,7 +746,7 @@ class TestErrorRateBoundary:
 class TestBypassExplicitBoundary:
     """Boundary tests for bypass_explicit signal (threshold 0.30)."""
 
-    def test_bypass_explicit_below_threshold(self, monkeypatch_registry, tmp_path):
+    def test_bypass_explicit_below_threshold(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """10 runs, 2 bypassed non-agent (20%) -> no anomaly."""
         from bathos.config import register_project
 
@@ -762,7 +764,7 @@ class TestBypassExplicitBoundary:
         assert signals["bypass_explicit"] == pytest.approx(0.2)
         assert not any("bypass_explicit" in a for a in anomalies)
 
-    def test_bypass_explicit_above_threshold(self, monkeypatch_registry, tmp_path):
+    def test_bypass_explicit_above_threshold(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """10 runs, 4 bypassed non-agent (40%) -> anomaly fires."""
         from bathos.config import register_project
 
@@ -784,7 +786,7 @@ class TestBypassExplicitBoundary:
 class TestBypassAgentModeBoundary:
     """Boundary tests for bypass_in_agent_mode signal (threshold 0.05)."""
 
-    def test_bypass_agent_mode_below_threshold(self, monkeypatch_registry, tmp_path):
+    def test_bypass_agent_mode_below_threshold(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """20 agent-mode runs, 0 bypassed -> no anomaly."""
         from bathos.config import register_project
 
@@ -802,7 +804,7 @@ class TestBypassAgentModeBoundary:
         assert signals["bypass_in_agent_mode"] == pytest.approx(0.0)
         assert not any("bypass_in_agent_mode" in a for a in anomalies)
 
-    def test_bypass_agent_mode_above_threshold(self, monkeypatch_registry, tmp_path):
+    def test_bypass_agent_mode_above_threshold(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """20 agent-mode runs, 2 bypassed (10%) -> anomaly fires."""
         from bathos.config import register_project
 
@@ -827,7 +829,7 @@ class TestBypassAgentModeBoundary:
 class TestOutcomeEntropyBoundary:
     """Boundary tests for outcome_entropy (flag when < 0.5 nats)."""
 
-    def test_outcome_entropy_above_threshold(self, monkeypatch_registry, tmp_path):
+    def test_outcome_entropy_above_threshold(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """Balanced 4-label distribution -> entropy ~ ln(4) ~ 1.386 > 0.5, no anomaly."""
         from bathos.config import register_project
 
@@ -845,7 +847,7 @@ class TestOutcomeEntropyBoundary:
         assert signals["outcome_entropy"] > 0.5
         assert not any("outcome_entropy" in a for a in anomalies)
 
-    def test_outcome_entropy_below_threshold(self, monkeypatch_registry, tmp_path):
+    def test_outcome_entropy_below_threshold(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """Highly skewed: 9 pass, 1 fail -> H ~ 0.325 < 0.5, anomaly fires."""
         from bathos.config import register_project
 
@@ -879,7 +881,7 @@ class TestUnfiredBranchesBoundary:
         path.write_text(content)
         return path, labels
 
-    def test_unfired_branches_below_threshold(self, monkeypatch_registry, tmp_path):
+    def test_unfired_branches_below_threshold(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """10 declared outcomes, 3 never fired (30%) -> no anomaly."""
         from bathos.config import register_project
 
@@ -908,7 +910,7 @@ class TestUnfiredBranchesBoundary:
         assert signals["unfired_branches"] == pytest.approx(3 / 10)
         assert not any("unfired_branches" in a for a in anomalies)
 
-    def test_unfired_branches_above_threshold(self, monkeypatch_registry, tmp_path):
+    def test_unfired_branches_above_threshold(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """10 declared outcomes, 5 never fired (50%) -> anomaly fires."""
         from bathos.config import register_project
 
@@ -973,7 +975,7 @@ class TestSchemaOverflowBoundary:
         )
         path.write_text(content)
 
-    def test_schema_overflow_below_threshold(self, monkeypatch_registry, tmp_path):
+    def test_schema_overflow_below_threshold(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """10 sidecar runs, all metadata keys declared -> rate = 0.0, no anomaly."""
         from bathos.config import register_project
 
@@ -1005,7 +1007,7 @@ class TestSchemaOverflowBoundary:
         assert signals["schema_overflow_rate"] == pytest.approx(0.0)
         assert not any("schema_overflow_rate" in a for a in anomalies)
 
-    def test_schema_overflow_above_threshold(self, monkeypatch_registry, tmp_path):
+    def test_schema_overflow_above_threshold(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """10 sidecar runs, 3 have undeclared keys (30%) -> anomaly fires."""
         from bathos.config import register_project
 
@@ -1052,7 +1054,7 @@ class TestSchemaOverflowBoundary:
 class TestPostHocBiasFlagBoundary:
     """Boundary tests for post_hoc_bias_flag (worst in first third > 10% total)."""
 
-    def test_post_hoc_bias_not_flagged(self, monkeypatch_registry, tmp_path):
+    def test_post_hoc_bias_not_flagged(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """12 runs, 'fail' only in last third -> flag = False."""
         from bathos.config import register_project
 
@@ -1070,7 +1072,7 @@ class TestPostHocBiasFlagBoundary:
 
         assert signals["post_hoc_bias_flag"] is False
 
-    def test_post_hoc_bias_flagged(self, monkeypatch_registry, tmp_path):
+    def test_post_hoc_bias_flagged(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """12 runs, 2 'fail' in first 4 (first third) -> 2/12 = 16.7% > 10%, flag = True."""
         from bathos.config import register_project
 
@@ -1108,7 +1110,7 @@ class TestSchemaOverflowSemantics:
         )
         path.write_text(content)
 
-    def test_schema_overflow_declared_keys_only(self, monkeypatch_registry, tmp_path):
+    def test_schema_overflow_declared_keys_only(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """metadata = {temp_std: 1.0} with sidecar declaring temp_std -> overflow_rate == 0.0."""
         from bathos.config import register_project
 
@@ -1135,7 +1137,7 @@ class TestSchemaOverflowSemantics:
         signals = result["audit_results"]["test_project"]["signals"]
         assert signals["schema_overflow_rate"] == pytest.approx(0.0)
 
-    def test_schema_overflow_undeclared_key(self, monkeypatch_registry, tmp_path):
+    def test_schema_overflow_undeclared_key(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """metadata has undeclared_debug not in sidecar -> overflow_rate > 0."""
         from bathos.config import register_project
 
@@ -1164,7 +1166,7 @@ class TestSchemaOverflowSemantics:
         signals = result["audit_results"]["test_project"]["signals"]
         assert signals["schema_overflow_rate"] > 0.0
 
-    def test_schema_overflow_no_sidecar_skipped(self, monkeypatch_registry, tmp_path):
+    def test_schema_overflow_no_sidecar_skipped(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """All runs have no sidecar_path -> denominator = 0, overflow_rate == 0.0."""
         from bathos.config import register_project
 
@@ -1187,7 +1189,7 @@ class TestSchemaOverflowSemantics:
         # No runs have sidecar_path -> runs_with_sidecar = 0 -> rate = 0.0
         assert signals["schema_overflow_rate"] == pytest.approx(0.0)
 
-    def test_schema_overflow_denominator_is_sidecar_runs(self, monkeypatch_registry, tmp_path):
+    def test_schema_overflow_denominator_is_sidecar_runs(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """5 sidecar runs (all clean) + 5 no-sidecar runs -> denominator = 5, not 10."""
         from bathos.config import register_project
 
@@ -1229,7 +1231,7 @@ class TestSchemaOverflowSemantics:
 class TestControlArmRate:
     """Test control_arm_rate signal (AC-5)."""
 
-    def test_control_arm_rate_zero_no_ctrl_runs(self, monkeypatch_registry, tmp_path):
+    def test_control_arm_rate_zero_no_ctrl_runs(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """Test control_arm_rate is 0 when no runs have ctrl_* outcomes."""
         from bathos.config import register_project
 
@@ -1265,7 +1267,7 @@ class TestControlArmRate:
         signals = result["audit_results"]["test_project"]["signals"]
         assert signals["control_arm_rate"] == pytest.approx(0.0)
 
-    def test_control_arm_rate_nonzero_with_ctrl_passes(self, monkeypatch_registry, tmp_path):
+    def test_control_arm_rate_nonzero_with_ctrl_passes(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """Test control_arm_rate > 0 when runs have ctrl_pass outcomes."""
         from bathos.config import register_project
 
@@ -1302,7 +1304,7 @@ class TestControlArmRate:
         # 2 out of 5 have ctrl_* outcomes
         assert signals["control_arm_rate"] == pytest.approx(0.4)
 
-    def test_control_arm_rate_mixed_ctrl_outcomes(self, monkeypatch_registry, tmp_path):
+    def test_control_arm_rate_mixed_ctrl_outcomes(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """Test control_arm_rate counts both ctrl_pass and ctrl_fail."""
         from bathos.config import register_project
 
@@ -1341,7 +1343,9 @@ class TestControlArmRate:
         assert signals["control_arm_rate"] == pytest.approx(0.6)
 
     def test_control_arm_rate_warning_zero_with_validation_stage(
-        self, monkeypatch_registry, tmp_path
+        self,
+        monkeypatch_registry,  # noqa: ARG002 - pytest fixture needed for side effect
+        tmp_path,
     ):
         """Test WARNING when control_arm_rate==0.0 and validation/production runs exist."""
         from bathos.config import register_project
@@ -1491,7 +1495,7 @@ class TestControlArmRate:
 class TestSubmitBypassRateSignal:
     """Test AC-9 signal_submit_bypass_rate — detection of cluster submit bypass."""
 
-    def test_submit_bypass_rate_all_via_bth_submit(self, monkeypatch_registry, tmp_path):
+    def test_submit_bypass_rate_all_via_bth_submit(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """All validation/production runs submitted via bth submit — rate=0%."""
         from bathos.sprint_audit import signal_submit_bypass_rate
 
@@ -1544,7 +1548,7 @@ class TestSubmitBypassRateSignal:
         assert result.level == "OK"
         assert "0/3" in result.message
 
-    def test_submit_bypass_rate_some_bypassed(self, monkeypatch_registry, tmp_path):
+    def test_submit_bypass_rate_some_bypassed(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """Only 2 of 3 validation runs submitted via bth submit — rate=33% > 5% threshold."""
         from bathos.sprint_audit import signal_submit_bypass_rate
 
@@ -1597,7 +1601,7 @@ class TestSubmitBypassRateSignal:
         assert result.level == "WARNING"  # 33% > 5% threshold
         assert "1/3" in result.message
 
-    def test_submit_bypass_rate_high_rate_warning(self, monkeypatch_registry, tmp_path):
+    def test_submit_bypass_rate_high_rate_warning(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """6 of 10 validation runs bypassed — rate=60% > 5% threshold — WARNING."""
         from bathos.sprint_audit import signal_submit_bypass_rate
 
@@ -1650,7 +1654,7 @@ class TestSubmitBypassRateSignal:
         assert result.level == "WARNING"
         assert "60.00%" in result.message or "6/10" in result.message
 
-    def test_submit_bypass_rate_no_validation_runs(self, monkeypatch_registry, tmp_path):
+    def test_submit_bypass_rate_no_validation_runs(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """No validation/production runs — rate=0%, level=INFO."""
         from bathos.sprint_audit import signal_submit_bypass_rate
 
@@ -1692,7 +1696,7 @@ class TestSubmitBypassRateSignal:
         assert result.level == "INFO"
         assert "no validation/production cluster runs found" in result.message
 
-    def test_submit_bypass_rate_no_provenance_records(self, monkeypatch_registry, tmp_path):
+    def test_submit_bypass_rate_no_provenance_records(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """Validation runs exist but no provenance records yet — all are bypassed."""
         from bathos.sprint_audit import signal_submit_bypass_rate
 
@@ -1734,7 +1738,7 @@ class TestSubmitBypassRateSignal:
         assert result.level == "WARNING"
         assert "100.00%" in result.message or "2/2" in result.message
 
-    def test_submit_bypass_rate_no_warm_db(self, monkeypatch_registry, tmp_path):
+    def test_submit_bypass_rate_no_warm_db(self, monkeypatch_registry, tmp_path):  # noqa: ARG002 - pytest fixture needed for side effect
         """When warm DB doesn't exist, signal returns INFO with value=None (coverage for line 238-244)."""
         from bathos.sprint_audit import signal_submit_bypass_rate
 

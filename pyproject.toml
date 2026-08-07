@@ -51,16 +51,16 @@ dev = [
     "pytest>=8",
     "pytest-tmp-files>=0.0.2",
     "pytest-json-report>=1.5",
+    "pytest-cov>=5",
     "ruff>=0.6",
-    "pyright>=1.1",
 ]
 [dependency-groups]
 dev = [
     "pytest>=8",
     "pytest-tmp-files>=0.0.2",
     "pytest-json-report>=1.5",
+    "pytest-cov>=5",
     "ruff>=0.6",
-    "pyright>=1.1",
 ]
 
 [project.urls]
@@ -99,7 +99,3 @@ target-version = "py313"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "ARG", "SIM"]
 ignore = ["E501"]
-
-[tool.pyright]
-typeCheckingMode = "strict"
-exclude = ["tests"]

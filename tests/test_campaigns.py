@@ -173,7 +173,6 @@ def test_confirmation_campaign_rejects_prior_run(populated_warm_catalog: Path):
         campaign = create_campaign(
             db, name="Confirmation Test", project_slug="prolix", mode="confirmation"
         )
-        campaign_start = campaign.started_at
 
         # Insert a run with prior timestamp directly into DB
         old_timestamp = datetime(2026, 5, 9, 12, 0, 0, tzinfo=UTC).isoformat()
@@ -761,7 +760,10 @@ hypothesis_ids = ["H1"]
         db.close()
 
 
-def test_conclude_campaign_claim_file_not_found_raises(populated_warm_catalog: Path, tmp_path):
+def test_conclude_campaign_claim_file_not_found_raises(
+    populated_warm_catalog: Path,
+    tmp_path,  # noqa: ARG001 - pytest fixture requested in test signature
+):
     """AC-08: conclude_campaign raises RuntimeError when claim file not found (not downgraded to confounded)."""
     db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
     try:
@@ -783,7 +785,10 @@ def test_conclude_campaign_claim_file_not_found_raises(populated_warm_catalog: P
         db.close()
 
 
-def test_conclude_campaign_exploration_mode_warning_only(populated_warm_catalog: Path, tmp_path):
+def test_conclude_campaign_exploration_mode_warning_only(
+    populated_warm_catalog: Path,
+    tmp_path,  # noqa: ARG001 - pytest fixture requested in test signature
+):
     """AC-08: Union Gate on exploration mode prints warning only, does not downgrade verdict."""
 
     db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))

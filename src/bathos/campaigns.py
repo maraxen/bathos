@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import uuid4
 
 import duckdb
@@ -33,8 +34,6 @@ class Campaign:
 
 
 def _open_db(catalog_dir) -> duckdb.DuckDBPyConnection:
-    from pathlib import Path
-
     return duckdb.connect(str(Path(catalog_dir) / "bathos.db"))
 
 
@@ -111,12 +110,11 @@ def add_run_to_campaign(db, campaign_id: str, run_id: str) -> None:
         if run_dt is not None and run_dt.tzinfo is None:
             run_dt = run_dt.replace(tzinfo=UTC)
 
-        if campaign_dt is not None and run_dt is not None:
-            if run_dt < campaign_dt:
-                raise CampaignError(
-                    f"Cannot add run {run_id} to confirmation campaign {campaign_id}: "
-                    f"run timestamp ({run_dt.isoformat()}) predates campaign creation ({campaign_dt.isoformat()})"
-                )
+        if campaign_dt is not None and run_dt is not None and run_dt < campaign_dt:
+            raise CampaignError(
+                f"Cannot add run {run_id} to confirmation campaign {campaign_id}: "
+                f"run timestamp ({run_dt.isoformat()}) predates campaign creation ({campaign_dt.isoformat()})"
+            )
 
     if campaign_mode == "sequential":
         # Compute e-value from sidecar
@@ -906,7 +904,7 @@ def emit_figure_manifest(db, catalog_dir: str, campaign_id: str) -> None:
 
 
 def emit_claim_coverage_report(
-    db,
+    db,  # noqa: ARG001 - kept for signature compatibility
     catalog_dir: str | Path,
     campaign_id: str,
     verdict: str,

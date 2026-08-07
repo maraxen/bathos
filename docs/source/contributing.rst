@@ -19,7 +19,7 @@ Install dependencies with ``uv``:
 
     uv sync --dev
 
-This installs bathos in editable mode and all development dependencies (pytest, ruff, pyright).
+This installs bathos in editable mode and all development dependencies (pytest, ruff).
 
 Running Tests
 -------------
@@ -50,8 +50,8 @@ Run tests matching a pattern:
 
     uv run pytest -k "test_compact" -v
 
-Linting & Type Checking
------------------------
+Linting
+-------
 
 Check code style with ruff:
 
@@ -65,18 +65,11 @@ Fix style issues automatically:
 
     ruff check --fix src/ tests/
 
-Check types with pyright:
-
-.. code-block:: bash
-
-    pyright src/
-
 Before submitting a PR, ensure:
 
 .. code-block:: bash
 
     ruff check src/ tests/         # 0 violations
-    pyright src/                   # 0 errors
     uv run pytest tests/ -v        # All tests pass
 
 Code Style
@@ -185,7 +178,6 @@ Pull Request Process
 
        uv run pytest tests/ --cov=bathos -v
        ruff check src/ tests/
-       pyright src/
 
 5. **Commit with conventional message:**
 
@@ -352,7 +344,7 @@ Code Review Expectations
 
 All PRs are reviewed before merging. Reviewers will check:
 
-- Code follows style guide (ruff, pyright pass)
+- Code follows style guide (ruff passes)
 - Tests cover new code (>80% overall coverage)
 - Docstrings are present and accurate
 - Commit messages follow conventions

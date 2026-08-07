@@ -21,7 +21,9 @@ def monkeypatch_registry(monkeypatch, tmp_path) -> None:
     )
 
 
-def test_sprint_audit_empty_registry(monkeypatch_registry):
+def test_sprint_audit_empty_registry(
+    monkeypatch_registry,  # noqa: ARG001 - pytest fixture
+):
     """Test that audit returns empty results with no registered projects."""
     from bathos.sprint_audit import sprint_audit
 
@@ -30,7 +32,11 @@ def test_sprint_audit_empty_registry(monkeypatch_registry):
     assert result["warnings"] == []
 
 
-def test_sprint_audit_skips_incompatible_schema(monkeypatch_registry, tmp_path, monkeypatch):
+def test_sprint_audit_skips_incompatible_schema(
+    monkeypatch_registry,  # noqa: ARG001 - pytest fixture
+    tmp_path,
+    monkeypatch,  # noqa: ARG001 - pytest fixture
+):
     """Test that audit skips projects with incompatible schema versions."""
     from bathos.config import register_project
     from bathos.sprint_audit import sprint_audit
@@ -62,7 +68,11 @@ def test_sprint_audit_skips_incompatible_schema(monkeypatch_registry, tmp_path, 
     assert any("schema version mismatch" in w for w in result["warnings"])
 
 
-def test_sprint_audit_reports_anomalies(monkeypatch_registry, tmp_path, monkeypatch):
+def test_sprint_audit_reports_anomalies(
+    monkeypatch_registry,  # noqa: ARG001 - pytest fixture
+    tmp_path,
+    monkeypatch,  # noqa: ARG001 - pytest fixture
+):
     """Test that audit detects and reports anomalies."""
     from bathos.config import register_project
     from bathos.sprint_audit import sprint_audit

@@ -300,7 +300,12 @@ planned_run_label = "main"
 class TestRegisterClaim:
     """Tests for claim registration."""
 
-    def test_register_claim_success(self, temp_claim_file, temp_db, tmp_path):
+    def test_register_claim_success(
+        self,
+        temp_claim_file,  # noqa: ARG002 - pytest fixture
+        temp_db,
+        tmp_path,
+    ):
         """AC-02: register claim writes path and SHA256 to campaigns table."""
         campaign_id = "test_campaign_id"
 
@@ -331,7 +336,12 @@ class TestRegisterClaim:
         assert row[0] == str(relative_path)
         assert len(row[1]) == 64  # SHA256
 
-    def test_register_claim_rejects_absolute_path(self, temp_claim_file, temp_db, tmp_path):
+    def test_register_claim_rejects_absolute_path(
+        self,
+        temp_claim_file,  # noqa: ARG002 - pytest fixture
+        temp_db,
+        tmp_path,
+    ):
         """AC-02: register rejects absolute paths that escape workspace."""
         campaign_id = "test_campaign_id"
         temp_db.execute(
@@ -742,7 +752,11 @@ class TestClaimCoverageReport:
         # With 1 clause and 0 uncovered, coverage should be 1.0
         assert data["coverage_fraction"] == 1.0
 
-    def test_ac12_coverage_fraction_half(self, temp_claim_file, tmp_path):
+    def test_ac12_coverage_fraction_half(
+        self,
+        temp_claim_file,  # noqa: ARG002 - pytest fixture
+        tmp_path,
+    ):
         """AC-12: coverage_fraction == 0.5 when 1 of 2 clauses uncovered."""
         from bathos.campaigns import emit_claim_coverage_report
 
@@ -875,7 +889,11 @@ label = "Null"
 class TestBaselineParity:
     """Tests for AC-13: [baseline_parity] sub-block validation."""
 
-    def test_ac13_parity_run_id_empty_warning(self, tmp_path, temp_db):
+    def test_ac13_parity_run_id_empty_warning(
+        self,
+        tmp_path,
+        temp_db,  # noqa: ARG002 - pytest fixture
+    ):
         """AC-13: confound with empty parity_run_id → WARNING."""
         claim_path = tmp_path / "test.claim.toml"
         claim_path.write_text("""[claim]
@@ -1667,7 +1685,11 @@ predicted_outcome = "outcome_x"
         assert result.ok is True
         assert any("positive-testing bias" in w for w in result.warnings)
 
-    def test_ac06_single_cell_db_exception_returns_empty(self, temp_db, tmp_path):
+    def test_ac06_single_cell_db_exception_returns_empty(
+        self,
+        temp_db,  # noqa: ARG002 - pytest fixture
+        tmp_path,  # noqa: ARG002 - pytest fixture
+    ):
         """AC-06: DB exception returns empty list, doesn't crash."""
         campaign_id = "test_campaign_001"
 

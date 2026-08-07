@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import re
 import tomllib
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+import duckdb
+
 from bathos.sidecar import find_sidecar
 
 
-class IssueSeverity(str, Enum):
+class IssueSeverity(str, Enum):  # noqa: UP042 - inheriting str preserves str(Enum) returning Enum member value for serialization
     ERROR = "error"
     WARNING = "warning"
     INFO = "info"
@@ -1218,7 +1221,9 @@ def check_canonical_stage_names(catalog_dir: Path) -> list[LintIssue]:
 
 
 def check_baseline_ref_exists(
-    project_root: Path, catalog_dir: Path, db_path: Path
+    project_root: Path,
+    catalog_dir: Path,  # noqa: ARG001 - kept for public signature compatibility
+    db_path: Path,
 ) -> list[LintIssue]:
     """Tier-2: Validate that baseline_ref values exist in the warm catalog.
 
@@ -1308,7 +1313,7 @@ def check_baseline_ref_exists(
 
 
 def check_single_cell_gate(
-    claim_discriminability: list[dict],
+    claim_discriminability: list[dict],  # noqa: ARG001 - kept for gate signature compatibility
     campaign_id: str,
     db: duckdb.DuckDBPyConnection,
 ) -> list[LintIssue]:
@@ -1339,10 +1344,8 @@ def check_single_cell_gate(
     # Parse all metadata blobs
     metas = []
     for (meta_str,) in rows:
-        try:
+        with suppress(json.JSONDecodeError, TypeError):
             metas.append(json.loads(meta_str))
-        except (json.JSONDecodeError, TypeError):
-            pass
 
     if len(metas) < 2:
         return issues

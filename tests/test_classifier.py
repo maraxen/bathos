@@ -274,7 +274,10 @@ def test_conflict_blocks_apply(project_with_scripts: Path) -> None:
         apply_classify_plan(plan)
 
 
-def test_untracked_files_block_apply(project_with_scripts: Path, tmp_path: Path) -> None:
+def test_untracked_files_block_apply(
+    project_with_scripts: Path,
+    tmp_path: Path,  # noqa: ARG001 - pytest fixture
+) -> None:
     """Test that apply_classify_plan aborts if source is untracked."""
     script = project_with_scripts / "scripts" / "benchmark_test.py"
     script.write_text("# benchmark")
@@ -363,7 +366,9 @@ def test_infer_date_prefix_fallback_to_mtime(project_with_scripts: Path) -> None
 
 
 def test_sidecar_scaffold_for_experiments(
-    project_with_scripts: Path, tmp_path: Path, monkeypatch
+    project_with_scripts: Path,
+    tmp_path: Path,  # noqa: ARG001 - pytest fixture
+    monkeypatch,
 ) -> None:
     """Test that apply_classify_plan writes sidecar stub for experiments."""
     # Work in the project directory

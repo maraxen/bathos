@@ -561,37 +561,41 @@ class TestRemoteTestCLI:
         config_path = tmp_path / ".bth.toml"
         config_path.write_text(BTH_TOML_WITH_REMOTE)
 
-        with patch("bathos.cli.find_project_config", return_value=config_path):
-            with patch("bathos.remote.subprocess.run") as mock_run:
-                mock_result = MagicMock()
-                mock_result.returncode = 0
-                mock_result.stdout = "ok\n"
-                mock_result.stderr = ""
-                mock_run.return_value = mock_result
+        with (
+            patch("bathos.cli.find_project_config", return_value=config_path),
+            patch("bathos.remote.subprocess.run") as mock_run,
+        ):
+            mock_result = MagicMock()
+            mock_result.returncode = 0
+            mock_result.stdout = "ok\n"
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
 
-                result = cli_runner.invoke(app, ["remote", "test", "engaging"])
+            result = cli_runner.invoke(app, ["remote", "test", "engaging"])
 
-                assert result.exit_code == 0
-                assert "engaging: ok" in result.stdout
-                assert "ms" in result.stdout
+            assert result.exit_code == 0
+            assert "engaging: ok" in result.stdout
+            assert "ms" in result.stdout
 
     def test_remote_test_failure(self, tmp_path, cli_runner):
         """bth remote test shows failure message with error."""
         config_path = tmp_path / ".bth.toml"
         config_path.write_text(BTH_TOML_WITH_REMOTE)
 
-        with patch("bathos.cli.find_project_config", return_value=config_path):
-            with patch("bathos.remote.subprocess.run") as mock_run:
-                mock_result = MagicMock()
-                mock_result.returncode = 1
-                mock_result.stdout = ""
-                mock_result.stderr = "ssh: could not resolve hostname"
-                mock_run.return_value = mock_result
+        with (
+            patch("bathos.cli.find_project_config", return_value=config_path),
+            patch("bathos.remote.subprocess.run") as mock_run,
+        ):
+            mock_result = MagicMock()
+            mock_result.returncode = 1
+            mock_result.stdout = ""
+            mock_result.stderr = "ssh: could not resolve hostname"
+            mock_run.return_value = mock_result
 
-                result = cli_runner.invoke(app, ["remote", "test", "engaging"])
+            result = cli_runner.invoke(app, ["remote", "test", "engaging"])
 
-                assert result.exit_code == 1
-                assert "engaging: unreachable" in result.stdout
+            assert result.exit_code == 1
+            assert "engaging: unreachable" in result.stdout
 
     def test_remote_test_not_found(self, tmp_path, cli_runner):
         """bth remote test fails when remote not found."""
@@ -613,54 +617,57 @@ class TestSyncAutoSelection:
         config_path = tmp_path / ".bth.toml"
         config_path.write_text(BTH_TOML_WITH_REMOTE)
 
-        with patch("bathos.cli.find_project_config", return_value=config_path):
-            with patch("bathos.cli.load_project_config") as mock_load:
-                from bathos.config import load_project_config
+        from bathos.config import load_project_config
 
-                config = load_project_config(config_path)
-                mock_load.return_value = config
+        config = load_project_config(config_path)
 
-                with patch("bathos.cli.sync_catalog") as mock_sync:
-                    mock_sync.return_value = MagicMock(
-                        transferred=3, remote="engaging", duration_s=0.8, filtered=0
-                    )
+        with (
+            patch("bathos.cli.find_project_config", return_value=config_path),
+            patch("bathos.cli.load_project_config", return_value=config),
+            patch("bathos.cli.sync_catalog") as mock_sync,
+        ):
+            mock_sync.return_value = MagicMock(
+                transferred=3, remote="engaging", duration_s=0.8, filtered=0
+            )
 
-                    result = cli_runner.invoke(app, ["sync"])
+            result = cli_runner.invoke(app, ["sync"])
 
-                    assert result.exit_code == 0
-                    # Verify sync_catalog was called
-                    mock_sync.assert_called_once()
+            assert result.exit_code == 0
+            # Verify sync_catalog was called
+            mock_sync.assert_called_once()
 
     def test_sync_no_remotes_fails(self, tmp_path, cli_runner):
         """bth sync with zero remotes fails."""
         config_path = tmp_path / ".bth.toml"
         config_path.write_text(MINIMAL_BTH_TOML)
 
-        with patch("bathos.cli.find_project_config", return_value=config_path):
-            with patch("bathos.cli.load_project_config") as mock_load:
-                from bathos.config import load_project_config
+        from bathos.config import load_project_config
 
-                config = load_project_config(config_path)
-                mock_load.return_value = config
+        config = load_project_config(config_path)
 
-                result = cli_runner.invoke(app, ["sync"])
+        with (
+            patch("bathos.cli.find_project_config", return_value=config_path),
+            patch("bathos.cli.load_project_config", return_value=config),
+        ):
+            result = cli_runner.invoke(app, ["sync"])
 
-                assert result.exit_code == 1
-                assert "No remotes configured" in result.stdout
+            assert result.exit_code == 1
+            assert "No remotes configured" in result.stdout
 
     def test_sync_multiple_remotes_fails(self, tmp_path, cli_runner):
         """bth sync with multiple remotes fails without explicit selection."""
         config_path = tmp_path / ".bth.toml"
         config_path.write_text(BTH_TOML_WITH_MULTIPLE_REMOTES)
 
-        with patch("bathos.cli.find_project_config", return_value=config_path):
-            with patch("bathos.cli.load_project_config") as mock_load:
-                from bathos.config import load_project_config
+        from bathos.config import load_project_config
 
-                config = load_project_config(config_path)
-                mock_load.return_value = config
+        config = load_project_config(config_path)
 
-                result = cli_runner.invoke(app, ["sync"])
+        with (
+            patch("bathos.cli.find_project_config", return_value=config_path),
+            patch("bathos.cli.load_project_config", return_value=config),
+        ):
+            result = cli_runner.invoke(app, ["sync"])
 
-                assert result.exit_code == 1
-                assert "Multiple remotes configured" in result.stdout
+            assert result.exit_code == 1
+            assert "Multiple remotes configured" in result.stdout

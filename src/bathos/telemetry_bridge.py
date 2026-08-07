@@ -38,7 +38,7 @@ def init_server_telemetry(
 
 
 def init_via_cisternal(
-    level: str | int | None = None,
+    level: str | int | None = None,  # noqa: ARG001 - kept for cisternal bridge signature compatibility
     log_dir: str | Path | None = None,
     max_bytes: int = 10_485_760,
     backup_count: int = 5,

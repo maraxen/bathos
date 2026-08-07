@@ -24,7 +24,11 @@ def event_mock():
         yield mock
 
 
-def test_success_envelope_has_all_four_keys(tmp_path: Path, monkeypatch, event_mock):
+def test_success_envelope_has_all_four_keys(
+    tmp_path: Path,
+    monkeypatch,
+    event_mock,  # noqa: ARG001 - pytest fixture
+):
     """Verify success envelope contains all four mandatory keys.
 
     Given: A successful call to a tool wrapped by traced_tool
@@ -37,7 +41,9 @@ def test_success_envelope_has_all_four_keys(tmp_path: Path, monkeypatch, event_m
 
     # Create a simple async tool function that succeeds
     @traced_tool
-    async def mock_success_tool(catalog_dir: str = ""):
+    async def mock_success_tool(
+        catalog_dir: str = "",  # noqa: ARG001 - mock tool parameter
+    ):
         """A mock tool that returns success."""
         return {"data": {"runs": [], "count": 0}}
 
@@ -57,7 +63,11 @@ def test_success_envelope_has_all_four_keys(tmp_path: Path, monkeypatch, event_m
     assert result["resolution_hint"] is None, "resolution_hint should be None on success"
 
 
-def test_error_envelope_has_all_four_keys(tmp_path: Path, monkeypatch, event_mock):
+def test_error_envelope_has_all_four_keys(
+    tmp_path: Path,
+    monkeypatch,
+    event_mock,  # noqa: ARG001 - pytest fixture
+):
     """Verify error envelope contains all four mandatory keys with proper values.
 
     Given: A tool that raises CatalogError
@@ -71,7 +81,9 @@ def test_error_envelope_has_all_four_keys(tmp_path: Path, monkeypatch, event_moc
 
     # Create a tool function that raises CatalogError
     @traced_tool
-    async def mock_error_tool(catalog_dir: str = ""):
+    async def mock_error_tool(
+        catalog_dir: str = "",  # noqa: ARG001 - mock tool parameter
+    ):
         """A mock tool that raises CatalogError."""
         raise CatalogError("Mock catalog error for testing")
 
@@ -103,7 +115,9 @@ def test_error_envelope_has_all_four_keys(tmp_path: Path, monkeypatch, event_moc
 
 
 def test_self_reported_error_dict_is_not_clobbered_to_success(
-    tmp_path: Path, monkeypatch, event_mock
+    tmp_path: Path,
+    monkeypatch,
+    event_mock,  # noqa: ARG001 - pytest fixture
 ):
     """A tool that returns its own {"ok": False, "error": ...} dict (rather than
     raising) must not have that silently overwritten into a fake success.
@@ -119,7 +133,9 @@ def test_self_reported_error_dict_is_not_clobbered_to_success(
     monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
 
     @traced_tool
-    async def mock_self_reported_error_tool(catalog_dir: str = ""):
+    async def mock_self_reported_error_tool(
+        catalog_dir: str = "",  # noqa: ARG001 - mock tool parameter
+    ):
         """Mimics campaign_add_tool's except-block return shape."""
         return {"ok": False, "error": "Campaign not found: deadbeef"}
 
@@ -131,7 +147,11 @@ def test_self_reported_error_dict_is_not_clobbered_to_success(
     )
 
 
-def test_self_reported_bare_error_key_infers_ok_false(tmp_path: Path, monkeypatch, event_mock):
+def test_self_reported_bare_error_key_infers_ok_false(
+    tmp_path: Path,
+    monkeypatch,
+    event_mock,  # noqa: ARG001 - pytest fixture
+):
     """A tool that returns only {"error": "..."} (no explicit "ok" key) must still
     surface as ok=False, not the default ok=True."""
     catalog_dir = tmp_path / ".bth" / "catalog"
@@ -139,7 +159,9 @@ def test_self_reported_bare_error_key_infers_ok_false(tmp_path: Path, monkeypatc
     monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
 
     @traced_tool
-    async def mock_bare_error_tool(catalog_dir: str = ""):
+    async def mock_bare_error_tool(
+        catalog_dir: str = "",  # noqa: ARG001 - mock tool parameter
+    ):
         """Mimics run_tool's `if not script_path: return {"error": "..."}` pattern."""
         return {"error": "script_path parameter is required"}
 

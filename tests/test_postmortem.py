@@ -1,5 +1,6 @@
 import json
 import textwrap
+from contextlib import suppress
 from pathlib import Path
 
 import duckdb
@@ -11,12 +12,13 @@ from bathos.cli import app
 from bathos.compact import compact
 from bathos.schema import Run
 
-# We import the postmortem functions which we expect to be implemented in bathos.postmortem.
-# Since we are in the RED phase, this import or the tests will fail, which is correct.
-try:
-    from bathos.postmortem import Postmortem, parse_postmortem, validate_postmortem
-except ImportError:
-    # We define dummy place-holders if we want pytest to parse the file without immediate ImportError,
+with suppress(ImportError):
+    from bathos.postmortem import (  # noqa: F401 - import check for module existence
+        Postmortem,
+        parse_postmortem,
+        validate_postmortem,
+    )
+
     # or we can let it raise ImportError immediately. Raising ImportError immediately is a perfectly valid
     # way to fail, but to ensure pytest runs and discovers other potential failures or shows exactly
     # what fails, let's check: does the prompt say "verify that running pytest tests/test_postmortem.py fails"?

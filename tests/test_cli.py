@@ -559,7 +559,7 @@ def test_check_command_with_check_outputs(tmp_path: Path, monkeypatch):
     assert str(output_file) in result.output
 
 
-def test_export_dry_run_claude_user(monkeypatch):
+def test_export_dry_run_claude_user(monkeypatch):  # noqa: ARG001 - pytest fixture
     """bth export --tool claude --level user --dry-run prints target path without writing."""
     result = runner.invoke(app, ["export", "--tool", "claude", "--level", "user", "--dry-run"])
     assert result.exit_code == 0

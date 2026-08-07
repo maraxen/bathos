@@ -336,7 +336,11 @@ class TestContextvarCorrelation:
 class TestPerProcessFileNaming:
     """Each process must write to its own events.<hostname>.<pid>.jsonl file."""
 
-    def test_filename_contains_hostname_and_pid(self, tmp_path, monkeypatch):
+    def test_filename_contains_hostname_and_pid(
+        self,
+        tmp_path,
+        monkeypatch,  # noqa: ARG002 - pytest fixture
+    ):
         """File name pattern: events.<hostname>.<pid>.jsonl."""
         from bathos.telemetry import event, init_telemetry
 

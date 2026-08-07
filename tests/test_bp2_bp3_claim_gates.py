@@ -207,7 +207,10 @@ label = "Null"
         return claim_path
 
     def test_negative_outcome_without_claim_registered_is_unaffected(
-        self, tmp_catalog, git_workspace, clean_db
+        self,
+        tmp_catalog,  # noqa: ARG002 - pytest fixture requested for side effects
+        git_workspace,
+        clean_db,  # noqa: ARG002 - pytest fixture requested for side effects
     ):
         """No claim registered -> BP-3 opt-in skip, negative outcome needs no --negative-check."""
         root, _sha = git_workspace
@@ -223,7 +226,10 @@ label = "Null"
         assert rows[0][0] == "failed"
 
     def test_negative_outcome_with_claim_and_blank_check_raises(
-        self, tmp_catalog, git_workspace, clean_db
+        self,
+        tmp_catalog,  # noqa: ARG002 - pytest fixture requested for side effects
+        git_workspace,
+        clean_db,  # noqa: ARG002 - pytest fixture requested for side effects
     ):
         root, _sha = git_workspace
         db = clean_db
@@ -237,7 +243,10 @@ label = "Null"
             conclude_campaign(db, campaign.id, "failed", "dead end", workspace_root=root)
 
     def test_negative_outcome_with_claim_and_backing_succeeds(
-        self, tmp_catalog, git_workspace, clean_db
+        self,
+        tmp_catalog,  # noqa: ARG002 - pytest fixture requested for side effects
+        git_workspace,
+        clean_db,  # noqa: ARG002 - pytest fixture requested for side effects
     ):
         root, _sha = git_workspace
         db = clean_db
@@ -261,7 +270,10 @@ label = "Null"
         assert campaign_row.negative_check == "bootstrap CI excludes zero; see run abc123"
 
     def test_positive_outcome_with_claim_needs_no_negative_check(
-        self, tmp_catalog, git_workspace, clean_db
+        self,
+        tmp_catalog,  # noqa: ARG002 - pytest fixture requested for side effects
+        git_workspace,
+        clean_db,  # noqa: ARG002 - pytest fixture requested for side effects
     ):
         root, _sha = git_workspace
         db = clean_db
@@ -279,7 +291,12 @@ label = "Null"
         ).fetchall()
         assert rows[0][0] == "pass"
 
-    def test_custom_negative_outcome_pattern_override(self, tmp_catalog, git_workspace, clean_db):
+    def test_custom_negative_outcome_pattern_override(
+        self,
+        tmp_catalog,  # noqa: ARG002 - pytest fixture requested for side effects
+        git_workspace,
+        clean_db,  # noqa: ARG002 - pytest fixture requested for side effects
+    ):
         import re
 
         root, _sha = git_workspace

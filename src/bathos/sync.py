@@ -115,7 +115,6 @@ def sync_catalog(
     )
 
     start_time = time.time()
-    t0_ns = time.monotonic_ns()
     last_progress_ts = time.monotonic()
     last_progress_ts_lock = threading.Lock()
     last_progress_ts_ref = [last_progress_ts]  # mutable container for thread sharing
@@ -236,10 +235,7 @@ def sync_catalog(
     duration_ms = duration_s * 1000
 
     # Parse transferred count from stdout if we didn't get it from progress2
-    if total_bytes == 0:
-        transferred = _parse_transferred_count(stdout_output)
-    else:
-        transferred = total_bytes
+    transferred = _parse_transferred_count(stdout_output) if total_bytes == 0 else total_bytes
 
     # Emit telemetry: sync.rsync_end
     event(
