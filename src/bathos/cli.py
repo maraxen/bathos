@@ -217,10 +217,10 @@ def lineage(
         "-f",
         help="Output format: text, prov, or dot",
     ),
-    depth: int = typer.Option(  # noqa: ARG001 - Typer CLI command parameter
-        10,
+    depth: int = typer.Option(
+        50,
         "--depth",
-        help="Maximum lineage depth to traverse",
+        help="Maximum number of ancestor hops to traverse",
     ),
 ):
     """Show ancestor chain of a run following parent_run_id links."""
@@ -231,7 +231,10 @@ def lineage(
     from bathos.query import lineage as get_lineage
 
     try:
-        ancestors = get_lineage(run_id, _catalog_dir())
+        ancestors = get_lineage(run_id, _catalog_dir(), depth=depth)
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
     except CatalogError as e:
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(1)
@@ -1901,9 +1904,6 @@ def classify(
         "--min-confidence",
         help="Only include classifications at or above this level (high|medium|low)",
     ),
-    no_content: bool = typer.Option(  # noqa: ARG001 - Typer CLI option flag
-        False, "--no-content", help="Skip content-augmented classification"
-    ),
     no_scaffold: bool = typer.Option(
         False, "--no-scaffold", help="Do not scaffold sidecar stubs when applying"
     ),
@@ -2125,7 +2125,7 @@ def lint(
         issues.extend(check_run_concentration(catalog_dir, threshold=concentration_threshold))
         issues.extend(check_ephemeral_output_paths(catalog_dir))
         issues.extend(check_canonical_stage_names(catalog_dir))
-        issues.extend(check_baseline_ref_exists(project_root.resolve(), catalog_dir, db_path))
+        issues.extend(check_baseline_ref_exists(project_root.resolve(), db_path))
 
     if not issues:
         typer.echo("No issues found.")
@@ -2556,7 +2556,6 @@ def postmortem_show(
 @postmortem_app.command()
 def validate(
     file: Path = typer.Argument(..., help="Path to .bth.postmortem.toml file to validate"),
-    strict: bool = typer.Option(False, "--strict", help="Treat missing run ID as error"),
     strict_files: bool = typer.Option(
         False, "--strict-files", help="Treat missing asset files as error"
     ),
@@ -2578,7 +2577,7 @@ def validate(
     workspace_root = resolve_workspace().fs_root
 
     result = validate_postmortem(
-        pm, workspace_root=workspace_root, strict=strict, strict_files=strict_files
+        pm, workspace_root=workspace_root, strict_files=strict_files
     )
     if result.ok:
         typer.echo(f"✓ {file.name} is valid")

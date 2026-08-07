@@ -615,7 +615,7 @@ target = "50 ns/day"
 ns_per_day = "float"
 """)
 
-    issues = check_baseline_ref_exists(project_root, catalog_dir, catalog_dir / "bathos.db")
+    issues = check_baseline_ref_exists(project_root, catalog_dir / "bathos.db")
 
     # Should find the baseline and emit INFO
     assert len(issues) > 0
@@ -652,7 +652,7 @@ target = "50 ns/day"
 ns_per_day = "float"
 """)
 
-    issues = check_baseline_ref_exists(project_root, catalog_dir, catalog_dir / "bathos.db")
+    issues = check_baseline_ref_exists(project_root, catalog_dir / "bathos.db")
 
     # Should emit a WARNING about missing baseline
     warning_issues = [i for i in issues if i.severity == IssueSeverity.WARNING]
@@ -687,7 +687,7 @@ target = "50 ns/day"
 ns_per_day = "float"
 """)
 
-    issues = check_baseline_ref_exists(project_root, catalog_dir, catalog_dir / "bathos.db")
+    issues = check_baseline_ref_exists(project_root, catalog_dir / "bathos.db")
 
     # Should return empty issues (empty baseline_ref is skipped)
     assert issues == []
@@ -712,7 +712,7 @@ regression_threshold = 0.05
 ns_per_day = "float"
 """)
 
-    issues = check_baseline_ref_exists(project_root, catalog_dir, catalog_dir / "bathos.db")
+    issues = check_baseline_ref_exists(project_root, catalog_dir / "bathos.db")
 
     # Should skip silently (no DB exists)
     assert issues == []
@@ -766,7 +766,7 @@ target = "50 ns/day"
 ns_per_day = "float"
 """)
 
-    issues = check_baseline_ref_exists(project_root, catalog_dir, catalog_dir / "bathos.db")
+    issues = check_baseline_ref_exists(project_root, catalog_dir / "bathos.db")
 
     # Should find the baseline by prefix match and emit INFO
     assert len(issues) == 1

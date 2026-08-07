@@ -417,3 +417,91 @@ def test_validate_popper_on_benchmark_sidecar(tmp_path):  # noqa: ARG001 - pytes
     )
     errors = validate_popper_block(sidecar)
     assert any(e.field == "popper" for e in errors)
+
+
+# ---------------------------------------------------------------------------
+# Telemetry parity with the sibling block validators
+#
+# validate_reproduction_block / _controls_block / _differential_block all take
+# sidecar_path and emit sidecar.validate_error on failure. validate_popper_block
+# took the same argument and emitted nothing, so popper failures were the only
+# sidecar validation errors with no telemetry trail.
+# ---------------------------------------------------------------------------
+
+
+def _capture_events(monkeypatch):
+    captured: list[tuple[str, dict]] = []
+
+    def _fake_event(name: str, **fields):
+        captured.append((name, fields))
+
+    monkeypatch.setattr("bathos.validate.event", _fake_event)
+    return captured
+
+
+_BAD_POPPER = """
+    [experiment]
+    hypothesis = "h"
+    [outcomes.pass]
+    condition = "x > 0"
+    decision = "ship"
+    [result_schema]
+    x = "float"
+    [popper]
+    null_pass_rate = 1.5
+    alt_pass_rate = 0.75
+    stopping_threshold = 20.0
+"""
+
+
+def test_validate_popper_emits_telemetry_with_path(tmp_path, monkeypatch):
+    captured = _capture_events(monkeypatch)
+    path = _write_toml(tmp_path, _BAD_POPPER)
+
+    errors = validate_popper_block(parse_sidecar(path), path)
+
+    assert any(e.field == "popper.null_pass_rate" for e in errors)
+    assert captured, "expected a sidecar.validate_error event"
+    names = {name for name, _ in captured}
+    assert names == {"sidecar.validate_error"}
+    assert all(fields["path"] == str(path) for _, fields in captured)
+    assert any(fields["field"] == "popper.null_pass_rate" for _, fields in captured)
+
+
+def test_validate_popper_emits_nothing_without_path(tmp_path, monkeypatch):
+    """sidecar_path is optional; no path means no event, as in the siblings."""
+    captured = _capture_events(monkeypatch)
+    path = _write_toml(tmp_path, _BAD_POPPER)
+
+    errors = validate_popper_block(parse_sidecar(path))
+
+    assert errors, "sidecar should still be invalid"
+    assert captured == []
+
+
+def test_validate_popper_advisory_warning_emits_no_error_event(tmp_path, monkeypatch):
+    """A WARNING-prefixed advisory is not an error and must not be reported as one."""
+    captured = _capture_events(monkeypatch)
+    path = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "h"
+        [outcomes.pass]
+        condition = "x > 0"
+        decision = "ship"
+        [result_schema]
+        x = "float"
+        [popper]
+        null_pass_rate = 0.3
+        alt_pass_rate = 0.75
+        stopping_threshold = 5.0
+    """,
+    )
+
+    errors = validate_popper_block(parse_sidecar(path), path)
+
+    # The advisory is returned...
+    assert any(e.message.startswith("WARNING:") for e in errors)
+    # ...but deliberately produces no sidecar.validate_error event.
+    assert captured == []

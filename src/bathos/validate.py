@@ -38,12 +38,17 @@ class ValidationResult:
 
 def validate_popper_block(
     sidecar: Sidecar,
-    sidecar_path: Path | None = None,  # noqa: ARG001 - kept for validator signature compatibility
+    sidecar_path: Path | None = None,
 ) -> list[ValidationError]:
     """Validate [popper] block fields per the spec (Section 2.3 of #792 spec).
 
     Returns a list of ValidationError (empty if valid).
     WARNING-level entries use message prefixed with "WARNING:".
+
+    Emits a ``sidecar.validate_error`` event per error when ``sidecar_path`` is
+    given, matching validate_reproduction_block / _controls_block /
+    _differential_block. WARNING-level entries emit nothing — they are advisory,
+    and labelling them ``validate_error`` would misreport them.
     """
     errors: list[ValidationError] = []
 
@@ -58,6 +63,13 @@ def validate_popper_block(
                 "[popper] block is only valid in [experiment] sidecars",
             )
         )
+        if sidecar_path:
+            event(
+                "sidecar.validate_error",
+                path=str(sidecar_path),
+                field="popper",
+                reason="[popper] block is only valid in [experiment] sidecars",
+            )
         return errors  # No point validating further
 
     null = sidecar.popper_null_pass_rate
@@ -72,6 +84,13 @@ def validate_popper_block(
                 f"null_pass_rate must be in (0, 1), got {null!r}",
             )
         )
+        if sidecar_path:
+            event(
+                "sidecar.validate_error",
+                path=str(sidecar_path),
+                field="popper.null_pass_rate",
+                reason=f"null_pass_rate out of range: {null!r}",
+            )
 
     # alt_pass_rate range
     if alt is None or not (0 < alt < 1):
@@ -81,6 +100,13 @@ def validate_popper_block(
                 f"alt_pass_rate must be in (0, 1), got {alt!r}",
             )
         )
+        if sidecar_path:
+            event(
+                "sidecar.validate_error",
+                path=str(sidecar_path),
+                field="popper.alt_pass_rate",
+                reason=f"alt_pass_rate out of range: {alt!r}",
+            )
 
     # null != alt (no test power if equal)
     if null is not None and alt is not None and null == alt:
@@ -90,6 +116,13 @@ def validate_popper_block(
                 "null_pass_rate and alt_pass_rate are identical; no test power",
             )
         )
+        if sidecar_path:
+            event(
+                "sidecar.validate_error",
+                path=str(sidecar_path),
+                field="popper",
+                reason="null_pass_rate and alt_pass_rate are identical; no test power",
+            )
 
     # stopping_threshold >= 1.0
     if threshold is None or threshold < 1.0:
@@ -99,7 +132,15 @@ def validate_popper_block(
                 f"stopping_threshold must be >= 1.0, got {threshold!r}",
             )
         )
+        if sidecar_path:
+            event(
+                "sidecar.validate_error",
+                path=str(sidecar_path),
+                field="popper.stopping_threshold",
+                reason=f"stopping_threshold below 1.0: {threshold!r}",
+            )
     elif threshold < 10.0:
+        # Advisory, not an error — deliberately emits no sidecar.validate_error event.
         errors.append(
             ValidationError(
                 "popper.stopping_threshold",
@@ -117,6 +158,13 @@ def validate_popper_block(
                     f"Unknown outcome label {key!r} in [popper.weights] — not declared in [outcomes]",
                 )
             )
+            if sidecar_path:
+                event(
+                    "sidecar.validate_error",
+                    path=str(sidecar_path),
+                    field=f"popper.weights.{key}",
+                    reason=f"Unknown outcome label {key!r} not declared in [outcomes]",
+                )
         if val <= 0:
             errors.append(
                 ValidationError(
@@ -124,6 +172,13 @@ def validate_popper_block(
                     f"Weight for {key!r} must be > 0, got {val!r}",
                 )
             )
+            if sidecar_path:
+                event(
+                    "sidecar.validate_error",
+                    path=str(sidecar_path),
+                    field=f"popper.weights.{key}",
+                    reason=f"Weight for {key!r} must be > 0, got {val!r}",
+                )
         if key == "error" and val != 1.0:
             errors.append(
                 ValidationError(
@@ -131,6 +186,13 @@ def validate_popper_block(
                     f"Weight for 'error' must be exactly 1.0 (non-overridable), got {val!r}",
                 )
             )
+            if sidecar_path:
+                event(
+                    "sidecar.validate_error",
+                    path=str(sidecar_path),
+                    field="popper.weights.error",
+                    reason=f"Weight for 'error' must be exactly 1.0, got {val!r}",
+                )
 
     return errors
 
