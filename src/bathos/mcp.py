@@ -938,7 +938,6 @@ def archive_tool(
     Args:
         catalog_dir: Catalog directory (empty = use default)
         project: Project slug to archive
-        keep_cool: Keep cool-tier Parquet after archiving
 
     Returns:
         Dict with result summary
@@ -1684,13 +1683,19 @@ async def mcp_compact_tool(
 async def mcp_archive_tool(
     catalog_dir: str = "",
     project: str = "",
-    keep_cool: bool = False,
     token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
     """Archive warm-tier DuckDB to cold-tier Parquet.
 
     Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
-    return archive_tool(catalog_dir=catalog_dir, project=project, keep_cool=keep_cool)
+    # `keep_cool` used to be declared here and forwarded to archive_tool(), which
+    # has no such parameter — so every authenticated call raised TypeError, which
+    # @traced_tool shaped into an ok=False envelope rather than letting it crash.
+    # The tool was 100% broken and reported it as an ordinary error. Nothing
+    # downstream can honour the flag either: bathos.archive.archive() only exports
+    # warm→cold and never removes cool-tier fragments, so there is no deletion for
+    # a "keep" switch to suppress. Reinstating it means implementing that first.
+    return archive_tool(catalog_dir=catalog_dir, project=project)
 
 
 @cisternal.tool(registry="bathos", name="check")
