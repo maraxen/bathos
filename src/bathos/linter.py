@@ -1222,7 +1222,6 @@ def check_canonical_stage_names(catalog_dir: Path) -> list[LintIssue]:
 
 def check_baseline_ref_exists(
     project_root: Path,
-    catalog_dir: Path,  # noqa: ARG001 - kept for public signature compatibility
     db_path: Path,
 ) -> list[LintIssue]:
     """Tier-2: Validate that baseline_ref values exist in the warm catalog.
@@ -1238,7 +1237,6 @@ def check_baseline_ref_exists(
 
     Args:
         project_root: Path to project root.
-        catalog_dir: Path to catalog directory (for scanning).
         db_path: Path to bathos.db warm catalog.
 
     Returns:
@@ -1313,14 +1311,25 @@ def check_baseline_ref_exists(
 
 
 def check_single_cell_gate(
-    claim_discriminability: list[dict],  # noqa: ARG001 - kept for gate signature compatibility
+    # Deliberately unused. AC-06 is specified as a campaign-wide "did you vary
+    # anything" smell test over the runs' own grid parameter values, deliberately
+    # NOT scoped to the claim's discriminability matrix — that is AC-04/AC-05's
+    # job, and those two do consume this data (see claim.py). The parameter is
+    # accepted only for signature symmetry across the three gates.
+    claim_discriminability: list[dict],  # noqa: ARG001
     campaign_id: str,
     db: duckdb.DuckDBPyConnection,
 ) -> list[LintIssue]:
     """AC-06: warn if all confirmatory runs in a campaign share identical metadata values.
 
+    Reads ``runs.metadata`` via ``campaign_runs``; it does not read
+    ``claim_discriminates``. Not currently wired into any command — ``bth lint
+    --campaign`` is post-MVP, so this is exercised by tests only.
+
     Args:
-        claim_discriminability: List of discriminability entries from claim
+        claim_discriminability: Discriminability entries from the claim. Accepted
+            for signature symmetry with the AC-04/AC-05 gates and intentionally
+            unused; see the comment on the parameter.
         campaign_id: Campaign ID to check
         db: DuckDB connection
 

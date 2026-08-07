@@ -452,20 +452,28 @@ def run_sql(sql: str, catalog_dir: Path | None = None) -> list[tuple]:
     return result
 
 
-def lineage(run_id: str, catalog_dir: Path) -> list[Run]:
+def lineage(run_id: str, catalog_dir: Path, depth: int = 50) -> list[Run]:
     """Return ancestor chain of run_id following parent_run_id links (recursive CTE).
 
     Args:
         run_id: The run ID to trace ancestry for.
         catalog_dir: Path to catalog directory.
+        depth: Maximum number of ancestor hops to traverse. The starting run is
+            depth 0, so depth=0 returns only that run and depth=50 (the default)
+            reproduces the historical hardcoded cycle guard. Also bounds runaway
+            recursion on a cyclic parent_run_id chain.
 
     Returns:
         List of Run objects in chronological order (oldest ancestor first).
         Returns empty list if run not found or catalog doesn't exist.
 
     Raises:
+        ValueError: If depth is negative.
         CatalogError: If the query fails due to a schema or database error.
     """
+    if depth < 0:
+        raise ValueError(f"depth must be >= 0, got {depth}")
+
     db_path = catalog_dir / "bathos.db"
     if not db_path.exists():
         return []
@@ -475,7 +483,8 @@ def lineage(run_id: str, catalog_dir: Path) -> list[Run]:
     try:
         # Use recursive CTE to find all ancestors
         # COALESCE handles both NULL and empty string for parent_run_id
-        # depth < 50 prevents runaway cycles
+        # a.depth < ? bounds the walk: it is both the caller's requested limit and
+        # the cycle guard. Bound as a parameter, never interpolated.
         rows = db.execute(
             """
             WITH RECURSIVE ancestors AS (
@@ -483,11 +492,11 @@ def lineage(run_id: str, catalog_dir: Path) -> list[Run]:
                 UNION ALL
                 SELECT r.*, a.depth + 1 FROM runs r
                 INNER JOIN ancestors a ON r.id = a.parent_run_id
-                WHERE COALESCE(a.parent_run_id, '') != '' AND a.depth < 50
+                WHERE COALESCE(a.parent_run_id, '') != '' AND a.depth < ?
             )
             SELECT * EXCLUDE (depth) FROM ancestors ORDER BY timestamp
         """,
-            [run_id],
+            [run_id, depth],
         ).fetchall()
         return [_row_to_run(row) for row in rows if _row_to_run(row) is not None]
     except Exception as e:

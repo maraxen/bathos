@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import warnings
 from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any
@@ -38,14 +39,35 @@ def init_server_telemetry(
 
 
 def init_via_cisternal(
-    level: str | int | None = None,  # noqa: ARG001 - kept for cisternal bridge signature compatibility
+    # Accepted for signature symmetry with init_server_telemetry, but NOT forwarded:
+    # cisternal.init() takes (log_dir, max_bytes, backup_count, exporters,
+    # heartbeat_interval) and cisternal has no level, severity or filtering
+    # mechanism to forward it to. Warned about below rather than dropped silently.
+    # Upstream gap tracked as debt #1202; forward it here once cisternal supports it.
+    level: str | int | None = None,
     log_dir: str | Path | None = None,
     max_bytes: int = 10_485_760,
     backup_count: int = 5,
 ) -> bool:
-    """Initialize cisternal pipeline when cutover flag is set."""
+    """Initialize cisternal pipeline when cutover flag is set.
+
+    Note: ``level`` has no effect on this path. On the legacy path it is a real
+    stdlib severity filter (``init_telemetry`` calls ``root_logger.setLevel``),
+    but cisternal exposes no equivalent, so an explicitly requested level — via
+    this argument or ``BTH_LOG_LEVEL`` — is dropped and warned about.
+    """
     if not cisternal_cutover_enabled():
         return False
+
+    if level is not None or os.environ.get("BTH_LOG_LEVEL"):
+        warnings.warn(
+            "Telemetry log level is ignored under the cisternal cutover "
+            "(CISTERNAL_TELEMETRY): cisternal provides no severity filtering, so "
+            "every event is emitted regardless of level or BTH_LOG_LEVEL. Unset "
+            "CISTERNAL_TELEMETRY to restore level filtering on the legacy pipeline.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
     import cisternal
 

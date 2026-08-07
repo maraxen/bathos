@@ -1392,14 +1392,15 @@ async def mcp_cite_run_tool(
 async def mcp_lineage_prov_tool(
     run_id: str,
     catalog_dir: str = "",
-    depth: int = 10,  # noqa: ARG001 - MCP tool parameter required for signature and schema generation
+    depth: int = 50,
 ) -> dict:
     """Return W3C PROV-JSON lineage for a run.
 
     Args:
         run_id: The run ID to trace ancestry for.
         catalog_dir: Path to catalog directory (uses default if empty).
-        depth: Maximum lineage depth to traverse.
+        depth: Maximum number of ancestor hops to traverse. The starting run is
+            depth 0; the default of 50 matches the historical cycle guard.
 
     Returns:
         W3C PROV-JSON formatted lineage (dict).
@@ -1409,7 +1410,7 @@ async def mcp_lineage_prov_tool(
     from bathos.query import lineage as get_lineage
 
     cat_dir = _get_catalog_dir(catalog_dir)
-    ancestors = get_lineage(run_id, cat_dir)
+    ancestors = get_lineage(run_id, cat_dir, depth=depth)
 
     if not ancestors:
         raise CatalogError(f"Run not found or no lineage: {run_id}")
@@ -2644,7 +2645,7 @@ def lint_tool(project_root: str = "") -> dict:
         issues.extend(check_unfired_branches(catalog_dir))
         issues.extend(check_ephemeral_output_paths(catalog_dir))
         issues.extend(check_canonical_stage_names(catalog_dir))
-        issues.extend(check_baseline_ref_exists(root.resolve(), catalog_dir, db_path))
+        issues.extend(check_baseline_ref_exists(root.resolve(), db_path))
 
     errors = [i for i in issues if i.severity == IssueSeverity.ERROR]
     warnings = [i for i in issues if i.severity == IssueSeverity.WARNING]
