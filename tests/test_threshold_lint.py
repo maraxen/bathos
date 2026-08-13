@@ -54,6 +54,32 @@ temp_std = "float"
 # TC-2: Numeric literal in condition WITH source → no warning
 # ---------------------------------------------------------------------------
 
+def test_check_threshold_basis_ignores_nested_git_checkout(tmp_path):
+    """A nested git boundary (vendored submodule, or an agent-managed worktree
+    under .claude/worktrees/) must not be scanned -- its sidecars belong to a
+    different project/checkout, and re-scanning them produces duplicate findings
+    once per nested copy (observed in practice with deeply-nested stale worktrees
+    of a submodule, each carrying its own copy of the same sidecar files)."""
+    from bathos.linter import check_threshold_basis
+
+    unjustified = """
+[experiment]
+hypothesis = "h"
+[outcomes.pass]
+condition = "x < 5.0"
+decision = "proceed"
+is_residual = false
+[result_schema]
+x = "float"
+"""
+    nested = tmp_path / "external" / "vendored_dep"
+    nested.mkdir(parents=True)
+    (nested / ".git").write_text("gitdir: /elsewhere/.git/modules/vendored_dep\n")
+    (nested / "run_thing.bth.toml").write_text(unjustified)
+
+    issues = check_threshold_basis(tmp_path)
+    assert issues == []
+
 
 def test_check_threshold_basis_source_suppresses_warning(tmp_path):
     from bathos.linter import check_threshold_basis
