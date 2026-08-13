@@ -94,6 +94,21 @@ def test_missing_scripts_dir_returns_empty(tmp_path):
     assert issues == []
 
 
+def test_lint_project_ignores_run_lock_file(tmp_path):
+    """Run-lock files (`_write_manifest` in runner.py, name pattern
+    "<script_stem>.bth.<run_id>.bth.lock.toml") must not be flagged as a
+    mis-extensioned script -- they're a bathos-generated artifact, not user code."""
+    from bathos.linter import lint_project
+
+    s = _make_script(tmp_path, "experiments", "run_nvt.py")
+    _make_sidecar(s)
+    lock_file = s.parent / "run_nvt.bth.deadbeef-0000-0000-0000-000000000000.bth.lock.toml"
+    lock_file.write_text("[manifest]\nrun_id = 'deadbeef'\n")
+
+    issues = lint_project(tmp_path)
+    assert not any("lock.toml" in str(i.path) for i in issues)
+
+
 def test_cli_lint_exits_0_clean(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     # Isolate from user's real catalog to prevent warm-tier warnings leaking in
