@@ -8,6 +8,7 @@ from pathlib import Path
 from bathos.git import capture_git_state
 from bathos.schema import Run
 from bathos.telemetry import event
+from bathos.walk import iter_project_files
 
 
 @dataclass
@@ -303,7 +304,13 @@ def find_postmortem(
     if not root.exists():
         return None
 
-    for pm_file in root.rglob("*.bth.postmortem.toml"):
+    # Boundary-aware walk (backlog #4233): a bare rglob crossed into vendored
+    # submodules and nested .claude/worktrees/ checkouts, so a stale copy could be
+    # returned as this workspace's answer for a run/campaign id. This is the read
+    # path behind `bth postmortem show` and the postmortem_get MCP tool.
+    for pm_file in iter_project_files(
+        root, ".bth.postmortem.toml", event_name="postmortem.boundary_pruned"
+    ):
         try:
             pm = parse_postmortem(pm_file)
         except Exception:

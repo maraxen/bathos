@@ -16,6 +16,7 @@ import duckdb
 from bathos.catalog import read_runs
 from bathos.schema import CURRENT_SCHEMA_VERSION, Run
 from bathos.telemetry import event
+from bathos.walk import iter_project_files
 
 # DE-RISK SPIKE (gate 2b-A, #3485, branch figure-eda-2bA-durability-spike — NOT on
 # main): anchor cool-tier schema, imported lazily inside _ingest_anchor_fragments to
@@ -659,15 +660,24 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
     workspace_root = resolve_workspace().fs_root
 
     if workspace_root.exists():
-        for pm_file in workspace_root.rglob("*.bth.postmortem.toml"):
+        # Boundary-aware walk (backlog #4233): a bare rglob crossed into vendored
+        # submodules and nested .claude/worktrees/ checkouts. Because this map is
+        # keyed by run_id and feeds verdict_override into the run's recorded
+        # outcome below, a stale copy did not merely duplicate a warning -- it
+        # could silently rewrite a result.
+        for pm_file in iter_project_files(
+            workspace_root, ".bth.postmortem.toml", event_name="compact.boundary_pruned"
+        ):
             try:
                 pm = parse_postmortem(pm_file)
-                if pm.status != "draft":
-                    rel_path = str(pm_file.relative_to(workspace_root))
-                    # Campaign-scoped postmortems have run_id == "" and would all collide
-                # on that key, silently overwriting one another.
-                if pm.run_id:
-                    postmortem_map[pm.run_id] = (pm, rel_path)
+                # Drafts are unfinished by definition and must not reach the map:
+                # verdict_override from a half-written postmortem would overwrite the
+                # run's outcome. Campaign-scoped postmortems have run_id == "" and
+                # would all collide on that key, silently overwriting one another.
+                if pm.status == "draft" or not pm.run_id:
+                    continue
+                rel_path = str(pm_file.relative_to(workspace_root))
+                postmortem_map[pm.run_id] = (pm, rel_path)
             except Exception as e:
                 logger.warning(f"Skipping postmortem parse: {pm_file}: {e}")
 
