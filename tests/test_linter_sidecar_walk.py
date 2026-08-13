@@ -124,11 +124,16 @@ def test_results_are_sorted(tmp_path):
 
 
 def test_boundary_pruning_emits_telemetry(tmp_path, monkeypatch):
-    """Scope reduction must be observable -- a dropped sidecar otherwise looks like a clean project."""
-    import bathos.linter as linter_mod
+    """Scope reduction must be observable -- a dropped sidecar otherwise looks like a clean project.
+
+    Patched on `bathos.walk`, which owns the walk since backlog #4233 made it
+    shared with compact.py and postmortem.py. Lint keeps its own event *name* so
+    its scope reductions stay distinguishable from theirs in telemetry.
+    """
+    import bathos.walk as walk_mod
 
     events: list[tuple[str, dict]] = []
-    monkeypatch.setattr(linter_mod, "event", lambda name, **fields: events.append((name, fields)))
+    monkeypatch.setattr(walk_mod, "event", lambda name, **fields: events.append((name, fields)))
 
     _sidecar(tmp_path / "scripts", "mine.bth.toml")
     nested = tmp_path / "external" / "dep"
@@ -142,10 +147,10 @@ def test_boundary_pruning_emits_telemetry(tmp_path, monkeypatch):
 
 
 def test_no_telemetry_when_nothing_pruned(tmp_path, monkeypatch):
-    import bathos.linter as linter_mod
+    import bathos.walk as walk_mod
 
     events: list[tuple[str, dict]] = []
-    monkeypatch.setattr(linter_mod, "event", lambda name, **fields: events.append((name, fields)))
+    monkeypatch.setattr(walk_mod, "event", lambda name, **fields: events.append((name, fields)))
 
     _sidecar(tmp_path / "scripts", "mine.bth.toml")
     iter_project_sidecars(tmp_path)

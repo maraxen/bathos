@@ -10,7 +10,7 @@ from pathlib import Path
 import duckdb
 
 from bathos.sidecar import find_sidecar
-from bathos.telemetry import event
+from bathos.walk import iter_project_files
 
 
 class IssueSeverity(str, Enum):  # noqa: UP042 - inheriting str preserves str(Enum) returning Enum member value for serialization
@@ -45,53 +45,16 @@ _OR_SPLIT_RE = re.compile(r"\bOR\b", re.IGNORECASE)
 _SIDECAR_SUFFIX = ".bth.toml"
 _LOCK_FILE_SUFFIX = ".bth.lock.toml"
 
-# Directory names that never hold a project's own sidecars/scripts, so a lint
-# walk should neither descend into them nor warn about their contents.
-_WALK_PRUNE_DIRS = {".venv", "venv", "node_modules", "__pycache__", ".git", ".mypy_cache", ".ruff_cache", ".pytest_cache"}
-
-
 def iter_project_sidecars(root: Path) -> list[Path]:
-    """Find every "*.bth.toml" sidecar at or below `root`, without crossing into a
-    nested git boundary (submodule or worktree checkout) or common dependency/cache
-    directories. Results are returned in sorted order.
+    """Find every "*.bth.toml" sidecar at or below `root`, in sorted order.
 
-    A naive `root.rglob("*.bth.toml")` has no concept of repo boundaries:
-    in a project with vendored submodules (each an independent git checkout) and
-    agent-managed worktrees under `.claude/worktrees/` (which may themselves
-    contain nested, possibly-stale worktrees of those same submodules), it
-    re-scans the same physical sidecar files once per nested checkout -- the
-    same handful of lint findings gets reported dozens of times over. A
-    directory is a nested git boundary iff it has its own ".git" entry (a
-    directory for a normal repo/submodule checkout, or a file for a worktree) --
-    that's the same test git itself uses, and it correctly excludes both
-    submodules and worktrees without needing to special-case either.
-
-    `root` itself is never treated as a boundary: the caller has explicitly asked
-    for this subtree, so a lint run rooted inside a worktree scans that worktree
-    rather than immediately halting on its own ".git". Callers wanting a narrower
-    scope should pass the narrower directory as `root` instead of filtering the
-    results afterwards -- that avoids walking a tree only to discard most of it.
-
-    Pruning is deliberately scope-*reducing*, so it emits a `lint.boundary_pruned`
-    telemetry event when it fires. Silently narrowing what gets linted is the more
-    dangerous direction of error for a pre-registration tool: a missing finding
-    looks exactly like a clean project.
-
-    Note: symlinked directories are not followed (`Path.walk()` default), so a
-    sidecar reachable only through a symlinked directory is not returned.
+    Thin wrapper over `bathos.walk.iter_project_files`, which owns the
+    boundary-pruning logic and documents why a bare rglob is wrong here. The
+    `lint.boundary_pruned` event name is preserved rather than taking the shared
+    default, so lint's scope reductions stay distinguishable in telemetry from
+    compaction's and postmortem lookup's.
     """
-    sidecars: list[Path] = []
-    pruned = 0
-    for dirpath, dirnames, filenames in root.walk():
-        if dirpath != root and (dirpath / ".git").exists():
-            pruned += 1
-            dirnames.clear()
-            continue
-        dirnames[:] = [d for d in dirnames if d not in _WALK_PRUNE_DIRS]
-        sidecars.extend(dirpath / f for f in filenames if f.endswith(_SIDECAR_SUFFIX))
-    if pruned:
-        event("lint.boundary_pruned", root=str(root), pruned_boundaries=pruned)
-    return sorted(sidecars)
+    return iter_project_files(root, _SIDECAR_SUFFIX, event_name="lint.boundary_pruned")
 
 
 _DIR_RULES: dict[str, dict] = {
