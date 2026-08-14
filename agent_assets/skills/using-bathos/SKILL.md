@@ -1,12 +1,14 @@
 ---
 name: using-bathos
-description: Experiment tracking with bathos — run tracking, sidecar pre-registration, cluster submission, catalog queries
-triggers: [bathos, bth, experiment, run, sidecar, cluster, submit, slurm, catalog, campaign]
+description: Experiment tracking with bathos — run tracking, sidecar pre-registration, controls discipline, catalog queries
+triggers: [bathos, bth, experiment, run, sidecar, catalog, init, lint, controls, stage_name]
 ---
 
 # using-bathos
 
 bathos (`bth`) is a standalone experiment tracking CLI for researchers running 10+ projects across local and SLURM cluster environments. It tracks script runs, pre-registers hypotheses via sidecars, syncs results to/from clusters, and provides rich query and reporting interfaces.
+
+This skill covers the daily-driver workflow: installation, run tracking, sidecar pre-registration, controls discipline, and catalog queries. For cluster submission and sync, campaigns and claim-tier rigor, literature-parity validation, or MCP tool integration, see the sibling skills listed under **Related** below.
 
 ## Core Concepts
 
@@ -16,11 +18,9 @@ bathos (`bth`) is a standalone experiment tracking CLI for researchers running 1
 
 **Outcome** — Evaluated at run-end by matching result JSON against DuckDB SQL conditions in the sidecar. Values: `pass`, `marginal`, `fail`, `error`. One outcome must be marked `is_residual = true`.
 
-**Campaign** — A named group of related runs. Accessible via `bth campaign` subcommands; queries via `campaign_id` field.
+**Campaign** — A named group of related runs. Accessible via `bth campaign` subcommands; queries via `campaign_id` field. See **bathos-campaigns** for campaign, claim-tier, postmortem, and lineage workflows.
 
 **Catalog** — Tiered Parquet + DuckDB store at `~/.bth/catalog/` (or `.bth.toml` `[project].catalog_dir`). Cool tier (per-run fragments) → compacted to warm tier (DuckDB database) → optionally archived to cold tier (partitioned Parquet).
-
-**Sync** — Push/pull catalog between local and cluster remote via myxcel. Uses `bth sync [remote] [--pull]` or cluster submission flags `--push-first`, `--then-pull`, `--then-sync`.
 
 ## Installation
 
@@ -125,7 +125,34 @@ n_steps = "int"
 - Exactly one outcome must have `is_residual = true`
 - `result_schema` declares all columns referenced by outcome conditions
 - No Python-style chained comparisons: use `AND` instead of `0.4 <= x < 0.7`
-- Script outputs JSON to path registered with `bth run --out`
+
+**How outcome evaluation actually finds your result JSON** — `bth run` reads it from, in order:
+1. `$BTH_RESULTS_PATH` — an env var `bth run` sets for the subprocess. **This is the
+   reliable mechanism; write your result dict here.**
+2. `<script_stem>.bth-results.json` adjacent to the script (fallback).
+3. A single registered `--out` JSON path (fallback) — only used when *exactly one*
+   `--out` path ends in `.json`; with zero or multiple candidates this is skipped
+   rather than guessing, and outcome stays `unknown`.
+
+Writing only to `--out` and never to `$BTH_RESULTS_PATH` is a common mistake that
+silently leaves `outcome='unknown'` for every run, even when the run completes
+successfully and the sidecar conditions would otherwise evaluate to `pass`. Prefer
+writing to both:
+
+```python
+import json
+import os
+
+result = {"temp_mean": 300.5, "temp_std": 2.3, "n_steps": 1000}
+
+with open(args.out, "w") as f:
+    json.dump(result, f)
+
+results_path = os.environ.get("BTH_RESULTS_PATH")
+if results_path:
+    with open(results_path, "w") as f:
+        json.dump(result, f)
+```
 
 ### Benchmark Sidecar Format
 
@@ -157,6 +184,204 @@ bth check --path scripts/experiments/train.bth.toml
 ```
 
 Checks TOML syntax, schema completeness, DuckDB condition validity, and residual outcome presence.
+
+## Controls Discipline (v0.11.0)
+
+### Stage Classification
+
+Every experiment sidecar can declare a `stage_name` field (default: `"exploration"`) to classify the maturity and intent of the run. Canonical values are advisory — non-canonical values are logged as a warning and coerced to `"exploration"` at parse time.
+
+**Canonical stages:**
+- `exploration` — hypothesis generation, parameter sensitivity, proof-of-concept (default)
+- `calibration` — tuning hyperparameters before validation; outcome refinement
+- `validation` — testing hypothesis with controlled parameters; reproducibility required
+- `ablation` — isolating contributions of components
+- `production` — final tested run ready for publication
+
+```toml
+[experiment]
+hypothesis = "..."
+stage_name = "validation"  # optional, defaults to "exploration"
+```
+
+Non-canonical values (e.g., `"pilot"`, `"final"`) trigger a warning and are coerced to `"exploration"`:
+```
+WARNING: Invalid stage_name 'pilot' in scripts/experiments/train.bth.toml; must be one of {'exploration', 'calibration', 'validation', 'ablation', 'production'}. Coercing to 'exploration'.
+```
+
+### Novel Flag
+
+Mark a run as novel (a new claim, not reproduction of prior work) with the `novel` flag:
+
+```toml
+[experiment]
+hypothesis = "..."
+novel = true
+```
+
+Setting `novel = true` satisfies Tier-1 lint requirements for validation/production experiments (see Lint Checks below).
+
+### Reproduction Block
+
+Declare reproduction metadata (optional `[reproduction]` block) to link your experiment to prior work or control runs:
+
+```toml
+[reproduction]
+reproduces_paper = "doi:10.1234/example"    # DOI or citation string (or "")
+reproduces_run = "run_abc123"               # Bathos run UUID (or "")
+tolerance_pct = 5.0                         # Allowed deviation in outcome metrics (optional)
+requires_pass_stem = "baseline_train"       # Script stem that must pass first (optional)
+```
+
+**Fields:**
+- `reproduces_paper` — DOI or full citation if this experiment reproduces published work. Leave empty if not reproducing a paper.
+- `reproduces_run` — Bathos run UUID if this experiment reproduces a prior bathos run. Leave empty if not reproducing a bathos run.
+- `tolerance_pct` — Allowed percentage deviation in outcome metrics when comparing to the reproduced reference. Optional; omit if not doing quantitative reproduction.
+- `requires_pass_stem` — Script stem (e.g., `"baseline_train"`) that must have at least one passing run before this script can be submitted. Enforced at `bth submit` time. Optional; omit if no prerequisite.
+
+### Controls Block
+
+Declare which outcome labels count as "control arm success" and "control arm failure" (optional `[controls]` block):
+
+```toml
+[controls]
+positive_outcome = ["pass"]
+negative_outcome = ["fail", "marginal"]
+```
+
+**Fields:**
+- `positive_outcome` — List of outcome labels that indicate the control arm succeeded (e.g., `["pass"]`).
+- `negative_outcome` — List of outcome labels that indicate the control arm failed (e.g., `["fail", "marginal"]`).
+
+The control block is declarative; it feeds Sprint Audit Signal 9 (see below).
+
+### bth submit Gate
+
+Two separate gate mechanisms protect experimental discipline (see **bathos-cluster** for `bth submit` itself):
+
+**1. Run-time gate** (`gate_check()` in `bth run`) — happens automatically at run start, validates sidecar presence, hash, and first-of-kind properties. Does NOT touch `stage_name`, `novel`, or `[reproduction]` fields.
+
+**2. Submit-time gate** (at `bth submit`) — keyed ONLY on `[reproduction].requires_pass_stem`. Operates in two modes:
+
+**Hard gate for validation/production:**
+- If `requires_pass_stem` is set AND `stage_name` is in `("validation", "production")`, **exit with error** if no passing run of that script stem exists.
+- Error code: `REPRODUCTION_PREREQUISITE_UNMET`
+
+```bash
+$ bth submit --preset gpu -- bth run uv run python scripts/validate.py
+REPRODUCTION_PREREQUISITE_UNMET: no passing run of 'baseline_train' found
+# Exit 1 — submission blocked
+```
+
+**Advisory warning for exploration/calibration:**
+- If `requires_pass_stem` is set AND `stage_name` is in `("exploration", "calibration")`, **warn but continue**.
+
+```bash
+$ bth submit --preset gpu -- bth run uv run python scripts/calibrate.py
+WARNING: no passing run of 'baseline_train' found (advisory for calibration stage)
+# Exit 0 — submission proceeds
+```
+
+**Silent skip:**
+- If `[reproduction]` block is absent or `requires_pass_stem` is empty, gate is skipped silently.
+
+### Lint Checks
+
+#### Tier-1 (Error)
+
+**`check_novel_or_reproduces_declared`** — Enforces reproducibility documentation for validation/production runs.
+
+Triggered by: `bth lint` (Tier-1 block)
+
+**Rule:** Any experiment with `stage_name` in `{"validation", "production"}` must have either:
+- `[reproduction]` block with non-empty `reproduces_paper` or `reproduces_run`, OR
+- `novel = true`
+
+**Example violations:**
+```toml
+[experiment]
+hypothesis = "Testing X"
+stage_name = "validation"
+# ✗ FAIL: No [reproduction] block, no novel=true
+```
+
+**Fixes:**
+```toml
+# Option 1: Declare reproduction
+[experiment]
+hypothesis = "Testing X"
+stage_name = "validation"
+
+[reproduction]
+reproduces_paper = "doi:10.1234/example"
+
+# Option 2: Declare as novel
+[experiment]
+hypothesis = "Testing X"
+stage_name = "validation"
+novel = true
+```
+
+#### Tier-2 (Warning)
+
+**`check_bypass_trend`** — Flags increasing use of `--no-sidecar` (tracked as `sidecar_mode='bypassed'`).
+
+Triggered by: `bth lint` (Tier-2 advisory)
+
+Warns if latest week's bypass rate is higher than prior week's.
+
+**`check_canonical_stage_names`** — Flags non-canonical `stage_name` values already in the warm catalog.
+
+Triggered by: `bth lint` (Tier-2 advisory)
+
+Example:
+```
+WARNING: Non-canonical stage_name 'pilot' in warm catalog (1 run). Consider renaming to one of: exploration, calibration, validation, ablation, production
+```
+
+### Sprint Audit Signals
+
+Run sprint audit to check project health across controls:
+
+```bash
+bth sprint-audit
+```
+
+#### Signal 9: control_arm_rate
+
+**Definition:** Fraction of all runs in the project with outcome labels matching the pattern `ctrl_%` (e.g., `ctrl_pass`, `ctrl_fail`).
+
+**Status values:**
+- **OK** if `control_arm_rate > 0.0` (at least some control runs exist)
+- **WARNING** if `control_arm_rate == 0.0` AND validation/production runs exist (no control runs despite having main runs)
+- **INFO** if no runs exist or catalog unavailable
+
+**Usage:** Not based on `[controls]` sidecar block presence; it scans actual outcome values across the catalog.
+
+```bash
+$ bth sprint-audit
+Signal 9 (control_arm_rate): control_arm_rate=12.5% (5/40 runs with ctrl_* outcome)
+Status: OK
+```
+
+#### Signal 10: submit_bypass_rate
+
+**Definition:** Fraction of validation/production cluster runs (those with `slurm_job_id` populated) that **lack** a matching submit-provenance record.
+
+Provenance stored at: `~/.bth/catalog/submits/<project_slug>/**/*.parquet`
+
+**Status values:**
+- **OK** if `submit_bypass_rate <= 5%` (0.05)
+- **WARNING** if `submit_bypass_rate > 5%` (more than 1 in 20 V/P jobs lack provenance)
+- **INFO** if no validation/production cluster runs exist
+
+**Usage:** Detects when jobs are submitted outside `bth submit` workflow (e.g., raw `sbatch`), bypassing provenance tracking.
+
+```bash
+$ bth sprint-audit
+Signal 10 (submit_bypass_rate): submit_bypass_rate=3.0% (1/34 validation/production cluster runs without provenance)
+Status: OK
+```
 
 ## Query and Inspect
 
@@ -229,219 +454,6 @@ bth migrate-to-project-subdirs
 
 Reorganizes flat catalog to per-project subdirectories (`runs/<slug>/run_<uuid>.parquet`). Enables per-project filtering in `bth sync`.
 
-## Cluster Submission (Phase 2)
-
-### Submit Job to SLURM
-
-```bash
-bth submit \
-  --preset gpu-h200 \
-  --array 0-19%4 \
-  --then-sync \
-  -- bth run uv run python scripts/train.py --epochs 100
-```
-
-Submits to SLURM via myxcel, waits for completion, syncs results back. Records `slurm_job_id` and `slurm_array_task_id` in run record.
-
-**Options:**
-- `--preset NAME` — SLURM preset (gpu, gpu-h200, cpu, quicktest, etc.)
-- `--remote NAME` — Override myxcel remote (default: from `.bth.toml`)
-- `--array SPEC` — SLURM array spec (e.g., `0-9%4`)
-- `--dependency SPEC` — SLURM dependency (e.g., `afterok:12345`)
-- `--name NAME` — Job name
-- `--push-first / --no-push-first` — Push project before submit (default: push)
-- `--wait / --no-wait` — Block until completion (default: no-wait)
-- `--then-pull` — Pull results after completion (implies `--wait`)
-- `--then-sync` — Run `bth sync` after pull (implies `--then-pull --wait`)
-
-Exit codes: 0 = success or no-wait, 1 = job failure, 2 = timeout.
-
-### Override Preset in Sidecar
-
-```toml
-[cluster]
-preset = "gpu-h200"
-remote = "engaging"
-project = "myproject"
-```
-
-Sidecar `[cluster]` section overrides `.bth.toml` defaults. CLI flags override sidecar.
-
-## Sync Catalog
-
-### Push to Remote
-
-```bash
-bth sync engaging
-```
-
-Uses myxcel to rsync local catalog to cluster remote. Only syncs current project (v0.4+).
-
-### Pull from Remote
-
-```bash
-bth sync engaging --pull
-```
-
-Fetches latest catalog fragments from cluster. Merges with local catalog.
-
-### Full Workflow
-
-```bash
-bth sync engaging --pull  # Get latest cluster results
-bth find --filter "slurm_job_id = '12345'"  # Query locally
-```
-
-## Campaigns
-
-### Create Campaign
-
-```bash
-bth campaign create --name "baseline sweep" --description "Hyperparameter space exploration"
-```
-
-Returns campaign ID.
-
-### List Campaigns
-
-```bash
-bth campaign ls
-```
-
-Shows campaign names, descriptions, associated run counts.
-
-### Add Runs to Campaign
-
-```bash
-bth campaign add --id <campaign-id> --runs <run-id-1> <run-id-2>
-```
-
-Links runs to campaign.
-
-### Review Campaign Results
-
-```bash
-bth campaign review <campaign-id>
-```
-
-Summary table: outcome counts, average duration, tags, sample runs.
-
-### Conclude Campaign
-
-```bash
-bth campaign conclude <campaign-id>
-```
-
-Marks campaign closed; queries still work but status is `concluded`.
-
-## Figure Manifest (Campaign → Maraxiom)
-
-When a campaign concludes, bathos emits `figure_manifest.json` at
-`~/.bth/catalog/sidecars/<campaign_id>/figure_manifest.json`. Maraxiom reads this
-during `mrx check` freshness sweeps (F7/F8 signals) to confirm figure pins are current.
-
-### Register figure outputs during a run
-
-Pass figure file paths alongside the result JSON using repeated `--out` flags (any file type is valid; repeat the flag for each path):
-
-```bash
-bth run \
-  --out outputs/results/my_run.json \
-  --out outputs/figures/scatter.svg \
-  --out outputs/figures/barplot.png \
-  --campaign <campaign-id> \
-  -- uv run python scripts/experiments/my_experiment.py
-```
-
-To make figure paths queryable from outcome conditions or postmortems, declare them in
-`[result_schema]` and write them to the result JSON alongside scalar metrics:
-
-```toml
-[result_schema]
-my_metric            = "float"
-figure_path_scatter  = "str"   # e.g., "outputs/figures/scatter.svg"
-figure_path_barplot  = "str"
-```
-
-### Populate the figure manifest after runs finish
-
-`bth campaign conclude` emits an empty manifest by default. Populate it programmatically:
-
-```python
-from bathos.figure_manifest import FigureManifest, FigureEntry, InputPin
-
-manifest = FigureManifest(
-    campaign_id="<campaign-id>",
-    figures=[
-        FigureEntry(
-            figure_id="scatter_cross_model_r",
-            intent="Cross-model energy correlation — mismatch-ceiling verification",
-            figure_kind="analysis_chart",   # optional
-            render_state="ready",           # "ready" | "deferred"
-            input_pins=[InputPin(
-                run_id="<bathos-run-id>",
-                output_path="outputs/results/my_run.json",
-                sha256="<sha256-of-data-file>",  # hash of the DATA file, not the figure
-            )],
-        ),
-    ],
-)
-manifest.write_manifest()
-```
-
-`render_state` values:
-- `"ready"` — figure is rendered; maraxiom can reference its asset path
-- `"deferred"` — figure intent is registered but rendering is pending (use for stubs before figures are generated)
-
-### Key rule
-
-Populate `figure_manifest.json` before presenting. `mrx check` reads it during freshness sweeps (F7/F8 signals) to confirm figure pins are current. `mrx context` ingests run records from the bathos catalog independently — the manifest does not gate `mrx context`.
-
-## Lineage and Citation
-
-### Lineage Graph
-
-```bash
-bth lineage <run-id>
-bth lineage <run-id> --format prov
-```
-
-Shows parent-child run relationships. `--format prov` outputs W3C PROV-JSON.
-
-### Citation String
-
-```bash
-bth cite <run-id>
-```
-
-BibTeX/APA-style citation for reproducibility documentation.
-
-## Postmortems
-
-### Scaffold Postmortem
-
-```bash
-bth postmortem scaffold <run-id>
-```
-
-Creates `<script>.bth.postmortem.toml` template for run review.
-
-### Validate Postmortem
-
-```bash
-bth postmortem validate <path>
-```
-
-Checks TOML syntax, required fields, git drift detection, and asset integrity.
-
-### Get Postmortem
-
-```bash
-bth postmortem get <run-id>
-```
-
-Retrieves and displays postmortem metadata.
-
 ## Visualization (v0.5+)
 
 ### Local Dashboard
@@ -459,32 +471,6 @@ bth export --html --out ~/reports/report.html
 ```
 
 Generates self-contained HTML report of all runs. Warns if > 5 MB.
-
-## Remote Profiles
-
-### Add Remote
-
-```bash
-bth remote add engaging --host engaging.csail.mit.edu --path ~/projects/myproject
-```
-
-Registers cluster host for sync and submission.
-
-### List Remotes
-
-```bash
-bth remote ls
-```
-
-Shows configured remotes.
-
-### Test Connectivity
-
-```bash
-bth remote test engaging
-```
-
-Verifies SSH access to remote.
 
 ## Linting and Validation
 
@@ -527,7 +513,7 @@ path = "~/projects/myproject"
 - **Exactly one residual outcome** — one outcome must have `is_residual = true` for gate evaluation
 - **No `--no-sidecar` in production** — bypassing logs `BYPASSED` and breaks pre-registration discipline
 - **Test measurement pipeline on synthetic data** — verify metrics work before trusting research conclusions
-- **Postmortem colocated with script** — `<script>.bth.postmortem.toml` alongside `<script>.py`
+- **Postmortem colocated with script** — `<script>.bth.postmortem.toml` alongside `<script>.py` (see **bathos-campaigns**)
 
 ## Typical Workflow
 
@@ -543,328 +529,21 @@ bth new-experiment --name baseline_training
 bth check --path scripts/experiments/baseline_training.bth.toml
 uv run python scripts/experiments/baseline_training.py --smoke --out /tmp/test.json  # NOT via bth run — smoke outputs are ephemeral, not tracked
 
-# 4. Run locally or submit to cluster
+# 4. Run locally or submit to cluster (see bathos-cluster for bth submit)
 bth run -- uv run python scripts/experiments/baseline_training.py --out outputs/run.json
-# OR
-bth submit --preset gpu --then-sync -- bth run uv run python scripts/experiments/baseline_training.py
 
 # 5. Query results
 bth find --filter "outcome='pass' AND project_slug='myproject'"
-bth campaign review <campaign-id>
 
-# 6. Review postmortem
-bth postmortem scaffold <run-id>
-bth postmortem validate scripts/experiments/baseline_training.bth.postmortem.toml
-
-# 7. Export report
+# 6. Export report
 bth export --html --out ~/reports/latest.html
-
-# 8. Populate figure manifest (if campaign produced figures for maraxiom)
-# from bathos.figure_manifest import FigureManifest, FigureEntry, InputPin
-# manifest = FigureManifest(campaign_id="...", figures=[FigureEntry(...)])
-# manifest.write_manifest()
-# Then mrx check reads it during freshness sweeps; mrx context ingests run records independently
 ```
-
-## Claim-Tier Pre-Registration (confirmatory campaigns)
-
-The sidecar pre-registers a single *run*. A **claim** pre-registers the *campaign* — the headline a set of
-runs is meant to establish, what would falsify it, and which runs discriminate which hypotheses. It exists to
-prevent the failure where several narrow gates each pass but their union does not establish the headline.
-Use it for `confirmation` / `sequential` campaigns; `exploration` campaigns are exempt.
-
-**The discipline is: author and *register* the claim before the confirmatory runs.** The Union Gate at
-`bth campaign conclude` only fires when a claim is registered — an unregistered claim provides no enforcement
-at all (`bth sprint-audit` Signal 12 flags exactly this).
-
-### Workflow
-
-```bash
-# 1. Scaffold a claim template (pulls hypotheses / outcome labels from the catalog)
-bth claim scaffold <campaign-id>
-#    -> writes .bth/claims/<campaign-name>.claim.toml + per-run sidecar snippets
-
-# 2. Author it (headline, kill_condition, hypotheses, confounds, discriminability, clauses), then validate
-bth claim validate .bth/claims/<campaign-name>.claim.toml
-
-# 3. Register BEFORE any confirmatory run — records claim_path + claim_sha256 (the tamper anchor)
-bth claim register .bth/claims/<campaign-name>.claim.toml --campaign <campaign-id>
-#    amending a registered claim and re-registering requires --force (writes an audit event)
-
-# 4. Run the campaign; each confirmatory sidecar declares which hypotheses it discriminates / isolates
-#    (see "Signal discrimination and probe design" below for how to design those runs)
-
-# 5. Conclude — the Union Gate checks clause coverage
-bth campaign conclude <campaign-id> --outcome pass
-```
-
-`bth claim scaffold` and `bth claim validate` are also exposed as MCP tools (`claim_scaffold`, `claim_validate`).
-
-### Descriptive labels (opaque IDs)
-
-Claim entities use short **ids** for machine cross-referencing (`H_information_symmetry`, `C_topology_coupling`) and a required **`label`** field for human-readable output. If an id matches the opaque pattern `/^[A-Z][0-9]+$/` (e.g. `H1`, `C2`), `bth claim validate` **errors** when `label` is blank. `bth lint` scans `.bth/claims/*.toml` and emits **warnings** for missing or placeholder labels (`REQUIRED: …`) before you register. Conclude-gate messages, parity confound checks, and `claim_coverage_*.json` (`clause_labels`) prefer labels over raw ids where available.
-
-### `claim.bth.toml` anatomy
-
-```toml
-[claim]
-headline       = "<falsifiable proposition the campaign must establish>"
-kill_condition = "<result that would falsify it>"        # mandatory; no bypass
-regime         = "<parameter range the claim ranges over; runs must cover it>"
-
-# >= 2 hypotheses, each with a descriptive id + label; ONE must be a null / misspecified alternative
-[[hypotheses]]
-id    = "H_main_effect"
-label = "the proposed mechanism drives the effect"
-predicted_signature = "monotone improvement with signal"
-[[hypotheses]]
-id    = "H_null_misspec"
-label = "both wrong / measurement misspecified"
-predicted_signature = "flat or non-monotone response"
-
-# load-bearing assumptions; the campaign halts if one is falsified
-[[assumptions]]
-id      = "A_info_symmetry"
-label   = "method and baseline have symmetric access to the signal"
-halt_if = "one method uses information the other lacks"
-status  = "untested"
-
-# one row per confound; status must reach "controlled" for a pass verdict
-[[confounds]]
-id            = "C_baseline"
-label         = "baseline is the published method, not a weak reimplementation"
-control       = "reference-parity gate"
-isolating_run = ""
-status        = "uncontrolled"
-# optional sub-block when the baseline is a reimplementation of a published method:
-[confounds.reference_parity]
-reference_paper   = "Author YEAR"
-reference_metric  = "recovery_hamming"
-reference_value   = 0.0
-equivalence_bound = 0.0
-parity_run_id     = ""                                    # the run that establishes parity
-
-# which planned run separates which hypothesis pair (every row needs a predicted_outcome)
-[[claim.discriminability]]
-hypothesis_a      = "H_main_effect"
-hypothesis_b      = "H_null_misspec"
-planned_run_label = "sweet_spot"
-predicted_outcome = "advantage_ci_lower_gt_0"
-
-[union_gate]
-[[union_gate.clauses]]
-id             = "C_main_effect"
-description    = "primary hypothesis distinguishable from the null on the target metric"
-hypothesis_ids = ["H_main_effect", "H_null_misspec"]      # cross-ref to [[hypotheses]] ids
-```
-
-Confirmatory **sidecars** cross-reference the claim by short id:
-
-```toml
-[experiment]
-claim_discriminates = ["H_main_effect", "H_null_misspec"]  # hypotheses this run separates
-claim_isolates      = ["C_baseline"]                        # confound / variable this run isolates
-```
-
-### The Union Gate at `conclude`
-
-- A clause is **covered** when some run has all of its `hypothesis_ids` in its `claim_discriminates`.
-- **confirmation / sequential** campaign: an uncovered clause downgrades the verdict to `confounded`
-  (not `pass`). `bth campaign conclude --force-verdict` bypasses, recording `claim_mode='bypassed'`.
-- **exploration** campaign: the checks still run but are warn-only — no downgrade.
-- Modifying the claim file after registration → `conclude` errors on the SHA mismatch; re-register with `--force`.
-- **Signal 12** (`bth sprint-audit`) flags a confirmation campaign with no registered claim — the one case
-  where the gate silently does nothing.
-
-## Signal discrimination and probe design
-
-Before submitting a confirmatory campaign, design runs that actively discriminate between competing
-hypotheses. Each probe type targets a different failure mode.
-
-### Probe types
-
-**Scaled-divergence probe**
-Purpose: Confirm the effect scales with the signal — rules out ceiling/floor effects masking the null.
-Design: Run the same experiment at 3+ signal levels (e.g., K=2, K=4, K=8 for an information-content claim).
-Expected signature: monotonic improvement tracking the signal; flat response falsifies the claim.
-Discriminates: Genuine causal effect vs. threshold artifact or capacity bottleneck.
-Sidecar field: `claim_discriminates = ["H_main_effect", "H_scaling"]`
-
-**Planted-mode probe**
-Purpose: Verify the model actually uses the planted information — rules out spurious correlation.
-Design: Run with the planted signal deliberately corrupted or ablated; model must fail.
-Expected signature: performance degrades to chance on the ablated version.
-Discriminates: Information-use vs. pattern matching on surface cues unrelated to the planted signal.
-Sidecar field: `claim_discriminates = ["H_information_use", "H_null"]`
-
-**Null-injection probe**
-Purpose: Confirm the null hypothesis is actually falsifiable by the eval.
-Design: Submit a known-bad model or a random-output baseline through the full eval pipeline.
-Expected signature: null model scores at chance; if it scores above chance, the eval is miscalibrated.
-Discriminates: Eval sensitivity vs. leakage from training data or shared artifacts.
-Sidecar field: `claim_discriminates = ["H_null", "H_eval_validity"]`
-
-**Information-ablation probe**
-Purpose: Isolate which specific information channel drives the result.
-Design: Ablate one information source at a time (sequence identity, structural context, coevolution signal).
-Expected signature: performance drops precisely when the claimed channel is removed; other ablations leave performance intact.
-Discriminates: Channel-specific contribution vs. redundancy or compensation across channels.
-Sidecar field: `claim_isolates = ["V_sequence_identity"]`
-
-### Connecting probes to the Union Gate
-
-Each probe maps to one or more `[[union_gate.clauses]]` in `claim.bth.toml`.
-A clause is covered when at least one run has all of its `hypothesis_ids` in `claim_discriminates`.
-
-Typical pattern: one scaled-divergence probe covers the main-effect clause; one null-injection probe covers the eval-validity clause; one information-ablation probe covers each isolation clause.
-
-Signal 12 (`bth sprint-audit`): fires when a confirmation campaign has no `claim_path` registered — the Union Gate will not run at conclude, and the probe design above will have no enforcement.
-
-## Validating a reimplemented baseline (literature-parity)
-
-When you reimplement a method from a published paper — especially one that publishes no reference code — the reimplementation can silently diverge from the described method, confounding any downstream comparison (`[confounds.reference_parity]` in claim-tier language). A unit test cannot catch this: the reimplemented method runs, passes internal checks, and produces plausible numbers. This section documents bathos's structured validation protocol.
-
-### When to use literature-parity validation
-
-**Use this workflow when:**
-- Your project reimplements a method from a peer-reviewed publication
-- The original paper publishes no reference code (or the code diverges significantly from the paper text)
-- The reimplementation will be compared against the published results or other baselines
-- You need to flag the `[confounds.reference_parity]` confound as *controlled* for downstream claim-tier gates
-
-**Outcome:** A graded parity run with verdict PARITY (faithfully reimplemented), PARTIAL (controlled deviations documented), or FAIL (significant discrepancies). The verdict controls whether the F2 conclude-gate and F3 submit-gate allow downstream campaigns to proceed.
-
-### The 5-phase protocol
-
-The protocol is **operator-driven** (you orchestrate the agents) and **blind-first** (reconstructors see only the paper text, not your code or prior summaries). The steps are:
-
-**Phase 1: Blind reconstruction (N independent agents, default N=3)**
-- Each agent independently reconstructs the method from the paper **only**
-- Reconstruction follows diverse lenses: mathematical formulation, algorithmic detail, experimental protocol
-- Agents record ambiguities they encounter rather than guessing
-- No cross-talk; agents do not see each other's work or your code
-
-**Phase 2: Reconcile**
-- Compare the N reconstructions; flag disagreements (likely indicating paper ambiguity or misreads)
-- Map each reconstructed clause onto your actual code with a verdict (MATCH / DEVIATION / MISSING / AMBIGUOUS)
-- Produce a checklist of code-to-paper correspondences
-
-**Phase 3: Adversarial refutation (M independent attacks, default M=3)**
-- Each attacker assumes a defect and tries to prove it using different evidence channels
-- Channels: statistical correctness, hyperparameter fidelity, algorithmic structure
-- Each attacker must state its assumption upfront (honesty-tax); default to "deviation" if evidence is inconclusive
-- Goal: find or rule out mechanism-nullifying defects that unit tests missed
-
-**Phase 4: Adjudicate**
-- Confirm findings by ≥2-vote or hard evidence (runnable invariant tests you write)
-- Rank severity: does this deviation affect the method's core behavior?
-- Recommend fixes (code changes to restore parity, or documented deviations)
-
-**Phase 5: Graded verdict**
-- Compute grade from evidence: PARITY (all clear), PARTIAL (controlled deviations), FAIL (significant discrepancies)
-- Produce an executable **invariant-test spec** — synthetic ground-truth tests that lock in the verdict
-  (see AC-15 / AC-20: the tests are registered in the run's `output_paths` and checksummed via SHA; drift is detectable via `bth check`)
-- Write a reproduce-the-protocol plan (how to restore your implementation to parity if needed)
-- Populate `[confounds.reference_parity]` block for the next campaign
-
-### Configuration: `parity.bth.toml`
-
-Create a `parity.bth.toml` sidecar alongside the relevant script. Example structure:
-
-```toml
-[parity]
-paper_pdf              = "path/to/paper.pdf"          # Source of truth (required)
-impl_paths             = [
-  "src/myproject/method.py",
-  "src/myproject/baseline.py"
-]                                                      # Your implementation files (required)
-reference_code         = null                          # Optional: if the paper published code, path to it
-citation_note          = "arXiv:1234.5678 describes the method in §3.2–3.4"
-recon_lenses           = [
-  "math",
-  "algo",
-  "protocol"
-]                                                      # Default if omitted; customize for your paper
-attack_lenses          = [
-  "stats",
-  "hyper",
-  "struct"
-]                                                      # Default if omitted
-hypotheses             = [
-  "core mechanism (coevolution reshuffle) is implemented faithfully",
-  "metric readout captures the intended signal"
-]                                                      # Your upfront hypotheses about what could go wrong
-equivalence_bound      = 0.05                          # Tolerance for numeric equivalence (if applicable)
-N                      = 3                             # Number of reconstructors (default 3)
-M                      = 3                             # Number of refutation attackers (default 3)
-```
-
-**Required fields:** `paper_pdf`, `impl_paths`  
-**Optional fields (with sensible defaults):** `recon_lenses`, `attack_lenses`, `equivalence_bound`, `N`, `M`, `hypotheses`, `citation_note`, `reference_code`
-
-### Orchestrator-owned re-derivation lock (Constraint 1)
-
-**This is critical and skill-enforced only in v1** (no code-enforced gate):
-
-> After the agents' phases complete, **you (the orchestrator) must independently re-derive the decisive findings using runnable tests.** Never trust an agent's assertion "parity is established"; run your own synthetic-ground-truth invariant tests to confirm.
-
-In practice: if Phase 3 or 4 identifies a potential defect (e.g., "the method is invariant to coevolution signal"), write a `tests/test_<method>_invariants.py` that explicitly tests that claim and run it to failure and success.
-
-**Why this matters:** The Zeinaty 2026 case in `asr` caught a mechanism-nullifying bug via this discipline: the paper's metric readout was mathematically invariant to the core mechanism (it contributed exactly zero to the reported result). Three sprints of unit tests missed this; an invariant-test specification locked in by orchestrator re-derivation found it immediately.
-
-### Integration with claim-tier gates
-
-Once a parity run completes successfully:
-
-1. **Record the run ID** — `bth show <run-id>` to get its UUID
-2. **Populate `[confounds.reference_parity]` in your campaign's `claim.bth.toml`**:
-   ```toml
-   [[confounds]]
-   id = "C_baseline"
-   label = "baseline is the published method, not a weak reimplementation"
-   [confounds.reference_parity]
-   parity_run_id = "run_12abc345..."  # from the parity run
-   ```
-3. **At campaign conclude** (F2 gate) — the Union Gate reads the parity run's verdict:
-   - PARITY or PARTIAL → confound marked controlled; campaign proceeds
-   - FAIL → confound uncontrolled; confirmation/sequential campaign downgrades to `confounded`
-4. **At campaign submit** (F3 gate) — a reproduction sidecar can declare a prerequisite parity run:
-   ```toml
-   [reproduction]
-   requires_parity = "run_12abc345..."  # hard-blocks validation/production if uncontrolled
-   ```
-
-### Evidence channels and evidence severity
-
-Literature-parity relies on multiple evidence channels working together:
-
-- **C1 (reconstruction parity):** N independent agents converge on the same interpretation of the paper (agreement = higher confidence)
-- **C4 (adversarial severity):** M attackers try diverse refutation strategies; if all fail or find only minor deviations, confidence increases
-- **D2 (evidence channels):** reconstruction via math, algorithm, protocol; refutation via stats, hyperparameter, structure
-- **E1 (reproduction rung):** R0 = text parity only; R1 = numeric equivalence; R2–R4 = partial/full reproducibility with published code
-- **D3 (manifest-declared mode):** your `parity.bth.toml` declares whether Mode A (code-published) or Mode B (text-only) applies
-
-### Grading: the cap-lattice ceiling table
-
-The final verdict (PARITY / PARTIAL / FAIL) is **computed automatically** from evidence using a cap-lattice (no human adjudication):
-
-- **Invariant-test failure** → FAIL (no override)
-- **Clause-parity % below threshold** → caps to PARTIAL
-- **Adversarial survival** — all refutations failed or found only minor issues → boosts toward PARITY
-- **Ambiguity load (load-bearing)** — unresolved paper ambiguities in core mechanism → caps to PARTIAL
-- **Reproduction rung R2 or worse** (partial reproducibility, missing systems) → caps to PARTIAL
-
-The compute-grade function returns the minimum across all applicable ceilings.
-
-### Related
-
-- **`parity.bth.toml` fields and validation**: see `parity.bth.toml.template` in `agent_assets/skills/using-bathos/literature-parity/`
-- **Phase templates** (orchestrator-facing agent prompts): in `agent_assets/skills/using-bathos/literature-parity/` (01_reconstruct.md through 05_verdict.md)
-- **Signal 13** (`bth sprint-audit`): flags a confirmation campaign citing a published-method baseline with uncontrolled `reference_parity`
-- **AC-16–AC-22** (epic-level acceptance criteria): all parity-related gates and integration points
 
 ## Related
 
+- **bathos-cluster** — SLURM submission (`bth submit`), catalog sync (`bth sync`), remote profiles
+- **bathos-campaigns** — campaigns, figure manifests, lineage/citation, postmortems, claim-tier pre-registration, signal discrimination and probe design
+- **bathos-literature-parity** — validating a reimplemented baseline against a published method
+- **bathos-mcp** — MCP tool error envelope and integration contract
 - **CLAUDE.md**: Bathos architecture, schema versions, backlog
 - **Global rules**: `~/.claude/rules/BATHOS.md` — `uv run python` discipline, sidecar validation, DuckDB conditions
-- **Cluster rules**: `~/.claude/rules/CLUSTER.md` — SLURM partition limits, job submission, local validation gates
