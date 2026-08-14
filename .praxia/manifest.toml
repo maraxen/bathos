@@ -22,24 +22,48 @@ provides = ["readback"]
 # Fixed as part of debt #619 (MCP write-seam auth hardening).
 command = ["bth-mcp"]
 
+# NOTE: `triggers` below is human-readable documentation only — cisternal's
+# ManifestAssetSource._load_skills() (assets/manifest.py) reads only `name`
+# and `path` from each [[plugin.skills]] entry; `triggers` is never consumed.
+# The triggers Claude actually sees come solely from the `description`/
+# `triggers` fields in each skill file's own YAML frontmatter (linked below).
+# Keep the two in sync by hand until cisternal's loader grows support for
+# manifest-declared triggers.
 [[plugin.skills]]
 name     = "using-bathos"
-path     = "agent_assets/skills/using-bathos/SKILL.md"
-triggers = ["bth run", "sidecar", "campaign", "experiment", "bth check"]
+path     = "../agent_assets/skills/using-bathos/SKILL.md"
+triggers = ["bth run", "sidecar", "catalog", "controls", "stage_name", "bth init", "bth check"]
+
+[[plugin.skills]]
+name     = "bathos-cluster"
+path     = "../agent_assets/skills/bathos-cluster/SKILL.md"
+triggers = ["bth submit", "slurm", "sbatch", "myxcel", "bth sync", "bth remote"]
+
+[[plugin.skills]]
+name     = "bathos-campaigns"
+path     = "../agent_assets/skills/bathos-campaigns/SKILL.md"
+triggers = ["bth campaign", "claim", "union gate", "figure manifest", "postmortem", "bth lineage", "bth cite"]
+
+[[plugin.skills]]
+name     = "bathos-literature-parity"
+path     = "../agent_assets/skills/bathos-literature-parity/SKILL.md"
+triggers = ["literature parity", "reimplemented baseline", "parity.bth.toml", "reference_parity"]
+
+[[plugin.skills]]
+name     = "bathos-mcp"
+path     = "../agent_assets/skills/bathos-mcp/SKILL.md"
+triggers = ["bathos mcp", "BathosErrorCode", "error envelope", "validation_ok"]
 
 [[plugin.snippets]]
 name           = "bathos-rules"
-path           = "agent_assets/snippets/rules.md"
+path           = "../agent_assets/snippets/rules.md"
 scope          = "project"
 scope_detector = "glob:scripts/**/*.bth.toml"
 
 [[plugin.agents]]
 name  = "experiment-runner"
-path  = "agent_assets/agents/experiment-runner.md"
+path  = "../agent_assets/agents/experiment-runner.md"
 tools = ["run", "campaign_create", "campaign_review", "check"]
 
 [plugin.dependencies]
 myxcel = ">=0.3"
-
-[plugin.export_command]
-claude_code = ["bth", "export", "--surface", "claude_code", "--level", "user"]
