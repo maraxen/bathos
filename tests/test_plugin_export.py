@@ -10,26 +10,6 @@ def test_export_plugin_bundle_unknown_surface():
         export_plugin_bundle(surface="bogus", out=None, dry_run=True)
 
 
-CISTERNAL_VERSION_OVERRIDE_BUG = (
-    "cisternal's CompositeAssetSource.load() (assets/composite.py) computes a "
-    "registry_meta from the caller-supplied --version/--name override, but "
-    "then discards it when assembling the final bundle, using "
-    "manifest_report.bundle.metadata (i.e. manifest.toml's own, often-stale "
-    "plugin.version field) unconditionally. bathos passes --version explicitly "
-    "specifically to avoid drifting from manifest.toml's hand-maintained "
-    "version, and it silently doesn't work. Fixed upstream at "
-    "maraxen/cisternal@a6005d8, shipping in cisternal v0.1.1a3 "
-    "(maraxen/cisternal#23) — this repo's pyproject.toml already pins "
-    ">=0.1.1a3; remove this xfail once that version is installed. "
-    "(The prior path-resolution bug tracked as backlog #4078 — cisternal "
-    "resolving manifest asset paths against the manifest's own directory — "
-    "is already fixed on the bathos side: .praxia/manifest.toml's "
-    "[[plugin.skills]]/[[plugin.snippets]]/[[plugin.agents]] paths now carry "
-    "the `../` prefix cisternal's resolution needs.)"
-)
-
-
-@pytest.mark.xfail(strict=True, reason=CISTERNAL_VERSION_OVERRIDE_BUG)
 def test_export_plugin_bundle_writes_real_claude_bundle(tmp_path):
     import bathos
     from bathos.plugin_export import export_plugin_bundle
