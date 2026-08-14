@@ -14,6 +14,29 @@ def test_get_skill_source_path_returns_existing_file():
     assert p.name == "SKILL.md"
 
 
+def test_legacy_skill_source_matches_plugin_skill_source():
+    """agent_assets/using_bathos/SKILL.md (bth export's single-file source,
+    per bathos.export.get_skill_source_path — UNCHANGED, do not touch) and
+    agent_assets/skills/using-bathos/SKILL.md (the plugin bundle's source,
+    declared in .praxia/manifest.toml) must stay byte-identical.
+
+    These were two independently hand-edited copies for months (the plugin
+    copy gained claim-tier/literature-parity sections; the legacy copy
+    gained controls-discipline/MCP-envelope sections) with neither getting
+    the other's updates. Catch the next silent fork here instead.
+    """
+    from bathos.export import get_skill_source_path
+
+    legacy = get_skill_source_path()
+    plugin = legacy.parent.parent / "skills" / "using-bathos" / "SKILL.md"
+    assert plugin.exists(), f"Plugin skill source not found at {plugin}"
+    assert legacy.read_text() == plugin.read_text(), (
+        f"{legacy} and {plugin} have diverged — sync their content "
+        "(or split the diverging section into a new skill under "
+        "agent_assets/skills/ and reference it from both)."
+    )
+
+
 def test_export_skill_writes_to_target(tmp_path):
     from bathos.export import export_skill
 
@@ -148,16 +171,6 @@ def test_register_mcp_workspace_uses_cwd(tmp_path, monkeypatch):
     assert "bathos" in data["mcpServers"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Upstream cisternal path-resolution bug — see backlog #4078 and the full explanation "
-        "on CISTERNAL_PATH_BUG in tests/test_plugin_export.py. cisternal resolves manifest "
-        "asset paths against the manifest's own directory; praxia resolves the same manifest "
-        "against the repo root. bathos's paths are correct for praxia, so this cannot be "
-        "fixed here."
-    ),
-)
 def test_export_cmd_surface_writes_plugin_bundle(tmp_path):
     """bth export --surface claude produces a real plugin bundle, not the old skill-copy path."""
     out = tmp_path / "plugin-dist"

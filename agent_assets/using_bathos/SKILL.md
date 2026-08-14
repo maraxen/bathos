@@ -1,12 +1,14 @@
 ---
 name: using-bathos
-description: Experiment tracking with bathos — run tracking, sidecar pre-registration, cluster submission, catalog queries
-triggers: [bathos, bth, experiment, run, sidecar, cluster, submit, slurm, catalog, campaign]
+description: Experiment tracking with bathos — run tracking, sidecar pre-registration, controls discipline, catalog queries
+triggers: [bathos, bth, experiment, run, sidecar, catalog, init, lint, controls, stage_name]
 ---
 
 # using-bathos
 
 bathos (`bth`) is a standalone experiment tracking CLI for researchers running 10+ projects across local and SLURM cluster environments. It tracks script runs, pre-registers hypotheses via sidecars, syncs results to/from clusters, and provides rich query and reporting interfaces.
+
+This skill covers the daily-driver workflow: installation, run tracking, sidecar pre-registration, controls discipline, and catalog queries. For cluster submission and sync, campaigns and claim-tier rigor, literature-parity validation, or MCP tool integration, see the sibling skills listed under **Related** below.
 
 ## Core Concepts
 
@@ -16,11 +18,9 @@ bathos (`bth`) is a standalone experiment tracking CLI for researchers running 1
 
 **Outcome** — Evaluated at run-end by matching result JSON against DuckDB SQL conditions in the sidecar. Values: `pass`, `marginal`, `fail`, `error`. One outcome must be marked `is_residual = true`.
 
-**Campaign** — A named group of related runs. Accessible via `bth campaign` subcommands; queries via `campaign_id` field.
+**Campaign** — A named group of related runs. Accessible via `bth campaign` subcommands; queries via `campaign_id` field. See **bathos-campaigns** for campaign, claim-tier, postmortem, and lineage workflows.
 
 **Catalog** — Tiered Parquet + DuckDB store at `~/.bth/catalog/` (or `.bth.toml` `[project].catalog_dir`). Cool tier (per-run fragments) → compacted to warm tier (DuckDB database) → optionally archived to cold tier (partitioned Parquet).
-
-**Sync** — Push/pull catalog between local and cluster remote via myxcel. Uses `bth sync [remote] [--pull]` or cluster submission flags `--push-first`, `--then-pull`, `--then-sync`.
 
 ## Installation
 
@@ -257,7 +257,7 @@ The control block is declarative; it feeds Sprint Audit Signal 9 (see below).
 
 ### bth submit Gate
 
-Two separate gate mechanisms protect experimental discipline:
+Two separate gate mechanisms protect experimental discipline (see **bathos-cluster** for `bth submit` itself):
 
 **1. Run-time gate** (`gate_check()` in `bth run`) — happens automatically at run start, validates sidecar presence, hash, and first-of-kind properties. Does NOT touch `stage_name`, `novel`, or `[reproduction]` fields.
 
@@ -454,290 +454,6 @@ bth migrate-to-project-subdirs
 
 Reorganizes flat catalog to per-project subdirectories (`runs/<slug>/run_<uuid>.parquet`). Enables per-project filtering in `bth sync`.
 
-## Cluster Submission (Phase 2)
-
-### Submit Job to SLURM
-
-```bash
-bth submit \
-  --preset gpu-h200 \
-  --array 0-19%4 \
-  --then-sync \
-  -- bth run uv run python scripts/train.py --epochs 100
-```
-
-Submits to SLURM via myxcel, waits for completion, syncs results back. Records `slurm_job_id` and `slurm_array_task_id` in run record.
-
-**Options:**
-- `--preset NAME` — SLURM preset (gpu, gpu-h200, cpu, quicktest, etc.)
-- `--remote NAME` — Override myxcel remote (default: from `.bth.toml`)
-- `--array SPEC` — SLURM array spec (e.g., `0-9%4`)
-- `--dependency SPEC` — SLURM dependency (e.g., `afterok:12345`)
-- `--name NAME` — Job name
-- `--push-first / --no-push-first` — Push project before submit (default: push)
-- `--wait / --no-wait` — Block until completion (default: no-wait)
-- `--then-pull` — Pull results after completion (implies `--wait`)
-- `--then-sync` — Run `bth sync` after pull (implies `--then-pull --wait`)
-
-Exit codes: 0 = success or no-wait, 1 = job failure, 2 = timeout.
-
-### Override Preset in Sidecar
-
-```toml
-[cluster]
-preset = "gpu-h200"
-remote = "engaging"
-project = "myproject"
-```
-
-Sidecar `[cluster]` section overrides `.bth.toml` defaults. CLI flags override sidecar.
-
-## Sync Catalog
-
-### Push to Remote
-
-```bash
-bth sync engaging
-```
-
-Uses myxcel to rsync local catalog to cluster remote. Only syncs current project (v0.4+).
-
-### Pull from Remote
-
-```bash
-bth sync engaging --pull
-```
-
-Fetches latest catalog fragments from cluster. Merges with local catalog.
-
-### Full Workflow
-
-```bash
-bth sync engaging --pull  # Get latest cluster results
-bth find --filter "slurm_job_id = '12345'"  # Query locally
-```
-
-## Campaigns
-
-### Create Campaign
-
-```bash
-bth campaign create --name "baseline sweep" --description "Hyperparameter space exploration"
-```
-
-Returns campaign ID.
-
-### List Campaigns
-
-```bash
-bth campaign ls
-```
-
-Shows campaign names, descriptions, associated run counts.
-
-### Add Runs to Campaign
-
-```bash
-bth campaign add --id <campaign-id> --runs <run-id-1> <run-id-2>
-```
-
-Links runs to campaign.
-
-### Review Campaign Results
-
-```bash
-bth campaign review <campaign-id>
-```
-
-Summary table: outcome counts, average duration, tags, sample runs.
-
-### Conclude Campaign
-
-```bash
-bth campaign conclude <campaign-id>
-```
-
-Marks campaign closed; queries still work but status is `concluded`.
-
-## Figure Manifest (Campaign → Maraxiom)
-
-When a campaign concludes, bathos emits `figure_manifest.json` at
-`~/.bth/catalog/sidecars/<campaign_id>/figure_manifest.json`. Maraxiom reads this
-during `mrx check` freshness sweeps (F7/F8 signals) to confirm figure pins are current.
-
-### Register figure outputs during a run
-
-Pass figure file paths alongside the result JSON using repeated `--out` flags (any file type is valid; repeat the flag for each path):
-
-```bash
-bth run \
-  --out outputs/results/my_run.json \
-  --out outputs/figures/scatter.svg \
-  --out outputs/figures/barplot.png \
-  --campaign <campaign-id> \
-  -- uv run python scripts/experiments/my_experiment.py
-```
-
-To make figure paths queryable from outcome conditions or postmortems, declare them in
-`[result_schema]` and write them to the result JSON alongside scalar metrics:
-
-```toml
-[result_schema]
-my_metric            = "float"
-figure_path_scatter  = "str"   # e.g., "outputs/figures/scatter.svg"
-figure_path_barplot  = "str"
-```
-
-### Populate the figure manifest after runs finish
-
-`bth campaign conclude` emits an empty manifest by default. Populate it programmatically:
-
-```python
-from bathos.figure_manifest import FigureManifest, FigureEntry, InputPin
-
-manifest = FigureManifest(
-    campaign_id="<campaign-id>",
-    figures=[
-        FigureEntry(
-            figure_id="scatter_cross_model_r",
-            intent="Cross-model energy correlation — mismatch-ceiling verification",
-            figure_kind="analysis_chart",   # optional
-            render_state="ready",           # "ready" | "deferred"
-            input_pins=[InputPin(
-                run_id="<bathos-run-id>",
-                output_path="outputs/results/my_run.json",
-                sha256="<sha256-of-data-file>",  # hash of the DATA file, not the figure
-            )],
-        ),
-    ],
-)
-manifest.write_manifest()
-```
-
-`render_state` values:
-- `"ready"` — figure is rendered; maraxiom can reference its asset path
-- `"deferred"` — figure intent is registered but rendering is pending (use for stubs before figures are generated)
-
-### Key rule
-
-Populate `figure_manifest.json` before presenting. `mrx check` reads it during freshness sweeps (F7/F8 signals) to confirm figure pins are current. `mrx context` ingests run records from the bathos catalog independently — the manifest does not gate `mrx context`.
-
-### Figure Manifest Schema
-
-The manifest is a structured JSON sidecar stored at `<catalog>/sidecars/<campaign_id>/figure_manifest.json`.
-
-**Root schema:**
-```json
-{
-  "manifest_version": "1.0",
-  "campaign_id": "<campaign-id>",
-  "figures": [...]
-}
-```
-
-**Fields:**
-- `manifest_version` (str) — Schema version (e.g., `"1.0"`). Used for backward-compatibility.
-- `campaign_id` (str) — Campaign ID this manifest belongs to. Must match the sidecar directory name.
-- `figures` (list[FigureEntry]) — List of figures. Empty list `[]` is valid (no figures to render).
-
-**FigureEntry schema:**
-```json
-{
-  "figure_id": "scatter_cross_model_r",
-  "intent": "Cross-model energy correlation — mismatch-ceiling verification",
-  "input_pins": [...],
-  "render_state": "ready",
-  "figure_kind": "analysis_chart"
-}
-```
-
-**Fields:**
-- `figure_id` (str) — Unique figure identifier (slug format, e.g., `"scatter_cross_model_r"`).
-- `intent` (str) — Human-readable intent describing what the figure is meant to show. Example: `"main result"`, `"supplementary ablation"`, `"owner-side comparison"`.
-- `input_pins` (list[InputPin]) — Data sources this figure derives from (see InputPin schema below). Typically one pin for analysis figures; may be multiple for comparisons.
-- `render_state` (str) — One of `"ready"` or `"deferred"`.
-  - `"ready"` — Figure is fully rendered and available.
-  - `"deferred"` — Figure intent is pinned but rendering is blocked (e.g., needs owner-only data or styling).
-- `figure_kind` (str | None) — Optional figure kind (freeform vocabulary). Examples: `"analysis_chart"`, `"structural"`. `null`/absent indicates unclassified or legacy figure.
-
-**InputPin schema:**
-```json
-{
-  "run_id": "run_abc123",
-  "output_path": "outputs/results/my_run.json",
-  "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-}
-```
-
-**Fields:**
-- `run_id` (str) — Bathos run ID that produced the data product.
-- `output_path` (str) — Path to the data file within the bathos catalog (typically registered via `bth run --out`).
-- `sha256` (str) — SHA256 hash of the data product (immutability guarantee). This is the hash of the **DATA file** (e.g., JSON result), not the rendered figure.
-
-### Consuming the Manifest
-
-Import and read the manifest programmatically:
-
-```python
-from bathos.figure_manifest import FigureManifest
-
-manifest = FigureManifest.read_manifest(
-    Path("~/.bth/catalog/sidecars/camp_abc123/figure_manifest.json")
-)
-
-for fig in manifest.figures:
-    print(f"{fig.figure_id}: {fig.intent} ({fig.render_state})")
-    for pin in fig.input_pins:
-        print(f"  run {pin.run_id} -> {pin.output_path}")
-        # Verify immutability via sha256
-        assert pin.sha256 == compute_sha256(pin.output_path)
-```
-
-## Lineage and Citation
-
-### Lineage Graph
-
-```bash
-bth lineage <run-id>
-bth lineage <run-id> --format prov
-```
-
-Shows parent-child run relationships. `--format prov` outputs W3C PROV-JSON.
-
-### Citation String
-
-```bash
-bth cite <run-id>
-```
-
-BibTeX/APA-style citation for reproducibility documentation.
-
-## Postmortems
-
-### Scaffold Postmortem
-
-```bash
-bth postmortem scaffold <run-id>
-```
-
-Creates `<script>.bth.postmortem.toml` template for run review.
-
-### Validate Postmortem
-
-```bash
-bth postmortem validate <path>
-```
-
-Checks TOML syntax, required fields, git drift detection, and asset integrity.
-
-### Get Postmortem
-
-```bash
-bth postmortem get <run-id>
-```
-
-Retrieves and displays postmortem metadata.
-
 ## Visualization (v0.5+)
 
 ### Local Dashboard
@@ -755,32 +471,6 @@ bth export --html --out ~/reports/report.html
 ```
 
 Generates self-contained HTML report of all runs. Warns if > 5 MB.
-
-## Remote Profiles
-
-### Add Remote
-
-```bash
-bth remote add engaging --host engaging.csail.mit.edu --path ~/projects/myproject
-```
-
-Registers cluster host for sync and submission.
-
-### List Remotes
-
-```bash
-bth remote ls
-```
-
-Shows configured remotes.
-
-### Test Connectivity
-
-```bash
-bth remote test engaging
-```
-
-Verifies SSH access to remote.
 
 ## Linting and Validation
 
@@ -823,7 +513,7 @@ path = "~/projects/myproject"
 - **Exactly one residual outcome** — one outcome must have `is_residual = true` for gate evaluation
 - **No `--no-sidecar` in production** — bypassing logs `BYPASSED` and breaks pre-registration discipline
 - **Test measurement pipeline on synthetic data** — verify metrics work before trusting research conclusions
-- **Postmortem colocated with script** — `<script>.bth.postmortem.toml` alongside `<script>.py`
+- **Postmortem colocated with script** — `<script>.bth.postmortem.toml` alongside `<script>.py` (see **bathos-campaigns**)
 
 ## Typical Workflow
 
@@ -839,146 +529,21 @@ bth new-experiment --name baseline_training
 bth check --path scripts/experiments/baseline_training.bth.toml
 uv run python scripts/experiments/baseline_training.py --smoke --out /tmp/test.json  # NOT via bth run — smoke outputs are ephemeral, not tracked
 
-# 4. Run locally or submit to cluster
+# 4. Run locally or submit to cluster (see bathos-cluster for bth submit)
 bth run -- uv run python scripts/experiments/baseline_training.py --out outputs/run.json
-# OR
-bth submit --preset gpu --then-sync -- bth run uv run python scripts/experiments/baseline_training.py
 
 # 5. Query results
 bth find --filter "outcome='pass' AND project_slug='myproject'"
-bth campaign review <campaign-id>
 
-# 6. Review postmortem
-bth postmortem scaffold <run-id>
-bth postmortem validate scripts/experiments/baseline_training.bth.postmortem.toml
-
-# 7. Export report
+# 6. Export report
 bth export --html --out ~/reports/latest.html
-
-# 8. Populate figure manifest (if campaign produced figures for maraxiom)
-# from bathos.figure_manifest import FigureManifest, FigureEntry, InputPin
-# manifest = FigureManifest(campaign_id="...", figures=[FigureEntry(...)])
-# manifest.write_manifest()
-# Then mrx check reads it during freshness sweeps; mrx context ingests run records independently
 ```
-
-## MCP Error Envelope
-
-All 22 bathos MCP tools return a typed envelope with consistent structure. Understanding the envelope shape and error codes is essential for robust integrations.
-
-### Envelope Shape
-
-Every successful or failed MCP call returns a dictionary with these four keys (always present; KeyError is impossible):
-
-```json
-{
-  "ok": true,
-  "error_code": null,
-  "error": null,
-  "resolution_hint": null,
-  "data_field_1": "...",
-  "data_field_2": "..."
-}
-```
-
-**Fields:**
-- `ok` (bool) — `true` if call succeeded; `false` if error
-- `error_code` (str | null) — `null` on success; one of 16 BathosErrorCode values on error
-- `error` (str | null) — `null` on success; human-readable error message on error
-- `resolution_hint` (str | null) — `null` on success; actionable fix suggestion on error
-- Additional fields vary by tool (on success only)
-
-### BathosErrorCode Values (16 total)
-
-**Gate-derived codes (11, aliased from GateErrorCode):**
-- `sidecar_missing` — Sidecar `.bth.toml` not found
-- `sidecar_invalid` — TOML syntax error or missing required sections
-- `sidecar_hash_mismatch` — Sidecar content changed; hash mismatch detected
-- `not_first_of_kind` — Run of this script already exists; use `--derived-from`
-- `manifest_write_failed` — Failed to write `.bth.postmortem.toml` manifest
-- `adversarial_check_missing` — Missing `adversarial_check` in `outcomes.pass` blocks
-- `hypothesis_lock_missing` — Hypothesis lock file not found
-- `outcome_evaluation_error` — DuckDB SQL condition parsing or evaluation failed
-- `result_schema_mismatch` — Result JSON doesn't match declared schema
-- `outcome_ambiguous` — Multiple outcome conditions matched (exactly one expected)
-- `internal` — Unexpected internal error
-
-**Domain-specific codes (5):**
-- `catalog_error` — Database or Parquet I/O failure
-- `campaign_error` — Campaign query or update failure
-- `sidecar_error` — Sidecar parsing or content validation error
-- `export_error` — Export (HTML, archive) generation failure
-- `invalid_param` — Invalid parameter or argument
-
-### Caller Pattern (Standard Case)
-
-For most tools, check `ok` and extract data:
-
-```python
-result = await session.call_tool("bathos", "list_runs", {"project_slug": "myproject"})
-if not result["ok"]:
-    raise RuntimeError(
-        f"[{result['error_code']}] {result['error']}\n"
-        f"Hint: {result['resolution_hint']}"
-    )
-
-# On success, access tool-specific data
-runs = result["runs"]
-for run in runs:
-    print(f"{run['id']}: {run['outcome']}")
-```
-
-### Special Case: validation_ok (postmortem_validate, validate_sidecar)
-
-Two tools use a different validation result field:
-
-```python
-result = await session.call_tool("bathos", "validate_sidecar", {"script_path": "scripts/experiments/train.bth.toml"})
-
-# Transport always succeeds (ok=True)
-assert result["ok"] is True
-
-# Validation result is in validation_ok (NOT ok)
-if not result["validation_ok"]:
-    for error_msg in result.get("errors", []):
-        print(f"Validation error: {error_msg}")
-else:
-    print("Sidecar is valid")
-```
-
-**Envelope shape for these tools (success):**
-```json
-{
-  "ok": true,
-  "error_code": null,
-  "error": null,
-  "resolution_hint": null,
-  "validation_ok": true,
-  "path": "..."
-}
-```
-
-**Envelope shape for these tools (failure):**
-```json
-{
-  "ok": true,
-  "error_code": null,
-  "error": null,
-  "resolution_hint": null,
-  "validation_ok": false,
-  "errors": ["field1: error message", "field2: error message"]
-}
-```
-
-**Why two validation fields?**
-- `ok` indicates transport success (the MCP call itself worked)
-- `validation_ok` indicates semantic success (the sidecar/postmortem is structurally valid)
-- `errors` is absent on success; present as a list of human-readable validation issues on failure
-
-If a validation fails for reasons outside the tool (missing file, permission denied), both `ok` and `validation_ok` are `false`, and the error message is in `error`, not `errors`.
 
 ## Related
 
+- **bathos-cluster** — SLURM submission (`bth submit`), catalog sync (`bth sync`), remote profiles
+- **bathos-campaigns** — campaigns, figure manifests, lineage/citation, postmortems, claim-tier pre-registration, signal discrimination and probe design
+- **bathos-literature-parity** — validating a reimplemented baseline against a published method
+- **bathos-mcp** — MCP tool error envelope and integration contract
 - **CLAUDE.md**: Bathos architecture, schema versions, backlog
 - **Global rules**: `~/.claude/rules/BATHOS.md` — `uv run python` discipline, sidecar validation, DuckDB conditions
-- **Cluster rules**: `~/.claude/rules/CLUSTER.md` — SLURM partition limits, job submission, local validation gates
