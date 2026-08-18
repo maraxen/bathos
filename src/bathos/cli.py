@@ -56,6 +56,11 @@ ref_app = typer.Typer(
 )
 app.add_typer(ref_app, name="ref")
 
+provenance_app = typer.Typer(
+    help="Inspect a run's durable git provenance (pinned commit, dirty-tree snapshot, diff)"
+)
+app.add_typer(provenance_app, name="provenance")
+
 
 def _catalog_dir() -> Path:
     override = os.environ.get("BTH_CATALOG_DIR")
@@ -2795,3 +2800,59 @@ def ref_applicable(
         typer.echo(f"{len(unevaluable)} card(s) could not be evaluated:", err=True)
         for card, err in unevaluable:
             typer.echo(f"  {card.id}: {err}", err=True)
+
+
+@provenance_app.command("show")
+def provenance_show(run_id: str = typer.Argument(..., help="Run id")) -> None:
+    """Show what was durably pinned for a run: HEAD, the pinned commit, and whether it was dirty."""
+    from bathos.git_pin import RUN_REF_PREFIX, WIP_REF_PREFIX, manifest_entry
+
+    entry = manifest_entry(run_id, Path.cwd())
+    if entry is None:
+        typer.echo(
+            f"no provenance record for run {run_id}. Either it predates ref pinning, or it ran "
+            "in a different repository (cluster runs pin in the clone they executed on).",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    typer.echo(f"run          {run_id}")
+    typer.echo(f"branch       {entry.get('branch', '')}")
+    typer.echo(f"head         {entry.get('head_sha', '')}")
+    typer.echo(f"pinned       {entry.get('pinned_sha', '')}")
+    typer.echo(f"dirty        {entry.get('dirty')}")
+    typer.echo(f"recorded_at  {entry.get('recorded_at', '')}")
+    typer.echo(f"run ref      {RUN_REF_PREFIX}/{run_id}")
+    if entry.get("wip_commit"):
+        typer.echo(f"wip ref      {WIP_REF_PREFIX}/{run_id}")
+        typer.echo("")
+        typer.echo(
+            "This run executed on a DIRTY tree, so `pinned` is a snapshot of what actually ran, "
+            "not `head`. See `bth provenance diff` for the uncommitted delta."
+        )
+
+
+@provenance_app.command("diff")
+def provenance_diff(
+    run_id: str = typer.Argument(..., help="Run id"),
+    name_only: bool = typer.Option(False, "--name-only", help="List changed paths only"),
+) -> None:
+    """Show the uncommitted changes that were live when a run executed.
+
+    Answers "what was actually different when this ran?" for the 92% of runs that execute on a
+    dirty tree, where the recorded commit alone does not identify the code.
+    """
+    from bathos.git_pin import uncommitted_diff_for_run
+
+    diff = uncommitted_diff_for_run(run_id, Path.cwd(), name_only=name_only)
+    if diff is None:
+        typer.echo(
+            f"cannot reconstruct the working state for run {run_id}. It predates ref pinning, ran "
+            "in another repository, or its snapshot object is gone.",
+            err=True,
+        )
+        raise typer.Exit(1)
+    if diff == "":
+        typer.echo(f"run {run_id} executed on a clean tree; the recorded commit is exact.")
+        return
+    typer.echo(diff, nl=False)

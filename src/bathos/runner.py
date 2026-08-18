@@ -17,6 +17,7 @@ import typer
 from bathos.catalog import write_run
 from bathos.checker import hash_dependency_lock
 from bathos.git import capture_git_state
+from bathos.git_pin import pin_result_as_dict, pin_run
 from bathos.prereg import (
     GateErrorCode,
     _gate_failure_payload,
@@ -517,6 +518,36 @@ def run_script(
     except Exception as e:
         event("run.error", phase="persist", exc_type=type(e).__name__, exc_msg=str(e))
         raise
+
+    # Make the git provenance DURABLE, not merely recorded. Capturing `git_hash` is already
+    # reliable; keeping it resolvable is not. Measured on one project's catalog (2026-08-18):
+    # 345/345 runs had a hash, only 40.6% still resolved, and 92.2% ran on a dirty tree -- so the
+    # median run recorded a clean-looking hash for a tree that never existed. A per-run ref makes
+    # the cited commit un-collectable and survives deletion of the branch it was made on, and on a
+    # dirty tree the ref points at a snapshot of what actually ran.
+    #
+    # Best-effort by construction: provenance capture must never be able to fail a run.
+    try:
+        pin = pin_run(
+            run_id=run.id,
+            git_hash=git.hash,
+            git_branch=git.branch,
+            dirty=git.dirty,
+            cwd=cwd,
+        )
+        event("run.pinned", run_uuid=run.id, **pin_result_as_dict(pin))
+        if pin.ignored_provenance_paths:
+            # Loud, because the failure is silent otherwise: a claim written to an ignored path is
+            # never committed, and a claim's sha256 is the tamper anchor its campaign's Union Gate
+            # evaluates against. Observed in the wild leaving 3 of 4 claims untracked.
+            typer.echo(
+                "warning: these provenance paths are gitignored, so anything written there will "
+                f"never be committed: {', '.join(pin.ignored_provenance_paths)}. "
+                "Narrow the ignore rule (e.g. `.bth/*` plus `!.bth/claims/` and `!.bth/refs/`).",
+                err=True,
+            )
+    except Exception as e:  # pragma: no cover - defensive; pinning must not break a run
+        event("run.pin_error", run_uuid=run.id, exc_type=type(e).__name__, exc_msg=str(e))
 
     results_temp_dir = Path(tempfile.gettempdir())
 
