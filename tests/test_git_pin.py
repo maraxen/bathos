@@ -3,13 +3,13 @@ import subprocess
 from pathlib import Path
 
 from bathos.git_pin import (
-    ref_resolves,
-    uncommitted_diff_for_run,
-    update_ref,
     MANIFEST_RELPATH,
     ignored_provenance_paths,
     pin_run,
+    ref_resolves,
     snapshot_worktree,
+    uncommitted_diff_for_run,
+    update_ref,
 )
 
 
@@ -149,6 +149,17 @@ def test_snapshot_captures_untracked_but_respects_gitignore(tmp_path: Path):
     ).stdout
     assert "new_script.py" in listing
     assert "ignored_bulk/huge.bin" not in listing
+
+    # The snapshot must be PARENTED ON HEAD. Everything downstream depends on it: `git diff
+    # head_sha pinned_sha` is only the run-time delta if this holds, and storage is only delta-only
+    # because the parent shares its blobs. Asserted here rather than dropping the unused binding.
+    parents = subprocess.run(
+        ["git", "rev-list", "--parents", "-n", "1", wip],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+    ).stdout.split()
+    assert parents[1:] == [head]
 
 
 def test_pinned_commit_survives_branch_deletion(tmp_path: Path):

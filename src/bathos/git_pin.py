@@ -35,7 +35,7 @@ import json
 import subprocess
 import tempfile
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 RUN_REF_PREFIX = "refs/bathos/runs"
@@ -395,7 +395,7 @@ def pin_run(
             "ignored_declared_paths": list(result.ignored_declared_paths),
             "unpinned_reason": result.unpinned_reason,
             "complete": result.complete,
-            "recorded_at": datetime.now(timezone.utc).isoformat(),
+            "recorded_at": datetime.now(UTC).isoformat(),
         },
         cwd,
     )
