@@ -57,6 +57,18 @@ _IDENTITY_ENV = {
 }
 
 
+# Above this many bytes of newly-staged content, capture metadata instead of blobs. A snapshot is
+# permanently reachable via its ref, so an unignored output directory would grow the repository
+# without bound -- a worse failure than incomplete provenance. Calibrated against a real, messy
+# working repo mid-audit: 306 dirty paths came to 1.33 MB, so this leaves ~40x headroom and fires
+# only on a genuine "outputs/ is not ignored" mistake.
+DEFAULT_MAX_SNAPSHOT_BYTES = 50 * 1024 * 1024
+
+SNAPSHOT_FULL = "full"
+SNAPSHOT_METADATA_ONLY = "metadata_only"
+SNAPSHOT_NONE = "none"
+
+
 @dataclass
 class PinResult:
     """What was durably recorded for one run. Empty strings mean "not done"."""
@@ -67,6 +79,29 @@ class PinResult:
     manifest_path: str = ""
     unpinned_reason: str = ""
     ignored_provenance_paths: tuple[str, ...] = ()
+    # Set only after the ref has been read back. `run_ref` being non-empty means "we tried and
+    # update-ref returned 0"; these mean "the ref resolves to an object that is really there".
+    run_ref_ok: bool = False
+    wip_ref_ok: bool = False
+    snapshot_mode: str = SNAPSHOT_NONE
+    skipped_bytes: int = 0
+    skipped_paths: tuple[str, ...] = ()
+    ignored_declared_paths: tuple[str, ...] = ()
+
+    @property
+    def complete(self) -> bool:
+        """Whether this run's provenance is fully durable.
+
+        The field downstream gates should read. Deliberately strict: a partially-captured record
+        must not be able to pass for a complete one, which is the whole failure this module exists
+        to stop.
+        """
+        return (
+            self.run_ref_ok
+            and self.snapshot_mode in (SNAPSHOT_FULL, SNAPSHOT_NONE)
+            and not self.ignored_declared_paths
+            and not self.unpinned_reason
+        )
 
 
 def _git(
@@ -115,44 +150,60 @@ def ignored_provenance_paths(cwd: Path) -> tuple[str, ...]:
     return tuple(ignored)
 
 
-def snapshot_worktree(run_id: str, cwd: Path) -> str | None:
-    """Commit the working tree's ACTUAL contents to a dangling object; return its sha.
+@dataclass
+class SnapshotResult:
+    """Outcome of trying to capture the working tree."""
 
-    Uses a throwaway index so the caller's index, worktree and branches are never touched. `git add
-    -A` respects `.gitignore`, so ignored bulk (virtualenvs, caches, large scratch outputs) is not
-    swept in, while untracked-but-tracked-able files -- frequently the script that actually ran --
-    are captured.
+    commit: str = ""
+    mode: str = SNAPSHOT_NONE
+    skipped_bytes: int = 0
+    skipped_paths: tuple[str, ...] = ()
 
-    Storage is a delta against HEAD: unchanged blobs are shared with objects the repository already
-    has, so a snapshot costs roughly the changed files and nothing more. This is why a plain object
-    plus a ref is preferable to writing a bundle per run -- same bytes, no dependency on a base
-    commit still being present at read time, and git's own GC protection applies.
+
+def snapshot_worktree_detailed(
+    run_id: str, cwd: Path, max_bytes: int = DEFAULT_MAX_SNAPSHOT_BYTES
+) -> SnapshotResult:
+    """Capture the working tree, degrading explicitly when it is too large to store.
+
+    Over `max_bytes` of newly-staged content the blobs are NOT committed. A snapshot is permanently
+    reachable through its ref, so capturing an unignored output directory would grow the repository
+    without bound on every dirty run -- a worse outcome than incomplete provenance. Instead the
+    result reports `metadata_only` with the byte count and the largest contributors, so the record
+    states what it could not keep and the caller can name the paths that should be ignored.
     """
     root = repo_root(cwd)
     if root is None:
-        return None
+        return SnapshotResult()
 
     head = _git("rev-parse", "HEAD", cwd=root)
     if head.returncode != 0:
-        return None  # unborn branch: nothing to parent a snapshot onto
+        return SnapshotResult()  # unborn branch: nothing to parent a snapshot onto
     parent = head.stdout.strip()
 
     with tempfile.TemporaryDirectory(prefix="bathos-index-") as tmpdir:
         index_env = {"GIT_INDEX_FILE": str(Path(tmpdir) / "index")}
 
         if _git("read-tree", parent, cwd=root, env_extra=index_env).returncode != 0:
-            return None
+            return SnapshotResult()
         if _git("add", "-A", cwd=root, env_extra=index_env).returncode != 0:
-            return None
+            return SnapshotResult()
+
+        total, sized = _staged_bytes(cwd, index_env)
+        if total > max_bytes:
+            return SnapshotResult(
+                mode=SNAPSHOT_METADATA_ONLY,
+                skipped_bytes=total,
+                skipped_paths=tuple(rel for _size, rel in sized[:10]),
+            )
 
         tree = _git("write-tree", cwd=root, env_extra=index_env)
         if tree.returncode != 0:
-            return None
+            return SnapshotResult()
         tree_sha = tree.stdout.strip()
 
         # An unchanged tree means the worktree matched HEAD after all; no snapshot needed.
         if tree_sha == _git("rev-parse", f"{parent}^{{tree}}", cwd=root).stdout.strip():
-            return None
+            return SnapshotResult()
 
         commit = _git(
             "commit-tree",
@@ -165,16 +216,70 @@ def snapshot_worktree(run_id: str, cwd: Path) -> str | None:
             env_extra={**index_env, **_IDENTITY_ENV},
         )
         if commit.returncode != 0:
-            return None
-        return commit.stdout.strip() or None
+            return SnapshotResult()
+        sha = commit.stdout.strip()
+        if not sha:
+            return SnapshotResult()
+        return SnapshotResult(commit=sha, mode=SNAPSHOT_FULL)
+
+
+def snapshot_worktree(run_id: str, cwd: Path) -> str | None:
+    """Backwards-compatible wrapper: the snapshot commit sha, or None.
+
+    Callers that need to know WHY nothing was captured -- clean tree versus too large to store --
+    should use `snapshot_worktree_detailed`, since both cases return None here.
+    """
+    return snapshot_worktree_detailed(run_id, cwd).commit or None
+
 
 
 def update_ref(ref: str, sha: str, cwd: Path) -> bool:
-    """Point `ref` at `sha`. Returns whether it took."""
+    """Point `ref` at `sha`, then READ IT BACK. Returns whether the ref really resolves.
+
+    Verifying rather than trusting `update-ref`'s exit code is the difference between recording that
+    something is durable and knowing it is. A ref that failed to be written -- unwritable ref
+    directory, full disk, lock contention -- would otherwise be reported as pinned while its object
+    is collectable, which is precisely the false attestation this module exists to eliminate.
+    """
     root = repo_root(cwd)
     if root is None or not sha:
         return False
-    return _git("update-ref", ref, sha, cwd=root).returncode == 0
+    if _git("update-ref", ref, sha, cwd=root).returncode != 0:
+        return False
+    verify = _git("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", cwd=root)
+    return verify.returncode == 0 and verify.stdout.strip() == sha
+
+
+def ref_resolves(ref: str, cwd: Path) -> bool:
+    """Whether `ref` currently resolves to a present commit object."""
+    root = repo_root(cwd)
+    if root is None:
+        return False
+    return _git("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", cwd=root).returncode == 0
+
+
+def _staged_bytes(cwd: Path, index_env: dict[str, str]) -> tuple[int, list[tuple[int, str]]]:
+    """Total size of paths differing from HEAD in the temp index, plus the largest contributors."""
+    root = repo_root(cwd)
+    if root is None:
+        return 0, []
+    listing = _git("diff", "--cached", "--name-only", "HEAD", cwd=root, env_extra=index_env)
+    if listing.returncode != 0:
+        return 0, []
+    sized: list[tuple[int, str]] = []
+    total = 0
+    for rel in listing.stdout.splitlines():
+        rel = rel.strip()
+        if not rel:
+            continue
+        try:
+            size = (root / rel).stat().st_size
+        except OSError:
+            continue  # deleted paths contribute nothing to snapshot size
+        total += size
+        sized.append((size, rel))
+    sized.sort(reverse=True)
+    return total, sized
 
 
 def append_manifest(entry: dict, cwd: Path) -> Path | None:
@@ -192,14 +297,50 @@ def append_manifest(entry: dict, cwd: Path) -> Path | None:
     return path
 
 
-def pin_run(run_id: str, git_hash: str, git_branch: str, dirty: bool, cwd: Path) -> PinResult:
+def ignored_declared_paths(paths: list[str] | tuple[str, ...], cwd: Path) -> tuple[str, ...]:
+    """Which of the caller's DECLARED load-bearing paths this repo ignores.
+
+    The inverse hazard to an oversized snapshot: `git add -A` respects `.gitignore`, so a file that
+    matters but is ignored is omitted from the snapshot silently. bathos cannot discover undeclared
+    inputs -- a config read at runtime that nobody registered is beyond what any of this can see --
+    but it can enforce that what WAS declared is capturable, which is the part a tool can own.
+    """
+    root = repo_root(cwd)
+    if root is None or not paths:
+        return ()
+    ignored = []
+    for raw in paths:
+        if not raw:
+            continue
+        result = _git("check-ignore", "-q", str(raw), cwd=root)
+        if result.returncode == 0:
+            ignored.append(str(raw))
+    return tuple(ignored)
+
+
+def pin_run(
+    run_id: str,
+    git_hash: str,
+    git_branch: str,
+    dirty: bool,
+    cwd: Path,
+    declared_paths: list[str] | tuple[str, ...] = (),
+    max_snapshot_bytes: int = DEFAULT_MAX_SNAPSHOT_BYTES,
+) -> PinResult:
     """Durably record one run's provenance. Never raises; degrades to a partial result.
 
     On a dirty tree the run ref points at the SNAPSHOT rather than at HEAD, because the snapshot is
     the tree that actually ran. `git_hash` is still recorded in the manifest so the relationship to
     the committed history stays visible.
+
+    Every degradation is recorded rather than swallowed: a ref that did not take, a snapshot too
+    large to store, a declared path the repo ignores. The manifest entry carries all of it, so
+    "which runs have complete provenance?" is a query instead of an excavation.
     """
-    result = PinResult(ignored_provenance_paths=ignored_provenance_paths(cwd))
+    result = PinResult(
+        ignored_provenance_paths=ignored_provenance_paths(cwd),
+        ignored_declared_paths=ignored_declared_paths(declared_paths, cwd),
+    )
 
     if repo_root(cwd) is None:
         result.unpinned_reason = "not a git repository"
@@ -210,17 +351,28 @@ def pin_run(run_id: str, git_hash: str, git_branch: str, dirty: bool, cwd: Path)
 
     pinned_sha = git_hash
     if dirty:
-        wip = snapshot_worktree(run_id, cwd)
-        if wip:
-            result.wip_commit = wip
+        snap = snapshot_worktree_detailed(run_id, cwd, max_bytes=max_snapshot_bytes)
+        result.snapshot_mode = snap.mode
+        result.skipped_bytes = snap.skipped_bytes
+        result.skipped_paths = snap.skipped_paths
+        if snap.commit:
+            result.wip_commit = snap.commit
             wip_ref = f"{WIP_REF_PREFIX}/{run_id}"
-            if update_ref(wip_ref, wip, cwd):
+            if update_ref(wip_ref, snap.commit, cwd):
                 result.wip_ref = wip_ref
-            pinned_sha = wip
+                result.wip_ref_ok = True
+            else:
+                result.unpinned_reason = "could not create wip ref"
+            pinned_sha = snap.commit
+        elif snap.mode == SNAPSHOT_METADATA_ONLY:
+            result.unpinned_reason = (
+                f"working tree too large to snapshot ({snap.skipped_bytes:,} bytes)"
+            )
 
     run_ref = f"{RUN_REF_PREFIX}/{run_id}"
     if update_ref(run_ref, pinned_sha, cwd):
         result.run_ref = run_ref
+        result.run_ref_ok = True
     else:
         result.unpinned_reason = result.unpinned_reason or "could not create run ref"
 
@@ -232,6 +384,17 @@ def pin_run(run_id: str, git_hash: str, git_branch: str, dirty: bool, cwd: Path)
             "branch": git_branch,
             "dirty": bool(dirty),
             "wip_commit": result.wip_commit,
+            # Recorded so a reader can tell a durable record from a partial one WITHOUT re-deriving
+            # it. Omitting these is what let the original version claim a run was pinned when its
+            # ref had failed to be written and its object was already collectable.
+            "run_ref_ok": result.run_ref_ok,
+            "wip_ref_ok": result.wip_ref_ok,
+            "snapshot_mode": result.snapshot_mode,
+            "skipped_bytes": result.skipped_bytes,
+            "skipped_paths": list(result.skipped_paths),
+            "ignored_declared_paths": list(result.ignored_declared_paths),
+            "unpinned_reason": result.unpinned_reason,
+            "complete": result.complete,
             "recorded_at": datetime.now(timezone.utc).isoformat(),
         },
         cwd,
@@ -242,27 +405,53 @@ def pin_run(run_id: str, git_hash: str, git_branch: str, dirty: bool, cwd: Path)
     return result
 
 
-def manifest_entry(run_id: str, cwd: Path) -> dict | None:
-    """The most recent manifest record for `run_id`, or None."""
+def manifest_candidates(cwd: Path) -> list[Path]:
+    """Every manifest that could describe a run in THIS repository.
+
+    Refs are shared across linked worktrees but the manifest is an ordinary file in one checkout, so
+    a run pinned inside `git worktree add`-ed tree is absent from the main worktree's manifest even
+    though its ref and object are fully present there. Since worktree-per-task is a common workflow,
+    that would make the manifest miss the majority of runs -- so lookups consult the current
+    worktree AND the main one.
+    """
     root = repo_root(cwd)
     if root is None:
-        return None
-    path = root / MANIFEST_RELPATH
-    if not path.exists():
-        return None
-    found = None
-    try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
+        return []
+    candidates = [root]
+
+    # Enumerate EVERY linked worktree, not just the main one. Looking only "upward" via
+    # --git-common-dir finds main from a linked tree but not a linked tree from main, which leaves
+    # the more common direction broken: work happens in the worktree, and it is read from main.
+    listing = _git("worktree", "list", "--porcelain", cwd=root)
+    if listing.returncode == 0:
+        for line in listing.stdout.splitlines():
+            if not line.startswith("worktree "):
                 continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue  # a corrupt line must not hide the rest of the manifest
-            if entry.get("run_id") == run_id:
-                found = entry
-    except OSError:
-        return None
+            other = Path(line[len("worktree ") :].strip())
+            if other != root and other not in candidates:
+                candidates.append(other)
+
+    return [c / MANIFEST_RELPATH for c in candidates]
+
+
+def manifest_entry(run_id: str, cwd: Path) -> dict | None:
+    """The most recent manifest record for `run_id`, from any manifest in this repository."""
+    found = None
+    for path in manifest_candidates(cwd):
+        if not path.exists():
+            continue
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue  # a corrupt line must not hide the rest of the manifest
+                if entry.get("run_id") == run_id:
+                    found = entry
+        except OSError:
+            continue
     return found
 
 

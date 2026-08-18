@@ -528,14 +528,24 @@ def run_script(
     #
     # Best-effort by construction: provenance capture must never be able to fail a run.
     try:
+        # Declared, load-bearing paths. bathos cannot discover UNdeclared inputs, but it can refuse
+        # to let a declared one be silently omitted from the snapshot because the repo ignores it.
+        declared = [str(p) for p in output_paths]
+        if script_path is not None:
+            declared.append(str(script_path))
+        if bundle and bundle.path:
+            declared.append(str(bundle.path))
+
         pin = pin_run(
             run_id=run.id,
             git_hash=git.hash,
             git_branch=git.branch,
             dirty=git.dirty,
             cwd=cwd,
+            declared_paths=declared,
         )
         event("run.pinned", run_uuid=run.id, **pin_result_as_dict(pin))
+
         if pin.ignored_provenance_paths:
             # Loud, because the failure is silent otherwise: a claim written to an ignored path is
             # never committed, and a claim's sha256 is the tamper anchor its campaign's Union Gate
@@ -545,6 +555,25 @@ def run_script(
                 f"never be committed: {', '.join(pin.ignored_provenance_paths)}. "
                 "Narrow the ignore rule (e.g. `.bth/*` plus `!.bth/claims/` and `!.bth/refs/`).",
                 err=True,
+            )
+        if pin.ignored_declared_paths:
+            typer.echo(
+                "warning: these declared paths are gitignored, so they were NOT captured in this "
+                f"run's provenance snapshot: {', '.join(pin.ignored_declared_paths)}",
+                err=True,
+            )
+        if pin.snapshot_mode == "metadata_only":
+            typer.echo(
+                f"warning: working tree is {pin.skipped_bytes:,} bytes of uncommitted content -- "
+                "too large to snapshot, so its CONTENTS were not captured. Largest contributors: "
+                f"{', '.join(pin.skipped_paths[:5])}. Consider gitignoring these.",
+                err=True,
+            )
+        if pin.unpinned_reason and pin.snapshot_mode != "metadata_only":
+            # A ref that failed to be written leaves the object collectable. Saying nothing here is
+            # what turns an incomplete record into a false attestation.
+            typer.echo(
+                f"warning: run provenance is not durable: {pin.unpinned_reason}", err=True
             )
     except Exception as e:  # pragma: no cover - defensive; pinning must not break a run
         event("run.pin_error", run_uuid=run.id, exc_type=type(e).__name__, exc_msg=str(e))

@@ -2805,10 +2805,24 @@ def ref_applicable(
 @provenance_app.command("show")
 def provenance_show(run_id: str = typer.Argument(..., help="Run id")) -> None:
     """Show what was durably pinned for a run: HEAD, the pinned commit, and whether it was dirty."""
-    from bathos.git_pin import RUN_REF_PREFIX, WIP_REF_PREFIX, manifest_entry
+    from bathos.git_pin import (
+        RUN_REF_PREFIX,
+        SNAPSHOT_METADATA_ONLY,
+        WIP_REF_PREFIX,
+        manifest_entry,
+        ref_resolves,
+    )
 
-    entry = manifest_entry(run_id, Path.cwd())
-    if entry is None:
+    cwd = Path.cwd()
+    entry = manifest_entry(run_id, cwd)
+    run_ref = f"{RUN_REF_PREFIX}/{run_id}"
+    wip_ref = f"{WIP_REF_PREFIX}/{run_id}"
+    # Check the refs regardless of the manifest: refs are shared across linked worktrees, so a run
+    # can be perfectly pinned and still be missing from the manifest this checkout happens to hold.
+    run_ref_live = ref_resolves(run_ref, cwd)
+    wip_ref_live = ref_resolves(wip_ref, cwd)
+
+    if entry is None and not run_ref_live:
         typer.echo(
             f"no provenance record for run {run_id}. Either it predates ref pinning, or it ran "
             "in a different repository (cluster runs pin in the clone they executed on).",
@@ -2816,15 +2830,47 @@ def provenance_show(run_id: str = typer.Argument(..., help="Run id")) -> None:
         )
         raise typer.Exit(1)
 
+    if entry is None:
+        typer.echo(f"run          {run_id}")
+        typer.echo(f"run ref      {run_ref}  (resolves)")
+        typer.echo(
+            "\nThe ref is present but no manifest entry was found in this checkout. The run was "
+            "most likely pinned in another worktree of this repository."
+        )
+        return
+
     typer.echo(f"run          {run_id}")
     typer.echo(f"branch       {entry.get('branch', '')}")
     typer.echo(f"head         {entry.get('head_sha', '')}")
     typer.echo(f"pinned       {entry.get('pinned_sha', '')}")
     typer.echo(f"dirty        {entry.get('dirty')}")
+    typer.echo(f"complete     {entry.get('complete')}")
     typer.echo(f"recorded_at  {entry.get('recorded_at', '')}")
-    typer.echo(f"run ref      {RUN_REF_PREFIX}/{run_id}")
+    # Report what the ref DOES, not what it would be called. Printing the name unconditionally is
+    # how the first version claimed a run was pinned when the ref had never been written.
+    typer.echo(f"run ref      {run_ref}  ({'resolves' if run_ref_live else 'MISSING'})")
     if entry.get("wip_commit"):
-        typer.echo(f"wip ref      {WIP_REF_PREFIX}/{run_id}")
+        typer.echo(f"wip ref      {wip_ref}  ({'resolves' if wip_ref_live else 'MISSING'})")
+
+    if entry.get("unpinned_reason"):
+        typer.echo(f"\nPROVENANCE INCOMPLETE: {entry['unpinned_reason']}", err=True)
+    if entry.get("snapshot_mode") == SNAPSHOT_METADATA_ONLY:
+        skipped = entry.get("skipped_paths") or []
+        typer.echo(
+            f"\nThe working tree was too large to snapshot ({entry.get('skipped_bytes', 0):,} "
+            "bytes), so its CONTENTS were not captured. Largest contributors:",
+            err=True,
+        )
+        for path in skipped[:10]:
+            typer.echo(f"  {path}", err=True)
+        typer.echo("Consider gitignoring these, then re-running.", err=True)
+    if entry.get("ignored_declared_paths"):
+        typer.echo(
+            "\nThese declared paths are gitignored and were NOT captured in the snapshot: "
+            f"{', '.join(entry['ignored_declared_paths'])}",
+            err=True,
+        )
+    if entry.get("wip_commit") and not entry.get("unpinned_reason"):
         typer.echo("")
         typer.echo(
             "This run executed on a DIRTY tree, so `pinned` is a snapshot of what actually ran, "

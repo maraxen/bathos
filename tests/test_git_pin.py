@@ -3,7 +3,9 @@ import subprocess
 from pathlib import Path
 
 from bathos.git_pin import (
+    ref_resolves,
     uncommitted_diff_for_run,
+    update_ref,
     MANIFEST_RELPATH,
     ignored_provenance_paths,
     pin_run,
@@ -292,3 +294,136 @@ def test_unknown_hash_is_not_pinned(tmp_path: Path):
     result = pin_run("run-unknown", "unknown", "unknown", dirty=False, cwd=tmp_path)
     assert result.run_ref == ""
     assert "no resolvable HEAD" in result.unpinned_reason
+
+
+# --- Regressions for defects found by adversarial audit (260818) -------------------------------
+
+
+def test_failed_ref_creation_is_recorded_not_claimed(tmp_path: Path):
+    """The module's own failure mode: reporting a run as pinned when the ref never took.
+
+    Original defect -- the manifest was appended unconditionally and never carried the failure, so a
+    run whose object was already collectable read as durable. Simulated by making the ref directory
+    unwritable, which is what a full disk or lock contention produces.
+    """
+    import os
+    import stat
+
+    head = _init_repo(tmp_path)
+    refs_dir = tmp_path / ".git" / "refs"
+    original_mode = refs_dir.stat().st_mode
+    os.chmod(refs_dir, stat.S_IREAD | stat.S_IEXEC)
+    try:
+        result = pin_run("run-permfail", head, "main", dirty=False, cwd=tmp_path)
+    finally:
+        os.chmod(refs_dir, original_mode)
+
+    assert result.run_ref_ok is False
+    assert result.unpinned_reason
+    assert result.complete is False
+
+    entry = json.loads((tmp_path / MANIFEST_RELPATH).read_text().strip())
+    assert entry["run_ref_ok"] is False
+    assert entry["complete"] is False
+    assert entry["unpinned_reason"]
+
+
+def test_update_ref_verifies_rather_than_trusting_exit_code(tmp_path: Path):
+    head = _init_repo(tmp_path)
+    assert update_ref("refs/bathos/runs/verified", head, tmp_path) is True
+    assert ref_resolves("refs/bathos/runs/verified", tmp_path) is True
+    assert ref_resolves("refs/bathos/runs/never-made", tmp_path) is False
+
+
+def test_dirty_flag_but_unchanged_tree_makes_no_snapshot(tmp_path: Path):
+    """Coverage gap found by mutation: nothing exercised dirty=True over a tree matching HEAD."""
+    head = _init_repo(tmp_path)
+
+    result = pin_run("run-notreally", head, "main", dirty=True, cwd=tmp_path)
+
+    assert result.wip_commit == ""
+    assert result.snapshot_mode == "none"
+    assert _rev(tmp_path, result.run_ref) == head
+    assert result.complete is True
+
+
+def test_diff_works_from_ref_alone_when_manifest_is_absent(tmp_path: Path):
+    """Coverage gap found by mutation: the ref-present/manifest-missing direction was untested."""
+    head = _init_repo(tmp_path)
+    (tmp_path / "tracked.txt").write_text("what actually ran")
+    pin_run("run-nomanifest", head, "main", dirty=True, cwd=tmp_path)
+
+    (tmp_path / MANIFEST_RELPATH).unlink()
+
+    diff = uncommitted_diff_for_run("run-nomanifest", tmp_path)
+    assert diff is not None
+    assert "what actually ran" in diff
+
+
+def test_oversized_worktree_degrades_to_metadata_instead_of_bloating(tmp_path: Path):
+    """An unignored output dir must not be committed into a permanently-reachable snapshot."""
+    head = _init_repo(tmp_path)
+    (tmp_path / "outputs").mkdir()
+    (tmp_path / "outputs" / "big.bin").write_bytes(b"x" * 200_000)
+
+    result = pin_run(
+        "run-big", head, "main", dirty=True, cwd=tmp_path, max_snapshot_bytes=50_000
+    )
+
+    assert result.snapshot_mode == "metadata_only"
+    assert result.wip_commit == ""
+    assert result.skipped_bytes >= 200_000
+    assert any("big.bin" in p for p in result.skipped_paths)
+    assert result.complete is False  # must not pass for a durable record
+
+    entry = json.loads((tmp_path / MANIFEST_RELPATH).read_text().strip())
+    assert entry["snapshot_mode"] == "metadata_only"
+    assert entry["complete"] is False
+
+
+def test_ignored_declared_path_is_reported(tmp_path: Path):
+    """The inverse hazard: a load-bearing file the repo ignores is omitted from the snapshot."""
+    head = _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text("secret_config.yaml\n")
+    (tmp_path / "secret_config.yaml").write_text("k: v")
+
+    result = pin_run(
+        "run-ignored",
+        head,
+        "main",
+        dirty=True,
+        cwd=tmp_path,
+        declared_paths=["secret_config.yaml", "tracked.txt"],
+    )
+
+    assert result.ignored_declared_paths == ("secret_config.yaml",)
+    assert result.complete is False
+
+
+def test_manifest_is_found_from_a_sibling_worktree(tmp_path: Path):
+    """Refs are shared across linked worktrees; the manifest must be found from either side.
+
+    Worktree-per-task is a common workflow, so a run pinned inside `git worktree add` must not be
+    invisible from the main checkout while its ref sits there resolvable.
+    """
+    main_repo = tmp_path / "main"
+    main_repo.mkdir()
+    head = _init_repo(main_repo)
+
+    linked = tmp_path / "linked"
+    subprocess.run(
+        ["git", "worktree", "add", str(linked), "-b", "side"],
+        cwd=main_repo,
+        check=True,
+        capture_output=True,
+    )
+
+    pin_run("run-wt", head, "side", dirty=False, cwd=linked)
+
+    # Written in the linked worktree, and must be readable from the main one.
+    from bathos.git_pin import manifest_entry
+
+    assert manifest_entry("run-wt", linked) is not None
+    entry = manifest_entry("run-wt", main_repo)
+    assert entry is not None
+    assert entry["run_id"] == "run-wt"
