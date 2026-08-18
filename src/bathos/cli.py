@@ -2902,3 +2902,42 @@ def provenance_diff(
         typer.echo(f"run {run_id} executed on a clean tree; the recorded commit is exact.")
         return
     typer.echo(diff, nl=False)
+
+
+@provenance_app.command("import")
+def provenance_import(
+    directory: str = typer.Option(
+        "", "--dir", help="Directory of .bundle files (default: outputs/provenance)"
+    ),
+) -> None:
+    """Import provenance bundles produced by runs on another machine.
+
+    Cluster runs pin into the cluster's object store, which is not the one results are read from,
+    and compute hosts usually have no network path to the shared remote. So a dirty remote run
+    exports its snapshot as a bundle under the results directory, which travels back with the
+    results; this imports it.
+    """
+    from bathos.git_pin import EXPORT_DIRNAME, import_bundles
+
+    cwd = Path.cwd()
+    target = Path(directory) if directory else None
+    report = import_bundles(cwd, import_dir=target)
+
+    for run_id in report.imported:
+        typer.echo(f"imported  {run_id}")
+    for run_id in report.already_present:
+        typer.echo(f"present   {run_id}")
+    for run_id, reason in report.unusable:
+        typer.echo(f"UNUSABLE  {run_id}: {reason}", err=True)
+
+    if not (report.imported or report.already_present or report.unusable):
+        where = target or (cwd / EXPORT_DIRNAME)
+        typer.echo(f"no provenance bundles found in {where}")
+        return
+
+    typer.echo(
+        f"\n{len(report.imported)} imported, {len(report.already_present)} already present, "
+        f"{len(report.unusable)} unusable"
+    )
+    if report.unusable:
+        raise typer.Exit(1)
