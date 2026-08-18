@@ -32,8 +32,10 @@ so every function degrades to `None`/empty rather than raising.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
+from contextlib import suppress
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -87,6 +89,8 @@ class PinResult:
     skipped_bytes: int = 0
     skipped_paths: tuple[str, ...] = ()
     ignored_declared_paths: tuple[str, ...] = ()
+    # Path to the exported bundle, when this run's snapshot needs to reach another clone.
+    bundle_path: str = ""
 
     @property
     def complete(self) -> bool:
@@ -326,6 +330,7 @@ def pin_run(
     cwd: Path,
     declared_paths: list[str] | tuple[str, ...] = (),
     max_snapshot_bytes: int = DEFAULT_MAX_SNAPSHOT_BYTES,
+    export_dir: Path | None = None,
 ) -> PinResult:
     """Durably record one run's provenance. Never raises; degrades to a partial result.
 
@@ -376,8 +381,7 @@ def pin_run(
     else:
         result.unpinned_reason = result.unpinned_reason or "could not create run ref"
 
-    manifest = append_manifest(
-        {
+    entry = {
             "run_id": run_id,
             "head_sha": git_hash,
             "pinned_sha": pinned_sha,
@@ -396,11 +400,38 @@ def pin_run(
             "unpinned_reason": result.unpinned_reason,
             "complete": result.complete,
             "recorded_at": datetime.now(UTC).isoformat(),
-        },
-        cwd,
-    )
+    }
+    manifest = append_manifest(entry, cwd)
     if manifest is not None:
         result.manifest_path = str(manifest)
+
+    # Export only when the run is REMOTE and dirty. Two conditions, both necessary:
+    #
+    #   remote -- a local run pins into the very object store its results are read from, so a
+    #             bundle would be bytes written for a journey nobody takes. Detected by the
+    #             scheduler's job id, or forced by passing `export_dir` explicitly.
+    #   dirty  -- a clean run pinned an ordinary commit the other end already has, and its run row
+    #             travels through the normal catalog sync.
+    #
+    # Getting this wrong in the permissive direction is not harmless: it would drop a bundle into
+    # the results directory on every dirty local run, which is exactly the kind of unexplained
+    # accumulation that later gets mass-deleted along with something that mattered.
+    is_remote = bool(os.environ.get("SLURM_JOB_ID") or os.environ.get("BTH_FORCE_PROVENANCE_EXPORT"))
+    if (
+        (export_dir is not None or is_remote)
+        and result.snapshot_mode == SNAPSHOT_FULL
+        and pinned_sha != git_hash
+    ):
+        bundle = export_bundle(run_id, pinned_sha, git_hash, cwd, export_dir=export_dir)
+        if bundle is not None:
+            result.bundle_path = str(bundle)
+            # The sidecar carries the manifest entry so the importing clone can rebuild the record,
+            # not just the objects: a bundle alone would restore the commit while losing what run
+            # it belonged to and whether that run's provenance was complete.
+            with suppress(OSError):
+                bundle.with_suffix(".json").write_text(
+                    json.dumps(entry, sort_keys=True), encoding="utf-8"
+                )
 
     return result
 
@@ -499,3 +530,144 @@ def pin_result_as_dict(result: PinResult) -> dict:
     payload = asdict(result)
     payload["ignored_provenance_paths"] = list(result.ignored_provenance_paths)
     return payload
+
+
+# ---------------------------------------------------------------------------
+# Cross-clone transport
+#
+# A ref protects objects inside ONE object store. Runs that execute on a cluster pin into that
+# machine's `.git`, which is not the one you read results from -- and the usual answer, pushing
+# `refs/bathos/*` to the shared remote, is unavailable when compute hosts have no outbound network
+# (the common case: login and compute nodes are frequently firewalled off entirely).
+#
+# So provenance for a REMOTE run has to travel as a file, through whatever channel already moves
+# results back. `EXPORT_DIRNAME` sits under the results directory deliberately: that directory is
+# already synced, so a bundle written there arrives with the results and needs no new transport, no
+# profile change, and no second credential path.
+#
+# Only DIRTY runs need this. A clean run pins an ordinary commit the shared remote already has, and
+# its run row (carrying `git_hash`) arrives through the normal catalog sync -- so bundling it would
+# move bytes that are already present on both ends.
+# ---------------------------------------------------------------------------
+
+EXPORT_DIRNAME = Path("outputs") / "provenance"
+
+
+@dataclass
+class ImportReport:
+    """Outcome of importing bundled provenance from another machine."""
+
+    imported: tuple[str, ...] = ()
+    already_present: tuple[str, ...] = ()
+    unusable: tuple[tuple[str, str], ...] = ()  # (run_id, reason)
+
+
+def export_bundle(
+    run_id: str,
+    pinned_sha: str,
+    head_sha: str,
+    cwd: Path,
+    export_dir: Path | None = None,
+) -> Path | None:
+    """Write a bundle carrying one run's snapshot to another clone.
+
+    The bundle is a DELTA against `head_sha` (`--not`), which keeps it to the changed files rather
+    than the whole history. That is safe here precisely because `head_sha` is the snapshot's parent
+    and an ordinary commit: any clone that can meaningfully read this run already has it, and
+    `import_bundles` verifies that rather than assuming it.
+    """
+    root = repo_root(cwd)
+    if root is None or not pinned_sha or pinned_sha == head_sha:
+        return None
+
+    target_dir = export_dir if export_dir is not None else root / EXPORT_DIRNAME
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+
+    # Bundle the REF, not the raw sha: `git bundle create` refuses a bare commit with "Refusing to
+    # create empty bundle", because a bundle is defined as a set of named refs plus the objects
+    # they need. The run ref already points at `pinned_sha`, so naming it costs nothing and makes
+    # the bundle self-describing.
+    run_ref = f"{RUN_REF_PREFIX}/{run_id}"
+    if _git("rev-parse", "--verify", "--quiet", run_ref, cwd=root).stdout.strip() != pinned_sha:
+        return None
+
+    refs = [run_ref]
+    wip_ref = f"{WIP_REF_PREFIX}/{run_id}"
+    if _git("rev-parse", "--verify", "--quiet", wip_ref, cwd=root).returncode == 0:
+        refs.append(wip_ref)
+
+    bundle_path = target_dir / f"{run_id}.bundle"
+    result = _git("bundle", "create", str(bundle_path), *refs, "--not", head_sha, cwd=root)
+    if result.returncode != 0 or not bundle_path.exists():
+        return None
+    return bundle_path
+
+
+def _ensure_refs_and_manifest(run_id: str, entry: dict, cwd: Path, root: Path) -> None:
+    """Create this clone's refs for an imported run, and record it in the local manifest."""
+    pinned = str(entry.get("pinned_sha", ""))
+    if pinned and _git("cat-file", "-e", f"{pinned}^{{commit}}", cwd=root).returncode == 0:
+        update_ref(f"{RUN_REF_PREFIX}/{run_id}", pinned, cwd)
+        wip = str(entry.get("wip_commit", ""))
+        if wip:
+            update_ref(f"{WIP_REF_PREFIX}/{run_id}", wip, cwd)
+
+    if entry and manifest_entry(run_id, cwd) is None:
+        append_manifest({**entry, "imported_from_bundle": True}, cwd)
+
+
+def import_bundles(cwd: Path, import_dir: Path | None = None) -> ImportReport:
+    """Import provenance bundles produced on another machine.
+
+    Refuses to import a bundle whose prerequisites are absent, rather than creating a ref pointing
+    at an object this clone does not have. A dangling ref would read as durable provenance while
+    being unreadable -- the exact failure this module exists to prevent, reintroduced by the back
+    door.
+    """
+    root = repo_root(cwd)
+    if root is None:
+        return ImportReport()
+
+    source_dir = import_dir if import_dir is not None else root / EXPORT_DIRNAME
+    if not source_dir.is_dir():
+        return ImportReport()
+
+    imported: list[str] = []
+    already: list[str] = []
+    unusable: list[tuple[str, str]] = []
+
+    for bundle_path in sorted(source_dir.glob("*.bundle")):
+        run_id = bundle_path.stem
+        sidecar = bundle_path.with_suffix(".json")
+        entry: dict = {}
+        if sidecar.exists():
+            try:
+                entry = json.loads(sidecar.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                entry = {}
+
+        pinned = str(entry.get("pinned_sha", ""))
+        if pinned and _git("cat-file", "-e", f"{pinned}^{{commit}}", cwd=root).returncode == 0:
+            already.append(run_id)
+            _ensure_refs_and_manifest(run_id, entry, cwd, root)
+            continue
+
+        # `bundle verify` is exactly the prerequisite check needed: it fails when the base commits
+        # the delta was built against are missing from this repository.
+        if _git("bundle", "verify", str(bundle_path), cwd=root).returncode != 0:
+            unusable.append((run_id, "bundle prerequisites missing -- fetch the base commit first"))
+            continue
+
+        if _git("bundle", "unbundle", str(bundle_path), cwd=root).returncode != 0:
+            unusable.append((run_id, "unbundle failed"))
+            continue
+
+        _ensure_refs_and_manifest(run_id, entry, cwd, root)
+        imported.append(run_id)
+
+    return ImportReport(
+        imported=tuple(imported), already_present=tuple(already), unusable=tuple(unusable)
+    )

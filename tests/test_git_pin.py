@@ -3,8 +3,11 @@ import subprocess
 from pathlib import Path
 
 from bathos.git_pin import (
+    EXPORT_DIRNAME,
     MANIFEST_RELPATH,
     ignored_provenance_paths,
+    import_bundles,
+    manifest_entry,
     pin_run,
     ref_resolves,
     snapshot_worktree,
@@ -438,3 +441,189 @@ def test_manifest_is_found_from_a_sibling_worktree(tmp_path: Path):
     entry = manifest_entry("run-wt", main_repo)
     assert entry is not None
     assert entry["run_id"] == "run-wt"
+
+
+# --- Cross-clone transport ----------------------------------------------------------------------
+
+
+def _clone_of(src: Path, dest: Path) -> Path:
+    subprocess.run(
+        ["git", "clone", "-q", str(src), str(dest)], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "t@t.com"], cwd=dest, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "T"], cwd=dest, check=True, capture_output=True
+    )
+    return dest
+
+
+def test_dirty_run_exports_a_bundle_clean_run_does_not(tmp_path: Path):
+    """Only a snapshot needs transporting; a clean run pinned a commit both ends already have."""
+    head = _init_repo(tmp_path)
+
+    clean = pin_run("run-clean", head, "main", dirty=False, cwd=tmp_path)
+    assert clean.bundle_path == ""
+
+    (tmp_path / "tracked.txt").write_text("ran like this")
+    dirty = pin_run(
+        "run-dirty", head, "main", dirty=True, cwd=tmp_path,
+        export_dir=tmp_path / EXPORT_DIRNAME,
+    )
+    assert dirty.bundle_path
+    assert Path(dirty.bundle_path).exists()
+    assert Path(dirty.bundle_path).with_suffix(".json").exists()
+
+
+def test_bundle_round_trips_the_snapshot_into_a_separate_clone(tmp_path: Path):
+    """The real scenario: a run executes on a cluster, and its snapshot must reach the machine
+    where results are read -- with no network path between the two object stores."""
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    head = _init_repo(origin)
+
+    # The "cluster" checkout, and a dirty run on it.
+    cluster = _clone_of(origin, tmp_path / "cluster")
+    (cluster / "tracked.txt").write_text("what actually ran on the cluster")
+    (cluster / "cluster_only.py").write_text("print('remote')")
+    result = pin_run(
+        "run-remote", head, "main", dirty=True, cwd=cluster,
+        export_dir=cluster / EXPORT_DIRNAME,
+    )
+    assert result.wip_commit
+
+    # The "laptop" checkout has never seen that snapshot.
+    laptop = _clone_of(origin, tmp_path / "laptop")
+    assert (
+        subprocess.run(
+            ["git", "cat-file", "-e", f"{result.wip_commit}^{{commit}}"],
+            cwd=laptop,
+            capture_output=True,
+        ).returncode
+        != 0
+    )
+
+    # Transport is a plain file copy -- whatever already moves results back.
+    dest = laptop / EXPORT_DIRNAME
+    dest.mkdir(parents=True)
+    for suffix in (".bundle", ".json"):
+        src = Path(result.bundle_path).with_suffix(suffix)
+        (dest / src.name).write_bytes(src.read_bytes())
+
+    report = import_bundles(laptop)
+    assert report.imported == ("run-remote",)
+    assert not report.unusable
+
+    # Objects, refs and the record all arrived.
+    assert (
+        subprocess.run(
+            ["git", "cat-file", "-e", f"{result.wip_commit}^{{commit}}"],
+            cwd=laptop,
+            capture_output=True,
+        ).returncode
+        == 0
+    )
+    assert _rev(laptop, "refs/bathos/runs/run-remote") == result.wip_commit
+    entry = manifest_entry("run-remote", laptop)
+    assert entry is not None
+    assert entry["imported_from_bundle"] is True
+
+    # And the whole point: the run-time diff is readable on the laptop.
+    diff = uncommitted_diff_for_run("run-remote", laptop)
+    assert diff is not None
+    assert "what actually ran on the cluster" in diff
+    assert "print('remote')" in diff
+
+
+def test_import_refuses_a_bundle_whose_base_is_missing(tmp_path: Path):
+    """A dangling ref would read as durable provenance while being unreadable -- the exact failure
+    this module exists to prevent. Refuse, and say why."""
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _init_repo(origin)
+
+    cluster = _clone_of(origin, tmp_path / "cluster")
+    # A commit that exists ONLY on the cluster, so the delta's base is unknown elsewhere.
+    (cluster / "tracked.txt").write_text("unpushed base")
+    subprocess.run(["git", "add", "-A"], cwd=cluster, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-qm", "unpushed"], cwd=cluster, check=True, capture_output=True
+    )
+    unpushed_head = _rev(cluster, "HEAD")
+    (cluster / "tracked.txt").write_text("dirty on top of an unpushed base")
+    result = pin_run(
+        "run-orphan", unpushed_head, "main", dirty=True, cwd=cluster,
+        export_dir=cluster / EXPORT_DIRNAME,
+    )
+    assert result.bundle_path
+
+    laptop = _clone_of(origin, tmp_path / "laptop")
+    dest = laptop / EXPORT_DIRNAME
+    dest.mkdir(parents=True)
+    for suffix in (".bundle", ".json"):
+        src = Path(result.bundle_path).with_suffix(suffix)
+        (dest / src.name).write_bytes(src.read_bytes())
+
+    report = import_bundles(laptop)
+    assert report.imported == ()
+    assert len(report.unusable) == 1
+    run_id, reason = report.unusable[0]
+    assert run_id == "run-orphan"
+    assert "prerequisites" in reason
+    # No ref was created for something this clone cannot read.
+    assert ref_resolves("refs/bathos/runs/run-orphan", laptop) is False
+
+
+def test_import_is_idempotent(tmp_path: Path):
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    head = _init_repo(origin)
+    cluster = _clone_of(origin, tmp_path / "cluster")
+    (cluster / "tracked.txt").write_text("x")
+    result = pin_run(
+        "run-twice", head, "main", dirty=True, cwd=cluster,
+        export_dir=cluster / EXPORT_DIRNAME,
+    )
+
+    laptop = _clone_of(origin, tmp_path / "laptop")
+    dest = laptop / EXPORT_DIRNAME
+    dest.mkdir(parents=True)
+    for suffix in (".bundle", ".json"):
+        src = Path(result.bundle_path).with_suffix(suffix)
+        (dest / src.name).write_bytes(src.read_bytes())
+
+    first = import_bundles(laptop)
+    second = import_bundles(laptop)
+    assert first.imported == ("run-twice",)
+    assert second.imported == ()
+    assert second.already_present == ("run-twice",)
+
+    lines = (laptop / MANIFEST_RELPATH).read_text().strip().splitlines()
+    assert len([x for x in lines if json.loads(x)["run_id"] == "run-twice"]) == 1
+
+
+def test_bundle_is_a_delta_not_the_whole_history(tmp_path: Path):
+    """Sized as the changed files, not the repository -- otherwise every dirty cluster run would
+    ship a full clone back through the results channel."""
+    head = _init_repo(tmp_path)
+    # Bulk that is committed, and therefore already on both ends.
+    (tmp_path / "bulk.bin").write_text("y" * 400_000)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-qm", "bulk"], cwd=tmp_path, check=True, capture_output=True)
+    head = _rev(tmp_path, "HEAD")
+
+    (tmp_path / "tracked.txt").write_text("small change")
+    result = pin_run(
+        "run-delta", head, "main", dirty=True, cwd=tmp_path,
+        export_dir=tmp_path / EXPORT_DIRNAME,
+    )
+
+    assert result.bundle_path
+    assert Path(result.bundle_path).stat().st_size < 50_000
+
+
+def test_import_outside_a_repo_or_with_no_dir_is_a_noop(tmp_path: Path):
+    assert import_bundles(tmp_path).imported == ()
+    _init_repo(tmp_path)
+    assert import_bundles(tmp_path).imported == ()
