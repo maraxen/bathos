@@ -394,6 +394,11 @@ def _build_untracked_bundle(paths: list[Path], project_root: Path, bundle_target
             shutil.copy2(p, dest)
 
         _run_git(["init", "-q"], cwd=scratch)
+        # This is a throwaway repo scoped to just the bundle contents, never the user's own
+        # repo -- fixed local identity avoids depending on a global git config existing
+        # (CI runners commonly have none, unlike a researcher's own configured machine).
+        _run_git(["config", "user.email", "bathos-archive@localhost"], cwd=scratch)
+        _run_git(["config", "user.name", "bathos artifact_archive"], cwd=scratch)
         _run_git(["add", "-A"], cwd=scratch)
         _run_git(["commit", "-q", "-m", "archived output bundle"], cwd=scratch)
         _run_git(["bundle", "create", str(bundle_target), "--all"], cwd=scratch)
