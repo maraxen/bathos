@@ -1,6 +1,5 @@
 """Tests for Signal 14 (unarchived_stale_scripts_count), sprint_audit.py."""
 
-from pathlib import Path
 
 
 def test_signal_ok_when_no_stale_scripts(tmp_path):

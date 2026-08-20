@@ -377,7 +377,11 @@ def test_restore_tail_failure_raises_registered_error_and_retry_is_idempotent(tm
     correct on disk when the tail fails, a retry after the underlying cause is fixed must
     succeed rather than getting permanently stuck on git's "nothing to commit" once the
     first attempt already staged/committed as far as it could."""
-    from bathos.artifact_archive import ArchiveError, archive_experiment_bundle, restore_archived_item
+    from bathos.artifact_archive import (
+        ArchiveError,
+        archive_experiment_bundle,
+        restore_archived_item,
+    )
 
     repo, script, _sidecar = _make_scripted_repo(tmp_path)
     original_script_text = script.read_text()

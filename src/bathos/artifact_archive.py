@@ -228,7 +228,7 @@ def parse_stub(path: Path) -> dict[str, str] | None:
             continue
         key, _, value = line.partition(":")
         fields[key.strip()] = value.strip()
-    marker_line = next((l for l in text.splitlines() if _STUB_MARKER in l), "")
+    marker_line = next((ln for ln in text.splitlines() if _STUB_MARKER in ln), "")
     if "item_id=" in marker_line:
         fields["item_id"] = marker_line.split("item_id=", 1)[1].rstrip(")").strip()
     return fields
