@@ -87,6 +87,23 @@ def _require_project_slug() -> str:
     return load_project_config(cfg_path).slug
 
 
+def _soft_project_slug() -> str | None:
+    """Best-effort project slug lookup that returns None instead of exiting.
+
+    Used by commands like `lint` that must keep working on a project with no
+    BTH_PROJECT_SLUG/.bth.toml at all (unlike `run`/`archive-artifact`, which require one).
+    """
+    slug_env = os.environ.get("BTH_PROJECT_SLUG")
+    if slug_env:
+        return slug_env
+    from bathos.config import find_project_config, load_project_config
+
+    cfg_path = find_project_config()
+    if cfg_path is None:
+        return None
+    return load_project_config(cfg_path).slug
+
+
 @app.callback(invoke_without_command=True)
 def main(
     version: bool = typer.Option(False, "--version", "-V", is_eager=True),
@@ -134,6 +151,11 @@ def run(
     no_sidecar: bool = typer.Option(
         False, "--no-sidecar", help="Bypass sidecar enforcement (logs BYPASSED)"
     ),
+    allow_stale: bool = typer.Option(
+        False,
+        "--allow-stale",
+        help="Run anyway despite the sidecar's [status] stale=true flag",
+    ),
     derived_from: str | None = typer.Option(
         None, "--derived-from", help="Parent run ID for lineage"
     ),
@@ -163,6 +185,7 @@ def run(
         tags=tag,
         agent_mode=agent_mode,
         no_sidecar=no_sidecar,
+        allow_stale=allow_stale,
         derived_from=derived_from,
         campaign_id=campaign,
         component_id=component_id,
@@ -506,6 +529,85 @@ def archive_cmd(
     except RuntimeError as e:
         typer.secho(f"✗ {str(e)}", fg="red")
         raise typer.Exit(1)
+
+
+@app.command("archive-artifact")
+def archive_artifact_cmd(
+    script_path: Path = typer.Argument(..., help="Path to the script to archive"),
+    verdict: str = typer.Option(..., "--verdict", help="One-sentence verdict on this bundle"),
+    reason: str = typer.Option(..., "--reason", help="Why this is being archived"),
+    superseded_by: str = typer.Option(
+        "", "--superseded-by", help="Run id / claim id / archive item id that supersedes this"
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show what would be archived without writing"
+    ),
+):
+    """Archive a script + its sidecar + its tracked outputs (stub-in-place, git-native).
+
+    Never invoked automatically -- `bth lint`'s check_archival_candidates only proposes
+    candidates; this command is the explicit action a human or agent takes.
+    """
+    from bathos.artifact_archive import ArchiveError, archive_experiment_bundle
+
+    slug = _require_project_slug()
+    try:
+        item = archive_experiment_bundle(
+            project_root=Path.cwd(),
+            script_path=script_path,
+            catalog_dir=_catalog_dir(),
+            project_slug=slug,
+            verdict=verdict,
+            reason=reason,
+            superseded_by=superseded_by,
+            dry_run=dry_run,
+        )
+    except ArchiveError as e:
+        typer.secho(f"✗ {e}", fg="red")
+        raise typer.Exit(1)
+
+    status = "[dry-run] " if dry_run else ""
+    typer.secho(f"✓ {status}Archived item {item.id}", fg="green")
+    for p in item.paths:
+        typer.echo(f"  {p}")
+    if not dry_run:
+        typer.secho(f"  Restore: bth restore {item.id}", fg="cyan")
+
+
+@app.command("restore")
+def restore_cmd(
+    item_id: str = typer.Argument(..., help="Archived item id"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be restored"),
+    stub_path: Path | None = typer.Option(
+        None,
+        "--stub-path",
+        help=(
+            "Path to one of the stub files bth archive-artifact wrote, used to recover "
+            "via its own embedded pre_archive_sha when there's no local ~/.bth/catalog "
+            "record for item_id (e.g. a fresh clone). Without a ledger, restores only "
+            "this one file -- restore each stub in a multi-file bundle separately."
+        ),
+    ),
+):
+    """Restore a previously archived script+output bundle."""
+    from bathos.artifact_archive import ArchiveError, restore_archived_item
+
+    try:
+        result = restore_archived_item(
+            project_root=Path.cwd(),
+            item_id=item_id,
+            catalog_dir=_catalog_dir(),
+            dry_run=dry_run,
+            stub_path=stub_path,
+        )
+    except ArchiveError as e:
+        typer.secho(f"✗ {e}", fg="red")
+        raise typer.Exit(1)
+
+    status = "[dry-run] " if dry_run else ""
+    typer.secho(f"✓ {status}Restored item {result.id}", fg="green")
+    for p in result.restored_paths:
+        typer.echo(f"  {p}")
 
 
 @app.command()
@@ -2097,6 +2199,7 @@ def lint(
     from bathos.linter import (
         IssueSeverity,
         check_adversarial_checks,
+        check_archival_candidates,
         check_baseline_ref_exists,
         check_bypass_trend,
         check_canonical_stage_names,
@@ -2104,6 +2207,7 @@ def lint(
         check_ephemeral_output_paths,
         check_residual_rates,
         check_run_concentration,
+        check_stale_scripts_without_reason,
         check_threshold_basis,
         check_todo_strings_in_scaffold,
         check_unfired_branches,
@@ -2119,6 +2223,17 @@ def lint(
     issues.extend(check_adversarial_checks(project_root.resolve()))
     issues.extend(check_threshold_basis(project_root.resolve()))
     issues.extend(check_todo_strings_in_scaffold(project_root.resolve()))
+    issues.extend(check_stale_scripts_without_reason(project_root.resolve()))
+    # check_archival_candidates works with no warm catalog at all (every stale sidecar is
+    # a candidate) as well as with one present -- unlike the checks below, it must not be
+    # gated behind db_path.exists(). project_slug scopes the archived_items lookup so a
+    # same-relative-path archived record in a DIFFERENT project (catalog_dir is commonly
+    # shared) doesn't silently suppress this warning here.
+    issues.extend(
+        check_archival_candidates(
+            project_root.resolve(), _catalog_dir(), project_slug=_soft_project_slug()
+        )
+    )
 
     # Add warm-catalog Tier-2 checks if catalog exists
     catalog_dir = _catalog_dir()

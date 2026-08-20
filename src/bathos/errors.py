@@ -47,6 +47,12 @@ class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(
     # or carried an invalid shared-secret token (bathos.mcp_auth).
     AUTH_ERROR = "auth_error"
 
+    # Artifact archival (bathos.artifact_archive): archive-artifact/restore refusals.
+    ARCHIVE_ERROR = "archive_error"
+    ARCHIVE_DIRTY_TREE = "archive_dirty_tree_refused"
+    ARCHIVE_ITEM_NOT_FOUND = "archive_item_not_found"
+    ARCHIVE_BUNDLE_NOT_FOUND = "archive_bundle_not_found"
+
 
 # Resolution hints registry: every BathosErrorCode member must have a non-empty entry
 RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
@@ -70,6 +76,10 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.INVALID_PARAM: "Verify all required parameters are provided with correct types",
     BathosErrorCode.GRADUATION_REFUSED: "Register a PASS attestation for the product (bth attestation register) before graduating it to promoted",
     BathosErrorCode.AUTH_ERROR: "Supply a valid token= matching ~/.bth/mcp_token (run any `bth` command locally to create it if missing)",
+    BathosErrorCode.ARCHIVE_ERROR: "Check the script path and item id; see the error message for the specific refusal",
+    BathosErrorCode.ARCHIVE_DIRTY_TREE: "Commit or stash the uncommitted bundle-path changes, then retry",
+    BathosErrorCode.ARCHIVE_ITEM_NOT_FOUND: "Verify the item id, or pass stub_path pointing at one of the stub files bth archive-artifact wrote (its embedded pre_archive_sha recovers it without the ledger)",
+    BathosErrorCode.ARCHIVE_BUNDLE_NOT_FOUND: "The archive_bundles/<slug>/<item_id>.bundle file referenced by the ledger is missing on this machine -- restore what's recoverable from git history and recover the bundle from a backup or another clone",
 }
 
 
@@ -126,4 +136,9 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     # INTERNAL is being used as the catch-all because no DEPENDENCY_MISSING code
     # exists. Worth revisiting alongside any future taxonomy change.
     "ScipyUnavailableError": BathosErrorCode.INTERNAL,
+    # Artifact archival (bathos.artifact_archive): archive-artifact/restore refusals.
+    "ArchiveError": BathosErrorCode.ARCHIVE_ERROR,
+    "DirtyTreeError": BathosErrorCode.ARCHIVE_DIRTY_TREE,
+    "ArtifactNotFoundError": BathosErrorCode.ARCHIVE_ITEM_NOT_FOUND,
+    "BundleNotFoundError": BathosErrorCode.ARCHIVE_BUNDLE_NOT_FOUND,
 }

@@ -867,3 +867,151 @@ def test_parse_experiment_sidecar_differential_block_unknown_key_warning(tmp_pat
 
     assert sidecar.differential is not None
     assert any("Unknown key in [differential]" in record.message for record in caplog.records)
+
+
+def test_parse_experiment_sidecar_status_block(tmp_path):
+    """[status] block with stale/stale_reason/superseded_by is parsed correctly."""
+    from bathos.sidecar import parse_sidecar
+
+    path = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "Test hypothesis"
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        value = "float"
+        [status]
+        stale = true
+        stale_reason = "wt-summary-json default points at a mismatched input"
+        superseded_by = "run_abc123"
+    """,
+    )
+    sidecar = parse_sidecar(path)
+    assert sidecar.status is not None
+    assert sidecar.status.stale is True
+    assert sidecar.status.stale_reason == (
+        "wt-summary-json default points at a mismatched input"
+    )
+    assert sidecar.status.superseded_by == "run_abc123"
+
+
+def test_parse_experiment_sidecar_status_block_absent(tmp_path):
+    """When [status] absent, status is None."""
+    from bathos.sidecar import parse_sidecar
+
+    path = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "Test hypothesis"
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        value = "float"
+    """,
+    )
+    sidecar = parse_sidecar(path)
+    assert sidecar.status is None
+
+
+def test_parse_experiment_sidecar_status_block_defaults(tmp_path):
+    """[status] present but empty defaults stale=False and empty strings."""
+    from bathos.sidecar import parse_sidecar
+
+    path = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "Test hypothesis"
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        value = "float"
+        [status]
+    """,
+    )
+    sidecar = parse_sidecar(path)
+    assert sidecar.status is not None
+    assert sidecar.status.stale is False
+    assert sidecar.status.stale_reason == ""
+    assert sidecar.status.superseded_by == ""
+
+
+def test_parse_experiment_sidecar_status_block_unknown_key_warning(tmp_path, caplog):
+    """Unknown keys in [status] emit WARNING."""
+    import logging
+
+    from bathos.sidecar import parse_sidecar
+
+    path = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "Test hypothesis"
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Fallback"
+        is_residual = true
+        [result_schema]
+        value = "float"
+        [status]
+        stale = true
+        unknown_field = "should warn"
+    """,
+    )
+    with caplog.at_level(logging.WARNING, logger="bathos.sidecar"):
+        sidecar = parse_sidecar(path)
+
+    assert sidecar.status is not None
+    assert any("Unknown key in [status]" in record.message for record in caplog.records)
+
+
+def test_parse_benchmark_sidecar_status_block(tmp_path):
+    """[status] applies to non-experiment sidecar kinds too (e.g. benchmark)."""
+    from bathos.sidecar import parse_sidecar
+
+    path = _write_toml(
+        tmp_path,
+        """
+        [benchmark]
+        baseline_ref = "run_xyz"
+        metric = "ns_per_day"
+        [result_schema]
+        ns_per_day = "float"
+        [status]
+        stale = true
+        stale_reason = "baseline script superseded"
+    """,
+    )
+    sidecar = parse_sidecar(path)
+    assert sidecar.status is not None
+    assert sidecar.status.stale is True
+    assert sidecar.status.stale_reason == "baseline script superseded"

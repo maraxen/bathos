@@ -35,6 +35,7 @@ class GateErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(En
     RESULT_SCHEMA_MISMATCH = "result_schema_mismatch"  # reserved: strict schema enforcement in v0.7
     OUTCOME_AMBIGUOUS = "outcome_ambiguous"  # reserved: multiple outcome conditions evaluating true
     DIFFERENTIAL_INVARIANT_VIOLATED = "differential_invariant_violated"  # debt #1071
+    SCRIPT_STALE = "script_stale"
     INTERNAL = "internal"
 
 
@@ -88,6 +89,7 @@ _RESOLUTION_HINTS: dict[GateErrorCode, str] = {
     GateErrorCode.RESULT_SCHEMA_MISMATCH: "Ensure script output JSON matches the result_schema in the sidecar",
     GateErrorCode.OUTCOME_AMBIGUOUS: "Ensure exactly one outcome condition evaluates to true",
     GateErrorCode.DIFFERENTIAL_INVARIANT_VIOLATED: "Investigate why the measurement pipeline produces the same/different result regardless of the [differential] knob",
+    GateErrorCode.SCRIPT_STALE: "Remove [status] stale=true once the script is fixed, or pass --allow-stale to run it anyway despite the flag",
     GateErrorCode.INTERNAL: "File a bug report with the full error message",
 }
 
@@ -399,6 +401,7 @@ def gate_check(
     mode: AgentMode,
     catalog_dir: Path | None = None,
     git_hash: str = "",
+    allow_stale: bool = False,
 ) -> GateResult:
     """Run the pre-registration gate. Returns GateResult with ok=True or structured error."""
     from bathos.sidecar import is_in_enforced_dir
@@ -436,6 +439,30 @@ def gate_check(
             "prereg.gate_deny",
             script_path=str(script_path),
             reason="sidecar_invalid",
+            agent_mode=mode,
+        )
+        return GateResult(
+            ok=False, mode=mode, bundle=bundle, validation=validation, error_payload=payload
+        )
+
+    # Stale-script gate: block in BOTH collaborative and autonomous mode, unlike the
+    # autonomous-only checks below -- a human re-running a script with a known-wrong
+    # default is exactly as dangerous as an agent doing so. Bypassable only via the
+    # explicit --allow-stale flag, never implicitly by agent_mode.
+    if sidecar.status and sidecar.status.stale and not allow_stale:
+        payload = _gate_failure_payload(
+            error_code=GateErrorCode.SCRIPT_STALE,
+            phase="pre_execution",
+            errors=[
+                sidecar.status.stale_reason or "script marked stale in [status]",
+                f"superseded_by={sidecar.status.superseded_by or '(unset)'}",
+            ],
+            agent_mode=mode,
+        )
+        event(
+            "prereg.gate_deny",
+            script_path=str(script_path),
+            reason="script_stale",
             agent_mode=mode,
         )
         return GateResult(

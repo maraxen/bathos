@@ -563,6 +563,60 @@ def _ingest_ledger_fragments(con: duckdb.DuckDBPyConnection, catalog_dir: Path) 
     return ingested
 
 
+def _ingest_archived_item_fragments(con: duckdb.DuckDBPyConnection, catalog_dir: Path) -> int:
+    """Re-derive the warm ``archived_items`` table from cool-tier fragments.
+
+    Mirrors :func:`_ingest_ledger_fragments` exactly, adapted for the archive ledger's
+    append-only (archived -> possibly-later-restored) semantics: every fragment is a
+    distinct, immutable record keyed by its own ``record_id``, so re-ingestion is
+    skip-if-present. No-op if ``<catalog_dir>/archived_items/`` does not exist -- projects
+    that never archive anything pay zero cost here.
+
+    Returns the number of fragment records ingested (post skip-if-present).
+    """
+    import json
+
+    from bathos.archived_items import _TABLE_SCHEMA, read_archived_item_fragments
+
+    records = read_archived_item_fragments(catalog_dir)
+    if not records:
+        return 0
+
+    con.execute(_TABLE_SCHEMA)
+    ingested = 0
+    for record in records:
+        existing = con.execute(
+            "SELECT record_id FROM archived_items WHERE record_id = ?", [record.record_id]
+        ).fetchone()
+        if existing:
+            continue
+        con.execute(
+            "INSERT INTO archived_items "
+            "(id, project_slug, event, kind, paths, pre_archive_sha, stub_commit_sha, verdict, "
+            "reason, superseded_by, bundle_sha256, bundle_path, archived_by, recorded_at, "
+            "record_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                record.id,
+                record.project_slug,
+                record.event,
+                record.kind,
+                json.dumps(record.paths),
+                record.pre_archive_sha,
+                record.stub_commit_sha,
+                record.verdict,
+                record.reason,
+                record.superseded_by,
+                record.bundle_sha256,
+                record.bundle_path,
+                record.archived_by,
+                record.recorded_at,
+                record.record_id,
+            ],
+        )
+        ingested += 1
+    return ingested
+
+
 def _ingest_anchor_fragments(con: duckdb.DuckDBPyConnection, catalog_dir: Path) -> int:
     """Re-derive the warm ``sidecar_anchors`` table from cool-tier anchor fragments.
 
@@ -781,6 +835,11 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
     # same pattern as anchors above. Unconditional, cheap no-op if no ledger/
     # fragments exist, fires on force_rebuild too.
     _ingest_ledger_fragments(con, catalog_dir)
+
+    # Artifact archival: re-derive archived_items from cool-tier fragments, same
+    # pattern as trust_ledger above. Unconditional, cheap no-op if no
+    # archived_items/ fragments exist, fires on force_rebuild too.
+    _ingest_archived_item_fragments(con, catalog_dir)
 
     # Track ingested and skipped counts
     ingested = 0

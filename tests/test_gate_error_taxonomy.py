@@ -24,6 +24,7 @@ class TestGateErrorCode:
             "RESULT_SCHEMA_MISMATCH",
             "OUTCOME_AMBIGUOUS",
             "DIFFERENTIAL_INVARIANT_VIOLATED",
+            "SCRIPT_STALE",
             "INTERNAL",
         }
         actual_codes = {code.name for code in GateErrorCode}
