@@ -984,14 +984,24 @@ def archive_artifact_tool(
     Returns:
         Dict with the archived item's fields, or {"error": ..., "error_code": ...} on failure
     """
-    from bathos.artifact_archive import ArchiveError, archive_experiment_bundle
+    from bathos.artifact_archive import (
+        ArchiveError,
+        ArtifactNotFoundError,
+        DirtyTreeError,
+        archive_experiment_bundle,
+    )
 
     if not script_path:
-        return {"error": "script_path parameter is required", "error_code": "missing_argument"}
+        return {
+            "error": "script_path parameter is required",
+            "error_code": BathosErrorCode.INVALID_PARAM.value,
+            "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.INVALID_PARAM],
+        }
     if not verdict or not reason:
         return {
             "error": "verdict and reason parameters are required",
-            "error_code": "missing_argument",
+            "error_code": BathosErrorCode.INVALID_PARAM.value,
+            "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.INVALID_PARAM],
         }
 
     cat_dir = _get_catalog_dir(catalog_dir or None)
@@ -1009,8 +1019,15 @@ def archive_artifact_tool(
             superseded_by=superseded_by,
             dry_run=dry_run,
         )
+    except DirtyTreeError as e:
+        code = BathosErrorCode.ARCHIVE_DIRTY_TREE
+        return {"error": str(e), "error_code": code.value, "resolution_hint": RESOLUTION_HINTS[code]}
+    except ArtifactNotFoundError as e:
+        code = BathosErrorCode.ARCHIVE_ITEM_NOT_FOUND
+        return {"error": str(e), "error_code": code.value, "resolution_hint": RESOLUTION_HINTS[code]}
     except ArchiveError as e:
-        return {"error": str(e), "error_code": "artifact_archive_refused"}
+        code = BathosErrorCode.ARCHIVE_ERROR
+        return {"error": str(e), "error_code": code.value, "resolution_hint": RESOLUTION_HINTS[code]}
 
     return {"ok": True, "item": dataclasses.asdict(item)}
 
@@ -1020,6 +1037,7 @@ def restore_tool(
     project_root: str = "",
     catalog_dir: str = "",
     dry_run: bool = False,
+    stub_path: str = "",
 ) -> dict:
     """Restore a previously archived script+output bundle.
 
@@ -1028,14 +1046,22 @@ def restore_tool(
         project_root: Project root directory (empty = current directory)
         catalog_dir: Catalog directory (empty = use default)
         dry_run: Show what would be restored without writing
+        stub_path: Path to one of the stub files bth archive-artifact wrote, used to
+            recover via its own embedded pre_archive_sha when there's no local
+            ~/.bth/catalog record for item_id (e.g. a fresh clone). Without a ledger,
+            restores only this one file.
 
     Returns:
         Dict with restored paths, or {"error": ..., "error_code": ...} on failure
     """
-    from bathos.artifact_archive import ArchiveError, restore_archived_item
+    from bathos.artifact_archive import ArchiveError, ArtifactNotFoundError, restore_archived_item
 
     if not item_id:
-        return {"error": "item_id parameter is required", "error_code": "missing_argument"}
+        return {
+            "error": "item_id parameter is required",
+            "error_code": BathosErrorCode.INVALID_PARAM.value,
+            "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.INVALID_PARAM],
+        }
 
     cat_dir = _get_catalog_dir(catalog_dir or None)
     proj_root = Path(project_root) if project_root else Path.cwd()
@@ -1046,9 +1072,14 @@ def restore_tool(
             item_id=item_id,
             catalog_dir=cat_dir,
             dry_run=dry_run,
+            stub_path=Path(stub_path) if stub_path else None,
         )
+    except ArtifactNotFoundError as e:
+        code = BathosErrorCode.ARCHIVE_ITEM_NOT_FOUND
+        return {"error": str(e), "error_code": code.value, "resolution_hint": RESOLUTION_HINTS[code]}
     except ArchiveError as e:
-        return {"error": str(e), "error_code": "artifact_restore_refused"}
+        code = BathosErrorCode.ARCHIVE_ERROR
+        return {"error": str(e), "error_code": code.value, "resolution_hint": RESOLUTION_HINTS[code]}
 
     return {"ok": True, "result": dataclasses.asdict(result)}
 
@@ -1836,6 +1867,7 @@ async def mcp_restore_tool(
     project_root: str = "",
     catalog_dir: str = "",
     dry_run: bool = False,
+    stub_path: str = "",
     token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
     """Restore a previously archived script+output bundle.
@@ -1846,6 +1878,7 @@ async def mcp_restore_tool(
         project_root=project_root,
         catalog_dir=catalog_dir,
         dry_run=dry_run,
+        stub_path=stub_path,
     )
 
 

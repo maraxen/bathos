@@ -133,6 +133,143 @@ def test_restore_recovers_exact_bytes(tmp_path):
     assert result.restore_commit_sha
 
 
+def test_restore_recovers_binary_content_exactly(tmp_path):
+    """restore's git-show call is deliberately raw-bytes (not the text=True _run_git
+    helper) so binary output files (plots, .npz, ...) don't get corrupted by
+    locale-dependent text encode/decode during restore -- exercise that path with
+    genuinely non-UTF8 bytes, not just text content."""
+    from bathos.artifact_archive import archive_experiment_bundle, restore_archived_item
+
+    repo, script, _sidecar = _make_scripted_repo(tmp_path)
+    binary_content = bytes(range(256)) * 4  # non-UTF8 bytes, including embedded nulls
+    script.write_bytes(binary_content)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "binary script content"], cwd=repo, check=True)
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+
+    item = archive_experiment_bundle(
+        project_root=repo,
+        script_path=script,
+        catalog_dir=catalog_dir,
+        project_slug="testproj",
+        verdict="v",
+        reason="r",
+    )
+    restore_archived_item(project_root=repo, item_id=item.id, catalog_dir=catalog_dir)
+
+    assert script.read_bytes() == binary_content
+
+
+def test_restore_recovers_bundled_untracked_output(tmp_path):
+    """Regression test: restore's bundle-restore path previously ran `git clone` directly
+    into the live (non-empty) project_root, which git refuses -- the clone silently failed
+    (check=False) while the restore still reported success and the untracked output file
+    was never written back. Confirms the fix (clone into a scratch dir, copy bytes into
+    place) actually recovers the file, going through restore_archived_item end to end
+    rather than only exercising _build_untracked_bundle in isolation."""
+    import hashlib
+
+    from bathos.artifact_archive import archive_experiment_bundle, restore_archived_item
+    from bathos.catalog import init_catalog, write_run
+    from bathos.compact import compact
+    from bathos.schema import Run
+
+    repo, script, _sidecar = _make_scripted_repo(tmp_path)
+    catalog_dir = tmp_path / "catalog"
+    init_catalog(catalog_dir)
+
+    script_sha256 = hashlib.sha256(script.read_bytes()).hexdigest()
+    output_rel = "outputs/result.txt"
+    output_path = repo / output_rel
+    output_path.parent.mkdir(parents=True)
+    output_content = b"some untracked result data\n"
+    output_path.write_bytes(output_content)
+    # deliberately never `git add`ed -- this is the untracked-output case
+
+    write_run(
+        Run(
+            project_slug="testproj",
+            command="python run_thing.py",
+            argv=["python", "run_thing.py"],
+            git_hash="abc",
+            git_branch="main",
+            git_dirty=False,
+            script_sha256=script_sha256,
+            output_paths=[output_rel],
+        ),
+        catalog_dir,
+    )
+    compact(catalog_dir)
+
+    item = archive_experiment_bundle(
+        project_root=repo,
+        script_path=script,
+        catalog_dir=catalog_dir,
+        project_slug="testproj",
+        verdict="v",
+        reason="r",
+    )
+    assert item.bundle_path  # confirms the untracked path was actually bundled
+    assert not output_path.exists()  # archived: the untracked file was removed
+
+    result = restore_archived_item(project_root=repo, item_id=item.id, catalog_dir=catalog_dir)
+
+    assert output_path.exists()
+    assert output_path.read_bytes() == output_content
+    assert str(output_path) in result.restored_paths
+
+
+def test_restore_falls_back_to_stub_path_with_no_ledger_record(tmp_path):
+    """Regression test: restore_archived_item's plan-mandated fresh-clone fallback (parse
+    the stub file's own embedded pre_archive_sha when the warm catalog has no record for
+    item_id) previously just raised ArchiveError unconditionally -- there was no stub_path
+    parameter to actually use it. Simulates a fresh clone by pointing restore at a *separate*
+    empty catalog_dir (no ledger record reachable) while passing stub_path explicitly."""
+    from bathos.artifact_archive import archive_experiment_bundle, restore_archived_item
+
+    repo, script, _sidecar = _make_scripted_repo(tmp_path)
+    original_script_text = script.read_text()
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+
+    item = archive_experiment_bundle(
+        project_root=repo,
+        script_path=script,
+        catalog_dir=catalog_dir,
+        project_slug="testproj",
+        verdict="v",
+        reason="r",
+    )
+    stub_text_before_restore = script.read_text()
+    assert item.id in stub_text_before_restore
+
+    empty_catalog_dir = tmp_path / "empty_catalog"  # simulates "no local ~/.bth/catalog/"
+    empty_catalog_dir.mkdir()
+
+    result = restore_archived_item(
+        project_root=repo,
+        item_id=item.id,
+        catalog_dir=empty_catalog_dir,
+        stub_path=script,
+    )
+
+    assert script.read_text() == original_script_text
+    assert result.restored_paths
+
+
+def test_restore_raises_without_ledger_record_or_stub_path(tmp_path):
+    from bathos.artifact_archive import ArtifactNotFoundError, restore_archived_item
+
+    repo, _script, _sidecar = _make_scripted_repo(tmp_path)
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+
+    with pytest.raises(ArtifactNotFoundError):
+        restore_archived_item(project_root=repo, item_id="no-such-id", catalog_dir=catalog_dir)
+
+
 def test_restore_twice_raises(tmp_path):
     from bathos.artifact_archive import (
         ArchiveError,

@@ -54,6 +54,17 @@ class DirtyTreeError(ArchiveError):
     """Raised when a bundle path has uncommitted changes -- refuse to overwrite work."""
 
 
+class ArtifactNotFoundError(ArchiveError):
+    """Raised when a script path doesn't exist, or an item id has no archived_items ledger
+    record AND no stub_path was given to recover it from a stub file's own embedded
+    metadata (the fresh-clone / no-local-catalog durability path)."""
+
+
+class BundleNotFoundError(ArchiveError):
+    """Raised when a ledger record references an untracked-output git bundle file that is
+    missing or unreadable on this machine."""
+
+
 @dataclass
 class ArchivedItem:
     id: str
@@ -124,9 +135,16 @@ def _refuse_if_dirty(project_root: Path, paths: list[Path]) -> None:
         cwd=project_root,
         check=False,
     )
-    if result.stdout.strip():
+    # `??` (untracked) is expected and fine -- output paths that were never `git add`ed are
+    # exactly the ones this module packs into a bundle rather than stubbing in place. Only a
+    # TRACKED path with uncommitted modifications is a genuine "would clobber unsaved work"
+    # refusal; treating untracked-ness itself as dirty would make the whole bundle path
+    # (packing legitimately-untracked outputs) permanently unreachable.
+    dirty_lines = [line for line in result.stdout.splitlines() if not line.startswith("??")]
+    if dirty_lines:
         raise DirtyTreeError(
-            "Refusing to archive: uncommitted changes on bundle path(s):\n" + result.stdout
+            "Refusing to archive: uncommitted changes on bundle path(s):\n"
+            + "\n".join(dirty_lines)
         )
 
 
@@ -229,7 +247,7 @@ def archive_experiment_bundle(
     project_root = project_root.resolve()
     script_path = script_path.resolve()
     if not script_path.exists():
-        raise ArchiveError(f"Script not found: {script_path}")
+        raise ArtifactNotFoundError(f"Script not found: {script_path}")
 
     item_id = str(uuid.uuid4())
     sidecar_path = find_sidecar(script_path)
@@ -425,13 +443,16 @@ def restore_archived_item(
     catalog_dir: Path,
     restored_by: str = "agent",
     dry_run: bool = False,
+    stub_path: Path | None = None,
 ) -> RestoreResult:
-    """Restore a previously archived bundle: recover tracked paths from git history (or
-    unbundle untracked ones), commit the restoration, and append a 'restored' ledger record.
+    """Restore a previously archived bundle: recover tracked paths from git history,
+    unbundle untracked ones, commit the restoration, and append a 'restored' ledger record.
 
-    Falls back to parsing the stub file's own embedded pre_archive_sha when the warm
-    catalog has no record for item_id (fresh clone, no local ~/.bth/catalog/) -- this is
-    why the SHA lives in the stub itself and not only in the ledger.
+    Falls back to parsing `stub_path`'s own embedded pre_archive_sha when the warm catalog
+    has no record for item_id (fresh clone, no local ~/.bth/catalog/) -- this is why the SHA
+    lives in the stub itself and not only in the ledger. Without the ledger only the single
+    stub file pointed at can be recovered (there is no bundle-wide manifest without it) --
+    restore each stub in a multi-file bundle individually in that case.
     """
     project_root = project_root.resolve()
     record = latest_status(catalog_dir, item_id)
@@ -444,12 +465,36 @@ def restore_archived_item(
         paths = record.paths
         bundle_path = record.bundle_path
         project_slug = record.project_slug
+        kind = record.kind
+        verdict = record.verdict
+        reason = record.reason
+        superseded_by = record.superseded_by
+        bundle_sha256 = record.bundle_sha256
+    elif stub_path is not None:
+        stub_path = stub_path.resolve()
+        parsed = parse_stub(stub_path)
+        if parsed is None:
+            raise ArtifactNotFoundError(f"{stub_path} is not a bathos archive stub")
+        if parsed.get("item_id") != item_id:
+            raise ArtifactNotFoundError(
+                f"Stub at {stub_path} has item_id={parsed.get('item_id')!r}, expected {item_id!r}"
+            )
+        pre_archive_sha = parsed["pre_archive_sha"]
+        paths = [str(stub_path.relative_to(project_root))]
+        bundle_path = ""
+        project_slug = "unknown"
+        kind = "experiment"
+        verdict = parsed.get("verdict", "")
+        reason = parsed.get("reason", "")
+        superseded_by = parsed.get("superseded_by", "")
+        if superseded_by == "(unset)":
+            superseded_by = ""
+        bundle_sha256 = ""
     else:
-        # Ledger unavailable -- fall back to parsing whichever stub file the caller
-        # can locate. The CLI is responsible for finding at least one stub path to try.
-        raise ArchiveError(
-            f"No archived_items record for {item_id} and no stub path given — "
-            "pass the stub file's path directly to recover from its embedded metadata"
+        raise ArtifactNotFoundError(
+            f"No archived_items record for {item_id} in {catalog_dir} and no stub_path given "
+            "-- pass the path to one of the stub files bth archive-artifact wrote (its own "
+            "embedded pre_archive_sha recovers it without the ledger)"
         )
 
     if dry_run:
@@ -473,30 +518,58 @@ def restore_archived_item(
         abs_path.write_bytes(show.stdout)
         restored.append(abs_path)
 
-    if bundle_path and Path(bundle_path).exists():
-        _run_git(["clone", "-q", bundle_path, str(project_root)], cwd=project_root, check=False)
+    bundle_restored: list[Path] = []
+    if bundle_path:
+        bundle_file = Path(bundle_path)
+        if not bundle_file.exists():
+            raise BundleNotFoundError(f"Archive bundle not found on disk: {bundle_path}")
+        import tempfile
 
+        # Clone into a scratch dir, not project_root -- `git clone` refuses a non-empty
+        # destination (the live working tree always is one), which previously made this
+        # silently no-op while the restore still reported success (data never came back).
+        with tempfile.TemporaryDirectory() as tmp:
+            clone_dir = Path(tmp) / "bundle_clone"
+            clone_result = _run_git(
+                ["clone", "-q", str(bundle_file), str(clone_dir)], cwd=project_root, check=False
+            )
+            if clone_result.returncode != 0:
+                raise BundleNotFoundError(
+                    f"Failed to clone archive bundle {bundle_path}: {clone_result.stderr}"
+                )
+            for item in sorted(clone_dir.rglob("*")):
+                if not item.is_file():
+                    continue
+                rel = item.relative_to(clone_dir)
+                if rel.parts and rel.parts[0] == ".git":
+                    continue
+                dest = project_root / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(item.read_bytes())
+                bundle_restored.append(dest)
+
+    restore_commit_sha = ""
     if restored:
         _run_git(["add", *[str(p) for p in restored]], cwd=project_root)
         _run_git(
             ["commit", "-m", f"restore: {item_id} (from {pre_archive_sha[:8]})"],
             cwd=project_root,
         )
-    restore_commit_sha = _run_git(["rev-parse", "HEAD"], cwd=project_root).stdout.strip()
+        restore_commit_sha = _run_git(["rev-parse", "HEAD"], cwd=project_root).stdout.strip()
 
     append_archived_item_record(
         ArchivedItemRecord(
             id=item_id,
             project_slug=project_slug,
             event="restored",
-            kind=record.kind,
+            kind=kind,
             paths=paths,
             pre_archive_sha=pre_archive_sha,
             stub_commit_sha=restore_commit_sha,
-            verdict=record.verdict,
-            reason=record.reason,
-            superseded_by=record.superseded_by,
-            bundle_sha256=record.bundle_sha256,
+            verdict=verdict,
+            reason=reason,
+            superseded_by=superseded_by,
+            bundle_sha256=bundle_sha256,
             bundle_path=bundle_path,
             archived_by=restored_by,
         ),
@@ -504,6 +577,11 @@ def restore_archived_item(
     )
     _regenerate_index(project_root, catalog_dir)
 
-    event("archive.artifact_restored", id=item_id, paths=[str(p) for p in restored])
+    all_restored = restored + bundle_restored
+    event("archive.artifact_restored", id=item_id, paths=[str(p) for p in all_restored])
 
-    return RestoreResult(id=item_id, restored_paths=[str(p) for p in restored], restore_commit_sha=restore_commit_sha)
+    return RestoreResult(
+        id=item_id,
+        restored_paths=[str(p) for p in all_restored],
+        restore_commit_sha=restore_commit_sha,
+    )

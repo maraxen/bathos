@@ -561,6 +561,16 @@ def archive_artifact_cmd(
 def restore_cmd(
     item_id: str = typer.Argument(..., help="Archived item id"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be restored"),
+    stub_path: Path | None = typer.Option(
+        None,
+        "--stub-path",
+        help=(
+            "Path to one of the stub files bth archive-artifact wrote, used to recover "
+            "via its own embedded pre_archive_sha when there's no local ~/.bth/catalog "
+            "record for item_id (e.g. a fresh clone). Without a ledger, restores only "
+            "this one file -- restore each stub in a multi-file bundle separately."
+        ),
+    ),
 ):
     """Restore a previously archived script+output bundle."""
     from bathos.artifact_archive import ArchiveError, restore_archived_item
@@ -571,6 +581,7 @@ def restore_cmd(
             item_id=item_id,
             catalog_dir=_catalog_dir(),
             dry_run=dry_run,
+            stub_path=stub_path,
         )
     except ArchiveError as e:
         typer.secho(f"✗ {e}", fg="red")
