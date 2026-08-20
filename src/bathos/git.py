@@ -3,8 +3,14 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
+
+# Schema v1's three-valued provenance_status enum (D4). A record whose status is anything
+# else -- missing OR present-but-unrecognised -- must be rejected, not passed through with
+# whatever git_sha it happened to carry.
+_VALID_PROVENANCE_STATUSES = frozenset({"git", "nogit", "unavailable"})
 
 
 @dataclass
@@ -75,18 +81,29 @@ def _sidecar_channel(cwd: str | Path) -> dict | None:
         if sidecar_path.exists():
             try:
                 data = json.loads(sidecar_path.read_text())
-                # Validate: must have provenance_status and schema_version must be int
+                # Reject if provenance_status is missing OR unrecognised, and if
+                # schema_version is absent or non-integer -- exactly the two rejection
+                # conditions the schema doc specifies (D4's status enum plus the
+                # forward-compat rule immediately below).
                 if (
                     "provenance_status" not in data
+                    or data.get("provenance_status") not in _VALID_PROVENANCE_STATUSES
                     or "schema_version" not in data
                     or not isinstance(data.get("schema_version"), int)
                 ):
                     return None
-                # Forward compatibility: accept unknown schema_version with a warning
+                # Forward compatibility: accept a newer schema version, reading the fields
+                # this version of bathos knows about, but warn once per call site (Python's
+                # default warning filter already shows each `warnings.warn` call site once,
+                # so no hand-rolled dedup flag is needed) so an operator running a stale
+                # bathos against a newer myxcel notices rather than silently under-reading.
                 if data.get("schema_version", 0) > 1:
-                    # In a real implementation, this would be a one-time warning
-                    # For now just accept it
-                    pass
+                    warnings.warn(
+                        f"myxcel provenance sidecar at {sidecar_path} has schema_version="
+                        f"{data.get('schema_version')}, newer than this bathos understands "
+                        f"(max known: 1) -- reading only the fields this version knows about.",
+                        stacklevel=2,
+                    )
                 return {
                     "provenance_status": data.get("provenance_status"),
                     "git_sha": data.get("git_sha"),

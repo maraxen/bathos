@@ -409,9 +409,21 @@ def test_malformed_sidecar_falls_through(tmp_path: Path):
     state = capture_git_state(tmp_path)
     assert state.hash == "unknown"
 
+    # Present but unrecognised provenance_status (D4's enum is exactly
+    # "git" | "nogit" | "unavailable" -- anything else must be rejected, not passed
+    # through with whatever git_sha it happened to carry).
+    sidecar_file.write_text(
+        json.dumps({"schema_version": 1, "provenance_status": "totally-bogus-status", "git_sha": "9" * 40})
+    )
+    state = capture_git_state(tmp_path)
+    assert state.hash == "unknown"
+    assert state.provenance_source == "none"
+
 
 def test_future_schema_version_is_accepted_with_warning(tmp_path: Path):
-    """Forward compatibility: future schema_version accepted with warning."""
+    """Forward compatibility: future schema_version accepted, AND warns once (D2's
+    "accepts the record... and warns once" -- the acceptance half alone isn't the full
+    contract)."""
     sidecar_data = {
         "schema_version": 99,  # Future version
         "provenance_status": "git",
@@ -431,7 +443,8 @@ def test_future_schema_version_is_accepted_with_warning(tmp_path: Path):
     sidecar_file = tmp_path / ".myxcel_provenance.json"
     sidecar_file.write_text(json.dumps(sidecar_data))
 
-    state = capture_git_state(tmp_path)
+    with pytest.warns(UserWarning, match="schema_version"):
+        state = capture_git_state(tmp_path)
     assert state.hash == "3" * 40
     assert state.provenance_source == "myxcel-sidecar"
 
