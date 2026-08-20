@@ -43,7 +43,7 @@ def test_run_defaults():
     assert r.tags == []
     assert isinstance(r.timestamp, datetime)
     assert r.timestamp.tzinfo is not None
-    assert r.schema_version == "14"
+    assert r.schema_version == "15"
     assert r.slurm_job_id == ""
     assert r.metadata == "{}"
 
@@ -84,7 +84,7 @@ def test_run_roundtrip_via_arrow():
     assert r2.duration_s == 1.5
     assert r2.output_paths == ["/tmp/out.parquet"]
     assert r2.tags == ["tip3p"]
-    assert r2.schema_version == "14"
+    assert r2.schema_version == "15"
     assert r2.slurm_job_id == ""
 
 
@@ -100,7 +100,7 @@ def test_schema_version_in_cool_parquet():
     )
     table = r.to_arrow()
     assert "schema_version" in table.column_names
-    assert table.column("schema_version")[0].as_py() == "14"
+    assert table.column("schema_version")[0].as_py() == "15"
 
 
 def test_slurm_job_id_captured_from_env():
@@ -233,7 +233,7 @@ def test_schema_version_defaults_to_7():
         git_branch="main",
         git_dirty=False,
     )
-    assert r.schema_version == "14"
+    assert r.schema_version == "15"
 
 
 def test_sample_run_fixture_has_hostname(sample_run):
@@ -370,7 +370,7 @@ def test_schema_v5_fields_exist():
     from bathos.schema import CURRENT_SCHEMA_VERSION, Run
 
     # Current version should be "7" (v5 fields still present)
-    assert CURRENT_SCHEMA_VERSION == "14"
+    assert CURRENT_SCHEMA_VERSION == "15"
 
     # Run should have all 4 new fields
     r = Run(
@@ -444,7 +444,7 @@ def test_schema_version_is_7():
     """Verify CURRENT_SCHEMA_VERSION is now '11'."""
     from bathos.schema import CURRENT_SCHEMA_VERSION
 
-    assert CURRENT_SCHEMA_VERSION == "14"
+    assert CURRENT_SCHEMA_VERSION == "15"
 
 
 def test_run_stage_name_default_none():
@@ -864,3 +864,73 @@ def test_differential_fields_none_round_trip_arrow():
     for field_name in _DIFFERENTIAL_STRING_FIELDS:
         assert getattr(r2, field_name) is None
     assert r2.differential_effect is None
+
+
+_GIT_PROVENANCE_FIELDS = (
+    "git_dirty_content_id",
+    "git_provenance_source",
+)
+
+
+def test_run_git_provenance_fields_default_none():
+    """Verify v15 git provenance fields default to None."""
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+    )
+    for field_name in _GIT_PROVENANCE_FIELDS:
+        assert getattr(r, field_name) is None
+
+
+def test_git_provenance_fields_in_cool_and_warm_schema():
+    """Verify git_dirty_content_id/git_provenance_source are in both COOL_SCHEMA and WARM_SCHEMA."""
+    for schema in (COOL_SCHEMA, WARM_SCHEMA):
+        for field_name in _GIT_PROVENANCE_FIELDS:
+            assert field_name in schema.names
+            field_obj = next(f for f in schema if f.name == field_name)
+            assert field_obj.type == pa.string()
+            assert field_obj.nullable
+
+
+def test_git_provenance_fields_round_trip_arrow():
+    """Verify git_dirty_content_id/git_provenance_source round-trip through Arrow serialization."""
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        git_dirty_content_id="tree:abc123def456abc123def456abc123def45678",
+        git_provenance_source="myxcel-env",
+    )
+    table = r.to_arrow()
+    assert table.column("git_dirty_content_id")[0].as_py() == "tree:abc123def456abc123def456abc123def45678"
+    assert table.column("git_provenance_source")[0].as_py() == "myxcel-env"
+
+    r2 = Run.from_arrow_row(table.to_pydict(), 0)
+    assert r2.git_dirty_content_id == "tree:abc123def456abc123def456abc123def45678"
+    assert r2.git_provenance_source == "myxcel-env"
+
+
+def test_git_provenance_fields_none_round_trip_arrow():
+    """Verify git provenance fields default to None (not '' / 0.0) through Arrow serialization."""
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+    )
+    table = r.to_arrow()
+    for field_name in _GIT_PROVENANCE_FIELDS:
+        assert table.column(field_name)[0].as_py() is None
+
+    r2 = Run.from_arrow_row(table.to_pydict(), 0)
+    for field_name in _GIT_PROVENANCE_FIELDS:
+        assert getattr(r2, field_name) is None

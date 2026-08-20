@@ -478,6 +478,8 @@ def run_script(
         component_id=component_id,
         component_sidecar_sha256=component_sidecar_sha256,
         dependency_lock_sha256=dependency_lock_sha256,
+        git_dirty_content_id=git.dirty_content_id,
+        git_provenance_source=git.provenance_source,
     )
     run_uuid_var.set(run.id)
     event(

@@ -148,10 +148,10 @@ def test_compact_upgrades_v0_fragments(tmp_catalog: Path, sample_run: Run):
     result = compact(tmp_catalog)
     assert result.ingested == 1
 
-    # Verify in DuckDB: should have schema_version="14" (migrated through v0→v1→…→v13→v14)
+    # Verify in DuckDB: should have schema_version="15" (migrated through v0→v1→…→v14→v15)
     con = duckdb.connect(str(tmp_catalog / "bathos.db"))
     rows = con.execute("SELECT schema_version FROM runs").fetchall()
-    assert rows[0][0] == "14"
+    assert rows[0][0] == "15"
 
 
 def test_compact_tracks_warm_schema_version(tmp_catalog: Path, sample_run: Run):
@@ -166,7 +166,7 @@ def test_compact_tracks_warm_schema_version(tmp_catalog: Path, sample_run: Run):
     con = duckdb.connect(str(tmp_catalog / "bathos.db"))
     rows = con.execute("SELECT value FROM _schema_meta WHERE key = 'warm_version'").fetchall()
     assert len(rows) == 1
-    assert rows[0][0] == "14"
+    assert rows[0][0] == "15"
 
 
 def test_fragment_count_helper(tmp_catalog: Path, sample_run: Run):
@@ -250,7 +250,7 @@ def test_compact_migrates_v1_to_v4(sample_run: Run):
     result = _apply_migrations(v1_run)
 
     # Verify upgraded to v9 with hostname
-    assert result.schema_version == "14"
+    assert result.schema_version == "15"
     assert result.hostname == ""
 
 
@@ -265,7 +265,7 @@ def test_compact_v0_chain_to_v4(sample_run: Run):
     result = _apply_migrations(v0_run)
 
     # Verify final state is v9
-    assert result.schema_version == "14"
+    assert result.schema_version == "15"
     assert result.hostname == ""
 
 
@@ -279,7 +279,7 @@ def test_apply_migrations_v4_upgrades_to_v5(sample_run: Run):
     result = _apply_migrations(v4_run)
 
     # Verify upgraded
-    assert result.schema_version == "14"
+    assert result.schema_version == "15"
     assert result.hostname == "testhost"
     # Verify fields added during v5 migration are present
     assert result.manifest_sha256 == ""
@@ -475,7 +475,7 @@ def test_migration_v2_to_v4(tmp_catalog: Path, sample_run: Run):
     con.close()
 
     assert len(rows) == 1
-    assert rows[0][0] == "14"  # schema_version
+    assert rows[0][0] == "15"  # schema_version
     assert rows[0][1] == ""  # sidecar_sha256
     assert rows[0][2] == ""  # sidecar_path
     assert rows[0][3] == ""  # parent_run_id
@@ -510,7 +510,7 @@ def test_migration_chain_v0_to_v4(tmp_catalog: Path, sample_run: Run):
     con.close()
 
     assert len(rows) == 1
-    assert rows[0][0] == "14"  # schema_version
+    assert rows[0][0] == "15"  # schema_version
     assert rows[0][1] == ""  # hostname (from v1 migration)
     assert rows[0][2] == ""  # sidecar_sha256 (from v2 migration)
     assert rows[0][3] == ""  # sidecar_path
@@ -534,7 +534,7 @@ def test_migration_v6_to_v7_adds_stage_name(sample_run: Run):
     result = _apply_migrations(v6_run)
 
     # Verify upgraded to v7 with stage_name=None
-    assert result.schema_version == "14"
+    assert result.schema_version == "15"
     assert result.stage_name is None
 
 
@@ -549,7 +549,7 @@ def test_migration_chain_v0_to_v7_includes_stage_name(sample_run: Run):
     result = _apply_migrations(v0_run)
 
     # Verify final state is v7 with stage_name=None
-    assert result.schema_version == "14"
+    assert result.schema_version == "15"
     assert result.stage_name is None
 
 
@@ -756,7 +756,7 @@ def test_migration_v8_to_v9_adds_parity_run_type(sample_run: Run):
     result = _apply_migrations(v8_run)
 
     # Verify upgraded to v9 with parity_run_type=None
-    assert result.schema_version == "14"
+    assert result.schema_version == "15"
     assert result.parity_run_type is None
 
 
@@ -771,7 +771,7 @@ def test_migration_chain_v0_to_v9_includes_parity_run_type(sample_run: Run):
     result = _apply_migrations(v0_run)
 
     # Verify final state is v9 with parity_run_type=None
-    assert result.schema_version == "14"
+    assert result.schema_version == "15"
     assert result.parity_run_type is None
 
 
@@ -789,7 +789,7 @@ def test_migration_v9_to_v10_adds_seed_fields(sample_run: Run):
     result = _apply_migrations(v9_run)
 
     # Verify upgraded to v10 with all three B2-02 fields None
-    assert result.schema_version == "14"
+    assert result.schema_version == "15"
     assert result.seed is None
     assert result.baseline_hpo_trials is None
     assert result.baseline_hpo_compute_budget is None
@@ -802,7 +802,7 @@ def test_migration_chain_v0_to_v10_includes_seed_fields(sample_run: Run):
     v0_run = dataclasses.replace(sample_run, schema_version="0")
     result = _apply_migrations(v0_run)
 
-    assert result.schema_version == "14"
+    assert result.schema_version == "15"
     assert result.seed is None
     assert result.baseline_hpo_trials is None
     assert result.baseline_hpo_compute_budget is None
@@ -837,7 +837,7 @@ def test_migration_v10_to_v11_adds_stdout_sha256(sample_run: Run):
 
     result = _apply_migrations(v10_run)
 
-    assert result.schema_version == "14"
+    assert result.schema_version == "15"
     assert result.stdout_sha256 is None
 
 
@@ -848,7 +848,7 @@ def test_migration_chain_v0_to_v11_includes_stdout_sha256(sample_run: Run):
     v0_run = dataclasses.replace(sample_run, schema_version="0")
     result = _apply_migrations(v0_run)
 
-    assert result.schema_version == "14"
+    assert result.schema_version == "15"
     assert result.stdout_sha256 is None
 
 
@@ -879,7 +879,7 @@ def test_migration_v11_to_v12_adds_component_fields(sample_run: Run):
 
     result = _apply_migrations(v11_run)
 
-    assert result.schema_version == "14"
+    assert result.schema_version == "15"
     assert result.component_id is None
     assert result.component_sidecar_sha256 is None
 
@@ -891,7 +891,7 @@ def test_migration_chain_v0_to_v12_includes_component_fields(sample_run: Run):
     v0_run = dataclasses.replace(sample_run, schema_version="0")
     result = _apply_migrations(v0_run)
 
-    assert result.schema_version == "14"
+    assert result.schema_version == "15"
     assert result.component_id is None
     assert result.component_sidecar_sha256 is None
 
@@ -915,3 +915,52 @@ def test_compact_persists_component_fields_to_warm(tmp_catalog: Path, sample_run
     con.close()
 
     assert rows[0] == ("stage_bundle.preprocess", "cafebabe" * 8)
+
+
+def test_migration_v14_to_v15_adds_git_provenance_fields(sample_run: Run):
+    """Verify v14 fragments are upgraded to v15 with git_dirty_content_id/git_provenance_source
+    None (v15 git provenance)."""
+    from bathos.compact import _apply_migrations
+
+    v14_run = dataclasses.replace(sample_run, schema_version="14")
+    assert v14_run.git_dirty_content_id is None
+    assert v14_run.git_provenance_source is None
+
+    result = _apply_migrations(v14_run)
+
+    assert result.schema_version == "15"
+    assert result.git_dirty_content_id is None
+    assert result.git_provenance_source is None
+
+
+def test_migration_chain_v0_to_v15_includes_git_provenance_fields(sample_run: Run):
+    """Verify v0 fragments chain through all migrations to v15 with git provenance fields None."""
+    from bathos.compact import _apply_migrations
+
+    v0_run = dataclasses.replace(sample_run, schema_version="0")
+    result = _apply_migrations(v0_run)
+
+    assert result.schema_version == "15"
+    assert result.git_dirty_content_id is None
+    assert result.git_provenance_source is None
+
+
+def test_compact_persists_git_provenance_fields_to_warm(tmp_catalog: Path, sample_run: Run):
+    """Verify a run's git_dirty_content_id/git_provenance_source persist through cool-tier write +
+    compact into the warm DB."""
+    init_catalog(tmp_catalog)
+    run_with_provenance = dataclasses.replace(
+        sample_run,
+        git_dirty_content_id="tree:abc123def456abc123def456abc123def45678",
+        git_provenance_source="myxcel-env",
+    )
+    write_run(run_with_provenance, tmp_catalog)
+
+    result = compact(tmp_catalog)
+    assert result.ingested == 1
+
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    rows = con.execute("SELECT git_dirty_content_id, git_provenance_source FROM runs").fetchall()
+    con.close()
+
+    assert rows[0] == ("tree:abc123def456abc123def456abc123def45678", "myxcel-env")
