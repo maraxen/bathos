@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0a3] - 2026-08-20
+
+**Alpha pre-release.**
+
+### Added
+
+- **`capture_git_state()` now consumes myxcel's provenance sidecar and env channel**, instead
+  of shelling out to `git` on a cluster copy that has no `.git` at all (myxcel deliberately
+  excludes it from cluster syncs). Two channels, a defined precedence (a real repo governing
+  the same root always wins; otherwise env, then sidecar, then the legacy shellout), and a new
+  `dirty_content_id`/`provenance_source` pair on `GitState`/`Run`. Companion change on the
+  myxcel side (myxcel#14) is required for this to actually receive data — inert without it.
+- **Stale-script runtime gate and archive/restore for script+output bundles.** A sidecar TOML
+  can mark a script `stale=true`; `bth run` refuses to execute it (both collaborative and
+  autonomous agent mode) unless `--allow-stale`. `bth archive-artifact`/`bth restore` move a
+  stale script's tracked content into a durable, git-notes-backed ledger and recover exact
+  original bytes later, including a fresh-clone fallback with no local catalog. `bth lint`
+  proposes (never auto-archives) stale-but-unarchived candidates; sprint-audit Signal 14
+  surfaces the same check across all registered projects.
+- **Every run's commit is now pinned to a durable ref, and dirty trees are snapshotted.**
+  Measured on one project's catalog: git provenance silently bundled three different
+  properties — capture (100%), reachability (40.6%), and fidelity/clean-tree (7.8%) — so most
+  recorded hashes described a tree that never existed, or no longer resolves after a history
+  rewrite. Dirty runs now commit their actual tree contents via a throwaway index (caller's
+  index/worktree/branches untouched) and pin that; the resulting mapping lives somewhere git
+  history rewrites can't take it with it.
+- **Dirty snapshots taken on a remote/cluster run are carried home as bundles**, since a ref
+  only protects objects in the object store it's pinned in, and cluster nodes cannot reach
+  GitHub to push one directly. Only exports when both remote and dirty — a clean run's hash is
+  already reachable through the normal catalog sync, so bundling it would move bytes both ends
+  already have. Rides `outputs/provenance/`, the directory already synced back, so no new
+  transport or credential path.
+- **`using-bathos` skill split into 5 focused skills** (`using-bathos` core, `bathos-cluster`,
+  `bathos-campaigns`, `bathos-literature-parity`, `bathos-mcp`), each with distinct trigger
+  phrases, and a two-way content fork between the legacy and plugin-bundle skill sources
+  (independently hand-edited for months, each missing the other's updates) reconciled into the
+  union.
+
+### Fixed
+
+- **`bth export --surface claude` was silently producing an empty/broken plugin bundle**
+  (`.praxia/manifest.toml` needed a `../` prefix for cisternal's manifest-relative path
+  resolution, and a bogus `[plugin.export_command]` table was corrupting the commands list).
+- **A draft postmortem could silently overwrite a completed run's recorded outcome** in
+  `compact()` — a variable was assigned inside a `status != "draft"` guard but consumed outside
+  it. Found while fixing the original assigned bug: `compact.py`/`postmortem.py` scanned for
+  sidecars with a boundary-unaware `rglob`, crossing into vendored submodules and nested
+  `.claude/worktrees/` checkouts and silently overwriting run/campaign-keyed entries with stale
+  copies (worse than the same bug in `linter.py`, which only produced duplicate warnings).
+- **Sidecar-scanning lint checks re-landed the same boundary-crossing fix** (the original,
+  #30, was 11 commits behind main's `check_baseline_ref_exists` signature change) — one shared
+  walk now stops at any directory carrying its own `.git`, catching submodules and worktrees
+  without special-casing either. Also: a run's own `*.bth.<run_id>.bth.lock.toml` file was
+  being flagged as a script with the wrong extension.
+
 ## [0.13.0a2] - 2026-08-07
 
 **Alpha pre-release.** Still alpha: this release *removes* three CLI flags, an MCP tool
