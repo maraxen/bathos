@@ -472,6 +472,126 @@ def test_capture_git_state_never_raises_with_nonexistent_prov_root(tmp_path: Pat
     assert state.provenance_source == "none"
 
 
+def test_env_channel_rejected_by_d5_falls_through_to_sidecar_with_correct_source(
+    tmp_path: Path, monkeypatch
+):
+    """provenance_source must reflect which channel actually supplied the data, not just
+    ambient env-var presence. Sets MYXCEL_PROVENANCE_SCHEMA (so it's present in os.environ)
+    but points MYXCEL_PROVENANCE_ROOT at a DIFFERENT directory than cwd, so D5 rejects the
+    env channel -- while a valid sidecar sits at cwd. The result must come from the sidecar
+    AND be labeled "myxcel-sidecar", not mislabeled "myxcel-env" from the stale environ
+    presence check."""
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+
+    env_sha = "1" * 40
+    monkeypatch.setenv("MYXCEL_PROVENANCE_SCHEMA", "1")
+    monkeypatch.setenv("MYXCEL_PROVENANCE_STATUS", "git")
+    monkeypatch.setenv("MYXCEL_GIT_SHA", env_sha)
+    monkeypatch.setenv("MYXCEL_GIT_BRANCH", "env-branch")
+    monkeypatch.setenv("MYXCEL_GIT_DIRTY", "0")
+    # Points at a directory that is NOT an ancestor of tmp_path -> D5 rejects.
+    monkeypatch.setenv("MYXCEL_PROVENANCE_ROOT", str(other_dir))
+
+    sidecar_sha = "2" * 40
+    sidecar_data = {
+        "schema_version": 1,
+        "provenance_status": "git",
+        "git_sha": sidecar_sha,
+        "git_branch": "sidecar-branch",
+        "git_dirty": False,
+        "dirty_content_id": None,
+        "capture_stage": "push",
+        "sync_state": "verified",
+        "computed_at": "2026-08-20T14:00:00Z",
+        "provenance_root": str(tmp_path),
+        "remote": "test",
+        "project": "testproj",
+        "worktree": None,
+        "myxcel_version": "0.1.0",
+    }
+    (tmp_path / ".myxcel_provenance.json").write_text(json.dumps(sidecar_data))
+
+    state = capture_git_state(tmp_path)
+    assert state.hash == sidecar_sha
+    assert state.branch == "sidecar-branch"
+    assert state.provenance_source == "myxcel-sidecar"
+
+
+def test_env_channel_rejects_when_provenance_root_is_empty(tmp_path: Path, monkeypatch):
+    """D5 must fail CLOSED (reject the env channel) when MYXCEL_PROVENANCE_ROOT is
+    missing/empty -- an unresolvable root can't be verified as covering cwd, so the safe
+    direction is to discard the channel, not accept it unconditionally."""
+    monkeypatch.setenv("MYXCEL_PROVENANCE_SCHEMA", "1")
+    monkeypatch.setenv("MYXCEL_PROVENANCE_STATUS", "git")
+    monkeypatch.setenv("MYXCEL_GIT_SHA", "3" * 40)
+    monkeypatch.setenv("MYXCEL_GIT_BRANCH", "test")
+    monkeypatch.setenv("MYXCEL_GIT_DIRTY", "0")
+    monkeypatch.delenv("MYXCEL_PROVENANCE_ROOT", raising=False)
+
+    state = capture_git_state(tmp_path)
+    # No env channel (rejected), no sidecar, no real repo -> legacy shellout -> unknown.
+    assert state.hash == "unknown"
+    assert state.provenance_source == "none"
+
+
+def test_real_repo_wins_does_not_borrow_stale_dirty_content_id(tmp_path: Path, monkeypatch):
+    """D6/D3: when a real repo at the provenance root wins, dirty_content_id must NOT be
+    borrowed from the channel -- the channel's dirty_content_id may describe an earlier
+    (possibly drifted) tree state than the one the fresh git shellout just observed, and
+    bathos has no local equivalent of myxcel's tree-OID algorithm to compute a fresh one."""
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True,
+    )
+    (tmp_path / "file.txt").write_text("hello")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
+
+    monkeypatch.setenv("MYXCEL_PROVENANCE_SCHEMA", "1")
+    monkeypatch.setenv("MYXCEL_PROVENANCE_STATUS", "git")
+    monkeypatch.setenv("MYXCEL_GIT_SHA", "4" * 40)
+    monkeypatch.setenv("MYXCEL_GIT_BRANCH", "fake-branch")
+    monkeypatch.setenv("MYXCEL_GIT_DIRTY", "1")
+    monkeypatch.setenv("MYXCEL_GIT_DIRTY_CONTENT_ID", "tree:" + "a" * 40)
+    monkeypatch.setenv("MYXCEL_PROVENANCE_ROOT", str(tmp_path))
+
+    state = capture_git_state(tmp_path)
+    assert state.provenance_source == "git"
+    assert state.dirty_content_id is None
+
+
+def test_same_root_falls_back_to_realpath_when_samefile_raises(tmp_path: Path):
+    """D6: _same_root must fall back to a realpath comparison when `samefile` cannot be
+    computed at all (raises, rather than returning False) -- the case a stat-identity check
+    genuinely cannot answer, e.g. one side of the comparison doesn't exist on disk (a path
+    computed from a symlink target or a bind-mount alias before the mount is live). This
+    exercises the actual fallback trigger: `Path.samefile()` raises FileNotFoundError/OSError
+    when either path is missing, at which point only the second (`os.path.realpath`) try
+    block runs -- realpath resolves purely lexically and does not require either path to
+    exist, so two syntactically-different-but-equivalent paths (one with a `..` segment)
+    still compare equal via the fallback even though `samefile` could never have answered."""
+    from bathos.git import _same_root
+
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+
+    # The intermediate component "nonexistent_dir" does not exist, so the OS cannot
+    # traverse the literal path -> Path(missing).samefile(real_dir) raises
+    # FileNotFoundError, forcing the realpath fallback. os.path.realpath resolves the
+    # ".." segment lexically without requiring the path to exist, landing on real_dir.
+    missing_but_equivalent = tmp_path / "nonexistent_dir" / ".." / "real"
+    assert not missing_but_equivalent.exists()  # confirms samefile() would raise here
+    assert _same_root(str(missing_but_equivalent), str(real_dir)) is True
+
+    missing_and_different = tmp_path / "nonexistent_dir" / ".." / "nonexistent_target"
+    assert _same_root(str(missing_and_different), str(real_dir)) is False
+
+
 def test_same_root_treats_oserror_as_not_same(tmp_path: Path, monkeypatch):
     """D6: samefile raising OSError is treated as 'not same', no exception escapes."""
     subdir = tmp_path / "subdir"

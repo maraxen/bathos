@@ -28,16 +28,21 @@ def _env_channel(cwd: str | Path) -> dict | None:
     if "MYXCEL_PROVENANCE_SCHEMA" not in os.environ:
         return None
 
-    # Check D5 guard: cwd must be inside provenance root
+    # Check D5 guard: cwd must be inside provenance root. Fail CLOSED (reject the channel)
+    # when the root is missing/empty -- an unresolvable root can't be verified as covering
+    # cwd, so silently accepting would be the unsafe direction (the same posture used
+    # everywhere else in this design: malformed sidecar records are rejected, _same_root
+    # treats ambiguity as "not same").
     root_str = os.environ.get("MYXCEL_PROVENANCE_ROOT", "")
-    if root_str:
-        try:
-            cwd_path = Path(cwd).resolve()
-            root_path = Path(root_str).resolve()
-            if not cwd_path.is_relative_to(root_path):
-                return None
-        except (ValueError, OSError):
+    if not root_str:
+        return None
+    try:
+        cwd_path = Path(cwd).resolve()
+        root_path = Path(root_str).resolve()
+        if not cwd_path.is_relative_to(root_path):
             return None
+    except (ValueError, OSError):
+        return None
 
     # Read the env channel fields
     return {
@@ -184,8 +189,18 @@ def capture_git_state(cwd: Path = Path.cwd()) -> GitState:
     try:
         cwd_str = str(cwd)
 
-        # Try env and sidecar channels
-        prov = _env_channel(cwd_str) or _sidecar_channel(cwd_str)
+        # Try env and sidecar channels, tracking which one actually supplied `prov` --
+        # re-deriving the source later from ambient os.environ presence (rather than which
+        # call returned non-None) mislabels the sidecar as "myxcel-env" whenever D5 rejects
+        # the env channel (cwd outside MYXCEL_PROVENANCE_ROOT) while MYXCEL_PROVENANCE_SCHEMA
+        # is still set in the environment.
+        env_prov = _env_channel(cwd_str)
+        if env_prov is not None:
+            prov = env_prov
+            prov_source = "myxcel-env"
+        else:
+            prov = _sidecar_channel(cwd_str)
+            prov_source = "myxcel-sidecar"
 
         if prov is None:
             # No channel: use legacy shellout
@@ -197,12 +212,18 @@ def capture_git_state(cwd: Path = Path.cwd()) -> GitState:
         if git_info is not None:
             hash_, branch, dirty, toplevel = git_info
             if _same_root(toplevel, prov.get("root") or ""):
-                # Real repo at same root wins
+                # Real repo at same root wins. dirty_content_id is intentionally NOT
+                # borrowed from `prov` here -- prov may describe an earlier (possibly
+                # drifted) tree state than the one this fresh shellout just observed, so
+                # pairing a fresh dirty flag with a stale content id would be internally
+                # inconsistent (D3's invariant). Bathos has no local equivalent of
+                # myxcel's tree-OID algorithm to compute a fresh one, so None (unknown) is
+                # the safe value here, not a guess.
                 return GitState(
                     hash=hash_,
                     branch=branch,
                     dirty=dirty,
-                    dirty_content_id=prov.get("dirty_content_id"),
+                    dirty_content_id=None,
                     provenance_source="git",
                 )
 
@@ -225,15 +246,12 @@ def capture_git_state(cwd: Path = Path.cwd()) -> GitState:
         elif status == "unavailable" or not git_sha:
             git_sha = "unknown"
 
-        # Determine provenance source
-        source = "myxcel-env" if "MYXCEL_PROVENANCE_SCHEMA" in os.environ else "myxcel-sidecar"
-
         return GitState(
             hash=git_sha or "unknown",
             branch=git_branch or "unknown",
             dirty=dirty,
             dirty_content_id=prov.get("dirty_content_id"),
-            provenance_source=source,
+            provenance_source=prov_source,
         )
     except Exception:
         # Never raise (C6)

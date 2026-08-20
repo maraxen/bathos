@@ -26,6 +26,39 @@ def test_decorator_records_run(tmp_path, monkeypatch):
     assert runs[0].exit_code == 0
 
 
+def test_decorator_records_git_dirty_content_id_and_provenance_source(tmp_path, monkeypatch):
+    """@bth.experiment must populate git_dirty_content_id/git_provenance_source on the
+    recorded Run, not just git_hash/git_branch/git_dirty -- these two v15 fields come from
+    the same GitState capture_git_state() already returns, so omitting them from the Run(...)
+    call here would silently lose data every decorator-based run captures correctly
+    (task 260820_bathos-git-sync)."""
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_path))
+    monkeypatch.setenv("BTH_PROJECT_SLUG", "test_proj")
+    monkeypatch.chdir(tmp_path)
+
+    monkeypatch.setenv("MYXCEL_PROVENANCE_SCHEMA", "1")
+    monkeypatch.setenv("MYXCEL_PROVENANCE_STATUS", "git")
+    monkeypatch.setenv("MYXCEL_GIT_SHA", "a" * 40)
+    monkeypatch.setenv("MYXCEL_GIT_BRANCH", "feature")
+    monkeypatch.setenv("MYXCEL_GIT_DIRTY", "1")
+    monkeypatch.setenv("MYXCEL_GIT_DIRTY_CONTENT_ID", "tree:" + "b" * 40)
+    monkeypatch.setenv("MYXCEL_PROVENANCE_ROOT", str(tmp_path))
+
+    from bathos.decorators import experiment
+    from bathos.query import list_runs
+
+    @experiment
+    def my_fn():
+        return 42
+
+    my_fn()
+
+    runs = list_runs(tmp_path)
+    assert len(runs) == 1
+    assert runs[0].git_provenance_source == "myxcel-env"
+    assert runs[0].git_dirty_content_id == "tree:" + "b" * 40
+
+
 def test_decorator_records_failure(tmp_path, monkeypatch):
     """@bth.experiment records failed runs on exception."""
     monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_path))

@@ -46,6 +46,8 @@ def experiment(func):
             git_hash=git.hash,
             git_branch=git.branch,
             git_dirty=git.dirty,
+            git_dirty_content_id=git.dirty_content_id,
+            git_provenance_source=git.provenance_source,
             status="running",
         )
         catalog_dir.mkdir(parents=True, exist_ok=True)
