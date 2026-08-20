@@ -87,6 +87,23 @@ def _require_project_slug() -> str:
     return load_project_config(cfg_path).slug
 
 
+def _soft_project_slug() -> str | None:
+    """Best-effort project slug lookup that returns None instead of exiting.
+
+    Used by commands like `lint` that must keep working on a project with no
+    BTH_PROJECT_SLUG/.bth.toml at all (unlike `run`/`archive-artifact`, which require one).
+    """
+    slug_env = os.environ.get("BTH_PROJECT_SLUG")
+    if slug_env:
+        return slug_env
+    from bathos.config import find_project_config, load_project_config
+
+    cfg_path = find_project_config()
+    if cfg_path is None:
+        return None
+    return load_project_config(cfg_path).slug
+
+
 @app.callback(invoke_without_command=True)
 def main(
     version: bool = typer.Option(False, "--version", "-V", is_eager=True),
@@ -2209,8 +2226,14 @@ def lint(
     issues.extend(check_stale_scripts_without_reason(project_root.resolve()))
     # check_archival_candidates works with no warm catalog at all (every stale sidecar is
     # a candidate) as well as with one present -- unlike the checks below, it must not be
-    # gated behind db_path.exists().
-    issues.extend(check_archival_candidates(project_root.resolve(), _catalog_dir()))
+    # gated behind db_path.exists(). project_slug scopes the archived_items lookup so a
+    # same-relative-path archived record in a DIFFERENT project (catalog_dir is commonly
+    # shared) doesn't silently suppress this warning here.
+    issues.extend(
+        check_archival_candidates(
+            project_root.resolve(), _catalog_dir(), project_slug=_soft_project_slug()
+        )
+    )
 
     # Add warm-catalog Tier-2 checks if catalog exists
     catalog_dir = _catalog_dir()

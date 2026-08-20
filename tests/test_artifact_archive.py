@@ -259,6 +259,114 @@ def test_restore_falls_back_to_stub_path_with_no_ledger_record(tmp_path):
     assert result.restored_paths
 
 
+def test_stub_fallback_records_real_project_slug_not_unknown(tmp_path):
+    """Regression test: the stub_path fallback previously hardcoded project_slug="unknown"
+    on the "restored" ledger event it appends, because _stub_content didn't embed
+    project_slug at all. A wrong project_slug on that ledger row would misattribute the
+    item under check_archival_candidates's project_slug-scoped query (see the cross-project
+    isolation fix). _stub_content now embeds project_slug so the fallback can recover the
+    real value."""
+    import duckdb
+
+    from bathos.artifact_archive import archive_experiment_bundle, restore_archived_item
+    from bathos.compact import compact
+
+    repo, script, _sidecar = _make_scripted_repo(tmp_path)
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+
+    item = archive_experiment_bundle(
+        project_root=repo,
+        script_path=script,
+        catalog_dir=catalog_dir,
+        project_slug="realproj",
+        verdict="v",
+        reason="r",
+    )
+
+    empty_catalog_dir = tmp_path / "empty_catalog"
+    empty_catalog_dir.mkdir()
+    restore_archived_item(
+        project_root=repo,
+        item_id=item.id,
+        catalog_dir=empty_catalog_dir,
+        stub_path=script,
+    )
+    compact(empty_catalog_dir)
+
+    con = duckdb.connect(str(empty_catalog_dir / "bathos.db"), read_only=True)
+    try:
+        rows = con.execute(
+            "SELECT project_slug FROM archived_items WHERE id = ? AND event = 'restored'",
+            [item.id],
+        ).fetchall()
+    finally:
+        con.close()
+    assert rows == [("realproj",)]
+
+
+def test_restore_missing_bundle_leaves_no_partial_writes(tmp_path):
+    """Regression test: restore_archived_item previously wrote tracked-path bytes to disk
+    (via git show) BEFORE validating the bundle file, so a missing/corrupt bundle left
+    tracked files silently reverted-but-uncommitted on disk while the ledger/index still
+    reported the item as ARCHIVED. The bundle step now runs first, so a missing bundle must
+    raise before touching any tracked-path bytes at all."""
+    import hashlib
+
+    from bathos.artifact_archive import (
+        BundleNotFoundError,
+        archive_experiment_bundle,
+        restore_archived_item,
+    )
+    from bathos.catalog import init_catalog, write_run
+    from bathos.compact import compact
+    from bathos.schema import Run
+
+    repo, script, _sidecar = _make_scripted_repo(tmp_path)
+    catalog_dir = tmp_path / "catalog"
+    init_catalog(catalog_dir)
+
+    script_sha256 = hashlib.sha256(script.read_bytes()).hexdigest()
+    output_rel = "outputs/result.txt"
+    output_path = repo / output_rel
+    output_path.parent.mkdir(parents=True)
+    output_path.write_bytes(b"some untracked result data\n")
+
+    write_run(
+        Run(
+            project_slug="testproj",
+            command="python run_thing.py",
+            argv=["python", "run_thing.py"],
+            git_hash="abc",
+            git_branch="main",
+            git_dirty=False,
+            script_sha256=script_sha256,
+            output_paths=[output_rel],
+        ),
+        catalog_dir,
+    )
+    compact(catalog_dir)
+
+    item = archive_experiment_bundle(
+        project_root=repo,
+        script_path=script,
+        catalog_dir=catalog_dir,
+        project_slug="testproj",
+        verdict="v",
+        reason="r",
+    )
+    assert item.bundle_path
+
+    stub_text_before_restore = script.read_text()
+    Path(item.bundle_path).unlink()  # simulate a bundle that went missing on this machine
+
+    with pytest.raises(BundleNotFoundError):
+        restore_archived_item(project_root=repo, item_id=item.id, catalog_dir=catalog_dir)
+
+    # No partial write: the tracked script must still be the untouched stub, not reverted.
+    assert script.read_text() == stub_text_before_restore
+
+
 def test_restore_raises_without_ledger_record_or_stub_path(tmp_path):
     from bathos.artifact_archive import ArtifactNotFoundError, restore_archived_item
 

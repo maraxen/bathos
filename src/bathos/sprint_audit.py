@@ -289,7 +289,9 @@ def signal_submit_bypass_rate(project_slug: str, db_path: Path, catalog_dir: Pat
         )
 
 
-def signal_unarchived_stale_scripts(project_root: Path, catalog_dir: Path) -> SignalResult:
+def signal_unarchived_stale_scripts(
+    project_root: Path, catalog_dir: Path, project_slug: str | None = None
+) -> SignalResult:
     """Signal 14: unarchived_stale_scripts_count -- sidecars with [status] stale=true that
     have no covering archived_items record (bathos.linter.check_archival_candidates).
 
@@ -299,11 +301,15 @@ def signal_unarchived_stale_scripts(project_root: Path, catalog_dir: Path) -> Si
     itself, surfaced every audit, is the signal. WARNING whenever count > 0 -- a stale,
     unarchived script is a live "wrong default" landmine (see prereg.gate_check
     SCRIPT_STALE) sitting in working-tree visibility, not merely a hygiene nit.
+
+    project_slug scopes the archived_items lookup so a same-relative-path archived record
+    in one project (catalog_dir is commonly shared across all of a researcher's projects)
+    doesn't silently suppress this signal for a different project's same-path script.
     """
     try:
         from bathos.linter import check_archival_candidates
 
-        issues = check_archival_candidates(project_root, catalog_dir)
+        issues = check_archival_candidates(project_root, catalog_dir, project_slug=project_slug)
         count = len(issues)
         level = "WARNING" if count > 0 else "OK"
         return SignalResult(
@@ -685,7 +691,9 @@ def sprint_audit(hours: int = 24) -> dict:
 
             # Signal 14: unarchived_stale_scripts_count -- sidecars marked stale (prereg's
             # SCRIPT_STALE gate) with no covering archived_items record.
-            signal_result_unarchived = signal_unarchived_stale_scripts(project_root, catalog_dir)
+            signal_result_unarchived = signal_unarchived_stale_scripts(
+                project_root, catalog_dir, project_slug=project["slug"]
+            )
             signals["unarchived_stale_scripts_count"] = (
                 signal_result_unarchived.value
                 if signal_result_unarchived.value is not None

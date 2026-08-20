@@ -117,3 +117,55 @@ def test_stale_script_reflagged_after_restore(tmp_path):
     # restored -> the original stale sidecar is back -> flagged again
     issues = check_archival_candidates(repo, catalog_dir)
     assert len(issues) == 1
+
+
+def test_stale_script_not_falsely_exempted_by_another_projects_archive(tmp_path):
+    """Regression test: catalog_dir is commonly one shared ~/.bth/catalog/ across all of a
+    researcher's projects, and this repo's own scripts/experiments/verb_noun.py naming
+    convention makes identical relative paths across projects plausible. An archived_items
+    record from project B must NOT suppress the stale-script warning for project A's
+    same-relative-path script -- check_archival_candidates must scope its lookup by
+    project_slug when one is available."""
+    from bathos.artifact_archive import archive_experiment_bundle
+    from bathos.linter import check_archival_candidates
+
+    catalog_dir = tmp_path / "catalog"  # shared across both projects, like the real default
+    catalog_dir.mkdir()
+
+    # Project B archives scripts/experiments/run_thing.py and marks it ARCHIVED in the
+    # shared ledger.
+    repo_b = tmp_path / "proj_b"
+    repo_b.mkdir()
+    _init_repo(repo_b)
+    scripts_dir_b = repo_b / "scripts" / "experiments"
+    scripts_dir_b.mkdir(parents=True)
+    script_b, _sidecar_b = _make_stale_sidecar(scripts_dir_b, "run_thing")
+    subprocess.run(["git", "add", "-A"], cwd=repo_b, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo_b, check=True)
+    archive_experiment_bundle(
+        project_root=repo_b,
+        script_path=script_b,
+        catalog_dir=catalog_dir,
+        project_slug="proj_b",
+        verdict="superseded",
+        reason="wrong default",
+    )
+
+    # Project A has its OWN unarchived stale script at the same relative path.
+    repo_a = tmp_path / "proj_a"
+    repo_a.mkdir()
+    _init_repo(repo_a)
+    scripts_dir_a = repo_a / "scripts" / "experiments"
+    scripts_dir_a.mkdir(parents=True)
+    _make_stale_sidecar(scripts_dir_a, "run_thing")
+    subprocess.run(["git", "add", "-A"], cwd=repo_a, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo_a, check=True)
+
+    # Unscoped (no project_slug) is the pre-fix fallback behavior and is expected to be
+    # wrong here -- documenting the failure mode, not asserting it's desired.
+    issues_unscoped = check_archival_candidates(repo_a, catalog_dir)
+    assert issues_unscoped == []
+
+    # Scoped by project_slug: project A's script must still be flagged.
+    issues_scoped = check_archival_candidates(repo_a, catalog_dir, project_slug="proj_a")
+    assert len(issues_scoped) == 1

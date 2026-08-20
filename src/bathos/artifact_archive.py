@@ -177,6 +177,7 @@ def _tracked_output_paths_for_script(
 
 def _stub_content(
     item_id: str,
+    project_slug: str,
     verdict: str,
     reason: str,
     superseded_by: str,
@@ -189,9 +190,15 @@ def _stub_content(
     table for sidecars) -- a stubbed .bth.toml that still parsed as a valid sidecar table
     would risk being picked up by bathos.sidecar.parse_sidecar as if it were live, which
     is exactly the "wrong live default" danger this whole design exists to avoid.
+
+    Embeds project_slug (not just pre_archive_sha) so restore_archived_item's stub_path
+    fallback can record the real project_slug on its "restored" ledger event instead of a
+    placeholder -- a wrong project_slug written to the shared archived_items ledger would
+    misattribute the item under check_archival_candidates's per-project scoping.
     """
     lines = [
         f"# {_STUB_MARKER} (item_id={item_id})",
+        f"# project_slug: {project_slug}",
         f"# verdict: {verdict}",
         f"# reason: {reason}",
         f"# superseded_by: {superseded_by or '(unset)'}",
@@ -286,7 +293,7 @@ def archive_experiment_bundle(
     pre_archive_sha = capture_git_state(project_root).hash
 
     for p in tracked:
-        stub = _stub_content(item_id, verdict, reason, superseded_by, pre_archive_sha)
+        stub = _stub_content(item_id, project_slug, verdict, reason, superseded_by, pre_archive_sha)
         p.write_text(stub)
 
     bundle_sha256 = ""
@@ -482,7 +489,11 @@ def restore_archived_item(
         pre_archive_sha = parsed["pre_archive_sha"]
         paths = [str(stub_path.relative_to(project_root))]
         bundle_path = ""
-        project_slug = "unknown"
+        # Older stubs (written before project_slug was added to _stub_content) fall back
+        # to "unknown" -- new stubs carry the real slug so the "restored" ledger event
+        # below doesn't misattribute the item under check_archival_candidates's
+        # project_slug-scoped query.
+        project_slug = parsed.get("project_slug") or "unknown"
         kind = "experiment"
         verdict = parsed.get("verdict", "")
         reason = parsed.get("reason", "")
@@ -500,24 +511,12 @@ def restore_archived_item(
     if dry_run:
         return RestoreResult(id=item_id, restored_paths=paths, restore_commit_sha="")
 
-    restored: list[Path] = []
-    for rel in paths:
-        abs_path = project_root / rel
-        # Raw-bytes subprocess call, deliberately NOT `_run_git` (text=True) -- output
-        # files are frequently binary (plots, .npz, ...) and text-mode decoding would
-        # corrupt them via locale-dependent encoding/decoding.
-        show = subprocess.run(
-            ["git", "show", f"{pre_archive_sha}:{rel}"],
-            cwd=project_root,
-            capture_output=True,
-            check=False,
-        )
-        if show.returncode != 0:
-            continue  # this path was untracked -> comes from the bundle instead
-        abs_path.parent.mkdir(parents=True, exist_ok=True)
-        abs_path.write_bytes(show.stdout)
-        restored.append(abs_path)
-
+    # Bundle restore FIRST, tracked-path git-show restore SECOND -- deliberately, so a
+    # missing/corrupt bundle raises before any bytes are written to project_root at all.
+    # The tracked-path loop below cannot itself fail (a non-zero `git show` just means
+    # "this path was untracked", not an error), so ordering the fallible step first means
+    # this function has no partial-write failure mode: either nothing on disk changes, or
+    # everything below this point does.
     bundle_restored: list[Path] = []
     if bundle_path:
         bundle_file = Path(bundle_path)
@@ -547,6 +546,24 @@ def restore_archived_item(
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_bytes(item.read_bytes())
                 bundle_restored.append(dest)
+
+    restored: list[Path] = []
+    for rel in paths:
+        abs_path = project_root / rel
+        # Raw-bytes subprocess call, deliberately NOT `_run_git` (text=True) -- output
+        # files are frequently binary (plots, .npz, ...) and text-mode decoding would
+        # corrupt them via locale-dependent encoding/decoding.
+        show = subprocess.run(
+            ["git", "show", f"{pre_archive_sha}:{rel}"],
+            cwd=project_root,
+            capture_output=True,
+            check=False,
+        )
+        if show.returncode != 0:
+            continue  # this path was untracked -> comes from the bundle instead
+        abs_path.parent.mkdir(parents=True, exist_ok=True)
+        abs_path.write_bytes(show.stdout)
+        restored.append(abs_path)
 
     restore_commit_sha = ""
     if restored:

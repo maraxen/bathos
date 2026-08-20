@@ -993,7 +993,9 @@ def check_stale_scripts_without_reason(project_root: Path) -> list[LintIssue]:
     return issues
 
 
-def check_archival_candidates(project_root: Path, catalog_dir: Path) -> list[LintIssue]:
+def check_archival_candidates(
+    project_root: Path, catalog_dir: Path, project_slug: str | None = None
+) -> list[LintIssue]:
     """Tier-2: propose (never act on) stale scripts that have not yet been archived.
 
     Deliberately narrow v1 scope: flags any sidecar with [status] stale=true (see
@@ -1005,6 +1007,15 @@ def check_archival_candidates(project_root: Path, catalog_dir: Path) -> list[Lin
     A sidecar counts as "already archived" only if the LATEST archived_items event for
     the covering item is "archived" (not "restored") -- a restored-then-still-stale
     sidecar is a fresh candidate again, not permanently exempt.
+
+    project_slug scopes the archived_items query, mirroring
+    artifact_archive._tracked_output_paths_for_script. catalog_dir is commonly one shared
+    ~/.bth/catalog/ across all of a researcher's projects (bathos.config), and this repo's
+    own scripts/ directory convention (scripts/experiments/verb_noun.py) makes identical
+    relative paths across projects likely -- without this filter, an archived record in
+    ANY project would silently suppress the warning for a same-path stale script in every
+    other project. When project_slug is not available to the caller, the check falls back
+    to unscoped (pre-fix) behavior rather than erroring.
     """
     from bathos.sidecar import parse_sidecar
 
@@ -1020,10 +1031,17 @@ def check_archival_candidates(project_root: Path, catalog_dir: Path) -> list[Lin
         try:
             con = duckdb.connect(str(db_path), read_only=True)
             try:
-                rows = con.execute(
-                    "SELECT id, paths, event, recorded_at FROM archived_items "
-                    "ORDER BY recorded_at ASC"
-                ).fetchall()
+                if project_slug is not None:
+                    rows = con.execute(
+                        "SELECT id, paths, event, recorded_at FROM archived_items "
+                        "WHERE project_slug = ? ORDER BY recorded_at ASC",
+                        [project_slug],
+                    ).fetchall()
+                else:
+                    rows = con.execute(
+                        "SELECT id, paths, event, recorded_at FROM archived_items "
+                        "ORDER BY recorded_at ASC"
+                    ).fetchall()
             finally:
                 con.close()
             latest_by_id: dict[str, tuple[str, str]] = {}
