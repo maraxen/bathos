@@ -307,6 +307,7 @@ def run_script(
     cwd: Path = Path.cwd(),
     agent_mode: str | None = None,
     no_sidecar: bool = False,
+    allow_stale: bool = False,
     derived_from: str | None = None,
     campaign_id: str | None = None,
     component_id: str | None = None,
@@ -423,6 +424,7 @@ def run_script(
             mode=resolved_mode,
             catalog_dir=catalog_dir,
             git_hash=git.hash,
+            allow_stale=allow_stale,
         )
         if not gate_result.ok:
             # Serialize error payload to dict for JSON output

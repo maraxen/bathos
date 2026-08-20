@@ -956,6 +956,103 @@ def archive_tool(
     return result_dict
 
 
+def archive_artifact_tool(
+    script_path: str = "",
+    project_root: str = "",
+    catalog_dir: str = "",
+    project_slug: str = "",
+    verdict: str = "",
+    reason: str = "",
+    superseded_by: str = "",
+    dry_run: bool = False,
+) -> dict:
+    """Archive a script + its sidecar + its tracked outputs (stub-in-place, git-native).
+
+    Never invoked automatically -- lint_tool's check_archival_candidates only proposes
+    candidates; this is the explicit action a caller takes.
+
+    Args:
+        script_path: Path to the script to archive
+        project_root: Project root directory (empty = current directory)
+        catalog_dir: Catalog directory (empty = use default)
+        project_slug: Project slug (default: 'default')
+        verdict: One-sentence verdict on this bundle
+        reason: Why this is being archived
+        superseded_by: Run id / claim id / archive item id that supersedes this
+        dry_run: Show what would be archived without writing
+
+    Returns:
+        Dict with the archived item's fields, or {"error": ..., "error_code": ...} on failure
+    """
+    from bathos.artifact_archive import ArchiveError, archive_experiment_bundle
+
+    if not script_path:
+        return {"error": "script_path parameter is required", "error_code": "missing_argument"}
+    if not verdict or not reason:
+        return {
+            "error": "verdict and reason parameters are required",
+            "error_code": "missing_argument",
+        }
+
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    proj_root = Path(project_root) if project_root else Path.cwd()
+    slug = project_slug or "default"
+
+    try:
+        item = archive_experiment_bundle(
+            project_root=proj_root,
+            script_path=Path(script_path),
+            catalog_dir=cat_dir,
+            project_slug=slug,
+            verdict=verdict,
+            reason=reason,
+            superseded_by=superseded_by,
+            dry_run=dry_run,
+        )
+    except ArchiveError as e:
+        return {"error": str(e), "error_code": "artifact_archive_refused"}
+
+    return {"ok": True, "item": dataclasses.asdict(item)}
+
+
+def restore_tool(
+    item_id: str = "",
+    project_root: str = "",
+    catalog_dir: str = "",
+    dry_run: bool = False,
+) -> dict:
+    """Restore a previously archived script+output bundle.
+
+    Args:
+        item_id: Archived item id
+        project_root: Project root directory (empty = current directory)
+        catalog_dir: Catalog directory (empty = use default)
+        dry_run: Show what would be restored without writing
+
+    Returns:
+        Dict with restored paths, or {"error": ..., "error_code": ...} on failure
+    """
+    from bathos.artifact_archive import ArchiveError, restore_archived_item
+
+    if not item_id:
+        return {"error": "item_id parameter is required", "error_code": "missing_argument"}
+
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    proj_root = Path(project_root) if project_root else Path.cwd()
+
+    try:
+        result = restore_archived_item(
+            project_root=proj_root,
+            item_id=item_id,
+            catalog_dir=cat_dir,
+            dry_run=dry_run,
+        )
+    except ArchiveError as e:
+        return {"error": str(e), "error_code": "artifact_restore_refused"}
+
+    return {"ok": True, "result": dataclasses.asdict(result)}
+
+
 def check_tool(
     catalog_dir: str = "",
     project_root: str = "",
@@ -1092,6 +1189,7 @@ def run_tool(
     derived_from: str = "",
     campaign_id: str = "",
     no_sidecar: bool = False,
+    allow_stale: bool = False,
 ) -> dict:
     """Run a script and record provenance.
 
@@ -1106,6 +1204,7 @@ def run_tool(
         derived_from: Parent run ID (for parametric sweeps)
         campaign_id: Campaign ID to associate run with
         no_sidecar: Skip sidecar requirement (for exploratory runs)
+        allow_stale: Run anyway despite the sidecar's [status] stale=true flag
 
     Returns:
         Dict with run result or structured gate error
@@ -1141,6 +1240,7 @@ def run_tool(
         tags=tags,
         agent_mode=agent_mode or None,
         no_sidecar=no_sidecar,
+        allow_stale=allow_stale,
         derived_from=derived_from or None,
         campaign_id=campaign_id or None,
     )
@@ -1697,6 +1797,56 @@ async def mcp_archive_tool(
     # warm→cold and never removes cool-tier fragments, so there is no deletion for
     # a "keep" switch to suppress. Reinstating it means implementing that first.
     return archive_tool(catalog_dir=catalog_dir, project=project)
+
+
+@cisternal.tool(registry="bathos", name="archive_artifact")
+@traced_tool
+@require_write_token
+async def mcp_archive_artifact_tool(
+    script_path: str = "",
+    project_root: str = "",
+    catalog_dir: str = "",
+    project_slug: str = "",
+    verdict: str = "",
+    reason: str = "",
+    superseded_by: str = "",
+    dry_run: bool = False,
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
+) -> dict:
+    """Archive a script + its sidecar + its tracked outputs (stub-in-place, git-native).
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    return archive_artifact_tool(
+        script_path=script_path,
+        project_root=project_root,
+        catalog_dir=catalog_dir,
+        project_slug=project_slug,
+        verdict=verdict,
+        reason=reason,
+        superseded_by=superseded_by,
+        dry_run=dry_run,
+    )
+
+
+@cisternal.tool(registry="bathos", name="restore")
+@traced_tool
+@require_write_token
+async def mcp_restore_tool(
+    item_id: str = "",
+    project_root: str = "",
+    catalog_dir: str = "",
+    dry_run: bool = False,
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
+) -> dict:
+    """Restore a previously archived script+output bundle.
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    return restore_tool(
+        item_id=item_id,
+        project_root=project_root,
+        catalog_dir=catalog_dir,
+        dry_run=dry_run,
+    )
 
 
 @cisternal.tool(registry="bathos", name="check")

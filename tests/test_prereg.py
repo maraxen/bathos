@@ -193,6 +193,98 @@ def test_gate_check_invalid_sidecar_fails(tmp_path):
     assert any("reasoning" in e.lower() for e in result.error_payload.errors)
 
 
+def _write_stale_sidecar(tmp_path: Path, script_stem: str = "run_test") -> Path:
+    """Write a valid experiment sidecar with [status] stale=true."""
+    p = tmp_path / f"{script_stem}.bth.toml"
+    p.write_text(
+        textwrap.dedent("""
+        [experiment]
+        hypothesis = "Test hypothesis"
+        [outcomes.pass]
+        condition = "value > 0"
+        decision = "proceed"
+        reasoning = "Good value"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "review"
+        reasoning = "Catch-all outcome"
+        is_residual = true
+        [result_schema]
+        value = "float"
+        [status]
+        stale = true
+        stale_reason = "known-wrong default input"
+        superseded_by = "run_abc123"
+    """)
+    )
+    return p
+
+
+def test_gate_check_stale_script_denies_collaborative(tmp_path):
+    """A stale sidecar denies in collaborative mode too -- a human re-running a known-wrong
+    script is exactly as dangerous as an agent doing so."""
+    from bathos.prereg import GateErrorCode, gate_check, resolve_sidecar
+
+    script = tmp_path / "scripts" / "experiments" / "run_nvt.py"
+    script.parent.mkdir(parents=True)
+    script.touch()
+    _write_stale_sidecar(script.parent, "run_nvt")
+
+    bundle = resolve_sidecar(script)
+    result = gate_check(script, bundle, "collaborative")
+
+    assert result.ok is False
+    assert result.error_payload is not None
+    assert result.error_payload.error_code == GateErrorCode.SCRIPT_STALE
+    assert "known-wrong default input" in result.error_payload.errors[0]
+    assert "superseded_by=run_abc123" in result.error_payload.errors[1]
+
+
+def test_gate_check_stale_script_denies_autonomous(tmp_path):
+    from bathos.prereg import GateErrorCode, gate_check, resolve_sidecar
+
+    script = tmp_path / "scripts" / "experiments" / "run_nvt.py"
+    script.parent.mkdir(parents=True)
+    script.touch()
+    _write_stale_sidecar(script.parent, "run_nvt")
+
+    bundle = resolve_sidecar(script)
+    result = gate_check(script, bundle, "autonomous")
+
+    assert result.ok is False
+    assert result.error_payload.error_code == GateErrorCode.SCRIPT_STALE
+
+
+def test_gate_check_stale_script_allow_stale_bypasses(tmp_path):
+    from bathos.prereg import gate_check, resolve_sidecar
+
+    script = tmp_path / "scripts" / "experiments" / "run_nvt.py"
+    script.parent.mkdir(parents=True)
+    script.touch()
+    _write_stale_sidecar(script.parent, "run_nvt")
+
+    bundle = resolve_sidecar(script)
+    result = gate_check(script, bundle, "collaborative", allow_stale=True)
+
+    assert result.ok is True
+    assert result.error_payload is None
+
+
+def test_gate_check_non_stale_script_unaffected(tmp_path):
+    """A sidecar with no [status] block (or stale=false) is unaffected by the stale gate."""
+    from bathos.prereg import gate_check, resolve_sidecar
+
+    script = tmp_path / "scripts" / "experiments" / "run_nvt.py"
+    script.parent.mkdir(parents=True)
+    script.touch()
+    _write_valid_sidecar(script.parent, "run_nvt")
+
+    bundle = resolve_sidecar(script)
+    result = gate_check(script, bundle, "collaborative")
+
+    assert result.ok is True
+
+
 def test_check_first_of_kind_no_prior_runs(tmp_path):
     from bathos.prereg import check_first_of_kind
 

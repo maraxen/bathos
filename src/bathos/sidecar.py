@@ -79,6 +79,22 @@ class DifferentialBlock:
     min_effect: float | None = None  # required when metric is set and numeric
 
 
+@dataclass
+class StatusBlock:
+    """Staleness declaration for sidecars of any kind (optional [status] block).
+
+    `bth run`'s pre-registration gate (prereg.gate_check) denies execution of a script
+    whose sidecar declares `stale = true`, unless the caller passes `--allow-stale` —
+    this is what stops an agent (or a human) from re-running a script known to have a
+    wrong default or a superseded hypothesis, independent of whether the file has been
+    physically archived (see bathos.artifact_archive).
+    """
+
+    stale: bool = False
+    stale_reason: str = ""
+    superseded_by: str = ""  # free text: run id / claim id / archive item id
+
+
 #: Legal `disposition` values, by review kind. Validated structurally; an unknown value is a
 #: validation error rather than a silent pass, because disposition is what obligation trigger
 #: (4) keys on — a typo would make a citation permanently unable to be contradicted.
@@ -233,6 +249,8 @@ class Sidecar:
     # targeted literature / implementation review (build-order step 2). Advisory at parse
     # time; the Review Coverage Gate at campaign conclude is what consumes it.
     review: ReviewBlock | None = None
+    # staleness declaration (all sidecar kinds) -- consumed by prereg.gate_check
+    status: StatusBlock | None = None
 
 
 ENFORCED_DIRS = {"experiments", "benchmarks", "validation"}
@@ -459,6 +477,21 @@ def parse_sidecar(path: Path) -> Sidecar:
         for key in review_data:
             if key not in {"literature", "implementation"}:
                 logger.warning(f"Unknown key in [review]: {key!r}")
+
+    # Parse [status] block (optional, all sidecar kinds).
+    if "status" in data:
+        status_data = data.get("status") or {}
+        if not isinstance(status_data, dict):
+            logger.warning("[status] is not a table; ignoring")
+            status_data = {}
+        sidecar.status = StatusBlock(
+            stale=bool(status_data.get("stale", False)),
+            stale_reason=str(status_data.get("stale_reason", "")),
+            superseded_by=str(status_data.get("superseded_by", "")),
+        )
+        for key in status_data:
+            if key not in {"stale", "stale_reason", "superseded_by"}:
+                logger.warning(f"Unknown key in [status]: {key!r}")
 
     return sidecar
 

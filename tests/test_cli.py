@@ -867,3 +867,26 @@ def test_report_emit_idempotency(tmp_path: Path, monkeypatch):
         json.loads(manifest_content_second)
     finally:
         db.close()
+
+
+def test_lint_flags_unarchived_stale_script_without_warm_catalog(tmp_path: Path, monkeypatch):
+    """Regression test: check_archival_candidates must fire through the `bth lint` CLI
+    command even when no warm catalog (bathos.db) has ever been compacted -- it was
+    previously wired inside the `if db_path.exists():` block alongside the warm-catalog-only
+    checks, which silently suppressed it on every project that hadn't yet run `bth compact`."""
+    monkeypatch.chdir(tmp_path)
+    catalog = tmp_path / ".bth" / "catalog"
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
+    monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
+    (tmp_path / ".bth.toml").write_text(f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n')
+
+    scripts_dir = tmp_path / "scripts" / "experiments"
+    scripts_dir.mkdir(parents=True)
+    (scripts_dir / "run_thing.py").write_text("print('hello')\n")
+    (scripts_dir / "run_thing.bth.toml").write_text(
+        "[experiment]\nhypothesis = 'h'\n[status]\nstale = true\nstale_reason = 'bad default'\n"
+    )
+
+    assert not catalog.exists()  # no compact has run -- db_path.exists() would be False
+    result = runner.invoke(app, ["lint"])
+    assert "unarchived_stale_script" in result.output

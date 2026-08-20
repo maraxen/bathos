@@ -949,6 +949,128 @@ def check_threshold_basis(project_root: Path) -> list[LintIssue]:
     return issues
 
 
+def check_stale_scripts_without_reason(project_root: Path) -> list[LintIssue]:
+    """Tier-2: Warn when [status] stale=true lacks a stale_reason (debt: archival design).
+
+    Scans all .bth.toml files in the project. A stale flag with no reason is exactly as
+    unjustified as a numeric threshold with no source -- see check_threshold_basis -- and
+    it also degrades the pre-registration gate's deny message (prereg.gate_check) into
+    something un-actionable for whoever hits it.
+
+    Args:
+        project_root: Root directory of the project.
+
+    Returns:
+        List of LintIssue objects with severity WARNING.
+    """
+    issues: list[LintIssue] = []
+
+    for sidecar_path in iter_project_sidecars(project_root):
+        try:
+            with open(sidecar_path, "rb") as f:
+                data = tomllib.load(f)
+        except Exception:
+            continue
+
+        status = data.get("status", {})
+        if not isinstance(status, dict) or not status.get("stale"):
+            continue
+
+        if not str(status.get("stale_reason", "")).strip():
+            issues.append(
+                LintIssue(
+                    path=sidecar_path,
+                    directory="sidecar",
+                    issue="stale_without_reason",
+                    severity=IssueSeverity.WARNING,
+                    detail=(
+                        "[status] stale=true but stale_reason is empty — add a reason so "
+                        "the pre-registration gate's deny message is actionable"
+                    ),
+                )
+            )
+
+    return issues
+
+
+def check_archival_candidates(project_root: Path, catalog_dir: Path) -> list[LintIssue]:
+    """Tier-2: propose (never act on) stale scripts that have not yet been archived.
+
+    Deliberately narrow v1 scope: flags any sidecar with [status] stale=true (see
+    check_stale_scripts_without_reason / prereg.gate_check) that has no corresponding
+    archived_items record. This is lint's role in the archival design -- PROPOSE a
+    candidate; only an explicit `bth archive-artifact` call (bathos.artifact_archive)
+    actually mutates the tree.
+
+    A sidecar counts as "already archived" only if the LATEST archived_items event for
+    the covering item is "archived" (not "restored") -- a restored-then-still-stale
+    sidecar is a fresh candidate again, not permanently exempt.
+    """
+    from bathos.sidecar import parse_sidecar
+
+    issues: list[LintIssue] = []
+
+    archived_rel_paths: set[str] = set()
+    db_path = catalog_dir / "bathos.db"
+    if db_path.exists():
+        import json
+
+        import duckdb
+
+        try:
+            con = duckdb.connect(str(db_path), read_only=True)
+            try:
+                rows = con.execute(
+                    "SELECT id, paths, event, recorded_at FROM archived_items "
+                    "ORDER BY recorded_at ASC"
+                ).fetchall()
+            finally:
+                con.close()
+            latest_by_id: dict[str, tuple[str, str]] = {}
+            for item_id, paths_json, event_name, _recorded_at in rows:
+                latest_by_id[item_id] = (event_name, paths_json)  # ASC order -> last wins
+            for event_name, paths_json in latest_by_id.values():
+                if event_name != "archived":
+                    continue
+                try:
+                    paths = json.loads(paths_json) if paths_json else []
+                except (TypeError, ValueError):
+                    paths = []
+                archived_rel_paths.update(paths)
+        except Exception:
+            pass  # no archived_items table yet -- every stale sidecar is a candidate
+
+    for sidecar_path in iter_project_sidecars(project_root):
+        try:
+            sidecar = parse_sidecar(sidecar_path)
+        except Exception:
+            continue
+        if not (sidecar.status and sidecar.status.stale):
+            continue
+
+        try:
+            rel = str(sidecar_path.relative_to(project_root))
+        except ValueError:
+            rel = str(sidecar_path)
+        if rel in archived_rel_paths:
+            continue
+
+        issues.append(
+            LintIssue(
+                path=sidecar_path,
+                directory="sidecar",
+                issue="unarchived_stale_script",
+                severity=IssueSeverity.WARNING,
+                detail=(
+                    "[status] stale=true but no archived_items record covers this sidecar — "
+                    "run `bth archive-artifact` to migrate it out of working-tree visibility"
+                ),
+            )
+        )
+
+    return issues
+
+
 def check_claim_opaque_labels(project_root: Path) -> list[LintIssue]:
     """Tier-1: Warn on opaque claim IDs with missing or placeholder labels.
 
