@@ -514,9 +514,11 @@ def restore_archived_item(
     # Bundle restore FIRST, tracked-path git-show restore SECOND -- deliberately, so a
     # missing/corrupt bundle raises before any bytes are written to project_root at all.
     # The tracked-path loop below cannot itself fail (a non-zero `git show` just means
-    # "this path was untracked", not an error), so ordering the fallible step first means
-    # this function has no partial-write failure mode: either nothing on disk changes, or
-    # everything below this point does.
+    # "this path was untracked", not an error). This closes the FIRST partial-write window
+    # (a missing bundle used to leave already-restored tracked files silently reverted on
+    # disk); it does not make the whole function atomic -- the commit/ledger tail below is
+    # still fallible and is handled separately (idempotent retry + a registered exception
+    # type, not a bare try/except silence).
     bundle_restored: list[Path] = []
     if bundle_path:
         bundle_file = Path(bundle_path)
@@ -565,34 +567,59 @@ def restore_archived_item(
         abs_path.write_bytes(show.stdout)
         restored.append(abs_path)
 
-    restore_commit_sha = ""
-    if restored:
-        _run_git(["add", *[str(p) for p in restored]], cwd=project_root)
-        _run_git(
-            ["commit", "-m", f"restore: {item_id} (from {pre_archive_sha[:8]})"],
-            cwd=project_root,
-        )
-        restore_commit_sha = _run_git(["rev-parse", "HEAD"], cwd=project_root).stdout.strip()
+    try:
+        restore_commit_sha = ""
+        if restored:
+            _run_git(["add", *[str(p) for p in restored]], cwd=project_root)
+            # Idempotent retry: if an earlier attempt got this far and committed but then
+            # failed later (e.g. append_archived_item_record hitting concurrent DB
+            # contention -- a real risk in this codebase's SLURM-parallel design, see
+            # trust_ledger.py), the `git add` above is a no-op and nothing is staged.
+            # Committing anyway would fail with "nothing to commit" and permanently strand
+            # the item on every retry, since the bytes already match and will never
+            # re-produce a diff to commit.
+            diff_check = _run_git(["diff", "--cached", "--quiet"], cwd=project_root, check=False)
+            if diff_check.returncode != 0:  # non-zero = there ARE staged changes to commit
+                _run_git(
+                    ["commit", "-m", f"restore: {item_id} (from {pre_archive_sha[:8]})"],
+                    cwd=project_root,
+                )
+            restore_commit_sha = _run_git(["rev-parse", "HEAD"], cwd=project_root).stdout.strip()
 
-    append_archived_item_record(
-        ArchivedItemRecord(
-            id=item_id,
-            project_slug=project_slug,
-            event="restored",
-            kind=kind,
-            paths=paths,
-            pre_archive_sha=pre_archive_sha,
-            stub_commit_sha=restore_commit_sha,
-            verdict=verdict,
-            reason=reason,
-            superseded_by=superseded_by,
-            bundle_sha256=bundle_sha256,
-            bundle_path=bundle_path,
-            archived_by=restored_by,
-        ),
-        catalog_dir,
-    )
-    _regenerate_index(project_root, catalog_dir)
+        append_archived_item_record(
+            ArchivedItemRecord(
+                id=item_id,
+                project_slug=project_slug,
+                event="restored",
+                kind=kind,
+                paths=paths,
+                pre_archive_sha=pre_archive_sha,
+                stub_commit_sha=restore_commit_sha,
+                verdict=verdict,
+                reason=reason,
+                superseded_by=superseded_by,
+                bundle_sha256=bundle_sha256,
+                bundle_path=bundle_path,
+                archived_by=restored_by,
+            ),
+            catalog_dir,
+        )
+        _regenerate_index(project_root, catalog_dir)
+    except ArchiveError:
+        raise
+    except Exception as e:
+        # The restore commit/ledger-append/index-regen tail is fallible (git commit can
+        # fail on a rejecting hook or full disk; append_archived_item_record can fail on
+        # concurrent DB contention). Bytes recovered above are already correct on disk --
+        # only the commit/ledger bookkeeping failed -- but this must still surface as a
+        # registered ArchiveError, not an unhandled exception type at the MCP boundary
+        # (see errors.py::EXCEPTION_TO_CODE). A retry is safe: the git-add/diff-check above
+        # makes the commit step a no-op once bytes already match.
+        raise ArchiveError(
+            f"Restore of {item_id} recovered file content but failed to finalize "
+            f"(commit/ledger/index): {e}. Bytes on disk should already be correct; retry "
+            "bth restore to complete the commit/ledger update."
+        ) from e
 
     all_restored = restored + bundle_restored
     event("archive.artifact_restored", id=item_id, paths=[str(p) for p in all_restored])

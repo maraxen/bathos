@@ -367,6 +367,51 @@ def test_restore_missing_bundle_leaves_no_partial_writes(tmp_path):
     assert script.read_text() == stub_text_before_restore
 
 
+def test_restore_tail_failure_raises_registered_error_and_retry_is_idempotent(tmp_path):
+    """Regression test: restore_archived_item's post-restore tail (git commit for the
+    restored tracked paths + append_archived_item_record + index regen) is fallible and
+    runs AFTER bytes are already correctly written to disk. A failure there must surface as
+    a registered ArchiveError -- a raw subprocess.CalledProcessError has no
+    errors.py::EXCEPTION_TO_CODE entry and would surface as an unhandled exception at the
+    MCP boundary instead of a structured error. And since the recovered bytes are already
+    correct on disk when the tail fails, a retry after the underlying cause is fixed must
+    succeed rather than getting permanently stuck on git's "nothing to commit" once the
+    first attempt already staged/committed as far as it could."""
+    from bathos.artifact_archive import ArchiveError, archive_experiment_bundle, restore_archived_item
+
+    repo, script, _sidecar = _make_scripted_repo(tmp_path)
+    original_script_text = script.read_text()
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+
+    item = archive_experiment_bundle(
+        project_root=repo,
+        script_path=script,
+        catalog_dir=catalog_dir,
+        project_slug="testproj",
+        verdict="v",
+        reason="r",
+    )
+
+    # Force the tail's `git commit` to fail deterministically, regardless of the host's own
+    # global git identity config.
+    reject_hook = repo / ".git" / "hooks" / "pre-commit"
+    reject_hook.write_text("#!/bin/sh\nexit 1\n")
+    reject_hook.chmod(0o755)
+
+    with pytest.raises(ArchiveError):
+        restore_archived_item(project_root=repo, item_id=item.id, catalog_dir=catalog_dir)
+
+    # Bytes are already correctly restored on disk even though the commit failed.
+    assert script.read_text() == original_script_text
+
+    # Fix the underlying cause and retry -- must succeed, not get stuck on "nothing to
+    # commit" now that the file is already staged (or already committed) from attempt 1.
+    reject_hook.unlink()
+    result = restore_archived_item(project_root=repo, item_id=item.id, catalog_dir=catalog_dir)
+    assert result.restore_commit_sha
+
+
 def test_restore_raises_without_ledger_record_or_stub_path(tmp_path):
     from bathos.artifact_archive import ArtifactNotFoundError, restore_archived_item
 
