@@ -1,5 +1,4 @@
 import json
-import os
 import subprocess
 from pathlib import Path
 
@@ -124,7 +123,7 @@ def test_env_channel_rejects_unrecognised_provenance_status(tmp_path: Path, monk
 
 
 # Test sidecar channel
-def test_sidecar_channel_used_when_no_env(tmp_path: Path, monkeypatch):
+def test_sidecar_channel_used_when_no_env(tmp_path: Path):
     """Sidecar channel is used when no env vars set."""
     test_sha = "b" * 40
     sidecar_data = {
@@ -377,7 +376,6 @@ def test_sidecar_ascent_is_bounded_to_eight_levels(tmp_path: Path):
 
 def test_status_nogit_maps_to_hash_nogit(tmp_path: Path, monkeypatch):
     """D4: status='nogit' maps to hash='nogit'."""
-    test_sha = "2" * 40
     monkeypatch.setenv("MYXCEL_PROVENANCE_SCHEMA", "1")
     monkeypatch.setenv("MYXCEL_PROVENANCE_STATUS", "nogit")
     monkeypatch.setenv("MYXCEL_GIT_SHA", "")  # empty → None
