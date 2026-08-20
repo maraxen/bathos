@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pyarrow as pa
 
-CURRENT_SCHEMA_VERSION = "14"
+CURRENT_SCHEMA_VERSION = "15"
 
 # Format validator for stage_name values — used by linter.check_canonical_stage_names.
 # Enforcement at parse time uses CANONICAL_STAGES set-membership (parse_sidecar); this
@@ -82,6 +82,8 @@ COOL_SCHEMA = pa.schema(
         pa.field("differential_effect", pa.float64(), nullable=True),
         pa.field("dependency_lock_sha256", pa.string(), nullable=True),
         pa.field("adversarial_check_result", pa.string(), nullable=True),
+        pa.field("git_dirty_content_id", pa.string(), nullable=True),
+        pa.field("git_provenance_source", pa.string(), nullable=True),
     ]
 )
 
@@ -145,6 +147,8 @@ WARM_SCHEMA = pa.schema(
         pa.field("differential_effect", pa.float64(), nullable=True),
         pa.field("dependency_lock_sha256", pa.string(), nullable=True),
         pa.field("adversarial_check_result", pa.string(), nullable=True),
+        pa.field("git_dirty_content_id", pa.string(), nullable=True),
+        pa.field("git_provenance_source", pa.string(), nullable=True),
     ]
 )
 
@@ -213,6 +217,12 @@ class Run:
     #: only whether the field was DECLARED (present/missing/n/a) -- a declaration fact, not
     #: a measurement. Overloading that column would make every pre-v14 row unreadable.
     adversarial_check_result: str | None = None
+    #: v15. Dirty content identifier: "tree:<40hex>" | "diff-sha256:<64hex>" | None.
+    #: From myxcel provenance capture: identifies the state of uncommitted edits.
+    git_dirty_content_id: str | None = None
+    #: v15. Source of git provenance: "git" | "myxcel-env" | "myxcel-sidecar" | "none".
+    #: Indicates which channel provided the git_hash and git_branch values.
+    git_provenance_source: str | None = None
 
     def to_arrow(self) -> pa.Table:
         return pa.table(
@@ -273,6 +283,8 @@ class Run:
                 "differential_effect": [self.differential_effect],
                 "dependency_lock_sha256": [self.dependency_lock_sha256],
                 "adversarial_check_result": [self.adversarial_check_result],
+                "git_dirty_content_id": [self.git_dirty_content_id],
+                "git_provenance_source": [self.git_provenance_source],
             },
             schema=COOL_SCHEMA,
         )
@@ -403,5 +415,11 @@ class Run:
             else None,
             dependency_lock_sha256=pydict.get("dependency_lock_sha256", [None])[i]
             if "dependency_lock_sha256" in pydict
+            else None,
+            git_dirty_content_id=pydict.get("git_dirty_content_id", [None])[i]
+            if "git_dirty_content_id" in pydict
+            else None,
+            git_provenance_source=pydict.get("git_provenance_source", [None])[i]
+            if "git_provenance_source" in pydict
             else None,
         )

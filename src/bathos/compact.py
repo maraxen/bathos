@@ -299,6 +299,19 @@ def _migrate_v13(run_dict: dict) -> dict:
     return run_dict
 
 
+def _migrate_v14(run_dict: dict) -> dict:
+    """Migrate v14 fragment to v15 by adding git provenance fields.
+
+    git_dirty_content_id and git_provenance_source default to None -- a run predating the
+    myxcel provenance capture feature has no recorded content ID or provenance source,
+    which is a different fact from "captured as empty string".
+    """
+    run_dict["git_dirty_content_id"] = None
+    run_dict["git_provenance_source"] = None
+    run_dict["schema_version"] = "15"
+    return run_dict
+
+
 MIGRATIONS["0"] = _migrate_v0
 MIGRATIONS["1"] = _migrate_v1
 MIGRATIONS["2"] = _migrate_v2
@@ -313,6 +326,7 @@ MIGRATIONS["10"] = _migrate_v10
 MIGRATIONS["11"] = _migrate_v11
 MIGRATIONS["12"] = _migrate_v12
 MIGRATIONS["13"] = _migrate_v13
+MIGRATIONS["14"] = _migrate_v14
 
 
 _RUNS_TABLE_SCHEMA = """
@@ -373,7 +387,9 @@ CREATE TABLE IF NOT EXISTS runs (
     differential_on_value TEXT,
     differential_effect DOUBLE,
     dependency_lock_sha256 TEXT,
-    adversarial_check_result TEXT
+    adversarial_check_result TEXT,
+    git_dirty_content_id TEXT,
+    git_provenance_source TEXT
 )
 """
 
@@ -799,6 +815,8 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
         "ALTER TABLE runs ADD COLUMN IF NOT EXISTS differential_effect DOUBLE",
         "ALTER TABLE runs ADD COLUMN IF NOT EXISTS dependency_lock_sha256 TEXT",
         "ALTER TABLE runs ADD COLUMN IF NOT EXISTS adversarial_check_result TEXT",
+        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS git_dirty_content_id TEXT",
+        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS git_provenance_source TEXT",
     ]:
         with contextlib.suppress(Exception):
             con.execute(_runs_alter_sql)
@@ -976,8 +994,8 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                 claim_discriminates, claim_isolates, parity_run_type, seed, baseline_hpo_trials, baseline_hpo_compute_budget,
                 stdout_sha256, component_id, component_sidecar_sha256,
                 differential_status, differential_off_value, differential_on_value, differential_effect, dependency_lock_sha256,
-                adversarial_check_result
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                adversarial_check_result, git_dirty_content_id, git_provenance_source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 run.id,
@@ -1033,6 +1051,8 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                 run.differential_effect,
                 run.dependency_lock_sha256,
                 run.adversarial_check_result,
+                run.git_dirty_content_id,
+                run.git_provenance_source,
             ],
         )
 

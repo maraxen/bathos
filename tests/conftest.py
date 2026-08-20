@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -31,3 +32,16 @@ def sample_run() -> Run:
         tags=["smoke"],
         hostname="test-host",
     )
+
+
+@pytest.fixture(autouse=True)
+def clear_myxcel_env(monkeypatch):
+    """Autouse fixture to clear all MYXCEL_* env vars for each test.
+
+    This prevents ambient MYXCEL_* variables from a myxcel-submitted job
+    from affecting test behavior. Tests that need specific MYXCEL_* values
+    can set them explicitly via monkeypatch after this fixture clears them.
+    """
+    myxcel_vars = [k for k in os.environ if k.startswith("MYXCEL_")]
+    for var in myxcel_vars:
+        monkeypatch.delenv(var, raising=False)

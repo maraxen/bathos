@@ -273,3 +273,50 @@ def test_migrate_v12_to_v13_differential_fields_null_backfill(tmp_path):
     assert tbl_after.num_rows == 1
     schema_versions = tbl_after.column("schema_version").to_pylist()
     assert all(v == CURRENT_SCHEMA_VERSION for v in schema_versions)
+
+
+def test_migrate_v14_to_v15_git_provenance_fields_null_backfill(tmp_path):
+    """v14→v15 migration: git_dirty_content_id/git_provenance_source backfill to None, not
+    ''. A run predating the myxcel provenance-capture feature has no recorded content id or
+    provenance source at all -- a different fact from "captured as empty string" -- mirrors
+    the v12->v13 differential-fields regression guard above for the same reason (task
+    260820_bathos-git-sync)."""
+    from bathos.migrate import migrate_catalog
+    from bathos.schema import COOL_SCHEMA, CURRENT_SCHEMA_VERSION
+
+    v14_field_names = {"git_dirty_content_id", "git_provenance_source"}
+    v14_schema = pa.schema([f for f in COOL_SCHEMA if f.name not in v14_field_names])
+
+    r = Run(
+        project_slug="test-project",
+        command="python test.py",
+        argv=["python", "test.py"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+    )
+    full_tbl = r.to_arrow()
+    v14_tbl = full_tbl.select([f.name for f in v14_schema])
+
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    fragment_path = runs_dir / "run_v14_test.parquet"
+    pq.write_table(v14_tbl, fragment_path)
+
+    tbl_before = pq.read_table(fragment_path)
+    for field_name in v14_field_names:
+        assert field_name not in tbl_before.schema.names
+
+    result = migrate_catalog(tmp_path, dry_run=False)
+    assert result.scanned == 1
+    assert result.migrated == 1
+
+    tbl_after = pq.read_table(fragment_path)
+    for field_name in v14_field_names:
+        assert field_name in tbl_after.schema.names
+        values = tbl_after.column(field_name).to_pylist()
+        assert all(v is None for v in values), f"{field_name}: expected all None, got {values}"
+
+    assert tbl_after.num_rows == 1
+    schema_versions = tbl_after.column("schema_version").to_pylist()
+    assert all(v == CURRENT_SCHEMA_VERSION for v in schema_versions)
