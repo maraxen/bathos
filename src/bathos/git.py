@@ -50,9 +50,16 @@ def _env_channel(cwd: str | Path) -> dict | None:
     except (ValueError, OSError):
         return None
 
+    # Reject a missing or unrecognised provenance_status the same way _sidecar_channel
+    # does (D4's status enum is exactly "git" | "nogit" | "unavailable") -- a garbage or
+    # absent status must not carry through whatever git_sha happens to accompany it.
+    status = os.environ.get("MYXCEL_PROVENANCE_STATUS", "")
+    if status not in _VALID_PROVENANCE_STATUSES:
+        return None
+
     # Read the env channel fields
     return {
-        "provenance_status": os.environ.get("MYXCEL_PROVENANCE_STATUS", ""),
+        "provenance_status": status,
         "git_sha": os.environ.get("MYXCEL_GIT_SHA", "") or None,
         "git_branch": os.environ.get("MYXCEL_GIT_BRANCH", "") or None,
         "git_dirty": os.environ.get("MYXCEL_GIT_DIRTY", ""),

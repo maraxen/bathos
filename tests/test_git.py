@@ -106,6 +106,23 @@ def test_env_channel_ignored_when_cwd_outside_provenance_root(tmp_path: Path, mo
     assert state.provenance_source == "none"
 
 
+def test_env_channel_rejects_unrecognised_provenance_status(tmp_path: Path, monkeypatch):
+    """D4: _env_channel must reject a missing/unrecognised MYXCEL_PROVENANCE_STATUS the
+    same way _sidecar_channel rejects an invalid sidecar status -- a garbage or absent
+    status must not let whatever git_sha happens to accompany it carry through. Env and
+    sidecar are "one schema, one parser" per the spec; this locks the symmetry."""
+    monkeypatch.setenv("MYXCEL_PROVENANCE_SCHEMA", "1")
+    monkeypatch.setenv("MYXCEL_PROVENANCE_STATUS", "totally-bogus-status")
+    monkeypatch.setenv("MYXCEL_GIT_SHA", "9" * 40)
+    monkeypatch.setenv("MYXCEL_GIT_BRANCH", "weird-branch")
+    monkeypatch.setenv("MYXCEL_GIT_DIRTY", "0")
+    monkeypatch.setenv("MYXCEL_PROVENANCE_ROOT", str(tmp_path))
+
+    state = capture_git_state(tmp_path)
+    assert state.hash == "unknown"
+    assert state.provenance_source == "none"
+
+
 # Test sidecar channel
 def test_sidecar_channel_used_when_no_env(tmp_path: Path, monkeypatch):
     """Sidecar channel is used when no env vars set."""
