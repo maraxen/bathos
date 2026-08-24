@@ -710,6 +710,19 @@ def _run_campaign_conclude_hooks(
     -- the caller passes this when it already resolved membership earlier in the
     same conclude_campaign() call (e.g. for the Union Gate), so the same warm
     ``campaign_runs``-union-cool-parquet scan doesn't run twice.
+
+    Connection handling: ``db`` (the writable connection conclude_campaign() was
+    given) is closed here, after member-info resolution but before any hook is
+    invoked. DuckDB refuses a second (even read-only) connection to the same
+    catalog file while a writable one is open in the same process -- and a hook
+    is expected to open its own connection to resolve/verify things against the
+    catalog (this is exactly what affigit-wire's phase1_preflight gate does).
+    Closing proactively, rather than leaving that conflict for the first hook to
+    discover, is safe here specifically because this is conclude_campaign()'s
+    final action: nothing in conclude_campaign() or its callers (bathos's own CLI
+    and MCP tool surfaces) touches ``db`` again after this call returns -- both
+    callers' own ``finally: db.close()`` on an already-closed connection is a
+    documented DuckDB no-op, not an error.
     """
     try:
         hooks = importlib.metadata.entry_points(group="bathos.campaign_conclude_hooks")
@@ -730,6 +743,11 @@ def _run_campaign_conclude_hooks(
     payload = CampaignConcludeEvent(
         campaign_id=campaign_id, outcome_label=outcome_label, members=members
     )
+
+    try:
+        db.close()
+    except Exception as e:
+        print(f"WARNING: could not close catalog connection before campaign_conclude_hooks: {e}")
 
     for hook_ep in hooks:
         try:
@@ -805,6 +823,13 @@ def conclude_campaign(
         concluded. Hooks run synchronously, in the order importlib.metadata
         returns them (unspecified across ties), and conclude_campaign() blocks
         until every hook has returned or raised.
+
+        Connection handling: the ``db`` connection passed into conclude_campaign()
+        is closed before any hook is invoked (DuckDB does not allow a second
+        connection, even read-only, to the same catalog file while a writable one
+        is open in-process) -- a hook that needs to query the catalog must open
+        its own connection via ``connect_catalog_db``/``duckdb.connect``. This is
+        safe because hook dispatch is conclude_campaign()'s final action.
 
         Non-propagation guarantee: a hook that raises, that fails to load, or
         whose entry-point group itself cannot be resolved, NEVER raises out of

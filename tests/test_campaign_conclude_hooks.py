@@ -183,9 +183,17 @@ def test_hook_that_raises_does_not_propagate_or_block_conclusion(
         result = conclude_campaign(db, campaign.id, "pass", "worked")
         assert result is None
 
-        row = db.execute(
-            "SELECT status, outcome_label FROM campaigns WHERE id = ?", [campaign.id]
-        ).fetchone()
+        # conclude_campaign() closes `db` before invoking any hook (see
+        # _run_campaign_conclude_hooks's docstring) -- a fresh connection is the
+        # correct way to observe post-conclusion state here, exactly as a real
+        # hook (or a caller re-querying after conclude_campaign() returns) would.
+        verify_db = duckdb.connect(str(catalog_with_two_runs / "bathos.db"), read_only=True)
+        try:
+            row = verify_db.execute(
+                "SELECT status, outcome_label FROM campaigns WHERE id = ?", [campaign.id]
+            ).fetchone()
+        finally:
+            verify_db.close()
         assert row[0] == "concluded"
         assert row[1] == "pass"
 
@@ -383,14 +391,66 @@ hypothesis_ids = ["H_primary", "H_null"]
             db, campaign.id, "pass", "Should be downgraded", workspace_root=tmp_path
         )
 
-        row = db.execute(
-            "SELECT outcome_label FROM campaigns WHERE id = ?", [campaign.id]
-        ).fetchone()
+        # conclude_campaign() closes `db` before invoking any hook -- reconnect to
+        # observe post-conclusion state, same as a real hook would have to.
+        verify_db = duckdb.connect(str(catalog_with_two_runs / "bathos.db"), read_only=True)
+        try:
+            row = verify_db.execute(
+                "SELECT outcome_label FROM campaigns WHERE id = ?", [campaign.id]
+            ).fetchone()
+        finally:
+            verify_db.close()
         assert row[0] == "confounded"
 
         assert len(captured) == 1
         # The hook must see the same final label that was persisted -- not the
         # researcher's original "pass" argument.
         assert captured[0].outcome_label == "confounded"
+    finally:
+        db.close()
+
+
+def test_hook_can_open_its_own_connection_to_the_same_catalog(
+    catalog_with_two_runs: Path, monkeypatch
+):
+    """Regression for a real, reproduced bug: conclude_campaign() used to hold its
+    writable `db` connection open through hook dispatch. DuckDB refuses a second
+    connection -- even read-only -- to the same catalog file while a writable one is
+    open in-process, so any hook that queries the catalog itself (exactly what
+    affigit-wire's BathosGateRunner.phase1_preflight does, via
+    bathos.mcp.resolve_pin_tool -> readback.resolve_pin -> get_trust_state) would
+    fail every time. This proves a hook opening a fresh read-only connection to the
+    same catalog file now succeeds instead of raising a DuckDB ConnectionException."""
+    db = duckdb.connect(str(catalog_with_two_runs / "bathos.db"))
+    try:
+        campaign = create_campaign(db, name="Test", project_slug="prolix", mode="exploration")
+
+        opened_own_connection_ok = []
+
+        def hook_that_opens_its_own_connection(event):
+            # This is the exact shape of the conflict: a second connection to the
+            # SAME catalog file, opened from inside hook dispatch.
+            own_db = duckdb.connect(str(catalog_with_two_runs / "bathos.db"), read_only=True)
+            try:
+                row = own_db.execute(
+                    "SELECT status FROM campaigns WHERE id = ?", [event.campaign_id]
+                ).fetchone()
+                opened_own_connection_ok.append(row[0])
+            finally:
+                own_db.close()
+
+        _patch_entry_points(
+            monkeypatch,
+            {HOOK_GROUP: [_FakeEntryPoint("self-connecting-hook", hook_that_opens_its_own_connection)]},
+        )
+
+        # Must not raise. Before the fix, this hook's duckdb.connect() call would
+        # raise duckdb.ConnectionException (caught by _run_campaign_conclude_hooks'
+        # own try/except around hook invocation, so conclude_campaign() itself
+        # wouldn't have raised either -- but the hook's own catalog query would
+        # never have actually succeeded, which is what this test asserts against).
+        conclude_campaign(db, campaign.id, "pass", "worked")
+
+        assert opened_own_connection_ok == ["concluded"]
     finally:
         db.close()
