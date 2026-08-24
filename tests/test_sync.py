@@ -10,6 +10,11 @@ from bathos.config import ProjectConfig
 from bathos.sync import SyncResult, sync_catalog
 
 
+@pytest.fixture(autouse=True)
+def _no_ssh_mkdir(monkeypatch):
+    monkeypatch.setattr("bathos.sync.ensure_remote_catalog_dir", lambda *_a, **_k: None)
+
+
 def _make_mock_popen(returncode=0, stderr_output="", stdout_output=""):
     """Create a mock Popen object."""
     mock_proc = MagicMock()
@@ -45,9 +50,8 @@ def test_sync_constructs_correct_rsync_command_push(tmp_path: Path):
 
         sync_catalog("engaging", config, catalog_dir, pull=False)
 
-        # Verify rsync was called with correct arguments
-        call_args = mock_popen.call_args
-        cmd = call_args[0][0]
+        cmds = [c[0][0] for c in mock_popen.call_args_list]
+        cmd = next(c for c in cmds if any("runs/" in str(a) for a in c))
 
         # Should be rsync command
         assert cmd[0] == "rsync"
@@ -171,10 +175,9 @@ def test_sync_uses_ignore_existing(tmp_path: Path):
 
         sync_catalog("engaging", config, catalog_dir, pull=False)
 
-        call_args = mock_popen.call_args
-        cmd = call_args[0][0]
-
-        assert "--ignore-existing" in cmd
+        cmds = [c[0][0] for c in mock_popen.call_args_list]
+        runs_cmd = next(c for c in cmds if "--ignore-existing" in c)
+        assert any("runs/" in str(a) for a in runs_cmd)
 
 
 def test_sync_returns_sync_result(tmp_path: Path):

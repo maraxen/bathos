@@ -630,12 +630,25 @@ hypothesis_ids = ["H_information_symmetry", "H_null_misspec"]
     return claim_path
 
 
+def resolve_claim_path(path_relative: str, workspace_root: Path) -> Path:
+    """Resolve a claim path and reject escapes of workspace_root."""
+    root = workspace_root.resolve()
+    raw = Path(path_relative)
+    candidate = raw.resolve() if raw.is_absolute() else (root / raw).resolve()
+    if not candidate.is_relative_to(root):
+        raise RuntimeError(
+            f"Claim file must be within workspace root. Path {path_relative} escapes {workspace_root}"
+        )
+    return candidate
+
+
 def register_claim(
     path: Path,
     campaign_id: str,
     db: duckdb.DuckDBPyConnection,
     workspace_root: Path,
     force: bool = False,
+    catalog_dir: Path | None = None,
 ) -> None:
     """Register a claim file with a campaign.
 
@@ -649,28 +662,21 @@ def register_claim(
     Raises:
         RuntimeError: If path is absolute or escapes workspace, or campaign not found
     """
-    from bathos.campaigns import CampaignError, _resolve_campaign_id
+    from bathos.campaigns import CampaignError, _resolve_campaign_id, ingest_cool_campaigns
 
-    # Resolve path to relative if absolute
-    if path.is_absolute():
-        try:
-            rel_path = path.relative_to(workspace_root)
-        except ValueError:
-            raise RuntimeError(
-                f"Claim file must be within workspace root. Path {path} escapes {workspace_root}"
-            )
-    else:
-        rel_path = path
+    abs_path = resolve_claim_path(str(path), workspace_root)
+    rel_path = abs_path.relative_to(workspace_root.resolve())
 
-    # Verify file exists
-    abs_path = workspace_root / rel_path
     if not abs_path.exists():
         raise FileNotFoundError(f"Claim file not found at {abs_path}")
 
     try:
-        full_id = _resolve_campaign_id(db, campaign_id)
+        full_id = _resolve_campaign_id(db, campaign_id, catalog_dir=catalog_dir)
     except CampaignError as e:
         raise RuntimeError(f"Campaign not found: {e}") from e
+
+    if catalog_dir is not None:
+        ingest_cool_campaigns(db, catalog_dir)
 
     # Compute SHA256
     claim_content = abs_path.read_bytes()
@@ -678,6 +684,40 @@ def register_claim(
 
     # Check if already registered
     existing = db.execute("SELECT claim_sha256 FROM campaigns WHERE id = ?", [full_id]).fetchall()
+    if not existing:
+        if catalog_dir is None:
+            raise RuntimeError(f"Campaign not found in warm catalog: {full_id}")
+        from bathos.campaigns import read_cool_campaigns
+
+        cool = next((c for c in read_cool_campaigns(catalog_dir) if c.id == full_id), None)
+        if cool is None:
+            raise RuntimeError(f"Campaign not found in warm catalog: {full_id}")
+        db.execute(
+            """
+            INSERT INTO campaigns (
+                id, project_slug, name, mode, question, hypothesis, status,
+                started_at, concluded_at, conclusion, outcome_label,
+                parent_campaign_id, stopping_threshold, negative_check
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                cool.id,
+                cool.project_slug,
+                cool.name,
+                cool.mode,
+                cool.question,
+                cool.hypothesis,
+                cool.status,
+                cool.started_at,
+                cool.concluded_at,
+                cool.conclusion,
+                cool.outcome_label,
+                cool.parent_campaign_id,
+                cool.stopping_threshold,
+                cool.negative_check,
+            ],
+        )
+        existing = [(None,)]
     if existing and existing[0][0] is not None:
         if not force:
             raise RuntimeError(
@@ -692,6 +732,15 @@ def register_claim(
         "UPDATE campaigns SET claim_path = ?, claim_sha256 = ? WHERE id = ?",
         [str(rel_path), claim_sha256, full_id],
     )
+    stored = db.execute("SELECT claim_sha256 FROM campaigns WHERE id = ?", [full_id]).fetchone()
+    if stored is None or stored[0] != claim_sha256:
+        raise RuntimeError(f"Campaign not found in warm catalog; cannot register claim: {full_id}")
+    if catalog_dir is not None:
+        from bathos.campaigns import get_campaign, write_campaign_cool
+
+        refreshed = get_campaign(db, full_id, catalog_dir=catalog_dir)
+        if refreshed is not None:
+            write_campaign_cool(refreshed, catalog_dir)
 
     event(
         "claim.register", campaign_id=full_id, claim_path=str(rel_path), claim_sha256=claim_sha256
@@ -726,7 +775,7 @@ def check_sha(path_relative: str, registered_sha: str, workspace_root: Path) -> 
         FileNotFoundError: If claim file not found
         ValueError: If SHA256 mismatch
     """
-    abs_path = workspace_root / path_relative
+    abs_path = resolve_claim_path(path_relative, workspace_root)
     if not abs_path.exists():
         raise FileNotFoundError(f"Claim file not found at {abs_path}")
 

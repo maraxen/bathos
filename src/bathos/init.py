@@ -45,6 +45,7 @@ def init_project(
     # .bth.toml
     toml_path = project_root / ".bth.toml"
     content = _BTH_TOML_TEMPLATE.format(slug=slug, root=str(project_root))
+    remote_root = None
     if remote:
         host, remote_root = remote.split(":", 1)
         content += f'\n[remotes.{host}]\nhost = "{host}"\nremote_root = "{remote_root}"\n'
@@ -52,10 +53,14 @@ def init_project(
         content += f'\n[slurm]\npartition = "{slurm_partition}"\n'
     toml_path.write_text(content)
 
-    # scripts/slurm/_bth_env.sh
-    template = _load_env_sh_template()
-    env_sh = template.format(slug=slug, root=str(project_root), catalog_dir=str(catalog_dir))
-    (project_root / "scripts" / "slurm" / "_bth_env.sh").write_text(env_sh)
+    from bathos.cluster_catalog import write_bth_env_sh
+
+    write_bth_env_sh(
+        project_root,
+        slug=slug,
+        project_root_value=project_root,
+        remote_root=remote_root,
+    )
 
     # .gitignore
     gitignore = project_root / ".gitignore"

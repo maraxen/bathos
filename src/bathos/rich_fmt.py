@@ -313,6 +313,8 @@ def render_popper_summary(popper_data: dict | None, console: Console | None = No
                 style="yellow",
             )
         )
+    elif popper_data.get("gap"):
+        console.print(Text(f"  Campaign conclusion: {popper_data['gap']}", style="yellow"))
     else:
         console.print(Text("  Campaign conclusion: NO RUNS YET", style="dim"))
 

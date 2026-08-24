@@ -80,6 +80,17 @@ def add_remote(config_path: Path, name: str, host: str, path: str) -> None:
 
     tmp_path.replace(config_path)
 
+    project_root = config_path.parent
+    slug = doc.get("project", {}).get("slug", project_root.name)
+    from bathos.cluster_catalog import write_bth_env_sh
+
+    write_bth_env_sh(
+        project_root,
+        slug=str(slug),
+        project_root_value=doc.get("project", {}).get("root", project_root),
+        remote_root=path,
+    )
+
 
 def remove_remote(config_path: Path, name: str) -> None:
     """Remove a remote from the config file.

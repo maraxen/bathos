@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from bathos.cluster_catalog import ensure_remote_catalog_dir, remote_catalog_path
 from bathos.config import ProjectConfig
 from bathos.telemetry import event
 
@@ -15,6 +16,28 @@ logger = logging.getLogger(__name__)
 
 _SYNC_TIMEOUT_S = 120  # rsync kill switch: fail if no completion within 2 minutes
 _RSYNC_STALL_SECONDS = 30  # Stall detection: no progress for N seconds
+
+
+def _popen_rsync_watchdog(cmd: list[str]) -> tuple[subprocess.Popen, threading.Event]:
+    proc = subprocess.Popen(
+        cmd,
+        stderr=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    fired = threading.Event()
+
+    def watchdog():
+        try:
+            proc.wait(timeout=_SYNC_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            fired.set()
+            proc.kill()
+        except Exception:
+            pass
+
+    threading.Thread(target=watchdog, daemon=True).start()
+    return proc, fired
 
 
 @dataclass
@@ -53,13 +76,15 @@ def sync_catalog(
     remote_config = config.remotes[remote_name]
     host = remote_config["host"]
     remote_root = remote_config["remote_root"]
+    ensure_remote_catalog_dir(host, remote_root)
+    remote_cat = remote_catalog_path(remote_root)
 
     project_slug = config.slug
     sync_filter = getattr(config, "sync_filter", "project_slug")
 
     if sync_filter == "project_slug":
         local_runs = catalog_dir / "runs" / project_slug
-        remote_runs = f"{host}:{remote_root}/.bth/catalog/runs/{project_slug}/"
+        remote_runs = f"{host}:{remote_cat}/runs/{project_slug}/"
         # Count filtered runs (total in catalog minus this project's runs)
         runs_root = catalog_dir / "runs"
         if not pull and runs_root.exists():
@@ -72,7 +97,7 @@ def sync_catalog(
             filtered = 0
     else:
         local_runs = catalog_dir / "runs"
-        remote_runs = f"{host}:{remote_root}/.bth/catalog/runs/"
+        remote_runs = f"{host}:{remote_cat}/runs/"
         filtered = 0
 
     if not pull:
@@ -125,26 +150,7 @@ def sync_catalog(
     _watchdog_fired = threading.Event()
 
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stderr=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            text=True,
-        )
-
-        # Watchdog thread to detect hangs
-        def watchdog():
-            try:
-                proc.wait(timeout=_SYNC_TIMEOUT_S)
-            except subprocess.TimeoutExpired:
-                _watchdog_fired.set()
-                proc.kill()
-            except Exception:
-                # Ignore other exceptions (e.g., if proc is already dead)
-                pass
-
-        watchdog_thread = threading.Thread(target=watchdog, daemon=True)
-        watchdog_thread.start()
+        proc, _watchdog_fired = _popen_rsync_watchdog(cmd)
 
         # Stall monitor thread: detect silent hangs where no output is produced
         def stall_monitor():
@@ -248,6 +254,57 @@ def sync_catalog(
 
     if exit_code != 0:
         raise RuntimeError(f"rsync failed with exit code {exit_code}")
+
+    local_campaigns = catalog_dir / "campaigns"
+    local_campaigns.mkdir(parents=True, exist_ok=True)
+    remote_campaigns = f"{host}:{remote_cat}/campaigns/"
+    if pull:
+        c_src, c_dst = remote_campaigns, str(local_campaigns) + "/"
+    else:
+        c_src, c_dst = str(local_campaigns) + "/", remote_campaigns
+    camp_cmd = [
+        "rsync",
+        "-az",
+        f"-e{ssh_opts}",
+        "--update",
+        "--exclude",
+        "*.tmp",
+        "--info=progress2",
+        c_src,
+        c_dst,
+    ]
+    event(
+        "sync.rsync_start",
+        direction=direction,
+        remote=remote_name,
+        src=c_src,
+        dst=c_dst,
+        filters="campaigns",
+    )
+    camp_proc, camp_watchdog_fired = _popen_rsync_watchdog(camp_cmd)
+
+    def _drain(pipe):
+        if pipe is not None:
+            pipe.read()
+
+    drain_err = threading.Thread(target=_drain, args=(camp_proc.stderr,), daemon=True)
+    drain_out = threading.Thread(target=_drain, args=(camp_proc.stdout,), daemon=True)
+    drain_err.start()
+    drain_out.start()
+    drain_err.join()
+    drain_out.join()
+    camp_exit = camp_proc.wait()
+    if camp_watchdog_fired.is_set() or camp_exit == -9:
+        raise RuntimeError(f"rsync timed out after {_SYNC_TIMEOUT_S}s and was killed")
+    event(
+        "sync.rsync_end",
+        exit_code=camp_exit,
+        duration_ms=0,
+        bytes_transferred=0,
+        files_transferred=0,
+    )
+    if camp_exit != 0:
+        raise RuntimeError(f"rsync failed with exit code {camp_exit}")
 
     # Post-pull truncation scan (Fix 6)
     truncated_candidates = []

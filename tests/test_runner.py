@@ -908,6 +908,7 @@ def test_run_with_campaign_populates_campaign_runs(tmp_catalog: Path):
         campaign_id=campaign.id,
     )
     assert exit_code == 0
+    compact(tmp_catalog)
 
     runs = read_runs(tmp_catalog)
     assert len(runs) == 1
@@ -946,6 +947,7 @@ def test_run_with_campaign_short_prefix_resolves_to_full_id(tmp_catalog: Path):
         campaign_id=campaign.id[:8],
     )
     assert exit_code == 0
+    compact(tmp_catalog)
 
     runs = read_runs(tmp_catalog)
     assert runs[0].campaign_id == campaign.id

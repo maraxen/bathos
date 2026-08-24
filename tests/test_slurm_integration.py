@@ -25,12 +25,12 @@ def test_init_generates_bth_env_sh_with_catalog_dir(tmp_path: Path):
 
 
 def test_init_catalog_dir_override(tmp_path: Path):
-    """bth init --catalog-dir flag overrides catalog_dir in _bth_env.sh."""
+    """Local --catalog-dir must not be baked into cluster _bth_env.sh."""
     custom_catalog = tmp_path / "custom" / "catalog"
     init_project(tmp_path, slug="myproj", catalog_dir=custom_catalog)
     env_sh = (tmp_path / "scripts" / "slurm" / "_bth_env.sh").read_text()
-    # Verify the custom path is in the exported BTH_CATALOG_DIR
-    assert str(custom_catalog) in env_sh or "custom/catalog" in env_sh
+    assert "${BTH_PROJECT_ROOT}/.bth/catalog" in env_sh
+    assert "custom/catalog" not in env_sh
 
 
 def test_check_filter_by_slurm_job(tmp_catalog: Path):

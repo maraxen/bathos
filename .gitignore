@@ -17,6 +17,9 @@ scripts/scratch/
 .vscode/
 tmp/
 
+# Serena MCP/LSP workspace (symbol caches, local overrides, memories)
+.serena/
+
 # Ephemeral caches
 .fastembed_cache/
 .claude/

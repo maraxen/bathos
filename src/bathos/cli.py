@@ -807,7 +807,11 @@ def campaign_create(
     db = duckdb.connect(str(_catalog_dir() / "bathos.db"))
     try:
         existing = [
-            c for c in list_campaigns(db, project_slug=slug, status="open") if c.name == name
+            c
+            for c in list_campaigns(
+                db, project_slug=slug, status="open", catalog_dir=_catalog_dir()
+            )
+            if c.name == name
         ]
         if existing:
             ids = ", ".join(c.id[:8] for c in existing)
@@ -823,6 +827,7 @@ def campaign_create(
             question=question,
             hypothesis=hypothesis,
             parent_campaign_id=parent,
+            catalog_dir=_catalog_dir(),
         )
         typer.echo(f"Created campaign {campaign.id[:8]} — {campaign.name} ({campaign.mode})")
     finally:
@@ -837,11 +842,13 @@ def campaign_add(
     """Add a run to a campaign."""
     import duckdb
 
-    from bathos.campaigns import CampaignError, add_run_to_campaign
+    from bathos.campaigns import CampaignError, add_run_to_campaign, prepare_catalog_for_conclude
 
-    db = duckdb.connect(str(_catalog_dir() / "bathos.db"))
+    cat = _catalog_dir()
+    prepare_catalog_for_conclude(cat)
+    db = duckdb.connect(str(cat / "bathos.db"))
     try:
-        add_run_to_campaign(db, campaign, run_id)
+        add_run_to_campaign(db, campaign, run_id, catalog_dir=cat)
         typer.echo(f"Added run {run_id[:8]} to campaign {campaign[:8]}")
     except CampaignError as e:
         typer.echo(f"Error: {e}", err=True)
@@ -890,9 +897,13 @@ def campaign_conclude(
         if raw_pattern:
             negative_outcome_pattern = re.compile(raw_pattern, re.IGNORECASE)
 
-    db = duckdb.connect(str(_catalog_dir() / "bathos.db"))
+    cat = _catalog_dir()
+    from bathos.campaigns import prepare_catalog_for_conclude
+
+    prepare_catalog_for_conclude(cat)
+    db = duckdb.connect(str(cat / "bathos.db"))
     try:
-        campaign = get_campaign(db, campaign_id)
+        campaign = get_campaign(db, campaign_id, catalog_dir=cat)
         if campaign is None:
             typer.echo(f"Campaign not found: {campaign_id}", err=True)
             raise typer.Exit(1)
@@ -941,8 +952,9 @@ def campaign_conclude(
             note,
             negative_check=negative_check or None,
             negative_outcome_pattern=negative_outcome_pattern,
+            catalog_dir=cat,
         )
-        typer.echo(f"Concluded campaign {campaign_id[:8]} — outcome: {outcome}")
+        typer.echo(f"Concluded campaign {campaign.id[:8]} — outcome: {outcome}")
     except CampaignError as e:
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(1)
@@ -999,7 +1011,7 @@ def claim_register_cmd(
     ws = resolve_workspace().fs_root
     db = duckdb.connect(str(db_path), read_only=False)
     try:
-        register_claim(path, campaign, db, ws, force=force)
+        register_claim(path, campaign, db, ws, force=force, catalog_dir=_catalog_dir())
         typer.echo(f"Registered claim for campaign {campaign[:8]}")
     except (RuntimeError, FileNotFoundError) as e:
         typer.echo(f"Error: {e}", err=True)
@@ -1208,17 +1220,17 @@ def campaign_ls(
     status: str | None = typer.Option(None, "--status", help="Filter by status: open|concluded"),
 ):
     """List campaigns."""
-    import duckdb
-
-    from bathos.campaigns import list_campaigns
+    from bathos.campaigns import connect_catalog_db, list_campaigns
     from bathos.rich_fmt import render_campaign_table
 
-    db = duckdb.connect(str(_catalog_dir() / "bathos.db"), read_only=True)
+    cat = _catalog_dir()
+    db = connect_catalog_db(cat, read_only=True)
     try:
-        campaigns = list_campaigns(db, status=status)
+        campaigns = list_campaigns(db, status=status, catalog_dir=cat)
         render_campaign_table(campaigns)
     finally:
-        db.close()
+        if db is not None:
+            db.close()
 
 
 @campaign_app.command("show")
@@ -1226,13 +1238,12 @@ def campaign_show(
     campaign_id: str = typer.Argument(..., help="Campaign ID (or prefix)"),
 ):
     """Show campaign details."""
-    import duckdb
+    from bathos.campaigns import connect_catalog_db, get_campaign
 
-    from bathos.campaigns import get_campaign
-
-    db = duckdb.connect(str(_catalog_dir() / "bathos.db"), read_only=True)
+    cat = _catalog_dir()
+    db = connect_catalog_db(cat, read_only=True)
     try:
-        campaign = get_campaign(db, campaign_id)
+        campaign = get_campaign(db, campaign_id, catalog_dir=cat)
         if not campaign:
             typer.echo(f"Campaign not found: {campaign_id}", err=True)
             raise typer.Exit(1)
@@ -1248,7 +1259,8 @@ def campaign_show(
             if campaign.conclusion:
                 typer.echo(f"Conclusion: {campaign.conclusion}")
     finally:
-        db.close()
+        if db is not None:
+            db.close()
 
 
 @campaign_app.command("review")
@@ -1256,25 +1268,25 @@ def campaign_review(
     campaign_id: str = typer.Argument(..., help="Campaign ID"),
 ):
     """Review campaign: residual rate, bypass rate, outcome distribution."""
-    import duckdb
-
-    from bathos.campaigns import get_campaign, review_campaign
+    from bathos.campaigns import connect_catalog_db, get_campaign, review_campaign
     from bathos.rich_fmt import render_campaign_review, render_popper_summary
 
-    db = duckdb.connect(str(_catalog_dir() / "bathos.db"), read_only=True)
+    cat = _catalog_dir()
+    db = connect_catalog_db(cat, read_only=True)
     try:
-        campaign = get_campaign(db, campaign_id)
+        campaign = get_campaign(db, campaign_id, catalog_dir=cat)
         if campaign is None:
             typer.echo(f"Campaign not found: {campaign_id}", err=True)
             raise typer.Exit(1)
-        review = review_campaign(db, campaign_id)
+        review = review_campaign(db, campaign_id, catalog_dir=cat)
         if "error" in review:
             typer.echo(review["error"], err=True)
             raise typer.Exit(1)
         render_campaign_review(campaign, review)
         render_popper_summary(review.get("popper"))
     finally:
-        db.close()
+        if db is not None:
+            db.close()
 
 
 @report_app.command("emit")
@@ -1286,20 +1298,19 @@ def report_emit(
     Creates both campaign_report.json and figure_manifest.json at
     <catalog>/sidecars/<campaign_id>/ for a concluded campaign.
     """
-    import duckdb
-
     from bathos.campaigns import (
         CampaignError,
+        connect_catalog_db,
         emit_campaign_report,
         emit_figure_manifest,
         get_campaign,
     )
 
     catalog_dir = _catalog_dir()
-    db = duckdb.connect(str(catalog_dir / "bathos.db"))
+    db = connect_catalog_db(catalog_dir, read_only=False)
     try:
         # Verify campaign exists and is concluded
-        campaign = get_campaign(db, campaign_id)
+        campaign = get_campaign(db, campaign_id, catalog_dir=catalog_dir)
         if campaign is None:
             typer.echo(f"Campaign not found: {campaign_id}", err=True)
             raise typer.Exit(1)
@@ -1324,7 +1335,8 @@ def report_emit(
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(1)
     finally:
-        db.close()
+        if db is not None:
+            db.close()
 
 
 @report_app.command("show")
@@ -1824,6 +1836,26 @@ def submit(
     except ValueError as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(1)
+
+    remote_cfg = config.remotes.get(cluster.remote)
+    if remote_cfg and remote_cfg.get("remote_root"):
+        from bathos.cluster_catalog import (
+            CatalogIdentityError,
+            check_env_catalog_matches_remote,
+            ensure_remote_catalog_dir,
+        )
+
+        try:
+            check_env_catalog_matches_remote(cfg_path.parent, remote_cfg["remote_root"])
+            ensure_remote_catalog_dir(
+                remote_cfg.get("host", cluster.remote), remote_cfg["remote_root"]
+            )
+        except CatalogIdentityError as e:
+            typer.echo(str(e), err=True)
+            raise typer.Exit(1)
+        except RuntimeError as e:
+            typer.echo(str(e), err=True)
+            raise typer.Exit(1)
 
     # 5. Derive job_name
     job_name = name or (command[0].split("/")[-1] if command else "bth-submit")
@@ -2546,28 +2578,25 @@ def scaffold(
     workspace_root = resolve_workspace().fs_root
 
     if campaign_id:
-        import duckdb
-
-        from bathos.campaigns import get_campaign
+        from bathos.campaigns import connect_catalog_db, get_campaign
         from bathos.obligations import list_obligations
 
-        db_path = _catalog_dir() / "bathos.db"
-        campaign = None
-        if db_path.exists():
-            db = duckdb.connect(str(db_path))
+        cat = _catalog_dir()
+        db = connect_catalog_db(cat, read_only=True)
+        campaign = get_campaign(db, campaign_id, catalog_dir=cat)
+        member_ids = []
+        if db is not None:
             try:
-                campaign = get_campaign(db, campaign_id)
-                member_ids = [
-                    r[0]
-                    for r in db.execute(
-                        "SELECT run_id FROM campaign_runs WHERE campaign_id = ?",
-                        [campaign.id if campaign else campaign_id],
-                    ).fetchall()
-                ]
+                if campaign is not None:
+                    member_ids = [
+                        r[0]
+                        for r in db.execute(
+                            "SELECT run_id FROM campaign_runs WHERE campaign_id = ?",
+                            [campaign.id],
+                        ).fetchall()
+                    ]
             finally:
                 db.close()
-        else:
-            member_ids = []
 
         if campaign is None:
             typer.echo(f"Campaign not found: {campaign_id}", err=True)
@@ -2696,9 +2725,7 @@ def validate(
 
     workspace_root = resolve_workspace().fs_root
 
-    result = validate_postmortem(
-        pm, workspace_root=workspace_root, strict_files=strict_files
-    )
+    result = validate_postmortem(pm, workspace_root=workspace_root, strict_files=strict_files)
     if result.ok:
         typer.echo(f"✓ {file.name} is valid")
     else:

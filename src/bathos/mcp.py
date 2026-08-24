@@ -1021,13 +1021,25 @@ def archive_artifact_tool(
         )
     except DirtyTreeError as e:
         code = BathosErrorCode.ARCHIVE_DIRTY_TREE
-        return {"error": str(e), "error_code": code.value, "resolution_hint": RESOLUTION_HINTS[code]}
+        return {
+            "error": str(e),
+            "error_code": code.value,
+            "resolution_hint": RESOLUTION_HINTS[code],
+        }
     except ArtifactNotFoundError as e:
         code = BathosErrorCode.ARCHIVE_ITEM_NOT_FOUND
-        return {"error": str(e), "error_code": code.value, "resolution_hint": RESOLUTION_HINTS[code]}
+        return {
+            "error": str(e),
+            "error_code": code.value,
+            "resolution_hint": RESOLUTION_HINTS[code],
+        }
     except ArchiveError as e:
         code = BathosErrorCode.ARCHIVE_ERROR
-        return {"error": str(e), "error_code": code.value, "resolution_hint": RESOLUTION_HINTS[code]}
+        return {
+            "error": str(e),
+            "error_code": code.value,
+            "resolution_hint": RESOLUTION_HINTS[code],
+        }
 
     return {"ok": True, "item": dataclasses.asdict(item)}
 
@@ -1076,10 +1088,18 @@ def restore_tool(
         )
     except ArtifactNotFoundError as e:
         code = BathosErrorCode.ARCHIVE_ITEM_NOT_FOUND
-        return {"error": str(e), "error_code": code.value, "resolution_hint": RESOLUTION_HINTS[code]}
+        return {
+            "error": str(e),
+            "error_code": code.value,
+            "resolution_hint": RESOLUTION_HINTS[code],
+        }
     except ArchiveError as e:
         code = BathosErrorCode.ARCHIVE_ERROR
-        return {"error": str(e), "error_code": code.value, "resolution_hint": RESOLUTION_HINTS[code]}
+        return {
+            "error": str(e),
+            "error_code": code.value,
+            "resolution_hint": RESOLUTION_HINTS[code],
+        }
 
     return {"ok": True, "result": dataclasses.asdict(result)}
 
@@ -1331,6 +1351,7 @@ def campaign_create_tool(
             mode=mode,
             question=question or None,
             hypothesis=hypothesis or None,
+            catalog_dir=cat_dir,
         )
         return {
             "campaign_id": campaign.id,
@@ -1361,11 +1382,13 @@ def campaign_list_tool(
     cat_dir = _get_catalog_dir(catalog_dir or None)
     slug = project_slug or _get_project_slug()
 
-    import duckdb
+    from bathos.campaigns import connect_catalog_db
 
-    db = duckdb.connect(str(cat_dir / "bathos.db"), read_only=True)
+    db = connect_catalog_db(cat_dir, read_only=True)
     try:
-        campaigns = list_campaigns(db, project_slug=slug, status=status or None)
+        campaigns = list_campaigns(
+            db, project_slug=slug, status=status or None, catalog_dir=cat_dir
+        )
         campaigns_json = [
             {
                 "id": c.id,
@@ -1380,7 +1403,8 @@ def campaign_list_tool(
         ]
         return {"campaigns": campaigns_json, "count": len(campaigns_json)}
     finally:
-        db.close()
+        if db is not None:
+            db.close()
 
 
 def campaign_review_tool(
@@ -1401,14 +1425,15 @@ def campaign_review_tool(
 
     cat_dir = _get_catalog_dir(catalog_dir or None)
 
-    import duckdb
+    from bathos.campaigns import connect_catalog_db
 
-    db = duckdb.connect(str(cat_dir / "bathos.db"), read_only=True)
+    db = connect_catalog_db(cat_dir, read_only=True)
     try:
-        review = review_campaign(db, campaign_id)
+        review = review_campaign(db, campaign_id, catalog_dir=cat_dir)
         return review
     finally:
-        db.close()
+        if db is not None:
+            db.close()
 
 
 def campaign_conclude_tool(
@@ -1440,10 +1465,18 @@ def campaign_conclude_tool(
 
     import duckdb
 
+    from bathos.campaigns import prepare_catalog_for_conclude
+
+    prepare_catalog_for_conclude(cat_dir)
     db = duckdb.connect(str(cat_dir / "bathos.db"))
     try:
         conclude_campaign(
-            db, campaign_id, outcome_label, conclusion or "", negative_check=negative_check or None
+            db,
+            campaign_id,
+            outcome_label,
+            conclusion or "",
+            negative_check=negative_check or None,
+            catalog_dir=cat_dir,
         )
         return {
             "status": "concluded",
@@ -2087,27 +2120,25 @@ async def postmortem_scaffold(
         ws = resolve_workspace().fs_root
 
     if campaign_id:
-        import duckdb
-
-        from bathos.campaigns import get_campaign
+        from bathos.campaigns import connect_catalog_db, get_campaign
         from bathos.obligations import list_obligations
 
-        db_path = cat_dir / "bathos.db"
-        if not db_path.exists():
-            return {"error": f"Campaign '{campaign_id}' not found"}
-        db = duckdb.connect(str(db_path))
+        db = connect_catalog_db(cat_dir, read_only=True)
         try:
-            campaign = get_campaign(db, campaign_id)
+            campaign = get_campaign(db, campaign_id, catalog_dir=cat_dir)
             if campaign is None:
                 return {"error": f"Campaign '{campaign_id}' not found"}
-            member_ids = [
-                r[0]
-                for r in db.execute(
-                    "SELECT run_id FROM campaign_runs WHERE campaign_id = ?", [campaign.id]
-                ).fetchall()
-            ]
+            member_ids = []
+            if db is not None:
+                member_ids = [
+                    r[0]
+                    for r in db.execute(
+                        "SELECT run_id FROM campaign_runs WHERE campaign_id = ?", [campaign.id]
+                    ).fetchall()
+                ]
         finally:
-            db.close()
+            if db is not None:
+                db.close()
 
         scoped = {campaign.id, *member_ids}
         open_ids = [o.obligation_id for o in list_obligations(ws) if o.entity_id in scoped]
@@ -2321,6 +2352,40 @@ async def claim_validate(
     }
 
 
+def _claim_register_sync(
+    path: str,
+    campaign_id: str,
+    cat_dir: Path,
+    workspace_root: Path,
+    *,
+    force: bool = False,
+) -> dict:
+    """Register a claim; always close the DuckDB write connection."""
+    import duckdb
+
+    from bathos.claim import register_claim
+
+    db_path = Path(cat_dir) / "bathos.db"
+    if not db_path.exists():
+        return {"ok": False, "error": f"Catalog database not found at {db_path}"}
+    db = duckdb.connect(str(db_path), read_only=False)
+    try:
+        register_claim(
+            Path(path), campaign_id, db, workspace_root, force=force, catalog_dir=cat_dir
+        )
+        return {
+            "ok": True,
+            "path": path,
+            "campaign_id": campaign_id,
+            "force": force,
+            "message": f"Registered claim for campaign {campaign_id}",
+        }
+    except (RuntimeError, FileNotFoundError) as e:
+        return {"ok": False, "error": str(e), "error_code": "register_failed"}
+    finally:
+        db.close()
+
+
 @cisternal.tool(registry="bathos")
 @traced_tool
 @require_write_token
@@ -2335,13 +2400,7 @@ async def claim_register(
     """Register a claim TOML file with a campaign (path + SHA256 anchor).
 
     Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
-    from bathos.claim import register_claim
-
     cat_dir = _get_catalog_dir(catalog_dir)
-    db_path = cat_dir / "bathos.db"
-
-    if not db_path.exists():
-        return {"ok": False, "error": f"Catalog database not found at {db_path}"}
 
     if workspace_root:
         ws = Path(workspace_root).expanduser().resolve()
@@ -2350,21 +2409,7 @@ async def claim_register(
 
         ws = resolve_workspace().fs_root
 
-    try:
-        import duckdb
-
-        db = duckdb.connect(str(db_path), read_only=False)
-        register_claim(Path(path), campaign_id, db, ws, force=force)
-        db.close()
-        return {
-            "ok": True,
-            "path": path,
-            "campaign_id": campaign_id,
-            "force": force,
-            "message": f"Registered claim for campaign {campaign_id}",
-        }
-    except (RuntimeError, FileNotFoundError) as e:
-        return {"ok": False, "error": str(e), "error_code": "register_failed"}
+    return _claim_register_sync(path, campaign_id, cat_dir, ws, force=force)
 
 
 @cisternal.tool(registry="bathos")
@@ -2719,9 +2764,12 @@ def campaign_add_tool(
     cat_dir = _get_catalog_dir(catalog_dir or None)
     import duckdb
 
+    from bathos.campaigns import prepare_catalog_for_conclude
+
+    prepare_catalog_for_conclude(cat_dir)
     db = duckdb.connect(str(cat_dir / "bathos.db"))
     try:
-        add_run_to_campaign(db, campaign_id, run_id)
+        add_run_to_campaign(db, campaign_id, run_id, catalog_dir=cat_dir)
         return {
             "ok": True,
             "run_id": run_id,
@@ -2743,11 +2791,11 @@ def campaign_show_tool(
         return {"error": "campaign_id parameter is required"}
 
     cat_dir = _get_catalog_dir(catalog_dir or None)
-    import duckdb
+    from bathos.campaigns import connect_catalog_db
 
-    db = duckdb.connect(str(cat_dir / "bathos.db"), read_only=True)
+    db = connect_catalog_db(cat_dir, read_only=True)
     try:
-        campaign = get_campaign(db, campaign_id)
+        campaign = get_campaign(db, campaign_id, catalog_dir=cat_dir)
         if campaign is None:
             return {"ok": False, "error": f"Campaign not found: {campaign_id}"}
         return {
@@ -2764,7 +2812,8 @@ def campaign_show_tool(
             "conclusion": campaign.conclusion,
         }
     finally:
-        db.close()
+        if db is not None:
+            db.close()
 
 
 def verify_tool(

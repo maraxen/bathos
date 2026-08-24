@@ -772,318 +772,321 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
     # Open DuckDB connection (time the connect call to detect lock waits)
     t_connect = time.monotonic()
     con = duckdb.connect(str(db_path))
-    waited_ms = (time.monotonic() - t_connect) * 1000
-    if waited_ms > 500:
-        event("catalog.duckdb_lock_wait", waited_ms=int(waited_ms), db_path=str(db_path))
+    try:
+        waited_ms = (time.monotonic() - t_connect) * 1000
+        if waited_ms > 500:
+            event("catalog.duckdb_lock_wait", waited_ms=int(waited_ms), db_path=str(db_path))
 
-    # Initialize schema meta table if it doesn't exist
-    con.execute("CREATE TABLE IF NOT EXISTS _schema_meta (key TEXT PRIMARY KEY, value TEXT)")
+        # Initialize schema meta table if it doesn't exist
+        con.execute("CREATE TABLE IF NOT EXISTS _schema_meta (key TEXT PRIMARY KEY, value TEXT)")
 
-    # Initialize schema migrations audit table if it doesn't exist
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS _schema_migrations (
-            warm_version TEXT NOT NULL,
-            migrated_at TIMESTAMPTZ DEFAULT now(),
-            notes TEXT
+        # Initialize schema migrations audit table if it doesn't exist
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS _schema_migrations (
+                warm_version TEXT NOT NULL,
+                migrated_at TIMESTAMPTZ DEFAULT now(),
+                notes TEXT
+            )
+        """)
+
+        # Initialize runs table if it doesn't exist
+        con.execute(_RUNS_TABLE_SCHEMA)
+
+        # Idempotent column additions for columns added after the initial schema.
+        # CREATE TABLE IF NOT EXISTS is a no-op on existing tables, so pre-existing
+        # warm catalogs need explicit ALTER TABLE to gain newer columns.
+        for _runs_alter_sql in [
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS manifest_sha256 TEXT",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS manifest_path TEXT",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS outcome_error_reason TEXT",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS adversarial_check_status TEXT",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS stage_name TEXT",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS claim_discriminates TEXT",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS claim_isolates TEXT",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS parity_run_type TEXT",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS seed BIGINT",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS baseline_hpo_trials BIGINT",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS baseline_hpo_compute_budget DOUBLE",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS stdout_sha256 TEXT",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS component_id TEXT",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS component_sidecar_sha256 TEXT",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS differential_status TEXT",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS differential_off_value TEXT",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS differential_on_value TEXT",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS differential_effect DOUBLE",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS dependency_lock_sha256 TEXT",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS adversarial_check_result TEXT",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS git_dirty_content_id TEXT",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS git_provenance_source TEXT",
+        ]:
+            with contextlib.suppress(Exception):
+                con.execute(_runs_alter_sql)
+
+        # Initialize campaign tables if they don't exist
+        con.execute(_CAMPAIGNS_TABLE_SCHEMA)
+        con.execute(_CAMPAIGN_RUNS_TABLE_SCHEMA)
+        con.execute(_AMENDMENTS_TABLE_SCHEMA)
+        con.execute(_CAMPAIGN_EDGES_TABLE_SCHEMA)
+        con.execute(_RUN_EDGES_TABLE_SCHEMA)
+
+        # Idempotent column additions for POPPER (handles existing warm DBs)
+        for _alter_sql in [
+            "ALTER TABLE campaign_runs ADD COLUMN IF NOT EXISTS evalue REAL",
+            "ALTER TABLE campaign_runs ADD COLUMN IF NOT EXISTS seq_position INTEGER",
+            "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS stopping_threshold REAL",
+            "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS claim_path TEXT",
+            "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS claim_sha256 TEXT",
+            "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS claim_mode TEXT",
+            "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS negative_check TEXT",
+        ]:
+            with contextlib.suppress(Exception):
+                con.execute(_alter_sql)
+
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_campaigns_mode_status ON campaigns (mode, status)"
         )
-    """)
 
-    # Initialize runs table if it doesn't exist
-    con.execute(_RUNS_TABLE_SCHEMA)
+        # DE-RISK SPIKE (gate 2b-A, #3485, branch figure-eda-2bA-durability-spike — NOT
+        # on main): re-derive sidecar_anchors from cool-tier anchor fragments, same as
+        # runs are re-derived from cool_runs below. This runs unconditionally (cheap
+        # no-op if no anchors/ fragments exist) so it also fires on force_rebuild.
+        _ingest_anchor_fragments(con, catalog_dir)
 
-    # Idempotent column additions for columns added after the initial schema.
-    # CREATE TABLE IF NOT EXISTS is a no-op on existing tables, so pre-existing
-    # warm catalogs need explicit ALTER TABLE to gain newer columns.
-    for _runs_alter_sql in [
-        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS manifest_sha256 TEXT",
-        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS manifest_path TEXT",
-        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS outcome_error_reason TEXT",
-        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS adversarial_check_status TEXT",
-        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS stage_name TEXT",
-        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS claim_discriminates TEXT",
-        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS claim_isolates TEXT",
-        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS parity_run_type TEXT",
-        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS seed BIGINT",
-        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS baseline_hpo_trials BIGINT",
-        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS baseline_hpo_compute_budget DOUBLE",
-        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS stdout_sha256 TEXT",
-        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS component_id TEXT",
-        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS component_sidecar_sha256 TEXT",
-        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS differential_status TEXT",
-        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS differential_off_value TEXT",
-        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS differential_on_value TEXT",
-        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS differential_effect DOUBLE",
-        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS dependency_lock_sha256 TEXT",
-        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS adversarial_check_result TEXT",
-        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS git_dirty_content_id TEXT",
-        "ALTER TABLE runs ADD COLUMN IF NOT EXISTS git_provenance_source TEXT",
-    ]:
-        with contextlib.suppress(Exception):
-            con.execute(_runs_alter_sql)
+        # S3 (backlog #3491): re-derive trust_ledger from cool-tier ledger fragments,
+        # same pattern as anchors above. Unconditional, cheap no-op if no ledger/
+        # fragments exist, fires on force_rebuild too.
+        _ingest_ledger_fragments(con, catalog_dir)
 
-    # Initialize campaign tables if they don't exist
-    con.execute(_CAMPAIGNS_TABLE_SCHEMA)
-    con.execute(_CAMPAIGN_RUNS_TABLE_SCHEMA)
-    con.execute(_AMENDMENTS_TABLE_SCHEMA)
-    con.execute(_CAMPAIGN_EDGES_TABLE_SCHEMA)
-    con.execute(_RUN_EDGES_TABLE_SCHEMA)
+        # Artifact archival: re-derive archived_items from cool-tier fragments, same
+        # pattern as trust_ledger above. Unconditional, cheap no-op if no
+        # archived_items/ fragments exist, fires on force_rebuild too.
+        _ingest_archived_item_fragments(con, catalog_dir)
 
-    # Idempotent column additions for POPPER (handles existing warm DBs)
-    for _alter_sql in [
-        "ALTER TABLE campaign_runs ADD COLUMN IF NOT EXISTS evalue REAL",
-        "ALTER TABLE campaign_runs ADD COLUMN IF NOT EXISTS seq_position INTEGER",
-        "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS stopping_threshold REAL",
-        "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS claim_path TEXT",
-        "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS claim_sha256 TEXT",
-        "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS claim_mode TEXT",
-        "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS negative_check TEXT",
-    ]:
-        with contextlib.suppress(Exception):
-            con.execute(_alter_sql)
+        # Track ingested and skipped counts
+        ingested = 0
+        skipped = 0
 
-    con.execute("CREATE INDEX IF NOT EXISTS idx_campaigns_mode_status ON campaigns (mode, status)")
+        # Ingest each run
+        for run in cool_runs:
+            # Check if run already exists in DuckDB
+            existing = con.execute("SELECT id FROM runs WHERE id = ?", [run.id]).fetchall()
 
-    # DE-RISK SPIKE (gate 2b-A, #3485, branch figure-eda-2bA-durability-spike — NOT
-    # on main): re-derive sidecar_anchors from cool-tier anchor fragments, same as
-    # runs are re-derived from cool_runs below. This runs unconditionally (cheap
-    # no-op if no anchors/ fragments exist) so it also fires on force_rebuild.
-    _ingest_anchor_fragments(con, catalog_dir)
+            if existing:
+                skipped += 1
 
-    # S3 (backlog #3491): re-derive trust_ledger from cool-tier ledger fragments,
-    # same pattern as anchors above. Unconditional, cheap no-op if no ledger/
-    # fragments exist, fires on force_rebuild too.
-    _ingest_ledger_fragments(con, catalog_dir)
+                # Refresh output_metadata on every compact so the catalog reflects
+                # the current filesystem state (Debt #71). Re-stat is cheap; we only
+                # re-hash files whose mtime changed since the stored snapshot.
+                if run.output_paths:
+                    stored_row = con.execute(
+                        "SELECT output_metadata FROM runs WHERE id = ?", [run.id]
+                    ).fetchone()
+                    stored_json = stored_row[0] if stored_row else "[]"
+                    try:
+                        stored_meta = {m["path"]: m for m in json.loads(stored_json or "[]")}
+                    except (json.JSONDecodeError, TypeError, KeyError):
+                        stored_meta = {}
 
-    # Artifact archival: re-derive archived_items from cool-tier fragments, same
-    # pattern as trust_ledger above. Unconditional, cheap no-op if no
-    # archived_items/ fragments exist, fires on force_rebuild too.
-    _ingest_archived_item_fragments(con, catalog_dir)
+                    refreshed = []
+                    for output_path in run.output_paths:
+                        prev = stored_meta.get(output_path, {})
+                        fresh = _collect_output_metadata(output_path)
+                        # Re-use stored sha256 if mtime unchanged (skip expensive rehash)
+                        if (
+                            fresh.get("status") == "present"
+                            and prev.get("status") == "present"
+                            and fresh.get("mtime_unix") == prev.get("mtime_unix")
+                            and prev.get("sha256") is not None
+                        ):
+                            fresh["sha256"] = prev["sha256"]
+                        refreshed.append({"path": output_path, **fresh})
 
-    # Track ingested and skipped counts
-    ingested = 0
-    skipped = 0
+                    con.execute(
+                        "UPDATE runs SET output_metadata = ? WHERE id = ?",
+                        [json.dumps(refreshed), run.id],
+                    )
 
-    # Ingest each run
-    for run in cool_runs:
-        # Check if run already exists in DuckDB
-        existing = con.execute("SELECT id FROM runs WHERE id = ?", [run.id]).fetchall()
+                if run.id in postmortem_map:
+                    pm, rel_path = postmortem_map[run.id]
+                    postmortem_verdict_override = pm.verdict_override
+                    postmortem_has_anomalies = any(
+                        v and str(v).lower() != "none"
+                        for v in getattr(pm, "anomalies", {}).values()
+                    )
 
-        if existing:
-            skipped += 1
+                    curr_outcome = (
+                        con.execute("SELECT outcome FROM runs WHERE id = ?", [run.id]).fetchone()[0]
+                        or ""
+                    )
+                    outcome = (
+                        postmortem_verdict_override
+                        if postmortem_verdict_override != "none"
+                        else curr_outcome
+                    )
 
-            # Refresh output_metadata on every compact so the catalog reflects
-            # the current filesystem state (Debt #71). Re-stat is cheap; we only
-            # re-hash files whose mtime changed since the stored snapshot.
-            if run.output_paths:
-                stored_row = con.execute(
-                    "SELECT output_metadata FROM runs WHERE id = ?", [run.id]
-                ).fetchone()
-                stored_json = stored_row[0] if stored_row else "[]"
-                try:
-                    stored_meta = {m["path"]: m for m in json.loads(stored_json or "[]")}
-                except (json.JSONDecodeError, TypeError, KeyError):
-                    stored_meta = {}
+                    con.execute(
+                        """
+                        UPDATE runs SET
+                            outcome = ?,
+                            postmortem_status = ?,
+                            postmortem_override = ?,
+                            postmortem_verdict_override = ?,
+                            postmortem_author = ?,
+                            postmortem_path = ?,
+                            postmortem_hypothesis_status = ?,
+                            postmortem_has_anomalies = ?,
+                            postmortem_summary = ?,
+                            postmortem_asset_links = ?
+                        WHERE id = ?
+                        """,
+                        [
+                            outcome,
+                            pm.status,
+                            pm.verdict_override,
+                            pm.verdict_override,
+                            pm.author,
+                            rel_path,
+                            pm.hypothesis_status,
+                            postmortem_has_anomalies,
+                            pm.summary,
+                            json.dumps(pm.asset_links),
+                            run.id,
+                        ],
+                    )
+                continue
 
-                refreshed = []
-                for output_path in run.output_paths:
-                    prev = stored_meta.get(output_path, {})
-                    fresh = _collect_output_metadata(output_path)
-                    # Re-use stored sha256 if mtime unchanged (skip expensive rehash)
-                    if (
-                        fresh.get("status") == "present"
-                        and prev.get("status") == "present"
-                        and fresh.get("mtime_unix") == prev.get("mtime_unix")
-                        and prev.get("sha256") is not None
-                    ):
-                        fresh["sha256"] = prev["sha256"]
-                    refreshed.append({"path": output_path, **fresh})
+            # Apply migrations if needed
+            run = _apply_migrations(run)
 
-                con.execute(
-                    "UPDATE runs SET output_metadata = ? WHERE id = ?",
-                    [json.dumps(refreshed), run.id],
-                )
-
+            # Apply postmortem updates to run object if present
             if run.id in postmortem_map:
                 pm, rel_path = postmortem_map[run.id]
-                postmortem_verdict_override = pm.verdict_override
-                postmortem_has_anomalies = any(
+                run.postmortem_status = pm.status
+                run.postmortem_override = pm.verdict_override
+                run.postmortem_verdict_override = pm.verdict_override
+                run.postmortem_author = pm.author
+                run.postmortem_path = rel_path
+                run.postmortem_hypothesis_status = pm.hypothesis_status
+                run.postmortem_has_anomalies = any(
                     v and str(v).lower() != "none" for v in getattr(pm, "anomalies", {}).values()
                 )
+                run.postmortem_summary = pm.summary
+                run.postmortem_asset_links = json.dumps(pm.asset_links)
+                if pm.verdict_override != "none":
+                    run.outcome = pm.verdict_override
 
-                curr_outcome = (
-                    con.execute("SELECT outcome FROM runs WHERE id = ?", [run.id]).fetchone()[0]
-                    or ""
-                )
-                outcome = (
-                    postmortem_verdict_override
-                    if postmortem_verdict_override != "none"
-                    else curr_outcome
-                )
+            # Collect output metadata
+            output_metadata = []
+            if run.output_paths:
+                for output_path in run.output_paths:
+                    meta = _collect_output_metadata(output_path)
+                    output_metadata.append({"path": output_path, **meta})
 
-                con.execute(
-                    """
-                    UPDATE runs SET
-                        outcome = ?,
-                        postmortem_status = ?,
-                        postmortem_override = ?,
-                        postmortem_verdict_override = ?,
-                        postmortem_author = ?,
-                        postmortem_path = ?,
-                        postmortem_hypothesis_status = ?,
-                        postmortem_has_anomalies = ?,
-                        postmortem_summary = ?,
-                        postmortem_asset_links = ?
-                    WHERE id = ?
-                    """,
-                    [
-                        outcome,
-                        pm.status,
-                        pm.verdict_override,
-                        pm.verdict_override,
-                        pm.author,
-                        rel_path,
-                        pm.hypothesis_status,
-                        postmortem_has_anomalies,
-                        pm.summary,
-                        json.dumps(pm.asset_links),
-                        run.id,
-                    ],
-                )
-            continue
+            # Serialize metadata to JSON
+            output_metadata_json = json.dumps(output_metadata) if output_metadata else "[]"
 
-        # Apply migrations if needed
-        run = _apply_migrations(run)
-
-        # Apply postmortem updates to run object if present
-        if run.id in postmortem_map:
-            pm, rel_path = postmortem_map[run.id]
-            run.postmortem_status = pm.status
-            run.postmortem_override = pm.verdict_override
-            run.postmortem_verdict_override = pm.verdict_override
-            run.postmortem_author = pm.author
-            run.postmortem_path = rel_path
-            run.postmortem_hypothesis_status = pm.hypothesis_status
-            run.postmortem_has_anomalies = any(
-                v and str(v).lower() != "none" for v in getattr(pm, "anomalies", {}).values()
-            )
-            run.postmortem_summary = pm.summary
-            run.postmortem_asset_links = json.dumps(pm.asset_links)
-            if pm.verdict_override != "none":
-                run.outcome = pm.verdict_override
-
-        # Collect output metadata
-        output_metadata = []
-        if run.output_paths:
-            for output_path in run.output_paths:
-                meta = _collect_output_metadata(output_path)
-                output_metadata.append({"path": output_path, **meta})
-
-        # Serialize metadata to JSON
-        output_metadata_json = json.dumps(output_metadata) if output_metadata else "[]"
-
-        # Insert into DuckDB
-        con.execute(
-            """
-            INSERT INTO runs (
-                id, project_slug, command, argv, git_hash, git_branch,
-                git_dirty, timestamp, duration_s, exit_code, status,
-                output_paths, tags, schema_version, slurm_job_id, hostname, metadata, outcome, output_metadata,
-                sidecar_sha256, sidecar_path, parent_run_id, agent_mode, sidecar_mode, outcome_is_residual, skill_sha256, campaign_id,
-                script_sha256, postmortem_status, postmortem_override, postmortem_verdict_override, postmortem_author, postmortem_path,
-                postmortem_hypothesis_status, postmortem_has_anomalies, postmortem_summary, postmortem_asset_links, stage_name,
-                claim_discriminates, claim_isolates, parity_run_type, seed, baseline_hpo_trials, baseline_hpo_compute_budget,
-                stdout_sha256, component_id, component_sidecar_sha256,
-                differential_status, differential_off_value, differential_on_value, differential_effect, dependency_lock_sha256,
-                adversarial_check_result, git_dirty_content_id, git_provenance_source
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                run.id,
-                run.project_slug,
-                run.command,
-                run.argv,
-                run.git_hash,
-                run.git_branch,
-                run.git_dirty,
-                run.timestamp,
-                run.duration_s,
-                run.exit_code,
-                run.status,
-                run.output_paths,
-                run.tags,
-                run.schema_version,
-                run.slurm_job_id,
-                run.hostname,
-                run.metadata,
-                run.outcome or None,  # preserve evaluated outcome label from cool fragment
-                output_metadata_json,
-                run.sidecar_sha256,
-                run.sidecar_path,
-                run.parent_run_id,
-                run.agent_mode,
-                run.sidecar_mode,
-                run.outcome_is_residual,
-                run.skill_sha256,
-                run.campaign_id,
-                run.script_sha256,
-                run.postmortem_status,
-                run.postmortem_override,
-                run.postmortem_verdict_override,
-                run.postmortem_author,
-                run.postmortem_path,
-                run.postmortem_hypothesis_status,
-                run.postmortem_has_anomalies,
-                run.postmortem_summary,
-                run.postmortem_asset_links,
-                run.stage_name,
-                run.claim_discriminates,
-                run.claim_isolates,
-                run.parity_run_type,
-                run.seed,
-                run.baseline_hpo_trials,
-                run.baseline_hpo_compute_budget,
-                run.stdout_sha256,
-                run.component_id,
-                run.component_sidecar_sha256,
-                run.differential_status,
-                run.differential_off_value,
-                run.differential_on_value,
-                run.differential_effect,
-                run.dependency_lock_sha256,
-                run.adversarial_check_result,
-                run.git_dirty_content_id,
-                run.git_provenance_source,
-            ],
-        )
-
-        ingested += 1
-
-    # Populate campaign_runs from runs with campaign_id set
-    for run in cool_runs:
-        if run.campaign_id:
+            # Insert into DuckDB
             con.execute(
                 """
-                INSERT INTO campaign_runs (campaign_id, run_id)
-                VALUES (?, ?)
-                ON CONFLICT DO NOTHING
-            """,
-                [run.campaign_id, run.id],
+                INSERT INTO runs (
+                    id, project_slug, command, argv, git_hash, git_branch,
+                    git_dirty, timestamp, duration_s, exit_code, status,
+                    output_paths, tags, schema_version, slurm_job_id, hostname, metadata, outcome, output_metadata,
+                    sidecar_sha256, sidecar_path, parent_run_id, agent_mode, sidecar_mode, outcome_is_residual, skill_sha256, campaign_id,
+                    script_sha256, postmortem_status, postmortem_override, postmortem_verdict_override, postmortem_author, postmortem_path,
+                    postmortem_hypothesis_status, postmortem_has_anomalies, postmortem_summary, postmortem_asset_links, stage_name,
+                    claim_discriminates, claim_isolates, parity_run_type, seed, baseline_hpo_trials, baseline_hpo_compute_budget,
+                    stdout_sha256, component_id, component_sidecar_sha256,
+                    differential_status, differential_off_value, differential_on_value, differential_effect, dependency_lock_sha256,
+                    adversarial_check_result, git_dirty_content_id, git_provenance_source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    run.id,
+                    run.project_slug,
+                    run.command,
+                    run.argv,
+                    run.git_hash,
+                    run.git_branch,
+                    run.git_dirty,
+                    run.timestamp,
+                    run.duration_s,
+                    run.exit_code,
+                    run.status,
+                    run.output_paths,
+                    run.tags,
+                    run.schema_version,
+                    run.slurm_job_id,
+                    run.hostname,
+                    run.metadata,
+                    run.outcome or None,  # preserve evaluated outcome label from cool fragment
+                    output_metadata_json,
+                    run.sidecar_sha256,
+                    run.sidecar_path,
+                    run.parent_run_id,
+                    run.agent_mode,
+                    run.sidecar_mode,
+                    run.outcome_is_residual,
+                    run.skill_sha256,
+                    run.campaign_id,
+                    run.script_sha256,
+                    run.postmortem_status,
+                    run.postmortem_override,
+                    run.postmortem_verdict_override,
+                    run.postmortem_author,
+                    run.postmortem_path,
+                    run.postmortem_hypothesis_status,
+                    run.postmortem_has_anomalies,
+                    run.postmortem_summary,
+                    run.postmortem_asset_links,
+                    run.stage_name,
+                    run.claim_discriminates,
+                    run.claim_isolates,
+                    run.parity_run_type,
+                    run.seed,
+                    run.baseline_hpo_trials,
+                    run.baseline_hpo_compute_budget,
+                    run.stdout_sha256,
+                    run.component_id,
+                    run.component_sidecar_sha256,
+                    run.differential_status,
+                    run.differential_off_value,
+                    run.differential_on_value,
+                    run.differential_effect,
+                    run.dependency_lock_sha256,
+                    run.adversarial_check_result,
+                    run.git_dirty_content_id,
+                    run.git_provenance_source,
+                ],
             )
 
-    # Update schema_meta table
-    con.execute(
-        "INSERT OR REPLACE INTO _schema_meta (key, value) VALUES (?, ?)",
-        ["warm_version", CURRENT_SCHEMA_VERSION],
-    )
+            ingested += 1
 
-    # Record migration in audit table
-    con.execute(
-        "INSERT INTO _schema_migrations (warm_version, notes) VALUES (?, ?)",
-        [CURRENT_SCHEMA_VERSION, "compact"],
-    )
+        from bathos.campaigns import ingest_cool_campaigns
 
-    # Commit and close
-    con.close()
+        ingest_cool_campaigns(con, catalog_dir)
+
+        from bathos.campaigns import CampaignError, link_cool_runs_to_campaigns
+
+        try:
+            link_cool_runs_to_campaigns(con, cool_runs, catalog_dir=catalog_dir)
+        except CampaignError as e:
+            logger.warning("sequential threshold mismatch during compact: %s", e)
+
+        # Update schema_meta table
+        con.execute(
+            "INSERT OR REPLACE INTO _schema_meta (key, value) VALUES (?, ?)",
+            ["warm_version", CURRENT_SCHEMA_VERSION],
+        )
+
+        # Record migration in audit table
+        con.execute(
+            "INSERT INTO _schema_migrations (warm_version, notes) VALUES (?, ?)",
+            [CURRENT_SCHEMA_VERSION, "compact"],
+        )
+
+    finally:
+        con.close()
 
     duration_s = time.time() - start_time
     duration_ms = duration_s * 1000

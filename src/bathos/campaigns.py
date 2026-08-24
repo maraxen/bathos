@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+import logging
+from collections import defaultdict
+from contextlib import suppress
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -31,10 +35,161 @@ class Campaign:
     parent_campaign_id: str | None = None
     stopping_threshold: float | None = None
     negative_check: str | None = None
+    claim_path: str | None = None
+    claim_sha256: str | None = None
+    claim_mode: str | None = None
 
 
 def _open_db(catalog_dir) -> duckdb.DuckDBPyConnection:
     return duckdb.connect(str(Path(catalog_dir) / "bathos.db"))
+
+
+def write_campaign_cool(campaign: Campaign, catalog_dir: Path) -> Path:
+    """Atomic write-then-rename of `{catalog}/campaigns/{id}.json`."""
+    dest_dir = Path(catalog_dir) / "campaigns"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    target = dest_dir / f"{campaign.id}.json"
+    tmp = dest_dir / f"{campaign.id}.json.tmp"
+    tmp.write_text(json.dumps(asdict(campaign), indent=2, sort_keys=True) + "\n")
+    tmp.replace(target)
+    return target
+
+
+def _campaign_from_payload(payload: dict) -> Campaign:
+    return Campaign(
+        id=payload["id"],
+        project_slug=payload.get("project_slug", ""),
+        name=payload.get("name", ""),
+        mode=payload.get("mode", "exploration"),
+        question=payload.get("question"),
+        hypothesis=payload.get("hypothesis"),
+        status=payload.get("status", "open"),
+        started_at=payload.get("started_at", ""),
+        concluded_at=payload.get("concluded_at"),
+        conclusion=payload.get("conclusion"),
+        outcome_label=payload.get("outcome_label"),
+        parent_campaign_id=payload.get("parent_campaign_id"),
+        stopping_threshold=payload.get("stopping_threshold"),
+        negative_check=payload.get("negative_check"),
+        claim_path=payload.get("claim_path"),
+        claim_sha256=payload.get("claim_sha256"),
+        claim_mode=payload.get("claim_mode"),
+    )
+
+
+def read_cool_campaigns(catalog_dir: Path) -> list[Campaign]:
+    logger = logging.getLogger(__name__)
+    dest_dir = Path(catalog_dir) / "campaigns"
+    if not dest_dir.exists():
+        return []
+    campaigns: list[Campaign] = []
+    seen: set[str] = set()
+    for path in dest_dir.glob("*.json"):
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("Skipping unreadable campaign JSON %s: %s", path, e)
+            event("catalog.campaign_json_unreadable", path=str(path))
+            continue
+        if not isinstance(payload, dict) or "id" not in payload:
+            logger.warning("Skipping campaign JSON missing id: %s", path)
+            continue
+        if path.stem != payload["id"]:
+            logger.warning(
+                "Skipping campaign JSON whose filename %s does not match id %s",
+                path.name,
+                payload["id"],
+            )
+            continue
+        if payload["id"] in seen:
+            continue
+        seen.add(payload["id"])
+        campaigns.append(_campaign_from_payload(payload))
+    return campaigns
+
+
+def ingest_cool_campaigns(db, catalog_dir: Path) -> int:
+    """Upsert cool-tier campaign JSON into the warm `campaigns` table."""
+    n = 0
+    for campaign in read_cool_campaigns(catalog_dir):
+        db.execute(
+            """
+            INSERT INTO campaigns (
+                id, project_slug, name, mode, question, hypothesis, status,
+                started_at, concluded_at, conclusion, outcome_label,
+                parent_campaign_id, stopping_threshold, negative_check,
+                claim_path, claim_sha256, claim_mode
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (id) DO UPDATE SET
+                project_slug = excluded.project_slug,
+                name = excluded.name,
+                mode = campaigns.mode,
+                question = excluded.question,
+                hypothesis = excluded.hypothesis,
+                status = CASE WHEN campaigns.status = 'concluded' THEN campaigns.status ELSE excluded.status END,
+                started_at = excluded.started_at,
+                concluded_at = CASE WHEN campaigns.status = 'concluded' THEN campaigns.concluded_at ELSE excluded.concluded_at END,
+                conclusion = CASE WHEN campaigns.status = 'concluded' THEN campaigns.conclusion ELSE excluded.conclusion END,
+                outcome_label = CASE WHEN campaigns.status = 'concluded' THEN campaigns.outcome_label ELSE excluded.outcome_label END,
+                parent_campaign_id = excluded.parent_campaign_id,
+                stopping_threshold = COALESCE(campaigns.stopping_threshold, excluded.stopping_threshold),
+                negative_check = COALESCE(NULLIF(campaigns.negative_check, ''), NULLIF(excluded.negative_check, '')),
+                claim_path = COALESCE(NULLIF(campaigns.claim_path, ''), NULLIF(excluded.claim_path, '')),
+                claim_sha256 = COALESCE(NULLIF(campaigns.claim_sha256, ''), NULLIF(excluded.claim_sha256, '')),
+                claim_mode = COALESCE(NULLIF(campaigns.claim_mode, ''), NULLIF(excluded.claim_mode, ''))
+            """,
+            [
+                campaign.id,
+                campaign.project_slug,
+                campaign.name,
+                campaign.mode,
+                campaign.question,
+                campaign.hypothesis,
+                campaign.status,
+                campaign.started_at,
+                campaign.concluded_at,
+                campaign.conclusion,
+                campaign.outcome_label,
+                campaign.parent_campaign_id,
+                campaign.stopping_threshold,
+                campaign.negative_check,
+                campaign.claim_path,
+                campaign.claim_sha256,
+                campaign.claim_mode,
+            ],
+        )
+        n += 1
+    return n
+
+
+def connect_catalog_db(catalog_dir: Path, *, read_only: bool = True):
+    """Open bathos.db if it exists; otherwise return None."""
+    path = Path(catalog_dir) / "bathos.db"
+    if not path.exists():
+        return None
+    return duckdb.connect(str(path), read_only=read_only)
+
+
+def prepare_catalog_for_conclude(catalog_dir: Path) -> None:
+    """Ensure warm schema and run rows exist so conclude Union Gate can join."""
+    from bathos.catalog import read_runs
+    from bathos.compact import compact
+
+    catalog_dir = Path(catalog_dir)
+    db_path = catalog_dir / "bathos.db"
+    cool = read_runs(catalog_dir)
+    if not db_path.exists():
+        compact(catalog_dir)
+        return
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        warm_ids = {r[0] for r in con.execute("SELECT id FROM runs").fetchall()}
+    except duckdb.Error:
+        warm_ids = set()
+    finally:
+        con.close()
+    if any(run.id not in warm_ids for run in cool):
+        compact(catalog_dir)
 
 
 def create_campaign(
@@ -45,6 +200,7 @@ def create_campaign(
     question: str | None = None,
     hypothesis: str | None = None,
     parent_campaign_id: str | None = None,
+    catalog_dir: Path | None = None,
 ) -> Campaign:
     if mode not in ("exploration", "confirmation", "sequential"):
         raise CampaignError(
@@ -67,7 +223,7 @@ def create_campaign(
     )
     # Use campaign_name field since 'name' is reserved by logging.LogRecord
     event("campaign.create", campaign_id=campaign_id, campaign_name=name)
-    return Campaign(
+    campaign = Campaign(
         id=campaign_id,
         project_slug=project_slug,
         name=name,
@@ -78,11 +234,16 @@ def create_campaign(
         started_at=started_at,
         parent_campaign_id=parent_campaign_id,
     )
+    if catalog_dir is not None:
+        write_campaign_cool(campaign, catalog_dir)
+    return campaign
 
 
-def add_run_to_campaign(db, campaign_id: str, run_id: str) -> None:
+def add_run_to_campaign(db, campaign_id: str, run_id: str, catalog_dir: Path | None = None) -> None:
     """Add run to campaign (idempotent). For sequential campaigns, computes e-value and applies threshold lock."""
-    campaign_id = _resolve_campaign_id(db, campaign_id)
+    campaign_id = _resolve_campaign_id(db, campaign_id, catalog_dir=catalog_dir)
+    if catalog_dir is not None:
+        ingest_cool_campaigns(db, catalog_dir)
     campaign_rows = db.execute(
         "SELECT mode, started_at, stopping_threshold FROM campaigns WHERE id = ?", [campaign_id]
     ).fetchall()
@@ -151,6 +312,10 @@ def add_run_to_campaign(db, campaign_id: str, run_id: str) -> None:
                     [sidecar_stopping_threshold, campaign_id],
                 )
                 campaign_threshold = sidecar_stopping_threshold
+                if catalog_dir is not None:
+                    refreshed = get_campaign(db, campaign_id, catalog_dir=catalog_dir)
+                    if refreshed is not None:
+                        write_campaign_cool(refreshed, catalog_dir)
             elif campaign_threshold is not None and sidecar_stopping_threshold is not None:
                 if sidecar_stopping_threshold != campaign_threshold:
                     n_runs = db.execute(
@@ -175,6 +340,142 @@ def add_run_to_campaign(db, campaign_id: str, run_id: str) -> None:
         )
 
 
+def link_cool_runs_to_campaigns(
+    db, cool_runs, catalog_dir: Path | None = None, campaign_id: str | None = None
+) -> None:
+    """Insert campaign_runs from parquet campaign_id; fill sequential e-values.
+
+    Does not enforce confirmation temporal ordering — cool fragments already stamped membership.
+    Sequential rank is the union of parquet campaign_id stamps and warm campaign_runs.
+    Catalog-wide compact skips a campaign on threshold mismatch instead of aborting.
+    """
+    from types import SimpleNamespace
+
+    from bathos.sidecar import SidecarError, parse_sidecar
+
+    members = [r for r in cool_runs if r.campaign_id]
+    if campaign_id is not None:
+        members = [r for r in members if r.campaign_id == campaign_id]
+    for run in members:
+        db.execute(
+            """
+            INSERT INTO campaign_runs (campaign_id, run_id)
+            VALUES (?, ?)
+            ON CONFLICT DO NOTHING
+            """,
+            [run.campaign_id, run.id],
+        )
+
+    def _run_sort_key(r):
+        ts = r.timestamp
+        if ts is None:
+            ts = datetime.min.replace(tzinfo=UTC)
+        elif getattr(ts, "tzinfo", None) is None:
+            ts = ts.replace(tzinfo=UTC)
+        return (ts, r.id)
+
+    cids: set[str] = {r.campaign_id for r in members if r.campaign_id}
+    try:
+        for row in db.execute("SELECT DISTINCT campaign_id FROM campaign_runs").fetchall():
+            if row[0]:
+                cids.add(row[0])
+    except duckdb.Error:
+        pass
+    if campaign_id is not None:
+        cids = {campaign_id}
+
+    parquet_by_cid: dict[str, list] = defaultdict(list)
+    for run in members:
+        parquet_by_cid[run.campaign_id].append(run)
+
+    for cid in cids:
+        mode_row = db.execute(
+            "SELECT mode, stopping_threshold FROM campaigns WHERE id = ?", [cid]
+        ).fetchone()
+        if not mode_row or mode_row[0] != "sequential":
+            continue
+        by_id: dict[str, object] = {}
+        for run in parquet_by_cid.get(cid, []):
+            by_id[run.id] = run
+        try:
+            for run_id, ts, sidecar_path, outcome in db.execute(
+                """
+                SELECT cr.run_id, r.timestamp, r.sidecar_path, r.outcome
+                FROM campaign_runs cr
+                INNER JOIN runs r ON cr.run_id = r.id
+                WHERE cr.campaign_id = ?
+                """,
+                [cid],
+            ).fetchall():
+                if run_id not in by_id:
+                    by_id[run_id] = SimpleNamespace(
+                        id=run_id,
+                        timestamp=ts,
+                        sidecar_path=sidecar_path,
+                        outcome=outcome,
+                        campaign_id=cid,
+                    )
+        except duckdb.Error:
+            pass
+        ordered = sorted(by_id.values(), key=_run_sort_key)
+        campaign_threshold = mode_row[1]
+        mismatch: CampaignError | None = None
+        for i, run in enumerate(ordered, start=1):
+            sidecar_path_obj = Path(run.sidecar_path) if run.sidecar_path else None
+            sidecar_stopping_threshold = None
+            evalue = None
+            if sidecar_path_obj is not None and sidecar_path_obj.exists():
+                try:
+                    sidecar = parse_sidecar(sidecar_path_obj)
+                    evalue = compute_evalue(sidecar, run.outcome or "unknown")
+                    sidecar_stopping_threshold = sidecar.popper_stopping_threshold
+                except SidecarError:
+                    evalue = None
+            is_neutral_outcome = run.outcome in ("error", "unknown", None, "")
+            if (
+                not is_neutral_outcome
+                and campaign_threshold is not None
+                and sidecar_stopping_threshold is not None
+                and sidecar_stopping_threshold != campaign_threshold
+            ):
+                n_runs = db.execute(
+                    "SELECT COUNT(*) FROM campaign_runs WHERE campaign_id = ? AND seq_position IS NOT NULL",
+                    [cid],
+                ).fetchone()[0]
+                mismatch = CampaignError(
+                    f"Cannot change stopping_threshold for campaign {cid[:8]}: "
+                    f"{n_runs} non-error run(s) already added (threshold locked at {campaign_threshold}). "
+                    f"To use a different threshold, create a new campaign with "
+                    f"--parent {cid[:8]} to preserve lineage."
+                )
+                break
+            if (
+                not is_neutral_outcome
+                and campaign_threshold is None
+                and sidecar_stopping_threshold is not None
+            ):
+                db.execute(
+                    "UPDATE campaigns SET stopping_threshold = ? WHERE id = ?",
+                    [sidecar_stopping_threshold, cid],
+                )
+                campaign_threshold = sidecar_stopping_threshold
+                if catalog_dir is not None:
+                    refreshed = get_campaign(db, cid, catalog_dir=catalog_dir)
+                    if refreshed is not None:
+                        write_campaign_cool(refreshed, catalog_dir)
+            db.execute(
+                """
+                UPDATE campaign_runs SET evalue = COALESCE(?, evalue), seq_position = ?
+                WHERE campaign_id = ? AND run_id = ?
+                """,
+                [evalue, i, cid, run.id],
+            )
+        if mismatch is not None:
+            if campaign_id is not None:
+                raise mismatch
+            event("catalog.sequential_threshold_mismatch", campaign_id=cid, error=str(mismatch))
+
+
 def _campaign_threshold_met(db, campaign_id: str, stopping_threshold: float) -> bool:
     """Return True if all scripts in the campaign have E_n >= stopping_threshold."""
     rows = db.execute(
@@ -192,24 +493,29 @@ def _campaign_threshold_met(db, campaign_id: str, stopping_threshold: float) -> 
     return all((row[0] is not None and row[0] >= stopping_threshold) for row in rows)
 
 
-def _resolve_campaign_id(db, campaign_id: str) -> str:
+def _resolve_campaign_id(db, campaign_id: str, catalog_dir: Path | None = None) -> str:
     """Resolve a full or short (prefix) campaign ID to a full UUID.
 
-    Tries exact match first; falls back to prefix match. Raises CampaignError
-    if no match or if the prefix is ambiguous (matches multiple campaigns).
+    Unions cool-tier JSON ids with warm `campaigns.id` before exact/prefix match
+    so a partial sync cannot uniquely resolve a prefix that is ambiguous in DuckDB.
     """
-    rows = db.execute("SELECT id FROM campaigns WHERE id = ?", [campaign_id]).fetchall()
-    if rows:
-        return rows[0][0]
-    prefix_rows = db.execute(
-        "SELECT id FROM campaigns WHERE id LIKE ?", [campaign_id + "%"]
-    ).fetchall()
-    if not prefix_rows:
-        raise CampaignError(f"Campaign not found: {campaign_id}")
-    if len(prefix_rows) > 1:
-        matches = ", ".join(r[0][:8] for r in prefix_rows)
+    ids: list[str] = []
+    if catalog_dir is not None:
+        ids.extend(c.id for c in read_cool_campaigns(catalog_dir))
+    if db is not None:
+        with suppress(duckdb.Error):
+            ids.extend(r[0] for r in db.execute("SELECT id FROM campaigns").fetchall())
+    unique = list(dict.fromkeys(ids))
+    exact = [i for i in unique if i == campaign_id]
+    if exact:
+        return exact[0]
+    prefix = [i for i in unique if i.startswith(campaign_id)]
+    if len(prefix) == 1:
+        return prefix[0]
+    if len(prefix) > 1:
+        matches = ", ".join(i[:8] for i in prefix)
         raise CampaignError(f"Ambiguous campaign ID prefix {campaign_id!r} matches: {matches}")
-    return prefix_rows[0][0]
+    raise CampaignError(f"Campaign not found: {campaign_id}")
 
 
 def count_seeds_for_script(db, script_sha256: str) -> int:
@@ -248,6 +554,7 @@ def conclude_campaign(
     force_verdict: bool = False,
     negative_check: str | None = None,
     negative_outcome_pattern=None,
+    catalog_dir: Path | None = None,
 ) -> None:
     """Mark campaign as concluded.
 
@@ -278,10 +585,24 @@ def conclude_campaign(
     """
     from pathlib import Path
 
-    from bathos.claim import check_sha, is_negative_outcome, parse_claim, run_union_gate
+    from bathos.claim import (
+        check_sha,
+        is_negative_outcome,
+        parse_claim,
+        resolve_claim_path,
+        run_union_gate,
+    )
     from bathos.workspace import resolve_workspace
 
-    full_id = _resolve_campaign_id(db, campaign_id)
+    full_id = _resolve_campaign_id(db, campaign_id, catalog_dir=catalog_dir)
+
+    if catalog_dir is not None:
+        from bathos.catalog import read_runs
+
+        ingest_cool_campaigns(db, catalog_dir)
+        link_cool_runs_to_campaigns(
+            db, read_runs(catalog_dir), catalog_dir=catalog_dir, campaign_id=full_id
+        )
 
     # Check if campaign has a registered claim
     row = db.execute(
@@ -294,6 +615,10 @@ def conclude_campaign(
 
     if row:
         claim_path_rel, registered_sha, campaign_mode = row[0], row[1], row[2]
+        if not claim_path_rel:
+            claim_path_rel = None
+        if not registered_sha:
+            registered_sha = None
 
     # AC-08: Union Gate short-circuits if claim_path IS NULL (opt-in adoption ladder)
     if claim_path_rel and registered_sha:
@@ -301,7 +626,7 @@ def conclude_campaign(
         if workspace_root is None:
             workspace_root = resolve_workspace(Path.cwd()).fs_root
 
-        abs_path = workspace_root / claim_path_rel
+        abs_path = resolve_claim_path(claim_path_rel, workspace_root)
 
         # AC-08: File-not-found is always an error, never a silent bypass
         if not abs_path.exists():
@@ -592,94 +917,233 @@ def conclude_campaign(
 
     # Final update
     concluded_at = datetime.now(UTC).isoformat()
+    exists = db.execute("SELECT 1 FROM campaigns WHERE id = ?", [full_id]).fetchone()
+    if not exists and catalog_dir is not None:
+        cool = next((c for c in read_cool_campaigns(catalog_dir) if c.id == full_id), None)
+        if cool is not None:
+            db.execute(
+                """
+                INSERT INTO campaigns (
+                    id, project_slug, name, mode, question, hypothesis, status,
+                    started_at, concluded_at, conclusion, outcome_label,
+                    parent_campaign_id, stopping_threshold, negative_check,
+                    claim_path, claim_sha256, claim_mode
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    cool.id,
+                    cool.project_slug,
+                    cool.name,
+                    cool.mode,
+                    cool.question,
+                    cool.hypothesis,
+                    cool.status,
+                    cool.started_at,
+                    cool.concluded_at,
+                    cool.conclusion,
+                    cool.outcome_label,
+                    cool.parent_campaign_id,
+                    cool.stopping_threshold,
+                    cool.negative_check,
+                    cool.claim_path,
+                    cool.claim_sha256,
+                    cool.claim_mode,
+                ],
+            )
     db.execute(
         "UPDATE campaigns SET status = 'concluded', concluded_at = ?, outcome_label = ?, conclusion = ?, negative_check = ? WHERE id = ?",
         [concluded_at, outcome_label, conclusion, negative_check, full_id],
     )
     db.commit()
+    if catalog_dir is not None:
+        refreshed = get_campaign(db, full_id, catalog_dir=catalog_dir)
+        if refreshed is not None:
+            write_campaign_cool(refreshed, catalog_dir)
     event("campaign.conclude", campaign_id=full_id, verdict=outcome_label)
 
 
-def get_campaign(db, campaign_id: str) -> Campaign | None:
-    """Fetch campaign by ID."""
-    try:
-        full_id = _resolve_campaign_id(db, campaign_id)
-    except CampaignError:
-        return None
-    rows = db.execute(
-        "SELECT id, project_slug, name, mode, question, hypothesis, status, started_at, concluded_at, conclusion, outcome_label, parent_campaign_id, stopping_threshold, negative_check FROM campaigns WHERE id = ?",
-        [full_id],
-    ).fetchall()
-    if not rows:
-        return None
-    r = rows[0]
+def _nz(value: str | None) -> str | None:
+    return value if value else None
+
+
+def _merge_warm_cool(warm: Campaign | None, cool: Campaign | None) -> Campaign | None:
+    """Merge warm DuckDB and cool JSON using ingest warm-wins rules."""
+    if warm is None:
+        return cool
+    if cool is None:
+        return warm
+    concluded = warm.status == "concluded"
     return Campaign(
-        id=r[0],
-        project_slug=r[1],
-        name=r[2],
-        mode=r[3],
-        question=r[4],
-        hypothesis=r[5],
-        status=r[6],
-        started_at=r[7],
-        concluded_at=r[8],
-        conclusion=r[9],
-        outcome_label=r[10],
-        parent_campaign_id=r[11],
-        stopping_threshold=r[12],
-        negative_check=r[13],
+        id=warm.id,
+        project_slug=cool.project_slug or warm.project_slug,
+        name=cool.name or warm.name,
+        mode=warm.mode,
+        question=cool.question if cool.question is not None else warm.question,
+        hypothesis=cool.hypothesis if cool.hypothesis is not None else warm.hypothesis,
+        status=warm.status if concluded else (cool.status or warm.status),
+        started_at=cool.started_at or warm.started_at,
+        concluded_at=warm.concluded_at if concluded else cool.concluded_at,
+        conclusion=warm.conclusion if concluded else cool.conclusion,
+        outcome_label=warm.outcome_label if concluded else cool.outcome_label,
+        parent_campaign_id=cool.parent_campaign_id or warm.parent_campaign_id,
+        stopping_threshold=(
+            warm.stopping_threshold
+            if warm.stopping_threshold is not None
+            else cool.stopping_threshold
+        ),
+        negative_check=_nz(warm.negative_check) or _nz(cool.negative_check),
+        claim_path=_nz(warm.claim_path) or _nz(cool.claim_path),
+        claim_sha256=_nz(warm.claim_sha256) or _nz(cool.claim_sha256),
+        claim_mode=_nz(warm.claim_mode) or _nz(cool.claim_mode),
     )
 
 
+def get_campaign(db, campaign_id: str, catalog_dir: Path | None = None) -> Campaign | None:
+    """Fetch campaign by ID from warm DuckDB merged with cool JSON."""
+    try:
+        full_id = _resolve_campaign_id(db, campaign_id, catalog_dir=catalog_dir)
+    except CampaignError:
+        return None
+    warm: Campaign | None = None
+    if db is not None:
+        try:
+            rows = db.execute(
+                "SELECT id, project_slug, name, mode, question, hypothesis, status, started_at, concluded_at, conclusion, outcome_label, parent_campaign_id, stopping_threshold, negative_check, claim_path, claim_sha256, claim_mode FROM campaigns WHERE id = ?",
+                [full_id],
+            ).fetchall()
+        except duckdb.Error:
+            rows = db.execute(
+                "SELECT id, project_slug, name, mode, question, hypothesis, status, started_at, concluded_at, conclusion, outcome_label, parent_campaign_id, stopping_threshold, negative_check FROM campaigns WHERE id = ?",
+                [full_id],
+            ).fetchall()
+            if rows:
+                r = rows[0]
+                warm = Campaign(
+                    id=r[0],
+                    project_slug=r[1],
+                    name=r[2],
+                    mode=r[3],
+                    question=r[4],
+                    hypothesis=r[5],
+                    status=r[6],
+                    started_at=r[7],
+                    concluded_at=r[8],
+                    conclusion=r[9],
+                    outcome_label=r[10],
+                    parent_campaign_id=r[11],
+                    stopping_threshold=r[12],
+                    negative_check=r[13],
+                )
+            rows = []
+        if rows:
+            r = rows[0]
+            extra = r[14:] if len(r) > 14 else (None, None, None)
+            warm = Campaign(
+                id=r[0],
+                project_slug=r[1],
+                name=r[2],
+                mode=r[3],
+                question=r[4],
+                hypothesis=r[5],
+                status=r[6],
+                started_at=r[7],
+                concluded_at=r[8],
+                conclusion=r[9],
+                outcome_label=r[10],
+                parent_campaign_id=r[11],
+                stopping_threshold=r[12],
+                negative_check=r[13],
+                claim_path=extra[0] if extra else None,
+                claim_sha256=extra[1] if len(extra) > 1 else None,
+                claim_mode=extra[2] if len(extra) > 2 else None,
+            )
+    cool = None
+    if catalog_dir is not None:
+        cool = next((c for c in read_cool_campaigns(catalog_dir) if c.id == full_id), None)
+    return _merge_warm_cool(warm, cool)
+
+
 def list_campaigns(
-    db, project_slug: str | None = None, status: str | None = None
+    db,
+    project_slug: str | None = None,
+    status: str | None = None,
+    catalog_dir: Path | None = None,
 ) -> list[Campaign]:
-    """List campaigns with optional filters."""
-    query = "SELECT id, project_slug, name, mode, question, hypothesis, status, started_at, concluded_at, conclusion, outcome_label, parent_campaign_id, stopping_threshold, negative_check FROM campaigns WHERE 1=1"
-    params = []
-    if project_slug:
-        query += " AND project_slug = ?"
-        params.append(project_slug)
+    """List campaigns with optional filters, unioning cool JSON when catalog_dir is set."""
+    by_id: dict[str, Campaign] = {}
+    if db is not None:
+        query = "SELECT id, project_slug, name, mode, question, hypothesis, status, started_at, concluded_at, conclusion, outcome_label, parent_campaign_id, stopping_threshold, negative_check, claim_path, claim_sha256, claim_mode FROM campaigns WHERE 1=1"
+        params: list = []
+        if project_slug:
+            query += " AND project_slug = ?"
+            params.append(project_slug)
+        try:
+            rows = db.execute(query, params).fetchall()
+        except duckdb.Error:
+            query = "SELECT id, project_slug, name, mode, question, hypothesis, status, started_at, concluded_at, conclusion, outcome_label, parent_campaign_id, stopping_threshold, negative_check FROM campaigns WHERE 1=1"
+            if project_slug:
+                query += " AND project_slug = ?"
+            rows = db.execute(query, params).fetchall()
+        for r in rows:
+            extra = r[14:] if len(r) > 14 else (None, None, None)
+            by_id[r[0]] = Campaign(
+                id=r[0],
+                project_slug=r[1],
+                name=r[2],
+                mode=r[3],
+                question=r[4],
+                hypothesis=r[5],
+                status=r[6],
+                started_at=r[7],
+                concluded_at=r[8],
+                conclusion=r[9],
+                outcome_label=r[10],
+                parent_campaign_id=r[11],
+                stopping_threshold=r[12],
+                negative_check=r[13],
+                claim_path=extra[0] if extra else None,
+                claim_sha256=extra[1] if len(extra) > 1 else None,
+                claim_mode=extra[2] if len(extra) > 2 else None,
+            )
+    if catalog_dir is not None:
+        for cool in read_cool_campaigns(catalog_dir):
+            if project_slug and cool.project_slug != project_slug:
+                continue
+            by_id[cool.id] = _merge_warm_cool(by_id.get(cool.id), cool)
+    campaigns = [c for c in by_id.values() if c is not None]
     if status:
-        query += " AND status = ?"
-        params.append(status)
-    rows = db.execute(query, params).fetchall()
-    return [
-        Campaign(
-            id=r[0],
-            project_slug=r[1],
-            name=r[2],
-            mode=r[3],
-            question=r[4],
-            hypothesis=r[5],
-            status=r[6],
-            started_at=r[7],
-            concluded_at=r[8],
-            conclusion=r[9],
-            outcome_label=r[10],
-            parent_campaign_id=r[11],
-            stopping_threshold=r[12],
-            negative_check=r[13],
-        )
-        for r in rows
-    ]
+        campaigns = [c for c in campaigns if c.status == status]
+    return campaigns
 
 
-def review_campaign(db, campaign_id: str) -> dict:
+def review_campaign(db, campaign_id: str, catalog_dir: Path | None = None) -> dict:
     """Generate campaign review: residual rate, bypass rate, outcome distribution, anomalies, and POPPER summary."""
     try:
-        campaign_id = _resolve_campaign_id(db, campaign_id)
+        campaign_id = _resolve_campaign_id(db, campaign_id, catalog_dir=catalog_dir)
     except CampaignError as e:
         return {"error": str(e)}
-    rows = db.execute(
-        """
-        SELECT r.id, r.sidecar_mode, r.outcome, r.outcome_is_residual
-        FROM campaign_runs cr
-        INNER JOIN runs r ON cr.run_id = r.id
-        WHERE cr.campaign_id = ?
-    """,
-        [campaign_id],
-    ).fetchall()
+    rows = []
+    if db is not None:
+        try:
+            rows = db.execute(
+                """
+                SELECT r.id, r.sidecar_mode, r.outcome, r.outcome_is_residual
+                FROM campaign_runs cr
+                INNER JOIN runs r ON cr.run_id = r.id
+                WHERE cr.campaign_id = ?
+            """,
+                [campaign_id],
+            ).fetchall()
+        except duckdb.Error:
+            rows = []
+    by_id = {r[0]: r for r in rows}
+    if catalog_dir is not None:
+        from bathos.catalog import read_runs
+
+        for r in read_runs(catalog_dir):
+            if r.campaign_id == campaign_id and r.id not in by_id:
+                by_id[r.id] = (r.id, r.sidecar_mode, r.outcome, r.outcome_is_residual)
+    rows = list(by_id.values())
 
     if not rows:
         return {"error": f"Campaign {campaign_id} not found or has no runs"}
@@ -706,13 +1170,25 @@ def review_campaign(db, campaign_id: str) -> dict:
 
     # POPPER sequential test summary
     popper_data = None
-    campaign_meta = db.execute(
-        "SELECT mode, stopping_threshold FROM campaigns WHERE id = ?", [campaign_id]
-    ).fetchone()
+    campaign_meta = None
+    if db is not None:
+        try:
+            campaign_meta = db.execute(
+                "SELECT mode, stopping_threshold FROM campaigns WHERE id = ?", [campaign_id]
+            ).fetchone()
+        except duckdb.Error:
+            campaign_meta = None
+    if campaign_meta is None and catalog_dir is not None:
+        cool_c = next((c for c in read_cool_campaigns(catalog_dir) if c.id == campaign_id), None)
+        if cool_c is not None:
+            campaign_meta = (cool_c.mode, cool_c.stopping_threshold)
     if campaign_meta and campaign_meta[0] == "sequential":
         stopping_threshold = campaign_meta[1]
-        script_rows = db.execute(
-            """
+        script_rows = []
+        if db is not None:
+            try:
+                script_rows = db.execute(
+                    """
             SELECT
                 COALESCE(NULLIF(r.script_sha256, ''), r.sidecar_path, '_ungrouped') AS script_key,
                 COUNT(*) FILTER (WHERE r.outcome != 'error' AND r.outcome != 'unknown') AS n_effective,
@@ -724,8 +1200,10 @@ def review_campaign(db, campaign_id: str) -> dict:
             GROUP BY script_key
             ORDER BY script_key
         """,
-            [campaign_id],
-        ).fetchall()
+                    [campaign_id],
+                ).fetchall()
+            except duckdb.Error:
+                script_rows = []
 
         scripts = []
         for sr in script_rows:
@@ -752,6 +1230,8 @@ def review_campaign(db, campaign_id: str) -> dict:
             "threshold_met": threshold_met,
             "scripts": scripts,
         }
+        if not scripts:
+            popper_data["gap"] = "evalues_unavailable"
 
     return {
         "total_runs": total,

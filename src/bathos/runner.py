@@ -324,21 +324,28 @@ def run_script(
         from bathos.campaigns import CampaignError, _resolve_campaign_id
 
         db_path = catalog_dir / "bathos.db"
-        if not db_path.exists():
-            typer.echo(
-                f"Error: --campaign {campaign_id!r} given but no campaign catalog exists yet "
-                "(run `bth campaign create` first)",
-                err=True,
-            )
-            return 1
-        campaign_db = duckdb.connect(str(db_path))
+        campaign_db = None
         try:
-            resolved_campaign_id = _resolve_campaign_id(campaign_db, campaign_id)
+            if db_path.exists():
+                # read_only: SLURM array tasks otherwise take exclusive locks on the
+                # same bathos.db and fail with "Conflicting lock is held".
+                campaign_db = duckdb.connect(str(db_path), read_only=True)
+            resolved_campaign_id = _resolve_campaign_id(
+                campaign_db, campaign_id, catalog_dir=catalog_dir
+            )
         except CampaignError as e:
             typer.echo(f"Error: {e}", err=True)
+            cool_dir = catalog_dir / "campaigns"
+            has_cool = cool_dir.exists() and any(cool_dir.glob("*.json"))
+            if not db_path.exists() and not has_cool:
+                typer.echo(
+                    "(run `bth campaign create` first)",
+                    err=True,
+                )
             return 1
         finally:
-            campaign_db.close()
+            if campaign_db is not None:
+                campaign_db.close()
 
     # Warn if any registered output path is ephemeral
     ephemeral_outs = [p for p in output_paths if _is_ephemeral_path(p)]
@@ -576,9 +583,7 @@ def run_script(
         if pin.unpinned_reason and pin.snapshot_mode != "metadata_only":
             # A ref that failed to be written leaves the object collectable. Saying nothing here is
             # what turns an incomplete record into a false attestation.
-            typer.echo(
-                f"warning: run provenance is not durable: {pin.unpinned_reason}", err=True
-            )
+            typer.echo(f"warning: run provenance is not durable: {pin.unpinned_reason}", err=True)
     except Exception as e:  # pragma: no cover - defensive; pinning must not break a run
         event("run.pin_error", run_uuid=run.id, exc_type=type(e).__name__, exc_msg=str(e))
 
@@ -865,27 +870,6 @@ def run_script(
     # Link this run into campaign_runs (the table campaign review/conclude actually
     # read from). The run only exists in the cool tier until compacted, so compact
     # first — add_run_to_campaign looks the run up in the warm `runs` table.
-    if resolved_campaign_id:
-        import duckdb
-
-        from bathos.campaigns import CampaignError, add_run_to_campaign
-        from bathos.compact import compact
-
-        try:
-            compact(catalog_dir)
-            campaign_db = duckdb.connect(str(catalog_dir / "bathos.db"))
-            try:
-                add_run_to_campaign(campaign_db, resolved_campaign_id, run.id)
-                campaign_db.commit()
-            finally:
-                campaign_db.close()
-        except Exception as e:
-            event("run.error", phase="campaign_link", exc_type=type(e).__name__, exc_msg=str(e))
-            typer.echo(
-                f"Warning: run {run.id[:8]} completed but failed to link to campaign "
-                f"{resolved_campaign_id[:8]}: {e}. Recover with: "
-                f"bth campaign add {run.id} --campaign {resolved_campaign_id}",
-                err=True,
-            )
-
+    # Membership is the cool parquet campaign_id column. Compact (or review) ingests
+    # campaign_runs later — do not open bathos.db writable from array tasks.
     return exit_code

@@ -8,12 +8,18 @@ from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from bathos.catalog import write_run
 from bathos.config import ProjectConfig
 from bathos.migrate import migrate_to_project_subdirs
 from bathos.schema import Run
 from bathos.sync import sync_catalog
+
+
+@pytest.fixture(autouse=True)
+def _no_ssh_mkdir(monkeypatch):
+    monkeypatch.setattr("bathos.sync.ensure_remote_catalog_dir", lambda *_a, **_k: None)
 
 
 def _make_mock_popen(returncode=0, stderr_output="", stdout_output=""):
@@ -77,8 +83,8 @@ def test_sync_filters_by_slug(tmp_path: Path):
 
         result = sync_catalog("engaging", config, catalog, pull=False)
 
-        cmd = mock_popen.call_args[0][0]
-        # Source should be the project-slug subdir
+        cmds = [c[0][0] for c in mock_popen.call_args_list]
+        cmd = next(c for c in cmds if any("runs/asr/" in str(a) for a in c))
         assert any("runs/asr/" in str(a) for a in cmd), f"Expected runs/asr/ in cmd: {cmd}"
         # Should NOT reference prolix
         assert not any("prolix" in str(a) for a in cmd)
@@ -103,7 +109,8 @@ def test_sync_no_filter_mode_preserves_current_behavior(tmp_path: Path):
 
         result = sync_catalog("engaging", config, catalog, pull=False)
 
-        cmd = mock_popen.call_args[0][0]
+        cmds = [c[0][0] for c in mock_popen.call_args_list]
+        cmd = next(c for c in cmds if any(str(catalog / "runs") + "/" in str(a) for a in c))
         # Source should be the flat runs/ dir (no slug subdir)
         assert any(str(catalog / "runs") + "/" in str(a) for a in cmd), (
             f"Expected flat runs/ in cmd: {cmd}"
@@ -126,8 +133,8 @@ def test_sync_pull_targets_project_subdir(tmp_path: Path):
 
         sync_catalog("engaging", config, catalog, pull=True)
 
-        cmd = mock_popen.call_args[0][0]
-        # Remote source should include the slug subdir
+        cmds = [c[0][0] for c in mock_popen.call_args_list]
+        cmd = next(c for c in cmds if any("runs/asr/" in str(a) for a in c))
         assert any("runs/asr/" in str(a) for a in cmd), f"Expected runs/asr/ in cmd: {cmd}"
         # Local destination should also include the slug subdir
         assert any(str(catalog / "runs" / "asr") in str(a) for a in cmd)
