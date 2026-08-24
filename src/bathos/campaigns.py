@@ -171,7 +171,7 @@ def connect_catalog_db(catalog_dir: Path, *, read_only: bool = True):
 
 
 def prepare_catalog_for_conclude(catalog_dir: Path) -> None:
-    """Ensure warm schema and run rows exist so conclude Union Gate can join."""
+    """Ensure warm rows and campaign_runs membership exist for conclude and threshold checks."""
     from bathos.catalog import read_runs
     from bathos.compact import compact
 
@@ -190,6 +190,13 @@ def prepare_catalog_for_conclude(catalog_dir: Path) -> None:
         con.close()
     if any(run.id not in warm_ids for run in cool):
         compact(catalog_dir)
+        return
+    con = duckdb.connect(str(db_path))
+    try:
+        ingest_cool_campaigns(con, catalog_dir)
+        link_cool_runs_to_campaigns(con, cool, catalog_dir=catalog_dir)
+    finally:
+        con.close()
 
 
 def create_campaign(

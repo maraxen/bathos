@@ -15,6 +15,7 @@ import pytest
 from bathos.campaigns import (
     Campaign,
     CampaignError,
+    _campaign_threshold_met,
     _resolve_campaign_id,
     add_run_to_campaign,
     conclude_campaign,
@@ -1298,5 +1299,40 @@ hypothesis_ids = ["H_primary", "H_null"]
             [cid],
         ).fetchone()[0]
         assert joined >= 1
+    finally:
+        db.close()
+
+
+def test_prepare_relinks_membership_when_compact_skipped(tmp_catalog: Path, tmp_path: Path):
+    from tests.test_campaigns_popper import _write_popper_sidecar
+
+    sidecar = _write_popper_sidecar(tmp_path, null=0.30, alt=0.75, threshold=2.0)
+    init_catalog(tmp_catalog)
+    compact(tmp_catalog)
+    db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        campaign = create_campaign(
+            db, name="seq-relink", project_slug="prolix", mode="sequential", catalog_dir=tmp_catalog
+        )
+    finally:
+        db.close()
+    write_run(_run(campaign_id=campaign.id, sidecar_path=str(sidecar)), tmp_catalog)
+    compact(tmp_catalog)
+    db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        assert _campaign_threshold_met(db, campaign.id, 2.0) is True
+        db.execute("DELETE FROM campaign_runs WHERE campaign_id = ?", [campaign.id])
+        db.commit()
+        assert _campaign_threshold_met(db, campaign.id, 2.0) is False
+    finally:
+        db.close()
+    prepare_catalog_for_conclude(tmp_catalog)
+    db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        n = db.execute(
+            "SELECT COUNT(*) FROM campaign_runs WHERE campaign_id = ?", [campaign.id]
+        ).fetchone()[0]
+        assert n >= 1
+        assert _campaign_threshold_met(db, campaign.id, 2.0) is True
     finally:
         db.close()
