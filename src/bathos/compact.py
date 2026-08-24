@@ -906,6 +906,22 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                         [json.dumps(refreshed), run.id],
                     )
 
+                con.execute(
+                    """
+                    UPDATE runs SET
+                      claim_discriminates = COALESCE(?, claim_discriminates),
+                      claim_isolates = COALESCE(?, claim_isolates),
+                      parity_run_type = COALESCE(?, parity_run_type)
+                    WHERE id = ?
+                    """,
+                    [
+                        run.claim_discriminates,
+                        run.claim_isolates,
+                        run.parity_run_type,
+                        run.id,
+                    ],
+                )
+
                 if run.id in postmortem_map:
                     pm, rel_path = postmortem_map[run.id]
                     postmortem_verdict_override = pm.verdict_override

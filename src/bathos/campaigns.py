@@ -122,12 +122,12 @@ def ingest_cool_campaigns(db, catalog_dir: Path) -> int:
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (id) DO UPDATE SET
                 project_slug = excluded.project_slug,
-                name = excluded.name,
+                name = COALESCE(NULLIF(excluded.name, ''), campaigns.name),
                 mode = campaigns.mode,
-                question = excluded.question,
-                hypothesis = excluded.hypothesis,
+                question = COALESCE(NULLIF(excluded.question, ''), campaigns.question),
+                hypothesis = COALESCE(NULLIF(excluded.hypothesis, ''), campaigns.hypothesis),
                 status = CASE WHEN campaigns.status = 'concluded' THEN campaigns.status ELSE excluded.status END,
-                started_at = excluded.started_at,
+                started_at = COALESCE(NULLIF(excluded.started_at, ''), campaigns.started_at),
                 concluded_at = CASE WHEN campaigns.status = 'concluded' THEN campaigns.concluded_at ELSE excluded.concluded_at END,
                 conclusion = CASE WHEN campaigns.status = 'concluded' THEN campaigns.conclusion ELSE excluded.conclusion END,
                 outcome_label = CASE WHEN campaigns.status = 'concluded' THEN campaigns.outcome_label ELSE excluded.outcome_label END,
@@ -168,6 +168,27 @@ def connect_catalog_db(catalog_dir: Path, *, read_only: bool = True):
     if not path.exists():
         return None
     return duckdb.connect(str(path), read_only=read_only)
+
+
+def union_campaign_member_ids(db, campaign_id: str, catalog_dir: Path | None) -> list[str]:
+    """Warm campaign_runs union cool parquet rows stamped with campaign_id."""
+    ids: set[str] = set()
+    if db is not None:
+        try:
+            for (rid,) in db.execute(
+                "SELECT run_id FROM campaign_runs WHERE campaign_id = ?", [campaign_id]
+            ).fetchall():
+                if rid:
+                    ids.add(rid)
+        except duckdb.Error:
+            pass
+    if catalog_dir is not None:
+        from bathos.catalog import read_runs
+
+        for run in read_runs(catalog_dir):
+            if run.campaign_id == campaign_id:
+                ids.add(run.id)
+    return sorted(ids)
 
 
 def prepare_catalog_for_conclude(catalog_dir: Path) -> None:
@@ -345,6 +366,14 @@ def add_run_to_campaign(db, campaign_id: str, run_id: str, catalog_dir: Path | N
             "INSERT INTO campaign_runs (campaign_id, run_id, evalue, seq_position) VALUES (?, ?, NULL, NULL) ON CONFLICT DO NOTHING",
             [campaign_id, run_id],
         )
+    if catalog_dir is not None:
+        from bathos.catalog import read_runs, write_run
+
+        for run in read_runs(catalog_dir):
+            if run.id == run_id:
+                run.campaign_id = campaign_id
+                write_run(run, catalog_dir)
+                break
 
 
 def link_cool_runs_to_campaigns(
@@ -648,6 +677,12 @@ def conclude_campaign(
         # Parse the claim
         claim = parse_claim(abs_path)
 
+        members = union_campaign_member_ids(db, full_id, catalog_dir)
+        if not members:
+            raise CampaignError(
+                f"Cannot conclude campaign {full_id[:8]}: empty membership with a registered claim"
+            )
+
         # BP-3: negative-claim backing check (opt-in via claim registration, same as Union Gate)
         if (
             is_negative_outcome(outcome_label, negative_outcome_pattern)
@@ -843,7 +878,7 @@ def conclude_campaign(
         bypass_reason = "force_verdict flag" if force_verdict else None
         emit_claim_coverage_report(
             db,
-            Path.home() / ".bth" / "catalog",
+            catalog_dir if catalog_dir is not None else Path.home() / ".bth" / "catalog",
             full_id,
             verdict_str,
             uncovered,
@@ -1019,29 +1054,54 @@ def get_campaign(db, campaign_id: str, catalog_dir: Path | None = None) -> Campa
                 [full_id],
             ).fetchall()
         except duckdb.Error:
-            rows = db.execute(
-                "SELECT id, project_slug, name, mode, question, hypothesis, status, started_at, concluded_at, conclusion, outcome_label, parent_campaign_id, stopping_threshold, negative_check FROM campaigns WHERE id = ?",
-                [full_id],
-            ).fetchall()
-            if rows:
-                r = rows[0]
-                warm = Campaign(
-                    id=r[0],
-                    project_slug=r[1],
-                    name=r[2],
-                    mode=r[3],
-                    question=r[4],
-                    hypothesis=r[5],
-                    status=r[6],
-                    started_at=r[7],
-                    concluded_at=r[8],
-                    conclusion=r[9],
-                    outcome_label=r[10],
-                    parent_campaign_id=r[11],
-                    stopping_threshold=r[12],
-                    negative_check=r[13],
-                )
-            rows = []
+            try:
+                rows = db.execute(
+                    "SELECT id, project_slug, name, mode, question, hypothesis, status, started_at, concluded_at, conclusion, outcome_label, parent_campaign_id, stopping_threshold, negative_check FROM campaigns WHERE id = ?",
+                    [full_id],
+                ).fetchall()
+            except duckdb.Error:
+                rows = db.execute(
+                    "SELECT id, project_slug, name, mode, question, hypothesis, status, started_at, concluded_at, conclusion, outcome_label, parent_campaign_id, stopping_threshold FROM campaigns WHERE id = ?",
+                    [full_id],
+                ).fetchall()
+                if rows:
+                    r = rows[0]
+                    warm = Campaign(
+                        id=r[0],
+                        project_slug=r[1],
+                        name=r[2],
+                        mode=r[3],
+                        question=r[4],
+                        hypothesis=r[5],
+                        status=r[6],
+                        started_at=r[7],
+                        concluded_at=r[8],
+                        conclusion=r[9],
+                        outcome_label=r[10],
+                        parent_campaign_id=r[11],
+                        stopping_threshold=r[12],
+                    )
+                rows = []
+            else:
+                if rows:
+                    r = rows[0]
+                    warm = Campaign(
+                        id=r[0],
+                        project_slug=r[1],
+                        name=r[2],
+                        mode=r[3],
+                        question=r[4],
+                        hypothesis=r[5],
+                        status=r[6],
+                        started_at=r[7],
+                        concluded_at=r[8],
+                        conclusion=r[9],
+                        outcome_label=r[10],
+                        parent_campaign_id=r[11],
+                        stopping_threshold=r[12],
+                        negative_check=r[13],
+                    )
+                rows = []
         if rows:
             r = rows[0]
             extra = r[14:] if len(r) > 14 else (None, None, None)
@@ -1273,24 +1333,15 @@ def emit_campaign_report(
 
     from bathos.campaign_report import CampaignReport
 
-    campaign_id = _resolve_campaign_id(db, campaign_id)
-
-    # Fetch campaign metadata
-    campaign_rows = db.execute(
-        "SELECT conclusion FROM campaigns WHERE id = ?", [campaign_id]
-    ).fetchall()
-    if not campaign_rows:
+    cat = Path(catalog_dir)
+    campaign_id = _resolve_campaign_id(db, campaign_id, catalog_dir=cat)
+    campaign = get_campaign(db, campaign_id, catalog_dir=cat)
+    if campaign is None:
         raise CampaignError(f"Campaign {campaign_id} not found")
+    campaign_conclusion = campaign.conclusion
 
-    campaign_conclusion = campaign_rows[0][0]
-
-    # Check if campaign has any runs
-    run_count = db.execute(
-        "SELECT COUNT(*) FROM campaign_runs WHERE campaign_id = ?", [campaign_id]
-    ).fetchone()[0]
-
-    # Handle zero-run campaign: emit a valid report with defaults
-    if run_count == 0:
+    member_ids = union_campaign_member_ids(db, campaign_id, cat)
+    if not member_ids:
         review_data = {
             "total_runs": 0,
             "residual_rate": 0.0,
@@ -1302,25 +1353,23 @@ def emit_campaign_report(
         }
         stage_breakdown = {}
     else:
-        # Generate the review stats (includes total_runs, residual_rate, etc.)
-        review_data = review_campaign(db, campaign_id)
-
-        # Build stage_breakdown: count runs by stage_name with None as explicit bucket
-        stage_rows = db.execute(
-            """
+        review_data = review_campaign(db, campaign_id, catalog_dir=cat)
+        if "error" in review_data:
+            raise CampaignError(review_data["error"])
+        stage_breakdown = {}
+        if db is not None:
+            stage_rows = db.execute(
+                """
             SELECT COALESCE(NULLIF(r.stage_name, ''), NULL) AS stage_key, COUNT(*) AS count
             FROM campaign_runs cr
             INNER JOIN runs r ON cr.run_id = r.id
             WHERE cr.campaign_id = ?
             GROUP BY stage_key
         """,
-            [campaign_id],
-        ).fetchall()
-
-        stage_breakdown = {}
-        for stage_key, count in stage_rows:
-            # Use None as the key for null/empty stage_name (explicit bucket)
-            stage_breakdown[stage_key] = count
+                [campaign_id],
+            ).fetchall()
+            for stage_key, count in stage_rows:
+                stage_breakdown[stage_key] = count
 
     # Create the campaign report
     report = CampaignReport(
@@ -1368,11 +1417,10 @@ def emit_figure_manifest(db, catalog_dir: str, campaign_id: str) -> None:
 
     from bathos.figure_manifest import FigureManifest
 
-    campaign_id = _resolve_campaign_id(db, campaign_id)
-
-    # Verify campaign exists
-    campaign_rows = db.execute("SELECT id FROM campaigns WHERE id = ?", [campaign_id]).fetchall()
-    if not campaign_rows:
+    cat = Path(catalog_dir)
+    campaign_id = _resolve_campaign_id(db, campaign_id, catalog_dir=cat)
+    campaign = get_campaign(db, campaign_id, catalog_dir=cat)
+    if campaign is None:
         raise CampaignError(f"Campaign {campaign_id} not found")
 
     # Create an empty figure manifest (bathos truth-only: no rendering)

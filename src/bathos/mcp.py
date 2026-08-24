@@ -2120,7 +2120,7 @@ async def postmortem_scaffold(
         ws = resolve_workspace().fs_root
 
     if campaign_id:
-        from bathos.campaigns import connect_catalog_db, get_campaign
+        from bathos.campaigns import connect_catalog_db, get_campaign, union_campaign_member_ids
         from bathos.obligations import list_obligations
 
         db = connect_catalog_db(cat_dir, read_only=True)
@@ -2128,14 +2128,7 @@ async def postmortem_scaffold(
             campaign = get_campaign(db, campaign_id, catalog_dir=cat_dir)
             if campaign is None:
                 return {"error": f"Campaign '{campaign_id}' not found"}
-            member_ids = []
-            if db is not None:
-                member_ids = [
-                    r[0]
-                    for r in db.execute(
-                        "SELECT run_id FROM campaign_runs WHERE campaign_id = ?", [campaign.id]
-                    ).fetchall()
-                ]
+            member_ids = union_campaign_member_ids(db, campaign.id, cat_dir)
         finally:
             if db is not None:
                 db.close()

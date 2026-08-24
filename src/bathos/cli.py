@@ -1307,8 +1307,14 @@ def report_emit(
     )
 
     catalog_dir = _catalog_dir()
+    from bathos.campaigns import prepare_catalog_for_conclude
+
+    prepare_catalog_for_conclude(catalog_dir)
     db = connect_catalog_db(catalog_dir, read_only=False)
     try:
+        if db is None:
+            typer.echo("Catalog database not found; run `bth compact` first", err=True)
+            raise typer.Exit(1)
         # Verify campaign exists and is concluded
         campaign = get_campaign(db, campaign_id, catalog_dir=catalog_dir)
         if campaign is None:
@@ -2578,24 +2584,18 @@ def scaffold(
     workspace_root = resolve_workspace().fs_root
 
     if campaign_id:
-        from bathos.campaigns import connect_catalog_db, get_campaign
+        from bathos.campaigns import connect_catalog_db, get_campaign, union_campaign_member_ids
         from bathos.obligations import list_obligations
 
         cat = _catalog_dir()
         db = connect_catalog_db(cat, read_only=True)
-        campaign = get_campaign(db, campaign_id, catalog_dir=cat)
-        member_ids = []
-        if db is not None:
-            try:
-                if campaign is not None:
-                    member_ids = [
-                        r[0]
-                        for r in db.execute(
-                            "SELECT run_id FROM campaign_runs WHERE campaign_id = ?",
-                            [campaign.id],
-                        ).fetchall()
-                    ]
-            finally:
+        try:
+            campaign = get_campaign(db, campaign_id, catalog_dir=cat)
+            member_ids = (
+                union_campaign_member_ids(db, campaign.id, cat) if campaign is not None else []
+            )
+        finally:
+            if db is not None:
                 db.close()
 
         if campaign is None:

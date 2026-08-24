@@ -20,12 +20,14 @@ from bathos.campaigns import (
     add_run_to_campaign,
     conclude_campaign,
     create_campaign,
+    emit_campaign_report,
     get_campaign,
     ingest_cool_campaigns,
     link_cool_runs_to_campaigns,
     list_campaigns,
     prepare_catalog_for_conclude,
     review_campaign,
+    union_campaign_member_ids,
     write_campaign_cool,
 )
 from bathos.catalog import init_catalog, write_run
@@ -1334,5 +1336,237 @@ def test_prepare_relinks_membership_when_compact_skipped(tmp_catalog: Path, tmp_
         ).fetchone()[0]
         assert n >= 1
         assert _campaign_threshold_met(db, campaign.id, 2.0) is True
+    finally:
+        db.close()
+
+
+_MIN_CLAIM = """[claim]
+headline = "Test claim"
+kill_condition = "Outcome != expected"
+kill_condition_satisfiable_by_null = false
+regime = "param=1.0..2.0"
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary hypothesis"
+predicted_signature = "metric=100"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null hypothesis"
+predicted_signature = "metric=50"
+
+[[assumptions]]
+id = "A1"
+label = "Test assumption"
+
+[[confounds]]
+id = "C1"
+label = "Test confound"
+
+[[claim.discriminability]]
+hypothesis_a = "H_primary"
+hypothesis_b = "H_null"
+planned_run_label = "main"
+predicted_outcome = "discriminates"
+
+[claim.union_gate]
+[[claim.union_gate.clauses]]
+id = "C_main"
+description = "Main clause"
+hypothesis_ids = ["H_primary", "H_null"]
+"""
+
+
+def test_emit_report_uses_cool_overlay_and_parquet_members(tmp_catalog: Path):
+    init_catalog(tmp_catalog)
+    compact(tmp_catalog)
+    db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        campaign = create_campaign(
+            db, name="emit-me", project_slug="prolix", mode="exploration", catalog_dir=tmp_catalog
+        )
+    finally:
+        db.close()
+    member = _run(campaign_id=campaign.id)
+    write_run(member, tmp_catalog)
+    compact(tmp_catalog)
+    db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        db.execute("DELETE FROM campaign_runs WHERE campaign_id = ?", [campaign.id])
+        db.commit()
+        payload = json.loads((tmp_catalog / "campaigns" / f"{campaign.id}.json").read_text())
+        payload["status"] = "concluded"
+        payload["conclusion"] = "from-cool"
+        (tmp_catalog / "campaigns" / f"{campaign.id}.json").write_text(json.dumps(payload) + "\n")
+        emit_campaign_report(db, str(tmp_catalog), campaign.id)
+    finally:
+        db.close()
+    report = json.loads(
+        (tmp_catalog / "sidecars" / campaign.id / "campaign_report.json").read_text()
+    )
+    assert report["conclude"] == "from-cool"
+    assert report["total_runs"] >= 1
+
+
+def test_union_members_include_parquet_without_campaign_runs(tmp_catalog: Path):
+    init_catalog(tmp_catalog)
+    compact(tmp_catalog)
+    cid = "ee1f47e8-aaaa-bbbb-cccc-ddddeeeeffff"
+    write_campaign_cool(
+        Campaign(
+            id=cid,
+            project_slug="prolix",
+            name="pm-members",
+            mode="exploration",
+            status="open",
+            started_at="2026-08-21T00:00:00+00:00",
+        ),
+        tmp_catalog,
+    )
+    run = _run(campaign_id=cid)
+    write_run(run, tmp_catalog)
+    compact(tmp_catalog)
+    db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        db.execute("DELETE FROM campaign_runs WHERE campaign_id = ?", [cid])
+        db.commit()
+        ids = union_campaign_member_ids(db, cid, tmp_catalog)
+        assert run.id in ids
+    finally:
+        db.close()
+
+
+def test_add_run_stamps_parquet_campaign_id(tmp_catalog: Path):
+    init_catalog(tmp_catalog)
+    compact(tmp_catalog)
+    db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        campaign = create_campaign(
+            db, name="stamp", project_slug="prolix", mode="exploration", catalog_dir=tmp_catalog
+        )
+    finally:
+        db.close()
+    run = _run(campaign_id=None)
+    write_run(run, tmp_catalog)
+    compact(tmp_catalog)
+    db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        add_run_to_campaign(db, campaign.id, run.id, catalog_dir=tmp_catalog)
+    finally:
+        db.close()
+    from bathos.catalog import read_runs
+
+    stamped = next(r for r in read_runs(tmp_catalog) if r.id == run.id)
+    assert stamped.campaign_id == campaign.id
+
+
+def test_conclude_registered_claim_empty_membership_raises(tmp_catalog: Path, tmp_path: Path):
+    from bathos.claim import register_claim
+
+    (tmp_path / "test.claim.toml").write_text(_MIN_CLAIM)
+    init_catalog(tmp_catalog)
+    compact(tmp_catalog)
+    db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        campaign = create_campaign(
+            db,
+            name="empty-claim",
+            project_slug="prolix",
+            mode="confirmation",
+            catalog_dir=tmp_catalog,
+        )
+        register_claim(Path("test.claim.toml"), campaign.id, db, tmp_path, catalog_dir=tmp_catalog)
+        with pytest.raises(CampaignError, match="empty membership"):
+            conclude_campaign(
+                db,
+                campaign.id,
+                "success",
+                "done",
+                catalog_dir=tmp_catalog,
+                workspace_root=tmp_path,
+            )
+    finally:
+        db.close()
+
+
+def test_ingest_preserves_warm_started_at_and_name_when_cool_empty(tmp_catalog: Path):
+    init_catalog(tmp_catalog)
+    compact(tmp_catalog)
+    db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        campaign = create_campaign(
+            db, name="keep-me", project_slug="prolix", mode="exploration", catalog_dir=tmp_catalog
+        )
+        started = db.execute(
+            "SELECT started_at FROM campaigns WHERE id = ?", [campaign.id]
+        ).fetchone()[0]
+        payload = json.loads((tmp_catalog / "campaigns" / f"{campaign.id}.json").read_text())
+        payload["name"] = ""
+        payload["started_at"] = ""
+        (tmp_catalog / "campaigns" / f"{campaign.id}.json").write_text(json.dumps(payload) + "\n")
+        ingest_cool_campaigns(db, tmp_catalog)
+        row = db.execute(
+            "SELECT name, started_at FROM campaigns WHERE id = ?", [campaign.id]
+        ).fetchone()
+        assert row[0] == "keep-me"
+        assert row[1] == started
+        payload["name"] = "renamed"
+        (tmp_catalog / "campaigns" / f"{campaign.id}.json").write_text(json.dumps(payload) + "\n")
+        ingest_cool_campaigns(db, tmp_catalog)
+        name = db.execute("SELECT name FROM campaigns WHERE id = ?", [campaign.id]).fetchone()[0]
+        assert name == "renamed"
+    finally:
+        db.close()
+
+
+def test_claim_coverage_sidecar_written_to_catalog_dir(tmp_catalog: Path, tmp_path: Path):
+    from bathos.claim import register_claim
+
+    (tmp_path / "test.claim.toml").write_text(_MIN_CLAIM)
+    init_catalog(tmp_catalog)
+    compact(tmp_catalog)
+    db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        campaign = create_campaign(
+            db,
+            name="cov",
+            project_slug="prolix",
+            mode="confirmation",
+            catalog_dir=tmp_catalog,
+        )
+        cid = campaign.id
+    finally:
+        db.close()
+    write_run(_run(campaign_id=cid), tmp_catalog)
+    compact(tmp_catalog)
+    db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        register_claim(Path("test.claim.toml"), cid, db, tmp_path, catalog_dir=tmp_catalog)
+        with suppress(Exception):
+            conclude_campaign(
+                db, cid, "success", "done", catalog_dir=tmp_catalog, workspace_root=tmp_path
+            )
+    finally:
+        db.close()
+    coverage = tmp_catalog / "sidecars" / cid / f"claim_coverage_{cid}.json"
+    assert coverage.is_file()
+
+
+def test_compact_skip_refreshes_claim_discriminates(tmp_catalog: Path):
+    init_catalog(tmp_catalog)
+    compact(tmp_catalog)
+    run = _run()
+    write_run(run, tmp_catalog)
+    compact(tmp_catalog)
+    run.claim_discriminates = json.dumps(["H_primary"])
+    write_run(run, tmp_catalog)
+    compact(tmp_catalog)
+    db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        disc = db.execute("SELECT claim_discriminates FROM runs WHERE id = ?", [run.id]).fetchone()[
+            0
+        ]
+        assert disc == json.dumps(["H_primary"])
     finally:
         db.close()
