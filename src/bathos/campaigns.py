@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import logging
 from collections import defaultdict
@@ -589,6 +590,155 @@ def count_runs_for_script(db, script_sha256: str) -> int:
     return rows[0][0] if rows else 0
 
 
+@dataclass(frozen=True)
+class ConcludedRunInfo:
+    """One campaign member run's identity + artifact pointers, as known to bathos
+    at conclude time -- enough for a hook to locate the run's output without
+    re-querying the catalog itself."""
+
+    run_id: str
+    output_path: str | None
+    sidecar_path: str | None
+    content_hash: str | None
+
+
+@dataclass(frozen=True)
+class CampaignConcludeEvent:
+    """Payload passed to every ``bathos.campaign_conclude_hooks`` entry point.
+
+    See the "Post-conclude hooks" section of conclude_campaign()'s docstring for
+    the full contract (call signature, ordering/timing, non-propagation guarantee).
+    """
+
+    campaign_id: str
+    outcome_label: str
+    members: tuple[ConcludedRunInfo, ...]
+
+
+def _output_metadata_content_hash(metadata_json: str | None, output_path: str | None) -> str | None:
+    """The sha256 recorded for ``output_path`` in a run's output_metadata JSON array.
+
+    output_metadata entries are produced 1:1 with output_paths, keyed by "path"
+    (see bathos.compact._collect_output_metadata / the compaction write path) --
+    NOT necessarily all hash-bearing, since a >100MB or unreadable output is
+    recorded with sha256 omitted. Matching must be by path, not by "first entry
+    with a truthy hash": for a multi-output run where output_paths[0] itself has
+    no recorded hash but a later output does, returning that later hash would
+    silently pair ConcludedRunInfo.output_path with the wrong file's content_hash.
+    """
+    if not metadata_json or not output_path:
+        return None
+    try:
+        entries = json.loads(metadata_json)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(entries, list):
+        return None
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("path") == output_path and entry.get("sha256"):
+            return entry["sha256"]
+    return None
+
+
+def _resolve_member_run_infos(db, run_ids: list[str]) -> tuple[ConcludedRunInfo, ...]:
+    """Best-effort, single-query lookup of every member run's output/sidecar path
+    and content hash.
+
+    Reuses the already-open warm-tier connection rather than re-deriving from the
+    catalog, and batches all member runs into one IN-list query rather than one
+    query per run -- conclude_campaign() must not scale linearly with campaign
+    membership just to build the hook payload. Any lookup failure (missing table,
+    missing row, missing/malformed output_metadata) degrades to None fields rather
+    than raising -- this feeds an advisory hook payload, not a gate, so it must
+    never be able to break conclude_campaign().
+    """
+    if not run_ids:
+        return ()
+
+    rows_by_id: dict[str, tuple] = {}
+    try:
+        placeholders = ", ".join("?" for _ in run_ids)
+        for row in db.execute(
+            f"SELECT id, output_paths, sidecar_path, output_metadata FROM runs "
+            f"WHERE id IN ({placeholders})",
+            run_ids,
+        ).fetchall():
+            rows_by_id[row[0]] = row[1:]
+    except duckdb.Error:
+        rows_by_id = {}
+
+    infos = []
+    for run_id in run_ids:
+        output_path: str | None = None
+        sidecar_path: str | None = None
+        content_hash: str | None = None
+        row = rows_by_id.get(run_id)
+        if row:
+            paths, sidecar, metadata_json = row
+            if paths:
+                output_path = paths[0]
+            if sidecar:
+                sidecar_path = sidecar
+            content_hash = _output_metadata_content_hash(metadata_json, output_path)
+        infos.append(
+            ConcludedRunInfo(
+                run_id=run_id,
+                output_path=output_path,
+                sidecar_path=sidecar_path,
+                content_hash=content_hash,
+            )
+        )
+    return tuple(infos)
+
+
+def _run_campaign_conclude_hooks(
+    db,
+    campaign_id: str,
+    outcome_label: str,
+    catalog_dir: Path | None,
+    member_ids: list[str] | None = None,
+) -> None:
+    """Discover and invoke ``bathos.campaign_conclude_hooks`` entry points.
+
+    Must be called only after the campaign is durably marked concluded. Hook
+    failures are caught and printed as warnings -- they can never propagate out
+    of conclude_campaign(), and can never affect its return value or the
+    campaign's concluded state. See conclude_campaign()'s docstring for the
+    full contract.
+
+    ``member_ids``, if given, is reused as-is instead of re-querying the catalog
+    -- the caller passes this when it already resolved membership earlier in the
+    same conclude_campaign() call (e.g. for the Union Gate), so the same warm
+    ``campaign_runs``-union-cool-parquet scan doesn't run twice.
+    """
+    try:
+        hooks = importlib.metadata.entry_points(group="bathos.campaign_conclude_hooks")
+    except Exception as e:
+        print(f"WARNING: could not discover campaign_conclude_hooks: {e}")
+        return
+
+    if not hooks:
+        return
+
+    try:
+        if member_ids is None:
+            member_ids = union_campaign_member_ids(db, campaign_id, catalog_dir)
+        members = _resolve_member_run_infos(db, member_ids)
+    except Exception as e:
+        print(f"WARNING: could not resolve campaign_conclude_hooks member run info: {e}")
+        return
+    payload = CampaignConcludeEvent(
+        campaign_id=campaign_id, outcome_label=outcome_label, members=members
+    )
+
+    for hook_ep in hooks:
+        try:
+            hook = hook_ep.load()
+            hook(payload)
+        except Exception as e:
+            print(f"WARNING: campaign_conclude_hook '{hook_ep.name}' failed: {e}")
+
+
 def conclude_campaign(
     db,
     campaign_id: str,
@@ -626,6 +776,44 @@ def conclude_campaign(
     Raises:
         CampaignError: If a claim is registered, outcome_label is a negative claim, and
             negative_check is blank.
+
+    Post-conclude hooks:
+        After the campaign is durably marked concluded (DB committed, cool-tier
+        JSON re-synced, telemetry emitted), this function discovers and invokes
+        every entry point registered under the ``bathos.campaign_conclude_hooks``
+        group (via ``importlib.metadata.entry_points``). This lets external
+        packages react to a concluded campaign -- e.g. attempting a real
+        promotion -- without bathos taking a hard dependency on them.
+
+        Each entry point must resolve to a callable of signature::
+
+            def hook(event: bathos.campaigns.CampaignConcludeEvent) -> None: ...
+
+        ``CampaignConcludeEvent`` carries ``campaign_id``, the final
+        ``outcome_label`` (post any Union-Gate/parity-confound/review-coverage/
+        obligation-gate downgrade), and ``members``: a tuple of
+        ``ConcludedRunInfo(run_id, output_path, sidecar_path, content_hash)`` for
+        every run in the campaign's union membership (warm ``campaign_runs`` union
+        cool-tier parquet rows, per union_campaign_member_ids()). Any of
+        ``output_path``/``sidecar_path``/``content_hash`` may be None when bathos
+        cannot resolve it (e.g. the run predates compaction, or has no recorded
+        output SHA).
+
+        Ordering/timing guarantees: hooks run once per conclude_campaign() call,
+        strictly after the campaign's concluded state is committed -- a hook can
+        rely on immediately re-querying bathos and seeing the campaign as
+        concluded. Hooks run synchronously, in the order importlib.metadata
+        returns them (unspecified across ties), and conclude_campaign() blocks
+        until every hook has returned or raised.
+
+        Non-propagation guarantee: a hook that raises, that fails to load, or
+        whose entry-point group itself cannot be resolved, NEVER raises out of
+        conclude_campaign() and NEVER changes the campaign's concluded status or
+        this function's (None) return value. Each such failure is caught and
+        printed as a ``WARNING: campaign_conclude_hook '<name>' failed: ...``
+        line, matching this function's existing print()-based warning pattern.
+        A downstream consumer's bug must never break bathos's own conclusion
+        contract. See ``.praxia/docs/decisions/`` for the design rationale.
     """
     from pathlib import Path
 
@@ -639,6 +827,10 @@ def conclude_campaign(
     from bathos.workspace import resolve_workspace
 
     full_id = _resolve_campaign_id(db, campaign_id, catalog_dir=catalog_dir)
+    # Reused by _run_campaign_conclude_hooks() at the end of this function, if the
+    # Union Gate below already resolved membership -- avoids a second identical
+    # catalog scan (warm campaign_runs union cool-tier parquet) for the same call.
+    precomputed_member_ids: list[str] | None = None
 
     if catalog_dir is not None:
         from bathos.catalog import read_runs
@@ -690,6 +882,7 @@ def conclude_campaign(
             raise CampaignError(
                 f"Cannot conclude campaign {full_id[:8]}: empty membership with a registered claim"
             )
+        precomputed_member_ids = members
 
         # BP-3: negative-claim backing check (opt-in via claim registration, same as Union Gate)
         if (
@@ -1010,6 +1203,10 @@ def conclude_campaign(
         if refreshed is not None:
             write_campaign_cool(refreshed, catalog_dir)
     event("campaign.conclude", campaign_id=full_id, verdict=outcome_label)
+
+    _run_campaign_conclude_hooks(
+        db, full_id, outcome_label, catalog_dir, member_ids=precomputed_member_ids
+    )
 
 
 def _nz(value: str | None) -> str | None:
