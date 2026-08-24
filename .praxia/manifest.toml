@@ -50,6 +50,11 @@ path     = "../agent_assets/skills/bathos-literature-parity/SKILL.md"
 triggers = ["literature parity", "reimplemented baseline", "parity.bth.toml", "reference_parity"]
 
 [[plugin.skills]]
+name     = "bathos-knob-reachability"
+path     = "../agent_assets/skills/bathos-knob-reachability/SKILL.md"
+triggers = ["knob reachability", "does the knob reach", "config surface", "jaxpr", "silent no-op", "knob differential", "parameter audit"]
+
+[[plugin.skills]]
 name     = "bathos-mcp"
 path     = "../agent_assets/skills/bathos-mcp/SKILL.md"
 triggers = ["bathos mcp", "BathosErrorCode", "error envelope", "validation_ok"]
