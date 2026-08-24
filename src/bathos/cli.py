@@ -903,7 +903,11 @@ def campaign_conclude(
     prepare_catalog_for_conclude(cat)
     db = duckdb.connect(str(cat / "bathos.db"))
     try:
-        campaign = get_campaign(db, campaign_id, catalog_dir=cat)
+        try:
+            campaign = get_campaign(db, campaign_id, catalog_dir=cat)
+        except CampaignError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1)
         if campaign is None:
             typer.echo(f"Campaign not found: {campaign_id}", err=True)
             raise typer.Exit(1)
@@ -1238,12 +1242,16 @@ def campaign_show(
     campaign_id: str = typer.Argument(..., help="Campaign ID (or prefix)"),
 ):
     """Show campaign details."""
-    from bathos.campaigns import connect_catalog_db, get_campaign
+    from bathos.campaigns import CampaignError, connect_catalog_db, get_campaign
 
     cat = _catalog_dir()
     db = connect_catalog_db(cat, read_only=True)
     try:
-        campaign = get_campaign(db, campaign_id, catalog_dir=cat)
+        try:
+            campaign = get_campaign(db, campaign_id, catalog_dir=cat)
+        except CampaignError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1)
         if not campaign:
             typer.echo(f"Campaign not found: {campaign_id}", err=True)
             raise typer.Exit(1)
@@ -1268,13 +1276,17 @@ def campaign_review(
     campaign_id: str = typer.Argument(..., help="Campaign ID"),
 ):
     """Review campaign: residual rate, bypass rate, outcome distribution."""
-    from bathos.campaigns import connect_catalog_db, get_campaign, review_campaign
+    from bathos.campaigns import CampaignError, connect_catalog_db, get_campaign, review_campaign
     from bathos.rich_fmt import render_campaign_review, render_popper_summary
 
     cat = _catalog_dir()
     db = connect_catalog_db(cat, read_only=True)
     try:
-        campaign = get_campaign(db, campaign_id, catalog_dir=cat)
+        try:
+            campaign = get_campaign(db, campaign_id, catalog_dir=cat)
+        except CampaignError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1)
         if campaign is None:
             typer.echo(f"Campaign not found: {campaign_id}", err=True)
             raise typer.Exit(1)
@@ -1316,7 +1328,11 @@ def report_emit(
             typer.echo("Catalog database not found; run `bth compact` first", err=True)
             raise typer.Exit(1)
         # Verify campaign exists and is concluded
-        campaign = get_campaign(db, campaign_id, catalog_dir=catalog_dir)
+        try:
+            campaign = get_campaign(db, campaign_id, catalog_dir=catalog_dir)
+        except CampaignError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1)
         if campaign is None:
             typer.echo(f"Campaign not found: {campaign_id}", err=True)
             raise typer.Exit(1)
@@ -2584,13 +2600,22 @@ def scaffold(
     workspace_root = resolve_workspace().fs_root
 
     if campaign_id:
-        from bathos.campaigns import connect_catalog_db, get_campaign, union_campaign_member_ids
+        from bathos.campaigns import (
+            CampaignError,
+            connect_catalog_db,
+            get_campaign,
+            union_campaign_member_ids,
+        )
         from bathos.obligations import list_obligations
 
         cat = _catalog_dir()
         db = connect_catalog_db(cat, read_only=True)
         try:
-            campaign = get_campaign(db, campaign_id, catalog_dir=cat)
+            try:
+                campaign = get_campaign(db, campaign_id, catalog_dir=cat)
+            except CampaignError as e:
+                typer.echo(f"Error: {e}", err=True)
+                raise typer.Exit(1)
             member_ids = (
                 union_campaign_member_ids(db, campaign.id, cat) if campaign is not None else []
             )

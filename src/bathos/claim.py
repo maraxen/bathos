@@ -216,7 +216,7 @@ def load_registered_claim(
     if workspace_root is None:
         workspace_root = resolve_workspace(Path.cwd()).fs_root
 
-    abs_path = workspace_root / claim_path_rel
+    abs_path = resolve_claim_path(claim_path_rel, workspace_root)
     if not abs_path.exists():
         raise FileNotFoundError(
             f"claim.bth.toml not found at {abs_path} — file may have been moved or deleted."
@@ -1003,7 +1003,7 @@ def attest_parity(
 
     claim_path_rel = rows[0][0]
     stored_db_sha = rows[0][1]
-    abs_claim_path = workspace_root / claim_path_rel
+    abs_claim_path = resolve_claim_path(claim_path_rel, workspace_root)
 
     if not abs_claim_path.exists():
         raise FileNotFoundError(f"Claim file not found at {abs_claim_path}")

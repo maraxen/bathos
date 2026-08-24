@@ -1111,8 +1111,10 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
     warm_rows_after = 0
     try:
         temp_con = duckdb.connect(str(db_path), read_only=True)
-        warm_rows_after = temp_con.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
-        temp_con.close()
+        try:
+            warm_rows_after = temp_con.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+        finally:
+            temp_con.close()
     except Exception:
         warm_rows_after = 0
 

@@ -455,7 +455,9 @@ def link_cool_runs_to_campaigns(
             pass
         ordered = sorted(by_id.values(), key=_run_sort_key)
         campaign_threshold = mode_row[1]
+        planned: list[tuple] = []
         mismatch: CampaignError | None = None
+        pending_threshold = campaign_threshold
         for i, run in enumerate(ordered, start=1):
             sidecar_path_obj = Path(run.sidecar_path) if run.sidecar_path else None
             sidecar_stopping_threshold = None
@@ -470,9 +472,9 @@ def link_cool_runs_to_campaigns(
             is_neutral_outcome = run.outcome in ("error", "unknown", None, "")
             if (
                 not is_neutral_outcome
-                and campaign_threshold is not None
+                and pending_threshold is not None
                 and sidecar_stopping_threshold is not None
-                and sidecar_stopping_threshold != campaign_threshold
+                and sidecar_stopping_threshold != pending_threshold
             ):
                 n_runs = db.execute(
                     "SELECT COUNT(*) FROM campaign_runs WHERE campaign_id = ? AND seq_position IS NOT NULL",
@@ -480,21 +482,31 @@ def link_cool_runs_to_campaigns(
                 ).fetchone()[0]
                 mismatch = CampaignError(
                     f"Cannot change stopping_threshold for campaign {cid[:8]}: "
-                    f"{n_runs} non-error run(s) already added (threshold locked at {campaign_threshold}). "
+                    f"{n_runs} non-error run(s) already added (threshold locked at {pending_threshold}). "
                     f"To use a different threshold, create a new campaign with "
                     f"--parent {cid[:8]} to preserve lineage."
                 )
                 break
+            lock_threshold = None
             if (
                 not is_neutral_outcome
-                and campaign_threshold is None
+                and pending_threshold is None
                 and sidecar_stopping_threshold is not None
             ):
+                lock_threshold = sidecar_stopping_threshold
+                pending_threshold = sidecar_stopping_threshold
+            planned.append((evalue, i, run.id, lock_threshold))
+        if mismatch is not None:
+            if campaign_id is not None:
+                raise mismatch
+            event("catalog.sequential_threshold_mismatch", campaign_id=cid, error=str(mismatch))
+            continue
+        for evalue, i, run_id, lock_threshold in planned:
+            if lock_threshold is not None:
                 db.execute(
                     "UPDATE campaigns SET stopping_threshold = ? WHERE id = ?",
-                    [sidecar_stopping_threshold, cid],
+                    [lock_threshold, cid],
                 )
-                campaign_threshold = sidecar_stopping_threshold
                 if catalog_dir is not None:
                     refreshed = get_campaign(db, cid, catalog_dir=catalog_dir)
                     if refreshed is not None:
@@ -504,12 +516,8 @@ def link_cool_runs_to_campaigns(
                 UPDATE campaign_runs SET evalue = COALESCE(?, evalue), seq_position = ?
                 WHERE campaign_id = ? AND run_id = ?
                 """,
-                [evalue, i, cid, run.id],
+                [evalue, i, cid, run_id],
             )
-        if mismatch is not None:
-            if campaign_id is not None:
-                raise mismatch
-            event("catalog.sequential_threshold_mismatch", campaign_id=cid, error=str(mismatch))
 
 
 def _campaign_threshold_met(db, campaign_id: str, stopping_threshold: float) -> bool:
@@ -1044,7 +1052,9 @@ def get_campaign(db, campaign_id: str, catalog_dir: Path | None = None) -> Campa
     """Fetch campaign by ID from warm DuckDB merged with cool JSON."""
     try:
         full_id = _resolve_campaign_id(db, campaign_id, catalog_dir=catalog_dir)
-    except CampaignError:
+    except CampaignError as e:
+        if "Ambiguous" in str(e):
+            raise
         return None
     warm: Campaign | None = None
     if db is not None:

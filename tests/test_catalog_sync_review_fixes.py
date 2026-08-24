@@ -1288,10 +1288,9 @@ hypothesis_ids = ["H_primary", "H_null"]
     prepare_catalog_for_conclude(tmp_catalog)
     db = duckdb.connect(str(tmp_catalog / "bathos.db"))
     try:
-        with suppress(Exception):
-            conclude_campaign(
-                db, cid, "success", "done", catalog_dir=tmp_catalog, workspace_root=tmp_path
-            )
+        conclude_campaign(
+            db, cid, "success", "done", catalog_dir=tmp_catalog, workspace_root=tmp_path
+        )
         joined = db.execute(
             """
             SELECT COUNT(*) FROM campaign_runs cr
@@ -1301,6 +1300,10 @@ hypothesis_ids = ["H_primary", "H_null"]
             [cid],
         ).fetchone()[0]
         assert joined >= 1
+        warm_status = db.execute("SELECT status FROM campaigns WHERE id = ?", [cid]).fetchone()[0]
+        assert warm_status == "concluded"
+        cool_status = json.loads((tmp_catalog / "campaigns" / f"{cid}.json").read_text())["status"]
+        assert cool_status == "concluded"
     finally:
         db.close()
 
@@ -1570,3 +1573,183 @@ def test_compact_skip_refreshes_claim_discriminates(tmp_catalog: Path):
         assert disc == json.dumps(["H_primary"])
     finally:
         db.close()
+
+
+def test_mcp_create_warns_on_cool_only_duplicate_name(tmp_catalog: Path):
+    from bathos.mcp import campaign_create_tool
+
+    init_catalog(tmp_catalog)
+    compact(tmp_catalog)
+    write_campaign_cool(
+        Campaign(
+            id="aa1f47e8-aaaa-bbbb-cccc-ddddeeeeffff",
+            project_slug="prolix",
+            name="dup-name",
+            mode="exploration",
+            status="open",
+            started_at="2026-08-21T00:00:00+00:00",
+        ),
+        tmp_catalog,
+    )
+    out = campaign_create_tool(
+        name="dup-name", catalog_dir=str(tmp_catalog), project_slug="prolix"
+    )
+    assert "campaign_id" in out
+    assert "warning" in out
+    assert "dup-name" in out["warning"]
+    assert "aa1f47e8" in out["warning"]
+
+
+def test_mcp_create_succeeds_when_warm_db_missing_with_cool_json(tmp_path: Path):
+    from bathos.mcp import campaign_create_tool
+
+    cat = tmp_path / "catalog"
+    cat.mkdir()
+    write_campaign_cool(
+        Campaign(
+            id="bb1f47e8-aaaa-bbbb-cccc-ddddeeeeffff",
+            project_slug="prolix",
+            name="cool-json-only",
+            mode="exploration",
+            status="open",
+            started_at="2026-08-21T00:00:00+00:00",
+        ),
+        cat,
+    )
+    out = campaign_create_tool(name="after-compact", catalog_dir=str(cat), project_slug="prolix")
+    assert "campaign_id" in out
+    assert (cat / "bathos.db").is_file()
+    assert (cat / "campaigns" / f"{out['campaign_id']}.json").is_file()
+
+
+def test_mcp_conclude_unknown_id_returns_error(tmp_catalog: Path):
+    from bathos.mcp import campaign_conclude_tool
+
+    init_catalog(tmp_catalog)
+    compact(tmp_catalog)
+    out = campaign_conclude_tool(
+        campaign_id="deadbeef-dead-beef-dead-beefdeadbeef",
+        outcome_label="success",
+        catalog_dir=str(tmp_catalog),
+    )
+    assert "error" in out
+    assert "campaign_id" not in out or out.get("status") != "concluded"
+
+
+def test_get_campaign_raises_ambiguous_prefix(tmp_catalog: Path):
+    init_catalog(tmp_catalog)
+    compact(tmp_catalog)
+    prefix = "cc222222"
+    id_a = prefix + "-bbbb-cccc-dddd-000000000001"
+    id_b = prefix + "-bbbb-cccc-dddd-000000000002"
+    write_campaign_cool(
+        Campaign(
+            id=id_a,
+            project_slug="prolix",
+            name="one",
+            mode="exploration",
+            status="open",
+            started_at="2026-08-21T00:00:00+00:00",
+        ),
+        tmp_catalog,
+    )
+    write_campaign_cool(
+        Campaign(
+            id=id_b,
+            project_slug="prolix",
+            name="two",
+            mode="exploration",
+            status="open",
+            started_at="2026-08-21T00:00:00+00:00",
+        ),
+        tmp_catalog,
+    )
+    db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        with pytest.raises(CampaignError, match="Ambiguous"):
+            get_campaign(db, prefix, catalog_dir=tmp_catalog)
+    finally:
+        db.close()
+
+
+def test_load_registered_claim_rejects_path_escape(tmp_catalog: Path, tmp_path: Path):
+    from bathos.claim import load_registered_claim
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    secret = tmp_path / "secret.toml"
+    secret.write_text("stolen")
+    sha = __import__("hashlib").sha256(b"stolen").hexdigest()
+    init_catalog(tmp_catalog)
+    compact(tmp_catalog)
+    db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        campaign = create_campaign(
+            db,
+            name="escape-load",
+            project_slug="prolix",
+            mode="confirmation",
+            catalog_dir=tmp_catalog,
+        )
+        db.execute(
+            "UPDATE campaigns SET claim_path = ?, claim_sha256 = ? WHERE id = ?",
+            ["../secret.toml", sha, campaign.id],
+        )
+        db.commit()
+        with pytest.raises(RuntimeError, match="workspace"):
+            load_registered_claim(db, campaign.id, workspace)
+    finally:
+        db.close()
+
+
+def test_seq_position_not_partially_filled_on_threshold_mismatch(tmp_catalog: Path, tmp_path: Path):
+    from tests.test_campaigns_popper import _write_popper_sidecar
+
+    sidecar_a = _write_popper_sidecar(tmp_path, null=0.5, alt=0.9, threshold=2.0)
+    sidecar_b = _write_popper_sidecar(tmp_path, null=0.5, alt=0.9, threshold=20.0)
+    init_catalog(tmp_catalog)
+    compact(tmp_catalog)
+    db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        campaign = create_campaign(
+            db,
+            name="seq-mismatch",
+            project_slug="prolix",
+            mode="sequential",
+            catalog_dir=tmp_catalog,
+        )
+        cid = campaign.id
+    finally:
+        db.close()
+    run_a = _run(
+        campaign_id=cid,
+        sidecar_path=str(sidecar_a),
+        timestamp=datetime(2026, 8, 1, tzinfo=UTC),
+    )
+    run_b = _run(
+        campaign_id=cid,
+        sidecar_path=str(sidecar_b),
+        timestamp=datetime(2026, 8, 21, tzinfo=UTC),
+    )
+    write_run(run_a, tmp_catalog)
+    write_run(run_b, tmp_catalog)
+    compact(tmp_catalog)
+    db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        rows = db.execute(
+            "SELECT seq_position FROM campaign_runs WHERE campaign_id = ?",
+            [cid],
+        ).fetchall()
+        assert len(rows) == 2
+        assert all(r[0] is None for r in rows)
+        thresh = db.execute(
+            "SELECT stopping_threshold FROM campaigns WHERE id = ?", [cid]
+        ).fetchone()[0]
+        assert thresh is None
+        with pytest.raises(CampaignError, match="stopping_threshold"):
+            link_cool_runs_to_campaigns(
+                db, [run_a, run_b], catalog_dir=tmp_catalog, campaign_id=cid
+            )
+    finally:
+        db.close()
+

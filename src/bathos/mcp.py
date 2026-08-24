@@ -1340,10 +1340,23 @@ def campaign_create_tool(
     cat_dir = _get_catalog_dir(catalog_dir or None)
     slug = project_slug or _get_project_slug()
 
-    import duckdb
+    from bathos.campaigns import connect_catalog_db, list_campaigns
+    from bathos.catalog import init_catalog
+    from bathos.compact import compact
 
-    db = duckdb.connect(str(cat_dir / "bathos.db"))
+    db = connect_catalog_db(cat_dir, read_only=False)
+    if db is None:
+        init_catalog(cat_dir)
+        compact(cat_dir)
+        db = connect_catalog_db(cat_dir, read_only=False)
+    if db is None:
+        return {"error": f"Catalog database not found at {cat_dir / 'bathos.db'}"}
     try:
+        existing = [
+            c
+            for c in list_campaigns(db, project_slug=slug, status="open", catalog_dir=cat_dir)
+            if c.name == name
+        ]
         campaign = create_campaign(
             db,
             name=name,
@@ -1353,13 +1366,19 @@ def campaign_create_tool(
             hypothesis=hypothesis or None,
             catalog_dir=cat_dir,
         )
-        return {
+        result = {
             "campaign_id": campaign.id,
             "name": campaign.name,
             "mode": campaign.mode,
             "status": campaign.status,
             "started_at": campaign.started_at,
         }
+        if existing:
+            ids = ", ".join(c.id[:8] for c in existing)
+            result["warning"] = (
+                f"{len(existing)} open campaign(s) named {name!r} already exist: {ids}"
+            )
+        return result
     finally:
         db.close()
 
@@ -1463,12 +1482,12 @@ def campaign_conclude_tool(
 
     cat_dir = _get_catalog_dir(catalog_dir or None)
 
-    import duckdb
-
-    from bathos.campaigns import prepare_catalog_for_conclude
+    from bathos.campaigns import CampaignError, connect_catalog_db, prepare_catalog_for_conclude
 
     prepare_catalog_for_conclude(cat_dir)
-    db = duckdb.connect(str(cat_dir / "bathos.db"))
+    db = connect_catalog_db(cat_dir, read_only=False)
+    if db is None:
+        return {"error": f"Catalog database not found at {cat_dir / 'bathos.db'}"}
     try:
         conclude_campaign(
             db,
@@ -1483,6 +1502,8 @@ def campaign_conclude_tool(
             "campaign_id": campaign_id,
             "outcome_label": outcome_label,
         }
+    except CampaignError as e:
+        return {"error": str(e)}
     finally:
         db.close()
 

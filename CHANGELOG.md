@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Cluster cool catalog without rsyncing `bathos.db`.** Campaigns live as cool JSON under
+  `{catalog}/campaigns/{uuid}.json`. Cluster jobs write `{remote_root}/.bth/catalog`. Conclude,
+  emit, and postmortem overlay cool JSON onto warm DuckDB after compact/prepare.
+
+### Fixed
+
+- MCP `campaign_create` uses `connect_catalog_db` (compacts if needed) and lists cool-tier open
+  campaigns for the duplicate-name warning.
+- MCP `campaign_conclude` returns `{"error": ...}` for `CampaignError` and a missing catalog
+  instead of raising.
+- `get_campaign` re-raises ambiguous ID prefixes; CLI prints `Error:` rather than "not found".
+- Claim readers (`load_registered_claim`, attest-parity) resolve paths through
+  `resolve_claim_path` so registered `../` paths cannot escape the workspace.
+- Sequential compact skips all `seq_position` writes for a campaign on sidecar threshold
+  mismatch (catalog-wide) instead of leaving a partial fill.
+
 ## [0.13.0a3] - 2026-08-20
 
 **Alpha pre-release.**
