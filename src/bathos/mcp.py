@@ -10,6 +10,7 @@ import dataclasses
 import functools
 import json
 import os
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -1269,8 +1270,12 @@ def run_tool(
     if tags is None:
         tags = []
 
-    # Construct argv: ['python', script_path, ...args]
-    argv = ["python", script_path] + args
+    # Construct argv: [<interpreter>, script_path, ...args]. Use THIS process's
+    # interpreter, not a bare "python": machines without an unprefixed `python`
+    # on PATH (python3-only systems) made Popen raise FileNotFoundError, which
+    # run_script swallowed into a bare exit_code=1. The interpreter running
+    # bathos is also the one guaranteed to satisfy BTH_RESULTS_PATH plumbing.
+    argv = [sys.executable, script_path] + args
 
     # Resolve parameters
     cat_dir = _get_catalog_dir(catalog_dir or None)

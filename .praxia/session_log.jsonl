@@ -61,3 +61,10 @@
 {"event":"end","session_id":"050a005b-1047-4534-9187-bd88241be128","ts":"2026-08-05T19:24:46Z"}
 {"event":"end","session_id":"022e9b19-2a7c-46f6-828f-a2da2e011bd6","ts":"2026-08-06T14:02:58Z"}
 {"event":"end","session_id":"022e9b19-2a7c-46f6-828f-a2da2e011bd6","ts":"2026-08-06T14:02:58Z"}
+{"event":"start","session_id":"b3052e55-403f-49c8-ba24-be27eddaea23","source":"startup","task_id":"unknown","ts":"2026-08-14T16:42:26Z"}
+{"event":"start","session_id":"b3052e55-403f-49c8-ba24-be27eddaea23","source":"startup","task_id":"unknown","ts":"2026-08-14T16:42:26Z"}
+{"event":"start","session_id":"8524a3cc-b907-4fd0-924e-85a2180d87cb","source":"startup","task_id":"unknown","ts":"2026-08-20T14:19:59Z"}
+{"event":"start","session_id":"8524a3cc-b907-4fd0-924e-85a2180d87cb","source":"startup","task_id":"unknown","ts":"2026-08-20T14:19:59Z"}
+{"event":"start","session_id":"303c5129-a291-45d4-b568-2f3328bf07ca","source":"startup","task_id":"unknown","ts":"2026-08-24T18:26:44Z"}
+{"event":"start","session_id":"303c5129-a291-45d4-b568-2f3328bf07ca","source":"startup","task_id":"unknown","ts":"2026-08-24T18:26:44Z"}
+{"event":"end","session_id":"a81cb85c-ca46-4cba-8c7d-2e8a2f21e93f","ts":"2026-08-24T18:54:51Z"}

@@ -610,3 +610,16 @@
 {"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-a1660cb9ba86b9dde","date":"2026-08-06"}
 {"agent_type":"Explore","verdict":"PASS","verdict_source":"regex","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-afb1f70269b84b484","date":"2026-08-06"}
 {"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-aebc794f59e917dbf","date":"2026-08-07"}
+{"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-a68c489f66a2649d1","date":"2026-08-13"}
+{"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-a68c489f66a2649d1","date":"2026-08-13"}
+{"event":"worktree_created","path":"/home/marielle/projects/bathos/.claude/worktrees/wt-20260813-162552","branch":"unknown","ts":"2026-08-13T16:25:52Z","telemetry_id":"worktree-create-81a40a4d","date":"2026-08-13"}
+{"event":"startup","session_id":"b3052e55-403f-49c8-ba24-be27eddaea23","ts":"2026-08-14T16:42:26Z","telemetry_id":"session-start-b3052e55-403f-49c8-ba24-be27eddaea23","date":"2026-08-14"}
+{"event":"worktree_created","path":"/home/marielle/projects/bathos/.claude/worktrees/wt-20260814-165931","branch":"unknown","ts":"2026-08-14T16:59:31Z","telemetry_id":"worktree-create-db0900de","date":"2026-08-14"}
+{"event":"startup","session_id":"8524a3cc-b907-4fd0-924e-85a2180d87cb","ts":"2026-08-20T14:19:59Z","telemetry_id":"session-start-8524a3cc-b907-4fd0-924e-85a2180d87cb","date":"2026-08-20"}
+{"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-afa104f11c399bdf7","date":"2026-08-20"}
+{"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-afa104f11c399bdf7","date":"2026-08-20"}
+{"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-a67389d8af59de940","date":"2026-08-20"}
+{"event":"worktree_created","path":"/home/marielle/projects/bathos/.claude/worktrees/wt-20260820-145822","branch":"unknown","ts":"2026-08-20T14:58:22Z","telemetry_id":"worktree-create-5fd856ff","date":"2026-08-20"}
+{"event":"worktree_created","path":"/home/marielle/projects/bathos/.claude/worktrees/wt-20260820-145942","branch":"unknown","ts":"2026-08-20T14:59:42Z","telemetry_id":"worktree-create-e916daed","date":"2026-08-20"}
+{"event":"startup","session_id":"303c5129-a291-45d4-b568-2f3328bf07ca","ts":"2026-08-24T18:26:44Z","telemetry_id":"session-start-303c5129-a291-45d4-b568-2f3328bf07ca","date":"2026-08-24"}
+{"event":"worktree_created","path":"/home/marielle/projects/bathos/.claude/worktrees/wt-20260824-182706","branch":"unknown","ts":"2026-08-24T18:27:06Z","telemetry_id":"worktree-create-e17b3a56","date":"2026-08-24"}

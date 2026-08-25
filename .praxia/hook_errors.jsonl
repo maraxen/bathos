@@ -21,3 +21,9 @@
 {"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-07-30T13:40:04Z"}
 {"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-07-30T14:04:23Z"}
 {"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-08-06T15:06:04Z"}
+{"hook":"worktree-create","error":"git worktree add failed for /home/marielle/projects/bathos/.claude/worktrees/wt-20260813-162552","ts":"2026-08-13T16:25:52Z"}
+{"hook":"worktree-create","error":"git worktree add failed for /home/marielle/projects/bathos/.claude/worktrees/wt-20260814-165931","ts":"2026-08-14T16:59:31Z"}
+{"hook":"worktree-create","error":"git worktree add failed for /home/marielle/projects/bathos/.claude/worktrees/wt-20260820-145822","ts":"2026-08-20T14:58:22Z"}
+{"hook":"worktree-create","error":"git worktree add failed for /home/marielle/projects/bathos/.claude/worktrees/wt-20260820-145822","ts":"2026-08-20T14:58:22Z"}
+{"hook":"worktree-create","error":"git worktree add failed for /home/marielle/projects/bathos/.claude/worktrees/wt-20260820-145942","ts":"2026-08-20T14:59:42Z"}
+{"hook":"worktree-create","error":"git worktree add failed for /home/marielle/projects/bathos/.claude/worktrees/wt-20260824-182706","ts":"2026-08-24T18:27:06Z"}

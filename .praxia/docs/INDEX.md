@@ -1,4 +1,4 @@
-# wt-20260824-182706 Internal Docs
+# bathos Internal Docs
 
 ## Daily
 - [260805_overnight-decisions](daily/260805_overnight-decisions.md) — Every decision made without a human gate during the overnight autonomous loop run, with enough context to backtrack

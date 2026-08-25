@@ -9,6 +9,13 @@ import pytest
 from typer.testing import CliRunner
 
 from bathos.cli import app
+from bathos.compact import _CAMPAIGNS_TABLE_SCHEMA
+
+# Canonical warm-tier campaigns DDL. The CLI's claim flow upserts cool-tier
+# campaign JSON (ingest_cool_campaigns) whose INSERT references the FULL
+# modern column list; hand-rolled stale schemas here caused Binder exceptions.
+# Always build the table from this DDL and use named columns in inserts so
+# future schema additions cannot silently break these tests again.
 
 runner = CliRunner()
 
@@ -36,12 +43,10 @@ def test_claim_scaffold_creates_file(claim_cli_env, tmp_path):
     catalog = claim_cli_env
     db_path = catalog / "bathos.db"
     con = duckdb.connect(str(db_path))
+    con.execute(_CAMPAIGNS_TABLE_SCHEMA)
     con.execute(
-        "CREATE TABLE campaigns (id VARCHAR, project_slug VARCHAR, name VARCHAR, "
-        "mode VARCHAR, status VARCHAR, started_at VARCHAR, hypothesis VARCHAR)"
-    )
-    con.execute(
-        "INSERT INTO campaigns VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
         [
             "camp-1",
             "testproj",
@@ -49,7 +54,6 @@ def test_claim_scaffold_creates_file(claim_cli_env, tmp_path):
             "confirmation",
             "open",
             datetime.now(UTC).isoformat(),
-            "test hypothesis",
         ],
     )
     con.close()
@@ -98,12 +102,10 @@ label = "Null"
 """)
     db_path = catalog / "bathos.db"
     con = duckdb.connect(str(db_path))
+    con.execute(_CAMPAIGNS_TABLE_SCHEMA)
     con.execute(
-        "CREATE TABLE campaigns (id VARCHAR, project_slug VARCHAR, name VARCHAR, "
-        "mode VARCHAR, status VARCHAR, started_at VARCHAR, claim_path VARCHAR, claim_sha256 VARCHAR)"
-    )
-    con.execute(
-        "INSERT INTO campaigns VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)",
+        "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
         ["camp-1", "testproj", "bind_test", "confirmation", "open", datetime.now(UTC).isoformat()],
     )
     con.close()
@@ -145,12 +147,10 @@ def _register_test_claim(tmp_path, catalog, campaign_id="camp-1"):
     )
     db_path = catalog / "bathos.db"
     con = duckdb.connect(str(db_path))
+    con.execute(_CAMPAIGNS_TABLE_SCHEMA)
     con.execute(
-        "CREATE TABLE campaigns (id VARCHAR, project_slug VARCHAR, name VARCHAR, "
-        "mode VARCHAR, status VARCHAR, started_at VARCHAR, claim_path VARCHAR, claim_sha256 VARCHAR)"
-    )
-    con.execute(
-        "INSERT INTO campaigns VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)",
+        "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
         [
             campaign_id,
             "testproj",

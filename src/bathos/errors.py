@@ -141,4 +141,8 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     "DirtyTreeError": BathosErrorCode.ARCHIVE_DIRTY_TREE,
     "ArtifactNotFoundError": BathosErrorCode.ARCHIVE_ITEM_NOT_FOUND,
     "BundleNotFoundError": BathosErrorCode.ARCHIVE_BUNDLE_NOT_FOUND,
+    # Cluster catalog identity mismatch (cluster_catalog.py): the local
+    # .bth/catalog disagrees with the remote root's catalog -- same
+    # integrity family as CatalogError.
+    "CatalogIdentityError": BathosErrorCode.CATALOG_ERROR,
 }

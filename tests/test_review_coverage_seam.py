@@ -176,6 +176,28 @@ def test_exploration_campaigns_are_untouched_by_the_gate(tmp_path):
     campaign = create_campaign(db, "c", "p", "exploration")
     register_claim(tmp_path / "claim.bth.toml", campaign.id, db, tmp_path)
     db.commit()
+    db.close()
+
+    # A registered claim requires non-empty campaign membership at conclude
+    # (campaigns.py empty-membership guard). Exploration mode accepts runs from
+    # before campaign creation, but write after close/reopen to match the
+    # warm-tier flow used by _campaign().
+    run = Run(
+        project_slug="p",
+        command="python s.py",
+        argv=["python", "s.py"],
+        git_hash="a",
+        git_branch="main",
+        git_dirty=False,
+        status="completed",
+        exit_code=0,
+    )
+    write_run(run, catalog_dir)
+    compact(catalog_dir)
+
+    db = duckdb.connect(str(catalog_dir / "bathos.db"))
+    add_run_to_campaign(db, campaign.id, run.id)
+    db.commit()
 
     conclude_campaign(db, campaign.id, "pass", "note", workspace_root=tmp_path)
     assert _verdict(db, campaign.id) == "pass"
