@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Blast-radius assessment (Phase 1, backlog #4551).** `bth blast-radius assess
+  --commit <sha>|--commit-range <a..b>|--file <path>` answers "a bug was found/fixed here —
+  which past runs does it implicate?": a new `blast_radius_ledger` (mirrors
+  `trust_ledger`'s durable dual-write shape, composite-keyed on `(entity_type, entity_id)`
+  for Phase 2 forward-compat) records "affected"/"unverifiable" runs via a v1 file-path
+  heuristic + git ancestry check, reusing `check_runs()`'s DIRTY_RUN/UNKNOWN_CODE
+  classification for the unverifiable bucket. `bth blast-radius clear` manually clears a
+  flag (requires a reason, not attestation-gated in Phase 1). `bth query blast-status`
+  and matching MCP tools (`blast_radius_assess`, `blast_radius_clear`,
+  `get_blast_radius_status`) round out the surface. Campaign/claim-level propagation,
+  the dependency-version anchor, and both shadow-mode subsystems are Phase 2
+  (backlog #4552). Spec: `.praxia/docs/specs/260826_blast-radius-assessment-skill.md`.
 - **Cluster cool catalog without rsyncing `bathos.db`.** Campaigns live as cool JSON under
   `{catalog}/campaigns/{uuid}.json`. Cluster jobs write `{remote_root}/.bth/catalog`. Conclude,
   emit, and postmortem overlay cool JSON onto warm DuckDB after compact/prepare.
