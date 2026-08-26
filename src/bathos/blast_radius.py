@@ -21,6 +21,7 @@ vs. trust_ledger's PASS-attestation-gated ratchet.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
 import uuid
@@ -945,3 +946,58 @@ def propagate_to_claims(
         )
         records.append(append_ledger_record(record, catalog_dir))
     return records
+
+
+_FIX_LIKE_KEYWORD_PATTERN = re.compile(
+    r"\b(fix|fixes|fixed|bug|bugfix|hotfix|regression|patch)\b", re.IGNORECASE
+)
+
+
+def matches_fix_like_keywords(commit_message: str) -> bool:
+    """Shadow-trigger keyword filter (spec Decision Log #2, backlog #4555).
+
+    Hardcoded pattern, not configurable via .bth.toml yet -- the user's own
+    call: prove the trigger before building configurability.
+    """
+    return bool(_FIX_LIKE_KEYWORD_PATTERN.search(commit_message))
+
+
+def record_shadow_trigger(
+    catalog_dir: Path | str, project_root: Path | str, commit: str
+) -> BlastRadiusRecord | None:
+    """SAC-6/SAC-7: run a shadow-only assessment for `commit` and log a single
+    entity_type="shadow_trigger" record.
+
+    NEVER calls flag_blast_radius or either propagate_to_* function -- this
+    can never durably affect a real run/campaign/claim's state (spec Decision
+    Log #7). `to_state="shadow_only"` is a 4th state value distinct from
+    affected/unverifiable/cleared, and `entity_id` is the commit sha rather
+    than a run/campaign id, so this is a fully separate namespace within the
+    same blast_radius_ledger table (proven collision-free by Phase 1's own
+    test_composite_key_does_not_cross_entity_types).
+
+    Returns the appended record, or None if assess_blast_radius raised
+    ValueError (e.g. `commit` has no parent -- the very first commit in a
+    repo) -- a shadow trigger failing quietly is acceptable (spec pre-mortem:
+    "a detached background process's own errors are invisible to the user at
+    commit time by design").
+    """
+    try:
+        report = assess_blast_radius(catalog_dir, project_root, commit=commit)
+    except ValueError:
+        return None
+
+    all_matches = list(report.affected) + list(report.unverifiable)
+    record = BlastRadiusRecord(
+        entity_type="shadow_trigger",
+        entity_id=commit,
+        to_state="shadow_only",
+        anchor_kind=report.anchor_kind,
+        anchor_value=report.anchor_value,
+        matched_files=json.dumps(sorted({f for m in all_matches for f in m.matched_files})),
+        match_reason=(
+            f"{len(report.affected)} affected, {len(report.unverifiable)} unverifiable "
+            f"run(s) would have been flagged: {[m.run_id for m in all_matches]}"
+        ),
+    )
+    return append_ledger_record(record, catalog_dir)
