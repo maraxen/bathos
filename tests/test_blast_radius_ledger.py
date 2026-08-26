@@ -195,3 +195,42 @@ class TestNewPhase2Columns:
             catalog_dir,
         )
         assert fold_blast_radius_state(catalog_dir, "claim", "camp-002") == "affected"
+
+    def test_read_only_conn_against_pre_migration_table_does_not_report_clean(
+        self, catalog_dir
+    ):
+        """Regression (third jury round, code-review lens, PR #54): a caller-
+        supplied READ-ONLY connection (fold_blast_radius_state_using_conn /
+        latest_ledger_record_using_conn -- used by campaigns.review_campaign()
+        when it already holds one open) can never run _connect()'s self-healing
+        ALTER TABLE, unlike the read-write path this test's sibling covers via
+        compact(). Selecting the full column list against a genuinely
+        un-migrated table used to raise duckdb.BinderException, which the
+        _using_conn variants caught as duckdb.Error and reported as "no
+        record" -> "clean" -- a silent false negative for a campaign that
+        actually IS affected. Confirmed via direct reproduction before the fix
+        (a legacy-column fallback in _fetch_latest_record)."""
+        import duckdb
+
+        from bathos.blast_radius import fold_blast_radius_state_using_conn
+
+        con = duckdb.connect(str(catalog_dir / "bathos.db"))
+        con.execute("""
+            CREATE TABLE blast_radius_ledger (
+                id TEXT PRIMARY KEY, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL,
+                from_state TEXT, to_state TEXT NOT NULL, anchor_kind TEXT, anchor_value TEXT,
+                matched_files TEXT, match_reason TEXT, reason TEXT, amended_at TEXT NOT NULL
+            )
+        """)
+        con.execute(
+            "INSERT INTO blast_radius_ledger VALUES "
+            "('id1', 'campaign', 'camp-legacy', NULL, 'affected', 'commit', 'abc', "
+            "'[]', 'reason text', '', '2026-01-01T00:00:00')"
+        )
+        con.close()
+
+        ro = duckdb.connect(str(catalog_dir / "bathos.db"), read_only=True)
+        try:
+            assert fold_blast_radius_state_using_conn(ro, "campaign", "camp-legacy") == "affected"
+        finally:
+            ro.close()

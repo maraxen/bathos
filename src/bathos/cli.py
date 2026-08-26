@@ -1320,9 +1320,6 @@ esac
 """
 
 
-_SHADOW_HOOK_SCRIPT = _build_shadow_hook_script()
-
-
 @blast_app.command("install-hook")
 def blast_radius_install_hook_cmd():
     """Install the post-commit shadow-trigger hook (SAC-1/2, backlog #4555).
@@ -1333,9 +1330,18 @@ def blast_radius_install_hook_cmd():
     from bathos.git_hooks import install_managed_hooks
     from bathos.workspace import resolve_workspace
 
+    # Built here, not at module scope: _build_shadow_hook_script() imports
+    # bathos.blast_radius (duckdb/pyarrow at module level) -- every other
+    # blast_radius import in this file is already lazy, scoped to the one
+    # command body that needs it (lines below, and blast_radius_shadow_check_cmd/
+    # query_shadow_log). A module-level constant would force that import cost
+    # onto every `bth` invocation, not just this command (confirmed, PR #54
+    # third jury round, code-review lens).
+    _shadow_hook_script = _build_shadow_hook_script()
+
     ws_root = resolve_workspace().fs_root
     managed = ws_root / ".bth" / "hooks"
-    install_managed_hooks(ws_root, managed, {"post-commit": _SHADOW_HOOK_SCRIPT})
+    install_managed_hooks(ws_root, managed, {"post-commit": _shadow_hook_script})
     typer.echo(f"Installed shadow-trigger hook at {managed}")
 
 

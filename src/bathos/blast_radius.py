@@ -268,32 +268,64 @@ def append_ledger_record(
     return record
 
 
+_LEDGER_RECORD_COLUMNS = (
+    "id", "entity_type", "entity_id", "from_state", "to_state", "anchor_kind",
+    "anchor_value", "matched_files", "matched_clauses", "shadow_verdict",
+    "match_reason", "reason", "amended_at",
+)
+# Phase-1-era blast_radius_ledger tables predate matched_clauses/shadow_verdict
+# (added Phase 2a, AC-8/AC-10). _connect() self-heals this via `ALTER TABLE ADD
+# COLUMN IF NOT EXISTS` on every read-write connection -- but a caller-supplied
+# READ-ONLY connection (see *_using_conn below) can never run that ALTER, so
+# selecting the full column list against an un-migrated table raises
+# duckdb.BinderException. Falling back to this legacy column set (rather than
+# treating the BinderException as "no record" -> "clean") is load-bearing: a
+# genuinely affected/unverifiable record in an un-migrated table must never be
+# silently reported as clean, which would defeat the entire point of this
+# ledger. Confirmed via direct reproduction: without this fallback,
+# fold_blast_radius_state_using_conn() on such a table returned "clean" for a
+# campaign with a real to_state="affected" record.
+_LEDGER_RECORD_COLUMNS_LEGACY = tuple(
+    c for c in _LEDGER_RECORD_COLUMNS if c not in ("matched_clauses", "shadow_verdict")
+)
+
+
+def _row_to_record(columns: tuple[str, ...], row: tuple) -> BlastRadiusRecord:
+    values = dict(zip(columns, row))
+    return BlastRadiusRecord(
+        id=values["id"],
+        entity_type=values["entity_type"],
+        entity_id=values["entity_id"],
+        from_state=values["from_state"],
+        to_state=values["to_state"],
+        anchor_kind=values["anchor_kind"],
+        anchor_value=values["anchor_value"],
+        matched_files=values["matched_files"],
+        matched_clauses=values.get("matched_clauses"),
+        shadow_verdict=values.get("shadow_verdict"),
+        match_reason=values["match_reason"],
+        reason=values["reason"],
+        amended_at=values["amended_at"],
+    )
+
+
 def _fetch_latest_record(con, entity_type: str, entity_id: str) -> BlastRadiusRecord | None:
-    row = con.execute(
-        "SELECT id, entity_type, entity_id, from_state, to_state, anchor_kind, "
-        "anchor_value, matched_files, matched_clauses, shadow_verdict, match_reason, "
-        "reason, amended_at "
-        "FROM blast_radius_ledger WHERE entity_type = ? AND entity_id = ? "
-        "ORDER BY amended_at DESC LIMIT 1",
-        [entity_type, entity_id],
-    ).fetchone()
+    def _query(columns: tuple[str, ...]):
+        return con.execute(
+            f"SELECT {', '.join(columns)} FROM blast_radius_ledger "
+            "WHERE entity_type = ? AND entity_id = ? ORDER BY amended_at DESC LIMIT 1",
+            [entity_type, entity_id],
+        ).fetchone()
+
+    try:
+        row = _query(_LEDGER_RECORD_COLUMNS)
+        columns = _LEDGER_RECORD_COLUMNS
+    except duckdb.BinderException:
+        row = _query(_LEDGER_RECORD_COLUMNS_LEGACY)
+        columns = _LEDGER_RECORD_COLUMNS_LEGACY
     if row is None:
         return None
-    return BlastRadiusRecord(
-        id=row[0],
-        entity_type=row[1],
-        entity_id=row[2],
-        from_state=row[3],
-        to_state=row[4],
-        anchor_kind=row[5],
-        anchor_value=row[6],
-        matched_files=row[7],
-        matched_clauses=row[8],
-        shadow_verdict=row[9],
-        match_reason=row[10],
-        reason=row[11],
-        amended_at=row[12],
-    )
+    return _row_to_record(columns, row)
 
 
 def latest_ledger_record(
