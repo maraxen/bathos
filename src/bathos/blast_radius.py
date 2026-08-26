@@ -32,7 +32,7 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from bathos.checker import check_runs
+from bathos.checker import check_dependency_lock_drift, check_runs, hash_dependency_lock
 from bathos.query import list_runs
 from bathos.schema import Run
 from bathos.telemetry import event
@@ -324,6 +324,7 @@ class BlastRadiusMatch:
     command: str
     matched_files: list[str]
     reason: str
+    campaign_id: str = ""  # "" = run has no campaign; needed for AC-7/AC-8 propagation
 
 
 @dataclass(frozen=True)
@@ -452,14 +453,16 @@ def assess_blast_radius(
     commit: str | None = None,
     commit_range: str | None = None,
     files: list[str] | None = None,
+    dependency: bool = False,
     project: str | None = None,
 ) -> BlastRadiusReport:
-    """Assess which catalogued runs a bug/fix implicates (AC-1, AC-2, AC-4, AC-5).
+    """Assess which catalogued runs a bug/fix implicates (AC-1, AC-2, AC-3, AC-4, AC-5).
 
-    Exactly one of `commit`, `commit_range`, or `files` must be given -- these are
-    the three anchor types (spec Decision Log #1). This function is a pure read: it
-    does not write to the ledger. Callers pass the returned report to
-    flag_blast_radius() to durably record it (AC-11: report-then-flag ordering).
+    Exactly one of `commit`, `commit_range`, `files`, or `dependency=True` must be
+    given -- these are the four anchor types (spec Decision Log #1). This function
+    is a pure read: it does not write to the ledger. Callers pass the returned
+    report to flag_blast_radius() to durably record it (AC-11: report-then-flag
+    ordering).
 
     Args:
         catalog_dir: Path to the bathos catalog root.
@@ -474,6 +477,15 @@ def assess_blast_radius(
         files: Explicit file/symbol path(s) (AC-2). No ancestry check is applied --
             there is no commit boundary to compare against, so any run touching
             these files is "affected" regardless of when it ran.
+        dependency: If True (AC-3), assess for dependency-lock drift instead of a
+            file/commit anchor. Not file-based -- reuses
+            bathos.checker.check_dependency_lock_drift/hash_dependency_lock as-is
+            (backlog #4552 constraint: whole-lockfile hash comparison only, no
+            per-package diffing). A run with no recorded dependency_lock_sha256
+            (predates that field) goes to "unverifiable", NOT "unaffected" --
+            deliberately not reusing check_dependency_lock_drift's own
+            fail-open-on-missing-hash default, which is right for its own
+            freshness-scan purpose but would be a silent false negative here.
         project: Optional project_slug filter. bathos's catalog is shared across
             multiple projects (a run in project B whose command happens to
             substring-match a changed filename in project A would otherwise be
@@ -488,21 +500,27 @@ def assess_blast_radius(
         a valid, non-error result) -- only raises ValueError for a malformed anchor
         argument combination.
     """
-    n_anchors = sum(x is not None for x in (commit, commit_range, files))
+    n_anchors = sum(x is not None for x in (commit, commit_range, files)) + int(dependency)
     if n_anchors != 1:
         raise ValueError(
-            "assess_blast_radius requires exactly one of commit, commit_range, or files "
-            f"(got {n_anchors})"
+            "assess_blast_radius requires exactly one of commit, commit_range, files, "
+            f"or dependency=True (got {n_anchors})"
         )
 
     project_root = Path(project_root)
-    #: None only for the file anchor (no commit boundary to check ancestry against);
-    #: set for both commit and commit_range. This one variable is the sole ancestry
-    #: switch -- a separate `use_ancestry` bool used to shadow it, redundant since it
-    #: was always exactly `boundary is not None` (code-review finding, PR #54).
+    #: None only for the file and dependency anchors (no commit boundary to check
+    #: ancestry against); set for both commit and commit_range. This one variable is
+    #: the sole ancestry switch -- a separate `use_ancestry` bool used to shadow it,
+    #: redundant since it was always exactly `boundary is not None` (code-review
+    #: finding, PR #54).
     boundary: str | None = None
 
-    if commit is not None:
+    if dependency:
+        anchor_kind = "dependency"
+        current_lock_hash = hash_dependency_lock(project_root)
+        anchor_value = current_lock_hash or "no-uv.lock-present"
+        changed_files: list[str] = []  # not file-based; per-run loop special-cases this anchor
+    elif commit is not None:
         anchor_kind, anchor_value = "commit", commit
         changed_files = _git_diff_name_only(f"{commit}^", commit, project_root)
         boundary = f"{commit}^"
@@ -543,6 +561,40 @@ def assess_blast_radius(
     unaffected_run_ids: list[str] = []
 
     for run in all_runs:
+        if anchor_kind == "dependency":
+            if not run.dependency_lock_sha256:
+                unverifiable.append(
+                    BlastRadiusMatch(
+                        run_id=run.id,
+                        git_hash=run.git_hash,
+                        command=run.command,
+                        campaign_id=run.campaign_id,
+                        matched_files=[],
+                        reason=(
+                            "no recorded dependency_lock_sha256 -- predates that "
+                            "field or was never captured; cannot verify"
+                        ),
+                    )
+                )
+                continue
+            if check_dependency_lock_drift(run.dependency_lock_sha256, project_root):
+                affected.append(
+                    BlastRadiusMatch(
+                        run_id=run.id,
+                        git_hash=run.git_hash,
+                        command=run.command,
+                        campaign_id=run.campaign_id,
+                        matched_files=[],
+                        reason=(
+                            f"dependency_lock_sha256 {run.dependency_lock_sha256[:9]} "
+                            "drifted from current uv.lock"
+                        ),
+                    )
+                )
+            else:
+                unaffected_run_ids.append(run.id)
+            continue
+
         matched_files = _run_touches_files(run, changed_files)
         if not matched_files:
             unaffected_run_ids.append(run.id)
@@ -556,6 +608,7 @@ def assess_blast_radius(
                     run_id=run.id,
                     git_hash=run.git_hash,
                     command=run.command,
+                    campaign_id=run.campaign_id,
                     matched_files=matched_files,
                     reason=(
                         f"touches {matched_files} but git status is {status} -- "
@@ -571,6 +624,7 @@ def assess_blast_radius(
                     run_id=run.id,
                     git_hash=run.git_hash,
                     command=run.command,
+                    campaign_id=run.campaign_id,
                     matched_files=matched_files,
                     reason=(
                         f"touches {matched_files} (file anchor -- no commit "
@@ -586,6 +640,7 @@ def assess_blast_radius(
                     run_id=run.id,
                     git_hash=run.git_hash,
                     command=run.command,
+                    campaign_id=run.campaign_id,
                     matched_files=matched_files,
                     reason=(
                         f"touches {matched_files}; git_hash {run.git_hash[:9]} "

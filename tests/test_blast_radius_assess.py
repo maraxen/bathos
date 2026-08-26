@@ -14,6 +14,7 @@ import pytest
 
 from bathos.blast_radius import assess_blast_radius
 from bathos.catalog import init_catalog, write_run
+from bathos.checker import hash_dependency_lock
 from bathos.schema import Run
 
 
@@ -285,3 +286,68 @@ class TestFlagInjectionGuard:
     def test_commit_range_with_flag_like_tip_is_rejected(self, repo, catalog_dir):
         with pytest.raises(ValueError, match="flag"):
             assess_blast_radius(catalog_dir, repo, commit_range="abc123..--evil")
+
+
+class TestDependencyAnchor:
+    """AC-3 (Phase 2a, #4552): dependency-version anchor. Not file-based --
+    reuses check_dependency_lock_drift/hash_dependency_lock as-is."""
+
+    def test_run_with_drifted_lock_is_affected(self, repo, catalog_dir):
+        (repo / "uv.lock").write_text("old-lock-content\n")
+        old_hash = hash_dependency_lock(repo)
+
+        run = Run(
+            project_slug="proj",
+            command="scripts/experiments/foo.py",
+            argv=["scripts/experiments/foo.py"],
+            git_hash="def456",
+            git_branch="main",
+            git_dirty=False,
+            dependency_lock_sha256=old_hash,
+        )
+        write_run(run, catalog_dir)
+
+        (repo / "uv.lock").write_text("new-lock-content\n")  # lock changes
+
+        report = assess_blast_radius(catalog_dir, repo, dependency=True)
+
+        assert report.anchor_kind == "dependency"
+        affected_ids = [m.run_id for m in report.affected]
+        assert run.id in affected_ids
+
+    def test_run_with_no_recorded_lock_hash_is_unverifiable(self, repo, catalog_dir):
+        (repo / "uv.lock").write_text("content\n")
+        run = _run(
+            catalog_dir,
+            command="scripts/experiments/foo.py",
+            argv=["scripts/experiments/foo.py"],
+            git_hash="abc123",
+        )  # dependency_lock_sha256 defaults to None
+
+        report = assess_blast_radius(catalog_dir, repo, dependency=True)
+
+        assert run.id not in [m.run_id for m in report.affected]
+        assert run.id in [m.run_id for m in report.unverifiable]
+
+    def test_run_with_matching_lock_hash_is_unaffected(self, repo, catalog_dir):
+        (repo / "uv.lock").write_text("stable-content\n")
+        current_hash = hash_dependency_lock(repo)
+
+        run = Run(
+            project_slug="proj",
+            command="scripts/experiments/foo.py",
+            argv=["scripts/experiments/foo.py"],
+            git_hash="abc123",
+            git_branch="main",
+            git_dirty=False,
+            dependency_lock_sha256=current_hash,
+        )
+        write_run(run, catalog_dir)
+
+        report = assess_blast_radius(catalog_dir, repo, dependency=True)
+
+        assert run.id in report.unaffected_run_ids
+
+    def test_requires_exactly_one_anchor_including_dependency(self, repo, catalog_dir):
+        with pytest.raises(ValueError):
+            assess_blast_radius(catalog_dir, repo, commit="abc", dependency=True)
