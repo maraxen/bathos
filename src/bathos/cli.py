@@ -61,6 +61,11 @@ provenance_app = typer.Typer(
 )
 app.add_typer(provenance_app, name="provenance")
 
+blast_app = typer.Typer(
+    help="Blast-radius assessment: which runs does a bug/fix implicate? (backlog #4551)"
+)
+app.add_typer(blast_app, name="blast-radius")
+
 
 def _catalog_dir() -> Path:
     override = os.environ.get("BTH_CATALOG_DIR")
@@ -1196,6 +1201,71 @@ def attestation_register_cmd(
         raise typer.Exit(1)
 
 
+@blast_app.command("assess")
+def blast_radius_assess_cmd(
+    commit: str | None = typer.Option(None, "--commit", help="Single fix commit SHA"),
+    commit_range: str | None = typer.Option(
+        None, "--commit-range", help="Commit range, e.g. abc123..def456"
+    ),
+    files: list[str] | None = typer.Option(
+        None, "--file", help="File/symbol path anchor (repeatable, no ancestry check)"
+    ),
+    no_flag: bool = typer.Option(
+        False, "--no-flag", help="Print the report only; do not write ledger records"
+    ),
+):
+    """Assess which runs a bug/fix implicates, then flag them (AC-1/2/4/5/6/11)."""
+    import dataclasses
+    import json as json_mod
+
+    from bathos.blast_radius import assess_blast_radius, flag_blast_radius
+    from bathos.workspace import resolve_workspace
+
+    ws_root = resolve_workspace().fs_root
+    try:
+        report = assess_blast_radius(
+            _catalog_dir(),
+            ws_root,
+            commit=commit,
+            commit_range=commit_range,
+            files=files or None,
+        )
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(json_mod.dumps(dataclasses.asdict(report), indent=2))
+
+    if no_flag:
+        return
+    records = flag_blast_radius(report, _catalog_dir())
+    typer.echo(f"\nFlagged {len(records)} run(s) in blast_radius_ledger.")
+
+
+@blast_app.command("clear")
+def blast_radius_clear_cmd(
+    entity_type: str = typer.Argument(..., help="'run', 'campaign', or 'claim'"),
+    entity_id: str = typer.Argument(..., help="Entity ID to clear"),
+    reason: str = typer.Option(
+        ..., "--reason", help="Required justification (manual re-attestation, AC-9)"
+    ),
+):
+    """Manually clear a blast-radius flag. Does not verify the reason -- records it
+    for audit (see clear_blast_radius_flag's docstring for the deliberate scope cut
+    vs. an attestation-gated ratchet)."""
+    import dataclasses
+    import json as json_mod
+
+    from bathos.blast_radius import clear_blast_radius_flag
+
+    try:
+        record = clear_blast_radius_flag(_catalog_dir(), entity_type, entity_id, reason=reason)
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+    typer.echo(json_mod.dumps(dataclasses.asdict(record), indent=2))
+
+
 @campaign_app.command("attest-parity")
 def campaign_attest_parity(
     campaign_id: str = typer.Argument(..., help="Campaign ID (or prefix)"),
@@ -1474,6 +1544,17 @@ def query_candidates(
 
     candidates = list_candidates(_catalog_dir(), campaign_id)
     typer.echo(json_mod.dumps(candidates, indent=2))
+
+
+@query_app.command("blast-status")
+def query_blast_status(
+    entity_type: str = typer.Argument(..., help="'run', 'campaign', or 'claim'"),
+    entity_id: str = typer.Argument(..., help="Entity ID to look up"),
+):
+    """Look up blast-radius status for an entity: clean/affected/unverifiable/cleared."""
+    from bathos.blast_radius import fold_blast_radius_state
+
+    typer.echo(fold_blast_radius_state(_catalog_dir(), entity_type, entity_id))
 
 
 @anchor_app.command("insert")
