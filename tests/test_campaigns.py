@@ -313,6 +313,38 @@ def test_review_campaign_computes_rates(populated_warm_catalog: Path):
         db.close()
 
 
+def test_review_campaign_surfaces_blast_radius_status(populated_warm_catalog: Path):
+    """AC-12 slice (Phase 2a, #4552): review_campaign surfaces informational,
+    non-gating blast-radius status when catalog_dir is passed. Defaults to
+    "clean" when nothing has been flagged (and, separately, when catalog_dir
+    is omitted -- covered by test_review_campaign_computes_rates continuing
+    to pass with no assertions on these new fields)."""
+    from bathos.blast_radius import BlastRadiusRecord, append_ledger_record
+
+    db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
+    try:
+        campaign = create_campaign(
+            db, name="BR Test", project_slug="prolix", mode="exploration"
+        )
+        runs = db.execute("SELECT id FROM runs WHERE project_slug = 'prolix'").fetchall()
+        for (run_id,) in runs:
+            add_run_to_campaign(db, campaign.id, run_id)
+
+        review = review_campaign(db, campaign.id, catalog_dir=populated_warm_catalog)
+        assert review["blast_radius_status"] == "clean"
+        assert review["claim_blast_radius_status"] == "clean"
+
+        append_ledger_record(
+            BlastRadiusRecord(entity_type="campaign", entity_id=campaign.id, to_state="affected"),
+            populated_warm_catalog,
+        )
+        review = review_campaign(db, campaign.id, catalog_dir=populated_warm_catalog)
+        assert review["blast_radius_status"] == "affected"
+        assert review["claim_blast_radius_status"] == "clean"  # unaffected, independent bucket
+    finally:
+        db.close()
+
+
 def test_compact_populates_campaign_runs(tmp_catalog: Path):
     """Test that compact() populates campaign_runs from runs with campaign_id."""
     init_catalog(tmp_catalog)

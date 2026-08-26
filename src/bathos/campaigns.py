@@ -1532,6 +1532,20 @@ def review_campaign(db, campaign_id: str, catalog_dir: Path | None = None) -> di
         if not scripts:
             popper_data["gap"] = "evalues_unavailable"
 
+    # AC-12 slice (Phase 2a, #4552): informational, non-gating blast-radius status.
+    # "clean" (the fold's own default for "no ledger record") is the correct value
+    # both when nothing has ever been flagged AND when this campaign has no
+    # registered claim at all -- propagate_to_claims only ever writes a claim-level
+    # record when a claim IS registered and implicated, so no special-casing is
+    # needed here for "does this campaign even have a claim".
+    blast_radius_status = "clean"
+    claim_blast_radius_status = "clean"
+    if catalog_dir is not None:
+        from bathos.blast_radius import fold_blast_radius_state
+
+        blast_radius_status = fold_blast_radius_state(catalog_dir, "campaign", campaign_id)
+        claim_blast_radius_status = fold_blast_radius_state(catalog_dir, "claim", campaign_id)
+
     return {
         "total_runs": total,
         "residual_rate": residual_rate,
@@ -1540,6 +1554,8 @@ def review_campaign(db, campaign_id: str, catalog_dir: Path | None = None) -> di
         "outcome_distribution": outcome_dist,
         "anomalies": anomalies,
         "popper": popper_data,
+        "blast_radius_status": blast_radius_status,
+        "claim_blast_radius_status": claim_blast_radius_status,
     }
 
 
