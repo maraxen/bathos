@@ -27,3 +27,23 @@
 {"hook":"worktree-create","error":"git worktree add failed for /home/marielle/projects/bathos/.claude/worktrees/wt-20260820-145822","ts":"2026-08-20T14:58:22Z"}
 {"hook":"worktree-create","error":"git worktree add failed for /home/marielle/projects/bathos/.claude/worktrees/wt-20260820-145942","ts":"2026-08-20T14:59:42Z"}
 {"hook":"worktree-create","error":"git worktree add failed for /home/marielle/projects/bathos/.claude/worktrees/wt-20260824-182706","ts":"2026-08-24T18:27:06Z"}
+{"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-08-26T19:29:34Z"}
+{"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-08-26T19:30:04Z"}
+{"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-08-26T19:31:12Z"}
+{"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-08-26T19:31:22Z"}
+{"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-08-26T19:31:35Z"}
+{"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-08-26T19:31:56Z"}
+{"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-08-26T19:32:04Z"}
+{"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-08-26T19:32:12Z"}
+{"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-08-26T19:35:29Z"}
+{"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-08-26T19:35:41Z"}
+{"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-08-26T19:35:47Z"}
+{"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-08-26T19:36:02Z"}
+{"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-08-26T19:36:03Z"}
+{"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-08-26T19:36:08Z"}
+{"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-08-26T19:36:10Z"}
+{"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-08-26T19:36:15Z"}
+{"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-08-26T19:36:19Z"}
+{"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-08-26T19:36:50Z"}
+{"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-08-26T19:37:12Z"}
+{"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-08-26T22:31:29Z"}

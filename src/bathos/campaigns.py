@@ -1541,10 +1541,25 @@ def review_campaign(db, campaign_id: str, catalog_dir: Path | None = None) -> di
     blast_radius_status = "clean"
     claim_blast_radius_status = "clean"
     if catalog_dir is not None:
-        from bathos.blast_radius import fold_blast_radius_state
+        # `db` (when not None) is a connection this function does not own -- it may
+        # be read-only (the real CLI/MCP `campaign review` path opens it that way).
+        # DuckDB refuses a second connection to the same file with a different
+        # config, so reuse `db` via the `_using_conn` variant rather than letting
+        # fold_blast_radius_state() open its own (confirmed crash via direct
+        # reproduction: duckdb.ConnectionException on any catalog with a compacted
+        # bathos.db, i.e. the normal case).
+        if db is not None:
+            from bathos.blast_radius import fold_blast_radius_state_using_conn
 
-        blast_radius_status = fold_blast_radius_state(catalog_dir, "campaign", campaign_id)
-        claim_blast_radius_status = fold_blast_radius_state(catalog_dir, "claim", campaign_id)
+            blast_radius_status = fold_blast_radius_state_using_conn(db, "campaign", campaign_id)
+            claim_blast_radius_status = fold_blast_radius_state_using_conn(
+                db, "claim", campaign_id
+            )
+        else:
+            from bathos.blast_radius import fold_blast_radius_state
+
+            blast_radius_status = fold_blast_radius_state(catalog_dir, "campaign", campaign_id)
+            claim_blast_radius_status = fold_blast_radius_state(catalog_dir, "claim", campaign_id)
 
     return {
         "total_runs": total,

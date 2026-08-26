@@ -345,6 +345,43 @@ def test_review_campaign_surfaces_blast_radius_status(populated_warm_catalog: Pa
         db.close()
 
 
+def test_review_campaign_works_with_read_only_connection(populated_warm_catalog: Path):
+    """Regression: the real CLI (`bth campaign review`) and MCP `campaign_review`
+    open `bathos.db` via `connect_catalog_db(cat, read_only=True)`, not the
+    plain read-write `duckdb.connect()` the other blast-radius tests use.
+    review_campaign() used to crash with duckdb.ConnectionException in that
+    case, because its AC-12 slice opened a SECOND, read-write connection to
+    the same file via fold_blast_radius_state() -- DuckDB refuses a second
+    connection to one file with a different config than an existing one.
+    Confirmed via direct reproduction before the fix (fold_blast_radius_state_using_conn)."""
+    from bathos.blast_radius import BlastRadiusRecord, append_ledger_record
+    from bathos.campaigns import connect_catalog_db
+
+    setup_db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
+    try:
+        campaign = create_campaign(
+            setup_db, name="RO Test", project_slug="prolix", mode="exploration"
+        )
+        runs = setup_db.execute("SELECT id FROM runs WHERE project_slug = 'prolix'").fetchall()
+        for (run_id,) in runs:
+            add_run_to_campaign(setup_db, campaign.id, run_id)
+        append_ledger_record(
+            BlastRadiusRecord(entity_type="campaign", entity_id=campaign.id, to_state="affected"),
+            populated_warm_catalog,
+        )
+    finally:
+        setup_db.close()
+
+    db = connect_catalog_db(populated_warm_catalog, read_only=True)
+    try:
+        review = review_campaign(db, campaign.id, catalog_dir=populated_warm_catalog)
+        assert "error" not in review
+        assert review["blast_radius_status"] == "affected"
+        assert review["claim_blast_radius_status"] == "clean"
+    finally:
+        db.close()
+
+
 def test_compact_populates_campaign_runs(tmp_catalog: Path):
     """Test that compact() populates campaign_runs from runs with campaign_id."""
     init_catalog(tmp_catalog)

@@ -268,6 +268,34 @@ def append_ledger_record(
     return record
 
 
+def _fetch_latest_record(con, entity_type: str, entity_id: str) -> BlastRadiusRecord | None:
+    row = con.execute(
+        "SELECT id, entity_type, entity_id, from_state, to_state, anchor_kind, "
+        "anchor_value, matched_files, matched_clauses, shadow_verdict, match_reason, "
+        "reason, amended_at "
+        "FROM blast_radius_ledger WHERE entity_type = ? AND entity_id = ? "
+        "ORDER BY amended_at DESC LIMIT 1",
+        [entity_type, entity_id],
+    ).fetchone()
+    if row is None:
+        return None
+    return BlastRadiusRecord(
+        id=row[0],
+        entity_type=row[1],
+        entity_id=row[2],
+        from_state=row[3],
+        to_state=row[4],
+        anchor_kind=row[5],
+        anchor_value=row[6],
+        matched_files=row[7],
+        matched_clauses=row[8],
+        shadow_verdict=row[9],
+        match_reason=row[10],
+        reason=row[11],
+        amended_at=row[12],
+    )
+
+
 def latest_ledger_record(
     catalog_dir: Path | str, entity_type: str, entity_id: str
 ) -> BlastRadiusRecord | None:
@@ -275,33 +303,30 @@ def latest_ledger_record(
     or `None` if no record exists."""
     con = _connect(catalog_dir)
     try:
-        row = con.execute(
-            "SELECT id, entity_type, entity_id, from_state, to_state, anchor_kind, "
-            "anchor_value, matched_files, matched_clauses, shadow_verdict, match_reason, "
-            "reason, amended_at "
-            "FROM blast_radius_ledger WHERE entity_type = ? AND entity_id = ? "
-            "ORDER BY amended_at DESC LIMIT 1",
-            [entity_type, entity_id],
-        ).fetchone()
-        if row is None:
-            return None
-        return BlastRadiusRecord(
-            id=row[0],
-            entity_type=row[1],
-            entity_id=row[2],
-            from_state=row[3],
-            to_state=row[4],
-            anchor_kind=row[5],
-            anchor_value=row[6],
-            matched_files=row[7],
-            matched_clauses=row[8],
-            shadow_verdict=row[9],
-            match_reason=row[10],
-            reason=row[11],
-            amended_at=row[12],
-        )
+        return _fetch_latest_record(con, entity_type, entity_id)
     finally:
         con.close()
+
+
+def latest_ledger_record_using_conn(
+    con, entity_type: str, entity_id: str
+) -> BlastRadiusRecord | None:
+    """Like `latest_ledger_record`, but queries an EXISTING connection instead of
+    opening a new one. DuckDB refuses a second connection to the same database
+    file with a different config (e.g. read-only vs read-write) than one
+    already open -- callers that already hold an open connection to the same
+    `bathos.db` (e.g. `campaigns.review_campaign`, opened read-only by the CLI/
+    MCP `campaign review` path) MUST use this instead of `latest_ledger_record`,
+    which would crash with `duckdb.ConnectionException` in that situation
+    (confirmed via direct reproduction). Best-effort: a read-only connection
+    can't run this module's own migration ALTERs, so a pre-migration table
+    (missing `matched_clauses`/`shadow_verdict`) or a missing ledger table
+    entirely is treated as "no record" rather than raised.
+    """
+    try:
+        return _fetch_latest_record(con, entity_type, entity_id)
+    except duckdb.Error:
+        return None
 
 
 def fold_blast_radius_state(catalog_dir: Path | str, entity_type: str, entity_id: str) -> str:
@@ -313,6 +338,13 @@ def fold_blast_radius_state(catalog_dir: Path | str, entity_type: str, entity_id
     ratchet, so a plain default string is the right shape for callers).
     """
     latest = latest_ledger_record(catalog_dir, entity_type, entity_id)
+    return latest.to_state if latest is not None else "clean"
+
+
+def fold_blast_radius_state_using_conn(con, entity_type: str, entity_id: str) -> str:
+    """Like `fold_blast_radius_state`, but via `latest_ledger_record_using_conn` --
+    see that function's docstring for why this exists."""
+    latest = latest_ledger_record_using_conn(con, entity_type, entity_id)
     return latest.to_state if latest is not None else "clean"
 
 
@@ -948,9 +980,28 @@ def propagate_to_claims(
     return records
 
 
+# Single canonical keyword list (spec Decision Log #2, backlog #4555). The installed
+# post-commit hook's shell `case` pre-filter (cli.py's _SHADOW_HOOK_SCRIPT) is generated
+# FROM this same tuple rather than hardcoding its own copy -- a prior version duplicated
+# the list by hand in a shell glob, which silently drifted from this pattern (confirmed,
+# PR #54 second jury round: the shell glob did unanchored substring matching -- e.g.
+# "prefix"/"debug" -- while this word-boundary regex did not, and the shell filter alone
+# decided whether to run at all, making this function dead code in production).
+SHADOW_KEYWORDS = ("fix", "fixes", "fixed", "bug", "bugfix", "hotfix", "regression", "patch")
+
 _FIX_LIKE_KEYWORD_PATTERN = re.compile(
-    r"\b(fix|fixes|fixed|bug|bugfix|hotfix|regression|patch)\b", re.IGNORECASE
+    r"\b(" + "|".join(SHADOW_KEYWORDS) + r")\b", re.IGNORECASE
 )
+
+
+def identify_fix_like_keyword(commit_message: str) -> str | None:
+    """Return the first canonical fix-like keyword found in `commit_message`
+    (lowercased), or None if none match. The authoritative keyword decision --
+    `record_shadow_trigger` uses this (not the shell's own coarser pre-filter)
+    to decide whether to run at all (SAC-5) and to capture which keyword
+    matched for display (SAC-8)."""
+    match = _FIX_LIKE_KEYWORD_PATTERN.search(commit_message)
+    return match.group(1).lower() if match else None
 
 
 def matches_fix_like_keywords(commit_message: str) -> bool:
@@ -959,14 +1010,33 @@ def matches_fix_like_keywords(commit_message: str) -> bool:
     Hardcoded pattern, not configurable via .bth.toml yet -- the user's own
     call: prove the trigger before building configurability.
     """
-    return bool(_FIX_LIKE_KEYWORD_PATTERN.search(commit_message))
+    return identify_fix_like_keyword(commit_message) is not None
+
+
+def _commit_message(commit: str, project_root: Path | str) -> str:
+    _reject_flag_like(commit)
+    result = subprocess.run(
+        ["git", "log", "-1", "--pretty=%B", commit],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise ValueError(f"git log -1 --pretty=%B {commit} failed: {result.stderr.strip()}")
+    return result.stdout
 
 
 def record_shadow_trigger(
     catalog_dir: Path | str, project_root: Path | str, commit: str
 ) -> BlastRadiusRecord | None:
-    """SAC-6/SAC-7: run a shadow-only assessment for `commit` and log a single
-    entity_type="shadow_trigger" record.
+    """SAC-5/SAC-6/SAC-7/SAC-8: run a shadow-only assessment for `commit` and log a
+    single entity_type="shadow_trigger" record -- but only if `commit`'s own message
+    matches the canonical keyword pattern (SAC-5: no assessment attempted at all,
+    not even in the background, for a non-matching commit). The installed hook's
+    shell pre-filter is a coarse, cheap gate to avoid spawning this command's
+    process at all for most commits; this function makes the real, authoritative
+    keyword decision and captures which keyword matched (SAC-8) regardless of what
+    the shell filter decided.
 
     NEVER calls flag_blast_radius or either propagate_to_* function -- this
     can never durably affect a real run/campaign/claim's state (spec Decision
@@ -976,12 +1046,21 @@ def record_shadow_trigger(
     same blast_radius_ledger table (proven collision-free by Phase 1's own
     test_composite_key_does_not_cross_entity_types).
 
-    Returns the appended record, or None if assess_blast_radius raised
-    ValueError (e.g. `commit` has no parent -- the very first commit in a
-    repo) -- a shadow trigger failing quietly is acceptable (spec pre-mortem:
-    "a detached background process's own errors are invisible to the user at
-    commit time by design").
+    Returns the appended record, or None if the commit message doesn't match
+    the keyword pattern, or if assess_blast_radius raised ValueError (e.g.
+    `commit` has no parent -- the very first commit in a repo) -- a shadow
+    trigger failing quietly is acceptable (spec pre-mortem: "a detached
+    background process's own errors are invisible to the user at commit time
+    by design").
     """
+    try:
+        message = _commit_message(commit, project_root)
+    except ValueError:
+        return None
+    keyword = identify_fix_like_keyword(message)
+    if keyword is None:
+        return None
+
     try:
         report = assess_blast_radius(catalog_dir, project_root, commit=commit)
     except ValueError:
@@ -996,8 +1075,9 @@ def record_shadow_trigger(
         anchor_value=report.anchor_value,
         matched_files=json.dumps(sorted({f for m in all_matches for f in m.matched_files})),
         match_reason=(
-            f"{len(report.affected)} affected, {len(report.unverifiable)} unverifiable "
-            f"run(s) would have been flagged: {[m.run_id for m in all_matches]}"
+            f"keyword={keyword}; {len(report.affected)} affected, "
+            f"{len(report.unverifiable)} unverifiable run(s) would have been flagged: "
+            f"{[m.run_id for m in all_matches]}"
         ),
     )
     return append_ledger_record(record, catalog_dir)

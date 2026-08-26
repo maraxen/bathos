@@ -110,6 +110,55 @@ class TestPreservesExistingCoreHooksPath:
         assert _get_hooks_path(repo) == str(managed)
 
 
+class TestChainSourcePathShellInjection:
+    """Regression for a confirmed shell-injection vulnerability: the chain line
+    used to interpolate the pre-existing hook's path into a DOUBLE-quoted `sh`
+    string, and double quotes do NOT suppress `$(...)` command substitution --
+    a `core.hooksPath` (or default `.git/hooks`) directory containing shell
+    metacharacters in its name executed arbitrary shell code on the next real
+    `git commit` that fired the chained hook. Confirmed via direct
+    reproduction before the fix (`_shell_quote` in git_hooks.py)."""
+
+    def test_hooks_path_with_command_substitution_does_not_execute(self, repo, tmp_path):
+        # Directory names cannot contain "/", so the injected payload targets a
+        # relative filename -- it lands in the hook's CWD (the repo root) if it
+        # ever executes, which is exactly what must never happen.
+        payload_marker = repo / "pwned.txt"
+        evil_dir = tmp_path / "$(touch pwned.txt)"
+        evil_dir.mkdir()
+        original_marker = tmp_path / "original_ran.txt"
+        original = evil_dir / "post-commit"
+        original.write_text(f"#!/bin/sh\ntouch {original_marker}\n")
+        original.chmod(0o755)
+        _git(["config", "core.hooksPath", str(evil_dir)], repo)
+
+        managed = tmp_path / "managed"
+        install_managed_hooks(repo, managed, {"post-commit": "#!/bin/sh\nexit 0\n"})
+        (repo / "f.txt").write_text("x")
+        _git(["add", "f.txt"], repo)
+        _git(["commit", "-m", "test"], repo)
+
+        assert not payload_marker.exists(), "injected command must never execute"
+        assert original_marker.exists(), "the original (safely-quoted) hook must still chain"
+
+    def test_hooks_path_with_backtick_and_quote_does_not_execute(self, repo, tmp_path):
+        payload_marker = repo / "pwned2.txt"
+        evil_dir = tmp_path / 'weird`touch pwned2.txt`"dir'
+        evil_dir.mkdir()
+        original = evil_dir / "post-commit"
+        original.write_text("#!/bin/sh\nexit 0\n")
+        original.chmod(0o755)
+        _git(["config", "core.hooksPath", str(evil_dir)], repo)
+
+        managed = tmp_path / "managed"
+        install_managed_hooks(repo, managed, {"post-commit": "#!/bin/sh\nexit 0\n"})
+        (repo / "f.txt").write_text("x")
+        _git(["add", "f.txt"], repo)
+        _git(["commit", "-m", "test"], repo)
+
+        assert not payload_marker.exists(), "injected command must never execute"
+
+
 class TestUninstall:
     def test_restores_unset_hooks_path(self, repo, tmp_path):
         managed = tmp_path / "managed"

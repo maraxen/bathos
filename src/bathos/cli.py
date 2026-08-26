@@ -1289,17 +1289,38 @@ def blast_radius_clear_cmd(
     typer.echo(json_mod.dumps(dataclasses.asdict(record), indent=2))
 
 
-_SHADOW_HOOK_SCRIPT = """#!/bin/sh
+def _build_shadow_hook_script() -> str:
+    """Generate the installed post-commit hook's script content.
+
+    The `case` branch below is a CHEAP, coarse pre-filter only, generated from
+    the exact same `SHADOW_KEYWORDS` tuple that
+    `bathos.blast_radius.identify_fix_like_keyword` uses -- a prior version
+    hand-duplicated a separate, unanchored-substring shell glob here, which
+    silently drifted from the word-boundary regex it was meant to mirror
+    (confirmed, PR #54 second jury round). Its only job is avoiding a `bth`
+    process spawn for commits obviously irrelevant; `record_shadow_trigger`
+    independently re-derives the commit message and makes the real,
+    authoritative keyword decision (SAC-5: no assessment ever runs for a
+    genuinely non-matching commit, regardless of what this coarser filter let
+    through) and captures which keyword matched (SAC-8).
+    """
+    from bathos.blast_radius import SHADOW_KEYWORDS
+
+    case_pattern = "|".join(f"*{kw}*" for kw in SHADOW_KEYWORDS)
+    return f"""#!/bin/sh
 # Installed by bathos (backlog #4555) -- do not edit directly, re-run
 # `bth blast-radius install-hook` to regenerate.
 sha="$(git rev-parse HEAD)"
-msg="$(git log -1 --pretty=%B HEAD)"
-case "$msg" in
-    *[Ff]ix*|*[Bb]ug*|*[Rr]egression*|*[Hh]otfix*|*[Pp]atch*)
+msg_lower="$(git log -1 --pretty=%B HEAD | tr '[:upper:]' '[:lower:]')"
+case "$msg_lower" in
+    {case_pattern})
         setsid nohup bth blast-radius shadow-check "$sha" >/dev/null 2>&1 &
         ;;
 esac
 """
+
+
+_SHADOW_HOOK_SCRIPT = _build_shadow_hook_script()
 
 
 @blast_app.command("install-hook")

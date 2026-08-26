@@ -35,6 +35,19 @@ _STATE_FILENAME = ".bathos_state.json"
 _SAMPLE_SUFFIX = ".sample"  # git ships *.sample hooks by default; never executable, skip
 
 
+def _shell_quote(value: str) -> str:
+    """POSIX single-quote a string for safe interpolation into a `sh` script.
+
+    `original` (a filesystem path) is attacker-influenced whenever
+    `core.hooksPath` points somewhere with shell metacharacters in its name --
+    e.g. a directory literally named `$(...)`. Without this, the chain line
+    embeds the path unescaped inside DOUBLE quotes, and double quotes do NOT
+    suppress `$(...)` command substitution, so such a path executes arbitrary
+    shell code on the next real `git commit` that fires the chained hook
+    (confirmed via direct reproduction)."""
+    return "'" + value.replace("'", "'\\''") + "'"
+
+
 def _get_explicit_hooks_path(repo_root: Path) -> str | None:
     """The raw `core.hooksPath` config value, or None if it was never explicitly
     set. Kept separate from the RESOLVED hooks directory (see
@@ -147,7 +160,10 @@ def install_managed_hooks(
         target = managed_dir / name
         original = chain_source_dir / name
         if original.exists() and name in preexisting_names:
-            content = f'#!/bin/sh\n"{original}" "$@" || true\n{_strip_shebang(script)}'
+            content = (
+                f"#!/bin/sh\n{_shell_quote(str(original))} \"$@\" || true\n"
+                f"{_strip_shebang(script)}"
+            )
         else:
             content = script
         target.write_text(content)
