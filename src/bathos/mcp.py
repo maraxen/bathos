@@ -587,9 +587,14 @@ def blast_radius_assess_tool(
     commit: str = "",
     commit_range: str = "",
     files: str = "",
+    project: str = "",
     flag: bool = True,
 ) -> dict:
     """Assess which runs a bug/fix implicates (backlog #4551; real).
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619) at the MCP
+    wrapper layer — see mcp_blast_radius_assess_tool. Gated because flag=True by
+    default performs a durable ledger write (security-audit finding, PR #54).
 
     Args:
         catalog_dir: Catalog directory (empty = use default).
@@ -597,6 +602,7 @@ def blast_radius_assess_tool(
         commit: Single fix commit SHA anchor.
         commit_range: "<base>..<tip>" range anchor.
         files: Comma-separated file/symbol path anchor (no ancestry check).
+        project: Optional project_slug filter (empty = whole catalog).
         flag: If True (default), also durably record affected/unverifiable runs
             in the blast_radius_ledger (AC-6). Exactly one of commit/commit_range/
             files must be non-empty.
@@ -625,6 +631,7 @@ def blast_radius_assess_tool(
             commit=commit or None,
             commit_range=commit_range or None,
             files=file_list,
+            project=project or None,
         )
     except ValueError as e:
         return {"error": str(e)}
@@ -1983,21 +1990,29 @@ async def mcp_graduate_product_tool(
 
 @cisternal.tool(registry="bathos", name="blast_radius_assess")
 @traced_tool
+@require_write_token
 async def mcp_blast_radius_assess_tool(
     catalog_dir: str = "",
     project_root: str = "",
     commit: str = "",
     commit_range: str = "",
     files: str = "",
+    project: str = "",
     flag: bool = True,
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
-    """Assess which runs a bug/fix implicates, optionally flagging them (backlog #4551)."""
+    """Assess which runs a bug/fix implicates, optionally flagging them (backlog #4551).
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619) — gated because
+    flag=True by default performs a durable ledger write (security-audit finding,
+    PR #54: this was previously the only mutating tool in this file without the gate)."""
     return blast_radius_assess_tool(
         catalog_dir=catalog_dir,
         project_root=project_root,
         commit=commit,
         commit_range=commit_range,
         files=files,
+        project=project,
         flag=flag,
     )
 

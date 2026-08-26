@@ -187,3 +187,91 @@ class TestInputValidation:
             assess_blast_radius(catalog_dir, repo)
         with pytest.raises(ValueError):
             assess_blast_radius(catalog_dir, repo, commit="abc", files=["x.py"])
+
+
+class TestManyRunsAreNotSilentlyTruncated:
+    """Regression (PR #54 review, independent cross-file-tracer finding):
+    list_runs()/check_runs() default to limit=50 with NO ORDER BY -- on a catalog
+    with more than 50 runs (the stated norm: a solo researcher's catalog spans
+    10+ projects over time), assess_blast_radius used to silently drop an
+    arbitrary subset instead of considering every run. A dropped run reads as
+    "not affected" with no indication anything was omitted -- exactly backwards
+    for a tool whose whole purpose is not missing affected runs."""
+
+    def test_every_run_is_accounted_for_past_the_old_default_limit(self, repo, catalog_dir):
+        pre_fix_sha = _commit_file(repo, "scripts/experiments/foo.py", "a = 1\n", "initial")
+        fix_sha = _commit_file(repo, "scripts/experiments/foo.py", "a = 2\n", "fix bug")
+
+        total_runs = 61  # comfortably past the old default limit=50
+        for i in range(total_runs):
+            _run(
+                catalog_dir,
+                command=f"scripts/experiments/filler_{i}.py",
+                argv=[f"scripts/experiments/filler_{i}.py"],
+                git_hash=pre_fix_sha,
+            )
+
+        report = assess_blast_radius(catalog_dir, repo, commit=fix_sha)
+
+        total_considered = (
+            len(report.affected) + len(report.unverifiable) + len(report.unaffected_run_ids)
+        )
+        assert total_considered == total_runs, (
+            f"expected all {total_runs} runs considered, got {total_considered} -- "
+            "list_runs()/check_runs() default limit=50 truncation regression"
+        )
+
+
+class TestProjectFilter:
+    """Regression (PR #54 review, independent cross-file-tracer finding):
+    assess_blast_radius previously scanned the whole shared catalog with no way
+    to scope to one project, unlike other multi-project-aware call sites
+    elsewhere in cli.py."""
+
+    def test_project_filter_excludes_other_projects(self, repo, catalog_dir):
+        pre_fix_sha = _commit_file(repo, "scripts/experiments/foo.py", "a = 1\n", "initial")
+        fix_sha = _commit_file(repo, "scripts/experiments/foo.py", "a = 2\n", "fix bug")
+
+        target = Run(
+            project_slug="project-a",
+            command="scripts/experiments/foo.py",
+            argv=["scripts/experiments/foo.py"],
+            git_hash=pre_fix_sha,
+            git_branch="main",
+            git_dirty=False,
+        )
+        write_run(target, catalog_dir)
+        other = Run(
+            project_slug="project-b",
+            command="scripts/experiments/foo.py",
+            argv=["scripts/experiments/foo.py"],
+            git_hash=pre_fix_sha,
+            git_branch="main",
+            git_dirty=False,
+        )
+        write_run(other, catalog_dir)
+
+        report = assess_blast_radius(catalog_dir, repo, commit=fix_sha, project="project-a")
+
+        affected_ids = [m.run_id for m in report.affected]
+        assert target.id in affected_ids
+        assert other.id not in affected_ids
+
+
+class TestFlagInjectionGuard:
+    """Regression (PR #54 security audit): a commit/commit_range value starting
+    with '-' must be refused before reaching git, not passed through as an
+    argv token git could parse as a flag (e.g. --output=<path>, which WRITES
+    the diff to an attacker-chosen path instead of comparing revisions)."""
+
+    def test_commit_starting_with_dash_is_rejected(self, repo, catalog_dir):
+        with pytest.raises(ValueError, match="flag"):
+            assess_blast_radius(catalog_dir, repo, commit="--upload-pack=/tmp/evil")
+
+    def test_commit_range_with_flag_like_whole_value_is_rejected(self, repo, catalog_dir):
+        with pytest.raises(ValueError, match="flag"):
+            assess_blast_radius(catalog_dir, repo, commit_range="--output=/tmp/pwned..x")
+
+    def test_commit_range_with_flag_like_tip_is_rejected(self, repo, catalog_dir):
+        with pytest.raises(ValueError, match="flag"):
+            assess_blast_radius(catalog_dir, repo, commit_range="abc123..--evil")

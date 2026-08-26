@@ -291,7 +291,28 @@ class BlastRadiusReport:
     unaffected_run_ids: list[str]
 
 
+def _reject_flag_like(value: str) -> None:
+    """Refuse a git revision argument that looks like a flag (starts with '-').
+
+    Argv-list subprocess calls (no shell=True, used throughout this module) are
+    already immune to shell injection, but git still parses a leading '-' as a
+    flag WITHIN a single argv token -- e.g. the single token "--output=/tmp/x" is
+    parsed as the --output flag regardless of surrounding context. A caller-
+    supplied commit/commit_range value that starts with '-' could smuggle an
+    arbitrary git flag (e.g. --output=<path>, which WRITES the diff to an
+    attacker-chosen path) instead of being treated as a revision. Security-audit
+    finding, PR #54.
+    """
+    if value.startswith("-"):
+        raise ValueError(
+            f"refusing to pass {value!r} to git: it starts with '-', which git "
+            "parses as a flag rather than a revision (flag-injection guard)"
+        )
+
+
 def _git_diff_name_only(a: str, b: str, project_root: Path) -> list[str]:
+    _reject_flag_like(a)
+    _reject_flag_like(b)
     result = subprocess.run(
         ["git", "diff", "--name-only", a, b],
         cwd=project_root,
@@ -304,6 +325,10 @@ def _git_diff_name_only(a: str, b: str, project_root: Path) -> list[str]:
 
 
 def _git_diff_name_only_range(commit_range: str, project_root: Path) -> list[str]:
+    _reject_flag_like(commit_range)
+    base, _, tip = commit_range.partition("..")
+    _reject_flag_like(base)
+    _reject_flag_like(tip.lstrip("."))  # tolerate a three-dot A...B range
     result = subprocess.run(
         ["git", "diff", "--name-only", commit_range],
         cwd=project_root,
@@ -319,9 +344,14 @@ def _is_ancestor(candidate_sha: str, boundary_sha: str, project_root: Path) -> b
     """True iff candidate_sha is boundary_sha or an ancestor of it.
 
     Fails closed (False) on any git error -- an unresolvable sha (e.g. run.git_hash
-    is a value git can't look up) must never be treated as "predates the fix".
+    is a value git can't look up) must never be treated as "predates the fix". A
+    flag-like sha (starts with '-') also fails closed here rather than raising --
+    this is a read-path classification helper, not a user-facing error site, and a
+    flag-like value can never legitimately be an ancestor (security-audit finding).
     """
     if not candidate_sha or candidate_sha in ("unknown", "nogit"):
+        return False
+    if candidate_sha.startswith("-") or boundary_sha.startswith("-"):
         return False
     result = subprocess.run(
         ["git", "merge-base", "--is-ancestor", candidate_sha, boundary_sha],
@@ -356,6 +386,17 @@ def _run_touches_files(run: Run, changed_files: list[str]) -> list[str]:
     return matched
 
 
+#: list_runs()/check_runs() require an int limit (no "unbounded" sentinel) and build
+#: their SQL with no ORDER BY, so the default limit=50 silently drops an ARBITRARY
+#: subset of runs on any catalog above 50 rows -- not "the 50 most recent". That is
+#: exactly the multi-project, many-run scale bathos is designed for (CLAUDE.md:
+#: "a single researcher across 10+ projects"), and for a tool whose entire purpose is
+#: "did I miss a run this bug affects", silent truncation is a false-negative machine,
+#: worse than the heuristic-noise false-positive risk the spec's pre-mortem already
+#: accepted. Pass this instead of the 50-row default. Found in PR #54 review.
+_UNBOUNDED_SCAN_LIMIT = 1_000_000
+
+
 def assess_blast_radius(
     catalog_dir: Path | str,
     project_root: Path | str,
@@ -363,6 +404,7 @@ def assess_blast_radius(
     commit: str | None = None,
     commit_range: str | None = None,
     files: list[str] | None = None,
+    project: str | None = None,
 ) -> BlastRadiusReport:
     """Assess which catalogued runs a bug/fix implicates (AC-1, AC-2, AC-4, AC-5).
 
@@ -384,6 +426,14 @@ def assess_blast_radius(
         files: Explicit file/symbol path(s) (AC-2). No ancestry check is applied --
             there is no commit boundary to compare against, so any run touching
             these files is "affected" regardless of when it ran.
+        project: Optional project_slug filter. bathos's catalog is shared across
+            multiple projects (a run in project B whose command happens to
+            substring-match a changed filename in project A would otherwise be
+            pulled into the match set); pass this to scope the scan to one
+            project. Default None scans the whole catalog, matching the tool's
+            other defaults -- cross-project matches remain possible but are of a
+            piece with the already-accepted heuristic-noise tradeoff (auditable
+            via AC-13's match_reason, not silently wrong the way truncation was).
 
     Returns:
         A BlastRadiusReport. Does not raise for "no runs matched" (empty buckets is
@@ -417,8 +467,13 @@ def assess_blast_radius(
         changed_files = list(files)
         use_ancestry = False
 
-    check_results = {r.run_id: r for r in check_runs(Path(catalog_dir), project_root)}
-    all_runs = list_runs(Path(catalog_dir))
+    check_results = {
+        r.run_id: r
+        for r in check_runs(
+            Path(catalog_dir), project_root, project=project, limit=_UNBOUNDED_SCAN_LIMIT
+        )
+    }
+    all_runs = list_runs(Path(catalog_dir), project=project, limit=_UNBOUNDED_SCAN_LIMIT)
 
     affected: list[BlastRadiusMatch] = []
     unverifiable: list[BlastRadiusMatch] = []

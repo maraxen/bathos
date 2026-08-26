@@ -1210,6 +1210,9 @@ def blast_radius_assess_cmd(
     files: list[str] | None = typer.Option(
         None, "--file", help="File/symbol path anchor (repeatable, no ancestry check)"
     ),
+    project: str | None = typer.Option(
+        None, "--project", help="Scope to one project_slug (default: whole catalog)"
+    ),
     no_flag: bool = typer.Option(
         False, "--no-flag", help="Print the report only; do not write ledger records"
     ),
@@ -1229,6 +1232,7 @@ def blast_radius_assess_cmd(
             commit=commit,
             commit_range=commit_range,
             files=files or None,
+            project=project,
         )
     except ValueError as e:
         typer.echo(f"Error: {e}", err=True)
