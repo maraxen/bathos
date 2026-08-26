@@ -116,3 +116,60 @@ class TestBlastRadiusClearCmd:
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
         assert data["to_state"] == "cleared"
+
+
+class TestBlastRadiusHookCmds:
+    """Backlog #4555 CLI surface: install-hook/uninstall-hook/shadow-check/shadow-log."""
+
+    def test_install_then_uninstall_hook(self, repo, monkeypatch):
+        monkeypatch.chdir(repo)
+        result = runner.invoke(app, ["blast-radius", "install-hook"])
+        assert result.exit_code == 0, result.output
+        assert (repo / ".bth" / "hooks" / "post-commit").exists()
+
+        result = runner.invoke(app, ["blast-radius", "uninstall-hook"])
+        assert result.exit_code == 0, result.output
+        assert not (repo / ".bth" / "hooks").exists()
+
+    def test_uninstall_without_install_errors(self, repo, monkeypatch):
+        monkeypatch.chdir(repo)
+        result = runner.invoke(app, ["blast-radius", "uninstall-hook"])
+        assert result.exit_code != 0
+
+    def test_shadow_check_records_and_shadow_log_lists_it(self, repo, catalog_dir, monkeypatch):
+        from bathos.blast_radius import fold_blast_radius_state
+
+        pre_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        run = Run(
+            project_slug="p", command="foo.py", argv=["foo.py"],
+            git_hash=pre_sha, git_branch="main", git_dirty=False,
+        )
+        write_run(run, catalog_dir)
+
+        (repo / "foo.py").write_text("a = 2\n")
+        _git(["add", "foo.py"], repo)
+        _git(["commit", "-m", "fix bug"], repo)
+        fix_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+        monkeypatch.chdir(repo)
+        monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
+        result = runner.invoke(app, ["blast-radius", "shadow-check", fix_sha])
+        assert result.exit_code == 0, result.output
+        assert fold_blast_radius_state(catalog_dir, "shadow_trigger", fix_sha) == "shadow_only"
+
+        log_result = runner.invoke(app, ["query", "shadow-log"])
+        assert log_result.exit_code == 0, log_result.output
+        assert fix_sha[:9] in log_result.output
+
+    def test_shadow_check_no_parent_commit_does_not_error(self, repo, catalog_dir, monkeypatch):
+        first_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        monkeypatch.chdir(repo)
+        monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
+        result = runner.invoke(app, ["blast-radius", "shadow-check", first_sha])
+        assert result.exit_code == 0, result.output

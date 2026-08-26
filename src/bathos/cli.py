@@ -1289,6 +1289,71 @@ def blast_radius_clear_cmd(
     typer.echo(json_mod.dumps(dataclasses.asdict(record), indent=2))
 
 
+_SHADOW_HOOK_SCRIPT = """#!/bin/sh
+# Installed by bathos (backlog #4555) -- do not edit directly, re-run
+# `bth blast-radius install-hook` to regenerate.
+sha="$(git rev-parse HEAD)"
+msg="$(git log -1 --pretty=%B HEAD)"
+case "$msg" in
+    *[Ff]ix*|*[Bb]ug*|*[Rr]egression*|*[Hh]otfix*|*[Pp]atch*)
+        nohup bth blast-radius shadow-check "$sha" >/dev/null 2>&1 &
+        ;;
+esac
+"""
+
+
+@blast_app.command("install-hook")
+def blast_radius_install_hook_cmd():
+    """Install the post-commit shadow-trigger hook (SAC-1/2, backlog #4555).
+
+    Preserves any pre-existing hooks (chains to post-commit if one existed,
+    symlinks every other hook name through unchanged) -- see
+    bathos.git_hooks.install_managed_hooks."""
+    from bathos.git_hooks import install_managed_hooks
+    from bathos.workspace import resolve_workspace
+
+    ws_root = resolve_workspace().fs_root
+    managed = ws_root / ".bth" / "hooks"
+    install_managed_hooks(ws_root, managed, {"post-commit": _SHADOW_HOOK_SCRIPT})
+    typer.echo(f"Installed shadow-trigger hook at {managed}")
+
+
+@blast_app.command("uninstall-hook")
+def blast_radius_uninstall_hook_cmd():
+    """Uninstall the shadow-trigger hook, restoring the prior core.hooksPath (SAC-3)."""
+    from bathos.git_hooks import uninstall_managed_hooks
+    from bathos.workspace import resolve_workspace
+
+    ws_root = resolve_workspace().fs_root
+    managed = ws_root / ".bth" / "hooks"
+    try:
+        uninstall_managed_hooks(ws_root, managed)
+    except FileNotFoundError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+    typer.echo("Uninstalled shadow-trigger hook")
+
+
+@blast_app.command("shadow-check")
+def blast_radius_shadow_check_cmd(
+    commit: str = typer.Argument(..., help="Commit SHA to shadow-assess"),
+):
+    """Run a shadow-only assessment for one commit (SAC-4/5/6/7, backlog #4555).
+
+    Called by the installed post-commit hook (detached, in the background);
+    safe to invoke directly for testing/debugging. Never durably affects a
+    real run/campaign/claim's state."""
+    from bathos.blast_radius import record_shadow_trigger
+    from bathos.workspace import resolve_workspace
+
+    ws_root = resolve_workspace().fs_root
+    record = record_shadow_trigger(_catalog_dir(), ws_root, commit)
+    if record is None:
+        typer.echo(f"No shadow trigger recorded for {commit} (e.g. no parent commit)")
+        return
+    typer.echo(f"Shadow-recorded {commit}: {record.match_reason}")
+
+
 @campaign_app.command("attest-parity")
 def campaign_attest_parity(
     campaign_id: str = typer.Argument(..., help="Campaign ID (or prefix)"),
@@ -1578,6 +1643,30 @@ def query_blast_status(
     from bathos.blast_radius import fold_blast_radius_state
 
     typer.echo(fold_blast_radius_state(_catalog_dir(), entity_type, entity_id))
+
+
+@query_app.command("shadow-log")
+def query_shadow_log(
+    limit: int = typer.Option(20, "--limit", help="Max records to show"),
+):
+    """List recent shadow-trigger firings for calibration review (SAC-8, backlog #4555)."""
+    import duckdb
+
+    cat_dir = _catalog_dir()
+    db_path = cat_dir / "bathos.db"
+    if not db_path.exists():
+        return
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        rows = con.execute(
+            "SELECT entity_id, match_reason, amended_at FROM blast_radius_ledger "
+            "WHERE entity_type = 'shadow_trigger' ORDER BY amended_at DESC LIMIT ?",
+            [limit],
+        ).fetchall()
+    finally:
+        con.close()
+    for commit, reason, amended_at in rows:
+        typer.echo(f"{amended_at}  {commit[:9]}  {reason}")
 
 
 @anchor_app.command("insert")
