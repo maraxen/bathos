@@ -101,6 +101,12 @@ class ResolvedPin:
     content_hash: str | None
     trust_state: str
     fresh: bool
+    live_content_hash: str | None = None
+    """The sha256 actually on disk right now (None if the file is missing/unreadable/
+    unhashed). Distinct from ``content_hash``, which is always the RECORDED hash from
+    the run's output_metadata. When ``fresh`` is False these two differ (or
+    ``live_content_hash`` is None because the file vanished) -- callers building a
+    not-fresh diagnostic must report both, not report ``content_hash`` twice."""
 
 
 def resolve_pin(catalog_dir: Path | str, run_id: str, output_path: str) -> ResolvedPin:
@@ -151,10 +157,12 @@ def resolve_pin(catalog_dir: Path | str, run_id: str, output_path: str) -> Resol
             content_hash=None,
             trust_state=get_trust_state(cat_dir, None),
             fresh=False,
+            live_content_hash=None,
         )
 
     current = _collect_output_metadata(output_path)
-    fresh = current.get("status") == "present" and current.get("sha256") == recorded_sha256
+    live_sha256 = current.get("sha256")
+    fresh = current.get("status") == "present" and live_sha256 == recorded_sha256
 
     return ResolvedPin(
         run_id=run_id,
@@ -162,6 +170,7 @@ def resolve_pin(catalog_dir: Path | str, run_id: str, output_path: str) -> Resol
         content_hash=recorded_sha256,
         trust_state=get_trust_state(cat_dir, recorded_sha256),
         fresh=fresh,
+        live_content_hash=live_sha256,
     )
 
 
