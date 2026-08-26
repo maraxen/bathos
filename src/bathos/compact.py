@@ -597,6 +597,17 @@ def _ingest_blast_radius_fragments(con: duckdb.DuckDBPyConnection, catalog_dir: 
         return 0
 
     con.execute(_BLAST_RADIUS_TABLE_SCHEMA)
+    # Phase 2a (#4552): matched_clauses/shadow_verdict were added after some catalogs may
+    # already have a Phase-1-era blast_radius_ledger table (CREATE TABLE IF NOT EXISTS above
+    # is a no-op against an existing table, so it won't add these) -- same additive
+    # ALTER TABLE ADD COLUMN IF NOT EXISTS pattern used for campaigns/campaign_runs elsewhere
+    # in this function.
+    for _alter_sql in [
+        "ALTER TABLE blast_radius_ledger ADD COLUMN IF NOT EXISTS matched_clauses TEXT",
+        "ALTER TABLE blast_radius_ledger ADD COLUMN IF NOT EXISTS shadow_verdict TEXT",
+    ]:
+        with contextlib.suppress(Exception):
+            con.execute(_alter_sql)
     ingested = 0
     for record in records:
         existing = con.execute(
@@ -607,8 +618,8 @@ def _ingest_blast_radius_fragments(con: duckdb.DuckDBPyConnection, catalog_dir: 
         con.execute(
             "INSERT INTO blast_radius_ledger "
             "(id, entity_type, entity_id, from_state, to_state, anchor_kind, anchor_value, "
-            "matched_files, match_reason, reason, amended_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "matched_files, matched_clauses, shadow_verdict, match_reason, reason, amended_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 record.id,
                 record.entity_type,
@@ -618,6 +629,8 @@ def _ingest_blast_radius_fragments(con: duckdb.DuckDBPyConnection, catalog_dir: 
                 record.anchor_kind,
                 record.anchor_value,
                 record.matched_files,
+                record.matched_clauses,
+                record.shadow_verdict,
                 record.match_reason,
                 record.reason,
                 record.amended_at,

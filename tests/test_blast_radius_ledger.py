@@ -143,3 +143,55 @@ class TestReadLedgerFragmentsRobustness:
         # Must not raise despite the corrupt fragment; the good record still reads.
         records = read_ledger_fragments(catalog_dir)
         assert any(r.entity_id == "run-006" for r in records)
+
+
+class TestNewPhase2Columns:
+    """Phase 2a (backlog #4552): matched_clauses/shadow_verdict columns, additive
+    on the same table -- proven forward-compatible by Phase 1's own
+    test_composite_key_does_not_cross_entity_types (entity_type="claim" was
+    always a legal value, just unused until now)."""
+
+    def test_matched_clauses_and_shadow_verdict_round_trip(self, catalog_dir):
+        record = BlastRadiusRecord(
+            entity_type="claim",
+            entity_id="camp-001",
+            to_state="affected",
+            matched_clauses='["clause-a", "clause-b"]',
+            shadow_verdict='{"kind": "output_sha_still_matches", "verdict": "clean"}',
+        )
+        append_ledger_record(record, catalog_dir)
+
+        latest = latest_ledger_record(catalog_dir, "claim", "camp-001")
+        assert latest is not None
+        assert latest.matched_clauses == '["clause-a", "clause-b"]'
+        assert latest.shadow_verdict == '{"kind": "output_sha_still_matches", "verdict": "clean"}'
+
+    def test_existing_warm_table_migrates_via_compact(self, catalog_dir):
+        """A blast_radius_ledger table created by Phase-1-era code (no
+        matched_clauses/shadow_verdict columns) must gain them via compact(),
+        the same ALTER TABLE ADD COLUMN IF NOT EXISTS pattern used elsewhere in
+        compact.py for campaigns/etc."""
+        import duckdb
+
+        con = duckdb.connect(str(catalog_dir / "bathos.db"))
+        con.execute("""
+            CREATE TABLE blast_radius_ledger (
+                id TEXT PRIMARY KEY, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL,
+                from_state TEXT, to_state TEXT NOT NULL, anchor_kind TEXT, anchor_value TEXT,
+                matched_files TEXT, match_reason TEXT, reason TEXT, amended_at TEXT NOT NULL
+            )
+        """)
+        con.close()
+
+        from bathos.compact import compact as compact_catalog
+
+        compact_catalog(catalog_dir)  # must not raise on the pre-existing short-column table
+
+        append_ledger_record(
+            BlastRadiusRecord(
+                entity_type="claim", entity_id="camp-002", to_state="affected",
+                matched_clauses='["x"]',
+            ),
+            catalog_dir,
+        )
+        assert fold_blast_radius_state(catalog_dir, "claim", "camp-002") == "affected"

@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS blast_radius_ledger (
     anchor_kind TEXT,
     anchor_value TEXT,
     matched_files TEXT,
+    matched_clauses TEXT,
+    shadow_verdict TEXT,
     match_reason TEXT,
     reason TEXT,
     amended_at TEXT NOT NULL
@@ -65,6 +67,8 @@ _LEDGER_FRAGMENT_SCHEMA = pa.schema(
         pa.field("anchor_kind", pa.string()),
         pa.field("anchor_value", pa.string()),
         pa.field("matched_files", pa.string()),
+        pa.field("matched_clauses", pa.string()),
+        pa.field("shadow_verdict", pa.string()),
         pa.field("match_reason", pa.string()),
         pa.field("reason", pa.string()),
         pa.field("amended_at", pa.string()),
@@ -88,6 +92,8 @@ class BlastRadiusRecord:
     anchor_kind: str | None = None  # "commit" | "commit_range" | "file"
     anchor_value: str | None = None
     matched_files: str | None = None  # JSON-encoded list[str]
+    matched_clauses: str | None = None  # JSON-encoded list[str], claim entity_type only (AC-8)
+    shadow_verdict: str | None = None  # JSON-encoded dict, never applied (AC-10)
     match_reason: str | None = None  # AC-13: why this entity matched
     reason: str | None = None  # free-form clearing justification (AC-9)
     amended_at: str = field(default_factory=_now_iso)
@@ -120,6 +126,8 @@ def write_ledger_fragment(record: BlastRadiusRecord, catalog_dir: Path | str) ->
             "anchor_kind": [record.anchor_kind],
             "anchor_value": [record.anchor_value],
             "matched_files": [record.matched_files],
+            "matched_clauses": [record.matched_clauses],
+            "shadow_verdict": [record.shadow_verdict],
             "match_reason": [record.match_reason],
             "reason": [record.reason],
             "amended_at": [record.amended_at],
@@ -181,6 +189,8 @@ def read_ledger_fragments(catalog_dir: Path | str) -> list[BlastRadiusRecord]:
                 anchor_kind=pydict["anchor_kind"][i],
                 anchor_value=pydict["anchor_value"][i],
                 matched_files=pydict["matched_files"][i],
+                matched_clauses=pydict["matched_clauses"][i],
+                shadow_verdict=pydict["shadow_verdict"][i],
                 match_reason=pydict["match_reason"][i],
                 reason=pydict["reason"][i],
                 amended_at=pydict["amended_at"][i],
@@ -192,6 +202,19 @@ def read_ledger_fragments(catalog_dir: Path | str) -> list[BlastRadiusRecord]:
 def _connect(catalog_dir: Path | str) -> duckdb.DuckDBPyConnection:
     con = duckdb.connect(str(Path(catalog_dir) / "bathos.db"))
     con.execute(_LEDGER_TABLE_SCHEMA)
+    # Phase 2a (#4552): CREATE TABLE IF NOT EXISTS above is a no-op against a table a
+    # Phase-1-era catalog already created without matched_clauses/shadow_verdict -- this
+    # ALTER must run on every direct connection (not just compact.py's ingest path, which
+    # only fires when there are cool-tier fragments to re-derive: an old table with zero
+    # fragments yet would otherwise never get migrated before the first Phase-2a INSERT).
+    import contextlib
+
+    for _alter_sql in (
+        "ALTER TABLE blast_radius_ledger ADD COLUMN IF NOT EXISTS matched_clauses TEXT",
+        "ALTER TABLE blast_radius_ledger ADD COLUMN IF NOT EXISTS shadow_verdict TEXT",
+    ):
+        with contextlib.suppress(Exception):
+            con.execute(_alter_sql)
     return con
 
 
@@ -206,8 +229,8 @@ def _insert_warm_row(record: BlastRadiusRecord, catalog_dir: Path | str) -> None
         con.execute(
             "INSERT INTO blast_radius_ledger "
             "(id, entity_type, entity_id, from_state, to_state, anchor_kind, anchor_value, "
-            "matched_files, match_reason, reason, amended_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "matched_files, matched_clauses, shadow_verdict, match_reason, reason, amended_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 record.id,
                 record.entity_type,
@@ -217,6 +240,8 @@ def _insert_warm_row(record: BlastRadiusRecord, catalog_dir: Path | str) -> None
                 record.anchor_kind,
                 record.anchor_value,
                 record.matched_files,
+                record.matched_clauses,
+                record.shadow_verdict,
                 record.match_reason,
                 record.reason,
                 record.amended_at,
@@ -251,7 +276,8 @@ def latest_ledger_record(
     try:
         row = con.execute(
             "SELECT id, entity_type, entity_id, from_state, to_state, anchor_kind, "
-            "anchor_value, matched_files, match_reason, reason, amended_at "
+            "anchor_value, matched_files, matched_clauses, shadow_verdict, match_reason, "
+            "reason, amended_at "
             "FROM blast_radius_ledger WHERE entity_type = ? AND entity_id = ? "
             "ORDER BY amended_at DESC LIMIT 1",
             [entity_type, entity_id],
@@ -267,9 +293,11 @@ def latest_ledger_record(
             anchor_kind=row[5],
             anchor_value=row[6],
             matched_files=row[7],
-            match_reason=row[8],
-            reason=row[9],
-            amended_at=row[10],
+            matched_clauses=row[8],
+            shadow_verdict=row[9],
+            match_reason=row[10],
+            reason=row[11],
+            amended_at=row[12],
         )
     finally:
         con.close()
