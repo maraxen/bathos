@@ -18,9 +18,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   classification for the unverifiable bucket. `bth blast-radius clear` manually clears a
   flag (requires a reason, not attestation-gated in Phase 1). `bth query blast-status`
   and matching MCP tools (`blast_radius_assess`, `blast_radius_clear`,
-  `get_blast_radius_status`) round out the surface. Campaign/claim-level propagation,
-  the dependency-version anchor, and both shadow-mode subsystems are Phase 2
-  (backlog #4552). Spec: `.praxia/docs/specs/260826_blast-radius-assessment-skill.md`.
+  `get_blast_radius_status`) round out the surface. Spec:
+  `.praxia/docs/specs/260826_blast-radius-assessment-skill.md`.
+- **Blast-radius Phase 2a: campaign/claim propagation, dependency anchor, shadow
+  auto-clear (backlog #4552).** `bth blast-radius assess --dependency` adds a 4th anchor
+  type (dependency-lock-drift, reusing `check_dependency_lock_drift`/`hash_dependency_lock`
+  as-is; a run with no recorded `dependency_lock_sha256` goes to "unverifiable", not a
+  silent "unaffected"). Every `assess` now also propagates to campaign-level
+  (`propagate_to_campaigns`, more-severe-state-wins across member runs) and claim-level
+  (`propagate_to_claims`, naming which union-gate clauses are backed by an affected run —
+  same covering-run matching `run_union_gate` uses) ledger records. A shadow auto-clear
+  verdict (`compute_shadow_auto_clear_verdict`, an output-SHA-drift proxy signal) is
+  computed and stored on every "affected" flag but never applied — pure observability
+  ahead of ever trusting it to act. `bth campaign review`'s output gains informational,
+  non-gating `blast_radius_status`/`claim_blast_radius_status` fields. The event/git-hook
+  shadow trigger is split out to backlog #4555 (needs its own OS-integration design pass).
 - **Cluster cool catalog without rsyncing `bathos.db`.** Campaigns live as cool JSON under
   `{catalog}/campaigns/{uuid}.json`. Cluster jobs write `{remote_root}/.bth/catalog`. Conclude,
   emit, and postmortem overlay cool JSON onto warm DuckDB after compact/prepare.
