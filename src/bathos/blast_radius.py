@@ -33,7 +33,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from bathos.checker import check_dependency_lock_drift, check_runs, hash_dependency_lock
-from bathos.query import list_runs
+from bathos.query import get_run, list_runs
 from bathos.schema import Run
 from bathos.telemetry import event
 
@@ -661,6 +661,38 @@ def assess_blast_radius(
     )
 
 
+def compute_shadow_auto_clear_verdict(run: Run) -> dict:
+    """AC-10: compute (never apply) an auto-clear signal for a flagged run.
+
+    There is no generic "re-run this script" capability in bathos, so the
+    shadow heuristic uses the cheapest REAL proxy already available: does every
+    catalogued output file's on-disk content still match its recorded sha256
+    (bathos.checker.check_output_sha_drift, the same AC-20 check `bth check
+    --check-outputs` uses)? "clean" is weak evidence the run's product hasn't
+    silently changed since flagging -- NOT evidence the flagged code issue
+    doesn't apply, which is why this is logged, never applied (spec Decision
+    Log #5: "best of both worlds... live test any auto-clear feature before it
+    actually would be used in production").
+
+    Returns a JSON-serializable dict: {"kind": "output_sha_still_matches",
+    "verdict": "clean" | "drifted" | "no_outputs_recorded", "checked_at": iso8601}.
+    """
+    from bathos.checker import check_output_sha_drift
+
+    results = check_output_sha_drift(run)
+    if not results:
+        verdict = "no_outputs_recorded"
+    elif any(r.status in ("DRIFT", "MISSING", "UNREADABLE") for r in results):
+        verdict = "drifted"
+    else:
+        verdict = "clean"
+    return {
+        "kind": "output_sha_still_matches",
+        "verdict": verdict,
+        "checked_at": _now_iso(),
+    }
+
+
 def flag_blast_radius(
     report: BlastRadiusReport, catalog_dir: Path | str
 ) -> list[BlastRadiusRecord]:
@@ -669,12 +701,39 @@ def flag_blast_radius(
     Pure write step -- callers MUST render/print `report` to the user BEFORE
     calling this (AC-11: report-then-flag ordering). This function does no
     printing itself; see `bth blast-radius assess`'s CLI command for the ordering.
+
+    For "affected" matches only (AC-10), also computes a shadow auto-clear
+    verdict (compute_shadow_auto_clear_verdict) and stores it on the SAME
+    record's shadow_verdict field -- purely observational, never applied:
+    `to_state` is exactly what the caller decided (affected/unverifiable),
+    regardless of what the shadow verdict says. "unverifiable" matches get no
+    shadow verdict -- a run bathos can't even trust the git state of has no
+    more meaningful an output-drift signal either.
     """
     records: list[BlastRadiusRecord] = []
     for match, to_state in [
         *((m, "affected") for m in report.affected),
         *((m, "unverifiable") for m in report.unverifiable),
     ]:
+        shadow_verdict_json = None
+        if to_state == "affected":
+            # Best-effort: the shadow verdict is purely observational (AC-10) and must
+            # never break the actual flagging write below. get_run() can raise here in
+            # a real, pre-existing cross-module scenario shared with trust_ledger.py:
+            # writing ANY ledger record creates bathos.db as a side effect of
+            # duckdb.connect() (see this module's own _connect()), and if that happens
+            # before bathos.compact.compact() has ever populated a `runs` table, a
+            # later get_run() sees bathos.db exists (query.py's _resolve_backend picks
+            # "warm") but finds no `runs` table there -- CatalogException, not a
+            # missing-run None. Caught here (backlog debt item filed for the deeper
+            # _resolve_backend assumption, not fixed in this module).
+            try:
+                run = get_run(match.run_id, Path(catalog_dir))
+            except duckdb.Error:
+                run = None
+            if run is not None:
+                shadow_verdict_json = json.dumps(compute_shadow_auto_clear_verdict(run))
+
         record = BlastRadiusRecord(
             entity_type="run",
             entity_id=match.run_id,
@@ -683,6 +742,7 @@ def flag_blast_radius(
             anchor_kind=report.anchor_kind,
             anchor_value=report.anchor_value,
             matched_files=json.dumps(match.matched_files),
+            shadow_verdict=shadow_verdict_json,
             match_reason=match.reason,
         )
         records.append(append_ledger_record(record, catalog_dir))
