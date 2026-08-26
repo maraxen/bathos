@@ -109,3 +109,37 @@ class TestSurvivesCompactForceRebuild:
         assert result is not None
 
         assert fold_blast_radius_state(catalog_dir, "run", "run-004") == "affected"
+
+
+class TestReadLedgerFragmentsRobustness:
+    """Regression (code-review finding, PR #54): a leftover .tmp.parquet file
+    (write_ledger_fragment interrupted between the tmp-write and the atomic
+    rename) must not be read as a real fragment, and a genuinely corrupt final
+    fragment must not crash the whole read (which bathos.compact.compact()
+    calls unconditionally for every project's data)."""
+
+    def test_leftover_tmp_fragment_is_ignored(self, catalog_dir):
+        append_ledger_record(
+            BlastRadiusRecord(entity_type="run", entity_id="run-005", to_state="affected"),
+            catalog_dir,
+        )
+        frag_dir = catalog_dir / "blast_radius"
+        (frag_dir / "blast_radius_deadbeef.tmp.parquet").write_bytes(b"not a real parquet file")
+
+        # Must not raise, and must not pick up the tmp file as a phantom record.
+        records = read_ledger_fragments(catalog_dir)
+        assert all(r.entity_id != "" for r in records)
+        assert len(records) == 1
+        assert records[0].entity_id == "run-005"
+
+    def test_corrupt_final_fragment_is_skipped_not_fatal(self, catalog_dir):
+        append_ledger_record(
+            BlastRadiusRecord(entity_type="run", entity_id="run-006", to_state="affected"),
+            catalog_dir,
+        )
+        frag_dir = catalog_dir / "blast_radius"
+        (frag_dir / "blast_radius_corrupt123.parquet").write_bytes(b"garbage, not parquet")
+
+        # Must not raise despite the corrupt fragment; the good record still reads.
+        records = read_ledger_fragments(catalog_dir)
+        assert any(r.entity_id == "run-006" for r in records)

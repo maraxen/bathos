@@ -161,6 +161,16 @@ class TestCommitRangeAnchor:
         with pytest.raises(ValueError):
             assess_blast_radius(catalog_dir, repo, commit_range="abc123")
 
+    def test_triple_dot_range_is_rejected(self, repo, catalog_dir):
+        """Regression (code-review finding, PR #54): a three-dot 'A...B' range is
+        symmetric-difference, not a guarantee that A is an ancestor of B --
+        `commit_range.split("..")[0]` would silently use A as the ancestry
+        boundary anyway if this weren't rejected, producing a wrong split."""
+        base_sha = _commit_file(repo, "scripts/experiments/foo.py", "a = 1\n", "base")
+        tip_sha = _commit_file(repo, "scripts/experiments/foo.py", "a = 2\n", "tip")
+        with pytest.raises(ValueError, match="two-dot"):
+            assess_blast_radius(catalog_dir, repo, commit_range=f"{base_sha}...{tip_sha}")
+
 
 class TestFileAnchor:
     def test_file_anchor_matches_without_ancestry_check(self, repo, catalog_dir):

@@ -136,15 +136,36 @@ def write_ledger_fragment(record: BlastRadiusRecord, catalog_dir: Path | str) ->
 
 
 def read_ledger_fragments(catalog_dir: Path | str) -> list[BlastRadiusRecord]:
-    """Read every cool-tier ledger fragment, unfolded (full history)."""
+    """Read every cool-tier ledger fragment, unfolded (full history).
+
+    Two robustness guards (code-review finding, PR #54): the glob excludes
+    `*.tmp.parquet` (write_ledger_fragment's own tmp-write-then-rename target),
+    which would otherwise match `blast_radius_*.parquet` and be read as a
+    fragment if a write was interrupted between the tmp-write and the atomic
+    rename. And a fragment that still fails to parse (e.g. corruption from a
+    non-atomic-rename edge case, or disk-level corruption) is skipped with a
+    telemetry event rather than raising -- one bad fragment must not crash
+    bathos.compact.compact() for the entire catalog (every project's data),
+    which is what an uncaught pq.read_table() exception here would do, since
+    this function is called from compact()'s unconditional ingest step.
+    """
     frag_dir = _ledger_fragments_dir(catalog_dir)
     if not frag_dir.exists():
         return []
-    parquet_files = list(frag_dir.glob("blast_radius_*.parquet"))
+    parquet_files = [
+        f for f in frag_dir.glob("blast_radius_*.parquet") if not f.name.endswith(".tmp.parquet")
+    ]
     if not parquet_files:
         return []
 
-    tables = [pq.read_table(f) for f in parquet_files]
+    tables = []
+    for f in parquet_files:
+        try:
+            tables.append(pq.read_table(f))
+        except Exception as exc:  # noqa: BLE001 — deliberately broad, see docstring
+            event("blast_radius.corrupt_fragment", path=str(f), error=str(exc))
+    if not tables:
+        return []
     combined = pa.concat_tables(tables, promote_options="permissive")
     pydict = combined.to_pydict()
 
@@ -375,12 +396,11 @@ def _run_touches_files(run: Run, changed_files: list[str]) -> list[str]:
             hay_norm = (hay or "").replace("\\", "/")
             if not hay_norm:
                 continue
-            if (
-                changed_norm in hay_norm
-                or hay_norm in changed_norm
-                or hay_norm.endswith(changed_norm)
-                or changed_norm.endswith(hay_norm)
-            ):
+            # Just the two `in` checks: `s.endswith(t)` implies `t in s`, so an
+            # endswith clause here could never independently flip the result --
+            # dropped per code-review finding (verified: exhaustive brute-force
+            # check found no case where the two endswith clauses mattered).
+            if changed_norm in hay_norm or hay_norm in changed_norm:
                 matched.append(changed)
                 break
     return matched
@@ -448,7 +468,10 @@ def assess_blast_radius(
         )
 
     project_root = Path(project_root)
-    use_ancestry = True
+    #: None only for the file anchor (no commit boundary to check ancestry against);
+    #: set for both commit and commit_range. This one variable is the sole ancestry
+    #: switch -- a separate `use_ancestry` bool used to shadow it, redundant since it
+    #: was always exactly `boundary is not None` (code-review finding, PR #54).
     boundary: str | None = None
 
     if commit is not None:
@@ -458,6 +481,19 @@ def assess_blast_radius(
     elif commit_range is not None:
         if ".." not in commit_range:
             raise ValueError(f"commit_range must contain '..', got {commit_range!r}")
+        if "..." in commit_range:
+            # git's three-dot "A...B" is symmetric-difference and does NOT guarantee
+            # A is an ancestor of B -- but `commit_range.split("..")[0]` below treats
+            # the base as exactly that ancestry boundary. Silently accepting a
+            # three-dot range would compute changed_files correctly (git handles it
+            # natively) while quietly using a boundary the range doesn't actually
+            # promise, producing a wrong affected/unaffected split with no warning
+            # (code-review finding, PR #54). This function only ever documented
+            # two-dot "<base>..<tip>" syntax; reject the ambiguous case explicitly.
+            raise ValueError(
+                f"commit_range must use two-dot '<base>..<tip>' syntax, not "
+                f"three-dot (symmetric-difference) syntax: got {commit_range!r}"
+            )
         anchor_kind, anchor_value = "commit_range", commit_range
         changed_files = _git_diff_name_only_range(commit_range, project_root)
         boundary = commit_range.split("..")[0]
@@ -465,7 +501,6 @@ def assess_blast_radius(
         assert files is not None  # guaranteed by the n_anchors == 1 check above
         anchor_kind, anchor_value = "file", ",".join(files)
         changed_files = list(files)
-        use_ancestry = False
 
     check_results = {
         r.run_id: r
@@ -502,7 +537,7 @@ def assess_blast_radius(
             )
             continue
 
-        if not use_ancestry:
+        if boundary is None:
             affected.append(
                 BlastRadiusMatch(
                     run_id=run.id,
@@ -517,7 +552,6 @@ def assess_blast_radius(
             )
             continue
 
-        assert boundary is not None  # set whenever use_ancestry is True
         if _is_ancestor(run.git_hash, boundary, project_root):
             affected.append(
                 BlastRadiusMatch(
