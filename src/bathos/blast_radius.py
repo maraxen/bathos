@@ -754,3 +754,115 @@ def propagate_to_campaigns(
         )
         records.append(append_ledger_record(record, catalog_dir))
     return records
+
+
+def _clauses_backed_by_runs(db: duckdb.DuckDBPyConnection, claim, run_ids: set[str]) -> list[str]:
+    """Union-gate clause IDs from `claim` backed by >=1 run in `run_ids`.
+
+    Same covering-run matching bathos.claim.run_union_gate uses (a run's
+    claim_discriminates JSON array must contain ALL of a clause's
+    hypothesis_ids), scoped to a specific run-id set instead of "any campaign
+    member". positive_control clauses are skipped -- they use a differential/
+    dependency-lock check (bathos.claim.differential_confound_check), not
+    discriminates matching, out of scope here.
+    """
+    implicated: list[str] = []
+    for clause in claim.union_gate_clauses:
+        if clause.get("positive_control") is True:
+            continue
+        hypothesis_ids = clause.get("hypothesis_ids", [])
+        clause_id = clause.get("id", "?")
+        for run_id in run_ids:
+            row = db.execute(
+                "SELECT claim_discriminates FROM runs WHERE id = ?", [run_id]
+            ).fetchone()
+            if not row or not row[0]:
+                continue
+            try:
+                disc_list = json.loads(row[0])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(disc_list, list) and all(h in disc_list for h in hypothesis_ids):
+                implicated.append(clause_id)
+                break
+    return implicated
+
+
+def propagate_to_claims(
+    report: BlastRadiusReport,
+    catalog_dir: Path | str,
+    *,
+    workspace_root: Path | str | None = None,
+) -> list[BlastRadiusRecord]:
+    """AC-8: derive and record claim-level flags naming implicated union-gate
+    clauses, for any campaign with a registered claim and >=1 affected/
+    unverifiable run backing one of its clauses.
+
+    Claim-level records key on campaign_id (entity_type="claim") -- claims are
+    always accessed via their owning campaign_id in this codebase (there is no
+    separate claim_id), consistent with bathos.claim.load_registered_claim's
+    own resolution path. Silently skips (no record, no error) a campaign with
+    no registered claim, an unreadable/moved claim file, or a SHA mismatch --
+    this is read-only propagation, not a validation gate (spec Decision Log
+    #3: no gating in Phase 1/2a).
+    """
+    from bathos.campaigns import CampaignError, connect_catalog_db
+    from bathos.claim import load_registered_claim
+
+    by_campaign: dict[str, set[str]] = {}
+    for m in report.affected:
+        if m.campaign_id:
+            by_campaign.setdefault(m.campaign_id, set()).add(m.run_id)
+    for m in report.unverifiable:
+        if m.campaign_id:
+            by_campaign.setdefault(m.campaign_id, set()).add(m.run_id)
+
+    if not by_campaign:
+        return []
+
+    db = connect_catalog_db(Path(catalog_dir), read_only=True)
+    if db is None:
+        return []  # no warm tier at all -- claims only resolve from the warm `campaigns` table
+
+    # Read phase (campaigns db held open) and write phase (blast_radius_ledger db,
+    # via fold_blast_radius_state/append_ledger_record) are kept strictly separate:
+    # DuckDB refuses a second connection to the SAME bathos.db file with a different
+    # read_only configuration while the first is still open, and fold_blast_radius_state
+    # opens its own read-write connection internally -- calling it while `db` (read-only)
+    # is still open raised "Connection Error: Can't open a connection to same database
+    # file with a different configuration than existing connections" (caught by this
+    # module's own tests).
+    to_write: list[tuple[str, list[str]]] = []
+    try:
+        for campaign_id, run_ids in by_campaign.items():
+            try:
+                claim = load_registered_claim(
+                    db,
+                    campaign_id,
+                    workspace_root=Path(workspace_root) if workspace_root else None,
+                )
+            except (CampaignError, FileNotFoundError, ValueError):
+                continue
+            if claim is None:
+                continue
+            implicated = _clauses_backed_by_runs(db, claim, run_ids)
+            if not implicated:
+                continue
+            to_write.append((campaign_id, implicated))
+    finally:
+        db.close()
+
+    records: list[BlastRadiusRecord] = []
+    for campaign_id, implicated in to_write:
+        record = BlastRadiusRecord(
+            entity_type="claim",
+            entity_id=campaign_id,
+            to_state="affected",
+            from_state=fold_blast_radius_state(catalog_dir, "claim", campaign_id),
+            anchor_kind=report.anchor_kind,
+            anchor_value=report.anchor_value,
+            matched_clauses=json.dumps(sorted(implicated)),
+            match_reason=f"union-gate clause(s) {sorted(implicated)} backed by an affected run",
+        )
+        records.append(append_ledger_record(record, catalog_dir))
+    return records
