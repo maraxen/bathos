@@ -1296,7 +1296,7 @@ sha="$(git rev-parse HEAD)"
 msg="$(git log -1 --pretty=%B HEAD)"
 case "$msg" in
     *[Ff]ix*|*[Bb]ug*|*[Rr]egression*|*[Hh]otfix*|*[Pp]atch*)
-        nohup bth blast-radius shadow-check "$sha" >/dev/null 2>&1 &
+        setsid nohup bth blast-radius shadow-check "$sha" >/dev/null 2>&1 &
         ;;
 esac
 """
