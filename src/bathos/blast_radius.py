@@ -716,3 +716,41 @@ def clear_blast_radius_flag(
         reason=reason,
     )
     return append_ledger_record(record, catalog_dir)
+
+
+def propagate_to_campaigns(
+    report: BlastRadiusReport, catalog_dir: Path | str
+) -> list[BlastRadiusRecord]:
+    """AC-7: derive and record campaign-level flags from a run-level report.
+
+    Groups affected/unverifiable matches by `match.campaign_id` (populated by
+    assess_blast_radius from each run's own campaign_id field -- reads existing
+    linkage, no new tracking). A campaign gets "affected" if ANY member match is
+    affected, else "unverifiable" if any member match is unverifiable (more
+    severe state wins). Matches with no campaign_id (campaign_id == "") are
+    skipped -- nothing to propagate to.
+    """
+    by_campaign: dict[str, list[tuple[BlastRadiusMatch, str]]] = {}
+    for m in report.affected:
+        if m.campaign_id:
+            by_campaign.setdefault(m.campaign_id, []).append((m, "affected"))
+    for m in report.unverifiable:
+        if m.campaign_id:
+            by_campaign.setdefault(m.campaign_id, []).append((m, "unverifiable"))
+
+    records: list[BlastRadiusRecord] = []
+    for campaign_id, entries in by_campaign.items():
+        to_state = "affected" if any(s == "affected" for _, s in entries) else "unverifiable"
+        matched_files = sorted({f for m, _ in entries for f in m.matched_files})
+        record = BlastRadiusRecord(
+            entity_type="campaign",
+            entity_id=campaign_id,
+            to_state=to_state,
+            from_state=fold_blast_radius_state(catalog_dir, "campaign", campaign_id),
+            anchor_kind=report.anchor_kind,
+            anchor_value=report.anchor_value,
+            matched_files=json.dumps(matched_files),
+            match_reason=f"{len(entries)} member run(s) implicated",
+        )
+        records.append(append_ledger_record(record, catalog_dir))
+    return records
