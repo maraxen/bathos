@@ -579,6 +579,67 @@ def _ingest_ledger_fragments(con: duckdb.DuckDBPyConnection, catalog_dir: Path) 
     return ingested
 
 
+def _ingest_blast_radius_fragments(con: duckdb.DuckDBPyConnection, catalog_dir: Path) -> int:
+    """Re-derive the warm `blast_radius_ledger` table from cool-tier fragments.
+
+    Backlog #4551. Mirrors :func:`_ingest_ledger_fragments` exactly, adapted for
+    the blast-radius ledger's composite (entity_type, entity_id) key instead of
+    content_hash -- same append-only, skip-if-present-by-own-id semantics.
+
+    No-op if `<catalog_dir>/blast_radius/` does not exist. Returns the number of
+    fragment records ingested (post skip-if-present).
+    """
+    from bathos.blast_radius import _LEDGER_TABLE_SCHEMA as _BLAST_RADIUS_TABLE_SCHEMA
+    from bathos.blast_radius import read_ledger_fragments as read_blast_radius_fragments
+
+    records = read_blast_radius_fragments(catalog_dir)
+    if not records:
+        return 0
+
+    con.execute(_BLAST_RADIUS_TABLE_SCHEMA)
+    # Phase 2a (#4552): matched_clauses/shadow_verdict were added after some catalogs may
+    # already have a Phase-1-era blast_radius_ledger table (CREATE TABLE IF NOT EXISTS above
+    # is a no-op against an existing table, so it won't add these) -- same additive
+    # ALTER TABLE ADD COLUMN IF NOT EXISTS pattern used for campaigns/campaign_runs elsewhere
+    # in this function.
+    for _alter_sql in [
+        "ALTER TABLE blast_radius_ledger ADD COLUMN IF NOT EXISTS matched_clauses TEXT",
+        "ALTER TABLE blast_radius_ledger ADD COLUMN IF NOT EXISTS shadow_verdict TEXT",
+    ]:
+        with contextlib.suppress(Exception):
+            con.execute(_alter_sql)
+    ingested = 0
+    for record in records:
+        existing = con.execute(
+            "SELECT id FROM blast_radius_ledger WHERE id = ?", [record.id]
+        ).fetchone()
+        if existing:
+            continue
+        con.execute(
+            "INSERT INTO blast_radius_ledger "
+            "(id, entity_type, entity_id, from_state, to_state, anchor_kind, anchor_value, "
+            "matched_files, matched_clauses, shadow_verdict, match_reason, reason, amended_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                record.id,
+                record.entity_type,
+                record.entity_id,
+                record.from_state,
+                record.to_state,
+                record.anchor_kind,
+                record.anchor_value,
+                record.matched_files,
+                record.matched_clauses,
+                record.shadow_verdict,
+                record.match_reason,
+                record.reason,
+                record.amended_at,
+            ],
+        )
+        ingested += 1
+    return ingested
+
+
 def _ingest_archived_item_fragments(con: duckdb.DuckDBPyConnection, catalog_dir: Path) -> int:
     """Re-derive the warm ``archived_items`` table from cool-tier fragments.
 
@@ -856,6 +917,11 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
         # same pattern as anchors above. Unconditional, cheap no-op if no ledger/
         # fragments exist, fires on force_rebuild too.
         _ingest_ledger_fragments(con, catalog_dir)
+
+        # Backlog #4551: re-derive blast_radius_ledger from cool-tier fragments,
+        # same pattern as trust_ledger above. Unconditional, cheap no-op if no
+        # blast_radius/ fragments exist, fires on force_rebuild too.
+        _ingest_blast_radius_fragments(con, catalog_dir)
 
         # Artifact archival: re-derive archived_items from cool-tier fragments, same
         # pattern as trust_ledger above. Unconditional, cheap no-op if no

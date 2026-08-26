@@ -9,6 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Blast-radius assessment (Phase 1, backlog #4551).** `bth blast-radius assess
+  --commit <sha>|--commit-range <a..b>|--file <path>` answers "a bug was found/fixed here —
+  which past runs does it implicate?": a new `blast_radius_ledger` (mirrors
+  `trust_ledger`'s durable dual-write shape, composite-keyed on `(entity_type, entity_id)`
+  for Phase 2 forward-compat) records "affected"/"unverifiable" runs via a v1 file-path
+  heuristic + git ancestry check, reusing `check_runs()`'s DIRTY_RUN/UNKNOWN_CODE
+  classification for the unverifiable bucket. `bth blast-radius clear` manually clears a
+  flag (requires a reason, not attestation-gated in Phase 1). `bth query blast-status`
+  and matching MCP tools (`blast_radius_assess`, `blast_radius_clear`,
+  `get_blast_radius_status`) round out the surface. Spec:
+  `.praxia/docs/specs/260826_blast-radius-assessment-skill.md`.
+- **Blast-radius Phase 2a: campaign/claim propagation, dependency anchor, shadow
+  auto-clear (backlog #4552).** `bth blast-radius assess --dependency` adds a 4th anchor
+  type (dependency-lock-drift, reusing `check_dependency_lock_drift`/`hash_dependency_lock`
+  as-is; a run with no recorded `dependency_lock_sha256` goes to "unverifiable", not a
+  silent "unaffected"). Every `assess` now also propagates to campaign-level
+  (`propagate_to_campaigns`, more-severe-state-wins across member runs) and claim-level
+  (`propagate_to_claims`, naming which union-gate clauses are backed by an affected run —
+  same covering-run matching `run_union_gate` uses) ledger records. A shadow auto-clear
+  verdict (`compute_shadow_auto_clear_verdict`, an output-SHA-drift proxy signal) is
+  computed and stored on every "affected" flag but never applied — pure observability
+  ahead of ever trusting it to act. `bth campaign review`'s output gains informational,
+  non-gating `blast_radius_status`/`claim_blast_radius_status` fields. The event/git-hook
+  shadow trigger is split out to backlog #4555 (needs its own OS-integration design pass).
+- **Blast-radius Phase 2b: event/git-hook shadow-mode trigger (backlog #4555).**
+  `bth blast-radius install-hook`/`uninstall-hook` wrap `core.hooksPath` around a
+  bathos-managed directory (`bathos.git_hooks`) that preserves whatever hooks were already
+  active — chains to a pre-existing `post-commit` (if any), symlinks every other hook name
+  through unchanged, and restores the exact prior `core.hooksPath` on uninstall. The
+  installed `post-commit` script does only a cheap keyword check inline
+  (`fix`/`bug`/`regression`/`hotfix`/`patch`, hardcoded, case-insensitive) and spawns
+  `bth blast-radius shadow-check "$sha"` detached (`setsid nohup ... &`) — all real logic
+  lives in `record_shadow_trigger()`, which reuses `assess_blast_radius(commit=...)` and
+  logs a `entity_type="shadow_trigger"` ledger record (`to_state="shadow_only"`, keyed by
+  commit sha) on the same `blast_radius_ledger` table, never calling `flag_blast_radius` or
+  either `propagate_to_*` function — a shadow trigger can never durably affect a real
+  run/campaign/claim's state. `bth query shadow-log` lists recent firings for calibration
+  review.
 - **Cluster cool catalog without rsyncing `bathos.db`.** Campaigns live as cool JSON under
   `{catalog}/campaigns/{uuid}.json`. Cluster jobs write `{remote_root}/.bth/catalog`. Conclude,
   emit, and postmortem overlay cool JSON onto warm DuckDB after compact/prepare.

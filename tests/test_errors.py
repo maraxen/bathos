@@ -31,12 +31,24 @@ def _collect_raised_exception_classes(src_root: Path) -> set[str]:
         if py_file.name in EXCLUDED_FILES:
             continue
         tree = ast.parse(py_file.read_text())
+        # Names bound as locals (assignment targets, for targets, with-targets)
+        # or as `except ... as name` handlers are re-raise idioms, not class
+        # references: e.g. campaigns.py builds `mismatch = CampaignError(...)`
+        # and later does `raise mismatch`. A bare-name raise of a bound local
+        # tells us nothing about a *class* needing a registered code.
+        bound: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                bound.add(node.id)
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                bound.add(node.name)
         for node in ast.walk(tree):
             if isinstance(node, ast.Raise) and node.exc is not None:
                 exc = node.exc
                 if isinstance(exc, ast.Call) and isinstance(exc.func, ast.Name):
-                    raised.add(exc.func.id)
-                elif isinstance(exc, ast.Name):
+                    if exc.func.id not in bound:
+                        raised.add(exc.func.id)
+                elif isinstance(exc, ast.Name) and exc.id not in bound:
                     raised.add(exc.id)
     return raised
 

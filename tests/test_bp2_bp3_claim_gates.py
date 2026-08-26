@@ -239,6 +239,11 @@ label = "Null"
         claim_path = self._claim_no_confounds(root)
         register_claim(claim_path, campaign.id, db, root)
 
+        # A registered claim requires non-empty campaign membership at conclude
+        # (campaigns.py empty-membership guard); give the gate a member run so
+        # the BP-3 negative-check logic under test is actually reached.
+        db = _add_completed_run(tmp_catalog, campaign, db)
+
         with pytest.raises(CampaignError, match="negative claim"):
             conclude_campaign(db, campaign.id, "failed", "dead end", workspace_root=root)
 
@@ -255,6 +260,9 @@ label = "Null"
         )
         claim_path = self._claim_no_confounds(root)
         register_claim(claim_path, campaign.id, db, root)
+
+        # Membership required to reach BP-3 logic (see blank-check test above).
+        db = _add_completed_run(tmp_catalog, campaign, db)
 
         conclude_campaign(
             db,
@@ -283,6 +291,9 @@ label = "Null"
         claim_path = self._claim_no_confounds(root)
         register_claim(claim_path, campaign.id, db, root)
 
+        # Membership required to reach BP-3 logic (see blank-check test above).
+        db = _add_completed_run(tmp_catalog, campaign, db)
+
         # "pass" does not match the negative vocabulary -> no error even with blank negative_check
         conclude_campaign(db, campaign.id, "pass", "worked", workspace_root=root)
 
@@ -306,6 +317,9 @@ label = "Null"
         )
         claim_path = self._claim_no_confounds(root)
         register_claim(claim_path, campaign.id, db, root)
+
+        # Membership required to reach BP-3 logic (see blank-check test above).
+        db = _add_completed_run(tmp_catalog, campaign, db)
 
         custom_pattern = re.compile(r"\b(inconclusive)\b", re.IGNORECASE)
 

@@ -1532,6 +1532,35 @@ def review_campaign(db, campaign_id: str, catalog_dir: Path | None = None) -> di
         if not scripts:
             popper_data["gap"] = "evalues_unavailable"
 
+    # AC-12 slice (Phase 2a, #4552): informational, non-gating blast-radius status.
+    # "clean" (the fold's own default for "no ledger record") is the correct value
+    # both when nothing has ever been flagged AND when this campaign has no
+    # registered claim at all -- propagate_to_claims only ever writes a claim-level
+    # record when a claim IS registered and implicated, so no special-casing is
+    # needed here for "does this campaign even have a claim".
+    blast_radius_status = "clean"
+    claim_blast_radius_status = "clean"
+    if catalog_dir is not None:
+        # `db` (when not None) is a connection this function does not own -- it may
+        # be read-only (the real CLI/MCP `campaign review` path opens it that way).
+        # DuckDB refuses a second connection to the same file with a different
+        # config, so reuse `db` via the `_using_conn` variant rather than letting
+        # fold_blast_radius_state() open its own (confirmed crash via direct
+        # reproduction: duckdb.ConnectionException on any catalog with a compacted
+        # bathos.db, i.e. the normal case).
+        if db is not None:
+            from bathos.blast_radius import fold_blast_radius_state_using_conn
+
+            blast_radius_status = fold_blast_radius_state_using_conn(db, "campaign", campaign_id)
+            claim_blast_radius_status = fold_blast_radius_state_using_conn(
+                db, "claim", campaign_id
+            )
+        else:
+            from bathos.blast_radius import fold_blast_radius_state
+
+            blast_radius_status = fold_blast_radius_state(catalog_dir, "campaign", campaign_id)
+            claim_blast_radius_status = fold_blast_radius_state(catalog_dir, "claim", campaign_id)
+
     return {
         "total_runs": total,
         "residual_rate": residual_rate,
@@ -1540,6 +1569,8 @@ def review_campaign(db, campaign_id: str, catalog_dir: Path | None = None) -> di
         "outcome_distribution": outcome_dist,
         "anomalies": anomalies,
         "popper": popper_data,
+        "blast_radius_status": blast_radius_status,
+        "claim_blast_radius_status": claim_blast_radius_status,
     }
 
 
