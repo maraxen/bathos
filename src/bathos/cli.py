@@ -1210,6 +1210,9 @@ def blast_radius_assess_cmd(
     files: list[str] | None = typer.Option(
         None, "--file", help="File/symbol path anchor (repeatable, no ancestry check)"
     ),
+    dependency: bool = typer.Option(
+        False, "--dependency", help="Dependency-lock-drift anchor (no commit/file needed)"
+    ),
     project: str | None = typer.Option(
         None, "--project", help="Scope to one project_slug (default: whole catalog)"
     ),
@@ -1217,11 +1220,17 @@ def blast_radius_assess_cmd(
         False, "--no-flag", help="Print the report only; do not write ledger records"
     ),
 ):
-    """Assess which runs a bug/fix implicates, then flag them (AC-1/2/4/5/6/11)."""
+    """Assess which runs a bug/fix implicates, then flag them + propagate to
+    campaigns/claims (AC-1/2/3/4/5/6/7/8/9/10/11)."""
     import dataclasses
     import json as json_mod
 
-    from bathos.blast_radius import assess_blast_radius, flag_blast_radius
+    from bathos.blast_radius import (
+        assess_blast_radius,
+        flag_blast_radius,
+        propagate_to_campaigns,
+        propagate_to_claims,
+    )
     from bathos.workspace import resolve_workspace
 
     ws_root = resolve_workspace().fs_root
@@ -1232,6 +1241,7 @@ def blast_radius_assess_cmd(
             commit=commit,
             commit_range=commit_range,
             files=files or None,
+            dependency=dependency,
             project=project,
         )
     except ValueError as e:
@@ -1244,6 +1254,15 @@ def blast_radius_assess_cmd(
         return
     records = flag_blast_radius(report, _catalog_dir())
     typer.echo(f"\nFlagged {len(records)} run(s) in blast_radius_ledger.")
+
+    campaign_records = propagate_to_campaigns(report, _catalog_dir())
+    if campaign_records:
+        typer.echo(f"Flagged {len(campaign_records)} campaign(s).")
+
+    claim_records = propagate_to_claims(report, _catalog_dir(), workspace_root=ws_root)
+    if claim_records:
+        clauses = [json_mod.loads(r.matched_clauses) for r in claim_records if r.matched_clauses]
+        typer.echo(f"Flagged {len(claim_records)} claim(s), implicated clauses: {clauses}")
 
 
 @blast_app.command("clear")

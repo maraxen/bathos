@@ -351,3 +351,43 @@ class TestDependencyAnchor:
     def test_requires_exactly_one_anchor_including_dependency(self, repo, catalog_dir):
         with pytest.raises(ValueError):
             assess_blast_radius(catalog_dir, repo, commit="abc", dependency=True)
+
+
+class TestCampaignIdResolution:
+    """Regression: bathos.campaigns.add_run_to_campaign only writes the
+    campaign_runs junction table -- it does NOT also set the run's own
+    campaign_id field. A naive `match.campaign_id = run.campaign_id` read
+    (the first implementation of this) silently misses this, the CANONICAL
+    way campaigns work in this codebase (bathos.claim.run_union_gate's own
+    covering-run query joins campaign_runs, not runs.campaign_id). Caught by
+    tests/test_blast_radius_mcp.py's end-to-end propagation test failing with
+    campaign_flagged_count == 0 for a run added via add_run_to_campaign."""
+
+    def test_membership_via_campaign_runs_junction_table_alone_is_found(
+        self, repo, catalog_dir
+    ):
+        from bathos.campaigns import add_run_to_campaign, connect_catalog_db, create_campaign
+        from bathos.compact import compact as compact_catalog
+
+        pre_fix_sha = _commit_file(repo, "scripts/experiments/foo.py", "a = 1\n", "initial")
+        fix_sha = _commit_file(repo, "scripts/experiments/foo.py", "a = 2\n", "fix")
+
+        run = Run(
+            project_slug="proj", command="scripts/experiments/foo.py",
+            argv=["scripts/experiments/foo.py"], git_hash=pre_fix_sha,
+            git_branch="main", git_dirty=False,
+            # deliberately NOT setting campaign_id here -- membership comes
+            # ONLY from add_run_to_campaign below, the case that broke.
+        )
+        write_run(run, catalog_dir)
+        compact_catalog(catalog_dir)
+        db = connect_catalog_db(catalog_dir, read_only=False)
+        campaign = create_campaign(db, "camp-x", "proj", "exploration", catalog_dir=catalog_dir)
+        add_run_to_campaign(db, campaign.id, run.id, catalog_dir=catalog_dir)
+        db.close()
+
+        report = assess_blast_radius(catalog_dir, repo, commit=fix_sha)
+
+        matching = [m for m in report.affected if m.run_id == run.id]
+        assert len(matching) == 1
+        assert matching[0].campaign_id == campaign.id

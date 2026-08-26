@@ -89,3 +89,34 @@ def test_status_tool_returns_clean_by_default(catalog_dir):
         catalog_dir=str(catalog_dir), entity_type="run", entity_id="never-flagged"
     )
     assert result["status"] == "clean"
+
+
+def test_assess_tool_dependency_anchor_and_campaign_propagation(repo, catalog_dir):
+    from bathos.campaigns import add_run_to_campaign, connect_catalog_db, create_campaign
+    from bathos.checker import hash_dependency_lock
+    from bathos.compact import compact as compact_catalog
+    from bathos.mcp import blast_radius_assess_tool
+
+    (repo / "uv.lock").write_text("old\n")
+    old_hash = hash_dependency_lock(repo)
+    run = Run(
+        project_slug="p", command="foo.py", argv=["foo.py"], git_hash="abc",
+        git_branch="main", git_dirty=False, dependency_lock_sha256=old_hash,
+    )
+    write_run(run, catalog_dir)
+    compact_catalog(catalog_dir)
+    db = connect_catalog_db(catalog_dir, read_only=False)
+    campaign = create_campaign(db, "camp-mcp", "p", "exploration", catalog_dir=catalog_dir)
+    add_run_to_campaign(db, campaign.id, run.id, catalog_dir=catalog_dir)
+    db.close()
+
+    (repo / "uv.lock").write_text("new\n")
+
+    result = blast_radius_assess_tool(
+        catalog_dir=str(catalog_dir), project_root=str(repo), dependency=True
+    )
+
+    assert "error" not in result
+    assert result["anchor_kind"] == "dependency"
+    assert result["flagged_count"] == 1
+    assert result["campaign_flagged_count"] == 1

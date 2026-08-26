@@ -587,10 +587,11 @@ def blast_radius_assess_tool(
     commit: str = "",
     commit_range: str = "",
     files: str = "",
+    dependency: bool = False,
     project: str = "",
     flag: bool = True,
 ) -> dict:
-    """Assess which runs a bug/fix implicates (backlog #4551; real).
+    """Assess which runs a bug/fix implicates (backlog #4551/#4552; real).
 
     Requires token= matching the local ~/.bth/mcp_token (debt #619) at the MCP
     wrapper layer — see mcp_blast_radius_assess_tool. Gated because flag=True by
@@ -602,23 +603,34 @@ def blast_radius_assess_tool(
         commit: Single fix commit SHA anchor.
         commit_range: "<base>..<tip>" range anchor.
         files: Comma-separated file/symbol path anchor (no ancestry check).
+        dependency: If True, dependency-lock-drift anchor (AC-3) instead of a
+            commit/file anchor.
         project: Optional project_slug filter (empty = whole catalog).
         flag: If True (default), also durably record affected/unverifiable runs
-            in the blast_radius_ledger (AC-6). Exactly one of commit/commit_range/
-            files must be non-empty.
+            in the blast_radius_ledger (AC-6), and propagate to campaign/claim
+            records (AC-7/AC-8). Exactly one of commit/commit_range/files/
+            dependency=True must be given.
 
     Returns:
         Dict with anchor_kind/anchor_value/changed_files/affected/unverifiable/
-        unaffected_run_ids (report), plus flagged_count if flag=True. Or
-        {"error": ...} if the anchor arguments are malformed.
+        unaffected_run_ids (report), plus flagged_count/campaign_flagged_count/
+        claim_flagged_count if flag=True. Or {"error": ...} if the anchor
+        arguments are malformed.
     """
     import dataclasses
 
-    from bathos.blast_radius import assess_blast_radius, flag_blast_radius
+    from bathos.blast_radius import (
+        assess_blast_radius,
+        flag_blast_radius,
+        propagate_to_campaigns,
+        propagate_to_claims,
+    )
 
-    n = sum(bool(x) for x in (commit, commit_range, files))
+    n = sum(bool(x) for x in (commit, commit_range, files)) + int(dependency)
     if n != 1:
-        return {"error": "exactly one of commit, commit_range, or files is required"}
+        return {
+            "error": "exactly one of commit, commit_range, files, or dependency=True is required"
+        }
 
     cat_dir = _get_catalog_dir(catalog_dir or None)
     proj_root = Path(project_root) if project_root else Path.cwd()
@@ -631,6 +643,7 @@ def blast_radius_assess_tool(
             commit=commit or None,
             commit_range=commit_range or None,
             files=file_list,
+            dependency=dependency,
             project=project or None,
         )
     except ValueError as e:
@@ -640,6 +653,10 @@ def blast_radius_assess_tool(
     if flag:
         records = flag_blast_radius(report, cat_dir)
         result["flagged_count"] = len(records)
+        campaign_records = propagate_to_campaigns(report, cat_dir)
+        result["campaign_flagged_count"] = len(campaign_records)
+        claim_records = propagate_to_claims(report, cat_dir, workspace_root=proj_root)
+        result["claim_flagged_count"] = len(claim_records)
     return result
 
 
@@ -1997,11 +2014,13 @@ async def mcp_blast_radius_assess_tool(
     commit: str = "",
     commit_range: str = "",
     files: str = "",
+    dependency: bool = False,
     project: str = "",
     flag: bool = True,
     token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
-    """Assess which runs a bug/fix implicates, optionally flagging them (backlog #4551).
+    """Assess which runs a bug/fix implicates, then flag + propagate to
+    campaign/claim records (backlog #4551/#4552).
 
     Requires token= matching the local ~/.bth/mcp_token (debt #619) — gated because
     flag=True by default performs a durable ledger write (security-audit finding,
@@ -2012,6 +2031,7 @@ async def mcp_blast_radius_assess_tool(
         commit=commit,
         commit_range=commit_range,
         files=files,
+        dependency=dependency,
         project=project,
         flag=flag,
     )

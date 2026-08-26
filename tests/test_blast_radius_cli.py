@@ -81,6 +81,26 @@ class TestBlastRadiusAssessCmd:
         result = runner.invoke(app, ["blast-radius", "assess"])
         assert result.exit_code != 0
 
+    def test_assess_by_dependency_flag(self, repo, catalog_dir, monkeypatch):
+        (repo / "uv.lock").write_text("old\n")
+        from bathos.checker import hash_dependency_lock
+
+        old_hash = hash_dependency_lock(repo)
+        run = Run(
+            project_slug="p", command="foo.py", argv=["foo.py"],
+            git_hash="abc", git_branch="main", git_dirty=False,
+            dependency_lock_sha256=old_hash,
+        )
+        write_run(run, catalog_dir)
+        (repo / "uv.lock").write_text("new\n")
+
+        monkeypatch.chdir(repo)
+        monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
+        result = runner.invoke(app, ["blast-radius", "assess", "--dependency"])
+
+        assert result.exit_code == 0, result.output
+        assert '"anchor_kind": "dependency"' in result.output
+
 
 class TestBlastRadiusClearCmd:
     def test_clear_requires_reason(self, catalog_dir, monkeypatch):

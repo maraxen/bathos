@@ -556,6 +556,25 @@ def assess_blast_radius(
     }
     all_runs = list_runs(Path(catalog_dir), project=project, limit=_UNBOUNDED_SCAN_LIMIT)
 
+    # Campaign membership has two independent, NOT-mutually-synced sources: Run.campaign_id
+    # (set at write time by some flows, and what readback.list_candidates reads) and the
+    # campaign_runs junction table (populated by bathos.campaigns.add_run_to_campaign,
+    # which does NOT also update the run's own campaign_id field -- confirmed live: a run
+    # added via add_run_to_campaign alone has campaign_id == ""). AC-7/AC-8 propagation
+    # needs the real membership, so both are checked, run.campaign_id preferred when set.
+    # Built once here, not per-run, mirroring check_results above.
+    campaign_by_run: dict[str, str] = {}
+    db_path = Path(catalog_dir) / "bathos.db"
+    if db_path.exists():
+        con = duckdb.connect(str(db_path), read_only=True)
+        try:
+            rows = con.execute("SELECT run_id, campaign_id FROM campaign_runs").fetchall()
+            campaign_by_run = dict(rows)
+        except duckdb.Error:
+            pass
+        finally:
+            con.close()
+
     affected: list[BlastRadiusMatch] = []
     unverifiable: list[BlastRadiusMatch] = []
     unaffected_run_ids: list[str] = []
@@ -568,7 +587,7 @@ def assess_blast_radius(
                         run_id=run.id,
                         git_hash=run.git_hash,
                         command=run.command,
-                        campaign_id=run.campaign_id,
+                        campaign_id=run.campaign_id or campaign_by_run.get(run.id, ""),
                         matched_files=[],
                         reason=(
                             "no recorded dependency_lock_sha256 -- predates that "
@@ -583,7 +602,7 @@ def assess_blast_radius(
                         run_id=run.id,
                         git_hash=run.git_hash,
                         command=run.command,
-                        campaign_id=run.campaign_id,
+                        campaign_id=run.campaign_id or campaign_by_run.get(run.id, ""),
                         matched_files=[],
                         reason=(
                             f"dependency_lock_sha256 {run.dependency_lock_sha256[:9]} "
@@ -608,7 +627,7 @@ def assess_blast_radius(
                     run_id=run.id,
                     git_hash=run.git_hash,
                     command=run.command,
-                    campaign_id=run.campaign_id,
+                    campaign_id=run.campaign_id or campaign_by_run.get(run.id, ""),
                     matched_files=matched_files,
                     reason=(
                         f"touches {matched_files} but git status is {status} -- "
@@ -624,7 +643,7 @@ def assess_blast_radius(
                     run_id=run.id,
                     git_hash=run.git_hash,
                     command=run.command,
-                    campaign_id=run.campaign_id,
+                    campaign_id=run.campaign_id or campaign_by_run.get(run.id, ""),
                     matched_files=matched_files,
                     reason=(
                         f"touches {matched_files} (file anchor -- no commit "
@@ -640,7 +659,7 @@ def assess_blast_radius(
                     run_id=run.id,
                     git_hash=run.git_hash,
                     command=run.command,
-                    campaign_id=run.campaign_id,
+                    campaign_id=run.campaign_id or campaign_by_run.get(run.id, ""),
                     matched_files=matched_files,
                     reason=(
                         f"touches {matched_files}; git_hash {run.git_hash[:9]} "
