@@ -34,6 +34,13 @@ dependencies = [
     "cisternal>=0.1.1a3",
 ]
 
+# TEMPORARY dev-time override: cisternal's provenance module (this PR depends on
+# it) isn't released yet -- lives in maraxen/cisternal PR #32
+# (feat/provenance-module), unmerged as of this commit. Remove this section and
+# bump the version pin above to a real released version once that PR merges.
+[tool.uv.sources]
+cisternal = { path = "../cisternal", editable = true }
+
 [project.optional-dependencies]
 viz = [
     "fastapi>=0.110",

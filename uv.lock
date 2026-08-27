@@ -138,7 +138,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cisternal", specifier = ">=0.1.1a3" },
+    { name = "cisternal", editable = "../cisternal" },
     { name = "duckdb", specifier = ">=1.0" },
     { name = "fastapi", marker = "extra == 'viz'", specifier = ">=0.110" },
     { name = "fastmcp", specifier = ">=3.3.1" },
@@ -320,17 +320,39 @@ wheels = [
 
 [[package]]
 name = "cisternal"
-version = "0.1.1a3"
-source = { registry = "https://pypi.org/simple" }
+version = "0.1.1a5"
+source = { editable = "../cisternal" }
 dependencies = [
     { name = "cyclopts" },
     { name = "fastmcp" },
     { name = "opentelemetry-api" },
     { name = "pyyaml" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/eb/42/1698e42b5e9b14c07665952b854d961732f9c7cf3dcf56de8814cade40bb/cisternal-0.1.1a3.tar.gz", hash = "sha256:a5951210aac7e05ce6cc8f1b63d80766df7e5fd4b82df8884498023cbbf159fe", size = 170339, upload-time = "2026-08-14T17:36:26.269Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/0b/f3/430f5df2f5db5c8ab45da0353bdae6896651686e3c0a1bd6ce5f2d69db6b/cisternal-0.1.1a3-py3-none-any.whl", hash = "sha256:22b4dcd24006a36a62ff728a92ade80cde0abf016ac03e13d6e438d3632c0bcc", size = 109164, upload-time = "2026-08-14T17:36:24.946Z" },
+
+[package.metadata]
+requires-dist = [
+    { name = "cyclopts", specifier = ">=4.18.0" },
+    { name = "fastmcp", specifier = "==4.0.0a2" },
+    { name = "opentelemetry-api", specifier = ">=1.42.1" },
+    { name = "opentelemetry-exporter-otlp-proto-grpc", marker = "extra == 'otlp'", specifier = ">=1.42.1" },
+    { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'otlp'", specifier = ">=1.42.1" },
+    { name = "opentelemetry-sdk", marker = "extra == 'otlp'", specifier = ">=1.42.1" },
+    { name = "opentelemetry-semantic-conventions", marker = "extra == 'otlp'", specifier = ">=0.63b1" },
+    { name = "pyyaml", specifier = ">=6.0.2" },
+]
+provides-extras = ["otlp"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "opentelemetry-exporter-otlp-proto-grpc", specifier = ">=1.42.1" },
+    { name = "opentelemetry-exporter-otlp-proto-http", specifier = ">=1.42.1" },
+    { name = "opentelemetry-sdk", specifier = ">=1.42.1" },
+    { name = "opentelemetry-semantic-conventions", specifier = ">=0.63b1" },
+    { name = "pytest", specifier = ">=9.0.3" },
+    { name = "pytest-asyncio", specifier = ">=0.24.0" },
+    { name = "pytest-cov", specifier = ">=7.1.0" },
+    { name = "ruff", specifier = ">=0.15.17" },
+    { name = "ty", specifier = ">=0.0.49" },
 ]
 
 [[package]]
