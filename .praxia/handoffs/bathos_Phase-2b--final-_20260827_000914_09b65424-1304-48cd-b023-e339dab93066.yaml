@@ -1,0 +1,35 @@
+---
+workspace: bathos
+session_id: session_01Wi4hFmuuLiqzEigwpPdWYs
+status: complete
+immediately_relevant: []
+active_dispatches: []
+task_id: 260826_blast-radius-shadow-trigger
+phase: Phase 2b (final)
+goal_statement: Implement the blast-radius assessment feature end-to-end (Phase 1 ledger+assess, Phase 2a campaign/claim propagation + dependency anchor + shadow auto-clear, Phase 2b git-hook shadow-mode trigger) and land it on main with real jury-audit scrutiny rather than CI-only confidence.
+context_refs:
+- phase: Phase 1
+  task_id: 260826_blast-radius-assessment-skill
+  summary: Ledger + assess_blast_radius + flag/clear CLI/MCP, first jury round (code-review/auditor/security-auditor) all PASS after fixes
+- phase: Phase 2a
+  task_id: 260826_blast-radius-assessment-skill
+  summary: Campaign/claim propagation (AC-7/8), dependency-version anchor (AC-3), shadow auto-clear verdict (AC-10, never auto-applied), AC-12 campaign-review status slice
+failed_attempts: []
+open_questions: []
+deferred:
+- description: 'debt #1474: append-only ledger pattern duplicated near-line-for-line across trust_ledger.py, blast_radius.py, and archived_items'
+  rationale: Maintenance-cost concern, not a correctness bug; a shared generic ledger substrate would need careful design to avoid over-abstracting three still-slightly-different consumers
+  recommended_phase: future infra cleanup sprint
+- description: 'debt #1486/#1487/#1488: assess_blast_radius double-scans the catalog, check_dependency_lock_drift re-hashes uv.lock per run, _clauses_backed_by_runs issues N+1 DuckDB queries'
+  rationale: Efficiency-only findings from the third jury round's code-review lens; filed rather than fixed under review-cycle time pressure per this session's own precedent
+  recommended_phase: future perf cleanup
+- description: 'debt #1473/#1475/#1476/#1477: adjacent pre-existing issues noticed incidentally (git-ancestor error conflation, per-record DB connections, checker truncation, query.py backend-resolution assumption)'
+  rationale: Out of scope for the blast-radius feature itself; surfaced by peer review during Phase 1/2a work
+  recommended_phase: unscheduled
+lessons_refs:
+- .praxia/lessons.jsonl
+next_steps:
+- 'No blocking follow-up. Optional: pick up debt #1474 (append-only ledger pattern duplicated 3x across trust_ledger.py/blast_radius.py/archived_items) if doing broader ledger-infrastructure cleanup'
+- 'Optional: debt #1486-#1488 (assess_blast_radius double-scans the catalog; check_dependency_lock_drift re-hashes uv.lock per-run instead of once; _clauses_backed_by_runs N+1 query) are efficiency-only findings from the third jury round, deliberately deferred rather than fixed under review pressure'
+- 'Optional: debt #1473/#1475/#1476/#1477 are pre-existing adjacent issues surfaced incidentally during this work (_is_ancestor error conflation, per-record DB connections in flag_blast_radius, checker.py truncation, query.py backend-resolution assumption)'
+---
