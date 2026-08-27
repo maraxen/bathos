@@ -942,3 +942,4 @@
 {"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-a20af3531aae85b64","date":"2026-08-26"}
 {"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-a20af3531aae85b64","date":"2026-08-26"}
 {"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-a295dd7cf34b51811","date":"2026-08-26"}
+{"event":"mcp_tool_call","telemetry_id":"mcp-transduction_query-toolu_01WaCwy9zaU5PKShWdvfC9T3","timestamp":"2026-08-27T00:07:56Z","tool_name":"mcp__plugin_praxia_core__transduction_query","praxia_tool":"transduction_query","action":null,"outcome":"ok","surface":"unknown","task_id":"unknown","session_id":"7582d32b-114e-489b-bcf1-1d1ef38533b8","tool_use_id":"toolu_01WaCwy9zaU5PKShWdvfC9T3","date":"2026-08-27"}
