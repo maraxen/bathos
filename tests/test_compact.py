@@ -2,10 +2,22 @@ import dataclasses
 from pathlib import Path
 
 import duckdb
+from typer.testing import CliRunner
 
-from bathos.catalog import init_catalog, write_run
+from bathos.catalog import CorruptFragment, init_catalog, write_run
 from bathos.compact import _fragment_count, compact
 from bathos.schema import Run
+
+runner = CliRunner()
+
+
+def _truncate_to_corrupt(path: Path) -> None:
+    """Truncate a valid Parquet file so it has no readable footer (see
+    test_catalog.py's identical helper for why this -- not a zero-byte file --
+    matches the real-world defect)."""
+    data = path.read_bytes()
+    assert len(data) > 100, "fixture fragment is too small to truncate meaningfully"
+    path.write_bytes(data[: len(data) // 2])
 
 
 def test_compact_ingests_all_fragments(tmp_catalog: Path, sample_run: Run):
@@ -964,3 +976,100 @@ def test_compact_persists_git_provenance_fields_to_warm(tmp_catalog: Path, sampl
     con.close()
 
     assert rows[0] == ("tree:abc123def456abc123def456abc123def45678", "myxcel-env")
+
+
+# =============================================================================
+# Defect 1 (260827_bathos-catalog-robustness): one corrupt cool-tier fragment
+# in one project must not abort `bth compact` for every project.
+# =============================================================================
+
+
+def test_compact_skips_corrupt_fragment(tmp_catalog: Path, sample_run: Run):
+    """A truncated/corrupt fragment must not abort compact -- the valid runs in
+    the same and other projects still get ingested, and the corrupt fragment is
+    reported (not silently dropped, not auto-deleted).
+
+    Reproduces the real-world failure: `bth compact` aborted catalog-wide with
+    pyarrow.lib.ArrowInvalid on a single corrupt fragment belonging to one
+    project (asr), blocking maintenance for every other project's catalog too.
+    """
+    init_catalog(tmp_catalog)
+    write_run(sample_run, tmp_catalog)
+
+    other = dataclasses.replace(sample_run, id="run-corrupt-target", project_slug="otherproj")
+    write_run(other, tmp_catalog)
+    corrupt_path = tmp_catalog / "runs" / "otherproj" / f"run_{other.id}.parquet"
+    _truncate_to_corrupt(corrupt_path)
+
+    result = compact(tmp_catalog)
+
+    assert result.ingested == 1
+    assert result.skipped == 0
+    assert len(result.corrupt_fragments) == 1
+    assert isinstance(result.corrupt_fragments[0], CorruptFragment)
+    assert result.corrupt_fragments[0].path == corrupt_path
+
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    ids = [r[0] for r in con.execute("SELECT id FROM runs").fetchall()]
+    con.close()
+    assert ids == [sample_run.id]
+
+    # Corrupt file is left in place -- never auto-deleted/auto-quarantined by compact.
+    assert corrupt_path.exists()
+
+
+def test_compact_no_corruption_reports_empty_corrupt_list(tmp_catalog: Path, sample_run: Run):
+    init_catalog(tmp_catalog)
+    write_run(sample_run, tmp_catalog)
+    result = compact(tmp_catalog)
+    assert result.corrupt_fragments == []
+
+
+def test_cli_compact_default_reports_corrupt_and_exits_zero(tmp_catalog, monkeypatch, sample_run):
+    """Default `bth compact` behaviour: skip-and-report, exit 0 (maintenance
+    must always be able to complete; see commit message for the skip-vs-fail
+    trade-off discussion)."""
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_catalog))
+    init_catalog(tmp_catalog)
+    write_run(sample_run, tmp_catalog)
+    corrupt_path = tmp_catalog / "runs" / "otherproj" / "run_bad.parquet"
+    corrupt_path.parent.mkdir(parents=True)
+    other = dataclasses.replace(sample_run, id="bad", project_slug="otherproj")
+    write_run(other, tmp_catalog)
+    _truncate_to_corrupt(tmp_catalog / "runs" / "otherproj" / "run_bad.parquet")
+
+    from bathos.cli import app
+
+    result = runner.invoke(app, ["compact"])
+    assert result.exit_code == 0
+    assert "corrupt" in result.output.lower() or "corrupt" in (result.stderr or "").lower()
+
+
+def test_cli_compact_strict_exits_nonzero_on_corruption(tmp_catalog, monkeypatch, sample_run):
+    """--strict is the opt-in hard-fail path for operators/CI who want corruption
+    to be a build-breaking event rather than a warning."""
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_catalog))
+    init_catalog(tmp_catalog)
+    write_run(sample_run, tmp_catalog)
+    corrupt_dir = tmp_catalog / "runs" / "otherproj"
+    corrupt_dir.mkdir(parents=True)
+    other = dataclasses.replace(sample_run, id="bad", project_slug="otherproj")
+    write_run(other, tmp_catalog)
+    _truncate_to_corrupt(corrupt_dir / "run_bad.parquet")
+
+    from bathos.cli import app
+
+    result = runner.invoke(app, ["compact", "--strict"])
+    assert result.exit_code != 0
+
+
+def test_cli_compact_strict_exits_zero_when_clean(tmp_catalog, monkeypatch, sample_run):
+    """--strict must not fail a compact that has no corruption."""
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_catalog))
+    init_catalog(tmp_catalog)
+    write_run(sample_run, tmp_catalog)
+
+    from bathos.cli import app
+
+    result = runner.invoke(app, ["compact", "--strict"])
+    assert result.exit_code == 0

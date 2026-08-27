@@ -15,6 +15,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **One corrupt cool-tier fragment no longer aborts catalog maintenance for every project.**
+  `read_runs()` (and the new `read_runs_report()`) and `migrate_catalog()` used to call
+  `pq.read_table()` over every fragment with no per-file error handling; a single truncated
+  Parquet fragment (e.g. from a killed SLURM job) raised `pyarrow.lib.ArrowInvalid` out of
+  `bth compact` and `bth migrate --dry-run`, blocking maintenance catalog-wide until an
+  operator manually renamed the bad file aside. Both now skip an unreadable fragment, log a
+  WARNING, and report it in the result (`CompactResult.corrupt_fragments`,
+  `MigrateResult.corrupt`) instead of raising -- printed loudly by the CLI with a pointer to
+  `bth repair --tier cool` (already has a `quarantine_corrupt` action; unchanged here).
+  Default is skip-and-report so maintenance always completes; `bth compact --strict` opts into
+  the old hard-fail behaviour for CI/automation that wants corruption to be build-breaking.
+  Corrupt files are never auto-deleted or auto-quarantined by compact/migrate themselves.
+- **`bth migrate` gains `--project` scoping.** Previously always scanned every project's
+  fragments under `runs/`; on a large multi-project catalog this made a routine "migrate what
+  I just added" ask into an unscoped, unreviewable operation touching thousands of unrelated
+  fragments. `bth migrate --project <slug>` now scans only `runs/<slug>/`; the CLI always
+  prints which scope ran (`ALL projects` or `project '<slug>'`) so the default stays visible
+  rather than silent. Investigation note: `bth compact` never needed `migrate` to run first --
+  `read_runs()`'s permissive multi-fragment concat plus `_apply_migrations()` at warm-ingest
+  time already tolerate old-schema cool fragments; `migrate_catalog` only matters for
+  consumers that read raw cool-tier Parquet directly expecting a uniform on-disk schema.
 - MCP `campaign_create` uses `connect_catalog_db` (compacts if needed) and lists cool-tier open
   campaigns for the duplicate-name warning.
 - MCP `campaign_conclude` returns `{"error": ...}` for `CampaignError` and a missing catalog

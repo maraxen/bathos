@@ -356,6 +356,12 @@ def compact(
     force_rebuild: bool = typer.Option(
         False, "--force-rebuild", help="Rebuild bathos.db from cool fragments if corrupt"
     ),
+    strict: bool = typer.Option(
+        False,
+        "--strict",
+        help="Exit non-zero if any cool-tier fragment is corrupt/unreadable "
+        "(default: skip corrupt fragments and report them, so maintenance always completes)",
+    ),
 ):
     """Compact cool fragments into warm DuckDB catalog."""
     from bathos.compact import compact as compact_catalog
@@ -363,6 +369,18 @@ def compact(
     catalog_dir = _catalog_dir()
     result = compact_catalog(catalog_dir, force_rebuild=force_rebuild)
     typer.echo(f"Compacted {result.ingested} runs into bathos.db in {result.duration_s:.1f}s")
+    if result.corrupt_fragments:
+        typer.secho(
+            f"WARNING: skipped {len(result.corrupt_fragments)} corrupt/unreadable "
+            f"fragment(s):",
+            fg="yellow",
+            err=True,
+        )
+        for cf in result.corrupt_fragments:
+            typer.secho(f"  {cf.path}", fg="yellow", err=True)
+        typer.secho("Run 'bth repair --tier cool' to quarantine them.", fg="yellow", err=True)
+        if strict:
+            raise typer.Exit(1)
 
 
 @app.command()
@@ -1999,6 +2017,12 @@ def migrate(
     classify: bool = typer.Option(
         False, "--classify", help="Classify flat scripts into subdirs (Phase 2)"
     ),
+    project: str | None = typer.Option(
+        None,
+        "--project",
+        help="Scope migration to a single project slug's runs/<project>/ fragments "
+        "(default: all projects in the catalog)",
+    ),
 ):
     """Migrate cool-tier Parquet fragments to current schema, optionally classifying scripts."""
     if classify:
@@ -2025,14 +2049,24 @@ def migrate(
 
     from bathos.migrate import migrate_catalog
 
-    result = migrate_catalog(_catalog_dir(), dry_run=dry_run)
-    typer.echo(f"Scanned {result.scanned} fragments.")
+    result = migrate_catalog(_catalog_dir(), dry_run=dry_run, project=project)
+    scope = f"project {project!r}" if project else "ALL projects"
+    typer.echo(f"Scanned {result.scanned} fragments ({scope}).")
     typer.echo(f"  {result.already_current} already at current schema")
     if result.migrated:
         action = "Would migrate" if dry_run else "Migrated"
         typer.echo(f"  {action} {result.migrated} fragment(s).")
     else:
         typer.echo("  Nothing to migrate.")
+    if result.corrupt:
+        typer.secho(
+            f"  WARNING: skipped {len(result.corrupt)} corrupt/unreadable fragment(s):",
+            fg="yellow",
+            err=True,
+        )
+        for p in result.corrupt:
+            typer.secho(f"    {p}", fg="yellow", err=True)
+        typer.secho("  Run 'bth repair --tier cool' to quarantine them.", fg="yellow", err=True)
 
 
 @app.command("migrate-to-project-subdirs")
@@ -2544,6 +2578,12 @@ def catalog_version_cmd():
 
     result = migrate_catalog(catalog_dir, dry_run=True)
     typer.echo(f"Cool-tier fragments: {result.scanned} scanned, {result.migrated} need migration.")
+    if result.corrupt:
+        typer.secho(
+            f"  WARNING: {len(result.corrupt)} corrupt/unreadable fragment(s) skipped "
+            f"(run 'bth repair --tier cool' to quarantine them).",
+            fg="yellow",
+        )
 
     db_path = catalog_dir / "bathos.db"
     if db_path.exists():

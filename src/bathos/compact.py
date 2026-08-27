@@ -7,13 +7,13 @@ import logging
 import shutil
 import time
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
 import duckdb
 
-from bathos.catalog import read_runs
+from bathos.catalog import CorruptFragment, read_runs_report
 from bathos.schema import CURRENT_SCHEMA_VERSION, Run
 from bathos.telemetry import event
 from bathos.walk import iter_project_files
@@ -128,6 +128,7 @@ class CompactResult:
     ingested: int
     skipped: int
     duration_s: float
+    corrupt_fragments: list[CorruptFragment] = field(default_factory=list)
 
 
 # Migration registry: transforms Run objects from older schema versions to current
@@ -719,8 +720,10 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
     # Count cool files at start for telemetry
     cool_files = _fragment_count(catalog_dir)
 
-    # Read all runs from cool fragments (read_runs snapshots file list internally)
-    cool_runs = read_runs(catalog_dir)
+    # Read all runs from cool fragments (read_runs_report snapshots the file list
+    # internally). A corrupt/unreadable fragment is skipped and reported here rather
+    # than aborting compact for every project (260827_bathos-catalog-robustness).
+    cool_runs, corrupt_fragments = read_runs_report(catalog_dir)
 
     # Parse all postmortems in workspace (live fs_root; worktree-aware, spec 260611)
     from bathos.postmortem import parse_postmortem
@@ -1131,4 +1134,5 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
         ingested=ingested,
         skipped=skipped,
         duration_s=duration_s,
+        corrupt_fragments=corrupt_fragments,
     )
