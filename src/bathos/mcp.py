@@ -2485,21 +2485,18 @@ async def mcp_campaign_conclude_tool(
     )
 
 
-@cisternal.tool(registry="bathos")
-@traced_tool
-@require_write_token
-async def postmortem_scaffold(
+@cisternal.tool(
+    registry="bathos-cli", name="postmortem_scaffold", cli_group="postmortem", cli_name="scaffold"
+)
+def postmortem_scaffold_tool(
     run_id: str = "",
     campaign_id: str = "",
     catalog_dir: str | None = None,
     workspace_root: str | None = None,
-    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
     """Scaffold a new postmortem TOML template for a run ID or a campaign ID.
 
     Pass exactly one of run_id / campaign_id. Returns the path where the template was written.
-
-    Requires token= matching the local ~/.bth/mcp_token (debt #619).
     """
     from bathos.postmortem import (
         find_run_for_scaffold,
@@ -2548,9 +2545,10 @@ async def postmortem_scaffold(
     return {"path": str(postmortem_path), "run_id": run_id}
 
 
-@cisternal.tool(registry="bathos")
-@traced_tool
-async def postmortem_validate(
+@cisternal.tool(
+    registry="bathos-cli", name="postmortem_validate", cli_group="postmortem", cli_name="validate"
+)
+def postmortem_validate_tool(
     path: str,
     workspace_root: str | None = None,
     strict_files: bool = False,
@@ -2586,9 +2584,8 @@ async def postmortem_validate(
     return {"validation_ok": False, "errors": [e.message for e in result.errors]}
 
 
-@cisternal.tool(registry="bathos")
-@traced_tool
-async def postmortem_get(
+@cisternal.tool(registry="bathos-cli", name="postmortem_get", cli_group="postmortem", cli_name="show")
+def postmortem_get_tool(
     run_id: str = "",
     campaign_id: str = "",
     workspace_root: str | None = None,
@@ -2640,17 +2637,65 @@ async def postmortem_get(
 @cisternal.tool(registry="bathos")
 @traced_tool
 @require_write_token
-async def claim_scaffold(
-    campaign_id: str,
+async def postmortem_scaffold(
+    run_id: str = "",
+    campaign_id: str = "",
     catalog_dir: str | None = None,
     workspace_root: str | None = None,
     token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
+    """Scaffold a new postmortem TOML template for a run ID or a campaign ID.
+
+    Pass exactly one of run_id / campaign_id. Returns the path where the template was written.
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619).
+    """
+    return postmortem_scaffold_tool(
+        run_id=run_id,
+        campaign_id=campaign_id,
+        catalog_dir=catalog_dir,
+        workspace_root=workspace_root,
+    )
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def postmortem_validate(
+    path: str,
+    workspace_root: str | None = None,
+    strict_files: bool = False,
+) -> dict:
+    """Validate a postmortem TOML file.
+
+    Returns {'validation_ok': True} on success or {'validation_ok': False, 'errors': [...]} on failure.
+    """
+    return postmortem_validate_tool(path, workspace_root=workspace_root, strict_files=strict_files)
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def postmortem_get(
+    run_id: str = "",
+    campaign_id: str = "",
+    workspace_root: str | None = None,
+) -> dict:
+    """Retrieve postmortem data for a run ID or a campaign ID.
+
+    Pass exactly one of run_id / campaign_id. Returns the parsed postmortem fields or an
+    error dict if not found.
+    """
+    return postmortem_get_tool(run_id=run_id, campaign_id=campaign_id, workspace_root=workspace_root)
+
+
+@cisternal.tool(registry="bathos-cli", name="claim_scaffold", cli_group="claim", cli_name="scaffold")
+def claim_scaffold_tool(
+    campaign_id: str,
+    catalog_dir: str | None = None,
+    workspace_root: str | None = None,
+) -> dict:
     """Scaffold a new claim TOML template for the given campaign ID.
 
     Returns the path where the template was written.
-
-    Requires token= matching the local ~/.bth/mcp_token (debt #619).
     """
     from bathos.claim import scaffold_claim
 
@@ -2684,9 +2729,8 @@ async def claim_scaffold(
         return {"ok": False, "error": str(e), "error_code": "scaffold_failed"}
 
 
-@cisternal.tool(registry="bathos")
-@traced_tool
-async def claim_validate(
+@cisternal.tool(registry="bathos-cli", name="claim_validate", cli_group="claim", cli_name="validate")
+def claim_validate_tool(
     path: str,
     catalog_dir: str | None = None,
 ) -> dict:
@@ -2746,6 +2790,39 @@ async def claim_validate(
     }
 
 
+@cisternal.tool(registry="bathos")
+@traced_tool
+@require_write_token
+async def claim_scaffold(
+    campaign_id: str,
+    catalog_dir: str | None = None,
+    workspace_root: str | None = None,
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
+) -> dict:
+    """Scaffold a new claim TOML template for the given campaign ID.
+
+    Returns the path where the template was written.
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619).
+    """
+    return claim_scaffold_tool(
+        campaign_id=campaign_id, catalog_dir=catalog_dir, workspace_root=workspace_root
+    )
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def claim_validate(
+    path: str,
+    catalog_dir: str | None = None,
+) -> dict:
+    """Validate a claim TOML file.
+
+    Returns {'ok': True} on success or {'ok': False, 'errors': [...]} on failure.
+    """
+    return claim_validate_tool(path, catalog_dir=catalog_dir)
+
+
 def _claim_register_sync(
     path: str,
     campaign_id: str,
@@ -2780,20 +2857,26 @@ def _claim_register_sync(
         db.close()
 
 
-@cisternal.tool(registry="bathos")
-@traced_tool
-@require_write_token
-async def claim_register(
+@cisternal.tool(registry="bathos-cli", name="claim_register", cli_group="claim", cli_name="register")
+def claim_register_tool(
     path: str,
     campaign_id: str,
     catalog_dir: str | None = None,
     workspace_root: str | None = None,
     force: bool = False,
-    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
     """Register a claim TOML file with a campaign (path + SHA256 anchor).
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    NOT auto-classified as a direct decoration by the codegen audit's
+    ast.walk-based delegate scan -- `claim_register`'s async body resolves
+    catalog_dir/workspace_root (env-var fallback, live workspace
+    resolution) before its trailing `return _claim_register_sync(...)`,
+    which the walk finds regardless of what precedes it. Decorating
+    `_claim_register_sync` directly would have silently dropped that
+    resolution for the CLI (it takes already-resolved Path args with no
+    defaults). This wrapper restores it; `_claim_register_sync` itself
+    stays the shared low-level implementation both callers delegate to.
+    """
     cat_dir = _get_catalog_dir(catalog_dir)
 
     if workspace_root:
@@ -2806,19 +2889,17 @@ async def claim_register(
     return _claim_register_sync(path, campaign_id, cat_dir, ws, force=force)
 
 
-@cisternal.tool(registry="bathos")
-@traced_tool
-@require_write_token
-async def gate_stamp(
+@cisternal.tool(registry="bathos-cli", name="gate_stamp", cli_group="gate", cli_name="stamp")
+def gate_stamp_tool(
     gate_name: str,
     result: str,
     workspace_root: str | None = None,
-    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
     """Record a self-attested pass/fail for a BP-2 synthetic-recovery gate at current git HEAD.
 
     bathos does not run the test itself — run your project's own invariant test first, then
-    stamp the result here. Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    stamp the result here.
+    """
     from bathos.gate import stamp_gate
     from bathos.git import capture_git_state
 
@@ -2846,9 +2927,8 @@ async def gate_stamp(
     }
 
 
-@cisternal.tool(registry="bathos")
-@traced_tool
-async def gate_status(
+@cisternal.tool(registry="bathos-cli", name="gate_status", cli_group="gate", cli_name="status")
+def gate_status_tool(
     gate_name: str,
     guards: list[str],
     workspace_root: str | None = None,
@@ -2865,6 +2945,52 @@ async def gate_status(
 
     state = gate_state(ws, gate_name, guards)
     return {"ok": True, "gate_name": gate_name, "state": state}
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+@require_write_token
+async def claim_register(
+    path: str,
+    campaign_id: str,
+    catalog_dir: str | None = None,
+    workspace_root: str | None = None,
+    force: bool = False,
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
+) -> dict:
+    """Register a claim TOML file with a campaign (path + SHA256 anchor).
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    return claim_register_tool(
+        path, campaign_id, catalog_dir=catalog_dir, workspace_root=workspace_root, force=force
+    )
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+@require_write_token
+async def gate_stamp(
+    gate_name: str,
+    result: str,
+    workspace_root: str | None = None,
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
+) -> dict:
+    """Record a self-attested pass/fail for a BP-2 synthetic-recovery gate at current git HEAD.
+
+    bathos does not run the test itself — run your project's own invariant test first, then
+    stamp the result here. Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    return gate_stamp_tool(gate_name, result, workspace_root=workspace_root)
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def gate_status(
+    gate_name: str,
+    guards: list[str],
+    workspace_root: str | None = None,
+) -> dict:
+    """Report GREEN/STALE/RED/UNKNOWN for a named BP-2 synthetic-recovery gate."""
+    return gate_status_tool(gate_name, guards, workspace_root=workspace_root)
 
 
 @cisternal.tool(registry="bathos")
@@ -2935,19 +3061,30 @@ async def doc_schema(kind: str = "claim") -> dict:
     }
 
 
-@cisternal.tool(registry="bathos")
-@traced_tool
-@require_write_token
-async def claim_author(
-    claim: ClaimPayload,
+def claim_author_tool(
+    claim: ClaimPayload | dict,
     path: str = "",
     campaign_id: str = "",
     catalog_dir: str | None = None,
     workspace_root: str | None = None,
     force: bool = False,
-    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
+    actor: str = "mcp",
+    reason: str = "",
 ) -> dict:
     """Author a claim from a structured payload -- no hand-written TOML.
+
+    Shared core for both callers: the MCP tool (`claim_author`, below) takes
+    a typed `ClaimPayload` for schema discoverability, for callers that
+    validate it at the FastMCP protocol boundary -- but a direct in-process
+    caller can and does pass a raw dict (see test_authoring_parity.py's
+    `_author_via_mcp`, which bypasses that boundary entirely), so this
+    accepts either and passes it straight through unchanged; `author_claim`
+    itself does the ClaimPayload.model_validate() coercion (do NOT call
+    .model_dump() here first -- that breaks the raw-dict path, since a plain
+    dict has no .model_dump()). The CLI (`claim_author_cli_tool`) reads a raw
+    JSON blob via --from-json/stdin (matching the shipped Typer command's
+    UX, cli.py's claim_author_cmd) and passes the parsed dict through the
+    same way.
 
     The payload is rendered to canonical TOML, re-parsed with the same reader the read
     path uses, and validated BEFORE anything is written. A document that would fail
@@ -2961,8 +3098,6 @@ async def claim_author(
     On refusal, `error_code` is `document_invalid` (fix the fields) or `document_conflict`
     (a document already exists -- pass force=true to overwrite). Call `doc_schema` for the
     field list.
-
-    Requires token= matching the local ~/.bth/mcp_token (debt #619).
     """
     from bathos.authoring.write import author_claim
     from bathos.claim import resolve_claim_path
@@ -3025,8 +3160,8 @@ async def claim_author(
             claim,
             target,
             force=force,
-            actor="mcp",
-            reason="",
+            actor=actor,
+            reason=reason,
             catalog_db=db,
             workspace_root=ws,
             campaign_id=campaign_id or None,
@@ -3043,6 +3178,92 @@ async def claim_author(
             "its sha256 against the campaign."
         )
     return envelope
+
+
+@cisternal.tool(registry="bathos-cli", name="claim_author", cli_group="claim", cli_name="author")
+def claim_author_cli_tool(
+    path: str = "",
+    campaign_id: str = "",
+    from_json: str = "",
+    catalog_dir: str | None = None,
+    workspace_root: str | None = None,
+    force: bool = False,
+    reason: str = "",
+) -> dict:
+    """CLI entry point for `claim author`.
+
+    Reads a JSON claim payload from a file (--from-json PATH) or stdin
+    (--from-json -), matching the shipped Typer command's UX exactly
+    (cli.py's claim_author_cmd), then delegates to claim_author_tool -- the
+    same shared implementation the MCP tool wraps after a ClaimPayload
+    model_dump().
+    """
+    import json
+    import sys
+
+    if not from_json:
+        return {"ok": False, "error": "--from-json is required (a file path, or '-' for stdin)"}
+
+    try:
+        raw = sys.stdin.read() if from_json == "-" else Path(from_json).read_text()
+    except OSError as e:
+        return {"ok": False, "error": str(e), "error_code": "file_not_found"}
+
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as e:
+        return {"ok": False, "error": f"payload is not valid JSON: {e}"}
+
+    return claim_author_tool(
+        claim=payload,
+        path=path,
+        campaign_id=campaign_id,
+        catalog_dir=catalog_dir,
+        workspace_root=workspace_root,
+        force=force,
+        actor="cli",
+        reason=reason,
+    )
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+@require_write_token
+async def claim_author(
+    claim: ClaimPayload,
+    path: str = "",
+    campaign_id: str = "",
+    catalog_dir: str | None = None,
+    workspace_root: str | None = None,
+    force: bool = False,
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
+) -> dict:
+    """Author a claim from a structured payload -- no hand-written TOML.
+
+    The payload is rendered to canonical TOML, re-parsed with the same reader the read
+    path uses, and validated BEFORE anything is written. A document that would fail
+    validation is not written at all, so the target file is either absent or valid --
+    there is no write-then-flag state.
+
+    Supply either `path` (relative to the workspace root) or `campaign_id`, in which case
+    the claim lands at `.bth/claims/<campaign name>.claim.toml`. Passing `campaign_id`
+    also lets validation run its catalog-aware checks (baseline parity, gate state).
+
+    On refusal, `error_code` is `document_invalid` (fix the fields) or `document_conflict`
+    (a document already exists -- pass force=true to overwrite). Call `doc_schema` for the
+    field list.
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619).
+    """
+    return claim_author_tool(
+        claim=claim,
+        path=path,
+        campaign_id=campaign_id,
+        catalog_dir=catalog_dir,
+        workspace_root=workspace_root,
+        force=force,
+        actor="mcp",
+    )
 
 
 @cisternal.tool(registry="bathos-cli", name="new_experiment", cli_name="new-experiment")
@@ -3731,9 +3952,8 @@ async def mcp_repair_tool(
 # ── rule-card corpus (mirrors `bth ref`) ─────────────────────────────────────
 
 
-@cisternal.tool(registry="bathos")
-@traced_tool
-async def reference_list() -> dict:
+@cisternal.tool(registry="bathos-cli", name="reference_list", cli_group="ref", cli_name="list")
+def reference_list_tool() -> dict:
     """List every rule card in the shipped corpus.
 
     Returns {'ok': True, 'cards': [{id, title, severity, domain, source_check,
@@ -3759,9 +3979,8 @@ async def reference_list() -> dict:
     }
 
 
-@cisternal.tool(registry="bathos")
-@traced_tool
-async def reference_get(card_id: str) -> dict:
+@cisternal.tool(registry="bathos-cli", name="reference_get", cli_group="ref", cli_name="show")
+def reference_get_tool(card_id: str) -> dict:
     """Fetch one rule card by id, including its markdown body."""
     from bathos.corpus import CorpusError, get_card
 
@@ -3786,9 +4005,8 @@ async def reference_get(card_id: str) -> dict:
     }
 
 
-@cisternal.tool(registry="bathos")
-@traced_tool
-async def reference_search(query: str) -> dict:
+@cisternal.tool(registry="bathos-cli", name="reference_search", cli_group="ref", cli_name="search")
+def reference_search_tool(query: str) -> dict:
     """Substring search over card id, title, tags and body."""
     from bathos.corpus import search_cards
 
@@ -3803,9 +4021,10 @@ async def reference_search(query: str) -> dict:
     }
 
 
-@cisternal.tool(registry="bathos")
-@traced_tool
-async def reference_applicable(script: str, catalog_dir: str | None = None) -> dict:
+@cisternal.tool(
+    registry="bathos-cli", name="reference_applicable", cli_group="ref", cli_name="applicable"
+)
+def reference_applicable_tool(script: str, catalog_dir: str | None = None) -> dict:
     """Evaluate every card's applies_when against a script's sidecar.
 
     `unevaluable` is always returned alongside `fired`: a card that could NOT be checked must
@@ -3825,6 +4044,42 @@ async def reference_applicable(script: str, catalog_dir: str | None = None) -> d
         ],
         "unevaluable": [{"id": c.id, "error": e} for c, e in unevaluable],
     }
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def reference_list() -> dict:
+    """List every rule card in the shipped corpus.
+
+    Returns {'ok': True, 'cards': [{id, title, severity, domain, source_check,
+    has_applies_when}], 'errors': [...]}.
+    """
+    return reference_list_tool()
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def reference_get(card_id: str) -> dict:
+    """Fetch one rule card by id, including its markdown body."""
+    return reference_get_tool(card_id)
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def reference_search(query: str) -> dict:
+    """Substring search over card id, title, tags and body."""
+    return reference_search_tool(query)
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def reference_applicable(script: str, catalog_dir: str | None = None) -> dict:
+    """Evaluate every card's applies_when against a script's sidecar.
+
+    `unevaluable` is always returned alongside `fired`: a card that could NOT be checked must
+    never be indistinguishable from one that was checked and did not match.
+    """
+    return reference_applicable_tool(script, catalog_dir=catalog_dir)
 
 
 if __name__ == "__main__":

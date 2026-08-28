@@ -151,6 +151,32 @@ def test_cli_command_routes_through_the_shared_core():
 
 
 def test_mcp_tool_routes_through_the_shared_core():
-    assert _calls_author_claim((SRC / "mcp.py").read_text(), "claim_author"), (
-        "the claim_author MCP tool must delegate to authoring.write.author_claim"
+    # backlog #4702 Milestone 2: claim_author's own body no longer calls
+    # author_claim directly -- it delegates to claim_author_tool, the new
+    # plain sync function shared with the cyclopts CLI's `claim author`
+    # command (src/bathos/cli_cyclopts.py). The architectural invariant this
+    # test guards -- both surfaces route through ONE shared core, so they
+    # cannot silently drift apart -- still holds; the call chain just has one
+    # more hop now (claim_author -> claim_author_tool -> author_claim), so
+    # both links are checked instead of one direct call.
+    mcp_source = (SRC / "mcp.py").read_text()
+    assert _calls_author_claim(mcp_source, "claim_author_tool"), (
+        "claim_author_tool (the shared core both claim_author and "
+        "claim_author_cli_tool delegate to) must call authoring.write.author_claim"
+    )
+
+    tree = ast.parse(mcp_source)
+    claim_author_calls_claim_author_tool = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "claim_author":
+            claim_author_calls_claim_author_tool = any(
+                isinstance(call.func, ast.Name) and call.func.id == "claim_author_tool"
+                for call in ast.walk(node)
+                if isinstance(call, ast.Call)
+            )
+            break
+    else:
+        raise AssertionError("claim_author not found -- rename it here too")
+    assert claim_author_calls_claim_author_tool, (
+        "the claim_author MCP tool must delegate to claim_author_tool, the shared core"
     )

@@ -92,6 +92,25 @@ wire(
         "figure_lookup",
         "list_candidates",
         "get_blast_radius_status",
+        # claim group (Milestone 2 -- extraction-heavy batch; claim_register
+        # corrected from the codegen audit's "direct" classification, see
+        # claim_register_tool's docstring)
+        "claim_scaffold",
+        "claim_validate",
+        "claim_register",
+        "claim_author",
+        # gate group (Milestone 2)
+        "gate_stamp",
+        "gate_status",
+        # postmortem group (Milestone 2)
+        "postmortem_scaffold",
+        "postmortem_validate",
+        "postmortem_get",
+        # ref group (Milestone 2)
+        "reference_list",
+        "reference_get",
+        "reference_search",
+        "reference_applicable",
     ],
 )
 
