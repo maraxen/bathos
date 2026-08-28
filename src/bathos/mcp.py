@@ -395,6 +395,7 @@ def run_sql_tool(
 # ============================================================================
 
 
+@cisternal.tool(registry="bathos-cli", name="resolve_pin", cli_group="query", cli_name="resolve-pin")
 def resolve_pin_tool(
     run_id: str = "",
     output_path: str = "",
@@ -422,6 +423,7 @@ def resolve_pin_tool(
     return dataclasses.asdict(pin)
 
 
+@cisternal.tool(registry="bathos-cli", name="get_trust_state", cli_group="query", cli_name="trust-state")
 def get_trust_state_tool(
     content_hash: str = "",
     catalog_dir: str = "",
@@ -447,6 +449,7 @@ def get_trust_state_tool(
     }
 
 
+@cisternal.tool(registry="bathos-cli", name="query_attestation", cli_group="query", cli_name="attestation")
 def query_attestation_tool(
     content_hash: str = "",
     min_strength: str = "",
@@ -526,6 +529,7 @@ def read_figure_manifest_tool(
     return manifest.model_dump()
 
 
+@cisternal.tool(registry="bathos-cli", name="figure_lookup", cli_group="query", cli_name="figures")
 def figure_lookup_tool(
     asset_sha256: str = "",
     input_hash: str = "",
@@ -554,6 +558,7 @@ def figure_lookup_tool(
     return {"figures": figures, "count": len(figures)}
 
 
+@cisternal.tool(registry="bathos-cli", name="list_candidates", cli_group="query", cli_name="candidates")
 def list_candidates_tool(
     campaign_id: str = "",
     catalog_dir: str = "",
@@ -586,6 +591,9 @@ def list_candidates_tool(
 # ============================================================================
 
 
+@cisternal.tool(
+    registry="bathos-cli", name="blast_radius_assess", cli_group="blast-radius", cli_name="assess"
+)
 def blast_radius_assess_tool(
     catalog_dir: str = "",
     project_root: str = "",
@@ -665,6 +673,9 @@ def blast_radius_assess_tool(
     return result
 
 
+@cisternal.tool(
+    registry="bathos-cli", name="blast_radius_clear", cli_group="blast-radius", cli_name="clear"
+)
 def blast_radius_clear_tool(
     catalog_dir: str = "",
     entity_type: str = "",
@@ -699,6 +710,12 @@ def blast_radius_clear_tool(
     return dataclasses.asdict(record)
 
 
+@cisternal.tool(
+    registry="bathos-cli",
+    name="get_blast_radius_status",
+    cli_group="query",
+    cli_name="blast-status",
+)
 def get_blast_radius_status_tool(
     catalog_dir: str = "",
     entity_type: str = "",
@@ -738,6 +755,7 @@ def get_blast_radius_status_tool(
 # ============================================================================
 
 
+@cisternal.tool(registry="bathos-cli", name="anchor_insert", cli_group="anchor", cli_name="insert")
 def anchor_insert_tool(
     path: str = "",
     sha256: str = "",
@@ -780,6 +798,7 @@ def anchor_insert_tool(
     return {"ok": True, "anchor": dataclasses.asdict(record)}
 
 
+@cisternal.tool(registry="bathos-cli", name="anchor_get", cli_group="anchor", cli_name="get")
 def anchor_get_tool(
     path: str = "",
     sha256: str = "",
@@ -804,6 +823,7 @@ def anchor_get_tool(
     return {"ok": True, "anchor": dataclasses.asdict(record) if record else None}
 
 
+@cisternal.tool(registry="bathos-cli", name="anchor_find", cli_group="anchor", cli_name="find")
 def anchor_find_tool(
     kind: str = "",
     sha256: str = "",
@@ -845,6 +865,12 @@ def anchor_find_tool(
 # ============================================================================
 
 
+@cisternal.tool(
+    registry="bathos-cli",
+    name="figure_entry_register",
+    cli_group="anchor",
+    cli_name="figure-register",
+)
 def figure_entry_register_tool(
     asset_sha256: str = "",
     sidecar_ref: str = "",
@@ -916,6 +942,9 @@ def figure_entry_register_tool(
 # ============================================================================
 
 
+@cisternal.tool(
+    registry="bathos-cli", name="attestation_scaffold", cli_group="attestation", cli_name="scaffold"
+)
 def attestation_scaffold_tool(
     kind: str = "",
     workspace_root: str = "",
@@ -947,6 +976,9 @@ def attestation_scaffold_tool(
         return {"ok": False, "error": str(e), "error_code": "invalid_kind"}
 
 
+@cisternal.tool(
+    registry="bathos-cli", name="attestation_validate", cli_group="attestation", cli_name="validate"
+)
 def attestation_validate_tool(
     path: str = "",
 ) -> dict:
@@ -988,6 +1020,9 @@ def attestation_validate_tool(
     }
 
 
+@cisternal.tool(
+    registry="bathos-cli", name="attestation_register", cli_group="attestation", cli_name="register"
+)
 def attestation_register_tool(
     path: str = "",
     catalog_dir: str = "",
@@ -3186,6 +3221,7 @@ async def validate_sidecar(
     return result
 
 
+@cisternal.tool(registry="bathos-cli", name="list_outputs", cli_group="outputs", cli_name="list")
 def list_outputs_tool(
     run_id: str,
     workspace_root: str | None = None,
@@ -3242,6 +3278,7 @@ def list_outputs_tool(
     return {"run_id": run_id, "files": files, "live": live}
 
 
+@cisternal.tool(registry="bathos-cli", name="outputs_summary", cli_group="outputs", cli_name="summary")
 def outputs_summary_tool(
     workspace_root: str | None = None,
     project: str | None = None,

@@ -51,9 +51,9 @@ The codegen's `inner_fn` field is read from the MCP (`registry="bathos"`) partit
 ## Sequencing recommendation
 
 1. ~~Extend the codegen script with the async-wrapper audit~~ — **done 260828**, see above.
-2. Top-level singletons batch (19 commands: 14 direct + 5 extraction) — highest command-count-per-batch, lowest structural risk (no grouping). **In progress.**
-3. High-direct-ratio grouped batches (`anchor`, `attestation`, `blast-radius`, `outputs`, `query` = 15 direct, 0 extraction) — mechanically identical to the campaign pilot's direct-decoration commands.
-4. Extraction-heavy grouped batches (`claim`, `gate`, `postmortem`, `ref` = 10 commands, 9 of them needing a new plain sync function) — sequenced last since each needs real review, not just decorator-pasting.
+2. ~~Top-level singletons batch (19 commands: 14 direct + 5 extraction)~~ — **done 260828** (commits `61f69a00`, `3706543b`).
+3. ~~High-direct-ratio grouped batches (`anchor`, `attestation`, `blast-radius`, `outputs`, `query` = 15 direct, 0 extraction)~~ — **done 260828**: `anchor` (4), `attestation` (3), `blast-radius` partial (`assess`/`clear`, 2), `outputs` (2), `query` (6). 21 new CLI-level tests (`tests/test_registry_group_cli_cyclopts.py`), full targeted regression + Python-API-layer suite green.
+4. Extraction-heavy grouped batches (`claim`, `gate`, `postmortem`, `ref` = 10 commands, 9 of them needing a new plain sync function) — sequenced last since each needs real review, not just decorator-pasting. **Next up.**
 5. CLI-only batch (22 commands) — can run in parallel with 2-4 since it's independent; no ordering constraint.
 6. `claim author`'s payload design decision, folded into step 4's `claim` work.
 7. **Cutover**: once all 78 commands exist behind the registry-driven or hand-written cyclopts surface, retire the preview entry point, mount everything on the real `bth` cyclopts app, delete the old Typer `cli.py` surface, drop `typer` from `pyproject.toml`/`runner.py`. This is the point where `tests/test_cli.py`'s ~350 `CliRunner`-based assertions finally need to move onto `_cyclopts_runner.py` (or the equivalent shim, promoted to a permanent test utility at that point) — doing this as one coordinated cutover, not per-batch, avoids running two parallel CLI surfaces (typer + cyclopts) in the shipped binary at any point.

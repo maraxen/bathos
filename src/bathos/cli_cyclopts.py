@@ -69,6 +69,29 @@ wire(
         "repair",
         "new_experiment",
         "validate_sidecar",
+        # anchor group (Milestone 2)
+        "anchor_insert",
+        "anchor_get",
+        "anchor_find",
+        "figure_entry_register",
+        # attestation group (Milestone 2)
+        "attestation_scaffold",
+        "attestation_validate",
+        "attestation_register",
+        # blast-radius group, partial (Milestone 2 -- assess/clear only; the 3
+        # hook-management commands have no MCP equivalent, stay CLI-only)
+        "blast_radius_assess",
+        "blast_radius_clear",
+        # outputs group (Milestone 2)
+        "list_outputs",
+        "outputs_summary",
+        # query group (Milestone 2)
+        "resolve_pin",
+        "get_trust_state",
+        "query_attestation",
+        "figure_lookup",
+        "list_candidates",
+        "get_blast_radius_status",
     ],
 )
 
