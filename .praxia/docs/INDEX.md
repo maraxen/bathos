@@ -19,6 +19,8 @@
 - [260515_v02-sprint-plan](plans/260515_v02-sprint-plan.md)
 
 ## Specs
+- [260826_blast-radius-assessment-skill](specs/260826_blast-radius-assessment-skill.md) — Blast-radius assessment for bathos-tracked experiments
+- [260826_blast-radius-shadow-trigger](specs/260826_blast-radius-shadow-trigger.md) — Blast-radius shadow-mode git-hook trigger
 - [260729_post-mortem-obligations-targeted-review-schema-and-a-shipped-rule-card-corpus](specs/260729_post-mortem-obligations-targeted-review-schema-and-a-shipped-rule-card-corpus.md) — Unifies post-mortem workflow hooks, a [review] sidecar block for targeted literature/implementation review, and a machine-addressable reference corpus shipped in agent_assets/
 - [260707_scientific-validity-gates](specs/260707_scientific-validity-gates.md) — debt #200: `[invariants]` sidecar block (hard-fail on violated result assertions, reuses `[outcomes.*]` DuckDB-condition machinery), optional cross-run differential extension, `[sanity]` pre-flight block; not yet planned/implemented
 - [260618_abstraction-boundary-open-design-questio](specs/260618_abstraction-boundary-open-design-questio.md)
@@ -69,6 +71,7 @@
 ## Roadmaps
 
 ## Archive
+- [handoffs_migrated_260828_001](archive/handoffs_migrated_260828_001.md)
 
 ## Misc
 - [260515_mission](misc/260515_mission.md)
