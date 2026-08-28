@@ -275,6 +275,128 @@ def test_migrate_v12_to_v13_differential_fields_null_backfill(tmp_path):
     assert all(v == CURRENT_SCHEMA_VERSION for v in schema_versions)
 
 
+# =============================================================================
+# Defect 1 (260827_bathos-catalog-robustness): one corrupt cool-tier fragment
+# must not abort `bth migrate` for every project.
+# =============================================================================
+
+
+def _truncate_to_corrupt(path: Path) -> None:
+    """Truncate a valid Parquet file so it has no readable footer (see
+    test_catalog.py's identical helper for why this -- not a zero-byte file --
+    matches the real-world defect)."""
+    data = path.read_bytes()
+    assert len(data) > 100, "fixture fragment is too small to truncate meaningfully"
+    path.write_bytes(data[: len(data) // 2])
+
+
+def test_migrate_skips_corrupt_fragment(tmp_path):
+    """A truncated/corrupt fragment must be skipped and reported, not crash the scan.
+
+    Reproduces the real-world failure: `bth migrate --dry-run` aborted catalog-wide
+    with pyarrow.lib.ArrowInvalid on a single corrupt fragment in one project.
+    """
+    from bathos.migrate import migrate_catalog
+
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    _write_old_fragment(runs_dir, "good")
+    corrupt_path = _write_old_fragment(runs_dir, "corrupt")
+    _truncate_to_corrupt(corrupt_path)
+
+    result = migrate_catalog(tmp_path, dry_run=True)
+
+    assert result.scanned == 2
+    assert result.migrated == 1  # only the good, old-schema fragment
+    assert len(result.corrupt) == 1
+    assert result.corrupt[0] == corrupt_path
+
+
+def test_migrate_all_corrupt_returns_empty_not_raise(tmp_path):
+    from bathos.migrate import migrate_catalog
+
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    _write_old_fragment(runs_dir, "onlybad")
+    corrupt_path = runs_dir / "run_onlybad.parquet"
+    _truncate_to_corrupt(corrupt_path)
+
+    result = migrate_catalog(tmp_path, dry_run=True)
+    assert result.scanned == 1
+    assert result.migrated == 0
+    assert len(result.corrupt) == 1
+
+
+# =============================================================================
+# Defect 2 (260827_bathos-catalog-robustness): `bth migrate --dry-run` has no
+# way to scope to a single project -- it always scans/reports on every project
+# in the catalog.
+# =============================================================================
+
+
+def test_migrate_project_scoping_only_scans_named_project(tmp_path):
+    """migrate_catalog(project=...) must scope the scan to runs/<project>/ only,
+    leaving other projects' fragments untouched and uncounted.
+
+    Reproduces the real-world symptom: after adding 4 fragments to one project,
+    `bth migrate --dry-run` reported "Scanned 4061 fragments... Would migrate
+    3880" with no way to ask "just the 4 I added, in this project".
+    """
+    from bathos.migrate import migrate_catalog
+
+    alpha_dir = tmp_path / "runs" / "alpha"
+    beta_dir = tmp_path / "runs" / "beta"
+    alpha_dir.mkdir(parents=True)
+    beta_dir.mkdir(parents=True)
+
+    _write_old_fragment(alpha_dir, "a1")
+    _write_old_fragment(beta_dir, "b1")
+    _write_old_fragment(beta_dir, "b2")
+
+    result = migrate_catalog(tmp_path, dry_run=True, project="alpha")
+
+    assert result.scanned == 1
+    assert result.migrated == 1
+
+    # beta's fragments were never touched or even opened
+    beta_tbl = pq.read_table(beta_dir / "run_b1.parquet")
+    assert "outcome" not in beta_tbl.schema.names
+
+
+def test_migrate_no_project_scopes_to_all(tmp_path):
+    """Omitting project= keeps the pre-existing all-projects default behaviour."""
+    from bathos.migrate import migrate_catalog
+
+    alpha_dir = tmp_path / "runs" / "alpha"
+    beta_dir = tmp_path / "runs" / "beta"
+    alpha_dir.mkdir(parents=True)
+    beta_dir.mkdir(parents=True)
+
+    _write_old_fragment(alpha_dir, "a1")
+    _write_old_fragment(beta_dir, "b1")
+
+    result = migrate_catalog(tmp_path, dry_run=True)
+    assert result.scanned == 2
+    assert result.migrated == 2
+
+
+def test_cli_migrate_project_flag(tmp_path, monkeypatch):
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_path))
+    alpha_dir = tmp_path / "runs" / "alpha"
+    beta_dir = tmp_path / "runs" / "beta"
+    alpha_dir.mkdir(parents=True)
+    beta_dir.mkdir(parents=True)
+    _write_old_fragment(alpha_dir, "a1")
+    _write_old_fragment(beta_dir, "b1")
+
+    from bathos.cli import app
+
+    result = runner.invoke(app, ["migrate", "--dry-run", "--project", "alpha"])
+    assert result.exit_code == 0
+    assert "Scanned 1 fragments" in result.output
+    assert "alpha" in result.output
+
+
 def test_migrate_v14_to_v15_git_provenance_fields_null_backfill(tmp_path):
     """v14→v15 migration: git_dirty_content_id/git_provenance_source backfill to None, not
     ''. A run predating the myxcel provenance-capture feature has no recorded content id or
