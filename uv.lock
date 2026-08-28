@@ -139,7 +139,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cisternal", editable = "../cisternal" },
+    { name = "cisternal", git = "https://github.com/maraxen/cisternal?rev=6c0819a509d584a9470817e9383cc015940e6a74" },
     { name = "duckdb", specifier = ">=1.0" },
     { name = "fastapi", marker = "extra == 'viz'", specifier = ">=0.110" },
     { name = "fastmcp", specifier = ">=3.3.1" },
@@ -322,39 +322,13 @@ wheels = [
 
 [[package]]
 name = "cisternal"
-version = "0.1.1a5"
-source = { editable = "../cisternal" }
+version = "0.1.1a7"
+source = { git = "https://github.com/maraxen/cisternal?rev=6c0819a509d584a9470817e9383cc015940e6a74#6c0819a509d584a9470817e9383cc015940e6a74" }
 dependencies = [
     { name = "cyclopts" },
     { name = "fastmcp" },
     { name = "opentelemetry-api" },
     { name = "pyyaml" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "cyclopts", specifier = ">=4.18.0" },
-    { name = "fastmcp", specifier = "==4.0.0a2" },
-    { name = "opentelemetry-api", specifier = ">=1.42.1" },
-    { name = "opentelemetry-exporter-otlp-proto-grpc", marker = "extra == 'otlp'", specifier = ">=1.42.1" },
-    { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'otlp'", specifier = ">=1.42.1" },
-    { name = "opentelemetry-sdk", marker = "extra == 'otlp'", specifier = ">=1.42.1" },
-    { name = "opentelemetry-semantic-conventions", marker = "extra == 'otlp'", specifier = ">=0.63b1" },
-    { name = "pyyaml", specifier = ">=6.0.2" },
-]
-provides-extras = ["otlp"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "opentelemetry-exporter-otlp-proto-grpc", specifier = ">=1.42.1" },
-    { name = "opentelemetry-exporter-otlp-proto-http", specifier = ">=1.42.1" },
-    { name = "opentelemetry-sdk", specifier = ">=1.42.1" },
-    { name = "opentelemetry-semantic-conventions", specifier = ">=0.63b1" },
-    { name = "pytest", specifier = ">=9.0.3" },
-    { name = "pytest-asyncio", specifier = ">=0.24.0" },
-    { name = "pytest-cov", specifier = ">=7.1.0" },
-    { name = "ruff", specifier = ">=0.15.17" },
-    { name = "ty", specifier = ">=0.0.49" },
 ]
 
 [[package]]
