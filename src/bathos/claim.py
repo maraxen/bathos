@@ -542,6 +542,8 @@ def scaffold_claim(campaign_id: str, db: duckdb.DuckDBPyConnection, workspace_ro
     Raises:
         RuntimeError: If campaign not found or directory cannot be created
     """
+    from bathos.authoring.render import render_claim
+    from bathos.authoring.scaffolds import scaffold_claim_payload
     from bathos.campaigns import CampaignError, _resolve_campaign_id
 
     try:
@@ -560,69 +562,17 @@ def scaffold_claim(campaign_id: str, db: duckdb.DuckDBPyConnection, workspace_ro
     claims_dir = workspace_root / ".bth" / "claims"
     claims_dir.mkdir(parents=True, exist_ok=True)
 
-    # Generate template
-    template = f"""# Claim for campaign: {campaign_name}
-# Generated via bth claim scaffold
-
-[claim]
-headline = "REQUIRED: One-sentence summary of what this campaign tests"
-kill_condition = "REQUIRED: Under what conditions would the result contradict the hypothesis?"
-# REQUIRED (debt #1071): is a null result a live possibility this kill_condition needs to
-# rule out? If true, at least one [[claim.union_gate.clauses]] entry below must set
-# positive_control = true, proving (via a [differential] pre-flight) that the instrument
-# can actually detect a known-real effect -- otherwise a null result is unfalsifiable-by-
-# instrument-failure.
-kill_condition_satisfiable_by_null = false
-regime = "Optional: Parameter ranges or conditions claimed to be covered"
-
-[[hypotheses]]
-id = "H_information_symmetry"
-label = "REQUIRED: Descriptive label for primary hypothesis"
-predicted_signature = "Optional: Expected metric fingerprint"
-
-[[hypotheses]]
-id = "H_null_misspec"
-label = "REQUIRED: Null or misspecification hypothesis"
-predicted_signature = "Optional: Expected metric fingerprint if null hypothesis is true"
-
-[[assumptions]]
-id = "A_measurement_valid"
-label = "REQUIRED: Descriptive assumption label"
-
-[[confounds]]
-id = "C_topology_coupling"
-label = "REQUIRED: Confound label"
-[confounds.reference_parity]
-reference_paper = "Optional: Citation if baseline from literature"
-reference_metric = "Optional: metric key in baseline run"
-reference_value = 1.0
-equivalence_bound = 0.05
-parity_run_id = ""
-
-[[confounds]]
-id = "C_pipeline_soundness"
-label = "REQUIRED: which pipeline component this campaign's runs depend on"
-[confounds.synthetic_recovery]
-gate_name = "REQUIRED: a name for the known-answer invariant test that proves this component sound"
-guards = ["REQUIRED: source paths whose change invalidates a recorded green stamp"]
-# Prove the invariant test passes yourself, then: bth gate stamp <gate_name> --result pass
-
-# Matrix indexed by hypothesis-pair × outcome-label
-# predicted_outcome: any outcome label from the runs, or "??" for unspecified
-[[claim.discriminability]]
-hypothesis_a = "H_information_symmetry"
-hypothesis_b = "H_null_misspec"
-planned_run_label = "outcome_1"
-predicted_outcome = "??  # EDIT: assign expected outcome if run exists"
-
-[claim.union_gate]
-[[claim.union_gate.clauses]]
-id = "C_main"
-description = "REQUIRED: What does this clause discriminate?"
-hypothesis_ids = ["H_information_symmetry", "H_null_misspec"]
-# positive_control = true  # set true (+ kill_condition_satisfiable_by_null=true above) if
-                           # this clause is proven by a [differential] pre-flight run
-"""
+    # Build the scaffold as a structured payload and render it. Emitting the
+    # document from a model rather than a hand-written f-string is what makes a
+    # structural mistake (such as the [claim.discriminability] /
+    # [[claim.discriminability]] table-vs-array collision that made every scaffolded
+    # claim unparseable) impossible to express in the first place.
+    payload = scaffold_claim_payload()
+    template = render_claim(
+        payload,
+        header=f"Claim for campaign: {campaign_name}\nGenerated via bth claim scaffold",
+        guidance=True,
+    )
 
     claim_path = claims_dir / f"{campaign_name}.claim.toml"
     claim_path.write_text(template)

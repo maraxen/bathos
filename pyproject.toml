@@ -32,6 +32,10 @@ dependencies = [
     "rich>=13",
     "fastmcp>=3.3.1",
     "cisternal>=0.1.1a3",
+    # Already present transitively via fastmcp and already imported directly by
+    # figure_manifest.py and campaign_report.py -- declared here so the authoring
+    # payload models do not rest on an undeclared transitive dependency.
+    "pydantic>=2.7",
 ]
 
 # TEMPORARY dev-time override: cisternal's provenance module (this PR depends on
