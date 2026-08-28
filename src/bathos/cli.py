@@ -370,6 +370,19 @@ def compact(
     typer.echo(f"Compacted {result.ingested} runs into bathos.db in {result.duration_s:.1f}s")
 
 
+class _AuthoringVerifyView:
+    """Adapts a ledger VerifyResult to the tier-result shape `bth verify` prints."""
+
+    tier = "authoring"
+
+    def __init__(self, result):
+        self.ok = result.ok
+        self.warnings = list(result.warnings)
+        self.errors = list(result.errors)
+        if result.entries_checked:
+            self.warnings.insert(0, f"{result.entries_checked} ledger entries checked")
+
+
 @app.command()
 def verify(
     tier: str = typer.Option(
@@ -380,6 +393,14 @@ def verify(
     ),
     archive_dir: Path | None = typer.Option(
         None, "--archive-dir", "-d", help="Archive root (default: ~/.bth/archive)"
+    ),
+    authoring: bool = typer.Option(
+        False,
+        "--authoring",
+        help=(
+            "Also verify the authored-document ledger: that its entries chain, and that "
+            "each document still matches its newest recorded sha256"
+        ),
     ),
 ):
     """Verify catalog integrity across cool, warm, and archive tiers."""
@@ -399,6 +420,13 @@ def verify(
     else:
         typer.echo(f"Unknown tier: {tier!r}. Choose cool, warm, archive, or all.", err=True)
         raise typer.Exit(1)
+
+    if authoring:
+        from bathos.authoring.ledger import verify_authoring_ledger
+        from bathos.workspace import resolve_workspace
+
+        ledger = verify_authoring_ledger(resolve_workspace().fs_root)
+        results = [*results, _AuthoringVerifyView(ledger)]
 
     any_errors = False
     for result in results:
@@ -1095,6 +1123,7 @@ def claim_author_cmd(
     import duckdb
 
     from bathos.authoring.write import author_claim
+    from bathos.workspace import resolve_workspace
 
     raw = sys.stdin.read() if from_json == "-" else Path(from_json).read_text()
     try:
@@ -1115,6 +1144,7 @@ def claim_author_cmd(
             actor="cli",
             reason=reason,
             catalog_db=db,
+            workspace_root=resolve_workspace().fs_root,
         )
     finally:
         if db is not None:

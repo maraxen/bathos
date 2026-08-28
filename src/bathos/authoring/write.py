@@ -19,12 +19,17 @@ let a broken renderer straight through.
 The gate is also what makes validation unskippable. Today an agent can scaffold, hand-
 edit, and simply never call validate; here the validator runs before the bytes exist.
 
-NOT YET IMPLEMENTED: the append-only mutation ledger. It is specified to use
-``cisternal.provenance.durable.append_manifest`` (flock'd, append-mode JSONL), which
-does not exist in the released cisternal 0.1.1a3 -- it lives on the unmerged
-``feat/provenance-module`` branch. Rather than fork a second implementation of a
-mechanism that is deliberately shared with myxcel, the ledger append is left as a single
-documented seam (:func:`_record_mutation`) that currently emits telemetry only.
+Step 7 is an append-only ledger line (see :mod:`bathos.authoring.ledger`), written
+through ``cisternal.provenance.durable.append_manifest`` -- flock'd, append-mode, with no
+update or delete API anywhere below it.
+
+The ledger append is ordered AFTER the write and is allowed to undo it. If the append
+fails inside a repository, the document is restored to its previous bytes (or removed, if
+this call created it) and the whole operation is reported as a refusal. The alternative --
+leaving a document on disk with no record of how it got there -- is exactly the state the
+ledger exists to make impossible. Outside a repository there is no tracked manifest to
+append to, which is legitimate; that case reports ``ledger_recorded=False`` rather than
+failing.
 """
 
 from __future__ import annotations
@@ -58,6 +63,8 @@ class AuthorResult:
     infos: list[str] = field(default_factory=list)
     unknown_keys: list[str] = field(default_factory=list)
     error_code: str | None = None
+    ledger_recorded: bool = False
+    ledger_note: str = ""
 
     @property
     def resolution_hint(self) -> str:
@@ -81,6 +88,8 @@ class AuthorResult:
             "warnings": list(self.warnings),
             "infos": list(self.infos),
             "unknown_keys": list(self.unknown_keys),
+            "ledger_recorded": self.ledger_recorded,
+            "ledger_note": self.ledger_note or None,
         }
 
 
@@ -112,26 +121,58 @@ def _atomic_write(path: Path, content: str) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _default_workspace_root(target: Path) -> Path:
+    """Where the ledger lives for *target*: its repository, else its own directory."""
+    from cisternal.provenance.durable import repo_root
+
+    parent = Path(target).parent
+    return repo_root(parent) or parent
+
+
+def _rollback(target: Path, before_content: bytes | None) -> None:
+    """Undo a write: restore the prior bytes, or remove a file this call created."""
+    if before_content is None:
+        target.unlink(missing_ok=True)
+    else:
+        target.write_bytes(before_content)
+
+
 def _record_mutation(
     *,
     doc_kind: str,
     path: Path,
+    workspace_root: Path,
     before_sha256: str | None,
     after_sha256: str,
+    before_blob_sha: str | None,
     op: str,
     actor: str,
     reason: str,
-) -> None:
-    """Record a document mutation.
+    campaign_id: str | None = None,
+):
+    """Append the ledger line and emit telemetry.
 
-    Currently telemetry only. The append-only, content-addressed ledger entry belongs
-    here too and is specified to go through
-    ``cisternal.provenance.durable.append_manifest`` into ``.bth/refs/authoring.jsonl``
-    (``.bth/refs`` is already in ``bathos.git_pin.PROVENANCE_PATHS``, so such a ledger
-    would be git-tracked and snapshot-captured for free). That module is not in the
-    released cisternal, so the append is deferred rather than duplicated here.
+    Raises:
+        LedgerAppendError: inside a repository, when the append did not land. The caller
+            rolls the document write back rather than leaving it unrecorded.
     """
+    from bathos.authoring.ledger import append_authoring_entry, build_entry
     from bathos.telemetry import event
+
+    entry = build_entry(
+        doc_kind=doc_kind,
+        path=path,
+        workspace_root=workspace_root,
+        before_sha256=before_sha256,
+        after_sha256=after_sha256,
+        before_blob_sha=before_blob_sha,
+        op=op,
+        actor=actor,
+        reason=reason,
+        campaign_id=campaign_id,
+    )
+
+    ledger = append_authoring_entry(entry, workspace_root)
 
     event(
         f"authoring.{op}",
@@ -141,7 +182,9 @@ def _record_mutation(
         after_sha256=after_sha256,
         actor=actor,
         reason=reason,
+        ledger_recorded=ledger.recorded,
     )
+    return ledger
 
 
 def author_claim(
@@ -152,6 +195,8 @@ def author_claim(
     actor: str = "cli",
     reason: str = "",
     catalog_db=None,
+    workspace_root: Path | None = None,
+    campaign_id: str | None = None,
 ) -> AuthorResult:
     """Author a claim document from a structured payload.
 
@@ -189,13 +234,15 @@ def author_claim(
     # 2. Conflict check before doing any work.
     target = Path(target)
     before_sha256: str | None = None
+    before_content: bytes | None = None
     if target.exists():
         if not force:
             return _refusal(
                 BathosErrorCode.DOCUMENT_CONFLICT,
                 [f"a document already exists at {target}"],
             )
-        before_sha256 = hashlib.sha256(target.read_bytes()).hexdigest()
+        before_content = target.read_bytes()
+        before_sha256 = hashlib.sha256(before_content).hexdigest()
 
     # 3. Render.
     rendered = render_claim(payload, guidance=False)
@@ -226,18 +273,38 @@ def author_claim(
         )
 
     # 6. Write atomically.
+    root = Path(workspace_root) if workspace_root else _default_workspace_root(target)
+
+    # Stash the superseded bytes in the git object store BEFORE overwriting them, so the
+    # ledger's before_blob_sha refers to content that is actually recoverable.
+    before_blob_sha = None
+    if before_content is not None:
+        from bathos.authoring.ledger import stash_blob
+
+        before_blob_sha = stash_blob(before_content, root)
+
     sha256 = _atomic_write(target, rendered)
 
-    # 7. Record.
-    _record_mutation(
-        doc_kind="claim",
-        path=target,
-        before_sha256=before_sha256,
-        after_sha256=sha256,
-        op="amend" if before_sha256 else "create",
-        actor=actor,
-        reason=reason,
-    )
+    # 7. Record. A ledger failure inside a repository undoes the write -- a document with
+    #    no record of its provenance is worse than no document.
+    from bathos.authoring.ledger import LedgerAppendError
+
+    try:
+        ledger = _record_mutation(
+            doc_kind="claim",
+            path=target,
+            workspace_root=root,
+            before_sha256=before_sha256,
+            after_sha256=sha256,
+            before_blob_sha=before_blob_sha,
+            op="amend" if before_sha256 else "create",
+            actor=actor,
+            reason=reason,
+            campaign_id=campaign_id,
+        )
+    except LedgerAppendError as e:
+        _rollback(target, before_content)
+        return _refusal(BathosErrorCode.DOCUMENT_INVALID, [str(e)])
 
     return AuthorResult(
         ok=True,
@@ -245,4 +312,6 @@ def author_claim(
         sha256=sha256,
         warnings=list(result.warnings),
         infos=list(result.infos),
+        ledger_recorded=ledger.recorded,
+        ledger_note=ledger.reason,
     )

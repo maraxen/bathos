@@ -2889,6 +2889,8 @@ async def claim_author(
             actor="mcp",
             reason="",
             catalog_db=db,
+            workspace_root=ws,
+            campaign_id=campaign_id or None,
         )
     finally:
         if db is not None:

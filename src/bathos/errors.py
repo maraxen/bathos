@@ -152,4 +152,9 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     # .bth/catalog disagrees with the remote root's catalog -- same
     # integrity family as CatalogError.
     "CatalogIdentityError": BathosErrorCode.CATALOG_ERROR,
+    # Structured document authoring (bathos.authoring.ledger): the append-only
+    # mutation ledger could not be written inside a repository where it should
+    # have been. The document write is rolled back, so this surfaces as an
+    # invalid-document refusal rather than a partially-recorded success.
+    "LedgerAppendError": BathosErrorCode.DOCUMENT_INVALID,
 }

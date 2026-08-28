@@ -56,6 +56,12 @@ RUN_REF_PREFIX = "refs/bathos/runs"
 WIP_REF_PREFIX = "refs/bathos/wip"
 MANIFEST_RELPATH = Path(".bth") / "refs" / "manifest.jsonl"
 
+# The authored-document mutation ledger, kept separate from the run manifest above: they
+# answer different questions (which tree did this RUN execute against, versus how did this
+# DOCUMENT come to have these bytes) and are appended by different code paths at different
+# times. Sharing one file would interleave them for no benefit and complicate both readers.
+AUTHORING_RELPATH = Path(".bth") / "refs" / "authoring.jsonl"
+
 # Paths whose contents a run's provenance may point at, and which are therefore useless if the
 # repository is configured to ignore them. `.bth/claims/` holds claim-tier pre-registrations, whose
 # sha256 is the tamper anchor the Union Gate evaluates against at `campaign conclude`.
@@ -66,6 +72,7 @@ EXPORT_DIRNAME = Path("outputs") / "provenance"
 __all__ = [
     "DEFAULT_MAX_SNAPSHOT_BYTES",
     "EXPORT_DIRNAME",
+    "AUTHORING_RELPATH",
     "MANIFEST_RELPATH",
     "PROVENANCE_PATHS",
     "RUN_REF_PREFIX",
@@ -76,6 +83,7 @@ __all__ = [
     "ImportReport",
     "PinResult",
     "SnapshotResult",
+    "append_authoring_manifest",
     "append_manifest",
     "export_bundle",
     "ignored_declared_paths",
@@ -106,6 +114,16 @@ def append_manifest(entry: dict, cwd: Path) -> Path | None:
     return _append_manifest(entry, cwd, MANIFEST_RELPATH)
 
 
+def append_authoring_manifest(entry: dict, cwd: Path) -> Path | None:
+    """Append one entry to the authored-document ledger.
+
+    Returns None both when the append failed AND when *cwd* is not in a git repository --
+    cisternal conflates the two. bathos.authoring.ledger disambiguates them; callers
+    should go through that rather than reading a None here as "no repo".
+    """
+    return _append_manifest(entry, cwd, AUTHORING_RELPATH)
+
+
 def manifest_candidates(cwd: Path) -> list[Path]:
     return _manifest_candidates(cwd, MANIFEST_RELPATH)
 
@@ -130,7 +148,9 @@ def export_bundle(
         target_dir = root / EXPORT_DIRNAME if root else None
     if target_dir is None:
         return None
-    return _export_bundle(run_id, pinned_sha, head_sha, cwd, target_dir, RUN_REF_PREFIX, WIP_REF_PREFIX)
+    return _export_bundle(
+        run_id, pinned_sha, head_sha, cwd, target_dir, RUN_REF_PREFIX, WIP_REF_PREFIX
+    )
 
 
 def import_bundles(cwd: Path, import_dir: Path | None = None) -> ImportReport:
@@ -161,7 +181,9 @@ def pin_run(
     `BTH_FORCE_PROVENANCE_EXPORT` set -- in which case it defaults to
     `<repo_root>/outputs/provenance`.
     """
-    is_remote = bool(os.environ.get("SLURM_JOB_ID") or os.environ.get("BTH_FORCE_PROVENANCE_EXPORT"))
+    is_remote = bool(
+        os.environ.get("SLURM_JOB_ID") or os.environ.get("BTH_FORCE_PROVENANCE_EXPORT")
+    )
     effective_export_dir = export_dir
     if effective_export_dir is None and is_remote:
         root = repo_root(cwd)
@@ -169,10 +191,17 @@ def pin_run(
             effective_export_dir = root / EXPORT_DIRNAME
 
     return _pin_run(
-        run_id, git_hash, git_branch, dirty, cwd,
-        declared_paths=declared_paths, max_snapshot_bytes=max_snapshot_bytes,
-        export_dir=effective_export_dir, provenance_paths=PROVENANCE_PATHS,
-        run_ref_prefix=RUN_REF_PREFIX, wip_ref_prefix=WIP_REF_PREFIX,
+        run_id,
+        git_hash,
+        git_branch,
+        dirty,
+        cwd,
+        declared_paths=declared_paths,
+        max_snapshot_bytes=max_snapshot_bytes,
+        export_dir=effective_export_dir,
+        provenance_paths=PROVENANCE_PATHS,
+        run_ref_prefix=RUN_REF_PREFIX,
+        wip_ref_prefix=WIP_REF_PREFIX,
         manifest_relpath=MANIFEST_RELPATH,
         identity_name="bathos",
         identity_email="bathos@localhost",
