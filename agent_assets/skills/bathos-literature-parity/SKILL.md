@@ -16,7 +16,7 @@ When you reimplement a method from a published paper — especially one that pub
 - The reimplementation will be compared against the published results or other baselines
 - You need to flag the `[confounds.reference_parity]` confound as *controlled* for downstream claim-tier gates
 
-**Outcome:** A graded parity run with verdict PARITY (faithfully reimplemented), PARTIAL (controlled deviations documented), or FAIL (significant discrepancies). The verdict controls whether the F2 conclude-gate and F3 submit-gate allow downstream campaigns to proceed.
+**Outcome:** A graded parity run with verdict PARITY (faithfully reimplemented), PARTIAL (controlled deviations documented), or FAIL (significant discrepancies). The verdict controls whether the F2 conclude-gate, F3 submit-gate, and F4 binding-gate allow downstream campaigns to proceed.
 
 ## The 5-phase protocol
 
@@ -104,22 +104,25 @@ In practice: if Phase 3 or 4 identifies a potential defect (e.g., "the method is
 
 Once a parity run completes successfully:
 
-1. **Record the run ID** — `bth show <run-id>` to get its UUID
-2. **Populate `[confounds.reference_parity]` in your campaign's `claim.bth.toml`** (see **bathos-campaigns**):
-   ```toml
-   [[confounds]]
-   id = "C_baseline"
-   label = "baseline is the published method, not a weak reimplementation"
-   [confounds.reference_parity]
-   parity_run_id = "run_12abc345..."  # from the parity run
-   ```
+1. **Scaffold the confound block** — `bth claim scaffold` (see **bathos-campaigns**) emits a
+   `[confounds.reference_parity]` block with reference_paper/reference_metric/reference_value/
+   equivalence_bound and an empty `parity_run_id = ""` placeholder. Fill in the metadata fields
+   by hand; leave `parity_run_id` empty.
+2. **Bind the run — never hand-edit `parity_run_id`** — `bth campaign attest-parity
+   <campaign-id> <parity-run-id>` (MCP: `claim_attest_parity`, gate F4). It validates the run is a
+   real passing parity run, then atomically replaces the literal `parity_run_id = ""` placeholder
+   and re-anchors the claim's recorded SHA. It works by text-replacing that exact empty string —
+   if you fill it in by hand first there is nothing left to bind, and the command refuses with
+   "parity_run_id already set or TOML format mismatch."
 3. **At campaign conclude** (F2 gate) — the Union Gate reads the parity run's verdict:
    - PARITY or PARTIAL → confound marked controlled; campaign proceeds
    - FAIL → confound uncontrolled; confirmation/sequential campaign downgrades to `confounded`
-4. **At campaign submit** (F3 gate) — a reproduction sidecar can declare a prerequisite parity run:
+4. **At campaign submit** (F3 gate) — a reproduction sidecar can declare a prerequisite parity run
+   by *script stem*, not run ID — any future passing `literature_parity` run whose command
+   contains this stem satisfies the gate:
    ```toml
    [reproduction]
-   requires_parity = "run_12abc345..."  # hard-blocks validation/production if uncontrolled
+   requires_parity_stem = "parity_validate"  # hard-blocks validation/production if unmet
    ```
 
 ## Evidence channels and evidence severity

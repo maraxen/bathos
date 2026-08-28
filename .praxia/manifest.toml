@@ -51,6 +51,11 @@ path     = "agent_assets/skills/bathos-campaigns/SKILL.md"
 triggers = ["bth campaign", "claim", "union gate", "figure manifest", "postmortem", "bth lineage", "bth cite"]
 
 [[plugin.skills]]
+name     = "bathos-rigor-gates"
+path     = "agent_assets/skills/bathos-rigor-gates/SKILL.md"
+triggers = ["review_tier", "obligations", "positive_control", "differential", "synthetic_recovery", "bth gate", "negative_check", "bth ref", "campaign_edges", "stats_gates", "capability_probe"]
+
+[[plugin.skills]]
 name     = "bathos-literature-parity"
 path     = "agent_assets/skills/bathos-literature-parity/SKILL.md"
 triggers = ["literature parity", "reimplemented baseline", "parity.bth.toml", "reference_parity"]
@@ -63,7 +68,12 @@ triggers = ["bathos mcp", "BathosErrorCode", "error envelope", "validation_ok"]
 [[plugin.skills]]
 name     = "bathos-trust-ledger"
 path     = "agent_assets/skills/bathos-trust-ledger/SKILL.md"
-triggers = ["graduate_product", "register_attestation", "resolve_pin", "get_trust_state", "query_attestation", "GRADUATION_REFUSED", "attestation.bth.toml", "trust_state"]
+triggers = ["graduate_product", "register_attestation", "resolve_pin", "get_trust_state", "query_attestation", "list_candidates", "GRADUATION_REFUSED", "GraduationRefused", "oracle_match", "repro_floor", "attestation.bth.toml", "trust_state"]
+
+[[plugin.skills]]
+name     = "bathos-blast-radius"
+path     = "agent_assets/skills/bathos-blast-radius/SKILL.md"
+triggers = ["bth blast-radius", "blast_radius_assess", "blast_radius_ledger", "shadow-check", "install-hook", "query blast-status", "shadow-log"]
 
 [[plugin.snippets]]
 name           = "bathos-rules"

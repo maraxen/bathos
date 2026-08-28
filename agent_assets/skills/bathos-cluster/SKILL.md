@@ -56,7 +56,10 @@ Sidecar `[cluster]` section overrides `.bth.toml` defaults. CLI flags override s
 bth sync engaging
 ```
 
-Uses myxcel to rsync local catalog to cluster remote. Only syncs current project (v0.4+).
+Runs `rsync` over SSH directly (not via myxcel) to push the cool-tier catalog — both
+`{catalog}/runs/<project>/*.parquet` and `{catalog}/campaigns/*.json` cool-JSON campaign
+records — to the remote's `{remote_root}/.bth/catalog`. Only syncs current project (v0.4+).
+`bathos.db` (the warm DuckDB) is deliberately never rsynced.
 
 ### Pull from Remote
 
@@ -64,13 +67,16 @@ Uses myxcel to rsync local catalog to cluster remote. Only syncs current project
 bth sync engaging --pull
 ```
 
-Fetches latest catalog fragments from cluster. Merges with local catalog.
+Fetches run Parquet fragments and campaign cool-JSON from the cluster and merges them into
+the local catalog. `bth campaign show`/`list` union cool JSON with `bathos.db` at read time,
+so newly-pulled campaigns show up immediately; `bth find`/SQL-level queries against the warm
+tier need `bth compact` first to fold new cool-tier data (runs and campaigns) into `bathos.db`.
 
 ### Full Workflow
 
 ```bash
-bth sync engaging --pull  # Get latest cluster results
-bth find --filter "slurm_job_id = '12345'"  # Query locally
+bth sync engaging --pull      # Get latest cluster results (runs + campaign JSON)
+bth find --slurm-job 12345    # Query locally
 ```
 
 ## Remote Profiles
@@ -78,18 +84,25 @@ bth find --filter "slurm_job_id = '12345'"  # Query locally
 ### Add Remote
 
 ```bash
-bth remote add engaging --host engaging.csail.mit.edu --path ~/projects/myproject
+bth remote add engaging engaging.csail.mit.edu:~/projects/myproject
 ```
 
-Registers cluster host for sync and submission.
+`bth remote add <name> <host>:<path>` — two positional arguments in `host:path` form, not
+`--host`/`--path` flags. Registers the cluster host for sync and submission, and
+(re)writes `scripts/slurm/_bth_env.sh` so cluster jobs export `BTH_CATALOG_DIR` pointing at
+`{remote_root}/.bth/catalog`. `bth submit` checks this file matches the configured remote
+and hard-fails with a `CatalogIdentityError` if it doesn't — re-run `bth remote add` after
+hand-editing a remote's path in `.bth.toml`.
 
 ### List Remotes
 
 ```bash
-bth remote ls
+bth remote list
 ```
 
-Shows configured remotes.
+Shows configured remotes. (There's no `ls` alias — `bth remote ls` errors with
+"No such command 'ls'. Did you mean 'list'?".)
+
 
 ### Test Connectivity
 

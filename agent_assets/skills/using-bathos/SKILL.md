@@ -12,7 +12,7 @@ This skill covers the daily-driver workflow: installation, run tracking, sidecar
 
 ## Core Concepts
 
-**Run** — A single script execution tracked in the catalog. Fields: `id`, `project_slug`, `command`, `argv`, `git_hash`, `git_branch`, `timestamp`, `duration_s`, `exit_code`, `status`, `output_paths`, `tags`, `outcome`, `sidecar_sha256`, `campaign_id`, `slurm_job_id`, `slurm_array_task_id`, postmortem metadata.
+**Run** — A single script execution tracked in the catalog. Fields: `id`, `project_slug`, `command`, `argv`, `git_hash`, `git_branch`, `timestamp`, `duration_s`, `exit_code`, `status`, `output_paths`, `tags`, `outcome`, `sidecar_sha256`, `campaign_id`, `slurm_job_id`, `slurm_array_task_id`, postmortem metadata. Dirty runs (with uncommitted changes) get a real snapshot commit via a throwaway index rather than a hash of a possibly-nonexistent tree; remote/cluster dirty runs bundle provenance home via `outputs/provenance/`.
 
 **Sidecar** — A `.bth.toml` file alongside a script that pre-registers hypothesis, expected outcome conditions (DuckDB SQL), and result schema. Enforced by default at `bth run` time (use `--no-sidecar` to bypass, logs `BYPASSED`).
 
@@ -21,6 +21,8 @@ This skill covers the daily-driver workflow: installation, run tracking, sidecar
 **Campaign** — A named group of related runs. Accessible via `bth campaign` subcommands; queries via `campaign_id` field. See **bathos-campaigns** for campaign, claim-tier, postmortem, and lineage workflows.
 
 **Catalog** — Tiered Parquet + DuckDB store at `~/.bth/catalog/` (or `.bth.toml` `[project].catalog_dir`). Cool tier (per-run fragments) → compacted to warm tier (DuckDB database) → optionally archived to cold tier (partitioned Parquet).
+
+**@bth.experiment** — An alternative Python-embedding entry point to provenance capture. Decorate a function with `@bth.experiment` (`bathos.decorators`) to get the same provenance capture as `bth run`, without a CLI invocation. Silently no-ops with a warning if `BTH_PROJECT_SLUG` is unset.
 
 ## Installation
 
@@ -60,11 +62,13 @@ bth run \
 
 **Options:**
 - `--out PATH` — Register output file path (can repeat)
-- `--tag TAG` — Add tag (can repeat)
+- `--tag TAG`, `-t` — Add tag (can repeat)
 - `--campaign ID` — Associate with campaign
 - `--agent-mode collaborative|autonomous` — Mark collaborative (human-in-loop) or autonomous runs
 - `--derived-from RUN_ID` — Link lineage to parent run
 - `--no-sidecar` — Bypass sidecar enforcement (logs `BYPASSED`)
+- `--allow-stale` — Run anyway despite the sidecar's `[status] stale = true` flag; without it, `bth run` refuses to execute a script marked stale
+- `--component-id ID` / `--component-sidecar-sha256 SHA` — Bind this run to an xtrax composition-node/StageBundle slot (cross-tool bridge; niche)
 
 Exit code is script's exit code.
 
@@ -172,18 +176,22 @@ n_atoms = "int"
 ### Scaffold a Template
 
 ```bash
-bth new-experiment --name my_experiment
+bth new-experiment my_experiment
+bth new-experiment my_experiment --force  # overwrite existing files
 ```
 
-Creates `scripts/experiments/my_experiment.py` and `scripts/experiments/my_experiment.bth.toml` skeleton.
+Creates `scripts/experiments/my_experiment.py` and `scripts/experiments/my_experiment.bth.toml` skeleton. `name` is a positional argument — `bth new-experiment --name my_experiment` fails with "no such option". (MCP mirror: `new_experiment` tool.)
 
 ### Validate Sidecar
 
 ```bash
-bth check --path scripts/experiments/train.bth.toml
+bth validate-sidecar scripts/experiments/train.bth.toml
+bth validate-sidecar scripts/experiments/train.bth.toml --campaign my-campaign-id  # also cross-checks claim_discriminates/claim_isolates against the campaign's registered claim
 ```
 
-Checks TOML syntax, schema completeness, DuckDB condition validity, and residual outcome presence.
+Checks TOML syntax, schema completeness, DuckDB condition validity, and residual outcome presence. Prints `field: message` for each error and exits 1 if invalid; prints `✓ <path> is valid` on success.
+
+Note: `bth check` (see **Query and Inspect** below) is a *different* command — it checks already-recorded runs for git-drift against current HEAD, it does not validate sidecars.
 
 ## Controls Discipline (v0.11.0)
 
@@ -347,6 +355,8 @@ Run sprint audit to check project health across controls:
 bth sprint-audit
 ```
 
+This section covers Signals 9 and 10 (controls-discipline-relevant); the audit computes 14 signals total — Signals 1-8 and 11/13/14 cover error/bypass rates, outcome entropy, claim registration, and stale-script backlog, and aren't documented in this skill (Signal 12 is covered in **bathos-campaigns**).
+
 #### Signal 9: control_arm_rate
 
 **Definition:** Fraction of all runs in the project with outcome labels matching the pattern `ctrl_%` (e.g., `ctrl_pass`, `ctrl_fail`).
@@ -402,15 +412,30 @@ bth show abc123-uuid
 
 Full run metadata, git state, outcome, sidecar hash, postmortem status.
 
+### Check Git-Drift Validity
+
+```bash
+bth check
+bth check --status STALE
+bth check --check-outputs
+```
+
+Compares each recorded run's git hash against current HEAD, reporting `OK` / `STALE` / `DIRTY_RUN` / `UNKNOWN_CODE`. `--check-outputs` additionally verifies registered output files still exist and re-checks their SHA against the recorded hash. Exits 1 if any run is `STALE` or has drift. Not a sidecar validator — see `bth validate-sidecar` above.
+
 ### Find Runs by Condition
 
 ```bash
-bth find --filter "outcome='pass' AND project_slug='myproject'"
-bth find --filter "campaign_id='my-campaign' AND slurm_job_id IS NOT NULL"
-bth find --limit 100
+bth find --project myproject --status completed
+bth find --tag experiment:baseline --tag date:2026-06-01
+bth find --slurm-job 12345678
+bth find --output-file "outputs/run_*.json"
 ```
 
-DuckDB WHERE clause over catalog. Returns table of matching runs.
+**Options:** `--project/-p`, `--since` (e.g. `7d`, `24h`), `--status`, `--tag` (repeatable), `--slurm-job`, `--output-file` (glob against registered output paths). There is **no `--filter` and no `--limit`** — these are fixed equality/glob filters and every match is printed. For an arbitrary DuckDB `WHERE` clause, use `bth sql` instead:
+
+```bash
+bth sql "SELECT * FROM runs WHERE outcome='pass' AND project_slug='myproject'"
+```
 
 ### Run Arbitrary SQL
 
@@ -426,25 +451,52 @@ Query catalog directly. Useful for analytics and audits.
 
 ```bash
 bth compact
+bth compact --strict          # exit non-zero if any cool fragment is corrupt (CI/automation)
+bth compact --force-rebuild   # rebuild bathos.db from cool fragments if the warm DB is corrupt
 ```
 
-Merges per-run Parquet fragments into DuckDB database. Automatic on `bth ls` if fragmentation is high.
+Merges per-run Parquet fragments into DuckDB database. Automatic (banner shown) on `bth ls` if fragmentation is high. A corrupt/unreadable fragment is skipped and reported by default rather than aborting compaction catalog-wide (`bth repair --tier cool` quarantines it); `--strict` restores the old hard-fail behavior.
 
 ### Archive Old Runs
 
 ```bash
-bth archive --before 90d --out ~/backups/archive.tar.zst
+bth archive --project myproject --dry-run   # preview
+bth archive --project myproject --archive-dir ~/backups/archive
 ```
 
-Exports cold-tier Parquet (partitioned by project/year/month) and compresses. Reduces catalog size.
+Exports warm-tier runs to cold-tier partitioned Parquet (by project/year/month, default root `~/.bth/archive`) plus a manifest. There is **no `--before` age filter and no `--out` file target** — `archive` exports every run for `--project` (default: all projects); `--dry-run` shows counts without writing. Requires a warm catalog (`bth compact` first).
+
+**Not the same as** the stale-script archive gate (`bth archive-artifact`/`bth restore`) — see "Stale-Script Archive Gate" below.
+
+### Stale-Script Archive Gate
+
+Distinct from `bth archive` above (catalog cold-tier export). A sidecar's `[status] stale = true`
+blocks `bth run` unless `--allow-stale` is passed (see Run Tracking Options). `bth archive-artifact`
+moves the stale script's tracked bytes into a git-notes-backed ledger for exact later recovery via
+`bth restore`.
 
 ### Migrate Schema
 
 ```bash
-bth migrate
+bth migrate                      # scans and migrates ALL projects' cool fragments
+bth migrate --project myproject  # scope to runs/myproject/ only
+bth migrate --dry-run            # preview without writing
 ```
 
-Upgrades catalog schema to current version. Run after updating bathos.
+Upgrades cool-tier Parquet fragments to the current schema. Run after updating bathos. Note: `bth compact` does **not** require this to run first — it already tolerates old-schema fragments on its own.
+
+### Catalog Maintenance & Repair
+
+```bash
+bth verify --tier cool        # read-only diagnostic: cool | warm | archive | all
+bth repair --tier cool --dry-run
+bth repair --tier cool --apply
+```
+
+`bth verify` diagnoses catalog integrity issues (sentinel files, corrupt fragments, warm/cool
+mismatches) without changing anything. `bth repair` fixes what `verify` finds: sentinel cleanup,
+corrupt-fragment quarantine, and (with `--acknowledge-warm-loss`) rebuilding a corrupted warm DB
+from cool fragments (`--from-warm` for the reverse direction). MCP mirrors: `repair_scan`, `repair`.
 
 ### Project Subdirectories (v0.4+)
 
@@ -460,9 +512,10 @@ Reorganizes flat catalog to per-project subdirectories (`runs/<slug>/run_<uuid>.
 
 ```bash
 bth view
+bth view --port 9000 --project myproject --no-open
 ```
 
-Opens FastAPI dashboard (default: `http://localhost:8000`) with interactive run browser, campaign summaries, outcome histograms.
+Opens FastAPI dashboard (default: `http://localhost:8080`; `--port`/`--host` override, `--no-open` skips auto-launching a browser, `--project` scopes to one project) with interactive run browser, campaign summaries, outcome histograms.
 
 ### Static HTML Export
 
@@ -508,7 +561,7 @@ path = "~/projects/myproject"
 ## Key Rules
 
 - **Always use `uv run python`** in sbatch scripts, never bare `python` (cluster nodes have no global python)
-- **Verify sidecar before submission** — run `bth check` to validate outcome conditions (DuckDB SQL must parse)
+- **Verify sidecar before submission** — run `bth validate-sidecar <path>` to validate outcome conditions; `bth check` checks *recorded runs* against current git HEAD, it does not validate sidecars
 - **Result schema must include all outcome columns** — if `condition = "metric >= 0.9"`, declare `metric = "float"` in `[result_schema]`
 - **Exactly one residual outcome** — one outcome must have `is_residual = true` for gate evaluation
 - **No `--no-sidecar` in production** — bypassing logs `BYPASSED` and breaks pre-registration discipline
@@ -522,18 +575,18 @@ path = "~/projects/myproject"
 bth init --slug myproject --slurm-partition mit_normal
 
 # 2. Create experiment
-bth new-experiment --name baseline_training
+bth new-experiment baseline_training
 # Edit scripts/experiments/baseline_training.py and .bth.toml
 
 # 3. Validate locally
-bth check --path scripts/experiments/baseline_training.bth.toml
+bth validate-sidecar scripts/experiments/baseline_training.bth.toml
 uv run python scripts/experiments/baseline_training.py --smoke --out /tmp/test.json  # NOT via bth run — smoke outputs are ephemeral, not tracked
 
 # 4. Run locally or submit to cluster (see bathos-cluster for bth submit)
 bth run -- uv run python scripts/experiments/baseline_training.py --out outputs/run.json
 
 # 5. Query results
-bth find --filter "outcome='pass' AND project_slug='myproject'"
+bth sql "SELECT * FROM runs WHERE outcome='pass' AND project_slug='myproject'"
 
 # 6. Export report
 bth export --html --out ~/reports/latest.html
@@ -544,6 +597,7 @@ bth export --html --out ~/reports/latest.html
 - **bathos-cluster** — SLURM submission (`bth submit`), catalog sync (`bth sync`), remote profiles
 - **bathos-campaigns** — campaigns, figure manifests, lineage/citation, postmortems, claim-tier pre-registration, signal discrimination and probe design
 - **bathos-literature-parity** — validating a reimplemented baseline against a published method
+- **bathos-blast-radius** — trace which past runs a bug fix/commit implicates
 - **bathos-mcp** — MCP tool error envelope and integration contract
 - **CLAUDE.md**: Bathos architecture, schema versions, backlog
 - **Global rules**: `~/.claude/rules/BATHOS.md` — `uv run python` discipline, sidecar validation, DuckDB conditions
