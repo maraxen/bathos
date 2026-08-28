@@ -94,6 +94,7 @@ version = "0.13.0a3"
 source = { editable = "." }
 dependencies = [
     { name = "cisternal" },
+    { name = "cyclopts" },
     { name = "duckdb" },
     { name = "fastmcp" },
     { name = "pyarrow" },
@@ -139,7 +140,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cisternal", git = "https://github.com/maraxen/cisternal?rev=6c0819a509d584a9470817e9383cc015940e6a74" },
+    { name = "cisternal", git = "https://github.com/maraxen/cisternal?rev=1c3dec56ffacc6ae3b31f7b7ea9e385d80dec1ac" },
+    { name = "cyclopts", specifier = ">=4.18.0" },
     { name = "duckdb", specifier = ">=1.0" },
     { name = "fastapi", marker = "extra == 'viz'", specifier = ">=0.110" },
     { name = "fastmcp", specifier = ">=3.3.1" },
@@ -323,7 +325,7 @@ wheels = [
 [[package]]
 name = "cisternal"
 version = "0.1.1a7"
-source = { git = "https://github.com/maraxen/cisternal?rev=6c0819a509d584a9470817e9383cc015940e6a74#6c0819a509d584a9470817e9383cc015940e6a74" }
+source = { git = "https://github.com/maraxen/cisternal?rev=1c3dec56ffacc6ae3b31f7b7ea9e385d80dec1ac#1c3dec56ffacc6ae3b31f7b7ea9e385d80dec1ac" }
 dependencies = [
     { name = "cyclopts" },
     { name = "fastmcp" },
