@@ -388,6 +388,19 @@ def compact(
             raise typer.Exit(1)
 
 
+class _AuthoringVerifyView:
+    """Adapts a ledger VerifyResult to the tier-result shape `bth verify` prints."""
+
+    tier = "authoring"
+
+    def __init__(self, result):
+        self.ok = result.ok
+        self.warnings = list(result.warnings)
+        self.errors = list(result.errors)
+        if result.entries_checked:
+            self.warnings.insert(0, f"{result.entries_checked} ledger entries checked")
+
+
 @app.command()
 def verify(
     tier: str = typer.Option(
@@ -398,6 +411,14 @@ def verify(
     ),
     archive_dir: Path | None = typer.Option(
         None, "--archive-dir", "-d", help="Archive root (default: ~/.bth/archive)"
+    ),
+    authoring: bool = typer.Option(
+        False,
+        "--authoring",
+        help=(
+            "Also verify the authored-document ledger: that its entries chain, and that "
+            "each document still matches its newest recorded sha256"
+        ),
     ),
 ):
     """Verify catalog integrity across cool, warm, and archive tiers."""
@@ -417,6 +438,13 @@ def verify(
     else:
         typer.echo(f"Unknown tier: {tier!r}. Choose cool, warm, archive, or all.", err=True)
         raise typer.Exit(1)
+
+    if authoring:
+        from bathos.authoring.ledger import verify_authoring_ledger
+        from bathos.workspace import resolve_workspace
+
+        ledger = verify_authoring_ledger(resolve_workspace().fs_root)
+        results = [*results, _AuthoringVerifyView(ledger)]
 
     any_errors = False
     for result in results:
@@ -1087,6 +1115,74 @@ def claim_validate_cmd(
         raise typer.Exit(1)
 
     typer.echo(f"✓ {path} is valid")
+
+
+@claim_app.command("author")
+def claim_author_cmd(
+    path: Path = typer.Argument(..., help="Where to write the claim .toml"),
+    from_json: str = typer.Option(
+        ...,
+        "--from-json",
+        help="JSON file holding the claim payload, or '-' to read stdin",
+    ),
+    force: bool = typer.Option(False, "--force", help="Overwrite an existing document"),
+    reason: str = typer.Option("", "--reason", help="Recorded with the mutation"),
+):
+    """Author a claim from a structured payload instead of hand-writing TOML.
+
+    The payload is rendered to canonical TOML, re-parsed, and validated BEFORE anything
+    is written -- a claim that would fail validation is not written at all. Run
+    `bth claim author --help` then see `doc_schema` (MCP) or the scaffold for the field
+    list.
+    """
+    import json
+    import sys
+
+    import duckdb
+
+    from bathos.authoring.write import author_claim
+    from bathos.workspace import resolve_workspace
+
+    raw = sys.stdin.read() if from_json == "-" else Path(from_json).read_text()
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as e:
+        typer.echo(f"error: payload is not valid JSON: {e}", err=True)
+        raise typer.Exit(1) from e
+
+    db = None
+    db_path = _catalog_dir() / "bathos.db"
+    if db_path.exists():
+        db = duckdb.connect(str(db_path), read_only=True)
+    try:
+        result = author_claim(
+            payload,
+            path,
+            force=force,
+            actor="cli",
+            reason=reason,
+            catalog_db=db,
+            workspace_root=resolve_workspace().fs_root,
+        )
+    finally:
+        if db is not None:
+            db.close()
+
+    for info in result.infos:
+        typer.secho(f"info: {info}", fg="cyan")
+    for warning in result.warnings:
+        typer.secho(f"warning: {warning}", fg="yellow")
+
+    if not result.ok:
+        for error in result.errors:
+            typer.echo(f"error: {error}", err=True)
+        if result.resolution_hint:
+            typer.secho(f"hint: {result.resolution_hint}", fg="yellow", err=True)
+        typer.secho("nothing was written", fg="red", err=True)
+        raise typer.Exit(1)
+
+    typer.secho(f"\u2713 wrote {result.path}", fg="green")
+    typer.echo(f"  sha256 {result.sha256}")
 
 
 @gate_app.command("stamp")

@@ -22,6 +22,7 @@ from bathos.anchor import find_anchors, get_anchor, register_anchor
 
 # Import core modules
 from bathos.archive import archive as archive_runs
+from bathos.authoring.models import ClaimPayload
 from bathos.campaigns import (
     CampaignError,
     add_run_to_campaign,
@@ -2753,6 +2754,237 @@ async def claim_attest_parity(
         raise ValueError(str(e)) from e
 
 
+# ── structured document authoring (bathos.authoring) ─────────────────────────
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def doc_schema(kind: str = "claim") -> dict:
+    """Field schema for an authored document kind, with a worked example.
+
+    Read-only discovery: call this after a `document_invalid` refusal to see the exact
+    field names, types and required-ness, rather than guessing at TOML structure.
+    Progressive disclosure -- the schema is fetched on demand instead of being carried
+    in every tool definition.
+    """
+    schemas = {"claim": ClaimPayload}
+    model = schemas.get(kind)
+    if model is None:
+        return {
+            "ok": False,
+            "error": f"unknown document kind {kind!r}; known kinds: {sorted(schemas)}",
+            "error_code": BathosErrorCode.INVALID_PARAM.value,
+            "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.INVALID_PARAM],
+        }
+
+    example = None
+    if kind == "claim":
+        from bathos.authoring.scaffolds import scaffold_claim_payload
+
+        example = scaffold_claim_payload().model_dump(exclude_none=True)
+
+    return {
+        "ok": True,
+        "kind": kind,
+        "schema": model.model_json_schema(),
+        "example": example,
+        "notes": (
+            "Sub-blocks are flattened with prefixed keys (reference_parity_paper rather "
+            "than a nested reference_parity object); the renderer restores the real TOML "
+            "nesting. parity_run_id is not author-supplied -- bind it later with "
+            "claim_attest_parity."
+        ),
+    }
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+@require_write_token
+async def claim_author(
+    claim: ClaimPayload,
+    path: str = "",
+    campaign_id: str = "",
+    catalog_dir: str | None = None,
+    workspace_root: str | None = None,
+    force: bool = False,
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
+) -> dict:
+    """Author a claim from a structured payload -- no hand-written TOML.
+
+    The payload is rendered to canonical TOML, re-parsed with the same reader the read
+    path uses, and validated BEFORE anything is written. A document that would fail
+    validation is not written at all, so the target file is either absent or valid --
+    there is no write-then-flag state.
+
+    Supply either `path` (relative to the workspace root) or `campaign_id`, in which case
+    the claim lands at `.bth/claims/<campaign name>.claim.toml`. Passing `campaign_id`
+    also lets validation run its catalog-aware checks (baseline parity, gate state).
+
+    On refusal, `error_code` is `document_invalid` (fix the fields) or `document_conflict`
+    (a document already exists -- pass force=true to overwrite). Call `doc_schema` for the
+    field list.
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619).
+    """
+    from bathos.authoring.write import author_claim
+    from bathos.claim import resolve_claim_path
+
+    if not path and not campaign_id:
+        return {
+            "ok": False,
+            "error": "supply either path= or campaign_id=",
+            "error_code": BathosErrorCode.INVALID_PARAM.value,
+            "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.INVALID_PARAM],
+        }
+
+    if workspace_root:
+        ws = Path(workspace_root).expanduser().resolve()
+    else:
+        from bathos.workspace import resolve_workspace
+
+        ws = resolve_workspace().fs_root
+
+    db = None
+    try:
+        if campaign_id:
+            cat_dir = _get_catalog_dir(catalog_dir)
+            db_path = cat_dir / "bathos.db"
+            if not db_path.exists():
+                return {
+                    "ok": False,
+                    "error": f"Catalog database not found at {db_path}",
+                    "error_code": BathosErrorCode.CATALOG_ERROR.value,
+                    "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.CATALOG_ERROR],
+                }
+
+            import duckdb
+
+            from bathos.campaigns import CampaignError, _resolve_campaign_id
+
+            db = duckdb.connect(str(db_path), read_only=False)
+            try:
+                full_id = _resolve_campaign_id(db, campaign_id)
+            except CampaignError as e:
+                return {
+                    "ok": False,
+                    "error": str(e),
+                    "error_code": BathosErrorCode.CAMPAIGN_ERROR.value,
+                    "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.CAMPAIGN_ERROR],
+                }
+            if not path:
+                rows = db.execute("SELECT name FROM campaigns WHERE id = ?", [full_id]).fetchall()
+                if not rows:
+                    return {
+                        "ok": False,
+                        "error": f"Campaign {campaign_id} not found",
+                        "error_code": BathosErrorCode.CAMPAIGN_ERROR.value,
+                        "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.CAMPAIGN_ERROR],
+                    }
+                path = str(Path(".bth") / "claims" / f"{rows[0][0]}.claim.toml")
+
+        target = resolve_claim_path(path, ws)
+        result = author_claim(
+            claim,
+            target,
+            force=force,
+            actor="mcp",
+            reason="",
+            catalog_db=db,
+            workspace_root=ws,
+            campaign_id=campaign_id or None,
+        )
+    finally:
+        if db is not None:
+            db.close()
+
+    envelope = result.as_envelope()
+    if result.ok and campaign_id:
+        envelope["campaign_id"] = campaign_id
+        envelope["message"] = (
+            f"Wrote claim to {result.path}. Register it with claim_register to anchor "
+            "its sha256 against the campaign."
+        )
+    return envelope
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+@require_write_token
+async def new_experiment(
+    name: str,
+    workspace_root: str | None = None,
+    force: bool = False,
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
+) -> dict:
+    """Scaffold an experiment script and its pre-registration sidecar.
+
+    Closes a real parity gap: `bth new-experiment` existed only on the CLI, so an agent
+    driving bathos through MCP had to hand-author `<stem>.bth.toml` from memory -- the
+    exact situation the structured authoring layer exists to remove. The scaffold's
+    optional blocks ship commented out on purpose: an uncommented `[[review.literature]]`
+    with empty fields is a validation ERROR on a file the author has not touched yet.
+
+    Returns the two paths written plus the sidecar's validation state, so the caller can
+    see immediately which placeholders still need filling.
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619).
+    """
+    from bathos.new_experiment import scaffold_experiment
+    from bathos.sidecar import parse_sidecar
+    from bathos.validate import validate_sidecar as validate_sidecar_core
+
+    if workspace_root:
+        ws = Path(workspace_root).expanduser().resolve()
+    else:
+        from bathos.workspace import resolve_workspace
+
+        ws = resolve_workspace().fs_root
+
+    try:
+        scaffolded = scaffold_experiment(name, ws, force=force)
+    except FileExistsError as e:
+        return {
+            "ok": False,
+            "error": str(e),
+            "error_code": BathosErrorCode.DOCUMENT_CONFLICT.value,
+            "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.DOCUMENT_CONFLICT],
+        }
+    except (OSError, ValueError) as e:
+        return {
+            "ok": False,
+            "error": str(e),
+            "error_code": BathosErrorCode.EXPORT_ERROR.value,
+            "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.EXPORT_ERROR],
+        }
+
+    validation: dict = {"checked": False}
+    try:
+        result = validate_sidecar_core(parse_sidecar(scaffolded.sidecar), scaffolded.sidecar)
+        validation = {
+            "checked": True,
+            "ok": result.ok,
+            "errors": [f"{e.field}: {e.message}" for e in result.errors],
+        }
+    except (ValueError, FileNotFoundError) as e:
+        validation = {"checked": True, "ok": False, "errors": [str(e)]}
+
+    return {
+        "ok": True,
+        "error_code": None,
+        "error": None,
+        "resolution_hint": None,
+        "name": name,
+        "script": str(scaffolded.script),
+        "sidecar": str(scaffolded.sidecar),
+        "name_warning": scaffolded.name_warning or None,
+        "sidecar_validation": validation,
+        "message": (
+            f"Scaffolded {scaffolded.script} and {scaffolded.sidecar}. Fill the REQUIRED "
+            "placeholders in the sidecar, then validate_sidecar before running."
+        ),
+    }
+
+
 @cisternal.tool(registry="bathos")
 @traced_tool
 async def validate_sidecar(
@@ -3441,6 +3673,14 @@ _WIRED = cisternal.wire(
         "reference_get",
         "reference_search",
         "reference_applicable",
+        "archive_artifact",
+        "restore",
+        "blast_radius_assess",
+        "blast_radius_clear",
+        "get_blast_radius_status",
+        "doc_schema",
+        "claim_author",
+        "new_experiment",
     ],
 )
 
