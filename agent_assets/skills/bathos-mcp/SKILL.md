@@ -6,11 +6,11 @@ triggers: [bathos mcp, BathosErrorCode, mcp tool integration, error envelope, va
 
 # bathos-mcp
 
-Integration contract for programmatic callers of bathos's MCP server (`bth-mcp`). All 22 bathos MCP tools return a typed envelope with consistent structure. Understanding the envelope shape and error codes is essential for robust integrations.
+Integration contract for programmatic callers of bathos's MCP server (`bth-mcp`). All bathos MCP tools (registered via the `_WIRED = cisternal.wire(...)` list at the bottom of `mcp.py` — 62 as of this writing, see that file for the current enumerated set) return a typed envelope with consistent structure. Understanding the envelope shape and error codes is essential for robust integrations.
 
 ## Envelope Shape
 
-Every successful or failed MCP call returns a dictionary with these four keys (always present; KeyError is impossible):
+Every successful or failed MCP call returns a dictionary with these four standard keys (always present on standard paths; see exceptions below for validation-failure cases):
 
 ```json
 {
@@ -30,7 +30,24 @@ Every successful or failed MCP call returns a dictionary with these four keys (a
 - `resolution_hint` (str | null) — `null` on success; actionable fix suggestion on error
 - Additional fields vary by tool (on success only)
 
-## BathosErrorCode Values (16 total)
+### Known Envelope Exceptions
+
+Several tool functions (`get_run`, `run_sql`, `cite_run`, `query_attestation`, `campaign_create`,
+`campaign_conclude`, `postmortem_scaffold`/`get`, `claim_attest_parity`, `blast_radius_assess`/
+`clear`, and others) catch their own errors internally and return a **bare `{"error": "..."}`**
+dict with no `ok`/`error_code`/`resolution_hint` keys on a validation-failure path — the standard
+envelope wrapper never sees these since no exception is raised. A caller that indexes
+`result["ok"]` unconditionally can hit a real `KeyError` on these tools' failure paths. Defensively
+use `result.get("ok", False)` rather than indexing.
+
+### Write Token Requirement
+
+Mutating tools (`run`, `init`, `compact`, `archive`, `sync`, `repair`, `attestation_register`, the
+scaffold/register/conclude family, `blast_radius_assess`/`blast_radius_clear`, `claim_author`/
+`new_experiment`, and others) require a `token=` parameter matching the local `~/.bth/mcp_token`.
+A missing or invalid token raises `auth_error`.
+
+## BathosErrorCode Values (24 total)
 
 **Gate-derived codes (11, aliased from GateErrorCode):**
 - `sidecar_missing` — Sidecar `.bth.toml` not found
@@ -45,12 +62,24 @@ Every successful or failed MCP call returns a dictionary with these four keys (a
 - `outcome_ambiguous` — Multiple outcome conditions matched (exactly one expected)
 - `internal` — Unexpected internal error
 
-**Domain-specific codes (5):**
+**Domain-specific codes (8):**
 - `catalog_error` — Database or Parquet I/O failure
 - `campaign_error` — Campaign query or update failure
 - `sidecar_error` — Sidecar parsing or content validation error
 - `export_error` — Export (HTML, archive) generation failure
 - `invalid_param` — Invalid parameter or argument
+- `graduation_refused` — Graduation decision rejected by policy
+- `auth_error` — Authentication or token validation failed
+
+**Artifact archive:**
+- `archive_error` — Archive operation or format error
+- `archive_dirty_tree_refused` — Attempted archive with uncommitted local changes
+- `archive_item_not_found` — Archive item not found in catalog
+- `archive_bundle_not_found` — Archive bundle not found
+
+**Document authoring:**
+- `document_invalid` — Document schema or structure validation failed
+- `document_conflict` — Document authoring conflict or lock contention
 
 ## Caller Pattern (Standard Case)
 
@@ -122,5 +151,6 @@ If a validation fails for reasons outside the tool (missing file, permission den
 ## Related
 
 - **using-bathos** — CLI equivalents of these tools (`bth run`, `bth check`, `bth ls`, ...)
-- **bathos-campaigns** — `claim_scaffold`/`claim_validate` MCP tools follow this same envelope
+- **bathos-campaigns** — `claim_scaffold`/`claim_validate` MCP tools follow this same envelope; `claim_author` and `doc_schema` conform to the standard envelope and use `document_*` error codes for authoring conflicts
+- **using-bathos** (document authoring) — `new_experiment` MCP tool and its `bth new-experiment` CLI mirror for experiment scaffolding
 - **CLAUDE.md**: `mcp.py` — thin FastMCP layer mirroring `cli.py`, tool-for-tool

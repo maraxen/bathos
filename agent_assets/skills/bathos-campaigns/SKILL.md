@@ -13,10 +13,12 @@ Grouping runs into campaigns, registering falsifiable claims for confirmatory ca
 ### Create Campaign
 
 ```bash
-bth campaign create --name "baseline sweep" --description "Hyperparameter space exploration"
+bth campaign create "baseline sweep" --mode confirmation --question "..." --hypothesis "..."
 ```
 
 Returns campaign ID.
+
+**Note:** `name` is a positional argument; real options are `--mode`, `--sequential`, `--question`, `--hypothesis`, `--parent`. There is no `--description` flag — no such field exists in the Campaign schema.
 
 ### List Campaigns
 
@@ -24,15 +26,17 @@ Returns campaign ID.
 bth campaign ls
 ```
 
-Shows campaign names, descriptions, associated run counts.
+Shows campaign name, mode, status, question/hypothesis, run count.
 
 ### Add Runs to Campaign
 
 ```bash
-bth campaign add --id <campaign-id> --runs <run-id-1> <run-id-2>
+bth campaign add <run-id> --campaign <campaign-id>
 ```
 
 Links runs to campaign.
+
+**Note:** One run per invocation (repeat the command per run) — flag is `--campaign`/`-c`, not `--id`; `--runs` (plural) does not exist.
 
 ### Review Campaign Results
 
@@ -40,7 +44,7 @@ Links runs to campaign.
 bth campaign review <campaign-id>
 ```
 
-Summary table: outcome counts, average duration, tags, sample runs.
+Reports residual rate, bypass rate, outcome distribution, anomalies, POPPER sequential-test summary (for sequential campaigns), and `blast_radius_status`/`claim_blast_radius_status` (see **bathos-blast-radius**).
 
 ### Conclude Campaign
 
@@ -49,6 +53,13 @@ bth campaign conclude <campaign-id>
 ```
 
 Marks campaign closed; queries still work but status is `concluded`. If a claim is registered (see Claim-Tier below), this is also where the Union Gate evaluates.
+
+**Flags:**
+- `--outcome` — required; specifies the campaign outcome (e.g., `pass`, `fail`, `inconclusive`)
+- `--negative-check TEXT` — required when `--outcome` is negative-sounding and a claim is registered (see **bathos-rigor-gates** for the detection vocabulary)
+- `--abort-if-below-threshold` — halts the conclude operation if metric thresholds are not met
+
+**Obligations:** The post-mortem Obligations system (`[obligations]` in `.bth.toml`) is documented in **bathos-rigor-gates**.
 
 ## Figure Manifest (Campaign → Maraxiom)
 
@@ -167,7 +178,13 @@ The manifest is a structured JSON sidecar stored at `<catalog>/sidecars/<campaig
 
 ### Consuming the Manifest
 
-Import and read the manifest programmatically:
+**Quick read (CLI):** For a quick read without writing Python, use:
+
+```bash
+bth report show-manifest <campaign-id>
+```
+
+**Programmatic read:** Import and read the manifest programmatically:
 
 ```python
 from bathos.figure_manifest import FigureManifest
@@ -195,13 +212,17 @@ bth lineage <run-id> --format prov
 
 Shows parent-child run relationships. `--format prov` outputs W3C PROV-JSON.
 
+**Note:** `--format dot` is listed in `--help` but is **not actually implemented** — it errors with 'dot format not yet implemented' (exit 1). Only `text` and `prov` currently work.
+
+**Multi-parent DAG:** `bathos.provenance.format_prov_json` supports multi-parent DAG lineage via a `run_parent_edges` parameter, but neither `bth lineage --format prov` nor the `lineage_prov` MCP tool currently passes it in — today's PROV output is always single-parent. See **bathos-rigor-gates** for the library-only multi-parent API (`bathos.campaign_edges`).
+
 ### Citation String
 
 ```bash
 bth cite <run-id>
 ```
 
-BibTeX/APA-style citation for reproducibility documentation.
+Emits a structured citation (markdown or `--format json`) linking the run to its hypothesis-sidecar hash, manifest hash, git SHA, and outcome — not a bibliographic (BibTeX/APA) format.
 
 ## Postmortems
 
@@ -221,13 +242,15 @@ bth postmortem validate <path>
 
 Checks TOML syntax, required fields, git drift detection, and asset integrity.
 
-### Get Postmortem
+### Show Postmortem
 
 ```bash
-bth postmortem get <run-id>
+bth postmortem show <run-id>
 ```
 
 Retrieves and displays postmortem metadata.
+
+**Note:** The CLI verb is `show` — the MCP tool is confusingly named `postmortem_get` (a genuine CLI/MCP naming mismatch). Both `scaffold` and `show` now accept `--campaign-id` to scaffold/show a campaign-scoped postmortem instead of a run-scoped one.
 
 ## Claim-Tier Pre-Registration (confirmatory campaigns)
 
@@ -262,6 +285,10 @@ bth campaign conclude <campaign-id> --outcome pass
 ```
 
 `bth claim scaffold` and `bth claim validate` are also exposed as MCP tools (`claim_scaffold`, `claim_validate`) — see **bathos-mcp**.
+
+### Authoring via typed payload
+
+**Alternative to hand-editing:** `bth claim author --from-json <payload.json> <path>` (or MCP `claim_author`) is an alternative to hand-editing the claim TOML — same document, written through a typed `ClaimPayload` model that's rendered, re-parsed, and validated before anything reaches disk. See **bathos-mcp** for the calling contract (error envelope, write-token requirement).
 
 ### Descriptive labels (opaque IDs)
 
@@ -329,15 +356,20 @@ claim_discriminates = ["H_main_effect", "H_null_misspec"]  # hypotheses this run
 claim_isolates      = ["C_baseline"]                        # confound / variable this run isolates
 ```
 
+**Confirmatory-rigor extensions:** Three related fields — `kill_condition_satisfiable_by_null` (bool, on `[claim]`, AC-23), the `positive_control = true` tag on a `[[union_gate.clauses]]` entry, and the `[confounds.synthetic_recovery]` sub-block — are documented in full in **bathos-rigor-gates**, which covers the confirmatory-rigor layer built on top of this claim schema.
+
+**Review Coverage Gate:** A `[review]` sidecar block (separate from the claim file itself) is a sibling gate to the Union Gate below, firing at the same `bth campaign conclude` moment — see **bathos-rigor-gates**.
+
 ### The Union Gate at `conclude`
 
 - A clause is **covered** when some run has all of its `hypothesis_ids` in its `claim_discriminates`.
 - **confirmation / sequential** campaign: an uncovered clause downgrades the verdict to `confounded`
-  (not `pass`). `bth campaign conclude --force-verdict` bypasses, recording `claim_mode='bypassed'`.
+  (not `pass`). `bth campaign conclude --force` bypasses, recording `claim_mode='bypassed'`.
 - **exploration** campaign: the checks still run but are warn-only — no downgrade.
 - Modifying the claim file after registration → `conclude` errors on the SHA mismatch; re-register with `--force`.
 - **Signal 12** (`bth sprint-audit`) flags a confirmation campaign with no registered claim — the one case
   where the gate silently does nothing.
+- `bth campaign review`'s `blast_radius_status`/`claim_blast_radius_status` fields (informational, non-gating) report whether any covering run has been flagged by a blast-radius assessment — see **bathos-blast-radius**.
 
 ## Signal discrimination and probe design
 
