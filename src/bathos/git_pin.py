@@ -123,16 +123,22 @@ def export_bundle(
 ) -> Path | None:
     """See cisternal.provenance.durable.export_bundle. `export_dir=None` here
     (bathos's original default) resolves to `<repo_root>/outputs/provenance`."""
-    root = repo_root(cwd)
-    target_dir = export_dir if export_dir is not None else (root / EXPORT_DIRNAME if root else None)
+    if export_dir is not None:
+        target_dir = export_dir
+    else:
+        root = repo_root(cwd)
+        target_dir = root / EXPORT_DIRNAME if root else None
     if target_dir is None:
         return None
     return _export_bundle(run_id, pinned_sha, head_sha, cwd, target_dir, RUN_REF_PREFIX, WIP_REF_PREFIX)
 
 
 def import_bundles(cwd: Path, import_dir: Path | None = None) -> ImportReport:
-    root = repo_root(cwd)
-    source_dir = import_dir if import_dir is not None else (root / EXPORT_DIRNAME if root else None)
+    if import_dir is not None:
+        source_dir = import_dir
+    else:
+        root = repo_root(cwd)
+        source_dir = root / EXPORT_DIRNAME if root else None
     if source_dir is None:
         return ImportReport()
     return _import_bundles(cwd, source_dir, RUN_REF_PREFIX, WIP_REF_PREFIX, MANIFEST_RELPATH)
@@ -168,4 +174,7 @@ def pin_run(
         export_dir=effective_export_dir, provenance_paths=PROVENANCE_PATHS,
         run_ref_prefix=RUN_REF_PREFIX, wip_ref_prefix=WIP_REF_PREFIX,
         manifest_relpath=MANIFEST_RELPATH,
+        identity_name="bathos",
+        identity_email="bathos@localhost",
+        commit_message_template="bathos worktree snapshot for run {run_id}",
     )
