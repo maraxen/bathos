@@ -35,6 +35,9 @@ class ValidationResult:
     infos: list[str] = field(default_factory=list)
 
 
+# The literal an unbound parity confound carries in a scaffolded claim. The write
+# path in attest_parity is a text edit, so this exact spelling is load-bearing.
+_EMPTY_PARITY_RUN_ID = 'parity_run_id = ""'
 _OPAQUE_ID_RE = re.compile(r"^[A-Z][0-9]+$")
 _PLACEHOLDER_LABEL_RE = re.compile(r"^REQUIRED:\s*", re.IGNORECASE)
 
@@ -604,7 +607,6 @@ gate_name = "REQUIRED: a name for the known-answer invariant test that proves th
 guards = ["REQUIRED: source paths whose change invalidates a recorded green stamp"]
 # Prove the invariant test passes yourself, then: bth gate stamp <gate_name> --result pass
 
-[claim.discriminability]
 # Matrix indexed by hypothesis-pair × outcome-label
 # predicted_outcome: any outcome label from the runs, or "??" for unspecified
 [[claim.discriminability]]
@@ -1055,15 +1057,10 @@ def attest_parity(
     # Parse the current claim
     claim = parse_claim(abs_claim_path)
 
-    # Find the confound with reference_parity and update it
-    updated = False
-    for confound in claim.confounds:
-        if "reference_parity" in confound:
-            confound["reference_parity"]["parity_run_id"] = parity_run_id
-            updated = True
-            break
-
-    if not updated:
+    # Presence check only. The write below is a targeted text edit against the
+    # original bytes (to preserve comments and formatting), so the parsed claim is
+    # never serialized -- mutating it here would be dead code.
+    if not any("reference_parity" in confound for confound in claim.confounds):
         raise ValueError(
             f"Campaign {campaign_id}'s claim has no [confounds.reference_parity] block"
         )
@@ -1075,17 +1072,28 @@ def attest_parity(
         mode="w", dir=temp_dir, suffix=".tmp", delete=False, encoding="utf-8"
     ) as tmp_f:
         temp_path = Path(tmp_f.name)
-        # Find the parity_run_id = "" line in reference_parity block and replace it
-        updated_content = original_content_str.replace(
-            'parity_run_id = ""', f'parity_run_id = "{parity_run_id}"'
-        )
-
-        # Assertion: ensure replacement actually occurred (prevent silent no-op)
-        if updated_content == original_content_str:
+        # Bind the single unbound parity_run_id. str.replace() is unbounded by
+        # default, so a claim carrying two empty parity_run_id fields would bind
+        # BOTH to this run -- silently attributing a parity attestation to a
+        # confound it was never run against. Refuse rather than guess which one
+        # was meant.
+        unbound = original_content_str.count(_EMPTY_PARITY_RUN_ID)
+        if unbound == 0:
             raise ValueError(
                 "parity_run_id already set or TOML format mismatch — use force to re-attest. "
                 "The claim file does not contain the expected 'parity_run_id = \"\"' line."
             )
+        if unbound > 1:
+            raise ValueError(
+                f"Claim file has {unbound} unbound 'parity_run_id = \"\"' fields; "
+                "attest_parity cannot determine which [confounds.reference_parity] block "
+                "to bind to run "
+                f"'{parity_run_id}'. Fill in the parity_run_id fields you are not attesting "
+                "here, leaving exactly one empty, then re-run."
+            )
+        updated_content = original_content_str.replace(
+            _EMPTY_PARITY_RUN_ID, f'parity_run_id = "{parity_run_id}"'
+        )
 
         tmp_f.write(updated_content)
         tmp_f.flush()

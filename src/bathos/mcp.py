@@ -3440,6 +3440,11 @@ _WIRED = cisternal.wire(
         "reference_get",
         "reference_search",
         "reference_applicable",
+        "archive_artifact",
+        "restore",
+        "blast_radius_assess",
+        "blast_radius_clear",
+        "get_blast_radius_status",
     ],
 )
 
