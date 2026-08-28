@@ -1,4 +1,4 @@
-# bathos Internal Docs
+# wt-20260828-174806 Internal Docs
 
 ## Daily
 - [260805_overnight-decisions](daily/260805_overnight-decisions.md) — Every decision made without a human gate during the overnight autonomous loop run, with enough context to backtrack
@@ -9,6 +9,7 @@
 - [260601_v061-sprint-close](handoffs/260601_v061-sprint-close.md)
 
 ## Plans
+- [260828_cyclopts-migration-milestone-2-scope](plans/260828_cyclopts-migration-milestone-2-scope.md) — Cyclopts CLI migration — Milestone 2 scope (backlog
 - [260805_deferred-item-triage-reconcile-the-handoff-backlog](plans/260805_deferred-item-triage-reconcile-the-handoff-backlog.md) — Scope for a one-time sweep of 42 deferred handoff entries plus a session-close reconciliation step, after Postgres evidence showed the defect is stale handoffs rather than untracked work
 - [260710_asr-rigor-ports-sprint-composition](plans/260710_asr-rigor-ports-sprint-composition.md) — port asr's C1–C5 rigor mechanisms into bathos core: BP-1 C3 concentration lint (`linter.py`), BP-2 C1 `[confounds.synthetic_recovery]` gate (`claim.py` AC-13 + `parity.py` submit-gate templates), BP-3 C5 negative-claim check (`validate_claim`); C2 needs a schema field (Appendix A), C4 stays in asr (Appendix B)
 - [260623_claim-labels-lint-sprint-composition](plans/260623_claim-labels-lint-sprint-composition.md)
@@ -19,6 +20,8 @@
 - [260515_v02-sprint-plan](plans/260515_v02-sprint-plan.md)
 
 ## Specs
+- [260826_blast-radius-assessment-skill](specs/260826_blast-radius-assessment-skill.md) — Blast-radius assessment for bathos-tracked experiments
+- [260826_blast-radius-shadow-trigger](specs/260826_blast-radius-shadow-trigger.md) — Blast-radius shadow-mode git-hook trigger
 - [260729_post-mortem-obligations-targeted-review-schema-and-a-shipped-rule-card-corpus](specs/260729_post-mortem-obligations-targeted-review-schema-and-a-shipped-rule-card-corpus.md) — Unifies post-mortem workflow hooks, a [review] sidecar block for targeted literature/implementation review, and a machine-addressable reference corpus shipped in agent_assets/
 - [260707_scientific-validity-gates](specs/260707_scientific-validity-gates.md) — debt #200: `[invariants]` sidecar block (hard-fail on violated result assertions, reuses `[outcomes.*]` DuckDB-condition machinery), optional cross-run differential extension, `[sanity]` pre-flight block; not yet planned/implemented
 - [260618_abstraction-boundary-open-design-questio](specs/260618_abstraction-boundary-open-design-questio.md)
