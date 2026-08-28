@@ -223,6 +223,24 @@ def render_campaign_review(
         )
         console.print(anomaly_panel)
 
+    # AC-12 slice (Phase 2a, #4552): informational, non-gating blast-radius status.
+    # campaigns.review_campaign() always populates these keys when catalog_dir was
+    # passed; .get() with a "clean" default covers the case it wasn't (e.g. a caller
+    # that never passes catalog_dir at all).
+    blast_radius_status = review.get("blast_radius_status", "clean")
+    claim_blast_radius_status = review.get("claim_blast_radius_status", "clean")
+    if blast_radius_status != "clean" or claim_blast_radius_status != "clean":
+        style = "bold red" if "affected" in (blast_radius_status, claim_blast_radius_status) else "yellow"
+        console.print(
+            Text(
+                f"Blast radius: campaign={blast_radius_status}, "
+                f"claim={claim_blast_radius_status}",
+                style=style,
+            )
+        )
+    else:
+        console.print(Text("Blast radius: clean", style="dim"))
+
 
 def _get_status_color(status: str) -> str:
     """Return Rich color style for status."""

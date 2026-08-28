@@ -7,13 +7,13 @@ import logging
 import shutil
 import time
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
 import duckdb
 
-from bathos.catalog import read_runs
+from bathos.catalog import CorruptFragment, read_runs_report
 from bathos.schema import CURRENT_SCHEMA_VERSION, Run
 from bathos.telemetry import event
 from bathos.walk import iter_project_files
@@ -128,6 +128,7 @@ class CompactResult:
     ingested: int
     skipped: int
     duration_s: float
+    corrupt_fragments: list[CorruptFragment] = field(default_factory=list)
 
 
 # Migration registry: transforms Run objects from older schema versions to current
@@ -579,6 +580,67 @@ def _ingest_ledger_fragments(con: duckdb.DuckDBPyConnection, catalog_dir: Path) 
     return ingested
 
 
+def _ingest_blast_radius_fragments(con: duckdb.DuckDBPyConnection, catalog_dir: Path) -> int:
+    """Re-derive the warm `blast_radius_ledger` table from cool-tier fragments.
+
+    Backlog #4551. Mirrors :func:`_ingest_ledger_fragments` exactly, adapted for
+    the blast-radius ledger's composite (entity_type, entity_id) key instead of
+    content_hash -- same append-only, skip-if-present-by-own-id semantics.
+
+    No-op if `<catalog_dir>/blast_radius/` does not exist. Returns the number of
+    fragment records ingested (post skip-if-present).
+    """
+    from bathos.blast_radius import _LEDGER_TABLE_SCHEMA as _BLAST_RADIUS_TABLE_SCHEMA
+    from bathos.blast_radius import read_ledger_fragments as read_blast_radius_fragments
+
+    records = read_blast_radius_fragments(catalog_dir)
+    if not records:
+        return 0
+
+    con.execute(_BLAST_RADIUS_TABLE_SCHEMA)
+    # Phase 2a (#4552): matched_clauses/shadow_verdict were added after some catalogs may
+    # already have a Phase-1-era blast_radius_ledger table (CREATE TABLE IF NOT EXISTS above
+    # is a no-op against an existing table, so it won't add these) -- same additive
+    # ALTER TABLE ADD COLUMN IF NOT EXISTS pattern used for campaigns/campaign_runs elsewhere
+    # in this function.
+    for _alter_sql in [
+        "ALTER TABLE blast_radius_ledger ADD COLUMN IF NOT EXISTS matched_clauses TEXT",
+        "ALTER TABLE blast_radius_ledger ADD COLUMN IF NOT EXISTS shadow_verdict TEXT",
+    ]:
+        with contextlib.suppress(Exception):
+            con.execute(_alter_sql)
+    ingested = 0
+    for record in records:
+        existing = con.execute(
+            "SELECT id FROM blast_radius_ledger WHERE id = ?", [record.id]
+        ).fetchone()
+        if existing:
+            continue
+        con.execute(
+            "INSERT INTO blast_radius_ledger "
+            "(id, entity_type, entity_id, from_state, to_state, anchor_kind, anchor_value, "
+            "matched_files, matched_clauses, shadow_verdict, match_reason, reason, amended_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                record.id,
+                record.entity_type,
+                record.entity_id,
+                record.from_state,
+                record.to_state,
+                record.anchor_kind,
+                record.anchor_value,
+                record.matched_files,
+                record.matched_clauses,
+                record.shadow_verdict,
+                record.match_reason,
+                record.reason,
+                record.amended_at,
+            ],
+        )
+        ingested += 1
+    return ingested
+
+
 def _ingest_archived_item_fragments(con: duckdb.DuckDBPyConnection, catalog_dir: Path) -> int:
     """Re-derive the warm ``archived_items`` table from cool-tier fragments.
 
@@ -719,8 +781,10 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
     # Count cool files at start for telemetry
     cool_files = _fragment_count(catalog_dir)
 
-    # Read all runs from cool fragments (read_runs snapshots file list internally)
-    cool_runs = read_runs(catalog_dir)
+    # Read all runs from cool fragments (read_runs_report snapshots the file list
+    # internally). A corrupt/unreadable fragment is skipped and reported here rather
+    # than aborting compact for every project (260827_bathos-catalog-robustness).
+    cool_runs, corrupt_fragments = read_runs_report(catalog_dir)
 
     # Parse all postmortems in workspace (live fs_root; worktree-aware, spec 260611)
     from bathos.postmortem import parse_postmortem
@@ -856,6 +920,11 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
         # same pattern as anchors above. Unconditional, cheap no-op if no ledger/
         # fragments exist, fires on force_rebuild too.
         _ingest_ledger_fragments(con, catalog_dir)
+
+        # Backlog #4551: re-derive blast_radius_ledger from cool-tier fragments,
+        # same pattern as trust_ledger above. Unconditional, cheap no-op if no
+        # blast_radius/ fragments exist, fires on force_rebuild too.
+        _ingest_blast_radius_fragments(con, catalog_dir)
 
         # Artifact archival: re-derive archived_items from cool-tier fragments, same
         # pattern as trust_ledger above. Unconditional, cheap no-op if no
@@ -1131,4 +1200,5 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
         ingested=ingested,
         skipped=skipped,
         duration_s=duration_s,
+        corrupt_fragments=corrupt_fragments,
     )

@@ -573,6 +573,156 @@ def list_candidates_tool(
 
 
 # ============================================================================
+# Blast-radius assessment (backlog #4551) — bathos.blast_radius adapter
+#
+# Answers "a bug was found/fixed here -- which past runs does it implicate?" via
+# commit / commit-range / file anchors. Phase 1: run-level flagging only, manual
+# invocation, no gating. See .praxia/docs/specs/260826_blast-radius-assessment-skill.md.
+# ============================================================================
+
+
+def blast_radius_assess_tool(
+    catalog_dir: str = "",
+    project_root: str = "",
+    commit: str = "",
+    commit_range: str = "",
+    files: str = "",
+    dependency: bool = False,
+    project: str = "",
+    flag: bool = True,
+) -> dict:
+    """Assess which runs a bug/fix implicates (backlog #4551/#4552; real).
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619) at the MCP
+    wrapper layer — see mcp_blast_radius_assess_tool. Gated because flag=True by
+    default performs a durable ledger write (security-audit finding, PR #54).
+
+    Args:
+        catalog_dir: Catalog directory (empty = use default).
+        project_root: Git repo to diff/query ancestry against (empty = cwd).
+        commit: Single fix commit SHA anchor.
+        commit_range: "<base>..<tip>" range anchor.
+        files: Comma-separated file/symbol path anchor (no ancestry check).
+        dependency: If True, dependency-lock-drift anchor (AC-3) instead of a
+            commit/file anchor.
+        project: Optional project_slug filter (empty = whole catalog).
+        flag: If True (default), also durably record affected/unverifiable runs
+            in the blast_radius_ledger (AC-6), and propagate to campaign/claim
+            records (AC-7/AC-8). Exactly one of commit/commit_range/files/
+            dependency=True must be given.
+
+    Returns:
+        Dict with anchor_kind/anchor_value/changed_files/affected/unverifiable/
+        unaffected_run_ids (report), plus flagged_count/campaign_flagged_count/
+        claim_flagged_count if flag=True. Or {"error": ...} if the anchor
+        arguments are malformed.
+    """
+    import dataclasses
+
+    from bathos.blast_radius import (
+        assess_blast_radius,
+        flag_blast_radius,
+        propagate_to_campaigns,
+        propagate_to_claims,
+    )
+
+    n = sum(bool(x) for x in (commit, commit_range, files)) + int(dependency)
+    if n != 1:
+        return {
+            "error": "exactly one of commit, commit_range, files, or dependency=True is required"
+        }
+
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    proj_root = Path(project_root) if project_root else Path.cwd()
+    file_list = [f.strip() for f in files.split(",") if f.strip()] or None
+
+    try:
+        report = assess_blast_radius(
+            cat_dir,
+            proj_root,
+            commit=commit or None,
+            commit_range=commit_range or None,
+            files=file_list,
+            dependency=dependency,
+            project=project or None,
+        )
+    except ValueError as e:
+        return {"error": str(e)}
+
+    result = dataclasses.asdict(report)
+    if flag:
+        records = flag_blast_radius(report, cat_dir)
+        result["flagged_count"] = len(records)
+        campaign_records = propagate_to_campaigns(report, cat_dir)
+        result["campaign_flagged_count"] = len(campaign_records)
+        claim_records = propagate_to_claims(report, cat_dir, workspace_root=proj_root)
+        result["claim_flagged_count"] = len(claim_records)
+    return result
+
+
+def blast_radius_clear_tool(
+    catalog_dir: str = "",
+    entity_type: str = "",
+    entity_id: str = "",
+    reason: str = "",
+) -> dict:
+    """Manually clear a blast-radius flag (backlog #4551, AC-9; real).
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619) at the MCP
+    wrapper layer — see mcp_blast_radius_clear_tool.
+
+    Args:
+        catalog_dir: Catalog directory (empty = use default).
+        entity_type: 'run', 'campaign', or 'claim'.
+        entity_id: Entity ID to clear.
+        reason: Required non-empty justification.
+
+    Returns:
+        Dict with the appended ledger record, or {"error": ...} if reason is empty.
+    """
+    import dataclasses
+
+    from bathos.blast_radius import clear_blast_radius_flag
+
+    if not entity_type or not entity_id:
+        return {"error": "entity_type and entity_id are required"}
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    try:
+        record = clear_blast_radius_flag(cat_dir, entity_type, entity_id, reason=reason)
+    except ValueError as e:
+        return {"error": str(e)}
+    return dataclasses.asdict(record)
+
+
+def get_blast_radius_status_tool(
+    catalog_dir: str = "",
+    entity_type: str = "",
+    entity_id: str = "",
+) -> dict:
+    """Look up blast-radius status for an entity (backlog #4551; real).
+
+    Args:
+        catalog_dir: Catalog directory (empty = use default).
+        entity_type: 'run', 'campaign', or 'claim'.
+        entity_id: Entity ID to look up.
+
+    Returns:
+        Dict with entity_type, entity_id, and status
+        (clean/affected/unverifiable/cleared).
+    """
+    from bathos.blast_radius import fold_blast_radius_state
+
+    if not entity_type or not entity_id:
+        return {"error": "entity_type and entity_id are required"}
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    return {
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+        "status": fold_blast_radius_state(cat_dir, entity_type, entity_id),
+    }
+
+
+# ============================================================================
 # Anchor-insert WRITE API (S2) — bathos.anchor adapter (backlog item 3483)
 #
 # Generic sidecar anchor by (path, sha256), mirroring the claim_register pattern
@@ -926,6 +1076,7 @@ def compact_tool(
         "ingested": result.ingested,
         "skipped": result.skipped,
         "duration_s": result.duration_s,
+        "corrupt_fragments": [str(cf.path) for cf in result.corrupt_fragments],
     }
     return result_dict
 
@@ -1852,6 +2003,69 @@ async def mcp_graduate_product_tool(
         run_id=run_id,
         output_path=output_path,
         reason=reason,
+    )
+
+
+@cisternal.tool(registry="bathos", name="blast_radius_assess")
+@traced_tool
+@require_write_token
+async def mcp_blast_radius_assess_tool(
+    catalog_dir: str = "",
+    project_root: str = "",
+    commit: str = "",
+    commit_range: str = "",
+    files: str = "",
+    dependency: bool = False,
+    project: str = "",
+    flag: bool = True,
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
+) -> dict:
+    """Assess which runs a bug/fix implicates, then flag + propagate to
+    campaign/claim records (backlog #4551/#4552).
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619) — gated because
+    flag=True by default performs a durable ledger write (security-audit finding,
+    PR #54: this was previously the only mutating tool in this file without the gate)."""
+    return blast_radius_assess_tool(
+        catalog_dir=catalog_dir,
+        project_root=project_root,
+        commit=commit,
+        commit_range=commit_range,
+        files=files,
+        dependency=dependency,
+        project=project,
+        flag=flag,
+    )
+
+
+@cisternal.tool(registry="bathos", name="blast_radius_clear")
+@traced_tool
+@require_write_token
+async def mcp_blast_radius_clear_tool(
+    catalog_dir: str = "",
+    entity_type: str = "",
+    entity_id: str = "",
+    reason: str = "",
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
+) -> dict:
+    """Manually clear a blast-radius flag (backlog #4551, AC-9).
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    return blast_radius_clear_tool(
+        catalog_dir=catalog_dir, entity_type=entity_type, entity_id=entity_id, reason=reason
+    )
+
+
+@cisternal.tool(registry="bathos", name="get_blast_radius_status")
+@traced_tool
+async def mcp_get_blast_radius_status_tool(
+    catalog_dir: str = "",
+    entity_type: str = "",
+    entity_id: str = "",
+) -> dict:
+    """Look up blast-radius status for an entity (backlog #4551)."""
+    return get_blast_radius_status_tool(
+        catalog_dir=catalog_dir, entity_type=entity_type, entity_id=entity_id
     )
 
 

@@ -9,12 +9,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Blast-radius assessment (Phase 1, backlog #4551).** `bth blast-radius assess
+  --commit <sha>|--commit-range <a..b>|--file <path>` answers "a bug was found/fixed here —
+  which past runs does it implicate?": a new `blast_radius_ledger` (mirrors
+  `trust_ledger`'s durable dual-write shape, composite-keyed on `(entity_type, entity_id)`
+  for Phase 2 forward-compat) records "affected"/"unverifiable" runs via a v1 file-path
+  heuristic + git ancestry check, reusing `check_runs()`'s DIRTY_RUN/UNKNOWN_CODE
+  classification for the unverifiable bucket. `bth blast-radius clear` manually clears a
+  flag (requires a reason, not attestation-gated in Phase 1). `bth query blast-status`
+  and matching MCP tools (`blast_radius_assess`, `blast_radius_clear`,
+  `get_blast_radius_status`) round out the surface. Spec:
+  `.praxia/docs/specs/260826_blast-radius-assessment-skill.md`.
+- **Blast-radius Phase 2a: campaign/claim propagation, dependency anchor, shadow
+  auto-clear (backlog #4552).** `bth blast-radius assess --dependency` adds a 4th anchor
+  type (dependency-lock-drift, reusing `check_dependency_lock_drift`/`hash_dependency_lock`
+  as-is; a run with no recorded `dependency_lock_sha256` goes to "unverifiable", not a
+  silent "unaffected"). Every `assess` now also propagates to campaign-level
+  (`propagate_to_campaigns`, more-severe-state-wins across member runs) and claim-level
+  (`propagate_to_claims`, naming which union-gate clauses are backed by an affected run —
+  same covering-run matching `run_union_gate` uses) ledger records. A shadow auto-clear
+  verdict (`compute_shadow_auto_clear_verdict`, an output-SHA-drift proxy signal) is
+  computed and stored on every "affected" flag but never applied — pure observability
+  ahead of ever trusting it to act. `bth campaign review`'s output gains informational,
+  non-gating `blast_radius_status`/`claim_blast_radius_status` fields. The event/git-hook
+  shadow trigger is split out to backlog #4555 (needs its own OS-integration design pass).
+- **Blast-radius Phase 2b: event/git-hook shadow-mode trigger (backlog #4555).**
+  `bth blast-radius install-hook`/`uninstall-hook` wrap `core.hooksPath` around a
+  bathos-managed directory (`bathos.git_hooks`) that preserves whatever hooks were already
+  active — chains to a pre-existing `post-commit` (if any), symlinks every other hook name
+  through unchanged, and restores the exact prior `core.hooksPath` on uninstall. The
+  installed `post-commit` script does only a cheap keyword check inline
+  (`fix`/`bug`/`regression`/`hotfix`/`patch`, hardcoded, case-insensitive) and spawns
+  `bth blast-radius shadow-check "$sha"` detached (`setsid nohup ... &`) — all real logic
+  lives in `record_shadow_trigger()`, which reuses `assess_blast_radius(commit=...)` and
+  logs a `entity_type="shadow_trigger"` ledger record (`to_state="shadow_only"`, keyed by
+  commit sha) on the same `blast_radius_ledger` table, never calling `flag_blast_radius` or
+  either `propagate_to_*` function — a shadow trigger can never durably affect a real
+  run/campaign/claim's state. `bth query shadow-log` lists recent firings for calibration
+  review.
 - **Cluster cool catalog without rsyncing `bathos.db`.** Campaigns live as cool JSON under
   `{catalog}/campaigns/{uuid}.json`. Cluster jobs write `{remote_root}/.bth/catalog`. Conclude,
   emit, and postmortem overlay cool JSON onto warm DuckDB after compact/prepare.
 
 ### Fixed
 
+- **One corrupt cool-tier fragment no longer aborts catalog maintenance for every project.**
+  `read_runs()` (and the new `read_runs_report()`) and `migrate_catalog()` used to call
+  `pq.read_table()` over every fragment with no per-file error handling; a single truncated
+  Parquet fragment (e.g. from a killed SLURM job) raised `pyarrow.lib.ArrowInvalid` out of
+  `bth compact` and `bth migrate --dry-run`, blocking maintenance catalog-wide until an
+  operator manually renamed the bad file aside. Both now skip an unreadable fragment, log a
+  WARNING, and report it in the result (`CompactResult.corrupt_fragments`,
+  `MigrateResult.corrupt`) instead of raising -- printed loudly by the CLI with a pointer to
+  `bth repair --tier cool` (already has a `quarantine_corrupt` action; unchanged here).
+  Default is skip-and-report so maintenance always completes; `bth compact --strict` opts into
+  the old hard-fail behaviour for CI/automation that wants corruption to be build-breaking.
+  Corrupt files are never auto-deleted or auto-quarantined by compact/migrate themselves.
+- **`bth migrate` gains `--project` scoping.** Previously always scanned every project's
+  fragments under `runs/`; on a large multi-project catalog this made a routine "migrate what
+  I just added" ask into an unscoped, unreviewable operation touching thousands of unrelated
+  fragments. `bth migrate --project <slug>` now scans only `runs/<slug>/`; the CLI always
+  prints which scope ran (`ALL projects` or `project '<slug>'`) so the default stays visible
+  rather than silent. Investigation note: `bth compact` never needed `migrate` to run first --
+  `read_runs()`'s permissive multi-fragment concat plus `_apply_migrations()` at warm-ingest
+  time already tolerate old-schema cool fragments; `migrate_catalog` only matters for
+  consumers that read raw cool-tier Parquet directly expecting a uniform on-disk schema.
 - MCP `campaign_create` uses `connect_catalog_db` (compacts if needed) and lists cool-tier open
   campaigns for the duplicate-name warning.
 - MCP `campaign_conclude` returns `{"error": ...}` for `CampaignError` and a missing catalog

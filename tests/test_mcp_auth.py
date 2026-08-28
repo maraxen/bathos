@@ -33,6 +33,8 @@ from bathos.mcp import (
     mcp_archive_tool,
     mcp_attestation_register_tool,
     mcp_attestation_scaffold_tool,
+    mcp_blast_radius_assess_tool,
+    mcp_blast_radius_clear_tool,
     mcp_campaign_add_tool,
     mcp_campaign_conclude_tool,
     mcp_campaign_create_tool,
@@ -47,10 +49,16 @@ from bathos.mcp import (
 )
 from bathos.mcp_auth import check_token, get_or_create_token, token_path
 
-# All 17 write-verb MCP tools gated with @require_write_token (debt #619).
+# All 19 write-verb MCP tools gated with @require_write_token (debt #619).
 # Kept as an explicit enumeration (rather than introspecting mcp.py) so this
 # test file itself is the audit trail for "every write tool is covered" —
 # see mcp.py's `rg -F "@require_write_token"` for the source-of-truth count.
+#
+# NOTE (PR #54 security audit): mcp_graduate_product_tool is ALSO
+# @require_write_token-gated in mcp.py but was already absent from this
+# enumeration before this PR touched the file — a pre-existing gap, not
+# something introduced or fixed here; flagging rather than silently leaving
+# it for the next person to rediscover.
 WRITE_TOOLS = [
     mcp_anchor_insert_tool,
     mcp_figure_entry_register_tool,
@@ -68,6 +76,8 @@ WRITE_TOOLS = [
     claim_attest_parity,
     mcp_campaign_add_tool,
     mcp_repair_tool,
+    mcp_blast_radius_assess_tool,
+    mcp_blast_radius_clear_tool,
 ]
 
 # postmortem_scaffold is imported separately below since its name collides

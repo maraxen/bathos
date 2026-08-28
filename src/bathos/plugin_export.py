@@ -5,14 +5,25 @@ writes a single skill file + merges MCP config directly into a caller's
 ~/.claude.json. This module instead builds a self-contained, portable plugin
 bundle (.claude-plugin/, agents/, skills/, .mcp.json) from the wired
 "bathos" MCP tool registry plus .praxia/manifest.toml's declared skills/
-agents/hooks, by shelling out to `cisternal assets export`.
+agents/hooks, calling cisternal's native, in-process Python API directly
+(cisternal.assets.load.load_asset_report -> cisternal.export emitters ->
+cisternal.export.write_bundle) — cisternal documents this as public API in
+cisternal/{assets,export}/__init__.py, so there's no need to shell out to
+the cisternal CLI and parse its stderr for warnings.
+
+Note on manifest path resolution: cisternal's ManifestAssetSource resolves a
+manifest's declared asset paths relative to the manifest FILE's own
+*grandparent* directory (tuned for its own convention of
+<plugin_root>/.praxia/manifest.toml), matching praxia's own repo-root-relative
+resolution of the same manifest. Requires cisternal>=0.1.1a4: earlier versions
+resolved from the manifest file's single parent instead, which is why
+.praxia/manifest.toml's asset paths used to carry a `../` prefix as a
+workaround (removed when this module was ported to the native API).
 """
 
 from __future__ import annotations
 
-import shutil
-import subprocess
-import sys
+import importlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,7 +41,7 @@ class PluginExportResult:
     surface: str
     out: Path
     dry_run: bool
-    stdout: str
+    files: tuple[str, ...]
 
 
 def _find_repo_root() -> Path:
@@ -58,74 +69,60 @@ def export_plugin_bundle(
 ) -> PluginExportResult:
     """Export the wired "bathos" registry + manifest assets as a plugin bundle.
 
-    Runs `cisternal assets export` against .praxia/manifest.toml and the
-    "bathos" MCP tool registry (populated by importing bathos.mcp), passing
-    the installed bathos version explicitly so the bundle never drifts from
-    manifest.toml's own (hand-maintained, easily stale) version field.
+    Imports bathos.mcp (populating the "bathos" cisternal tool registry via
+    its @cisternal.tool side-effects), then loads .praxia/manifest.toml
+    against that registry and emits it for the selected surface — in-process,
+    passing the installed bathos version explicitly so the bundle never
+    drifts from manifest.toml's own (hand-maintained, easily stale) version
+    field.
     """
     if surface not in SUPPORTED_SURFACES:
         raise PluginExportError(
             f"Unknown surface {surface!r}. Choose one of: {', '.join(SUPPORTED_SURFACES)}."
         )
 
-    # Check the running interpreter's own bin/ dir first — bth and cisternal
-    # are console scripts in the same venv, but that venv's bin/ is often
-    # not on PATH unless explicitly activated (e.g. when bth is invoked via
-    # its own venv-relative path rather than an activated shell).
-    venv_candidate = Path(sys.executable).parent / "cisternal"
-    cisternal_bin = str(venv_candidate) if venv_candidate.exists() else shutil.which("cisternal")
-    if cisternal_bin is None:
-        raise PluginExportError(
-            "cisternal CLI not found (checked the current interpreter's bin/ "
-            "dir and PATH). Plugin export requires the 'cisternal' console "
-            "script (installed alongside the cisternal dependency)."
-        )
+    from cisternal.assets.bundle import BundleMetadata
+    from cisternal.assets.load import load_asset_report
+    from cisternal.export import get_emitter, write_bundle
+
+    # Triggers bathos.mcp's @cisternal.tool registration side-effects (mirrors
+    # `cisternal assets export --import bathos.mcp`); sys.modules caching
+    # means an already-imported bathos.mcp is a no-op here, matching the CLI.
+    importlib.import_module("bathos.mcp")
 
     repo_root = _find_repo_root()
     manifest_path = repo_root / ".praxia" / "manifest.toml"
 
-    cmd = [
-        cisternal_bin,
-        "assets",
-        "export",
-        "--manifest",
-        str(manifest_path),
-        "--registry",
-        "bathos",
-        "--import",
-        "bathos.mcp",
-        "--surface",
-        surface,
-        "--name",
-        "bathos",
-        "--version",
-        bathos.__version__,
-    ]
-    if dry_run:
-        cmd.append("--dry-run")
-    else:
-        cmd.extend(["--out", str(out)])
-
-    proc = subprocess.run(
-        cmd,
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        check=False,
+    # Load once to pick up the manifest-declared description, then reload
+    # with bathos's own name/version overriding the manifest's — mirrors
+    # cisternal's own CLI (cisternal.cli._load_export_bundle).
+    preload = load_asset_report(manifest=manifest_path, registry="bathos")
+    metadata = BundleMetadata(
+        name="bathos",
+        version=bathos.__version__,
+        description=preload.bundle.metadata.description,
     )
-    # cisternal assets export always exits 0 (never-raise convention) and
-    # reports problems via stderr warnings instead — treat any stderr output
-    # as a hard failure here, since a correctly configured manifest.toml
-    # should produce none (a warning usually means an asset silently got
-    # dropped from the bundle, e.g. an unreadable path).
-    if proc.returncode != 0 or proc.stderr.strip():
+    report = load_asset_report(manifest=manifest_path, registry="bathos", metadata=metadata)
+
+    # load_asset_report never raises; a warning usually means an asset
+    # silently got dropped from the bundle, and a conflict means two assets
+    # collided on the same name — both are hard failures for us.
+    if report.warnings or report.conflicts:
         raise PluginExportError(
-            f"cisternal assets export reported problems (exit {proc.returncode}):\n{proc.stderr}"
+            "cisternal reported problems loading the manifest:\n"
+            f"warnings: {report.warnings}\nconflicts: {report.conflicts}"
         )
+
+    emitter = get_emitter(surface)
+    if emitter is None:
+        raise PluginExportError(f"cisternal has no emitter registered for surface {surface!r}.")
+
+    files = emitter.emit(report.bundle)
+    write_result = write_bundle(files, out, dry_run=dry_run)
 
     return PluginExportResult(
         surface=surface,
         out=out,
         dry_run=dry_run,
-        stdout=proc.stdout,
+        files=tuple(path for path, _sha256 in write_result.files),
     )

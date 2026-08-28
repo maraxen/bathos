@@ -3,8 +3,29 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 
-from bathos.catalog import init_catalog, read_runs, write_run, write_submit_provenance
+from bathos.catalog import (
+    CorruptFragment,
+    init_catalog,
+    read_runs,
+    read_runs_report,
+    write_run,
+    write_submit_provenance,
+)
 from bathos.schema import Run
+
+
+def _truncate_to_corrupt(path: Path) -> None:
+    """Truncate a valid Parquet file so it no longer has a readable footer.
+
+    Mirrors the real-world defect (260827_bathos-catalog-robustness): a cool-tier
+    fragment truncated mid-write (e.g. a killed SLURM job) is a nonzero-size file
+    with no Parquet magic bytes in its footer -- distinct from, and more common
+    than, a zero-byte file (already covered by test_repair.py's
+    catalog_with_corrupt_fragment fixture).
+    """
+    data = path.read_bytes()
+    assert len(data) > 100, "fixture fragment is too small to truncate meaningfully"
+    path.write_bytes(data[: len(data) // 2])
 
 
 def test_init_catalog_creates_dirs(tmp_catalog: Path):
@@ -129,3 +150,77 @@ def test_write_submit_provenance_atomic_rename(tmp_catalog: Path):
 
     assert len(tmp_files) == 0, "Temporary .tmp.parquet file should not exist after atomic rename"
     assert len(final_files) == 1, "Should have exactly one final Parquet file"
+
+
+# =============================================================================
+# Defect 1 (260827_bathos-catalog-robustness): one corrupt cool-tier fragment
+# must not abort a whole-catalog scan.
+# =============================================================================
+
+
+def test_read_runs_skips_truncated_fragment(tmp_catalog: Path, sample_run: Run):
+    """A single truncated fragment must not prevent read_runs from returning
+    every other, valid run in the catalog.
+
+    Reproduces the real-world failure: `pq.read_table()` on a corrupt fragment
+    raises `pyarrow.lib.ArrowInvalid: ... Parquet magic bytes not found in
+    footer`, and prior to the fix that exception propagated out of read_runs()
+    uncaught -- one bad file in one project broke every caller (bth compact,
+    bth migrate --dry-run, bth ls, bth find, ...) for every project.
+    """
+    init_catalog(tmp_catalog)
+    write_run(sample_run, tmp_catalog)
+
+    other = dataclasses.replace(sample_run, id="run-corrupt-target", project_slug="testproj2")
+    write_run(other, tmp_catalog)
+    corrupt_path = tmp_catalog / "runs" / "testproj2" / f"run_{other.id}.parquet"
+    _truncate_to_corrupt(corrupt_path)
+
+    runs = read_runs(tmp_catalog)
+
+    assert len(runs) == 1
+    assert runs[0].id == sample_run.id
+
+
+def test_read_runs_report_reports_corrupt_fragments(tmp_catalog: Path, sample_run: Run):
+    """read_runs_report() surfaces which fragments were skipped and why, so an
+    operator can act (bth repair --tier cool) instead of the failure being silent.
+    """
+    init_catalog(tmp_catalog)
+    write_run(sample_run, tmp_catalog)
+
+    other = dataclasses.replace(sample_run, id="run-corrupt-target", project_slug="testproj2")
+    write_run(other, tmp_catalog)
+    corrupt_path = tmp_catalog / "runs" / "testproj2" / f"run_{other.id}.parquet"
+    _truncate_to_corrupt(corrupt_path)
+
+    runs, corrupt = read_runs_report(tmp_catalog)
+
+    assert len(runs) == 1
+    assert runs[0].id == sample_run.id
+    assert len(corrupt) == 1
+    assert isinstance(corrupt[0], CorruptFragment)
+    assert corrupt[0].path == corrupt_path
+    assert corrupt[0].error  # non-empty diagnostic message
+
+
+def test_read_runs_all_fragments_corrupt_returns_empty_not_raise(tmp_catalog: Path, sample_run: Run):
+    """If every fragment in the catalog is corrupt, read_runs returns an empty
+    list rather than raising -- callers already treat an empty catalog as valid.
+    """
+    init_catalog(tmp_catalog)
+    write_run(sample_run, tmp_catalog)
+    corrupt_path = tmp_catalog / "runs" / sample_run.project_slug / f"run_{sample_run.id}.parquet"
+    _truncate_to_corrupt(corrupt_path)
+
+    runs, corrupt = read_runs_report(tmp_catalog)
+    assert runs == []
+    assert len(corrupt) == 1
+
+
+def test_read_runs_no_corruption_reports_empty_corrupt_list(tmp_catalog: Path, sample_run: Run):
+    init_catalog(tmp_catalog)
+    write_run(sample_run, tmp_catalog)
+    runs, corrupt = read_runs_report(tmp_catalog)
+    assert len(runs) == 1
+    assert corrupt == []

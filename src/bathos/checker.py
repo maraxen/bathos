@@ -44,6 +44,9 @@ def check_runs(
     catalog_dir: Path,
     project_root: Path,
     status_filter: str | None = None,
+    *,
+    project: str | None = None,
+    limit: int = 50,
 ) -> list[CheckResult]:
     """Check all runs in catalog for git-drift validity.
 
@@ -57,6 +60,13 @@ def check_runs(
         catalog_dir: Path to catalog directory
         project_root: Path to project root (used to get current git state)
         status_filter: Optional filter; return only results with this status
+        project: Optional project_slug filter, passed through to list_runs().
+        limit: Passed through to list_runs() (default 50, matching list_runs'
+            own default -- unchanged for existing callers). list_runs() has no
+            ORDER BY, so on a catalog with more than `limit` runs this silently
+            drops an arbitrary subset, not "the most recent". Callers that need
+            every run considered (e.g. bathos.blast_radius, where a dropped run
+            is a false "not affected") must pass an explicit larger limit.
 
     Returns:
         List of CheckResult objects
@@ -66,7 +76,7 @@ def check_runs(
     current_hash = current_state.hash
 
     # Get all runs from catalog
-    all_runs = list_runs(catalog_dir)
+    all_runs = list_runs(catalog_dir, project=project, limit=limit)
 
     results = []
     for run in all_runs:
