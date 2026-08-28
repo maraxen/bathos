@@ -61,6 +61,11 @@ provenance_app = typer.Typer(
 )
 app.add_typer(provenance_app, name="provenance")
 
+blast_app = typer.Typer(
+    help="Blast-radius assessment: which runs does a bug/fix implicate? (backlog #4551)"
+)
+app.add_typer(blast_app, name="blast-radius")
+
 
 def _catalog_dir() -> Path:
     override = os.environ.get("BTH_CATALOG_DIR")
@@ -1196,6 +1201,186 @@ def attestation_register_cmd(
         raise typer.Exit(1)
 
 
+@blast_app.command("assess")
+def blast_radius_assess_cmd(
+    commit: str | None = typer.Option(None, "--commit", help="Single fix commit SHA"),
+    commit_range: str | None = typer.Option(
+        None, "--commit-range", help="Commit range, e.g. abc123..def456"
+    ),
+    files: list[str] | None = typer.Option(
+        None, "--file", help="File/symbol path anchor (repeatable, no ancestry check)"
+    ),
+    dependency: bool = typer.Option(
+        False, "--dependency", help="Dependency-lock-drift anchor (no commit/file needed)"
+    ),
+    project: str | None = typer.Option(
+        None, "--project", help="Scope to one project_slug (default: whole catalog)"
+    ),
+    no_flag: bool = typer.Option(
+        False, "--no-flag", help="Print the report only; do not write ledger records"
+    ),
+):
+    """Assess which runs a bug/fix implicates, then flag them + propagate to
+    campaigns/claims (AC-1/2/3/4/5/6/7/8/9/10/11)."""
+    import dataclasses
+    import json as json_mod
+
+    from bathos.blast_radius import (
+        assess_blast_radius,
+        flag_blast_radius,
+        propagate_to_campaigns,
+        propagate_to_claims,
+    )
+    from bathos.workspace import resolve_workspace
+
+    ws_root = resolve_workspace().fs_root
+    try:
+        report = assess_blast_radius(
+            _catalog_dir(),
+            ws_root,
+            commit=commit,
+            commit_range=commit_range,
+            files=files or None,
+            dependency=dependency,
+            project=project,
+        )
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(json_mod.dumps(dataclasses.asdict(report), indent=2))
+
+    if no_flag:
+        return
+    records = flag_blast_radius(report, _catalog_dir())
+    typer.echo(f"\nFlagged {len(records)} run(s) in blast_radius_ledger.")
+
+    campaign_records = propagate_to_campaigns(report, _catalog_dir())
+    if campaign_records:
+        typer.echo(f"Flagged {len(campaign_records)} campaign(s).")
+
+    claim_records = propagate_to_claims(report, _catalog_dir(), workspace_root=ws_root)
+    if claim_records:
+        clauses = [json_mod.loads(r.matched_clauses) for r in claim_records if r.matched_clauses]
+        typer.echo(f"Flagged {len(claim_records)} claim(s), implicated clauses: {clauses}")
+
+
+@blast_app.command("clear")
+def blast_radius_clear_cmd(
+    entity_type: str = typer.Argument(..., help="'run', 'campaign', or 'claim'"),
+    entity_id: str = typer.Argument(..., help="Entity ID to clear"),
+    reason: str = typer.Option(
+        ..., "--reason", help="Required justification (manual re-attestation, AC-9)"
+    ),
+):
+    """Manually clear a blast-radius flag. Does not verify the reason -- records it
+    for audit (see clear_blast_radius_flag's docstring for the deliberate scope cut
+    vs. an attestation-gated ratchet)."""
+    import dataclasses
+    import json as json_mod
+
+    from bathos.blast_radius import clear_blast_radius_flag
+
+    try:
+        record = clear_blast_radius_flag(_catalog_dir(), entity_type, entity_id, reason=reason)
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+    typer.echo(json_mod.dumps(dataclasses.asdict(record), indent=2))
+
+
+def _build_shadow_hook_script() -> str:
+    """Generate the installed post-commit hook's script content.
+
+    The `case` branch below is a CHEAP, coarse pre-filter only, generated from
+    the exact same `SHADOW_KEYWORDS` tuple that
+    `bathos.blast_radius.identify_fix_like_keyword` uses -- a prior version
+    hand-duplicated a separate, unanchored-substring shell glob here, which
+    silently drifted from the word-boundary regex it was meant to mirror
+    (confirmed, PR #54 second jury round). Its only job is avoiding a `bth`
+    process spawn for commits obviously irrelevant; `record_shadow_trigger`
+    independently re-derives the commit message and makes the real,
+    authoritative keyword decision (SAC-5: no assessment ever runs for a
+    genuinely non-matching commit, regardless of what this coarser filter let
+    through) and captures which keyword matched (SAC-8).
+    """
+    from bathos.blast_radius import SHADOW_KEYWORDS
+
+    case_pattern = "|".join(f"*{kw}*" for kw in SHADOW_KEYWORDS)
+    return f"""#!/bin/sh
+# Installed by bathos (backlog #4555) -- do not edit directly, re-run
+# `bth blast-radius install-hook` to regenerate.
+sha="$(git rev-parse HEAD)"
+msg_lower="$(git log -1 --pretty=%B HEAD | tr '[:upper:]' '[:lower:]')"
+case "$msg_lower" in
+    {case_pattern})
+        setsid nohup bth blast-radius shadow-check "$sha" >/dev/null 2>&1 &
+        ;;
+esac
+"""
+
+
+@blast_app.command("install-hook")
+def blast_radius_install_hook_cmd():
+    """Install the post-commit shadow-trigger hook (SAC-1/2, backlog #4555).
+
+    Preserves any pre-existing hooks (chains to post-commit if one existed,
+    symlinks every other hook name through unchanged) -- see
+    bathos.git_hooks.install_managed_hooks."""
+    from bathos.git_hooks import install_managed_hooks
+    from bathos.workspace import resolve_workspace
+
+    # Built here, not at module scope: _build_shadow_hook_script() imports
+    # bathos.blast_radius (duckdb/pyarrow at module level) -- every other
+    # blast_radius import in this file is already lazy, scoped to the one
+    # command body that needs it (lines below, and blast_radius_shadow_check_cmd/
+    # query_shadow_log). A module-level constant would force that import cost
+    # onto every `bth` invocation, not just this command (confirmed, PR #54
+    # third jury round, code-review lens).
+    _shadow_hook_script = _build_shadow_hook_script()
+
+    ws_root = resolve_workspace().fs_root
+    managed = ws_root / ".bth" / "hooks"
+    install_managed_hooks(ws_root, managed, {"post-commit": _shadow_hook_script})
+    typer.echo(f"Installed shadow-trigger hook at {managed}")
+
+
+@blast_app.command("uninstall-hook")
+def blast_radius_uninstall_hook_cmd():
+    """Uninstall the shadow-trigger hook, restoring the prior core.hooksPath (SAC-3)."""
+    from bathos.git_hooks import uninstall_managed_hooks
+    from bathos.workspace import resolve_workspace
+
+    ws_root = resolve_workspace().fs_root
+    managed = ws_root / ".bth" / "hooks"
+    try:
+        uninstall_managed_hooks(ws_root, managed)
+    except FileNotFoundError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+    typer.echo("Uninstalled shadow-trigger hook")
+
+
+@blast_app.command("shadow-check")
+def blast_radius_shadow_check_cmd(
+    commit: str = typer.Argument(..., help="Commit SHA to shadow-assess"),
+):
+    """Run a shadow-only assessment for one commit (SAC-4/5/6/7, backlog #4555).
+
+    Called by the installed post-commit hook (detached, in the background);
+    safe to invoke directly for testing/debugging. Never durably affects a
+    real run/campaign/claim's state."""
+    from bathos.blast_radius import record_shadow_trigger
+    from bathos.workspace import resolve_workspace
+
+    ws_root = resolve_workspace().fs_root
+    record = record_shadow_trigger(_catalog_dir(), ws_root, commit)
+    if record is None:
+        typer.echo(f"No shadow trigger recorded for {commit} (e.g. no parent commit)")
+        return
+    typer.echo(f"Shadow-recorded {commit}: {record.match_reason}")
+
+
 @campaign_app.command("attest-parity")
 def campaign_attest_parity(
     campaign_id: str = typer.Argument(..., help="Campaign ID (or prefix)"),
@@ -1474,6 +1659,41 @@ def query_candidates(
 
     candidates = list_candidates(_catalog_dir(), campaign_id)
     typer.echo(json_mod.dumps(candidates, indent=2))
+
+
+@query_app.command("blast-status")
+def query_blast_status(
+    entity_type: str = typer.Argument(..., help="'run', 'campaign', or 'claim'"),
+    entity_id: str = typer.Argument(..., help="Entity ID to look up"),
+):
+    """Look up blast-radius status for an entity: clean/affected/unverifiable/cleared."""
+    from bathos.blast_radius import fold_blast_radius_state
+
+    typer.echo(fold_blast_radius_state(_catalog_dir(), entity_type, entity_id))
+
+
+@query_app.command("shadow-log")
+def query_shadow_log(
+    limit: int = typer.Option(20, "--limit", help="Max records to show"),
+):
+    """List recent shadow-trigger firings for calibration review (SAC-8, backlog #4555)."""
+    import duckdb
+
+    cat_dir = _catalog_dir()
+    db_path = cat_dir / "bathos.db"
+    if not db_path.exists():
+        return
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        rows = con.execute(
+            "SELECT entity_id, match_reason, amended_at FROM blast_radius_ledger "
+            "WHERE entity_type = 'shadow_trigger' ORDER BY amended_at DESC LIMIT ?",
+            [limit],
+        ).fetchall()
+    finally:
+        con.close()
+    for commit, reason, amended_at in rows:
+        typer.echo(f"{amended_at}  {commit[:9]}  {reason}")
 
 
 @anchor_app.command("insert")

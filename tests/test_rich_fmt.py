@@ -133,6 +133,46 @@ def test_render_campaign_review_with_anomalies(sample_campaign):
     assert "320K" in result or "Run 5" in result
 
 
+def test_render_campaign_review_shows_blast_radius_status(sample_campaign):
+    """AC-12 slice (Phase 2a, #4552): render_campaign_review must display
+    blast_radius_status/claim_blast_radius_status -- campaigns.review_campaign()
+    computes and forwards them, but the CLI's human-facing display previously
+    dropped them silently (confirmed spec-adherence gap, PR #54 second jury round)."""
+    review = {
+        "outcome_distribution": {"pass": 8},
+        "blast_radius_status": "affected",
+        "claim_blast_radius_status": "unverifiable",
+    }
+
+    output = io.StringIO()
+    console = Console(file=output, force_terminal=True, width=200)
+
+    render_campaign_review(sample_campaign, review, console=console)
+
+    result = output.getvalue()
+    assert "affected" in result
+    assert "unverifiable" in result
+
+
+def test_render_campaign_review_clean_blast_radius_is_shown(sample_campaign):
+    """Clean status must render explicitly, not be silently omitted -- an absent
+    line would be indistinguishable from the display gap this regresses against."""
+    review = {
+        "outcome_distribution": {"pass": 8},
+        "blast_radius_status": "clean",
+        "claim_blast_radius_status": "clean",
+    }
+
+    output = io.StringIO()
+    console = Console(file=output, force_terminal=True, width=200)
+
+    render_campaign_review(sample_campaign, review, console=console)
+
+    result = output.getvalue()
+    assert "Blast radius" in result
+    assert "clean" in result.lower()
+
+
 def test_invalid_measurement_outcome_color_distinct_from_fail_and_error():
     """debt #1071: invalid_measurement must read as visually distinct from fail/error."""
     from bathos.rich_fmt import _get_outcome_color
