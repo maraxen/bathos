@@ -627,3 +627,132 @@ def test_import_outside_a_repo_or_with_no_dir_is_a_noop(tmp_path: Path):
     assert import_bundles(tmp_path).imported == ()
     _init_repo(tmp_path)
     assert import_bundles(tmp_path).imported == ()
+
+
+# --- Fix 1: Bathos identity regression tests -----------------------------------------------
+
+
+def test_dirty_snapshot_uses_bathos_identity(tmp_path: Path):
+    """Verify that snapshots use bathos's identity, not cisternal's default."""
+    head = _init_repo(tmp_path)
+    (tmp_path / "tracked.txt").write_text("modified")
+
+    result = pin_run("run-identity", head, "main", dirty=True, cwd=tmp_path)
+
+    assert result.wip_commit
+
+    # Read the commit to verify its author/committer identity
+    log_output = subprocess.run(
+        ["git", "log", "-1", "--format=%an <%ae>", result.wip_commit],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
+
+    assert log_output == "bathos <bathos@localhost>", f"Expected bathos identity but got: {log_output}"
+
+
+def test_dirty_snapshot_uses_bathos_message_template(tmp_path: Path):
+    """Verify that snapshot commit messages use bathos's template."""
+    head = _init_repo(tmp_path)
+    (tmp_path / "tracked.txt").write_text("modified")
+
+    run_id = "run-msg-test"
+    result = pin_run(run_id, head, "main", dirty=True, cwd=tmp_path)
+
+    assert result.wip_commit
+
+    # Read the commit message
+    msg = subprocess.run(
+        ["git", "log", "-1", "--format=%B", result.wip_commit],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
+
+    expected_msg = f"bathos worktree snapshot for run {run_id}"
+    assert msg == expected_msg, f"Expected message '{expected_msg}' but got: {msg}"
+
+
+# --- Fix 3: Remote export auto-detection tests -----------------------------------------------
+
+
+def test_slurm_job_id_triggers_auto_export_directory(tmp_path: Path):
+    """When SLURM_JOB_ID is set and no export_dir is given, use default outputs/provenance."""
+    import os
+
+    head = _init_repo(tmp_path)
+    (tmp_path / "tracked.txt").write_text("modified")
+
+    # Set SLURM_JOB_ID to simulate remote execution
+    original_slurm = os.environ.get("SLURM_JOB_ID")
+    try:
+        os.environ["SLURM_JOB_ID"] = "12345"
+        result = pin_run("run-slurm", head, "main", dirty=True, cwd=tmp_path)
+
+        assert result.wip_commit
+        # Bundle should be exported to the default directory
+        assert result.bundle_path
+        assert EXPORT_DIRNAME.name in result.bundle_path
+        assert Path(result.bundle_path).exists()
+    finally:
+        if original_slurm is None:
+            os.environ.pop("SLURM_JOB_ID", None)
+        else:
+            os.environ["SLURM_JOB_ID"] = original_slurm
+
+
+def test_bth_force_provenance_export_triggers_auto_export_directory(tmp_path: Path):
+    """When BTH_FORCE_PROVENANCE_EXPORT is set and no export_dir is given, use default."""
+    import os
+
+    head = _init_repo(tmp_path)
+    (tmp_path / "tracked.txt").write_text("modified")
+
+    # Set BTH_FORCE_PROVENANCE_EXPORT to simulate forced export
+    original_bth = os.environ.get("BTH_FORCE_PROVENANCE_EXPORT")
+    try:
+        os.environ["BTH_FORCE_PROVENANCE_EXPORT"] = "1"
+        result = pin_run("run-bth-force", head, "main", dirty=True, cwd=tmp_path)
+
+        assert result.wip_commit
+        # Bundle should be exported to the default directory
+        assert result.bundle_path
+        assert EXPORT_DIRNAME.name in result.bundle_path
+        assert Path(result.bundle_path).exists()
+    finally:
+        if original_bth is None:
+            os.environ.pop("BTH_FORCE_PROVENANCE_EXPORT", None)
+        else:
+            os.environ["BTH_FORCE_PROVENANCE_EXPORT"] = original_bth
+
+
+def test_explicit_export_dir_overrides_auto_detection(tmp_path: Path):
+    """When export_dir is explicitly provided, it takes precedence over env-var auto-detection."""
+    import os
+
+    head = _init_repo(tmp_path)
+    (tmp_path / "tracked.txt").write_text("modified")
+
+    explicit_export_dir = tmp_path / "explicit_export"
+    explicit_export_dir.mkdir()
+
+    # Set SLURM_JOB_ID but provide explicit export_dir
+    original_slurm = os.environ.get("SLURM_JOB_ID")
+    try:
+        os.environ["SLURM_JOB_ID"] = "12345"
+        result = pin_run(
+            "run-explicit", head, "main", dirty=True, cwd=tmp_path,
+            export_dir=explicit_export_dir
+        )
+
+        assert result.wip_commit
+        assert result.bundle_path
+        # Bundle should be in the explicit directory, not the default
+        assert str(explicit_export_dir) in result.bundle_path
+        assert "explicit_export" in result.bundle_path
+    finally:
+        if original_slurm is None:
+            os.environ.pop("SLURM_JOB_ID", None)
+        else:
+            os.environ["SLURM_JOB_ID"] = original_slurm

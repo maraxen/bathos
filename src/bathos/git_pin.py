@@ -1,4 +1,17 @@
-"""Make a run's git provenance durable, not merely recorded.
+"""Durable git provenance -- thin shim over cisternal.provenance.durable.
+
+The worktree-snapshot / durable-ref / tracked-manifest mechanism (design
+rationale in the original module's docstring, preserved verbatim below)
+moved to `cisternal.provenance.durable`, generalized so `provenance_paths`,
+ref prefixes, and the manifest path are caller-supplied rather than
+hardcoded. This module supplies bathos's own values for those and
+re-exports everything with the exact same public names/signatures bathos's
+own callers (`runner.py`, `cli.py`, this module's test suite) already use --
+no behavior change.
+
+---
+
+Make a run's git provenance durable, not merely recorded.
 
 `bathos.git` captures WHAT the repo looked like. This module makes that capture survive, which is a
 separate problem and the one that actually fails in practice.
@@ -6,39 +19,38 @@ separate problem and the one that actually fails in practice.
 Motivating measurement (tev_design catalog, 2026-08-18): `git_hash` was populated on 345/345 runs --
 capture is not the gap -- but only 40.6% of those hashes still resolved to a commit, and 92.2% of
 runs executed on a DIRTY tree. So the median run recorded a clean-looking hash describing a tree that
-never existed, and two runs in five cited a commit that is simply gone. A recorded hash that cannot
-be resolved, or that describes a different tree than the one that ran, is a false attestation: the
-field reads as a reproducibility guarantee it cannot back.
-
-Three mechanisms, in order of how much they buy:
-
-1. **Worktree snapshot.** When the tree is dirty, commit its actual contents to a real object and
-   record THAT, so the provenance describes what ran rather than what happened to be committed.
-   Built through a temporary index, so the caller's index, worktree and branches are untouched.
-
-2. **Durable per-run ref** (`refs/bathos/runs/<run_id>`). A ref is a reachability root, so the cited
-   commit cannot be garbage-collected and survives deletion of the branch it was made on -- the
-   dominant loss mode when work happens in short-lived worktrees.
-
-3. **Tracked manifest** (`.bth/refs/manifest.jsonl`). Refs live in `.git/` and therefore do not
-   travel with a normal clone or survive a re-rooted history. The manifest is an ordinary tracked
-   file: reviewable, diffable, and recoverable from any clone. The two are complements, not
-   alternatives -- the ref protects the objects, the manifest preserves the mapping.
-
-Everything here is best-effort by construction. Provenance capture must never be able to fail a run,
-so every function degrades to `None`/empty rather than raising.
+never existed, and two runs in five cited a commit that is simply gone.
 """
 
 from __future__ import annotations
 
-import json
 import os
-import subprocess
-import tempfile
-from contextlib import suppress
-from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
 from pathlib import Path
+
+from cisternal.provenance.durable import (
+    DEFAULT_MAX_SNAPSHOT_BYTES,
+    SNAPSHOT_FULL,
+    SNAPSHOT_METADATA_ONLY,
+    SNAPSHOT_NONE,
+    ImportReport,
+    PinResult,
+    SnapshotResult,
+    pin_result_as_dict,  # re-exported unchanged
+    ref_resolves,  # re-exported unchanged
+    repo_root,  # re-exported unchanged
+    snapshot_worktree,  # re-exported unchanged
+    snapshot_worktree_detailed,  # re-exported unchanged
+    update_ref,  # re-exported unchanged
+)
+from cisternal.provenance.durable import append_manifest as _append_manifest
+from cisternal.provenance.durable import export_bundle as _export_bundle
+from cisternal.provenance.durable import ignored_declared_paths as _ignored_declared_paths
+from cisternal.provenance.durable import ignored_provenance_paths as _ignored_provenance_paths
+from cisternal.provenance.durable import import_bundles as _import_bundles
+from cisternal.provenance.durable import manifest_candidates as _manifest_candidates
+from cisternal.provenance.durable import manifest_entry as _manifest_entry
+from cisternal.provenance.durable import pin_run as _pin_run
+from cisternal.provenance.durable import uncommitted_diff_for_run as _uncommitted_diff_for_run
 
 RUN_REF_PREFIX = "refs/bathos/runs"
 WIP_REF_PREFIX = "refs/bathos/wip"
@@ -49,277 +61,87 @@ MANIFEST_RELPATH = Path(".bth") / "refs" / "manifest.jsonl"
 # sha256 is the tamper anchor the Union Gate evaluates against at `campaign conclude`.
 PROVENANCE_PATHS = (".bth/claims", ".bth/refs")
 
-# commit-tree refuses to run without an identity, and a run must not fail because the environment
-# has no git user configured (CI containers, cluster nodes).
-_IDENTITY_ENV = {
-    "GIT_AUTHOR_NAME": "bathos",
-    "GIT_AUTHOR_EMAIL": "bathos@localhost",
-    "GIT_COMMITTER_NAME": "bathos",
-    "GIT_COMMITTER_EMAIL": "bathos@localhost",
-}
+EXPORT_DIRNAME = Path("outputs") / "provenance"
 
-
-# Above this many bytes of newly-staged content, capture metadata instead of blobs. A snapshot is
-# permanently reachable via its ref, so an unignored output directory would grow the repository
-# without bound -- a worse failure than incomplete provenance. Calibrated against a real, messy
-# working repo mid-audit: 306 dirty paths came to 1.33 MB, so this leaves ~40x headroom and fires
-# only on a genuine "outputs/ is not ignored" mistake.
-DEFAULT_MAX_SNAPSHOT_BYTES = 50 * 1024 * 1024
-
-SNAPSHOT_FULL = "full"
-SNAPSHOT_METADATA_ONLY = "metadata_only"
-SNAPSHOT_NONE = "none"
-
-
-@dataclass
-class PinResult:
-    """What was durably recorded for one run. Empty strings mean "not done"."""
-
-    run_ref: str = ""
-    wip_ref: str = ""
-    wip_commit: str = ""
-    manifest_path: str = ""
-    unpinned_reason: str = ""
-    ignored_provenance_paths: tuple[str, ...] = ()
-    # Set only after the ref has been read back. `run_ref` being non-empty means "we tried and
-    # update-ref returned 0"; these mean "the ref resolves to an object that is really there".
-    run_ref_ok: bool = False
-    wip_ref_ok: bool = False
-    snapshot_mode: str = SNAPSHOT_NONE
-    skipped_bytes: int = 0
-    skipped_paths: tuple[str, ...] = ()
-    ignored_declared_paths: tuple[str, ...] = ()
-    # Path to the exported bundle, when this run's snapshot needs to reach another clone.
-    bundle_path: str = ""
-
-    @property
-    def complete(self) -> bool:
-        """Whether this run's provenance is fully durable.
-
-        The field downstream gates should read. Deliberately strict: a partially-captured record
-        must not be able to pass for a complete one, which is the whole failure this module exists
-        to stop.
-        """
-        return (
-            self.run_ref_ok
-            and self.snapshot_mode in (SNAPSHOT_FULL, SNAPSHOT_NONE)
-            and not self.ignored_declared_paths
-            and not self.unpinned_reason
-        )
-
-
-def _git(
-    *args: str, cwd: Path, env_extra: dict[str, str] | None = None, check: bool = False
-) -> subprocess.CompletedProcess[str]:
-    import os
-
-    env = {**os.environ, **(env_extra or {})}
-    return subprocess.run(
-        ["git", *args], cwd=cwd, text=True, capture_output=True, env=env, check=check
-    )
-
-
-def repo_root(cwd: Path) -> Path | None:
-    """Absolute worktree root, or None if `cwd` is not inside a git repository."""
-    try:
-        result = _git("rev-parse", "--show-toplevel", cwd=cwd)
-    except (OSError, FileNotFoundError):
-        return None
-    if result.returncode != 0:
-        return None
-    root = result.stdout.strip()
-    return Path(root) if root else None
+__all__ = [
+    "DEFAULT_MAX_SNAPSHOT_BYTES",
+    "EXPORT_DIRNAME",
+    "MANIFEST_RELPATH",
+    "PROVENANCE_PATHS",
+    "RUN_REF_PREFIX",
+    "SNAPSHOT_FULL",
+    "SNAPSHOT_METADATA_ONLY",
+    "SNAPSHOT_NONE",
+    "WIP_REF_PREFIX",
+    "ImportReport",
+    "PinResult",
+    "SnapshotResult",
+    "append_manifest",
+    "export_bundle",
+    "ignored_declared_paths",
+    "ignored_provenance_paths",
+    "import_bundles",
+    "manifest_candidates",
+    "manifest_entry",
+    "pin_result_as_dict",
+    "pin_run",
+    "ref_resolves",
+    "repo_root",
+    "snapshot_worktree",
+    "snapshot_worktree_detailed",
+    "uncommitted_diff_for_run",
+    "update_ref",
+]
 
 
 def ignored_provenance_paths(cwd: Path) -> tuple[str, ...]:
-    """Which provenance-bearing paths this repo is configured to IGNORE.
-
-    A non-empty result is a configuration bug worth surfacing loudly: it means a claim or a ref
-    manifest written there will never be committed, so the artifact a run's provenance points at is
-    silently discarded. Observed in the wild -- a bare `.bth/` ignore rule left 3 of 4 claim-tier
-    pre-registrations untracked, including one whose post-hoc amendment later became an audit
-    finding.
-    """
-    root = repo_root(cwd)
-    if root is None:
-        return ()
-    ignored = []
-    for rel in PROVENANCE_PATHS:
-        # check-ignore exits 0 when the path IS ignored. Probe a child, since an ignore rule on a
-        # directory is what actually bites, and `check-ignore` skips already-tracked paths.
-        probe = f"{rel}/.bathos-probe"
-        result = _git("check-ignore", "-q", "--no-index", probe, cwd=root)
-        if result.returncode == 0:
-            ignored.append(rel)
-    return tuple(ignored)
-
-
-@dataclass
-class SnapshotResult:
-    """Outcome of trying to capture the working tree."""
-
-    commit: str = ""
-    mode: str = SNAPSHOT_NONE
-    skipped_bytes: int = 0
-    skipped_paths: tuple[str, ...] = ()
-
-
-def snapshot_worktree_detailed(
-    run_id: str, cwd: Path, max_bytes: int = DEFAULT_MAX_SNAPSHOT_BYTES
-) -> SnapshotResult:
-    """Capture the working tree, degrading explicitly when it is too large to store.
-
-    Over `max_bytes` of newly-staged content the blobs are NOT committed. A snapshot is permanently
-    reachable through its ref, so capturing an unignored output directory would grow the repository
-    without bound on every dirty run -- a worse outcome than incomplete provenance. Instead the
-    result reports `metadata_only` with the byte count and the largest contributors, so the record
-    states what it could not keep and the caller can name the paths that should be ignored.
-    """
-    root = repo_root(cwd)
-    if root is None:
-        return SnapshotResult()
-
-    head = _git("rev-parse", "HEAD", cwd=root)
-    if head.returncode != 0:
-        return SnapshotResult()  # unborn branch: nothing to parent a snapshot onto
-    parent = head.stdout.strip()
-
-    with tempfile.TemporaryDirectory(prefix="bathos-index-") as tmpdir:
-        index_env = {"GIT_INDEX_FILE": str(Path(tmpdir) / "index")}
-
-        if _git("read-tree", parent, cwd=root, env_extra=index_env).returncode != 0:
-            return SnapshotResult()
-        if _git("add", "-A", cwd=root, env_extra=index_env).returncode != 0:
-            return SnapshotResult()
-
-        total, sized = _staged_bytes(cwd, index_env)
-        if total > max_bytes:
-            return SnapshotResult(
-                mode=SNAPSHOT_METADATA_ONLY,
-                skipped_bytes=total,
-                skipped_paths=tuple(rel for _size, rel in sized[:10]),
-            )
-
-        tree = _git("write-tree", cwd=root, env_extra=index_env)
-        if tree.returncode != 0:
-            return SnapshotResult()
-        tree_sha = tree.stdout.strip()
-
-        # An unchanged tree means the worktree matched HEAD after all; no snapshot needed.
-        if tree_sha == _git("rev-parse", f"{parent}^{{tree}}", cwd=root).stdout.strip():
-            return SnapshotResult()
-
-        commit = _git(
-            "commit-tree",
-            tree_sha,
-            "-p",
-            parent,
-            "-m",
-            f"bathos worktree snapshot for run {run_id}",
-            cwd=root,
-            env_extra={**index_env, **_IDENTITY_ENV},
-        )
-        if commit.returncode != 0:
-            return SnapshotResult()
-        sha = commit.stdout.strip()
-        if not sha:
-            return SnapshotResult()
-        return SnapshotResult(commit=sha, mode=SNAPSHOT_FULL)
-
-
-def snapshot_worktree(run_id: str, cwd: Path) -> str | None:
-    """Backwards-compatible wrapper: the snapshot commit sha, or None.
-
-    Callers that need to know WHY nothing was captured -- clean tree versus too large to store --
-    should use `snapshot_worktree_detailed`, since both cases return None here.
-    """
-    return snapshot_worktree_detailed(run_id, cwd).commit or None
-
-
-
-def update_ref(ref: str, sha: str, cwd: Path) -> bool:
-    """Point `ref` at `sha`, then READ IT BACK. Returns whether the ref really resolves.
-
-    Verifying rather than trusting `update-ref`'s exit code is the difference between recording that
-    something is durable and knowing it is. A ref that failed to be written -- unwritable ref
-    directory, full disk, lock contention -- would otherwise be reported as pinned while its object
-    is collectable, which is precisely the false attestation this module exists to eliminate.
-    """
-    root = repo_root(cwd)
-    if root is None or not sha:
-        return False
-    if _git("update-ref", ref, sha, cwd=root).returncode != 0:
-        return False
-    verify = _git("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", cwd=root)
-    return verify.returncode == 0 and verify.stdout.strip() == sha
-
-
-def ref_resolves(ref: str, cwd: Path) -> bool:
-    """Whether `ref` currently resolves to a present commit object."""
-    root = repo_root(cwd)
-    if root is None:
-        return False
-    return _git("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", cwd=root).returncode == 0
-
-
-def _staged_bytes(cwd: Path, index_env: dict[str, str]) -> tuple[int, list[tuple[int, str]]]:
-    """Total size of paths differing from HEAD in the temp index, plus the largest contributors."""
-    root = repo_root(cwd)
-    if root is None:
-        return 0, []
-    listing = _git("diff", "--cached", "--name-only", "HEAD", cwd=root, env_extra=index_env)
-    if listing.returncode != 0:
-        return 0, []
-    sized: list[tuple[int, str]] = []
-    total = 0
-    for rel in listing.stdout.splitlines():
-        rel = rel.strip()
-        if not rel:
-            continue
-        try:
-            size = (root / rel).stat().st_size
-        except OSError:
-            continue  # deleted paths contribute nothing to snapshot size
-        total += size
-        sized.append((size, rel))
-    sized.sort(reverse=True)
-    return total, sized
-
-
-def append_manifest(entry: dict, cwd: Path) -> Path | None:
-    """Append one JSONL record to the tracked ref manifest, creating it if needed."""
-    root = repo_root(cwd)
-    if root is None:
-        return None
-    path = root / MANIFEST_RELPATH
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry, sort_keys=True) + "\n")
-    except OSError:
-        return None
-    return path
+    return _ignored_provenance_paths(cwd, PROVENANCE_PATHS)
 
 
 def ignored_declared_paths(paths: list[str] | tuple[str, ...], cwd: Path) -> tuple[str, ...]:
-    """Which of the caller's DECLARED load-bearing paths this repo ignores.
+    return _ignored_declared_paths(paths, cwd)
 
-    The inverse hazard to an oversized snapshot: `git add -A` respects `.gitignore`, so a file that
-    matters but is ignored is omitted from the snapshot silently. bathos cannot discover undeclared
-    inputs -- a config read at runtime that nobody registered is beyond what any of this can see --
-    but it can enforce that what WAS declared is capturable, which is the part a tool can own.
-    """
-    root = repo_root(cwd)
-    if root is None or not paths:
-        return ()
-    ignored = []
-    for raw in paths:
-        if not raw:
-            continue
-        result = _git("check-ignore", "-q", str(raw), cwd=root)
-        if result.returncode == 0:
-            ignored.append(str(raw))
-    return tuple(ignored)
+
+def append_manifest(entry: dict, cwd: Path) -> Path | None:
+    return _append_manifest(entry, cwd, MANIFEST_RELPATH)
+
+
+def manifest_candidates(cwd: Path) -> list[Path]:
+    return _manifest_candidates(cwd, MANIFEST_RELPATH)
+
+
+def manifest_entry(run_id: str, cwd: Path) -> dict | None:
+    return _manifest_entry(run_id, cwd, MANIFEST_RELPATH)
+
+
+def uncommitted_diff_for_run(run_id: str, cwd: Path, name_only: bool = False) -> str | None:
+    return _uncommitted_diff_for_run(run_id, cwd, name_only, WIP_REF_PREFIX, MANIFEST_RELPATH)
+
+
+def export_bundle(
+    run_id: str, pinned_sha: str, head_sha: str, cwd: Path, export_dir: Path | None = None
+) -> Path | None:
+    """See cisternal.provenance.durable.export_bundle. `export_dir=None` here
+    (bathos's original default) resolves to `<repo_root>/outputs/provenance`."""
+    if export_dir is not None:
+        target_dir = export_dir
+    else:
+        root = repo_root(cwd)
+        target_dir = root / EXPORT_DIRNAME if root else None
+    if target_dir is None:
+        return None
+    return _export_bundle(run_id, pinned_sha, head_sha, cwd, target_dir, RUN_REF_PREFIX, WIP_REF_PREFIX)
+
+
+def import_bundles(cwd: Path, import_dir: Path | None = None) -> ImportReport:
+    if import_dir is not None:
+        source_dir = import_dir
+    else:
+        root = repo_root(cwd)
+        source_dir = root / EXPORT_DIRNAME if root else None
+    if source_dir is None:
+        return ImportReport()
+    return _import_bundles(cwd, source_dir, RUN_REF_PREFIX, WIP_REF_PREFIX, MANIFEST_RELPATH)
 
 
 def pin_run(
@@ -332,342 +154,27 @@ def pin_run(
     max_snapshot_bytes: int = DEFAULT_MAX_SNAPSHOT_BYTES,
     export_dir: Path | None = None,
 ) -> PinResult:
-    """Durably record one run's provenance. Never raises; degrades to a partial result.
+    """Durably record one run's provenance. See cisternal.provenance.durable.pin_run.
 
-    On a dirty tree the run ref points at the SNAPSHOT rather than at HEAD, because the snapshot is
-    the tree that actually ran. `git_hash` is still recorded in the manifest so the relationship to
-    the committed history stays visible.
-
-    Every degradation is recorded rather than swallowed: a ref that did not take, a snapshot too
-    large to store, a declared path the repo ignores. The manifest entry carries all of it, so
-    "which runs have complete provenance?" is a query instead of an excavation.
+    Export triggers when `export_dir` is given, OR (bathos's original
+    behavior, preserved here) when running as a SLURM job / with
+    `BTH_FORCE_PROVENANCE_EXPORT` set -- in which case it defaults to
+    `<repo_root>/outputs/provenance`.
     """
-    result = PinResult(
-        ignored_provenance_paths=ignored_provenance_paths(cwd),
-        ignored_declared_paths=ignored_declared_paths(declared_paths, cwd),
-    )
-
-    if repo_root(cwd) is None:
-        result.unpinned_reason = "not a git repository"
-        return result
-    if not git_hash or git_hash == "unknown":
-        result.unpinned_reason = "no resolvable HEAD to pin"
-        return result
-
-    pinned_sha = git_hash
-    if dirty:
-        snap = snapshot_worktree_detailed(run_id, cwd, max_bytes=max_snapshot_bytes)
-        result.snapshot_mode = snap.mode
-        result.skipped_bytes = snap.skipped_bytes
-        result.skipped_paths = snap.skipped_paths
-        if snap.commit:
-            result.wip_commit = snap.commit
-            wip_ref = f"{WIP_REF_PREFIX}/{run_id}"
-            if update_ref(wip_ref, snap.commit, cwd):
-                result.wip_ref = wip_ref
-                result.wip_ref_ok = True
-            else:
-                result.unpinned_reason = "could not create wip ref"
-            pinned_sha = snap.commit
-        elif snap.mode == SNAPSHOT_METADATA_ONLY:
-            result.unpinned_reason = (
-                f"working tree too large to snapshot ({snap.skipped_bytes:,} bytes)"
-            )
-
-    run_ref = f"{RUN_REF_PREFIX}/{run_id}"
-    if update_ref(run_ref, pinned_sha, cwd):
-        result.run_ref = run_ref
-        result.run_ref_ok = True
-    else:
-        result.unpinned_reason = result.unpinned_reason or "could not create run ref"
-
-    entry = {
-            "run_id": run_id,
-            "head_sha": git_hash,
-            "pinned_sha": pinned_sha,
-            "branch": git_branch,
-            "dirty": bool(dirty),
-            "wip_commit": result.wip_commit,
-            # Recorded so a reader can tell a durable record from a partial one WITHOUT re-deriving
-            # it. Omitting these is what let the original version claim a run was pinned when its
-            # ref had failed to be written and its object was already collectable.
-            "run_ref_ok": result.run_ref_ok,
-            "wip_ref_ok": result.wip_ref_ok,
-            "snapshot_mode": result.snapshot_mode,
-            "skipped_bytes": result.skipped_bytes,
-            "skipped_paths": list(result.skipped_paths),
-            "ignored_declared_paths": list(result.ignored_declared_paths),
-            "unpinned_reason": result.unpinned_reason,
-            "complete": result.complete,
-            "recorded_at": datetime.now(UTC).isoformat(),
-    }
-    manifest = append_manifest(entry, cwd)
-    if manifest is not None:
-        result.manifest_path = str(manifest)
-
-    # Export only when the run is REMOTE and dirty. Two conditions, both necessary:
-    #
-    #   remote -- a local run pins into the very object store its results are read from, so a
-    #             bundle would be bytes written for a journey nobody takes. Detected by the
-    #             scheduler's job id, or forced by passing `export_dir` explicitly.
-    #   dirty  -- a clean run pinned an ordinary commit the other end already has, and its run row
-    #             travels through the normal catalog sync.
-    #
-    # Getting this wrong in the permissive direction is not harmless: it would drop a bundle into
-    # the results directory on every dirty local run, which is exactly the kind of unexplained
-    # accumulation that later gets mass-deleted along with something that mattered.
     is_remote = bool(os.environ.get("SLURM_JOB_ID") or os.environ.get("BTH_FORCE_PROVENANCE_EXPORT"))
-    if (
-        (export_dir is not None or is_remote)
-        and result.snapshot_mode == SNAPSHOT_FULL
-        and pinned_sha != git_hash
-    ):
-        bundle = export_bundle(run_id, pinned_sha, git_hash, cwd, export_dir=export_dir)
-        if bundle is not None:
-            result.bundle_path = str(bundle)
-            # The sidecar carries the manifest entry so the importing clone can rebuild the record,
-            # not just the objects: a bundle alone would restore the commit while losing what run
-            # it belonged to and whether that run's provenance was complete.
-            with suppress(OSError):
-                bundle.with_suffix(".json").write_text(
-                    json.dumps(entry, sort_keys=True), encoding="utf-8"
-                )
+    effective_export_dir = export_dir
+    if effective_export_dir is None and is_remote:
+        root = repo_root(cwd)
+        if root is not None:
+            effective_export_dir = root / EXPORT_DIRNAME
 
-    return result
-
-
-def manifest_candidates(cwd: Path) -> list[Path]:
-    """Every manifest that could describe a run in THIS repository.
-
-    Refs are shared across linked worktrees but the manifest is an ordinary file in one checkout, so
-    a run pinned inside `git worktree add`-ed tree is absent from the main worktree's manifest even
-    though its ref and object are fully present there. Since worktree-per-task is a common workflow,
-    that would make the manifest miss the majority of runs -- so lookups consult the current
-    worktree AND the main one.
-    """
-    root = repo_root(cwd)
-    if root is None:
-        return []
-    candidates = [root]
-
-    # Enumerate EVERY linked worktree, not just the main one. Looking only "upward" via
-    # --git-common-dir finds main from a linked tree but not a linked tree from main, which leaves
-    # the more common direction broken: work happens in the worktree, and it is read from main.
-    listing = _git("worktree", "list", "--porcelain", cwd=root)
-    if listing.returncode == 0:
-        for line in listing.stdout.splitlines():
-            if not line.startswith("worktree "):
-                continue
-            other = Path(line[len("worktree ") :].strip())
-            if other != root and other not in candidates:
-                candidates.append(other)
-
-    return [c / MANIFEST_RELPATH for c in candidates]
-
-
-def manifest_entry(run_id: str, cwd: Path) -> dict | None:
-    """The most recent manifest record for `run_id`, from any manifest in this repository."""
-    found = None
-    for path in manifest_candidates(cwd):
-        if not path.exists():
-            continue
-        try:
-            for line in path.read_text(encoding="utf-8").splitlines():
-                if not line.strip():
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue  # a corrupt line must not hide the rest of the manifest
-                if entry.get("run_id") == run_id:
-                    found = entry
-        except OSError:
-            continue
-    return found
-
-
-def uncommitted_diff_for_run(run_id: str, cwd: Path, name_only: bool = False) -> str | None:
-    """The uncommitted changes that were live when `run_id` executed.
-
-    This is the payoff of parenting the snapshot on HEAD: the delta between the recorded `head_sha`
-    and the snapshot IS the dirty state at run time, recoverable long after the working tree moved
-    on. Returns "" when the run was clean, None when it cannot be reconstructed.
-
-    Prefers the ref (`refs/bathos/wip/<run_id>`) and falls back to the manifest's recorded sha, so a
-    clone that has the objects but not the refs can still answer.
-    """
-    root = repo_root(cwd)
-    if root is None:
-        return None
-
-    entry = manifest_entry(run_id, cwd)
-    wip_ref = f"{WIP_REF_PREFIX}/{run_id}"
-    have_ref = _git("rev-parse", "--verify", "--quiet", wip_ref, cwd=root).returncode == 0
-
-    if have_ref:
-        wip_sha = _git("rev-parse", wip_ref, cwd=root).stdout.strip()
-    elif entry and entry.get("wip_commit"):
-        wip_sha = str(entry["wip_commit"])
-    else:
-        # No snapshot recorded. Either the run was clean, or it predates pinning -- distinguish,
-        # rather than reporting "no changes" for a run whose changes were simply never captured.
-        if entry is not None and not entry.get("dirty"):
-            return ""
-        return None
-
-    head_sha = str(entry["head_sha"]) if entry and entry.get("head_sha") else f"{wip_sha}^"
-    args = ["diff", head_sha, wip_sha]
-    if name_only:
-        args.insert(1, "--name-only")
-    result = _git(*args, cwd=root)
-    if result.returncode != 0:
-        return None
-    return result.stdout
-
-
-def pin_result_as_dict(result: PinResult) -> dict:
-    """Flat dict for telemetry, with tuples rendered as lists."""
-    payload = asdict(result)
-    payload["ignored_provenance_paths"] = list(result.ignored_provenance_paths)
-    return payload
-
-
-# ---------------------------------------------------------------------------
-# Cross-clone transport
-#
-# A ref protects objects inside ONE object store. Runs that execute on a cluster pin into that
-# machine's `.git`, which is not the one you read results from -- and the usual answer, pushing
-# `refs/bathos/*` to the shared remote, is unavailable when compute hosts have no outbound network
-# (the common case: login and compute nodes are frequently firewalled off entirely).
-#
-# So provenance for a REMOTE run has to travel as a file, through whatever channel already moves
-# results back. `EXPORT_DIRNAME` sits under the results directory deliberately: that directory is
-# already synced, so a bundle written there arrives with the results and needs no new transport, no
-# profile change, and no second credential path.
-#
-# Only DIRTY runs need this. A clean run pins an ordinary commit the shared remote already has, and
-# its run row (carrying `git_hash`) arrives through the normal catalog sync -- so bundling it would
-# move bytes that are already present on both ends.
-# ---------------------------------------------------------------------------
-
-EXPORT_DIRNAME = Path("outputs") / "provenance"
-
-
-@dataclass
-class ImportReport:
-    """Outcome of importing bundled provenance from another machine."""
-
-    imported: tuple[str, ...] = ()
-    already_present: tuple[str, ...] = ()
-    unusable: tuple[tuple[str, str], ...] = ()  # (run_id, reason)
-
-
-def export_bundle(
-    run_id: str,
-    pinned_sha: str,
-    head_sha: str,
-    cwd: Path,
-    export_dir: Path | None = None,
-) -> Path | None:
-    """Write a bundle carrying one run's snapshot to another clone.
-
-    The bundle is a DELTA against `head_sha` (`--not`), which keeps it to the changed files rather
-    than the whole history. That is safe here precisely because `head_sha` is the snapshot's parent
-    and an ordinary commit: any clone that can meaningfully read this run already has it, and
-    `import_bundles` verifies that rather than assuming it.
-    """
-    root = repo_root(cwd)
-    if root is None or not pinned_sha or pinned_sha == head_sha:
-        return None
-
-    target_dir = export_dir if export_dir is not None else root / EXPORT_DIRNAME
-    try:
-        target_dir.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        return None
-
-    # Bundle the REF, not the raw sha: `git bundle create` refuses a bare commit with "Refusing to
-    # create empty bundle", because a bundle is defined as a set of named refs plus the objects
-    # they need. The run ref already points at `pinned_sha`, so naming it costs nothing and makes
-    # the bundle self-describing.
-    run_ref = f"{RUN_REF_PREFIX}/{run_id}"
-    if _git("rev-parse", "--verify", "--quiet", run_ref, cwd=root).stdout.strip() != pinned_sha:
-        return None
-
-    refs = [run_ref]
-    wip_ref = f"{WIP_REF_PREFIX}/{run_id}"
-    if _git("rev-parse", "--verify", "--quiet", wip_ref, cwd=root).returncode == 0:
-        refs.append(wip_ref)
-
-    bundle_path = target_dir / f"{run_id}.bundle"
-    result = _git("bundle", "create", str(bundle_path), *refs, "--not", head_sha, cwd=root)
-    if result.returncode != 0 or not bundle_path.exists():
-        return None
-    return bundle_path
-
-
-def _ensure_refs_and_manifest(run_id: str, entry: dict, cwd: Path, root: Path) -> None:
-    """Create this clone's refs for an imported run, and record it in the local manifest."""
-    pinned = str(entry.get("pinned_sha", ""))
-    if pinned and _git("cat-file", "-e", f"{pinned}^{{commit}}", cwd=root).returncode == 0:
-        update_ref(f"{RUN_REF_PREFIX}/{run_id}", pinned, cwd)
-        wip = str(entry.get("wip_commit", ""))
-        if wip:
-            update_ref(f"{WIP_REF_PREFIX}/{run_id}", wip, cwd)
-
-    if entry and manifest_entry(run_id, cwd) is None:
-        append_manifest({**entry, "imported_from_bundle": True}, cwd)
-
-
-def import_bundles(cwd: Path, import_dir: Path | None = None) -> ImportReport:
-    """Import provenance bundles produced on another machine.
-
-    Refuses to import a bundle whose prerequisites are absent, rather than creating a ref pointing
-    at an object this clone does not have. A dangling ref would read as durable provenance while
-    being unreadable -- the exact failure this module exists to prevent, reintroduced by the back
-    door.
-    """
-    root = repo_root(cwd)
-    if root is None:
-        return ImportReport()
-
-    source_dir = import_dir if import_dir is not None else root / EXPORT_DIRNAME
-    if not source_dir.is_dir():
-        return ImportReport()
-
-    imported: list[str] = []
-    already: list[str] = []
-    unusable: list[tuple[str, str]] = []
-
-    for bundle_path in sorted(source_dir.glob("*.bundle")):
-        run_id = bundle_path.stem
-        sidecar = bundle_path.with_suffix(".json")
-        entry: dict = {}
-        if sidecar.exists():
-            try:
-                entry = json.loads(sidecar.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                entry = {}
-
-        pinned = str(entry.get("pinned_sha", ""))
-        if pinned and _git("cat-file", "-e", f"{pinned}^{{commit}}", cwd=root).returncode == 0:
-            already.append(run_id)
-            _ensure_refs_and_manifest(run_id, entry, cwd, root)
-            continue
-
-        # `bundle verify` is exactly the prerequisite check needed: it fails when the base commits
-        # the delta was built against are missing from this repository.
-        if _git("bundle", "verify", str(bundle_path), cwd=root).returncode != 0:
-            unusable.append((run_id, "bundle prerequisites missing -- fetch the base commit first"))
-            continue
-
-        if _git("bundle", "unbundle", str(bundle_path), cwd=root).returncode != 0:
-            unusable.append((run_id, "unbundle failed"))
-            continue
-
-        _ensure_refs_and_manifest(run_id, entry, cwd, root)
-        imported.append(run_id)
-
-    return ImportReport(
-        imported=tuple(imported), already_present=tuple(already), unusable=tuple(unusable)
+    return _pin_run(
+        run_id, git_hash, git_branch, dirty, cwd,
+        declared_paths=declared_paths, max_snapshot_bytes=max_snapshot_bytes,
+        export_dir=effective_export_dir, provenance_paths=PROVENANCE_PATHS,
+        run_ref_prefix=RUN_REF_PREFIX, wip_ref_prefix=WIP_REF_PREFIX,
+        manifest_relpath=MANIFEST_RELPATH,
+        identity_name="bathos",
+        identity_email="bathos@localhost",
+        commit_message_template="bathos worktree snapshot for run {run_id}",
     )

@@ -62,7 +62,7 @@ triggers = ["bathos mcp", "BathosErrorCode", "error envelope", "validation_ok"]
 
 [[plugin.skills]]
 name     = "bathos-trust-ledger"
-path     = "../agent_assets/skills/bathos-trust-ledger/SKILL.md"
+path     = "agent_assets/skills/bathos-trust-ledger/SKILL.md"
 triggers = ["graduate_product", "register_attestation", "resolve_pin", "get_trust_state", "query_attestation", "GRADUATION_REFUSED", "attestation.bth.toml", "trust_state"]
 
 [[plugin.snippets]]
