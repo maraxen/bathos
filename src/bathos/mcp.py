@@ -1077,6 +1077,7 @@ def compact_tool(
         "ingested": result.ingested,
         "skipped": result.skipped,
         "duration_s": result.duration_s,
+        "corrupt_fragments": [str(cf.path) for cf in result.corrupt_fragments],
     }
     return result_dict
 

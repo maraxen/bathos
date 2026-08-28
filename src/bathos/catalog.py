@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib.metadata
+import logging
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -11,6 +13,21 @@ import pyarrow.parquet as pq
 
 from bathos.schema import Run
 from bathos.telemetry import event
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class CorruptFragment:
+    """A cool-tier Parquet fragment that could not be read.
+
+    Attributes:
+        path: Path to the unreadable fragment.
+        error: str(exception) captured while trying to read it.
+    """
+
+    path: Path
+    error: str
 
 
 def init_catalog(catalog_dir: Path) -> None:
@@ -34,19 +51,59 @@ def write_run(run: Run, catalog_dir: Path) -> None:
 
 
 def read_runs(catalog_dir: Path) -> list[Run]:
-    """Read all runs from Parquet fragments, sorted by timestamp DESC."""
+    """Read all runs from Parquet fragments, sorted by timestamp DESC.
+
+    Corrupt or unreadable fragments (e.g. a cool-tier Parquet file truncated by
+    a killed SLURM job) are skipped rather than aborting the whole read -- see
+    read_runs_report() for a variant that also returns what was skipped and
+    why, for operator-facing reporting (bth compact, bth migrate --dry-run).
+    A skip is always logged at WARNING, so it is never silent even for the 14+
+    call sites that only want the list[Run].
+    """
+    runs, _ = read_runs_report(catalog_dir)
+    return runs
+
+
+def read_runs_report(catalog_dir: Path) -> tuple[list[Run], list[CorruptFragment]]:
+    """Read all runs from Parquet fragments, sorted by timestamp DESC.
+
+    Returns (runs, corrupt_fragments). One corrupt fragment in one project must
+    never abort catalog maintenance for every project (260827_bathos-catalog-
+    robustness): each fragment is read individually and a read failure is
+    recorded and skipped instead of propagating out of this function.
+    """
     runs_dir = catalog_dir / "runs"
     if not runs_dir.exists():
-        return []
-    parquet_files = list(runs_dir.rglob("run_*.parquet"))
+        return [], []
+    parquet_files = sorted(runs_dir.rglob("run_*.parquet"))
     if not parquet_files:
-        return []
-    tables = [pq.read_table(f) for f in parquet_files]
+        return [], []
+
+    tables: list[pa.Table] = []
+    corrupt: list[CorruptFragment] = []
+    for f in parquet_files:
+        try:
+            tables.append(pq.read_table(f))
+        except Exception as exc:
+            logger.warning("Skipping corrupt cool-tier fragment %s: %s", f, exc)
+            corrupt.append(CorruptFragment(path=f, error=str(exc)))
+
+    if corrupt:
+        event(
+            "catalog.corrupt_fragments_skipped",
+            count=len(corrupt),
+            paths=[str(c.path) for c in corrupt],
+        )
+
+    if not tables:
+        return [], corrupt
+
     combined = pa.concat_tables(tables, promote_options="permissive")
     order = pc.sort_indices(combined, sort_keys=[("timestamp", "descending")])
     combined = combined.take(order)
     pydict = combined.to_pydict()
-    return [Run.from_arrow_row(pydict, i) for i in range(combined.num_rows)]
+    runs = [Run.from_arrow_row(pydict, i) for i in range(combined.num_rows)]
+    return runs, corrupt
 
 
 def write_submit_provenance(

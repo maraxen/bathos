@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -20,20 +20,53 @@ class MigrateResult:
     already_current: int
     migrated: int
     dry_run: bool
+    corrupt: list[Path] = field(default_factory=list)
 
 
-def migrate_catalog(catalog_dir: Path, dry_run: bool = False) -> MigrateResult:
-    """Scan cool-tier fragments and rewrite any missing COOL_SCHEMA columns."""
+def migrate_catalog(
+    catalog_dir: Path,
+    dry_run: bool = False,
+    project: str | None = None,
+) -> MigrateResult:
+    """Scan cool-tier fragments and rewrite any missing COOL_SCHEMA columns.
+
+    Args:
+        catalog_dir: catalog root (contains runs/<project_slug>/run_*.parquet).
+        dry_run: if True, report what would change without writing.
+        project: if given, scope the scan to runs/<project>/ only, instead of
+            every project in the catalog (260827_bathos-catalog-robustness --
+            an unscoped scan on a large catalog offers no way to migrate just
+            the handful of fragments an operator actually added). Assumes the
+            runs/<project_slug>/ subdirectory layout written by write_run() /
+            migrate_to_project_subdirs(); a catalog never migrated to that
+            layout has no per-project fragments to scope to. Default (None)
+            preserves the prior all-projects behaviour -- callers that print
+            the result should make that scope explicit (the CLI does).
+
+    Corrupt or unreadable fragments are skipped rather than aborting the whole
+    scan (260827_bathos-catalog-robustness) -- see MigrateResult.corrupt for
+    the paths skipped, which are never auto-deleted or auto-quarantined by
+    this function (use `bth repair --tier cool` for that, with its own
+    explicit dry-run/--apply gate).
+    """
     runs_dir = catalog_dir / "runs"
+    if project is not None:
+        runs_dir = runs_dir / project
     if not runs_dir.exists():
         return MigrateResult(scanned=0, already_current=0, migrated=0, dry_run=dry_run)
 
-    fragments = list(runs_dir.rglob("run_*.parquet"))
+    fragments = sorted(runs_dir.rglob("run_*.parquet"))
     current_names = {f.name for f in COOL_SCHEMA}
     migrated = 0
+    corrupt: list[Path] = []
 
     for frag in fragments:
-        tbl = pq.read_table(frag)
+        try:
+            tbl = pq.read_table(frag)
+        except Exception as exc:
+            logger.warning("Skipping corrupt cool-tier fragment %s: %s", frag, exc)
+            corrupt.append(frag)
+            continue
         existing = set(tbl.schema.names)
         missing = current_names - existing
         if not missing:
@@ -41,9 +74,11 @@ def migrate_catalog(catalog_dir: Path, dry_run: bool = False) -> MigrateResult:
         migrated += 1
         if dry_run:
             continue
-        for field in COOL_SCHEMA:
-            if field.name not in existing:
-                tbl = tbl.append_column(field, _default_array(field.type, len(tbl), field.name))
+        for col_field in COOL_SCHEMA:
+            if col_field.name not in existing:
+                tbl = tbl.append_column(
+                    col_field, _default_array(col_field.type, len(tbl), col_field.name)
+                )
         # Stamp schema_version to current on all upgraded fragments
         schema_version_idx = tbl.schema.get_field_index("schema_version")
         if schema_version_idx >= 0:
@@ -84,12 +119,13 @@ def migrate_catalog(catalog_dir: Path, dry_run: bool = False) -> MigrateResult:
                     ) from restore_exc
             raise
 
-    already_current = len(fragments) - migrated
+    already_current = len(fragments) - migrated - len(corrupt)
     return MigrateResult(
         scanned=len(fragments),
         already_current=already_current,
         migrated=migrated,
         dry_run=dry_run,
+        corrupt=corrupt,
     )
 
 

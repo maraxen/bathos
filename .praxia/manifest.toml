@@ -29,6 +29,12 @@ command = ["bth-mcp"]
 # `triggers` fields in each skill file's own YAML frontmatter (linked below).
 # Keep the two in sync by hand until cisternal's loader grows support for
 # manifest-declared triggers.
+#
+# Paths below are repo-root-relative (not `../`-prefixed): cisternal>=0.1.1a4
+# resolves ManifestAssetSource paths from the manifest file's grandparent
+# directory (i.e. repo root for `.praxia/manifest.toml`), matching praxia's
+# own resolution of this same manifest. Earlier `../agent_assets/...` paths
+# were a workaround for 0.1.1a3's now-fixed single-parent resolution bug.
 [[plugin.skills]]
 name     = "using-bathos"
 path     = "agent_assets/skills/using-bathos/SKILL.md"
