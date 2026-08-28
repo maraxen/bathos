@@ -29,29 +29,35 @@ command = ["bth-mcp"]
 # `triggers` fields in each skill file's own YAML frontmatter (linked below).
 # Keep the two in sync by hand until cisternal's loader grows support for
 # manifest-declared triggers.
+#
+# Paths below are repo-root-relative (not `../`-prefixed): cisternal>=0.1.1a4
+# resolves ManifestAssetSource paths from the manifest file's grandparent
+# directory (i.e. repo root for `.praxia/manifest.toml`), matching praxia's
+# own resolution of this same manifest. Earlier `../agent_assets/...` paths
+# were a workaround for 0.1.1a3's now-fixed single-parent resolution bug.
 [[plugin.skills]]
 name     = "using-bathos"
-path     = "../agent_assets/skills/using-bathos/SKILL.md"
+path     = "agent_assets/skills/using-bathos/SKILL.md"
 triggers = ["bth run", "sidecar", "catalog", "controls", "stage_name", "bth init", "bth check"]
 
 [[plugin.skills]]
 name     = "bathos-cluster"
-path     = "../agent_assets/skills/bathos-cluster/SKILL.md"
+path     = "agent_assets/skills/bathos-cluster/SKILL.md"
 triggers = ["bth submit", "slurm", "sbatch", "myxcel", "bth sync", "bth remote"]
 
 [[plugin.skills]]
 name     = "bathos-campaigns"
-path     = "../agent_assets/skills/bathos-campaigns/SKILL.md"
+path     = "agent_assets/skills/bathos-campaigns/SKILL.md"
 triggers = ["bth campaign", "claim", "union gate", "figure manifest", "postmortem", "bth lineage", "bth cite"]
 
 [[plugin.skills]]
 name     = "bathos-literature-parity"
-path     = "../agent_assets/skills/bathos-literature-parity/SKILL.md"
+path     = "agent_assets/skills/bathos-literature-parity/SKILL.md"
 triggers = ["literature parity", "reimplemented baseline", "parity.bth.toml", "reference_parity"]
 
 [[plugin.skills]]
 name     = "bathos-mcp"
-path     = "../agent_assets/skills/bathos-mcp/SKILL.md"
+path     = "agent_assets/skills/bathos-mcp/SKILL.md"
 triggers = ["bathos mcp", "BathosErrorCode", "error envelope", "validation_ok"]
 
 [[plugin.skills]]
@@ -61,13 +67,13 @@ triggers = ["graduate_product", "register_attestation", "resolve_pin", "get_trus
 
 [[plugin.snippets]]
 name           = "bathos-rules"
-path           = "../agent_assets/snippets/rules.md"
+path           = "agent_assets/snippets/rules.md"
 scope          = "project"
 scope_detector = "glob:scripts/**/*.bth.toml"
 
 [[plugin.agents]]
 name  = "experiment-runner"
-path  = "../agent_assets/agents/experiment-runner.md"
+path  = "agent_assets/agents/experiment-runner.md"
 tools = ["run", "campaign_create", "campaign_review", "check"]
 
 [plugin.dependencies]

@@ -31,7 +31,7 @@ dependencies = [
     "toml>=0.10",
     "rich>=13",
     "fastmcp>=3.3.1",
-    "cisternal>=0.1.1a3",
+    "cisternal>=0.1.1a4",
 ]
 
 [project.optional-dependencies]

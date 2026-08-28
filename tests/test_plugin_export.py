@@ -43,3 +43,35 @@ def test_export_plugin_bundle_dry_run_does_not_write(tmp_path):
     out = tmp_path / "plugin-dist"
     export_plugin_bundle(surface="claude", out=out, dry_run=True)
     assert not out.exists()
+
+
+def test_export_plugin_bundle_writes_real_cursor_bundle(tmp_path):
+    from bathos.plugin_export import export_plugin_bundle
+
+    out = tmp_path / "plugin-dist-cursor"
+    result = export_plugin_bundle(surface="cursor", out=out, dry_run=False)
+    assert result.dry_run is False
+    assert (out / ".cursor-plugin" / "plugin.json").exists()
+    assert (out / "skills" / "using-bathos" / "SKILL.md").exists()
+    assert (out / "skills" / "bathos-cluster" / "SKILL.md").exists()
+
+
+def test_export_plugin_bundle_writes_real_antigravity_bundle(tmp_path):
+    """Antigravity's emitter (non-rust-parity mode) has no 'agents' concept --
+    it only emits plugin.json, skills/, hook scripts, and mcp_config.json.
+    That's a real surface capability gap in cisternal's AntigravityEmitter,
+    not a bathos integration bug -- assert what it actually emits rather than
+    mirroring the claude/cursor agents assertions."""
+    import json
+
+    from bathos.plugin_export import export_plugin_bundle
+
+    out = tmp_path / "plugin-dist-antigravity"
+    result = export_plugin_bundle(surface="antigravity", out=out, dry_run=False)
+    assert result.dry_run is False
+    assert (out / "plugin.json").exists()
+    assert (out / "mcp_config.json").exists()
+    assert (out / "skills" / "using-bathos" / "SKILL.md").exists()
+
+    plugin_json = json.loads((out / "plugin.json").read_text())
+    assert plugin_json["name"] == "bathos"
