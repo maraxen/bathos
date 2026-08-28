@@ -26,7 +26,7 @@ those are bespoke per command and were hand-written for the campaign pilot;
 templating them is explicitly deferred until 2+ groups have proven what's
 reusable there.
 
-IMPORTANT CAVEAT -- `inner_fn` is a starting point, not the final answer.
+IMPORTANT CAVEAT -- `inner_fn` alone is a starting point, not the final answer.
 The mapping's `inner_fn` is read from the "bathos" (MCP) registry, i.e. it is
 the name of the `async def mcp_x_tool(...)` wrapper `@traced_tool` decorates
 -- almost never the plain, sync, business-logic function CLI wiring actually
@@ -37,10 +37,23 @@ resolving this by hand: 6 already delegated to a separately-named plain sync
 function (e.g. `mcp_campaign_add_tool` -> `campaign_add_tool`) that the new
 `registry="bathos-cli"` decorator was added to directly; 1
 (`claim_attest_parity`) had no such delegate and needed one extracted
-(`campaign_attest_parity_tool`, see `bathos/mcp.py`). Expect the same mix
-across the remaining 11 groups -- `--emit-decorators`' output paste-target
-comment names the MCP-registry function as a lead, not a guarantee; verify
-by reading it before pasting.
+(`campaign_attest_parity_tool`, see `bathos/mcp.py`).
+
+THE ASYNC-WRAPPER AUDIT (Milestone 2) resolves this automatically instead of
+leaving it to per-command manual inspection: it parses mcp.py's own AST,
+and for each `inner_fn` checks whether it's async and, if so, whether its
+body is a single `return <plain_fn>(...)` delegation to a non-async
+top-level function (the pattern all 6 direct-decoration campaign commands
+follow -- see mcp_list_runs_tool/mcp_verify_tool/mcp_check_tool for
+confirmed examples). Each mapping row gets two new fields:
+  resolved_sync_fn -- the function to actually decorate/paste onto (either
+                       inner_fn itself, if already sync, or the resolved
+                       delegate)
+  needs_extraction  -- true when no delegation pattern was found, meaning a
+                       new plain sync function must be extracted from
+                       inner_fn's body first (the claim_attest_parity case)
+`--emit-decorators` uses `resolved_sync_fn` as its paste target and flags
+`needs_extraction` rows distinctly rather than guessing at them.
 
 Usage::
 
@@ -63,6 +76,7 @@ log = logging.getLogger("migrate_cli_to_cyclopts")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CLI_PY = REPO_ROOT / "src" / "bathos" / "cli.py"
+MCP_PY = REPO_ROOT / "src" / "bathos" / "mcp.py"
 DEFAULT_MAP_PATH = REPO_ROOT / "scripts" / "analysis" / "cli_migration_map.toml"
 
 # Rename pairs confirmed by hand during Milestone 1 research + the campaign
@@ -147,6 +161,71 @@ class MappingRow:
     mcp_name: str | None
     inner_fn: str
     status: str  # "verified" | "needs_review" | "no_mcp_equivalent"
+    resolved_sync_fn: str | None = None
+    needs_extraction: bool = False
+
+
+def parse_mcp_function_defs(mcp_py: Path) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Return {name: FunctionDef|AsyncFunctionDef} for every top-level
+    function in mcp.py, used by `audit_inner_fn` to resolve delegation
+    without re-parsing the file per row."""
+    tree = ast.parse(mcp_py.read_text(), filename=str(mcp_py))
+    defs: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            defs[node.name] = node
+    return defs
+
+
+def audit_inner_fn(
+    inner_fn: str, func_defs: dict[str, ast.FunctionDef | ast.AsyncFunctionDef]
+) -> tuple[str | None, bool]:
+    """Resolve `inner_fn` to the plain sync function CLI wiring actually
+    needs. Returns (resolved_sync_fn, needs_extraction).
+
+    - inner_fn not found in mcp.py at all (unexpected, but fail open rather
+      than crash a batch run): (None, True) -- treat as needing a look, same
+      as a genuine extraction case.
+    - inner_fn is already a plain `def` (not async): (inner_fn, False) --
+      already directly usable, matching e.g. gate_stamp if it were sync.
+    - inner_fn is `async def` whose body is a single `return <name>(...)`
+      call to a NON-async top-level function defined elsewhere in the same
+      module (the mcp_list_runs_tool -> list_runs_tool pattern, confirmed
+      across mcp_list_runs_tool/mcp_verify_tool/mcp_check_tool and 6 of the
+      7 campaign pilot commands): (delegate_name, False).
+    - inner_fn is async with no such single-call-delegation body (dict
+      literals, multi-statement bodies, delegate not found or itself async
+      -- the gate_stamp / claim_attest_parity shape): (None, True).
+    """
+    node = func_defs.get(inner_fn)
+    if node is None:
+        return None, True
+
+    if isinstance(node, ast.FunctionDef):
+        return inner_fn, False
+
+    # AsyncFunctionDef: look for a body whose only `return` is a call to a
+    # plain top-level function. Real bodies have leading local imports and a
+    # docstring before the return, so scan every top-level Return in the
+    # body (not just the last statement) and require exactly one candidate.
+    candidates: list[str] = []
+    for stmt in ast.walk(node):
+        if not isinstance(stmt, ast.Return) or stmt.value is None:
+            continue
+        call = stmt.value
+        if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
+            continue
+        target = func_defs.get(call.func.id)
+        if target is not None and isinstance(target, ast.FunctionDef):
+            candidates.append(call.func.id)
+
+    unique = sorted(set(candidates))
+    if len(unique) == 1:
+        return unique[0], False
+    # Zero candidates (inline business logic, e.g. gate_stamp) or multiple
+    # distinct delegate targets (ambiguous -- don't guess) both mean a human
+    # needs to look; the difference isn't actionable by the codegen tool.
+    return None, True
 
 
 def _typer_command_name(decorator: ast.expr, fn_name: str) -> str:
@@ -260,6 +339,8 @@ def write_toml(rows: list[MappingRow], out_path: Path) -> None:
         "# Generated by scripts/analysis/migrate_cli_to_cyclopts.py -- review before use.",
         "# status: verified (mcp_name/inner_fn confirmed) | needs_review (guessed or unmatched)",
         "#       | no_mcp_equivalent (stays a hand-written cyclopts command, never registry-driven)",
+        "# resolved_sync_fn/needs_extraction: only meaningful for status=\"verified\" rows -- see",
+        "# the module docstring's ASYNC-WRAPPER AUDIT section.",
         "",
     ]
     for row in sorted(rows, key=lambda r: (r.cli_group or "", r.cli_name)):
@@ -274,6 +355,10 @@ def write_toml(rows: list[MappingRow], out_path: Path) -> None:
             lines.append(f'mcp_name = "{row.mcp_name}"')
         lines.append(f'inner_fn = "{row.inner_fn}"')
         lines.append(f'status = "{row.status}"')
+        if row.status == "verified":
+            if row.resolved_sync_fn:
+                lines.append(f'resolved_sync_fn = "{row.resolved_sync_fn}"')
+            lines.append(f"needs_extraction = {'true' if row.needs_extraction else 'false'}")
         lines.append("")
     out_path.write_text("\n".join(lines))
     log.info("Wrote %d mapping rows to %s", len(rows), out_path)
@@ -292,25 +377,41 @@ def emit_decorators(map_path: Path) -> None:
         log.warning("No status=\"verified\" rows found in %s", map_path)
         return
 
-    print(
-        "# CAUTION: inner_fn below is the MCP async wrapper's name, not necessarily",
-        "# the plain sync function to paste this onto -- see the module docstring's",
-        "# 'IMPORTANT CAVEAT' section before pasting any of these.",
-        sep="\n",
-    )
-    for row in verified:
-        group = row.get("cli_group")
-        group_kw = f', cli_group="{group}"' if group else ""
+    direct = [row for row in verified if not row.get("needs_extraction") and row.get("resolved_sync_fn")]
+    extraction = [row for row in verified if row.get("needs_extraction") or not row.get("resolved_sync_fn")]
+
+    if direct:
+        print("# --- direct decoration: paste onto the named resolved_sync_fn as-is ---")
+        for row in direct:
+            group = row.get("cli_group")
+            group_kw = f', cli_group="{group}"' if group else ""
+            print(
+                f'@cisternal.tool(registry="bathos-cli", name="{row["mcp_name"]}"'
+                f'{group_kw}, cli_name="{row["cli_name"]}")'
+            )
+            print(f"# ^ paste directly above: def {row['resolved_sync_fn']}(...)")
+
+    if extraction:
+        print()
         print(
-            f'@cisternal.tool(registry="bathos-cli", name="{row["mcp_name"]}"'
-            f'{group_kw}, cli_name="{row["cli_name"]}")'
+            "# --- needs extraction: no plain sync delegate found for these; write one",
+            "#     (the campaign_attest_parity_tool pattern) before pasting a decorator ---",
+            sep="\n",
         )
-        print(f"# ^ verify then paste above the real sync fn for: {row['inner_fn']}")
+        for row in extraction:
+            group = row.get("cli_group")
+            group_kw = f', cli_group="{group}"' if group else ""
+            print(
+                f'@cisternal.tool(registry="bathos-cli", name="{row["mcp_name"]}"'
+                f'{group_kw}, cli_name="{row["cli_name"]}")  '
+                f"# extract from: {row['inner_fn']}"
+            )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cli-py", type=Path, default=CLI_PY)
+    parser.add_argument("--mcp-py", type=Path, default=MCP_PY, help="mcp.py, for the async-wrapper audit")
     parser.add_argument("--map-out", type=Path, default=DEFAULT_MAP_PATH, help="Where to write the generated mapping TOML")
     parser.add_argument("--map-in", type=Path, default=DEFAULT_MAP_PATH, help="Mapping TOML to read for --emit-decorators")
     parser.add_argument(
@@ -331,6 +432,20 @@ def main() -> int:
     log.info("Loaded %d MCP tool names from the 'bathos' registry", len(mcp_names))
 
     rows = build_mapping(cli_commands, mcp_names)
+
+    func_defs = parse_mcp_function_defs(args.mcp_py)
+    direct_count = extraction_count = 0
+    for row in rows:
+        if row.status != "verified":
+            continue
+        resolved, needs_extraction = audit_inner_fn(row.inner_fn, func_defs)
+        row.resolved_sync_fn = resolved
+        row.needs_extraction = needs_extraction
+        if needs_extraction:
+            extraction_count += 1
+        else:
+            direct_count += 1
+
     verified = sum(1 for r in rows if r.status == "verified")
     needs_review = sum(1 for r in rows if r.status == "needs_review")
     cli_only = sum(1 for r in rows if r.status == "no_mcp_equivalent")
@@ -340,6 +455,12 @@ def main() -> int:
         needs_review,
         cli_only,
         len(rows),
+    )
+    log.info(
+        "Async-wrapper audit (of %d verified): %d direct decoration, %d need extraction",
+        verified,
+        direct_count,
+        extraction_count,
     )
 
     write_toml(rows, args.map_out)
