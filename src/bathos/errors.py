@@ -53,6 +53,11 @@ class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(
     ARCHIVE_ITEM_NOT_FOUND = "archive_item_not_found"
     ARCHIVE_BUNDLE_NOT_FOUND = "archive_bundle_not_found"
 
+    # Structured document authoring (bathos.authoring): a payload was refused before
+    # anything was written, so the target file is untouched.
+    DOCUMENT_INVALID = "document_invalid"
+    DOCUMENT_CONFLICT = "document_conflict"
+
 
 # Resolution hints registry: every BathosErrorCode member must have a non-empty entry
 RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
@@ -80,6 +85,8 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.ARCHIVE_DIRTY_TREE: "Commit or stash the uncommitted bundle-path changes, then retry",
     BathosErrorCode.ARCHIVE_ITEM_NOT_FOUND: "Verify the item id, or pass stub_path pointing at one of the stub files bth archive-artifact wrote (its embedded pre_archive_sha recovers it without the ledger)",
     BathosErrorCode.ARCHIVE_BUNDLE_NOT_FOUND: "The archive_bundles/<slug>/<item_id>.bundle file referenced by the ledger is missing on this machine -- restore what's recoverable from git history and recover the bundle from a backup or another clone",
+    BathosErrorCode.DOCUMENT_INVALID: "The document was NOT written. Fix the reported field errors and unknown keys, then retry -- call doc_schema for the field list and legal values",
+    BathosErrorCode.DOCUMENT_CONFLICT: "A document already exists at that path. Pass force=true to overwrite it, or author to a different path",
 }
 
 

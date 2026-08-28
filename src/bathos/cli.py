@@ -1071,6 +1071,72 @@ def claim_validate_cmd(
     typer.echo(f"✓ {path} is valid")
 
 
+@claim_app.command("author")
+def claim_author_cmd(
+    path: Path = typer.Argument(..., help="Where to write the claim .toml"),
+    from_json: str = typer.Option(
+        ...,
+        "--from-json",
+        help="JSON file holding the claim payload, or '-' to read stdin",
+    ),
+    force: bool = typer.Option(False, "--force", help="Overwrite an existing document"),
+    reason: str = typer.Option("", "--reason", help="Recorded with the mutation"),
+):
+    """Author a claim from a structured payload instead of hand-writing TOML.
+
+    The payload is rendered to canonical TOML, re-parsed, and validated BEFORE anything
+    is written -- a claim that would fail validation is not written at all. Run
+    `bth claim author --help` then see `doc_schema` (MCP) or the scaffold for the field
+    list.
+    """
+    import json
+    import sys
+
+    import duckdb
+
+    from bathos.authoring.write import author_claim
+
+    raw = sys.stdin.read() if from_json == "-" else Path(from_json).read_text()
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as e:
+        typer.echo(f"error: payload is not valid JSON: {e}", err=True)
+        raise typer.Exit(1) from e
+
+    db = None
+    db_path = _catalog_dir() / "bathos.db"
+    if db_path.exists():
+        db = duckdb.connect(str(db_path), read_only=True)
+    try:
+        result = author_claim(
+            payload,
+            path,
+            force=force,
+            actor="cli",
+            reason=reason,
+            catalog_db=db,
+        )
+    finally:
+        if db is not None:
+            db.close()
+
+    for info in result.infos:
+        typer.secho(f"info: {info}", fg="cyan")
+    for warning in result.warnings:
+        typer.secho(f"warning: {warning}", fg="yellow")
+
+    if not result.ok:
+        for error in result.errors:
+            typer.echo(f"error: {error}", err=True)
+        if result.resolution_hint:
+            typer.secho(f"hint: {result.resolution_hint}", fg="yellow", err=True)
+        typer.secho("nothing was written", fg="red", err=True)
+        raise typer.Exit(1)
+
+    typer.secho(f"\u2713 wrote {result.path}", fg="green")
+    typer.echo(f"  sha256 {result.sha256}")
+
+
 @gate_app.command("stamp")
 def gate_stamp_cmd(
     gate_name: str = typer.Argument(
