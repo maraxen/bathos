@@ -31,15 +31,22 @@ dependencies = [
     "toml>=0.10",
     "rich>=13",
     "fastmcp>=3.3.1",
-    "cisternal>=0.1.1a3",
+    "cisternal>=0.1.1a4",
 ]
 
-# TEMPORARY dev-time override: cisternal's provenance module (this PR depends on
-# it) isn't released yet -- lives in maraxen/cisternal PR #32
-# (feat/provenance-module), unmerged as of this commit. Remove this section and
-# bump the version pin above to a real released version once that PR merges.
+# TEMPORARY source override: this branch needs `cisternal.provenance`, which is
+# MERGED (maraxen/cisternal#32, squashed onto main as 6c0819a) but NOT YET
+# RELEASED -- PyPI's newest cisternal is 0.1.1a4, while main is 0.1.1a7.
+#
+# Pinned to a git rev rather than a local path so it resolves on any machine and
+# in CI. A `path = "../cisternal"` override only worked on the author's box, and
+# not even there from inside a git worktree, where `../` resolves relative to the
+# worktree rather than the main checkout.
+#
+# Remove this section once cisternal >= 0.1.1a7 is on PyPI, and raise the pin in
+# [project.dependencies] to that release.
 [tool.uv.sources]
-cisternal = { path = "../cisternal", editable = true }
+cisternal = { git = "https://github.com/maraxen/cisternal", rev = "6c0819a509d584a9470817e9383cc015940e6a74" }
 
 [project.optional-dependencies]
 viz = [
