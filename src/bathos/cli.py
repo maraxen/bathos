@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -68,28 +67,20 @@ app.add_typer(blast_app, name="blast-radius")
 
 
 def _catalog_dir() -> Path:
-    override = os.environ.get("BTH_CATALOG_DIR")
-    if override:
-        return Path(override)
-    from bathos.config import default_catalog_dir, find_project_config, load_project_config
+    from bathos.cli_common import catalog_dir
 
-    cfg_path = find_project_config()
-    if cfg_path is not None:
-        return load_project_config(cfg_path).catalog_dir
-    return default_catalog_dir()
+    return catalog_dir()
 
 
 def _require_project_slug() -> str:
-    slug_env = os.environ.get("BTH_PROJECT_SLUG")
-    if slug_env:
-        return slug_env
-    from bathos.config import find_project_config, load_project_config
+    from bathos.cli_common import require_project_slug
 
-    cfg_path = find_project_config()
-    if cfg_path is None:
-        typer.echo("No .bth.toml found. Run `bth init` first.", err=True)
-        raise typer.Exit(1)
-    return load_project_config(cfg_path).slug
+    try:
+        return require_project_slug()
+    except SystemExit as e:
+        # cli_common raises plain SystemExit (shared with the typer-free
+        # cyclopts surface); cli.py's own Typer callers expect typer.Exit.
+        raise typer.Exit(e.code if isinstance(e.code, int) else 1) from None
 
 
 def _soft_project_slug() -> str | None:
@@ -98,15 +89,9 @@ def _soft_project_slug() -> str | None:
     Used by commands like `lint` that must keep working on a project with no
     BTH_PROJECT_SLUG/.bth.toml at all (unlike `run`/`archive-artifact`, which require one).
     """
-    slug_env = os.environ.get("BTH_PROJECT_SLUG")
-    if slug_env:
-        return slug_env
-    from bathos.config import find_project_config, load_project_config
+    from bathos.cli_common import soft_project_slug
 
-    cfg_path = find_project_config()
-    if cfg_path is None:
-        return None
-    return load_project_config(cfg_path).slug
+    return soft_project_slug()
 
 
 @app.callback(invoke_without_command=True)
