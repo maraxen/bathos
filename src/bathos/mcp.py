@@ -257,24 +257,42 @@ def _get_project_slug(project_slug: str = "") -> str:
 def list_runs_tool(
     catalog_dir: str = "",
     limit: int = 10,
+    project: str = "",
+    since: str = "",
+    status: str = "",
 ) -> dict:
     """List recent runs from catalog.
 
     Args:
         catalog_dir: Catalog directory (empty = use default)
         limit: Max runs to return (default 10)
+        project: Filter by project slug
+        since: Relative time filter, e.g. '7d' or '24h'
+        status: Filter by run status
 
     Returns:
         Dict with runs array and count
     """
+    from bathos.cli_common import parse_since
+
     cat_dir = _get_catalog_dir(catalog_dir or None)
-    runs = list_runs(cat_dir, limit=limit)
+    if project or since or status:
+        runs = find_runs(
+            cat_dir,
+            since=parse_since(since or None),
+            project=project or None,
+            status=status or None,
+        )
+        runs = runs[:limit]
+    else:
+        runs = list_runs(cat_dir, limit=limit)
     runs_json = [
         {
             "id": r.id,
             "project_slug": r.project_slug,
             "command": r.command,
             "status": r.status,
+            "outcome": r.outcome,
             "exit_code": r.exit_code,
             "duration_s": r.duration_s,
             "timestamp": r.timestamp.isoformat() if r.timestamp else None,
@@ -287,31 +305,48 @@ def list_runs_tool(
 @cisternal.tool(registry="bathos-cli", name="find_runs", cli_name="find")
 def find_runs_tool(
     catalog_dir: str = "",
-    pattern: str = "",
+    project: str = "",
     tags: list[str] | None = None,
+    since: str = "",
+    status: str = "",
+    slurm_job: str = "",
+    output_file: str = "",
 ) -> dict:
-    """Find runs by pattern (project) and/or tags.
+    """Find runs matching filters.
 
     Args:
         catalog_dir: Catalog directory (empty = use default)
-        pattern: Project-slug filter (exact match against project_slug — despite the
-            name, this is not a glob/substring/tag match; see `tags` for tag filtering)
-        tags: Optional tag filter — matches runs with any of these tags. Independent
-            of `pattern`; the underlying query layer already supports this on both
-            the cool (Parquet) and warm (DuckDB) tiers, it just wasn't plumbed through
-            this MCP wrapper until now.
+        project: Project-slug filter (exact match against project_slug)
+        tags: Optional tag filter — matches runs with any of these tags
+        since: Relative time filter, e.g. '7d' or '24h'
+        status: Filter by run status
+        slurm_job: Filter by SLURM job ID
+        output_file: Filter to runs with a matching output file path (glob pattern)
 
     Returns:
         Dict with matching runs
     """
+    from bathos.cli_common import parse_since
+    from bathos.query import _filter_runs_by_output_file
+
     cat_dir = _get_catalog_dir(catalog_dir or None)
-    runs = find_runs(cat_dir, project=pattern if pattern else None, tags=tags or None)
+    runs = find_runs(
+        cat_dir,
+        since=parse_since(since or None),
+        project=project or None,
+        status=status or None,
+        tags=tags or None,
+        slurm_job_id=slurm_job or None,
+    )
+    if output_file:
+        runs = _filter_runs_by_output_file(runs, pattern=output_file)
     runs_json = [
         {
             "id": r.id,
             "project_slug": r.project_slug,
             "command": r.command,
             "status": r.status,
+            "outcome": r.outcome,
             "exit_code": r.exit_code,
             "duration_s": r.duration_s,
             "timestamp": r.timestamp.isoformat() if r.timestamp else None,
@@ -324,8 +359,8 @@ def find_runs_tool(
 
 @cisternal.tool(registry="bathos-cli", name="get_run", cli_name="show")
 def get_run_tool(
-    catalog_dir: str = "",
     run_id: str = "",
+    catalog_dir: str = "",
 ) -> dict:
     """Get details for a specific run.
 
@@ -363,8 +398,8 @@ def get_run_tool(
 
 @cisternal.tool(registry="bathos-cli", name="run_sql", cli_name="sql")
 def run_sql_tool(
-    catalog_dir: str = "",
     sql: str = "",
+    catalog_dir: str = "",
 ) -> dict:
     """Execute SQL query against catalog.
 
@@ -377,8 +412,11 @@ def run_sql_tool(
     """
     if not sql:
         return {"error": "sql parameter is required"}
-    cat_dir = _get_catalog_dir(catalog_dir or None) if catalog_dir else None
-    rows = run_sql(sql, cat_dir)
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    try:
+        rows = run_sql(sql, cat_dir)
+    except RuntimeError as e:
+        return {"error": str(e)}
     rows_json = [list(row) for row in rows]
     return {"rows": rows_json, "count": len(rows_json)}
 
@@ -677,10 +715,10 @@ def blast_radius_assess_tool(
     registry="bathos-cli", name="blast_radius_clear", cli_group="blast-radius", cli_name="clear"
 )
 def blast_radius_clear_tool(
-    catalog_dir: str = "",
     entity_type: str = "",
     entity_id: str = "",
     reason: str = "",
+    catalog_dir: str = "",
 ) -> dict:
     """Manually clear a blast-radius flag (backlog #4551, AC-9; real).
 
@@ -717,9 +755,9 @@ def blast_radius_clear_tool(
     cli_name="blast-status",
 )
 def get_blast_radius_status_tool(
-    catalog_dir: str = "",
     entity_type: str = "",
     entity_id: str = "",
+    catalog_dir: str = "",
 ) -> dict:
     """Look up blast-radius status for an entity (backlog #4551; real).
 
@@ -1102,23 +1140,36 @@ def graduate_product_tool(
 @cisternal.tool(registry="bathos-cli", name="compact", cli_name="compact")
 def compact_tool(
     catalog_dir: str = "",
+    force_rebuild: bool = False,
+    strict: bool = False,
 ) -> dict:
     """Compact cool-tier Parquet to warm-tier DuckDB.
 
     Args:
         catalog_dir: Catalog directory (empty = use default)
+        force_rebuild: Rebuild bathos.db from cool fragments if corrupt
+        strict: Exit non-zero if any cool-tier fragment is corrupt/unreadable
+            (default: skip corrupt fragments and report them, so maintenance
+            always completes)
 
     Returns:
         Dict with result summary
     """
     cat_dir = _get_catalog_dir(catalog_dir or None)
-    result = compact_catalog(cat_dir)
+    result = compact_catalog(cat_dir, force_rebuild=force_rebuild)
     result_dict = {
         "ingested": result.ingested,
         "skipped": result.skipped,
         "duration_s": result.duration_s,
         "corrupt_fragments": [str(cf.path) for cf in result.corrupt_fragments],
     }
+    if result.corrupt_fragments and strict:
+        # Singular "error" key -- see cli_render.render_or_exit -- matches the shipped
+        # Typer `compact --strict` command's `if strict: raise typer.Exit(1)` behavior.
+        result_dict["error"] = (
+            f"{len(result.corrupt_fragments)} corrupt/unreadable fragment(s) found "
+            "(--strict). Run 'bth repair --tier cool' to quarantine them."
+        )
     return result_dict
 
 
@@ -1126,21 +1177,28 @@ def compact_tool(
 def archive_tool(
     catalog_dir: str = "",
     project: str = "",
+    archive_dir: str = "",
+    dry_run: bool = False,
 ) -> dict:
     """Archive warm-tier DuckDB to cold-tier Parquet.
 
     Args:
         catalog_dir: Catalog directory (empty = use default)
-        project: Project slug to archive
+        project: Project slug to archive (empty = all projects, matching the shipped
+            Typer `archive --project` flag's own optional default)
+        archive_dir: Archive root directory (empty = ~/.bth/archive)
+        dry_run: Show what would be archived without writing
 
     Returns:
         Dict with result summary
     """
-    if not project:
-        return {"error": "project parameter is required"}
     cat_dir = _get_catalog_dir(catalog_dir or None)
-    archive_root = cat_dir / "archive"
-    result = archive_runs(cat_dir, archive_root=archive_root, project_slug=project)
+    if not cat_dir.exists():
+        return {"error": "Catalog not found"}
+    archive_root = Path(archive_dir) if archive_dir else None
+    result = archive_runs(
+        cat_dir, archive_root=archive_root, project_slug=project or None, dry_run=dry_run
+    )
     result_dict = {
         "runs_archived": result.runs_archived,
         "partitions_created": result.partitions_created,
@@ -1201,7 +1259,7 @@ def archive_artifact_tool(
 
     cat_dir = _get_catalog_dir(catalog_dir or None)
     proj_root = Path(project_root) if project_root else Path.cwd()
-    slug = project_slug or "default"
+    slug = _get_project_slug(project_slug)
 
     try:
         item = archive_experiment_bundle(
@@ -1305,6 +1363,7 @@ def check_tool(
     catalog_dir: str = "",
     project_root: str = "",
     status_filter: str = "",
+    check_outputs: bool = False,
 ) -> dict:
     """Check run freshness vs git HEAD.
 
@@ -1312,21 +1371,67 @@ def check_tool(
         catalog_dir: Catalog directory (empty = use default)
         project_root: Project root directory (empty = current directory)
         status_filter: Filter by status (e.g., "stale")
+        check_outputs: Also verify output files exist, are readable, and match their
+            recorded SHA256 (output SHA drift)
 
     Returns:
         Dict with check results
     """
+    from bathos.checker import check_output_files, check_output_sha_drift
+    from bathos.query import get_run
+
     cat_dir = _get_catalog_dir(catalog_dir or None)
     proj_root = Path(project_root) if project_root else Path.cwd()
     results = check_runs(cat_dir, proj_root, status_filter=status_filter)
+    stale_count = sum(1 for r in results if r.status == "STALE")
     results_json = [
         {
             "run_id": r.run_id,
             "status": r.status,
+            "run_git_hash": r.run_git_hash,
+            "current_hash": r.current_hash,
         }
         for r in results
     ]
-    return {"results": results_json, "count": len(results_json)}
+
+    drift_count = 0
+    output_status: list[dict] = []
+    if check_outputs:
+        for r in results:
+            run = get_run(r.run_id, cat_dir)
+            if run is None:
+                continue
+            for out_result in check_output_files(run):
+                output_status.append(
+                    {"run_id": r.run_id, "path": out_result.path, "status": out_result.status}
+                )
+            for drift in check_output_sha_drift(run):
+                if drift.status == "UNRECORDED":
+                    continue
+                if drift.status != "OK":
+                    drift_count += 1
+                output_status.append(
+                    {
+                        "run_id": r.run_id,
+                        "path": drift.path,
+                        "sha_drift_status": drift.status,
+                    }
+                )
+
+    result_dict = {
+        "results": results_json,
+        "count": len(results_json),
+        "stale_count": stale_count,
+        "drift_count": drift_count,
+        "output_status": output_status,
+    }
+    if stale_count > 0 or drift_count > 0:
+        # Singular "error" key -- see cli_render.render_or_exit -- matches the shipped
+        # Typer `check` command's `if stale_count or drift_count: raise typer.Exit(1)`.
+        result_dict["error"] = (
+            f"{stale_count} stale run(s), {drift_count} output SHA drift(s) detected"
+        )
+    return result_dict
 
 
 def capability_probe_tool(catalog_dir: str = "") -> dict:
@@ -1356,28 +1461,37 @@ def capability_probe_tool(catalog_dir: str = "") -> dict:
 
 @cisternal.tool(registry="bathos-cli", name="sync", cli_name="sync")
 def sync_tool(
-    catalog_dir: str = "",
     remote_name: str = "",
     pull: bool = False,
+    catalog_dir: str = "",
 ) -> dict:
     """Sync catalog to/from remote.
 
     Args:
         catalog_dir: Catalog directory (empty = use default)
-        remote_name: Remote name from .bth.toml
+        remote_name: Remote name from .bth.toml (auto-selected if only one configured)
         pull: Pull from remote (default: push to remote)
 
     Returns:
         Dict with sync result
     """
-    if not remote_name:
-        return {"error": "remote_name parameter is required"}
     cat_dir = _get_catalog_dir(catalog_dir or None)
     # Load ProjectConfig from .bth.toml in project root
     config_path = find_project_config(Path.cwd())
     if not config_path:
         return {"error": "Could not find .bth.toml in project hierarchy"}
     config = load_project_config(config_path)
+
+    if not remote_name:
+        remotes = list(config.remotes.keys())
+        if len(remotes) == 0:
+            return {"error": "No remotes configured. Use 'bth remote add' to add one."}
+        elif len(remotes) == 1:
+            remote_name = remotes[0]
+        else:
+            names = ", ".join(f"'{r}'" for r in sorted(remotes))
+            return {"error": f"Multiple remotes configured ({names}). Specify one explicitly."}
+
     result = sync_catalog(remote_name, config, cat_dir, pull=pull)
     result_dict = {
         "transferred": result.transferred,
@@ -1428,7 +1542,6 @@ def init_tool(
     }
 
 
-@cisternal.tool(registry="bathos-cli", name="run", cli_name="run")
 def run_tool(
     script_path: str = "",
     args: list[str] | None = None,
@@ -1441,6 +1554,8 @@ def run_tool(
     campaign_id: str = "",
     no_sidecar: bool = False,
     allow_stale: bool = False,
+    component_id: str = "",
+    component_sidecar_sha256: str = "",
 ) -> dict:
     """Run a script and record provenance.
 
@@ -1456,6 +1571,9 @@ def run_tool(
         campaign_id: Campaign ID to associate run with
         no_sidecar: Skip sidecar requirement (for exploratory runs)
         allow_stale: Run anyway despite the sidecar's [status] stale=true flag
+        component_id: xtrax composition-node/StageBundle-slot ID this run binds to (B2-08 bridge)
+        component_sidecar_sha256: SHA256 of the component-level sidecar for
+            component_id (B2-08 bridge)
 
     Returns:
         Dict with run result or structured gate error
@@ -1478,7 +1596,7 @@ def run_tool(
 
     # Resolve parameters
     cat_dir = _get_catalog_dir(catalog_dir or None)
-    slug = project_slug or "default"
+    slug = _get_project_slug(project_slug)
 
     # Clear any stale value before calling run_script: two early-return paths in
     # run_script (invalid sidecar, gate-check failure) bail before a Run is ever
@@ -1498,6 +1616,8 @@ def run_tool(
         allow_stale=allow_stale,
         derived_from=derived_from or None,
         campaign_id=campaign_id or None,
+        component_id=component_id or None,
+        component_sidecar_sha256=component_sidecar_sha256 or None,
     )
 
     # run_script doesn't return the Run it creates (its return type is a plain
@@ -1513,6 +1633,54 @@ def run_tool(
         "exit_code": exit_code,
         "success": exit_code == 0,
     }
+
+
+@cisternal.tool(registry="bathos-cli", name="run", cli_name="run")
+def run_cli_tool(
+    script_path: str = "",
+    args: list[str] | None = None,
+    project_slug: str = "",
+    catalog_dir: str = "",
+    output_paths: list[str] | None = None,
+    tags: list[str] | None = None,
+    agent_mode: str = "",
+    derived_from: str = "",
+    campaign_id: str = "",
+    no_sidecar: bool = False,
+    allow_stale: bool = False,
+    component_id: str = "",
+    component_sidecar_sha256: str = "",
+) -> dict:
+    """CLI-facing wrapper over run_tool: propagates the run script's own exit
+    code as the `bth run` process's exit code (matching the shipped Typer
+    `run` command's `raise typer.Exit(exit_code)` behavior).
+
+    A separate function from run_tool (rather than folding this into run_tool
+    itself) because cli_render.render_or_exit's generic dict-error convention
+    only supports a binary exit 0/1 via a singular "error" key -- it cannot
+    pass through an arbitrary exit code, and get_run_tool (the `show`
+    command) also has a top-level "exit_code" field with unrelated meaning (a
+    run's OWN recorded exit_code, not the `bth show` process's), so a generic
+    "exit_code"-in-any-result convention in render_or_exit would silently
+    break `bth show` on any failed run.
+    """
+    result = run_tool(
+        script_path=script_path,
+        args=args,
+        project_slug=project_slug,
+        catalog_dir=catalog_dir,
+        output_paths=output_paths,
+        tags=tags,
+        agent_mode=agent_mode,
+        derived_from=derived_from,
+        campaign_id=campaign_id,
+        no_sidecar=no_sidecar,
+        allow_stale=allow_stale,
+        component_id=component_id,
+        component_sidecar_sha256=component_sidecar_sha256,
+    )
+    print(json.dumps(result, indent=2, default=str))
+    raise SystemExit(1 if result.get("error") else result.get("exit_code", 0))
 
 
 @cisternal.tool(
@@ -1809,7 +1977,7 @@ async def mcp_find_runs_tool(
     tags: list[str] | None = None,
 ) -> dict:
     """Find runs by pattern (project) and/or tags."""
-    return find_runs_tool(catalog_dir=catalog_dir, pattern=pattern, tags=tags)
+    return find_runs_tool(catalog_dir=catalog_dir, project=pattern, tags=tags)
 
 
 @cisternal.tool(registry="bathos", name="get_run")
@@ -2589,13 +2757,15 @@ def postmortem_get_tool(
     run_id: str = "",
     campaign_id: str = "",
     workspace_root: str | None = None,
+    strict_files: bool = False,
 ) -> dict:
-    """Retrieve postmortem data for a run ID or a campaign ID.
+    """Retrieve and validate postmortem data for a run ID or a campaign ID.
 
     Pass exactly one of run_id / campaign_id. Returns the parsed postmortem fields or an
-    error dict if not found.
+    error dict if not found or if validation fails (e.g. a refutation-mapping violation:
+    hypothesis_status='refuted' with verdict_override='pass').
     """
-    from bathos.postmortem import find_postmortem
+    from bathos.postmortem import find_postmortem, validate_postmortem
 
     if bool(run_id) == bool(campaign_id):
         return {"error": "Pass exactly one of run_id or campaign_id"}
@@ -2614,6 +2784,45 @@ def postmortem_get_tool(
         return {"error": f"No postmortem found for {scope}"}
 
     pm_file, pm = found
+
+    # Drift detection needs the Run row, so it only applies to a run-scoped postmortem
+    # -- a campaign has no single git hash or dirty flag to compare against.
+    run_obj = None
+    if run_id:
+        cat_dir = _get_catalog_dir(None)
+        db_path = cat_dir / "bathos.db"
+        if db_path.exists():
+            import duckdb
+
+            from bathos.schema import Run
+
+            con = duckdb.connect(str(db_path))
+            try:
+                arrow_tbl = con.execute("SELECT * FROM runs WHERE id = ?", [run_id]).arrow()
+                if arrow_tbl.num_rows > 0:
+                    run_obj = Run.from_arrow_row(arrow_tbl.to_pydict(), 0)
+            except Exception:
+                pass
+            finally:
+                con.close()
+        if not run_obj:
+            from bathos.catalog import read_runs
+
+            for r in read_runs(cat_dir):
+                if r.id == run_id:
+                    run_obj = r
+                    break
+
+    validation = validate_postmortem(
+        pm, workspace_root=ws, run=run_obj, strict_files=strict_files
+    )
+    if not validation.ok:
+        return {
+            "error": "Validation failed: " + "; ".join(e.message for e in validation.errors),
+            "hypothesis_status": pm.hypothesis_status,
+            "verdict_override": pm.verdict_override,
+        }
+
     return {
         "run_id": pm.run_id,
         "campaign_id": pm.campaign_id,
@@ -3396,9 +3605,7 @@ def validate_sidecar_tool(
     if campaign_id:
         import duckdb
 
-        from bathos.config import default_catalog_dir
-
-        db = duckdb.connect(str(default_catalog_dir() / "bathos.db"))
+        db = duckdb.connect(str(_get_catalog_dir(None) / "bathos.db"))
         try:
             claim = load_registered_claim(db, campaign_id)
         except (CampaignError, FileNotFoundError, ValueError) as e:
@@ -3689,11 +3896,22 @@ def campaign_show_tool(
             db.close()
 
 
+@dataclasses.dataclass
+class _AuthoringVerifyResult:
+    """Adapts an authoring-ledger VerifyResult to the tier-result shape `bth verify` returns."""
+
+    ok: bool
+    warnings: list[str]
+    errors: list[str]
+    tier: str = "authoring"
+
+
 @cisternal.tool(registry="bathos-cli", name="verify", cli_name="verify")
 def verify_tool(
     tier: str = "all",
     catalog_dir: str = "",
     archive_dir: str = "",
+    authoring: bool = False,
 ) -> dict:
     """Verify catalog integrity across cool, warm, and archive tiers."""
     from bathos.verify import verify_all, verify_archive, verify_cool, verify_warm
@@ -3714,6 +3932,19 @@ def verify_tool(
     else:
         return {"ok": False, "error": f"Unknown tier: {tier!r}"}
 
+    if authoring:
+        from bathos.authoring.ledger import verify_authoring_ledger
+        from bathos.workspace import resolve_workspace
+
+        ledger = verify_authoring_ledger(resolve_workspace().fs_root)
+        ledger_warnings = list(ledger.warnings)
+        if ledger.entries_checked:
+            ledger_warnings.insert(0, f"{ledger.entries_checked} ledger entries checked")
+        results = [
+            *results,
+            _AuthoringVerifyResult(ok=ledger.ok, warnings=ledger_warnings, errors=list(ledger.errors)),
+        ]
+
     payload = {
         "ok": all(r.ok for r in results),
         "results": [
@@ -3721,21 +3952,30 @@ def verify_tool(
             for r in results
         ],
     }
+    all_errors = [e for r in results for e in r.errors]
+    if all_errors:
+        # Singular "error" key -- see cli_render.render_or_exit -- matches the shipped
+        # Typer `verify` command's `if any_errors: raise typer.Exit(1)`.
+        payload["error"] = "; ".join(all_errors)
     return payload
 
 
 @cisternal.tool(registry="bathos-cli", name="lint", cli_name="lint")
-def lint_tool(project_root: str = "") -> dict:
+def lint_tool(project_root: str = "", concentration_threshold: int = 20) -> dict:
     """Lint scripts/ and claim files for naming and structural issues."""
+    from bathos.cli_common import soft_project_slug
     from bathos.linter import (
         IssueSeverity,
         check_adversarial_checks,
+        check_archival_candidates,
         check_baseline_ref_exists,
         check_bypass_trend,
         check_canonical_stage_names,
         check_claim_opaque_labels,
         check_ephemeral_output_paths,
         check_residual_rates,
+        check_run_concentration,
+        check_stale_scripts_without_reason,
         check_threshold_basis,
         check_todo_strings_in_scaffold,
         check_unfired_branches,
@@ -3748,6 +3988,17 @@ def lint_tool(project_root: str = "") -> dict:
     issues.extend(check_adversarial_checks(root.resolve()))
     issues.extend(check_threshold_basis(root.resolve()))
     issues.extend(check_todo_strings_in_scaffold(root.resolve()))
+    issues.extend(check_stale_scripts_without_reason(root.resolve()))
+    # check_archival_candidates works with no warm catalog at all (every stale sidecar is
+    # a candidate) as well as with one present -- unlike the checks below, it must not be
+    # gated behind db_path.exists(). project_slug scopes the archived_items lookup so a
+    # same-relative-path archived record in a DIFFERENT project (catalog_dir is commonly
+    # shared) doesn't silently suppress this warning here.
+    issues.extend(
+        check_archival_candidates(
+            root.resolve(), _get_catalog_dir(None), project_slug=soft_project_slug()
+        )
+    )
 
     catalog_dir = _get_catalog_dir(None)
     db_path = catalog_dir / "bathos.db"
@@ -3755,13 +4006,14 @@ def lint_tool(project_root: str = "") -> dict:
         issues.extend(check_residual_rates(catalog_dir))
         issues.extend(check_bypass_trend(catalog_dir))
         issues.extend(check_unfired_branches(catalog_dir))
+        issues.extend(check_run_concentration(catalog_dir, threshold=concentration_threshold))
         issues.extend(check_ephemeral_output_paths(catalog_dir))
         issues.extend(check_canonical_stage_names(catalog_dir))
         issues.extend(check_baseline_ref_exists(root.resolve(), db_path))
 
     errors = [i for i in issues if i.severity == IssueSeverity.ERROR]
     warnings = [i for i in issues if i.severity == IssueSeverity.WARNING]
-    return {
+    result = {
         "ok": len(errors) == 0,
         "error_count": len(errors),
         "warning_count": len(warnings),
@@ -3775,6 +4027,14 @@ def lint_tool(project_root: str = "") -> dict:
             for i in issues
         ],
     }
+    if errors:
+        # Singular "error" key (not the plural "errors" some other tools use) is what
+        # cli_render.render_or_exit checks to decide CLI exit(1) -- matches the shipped
+        # Typer `lint` command's `if errors: raise typer.Exit(1)` behavior.
+        result["error"] = f"{len(errors)} error(s), {len(warnings)} warning(s)."
+    elif not issues:
+        result["message"] = "No issues found."
+    return result
 
 
 @cisternal.tool(registry="bathos", name="campaign_add")

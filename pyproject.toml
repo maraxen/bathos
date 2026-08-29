@@ -23,7 +23,6 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "typer>=0.12",
     "duckdb>=1.0",
     "pyarrow>=16",
     "pytz>=2026.2",
@@ -32,9 +31,10 @@ dependencies = [
     "rich>=13",
     "fastmcp>=3.3.1",
     "cisternal>=0.1.1a4",
-    # Milestone 1 of backlog #4702: bathos/cli_cyclopts.py wires a preview CLI
-    # directly against cisternal's cyclopts-based wire() -- declared here since
-    # it's imported directly, not just pulled in transitively via cisternal.
+    # backlog #4702: bathos/cli_cyclopts.py (the real `bth` CLI as of the final
+    # cutover) wires directly against cisternal's cyclopts-based wire() --
+    # declared here since it's imported directly, not just pulled in
+    # transitively via cisternal.
     "cyclopts>=4.18.0",
     # Already present transitively via fastmcp and already imported directly by
     # figure_manifest.py and campaign_report.py -- declared here so the authoring
@@ -100,13 +100,8 @@ Repository = "https://github.com/mariellerossi/bathos.git"
 "Bug Tracker" = "https://github.com/mariellerossi/bathos/issues"
 
 [project.scripts]
-bth = "bathos.cli:app"
+bth = "bathos.cli_cyclopts:app"
 bth-mcp = "bathos.mcp:mcp_server"
-# Preview entry point for backlog #4702 (Milestone 1: campaign group;
-# Milestone 2: top-level singletons + more) -- NOT the shipped `bth` binary.
-# Proves the registry-driven cyclopts pattern for each migrated group in
-# isolation; see cli_cyclopts.py's module docstring.
-bth-preview = "bathos.cli_cyclopts:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/bathos"]

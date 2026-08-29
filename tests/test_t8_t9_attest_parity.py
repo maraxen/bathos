@@ -6,15 +6,14 @@ import asyncio
 import hashlib
 import json
 from datetime import UTC, datetime
-from unittest.mock import patch
 
 import duckdb
 import pytest
-from typer.testing import CliRunner
 
 from bathos.catalog import init_catalog
-from bathos.cli import app
+from bathos.cli_cyclopts import app
 from bathos.mcp import claim_attest_parity
+from tests._cyclopts_runner import CyclopticRunner
 
 
 @pytest.fixture
@@ -146,12 +145,18 @@ class TestT8CLIAttestParity:
 
         monkeypatch.chdir(tmp_path)
 
-        with patch("bathos.cli._catalog_dir", return_value=catalog_dir):
-            runner = CliRunner()
-            result = runner.invoke(
-                app,
-                ["campaign", "attest-parity", campaign_id, parity_run_id],
-            )
+        runner = CyclopticRunner()
+        result = runner.invoke(
+            app,
+            [
+                "campaign",
+                "attest-parity",
+                campaign_id,
+                parity_run_id,
+                "--catalog-dir",
+                str(catalog_dir),
+            ],
+        )
 
         assert result.exit_code == 0, result.output
         assert "Attested parity run" in result.output
@@ -200,12 +205,18 @@ class TestT8CLIAttestParity:
 
         monkeypatch.chdir(tmp_path)
 
-        with patch("bathos.cli._catalog_dir", return_value=catalog_dir):
-            runner = CliRunner()
-            result = runner.invoke(
-                app,
-                ["campaign", "attest-parity", campaign_id, bad_run_id],
-            )
+        runner = CyclopticRunner()
+        result = runner.invoke(
+            app,
+            [
+                "campaign",
+                "attest-parity",
+                campaign_id,
+                bad_run_id,
+                "--catalog-dir",
+                str(catalog_dir),
+            ],
+        )
 
         assert result.exit_code == 1
         assert "parity_run_type" in result.output.lower() or "missing" in result.output.lower()

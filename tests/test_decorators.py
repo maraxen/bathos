@@ -1,8 +1,3 @@
-from typer.testing import CliRunner
-
-runner = CliRunner()
-
-
 def test_decorator_records_run(tmp_path, monkeypatch):
     """@bth.experiment writes a Run to the catalog."""
     monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_path))

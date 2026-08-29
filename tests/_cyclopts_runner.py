@@ -31,15 +31,21 @@ if TYPE_CHECKING:
 class InvokeResult:
     """Result of a `CyclopticRunner.invoke()` call.
 
-    Mirrors the subset of typer's `CliRunner` `Result` that bathos's
-    existing tests assert on: `exit_code` and the combined stdout+stderr
-    text (typer's `CliRunner` default is `mix_stderr=True`, so `.output`
-    and `.stdout` are aliases of the same captured stream here too).
+    Mirrors the subset of click 8.2+'s `Result` (typer's `CliRunner` return
+    type) that bathos's existing tests assert on: `exit_code`, `stdout` and
+    `stderr` captured separately, and `output` as their concatenation.
+    `output` is NOT a byte-for-byte chronological interleaving of the two
+    streams the way click's real `Result.output` is -- it's `stdout +
+    stderr`, since bathos's CLI commands each write to one stream or the
+    other per invocation rather than both interleaved, and every existing
+    test assertion against `.output` is a substring check that doesn't
+    depend on cross-stream ordering.
     """
 
     exit_code: int
-    output: str
+    output: str  # stdout + stderr concatenated, see class docstring
     stdout: str
+    stderr: str
     exception: BaseException | None = None
 
 
@@ -47,14 +53,15 @@ class CyclopticRunner:
     """Invoke a cyclopts App in-process, capturing output and exit code."""
 
     def invoke(self, app: cyclopts.App, args: list[str]) -> InvokeResult:
-        buf = io.StringIO()
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
         exit_code = 0
         exception: BaseException | None = None
 
         old_stderr = sys.stderr
         try:
-            with contextlib.redirect_stdout(buf):
-                sys.stderr = buf
+            with contextlib.redirect_stdout(stdout_buf):
+                sys.stderr = stderr_buf
                 try:
                     app(args)
                 except SystemExit as e:
@@ -65,5 +72,12 @@ class CyclopticRunner:
         finally:
             sys.stderr = old_stderr
 
-        text = buf.getvalue()
-        return InvokeResult(exit_code=exit_code, output=text, stdout=text, exception=exception)
+        stdout_text = stdout_buf.getvalue()
+        stderr_text = stderr_buf.getvalue()
+        return InvokeResult(
+            exit_code=exit_code,
+            output=stdout_text + stderr_text,
+            stdout=stdout_text,
+            stderr=stderr_text,
+            exception=exception,
+        )

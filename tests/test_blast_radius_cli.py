@@ -10,13 +10,13 @@ import json
 import subprocess
 
 import pytest
-from typer.testing import CliRunner
 
 from bathos.catalog import init_catalog, write_run
-from bathos.cli import app
+from bathos.cli_cyclopts import app
 from bathos.schema import Run
+from tests._cyclopts_runner import CyclopticRunner
 
-runner = CliRunner()
+runner = CyclopticRunner()
 
 
 def _git(args, cwd):
@@ -70,10 +70,10 @@ class TestBlastRadiusAssessCmd:
 
         assert result.exit_code == 0, result.output
         assert "foo.py" in result.output
-        assert "Flagged 1 run" in result.output
+        assert json.loads(result.output)["flagged_count"] == 1
 
         status = runner.invoke(app, ["query", "blast-status", "run", run.id])
-        assert status.output.strip() == "affected"
+        assert json.loads(status.output)["status"] == "affected"
 
     def test_assess_requires_an_anchor(self, repo, catalog_dir, monkeypatch):
         monkeypatch.chdir(repo)

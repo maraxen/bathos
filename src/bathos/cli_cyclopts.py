@@ -1,25 +1,17 @@
-"""Preview cyclopts CLI, driven by cisternal's `wire()` — backlog #4702.
+"""The `bth` cyclopts CLI, driven by cisternal's `wire()` — backlog #4702.
 
-This is a standalone, additional console-script entry point (`bth-preview` in
-`[project.scripts]`, renamed from `bth-campaign-preview` once Milestone 2
-extended it past the campaign group) proving the registry-driven CLI pattern
-end to end for each migrated command group/singleton. It is NOT the shipped
-`bth` binary: `bathos.cli`'s hand-written Typer commands are untouched and
-remain what the real `bth ...` commands run. Typer and cyclopts are not
-interoperable frameworks, and mounting a cyclopts sub-app inside `bth`'s
-existing Typer app (or vice versa) is not a supported path — see the
-Milestone 1 plan's "safety decision" in `.praxia/docs/plans/` for the
-reasoning.
-
-Cutting the real `bth` entry point over to this cyclopts-generated surface
-(and deleting the old Typer commands) is explicit follow-on scope, once every
-command in `scripts/analysis/cli_migration_map.toml` is migrated — see the
-Milestone 2 scope doc in `.praxia/docs/plans/`.
+This IS the shipped `bth` binary (`[project.scripts]`'s `bth = "bathos.
+cli_cyclopts:app"`, cut over from the old Typer app in `bathos.cli` once
+every one of the 78 original Typer commands had a cyclopts equivalent here —
+see the Milestone 2 scope doc in `.praxia/docs/plans/` for the full
+migration history). It started life as a preview entry point (`bth-preview`,
+Milestone 1's campaign-group pilot) proving the registry-driven CLI pattern
+in isolation before any cutover; that preview entry point is now retired.
 
 `expected=` below must list every `registry="bathos-cli"` tool name currently
 registered in `bathos.mcp` — cisternal's `wire()` raises `CisternalWireError`
 at import time if any listed name is missing, so a forgotten name here is
-caught immediately rather than silently absent from the preview app.
+caught immediately rather than silently absent from the app.
 """
 
 from __future__ import annotations
@@ -32,8 +24,26 @@ import cyclopts
 from cisternal import wire
 
 from bathos.cli_render import cyclopts_result_action
+from bathos.mcp_auth import get_or_create_token
+from bathos.telemetry import init_telemetry
 
-app = cyclopts.App(name="bth-preview", result_action=cyclopts_result_action)
+app = cyclopts.App(name="bth", result_action=cyclopts_result_action)
+
+# Ported from bathos.cli's Typer `@app.callback(invoke_without_command=True)`
+# (the old `main` callback), which ran this unconditionally before every `bth`
+# invocation regardless of subcommand or --version. A fresh `bth` invocation is
+# a fresh process, so module-level placement here runs it exactly once per
+# real invocation -- the same semantics as before. Both calls are internally
+# idempotent (init_telemetry checks its own _INITIALIZED guard; get_or_create_
+# token only writes ~/.bth/mcp_token if it doesn't already exist), so running
+# them once per test process (rather than once per in-process app(...) call)
+# is equivalent for test purposes too.
+init_telemetry()
+# Ensure the local MCP write-seam token (~/.bth/mcp_token, mode 0600) exists on
+# first `bth` CLI use, so it's ready before any MCP client spawns bth-mcp
+# (debt #619). CLI commands call core functions directly and never check this
+# token themselves -- see bathos.mcp_auth.
+get_or_create_token()
 
 # Importing bathos.mcp executes its module-level @cisternal.tool decorations,
 # populating the "bathos-cli" registry partition this wire() call snapshots.

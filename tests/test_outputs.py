@@ -157,16 +157,16 @@ class TestOutputsListCommand:
     """Tests for 'bth outputs list' command."""
 
     def test_outputs_list_exists(self):
-        """Test that outputs_list command exists."""
-        from bathos.cli import outputs_list
+        """Test that the list_outputs_tool CLI command implementation exists."""
+        from bathos.mcp import list_outputs_tool
 
-        assert callable(outputs_list)
+        assert callable(list_outputs_tool)
 
     def test_outputs_summary_exists(self):
-        """Test that outputs_summary command exists."""
-        from bathos.cli import outputs_summary
+        """Test that the outputs_summary_tool CLI command implementation exists."""
+        from bathos.mcp import outputs_summary_tool
 
-        assert callable(outputs_summary)
+        assert callable(outputs_summary_tool)
 
 
 class TestMCPTools:

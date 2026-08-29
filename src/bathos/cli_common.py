@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 
@@ -34,6 +35,17 @@ def require_project_slug() -> str:
         print("No .bth.toml found. Run `bth init` first.", file=sys.stderr)
         raise SystemExit(1)
     return load_project_config(cfg_path).slug
+
+
+def parse_since(since: str | None) -> datetime | None:
+    """Parse a relative-time filter like '7d' or '24h' into a UTC datetime."""
+    if since is None:
+        return None
+    if since.endswith("d"):
+        return datetime.now(UTC) - timedelta(days=float(since[:-1]))
+    if since.endswith("h"):
+        return datetime.now(UTC) - timedelta(hours=float(since[:-1]))
+    return None
 
 
 def soft_project_slug() -> str | None:

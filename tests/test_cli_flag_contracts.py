@@ -14,18 +14,19 @@ Two contracts are pinned here:
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from typer.testing import CliRunner
 
 from bathos.catalog import init_catalog, write_run
-from bathos.cli import app
+from bathos.cli_cyclopts import app
 from bathos.compact import compact
 from bathos.schema import Run
+from tests._cyclopts_runner import CyclopticRunner
 
-runner = CliRunner()
+runner = CyclopticRunner()
 
 
 def _make_run(n: int, base: datetime, parent_run_id: str = "") -> Run:
@@ -123,9 +124,13 @@ def test_cli_lineage_depth_changes_output(lineage_chain, monkeypatch):
     assert shallow.exit_code == 0, shallow.output
     assert deep.exit_code == 0, deep.output
 
-    # One ancestor line vs three, over the same chain.
-    assert shallow.output.count("outcome=") == 2
-    assert deep.output.count("outcome=") == 4
+    # W3C PROV-JSON output (registry-driven cyclopts command, not the retired
+    # Typer command's human-readable "outcome=" lines) -- one ancestor entity
+    # vs three, over the same chain.
+    shallow_entities = json.loads(shallow.output)["prov"]["entity"]
+    deep_entities = json.loads(deep.output)["prov"]["entity"]
+    assert len(shallow_entities) == 2
+    assert len(deep_entities) == 4
     assert shallow.output != deep.output
 
 
@@ -171,7 +176,7 @@ def test_classify_no_content_flag_is_gone(tmp_path, monkeypatch):
 
     result = runner.invoke(app, ["classify", "--no-content"])
     assert result.exit_code != 0
-    assert "no such option" in result.output.lower()
+    assert "unknown option" in result.output.lower()
 
 
 def test_classify_still_runs_without_the_removed_flag(tmp_path, monkeypatch):
@@ -190,7 +195,7 @@ def test_postmortem_validate_strict_flag_is_gone(tmp_path):
 
     result = runner.invoke(app, ["postmortem", "validate", str(pm), "--strict"])
     assert result.exit_code != 0
-    assert "no such option" in result.output.lower()
+    assert "unknown option" in result.output.lower()
 
 
 def test_postmortem_validate_strict_files_still_accepted(tmp_path):
@@ -200,4 +205,4 @@ def test_postmortem_validate_strict_files_still_accepted(tmp_path):
 
     result = runner.invoke(app, ["postmortem", "validate", str(pm), "--strict-files"])
     # Parse fails on an empty file, but the option itself must be recognised.
-    assert "no such option" not in result.output.lower()
+    assert "unknown option" not in result.output.lower()

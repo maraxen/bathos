@@ -1,13 +1,17 @@
 """The CLI and MCP authoring surfaces must not drift apart.
 
-Parity is guaranteed by a shared core (``bathos.authoring.write.author_claim``), not by
-shared registration: ``cisternal.wire(app=...)`` registers CLI commands on a *cyclopts*
-App, while bathos's CLI is Typer -- and wiring an async tool onto Typer fails silently
-(the command exits 0 having awaited nothing), which is worse than not wiring it at all.
+Parity is guaranteed by a shared core (``bathos.authoring.write.author_claim``). As of
+the final cutover (backlog #4702), both surfaces are cyclopts commands registered via
+``cisternal.wire()`` -- `claim_author` (MCP) and `claim_author_cli_tool` (CLI, reading
+``--from-json``/stdin) both delegate to the same `claim_author_tool`, which is the one
+function that actually calls `author_claim`. Before the cutover, bathos's CLI was Typer
+and the two surfaces were written and pinned separately here (wiring an async tool onto
+Typer fails silently -- the command exits 0 having awaited nothing -- which is worse
+than not wiring it at all); the structural checks below still verify the same
+invariant, just against the now-unified surface.
 
-So the surfaces are written separately and pinned together here, following the precedent
-already documented at ``bathos/postmortem.py``: "Shared by the CLI and the MCP tool so
-the two surfaces cannot diverge (regression: debt #479)."
+Following the precedent already documented at ``bathos/postmortem.py``: "Shared by the
+CLI and the MCP tool so the two surfaces cannot diverge (regression: debt #479)."
 """
 
 from __future__ import annotations
@@ -18,7 +22,6 @@ import json
 from pathlib import Path
 
 import pytest
-from typer.testing import CliRunner
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "bathos"
 
@@ -61,11 +64,31 @@ def _mcp_token() -> str:
 
 
 def _author_via_cli(target: Path, payload: dict, tmp_path: Path):
+    """Invoke `bth claim author` via the cyclopts CLI.
+
+    claim_author_tool (mcp.py) treats `path` as relative to the workspace
+    root and rejects a target that resolves outside it (a design decision
+    from the extraction-heavy batch, not present in the retired Typer
+    command) -- so `target` must be inside `tmp_path`, passed relative, with
+    `tmp_path` itself pinned as `--workspace-root`. Mirrors `_author_via_mcp`
+    below, which already does the equivalent (`path=str(target.relative_to(
+    workspace))`, `workspace_root=str(workspace)`).
+    """
+    from tests._cyclopts_runner import CyclopticRunner
+
     payload_file = tmp_path / "payload.json"
     payload_file.write_text(json.dumps(payload))
-    return CliRunner().invoke(
-        __import__("bathos.cli", fromlist=["app"]).app,
-        ["claim", "author", str(target), "--from-json", str(payload_file)],
+    return CyclopticRunner().invoke(
+        __import__("bathos.cli_cyclopts", fromlist=["app"]).app,
+        [
+            "claim",
+            "author",
+            str(target.relative_to(tmp_path)),
+            "--from-json",
+            str(payload_file),
+            "--workspace-root",
+            str(tmp_path),
+        ],
     )
 
 
@@ -144,9 +167,27 @@ def _calls_author_claim(source: str, func_name: str) -> bool:
 
 
 def test_cli_command_routes_through_the_shared_core():
-    assert _calls_author_claim((SRC / "cli.py").read_text(), "claim_author_cmd"), (
-        "bth claim author must delegate to authoring.write.author_claim, not reimplement "
-        "the render/validate/write pipeline"
+    """bth claim author (claim_author_cli_tool, mcp.py) must delegate to
+    claim_author_tool -- the shared core test_mcp_tool_routes_through_the_shared_core
+    (below) already confirms calls author_claim. Regression note (final cutover,
+    backlog #4702): bathos.cli (Typer) was deleted; claim_author_cmd no longer
+    exists -- this test used to check that function directly, back when the CLI
+    and MCP surfaces were separate frameworks that couldn't share one function."""
+    mcp_source = (SRC / "mcp.py").read_text()
+    tree = ast.parse(mcp_source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "claim_author_cli_tool":
+            calls_claim_author_tool = any(
+                isinstance(call.func, ast.Name) and call.func.id == "claim_author_tool"
+                for call in ast.walk(node)
+                if isinstance(call, ast.Call)
+            )
+            break
+    else:
+        raise AssertionError("claim_author_cli_tool not found -- rename it here too")
+    assert calls_claim_author_tool, (
+        "bth claim author (claim_author_cli_tool) must delegate to claim_author_tool, "
+        "not reimplement the render/validate/write pipeline"
     )
 
 

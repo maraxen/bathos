@@ -5,14 +5,13 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import tomllib
 from contextlib import suppress
 from pathlib import Path
-
-import typer
 
 from bathos.catalog import write_run
 from bathos.checker import hash_dependency_lock
@@ -334,14 +333,11 @@ def run_script(
                 campaign_db, campaign_id, catalog_dir=catalog_dir
             )
         except CampaignError as e:
-            typer.echo(f"Error: {e}", err=True)
+            print(f"Error: {e}", file=sys.stderr)
             cool_dir = catalog_dir / "campaigns"
             has_cool = cool_dir.exists() and any(cool_dir.glob("*.json"))
             if not db_path.exists() and not has_cool:
-                typer.echo(
-                    "(run `bth campaign create` first)",
-                    err=True,
-                )
+                print("(run `bth campaign create` first)", file=sys.stderr)
             return 1
         finally:
             if campaign_db is not None:
@@ -351,10 +347,10 @@ def run_script(
     ephemeral_outs = [p for p in output_paths if _is_ephemeral_path(p)]
     if ephemeral_outs:
         for ep in ephemeral_outs:
-            typer.echo(
+            print(
                 f"Warning: --out {ep!r} is in a temp directory and will be lost on reboot. "
                 "Use a persistent project path (e.g. outputs/) instead.",
-                err=True,
+                file=sys.stderr,
             )
 
     script_path = _find_script_path(argv, cwd)
@@ -383,7 +379,7 @@ def run_script(
                 sidecar = parse_sidecar(bundle.path)
             except SidecarError as e:
                 event("run.error", phase="validate", exc_type=type(e).__name__, exc_msg=str(e))
-                typer.echo(f"Error: invalid sidecar — {e}", err=True)
+                print(f"Error: invalid sidecar — {e}", file=sys.stderr)
                 return 1
 
     # Read project config for agent_mode default
@@ -438,7 +434,7 @@ def run_script(
             payload_dict = (
                 dataclasses.asdict(gate_result.error_payload) if gate_result.error_payload else {}
             )
-            typer.echo(json.dumps(payload_dict), err=True)
+            print(json.dumps(payload_dict), file=sys.stderr)
             return 1
 
     # Determine sidecar_mode string
@@ -561,29 +557,29 @@ def run_script(
             # Loud, because the failure is silent otherwise: a claim written to an ignored path is
             # never committed, and a claim's sha256 is the tamper anchor its campaign's Union Gate
             # evaluates against. Observed in the wild leaving 3 of 4 claims untracked.
-            typer.echo(
+            print(
                 "warning: these provenance paths are gitignored, so anything written there will "
                 f"never be committed: {', '.join(pin.ignored_provenance_paths)}. "
                 "Narrow the ignore rule (e.g. `.bth/*` plus `!.bth/claims/` and `!.bth/refs/`).",
-                err=True,
+                file=sys.stderr,
             )
         if pin.ignored_declared_paths:
-            typer.echo(
+            print(
                 "warning: these declared paths are gitignored, so they were NOT captured in this "
                 f"run's provenance snapshot: {', '.join(pin.ignored_declared_paths)}",
-                err=True,
+                file=sys.stderr,
             )
         if pin.snapshot_mode == "metadata_only":
-            typer.echo(
+            print(
                 f"warning: working tree is {pin.skipped_bytes:,} bytes of uncommitted content -- "
                 "too large to snapshot, so its CONTENTS were not captured. Largest contributors: "
                 f"{', '.join(pin.skipped_paths[:5])}. Consider gitignoring these.",
-                err=True,
+                file=sys.stderr,
             )
         if pin.unpinned_reason and pin.snapshot_mode != "metadata_only":
             # A ref that failed to be written leaves the object collectable. Saying nothing here is
             # what turns an incomplete record into a false attestation.
-            typer.echo(f"warning: run provenance is not durable: {pin.unpinned_reason}", err=True)
+            print(f"warning: run provenance is not durable: {pin.unpinned_reason}", file=sys.stderr)
     except Exception as e:  # pragma: no cover - defensive; pinning must not break a run
         event("run.pin_error", run_uuid=run.id, exc_type=type(e).__name__, exc_msg=str(e))
 
@@ -628,7 +624,7 @@ def run_script(
             except Exception as e:
                 event("run.error", phase="persist", exc_type=type(e).__name__, exc_msg=str(e))
                 raise
-            typer.echo(json.dumps(dataclasses.asdict(payload)), err=True)
+            print(json.dumps(dataclasses.asdict(payload)), file=sys.stderr)
             return 1
         event("run.differential_preflight_passed", run_uuid=run.id)
 

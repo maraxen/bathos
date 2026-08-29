@@ -580,9 +580,8 @@ accuracy = "float"
 
 
 def test_cli_lint_threshold_warning_appears(tmp_path, monkeypatch):
-    from typer.testing import CliRunner
-
-    from bathos.cli import app
+    from bathos.cli_cyclopts import app
+    from tests._cyclopts_runner import CyclopticRunner
 
     monkeypatch.chdir(tmp_path)
     catalog_dir = tmp_path / ".bth" / "catalog"
@@ -607,7 +606,7 @@ err = "float"
 """
     (tmp_path / "run_test.bth.toml").write_text(toml_content)
 
-    cli_runner = CliRunner()
+    cli_runner = CyclopticRunner()
     result = cli_runner.invoke(app, ["lint", "--project-root", str(tmp_path)])
     assert "unjustified_threshold" in result.output
     assert "warning" in result.output.lower()

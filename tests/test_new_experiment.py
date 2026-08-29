@@ -1,7 +1,8 @@
 import pytest
-from typer.testing import CliRunner
 
-runner = CliRunner()
+from tests._cyclopts_runner import CyclopticRunner
+
+runner = CyclopticRunner()
 
 
 def test_creates_script_and_sidecar(tmp_path):
@@ -49,7 +50,7 @@ def test_warns_on_bad_name_style(tmp_path):
 
 def test_cli_new_experiment(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    from bathos.cli import app
+    from bathos.cli_cyclopts import app
 
     result = runner.invoke(app, ["new-experiment", "run_smoke"])
     assert result.exit_code == 0
@@ -60,7 +61,7 @@ def test_cli_new_experiment(tmp_path, monkeypatch):
 
 def test_cli_new_experiment_refuses_overwrite(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    from bathos.cli import app
+    from bathos.cli_cyclopts import app
 
     runner.invoke(app, ["new-experiment", "run_smoke"])
     result = runner.invoke(app, ["new-experiment", "run_smoke"])
@@ -70,7 +71,7 @@ def test_cli_new_experiment_refuses_overwrite(tmp_path, monkeypatch):
 
 def test_cli_new_experiment_force(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    from bathos.cli import app
+    from bathos.cli_cyclopts import app
 
     runner.invoke(app, ["new-experiment", "run_smoke"])
     result = runner.invoke(app, ["new-experiment", "run_smoke", "--force"])

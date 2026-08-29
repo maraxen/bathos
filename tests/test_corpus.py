@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
 import pytest
-from typer.testing import CliRunner
 
-from bathos.cli import app
+from bathos.cli_cyclopts import app
 from bathos.corpus import (
     CONTEXT_COLUMNS,
     CorpusError,
@@ -21,8 +21,9 @@ from bathos.corpus import (
     parse_card,
     search_cards,
 )
+from tests._cyclopts_runner import CyclopticRunner
 
-runner = CliRunner()
+runner = CyclopticRunner()
 
 
 def write_card(root: Path, name: str, frontmatter: str, body: str = "Body text.") -> Path:
@@ -289,8 +290,17 @@ def test_cli_ref_show_unknown_id_exits_nonzero():
 
 
 def test_cli_ref_search_hit_and_miss():
-    assert runner.invoke(app, ["ref", "search", "threshold"]).exit_code == 0
-    assert runner.invoke(app, ["ref", "search", "zzzznotpresent"]).exit_code == 1
+    """reference_search_tool is shared with the MCP `reference_search` tool (mcp.py),
+    where "found zero matches" is a valid `{"ok": true, "count": 0}` response, not an
+    error -- unlike the retired Typer `ref search` command, which exited 1 on a miss.
+    CLI callers can still detect a miss via the JSON `count` field."""
+    hit = runner.invoke(app, ["ref", "search", "threshold"])
+    assert hit.exit_code == 0
+    assert json.loads(hit.output)["count"] > 0
+
+    miss = runner.invoke(app, ["ref", "search", "zzzznotpresent"])
+    assert miss.exit_code == 0
+    assert json.loads(miss.output)["count"] == 0
 
 
 def test_cli_ref_applicable_fires_on_a_validation_sidecar(tmp_path, monkeypatch):
@@ -326,7 +336,7 @@ def test_cli_ref_applicable_reports_no_match_plainly(tmp_path, monkeypatch):
     monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_path / "catalog"))
     res = runner.invoke(app, ["ref", "applicable", str(tmp_path / "absent.py")])
     assert res.exit_code == 0
-    assert "No cards fired" in res.stdout
+    assert json.loads(res.output)["fired"] == []
 
 
 def test_invalid_severity_is_rejected_and_skipped(tmp_path):

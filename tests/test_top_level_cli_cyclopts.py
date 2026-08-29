@@ -154,8 +154,21 @@ class TestVerifyCyclopts:
 
 
 class TestCheckCyclopts:
-    def test_happy_path(self, populated_catalog):
+    def test_stale_run_exits_1(self, populated_catalog):
+        """`populated_catalog`'s run carries a fake git_hash ("abc123") and runs
+        outside any real git repo, so it's genuinely STALE under check_runs'
+        real drift logic -- not a happy path. Regression: check_tool used to
+        omit a singular "error" key entirely, so cli_render.render_or_exit
+        never triggered exit(1) even with real drift detected (same bug class
+        as lint_tool/compact_tool, found during the final cutover, backlog
+        #4702) -- this test previously asserted exit_code == 0 against this
+        same stale fixture, silently passing only because the bug masked it."""
         result = runner.invoke(app, ["check", "--catalog-dir", str(populated_catalog)])
+        assert result.exit_code == 1, result.output
+        assert "stale" in result.output.lower()
+
+    def test_clean_catalog_exits_0(self, tmp_catalog):
+        result = runner.invoke(app, ["check", "--catalog-dir", str(tmp_catalog)])
         assert result.exit_code == 0, result.output
 
 
@@ -276,11 +289,17 @@ class TestSyncCyclopts:
 
 
 class TestRunCyclopts:
-    def test_missing_script_tracks_failure_as_data_not_cli_error(self, populated_catalog):
-        # run_tool tracks provenance for whatever the subprocess did, including
-        # failing to start -- a missing script is captured as
-        # {"success": false, "exit_code": ...} in the run record, not a CLI
-        # error, matching the shipped `bth run`'s own behavior.
+    def test_missing_script_propagates_subprocess_exit_code(self, populated_catalog):
+        """A missing script is tracked as run provenance ({"success": false,
+        "exit_code": ...}) AND its exit_code propagates to the `bth run`
+        process's own exit code -- matching the shipped Typer `run` command's
+        `raise typer.Exit(exit_code)`. Regression note (final cutover, backlog
+        #4702): this test previously asserted exit_code == 0 here, describing
+        that as "not a CLI error, matching the shipped bth run's own
+        behavior" -- that was backwards. run_tool never propagated the
+        script's real exit_code to the CLI process at all (a bug, not a
+        design choice); run_cli_tool (mcp.py) now does, restoring parity with
+        the original Typer command."""
         result = runner.invoke(
             app,
             [
@@ -291,12 +310,25 @@ class TestRunCyclopts:
                 str(populated_catalog),
             ],
         )
-        assert result.exit_code == 0, result.output
         payload = json.loads(result.output)
         assert payload["success"] is False
+        assert result.exit_code == payload["exit_code"]
+        assert result.exit_code != 0
 
 
 class TestLintCyclopts:
     def test_happy_path(self, tmp_path):
         result = runner.invoke(app, ["lint", "--project-root", str(tmp_path)])
         assert result.exit_code == 0, result.output
+
+    def test_naming_error_exits_1(self, tmp_path):
+        """Regression: lint_tool used to omit a singular "error" key entirely, so
+        cli_render.render_or_exit never triggered exit(1) even with real lint
+        errors present -- found migrating test_linter.py's CLI tests onto
+        cyclopts during the final cutover (backlog #4702)."""
+        d = tmp_path / "scripts" / "experiments"
+        d.mkdir(parents=True)
+        (d / "BadName.py").write_text("# script")
+
+        result = runner.invoke(app, ["lint", "--project-root", str(tmp_path)])
+        assert result.exit_code == 1, result.output

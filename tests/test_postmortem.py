@@ -5,12 +5,12 @@ from pathlib import Path
 
 import duckdb
 import pytest
-from typer.testing import CliRunner
 
 from bathos.catalog import init_catalog, write_run
-from bathos.cli import app
+from bathos.cli_cyclopts import app
 from bathos.compact import compact
 from bathos.schema import Run
+from tests._cyclopts_runner import CyclopticRunner
 
 with suppress(ImportError):
     from bathos.postmortem import (  # noqa: F401 - import check for module existence
@@ -35,7 +35,7 @@ with suppress(ImportError):
     # discoverable, which provides a cleaner pytest output (e.g., "ImportError: cannot import name ...").
     pass
 
-runner = CliRunner()
+runner = CyclopticRunner()
 
 
 def test_parse_postmortem_valid(tmp_path: Path):
@@ -534,7 +534,7 @@ def test_cli_postmortem_scaffold(tmp_path: Path, monkeypatch):
     # 1. Test scaffold with non-existent run_id fails
     result = runner.invoke(app, ["postmortem", "scaffold", "nonexistent"])
     assert result.exit_code != 0
-    assert "Run not found" in result.output
+    assert "not found" in result.output.lower()
 
     # 2. Test scaffold with valid run_id succeeds and creates TOML file
     run = Run(
@@ -676,7 +676,7 @@ def test_cli_postmortem_show(tmp_path: Path, monkeypatch):
     # 1. Test show when postmortem file does not exist
     result = runner.invoke(app, ["postmortem", "show", run.id])
     assert result.exit_code != 0
-    assert "Postmortem not found" in result.output
+    assert "no postmortem found" in result.output.lower()
 
     # 2. Test show with valid postmortem TOML
     postmortem_content = f"""

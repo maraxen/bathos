@@ -2,12 +2,12 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-from typer.testing import CliRunner
 
 from bathos.catalog import write_run
 from bathos.schema import COOL_SCHEMA, Run
+from tests._cyclopts_runner import CyclopticRunner
 
-runner = CliRunner()
+runner = CyclopticRunner()
 
 
 def _write_old_fragment(runs_dir: Path, stem: str) -> Path:
@@ -116,7 +116,7 @@ def test_cli_migrate_dry_run(tmp_path, monkeypatch):
     runs_dir.mkdir()
     _write_old_fragment(runs_dir, "ccc")
 
-    from bathos.cli import app
+    from bathos.cli_cyclopts import app
 
     result = runner.invoke(app, ["migrate", "--dry-run"])
     assert result.exit_code == 0
@@ -133,7 +133,7 @@ def test_cli_migrate_writes(tmp_path, monkeypatch):
     runs_dir.mkdir()
     _write_old_fragment(runs_dir, "ddd")
 
-    from bathos.cli import app
+    from bathos.cli_cyclopts import app
 
     result = runner.invoke(app, ["migrate"])
     assert result.exit_code == 0
@@ -389,7 +389,7 @@ def test_cli_migrate_project_flag(tmp_path, monkeypatch):
     _write_old_fragment(alpha_dir, "a1")
     _write_old_fragment(beta_dir, "b1")
 
-    from bathos.cli import app
+    from bathos.cli_cyclopts import app
 
     result = runner.invoke(app, ["migrate", "--dry-run", "--project", "alpha"])
     assert result.exit_code == 0
