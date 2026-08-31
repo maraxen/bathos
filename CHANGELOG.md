@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0a4] - 2026-08-31
+
 ### Added
 
 - **Blast-radius assessment (Phase 1, backlog #4551).** `bth blast-radius assess
@@ -50,6 +52,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Cluster cool catalog without rsyncing `bathos.db`.** Campaigns live as cool JSON under
   `{catalog}/campaigns/{uuid}.json`. Cluster jobs write `{remote_root}/.bth/catalog`. Conclude,
   emit, and postmortem overlay cool JSON onto warm DuckDB after compact/prepare.
+
+### Changed
+
+- **`bth` is now a cyclopts app; Typer is gone (backlog #4702).** All 78 commands were
+  migrated off `typer` onto `cisternal`'s registry-driven `wire()` pattern (49 commands
+  shared with the `bth-mcp` server surface) plus a hand-written "CLI-only batch" (22
+  commands with no MCP equivalent); `src/bathos/cli.py` (the old Typer app) is deleted,
+  `typer` is dropped as a dependency entirely, and `bth-preview` (the Milestone 1 pilot
+  entry point) is retired now that `bth` itself is the cyclopts app. Two accepted
+  behavior changes: `bth campaign create --campaign` is now `--campaign-id` (a cisternal
+  `wire()` limitation resolving `Annotated`/`cyclopts.Parameter` metadata through modules
+  using `from __future__ import annotations`); and `ls`/`show`/`campaign ls`/`campaign
+  show`/`campaign review`/`outputs list`/`outputs summary` now emit plain JSON instead of
+  Rich-formatted tables, pending a future cisternal "rich CLI contracts" feature. Migrating
+  all 25 CLI-level test files onto the real app (`tests/_cyclopts_runner.py`'s
+  `CyclopticRunner`, replacing `typer.testing.CliRunner`) surfaced and fixed several real
+  functional regressions along the way: `bth run`'s extra-args passthrough to the wrapped
+  script and its hard-fail on a missing `project_slug` (both silently regressed, then
+  restored to match the old Typer command's behavior, along with the same
+  silently-defaulted-slug bug in `archive-artifact`); `_get_catalog_dir`'s missing
+  `.bth.toml` `[project] catalog_dir` lookup; `bth ls`'s default `--limit` (restored
+  20, was silently 10) and its `-n`/`-p` short-flag aliases; `mcp_lint`/`mcp_verify`
+  leaking a CLI-only `"error"` envelope key to MCP callers; a duplicated/drifted
+  "No .bth.toml found" guard across `remote add/list/remove/test` and `submit`
+  (consolidated into one `cli_common.require_project_config_path()` helper); and
+  `catalog-version` silently dropping its corrupt-fragment warning and entire
+  "Warm DB version" report during the port (both restored, uncolored — colored terminal
+  output is not restored project-wide, matching the JSON-first direction above).
+  `scripts/analysis/migrate_cli_to_cyclopts.py`, the one-time migration-assist tool that
+  drove this port's batch sequencing, is deleted along with its generated
+  `cli_migration_map.toml` now that the migration it assisted is complete.
 
 ### Fixed
 
