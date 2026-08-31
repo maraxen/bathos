@@ -90,7 +90,7 @@ wheels = [
 
 [[package]]
 name = "bathos"
-version = "0.13.0a3"
+version = "0.13.0a4"
 source = { editable = "." }
 dependencies = [
     { name = "cisternal" },

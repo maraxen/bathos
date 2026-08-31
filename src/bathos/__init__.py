@@ -1,4 +1,4 @@
-__version__ = "0.13.0a3"
+__version__ = "0.13.0a4"
 
 from bathos.compact import CompactionLockedError, CorruptDatabaseError
 from bathos.decorators import experiment
