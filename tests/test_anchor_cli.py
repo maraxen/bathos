@@ -9,11 +9,11 @@ from __future__ import annotations
 import json
 
 import pytest
-from typer.testing import CliRunner
 
-from bathos.cli import app
+from bathos.cli_cyclopts import app
+from tests._cyclopts_runner import CyclopticRunner
 
-runner = CliRunner()
+runner = CyclopticRunner()
 
 
 @pytest.fixture
@@ -49,14 +49,14 @@ def test_anchor_insert_then_get_round_trips(anchor_cli_env):
         ],
     )
     assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
+    payload = json.loads(result.output)["anchor"]
     assert payload["path"] == "fig.png"
     assert payload["sha256"] == "a" * 64
     assert payload["content_hash"] == "b" * 64
 
     get_result = runner.invoke(app, ["anchor", "get", "fig.png", "a" * 64])
     assert get_result.exit_code == 0, get_result.output
-    fetched = json.loads(get_result.output)
+    fetched = json.loads(get_result.output)["anchor"]
     assert fetched["kind"] == "figure"
     assert fetched["content_hash"] == "b" * 64
 
@@ -65,4 +65,4 @@ def test_anchor_get_missing_prints_null(anchor_cli_env):
     _ = anchor_cli_env  # fixture sets BTH_CATALOG_DIR via monkeypatch as a side effect
     result = runner.invoke(app, ["anchor", "get", "nope.png", "a" * 64])
     assert result.exit_code == 0, result.output
-    assert result.output.strip() == "null"
+    assert json.loads(result.output)["anchor"] is None

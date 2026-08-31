@@ -6,7 +6,6 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from typer.testing import CliRunner
 
 from bathos.cluster_catalog import (
     CatalogIdentityError,
@@ -121,8 +120,11 @@ def test_submit_refuses_mismatched_env_catalog(tmp_path: Path, monkeypatch):
     env_path.parent.mkdir(parents=True)
     env_path.write_text('export BTH_CATALOG_DIR="${HOME}/.bth/catalog"\n')
 
-    from bathos.cli import app
+    from bathos.cli_cyclopts import app
+    from tests._cyclopts_runner import CyclopticRunner
 
-    result = CliRunner().invoke(app, ["submit", "--no-wait", "uv", "run", "python", "train.py"])
+    result = CyclopticRunner().invoke(
+        app, ["submit", "--no-wait", "uv", "run", "python", "train.py"]
+    )
     assert result.exit_code != 0
     assert "BTH_CATALOG_DIR" in result.output

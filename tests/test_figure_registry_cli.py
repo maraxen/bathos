@@ -9,11 +9,11 @@ from __future__ import annotations
 import json
 
 import pytest
-from typer.testing import CliRunner
 
-from bathos.cli import app
+from bathos.cli_cyclopts import app
+from tests._cyclopts_runner import CyclopticRunner
 
-runner = CliRunner()
+runner = CyclopticRunner()
 
 
 @pytest.fixture
@@ -50,7 +50,7 @@ def test_figure_register_then_query_figures_round_trips(anchor_cli_env):
         ],
     )
     assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
+    payload = json.loads(result.output)["figure_entry"]
     assert payload["asset_sha256"] == "a" * 64
     assert payload["sidecar_ref"] == "fig.figure.toml"
     assert payload["figure_kind"] == "chord_diagram"
@@ -61,7 +61,7 @@ def test_figure_register_then_query_figures_round_trips(anchor_cli_env):
 
     query_result = runner.invoke(app, ["query", "figures", "--asset-sha256", "a" * 64])
     assert query_result.exit_code == 0, query_result.output
-    figures = json.loads(query_result.output)
+    figures = json.loads(query_result.output)["figures"]
     assert len(figures) == 1
     assert figures[0]["figure_kind"] == "chord_diagram"
 

@@ -12,14 +12,14 @@ from pathlib import Path
 
 import duckdb
 import pytest
-from typer.testing import CliRunner
 
 from bathos.catalog import init_catalog, write_run
-from bathos.cli import app
+from bathos.cli_cyclopts import app
 from bathos.compact import compact
 from bathos.schema import Run
+from tests._cyclopts_runner import CyclopticRunner
 
-runner = CliRunner()
+runner = CyclopticRunner()
 
 
 def _campaign_catalog(tmp_path: Path):
@@ -154,7 +154,7 @@ def test_cli_scaffold_rejects_an_unknown_campaign(tmp_path: Path, monkeypatch):
 
     result = runner.invoke(app, ["postmortem", "scaffold", "--campaign-id", "no-such-campaign"])
     assert result.exit_code != 0
-    assert "Campaign not found" in result.output
+    assert "not found" in result.output.lower()
 
 
 # ── MCP mirror ──────────────────────────────────────────────────────────────

@@ -17,6 +17,8 @@ from bathos.mcp import (
     get_run_tool,
     init_tool,
     list_runs_tool,
+    mcp_lint_tool,
+    mcp_verify_tool,
     run_sql_tool,
     run_tool,
     sync_tool,
@@ -109,7 +111,7 @@ class TestFindRunsTool:
         write_run(run1, tmp_catalog)
         write_run(run2, tmp_catalog)
 
-        result = find_runs_tool(catalog_dir=str(tmp_catalog), pattern="proj_a")
+        result = find_runs_tool(catalog_dir=str(tmp_catalog), project="proj_a")
         data = result
         assert data["count"] == 1
         assert data["runs"][0]["project_slug"] == "proj_a"
@@ -254,11 +256,21 @@ class TestCompactTool:
 class TestArchiveTool:
     """Test archive MCP tool."""
 
-    def test_archive_tool_requires_project(self):
-        """Verify archive requires project parameter."""
-        result = archive_tool(catalog_dir="", project="")
-        data = result
-        assert "error" in data
+    def test_archive_tool_empty_project_means_all_projects(self, tmp_path):
+        """project="" means "archive all projects" (matching the shipped Typer
+        `archive --project` flag's own optional default) -- not an error.
+
+        Regression note (final cutover, backlog #4702): archive_tool used to
+        require project explicitly (`if not project: return {"error": ...}`),
+        which this test previously pinned as correct. That was a real
+        regression from the retired Typer command's "no --project = all
+        projects" behavior (bathos.archive.archive() itself already accepts
+        project_slug=None for "all"), fixed during the cutover -- so this test
+        now checks the *safe* case (empty catalog, no runs to archive) rather
+        than asserting an error. Uses tmp_path, not the real default catalog
+        dir, so this can never touch the user's real catalog."""
+        result = archive_tool(catalog_dir=str(tmp_path / "catalog"), project="")
+        assert "error" in result  # no catalog at this path yet -- "Catalog not found"
 
     def test_archive_tool_calls_archive_module(self, tmp_catalog, sample_run):
         """Verify archive tool returns expected result."""
@@ -283,11 +295,15 @@ class TestArchiveTool:
             assert "duration_s" in data
 
     def test_archive_tool_error_handling(self):
-        """Verify archive raises on nonexistent catalog."""
-        import pytest
+        """Verify archive reports a clean error on a nonexistent catalog.
 
-        with pytest.raises(Exception):
-            archive_tool(catalog_dir="/nonexistent/path", project="test")
+        Regression note (final cutover, backlog #4702): archive_tool now checks
+        catalog_dir.exists() up front and returns {"error": ...} (matching the
+        shipped Typer `archive` command's "Catalog not found" + exit(1)
+        behavior, restored during the cutover) instead of letting an exception
+        propagate from deeper in the call stack."""
+        result = archive_tool(catalog_dir="/nonexistent/path", project="test")
+        assert "error" in result
 
 
 class TestCheckTool:
@@ -349,8 +365,16 @@ class TestCapabilityProbeTool:
 class TestSyncTool:
     """Test sync MCP tool."""
 
-    def test_sync_tool_requires_remote_name(self):
-        """Verify sync requires remote_name parameter."""
+    def test_sync_tool_errors_with_no_bth_toml(self, tmp_path, monkeypatch):
+        """Verify sync errors when no .bth.toml can be found to resolve a remote from.
+
+        Regression note (final cutover, backlog #4702): sync_tool now auto-selects
+        a configured remote when remote_name is omitted and exactly one is
+        configured (matching the shipped Typer `bth sync` command's behavior,
+        restored during the cutover) -- so this test must isolate into a
+        directory with no .bth.toml, rather than relying on remote_name="" being
+        unconditionally an error regardless of ambient project config."""
+        monkeypatch.chdir(tmp_path)
         result = sync_tool(catalog_dir="", remote_name="")
         data = result
         assert "error" in data
@@ -525,3 +549,33 @@ class TestMCPServerStartup:
         # No mcp_x_tool wrapper names should ever leak onto the server.
         leaked = [n for n in wired_names if n.startswith("mcp_") and n.endswith("_tool")]
         assert not leaked, f"Raw wrapper function names leaked as tool names: {leaked}"
+
+
+class TestLintVerifyEnvelope:
+    """Regression (PR #59 review): mcp_lint_tool/mcp_verify_tool passed
+    lint_tool/verify_tool's CLI-only singular "error" key straight through
+    into the MCP envelope, unlike validate_sidecar's wrapper (which already
+    pops it) -- see mcp.py's mcp_lint_tool/mcp_verify_tool for the fix."""
+
+    def test_mcp_verify_tool_no_leaked_error_key(self, tmp_catalog):
+        # A stray .bak file makes verify_cool (and so verify_tool) fail.
+        runs_dir = tmp_catalog / "runs" / "proj"
+        runs_dir.mkdir(parents=True)
+        (runs_dir / "run_abc123.bak").write_text("corrupted backup")
+
+        result = asyncio.run(mcp_verify_tool(catalog_dir=str(tmp_catalog)))
+
+        assert result["ok"] is False
+        assert "error" not in result or result["error"] is None
+        assert result["results"]
+
+    def test_mcp_lint_tool_no_leaked_error_key(self, tmp_path):
+        d = tmp_path / "scripts" / "experiments"
+        d.mkdir(parents=True)
+        (d / "BadName.py").write_text("# script")
+
+        result = asyncio.run(mcp_lint_tool(project_root=str(tmp_path)))
+
+        assert result["ok"] is False
+        assert "error" not in result or result["error"] is None
+        assert result["issues"]

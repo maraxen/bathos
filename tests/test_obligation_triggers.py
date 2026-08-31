@@ -475,17 +475,16 @@ def test_a_passing_run_opens_nothing_even_when_enabled(tmp_path, monkeypatch):
 def test_submit_warns_about_open_obligations_without_blocking(tmp_path, monkeypatch):
     """The warning is unflagged and unconditional, but inert by default: with no trigger
     enabled the ledger is empty, so it prints nothing."""
-    from typer.testing import CliRunner
-
-    from bathos.cli import app
+    from bathos.cli_cyclopts import app
     from bathos.obligations import open_obligation
+    from tests._cyclopts_runner import CyclopticRunner
 
     monkeypatch.setenv("BTH_WORKSPACE_ROOT", str(tmp_path))
     monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_path / "catalog"))
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".bth.toml").write_text(f'[project]\nslug = "p"\nroot = "{tmp_path}"\n')
 
-    runner = CliRunner()
+    runner = CyclopticRunner()
     quiet = runner.invoke(app, ["submit", "--no-push-first", "--", "echo", "hi"])
     assert "open obligation" not in quiet.output.lower()
 

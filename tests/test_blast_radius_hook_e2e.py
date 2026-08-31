@@ -46,14 +46,14 @@ from pathlib import Path
 
 import duckdb
 import pytest
-from typer.testing import CliRunner
 
 from bathos.blast_radius import fold_blast_radius_state
 from bathos.catalog import init_catalog, write_run
-from bathos.cli import app
+from bathos.cli_cyclopts import app
 from bathos.schema import Run
+from tests._cyclopts_runner import CyclopticRunner
 
-runner = CliRunner()
+runner = CyclopticRunner()
 
 _WORKTREE_ROOT = Path(__file__).resolve().parent.parent
 _ATTEMPTS = 3

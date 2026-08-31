@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from typer.testing import CliRunner
+from tests._cyclopts_runner import CyclopticRunner
 
-runner = CliRunner()
+runner = CyclopticRunner()
 
 
 def _make_script(base: Path, subdir: str, name: str) -> Path:
@@ -117,7 +117,7 @@ def test_cli_lint_exits_0_clean(tmp_path, monkeypatch):
     monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
     s = _make_script(tmp_path, "experiments", "run_nvt.py")
     _make_sidecar(s)
-    from bathos.cli import app
+    from bathos.cli_cyclopts import app
 
     result = runner.invoke(app, ["lint"])
     assert result.exit_code == 0
@@ -127,7 +127,7 @@ def test_cli_lint_exits_0_clean(tmp_path, monkeypatch):
 def test_cli_lint_exits_1_with_issues(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _make_script(tmp_path, "experiments", "RunNVT.py")
-    from bathos.cli import app
+    from bathos.cli_cyclopts import app
 
     result = runner.invoke(app, ["lint"])
     assert result.exit_code == 1
@@ -173,7 +173,7 @@ def test_cli_lint_exits_0_with_canonical_warnings(tmp_path, monkeypatch):
     s = _make_script(tmp_path, "experiments", "run_test.py")
     _make_sidecar(s)
 
-    from bathos.cli import app
+    from bathos.cli_cyclopts import app
 
     result = runner.invoke(app, ["lint"])
     # Must exit 0 (advisory, never blocks)

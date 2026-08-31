@@ -6,15 +6,15 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from typer.testing import CliRunner
 
 from bathos.catalog import init_catalog, write_run
 from bathos.checker import check_runs
-from bathos.cli import app
+from bathos.cli_cyclopts import app
 from bathos.compact import compact
 from bathos.config import load_project_config
 from bathos.schema import Run
 from bathos.sync import sync_catalog
+from tests._cyclopts_runner import CyclopticRunner
 
 
 @pytest.fixture(autouse=True)
@@ -33,7 +33,7 @@ def _make_mock_popen(returncode=0, stderr_output="", stdout_output=""):
     return mock_proc
 
 
-runner = CliRunner()
+runner = CyclopticRunner()
 
 
 @pytest.fixture

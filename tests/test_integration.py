@@ -1,16 +1,14 @@
 """End-to-end: init → run → ls → show → find → compact."""
 
-import sys
 from pathlib import Path
 
-from typer.testing import CliRunner
-
 from bathos.catalog import init_catalog, read_runs
-from bathos.cli import app
+from bathos.cli_cyclopts import app
 from bathos.compact import compact
 from bathos.query import run_sql
+from tests._cyclopts_runner import CyclopticRunner
 
-runner = CliRunner()
+runner = CyclopticRunner()
 
 
 def test_full_workflow(tmp_path: Path, monkeypatch):
@@ -31,21 +29,29 @@ def test_full_workflow(tmp_path: Path, monkeypatch):
     assert (tmp_path / "scripts" / "experiments").is_dir()
 
     # 2. run a passing script
-    r = runner.invoke(app, ["run", sys.executable, "--", "-c", "pass"])
-    assert r.exit_code == 0
+    passing_script = tmp_path / "passing.py"
+    passing_script.write_text("pass\n")
+    r = runner.invoke(app, ["run", str(passing_script)])
+    assert r.exit_code == 0, r.output
 
     # 3. run a failing script
-    r = runner.invoke(app, ["run", sys.executable, "--", "-c", "raise SystemExit(1)"])
-    assert r.exit_code == 1
+    failing_script = tmp_path / "failing.py"
+    failing_script.write_text("raise SystemExit(1)\n")
+    r = runner.invoke(app, ["run", str(failing_script)])
+    assert r.exit_code == 1, r.output
 
-    # 4a. ls shows both runs and banner BEFORE compact (threshold now 1, so 2 fragments triggers it)
+    # 4a. ls shows both runs (JSON output -- no rich uncompacted-fragments banner;
+    # that check moves to should_compact() directly at step 8b below)
     r = runner.invoke(app, ["ls"])
     assert r.exit_code == 0
     assert "intproj" in r.output
     lines = [line for line in r.output.splitlines() if "intproj" in line]
     assert len(lines) == 2
-    # Banner should appear now since fragment count (2) > threshold (1)
-    assert "uncompacted" in r.output
+    from bathos.compact import should_compact
+
+    assert should_compact(catalog), (
+        "fragment count (2) > threshold (1) should still recommend compaction"
+    )
 
     # 5. find by status
     r = runner.invoke(app, ["find", "--status", "failed"])
@@ -58,8 +64,7 @@ def test_full_workflow(tmp_path: Path, monkeypatch):
     run_id = runs[0].id
     r = runner.invoke(app, ["show", run_id])
     assert r.exit_code == 0
-    # Rich panels show "Execution" header; full UUID not shown (short ID only)
-    assert "Execution" in r.output
+    assert run_id in r.output
 
     # 7. sql escape hatch (cool tier; runs are in per-project subdirs)
     glob = str(catalog / "runs" / "intproj" / "run_*.parquet")

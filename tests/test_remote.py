@@ -4,9 +4,9 @@ import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
-from typer.testing import CliRunner
 
-from bathos.cli import app
+from bathos.cli_cyclopts import app
+from tests._cyclopts_runner import CyclopticRunner
 
 # Test fixtures and constants
 
@@ -87,7 +87,7 @@ def tmp_config_with_multiple_remotes(tmp_path):
 @pytest.fixture
 def cli_runner():
     """Create a CLI test runner."""
-    return CliRunner()
+    return CyclopticRunner()
 
 
 # Tests for list_remotes (pure function)
@@ -425,7 +425,7 @@ class TestRemoteAddCLI:
         config_path = tmp_path / ".bth.toml"
         config_path.write_text(MINIMAL_BTH_TOML)
 
-        with patch("bathos.cli.find_project_config", return_value=config_path):
+        with patch("bathos.config.find_project_config", return_value=config_path):
             result = cli_runner.invoke(
                 app, ["remote", "add", "engaging", "engaging:~/projects/bathos"]
             )
@@ -438,7 +438,7 @@ class TestRemoteAddCLI:
         config_path = tmp_path / ".bth.toml"
         config_path.write_text(BTH_TOML_WITH_REMOTE)
 
-        with patch("bathos.cli.find_project_config", return_value=config_path):
+        with patch("bathos.config.find_project_config", return_value=config_path):
             result = cli_runner.invoke(app, ["remote", "add", "engaging", "other:~/path"])
 
             assert result.exit_code == 1
@@ -449,19 +449,25 @@ class TestRemoteAddCLI:
         config_path = tmp_path / ".bth.toml"
         config_path.write_text(MINIMAL_BTH_TOML)
 
-        with patch("bathos.cli.find_project_config", return_value=config_path):
+        with patch("bathos.config.find_project_config", return_value=config_path):
             result = cli_runner.invoke(app, ["remote", "add", "badname", "nocolon"])
 
             assert result.exit_code == 1
             assert "Invalid URL 'nocolon': expected 'host:path' format" in result.stdout
 
     def test_remote_add_no_config_file(self, cli_runner):
-        """bth remote add fails when no .bth.toml found."""
-        with patch("bathos.cli.find_project_config", return_value=None):
+        """bth remote add fails when no .bth.toml found.
+
+        Regression (PR #59 review): this guard used to print to stdout with a
+        single-quote wording that drifted from cli_common.require_project_slug()'s
+        established stderr + backtick convention (already used by `bth run`/
+        `bth submit`). Now routed through the shared
+        cli_common.require_project_config_path() helper -- stderr, not stdout."""
+        with patch("bathos.config.find_project_config", return_value=None):
             result = cli_runner.invoke(app, ["remote", "add", "remote1", "host:~/path"])
 
             assert result.exit_code == 1
-            assert "No .bth.toml found" in result.stdout
+            assert "No .bth.toml found" in result.stderr
 
 
 class TestRemoteListCLI:
@@ -472,7 +478,7 @@ class TestRemoteListCLI:
         config_path = tmp_path / ".bth.toml"
         config_path.write_text(BTH_TOML_WITH_REMOTE)
 
-        with patch("bathos.cli.find_project_config", return_value=config_path):
+        with patch("bathos.config.find_project_config", return_value=config_path):
             result = cli_runner.invoke(app, ["remote", "list"])
 
             assert result.exit_code == 0
@@ -486,26 +492,28 @@ class TestRemoteListCLI:
         config_path = tmp_path / ".bth.toml"
         config_path.write_text(MINIMAL_BTH_TOML)
 
-        with patch("bathos.cli.find_project_config", return_value=config_path):
+        with patch("bathos.config.find_project_config", return_value=config_path):
             result = cli_runner.invoke(app, ["remote", "list"])
 
             assert result.exit_code == 0
             assert "No remotes configured" in result.stdout
 
     def test_remote_list_no_config_file(self, cli_runner):
-        """bth remote list fails when no .bth.toml found."""
-        with patch("bathos.cli.find_project_config", return_value=None):
+        """bth remote list fails when no .bth.toml found (regression: now
+        stderr via cli_common.require_project_config_path(), see
+        test_remote_add_no_config_file)."""
+        with patch("bathos.config.find_project_config", return_value=None):
             result = cli_runner.invoke(app, ["remote", "list"])
 
             assert result.exit_code == 1
-            assert "No .bth.toml found" in result.stdout
+            assert "No .bth.toml found" in result.stderr
 
     def test_remote_list_multiple_remotes_sorted(self, tmp_path, cli_runner):
         """bth remote list shows multiple remotes in sorted order."""
         config_path = tmp_path / ".bth.toml"
         config_path.write_text(BTH_TOML_WITH_MULTIPLE_REMOTES)
 
-        with patch("bathos.cli.find_project_config", return_value=config_path):
+        with patch("bathos.config.find_project_config", return_value=config_path):
             result = cli_runner.invoke(app, ["remote", "list"])
 
             assert result.exit_code == 0
@@ -527,7 +535,7 @@ class TestRemoveRemoteCLI:
         config_path = tmp_path / ".bth.toml"
         config_path.write_text(BTH_TOML_WITH_REMOTE)
 
-        with patch("bathos.cli.find_project_config", return_value=config_path):
+        with patch("bathos.config.find_project_config", return_value=config_path):
             result = cli_runner.invoke(app, ["remote", "remove", "engaging"])
 
             assert result.exit_code == 0
@@ -538,19 +546,21 @@ class TestRemoveRemoteCLI:
         config_path = tmp_path / ".bth.toml"
         config_path.write_text(MINIMAL_BTH_TOML)
 
-        with patch("bathos.cli.find_project_config", return_value=config_path):
+        with patch("bathos.config.find_project_config", return_value=config_path):
             result = cli_runner.invoke(app, ["remote", "remove", "nosuchhost"])
 
             assert result.exit_code == 1
             assert "Remote 'nosuchhost' not found" in result.stdout
 
     def test_remote_remove_no_config_file(self, cli_runner):
-        """bth remote remove fails when no .bth.toml found."""
-        with patch("bathos.cli.find_project_config", return_value=None):
+        """bth remote remove fails when no .bth.toml found (regression: now
+        stderr via cli_common.require_project_config_path(), see
+        test_remote_add_no_config_file)."""
+        with patch("bathos.config.find_project_config", return_value=None):
             result = cli_runner.invoke(app, ["remote", "remove", "remote1"])
 
             assert result.exit_code == 1
-            assert "No .bth.toml found" in result.stdout
+            assert "No .bth.toml found" in result.stderr
 
 
 class TestRemoteTestCLI:
@@ -562,7 +572,7 @@ class TestRemoteTestCLI:
         config_path.write_text(BTH_TOML_WITH_REMOTE)
 
         with (
-            patch("bathos.cli.find_project_config", return_value=config_path),
+            patch("bathos.config.find_project_config", return_value=config_path),
             patch("bathos.remote.subprocess.run") as mock_run,
         ):
             mock_result = MagicMock()
@@ -583,7 +593,7 @@ class TestRemoteTestCLI:
         config_path.write_text(BTH_TOML_WITH_REMOTE)
 
         with (
-            patch("bathos.cli.find_project_config", return_value=config_path),
+            patch("bathos.config.find_project_config", return_value=config_path),
             patch("bathos.remote.subprocess.run") as mock_run,
         ):
             mock_result = MagicMock()
@@ -602,11 +612,22 @@ class TestRemoteTestCLI:
         config_path = tmp_path / ".bth.toml"
         config_path.write_text(MINIMAL_BTH_TOML)
 
-        with patch("bathos.cli.find_project_config", return_value=config_path):
+        with patch("bathos.config.find_project_config", return_value=config_path):
             result = cli_runner.invoke(app, ["remote", "test", "nosuchhost"])
 
             assert result.exit_code == 1
             assert "Remote 'nosuchhost' not found" in result.stdout
+
+    def test_remote_test_no_config_file(self, cli_runner):
+        """bth remote test fails when no .bth.toml found -- previously
+        untested (only "remote name not found" was covered), found while
+        fixing the same guard's stdout/stderr drift across remote_* commands
+        (PR #59 review)."""
+        with patch("bathos.config.find_project_config", return_value=None):
+            result = cli_runner.invoke(app, ["remote", "test", "engaging"])
+
+            assert result.exit_code == 1
+            assert "No .bth.toml found" in result.stderr
 
 
 class TestSyncAutoSelection:
@@ -622,9 +643,9 @@ class TestSyncAutoSelection:
         config = load_project_config(config_path)
 
         with (
-            patch("bathos.cli.find_project_config", return_value=config_path),
-            patch("bathos.cli.load_project_config", return_value=config),
-            patch("bathos.cli.sync_catalog") as mock_sync,
+            patch("bathos.mcp.find_project_config", return_value=config_path),
+            patch("bathos.mcp.load_project_config", return_value=config),
+            patch("bathos.mcp.sync_catalog") as mock_sync,
         ):
             mock_sync.return_value = MagicMock(
                 transferred=3, remote="engaging", duration_s=0.8, filtered=0
@@ -632,7 +653,7 @@ class TestSyncAutoSelection:
 
             result = cli_runner.invoke(app, ["sync"])
 
-            assert result.exit_code == 0
+            assert result.exit_code == 0, result.output
             # Verify sync_catalog was called
             mock_sync.assert_called_once()
 
@@ -646,13 +667,13 @@ class TestSyncAutoSelection:
         config = load_project_config(config_path)
 
         with (
-            patch("bathos.cli.find_project_config", return_value=config_path),
-            patch("bathos.cli.load_project_config", return_value=config),
+            patch("bathos.mcp.find_project_config", return_value=config_path),
+            patch("bathos.mcp.load_project_config", return_value=config),
         ):
             result = cli_runner.invoke(app, ["sync"])
 
             assert result.exit_code == 1
-            assert "No remotes configured" in result.stdout
+            assert "No remotes configured" in result.output
 
     def test_sync_multiple_remotes_fails(self, tmp_path, cli_runner):
         """bth sync with multiple remotes fails without explicit selection."""
@@ -664,10 +685,10 @@ class TestSyncAutoSelection:
         config = load_project_config(config_path)
 
         with (
-            patch("bathos.cli.find_project_config", return_value=config_path),
-            patch("bathos.cli.load_project_config", return_value=config),
+            patch("bathos.mcp.find_project_config", return_value=config_path),
+            patch("bathos.mcp.load_project_config", return_value=config),
         ):
             result = cli_runner.invoke(app, ["sync"])
 
             assert result.exit_code == 1
-            assert "Multiple remotes configured" in result.stdout
+            assert "Multiple remotes configured" in result.output

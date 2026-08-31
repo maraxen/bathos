@@ -1,4 +1,17 @@
-"""CLI tests for bth claim subcommands."""
+"""CLI tests for bth claim subcommands.
+
+Note (final cutover, backlog #4702): the shipped Typer `claim register`/
+`validate-sidecar` commands exposed `--campaign`/`-c`; the registry-driven
+cyclopts commands derive their flag name from the shared tool functions'
+`campaign_id` parameter, so the flag is `--campaign-id` (no `-c` alias). An
+`Annotated[..., cyclopts.Parameter(name=[...])]` alias was tried and reverted:
+cisternal's wire() copies the wrapped function's `__annotations__` dict onto a
+new closure defined inside `cisternal.registration.wired`, and `from __future__
+import annotations` means those annotations are strings resolved via
+`get_type_hints()` against the WRAPPER's `__globals__` (cisternal's own module),
+not bathos.mcp's -- so `Annotated`/`cyclopts` are undefined there. Accepted as a
+CLI-flag-name difference, same category as `find --tag` -> `--tags`.
+"""
 
 from __future__ import annotations
 
@@ -6,10 +19,10 @@ from datetime import UTC, datetime
 
 import duckdb
 import pytest
-from typer.testing import CliRunner
 
-from bathos.cli import app
+from bathos.cli_cyclopts import app
 from bathos.compact import _CAMPAIGNS_TABLE_SCHEMA
+from tests._cyclopts_runner import CyclopticRunner
 
 # Canonical warm-tier campaigns DDL. The CLI's claim flow upserts cool-tier
 # campaign JSON (ingest_cool_campaigns) whose INSERT references the FULL
@@ -17,7 +30,7 @@ from bathos.compact import _CAMPAIGNS_TABLE_SCHEMA
 # Always build the table from this DDL and use named columns in inserts so
 # future schema additions cannot silently break these tests again.
 
-runner = CliRunner()
+runner = CyclopticRunner()
 
 
 @pytest.fixture
@@ -112,7 +125,7 @@ label = "Null"
 
     result = runner.invoke(
         app,
-        ["claim", "register", str(claim_path), "--campaign", "camp-1"],
+        ["claim", "register", str(claim_path), "--campaign-id", "camp-1"],
     )
     assert result.exit_code == 0, result.output
 
@@ -161,7 +174,7 @@ def _register_test_claim(tmp_path, catalog, campaign_id="camp-1"):
         ],
     )
     con.close()
-    result = runner.invoke(app, ["claim", "register", str(claim_path), "--campaign", campaign_id])
+    result = runner.invoke(app, ["claim", "register", str(claim_path), "--campaign-id", campaign_id])
     assert result.exit_code == 0, result.output
     return claim_path
 
@@ -194,7 +207,7 @@ def test_validate_sidecar_campaign_flag_catches_wrong_hypothesis_id(claim_cli_en
     """)
     )
 
-    result = runner.invoke(app, ["validate-sidecar", str(sidecar_path), "--campaign", "camp-1"])
+    result = runner.invoke(app, ["validate-sidecar", str(sidecar_path), "--campaign-id", "camp-1"])
     assert result.exit_code == 1
     assert "beyond_nj_regime_found" in result.output
     assert "claim_discriminates" in result.output
@@ -227,7 +240,7 @@ def test_validate_sidecar_campaign_flag_passes_with_correct_ids(claim_cli_env, t
     """)
     )
 
-    result = runner.invoke(app, ["validate-sidecar", str(sidecar_path), "--campaign", "camp-1"])
+    result = runner.invoke(app, ["validate-sidecar", str(sidecar_path), "--campaign-id", "camp-1"])
     assert result.exit_code == 0, result.output
 
 

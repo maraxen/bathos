@@ -5,11 +5,11 @@ from unittest.mock import MagicMock, patch
 
 import pyarrow.parquet as pq
 import pytest
-from typer.testing import CliRunner
 
-from bathos.cli import app
+from bathos.cli_cyclopts import app
+from tests._cyclopts_runner import CyclopticRunner
 
-runner = CliRunner()
+runner = CyclopticRunner()
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -150,7 +150,7 @@ def test_then_sync_calls_pull_and_sync_catalog(tmp_path: Path, monkeypatch):
         patch("bathos.cluster.submit_job", return_value=_SUBMIT_RESULT),
         patch("bathos.cluster.job_wait", return_value=_WAIT_SUCCESS),
         patch("bathos.cluster.pull_project") as mock_pull,
-        patch("bathos.cli.sync_catalog", return_value=fake_sync_result) as mock_sync,
+        patch("bathos.sync.sync_catalog", return_value=fake_sync_result) as mock_sync,
     ):
         result = runner.invoke(app, ["submit", "--then-sync", "uv", "run", "python", "train.py"])
 

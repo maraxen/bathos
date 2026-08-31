@@ -40,6 +40,18 @@ import bathos.mcp as mcp_module
 # Consumed by @require_write_token before the body runs; never forwarded.
 _DECORATOR_CONSUMED = {"token"}
 
+# Wrapper param name -> impl param name, for the rare wrapper that deliberately
+# translates a parameter when forwarding rather than passing it through unchanged.
+# mcp_find_runs_tool keeps its own public MCP schema name `pattern` (an existing
+# external contract), while find_runs_tool's CLI-facing parameter was renamed to
+# `project` during the cyclopts cutover (backlog #4702) so `bth find --project`
+# derives correctly from the parameter name -- the wrapper's body already does
+# `find_runs_tool(project=pattern, ...)`, so this is a real translation, not a
+# forwarding bug.
+_RENAMED_ON_FORWARD: dict[str, dict[str, str]] = {
+    "mcp_find_runs_tool": {"pattern": "project"},
+}
+
 
 def _wrapper_impl_pairs() -> list[tuple[str, str]]:
     """Every ``mcp_<name>_tool`` that has a matching ``<name>_tool`` implementation."""
@@ -70,7 +82,17 @@ def test_wrapper_params_are_accepted_by_impl(wrapper_name: str, impl_name: str) 
     wrapper_params = set(inspect.signature(wrapper).parameters) - _DECORATOR_CONSUMED
     impl_params = set(inspect.signature(impl).parameters)
 
-    undeliverable = wrapper_params - impl_params
+    renames = _RENAMED_ON_FORWARD.get(wrapper_name, {})
+    deliverable_params = impl_params | set(renames.keys())
+    undeliverable = wrapper_params - deliverable_params
+    # A declared rename target must itself be real, or the exception just hides
+    # a genuine break -- e.g. if find_runs_tool's `project` param were ever renamed
+    # again without updating this table.
+    for wrapper_param, impl_param in renames.items():
+        assert impl_param in impl_params, (
+            f"{wrapper_name}'s declared rename {wrapper_param!r} -> {impl_param!r} "
+            f"is stale: {impl_name} no longer has an {impl_param!r} parameter."
+        )
     assert not undeliverable, (
         f"{wrapper_name} declares {sorted(undeliverable)}, which {impl_name} does not "
         f"accept. Forwarding it raises TypeError, and @traced_tool turns that into an "
@@ -94,7 +116,12 @@ def test_archive_tool_accepts_exactly_what_its_wrapper_forwards() -> None:
     )
 
     # Make the call the wrapper actually makes. Python validates kwargs before the
-    # body runs, so a signature mismatch raises TypeError here without needing a
-    # catalog; the empty-project guard returns first and keeps this off the disk.
-    result = mcp_module.archive_tool(catalog_dir="", project="")
-    assert result == {"error": "project parameter is required"}
+    # body runs, so a signature mismatch raises TypeError before any catalog is
+    # touched; catalog_dir points at a path that cannot exist, so the very next
+    # guard returns cleanly and keeps this off the real disk. (project="" is
+    # deliberately valid -- archive_tool treats it as "all projects", matching
+    # the shipped Typer `archive --project` flag's own optional default;
+    # requiring project was a real regression found and fixed during the final
+    # cutover, backlog #4702.)
+    result = mcp_module.archive_tool(catalog_dir="/nonexistent/path", project="")
+    assert result == {"error": "Catalog not found"}

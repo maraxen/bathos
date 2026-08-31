@@ -2,13 +2,13 @@ import dataclasses
 from pathlib import Path
 
 import duckdb
-from typer.testing import CliRunner
 
 from bathos.catalog import CorruptFragment, init_catalog, write_run
 from bathos.compact import _fragment_count, compact
 from bathos.schema import Run
+from tests._cyclopts_runner import CyclopticRunner
 
-runner = CliRunner()
+runner = CyclopticRunner()
 
 
 def _truncate_to_corrupt(path: Path) -> None:
@@ -1038,7 +1038,7 @@ def test_cli_compact_default_reports_corrupt_and_exits_zero(tmp_catalog, monkeyp
     write_run(other, tmp_catalog)
     _truncate_to_corrupt(tmp_catalog / "runs" / "otherproj" / "run_bad.parquet")
 
-    from bathos.cli import app
+    from bathos.cli_cyclopts import app
 
     result = runner.invoke(app, ["compact"])
     assert result.exit_code == 0
@@ -1057,7 +1057,7 @@ def test_cli_compact_strict_exits_nonzero_on_corruption(tmp_catalog, monkeypatch
     write_run(other, tmp_catalog)
     _truncate_to_corrupt(corrupt_dir / "run_bad.parquet")
 
-    from bathos.cli import app
+    from bathos.cli_cyclopts import app
 
     result = runner.invoke(app, ["compact", "--strict"])
     assert result.exit_code != 0
@@ -1069,7 +1069,7 @@ def test_cli_compact_strict_exits_zero_when_clean(tmp_catalog, monkeypatch, samp
     init_catalog(tmp_catalog)
     write_run(sample_run, tmp_catalog)
 
-    from bathos.cli import app
+    from bathos.cli_cyclopts import app
 
     result = runner.invoke(app, ["compact", "--strict"])
     assert result.exit_code == 0
