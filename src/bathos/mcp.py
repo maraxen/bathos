@@ -14,8 +14,10 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from typing import Annotated
 
 import cisternal
+import cyclopts
 from fastmcp import FastMCP
 
 from bathos.anchor import find_anchors, get_anchor, register_anchor
@@ -35,6 +37,7 @@ from bathos.campaigns import (
 from bathos.capability import probe_capabilities
 from bathos.catalog import init_catalog
 from bathos.checker import check_runs
+from bathos.cli_common import require_project_slug
 from bathos.compact import compact as compact_catalog
 from bathos.config import default_catalog_dir, find_project_config, load_project_config
 from bathos.errors import RESOLUTION_HINTS, BathosErrorCode
@@ -1594,9 +1597,13 @@ def run_tool(
     # bathos is also the one guaranteed to satisfy BTH_RESULTS_PATH plumbing.
     argv = [sys.executable, script_path] + args
 
-    # Resolve parameters
+    # Resolve parameters. Unlike _get_project_slug's other call sites, `run`
+    # must hard-fail with no configured slug rather than silently defaulting
+    # to "default" -- matching the pre-cutover Typer `run` command's
+    # _require_project_slug() and cli_common.soft_project_slug()'s own
+    # docstring, which documents `run` as a slug-required command.
     cat_dir = _get_catalog_dir(catalog_dir or None)
-    slug = _get_project_slug(project_slug)
+    slug = project_slug or require_project_slug()
 
     # Clear any stale value before calling run_script: two early-return paths in
     # run_script (invalid sidecar, gate-check failure) bail before a Run is ever
@@ -1638,7 +1645,7 @@ def run_tool(
 @cisternal.tool(registry="bathos-cli", name="run", cli_name="run")
 def run_cli_tool(
     script_path: str = "",
-    args: list[str] | None = None,
+    *args: str,
     project_slug: str = "",
     catalog_dir: str = "",
     output_paths: list[str] | None = None,
@@ -1666,7 +1673,7 @@ def run_cli_tool(
     """
     result = run_tool(
         script_path=script_path,
-        args=args,
+        args=list(args),
         project_slug=project_slug,
         catalog_dir=catalog_dir,
         output_paths=output_paths,
@@ -1681,6 +1688,27 @@ def run_cli_tool(
     )
     print(json.dumps(result, indent=2, default=str))
     raise SystemExit(1 if result.get("error") else result.get("exit_code", 0))
+
+
+# cisternal.wire()'s CLI closure (wired.py's _make_cli_cmd) copies
+# __annotations__ verbatim from this function and rebuilds a Signature via
+# plain inspect.signature() (no eval_str) against that closure's OWN globals
+# -- which don't include this module's `cyclopts`/`Annotated` names. Because
+# this module has `from __future__ import annotations`, a source-level
+# `*args: Annotated[str, cyclopts.Parameter(allow_leading_hyphen=True)]`
+# would be stored as a *string* and later fail with `NameError: name
+# 'Annotated' is not defined` when cyclopts resolves it via
+# get_type_hints(cli_cmd) (verified empirically -- this is the same
+# limitation documented for `--campaign` -> `--campaign-id`). Mutating
+# __annotations__ here, after the def, stores the real (already-evaluated)
+# Annotated object instead of a string, so no name resolution is needed
+# downstream. Without allow_leading_hyphen, cyclopts' positional/variadic
+# parser rejects any leading-hyphen token (e.g. `--lr`) as an unrecognized
+# option before it ever reaches this function -- the exact `bth run
+# --script-path x --lr 0.01` regression this restores passthrough for.
+run_cli_tool.__annotations__["args"] = Annotated[
+    str, cyclopts.Parameter(allow_leading_hyphen=True)
+]
 
 
 @cisternal.tool(

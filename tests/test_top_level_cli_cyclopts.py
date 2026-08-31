@@ -315,6 +315,45 @@ class TestRunCyclopts:
         assert result.exit_code == payload["exit_code"]
         assert result.exit_code != 0
 
+    def test_extra_args_passthrough(self, tmp_path, monkeypatch):
+        """Regression (final cutover, backlog #4702): the old Typer `run`
+        command used context_settings={"allow_extra_args": True,
+        "ignore_unknown_options": True} to forward arbitrary flags to the
+        wrapped script; run_cli_tool (mcp.py) lost this, so any unrecognized
+        leading-hyphen token (e.g. --lr 0.01) exited 1 with "Unknown option"
+        instead of reaching the script."""
+        monkeypatch.chdir(tmp_path)
+        catalog = tmp_path / ".bth" / "catalog"
+        monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
+        monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
+        record = tmp_path / "argv.json"
+        probe = tmp_path / "probe.py"
+        probe.write_text(
+            "import json, sys\n" f"json.dump(sys.argv[1:], open(r'{record}', 'w'))\n"
+        )
+
+        result = runner.invoke(app, ["run", str(probe), "--lr", "0.01", "--foo=bar"])
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(record.read_text()) == ["--lr", "0.01", "--foo=bar"]
+
+    def test_missing_project_slug_hard_fails(self, tmp_path, monkeypatch):
+        """Regression (final cutover, backlog #4702): run_tool (mcp.py) fell
+        back to _get_project_slug's silent project_slug="default" instead of
+        hard-failing via cli_common.require_project_slug(), matching the
+        pre-cutover Typer `run` command's _require_project_slug() and
+        soft_project_slug()'s own docstring, which documents `run` as
+        requiring a configured slug."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("BTH_PROJECT_SLUG", raising=False)
+        probe = tmp_path / "probe.py"
+        probe.write_text("pass\n")
+
+        result = runner.invoke(app, ["run", str(probe)])
+
+        assert result.exit_code == 1
+        assert "No .bth.toml found" in result.output
+
 
 class TestLintCyclopts:
     def test_happy_path(self, tmp_path):
