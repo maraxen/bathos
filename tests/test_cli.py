@@ -5,6 +5,7 @@ from pathlib import Path
 from bathos.catalog import init_catalog, write_run
 from bathos.cli_common import catalog_dir as _catalog_dir
 from bathos.cli_cyclopts import app
+from bathos.mcp import _get_catalog_dir
 from bathos.schema import Run
 from tests._cyclopts_runner import CyclopticRunner
 
@@ -655,6 +656,20 @@ def test_catalog_dir_falls_back_to_default_when_no_config(tmp_path: Path, monkey
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("BTH_CATALOG_DIR", raising=False)
     assert _catalog_dir() == Path.home() / ".bth" / "catalog"
+
+
+def test_mcp_get_catalog_dir_reads_project_config(tmp_path: Path, monkeypatch):
+    """Regression (PR #59 review): mcp.py's _get_catalog_dir -- the shared
+    helper behind every registry-driven CLI/MCP tool -- must honor a
+    .bth.toml catalog_dir override too, matching cli_common.catalog_dir()."""
+    custom_catalog = tmp_path / "custom_catalog"
+    cfg = tmp_path / ".bth.toml"
+    cfg.write_text(
+        f'[project]\nslug = "myproj"\nroot = "{tmp_path}"\ncatalog_dir = "{custom_catalog}"\n'
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("BTH_CATALOG_DIR", raising=False)
+    assert _get_catalog_dir(None) == custom_catalog
 
 
 def test_report_emit_cli_smoke_test(tmp_path: Path, monkeypatch):

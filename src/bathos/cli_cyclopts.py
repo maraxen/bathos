@@ -154,13 +154,10 @@ def remote_add_cmd(name: str, url: str) -> None:
     name: Remote name (e.g. 'engaging').
     url: host:path (e.g. 'engaging:~/projects/myproject').
     """
-    from bathos.config import find_project_config
+    from bathos.cli_common import require_project_config_path
     from bathos.remote import add_remote
 
-    cfg_path = find_project_config()
-    if cfg_path is None:
-        print("No .bth.toml found. Run 'bth init' first.")
-        raise SystemExit(1)
+    cfg_path = require_project_config_path()
 
     if ":" not in url:
         print(f"Invalid URL '{url}': expected 'host:path' format")
@@ -179,13 +176,11 @@ def remote_add_cmd(name: str, url: str) -> None:
 @remote_app.command(name="list")
 def remote_list_cmd() -> None:
     """List configured remotes."""
-    from bathos.config import find_project_config, load_project_config
+    from bathos.cli_common import require_project_config_path
+    from bathos.config import load_project_config
     from bathos.remote import list_remotes
 
-    cfg_path = find_project_config()
-    if cfg_path is None:
-        print("No .bth.toml found. Run 'bth init' first.")
-        raise SystemExit(1)
+    cfg_path = require_project_config_path()
 
     config = load_project_config(cfg_path)
     remotes = list_remotes(config)
@@ -215,13 +210,10 @@ def remote_remove_cmd(name: str) -> None:
     ----------
     name: Remote name to remove.
     """
-    from bathos.config import find_project_config
+    from bathos.cli_common import require_project_config_path
     from bathos.remote import remove_remote
 
-    cfg_path = find_project_config()
-    if cfg_path is None:
-        print("No .bth.toml found. Run 'bth init' first.")
-        raise SystemExit(1)
+    cfg_path = require_project_config_path()
 
     try:
         remove_remote(cfg_path, name)
@@ -239,13 +231,11 @@ def remote_test_cmd(name: str) -> None:
     ----------
     name: Remote name to test.
     """
-    from bathos.config import find_project_config, load_project_config
+    from bathos.cli_common import require_project_config_path
+    from bathos.config import load_project_config
     from bathos.remote import test_remote
 
-    cfg_path = find_project_config()
-    if cfg_path is None:
-        print("No .bth.toml found. Run 'bth init' first.")
-        raise SystemExit(1)
+    cfg_path = require_project_config_path()
 
     config = load_project_config(cfg_path)
 
@@ -688,7 +678,7 @@ def submit(
     import tomllib
     from pathlib import Path
 
-    from bathos.cli_common import catalog_dir
+    from bathos.cli_common import catalog_dir, require_project_config_path
     from bathos.cluster import (
         job_wait,
         pull_project,
@@ -696,7 +686,7 @@ def submit(
         resolve_cluster_config,
         submit_job,
     )
-    from bathos.config import find_project_config, load_project_config
+    from bathos.config import load_project_config
     from bathos.sync import sync_catalog
 
     sbatch_arg = sbatch_arg or []
@@ -708,11 +698,13 @@ def submit(
         wait = True
 
     # 2. Load project config
-    cfg_path = find_project_config()
-    if cfg_path is None:
-        print("No .bth.toml found. Run `bth init` first.", file=sys.stderr)
-        raise SystemExit(1)
+    cfg_path = require_project_config_path()
     config = load_project_config(cfg_path)
+    # Bind once, reuse below: catalog_dir() checks BTH_CATALOG_DIR before
+    # falling back to config.catalog_dir, so it isn't just config.catalog_dir
+    # -- but its own value doesn't change mid-invocation, so 5 separate calls
+    # were pure redundant I/O (a directory walk + TOML re-parse each time).
+    cat_dir = catalog_dir()
 
     # 3. Load sidecar [cluster] override (optional)
     sidecar_data = None
@@ -754,7 +746,7 @@ def submit(
                 stage_name = parsed_sidecar.stage_name or "exploration"
 
                 if requires_pass_stem and stage_name in ("validation", "production"):
-                    found = check_reproduction_prerequisite(requires_pass_stem, catalog_dir())
+                    found = check_reproduction_prerequisite(requires_pass_stem, cat_dir)
                     if not found:
                         print(
                             f"REPRODUCTION_PREREQUISITE_UNMET: no passing run of "
@@ -763,7 +755,7 @@ def submit(
                         )
                         raise SystemExit(1)
                 elif requires_pass_stem and stage_name in ("exploration", "calibration"):
-                    found = check_reproduction_prerequisite(requires_pass_stem, catalog_dir())
+                    found = check_reproduction_prerequisite(requires_pass_stem, cat_dir)
                     if not found:
                         print(
                             f"WARNING: no passing run of '{requires_pass_stem}' found "
@@ -780,7 +772,7 @@ def submit(
         from bathos.parity import check_parity_confounds_for_submit
 
         try:
-            result = check_parity_confounds_for_submit(parsed_sidecar, catalog_dir())
+            result = check_parity_confounds_for_submit(parsed_sidecar, cat_dir)
             stage_name = parsed_sidecar.stage_name or "exploration"
 
             if result["satisfied"] is False and result["tier_enforced"]:
@@ -915,7 +907,7 @@ def submit(
             sidecar_sha256=sidecar_sha256,
             myxcel_job_id=slurm_job_id,
             stage_name=stage_name,
-            catalog_dir=catalog_dir(),
+            catalog_dir=cat_dir,
         )
     except Exception as e:
         print(f"Warning: submit-provenance write failed: {e}", file=sys.stderr)
@@ -942,7 +934,7 @@ def submit(
     # 11. Sync if requested
     if then_sync:
         try:
-            sync_catalog(cluster.remote, config, catalog_dir(), pull=True)
+            sync_catalog(cluster.remote, config, cat_dir, pull=True)
         except (ValueError, RuntimeError) as e:
             print(str(e), file=sys.stderr)
             raise SystemExit(1) from None
@@ -1369,6 +1361,33 @@ def catalog_version_cmd() -> None:
 
     result = migrate_catalog(cat_dir, dry_run=True)
     print(f"Cool-tier fragments: {result.scanned} scanned, {result.migrated} need migration.")
+    if result.corrupt:
+        print(
+            f"  WARNING: {len(result.corrupt)} corrupt/unreadable fragment(s) skipped "
+            f"(run 'bth repair --tier cool' to quarantine them).",
+            file=sys.stderr,
+        )
+
+    db_path = cat_dir / "bathos.db"
+    if db_path.exists():
+        import duckdb
+
+        con = duckdb.connect(str(db_path), read_only=True)
+        try:
+            rows = con.execute(
+                "SELECT warm_version, migrated_at FROM _schema_migrations "
+                "ORDER BY migrated_at DESC LIMIT 1"
+            ).fetchall()
+            if rows:
+                print(f"Warm DB version: {rows[0][0]} (last migration: {rows[0][1]})")
+            else:
+                print("Warm DB: no migration history found.")
+        except Exception:
+            print("Warm DB: no migration history found.")
+        finally:
+            con.close()
+    else:
+        print("Warm DB: not yet created (run bth compact).")
 
 
 if __name__ == "__main__":

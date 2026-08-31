@@ -17,6 +17,8 @@ from bathos.mcp import (
     get_run_tool,
     init_tool,
     list_runs_tool,
+    mcp_lint_tool,
+    mcp_verify_tool,
     run_sql_tool,
     run_tool,
     sync_tool,
@@ -547,3 +549,33 @@ class TestMCPServerStartup:
         # No mcp_x_tool wrapper names should ever leak onto the server.
         leaked = [n for n in wired_names if n.startswith("mcp_") and n.endswith("_tool")]
         assert not leaked, f"Raw wrapper function names leaked as tool names: {leaked}"
+
+
+class TestLintVerifyEnvelope:
+    """Regression (PR #59 review): mcp_lint_tool/mcp_verify_tool passed
+    lint_tool/verify_tool's CLI-only singular "error" key straight through
+    into the MCP envelope, unlike validate_sidecar's wrapper (which already
+    pops it) -- see mcp.py's mcp_lint_tool/mcp_verify_tool for the fix."""
+
+    def test_mcp_verify_tool_no_leaked_error_key(self, tmp_catalog):
+        # A stray .bak file makes verify_cool (and so verify_tool) fail.
+        runs_dir = tmp_catalog / "runs" / "proj"
+        runs_dir.mkdir(parents=True)
+        (runs_dir / "run_abc123.bak").write_text("corrupted backup")
+
+        result = asyncio.run(mcp_verify_tool(catalog_dir=str(tmp_catalog)))
+
+        assert result["ok"] is False
+        assert "error" not in result or result["error"] is None
+        assert result["results"]
+
+    def test_mcp_lint_tool_no_leaked_error_key(self, tmp_path):
+        d = tmp_path / "scripts" / "experiments"
+        d.mkdir(parents=True)
+        (d / "BadName.py").write_text("# script")
+
+        result = asyncio.run(mcp_lint_tool(project_root=str(tmp_path)))
+
+        assert result["ok"] is False
+        assert "error" not in result or result["error"] is None
+        assert result["issues"]

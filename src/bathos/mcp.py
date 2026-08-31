@@ -224,12 +224,15 @@ def require_write_token(fn):
 
 
 def _get_catalog_dir(catalog_dir: str | None = None) -> Path:
-    """Resolve catalog directory from parameter or environment."""
+    """Resolve catalog directory from parameter, environment, or .bth.toml."""
     if catalog_dir:
         return Path(catalog_dir)
     override = os.environ.get("BTH_CATALOG_DIR")
     if override:
         return Path(override)
+    config_path = find_project_config(Path.cwd())
+    if config_path:
+        return load_project_config(config_path).catalog_dir
     return default_catalog_dir()
 
 
@@ -259,7 +262,7 @@ def _get_project_slug(project_slug: str = "") -> str:
 @cisternal.tool(registry="bathos-cli", name="list_runs", cli_name="ls")
 def list_runs_tool(
     catalog_dir: str = "",
-    limit: int = 10,
+    limit: int = 20,
     project: str = "",
     since: str = "",
     status: str = "",
@@ -268,8 +271,8 @@ def list_runs_tool(
 
     Args:
         catalog_dir: Catalog directory (empty = use default)
-        limit: Max runs to return (default 10)
-        project: Filter by project slug
+        limit: Max runs to return (default 20). CLI aliases: --limit/-n.
+        project: Filter by project slug. CLI aliases: --project/-p.
         since: Relative time filter, e.g. '7d' or '24h'
         status: Filter by run status
 
@@ -303,6 +306,21 @@ def list_runs_tool(
         for r in runs
     ]
     return {"runs": runs_json, "count": len(runs_json)}
+
+
+# Same wire()-closure/PEP-563 workaround as run_cli_tool's `args` above: a
+# source-level Annotated[...] here would be stored as a string (this module
+# has `from __future__ import annotations`) and fail with NameError once
+# cyclopts resolves it against wired.py's globals, which don't import
+# cyclopts/Annotated. Mutating __annotations__ after the def stores the
+# already-evaluated object instead, restoring the old Typer `ls` command's
+# -n/-p short-flag aliases.
+list_runs_tool.__annotations__["limit"] = Annotated[
+    int, cyclopts.Parameter(name=["--limit", "-n"])
+]
+list_runs_tool.__annotations__["project"] = Annotated[
+    str, cyclopts.Parameter(name=["--project", "-p"])
+]
 
 
 @cisternal.tool(registry="bathos-cli", name="find_runs", cli_name="find")
@@ -1262,7 +1280,10 @@ def archive_artifact_tool(
 
     cat_dir = _get_catalog_dir(catalog_dir or None)
     proj_root = Path(project_root) if project_root else Path.cwd()
-    slug = _get_project_slug(project_slug)
+    # Hard-fail on a missing slug, like `run` -- see require_project_slug's
+    # call in run_tool above for the same rationale (soft_project_slug's own
+    # docstring documents `archive-artifact` as slug-required, unlike `lint`).
+    slug = project_slug or require_project_slug()
 
     try:
         item = archive_experiment_bundle(
@@ -4098,7 +4119,13 @@ async def mcp_verify_tool(
     archive_dir: str = "",
 ) -> dict:
     """Verify catalog integrity."""
-    return verify_tool(tier=tier, catalog_dir=catalog_dir, archive_dir=archive_dir)
+    result = verify_tool(tier=tier, catalog_dir=catalog_dir, archive_dir=archive_dir)
+    # verify_tool injects an "error" key for CLI rendering purposes
+    # (render_or_exit's uniform contract) -- strip it here like
+    # validate_sidecar's wrapper does, since "ok"/"results" already carry
+    # this tool's real failure detail.
+    result.pop("error", None)
+    return result
 
 
 @cisternal.tool(registry="bathos", name="lint")
@@ -4107,7 +4134,13 @@ async def mcp_lint_tool(
     project_root: str = "",
 ) -> dict:
     """Lint project scripts and claim files."""
-    return lint_tool(project_root=project_root)
+    result = lint_tool(project_root=project_root)
+    # lint_tool injects an "error" key for CLI rendering purposes
+    # (render_or_exit's uniform contract) -- strip it here like
+    # validate_sidecar's wrapper does, since "ok"/"issues" already carry
+    # this tool's real failure detail.
+    result.pop("error", None)
+    return result
 
 
 @cisternal.tool(registry="bathos", name="repair_scan")

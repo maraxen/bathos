@@ -64,6 +64,55 @@ class TestLsCyclopts:
         payload = json.loads(result.output)
         assert payload["count"] >= 1
 
+    @staticmethod
+    def _catalog_with_n_runs(tmp_catalog: Path, n: int) -> Path:
+        init_catalog(tmp_catalog)
+        for i in range(n):
+            write_run(
+                Run(
+                    project_slug="aliastest" if i % 2 == 0 else "otherproj",
+                    command=f"python run_{i}.py",
+                    argv=["python", f"run_{i}.py"],
+                    git_hash=f"hash{i}",
+                    git_branch="main",
+                    git_dirty=False,
+                    status="completed",
+                    exit_code=0,
+                ),
+                tmp_catalog,
+            )
+        compact(tmp_catalog)
+        return tmp_catalog
+
+    def test_default_limit_is_20(self, tmp_catalog):
+        """Regression (PR #59 review): the old Typer `ls` command's default
+        --limit was 20 (typer.Option(20, "--limit", "-n")); the cyclopts port
+        silently dropped it to 10."""
+        catalog = self._catalog_with_n_runs(tmp_catalog, 25)
+        result = runner.invoke(app, ["ls", "--catalog-dir", str(catalog)])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["count"] == 20
+
+    def test_limit_short_flag_n(self, tmp_catalog):
+        """Regression (PR #59 review): the old Typer `ls` command's -n alias
+        for --limit was lost in the cyclopts port."""
+        catalog = self._catalog_with_n_runs(tmp_catalog, 25)
+        result = runner.invoke(app, ["ls", "--catalog-dir", str(catalog), "-n", "5"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["count"] == 5
+
+    def test_project_short_flag_p(self, tmp_catalog):
+        """Regression (PR #59 review): the old Typer `ls` command's -p alias
+        for --project was lost in the cyclopts port."""
+        catalog = self._catalog_with_n_runs(tmp_catalog, 10)
+        result = runner.invoke(app, ["ls", "--catalog-dir", str(catalog), "-p", "aliastest"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["count"] > 0
+        assert all(r["project_slug"] == "aliastest" for r in payload["runs"])
+
 
 class TestFindCyclopts:
     def test_happy_path(self, populated_catalog):
@@ -271,6 +320,30 @@ class TestArchiveArtifactCyclopts:
             ],
         )
         assert result.exit_code == 1
+
+    def test_missing_project_slug_hard_fails(self, tmp_path, monkeypatch):
+        """Regression (PR #59 review): archive_artifact_tool (mcp.py) fell
+        back to _get_project_slug's silent project_slug="default" instead of
+        hard-failing via cli_common.require_project_slug(), the same
+        regression already fixed in `run` -- soft_project_slug()'s own
+        docstring documents archive-artifact as requiring a configured slug."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("BTH_PROJECT_SLUG", raising=False)
+
+        result = runner.invoke(
+            app,
+            [
+                "archive-artifact",
+                str(tmp_path / "probe.py"),
+                "--verdict",
+                "keep",
+                "--reason",
+                "testing",
+            ],
+        )
+
+        assert result.exit_code == 1
+        assert "No .bth.toml found" in result.output
 
 
 class TestSyncCyclopts:

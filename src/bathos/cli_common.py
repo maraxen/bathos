@@ -37,6 +37,20 @@ def require_project_slug() -> str:
     return load_project_config(cfg_path).slug
 
 
+def require_project_config_path() -> Path:
+    """Hard-fail with the same message/stream as require_project_slug(), but
+    return the .bth.toml path itself rather than a resolved slug -- for
+    commands (remote add/list/remove/test, submit) that need the config path
+    or its full ProjectConfig, not just the slug."""
+    from bathos.config import find_project_config
+
+    cfg_path = find_project_config()
+    if cfg_path is None:
+        print("No .bth.toml found. Run `bth init` first.", file=sys.stderr)
+        raise SystemExit(1)
+    return cfg_path
+
+
 def parse_since(since: str | None) -> datetime | None:
     """Parse a relative-time filter like '7d' or '24h' into a UTC datetime."""
     if since is None:

@@ -22,8 +22,9 @@ from unittest.mock import patch
 import duckdb
 import pytest
 
-from bathos.catalog import init_catalog
+from bathos.catalog import init_catalog, write_run
 from bathos.cli_cyclopts import app
+from bathos.compact import compact
 from bathos.schema import Run
 from tests._cyclopts_runner import CyclopticRunner
 
@@ -425,6 +426,50 @@ class TestTopLevelCliOnlyCyclopts:
         result = runner.invoke(app, ["catalog-version"])
         assert result.exit_code == 0, result.output
         assert "Current schema version" in result.output
+
+    def test_catalog_version_reports_corrupt_fragment_warning(self, tmp_path, monkeypatch):
+        """Regression (found while fixing PR #59 review finding #7):
+        catalog_version_cmd dropped the corrupt-fragment WARNING entirely
+        (not just its color) when the old Typer `catalog-version` command was
+        ported to cyclopts -- restored, plain-text (uncolored, matching this
+        batch's established JSON/plain-print direction)."""
+        catalog = tmp_path / "catalog"
+        init_catalog(catalog)
+        runs_dir = catalog / "runs" / "proj"
+        runs_dir.mkdir(parents=True)
+        (runs_dir / "run_abc123.parquet").write_bytes(b"not parquet")
+        monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
+
+        result = runner.invoke(app, ["catalog-version"])
+        assert result.exit_code == 0, result.output
+        assert "WARNING" in result.output
+        assert "corrupt" in result.output.lower()
+
+    def test_catalog_version_reports_warm_db_version(self, tmp_path, monkeypatch):
+        """Regression (found while fixing PR #59 review finding #7):
+        catalog_version_cmd dropped the entire "Warm DB version" reporting
+        block (the _schema_migrations query) -- restored."""
+        catalog = tmp_path / "catalog"
+        init_catalog(catalog)
+        write_run(
+            Run(
+                project_slug="proj",
+                command="python run.py",
+                argv=["python", "run.py"],
+                git_hash="abc123",
+                git_branch="main",
+                git_dirty=False,
+                status="completed",
+                exit_code=0,
+            ),
+            catalog,
+        )
+        compact(catalog)
+        monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
+
+        result = runner.invoke(app, ["catalog-version"])
+        assert result.exit_code == 0, result.output
+        assert "Warm DB version" in result.output
 
     def test_export_dry_run(self):
         result = runner.invoke(app, ["export", "--tool", "claude", "--level", "user", "--dry-run"])
