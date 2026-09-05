@@ -1611,12 +1611,36 @@ def run_tool(
     if tags is None:
         tags = []
 
-    # Construct argv: [<interpreter>, script_path, ...args]. Use THIS process's
-    # interpreter, not a bare "python": machines without an unprefixed `python`
-    # on PATH (python3-only systems) made Popen raise FileNotFoundError, which
-    # run_script swallowed into a bare exit_code=1. The interpreter running
-    # bathos is also the one guaranteed to satisfy BTH_RESULTS_PATH plumbing.
-    argv = [sys.executable, script_path] + args
+    # Construct argv. Two shapes reach this function under the one `script_path`
+    # + `*args` signature, and they need DIFFERENT treatment (debt: `bth run`
+    # blocks all tracked runs in projects whose scripts need their own venv,
+    # e.g. protamer/proxide -- see using-bathos skill's documented
+    # `bth run -- uv run python scripts/train.py ...` usage):
+    #
+    # 1. A bare `.py` script (`bth run scripts/train.py ...`, no interpreter of
+    #    its own named): prepend THIS process's interpreter, not a bare
+    #    "python" -- machines without an unprefixed `python` on PATH
+    #    (python3-only systems) made Popen raise FileNotFoundError, which
+    #    run_script swallowed into a bare exit_code=1. sys.executable is also
+    #    the interpreter guaranteed to satisfy BTH_RESULTS_PATH plumbing.
+    # 2. An already-a-command first token (`bth run -- uv run python
+    #    scripts/train.py ...` -- script_path="uv", args=("run", "python",
+    #    ...)): exec it AS GIVEN. Prepending sys.executable here silently
+    #    replaced the user's whole command with `<bathos's own interpreter>
+    #    uv run python ...`, which tries to open a file literally named "uv"
+    #    and ignores everything the user meant to run -- and, worse, runs
+    #    ANY bare `.py` target under bathos's own tool-isolated interpreter
+    #    even when the user named a different one (`bth run -- python3 -c
+    #    "..."` : script_path="python3" [not sys.executable], "-c" and its
+    #    payload silently discarded as a script-name-that-doesn't-exist
+    #    lookup). A project script that imports project-local packages
+    #    (e.g. proxide) is never installed into bathos's own tool venv, so
+    #    case 1's prepend fails every such script with a ModuleNotFoundError
+    #    that has nothing to do with the script itself.
+    if script_path.endswith(".py"):
+        argv = [sys.executable, script_path] + args
+    else:
+        argv = [script_path] + args
 
     # Resolve parameters. Unlike _get_project_slug's other call sites, `run`
     # must hard-fail with no configured slug rather than silently defaulting
