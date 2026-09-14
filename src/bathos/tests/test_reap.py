@@ -91,7 +91,9 @@ def test_reap_non_running_not_reaped(temp_catalog):
 
 def test_reap_preserves_all_fields_except_status_metadata(temp_catalog):
     """Test (ii) - all non-status/non-metadata fields preserved after apply."""
-    from bathos.reap import reap_runs
+    from bathos.reap import reap_runs, read_reap_ledger
+    from bathos.compact import compact
+    from bathos.query import list_runs
 
     original = create_run("run_test", age_hours=25, status="running")
     original.git_hash = "deadbeef"
@@ -100,24 +102,37 @@ def test_reap_preserves_all_fields_except_status_metadata(temp_catalog):
 
     write_run(original, temp_catalog)
 
+    # Pre-build warm tier before reaping
+    compact(temp_catalog)
+
+    # Now reap - this will force-rebuild the warm tier and update metadata
     candidates, _ = reap_runs(
         temp_catalog, older_than_h=24, dry_run=False, apply=True
     )
     assert len(candidates) == 1
 
-    # Read back the reaped run
+    # Read back the reaped run from cool tier
     reaped = read_runs(temp_catalog)[0]
     assert reaped.status == "abandoned"
     assert reaped.git_hash == "deadbeef"
     assert reaped.outcome == "test_outcome"
     assert reaped.tags == ["tag1", "tag2"]
-    # Verify metadata.reaped is persisted
-    metadata = json.loads(reaped.metadata)
-    assert "reaped" in metadata
-    assert metadata["reaped"]["reason"] == "orphan_window_exceeded"
-    assert metadata["reaped"]["prior_status"] == "running"
-    assert "reaped_at" in metadata["reaped"]
-    assert metadata["reaped"]["window_h"] == 24
+
+    # Verify ledger entry exists with correct fields
+    ledger = read_reap_ledger(temp_catalog)
+    assert "run_test" in ledger
+    ledger_entry = ledger["run_test"]
+    assert ledger_entry["reason"] == "orphan_window_exceeded"
+    assert ledger_entry["prior_status"] == "running"
+    assert "reaped_at" in ledger_entry
+    assert ledger_entry["window_h"] == 24
+
+    # Verify warm-tier metadata was updated by reconcile_warm_tier
+    warm_runs = list_runs(temp_catalog)
+    assert len(warm_runs) == 1
+    warm_metadata = json.loads(warm_runs[0].metadata or "{}")
+    assert "reaped" in warm_metadata
+    assert warm_metadata["reaped"]["reason"] == "orphan_window_exceeded"
 
 
 def test_reap_idempotent(temp_catalog):
