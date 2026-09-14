@@ -135,24 +135,20 @@ def reap_runs(
 
     for run in all_runs:
         # Handle revert case
-        if revert:
-            if run.id not in (revert_ids or []):
-                continue
-            # Restore prior_status from metadata
-            try:
-                metadata = json.loads(run.metadata or "{}")
-                reaped = metadata.get("reaped", {})
-                prior_status = reaped.get("prior_status")
-                if prior_status:
-                    run.status = prior_status
-                    # Remove reaped object
+        if revert and revert_ids and run.id in revert_ids:
+            # Restore prior_status: we only reap from "running" status, so abandoned runs were running
+            if run.status == "abandoned":
+                run.status = "running"
+                # Try to remove reaped metadata if it exists (warm tier only)
+                try:
+                    metadata = json.loads(run.metadata or "{}")
                     metadata.pop("reaped", None)
                     run.metadata = json.dumps(metadata)
-                    if apply:
-                        write_run(run, catalog_dir)
-                    candidates.append(run)
-            except (json.JSONDecodeError, ValueError):
-                pass
+                except (json.JSONDecodeError, ValueError):
+                    pass
+                if apply:
+                    write_run(run, catalog_dir)
+                candidates.append(run)
             continue
 
         # Skip non-running
@@ -194,29 +190,34 @@ def reap_runs(
 
     # Apply reaping if requested
     if apply:
-        for run in candidates:
-            # Mark as abandoned
-            run.status = "abandoned"
-            # Add reaped metadata
-            try:
-                metadata = json.loads(run.metadata or "{}")
-            except (json.JSONDecodeError, ValueError):
-                metadata = {}
+        if revert:
+            # Revert path: reconcile warm tier after rewrites
+            reconcile_warm_tier(catalog_dir)
+        else:
+            # Reap path: write reaped runs and reconcile warm tier
+            for run in candidates:
+                # Mark as abandoned
+                run.status = "abandoned"
+                # Add reaped metadata
+                try:
+                    metadata = json.loads(run.metadata or "{}")
+                except (json.JSONDecodeError, ValueError):
+                    metadata = {}
 
-            metadata["reaped"] = {
-                "reaped_at": datetime.now(UTC).isoformat(),
-                "reason": "orphan_window_exceeded",
-                "window_h": older_than_h,
-                "prior_status": "running",
-            }
-            run.metadata = json.dumps(metadata)
+                metadata["reaped"] = {
+                    "reaped_at": datetime.now(UTC).isoformat(),
+                    "reason": "orphan_window_exceeded",
+                    "window_h": older_than_h,
+                    "prior_status": "running",
+                }
+                run.metadata = json.dumps(metadata)
 
-            # Write back (atomic)
-            write_run(run, catalog_dir)
-            event("catalog.reap_run", run_id=run.id, reason="orphan_window")
+                # Write back (atomic)
+                write_run(run, catalog_dir)
+                event("catalog.reap_run", run_id=run.id, reason="orphan_window")
 
-        # Reconcile warm tier after writing all reaped runs
-        reconcile_warm_tier(catalog_dir)
+            # Reconcile warm tier after writing all reaped runs
+            reconcile_warm_tier(catalog_dir)
 
     return candidates, skipped
 

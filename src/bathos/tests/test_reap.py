@@ -332,23 +332,27 @@ def test_reap_warm_tier_disagreement_reconciled(temp_catalog):
     # Build warm tier (status will be completed)
     compact(temp_catalog)
 
-    # Manually edit the Parquet to change status to running (simulate the disagreement)
-    # This is a bit hacky but tests the scenario
-    import pyarrow as pa
-    runs_dir = temp_catalog / "runs" / "test"
-    fragment_path = runs_dir / "run_run_test.parquet"
-    table = pq.read_table(fragment_path)
-    # Change status column
-    status_col = table.column("status")
-    new_status = pa.array(["running"])
-    # Re-write with modified status
-    modified_table = table.set_column(table.schema.get_field_index("status"), new_status)
-    pq.write_table(modified_table, fragment_path)
+    # Manually edit warm tier to disagree: change status to running in DB
+    import duckdb
+    db_path = temp_catalog / "bathos.db"
+    con = duckdb.connect(str(db_path))
+    con.execute("UPDATE runs SET status = 'running' WHERE id = 'run_test'")
+    con.close()
+
+    # Verify disagreement exists
+    runs_warm_before = list_runs(temp_catalog)
+    assert len(runs_warm_before) == 1
+    assert runs_warm_before[0].status == "running"  # warm says running
+
+    # Cool tier still says completed
+    cool_runs = read_runs(temp_catalog)
+    assert len(cool_runs) == 1
+    assert cool_runs[0].status == "completed"
 
     # Now reap should reconcile (completed is NOT reaped, but warm should be updated)
     reap_runs(temp_catalog, older_than_h=24, dry_run=False, apply=True)
 
-    # Check that list_runs (warm path) reports completed
+    # Check that list_runs (warm path) reports completed (reconciled)
     runs_after = list_runs(temp_catalog)
     assert len(runs_after) == 1
     assert runs_after[0].status == "completed"
