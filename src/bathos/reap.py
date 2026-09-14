@@ -136,19 +136,21 @@ def reap_runs(
     for run in all_runs:
         # Handle revert case
         if revert and revert_ids and run.id in revert_ids:
-            # Restore prior_status: we only reap from "running" status, so abandoned runs were running
-            if run.status == "abandoned":
-                run.status = "running"
-                # Try to remove reaped metadata if it exists (warm tier only)
-                try:
-                    metadata = json.loads(run.metadata or "{}")
+            # Restore prior_status from metadata.reaped
+            try:
+                metadata = json.loads(run.metadata or "{}")
+                reaped = metadata.get("reaped", {})
+                prior_status = reaped.get("prior_status")
+                if prior_status:
+                    run.status = prior_status
+                    # Remove reaped object from metadata
                     metadata.pop("reaped", None)
                     run.metadata = json.dumps(metadata)
-                except (json.JSONDecodeError, ValueError):
-                    pass
-                if apply:
-                    write_run(run, catalog_dir)
-                candidates.append(run)
+                    if apply:
+                        write_run(run, catalog_dir)
+                    candidates.append(run)
+            except (json.JSONDecodeError, ValueError):
+                pass
             continue
 
         # Skip non-running

@@ -111,6 +111,13 @@ def test_reap_preserves_all_fields_except_status_metadata(temp_catalog):
     assert reaped.git_hash == "deadbeef"
     assert reaped.outcome == "test_outcome"
     assert reaped.tags == ["tag1", "tag2"]
+    # Verify metadata.reaped is persisted
+    metadata = json.loads(reaped.metadata)
+    assert "reaped" in metadata
+    assert metadata["reaped"]["reason"] == "orphan_window_exceeded"
+    assert metadata["reaped"]["prior_status"] == "running"
+    assert "reaped_at" in metadata["reaped"]
+    assert metadata["reaped"]["window_h"] == 24
 
 
 def test_reap_idempotent(temp_catalog):
