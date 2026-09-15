@@ -71,6 +71,7 @@ wire(
         "archive",
         "archive_artifact",
         "restore",
+        "reap",
         "check",
         "sync",
         "init",

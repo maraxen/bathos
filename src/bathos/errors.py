@@ -143,6 +143,8 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     # INTERNAL is being used as the catch-all because no DEPENDENCY_MISSING code
     # exists. Worth revisiting alongside any future taxonomy change.
     "ScipyUnavailableError": BathosErrorCode.INTERNAL,
+    # Reaper errors (bathos.reap): --older-than-h floor validation or other orphan-reaping issues.
+    "ReapError": BathosErrorCode.INVALID_PARAM,
     # Artifact archival (bathos.artifact_archive): archive-artifact/restore refusals.
     "ArchiveError": BathosErrorCode.ARCHIVE_ERROR,
     "DirtyTreeError": BathosErrorCode.ARCHIVE_DIRTY_TREE,

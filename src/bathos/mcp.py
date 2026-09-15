@@ -1382,6 +1382,63 @@ def restore_tool(
     return {"ok": True, "result": dataclasses.asdict(result)}
 
 
+@cisternal.tool(registry="bathos-cli", name="reap", cli_group="catalog", cli_name="reap")
+def reap_tool(
+    catalog_dir: str = "",
+    older_than_h: float = 24,
+    dry_run: bool = True,
+    apply: bool = False,
+    revert: bool = False,
+    revert_ids: str = "",
+) -> dict:
+    """Reap orphaned runs by marking them abandoned.
+
+    Args:
+        catalog_dir: Catalog directory (empty = use default)
+        older_than_h: Minimum age in hours to reap (default 24, floor enforced at 24)
+        dry_run: Show what would be reaped without writing (default True)
+        apply: Actually write reaped runs (default False)
+        revert: Restore prior_status instead of marking abandoned
+        revert_ids: Comma-separated run IDs to revert (only with --revert)
+
+    Returns:
+        Dict with reap results
+    """
+    from bathos.reap import reap_runs, reconcile_warm_tier, ReapError  # noqa: I001
+
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+
+    try:
+        revert_ids_list = [x.strip() for x in revert_ids.split(",")] if revert_ids else []
+        candidates, skipped = reap_runs(
+            cat_dir,
+            older_than_h=older_than_h,
+            dry_run=dry_run,
+            apply=apply,
+            revert=revert,
+            revert_ids=revert_ids_list if revert else None,
+        )
+    except ReapError as e:
+        return {
+            "error": str(e),
+            "error_code": BathosErrorCode.INVALID_PARAM.value,
+        }
+
+    # Reconcile warm tier after apply
+    if apply:
+        reconcile_warm_tier(cat_dir)
+
+    skipped_list = [{"run_id": r.id, "reason": reason} for r, reason in skipped]
+
+    return {
+        "candidates": len(candidates),
+        "reaped": len(candidates) if apply else 0,
+        "skipped": len(skipped),
+        "skipped_details": skipped_list,
+        "candidate_ids": [c.id for c in candidates],
+    }
+
+
 @cisternal.tool(registry="bathos-cli", name="check", cli_name="check")
 def check_tool(
     catalog_dir: str = "",
@@ -2554,6 +2611,31 @@ async def mcp_restore_tool(
         catalog_dir=catalog_dir,
         dry_run=dry_run,
         stub_path=stub_path,
+    )
+
+
+@cisternal.tool(registry="bathos", name="reap")
+@traced_tool
+@require_write_token
+async def mcp_reap_tool(
+    catalog_dir: str = "",
+    older_than_h: float = 24,
+    dry_run: bool = True,
+    apply: bool = False,
+    revert: bool = False,
+    revert_ids: str = "",
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
+) -> dict:
+    """Reap orphaned runs by marking them abandoned.
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    return reap_tool(
+        catalog_dir=catalog_dir,
+        older_than_h=older_than_h,
+        dry_run=dry_run,
+        apply=apply,
+        revert=revert,
+        revert_ids=revert_ids,
     )
 
 
@@ -4492,6 +4574,7 @@ _WIRED = cisternal.wire(
         "reference_applicable",
         "archive_artifact",
         "restore",
+        "reap",
         "blast_radius_assess",
         "blast_radius_clear",
         "get_blast_radius_status",
