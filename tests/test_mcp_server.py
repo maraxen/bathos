@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -506,6 +507,38 @@ class TestRunTool:
         assert "exit_code" in result
         assert result["exit_code"] != 0
         assert result["success"] is False
+
+    @patch("bathos.mcp.run_script")
+    def test_run_tool_prepends_interpreter_for_a_bare_py_script(self, mock_run):
+        """A bare `.py` script_path (no interpreter of its own) is run under
+        THIS process's interpreter -- the fix for machines with no unprefixed
+        `python` on PATH (a python3-only system), per the comment this pins."""
+        mock_run.return_value = 0
+
+        run_tool(script_path="/tmp/script.py", args=["--n", "10"])
+
+        called_argv = mock_run.call_args.kwargs["argv"]
+        assert called_argv == [sys.executable, "/tmp/script.py", "--n", "10"]
+
+    @patch("bathos.mcp.run_script")
+    def test_run_tool_execs_a_non_py_script_path_directly(self, mock_run):
+        """debt #1680 regression: `bth run -- uv run python scripts/train.py
+        ...` must exec the wrapped command AS GIVEN, not silently replace it
+        with `<bathos's own interpreter> uv run python ...` -- which tries to
+        open a file literally named "uv" and ignores the user's command
+        entirely. A non-`.py` first token (a command name, not a script) is
+        the wrapped-command shape: exec it directly, with no interpreter
+        prepended, so it resolves under its own PATH/venv."""
+        mock_run.return_value = 0
+
+        run_tool(
+            script_path="uv",
+            args=["run", "python", "scripts/train.py", "--epochs", "10"],
+        )
+
+        called_argv = mock_run.call_args.kwargs["argv"]
+        assert called_argv == ["uv", "run", "python", "scripts/train.py", "--epochs", "10"]
+        assert sys.executable not in called_argv
 
 
 class TestMCPServerStartup:
