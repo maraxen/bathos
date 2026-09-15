@@ -4,18 +4,15 @@ import json
 import os
 import socket
 import subprocess
-import time
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Optional
 
 import duckdb
 
 from bathos.catalog import read_runs, write_run
 from bathos.schema import Run
 from bathos.telemetry import event
-
 
 SACCT_NO_RECORD_REAP_H = 336  # 14 days
 
@@ -75,7 +72,7 @@ def read_reap_ledger(catalog_dir: Path) -> dict[str, dict]:
                     record = json.load(f)
                 run_id = ledger_file.stem  # e.g., "run_test"
                 ledger[run_id] = record
-            except (json.JSONDecodeError, IOError):
+            except (OSError, json.JSONDecodeError):
                 pass
 
     return ledger
@@ -94,7 +91,7 @@ class ReapStats:
     skipped_count: int
 
 
-def _query_slurm_job(job_id: str) -> tuple[Optional[str], Optional[str]]:
+def _query_slurm_job(job_id: str) -> tuple[str | None, str | None]:
     """Query SLURM job state using sacct -X.
 
     Args:
@@ -124,12 +121,11 @@ def _query_slurm_job(job_id: str) -> tuple[Optional[str], Optional[str]]:
         return None, "sacct_error"
 
 
-def _is_live_process_on_host(hostname: str, command: str, argv: list[str]) -> bool:
+def _is_live_process_on_host(hostname: str, argv: list[str]) -> bool:
     """Check if a live process matching argv exists on this host.
 
     Args:
         hostname: Recorded hostname from run
-        command: Recorded command
         argv: Recorded argv
 
     Returns:
@@ -151,10 +147,9 @@ def _is_live_process_on_host(hostname: str, command: str, argv: list[str]) -> bo
             timeout=5,
         )
         for line in result.stdout.split("\n"):
-            if argv[0] in line:
+            if argv[0] in line and "ps aux" not in line:
                 # Avoid matching our own process
-                if "ps aux" not in line:
-                    return True
+                return True
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
 
@@ -164,17 +159,17 @@ def _is_live_process_on_host(hostname: str, command: str, argv: list[str]) -> bo
 def reap_runs(
     catalog_dir: Path,
     older_than_h: float = 24,
-    dry_run: bool = True,
+    dry_run: bool = True,  # noqa: ARG001 - writes are gated by apply; dry_run is kept for CLI/MCP signature
     apply: bool = False,
     revert: bool = False,
-    revert_ids: Optional[list[str]] = None,
+    revert_ids: list[str] | None = None,
 ) -> tuple[list[Run], list[tuple[Run, str]]]:
     """Reap orphaned runs by marking them abandoned.
 
     Args:
         catalog_dir: Catalog directory path
         older_than_h: Minimum age in hours to reap (default 24)
-        dry_run: If True, only list candidates without writing
+        dry_run: Writes are gated by apply; dry_run is kept for CLI/MCP signature compatibility
         apply: If True, actually write reaped runs
         revert: If True, restore prior_status instead of marking abandoned
         revert_ids: List of run IDs to revert
@@ -256,7 +251,7 @@ def reap_runs(
                 candidates.append(run)
         else:
             # No SLURM job, check for live process
-            if _is_live_process_on_host(run.hostname, run.command, run.argv):
+            if _is_live_process_on_host(run.hostname, run.argv):
                 skipped.append((run, "same_host_live_process"))
             else:
                 candidates.append(run)

@@ -1404,7 +1404,7 @@ def reap_tool(
     Returns:
         Dict with reap results
     """
-    from bathos.reap import reap_runs, reconcile_warm_tier, ReapError
+    from bathos.reap import reap_runs, reconcile_warm_tier, ReapError  # noqa: I001
 
     cat_dir = _get_catalog_dir(catalog_dir or None)
 
@@ -2587,6 +2587,31 @@ async def mcp_restore_tool(
         catalog_dir=catalog_dir,
         dry_run=dry_run,
         stub_path=stub_path,
+    )
+
+
+@cisternal.tool(registry="bathos", name="reap")
+@traced_tool
+@require_write_token
+async def mcp_reap_tool(
+    catalog_dir: str = "",
+    older_than_h: float = 24,
+    dry_run: bool = True,
+    apply: bool = False,
+    revert: bool = False,
+    revert_ids: str = "",
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
+) -> dict:
+    """Reap orphaned runs by marking them abandoned.
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    return reap_tool(
+        catalog_dir=catalog_dir,
+        older_than_h=older_than_h,
+        dry_run=dry_run,
+        apply=apply,
+        revert=revert,
+        revert_ids=revert_ids,
     )
 
 
@@ -4525,6 +4550,7 @@ _WIRED = cisternal.wire(
         "reference_applicable",
         "archive_artifact",
         "restore",
+        "reap",
         "blast_radius_assess",
         "blast_radius_clear",
         "get_blast_radius_status",

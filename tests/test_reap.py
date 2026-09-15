@@ -195,7 +195,7 @@ def test_reap_sacct_terminal_states(temp_catalog, monkeypatch):
     write_run(run_failed, temp_catalog)
 
     # Mock sacct to return different states
-    def mock_run(cmd, *args, **kwargs):
+    def mock_run(cmd, *_args, **_kwargs):
         if "-X" not in cmd:
             # Verify -X is present
             raise AssertionError("sacct missing -X flag")
@@ -231,7 +231,7 @@ def test_reap_sacct_error_skips(temp_catalog, monkeypatch):
     run = create_run("run_test", age_hours=25, status="running", slurm_job_id="9999")
     write_run(run, temp_catalog)
 
-    def mock_run(cmd, *args, **kwargs):
+    def mock_run(cmd, *_args, **_kwargs):
         if "9999" in cmd:
             return subprocess.CompletedProcess(cmd, 1, "", "Error")
         return subprocess.CompletedProcess(cmd, 1, "", "")
@@ -256,7 +256,7 @@ def test_reap_sacct_no_record_old_reaped(temp_catalog, monkeypatch):
     write_run(run_30h, temp_catalog)
     write_run(run_337h, temp_catalog)
 
-    def mock_run(cmd, *args, **kwargs):
+    def mock_run(cmd, *_args, **_kwargs):
         # Empty output for all (sacct has no record)
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
@@ -272,7 +272,7 @@ def test_reap_sacct_no_record_old_reaped(temp_catalog, monkeypatch):
     assert "sacct_no_record" in skipped[0][1]
 
 
-def test_reap_same_host_live_process_skipped(temp_catalog, monkeypatch):
+def test_reap_same_host_live_process_skipped(temp_catalog):
     """Test (vii) - same-host live process is skipped."""
     # Get this host's hostname
     import socket
@@ -474,7 +474,7 @@ def test_reap_sacct_no_record_old_run_ledger_reason(temp_catalog, monkeypatch):
     run_337h = create_run("run_337h", age_hours=337, status="running", slurm_job_id="5002")
     write_run(run_337h, temp_catalog)
 
-    def mock_run(cmd, *args, **kwargs):
+    def mock_run(cmd, *_args, **_kwargs):
         # Verify -X flag is present
         assert "-X" in cmd, "sacct missing -X flag"
         # Empty output for all (sacct has no record)
