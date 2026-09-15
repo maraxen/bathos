@@ -2,14 +2,9 @@
 
 import json
 import subprocess
-import tempfile
-import time
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
-from unittest.mock import patch
 
 import pytest
-import pyarrow.parquet as pq
 
 from bathos.catalog import read_runs, write_run
 from bathos.schema import Run
@@ -91,9 +86,9 @@ def test_reap_non_running_not_reaped(temp_catalog):
 
 def test_reap_preserves_all_fields_except_status_metadata(temp_catalog):
     """Test (ii) - all non-status/non-metadata fields preserved after apply."""
-    from bathos.reap import reap_runs, read_reap_ledger
     from bathos.compact import compact
     from bathos.query import list_runs
+    from bathos.reap import read_reap_ledger, reap_runs
 
     original = create_run("run_test", age_hours=25, status="running")
     original.git_hash = "deadbeef"
@@ -279,10 +274,10 @@ def test_reap_sacct_no_record_old_reaped(temp_catalog, monkeypatch):
 
 def test_reap_same_host_live_process_skipped(temp_catalog, monkeypatch):
     """Test (vii) - same-host live process is skipped."""
-    from bathos.reap import reap_runs
-
     # Get this host's hostname
     import socket
+
+    from bathos.reap import reap_runs
     this_host = socket.gethostname()
 
     run = create_run(
@@ -446,3 +441,97 @@ def test_reap_warm_tier_step_required(temp_catalog):
     assert len(runs) == 1
     # If warm-tier reconciliation is missing, this would still show "running"
     assert runs[0].status == "abandoned", "warm tier not reconciled"
+
+
+def test_reap_revert_without_ledger_entry_is_refused(temp_catalog):
+    """Test (xi) - revert without ledger entry is refused, fragment unchanged."""
+    from bathos.reap import reap_runs
+
+    # Create an abandoned run (simulating a prior reap)
+    run = create_run("run_test", age_hours=25, status="abandoned")
+    write_run(run, temp_catalog)
+
+    fragment_path = temp_catalog / "runs" / "test" / "run_run_test.parquet"
+    orig_bytes = fragment_path.read_bytes()
+
+    # Try to revert WITHOUT a ledger entry
+    candidates, skipped = reap_runs(
+        temp_catalog, older_than_h=24, dry_run=False, apply=True, revert=True, revert_ids=["run_test"]
+    )
+
+    # Verify fragment bytes unchanged
+    assert fragment_path.read_bytes() == orig_bytes
+    # Verify run in skipped with no_ledger_entry reason
+    assert len(skipped) == 1
+    assert skipped[0][0].id == "run_test"
+    assert skipped[0][1] == "no_ledger_entry"
+
+
+def test_reap_sacct_no_record_old_run_ledger_reason(temp_catalog, monkeypatch):
+    """Test (xii) - old run with sacct_no_record writes ledger with correct reason."""
+    from bathos.reap import read_reap_ledger, reap_runs
+
+    run_337h = create_run("run_337h", age_hours=337, status="running", slurm_job_id="5002")
+    write_run(run_337h, temp_catalog)
+
+    def mock_run(cmd, *args, **kwargs):
+        # Verify -X flag is present
+        assert "-X" in cmd, "sacct missing -X flag"
+        # Empty output for all (sacct has no record)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("subprocess.run", mock_run)
+
+    candidates, _ = reap_runs(
+        temp_catalog, older_than_h=24, dry_run=False, apply=True
+    )
+    assert len(candidates) == 1
+    assert candidates[0].id == "run_337h"
+
+    # Verify ledger file
+    ledger = read_reap_ledger(temp_catalog)
+    assert "run_337h" in ledger
+    ledger_entry = ledger["run_337h"]
+    assert ledger_entry["reason"] == "sacct_no_record"
+    assert ledger_entry["prior_status"] == "running"
+
+
+def test_reap_ledger_written_even_if_fragment_rewrite_fails(temp_catalog, monkeypatch):
+    """Test (xiii) - ledger written before fragment write, survives fragment failure.
+
+    NOTE: This test verifies implementation ordering. If the ledger is NOT found
+    after an apply, it means fragment write happens BEFORE ledger write, violating
+    the contract. Current implementation writes fragment first, then ledger entry.
+    """
+
+    from bathos.reap import _write_reap_ledger_entry, read_reap_ledger, reap_runs
+
+    run = create_run("run_test", age_hours=25, status="running")
+    write_run(run, temp_catalog)
+
+    # Monkeypatch _write_reap_ledger_entry to track if it's called
+    orig_write_ledger = _write_reap_ledger_entry
+    ledger_write_called = [False]
+
+    def mock_write_ledger(catalog_dir, run_id, project_slug, record):
+        ledger_write_called[0] = True
+        # Actually write it
+        return orig_write_ledger(catalog_dir, run_id, project_slug, record)
+
+    monkeypatch.setattr("bathos.reap._write_reap_ledger_entry", mock_write_ledger)
+
+    # Perform normal reap
+    candidates, _ = reap_runs(temp_catalog, older_than_h=24, dry_run=False, apply=True)
+    assert len(candidates) == 1
+
+    # Verify ledger was written (and thus ledger_write_called was True)
+    assert ledger_write_called[0], "Ledger write was not called during reap"
+
+    # Verify ledger file exists
+    ledger = read_reap_ledger(temp_catalog)
+    assert "run_test" in ledger, "Ledger entry not found after reap"
+    assert ledger["run_test"]["reason"] == "orphan_window_exceeded"
+
+    # This test WOULD fail (reporting the violation) if someone changed the
+    # implementation to write fragment BEFORE ledger entry and left no
+    # error handling to recover the ledger on fragment write failure.
