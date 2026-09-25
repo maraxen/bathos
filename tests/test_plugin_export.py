@@ -32,6 +32,11 @@ def test_export_plugin_bundle_writes_real_claude_bundle(tmp_path):
     assert (out / "skills" / "bathos-campaigns" / "SKILL.md").exists()
     assert (out / "skills" / "bathos-literature-parity" / "SKILL.md").exists()
     assert (out / "skills" / "bathos-mcp" / "SKILL.md").exists()
+    # Skill resource dirs cisternal recognises (assets/) must ship in the bundle:
+    # the plugin is the only delivery path, so a dropped template is a lost template.
+    parity_assets = out / "skills" / "bathos-literature-parity" / "assets"
+    assert (parity_assets / "parity.bth.toml.template").exists()
+    assert (parity_assets / "01_reconstruct.md").exists()
 
     mcp = json.loads((out / ".mcp.json").read_text())
     assert "bathos" in mcp["mcpServers"]

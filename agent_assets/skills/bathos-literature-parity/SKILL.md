@@ -51,11 +51,11 @@ The protocol is **operator-driven** (you orchestrate the agents) and **blind-fir
 - Write a reproduce-the-protocol plan (how to restore your implementation to parity if needed)
 - Populate `[confounds.reference_parity]` block for the next campaign
 
-Phase templates (orchestrator-facing agent prompts) are bundled with this skill in `templates/` (`01_reconstruct.md` through `05_verdict.md`).
+Phase templates (orchestrator-facing agent prompts) are bundled with this skill in `assets/` (`01_reconstruct.md` through `05_verdict.md`).
 
 ## Configuration: `parity.bth.toml`
 
-Create a `parity.bth.toml` sidecar alongside the relevant script. A starter is bundled at `templates/parity.bth.toml.template`. Example structure:
+Create a `parity.bth.toml` sidecar alongside the relevant script. A starter is bundled at `assets/parity.bth.toml.template`. Example structure:
 
 ```toml
 [parity]
@@ -88,7 +88,7 @@ M                      = 3                             # Number of refutation at
 **Required fields:** `paper_pdf`, `impl_paths`
 **Optional fields (with sensible defaults):** `recon_lenses`, `attack_lenses`, `equivalence_bound`, `N`, `M`, `hypotheses`, `citation_note`, `reference_code`
 
-An executable example of driving `parity_validate()` is bundled at `templates/example_parity_validate.py`.
+An executable example of driving `parity_validate()` is bundled at `assets/example_parity_validate.py`.
 
 ## Orchestrator-owned re-derivation lock (Constraint 1)
 
@@ -149,7 +149,7 @@ The compute-grade function returns the minimum across all applicable ceilings.
 
 ## Related
 
-- **`templates/`** — phase-orchestration prompts (`01_reconstruct.md` through `05_verdict.md`), `parity.bth.toml.template`, and `example_parity_validate.py`
+- **`assets/`** — phase-orchestration prompts (`01_reconstruct.md` through `05_verdict.md`), `parity.bth.toml.template`, and `example_parity_validate.py`
 - **bathos-campaigns** — claim-tier `[confounds.reference_parity]` integration, Union Gate
 - **AC-16–AC-22** (epic-level acceptance criteria): all parity-related gates and integration points
 - **Signal 13** (`bth sprint-audit`): flags a confirmation campaign citing a published-method baseline with uncontrolled `reference_parity`
