@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: v3 (after adversarial cycle 3)
+revision: v4 (after adversarial cycle 4)
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -76,12 +76,18 @@ invest_overrides: []
   works); it exits non-zero only if both the project log and the fallback fail.
 - **D7. Every line is written twice: project log + mirror.** The writer appends the same bytes
   to `<main root>/.bth/log/<segment>` and `~/.bth/log-mirror/<project_id>/<segment>`, where
-  `project_id` is a UUID stored in the project's tracked `.bth.toml` (`[project] id`, written
-  by `bth init` or the first event), so it is stable across moves and clones. The mirror
+  `project_id` is a UUID stored in the project's tracked `.bth.toml` (`[project] id`). It is
+  minted **only** by `bth init` (or `bth init --assign-id` for existing projects), which the
+  user commits; a run never writes `.bth.toml`. `bth run` in a project with no id fails with a
+  structured error naming that command. The id is stable across moves, clones and worktrees.
+  Forks or copies share it deliberately; segment names never collide, `bth log restore` only
+  restores events whose `worktree_root` lies under the restoring root, and `bth verify` flags
+  two registered roots with the same id. The mirror
   protects against `git clean -fdX` and loss of the main checkout. **Ingest reads both copies
   and deduplicates by `eid`**, so neither is "authoritative on divergence": a line that reached
   only one of them is still ingested. A mirror append failure is a warning, not a run failure.
-  `bth log restore` copies mirror-only segments and missing bytes back into the project log.
+  `bth log restore` copies back into the project log every mirror line (for this root) that the
+  project log lacks; lines that reached neither copy are reported by `bth verify`, not invented.
 
 ## Authoritative writes (everything the index must not own)
 
@@ -164,7 +170,12 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
 
 ### Fold rules
 
-- One fold function (`bathos.index.fold`) is used by both ingest and the read path.
+- The index stores every accepted event verbatim in an `events` table keyed by `eid`. Derived
+  tables are a fold over it.
+- One fold function (`bathos.index.fold`) is used by both ingest and the read path, and it
+  always **re-folds an affected entity from its complete event history** (indexed events plus
+  new ones, sorted), never by applying new events on top of the stored row. So the result is
+  independent of arrival order.
 - For each entity, events are applied in `(ts, eid)` order; UUIDv7 makes the tie-break total
   and deterministic for a fixed event set.
 - **Merge policy per kind reproduces today's semantics exactly**, verified by a differential
@@ -173,21 +184,21 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   `question`, `hypothesis`, `started_at` take the latest non-empty value; claim fields and
   `stopping_threshold` follow what the current upsert/update code does, not a new rule. Any
   divergence AC-17 finds is a spec bug to fix here, not a behaviour change.
-- **Migration snapshots:** migrated state is one `*.migrated_state` event per entity with
-  `origin: migration` and `ts` = the export time. It sets the entity's full state; live events
-  for that entity with `ts <=` the snapshot's are ignored (the snapshot already reflects them),
-  and later ones apply on top, so dual-write events emitted before the export are not applied
-  twice.
+- **Imported history:** events produced by the legacy importer (Migration) carry deterministic
+  eids, `uuid5(NAMESPACE_BATHOS, f"{kind}:{entity}:{source_version}")`, so importing the same
+  source twice, or importing a late legacy fragment, yields the same events and is a no-op.
 - `run.started` without `run.finished` folds to `status='incomplete'` until `run.reaped` or a
   later `run.finished`.
-- Cross-host clock skew can only reorder events for the same entity from different hosts;
-  AC-1 names the last-writer-wins fields affected.
+- Cross-host clock skew can change which of two conflicting last-writer-wins updates wins; it
+  cannot make the result depend on arrival order. AC-1 names the affected fields.
 
 ### Index ingest (generation swap)
 
 - **Separate file until cut-over:** the new index is `~/.bth/catalog/index.db`. `bathos.db` is
   never swapped or written by the new path; legacy writers keep using it until cut-over, after
   which it is frozen read-only as a fallback.
+- Ingest inserts new events into `idx.events` (ignoring known eids) and re-folds every affected
+  entity from its full history.
 - Ingest runs only on the local machine (never on cluster nodes, which only append logs). It
   takes an exclusive `flock` on `~/.bth/catalog/ingest.lock` (local disk), copies `index.db` to
   `index.db.<gen>.tmp`, ingests into the copy, runs `CHECKPOINT`, closes it, refuses to proceed
@@ -206,14 +217,17 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
 
 - **One read API.** `bathos.index.connect_read()` returns an in-memory DuckDB connection that
   `ATTACH`es `index.db` read-only for this call only (never held across calls, including by the
-  long-lived MCP server, so it never pins an old generation). It then builds in-memory tables
-  with the index's names and columns: each is `idx.<table>` with the rows of entities that have
-  unindexed events replaced by the fold of (indexed state + those events), matched on the entity
-  key. Unqualified names in user SQL (`bth sql`, MCP `run_sql`) resolve to these tables, so DML
-  can never reach the index.
+  long-lived MCP server, so it never pins an old generation).
+- It reads each log file's bytes past its watermark, collects the affected entity keys, loads
+  those entities' indexed events from `idx.events`, and re-folds just those entities into small
+  in-memory tables. For each index table it then creates a **view** with the table's name and
+  columns: `idx.<table>` rows whose key is not affected, `UNION ALL` the re-folded rows. Cost
+  scales with the unindexed delta, not the index size. Unqualified names in user SQL
+  (`bth sql`, MCP `run_sql`) resolve to these views, and views reject DML, so user SQL can
+  never modify the index.
 - All 25 modules that call `duckdb.connect(` today (65 call sites) move to this API or to the
   ingest path; AC-18 fails the build on any other `duckdb.connect` against a catalog path.
-- If `index.db` does not exist yet, the tables are built from the events alone.
+- If `index.db` does not exist yet, the views are built from the events alone.
 
 ### Cluster
 
@@ -233,21 +247,27 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
 - **Prerequisite:** today the test suite writes pytest temp dirs into the real
   `~/.bth/projects.toml`. It must be isolated first (AC-11).
 
-### Migration and dual-write
+### Migration (quiesced cut-over, no dual-write)
 
-1. **Dual-write:** the runner and every "Authoritative writes" site emit events while still
-   writing the old tiers. The old tiers remain the only read source; log-append failures are
-   warnings during this phase (D6 applies from cut-over).
-2. **Export:** every cool fragment and every warm row becomes events with `origin: migration`,
-   written to the owning project's log (unresolvable ones to `unaffiliated/`). Natural-key
-   idempotency collapses records also produced by dual-write.
-3. **Build and diff:** build an index from events alone and diff it against the current
-   `bathos.db` table by table. Every difference must fall in an allow-listed class (data
-   already lost to earlier force-rebuilds; corrupt fragments skipped by `compact.py:787`;
-   `output_metadata` whose files changed since; postmortem overrides whose files are only in a
-   deleted worktree; unresolvable project) and goes into a signed-off residual report.
-   Unclassified differences block cut-over.
-4. **Cut-over:** reads switch to the new path; the old catalog stays read-only for one release.
+There is no dual-write phase: the new path is built and tested against fixture catalogs, then
+switched on in one step.
+
+1. **Quiesce:** `bth migrate --to-log` refuses to start while any run is `running` in the old
+   catalog or any SLURM job submitted through bathos is queued or running (checked via myxcel),
+   unless `--force` is given.
+2. **Import:** the legacy importer converts every cool fragment, every campaign JSON, and every
+   row of every table in "Authoritative writes" into events with deterministic eids (see Fold
+   rules), written to the owning project's `.bth/log/` (unresolvable ones to `unaffiliated/`).
+3. **Build and diff:** build `index.db` from events alone and diff it against `bathos.db` table
+   by table. Every difference must fall in an allow-listed class (data already lost to earlier
+   force-rebuilds; corrupt fragments skipped by `compact.py:787`; `output_metadata` whose files
+   changed since; postmortem overrides whose files are only in a deleted worktree; unresolvable
+   project) and goes into a signed-off residual report. Unclassified differences abort.
+4. **Switch:** reads and writes move to the new path; `bathos.db` is frozen read-only for one
+   release.
+5. **Stragglers:** legacy fragments that arrive later (a cluster job still using an old bathos)
+   are converted by the same importer on `bth sync --pull`/`bth compact`; deterministic eids
+   make this idempotent.
 
 ## Acceptance criteria
 
@@ -266,7 +286,7 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   every run exactly once after two pulls.
 - AC-7. A torn line at the end of a segment or in the middle of a file (followed by good lines)
   is quarantined with its offset and reported by `bth verify`; all good lines are ingested.
-- AC-8. (Enforced from cut-over.) With the project log unwritable: `run.started` goes to the fallback and the run proceeds;
+- AC-8. With the project log unwritable: `run.started` goes to the fallback and the run proceeds;
   with both unwritable the script is not launched; a `run.finished` in the fallback exits with
   the script's status plus a warning.
 - AC-9. Deleting an active segment mid-run loses no event: every line is ingested from the mirror.
@@ -278,28 +298,34 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   measured under a pre-registered sidecar. The latency budget is set in that sidecar, with a
   stated basis, before the measurement runs; this spec does not invent one.
 - AC-13. Migration step 3 produces a residual report in which every difference is classified.
-- AC-14. After `git clean -fdX` in a project, `bth verify` reports the loss and
-  `bth log restore` rebuilds the project log from the mirror byte-for-byte.
-- AC-15. The in-memory read result equals the result after a full ingest, for the same events.
+- AC-14. After `git clean -fdX` in a project, `bth verify` reports the loss, and after
+  `bth log restore` every event present in the mirror for that root is back in the project log
+  and the index is unchanged.
+- AC-15. For the same events, the read views equal the tables produced by a full ingest.
 - AC-17. Differential fold test: for randomized operation sequences on campaigns, anchors and
   runs, the old upsert/update code and the new fold produce identical rows.
 - AC-18. No module other than `bathos.index` and the ingest path calls `duckdb.connect` on a
   catalog path (AST test).
 - AC-19. Ingest refuses the swap when a `.wal` remains after close, and a reader that attached
   the previous generation completes its query correctly across the `os.replace`.
+- AC-20. Arrival-order independence: delivering the same events in any order and in any
+  batching (including a late event with an earlier `ts`) yields the same index and the same
+  read results as one sorted full ingest.
+- AC-21. Importing the same legacy catalog twice, and importing a single late legacy fragment
+  after cut-over, changes the index exactly once.
 - AC-16. Root resolution tests: main checkout, linked worktree, bare main, submodule, relative
   `--git-common-dir`, `BTH_WORKSPACE_ROOT` set, no git repo.
 
 ## Order of delivery
 
 1. AC-11 (test isolation).
-2. Writer, resolution, D3 check, `project_id`, mirror (AC-7, AC-9, AC-10, AC-14, AC-16).
-3. Dual-write at every authoritative site (AC-2); D6 failures are warnings in this phase.
-4. `index.db` ingest with generation swap and the read API, alongside the untouched `bathos.db`
-   (AC-1, AC-3, AC-4, AC-15, AC-17, AC-19).
-5. Migration snapshots + residual report (AC-13), move all 25 modules to the read API (AC-18),
-   then cut-over: legacy writers removed, D6 enforced (AC-8), `bathos.db` frozen.
-6. Cluster pull (AC-6).
+2. Writer, resolution, D3 check, `project_id` via `bth init`, mirror (AC-7, AC-9, AC-10,
+   AC-14, AC-16), behind a feature flag; production still uses the old tiers.
+3. `index.db`, `events` table, fold, generation-swap ingest, read API; move all 25 modules to
+   it, exercised against fixture catalogs (AC-1, AC-15, AC-17, AC-18, AC-19, AC-20).
+4. Legacy importer (AC-21) and cluster log pull (AC-6).
+5. Cut-over via `bth migrate --to-log` (AC-13); then AC-2, AC-3, AC-4 and AC-8 hold in
+   production; `bathos.db` frozen.
 
 ## Risks
 
