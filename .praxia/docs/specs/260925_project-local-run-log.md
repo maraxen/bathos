@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: v1 (after adversarial cycle 1)
+revision: v2 (after adversarial cycle 2)
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -12,267 +12,267 @@ invest_overrides: []
 
 ## Problem
 
-bathos's storage has two tiers whose roles have drifted:
-
 - **Cool tier** (`~/.bth/catalog/runs/<slug>/run_<uuid>.parquet`): one Parquet file per run.
   Sampled 2026-09-25: 4,323 fragments, every one a single row, median 15 KB; the same record
-  as a JSON line is a median 2.2 KB. Parquet is a format for large immutable batches; one-row
-  files are mostly metadata overhead. *(Untracked inspection figures: re-measure under a
-  pre-registered sidecar before citing; AC-12.)*
+  as a JSON line is a median 2.2 KB. *(Untracked inspection figures; re-measure under a
+  pre-registered sidecar before citing, AC-12.)*
 - **Warm tier** (`~/.bth/catalog/bathos.db`): meant to be a derived index, but it is the only
-  copy of several tables and several in-place updates (full list in "Authoritative writes").
-  `bth compact --force-rebuild` deletes `bathos.db`, so it destroys them; the catalog carries
-  `bathos.db.pre-campaign-restore-2608{14,16}`, `...pre-rebuild`, `...pre-groqseq-recovery-260827`.
-
-Symptoms: finished runs are invisible until `bth compact`; read paths open `bathos.db`
-read-write so any other holder makes every CLI read fail with `Could not set lock on file`
-(observed throughout 2026-09-25); rebuilding the index can lose data; a project's history lives
-outside the project.
+  copy of many rows and in-place updates (see "Authoritative writes"). `--force-rebuild` deletes
+  it; the catalog carries `bathos.db.pre-campaign-restore-2608{14,16}`, `...pre-rebuild`,
+  `...pre-groqseq-recovery-260827`. `compact` also rewrites run rows from files it finds under
+  the *current directory's* workspace (`compact.py:794`, `:1012`), so the index depends on
+  where compact happened to run.
+- **Locking:** reads open `bathos.db` read-write (`query.py:429` for `run_sql`), and DuckDB
+  refuses even a `read_only` open while another process holds the file read-write (verified
+  2026-09-25, duckdb 1.5.2: `IOException: Could not set lock on file`). Every CLI read failed
+  this way on 2026-09-25.
+- A finished run is invisible until `bth compact`; a project's history lives outside the project.
 
 ## Goals
 
 - G1. Every authoritative bathos record is appended as an event to a JSONL log inside the
-  project, and is never edited in place.
-- G2. `bathos.db` is a pure, disposable index: deleting it and re-ingesting the logs and the
-  cold archive reproduces it (AC-1 defines "reproduces").
-- G3. Readers never block and never lag: a record is queryable as soon as its line is written.
-- G4. Works from any git worktree, from the MCP server, and from SLURM jobs.
-- G5. Cross-project queries (`bth ls` across projects, `bth sprint-audit`) keep working.
+  project and never edited in place.
+- G2. `bathos.db` is a pure, disposable index: a deterministic function of the events alone
+  (no filesystem or cwd reads at ingest).
+- G3. Reads never block on a lock and never lag: a record is queryable once its line is written.
+- G4. Works from any git worktree, the MCP server, and SLURM jobs.
+- G5. Cross-project queries keep working.
 
-## Non-goals
+## Non-goals (this epic)
 
-- DuckDB 2.0 / Quack or DuckLake (see Future work; the log format is independent of both).
-- Changing sidecar semantics, outcome evaluation, or claim/campaign rules.
-- Changing cisternal. This spec only calls `cisternal.provenance.channels.capture_git_state`
-  and `cisternal.provenance.durable.pin_run` as bathos does today. Because the log is ignored
-  (D3), it cannot perturb their dirty computation, so no cisternal change is needed.
+- DuckDB 2.0/Quack, DuckLake, a cold archive, committing logs to git (opt-in tracking), and
+  segment sealing. All are deferred; none is needed for G1–G5.
+- Changing cisternal: bathos keeps calling `capture_git_state` and `pin_run` as today.
 
 ## Decisions
 
-- **D1. Location: the project's MAIN checkout, `<main root>/.bth/log/`.** `<main root>` is the
-  parent of `git rev-parse --git-common-dir` (the main worktree), so a run executed in a linked
-  worktree still appends to the main checkout's log. The worktree it ran in is recorded in the
-  event (`worktree_root`, `branch` from `GitState`). Rationale: linked worktrees are routinely
-  deleted (often automatically); an append-only record must outlive the directory it was
-  produced in. `.bth/` is reused rather than a new `.bathos/`, since projects already keep
-  bathos state there (claims, `refs/manifest.jsonl`, attestations, postmortems, hooks).
-- **D2. Format: JSONL, one file per writer.** No locking or interleaving across processes;
-  works on network filesystems, where SQLite's locking is unsafe.
-- **D3. The log is gitignored by default.** An ignored path is excluded from
-  `git status --porcelain`, so appends never mark the tree dirty, never force a provenance
-  snapshot, and are never touched by checkout, merge or branch switch. `bth` verifies this with
-  `git check-ignore -q .bth/log/`; if the path is NOT ignored, `bth init`/`bth run` add
-  `/.bth/log/` to `.gitignore` or fail with a structured error. Committing sealed segments is an
-  opt-in per project (D7).
-- **D4. Provenance comes only from cisternal.** Each `run.started` embeds `GitState`
-  (`hash`, `branch`, `dirty`, `dirty_content_id`, `provenance_source`) and the `PinResult`
-  (`pinned_sha`, the ref it created under `refs/bathos/runs/<run_id>` or, for a dirty tree,
-  `refs/bathos/wip/<run_id>`, and the manifest entry), exactly as `runner.py` computes them
-  today (pin before the subprocess starts, `runner.py:546`). bathos adds no git logic.
-- **D5. Parquet is for sealed history only.** Sealed segments are compacted into partitioned
-  Parquet in the cold archive; nothing writes Parquet one record at a time.
-- **D6. Recording is not best-effort.** Provenance capture must never fail a run; appending the
-  run's own events must. If `run.started` cannot be appended, the script is not launched. If
-  `run.finished` cannot be appended, the command exits non-zero with a structured error naming
-  the log path, after a retry to the fallback path (below).
-- **D7. Opt-in tracking.** A project can set `[log] tracked = true` in `.bth.toml`; then
-  `.bth/log/sealed/` (and only sealed/) is un-ignored and committed by the user like any file.
-  Consequences stated in `bth init`: command lines, argv and env subsets enter git history
-  permanently; default stays untracked (public repos, privacy).
+- **D1. Location: the project's main checkout, `<main root>/.bth/log/`.** *(Pending user
+  approval: the request was "inside each project directory ... in the worktree it's run
+  from". This keeps the log inside the project directory but writes it in the main checkout
+  rather than the linked worktree, because linked worktrees are routinely deleted, often
+  automatically, and an append-only record must outlive the directory that produced it. The
+  worktree a run executed in is recorded in every event. If the user prefers the worktree
+  location, D1 changes to "worktree root" and AC-5 becomes a recovery-from-mirror test.)*
+  `.bth/` is reused, since projects already keep bathos state there.
+- **D2. Format: JSONL, one file per writer process.** No cross-process locking; safe on
+  network filesystems (unlike SQLite).
+- **D3. The log is gitignored.** Ignored paths are excluded from `git status --porcelain`
+  (cisternal's dirty check, `capture.py:196`), so appends never mark the tree dirty or force a
+  provenance snapshot, and checkout/merge/branch switch never touch them. `bth` checks
+  `git check-ignore -q .bth/log/x`; if not ignored it adds `/.bth/log/` to `.gitignore`
+  (`bth init`) or fails `bth run` with a structured error.
+- **D4. Provenance comes only from cisternal.** `run.started` embeds `GitState` (hash, branch,
+  dirty, dirty_content_id, provenance_source) and the `PinResult` (pinned SHA,
+  `refs/bathos/runs/<run_id>` or `refs/bathos/wip/<run_id>` for a dirty tree, manifest entry),
+  computed where `runner.py` computes them today (`:546`, before the subprocess). bathos adds no
+  git logic.
+- **D5. No Parquet written one record at a time.** The run fragments and the existing
+  per-record ledger fragments (`blast_radius.py:116`, trust ledger, anchors, reap, archived
+  items) all move to the log. Parquet remains only for the existing `bth archive` export.
+- **D6. Recording is not best-effort.** If `run.started` cannot be appended to the project log
+  or the fallback, the script is not launched. If `run.finished` lands only in the fallback,
+  the command exits with the script's own status plus a warning (so SLURM `afterok` still
+  works); it exits non-zero only if both the project log and the fallback fail.
+- **D7. Every line is written twice: project log + mirror.** The writer appends the same bytes
+  to `<main root>/.bth/log/<segment>` and `~/.bth/log-mirror/<project-id>/<segment>`. The mirror
+  protects against `git clean -fdX`, which deletes ignored files and would otherwise erase the
+  project's history. A mirror append failure is a warning, not a run failure.
 
 ## Authoritative writes (everything the index must not own)
 
-Every current write to `bathos.db` that is not reproducible from another source becomes an
-event. Implementation must add to this table any write found later (AC-2 enforces it).
+AC-2 enforces that this table stays complete.
 
-| Current write | Location | Event |
+| Current write | Location | Event (natural key) |
 |---|---|---|
-| run row (start/finish) | `runner.py:524,623,847`, cool fragment | `run.started`, `run.finished` |
-| `runs.output_metadata` (output hashes; drift-check baseline, `checker.py:132`) | recomputed at compact, `compact.py:959-976` | `run.outputs_hashed`, emitted once at run end; compact never recomputes it |
-| `runs.metadata` rewrite by the reaper | `reap.py:361` | `run.reaped` |
-| `campaigns` insert / upsert | `campaigns.py` | `campaign.created` |
-| `stopping_threshold` update | `campaigns.py:340,508` | `campaign.threshold_set` |
-| `evalue`, `seq_position` update | `campaigns.py:517` | `campaign_run.evalue_updated` |
-| `claim_mode='bypassed'` | `campaigns.py:1043` | `campaign.claim_bypassed` |
-| `campaign_runs` insert | `campaigns.py` | `campaign.run_added` |
-| campaign conclusion | `campaigns.py` | `campaign.concluded` |
-| `campaign_edges`, `run_edges` | `campaign_edges.py` | `edge.added` |
-| `amendments` | — | `amendment.recorded` |
-| trust ledger, anchors, reap ledger, archived items (already durable Parquet) | `trust_ledger.py`, `anchor.py`, `reap.py`, `archived_items.py` | `ledger.*`, `anchor.*`, `reap.*`, `archive.*` |
+| run row, start and finish | `runner.py:524,623,847` | `run.started`, `run.finished` (`run_id`) |
+| `runs.output_metadata` (drift baseline, `checker.py:132`) | recomputed at compact, `compact.py:959-976` | `run.outputs_hashed` (`run_id`, `seq`): at run end, and on explicit `bth check --rebaseline`. Behaviour change: compact no longer silently refreshes the baseline when outputs change |
+| outcome + `postmortem_*` override | `compact.py:1012` (reads files via cwd) | `run.postmortem_applied` (`run_id`, postmortem sha256), emitted by postmortem validate/register |
+| `claim_discriminates`, `claim_isolates`, `parity_run_type` COALESCE | `compact.py:978` | carried in `run.started.data` from the sidecar |
+| `runs.metadata` rewrite by reaper | `reap.py:361` | `run.reaped` (`run_id`) |
+| campaign insert/upsert | `campaigns.py`, `campaigns.py:1194`, `claim.py:649` | `campaign.created` (`campaign_id`) |
+| `claim_path`, `claim_sha256` (Union Gate tamper anchor) | `claim.py:684`, `claim.py:1062` (incl. attest_parity rollback) | `campaign.claim_bound` (`campaign_id`, sha256); a rollback is a new event, not a deletion |
+| `stopping_threshold` | `campaigns.py:340,508` | `campaign.threshold_set` (`campaign_id`, `seq`) |
+| `evalue`, `seq_position` | `campaigns.py:517` | `campaign_run.evalue_updated` (`campaign_id`, `run_id`, `seq`) |
+| `claim_mode='bypassed'` | `campaigns.py:1043` | `campaign.claim_bypassed` (`campaign_id`) |
+| other campaign updates | `campaigns.py:1222` | `campaign.updated` (`campaign_id`, `seq`) |
+| `campaign_runs` insert | `campaigns.py` | `campaign.run_added` (`campaign_id`, `run_id`) |
+| campaign conclusion | `campaigns.py` | `campaign.concluded` (`campaign_id`) |
+| `campaign_edges`, `run_edges` | `campaign_edges.py` | `edge.added` (`src`, `dst`, `type`) |
+| `blast_radius_ledger` | `blast_radius.py:231`, `compact.py:620` | `blast_radius.recorded` (existing ledger id) |
+| `sidecar_anchors` insert/update | `anchor.py:211` | `anchor.recorded` (`path`, `sha256`) |
+| trust ledger, reap ledger, archived items | `trust_ledger.py`, `reap.py`, `archived_items.py` | `ledger.*`, `reap.*`, `archive.*` (existing ids) |
+| `amendments` | created at `compact.py:430`; no writer exists today | none until a writer is added (AC-2 then requires one) |
 
 ## Design
 
 ### Log directory resolution
 
-In order:
-1. `BTH_LOG_DIR` if set (SLURM and tests).
-2. `<main root>/.bth/log/` when the run's `project_root`/cwd is inside a git repo (D1).
-3. `<dir containing .bth.toml>/.bth/log/` when not in a git repo but a `.bth.toml` is found
-   walking up (bounded, as `resolve_workspace` does).
-4. Otherwise `~/.bth/log/unaffiliated/`, and every event carries `"project": null`;
-   `bth ls` shows these as unaffiliated. A run is never unrecorded because it has no project.
+Built on the existing `resolve_workspace()` ladder (`workspace.py`), not a new one:
+1. `fs_root` from `resolve_workspace()`: `BTH_WORKSPACE_ROOT` → git toplevel → the `.bth.toml`
+   recorded `root` → cwd.
+2. If that root is a *linked* worktree, map it to the main worktree: the first `worktree`
+   entry of `git worktree list --porcelain` (absolute path). If that entry is `bare`, keep the
+   linked worktree's own root and warn. A submodule is its own repository: its root is the
+   submodule working tree (`git worktree list` run inside it reports that path).
+3. Log dir = `<root>/.bth/log/`. If there is no git repo and no `.bth.toml`, use
+   `~/.bth/log/unaffiliated/`, with `"project": null` on every event.
 
-**Fallback path (D6):** if the resolved directory is unwritable, append to
-`~/.bth/log/fallback/<project-slug>/` and emit a warning; `bth log reconcile` later moves those
-events into the project log (idempotent by `(writer, seq)`).
+**Fallback (D6):** `~/.bth/log/fallback/<slug or _unaffiliated>/`. Ingest scans it like any
+project log, so no reconcile step is needed.
 
-### Segment naming and writers
+**Event destination:** each event goes to the log of the project that owns its entity: run
+events to the run's project, campaign events to the campaign's project. Cross-project links
+refer to other entities by id. MCP tools that receive only `catalog_dir` resolve the owner
+from the entity; if none can be resolved, the event goes to `unaffiliated/`.
 
-`<host>.<pid>.<start_ns>[.slurm-<job>-<task>-<restart>].jsonl`, where `<restart>` is
-`SLURM_RESTART_COUNT` (default 0). This is unique per process even with several `bth run`
-processes in one SLURM task and across requeues.
+### Segments and writers
 
-- Writers are keyed by `(process, log dir)`: the long-lived MCP server, which runs scripts for
-  arbitrary `project_root`s (`mcp.py:1717`), holds one writer per project log it touches.
-  Threads share a writer behind a lock.
-- **Sealing:** a segment is sealed (renamed into `sealed/`, then never modified) at 8 MB, when
-  the process exits cleanly, or after 1 h idle for long-lived processes.
-- **Stale active segments:** a segment is presumed dead when its host matches the current host
-  and its PID is not alive, or (other host) its mtime is older than 24 h. The next `bth`
-  command seals it. Readers never need this to be correct: they read active and sealed
-  segments alike (idempotency below), so a wrong liveness guess costs only an early seal.
-- **Unlink/rename detection:** before each append the writer `fstat`s its fd and `stat`s the
-  path; if the inode differs or the path is gone, it opens a new segment and records a
-  `writer.resumed` event naming the lost file, instead of writing into an unlinked inode.
-- Each line: one `write()` of the full line with a trailing `\n`, then `flush()` + `fsync()`.
+- Name: `<host>.<pid>.<start_ns>.jsonl`, with `.slurm-<job>-<task>-<restart>` appended as
+  information only (uniqueness comes from host, pid and start_ns).
+- One writer per `(process, log dir)`; the MCP server holds one per project it touches.
+  Threads share a writer behind a lock. A segment rotates to a new file at 8 MB. There is no
+  sealing: every file is read the same way.
+- Each line is one `write()` of the full line plus `\n`, then `flush()` + `fsync()`, to the
+  project log and then the mirror (D7).
+- Before each append the writer compares `fstat(fd)` with `stat(path)`; if the file was deleted
+  or replaced, it starts a new segment whose first line is `writer.resumed` naming the old one.
 
 ### Line envelope
 
 ```json
-{"v": 1, "kind": "run.finished", "id": "<entity uuid>", "ts": "<RFC3339 UTC>",
+{"v": 1, "kind": "run.finished", "key": ["<run_id>"], "ts": "<RFC3339 UTC>",
  "project": "<slug or null>", "writer": "<segment stem>", "seq": 17,
- "worktree_root": "<abs path>", "data": { ... }}
+ "worktree_root": "<abs path>", "origin": "live|migration", "data": { ... }}
 ```
 
-- `(writer, seq)` is globally unique and is the **idempotency key**; `seq` starts at 0 and
-  increments per line within a writer.
-- `data` is validated against a per-kind JSON Schema at ingest. Invalid lines go to an
-  index-side `quarantine` table with the reason; they are never dropped silently.
+- `(writer, seq)` identifies a physical line (dedups re-reads of the same file).
+- `(kind, key)` is the **natural key** (from the table). Create-type events (`run.started`,
+  `campaign.created`, `edge.added`, ...) are idempotent on it, so the same record arriving from
+  dual-write and from migration folds to one. Update-type events include a `seq` in the key and
+  are applied in fold order.
+- `data` is validated against a per-kind JSON Schema at ingest; invalid lines go to a
+  `quarantine` table with the reason.
 
-### Fold rules (current state from events)
+### Fold rules
 
-- Events for one entity are ordered by `(ts, writer, seq)`. This order is deterministic for a
-  fixed multiset of events. Cross-writer order depends on host clocks; the only fields whose
-  value can depend on cross-writer order are last-writer-wins attributes
-  (`campaign.threshold_set`, `campaign.claim_bypassed`), and these are listed in AC-1 as
-  skew-sensitive.
-- `run.started` with no `run.finished` folds to `status = 'incomplete'` until a `run.reaped` or
-  a later `run.finished` arrives.
-- Duplicates (same `(writer, seq)`) are ingested once.
+- Events for one entity are applied in `(ts, writer, seq)` order, which is deterministic for a
+  fixed multiset of events. The only fields that can depend on cross-host clock order are the
+  last-writer-wins updates (`campaign.threshold_set`, `campaign.updated`,
+  `campaign.claim_bypassed`); AC-1 names them.
+- `run.started` without `run.finished` folds to `status='incomplete'` until `run.reaped` or a
+  later `run.finished`.
 
-### Index (`bathos.db`)
+### Index ingest (generation swap)
 
-- **Ingest** scans every registered project's `.bth/log/` (active + sealed) and the fallback
-  and unaffiliated dirs. Per file it stores `(project, relative path, byte_offset,
-  sha256 of bytes [0, byte_offset))`. If the stored prefix hash no longer matches (file
-  replaced), it re-reads from 0; idempotency by `(writer, seq)` prevents duplicate rows.
-  Inodes are not used (checkout, clone and rsync change them).
-- **Reads** open `bathos.db` with `read_only=True` for the duration of one query and retry on
-  lock with bounded backoff. To satisfy G3, a read first scans each active segment's bytes past
-  its watermark into memory in Python (DuckDB `read_json` cannot start at a byte offset),
-  validates them, and exposes them as a temporary relation unioned with the indexed tables.
-- Only ingest opens `bathos.db` read-write. `bth compact` means "ingest now";
-  `--force-rebuild` deletes and re-ingests, which cannot lose data because the index owns none.
+- Ingest takes an exclusive `flock` on `~/.bth/catalog/ingest.lock` (a separate file, never
+  the database), copies `bathos.db` to `bathos.db.<gen>.tmp`, ingests into the copy, closes it,
+  and `os.replace()`s it onto `bathos.db`. Readers therefore never meet a read-write lock on
+  `bathos.db`: they either open the old generation or the new one.
+- Watermark per file: `(project, relative path, size, byte_offset)`. If a file is smaller than
+  its watermark or has vanished, it is re-read from the mirror (D7) and `bth verify` reports it;
+  idempotency by `(writer, seq)` makes re-reading safe. Inodes are not used.
+- Ingest runs on `bth compact`, and opportunistically at the end of any read that found more
+  than 500 unindexed events (non-blocking `flock`; skipped if held).
+- Ingest reads nothing but events: no filesystem, cwd or sidecar reads.
+- Unreachable project roots (unmounted, slow) are skipped with a warning naming them; their
+  already-ingested data stays queryable.
 
-### Worktrees
+### Reads (G3)
 
-- Runs in a linked worktree append to the main checkout's log (D1); deleting the worktree loses
-  nothing. The run's code state is protected independently by the existing pin
-  (`refs/bathos/runs|wip/<run_id>`).
-- A project whose main checkout is missing (bare repo with only linked worktrees) falls back to
-  the first worktree listed by `git worktree list` and emits a warning.
+- Every read uses an in-memory DuckDB connection that `ATTACH`es `bathos.db` read-only as
+  `idx`, then creates in-memory tables with the index's names and columns
+  (`runs`, `campaigns`, ...) as `idx.<table>` with **all** unindexed events folded in: bytes
+  past each file's watermark, from every segment. Folded rows *replace* rows with the same
+  natural key (anti-join), never duplicate them. Unqualified names in user SQL (`bth sql`, MCP
+  `run_sql`, `query.py:416`) resolve to these in-memory tables.
+- `run_sql` therefore cannot modify the index: DML hits only the in-memory copy.
+- If `bathos.db` does not exist yet, the in-memory tables are built from the events alone.
 
 ### Cluster
 
-- SLURM jobs set `BTH_LOG_DIR` to the cluster checkout's `.bth/log/` (resolution rule 1).
-  `bth sync --pull` delegates to `myxcel pull` (per the cluster rules) for that directory and
-  places the segments in the local main checkout's `.bth/log/remote/<remote-name>/`,
-  regardless of which branch either side has checked out. The segment name's host and SLURM
-  ids keep them distinct; idempotency makes repeated pulls safe.
-- Refs created on the cluster clone stay there. The pin's `bundle_path` (created for dirty
-  runs) is pulled with the segments; `bth recover --import-bundles` imports them locally.
-  Clean-tree cluster runs cite a commit that must already exist on the remote branch; if it
-  does not resolve locally after sync, `bth check` reports it, as it does today.
+- SLURM jobs set `BTH_WORKSPACE_ROOT` (existing mechanism) to the cluster checkout, so they log
+  to its `.bth/log/`. `bth sync --pull` delegates to `myxcel pull` for that directory into the
+  local main checkout's `.bth/log/remote/<remote>/` (branches on either side are irrelevant,
+  since the log is ignored). The mirror is written locally when pulled segments are ingested.
+  The old catalog rsync in `sync.py:54-119` is retired at cut-over.
+- Refs created on the cluster clone stay there. For dirty cluster runs the pin's exported
+  bundle is pulled with the segments; `bth recover --import-bundles` imports it. Clean-tree
+  runs cite a commit that must exist on the remote branch; `bth check` reports it if not.
 
-### Discovery (cross-project)
+### Discovery
 
-- `~/.bth/projects.toml` lists project main roots. Writing the first event to a project log
-  registers that root automatically (idempotent), so a run is never written but unindexed.
-  `bth projects prune` removes roots that no longer exist.
-- **Prerequisite (ships first):** the test suite must never touch the real `~/.bth`. Today
-  `~/.bth/projects.toml` contains pytest temp directories. All tests isolate `HOME` and
-  `BTH_*` (AC-11).
+- `~/.bth/projects.toml` lists main roots; the first event written to a project log registers
+  it (idempotent). `bth projects prune` removes vanished roots.
+- **Prerequisite:** today the test suite writes pytest temp dirs into the real
+  `~/.bth/projects.toml`. It must be isolated first (AC-11).
 
-### Cold archive
+### Migration and dual-write
 
-- `bth archive` compacts sealed segments older than a threshold into
-  `~/.bth/catalog/archive/project=<slug>/year=<Y>/month=<M>/*.parquet`, verifies the archive
-  row-for-row against the segments (by `(writer, seq)` and content hash), and only then deletes
-  the sealed JSONL. The archive is authoritative for what it holds; the index reads
-  archive + logs. Nothing is deleted on the assumption that git has a copy.
-
-### Migration
-
-1. Export every cool-tier fragment and every row of every table in "Authoritative writes" to
-   events in the owning project's `.bth/log/sealed/migrated-<date>.jsonl`. Runs whose project
-   root cannot be resolved go to `~/.bth/log/unaffiliated/`.
-2. Build a fresh index from the logs alone.
-3. Diff it against the current `bathos.db` table by table. Every difference must fall in an
-   allow-listed class (data already lost to earlier force-rebuilds; corrupt fragments skipped
-   by `compact.py:787`; `output_metadata` whose files have since changed; unresolvable project)
-   and is written to a signed-off residual report. An unclassified difference blocks cut-over.
-4. Keep the old catalog read-only for one release as a fallback.
+1. **Dual-write:** the runner and every "Authoritative writes" site emit events while still
+   writing the old tiers. The old tiers remain the only read source; log-append failures are
+   warnings during this phase (D6 applies from cut-over).
+2. **Export:** every cool fragment and every warm row becomes events with `origin: migration`,
+   written to the owning project's log (unresolvable ones to `unaffiliated/`). Natural-key
+   idempotency collapses records also produced by dual-write.
+3. **Build and diff:** build an index from events alone and diff it against the current
+   `bathos.db` table by table. Every difference must fall in an allow-listed class (data
+   already lost to earlier force-rebuilds; corrupt fragments skipped by `compact.py:787`;
+   `output_metadata` whose files changed since; postmortem overrides whose files are only in a
+   deleted worktree; unresolvable project) and goes into a signed-off residual report.
+   Unclassified differences block cut-over.
+4. **Cut-over:** reads switch to the new path; the old catalog stays read-only for one release.
 
 ## Acceptance criteria
 
-- AC-1. For any fixed multiset of events, delete + re-ingest produces an identical index
-  (property test with randomized events, writers and ingest order). Skew-sensitive fields
-  (last-writer-wins attributes named under "Fold rules") are excluded from the equality and
-  covered by a separate test that fixes `ts`.
-- AC-2. A lint/test enumerates every SQL write to `bathos.db` in `src/bathos/` and fails if
-  any is not the ingest path; each authoritative write must be an event.
-- AC-3. A run is visible to `bth show/ls/sql` and the MCP equivalents immediately after it
-  finishes, with no `bth compact`.
-- AC-4. Two concurrent `bth run` processes plus a reader in one project never raise a lock
-  error; both runs are recorded.
+- AC-1. For any fixed multiset of events, delete + re-ingest yields an identical index,
+  regardless of ingest order, cwd, or which files exist on disk (property test). The
+  last-writer-wins fields in "Fold rules" are excluded and tested separately with fixed `ts`.
+- AC-2. A test enumerates every SQL write to `bathos.db` in `src/bathos/` and fails unless it is
+  the ingest path; every entry in "Authoritative writes" has an event with a schema.
+- AC-3. A finished run is visible to `bth show/ls/sql` and the MCP equivalents immediately, with
+  no compact, including when it sits in a rotated segment.
+- AC-4. Two concurrent `bth run` processes, one ingest, and one reader never raise a lock error;
+  both runs are recorded.
 - AC-5. Deleting a linked worktree after a run changes nothing in the index or the logs.
-- AC-6. A SLURM array of N tasks, including a requeued task and a task running two
-  `bth run`s, yields N+1 distinct segments with every run recorded once after two pulls.
-- AC-7. A truncated final line is ignored by readers and reported by `bth verify`; an invalid
-  line is quarantined with a reason.
-- AC-8. With the log path made unwritable: `run.started` failure prevents launch; a
-  `run.finished` failure writes to the fallback path and exits non-zero with a structured
-  error; `bth log reconcile` then moves it idempotently.
-- AC-9. Deleting or renaming an active segment mid-run produces a `writer.resumed` event and
-  no lost lines.
-- AC-10. With `.bth/log/` not ignored, `bth run` adds the ignore rule or fails; it never
-  appends to a tracked-or-untracked-visible path. A run's recorded `git_dirty` is unaffected by
-  its own log appends (checked by two consecutive runs on a clean tree both recording
-  `dirty=false`).
-- AC-11. The test suite never writes to the real `~/.bth` (enforced by a session fixture that
-  fails if `~/.bth` mtime changes).
-- AC-12. The size and read-latency figures in this spec are re-measured under a pre-registered
-  bathos sidecar before they are cited.
+- AC-6. A SLURM array (including a requeued task and a task running two `bth run`s) records
+  every run exactly once after two pulls.
+- AC-7. A truncated final line is ignored by reads and reported by `bth verify`; an invalid line
+  is quarantined with a reason.
+- AC-8. With the project log unwritable: `run.started` goes to the fallback and the run proceeds;
+  with both unwritable the script is not launched; a `run.finished` in the fallback exits with
+  the script's status plus a warning.
+- AC-9. Deleting an active segment mid-run yields `writer.resumed` and later lines are recorded.
+- AC-10. With `.bth/log/` not ignored, `bth run` fails with a structured error (or `bth init`
+  adds the rule). Two consecutive runs on a clean tree both record `dirty=false`.
+- AC-11. An autouse fixture points `HOME` and every `BTH_*` path at `tmp_path`, and a test
+  asserts every bathos path accessor resolves under it.
+- AC-12. The size and latency figures here are re-measured under a pre-registered sidecar.
 - AC-13. Migration step 3 produces a residual report in which every difference is classified.
+- AC-14. After `git clean -fdX` in a project, `bth verify` reports the loss and
+  `bth log restore` rebuilds the project log from the mirror byte-for-byte.
+- AC-15. The in-memory read result equals the result after a full ingest, for the same events.
+- AC-16. Root resolution tests: main checkout, linked worktree, bare main, submodule, relative
+  `--git-common-dir`, `BTH_WORKSPACE_ROOT` set, no git repo.
 
 ## Order of delivery
 
-1. AC-11 (test isolation), then the event writer + resolution + D3 enforcement (AC-8/9/10).
-2. Dual-write: runner and every "Authoritative writes" site emit events while still writing the
-   old tiers.
-3. Index ingest + read path (AC-1..4), then migration (AC-13) and cut-over.
-4. Cluster pull, cold archive, opt-in tracking (D7).
+1. AC-11 (test isolation).
+2. Writer, resolution, D3 check, mirror (AC-7..10, AC-14, AC-16).
+3. Dual-write at every authoritative site (AC-2).
+4. Ingest with generation swap, in-memory read path (AC-1, AC-3, AC-4, AC-15).
+5. Migration + residual report (AC-13), then cut-over.
+6. Cluster pull (AC-6).
 
 ## Risks
 
 | Risk | Mitigation |
 |---|---|
-| A write site missed in the table | AC-2 lint fails the build |
-| Main checkout deleted | It is the project; same exposure as the repo itself. Cold archive holds sealed history |
-| Clock skew across hosts | Deterministic tie-break; skew-sensitive fields enumerated (AC-1) |
-| Many active segments slow reads | Tail-read past watermark only; 1 h idle seal |
+| A write site missed | AC-2 fails the build |
+| `git clean -fdX` / project dir loss | Mirror (D7) + `bth log restore` (AC-14) |
+| Main checkout itself deleted | Mirror holds every line |
+| Clock skew | Deterministic tie-break; skew-sensitive fields listed (AC-1) |
+| Copy-then-swap cost as the index grows | 11 MB today; revisit if ingest exceeds a few seconds (measure under AC-12) |
 
 ## Future work
 
-- DuckLake as the index/cold backend (the log format is independent of it).
-- Quack only if multi-process writers to the index itself become necessary.
+Cold archive of old segments, opt-in git tracking of logs, DuckLake as the index backend, Quack.
