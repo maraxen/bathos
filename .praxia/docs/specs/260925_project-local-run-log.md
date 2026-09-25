@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: v5 (after adversarial cycle 5)
+revision: v6 (after adversarial cycle 6)
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -188,24 +188,41 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   `question`, `hypothesis`, `started_at` take the latest non-empty value; claim fields and
   `stopping_threshold` follow what the current upsert/update code does, not a new rule. Any
   divergence AC-17 finds is a spec bug to fix here, not a behaviour change.
-- **Imported history:** the legacy importer emits exactly one `<kind>.imported` full-state
-  event per entity, built by merging that entity's legacy sources in precedence order
-  **warm row > cool fragment > campaign JSON** (field by field: the first source with a
-  non-empty value wins). Its `ts` is the source record's own time (run: end time if finished,
-  else start; campaign: `concluded_at` or `started_at`; ledger rows: their own timestamp). Its
-  eid is `uuid5(NAMESPACE_BATHOS, f"import:{kind}:{entity}:{sha256(merged state)}")`, so
-  re-importing unchanged sources is a no-op and a changed source (e.g. a straggler fragment
-  that now says `finished`) yields a new event. Several imported events for one entity fold by
-  status rank (`running` < terminal) and then `ts`. Imported and live events never describe the
-  same fact: after cut-over, every new run and campaign is created only by live events.
-- **Campaign-derived values:** a campaign's members are the union of `campaign.run_added` and
-  runs whose `run.started.data.campaign_id` names it. `seq_position`, `evalue` and the threshold
-  lock are **computed by the campaign fold** over all members sorted by `(run ts, run_id)`,
-  using each member's sidecar declaration from `run.started.data` and its folded outcome. That
-  reproduces `campaigns.py:414-521` without reading files. Any event on a member run marks its
-  campaign(s) as affected, at ingest and in the read views. A member with `ts` before
-  `concluded_at` that arrives after conclusion is included, and `bth verify` reports
-  `evalue_changed_after_conclusion` rather than silently altering what a stopping decision saw.
+- **Imported history:** the legacy importer emits one `<kind>.imported` event per entity
+  (plus `campaign_run.imported` per legacy `campaign_runs` row, carrying its stored `evalue` and
+  `seq_position`), built by merging that entity's legacy sources in precedence order
+  **warm row > cool fragment > campaign JSON**, field by field (first non-empty value wins).
+  The importer never reads current sidecar or output files. `ts` is the source record's own
+  time (run: end time if finished, else start; campaign: `concluded_at` or `started_at`; ledger
+  rows: their own timestamp). eid = `uuid5(NAMESPACE_BATHOS,
+  f"import:{kind}:{entity}:{sha256(merged state)}")`, so unchanged sources re-import as a no-op.
+- **Several imported events for one entity merge field by field**, never as whole-state
+  replacement: status-dependent fields (`status`, end time, `exit_code`, `outcome` when not
+  overridden) come from the highest status rank (`running` < terminal); every other field keeps
+  the first non-empty value in order of source precedence (warm-derived before fragment-only),
+  then `ts`. So a late fragment can advance a run from `running` to `finished` but can never
+  blank a field (e.g. `metadata`, `output_metadata`, postmortem fields) that an earlier
+  warm-derived import set.
+- **Stragglers** (legacy data imported after cut-over) are tagged `origin: straggler` with
+  `ts` = import time, so they order after the base import and after earlier live events, and
+  they merge by the same fill-only rule. After cut-over, all new runs and campaigns come from
+  live events; a straggler only adds to entities, never replaces live state.
+- **Campaign-derived values:** a campaign's members are the union of `campaign.run_added`,
+  `campaign_run.imported`, and runs whose `run.started.data.campaign_id` or
+  `run.imported.data.campaign_id` names it. The campaign fold reproduces
+  `campaigns.py:380-521`:
+  - members are sorted by the folded run **start time** `runs.timestamp` (null sorts first, as
+    `datetime.min` UTC), then `run_id` (`_run_sort_key`, `campaigns.py:406-412`). The event `ts`
+    is never used for this order.
+  - each member's outcome is its folded `runs.outcome` (postmortem override applied).
+  - a member with a sidecar declaration in `run.started.data` gets `evalue` computed from it; a
+    member without one (imported history) keeps its stored `evalue` from
+    `campaign_run.imported`, mirroring `evalue = COALESCE(?, evalue)` (`campaigns.py:517`).
+  - the threshold lock is computed as today; on a threshold mismatch the campaign is skipped as
+    today (`campaigns.py:500-504`) and `bth verify` reports it.
+  Any event on a member run marks its campaign(s) as affected, at ingest and in the read views.
+  A member whose start time precedes `concluded_at` but that arrives after conclusion is
+  included, and `bth verify` reports `evalue_changed_after_conclusion`.
 - `run.started` without `run.finished` folds to `status='incomplete'` until `run.reaped` or a
   later `run.finished`.
 - Cross-host clock skew can change which of two conflicting last-writer-wins updates wins; it
@@ -285,8 +302,9 @@ switched on in one step.
 3. **Build and diff:** build `index.db` from events alone and diff it against `bathos.db` table
    by table. Every difference must fall in an allow-listed class (data already lost to earlier
    force-rebuilds; corrupt fragments skipped by `compact.py:787`; `output_metadata` whose files
-   changed since; postmortem overrides whose files are only in a deleted worktree; e-values
-   whose sidecar changed since compact last read it; unresolvable project) and goes into a
+   changed since; postmortem overrides whose files are only in a deleted worktree; campaign
+   members whose legacy e-value used the fragment outcome rather than the postmortem-overridden
+   one; unresolvable project) and goes into a
    signed-off residual report. Unclassified differences abort.
 4. **Switch:** reads and writes move to the new path. `bathos.db` is renamed to
    `bathos.db.frozen` and kept read-only for one release.
@@ -330,6 +348,8 @@ switched on in one step.
   `bth log restore` every event present in the mirror for that root is back in the project log
   and the index is unchanged.
 - AC-15. For the same events, the read views equal the tables produced by a full ingest.
+- AC-16. Root resolution tests: main checkout, linked worktree, bare main, submodule, relative
+  `--git-common-dir`, `BTH_WORKSPACE_ROOT` set, no git repo.
 - AC-17. Differential fold test: for randomized operation sequences on campaigns, anchors and
   runs, the old upsert/update code and the new fold produce identical rows.
 - AC-18. No module other than `bathos.index` and the ingest path calls `duckdb.connect` on a
@@ -340,15 +360,16 @@ switched on in one step.
   batching (including a late event with an earlier `ts`) yields the same index and the same
   read results as one sorted full ingest.
 - AC-21. Importing the same legacy catalog twice changes nothing the second time; importing a
-  late fragment for an already-imported run changes that run exactly once (e.g. running to
-  finished).
-- AC-22. Campaign fold: for sequential campaigns, the fold's `seq_position`, `evalue` and
-  threshold lock equal what `campaigns.py:414-521` computes for the same runs and sidecars, and
-  do not depend on the order in which member-run events arrive.
+  late fragment for an already-imported run advances its status exactly once (e.g. running to
+  finished) and leaves every warm-only field (`metadata`, `output_metadata`, postmortem fields)
+  unchanged.
+- AC-22. Campaign fold: for sequential campaigns, the fold's `seq_position`, `evalue`,
+  threshold lock and threshold-mismatch skip equal what `campaigns.py:380-521` computes for the
+  same runs, outcomes and sidecars; members without a declaration keep their stored `evalue`;
+  the result does not depend on the order in which member-run events arrive.
 - AC-23. After cut-over, a write by an older bathos (fragment, submit Parquet, or new
   `bathos.db`) is imported and reported by `bth verify`.
-- AC-16. Root resolution tests: main checkout, linked worktree, bare main, submodule, relative
-  `--git-common-dir`, `BTH_WORKSPACE_ROOT` set, no git repo.
+
 
 ## Order of delivery
 
