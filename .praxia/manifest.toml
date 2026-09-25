@@ -3,6 +3,9 @@ name            = "bathos"
 version         = "0.5.0"
 description     = "Experiment tracking — pre-registration, provenance, campaigns"
 requires_praxia = ">=1.0"
+# Skills reach Claude Code only via the plugin bundle (bathos:<skill>); skip
+# praxia's legacy copy into ~/.claude/skills, which duplicated every listing.
+skills_delivered_by_plugin = true
 # Declares bathos as a provider of the generic praxia "readback" capability
 # (praxia-plugin-readback: resolve_pin/get_trust_state/query_attestation/
 # figure_lookup — all already live MCP tools on bth-mcp below, S1/S4/S7).
