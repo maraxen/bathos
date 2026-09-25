@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: v4 (after adversarial cycle 4)
+revision: v5 (after adversarial cycle 5)
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -78,8 +78,11 @@ invest_overrides: []
   to `<main root>/.bth/log/<segment>` and `~/.bth/log-mirror/<project_id>/<segment>`, where
   `project_id` is a UUID stored in the project's tracked `.bth.toml` (`[project] id`). It is
   minted **only** by `bth init` (or `bth init --assign-id` for existing projects), which the
-  user commits; a run never writes `.bth.toml`. `bth run` in a project with no id fails with a
-  structured error naming that command. The id is stable across moves, clones and worktrees.
+  user commits; a run never writes `.bth.toml`. The id is read from the resolved root's
+  `.bth.toml` (the main checkout, per D1). A local `bth run` with no id fails with a structured
+  error naming that command. SLURM jobs use `BTH_PROJECT_ID`, which `bth submit` exports from
+  the local id; a job with neither writes `project_id: null` and ingest maps its `project` slug
+  through `projects.toml`, with a warning. The id is stable across moves, clones and worktrees.
   Forks or copies share it deliberately; segment names never collide, `bth log restore` only
   restores events whose `worktree_root` lies under the restoring root, and `bth verify` flags
   two registered roots with the same id. The mirror
@@ -96,18 +99,19 @@ fold; event identity is the `eid` (see Line envelope).
 
 | Current write | Location | Event (natural key) |
 |---|---|---|
-| run row, start and finish | `runner.py:524,623,847` | `run.started`, `run.finished` (`run_id`) |
+| run row, start and finish | `runner.py:524,623,847` | `run.started` (`run_id`; `data` includes the parsed sidecar declaration and its sha256, so e-value inputs travel with the run), `run.finished` (`run_id`) |
+| submit provenance, one Parquet per record | `catalog.py:109` (`write_submit_provenance`; read by `sprint_audit.py:226`) | `submit.recorded` (`submit_id`; includes `slurm_job_id`) |
 | `runs.output_metadata` (drift baseline, `checker.py:132`) | recomputed at compact, `compact.py:959-976` | `run.outputs_hashed` (`run_id`, `seq`): at run end, and on explicit `bth check --rebaseline`. Behaviour change: compact no longer silently refreshes the baseline when outputs change |
 | outcome + `postmortem_*` override | `compact.py:1012` (reads files via cwd) | `run.postmortem_applied` (`run_id`, postmortem sha256), emitted by postmortem validate/register |
 | `claim_discriminates`, `claim_isolates`, `parity_run_type` COALESCE | `compact.py:978` | carried in `run.started.data` from the sidecar |
 | `runs.metadata` rewrite by reaper | `reap.py:361` | `run.reaped` (`run_id`) |
 | campaign insert/upsert | `campaigns.py`, `campaigns.py:1194`, `claim.py:649` | `campaign.created` (`campaign_id`) |
 | `claim_path`, `claim_sha256` (Union Gate tamper anchor) | `claim.py:684`, `claim.py:1062` (incl. attest_parity rollback) | `campaign.claim_bound` (`campaign_id`, sha256); a rollback is a new event, not a deletion |
-| `stopping_threshold` | `campaigns.py:340,508` | `campaign.threshold_set` (`campaign_id`, `seq`) |
-| `evalue`, `seq_position` | `campaigns.py:517` | `campaign_run.evalue_updated` (`campaign_id`, `run_id`, `seq`) |
+| `stopping_threshold` set explicitly by a command | `campaigns.py:340` | `campaign.threshold_set` (`campaign_id`) |
+| `evalue`, `seq_position`, threshold lock | `campaigns.py:316-351`, `:414-521`, `:508` (recomputed from sidecar files at compact) | **no event**: derived by the campaign fold (see Fold rules) |
 | `claim_mode='bypassed'` | `campaigns.py:1043` | `campaign.claim_bypassed` (`campaign_id`) |
 | other campaign updates | `campaigns.py:1222` | `campaign.updated` (`campaign_id`, `seq`) |
-| `campaign_runs` insert | `campaigns.py` | `campaign.run_added` (`campaign_id`, `run_id`) |
+| `campaign_runs` insert | `campaigns.py` | `campaign.run_added` (`campaign_id`, `run_id`); membership is ALSO implied by `run.started.data.campaign_id` (`campaigns.py:414`) |
 | campaign conclusion | `campaigns.py` | `campaign.concluded` (`campaign_id`) |
 | `campaign_edges`, `run_edges` | `campaign_edges.py` | `edge.added` (`src`, `dst`, `type`) |
 | `blast_radius_ledger` | `blast_radius.py:231`, `compact.py:620` | `blast_radius.recorded` (existing ledger id) |
@@ -184,9 +188,24 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   `question`, `hypothesis`, `started_at` take the latest non-empty value; claim fields and
   `stopping_threshold` follow what the current upsert/update code does, not a new rule. Any
   divergence AC-17 finds is a spec bug to fix here, not a behaviour change.
-- **Imported history:** events produced by the legacy importer (Migration) carry deterministic
-  eids, `uuid5(NAMESPACE_BATHOS, f"{kind}:{entity}:{source_version}")`, so importing the same
-  source twice, or importing a late legacy fragment, yields the same events and is a no-op.
+- **Imported history:** the legacy importer emits exactly one `<kind>.imported` full-state
+  event per entity, built by merging that entity's legacy sources in precedence order
+  **warm row > cool fragment > campaign JSON** (field by field: the first source with a
+  non-empty value wins). Its `ts` is the source record's own time (run: end time if finished,
+  else start; campaign: `concluded_at` or `started_at`; ledger rows: their own timestamp). Its
+  eid is `uuid5(NAMESPACE_BATHOS, f"import:{kind}:{entity}:{sha256(merged state)}")`, so
+  re-importing unchanged sources is a no-op and a changed source (e.g. a straggler fragment
+  that now says `finished`) yields a new event. Several imported events for one entity fold by
+  status rank (`running` < terminal) and then `ts`. Imported and live events never describe the
+  same fact: after cut-over, every new run and campaign is created only by live events.
+- **Campaign-derived values:** a campaign's members are the union of `campaign.run_added` and
+  runs whose `run.started.data.campaign_id` names it. `seq_position`, `evalue` and the threshold
+  lock are **computed by the campaign fold** over all members sorted by `(run ts, run_id)`,
+  using each member's sidecar declaration from `run.started.data` and its folded outcome. That
+  reproduces `campaigns.py:414-521` without reading files. Any event on a member run marks its
+  campaign(s) as affected, at ingest and in the read views. A member with `ts` before
+  `concluded_at` that arrives after conclusion is included, and `bth verify` reports
+  `evalue_changed_after_conclusion` rather than silently altering what a stopping decision saw.
 - `run.started` without `run.finished` folds to `status='incomplete'` until `run.reaped` or a
   later `run.finished`.
 - Cross-host clock skew can change which of two conflicting last-writer-wins updates wins; it
@@ -235,7 +254,8 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   to its `.bth/log/`. `bth sync --pull` delegates to `myxcel pull` for that directory into the
   local main checkout's `.bth/log/remote/<remote>/` (branches on either side are irrelevant,
   since the log is ignored). The mirror is written locally when pulled segments are ingested.
-  The old catalog rsync in `sync.py:54-119` is retired at cut-over.
+  The old catalog rsync in `sync.py:54-119` narrows at cut-over to pulling legacy fragments
+  only, and is removed by `bth migrate --retire-legacy` (Migration step 5).
 - Refs created on the cluster clone stay there. For dirty cluster runs the pin's exported
   bundle is pulled with the segments; `bth recover --import-bundles` imports it. Clean-tree
   runs cite a commit that must exist on the remote branch; `bth check` reports it if not.
@@ -252,22 +272,30 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
 There is no dual-write phase: the new path is built and tested against fixture catalogs, then
 switched on in one step.
 
-1. **Quiesce:** `bth migrate --to-log` refuses to start while any run is `running` in the old
-   catalog or any SLURM job submitted through bathos is queued or running (checked via myxcel),
-   unless `--force` is given.
-2. **Import:** the legacy importer converts every cool fragment, every campaign JSON, and every
-   row of every table in "Authoritative writes" into events with deterministic eids (see Fold
-   rules), written to the owning project's `.bth/log/` (unresolvable ones to `unaffiliated/`).
+0. **Ids:** `bth migrate --to-log` refuses to start until every registered root's `.bth.toml`
+   has a `[project] id` present in its committed `HEAD` (it lists the roots missing one and
+   the `bth init --assign-id` command).
+1. **Quiesce:** it runs `bth reap` first (reconciling stale `running` rows through `sacct`),
+   then refuses while any job in the user's `squeue` has a job id found in submit records or
+   in a `running` run's `slurm_job_id`. Other queued jobs are listed; proceeding past them
+   needs `--force`.
+2. **Import:** convert every cool fragment, submit record, campaign JSON, and every row of every
+   table in "Authoritative writes" into `*.imported` events (Fold rules), written to the owning
+   project's `.bth/log/` (unresolvable ones to `unaffiliated/`).
 3. **Build and diff:** build `index.db` from events alone and diff it against `bathos.db` table
    by table. Every difference must fall in an allow-listed class (data already lost to earlier
    force-rebuilds; corrupt fragments skipped by `compact.py:787`; `output_metadata` whose files
-   changed since; postmortem overrides whose files are only in a deleted worktree; unresolvable
-   project) and goes into a signed-off residual report. Unclassified differences abort.
-4. **Switch:** reads and writes move to the new path; `bathos.db` is frozen read-only for one
-   release.
-5. **Stragglers:** legacy fragments that arrive later (a cluster job still using an old bathos)
-   are converted by the same importer on `bth sync --pull`/`bth compact`; deterministic eids
-   make this idempotent.
+   changed since; postmortem overrides whose files are only in a deleted worktree; e-values
+   whose sidecar changed since compact last read it; unresolvable project) and goes into a
+   signed-off residual report. Unclassified differences abort.
+4. **Switch:** reads and writes move to the new path. `bathos.db` is renamed to
+   `bathos.db.frozen` and kept read-only for one release.
+5. **Stragglers and stale installs:** an older bathos (e.g. pinned in a project venv, or on the
+   cluster) may keep writing cool fragments, submit Parquet, or a fresh `bathos.db`. The
+   straggler importer converts all three on `bth compact` and `bth sync --pull`, and
+   `bth verify` reports every legacy write after cut-over with the writing host. The legacy
+   fragment pull from the cluster stays enabled until `bth migrate --retire-legacy`, which
+   refuses while any unimported legacy data exists.
 
 ## Acceptance criteria
 
@@ -311,21 +339,28 @@ switched on in one step.
 - AC-20. Arrival-order independence: delivering the same events in any order and in any
   batching (including a late event with an earlier `ts`) yields the same index and the same
   read results as one sorted full ingest.
-- AC-21. Importing the same legacy catalog twice, and importing a single late legacy fragment
-  after cut-over, changes the index exactly once.
+- AC-21. Importing the same legacy catalog twice changes nothing the second time; importing a
+  late fragment for an already-imported run changes that run exactly once (e.g. running to
+  finished).
+- AC-22. Campaign fold: for sequential campaigns, the fold's `seq_position`, `evalue` and
+  threshold lock equal what `campaigns.py:414-521` computes for the same runs and sidecars, and
+  do not depend on the order in which member-run events arrive.
+- AC-23. After cut-over, a write by an older bathos (fragment, submit Parquet, or new
+  `bathos.db`) is imported and reported by `bth verify`.
 - AC-16. Root resolution tests: main checkout, linked worktree, bare main, submodule, relative
   `--git-common-dir`, `BTH_WORKSPACE_ROOT` set, no git repo.
 
 ## Order of delivery
 
 1. AC-11 (test isolation).
-2. Writer, resolution, D3 check, `project_id` via `bth init`, mirror (AC-7, AC-9, AC-10,
-   AC-14, AC-16), behind a feature flag; production still uses the old tiers.
-3. `index.db`, `events` table, fold, generation-swap ingest, read API; move all 25 modules to
-   it, exercised against fixture catalogs (AC-1, AC-15, AC-17, AC-18, AC-19, AC-20).
-4. Legacy importer (AC-21) and cluster log pull (AC-6).
-5. Cut-over via `bth migrate --to-log` (AC-13); then AC-2, AC-3, AC-4 and AC-8 hold in
-   production; `bathos.db` frozen.
+2. Writer, resolution, D3 check, `project_id` via `bth init`/`--assign-id`, mirror (AC-7,
+   AC-9, AC-10, AC-14, AC-16), behind a feature flag; production still uses the old tiers.
+3. `index.db`, `events` table, fold (incl. the campaign fold), generation-swap ingest, read API;
+   move all 25 modules to it, exercised against fixture catalogs (AC-1, AC-15, AC-17, AC-18,
+   AC-19, AC-20, AC-22).
+4. Legacy and straggler importer (AC-21, AC-23) and cluster log pull (AC-6).
+5. Assign ids in every registered project (migration step 0), then cut-over via
+   `bth migrate --to-log` (AC-13); then AC-2, AC-3, AC-4 and AC-8 hold in production.
 
 ## Risks
 
