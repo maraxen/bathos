@@ -101,7 +101,7 @@ fold; event identity is the `eid` (see Line envelope).
 |---|---|---|
 | run row, start and finish | `runner.py:524,623,847` | `run.started` (`run_id`; `data` includes the parsed sidecar declaration and its sha256, so e-value inputs travel with the run), `run.finished` (`run_id`) |
 | submit provenance, one Parquet per record | `catalog.py:109` (`write_submit_provenance`; read by `sprint_audit.py:226`) | `submit.recorded` (`submit_id`; includes `slurm_job_id`) |
-| `runs.output_metadata` (drift baseline, `checker.py:132`) | recomputed at compact, `compact.py:959-976` | `run.outputs_hashed` (`run_id`, `seq`): at run end, and on explicit `bth check --rebaseline`. Behaviour change: compact no longer silently refreshes the baseline when outputs change |
+| `runs.output_metadata` (drift baseline, `checker.py:132`) | recomputed at compact, `compact.py:959-976` | `run.outputs_hashed` (`run_id`): at run end, and on explicit `bth check --rebaseline`. Behaviour change: compact no longer silently refreshes the baseline when outputs change |
 | outcome + `postmortem_*` override | `compact.py:1012` (reads files via cwd) | `run.postmortem_applied` (`run_id`, postmortem sha256), emitted by postmortem validate/register |
 | `claim_discriminates`, `claim_isolates`, `parity_run_type` COALESCE | `compact.py:978` | carried in `run.started.data` from the sidecar |
 | `runs.metadata` rewrite by reaper | `reap.py:361` | `run.reaped` (`run_id`) |
@@ -110,7 +110,7 @@ fold; event identity is the `eid` (see Line envelope).
 | `stopping_threshold` set explicitly by a command | `campaigns.py:340` | `campaign.threshold_set` (`campaign_id`) |
 | `evalue`, `seq_position`, threshold lock | `campaigns.py:316-351`, `:414-521`, `:508` (recomputed from sidecar files at compact) | **no event**: derived by the campaign fold (see Fold rules) |
 | `claim_mode='bypassed'` | `campaigns.py:1043` | `campaign.claim_bypassed` (`campaign_id`) |
-| other campaign updates | `campaigns.py:1222` | `campaign.updated` (`campaign_id`, `seq`) |
+| other campaign updates | `campaigns.py:1222` | `campaign.updated` (`campaign_id`) |
 | `campaign_runs` insert | `campaigns.py` | `campaign.run_added` (`campaign_id`, `run_id`); membership is ALSO implied by `run.started.data.campaign_id` (`campaigns.py:414`) |
 | campaign conclusion | `campaigns.py` | `campaign.concluded` (`campaign_id`) |
 | `campaign_edges`, `run_edges` | `campaign_edges.py` | `edge.added` (`src`, `dst`, `type`) |
