@@ -63,20 +63,52 @@ def _find_script_path(argv: list[str], cwd: Path) -> Path | None:
     # skipping whatever token followed. Only the passthrough branch's explicit `continue`
     # avoided it, which is why bare `uv run python script.py` never showed the bug.
     _UV_PASSTHROUGH = {"run", "python", "python3"}
+    # Options that take their value as the NEXT argv token (python's -c/-m/-W/-X and uv run's
+    # value options). Without this, `uv run --with numpy python x.py` would treat `numpy` as
+    # the script.
+    _VALUE_FLAGS = {
+        "-c",
+        "-m",
+        "-W",
+        "-X",
+        "--with",
+        "--with-editable",
+        "--with-requirements",
+        "--project",
+        "--directory",
+        "--python",
+        "-p",
+        "--extra",
+        "--group",
+        "--only-group",
+        "--no-group",
+        "--package",
+        "--from",
+        "--index",
+        "--default-index",
+        "--index-url",
+        "--extra-index-url",
+        "--env-file",
+        "--config-file",
+        "--cache-dir",
+        "--prerelease",
+        "--resolution",
+    }
     i = 1
     while i < len(argv):
         arg = argv[i]
         if arg in _UV_PASSTHROUGH:
             i += 1
             continue
-        if arg in ("-c", "-m", "-W"):
-            # These take a separate value argument (e.g. `-m module`, `-W ignore`).
+        if arg in _VALUE_FLAGS:
+            # These take a separate value argument (`-m module`, `-W ignore`,
+            # `uv run --with numpy`, `uv run --project .`): skip flag and value.
             i += 2
             continue
         if arg.startswith("-"):
             # Valueless flags (`--no-sync`, `--quiet`) and single-token `--opt=value`
             # flags (`--prerelease=allow`, `--python=3.12`) are both exactly one argv
-            # token -- neither takes a separate value argument.
+            # token.
             i += 1
             continue
         # First non-flag arg after python is the script

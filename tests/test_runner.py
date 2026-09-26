@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 
 import duckdb
+import pytest
 
 from bathos.catalog import init_catalog, read_runs
 from bathos.runner import run_script
@@ -1372,3 +1373,23 @@ def test_find_script_path_empty_argv():
     from bathos.runner import _find_script_path
 
     assert _find_script_path([], Path(".")) is None
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        ["uv", "run", "--with", "numpy", "python"],
+        ["uv", "run", "--project", ".", "python3"],
+        ["uv", "run", "--python", "3.12"],
+        ["uv", "run", "--with", "numpy", "--no-sync", "python3"],
+        ["python3", "-X", "dev"],
+    ],
+)
+def test_find_script_path_space_separated_option_values(tmp_path, prefix):
+    """Debt #1946 follow-up: an option whose value is the next token must skip both
+    tokens, or the value (e.g. `numpy`) is mistaken for the script."""
+    from bathos.runner import _find_script_path
+
+    script = tmp_path / "script.py"
+    script.write_text("print(1)\n")
+    assert _find_script_path([*prefix, "script.py"], tmp_path) == script.resolve()
