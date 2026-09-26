@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: v17 (after adversarial cycle 17)
+revision: v18 (after adversarial cycle 18)
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -353,6 +353,9 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   `connect_read`). Root ids use `main_root`, not `project_id`, wherever two roots can share
   an id, so every file belongs to exactly one root. A file smaller than its watermark, or vanished, is re-read from the other copy
   (D7) and reported by `bth verify`; `eid` dedup makes re-reading safe. Inodes are not used.
+- **Flag gate:** before the switch, ingest into `~/.bth/catalog/index.db` runs only with the flag
+  on (fixture catalogs under a test `BTH_CATALOG_DIR`) or from `bth migrate --to-log` step 4;
+  with the flag off, `bth compact` and the end-of-command hook run only the legacy compaction.
 - **When ingest runs:** on `bth compact`, and non-blockingly (skipped if the lock is held) at the
   end of commands that write events (`bth run`, campaign and claim commands, MCP equivalents).
   Read commands, including `bth view`, never ingest.
@@ -376,11 +379,15 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
 - All 25 modules that call `duckdb.connect(` today (65 call sites) move to this API or to the
   ingest path; AC-18 fails the build on any other `duckdb.connect` against a catalog path.
 - If `index.db` does not exist yet, the views are built from the events alone.
-- **Before cut-over (flag off)** `connect_read()` does exactly what each caller does today:
-  `duckdb.connect(bathos.db if it exists else "")` (`query.py:427-429`), read-write, with no
-  views and no `connect_legacy`. So production behaviour, including unqualified table names, DML
-  in `bth sql` and today's lock failure, is unchanged until Migration step 4 (the switch); the
-  read-only views and the DML refusal are part of the switch. G3 holds only from cut-over.
+- **Before cut-over (flag off)** `connect_read(path, read_only=..., missing=...)` is a
+  pass-through: it opens `bathos.db` with exactly the arguments that call site uses today
+  (about 40 sites open `read_only=True`, e.g. `linter.py:422`, `prereg.py:165`; `run_sql` opens
+  read-write and falls back to `""` when the file is missing, `query.py:427-429`), creates no
+  views and does not use `connect_legacy`. Legacy writers (e.g. `campaigns.py:45`,
+  `anchor.py:198`, `compact.py:838`) keep their own opens on the AC-18 test's allow-list and
+  never go through `connect_read`. So production behaviour, including unqualified table names,
+  DML in `bth sql` and today's lock failure, is unchanged until Migration step 4 (the switch);
+  the read-only views and the DML refusal are part of the switch. G3 holds only from cut-over.
 
 ### Cluster
 
@@ -546,7 +553,7 @@ switched on in one step.
    still uses the old tiers. Every write site in "Authoritative writes" gains its event emission behind the same
    flag (AC-25).
 3. `index.db`, `events` table, fold (incl. the campaign fold), generation-swap ingest, read API
-   (flag off: attaches `bathos.db` read-only); move all 25 modules to it, exercised against
+   (flag off: the pass-through in "Reads"); move all 25 modules to it, exercised against
    fixture catalogs (AC-1, AC-5, AC-7's ingest half, AC-9, AC-12, AC-15, AC-17, AC-18, AC-19,
    AC-20, AC-22). AC-18 is enforced
    from here; the legacy write sites (flag-off branch only) sit on an explicit allow-list in the
