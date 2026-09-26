@@ -21,6 +21,7 @@ _BTH_TOML_TEMPLATE = """\
 [project]
 slug = "{slug}"
 root = "{root}"
+id = "{project_id}"
 """
 
 _GITIGNORE_ENTRY = "scripts/scratch/\n"
@@ -43,8 +44,12 @@ def init_project(
         (project_root / d).mkdir(parents=True, exist_ok=True)
 
     # .bth.toml
+    from bathos.runlog.project_id import mint_project_id
+
     toml_path = project_root / ".bth.toml"
-    content = _BTH_TOML_TEMPLATE.format(slug=slug, root=str(project_root))
+    content = _BTH_TOML_TEMPLATE.format(
+        slug=slug, root=str(project_root), project_id=mint_project_id()
+    )
     remote_root = None
     if remote:
         host, remote_root = remote.split(":", 1)
@@ -71,6 +76,11 @@ def init_project(
                 f.write("\n")
             f.write(_GITIGNORE_ENTRY)
 
+    # D3: .bth/log/ must be gitignored before any run can append to it.
+    from bathos.runlog.resolve import ensure_log_ignored
+
+    ensure_log_ignored(project_root)
+
     # Catalog
     init_catalog(catalog_dir)
 
@@ -78,3 +88,14 @@ def init_project(
     from bathos.config import register_project
 
     register_project(slug=slug, catalog_dir=catalog_dir)
+
+
+def assign_id_to_existing_project(project_root: Path) -> tuple[str, bool]:
+    """`bth init --assign-id`: retrofit a `[project] id` onto an existing
+    project's `.bth.toml` without redoing the rest of `init_project` (script
+    dirs, .gitignore, catalog, env.sh). Returns `(project_id, minted)`.
+    """
+    from bathos.runlog.project_id import assign_project_id
+
+    result = assign_project_id(project_root)
+    return result.project_id, result.minted
