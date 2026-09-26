@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: v22 (after adversarial cycle 22)
+revision: v23 (after adversarial cycle 23)
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -381,7 +381,7 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   excluding `remote/`); `mirror`: `project_id` or `_null/<slug>`; `fallback`: slug;
   `unaffiliated`: constant; `remote-log`, `remote-fallback`, `remote-mirror`:
   `(main_root, remote)`; `staging`: the attempt id (read by migration step 3, and by ingest and
-  `connect_read` only between the marker and step 4(e); otherwise never enumerated). Root ids use `main_root`, not `project_id`, wherever two roots can share
+  `connect_read` from step 4(a) to 4(e); otherwise never enumerated). Root ids use `main_root`, not `project_id`, wherever two roots can share
   an id, so every file belongs to exactly one root. A file smaller than its watermark, or vanished, is re-read from the other copy
   (D7) and reported by `bth verify`; `eid` dedup makes re-reading safe. Inodes are not used.
 - **Flag gate:** ingest runs only with the flag on (see "Mode"), or from
@@ -460,10 +460,13 @@ switched on in one step.
    then refuses while any job in the user's `squeue` has a job id found in submit records or
    in a `running` run's `slurm_job_id`. Other queued jobs are listed; proceeding past them
    needs `--force`. It then takes the writers lock exclusively (waiting for, and reporting, any
-   running local `bth` writer) and holds it until step 4 completes.
+   running local `bth` writer) and holds it until step 4 completes, and, in-process under that
+   lock, runs the legacy (non-rebuild) compaction so `bathos.db` includes every fragment just
+   pulled before step 3 diffs against it.
 2. **Import:** convert every cool fragment, submit record, campaign JSON, and every row of every
    table in "Authoritative writes" into `*.imported` events (Fold rules). Before cut-over the
-   events go to a staging directory, `~/.bth/log/import-staging/<attempt>/`, never to project
+   events go to a staging directory, `~/.bth/log/import-staging/<attempt>/<root kind>/<root id>/`
+   (one subtree per destination project log or `unaffiliated`), never to project
    logs; an abort at step 3 deletes it (including its index, below). Standalone `bth migrate --import-legacy` refuses to run
    before cut-over. After cut-over it writes directly to the owning project's `.bth/log/`
    (unresolvable ones to `unaffiliated/`).
@@ -474,7 +477,9 @@ switched on in one step.
    changed since; postmortem overrides whose files are only in a deleted worktree; campaign
    members whose legacy e-value used the fragment outcome rather than the postmortem-overridden
    one; unresolvable project); unclassified differences abort. The classified residuals are
-   written to a report in the attempt directory and `--to-log` stops there; the user signs off by
+   written to a canonical report (one JSON line per difference, `canon: 1` form, sorted by
+   table then key, no attempt id, time or host fields) in the attempt directory and `--to-log`
+   stops there; the user signs off by
    re-running with `--accept-residual <sha256 of that report>`, which proceeds only if a fresh
    run of steps 1-3 reproduces a report with exactly that hash.
 4. **Switch.** The cut-over marker is the single commit point. In order: (a) build
@@ -482,9 +487,10 @@ switched on in one step.
    `cutover.json`, whose body also lists the staged segment names, after which reads and writes
    use the new path; (c) move each staged segment into its owning project log and mirror as
    `import-<attempt>-<n>.jsonl` (temp file then rename; skipped if already present); (d) rename
-   `bathos.db` to `bathos.db.frozen`; (e) delete the staging directory. Until (c) finishes, the
-   staging directory is an enumerated root for ingest and `connect_read` (kind `staging`), so
-   nothing is unreadable in between; eid dedup absorbs the move.
+   `bathos.db` to `bathos.db.frozen`; (e) delete the staging directory and its
+   `ingest_watermarks` rows. From (a) to (e) the staging directory is an enumerated root (kind
+   `staging`), so nothing is unreadable in between; eid dedup absorbs the move. Until (d)
+   completes, `bathos.db` is class `warm`.
    **Re-running `bth migrate --to-log`:** with the marker absent, nothing outside the staging
    directory has changed except possibly `~/.bth/catalog/index.db`, so it deletes both and
    starts again from step 1 (pull, reap, squeue check, exclusive lock, full re-listing of every
@@ -592,8 +598,10 @@ switched on in one step.
 - AC-29. `bth migrate --to-log` killed during step 2, during step 3, and after each of step 4's
   actions (a)-(e), then re-run, completes the switch with the same set of `(eid, kind, entity,
   data)` events and the same derived tables as an uninterrupted run (segment names and envelope
-  `writer`/`seq` may differ); a legacy write made while it was down is included; no project log
-  holds an imported event unless the marker exists; a `bth run`
+  `writer`/`seq` may differ); for a kill before the marker, a legacy write made while it was
+  down is included (a changed residual report then needs a fresh `--accept-residual`), and for a
+  kill after it, such a write is reported by `bth verify` (AC-23); no project log holds an
+  imported event unless the marker exists; a `bth run`
   started before the switch is either wholly legacy or wholly events; a `bth submit` after
   cut-over produces a job that appends events, and `BTH_LOG_MODE=1` outside a SLURM job or test
   is refused.
