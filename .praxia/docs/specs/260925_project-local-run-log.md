@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: v24 (after adversarial cycle 24)
+revision: v26 (after adversarial cycle 26)
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -458,15 +458,16 @@ switched on in one step.
    has a `[project] id` present in its committed `HEAD`, or, for a root with no git
    repository, present in the file (it lists the roots missing one and the
    `bth init --assign-id` command).
-1. **Quiesce:** it first pulls the legacy catalog from every configured remote (the existing
+1. **Quiesce:** holding the writers lock shared (as any local writer does), it first pulls the legacy catalog from every configured remote (the existing
    `sync.py` rsync), so finished cluster runs whose fragments were never pulled are imported; it
    then runs the reaper (reconciling stale `running` rows through `sacct`) with its warm-tier
-   reconciliation disabled (`reconcile_warm=False`: `reap.py:309` `reconcile_warm_tier`, which
+   reconciliation disabled (new keyword `reconcile_warm=False`, default `True`, gating
+   the reap path's call only: `reap.py:309` `reconcile_warm_tier`, which
    backs up and force-rebuilds `bathos.db` and then rewrites `runs.metadata`, is skipped), so the
    reap writes only its cool fragment rewrite and ledger JSON, both ordinary legacy sources,
    then refuses while any job in the user's `squeue` has a job id found in submit records or
    in a `running` run's `slurm_job_id`. Other queued jobs are listed; proceeding past them
-   needs `--force`. It then takes the writers lock exclusively (waiting for, and reporting, any
+   needs `--force`. It then releases its shared hold and takes the writers lock exclusively (waiting for, and reporting, any
    running local `bth` writer) and holds it until step 4 completes. It never runs the legacy
    compaction (whose postmortem walk depends on the cwd and which refreshes `output_metadata`)
    nor any force-rebuild, so `bathos.db` is not modified by the migration before step 4(d).
@@ -486,11 +487,13 @@ switched on in one step.
    changed since; postmortem overrides whose files are only in a deleted worktree; campaign
    members whose legacy e-value used the fragment outcome rather than the postmortem-overridden
    one; unresolvable project; a fragment not yet compacted into `bathos.db`, including those just
-   pulled or reaped in step 1, whose staged status is newer than its warm row); unclassified differences abort. The classified residuals are
+   pulled or reaped in step 1: any column of such a run, e.g. a staged status or `metadata.reaped`
+   newer than its warm row); unclassified differences abort. The classified residuals are
    written to a canonical report (exactly one JSON line per differing `(table, key, column)`,
    each line exactly the object `{table, key, column, class, legacy_value, staged_value}` with
    `key` the row's primary key as a JSON array, `class` the allow-listed class name, and each
-   value the column's JSON value or `null` for an absent row, in `canon: 1` form, lines sorted by their bytes, no attempt id, time or host fields) in the attempt directory and `--to-log`
+   value `[v]` (a one-element array holding the column's JSON value, so SQL NULL is `[null]`) or
+   `null` when the row is absent on that side, in `canon: 1` form, lines sorted by their bytes, no attempt id, time or host fields) in the attempt directory and `--to-log`
    stops there; the user signs off by
    re-running with `--accept-residual <sha256 of that report>`, which proceeds only if a fresh
    run of steps 1-3 reproduces a report with exactly that hash.
@@ -507,7 +510,10 @@ switched on in one step.
    dedup absorbs the move.
    **Re-running `bth migrate --to-log`:** with the marker absent, the migration has changed
    nothing outside the staging directory except `~/.bth/catalog/index.db` (possibly) and the
-   legacy sources step 1 adds (which any re-run re-imports), so it deletes those two and
+   legacy sources step 1 adds or changes (which any re-run keeps and re-imports), so it deletes the staging
+   directory and `~/.bth/catalog/index.db`, never a step-1 legacy source (those stay
+   and are re-imported; the reaper selects only `running` fragments, `reap.py:223`, so an
+   already-reaped run is not reaped again and the report converges), and
    starts again from step 1 (pull, reap, squeue check, exclusive lock, full re-listing of every
    legacy source). With the marker present, it skips step 1's squeue check, takes the writers
    lock, and finishes whichever of (c)-(e) remain.
@@ -641,7 +647,8 @@ switched on in one step.
    AC-20, AC-22). AC-18 is enforced
    from here; the legacy write sites (flag-off branch only) sit on an explicit allow-list in the
    AC-18 test, which step 5 empties.
-4. Legacy importer, reaper on folded status, `bth verify` checks, and `bth migrate --to-log`
+4. Legacy importer, reaper on folded status (plus a new `reconcile_warm: bool = True` keyword
+   on `reap_runs`, passed `False` only by migrate step 1), `bth verify` checks, and `bth migrate --to-log`
    (Migration steps 0-4: staging, diff, abort, switch) built and exercised against fixture
    catalogs (AC-7's verify half, AC-13, AC-14, AC-21, AC-23, AC-24, AC-26, AC-28, AC-29, AC-30), and the new
    cluster log pull in
