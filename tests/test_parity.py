@@ -74,6 +74,32 @@ impl_paths = ["src/impl.py"]
         finally:
             path.unlink()
 
+    def test_parse_accepts_str_path(self):
+        """debt #1950: parse_parity_toml must accept a plain str path, not just pathlib.Path."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
+            f.write(
+                """
+[parity]
+paper_pdf = "papers/zeinaty2026.pdf"
+impl_paths = ["src/impl.py"]
+"""
+            )
+            f.flush()
+            str_path = f.name  # plain str, not Path
+
+        try:
+            result = parse_parity_toml(str_path)
+            assert result["paper_pdf"] == "papers/zeinaty2026.pdf"
+            assert result["impl_paths"] == ["src/impl.py"]
+        finally:
+            Path(str_path).unlink()
+
+    def test_parse_str_path_missing_file_raises_file_not_found(self):
+        """debt #1950: a nonexistent str path must still raise FileNotFoundError (not
+        AttributeError from calling .exists() on a str before the Path() conversion)."""
+        with pytest.raises(FileNotFoundError):
+            parse_parity_toml("/nonexistent/path/to/parity.bth.toml")
+
     def test_parse_passes_valid_complete_file(self):
         """AC-02: Validator passes a fully-specified parity.bth.toml."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
