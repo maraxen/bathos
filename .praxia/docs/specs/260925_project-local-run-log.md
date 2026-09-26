@@ -427,7 +427,8 @@ switched on in one step.
 3. `index.db`, `events` table, fold (incl. the campaign fold), generation-swap ingest, read API
    (flag off: attaches `bathos.db` read-only); move all 25 modules to it, exercised against
    fixture catalogs (AC-1, AC-12, AC-15, AC-17, AC-18, AC-19, AC-20, AC-22). AC-18 is enforced
-   from here.
+   from here; the legacy write sites (flag-off branch only) sit on an explicit allow-list in the
+   AC-18 test, which step 5 empties.
 4. Legacy importer, `bth verify` checks (AC-21, AC-23, AC-24) and cluster log pull (AC-6).
 5. Assign ids in every registered project (migration step 0), then cut-over via
    `bth migrate --to-log` (AC-13); then AC-2, AC-3, AC-4 and AC-8 hold in production.
