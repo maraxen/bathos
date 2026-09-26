@@ -79,6 +79,27 @@ def test_preflight_accepts_matching_remote_catalog(tmp_path: Path):
     check_env_catalog_matches_remote(tmp_path, "~/projects/prolix")
 
 
+def test_missing_env_sh_is_structured_error_naming_remediation(tmp_path: Path):
+    """#1953: a missing scripts/slurm/_bth_env.sh must raise a structured error
+    that names the remediation command, not a warning-shaped message."""
+    with pytest.raises(CatalogIdentityError) as exc_info:
+        check_env_catalog_matches_remote(tmp_path, "~/projects/prolix")
+    message = str(exc_info.value)
+    assert "_bth_env.sh" in message
+    assert "bth remote add" in message or "bth init" in message
+
+
+def test_env_sh_without_catalog_export_names_remediation(tmp_path: Path):
+    """The "doesn't export BTH_CATALOG_DIR" branch should also name a fix."""
+    env_path = tmp_path / "scripts" / "slurm" / "_bth_env.sh"
+    env_path.parent.mkdir(parents=True)
+    env_path.write_text('export BTH_PROJECT_ROOT="/home/x/projects/prolix"\n')
+    with pytest.raises(CatalogIdentityError) as exc_info:
+        check_env_catalog_matches_remote(tmp_path, "~/projects/prolix")
+    message = str(exc_info.value)
+    assert "bth remote add" in message or "bth init" in message
+
+
 def test_ensure_remote_catalog_dir_sshes_mkdir(monkeypatch):
     mock_run = MagicMock(return_value=MagicMock(returncode=0, stderr=""))
     monkeypatch.setattr("bathos.cluster_catalog.subprocess.run", mock_run)
@@ -98,6 +119,9 @@ def test_ensure_remote_catalog_dir_sshes_mkdir(monkeypatch):
     assert "${HOME}" in remote_cmd or "$HOME" in remote_cmd
     assert "'~/" not in remote_cmd
     assert ".bth/catalog/campaigns" in remote_cmd
+    # #1945: the runs/ dir must exist too, or rsync push/pull into
+    # {remote_cat}/runs/<project_slug>/ fails with exit 11.
+    assert ".bth/catalog/runs" in remote_cmd
 
 
 def test_submit_refuses_mismatched_env_catalog(tmp_path: Path, monkeypatch):

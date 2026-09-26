@@ -145,6 +145,7 @@ def sync_catalog(
     last_progress_ts_ref = [last_progress_ts]  # mutable container for thread sharing
     total_bytes = 0
     total_files = 0
+    progress2_seen = False
     proc = None
     stdout_output = ""
     _watchdog_fired = threading.Event()
@@ -172,18 +173,28 @@ def sync_catalog(
 
             # Parse progress2 format: "   1,234 100%    1.23MB/s    0:00:01 (xfr#1, to-chk=0/1)"
             m = re.match(
-                r"\s*([\d,]+)\s+(\d+)%\s+([\d.]+\S*)\s+\S+",
+                r"\s*([\d,]+)\s+(\d+)%\s+([\d.]+\S*)\s+\S+(?:\s+\(xfr#(\d+),.*\))?",
                 line,
             )
             if m:
                 bytes_str = m.group(1).replace(",", "")
                 pct_str = m.group(2)
                 rate_str = m.group(3)
+                xfr_str = m.group(4)
 
                 try:
                     bytes_xfr = int(bytes_str)
                     pct = int(pct_str)
                     total_bytes = bytes_xfr
+                    progress2_seen = True
+                    # "xfr#N" is rsync's own running count of files transferred
+                    # so far in this session -- the true file count. Bytes are
+                    # per-file progress, not a transfer total, and must not be
+                    # used as a stand-in for "how many files transferred"
+                    # (#1945: that conflation is why `transferred` under-/
+                    # over-reported, including showing 0 after a real transfer).
+                    if xfr_str is not None:
+                        total_files = int(xfr_str)
                     with last_progress_ts_lock:
                         last_progress_ts_ref[0] = time.monotonic()
 
@@ -240,8 +251,11 @@ def sync_catalog(
     duration_s = time.time() - start_time
     duration_ms = duration_s * 1000
 
-    # Parse transferred count from stdout if we didn't get it from progress2
-    transferred = _parse_transferred_count(stdout_output) if total_bytes == 0 else total_bytes
+    # File count from rsync's own "xfr#N" progress2 counter if we saw any
+    # progress2 output; otherwise fall back to parsing `--stats`-style totals
+    # from stdout (e.g. when nothing hit stderr, as some mocked/older rsync
+    # builds do). Bytes are never used as a substitute file count (#1945).
+    transferred = total_files if progress2_seen else _parse_transferred_count(stdout_output)
 
     # Emit telemetry: sync.rsync_end
     event(
