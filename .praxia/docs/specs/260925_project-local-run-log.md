@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: v11 (after adversarial cycle 11)
+revision: v12 (after adversarial cycle 12)
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -92,9 +92,10 @@ invest_overrides: []
   `~/.bth/log-mirror/_null/<slug or _unaffiliated>/`. A mirror append failure is a warning, not a run failure.
   Fallback appends (D6) are mirrored the same way. `bth log restore` copies back into the
   project log every mirror line that the project log lacks and whose `main_root` is not another
-  currently registered root with the same `project_id` (so a moved project, whose old path is
-  gone or pruned, recovers its history, and a fork, whose other root is still registered, never
-  receives the other copy's events) (so a fork sharing the id never receives another copy's events); lines that reached neither copy are reported by `bth verify`, not invented.
+  *live* root with the same `project_id`, where live means listed in `projects.toml`, the path
+  exists, and its `.bth.toml` carries this id. So a moved project (old path gone, pruned or not)
+  recovers its history, and a fork (other root still live) never receives the other copy's
+  events; lines that reached neither copy are reported by `bth verify`, not invented.
 
 ## Authoritative writes (everything the index must not own)
 
@@ -231,25 +232,30 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   `run.imported` events; each legacy `campaign_runs` row gives a `campaign_run.imported` carrying
   its stored `evalue` (not `seq_position`, which the fold always recomputes). Each carries `data.source_class`, one of `warm`
   (`bathos.db.frozen`, or `bathos.db` before cut-over), `warm_recreated` (a `bathos.db` recreated
-  after cut-over by an older install), `fragment`, `campaign_json`, `ledger_json` (reap ledger) or
-  `submit_parquet`; precedence is that order. The importer never reads current sidecar or output
+  after cut-over by an older install), `fragment`, `campaign_json`, `ledger_json` (live reap
+  ledger), `ledger_reverted` (reverted reap ledger) or `submit_parquet`; precedence is that order.
+  Each also carries `data.source_locator`: the source file's path relative to the catalog dir,
+  or `<db file>:<table>` for a warm row. The importer never reads current sidecar or output
   files. `ts` is the source record's own time (run: end time if finished, else start; campaign:
   `concluded_at` or `started_at`; ledger rows: their own timestamp). eid = `uuid5(NAMESPACE_BATHOS,
-  f"import:{kind}:{entity}:{source_class}:{snapshot}:{sha256(canonical source record)}")`, where
-  `data.snapshot` is an ordinal per `(entity, source_class)`.
-- **Snapshots:** for each `(entity, source_class)` the importer compares the source's hash with
-  the newest existing snapshot (highest ordinal) of that pair. Equal: it appends nothing, so
+  f"import:{kind}:{entity}:{source_class}:{source_locator}:{snapshot}:{sha256(canonical source record)}")`,
+  where `data.snapshot` is an ordinal per snapshot chain.
+- **Snapshots:** a snapshot chain is one `(kind, entity, source_class, source_locator)`: one
+  concrete source record. For each chain the importer compares the source's hash with the newest
+  existing snapshot (highest ordinal) of that chain. Equal: it appends nothing, so
   re-running on unchanged sources is a no-op. Different (including a source that changed back
   to an earlier content): it appends a new event with ordinal = newest + 1. Only the highest
-  ordinal takes part in the fold. The importer holds the ingest lock, so ordinals never race.
+  ordinal of each chain takes part in the fold; every chain does (so several reverted ledgers of
+  one run all fold). The importer holds the ingest lock, so ordinals never race.
   "Existing" means, before cut-over, the current staging attempt and the destination logs; after
   cut-over, the index and the destination logs.
 - **Reap ledgers:** each `catalog/reaped/<slug>/<run_id>.json` imports as an abandoned claim
   (`run.imported`, `source_class=ledger_json`, `ts` = its `reaped_at`). Each
-  `reverted/<run_id>.<YYYYmmddHHMMSS>.json` (`reap.py:213-217`) imports as `run_reap.imported`
-  carrying `reaped_at` and the revert time from its filename; the fold treats it as an abandoned
-  claim at `reaped_at` followed by a revert at that time, so a pre-cut-over revert is honoured
-  whatever the warm row says.
+  `reverted/<run_id>.<YYYYmmddHHMMSS>.json` (`reap.py:213-217`, UTC, one-second resolution)
+  imports as `run_reap.imported` (`source_class=ledger_reverted`) carrying `reaped_at` and
+  `reverted_at = max(reaped_at, filename time)`; the fold treats it as an abandoned claim at
+  `reaped_at` followed by a revert at `reverted_at`, the revert always after its own claim. So a
+  pre-cut-over revert is honoured whatever the warm row says.
 - **Import merge (stage 1)**, field by field, never whole-state replacement:
   - *Campaigns:* `status='concluded'` is sticky: the base is concluded if any import says so,
     with `concluded_at` taken by source precedence, then earliest `ts`.
@@ -324,7 +330,8 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   where (root kind: root id) is one of `project`: `project_id` (the main root's `.bth/log/`,
   excluding `remote/`); `mirror`: `project_id` or `_null/<slug>`; `fallback`: slug;
   `unaffiliated`: constant; `remote-log`, `remote-fallback`, `remote-mirror`:
-  `(project_id, remote)`. Every file belongs to exactly one root. A file smaller than its watermark, or vanished, is re-read from the other copy
+  `(project_id, remote)`; `staging`: the attempt id (migration step 3 only, never read by
+  `connect_read`). Every file belongs to exactly one root. A file smaller than its watermark, or vanished, is re-read from the other copy
   (D7) and reported by `bth verify`; `eid` dedup makes re-reading safe. Inodes are not used.
 - **When ingest runs:** on `bth compact`, and non-blockingly (skipped if the lock is held) at the
   end of commands that write events (`bth run`, campaign and claim commands, MCP equivalents).
@@ -385,7 +392,9 @@ switched on in one step.
 0. **Ids:** `bth migrate --to-log` refuses to start until every registered root's `.bth.toml`
    has a `[project] id` present in its committed `HEAD` (it lists the roots missing one and
    the `bth init --assign-id` command).
-1. **Quiesce:** it runs `bth reap` first (reconciling stale `running` rows through `sacct`),
+1. **Quiesce:** it first pulls the legacy catalog from every configured remote (the existing
+   `sync.py` rsync), so finished cluster runs whose fragments were never pulled are imported; it
+   then runs `bth reap` (reconciling stale `running` rows through `sacct`),
    then refuses while any job in the user's `squeue` has a job id found in submit records or
    in a `running` run's `slurm_job_id`. Other queued jobs are listed; proceeding past them
    needs `--force`.
@@ -405,13 +414,14 @@ switched on in one step.
    signed-off residual report. Unclassified differences abort.
 4. **Switch:** the staged events are moved into their owning project logs (and mirrors),
    `~/.bth/catalog/index.db` is built from those logs, the staging directory is deleted, and
-   reads and writes move to the new path. The step-2 start time is recorded in `index.db` as the
-   cut-off for step 5. `bathos.db` is renamed to
+   reads and writes move to the new path. An `import_manifest` table in `index.db` records every
+   imported source (`source_locator`, sha256). `bathos.db` is renamed to
    `bathos.db.frozen` and kept read-only for one release.
 5. **Stale installs:** an older bathos (e.g. pinned in a project venv, or on the cluster) may
    keep writing cool fragments, submit Parquet, or a fresh `bathos.db`. `bth verify` reports
-   each such write (a legacy file newer than the step-2 start time recorded in `index.db`, or a
-   `bathos.db` present beside `bathos.db.frozen`) with the writing host; re-running
+   each such write (a legacy source whose `(source_locator, sha256)` is not in `import_manifest`,
+   which catches late cluster pulls whatever their mtime, or a `bathos.db` present beside
+   `bathos.db.frozen`) with the writing host; re-running
    `bth migrate --import-legacy` imports it (sources: `bathos.db.frozen`, any new `bathos.db`,
    fragments, submit Parquet, campaign JSON).
 
@@ -490,7 +500,9 @@ switched on in one step.
 - AC-27. With two roots sharing a `project_id`, `bth log restore` in one never copies the
   other's events; after moving a project, restore still recovers events written at the old path.
 - AC-28. Re-importing a legacy source that changed yields the fold of its newest snapshot only,
-  including a source that changed and then changed back; an aborted migration leaves no imported
+  including a source that changed and then changed back; a run reaped, reverted, reaped and
+  reverted again imports every ledger and re-importing it appends nothing; a fragment pulled after
+  cut-over with an mtime older than the migration is reported by `bth verify`; an aborted migration leaves no imported
   event in any project log and no `~/.bth/catalog/index.db`; abort, retry, switch leaves every
   imported event in the logs.
 
