@@ -160,10 +160,10 @@ def test_compact_upgrades_v0_fragments(tmp_catalog: Path, sample_run: Run):
     result = compact(tmp_catalog)
     assert result.ingested == 1
 
-    # Verify in DuckDB: should have schema_version="15" (migrated through v0→v1→…→v14→v15)
+    # Verify in DuckDB: should have schema_version="16" (migrated through v0→v1→…→v15→v16)
     con = duckdb.connect(str(tmp_catalog / "bathos.db"))
     rows = con.execute("SELECT schema_version FROM runs").fetchall()
-    assert rows[0][0] == "15"
+    assert rows[0][0] == "16"
 
 
 def test_compact_tracks_warm_schema_version(tmp_catalog: Path, sample_run: Run):
@@ -178,7 +178,7 @@ def test_compact_tracks_warm_schema_version(tmp_catalog: Path, sample_run: Run):
     con = duckdb.connect(str(tmp_catalog / "bathos.db"))
     rows = con.execute("SELECT value FROM _schema_meta WHERE key = 'warm_version'").fetchall()
     assert len(rows) == 1
-    assert rows[0][0] == "15"
+    assert rows[0][0] == "16"
 
 
 def test_fragment_count_helper(tmp_catalog: Path, sample_run: Run):
@@ -247,8 +247,8 @@ def test_compact_preserves_run_data(tmp_catalog: Path, sample_run: Run):
     assert rows[0][0] == ["smoke", "critical"]
     assert rows[0][1] == ["/tmp/a.json", "/tmp/b.json"]
     assert rows[0][2] == "12345"
-    # Note: metadata is not part of cool tier schema, so defaults to '{}' on read
-    assert rows[0][3] == "{}"
+    # Debt #1940: metadata now round-trips through the cool fragment into the warm table.
+    assert rows[0][3] == '{"key": "value"}'
 
 
 def test_compact_migrates_v1_to_v4(sample_run: Run):
@@ -262,7 +262,7 @@ def test_compact_migrates_v1_to_v4(sample_run: Run):
     result = _apply_migrations(v1_run)
 
     # Verify upgraded to v9 with hostname
-    assert result.schema_version == "15"
+    assert result.schema_version == "16"
     assert result.hostname == ""
 
 
@@ -277,7 +277,7 @@ def test_compact_v0_chain_to_v4(sample_run: Run):
     result = _apply_migrations(v0_run)
 
     # Verify final state is v9
-    assert result.schema_version == "15"
+    assert result.schema_version == "16"
     assert result.hostname == ""
 
 
@@ -291,7 +291,7 @@ def test_apply_migrations_v4_upgrades_to_v5(sample_run: Run):
     result = _apply_migrations(v4_run)
 
     # Verify upgraded
-    assert result.schema_version == "15"
+    assert result.schema_version == "16"
     assert result.hostname == "testhost"
     # Verify fields added during v5 migration are present
     assert result.manifest_sha256 == ""
@@ -487,7 +487,7 @@ def test_migration_v2_to_v4(tmp_catalog: Path, sample_run: Run):
     con.close()
 
     assert len(rows) == 1
-    assert rows[0][0] == "15"  # schema_version
+    assert rows[0][0] == "16"  # schema_version
     assert rows[0][1] == ""  # sidecar_sha256
     assert rows[0][2] == ""  # sidecar_path
     assert rows[0][3] == ""  # parent_run_id
@@ -522,7 +522,7 @@ def test_migration_chain_v0_to_v4(tmp_catalog: Path, sample_run: Run):
     con.close()
 
     assert len(rows) == 1
-    assert rows[0][0] == "15"  # schema_version
+    assert rows[0][0] == "16"  # schema_version
     assert rows[0][1] == ""  # hostname (from v1 migration)
     assert rows[0][2] == ""  # sidecar_sha256 (from v2 migration)
     assert rows[0][3] == ""  # sidecar_path
@@ -546,7 +546,7 @@ def test_migration_v6_to_v7_adds_stage_name(sample_run: Run):
     result = _apply_migrations(v6_run)
 
     # Verify upgraded to v7 with stage_name=None
-    assert result.schema_version == "15"
+    assert result.schema_version == "16"
     assert result.stage_name is None
 
 
@@ -561,7 +561,7 @@ def test_migration_chain_v0_to_v7_includes_stage_name(sample_run: Run):
     result = _apply_migrations(v0_run)
 
     # Verify final state is v7 with stage_name=None
-    assert result.schema_version == "15"
+    assert result.schema_version == "16"
     assert result.stage_name is None
 
 
@@ -768,7 +768,7 @@ def test_migration_v8_to_v9_adds_parity_run_type(sample_run: Run):
     result = _apply_migrations(v8_run)
 
     # Verify upgraded to v9 with parity_run_type=None
-    assert result.schema_version == "15"
+    assert result.schema_version == "16"
     assert result.parity_run_type is None
 
 
@@ -783,7 +783,7 @@ def test_migration_chain_v0_to_v9_includes_parity_run_type(sample_run: Run):
     result = _apply_migrations(v0_run)
 
     # Verify final state is v9 with parity_run_type=None
-    assert result.schema_version == "15"
+    assert result.schema_version == "16"
     assert result.parity_run_type is None
 
 
@@ -801,7 +801,7 @@ def test_migration_v9_to_v10_adds_seed_fields(sample_run: Run):
     result = _apply_migrations(v9_run)
 
     # Verify upgraded to v10 with all three B2-02 fields None
-    assert result.schema_version == "15"
+    assert result.schema_version == "16"
     assert result.seed is None
     assert result.baseline_hpo_trials is None
     assert result.baseline_hpo_compute_budget is None
@@ -814,7 +814,7 @@ def test_migration_chain_v0_to_v10_includes_seed_fields(sample_run: Run):
     v0_run = dataclasses.replace(sample_run, schema_version="0")
     result = _apply_migrations(v0_run)
 
-    assert result.schema_version == "15"
+    assert result.schema_version == "16"
     assert result.seed is None
     assert result.baseline_hpo_trials is None
     assert result.baseline_hpo_compute_budget is None
@@ -849,7 +849,7 @@ def test_migration_v10_to_v11_adds_stdout_sha256(sample_run: Run):
 
     result = _apply_migrations(v10_run)
 
-    assert result.schema_version == "15"
+    assert result.schema_version == "16"
     assert result.stdout_sha256 is None
 
 
@@ -860,7 +860,7 @@ def test_migration_chain_v0_to_v11_includes_stdout_sha256(sample_run: Run):
     v0_run = dataclasses.replace(sample_run, schema_version="0")
     result = _apply_migrations(v0_run)
 
-    assert result.schema_version == "15"
+    assert result.schema_version == "16"
     assert result.stdout_sha256 is None
 
 
@@ -891,7 +891,7 @@ def test_migration_v11_to_v12_adds_component_fields(sample_run: Run):
 
     result = _apply_migrations(v11_run)
 
-    assert result.schema_version == "15"
+    assert result.schema_version == "16"
     assert result.component_id is None
     assert result.component_sidecar_sha256 is None
 
@@ -903,7 +903,7 @@ def test_migration_chain_v0_to_v12_includes_component_fields(sample_run: Run):
     v0_run = dataclasses.replace(sample_run, schema_version="0")
     result = _apply_migrations(v0_run)
 
-    assert result.schema_version == "15"
+    assert result.schema_version == "16"
     assert result.component_id is None
     assert result.component_sidecar_sha256 is None
 
@@ -940,7 +940,7 @@ def test_migration_v14_to_v15_adds_git_provenance_fields(sample_run: Run):
 
     result = _apply_migrations(v14_run)
 
-    assert result.schema_version == "15"
+    assert result.schema_version == "16"
     assert result.git_dirty_content_id is None
     assert result.git_provenance_source is None
 
@@ -952,7 +952,7 @@ def test_migration_chain_v0_to_v15_includes_git_provenance_fields(sample_run: Ru
     v0_run = dataclasses.replace(sample_run, schema_version="0")
     result = _apply_migrations(v0_run)
 
-    assert result.schema_version == "15"
+    assert result.schema_version == "16"
     assert result.git_dirty_content_id is None
     assert result.git_provenance_source is None
 
@@ -1073,3 +1073,141 @@ def test_cli_compact_strict_exits_zero_when_clean(tmp_catalog, monkeypatch, samp
 
     result = runner.invoke(app, ["compact", "--strict"])
     assert result.exit_code == 0
+
+
+def test_compact_persists_metadata_to_warm(tmp_catalog: Path, sample_run: Run):
+    """Debt #1940: metadata round-trips cool -> compact -> warm runs.metadata (real
+    compact() DuckDB insert path, not just the Arrow layer covered in test_schema.py).
+    """
+    init_catalog(tmp_catalog)
+
+    run = dataclasses.replace(
+        sample_run, metadata='{"hypothesis": "temp_std < 5", "temp_std": 2.1}'
+    )
+    write_run(run, tmp_catalog)
+
+    result = compact(tmp_catalog)
+    assert result.ingested == 1
+
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    row = con.execute("SELECT metadata FROM runs WHERE id = ?", [run.id]).fetchone()
+    con.close()
+
+    assert row is not None
+    assert row[0] == '{"hypothesis": "temp_std < 5", "temp_std": 2.1}'
+
+
+def test_compact_persists_outcome_error_reason_to_warm(tmp_catalog: Path, sample_run: Run):
+    """Debt #1942: outcome_error_reason is queryable in the warm `runs` table after
+    compact(). The column existed (via CREATE TABLE / ALTER TABLE) and the field
+    already round-tripped through the cool fragment (schema.py), but compact()'s
+    INSERT statement never carried it into the warm row -- every outcome='error' run
+    had a NULL warm outcome_error_reason regardless.
+    """
+    init_catalog(tmp_catalog)
+
+    run = dataclasses.replace(
+        sample_run,
+        outcome="error",
+        outcome_error_reason="exit_code=1",
+    )
+    write_run(run, tmp_catalog)
+
+    result = compact(tmp_catalog)
+    assert result.ingested == 1
+
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    row = con.execute(
+        "SELECT outcome, outcome_error_reason FROM runs WHERE id = ?", [run.id]
+    ).fetchone()
+    con.close()
+
+    assert row is not None
+    assert row[0] == "error"
+    assert row[1] == "exit_code=1"
+
+
+def test_compact_queryable_by_outcome_error_reason(tmp_catalog: Path, sample_run: Run):
+    """Debt #1942: outcome_error_reason must be usable in a WHERE clause after compact,
+    matching the debt's acceptance criterion ("Test it is queryable after compact")."""
+    import uuid
+
+    init_catalog(tmp_catalog)
+
+    ok_run = dataclasses.replace(sample_run, id=str(uuid.uuid4()), outcome="pass")
+    err_run = dataclasses.replace(
+        sample_run,
+        id=str(uuid.uuid4()),
+        outcome="error",
+        outcome_error_reason="exit_code=137",
+    )
+    write_run(ok_run, tmp_catalog)
+    write_run(err_run, tmp_catalog)
+
+    result = compact(tmp_catalog)
+    assert result.ingested == 2
+
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    rows = con.execute(
+        "SELECT id FROM runs WHERE outcome_error_reason = ?", ["exit_code=137"]
+    ).fetchall()
+    con.close()
+
+    assert [r[0] for r in rows] == [err_run.id]
+
+
+def test_compact_persists_output_metadata_field_to_warm(tmp_catalog: Path, sample_run: Run):
+    """Debt #1940: the Run.output_metadata dataclass field round-trips cool -> warm too.
+
+    Note: the warm `output_metadata` *column* is independently recomputed fresh from
+    live output-path filesystem stats on every compact (Debt #71, `_collect_output_metadata`)
+    regardless of what the cool fragment stored -- that refresh behavior is intentional
+    and untouched here. This test only confirms the Arrow round-trip plumbing fix, via
+    a run with no output_paths so the freshly-computed value is deterministically "[]".
+    """
+    init_catalog(tmp_catalog)
+
+    run = dataclasses.replace(sample_run, output_paths=[], output_metadata='[{"stale": true}]')
+    write_run(run, tmp_catalog)
+
+    result = compact(tmp_catalog)
+    assert result.ingested == 1
+
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    row = con.execute("SELECT output_metadata FROM runs WHERE id = ?", [run.id]).fetchone()
+    con.close()
+
+    assert row is not None
+    assert row[0] == "[]"
+
+
+def test_compact_upgrades_v15_fragment_metadata_defaults(tmp_catalog: Path, sample_run: Run):
+    """A v15 (pre-debt-#1940) fragment lacking metadata/output_metadata columns
+    compacts cleanly and gets the "{}"/"[]" defaults, not a crash or NULL.
+    """
+    import pyarrow.parquet as pq
+
+    init_catalog(tmp_catalog)
+
+    v15_run = dataclasses.replace(sample_run, schema_version="15", output_paths=[])
+    # A genuine pre-fix v15 fragment has no metadata/output_metadata columns at all --
+    # to_arrow() now always writes them, so simulate the old on-disk shape by dropping
+    # both columns before writing, rather than relying on to_arrow().
+    table = v15_run.to_arrow().drop_columns(["metadata", "output_metadata"])
+    runs_dir = tmp_catalog / "runs" / v15_run.project_slug
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    pq.write_table(table, runs_dir / f"run_{v15_run.id}.parquet")
+
+    result = compact(tmp_catalog)
+    assert result.ingested == 1
+
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    row = con.execute(
+        "SELECT schema_version, metadata, output_metadata FROM runs WHERE id = ?", [v15_run.id]
+    ).fetchone()
+    con.close()
+
+    assert row is not None
+    assert row[0] == "16"
+    assert row[1] == "{}"
+    assert row[2] == "[]"

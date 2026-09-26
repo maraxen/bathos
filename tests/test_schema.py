@@ -43,7 +43,7 @@ def test_run_defaults():
     assert r.tags == []
     assert isinstance(r.timestamp, datetime)
     assert r.timestamp.tzinfo is not None
-    assert r.schema_version == "15"
+    assert r.schema_version == "16"
     assert r.slurm_job_id == ""
     assert r.metadata == "{}"
 
@@ -84,7 +84,7 @@ def test_run_roundtrip_via_arrow():
     assert r2.duration_s == 1.5
     assert r2.output_paths == ["/tmp/out.parquet"]
     assert r2.tags == ["tip3p"]
-    assert r2.schema_version == "15"
+    assert r2.schema_version == "16"
     assert r2.slurm_job_id == ""
 
 
@@ -100,7 +100,7 @@ def test_schema_version_in_cool_parquet():
     )
     table = r.to_arrow()
     assert "schema_version" in table.column_names
-    assert table.column("schema_version")[0].as_py() == "15"
+    assert table.column("schema_version")[0].as_py() == "16"
 
 
 def test_slurm_job_id_captured_from_env():
@@ -123,8 +123,14 @@ def test_slurm_job_id_captured_from_env():
     assert r2.slurm_job_id == "12345678"
 
 
-def test_metadata_not_in_cool_parquet():
-    """Verify metadata field is NOT written to cool Parquet."""
+def test_metadata_in_cool_parquet():
+    """Debt #1940: metadata IS written to cool Parquet and round-trips.
+
+    Previously Run.to_arrow() silently omitted metadata/output_metadata, so
+    runs.metadata was always "{}" after bth compact regardless of what the
+    script emitted -- see schema.py's v16 COOL_SCHEMA fields and _migrate_v15
+    in compact.py.
+    """
     r = Run(
         project_slug="proj",
         command="python foo.py",
@@ -135,7 +141,11 @@ def test_metadata_not_in_cool_parquet():
         metadata='{"key": "value"}',
     )
     table = r.to_arrow()
-    assert "metadata" not in table.column_names
+    assert "metadata" in table.column_names
+    assert table.column("metadata")[0].as_py() == '{"key": "value"}'
+
+    r2 = Run.from_arrow_row(table.to_pydict(), 0)
+    assert r2.metadata == '{"key": "value"}'
 
 
 def test_warm_schema_has_metadata_column():
@@ -161,7 +171,7 @@ def test_cool_schema_has_new_fields():
 
 
 def test_run_with_custom_metadata():
-    """Verify metadata is stored in Run but not serialized to cool Parquet."""
+    """Verify metadata is stored in Run and serialized to cool Parquet (debt #1940)."""
     r = Run(
         project_slug="proj",
         command="python foo.py",
@@ -173,7 +183,8 @@ def test_run_with_custom_metadata():
     )
     assert r.metadata == '{"hypothesis": "test", "outcome": "pass"}'
     table = r.to_arrow()
-    assert "metadata" not in table.column_names
+    assert "metadata" in table.column_names
+    assert table.column("metadata")[0].as_py() == '{"hypothesis": "test", "outcome": "pass"}'
 
 
 def test_cool_schema_has_hostname_field():
@@ -233,7 +244,7 @@ def test_schema_version_defaults_to_7():
         git_branch="main",
         git_dirty=False,
     )
-    assert r.schema_version == "15"
+    assert r.schema_version == "16"
 
 
 def test_sample_run_fixture_has_hostname(sample_run):
@@ -370,7 +381,7 @@ def test_schema_v5_fields_exist():
     from bathos.schema import CURRENT_SCHEMA_VERSION, Run
 
     # Current version should be "7" (v5 fields still present)
-    assert CURRENT_SCHEMA_VERSION == "15"
+    assert CURRENT_SCHEMA_VERSION == "16"
 
     # Run should have all 4 new fields
     r = Run(
@@ -444,7 +455,7 @@ def test_schema_version_is_7():
     """Verify CURRENT_SCHEMA_VERSION is now '11'."""
     from bathos.schema import CURRENT_SCHEMA_VERSION
 
-    assert CURRENT_SCHEMA_VERSION == "15"
+    assert CURRENT_SCHEMA_VERSION == "16"
 
 
 def test_run_stage_name_default_none():
@@ -934,3 +945,101 @@ def test_git_provenance_fields_none_round_trip_arrow():
     r2 = Run.from_arrow_row(table.to_pydict(), 0)
     for field_name in _GIT_PROVENANCE_FIELDS:
         assert getattr(r2, field_name) is None
+
+
+def test_output_metadata_in_cool_and_warm_schema():
+    """Debt #1940: output_metadata (like metadata) is now in COOL_SCHEMA, not just WARM_SCHEMA."""
+    for schema in (COOL_SCHEMA, WARM_SCHEMA):
+        assert "output_metadata" in schema.names
+        field_obj = next(f for f in schema if f.name == "output_metadata")
+        assert field_obj.type == pa.string()
+
+
+def test_metadata_output_metadata_round_trip_arrow():
+    """Debt #1940: metadata and output_metadata both round-trip through Arrow serialization."""
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        metadata='{"result": 42}',
+        output_metadata='[{"path": "/tmp/out.json", "status": "present"}]',
+    )
+    table = r.to_arrow()
+    assert table.column("metadata")[0].as_py() == '{"result": 42}'
+    assert (
+        table.column("output_metadata")[0].as_py()
+        == '[{"path": "/tmp/out.json", "status": "present"}]'
+    )
+
+    r2 = Run.from_arrow_row(table.to_pydict(), 0)
+    assert r2.metadata == '{"result": 42}'
+    assert r2.output_metadata == '[{"path": "/tmp/out.json", "status": "present"}]'
+
+
+def test_metadata_output_metadata_default_round_trip_arrow():
+    """Debt #1940: default (unset) metadata/output_metadata round-trip to their "{}"/"[]" defaults."""
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+    )
+    table = r.to_arrow()
+    r2 = Run.from_arrow_row(table.to_pydict(), 0)
+    assert r2.metadata == "{}"
+    assert r2.output_metadata == "[]"
+
+
+def test_metadata_missing_from_old_fragment_defaults_gracefully():
+    """A pre-v16 cool fragment (no metadata/output_metadata key in its pydict at all)
+    must still parse via from_arrow_row, defaulting to "{}"/"[]" rather than raising
+    KeyError -- this is the backward-compatibility contract debt #1940 requires for
+    fragments written before the fix.
+    """
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+    )
+    pydict = r.to_arrow().to_pydict()
+    del pydict["metadata"]
+    del pydict["output_metadata"]
+    r2 = Run.from_arrow_row(pydict, 0)
+    assert r2.metadata == "{}"
+    assert r2.output_metadata == "[]"
+
+
+def test_migration_v15_to_v16_adds_metadata_output_metadata(sample_run: Run):
+    """Verify v15 fragments are upgraded to v16 with metadata/output_metadata defaults."""
+    import dataclasses
+
+    from bathos.compact import _apply_migrations
+
+    v15_run = dataclasses.replace(sample_run, schema_version="15")
+    result = _apply_migrations(v15_run)
+
+    assert result.schema_version == "16"
+    assert result.metadata == "{}"
+    assert result.output_metadata == "[]"
+
+
+def test_migration_chain_v0_to_v16_includes_metadata_fields(sample_run: Run):
+    """Verify a v0 fragment chains all the way through to v16 with metadata defaults."""
+    import dataclasses
+
+    from bathos.compact import _apply_migrations
+
+    v0_run = dataclasses.replace(sample_run, schema_version="0")
+    result = _apply_migrations(v0_run)
+
+    assert result.schema_version == "16"
+    assert result.metadata == "{}"
+    assert result.output_metadata == "[]"

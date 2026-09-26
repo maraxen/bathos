@@ -53,26 +53,69 @@ def _find_script_path(argv: list[str], cwd: Path) -> Path | None:
     # First arg is python/uv; look for script file in subsequent args
     # Handle: python script.py, python -c "...", python -m module, etc.
     # Also handle: uv run python script.py (skip 'run' and 'python' tokens)
+    # Also handle: uv run --prerelease=allow python script.py, uv run --python=3.12 script.py
+    # (single `--opt=value` tokens and valueless flags like `uv run --no-sync script.py`),
+    # debt #1946 -- every branch below must `continue` its own advance. Previously the
+    # "-c"/"-m"/"-W" branch fell through to an unconditional `i += 1` at the bottom of the
+    # loop *on top of* its own `i += 2`, advancing by 3 instead of 2 and skipping straight
+    # over the script token; the same fallthrough double-advanced every other flag branch
+    # too (single-token `--opt`/`--opt=value` flags advanced by 2 instead of 1), silently
+    # skipping whatever token followed. Only the passthrough branch's explicit `continue`
+    # avoided it, which is why bare `uv run python script.py` never showed the bug.
     _UV_PASSTHROUGH = {"run", "python", "python3"}
+    # Options that take their value as the NEXT argv token (python's -c/-m/-W/-X and uv run's
+    # value options). Without this, `uv run --with numpy python x.py` would treat `numpy` as
+    # the script.
+    _VALUE_FLAGS = {
+        "-c",
+        "-m",
+        "-W",
+        "-X",
+        "--with",
+        "--with-editable",
+        "--with-requirements",
+        "--project",
+        "--directory",
+        "--python",
+        "-p",
+        "--extra",
+        "--group",
+        "--only-group",
+        "--no-group",
+        "--package",
+        "--from",
+        "--index",
+        "--default-index",
+        "--index-url",
+        "--extra-index-url",
+        "--env-file",
+        "--config-file",
+        "--cache-dir",
+        "--prerelease",
+        "--resolution",
+    }
     i = 1
     while i < len(argv):
         arg = argv[i]
         if arg in _UV_PASSTHROUGH:
             i += 1
             continue
-        if arg in ("-c", "-m", "-W"):
-            # These take an argument but don't point to a file
+        if arg in _VALUE_FLAGS:
+            # These take a separate value argument (`-m module`, `-W ignore`,
+            # `uv run --with numpy`, `uv run --project .`): skip flag and value.
             i += 2
-        elif arg.startswith("-"):
-            # Other flags
+            continue
+        if arg.startswith("-"):
+            # Valueless flags (`--no-sync`, `--quiet`) and single-token `--opt=value`
+            # flags (`--prerelease=allow`, `--python=3.12`) are both exactly one argv
+            # token.
             i += 1
-        else:
-            # First non-flag arg after python is the script
-            candidate = cwd / arg if not Path(arg).is_absolute() else Path(arg)
-            if candidate.exists() and candidate.suffix == ".py":
-                return candidate.resolve()
-            return None
-        i += 1
+            continue
+        # First non-flag arg after python is the script
+        candidate = cwd / arg if not Path(arg).is_absolute() else Path(arg)
+        if candidate.exists() and candidate.suffix == ".py":
+            return candidate.resolve()
+        return None
     return None
 
 
