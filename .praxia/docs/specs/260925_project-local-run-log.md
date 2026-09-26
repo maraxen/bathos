@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: v9 (after adversarial cycle 9)
+revision: v10 (after adversarial cycle 10)
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -91,8 +91,10 @@ invest_overrides: []
   only one of them is still ingested. Events with `project_id: null` (unaffiliated, or a SLURM job without an id) mirror to
   `~/.bth/log-mirror/_null/<slug or _unaffiliated>/`. A mirror append failure is a warning, not a run failure.
   Fallback appends (D6) are mirrored the same way. `bth log restore` copies back into the
-  project log every mirror line whose `main_root` equals this root and that the project log
-  lacks (so a fork sharing the id never receives another copy's events); lines that reached neither copy are reported by `bth verify`, not invented.
+  project log every mirror line whose `main_root` is this root or one of its earlier paths
+  (`projects.toml` keeps, per root, the past `main_root` paths it was registered under with the
+  same `project_id`; a move is recorded on first registration at the new path) and that the
+  project log lacks (so a fork sharing the id never receives another copy's events); lines that reached neither copy are reported by `bth verify`, not invented.
 
 ## Authoritative writes (everything the index must not own)
 
@@ -133,7 +135,7 @@ key as the live kind:
 | `run.imported` | `run_id` | warm `runs` row, cool fragment, reap ledger JSON |
 | `submit.imported` | `submit_id` | submit-provenance Parquet |
 | `campaign.imported` | `campaign_id` | warm `campaigns` row, campaign JSON |
-| `campaign_run.imported` | `(campaign_id, run_id)` | warm `campaign_runs` row (with stored `evalue`, `seq_position`) |
+| `campaign_run.imported` | `(campaign_id, run_id)` | warm `campaign_runs` row (with stored `evalue`) |
 | `edge.imported` | `(src, dst, type)` | warm `campaign_edges`, `run_edges` |
 | `blast_radius.imported` | ledger id | warm `blast_radius_ledger`, fragment |
 | `anchor.imported` | `anchor_id` | warm `sidecar_anchors` |
@@ -226,15 +228,22 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
 - **Imported history:** the legacy importer emits one `<kind>.imported` event **per (entity,
   legacy source)**, never a pre-merged one: a run with a warm row and a cool fragment gets two
   `run.imported` events; each legacy `campaign_runs` row gives a `campaign_run.imported` carrying
-  its stored `evalue` and `seq_position`. Each carries `data.source_class`, one of `warm`
+  its stored `evalue` (not `seq_position`, which the fold always recomputes). Each carries `data.source_class`, one of `warm`
   (`bathos.db.frozen`, or `bathos.db` before cut-over), `warm_recreated` (a `bathos.db` recreated
   after cut-over by an older install), `fragment`, `campaign_json`, `ledger_json` (reap ledger) or
   `submit_parquet`; precedence is that order. The importer never reads current sidecar or output
   files. `ts` is the source record's own time (run: end time if finished, else start; campaign:
   `concluded_at` or `started_at`; ledger rows: their own timestamp). eid = `uuid5(NAMESPACE_BATHOS,
-  f"import:{kind}:{entity}:{source_class}:{sha256(canonical source record)}")`. Before appending,
-  the importer skips every eid already in the index or in the destination log, so re-running it
-  on unchanged sources appends nothing.
+  f"import:{kind}:{entity}:{source_class}:{sha256(canonical source record)}")`. Each event also
+  carries `data.imported_at` (import time), which is excluded from the hash and from the
+  `eid_conflict` comparison. Before appending, the importer skips every eid already in the index
+  or in the destination log, so re-running it on unchanged sources appends nothing.
+- **Snapshots:** if a source changed between imports, one `(entity, source_class)` has several
+  imported events. Only the one with the latest `imported_at` (then eid) takes part in the fold;
+  older snapshots of that same source are ignored. This depends only on event contents.
+- **Reap ledgers:** files under `catalog/reaped/<slug>/reverted/` are skipped by the importer
+  (the fragment and warm row already carry the restored status, `reap.py:203-217`), matching the
+  legacy reader (`reap.py:63-68`).
 - **Import merge (stage 1)**, field by field, never whole-state replacement:
   - *Campaigns:* `status='concluded'` is sticky: the base is concluded if any import says so,
     with `concluded_at` taken by source precedence, then earliest `ts`.
@@ -245,14 +254,18 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   `outcome` when not overridden) come together from the single highest-ranked *status claim*:
   - rank 2, terminal (`completed`, `failed`, `killed`; `runner.py:456,613,679,687`): a
     `run.finished`, or a `run.imported` with a terminal status;
-  - rank 1, `abandoned` (`reap.py:288`): a `run.reaped` not followed in `(ts, eid)` order by a
-    `run.reap_reverted`, or a `run.imported` with status `abandoned`;
+  - rank 1, `abandoned` (`reap.py:288`): a `run.reaped` or a `run.imported` with status
+    `abandoned`, unless a `run.reap_reverted` follows it in `(ts, eid)` order (a revert cancels
+    every earlier abandoned claim, imported ones included);
   - rank 0, `incomplete`: otherwise (a `run.started`, or a `run.imported` with status `running`).
   Ties go by source precedence (live counts as highest), then later `ts`, then eid. So a real
   finish beats a reap whatever their `ts`, including a finish pulled from the cluster after the
   reap, and a stale warm `running` never hides a fragment's terminal status. After cut-over the
   reaper selects runs whose folded status is `incomplete` and records that as `prior_status`; a
   revert with no terminal claim folds back to `incomplete`.
+- **Behaviour change (stated, not accidental):** an imported campaign member has no sidecar
+  declaration in the log, so a postmortem applied to it after cut-over changes its folded
+  `outcome` but not its stored `evalue`; today's compact would recompute it from the sidecar.
 - **Legacy writes after cut-over** (an older bathos still writing fragments, submit Parquet or a
   fresh `bathos.db`) are not imported automatically. `bth verify` reports them with the writing
   host, and the user re-runs `bth migrate --import-legacy`, which appends only new eids.
@@ -274,8 +287,18 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   campaign's conclusion time (`campaign.concluded.ts`, or the imported `concluded_at`) is still
   included, and `bth verify` reports `evalue_changed_after_conclusion` for that campaign. This
   depends only on event contents, not arrival.
-- Cross-host clock skew can change which of two conflicting last-writer-wins updates wins; it
-  cannot make the result depend on arrival order. AC-1 names the affected fields.
+- **Clock-skew-sensitive results** (the single list; AC-1 refers here). These are decided by
+  `(ts, eid)` order between events that may come from different hosts, so cross-host clock skew
+  can change the winner, though never make it depend on arrival order:
+  - campaign `name`, `question`, `hypothesis`, `started_at` (latest non-empty) and every field
+    set by `campaign.updated`, `campaign.threshold_set`, `campaign.claim_bound`,
+    `campaign.claim_bypassed`;
+  - anchor fields set by `anchor.updated`;
+  - `runs.output_metadata` (latest `run.outputs_hashed`) and postmortem fields (latest
+    `run.postmortem_applied`);
+  - whether a `run.reap_reverted` follows a given abandoned claim;
+  - ties between two status claims of equal rank and source precedence;
+  - `evalue_changed_after_conclusion` (compares `ts` values).
 
 ### Index ingest (generation swap)
 
@@ -360,9 +383,12 @@ switched on in one step.
    then refuses while any job in the user's `squeue` has a job id found in submit records or
    in a `running` run's `slurm_job_id`. Other queued jobs are listed; proceeding past them
    needs `--force`.
-2. **Import** (`bth migrate --import-legacy`, also run by `--to-log`): convert every cool fragment, submit record, campaign JSON, and every row of every
-   table in "Authoritative writes" into `*.imported` events (Fold rules), written to the owning
-   project's `.bth/log/` (unresolvable ones to `unaffiliated/`).
+2. **Import:** convert every cool fragment, submit record, campaign JSON, and every row of every
+   table in "Authoritative writes" into `*.imported` events (Fold rules). Before cut-over the
+   events go to a staging directory, `~/.bth/log/import-staging/<attempt>/`, never to project
+   logs; an abort at step 3 deletes it. Standalone `bth migrate --import-legacy` refuses to run
+   before cut-over. After cut-over it writes directly to the owning project's `.bth/log/`
+   (unresolvable ones to `unaffiliated/`).
 3. **Build and diff:** build `index.db` from events alone and diff it against `bathos.db` table
    by table. Every difference must fall in an allow-listed class (data already lost to earlier
    force-rebuilds; corrupt fragments skipped by `compact.py:787`; `output_metadata` whose files
@@ -370,7 +396,8 @@ switched on in one step.
    members whose legacy e-value used the fragment outcome rather than the postmortem-overridden
    one; unresolvable project) and goes into a
    signed-off residual report. Unclassified differences abort.
-4. **Switch:** reads and writes move to the new path. `bathos.db` is renamed to
+4. **Switch:** the staged events are moved into their owning project logs (and mirrors), then
+   reads and writes move to the new path. `bathos.db` is renamed to
    `bathos.db.frozen` and kept read-only for one release.
 5. **Stale installs:** an older bathos (e.g. pinned in a project venv, or on the cluster) may
    keep writing cool fragments, submit Parquet, or a fresh `bathos.db`. `bth verify` reports
@@ -383,7 +410,8 @@ switched on in one step.
 
 - AC-1. For any fixed multiset of events, delete + re-ingest yields an identical index,
   regardless of ingest order, cwd, or which files exist on disk (property test). The
-  last-writer-wins fields in "Fold rules" are excluded and tested separately with fixed `ts`.
+  clock-skew-sensitive results listed in "Fold rules" are excluded and tested separately with
+  fixed `ts`; the `quarantine` table is excluded.
 - AC-2. A test enumerates every SQL write to a catalog database and every file write under
   `~/.bth/catalog` in `src/bathos/`, and fails unless it is the ingest path or the log writer;
   every entry in "Authoritative writes" has an event with a schema.
@@ -430,11 +458,6 @@ switched on in one step.
   second time; importing a rewritten fragment for an already-imported run whose warm row says
   `running` advances its status exactly once (to terminal) and leaves every warm-only field
   (`metadata`, `output_metadata`, postmortem fields) unchanged.
-- AC-26. Run status: a `run.reaped` with a later `ts` than a `run.finished` still folds to the
-  terminal status; a reap then revert with no finish folds to `incomplete`; the reaper after
-  cut-over selects exactly the folded `incomplete` runs past its window.
-- AC-27. With two roots sharing a `project_id`, `bth log restore` in one never copies the
-  other's events.
 - AC-22. Campaign fold: for sequential campaigns, the fold's `seq_position`, `evalue`,
   threshold lock and threshold-mismatch skip equal what `campaigns.py:380-521` computes for the
   same runs, outcomes and sidecars; members without a declaration keep their stored `evalue`;
@@ -449,7 +472,15 @@ switched on in one step.
   none on a clean fixture.
 - AC-25. Every write site in "Authoritative writes" has a test that, with the flag on, emits its
   event (and nothing else) and, with the flag off, performs only the legacy write.
-
+- AC-26. Run status: a `run.reaped` with a later `ts` than a `run.finished` still folds to the
+  terminal status; a reap then revert with no finish folds to `incomplete`; a run reaped before
+  cut-over (imported `abandoned`) and reverted after it folds to `incomplete`; a reverted legacy
+  ledger re-abandons nothing; the reaper after cut-over selects exactly the folded `incomplete`
+  runs past its window.
+- AC-27. With two roots sharing a `project_id`, `bth log restore` in one never copies the
+  other's events; after moving a project, restore still recovers events written at the old path.
+- AC-28. Re-importing a legacy source that changed yields the fold of its newest snapshot only;
+  an aborted migration leaves no imported event in any project log.
 
 ## Order of delivery
 
@@ -463,7 +494,7 @@ switched on in one step.
    fixture catalogs (AC-1, AC-12, AC-15, AC-17, AC-18, AC-19, AC-20, AC-22). AC-18 is enforced
    from here; the legacy write sites (flag-off branch only) sit on an explicit allow-list in the
    AC-18 test, which step 5 empties.
-4. Legacy importer, reaper on folded status, `bth verify` checks (AC-21, AC-23, AC-24, AC-26) and the new cluster log pull in
+4. Legacy importer, reaper on folded status, `bth verify` checks (AC-21, AC-23, AC-24, AC-26, AC-28) and the new cluster log pull in
    `bth sync --pull` (log, fallback, mirror; AC-6 and the cluster variants of AC-8, AC-9).
 5. Assign ids in every registered project (migration step 0), then cut-over via
    `bth migrate --to-log` (AC-13); then AC-2, AC-3, AC-4 and AC-8 hold in production.
