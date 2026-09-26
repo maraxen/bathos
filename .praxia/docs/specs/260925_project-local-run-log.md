@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: v10 (after adversarial cycle 10)
+revision: v11 (after adversarial cycle 11)
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -91,10 +91,10 @@ invest_overrides: []
   only one of them is still ingested. Events with `project_id: null` (unaffiliated, or a SLURM job without an id) mirror to
   `~/.bth/log-mirror/_null/<slug or _unaffiliated>/`. A mirror append failure is a warning, not a run failure.
   Fallback appends (D6) are mirrored the same way. `bth log restore` copies back into the
-  project log every mirror line whose `main_root` is this root or one of its earlier paths
-  (`projects.toml` keeps, per root, the past `main_root` paths it was registered under with the
-  same `project_id`; a move is recorded on first registration at the new path) and that the
-  project log lacks (so a fork sharing the id never receives another copy's events); lines that reached neither copy are reported by `bth verify`, not invented.
+  project log every mirror line that the project log lacks and whose `main_root` is not another
+  currently registered root with the same `project_id` (so a moved project, whose old path is
+  gone or pruned, recovers its history, and a fork, whose other root is still registered, never
+  receives the other copy's events) (so a fork sharing the id never receives another copy's events); lines that reached neither copy are reported by `bth verify`, not invented.
 
 ## Authoritative writes (everything the index must not own)
 
@@ -133,6 +133,7 @@ key as the live kind:
 | Import kind | Entity key | Built from |
 |---|---|---|
 | `run.imported` | `run_id` | warm `runs` row, cool fragment, reap ledger JSON |
+| `run_reap.imported` | `run_id` | reverted reap ledger JSON (`reaped/<slug>/reverted/`) |
 | `submit.imported` | `submit_id` | submit-provenance Parquet |
 | `campaign.imported` | `campaign_id` | warm `campaigns` row, campaign JSON |
 | `campaign_run.imported` | `(campaign_id, run_id)` | warm `campaign_runs` row (with stored `evalue`) |
@@ -234,16 +235,21 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   `submit_parquet`; precedence is that order. The importer never reads current sidecar or output
   files. `ts` is the source record's own time (run: end time if finished, else start; campaign:
   `concluded_at` or `started_at`; ledger rows: their own timestamp). eid = `uuid5(NAMESPACE_BATHOS,
-  f"import:{kind}:{entity}:{source_class}:{sha256(canonical source record)}")`. Each event also
-  carries `data.imported_at` (import time), which is excluded from the hash and from the
-  `eid_conflict` comparison. Before appending, the importer skips every eid already in the index
-  or in the destination log, so re-running it on unchanged sources appends nothing.
-- **Snapshots:** if a source changed between imports, one `(entity, source_class)` has several
-  imported events. Only the one with the latest `imported_at` (then eid) takes part in the fold;
-  older snapshots of that same source are ignored. This depends only on event contents.
-- **Reap ledgers:** files under `catalog/reaped/<slug>/reverted/` are skipped by the importer
-  (the fragment and warm row already carry the restored status, `reap.py:203-217`), matching the
-  legacy reader (`reap.py:63-68`).
+  f"import:{kind}:{entity}:{source_class}:{snapshot}:{sha256(canonical source record)}")`, where
+  `data.snapshot` is an ordinal per `(entity, source_class)`.
+- **Snapshots:** for each `(entity, source_class)` the importer compares the source's hash with
+  the newest existing snapshot (highest ordinal) of that pair. Equal: it appends nothing, so
+  re-running on unchanged sources is a no-op. Different (including a source that changed back
+  to an earlier content): it appends a new event with ordinal = newest + 1. Only the highest
+  ordinal takes part in the fold. The importer holds the ingest lock, so ordinals never race.
+  "Existing" means, before cut-over, the current staging attempt and the destination logs; after
+  cut-over, the index and the destination logs.
+- **Reap ledgers:** each `catalog/reaped/<slug>/<run_id>.json` imports as an abandoned claim
+  (`run.imported`, `source_class=ledger_json`, `ts` = its `reaped_at`). Each
+  `reverted/<run_id>.<YYYYmmddHHMMSS>.json` (`reap.py:213-217`) imports as `run_reap.imported`
+  carrying `reaped_at` and the revert time from its filename; the fold treats it as an abandoned
+  claim at `reaped_at` followed by a revert at that time, so a pre-cut-over revert is honoured
+  whatever the warm row says.
 - **Import merge (stage 1)**, field by field, never whole-state replacement:
   - *Campaigns:* `status='concluded'` is sticky: the base is concluded if any import says so,
     with `concluded_at` taken by source precedence, then earliest `ts`.
@@ -386,22 +392,25 @@ switched on in one step.
 2. **Import:** convert every cool fragment, submit record, campaign JSON, and every row of every
    table in "Authoritative writes" into `*.imported` events (Fold rules). Before cut-over the
    events go to a staging directory, `~/.bth/log/import-staging/<attempt>/`, never to project
-   logs; an abort at step 3 deletes it. Standalone `bth migrate --import-legacy` refuses to run
+   logs; an abort at step 3 deletes it (including its index, below). Standalone `bth migrate --import-legacy` refuses to run
    before cut-over. After cut-over it writes directly to the owning project's `.bth/log/`
    (unresolvable ones to `unaffiliated/`).
-3. **Build and diff:** build `index.db` from events alone and diff it against `bathos.db` table
-   by table. Every difference must fall in an allow-listed class (data already lost to earlier
+3. **Build and diff:** build `import-staging/<attempt>/index.db` from the staged events alone
+   (a root of kind `staging`, used only here) and diff it against `bathos.db` table by table.
+   `~/.bth/catalog/index.db` is not touched before step 4. Every difference must fall in an allow-listed class (data already lost to earlier
    force-rebuilds; corrupt fragments skipped by `compact.py:787`; `output_metadata` whose files
    changed since; postmortem overrides whose files are only in a deleted worktree; campaign
    members whose legacy e-value used the fragment outcome rather than the postmortem-overridden
    one; unresolvable project) and goes into a
    signed-off residual report. Unclassified differences abort.
-4. **Switch:** the staged events are moved into their owning project logs (and mirrors), then
-   reads and writes move to the new path. `bathos.db` is renamed to
+4. **Switch:** the staged events are moved into their owning project logs (and mirrors),
+   `~/.bth/catalog/index.db` is built from those logs, the staging directory is deleted, and
+   reads and writes move to the new path. The step-2 start time is recorded in `index.db` as the
+   cut-off for step 5. `bathos.db` is renamed to
    `bathos.db.frozen` and kept read-only for one release.
 5. **Stale installs:** an older bathos (e.g. pinned in a project venv, or on the cluster) may
    keep writing cool fragments, submit Parquet, or a fresh `bathos.db`. `bth verify` reports
-   each such write (a legacy file newer than the cut-over time recorded in `index.db`, or a
+   each such write (a legacy file newer than the step-2 start time recorded in `index.db`, or a
    `bathos.db` present beside `bathos.db.frozen`) with the writing host; re-running
    `bth migrate --import-legacy` imports it (sources: `bathos.db.frozen`, any new `bathos.db`,
    fragments, submit Parquet, campaign JSON).
@@ -474,13 +483,16 @@ switched on in one step.
   event (and nothing else) and, with the flag off, performs only the legacy write.
 - AC-26. Run status: a `run.reaped` with a later `ts` than a `run.finished` still folds to the
   terminal status; a reap then revert with no finish folds to `incomplete`; a run reaped before
-  cut-over (imported `abandoned`) and reverted after it folds to `incomplete`; a reverted legacy
-  ledger re-abandons nothing; the reaper after cut-over selects exactly the folded `incomplete`
+  cut-over (imported `abandoned`) and reverted after it folds to `incomplete`; a run reaped and
+  reverted before cut-over folds to its restored status even if the warm row still says
+  `abandoned`; the reaper after cut-over selects exactly the folded `incomplete`
   runs past its window.
 - AC-27. With two roots sharing a `project_id`, `bth log restore` in one never copies the
   other's events; after moving a project, restore still recovers events written at the old path.
-- AC-28. Re-importing a legacy source that changed yields the fold of its newest snapshot only;
-  an aborted migration leaves no imported event in any project log.
+- AC-28. Re-importing a legacy source that changed yields the fold of its newest snapshot only,
+  including a source that changed and then changed back; an aborted migration leaves no imported
+  event in any project log and no `~/.bth/catalog/index.db`; abort, retry, switch leaves every
+  imported event in the logs.
 
 ## Order of delivery
 
