@@ -50,11 +50,11 @@ Show details of a specific run:
 
     bth show <run_id>
 
-Query runs by pattern or status:
+Query runs by project or status:
 
 .. code-block:: bash
 
-    bth find --pattern "nvt" --status pass
+    bth find --project my-project --status pass
 
 CLI Reference
 -------------
@@ -78,11 +78,13 @@ Execute a script and capture provenance.
 
 .. code-block:: bash
 
-    bth run <SCRIPT_PATH> [--arg1 value1] [--out <OUTPUT_DIR>]
+    bth run <SCRIPT_PATH> [--arg1 value1] [--output-paths <PATH>] [--tags <TAG>] [--campaign-id <ID>]
 
 - ``SCRIPT_PATH``: Path to Python script to run
 - ``--arg*``: Arguments passed to the script
-- ``--out``: Output directory for artifacts (default: ``outputs/``)
+- ``--output-paths``: Register an output file produced by this run (repeatable)
+- ``--tags``: Attach a search tag to this run (repeatable)
+- ``--campaign-id``: Associate this run with a campaign
 
 Returns: run ID, exit code, and metadata.
 
@@ -114,11 +116,12 @@ Query runs by pattern and status.
 
 .. code-block:: bash
 
-    bth find [--pattern <PATTERN>] [--status pass|fail|stale] [--since <DATE>]
+    bth find [--project <SLUG>] [--tags <TAG>] [--status pass|fail|stale] [--since <DURATION>]
 
-- ``--pattern``: Filter by script name or project
+- ``--project``: Filter by project slug (exact match)
+- ``--tags``: Filter to runs with any of these tags (repeatable)
 - ``--status``: Filter by outcome (pass, fail, stale)
-- ``--since``: Only runs since date (YYYY-MM-DD)
+- ``--since``: Relative time filter, e.g. ``7d`` or ``24h``
 
 **bth sql**
 
@@ -173,11 +176,10 @@ Synchronize catalog between local machine and cluster.
 
 .. code-block:: bash
 
-    bth sync [--remote <HOST:PATH>] [--pull] [--dry-run]
+    bth sync [<remote-name>] [--pull]
 
-- ``--remote``: SSH destination for cluster (e.g., ``engaging:~/projects/myproject``)
+- ``<remote-name>``/``--remote-name``: Remote name configured via ``bth remote add`` (auto-selected if only one is configured)
 - ``--pull``: Download from cluster (default: upload)
-- ``--dry-run``: Preview without changes
 
 **bth postmortem**
 

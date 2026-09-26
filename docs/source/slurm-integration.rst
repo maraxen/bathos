@@ -87,7 +87,7 @@ For run-specific logs, check the bathos run metadata:
 
 .. code-block:: bash
 
-    bth find --pattern "benchmark_nvt" --since 2026-05-15
+    bth find --tags benchmark_nvt --since 2026-05-15
 
 Syncing Catalog to Cluster
 ---------------------------
@@ -96,7 +96,7 @@ Copy your catalog to the cluster before running batch jobs:
 
 .. code-block:: bash
 
-    bth sync --remote engaging:~/projects/my-research-project
+    bth sync engaging
 
 This uploads cool-tier Parquet fragments to the cluster, allowing jobs to reference previous runs.
 
@@ -108,7 +108,7 @@ After batch jobs complete, download results and compact to warm tier:
 .. code-block:: bash
 
     # Download cool-tier fragments from cluster
-    bth sync --remote engaging:~/projects/my-research-project --pull
+    bth sync engaging --pull
 
     # Consolidate to warm tier for fast queries
     bth compact
@@ -127,7 +127,7 @@ Here's a complete workflow:
     bth init --slug my-research-project
 
     # 2. Optionally sync previous results from cluster
-    bth sync --remote engaging:~/projects/my-research-project --pull
+    bth sync engaging --pull
     bth compact
 
     # 3. Submit batch array to cluster
@@ -137,11 +137,11 @@ Here's a complete workflow:
     squeue
 
     # 5. After ~30 minutes, download and check results
-    bth sync --remote engaging:~/projects/my-research-project --pull
+    bth sync engaging --pull
     bth compact
 
     # 6. Query results
-    bth find --pattern benchmark_nvt --status pass
+    bth find --tags benchmark_nvt --status pass
 
     # 7. Analyze results
     bth sql "SELECT seed, runtime_seconds FROM runs \
@@ -288,7 +288,7 @@ Run ``bth compact`` on your local machine after syncing:
 
 .. code-block:: bash
 
-    bth sync --remote engaging:~/projects/my-project --pull
+    bth sync engaging --pull
     bth compact  # Consolidate cool → warm
 
 Then queries are fast:

@@ -216,7 +216,7 @@ def main():
     # Phase 5: Graded verdict
     verdict = phase5_graded_verdict(config, checklist, adjudication)
 
-    # Output result JSON (for bth run --out)
+    # Output result JSON (for bth run --output-paths)
     result = {
         "parity_grade": verdict["grade"],
         "clause_parity_pct": verdict["clause_parity_pct"],

@@ -31,12 +31,12 @@ Shows campaign name, mode, status, question/hypothesis, run count.
 ### Add Runs to Campaign
 
 ```bash
-bth campaign add <run-id> --campaign <campaign-id>
+bth campaign add <run-id> --campaign-id <campaign-id>
 ```
 
 Links runs to campaign.
 
-**Note:** One run per invocation (repeat the command per run) — flag is `--campaign`/`-c`, not `--id`; `--runs` (plural) does not exist.
+**Note:** One run per invocation (repeat the command per run) — flag is `--campaign-id`, no `-c` shorthand; `--runs` (plural) does not exist.
 
 ### Review Campaign Results
 
@@ -69,14 +69,14 @@ during `mrx check` freshness sweeps (F7/F8 signals) to confirm figure pins are c
 
 ### Register figure outputs during a run
 
-Pass figure file paths alongside the result JSON using repeated `--out` flags (any file type is valid; repeat the flag for each path):
+Pass figure file paths alongside the result JSON using repeated `--output-paths` flags (any file type is valid; repeat the flag for each path):
 
 ```bash
 bth run \
-  --out outputs/results/my_run.json \
-  --out outputs/figures/scatter.svg \
-  --out outputs/figures/barplot.png \
-  --campaign <campaign-id> \
+  --output-paths outputs/results/my_run.json \
+  --output-paths outputs/figures/scatter.svg \
+  --output-paths outputs/figures/barplot.png \
+  --campaign-id <campaign-id> \
   -- uv run python scripts/experiments/my_experiment.py
 ```
 
@@ -173,7 +173,7 @@ The manifest is a structured JSON sidecar stored at `<catalog>/sidecars/<campaig
 
 **Fields:**
 - `run_id` (str) — Bathos run ID that produced the data product.
-- `output_path` (str) — Path to the data file within the bathos catalog (typically registered via `bth run --out`).
+- `output_path` (str) — Path to the data file within the bathos catalog (typically registered via `bth run --output-paths`).
 - `sha256` (str) — SHA256 hash of the data product (immutability guarantee). This is the hash of the **DATA file** (e.g., JSON result), not the rendered figure.
 
 ### Consuming the Manifest
@@ -274,7 +274,7 @@ bth claim scaffold <campaign-id>
 bth claim validate .bth/claims/<campaign-name>.claim.toml
 
 # 3. Register BEFORE any confirmatory run — records claim_path + claim_sha256 (the tamper anchor)
-bth claim register .bth/claims/<campaign-name>.claim.toml --campaign <campaign-id>
+bth claim register .bth/claims/<campaign-name>.claim.toml --campaign-id <campaign-id>
 #    amending a registered claim and re-registering requires --force (writes an audit event)
 
 # 4. Run the campaign; each confirmatory sidecar declares which hypotheses it discriminates / isolates

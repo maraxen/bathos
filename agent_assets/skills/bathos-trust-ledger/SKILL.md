@@ -103,7 +103,7 @@ catalog_dir = Path.home() / ".bth" / "catalog"  # or BTH_CATALOG_DIR / .bth.toml
 
 # --- 1. Track the producing run -------------------------------------------
 # Prefer the CLI so git/sidecar provenance is captured:
-#   bth run --out outputs/model.json -- uv run python scripts/train.py
+#   bth run --output-paths outputs/model.json -- uv run python scripts/train.py
 # Library equivalent (minimal fields shown):
 #   from bathos.schema import Run
 #   from bathos.catalog import init_catalog, write_run

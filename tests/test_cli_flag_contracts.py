@@ -14,7 +14,9 @@ Two contracts are pinned here:
 
 from __future__ import annotations
 
+import inspect
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -27,6 +29,8 @@ from bathos.schema import Run
 from tests._cyclopts_runner import CyclopticRunner
 
 runner = CyclopticRunner()
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _make_run(n: int, base: datetime, parent_run_id: str = "") -> Run:
@@ -206,3 +210,136 @@ def test_postmortem_validate_strict_files_still_accepted(tmp_path):
     result = runner.invoke(app, ["postmortem", "validate", str(pm), "--strict-files"])
     # Parse fails on an empty file, but the option itself must be recognised.
     assert "unknown option" not in result.output.lower()
+
+
+# --- 3. Doc surfaces don't drift from the real flag names -------------------
+#
+# praxia debt #1660: README/skill/docs examples said `bth run --out/--tag
+# --campaign`, but those flags are actually `--output-paths/--tags
+# --campaign-id` (cyclopts derives CLI flag names from the underlying
+# `@cisternal.tool` function's parameter names, kebab-cased -- see
+# src/bathos/mcp.py's `run_cli_tool`). Copy-pasting a documented invocation
+# then failed with "Unknown option".
+#
+# This guard re-derives each command's real flag set from its live cyclopts
+# signature (never a hardcoded list, so it can't itself go stale the same
+# way) and checks every single-line `bth <command> ...` invocation in the
+# doc surfaces that were fixed for #1660. It intentionally does NOT try to
+# parse multi-line shell continuations beyond a simple backslash-join, and it
+# stops each invocation at a bare `--` token -- everything after that is
+# forwarded to the user's own script/process, not parsed by bth itself, so
+# flags there (e.g. `bth run -- uv run python train.py --out foo.json`) are
+# correctly out of scope.
+
+# command name (as it appears right after "bth ") -> cyclopts app path
+COMMAND_APP_PATHS: dict[str, tuple[str, ...]] = {
+    "run": ("run",),
+    "submit": ("submit",),
+    "find": ("find",),
+    "campaign add": ("campaign", "add"),
+}
+
+# Flags valid for every command regardless of its own signature.
+UNIVERSAL_FLAGS = {"--help"}
+
+
+def _valid_flags_for(app_path: tuple[str, ...]) -> set[str]:
+    """Derive the real `--flag` names for a cyclopts command from its live signature."""
+    sub = app
+    for part in app_path:
+        sub = sub[part]
+    fn = sub.default_command
+    assert fn is not None, f"no default_command for app path {app_path!r}"
+
+    flags = set()
+    for name, param in inspect.signature(fn).parameters.items():
+        if param.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
+            continue
+        flags.add("--" + name.replace("_", "-"))
+    return flags
+
+
+_FLAG_RE = re.compile(r"--[a-zA-Z][a-zA-Z0-9-]*")
+
+
+def _bth_invocations(text: str, command: str) -> list[str]:
+    """Extract single-line `bth <command> ...` invocations from doc text.
+
+    Joins simple backslash line-continuations first, then returns each
+    matching invocation truncated at a bare `--` token (the passthrough
+    separator), so passthrough args are never mistaken for bth's own flags.
+
+    `bth run` is special-cased: its `*args` parameter is annotated
+    `allow_leading_hyphen=True` (mcp.py's `run_cli_tool`), so once a bare
+    (non-`--`) SCRIPT_PATH-shaped token is consumed positionally, cyclopts
+    hands every later `--foo`-looking token to the script instead of
+    matching it against `run`'s own options -- verified empirically:
+    `bth run --no-sidecar /tmp/t.py --out foo.json` exits 0 and forwards
+    `--out foo.json` to the script, it does not raise "Unknown option" the
+    way a leading `bth run --out foo.json -- ...` does. An invocation shaped
+    `bth run <SCRIPT_PATH> --flag ...` is therefore genuinely ambiguous
+    (untestable from text alone) and is skipped rather than flagged.
+    """
+    joined = re.sub(r"\\\s*\n\s*", " ", text)
+    prefix = f"bth {command} "
+    prefix_len = len(prefix.split())
+    invocations = []
+    for line in joined.splitlines():
+        line = line.strip().strip("`")
+        if not line.startswith(prefix):
+            continue
+        tokens = line.split()
+        if (
+            command == "run"
+            and len(tokens) > prefix_len
+            and not tokens[prefix_len].startswith("-")
+        ):
+            continue
+        cut = len(tokens)
+        for i, tok in enumerate(tokens):
+            if tok == "--":
+                cut = i
+                break
+        invocations.append(" ".join(tokens[:cut]))
+    return invocations
+
+
+# Doc surfaces known to document `bth run` / `bth submit` / `bth find` /
+# `bth campaign add` invocations -- the surfaces #1660 grepped. Historical
+# planning docs under docs/superpowers/{plans,specs}/ are deliberately
+# excluded: they are dated records of past design, not living usage docs.
+DOC_SURFACES = [
+    "README.md",
+    "agent_assets/using_bathos/SKILL.md",
+    "agent_assets/skills/using-bathos/SKILL.md",
+    "agent_assets/snippets/rules.md",
+    "agent_assets/skills/bathos-campaigns/SKILL.md",
+    "agent_assets/skills/bathos-cluster/SKILL.md",
+    "agent_assets/skills/bathos-trust-ledger/SKILL.md",
+    "agent_assets/agents/experiment-runner.md",
+    "docs/source/user-guide.rst",
+    "docs/source/slurm-integration.rst",
+]
+
+
+@pytest.mark.parametrize("command", list(COMMAND_APP_PATHS))
+def test_doc_invocations_use_real_flags(command):
+    """Every documented `bth <command> ...` invocation uses a flag the CLI accepts."""
+    valid = _valid_flags_for(COMMAND_APP_PATHS[command]) | UNIVERSAL_FLAGS
+    violations: list[str] = []
+
+    for rel_path in DOC_SURFACES:
+        path = REPO_ROOT / rel_path
+        if not path.exists():
+            continue
+        text = path.read_text()
+        for invocation in _bth_invocations(text, command):
+            used = set(_FLAG_RE.findall(invocation))
+            unknown = used - valid
+            if unknown:
+                violations.append(f"{rel_path}: {invocation!r} uses unknown flag(s) {sorted(unknown)}")
+
+    assert not violations, "stale/invalid flags in documented invocations:\n" + "\n".join(violations)
