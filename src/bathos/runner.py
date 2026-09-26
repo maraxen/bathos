@@ -653,19 +653,11 @@ def _run_script_impl(
             "campaign_id": resolved_campaign_id or None,
             "agent_mode": resolved_mode,
         }
-        try:
-            emit_event(
-                kind="run.started",
-                entity=[run.id],
-                data=started_data,
-                cwd=cwd,
-                hard_fail=True,
-            )
-        except RunLogNotLaunchedError as e:
-            event("run.error", phase="persist", exc_type=type(e).__name__, exc_msg=str(e))
-            print(f"Error: {e}", file=sys.stderr)
-            return 1
+        # D4: run.started embeds GitState and PinResult, so it is emitted after
+        # pin_run below (still before the subprocess), not here.
+        pending_started: dict | None = started_data
     else:
+        pending_started = None
         try:
             write_run(run, catalog_dir)
         except Exception as e:
@@ -680,6 +672,7 @@ def _run_script_impl(
     # dirty tree the ref points at a snapshot of what actually ran.
     #
     # Best-effort by construction: provenance capture must never be able to fail a run.
+    pin = None
     try:
         # Declared, load-bearing paths. bathos cannot discover UNdeclared inputs, but it can refuse
         # to let a declared one be silently omitted from the snapshot because the repo ignores it.
@@ -742,6 +735,23 @@ def _run_script_impl(
             print(f"warning: run provenance is not durable: {pin.unpinned_reason}", file=sys.stderr)
     except Exception as e:  # pragma: no cover - defensive; pinning must not break a run
         event("run.pin_error", run_uuid=run.id, exc_type=type(e).__name__, exc_msg=str(e))
+
+    if pending_started is not None:
+        pending_started["git_state"] = dataclasses.asdict(git)
+        pending_started["pin"] = pin_result_as_dict(pin) if pin is not None else None
+        # D6: run.started is not best-effort -- no subprocess unless it is durable.
+        try:
+            emit_event(
+                kind="run.started",
+                entity=[run.id],
+                data=pending_started,
+                cwd=cwd,
+                hard_fail=True,
+            )
+        except RunLogNotLaunchedError as e:
+            event("run.error", phase="persist", exc_type=type(e).__name__, exc_msg=str(e))
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
 
     results_temp_dir = Path(tempfile.gettempdir())
 

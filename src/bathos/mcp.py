@@ -3103,20 +3103,8 @@ def postmortem_get_tool(
             "verdict_override": pm.verdict_override,
         }
 
-    if run_id:
-        # run.postmortem_applied (delivery step 2b / AC-25): behind the flag only.
-        from bathos.postmortem import postmortem_applied_event_data
-        from bathos.runlog.emit import current_mode, emit_event, unit_of_work
-
-        with unit_of_work(cat_dir):
-            if current_mode():
-                emit_event(
-                    kind="run.postmortem_applied",
-                    entity=[run_id],
-                    data=postmortem_applied_event_data(pm, pm_file),
-                    cwd=ws,
-                )
-
+    # Read-only: run.postmortem_applied is emitted by postmortem validate/register
+    # (spec BC-2), never by a read.
     return {
         "run_id": pm.run_id,
         "campaign_id": pm.campaign_id,

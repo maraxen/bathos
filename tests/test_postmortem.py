@@ -902,7 +902,7 @@ def test_postmortem_validate_flag_on_emits_event(tmp_path: Path, monkeypatch):
     reset_writers_for_test()
 
 
-def test_postmortem_get_flag_on_emits_event(tmp_path: Path, monkeypatch):
+def test_postmortem_get_is_read_only_flag_on(tmp_path: Path, monkeypatch):
     from bathos.mcp import postmortem_get_tool
     from bathos.runlog.writer import reset_writers_for_test
 
@@ -914,8 +914,7 @@ def test_postmortem_get_flag_on_emits_event(tmp_path: Path, monkeypatch):
     result = postmortem_get_tool(run_id=run.id, workspace_root=str(workspace_root))
     assert "error" not in result
 
+    # A read never emits: run.postmortem_applied belongs to validate/register (BC-2).
     lines = _read_jsonl_dir(Path.home() / ".bth" / "log" / "unaffiliated")
-    applied = [line for line in lines if line["kind"] == "run.postmortem_applied"]
-    assert len(applied) == 1
-    assert applied[0]["entity"] == [run.id]
+    assert [line for line in lines if line["kind"] == "run.postmortem_applied"] == []
     reset_writers_for_test()

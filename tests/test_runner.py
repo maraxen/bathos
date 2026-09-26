@@ -1590,6 +1590,15 @@ def test_flag_on_run_emits_started_and_finished_events_only(
     assert started["entity"] == finished["entity"]
     assert "sidecar_sha256" in started["data"]
     assert "claim_discriminates" in started["data"]
+    # D4: GitState and PinResult are embedded (pin_run runs before the emit).
+    assert set(started["data"]["git_state"]) == {
+        "hash",
+        "branch",
+        "dirty",
+        "dirty_content_id",
+        "provenance_source",
+    }
+    assert "pin" in started["data"]
     assert finished["data"]["status"] == "completed"
     assert finished["data"]["exit_code"] == 0
     reset_writers_for_test()
