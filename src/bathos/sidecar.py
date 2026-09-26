@@ -534,11 +534,10 @@ def single_row_projection(row: dict) -> str:
     rather than producing a value at all (debt #1941). Quoting them as string literals cast to
     DOUBLE (`'inf'::DOUBLE`) is the form DuckDB accepts, and DuckDB then applies IEEE 754
     semantics for the finite comparisons that matter here (`inf < 5` is `false`, `-inf < 5` is
-    `true`). One documented divergence from strict IEEE 754: DuckDB defines a total order over
-    floats in which `nan = nan` is `true` and NaN sorts above +inf, rather than leaving NaN
-    unordered/self-unequal — so a condition like `x < 5` with `x = nan` deterministically
-    evaluates `false` (nan is not less than anything), never raises, and never silently
-    produces an `error` outcome.
+    `true`). NaN is rendered as SQL `NULL`, not `'nan'::DOUBLE`: DuckDB orders NaN above
+    +inf (so `'nan'::DOUBLE > 0.9` is TRUE), which would let a broken measurement satisfy a
+    `pass` condition. As NULL, every comparison on it is NULL, no condition matches, and the
+    outcome is `unknown` unless a condition tests `x IS NULL` explicitly.
     """
 
     def _sql_literal(v: object, k: str) -> str:
@@ -547,8 +546,8 @@ def single_row_projection(row: dict) -> str:
         if isinstance(v, bool):
             return f"{'TRUE' if v else 'FALSE'} AS {k}"
         if isinstance(v, float):
-            if v != v:  # NaN is the only float that is not equal to itself
-                return f"'nan'::DOUBLE AS {k}"
+            if v != v:  # NaN: NULL so it can never satisfy a comparison (see docstring)
+                return f"NULL::DOUBLE AS {k}"
             if v == float("inf"):
                 return f"'inf'::DOUBLE AS {k}"
             if v == float("-inf"):

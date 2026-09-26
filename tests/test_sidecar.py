@@ -312,14 +312,31 @@ def test_evaluate_outcome_negative_infinity_is_true(tmp_path):
 
 def test_evaluate_outcome_nan_is_deterministic_not_error(tmp_path):
     """A NaN result field must evaluate deterministically rather than raising or landing on
-    'error' (regression: debt #1941). DuckDB's total float order makes `nan < 5` false, so
-    this lands on the 'fail' branch, not 'unknown' or an exception."""
+    'error' (regression: debt #1941). NaN is projected as NULL, so no comparison matches and
+    the outcome is 'unknown' -- never a pass or fail it did not earn."""
     from bathos.sidecar import evaluate_outcome, parse_sidecar
 
     path = _write_toml(tmp_path, _outcome_toml_for_x())
     s = parse_sidecar(path)
     label = evaluate_outcome(s, {"x": float("nan")})
-    assert label == "fail"
+    assert label == "unknown"
+
+
+def test_evaluate_outcome_nan_never_passes_greater_than(tmp_path):
+    """Negative control: DuckDB orders 'nan'::DOUBLE above +inf, so a NaN rendered as a
+    DOUBLE would satisfy `x > 0.9`. A broken measurement must not record 'pass'."""
+    from bathos.sidecar import evaluate_outcome, parse_sidecar
+
+    path = _write_toml(
+        tmp_path,
+        '[experiment]\nhypothesis = "h"\n\n'
+        '[outcomes.pass]\ncondition = "x > 0.9"\ndecision = "d"\n\n'
+        '[outcomes.fail]\ncondition = "x <= 0.9"\ndecision = "d"\n\n'
+        '[result_schema]\nx = "float"\n',
+    )
+    s = parse_sidecar(path)
+    assert evaluate_outcome(s, {"x": float("nan")}) == "unknown"
+    assert evaluate_outcome(s, {"x": 0.95}) == "pass"
 
 
 def test_sidecar_agent_mode_parsed(tmp_path):
