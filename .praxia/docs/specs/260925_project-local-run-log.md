@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: v19 (after adversarial cycle 19)
+revision: v20 (after adversarial cycle 20)
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -152,14 +152,27 @@ key as the live kind:
 ### Mode (the flag and cut-over)
 
 - **Cut-over marker:** `~/.bth/catalog/cutover.json` (`{"at": <RFC3339>, "bathos": <version>}`),
-  written atomically (`os.replace`) as the last action of Migration step 4. "Before cut-over"
-  and "after cut-over" everywhere in this spec mean "marker absent" and "marker present".
-- **The flag** (log mode) is on iff the marker exists in the active catalog dir, or
-  `BTH_LOG_MODE=1` is set **and** `BTH_CATALOG_DIR` points somewhere other than the default
-  `~/.bth/catalog` (test fixtures only). `BTH_LOG_MODE=1` against the default catalog without a
-  marker is refused with a structured error, so the real catalog can never be half-switched.
-- Every check reads the marker afresh on each call (one `stat`), so a long-lived process such
-  as the MCP server switches at cut-over without a restart.
+  written atomically (`os.replace`) by Migration step 4 (see its action order). "Before
+  cut-over" and "after cut-over" everywhere in this spec mean "marker absent" and "marker
+  present" in the local catalog.
+- **The flag** (log mode) is on iff the local marker exists, or `BTH_LOG_MODE=1` is set in a
+  context where it is honoured: a SLURM job (`SLURM_JOB_ID` set) or a test
+  (`PYTEST_CURRENT_TEST` set, with a non-default `BTH_CATALOG_DIR`). Anywhere else
+  `BTH_LOG_MODE=1` without the marker is refused with a structured error, so the real local
+  catalog can never be half-switched.
+- **Cluster jobs:** a compute node has no marker (its catalog is the remote
+  `<remote_root>/.bth/catalog`, `cluster_catalog.py:21-26`). After cut-over, `bth submit`
+  exports `BTH_LOG_MODE=1` into the job environment, so the job appends events to the cluster
+  checkout's `.bth/log/` (Cluster). A job submitted with plain `sbatch`, bypassing `bth submit`,
+  stays in legacy mode; its pulled fragments are reported by `bth verify` as legacy writes
+  (Migration step 5).
+- **Mode is fixed once per unit of work:** read at the start of each CLI process and each MCP
+  tool invocation, and never re-read within it, so one command never mixes a legacy write with
+  an event. A long-lived MCP server therefore switches at cut-over without a restart, from its
+  next tool call.
+- **Writers lock:** every command that writes (legacy or events) holds a shared `flock` on
+  `~/.bth/catalog/writers.lock` for its duration; `bth migrate --to-log` takes it exclusively
+  (Migration step 1), so no local writer spans the switch.
 - Flag on: events only, `connect_read` builds views. Flag off: legacy writes only, the
   pass-through in "Reads".
 
@@ -442,7 +455,8 @@ switched on in one step.
    then runs `bth reap` (reconciling stale `running` rows through `sacct`),
    then refuses while any job in the user's `squeue` has a job id found in submit records or
    in a `running` run's `slurm_job_id`. Other queued jobs are listed; proceeding past them
-   needs `--force`.
+   needs `--force`. It then takes the writers lock exclusively (waiting for, and reporting, any
+   running local `bth` writer) and holds it until step 4 completes.
 2. **Import:** convert every cool fragment, submit record, campaign JSON, and every row of every
    table in "Authoritative writes" into `*.imported` events (Fold rules). Before cut-over the
    events go to a staging directory, `~/.bth/log/import-staging/<attempt>/`, never to project
@@ -457,13 +471,18 @@ switched on in one step.
    members whose legacy e-value used the fragment outcome rather than the postmortem-overridden
    one; unresolvable project) and goes into a
    signed-off residual report. Unclassified differences abort.
-4. **Switch:** the staged events are moved into their owning project logs (and mirrors),
-   `~/.bth/catalog/index.db` is built from those logs, the staging directory is deleted, and
-   reads and writes move to the new path. `import_manifest` is a derived table of the index
+4. **Switch**, in this order, each action idempotent: (a) copy the staged events into their
+   owning project logs and mirrors (eid dedup makes a repeat harmless); (b) build
+   `~/.bth/catalog/index.db` from those logs; (c) write `cutover.json`, after which reads and
+   writes use the new path; (d) rename `bathos.db` to `bathos.db.frozen`; (e) delete the
+   staging directory. `bth migrate --to-log` is resumable: re-run after a crash, it detects the
+   first incomplete action (marker absent with staging present: from (a); marker present with
+   `bathos.db` but no `bathos.db.frozen`: from (d); staging still present: (e)) and continues
+   from there, never re-running step 3's diff once the marker exists. `import_manifest` is a derived table of the index
    with one row per snapshot chain `(kind, entity, source_class, source_locator)` holding the
    newest snapshot's `source_sha256`, so it is rebuilt by a delete + re-ingest like every other
-   table and updated by every later re-import. `bathos.db` is renamed to
-   `bathos.db.frozen` and kept read-only for one release.
+   table and updated by every later re-import. `bathos.db.frozen` is kept read-only for one
+   release.
 5. **Stale installs:** an older bathos (e.g. pinned in a project venv, or on the cluster) may
    keep writing cool fragments, submit Parquet, or a fresh `bathos.db`. `bth verify` reports
    each such write: a legacy source record whose chain is missing from `import_manifest` or
@@ -558,7 +577,11 @@ switched on in one step.
   reverted again imports every ledger and re-importing it appends nothing; an aborted migration leaves no imported
   event in any project log and no `~/.bth/catalog/index.db`; abort, retry, switch leaves every
   imported event in the logs.
-
+- AC-29. `bth migrate --to-log` killed after each of step 4's actions (a)-(e) and re-run
+  completes the switch with the same index and logs as an uninterrupted run; a `bth run`
+  started before the switch is either wholly legacy or wholly events; a `bth submit` after
+  cut-over produces a job that appends events, and `BTH_LOG_MODE=1` outside a SLURM job or test
+  is refused.
 ## Order of delivery
 
 1. AC-11 (test isolation).
@@ -575,7 +598,7 @@ switched on in one step.
    AC-18 test, which step 5 empties.
 4. Legacy importer, reaper on folded status, `bth verify` checks, and `bth migrate --to-log`
    (Migration steps 0-4: staging, diff, abort, switch) built and exercised against fixture
-   catalogs (AC-7's verify half, AC-13, AC-14, AC-21, AC-23, AC-24, AC-26, AC-28), and the new
+   catalogs (AC-7's verify half, AC-13, AC-14, AC-21, AC-23, AC-24, AC-26, AC-28, AC-29), and the new
    cluster log pull in
    `bth sync --pull` (log, fallback, mirror; AC-6 and the cluster variants of AC-8, AC-9).
 5. Assign ids in every registered project (migration step 0), then run the step-4
