@@ -2158,7 +2158,7 @@ def campaign_attest_parity_tool(
 
     db = duckdb.connect(str(db_path), read_only=False)
     try:
-        attest_parity(campaign_id, parity_run_id, db, ws)
+        attest_parity(campaign_id, parity_run_id, db, ws, catalog_dir=cat_dir)
         return {
             "campaign_id": campaign_id,
             "parity_run_id": parity_run_id,

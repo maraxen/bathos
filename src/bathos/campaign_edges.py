@@ -34,6 +34,8 @@ race between the check and the insert within one connection's session.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 
 class CampaignEdgeError(Exception):
     """Base for campaign_edges/run_edges errors."""
@@ -69,7 +71,14 @@ def _would_create_cycle(
     return child_id in _ancestors(db, table, child_col, parent_col, parent_id)
 
 
-def add_campaign_edge(db, child_campaign_id: str, parent_campaign_id: str) -> None:
+def add_campaign_edge(
+    db,
+    child_campaign_id: str,
+    parent_campaign_id: str,
+    catalog_dir: Path | None = None,
+    *,
+    cwd: Path | None = None,
+) -> None:
     """Record that `child_campaign_id` was (partly) derived from `parent_campaign_id`.
 
     Idempotent: inserting the same edge twice is a no-op (`ON CONFLICT DO NOTHING`), so a
@@ -78,7 +87,14 @@ def add_campaign_edge(db, child_campaign_id: str, parent_campaign_id: str) -> No
     Raises:
         CycleRejectedError: this edge would create a cycle in the campaign DAG (including
             `child_campaign_id == parent_campaign_id`, a self-loop).
+
+    AC-25: behind the runlog flag, emits `edge.added` instead of the INSERT;
+    flag off performs only the legacy INSERT, unchanged. `cwd` resolves the
+    runlog project/root when the flag is on (defaults to `Path.cwd()` via
+    `resolve_log_root`).
     """
+    from bathos.runlog.emit import emit_or_legacy, unit_of_work
+
     if _would_create_cycle(
         db,
         "campaign_edges",
@@ -92,11 +108,22 @@ def add_campaign_edge(db, child_campaign_id: str, parent_campaign_id: str) -> No
             "cycle in the campaign DAG"
         )
         raise CycleRejectedError(msg)
-    db.execute(
-        "INSERT INTO campaign_edges (child_campaign_id, parent_campaign_id) VALUES (?, ?) "
-        "ON CONFLICT DO NOTHING",
-        [child_campaign_id, parent_campaign_id],
-    )
+
+    def _legacy_write() -> None:
+        db.execute(
+            "INSERT INTO campaign_edges (child_campaign_id, parent_campaign_id) VALUES (?, ?) "
+            "ON CONFLICT DO NOTHING",
+            [child_campaign_id, parent_campaign_id],
+        )
+
+    with unit_of_work(catalog_dir):
+        emit_or_legacy(
+            kind="edge.added",
+            entity=[child_campaign_id, parent_campaign_id, "campaign"],
+            data={"src": child_campaign_id, "dst": parent_campaign_id, "type": "campaign"},
+            legacy_write=_legacy_write,
+            cwd=cwd,
+        )
 
 
 def get_campaign_parents(db, campaign_id: str) -> list[str]:
@@ -110,7 +137,14 @@ def get_campaign_parents(db, campaign_id: str) -> list[str]:
     return [r[0] for r in rows]
 
 
-def add_run_edge(db, child_run_id: str, parent_run_id: str) -> None:
+def add_run_edge(
+    db,
+    child_run_id: str,
+    parent_run_id: str,
+    catalog_dir: Path | None = None,
+    *,
+    cwd: Path | None = None,
+) -> None:
     """Record that `child_run_id` was (partly) derived from `parent_run_id`.
 
     Same idempotency and cycle-rejection contract as `add_campaign_edge`, applied to the run
@@ -118,7 +152,12 @@ def add_run_edge(db, child_run_id: str, parent_run_id: str) -> None:
 
     Raises:
         CycleRejectedError: this edge would create a cycle in the run DAG.
+
+    AC-25: behind the runlog flag, emits `edge.added` instead of the INSERT;
+    flag off performs only the legacy INSERT, unchanged.
     """
+    from bathos.runlog.emit import emit_or_legacy, unit_of_work
+
     if _would_create_cycle(
         db, "run_edges", "child_run_id", "parent_run_id", child_run_id, parent_run_id
     ):
@@ -126,10 +165,21 @@ def add_run_edge(db, child_run_id: str, parent_run_id: str) -> None:
             f"adding edge {child_run_id!r} -> {parent_run_id!r} would create a cycle in the run DAG"
         )
         raise CycleRejectedError(msg)
-    db.execute(
-        "INSERT INTO run_edges (child_run_id, parent_run_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
-        [child_run_id, parent_run_id],
-    )
+
+    def _legacy_write() -> None:
+        db.execute(
+            "INSERT INTO run_edges (child_run_id, parent_run_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
+            [child_run_id, parent_run_id],
+        )
+
+    with unit_of_work(catalog_dir):
+        emit_or_legacy(
+            kind="edge.added",
+            entity=[child_run_id, parent_run_id, "run"],
+            data={"src": child_run_id, "dst": parent_run_id, "type": "run"},
+            legacy_write=_legacy_write,
+            cwd=cwd,
+        )
 
 
 def get_run_parents(db, run_id: str) -> list[str]:

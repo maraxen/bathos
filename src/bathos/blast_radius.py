@@ -265,6 +265,7 @@ def append_ledger_record(
     catalog_dir: Path | str,
     *,
     con: duckdb.DuckDBPyConnection | None = None,
+    cwd: Path | None = None,
 ) -> BlastRadiusRecord:
     """Durably append one ledger record: cool-tier fragment + warm-tier row.
 
@@ -273,12 +274,33 @@ def append_ledger_record(
     see `flag_blast_radius`, which reuses a single connection across an entire
     batch of records (debt #1475). Omit to open/close a connection as before --
     default behavior is unchanged.
+
+    AC-25: behind the runlog flag, emits `blast_radius.recorded` instead of the
+    fragment + warm-row writes; flag off performs only those legacy writes,
+    unchanged. `cwd` resolves the runlog project/root when the flag is on
+    (defaults to `Path.cwd()` via `resolve_log_root`). The compaction-time
+    write at `compact.py` (re-deriving the warm table from fragments) is a
+    separate, non-authoritative site and is untouched.
     """
-    write_ledger_fragment(record, catalog_dir)
-    if con is not None:
-        _insert_warm_row_using_conn(con, record)
-    else:
-        _insert_warm_row(record, catalog_dir)
+    from dataclasses import asdict
+
+    from bathos.runlog.emit import emit_or_legacy, unit_of_work
+
+    def _legacy_write() -> None:
+        write_ledger_fragment(record, catalog_dir)
+        if con is not None:
+            _insert_warm_row_using_conn(con, record)
+        else:
+            _insert_warm_row(record, catalog_dir)
+
+    with unit_of_work(Path(catalog_dir)):
+        emit_or_legacy(
+            kind="blast_radius.recorded",
+            entity=[record.id],
+            data=asdict(record),
+            legacy_write=_legacy_write,
+            cwd=cwd,
+        )
     event(
         "blast_radius.append",
         entity_type=record.entity_type,

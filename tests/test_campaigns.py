@@ -963,3 +963,516 @@ def test_count_seeds_for_script_ignores_null_seed(tmp_catalog: Path):
         assert count_runs_for_script(db, "script_c_sha") == 1
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# AC-25: runlog write sites behind the flag -- campaign.created,
+# campaign.threshold_set, campaign.claim_bypassed, campaign.run_added,
+# campaign.concluded (delivery step 2b, wave ii).
+# ---------------------------------------------------------------------------
+
+
+def _read_jsonl_dir(log_dir: Path) -> list[dict]:
+    import json
+
+    lines = []
+    if not log_dir.exists():
+        return lines
+    for f in sorted(log_dir.glob("*.jsonl")):
+        for line in f.read_text().splitlines():
+            if line.strip():
+                lines.append(json.loads(line))
+    return lines
+
+
+def test_create_campaign_flag_off_is_legacy_only(tmp_catalog: Path):
+    from bathos.runlog.writer import reset_writers_for_test
+
+    init_catalog(tmp_catalog)
+    compact(tmp_catalog)  # creates the `campaigns` table schema
+    db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        campaign = create_campaign(
+            db,
+            name="Flag Off",
+            project_slug="prolix",
+            mode="exploration",
+            catalog_dir=tmp_catalog,
+        )
+        rows = db.execute("SELECT id FROM campaigns WHERE id = ?", [campaign.id]).fetchall()
+        assert len(rows) == 1
+        assert (tmp_catalog / "campaigns" / f"{campaign.id}.json").exists()
+        assert not (Path.home() / ".bth" / "log" / "unaffiliated").exists()
+    finally:
+        db.close()
+        reset_writers_for_test()
+
+
+def test_create_campaign_flag_on_emits_event_only(tmp_catalog: Path, monkeypatch):
+    from bathos.runlog.writer import reset_writers_for_test
+
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_catalog))
+    init_catalog(tmp_catalog)
+    compact(tmp_catalog)  # creates the `campaigns` table schema
+    db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        campaign = create_campaign(
+            db,
+            name="Flag On",
+            project_slug="prolix",
+            mode="exploration",
+            catalog_dir=tmp_catalog,
+            cwd=tmp_catalog.parent,
+        )
+        rows = db.execute("SELECT id FROM campaigns WHERE id = ?", [campaign.id]).fetchall()
+        assert rows == []  # no legacy warm INSERT
+        assert not (tmp_catalog / "campaigns" / f"{campaign.id}.json").exists()
+
+        lines = _read_jsonl_dir(Path.home() / ".bth" / "log" / "unaffiliated")
+        created = [line for line in lines if line["kind"] == "campaign.created"]
+        assert len(created) == 1
+        assert created[0]["entity"] == [campaign.id]
+        assert created[0]["data"]["name"] == "Flag On"
+        assert created[0]["data"]["mode"] == "exploration"
+    finally:
+        db.close()
+        reset_writers_for_test()
+
+
+def _write_popper_sidecar(tmp_path: Path, threshold: float) -> Path:
+    """A minimal experiment sidecar with a [popper] stopping_threshold."""
+    import textwrap
+    import uuid
+
+    content = textwrap.dedent(f"""
+        [experiment]
+        hypothesis = "test hypothesis"
+        [outcomes.pass]
+        condition = "x > 0"
+        decision = "proceed"
+        reasoning = "good"
+        is_residual = false
+        [outcomes.fail]
+        condition = "x <= 0"
+        decision = "debug"
+        reasoning = "bad"
+        is_residual = true
+        [result_schema]
+        x = "float"
+        [popper]
+        null_pass_rate = 0.1
+        alt_pass_rate = 0.9
+        stopping_threshold = {threshold}
+    """)
+    p = tmp_path / f"sidecar_{uuid.uuid4().hex[:8]}.bth.toml"
+    p.write_text(content)
+    return p
+
+
+def test_add_run_to_campaign_flag_off_is_legacy_only(tmp_catalog: Path, tmp_path: Path):
+    from bathos.runlog.writer import reset_writers_for_test
+
+    init_catalog(tmp_catalog)
+    compact(tmp_catalog)  # creates the `campaigns`/`campaign_runs` table schema
+    db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        campaign = create_campaign(
+            db, name="Seq", project_slug="prolix", mode="sequential", catalog_dir=tmp_catalog
+        )
+        sidecar = _write_popper_sidecar(tmp_path, threshold=0.05)
+        run = Run(
+            project_slug="prolix",
+            command="python x.py",
+            argv=["python", "x.py"],
+            git_hash="abc",
+            git_branch="main",
+            git_dirty=False,
+            status="completed",
+            exit_code=0,
+            outcome="pass",
+            sidecar_path=str(sidecar),
+        )
+        write_run(run, tmp_catalog)
+        db.close()
+        compact(tmp_catalog)
+        db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+
+        add_run_to_campaign(db, campaign.id, run.id, catalog_dir=tmp_catalog)
+
+        threshold_row = db.execute(
+            "SELECT stopping_threshold FROM campaigns WHERE id = ?", [campaign.id]
+        ).fetchone()
+        assert threshold_row[0] == pytest.approx(0.05)
+        member_row = db.execute(
+            "SELECT run_id FROM campaign_runs WHERE campaign_id = ? AND run_id = ?",
+            [campaign.id, run.id],
+        ).fetchone()
+        assert member_row is not None
+        assert not (Path.home() / ".bth" / "log" / "unaffiliated").exists()
+    finally:
+        db.close()
+        reset_writers_for_test()
+
+
+def test_add_run_to_campaign_flag_on_emits_threshold_set_and_run_added(
+    tmp_catalog: Path, tmp_path: Path, monkeypatch
+):
+    from bathos.runlog.writer import reset_writers_for_test
+
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_catalog))
+    init_catalog(tmp_catalog)
+    compact(tmp_catalog)  # creates the `campaigns`/`campaign_runs` table schema
+    db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        # Insert the campaign row directly (flag-off) so this test isolates
+        # add_run_to_campaign's own two write sites.
+        campaign_id = "11111111-1111-1111-1111-111111111111"
+        db.execute(
+            "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at) "
+            "VALUES (?, 'prolix', 'Seq', 'sequential', 'open', current_timestamp)",
+            [campaign_id],
+        )
+        sidecar = _write_popper_sidecar(tmp_path, threshold=0.05)
+        run = Run(
+            project_slug="prolix",
+            command="python x.py",
+            argv=["python", "x.py"],
+            git_hash="abc",
+            git_branch="main",
+            git_dirty=False,
+            status="completed",
+            exit_code=0,
+            outcome="pass",
+            sidecar_path=str(sidecar),
+        )
+        write_run(run, tmp_catalog)
+        db.close()
+        compact(tmp_catalog)
+        db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+
+        add_run_to_campaign(
+            db, campaign_id, run.id, catalog_dir=tmp_catalog, cwd=tmp_catalog.parent
+        )
+
+        threshold_row = db.execute(
+            "SELECT stopping_threshold FROM campaigns WHERE id = ?", [campaign_id]
+        ).fetchone()
+        assert threshold_row[0] is None  # no legacy UPDATE
+        member_row = db.execute(
+            "SELECT run_id FROM campaign_runs WHERE campaign_id = ? AND run_id = ?",
+            [campaign_id, run.id],
+        ).fetchone()
+        assert member_row is None  # no legacy INSERT
+
+        lines = _read_jsonl_dir(Path.home() / ".bth" / "log" / "unaffiliated")
+        threshold_events = [line for line in lines if line["kind"] == "campaign.threshold_set"]
+        run_added_events = [line for line in lines if line["kind"] == "campaign.run_added"]
+        assert len(threshold_events) == 1
+        assert threshold_events[0]["entity"] == [campaign_id]
+        assert threshold_events[0]["data"]["stopping_threshold"] == pytest.approx(0.05)
+        assert len(run_added_events) == 1
+        assert run_added_events[0]["entity"] == [campaign_id, run.id]
+        assert run_added_events[0]["data"]["evalue"] is not None
+    finally:
+        db.close()
+        reset_writers_for_test()
+
+
+def test_conclude_campaign_flag_off_is_legacy_only(populated_warm_catalog: Path):
+    from bathos.runlog.writer import reset_writers_for_test
+
+    db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
+    try:
+        campaign = create_campaign(
+            db, name="Conclude Off", project_slug="prolix", mode="exploration"
+        )
+        conclude_campaign(db, campaign.id, "pass", "done", catalog_dir=populated_warm_catalog)
+
+        row = db.execute(
+            "SELECT status, outcome_label, conclusion FROM campaigns WHERE id = ?",
+            [campaign.id],
+        ).fetchone()
+        assert row == ("concluded", "pass", "done")
+        assert not (Path.home() / ".bth" / "log" / "unaffiliated").exists()
+    finally:
+        db.close()
+        reset_writers_for_test()
+
+
+def test_conclude_campaign_flag_on_emits_concluded_event_only(
+    populated_warm_catalog: Path, monkeypatch
+):
+    from bathos.runlog.writer import reset_writers_for_test
+
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(populated_warm_catalog))
+    db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
+    try:
+        campaign_id = "33333333-3333-3333-3333-333333333333"
+        db.execute(
+            "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at) "
+            "VALUES (?, 'prolix', 'Conclude On', 'exploration', 'open', current_timestamp)",
+            [campaign_id],
+        )
+        conclude_campaign(
+            db,
+            campaign_id,
+            "pass",
+            "done",
+            catalog_dir=populated_warm_catalog,
+            workspace_root=populated_warm_catalog.parent,
+        )
+
+        row = db.execute(
+            "SELECT status, outcome_label, conclusion FROM campaigns WHERE id = ?",
+            [campaign_id],
+        ).fetchone()
+        assert row == ("open", None, None)  # no legacy UPDATE
+
+        lines = _read_jsonl_dir(Path.home() / ".bth" / "log" / "unaffiliated")
+        concluded_events = [line for line in lines if line["kind"] == "campaign.concluded"]
+        assert len(concluded_events) == 1
+        assert concluded_events[0]["entity"] == [campaign_id]
+        assert concluded_events[0]["data"]["outcome_label"] == "pass"
+        assert concluded_events[0]["data"]["conclusion"] == "done"
+    finally:
+        db.close()
+        reset_writers_for_test()
+
+
+def test_conclude_campaign_recovery_insert_flag_off_is_legacy_only(
+    populated_warm_catalog: Path, monkeypatch
+):
+    """The `exists` recovery branch (a campaign only in cool JSON, e.g. created
+    before cut-over) only fires when `ingest_cool_campaigns`'s own upsert didn't
+    already materialize the warm row first -- monkeypatched to a no-op here so
+    this test can reach the recovery INSERT directly."""
+    from bathos import campaigns as campaigns_mod
+    from bathos.runlog.writer import reset_writers_for_test
+
+    monkeypatch.setattr(campaigns_mod, "ingest_cool_campaigns", lambda *_a, **_k: 0)
+
+    db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
+    try:
+        cool_only = campaigns_mod.Campaign(
+            id="44444444-4444-4444-4444-444444444444",
+            project_slug="prolix",
+            name="Cool Only",
+            mode="exploration",
+            status="open",
+            started_at=datetime.now(UTC).isoformat(),
+        )
+        campaigns_mod.write_campaign_cool(cool_only, populated_warm_catalog)
+
+        conclude_campaign(
+            db, cool_only.id, "pass", "done", catalog_dir=populated_warm_catalog
+        )
+
+        row = db.execute(
+            "SELECT status, name FROM campaigns WHERE id = ?", [cool_only.id]
+        ).fetchone()
+        assert row is not None
+        assert row[1] == "Cool Only"
+        assert not (Path.home() / ".bth" / "log" / "unaffiliated").exists()
+    finally:
+        db.close()
+        reset_writers_for_test()
+
+
+def test_conclude_campaign_recovery_insert_flag_on_emits_created_event_only(
+    populated_warm_catalog: Path, monkeypatch
+):
+    from bathos import campaigns as campaigns_mod
+    from bathos.runlog.writer import reset_writers_for_test
+
+    monkeypatch.setattr(campaigns_mod, "ingest_cool_campaigns", lambda *_a, **_k: 0)
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(populated_warm_catalog))
+
+    db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
+    try:
+        cool_only = campaigns_mod.Campaign(
+            id="55555555-5555-5555-5555-555555555555",
+            project_slug="prolix",
+            name="Cool Only On",
+            mode="exploration",
+            status="open",
+            started_at=datetime.now(UTC).isoformat(),
+        )
+        campaigns_mod.write_campaign_cool(cool_only, populated_warm_catalog)
+
+        conclude_campaign(
+            db,
+            cool_only.id,
+            "pass",
+            "done",
+            catalog_dir=populated_warm_catalog,
+            workspace_root=populated_warm_catalog.parent,
+        )
+
+        row = db.execute(
+            "SELECT status FROM campaigns WHERE id = ?", [cool_only.id]
+        ).fetchone()
+        assert row is None  # no legacy INSERT
+
+        lines = _read_jsonl_dir(Path.home() / ".bth" / "log" / "unaffiliated")
+        created_events = [line for line in lines if line["kind"] == "campaign.created"]
+        assert len(created_events) == 1
+        assert created_events[0]["entity"] == [cool_only.id]
+        assert created_events[0]["data"]["name"] == "Cool Only On"
+    finally:
+        db.close()
+        reset_writers_for_test()
+
+
+def test_conclude_campaign_claim_bypassed_flag_off_is_legacy_only(
+    populated_warm_catalog: Path, tmp_path, monkeypatch
+):
+    from bathos.claim import register_claim
+    from bathos.runlog.writer import reset_writers_for_test
+
+    fake_home = tmp_path / "fake_home_off"
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+    db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
+    try:
+        campaign = create_campaign(
+            db, name="Bypass Off", project_slug="prolix", mode="confirmation"
+        )
+        claim_path = tmp_path / "bypass_off.claim.toml"
+        claim_path.write_text("""[claim]
+headline = "Test claim"
+kill_condition = "Outcome != expected"
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary hypothesis"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null hypothesis"
+
+[claim.union_gate]
+[[claim.union_gate.clauses]]
+id = "C_main"
+description = "Main clause"
+hypothesis_ids = ["H_primary", "H_null"]
+""")
+        register_claim(claim_path, campaign.id, db, tmp_path)
+
+        campaign_time = datetime.fromisoformat(campaign.started_at)
+        run = Run(
+            project_slug="prolix",
+            command="python test.py",
+            argv=["python", "test.py"],
+            git_hash="abc",
+            git_branch="main",
+            git_dirty=False,
+            timestamp=campaign_time + timedelta(minutes=1),
+            status="completed",
+            exit_code=0,
+            claim_discriminates='["H_primary"]',
+        )
+        db.close()
+        write_run(run, populated_warm_catalog)
+        compact(populated_warm_catalog)
+        db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
+        add_run_to_campaign(db, campaign.id, run.id)
+
+        conclude_campaign(
+            db, campaign.id, "pass", "bypassed", workspace_root=tmp_path, force_verdict=True
+        )
+
+        row = db.execute(
+            "SELECT claim_mode FROM campaigns WHERE id = ?", [campaign.id]
+        ).fetchone()
+        assert row[0] == "bypassed"
+        assert not (fake_home / ".bth" / "log" / "unaffiliated").exists()
+    finally:
+        db.close()
+        reset_writers_for_test()
+
+
+def test_conclude_campaign_claim_bypassed_flag_on_emits_event_only(
+    populated_warm_catalog: Path, tmp_path, monkeypatch
+):
+    from bathos.claim import register_claim
+    from bathos.runlog.writer import reset_writers_for_test
+
+    fake_home = tmp_path / "fake_home_on"
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+    db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
+    try:
+        # Setup (campaign, claim registration, run membership) happens flag-off,
+        # so it isolates conclude_campaign's own claim_bypassed site below --
+        # register_claim/add_run_to_campaign are themselves wired sites (AC-25)
+        # and must not confound this test's target event.
+        campaign = create_campaign(
+            db, name="Bypass On", project_slug="prolix", mode="confirmation"
+        )
+        claim_path = tmp_path / "bypass_on.claim.toml"
+        claim_path.write_text("""[claim]
+headline = "Test claim"
+kill_condition = "Outcome != expected"
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary hypothesis"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null hypothesis"
+
+[claim.union_gate]
+[[claim.union_gate.clauses]]
+id = "C_main"
+description = "Main clause"
+hypothesis_ids = ["H_primary", "H_null"]
+""")
+        register_claim(claim_path, campaign.id, db, tmp_path)
+
+        campaign_time = datetime.fromisoformat(campaign.started_at)
+        run = Run(
+            project_slug="prolix",
+            command="python test.py",
+            argv=["python", "test.py"],
+            git_hash="abc",
+            git_branch="main",
+            git_dirty=False,
+            timestamp=campaign_time + timedelta(minutes=1),
+            status="completed",
+            exit_code=0,
+            claim_discriminates='["H_primary"]',
+        )
+        db.close()
+        write_run(run, populated_warm_catalog)
+        compact(populated_warm_catalog)
+        db = duckdb.connect(str(populated_warm_catalog / "bathos.db"))
+        add_run_to_campaign(db, campaign.id, run.id, catalog_dir=populated_warm_catalog)
+
+        claim_mode_before = db.execute(
+            "SELECT claim_mode FROM campaigns WHERE id = ?", [campaign.id]
+        ).fetchone()[0]
+
+        monkeypatch.setenv("BTH_LOG_MODE", "1")
+        monkeypatch.setenv("BTH_CATALOG_DIR", str(populated_warm_catalog))
+        conclude_campaign(
+            db, campaign.id, "pass", "bypassed", workspace_root=tmp_path, force_verdict=True
+        )
+
+        claim_mode_after = db.execute(
+            "SELECT claim_mode FROM campaigns WHERE id = ?", [campaign.id]
+        ).fetchone()[0]
+        assert claim_mode_after == claim_mode_before  # no legacy UPDATE
+
+        lines = _read_jsonl_dir(fake_home / ".bth" / "log" / "unaffiliated")
+        bypassed_events = [line for line in lines if line["kind"] == "campaign.claim_bypassed"]
+        assert len(bypassed_events) == 1
+        assert bypassed_events[0]["entity"] == [campaign.id]
+        assert bypassed_events[0]["data"]["claim_mode"] == "bypassed"
+    finally:
+        db.close()
+        reset_writers_for_test()

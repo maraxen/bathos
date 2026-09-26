@@ -616,3 +616,65 @@ def test_parse_stub_returns_none_for_non_stub_file(tmp_path):
     plain = tmp_path / "plain.py"
     plain.write_text("print('just a normal script')\n")
     assert parse_stub(plain) is None
+
+
+# ---------------------------------------------------------------------------
+# AC-25: archived_item.recorded write site behind the runlog flag (delivery
+# step 2b, wave ii).
+# ---------------------------------------------------------------------------
+
+
+def _read_jsonl_dir(log_dir):
+    import json
+
+    lines = []
+    if not log_dir.exists():
+        return lines
+    for f in sorted(log_dir.glob("*.jsonl")):
+        for line in f.read_text().splitlines():
+            if line.strip():
+                lines.append(json.loads(line))
+    return lines
+
+
+def test_append_archived_item_record_flag_off_is_legacy_only(tmp_path):
+    from bathos.archived_items import ArchivedItemRecord, append_archived_item_record, latest_status
+    from bathos.runlog.writer import reset_writers_for_test
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    record = ArchivedItemRecord(id="item-off", project_slug="prolix", event="archived")
+    append_archived_item_record(record, catalog_dir)
+
+    status = latest_status(catalog_dir, "item-off")
+    assert status is not None
+    assert status.event == "archived"
+    frag = catalog_dir / "archived_items" / f"archived_{record.record_id}.parquet"
+    assert frag.exists()
+    assert not (Path.home() / ".bth" / "log" / "unaffiliated").exists()
+    reset_writers_for_test()
+
+
+def test_append_archived_item_record_flag_on_emits_event_only(tmp_path, monkeypatch):
+    from bathos.archived_items import ArchivedItemRecord, append_archived_item_record, latest_status
+    from bathos.runlog.writer import reset_writers_for_test
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
+
+    record = ArchivedItemRecord(id="item-on", project_slug="prolix", event="archived")
+    append_archived_item_record(record, catalog_dir, cwd=catalog_dir.parent)
+
+    frag = catalog_dir / "archived_items" / f"archived_{record.record_id}.parquet"
+    assert not frag.exists()
+    assert latest_status(catalog_dir, "item-on") is None  # no legacy warm row
+
+    lines = _read_jsonl_dir(Path.home() / ".bth" / "log" / "unaffiliated")
+    recorded = [line for line in lines if line["kind"] == "archived_item.recorded"]
+    assert len(recorded) == 1
+    assert recorded[0]["entity"] == [record.record_id]
+    assert recorded[0]["data"]["event"] == "archived"
+    assert recorded[0]["data"]["id"] == "item-on"
+    reset_writers_for_test()

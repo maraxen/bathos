@@ -239,15 +239,35 @@ def _insert_row(con: duckdb.DuckDBPyConnection, record: ArchivedItemRecord) -> N
 
 
 def append_archived_item_record(
-    record: ArchivedItemRecord, catalog_dir: Path | str
+    record: ArchivedItemRecord, catalog_dir: Path | str, *, cwd: Path | None = None
 ) -> ArchivedItemRecord:
     """Durably append one ledger record: cool-tier fragment + warm-tier row.
 
     The single write path for both archiving and restoring -- there is no separate
     non-durable variant, matching ``trust_ledger.append_ledger_record``.
+
+    AC-25: behind the runlog flag, emits `archived_item.recorded` (entity:
+    `record_id`; `data.event` is `archived`/`restored`, `data.id` is the item)
+    instead of the fragment + warm-row writes; flag off performs only those
+    legacy writes, unchanged. `cwd` resolves the runlog project/root when the
+    flag is on (defaults to `Path.cwd()` via `resolve_log_root`).
     """
-    write_archived_item_fragment(record, catalog_dir)
-    _insert_warm_row(record, catalog_dir)
+    from dataclasses import asdict
+
+    from bathos.runlog.emit import emit_or_legacy, unit_of_work
+
+    def _legacy_write() -> None:
+        write_archived_item_fragment(record, catalog_dir)
+        _insert_warm_row(record, catalog_dir)
+
+    with unit_of_work(Path(catalog_dir)):
+        emit_or_legacy(
+            kind="archived_item.recorded",
+            entity=[record.record_id],
+            data=asdict(record),
+            legacy_write=_legacy_write,
+            cwd=cwd,
+        )
     event(
         "archived_items.append",
         id=record.id,

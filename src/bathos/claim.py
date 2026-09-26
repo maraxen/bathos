@@ -613,8 +613,17 @@ def register_claim(
 
     Raises:
         RuntimeError: If path is absolute or escapes workspace, or campaign not found
+
+    AC-25: two write sites behind the runlog flag -- `campaign.created` (the
+    recovery insert when the campaign only exists in cool JSON, e.g. created
+    before cut-over) and `campaign.claim_bound` (the claim_path/claim_sha256
+    UPDATE, the Union Gate tamper anchor). `workspace_root` doubles as the
+    runlog `cwd` for both.
     """
+    from dataclasses import asdict as _asdict
+
     from bathos.campaigns import CampaignError, _resolve_campaign_id, ingest_cool_campaigns
+    from bathos.runlog.emit import emit_or_legacy, unit_of_work
 
     abs_path = resolve_claim_path(str(path), workspace_root)
     rel_path = abs_path.relative_to(workspace_root.resolve())
@@ -622,77 +631,105 @@ def register_claim(
     if not abs_path.exists():
         raise FileNotFoundError(f"Claim file not found at {abs_path}")
 
-    try:
-        full_id = _resolve_campaign_id(db, campaign_id, catalog_dir=catalog_dir)
-    except CampaignError as e:
-        raise RuntimeError(f"Campaign not found: {e}") from e
+    with unit_of_work(catalog_dir):
+        try:
+            full_id = _resolve_campaign_id(db, campaign_id, catalog_dir=catalog_dir)
+        except CampaignError as e:
+            raise RuntimeError(f"Campaign not found: {e}") from e
 
-    if catalog_dir is not None:
-        ingest_cool_campaigns(db, catalog_dir)
+        if catalog_dir is not None:
+            ingest_cool_campaigns(db, catalog_dir)
 
-    # Compute SHA256
-    claim_content = abs_path.read_bytes()
-    claim_sha256 = hashlib.sha256(claim_content).hexdigest()
+        # Compute SHA256
+        claim_content = abs_path.read_bytes()
+        claim_sha256 = hashlib.sha256(claim_content).hexdigest()
 
-    # Check if already registered
-    existing = db.execute("SELECT claim_sha256 FROM campaigns WHERE id = ?", [full_id]).fetchall()
-    if not existing:
-        if catalog_dir is None:
-            raise RuntimeError(f"Campaign not found in warm catalog: {full_id}")
-        from bathos.campaigns import read_cool_campaigns
+        # Check if already registered
+        existing = db.execute(
+            "SELECT claim_sha256 FROM campaigns WHERE id = ?", [full_id]
+        ).fetchall()
+        if not existing:
+            if catalog_dir is None:
+                raise RuntimeError(f"Campaign not found in warm catalog: {full_id}")
+            from bathos.campaigns import read_cool_campaigns
 
-        cool = next((c for c in read_cool_campaigns(catalog_dir) if c.id == full_id), None)
-        if cool is None:
-            raise RuntimeError(f"Campaign not found in warm catalog: {full_id}")
-        db.execute(
-            """
-            INSERT INTO campaigns (
-                id, project_slug, name, mode, question, hypothesis, status,
-                started_at, concluded_at, conclusion, outcome_label,
-                parent_campaign_id, stopping_threshold, negative_check
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                cool.id,
-                cool.project_slug,
-                cool.name,
-                cool.mode,
-                cool.question,
-                cool.hypothesis,
-                cool.status,
-                cool.started_at,
-                cool.concluded_at,
-                cool.conclusion,
-                cool.outcome_label,
-                cool.parent_campaign_id,
-                cool.stopping_threshold,
-                cool.negative_check,
-            ],
-        )
-        existing = [(None,)]
-    if existing and existing[0][0] is not None:
-        if not force:
-            raise RuntimeError(
-                f"Campaign {campaign_id[:8]} already has a registered claim. "
-                "Use --force to re-register."
+            cool = next((c for c in read_cool_campaigns(catalog_dir) if c.id == full_id), None)
+            if cool is None:
+                raise RuntimeError(f"Campaign not found in warm catalog: {full_id}")
+
+            def _recovery_insert_legacy_write(_cool=cool) -> None:
+                db.execute(
+                    """
+                    INSERT INTO campaigns (
+                        id, project_slug, name, mode, question, hypothesis, status,
+                        started_at, concluded_at, conclusion, outcome_label,
+                        parent_campaign_id, stopping_threshold, negative_check
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        _cool.id,
+                        _cool.project_slug,
+                        _cool.name,
+                        _cool.mode,
+                        _cool.question,
+                        _cool.hypothesis,
+                        _cool.status,
+                        _cool.started_at,
+                        _cool.concluded_at,
+                        _cool.conclusion,
+                        _cool.outcome_label,
+                        _cool.parent_campaign_id,
+                        _cool.stopping_threshold,
+                        _cool.negative_check,
+                    ],
+                )
+
+            # AC-25: campaign.created (recovery insert)
+            emit_or_legacy(
+                kind="campaign.created",
+                entity=[full_id],
+                data=_asdict(cool),
+                legacy_write=_recovery_insert_legacy_write,
+                cwd=workspace_root,
             )
-        # Write audit event for re-registration
-        event("claim.register_force", campaign_id=full_id, claim_path=str(rel_path))
+            existing = [(None,)]
+        if existing and existing[0][0] is not None:
+            if not force:
+                raise RuntimeError(
+                    f"Campaign {campaign_id[:8]} already has a registered claim. "
+                    "Use --force to re-register."
+                )
+            # Write audit event for re-registration
+            event("claim.register_force", campaign_id=full_id, claim_path=str(rel_path))
 
-    # Update campaigns table
-    db.execute(
-        "UPDATE campaigns SET claim_path = ?, claim_sha256 = ? WHERE id = ?",
-        [str(rel_path), claim_sha256, full_id],
-    )
-    stored = db.execute("SELECT claim_sha256 FROM campaigns WHERE id = ?", [full_id]).fetchone()
-    if stored is None or stored[0] != claim_sha256:
-        raise RuntimeError(f"Campaign not found in warm catalog; cannot register claim: {full_id}")
-    if catalog_dir is not None:
-        from bathos.campaigns import get_campaign, write_campaign_cool
+        def _claim_bound_legacy_write() -> None:
+            # Update campaigns table
+            db.execute(
+                "UPDATE campaigns SET claim_path = ?, claim_sha256 = ? WHERE id = ?",
+                [str(rel_path), claim_sha256, full_id],
+            )
+            stored = db.execute(
+                "SELECT claim_sha256 FROM campaigns WHERE id = ?", [full_id]
+            ).fetchone()
+            if stored is None or stored[0] != claim_sha256:
+                raise RuntimeError(
+                    f"Campaign not found in warm catalog; cannot register claim: {full_id}"
+                )
+            if catalog_dir is not None:
+                from bathos.campaigns import get_campaign, write_campaign_cool
 
-        refreshed = get_campaign(db, full_id, catalog_dir=catalog_dir)
-        if refreshed is not None:
-            write_campaign_cool(refreshed, catalog_dir)
+                refreshed = get_campaign(db, full_id, catalog_dir=catalog_dir)
+                if refreshed is not None:
+                    write_campaign_cool(refreshed, catalog_dir)
+
+        # AC-25: campaign.claim_bound (Union Gate tamper anchor)
+        emit_or_legacy(
+            kind="campaign.claim_bound",
+            entity=[full_id],
+            data={"claim_path": str(rel_path), "claim_sha256": claim_sha256},
+            legacy_write=_claim_bound_legacy_write,
+            cwd=workspace_root,
+        )
 
     event(
         "claim.register", campaign_id=full_id, claim_path=str(rel_path), claim_sha256=claim_sha256
@@ -906,8 +943,18 @@ def attest_parity(
     parity_run_id: str,
     db: duckdb.DuckDBPyConnection,
     workspace_root: Path,
+    *,
+    catalog_dir: Path | None = None,
 ) -> None:
     """Bind a parity run to a campaign's claim and re-anchor the claim SHA (atomic).
+
+    AC-25: the claim_sha256 UPDATE is a `campaign.claim_bound` write site behind
+    the runlog flag (`workspace_root` doubles as the runlog `cwd`). The
+    file-rollback branch below (a DB-update or event-append failure after the
+    file was already renamed) emits a NEW `campaign.claim_bound` event carrying
+    the reverted (original) sha256 when the flag is on -- events are
+    append-only, so the prior event is never deleted, only superseded by a
+    later one for the same entity (latest wins, per the spec's "Fold rules").
 
     AC-11, AC-12, AC-13, AC-21: Validates that the cited run is a real passing
     parity run (outcome='pass' or 'partial', metadata.parity_run_type='literature_parity'),
@@ -933,11 +980,24 @@ def attest_parity(
         ValueError: If run not found, missing parity_run_type, wrong type, or outcome not pass/partial
         RuntimeError: If claim file not found or campaign not found
     """
+    from bathos.runlog.emit import unit_of_work
+
+    with unit_of_work(catalog_dir):
+        _attest_parity_impl(campaign_id, parity_run_id, db, workspace_root)
+
+
+def _attest_parity_impl(
+    campaign_id: str,
+    parity_run_id: str,
+    db: duckdb.DuckDBPyConnection,
+    workspace_root: Path,
+) -> None:
     import logging
     import os
     import tempfile
 
     from bathos.campaigns import CampaignError, _resolve_campaign_id
+    from bathos.runlog.emit import current_mode, emit_event, emit_or_legacy
 
     logger = logging.getLogger(__name__)
 
@@ -1057,9 +1117,19 @@ def attest_parity(
         new_content = abs_claim_path.read_bytes()
         new_sha256 = hashlib.sha256(new_content).hexdigest()
 
-        # DB update LAST (after file is safely renamed)
-        try:
+        # DB update LAST (after file is safely renamed). AC-25: behind the runlog
+        # flag this is a `campaign.claim_bound` event instead of the UPDATE.
+        def _claim_bound_legacy_write() -> None:
             db.execute("UPDATE campaigns SET claim_sha256 = ? WHERE id = ?", [new_sha256, full_id])
+
+        try:
+            emit_or_legacy(
+                kind="campaign.claim_bound",
+                entity=[full_id],
+                data={"claim_path": claim_path_rel, "claim_sha256": new_sha256},
+                legacy_write=_claim_bound_legacy_write,
+                cwd=workspace_root,
+            )
 
             event(
                 "claim.attest_parity",
@@ -1068,9 +1138,10 @@ def attest_parity(
                 claim_sha256=new_sha256,
             )
         except Exception as db_error:
-            # DB update failed AFTER file was already renamed.
+            # DB update (or, flag-on, the event append) failed AFTER file was
+            # already renamed.
             # BEST-EFFORT TRUE ROLLBACK: restore the file to original content,
-            # so file and DB are consistent at the OLD state again.
+            # so file and DB/log are consistent at the OLD state again.
             logger.error(
                 f"DB update failed for campaign {full_id}; rolling back file to original state. "
                 f"Error: {db_error}"
@@ -1089,6 +1160,18 @@ def attest_parity(
                     f"File successfully rolled back to original state. "
                     f"File and DB are now consistent at the original SHA {file_sha_at_entry}."
                 )
+                # AC-25: the rollback itself is a NEW campaign.claim_bound event
+                # carrying the reverted (original) sha256, not a deletion of
+                # whatever event was just emitted above -- events are
+                # append-only; the fold's clock-skew-sensitive tie-break (latest
+                # `campaign.claim_bound` wins) makes this one authoritative.
+                if current_mode():
+                    emit_event(
+                        kind="campaign.claim_bound",
+                        entity=[full_id],
+                        data={"claim_path": claim_path_rel, "claim_sha256": file_sha_at_entry},
+                        cwd=workspace_root,
+                    )
             except Exception as rollback_error:
                 logger.critical(
                     f"Rollback itself failed! File may be in inconsistent state. "
