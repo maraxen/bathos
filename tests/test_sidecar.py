@@ -271,6 +271,57 @@ def test_evaluate_outcome_string_with_apostrophe_does_not_crash(tmp_path):
     assert label == "pass"
 
 
+def _outcome_toml_for_x():
+    return """
+        [experiment]
+        hypothesis = "h"
+        [outcomes.pass]
+        condition = "x < 5"
+        decision = "proceed"
+        reasoning = "Good"
+        [outcomes.fail]
+        condition = "x >= 5"
+        decision = "debug"
+        reasoning = "Bad"
+        is_residual = true
+        [result_schema]
+        x = "float"
+    """
+
+
+def test_evaluate_outcome_positive_infinity_is_false_not_error(tmp_path):
+    """A bare `inf` result field must not crash SQL generation into an 'error' outcome
+    (regression: debt #1941). inf < 5 is false under IEEE 754, so the outcome is 'fail'."""
+    from bathos.sidecar import evaluate_outcome, parse_sidecar
+
+    path = _write_toml(tmp_path, _outcome_toml_for_x())
+    s = parse_sidecar(path)
+    label = evaluate_outcome(s, {"x": float("inf")})
+    assert label == "fail"
+
+
+def test_evaluate_outcome_negative_infinity_is_true(tmp_path):
+    """-inf < 5 is true under IEEE 754, so the outcome is 'pass' (regression: debt #1941)."""
+    from bathos.sidecar import evaluate_outcome, parse_sidecar
+
+    path = _write_toml(tmp_path, _outcome_toml_for_x())
+    s = parse_sidecar(path)
+    label = evaluate_outcome(s, {"x": float("-inf")})
+    assert label == "pass"
+
+
+def test_evaluate_outcome_nan_is_deterministic_not_error(tmp_path):
+    """A NaN result field must evaluate deterministically rather than raising or landing on
+    'error' (regression: debt #1941). DuckDB's total float order makes `nan < 5` false, so
+    this lands on the 'fail' branch, not 'unknown' or an exception."""
+    from bathos.sidecar import evaluate_outcome, parse_sidecar
+
+    path = _write_toml(tmp_path, _outcome_toml_for_x())
+    s = parse_sidecar(path)
+    label = evaluate_outcome(s, {"x": float("nan")})
+    assert label == "fail"
+
+
 def test_sidecar_agent_mode_parsed(tmp_path):
     from bathos.sidecar import parse_sidecar
 

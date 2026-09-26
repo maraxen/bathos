@@ -1235,6 +1235,85 @@ def test_differential_absent_no_op(tmp_catalog: Path, tmp_path: Path):
     assert runs[0].differential_status is None
 
 
+def test_differential_gate_blocks_on_arm_crash(tmp_catalog: Path, tmp_path: Path):
+    """A nonzero exit code on either pre-flight arm must yield invalid_measurement, even if
+    the (garbage) metadata happens to satisfy `expect` (regression: debt #1939). Here the
+    "on" arm crashes before writing a results file, so off's real signal (0.0) trivially
+    "differs" from on's empty metadata (None) -- exit-code checking must catch this before
+    that coincidental difference is ever considered."""
+    import textwrap
+
+    counter_path = tmp_path / "invocations.log"
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True, exist_ok=True)
+    script = enforced / "run_test.py"
+    script.write_text(
+        textwrap.dedent("""
+        import os
+        import sys
+        import json
+
+        phase = os.environ.get("BTH_DIFFERENTIAL_PHASE", "main")
+        with open(r"%s", "a") as cf:
+            cf.write(phase + "\\n")
+
+        if os.environ.get("BTH_DIFFERENTIAL_VALUE") == "1.0":
+            # simulate a crash on the "on" arm before any result is emitted
+            sys.exit(1)
+
+        signal = 0.0
+        results_path = os.environ.get("BTH_RESULTS_PATH")
+        if results_path:
+            with open(results_path, "w") as f:
+                json.dump({"signal": signal}, f)
+    """)
+        % counter_path
+    )
+
+    sidecar = enforced / "run_test.bth.toml"
+    sidecar.write_text(
+        textwrap.dedent("""
+        [experiment]
+        hypothesis = "test hypothesis"
+        [outcomes.pass]
+        condition = "signal >= 5"
+        decision = "good"
+        reasoning = "strong signal"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "other"
+        reasoning = "catch-all"
+        is_residual = true
+        [result_schema]
+        signal = "float"
+        [differential]
+        knob = "sidechain_conditioning"
+        off = "0.0"
+        on = "1.0"
+        expect = "differs"
+        metric = "signal"
+        min_effect = 0.05
+    """)
+    )
+
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 1
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert runs[0].outcome == "invalid_measurement"
+    assert runs[0].differential_status == "invalid_measurement"
+    invocations = counter_path.read_text().splitlines()
+    assert invocations == ["off", "on"], "main run must never execute when an arm crashes"
+
+
 def test_run_with_nonexistent_campaign_fails_fast(tmp_catalog: Path, tmp_path: Path):
     """--campaign with a warm catalog but no matching campaign must fail before running (regression: debt #491)."""
     from bathos.compact import compact

@@ -142,7 +142,7 @@ def evidence_from_result(result: dict) -> ParityEvidence:
     )
 
 
-def parse_parity_toml(path: Path) -> dict:
+def parse_parity_toml(path: str | Path) -> dict:
     """Parse and validate a parity.bth.toml file.
 
     Reads the [parity] section and validates required fields.
@@ -161,7 +161,7 @@ def parse_parity_toml(path: Path) -> dict:
         M (int, default 3): Attack phase M value (tunable)
 
     Args:
-        path: Path to parity.bth.toml file
+        path: Path to parity.bth.toml file (str or pathlib.Path -- debt #1950)
 
     Returns:
         Dict with parsed and validated fields
@@ -170,6 +170,7 @@ def parse_parity_toml(path: Path) -> dict:
         ValueError: If required fields are missing
         FileNotFoundError: If file does not exist
     """
+    path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Parity file not found at {path}")
 

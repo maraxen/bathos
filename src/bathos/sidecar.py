@@ -527,6 +527,18 @@ def single_row_projection(row: dict) -> str:
     Values are rendered as SQL literals. Nested structures (dict/list) cannot be addressed
     by a scalar condition anyway, so they are encoded as inert JSON strings — the row still
     evaluates instead of raising on Python-repr syntax.
+
+    Non-finite floats (`inf`, `-inf`, `nan`) are special-cased: `repr()` renders them as the
+    bare tokens `inf`/`-inf`/`nan`, which DuckDB parses as unqualified column references, not
+    float literals — `SELECT inf::DOUBLE` fails with "Referenced column \"inf\" was not found"
+    rather than producing a value at all (debt #1941). Quoting them as string literals cast to
+    DOUBLE (`'inf'::DOUBLE`) is the form DuckDB accepts, and DuckDB then applies IEEE 754
+    semantics for the finite comparisons that matter here (`inf < 5` is `false`, `-inf < 5` is
+    `true`). One documented divergence from strict IEEE 754: DuckDB defines a total order over
+    floats in which `nan = nan` is `true` and NaN sorts above +inf, rather than leaving NaN
+    unordered/self-unequal — so a condition like `x < 5` with `x = nan` deterministically
+    evaluates `false` (nan is not less than anything), never raises, and never silently
+    produces an `error` outcome.
     """
 
     def _sql_literal(v: object, k: str) -> str:
@@ -535,6 +547,12 @@ def single_row_projection(row: dict) -> str:
         if isinstance(v, bool):
             return f"{'TRUE' if v else 'FALSE'} AS {k}"
         if isinstance(v, float):
+            if v != v:  # NaN is the only float that is not equal to itself
+                return f"'nan'::DOUBLE AS {k}"
+            if v == float("inf"):
+                return f"'inf'::DOUBLE AS {k}"
+            if v == float("-inf"):
+                return f"'-inf'::DOUBLE AS {k}"
             return f"{v!r}::DOUBLE AS {k}"
         if isinstance(v, int):
             return f"{v!r} AS {k}"

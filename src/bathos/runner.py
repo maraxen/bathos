@@ -234,6 +234,31 @@ def _run_differential_preflight(
     off_result = _run_phase(differential.off, "off", off_path, off_output_dir)
     on_result = _run_phase(differential.on, "on", on_path, on_output_dir)
 
+    # A crashed arm (debt #1939) must never be masked by metadata that happens to "differ"
+    # (e.g. a crashed arm emitting no results at all trivially differs from a healthy one).
+    # Check exit codes before touching the metadata at all -- a nonzero exit on either arm
+    # means the pre-flight measured nothing, so it always fails, regardless of `expect`.
+    failed_phases = [
+        (phase, result["exit_code"])
+        for phase, result in (("off", off_result), ("on", on_result))
+        if result["exit_code"] != 0
+    ]
+    if failed_phases:
+        reason = (
+            f"[differential] knob={differential.knob!r} off={differential.off!r} "
+            f"on={differential.on!r} — "
+            + "; ".join(
+                f"{phase} arm exited with code {code}" for phase, code in failed_phases
+            )
+        )
+        return DifferentialResult(
+            ok=False,
+            off_metadata=off_result["raw"],
+            on_metadata=on_result["raw"],
+            effect=None,
+            reason=reason,
+        )
+
     effect: float | None = None
     if differential.metric:
         off_val = off_result["metadata"].get(differential.metric)
