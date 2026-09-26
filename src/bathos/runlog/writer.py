@@ -140,7 +140,8 @@ _writers_lock = threading.Lock()
 def get_writer(target_dir: Path, mirror_dir: Path) -> SegmentWriter:
     """Process-wide singleton per target_dir ("one writer per (process, log
     dir)"). Threads share it behind the writer's own lock."""
-    key = str(target_dir.resolve()) if target_dir.exists() else str(target_dir)
+    # resolve() is non-strict: the key is the same before and after mkdir.
+    key = str(target_dir.resolve())
     with _writers_lock:
         w = _writers.get(key)
         if w is None:
@@ -237,7 +238,15 @@ def append_event(
                 kind,
             )
         if not log_root.unaffiliated:
-            register_main_root(log_root.main_root)
+            # Best-effort: the event is already durable, so a registry failure
+            # must never reach the OSError handler below and re-append the
+            # event to the fallback.
+            try:
+                register_main_root(log_root.main_root)
+            except Exception as exc:
+                logger.warning(
+                    "runlog: root registration failed for %s: %s", log_root.main_root, exc
+                )
         return AppendOutcome(target="project", envelope=envelope, mirror_ok=mirror_ok)
     except OSError as exc:
         project_error = exc

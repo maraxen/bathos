@@ -8,7 +8,12 @@ only reads the id off the resolved main root.
 
 from __future__ import annotations
 
+import fcntl
+import os
+import tempfile
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -108,18 +113,59 @@ def assign_project_id(project_root: Path, *, force: bool = False) -> AssignResul
 # --- Discovery: root registration in ~/.bth/projects.toml -------------------
 
 
+class RegistryUnreadableError(RunLogError):
+    """`~/.bth/projects.toml` exists but does not parse; never overwrite it."""
+
+
 def _load_registry() -> tomlkit.TOMLDocument:
-    if projects_registry().exists():
-        try:
-            return tomlkit.parse(projects_registry().read_text())
-        except Exception:
-            return tomlkit.document()
-    return tomlkit.document()
+    """Parse the registry. Fails closed: a file that exists but does not parse
+    raises instead of reading as empty, so no caller can rewrite it with only
+    its own entry and drop every other registered root."""
+    path = projects_registry()
+    if not path.exists():
+        return tomlkit.document()
+    try:
+        return tomlkit.parse(path.read_text())
+    except Exception as exc:
+        raise RegistryUnreadableError(
+            f"{path} is unreadable ({exc}); leaving it untouched"
+        ) from exc
 
 
 def _write_registry(doc: tomlkit.TOMLDocument) -> None:
-    projects_registry().parent.mkdir(parents=True, exist_ok=True)
-    projects_registry().write_text(tomlkit.dumps(doc))
+    """Atomic replace (temp file in the same dir + os.replace)."""
+    path = projects_registry()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".projects.toml.")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(tomlkit.dumps(doc))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+@contextmanager
+def _registry_lock() -> Iterator[None]:
+    """Serialise read-modify-write of the registry across processes.
+
+    `bathos.config.register_project` writes the same file without this lock
+    (pre-existing); it only touches the `projects` key, this module only `roots`.
+    """
+    lock_path = projects_registry().with_name("projects.toml.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+_registered_this_process: set[str] = set()
 
 
 def register_main_root(main_root: Path) -> bool:
@@ -128,24 +174,33 @@ def register_main_root(main_root: Path) -> bool:
     "the first event written to a project log registers it (idempotent)" --
     called by the writer (writer.py) after a successful append to a project
     log (never for the fallback or mirror). Returns True if a new entry was
-    added, False if `main_root` was already registered.
+    added, False if `main_root` was already registered. Raises
+    `RegistryUnreadableError` (never overwrites) if the registry is corrupt.
     """
     main_root = main_root.resolve()
-    doc = _load_registry()
-    roots_table = doc.get("roots")
-    if roots_table is None:
-        roots_table = tomlkit.aot()
-        doc["roots"] = roots_table
-    for entry in roots_table:
-        if entry.get("root") == str(main_root):
-            return False
-    entry = tomlkit.table()
-    entry["root"] = str(main_root)
-    pid = read_project_id(main_root / ".bth.toml")
-    if pid:
-        entry["project_id"] = pid
-    roots_table.append(entry)
-    _write_registry(doc)
+    key = str(main_root)
+    # Keyed on the registry path too, so a redirected HOME is a different cache entry.
+    cache_key = f"{projects_registry()}::{key}"
+    if cache_key in _registered_this_process:
+        return False
+    with _registry_lock():
+        doc = _load_registry()
+        roots_table = doc.get("roots")
+        if roots_table is None:
+            roots_table = tomlkit.aot()
+            doc["roots"] = roots_table
+        for entry in roots_table:
+            if entry.get("root") == key:
+                _registered_this_process.add(cache_key)
+                return False
+        entry = tomlkit.table()
+        entry["root"] = key
+        pid = read_project_id(main_root / ".bth.toml")
+        if pid:
+            entry["project_id"] = pid
+        roots_table.append(entry)
+        _write_registry(doc)
+    _registered_this_process.add(cache_key)
     return True
 
 
@@ -160,6 +215,11 @@ def list_registered_roots() -> list[Path]:
 def prune_vanished_roots() -> list[Path]:
     """Remove registered roots that no longer exist on disk. Returns the
     pruned paths (`bth projects prune`, CLI wiring left to a later step)."""
+    with _registry_lock():
+        return _prune_locked()
+
+
+def _prune_locked() -> list[Path]:
     doc = _load_registry()
     roots_table = doc.get("roots")
     if roots_table is None:

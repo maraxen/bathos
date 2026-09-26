@@ -188,12 +188,13 @@ def resolve_log_root(cwd: Path | None = None) -> LogRootResolution:
 
 def fallback_log_root(resolution: LogRootResolution) -> Path:
     """`~/.bth/log/fallback/<slug or _unaffiliated>/` (D6)."""
-    from bathos.config import find_project_config, load_project_config
+    from bathos.config import load_project_config
 
     slug: str | None = None
     if not resolution.unaffiliated:
-        cfg_path = find_project_config(resolution.main_root)
-        if cfg_path is not None:
+        # Only the main root's own .bth.toml: an ancestor's belongs to another project.
+        cfg_path = resolution.main_root / ".bth.toml"
+        if cfg_path.is_file():
             try:
                 slug = load_project_config(cfg_path).slug
             except Exception:
