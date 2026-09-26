@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: v29 (after adversarial cycle 29)
+revision: v30 (after adversarial cycle 30)
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -109,9 +109,9 @@ fold; event identity is the `eid` (see Line envelope).
 | run row, start and finish | `runner.py:524,623,847` | `run.started` (`run_id`; `data` includes the parsed sidecar declaration and its sha256, so e-value inputs travel with the run), `run.finished` (`run_id`) |
 | submit provenance, one Parquet per record | `catalog.py:109` (`write_submit_provenance`; read by `sprint_audit.py:226`) | `submit.recorded` (`submit_id`; includes `slurm_job_id`) |
 | `runs.output_metadata` (drift baseline, `checker.py:132`) | recomputed at compact, `compact.py:959-976` | `run.outputs_hashed` (`run_id`): at run end, and on explicit `bth check --rebaseline`. Behaviour change: compact no longer silently refreshes the baseline when outputs change |
-| outcome + `postmortem_*` override | `compact.py:1012` (reads files via cwd) | `run.postmortem_applied` (`run_id`, postmortem sha256), emitted by postmortem validate/register |
+| outcome + `postmortem_*` override | `compact.py:1012` (reads files via cwd) | `run.postmortem_applied` (`run_id`, postmortem sha256; `data` carries the parsed fields `compact.py:1049-1059` writes: `status`, `verdict_override`, `author`, `path`, `hypothesis_status`, `has_anomalies`, `summary`, `asset_links`, so the fold never re-reads the file), emitted by postmortem validate/register |
 | `claim_discriminates`, `claim_isolates`, `parity_run_type` COALESCE | `compact.py:978-983` | `claim_*` carried in `run.started.data` from the sidecar; `parity_run_type` in `run.finished.data` (computed at finish from result metadata, `runner.py:770-793`) |
-| `runs.metadata` rewrite by reaper, cool-fragment rewrite and reap ledger JSON | `reap.py:292-304`, `:361`; `catalog/reaped/<slug>/<run_id>.json` | `run.reaped` (`run_id`; carries `prior_status`) |
+| `runs.metadata` rewrite by reaper, cool-fragment rewrite and reap ledger JSON | `reap.py:292-304`, `:361`; `catalog/reaped/<slug>/<run_id>.json` | `run.reaped` (`run_id`; `data` is the full ledger record of `reap.py:296-303`: `project_slug`, `reaped_at`, `reason`, `window_h`, `prior_status`) |
 | reap revert (ledger JSON moved to `reverted/`) | `reap.py:203-217` | `run.reap_reverted` (`run_id`) |
 | campaign insert/upsert | `campaigns.py`, `campaigns.py:1194`, `claim.py:649` | `campaign.created` (`campaign_id`) |
 | `claim_path`, `claim_sha256` (Union Gate tamper anchor) | `claim.py:684`, `claim.py:1062` (incl. attest_parity rollback) | `campaign.claim_bound` (`campaign_id`, sha256); a rollback is a new event, not a deletion |
@@ -261,7 +261,10 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   `campaigns.py:124-140`: `status='concluded'` and `concluded_at` are sticky once set; `name`,
   `question`, `hypothesis`, `started_at` take the latest non-empty value; claim fields and
   `stopping_threshold` follow what the current upsert/update code does, not a new rule. Any
-  divergence AC-17 finds is a spec bug to fix here, not a behaviour change.
+  divergence AC-17 finds is a spec bug to fix here, unless it is one of the enumerated stated
+  behaviour changes BC-1..BC-5 (below), each of which exists because the legacy result depends on
+  when `bth compact` or a force-rebuild ran, or on file read order, and so has no single value to
+  reproduce.
 - **Imported history:** the legacy importer emits one `<kind>.imported` event **per (entity,
   legacy source)**, never a pre-merged one: a run with a warm row and a cool fragment gets two
   `run.imported` events; each legacy `campaign_runs` row gives a `campaign_run.imported` carrying
@@ -316,13 +319,11 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   `outcome`, `outcome_error_reason`, `outcome_is_residual`, `adversarial_check_status`/`_result`,
   `differential_status`/`_off_value`/`_on_value`; "end time" everywhere in this spec means
   `timestamp + duration_s`, there being no end-time column), come together from the single
-  highest-ranked *status claim*. Three run fields are outside the bundle, each reproducing
-  today's compact: `parity_run_type` is the first non-null value over the status claims in rank
+  highest-ranked *status claim*. Three run fields are outside the bundle: `parity_run_type` is the first non-null value over the status claims in rank
   then tie order (the `COALESCE` of `compact.py:983`, so a winning claim with null never blanks
-  it); the stored `outcome` is sticky under postmortems as in `compact.py:1002-1010`: the
-  `verdict_override` of the latest `run.postmortem_applied` (or imported postmortem field) whose
-  override is not `"none"`, else the bundle's raw outcome, so a later `"none"` override does not
-  restore the raw outcome; and `metadata.reaped` is the ledger record carried by the latest
+  it; BC-4); the stored `outcome` is the `verdict_override` of the latest `run.postmortem_applied` (or
+  imported postmortem field) if that override is not `"none"`, else the bundle's raw outcome (the
+  new-row path of `compact.py:1047-1061`, i.e. today's state after any force-rebuild; BC-3); and `metadata.reaped` is the ledger record carried by the latest
   abandoned claim not cancelled by a revert (a `run.reaped`'s data or a `ledger_json` import),
   whatever the winning status, and absent when every abandoned claim is reverted, as
   `reconcile_warm_tier` merges every live ledger (`reap.py:338-362`); the rest of `metadata`
@@ -343,9 +344,19 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   reap, and a stale warm `running` never hides a fragment's terminal status. After cut-over the
   reaper selects runs whose folded status is `running` and records that as `prior_status`; a
   revert with no terminal claim folds back to `running`.
-- **Behaviour change (stated, not accidental):** an imported campaign member has no sidecar
-  declaration in the log, so a postmortem applied to it after cut-over changes its folded
-  `outcome` but not its stored `evalue`; today's compact would recompute it from the sidecar.
+- **Stated behaviour changes** (the complete list AC-17 exempts; each is also tested directly):
+  - BC-1. `output_metadata` is re-baselined only by `run.outputs_hashed` (Authoritative-writes
+    table), never silently by compact.
+  - BC-2. Campaign e-values always use the member's raw bundle outcome; today a warm-only member
+    (no fragment) uses its possibly overridden warm `outcome`. A postmortem therefore never
+    changes an `evalue`, for live or imported members.
+  - BC-3. The stored `outcome` follows the latest postmortem override (raw outcome when it is
+    `"none"`); today an override later set to `"none"` stays in place until the next
+    force-rebuild, which any reap `--apply` triggers (`reap.py:263,309,333`).
+  - BC-4. `parity_run_type` ties between non-null values go by rank then source precedence;
+    today the fragment compacted last wins (`COALESCE(new, old)`, `compact.py:983`).
+  - BC-5. A run with several fragments (e.g. reaped, then finished) folds by status rank; today
+    `campaigns.py:435-436` keeps whichever fragment was read last.
 - **Legacy writes after cut-over** (an older bathos still writing fragments, submit Parquet or a
   fresh `bathos.db`) are not imported automatically. `bth verify` reports them with the writing
   host, and the user re-runs `bth migrate --import-legacy`, which appends only new eids.
@@ -356,14 +367,17 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   - members are sorted by the folded run **start time** `runs.timestamp` (null sorts first, as
     `datetime.min` UTC), then `run_id` (`_run_sort_key`, `campaigns.py:406-412`). The event `ts`
     is never used for this order.
-  - each member's outcome is its folded `runs.outcome` (postmortem override applied).
+  - each member's outcome for the e-value is the raw outcome of its winning status bundle, never
+    the postmortem-overridden `runs.outcome`: today `campaigns.py:435-436` fills members from
+    fragment `Run` objects, whose outcome is raw on the existing-row path (`compact.py:1002-1027`
+    updates SQL only), and reads warm rows (`:447-454`) only for runs with no fragment (BC-2).
   - a member with a sidecar declaration in `run.started.data` gets `evalue` computed from it; a
     member without one (imported history) keeps its stored `evalue` from
     `campaign_run.imported`, mirroring `evalue = COALESCE(?, evalue)` (`campaigns.py:517`).
   - the threshold lock is computed as today; on a threshold mismatch the campaign is skipped as
     today (`campaigns.py:500-504`) and `bth verify` reports it.
   Any event on a member run marks its campaign(s) as affected, at ingest and in the read views.
-  A member whose folded end time (`run.finished.ts`, or the imported end time) is later than the
+  A member whose folded end time (`timestamp + duration_s` of its winning bundle) is later than the
   campaign's conclusion time (`campaign.concluded.ts`, or the imported `concluded_at`) is still
   included, and `bth verify` reports `evalue_changed_after_conclusion` for that campaign. This
   depends only on event contents, not arrival.
@@ -378,7 +392,8 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
     `run.postmortem_applied`);
   - whether a `run.reap_reverted` follows a given abandoned claim;
   - ties between two status claims of equal rank and source precedence;
-  - `evalue_changed_after_conclusion` (compares `ts` values).
+  - `evalue_changed_after_conclusion` (compares a run's `timestamp + duration_s`, set by its
+    host's clock, with the conclusion `ts`).
 
 ### Index ingest (generation swap)
 
@@ -600,7 +615,9 @@ switched on in one step.
 - AC-16. Root resolution tests: main checkout, linked worktree, bare main, submodule, relative
   `--git-common-dir`, `BTH_WORKSPACE_ROOT` set, no git repo.
 - AC-17. Differential fold test: for randomized operation sequences on campaigns, anchors and
-  runs, the old upsert/update code and the new fold produce identical rows.
+  runs, the old upsert/update code and the new fold produce identical rows, the old-code side
+  running `bth compact` after every operation (so compact-dependent behaviour such as the
+  sticky postmortem outcome is exercised).
 - AC-18. No module other than `bathos.index` and the ingest path calls `duckdb.connect` on a
   catalog path (AST test). The importer and `bth verify` open legacy databases (`bathos.db`,
   `bathos.db.frozen`) only through `bathos.index.connect_legacy(path)`, which opens read-only
@@ -639,8 +656,10 @@ switched on in one step.
   runs past its window.
   Also: a reaped run that later finishes keeps `metadata.reaped` (terminal status); a reap then
   revert has no `metadata.reaped`; a postmortem override `fail` followed by an override `"none"`
-  leaves `outcome = fail`; a terminal claim with null `parity_run_type` does not blank a value
-  another status claim carries. Each matches today's compact on the same sequence (AC-17).
+  leaves the raw outcome (BC-3) and never changes a campaign `evalue` (BC-2); a terminal claim
+  with null `parity_run_type` does not blank a value another status claim carries. Apart from
+  BC-1..BC-5, each matches today's compact on the same sequence (AC-17), and each of BC-1..BC-5
+  has a fixture showing the stated new result.
 - AC-27. With two roots sharing a `project_id`, `bth log restore` in one never copies the
   other's events; after moving a project, restore still recovers events written at the old path.
 - AC-28. Re-importing a legacy source that changed yields the fold of its newest snapshot only,
