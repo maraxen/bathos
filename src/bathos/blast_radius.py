@@ -219,45 +219,66 @@ def _connect(catalog_dir: Path | str) -> duckdb.DuckDBPyConnection:
     return con
 
 
+def _insert_warm_row_using_conn(con: duckdb.DuckDBPyConnection, record: BlastRadiusRecord) -> None:
+    """Like `_insert_warm_row`, but against an already-open connection instead of
+    opening/closing a fresh one -- see `flag_blast_radius`, which reuses one
+    connection across an entire batch of records instead of opening a new one
+    per record (debt #1475)."""
+    existing = con.execute(
+        "SELECT id FROM blast_radius_ledger WHERE id = ?", [record.id]
+    ).fetchone()
+    if existing:
+        return  # append-only: never update an existing ledger row
+    con.execute(
+        "INSERT INTO blast_radius_ledger "
+        "(id, entity_type, entity_id, from_state, to_state, anchor_kind, anchor_value, "
+        "matched_files, matched_clauses, shadow_verdict, match_reason, reason, amended_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            record.id,
+            record.entity_type,
+            record.entity_id,
+            record.from_state,
+            record.to_state,
+            record.anchor_kind,
+            record.anchor_value,
+            record.matched_files,
+            record.matched_clauses,
+            record.shadow_verdict,
+            record.match_reason,
+            record.reason,
+            record.amended_at,
+        ],
+    )
+
+
 def _insert_warm_row(record: BlastRadiusRecord, catalog_dir: Path | str) -> None:
     con = _connect(catalog_dir)
     try:
-        existing = con.execute(
-            "SELECT id FROM blast_radius_ledger WHERE id = ?", [record.id]
-        ).fetchone()
-        if existing:
-            return  # append-only: never update an existing ledger row
-        con.execute(
-            "INSERT INTO blast_radius_ledger "
-            "(id, entity_type, entity_id, from_state, to_state, anchor_kind, anchor_value, "
-            "matched_files, matched_clauses, shadow_verdict, match_reason, reason, amended_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [
-                record.id,
-                record.entity_type,
-                record.entity_id,
-                record.from_state,
-                record.to_state,
-                record.anchor_kind,
-                record.anchor_value,
-                record.matched_files,
-                record.matched_clauses,
-                record.shadow_verdict,
-                record.match_reason,
-                record.reason,
-                record.amended_at,
-            ],
-        )
+        _insert_warm_row_using_conn(con, record)
     finally:
         con.close()
 
 
 def append_ledger_record(
-    record: BlastRadiusRecord, catalog_dir: Path | str
+    record: BlastRadiusRecord,
+    catalog_dir: Path | str,
+    *,
+    con: duckdb.DuckDBPyConnection | None = None,
 ) -> BlastRadiusRecord:
-    """Durably append one ledger record: cool-tier fragment + warm-tier row."""
+    """Durably append one ledger record: cool-tier fragment + warm-tier row.
+
+    Pass an already-open `con` (from `_connect`) to insert against it directly
+    instead of opening a fresh warm-tier connection for this one record --
+    see `flag_blast_radius`, which reuses a single connection across an entire
+    batch of records (debt #1475). Omit to open/close a connection as before --
+    default behavior is unchanged.
+    """
     write_ledger_fragment(record, catalog_dir)
-    _insert_warm_row(record, catalog_dir)
+    if con is not None:
+        _insert_warm_row_using_conn(con, record)
+    else:
+        _insert_warm_row(record, catalog_dir)
     event(
         "blast_radius.append",
         entity_type=record.entity_type,
@@ -380,6 +401,22 @@ def fold_blast_radius_state_using_conn(con, entity_type: str, entity_id: str) ->
     return latest.to_state if latest is not None else "clean"
 
 
+def _fold_state_using_conn(con: duckdb.DuckDBPyConnection, entity_type: str, entity_id: str) -> str:
+    """Like `fold_blast_radius_state`, but against a connection this module itself
+    already opened (via `_connect`) rather than a caller-supplied one.
+
+    Unlike `fold_blast_radius_state_using_conn` (built for a possibly read-only,
+    externally-owned connection that may predate this module's own migration
+    ALTERs -- see its docstring), this does not swallow a non-BinderException
+    `duckdb.Error`: `con` here was just opened by `_connect()`, which always runs
+    the CREATE TABLE/ALTER migration, so any other error is a real anomaly and
+    should surface exactly as `fold_blast_radius_state` itself would (used by
+    `flag_blast_radius` to reuse one connection across a batch -- debt #1475).
+    """
+    latest = _fetch_latest_record(con, entity_type, entity_id)
+    return latest.to_state if latest is not None else "clean"
+
+
 @dataclass(frozen=True)
 class BlastRadiusMatch:
     """One run's match against a blast-radius anchor."""
@@ -458,11 +495,21 @@ def _git_diff_name_only_range(commit_range: str, project_root: Path) -> list[str
 def _is_ancestor(candidate_sha: str, boundary_sha: str, project_root: Path) -> bool:
     """True iff candidate_sha is boundary_sha or an ancestor of it.
 
-    Fails closed (False) on any git error -- an unresolvable sha (e.g. run.git_hash
-    is a value git can't look up) must never be treated as "predates the fix". A
-    flag-like sha (starts with '-') also fails closed here rather than raising --
-    this is a read-path classification helper, not a user-facing error site, and a
-    flag-like value can never legitimately be an ancestor (security-audit finding).
+    Fails closed (False) on "not an ancestor" -- git's own documented rc=1 for
+    `merge-base --is-ancestor` -- and also on an unresolvable/flag-like sha,
+    which can never legitimately be an ancestor (security-audit finding). A
+    flag-like sha fails closed here rather than raising -- this is a read-path
+    classification helper, not a user-facing error site.
+
+    Debt #1473: rc=1 ("not an ancestor") must not be conflated with a genuine
+    git failure (any other nonzero rc: unresolvable revision, corrupt repo,
+    git missing from PATH, etc). Those are surfaced via this module's own
+    `event()` telemetry convention -- same rationale as read_ledger_fragments'
+    corrupt-fragment handling: don't let one bad git_hash crash the whole
+    assess_blast_radius scan over potentially thousands of runs, but never
+    swallow the anomaly silently either. Still returns False (fail-closed)
+    rather than raising, since assess_blast_radius has no per-run try/except
+    around this call.
     """
     if not candidate_sha or candidate_sha in ("unknown", "nogit"):
         return False
@@ -473,7 +520,18 @@ def _is_ancestor(candidate_sha: str, boundary_sha: str, project_root: Path) -> b
         cwd=project_root,
         capture_output=True,
     )
-    return result.returncode == 0
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    event(
+        "blast_radius.ancestor_check_error",
+        candidate_sha=candidate_sha,
+        boundary_sha=boundary_sha,
+        returncode=result.returncode,
+        stderr=result.stderr.decode("utf-8", errors="replace").strip(),
+    )
+    return False
 
 
 def _run_touches_files(run: Run, changed_files: list[str]) -> list[str]:
@@ -613,13 +671,20 @@ def assess_blast_radius(
         anchor_kind, anchor_value = "file", ",".join(files)
         changed_files = list(files)
 
+    # Single catalog scan, reused for both the check-results lookup and the per-run
+    # loop below (debt #1486: check_runs() used to call list_runs() again internally
+    # with the same catalog_dir/project/limit, scanning the same rows twice).
+    all_runs = list_runs(Path(catalog_dir), project=project, limit=_UNBOUNDED_SCAN_LIMIT)
     check_results = {
         r.run_id: r
         for r in check_runs(
-            Path(catalog_dir), project_root, project=project, limit=_UNBOUNDED_SCAN_LIMIT
+            Path(catalog_dir),
+            project_root,
+            project=project,
+            limit=_UNBOUNDED_SCAN_LIMIT,
+            runs=all_runs,
         )
     }
-    all_runs = list_runs(Path(catalog_dir), project=project, limit=_UNBOUNDED_SCAN_LIMIT)
 
     # Campaign membership has two independent, NOT-mutually-synced sources: Run.campaign_id
     # (set at write time by some flows, and what readback.list_candidates reads) and the
@@ -661,7 +726,12 @@ def assess_blast_radius(
                     )
                 )
                 continue
-            if check_dependency_lock_drift(run.dependency_lock_sha256, project_root):
+            # current_lock_hash was already computed once above (anchor_value) --
+            # pass it through instead of letting check_dependency_lock_drift re-hash
+            # uv.lock on every iteration of this per-run loop (debt #1487).
+            if check_dependency_lock_drift(
+                run.dependency_lock_sha256, project_root, current_sha256=current_lock_hash
+            ):
                 affected.append(
                     BlastRadiusMatch(
                         run_id=run.id,
@@ -793,43 +863,58 @@ def flag_blast_radius(
     regardless of what the shadow verdict says. "unverifiable" matches get no
     shadow verdict -- a run bathos can't even trust the git state of has no
     more meaningful an output-drift signal either.
+
+    Debt #1475: opens at most ONE warm-tier DuckDB connection for this whole
+    batch (used for both the from_state fold and the ledger insert of every
+    record), instead of a fresh connection per record. Opened lazily on first
+    use rather than up front, so the point at which bathos.db springs into
+    existence (a `_connect()` side effect -- see the get_run() comment below)
+    is unchanged from before this connection was shared.
     """
     records: list[BlastRadiusRecord] = []
-    for match, to_state in [
-        *((m, "affected") for m in report.affected),
-        *((m, "unverifiable") for m in report.unverifiable),
-    ]:
-        shadow_verdict_json = None
-        if to_state == "affected":
-            # Best-effort: the shadow verdict is purely observational (AC-10) and must
-            # never break the actual flagging write below. get_run() can raise here in
-            # a real, pre-existing cross-module scenario shared with trust_ledger.py:
-            # writing ANY ledger record creates bathos.db as a side effect of
-            # duckdb.connect() (see this module's own _connect()), and if that happens
-            # before bathos.compact.compact() has ever populated a `runs` table, a
-            # later get_run() sees bathos.db exists (query.py's _resolve_backend picks
-            # "warm") but finds no `runs` table there -- CatalogException, not a
-            # missing-run None. Caught here (backlog debt item filed for the deeper
-            # _resolve_backend assumption, not fixed in this module).
-            try:
-                run = get_run(match.run_id, Path(catalog_dir))
-            except duckdb.Error:
-                run = None
-            if run is not None:
-                shadow_verdict_json = json.dumps(compute_shadow_auto_clear_verdict(run))
+    con: duckdb.DuckDBPyConnection | None = None
+    try:
+        for match, to_state in [
+            *((m, "affected") for m in report.affected),
+            *((m, "unverifiable") for m in report.unverifiable),
+        ]:
+            shadow_verdict_json = None
+            if to_state == "affected":
+                # Best-effort: the shadow verdict is purely observational (AC-10) and must
+                # never break the actual flagging write below. get_run() can raise here in
+                # a real, pre-existing cross-module scenario shared with trust_ledger.py:
+                # writing ANY ledger record creates bathos.db as a side effect of
+                # duckdb.connect() (see this module's own _connect()), and if that happens
+                # before bathos.compact.compact() has ever populated a `runs` table, a
+                # later get_run() sees bathos.db exists (query.py's _resolve_backend picks
+                # "warm") but finds no `runs` table there -- CatalogException, not a
+                # missing-run None. Caught here (backlog debt item filed for the deeper
+                # _resolve_backend assumption, not fixed in this module).
+                try:
+                    run = get_run(match.run_id, Path(catalog_dir))
+                except duckdb.Error:
+                    run = None
+                if run is not None:
+                    shadow_verdict_json = json.dumps(compute_shadow_auto_clear_verdict(run))
 
-        record = BlastRadiusRecord(
-            entity_type="run",
-            entity_id=match.run_id,
-            to_state=to_state,
-            from_state=fold_blast_radius_state(catalog_dir, "run", match.run_id),
-            anchor_kind=report.anchor_kind,
-            anchor_value=report.anchor_value,
-            matched_files=json.dumps(match.matched_files),
-            shadow_verdict=shadow_verdict_json,
-            match_reason=match.reason,
-        )
-        records.append(append_ledger_record(record, catalog_dir))
+            if con is None:
+                con = _connect(catalog_dir)
+
+            record = BlastRadiusRecord(
+                entity_type="run",
+                entity_id=match.run_id,
+                to_state=to_state,
+                from_state=_fold_state_using_conn(con, "run", match.run_id),
+                anchor_kind=report.anchor_kind,
+                anchor_value=report.anchor_value,
+                matched_files=json.dumps(match.matched_files),
+                shadow_verdict=shadow_verdict_json,
+                match_reason=match.reason,
+            )
+            records.append(append_ledger_record(record, catalog_dir, con=con))
+    finally:
+        if con is not None:
+            con.close()
     return records
 
 
@@ -909,24 +994,40 @@ def _clauses_backed_by_runs(db: duckdb.DuckDBPyConnection, claim, run_ids: set[s
     member". positive_control clauses are skipped -- they use a differential/
     dependency-lock check (bathos.claim.differential_confound_check), not
     discriminates matching, out of scope here.
+
+    Debt #1488: fetches every run's claim_discriminates in ONE batched query
+    (`WHERE id IN (...)`), not one query per (clause, run_id) pair -- the old
+    per-pair query loop issued up to `len(clauses) * len(run_ids)` round trips
+    for the same handful of rows.
     """
+    if not run_ids:
+        return []
+
+    placeholders = ", ".join("?" for _ in run_ids)
+    rows = db.execute(
+        f"SELECT id, claim_discriminates FROM runs WHERE id IN ({placeholders})",
+        list(run_ids),
+    ).fetchall()
+
+    disc_lists_by_run: dict[str, list] = {}
+    for run_id, disc_json in rows:
+        if not disc_json:
+            continue
+        try:
+            disc_list = json.loads(disc_json)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(disc_list, list):
+            disc_lists_by_run[run_id] = disc_list
+
     implicated: list[str] = []
     for clause in claim.union_gate_clauses:
         if clause.get("positive_control") is True:
             continue
         hypothesis_ids = clause.get("hypothesis_ids", [])
         clause_id = clause.get("id", "?")
-        for run_id in run_ids:
-            row = db.execute(
-                "SELECT claim_discriminates FROM runs WHERE id = ?", [run_id]
-            ).fetchone()
-            if not row or not row[0]:
-                continue
-            try:
-                disc_list = json.loads(row[0])
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if isinstance(disc_list, list) and all(h in disc_list for h in hypothesis_ids):
+        for disc_list in disc_lists_by_run.values():
+            if all(h in disc_list for h in hypothesis_ids):
                 implicated.append(clause_id)
                 break
     return implicated
