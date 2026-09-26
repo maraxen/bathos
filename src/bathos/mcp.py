@@ -1445,6 +1445,7 @@ def check_tool(
     project_root: str = "",
     status_filter: str = "",
     check_outputs: bool = False,
+    rebaseline: bool = False,
 ) -> dict:
     """Check run freshness vs git HEAD.
 
@@ -1454,11 +1455,17 @@ def check_tool(
         status_filter: Filter by status (e.g., "stale")
         check_outputs: Also verify output files exist, are readable, and match their
             recorded SHA256 (output SHA drift)
+        rebaseline: Recompute the output-metadata drift baseline (run.outputs_hashed,
+            delivery step 2b / AC-25) for every run in `results`, instead of relying
+            on the baseline compact.py refreshes automatically. Behind the runlog
+            flag: on, emits the event only; off, writes the warm `runs.output_metadata`
+            column directly (this command's own "legacy" path -- there is no prior
+            `--rebaseline` to preserve).
 
     Returns:
         Dict with check results
     """
-    from bathos.checker import check_output_files, check_output_sha_drift
+    from bathos.checker import check_output_files, check_output_sha_drift, rebaseline_run_outputs
     from bathos.query import get_run
 
     cat_dir = _get_catalog_dir(catalog_dir or None)
@@ -1499,12 +1506,22 @@ def check_tool(
                     }
                 )
 
+    rebaselined_count = 0
+    if rebaseline:
+        for r in results:
+            run = get_run(r.run_id, cat_dir)
+            if run is None or not run.output_paths:
+                continue
+            rebaseline_run_outputs(cat_dir, run, cwd=proj_root)
+            rebaselined_count += 1
+
     result_dict = {
         "results": results_json,
         "count": len(results_json),
         "stale_count": stale_count,
         "drift_count": drift_count,
         "output_status": output_status,
+        "rebaselined_count": rebaselined_count,
     }
     if stale_count > 0 or drift_count > 0:
         # Singular "error" key -- see cli_render.render_or_exit -- matches the shipped
@@ -2714,10 +2731,14 @@ async def mcp_check_tool(
     catalog_dir: str = "",
     project_root: str = "",
     status_filter: str = "",
+    rebaseline: bool = False,
 ) -> dict:
     """Check run freshness vs git HEAD."""
     return check_tool(
-        catalog_dir=catalog_dir, project_root=project_root, status_filter=status_filter
+        catalog_dir=catalog_dir,
+        project_root=project_root,
+        status_filter=status_filter,
+        rebaseline=rebaseline,
     )
 
 
@@ -2959,12 +2980,17 @@ def postmortem_validate_tool(
     path: str,
     workspace_root: str | None = None,
     strict_files: bool = False,
+    catalog_dir: str = "",
 ) -> dict:
     """Validate a postmortem TOML file.
 
     Returns {'validation_ok': True} on success or {'validation_ok': False, 'errors': [...]} on failure.
     """
-    from bathos.postmortem import parse_postmortem, validate_postmortem
+    from bathos.postmortem import (
+        parse_postmortem,
+        postmortem_applied_event_data,
+        validate_postmortem,
+    )
 
     pm_path = Path(path)
     if not pm_path.exists():
@@ -2982,6 +3008,21 @@ def postmortem_validate_tool(
 
     result = validate_postmortem(pm, workspace_root=ws, strict_files=strict_files)
     if result.ok:
+        if pm.run_id:
+            # run.postmortem_applied (delivery step 2b / AC-25): behind the flag
+            # only -- flag off leaves this validate command exactly as before
+            # (the legacy fold still comes from compact.py re-reading the file).
+            from bathos.runlog.emit import current_mode, emit_event, unit_of_work
+
+            cat_dir = _get_catalog_dir(catalog_dir or None)
+            with unit_of_work(cat_dir):
+                if current_mode():
+                    emit_event(
+                        kind="run.postmortem_applied",
+                        entity=[pm.run_id],
+                        data=postmortem_applied_event_data(pm, pm_path),
+                        cwd=ws,
+                    )
         return {
             "validation_ok": True,
             "run_id": pm.run_id,
@@ -3062,6 +3103,20 @@ def postmortem_get_tool(
             "verdict_override": pm.verdict_override,
         }
 
+    if run_id:
+        # run.postmortem_applied (delivery step 2b / AC-25): behind the flag only.
+        from bathos.postmortem import postmortem_applied_event_data
+        from bathos.runlog.emit import current_mode, emit_event, unit_of_work
+
+        with unit_of_work(cat_dir):
+            if current_mode():
+                emit_event(
+                    kind="run.postmortem_applied",
+                    entity=[run_id],
+                    data=postmortem_applied_event_data(pm, pm_file),
+                    cwd=ws,
+                )
+
     return {
         "run_id": pm.run_id,
         "campaign_id": pm.campaign_id,
@@ -3112,12 +3167,15 @@ async def postmortem_validate(
     path: str,
     workspace_root: str | None = None,
     strict_files: bool = False,
+    catalog_dir: str = "",
 ) -> dict:
     """Validate a postmortem TOML file.
 
     Returns {'validation_ok': True} on success or {'validation_ok': False, 'errors': [...]} on failure.
     """
-    return postmortem_validate_tool(path, workspace_root=workspace_root, strict_files=strict_files)
+    return postmortem_validate_tool(
+        path, workspace_root=workspace_root, strict_files=strict_files, catalog_dir=catalog_dir
+    )
 
 
 @cisternal.tool(registry="bathos")

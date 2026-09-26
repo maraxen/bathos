@@ -804,3 +804,118 @@ def test_mcp_postmortem_validate_explicit_param_wins(tmp_path: Path, monkeypatch
     )
     res = asyncio.run(mcp.postmortem_validate(path=str(pm_file), workspace_root=str(explicit_ws)))
     assert res["validation_ok"] is True  # explicit param won; asset resolved under explicit_ws
+
+
+# --- AC-25: run.postmortem_applied write site -----------------------------------
+
+
+def _read_jsonl_dir(log_dir: Path) -> list:
+    lines = []
+    if not log_dir.exists():
+        return lines
+    for f in sorted(log_dir.glob("*.jsonl")):
+        for line in f.read_text().splitlines():
+            if line.strip():
+                lines.append(json.loads(line))
+    return lines
+
+
+def _setup_postmortem_workspace(tmp_path: Path) -> tuple[Path, Path, "Run"]:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    init_catalog(catalog_dir)
+
+    run = Run(
+        project_slug="testproj",
+        command="python scripts/run.py",
+        argv=["python", "scripts/run.py"],
+        git_hash="hash123",
+        git_branch="main",
+        git_dirty=False,
+    )
+    write_run(run, catalog_dir)
+
+    script_file = workspace_root / "scripts" / "run.py"
+    script_file.parent.mkdir(parents=True)
+    script_file.write_text("pass")
+
+    postmortem_path = workspace_root / "scripts" / f"run.py.{run.id}.bth.postmortem.toml"
+    postmortem_path.write_text(
+        textwrap.dedent(f"""
+        run_id = "{run.id}"
+        [postmortem]
+        hypothesis_status = "held"
+        summary = "Validation works!"
+        unexpected_observations = "none"
+        root_cause = "none"
+        verdict_override = "pass"
+        next_steps = "none"
+        [asset_links]
+        """)
+    )
+    return workspace_root, catalog_dir, run
+
+
+def test_postmortem_validate_flag_off_emits_no_event(tmp_path: Path):
+    from bathos.mcp import postmortem_validate_tool
+    from bathos.runlog.writer import reset_writers_for_test
+
+    workspace_root, catalog_dir, run = _setup_postmortem_workspace(tmp_path)
+    postmortem_path = workspace_root / "scripts" / f"run.py.{run.id}.bth.postmortem.toml"
+
+    result = postmortem_validate_tool(
+        path=str(postmortem_path),
+        workspace_root=str(workspace_root),
+        catalog_dir=str(catalog_dir),
+    )
+    assert result["validation_ok"] is True
+    assert not (Path.home() / ".bth" / "log" / "unaffiliated").exists()
+    reset_writers_for_test()
+
+
+def test_postmortem_validate_flag_on_emits_event(tmp_path: Path, monkeypatch):
+    from bathos.mcp import postmortem_validate_tool
+    from bathos.runlog.writer import reset_writers_for_test
+
+    workspace_root, catalog_dir, run = _setup_postmortem_workspace(tmp_path)
+    postmortem_path = workspace_root / "scripts" / f"run.py.{run.id}.bth.postmortem.toml"
+
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
+
+    result = postmortem_validate_tool(
+        path=str(postmortem_path),
+        workspace_root=str(workspace_root),
+        catalog_dir=str(catalog_dir),
+    )
+    assert result["validation_ok"] is True
+
+    lines = _read_jsonl_dir(Path.home() / ".bth" / "log" / "unaffiliated")
+    applied = [line for line in lines if line["kind"] == "run.postmortem_applied"]
+    assert len(applied) == 1
+    assert applied[0]["entity"] == [run.id]
+    assert applied[0]["data"]["hypothesis_status"] == "held"
+    assert applied[0]["data"]["verdict_override"] == "pass"
+    assert applied[0]["data"]["summary"] == "Validation works!"
+    reset_writers_for_test()
+
+
+def test_postmortem_get_flag_on_emits_event(tmp_path: Path, monkeypatch):
+    from bathos.mcp import postmortem_get_tool
+    from bathos.runlog.writer import reset_writers_for_test
+
+    workspace_root, catalog_dir, run = _setup_postmortem_workspace(tmp_path)
+
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
+
+    result = postmortem_get_tool(run_id=run.id, workspace_root=str(workspace_root))
+    assert "error" not in result
+
+    lines = _read_jsonl_dir(Path.home() / ".bth" / "log" / "unaffiliated")
+    applied = [line for line in lines if line["kind"] == "run.postmortem_applied"]
+    assert len(applied) == 1
+    assert applied[0]["entity"] == [run.id]
+    reset_writers_for_test()

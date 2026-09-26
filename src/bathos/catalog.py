@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.metadata
 import logging
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -113,6 +114,9 @@ def write_submit_provenance(
     myxcel_job_id: str,
     stage_name: str,
     catalog_dir: Path,
+    *,
+    submit_id: str | None = None,
+    cwd: Path | None = None,
 ) -> None:
     """Write submit-provenance record atomically.
 
@@ -123,50 +127,82 @@ def write_submit_provenance(
         myxcel_job_id: SLURM job ID returned by myxcel submit.
         stage_name: Stage name from sidecar [experiment].stage_name (default 'exploration').
         catalog_dir: Catalog directory path.
+        submit_id: Entity key for the `submit.recorded` event (delivery step 2b,
+            AC-25). No legacy caller threads one through, so a fresh uuid4 is
+            minted when omitted -- this is a NEW identifier, not derived from
+            anything legacy code already tracks.
+        cwd: Working directory used to resolve the runlog project/root when the
+            flag is on. Defaults to `Path.cwd()` (via `resolve_log_root`).
 
     Writes atomically to ~/.bth/catalog/submits/<project_slug>/<timestamp>_submit.parquet.
+    Delivery step 2b (AC-25): behind the runlog flag, emits `submit.recorded`
+    instead of writing the Parquet fragment; flag off performs only this
+    legacy write, unchanged.
     """
-    submit_schema = pa.schema(
-        [
-            pa.field("project_slug", pa.string()),
-            pa.field("command", pa.string()),
-            pa.field("sidecar_sha256", pa.string()),
-            pa.field("bth_submit_version", pa.string()),
-            pa.field("submitted_at", pa.timestamp("us", tz="UTC")),
-            pa.field("myxcel_job_id", pa.string()),
-            pa.field("stage_name", pa.string()),
-        ]
-    )
+    from bathos.runlog.emit import emit_or_legacy, unit_of_work
 
-    submit_dir = catalog_dir / "submits" / project_slug
-    submit_dir.mkdir(parents=True, exist_ok=True)
+    with unit_of_work(catalog_dir):
 
-    ts = datetime.now(UTC)
-    ts_str = ts.strftime("%Y%m%dT%H%M%S%f")  # Include microseconds for uniqueness
-    tmp_path = submit_dir / f"{ts_str}_submit.parquet.tmp"
-    final_path = submit_dir / f"{ts_str}_submit.parquet"
+        def _legacy_write() -> None:
+            submit_schema = pa.schema(
+                [
+                    pa.field("project_slug", pa.string()),
+                    pa.field("command", pa.string()),
+                    pa.field("sidecar_sha256", pa.string()),
+                    pa.field("bth_submit_version", pa.string()),
+                    pa.field("submitted_at", pa.timestamp("us", tz="UTC")),
+                    pa.field("myxcel_job_id", pa.string()),
+                    pa.field("stage_name", pa.string()),
+                ]
+            )
 
-    t_start = time.monotonic()
-    table = pa.table(
-        {
-            "project_slug": [project_slug],
-            "command": [command],
-            "sidecar_sha256": [sidecar_sha256 or ""],
-            "bth_submit_version": [importlib.metadata.version("bathos")],
-            "submitted_at": pa.array([ts], type=pa.timestamp("us", tz="UTC")),
-            "myxcel_job_id": [myxcel_job_id or ""],
-            "stage_name": [stage_name or "exploration"],
-        },
-        schema=submit_schema,
-    )
-    pq.write_table(table, str(tmp_path))
-    tmp_path.rename(final_path)  # atomic on POSIX
-    duration_ms = (time.monotonic() - t_start) * 1000
+            submit_dir = catalog_dir / "submits" / project_slug
+            submit_dir.mkdir(parents=True, exist_ok=True)
 
-    # Emit telemetry event
-    event(
-        "catalog.write_submit_provenance",
-        path=str(final_path),
-        rows=1,
-        duration_ms=int(duration_ms),
-    )
+            ts = datetime.now(UTC)
+            ts_str = ts.strftime("%Y%m%dT%H%M%S%f")  # Include microseconds for uniqueness
+            tmp_path = submit_dir / f"{ts_str}_submit.parquet.tmp"
+            final_path = submit_dir / f"{ts_str}_submit.parquet"
+
+            t_start = time.monotonic()
+            table = pa.table(
+                {
+                    "project_slug": [project_slug],
+                    "command": [command],
+                    "sidecar_sha256": [sidecar_sha256 or ""],
+                    "bth_submit_version": [importlib.metadata.version("bathos")],
+                    "submitted_at": pa.array([ts], type=pa.timestamp("us", tz="UTC")),
+                    "myxcel_job_id": [myxcel_job_id or ""],
+                    "stage_name": [stage_name or "exploration"],
+                },
+                schema=submit_schema,
+            )
+            pq.write_table(table, str(tmp_path))
+            tmp_path.rename(final_path)  # atomic on POSIX
+            duration_ms = (time.monotonic() - t_start) * 1000
+
+            # Emit telemetry event
+            event(
+                "catalog.write_submit_provenance",
+                path=str(final_path),
+                rows=1,
+                duration_ms=int(duration_ms),
+            )
+
+        emit_or_legacy(
+            kind="submit.recorded",
+            entity=[submit_id or str(uuid.uuid4())],
+            data={
+                "project_slug": project_slug,
+                "command": command,
+                "sidecar_sha256": sidecar_sha256 or "",
+                "bth_submit_version": importlib.metadata.version("bathos"),
+                "myxcel_job_id": myxcel_job_id or "",
+                # AC-25 site description: "includes slurm_job_id" -- myxcel submit's
+                # job id IS the SLURM job id for this cluster backend.
+                "slurm_job_id": myxcel_job_id or "",
+                "stage_name": stage_name or "exploration",
+            },
+            legacy_write=_legacy_write,
+            cwd=cwd,
+        )

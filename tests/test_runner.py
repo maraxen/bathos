@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 
@@ -1512,3 +1513,119 @@ def test_find_script_path_space_separated_option_values(tmp_path, prefix):
     script = tmp_path / "script.py"
     script.write_text("print(1)\n")
     assert _find_script_path([*prefix, "script.py"], tmp_path) == script.resolve()
+
+
+# --- AC-25: run.started / run.finished / run.outputs_hashed write sites ---------
+
+
+def _read_jsonl_dir(log_dir: Path) -> list[dict]:
+    lines = []
+    if not log_dir.exists():
+        return lines
+    for f in sorted(log_dir.glob("*.jsonl")):
+        for line in f.read_text().splitlines():
+            if line.strip():
+                lines.append(json.loads(line))
+    return lines
+
+
+def test_flag_off_run_records_only_legacy_parquet(tmp_catalog: Path, tmp_path: Path):
+    """AC-25 flag-off half: with the flag off, run_script performs only the
+    legacy parquet write -- no .bth/log/ lines anywhere."""
+    from bathos.runlog.writer import reset_writers_for_test
+
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=[sys.executable, "-c", "pass"],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 0
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert runs[0].status == "completed"
+
+    unaffiliated_log = Path.home() / ".bth" / "log" / "unaffiliated"
+    assert not unaffiliated_log.exists()
+    reset_writers_for_test()
+
+
+def test_flag_on_run_emits_started_and_finished_events_only(
+    tmp_catalog: Path, tmp_path: Path, monkeypatch
+):
+    """AC-25 flag-on half: with the flag on, run_script emits run.started,
+    run.outputs_hashed and run.finished and performs NO legacy write (no
+    cool-tier parquet fragment for this run)."""
+    from bathos.runlog.writer import reset_writers_for_test
+
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_catalog))
+    init_catalog(tmp_catalog)
+
+    exit_code = run_script(
+        argv=[sys.executable, "-c", "pass"],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 0
+
+    # No legacy parquet fragment: the cool tier is untouched.
+    assert read_runs(tmp_catalog) == []
+
+    unaffiliated_log = Path.home() / ".bth" / "log" / "unaffiliated"
+    lines = _read_jsonl_dir(unaffiliated_log)
+    kinds = [line["kind"] for line in lines]
+    assert kinds.count("run.started") == 1
+    assert kinds.count("run.finished") == 1
+    assert kinds.count("run.outputs_hashed") == 1
+
+    started = next(line for line in lines if line["kind"] == "run.started")
+    finished = next(line for line in lines if line["kind"] == "run.finished")
+    assert started["entity"] == finished["entity"]
+    assert "sidecar_sha256" in started["data"]
+    assert "claim_discriminates" in started["data"]
+    assert finished["data"]["status"] == "completed"
+    assert finished["data"]["exit_code"] == 0
+    reset_writers_for_test()
+
+
+def test_mode_not_reread_mid_run(tmp_catalog: Path, tmp_path: Path):
+    """The flag is fixed once for the whole run_script call: flipping the
+    on-disk cut-over marker mid-subprocess must not affect which branch
+    run.finished takes."""
+    from bathos.runlog.mode import cutover_marker_path
+    from bathos.runlog.writer import reset_writers_for_test
+
+    init_catalog(tmp_catalog)
+    marker = cutover_marker_path(tmp_catalog)
+
+    script = tmp_path / "flip.py"
+    # The subprocess itself writes the cutover marker mid-run, simulating a
+    # `bth migrate --to-log` happening while this run's own subprocess is
+    # still executing.
+    script.write_text(f"from pathlib import Path\nPath({str(marker)!r}).write_text('{{}}')\n")
+
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 0
+    assert marker.exists()  # the subprocess did flip it
+
+    # Despite the marker now existing, run.finished must have gone the SAME
+    # way run.started did (flag was off for this whole unit of work): one
+    # legacy parquet fragment, no event log at all.
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert not (Path.home() / ".bth" / "log" / "unaffiliated").exists()
+    reset_writers_for_test()
