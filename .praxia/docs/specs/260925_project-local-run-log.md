@@ -388,7 +388,8 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   an id, so every file belongs to exactly one root. A file smaller than its watermark, or vanished, is re-read from the other copy
   (D7) and reported by `bth verify`; `eid` dedup makes re-reading safe. Inodes are not used.
 - **Flag gate:** ingest runs only with the flag on (see "Mode"), or from
-  `bth migrate --to-log` step 4; with the flag off, `bth compact` and the end-of-command hook
+  `bth migrate --to-log` steps 3 and 4 (step 3 builds only `import-staging/<attempt>/index.db`
+  from the staged events; step 4 builds `~/.bth/catalog/index.db`); otherwise, with the flag off, `bth compact` and the end-of-command hook
   run only the legacy compaction. So `~/.bth/catalog/index.db` is never created before the
   switch.
 - **When ingest runs:** on `bth compact`, and non-blockingly (skipped if the lock is held) at the
@@ -459,13 +460,18 @@ switched on in one step.
    `bth init --assign-id` command).
 1. **Quiesce:** it first pulls the legacy catalog from every configured remote (the existing
    `sync.py` rsync), so finished cluster runs whose fragments were never pulled are imported; it
-   then runs `bth reap` (reconciling stale `running` rows through `sacct`),
+   then runs the reaper (reconciling stale `running` rows through `sacct`) with its warm-tier
+   reconciliation disabled (`reconcile_warm=False`: `reap.py:309` `reconcile_warm_tier`, which
+   backs up and force-rebuilds `bathos.db` and then rewrites `runs.metadata`, is skipped), so the
+   reap writes only its cool fragment rewrite and ledger JSON, both ordinary legacy sources,
    then refuses while any job in the user's `squeue` has a job id found in submit records or
    in a `running` run's `slurm_job_id`. Other queued jobs are listed; proceeding past them
    needs `--force`. It then takes the writers lock exclusively (waiting for, and reporting, any
    running local `bth` writer) and holds it until step 4 completes. It never runs the legacy
-   compaction (whose postmortem walk depends on the cwd and which refreshes `output_metadata`),
-   so `bathos.db` is not modified by the migration before step 4(d).
+   compaction (whose postmortem walk depends on the cwd and which refreshes `output_metadata`)
+   nor any force-rebuild, so `bathos.db` is not modified by the migration before step 4(d).
+   The only files step 1 adds or changes are legacy sources (pulled fragments and submit
+   records, reaped fragments and reap ledgers), which step 2 imports like any other.
 2. **Import:** convert every cool fragment, submit record, campaign JSON, and every row of every
    table in "Authoritative writes" into `*.imported` events (Fold rules). Before cut-over the
    events go to a staging directory, `~/.bth/log/import-staging/<attempt>/<root kind>/<root id>/`
@@ -474,21 +480,24 @@ switched on in one step.
    before cut-over. After cut-over it writes directly to the owning project's `.bth/log/`
    (unresolvable ones to `unaffiliated/`).
 3. **Build and diff:** build `import-staging/<attempt>/index.db` from the staged events alone
-   (a root of kind `staging`, used only here) and diff it against `bathos.db` table by table.
+   (a root of kind `staging`; the same staging directory is read again at step 4) and diff it against `bathos.db` table by table.
    Every difference must fall in an allow-listed class (data already lost to earlier
    force-rebuilds; corrupt fragments skipped by `compact.py:787`; `output_metadata` whose files
    changed since; postmortem overrides whose files are only in a deleted worktree; campaign
    members whose legacy e-value used the fragment outcome rather than the postmortem-overridden
    one; unresolvable project; a fragment not yet compacted into `bathos.db`, including those just
-   pulled in step 1); unclassified differences abort. The classified residuals are
+   pulled or reaped in step 1, whose staged status is newer than its warm row); unclassified differences abort. The classified residuals are
    written to a canonical report (exactly one JSON line per differing `(table, key, column)`,
-   `canon: 1` form, lines sorted by their bytes, no attempt id, time or host fields) in the attempt directory and `--to-log`
+   each line exactly the object `{table, key, column, class, legacy_value, staged_value}` with
+   `key` the row's primary key as a JSON array, `class` the allow-listed class name, and each
+   value the column's JSON value or `null` for an absent row, in `canon: 1` form, lines sorted by their bytes, no attempt id, time or host fields) in the attempt directory and `--to-log`
    stops there; the user signs off by
    re-running with `--accept-residual <sha256 of that report>`, which proceeds only if a fresh
    run of steps 1-3 reproduces a report with exactly that hash.
 4. **Switch.** The cut-over marker is the single commit point. In order: (a) build
    `~/.bth/catalog/index.db` from the existing project logs plus the staged events; (b) write
-   `cutover.json`, whose body also lists the staged segment names, after which reads and writes
+   `cutover.json` (schema in "Mode": `attempt` names this attempt, `segments` its staged
+   segments), after which reads and writes
    use the new path; (c) move each staged segment into its owning project log and mirror as
    `import-<attempt>-<n>.jsonl` (temp file then rename; skipped if already present); (d) rename
    `bathos.db` to `bathos.db.frozen`; (e) delete the staging directory and its
@@ -496,8 +505,9 @@ switched on in one step.
    `connect_read` enumerate it (kind `staging`) from (b) to (e), i.e. whenever the marker lists
    an attempt whose staging directory still exists, so nothing is unreadable in between; eid
    dedup absorbs the move.
-   **Re-running `bth migrate --to-log`:** with the marker absent, nothing outside the staging
-   directory has changed except possibly `~/.bth/catalog/index.db`, so it deletes both and
+   **Re-running `bth migrate --to-log`:** with the marker absent, the migration has changed
+   nothing outside the staging directory except `~/.bth/catalog/index.db` (possibly) and the
+   legacy sources step 1 adds (which any re-run re-imports), so it deletes those two and
    starts again from step 1 (pull, reap, squeue check, exclusive lock, full re-listing of every
    legacy source). With the marker present, it skips step 1's squeue check, takes the writers
    lock, and finishes whichever of (c)-(e) remain.
@@ -610,6 +620,13 @@ switched on in one step.
   started before the switch is either wholly legacy or wholly events; a `bth submit` after
   cut-over produces a job that appends events, and `BTH_LOG_MODE=1` outside a SLURM job or test
   is refused.
+- AC-30. On a fixture catalog whose `bathos.db` holds a warm-only row (absent from every cool
+  fragment) and a stale `running` run that `sacct` reports finished, `bth migrate --to-log`
+  steps 1-3 leave `bathos.db` byte-identical, reap that run into a cool fragment and ledger
+  only, and yield a residual report whose lines are exactly
+  `{table, key, column, class, legacy_value, staged_value}`; changing any one `legacy_value` or
+  `class` in the fixture changes the report's sha256.
+
 ## Order of delivery
 
 1. AC-11 (test isolation).
@@ -626,7 +643,7 @@ switched on in one step.
    AC-18 test, which step 5 empties.
 4. Legacy importer, reaper on folded status, `bth verify` checks, and `bth migrate --to-log`
    (Migration steps 0-4: staging, diff, abort, switch) built and exercised against fixture
-   catalogs (AC-7's verify half, AC-13, AC-14, AC-21, AC-23, AC-24, AC-26, AC-28, AC-29), and the new
+   catalogs (AC-7's verify half, AC-13, AC-14, AC-21, AC-23, AC-24, AC-26, AC-28, AC-29, AC-30), and the new
    cluster log pull in
    `bth sync --pull` (log, fallback, mirror; AC-6 and the cluster variants of AC-8, AC-9).
 5. Assign ids in every registered project (migration step 0), then run the step-4
