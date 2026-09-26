@@ -26,15 +26,18 @@ logger = logging.getLogger(__name__)
 
 ROTATE_BYTES = 8 * 1024 * 1024
 
-MIRROR_ROOT = Path.home() / ".bth" / "log-mirror"
+
+def mirror_root() -> Path:
+    """`~/.bth/log-mirror/`, resolved per call so a redirected HOME is honoured (AC-11)."""
+    return Path.home() / ".bth" / "log-mirror"
 
 
 def mirror_dir_for(project_id: str | None, slug: str | None) -> Path:
     """`~/.bth/log-mirror/<project_id>/`, or `_null/<slug or _unaffiliated>/`
     when `project_id` is None (D7)."""
     if project_id:
-        return MIRROR_ROOT / project_id
-    return MIRROR_ROOT / "_null" / (slug or "_unaffiliated")
+        return mirror_root() / project_id
+    return mirror_root() / "_null" / (slug or "_unaffiliated")
 
 
 class SegmentWriter:

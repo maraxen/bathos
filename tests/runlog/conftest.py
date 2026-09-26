@@ -14,34 +14,20 @@ from pathlib import Path
 
 import pytest
 
-import bathos.runlog.project_id as project_id_mod
-import bathos.runlog.writer as writer_mod
 from bathos.runlog.writer import reset_writers_for_test
 
 
 @pytest.fixture(autouse=True)
-def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point HOME (and therefore ~/.bth/projects.toml, ~/.bth/log-mirror/,
-    ~/.bth/catalog/) at a throwaway directory for every runlog test.
-
-    `os.environ["HOME"]` alone is not enough: `PROJECTS_REGISTRY` and
-    `MIRROR_ROOT` are module-level `Path.home() / ...` constants, evaluated
-    once at import time (same pattern as `bathos.config.PROJECTS_REGISTRY`,
-    which existing tests -- test_sprint_audit.py, test_sprint_audit_signals.py
-    -- isolate the same way: monkeypatching the module attribute directly
-    rather than relying on a cached Path.home() call to re-resolve).
+def isolated_home(bathos_test_home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Build on the suite-wide `bathos_test_home` (AC-11): HOME already points
+    under tmp_path, and the runlog paths (`projects_registry()`, `mirror_root()`)
+    re-read `Path.home()` per call. Additionally clear the run-log env knobs.
     """
-    fake_home = tmp_path / "home"
-    fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
-    monkeypatch.setattr(project_id_mod, "PROJECTS_REGISTRY", fake_home / ".bth" / "projects.toml")
-    monkeypatch.setattr(writer_mod, "MIRROR_ROOT", fake_home / ".bth" / "log-mirror")
-    monkeypatch.delenv("BTH_PROJECT_SLUG", raising=False)
     monkeypatch.delenv("BTH_WORKSPACE_ROOT", raising=False)
     monkeypatch.delenv("BTH_LOG_MODE", raising=False)
     monkeypatch.delenv("SLURM_JOB_ID", raising=False)
     monkeypatch.delenv("BTH_PROJECT_ID", raising=False)
-    yield fake_home
+    yield bathos_test_home
     reset_writers_for_test()
 
 

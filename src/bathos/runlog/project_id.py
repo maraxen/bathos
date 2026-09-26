@@ -16,7 +16,10 @@ import tomlkit
 
 from .mode import RunLogError
 
-PROJECTS_REGISTRY = Path.home() / ".bth" / "projects.toml"
+
+def projects_registry() -> Path:
+    """`~/.bth/projects.toml`, resolved per call so a redirected HOME is honoured (AC-11)."""
+    return Path.home() / ".bth" / "projects.toml"
 
 
 class ProjectIdMissingError(RunLogError):
@@ -106,17 +109,17 @@ def assign_project_id(project_root: Path, *, force: bool = False) -> AssignResul
 
 
 def _load_registry() -> tomlkit.TOMLDocument:
-    if PROJECTS_REGISTRY.exists():
+    if projects_registry().exists():
         try:
-            return tomlkit.parse(PROJECTS_REGISTRY.read_text())
+            return tomlkit.parse(projects_registry().read_text())
         except Exception:
             return tomlkit.document()
     return tomlkit.document()
 
 
 def _write_registry(doc: tomlkit.TOMLDocument) -> None:
-    PROJECTS_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
-    PROJECTS_REGISTRY.write_text(tomlkit.dumps(doc))
+    projects_registry().parent.mkdir(parents=True, exist_ok=True)
+    projects_registry().write_text(tomlkit.dumps(doc))
 
 
 def register_main_root(main_root: Path) -> bool:
