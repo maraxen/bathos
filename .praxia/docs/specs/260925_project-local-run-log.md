@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: v23 (after adversarial cycle 23)
+revision: v24 (after adversarial cycle 24)
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -265,8 +265,9 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   legacy source)**, never a pre-merged one: a run with a warm row and a cool fragment gets two
   `run.imported` events; each legacy `campaign_runs` row gives a `campaign_run.imported` carrying
   its stored `evalue` (not `seq_position`, which the fold always recomputes). Each carries `data.source_class`, one of `warm`
-  (`bathos.db.frozen`, or `bathos.db` before cut-over), `warm_recreated` (a `bathos.db` recreated
-  after cut-over by an older install), `fragment`, `campaign_json`, `ledger_json` (live reap
+  (`bathos.db.frozen`, or `bathos.db` while no `bathos.db.frozen` exists, i.e. until Migration
+  step 4(d) has renamed it), `warm_recreated` (a `bathos.db` present beside `bathos.db.frozen`,
+  i.e. recreated by an older install after the rename), `fragment`, `campaign_json`, `ledger_json` (live reap
   ledger), `ledger_reverted` (reverted reap ledger) or `submit_parquet`; precedence is that order.
   (`corrupt`, below, marks manifest-only chains and never enters a fold.)
   Each also carries `data.source_locator` and `data.source_sha256`: sha256 of the canonical
@@ -380,8 +381,9 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   where (root kind: root id) is one of `project`: `main_root` (the main root's `.bth/log/`,
   excluding `remote/`); `mirror`: `project_id` or `_null/<slug>`; `fallback`: slug;
   `unaffiliated`: constant; `remote-log`, `remote-fallback`, `remote-mirror`:
-  `(main_root, remote)`; `staging`: the attempt id (read by migration step 3, and by ingest and
-  `connect_read` from step 4(a) to 4(e); otherwise never enumerated). Root ids use `main_root`, not `project_id`, wherever two roots can share
+  `(main_root, remote)`; `staging`: the attempt id (read by migration steps 3 and 4(a), and by ingest
+  and `connect_read` only while the marker lists that attempt and its directory exists, i.e.
+  from step 4(b) to 4(e); otherwise never enumerated). Root ids use `main_root`, not `project_id`, wherever two roots can share
   an id, so every file belongs to exactly one root. A file smaller than its watermark, or vanished, is re-read from the other copy
   (D7) and reported by `bth verify`; `eid` dedup makes re-reading safe. Inodes are not used.
 - **Flag gate:** ingest runs only with the flag on (see "Mode"), or from
@@ -460,9 +462,9 @@ switched on in one step.
    then refuses while any job in the user's `squeue` has a job id found in submit records or
    in a `running` run's `slurm_job_id`. Other queued jobs are listed; proceeding past them
    needs `--force`. It then takes the writers lock exclusively (waiting for, and reporting, any
-   running local `bth` writer) and holds it until step 4 completes, and, in-process under that
-   lock, runs the legacy (non-rebuild) compaction so `bathos.db` includes every fragment just
-   pulled before step 3 diffs against it.
+   running local `bth` writer) and holds it until step 4 completes. It never runs the legacy
+   compaction (whose postmortem walk depends on the cwd and which refreshes `output_metadata`),
+   so `bathos.db` is not modified by the migration before step 4(d).
 2. **Import:** convert every cool fragment, submit record, campaign JSON, and every row of every
    table in "Authoritative writes" into `*.imported` events (Fold rules). Before cut-over the
    events go to a staging directory, `~/.bth/log/import-staging/<attempt>/<root kind>/<root id>/`
@@ -476,9 +478,10 @@ switched on in one step.
    force-rebuilds; corrupt fragments skipped by `compact.py:787`; `output_metadata` whose files
    changed since; postmortem overrides whose files are only in a deleted worktree; campaign
    members whose legacy e-value used the fragment outcome rather than the postmortem-overridden
-   one; unresolvable project); unclassified differences abort. The classified residuals are
-   written to a canonical report (one JSON line per difference, `canon: 1` form, sorted by
-   table then key, no attempt id, time or host fields) in the attempt directory and `--to-log`
+   one; unresolvable project; a fragment not yet compacted into `bathos.db`, including those just
+   pulled in step 1); unclassified differences abort. The classified residuals are
+   written to a canonical report (exactly one JSON line per differing `(table, key, column)`,
+   `canon: 1` form, lines sorted by their bytes, no attempt id, time or host fields) in the attempt directory and `--to-log`
    stops there; the user signs off by
    re-running with `--accept-residual <sha256 of that report>`, which proceeds only if a fresh
    run of steps 1-3 reproduces a report with exactly that hash.
@@ -488,9 +491,10 @@ switched on in one step.
    use the new path; (c) move each staged segment into its owning project log and mirror as
    `import-<attempt>-<n>.jsonl` (temp file then rename; skipped if already present); (d) rename
    `bathos.db` to `bathos.db.frozen`; (e) delete the staging directory and its
-   `ingest_watermarks` rows. From (a) to (e) the staging directory is an enumerated root (kind
-   `staging`), so nothing is unreadable in between; eid dedup absorbs the move. Until (d)
-   completes, `bathos.db` is class `warm`.
+   `ingest_watermarks` rows. Migrate's own build reads the staging directory at (a); ingest and
+   `connect_read` enumerate it (kind `staging`) from (b) to (e), i.e. whenever the marker lists
+   an attempt whose staging directory still exists, so nothing is unreadable in between; eid
+   dedup absorbs the move.
    **Re-running `bth migrate --to-log`:** with the marker absent, nothing outside the staging
    directory has changed except possibly `~/.bth/catalog/index.db`, so it deletes both and
    starts again from step 1 (pull, reap, squeue check, exclusive lock, full re-listing of every
