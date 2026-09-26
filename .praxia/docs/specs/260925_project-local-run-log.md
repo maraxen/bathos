@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: v12 (after adversarial cycle 12)
+revision: v13 (after adversarial cycle 13)
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -234,15 +234,17 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   (`bathos.db.frozen`, or `bathos.db` before cut-over), `warm_recreated` (a `bathos.db` recreated
   after cut-over by an older install), `fragment`, `campaign_json`, `ledger_json` (live reap
   ledger), `ledger_reverted` (reverted reap ledger) or `submit_parquet`; precedence is that order.
-  Each also carries `data.source_locator`: the source file's path relative to the catalog dir,
-  or `<db file>:<table>` for a warm row. The importer never reads current sidecar or output
+  Each also carries `data.source_locator` and `data.source_sha256` (the hash of the canonical
+  source record). The locator is the source file's path relative to the catalog dir; for a warm
+  row it is `warm:<table>` for both `bathos.db` and `bathos.db.frozen` (so the step-4 rename
+  changes nothing), and `bathos.db:<table>` only for class `warm_recreated`. The importer never reads current sidecar or output
   files. `ts` is the source record's own time (run: end time if finished, else start; campaign:
   `concluded_at` or `started_at`; ledger rows: their own timestamp). eid = `uuid5(NAMESPACE_BATHOS,
-  f"import:{kind}:{entity}:{source_class}:{source_locator}:{snapshot}:{sha256(canonical source record)}")`,
+  f"import:{kind}:{entity}:{source_class}:{source_locator}:{snapshot}:{source_sha256}")`,
   where `data.snapshot` is an ordinal per snapshot chain.
 - **Snapshots:** a snapshot chain is one `(kind, entity, source_class, source_locator)`: one
-  concrete source record. For each chain the importer compares the source's hash with the newest
-  existing snapshot (highest ordinal) of that chain. Equal: it appends nothing, so
+  concrete source record. For each chain the importer compares the source's hash with the
+  `source_sha256` of the newest existing snapshot (highest ordinal) of that chain. Equal: it appends nothing, so
   re-running on unchanged sources is a no-op. Different (including a source that changed back
   to an earlier content): it appends a new event with ordinal = newest + 1. Only the highest
   ordinal of each chain takes part in the fold; every chain does (so several reverted ledgers of
@@ -267,8 +269,10 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   - rank 2, terminal (`completed`, `failed`, `killed`; `runner.py:456,613,679,687`): a
     `run.finished`, or a `run.imported` with a terminal status;
   - rank 1, `abandoned` (`reap.py:288`): a `run.reaped` or a `run.imported` with status
-    `abandoned`, unless a `run.reap_reverted` follows it in `(ts, eid)` order (a revert cancels
-    every earlier abandoned claim, imported ones included);
+    `abandoned`, unless a `run.reap_reverted` (live, or the revert inside a `run_reap.imported`)
+    follows it in `(ts, rank, eid)` order, where at equal `ts` a revert sorts after every
+    abandoned claim (a revert cancels every earlier or same-`ts` abandoned claim, imported ones
+    included);
   - rank 0, `incomplete`: otherwise (a `run.started`, or a `run.imported` with status `running`).
   Ties go by source precedence (live counts as highest), then later `ts`, then eid. So a real
   finish beats a reap whatever their `ts`, including a finish pulled from the cluster after the
@@ -414,12 +418,13 @@ switched on in one step.
    signed-off residual report. Unclassified differences abort.
 4. **Switch:** the staged events are moved into their owning project logs (and mirrors),
    `~/.bth/catalog/index.db` is built from those logs, the staging directory is deleted, and
-   reads and writes move to the new path. An `import_manifest` table in `index.db` records every
-   imported source (`source_locator`, sha256). `bathos.db` is renamed to
+   reads and writes move to the new path. `import_manifest` is a derived table of the index
+   (every `(source_locator, source_sha256)` seen on any `*.imported` event), so it is rebuilt by
+   a delete + re-ingest like every other table and updated by every later re-import. `bathos.db` is renamed to
    `bathos.db.frozen` and kept read-only for one release.
 5. **Stale installs:** an older bathos (e.g. pinned in a project venv, or on the cluster) may
    keep writing cool fragments, submit Parquet, or a fresh `bathos.db`. `bth verify` reports
-   each such write (a legacy source whose `(source_locator, sha256)` is not in `import_manifest`,
+   each such write (a legacy source whose `(source_locator, source_sha256)` is not in `import_manifest`,
    which catches late cluster pulls whatever their mtime, or a `bathos.db` present beside
    `bathos.db.frozen`) with the writing host; re-running
    `bth migrate --import-legacy` imports it (sources: `bathos.db.frozen`, any new `bathos.db`,
