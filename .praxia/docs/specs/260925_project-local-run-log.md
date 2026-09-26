@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: v18 (after adversarial cycle 18)
+revision: v19 (after adversarial cycle 19)
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -148,6 +148,20 @@ key as the live kind:
 | `legacy_source.unreadable` | `source_locator` | any legacy file that cannot be parsed (manifest bookkeeping only) |
 
 ## Design
+
+### Mode (the flag and cut-over)
+
+- **Cut-over marker:** `~/.bth/catalog/cutover.json` (`{"at": <RFC3339>, "bathos": <version>}`),
+  written atomically (`os.replace`) as the last action of Migration step 4. "Before cut-over"
+  and "after cut-over" everywhere in this spec mean "marker absent" and "marker present".
+- **The flag** (log mode) is on iff the marker exists in the active catalog dir, or
+  `BTH_LOG_MODE=1` is set **and** `BTH_CATALOG_DIR` points somewhere other than the default
+  `~/.bth/catalog` (test fixtures only). `BTH_LOG_MODE=1` against the default catalog without a
+  marker is refused with a structured error, so the real catalog can never be half-switched.
+- Every check reads the marker afresh on each call (one `stat`), so a long-lived process such
+  as the MCP server switches at cut-over without a restart.
+- Flag on: events only, `connect_read` builds views. Flag off: legacy writes only, the
+  pass-through in "Reads".
 
 ### Log directory resolution
 
@@ -353,9 +367,10 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   `connect_read`). Root ids use `main_root`, not `project_id`, wherever two roots can share
   an id, so every file belongs to exactly one root. A file smaller than its watermark, or vanished, is re-read from the other copy
   (D7) and reported by `bth verify`; `eid` dedup makes re-reading safe. Inodes are not used.
-- **Flag gate:** before the switch, ingest into `~/.bth/catalog/index.db` runs only with the flag
-  on (fixture catalogs under a test `BTH_CATALOG_DIR`) or from `bth migrate --to-log` step 4;
-  with the flag off, `bth compact` and the end-of-command hook run only the legacy compaction.
+- **Flag gate:** ingest runs only with the flag on (see "Mode"), or from
+  `bth migrate --to-log` step 4; with the flag off, `bth compact` and the end-of-command hook
+  run only the legacy compaction. So `~/.bth/catalog/index.db` is never created before the
+  switch.
 - **When ingest runs:** on `bth compact`, and non-blockingly (skipped if the lock is held) at the
   end of commands that write events (`bth run`, campaign and claim commands, MCP equivalents).
   Read commands, including `bth view`, never ingest.
@@ -381,7 +396,7 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
 - If `index.db` does not exist yet, the views are built from the events alone.
 - **Before cut-over (flag off)** `connect_read(path, read_only=..., missing=...)` is a
   pass-through: it opens `bathos.db` with exactly the arguments that call site uses today
-  (about 40 sites open `read_only=True`, e.g. `linter.py:422`, `prereg.py:165`; `run_sql` opens
+  (most sites open `read_only=True`, e.g. `linter.py:422`, `prereg.py:165`; `run_sql` opens
   read-write and falls back to `""` when the file is missing, `query.py:427-429`), creates no
   views and does not use `connect_legacy`. Legacy writers (e.g. `campaigns.py:45`,
   `anchor.py:198`, `compact.py:838`) keep their own opens on the AC-18 test's allow-list and
@@ -549,7 +564,7 @@ switched on in one step.
 1. AC-11 (test isolation).
 2. Writer, resolution, D3 check, `project_id` via `bth init`/`--assign-id`, root registration
    in `projects.toml` (Discovery), mirror and `bth log restore` (AC-10, AC-16, AC-27, plus the log-level halves of AC-5, AC-9 and AC-14:
-   the right lines exist in the project log and the mirror), behind a feature flag; production
+   the right lines exist in the project log and the mirror), behind the flag ("Mode"); production
    still uses the old tiers. Every write site in "Authoritative writes" gains its event emission behind the same
    flag (AC-25).
 3. `index.db`, `events` table, fold (incl. the campaign fold), generation-swap ingest, read API
