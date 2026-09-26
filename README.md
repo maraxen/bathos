@@ -43,8 +43,10 @@ bth sql "SELECT project_slug, count(*) FROM runs GROUP BY 1"
 **v0.3+ flags:**
 - `--agent-mode collaborative|autonomous` — declare whether this run is agent-driven
 - `--derived-from <run-id>` — record parent run for lineage tracking
-- `--campaign <campaign-id>` — associate this run with a campaign
+- `--campaign-id <campaign-id>` — associate this run with a campaign
 - `--no-sidecar` — bypass sidecar enforcement (use for ad-hoc runs)
+- `--output-paths <path>` (repeatable) — register output files produced by this run
+- `--tags <tag>` (repeatable) — attach search tags to this run
 
 ## CLI Reference
 
@@ -83,7 +85,7 @@ bth sql "SELECT project_slug, count(*) FROM runs GROUP BY 1"
 
 **`bth campaign`** — Manage experiment campaigns (v0.3+)
 - `bth campaign create <id> --hypothesis <text>` — create a new campaign
-- `bth campaign add <run-id> --campaign <id>` — associate a run with a campaign
+- `bth campaign add <run-id> --campaign-id <id>` — associate a run with a campaign
 - `bth campaign ls` — list campaigns
 - `bth campaign show <id>` — show campaign details and runs
 - `bth campaign review <id>` — statistical summary and anomaly detection

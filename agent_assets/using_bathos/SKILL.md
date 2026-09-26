@@ -53,17 +53,17 @@ Runs script, captures git state, and records run in catalog with auto-generated 
 
 ```bash
 bth run \
-  --out outputs/result.json \
-  --tag experiment:baseline \
-  --tag date:2026-06-01 \
-  --campaign my-campaign-id \
+  --output-paths outputs/result.json \
+  --tags experiment:baseline \
+  --tags date:2026-06-01 \
+  --campaign-id my-campaign-id \
   -- uv run python scripts/train.py
 ```
 
 **Options:**
-- `--out PATH` — Register output file path (can repeat)
-- `--tag TAG`, `-t` — Add tag (can repeat)
-- `--campaign ID` — Associate with campaign
+- `--output-paths PATH` — Register output file path (can repeat)
+- `--tags TAG` — Add tag (can repeat)
+- `--campaign-id ID` — Associate with campaign
 - `--agent-mode collaborative|autonomous` — Mark collaborative (human-in-loop) or autonomous runs
 - `--derived-from RUN_ID` — Link lineage to parent run
 - `--no-sidecar` — Bypass sidecar enforcement (logs `BYPASSED`)
@@ -74,16 +74,16 @@ Exit code is script's exit code.
 
 ## Output Path Convention
 
-Output JSON files registered with `bth run --out` must **never** be in ephemeral directories (`/tmp`, `/var/tmp`, or `$TMPDIR`). Bathos catalogs these paths as durable references; a temp-dir path will be lost on reboot or system cleanup, making the catalog entry unreproducible.
+Output JSON files registered with `bth run --output-paths` must **never** be in ephemeral directories (`/tmp`, `/var/tmp`, or `$TMPDIR`). Bathos catalogs these paths as durable references; a temp-dir path will be lost on reboot or system cleanup, making the catalog entry unreproducible.
 
-Non-JSON files (PNG, SVG, PDF figures) are equally valid `--out` targets; bathos stores them in `output_paths` as opaque file references alongside result JSON. Repeat the flag for each path.
+Non-JSON files (PNG, SVG, PDF figures) are equally valid `--output-paths` targets; bathos stores them in `output_paths` as opaque file references alongside result JSON. Repeat the flag for each path.
 
 ```bash
 # ✓ Correct — persistent project-relative path
-bth run --out outputs/run_abc.json -- uv run python scripts/experiments/train.py
+bth run --output-paths outputs/run_abc.json -- uv run python scripts/experiments/train.py
 
 # ✗ Wrong — /tmp is ephemeral; catalog entry becomes invalid after reboot
-bth run --out /tmp/result.json -- uv run python scripts/experiments/train.py
+bth run --output-paths /tmp/result.json -- uv run python scripts/experiments/train.py
 ```
 
 Smoke-test validation runs (pre-flight checks before a real run) should be executed **directly**, not via `bth run`, so they are not tracked:
@@ -93,7 +93,7 @@ Smoke-test validation runs (pre-flight checks before a real run) should be execu
 uv run python scripts/experiments/train.py --smoke --out /tmp/test.json
 
 # Then the real tracked run uses a persistent path
-bth run --out outputs/run_abc.json -- uv run python scripts/experiments/train.py
+bth run --output-paths outputs/run_abc.json -- uv run python scripts/experiments/train.py
 ```
 
 ## Sidecar Pre-Registration
@@ -134,11 +134,11 @@ n_steps = "int"
 1. `$BTH_RESULTS_PATH` — an env var `bth run` sets for the subprocess. **This is the
    reliable mechanism; write your result dict here.**
 2. `<script_stem>.bth-results.json` adjacent to the script (fallback).
-3. A single registered `--out` JSON path (fallback) — only used when *exactly one*
-   `--out` path ends in `.json`; with zero or multiple candidates this is skipped
+3. A single registered `--output-paths` JSON path (fallback) — only used when *exactly one*
+   `--output-paths` path ends in `.json`; with zero or multiple candidates this is skipped
    rather than guessing, and outcome stays `unknown`.
 
-Writing only to `--out` and never to `$BTH_RESULTS_PATH` is a common mistake that
+Writing only to `--output-paths` and never to `$BTH_RESULTS_PATH` is a common mistake that
 silently leaves `outcome='unknown'` for every run, even when the run completes
 successfully and the sidecar conditions would otherwise evaluate to `pass`. Prefer
 writing to both:
@@ -186,7 +186,7 @@ Creates `scripts/experiments/my_experiment.py` and `scripts/experiments/my_exper
 
 ```bash
 bth validate-sidecar scripts/experiments/train.bth.toml
-bth validate-sidecar scripts/experiments/train.bth.toml --campaign my-campaign-id  # also cross-checks claim_discriminates/claim_isolates against the campaign's registered claim
+bth validate-sidecar scripts/experiments/train.bth.toml --campaign-id my-campaign-id  # also cross-checks claim_discriminates/claim_isolates against the campaign's registered claim
 ```
 
 Checks TOML syntax, schema completeness, DuckDB condition validity, and residual outcome presence. Prints `field: message` for each error and exits 1 if invalid; prints `✓ <path> is valid` on success.
@@ -426,12 +426,12 @@ Compares each recorded run's git hash against current HEAD, reporting `OK` / `ST
 
 ```bash
 bth find --project myproject --status completed
-bth find --tag experiment:baseline --tag date:2026-06-01
+bth find --tags experiment:baseline --tags date:2026-06-01
 bth find --slurm-job 12345678
 bth find --output-file "outputs/run_*.json"
 ```
 
-**Options:** `--project/-p`, `--since` (e.g. `7d`, `24h`), `--status`, `--tag` (repeatable), `--slurm-job`, `--output-file` (glob against registered output paths). There is **no `--filter` and no `--limit`** — these are fixed equality/glob filters and every match is printed. For an arbitrary DuckDB `WHERE` clause, use `bth sql` instead:
+**Options:** `--project`, `--since` (e.g. `7d`, `24h`), `--status`, `--tags` (repeatable), `--slurm-job`, `--output-file` (glob against registered output paths). There is **no `--filter` and no `--limit`** — these are fixed equality/glob filters and every match is printed. For an arbitrary DuckDB `WHERE` clause, use `bth sql` instead:
 
 ```bash
 bth sql "SELECT * FROM runs WHERE outcome='pass' AND project_slug='myproject'"

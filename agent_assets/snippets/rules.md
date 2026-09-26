@@ -48,10 +48,10 @@ condition = "5 <= temp_std < 10"
 
 ## Campaign and Run Recording
 
-Tag runs with `--tag` and group with `--campaign` to organize related experiments:
+Tag runs with `--tags` and group with `--campaign-id` to organize related experiments:
 
 ```bash
-bth run --tag "v1.2" --campaign "npt-validation" -- uv run python script.py
+bth run --tags "v1.2" --campaign-id "npt-validation" -- uv run python script.py
 ```
 
 Campaigns are queryable: `bth campaign ls`, `bth campaign review`.
@@ -67,14 +67,14 @@ Prefer fixing the sidecar over bypassing it. If the sidecar is hard to write, th
 
 ## Output Path Convention
 
-Never pass a temp-directory path to `bth run --out`. Bathos catalogs `--out` paths as durable references.
+Never pass a temp-directory path to `bth run --output-paths`. Bathos catalogs `--output-paths` paths as durable references.
 
 ```bash
 # ✓ Correct — persistent, project-relative
-bth run --out outputs/result.json -- uv run python scripts/experiments/train.py
+bth run --output-paths outputs/result.json -- uv run python scripts/experiments/train.py
 
 # ✗ Wrong — /tmp is ephemeral; catalog entry becomes stale after reboot
-bth run --out /tmp/result.json -- uv run python scripts/experiments/train.py
+bth run --output-paths /tmp/result.json -- uv run python scripts/experiments/train.py
 ```
 
 Smoke-test validation runs should be executed directly (not via `bth run`) so they are never cataloged:
@@ -85,4 +85,4 @@ uv run python scripts/experiments/train.py --smoke --out /tmp/test.json
 ```
 
 `bth lint` will warn if the warm catalog contains runs with ephemeral output paths.
-`bth run` will warn at execution time if `--out` points to a temp directory.
+`bth run` will warn at execution time if `--output-paths` points to a temp directory.

@@ -7,7 +7,7 @@ The experiment-runner agent dispatches when a task requires executing or validat
 ## Key Responsibilities
 
 - **Sidecar validation:** Always validate the `.bth.toml` sidecar before running. Catch schema errors early.
-- **Run invocation:** Use `bth run -- uv run python ...` (never plain `python`). Respect `--tag`, `--campaign`, `--agent-mode`.
+- **Run invocation:** Use `bth run -- uv run python ...` (never plain `python`). Respect `--tags`, `--campaign-id`, `--agent-mode`.
 - **Campaign management:** Create campaigns for related runs; use `bth campaign review` to assess outcomes.
 - **Integrity gates:** Check derived-from lineage and outcome conditions match hypothesis.
 
