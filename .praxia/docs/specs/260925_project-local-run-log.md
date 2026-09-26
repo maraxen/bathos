@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: v31 (after adversarial cycle 31)
+revision: v32 (after adversarial cycle 32)
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -262,14 +262,15 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   `question`, `hypothesis`, `started_at` take the latest non-empty value; claim fields and
   `stopping_threshold` follow what the current upsert/update code does, not a new rule.
   **The reference for run and campaign rows is the canonical legacy state**: what
-  `reconcile_warm_tier` (`reap.py:314-366`: backup, `compact(force_rebuild=True)` from the
-  workspace root, then the reap-ledger merge) produces from the same fragments, ledgers,
+  `compact(force_rebuild=True)` followed by the reap-ledger merge of `reconcile_warm_tier`
+  (`reap.py:314-366`), both run unconditionally (not skipped when `bathos.db` is absent, as
+  `reap.py:326-327` would), with `BTH_WORKSPACE_ROOT` pinned to the fixture workspace, produces from the same fragments, ledgers,
   campaign JSON, sidecars and postmortem files. An incremental legacy compact is not a usable
   reference: a row that already exists is frozen except for `output_metadata`, the three
   COALESCE columns and the postmortem fields (`compact.py:943-1041` then `continue`), so its
   value depends on when compaction ran. Those timing effects are residual classes of Migration
   step 3, not fold rules. Any divergence AC-17 finds from the canonical state is a spec bug to
-  fix here, unless it is one of the stated behaviour changes BC-1..BC-5 (below).
+  fix here, unless it is one of the stated behaviour changes BC-1..BC-6 (below).
 - **Imported history:** the legacy importer emits one `<kind>.imported` event **per (entity,
   legacy source)**, never a pre-merged one: a run with a warm row and a cool fragment gets two
   `run.imported` events; each legacy `campaign_runs` row gives a `campaign_run.imported` carrying
@@ -328,7 +329,7 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   then tie order (the `COALESCE` of `compact.py:983`, so a winning claim with null never blanks
   it; BC-4); the stored `outcome` is the `verdict_override` of the latest `run.postmortem_applied` (or
   imported postmortem field) if that override is not `"none"`, else the bundle's raw outcome (the
-  new-row path of `compact.py:1047-1061`, which every row takes in the canonical state); and `metadata.reaped` is the ledger record carried by the latest
+  new-row path of `compact.py:1047-1061`, which every row inserted in the canonical state takes; BC-5 is the exception); and `metadata.reaped` is the ledger record carried by the latest
   abandoned claim not cancelled by a revert (a `run.reaped`'s data or a `ledger_json` import),
   whatever the winning status, and absent when every abandoned claim is reverted, as
   `reconcile_warm_tier` merges every live ledger (`reap.py:338-362`); the rest of `metadata`
@@ -359,15 +360,24 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
     rows); AC-17 fixtures register each postmortem file once.
   - BC-3. A run's e-value uses the sidecar declaration frozen in `run.started.data`; the legacy
     campaign pass re-parses the current sidecar file on every compact (`campaigns.py:463-470`), so
-    an edited sidecar changes it and a deleted one leaves the old value (`COALESCE`). An imported
+    an edited sidecar changes it and a deleted one gives NULL in the canonical state (the
+    incremental `COALESCE` would keep the old value). An imported
     member keeps its stored `evalue` (below). AC-17 fixtures never edit a sidecar after its run.
   - BC-4. `parity_run_type` ties between non-null values go by rank then source precedence;
     the canonical state keeps only the fragment's value, since the rebuild discards the warm row
     (incrementally, the fragment compacted last wins by `COALESCE(new, old)`, `compact.py:983`).
   - BC-5. A run id present in several fragment files (only possible across `runs/`
-    subdirectories, read by `rglob` in path order, `catalog.py:78`) folds by status rank; in the
-    canonical state the first file in path order is inserted and the rest are skipped as
-    existing rows.
+    subdirectories, read by `rglob` then stably sorted by descending `timestamp`, `catalog.py:78,102`) folds by
+    status rank; in the canonical state the first file in that order is inserted and the rest
+    are skipped as existing rows, while `campaigns.py:435-436` keeps the last file's `Run`
+    object (never override-mutated), so the legacy e-value, `seq_position` and threshold lock of
+    its campaigns use that file's raw outcome, `timestamp` and `sidecar_path`; BC-5 exempts
+    those campaign values as well as the run row.
+  - BC-6. Campaign membership is the union below, so a run started in campaign A and later
+    added to B is a member of both; `add_run_to_campaign` overwrites the fragment's single
+    `campaign_id` (`campaigns.py:370-377`) and the rebuild relinks only that
+    (`campaigns.py:393-404`), so the canonical state keeps only B. The incremental warm tier
+    keeps both rows, so step 3 needs no class for it.
 - **Legacy writes after cut-over** (an older bathos still writing fragments, submit Parquet or a
   fresh `bathos.db`) are not imported automatically. `bth verify` reports them with the writing
   host, and the user re-runs `bth migrate --import-legacy`, which appends only new eids.
@@ -379,11 +389,14 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
     `datetime.min` UTC), then `run_id` (`_run_sort_key`, `campaigns.py:406-412`). The event `ts`
     is never used for this order.
   - each member's outcome for the e-value is its folded `runs.outcome` (postmortem override
-    applied): in the canonical state every row takes the new-row path, which sets `run.outcome`
-    on the same `Run` object (`compact.py:1060-1061`) that `campaigns.py:435-436` then uses.
+    applied): in the canonical state every inserted row takes the new-row path, which sets
+    `run.outcome` on the same `Run` object (`compact.py:1060-1061`) that `campaigns.py:435-436`
+    then uses (except for BC-5 runs).
   - a member with a sidecar declaration in `run.started.data` gets `evalue` computed from it; a
-    member without one (imported history) keeps its stored `evalue` from
-    `campaign_run.imported`, mirroring `evalue = COALESCE(?, evalue)` (`campaigns.py:517`).
+    member without one keeps its stored `evalue` from `campaign_run.imported` if imported,
+    mirroring `evalue = COALESCE(?, evalue)` (`campaigns.py:517`), and otherwise (a live member
+    with no declaration) has `evalue` NULL, as in the canonical state (the `1.0` default of
+    `add_run_to_campaign` does not survive a rebuild).
   - the threshold lock is computed as today; on a threshold mismatch the campaign is skipped as
     today (`campaigns.py:500-504`) and `bth verify` reports it.
   Any event on a member run marks its campaign(s) as affected, at ingest and in the read views.
@@ -630,8 +643,11 @@ switched on in one step.
   `--git-common-dir`, `BTH_WORKSPACE_ROOT` set, no git repo.
 - AC-17. Differential fold test: for randomized operation sequences on campaigns, anchors and
   runs (runs started and finished, reaped and reverted, postmortems registered, campaigns
-  updated), the canonical legacy state (Fold rules: `reconcile_warm_tier` after the sequence)
-  and the new fold produce identical rows, apart from BC-1..BC-5.
+  updated), the canonical legacy state (Fold rules) and the new fold produce identical rows in
+  `runs`, `campaigns`, `campaign_runs` and `sidecar_anchors`, apart from BC-1..BC-6. Fixture
+  postmortems live inside the pinned workspace outside any pruned directory; `campaign_edges`
+  and `run_edges`, which the rebuild drops (no cool source), are compared to the old code's
+  incremental state instead.
 - AC-18. No module other than `bathos.index` and the ingest path calls `duckdb.connect` on a
   catalog path (AST test). The importer and `bth verify` open legacy databases (`bathos.db`,
   `bathos.db.frozen`) only through `bathos.index.connect_legacy(path)`, which opens read-only
@@ -673,7 +689,7 @@ switched on in one step.
   revert has no `metadata.reaped`; a postmortem override `fail` followed by an override `"none"`
   leaves the raw outcome, and the campaign `evalue` follows the folded outcome; a terminal claim
   with null `parity_run_type` does not blank a value another status claim carries. Each matches
-  the canonical legacy state on the same sequence (AC-17), and each of BC-1..BC-5 has a fixture
+  the canonical legacy state on the same sequence (AC-17), and each of BC-1..BC-6 has a fixture
   showing the stated new result.
 - AC-27. With two roots sharing a `project_id`, `bth log restore` in one never copies the
   other's events; after moving a project, restore still recovers events written at the old path.
