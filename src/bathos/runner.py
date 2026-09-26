@@ -53,6 +53,15 @@ def _find_script_path(argv: list[str], cwd: Path) -> Path | None:
     # First arg is python/uv; look for script file in subsequent args
     # Handle: python script.py, python -c "...", python -m module, etc.
     # Also handle: uv run python script.py (skip 'run' and 'python' tokens)
+    # Also handle: uv run --prerelease=allow python script.py, uv run --python=3.12 script.py
+    # (single `--opt=value` tokens and valueless flags like `uv run --no-sync script.py`),
+    # debt #1946 -- every branch below must `continue` its own advance. Previously the
+    # "-c"/"-m"/"-W" branch fell through to an unconditional `i += 1` at the bottom of the
+    # loop *on top of* its own `i += 2`, advancing by 3 instead of 2 and skipping straight
+    # over the script token; the same fallthrough double-advanced every other flag branch
+    # too (single-token `--opt`/`--opt=value` flags advanced by 2 instead of 1), silently
+    # skipping whatever token followed. Only the passthrough branch's explicit `continue`
+    # avoided it, which is why bare `uv run python script.py` never showed the bug.
     _UV_PASSTHROUGH = {"run", "python", "python3"}
     i = 1
     while i < len(argv):
@@ -61,18 +70,20 @@ def _find_script_path(argv: list[str], cwd: Path) -> Path | None:
             i += 1
             continue
         if arg in ("-c", "-m", "-W"):
-            # These take an argument but don't point to a file
+            # These take a separate value argument (e.g. `-m module`, `-W ignore`).
             i += 2
-        elif arg.startswith("-"):
-            # Other flags
+            continue
+        if arg.startswith("-"):
+            # Valueless flags (`--no-sync`, `--quiet`) and single-token `--opt=value`
+            # flags (`--prerelease=allow`, `--python=3.12`) are both exactly one argv
+            # token -- neither takes a separate value argument.
             i += 1
-        else:
-            # First non-flag arg after python is the script
-            candidate = cwd / arg if not Path(arg).is_absolute() else Path(arg)
-            if candidate.exists() and candidate.suffix == ".py":
-                return candidate.resolve()
-            return None
-        i += 1
+            continue
+        # First non-flag arg after python is the script
+        candidate = cwd / arg if not Path(arg).is_absolute() else Path(arg)
+        if candidate.exists() and candidate.suffix == ".py":
+            return candidate.resolve()
+        return None
     return None
 
 

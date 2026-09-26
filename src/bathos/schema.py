@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pyarrow as pa
 
-CURRENT_SCHEMA_VERSION = "15"
+CURRENT_SCHEMA_VERSION = "16"
 
 # Format validator for stage_name values — used by linter.check_canonical_stage_names.
 # Enforcement at parse time uses CANONICAL_STAGES set-membership (parse_sidecar); this
@@ -84,6 +84,14 @@ COOL_SCHEMA = pa.schema(
         pa.field("adversarial_check_result", pa.string(), nullable=True),
         pa.field("git_dirty_content_id", pa.string(), nullable=True),
         pa.field("git_provenance_source", pa.string(), nullable=True),
+        # v16 (debt #1940): metadata/output_metadata were WARM-only -- Run.to_arrow()
+        # silently dropped both, so runs.metadata was always "{}" after bth compact
+        # regardless of what the script actually emitted. Persisting them through the
+        # cool fragment closes that gap; old fragments lacking these columns are handled
+        # by pa.concat_tables(..., promote_options="permissive") in catalog.read_runs_report
+        # plus the _migrate_v15 default below.
+        pa.field("metadata", pa.string(), nullable=True),
+        pa.field("output_metadata", pa.string(), nullable=True),
     ]
 )
 
@@ -285,6 +293,8 @@ class Run:
                 "adversarial_check_result": [self.adversarial_check_result],
                 "git_dirty_content_id": [self.git_dirty_content_id],
                 "git_provenance_source": [self.git_provenance_source],
+                "metadata": [self.metadata],
+                "output_metadata": [self.output_metadata],
             },
             schema=COOL_SCHEMA,
         )
@@ -422,4 +432,8 @@ class Run:
             git_provenance_source=pydict.get("git_provenance_source", [None])[i]
             if "git_provenance_source" in pydict
             else None,
+            metadata=(pydict.get("metadata", ["{}"])[i] or "{}") if "metadata" in pydict else "{}",
+            output_metadata=(pydict.get("output_metadata", ["[]"])[i] or "[]")
+            if "output_metadata" in pydict
+            else "[]",
         )

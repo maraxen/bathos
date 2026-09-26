@@ -1255,3 +1255,120 @@ def test_run_with_nonexistent_campaign_fails_fast(tmp_catalog: Path, tmp_path: P
     assert exit_code == 1
     assert not marker.exists(), "subprocess must not run when --campaign cannot be resolved"
     assert read_runs(tmp_catalog) == []
+
+
+def test_find_script_path_bare_python(tmp_path: Path):
+    """Debt #1946 regression: `python script.py` finds the script."""
+    from bathos.runner import _find_script_path
+
+    script = tmp_path / "script.py"
+    script.write_text("pass\n")
+    assert _find_script_path(["python", "script.py"], tmp_path) == script.resolve()
+
+
+def test_find_script_path_uv_run_python(tmp_path: Path):
+    """`uv run python script.py` finds the script (bare passthrough case)."""
+    from bathos.runner import _find_script_path
+
+    script = tmp_path / "script.py"
+    script.write_text("pass\n")
+    assert _find_script_path(["uv", "run", "python", "script.py"], tmp_path) == script.resolve()
+
+
+def test_find_script_path_uv_run_single_token_opt_equals_value(tmp_path: Path):
+    """Debt #1946: a single `--opt=value` token must not shift subsequent-token pairing.
+
+    `uv run --prerelease=allow python script.py` is one real invocation shape this
+    debt names explicitly.
+    """
+    from bathos.runner import _find_script_path
+
+    script = tmp_path / "script.py"
+    script.write_text("pass\n")
+    argv = ["uv", "run", "--prerelease=allow", "python", "script.py"]
+    assert _find_script_path(argv, tmp_path) == script.resolve()
+
+
+def test_find_script_path_uv_run_opt_equals_value_no_python_token(tmp_path: Path):
+    """`uv run --python=3.12 script.py` -- no literal 'python' token in argv at all."""
+    from bathos.runner import _find_script_path
+
+    script = tmp_path / "script.py"
+    script.write_text("pass\n")
+    argv = ["uv", "run", "--python=3.12", "script.py"]
+    assert _find_script_path(argv, tmp_path) == script.resolve()
+
+
+def test_find_script_path_uv_run_multiple_opt_equals_value_flags(tmp_path: Path):
+    """Several `--opt=value` tokens in a row must each advance by exactly one."""
+    from bathos.runner import _find_script_path
+
+    script = tmp_path / "script.py"
+    script.write_text("pass\n")
+    argv = ["uv", "run", "--extra=foo", "--extra=bar", "python", "script.py"]
+    assert _find_script_path(argv, tmp_path) == script.resolve()
+
+
+def test_find_script_path_uv_run_valueless_long_flag(tmp_path: Path):
+    """`uv run --no-sync python3 script.py` -- a valueless long flag token."""
+    from bathos.runner import _find_script_path
+
+    script = tmp_path / "script.py"
+    script.write_text("pass\n")
+    argv = ["uv", "run", "--no-sync", "python3", "script.py"]
+    assert _find_script_path(argv, tmp_path) == script.resolve()
+
+
+def test_find_script_path_python_dash_m_space_separated(tmp_path: Path):
+    """Debt #1946 regression: `-m module` (2-token flag) must advance by exactly 2,
+    not 3 -- the old code's fallthrough `i += 1` after `i += 2` skipped the script
+    token entirely and returned None.
+    """
+    from bathos.runner import _find_script_path
+
+    script = tmp_path / "script.py"
+    script.write_text("pass\n")
+    argv = ["python3", "-m", "pytest", "script.py"]
+    assert _find_script_path(argv, tmp_path) == script.resolve()
+
+
+def test_find_script_path_python_dash_w_space_separated(tmp_path: Path):
+    """`-W ignore script.py` -- another 2-token flag; must not skip past the script."""
+    from bathos.runner import _find_script_path
+
+    script = tmp_path / "script.py"
+    script.write_text("pass\n")
+    argv = ["python3", "-W", "ignore", "script.py"]
+    assert _find_script_path(argv, tmp_path) == script.resolve()
+
+
+def test_find_script_path_python_dash_w_single_token(tmp_path: Path):
+    """`-Wignore` (single combined token, not `-W` + `ignore`) advances by 1."""
+    from bathos.runner import _find_script_path
+
+    script = tmp_path / "script.py"
+    script.write_text("pass\n")
+    argv = ["python3", "-Wignore", "script.py"]
+    assert _find_script_path(argv, tmp_path) == script.resolve()
+
+
+def test_find_script_path_dash_c_returns_none(tmp_path: Path):
+    """`python -c "..."` has no script file -- must return None, not misdetect."""
+    from bathos.runner import _find_script_path
+
+    assert _find_script_path(["python", "-c", "pass"], tmp_path) is None
+
+
+def test_find_script_path_first_arg_is_script(tmp_path: Path):
+    """A bare script path as argv[0] (no interpreter token) is detected directly."""
+    from bathos.runner import _find_script_path
+
+    script = tmp_path / "script.py"
+    script.write_text("pass\n")
+    assert _find_script_path(["script.py"], tmp_path) == script.resolve()
+
+
+def test_find_script_path_empty_argv():
+    from bathos.runner import _find_script_path
+
+    assert _find_script_path([], Path(".")) is None
