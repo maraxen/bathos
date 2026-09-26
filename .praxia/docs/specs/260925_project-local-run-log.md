@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: v14 (after adversarial cycle 14)
+revision: v15 (after adversarial cycle 15)
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -143,6 +143,7 @@ key as the live kind:
 | `anchor.imported` | `anchor_id` | warm `sidecar_anchors` |
 | `trust_ledger.imported` | record `id` | warm `trust_ledger`, fragment |
 | `archived_item.imported` | `record_id` | warm `archived_items`, fragment |
+| `legacy_source.unreadable` | `source_locator` | any legacy file that cannot be parsed (manifest bookkeeping only) |
 
 ## Design
 
@@ -253,6 +254,12 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   one run all fold). The importer holds the ingest lock, so ordinals never race.
   "Existing" means, before cut-over, the current staging attempt and the destination logs; after
   cut-over, the index and the destination logs.
+- **Unreadable sources** (e.g. corrupt fragments, skipped today at `compact.py:787`) have no
+  record to import. The importer records each in `import_manifest` as a chain with
+  `source_class=corrupt` and the sha256 of the file's bytes, via a `legacy_source.unreadable`
+  event (entity: `source_locator`); it takes no part in any fold. `bth verify` applies the same
+  byte-hash test, so a corrupt source is reported once as `corrupt_legacy_source` (matching the
+  step-3 residual report), not as a legacy write, and is reported again only if its bytes change.
 - **Reap ledgers:** each `catalog/reaped/<slug>/<run_id>.json` imports as an abandoned claim
   (`run.imported`, `source_class=ledger_json`, `ts` = its `reaped_at`). Each
   `reverted/<run_id>.<YYYYmmddHHMMSS>.json` (`reap.py:213-217`, UTC, one-second resolution)
@@ -480,7 +487,10 @@ switched on in one step.
 - AC-17. Differential fold test: for randomized operation sequences on campaigns, anchors and
   runs, the old upsert/update code and the new fold produce identical rows.
 - AC-18. No module other than `bathos.index` and the ingest path calls `duckdb.connect` on a
-  catalog path (AST test).
+  catalog path (AST test). Legacy databases (`bathos.db`, `bathos.db.frozen`) are opened only
+  through `bathos.index.connect_legacy(path)`, which opens read-only and, if the file is locked
+  by another process (e.g. an older install), returns a structured `legacy_db_locked` result
+  instead of raising; the importer and `bth verify` both use it.
 - AC-19. Ingest refuses the swap when a `.wal` remains after close.
 - AC-20. Arrival-order independence: delivering the same events in any order and in any
   batching (including a late event with an earlier `ts`) yields the same index and the same
@@ -494,13 +504,14 @@ switched on in one step.
   same runs, outcomes and sidecars; members without a declaration keep their stored `evalue`;
   the result does not depend on the order in which member-run events arrive.
 - AC-23. After cut-over, a write by an older bathos (fragment, submit Parquet, or new
-  `bathos.db`) is reported by `bth verify`, and re-running `bth migrate --import-legacy` imports
+  `bathos.db`), including a fragment pulled late with an mtime older than the migration, is
+  reported by `bth verify`, and re-running `bth migrate --import-legacy` imports
   it; a third run changes nothing.
 - AC-24. On fixture catalogs, `bth verify` emits one structured finding for each of: threshold
   mismatch, `evalue_changed_after_conclusion`, two roots sharing a `project_id`, a log file
   shrunk below or vanished past its watermark, an `eid_conflict`, a quarantined line, a line
-  present in neither the project log nor the mirror, and a legacy write after cut-over; and
-  none on a clean fixture.
+  present in neither the project log nor the mirror, a legacy write after cut-over, a
+  `corrupt_legacy_source`, and a `legacy_db_locked`; and none on a clean fixture.
 - AC-25. Every write site in "Authoritative writes" has a test that, with the flag on, emits its
   event (and nothing else) and, with the flag off, performs only the legacy write.
 - AC-26. Run status: a `run.reaped` with a later `ts` than a `run.finished` still folds to the
@@ -513,8 +524,7 @@ switched on in one step.
   other's events; after moving a project, restore still recovers events written at the old path.
 - AC-28. Re-importing a legacy source that changed yields the fold of its newest snapshot only,
   including a source that changed and then changed back; a run reaped, reverted, reaped and
-  reverted again imports every ledger and re-importing it appends nothing; a fragment pulled after
-  cut-over with an mtime older than the migration is reported by `bth verify`; an aborted migration leaves no imported
+  reverted again imports every ledger and re-importing it appends nothing; an aborted migration leaves no imported
   event in any project log and no `~/.bth/catalog/index.db`; abort, retry, switch leaves every
   imported event in the logs.
 
@@ -543,7 +553,7 @@ switched on in one step.
 | `git clean -fdX` / project dir loss | Mirror (D7) + `bth log restore` (AC-14) |
 | Main checkout itself deleted | Mirror holds every line |
 | Clock skew | Deterministic tie-break; skew-sensitive fields listed (AC-1) |
-| Copy-then-swap cost as the index grows | 11 MB today; revisit if ingest exceeds a few seconds (measure under AC-12) |
+| Copy-then-swap cost as the index grows | Measured under AC-12; revisit if ingest exceeds the budget set there |
 
 ## Future work
 
