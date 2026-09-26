@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: v13 (after adversarial cycle 13)
+revision: v14 (after adversarial cycle 14)
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -234,8 +234,10 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   (`bathos.db.frozen`, or `bathos.db` before cut-over), `warm_recreated` (a `bathos.db` recreated
   after cut-over by an older install), `fragment`, `campaign_json`, `ledger_json` (live reap
   ledger), `ledger_reverted` (reverted reap ledger) or `submit_parquet`; precedence is that order.
-  Each also carries `data.source_locator` and `data.source_sha256` (the hash of the canonical
-  source record). The locator is the source file's path relative to the catalog dir; for a warm
+  Each also carries `data.source_locator` and `data.source_sha256`: sha256 of the canonical
+  source record, which is the record as a JSON object with sorted keys, no whitespace, UTF-8,
+  timestamps as RFC3339 UTC and floats in shortest round-trip form. This form is versioned
+  (`data.canon: 1`) and never changed in place. The locator is the source file's path relative to the catalog dir; for a warm
   row it is `warm:<table>` for both `bathos.db` and `bathos.db.frozen` (so the step-4 rename
   changes nothing), and `bathos.db:<table>` only for class `warm_recreated`. The importer never reads current sidecar or output
   files. `ts` is the source record's own time (run: end time if finished, else start; campaign:
@@ -266,19 +268,22 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
     `output_metadata`, postmortem fields) that a warm import set.
 - **Run status (both stages).** The status-dependent fields (`status`, end time, `exit_code`,
   `outcome` when not overridden) come together from the single highest-ranked *status claim*:
-  - rank 2, terminal (`completed`, `failed`, `killed`; `runner.py:456,613,679,687`): a
+  - rank 2, terminal (`completed`, `failed`, `killed`; `runner.py:613,657,679,687`): a
     `run.finished`, or a `run.imported` with a terminal status;
   - rank 1, `abandoned` (`reap.py:288`): a `run.reaped` or a `run.imported` with status
     `abandoned`, unless a `run.reap_reverted` (live, or the revert inside a `run_reap.imported`)
-    follows it in `(ts, rank, eid)` order, where at equal `ts` a revert sorts after every
-    abandoned claim (a revert cancels every earlier or same-`ts` abandoned claim, imported ones
-    included);
-  - rank 0, `incomplete`: otherwise (a `run.started`, or a `run.imported` with status `running`).
+    follows it in `(ts, is_revert, eid)` order (`is_revert` is 0 for a claim, 1 for a revert, so
+    at equal `ts` a revert sorts after every abandoned claim); a revert cancels every earlier or
+    same-`ts` abandoned claim, imported ones included;
+  - rank 0, `running`: otherwise (a `run.started`, or a `run.imported` with status `running`).
+    This is today's stored value for a started, unfinished run (`runner.py:456`), so the fold
+    stays row-identical under AC-17 and the reaper keeps selecting `status == 'running'`
+    (`reap.py:223`).
   Ties go by source precedence (live counts as highest), then later `ts`, then eid. So a real
   finish beats a reap whatever their `ts`, including a finish pulled from the cluster after the
   reap, and a stale warm `running` never hides a fragment's terminal status. After cut-over the
-  reaper selects runs whose folded status is `incomplete` and records that as `prior_status`; a
-  revert with no terminal claim folds back to `incomplete`.
+  reaper selects runs whose folded status is `running` and records that as `prior_status`; a
+  revert with no terminal claim folds back to `running`.
 - **Behaviour change (stated, not accidental):** an imported campaign member has no sidecar
   declaration in the log, so a postmortem applied to it after cut-over changes its folded
   `outcome` but not its stored `evalue`; today's compact would recompute it from the sidecar.
@@ -419,14 +424,16 @@ switched on in one step.
 4. **Switch:** the staged events are moved into their owning project logs (and mirrors),
    `~/.bth/catalog/index.db` is built from those logs, the staging directory is deleted, and
    reads and writes move to the new path. `import_manifest` is a derived table of the index
-   (every `(source_locator, source_sha256)` seen on any `*.imported` event), so it is rebuilt by
-   a delete + re-ingest like every other table and updated by every later re-import. `bathos.db` is renamed to
+   with one row per snapshot chain `(kind, entity, source_class, source_locator)` holding the
+   newest snapshot's `source_sha256`, so it is rebuilt by a delete + re-ingest like every other
+   table and updated by every later re-import. `bathos.db` is renamed to
    `bathos.db.frozen` and kept read-only for one release.
 5. **Stale installs:** an older bathos (e.g. pinned in a project venv, or on the cluster) may
    keep writing cool fragments, submit Parquet, or a fresh `bathos.db`. `bth verify` reports
-   each such write (a legacy source whose `(source_locator, source_sha256)` is not in `import_manifest`,
-   which catches late cluster pulls whatever their mtime, or a `bathos.db` present beside
-   `bathos.db.frozen`) with the writing host; re-running
+   each such write: a legacy source record whose chain is missing from `import_manifest` or
+   whose hash differs from the chain's newest `source_sha256` (the same test the importer uses,
+   so verify and importer never disagree; it catches late cluster pulls whatever their mtime,
+   and rows of a `bathos.db` recreated beside `bathos.db.frozen`, which clear once imported) with the writing host; re-running
    `bth migrate --import-legacy` imports it (sources: `bathos.db.frozen`, any new `bathos.db`,
    fragments, submit Parquet, campaign JSON).
 
@@ -497,10 +504,10 @@ switched on in one step.
 - AC-25. Every write site in "Authoritative writes" has a test that, with the flag on, emits its
   event (and nothing else) and, with the flag off, performs only the legacy write.
 - AC-26. Run status: a `run.reaped` with a later `ts` than a `run.finished` still folds to the
-  terminal status; a reap then revert with no finish folds to `incomplete`; a run reaped before
-  cut-over (imported `abandoned`) and reverted after it folds to `incomplete`; a run reaped and
+  terminal status; a reap then revert with no finish folds to `running`; a run reaped before
+  cut-over (imported `abandoned`) and reverted after it folds to `running`; a run reaped and
   reverted before cut-over folds to its restored status even if the warm row still says
-  `abandoned`; the reaper after cut-over selects exactly the folded `incomplete`
+  `abandoned`; the reaper after cut-over selects exactly the folded `running`
   runs past its window.
 - AC-27. With two roots sharing a `project_id`, `bth log restore` in one never copies the
   other's events; after moving a project, restore still recovers events written at the old path.
