@@ -75,6 +75,7 @@ wire(
         "check",
         "sync",
         "init",
+        "log_restore",
         "run",
         "verify",
         "lint",

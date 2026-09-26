@@ -3,6 +3,7 @@
 import json
 import subprocess
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -535,3 +536,104 @@ def test_reap_ledger_written_even_if_fragment_rewrite_fails(temp_catalog, monkey
     # This test WOULD fail (reporting the violation) if someone changed the
     # implementation to write fragment BEFORE ledger entry and left no
     # error handling to recover the ledger on fragment write failure.
+
+
+# --- AC-25: run.reaped / run.reap_reverted write sites --------------------------
+
+
+def _read_jsonl_dir(log_dir):
+    lines = []
+    if not log_dir.exists():
+        return lines
+    for f in sorted(log_dir.glob("*.jsonl")):
+        for line in f.read_text().splitlines():
+            if line.strip():
+                lines.append(json.loads(line))
+    return lines
+
+
+def test_reap_flag_off_performs_only_legacy_write(temp_catalog):
+    """AC-25 flag-off half: parquet + ledger JSON, no event log."""
+    from bathos.reap import reap_runs
+
+    run = create_run("run_flagoff", age_hours=25, status="running")
+    write_run(run, temp_catalog)
+
+    reap_runs(temp_catalog, older_than_h=24, dry_run=False, apply=True)
+
+    reaped = read_runs(temp_catalog)[0]
+    assert reaped.status == "abandoned"
+    ledger_path = temp_catalog / "reaped" / "test" / "run_flagoff.json"
+    assert ledger_path.exists()
+    assert not (Path.home() / ".bth" / "log" / "unaffiliated").exists()
+
+
+def test_reap_flag_on_emits_event_and_skips_legacy_write(temp_catalog, monkeypatch):
+    """AC-25 flag-on half: run.reaped only -- no parquet status rewrite, no
+    ledger JSON, no warm-tier reconcile."""
+    from bathos.reap import reap_runs
+    from bathos.runlog.writer import reset_writers_for_test
+
+    run = create_run("run_flagon", age_hours=25, status="running")
+    write_run(run, temp_catalog)
+
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(temp_catalog))
+
+    reap_runs(temp_catalog, older_than_h=24, dry_run=False, apply=True, cwd=temp_catalog.parent)
+
+    # No legacy write: the cool fragment's status is untouched.
+    still_running = read_runs(temp_catalog)[0]
+    assert still_running.status == "running"
+    ledger_path = temp_catalog / "reaped" / "test" / "run_flagon.json"
+    assert not ledger_path.exists()
+    assert not (temp_catalog / "bathos.db").exists()  # no warm-tier reconcile
+
+    lines = _read_jsonl_dir(Path.home() / ".bth" / "log" / "unaffiliated")
+    reaped_events = [line for line in lines if line["kind"] == "run.reaped"]
+    assert len(reaped_events) == 1
+    assert reaped_events[0]["entity"] == ["run_flagon"]
+    assert reaped_events[0]["data"]["run_id"] == "run_flagon"
+    assert reaped_events[0]["data"]["prior_status"] == "running"
+    reset_writers_for_test()
+
+
+def test_reap_revert_flag_on_emits_event_and_skips_legacy_write(temp_catalog, monkeypatch):
+    """AC-25 flag-on half of the revert path: run.reap_reverted only."""
+    from bathos.reap import reap_runs
+    from bathos.runlog.writer import reset_writers_for_test
+
+    run = create_run("run_revert", age_hours=25, status="running")
+    write_run(run, temp_catalog)
+
+    # Reap first under the legacy path so a ledger entry exists to revert.
+    reap_runs(temp_catalog, older_than_h=24, dry_run=False, apply=True)
+    ledger_path = temp_catalog / "reaped" / "test" / "run_revert.json"
+    assert ledger_path.exists()
+
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(temp_catalog))
+
+    reap_runs(
+        temp_catalog,
+        older_than_h=24,
+        dry_run=False,
+        apply=True,
+        revert=True,
+        revert_ids=["run_revert"],
+        cwd=temp_catalog.parent,
+    )
+
+    # No legacy write: status stays "abandoned" (from the earlier legacy reap)
+    # and the ledger file is not moved to reverted/.
+    still_abandoned = read_runs(temp_catalog)[0]
+    assert still_abandoned.status == "abandoned"
+    assert ledger_path.exists()
+    assert not (ledger_path.parent / "reverted").exists()
+
+    lines = _read_jsonl_dir(Path.home() / ".bth" / "log" / "unaffiliated")
+    reverted_events = [line for line in lines if line["kind"] == "run.reap_reverted"]
+    assert len(reverted_events) == 1
+    assert reverted_events[0]["entity"] == ["run_revert"]
+    assert reverted_events[0]["data"]["prior_status"] == "running"
+    reset_writers_for_test()

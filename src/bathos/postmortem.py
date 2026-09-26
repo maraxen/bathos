@@ -129,6 +129,24 @@ def parse_postmortem(path: Path) -> Postmortem:
     )
 
 
+def postmortem_applied_event_data(postmortem: Postmortem, path: Path) -> dict:
+    """`run.postmortem_applied.data` (delivery step 2b / AC-25): the parsed
+    fields `compact.py`'s legacy fold reads off a validated postmortem file --
+    `status`, `verdict_override`, `author`, `path`, `hypothesis_status`,
+    `has_anomalies`, `summary`, `asset_links` -- so the fold never has to
+    re-read the file itself."""
+    return {
+        "status": postmortem.status,
+        "verdict_override": postmortem.verdict_override,
+        "author": postmortem.author,
+        "path": str(path),
+        "hypothesis_status": postmortem.hypothesis_status,
+        "has_anomalies": bool(postmortem.anomalies),
+        "summary": postmortem.summary,
+        "asset_links": postmortem.asset_links,
+    }
+
+
 def validate_postmortem(
     postmortem: Postmortem,
     workspace_root: Path | None = None,

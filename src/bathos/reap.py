@@ -11,6 +11,7 @@ from pathlib import Path
 import duckdb
 
 from bathos.catalog import read_runs, write_run
+from bathos.runlog.emit import current_mode, emit_event, unit_of_work
 from bathos.schema import Run
 from bathos.telemetry import event
 
@@ -163,6 +164,8 @@ def reap_runs(
     apply: bool = False,
     revert: bool = False,
     revert_ids: list[str] | None = None,
+    *,
+    cwd: Path | None = None,
 ) -> tuple[list[Run], list[tuple[Run, str]]]:
     """Reap orphaned runs by marking them abandoned.
 
@@ -173,14 +176,42 @@ def reap_runs(
         apply: If True, actually write reaped runs
         revert: If True, restore prior_status instead of marking abandoned
         revert_ids: List of run IDs to revert
+        cwd: Working directory used to resolve the runlog project/root for
+            run.reaped / run.reap_reverted when the flag is on. Defaults to
+            `Path.cwd()` (via `resolve_log_root`) -- same default every other
+            local command uses.
 
     Returns:
         (candidates_list, skipped_list) where skipped_list has (run, skip_reason) tuples
+
+    One call is one unit of work (Mode section): the flag is fixed for the
+    whole reap pass, so every run.reaped / run.reap_reverted event emitted
+    below (there may be many, one per candidate) shares a single resolution.
     """
-    # Enforce floor
+    # Enforce floor (before the writers lock -- a floor violation is not a write).
     if apply and older_than_h < 24:
         raise ReapError(f"Floor: --older-than-h must be >= 24 (given {older_than_h})")
 
+    with unit_of_work(catalog_dir):
+        return _reap_runs_impl(
+            catalog_dir,
+            older_than_h=older_than_h,
+            apply=apply,
+            revert=revert,
+            revert_ids=revert_ids,
+            cwd=cwd,
+        )
+
+
+def _reap_runs_impl(
+    catalog_dir: Path,
+    *,
+    older_than_h: float,
+    apply: bool,
+    revert: bool,
+    revert_ids: list[str] | None,
+    cwd: Path | None,
+) -> tuple[list[Run], list[tuple[Run, str]]]:
     # Read cool tier and ledger
     all_runs = read_runs(catalog_dir)
     ledger = read_reap_ledger(catalog_dir) if revert else {}
@@ -206,15 +237,25 @@ def reap_runs(
                 run.status = prior_status
 
                 if apply:
-                    write_run(run, catalog_dir)
-                    # Move ledger to reverted/
-                    ledger_dir = catalog_dir / "reaped" / run.project_slug
-                    ledger_path = ledger_dir / f"{run.id}.json"
-                    reverted_dir = ledger_dir / "reverted"
-                    reverted_dir.mkdir(parents=True, exist_ok=True)
-                    ts = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
-                    reverted_path = reverted_dir / f"{run.id}.{ts}.json"
-                    os.replace(ledger_path, reverted_path)
+                    if current_mode():
+                        # run.reap_reverted (AC-25): the event replaces BOTH the
+                        # write_run status rewrite and the ledger-JSON move.
+                        emit_event(
+                            kind="run.reap_reverted",
+                            entity=[run.id],
+                            data=ledger_record,
+                            cwd=cwd,
+                        )
+                    else:
+                        write_run(run, catalog_dir)
+                        # Move ledger to reverted/
+                        ledger_dir = catalog_dir / "reaped" / run.project_slug
+                        ledger_path = ledger_dir / f"{run.id}.json"
+                        reverted_dir = ledger_dir / "reverted"
+                        reverted_dir.mkdir(parents=True, exist_ok=True)
+                        ts = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+                        reverted_path = reverted_dir / f"{run.id}.{ts}.json"
+                        os.replace(ledger_path, reverted_path)
 
                 candidates.append(run)
             continue
@@ -259,8 +300,10 @@ def reap_runs(
     # Apply reaping if requested
     if apply:
         if revert:
-            # Revert path: reconcile warm tier after rewrites
-            reconcile_warm_tier(catalog_dir)
+            # Revert path: reconcile warm tier after rewrites (legacy only --
+            # the flag-on path above already emitted events, no warm rebuild).
+            if not current_mode():
+                reconcile_warm_tier(catalog_dir)
         else:
             # Reap path: write reaped runs with ledger entries
             # Track which runs were reaped via sacct_no_record
@@ -289,10 +332,6 @@ def reap_runs(
 
                 reaped_at = datetime.now(UTC).isoformat()
 
-                # Write back (atomic) — BEFORE ledger entry
-                write_run(run, catalog_dir)
-
-                # Write ledger entry after successful write
                 ledger_record = {
                     "run_id": run.id,
                     "project_slug": run.project_slug,
@@ -301,12 +340,22 @@ def reap_runs(
                     "window_h": older_than_h,
                     "prior_status": "running",
                 }
-                _write_reap_ledger_entry(catalog_dir, run.id, run.project_slug, ledger_record)
+
+                if current_mode():
+                    # run.reaped (AC-25): replaces the write_run status rewrite,
+                    # the ledger-JSON write, AND the warm-tier reconcile below.
+                    emit_event(kind="run.reaped", entity=[run.id], data=ledger_record, cwd=cwd)
+                else:
+                    # Write back (atomic) — BEFORE ledger entry
+                    write_run(run, catalog_dir)
+                    # Write ledger entry after successful write
+                    _write_reap_ledger_entry(catalog_dir, run.id, run.project_slug, ledger_record)
 
                 event("catalog.reap_run", run_id=run.id, reason=reason)
 
-            # Reconcile warm tier after writing all reaped runs
-            reconcile_warm_tier(catalog_dir)
+            # Reconcile warm tier after writing all reaped runs (legacy only).
+            if not current_mode():
+                reconcile_warm_tier(catalog_dir)
 
     return candidates, skipped
 

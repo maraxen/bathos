@@ -24,6 +24,17 @@ from bathos.prereg import (
     resolve_agent_mode,
     resolve_sidecar,
 )
+from bathos.runlog.emit import (
+    RunNotLaunchedError as RunLogNotLaunchedError,
+)
+from bathos.runlog.emit import (
+    apply_run_finished_exit_semantics,
+    current_mode,
+    emit_event,
+    run_event_data,
+    sidecar_declaration_for_event,
+    unit_of_work,
+)
 from bathos.schema import Run
 from bathos.sidecar import (
     DifferentialBlock,
@@ -380,8 +391,45 @@ def run_script(
     component_id: str | None = None,
     component_sidecar_sha256: str | None = None,
 ) -> int:
+    """Public entry point: one call is one `bth run` unit of work (runlog
+    Mode section). `unit_of_work()` fixes the log-mode flag for the whole
+    call -- resolved once here, before `_run_script_impl`'s first write site
+    (run.started) and held through its last (run.finished) -- so a
+    long-running script can never straddle a cut-over mid-process."""
     init_telemetry()
+    with unit_of_work(catalog_dir):
+        return _run_script_impl(
+            argv,
+            project_slug,
+            catalog_dir,
+            output_paths,
+            tags,
+            cwd=cwd,
+            agent_mode=agent_mode,
+            no_sidecar=no_sidecar,
+            allow_stale=allow_stale,
+            derived_from=derived_from,
+            campaign_id=campaign_id,
+            component_id=component_id,
+            component_sidecar_sha256=component_sidecar_sha256,
+        )
 
+
+def _run_script_impl(
+    argv: list[str],
+    project_slug: str,
+    catalog_dir: Path,
+    output_paths: list[str],
+    tags: list[str],
+    cwd: Path = Path.cwd(),
+    agent_mode: str | None = None,
+    no_sidecar: bool = False,
+    allow_stale: bool = False,
+    derived_from: str | None = None,
+    campaign_id: str | None = None,
+    component_id: str | None = None,
+    component_sidecar_sha256: str | None = None,
+) -> int:
     # Resolve --campaign up front (fail fast, before running the subprocess) and
     # store the full UUID — never the raw prefix — on the run record.
     resolved_campaign_id: str | None = None
@@ -588,11 +636,33 @@ def run_script(
             )
 
     catalog_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        write_run(run, catalog_dir)
-    except Exception as e:
-        event("run.error", phase="persist", exc_type=type(e).__name__, exc_msg=str(e))
-        raise
+    if current_mode():
+        # D6: run.started is not best-effort -- if this raises, the caller (below)
+        # must return before ever spawning the subprocess.
+        started_data = {
+            "sidecar": sidecar_declaration_for_event(sidecar),
+            "sidecar_sha256": bundle.sha256 if bundle and bundle.found else "",
+            "claim_discriminates": sidecar.claim_discriminates if sidecar else None,
+            "claim_isolates": sidecar.claim_isolates if sidecar else None,
+            "project_slug": project_slug,
+            "command": run.command,
+            "argv": argv,
+            "git_hash": run.git_hash,
+            "git_branch": run.git_branch,
+            "git_dirty": run.git_dirty,
+            "campaign_id": resolved_campaign_id or None,
+            "agent_mode": resolved_mode,
+        }
+        # D4: run.started embeds GitState and PinResult, so it is emitted after
+        # pin_run below (still before the subprocess), not here.
+        pending_started: dict | None = started_data
+    else:
+        pending_started = None
+        try:
+            write_run(run, catalog_dir)
+        except Exception as e:
+            event("run.error", phase="persist", exc_type=type(e).__name__, exc_msg=str(e))
+            raise
 
     # Make the git provenance DURABLE, not merely recorded. Capturing `git_hash` is already
     # reliable; keeping it resolvable is not. Measured on one project's catalog (2026-08-18):
@@ -602,6 +672,7 @@ def run_script(
     # dirty tree the ref points at a snapshot of what actually ran.
     #
     # Best-effort by construction: provenance capture must never be able to fail a run.
+    pin = None
     try:
         # Declared, load-bearing paths. bathos cannot discover UNdeclared inputs, but it can refuse
         # to let a declared one be silently omitted from the snapshot because the repo ignores it.
@@ -665,6 +736,23 @@ def run_script(
     except Exception as e:  # pragma: no cover - defensive; pinning must not break a run
         event("run.pin_error", run_uuid=run.id, exc_type=type(e).__name__, exc_msg=str(e))
 
+    if pending_started is not None:
+        pending_started["git_state"] = dataclasses.asdict(git)
+        pending_started["pin"] = pin_result_as_dict(pin) if pin is not None else None
+        # D6: run.started is not best-effort -- no subprocess unless it is durable.
+        try:
+            emit_event(
+                kind="run.started",
+                entity=[run.id],
+                data=pending_started,
+                cwd=cwd,
+                hard_fail=True,
+            )
+        except RunLogNotLaunchedError as e:
+            event("run.error", phase="persist", exc_type=type(e).__name__, exc_msg=str(e))
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+
     results_temp_dir = Path(tempfile.gettempdir())
 
     # Instrument-sensitivity pre-flight (debt #1071): before the main run, prove the
@@ -701,13 +789,23 @@ def run_script(
                 differential_on_value=sidecar.differential.on,
                 differential_effect=preflight.effect,
             )
-            try:
-                write_run(run, catalog_dir)
-            except Exception as e:
-                event("run.error", phase="persist", exc_type=type(e).__name__, exc_msg=str(e))
-                raise
+            finish_exit_code = 1
+            if current_mode():
+                outcome = emit_event(
+                    kind="run.finished",
+                    entity=[run.id],
+                    data=run_event_data(run),
+                    cwd=cwd,
+                )
+                finish_exit_code = apply_run_finished_exit_semantics(finish_exit_code, outcome)
+            else:
+                try:
+                    write_run(run, catalog_dir)
+                except Exception as e:
+                    event("run.error", phase="persist", exc_type=type(e).__name__, exc_msg=str(e))
+                    raise
             print(json.dumps(dataclasses.asdict(payload)), file=sys.stderr)
-            return 1
+            return finish_exit_code
         event("run.differential_preflight_passed", run_uuid=run.id)
 
     # Write pre-execution manifest (before subprocess)
@@ -923,22 +1021,44 @@ def run_script(
         except Exception as e:
             event("run.error", phase="obligation", exc_type=type(e).__name__, exc_msg=str(e))
 
-    # Record parquet write with telemetry
-    parquet_start = time.monotonic()
-    try:
-        write_run(run, catalog_dir)
-    except Exception as e:
-        event("run.error", phase="persist", exc_type=type(e).__name__, exc_msg=str(e))
-        raise
-    parquet_duration_ms = int((time.monotonic() - parquet_start) * 1000)
-    parquet_path = catalog_dir / "runs" / run.project_slug / f"run_{run.id}.parquet"
-    parquet_bytes = parquet_path.stat().st_size if parquet_path.exists() else 0
-    event(
-        "run.parquet_written",
-        path=str(parquet_path),
-        bytes=parquet_bytes,
-        duration_ms=parquet_duration_ms,
-    )
+    if current_mode():
+        # run.outputs_hashed (new at run end, flag-on only -- legacy leaves
+        # output_metadata to be recomputed at compact, so there is no legacy
+        # write to skip here per se; this is purely additive behavior).
+        from bathos.compact import _collect_output_metadata
+
+        output_metadata = [{"path": p, **_collect_output_metadata(p)} for p in output_paths]
+        emit_event(
+            kind="run.outputs_hashed",
+            entity=[run.id],
+            data={"output_metadata": output_metadata},
+            cwd=cwd,
+        )
+
+        finish_outcome = emit_event(
+            kind="run.finished",
+            entity=[run.id],
+            data=run_event_data(run),
+            cwd=cwd,
+        )
+        exit_code = apply_run_finished_exit_semantics(exit_code, finish_outcome)
+    else:
+        # Record parquet write with telemetry
+        parquet_start = time.monotonic()
+        try:
+            write_run(run, catalog_dir)
+        except Exception as e:
+            event("run.error", phase="persist", exc_type=type(e).__name__, exc_msg=str(e))
+            raise
+        parquet_duration_ms = int((time.monotonic() - parquet_start) * 1000)
+        parquet_path = catalog_dir / "runs" / run.project_slug / f"run_{run.id}.parquet"
+        parquet_bytes = parquet_path.stat().st_size if parquet_path.exists() else 0
+        event(
+            "run.parquet_written",
+            path=str(parquet_path),
+            bytes=parquet_bytes,
+            duration_ms=parquet_duration_ms,
+        )
 
     # Clean up temp results file if it exists
     if results_temp_path.exists():

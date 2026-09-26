@@ -1445,6 +1445,7 @@ def check_tool(
     project_root: str = "",
     status_filter: str = "",
     check_outputs: bool = False,
+    rebaseline: bool = False,
 ) -> dict:
     """Check run freshness vs git HEAD.
 
@@ -1454,11 +1455,17 @@ def check_tool(
         status_filter: Filter by status (e.g., "stale")
         check_outputs: Also verify output files exist, are readable, and match their
             recorded SHA256 (output SHA drift)
+        rebaseline: Recompute the output-metadata drift baseline (run.outputs_hashed,
+            delivery step 2b / AC-25) for every run in `results`, instead of relying
+            on the baseline compact.py refreshes automatically. Behind the runlog
+            flag: on, emits the event only; off, writes the warm `runs.output_metadata`
+            column directly (this command's own "legacy" path -- there is no prior
+            `--rebaseline` to preserve).
 
     Returns:
         Dict with check results
     """
-    from bathos.checker import check_output_files, check_output_sha_drift
+    from bathos.checker import check_output_files, check_output_sha_drift, rebaseline_run_outputs
     from bathos.query import get_run
 
     cat_dir = _get_catalog_dir(catalog_dir or None)
@@ -1499,12 +1506,22 @@ def check_tool(
                     }
                 )
 
+    rebaselined_count = 0
+    if rebaseline:
+        for r in results:
+            run = get_run(r.run_id, cat_dir)
+            if run is None or not run.output_paths:
+                continue
+            rebaseline_run_outputs(cat_dir, run, cwd=proj_root)
+            rebaselined_count += 1
+
     result_dict = {
         "results": results_json,
         "count": len(results_json),
         "stale_count": stale_count,
         "drift_count": drift_count,
         "output_status": output_status,
+        "rebaselined_count": rebaselined_count,
     }
     if stale_count > 0 or drift_count > 0:
         # Singular "error" key -- see cli_render.render_or_exit -- matches the shipped
@@ -1590,22 +1607,37 @@ def init_tool(
     slug: str = "",
     remote: str = "",
     slurm_partition: str = "",
+    assign_id: bool = False,
 ) -> dict:
-    """Initialize project with bathos.
+    """Initialize project with bathos, or retrofit a project id (D7).
 
     Args:
         project_root: Project root directory (empty = current directory)
         catalog_dir: Catalog directory (empty = use default)
-        slug: Project slug
+        slug: Project slug (ignored when assign_id is set)
         remote: Remote in host:path format
         slurm_partition: Default SLURM partition
+        assign_id: Retrofit a `[project] id` onto an EXISTING project's
+            `.bth.toml` (spec 260925 D7) instead of running full init.
+            Idempotent: a project that already has an id keeps it.
 
     Returns:
         Dict with init result
     """
+    root = Path(project_root) if project_root else Path.cwd()
+
+    if assign_id:
+        from bathos.init import assign_id_to_existing_project
+
+        project_id, minted = assign_id_to_existing_project(root)
+        return {
+            "project_root": str(root),
+            "project_id": project_id,
+            "minted": minted,
+        }
+
     if not slug:
         return {"error": "slug parameter is required"}
-    root = Path(project_root) if project_root else Path.cwd()
     cat_dir = _get_catalog_dir(catalog_dir or None)
     report = init_project(
         root,
@@ -1626,6 +1658,54 @@ def init_tool(
         "bth_toml_added": report.added,
         "bth_toml_preserved": report.preserved,
         "bth_toml_skipped_requests": report.skipped_requests,
+    }
+
+
+@cisternal.tool(registry="bathos-cli", name="log_restore", cli_group="log", cli_name="restore")
+def log_restore_tool(project_root: str = "") -> dict:
+    """Restore a project's run log from its mirror (spec 260925 D7, AC-14, AC-27).
+
+    Copies back into `<main root>/.bth/log/` every event present in
+    `~/.bth/log-mirror/` for this project that the project log lacks, except
+    one that belongs to another currently live root sharing the same project
+    id (a genuine fork never receives the other copy's own events).
+
+    Args:
+        project_root: A path inside the project to restore (empty = resolve
+            from cwd via the same worktree-aware ladder `bth run` uses)
+
+    Returns:
+        Dict with restored/already_present/skipped_other_live_root counts
+    """
+    from bathos.runlog.project_id import read_project_id
+    from bathos.runlog.resolve import resolve_log_root
+    from bathos.runlog.restore import restore_from_mirror
+
+    root = Path(project_root) if project_root else None
+    resolution = resolve_log_root(root)
+    if resolution.unaffiliated:
+        return {
+            "error": "no git repository and no .bth.toml found under this root; nothing to restore"
+        }
+
+    project_id = read_project_id(resolution.main_root / ".bth.toml")
+    slug = None
+    if project_id is None:
+        cfg_path = find_project_config(resolution.main_root)
+        if cfg_path is not None:
+            try:
+                slug = load_project_config(cfg_path).slug
+            except Exception:
+                slug = None
+
+    report = restore_from_mirror(resolution.main_root, project_id=project_id, slug=slug)
+    return {
+        "main_root": str(resolution.main_root),
+        "project_id": project_id,
+        "restored": report.restored,
+        "already_present": report.already_present,
+        "skipped_other_live_root": report.skipped_other_live_root,
+        "segments_written": [str(p) for p in report.segments_written],
     }
 
 
@@ -2651,10 +2731,14 @@ async def mcp_check_tool(
     catalog_dir: str = "",
     project_root: str = "",
     status_filter: str = "",
+    rebaseline: bool = False,
 ) -> dict:
     """Check run freshness vs git HEAD."""
     return check_tool(
-        catalog_dir=catalog_dir, project_root=project_root, status_filter=status_filter
+        catalog_dir=catalog_dir,
+        project_root=project_root,
+        status_filter=status_filter,
+        rebaseline=rebaseline,
     )
 
 
@@ -2691,9 +2775,10 @@ async def mcp_init_tool(
     slug: str = "",
     remote: str = "",
     slurm_partition: str = "",
+    assign_id: bool = False,
     token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
-    """Initialize project with bathos.
+    """Initialize project with bathos, or retrofit a project id (D7).
 
     Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
     return init_tool(
@@ -2702,7 +2787,21 @@ async def mcp_init_tool(
         slug=slug,
         remote=remote,
         slurm_partition=slurm_partition,
+        assign_id=assign_id,
     )
+
+
+@cisternal.tool(registry="bathos", name="log_restore")
+@traced_tool
+@require_write_token
+async def mcp_log_restore_tool(
+    project_root: str = "",
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
+) -> dict:
+    """Restore a project's run log from its mirror (spec 260925 D7, AC-14, AC-27).
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    return log_restore_tool(project_root=project_root)
 
 
 @cisternal.tool(registry="bathos", name="run")
@@ -2881,12 +2980,17 @@ def postmortem_validate_tool(
     path: str,
     workspace_root: str | None = None,
     strict_files: bool = False,
+    catalog_dir: str = "",
 ) -> dict:
     """Validate a postmortem TOML file.
 
     Returns {'validation_ok': True} on success or {'validation_ok': False, 'errors': [...]} on failure.
     """
-    from bathos.postmortem import parse_postmortem, validate_postmortem
+    from bathos.postmortem import (
+        parse_postmortem,
+        postmortem_applied_event_data,
+        validate_postmortem,
+    )
 
     pm_path = Path(path)
     if not pm_path.exists():
@@ -2904,6 +3008,21 @@ def postmortem_validate_tool(
 
     result = validate_postmortem(pm, workspace_root=ws, strict_files=strict_files)
     if result.ok:
+        if pm.run_id:
+            # run.postmortem_applied (delivery step 2b / AC-25): behind the flag
+            # only -- flag off leaves this validate command exactly as before
+            # (the legacy fold still comes from compact.py re-reading the file).
+            from bathos.runlog.emit import current_mode, emit_event, unit_of_work
+
+            cat_dir = _get_catalog_dir(catalog_dir or None)
+            with unit_of_work(cat_dir):
+                if current_mode():
+                    emit_event(
+                        kind="run.postmortem_applied",
+                        entity=[pm.run_id],
+                        data=postmortem_applied_event_data(pm, pm_path),
+                        cwd=ws,
+                    )
         return {
             "validation_ok": True,
             "run_id": pm.run_id,
@@ -2984,6 +3103,8 @@ def postmortem_get_tool(
             "verdict_override": pm.verdict_override,
         }
 
+    # Read-only: run.postmortem_applied is emitted by postmortem validate/register
+    # (spec BC-2), never by a read.
     return {
         "run_id": pm.run_id,
         "campaign_id": pm.campaign_id,
@@ -3034,12 +3155,15 @@ async def postmortem_validate(
     path: str,
     workspace_root: str | None = None,
     strict_files: bool = False,
+    catalog_dir: str = "",
 ) -> dict:
     """Validate a postmortem TOML file.
 
     Returns {'validation_ok': True} on success or {'validation_ok': False, 'errors': [...]} on failure.
     """
-    return postmortem_validate_tool(path, workspace_root=workspace_root, strict_files=strict_files)
+    return postmortem_validate_tool(
+        path, workspace_root=workspace_root, strict_files=strict_files, catalog_dir=catalog_dir
+    )
 
 
 @cisternal.tool(registry="bathos")
@@ -4551,6 +4675,7 @@ _WIRED = cisternal.wire(
         "capability_probe",
         "sync",
         "init",
+        "log_restore",
         "run",
         "campaign_create",
         "campaign_list",

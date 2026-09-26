@@ -7,6 +7,7 @@ from pathlib import Path
 
 from bathos.catalog import init_catalog
 from bathos.git_pin import MANIFEST_GITIGNORE_LINES
+from bathos.runlog.project_id import mint_project_id
 
 SCRIPT_DIRS = [
     "scripts/experiments",
@@ -24,6 +25,7 @@ _BTH_TOML_TEMPLATE = """\
 [project]
 slug = "{slug}"
 root = "{root}"
+id = "{project_id}"
 """
 
 # scripts/scratch/ is gitignored by convention (its own dir table says "No (gitignored)").
@@ -86,7 +88,9 @@ def _write_fresh_bth_toml(
     slurm_partition: str | None,
 ) -> InitReport:
     """First-time `.bth.toml` write -- unchanged behavior from before debt #1952."""
-    content = _BTH_TOML_TEMPLATE.format(slug=slug, root=str(project_root))
+    content = _BTH_TOML_TEMPLATE.format(
+        slug=slug, root=str(project_root), project_id=mint_project_id()
+    )
     added = ["[project]"]
     if remote:
         host, remote_root = remote.split(":", 1)
@@ -129,7 +133,9 @@ def _merge_bth_toml(
     if project_section and "slug" in project_section and "root" in project_section:
         report.preserved.append("[project]")
     else:
-        to_append += _BTH_TOML_TEMPLATE.format(slug=slug, root=str(project_root))
+        to_append += _BTH_TOML_TEMPLATE.format(
+            slug=slug, root=str(project_root), project_id=mint_project_id()
+        )
         report.added.append("[project]")
 
     if remote:
@@ -219,6 +225,11 @@ def init_project(
     # .gitignore
     _ensure_gitignore_entries(project_root, _GITIGNORE_ENTRIES)
 
+    # D3: .bth/log/ must be gitignored before any run can append to it.
+    from bathos.runlog.resolve import ensure_log_ignored
+
+    ensure_log_ignored(project_root)
+
     # Catalog
     init_catalog(catalog_dir)
 
@@ -228,3 +239,14 @@ def init_project(
     register_project(slug=slug, catalog_dir=catalog_dir)
 
     return report
+
+
+def assign_id_to_existing_project(project_root: Path) -> tuple[str, bool]:
+    """`bth init --assign-id`: retrofit a `[project] id` onto an existing
+    project's `.bth.toml` without redoing the rest of `init_project` (script
+    dirs, .gitignore, catalog, env.sh). Returns `(project_id, minted)`.
+    """
+    from bathos.runlog.project_id import assign_project_id
+
+    result = assign_project_id(project_root)
+    return result.project_id, result.minted
