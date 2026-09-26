@@ -207,6 +207,56 @@ def test_sync_returns_sync_result(tmp_path: Path):
         assert isinstance(result.duration_s, float)
 
 
+def test_sync_transferred_count_uses_xfr_not_bytes(tmp_path: Path):
+    """#1945: `transferred` must be rsync's own file count (the "xfr#N"
+    counter in --info=progress2 output), not the last progress line's byte
+    count -- conflating the two under-/over-reports and can show 0 even
+    when files really did transfer."""
+    config = ProjectConfig(
+        slug="test",
+        root=Path("/home/user/test"),
+        remotes={"engaging": {"host": "engaging", "remote_root": "~/projects/test"}},
+    )
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    (catalog_dir / "runs").mkdir()
+
+    # Three files transferred; the LAST progress2 line reports only 42 bytes
+    # for the final (small) file, while the running xfr# counter is 3.
+    stderr_output = (
+        "  10,000 100%    1.00MB/s    0:00:01 (xfr#1, to-chk=2/3)\n"
+        "   5,000 100%    1.00MB/s    0:00:01 (xfr#2, to-chk=1/3)\n"
+        "      42 100%    1.00MB/s    0:00:01 (xfr#3, to-chk=0/3)\n"
+    )
+    with patch("bathos.sync.subprocess.Popen") as mock_popen:
+        mock_popen.return_value = _make_mock_popen(stderr_output=stderr_output)
+
+        result = sync_catalog("engaging", config, catalog_dir, pull=False)
+
+    assert result.transferred == 3
+
+
+def test_sync_transferred_count_zero_when_nothing_to_transfer(tmp_path: Path):
+    """A no-op --ignore-existing sync reports xfr#0, which must surface as
+    transferred=0 -- not be confused with the "couldn't parse" fallback."""
+    config = ProjectConfig(
+        slug="test",
+        root=Path("/home/user/test"),
+        remotes={"engaging": {"host": "engaging", "remote_root": "~/projects/test"}},
+    )
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    (catalog_dir / "runs").mkdir()
+
+    stderr_output = "       0 100%    0.00kB/s    0:00:00 (xfr#0, to-chk=0/1)\n"
+    with patch("bathos.sync.subprocess.Popen") as mock_popen:
+        mock_popen.return_value = _make_mock_popen(stderr_output=stderr_output)
+
+        result = sync_catalog("engaging", config, catalog_dir, pull=False)
+
+    assert result.transferred == 0
+
+
 def test_sync_error_on_rsync_failure(tmp_path: Path):
     """sync_catalog raises error when rsync fails."""
     config = ProjectConfig(

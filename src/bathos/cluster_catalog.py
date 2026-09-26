@@ -110,14 +110,17 @@ def check_env_catalog_matches_remote(project_root: Path, remote_root: str) -> No
     if not env_path.exists():
         raise CatalogIdentityError(
             f"missing {env_path}: cluster jobs will not set BTH_CATALOG_DIR to "
-            f"{remote_catalog_path(remote_root)}"
+            f"{remote_catalog_path(remote_root)}, so SLURM runs would silently write to "
+            "~/.bth/catalog instead of the shared remote catalog. Run `bth remote add` "
+            "(or `bth init`) to (re)generate scripts/slurm/_bth_env.sh before submitting."
         )
     text = env_path.read_text()
     exported = _parse_export(text, "BTH_CATALOG_DIR")
     if not exported:
         raise CatalogIdentityError(
             f"{env_path} does not export BTH_CATALOG_DIR (jobs will write ~/.bth/catalog; "
-            f"bth sync uses {remote_catalog_path(remote_root)})"
+            f"bth sync uses {remote_catalog_path(remote_root)}). Regenerate it with "
+            "`bth remote add` (or `bth init`) so jobs and sync share one catalog."
         )
     baked_root = _parse_export(text, "BTH_PROJECT_ROOT")
     home = str(Path.home())
@@ -136,19 +139,32 @@ def check_env_catalog_matches_remote(project_root: Path, remote_root: str) -> No
         )
 
 
+def _quote_remote_dest(dest: str) -> str:
+    """Quote a remote path for embedding in a shell command, expanding a
+    leading ``~/`` to ``${HOME}/`` (unquoted, so the remote shell expands it)
+    while shell-quoting the rest."""
+    if dest.startswith("/~/"):
+        dest = dest[1:]
+    if dest.startswith("~/"):
+        return "${HOME}/" + shlex.quote(dest[2:])
+    return shlex.quote(dest)
+
+
 def ensure_remote_catalog_dir(host: str, remote_root: str) -> None:
-    """`mkdir -p` the remote cool catalog so rsync pull is not error 11."""
+    """`mkdir -p` the remote cool catalog's `campaigns/` and `runs/` dirs.
+
+    Both must exist before `bth sync`/`bth submit --push-first` rsync into
+    them, or rsync fails with exit 11 (#1945) when the remote catalog tree
+    (or just its `runs/` subdir) doesn't exist yet -- rsync only creates the
+    single leaf directory of its destination, not multiple missing levels.
+    """
     if "\n" in host or "\r" in host:
         raise ValueError("host must not contain a newline")
     if "\n" in remote_root or "\r" in remote_root:
         raise ValueError("remote_root must not contain a newline")
-    dest = remote_catalog_path(remote_root) + "/campaigns"
-    if dest.startswith("/~/"):
-        dest = dest[1:]
-    if dest.startswith("~/"):
-        remote_cmd = f"mkdir -p -- ${{HOME}}/{shlex.quote(dest[2:])}"
-    else:
-        remote_cmd = f"mkdir -p -- {shlex.quote(dest)}"
+    base = remote_catalog_path(remote_root)
+    dests = [f"{base}/campaigns", f"{base}/runs"]
+    remote_cmd = "mkdir -p -- " + " ".join(_quote_remote_dest(d) for d in dests)
     result = subprocess.run(
         ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, "--", remote_cmd],
         capture_output=True,
@@ -156,4 +172,4 @@ def ensure_remote_catalog_dir(host: str, remote_root: str) -> None:
         timeout=30,
     )
     if result.returncode != 0:
-        raise RuntimeError(result.stderr or f"ssh mkdir failed for {host}:{dest}")
+        raise RuntimeError(result.stderr or f"ssh mkdir failed for {host}:{base}")

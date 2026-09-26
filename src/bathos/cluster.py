@@ -73,9 +73,15 @@ def resolve_cluster_config(
 
 
 def push_project(remote: str, project: str) -> None:
-    """Run `myxcel push-project <remote> <project>`."""
+    """Run `myxcel push <remote> <project> --apply --yes`.
+
+    `myxcel push` (there is no `push-project` subcommand -- #1951/#1947) is
+    dry-run by default; `--apply` is required to actually transfer anything,
+    and `--yes` auto-confirms the interactive preflight prompt that would
+    otherwise block forever on this subprocess's closed stdin.
+    """
     result = subprocess.run(
-        ["myxcel", "push-project", remote, project],
+        ["myxcel", "push", remote, project, "--apply", "--yes"],
         capture_output=True,
         text=True,
         timeout=120,
@@ -146,9 +152,15 @@ def job_wait(remote: str, slurm_job_id: str, timeout: int = 3600) -> dict:
 
 
 def pull_project(remote: str, project: str) -> None:
-    """Run `myxcel pull-project <remote> <project>`."""
+    """Run `myxcel pull <remote> <project>`.
+
+    There is no `pull-project` subcommand (#1951/#1947); `myxcel pull` is the
+    real one. Unlike `push`, `pull` actually transfers by default (no
+    `--apply` gate) and never prompts interactively, so no extra flags are
+    needed here.
+    """
     result = subprocess.run(
-        ["myxcel", "pull-project", remote, project],
+        ["myxcel", "pull", remote, project],
         capture_output=True,
         text=True,
         timeout=120,
