@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: v20 (after adversarial cycle 20)
+revision: v21 (after adversarial cycle 21)
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -167,12 +167,16 @@ key as the live kind:
   stays in legacy mode; its pulled fragments are reported by `bth verify` as legacy writes
   (Migration step 5).
 - **Mode is fixed once per unit of work:** read at the start of each CLI process and each MCP
-  tool invocation, and never re-read within it, so one command never mixes a legacy write with
+  tool invocation (for a writer, only after it holds the writers lock, below), and never
+  re-read within it, so one command never mixes a legacy write with
   an event. A long-lived MCP server therefore switches at cut-over without a restart, from its
   next tool call.
-- **Writers lock:** every command that writes (legacy or events) holds a shared `flock` on
-  `~/.bth/catalog/writers.lock` for its duration; `bth migrate --to-log` takes it exclusively
-  (Migration step 1), so no local writer spans the switch.
+- **Writers lock:** every local command that writes (legacy or events) first takes a shared,
+  blocking `flock` on `~/.bth/catalog/writers.lock` (local disk), then reads the mode, and holds
+  the lock for its duration; `bth migrate --to-log` takes it exclusively (Migration step 1). So
+  a writer that waited through the switch starts in the new mode, and no local writer spans it.
+  SLURM jobs (`SLURM_JOB_ID` set) skip the lock: their catalog is remote, they only append logs,
+  and the switch concerns local writers.
 - Flag on: events only, `connect_read` builds views. Flag off: legacy writes only, the
   pass-through in "Reads".
 
@@ -465,20 +469,26 @@ switched on in one step.
    (unresolvable ones to `unaffiliated/`).
 3. **Build and diff:** build `import-staging/<attempt>/index.db` from the staged events alone
    (a root of kind `staging`, used only here) and diff it against `bathos.db` table by table.
-   `~/.bth/catalog/index.db` is not touched before step 4. Every difference must fall in an allow-listed class (data already lost to earlier
+   `~/.bth/catalog/index.db` is not touched before step 4. On a clean diff it writes the
+   `diff_passed` record into the attempt directory. Every difference must fall in an allow-listed class (data already lost to earlier
    force-rebuilds; corrupt fragments skipped by `compact.py:787`; `output_metadata` whose files
    changed since; postmortem overrides whose files are only in a deleted worktree; campaign
    members whose legacy e-value used the fragment outcome rather than the postmortem-overridden
    one; unresolvable project) and goes into a
    signed-off residual report. Unclassified differences abort.
 4. **Switch**, in this order, each action idempotent: (a) copy the staged events into their
-   owning project logs and mirrors (eid dedup makes a repeat harmless); (b) build
+   owning project logs and mirrors as fixed-name segments `import-<attempt>-<n>.jsonl`, each
+   written to a temp file and renamed into place, and skipped if it already exists (so a repeat
+   writes nothing); (b) build
    `~/.bth/catalog/index.db` from those logs; (c) write `cutover.json`, after which reads and
    writes use the new path; (d) rename `bathos.db` to `bathos.db.frozen`; (e) delete the
-   staging directory. `bth migrate --to-log` is resumable: re-run after a crash, it detects the
-   first incomplete action (marker absent with staging present: from (a); marker present with
-   `bathos.db` but no `bathos.db.frozen`: from (d); staging still present: (e)) and continues
-   from there, never re-running step 3's diff once the marker exists. `import_manifest` is a derived table of the index
+   staging directory. `bth migrate --to-log` is resumable. Every re-run first repeats step 1
+   (squeue check and the exclusive writers lock). Then, with the marker absent: if the attempt
+   directory holds a `diff_passed` record (written by step 3 with the sha256 set of the legacy
+   sources it imported) and those sources are unchanged, it continues from (a); otherwise it
+   deletes the staging directory and restarts from step 2. With the marker present: from (d) if
+   `bathos.db` exists without `bathos.db.frozen`, then (e) if staging remains; step 3's diff is
+   never re-run once the marker exists. `import_manifest` is a derived table of the index
    with one row per snapshot chain `(kind, entity, source_class, source_locator)` holding the
    newest snapshot's `source_sha256`, so it is rebuilt by a delete + re-ingest like every other
    table and updated by every later re-import. `bathos.db.frozen` is kept read-only for one
@@ -577,8 +587,10 @@ switched on in one step.
   reverted again imports every ledger and re-importing it appends nothing; an aborted migration leaves no imported
   event in any project log and no `~/.bth/catalog/index.db`; abort, retry, switch leaves every
   imported event in the logs.
-- AC-29. `bth migrate --to-log` killed after each of step 4's actions (a)-(e) and re-run
-  completes the switch with the same index and logs as an uninterrupted run; a `bth run`
+- AC-29. `bth migrate --to-log` killed during step 2, during step 3, and after each of step 4's
+  actions (a)-(e), then re-run, completes the switch with the same index and logs as an
+  uninterrupted run (a kill before `diff_passed` restarts from step 2; a legacy write made while
+  it was down is included); a `bth run`
   started before the switch is either wholly legacy or wholly events; a `bth submit` after
   cut-over produces a job that appends events, and `BTH_LOG_MODE=1` outside a SLURM job or test
   is refused.
