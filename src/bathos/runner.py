@@ -16,7 +16,7 @@ from pathlib import Path
 from bathos.catalog import write_run
 from bathos.checker import hash_dependency_lock
 from bathos.git import capture_git_state
-from bathos.git_pin import pin_result_as_dict, pin_run
+from bathos.git_pin import ensure_manifest_ignored, pin_result_as_dict, pin_run
 from bathos.prereg import (
     GateErrorCode,
     _gate_failure_payload,
@@ -542,6 +542,20 @@ def run_script(
             declared.append(str(script_path))
         if bundle and bundle.path:
             declared.append(str(bundle.path))
+
+        # Debt #1943: ensure the run manifest (.bth/refs/manifest.jsonl) is gitignored
+        # BEFORE pin_run appends to it. Otherwise the manifest write itself -- which
+        # happens on every run -- is what makes the NEXT run's git-dirty capture see an
+        # uncommitted change, even on an otherwise-clean tree.
+        if not ensure_manifest_ignored(cwd):
+            event("run.manifest_gitignore_warning", run_uuid=run.id, cwd=str(cwd))
+            print(
+                "warning: could not ensure the run manifest (.bth/refs/manifest.jsonl) is "
+                "gitignored -- a future run's git-dirty state may be polluted by this run's "
+                "own provenance bookkeeping. Check .gitignore for a rule (e.g. a `!` negation) "
+                "that un-ignores it.",
+                file=sys.stderr,
+            )
 
         pin = pin_run(
             run_id=run.id,

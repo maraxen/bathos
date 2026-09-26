@@ -4,7 +4,9 @@ from pathlib import Path
 
 from bathos.git_pin import (
     EXPORT_DIRNAME,
+    MANIFEST_GITIGNORE_LINES,
     MANIFEST_RELPATH,
+    ensure_manifest_ignored,
     ignored_provenance_paths,
     import_bundles,
     manifest_entry,
@@ -756,3 +758,89 @@ def test_explicit_export_dir_overrides_auto_detection(tmp_path: Path):
             os.environ.pop("SLURM_JOB_ID", None)
         else:
             os.environ["SLURM_JOB_ID"] = original_slurm
+
+
+# ---------------------------------------------------------------------------
+# ensure_manifest_ignored -- debt #1943
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_manifest_ignored_is_a_noop_outside_a_repo(tmp_path: Path):
+    """No repo -- pin_run itself no-ops, so there's nothing to make ignored."""
+    assert ensure_manifest_ignored(tmp_path) is True
+    assert not (tmp_path / ".gitignore").exists()
+
+
+def test_ensure_manifest_ignored_creates_gitignore_when_absent(tmp_path: Path):
+    _init_repo(tmp_path)
+    assert not (tmp_path / ".gitignore").exists()
+
+    assert ensure_manifest_ignored(tmp_path) is True
+
+    gitignore = (tmp_path / ".gitignore").read_text()
+    for line in MANIFEST_GITIGNORE_LINES:
+        assert line in gitignore
+
+
+def test_ensure_manifest_ignored_appends_to_existing_gitignore_without_disturbing_it(
+    tmp_path: Path,
+):
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text("*.pyc\n")
+
+    assert ensure_manifest_ignored(tmp_path) is True
+
+    gitignore = (tmp_path / ".gitignore").read_text()
+    assert "*.pyc" in gitignore
+    for line in MANIFEST_GITIGNORE_LINES:
+        assert line in gitignore
+
+
+def test_ensure_manifest_ignored_is_idempotent(tmp_path: Path):
+    _init_repo(tmp_path)
+    ensure_manifest_ignored(tmp_path)
+    first = (tmp_path / ".gitignore").read_text()
+
+    assert ensure_manifest_ignored(tmp_path) is True
+    assert (tmp_path / ".gitignore").read_text() == first
+
+
+def test_ensure_manifest_ignored_reports_false_when_a_negation_rule_defeats_it(
+    tmp_path: Path,
+):
+    """A hand-added `!` negation, appearing AFTER our own exact pattern is already present
+    (so our append logic sees nothing missing and doesn't re-anchor it at EOF), can
+    un-ignore the manifest despite it "being in .gitignore" at all."""
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text(
+        "/.bth/refs/manifest.jsonl\n!/.bth/refs/manifest.jsonl\n"
+    )
+
+    assert ensure_manifest_ignored(tmp_path) is False
+
+
+def test_manifest_write_does_not_dirty_the_tree_once_ignored(tmp_path: Path):
+    """The behavior debt #1943 actually cares about: appending to the manifest after
+    `ensure_manifest_ignored` must not register as a change under `git status --porcelain`.
+    """
+    head = _init_repo(tmp_path)
+    assert ensure_manifest_ignored(tmp_path) is True
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "gitignore manifest"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    pin_run("run-clean-1", head, "main", dirty=False, cwd=tmp_path)
+    status_after_first = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=tmp_path, text=True, capture_output=True
+    ).stdout
+    assert status_after_first.strip() == ""
+
+    pin_run("run-clean-2", head, "main", dirty=False, cwd=tmp_path)
+    status_after_second = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=tmp_path, text=True, capture_output=True
+    ).stdout
+    assert status_after_second.strip() == ""
