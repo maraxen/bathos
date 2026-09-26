@@ -2,8 +2,10 @@ import sys
 from pathlib import Path
 
 import duckdb
+import pytest
 
 from bathos.catalog import init_catalog, read_runs
+from bathos.init import init_project
 from bathos.runner import run_script
 
 
@@ -65,6 +67,45 @@ def test_run_captures_git_hash(tmp_catalog: Path, tmp_path: Path):
     runs = read_runs(tmp_catalog)
     assert runs[0].git_hash != "unknown"
     assert len(runs[0].git_hash) == 40
+
+
+def test_two_consecutive_runs_on_clean_tree_both_record_dirty_false(tmp_path: Path):
+    """Debt #1943: `bth run` appends to `.bth/refs/manifest.jsonl` before the script runs.
+    That write must not be what makes the SECOND run see a dirty tree."""
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    catalog = tmp_path / "catalog"
+
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "t@t.com"], cwd=repo, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "T"], cwd=repo, check=True, capture_output=True
+    )
+
+    init_project(repo, slug="p", catalog_dir=catalog)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "bth init"], cwd=repo, check=True, capture_output=True
+    )
+
+    init_catalog(catalog)
+    for _ in range(2):
+        run_script(
+            argv=[sys.executable, "-c", "pass"],
+            project_slug="p",
+            catalog_dir=catalog,
+            output_paths=[],
+            tags=[],
+            cwd=repo,
+        )
+
+    runs = read_runs(catalog)
+    assert len(runs) == 2
+    assert [r.git_dirty for r in runs] == [False, False]
 
 
 def test_run_records_output_paths(tmp_catalog: Path):
@@ -1235,6 +1276,85 @@ def test_differential_absent_no_op(tmp_catalog: Path, tmp_path: Path):
     assert runs[0].differential_status is None
 
 
+def test_differential_gate_blocks_on_arm_crash(tmp_catalog: Path, tmp_path: Path):
+    """A nonzero exit code on either pre-flight arm must yield invalid_measurement, even if
+    the (garbage) metadata happens to satisfy `expect` (regression: debt #1939). Here the
+    "on" arm crashes before writing a results file, so off's real signal (0.0) trivially
+    "differs" from on's empty metadata (None) -- exit-code checking must catch this before
+    that coincidental difference is ever considered."""
+    import textwrap
+
+    counter_path = tmp_path / "invocations.log"
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True, exist_ok=True)
+    script = enforced / "run_test.py"
+    script.write_text(
+        textwrap.dedent("""
+        import os
+        import sys
+        import json
+
+        phase = os.environ.get("BTH_DIFFERENTIAL_PHASE", "main")
+        with open(r"%s", "a") as cf:
+            cf.write(phase + "\\n")
+
+        if os.environ.get("BTH_DIFFERENTIAL_VALUE") == "1.0":
+            # simulate a crash on the "on" arm before any result is emitted
+            sys.exit(1)
+
+        signal = 0.0
+        results_path = os.environ.get("BTH_RESULTS_PATH")
+        if results_path:
+            with open(results_path, "w") as f:
+                json.dump({"signal": signal}, f)
+    """)
+        % counter_path
+    )
+
+    sidecar = enforced / "run_test.bth.toml"
+    sidecar.write_text(
+        textwrap.dedent("""
+        [experiment]
+        hypothesis = "test hypothesis"
+        [outcomes.pass]
+        condition = "signal >= 5"
+        decision = "good"
+        reasoning = "strong signal"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "other"
+        reasoning = "catch-all"
+        is_residual = true
+        [result_schema]
+        signal = "float"
+        [differential]
+        knob = "sidechain_conditioning"
+        off = "0.0"
+        on = "1.0"
+        expect = "differs"
+        metric = "signal"
+        min_effect = 0.05
+    """)
+    )
+
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 1
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert runs[0].outcome == "invalid_measurement"
+    assert runs[0].differential_status == "invalid_measurement"
+    invocations = counter_path.read_text().splitlines()
+    assert invocations == ["off", "on"], "main run must never execute when an arm crashes"
+
+
 def test_run_with_nonexistent_campaign_fails_fast(tmp_catalog: Path, tmp_path: Path):
     """--campaign with a warm catalog but no matching campaign must fail before running (regression: debt #491)."""
     from bathos.compact import compact
@@ -1255,3 +1375,140 @@ def test_run_with_nonexistent_campaign_fails_fast(tmp_catalog: Path, tmp_path: P
     assert exit_code == 1
     assert not marker.exists(), "subprocess must not run when --campaign cannot be resolved"
     assert read_runs(tmp_catalog) == []
+
+
+def test_find_script_path_bare_python(tmp_path: Path):
+    """Debt #1946 regression: `python script.py` finds the script."""
+    from bathos.runner import _find_script_path
+
+    script = tmp_path / "script.py"
+    script.write_text("pass\n")
+    assert _find_script_path(["python", "script.py"], tmp_path) == script.resolve()
+
+
+def test_find_script_path_uv_run_python(tmp_path: Path):
+    """`uv run python script.py` finds the script (bare passthrough case)."""
+    from bathos.runner import _find_script_path
+
+    script = tmp_path / "script.py"
+    script.write_text("pass\n")
+    assert _find_script_path(["uv", "run", "python", "script.py"], tmp_path) == script.resolve()
+
+
+def test_find_script_path_uv_run_single_token_opt_equals_value(tmp_path: Path):
+    """Debt #1946: a single `--opt=value` token must not shift subsequent-token pairing.
+
+    `uv run --prerelease=allow python script.py` is one real invocation shape this
+    debt names explicitly.
+    """
+    from bathos.runner import _find_script_path
+
+    script = tmp_path / "script.py"
+    script.write_text("pass\n")
+    argv = ["uv", "run", "--prerelease=allow", "python", "script.py"]
+    assert _find_script_path(argv, tmp_path) == script.resolve()
+
+
+def test_find_script_path_uv_run_opt_equals_value_no_python_token(tmp_path: Path):
+    """`uv run --python=3.12 script.py` -- no literal 'python' token in argv at all."""
+    from bathos.runner import _find_script_path
+
+    script = tmp_path / "script.py"
+    script.write_text("pass\n")
+    argv = ["uv", "run", "--python=3.12", "script.py"]
+    assert _find_script_path(argv, tmp_path) == script.resolve()
+
+
+def test_find_script_path_uv_run_multiple_opt_equals_value_flags(tmp_path: Path):
+    """Several `--opt=value` tokens in a row must each advance by exactly one."""
+    from bathos.runner import _find_script_path
+
+    script = tmp_path / "script.py"
+    script.write_text("pass\n")
+    argv = ["uv", "run", "--extra=foo", "--extra=bar", "python", "script.py"]
+    assert _find_script_path(argv, tmp_path) == script.resolve()
+
+
+def test_find_script_path_uv_run_valueless_long_flag(tmp_path: Path):
+    """`uv run --no-sync python3 script.py` -- a valueless long flag token."""
+    from bathos.runner import _find_script_path
+
+    script = tmp_path / "script.py"
+    script.write_text("pass\n")
+    argv = ["uv", "run", "--no-sync", "python3", "script.py"]
+    assert _find_script_path(argv, tmp_path) == script.resolve()
+
+
+def test_find_script_path_python_dash_m_space_separated(tmp_path: Path):
+    """Debt #1946 regression: `-m module` (2-token flag) must advance by exactly 2,
+    not 3 -- the old code's fallthrough `i += 1` after `i += 2` skipped the script
+    token entirely and returned None.
+    """
+    from bathos.runner import _find_script_path
+
+    script = tmp_path / "script.py"
+    script.write_text("pass\n")
+    argv = ["python3", "-m", "pytest", "script.py"]
+    assert _find_script_path(argv, tmp_path) == script.resolve()
+
+
+def test_find_script_path_python_dash_w_space_separated(tmp_path: Path):
+    """`-W ignore script.py` -- another 2-token flag; must not skip past the script."""
+    from bathos.runner import _find_script_path
+
+    script = tmp_path / "script.py"
+    script.write_text("pass\n")
+    argv = ["python3", "-W", "ignore", "script.py"]
+    assert _find_script_path(argv, tmp_path) == script.resolve()
+
+
+def test_find_script_path_python_dash_w_single_token(tmp_path: Path):
+    """`-Wignore` (single combined token, not `-W` + `ignore`) advances by 1."""
+    from bathos.runner import _find_script_path
+
+    script = tmp_path / "script.py"
+    script.write_text("pass\n")
+    argv = ["python3", "-Wignore", "script.py"]
+    assert _find_script_path(argv, tmp_path) == script.resolve()
+
+
+def test_find_script_path_dash_c_returns_none(tmp_path: Path):
+    """`python -c "..."` has no script file -- must return None, not misdetect."""
+    from bathos.runner import _find_script_path
+
+    assert _find_script_path(["python", "-c", "pass"], tmp_path) is None
+
+
+def test_find_script_path_first_arg_is_script(tmp_path: Path):
+    """A bare script path as argv[0] (no interpreter token) is detected directly."""
+    from bathos.runner import _find_script_path
+
+    script = tmp_path / "script.py"
+    script.write_text("pass\n")
+    assert _find_script_path(["script.py"], tmp_path) == script.resolve()
+
+
+def test_find_script_path_empty_argv():
+    from bathos.runner import _find_script_path
+
+    assert _find_script_path([], Path(".")) is None
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        ["uv", "run", "--with", "numpy", "python"],
+        ["uv", "run", "--project", ".", "python3"],
+        ["uv", "run", "--python", "3.12"],
+        ["uv", "run", "--with", "numpy", "--no-sync", "python3"],
+        ["python3", "-X", "dev"],
+    ],
+)
+def test_find_script_path_space_separated_option_values(tmp_path, prefix):
+    """Debt #1946 follow-up: an option whose value is the next token must skip both
+    tokens, or the value (e.g. `numpy`) is mistaken for the script."""
+    from bathos.runner import _find_script_path
+
+    script = tmp_path / "script.py"
+    script.write_text("print(1)\n")
+    assert _find_script_path([*prefix, "script.py"], tmp_path) == script.resolve()

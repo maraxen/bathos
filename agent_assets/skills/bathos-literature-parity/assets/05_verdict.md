@@ -63,7 +63,7 @@
 
 7. **Register outputs**:
    - Verdict report → `.praxia/docs/audits/YYMMDD_<paper-slug>-parity-verdict.md`
-   - Invariant tests → `tests/test_<method>_invariants.py` (checksummed via `bth run --out`)
+   - Invariant tests → `tests/test_<method>_invariants.py` (checksummed via `bth run --output-paths`)
    - Reproduce plan → as appendix in verdict or as standalone document
    - All paths registered in the parity run's metadata via `output_paths`
 

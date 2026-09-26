@@ -1622,7 +1622,7 @@ def init_tool(
     if not slug:
         return {"error": "slug parameter is required"}
     cat_dir = _get_catalog_dir(catalog_dir or None)
-    init_project(
+    report = init_project(
         root,
         slug=slug,
         catalog_dir=cat_dir,
@@ -1635,6 +1635,12 @@ def init_tool(
         "catalog_dir": str(cat_dir),
         "project_root": str(root),
         "slug": slug,
+        # Debt #1952: on an already-initialized project, .bth.toml is merged rather than
+        # overwritten -- this reports exactly what changed vs. what survived untouched.
+        "bth_toml_created": report.created,
+        "bth_toml_added": report.added,
+        "bth_toml_preserved": report.preserved,
+        "bth_toml_skipped_requests": report.skipped_requests,
     }
 
 

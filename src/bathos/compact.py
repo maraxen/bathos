@@ -313,6 +313,23 @@ def _migrate_v14(run_dict: dict) -> dict:
     return run_dict
 
 
+def _migrate_v15(run_dict: dict) -> dict:
+    """Migrate v15 fragment to v16 by adding metadata/output_metadata cool columns.
+
+    Debt #1940: these fields existed on the Run dataclass but were never written to
+    the cool Parquet fragment (Run.to_arrow() silently omitted both), so runs.metadata
+    was always "{}" after bth compact regardless of what the script emitted. A v15
+    fragment predates that fix and never captured them, so default to the same
+    empty-JSON sentinels the Run dataclass itself defaults to -- "{}" and "[]" --
+    rather than None, since every pre-v16 run's actual metadata is genuinely
+    unrecoverable, not merely unrecorded.
+    """
+    run_dict["metadata"] = "{}"
+    run_dict["output_metadata"] = "[]"
+    run_dict["schema_version"] = "16"
+    return run_dict
+
+
 MIGRATIONS["0"] = _migrate_v0
 MIGRATIONS["1"] = _migrate_v1
 MIGRATIONS["2"] = _migrate_v2
@@ -328,6 +345,7 @@ MIGRATIONS["11"] = _migrate_v11
 MIGRATIONS["12"] = _migrate_v12
 MIGRATIONS["13"] = _migrate_v13
 MIGRATIONS["14"] = _migrate_v14
+MIGRATIONS["15"] = _migrate_v15
 
 
 _RUNS_TABLE_SCHEMA = """
@@ -1083,8 +1101,9 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                     claim_discriminates, claim_isolates, parity_run_type, seed, baseline_hpo_trials, baseline_hpo_compute_budget,
                     stdout_sha256, component_id, component_sidecar_sha256,
                     differential_status, differential_off_value, differential_on_value, differential_effect, dependency_lock_sha256,
-                    adversarial_check_result, git_dirty_content_id, git_provenance_source
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    adversarial_check_result, git_dirty_content_id, git_provenance_source,
+                    outcome_error_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     run.id,
@@ -1142,6 +1161,15 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                     run.adversarial_check_result,
                     run.git_dirty_content_id,
                     run.git_provenance_source,
+                    # Debt #1942: outcome_error_reason is produced in runner.py (exit-code
+                    # guard + evaluate_outcome/adversarial-check error payloads) and already
+                    # round-trips through the cool fragment (schema.py to_arrow/from_arrow_row,
+                    # since v5), but this INSERT never carried it into the warm `runs` table
+                    # even though the column exists (ALTER TABLE above) -- so every run with
+                    # outcome="error" had a NULL warm outcome_error_reason. Least invasive fix:
+                    # add the one missing column/value pair here rather than restructure the
+                    # insert.
+                    run.outcome_error_reason or None,
                 ],
             )
 

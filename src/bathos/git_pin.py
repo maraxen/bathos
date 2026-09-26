@@ -25,6 +25,7 @@ never existed, and two runs in five cited a commit that is simply gone.
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 
 from cisternal.provenance.durable import (
@@ -67,12 +68,29 @@ AUTHORING_RELPATH = Path(".bth") / "refs" / "authoring.jsonl"
 # sha256 is the tamper anchor the Union Gate evaluates against at `campaign conclude`.
 PROVENANCE_PATHS = (".bth/claims", ".bth/refs")
 
+# Debt #1943: `.bth/refs/manifest.jsonl` is the run manifest -- `pin_run` (below) appends to
+# it on literally every `bth run`, before the script under provenance ever executes. Unlike
+# `.bth/refs/authoring.jsonl` (deliberately KEPT in PROVENANCE_PATHS/tracked -- its git
+# history is the tamper-evidence mechanism `bathos.authoring.ledger` depends on; see that
+# module's docstring and `test_the_ledger_file_lands_where_provenance_paths_expects_it`),
+# nothing in this module or cisternal.provenance.durable ever commits the manifest's
+# appends. So treating it as "tracked" the way the durable.py module docstring frames the
+# manifest mechanism ("reviewable, diffable, recoverable from any clone") means, in
+# practice, "modified-and-uncommitted starting with the second run, forever" -- which
+# poisons the exact `git_dirty` signal this whole mechanism exists to make trustworthy. The
+# manifest's own durability need is already covered by the per-run ref
+# (`refs/bathos/runs/<id>`), which lives in `.git` and cares nothing about `.gitignore`.
+# `.bth/claims` is unaffected: it holds authored, reviewed content (claim-tier
+# pre-registrations) with its own PROVENANCE_PATHS warning path, unchanged here.
+MANIFEST_GITIGNORE_LINES = ("/.bth/refs/manifest.jsonl", "/.bth/refs/.manifest.lock")
+
 EXPORT_DIRNAME = Path("outputs") / "provenance"
 
 __all__ = [
     "DEFAULT_MAX_SNAPSHOT_BYTES",
     "EXPORT_DIRNAME",
     "AUTHORING_RELPATH",
+    "MANIFEST_GITIGNORE_LINES",
     "MANIFEST_RELPATH",
     "PROVENANCE_PATHS",
     "RUN_REF_PREFIX",
@@ -85,6 +103,7 @@ __all__ = [
     "SnapshotResult",
     "append_authoring_manifest",
     "append_manifest",
+    "ensure_manifest_ignored",
     "export_bundle",
     "ignored_declared_paths",
     "ignored_provenance_paths",
@@ -104,6 +123,72 @@ __all__ = [
 
 def ignored_provenance_paths(cwd: Path) -> tuple[str, ...]:
     return _ignored_provenance_paths(cwd, PROVENANCE_PATHS)
+
+
+def ensure_manifest_ignored(cwd: Path) -> bool:
+    """Best-effort: make sure the run manifest is ignored before `pin_run` writes to it.
+
+    Covers projects initialized before `bth init` added the manifest to `.gitignore`
+    (`bathos.init._ensure_gitignore_entries`). `bth run` must not edit the tracked
+    `.gitignore` itself -- that edit would dirty the very tree whose cleanliness it is
+    protecting -- so the patterns go into the repository's local, untracked exclude file
+    (`git rev-parse --git-path info/exclude`, shared by every linked worktree). Then git is
+    asked whether the manifest is actually ignored, since a `!` negation in `.gitignore`
+    (which outranks info/exclude) can defeat it.
+
+    Never raises -- provenance bookkeeping must not be able to fail a run (see this
+    module's docstring). Returns whether the manifest is (now) ignored; `False` means
+    "manifest hygiene is degraded" (the caller should warn, not abort).
+    """
+    root = repo_root(cwd)
+    if root is None:
+        return True  # nothing to ignore: pin_run is a no-op outside a repo anyway
+
+    manifest_rel = MANIFEST_RELPATH.as_posix()
+
+    def _is_ignored() -> bool | None:
+        try:
+            result = subprocess.run(
+                ["git", "check-ignore", "-q", "--no-index", manifest_rel],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+        except OSError:
+            return None
+        return result.returncode == 0
+
+    if _is_ignored():
+        return True
+
+    try:
+        git_path = subprocess.run(
+            ["git", "rev-parse", "--git-path", "info/exclude"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return False
+    if git_path.returncode != 0 or not git_path.stdout.strip():
+        return False
+    exclude = Path(git_path.stdout.strip())
+    if not exclude.is_absolute():
+        exclude = root / exclude
+    try:
+        existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+        missing = [line for line in MANIFEST_GITIGNORE_LINES if line not in existing]
+        if missing:
+            new_text = existing
+            if new_text and not new_text.endswith("\n"):
+                new_text += "\n"
+            new_text += "".join(f"{line}\n" for line in missing)
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            exclude.write_text(new_text, encoding="utf-8")
+    except OSError:
+        pass  # best-effort; the authoritative check below still runs
+
+    return bool(_is_ignored())
 
 
 def ignored_declared_paths(paths: list[str] | tuple[str, ...], cwd: Path) -> tuple[str, ...]:

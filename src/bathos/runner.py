@@ -16,7 +16,7 @@ from pathlib import Path
 from bathos.catalog import write_run
 from bathos.checker import hash_dependency_lock
 from bathos.git import capture_git_state
-from bathos.git_pin import pin_result_as_dict, pin_run
+from bathos.git_pin import ensure_manifest_ignored, pin_result_as_dict, pin_run
 from bathos.prereg import (
     GateErrorCode,
     _gate_failure_payload,
@@ -53,26 +53,69 @@ def _find_script_path(argv: list[str], cwd: Path) -> Path | None:
     # First arg is python/uv; look for script file in subsequent args
     # Handle: python script.py, python -c "...", python -m module, etc.
     # Also handle: uv run python script.py (skip 'run' and 'python' tokens)
+    # Also handle: uv run --prerelease=allow python script.py, uv run --python=3.12 script.py
+    # (single `--opt=value` tokens and valueless flags like `uv run --no-sync script.py`),
+    # debt #1946 -- every branch below must `continue` its own advance. Previously the
+    # "-c"/"-m"/"-W" branch fell through to an unconditional `i += 1` at the bottom of the
+    # loop *on top of* its own `i += 2`, advancing by 3 instead of 2 and skipping straight
+    # over the script token; the same fallthrough double-advanced every other flag branch
+    # too (single-token `--opt`/`--opt=value` flags advanced by 2 instead of 1), silently
+    # skipping whatever token followed. Only the passthrough branch's explicit `continue`
+    # avoided it, which is why bare `uv run python script.py` never showed the bug.
     _UV_PASSTHROUGH = {"run", "python", "python3"}
+    # Options that take their value as the NEXT argv token (python's -c/-m/-W/-X and uv run's
+    # value options). Without this, `uv run --with numpy python x.py` would treat `numpy` as
+    # the script.
+    _VALUE_FLAGS = {
+        "-c",
+        "-m",
+        "-W",
+        "-X",
+        "--with",
+        "--with-editable",
+        "--with-requirements",
+        "--project",
+        "--directory",
+        "--python",
+        "-p",
+        "--extra",
+        "--group",
+        "--only-group",
+        "--no-group",
+        "--package",
+        "--from",
+        "--index",
+        "--default-index",
+        "--index-url",
+        "--extra-index-url",
+        "--env-file",
+        "--config-file",
+        "--cache-dir",
+        "--prerelease",
+        "--resolution",
+    }
     i = 1
     while i < len(argv):
         arg = argv[i]
         if arg in _UV_PASSTHROUGH:
             i += 1
             continue
-        if arg in ("-c", "-m", "-W"):
-            # These take an argument but don't point to a file
+        if arg in _VALUE_FLAGS:
+            # These take a separate value argument (`-m module`, `-W ignore`,
+            # `uv run --with numpy`, `uv run --project .`): skip flag and value.
             i += 2
-        elif arg.startswith("-"):
-            # Other flags
+            continue
+        if arg.startswith("-"):
+            # Valueless flags (`--no-sync`, `--quiet`) and single-token `--opt=value`
+            # flags (`--prerelease=allow`, `--python=3.12`) are both exactly one argv
+            # token.
             i += 1
-        else:
-            # First non-flag arg after python is the script
-            candidate = cwd / arg if not Path(arg).is_absolute() else Path(arg)
-            if candidate.exists() and candidate.suffix == ".py":
-                return candidate.resolve()
-            return None
-        i += 1
+            continue
+        # First non-flag arg after python is the script
+        candidate = cwd / arg if not Path(arg).is_absolute() else Path(arg)
+        if candidate.exists() and candidate.suffix == ".py":
+            return candidate.resolve()
+        return None
     return None
 
 
@@ -233,6 +276,31 @@ def _run_differential_preflight(
 
     off_result = _run_phase(differential.off, "off", off_path, off_output_dir)
     on_result = _run_phase(differential.on, "on", on_path, on_output_dir)
+
+    # A crashed arm (debt #1939) must never be masked by metadata that happens to "differ"
+    # (e.g. a crashed arm emitting no results at all trivially differs from a healthy one).
+    # Check exit codes before touching the metadata at all -- a nonzero exit on either arm
+    # means the pre-flight measured nothing, so it always fails, regardless of `expect`.
+    failed_phases = [
+        (phase, result["exit_code"])
+        for phase, result in (("off", off_result), ("on", on_result))
+        if result["exit_code"] != 0
+    ]
+    if failed_phases:
+        reason = (
+            f"[differential] knob={differential.knob!r} off={differential.off!r} "
+            f"on={differential.on!r} — "
+            + "; ".join(
+                f"{phase} arm exited with code {code}" for phase, code in failed_phases
+            )
+        )
+        return DifferentialResult(
+            ok=False,
+            off_metadata=off_result["raw"],
+            on_metadata=on_result["raw"],
+            effect=None,
+            reason=reason,
+        )
 
     effect: float | None = None
     if differential.metric:
@@ -542,6 +610,20 @@ def run_script(
             declared.append(str(script_path))
         if bundle and bundle.path:
             declared.append(str(bundle.path))
+
+        # Debt #1943: ensure the run manifest (.bth/refs/manifest.jsonl) is ignored (via the
+        # untracked .git/info/exclude, never the tracked .gitignore) BEFORE pin_run appends. Otherwise the manifest write itself -- which
+        # happens on every run -- is what makes the NEXT run's git-dirty capture see an
+        # uncommitted change, even on an otherwise-clean tree.
+        if not ensure_manifest_ignored(cwd):
+            event("run.manifest_gitignore_warning", run_uuid=run.id, cwd=str(cwd))
+            print(
+                "warning: could not ensure the run manifest (.bth/refs/manifest.jsonl) is "
+                "ignored -- a future run's git-dirty state may be polluted by this run's "
+                "own provenance bookkeeping. Check .gitignore for a rule (e.g. a `!` negation) "
+                "that un-ignores it.",
+                file=sys.stderr,
+            )
 
         pin = pin_run(
             run_id=run.id,

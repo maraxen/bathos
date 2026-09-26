@@ -65,3 +65,5 @@ tmp/
 # records local worktree branch names from a past sprint — machine-local and
 # transient (the worktrees it names are long gone)
 .praxia/worktree_manifests/
+/.bth/refs/manifest.jsonl
+/.bth/refs/.manifest.lock
