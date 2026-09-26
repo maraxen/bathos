@@ -391,7 +391,7 @@ class TestIsAncestorErrorSurfacing:
         unresolvable_sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
         result = _is_ancestor(unresolvable_sha, "HEAD", repo)
 
-        assert result is False  # still fail-closed
+        assert result is None  # unknown: caller flags the run as affected
         assert len(events) == 1, (
             "expected the genuine git error (unresolvable sha) to be surfaced via "
             "event(), not silently swallowed as an ordinary rc=1 'not ancestor' -- "

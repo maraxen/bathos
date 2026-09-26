@@ -492,7 +492,7 @@ def _git_diff_name_only_range(commit_range: str, project_root: Path) -> list[str
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
-def _is_ancestor(candidate_sha: str, boundary_sha: str, project_root: Path) -> bool:
+def _is_ancestor(candidate_sha: str, boundary_sha: str, project_root: Path) -> bool | None:
     """True iff candidate_sha is boundary_sha or an ancestor of it.
 
     Fails closed (False) on "not an ancestor" -- git's own documented rc=1 for
@@ -507,9 +507,10 @@ def _is_ancestor(candidate_sha: str, boundary_sha: str, project_root: Path) -> b
     `event()` telemetry convention -- same rationale as read_ledger_fragments'
     corrupt-fragment handling: don't let one bad git_hash crash the whole
     assess_blast_radius scan over potentially thousands of runs, but never
-    swallow the anomaly silently either. Still returns False (fail-closed)
-    rather than raising, since assess_blast_radius has no per-run try/except
-    around this call.
+    swallow the anomaly silently either. Returns None (unknown) rather than
+    raising, since assess_blast_radius has no per-run try/except around this
+    call; the caller treats unknown as affected, because a blast-radius check
+    that cannot rule a run out must not silently clear it.
     """
     if not candidate_sha or candidate_sha in ("unknown", "nogit"):
         return False
@@ -531,7 +532,7 @@ def _is_ancestor(candidate_sha: str, boundary_sha: str, project_root: Path) -> b
         returncode=result.returncode,
         stderr=result.stderr.decode("utf-8", errors="replace").strip(),
     )
-    return False
+    return None
 
 
 def _run_touches_files(run: Run, changed_files: list[str]) -> list[str]:
@@ -788,7 +789,23 @@ def assess_blast_radius(
             )
             continue
 
-        if _is_ancestor(run.git_hash, boundary, project_root):
+        ancestry = _is_ancestor(run.git_hash, boundary, project_root)
+        if ancestry is None:
+            affected.append(
+                BlastRadiusMatch(
+                    run_id=run.id,
+                    git_hash=run.git_hash,
+                    command=run.command,
+                    campaign_id=run.campaign_id or campaign_by_run.get(run.id, ""),
+                    matched_files=matched_files,
+                    reason=(
+                        f"touches {matched_files}; ancestry of git_hash "
+                        f"{run.git_hash[:9]} vs fix boundary {boundary} could not be "
+                        "determined (git error) -- flagged conservatively"
+                    ),
+                )
+            )
+        elif ancestry:
             affected.append(
                 BlastRadiusMatch(
                     run_id=run.id,
