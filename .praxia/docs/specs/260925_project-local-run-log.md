@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: v21 (after adversarial cycle 21)
+revision: v22 (after adversarial cycle 22)
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -286,8 +286,8 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   to an earlier content): it appends a new event with ordinal = newest + 1. Only the highest
   ordinal of each chain takes part in the fold; every chain does (so several reverted ledgers of
   one run all fold). The importer holds the ingest lock, so ordinals never race.
-  "Existing" means, before cut-over, the current staging attempt and the destination logs; after
-  cut-over, the index and the destination logs.
+  "Existing" means, before cut-over, the current staging attempt only (no imported event
+  reaches a project log before the marker); after cut-over, the index and the destination logs.
 - **Unreadable sources** (e.g. corrupt fragments, skipped today at `compact.py:787`) have no
   record to import. The importer records each in `import_manifest` as a chain with
   `source_class=corrupt` and the sha256 of the file's bytes, via a `legacy_source.unreadable`
@@ -380,8 +380,8 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   where (root kind: root id) is one of `project`: `main_root` (the main root's `.bth/log/`,
   excluding `remote/`); `mirror`: `project_id` or `_null/<slug>`; `fallback`: slug;
   `unaffiliated`: constant; `remote-log`, `remote-fallback`, `remote-mirror`:
-  `(main_root, remote)`; `staging`: the attempt id (migration step 3 only, never read by
-  `connect_read`). Root ids use `main_root`, not `project_id`, wherever two roots can share
+  `(main_root, remote)`; `staging`: the attempt id (read by migration step 3, and by ingest and
+  `connect_read` only between the marker and step 4(e); otherwise never enumerated). Root ids use `main_root`, not `project_id`, wherever two roots can share
   an id, so every file belongs to exactly one root. A file smaller than its watermark, or vanished, is re-read from the other copy
   (D7) and reported by `bth verify`; `eid` dedup makes re-reading safe. Inodes are not used.
 - **Flag gate:** ingest runs only with the flag on (see "Mode"), or from
@@ -469,26 +469,28 @@ switched on in one step.
    (unresolvable ones to `unaffiliated/`).
 3. **Build and diff:** build `import-staging/<attempt>/index.db` from the staged events alone
    (a root of kind `staging`, used only here) and diff it against `bathos.db` table by table.
-   `~/.bth/catalog/index.db` is not touched before step 4. On a clean diff it writes the
-   `diff_passed` record into the attempt directory. Every difference must fall in an allow-listed class (data already lost to earlier
+   Every difference must fall in an allow-listed class (data already lost to earlier
    force-rebuilds; corrupt fragments skipped by `compact.py:787`; `output_metadata` whose files
    changed since; postmortem overrides whose files are only in a deleted worktree; campaign
    members whose legacy e-value used the fragment outcome rather than the postmortem-overridden
-   one; unresolvable project) and goes into a
-   signed-off residual report. Unclassified differences abort.
-4. **Switch**, in this order, each action idempotent: (a) copy the staged events into their
-   owning project logs and mirrors as fixed-name segments `import-<attempt>-<n>.jsonl`, each
-   written to a temp file and renamed into place, and skipped if it already exists (so a repeat
-   writes nothing); (b) build
-   `~/.bth/catalog/index.db` from those logs; (c) write `cutover.json`, after which reads and
-   writes use the new path; (d) rename `bathos.db` to `bathos.db.frozen`; (e) delete the
-   staging directory. `bth migrate --to-log` is resumable. Every re-run first repeats step 1
-   (squeue check and the exclusive writers lock). Then, with the marker absent: if the attempt
-   directory holds a `diff_passed` record (written by step 3 with the sha256 set of the legacy
-   sources it imported) and those sources are unchanged, it continues from (a); otherwise it
-   deletes the staging directory and restarts from step 2. With the marker present: from (d) if
-   `bathos.db` exists without `bathos.db.frozen`, then (e) if staging remains; step 3's diff is
-   never re-run once the marker exists. `import_manifest` is a derived table of the index
+   one; unresolvable project); unclassified differences abort. The classified residuals are
+   written to a report in the attempt directory and `--to-log` stops there; the user signs off by
+   re-running with `--accept-residual <sha256 of that report>`, which proceeds only if a fresh
+   run of steps 1-3 reproduces a report with exactly that hash.
+4. **Switch.** The cut-over marker is the single commit point. In order: (a) build
+   `~/.bth/catalog/index.db` from the existing project logs plus the staged events; (b) write
+   `cutover.json`, whose body also lists the staged segment names, after which reads and writes
+   use the new path; (c) move each staged segment into its owning project log and mirror as
+   `import-<attempt>-<n>.jsonl` (temp file then rename; skipped if already present); (d) rename
+   `bathos.db` to `bathos.db.frozen`; (e) delete the staging directory. Until (c) finishes, the
+   staging directory is an enumerated root for ingest and `connect_read` (kind `staging`), so
+   nothing is unreadable in between; eid dedup absorbs the move.
+   **Re-running `bth migrate --to-log`:** with the marker absent, nothing outside the staging
+   directory has changed except possibly `~/.bth/catalog/index.db`, so it deletes both and
+   starts again from step 1 (pull, reap, squeue check, exclusive lock, full re-listing of every
+   legacy source). With the marker present, it skips step 1's squeue check, takes the writers
+   lock, and finishes whichever of (c)-(e) remain.
+   `import_manifest` is a derived table of the index
    with one row per snapshot chain `(kind, entity, source_class, source_locator)` holding the
    newest snapshot's `source_sha256`, so it is rebuilt by a delete + re-ingest like every other
    table and updated by every later re-import. `bathos.db.frozen` is kept read-only for one
@@ -588,9 +590,10 @@ switched on in one step.
   event in any project log and no `~/.bth/catalog/index.db`; abort, retry, switch leaves every
   imported event in the logs.
 - AC-29. `bth migrate --to-log` killed during step 2, during step 3, and after each of step 4's
-  actions (a)-(e), then re-run, completes the switch with the same index and logs as an
-  uninterrupted run (a kill before `diff_passed` restarts from step 2; a legacy write made while
-  it was down is included); a `bth run`
+  actions (a)-(e), then re-run, completes the switch with the same set of `(eid, kind, entity,
+  data)` events and the same derived tables as an uninterrupted run (segment names and envelope
+  `writer`/`seq` may differ); a legacy write made while it was down is included; no project log
+  holds an imported event unless the marker exists; a `bth run`
   started before the switch is either wholly legacy or wholly events; a `bth submit` after
   cut-over produces a job that appends events, and `BTH_LOG_MODE=1` outside a SLURM job or test
   is refused.
@@ -604,7 +607,7 @@ switched on in one step.
    flag (AC-25).
 3. `index.db`, `events` table, fold (incl. the campaign fold), generation-swap ingest, read API
    (flag off: the pass-through in "Reads"); move all 25 modules to it, exercised against
-   fixture catalogs (AC-1, AC-5, AC-7's ingest half, AC-9, AC-12, AC-15, AC-17, AC-18, AC-19,
+   fixture catalogs (AC-1, AC-5, AC-7's ingest half, AC-9, AC-15, AC-17, AC-18, AC-19,
    AC-20, AC-22). AC-18 is enforced
    from here; the legacy write sites (flag-off branch only) sit on an explicit allow-list in the
    AC-18 test, which step 5 empties.
@@ -615,7 +618,7 @@ switched on in one step.
    `bth sync --pull` (log, fallback, mirror; AC-6 and the cluster variants of AC-8, AC-9).
 5. Assign ids in every registered project (migration step 0), then run the step-4
    `bth migrate --to-log` on the real catalog (its AC-13 residual report is signed off); then
-   AC-2, AC-3, AC-4 and AC-8 hold in production.
+   AC-2, AC-3, AC-4 and AC-8 hold in production, and AC-12 is measured on the real catalog.
 
 ## Risks
 
