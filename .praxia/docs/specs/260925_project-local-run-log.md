@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: v28 (after adversarial cycle 28)
+revision: v29 (after adversarial cycle 29)
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -110,7 +110,7 @@ fold; event identity is the `eid` (see Line envelope).
 | submit provenance, one Parquet per record | `catalog.py:109` (`write_submit_provenance`; read by `sprint_audit.py:226`) | `submit.recorded` (`submit_id`; includes `slurm_job_id`) |
 | `runs.output_metadata` (drift baseline, `checker.py:132`) | recomputed at compact, `compact.py:959-976` | `run.outputs_hashed` (`run_id`): at run end, and on explicit `bth check --rebaseline`. Behaviour change: compact no longer silently refreshes the baseline when outputs change |
 | outcome + `postmortem_*` override | `compact.py:1012` (reads files via cwd) | `run.postmortem_applied` (`run_id`, postmortem sha256), emitted by postmortem validate/register |
-| `claim_discriminates`, `claim_isolates`, `parity_run_type` COALESCE | `compact.py:978` | carried in `run.started.data` from the sidecar |
+| `claim_discriminates`, `claim_isolates`, `parity_run_type` COALESCE | `compact.py:978-983` | `claim_*` carried in `run.started.data` from the sidecar; `parity_run_type` in `run.finished.data` (computed at finish from result metadata, `runner.py:770-793`) |
 | `runs.metadata` rewrite by reaper, cool-fragment rewrite and reap ledger JSON | `reap.py:292-304`, `:361`; `catalog/reaped/<slug>/<run_id>.json` | `run.reaped` (`run_id`; carries `prior_status`) |
 | reap revert (ledger JSON moved to `reverted/`) | `reap.py:203-217` | `run.reap_reverted` (`run_id`) |
 | campaign insert/upsert | `campaigns.py`, `campaigns.py:1194`, `claim.py:649` | `campaign.created` (`campaign_id`) |
@@ -307,15 +307,26 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
 - **Import merge (stage 1)**, field by field, never whole-state replacement:
   - *Campaigns:* `status='concluded'` is sticky: the base is concluded if any import says so,
     with `concluded_at` taken by source precedence, then earliest `ts`.
-  - *Every field except run status* keeps the first non-empty value in order of source
+  - *Every field except the status-dependent fields (Run status, below)* keeps the first non-empty value in order of source
     precedence, then `ts`, then eid (empty means absent, SQL NULL, `""`, `[]` or `{}`; `0`,
     `0.0` and `false` are values). So a fragment never blanks a field (e.g. `metadata`,
     `output_metadata`, postmortem fields) that a warm import set.
 - **Run status (both stages).** The status-dependent fields, i.e. everything the runner sets at finish
-  (`runner.py:781-805`: `status`, end time, `exit_code`, `duration_s`, `output_paths`,
-  `outcome` when not overridden, `outcome_error_reason`, `outcome_is_residual`,
-  `adversarial_check_status`/`_result`, `parity_run_type`, `differential_status`/`_off_value`/
-  `_on_value`; not `metadata`, which merges by the stage-1 rule), come together from the single highest-ranked *status claim*:
+  (`runner.py:781-805`: `status`, `exit_code`, `duration_s`, `output_paths`, the raw
+  `outcome`, `outcome_error_reason`, `outcome_is_residual`, `adversarial_check_status`/`_result`,
+  `differential_status`/`_off_value`/`_on_value`; "end time" everywhere in this spec means
+  `timestamp + duration_s`, there being no end-time column), come together from the single
+  highest-ranked *status claim*. Three run fields are outside the bundle, each reproducing
+  today's compact: `parity_run_type` is the first non-null value over the status claims in rank
+  then tie order (the `COALESCE` of `compact.py:983`, so a winning claim with null never blanks
+  it); the stored `outcome` is sticky under postmortems as in `compact.py:1002-1010`: the
+  `verdict_override` of the latest `run.postmortem_applied` (or imported postmortem field) whose
+  override is not `"none"`, else the bundle's raw outcome, so a later `"none"` override does not
+  restore the raw outcome; and `metadata.reaped` is the ledger record carried by the latest
+  abandoned claim not cancelled by a revert (a `run.reaped`'s data or a `ledger_json` import),
+  whatever the winning status, and absent when every abandoned claim is reverted, as
+  `reconcile_warm_tier` merges every live ledger (`reap.py:338-362`); the rest of `metadata`
+  merges by the stage-1 rule. The status claims:
   - rank 2, terminal (`completed`, `failed`, `killed`; `runner.py:613,657,679,687`): a
     `run.finished`, or a `run.imported` with a terminal status;
   - rank 1, `abandoned` (`reap.py:288`): a `run.reaped` or a `run.imported` with status
@@ -468,7 +479,7 @@ switched on in one step.
    each remote's `runs/` in full (no `--ignore-existing`; `--checksum`, deleting nothing) into
    `~/.bth/catalog/remote-runs/<root id>/<remote>/` (root id from the project's `main_root`, as
    for every other root, because remote names such as `engaging` repeat across projects; the
-   same path is the source locator and the watermark root), never into local `runs/`, so a fragment pulled while
+   same path is the source locator; it is an importer source, not an ingest watermark root), never into local `runs/`, so a fragment pulled while
    `running` and finished remotely since (which `--ignore-existing`, `sync.py:123`, never
    refreshes) is still imported with its terminal status; it
    then runs the reaper (reconciling stale `running` rows through `sacct`) with its warm-tier
@@ -503,8 +514,9 @@ switched on in one step.
    members whose legacy e-value used the fragment outcome rather than the postmortem-overridden
    one; unresolvable project; a fragment not yet compacted into `bathos.db`, including those just
    pulled or reaped in step 1: a column of such a run whose staged value equals the value that
-   fragment itself carries, e.g. a staged status or `metadata.reaped` newer than its warm row;
-   a staged value the fragment does not explain stays unclassified); unclassified differences abort. The classified residuals are
+   fragment or a reap ledger written in step 1 itself carries, e.g. a staged status the fragment
+   carries, or a `metadata.reaped` equal to a step-1 ledger record, newer than its warm row;
+   a staged value neither explains stays unclassified); unclassified differences abort. The classified residuals are
    written to a canonical report (exactly one JSON line per differing `(table, key, column)`,
    each line exactly the object `{table, key, column, class, legacy_value, staged_value}` with
    `key` the row's primary key as a JSON array, `class` the allow-listed class name, and each
@@ -625,6 +637,10 @@ switched on in one step.
   reverted before cut-over folds to its restored status even if the warm row still says
   `abandoned`; the reaper after cut-over selects exactly the folded `running`
   runs past its window.
+  Also: a reaped run that later finishes keeps `metadata.reaped` (terminal status); a reap then
+  revert has no `metadata.reaped`; a postmortem override `fail` followed by an override `"none"`
+  leaves `outcome = fail`; a terminal claim with null `parity_run_type` does not blank a value
+  another status claim carries. Each matches today's compact on the same sequence (AC-17).
 - AC-27. With two roots sharing a `project_id`, `bth log restore` in one never copies the
   other's events; after moving a project, restore still recovers events written at the old path.
 - AC-28. Re-importing a legacy source that changed yields the fold of its newest snapshot only,
