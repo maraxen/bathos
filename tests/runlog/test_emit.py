@@ -141,3 +141,14 @@ def test_apply_run_finished_exit_semantics_none_forces_nonzero():
     outcome = AppendOutcome(target="none", envelope=None, mirror_ok=False)
     assert apply_run_finished_exit_semantics(0, outcome) == 1
     assert apply_run_finished_exit_semantics(5, outcome) == 5
+
+
+def test_namespace_bathos_is_frozen_and_anchor_id_uses_it():
+    """NAMESPACE_BATHOS keys every deterministic id; a change silently re-keys entities."""
+    import uuid
+
+    from bathos.anchor import _anchor_entity_id
+    from bathos.runlog.envelope import NAMESPACE_BATHOS
+
+    assert uuid.uuid5(uuid.NAMESPACE_DNS, "bathos.runlog") == NAMESPACE_BATHOS
+    assert _anchor_entity_id("p", "s") == str(uuid.uuid5(NAMESPACE_BATHOS, "anchor:p:s"))

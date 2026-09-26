@@ -106,9 +106,11 @@ def _anchor_entity_id(path: str, sha256: str) -> str:
     (spec: "anchor_id = uuid5 of the legacy identity (path, sha256)"). Deliberately
     NOT the warm `id` column (a fresh uuid4 minted on every insert/rebuild, never
     a stable entity key -- see module docstring's durability note and AC-17's
-    BC-8). Namespaced under the stdlib's fixed `uuid.NAMESPACE_URL` so the id is
-    stable across processes/machines without needing a bathos-private constant."""
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"bathos-anchor:{path}:{sha256}"))
+    BC-8). Namespaced under the spec's NAMESPACE_BATHOS so the live `anchor.recorded`
+    and the importer's `anchor.imported` key the same anchor identically."""
+    from bathos.runlog.envelope import NAMESPACE_BATHOS
+
+    return str(uuid.uuid5(NAMESPACE_BATHOS, f"anchor:{path}:{sha256}"))
 
 
 @dataclass(frozen=True)

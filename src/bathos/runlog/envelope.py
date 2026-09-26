@@ -21,6 +21,11 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 
+# The spec's NAMESPACE_BATHOS: the one uuid5 namespace for every deterministic id
+# (import eids, anchor_id). Fixed forever -- changing it re-keys every entity.
+# Derived once as uuid5(NAMESPACE_DNS, "bathos.runlog") and frozen as a literal.
+NAMESPACE_BATHOS = uuid.UUID("e914891b-e8e2-5bd4-8a82-de09cd2b5eaa")
+
 
 def uuid7() -> uuid.UUID:
     """Generate a UUIDv7 (RFC 9562 <A6BA7C_60> layout): 48-bit ms timestamp,
