@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: v27 (after adversarial cycle 27)
+revision: v28 (after adversarial cycle 28)
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -268,7 +268,7 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   its stored `evalue` (not `seq_position`, which the fold always recomputes). Each carries `data.source_class`, one of `warm`
   (`bathos.db.frozen`, or `bathos.db` while no `bathos.db.frozen` exists, i.e. until Migration
   step 4(d) has renamed it), `warm_recreated` (a `bathos.db` present beside `bathos.db.frozen`,
-  i.e. recreated by an older install after the rename), `fragment`, `fragment_remote` (a fragment in `remote-runs/<remote>/`, Migration step 1),
+  i.e. recreated by an older install after the rename), `fragment`, `fragment_remote` (a fragment in `remote-runs/<root id>/<remote>/`, Migration step 1),
   `campaign_json`, `ledger_json` (live reap
   ledger), `ledger_reverted` (reverted reap ledger) or `submit_parquet`; precedence is that order.
   (`corrupt`, below, marks manifest-only chains and never enters a fold.)
@@ -308,10 +308,14 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   - *Campaigns:* `status='concluded'` is sticky: the base is concluded if any import says so,
     with `concluded_at` taken by source precedence, then earliest `ts`.
   - *Every field except run status* keeps the first non-empty value in order of source
-    precedence, then `ts`, then eid. So a fragment never blanks a field (e.g. `metadata`,
+    precedence, then `ts`, then eid (empty means absent, SQL NULL, `""`, `[]` or `{}`; `0`,
+    `0.0` and `false` are values). So a fragment never blanks a field (e.g. `metadata`,
     `output_metadata`, postmortem fields) that a warm import set.
-- **Run status (both stages).** The status-dependent fields (`status`, end time, `exit_code`,
-  `outcome` when not overridden) come together from the single highest-ranked *status claim*:
+- **Run status (both stages).** The status-dependent fields, i.e. everything the runner sets at finish
+  (`runner.py:781-805`: `status`, end time, `exit_code`, `duration_s`, `output_paths`,
+  `outcome` when not overridden, `outcome_error_reason`, `outcome_is_residual`,
+  `adversarial_check_status`/`_result`, `parity_run_type`, `differential_status`/`_off_value`/
+  `_on_value`; not `metadata`, which merges by the stage-1 rule), come together from the single highest-ranked *status claim*:
   - rank 2, terminal (`completed`, `failed`, `killed`; `runner.py:613,657,679,687`): a
     `run.finished`, or a `run.imported` with a terminal status;
   - rank 1, `abandoned` (`reap.py:288`): a `run.reaped` or a `run.imported` with status
@@ -438,7 +442,7 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   fallback and D7's mirror protect cluster runs too. Branches on either side are irrelevant,
   since the log is ignored.
   The old catalog rsync in `sync.py:54-119` narrows at cut-over to pulling legacy fragments
-  only, into the `remote-runs/<remote>/` mirror of Migration step 1, so late cluster writes by an older bathos still arrive for `bth verify` to report.
+  only, into the `remote-runs/<root id>/<remote>/` mirror of Migration step 1, so late cluster writes by an older bathos still arrive for `bth verify` to report.
   Removing it is future work.
 - Refs created on the cluster clone stay there, as today. Moving provenance refs between
   clones is out of scope (D4).
@@ -462,8 +466,10 @@ switched on in one step.
 1. **Quiesce:** holding the writers lock shared (as any local writer does), it first pulls the legacy catalog from every configured remote (the existing
    `sync.py` rsync), so finished cluster runs whose fragments were never pulled are imported, and additionally mirrors
    each remote's `runs/` in full (no `--ignore-existing`; `--checksum`, deleting nothing) into
-   `~/.bth/catalog/remote-runs/<remote>/`, never into local `runs/`, so a fragment pulled while
-   `running` and finished remotely since (which `--ignore-existing`, `sync.py:122`, never
+   `~/.bth/catalog/remote-runs/<root id>/<remote>/` (root id from the project's `main_root`, as
+   for every other root, because remote names such as `engaging` repeat across projects; the
+   same path is the source locator and the watermark root), never into local `runs/`, so a fragment pulled while
+   `running` and finished remotely since (which `--ignore-existing`, `sync.py:123`, never
    refreshes) is still imported with its terminal status; it
    then runs the reaper (reconciling stale `running` rows through `sacct`) with its warm-tier
    reconciliation disabled (new keyword `reconcile_warm=False`, default `True`, gating
@@ -496,8 +502,9 @@ switched on in one step.
    changed since; postmortem overrides whose files are only in a deleted worktree; campaign
    members whose legacy e-value used the fragment outcome rather than the postmortem-overridden
    one; unresolvable project; a fragment not yet compacted into `bathos.db`, including those just
-   pulled or reaped in step 1: any column of such a run, e.g. a staged status or `metadata.reaped`
-   newer than its warm row); unclassified differences abort. The classified residuals are
+   pulled or reaped in step 1: a column of such a run whose staged value equals the value that
+   fragment itself carries, e.g. a staged status or `metadata.reaped` newer than its warm row;
+   a staged value the fragment does not explain stays unclassified); unclassified differences abort. The classified residuals are
    written to a canonical report (exactly one JSON line per differing `(table, key, column)`,
    each line exactly the object `{table, key, column, class, legacy_value, staged_value}` with
    `key` the row's primary key as a JSON array, `class` the allow-listed class name, and each
@@ -538,7 +545,7 @@ switched on in one step.
    so verify and importer never disagree; it catches late cluster pulls whatever their mtime,
    and rows of a `bathos.db` recreated beside `bathos.db.frozen`, which clear once imported) with the writing host; re-running
    `bth migrate --import-legacy` imports it (sources: `bathos.db.frozen`, any new `bathos.db`,
-   fragments, submit Parquet, campaign JSON).
+   fragments in `runs/` and `remote-runs/`, reap ledgers, submit Parquet, campaign JSON).
 
 ## Acceptance criteria
 
@@ -602,7 +609,7 @@ switched on in one step.
   same runs, outcomes and sidecars; members without a declaration keep their stored `evalue`;
   the result does not depend on the order in which member-run events arrive.
 - AC-23. After cut-over, a write by an older bathos (fragment, submit Parquet, or new
-  `bathos.db`), including a fragment pulled late with an mtime older than the migration, is
+  `bathos.db`), including a fragment pulled late into `remote-runs/` with an mtime older than the migration, is
   reported by `bth verify`, and re-running `bth migrate --import-legacy` imports
   it; a third run changes nothing.
 - AC-24. On fixture catalogs, `bth verify` emits one structured finding for each of: threshold
@@ -625,7 +632,9 @@ switched on in one step.
   reverted again imports every ledger and re-importing it appends nothing; an aborted migration leaves no imported
   event in any project log and no `~/.bth/catalog/index.db`; abort, retry, switch leaves every
   imported event in the logs.
-- AC-29. `bth migrate --to-log` killed during step 1 (after the pull, and after the reap), during step 2, during step 3, and after each of step 4's
+- AC-29. A `bth submit` that takes the shared lock between step 1's shared hold and its
+  exclusive lock makes migrate refuse after the re-check. `bth migrate --to-log` killed during
+  step 1 (after the pull, and after the reap), during step 2, during step 3, and after each of step 4's
   actions (a)-(e), then re-run, completes the switch with the same set of `(eid, kind, entity,
   data)` events and the same derived tables as an uninterrupted run (segment names and envelope
   `writer`/`seq` may differ); for a kill before the marker, a legacy write made while it was
@@ -643,7 +652,9 @@ switched on in one step.
   `staged_value: null`, and the reaped run's lines carry the class of runs pulled or reaped in
   step 1; changing any one legacy value in the fixture changes the report's sha256. A second
   fixture whose local fragment was pulled `running` while its `remote-runs/` copy is terminal
-  folds that run to the terminal status, not `abandoned`.
+  folds that run to the terminal status, not `abandoned`, with `duration_s` and `output_paths`
+  from the remote copy; and two projects whose remotes share the name `engaging` keep separate
+  `remote-runs/` mirrors.
 
 ## Order of delivery
 
