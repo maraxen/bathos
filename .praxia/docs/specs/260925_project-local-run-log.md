@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: v15 (after adversarial cycle 15)
+revision: v16 (after adversarial cycle 16)
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -61,7 +61,8 @@ invest_overrides: []
   (cisternal's dirty check, `capture.py:196`), so appends never mark the tree dirty or force a
   provenance snapshot, and checkout/merge/branch switch never touch them. `bth` checks
   `git check-ignore -q .bth/log/x`; if not ignored it adds `/.bth/log/` to `.gitignore`
-  (`bth init`) or fails `bth run` with a structured error.
+  (`bth init`) or fails `bth run` with a structured error. With no git repository (a
+  `.bth.toml`-only project) there is nothing to dirty and the check is skipped.
 - **D4. Provenance comes only from cisternal.** `run.started` embeds `GitState` (hash, branch,
   dirty, dirty_content_id, provenance_source) and the `PinResult` (pinned SHA,
   `refs/bathos/runs/<run_id>` or `refs/bathos/wip/<run_id>` for a dirty tree, manifest entry),
@@ -84,7 +85,8 @@ invest_overrides: []
   error naming that command. SLURM jobs use `BTH_PROJECT_ID`, which `bth submit` exports from
   the local id; a job with neither writes `project_id: null` and ingest maps its `project` slug
   through `projects.toml`, with a warning. The id is stable across moves, clones and worktrees.
-  Forks or copies share it deliberately; segment names never collide, and `bth verify` flags
+  Forks or copies share it deliberately; segment names never collide between writers (a
+  `cp -r` copy duplicates existing files, which eid dedup absorbs), and `bth verify` flags
   two registered roots with the same id (AC-24). The mirror
   protects against `git clean -fdX` and loss of the main checkout. **Ingest reads both copies
   and deduplicates by `eid`**, so neither is "authoritative on divergence": a line that reached
@@ -235,6 +237,7 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   (`bathos.db.frozen`, or `bathos.db` before cut-over), `warm_recreated` (a `bathos.db` recreated
   after cut-over by an older install), `fragment`, `campaign_json`, `ledger_json` (live reap
   ledger), `ledger_reverted` (reverted reap ledger) or `submit_parquet`; precedence is that order.
+  (`corrupt`, below, marks manifest-only chains and never enters a fold.)
   Each also carries `data.source_locator` and `data.source_sha256`: sha256 of the canonical
   source record, which is the record as a JSON object with sorted keys, no whitespace, UTF-8,
   timestamps as RFC3339 UTC and floats in shortest round-trip form. This form is versioned
@@ -343,11 +346,12 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
 - Watermarks live in an `ingest_watermarks` table inside `index.db`, so they swap atomically
   with the data they describe. One row per file: `(root kind, root id, path relative to that
   root, size, byte_offset)`,
-  where (root kind: root id) is one of `project`: `project_id` (the main root's `.bth/log/`,
+  where (root kind: root id) is one of `project`: `main_root` (the main root's `.bth/log/`,
   excluding `remote/`); `mirror`: `project_id` or `_null/<slug>`; `fallback`: slug;
   `unaffiliated`: constant; `remote-log`, `remote-fallback`, `remote-mirror`:
-  `(project_id, remote)`; `staging`: the attempt id (migration step 3 only, never read by
-  `connect_read`). Every file belongs to exactly one root. A file smaller than its watermark, or vanished, is re-read from the other copy
+  `(main_root, remote)`; `staging`: the attempt id (migration step 3 only, never read by
+  `connect_read`). Root ids use `main_root`, not `project_id`, wherever two roots can share
+  an id, so every file belongs to exactly one root. A file smaller than its watermark, or vanished, is re-read from the other copy
   (D7) and reported by `bth verify`; `eid` dedup makes re-reading safe. Inodes are not used.
 - **When ingest runs:** on `bth compact`, and non-blockingly (skipped if the lock is held) at the
   end of commands that write events (`bth run`, campaign and claim commands, MCP equivalents).
@@ -372,9 +376,9 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
 - All 25 modules that call `duckdb.connect(` today (65 call sites) move to this API or to the
   ingest path; AC-18 fails the build on any other `duckdb.connect` against a catalog path.
 - If `index.db` does not exist yet, the views are built from the events alone.
-- **Before cut-over (flag off)** `connect_read()` attaches `bathos.db` read-only instead and
-  creates no views, so production behaviour, including today's lock failure, is unchanged until
-  Migration step 4 (the switch). G3 holds only from cut-over.
+- **Before cut-over (flag off)** `connect_read()` attaches `bathos.db` read-only instead
+  (directly, not through `connect_legacy`) and creates no views, so production behaviour,
+  including today's lock failure, is unchanged until Migration step 4 (the switch). G3 holds only from cut-over.
 
 ### Cluster
 
@@ -487,10 +491,12 @@ switched on in one step.
 - AC-17. Differential fold test: for randomized operation sequences on campaigns, anchors and
   runs, the old upsert/update code and the new fold produce identical rows.
 - AC-18. No module other than `bathos.index` and the ingest path calls `duckdb.connect` on a
-  catalog path (AST test). Legacy databases (`bathos.db`, `bathos.db.frozen`) are opened only
-  through `bathos.index.connect_legacy(path)`, which opens read-only and, if the file is locked
-  by another process (e.g. an older install), returns a structured `legacy_db_locked` result
-  instead of raising; the importer and `bth verify` both use it.
+  catalog path (AST test). The importer and `bth verify` open legacy databases (`bathos.db`,
+  `bathos.db.frozen`) only through `bathos.index.connect_legacy(path)`, which opens read-only
+  and, if the file is locked by another process (e.g. an older install), returns a structured
+  `legacy_db_locked` result instead of raising; `bth migrate --to-log` aborts on it, a
+  post-cut-over `--import-legacy` skips that source and reports it. Before cut-over, the
+  flag-off `connect_read` branch and the legacy write sites are on the step-3 allow-list.
 - AC-19. Ingest refuses the swap when a `.wal` remains after close.
 - AC-20. Arrival-order independence: delivering the same events in any order and in any
   batching (including a late event with an earlier `ts`) yields the same index and the same
@@ -531,16 +537,19 @@ switched on in one step.
 ## Order of delivery
 
 1. AC-11 (test isolation).
-2. Writer, resolution, D3 check, `project_id` via `bth init`/`--assign-id`, mirror (AC-5,
-   AC-7, AC-9, AC-10, AC-14, AC-16, AC-27), behind a feature flag; production still uses the old
-   tiers. Every write site in "Authoritative writes" gains its event emission behind the same
+2. Writer, resolution, D3 check, `project_id` via `bth init`/`--assign-id`, mirror and
+   `bth log restore` (AC-10, AC-16, AC-27, plus the log-level halves of AC-5, AC-9 and AC-14:
+   the right lines exist in the project log and the mirror), behind a feature flag; production
+   still uses the old tiers. Every write site in "Authoritative writes" gains its event emission behind the same
    flag (AC-25).
 3. `index.db`, `events` table, fold (incl. the campaign fold), generation-swap ingest, read API
    (flag off: attaches `bathos.db` read-only); move all 25 modules to it, exercised against
-   fixture catalogs (AC-1, AC-12, AC-15, AC-17, AC-18, AC-19, AC-20, AC-22). AC-18 is enforced
+   fixture catalogs (AC-1, AC-5, AC-7's ingest half, AC-9, AC-12, AC-15, AC-17, AC-18, AC-19,
+   AC-20, AC-22). AC-18 is enforced
    from here; the legacy write sites (flag-off branch only) sit on an explicit allow-list in the
    AC-18 test, which step 5 empties.
-4. Legacy importer, reaper on folded status, `bth verify` checks (AC-21, AC-23, AC-24, AC-26, AC-28) and the new cluster log pull in
+4. Legacy importer, reaper on folded status, `bth verify` checks (AC-7's verify half, AC-14,
+   AC-21, AC-23, AC-24, AC-26, AC-28) and the new cluster log pull in
    `bth sync --pull` (log, fallback, mirror; AC-6 and the cluster variants of AC-8, AC-9).
 5. Assign ids in every registered project (migration step 0), then cut-over via
    `bth migrate --to-log` (AC-13); then AC-2, AC-3, AC-4 and AC-8 hold in production.
