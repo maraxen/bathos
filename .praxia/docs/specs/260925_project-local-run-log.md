@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: v16 (after adversarial cycle 16)
+revision: v17 (after adversarial cycle 17)
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -376,9 +376,11 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
 - All 25 modules that call `duckdb.connect(` today (65 call sites) move to this API or to the
   ingest path; AC-18 fails the build on any other `duckdb.connect` against a catalog path.
 - If `index.db` does not exist yet, the views are built from the events alone.
-- **Before cut-over (flag off)** `connect_read()` attaches `bathos.db` read-only instead
-  (directly, not through `connect_legacy`) and creates no views, so production behaviour,
-  including today's lock failure, is unchanged until Migration step 4 (the switch). G3 holds only from cut-over.
+- **Before cut-over (flag off)** `connect_read()` does exactly what each caller does today:
+  `duckdb.connect(bathos.db if it exists else "")` (`query.py:427-429`), read-write, with no
+  views and no `connect_legacy`. So production behaviour, including unqualified table names, DML
+  in `bth sql` and today's lock failure, is unchanged until Migration step 4 (the switch); the
+  read-only views and the DML refusal are part of the switch. G3 holds only from cut-over.
 
 ### Cluster
 
@@ -410,8 +412,9 @@ There is no dual-write phase: the new path is built and tested against fixture c
 switched on in one step.
 
 0. **Ids:** `bth migrate --to-log` refuses to start until every registered root's `.bth.toml`
-   has a `[project] id` present in its committed `HEAD` (it lists the roots missing one and
-   the `bth init --assign-id` command).
+   has a `[project] id` present in its committed `HEAD`, or, for a root with no git
+   repository, present in the file (it lists the roots missing one and the
+   `bth init --assign-id` command).
 1. **Quiesce:** it first pulls the legacy catalog from every configured remote (the existing
    `sync.py` rsync), so finished cluster runs whose fragments were never pulled are imported; it
    then runs `bth reap` (reconciling stale `running` rows through `sacct`),
@@ -495,8 +498,8 @@ switched on in one step.
   `bathos.db.frozen`) only through `bathos.index.connect_legacy(path)`, which opens read-only
   and, if the file is locked by another process (e.g. an older install), returns a structured
   `legacy_db_locked` result instead of raising; `bth migrate --to-log` aborts on it, a
-  post-cut-over `--import-legacy` skips that source and reports it. Before cut-over, the
-  flag-off `connect_read` branch and the legacy write sites are on the step-3 allow-list.
+  post-cut-over `--import-legacy` skips that source and reports it. Before cut-over the legacy
+  write sites are on the AC-18 test's allow-list (delivery step 3).
 - AC-19. Ingest refuses the swap when a `.wal` remains after close.
 - AC-20. Arrival-order independence: delivering the same events in any order and in any
   batching (including a late event with an earlier `ts`) yields the same index and the same
@@ -537,8 +540,8 @@ switched on in one step.
 ## Order of delivery
 
 1. AC-11 (test isolation).
-2. Writer, resolution, D3 check, `project_id` via `bth init`/`--assign-id`, mirror and
-   `bth log restore` (AC-10, AC-16, AC-27, plus the log-level halves of AC-5, AC-9 and AC-14:
+2. Writer, resolution, D3 check, `project_id` via `bth init`/`--assign-id`, root registration
+   in `projects.toml` (Discovery), mirror and `bth log restore` (AC-10, AC-16, AC-27, plus the log-level halves of AC-5, AC-9 and AC-14:
    the right lines exist in the project log and the mirror), behind a feature flag; production
    still uses the old tiers. Every write site in "Authoritative writes" gains its event emission behind the same
    flag (AC-25).
@@ -548,11 +551,14 @@ switched on in one step.
    AC-20, AC-22). AC-18 is enforced
    from here; the legacy write sites (flag-off branch only) sit on an explicit allow-list in the
    AC-18 test, which step 5 empties.
-4. Legacy importer, reaper on folded status, `bth verify` checks (AC-7's verify half, AC-14,
-   AC-21, AC-23, AC-24, AC-26, AC-28) and the new cluster log pull in
+4. Legacy importer, reaper on folded status, `bth verify` checks, and `bth migrate --to-log`
+   (Migration steps 0-4: staging, diff, abort, switch) built and exercised against fixture
+   catalogs (AC-7's verify half, AC-13, AC-14, AC-21, AC-23, AC-24, AC-26, AC-28), and the new
+   cluster log pull in
    `bth sync --pull` (log, fallback, mirror; AC-6 and the cluster variants of AC-8, AC-9).
-5. Assign ids in every registered project (migration step 0), then cut-over via
-   `bth migrate --to-log` (AC-13); then AC-2, AC-3, AC-4 and AC-8 hold in production.
+5. Assign ids in every registered project (migration step 0), then run the step-4
+   `bth migrate --to-log` on the real catalog (its AC-13 residual report is signed off); then
+   AC-2, AC-3, AC-4 and AC-8 hold in production.
 
 ## Risks
 
