@@ -4,6 +4,7 @@ from pathlib import Path
 import duckdb
 
 from bathos.catalog import init_catalog, read_runs
+from bathos.init import init_project
 from bathos.runner import run_script
 
 
@@ -65,6 +66,45 @@ def test_run_captures_git_hash(tmp_catalog: Path, tmp_path: Path):
     runs = read_runs(tmp_catalog)
     assert runs[0].git_hash != "unknown"
     assert len(runs[0].git_hash) == 40
+
+
+def test_two_consecutive_runs_on_clean_tree_both_record_dirty_false(tmp_path: Path):
+    """Debt #1943: `bth run` appends to `.bth/refs/manifest.jsonl` before the script runs.
+    That write must not be what makes the SECOND run see a dirty tree."""
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    catalog = tmp_path / "catalog"
+
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "t@t.com"], cwd=repo, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "T"], cwd=repo, check=True, capture_output=True
+    )
+
+    init_project(repo, slug="p", catalog_dir=catalog)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "bth init"], cwd=repo, check=True, capture_output=True
+    )
+
+    init_catalog(catalog)
+    for _ in range(2):
+        run_script(
+            argv=[sys.executable, "-c", "pass"],
+            project_slug="p",
+            catalog_dir=catalog,
+            output_paths=[],
+            tags=[],
+            cwd=repo,
+        )
+
+    runs = read_runs(catalog)
+    assert len(runs) == 2
+    assert [r.git_dirty for r in runs] == [False, False]
 
 
 def test_run_records_output_paths(tmp_catalog: Path):

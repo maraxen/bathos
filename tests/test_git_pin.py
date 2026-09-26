@@ -4,7 +4,9 @@ from pathlib import Path
 
 from bathos.git_pin import (
     EXPORT_DIRNAME,
+    MANIFEST_GITIGNORE_LINES,
     MANIFEST_RELPATH,
+    ensure_manifest_ignored,
     ignored_provenance_paths,
     import_bundles,
     manifest_entry,
@@ -178,9 +180,7 @@ def test_pinned_commit_survives_branch_deletion(tmp_path: Path):
 
     pin_run("run-branch", branch_head, "throwaway", dirty=False, cwd=tmp_path)
 
-    subprocess.run(
-        ["git", "checkout", "-"], cwd=tmp_path, check=True, capture_output=True
-    )
+    subprocess.run(["git", "checkout", "-"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(
         ["git", "branch", "-D", "throwaway"], cwd=tmp_path, check=True, capture_output=True
     )
@@ -192,7 +192,9 @@ def test_pinned_commit_survives_branch_deletion(tmp_path: Path):
     assert _rev(tmp_path, "refs/bathos/runs/run-branch") == branch_head
     assert (
         subprocess.run(
-            ["git", "cat-file", "-e", f"{branch_head}^{{commit}}"], cwd=tmp_path, capture_output=True
+            ["git", "cat-file", "-e", f"{branch_head}^{{commit}}"],
+            cwd=tmp_path,
+            capture_output=True,
         ).returncode
         == 0
     )
@@ -380,9 +382,7 @@ def test_oversized_worktree_degrades_to_metadata_instead_of_bloating(tmp_path: P
     (tmp_path / "outputs").mkdir()
     (tmp_path / "outputs" / "big.bin").write_bytes(b"x" * 200_000)
 
-    result = pin_run(
-        "run-big", head, "main", dirty=True, cwd=tmp_path, max_snapshot_bytes=50_000
-    )
+    result = pin_run("run-big", head, "main", dirty=True, cwd=tmp_path, max_snapshot_bytes=50_000)
 
     assert result.snapshot_mode == "metadata_only"
     assert result.wip_commit == ""
@@ -447,15 +447,11 @@ def test_manifest_is_found_from_a_sibling_worktree(tmp_path: Path):
 
 
 def _clone_of(src: Path, dest: Path) -> Path:
-    subprocess.run(
-        ["git", "clone", "-q", str(src), str(dest)], check=True, capture_output=True
-    )
+    subprocess.run(["git", "clone", "-q", str(src), str(dest)], check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.email", "t@t.com"], cwd=dest, check=True, capture_output=True
     )
-    subprocess.run(
-        ["git", "config", "user.name", "T"], cwd=dest, check=True, capture_output=True
-    )
+    subprocess.run(["git", "config", "user.name", "T"], cwd=dest, check=True, capture_output=True)
     return dest
 
 
@@ -468,7 +464,11 @@ def test_dirty_run_exports_a_bundle_clean_run_does_not(tmp_path: Path):
 
     (tmp_path / "tracked.txt").write_text("ran like this")
     dirty = pin_run(
-        "run-dirty", head, "main", dirty=True, cwd=tmp_path,
+        "run-dirty",
+        head,
+        "main",
+        dirty=True,
+        cwd=tmp_path,
         export_dir=tmp_path / EXPORT_DIRNAME,
     )
     assert dirty.bundle_path
@@ -488,7 +488,11 @@ def test_bundle_round_trips_the_snapshot_into_a_separate_clone(tmp_path: Path):
     (cluster / "tracked.txt").write_text("what actually ran on the cluster")
     (cluster / "cluster_only.py").write_text("print('remote')")
     result = pin_run(
-        "run-remote", head, "main", dirty=True, cwd=cluster,
+        "run-remote",
+        head,
+        "main",
+        dirty=True,
+        cwd=cluster,
         export_dir=cluster / EXPORT_DIRNAME,
     )
     assert result.wip_commit
@@ -553,7 +557,11 @@ def test_import_refuses_a_bundle_whose_base_is_missing(tmp_path: Path):
     unpushed_head = _rev(cluster, "HEAD")
     (cluster / "tracked.txt").write_text("dirty on top of an unpushed base")
     result = pin_run(
-        "run-orphan", unpushed_head, "main", dirty=True, cwd=cluster,
+        "run-orphan",
+        unpushed_head,
+        "main",
+        dirty=True,
+        cwd=cluster,
         export_dir=cluster / EXPORT_DIRNAME,
     )
     assert result.bundle_path
@@ -582,7 +590,11 @@ def test_import_is_idempotent(tmp_path: Path):
     cluster = _clone_of(origin, tmp_path / "cluster")
     (cluster / "tracked.txt").write_text("x")
     result = pin_run(
-        "run-twice", head, "main", dirty=True, cwd=cluster,
+        "run-twice",
+        head,
+        "main",
+        dirty=True,
+        cwd=cluster,
         export_dir=cluster / EXPORT_DIRNAME,
     )
 
@@ -615,7 +627,11 @@ def test_bundle_is_a_delta_not_the_whole_history(tmp_path: Path):
 
     (tmp_path / "tracked.txt").write_text("small change")
     result = pin_run(
-        "run-delta", head, "main", dirty=True, cwd=tmp_path,
+        "run-delta",
+        head,
+        "main",
+        dirty=True,
+        cwd=tmp_path,
         export_dir=tmp_path / EXPORT_DIRNAME,
     )
 
@@ -649,7 +665,9 @@ def test_dirty_snapshot_uses_bathos_identity(tmp_path: Path):
         capture_output=True,
     ).stdout.strip()
 
-    assert log_output == "bathos <bathos@localhost>", f"Expected bathos identity but got: {log_output}"
+    assert log_output == "bathos <bathos@localhost>", (
+        f"Expected bathos identity but got: {log_output}"
+    )
 
 
 def test_dirty_snapshot_uses_bathos_message_template(tmp_path: Path):
@@ -742,8 +760,7 @@ def test_explicit_export_dir_overrides_auto_detection(tmp_path: Path):
     try:
         os.environ["SLURM_JOB_ID"] = "12345"
         result = pin_run(
-            "run-explicit", head, "main", dirty=True, cwd=tmp_path,
-            export_dir=explicit_export_dir
+            "run-explicit", head, "main", dirty=True, cwd=tmp_path, export_dir=explicit_export_dir
         )
 
         assert result.wip_commit
@@ -756,3 +773,102 @@ def test_explicit_export_dir_overrides_auto_detection(tmp_path: Path):
             os.environ.pop("SLURM_JOB_ID", None)
         else:
             os.environ["SLURM_JOB_ID"] = original_slurm
+
+
+# ---------------------------------------------------------------------------
+# ensure_manifest_ignored -- debt #1943
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_manifest_ignored_is_a_noop_outside_a_repo(tmp_path: Path):
+    """No repo -- pin_run itself no-ops, so there's nothing to make ignored."""
+    assert ensure_manifest_ignored(tmp_path) is True
+    assert not (tmp_path / ".gitignore").exists()
+
+
+def _exclude_file(repo: Path) -> Path:
+    out = subprocess.run(
+        ["git", "rev-parse", "--git-path", "info/exclude"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    path = Path(out)
+    return path if path.is_absolute() else repo / path
+
+
+def test_ensure_manifest_ignored_writes_local_exclude_not_gitignore(tmp_path: Path):
+    """`bth run` must never edit the tracked .gitignore (that would dirty the tree it is
+    protecting); the patterns go to the untracked info/exclude."""
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text("*.pyc\n")
+
+    assert ensure_manifest_ignored(tmp_path) is True
+
+    assert (tmp_path / ".gitignore").read_text() == "*.pyc\n"
+    exclude = _exclude_file(tmp_path).read_text()
+    for line in MANIFEST_GITIGNORE_LINES:
+        assert line in exclude
+
+
+def test_ensure_manifest_ignored_leaves_everything_alone_when_already_ignored(
+    tmp_path: Path,
+):
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text("/.bth/refs/manifest.jsonl\n")
+    exclude_before = _exclude_file(tmp_path)
+    before = exclude_before.read_text() if exclude_before.exists() else None
+
+    assert ensure_manifest_ignored(tmp_path) is True
+
+    after = exclude_before.read_text() if exclude_before.exists() else None
+    assert after == before
+
+
+def test_ensure_manifest_ignored_is_idempotent(tmp_path: Path):
+    _init_repo(tmp_path)
+    ensure_manifest_ignored(tmp_path)
+    first = _exclude_file(tmp_path).read_text()
+
+    assert ensure_manifest_ignored(tmp_path) is True
+    assert _exclude_file(tmp_path).read_text() == first
+
+
+def test_ensure_manifest_ignored_reports_false_when_a_negation_rule_defeats_it(
+    tmp_path: Path,
+):
+    """A `!` negation in .gitignore outranks info/exclude, so it un-ignores the manifest
+    even after ensure_manifest_ignored adds its patterns; the authoritative check-ignore
+    must then report False."""
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text("!/.bth/refs/manifest.jsonl\n")
+
+    assert ensure_manifest_ignored(tmp_path) is False
+
+
+def test_manifest_write_does_not_dirty_the_tree_once_ignored(tmp_path: Path):
+    """The behavior debt #1943 actually cares about: appending to the manifest after
+    `ensure_manifest_ignored` must not register as a change under `git status --porcelain`.
+    """
+    head = _init_repo(tmp_path)
+    assert ensure_manifest_ignored(tmp_path) is True
+    # No commit needed: ensure_manifest_ignored must not have modified any tracked file.
+    assert (
+        subprocess.run(
+            ["git", "status", "--porcelain"], cwd=tmp_path, text=True, capture_output=True
+        ).stdout.strip()
+        == ""
+    )
+
+    pin_run("run-clean-1", head, "main", dirty=False, cwd=tmp_path)
+    status_after_first = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=tmp_path, text=True, capture_output=True
+    ).stdout
+    assert status_after_first.strip() == ""
+
+    pin_run("run-clean-2", head, "main", dirty=False, cwd=tmp_path)
+    status_after_second = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=tmp_path, text=True, capture_output=True
+    ).stdout
+    assert status_after_second.strip() == ""
