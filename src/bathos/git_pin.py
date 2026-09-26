@@ -126,14 +126,15 @@ def ignored_provenance_paths(cwd: Path) -> tuple[str, ...]:
 
 
 def ensure_manifest_ignored(cwd: Path) -> bool:
-    """Best-effort: make sure the run manifest is gitignored before `pin_run` writes to it.
+    """Best-effort: make sure the run manifest is ignored before `pin_run` writes to it.
 
-    Handles the case `bth init` (via `bathos.init._ensure_gitignore_entries`) already
-    covers for NEW projects, plus the one it can't: a project that was initialized before
-    this fix existed, or whose `.gitignore` was hand-edited to un-ignore the manifest.
-    Appends `MANIFEST_GITIGNORE_LINES` to `<repo_root>/.gitignore` if missing, then asks
-    git itself whether the manifest path is now actually ignored -- a hand-added negation
-    rule (`!.bth/refs/manifest.jsonl`) would otherwise silently defeat our own append.
+    Covers projects initialized before `bth init` added the manifest to `.gitignore`
+    (`bathos.init._ensure_gitignore_entries`). `bth run` must not edit the tracked
+    `.gitignore` itself -- that edit would dirty the very tree whose cleanliness it is
+    protecting -- so the patterns go into the repository's local, untracked exclude file
+    (`git rev-parse --git-path info/exclude`, shared by every linked worktree). Then git is
+    asked whether the manifest is actually ignored, since a `!` negation in `.gitignore`
+    (which outranks info/exclude) can defeat it.
 
     Never raises -- provenance bookkeeping must not be able to fail a run (see this
     module's docstring). Returns whether the manifest is (now) ignored; `False` means
@@ -143,35 +144,51 @@ def ensure_manifest_ignored(cwd: Path) -> bool:
     if root is None:
         return True  # nothing to ignore: pin_run is a no-op outside a repo anyway
 
-    gitignore = root / ".gitignore"
-    try:
-        existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
-    except OSError:
-        existing = None
-
-    if existing is not None:
-        missing = [line for line in MANIFEST_GITIGNORE_LINES if line not in existing]
-        if missing:
-            try:
-                new_text = existing
-                if new_text and not new_text.endswith("\n"):
-                    new_text += "\n"
-                new_text += "".join(f"{line}\n" for line in missing)
-                gitignore.write_text(new_text, encoding="utf-8")
-            except OSError:
-                pass  # best-effort; the authoritative check below still runs
-
     manifest_rel = MANIFEST_RELPATH.as_posix()
+
+    def _is_ignored() -> bool | None:
+        try:
+            result = subprocess.run(
+                ["git", "check-ignore", "-q", "--no-index", manifest_rel],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+        except OSError:
+            return None
+        return result.returncode == 0
+
+    if _is_ignored():
+        return True
+
     try:
-        result = subprocess.run(
-            ["git", "check-ignore", "-q", "--no-index", manifest_rel],
+        git_path = subprocess.run(
+            ["git", "rev-parse", "--git-path", "info/exclude"],
             cwd=root,
             capture_output=True,
             text=True,
         )
     except OSError:
         return False
-    return result.returncode == 0
+    if git_path.returncode != 0 or not git_path.stdout.strip():
+        return False
+    exclude = Path(git_path.stdout.strip())
+    if not exclude.is_absolute():
+        exclude = root / exclude
+    try:
+        existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+        missing = [line for line in MANIFEST_GITIGNORE_LINES if line not in existing]
+        if missing:
+            new_text = existing
+            if new_text and not new_text.endswith("\n"):
+                new_text += "\n"
+            new_text += "".join(f"{line}\n" for line in missing)
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            exclude.write_text(new_text, encoding="utf-8")
+    except OSError:
+        pass  # best-effort; the authoritative check below still runs
+
+    return bool(_is_ignored())
 
 
 def ignored_declared_paths(paths: list[str] | tuple[str, ...], cwd: Path) -> tuple[str, ...]:

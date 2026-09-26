@@ -543,15 +543,15 @@ def run_script(
         if bundle and bundle.path:
             declared.append(str(bundle.path))
 
-        # Debt #1943: ensure the run manifest (.bth/refs/manifest.jsonl) is gitignored
-        # BEFORE pin_run appends to it. Otherwise the manifest write itself -- which
+        # Debt #1943: ensure the run manifest (.bth/refs/manifest.jsonl) is ignored (via the
+        # untracked .git/info/exclude, never the tracked .gitignore) BEFORE pin_run appends. Otherwise the manifest write itself -- which
         # happens on every run -- is what makes the NEXT run's git-dirty capture see an
         # uncommitted change, even on an otherwise-clean tree.
         if not ensure_manifest_ignored(cwd):
             event("run.manifest_gitignore_warning", run_uuid=run.id, cwd=str(cwd))
             print(
                 "warning: could not ensure the run manifest (.bth/refs/manifest.jsonl) is "
-                "gitignored -- a future run's git-dirty state may be polluted by this run's "
+                "ignored -- a future run's git-dirty state may be polluted by this run's "
                 "own provenance bookkeeping. Check .gitignore for a rule (e.g. a `!` negation) "
                 "that un-ignores it.",
                 file=sys.stderr,
