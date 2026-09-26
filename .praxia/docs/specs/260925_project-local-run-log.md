@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: v7 (after adversarial cycle 7)
+revision: v8 (after adversarial cycle 8)
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -65,7 +65,8 @@ invest_overrides: []
 - **D4. Provenance comes only from cisternal.** `run.started` embeds `GitState` (hash, branch,
   dirty, dirty_content_id, provenance_source) and the `PinResult` (pinned SHA,
   `refs/bathos/runs/<run_id>` or `refs/bathos/wip/<run_id>` for a dirty tree, manifest entry),
-  computed where `runner.py` computes them today (`:546`, before the subprocess). bathos adds no
+  computed where `runner.py` computes them today (`capture_git_state` at `:415`, `pin_run` at
+  `:546`, both before the subprocess). bathos adds no
   git logic.
 - **D5. No Parquet written one record at a time.** The run fragments and the existing
   per-record ledger fragments (`blast_radius.py:116`, trust ledger, anchors, reap, archived
@@ -87,7 +88,8 @@ invest_overrides: []
   two registered roots with the same id (AC-24). The mirror
   protects against `git clean -fdX` and loss of the main checkout. **Ingest reads both copies
   and deduplicates by `eid`**, so neither is "authoritative on divergence": a line that reached
-  only one of them is still ingested. A mirror append failure is a warning, not a run failure.
+  only one of them is still ingested. Events with `project_id: null` (unaffiliated, or a SLURM job without an id) mirror to
+  `~/.bth/log-mirror/_null/<slug or _unaffiliated>/`. A mirror append failure is a warning, not a run failure.
   `bth log restore` copies back into the project log every mirror line (for this `project_id`)
   that the project log lacks; lines that reached neither copy are reported by `bth verify`, not invented.
 
@@ -190,6 +192,12 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
 - `data` is validated against a per-kind JSON Schema (shipped in `bathos.index.schemas`, one
   file per kind) at ingest; invalid or torn lines anywhere in a file go to a `quarantine` table
   with the reason and file offset.
+- **Only `\n`-terminated lines are read.** Bytes after a file's last `\n` are an unfinished
+  append (a writer mid-`write()`, or a segment copied mid-line by a pull), not a torn line: they
+  are left unread and the watermark stops at the last `\n`. Such a tail is quarantined as torn
+  only once its writer has provably finished with the segment (the same host and pid have a later
+  segment, or the file is unchanged for 7 days), and `bth verify` reports it. A torn line in the
+  middle of a file (followed by a `\n`) is quarantined at once.
 - An `eid` already in `events` is skipped if the line's bytes are identical; if they differ, the
   new line is quarantined with reason `eid_conflict` and `bth verify` reports it.
 
@@ -214,14 +222,21 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   (plus `campaign_run.imported` per legacy `campaign_runs` row, carrying its stored `evalue` and
   `seq_position`), built by merging that entity's legacy sources in precedence order
   **warm row > cool fragment > campaign JSON**, field by field (first non-empty value wins).
+  Every `*.imported` event carries `data.source_class`, the highest-precedence source that
+  contributed to it: `warm` (including `bathos.db.frozen` or a `bathos.db` recreated after
+  cut-over), `fragment`, `campaign_json`, `ledger_json` (reap ledger) or `submit_parquet`. It is
+  part of the hashed merged state, so it is part of the eid. The fold's "source precedence" means
+  this field, in that order.
   The importer never reads current sidecar or output files. `ts` is the source record's own
   time (run: end time if finished, else start; campaign: `concluded_at` or `started_at`; ledger
   rows: their own timestamp). eid = `uuid5(NAMESPACE_BATHOS,
   f"import:{kind}:{entity}:{sha256(merged state)}")`, so unchanged sources re-import as a no-op.
 - **Several imported events for one entity merge field by field**, never as whole-state
   replacement:
-  - *Runs:* status rank is `running` (0) < `completed` = `failed` = `killed` (1) (the stored
-    statuses, `runner.py:456,613,679,687`). The status-dependent fields (`status`, end time,
+  - *Runs:* status rank is `running` (0) < `abandoned` (1) < `completed` = `failed` = `killed`
+    (2) (the stored statuses: `runner.py:456,613,679,687`; `abandoned` by the reaper,
+    `reap.py:288`). So a late terminal fragment beats a reaper's `abandoned`, as a real finish
+    should. The status-dependent fields (`status`, end time,
     `exit_code`, `outcome` when not overridden) come together from the import with the highest
     rank; ties go by source precedence (warm-derived before fragment-only), then later `ts`,
     then eid. `incomplete` is never stored or imported; it is derived only (see below).
@@ -265,7 +280,8 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   which it is frozen read-only as a fallback.
 - Ingest inserts new events into `idx.events` (ignoring known eids) and re-folds every affected
   entity from its full history.
-- Ingest runs only on the local machine (never on cluster nodes, which only append logs). It
+- Ingest runs only on the local machine (never on cluster nodes, which only append logs): it is
+  skipped whenever `SLURM_JOB_ID` is set or `BTH_NO_INGEST=1`. It
   takes an exclusive `flock` on `~/.bth/catalog/ingest.lock` (local disk), copies `index.db` to
   `index.db.<gen>.tmp`, ingests into the copy, runs `CHECKPOINT`, closes it, refuses to proceed
   if `index.db.<gen>.tmp.wal` still exists, then `os.replace()`s it onto `index.db`.
@@ -300,20 +316,24 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
 - If `index.db` does not exist yet, the views are built from the events alone.
 - **Before cut-over (flag off)** `connect_read()` attaches `bathos.db` read-only instead and
   creates no views, so production behaviour, including today's lock failure, is unchanged until
-  step 5. G3 holds only from cut-over.
+  Migration step 4 (the switch). G3 holds only from cut-over.
 
 ### Cluster
 
 - SLURM jobs set `BTH_WORKSPACE_ROOT` (existing mechanism) to the cluster checkout, so they log
-  to its `.bth/log/`. `bth sync --pull` delegates to `myxcel pull` for that directory into the
-  local main checkout's `.bth/log/remote/<remote>/` (branches on either side are irrelevant,
-  since the log is ignored). The mirror is written locally when pulled segments are ingested.
+  to its `.bth/log/`. `bth sync --pull` gains a log pull (new work: `sync.py:115-131` calls
+  `rsync` directly today) that copies three remote directories into the local main checkout's
+  `.bth/log/remote/<remote>/`: the checkout's `.bth/log/` to `log/`, the remote
+  `~/.bth/log/fallback/<slug>/` to `fallback/`, and the remote `~/.bth/log-mirror/<project_id>/`
+  to `mirror/`. Each is a root kind for enumeration and watermarks (`remote-log`,
+  `remote-fallback`, `remote-mirror`); eid dedup makes the overlapping copies safe. So D6's
+  fallback and D7's mirror protect cluster runs too. Branches on either side are irrelevant,
+  since the log is ignored.
   The old catalog rsync in `sync.py:54-119` narrows at cut-over to pulling legacy fragments
   only, so late cluster writes by an older bathos still arrive for `bth verify` to report.
   Removing it is future work.
-- Refs created on the cluster clone stay there. For dirty cluster runs the pin's exported
-  bundle is pulled with the segments; `bth recover --import-bundles` imports it. Clean-tree
-  runs cite a commit that must exist on the remote branch; `bth check` reports it if not.
+- Refs created on the cluster clone stay there, as today. Moving provenance refs between
+  clones is out of scope (D4).
 
 ### Discovery
 
@@ -367,13 +387,18 @@ switched on in one step.
   both runs are recorded.
 - AC-5. Deleting a linked worktree after a run changes nothing in the index or the logs.
 - AC-6. A SLURM array (including a requeued task and a task running two `bth run`s) records
-  every run exactly once after two pulls.
-- AC-7. A torn line at the end of a segment or in the middle of a file (followed by good lines)
-  is quarantined with its offset and reported by `bth verify`; all good lines are ingested.
+  every run exactly once after two pulls, including when the first pull copies a segment
+  mid-line (no quarantine entry; the line ingests once after the second pull).
+- AC-7. A torn line in the middle of a file (followed by good lines) is quarantined with its
+  offset and reported by `bth verify`; all good lines are ingested. An unterminated tail is not
+  quarantined while its writer may still be appending, and is quarantined once the writer has a
+  later segment.
 - AC-8. With the project log unwritable: `run.started` goes to the fallback and the run proceeds;
   with both unwritable the script is not launched; a `run.finished` in the fallback exits with
-  the script's status plus a warning.
-- AC-9. Deleting an active segment mid-run loses no event: every line is ingested from the mirror.
+  the script's status plus a warning. Cluster variant: a SLURM `run.started` that lands in the
+  remote fallback is in the local index after one `bth sync --pull` and ingest.
+- AC-9. Deleting an active segment mid-run loses no event: every line is ingested from the mirror,
+  locally and (via the pulled remote mirror) for a cluster run.
 - AC-10. With `.bth/log/` not ignored, `bth run` fails with a structured error (or `bth init`
   adds the rule). Two consecutive runs on a clean tree both record `dirty=false`.
 - AC-11. An autouse fixture points `HOME` and every `BTH_*` path at `tmp_path`, and a test
@@ -392,8 +417,7 @@ switched on in one step.
   runs, the old upsert/update code and the new fold produce identical rows.
 - AC-18. No module other than `bathos.index` and the ingest path calls `duckdb.connect` on a
   catalog path (AST test).
-- AC-19. Ingest refuses the swap when a `.wal` remains after close, and a reader that attached
-  the previous generation completes its query correctly across the `os.replace`.
+- AC-19. Ingest refuses the swap when a `.wal` remains after close.
 - AC-20. Arrival-order independence: delivering the same events in any order and in any
   batching (including a late event with an earlier `ts`) yields the same index and the same
   read results as one sorted full ingest.
@@ -429,7 +453,8 @@ switched on in one step.
    fixture catalogs (AC-1, AC-12, AC-15, AC-17, AC-18, AC-19, AC-20, AC-22). AC-18 is enforced
    from here; the legacy write sites (flag-off branch only) sit on an explicit allow-list in the
    AC-18 test, which step 5 empties.
-4. Legacy importer, `bth verify` checks (AC-21, AC-23, AC-24) and cluster log pull (AC-6).
+4. Legacy importer, `bth verify` checks (AC-21, AC-23, AC-24) and the new cluster log pull in
+   `bth sync --pull` (log, fallback, mirror; AC-6 and the cluster variants of AC-8, AC-9).
 5. Assign ids in every registered project (migration step 0), then cut-over via
    `bth migrate --to-log` (AC-13); then AC-2, AC-3, AC-4 and AC-8 hold in production.
 
