@@ -151,7 +151,8 @@ key as the live kind:
 
 ### Mode (the flag and cut-over)
 
-- **Cut-over marker:** `~/.bth/catalog/cutover.json` (`{"at": <RFC3339>, "bathos": <version>}`),
+- **Cut-over marker:** `~/.bth/catalog/cutover.json` (`{"at": <RFC3339>, "bathos": <version>, "attempt":
+  <attempt id>, "segments": [<staged segment paths>]}`),
   written atomically (`os.replace`) by Migration step 4 (see its action order). "Before
   cut-over" and "after cut-over" everywhere in this spec mean "marker absent" and "marker
   present" in the local catalog.
