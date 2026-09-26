@@ -42,7 +42,7 @@ def test_assign_project_id_preserves_other_toml_content(tmp_path: Path):
     root = tmp_path / "proj"
     root.mkdir()
     (root / ".bth.toml").write_text(
-        '[project]\nslug = "proj"\nroot = "%s"\n\n[slurm]\npartition = "pi_so3"\n' % root
+        f'[project]\nslug = "proj"\nroot = "{root}"\n\n[slurm]\npartition = "pi_so3"\n'
     )
     assign_project_id(root)
     text = (root / ".bth.toml").read_text()

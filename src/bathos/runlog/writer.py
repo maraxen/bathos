@@ -6,6 +6,7 @@ See spec sections "Segments and writers" and "Line envelope", and D6/D7.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -58,8 +59,10 @@ class SegmentWriter:
         stem = segment_stem(host, pid, start_ns, slurm_suffix=slurm_suffix_from_env())
         self.target_dir.mkdir(parents=True, exist_ok=True)
         self.mirror_dir.mkdir(parents=True, exist_ok=True)
-        self._target_fh = open(self.target_dir / f"{stem}.jsonl", "ab")
-        self._mirror_fh = open(self.mirror_dir / f"{stem}.jsonl", "ab")
+        # Deliberately long-lived handles (one segment spans many `append()`
+        # calls), not a single `with`-scoped open.
+        self._target_fh = open(self.target_dir / f"{stem}.jsonl", "ab")  # noqa: SIM115
+        self._mirror_fh = open(self.mirror_dir / f"{stem}.jsonl", "ab")  # noqa: SIM115
         self._segment_stem = stem
         self._bytes_written = 0
         self._seq = 0
@@ -67,10 +70,8 @@ class SegmentWriter:
     def _close_segment(self) -> None:
         for fh in (self._target_fh, self._mirror_fh):
             if fh is not None:
-                try:
+                with contextlib.suppress(OSError):
                     fh.close()
-                except OSError:
-                    pass
         self._target_fh = None
         self._mirror_fh = None
         self._segment_stem = None

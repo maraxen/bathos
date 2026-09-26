@@ -54,9 +54,7 @@ def is_log_mode_env_honored() -> bool:
     """
     if os.environ.get("SLURM_JOB_ID"):
         return True
-    if os.environ.get("PYTEST_CURRENT_TEST") and os.environ.get("BTH_CATALOG_DIR"):
-        return True
-    return False
+    return bool(os.environ.get("PYTEST_CURRENT_TEST") and os.environ.get("BTH_CATALOG_DIR"))
 
 
 def is_log_mode(catalog_dir: Path | None = None) -> bool:

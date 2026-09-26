@@ -17,7 +17,7 @@ from bathos.runlog.mode import (
 )
 
 
-def test_flag_off_by_default(tmp_path: Path, monkeypatch):
+def test_flag_off_by_default(tmp_path: Path):
     catalog_dir = tmp_path / "catalog"
     assert not is_log_mode(catalog_dir)
 
@@ -58,9 +58,8 @@ def test_env_flag_honored_under_test_with_nondefault_catalog_dir(tmp_path: Path,
 
 def test_writers_lock_shared_does_not_block_shared(tmp_path: Path):
     catalog_dir = tmp_path / "catalog"
-    with writers_lock(catalog_dir, exclusive=False):
-        with writers_lock(catalog_dir, exclusive=False):
-            pass  # two shared holders coexist -- must not deadlock
+    with writers_lock(catalog_dir, exclusive=False), writers_lock(catalog_dir, exclusive=False):
+        pass  # two shared holders coexist -- must not deadlock
 
 
 def test_writers_lock_creates_lock_file(tmp_path: Path):

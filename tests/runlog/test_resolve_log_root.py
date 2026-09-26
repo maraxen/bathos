@@ -25,9 +25,7 @@ def test_main_checkout(tmp_path: Path):
 def test_linked_worktree_maps_to_main(tmp_path: Path):
     repo = make_git_repo(tmp_path / "repo")
     worktree = tmp_path / "wt"
-    subprocess.run(
-        ["git", "worktree", "add", "-b", "feature", str(worktree)], cwd=repo, check=True
-    )
+    subprocess.run(["git", "worktree", "add", "-b", "feature", str(worktree)], cwd=repo, check=True)
     res = resolve_log_root(worktree)
     assert res.main_root == repo.resolve()
     assert res.worktree_root == worktree.resolve()
@@ -72,7 +70,7 @@ def _env() -> dict:
     return dict(os.environ)
 
 
-def test_relative_git_common_dir_still_resolves(tmp_path: Path, monkeypatch):
+def test_relative_git_common_dir_still_resolves(tmp_path: Path):
     # resolve_workspace's own `_git_anchors` already normalizes a relative
     # --git-common-dir/--git-dir against cwd; this test exercises that path
     # end to end through resolve_log_root rather than re-testing

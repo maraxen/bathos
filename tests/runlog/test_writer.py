@@ -159,7 +159,7 @@ def test_ac9_deleting_active_segment_loses_no_event_because_of_mirror(tmp_path: 
     assert mirror_after == mirror_before
 
 
-def test_unaffiliated_root_writes_to_unaffiliated_log_dir(tmp_path: Path, monkeypatch):
+def test_unaffiliated_root_writes_to_unaffiliated_log_dir(tmp_path: Path):
     plain = tmp_path / "plain"
     plain.mkdir()
     res = resolve_log_root(plain)
@@ -183,7 +183,7 @@ def test_unaffiliated_root_writes_to_unaffiliated_log_dir(tmp_path: Path, monkey
     reset_writers_for_test()
 
 
-def test_project_write_failure_falls_back(tmp_path: Path, monkeypatch):
+def test_project_write_failure_falls_back(tmp_path: Path):
     repo = make_git_repo(tmp_path / "repo")
     write_bth_toml(repo, slug="repo")
     assign_project_id(repo)

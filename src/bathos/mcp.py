@@ -1661,7 +1661,9 @@ def log_restore_tool(project_root: str = "") -> dict:
     root = Path(project_root) if project_root else None
     resolution = resolve_log_root(root)
     if resolution.unaffiliated:
-        return {"error": "no git repository and no .bth.toml found under this root; nothing to restore"}
+        return {
+            "error": "no git repository and no .bth.toml found under this root; nothing to restore"
+        }
 
     project_id = read_project_id(resolution.main_root / ".bth.toml")
     slug = None
