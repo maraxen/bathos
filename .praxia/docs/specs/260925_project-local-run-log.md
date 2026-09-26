@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: v8 (after adversarial cycle 8)
+revision: v9 (after adversarial cycle 9)
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -90,8 +90,9 @@ invest_overrides: []
   and deduplicates by `eid`**, so neither is "authoritative on divergence": a line that reached
   only one of them is still ingested. Events with `project_id: null` (unaffiliated, or a SLURM job without an id) mirror to
   `~/.bth/log-mirror/_null/<slug or _unaffiliated>/`. A mirror append failure is a warning, not a run failure.
-  `bth log restore` copies back into the project log every mirror line (for this `project_id`)
-  that the project log lacks; lines that reached neither copy are reported by `bth verify`, not invented.
+  Fallback appends (D6) are mirrored the same way. `bth log restore` copies back into the
+  project log every mirror line whose `main_root` equals this root and that the project log
+  lacks (so a fork sharing the id never receives another copy's events); lines that reached neither copy are reported by `bth verify`, not invented.
 
 ## Authoritative writes (everything the index must not own)
 
@@ -170,8 +171,9 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   sealing: every file is read the same way.
 - Each line is one `write()` of the full line plus `\n`, then `flush()` + `fsync()`, to the
   project log and then the mirror (D7).
-- After any failed or partial write the writer abandons that segment and starts a new one, so a
-  torn line is never followed by more lines from the same writer. A segment deleted mid-run is
+- After any failed or partial write to either copy, the writer abandons that segment name in
+  both copies and starts a new segment, so a torn line is never followed by more lines from the
+  same writer in either copy. A segment deleted mid-run is
   covered by the mirror (D7), not by detection in the writer.
 
 ### Line envelope
@@ -179,7 +181,8 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
 ```json
 {"v": 1, "eid": "<uuidv7>", "kind": "campaign.threshold_set", "entity": ["<campaign_id>"],
  "ts": "<RFC3339 UTC>", "project": "<slug or null>", "project_id": "<uuid or null>",
- "writer": "<segment stem>", "seq": 17, "worktree_root": "<abs path>",
+ "writer": "<segment stem>", "seq": 17, "main_root": "<abs path, per D1>",
+ "worktree_root": "<abs path>",
  "origin": "live|migration", "data": { ... }}
 ```
 
@@ -192,14 +195,15 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
 - `data` is validated against a per-kind JSON Schema (shipped in `bathos.index.schemas`, one
   file per kind) at ingest; invalid or torn lines anywhere in a file go to a `quarantine` table
   with the reason and file offset.
-- **Only `\n`-terminated lines are read.** Bytes after a file's last `\n` are an unfinished
-  append (a writer mid-`write()`, or a segment copied mid-line by a pull), not a torn line: they
-  are left unread and the watermark stops at the last `\n`. Such a tail is quarantined as torn
-  only once its writer has provably finished with the segment (the same host and pid have a later
-  segment, or the file is unchanged for 7 days), and `bth verify` reports it. A torn line in the
-  middle of a file (followed by a `\n`) is quarantined at once.
-- An `eid` already in `events` is skipped if the line's bytes are identical; if they differ, the
-  new line is quarantined with reason `eid_conflict` and `bth verify` reports it.
+- **Only `\n`-terminated lines are read.** Bytes after a file's last `\n` are never ingested
+  or quarantined; the watermark stops at the last `\n`. `bth verify` (not ingest) reports an
+  unterminated tail as torn once its writer has a later segment or the file is unchanged for
+  7 days. A torn line in the middle of a file (followed by a `\n`) is quarantined at ingest.
+- An `eid` already in `events` is skipped if its `(kind, entity, data)` is identical (envelope
+  fields such as `writer`, `seq`, `worktree_root` may differ between copies or re-imports); if
+  that content differs, the new line is quarantined with reason `eid_conflict` and `bth verify`
+  reports it.
+- The `quarantine` table is diagnostic state outside the fold; AC-1 and AC-20 exclude it.
 
 ### Fold rules
 
@@ -210,46 +214,48 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   new ones, sorted), never by applying new events on top of the stored row. So the result is
   independent of arrival order.
 - **An entity folds in two stages:** (1) its `*.imported` events merge into a base state by the
-  import merge rule below; (2) its live events apply on top in `(ts, eid)` order. UUIDv7 (and
-  uuid5 for imports) makes the tie-break total and deterministic for a fixed event set.
+  import merge rule below; (2) its live events apply on top in `(ts, eid)` order, except for run
+  status (see "Run status"), which is ranked across both stages. UUIDv7 (and uuid5 for imports)
+  makes the tie-break total and deterministic for a fixed event set.
 - **Merge policy per kind reproduces today's semantics exactly**, verified by a differential
   test that feeds the same operation sequences to the old code and the new fold (AC-17). From
   `campaigns.py:124-140`: `status='concluded'` and `concluded_at` are sticky once set; `name`,
   `question`, `hypothesis`, `started_at` take the latest non-empty value; claim fields and
   `stopping_threshold` follow what the current upsert/update code does, not a new rule. Any
   divergence AC-17 finds is a spec bug to fix here, not a behaviour change.
-- **Imported history:** the legacy importer emits one `<kind>.imported` event per entity
-  (plus `campaign_run.imported` per legacy `campaign_runs` row, carrying its stored `evalue` and
-  `seq_position`), built by merging that entity's legacy sources in precedence order
-  **warm row > cool fragment > campaign JSON**, field by field (first non-empty value wins).
-  Every `*.imported` event carries `data.source_class`, the highest-precedence source that
-  contributed to it: `warm` (including `bathos.db.frozen` or a `bathos.db` recreated after
-  cut-over), `fragment`, `campaign_json`, `ledger_json` (reap ledger) or `submit_parquet`. It is
-  part of the hashed merged state, so it is part of the eid. The fold's "source precedence" means
-  this field, in that order.
-  The importer never reads current sidecar or output files. `ts` is the source record's own
-  time (run: end time if finished, else start; campaign: `concluded_at` or `started_at`; ledger
-  rows: their own timestamp). eid = `uuid5(NAMESPACE_BATHOS,
-  f"import:{kind}:{entity}:{sha256(merged state)}")`, so unchanged sources re-import as a no-op.
-- **Several imported events for one entity merge field by field**, never as whole-state
-  replacement:
-  - *Runs:* status rank is `running` (0) < `abandoned` (1) < `completed` = `failed` = `killed`
-    (2) (the stored statuses: `runner.py:456,613,679,687`; `abandoned` by the reaper,
-    `reap.py:288`). So a late terminal fragment beats a reaper's `abandoned`, as a real finish
-    should. The status-dependent fields (`status`, end time,
-    `exit_code`, `outcome` when not overridden) come together from the import with the highest
-    rank; ties go by source precedence (warm-derived before fragment-only), then later `ts`,
-    then eid. `incomplete` is never stored or imported; it is derived only (see below).
+- **Imported history:** the legacy importer emits one `<kind>.imported` event **per (entity,
+  legacy source)**, never a pre-merged one: a run with a warm row and a cool fragment gets two
+  `run.imported` events; each legacy `campaign_runs` row gives a `campaign_run.imported` carrying
+  its stored `evalue` and `seq_position`. Each carries `data.source_class`, one of `warm`
+  (`bathos.db.frozen`, or `bathos.db` before cut-over), `warm_recreated` (a `bathos.db` recreated
+  after cut-over by an older install), `fragment`, `campaign_json`, `ledger_json` (reap ledger) or
+  `submit_parquet`; precedence is that order. The importer never reads current sidecar or output
+  files. `ts` is the source record's own time (run: end time if finished, else start; campaign:
+  `concluded_at` or `started_at`; ledger rows: their own timestamp). eid = `uuid5(NAMESPACE_BATHOS,
+  f"import:{kind}:{entity}:{source_class}:{sha256(canonical source record)}")`. Before appending,
+  the importer skips every eid already in the index or in the destination log, so re-running it
+  on unchanged sources appends nothing.
+- **Import merge (stage 1)**, field by field, never whole-state replacement:
   - *Campaigns:* `status='concluded'` is sticky: the base is concluded if any import says so,
     with `concluded_at` taken by source precedence, then earliest `ts`.
-  - *Every other field* keeps the first non-empty value in order of source precedence, then
-    `ts`, then eid.
-  So a late fragment can advance a run from `running` to terminal but can never blank a field
-  (e.g. `metadata`, `output_metadata`, postmortem fields) that an earlier warm-derived import set.
+  - *Every field except run status* keeps the first non-empty value in order of source
+    precedence, then `ts`, then eid. So a fragment never blanks a field (e.g. `metadata`,
+    `output_metadata`, postmortem fields) that a warm import set.
+- **Run status (both stages).** The status-dependent fields (`status`, end time, `exit_code`,
+  `outcome` when not overridden) come together from the single highest-ranked *status claim*:
+  - rank 2, terminal (`completed`, `failed`, `killed`; `runner.py:456,613,679,687`): a
+    `run.finished`, or a `run.imported` with a terminal status;
+  - rank 1, `abandoned` (`reap.py:288`): a `run.reaped` not followed in `(ts, eid)` order by a
+    `run.reap_reverted`, or a `run.imported` with status `abandoned`;
+  - rank 0, `incomplete`: otherwise (a `run.started`, or a `run.imported` with status `running`).
+  Ties go by source precedence (live counts as highest), then later `ts`, then eid. So a real
+  finish beats a reap whatever their `ts`, including a finish pulled from the cluster after the
+  reap, and a stale warm `running` never hides a fragment's terminal status. After cut-over the
+  reaper selects runs whose folded status is `incomplete` and records that as `prior_status`; a
+  revert with no terminal claim folds back to `incomplete`.
 - **Legacy writes after cut-over** (an older bathos still writing fragments, submit Parquet or a
   fresh `bathos.db`) are not imported automatically. `bth verify` reports them with the writing
-  host, and the user re-runs `bth migrate --import-legacy`, which is idempotent (unchanged
-  sources give the same uuid5 eid and are skipped) and merges late data by the rule above.
+  host, and the user re-runs `bth migrate --import-legacy`, which appends only new eids.
 - **Campaign-derived values:** a campaign's members are the union of `campaign.run_added`,
   `campaign_run.imported`, and runs whose `run.started.data.campaign_id` or
   `run.imported.data.campaign_id` names it. The campaign fold reproduces
@@ -268,8 +274,6 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   campaign's conclusion time (`campaign.concluded.ts`, or the imported `concluded_at`) is still
   included, and `bth verify` reports `evalue_changed_after_conclusion` for that campaign. This
   depends only on event contents, not arrival.
-- `run.started` without `run.finished` folds to `status='incomplete'` until `run.reaped` or a
-  later `run.finished`.
 - Cross-host clock skew can change which of two conflicting last-writer-wins updates wins; it
   cannot make the result depend on arrival order. AC-1 names the affected fields.
 
@@ -288,8 +292,10 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
 - Watermarks live in an `ingest_watermarks` table inside `index.db`, so they swap atomically
   with the data they describe. One row per file: `(root kind, root id, path relative to that
   root, size, byte_offset)`,
-  where root kind is `project` (root id = `project_id`), `mirror`, `fallback` or
-  `unaffiliated`. A file smaller than its watermark, or vanished, is re-read from the other copy
+  where (root kind: root id) is one of `project`: `project_id` (the main root's `.bth/log/`,
+  excluding `remote/`); `mirror`: `project_id` or `_null/<slug>`; `fallback`: slug;
+  `unaffiliated`: constant; `remote-log`, `remote-fallback`, `remote-mirror`:
+  `(project_id, remote)`. Every file belongs to exactly one root. A file smaller than its watermark, or vanished, is re-read from the other copy
   (D7) and reported by `bth verify`; `eid` dedup makes re-reading safe. Inodes are not used.
 - **When ingest runs:** on `bth compact`, and non-blockingly (skipped if the lock is held) at the
   end of commands that write events (`bth run`, campaign and claim commands, MCP equivalents).
@@ -390,9 +396,8 @@ switched on in one step.
   every run exactly once after two pulls, including when the first pull copies a segment
   mid-line (no quarantine entry; the line ingests once after the second pull).
 - AC-7. A torn line in the middle of a file (followed by good lines) is quarantined with its
-  offset and reported by `bth verify`; all good lines are ingested. An unterminated tail is not
-  quarantined while its writer may still be appending, and is quarantined once the writer has a
-  later segment.
+  offset and reported by `bth verify`; all good lines are ingested. An unterminated tail is never
+  quarantined by ingest, and `bth verify` reports it once the writer has a later segment.
 - AC-8. With the project log unwritable: `run.started` goes to the fallback and the run proceeds;
   with both unwritable the script is not launched; a `run.finished` in the fallback exits with
   the script's status plus a warning. Cluster variant: a SLURM `run.started` that lands in the
@@ -421,10 +426,15 @@ switched on in one step.
 - AC-20. Arrival-order independence: delivering the same events in any order and in any
   batching (including a late event with an earlier `ts`) yields the same index and the same
   read results as one sorted full ingest.
-- AC-21. Importing the same legacy catalog twice changes nothing the second time; importing a
-  late fragment for an already-imported run advances its status exactly once (e.g. running to
-  finished) and leaves every warm-only field (`metadata`, `output_metadata`, postmortem fields)
-  unchanged.
+- AC-21. Importing the same legacy catalog twice appends nothing and quarantines nothing the
+  second time; importing a rewritten fragment for an already-imported run whose warm row says
+  `running` advances its status exactly once (to terminal) and leaves every warm-only field
+  (`metadata`, `output_metadata`, postmortem fields) unchanged.
+- AC-26. Run status: a `run.reaped` with a later `ts` than a `run.finished` still folds to the
+  terminal status; a reap then revert with no finish folds to `incomplete`; the reaper after
+  cut-over selects exactly the folded `incomplete` runs past its window.
+- AC-27. With two roots sharing a `project_id`, `bth log restore` in one never copies the
+  other's events.
 - AC-22. Campaign fold: for sequential campaigns, the fold's `seq_position`, `evalue`,
   threshold lock and threshold-mismatch skip equal what `campaigns.py:380-521` computes for the
   same runs, outcomes and sidecars; members without a declaration keep their stored `evalue`;
@@ -445,7 +455,7 @@ switched on in one step.
 
 1. AC-11 (test isolation).
 2. Writer, resolution, D3 check, `project_id` via `bth init`/`--assign-id`, mirror (AC-5,
-   AC-7, AC-9, AC-10, AC-14, AC-16), behind a feature flag; production still uses the old
+   AC-7, AC-9, AC-10, AC-14, AC-16, AC-27), behind a feature flag; production still uses the old
    tiers. Every write site in "Authoritative writes" gains its event emission behind the same
    flag (AC-25).
 3. `index.db`, `events` table, fold (incl. the campaign fold), generation-swap ingest, read API
@@ -453,7 +463,7 @@ switched on in one step.
    fixture catalogs (AC-1, AC-12, AC-15, AC-17, AC-18, AC-19, AC-20, AC-22). AC-18 is enforced
    from here; the legacy write sites (flag-off branch only) sit on an explicit allow-list in the
    AC-18 test, which step 5 empties.
-4. Legacy importer, `bth verify` checks (AC-21, AC-23, AC-24) and the new cluster log pull in
+4. Legacy importer, reaper on folded status, `bth verify` checks (AC-21, AC-23, AC-24, AC-26) and the new cluster log pull in
    `bth sync --pull` (log, fallback, mirror; AC-6 and the cluster variants of AC-8, AC-9).
 5. Assign ids in every registered project (migration step 0), then cut-over via
    `bth migrate --to-log` (AC-13); then AC-2, AC-3, AC-4 and AC-8 hold in production.
