@@ -47,6 +47,7 @@ def check_runs(
     *,
     project: str | None = None,
     limit: int = 50,
+    runs: list[Run] | None = None,
 ) -> list[CheckResult]:
     """Check all runs in catalog for git-drift validity.
 
@@ -67,6 +68,14 @@ def check_runs(
             drops an arbitrary subset, not "the most recent". Callers that need
             every run considered (e.g. bathos.blast_radius, where a dropped run
             is a false "not affected") must pass an explicit larger limit.
+        runs: Optional preloaded run list, used instead of calling list_runs()
+            again. For a caller (e.g. bathos.blast_radius.assess_blast_radius)
+            that already scanned the same catalog/project/limit via its own
+            list_runs() call and would otherwise double-scan the catalog for
+            the exact same rows (debt #1486). `project`/`limit` are ignored
+            when `runs` is given -- the caller is responsible for having
+            fetched the equivalent set. Omit to fetch as before -- default
+            behavior is unchanged.
 
     Returns:
         List of CheckResult objects
@@ -75,8 +84,8 @@ def check_runs(
     current_state = capture_git_state(project_root)
     current_hash = current_state.hash
 
-    # Get all runs from catalog
-    all_runs = list_runs(catalog_dir, project=project, limit=limit)
+    # Get all runs from catalog (or reuse a caller-supplied, already-scanned list)
+    all_runs = runs if runs is not None else list_runs(catalog_dir, project=project, limit=limit)
 
     results = []
     for run in all_runs:
@@ -242,16 +251,33 @@ def hash_dependency_lock(workspace_root: Path) -> str | None:
         return None
 
 
-def check_dependency_lock_drift(recorded_sha256: str | None, workspace_root: Path) -> bool:
+#: Sentinel distinguishing "no current_sha256 supplied" (compute it) from "caller
+#: already computed it and it happens to be None" (no uv.lock present) -- see
+#: check_dependency_lock_drift's `current_sha256` param (debt #1487).
+_UNSET = object()
+
+
+def check_dependency_lock_drift(
+    recorded_sha256: str | None,
+    workspace_root: Path,
+    *,
+    current_sha256: str | None | object = _UNSET,
+) -> bool:
     """Return True iff the current uv.lock hash differs from recorded_sha256 (debt #1071).
 
     Fails open (False, "no drift") if recorded_sha256 is falsy (e.g. a run predating this
     field) or if the current lockfile is itself absent -- nothing to compare against, and
     a missing baseline shouldn't be treated as evidence of change.
+
+    Args:
+        current_sha256: Optional precomputed `hash_dependency_lock(workspace_root)` result,
+            for a caller (e.g. bathos.blast_radius.assess_blast_radius) that already hashed
+            the lockfile once and would otherwise re-hash it on every call in a per-run loop
+            (debt #1487). Omit to hash lazily as before -- default behavior is unchanged.
     """
     if not recorded_sha256:
         return False
-    current = hash_dependency_lock(workspace_root)
+    current = hash_dependency_lock(workspace_root) if current_sha256 is _UNSET else current_sha256
     if current is None:
         return False
     return current != recorded_sha256
