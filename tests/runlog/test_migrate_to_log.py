@@ -1087,3 +1087,175 @@ def test_unresolvable_project_class(tmp_path: Path):
     assert edge_lines, "expected a run_edges residual"
     for line in edge_lines:
         assert line.cls == "unresolvable_project"
+
+
+# --------------------------------------------------------------------------
+# AC-28: abort leaves no imported event / no index.db; abort-retry-switch
+# imports everything exactly once
+# --------------------------------------------------------------------------
+
+
+def _project_log_import_eids(backend) -> set[str]:
+    """Every `eid` of an `origin: migration` event currently sitting in the
+    project's own log directory (never the staging tree) -- step 4(c)'s
+    ONLY legitimate source, so this is zero before a switch completes."""
+    log_dir = backend.workspace / ".bth" / "log"
+    eids: set[str] = set()
+    if not log_dir.is_dir():
+        return eids
+    for f in sorted(log_dir.glob("*.jsonl")):
+        for line in f.read_text().splitlines():
+            if not line.strip():
+                continue
+            obj = json.loads(line)
+            if obj.get("origin") == "migration":
+                eids.add(obj["eid"])
+    return eids
+
+
+def test_ac28_abort_leaves_no_imported_event_and_no_index_db(tmp_path: Path):
+    backend = _simple_backend(tmp_path)
+    from bathos.index import index_db_path
+    from bathos.runlog.migrate import migrate_to_log
+
+    result = migrate_to_log(backend.catalog_dir)
+    assert result.status == "residual_pending"  # stopped before the switch -- an "abort"
+
+    assert _project_log_import_eids(backend) == set()
+    assert not index_db_path(backend.catalog_dir).exists()
+    assert not cutover_marker_path(backend.catalog_dir).exists()
+
+
+def test_ac28_abort_retry_switch_imports_everything_exactly_once(tmp_path: Path):
+    backend = _simple_backend(tmp_path)
+    from bathos.runlog.migrate import migrate_to_log
+
+    # Abort (residual_pending, no --accept-residual).
+    first = migrate_to_log(backend.catalog_dir)
+    assert first.status == "residual_pending"
+    assert _project_log_import_eids(backend) == set()
+
+    # Retry -> switch (a fresh attempt: the aborted one's staging is wiped
+    # and re-scanned from scratch, per spec "Re-running bth migrate --to-log").
+    final = _converge(backend.catalog_dir)
+    assert final.status == "switched"
+
+    eids_in_log = list(_project_log_import_eids(backend))
+    assert eids_in_log, "expected at least one imported event in the project log"
+    # "exactly once": every distinct eid appears in exactly one raw JSON
+    # line across every segment in the project log (not merely deduplicated
+    # by the index -- the log itself must never carry a real duplicate).
+    all_lines: list[dict] = []
+    log_dir = backend.workspace / ".bth" / "log"
+    for f in sorted(log_dir.glob("*.jsonl")):
+        for line in f.read_text().splitlines():
+            if line.strip():
+                all_lines.append(json.loads(line))
+    migration_eids = [obj["eid"] for obj in all_lines if obj.get("origin") == "migration"]
+    assert len(migration_eids) == len(set(migration_eids)), (
+        "an eid appeared more than once in the raw project log"
+    )
+
+    # And the mirror agrees (same segment names, same content, per D7).
+    from bathos.runlog.project_id import read_project_id
+    from bathos.runlog.writer import mirror_dir_for
+
+    pid = read_project_id(backend.workspace / ".bth.toml")
+    mirror_dir = mirror_dir_for(pid, "proj")
+    mirror_eids: list[str] = []
+    for f in sorted(mirror_dir.glob("*.jsonl")):
+        for line in f.read_text().splitlines():
+            if line.strip():
+                obj = json.loads(line)
+                if obj.get("origin") == "migration":
+                    mirror_eids.append(obj["eid"])
+    assert set(mirror_eids) == set(migration_eids)
+    assert len(mirror_eids) == len(set(mirror_eids))
+
+
+# --------------------------------------------------------------------------
+# AC-29: a kill after each step 4 sub-step, re-run, same final state
+# --------------------------------------------------------------------------
+
+
+def _kill_after(monkeypatch, step_name: str):
+    """Monkeypatch `bathos.runlog.migrate.<step_name>` to run its REAL
+    implementation, then raise -- simulating a process kill that lands
+    exactly after that sub-step completed on disk."""
+    import bathos.runlog.migrate as migrate_mod
+
+    original = getattr(migrate_mod, step_name)
+
+    def _wrapped(*args, **kwargs):
+        original(*args, **kwargs)
+        raise RuntimeError(f"simulated kill after {step_name}")
+
+    monkeypatch.setattr(migrate_mod, step_name, _wrapped)
+    return original
+
+
+@pytest.mark.parametrize(
+    "step_name",
+    [
+        "_step4a_build_index",
+        "_step4b_write_marker",
+        "_step4c_move_staged_segments",
+        "_step4d_rename_warm",
+        "_step4e_delete_staging",
+    ],
+)
+def test_ac29_kill_after_each_step4_substep_then_rerun_matches_uninterrupted(
+    tmp_path: Path, monkeypatch, step_name: str
+):
+    from bathos.index import connect_read
+    from bathos.runlog.migrate import migrate_to_log
+
+    backend = _simple_backend(tmp_path)
+    first = migrate_to_log(backend.catalog_dir)
+    assert first.status == "residual_pending"
+    accept = first.report_sha256
+
+    original_step = _kill_after(monkeypatch, step_name)
+    with pytest.raises(RuntimeError, match=f"simulated kill after {step_name}"):
+        migrate_to_log(backend.catalog_dir, accept_residual=accept)
+
+    # Restore JUST this one patched step (never monkeypatch.undo() -- that
+    # would also revert the autouse squeue mock AND the suite-wide HOME
+    # redirection `bathos_test_home`/`isolated_home` set up via the SAME
+    # monkeypatch fixture instance, silently pointing list_registered_roots()
+    # at the real ~/.bth/projects.toml for the rest of this test).
+    import bathos.runlog.migrate as migrate_mod
+
+    monkeypatch.setattr(migrate_mod, step_name, original_step)
+
+    final = _converge(backend.catalog_dir)
+    assert final.status in ("switched", "already_migrated")
+
+    assert cutover_marker_path(backend.catalog_dir).exists()
+    assert (backend.catalog_dir / "bathos.db.frozen").exists()
+    assert not (backend.catalog_dir / "bathos.db").exists()
+
+    con = connect_read(backend.catalog_dir)
+    try:
+        row = con.execute(
+            "SELECT id, status, project_slug, command FROM runs WHERE id = ?", ["run-a"]
+        ).fetchone()
+    finally:
+        con.close()
+    assert row == ("run-a", "completed", "proj", "scripts/experiments/run-a.py")
+
+    # No duplicate segment files (a retry after a kill must not re-number or
+    # re-create an already-moved segment under a colliding name).
+    log_dir = backend.workspace / ".bth" / "log"
+    segment_names = [f.name for f in log_dir.glob("import-*.jsonl")]
+    assert len(segment_names) == len(set(segment_names))
+
+    # And no eid appears twice across the project log (same guard as AC-28).
+    all_eids: list[str] = []
+    for f in sorted(log_dir.glob("*.jsonl")):
+        for line in f.read_text().splitlines():
+            if line.strip():
+                obj = json.loads(line)
+                if obj.get("origin") == "migration":
+                    all_eids.append(obj["eid"])
+    assert len(all_eids) == len(set(all_eids))
