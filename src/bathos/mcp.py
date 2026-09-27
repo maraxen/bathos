@@ -6,6 +6,7 @@ campaigns, claims, postmortem, outputs, repair, verify, and lint.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import functools
 import json
@@ -3021,10 +3022,20 @@ def postmortem_validate_tool(
             cat_dir = _get_catalog_dir(catalog_dir or None)
             with unit_of_work(cat_dir):
                 if current_mode():
+                    event_data = postmortem_applied_event_data(pm, pm_path)
+                    # AC-17 finding: the legacy fold (compact.py's cwd walk)
+                    # always stores `postmortem_path` workspace-RELATIVE
+                    # (`rel_path = pm_file.relative_to(workspace_root)`,
+                    # compact.py) so the fold must match that shape rather
+                    # than whatever the caller happened to pass as `path` --
+                    # otherwise `runs.postmortem_path` silently changes
+                    # representation (absolute vs relative) across cut-over.
+                    with contextlib.suppress(ValueError):
+                        event_data["path"] = str(pm_path.resolve().relative_to(ws.resolve()))
                     emit_event(
                         kind="run.postmortem_applied",
                         entity=[pm.run_id],
-                        data=postmortem_applied_event_data(pm, pm_path),
+                        data=event_data,
                         cwd=ws,
                     )
         return {

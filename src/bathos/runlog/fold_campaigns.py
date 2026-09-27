@@ -133,7 +133,7 @@ def member_sidecar_declaration(run_events: list[dict]) -> dict | None:
 
 def resolve_run_campaign_id(
     run_events: list[dict], run_added_events_for_run: list[dict]
-) -> str | None:
+) -> str:
     """The single campaign a run currently belongs to, for the denormalized
     `runs.campaign_id` column (review finding, HIGH -- spec BC-6, lines
     374-379: "`add_run_to_campaign` overwrites the fragment's single
@@ -164,7 +164,14 @@ def resolve_run_campaign_id(
         if len(entity) >= 2:
             candidates.append((ev.get("ts", ""), ev.get("eid", ""), entity[0]))
     if not candidates:
-        return None
+        # AC-17 finding: the legacy `schema.Run.campaign_id` default is `""`
+        # (never `NULL`) -- `compact.py`'s fresh-row INSERT always writes
+        # `run.campaign_id` verbatim, so a run with no campaign assignment
+        # gets the empty string, not NULL, in the canonical legacy state.
+        # Returning `None` here (an earlier version of this function did)
+        # left `runs.campaign_id` NULL for every unaffiliated run, diverging
+        # from that default representation.
+        return ""
     return max(candidates, key=lambda c: (c[0], c[1]))[2]
 
 

@@ -513,3 +513,17 @@ def test_ac20_arrival_order_independence():
     assert forward == backward
     assert forward[0]["status"] == "concluded"
     assert forward[0]["stopping_threshold"] == 0.05
+
+
+def test_ac17_resolve_run_campaign_id_defaults_to_empty_string_not_none():
+    """AC-17 finding: the legacy `schema.Run.campaign_id` default is `""`,
+    never NULL -- `compact.py`'s fresh-row INSERT always writes
+    `run.campaign_id` verbatim (there is no "unset" case in the warm
+    schema). A run with no campaign assignment at all (no `run.started.data.
+    campaign_id`, no `campaign.run_added`) must resolve to `""`, matching
+    that default; an earlier version of this function returned `None`,
+    which would have made `runs.campaign_id` NULL for every unaffiliated
+    run after cut-over -- a representation change for the common case."""
+    from bathos.runlog.fold_campaigns import resolve_run_campaign_id
+
+    assert resolve_run_campaign_id([], []) == ""

@@ -734,6 +734,44 @@ def test_real_emitter_archived_item(tmp_path: Path):
     assert json.loads(row[3]) == ["a.svg"]
 
 
+def test_real_emitter_postmortem_path_is_workspace_relative(tmp_path: Path):
+    """AC-17 finding: `bathos.mcp.postmortem_validate_tool` used to emit
+    `run.postmortem_applied.data["path"]` as whatever absolute path the
+    caller passed in, while the legacy fold (`compact.py`'s cwd walk) always
+    stores a workspace-RELATIVE path (`rel_path = pm_file.relative_to(
+    workspace_root)`). Left unfixed, `runs.postmortem_path` silently changes
+    representation (absolute vs relative) across cut-over for every
+    postmortem-bearing run."""
+    from bathos.mcp import postmortem_validate_tool
+
+    repo, _pid = setup_project(tmp_path)
+    catalog_dir = tmp_path / "catalog"
+    enable_log_mode(catalog_dir)
+
+    pm_dir = repo / "postmortems"
+    pm_dir.mkdir()
+    pm_path = pm_dir / "r1.bth.postmortem.toml"
+    pm_path.write_text(
+        'run_id = "r1"\n\n[postmortem]\nhypothesis_status = "held"\n'
+        'verdict_override = "none"\nauthor = "a"\nstatus = "final"\n'
+    )
+
+    result = postmortem_validate_tool(
+        path=str(pm_path), workspace_root=str(repo), catalog_dir=str(catalog_dir)
+    )
+    assert result["validation_ok"] is True
+
+    report = run_ingest(catalog_dir)
+    assert report.new_events == 1
+
+    con = connect_read(catalog_dir)
+    row = con.execute(
+        "SELECT data FROM events WHERE kind = 'run.postmortem_applied'"
+    ).fetchone()
+    data = json.loads(row[0])
+    assert data["path"] == "postmortems/r1.bth.postmortem.toml"
+
+
 def test_real_emitter_submit_provenance(tmp_path: Path):
     from bathos.catalog import write_submit_provenance
 

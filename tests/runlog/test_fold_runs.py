@@ -107,7 +107,10 @@ def test_started_only_is_running_with_defaults():
     assert row["status"] == "running"
     assert row["exit_code"] == -1
     assert row["duration_s"] == 0.0
-    assert row["outcome"] == ""
+    # AC-17 finding: compact.py's fresh-row INSERT stores `run.outcome or
+    # None` -- an empty outcome is NULL in the canonical legacy state, not
+    # "".
+    assert row["outcome"] is None
     assert row["project_slug"] == "proj"
 
 
@@ -383,3 +386,89 @@ def test_reaped_run_keeps_general_fields_from_real_run_started_payload():
     assert row["git_provenance_source"] == "live"
     assert row["timestamp"] is not None
     assert row.get("claim_discriminates") is None  # NULL, never the string "[]"
+
+
+def test_ac17_postmortem_defaults_match_legacy_fresh_row_with_no_postmortem():
+    """AC-17 finding: `compact.py`'s new-row INSERT branch always writes the
+    `schema.Run()` defaults for every postmortem_* column, whether or not
+    `run.id` has a registered postmortem -- only a REGISTERED one overrides
+    them. An earlier version of this fold left these columns unset (NULL)
+    for a run with no `run.postmortem_applied` event, which diverged from
+    the canonical legacy state (a full `compact(force_rebuild=True)`) for
+    every un-postmortemed run -- the common case. If this regresses back to
+    leaving them unset, every assertion below fails."""
+    row = fold_run([started(), finished()])
+    assert row["postmortem_status"] == "unassigned"
+    assert row["postmortem_override"] == "none"
+    assert row["postmortem_verdict_override"] == "none"
+    assert row["postmortem_author"] == ""
+    assert row["postmortem_path"] == ""
+    assert row["postmortem_hypothesis_status"] == "unassigned"
+    assert row["postmortem_has_anomalies"] is False
+    assert row["postmortem_summary"] == ""
+    assert row["postmortem_asset_links"] == "{}"
+
+
+def test_ac17_postmortem_override_tracks_verdict_override():
+    """AC-17 finding: the legacy warm `runs` table has a `postmortem_override`
+    column DISTINCT from `postmortem_verdict_override` (schema.py's `Run` has
+    both fields), and compact.py always sets them to the SAME value
+    (`run.postmortem_override = pm.verdict_override`, compact.py:1068). A
+    fold that never populates `postmortem_override` at all leaves it NULL
+    forever after cut-over -- a real column silently going blank for every
+    consumer that still reads it (query.py, repair.py)."""
+    pm = ev(
+        "run.postmortem_applied",
+        ["r1"],
+        {
+            "sha256": "s1",
+            "status": "validated",
+            "verdict_override": "fail",
+            "author": "a",
+            "path": "p1.toml",
+            "hypothesis_status": "refuted",
+            "has_anomalies": False,
+            "summary": "",
+            "asset_links": {},
+        },
+        T1,
+        "e_pm1",
+    )
+    row = fold_run([started(), finished(), pm])
+    assert row["postmortem_override"] == "fail"
+    assert row["postmortem_override"] == row["postmortem_verdict_override"]
+
+
+def test_ac17_tags_is_a_general_field():
+    """AC-17 finding: `tags` is a real legacy warm column (`tags TEXT[]`,
+    compact.py) fed by a real `Run` field (`bth run --tag`); an earlier
+    version of this fold had no column for it at all, silently NULLing
+    `runs.tags` for every run after cut-over."""
+    row = fold_run([started(tags=["a", "b"]), finished()])
+    assert row["tags"] == ["a", "b"]
+
+
+def test_ac17_outcome_error_reason_empty_string_normalizes_to_none():
+    """AC-17 finding: `compact.py`'s fresh-row INSERT normalizes a falsy
+    `outcome_error_reason` to SQL NULL for this ONE column specifically
+    (`run.outcome_error_reason or None`, the last value in its INSERT) --
+    every other TEXT column is inserted as-is (e.g. `status`, `command`
+    stay `""`, never NULL). An earlier version of this fold left it `""`,
+    a permanent, spurious divergence from the canonical legacy state for
+    every run that never set one (the common case)."""
+    row = fold_run([started(), finished()])
+    assert row["outcome_error_reason"] is None
+
+    row = fold_run([started(), finished(outcome_error_reason="boom")])
+    assert row["outcome_error_reason"] == "boom"
+
+
+def test_ac17_outcome_empty_string_normalizes_to_none():
+    """AC-17 finding: `compact.py`'s fresh-row INSERT stores `run.outcome or
+    None` (a comment there: "preserve evaluated outcome label from cool
+    fragment") -- an empty outcome is NULL in the canonical legacy state,
+    for ANY status (running, abandoned, completed-with-no-evaluated-
+    outcome), not just "". A real, non-empty outcome is unaffected."""
+    assert fold_run([started()])["outcome"] is None
+    assert fold_run([started(), reaped()])["outcome"] is None
+    assert fold_run([started(), finished(outcome="pass")])["outcome"] == "pass"

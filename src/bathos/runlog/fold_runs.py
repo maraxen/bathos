@@ -86,6 +86,11 @@ GENERAL_FIELDS = (
     "project_slug",
     "command",
     "argv",
+    # AC-17 finding: `tags` is a real `Run` field (`bth run --tag`) and a
+    # real legacy warm column (`tags TEXT[]`, compact.py); an earlier
+    # version of this fold had no column for it at all, so `runs.tags` was
+    # silently NULL for every run after cut-over.
+    "tags",
     "git_hash",
     "git_branch",
     "git_dirty",
@@ -314,12 +319,37 @@ def fold_run(events: list[dict]) -> dict[str, Any]:
 
     # Postmortem fields: latest run.postmortem_applied, BC-2's (ts, eid)-only
     # tie-break (source precedence does not apply here per the spec text).
+    #
+    # AC-17 finding: a run with NO postmortem event must still carry the same
+    # non-NULL defaults the legacy `schema.Run()` dataclass gives every fresh
+    # warm row (compact.py's new-row INSERT branch always writes
+    # `run.postmortem_status`/`.postmortem_override`/etc, whether or not
+    # `run.id in postmortem_map` -- only a REGISTERED postmortem overrides
+    # them). Leaving these columns unset (NULL) here, as an earlier version
+    # of this fold did, diverged from the canonical legacy state for every
+    # run that never got a postmortem -- the common case.
+    row["postmortem_status"] = "unassigned"
+    row["postmortem_override"] = "none"
+    row["postmortem_verdict_override"] = "none"
+    row["postmortem_author"] = ""
+    row["postmortem_path"] = ""
+    row["postmortem_hypothesis_status"] = "unassigned"
+    row["postmortem_has_anomalies"] = False
+    row["postmortem_summary"] = ""
+    row["postmortem_asset_links"] = "{}"
     pm_events = [ev for ev in events if ev.get("kind") == "run.postmortem_applied"]
     postmortem_verdict_override: str | None = None
     if pm_events:
         latest_pm = max(pm_events, key=lambda ev: (ev.get("ts", ""), ev.get("eid", "")))
         pdata = latest_pm.get("data") or {}
         row["postmortem_status"] = pdata.get("status")
+        # AC-17 finding: `postmortem_override` is a distinct legacy warm
+        # column from `postmortem_verdict_override` (schema.py's Run has
+        # both), and compact.py always sets them to the SAME value
+        # (`run.postmortem_override = pm.verdict_override`, compact.py:1068)
+        # -- there is no separate live-write-site event for it (the spec's
+        # Authoritative-writes table only names `verdict_override`).
+        row["postmortem_override"] = pdata.get("verdict_override")
         row["postmortem_verdict_override"] = pdata.get("verdict_override")
         row["postmortem_author"] = pdata.get("author")
         row["postmortem_path"] = pdata.get("path")
@@ -348,6 +378,18 @@ def fold_run(events: list[dict]) -> dict[str, Any]:
     # Campaign-derived fields -- STUBBED, wave b (the campaign fold).
     row["seq_position"] = None
     row["evalue"] = None
+
+    # AC-17 finding: `compact.py`'s fresh-row INSERT normalizes a falsy
+    # `outcome_error_reason`/`outcome` to SQL NULL for these two columns
+    # specifically (`run.outcome_error_reason or None`, `run.outcome or
+    # None # preserve evaluated outcome label from cool fragment`) -- most
+    # other TEXT columns are inserted as-is. Matching that quirk
+    # bit-for-bit here (the `_STATUS_DEFAULTS`/bundle machinery otherwise
+    # gives `""`) rather than leaving it a permanent, spurious "" vs NULL
+    # divergence for every run with no outcome yet (e.g. `running`,
+    # `abandoned`).
+    row["outcome_error_reason"] = row.get("outcome_error_reason") or None
+    row["outcome"] = row.get("outcome") or None
 
     return row
 
