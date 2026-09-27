@@ -81,7 +81,22 @@ class Backend:
     catalog_dir: Path
 
 
+def _refuse_real_home() -> None:
+    """The harness registers roots and writes mirrors under HOME. Run outside pytest's
+    `bathos_test_home` (e.g. from a debugging script) it wrote into the REAL
+    ~/.bth/projects.toml and ~/.bth/log-mirror/ (seen 2026-09-26). Refuse instead."""
+    import pwd
+
+    real_home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+    if Path.home().resolve() == real_home:
+        raise RuntimeError(
+            "ac17_harness refuses to run with HOME at the real home directory; "
+            "run it under pytest (bathos_test_home) or point HOME at a temp dir."
+        )
+
+
 def make_backend(tmp_path: Path, name: str, *, is_new: bool) -> Backend:
+    _refuse_real_home()
     workspace = tmp_path / f"ws_{name}"
     catalog_dir = tmp_path / f"cat_{name}"
     make_git_repo(workspace)
