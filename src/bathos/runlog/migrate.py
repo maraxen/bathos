@@ -570,17 +570,20 @@ def _append_import_events(
 
 def _route_candidates(
     candidates: list, roots: list[tuple[Path, ProjectConfig | None]]
-) -> tuple[dict[Path | None, list], int]:
+) -> tuple[dict[Path | None, list], int, set[str]]:
     """Bucket every candidate by its resolved OWNING root (`None` ==
-    unaffiliated). Returns `(buckets, unresolved_count)`: the latter counts
-    candidates that fell to `unaffiliated/` because their parent entity's
-    project genuinely could not be determined (never because there simply
-    is no registered root) -- a real multi-project catalog can see how many
-    entities need attention.
+    unaffiliated). Returns `(buckets, unresolved_count, unresolved_ids)`:
+    the count and the set of each unresolved candidate's OWN entity id
+    (`entity[0]` -- a run id, campaign id, or edge/ledger source id) feed
+    step 3's `unresolvable_project` residual class, so a diff on an entity
+    whose project genuinely could not be determined (never because there
+    simply is no registered root) is classified rather than left
+    unclassified -- a real multi-project catalog can see how many entities
+    need attention.
 
     With 0 or 1 registered roots the routing is unambiguous (everything
     goes there, or to unaffiliated with none registered) -- `unresolved_
-    count` is always 0 there.
+    count`/`unresolved_ids` are always empty there.
 
     With 2+ registered roots (review finding (a), 260927 -- the real
     catalog has 10+ projects sharing one catalog): resolved via the
@@ -596,10 +599,10 @@ def _route_candidates(
     at all to resolve a parent from).
     """
     if not roots:
-        return {None: list(candidates)}, 0
+        return {None: list(candidates)}, 0, set()
     if len(roots) == 1:
         root, _cfg = roots[0]
-        return {root: list(candidates)}, 0
+        return {root: list(candidates)}, 0, set()
 
     slug_to_root = {cfg.slug: root for root, cfg in roots if cfg is not None}
     root_to_slug = {root: cfg.slug for root, cfg in roots if cfg is not None}
@@ -663,13 +666,16 @@ def _route_candidates(
 
     buckets: dict[Path | None, list] = {}
     unresolved = 0
+    unresolved_ids: set[str] = set()
     for cand in candidates:
         slug = _resolve_slug(cand)
         root = slug_to_root.get(slug) if slug else None
         if root is None:
             unresolved += 1
+            if cand.entity:
+                unresolved_ids.add(cand.entity[0])
         buckets.setdefault(root, []).append(cand)
-    return buckets, unresolved
+    return buckets, unresolved, unresolved_ids
 
 
 def _root_project_info(root: Path | None) -> tuple[str | None, str | None]:
@@ -699,25 +705,25 @@ def _dest_for_root(root: Path | None, *, staging_root: Path | None) -> Path:
 
 def _import_candidates(
     catalog_dir: Path, *, staging_root: Path | None
-) -> tuple[ImportReport, int]:
+) -> tuple[ImportReport, int, set[str]]:
     """The shared body of Migration step 2 and `--import-legacy`: scan every
     legacy source once (`_all_candidates`, AC-18's `connect_legacy`), route
     each candidate to its owning destination, and append. `staging_root`
     picks staging (step 2) vs. direct project logs (`--import-legacy`).
-    Returns `(report, unresolved_routing_count)` -- the latter from
-    `_route_candidates` (0 for a 0/1-root catalog).
+    Returns `(report, unresolved_routing_count, unresolved_ids)` -- the
+    latter two from `_route_candidates` (empty for a 0/1-root catalog).
     """
     report = ImportReport()
     candidates = _all_candidates(catalog_dir, report)
     roots = _registered_roots_with_config()
-    buckets, unresolved = _route_candidates(candidates, roots)
+    buckets, unresolved, unresolved_ids = _route_candidates(candidates, roots)
     for root, bucket in buckets.items():
         dest = _dest_for_root(root, staging_root=staging_root)
         slug, pid = _root_project_info(root)
         main_root = root if root is not None else catalog_dir
         n = _append_import_events(bucket, dest, project=slug, project_id=pid, main_root=main_root)
         report.appended += n
-    return report, unresolved
+    return report, unresolved, unresolved_ids
 
 
 # --------------------------------------------------------------------------
@@ -802,6 +808,18 @@ def _read_legacy_tables(
         opened.close()
 
 
+def _sidecar_current_sha256(path: str) -> str | None:
+    """The CURRENT sha256 of a sidecar file on disk, or `None` if it no
+    longer exists (BC-3: "a deleted one gives NULL in the canonical
+    state")."""
+    p = Path(path)
+    if not p.is_file():
+        return None
+    with contextlib.suppress(OSError):
+        return hashlib.sha256(p.read_bytes()).hexdigest()
+    return None
+
+
 def _classify(
     table: str,
     key: tuple,
@@ -811,16 +829,21 @@ def _classify(
     *,
     step1_touched_run_ids: set[str],
     cool_run_rows: dict[str, dict[str, Any]],
+    unresolved_ids: set[str],
 ) -> str | None:
     """Assign one allow-listed class (spec Migration step 3) to a residual
     row, or `None` (unclassified -- aborts the migration).
 
-    Implements four classes:
+    Implements:
 
     - `step1_pulled_or_reaped` (AC-30): the run entity was touched by THIS
       invocation's own step-1 pull/reap.
     - `warm_only_row` (AC-30): the entity has a warm row but no legacy
       source at all (nothing staged for it).
+    - `unresolvable_project` (review finding (b), 260927): the entity's own
+      project could not be determined by `_route_candidates` (routed to
+      `unaffiliated/`) -- a residual on it is explained by "we don't know
+      which project this belongs to", not a genuine loss.
     - `fragment_not_yet_compacted` (spec: "a fragment not yet compacted into
       bathos.db, including those just pulled or reaped in step 1: a column
       of such a run whose staged value equals the value that fragment or a
@@ -838,18 +861,36 @@ def _classify(
       from a separate ledger record, not the fragment's own `metadata`
       column, whenever `reconcile_warm_tier`'s merge -- not just a plain
       fragment rewrite -- is what lagged).
+    - `sidecar_edited_evalue` (BC-3, review finding (b)): an `evalue` column
+      (`runs` or `campaign_runs`) whose folded run's frozen `sidecar_path`
+      either no longer exists or no longer hashes to its frozen
+      `sidecar_sha256` -- the legacy campaign pass re-parses the CURRENT
+      file on every compact, so an edited or deleted sidecar changes its
+      warm e-value while the fold (frozen at `run.started.data`) does not.
+    - `campaign_evalue_confound` (BC-7, review finding (b)): an `evalue`
+      column on a run carrying a postmortem verdict override -- the legacy
+      campaign pass always computes from the fragment's RAW outcome
+      (`compact.py:1044` rebinds `run` before the postmortem override at
+      `:1061`), while the fold uses the folded (postmortem-overridden)
+      outcome.
+    - `force_rebuild_loss` (review finding (b)): the entity has a staged
+      fold but NO legacy row at all (any table) -- e.g. BC-8's non-durable
+      `CatalogAnchorStore` anchors, which write no fragment, so a
+      force-rebuild drops them while the fold (driven by durable events)
+      keeps every one.
 
-    Every other allow-listed class in the spec's prose (force-rebuild loss,
-    corrupt-fragment skips, output_metadata drift, postmortem/worktree loss,
-    campaign e-value confounds, sidecar-edited e-values, unresolvable
-    project) is a deliberately deferred scope limitation of this wave -- a
-    residual of one of those kinds is reported as unclassified (aborting the
-    migration) rather than silently accepted, which is the safe direction
-    (see the task report for the full list).
+    Deliberately deferred (documented, not silently papered over -- see the
+    task report): `corrupt_fragment_skip` (compact.py:787's corrupt-fragment
+    skip appears structurally unreachable as a genuine residual given this
+    importer's warm-source redundancy, the same class of finding as AC-30's
+    original "warm-only row" wording before v35 corrected it),
+    `output_metadata_drift`, and `postmortem_worktree_deleted`.
     """
     run_id = key[0] if table == "runs" and key else None
     if run_id and run_id in step1_touched_run_ids:
         return "step1_pulled_or_reaped"
+    if key and key[0] in unresolved_ids:
+        return "unresolvable_project"
     if srow is None and lrow is not None:
         return "warm_only_row"
     if table == "runs" and run_id and run_id in cool_run_rows:
@@ -859,6 +900,24 @@ def _classify(
             return "fragment_not_yet_compacted"
     if table == "runs" and column == "metadata":
         return "frozen_at_earlier_compact"
+    if column == "evalue" and table in ("runs", "campaign_runs"):
+        member_run_id = key[-1] if table == "campaign_runs" and key else run_id
+        run_row = cool_run_rows.get(member_run_id) if member_run_id else None
+        sidecar_path = (run_row or {}).get("sidecar_path") or (srow or {}).get("sidecar_path")
+        sidecar_sha256 = (run_row or {}).get("sidecar_sha256") or (srow or {}).get(
+            "sidecar_sha256"
+        )
+        if sidecar_path:
+            current_sha = _sidecar_current_sha256(sidecar_path)
+            if current_sha != (sidecar_sha256 or None):
+                return "sidecar_edited_evalue"
+        override = (run_row or {}).get("postmortem_verdict_override") or (srow or {}).get(
+            "postmortem_verdict_override"
+        )
+        if override and override not in ("none", ""):
+            return "campaign_evalue_confound"
+    if lrow is None and srow is not None:
+        return "force_rebuild_loss"
     return None
 
 
@@ -904,6 +963,7 @@ def _diff_tables(
     *,
     step1_touched_run_ids: set[str],
     cool_run_rows: dict[str, dict[str, Any]],
+    unresolved_ids: set[str],
 ) -> tuple[list[ResidualLine], list[dict[str, Any]]]:
     lines: list[ResidualLine] = []
     unclassified: list[dict[str, Any]] = []
@@ -945,6 +1005,7 @@ def _diff_tables(
                     srow,
                     step1_touched_run_ids=step1_touched_run_ids,
                     cool_run_rows=cool_run_rows,
+                    unresolved_ids=unresolved_ids,
                 )
                 rl = ResidualLine(
                     table=table,
@@ -993,7 +1054,11 @@ def _cool_fragment_run_rows(catalog_dir: Path) -> dict[str, dict[str, Any]]:
 
 
 def _build_and_diff(
-    catalog_dir: Path, attempt: str, *, step1_touched_run_ids: set[str]
+    catalog_dir: Path,
+    attempt: str,
+    *,
+    step1_touched_run_ids: set[str],
+    unresolved_ids: set[str] | None = None,
 ) -> DiffResult:
     legacy_tables, legacy_columns, legacy_table_exists, locked_status = _read_legacy_tables(
         catalog_dir
@@ -1024,6 +1089,7 @@ def _build_and_diff(
         staged_tables,
         step1_touched_run_ids=step1_touched_run_ids,
         cool_run_rows=cool_run_rows,
+        unresolved_ids=unresolved_ids or set(),
     )
     sha = _report_sha256(lines)
     return DiffResult(lines=lines, unclassified=unclassified, locked_status=None, sha256=sha)
@@ -1250,7 +1316,7 @@ def migrate_to_log(
         _cleanup_prior_attempt_state(cd)
         attempt = _new_attempt_id()
 
-        import_report, unresolved_routing = _import_candidates(
+        import_report, unresolved_routing, unresolved_ids = _import_candidates(
             cd, staging_root=_attempt_staging_root(attempt)
         )
         if import_report.locked:
@@ -1261,7 +1327,12 @@ def migrate_to_log(
                 detail="a legacy source is locked by another process; retry once it is free",
             )
 
-        diff = _build_and_diff(cd, attempt, step1_touched_run_ids=step1_touched)
+        diff = _build_and_diff(
+            cd,
+            attempt,
+            step1_touched_run_ids=step1_touched,
+            unresolved_ids=unresolved_ids,
+        )
         if diff.locked_status is not None:
             return MigrateToLogResult(
                 status="legacy_db_locked",
@@ -1321,7 +1392,7 @@ def import_legacy_post_cutover(catalog_dir: Path | None = None) -> MigrateToLogR
             ),
         )
     with writers_lock(cd, exclusive=True):
-        report, unresolved_routing = _import_candidates(cd, staging_root=None)
+        report, unresolved_routing, _unresolved_ids = _import_candidates(cd, staging_root=None)
     if report.locked:
         return MigrateToLogResult(
             status="legacy_db_locked",

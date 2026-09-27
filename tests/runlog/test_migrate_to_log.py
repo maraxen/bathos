@@ -896,7 +896,7 @@ def test_multi_root_routing_by_parent_entity(tmp_path: Path):
     compact(shared_cat)
 
     staging_root = _attempt_staging_root("test-multi-root")
-    report, unresolved = _import_candidates(shared_cat, staging_root=staging_root)
+    report, unresolved, _unresolved_ids = _import_candidates(shared_cat, staging_root=staging_root)
     assert report.locked == []
     assert unresolved == 0, "every entity here has a resolvable parent"
 
@@ -951,3 +951,139 @@ def test_multi_root_routing_by_parent_entity(tmp_path: Path):
         assert ("run-p2a",) not in run_ids_seen
         assert ("run-p2b",) not in run_ids_seen
         assert ("run-p3",) not in run_ids_seen
+
+
+# --------------------------------------------------------------------------
+# Additional residual classes (review finding (b), 260927)
+# --------------------------------------------------------------------------
+
+
+def test_force_rebuild_loss_class(tmp_path: Path):
+    """Review finding (b): `force_rebuild_loss` -- an entity with a staged
+    fold but NO legacy row at all. `run_edges` has no cool-tier fragment
+    concept (warm-table-only, like BC-8's anchors), so a
+    `compact(force_rebuild=True)` genuinely drops it while step 2's earlier
+    import scan (staged) still has it.
+    """
+    import duckdb
+
+    from bathos.campaign_edges import add_run_edge
+    from bathos.runlog.migrate import _attempt_staging_root, _build_and_diff, _import_candidates
+
+    backend = _simple_backend(tmp_path)
+    write_run(
+        Run(
+            id="run-edge-parent",
+            project_slug="proj",
+            command="p.py",
+            argv=["python", "p.py"],
+            git_hash="7" * 40,
+            git_branch="main",
+            git_dirty=False,
+            timestamp=BASE_TS,
+            duration_s=1.0,
+            exit_code=0,
+            status="completed",
+        ),
+        backend.catalog_dir,
+    )
+    compact(backend.catalog_dir)
+
+    db = duckdb.connect(str(backend.catalog_dir / "bathos.db"))
+    try:
+        add_run_edge(db, "run-a", "run-edge-parent", catalog_dir=backend.catalog_dir)
+    finally:
+        db.close()
+
+    staging_root = _attempt_staging_root("frb-test")
+    report, _unresolved, _ids = _import_candidates(backend.catalog_dir, staging_root=staging_root)
+    assert report.locked == []
+
+    compact(backend.catalog_dir, force_rebuild=True)
+    con = duckdb.connect(str(backend.catalog_dir / "bathos.db"), read_only=True)
+    try:
+        try:
+            rows_after = con.execute("SELECT * FROM run_edges").fetchall()
+        except duckdb.CatalogException:
+            rows_after = []  # the table itself was dropped -- also "gone"
+    finally:
+        con.close()
+    assert rows_after == [], "run_edges must be gone (dropped or emptied) after force-rebuild"
+
+    diff = _build_and_diff(backend.catalog_dir, "frb-test", step1_touched_run_ids=set())
+    assert diff.unclassified == []
+    edge_lines = [line for line in diff.lines if line.table == "run_edges"]
+    assert edge_lines, "expected a run_edges residual"
+    for line in edge_lines:
+        assert line.cls == "force_rebuild_loss"
+        assert line.legacy_value is None
+
+
+def test_unresolvable_project_class(tmp_path: Path):
+    """Review finding (b): `unresolvable_project` -- a residual on an
+    entity whose project could not be determined by `_route_candidates`
+    (2+ registered roots, none matching this entity's own project_slug) is
+    classified rather than left unclassified, and takes priority over
+    `force_rebuild_loss` when both would otherwise apply.
+    """
+    import duckdb
+
+    from bathos.campaign_edges import add_run_edge
+    from bathos.runlog.migrate import _attempt_staging_root, _build_and_diff, _import_candidates
+
+    roots: dict[str, Path] = {}
+    for slug in ("proj1", "proj2"):
+        root = tmp_path / slug
+        make_git_repo(root)
+        write_bth_toml(root, slug=slug)
+        assign_project_id(root)
+        _commit_all(root, f"assign id for {slug}")
+        register_main_root(root)
+        roots[slug] = root
+
+    shared_cat = tmp_path / "shared_cat"
+    # Neither run's project_slug ("proj-orphan") matches a registered root.
+    for rid in ("run-orphan-a", "run-orphan-b"):
+        write_run(
+            Run(
+                id=rid,
+                project_slug="proj-orphan",
+                command="o.py",
+                argv=["python", "o.py"],
+                git_hash="8" * 40,
+                git_branch="main",
+                git_dirty=False,
+                timestamp=BASE_TS,
+                duration_s=1.0,
+                exit_code=0,
+                status="completed",
+            ),
+            shared_cat,
+        )
+    compact(shared_cat)
+
+    db = duckdb.connect(str(shared_cat / "bathos.db"))
+    try:
+        add_run_edge(db, "run-orphan-b", "run-orphan-a", catalog_dir=shared_cat)
+    finally:
+        db.close()
+
+    staging_root = _attempt_staging_root("unres-test")
+    report, unresolved, unresolved_ids = _import_candidates(shared_cat, staging_root=staging_root)
+    assert report.locked == []
+    assert unresolved > 0
+    assert "run-orphan-a" in unresolved_ids or "run-orphan-b" in unresolved_ids
+
+    # The same force-rebuild-drops-run_edges mechanism as
+    # test_force_rebuild_loss_class -- but this time the entity is ALSO
+    # unresolvable, and that must take priority.
+    compact(shared_cat, force_rebuild=True)
+
+    diff = _build_and_diff(
+        shared_cat, "unres-test", step1_touched_run_ids=set(), unresolved_ids=unresolved_ids
+    )
+    assert diff.unclassified == []
+    edge_lines = [line for line in diff.lines if line.table == "run_edges"]
+    assert edge_lines, "expected a run_edges residual"
+    for line in edge_lines:
+        assert line.cls == "unresolvable_project"
