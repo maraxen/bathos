@@ -20,6 +20,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import duckdb
+import pytest
 
 from bathos.catalog import write_run
 from bathos.compact import compact
@@ -36,6 +37,17 @@ from .conftest import make_git_repo, write_bth_toml
 from .test_importer import _add_extra_entities, _ops
 
 BASE_TS = datetime(2020, 1, 1, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def _squeue_available_and_empty(monkeypatch):
+    """This sandbox has no real `squeue` binary, and `my_squeue_job_ids()`
+    now fails CLOSED (raises `SqueueUnavailableError`) rather than
+    returning `[]` on any query failure (review finding, HIGH, 260927) --
+    every test in this module that is not specifically exercising that
+    failure mode needs squeue mocked as available-and-empty, matching "no
+    real SSH"."""
+    monkeypatch.setattr("bathos.runlog.migrate.my_squeue_job_ids", lambda: [])
 
 
 def _commit_all(root: Path, message: str = "commit") -> None:
@@ -448,6 +460,92 @@ def test_squeue_conflict_refuses_without_force(tmp_path: Path, monkeypatch):
     assert forced.status == "switched"
 
 
+def test_squeue_unavailable_refuses_unconditionally_even_with_force(
+    tmp_path: Path, monkeypatch
+):
+    """Review finding (HIGH, 260927): `my_squeue_job_ids()` used to return
+    `[]` on an OSError/timeout/non-zero exit, indistinguishable from "no
+    jobs" -- an unreachable cluster silently let migration proceed. It must
+    fail CLOSED with its own status, in BOTH the step-1 shared-lock check
+    and the post-exclusive-acquire re-check, and `--force` (which only
+    overrides an actually-observed conflict) must not paper over it.
+    """
+    from bathos.runlog.migrate import SqueueUnavailableError, migrate_to_log
+
+    backend = _simple_backend(tmp_path)
+
+    def _raise():
+        raise SqueueUnavailableError("squeue timed out: Command timed out after 30s")
+
+    monkeypatch.setattr("bathos.runlog.migrate.my_squeue_job_ids", _raise)
+
+    result = migrate_to_log(backend.catalog_dir)
+    assert result.status == "squeue_unavailable"
+    assert "timed out" in result.detail
+    assert not cutover_marker_path(backend.catalog_dir).exists()
+    assert not (backend.catalog_dir / "bathos.db.frozen").exists()
+
+    forced = migrate_to_log(backend.catalog_dir, force=True)
+    assert forced.status == "squeue_unavailable"
+    assert not cutover_marker_path(backend.catalog_dir).exists()
+
+
+def test_squeue_unavailable_in_exclusive_recheck_also_refuses(tmp_path: Path, monkeypatch):
+    """The SAME failure mode, but surfacing only on the post-exclusive-lock
+    re-check (the step-1 check succeeded moments earlier) -- both call
+    sites must fail closed independently."""
+    from bathos.runlog.migrate import SqueueUnavailableError, migrate_to_log
+
+    backend = _simple_backend(tmp_path)
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise SqueueUnavailableError("squeue: connection refused")
+        return []
+
+    monkeypatch.setattr("bathos.runlog.migrate.my_squeue_job_ids", flaky)
+
+    result = migrate_to_log(backend.catalog_dir)
+    assert result.status == "squeue_unavailable"
+    assert calls["n"] == 2
+    assert not cutover_marker_path(backend.catalog_dir).exists()
+
+
+def test_step1_reap_failure_aborts_with_its_own_status(tmp_path: Path, monkeypatch):
+    """Review finding (MEDIUM, 260927): a `reap_runs()` exception during
+    step 1 used to be swallowed (`contextlib.suppress(Exception)`), letting
+    migration continue as though nothing had failed, on a possibly
+    half-reaped catalog. It must abort instead, with its own status naming
+    the failure, and touch nothing (no marker, no `bathos.db.frozen`)."""
+    from bathos.runlog.migrate import migrate_to_log
+
+    backend = _simple_backend(tmp_path)
+
+    import bathos.reap as reap_module
+
+    real_reap_runs = reap_module.reap_runs
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("simulated reap_runs failure")
+
+    monkeypatch.setattr(reap_module, "reap_runs", _boom)
+
+    result = migrate_to_log(backend.catalog_dir)
+    assert result.status == "step1_reap_failed"
+    assert "simulated reap_runs failure" in result.detail
+    assert not cutover_marker_path(backend.catalog_dir).exists()
+    assert not (backend.catalog_dir / "bathos.db.frozen").exists()
+
+    # Once the failure clears, migration proceeds normally. Restore just
+    # THIS patch (not monkeypatch.undo(), which would also revert the
+    # autouse squeue mock this test relies on).
+    monkeypatch.setattr(reap_module, "reap_runs", real_reap_runs)
+    result2 = _converge(backend.catalog_dir)
+    assert result2.status == "switched"
+
+
 # --------------------------------------------------------------------------
 # Re-run after successful cut-over
 # --------------------------------------------------------------------------
@@ -463,6 +561,36 @@ def test_rerun_after_switch_is_noop(tmp_path: Path):
     second = migrate_to_log(backend.catalog_dir)
     assert second.status == "already_migrated"
     assert second.attempt == first.attempt
+
+
+def test_cleanup_prior_attempt_sweeps_stray_tmp_files(tmp_path: Path):
+    """Review finding (LOW, 260927): `_cleanup_prior_attempt_state()` (the
+    fresh-attempt path, marker absent) used to leave stray `index.db.*.tmp`
+    (an interrupted step 4(a) build) and `.import-<attempt>-*.jsonl.tmp`
+    (an interrupted step 4(c) segment copy) behind forever."""
+    from bathos.runlog.migrate import migrate_to_log
+
+    backend = _simple_backend(tmp_path)
+
+    stray_index_tmp = backend.catalog_dir / "index.db.deadbeef12ab.tmp"
+    stray_index_tmp.write_bytes(b"stale partial build")
+    stray_index_wal = backend.catalog_dir / "index.db.deadbeef12ab.tmp.wal"
+    stray_index_wal.write_bytes(b"stale wal")
+
+    log_dir = backend.workspace / ".bth" / "log"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stray_segment_tmp = log_dir / ".import-oldattempt-1.jsonl.tmp"
+    stray_segment_tmp.write_text('{"stale": true}\n')
+
+    assert stray_index_tmp.exists()
+    assert stray_segment_tmp.exists()
+
+    result = migrate_to_log(backend.catalog_dir)
+    assert result.status == "residual_pending"  # the fresh-attempt path ran
+
+    assert not stray_index_tmp.exists()
+    assert not stray_index_wal.exists()
+    assert not stray_segment_tmp.exists()
 
 
 # --------------------------------------------------------------------------

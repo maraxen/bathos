@@ -118,9 +118,9 @@ class ResidualLine:
 @dataclass
 class MigrateToLogResult:
     """The outcome of one `migrate_to_log()` call. `status` is one of:
-    `missing_project_ids`, `squeue_conflict`, `legacy_db_locked`,
-    `unclassified_residual`, `residual_pending`, `switched`,
-    `already_migrated`."""
+    `missing_project_ids`, `squeue_unavailable`, `squeue_conflict`,
+    `step1_reap_failed`, `legacy_db_locked`, `unclassified_residual`,
+    `residual_pending`, `switched`, `already_migrated`."""
 
     status: str
     attempt: str | None = None
@@ -330,10 +330,23 @@ def _running_slurm_job_ids(catalog_dir: Path) -> set[str]:
     return ids
 
 
+class SqueueUnavailableError(RuntimeError):
+    """`squeue` could not be queried at all (unreachable host, timeout, or a
+    non-zero exit) -- fails CLOSED. Review finding (HIGH, 260927): the
+    earlier version of `my_squeue_job_ids()` returned `[]` on ANY of these,
+    which is indistinguishable from "checked, no jobs" -- a genuinely
+    unreachable cluster would silently let migration proceed as if the
+    queue were empty. This is refused UNCONDITIONALLY (never overridable by
+    `--force`, which only overrides an actual, successfully-observed
+    conflict): the spec gives `--force` no role in "couldn't check"."""
+
+
 def my_squeue_job_ids() -> list[str]:
     """`squeue --me --noheader --format=%A`, via the transparently-wrapped
     command (myxcel). Its own function so tests can mock the cluster
-    boundary directly rather than shelling out (no real SSH)."""
+    boundary directly rather than shelling out (no real SSH). Raises
+    `SqueueUnavailableError` rather than returning `[]` on any failure to
+    query it -- see that class's docstring."""
     try:
         result = subprocess.run(
             ["squeue", "--me", "--noheader", "--format=%A"],
@@ -341,35 +354,73 @@ def my_squeue_job_ids() -> list[str]:
             text=True,
             timeout=30,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return []
+    except OSError as exc:
+        raise SqueueUnavailableError(f"squeue could not be run: {exc}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise SqueueUnavailableError(f"squeue timed out: {exc}") from exc
     if result.returncode != 0:
-        return []
+        stderr = (result.stderr or "").strip()
+        stdout = (result.stdout or "").strip()
+        raise SqueueUnavailableError(
+            f"squeue exited {result.returncode}: {stderr or stdout or '(no output)'}"
+        )
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
 def squeue_conflict(catalog_dir: Path) -> list[str]:
+    """Raises `SqueueUnavailableError` (propagated from `my_squeue_job_ids`)
+    rather than ever silently reporting "no conflict" when the queue itself
+    could not be checked."""
     known = _running_slurm_job_ids(catalog_dir)
     mine = my_squeue_job_ids()
     return sorted(j for j in mine if j in known)
 
 
-def _run_step1_shared(catalog_dir: Path, *, force: bool) -> tuple[list[str], set[str]]:
+def _check_squeue(catalog_dir: Path) -> tuple[list[str], str | None]:
+    """`(conflicting_jobs, unavailable_message)`. `unavailable_message` is
+    set (and `conflicting_jobs` empty) when `squeue` itself could not be
+    queried -- callers must refuse on this UNCONDITIONALLY, `--force` or
+    not (see `SqueueUnavailableError`)."""
+    try:
+        return squeue_conflict(catalog_dir), None
+    except SqueueUnavailableError as exc:
+        return [], str(exc)
+
+
+def _run_step1_shared(
+    catalog_dir: Path, *, force: bool
+) -> tuple[list[str], set[str], str | None, str | None]:
     """Step 1's shared-lock phase: pull + mirror + reap(reconcile_warm=False),
     then the squeue/submit-record refusal. Returns `(conflicting_jobs,
-    step1_touched_run_ids)` -- the latter feeds step 3's
-    `step1_pulled_or_reaped` residual class (spec: "a staged status the
-    fragment carries" / "a `metadata.reaped` equal to a step-1 ledger
-    record" are both runs THIS pass itself touched).
+    step1_touched_run_ids, squeue_unavailable_message, reap_error_message)`
+    -- `step1_touched_run_ids` feeds step 3's `step1_pulled_or_reaped`
+    residual class (spec: "a staged status the fragment carries" / "a
+    `metadata.reaped` equal to a step-1 ledger record" are both runs THIS
+    pass itself touched).
+
+    Review finding (MEDIUM, 260927): a `reap_runs()` failure used to be
+    silently swallowed (`contextlib.suppress(Exception)`), letting a
+    half-reaped catalog proceed as if nothing had failed. `reap_error_message`
+    now surfaces it; the caller aborts on it (the stricter option) rather
+    than continuing on unknown state. `squeue_conflict` is skipped entirely
+    when reap failed -- there is nothing useful to check against a state
+    step 1 itself could not finish establishing.
     """
     from bathos.reap import reap_runs
 
     touched: set[str] = set()
+    reap_error: str | None = None
     with writers_lock(catalog_dir, exclusive=False):
         pull_and_mirror_all_remotes(catalog_dir)
-        with contextlib.suppress(Exception):
+        try:
             candidates, _skipped = reap_runs(catalog_dir, apply=True, reconcile_warm=False)
             touched.update(r.id for r in candidates)
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the caller, not swallowed
+            reap_error = str(exc)
+
+        if reap_error is not None:
+            return [], touched, None, reap_error
+
         remote_runs_dir = catalog_dir / "remote-runs"
         if remote_runs_dir.is_dir():
             import pyarrow.parquet as pq
@@ -380,8 +431,13 @@ def _run_step1_shared(catalog_dir: Path, *, force: bool) -> tuple[list[str], set
                 with contextlib.suppress(Exception):
                     tbl = pq.read_table(f, columns=["id"])
                     touched.update(v for v in tbl.column("id").to_pylist() if v)
-        conflict = [] if force else squeue_conflict(catalog_dir)
-    return conflict, touched
+
+        conflict, squeue_error = _check_squeue(catalog_dir)
+        if squeue_error is not None:
+            return [], touched, squeue_error, None
+        if force:
+            conflict = []
+    return conflict, touched, None, None
 
 
 # --------------------------------------------------------------------------
@@ -401,7 +457,17 @@ def _cleanup_prior_attempt_state(catalog_dir: Path) -> None:
     """Re-run semantics (spec Migration step 4, "Re-running `bth migrate
     --to-log`"): with the marker absent, delete every leftover staging
     attempt directory and `index.db` -- never a step-1 legacy source (those
-    stay and are re-imported)."""
+    stay and are re-imported).
+
+    Review finding (LOW, 260927): also sweeps stray temp files an earlier,
+    interrupted attempt could have left behind -- `index.db.<gen>.tmp` (a
+    step 4(a) build killed before its `os.replace`) and
+    `.import-<attempt>-<n>.jsonl.tmp` (a step 4(c) segment copy killed
+    mid-write) in every registered root's log dir, its mirror, and
+    unaffiliated + its mirror. Neither is load-bearing for correctness (a
+    `.tmp` file is never read by anything), but leaving them around forever
+    is still a real, unbounded disk leak across repeated aborted attempts.
+    """
     staging_base = Path.home() / ".bth" / "log" / "import-staging"
     if staging_base.is_dir():
         shutil.rmtree(staging_base, ignore_errors=True)
@@ -409,6 +475,23 @@ def _cleanup_prior_attempt_state(catalog_dir: Path) -> None:
     idx_path.unlink(missing_ok=True)
     with contextlib.suppress(OSError):
         idx_path.with_name(idx_path.name + ".wal").unlink()
+    for tmp in catalog_dir.glob("index.db.*.tmp"):
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        with contextlib.suppress(OSError):
+            tmp.with_name(tmp.name + ".wal").unlink()
+
+    search_dirs = [Path.home() / ".bth" / "log" / "unaffiliated", mirror_dir_for(None, None)]
+    for root, _cfg in _registered_roots_with_config():
+        search_dirs.append(root / ".bth" / "log")
+        slug, pid = _root_project_info(root)
+        search_dirs.append(mirror_dir_for(pid, slug))
+    for d in search_dirs:
+        if not d.is_dir():
+            continue
+        for tmp in d.glob(".import-*.jsonl.tmp"):
+            with contextlib.suppress(OSError):
+                tmp.unlink()
 
 
 def _append_import_events(
@@ -1061,7 +1144,17 @@ def migrate_to_log(
         with writers_lock(cd, exclusive=True):
             return _finish_remainder(cd, str(attempt))
 
-    conflict, step1_touched = _run_step1_shared(cd, force=force)
+    conflict, step1_touched, squeue_error, reap_error = _run_step1_shared(cd, force=force)
+    if reap_error is not None:
+        return MigrateToLogResult(
+            status="step1_reap_failed",
+            detail=(
+                f"step 1's reap_runs() failed: {reap_error}; aborting rather than "
+                "proceeding on a possibly half-reaped catalog"
+            ),
+        )
+    if squeue_error is not None:
+        return MigrateToLogResult(status="squeue_unavailable", detail=squeue_error)
     if conflict:
         return MigrateToLogResult(status="squeue_conflict", conflicting_jobs=conflict)
 
@@ -1072,8 +1165,10 @@ def migrate_to_log(
             if attempt:
                 return _finish_remainder(cd, str(attempt))
 
-        conflict2 = [] if force else squeue_conflict(cd)
-        if conflict2:
+        conflict2, squeue_error2 = _check_squeue(cd)
+        if squeue_error2 is not None:
+            return MigrateToLogResult(status="squeue_unavailable", detail=squeue_error2)
+        if conflict2 and not force:
             return MigrateToLogResult(status="squeue_conflict", conflicting_jobs=conflict2)
 
         _cleanup_prior_attempt_state(cd)
