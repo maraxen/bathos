@@ -1599,6 +1599,10 @@ def test_flag_on_run_emits_started_and_finished_events_only(
         "provenance_source",
     }
     assert "pin" in started["data"]
+    # Review 3a: the full Run row, so a reaped (never-finished) run folds every column.
+    for key in ("timestamp", "hostname", "git_dirty_content_id", "git_provenance_source"):
+        assert key in started["data"]
+    assert not isinstance(started["data"]["claim_discriminates"], list)
     assert finished["data"]["status"] == "completed"
     assert finished["data"]["exit_code"] == 0
     reset_writers_for_test()

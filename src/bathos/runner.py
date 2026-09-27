@@ -639,17 +639,14 @@ def _run_script_impl(
     if current_mode():
         # D6: run.started is not best-effort -- if this raises, the caller (below)
         # must return before ever spawning the subprocess.
+        # The full Run row (same encoding as run.finished), so a run that never
+        # finishes (reaped) still folds every general column; claim_* use Run's
+        # JSON-or-NULL encoding rather than the raw sidecar list.
         started_data = {
+            **run_event_data(run),
             "sidecar": sidecar_declaration_for_event(sidecar),
             "sidecar_sha256": bundle.sha256 if bundle and bundle.found else "",
-            "claim_discriminates": sidecar.claim_discriminates if sidecar else None,
-            "claim_isolates": sidecar.claim_isolates if sidecar else None,
-            "project_slug": project_slug,
-            "command": run.command,
             "argv": argv,
-            "git_hash": run.git_hash,
-            "git_branch": run.git_branch,
-            "git_dirty": run.git_dirty,
             "campaign_id": resolved_campaign_id or None,
             "agent_mode": resolved_mode,
         }

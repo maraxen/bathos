@@ -348,3 +348,38 @@ def test_arrival_order_independence_ac20():
 
 def test_no_events_returns_bare_id_only():
     assert fold_run([]) == {"id": None}
+
+
+def test_reaped_run_keeps_general_fields_from_real_run_started_payload():
+    """Review 3a #1/#2: a reaped run never emits run.finished, so every general
+    column must come from run.started -- built here exactly as runner.py builds it."""
+    from bathos.runlog.emit import run_event_data
+    from bathos.schema import Run
+
+    run = Run(
+        project_slug="p",
+        command="python x.py",
+        argv=["python", "x.py"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=True,
+        status="running",
+        hostname="node4007",
+        slurm_job_id="123",
+        git_dirty_content_id="dci",
+        git_provenance_source="live",
+        claim_discriminates=None,
+    )
+    row = fold_run(
+        [
+            ev("run.started", [run.id], run_event_data(run), T0, "e0"),
+            reaped(run_id=run.id),
+        ]
+    )
+    assert row["status"] == "abandoned"
+    assert row["hostname"] == "node4007"
+    assert row["slurm_job_id"] == "123"
+    assert row["git_dirty_content_id"] == "dci"
+    assert row["git_provenance_source"] == "live"
+    assert row["timestamp"] is not None
+    assert row.get("claim_discriminates") is None  # NULL, never the string "[]"
