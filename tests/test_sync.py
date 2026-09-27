@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from bathos.config import ProjectConfig
-from bathos.sync import SyncResult, sync_catalog
+from bathos.sync import SyncResult, cluster_log_remote_dirs, pull_cluster_log, sync_catalog
 
 
 @pytest.fixture(autouse=True)
@@ -273,3 +273,78 @@ def test_sync_error_on_rsync_failure(tmp_path: Path):
 
         with pytest.raises(RuntimeError, match="rsync failed"):
             sync_catalog("engaging", config, catalog_dir, pull=False)
+
+
+# ---------------------------------------------------------------------------
+# Cluster log pull (spec "Cluster", delivery step 4 wave d, item 1):
+# `pull_cluster_log` -- log/fallback/mirror, via the myxcel wrapper only.
+# ---------------------------------------------------------------------------
+
+
+def _cluster_config(tmp_path: Path) -> ProjectConfig:
+    return ProjectConfig(
+        slug="testproj",
+        root=tmp_path,
+        remotes={"engaging": {"host": "engaging", "remote_root": "~/projects/testproj"}},
+    )
+
+
+def test_cluster_log_remote_dirs_layout(tmp_path: Path):
+    log_dir, fallback_dir, mirror_dir = cluster_log_remote_dirs(tmp_path, "engaging")
+    assert log_dir == tmp_path / ".bth" / "log" / "remote" / "engaging" / "log"
+    assert fallback_dir == tmp_path / ".bth" / "log" / "remote" / "engaging" / "fallback"
+    assert mirror_dir == tmp_path / ".bth" / "log" / "remote" / "engaging" / "mirror"
+
+
+def test_pull_cluster_log_pulls_three_subpaths_via_myxcel_with_project_id(tmp_path: Path):
+    """All three sub-pulls go through `bathos.cluster.pull_path` (never
+    rsync directly), with the project-id mirror path when one is present."""
+    config = _cluster_config(tmp_path)
+
+    with patch("bathos.cluster.pull_path") as mock_pull:
+        pull_cluster_log("engaging", config, tmp_path, "proj-id-123")
+
+    assert mock_pull.call_count == 3
+    calls = {c.args[0:2] for c in mock_pull.call_args_list}
+    assert ("engaging", "~/projects/testproj/.bth/log/") in calls
+    assert ("engaging", "~/.bth/log/fallback/testproj/") in calls
+    assert ("engaging", "~/.bth/log-mirror/proj-id-123/") in calls
+
+    log_dir, fallback_dir, mirror_dir = cluster_log_remote_dirs(tmp_path, "engaging")
+    assert log_dir.is_dir()
+    assert fallback_dir.is_dir()
+    assert mirror_dir.is_dir()
+
+
+def test_pull_cluster_log_uses_null_slug_mirror_when_no_project_id(tmp_path: Path):
+    """With no project id (D7's null-id fallback), the mirror source is
+    `~/.bth/log-mirror/_null/<slug>/`, matching the writer's own fallback."""
+    config = _cluster_config(tmp_path)
+
+    with patch("bathos.cluster.pull_path") as mock_pull:
+        pull_cluster_log("engaging", config, tmp_path, None)
+
+    calls = {c.args[0:2] for c in mock_pull.call_args_list}
+    assert ("engaging", "~/.bth/log-mirror/_null/testproj/") in calls
+
+
+def test_pull_cluster_log_is_best_effort_per_subpath(tmp_path: Path):
+    """One sub-path failing (e.g. a fallback directory that was never
+    written on the remote) must not prevent the other two from being
+    attempted."""
+    config = _cluster_config(tmp_path)
+
+    def _side_effect(_remote, remote_path, _dest):
+        if "fallback" in remote_path:
+            raise RuntimeError("no such directory")
+
+    with patch("bathos.cluster.pull_path", side_effect=_side_effect) as mock_pull:
+        pull_cluster_log("engaging", config, tmp_path, "proj-id-123")
+
+    assert mock_pull.call_count == 3
+
+
+def test_pull_cluster_log_raises_for_unconfigured_remote(tmp_path: Path):
+    config = ProjectConfig(slug="testproj", root=tmp_path, remotes={})
+    with pytest.raises(ValueError, match="not in config"):
+        pull_cluster_log("engaging", config, tmp_path, "proj-id-123")

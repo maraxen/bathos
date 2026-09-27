@@ -775,3 +775,96 @@ value = "float"
     table = pq.read_table(parquet_files[0])
     # Should default to exploration
     assert table.column("stage_name")[0].as_py() == "exploration"
+
+
+# ---------------------------------------------------------------------------
+# Cluster log-mode env export (spec "Mode" / "Cluster jobs", delivery step 4
+# wave d, item 2): after cut-over, `bth submit` exports BTH_LOG_MODE=1 and
+# BTH_PROJECT_ID into the job environment. Pre-cut-over, neither is exported
+# and the submitted command is unchanged.
+# ---------------------------------------------------------------------------
+
+
+def _enable_log_mode(catalog_dir: Path) -> None:
+    import json
+
+    from bathos.runlog.mode import cutover_marker_path
+
+    catalog_dir.mkdir(parents=True, exist_ok=True)
+    cutover_marker_path(catalog_dir).write_text(
+        json.dumps(
+            {"at": "2026-01-01T00:00:00Z", "bathos": "test", "attempt": "1", "segments": []}
+        )
+    )
+
+
+def test_submit_precutover_leaves_command_unchanged(tmp_path: Path, monkeypatch):
+    """Flag off (no cutover marker): the submitted command is exactly the
+    user's command, with no BTH_LOG_MODE/BTH_PROJECT_ID prefix."""
+    monkeypatch.chdir(tmp_path)
+    catalog_dir = tmp_path / "catalog"
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
+    _write_project_toml(tmp_path)
+
+    with (
+        patch("bathos.cluster.push_project"),
+        patch("bathos.cluster.submit_job", return_value=_SUBMIT_RESULT) as mock_submit,
+    ):
+        result = runner.invoke(app, ["submit", "--no-wait", "uv", "run", "python", "train.py"])
+
+    assert result.exit_code == 0, result.output
+    cmd_str = mock_submit.call_args[0][3]
+    assert cmd_str == "uv run python train.py"
+    assert "BTH_LOG_MODE" not in cmd_str
+
+
+def test_submit_postcutover_exports_log_mode_and_project_id(tmp_path: Path, monkeypatch):
+    """After cutover, with a [project] id present, the submitted command is
+    prefixed with `env BTH_LOG_MODE=1 BTH_PROJECT_ID=<id>`."""
+    monkeypatch.chdir(tmp_path)
+    catalog_dir = tmp_path / "catalog"
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
+    content = (
+        "[project]\n"
+        'slug = "myproject"\n'
+        f'root = "{tmp_path}"\n'
+        'id = "abc-123"\n'
+        "\n"
+        "[slurm]\n"
+        'remote = "engaging"\n'
+        'preset = "gpu"\n'
+    )
+    (tmp_path / ".bth.toml").write_text(content)
+    _enable_log_mode(catalog_dir)
+
+    with (
+        patch("bathos.cluster.push_project"),
+        patch("bathos.cluster.submit_job", return_value=_SUBMIT_RESULT) as mock_submit,
+    ):
+        result = runner.invoke(app, ["submit", "--no-wait", "uv", "run", "python", "train.py"])
+
+    assert result.exit_code == 0, result.output
+    cmd_str = mock_submit.call_args[0][3]
+    assert cmd_str == "env BTH_LOG_MODE=1 BTH_PROJECT_ID=abc-123 uv run python train.py"
+
+
+def test_submit_postcutover_no_project_id_exports_log_mode_only(tmp_path: Path, monkeypatch):
+    """After cutover, with NO [project] id, only BTH_LOG_MODE=1 is exported;
+    the job's writer then falls back to `project_id: null` (D7), mapped by
+    slug at ingest."""
+    monkeypatch.chdir(tmp_path)
+    catalog_dir = tmp_path / "catalog"
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
+    _write_project_toml(tmp_path)
+    _enable_log_mode(catalog_dir)
+
+    with (
+        patch("bathos.cluster.push_project"),
+        patch("bathos.cluster.submit_job", return_value=_SUBMIT_RESULT) as mock_submit,
+    ):
+        result = runner.invoke(app, ["submit", "--no-wait", "uv", "run", "python", "train.py"])
+
+    assert result.exit_code == 0, result.output
+    cmd_str = mock_submit.call_args[0][3]
+    assert cmd_str == "env BTH_LOG_MODE=1 uv run python train.py"
+    assert "BTH_PROJECT_ID" not in cmd_str

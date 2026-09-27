@@ -1603,6 +1603,27 @@ def sync_tool(
         "remote": result.remote,
         "filtered": result.filtered,
     }
+
+    # Cluster log pull (spec "Cluster", delivery step 4 wave d): only on
+    # --pull, and only once the local flag is on -- with the flag off, sync
+    # behaves exactly as today (spec "Cluster" + "Mode").
+    if pull:
+        from bathos.runlog.mode import is_log_mode
+
+        if is_log_mode(cat_dir):
+            from bathos.runlog.project_id import read_project_id
+            from bathos.runlog.resolve import resolve_log_root
+            from bathos.sync import pull_cluster_log
+
+            resolution = resolve_log_root(Path.cwd())
+            if not resolution.unaffiliated:
+                project_id = read_project_id(resolution.main_root / ".bth.toml")
+                try:
+                    pull_cluster_log(remote_name, config, resolution.main_root, project_id)
+                    result_dict["cluster_log_pulled"] = True
+                except Exception as e:
+                    result_dict["cluster_log_pull_error"] = str(e)
+
     return result_dict
 
 

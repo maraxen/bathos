@@ -29,6 +29,17 @@ three simple ledgers plus submit provenance (`blast_radius_ledger` /
 own `seq_position`/`evalue` columns (stubbed to NULL in wave a) are filled
 here too, by consulting the run's own campaign membership -- see
 `_refold_run`'s docstring.
+
+Scope (delivery step 4, wave d): the three cluster root kinds deferred above
+are now enumerated too -- `remote-log`, `remote-fallback`, `remote-mirror`,
+one triple per `<main root>/.bth/log/remote/<remote>/{log,fallback,mirror}/`
+subdirectory a `bth sync --pull` (`bathos.sync.pull_cluster_log`) populated
+(spec "Cluster"). Discovery is purely filesystem-driven, like every other
+root kind here: each subdirectory NAME under `.../remote/` is read straight
+off disk as the remote's name, with no project-config lookup. `root_id` is
+`f"{main_root}::{remote}"` (spec: "root id ... (main_root, remote)"), packed
+into ingest_watermarks' single VARCHAR `root_id` column the same way the
+`staging` root kind already packs `(attempt, kind, sub)` into one string.
 """
 
 from __future__ import annotations
@@ -202,18 +213,31 @@ def _marker_staging_roots(catalog_dir: Path) -> list[tuple[str, str, Path]]:
     return staging_roots_for_attempt(str(attempt))
 
 
+def remote_root_id(main_root: Path, remote: str) -> str:
+    """`root_id` for the `remote-log`/`remote-fallback`/`remote-mirror` root
+    kinds (spec: "root id ... (main_root, remote)"), packed into a single
+    string for `ingest_watermarks`' VARCHAR `root_id` column -- same
+    packing style as the `staging` root kind's `f"{attempt}/{kind}/{sub}"`.
+    A resolved (not raw) `main_root` is required so re-discovery from a
+    fresh process reproduces the identical id (mirrors the `project` root
+    kind's own `str(resolved)` convention)."""
+    return f"{main_root}::{remote}"
+
+
 def discover_roots(catalog_dir: Path | None = None) -> list[tuple[str, str, Path]]:
     """Every `(root_kind, root_id, log_dir)` this wave enumerates -- the
-    registered project roots, the mirror, the fallback, unaffiliated, and
-    (spec Migration step 4) any in-progress migration attempt's staging tree
-    (spec "Discovery" + "Reads", narrowed per this module's docstring).
+    registered project roots, the mirror, the fallback, unaffiliated, each
+    project's pulled cluster segments, and (spec Migration step 4) any
+    in-progress migration attempt's staging tree (spec "Discovery" + "Reads",
+    narrowed per this module's docstring).
 
     `root_id` for a `project` root is the resolved main root's own path
     (spec: "Root ids use `main_root`, not `project_id`, wherever two roots
     can share an id, so every file belongs to exactly one root"). Every root
     but the staging one is resolved from global, HOME-anchored state
     (`projects.toml`, `~/.bth/log-mirror/`, `~/.bth/log/fallback/`,
-    `~/.bth/log/unaffiliated/`) -- none of it is scoped to a particular
+    `~/.bth/log/unaffiliated/`, and each registered root's own
+    `.bth/log/remote/`) -- none of it is scoped to a particular
     `catalog_dir`. `catalog_dir` (optional, defaults to
     `default_catalog_dir()`) is used ONLY to resolve the cut-over marker for
     the staging root; a redirected `HOME` (AC-11) is what isolates the rest
@@ -226,6 +250,21 @@ def discover_roots(catalog_dir: Path | None = None) -> list[tuple[str, str, Path
         resolved = main_root.resolve()
         # Non-recursive glob below naturally excludes `.bth/log/remote/`.
         roots.append(("project", str(resolved), resolved / ".bth" / "log"))
+
+        remote_root_dir = resolved / ".bth" / "log" / "remote"
+        if remote_root_dir.is_dir():
+            for remote_entry in sorted(remote_root_dir.iterdir()):
+                if not remote_entry.is_dir():
+                    continue
+                rid = remote_root_id(resolved, remote_entry.name)
+                for sub_name, kind in (
+                    ("log", "remote-log"),
+                    ("fallback", "remote-fallback"),
+                    ("mirror", "remote-mirror"),
+                ):
+                    sub_dir = remote_entry / sub_name
+                    if sub_dir.is_dir():
+                        roots.append((kind, rid, sub_dir))
 
     mirror_root_dir = Path.home() / ".bth" / "log-mirror"
     if mirror_root_dir.is_dir():
@@ -975,6 +1014,7 @@ __all__ = [
     "ingest_lock",
     "ingest_lock_path",
     "read_folded_tables",
+    "remote_root_id",
     "run_ingest",
     "staging_roots_for_attempt",
 ]

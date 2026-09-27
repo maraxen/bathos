@@ -861,8 +861,31 @@ def submit(
             print(str(e), file=sys.stderr)
             raise SystemExit(1) from None
 
+    # 6a. After cut-over, export BTH_LOG_MODE and BTH_PROJECT_ID into the job
+    # environment (spec "Mode" / "Cluster jobs"): a compute node has no
+    # cut-over marker of its own (its catalog is the remote one,
+    # `cluster_catalog.py:21-26`), so it relies on `BTH_LOG_MODE=1` from here
+    # to know it should append events rather than write legacy fragments;
+    # `BTH_PROJECT_ID` lets its writer mirror to the right `~/.bth/log-mirror/
+    # <project_id>/` instead of `_null/<slug>` (D7). Pre-cut-over (flag off
+    # locally), neither is exported and the job's own behaviour is unchanged.
+    # `myxcel submit-job` has no generic `--env` passthrough (see
+    # `myxcel-slurm-submit`), so these are exported by prefixing the shell
+    # command itself, which `--command` already passes through verbatim.
+    cmd_env_prefix = ""
+    from bathos.runlog.mode import is_log_mode
+
+    if is_log_mode(cat_dir):
+        from bathos.runlog.project_id import read_project_id
+
+        env_pairs = ["BTH_LOG_MODE=1"]
+        project_id = read_project_id(cfg_path)
+        if project_id:
+            env_pairs.append(f"BTH_PROJECT_ID={project_id}")
+        cmd_env_prefix = "env " + " ".join(env_pairs) + " "
+
     # 7. Submit
-    cmd_str = " ".join(command)
+    cmd_str = cmd_env_prefix + " ".join(command)
     try:
         result = submit_job(
             cluster.remote,
