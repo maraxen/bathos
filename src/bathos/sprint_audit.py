@@ -8,7 +8,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from bathos.index import connect_read
+from bathos.index import catalog_readable, connect_read
+from bathos.runlog.mode import is_log_mode
 from bathos.schema import CURRENT_SCHEMA_VERSION
 
 
@@ -129,7 +130,7 @@ def signal_control_arm_rate(project_slug: str, db_path: Path) -> SignalResult:
         - If control_arm_rate == 0.0 AND validation/production runs exist: level='WARNING'
           (no control arm found in validation/production campaigns)
     """
-    if not db_path.exists():
+    if not catalog_readable(db_path.parent):
         return SignalResult(
             signal="control_arm_rate",
             value=None,
@@ -190,12 +191,20 @@ def signal_control_arm_rate(project_slug: str, db_path: Path) -> SignalResult:
         )
 
 
-def signal_submit_bypass_rate(project_slug: str, db_path: Path, catalog_dir: Path) -> SignalResult:
+def signal_submit_bypass_rate(
+    project_slug: str, db_path: Path, catalog_dir: Path  # noqa: ARG001 -- kept for API stability
+) -> SignalResult:
     """Signal 10: submit_bypass_rate — fraction of validation/production runs not submitted via bth submit.
 
     Args:
         project_slug: Project identifier.
-        db_path: Path to warm DB (bathos.db).
+        db_path: Path to warm DB (bathos.db). No longer read directly (AC-18
+            review finding 2): the readability guard and the actual read now
+            go through `catalog_readable(catalog_dir)`/`connect_read(catalog_dir,
+            ...)` so this signal also sees the folded index post-cutover.
+            Kept in the signature for call-site stability (this is also
+            `signal_control_arm_rate`'s shape, and both are exercised
+            positionally by tests/test_sprint_audit_signals.py).
         catalog_dir: Path to catalog directory (~/.bth/catalog).
 
     Returns:
@@ -237,7 +246,7 @@ def signal_submit_bypass_rate(project_slug: str, db_path: Path, catalog_dir: Pat
             pass
 
     # Query warm DB for validation/production runs with slurm_job_id
-    if not db_path.exists():
+    if not catalog_readable(catalog_dir):
         return SignalResult(
             signal="submit_bypass_rate",
             value=None,
@@ -348,32 +357,36 @@ def sprint_audit(hours: int = 24) -> dict:
         catalog_dir = Path(project["catalog_dir"])
         db_path = catalog_dir / "bathos.db"
 
-        if not db_path.exists():
+        if not catalog_readable(catalog_dir):
             warnings.append(
                 f"Project {project['slug']}: no warm DB found (run bth compact first). Skipping."
             )
             continue
 
-        # Check schema version before querying
-        try:
-            db_check = connect_read(catalog_dir, read_only=True)
-            version_rows = db_check.execute(
-                "SELECT value FROM _schema_meta WHERE key = 'warm_version'"
-            ).fetchall()
-            db_check.close()
+        # Check schema version before querying -- legacy warm tier only. The
+        # folded index has no `_schema_meta` table (that's a bathos.db-only
+        # concern); once the flag is on, bathos.index's own schema is what's
+        # being read, not a per-project drift risk this check exists for.
+        if not is_log_mode(catalog_dir):
+            try:
+                db_check = connect_read(catalog_dir, read_only=True)
+                version_rows = db_check.execute(
+                    "SELECT value FROM _schema_meta WHERE key = 'warm_version'"
+                ).fetchall()
+                db_check.close()
 
-            if version_rows:
-                version = version_rows[0][0]
-                if version != CURRENT_SCHEMA_VERSION:
-                    warnings.append(
-                        f"Project {project['slug']}: schema version mismatch "
-                        f"(has {version!r}, need {CURRENT_SCHEMA_VERSION!r}) — "
-                        f"run bth compact first. Skipping."
-                    )
-                    continue
-        except Exception as e:
-            warnings.append(f"Project {project['slug']}: failed schema check — {e}. Skipping.")
-            continue
+                if version_rows:
+                    version = version_rows[0][0]
+                    if version != CURRENT_SCHEMA_VERSION:
+                        warnings.append(
+                            f"Project {project['slug']}: schema version mismatch "
+                            f"(has {version!r}, need {CURRENT_SCHEMA_VERSION!r}) — "
+                            f"run bth compact first. Skipping."
+                        )
+                        continue
+            except Exception as e:
+                warnings.append(f"Project {project['slug']}: failed schema check — {e}. Skipping.")
+                continue
 
         # Safe to query
         try:

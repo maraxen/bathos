@@ -28,7 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from bathos.index import connect_read
+from bathos.index import catalog_readable, connect_read
 
 SEED_COLUMNS = ("seed", "baseline_hpo_trials", "baseline_hpo_compute_budget")
 
@@ -46,8 +46,7 @@ class CapabilityReport:
 def _warm_runs_columns(catalog_dir: Path) -> set[str] | None:
     """The actual column names on the warm `runs` table, or None if no warm DB exists yet
     (catalog is cool-tier only -- `bth compact` has never run)."""
-    db_path = catalog_dir / "bathos.db"
-    if not db_path.exists():
+    if not catalog_readable(catalog_dir):
         return None
     con = connect_read(catalog_dir, read_only=True)
     try:

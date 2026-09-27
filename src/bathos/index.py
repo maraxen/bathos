@@ -366,11 +366,15 @@ def connect_read(
       `"empty"` (the default) returns `duckdb.connect("")`, an anonymous
       in-memory connection with nothing attached -- this matches both the
       pre-existing default behaviour of this function and `query.run_sql`'s
-      explicit `str(db_path) if db_path.exists() else ""` fallback. Every
-      other call site this wave moved onto `connect_read` already guards with
-      its own `if db_path.exists():` before calling, so `missing` is never
-      exercised there; it exists so a future call site with a different
-      contract does not have to re-invent the pass-through.
+      explicit `str(db_path) if db_path.exists() else ""` fallback. Most
+      other call sites this wave moved onto `connect_read` guard with
+      `catalog_readable(catalog_dir)` before calling (see below), so
+      `missing` is never exercised there; it exists so a call site with a
+      different contract (or none at all -- `run_sql`, and any future
+      caller) does not have to re-invent the pass-through. (An earlier
+      revision of this docstring claimed EVERY migrated call site guards
+      this way; a review caught one that didn't -- `viz/html.py`'s
+      `_project_campaigns`, fixed alongside `catalog_readable` itself.)
 
     Flag ON (after cut-over): ATTACHes `index.db` read-only for this call
     only (never held across calls) and exposes `runs`/`events`/... as views
@@ -420,6 +424,44 @@ def connect_read(
     return con
 
 
+def catalog_readable(catalog_dir: Path | None = None) -> bool:
+    """True if there is something for `connect_read` to read.
+
+    Review finding (AC-18, post-4727b872): about a dozen migrated readers
+    guarded their `connect_read` call with a bare `(catalog_dir /
+    "bathos.db").exists()` check carried over unchanged from the
+    pre-migration code. That guard is correct before cut-over, but Migration
+    step 4(d) renames `bathos.db` to `bathos.db.frozen`, so the guard goes
+    false forever afterwards -- those readers would silently report "no
+    catalog" instead of falling through to the folded index.
+
+    The fix is this one helper, used in place of the bare `.exists()` check
+    everywhere `connect_read` is guarded: true when the runlog flag is on
+    (the index is authoritative regardless of whether `bathos.db` happens to
+    still exist -- `connect_read`'s flag-on branch handles a missing
+    `index.db` itself, by returning the empty schema, so "flag on" alone is
+    always "something readable") or when the legacy `bathos.db` exists
+    (flag off, today's behaviour, unchanged).
+    """
+    from bathos.runlog.mode import is_log_mode
+
+    cd = catalog_dir or default_catalog_dir()
+    return is_log_mode(cd) or (cd / "bathos.db").exists()
+
+
+#: Substring of the `duckdb.IOException` message DuckDB raises when another
+#: process holds the file's OS-level lock (verified 2026-09-25, duckdb
+#: 1.5.2, against a real cross-process lock: "IO Error: Could not set lock
+#: on file ...: Conflicting lock is held in ...").
+_LOCK_ERROR_MARKER = "Could not set lock on file"
+
+#: Substring of the `duckdb.IOException` message DuckDB raises when the file
+#: exists but is not a DuckDB database at all -- corrupt, truncated, or a
+#: stray non-DuckDB file at that path (verified 2026-09-26: "IO Error: The
+#: file \"...\" exists, but it is not a valid DuckDB database file!").
+_CORRUPT_ERROR_MARKER = "not a valid DuckDB database file"
+
+
 def connect_legacy(
     path: Path | str,
 ) -> duckdb.DuckDBPyConnection | dict[str, str]:
@@ -430,24 +472,36 @@ def connect_legacy(
     which opens read-only and, if the file is locked by another process
     (e.g. an older install), returns a structured `legacy_db_locked` result
     instead of raising; `bth migrate --to-log` aborts on it, a post-cut-over
-    `--import-legacy` skips that source and reports it."
+    `--import-legacy` skips that source and reports it." AC-24 additionally
+    names a `corrupt_legacy_source` finding as distinct from
+    `legacy_db_locked` -- both are raised by DuckDB as the SAME exception
+    type (`duckdb.IOException`) with different messages, so this function
+    tells them apart by message rather than folding them into one result.
 
-    Returns the read-only `duckdb.DuckDBPyConnection` on success, or -- only
-    when the file exists but a concurrent writer holds its OS-level lock --
-    the plain dict `{"status": "legacy_db_locked", "path": ..., "reason":
-    ...}` (verified 2026-09-25 against duckdb 1.5.2: a locked file raises
-    `duckdb.IOException` with a message containing "Could not set lock on
-    file"; this function treats any `IOException` on a file that exists as
-    that case, per the spec's stated scenario). Callers (step 4's importer
-    and `bth verify`, neither built yet) are expected to turn this dict into
-    their own structured finding/abort rather than raising it themselves.
+    Returns the read-only `duckdb.DuckDBPyConnection` on success, or one of
+    two structured dicts instead of raising:
 
-    A genuinely missing file is a caller error, not a lock -- callers decide
-    whether a legacy source is expected to exist before opening it, so this
-    raises `FileNotFoundError` rather than folding "missing" and "locked"
-    into the same result (DuckDB's own message for a missing read-only open
-    is also an `IOException`, so the two cases must be told apart before the
-    connect attempt, not after).
+    - `{"status": "legacy_db_locked", "path": ..., "reason": ...}` when the
+      file exists but a concurrent writer holds its OS-level lock (message
+      contains `_LOCK_ERROR_MARKER`).
+    - `{"status": "corrupt_legacy_source", "path": ..., "reason": ...}` when
+      the file exists but is not a valid DuckDB database at all -- corrupt,
+      truncated, or garbage at that path (message contains
+      `_CORRUPT_ERROR_MARKER`).
+
+    Callers (step 4's importer and `bth verify`, neither built yet) are
+    expected to turn either dict into their own structured finding/abort
+    rather than raising it themselves. Any other `duckdb.IOException` (a
+    case neither marker matches) is re-raised unchanged -- this function
+    only recognizes the two failure modes the spec names, not every
+    possible I/O error.
+
+    A genuinely missing file is a caller error, not a lock or corruption --
+    callers decide whether a legacy source is expected to exist before
+    opening it, so this raises `FileNotFoundError` rather than folding
+    "missing" into either structured result (DuckDB's own message for a
+    missing read-only open is also an `IOException`, so all three cases
+    must be told apart before the connect attempt, not after).
     """
     p = Path(path)
     if not p.exists():
@@ -455,7 +509,12 @@ def connect_legacy(
     try:
         return duckdb.connect(str(p), read_only=True)
     except duckdb.IOException as exc:
-        return {"status": "legacy_db_locked", "path": str(p), "reason": str(exc)}
+        msg = str(exc)
+        if _LOCK_ERROR_MARKER in msg:
+            return {"status": "legacy_db_locked", "path": str(p), "reason": msg}
+        if _CORRUPT_ERROR_MARKER in msg:
+            return {"status": "corrupt_legacy_source", "path": str(p), "reason": msg}
+        raise
 
 
 __all__ = [
@@ -482,6 +541,7 @@ __all__ = [
     "TRUST_LEDGER_COLUMNS",
     "TRUST_LEDGER_DDL",
     "WATERMARKS_DDL",
+    "catalog_readable",
     "connect_legacy",
     "connect_read",
     "index_db_path",

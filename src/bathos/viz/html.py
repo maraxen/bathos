@@ -10,6 +10,7 @@ from pathlib import Path
 from jinja2 import Environment, PackageLoader
 
 from bathos.campaigns import Campaign
+from bathos.index import catalog_readable
 from bathos.schema import Run
 from bathos.viz.data import CampaignDisplay, RunDisplay, project_campaign, project_run
 
@@ -62,8 +63,15 @@ def _project_campaigns(
             "anomalies": [],
         }
 
-        # Query DuckDB for aggregates if catalog_dir provided
-        if catalog_dir is not None:
+        # Query DuckDB for aggregates if catalog_dir provided and readable.
+        # (Review finding, post-4727b872: this site had no existence guard at
+        # all -- it relied on connect_read's flag-off `missing="empty"`
+        # fallback plus the broad `except Exception` below to degrade
+        # gracefully. That happened to work, but every other migrated call
+        # site guards explicitly with `catalog_readable`, and a bare
+        # `.exists()` guard here would have gone stale after cut-over the
+        # same way the others did -- so it gets the same explicit guard.)
+        if catalog_dir is not None and catalog_readable(catalog_dir):
             try:
                 from bathos.index import connect_read
 

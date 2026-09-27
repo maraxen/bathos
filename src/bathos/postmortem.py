@@ -402,10 +402,9 @@ def find_run_for_scaffold(run_id: str, catalog_dir: Path) -> tuple[str, str] | N
     the next `bth compact`, and callers here (postmortem scaffold) must still find it.
     """
     from bathos.catalog import read_runs
-    from bathos.index import connect_read
+    from bathos.index import catalog_readable, connect_read
 
-    db_path = catalog_dir / "bathos.db"
-    if db_path.exists():
+    if catalog_readable(catalog_dir):
         con = connect_read(catalog_dir, read_only=False)
         try:
             row = con.execute(

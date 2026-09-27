@@ -152,10 +152,9 @@ def _tracked_output_paths_for_script(
     catalog_dir: Path, project_slug: str, script_sha256: str
 ) -> list[str]:
     """Output paths recorded on any run whose script_sha256 matches, deduplicated."""
-    from bathos.index import connect_read
+    from bathos.index import catalog_readable, connect_read
 
-    db_path = catalog_dir / "bathos.db"
-    if not db_path.exists() or not script_sha256:
+    if not catalog_readable(catalog_dir) or not script_sha256:
         return []
     try:
         con = connect_read(catalog_dir, read_only=True)
@@ -410,15 +409,14 @@ def _regenerate_index(project_root: Path, catalog_dir: Path) -> None:
     Generated artifact, like .praxia/docs/INDEX.md elsewhere -- never hand-edited,
     rebuilt in full from the archived_items ledger on every archive/restore.
     """
-    from bathos.index import connect_read
+    from bathos.index import catalog_readable, connect_read
 
     index_dir = project_root / ".bth"
     index_dir.mkdir(parents=True, exist_ok=True)
     index_path = index_dir / "ARCHIVE_INDEX.md"
 
-    db_path = catalog_dir / "bathos.db"
     rows: list[tuple] = []
-    if db_path.exists():
+    if catalog_readable(catalog_dir):
         con = connect_read(catalog_dir, read_only=True)
         try:
             rows = con.execute(

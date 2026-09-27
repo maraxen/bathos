@@ -42,7 +42,7 @@ from pathlib import Path
 import duckdb
 
 import bathos
-from bathos.index import connect_read
+from bathos.index import catalog_readable, connect_read
 from bathos.sidecar import single_row_projection
 
 FRONTMATTER_DELIM = "+++"
@@ -372,8 +372,7 @@ def _catalog_counts(script: Path, catalog_dir: Path) -> dict:
     The cost is that a zero is ambiguous between "no runs" and "could not read", which is why
     CONTEXT_COLUMNS documents these as "0 when unavailable" rather than as counts.
     """
-    db_path = Path(catalog_dir) / "bathos.db"
-    if not db_path.exists():
+    if not catalog_readable(Path(catalog_dir)):
         return {}
     stem = script.stem
     # An empty stem would become LIKE '%%', which matches every run in the catalog. Returning

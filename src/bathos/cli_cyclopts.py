@@ -625,11 +625,10 @@ def query_shadow_log_cmd(limit: int = 20) -> None:
     limit: Max records to show.
     """
     from bathos.cli_common import catalog_dir
-    from bathos.index import connect_read
+    from bathos.index import catalog_readable, connect_read
 
     cat_dir = catalog_dir()
-    db_path = cat_dir / "bathos.db"
-    if not db_path.exists():
+    if not catalog_readable(cat_dir):
         return
     con = connect_read(cat_dir, read_only=True)
     try:
@@ -1354,6 +1353,7 @@ def view(
 def catalog_version_cmd() -> None:
     """Show schema version status of the catalog."""
     from bathos.cli_common import catalog_dir as _catalog_dir_fn
+    from bathos.index import catalog_readable
     from bathos.migrate import migrate_catalog
     from bathos.schema import CURRENT_SCHEMA_VERSION
 
@@ -1369,8 +1369,7 @@ def catalog_version_cmd() -> None:
             file=sys.stderr,
         )
 
-    db_path = cat_dir / "bathos.db"
-    if db_path.exists():
+    if catalog_readable(cat_dir):
         from bathos.index import connect_read
 
         con = connect_read(cat_dir, read_only=True)

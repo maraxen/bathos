@@ -34,7 +34,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from bathos.checker import check_dependency_lock_drift, check_runs, hash_dependency_lock
-from bathos.index import connect_read
+from bathos.index import catalog_readable, connect_read
 from bathos.query import get_run, list_runs
 from bathos.schema import Run
 from bathos.telemetry import event
@@ -718,8 +718,7 @@ def assess_blast_radius(
     # needs the real membership, so both are checked, run.campaign_id preferred when set.
     # Built once here, not per-run, mirroring check_results above.
     campaign_by_run: dict[str, str] = {}
-    db_path = Path(catalog_dir) / "bathos.db"
-    if db_path.exists():
+    if catalog_readable(Path(catalog_dir)):
         con = connect_read(Path(catalog_dir), read_only=True)
         try:
             rows = con.execute("SELECT run_id, campaign_id FROM campaign_runs").fetchall()

@@ -76,7 +76,7 @@ from pathlib import Path
 from bathos.campaign_report import CampaignReport
 from bathos.compact import _collect_output_metadata
 from bathos.figure_manifest import FigureManifest
-from bathos.index import connect_read
+from bathos.index import catalog_readable, connect_read
 from bathos.query import CatalogError, get_run
 
 
@@ -223,8 +223,7 @@ def _find_run_with_output_sha256(
     """
     import duckdb
 
-    db_path = Path(catalog_dir) / "bathos.db"
-    if not db_path.exists():
+    if not catalog_readable(Path(catalog_dir)):
         return None
 
     con = connect_read(Path(catalog_dir), read_only=True)
@@ -568,8 +567,7 @@ def list_candidates(catalog_dir: Path | str, campaign_id: str) -> list[dict]:
             }
         )
 
-    db_path = Path(catalog_dir) / "bathos.db"
-    if db_path.exists():
+    if catalog_readable(Path(catalog_dir)):
         con = connect_read(Path(catalog_dir), read_only=True)
         try:
             rows = con.execute(

@@ -7,7 +7,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Literal
 
-from bathos.index import connect_read
+from bathos.index import catalog_readable, connect_read
 from bathos.schema import Run
 from bathos.sidecar import Sidecar, find_sidecar, parse_sidecar
 from bathos.telemetry import event
@@ -153,25 +153,22 @@ def check_first_of_kind(script_path: Path, catalog_dir: Path, git_hash: str) -> 
 
     Raises GateError if warm DB check fails (not merely absent).
     """
-    from bathos.query import _resolve_backend
 
     # Normalize script path to a comparable string
     script_str = str(script_path.resolve())
     try:
-        if _resolve_backend(catalog_dir) == "warm":
-            db_path = catalog_dir / "bathos.db"
-            if db_path.exists():
-                con = connect_read(catalog_dir, read_only=True)
-                try:
-                    rows = con.execute(
-                        "SELECT COUNT(*) FROM runs WHERE command LIKE ? AND git_hash = ?",
-                        [f"%{script_str}%", git_hash],
-                    ).fetchall()
+        if catalog_readable(catalog_dir):
+            con = connect_read(catalog_dir, read_only=True)
+            try:
+                rows = con.execute(
+                    "SELECT COUNT(*) FROM runs WHERE command LIKE ? AND git_hash = ?",
+                    [f"%{script_str}%", git_hash],
+                ).fetchall()
+                con.close()
+                return rows[0][0] == 0
+            finally:
+                if not con.closed:
                     con.close()
-                    return rows[0][0] == 0
-                finally:
-                    if not con.closed:
-                        con.close()
     except Exception as e:
         logger.warning(f"Warm tier gate check failed: {e}")
     # If warm tier unavailable, scan cool tier
@@ -200,26 +197,23 @@ def check_sidecar_drift(script_path: Path, catalog_dir: Path, current_sidecar_sh
     if not current_sidecar_sha256:
         return False
 
-    from bathos.query import _resolve_backend
 
     script_str = str(script_path.resolve())
     baseline: str | None = None
     try:
-        if _resolve_backend(catalog_dir) == "warm":
-            db_path = catalog_dir / "bathos.db"
-            if db_path.exists():
-                con = connect_read(catalog_dir, read_only=True)
-                try:
-                    rows = con.execute(
-                        "SELECT sidecar_sha256 FROM runs WHERE command LIKE ? AND sidecar_sha256 != '' "
-                        "ORDER BY timestamp ASC LIMIT 1",
-                        [f"%{script_str}%"],
-                    ).fetchall()
-                    if rows:
-                        baseline = rows[0][0]
-                finally:
-                    if not con.closed:
-                        con.close()
+        if catalog_readable(catalog_dir):
+            con = connect_read(catalog_dir, read_only=True)
+            try:
+                rows = con.execute(
+                    "SELECT sidecar_sha256 FROM runs WHERE command LIKE ? AND sidecar_sha256 != '' "
+                    "ORDER BY timestamp ASC LIMIT 1",
+                    [f"%{script_str}%"],
+                ).fetchall()
+                if rows:
+                    baseline = rows[0][0]
+            finally:
+                if not con.closed:
+                    con.close()
         if baseline is None:
             from bathos.query import list_runs
 
@@ -259,26 +253,23 @@ def check_component_sidecar_drift(
     if not current_component_sidecar_sha256 or not component_id:
         return False
 
-    from bathos.query import _resolve_backend
 
     baseline: str | None = None
     try:
-        if _resolve_backend(catalog_dir) == "warm":
-            db_path = catalog_dir / "bathos.db"
-            if db_path.exists():
-                con = connect_read(catalog_dir, read_only=True)
-                try:
-                    rows = con.execute(
-                        "SELECT component_sidecar_sha256 FROM runs WHERE component_id = ? "
-                        "AND component_sidecar_sha256 IS NOT NULL AND component_sidecar_sha256 != '' "
-                        "ORDER BY timestamp ASC LIMIT 1",
-                        [component_id],
-                    ).fetchall()
-                    if rows:
-                        baseline = rows[0][0]
-                finally:
-                    if not con.closed:
-                        con.close()
+        if catalog_readable(catalog_dir):
+            con = connect_read(catalog_dir, read_only=True)
+            try:
+                rows = con.execute(
+                    "SELECT component_sidecar_sha256 FROM runs WHERE component_id = ? "
+                    "AND component_sidecar_sha256 IS NOT NULL AND component_sidecar_sha256 != '' "
+                    "ORDER BY timestamp ASC LIMIT 1",
+                    [component_id],
+                ).fetchall()
+                if rows:
+                    baseline = rows[0][0]
+            finally:
+                if not con.closed:
+                    con.close()
         if baseline is None:
             from bathos.query import list_runs
 
@@ -319,10 +310,8 @@ def check_reproduction_prerequisite(
     """
     import pyarrow.parquet as pq
 
-    db_path = catalog_dir / "bathos.db"
-
     # Warm path: query DuckDB if available
-    if db_path.exists():
+    if catalog_readable(catalog_dir):
         try:
             with connect_read(catalog_dir, read_only=True) as conn:
                 rows = conn.execute(

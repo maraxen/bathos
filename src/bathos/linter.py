@@ -9,7 +9,7 @@ from pathlib import Path
 
 import duckdb
 
-from bathos.index import connect_read
+from bathos.index import catalog_readable, connect_read
 from bathos.sidecar import find_sidecar
 from bathos.walk import iter_project_files
 
@@ -414,8 +414,7 @@ def check_residual_rates(catalog_dir: Path, threshold: float = 0.10) -> list[Lin
         List of LintIssue objects with severity WARNING.
     """
 
-    db_path = catalog_dir / "bathos.db"
-    if not db_path.exists():
+    if not catalog_readable(catalog_dir):
         return []
 
     try:
@@ -478,8 +477,7 @@ def check_bypass_trend(catalog_dir: Path) -> list[LintIssue]:
     from datetime import UTC, datetime, timedelta
 
 
-    db_path = catalog_dir / "bathos.db"
-    if not db_path.exists():
+    if not catalog_readable(catalog_dir):
         return []
 
     try:
@@ -605,8 +603,7 @@ def check_unfired_branches(catalog_dir: Path, min_runs: int = 5) -> list[LintIss
         List of LintIssue objects with severity WARNING.
     """
 
-    db_path = catalog_dir / "bathos.db"
-    if not db_path.exists():
+    if not catalog_readable(catalog_dir):
         return []
 
     try:
@@ -670,8 +667,7 @@ def check_run_concentration(catalog_dir: Path, threshold: int = 20) -> list[Lint
         List of LintIssue objects with severity WARNING.
     """
 
-    db_path = catalog_dir / "bathos.db"
-    if not db_path.exists():
+    if not catalog_readable(catalog_dir):
         return []
 
     unvalidated = "(outcome IS NULL OR trim(outcome) IN ('', 'unknown', 'none'))"
@@ -1019,10 +1015,8 @@ def check_archival_candidates(
     issues: list[LintIssue] = []
 
     archived_rel_paths: set[str] = set()
-    db_path = catalog_dir / "bathos.db"
-    if db_path.exists():
+    if catalog_readable(catalog_dir):
         import json
-
 
         try:
             con = connect_read(catalog_dir, read_only=True)
@@ -1231,8 +1225,7 @@ def check_ephemeral_output_paths(catalog_dir: Path) -> list[LintIssue]:
     import tempfile
 
 
-    db_path = catalog_dir / "bathos.db"
-    if not db_path.exists():
+    if not catalog_readable(catalog_dir):
         return []
 
     temp_root = str(Path(tempfile.gettempdir()).resolve())
@@ -1303,8 +1296,7 @@ def check_canonical_stage_names(catalog_dir: Path) -> list[LintIssue]:
 
     from bathos.schema import STAGE_NAME_REGEX
 
-    db_path = catalog_dir / "bathos.db"
-    if not db_path.exists():
+    if not catalog_readable(catalog_dir):
         return []
 
     # Canonical set: the advisory vocabulary for stage_name values.
@@ -1402,7 +1394,7 @@ def check_baseline_ref_exists(
         List of LintIssue objects with severity WARNING (not found) or informational details.
     """
 
-    if not db_path.exists():
+    if not catalog_readable(db_path.parent):
         return []
 
     scripts_dir = project_root / "scripts" / "benchmarks"

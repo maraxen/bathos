@@ -10,7 +10,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from bathos.index import connect_read
+from bathos.index import catalog_readable, connect_read
 from bathos.telemetry import event
 
 
@@ -61,9 +61,8 @@ def archive(
     if not dry_run:
         archive_root.mkdir(parents=True, exist_ok=True)
 
-    # Check for warm DB
-    db_path = catalog_dir / "bathos.db"
-    if not db_path.exists():
+    # Check for warm DB or folded index
+    if not catalog_readable(catalog_dir):
         raise RuntimeError("No warm catalog. Run `bth compact` first.")
 
     # Read runs from warm DB

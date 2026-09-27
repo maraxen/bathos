@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from bathos.config import default_catalog_dir
-from bathos.index import connect_read
+from bathos.index import catalog_readable, connect_read
 from bathos.verify import verify_cool, verify_warm
 
 logger = logging.getLogger(__name__)
@@ -352,8 +352,8 @@ def _actions_from_warm_only_runs(catalog_dir: Path) -> tuple[list[RepairAction],
     warnings: list[str] = []
 
     db_path = catalog_dir / "bathos.db"
-    if not db_path.exists():
-        # No warm DB; nothing to re-export
+    if not catalog_readable(catalog_dir):
+        # No warm DB and no folded index; nothing to re-export
         return [], []
 
     # Read all cool fragment UUIDs
@@ -447,11 +447,10 @@ def repair(
     warm_rebuild_actions = [a for a in actions if a.action == "rebuild_warm"]
     if warm_rebuild_actions and not acknowledge_warm_loss:
         # Check if warm DB has postmortem annotations or output_metadata
-        db_path = catalog_dir / "bathos.db"
         db_queryable = False
         postmortem_count = 0
         output_metadata_count = 0
-        if db_path.exists():
+        if catalog_readable(catalog_dir):
             try:
                 con = connect_read(catalog_dir, read_only=True)
                 try:
@@ -769,7 +768,7 @@ def _handle_reexport_from_warm(
     db_path = Path(action.path)
     logger.info(f"Re-exporting warm runs to cool fragments from {db_path}")
 
-    if not db_path.exists():
+    if not catalog_readable(catalog_dir):
         logger.warning(f"Warm database not found: {db_path}")
         return
 
