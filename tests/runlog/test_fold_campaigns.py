@@ -454,9 +454,31 @@ def test_non_sequential_mode_never_computes_evalue_or_threshold():
     row, campaign_runs = _fold(
         "c1", [created(mode="exploration")], linked_run_ids={"r1"}, member_run_events=member_events
     )
-    assert row["stopping_threshold"] is None
+    # LOW review finding: non-sequential campaigns leave stopping_threshold
+    # exactly as the general merge produced it (absent here, since
+    # created(mode="exploration")'s own stopping_threshold is None) --
+    # never forced to None by this branch. See
+    # test_non_sequential_campaign_keeps_general_merge_stopping_threshold
+    # for the discriminating case (a non-null general-merge value).
+    assert row.get("stopping_threshold") is None
     assert campaign_runs[0]["evalue"] is None
     assert campaign_runs[0]["seq_position"] is None
+
+
+def test_non_sequential_campaign_keeps_general_merge_stopping_threshold():
+    """LOW review finding: legacy `link_cool_runs_to_campaigns` `continue`s
+    past the ENTIRE walk for a non-sequential campaign ("if not mode_row or
+    mode_row[0] != 'sequential': continue") without ever touching
+    `stopping_threshold` -- it is left at whatever the column already held
+    (here, whatever the general merge produced from `campaign.created`'s own
+    data, e.g. a recovery-insert of a cool JSON snapshot that already
+    carried a value). Negative control: a rule that forces
+    `stopping_threshold = None` for every non-sequential campaign (this
+    module's own prior behavior) would return None here instead of 0.05."""
+    row, campaign_runs = _fold("c1", [created(mode="exploration", stopping_threshold=0.05)])
+    assert row["stopping_threshold"] == 0.05
+    assert row["stopping_threshold"] is not None
+    assert campaign_runs == []
 
 
 # --- AC-20: arrival-order independence ---------------------------------------

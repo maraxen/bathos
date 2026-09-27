@@ -131,6 +131,43 @@ def member_sidecar_declaration(run_events: list[dict]) -> dict | None:
     return decl
 
 
+def resolve_run_campaign_id(
+    run_events: list[dict], run_added_events_for_run: list[dict]
+) -> str | None:
+    """The single campaign a run currently belongs to, for the denormalized
+    `runs.campaign_id` column (review finding, HIGH -- spec BC-6, lines
+    374-379: "`add_run_to_campaign` overwrites the fragment's single
+    `campaign_id` ... so the canonical state keeps only B").
+
+    The LATEST assignment by `(ts, eid)` wins, taken across BOTH:
+    - the run's own `run.started`/`run.imported` event(s)' `data.campaign_id`
+      (its original assignment, at that event's own `(ts, eid)`), and
+    - every `campaign.run_added` event naming this run (`entity[0]` is the
+      newly-assigned campaign, at THAT event's own `(ts, eid)`).
+
+    This does NOT decide `campaign_runs` membership -- that stays the union
+    of the same sources (computed in `fold_campaign`, BC-6): a run started in
+    A and later added to B is still a member of both, but `runs.campaign_id`
+    (and, downstream, `runs.seq_position`/`runs.evalue`) follows only the
+    latest assignment, matching the canonical legacy state's single
+    `campaign_id` column.
+    """
+    candidates: list[tuple[str, str, str]] = []
+    for ev in run_events:
+        if ev.get("kind") not in ("run.started", "run.imported"):
+            continue
+        cid = (ev.get("data") or {}).get("campaign_id")
+        if cid:
+            candidates.append((ev.get("ts", ""), ev.get("eid", ""), cid))
+    for ev in run_added_events_for_run:
+        entity = ev.get("entity") or []
+        if len(entity) >= 2:
+            candidates.append((ev.get("ts", ""), ev.get("eid", ""), entity[0]))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda c: (c[0], c[1]))[2]
+
+
 def _run_sort_key(folded_run: dict) -> tuple[str, str]:
     """ "members are sorted by the folded run start time `runs.timestamp`
     (null sorts first, as `datetime.min` UTC), then `run_id`" -- RFC3339
@@ -200,12 +237,17 @@ def fold_campaign(
     mode = row.get("mode")
     if mode != "sequential":
         # "if not mode_row or mode_row[0] != 'sequential': continue" --
-        # non-sequential campaigns get no evalue/seq_position walk at all.
+        # non-sequential campaigns get no evalue/seq_position walk at all,
+        # and (review finding, LOW) `stopping_threshold` is left exactly as
+        # the general merge produced it -- legacy `continue`s past the whole
+        # walk without ever touching the column, so a non-sequential
+        # campaign's stopping_threshold (however it got a value -- e.g. a
+        # recovery-insert of a cool JSON snapshot) is never reset to NULL
+        # here.
         campaign_runs_rows = [
             {"campaign_id": campaign_id, "run_id": rid, "evalue": None, "seq_position": None}
             for rid in ordered
         ]
-        row["stopping_threshold"] = None
         return row, campaign_runs_rows
 
     from bathos.sidecar import compute_evalue
@@ -260,4 +302,4 @@ def fold_campaign(
     return row, campaign_runs_rows
 
 
-__all__ = ["fold_campaign", "member_sidecar_declaration"]
+__all__ = ["fold_campaign", "member_sidecar_declaration", "resolve_run_campaign_id"]

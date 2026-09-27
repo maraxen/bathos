@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 
 import duckdb
+import pytest
 
 from bathos.runlog.envelope import build_envelope
 from bathos.runlog.index import connect_read
@@ -56,6 +57,76 @@ def _envelope_line(**kwargs) -> str:
 def _write_lines(repo: Path, *lines: str, seg: str = "seg1.jsonl") -> None:
     log_dir = repo / ".bth" / "log"
     _write_segment(log_dir, seg, "".join(lines).encode())
+
+
+def _campaign_created_data(campaign_id: str, mode: str = "sequential", **extra) -> dict:
+    data = {
+        "id": campaign_id,
+        "project_slug": "repo",
+        "name": "c",
+        "mode": mode,
+        "question": None,
+        "hypothesis": None,
+        "status": "open",
+        "started_at": "2026-01-01T00:00:00Z",
+        "concluded_at": None,
+        "conclusion": None,
+        "outcome_label": None,
+        "parent_campaign_id": None,
+        "stopping_threshold": None,
+        "negative_check": None,
+        "claim_path": None,
+        "claim_sha256": None,
+        "claim_mode": None,
+    }
+    data.update(extra)
+    return data
+
+
+def _sidecar_decl(null_rate=0.1, alt_rate=0.9, threshold=0.05) -> dict:
+    return {
+        "kind": "experiment",
+        "result_schema": {},
+        "outcomes": {"pass": {"condition": "true", "is_residual": False}},
+        "popper_null_pass_rate": null_rate,
+        "popper_alt_pass_rate": alt_rate,
+        "popper_stopping_threshold": threshold,
+        "popper_weights": {},
+    }
+
+
+def _run_started_data(campaign_id: str | None, ts: str, **extra) -> dict:
+    data = {
+        "project_slug": "repo",
+        "command": "python x.py",
+        "argv": [],
+        "git_hash": "a",
+        "git_branch": "main",
+        "git_dirty": False,
+        "timestamp": ts,
+        "campaign_id": campaign_id,
+        "agent_mode": "manual",
+        "sidecar": _sidecar_decl(),
+    }
+    data.update(extra)
+    return data
+
+
+def _run_finished_data(run_id: str, ts: str, outcome: str = "pass", **extra) -> dict:
+    data = {
+        "id": run_id,
+        "status": "completed",
+        "exit_code": 0,
+        "duration_s": 1.0,
+        "output_paths": [],
+        "outcome": outcome,
+        "outcome_error_reason": "",
+        "outcome_is_residual": False,
+        "adversarial_check_status": "",
+        "timestamp": ts,
+    }
+    data.update(extra)
+    return data
 
 
 # --- campaign fold, hand-built envelopes ------------------------------------
@@ -289,6 +360,235 @@ def test_campaign_fold_ac20_arrival_order_independence(tmp_path: Path):
         "SELECT evalue, seq_position FROM campaign_runs WHERE campaign_id='camp-x'"
     ).fetchone()
     assert cr_a == cr_b == (4.0, 1)
+
+
+# --- review findings: runs.campaign_id must follow campaign.run_added ------
+# (HIGH: spec BC-6, lines 374-379 -- "add_run_to_campaign overwrites the
+# fragment's single campaign_id ... so the canonical state keeps only B".)
+
+
+def test_run_campaign_id_filled_from_run_added_only(tmp_path: Path):
+    """A run that never carries a campaign_id in its OWN run.started event
+    (started outside any campaign) is later added to a campaign purely via
+    `campaign.run_added` -- `runs.campaign_id`/`seq_position`/`evalue` must
+    still be filled from that campaign, not left NULL because `fold_run`
+    itself never sees `campaign.run_added` (a different entity key)."""
+    repo, pid = setup_project(tmp_path)
+    catalog_dir = tmp_path / "catalog"
+    enable_log_mode(catalog_dir)
+    common = dict(main_root=repo, worktree_root=repo, project="repo", project_id=pid, writer="w1")
+
+    lines = [
+        _envelope_line(
+            kind="campaign.created",
+            entity=["camp-1"],
+            data=_campaign_created_data("camp-1"),
+            seq=1,
+            ts="2026-01-01T00:00:00.000000Z",
+            eid="e-created",
+            **common,
+        ),
+        _envelope_line(
+            kind="run.started",
+            entity=["run-1"],
+            data=_run_started_data(None, "2026-01-01T00:01:00.000000Z"),
+            seq=2,
+            ts="2026-01-01T00:01:00.000000Z",
+            eid="e-started",
+            **common,
+        ),
+        _envelope_line(
+            kind="run.finished",
+            entity=["run-1"],
+            data=_run_finished_data("run-1", "2026-01-01T00:01:00.000000Z"),
+            seq=3,
+            ts="2026-01-01T00:02:00.000000Z",
+            eid="e-finished",
+            **common,
+        ),
+        _envelope_line(
+            kind="campaign.run_added",
+            entity=["camp-1", "run-1"],
+            data={"campaign_id": "camp-1", "run_id": "run-1", "evalue": 1.0, "seq_position": 1},
+            seq=4,
+            ts="2026-01-01T00:03:00.000000Z",
+            eid="e-added",
+            **common,
+        ),
+    ]
+    _write_lines(repo, *lines)
+
+    report = run_ingest(catalog_dir)
+    assert report.new_events == 4
+
+    con = connect_read(catalog_dir)
+    rrow = con.execute(
+        "SELECT campaign_id, seq_position, evalue FROM runs WHERE id = 'run-1'"
+    ).fetchone()
+    assert rrow[0] == "camp-1"
+    assert rrow[1] == 1
+    assert rrow[2] == 9.0  # alt/null = 0.9/0.1, from _sidecar_decl()'s defaults
+
+
+def test_run_reassigned_via_run_added_uses_new_campaign(tmp_path: Path):
+    """A run started (and folded) into campaign A, then later moved into
+    campaign B purely via `campaign.run_added` -- runs.campaign_id must
+    follow the LATEST assignment (B), with seq_position/evalue read from
+    B's fold, while `campaign_runs` keeps BOTH memberships (BC-6 union is
+    unaffected -- only the run's single denormalized campaign_id changes)."""
+    repo, pid = setup_project(tmp_path)
+    catalog_dir = tmp_path / "catalog"
+    enable_log_mode(catalog_dir)
+    common = dict(main_root=repo, worktree_root=repo, project="repo", project_id=pid, writer="w1")
+
+    lines = [
+        _envelope_line(
+            kind="campaign.created",
+            entity=["camp-a"],
+            data=_campaign_created_data("camp-a"),
+            seq=1,
+            ts="2026-01-01T00:00:00.000000Z",
+            eid="e-created-a",
+            **common,
+        ),
+        _envelope_line(
+            kind="campaign.created",
+            entity=["camp-b"],
+            data=_campaign_created_data("camp-b"),
+            seq=2,
+            ts="2026-01-01T00:00:01.000000Z",
+            eid="e-created-b",
+            **common,
+        ),
+        _envelope_line(
+            kind="run.started",
+            entity=["run-1"],
+            data=_run_started_data("camp-a", "2026-01-01T00:01:00.000000Z"),
+            seq=3,
+            ts="2026-01-01T00:01:00.000000Z",
+            eid="e-started",
+            **common,
+        ),
+        _envelope_line(
+            kind="run.finished",
+            entity=["run-1"],
+            data=_run_finished_data("run-1", "2026-01-01T00:01:00.000000Z"),
+            seq=4,
+            ts="2026-01-01T00:02:00.000000Z",
+            eid="e-finished",
+            **common,
+        ),
+        # A LATER re-assignment into camp-b.
+        _envelope_line(
+            kind="campaign.run_added",
+            entity=["camp-b", "run-1"],
+            data={"campaign_id": "camp-b", "run_id": "run-1", "evalue": 1.0, "seq_position": 1},
+            seq=5,
+            ts="2026-01-01T00:03:00.000000Z",
+            eid="e-added-b",
+            **common,
+        ),
+    ]
+    _write_lines(repo, *lines)
+
+    report = run_ingest(catalog_dir)
+    assert report.new_events == 5
+
+    con = connect_read(catalog_dir)
+    rrow = con.execute(
+        "SELECT campaign_id, seq_position, evalue FROM runs WHERE id = 'run-1'"
+    ).fetchone()
+    assert rrow[0] == "camp-b"
+    assert rrow[0] != "camp-a"  # negative control: the ORIGINAL run.started assignment
+    assert rrow[1] == 1
+    assert rrow[2] == 9.0
+
+    # BC-6: campaign_runs keeps BOTH memberships despite the single-run
+    # campaign_id column following only the latest one.
+    members = {
+        r[0]
+        for r in con.execute(
+            "SELECT campaign_id FROM campaign_runs WHERE run_id = 'run-1'"
+        ).fetchall()
+    }
+    assert members == {"camp-a", "camp-b"}
+
+
+# --- review finding: campaign fold caching (MEDIUM) -------------------------
+
+
+def test_compute_campaign_fold_called_once_per_batch_for_multiple_members(tmp_path: Path):
+    """A single ingest batch that refolds 3 member runs of ONE sequential
+    campaign (each via its own run.finished event) must compute that
+    campaign's fold exactly once -- not once per member refold plus once
+    more for the campaign's own persist step."""
+    import bathos.runlog.ingest as ingest_mod
+
+    repo, pid = setup_project(tmp_path)
+    catalog_dir = tmp_path / "catalog"
+    enable_log_mode(catalog_dir)
+    common = dict(main_root=repo, worktree_root=repo, project="repo", project_id=pid, writer="w1")
+
+    lines = [
+        _envelope_line(
+            kind="campaign.created",
+            entity=["camp-1"],
+            data=_campaign_created_data("camp-1"),
+            seq=1,
+            ts="2026-01-01T00:00:00.000000Z",
+            eid="e-created",
+            **common,
+        ),
+    ]
+    for i in range(1, 4):
+        run_id = f"run-{i}"
+        ts_start = f"2026-01-01T00:0{i}:00.000000Z"
+        ts_finish = f"2026-01-01T00:0{i}:30.000000Z"
+        lines.append(
+            _envelope_line(
+                kind="run.started",
+                entity=[run_id],
+                data=_run_started_data("camp-1", ts_start),
+                seq=10 + i,
+                ts=ts_start,
+                eid=f"e-started-{i}",
+                **common,
+            )
+        )
+        lines.append(
+            _envelope_line(
+                kind="run.finished",
+                entity=[run_id],
+                data=_run_finished_data(run_id, ts_start),
+                seq=20 + i,
+                ts=ts_finish,
+                eid=f"e-finished-{i}",
+                **common,
+            )
+        )
+    _write_lines(repo, *lines)
+
+    call_count = 0
+    original = ingest_mod._compute_campaign_fold
+
+    def _counting_compute(con, campaign_id):
+        nonlocal call_count
+        call_count += 1
+        return original(con, campaign_id)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(ingest_mod, "_compute_campaign_fold", _counting_compute)
+        report = run_ingest(catalog_dir)
+
+    assert report.new_events == 7  # 1 created + 3x(started + finished)
+    assert call_count == 1
+
+    con = connect_read(catalog_dir)
+    positions = {
+        r[0]: r[1]
+        for r in con.execute("SELECT id, seq_position FROM runs ORDER BY id").fetchall()
+    }
+    assert positions == {"run-1": 1, "run-2": 2, "run-3": 3}
 
 
 # --- real emitters -----------------------------------------------------------

@@ -47,7 +47,7 @@ import duckdb
 
 from bathos.config import default_catalog_dir
 from bathos.runlog.fold_anchors import fold_anchor
-from bathos.runlog.fold_campaigns import fold_campaign
+from bathos.runlog.fold_campaigns import fold_campaign, resolve_run_campaign_id
 from bathos.runlog.fold_edges import fold_edge
 from bathos.runlog.fold_ledgers import (
     fold_archived_item,
@@ -464,20 +464,73 @@ def _campaign_member_run_ids(con: duckdb.DuckDBPyConnection, campaign_id: str) -
     return ids
 
 
-def _refold_run(con: duckdb.DuckDBPyConnection, run_id: str) -> None:
-    """Refold one run entity, then fill `seq_position`/`evalue` (wave a's
-    stub) from its OWN folded `campaign_id`'s campaign fold, if any -- NOT
-    from whichever campaign the ingest loop happened to also touch this
-    batch, so the result is independent of refold order (AC-1/AC-20 extended
-    to this cross-entity denormalization)."""
+def _run_added_events_for_run(con: duckdb.DuckDBPyConnection, run_id: str) -> list[dict]:
+    return [
+        e
+        for e in _fetch_events_by_kinds(con, frozenset({"campaign.run_added"}))
+        if len(e.get("entity") or []) >= 2 and e["entity"][1] == run_id
+    ]
+
+
+def _cached_campaign_fold(
+    con: duckdb.DuckDBPyConnection,
+    campaign_id: str,
+    cache: dict[str, tuple[dict, list[dict]]],
+) -> tuple[dict, list[dict]]:
+    """`_compute_campaign_fold`, memoized per ingest batch (review finding,
+    MEDIUM: computing one campaign's fold is O(members); before this cache,
+    an ingest batch that refolded M members of one campaign recomputed the
+    WHOLE campaign fold once per member INSIDE `_refold_run`, plus once more
+    for the campaign's own persist step -- O(M) recomputations of an O(M)
+    computation, i.e. O(M^2) per batch. `cache` is one plain dict created
+    fresh in `_ingest_locked` and threaded through every `_refold_run`/
+    `_refold_campaign` call in that batch, so each distinct campaign_id is
+    computed at most once per batch, regardless of how many of its members
+    or how many of its own direct events triggered a refold.
+    """
+    if campaign_id not in cache:
+        cache[campaign_id] = _compute_campaign_fold(con, campaign_id)
+    return cache[campaign_id]
+
+
+def _refold_run(
+    con: duckdb.DuckDBPyConnection,
+    run_id: str,
+    campaign_fold_cache: dict[str, tuple[dict, list[dict]]] | None = None,
+) -> None:
+    """Refold one run entity, then fill `campaign_id` (review finding, HIGH),
+    `seq_position`, and `evalue` (wave a's stub) from that resolved
+    campaign's fold, if any.
+
+    `campaign_id` is NOT simply whatever `fold_run` (a single-entity, `run.
+    started`/`run.finished`/`run.imported`-only fold) produced -- that fold
+    never sees `campaign.run_added` events (entity `[campaign_id, run_id]`,
+    a different entity key entirely), so it would silently ignore a later
+    reassignment via `add_run_to_campaign` (spec BC-6). The resolved value
+    here is the latest-by-`(ts, eid)` assignment across BOTH sources (see
+    `fold_campaigns.resolve_run_campaign_id`), and `seq_position`/`evalue`
+    are read from THAT campaign's fold -- not from whichever campaign the
+    ingest loop happened to also touch this batch -- so the result is
+    independent of refold order (AC-1/AC-20 extended to this cross-entity
+    denormalization).
+
+    `campaign_fold_cache` should be one dict shared across an entire ingest
+    batch (see `_cached_campaign_fold`); omitted only for standalone/test
+    callers, where a fresh, unshared cache is harmless.
+    """
+    if campaign_fold_cache is None:
+        campaign_fold_cache = {}
     events = _fetch_events_by_entity_key(con, [run_id])
     con.execute("DELETE FROM runs WHERE id = ?", [run_id])
     if not events:
         return
     row = fold_run(events)
+    row["campaign_id"] = resolve_run_campaign_id(events, _run_added_events_for_run(con, run_id))
     campaign_id = row.get("campaign_id")
     if campaign_id:
-        _campaign_row, campaign_runs_rows = _compute_campaign_fold(con, campaign_id)
+        _campaign_row, campaign_runs_rows = _cached_campaign_fold(
+            con, campaign_id, campaign_fold_cache
+        )
         for cr in campaign_runs_rows:
             if cr["run_id"] == run_id:
                 row["seq_position"] = cr["seq_position"]
@@ -486,8 +539,14 @@ def _refold_run(con: duckdb.DuckDBPyConnection, run_id: str) -> None:
     _insert_run_row(con, row)
 
 
-def _refold_campaign(con: duckdb.DuckDBPyConnection, campaign_id: str) -> None:
-    row, campaign_runs_rows = _compute_campaign_fold(con, campaign_id)
+def _refold_campaign(
+    con: duckdb.DuckDBPyConnection,
+    campaign_id: str,
+    campaign_fold_cache: dict[str, tuple[dict, list[dict]]] | None = None,
+) -> None:
+    if campaign_fold_cache is None:
+        campaign_fold_cache = {}
+    row, campaign_runs_rows = _cached_campaign_fold(con, campaign_id, campaign_fold_cache)
     con.execute("DELETE FROM campaigns WHERE id = ?", [campaign_id])
     con.execute("DELETE FROM campaign_runs WHERE campaign_id = ?", [campaign_id])
     if not row.get("mode") and not campaign_runs_rows:
@@ -712,10 +771,15 @@ def _ingest_locked(cd: Path) -> IngestReport:
         for campaign_id in list(affected_campaign_ids):
             affected_run_ids |= _campaign_member_run_ids(con, campaign_id)
 
+        # Shared across every refold in this batch (review finding, MEDIUM):
+        # see `_cached_campaign_fold` -- a campaign touched by several
+        # members' refolds, or by both a member refold and its own direct
+        # persist, is computed exactly once.
+        campaign_fold_cache: dict[str, tuple[dict, list[dict]]] = {}
         for run_id in affected_run_ids:
-            _refold_run(con, run_id)
+            _refold_run(con, run_id, campaign_fold_cache=campaign_fold_cache)
         for campaign_id in affected_campaign_ids:
-            _refold_campaign(con, campaign_id)
+            _refold_campaign(con, campaign_id, campaign_fold_cache=campaign_fold_cache)
         for edge_key in affected_edge_keys:
             _refold_edge(con, list(edge_key))
         for anchor_id in affected_anchor_ids:
