@@ -642,3 +642,29 @@ def test_mixed_import_then_live_events_on_top(tmp_path: Path):
     # metadata.reaped survives the later finish (AC-26: "a reaped run that
     # later finishes keeps metadata.reaped").
     assert json.loads(after["metadata"]).get("reaped", {}).get("run_id") == "run-c"
+
+
+def test_non_object_reap_ledger_json_is_unreadable_not_a_crash(tmp_path: Path):
+    """Review 4a: valid JSON that is not an object (`[]`, `null`, a string) in a live
+    or reverted reap ledger must become legacy_source.unreadable -- one bad file
+    must never abort the whole (one-shot) import."""
+    backend, _extras = _build_legacy_fixture(tmp_path)
+    reaped = backend.catalog_dir / "reaped" / "proj"
+    (reaped / "reverted").mkdir(parents=True, exist_ok=True)
+    (reaped / "run_bad_list.json").write_text("[]")
+    (reaped / "run_bad_null.json").write_text("null")
+    (reaped / "reverted" / "run_bad_str.json").write_text('"oops"')
+    (reaped / "run_numeric_ts.json").write_text('{"run_id": "run-z", "reaped_at": 1700000000}')
+
+    report = import_legacy_catalog(
+        backend.catalog_dir,
+        backend.workspace / ".bth" / "log",
+        project="proj",
+        main_root=backend.workspace,
+        worktree_root=backend.workspace,
+    )
+    for name in ("run_bad_list.json", "run_bad_null.json", "reverted/run_bad_str.json"):
+        assert f"reaped/proj/{name}" in report.unreadable
+    # The rest of the catalog still imported.
+    assert any(ev["kind"] == "run.imported" and ev["entity"] == ["run-a"] for ev in report.events)
+    assert any(ev["kind"] == "run.imported" and ev["entity"] == ["run-z"] for ev in report.events)

@@ -457,6 +457,11 @@ def _reap_ledger_candidates(catalog_dir: Path, report: ImportReport) -> list[Imp
             except (OSError, json.JSONDecodeError):
                 out.append(_emit_unreadable(report, locator, f))
                 continue
+            # Valid JSON that is not a ledger object ([], null, a string) is
+            # unreadable too -- it must never abort the whole import.
+            if not isinstance(record, dict):
+                out.append(_emit_unreadable(report, locator, f))
+                continue
             run_id = record.get("run_id") or f.stem
             fields = dict(record)
             # spec "Reap ledgers": "the fold treats it as an abandoned claim"
@@ -465,7 +470,7 @@ def _reap_ledger_candidates(catalog_dir: Path, report: ImportReport) -> list[Imp
             # way a live `run.reaped` already carries that status implicitly
             # via its own dedicated kind.
             fields["status"] = "abandoned"
-            ts = record.get("reaped_at") or ""
+            ts = str(record.get("reaped_at") or "")
             out.append(
                 ImportCandidate("run.imported", [run_id], fields, ts, "ledger_json", locator)
             )
@@ -480,8 +485,13 @@ def _reap_ledger_candidates(catalog_dir: Path, report: ImportReport) -> list[Imp
             except (OSError, json.JSONDecodeError):
                 out.append(_emit_unreadable(report, locator, f))
                 continue
+            # Valid JSON that is not a ledger object ([], null, a string) is
+            # unreadable too -- it must never abort the whole import.
+            if not isinstance(record, dict):
+                out.append(_emit_unreadable(report, locator, f))
+                continue
             run_id = record.get("run_id") or ""
-            reaped_at = record.get("reaped_at") or ""
+            reaped_at = str(record.get("reaped_at") or "")
             filename_ts = _parse_reverted_filename_ts(f.stem)
             reverted_at = max(reaped_at, filename_ts) if filename_ts else reaped_at
             fields = dict(record)
