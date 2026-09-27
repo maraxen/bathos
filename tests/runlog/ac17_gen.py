@@ -47,6 +47,17 @@ def generate_ops(seed: int) -> list[dict[str, Any]]:
     # pick edge/anchor targets and to avoid reassigning into the SAME campaign.
     run_campaign: dict[str, str | None] = {}
     finished_run_ids: list[str] = []
+    # AC-17 finding (classification b, legacy quirk -- NOT fixed here, see
+    # ac17_harness's reassignment-guard comment for the sibling case):
+    # `conclude_campaign`'s own `link_cool_runs_to_campaigns(...,
+    # campaign_id=full_id)` call RAISES CampaignError on a threshold
+    # mismatch, unlike compact()'s bulk (unscoped) pass, which only
+    # logs+skips. The deliberate threshold-deviation below (to exercise
+    # AC-22's mismatch-skip path) is real and valuable, but it must never
+    # be paired with a `conclude` op on the SAME campaign, or the legacy
+    # side crashes instead of producing a comparable canonical state.
+    # Tracked here so the conclude-generation loop can skip such campaigns.
+    campaign_has_deviation: dict[str, bool] = {}
 
     for i in range(n_runs):
         run_id = f"run-{i}"
@@ -67,6 +78,7 @@ def generate_ops(seed: int) -> list[dict[str, Any]]:
                     # skip path (AC-22), which both sides must resolve
                     # identically -- not a BC, a shared-logic assertion.
                     threshold = round(threshold + 0.5, 3)
+                    campaign_has_deviation[campaign_handle] = True
             else:
                 null, alt, threshold = 0.2, 0.8, round(rng.uniform(0.01, 0.3), 3)
             sidecar_text = sidecar_toml(null, alt, threshold)
@@ -202,6 +214,8 @@ def generate_ops(seed: int) -> list[dict[str, Any]]:
         )
 
     for handle in campaign_handles:
+        if campaign_has_deviation.get(handle):
+            continue
         if rng.random() < 0.7:
             outcome_label = rng.choice(["pass", "fail", "confirmed", "refuted", "exploratory"])
             ops.append(

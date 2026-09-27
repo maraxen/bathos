@@ -29,13 +29,13 @@ full write-up):
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
-import math
 import os
 import struct
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -124,10 +124,8 @@ def _refresh_and_get_db(backend: Backend):
 
 
 def _safe_close(db) -> None:
-    try:
+    with contextlib.suppress(Exception):  # pragma: no cover - defensive only
         db.close()
-    except Exception:  # pragma: no cover - defensive only
-        pass
 
 
 # --------------------------------------------------------------------------
@@ -522,7 +520,7 @@ def canonical_legacy_state(backend: Backend, monkeypatch) -> dict[str, list[dict
 
     db = duckdb.connect(str(backend.catalog_dir / "bathos.db"), read_only=True)
     try:
-        return _dump_tables(db, is_new=False)
+        return _dump_tables(db)
     finally:
         db.close()
 
@@ -531,7 +529,7 @@ def new_fold_state(backend: Backend) -> dict[str, list[dict]]:
     run_ingest(backend.catalog_dir)
     con = connect_read(backend.catalog_dir)
     try:
-        return _dump_tables(con, is_new=True)
+        return _dump_tables(con)
     finally:
         con.close()
 
@@ -539,7 +537,7 @@ def new_fold_state(backend: Backend) -> dict[str, list[dict]]:
 _TABLES = ("runs", "campaigns", "campaign_runs", "campaign_edges", "run_edges", "sidecar_anchors")
 
 
-def _dump_tables(con, *, is_new: bool) -> dict[str, list[dict]]:
+def _dump_tables(con) -> dict[str, list[dict]]:
     out: dict[str, list[dict]] = {}
     for table in _TABLES:
         try:

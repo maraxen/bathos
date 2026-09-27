@@ -216,10 +216,10 @@ def _normalize_row(table: str, row: dict, ws: Path, camp_rev: dict[str, str]) ->
     return out
 
 
-def _diff_rows(l: dict, n: dict) -> list[tuple[str, object, object]]:
+def _diff_rows(legacy_row: dict, new_row: dict) -> list[tuple[str, object, object]]:
     diffs = []
-    for col in sorted(set(l) | set(n)):
-        lv, nv = l.get(col), n.get(col)
+    for col in sorted(set(legacy_row) | set(new_row)):
+        lv, nv = legacy_row.get(col), new_row.get(col)
         if not _floaty_equal(lv, nv):
             diffs.append((col, lv, nv))
     return diffs
@@ -234,6 +234,66 @@ def _reassignments(ops: list[dict]) -> dict[str, set[str]]:
             if prev:
                 out.setdefault(prev, set()).add(op["run_id"])
     return out
+
+
+# Fixed by `ac17_harness.sidecar_toml`'s template: `pass`/`fail` are both
+# declared non-residual outcomes, `marginal` is the only residual one -- so
+# `derive_pass_labels` is this constant for every sidecar this generator
+# emits, regardless of its popper rates.
+_PASS_LABELS = frozenset({"pass", "fail"})
+
+
+def _evalue_bucket(outcome: str | None, null: float, alt: float) -> float:
+    """A local re-implementation of `bathos.sidecar.compute_evalue`'s
+    outcome-label branching (not the sidecar-parsing plumbing) -- used only
+    to detect whether two CANDIDATE outcome labels for the same run would
+    land in the same e-value bucket, never to assert an actual e-value."""
+    if outcome in ("error", "unknown", None, ""):
+        return 1.0
+    if outcome == "marginal":
+        return 1.0
+    return alt / null if outcome in _PASS_LABELS else (1.0 - alt) / (1.0 - null)
+
+
+def _bc7_affected_run_ids(ops: list[dict]) -> set[str]:
+    """BC-7: "campaign e-values ... use the member's folded (postmortem-
+    overridden) outcome; the legacy campaign pass always sees the
+    fragment's raw outcome" (`compact.py:1044` rebinds `run =
+    _apply_migrations(run)`, a NEW `Run`, before the postmortem override is
+    applied, so the `cool_runs` element `link_cool_runs_to_campaigns` sees
+    is never overridden).
+
+    A run is BC-7-affected only when a LATER postmortem override actually
+    changes which e-value BUCKET its outcome falls into (pass-direction vs.
+    fail-direction vs. the marginal/neutral 1.0 special cases) -- not every
+    postmortem changes anything (e.g. `verdict_override="none"`, or an
+    override that happens to land in the same bucket as the raw outcome,
+    changes nothing either side computes).
+    """
+    raw_outcome: dict[str, str] = {}
+    popper: dict[str, tuple[float, float, float] | None] = {}
+    for op in ops:
+        if op["kind"] == "start_run":
+            popper[op["run_id"]] = op.get("popper")
+        elif op["kind"] == "finish_run":
+            raw_outcome[op["run_id"]] = op["outcome"]
+
+    affected: set[str] = set()
+    for op in ops:
+        if op["kind"] != "postmortem":
+            continue
+        run_id = op["run_id"]
+        override = op["verdict_override"]
+        if override == "none":
+            continue
+        raw = raw_outcome.get(run_id)
+        pop = popper.get(run_id)
+        if pop is None:
+            continue
+        null, alt, _threshold = pop
+        if _evalue_bucket(raw, null, alt) != _evalue_bucket(override, null, alt):
+            affected.add(run_id)
+    return affected
 
 
 def _run_differential(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed: int) -> None:
@@ -256,6 +316,7 @@ def _run_differential(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed: int
 
     reassigned_out = _reassignments(ops)
     bc6_handles = {h for h, rids in reassigned_out.items() if rids}
+    bc7_run_ids = _bc7_affected_run_ids(ops)
 
     all_diffs: list[str] = []
 
@@ -294,17 +355,17 @@ def _run_differential(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed: int
         f"only_new={set(n_camps) - set(l_camps)}"
     )
     for h in l_camps:
-        l, n = dict(l_camps[h]), dict(n_camps[h])
-        l.pop("id", None)
-        n.pop("id", None)
+        legacy_row, new_row = dict(l_camps[h]), dict(n_camps[h])
+        legacy_row.pop("id", None)
+        new_row.pop("id", None)
         if h in bc6_handles:
             # BC-6: `add_run_to_campaign` overwrites the fragment's single
             # campaign_id; on a full rebuild the dropped member's earlier
             # stamp is gone entirely, which shifts the stopping_threshold
             # lock for whichever remaining member locks it first.
-            l.pop("stopping_threshold", None)
-            n.pop("stopping_threshold", None)
-        for col, lv, nv in _diff_rows(l, n):
+            legacy_row.pop("stopping_threshold", None)
+            new_row.pop("stopping_threshold", None)
+        for col, lv, nv in _diff_rows(legacy_row, new_row):
             all_diffs.append(f"campaigns[{h}].{col}: legacy={lv!r} new={nv!r}")
 
     # ---- campaign_runs -------------------------------------------------
@@ -327,7 +388,20 @@ def _run_differential(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed: int
         all_diffs.append(f"campaign_runs present only in legacy: {only_legacy}")
     for key in set(l_cr) & set(n_cr):
         lr, nr = l_cr[key], n_cr[key]
-        cols = ["evalue"] if key[0] in bc6_handles else ["evalue", "seq_position"]
+        campaign_handle, run_id = key
+        cols = ["evalue", "seq_position"]
+        if campaign_handle in bc6_handles:
+            # BC-6: the dropped membership shifts the remaining members'
+            # seq_position (a full rebuild only sees the fragment's LATEST
+            # single campaign_id stamp, so a departed member's original
+            # position in the sequence is gone entirely).
+            cols.remove("seq_position")
+        if run_id in bc7_run_ids:
+            # BC-7: legacy's `link_cool_runs_to_campaigns` sees the raw
+            # fragment outcome; the fold uses the postmortem-overridden
+            # one -- and for this run, that changes which e-value bucket
+            # it lands in (see `_bc7_affected_run_ids`).
+            cols.remove("evalue")
         for col in cols:
             if not _floaty_equal(lr.get(col), nr.get(col)):
                 all_diffs.append(f"campaign_runs[{key}].{col}: legacy={lr.get(col)!r} new={nr.get(col)!r}")
