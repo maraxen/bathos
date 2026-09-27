@@ -208,3 +208,64 @@ class TestAnchorRecordShape:
             "campaign_id",
             "anchored_at",
         }
+
+
+# ---------------------------------------------------------------------------
+# AC-25: anchor.recorded write site behind the runlog flag (delivery step 2b,
+# wave ii). anchor.updated (compact.py's compaction-time campaign_id/anchored_at
+# rewrite) has no live (non-compact) writer -- see report.
+# ---------------------------------------------------------------------------
+
+
+def _read_jsonl_dir(log_dir):
+    import json
+
+    lines = []
+    if not log_dir.exists():
+        return lines
+    for f in sorted(log_dir.glob("*.jsonl")):
+        for line in f.read_text().splitlines():
+            if line.strip():
+                lines.append(json.loads(line))
+    return lines
+
+
+def test_catalog_anchor_store_insert_flag_off_is_legacy_only(catalog_dir):
+    from pathlib import Path
+
+    from bathos.runlog.writer import reset_writers_for_test
+
+    store = CatalogAnchorStore(catalog_dir)
+    record = AnchorRecord(path="sidecars/x.json", sha256="a" * 64, kind="figure")
+    store.insert(record)
+
+    fetched = store.get("sidecars/x.json", "a" * 64)
+    assert fetched is not None
+    assert fetched.kind == "figure"
+    assert not (Path.home() / ".bth" / "log" / "unaffiliated").exists()
+    reset_writers_for_test()
+
+
+def test_catalog_anchor_store_insert_flag_on_emits_event_only(catalog_dir, monkeypatch):
+    from pathlib import Path
+
+    from bathos.anchor import _anchor_entity_id
+    from bathos.runlog.writer import reset_writers_for_test
+
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
+
+    store = CatalogAnchorStore(catalog_dir)
+    record = AnchorRecord(path="sidecars/y.json", sha256="b" * 64, kind="figure")
+    store.insert(record, cwd=catalog_dir.parent)
+
+    assert store.get("sidecars/y.json", "b" * 64) is None  # no legacy INSERT
+
+    lines = _read_jsonl_dir(Path.home() / ".bth" / "log" / "unaffiliated")
+    recorded = [line for line in lines if line["kind"] == "anchor.recorded"]
+    assert len(recorded) == 1
+    expected_id = _anchor_entity_id("sidecars/y.json", "b" * 64)
+    assert recorded[0]["entity"] == [expected_id]
+    assert recorded[0]["data"]["path"] == "sidecars/y.json"
+    assert recorded[0]["data"]["sha256"] == "b" * 64
+    reset_writers_for_test()

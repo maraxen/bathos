@@ -112,3 +112,20 @@ def test_test_setenv_override_still_wins(tmp_path: Path, monkeypatch):
     custom = tmp_path / "custom_catalog"
     monkeypatch.setenv("BTH_CATALOG_DIR", str(custom))
     assert cli_common.catalog_dir() == custom
+
+
+def test_runlog_projects_registry_resolves_under_tmp_path(tmp_path: Path):
+    """AC-11 (run-log spec): the root-registration file resolves per call."""
+    from bathos.runlog.project_id import projects_registry
+
+    _assert_under(projects_registry(), tmp_path)
+
+
+def test_runlog_mirror_resolves_under_tmp_path(tmp_path: Path):
+    """AC-11 (run-log spec): `~/.bth/log-mirror/<project_id>/` resolves under tmp_path,
+    for both an id-bearing and an id-less (`_null/<slug>`) project."""
+    from bathos.runlog.writer import mirror_dir_for, mirror_root
+
+    _assert_under(mirror_root(), tmp_path)
+    _assert_under(mirror_dir_for("0190-test-id", "slug"), tmp_path)
+    _assert_under(mirror_dir_for(None, "slug"), tmp_path)

@@ -34,6 +34,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from bathos.checker import check_dependency_lock_drift, check_runs, hash_dependency_lock
+from bathos.index import catalog_readable, connect_read
 from bathos.query import get_run, list_runs
 from bathos.schema import Run
 from bathos.telemetry import event
@@ -265,6 +266,7 @@ def append_ledger_record(
     catalog_dir: Path | str,
     *,
     con: duckdb.DuckDBPyConnection | None = None,
+    cwd: Path | None = None,
 ) -> BlastRadiusRecord:
     """Durably append one ledger record: cool-tier fragment + warm-tier row.
 
@@ -273,12 +275,33 @@ def append_ledger_record(
     see `flag_blast_radius`, which reuses a single connection across an entire
     batch of records (debt #1475). Omit to open/close a connection as before --
     default behavior is unchanged.
+
+    AC-25: behind the runlog flag, emits `blast_radius.recorded` instead of the
+    fragment + warm-row writes; flag off performs only those legacy writes,
+    unchanged. `cwd` resolves the runlog project/root when the flag is on
+    (defaults to `Path.cwd()` via `resolve_log_root`). The compaction-time
+    write at `compact.py` (re-deriving the warm table from fragments) is a
+    separate, non-authoritative site and is untouched.
     """
-    write_ledger_fragment(record, catalog_dir)
-    if con is not None:
-        _insert_warm_row_using_conn(con, record)
-    else:
-        _insert_warm_row(record, catalog_dir)
+    from dataclasses import asdict
+
+    from bathos.runlog.emit import emit_or_legacy, unit_of_work
+
+    def _legacy_write() -> None:
+        write_ledger_fragment(record, catalog_dir)
+        if con is not None:
+            _insert_warm_row_using_conn(con, record)
+        else:
+            _insert_warm_row(record, catalog_dir)
+
+    with unit_of_work(Path(catalog_dir)):
+        emit_or_legacy(
+            kind="blast_radius.recorded",
+            entity=[record.id],
+            data=asdict(record),
+            legacy_write=_legacy_write,
+            cwd=cwd,
+        )
     event(
         "blast_radius.append",
         entity_type=record.entity_type,
@@ -695,9 +718,8 @@ def assess_blast_radius(
     # needs the real membership, so both are checked, run.campaign_id preferred when set.
     # Built once here, not per-run, mirroring check_results above.
     campaign_by_run: dict[str, str] = {}
-    db_path = Path(catalog_dir) / "bathos.db"
-    if db_path.exists():
-        con = duckdb.connect(str(db_path), read_only=True)
+    if catalog_readable(Path(catalog_dir)):
+        con = connect_read(Path(catalog_dir), read_only=True)
         try:
             rows = con.execute("SELECT run_id, campaign_id FROM campaign_runs").fetchall()
             campaign_by_run = dict(rows)
@@ -865,6 +887,17 @@ def compute_shadow_auto_clear_verdict(run: Run) -> dict:
 
 
 def flag_blast_radius(
+    report: BlastRadiusReport, catalog_dir: Path | str
+) -> list[BlastRadiusRecord]:
+    """One unit of work for the whole batch: the mode is read once, so a cut-over
+    can never split one assess into some legacy rows and some events (spec "Mode")."""
+    from bathos.runlog.emit import unit_of_work
+
+    with unit_of_work(Path(catalog_dir)):
+        return _flag_blast_radius_impl(report, catalog_dir)
+
+
+def _flag_blast_radius_impl(
     report: BlastRadiusReport, catalog_dir: Path | str
 ) -> list[BlastRadiusRecord]:
     """Durably record every affected/unverifiable match in `report` (AC-6).

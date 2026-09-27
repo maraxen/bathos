@@ -345,6 +345,75 @@ def sync_catalog(
     )
 
 
+def cluster_log_remote_dirs(project_root: Path, remote_name: str) -> tuple[Path, Path, Path]:
+    """Local destination directories for the cluster log pull (spec
+    "Cluster"): `<project_root>/.bth/log/remote/<remote_name>/{log,fallback,mirror}/`,
+    the same subtree `bathos.runlog.ingest.discover_roots` enumerates as the
+    `remote-log`/`remote-fallback`/`remote-mirror` root kinds."""
+    base = project_root / ".bth" / "log" / "remote" / remote_name
+    return base / "log", base / "fallback", base / "mirror"
+
+
+def pull_cluster_log(
+    remote_name: str,
+    config: ProjectConfig,
+    project_root: Path,
+    project_id: str | None,
+) -> None:
+    """Cluster log pull (spec "Cluster", delivery step 4 wave d): pull the
+    remote checkout's `.bth/log/`, the remote `~/.bth/log/fallback/<slug>/`,
+    and the remote `~/.bth/log-mirror/<project_id>/` (or, with no project id,
+    `~/.bth/log-mirror/_null/<slug>/` -- the same fallback path a SLURM job
+    with no `BTH_PROJECT_ID` mirrors to, per D7/`resolve_write_project_id`)
+    into the local main checkout's
+    `.bth/log/remote/<remote_name>/{log,fallback,mirror}/`.
+
+    Each destination is its own root kind for ingest (`remote-log`,
+    `remote-fallback`, `remote-mirror`, `bathos.runlog.ingest.discover_roots`);
+    `eid` dedup at ingest makes the overlapping copies -- and a repeated pull
+    of the same segments -- safe, so this function is a plain, idempotent,
+    best-effort refresh of those three directories.
+
+    Goes through `bathos.cluster.pull_path` (a myxcel wrapper), never rsync
+    directly (CLAUDE.md "Bathos Sync Delegates to Myxcel"). Each of the three
+    sub-pulls is independent and best-effort: a fallback or mirror directory
+    that has never been written on the remote (the common case -- most runs
+    never fail over to the fallback, or lose an active segment) must not
+    abort the other two.
+    """
+    if remote_name not in config.remotes:
+        raise ValueError(f"Remote '{remote_name}' not in config")
+    remote_config = config.remotes[remote_name]
+    host = remote_config["host"]
+    remote_root = remote_config["remote_root"].rstrip("/")
+    slug = config.slug
+
+    log_dest, fallback_dest, mirror_dest = cluster_log_remote_dirs(project_root, remote_name)
+    for d in (log_dest, fallback_dest, mirror_dest):
+        d.mkdir(parents=True, exist_ok=True)
+
+    from bathos.cluster import pull_path
+
+    mirror_component = project_id if project_id else f"_null/{slug}"
+
+    for src, dst, label in (
+        (f"{remote_root}/.bth/log/", log_dest, "log"),
+        (f"~/.bth/log/fallback/{slug}/", fallback_dest, "fallback"),
+        (f"~/.bth/log-mirror/{mirror_component}/", mirror_dest, "mirror"),
+    ):
+        try:
+            pull_path(host, src, str(dst) + "/")
+        except Exception as exc:  # noqa: BLE001 -- best-effort, see docstring
+            logger.warning(
+                "bth sync --pull: cluster log %s pull from %s:%s failed (remote=%s): %s",
+                label,
+                host,
+                src,
+                remote_name,
+                exc,
+            )
+
+
 def _parse_transferred_count(rsync_output: str) -> int:
     """
     Parse number of transferred files from rsync output.

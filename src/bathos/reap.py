@@ -11,6 +11,8 @@ from pathlib import Path
 import duckdb
 
 from bathos.catalog import read_runs, write_run
+from bathos.index import connect_read
+from bathos.runlog.emit import current_mode, emit_event, unit_of_work
 from bathos.schema import Run
 from bathos.telemetry import event
 
@@ -163,6 +165,9 @@ def reap_runs(
     apply: bool = False,
     revert: bool = False,
     revert_ids: list[str] | None = None,
+    *,
+    cwd: Path | None = None,
+    reconcile_warm: bool = True,
 ) -> tuple[list[Run], list[tuple[Run, str]]]:
     """Reap orphaned runs by marking them abandoned.
 
@@ -173,17 +178,110 @@ def reap_runs(
         apply: If True, actually write reaped runs
         revert: If True, restore prior_status instead of marking abandoned
         revert_ids: List of run IDs to revert
+        cwd: Working directory used to resolve the runlog project/root for
+            run.reaped / run.reap_reverted when the flag is on. Defaults to
+            `Path.cwd()` (via `resolve_log_root`) -- same default every other
+            local command uses.
+        reconcile_warm: Legacy-only (flag off): whether to force-rebuild the
+            warm tier and merge ledger entries after writing reaped/reverted
+            runs (spec Migration step 1: "with its warm-tier reconciliation
+            disabled ... so the reap writes only its cool fragment rewrite
+            and ledger JSON"). Default True (today's behaviour, unchanged for
+            every existing caller); `bth migrate --to-log` step 1 is the only
+            caller passing `False`. Has no effect when the flag is on: the
+            flag-on path never touches the warm tier at all.
 
     Returns:
         (candidates_list, skipped_list) where skipped_list has (run, skip_reason) tuples
+
+    One call is one unit of work (Mode section): the flag is fixed for the
+    whole reap pass, so every run.reaped / run.reap_reverted event emitted
+    below (there may be many, one per candidate) shares a single resolution.
+
+    Candidate discovery (spec delivery step 4, "the reaper on folded
+    status"): with the flag ON, candidates (and, for `revert`, each run's
+    prior reap-ledger record) are read from the folded `runs` table via
+    `bathos.index.connect_read` -- never from cool fragments, which a flag-on
+    `bth run` never writes. With the flag OFF, this is unchanged: cool
+    fragments via `bathos.catalog.read_runs` and the JSON ledger via
+    `read_reap_ledger`.
     """
-    # Enforce floor
+    # Enforce floor (before the writers lock -- a floor violation is not a write).
     if apply and older_than_h < 24:
         raise ReapError(f"Floor: --older-than-h must be >= 24 (given {older_than_h})")
 
-    # Read cool tier and ledger
-    all_runs = read_runs(catalog_dir)
-    ledger = read_reap_ledger(catalog_dir) if revert else {}
+    with unit_of_work(catalog_dir):
+        return _reap_runs_impl(
+            catalog_dir,
+            older_than_h=older_than_h,
+            apply=apply,
+            revert=revert,
+            revert_ids=revert_ids,
+            cwd=cwd,
+            reconcile_warm=reconcile_warm,
+        )
+
+
+def _read_all_runs_from_index(catalog_dir: Path) -> list[Run]:
+    """Every run, as folded by the index (spec "the reaper on folded
+    status") -- the flag-on equivalent of `bathos.catalog.read_runs`, which
+    reads cool fragments a flag-on `bth run` never writes.
+
+    Column-name-keyed via `bathos.query._run_from_index_row` (the same
+    helper `query.py`'s own index-backed reads use), not the legacy warm
+    tier's positional unpacking -- `bathos.index.RUNS_DDL`'s column order is
+    not the legacy warm table's.
+    """
+    from bathos.query import _run_from_index_row
+
+    con = connect_read(catalog_dir)
+    try:
+        cur = con.execute("SELECT * FROM runs")
+        col_names = [d[0] for d in cur.description]
+        rows = cur.fetchall()
+    finally:
+        con.close()
+    return [_run_from_index_row(dict(zip(col_names, r, strict=True))) for r in rows]
+
+
+def _ledger_from_folded_runs(all_runs: list[Run]) -> dict[str, dict]:
+    """The flag-on equivalent of `read_reap_ledger`: a flag-on reap/revert
+    never writes `catalog/reaped/<slug>/<run_id>.json` at all (spec: the
+    `run.reaped` event "replaces ... the ledger-JSON write"), so the ledger
+    record for a revert must come from the run's own folded
+    `metadata.reaped` (`fold_run`'s "metadata.reaped: the latest not-
+    cancelled ledger-shaped abandoned claim") instead of a file on disk.
+    """
+    ledger: dict[str, dict] = {}
+    for run in all_runs:
+        try:
+            metadata = json.loads(run.metadata or "{}")
+        except (json.JSONDecodeError, TypeError, ValueError):
+            metadata = {}
+        reaped = metadata.get("reaped") if isinstance(metadata, dict) else None
+        if reaped:
+            ledger[run.id] = reaped
+    return ledger
+
+
+def _reap_runs_impl(
+    catalog_dir: Path,
+    *,
+    older_than_h: float,
+    apply: bool,
+    revert: bool,
+    revert_ids: list[str] | None,
+    cwd: Path | None,
+    reconcile_warm: bool = True,
+) -> tuple[list[Run], list[tuple[Run, str]]]:
+    flag_on = current_mode()
+
+    if flag_on:
+        all_runs = _read_all_runs_from_index(catalog_dir)
+        ledger = _ledger_from_folded_runs(all_runs) if revert else {}
+    else:
+        all_runs = read_runs(catalog_dir)
+        ledger = read_reap_ledger(catalog_dir) if revert else {}
 
     now = datetime.now(UTC)
     cutoff_time = now - timedelta(hours=older_than_h)
@@ -206,15 +304,25 @@ def reap_runs(
                 run.status = prior_status
 
                 if apply:
-                    write_run(run, catalog_dir)
-                    # Move ledger to reverted/
-                    ledger_dir = catalog_dir / "reaped" / run.project_slug
-                    ledger_path = ledger_dir / f"{run.id}.json"
-                    reverted_dir = ledger_dir / "reverted"
-                    reverted_dir.mkdir(parents=True, exist_ok=True)
-                    ts = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
-                    reverted_path = reverted_dir / f"{run.id}.{ts}.json"
-                    os.replace(ledger_path, reverted_path)
+                    if flag_on:
+                        # run.reap_reverted (AC-25): the event replaces BOTH the
+                        # write_run status rewrite and the ledger-JSON move.
+                        emit_event(
+                            kind="run.reap_reverted",
+                            entity=[run.id],
+                            data=ledger_record,
+                            cwd=cwd,
+                        )
+                    else:
+                        write_run(run, catalog_dir)
+                        # Move ledger to reverted/
+                        ledger_dir = catalog_dir / "reaped" / run.project_slug
+                        ledger_path = ledger_dir / f"{run.id}.json"
+                        reverted_dir = ledger_dir / "reverted"
+                        reverted_dir.mkdir(parents=True, exist_ok=True)
+                        ts = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+                        reverted_path = reverted_dir / f"{run.id}.{ts}.json"
+                        os.replace(ledger_path, reverted_path)
 
                 candidates.append(run)
             continue
@@ -259,8 +367,10 @@ def reap_runs(
     # Apply reaping if requested
     if apply:
         if revert:
-            # Revert path: reconcile warm tier after rewrites
-            reconcile_warm_tier(catalog_dir)
+            # Revert path: reconcile warm tier after rewrites (legacy only --
+            # the flag-on path above already emitted events, no warm rebuild).
+            if not flag_on and reconcile_warm:
+                reconcile_warm_tier(catalog_dir)
         else:
             # Reap path: write reaped runs with ledger entries
             # Track which runs were reaped via sacct_no_record
@@ -289,10 +399,6 @@ def reap_runs(
 
                 reaped_at = datetime.now(UTC).isoformat()
 
-                # Write back (atomic) — BEFORE ledger entry
-                write_run(run, catalog_dir)
-
-                # Write ledger entry after successful write
                 ledger_record = {
                     "run_id": run.id,
                     "project_slug": run.project_slug,
@@ -301,12 +407,22 @@ def reap_runs(
                     "window_h": older_than_h,
                     "prior_status": "running",
                 }
-                _write_reap_ledger_entry(catalog_dir, run.id, run.project_slug, ledger_record)
+
+                if flag_on:
+                    # run.reaped (AC-25): replaces the write_run status rewrite,
+                    # the ledger-JSON write, AND the warm-tier reconcile below.
+                    emit_event(kind="run.reaped", entity=[run.id], data=ledger_record, cwd=cwd)
+                else:
+                    # Write back (atomic) — BEFORE ledger entry
+                    write_run(run, catalog_dir)
+                    # Write ledger entry after successful write
+                    _write_reap_ledger_entry(catalog_dir, run.id, run.project_slug, ledger_record)
 
                 event("catalog.reap_run", run_id=run.id, reason=reason)
 
-            # Reconcile warm tier after writing all reaped runs
-            reconcile_warm_tier(catalog_dir)
+            # Reconcile warm tier after writing all reaped runs (legacy only).
+            if not flag_on and reconcile_warm:
+                reconcile_warm_tier(catalog_dir)
 
     return candidates, skipped
 

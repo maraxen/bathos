@@ -11,6 +11,7 @@ from typing import Literal
 import duckdb
 
 from bathos.catalog import read_runs
+from bathos.index import connect_read
 from bathos.schema import Run
 from bathos.telemetry import event
 
@@ -167,14 +168,65 @@ def _row_to_run(row: tuple) -> Run | None:
         raise RuntimeError(f"Failed to convert DuckDB row to Run: {e}") from e
 
 
-def _resolve_backend(catalog_dir: Path) -> Literal["cool", "warm"]:
+def _resolve_backend(catalog_dir: Path) -> Literal["cool", "warm", "index"]:
     """Determine which backend to use based on catalog state.
 
-    Returns 'warm' if catalog_dir/bathos.db exists, else 'cool'.
+    Returns 'index' when the runlog flag is on (spec "Mode"): once cut over,
+    `bathos.db` is frozen/absent and the folded index (`bathos.index.
+    connect_read`) is the only live source, regardless of whether a stale
+    `bathos.db` happens to still be lying around. Otherwise 'warm' if
+    catalog_dir/bathos.db exists, else 'cool'.
     """
+    from bathos.runlog.mode import is_log_mode
+
+    if is_log_mode(catalog_dir):
+        return "index"
     if (catalog_dir / "bathos.db").exists():
         return "warm"
     return "cool"
+
+
+def _run_from_index_row(row: dict) -> Run:
+    """Build a `Run` from one row of the folded index's `runs` table.
+
+    Column-name keyed, unlike the legacy warm tier's positional
+    `_row_to_run` -- `bathos.index.RUNS_DDL`'s column order does not match
+    the legacy warm table's, so `SELECT *` position is not portable between
+    the two backends; every field is looked up by name here instead.
+    """
+    from dataclasses import fields
+
+    def _json_list(value: object) -> list:
+        if not value:
+            return []
+        return json.loads(value) if isinstance(value, str) else list(value)
+
+    timestamp = row.get("timestamp")
+    if isinstance(timestamp, str) and timestamp:
+        timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+
+    kwargs: dict = {}
+    for f in fields(Run):
+        if f.name not in row:
+            continue
+        if f.name in ("argv", "output_paths", "tags"):
+            kwargs[f.name] = _json_list(row[f.name])
+        elif f.name == "timestamp":
+            kwargs[f.name] = timestamp if timestamp is not None else f.default_factory()
+        else:
+            kwargs[f.name] = row[f.name]
+    return Run(**kwargs)
+
+
+def _index_query_runs(catalog_dir: Path, query: str, params: list) -> list[Run]:
+    con = connect_read(catalog_dir)
+    try:
+        cur = con.execute(query, params)
+        col_names = [d[0] for d in cur.description]
+        rows = cur.fetchall()
+    finally:
+        con.close()
+    return [_run_from_index_row(dict(zip(col_names, row, strict=True))) for row in rows]
 
 
 def _cool_list_runs(
@@ -200,12 +252,36 @@ def list_runs(
 ) -> list[Run]:
     """List runs from catalog, with optional filtering and limit.
 
-    Dispatches to cool or warm backend based on catalog state.
+    Dispatches to the index, warm, or cool backend based on catalog state.
     """
     backend = _resolve_backend(catalog_dir)
+    if backend == "index":
+        return _index_list_runs(catalog_dir, project=project, status=status, limit=limit)
     if backend == "warm":
         return _warm_list_runs(catalog_dir, project=project, status=status, limit=limit)
     return _cool_list_runs(catalog_dir, project=project, status=status, limit=limit)
+
+
+def _index_list_runs(
+    catalog_dir: Path,
+    project: str | None = None,
+    status: str | None = None,
+    limit: int = 50,
+) -> list[Run]:
+    """List runs from the folded index (flag on; spec AC-3)."""
+    query = "SELECT * FROM runs"
+    params: list = []
+    conditions = []
+    if project:
+        conditions.append("project_slug = ?")
+        params.append(project)
+    if status:
+        conditions.append("status = ?")
+        params.append(status)
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    query += f" LIMIT {limit}"
+    return _index_query_runs(catalog_dir, query, params)
 
 
 def _warm_list_runs(
@@ -217,8 +293,7 @@ def _warm_list_runs(
     """List runs using warm tier (DuckDB)."""
     t_start = time.monotonic()
 
-    db_path = catalog_dir / "bathos.db"
-    con = duckdb.connect(str(db_path))
+    con = connect_read(catalog_dir, read_only=False)
     con.execute("SET TimeZone='UTC'")
 
     # Build query
@@ -268,20 +343,27 @@ def _cool_get_run(run_id: str, catalog_dir: Path) -> Run | None:
 def get_run(run_id: str, catalog_dir: Path) -> Run | None:
     """Get a single run by ID, or None if not found.
 
-    Dispatches to cool or warm backend based on catalog state.
+    Dispatches to the index, warm, or cool backend based on catalog state.
     """
     backend = _resolve_backend(catalog_dir)
+    if backend == "index":
+        return _index_get_run(run_id, catalog_dir)
     if backend == "warm":
         return _warm_get_run(run_id, catalog_dir)
     return _cool_get_run(run_id, catalog_dir)
+
+
+def _index_get_run(run_id: str, catalog_dir: Path) -> Run | None:
+    """Get a single run by ID from the folded index (flag on; spec AC-3)."""
+    runs = _index_query_runs(catalog_dir, "SELECT * FROM runs WHERE id = ?", [run_id])
+    return runs[0] if runs else None
 
 
 def _warm_get_run(run_id: str, catalog_dir: Path) -> Run | None:
     """Get a single run by ID using warm tier (DuckDB)."""
     t_start = time.monotonic()
 
-    db_path = catalog_dir / "bathos.db"
-    con = duckdb.connect(str(db_path))
+    con = connect_read(catalog_dir, read_only=False)
     con.execute("SET TimeZone='UTC'")
 
     rows = con.execute("SELECT * FROM runs WHERE id = ?", [run_id]).fetchall()
@@ -336,9 +418,18 @@ def find_runs(
 ) -> list[Run]:
     """Find runs with multiple filter criteria.
 
-    Dispatches to cool or warm backend based on catalog state.
+    Dispatches to the index, warm, or cool backend based on catalog state.
     """
     backend = _resolve_backend(catalog_dir)
+    if backend == "index":
+        return _index_find_runs(
+            catalog_dir,
+            since=since,
+            project=project,
+            status=status,
+            tags=tags,
+            slurm_job_id=slurm_job_id,
+        )
     if backend == "warm":
         return _warm_find_runs(
             catalog_dir,
@@ -358,6 +449,46 @@ def find_runs(
     )
 
 
+def _index_find_runs(
+    catalog_dir: Path,
+    since: datetime | None = None,
+    project: str | None = None,
+    status: str | None = None,
+    tags: list[str] | None = None,
+    slurm_job_id: str | None = None,
+) -> list[Run]:
+    """Find runs in the folded index (flag on; spec AC-3).
+
+    `since` and `tags` are applied in Python after the fetch, like the cool
+    backend: the index's `timestamp` column is text (an RFC3339 string, spec
+    "Line envelope"), not a DuckDB TIMESTAMP, so comparing it against a
+    `datetime` parameter belongs on the already-parsed `Run.timestamp`
+    values, not as a SQL predicate; `tags` is JSON-encoded text for the same
+    reason `_warm_find_runs` also filters it in Python.
+    """
+    query = "SELECT * FROM runs"
+    params: list = []
+    conditions = []
+    if project:
+        conditions.append("project_slug = ?")
+        params.append(project)
+    if status:
+        conditions.append("status = ?")
+        params.append(status)
+    if slurm_job_id:
+        conditions.append("slurm_job_id = ?")
+        params.append(slurm_job_id)
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+
+    runs = _index_query_runs(catalog_dir, query, params)
+    if since:
+        runs = [r for r in runs if r.timestamp >= since]
+    if tags:
+        runs = [r for r in runs if any(t in r.tags for t in tags)]
+    return runs
+
+
 def _warm_find_runs(
     catalog_dir: Path,
     since: datetime | None = None,
@@ -369,8 +500,7 @@ def _warm_find_runs(
     """Find runs using warm tier (DuckDB)."""
     t_start = time.monotonic()
 
-    db_path = catalog_dir / "bathos.db"
-    con = duckdb.connect(str(db_path))
+    con = connect_read(catalog_dir, read_only=False)
     con.execute("SET TimeZone='UTC'")
 
     query = "SELECT * FROM runs"
@@ -425,8 +555,7 @@ def run_sql(sql: str, catalog_dir: Path | None = None) -> list[tuple]:
     result = []
 
     if catalog_dir is not None:
-        db_path = catalog_dir / "bathos.db"
-        con = duckdb.connect(str(db_path) if db_path.exists() else "")
+        con = connect_read(catalog_dir, read_only=False, missing="empty")
     else:
         con = duckdb.connect()
 
@@ -478,7 +607,7 @@ def lineage(run_id: str, catalog_dir: Path, depth: int = 50) -> list[Run]:
     if not db_path.exists():
         return []
 
-    db = duckdb.connect(str(db_path), read_only=True)
+    db = connect_read(catalog_dir, read_only=True)
     db.execute("SET TimeZone='UTC'")
     try:
         # Use recursive CTE to find all ancestors

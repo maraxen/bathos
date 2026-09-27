@@ -75,6 +75,7 @@ wire(
         "check",
         "sync",
         "init",
+        "log_restore",
         "run",
         "verify",
         "lint",
@@ -623,15 +624,13 @@ def query_shadow_log_cmd(limit: int = 20) -> None:
     ----------
     limit: Max records to show.
     """
-    import duckdb
-
     from bathos.cli_common import catalog_dir
+    from bathos.index import catalog_readable, connect_read
 
     cat_dir = catalog_dir()
-    db_path = cat_dir / "bathos.db"
-    if not db_path.exists():
+    if not catalog_readable(cat_dir):
         return
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = connect_read(cat_dir, read_only=True)
     try:
         rows = con.execute(
             "SELECT entity_id, match_reason, amended_at FROM blast_radius_ledger "
@@ -862,8 +861,31 @@ def submit(
             print(str(e), file=sys.stderr)
             raise SystemExit(1) from None
 
+    # 6a. After cut-over, export BTH_LOG_MODE and BTH_PROJECT_ID into the job
+    # environment (spec "Mode" / "Cluster jobs"): a compute node has no
+    # cut-over marker of its own (its catalog is the remote one,
+    # `cluster_catalog.py:21-26`), so it relies on `BTH_LOG_MODE=1` from here
+    # to know it should append events rather than write legacy fragments;
+    # `BTH_PROJECT_ID` lets its writer mirror to the right `~/.bth/log-mirror/
+    # <project_id>/` instead of `_null/<slug>` (D7). Pre-cut-over (flag off
+    # locally), neither is exported and the job's own behaviour is unchanged.
+    # `myxcel submit-job` has no generic `--env` passthrough (see
+    # `myxcel-slurm-submit`), so these are exported by prefixing the shell
+    # command itself, which `--command` already passes through verbatim.
+    cmd_env_prefix = ""
+    from bathos.runlog.mode import is_log_mode
+
+    if is_log_mode(cat_dir):
+        from bathos.runlog.project_id import read_project_id
+
+        env_pairs = ["BTH_LOG_MODE=1"]
+        project_id = read_project_id(cfg_path)
+        if project_id:
+            env_pairs.append(f"BTH_PROJECT_ID={project_id}")
+        cmd_env_prefix = "env " + " ".join(env_pairs) + " "
+
     # 7. Submit
-    cmd_str = " ".join(command)
+    cmd_str = cmd_env_prefix + " ".join(command)
     try:
         result = submit_job(
             cluster.remote,
@@ -960,7 +982,15 @@ def submit(
 
 
 @app.command
-def migrate(dry_run: bool = False, classify: bool = False, project: str | None = None) -> None:
+def migrate(
+    dry_run: bool = False,
+    classify: bool = False,
+    project: str | None = None,
+    to_log: bool = False,
+    import_legacy: bool = False,
+    force: bool = False,
+    accept_residual: str = "",
+) -> None:
     """Migrate cool-tier Parquet fragments to current schema, optionally classifying scripts.
 
     Parameters
@@ -969,8 +999,49 @@ def migrate(dry_run: bool = False, classify: bool = False, project: str | None =
     classify: Classify flat scripts into subdirs (Phase 2).
     project: Scope migration to a single project slug's runs/<project>/ fragments
         (default: all projects in the catalog).
+    to_log: Run the project-local-run-log cut-over (Migration steps 0-4) instead of
+        the schema migration above. See `.praxia/docs/specs/260925_project-local-run-log.md`.
+    import_legacy: Post-cut-over re-import of a stale legacy write (AC-23); refused
+        before cut-over.
+    force: With --to-log, proceed past a squeue/submit-record conflict instead of refusing.
+    accept_residual: With --to-log, the sha256 of a previously-reviewed residual report;
+        proceeds to the switch only if a fresh run reproduces that exact hash.
     """
     from bathos.cli_common import catalog_dir
+
+    if import_legacy:
+        from bathos.runlog.migrate import import_legacy_post_cutover
+
+        result = import_legacy_post_cutover(catalog_dir())
+        print(f"{result.status}: {result.detail}")
+        if result.status not in ("imported",):
+            raise SystemExit(1)
+        return
+
+    if to_log:
+        from bathos.runlog.migrate import migrate_to_log
+
+        result = migrate_to_log(
+            catalog_dir(),
+            force=force,
+            accept_residual=accept_residual or None,
+        )
+        print(f"status: {result.status}")
+        if result.attempt:
+            print(f"  attempt: {result.attempt}")
+        if result.detail:
+            print(f"  {result.detail}")
+        if result.missing_project_ids:
+            print("  roots missing a committed [project] id:", file=sys.stderr)
+            for p in result.missing_project_ids:
+                print(f"    {p}", file=sys.stderr)
+        if result.conflicting_jobs:
+            print(f"  conflicting job(s): {', '.join(result.conflicting_jobs)}", file=sys.stderr)
+        if result.report_sha256:
+            print(f"  report sha256: {result.report_sha256}")
+        if result.status != "switched" and result.status != "already_migrated":
+            raise SystemExit(1)
+        return
 
     if classify:
         from bathos.classifier import apply_classify_plan, build_move_plan, classify_flat_scripts
@@ -1354,6 +1425,7 @@ def view(
 def catalog_version_cmd() -> None:
     """Show schema version status of the catalog."""
     from bathos.cli_common import catalog_dir as _catalog_dir_fn
+    from bathos.index import catalog_readable
     from bathos.migrate import migrate_catalog
     from bathos.schema import CURRENT_SCHEMA_VERSION
 
@@ -1369,11 +1441,10 @@ def catalog_version_cmd() -> None:
             file=sys.stderr,
         )
 
-    db_path = cat_dir / "bathos.db"
-    if db_path.exists():
-        import duckdb
+    if catalog_readable(cat_dir):
+        from bathos.index import connect_read
 
-        con = duckdb.connect(str(db_path), read_only=True)
+        con = connect_read(cat_dir, read_only=True)
         try:
             rows = con.execute(
                 "SELECT warm_version, migrated_at FROM _schema_migrations "

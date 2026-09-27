@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -753,6 +754,155 @@ class TestScaffoldClaimParity:
         assert "parity_status" not in content, (
             "Scaffolded claim should NOT include parity_status field (inferred only)"
         )
+
+
+# ---------------------------------------------------------------------------
+# AC-25: attest_parity's campaign.claim_bound write site behind the runlog
+# flag (delivery step 2b, wave ii), including the rollback branch, which is a
+# NEW event, not a deletion of the one just emitted.
+# ---------------------------------------------------------------------------
+
+
+def _read_jsonl_dir(log_dir):
+    import json as _json
+
+    lines = []
+    if not log_dir.exists():
+        return lines
+    for f in sorted(log_dir.glob("*.jsonl")):
+        for line in f.read_text().splitlines():
+            if line.strip():
+                lines.append(_json.loads(line))
+    return lines
+
+
+def _setup_parity_campaign(temp_db, tmp_path, campaign_id, parity_run_id):
+    from bathos.claim import register_claim
+
+    temp_db.execute(
+        "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at) "
+        "VALUES (?, 'test', ?, 'confirmation', 'open', ?)",
+        [campaign_id, campaign_id, datetime.now(UTC).isoformat()],
+    )
+    parity_metadata = json.dumps({"metric_key": 1.0, "parity_run_type": "literature_parity"})
+    temp_db.execute(
+        "INSERT INTO runs (id, campaign_id, outcome, metadata, parity_run_type) VALUES (?, ?, ?, ?, ?)",
+        [parity_run_id, campaign_id, "pass", parity_metadata, "literature_parity"],
+    )
+    register_claim(Path("test_parity.claim.toml"), campaign_id, temp_db, tmp_path, force=False)
+    temp_db.commit()
+
+
+def test_attest_parity_flag_off_is_legacy_only(
+    temp_db, tmp_path, temp_claim_file_with_parity  # noqa: ARG001 - pytest fixture
+):
+    from bathos.runlog.writer import reset_writers_for_test
+
+    campaign_id = "flagoff_parity_campaign"
+    parity_run_id = "run_parity_flagoff"
+    _setup_parity_campaign(temp_db, tmp_path, campaign_id, parity_run_id)
+
+    initial_sha = temp_db.execute(
+        "SELECT claim_sha256 FROM campaigns WHERE id = ?", [campaign_id]
+    ).fetchone()[0]
+
+    attest_parity(
+        campaign_id=campaign_id, parity_run_id=parity_run_id, db=temp_db, workspace_root=tmp_path
+    )
+
+    new_sha = temp_db.execute(
+        "SELECT claim_sha256 FROM campaigns WHERE id = ?", [campaign_id]
+    ).fetchone()[0]
+    assert new_sha != initial_sha
+    assert not (Path.home() / ".bth" / "log" / "unaffiliated").exists()
+    reset_writers_for_test()
+
+
+def test_attest_parity_flag_on_emits_claim_bound_event_only(
+    temp_db, tmp_path, temp_claim_file_with_parity, monkeypatch  # noqa: ARG001 - pytest fixture
+):
+    from bathos.runlog.writer import reset_writers_for_test
+
+    campaign_id = "flagon_parity_campaign"
+    parity_run_id = "run_parity_flagon"
+    _setup_parity_campaign(temp_db, tmp_path, campaign_id, parity_run_id)
+
+    sha_before = temp_db.execute(
+        "SELECT claim_sha256 FROM campaigns WHERE id = ?", [campaign_id]
+    ).fetchone()[0]
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
+
+    attest_parity(
+        campaign_id=campaign_id,
+        parity_run_id=parity_run_id,
+        db=temp_db,
+        workspace_root=tmp_path,
+        catalog_dir=catalog_dir,
+    )
+
+    sha_after = temp_db.execute(
+        "SELECT claim_sha256 FROM campaigns WHERE id = ?", [campaign_id]
+    ).fetchone()[0]
+    assert sha_after == sha_before  # no legacy UPDATE
+
+    lines = _read_jsonl_dir(Path.home() / ".bth" / "log" / "unaffiliated")
+    bound = [line for line in lines if line["kind"] == "campaign.claim_bound"]
+    assert len(bound) == 1
+    assert bound[0]["entity"] == [campaign_id]
+    assert bound[0]["data"]["claim_sha256"]
+    assert bound[0]["data"]["claim_sha256"] != sha_before
+    reset_writers_for_test()
+
+
+def test_attest_parity_flag_on_rollback_emits_new_claim_bound_event(
+    temp_db, tmp_path, temp_claim_file_with_parity, monkeypatch  # noqa: ARG001 - pytest fixture
+):
+    """AC-25 + spec note: the rollback branch (an append failure after the file
+    was already renamed) emits a NEW campaign.claim_bound event carrying the
+    reverted (original) sha256 -- events are append-only, so the earlier event
+    is never deleted, only superseded."""
+    from bathos.runlog.writer import reset_writers_for_test
+
+    campaign_id = "flagon_rollback_campaign"
+    parity_run_id = "run_parity_rollback"
+    _setup_parity_campaign(temp_db, tmp_path, campaign_id, parity_run_id)
+
+    original_content = (tmp_path / "test_parity.claim.toml").read_bytes()
+    original_sha = hashlib.sha256(original_content).hexdigest()
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
+
+    def _boom(**kwargs):  # noqa: ARG001 - matches emit_or_legacy's signature
+        raise RuntimeError("simulated event-append failure")
+
+    monkeypatch.setattr("bathos.runlog.emit.emit_or_legacy", _boom)
+
+    with pytest.raises(RuntimeError, match="simulated event-append failure"):
+        attest_parity(
+            campaign_id=campaign_id,
+            parity_run_id=parity_run_id,
+            db=temp_db,
+            workspace_root=tmp_path,
+            catalog_dir=catalog_dir,
+        )
+
+    # File rolled back to its original content.
+    rolled_back_content = (tmp_path / "test_parity.claim.toml").read_bytes()
+    assert rolled_back_content == original_content
+
+    lines = _read_jsonl_dir(Path.home() / ".bth" / "log" / "unaffiliated")
+    bound = [line for line in lines if line["kind"] == "campaign.claim_bound"]
+    assert len(bound) == 1  # the rollback event -- the failed attempt emitted nothing
+    assert bound[0]["entity"] == [campaign_id]
+    assert bound[0]["data"]["claim_sha256"] == original_sha
+    reset_writers_for_test()
 
 
 if __name__ == "__main__":

@@ -152,6 +152,72 @@ def test_write_submit_provenance_atomic_rename(tmp_catalog: Path):
     assert len(final_files) == 1, "Should have exactly one final Parquet file"
 
 
+# --- AC-25: submit.recorded write site ------------------------------------------
+
+
+def _read_jsonl_dir(log_dir: Path) -> list[dict]:
+    import json
+
+    lines = []
+    if not log_dir.exists():
+        return lines
+    for f in sorted(log_dir.glob("*.jsonl")):
+        for line in f.read_text().splitlines():
+            if line.strip():
+                lines.append(json.loads(line))
+    return lines
+
+
+def test_write_submit_provenance_flag_off_is_legacy_only(tmp_catalog: Path, tmp_path: Path):
+    from bathos.runlog.writer import reset_writers_for_test
+
+    init_catalog(tmp_catalog)
+    write_submit_provenance(
+        project_slug="myproject",
+        command="scripts/experiments/foo.py",
+        sidecar_sha256="abc123",
+        myxcel_job_id="12345",
+        stage_name="validation",
+        catalog_dir=tmp_catalog,
+        cwd=tmp_path,
+    )
+    submit_dir = tmp_catalog / "submits" / "myproject"
+    assert len(list(submit_dir.glob("*.parquet"))) == 1
+    assert not (Path.home() / ".bth" / "log" / "unaffiliated").exists()
+    reset_writers_for_test()
+
+
+def test_write_submit_provenance_flag_on_emits_event_only(
+    tmp_catalog: Path, tmp_path: Path, monkeypatch
+):
+    from bathos.runlog.writer import reset_writers_for_test
+
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_catalog))
+    init_catalog(tmp_catalog)
+
+    write_submit_provenance(
+        project_slug="myproject",
+        command="scripts/experiments/foo.py",
+        sidecar_sha256="abc123",
+        myxcel_job_id="12345",
+        stage_name="validation",
+        catalog_dir=tmp_catalog,
+        cwd=tmp_path,
+    )
+
+    submit_dir = tmp_catalog / "submits" / "myproject"
+    assert not submit_dir.exists()  # no legacy Parquet fragment
+
+    lines = _read_jsonl_dir(Path.home() / ".bth" / "log" / "unaffiliated")
+    assert len(lines) == 1
+    assert lines[0]["kind"] == "submit.recorded"
+    assert lines[0]["data"]["myxcel_job_id"] == "12345"
+    assert lines[0]["data"]["slurm_job_id"] == "12345"
+    assert lines[0]["data"]["stage_name"] == "validation"
+    reset_writers_for_test()
+
+
 # =============================================================================
 # Defect 1 (260827_bathos-catalog-robustness): one corrupt cool-tier fragment
 # must not abort a whole-catalog scan.

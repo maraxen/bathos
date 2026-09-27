@@ -58,6 +58,13 @@ class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(
     DOCUMENT_INVALID = "document_invalid"
     DOCUMENT_CONFLICT = "document_conflict"
 
+    # Project-local run log (bathos.runlog, spec 260925): structured refusals
+    # for the D3 gitignore gate, D7 project-id requirement, and the Mode
+    # section's BTH_LOG_MODE guard. Inert while the flag is off.
+    RUNLOG_NOT_IGNORED = "runlog_not_ignored"
+    RUNLOG_PROJECT_ID_MISSING = "runlog_project_id_missing"
+    RUNLOG_MODE_REFUSED = "runlog_mode_refused"
+
 
 # Resolution hints registry: every BathosErrorCode member must have a non-empty entry
 RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
@@ -87,6 +94,9 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.ARCHIVE_BUNDLE_NOT_FOUND: "The archive_bundles/<slug>/<item_id>.bundle file referenced by the ledger is missing on this machine -- restore what's recoverable from git history and recover the bundle from a backup or another clone",
     BathosErrorCode.DOCUMENT_INVALID: "The document was NOT written. Fix the reported field errors and unknown keys, then retry -- call doc_schema for the field list and legal values",
     BathosErrorCode.DOCUMENT_CONFLICT: "A document already exists at that path. Pass force=true to overwrite it, or author to a different path",
+    BathosErrorCode.RUNLOG_NOT_IGNORED: "Add '/.bth/log/' to .gitignore in the main checkout (or run `bth init` there) before recording runs",
+    BathosErrorCode.RUNLOG_PROJECT_ID_MISSING: "Run `bth init --assign-id` in the main checkout, then commit the updated .bth.toml",
+    BathosErrorCode.RUNLOG_MODE_REFUSED: "Unset BTH_LOG_MODE, or run `bth migrate --to-log` to write the real cut-over marker",
 }
 
 
@@ -159,4 +169,8 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     # have been. The document write is rolled back, so this surfaces as an
     # invalid-document refusal rather than a partially-recorded success.
     "LedgerAppendError": BathosErrorCode.DOCUMENT_INVALID,
+    # Project-local run log (bathos.runlog, spec 260925).
+    "LogNotIgnoredError": BathosErrorCode.RUNLOG_NOT_IGNORED,
+    "ProjectIdMissingError": BathosErrorCode.RUNLOG_PROJECT_ID_MISSING,
+    "LogModeRefusedError": BathosErrorCode.RUNLOG_MODE_REFUSED,
 }

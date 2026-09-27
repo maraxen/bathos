@@ -12,6 +12,7 @@ from uuid import uuid4
 
 import duckdb
 
+from bathos.index import connect_read
 from bathos.sidecar import compute_evalue
 from bathos.telemetry import event
 
@@ -164,11 +165,40 @@ def ingest_cool_campaigns(db, catalog_dir: Path) -> int:
 
 
 def connect_catalog_db(catalog_dir: Path, *, read_only: bool = True):
-    """Open bathos.db if it exists; otherwise return None."""
+    """Open the catalog if available; otherwise return None.
+
+    `read_only=True` (the majority of this function's 8+ call sites, spread
+    across mcp.py/cli_cyclopts.py/blast_radius.py) goes through
+    `bathos.index.connect_read` -- AC-18's one flag-gated read entry point.
+    Flag off, this reproduces the old "open bathos.db read-only, or None if
+    it isn't there yet" contract exactly. Flag on, it returns a connection
+    over the folded index instead (its `campaigns`/`campaign_runs`/... views,
+    empty until the first ingest), so every read-only caller of this
+    function -- `bth campaign list`/`show` among them -- sees the folded
+    index once the flag flips, with no caller-side change. A caller's
+    pre-existing `if db is None: return []`-style short circuit still fires
+    before cut-over; once the flag is on there is always a (possibly empty)
+    index to query, so it stops firing -- an empty result reads the same as
+    "not connected" did for every current caller (`by_campaign`/similar
+    lookups over zero rows), which is why no caller needed to change.
+
+    `read_only=False` (writes) is NOT flag-aware here and keeps its own raw
+    `duckdb.connect` (AC-18 allow-list: `campaigns.py`/`connect_catalog_db`)
+    -- this module's own write sites (`create_campaign`, `conclude_campaign`,
+    etc.) flag-gate the actual mutation internally via `emit_or_legacy`, and
+    still need a real legacy connection to write through on their flag-off
+    branch regardless of what this function's read side does.
+    """
     path = Path(catalog_dir) / "bathos.db"
+    if read_only:
+        from bathos.runlog.mode import is_log_mode
+
+        if not is_log_mode(catalog_dir) and not path.exists():
+            return None
+        return connect_read(catalog_dir, read_only=True)
     if not path.exists():
         return None
-    return duckdb.connect(str(path), read_only=read_only)
+    return duckdb.connect(str(path), read_only=False)
 
 
 def union_campaign_member_ids(db, campaign_id: str, catalog_dir: Path | None) -> list[str]:
@@ -203,7 +233,7 @@ def prepare_catalog_for_conclude(catalog_dir: Path) -> None:
     if not db_path.exists():
         compact(catalog_dir)
         return
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = connect_read(catalog_dir, read_only=True)
     try:
         warm_ids = {r[0] for r in con.execute("SELECT id FROM runs").fetchall()}
     except duckdb.Error:
@@ -230,28 +260,21 @@ def create_campaign(
     hypothesis: str | None = None,
     parent_campaign_id: str | None = None,
     catalog_dir: Path | None = None,
+    *,
+    cwd: Path | None = None,
 ) -> Campaign:
+    """AC-25: behind the runlog flag, emits `campaign.created` instead of the
+    warm INSERT + cool-JSON write; flag off performs only the legacy writes,
+    unchanged. `cwd` resolves the runlog project/root when the flag is on
+    (defaults to `Path.cwd()` via `resolve_log_root`)."""
+    from bathos.runlog.emit import current_mode, emit_or_legacy, unit_of_work
+
     if mode not in ("exploration", "confirmation", "sequential"):
         raise CampaignError(
             f"mode must be 'exploration', 'confirmation', or 'sequential', got {mode!r}"
         )
     campaign_id = str(uuid4())
     started_at = datetime.now(UTC).isoformat()
-    db.execute(
-        "INSERT INTO campaigns (id, project_slug, name, mode, question, hypothesis, status, started_at, parent_campaign_id) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)",
-        [
-            campaign_id,
-            project_slug,
-            name,
-            mode,
-            question,
-            hypothesis,
-            started_at,
-            parent_campaign_id,
-        ],
-    )
-    # Use campaign_name field since 'name' is reserved by logging.LogRecord
-    event("campaign.create", campaign_id=campaign_id, campaign_name=name)
     campaign = Campaign(
         id=campaign_id,
         project_slug=project_slug,
@@ -263,15 +286,78 @@ def create_campaign(
         started_at=started_at,
         parent_campaign_id=parent_campaign_id,
     )
-    if catalog_dir is not None:
-        write_campaign_cool(campaign, catalog_dir)
+
+    def _legacy_write() -> None:
+        db.execute(
+            "INSERT INTO campaigns (id, project_slug, name, mode, question, hypothesis, status, started_at, parent_campaign_id) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)",
+            [
+                campaign_id,
+                project_slug,
+                name,
+                mode,
+                question,
+                hypothesis,
+                started_at,
+                parent_campaign_id,
+            ],
+        )
+        # Same position as before step 2b: after the INSERT, before the cool write.
+        # Use campaign_name field since 'name' is reserved by logging.LogRecord
+        event("campaign.create", campaign_id=campaign_id, campaign_name=name)
+        if catalog_dir is not None:
+            write_campaign_cool(campaign, catalog_dir)
+
+    with unit_of_work(catalog_dir):
+        emit_or_legacy(
+            kind="campaign.created",
+            entity=[campaign_id],
+            data=asdict(campaign),
+            legacy_write=_legacy_write,
+            cwd=cwd,
+        )
+        if current_mode():
+            event("campaign.create", campaign_id=campaign_id, campaign_name=name)
     return campaign
 
 
-def add_run_to_campaign(db, campaign_id: str, run_id: str, catalog_dir: Path | None = None) -> None:
-    """Add run to campaign (idempotent). For sequential campaigns, computes e-value and applies threshold lock."""
+def add_run_to_campaign(
+    db,
+    campaign_id: str,
+    run_id: str,
+    catalog_dir: Path | None = None,
+    *,
+    cwd: Path | None = None,
+) -> None:
+    """Add run to campaign (idempotent). For sequential campaigns, computes e-value and applies threshold lock.
+
+    AC-25: two write sites behind the runlog flag -- `campaign.threshold_set`
+    (only when a sidecar's `popper_stopping_threshold` locks the campaign's
+    previously-unset threshold) and `campaign.run_added` (the `campaign_runs`
+    insert plus the run's own `campaign_id` backfill, which the flag-on fold
+    instead derives from this same event -- see "Fold rules": campaign
+    membership is the union of `campaign.run_added`, `campaign_run.imported`,
+    and `run.started.data.campaign_id`). `cwd` resolves the runlog project/root
+    when the flag is on (defaults to `Path.cwd()` via `resolve_log_root`).
+    """
+    from bathos.runlog.emit import unit_of_work
+
+    with unit_of_work(catalog_dir):
+        return _add_run_to_campaign_impl(db, campaign_id, run_id, catalog_dir, cwd=cwd)
+
+
+def _add_run_to_campaign_impl(
+    db,
+    campaign_id: str,
+    run_id: str,
+    catalog_dir: Path | None = None,
+    *,
+    cwd: Path | None = None,
+) -> None:
+    from bathos.runlog.emit import current_mode, emit_or_legacy
+
     campaign_id = _resolve_campaign_id(db, campaign_id, catalog_dir=catalog_dir)
-    if catalog_dir is not None:
+    # Flag on: events only -- the cool->warm ingest is a legacy write (spec "Mode").
+    if catalog_dir is not None and not current_mode():
         ingest_cool_campaigns(db, catalog_dir)
     campaign_rows = db.execute(
         "SELECT mode, started_at, stopping_threshold FROM campaigns WHERE id = ?", [campaign_id]
@@ -335,16 +421,25 @@ def add_run_to_campaign(db, campaign_id: str, run_id: str, catalog_dir: Path | N
         is_neutral_outcome = run_outcome in ("error", "unknown", None, "")
         if not is_neutral_outcome:
             if campaign_threshold is None and sidecar_stopping_threshold is not None:
-                # Lock threshold from this sidecar
-                db.execute(
-                    "UPDATE campaigns SET stopping_threshold = ? WHERE id = ?",
-                    [sidecar_stopping_threshold, campaign_id],
+                # Lock threshold from this sidecar (AC-25: campaign.threshold_set)
+                def _threshold_legacy_write() -> None:
+                    db.execute(
+                        "UPDATE campaigns SET stopping_threshold = ? WHERE id = ?",
+                        [sidecar_stopping_threshold, campaign_id],
+                    )
+                    if catalog_dir is not None:
+                        refreshed = get_campaign(db, campaign_id, catalog_dir=catalog_dir)
+                        if refreshed is not None:
+                            write_campaign_cool(refreshed, catalog_dir)
+
+                emit_or_legacy(
+                    kind="campaign.threshold_set",
+                    entity=[campaign_id],
+                    data={"stopping_threshold": sidecar_stopping_threshold},
+                    legacy_write=_threshold_legacy_write,
+                    cwd=cwd,
                 )
                 campaign_threshold = sidecar_stopping_threshold
-                if catalog_dir is not None:
-                    refreshed = get_campaign(db, campaign_id, catalog_dir=catalog_dir)
-                    if refreshed is not None:
-                        write_campaign_cool(refreshed, catalog_dir)
             elif campaign_threshold is not None and sidecar_stopping_threshold is not None:
                 if sidecar_stopping_threshold != campaign_threshold:
                     n_runs = db.execute(
@@ -357,24 +452,45 @@ def add_run_to_campaign(db, campaign_id: str, run_id: str, catalog_dir: Path | N
                         f"To use a different threshold, create a new campaign with "
                         f"--parent {campaign_id[:8]} to preserve lineage."
                     )
-
-        db.execute(
-            "INSERT INTO campaign_runs (campaign_id, run_id, evalue, seq_position) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
-            [campaign_id, run_id, evalue, seq_position],
-        )
     else:
-        db.execute(
-            "INSERT INTO campaign_runs (campaign_id, run_id, evalue, seq_position) VALUES (?, ?, NULL, NULL) ON CONFLICT DO NOTHING",
-            [campaign_id, run_id],
-        )
-    if catalog_dir is not None:
-        from bathos.catalog import read_runs, write_run
+        evalue = None
+        seq_position = None
 
-        for run in read_runs(catalog_dir):
-            if run.id == run_id:
-                run.campaign_id = campaign_id
-                write_run(run, catalog_dir)
-                break
+    # AC-25: campaign.run_added -- the campaign_runs insert plus the run's own
+    # campaign_id backfill (skipped when the flag is on; the fold derives
+    # membership from this event instead, see "Fold rules").
+    def _run_added_legacy_write() -> None:
+        if campaign_mode == "sequential":
+            db.execute(
+                "INSERT INTO campaign_runs (campaign_id, run_id, evalue, seq_position) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                [campaign_id, run_id, evalue, seq_position],
+            )
+        else:
+            db.execute(
+                "INSERT INTO campaign_runs (campaign_id, run_id, evalue, seq_position) VALUES (?, ?, NULL, NULL) ON CONFLICT DO NOTHING",
+                [campaign_id, run_id],
+            )
+        if catalog_dir is not None:
+            from bathos.catalog import read_runs, write_run
+
+            for run in read_runs(catalog_dir):
+                if run.id == run_id:
+                    run.campaign_id = campaign_id
+                    write_run(run, catalog_dir)
+                    break
+
+    emit_or_legacy(
+        kind="campaign.run_added",
+        entity=[campaign_id, run_id],
+        data={
+            "campaign_id": campaign_id,
+            "run_id": run_id,
+            "evalue": evalue,
+            "seq_position": seq_position,
+        },
+        legacy_write=_run_added_legacy_write,
+        cwd=cwd,
+    )
 
 
 def link_cool_runs_to_campaigns(
@@ -768,6 +884,36 @@ def conclude_campaign(
     negative_outcome_pattern=None,
     catalog_dir: Path | None = None,
 ) -> None:
+    """Mark campaign as concluded. Thin wrapper: fixes the runlog mode for this
+    unit of work (AC-25), then delegates to `_conclude_campaign_impl` for the
+    actual behavior. See that function's docstring for details."""
+    from bathos.runlog.emit import unit_of_work
+
+    with unit_of_work(catalog_dir):
+        _conclude_campaign_impl(
+            db,
+            campaign_id,
+            outcome_label,
+            conclusion,
+            workspace_root=workspace_root,
+            force_verdict=force_verdict,
+            negative_check=negative_check,
+            negative_outcome_pattern=negative_outcome_pattern,
+            catalog_dir=catalog_dir,
+        )
+
+
+def _conclude_campaign_impl(
+    db,
+    campaign_id: str,
+    outcome_label: str,
+    conclusion: str,
+    workspace_root=None,
+    force_verdict: bool = False,
+    negative_check: str | None = None,
+    negative_outcome_pattern=None,
+    catalog_dir: Path | None = None,
+) -> None:
     """Mark campaign as concluded.
 
     If campaign has a registered claim file, runs Union Gate to validate discriminability.
@@ -849,6 +995,7 @@ def conclude_campaign(
         resolve_claim_path,
         run_union_gate,
     )
+    from bathos.runlog.emit import emit_or_legacy
     from bathos.workspace import resolve_workspace
 
     full_id = _resolve_campaign_id(db, campaign_id, catalog_dir=catalog_dir)
@@ -857,7 +1004,10 @@ def conclude_campaign(
     # catalog scan (warm campaign_runs union cool-tier parquet) for the same call.
     precomputed_member_ids: list[str] | None = None
 
-    if catalog_dir is not None:
+    from bathos.runlog.emit import current_mode as _current_mode
+
+    # Flag on: events only -- the cool->warm ingest/link is a legacy write (spec "Mode").
+    if catalog_dir is not None and not _current_mode():
         from bathos.catalog import read_runs
 
         ingest_cool_campaigns(db, catalog_dir)
@@ -1040,7 +1190,20 @@ def conclude_campaign(
                     # AC-09: Bypass with audit trail
                     print(f"Union Gate bypassed — unmapped clauses: {uncovered_display}")
                     outcome_label = outcome_label  # Keep researcher's label
-                    db.execute("UPDATE campaigns SET claim_mode='bypassed' WHERE id=?", [full_id])
+
+                    def _claim_bypassed_legacy_write() -> None:
+                        db.execute(
+                            "UPDATE campaigns SET claim_mode='bypassed' WHERE id=?", [full_id]
+                        )
+
+                    # AC-25: campaign.claim_bypassed
+                    emit_or_legacy(
+                        kind="campaign.claim_bypassed",
+                        entity=[full_id],
+                        data={"claim_mode": "bypassed"},
+                        legacy_write=_claim_bypassed_legacy_write,
+                        cwd=workspace_root,
+                    )
                 else:
                     # AC-08: Soft-block downgrade to confounded
                     print(
@@ -1189,44 +1352,73 @@ def conclude_campaign(
     if not exists and catalog_dir is not None:
         cool = next((c for c in read_cool_campaigns(catalog_dir) if c.id == full_id), None)
         if cool is not None:
-            db.execute(
-                """
-                INSERT INTO campaigns (
-                    id, project_slug, name, mode, question, hypothesis, status,
-                    started_at, concluded_at, conclusion, outcome_label,
-                    parent_campaign_id, stopping_threshold, negative_check,
-                    claim_path, claim_sha256, claim_mode
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    cool.id,
-                    cool.project_slug,
-                    cool.name,
-                    cool.mode,
-                    cool.question,
-                    cool.hypothesis,
-                    cool.status,
-                    cool.started_at,
-                    cool.concluded_at,
-                    cool.conclusion,
-                    cool.outcome_label,
-                    cool.parent_campaign_id,
-                    cool.stopping_threshold,
-                    cool.negative_check,
-                    cool.claim_path,
-                    cool.claim_sha256,
-                    cool.claim_mode,
-                ],
+
+            def _recovery_insert_legacy_write(_cool: Campaign = cool) -> None:
+                db.execute(
+                    """
+                    INSERT INTO campaigns (
+                        id, project_slug, name, mode, question, hypothesis, status,
+                        started_at, concluded_at, conclusion, outcome_label,
+                        parent_campaign_id, stopping_threshold, negative_check,
+                        claim_path, claim_sha256, claim_mode
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        _cool.id,
+                        _cool.project_slug,
+                        _cool.name,
+                        _cool.mode,
+                        _cool.question,
+                        _cool.hypothesis,
+                        _cool.status,
+                        _cool.started_at,
+                        _cool.concluded_at,
+                        _cool.conclusion,
+                        _cool.outcome_label,
+                        _cool.parent_campaign_id,
+                        _cool.stopping_threshold,
+                        _cool.negative_check,
+                        _cool.claim_path,
+                        _cool.claim_sha256,
+                        _cool.claim_mode,
+                    ],
+                )
+
+            # AC-25: campaign.created (recovery insert -- a campaign that exists
+            # only in cool JSON, e.g. created before cut-over, being materialized
+            # into the warm table here for the first time).
+            emit_or_legacy(
+                kind="campaign.created",
+                entity=[full_id],
+                data=asdict(cool),
+                legacy_write=_recovery_insert_legacy_write,
+                cwd=workspace_root,
             )
-    db.execute(
-        "UPDATE campaigns SET status = 'concluded', concluded_at = ?, outcome_label = ?, conclusion = ?, negative_check = ? WHERE id = ?",
-        [concluded_at, outcome_label, conclusion, negative_check, full_id],
+
+    def _concluded_legacy_write() -> None:
+        db.execute(
+            "UPDATE campaigns SET status = 'concluded', concluded_at = ?, outcome_label = ?, conclusion = ?, negative_check = ? WHERE id = ?",
+            [concluded_at, outcome_label, conclusion, negative_check, full_id],
+        )
+        db.commit()
+        if catalog_dir is not None:
+            refreshed = get_campaign(db, full_id, catalog_dir=catalog_dir)
+            if refreshed is not None:
+                write_campaign_cool(refreshed, catalog_dir)
+
+    # AC-25: campaign.concluded
+    emit_or_legacy(
+        kind="campaign.concluded",
+        entity=[full_id],
+        data={
+            "concluded_at": concluded_at,
+            "outcome_label": outcome_label,
+            "conclusion": conclusion,
+            "negative_check": negative_check,
+        },
+        legacy_write=_concluded_legacy_write,
+        cwd=workspace_root,
     )
-    db.commit()
-    if catalog_dir is not None:
-        refreshed = get_campaign(db, full_id, catalog_dir=catalog_dir)
-        if refreshed is not None:
-            write_campaign_cool(refreshed, catalog_dir)
     event("campaign.conclude", campaign_id=full_id, verdict=outcome_label)
 
     _run_campaign_conclude_hooks(

@@ -113,6 +113,62 @@ def check_runs(
     return results
 
 
+def rebaseline_run_outputs(
+    catalog_dir: Path,
+    run: Run,
+    *,
+    cwd: Path | None = None,
+) -> list[dict]:
+    """Recompute the output-metadata drift baseline for one run's
+    `output_paths` (`run.outputs_hashed`, delivery step 2b / AC-25) -- the
+    explicit `bth check --rebaseline` counterpart to the automatic refresh
+    `compact.py` already performs on every compact (Debt #71). Per the spec's
+    "Authoritative writes" table: "Behaviour change: compact no longer
+    silently refreshes the baseline when outputs change" once cut over --
+    compact.py itself is unchanged here (step 3 territory); this is only the
+    new explicit path.
+
+    Flag on: emits `run.outputs_hashed` with the freshly computed metadata
+    and does not touch the warm DB. Flag off: writes directly into
+    `runs.output_metadata` for `run.id` in the warm DB, mirroring what
+    `compact.py`'s own refresh does -- this on-demand command has no other
+    existing legacy writer to reuse, since `--rebaseline` does not exist
+    before this change.
+    """
+    from bathos.compact import _collect_output_metadata
+    from bathos.runlog.emit import emit_or_legacy, unit_of_work
+
+    output_metadata = [{"path": p, **_collect_output_metadata(p)} for p in run.output_paths]
+
+    with unit_of_work(catalog_dir):
+
+        def _legacy_write() -> None:
+            import duckdb
+
+            db_path = catalog_dir / "bathos.db"
+            if not db_path.exists():
+                return
+            con = duckdb.connect(str(db_path))
+            try:
+                con.execute(
+                    "UPDATE runs SET output_metadata = ? WHERE id = ?",
+                    [json.dumps(output_metadata), run.id],
+                )
+                con.commit()
+            finally:
+                con.close()
+
+        emit_or_legacy(
+            kind="run.outputs_hashed",
+            entity=[run.id],
+            data={"output_metadata": output_metadata},
+            legacy_write=_legacy_write,
+            cwd=cwd,
+        )
+
+    return output_metadata
+
+
 def check_output_files(run: Run) -> list[OutputCheckResult]:
     """Verify output files exist and are readable.
 

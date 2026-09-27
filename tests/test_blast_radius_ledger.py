@@ -234,3 +234,68 @@ class TestNewPhase2Columns:
             assert fold_blast_radius_state_using_conn(ro, "campaign", "camp-legacy") == "affected"
         finally:
             ro.close()
+
+
+# ---------------------------------------------------------------------------
+# AC-25: blast_radius.recorded write site behind the runlog flag (delivery
+# step 2b, wave ii). compact.py's re-derivation of the warm table from
+# fragments is a separate, non-authoritative, compaction-time write and is
+# untouched.
+# ---------------------------------------------------------------------------
+
+
+def _read_jsonl_dir(log_dir):
+    import json
+
+    lines = []
+    if not log_dir.exists():
+        return lines
+    for f in sorted(log_dir.glob("*.jsonl")):
+        for line in f.read_text().splitlines():
+            if line.strip():
+                lines.append(json.loads(line))
+    return lines
+
+
+def test_append_ledger_record_flag_off_is_legacy_only(catalog_dir):
+    from pathlib import Path
+
+    from bathos.runlog.writer import reset_writers_for_test
+
+    record = BlastRadiusRecord(
+        entity_type="run", entity_id="run-flagoff", to_state="affected", reason="touch"
+    )
+    append_ledger_record(record, catalog_dir)
+
+    assert fold_blast_radius_state(catalog_dir, "run", "run-flagoff") == "affected"
+    frag = catalog_dir / "blast_radius" / f"blast_radius_{record.id}.parquet"
+    assert frag.exists()
+    assert not (Path.home() / ".bth" / "log" / "unaffiliated").exists()
+    reset_writers_for_test()
+
+
+def test_append_ledger_record_flag_on_emits_event_only(catalog_dir, monkeypatch):
+    from pathlib import Path
+
+    from bathos.runlog.writer import reset_writers_for_test
+
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
+
+    record = BlastRadiusRecord(
+        entity_type="run", entity_id="run-flagon", to_state="affected", reason="touch"
+    )
+    append_ledger_record(record, catalog_dir, cwd=catalog_dir.parent)
+
+    # No legacy fragment, no legacy warm row.
+    frag = catalog_dir / "blast_radius" / f"blast_radius_{record.id}.parquet"
+    assert not frag.exists()
+    assert fold_blast_radius_state(catalog_dir, "run", "run-flagon") == "clean"
+
+    lines = _read_jsonl_dir(Path.home() / ".bth" / "log" / "unaffiliated")
+    recorded = [line for line in lines if line["kind"] == "blast_radius.recorded"]
+    assert len(recorded) == 1
+    assert recorded[0]["entity"] == [record.id]
+    assert recorded[0]["data"]["entity_id"] == "run-flagon"
+    assert recorded[0]["data"]["to_state"] == "affected"
+    reset_writers_for_test()

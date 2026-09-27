@@ -28,7 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-import duckdb
+from bathos.index import catalog_readable, connect_read
 
 SEED_COLUMNS = ("seed", "baseline_hpo_trials", "baseline_hpo_compute_budget")
 
@@ -46,10 +46,9 @@ class CapabilityReport:
 def _warm_runs_columns(catalog_dir: Path) -> set[str] | None:
     """The actual column names on the warm `runs` table, or None if no warm DB exists yet
     (catalog is cool-tier only -- `bth compact` has never run)."""
-    db_path = catalog_dir / "bathos.db"
-    if not db_path.exists():
+    if not catalog_readable(catalog_dir):
         return None
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = connect_read(catalog_dir, read_only=True)
     try:
         rows = con.execute("PRAGMA table_info('runs')").fetchall()
         return {row[1] for row in rows}

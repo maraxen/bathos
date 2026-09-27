@@ -1,3 +1,4 @@
+import json
 import subprocess
 from pathlib import Path
 
@@ -427,3 +428,98 @@ def test_check_dependency_lock_drift_detects_match_and_mismatch(tmp_path: Path):
 
     lock.write_text("version = 2\n")
     assert check_dependency_lock_drift(recorded, tmp_path) is True
+
+
+# --- AC-25: run.outputs_hashed (bth check --rebaseline) -------------------------
+
+
+def _read_jsonl_dir(log_dir: Path) -> list:
+    import json
+
+    lines = []
+    if not log_dir.exists():
+        return lines
+    for f in sorted(log_dir.glob("*.jsonl")):
+        for line in f.read_text().splitlines():
+            if line.strip():
+                lines.append(json.loads(line))
+    return lines
+
+
+def _make_run_with_output(tmp_catalog: Path, tmp_path: Path) -> Run:
+    from bathos.compact import compact
+
+    out_file = tmp_path / "result.json"
+    out_file.write_text('{"ok": true}')
+    run = Run(
+        project_slug="testproj",
+        command="test cmd",
+        argv=["test"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+        status="completed",
+        output_paths=[str(out_file)],
+    )
+    write_run(run, tmp_catalog)
+    compact(tmp_catalog)
+    return run
+
+
+def test_rebaseline_flag_off_writes_warm_db_only(tmp_catalog: Path, tmp_path: Path):
+    import duckdb
+
+    from bathos.checker import rebaseline_run_outputs
+    from bathos.runlog.writer import reset_writers_for_test
+
+    run = _make_run_with_output(tmp_catalog, tmp_path)
+    metadata = rebaseline_run_outputs(tmp_catalog, run, cwd=tmp_path)
+    assert metadata and metadata[0]["status"] == "present"
+
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"), read_only=True)
+    try:
+        row = con.execute("SELECT output_metadata FROM runs WHERE id = ?", [run.id]).fetchone()
+    finally:
+        con.close()
+    assert row is not None
+    assert "result.json" in row[0]
+    assert not (Path.home() / ".bth" / "log" / "unaffiliated").exists()
+    reset_writers_for_test()
+
+
+def test_rebaseline_flag_on_emits_event_and_skips_warm_write(
+    tmp_catalog: Path, tmp_path: Path, monkeypatch
+):
+    import duckdb
+
+    from bathos.checker import rebaseline_run_outputs
+    from bathos.runlog.writer import reset_writers_for_test
+
+    run = _make_run_with_output(tmp_catalog, tmp_path)
+
+    # Snapshot the warm output_metadata BEFORE rebaselining under the flag.
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"), read_only=True)
+    try:
+        before = con.execute("SELECT output_metadata FROM runs WHERE id = ?", [run.id]).fetchone()[
+            0
+        ]
+    finally:
+        con.close()
+
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_catalog))
+    rebaseline_run_outputs(tmp_catalog, run, cwd=tmp_path)
+
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"), read_only=True)
+    try:
+        after = con.execute("SELECT output_metadata FROM runs WHERE id = ?", [run.id]).fetchone()[0]
+    finally:
+        con.close()
+    assert after == before  # warm DB untouched by the flag-on path
+
+    lines = _read_jsonl_dir(Path.home() / ".bth" / "log" / "unaffiliated")
+    assert len(lines) == 1
+    assert lines[0]["kind"] == "run.outputs_hashed"
+    assert lines[0]["entity"] == [run.id]
+    assert "result.json" in json.dumps(lines[0]["data"])
+    reset_writers_for_test()

@@ -100,6 +100,19 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _anchor_entity_id(path: str, sha256: str) -> str:
+    """uuid5 of the anchor's legacy identity (path, sha256) -- a content-addressed,
+    process-independent entity key for `anchor.recorded`/`anchor.updated`
+    (spec: "anchor_id = uuid5 of the legacy identity (path, sha256)"). Deliberately
+    NOT the warm `id` column (a fresh uuid4 minted on every insert/rebuild, never
+    a stable entity key -- see module docstring's durability note and AC-17's
+    BC-8). Namespaced under the spec's NAMESPACE_BATHOS so the live `anchor.recorded`
+    and the importer's `anchor.imported` key the same anchor identically."""
+    from bathos.runlog.envelope import NAMESPACE_BATHOS
+
+    return str(uuid.uuid5(NAMESPACE_BATHOS, f"anchor:{path}:{sha256}"))
+
+
 @dataclass(frozen=True)
 class AnchorRecord:
     """One anchored sidecar: identity is (path, sha256)."""
@@ -199,45 +212,69 @@ class CatalogAnchorStore:
         con.execute(_ANCHORS_TABLE_SCHEMA)
         return con
 
-    def insert(self, record: AnchorRecord) -> AnchorRecord:
-        con = self._connect()
-        try:
-            existing = con.execute(
-                "SELECT id FROM sidecar_anchors WHERE path = ? AND sha256 = ?",
-                [record.path, record.sha256],
-            ).fetchone()
-            if existing:
-                con.execute(
-                    "UPDATE sidecar_anchors SET kind = ?, label = ?, content_hash = ?, "
-                    "campaign_id = ?, anchored_at = ? WHERE id = ?",
-                    [
-                        record.kind,
-                        record.label,
-                        record.content_hash,
-                        record.campaign_id,
-                        record.anchored_at,
-                        existing[0],
-                    ],
-                )
-            else:
-                con.execute(
-                    "INSERT INTO sidecar_anchors "
-                    "(id, path, sha256, kind, label, content_hash, campaign_id, anchored_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    [
-                        str(uuid.uuid4()),
-                        record.path,
-                        record.sha256,
-                        record.kind,
-                        record.label,
-                        record.content_hash,
-                        record.campaign_id,
-                        record.anchored_at,
-                    ],
-                )
-            return record
-        finally:
-            con.close()
+    def insert(self, record: AnchorRecord, *, cwd: Path | None = None) -> AnchorRecord:
+        """AC-25: behind the runlog flag, emits `anchor.recorded` instead of the
+        INSERT-or-UPDATE below (both branches -- a fresh anchor and a re-anchor
+        of the same (path, sha256) -- are the SAME event kind; see the module's
+        `anchor.updated` note: only the compaction-time rewrite in
+        `compact.py` is a distinct kind, and it has no live-command
+        equivalent). The event's entity key is a uuid5 of the anchor's legacy
+        (path, sha256) identity, never the warm `id` column, which is a fresh
+        uuid4 minted on every insert/rebuild and so is never a stable entity
+        key (module docstring's durability note; AC-17's BC-8).
+        """
+        from dataclasses import asdict
+
+        from bathos.runlog.emit import emit_or_legacy, unit_of_work
+
+        def _legacy_write() -> None:
+            con = self._connect()
+            try:
+                existing = con.execute(
+                    "SELECT id FROM sidecar_anchors WHERE path = ? AND sha256 = ?",
+                    [record.path, record.sha256],
+                ).fetchone()
+                if existing:
+                    con.execute(
+                        "UPDATE sidecar_anchors SET kind = ?, label = ?, content_hash = ?, "
+                        "campaign_id = ?, anchored_at = ? WHERE id = ?",
+                        [
+                            record.kind,
+                            record.label,
+                            record.content_hash,
+                            record.campaign_id,
+                            record.anchored_at,
+                            existing[0],
+                        ],
+                    )
+                else:
+                    con.execute(
+                        "INSERT INTO sidecar_anchors "
+                        "(id, path, sha256, kind, label, content_hash, campaign_id, anchored_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        [
+                            str(uuid.uuid4()),
+                            record.path,
+                            record.sha256,
+                            record.kind,
+                            record.label,
+                            record.content_hash,
+                            record.campaign_id,
+                            record.anchored_at,
+                        ],
+                    )
+            finally:
+                con.close()
+
+        with unit_of_work(self._catalog_dir):
+            emit_or_legacy(
+                kind="anchor.recorded",
+                entity=[_anchor_entity_id(record.path, record.sha256)],
+                data=asdict(record),
+                legacy_write=_legacy_write,
+                cwd=cwd,
+            )
+        return record
 
     def get(self, path: str, sha256: str) -> AnchorRecord | None:
         con = self._connect()

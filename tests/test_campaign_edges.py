@@ -131,3 +131,83 @@ class TestRunEdgesCycleRejection:
         add_campaign_edge(warm_db, "X", "Y")
         add_run_edge(warm_db, "X", "Y")  # same IDs, different table -- must not raise
         assert get_run_parents(warm_db, "X") == ["Y"]
+
+
+# ---------------------------------------------------------------------------
+# AC-25: edge.added write site behind the runlog flag (delivery step 2b, wave ii).
+# ---------------------------------------------------------------------------
+
+
+def _read_jsonl_dir(log_dir: Path) -> list[dict]:
+    import json
+
+    lines = []
+    if not log_dir.exists():
+        return lines
+    for f in sorted(log_dir.glob("*.jsonl")):
+        for line in f.read_text().splitlines():
+            if line.strip():
+                lines.append(json.loads(line))
+    return lines
+
+
+def test_add_campaign_edge_flag_off_is_legacy_only(warm_db, tmp_catalog: Path):
+    from bathos.runlog.writer import reset_writers_for_test
+
+    add_campaign_edge(warm_db, "child-off", "parent-off", tmp_catalog)
+    assert get_campaign_parents(warm_db, "child-off") == ["parent-off"]
+    assert not (Path.home() / ".bth" / "log" / "unaffiliated").exists()
+    reset_writers_for_test()
+
+
+def test_add_campaign_edge_flag_on_emits_event_only(warm_db, tmp_catalog: Path, monkeypatch):
+    from bathos.runlog.writer import reset_writers_for_test
+
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_catalog))
+
+    add_campaign_edge(warm_db, "child-on", "parent-on", tmp_catalog, cwd=tmp_catalog.parent)
+
+    assert get_campaign_parents(warm_db, "child-on") == []  # no legacy INSERT
+
+    lines = _read_jsonl_dir(Path.home() / ".bth" / "log" / "unaffiliated")
+    edge_events = [line for line in lines if line["kind"] == "edge.added"]
+    assert len(edge_events) == 1
+    assert edge_events[0]["entity"] == ["child-on", "parent-on", "campaign"]
+    assert edge_events[0]["data"] == {
+        "src": "child-on",
+        "dst": "parent-on",
+        "type": "campaign",
+    }
+    reset_writers_for_test()
+
+
+def test_add_run_edge_flag_off_is_legacy_only(warm_db, tmp_catalog: Path):
+    from bathos.runlog.writer import reset_writers_for_test
+
+    add_run_edge(warm_db, "run-child-off", "run-parent-off", tmp_catalog)
+    assert get_run_parents(warm_db, "run-child-off") == ["run-parent-off"]
+    assert not (Path.home() / ".bth" / "log" / "unaffiliated").exists()
+    reset_writers_for_test()
+
+
+def test_add_run_edge_flag_on_emits_event_only(warm_db, tmp_catalog: Path, monkeypatch):
+    from bathos.runlog.writer import reset_writers_for_test
+
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_catalog))
+
+    add_run_edge(warm_db, "run-child-on", "run-parent-on", tmp_catalog, cwd=tmp_catalog.parent)
+
+    assert get_run_parents(warm_db, "run-child-on") == []  # no legacy INSERT
+
+    lines = _read_jsonl_dir(Path.home() / ".bth" / "log" / "unaffiliated")
+    edge_events = [line for line in lines if line["kind"] == "edge.added"]
+    assert len(edge_events) == 1
+    assert edge_events[0]["entity"] == ["run-child-on", "run-parent-on", "run"]
+    assert edge_events[0]["data"] == {
+        "src": "run-child-on",
+        "dst": "run-parent-on",
+        "type": "run",
+    }
+    reset_writers_for_test()

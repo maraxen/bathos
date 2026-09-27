@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from bathos.cluster import pull_project, push_project
+from bathos.cluster import pull_path, pull_project, push_project
 
 
 def test_push_project_uses_real_myxcel_push_subcommand():
@@ -67,3 +67,27 @@ def test_pull_project_raises_on_failure():
         mock_run.return_value = MagicMock(returncode=1, stderr="pull failed")
         with pytest.raises(RuntimeError, match="pull failed"):
             pull_project("engaging", "myproject")
+
+
+def test_pull_path_uses_real_myxcel_pull_subcommand_with_explicit_path_and_dest():
+    """pull_path (the cluster log/fallback/mirror pull's myxcel wrapper, spec
+    "Cluster") must call `myxcel pull <remote> <remote_path> --dest <local_dest>`,
+    never rsync directly (CLAUDE.md "Bathos Sync Delegates to Myxcel")."""
+    with patch("bathos.cluster.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stderr="")
+        pull_path("engaging", "~/projects/testproj/.bth/log/", "/local/dest/log/")
+
+    argv = mock_run.call_args[0][0]
+    assert argv[0] == "myxcel"
+    assert argv[1] == "pull"
+    assert argv[2] == "engaging"
+    assert argv[3] == "~/projects/testproj/.bth/log/"
+    assert "--dest" in argv
+    assert argv[argv.index("--dest") + 1] == "/local/dest/log/"
+
+
+def test_pull_path_raises_on_failure():
+    with patch("bathos.cluster.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=1, stderr="pull failed")
+        with pytest.raises(RuntimeError, match="pull failed"):
+            pull_path("engaging", "~/some/path/", "/local/dest/")

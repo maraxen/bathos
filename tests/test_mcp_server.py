@@ -410,6 +410,106 @@ class TestSyncTool:
         with pytest.raises(Exception):
             sync_tool(catalog_dir="/nonexistent/path", remote_name="origin")
 
+    def test_sync_tool_pulls_cluster_log_when_log_mode_on(self, tmp_path, monkeypatch):
+        """--pull, with the local cutover flag on, additionally triggers the
+        cluster log pull (spec "Cluster", delivery step 4 wave d)."""
+        monkeypatch.delenv("BTH_LOG_MODE", raising=False)
+        from bathos.config import ProjectConfig
+        from bathos.runlog.mode import cutover_marker_path
+        from bathos.runlog.resolve import LogRootResolution
+        from bathos.sync import SyncResult
+
+        cat_dir = tmp_path / "catalog"
+        cutover_marker_path(cat_dir).parent.mkdir(parents=True, exist_ok=True)
+        cutover_marker_path(cat_dir).write_text(
+            '{"at": "x", "bathos": "t", "attempt": "1", "segments": []}'
+        )
+
+        mock_config = ProjectConfig(
+            slug="test",
+            root=tmp_path,
+            remotes={"engaging": {"host": "engaging", "remote_root": "~/projects/test"}},
+        )
+        resolution = LogRootResolution(main_root=tmp_path, worktree_root=tmp_path, unaffiliated=False)
+
+        with (
+            patch("bathos.mcp.find_project_config", return_value=tmp_path / ".bth.toml"),
+            patch("bathos.mcp.load_project_config", return_value=mock_config),
+            patch(
+                "bathos.mcp.sync_catalog",
+                return_value=SyncResult(transferred=0, duration_s=0.1, remote="engaging"),
+            ),
+            patch("bathos.runlog.resolve.resolve_log_root", return_value=resolution),
+            patch("bathos.runlog.project_id.read_project_id", return_value="pid-1"),
+            patch("bathos.sync.pull_cluster_log") as mock_pull,
+        ):
+            result = sync_tool(catalog_dir=str(cat_dir), remote_name="engaging", pull=True)
+
+        assert result.get("cluster_log_pulled") is True
+        mock_pull.assert_called_once_with("engaging", mock_config, tmp_path, "pid-1")
+
+    def test_sync_tool_skips_cluster_log_pull_when_log_mode_off(self, tmp_path, monkeypatch):
+        """Flag off (no cutover marker): sync behaves exactly as today -- no
+        cluster log pull is attempted, even with --pull."""
+        monkeypatch.delenv("BTH_LOG_MODE", raising=False)
+        from bathos.config import ProjectConfig
+        from bathos.sync import SyncResult
+
+        cat_dir = tmp_path / "catalog"  # deliberately no cutover.json written
+
+        mock_config = ProjectConfig(
+            slug="test",
+            root=tmp_path,
+            remotes={"engaging": {"host": "engaging", "remote_root": "~/projects/test"}},
+        )
+
+        with (
+            patch("bathos.mcp.find_project_config", return_value=tmp_path / ".bth.toml"),
+            patch("bathos.mcp.load_project_config", return_value=mock_config),
+            patch(
+                "bathos.mcp.sync_catalog",
+                return_value=SyncResult(transferred=0, duration_s=0.1, remote="engaging"),
+            ),
+            patch("bathos.sync.pull_cluster_log") as mock_pull,
+        ):
+            result = sync_tool(catalog_dir=str(cat_dir), remote_name="engaging", pull=True)
+
+        assert "cluster_log_pulled" not in result
+        mock_pull.assert_not_called()
+
+    def test_sync_tool_skips_cluster_log_pull_when_pull_false(self, tmp_path, monkeypatch):
+        """No --pull: no cluster log pull attempted, even with the flag on."""
+        monkeypatch.delenv("BTH_LOG_MODE", raising=False)
+        from bathos.config import ProjectConfig
+        from bathos.runlog.mode import cutover_marker_path
+        from bathos.sync import SyncResult
+
+        cat_dir = tmp_path / "catalog"
+        cutover_marker_path(cat_dir).parent.mkdir(parents=True, exist_ok=True)
+        cutover_marker_path(cat_dir).write_text(
+            '{"at": "x", "bathos": "t", "attempt": "1", "segments": []}'
+        )
+
+        mock_config = ProjectConfig(
+            slug="test",
+            root=tmp_path,
+            remotes={"engaging": {"host": "engaging", "remote_root": "~/projects/test"}},
+        )
+
+        with (
+            patch("bathos.mcp.find_project_config", return_value=tmp_path / ".bth.toml"),
+            patch("bathos.mcp.load_project_config", return_value=mock_config),
+            patch(
+                "bathos.mcp.sync_catalog",
+                return_value=SyncResult(transferred=0, duration_s=0.1, remote="engaging"),
+            ),
+            patch("bathos.sync.pull_cluster_log") as mock_pull,
+        ):
+            result = sync_tool(catalog_dir=str(cat_dir), remote_name="engaging", pull=False)
+
+        assert "cluster_log_pulled" not in result
+        mock_pull.assert_not_called()
+
 
 class TestInitTool:
     """Test init MCP tool."""

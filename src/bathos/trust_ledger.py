@@ -220,7 +220,9 @@ def _insert_warm_row(record: TrustLedgerRecord, catalog_dir: Path | str) -> None
         con.close()
 
 
-def append_ledger_record(record: TrustLedgerRecord, catalog_dir: Path | str) -> TrustLedgerRecord:
+def append_ledger_record(
+    record: TrustLedgerRecord, catalog_dir: Path | str, *, cwd: Path | None = None
+) -> TrustLedgerRecord:
     """Durably append one ledger record: cool-tier fragment (durable, survives
     ``compact(force_rebuild=True)``) + warm-tier row (disposable, re-derived from
     cool fragments on every compact via :func:`_ingest_ledger_fragments`).
@@ -229,9 +231,28 @@ def append_ledger_record(record: TrustLedgerRecord, catalog_dir: Path | str) -> 
     there is no separate "plain, non-durable" variant for the ledger (unlike
     ``bathos.anchor``'s ``CatalogAnchorStore``/``DurableAnchorStore`` split):
     promotion state-of-record must always be durable, by definition of what it is.
+
+    AC-25: behind the runlog flag, emits `trust_ledger.recorded` instead of the
+    fragment + warm-row writes; flag off performs only those legacy writes,
+    unchanged. `cwd` resolves the runlog project/root when the flag is on
+    (defaults to `Path.cwd()` via `resolve_log_root`).
     """
-    write_ledger_fragment(record, catalog_dir)
-    _insert_warm_row(record, catalog_dir)
+    from dataclasses import asdict
+
+    from bathos.runlog.emit import emit_or_legacy, unit_of_work
+
+    def _legacy_write() -> None:
+        write_ledger_fragment(record, catalog_dir)
+        _insert_warm_row(record, catalog_dir)
+
+    with unit_of_work(Path(catalog_dir)):
+        emit_or_legacy(
+            kind="trust_ledger.recorded",
+            entity=[record.id],
+            data=asdict(record),
+            legacy_write=_legacy_write,
+            cwd=cwd,
+        )
     event(
         "trust_ledger.append",
         content_hash=record.content_hash,

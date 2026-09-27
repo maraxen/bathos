@@ -302,3 +302,65 @@ class TestGraduationSurvivesForceRebuild:
 
         assert fold_trust_state(catalog_dir, h1) == "promoted"
         assert fold_trust_state(catalog_dir, h2) == "promoted"
+
+
+# ---------------------------------------------------------------------------
+# AC-25: trust_ledger.recorded write site behind the runlog flag (delivery
+# step 2b, wave ii).
+# ---------------------------------------------------------------------------
+
+
+def _read_jsonl_dir(log_dir):
+    import json
+
+    lines = []
+    if not log_dir.exists():
+        return lines
+    for f in sorted(log_dir.glob("*.jsonl")):
+        for line in f.read_text().splitlines():
+            if line.strip():
+                lines.append(json.loads(line))
+    return lines
+
+
+def test_append_ledger_record_flag_off_is_legacy_only(catalog_dir):
+    from pathlib import Path
+
+    from bathos.runlog.writer import reset_writers_for_test
+
+    record = TrustLedgerRecord(
+        content_hash="deadbeef", from_state="candidate", to_state="promoted"
+    )
+    append_ledger_record(record, catalog_dir)
+
+    assert fold_trust_state(catalog_dir, "deadbeef") == "promoted"
+    frag = catalog_dir / "ledger" / f"ledger_{record.id}.parquet"
+    assert frag.exists()
+    assert not (Path.home() / ".bth" / "log" / "unaffiliated").exists()
+    reset_writers_for_test()
+
+
+def test_append_ledger_record_flag_on_emits_event_only(catalog_dir, monkeypatch):
+    from pathlib import Path
+
+    from bathos.runlog.writer import reset_writers_for_test
+
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
+
+    record = TrustLedgerRecord(
+        content_hash="cafef00d", from_state="candidate", to_state="promoted"
+    )
+    append_ledger_record(record, catalog_dir, cwd=catalog_dir.parent)
+
+    frag = catalog_dir / "ledger" / f"ledger_{record.id}.parquet"
+    assert not frag.exists()
+    assert fold_trust_state(catalog_dir, "cafef00d") is None  # no legacy warm row
+
+    lines = _read_jsonl_dir(Path.home() / ".bth" / "log" / "unaffiliated")
+    recorded = [line for line in lines if line["kind"] == "trust_ledger.recorded"]
+    assert len(recorded) == 1
+    assert recorded[0]["entity"] == [record.id]
+    assert recorded[0]["data"]["content_hash"] == "cafef00d"
+    assert recorded[0]["data"]["to_state"] == "promoted"
+    reset_writers_for_test()

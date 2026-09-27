@@ -167,3 +167,27 @@ def pull_project(remote: str, project: str) -> None:
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr)
+
+
+def pull_path(remote: str, remote_path: str, local_dest: str) -> None:
+    """Run `myxcel pull <remote> <remote_path> --dest <local_dest>`.
+
+    Generalizes `pull_project`'s myxcel wrapper to an explicit remote
+    directory (rather than a myxcel-registered project name) and an explicit
+    local destination -- used for the cluster run-log pull (spec "Cluster"):
+    the source directories (`<remote root>/.bth/log/`,
+    `~/.bth/log/fallback/<slug>/`, `~/.bth/log-mirror/<project_id>/`) are not
+    addressable through `pull_project`'s project-name mapping, and CLAUDE.md
+    ("Bathos Sync Delegates to Myxcel") requires the myxcel boundary here
+    rather than a direct rsync call. `local_dest` must already exist -- this
+    wrapper does not create it. Raises `RuntimeError` on a non-zero exit,
+    same convention as `pull_project`/`push_project`.
+    """
+    result = subprocess.run(
+        ["myxcel", "pull", remote, remote_path, "--dest", local_dest],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr)

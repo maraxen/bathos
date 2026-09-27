@@ -129,6 +129,27 @@ def parse_postmortem(path: Path) -> Postmortem:
     )
 
 
+def postmortem_applied_event_data(postmortem: Postmortem, path: Path) -> dict:
+    """`run.postmortem_applied.data` (delivery step 2b / AC-25): the parsed
+    fields `compact.py`'s legacy fold reads off a validated postmortem file --
+    `status`, `verdict_override`, `author`, `path`, `hypothesis_status`,
+    `has_anomalies`, `summary`, `asset_links` -- so the fold never has to
+    re-read the file itself. `sha256` is the postmortem file's content hash (the
+    spec's natural key alongside run_id), so two different contents applied to
+    one run stay distinguishable."""
+    return {
+        "sha256": hashlib.sha256(Path(path).read_bytes()).hexdigest(),
+        "status": postmortem.status,
+        "verdict_override": postmortem.verdict_override,
+        "author": postmortem.author,
+        "path": str(path),
+        "hypothesis_status": postmortem.hypothesis_status,
+        "has_anomalies": bool(postmortem.anomalies),
+        "summary": postmortem.summary,
+        "asset_links": postmortem.asset_links,
+    }
+
+
 def validate_postmortem(
     postmortem: Postmortem,
     workspace_root: Path | None = None,
@@ -380,13 +401,11 @@ def find_run_for_scaffold(run_id: str, catalog_dir: Path) -> tuple[str, str] | N
     warm DB file exists — a freshly-run script only lives in the cool tier until
     the next `bth compact`, and callers here (postmortem scaffold) must still find it.
     """
-    import duckdb
-
     from bathos.catalog import read_runs
+    from bathos.index import catalog_readable, connect_read
 
-    db_path = catalog_dir / "bathos.db"
-    if db_path.exists():
-        con = duckdb.connect(str(db_path))
+    if catalog_readable(catalog_dir):
+        con = connect_read(catalog_dir, read_only=False)
         try:
             row = con.execute(
                 "SELECT command, project_slug FROM runs WHERE id = ?", [run_id]

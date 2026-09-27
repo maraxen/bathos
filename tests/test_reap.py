@@ -3,6 +3,7 @@
 import json
 import subprocess
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -535,3 +536,132 @@ def test_reap_ledger_written_even_if_fragment_rewrite_fails(temp_catalog, monkey
     # This test WOULD fail (reporting the violation) if someone changed the
     # implementation to write fragment BEFORE ledger entry and left no
     # error handling to recover the ledger on fragment write failure.
+
+
+# --- AC-25: run.reaped / run.reap_reverted write sites --------------------------
+
+
+def _read_jsonl_dir(log_dir):
+    lines = []
+    if not log_dir.exists():
+        return lines
+    for f in sorted(log_dir.glob("*.jsonl")):
+        for line in f.read_text().splitlines():
+            if line.strip():
+                lines.append(json.loads(line))
+    return lines
+
+
+def test_reap_flag_off_performs_only_legacy_write(temp_catalog):
+    """AC-25 flag-off half: parquet + ledger JSON, no event log."""
+    from bathos.reap import reap_runs
+
+    run = create_run("run_flagoff", age_hours=25, status="running")
+    write_run(run, temp_catalog)
+
+    reap_runs(temp_catalog, older_than_h=24, dry_run=False, apply=True)
+
+    reaped = read_runs(temp_catalog)[0]
+    assert reaped.status == "abandoned"
+    ledger_path = temp_catalog / "reaped" / "test" / "run_flagoff.json"
+    assert ledger_path.exists()
+    assert not (Path.home() / ".bth" / "log" / "unaffiliated").exists()
+
+
+def test_reap_flag_on_emits_event_and_skips_legacy_write(temp_catalog, monkeypatch):
+    """AC-25 flag-on half: run.reaped only -- no parquet status rewrite, no
+    ledger JSON, no warm-tier reconcile.
+
+    Delivery step 4 ("the reaper on folded status"): candidate discovery
+    reads the folded index, not cool fragments, once the flag is on -- so
+    unlike the pre-step-4 version of this test, the fixture is a real
+    `run.started` event (+ an ingest) rather than a legacy `write_run`
+    fragment, matching what a real flag-on `bth run` actually produces.
+    """
+    from bathos.reap import reap_runs
+    from bathos.runlog.emit import emit_event, run_event_data
+    from bathos.runlog.ingest import run_ingest
+    from bathos.runlog.writer import reset_writers_for_test
+
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(temp_catalog))
+
+    run = create_run("run_flagon", age_hours=25, status="running")
+    emit_event(
+        kind="run.started",
+        entity=[run.id],
+        data=run_event_data(run),
+        cwd=temp_catalog.parent,
+        hard_fail=True,
+    )
+    run_ingest(temp_catalog)
+
+    reap_runs(temp_catalog, older_than_h=24, dry_run=False, apply=True, cwd=temp_catalog.parent)
+
+    # No legacy write: no cool fragment was ever written for this run.
+    assert not list((temp_catalog / "runs").rglob("run_*.parquet"))
+    ledger_path = temp_catalog / "reaped" / "test" / "run_flagon.json"
+    assert not ledger_path.exists()
+    assert not (temp_catalog / "bathos.db").exists()  # no warm-tier reconcile
+
+    lines = _read_jsonl_dir(Path.home() / ".bth" / "log" / "unaffiliated")
+    reaped_events = [line for line in lines if line["kind"] == "run.reaped"]
+    assert len(reaped_events) == 1
+    assert reaped_events[0]["entity"] == ["run_flagon"]
+    assert reaped_events[0]["data"]["run_id"] == "run_flagon"
+    assert reaped_events[0]["data"]["prior_status"] == "running"
+    reset_writers_for_test()
+
+
+def test_reap_revert_flag_on_emits_event_and_skips_legacy_write(temp_catalog, monkeypatch):
+    """AC-25 flag-on half of the revert path: run.reap_reverted only.
+
+    Delivery step 4: the ledger record for the revert now comes from the
+    folded run's own `metadata.reaped` (set by the earlier flag-on
+    `run.reaped`), never from a `reaped/<slug>/<run_id>.json` file -- a
+    flag-on reap writes no such file at all.
+    """
+    from bathos.reap import reap_runs
+    from bathos.runlog.emit import emit_event, run_event_data
+    from bathos.runlog.ingest import run_ingest
+    from bathos.runlog.writer import reset_writers_for_test
+
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(temp_catalog))
+
+    run = create_run("run_revert", age_hours=25, status="running")
+    emit_event(
+        kind="run.started",
+        entity=[run.id],
+        data=run_event_data(run),
+        cwd=temp_catalog.parent,
+        hard_fail=True,
+    )
+    run_ingest(temp_catalog)
+
+    # Reap first (flag on) so a folded metadata.reaped ledger record exists
+    # to revert.
+    reap_runs(temp_catalog, older_than_h=24, dry_run=False, apply=True, cwd=temp_catalog.parent)
+    run_ingest(temp_catalog)
+
+    reap_runs(
+        temp_catalog,
+        older_than_h=24,
+        dry_run=False,
+        apply=True,
+        revert=True,
+        revert_ids=["run_revert"],
+        cwd=temp_catalog.parent,
+    )
+
+    # No legacy write: no cool fragment, no ledger JSON file ever existed.
+    assert not list((temp_catalog / "runs").rglob("run_*.parquet"))
+    ledger_path = temp_catalog / "reaped" / "test" / "run_revert.json"
+    assert not ledger_path.exists()
+
+    lines = _read_jsonl_dir(Path.home() / ".bth" / "log" / "unaffiliated")
+    reverted_events = [line for line in lines if line["kind"] == "run.reap_reverted"]
+    assert len(reverted_events) == 1
+    assert reverted_events[0]["entity"] == ["run_revert"]
+    assert reverted_events[0]["data"]["prior_status"] == "running"
+    reset_writers_for_test()

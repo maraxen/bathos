@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from bathos.config import default_catalog_dir
+from bathos.index import catalog_readable, connect_read
 from bathos.verify import verify_cool, verify_warm
 
 logger = logging.getLogger(__name__)
@@ -347,14 +348,12 @@ def _actions_from_warm_only_runs(catalog_dir: Path) -> tuple[list[RepairAction],
     Returns:
         Tuple of (list of RepairAction objects, list of warning strings)
     """
-    import duckdb
-
     actions: list[RepairAction] = []
     warnings: list[str] = []
 
     db_path = catalog_dir / "bathos.db"
-    if not db_path.exists():
-        # No warm DB; nothing to re-export
+    if not catalog_readable(catalog_dir):
+        # No warm DB and no folded index; nothing to re-export
         return [], []
 
     # Read all cool fragment UUIDs
@@ -369,7 +368,7 @@ def _actions_from_warm_only_runs(catalog_dir: Path) -> tuple[list[RepairAction],
 
     # Query warm DB for all run UUIDs
     try:
-        con = duckdb.connect(str(db_path), read_only=True)
+        con = connect_read(catalog_dir, read_only=True)
         try:
             warm_rows = con.execute("SELECT id FROM runs").fetchall()
             warm_uuids = {row[0] for row in warm_rows}
@@ -448,15 +447,12 @@ def repair(
     warm_rebuild_actions = [a for a in actions if a.action == "rebuild_warm"]
     if warm_rebuild_actions and not acknowledge_warm_loss:
         # Check if warm DB has postmortem annotations or output_metadata
-        db_path = catalog_dir / "bathos.db"
         db_queryable = False
         postmortem_count = 0
         output_metadata_count = 0
-        if db_path.exists():
+        if catalog_readable(catalog_dir):
             try:
-                import duckdb
-
-                con = duckdb.connect(str(db_path), read_only=True)
+                con = connect_read(catalog_dir, read_only=True)
                 try:
                     # Count postmortem annotations (any postmortem_status != 'unassigned')
                     pm_result = con.execute(
@@ -766,15 +762,13 @@ def _handle_reexport_from_warm(
         catalog_dir: Catalog directory
         manifest: Optional RepairManifest to collect warnings about NULL-metadata runs
     """
-    import duckdb
-
     from bathos.catalog import read_runs, write_run
     from bathos.schema import Run
 
     db_path = Path(action.path)
     logger.info(f"Re-exporting warm runs to cool fragments from {db_path}")
 
-    if not db_path.exists():
+    if not catalog_readable(catalog_dir):
         logger.warning(f"Warm database not found: {db_path}")
         return
 
@@ -788,7 +782,7 @@ def _handle_reexport_from_warm(
 
     # Get column names for reconstruction (to handle schema variations)
     try:
-        con = duckdb.connect(str(db_path), read_only=True)
+        con = connect_read(catalog_dir, read_only=True)
         try:
             col_info = con.execute("PRAGMA table_info(runs)").fetchall()
             col_names = [col[1] for col in col_info]  # col[1] is the column name
@@ -800,7 +794,7 @@ def _handle_reexport_from_warm(
 
     # Open warm DB and query all runs
     try:
-        con = duckdb.connect(str(db_path), read_only=True)
+        con = connect_read(catalog_dir, read_only=True)
         try:
             # Fetch all columns from runs table
             warm_rows = con.execute(

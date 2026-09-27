@@ -1959,5 +1959,86 @@ predicted_outcome = ""
         assert data["clause_labels"]["C_main"]
 
 
+# ---------------------------------------------------------------------------
+# AC-25: register_claim's two runlog write sites (delivery step 2b, wave ii):
+# campaign.created (the recovery insert, tested in tests/test_campaigns.py's
+# analogous conclude_campaign case) and campaign.claim_bound (this one).
+# ---------------------------------------------------------------------------
+
+
+def _read_jsonl_dir(log_dir):
+    import json as _json
+
+    lines = []
+    if not log_dir.exists():
+        return lines
+    for f in sorted(log_dir.glob("*.jsonl")):
+        for line in f.read_text().splitlines():
+            if line.strip():
+                lines.append(_json.loads(line))
+    return lines
+
+
+def test_register_claim_flag_off_is_legacy_only(
+    temp_claim_file, temp_db, tmp_path  # noqa: ARG001 - pytest fixture
+):
+    from bathos.runlog.writer import reset_writers_for_test
+
+    campaign_id = "flagoff_campaign"
+    temp_db.execute(
+        "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at) "
+        "VALUES (?, 'test', 'test_campaign', 'confirmation', 'open', ?)",
+        [campaign_id, datetime.now(UTC).isoformat()],
+    )
+    temp_db.commit()
+
+    register_claim(Path("test.claim.toml"), campaign_id, temp_db, tmp_path, force=False)
+
+    row = temp_db.execute(
+        "SELECT claim_path, claim_sha256 FROM campaigns WHERE id=?", [campaign_id]
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "test.claim.toml"
+    assert row[1]
+    assert not (Path.home() / ".bth" / "log" / "unaffiliated").exists()
+    reset_writers_for_test()
+
+
+def test_register_claim_flag_on_emits_claim_bound_event_only(
+    temp_claim_file, temp_db, tmp_path, monkeypatch  # noqa: ARG001 - pytest fixture
+):
+    from bathos.runlog.writer import reset_writers_for_test
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
+
+    campaign_id = "flagon_campaign"
+    temp_db.execute(
+        "INSERT INTO campaigns (id, project_slug, name, mode, status, started_at) "
+        "VALUES (?, 'test', 'test_campaign', 'confirmation', 'open', ?)",
+        [campaign_id, datetime.now(UTC).isoformat()],
+    )
+    temp_db.commit()
+
+    register_claim(
+        Path("test.claim.toml"), campaign_id, temp_db, tmp_path, force=False, catalog_dir=catalog_dir
+    )
+
+    row = temp_db.execute(
+        "SELECT claim_path, claim_sha256 FROM campaigns WHERE id=?", [campaign_id]
+    ).fetchone()
+    assert row == (None, None)  # no legacy UPDATE
+
+    lines = _read_jsonl_dir(Path.home() / ".bth" / "log" / "unaffiliated")
+    bound = [line for line in lines if line["kind"] == "campaign.claim_bound"]
+    assert len(bound) == 1
+    assert bound[0]["entity"] == [campaign_id]
+    assert bound[0]["data"]["claim_path"] == "test.claim.toml"
+    assert bound[0]["data"]["claim_sha256"]
+    reset_writers_for_test()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

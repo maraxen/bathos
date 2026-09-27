@@ -9,6 +9,7 @@ from pathlib import Path
 
 import duckdb
 
+from bathos.index import catalog_readable, connect_read
 from bathos.sidecar import find_sidecar
 from bathos.walk import iter_project_files
 
@@ -412,14 +413,12 @@ def check_residual_rates(catalog_dir: Path, threshold: float = 0.10) -> list[Lin
     Returns:
         List of LintIssue objects with severity WARNING.
     """
-    import duckdb
 
-    db_path = catalog_dir / "bathos.db"
-    if not db_path.exists():
+    if not catalog_readable(catalog_dir):
         return []
 
     try:
-        db = duckdb.connect(str(db_path), read_only=True)
+        db = connect_read(catalog_dir, read_only=True)
         db.execute("SET TimeZone='UTC'")
 
         # Check if campaign_runs and runs tables exist
@@ -477,14 +476,12 @@ def check_bypass_trend(catalog_dir: Path) -> list[LintIssue]:
     """
     from datetime import UTC, datetime, timedelta
 
-    import duckdb
 
-    db_path = catalog_dir / "bathos.db"
-    if not db_path.exists():
+    if not catalog_readable(catalog_dir):
         return []
 
     try:
-        db = duckdb.connect(str(db_path), read_only=True)
+        db = connect_read(catalog_dir, read_only=True)
         db.execute("SET TimeZone='UTC'")
 
         # Get last 4 weeks of data
@@ -605,14 +602,12 @@ def check_unfired_branches(catalog_dir: Path, min_runs: int = 5) -> list[LintIss
     Returns:
         List of LintIssue objects with severity WARNING.
     """
-    import duckdb
 
-    db_path = catalog_dir / "bathos.db"
-    if not db_path.exists():
+    if not catalog_readable(catalog_dir):
         return []
 
     try:
-        db = duckdb.connect(str(db_path), read_only=True)
+        db = connect_read(catalog_dir, read_only=True)
         db.execute("SET TimeZone='UTC'")
 
         try:
@@ -671,16 +666,14 @@ def check_run_concentration(catalog_dir: Path, threshold: int = 20) -> list[Lint
     Returns:
         List of LintIssue objects with severity WARNING.
     """
-    import duckdb
 
-    db_path = catalog_dir / "bathos.db"
-    if not db_path.exists():
+    if not catalog_readable(catalog_dir):
         return []
 
     unvalidated = "(outcome IS NULL OR trim(outcome) IN ('', 'unknown', 'none'))"
 
     try:
-        db = duckdb.connect(str(db_path), read_only=True)
+        db = connect_read(catalog_dir, read_only=True)
         db.execute("SET TimeZone='UTC'")
 
         issues: list[LintIssue] = []
@@ -1022,14 +1015,11 @@ def check_archival_candidates(
     issues: list[LintIssue] = []
 
     archived_rel_paths: set[str] = set()
-    db_path = catalog_dir / "bathos.db"
-    if db_path.exists():
+    if catalog_readable(catalog_dir):
         import json
 
-        import duckdb
-
         try:
-            con = duckdb.connect(str(db_path), read_only=True)
+            con = connect_read(catalog_dir, read_only=True)
             try:
                 if project_slug is not None:
                     rows = con.execute(
@@ -1234,17 +1224,15 @@ def check_ephemeral_output_paths(catalog_dir: Path) -> list[LintIssue]:
     """
     import tempfile
 
-    import duckdb
 
-    db_path = catalog_dir / "bathos.db"
-    if not db_path.exists():
+    if not catalog_readable(catalog_dir):
         return []
 
     temp_root = str(Path(tempfile.gettempdir()).resolve())
     temp_patterns = list({"/tmp/%", "/var/tmp/%", temp_root + "/%"})
 
     try:
-        db = duckdb.connect(str(db_path), read_only=True)
+        db = connect_read(catalog_dir, read_only=True)
         db.execute("SET TimeZone='UTC'")
 
         like_clauses = " OR ".join(f"p LIKE '{pat}'" for pat in temp_patterns)
@@ -1305,12 +1293,10 @@ def check_canonical_stage_names(catalog_dir: Path) -> list[LintIssue]:
         Returns empty list if no runs or no non-canonical stages found.
         Always returns (never raises), so lint can continue even if DB unreachable.
     """
-    import duckdb
 
     from bathos.schema import STAGE_NAME_REGEX
 
-    db_path = catalog_dir / "bathos.db"
-    if not db_path.exists():
+    if not catalog_readable(catalog_dir):
         return []
 
     # Canonical set: the advisory vocabulary for stage_name values.
@@ -1326,7 +1312,7 @@ def check_canonical_stage_names(catalog_dir: Path) -> list[LintIssue]:
     }
 
     try:
-        db = duckdb.connect(str(db_path), read_only=True)
+        db = connect_read(catalog_dir, read_only=True)
         db.execute("SET TimeZone='UTC'")
 
         try:
@@ -1407,9 +1393,8 @@ def check_baseline_ref_exists(
     Returns:
         List of LintIssue objects with severity WARNING (not found) or informational details.
     """
-    import duckdb
 
-    if not db_path.exists():
+    if not catalog_readable(db_path.parent):
         return []
 
     scripts_dir = project_root / "scripts" / "benchmarks"
@@ -1436,7 +1421,7 @@ def check_baseline_ref_exists(
 
         # Query warm DuckDB for the baseline run
         try:
-            db = duckdb.connect(str(db_path), read_only=True)
+            db = connect_read(db_path.parent, read_only=True)
             db.execute("SET TimeZone='UTC'")
 
             row = db.execute(

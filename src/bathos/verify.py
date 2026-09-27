@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
+import re
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -284,8 +287,424 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _format_finding(finding: dict) -> str:
+    """One structured finding -> one human-readable line, for the `errors`
+    list every other tier here already uses (spec: "extend that, do not
+    build a parallel one")."""
+    detail = ", ".join(f"{k}={v!r}" for k, v in finding.items() if k != "type")
+    return f"{finding['type']}: {detail}" if detail else str(finding["type"])
+
+
+def _parse_iso_ts(value: object) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _folded_run_end_ts(folded_run: dict) -> datetime | None:
+    """`timestamp + duration_s` (spec: "'end time' everywhere in this spec
+    means `timestamp + duration_s`, there being no end-time column")."""
+    ts = _parse_iso_ts(folded_run.get("timestamp"))
+    if ts is None:
+        return None
+    try:
+        duration = float(folded_run.get("duration_s") or 0.0)
+    except (TypeError, ValueError):
+        duration = 0.0
+    return ts + timedelta(seconds=duration)
+
+
+def _duplicate_project_id_findings() -> list[dict]:
+    """AC-24: "two roots sharing a `project_id`" (D7)."""
+    from bathos.runlog.project_id import list_registered_roots, read_project_id
+
+    by_id: dict[str, list[str]] = {}
+    for root in list_registered_roots():
+        if not root.exists():
+            continue
+        pid = read_project_id(root / ".bth.toml")
+        if pid:
+            by_id.setdefault(pid, []).append(str(root))
+    return [
+        {"type": "duplicate_project_id", "project_id": pid, "roots": sorted(roots)}
+        for pid, roots in by_id.items()
+        if len(roots) > 1
+    ]
+
+
+def _quarantine_findings(catalog_dir: Path) -> list[dict]:
+    """AC-24: "a quarantined line" and "an `eid_conflict`" -- every row of
+    the folded index's `quarantine` table, split by `reason` (spec Line
+    envelope: an `eid_conflict` is one specific quarantine reason among
+    others, e.g. `invalid_json`/a schema violation -- see `ingest.py`)."""
+    from bathos.index import connect_read
+
+    con = connect_read(catalog_dir)
+    try:
+        rows = con.execute(
+            "SELECT file, byte_offset, reason, raw_line, detected_at FROM quarantine"
+        ).fetchall()
+    finally:
+        con.close()
+
+    findings = []
+    for file, byte_offset, reason, raw_line, detected_at in rows:
+        eid = None
+        if raw_line:
+            with contextlib.suppress(Exception):
+                eid = json.loads(raw_line).get("eid")
+        finding_type = "eid_conflict" if reason == "eid_conflict" else "quarantined_line"
+        findings.append(
+            {
+                "type": finding_type,
+                "file": file,
+                "byte_offset": byte_offset,
+                "reason": reason,
+                "eid": eid,
+                "detected_at": detected_at,
+            }
+        )
+    return findings
+
+
+def _mirror_dir_for_main_root(main_root: Path) -> Path:
+    """The mirror directory D7 pairs with `main_root`'s project log (spec
+    "Segments and writers": the same segment filename in both copies)."""
+    from bathos.runlog.project_id import read_project_id
+    from bathos.runlog.writer import mirror_dir_for
+
+    pid = read_project_id(main_root / ".bth.toml")
+    slug = None
+    if pid is None:
+        cfg_path = main_root / ".bth.toml"
+        if cfg_path.is_file():
+            with contextlib.suppress(Exception):
+                from bathos.config import load_project_config
+
+                slug = load_project_config(cfg_path).slug
+    return mirror_dir_for(pid, slug)
+
+
+def _watermark_findings(catalog_dir: Path) -> list[dict]:
+    """AC-24: "a log file shrunk below or vanished past its watermark", and
+    (spec D7 / AC-14) "a line present in neither the project log nor the
+    mirror" -- the stronger case where a `project` root's shrunk/vanished
+    file's own paired mirror copy (same segment filename) is ALSO short of
+    the same watermark, so `bth log restore` could not recover it either.
+    """
+    from bathos.index import connect_read
+    from bathos.runlog.ingest import discover_roots
+
+    con = connect_read(catalog_dir)
+    try:
+        rows = con.execute(
+            "SELECT root_kind, root_id, path, size, byte_offset FROM ingest_watermarks"
+        ).fetchall()
+    finally:
+        con.close()
+    if not rows:
+        return []
+
+    root_dirs = {
+        (kind, root_id): log_dir for kind, root_id, log_dir in discover_roots(catalog_dir)
+    }
+
+    findings: list[dict] = []
+    for root_kind, root_id, path, _size, byte_offset in rows:
+        base = root_dirs.get((root_kind, root_id))
+        file_path = (base / path) if base is not None else None
+        actual_size = file_path.stat().st_size if (file_path and file_path.exists()) else 0
+        if actual_size >= byte_offset:
+            continue
+        findings.append(
+            {
+                "type": "log_watermark_shrunk",
+                "root_kind": root_kind,
+                "root_id": root_id,
+                "path": path,
+                "watermark_offset": byte_offset,
+                "actual_size": actual_size,
+            }
+        )
+        if root_kind != "project":
+            continue
+        mirror_dir = _mirror_dir_for_main_root(Path(root_id))
+        mirror_path = mirror_dir / path
+        mirror_size = mirror_path.stat().st_size if mirror_path.exists() else 0
+        if mirror_size < byte_offset:
+            findings.append(
+                {
+                    "type": "line_missing_from_both_copies",
+                    "root_id": root_id,
+                    "path": path,
+                    "watermark_offset": byte_offset,
+                }
+            )
+    return findings
+
+
+_SEGMENT_RE = re.compile(r"^(?P<host>[^.]+)\.(?P<pid>\d+)\.(?P<start_ns>\d+)(?:\.slurm-.*)?\.jsonl$")
+
+_UNTERMINATED_TAIL_STALE_DAYS = 7
+
+
+def _parse_segment_name(name: str) -> tuple[str, int, int] | None:
+    """`<host>.<pid>.<start_ns>[.slurm-...].jsonl` -> `(host, pid, start_ns)`,
+    or None for a name that does not match the segment naming convention
+    (spec "Segments and writers")."""
+    m = _SEGMENT_RE.match(name)
+    if not m:
+        return None
+    return m.group("host"), int(m.group("pid")), int(m.group("start_ns"))
+
+
+def _unterminated_tail_findings(catalog_dir: Path) -> list[dict]:
+    """AC-7 (verify half, delivery step 4): "An unterminated tail is never
+    quarantined by ingest, and `bth verify` reports it once the writer has a
+    later segment[,] or the file is unchanged for 7 days" (spec "Line
+    envelope"). Ingest's own watermark stops at the last `\\n`
+    (`ingest.py:_read_new_lines`), so a segment whose actual size exceeds
+    its recorded watermark has trailing bytes past the last complete line --
+    an unterminated tail, by construction, at every moment between two
+    completed lines. It is reported as torn only once one of the two
+    trigger conditions holds, distinguishing "still being written" from
+    "abandoned mid-line": a later segment from the SAME writer (same host
+    and pid, a higher `start_ns`) proves that writer rotated away and will
+    never complete this line, and a 7-day-stale mtime is the same signal
+    when no later segment exists to prove it directly.
+    """
+    from bathos.index import connect_read
+    from bathos.runlog.ingest import discover_roots
+
+    con = connect_read(catalog_dir)
+    try:
+        rows = con.execute(
+            "SELECT root_kind, root_id, path, size, byte_offset FROM ingest_watermarks"
+        ).fetchall()
+    finally:
+        con.close()
+    if not rows:
+        return []
+
+    root_dirs = {
+        (kind, root_id): log_dir for kind, root_id, log_dir in discover_roots(catalog_dir)
+    }
+    now = datetime.now(UTC)
+
+    findings: list[dict] = []
+    for root_kind, root_id, path, _size, byte_offset in rows:
+        base = root_dirs.get((root_kind, root_id))
+        file_path = (base / path) if base is not None else None
+        if file_path is None or not file_path.exists():
+            continue
+        actual_size = file_path.stat().st_size
+        if actual_size <= byte_offset:
+            continue  # nothing past the last completed line
+
+        later_segment = False
+        parsed = _parse_segment_name(path)
+        if parsed is not None and base is not None:
+            host, pid, start_ns = parsed
+            for sibling in base.glob("*.jsonl"):
+                if sibling.name == path:
+                    continue
+                sib_parsed = _parse_segment_name(sibling.name)
+                if (
+                    sib_parsed
+                    and sib_parsed[0] == host
+                    and sib_parsed[1] == pid
+                    and sib_parsed[2] > start_ns
+                ):
+                    later_segment = True
+                    break
+
+        mtime = datetime.fromtimestamp(file_path.stat().st_mtime, tz=UTC)
+        stale = (now - mtime) >= timedelta(days=_UNTERMINATED_TAIL_STALE_DAYS)
+        if not (later_segment or stale):
+            continue
+
+        findings.append(
+            {
+                "type": "unterminated_tail",
+                "root_kind": root_kind,
+                "root_id": root_id,
+                "path": path,
+                "watermark_offset": byte_offset,
+                "actual_size": actual_size,
+            }
+        )
+    return findings
+
+
+def _campaign_findings(catalog_dir: Path) -> list[dict]:
+    """AC-24: "threshold mismatch" (BC-12) and "`evalue_changed_after_
+    conclusion`" (spec "Fold rules": a member whose folded end time is later
+    than its campaign's conclusion time). Recomputes each campaign's fold
+    fresh via the same `_compute_campaign_fold` ingest itself uses -- the
+    persisted `campaigns`/`campaign_runs` tables alone cannot distinguish "a
+    real mismatch" from "no sequential members yet" (both leave
+    `stopping_threshold` NULL), so this reads the one source of truth
+    (`fold_campaign`'s own `_threshold_mismatch` flag) rather than
+    re-deriving the condition a second, possibly-diverging way."""
+    from bathos.index import connect_read
+    from bathos.runlog.fold_runs import fold_run
+    from bathos.runlog.ingest import _compute_campaign_fold, _fetch_events_by_entity_key
+
+    con = connect_read(catalog_dir)
+    try:
+        campaign_ids = [r[0] for r in con.execute("SELECT id FROM campaigns").fetchall()]
+    finally:
+        con.close()
+
+    findings: list[dict] = []
+    for campaign_id in campaign_ids:
+        con = connect_read(catalog_dir)
+        try:
+            row, campaign_runs_rows = _compute_campaign_fold(con, campaign_id)
+
+            if row.get("_threshold_mismatch"):
+                findings.append({"type": "threshold_mismatch", "campaign_id": campaign_id})
+
+            concluded_at = row.get("concluded_at")
+            concluded_dt = _parse_iso_ts(concluded_at) if row.get("status") == "concluded" else None
+            if concluded_dt is not None:
+                for member in campaign_runs_rows:
+                    run_id = member["run_id"]
+                    member_events = _fetch_events_by_entity_key(con, [run_id])
+                    if not member_events:
+                        continue
+                    end_ts = _folded_run_end_ts(fold_run(member_events))
+                    if end_ts is not None and end_ts > concluded_dt:
+                        findings.append(
+                            {
+                                "type": "evalue_changed_after_conclusion",
+                                "campaign_id": campaign_id,
+                                "run_id": run_id,
+                            }
+                        )
+        finally:
+            con.close()
+    return findings
+
+
+def _known_import_chains(catalog_dir: Path) -> dict[tuple[str, ...], tuple[int, str]]:
+    """The already-ingested equivalent of `importer._existing_chains`
+    (which reads staging JSONL files pre-cutover): `(kind, *entity,
+    source_class, source_locator) -> (max ordinal, source_sha256)`, read
+    from `idx.events` instead, so a post-cutover legacy write can be told
+    apart from one the importer already knows about (spec "Legacy writes
+    after cut-over" / AC-23 / Migration step 5)."""
+    from bathos.index import connect_read
+    from bathos.runlog.importer import _existing_chains
+
+    con = connect_read(catalog_dir)
+    try:
+        rows = con.execute(
+            "SELECT kind, entity, origin, data FROM events "
+            "WHERE kind LIKE '%.imported' OR kind = 'legacy_source.unreadable'"
+        ).fetchall()
+    finally:
+        con.close()
+    events = [
+        {
+            "kind": kind,
+            "entity": json.loads(entity) if isinstance(entity, str) else entity,
+            "origin": origin,
+            "data": json.loads(data) if isinstance(data, str) else data,
+        }
+        for kind, entity, origin, data in rows
+    ]
+    return _existing_chains(events)
+
+
+def _legacy_findings(catalog_dir: Path) -> list[dict]:
+    """AC-24: "a legacy write after cut-over", "a `corrupt_legacy_source`",
+    and "a `legacy_db_locked`" -- reuses the importer's own candidate scan
+    (`_all_candidates`, `connect_legacy`) rather than re-implementing legacy-
+    source discovery a second time (spec: "the same test the importer uses,
+    so verify and importer never disagree"). Only meaningful post-cutover
+    (spec Migration step 5: "an older bathos ... writing after cut-over");
+    before cut-over, an unimported legacy source is simply not yet migrated,
+    not an anomaly.
+    """
+    from bathos.runlog.importer import ImportReport, _all_candidates, _source_sha256
+
+    report = ImportReport()
+    candidates = _all_candidates(catalog_dir, report)
+
+    findings: list[dict] = []
+    for path in report.locked:
+        findings.append({"type": "legacy_db_locked", "path": path})
+    for locator in report.unreadable:
+        findings.append({"type": "corrupt_legacy_source", "source_locator": locator})
+
+    known_chains = _known_import_chains(catalog_dir)
+    for cand in candidates:
+        if cand.kind == "legacy_source.unreadable":
+            continue  # already reported above via report.unreadable
+        sha = _source_sha256(cand.fields)
+        chain_key = (cand.kind, *cand.entity, cand.source_class, cand.source_locator)
+        known = known_chains.get(chain_key)
+        if known is None or known[1] != sha:
+            findings.append(
+                {
+                    "type": "legacy_write_after_cutover",
+                    "kind": cand.kind,
+                    "entity": cand.entity,
+                    "source_locator": cand.source_locator,
+                    "writing_host": cand.fields.get("hostname") or None,
+                }
+            )
+    return findings
+
+
+def verify_runlog(catalog_dir: Path) -> VerifyResult:
+    """`bth verify`'s project-local-run-log checks (spec delivery step 4,
+    "`bth verify` checks"; AC-7's verify half, AC-24, and the reap/revert
+    semantics of AC-26 via `bathos.reap`).
+
+    Extends the existing per-tier `VerifyResult` shape rather than building
+    a parallel report format: `errors` gets one human-readable line per
+    finding (same convention as `verify_cool`/`verify_warm`/`verify_archive`
+    above), and `stats["findings"]` additionally carries the same findings
+    as structured dicts (`{"type": "...", ...}`) for a caller that wants to
+    branch on `type` rather than parse a message string.
+
+    `duplicate_project_id` runs unconditionally (a registry-level check, not
+    an index one); every other check depends on the folded index /
+    `events`/`quarantine` tables, which do not exist in any meaningful sense
+    before cut-over (`connect_read`'s flag-off branch is a plain pass-
+    through to `bathos.db`, per spec "Reads": "G3 holds only from cut-over")
+    -- so this returns just the registry check, clean otherwise, before
+    cut-over rather than reading `bathos.db` a second time here (that is
+    `verify_warm`'s job).
+    """
+    from bathos.runlog.mode import is_log_mode
+
+    findings: list[dict] = []
+    findings.extend(_duplicate_project_id_findings())
+
+    if is_log_mode(catalog_dir):
+        findings.extend(_quarantine_findings(catalog_dir))
+        findings.extend(_watermark_findings(catalog_dir))
+        findings.extend(_unterminated_tail_findings(catalog_dir))
+        findings.extend(_campaign_findings(catalog_dir))
+        findings.extend(_legacy_findings(catalog_dir))
+
+    return VerifyResult(
+        tier="runlog",
+        ok=len(findings) == 0,
+        errors=[_format_finding(f) for f in findings],
+        warnings=[],
+        stats={"findings": findings, "finding_count": len(findings)},
+    )
+
+
 def verify_all(catalog_dir: Path, archive_root: Path | None = None) -> list[VerifyResult]:
-    """Run verify_cool, verify_warm, and verify_archive; return all results."""
+    """Run verify_cool, verify_warm, verify_archive, and verify_runlog; return all results."""
     if archive_root is None:
         archive_root = Path.home() / ".bth" / "archive"
 
@@ -293,4 +712,5 @@ def verify_all(catalog_dir: Path, archive_root: Path | None = None) -> list[Veri
         verify_cool(catalog_dir),
         verify_warm(catalog_dir),
         verify_archive(archive_root),
+        verify_runlog(catalog_dir),
     ]

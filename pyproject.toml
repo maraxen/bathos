@@ -121,6 +121,9 @@ include = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--json-report --json-report-file=tmp/pytest.json -q"
+markers = [
+    "slow: a longer, opt-in sweep (e.g. AC-17's wider seed sweep); not run by default",
+]
 
 [tool.ruff]
 line-length = 100
