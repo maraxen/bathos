@@ -81,9 +81,12 @@ def build_envelope(
 
 
 def _now_rfc3339() -> str:
-    return (
-        time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
-        + f".{time.time_ns() // 1000 % 1_000_000:06d}Z"
+    # ONE clock read: seconds and microseconds from separate reads could straddle a
+    # second boundary and go ~1 s backwards, reordering back-to-back events (e.g. a
+    # revert sorting before its reap).
+    ns = time.time_ns()
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ns // 1_000_000_000)) + (
+        f".{ns // 1000 % 1_000_000:06d}Z"
     )
 
 

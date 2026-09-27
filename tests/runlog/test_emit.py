@@ -152,3 +152,26 @@ def test_namespace_bathos_is_frozen_and_anchor_id_uses_it():
 
     assert uuid.uuid5(uuid.NAMESPACE_DNS, "bathos.runlog") == NAMESPACE_BATHOS
     assert _anchor_entity_id("p", "s") == str(uuid.uuid5(NAMESPACE_BATHOS, "anchor:p:s"))
+
+
+def test_now_rfc3339_uses_one_clock_read_across_a_second_boundary(monkeypatch):
+    """Seconds and microseconds must come from the same instant: two reads straddling
+    a second boundary produced a ts ~1 s in the past (AC-17 sweep flake)."""
+    import time as _time
+
+    from bathos.runlog import envelope
+
+    # Pre-fix: each call read time_ns twice, so feed enough values for either shape.
+    reads = iter([1_700_000_005_999_999_500, 1_700_000_006_000_000_500] * 2)
+    monkeypatch.setattr(_time, "time_ns", lambda: next(reads))
+    first = envelope._now_rfc3339()
+    second = envelope._now_rfc3339()
+    # Each ts must be exactly its own instant (seconds and micros from one read).
+    from datetime import UTC, datetime
+
+    def expect(ns: int) -> str:
+        return datetime.fromtimestamp(ns // 1000 / 1e6, UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+    assert first == expect(1_700_000_005_999_999_500)
+    assert second == expect(1_700_000_006_000_000_500)
+    assert first < second
