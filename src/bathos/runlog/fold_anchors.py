@@ -19,15 +19,27 @@ from __future__ import annotations
 
 from typing import Any
 
+from bathos.runlog.fold_merge import dedup_import_snapshots, latest_whole_row
+
 
 def fold_anchor(events: list[dict]) -> dict[str, Any] | None:
-    """Fold every `anchor.recorded` event for one `anchor_id` entity into a
-    `sidecar_anchors`-shaped dict, or `None` if no such event exists."""
-    anchor_events = [e for e in events if e.get("kind") == "anchor.recorded"]
-    if not anchor_events:
+    """Fold every `anchor.recorded`/`anchor.imported` event for one
+    `anchor_id` entity into a `sidecar_anchors`-shaped dict, or `None` if no
+    such event exists.
+
+    Two-stage (spec "Fold rules"): a live `anchor.recorded` wins outright
+    over any `anchor.imported` for this entity (see `latest_whole_row`);
+    among several imports (there is only ever the `warm` source class for
+    anchors -- "the anchors in warm" -- so this never actually ties on
+    precedence in practice), the highest source-class precedence wins,
+    tie-broken by latest `(ts, eid)`.
+    """
+    events = dedup_import_snapshots(events)
+    live = [e for e in events if e.get("kind") == "anchor.recorded"]
+    imported = [e for e in events if e.get("kind") == "anchor.imported"]
+    data = latest_whole_row(live, imported)
+    if data is None:
         return None
-    latest = max(anchor_events, key=lambda e: (e.get("ts", ""), e.get("eid", "")))
-    data = latest.get("data") or {}
     return {
         "path": data.get("path"),
         "sha256": data.get("sha256"),

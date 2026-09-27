@@ -32,6 +32,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from bathos.runlog.fold_merge import dedup_import_snapshots, stage1_field_merge
+
 TERMINAL_STATUSES = frozenset({"completed", "failed", "killed"})
 
 # The status-dependent bundle (Fold rules, "Run status"): fields the runner
@@ -121,7 +123,67 @@ GENERAL_FIELDS = (
     "manifest_path",
     "skill_sha256",
     "schema_version",
+    # BC-1/BC-2 (spec "Import merge (stage 1)": "so a fragment never blanks
+    # a field (e.g. metadata, output_metadata, postmortem fields) that a
+    # warm import set"): these have no LIVE general-field write site (only
+    # a dedicated event each -- run.outputs_hashed, run.postmortem_applied
+    # -- handled below), but the legacy importer's run.imported DOES carry
+    # them (they are ordinary warm-row/fragment columns), so they still need
+    # the stage-1 import merge. Adding them here is a no-op for the stage-2
+    # live loop (run.started/run.finished never set these keys), so it only
+    # ever fills in a value the dedicated event mechanism would otherwise
+    # leave at its hardcoded default.
+    "output_metadata",
+    "postmortem_status",
+    "postmortem_override",
+    "postmortem_verdict_override",
+    "postmortem_author",
+    "postmortem_path",
+    "postmortem_hypothesis_status",
+    "postmortem_has_anomalies",
+    "postmortem_summary",
+    "postmortem_asset_links",
 )
+
+# Reap-ledger record fields (spec "Reap ledgers" / "Authoritative writes":
+# `run.reaped`'s `data` is exactly `reap.py:296-303`'s ledger record). Used
+# to extract `metadata.reaped` from a ledger-shaped claim's own `data`,
+# stripping the importer's bookkeeping keys (`source_class`, `source_locator`,
+# `source_sha256`, `canon`, `snapshot`) and the `status` marker the importer
+# adds to a `run.imported` ledger-sourced claim so `_expand_claims` can
+# classify it -- neither belongs in the stored ledger record.
+_REAP_LEDGER_FIELDS = ("run_id", "project_slug", "reaped_at", "reason", "window_h", "prior_status")
+
+# `schema.Run()`'s own defaults for the GENERAL_FIELDS whose canonical value
+# is an empty string or empty list, never `None` (AC-17 finding: a warm
+# row/fragment genuinely holding this literal default -- e.g. a run that
+# never set `hostname` -- is `is_empty()`-empty in EVERY import source, so
+# `stage1_field_merge` correctly leaves the field unset per the spec's "first
+# non-empty value" rule; but `compact.py`'s fresh-row INSERT always writes
+# the literal default, never SQL NULL, for these columns, so leaving them
+# absent here would diverge from the canonical legacy state for the common
+# case of a run that never set them. `setdefault` below re-applies exactly
+# `schema.Run()`'s own default, once, only for a field the merge left unset
+# -- it never overwrites a real value (including a stage-2 live "" -- not
+# reachable for these fields today, but this stays additive either way).
+# Fields whose `schema.Run()` default is `None` (e.g. `stage_name`,
+# `claim_discriminates`) are deliberately absent from this dict: `None` IS
+# their canonical default, so leaving them unset is already correct.
+_GENERAL_FIELD_DEFAULTS: dict[str, Any] = {
+    "tags": [],
+    "sidecar_sha256": "",
+    "sidecar_path": "",
+    "parent_run_id": "",
+    "agent_mode": "",
+    "sidecar_mode": "",
+    "script_sha256": "",
+    "slurm_job_id": "",
+    "slurm_array_task_id": "",
+    "hostname": "",
+    "manifest_sha256": "",
+    "manifest_path": "",
+    "skill_sha256": "",
+}
 
 _ORIGIN_PRECEDENCE = {"live": 1, "migration": 0}
 
@@ -215,9 +277,9 @@ def _abandoned_state(claims: list[_Claim]) -> tuple[bool, _Claim | None]:
     always sorts after every claim at the same ts, so "a revert cancels
     every earlier or same-ts abandoned claim" is exactly: the state after
     the LAST rank-1 event in this order. If that last event is a claim, an
-    abandon is active and that claim is the one `metadata.reaped` uses (it
-    cannot have been cancelled -- nothing sorts after it). If it is a
-    revert, no claim survives.
+    abandon is active (this decides the STATUS bundle only -- see
+    `_ledger_shaped_reaped_claim` for what `metadata.reaped` uses). If it is
+    a revert, no claim survives.
     """
     rank1 = sorted((c for c in claims if c.rank == 1), key=lambda c: c.sort_key)
     if not rank1:
@@ -226,6 +288,51 @@ def _abandoned_state(claims: list[_Claim]) -> tuple[bool, _Claim | None]:
     if last.is_revert:
         return False, None
     return True, last
+
+
+def _is_ledger_shaped_claim(ev: dict) -> bool:
+    """True for a rank-1 event whose `data` IS a reap-ledger record (spec
+    "Reap ledgers"/"Authoritative writes"): a live `run.reaped`, or a
+    `run.imported` sourced from the reap ledger JSON itself
+    (`source_class="ledger_json"`).
+
+    Distinguishes these from a `run.imported` sourced from a full warm-row
+    or fragment snapshot whose OWN `status` column happens to be
+    `"abandoned"` -- that event's `data` is the run's entire row (dozens of
+    unrelated columns), not a ledger record, so it must never seed
+    `metadata.reaped` (see `_ledger_shaped_reaped_claim`). Per the "Reap
+    ledgers" import rule, the importer always emits the ledger file itself
+    as its own dedicated `run.imported` event for the same entity whenever
+    one exists, so this filter never silently drops real reap information --
+    it only excludes a coincidental `status=="abandoned"` on an unrelated
+    full-row import.
+    """
+    kind = ev.get("kind")
+    if kind in ("run.reaped", "run.reap_reverted", "run_reap.imported"):
+        return True
+    if kind == "run.imported":
+        return (ev.get("data") or {}).get("source_class") == "ledger_json"
+    return False
+
+
+def _ledger_shaped_reaped_claim(claims: list[_Claim]) -> _Claim | None:
+    """Like `_abandoned_state`, but restricted to ledger-shaped rank-1
+    events (claims and their cancelling reverts) -- spec: "`metadata.reaped`
+    is the ledger record carried by the latest abandoned claim not
+    cancelled by a revert". A full-row `run.imported` claim never counts
+    here (see `_is_ledger_shaped_claim`), so it can neither seed nor cancel
+    a ledger-derived `metadata.reaped`.
+    """
+    rank1 = sorted(
+        (c for c in claims if c.rank == 1 and _is_ledger_shaped_claim(c.ev)),
+        key=lambda c: c.sort_key,
+    )
+    if not rank1:
+        return None
+    last = rank1[-1]
+    if last.is_revert:
+        return None
+    return last
 
 
 def _running_claim(claims: list[_Claim]) -> _Claim | None:
@@ -268,6 +375,12 @@ def fold_run(events: list[dict]) -> dict[str, Any]:
     if not events:
         return row
 
+    # Snapshot chains (spec "Snapshots"): drop every superseded import
+    # snapshot before anything else sees this entity's events -- both the
+    # status-claim ranking and the general-field merge below must only ever
+    # see the newest snapshot of each concrete legacy source.
+    events = dedup_import_snapshots(events)
+
     claims = _expand_claims(events)
 
     terminal = _winning_terminal_claim(claims)
@@ -296,49 +409,79 @@ def fold_run(events: list[dict]) -> dict[str, Any]:
         bundle["status"] = "completed"
     row.update(bundle)
 
-    # General fields: "apply on top" in (ts, eid) order.
-    general_sources = sorted(
-        (ev for ev in events if ev.get("kind") in ("run.started", "run.finished", "run.imported")),
+    # General fields, two-stage (spec "Fold rules": "An entity folds in two
+    # stages: (1) its `*.imported` events merge into a base state by the
+    # import merge rule below; (2) its live events apply on top"):
+    #
+    # Stage 1: every `run.imported` event, merged by source-class precedence
+    # then (ts, eid) -- "keeps the first non-empty value in order of source
+    # precedence" (`stage1_field_merge`). A NEGATIVE CONTROL matters here: a
+    # plain (ts, eid) merge across imports+live together (the pre-importer
+    # code above this comment) would let a LOWER-precedence import (e.g. a
+    # `fragment`) with a LATER timestamp silently overwrite a HIGHER-
+    # precedence import (e.g. `warm`) with an earlier one -- precedence must
+    # win regardless of which import happens to be newer.
+    #
+    # Stage 2: live `run.started`/`run.finished` events apply on top, in
+    # (ts, eid) order, later wins -- unchanged from the pre-importer
+    # behaviour, just now layered onto the stage-1 base instead of sorted in
+    # among the imports.
+    imported_general = [ev for ev in events if ev.get("kind") == "run.imported"]
+    live_general = sorted(
+        (ev for ev in events if ev.get("kind") in ("run.started", "run.finished")),
         key=lambda ev: (ev.get("ts", ""), ev.get("eid", "")),
     )
-    for ev in general_sources:
+    row.update(stage1_field_merge(imported_general, GENERAL_FIELDS))
+    for ev in live_general:
         data = ev.get("data") or {}
         for field in GENERAL_FIELDS:
             if field in data and data[field] is not None:
                 row[field] = data[field]
+    for field, default in _GENERAL_FIELD_DEFAULTS.items():
+        row.setdefault(field, default)
 
     row["parity_run_type"] = _parity_run_type(claims)
 
-    # output_metadata: latest run.outputs_hashed (clock-skew-sensitive field).
+    # output_metadata: latest run.outputs_hashed (clock-skew-sensitive field)
+    # always wins when present; otherwise the stage-1 import merge above
+    # already filled it from a warm/fragment source's own column, if any
+    # (BC-1's "never blanks a field ... that a warm import set" applied to
+    # a field with no live GENERAL write site).
     outputs_events = [ev for ev in events if ev.get("kind") == "run.outputs_hashed"]
     if outputs_events:
         latest_outputs = max(outputs_events, key=lambda ev: (ev.get("ts", ""), ev.get("eid", "")))
         row["output_metadata"] = (latest_outputs.get("data") or {}).get("output_metadata")
     else:
-        row["output_metadata"] = None
+        row.setdefault("output_metadata", None)
 
     # Postmortem fields: latest run.postmortem_applied, BC-2's (ts, eid)-only
-    # tie-break (source precedence does not apply here per the spec text).
-    #
-    # AC-17 finding: a run with NO postmortem event must still carry the same
-    # non-NULL defaults the legacy `schema.Run()` dataclass gives every fresh
-    # warm row (compact.py's new-row INSERT branch always writes
-    # `run.postmortem_status`/`.postmortem_override`/etc, whether or not
-    # `run.id in postmortem_map` -- only a REGISTERED postmortem overrides
-    # them). Leaving these columns unset (NULL) here, as an earlier version
-    # of this fold did, diverged from the canonical legacy state for every
-    # run that never got a postmortem -- the common case.
-    row["postmortem_status"] = "unassigned"
-    row["postmortem_override"] = "none"
-    row["postmortem_verdict_override"] = "none"
-    row["postmortem_author"] = ""
-    row["postmortem_path"] = ""
-    row["postmortem_hypothesis_status"] = "unassigned"
-    row["postmortem_has_anomalies"] = False
-    row["postmortem_summary"] = ""
-    row["postmortem_asset_links"] = "{}"
+    # tie-break (source precedence does not apply here per the spec text),
+    # always wins when present. Otherwise the stage-1 import merge above
+    # already filled these from a warm/fragment row's own postmortem_*
+    # columns (BC-2: "The importer imports what the walk found (postmortem
+    # fields of warm rows)") -- `setdefault` below only supplies the
+    # legacy `schema.Run()` dataclass's non-NULL defaults for a run with
+    # NEITHER an import NOR a live postmortem event (AC-17 finding:
+    # compact.py's fresh-row INSERT always writes these columns, whether or
+    # not a postmortem was ever registered).
+    row.setdefault("postmortem_status", "unassigned")
+    row.setdefault("postmortem_override", "none")
+    row.setdefault("postmortem_verdict_override", "none")
+    row.setdefault("postmortem_author", "")
+    row.setdefault("postmortem_path", "")
+    row.setdefault("postmortem_hypothesis_status", "unassigned")
+    row.setdefault("postmortem_has_anomalies", False)
+    row.setdefault("postmortem_summary", "")
+    row.setdefault("postmortem_asset_links", "{}")
     pm_events = [ev for ev in events if ev.get("kind") == "run.postmortem_applied"]
-    postmortem_verdict_override: str | None = None
+    # Seed from whatever stage 1 (or the setdefault above) already put in
+    # `postmortem_verdict_override` -- an IMPORTED postmortem override (BC-2)
+    # must feed the stored-outcome computation below just as a live one
+    # does; a live `run.postmortem_applied` (if any) overwrites it again
+    # further down.
+    postmortem_verdict_override: str | None = row.get("postmortem_verdict_override")
+    if postmortem_verdict_override == "none":
+        postmortem_verdict_override = None
     if pm_events:
         latest_pm = max(pm_events, key=lambda ev: (ev.get("ts", ""), ev.get("eid", "")))
         pdata = latest_pm.get("data") or {}
@@ -367,12 +510,22 @@ def fold_run(events: list[dict]) -> dict[str, Any]:
     else:
         row["outcome"] = raw_outcome
 
-    # metadata.reaped: the latest not-cancelled abandoned claim, independent
-    # of the winning status (AC-26: a reaped run that later finishes keeps
-    # metadata.reaped; a reap then revert has none).
+    # metadata.reaped: the latest not-cancelled LEDGER-SHAPED abandoned claim
+    # (`_ledger_shaped_reaped_claim`, distinct from `reaped_claim`/
+    # `abandoned_active` above, which decide the STATUS bundle and also
+    # count a full-row import whose own `status` column is "abandoned"),
+    # independent of the winning status (AC-26: a reaped run that later
+    # finishes keeps metadata.reaped; a reap then revert has none). Only the
+    # known ledger-record fields are kept -- never the claim event's whole
+    # `data` -- so neither the importer's bookkeeping keys (source_class,
+    # source_locator, source_sha256, canon, snapshot) nor the `status`
+    # marker a ledger_json-sourced `run.imported` carries leak into the
+    # stored value.
     metadata: dict[str, Any] = {}
-    if reaped_claim is not None:
-        metadata["reaped"] = reaped_claim.ev.get("data")
+    ledger_claim = _ledger_shaped_reaped_claim(claims)
+    if ledger_claim is not None:
+        cdata = ledger_claim.ev.get("data") or {}
+        metadata["reaped"] = {k: cdata[k] for k in _REAP_LEDGER_FIELDS if k in cdata}
     row["metadata"] = metadata
 
     # Campaign-derived fields -- STUBBED, wave b (the campaign fold).

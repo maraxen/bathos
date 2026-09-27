@@ -100,11 +100,23 @@ _CAMPAIGN_DIRECT_KINDS = frozenset(
         "campaign.threshold_set",
         "campaign.claim_bypassed",
         "campaign.concluded",
+        "campaign.imported",
     }
 )
 # Campaign-membership kinds: entity == [campaign_id, run_id, ...].
 _CAMPAIGN_MEMBER_KINDS = frozenset({"campaign.run_added", "campaign_run.imported"})
 _RUN_STARTED_KINDS = frozenset({"run.started", "run.imported"})
+
+# Simple-entity kinds (edges, anchors, the append-only ledgers, submit
+# provenance): each maps a live kind to its legacy-importer `*.imported`
+# counterpart so a batch that ingests only imported history (the common case
+# right after `bth migrate --to-log`) still marks the entity affected.
+_EDGE_KINDS = frozenset({"edge.added", "edge.imported"})
+_ANCHOR_KINDS = frozenset({"anchor.recorded", "anchor.imported"})
+_BLAST_RADIUS_KINDS = frozenset({"blast_radius.recorded", "blast_radius.imported"})
+_TRUST_LEDGER_KINDS = frozenset({"trust_ledger.recorded", "trust_ledger.imported"})
+_ARCHIVED_ITEM_KINDS = frozenset({"archived_item.recorded", "archived_item.imported"})
+_SUBMIT_KINDS = frozenset({"submit.recorded", "submit.imported"})
 
 
 class IngestWalRemainsError(RunLogError):
@@ -745,17 +757,17 @@ def _ingest_locked(cd: Path) -> IngestReport:
                         kind in _CAMPAIGN_MEMBER_KINDS and len(entity) >= 2
                     ):
                         affected_campaign_ids.add(entity[0])
-                    elif kind == "edge.added" and len(entity) >= 2:
+                    elif kind in _EDGE_KINDS and len(entity) >= 2:
                         affected_edge_keys.add(tuple(entity))
-                    elif kind == "anchor.recorded" and len(entity) == 1:
+                    elif kind in _ANCHOR_KINDS and len(entity) == 1:
                         affected_anchor_ids.add(entity[0])
-                    elif kind == "blast_radius.recorded" and len(entity) == 1:
+                    elif kind in _BLAST_RADIUS_KINDS and len(entity) == 1:
                         affected_blast_radius_ids.add(entity[0])
-                    elif kind == "trust_ledger.recorded" and len(entity) == 1:
+                    elif kind in _TRUST_LEDGER_KINDS and len(entity) == 1:
                         affected_trust_ledger_ids.add(entity[0])
-                    elif kind == "archived_item.recorded" and len(entity) == 1:
+                    elif kind in _ARCHIVED_ITEM_KINDS and len(entity) == 1:
                         affected_archived_item_ids.add(entity[0])
-                    elif kind == "submit.recorded" and len(entity) == 1:
+                    elif kind in _SUBMIT_KINDS and len(entity) == 1:
                         affected_submit_ids.add(entity[0])
                 if new_offset != prev_offset:
                     watermarks[wm_key] = new_offset

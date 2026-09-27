@@ -527,3 +527,143 @@ def test_ac17_resolve_run_campaign_id_defaults_to_empty_string_not_none():
     from bathos.runlog.fold_campaigns import resolve_run_campaign_id
 
     assert resolve_run_campaign_id([], []) == ""
+
+
+# --- import stage-1 precedence (spec "Import merge (stage 1)") -------------
+
+
+def _imported_campaign(
+    campaign_id="c1",
+    ts=T0,
+    eid="e_imp",
+    source_class="warm",
+    source_locator="warm:campaigns",
+    snapshot=0,
+    source_sha256="s",
+    **extra,
+) -> dict:
+    data = {
+        "id": campaign_id,
+        "project_slug": "proj",
+        "name": "camp",
+        "mode": "exploration",
+        "status": "open",
+        "started_at": ts,
+        "source_class": source_class,
+        "source_locator": source_locator,
+        "canon": 1,
+        "snapshot": snapshot,
+        "source_sha256": source_sha256,
+    }
+    data.update(extra)
+    return ev("campaign.imported", [campaign_id], data, ts, eid, origin="migration")
+
+
+def test_import_stage1_precedence_beats_later_timestamp():
+    """Stage 1 (spec "Import merge (stage 1)"): source-class precedence
+    decides which import's value wins, not (ts, eid) alone. NEGATIVE
+    CONTROL: `campaign_json_ev` has a LATER ts than `warm_ev`; a plain
+    (ts, eid) merge across every `campaign.imported` event together
+    (sorting by ts and letting the later one win, which is the behaviour
+    before the two-stage rewrite) would pick `campaign_json_ev`'s
+    hypothesis ("from json, late"). The correct precedence-first merge
+    keeps `warm_ev`'s value ("from warm, early") because `warm` outranks
+    `campaign_json` regardless of timestamp.
+    """
+    warm_ev = _imported_campaign(
+        ts=T0,
+        eid="e_warm",
+        source_class="warm",
+        source_locator="warm:campaigns",
+        hypothesis="from warm, early",
+    )
+    campaign_json_ev = _imported_campaign(
+        ts=T2,
+        eid="e_json",
+        source_class="campaign_json",
+        source_locator="campaigns/c1.json",
+        hypothesis="from json, late",
+    )
+    row, _ = _fold("c1", [warm_ev, campaign_json_ev])
+    assert row["hypothesis"] == "from warm, early"
+
+    # Sanity: a plain (ts, eid) merge (the negative control) really would
+    # have picked the LATER event -- proves this test is discriminating.
+    assert sorted([warm_ev, campaign_json_ev], key=lambda e: (e["ts"], e["eid"]))[-1] is campaign_json_ev
+
+
+def test_import_stage1_first_non_empty_falls_through_precedence():
+    """"keeps the first non-empty value in order of source precedence" --
+    when the highest-precedence source's own value is empty (spec: `""`
+    counts as empty), the merge falls through to the next-precedence
+    source's non-empty value rather than leaving the field unset just
+    because the highest-precedence source technically carried the key.
+    """
+    warm_ev = _imported_campaign(
+        ts=T0, eid="e_warm", source_class="warm", source_locator="warm:campaigns", question=""
+    )
+    campaign_json_ev = _imported_campaign(
+        ts=T0,
+        eid="e_json",
+        source_class="campaign_json",
+        source_locator="campaigns/c1.json",
+        question="does it replicate?",
+    )
+    row, _ = _fold("c1", [warm_ev, campaign_json_ev])
+    assert row["question"] == "does it replicate?"
+
+
+def test_import_stage1_concluded_status_sticky_regardless_of_precedence():
+    """spec: "status='concluded' is sticky: the base is concluded if ANY
+    import says so" -- even the LOWEST-precedence import's `concluded`
+    status forces the base to `concluded`, not just the highest-precedence
+    one."""
+    warm_ev = _imported_campaign(
+        ts=T0, eid="e_warm", source_class="warm", source_locator="warm:campaigns", status="open"
+    )
+    campaign_json_ev = _imported_campaign(
+        ts=T1,
+        eid="e_json",
+        source_class="campaign_json",
+        source_locator="campaigns/c1.json",
+        status="concluded",
+    )
+    row, _ = _fold("c1", [warm_ev, campaign_json_ev])
+    assert row["status"] == "concluded"
+
+
+def test_import_snapshot_chain_only_highest_ordinal_folds():
+    """spec "Snapshots": "Only the highest ordinal of each chain takes part
+    in the fold." NEGATIVE CONTROL: ordinal 0 (the original, superseded
+    snapshot) has an EARLIER ts (T0) than ordinal 1 (the update, T1) --
+    both share the SAME source_class, so a plain "first non-empty in
+    precedence order, then ts" merge with no snapshot-chain filtering
+    (ties broken by ascending ts, "first" wins) would pick ordinal 0's
+    STALE value ("orig-branch"), since it sorts first. With snapshot-chain
+    dedup, ordinal 0 is dropped from the merge entirely (it is no longer
+    the newest snapshot of its chain) and ordinal 1's value
+    ("updated-branch") wins.
+    """
+    original = _imported_campaign(
+        ts=T0,
+        eid="e0",
+        source_class="warm",
+        source_locator="warm:campaigns",
+        snapshot=0,
+        source_sha256="s0",
+        hypothesis="orig-branch",
+    )
+    updated = _imported_campaign(
+        ts=T1,
+        eid="e1",
+        source_class="warm",
+        source_locator="warm:campaigns",
+        snapshot=1,
+        source_sha256="s1",
+        hypothesis="updated-branch",
+    )
+    row, _ = _fold("c1", [original, updated])
+    assert row["hypothesis"] == "updated-branch"
+
+    # Sanity: the naive (no-dedup) merge really would pick the OTHER value.
+    assert sorted([original, updated], key=lambda e: (e["ts"], e["eid"]))[0] is original

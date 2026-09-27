@@ -472,3 +472,137 @@ def test_ac17_outcome_empty_string_normalizes_to_none():
     assert fold_run([started()])["outcome"] is None
     assert fold_run([started(), reaped()])["outcome"] is None
     assert fold_run([started(), finished(outcome="pass")])["outcome"] == "pass"
+
+
+# --- import stage-1 precedence (spec "Import merge (stage 1)") -------------
+
+
+def _imported_run(
+    run_id="r1",
+    ts=T0,
+    eid="e_imp",
+    source_class="warm",
+    source_locator="warm:runs",
+    snapshot=0,
+    source_sha256="s",
+    **extra,
+) -> dict:
+    data = {
+        "id": run_id,
+        "project_slug": "proj",
+        "command": "python foo.py",
+        "argv": ["python", "foo.py"],
+        "git_hash": "abc123",
+        "git_branch": "main",
+        "git_dirty": False,
+        "status": "completed",
+        "source_class": source_class,
+        "source_locator": source_locator,
+        "canon": 1,
+        "snapshot": snapshot,
+        "source_sha256": source_sha256,
+    }
+    data.update(extra)
+    return ev("run.imported", [run_id], data, ts, eid, origin="migration")
+
+
+def test_import_stage1_precedence_beats_later_timestamp():
+    """Stage 1 (spec "Import merge (stage 1)"): source-class precedence
+    decides which import's value wins for a GENERAL field, not (ts, eid)
+    alone. NEGATIVE CONTROL: `fragment_ev` has a LATER ts than `warm_ev`; a
+    plain (ts, eid) merge across every `run.imported` event together
+    (sorting by ts and letting the later one win -- this fold's behaviour
+    before the two-stage rewrite) would pick `fragment_ev`'s branch
+    ("frag-branch"). The correct precedence-first merge keeps `warm_ev`'s
+    value ("warm-branch") because `warm` outranks `fragment` regardless of
+    timestamp.
+    """
+    warm_ev = _imported_run(
+        ts=T0, eid="e_warm", source_class="warm", source_locator="warm:runs", git_branch="warm-branch"
+    )
+    fragment_ev = _imported_run(
+        ts=T2,
+        eid="e_frag",
+        source_class="fragment",
+        source_locator="runs/proj/run_r1.parquet",
+        git_branch="frag-branch",
+    )
+    row = fold_run([warm_ev, fragment_ev])
+    assert row["git_branch"] == "warm-branch"
+
+    # Sanity: a plain (ts, eid) merge (the negative control) really would
+    # have picked the LATER event -- proves this test is discriminating.
+    assert sorted([warm_ev, fragment_ev], key=lambda e: (e["ts"], e["eid"]))[-1] is fragment_ev
+
+
+def test_import_stage1_first_non_empty_falls_through_precedence():
+    """"keeps the first non-empty value in order of source precedence" --
+    when the highest-precedence source's own value is empty (spec: `""`
+    counts as empty), the merge falls through to the next-precedence
+    source's non-empty value rather than leaving the field unset just
+    because the highest-precedence source technically carried the key.
+    """
+    warm_ev = _imported_run(
+        ts=T0, eid="e_warm", source_class="warm", source_locator="warm:runs", sidecar_path=""
+    )
+    fragment_ev = _imported_run(
+        ts=T0,
+        eid="e_frag",
+        source_class="fragment",
+        source_locator="runs/proj/run_r1.parquet",
+        sidecar_path="scripts/experiments/r1.bth.toml",
+    )
+    row = fold_run([warm_ev, fragment_ev])
+    assert row["sidecar_path"] == "scripts/experiments/r1.bth.toml"
+
+
+def test_import_snapshot_chain_only_highest_ordinal_folds():
+    """spec "Snapshots": "Only the highest ordinal of each chain takes part
+    in the fold." NEGATIVE CONTROL: ordinal 0 (the original, superseded
+    snapshot) has an EARLIER ts (T0) than ordinal 1 (the update, T1) --
+    both share the SAME source_class, so a plain "first non-empty in
+    precedence order, then ts" merge with no snapshot-chain filtering
+    (ties broken by ascending ts, "first" wins) would pick ordinal 0's
+    STALE value ("orig-branch"), since it sorts first. With snapshot-chain
+    dedup, ordinal 0 is dropped from the merge entirely (it is no longer
+    the newest snapshot of its chain) and ordinal 1's value
+    ("updated-branch") wins.
+    """
+    original = _imported_run(
+        ts=T0,
+        eid="e0",
+        source_class="warm",
+        source_locator="warm:runs",
+        snapshot=0,
+        source_sha256="s0",
+        git_branch="orig-branch",
+    )
+    updated = _imported_run(
+        ts=T1,
+        eid="e1",
+        source_class="warm",
+        source_locator="warm:runs",
+        snapshot=1,
+        source_sha256="s1",
+        git_branch="updated-branch",
+    )
+    row = fold_run([original, updated])
+    assert row["git_branch"] == "updated-branch"
+
+    # Sanity: the naive (no-dedup) merge really would pick the OTHER value.
+    assert sorted([original, updated], key=lambda e: (e["ts"], e["eid"]))[0] is original
+
+
+def test_import_stage2_live_overrides_stage1_import():
+    """Stage 2 "live events apply on top" (spec "Fold rules"): a LIVE
+    `run.started` for the SAME run always wins the general-field merge over
+    ANY import, regardless of precedence or timestamp -- mixed import-then-
+    live-event history (e.g. a fixture directly exercising the two-stage
+    merge, or an old bathos still writing after cut-over, spec "Legacy
+    writes after cut-over")."""
+    warm_ev = _imported_run(
+        ts=T0, eid="e_warm", source_class="warm", source_locator="warm:runs", git_branch="imported-branch"
+    )
+    live_started = started(git_branch="live-branch", ts=T1, eid="e_live")
+    row = fold_run([warm_ev, live_started])
+    assert row["git_branch"] == "live-branch"

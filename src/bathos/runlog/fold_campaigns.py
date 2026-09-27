@@ -34,6 +34,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from bathos.runlog.fold_merge import dedup_import_snapshots, import_precedence_key, is_empty
 from bathos.runlog.fold_runs import fold_run
 
 NEUTRAL_OUTCOMES = frozenset({"error", "unknown", None, ""})
@@ -51,18 +52,64 @@ _GENERAL_CAMPAIGN_KINDS = frozenset(
     }
 )
 
+# Bookkeeping keys the legacy importer adds to a `campaign.imported` event's
+# `data` alongside the campaign row's own fields (spec "Imported history"):
+# never real campaign columns, so never let them enter the folded row.
+_IMPORT_BOOKKEEPING_KEYS = frozenset(
+    {"source_class", "source_locator", "source_sha256", "canon", "snapshot"}
+)
+
 
 def _tie_key(ev: dict) -> tuple[str, str]:
     return (ev.get("ts", ""), ev.get("eid", ""))
 
 
-def _general_merge(campaign_events: list[dict]) -> dict[str, Any]:
+def _stage1_campaign_import_merge(imported_events: list[dict]) -> dict[str, Any]:
+    """Stage 1 of the two-stage fold for campaigns (spec "Fold rules": "its
+    `*.imported` events merge into a base state by the import merge rule"):
+    merge every `campaign.imported` event's fields by source-class
+    precedence then (ts, eid), keeping the first NON-EMPTY value per field
+    ("Import merge (stage 1)"). Unlike the run fold's `GENERAL_FIELDS` (a
+    fixed tuple), a `campaign.imported` event's `data` IS the legacy
+    campaign row verbatim (whatever columns that source has), so this walks
+    the events' own keys rather than a separate field list -- exactly
+    mirroring `_general_merge`'s existing dynamic-key approach for live
+    events, just precedence-ordered instead of (ts, eid)-ordered and
+    filtered for the importer's own bookkeeping keys.
+
+    *Campaigns:* `status="concluded"` is sticky -- "the base is concluded
+    if any import says so" -- regardless of source precedence, so it is
+    resolved separately from the rest of the fields.
+    """
+    ordered = sorted(imported_events, key=import_precedence_key)
+    row: dict[str, Any] = {}
+    seen_fields: set[str] = set()
+    for ev in ordered:
+        data = ev.get("data") or {}
+        for key, value in data.items():
+            if key in _IMPORT_BOOKKEEPING_KEYS or key in seen_fields:
+                continue
+            if is_empty(value):
+                continue
+            row[key] = value
+            seen_fields.add(key)
+    if any((ev.get("data") or {}).get("status") == "concluded" for ev in imported_events):
+        row["status"] = "concluded"
+    return row
+
+
+def _general_merge(campaign_events: list[dict], base: dict[str, Any] | None = None) -> dict[str, Any]:
     """ "apply on top" in (ts, eid) order -- later events' present (non-None)
     keys win over earlier ones; a key an event never sets is left untouched
     (never blanked). `campaign.concluded`'s own data has no `status` key, so
     `status` is forced to `"concluded"` afterward whenever any such event
-    exists (there is no "un-conclude" event, so this is trivially sticky)."""
-    row: dict[str, Any] = {}
+    exists (there is no "un-conclude" event, so this is trivially sticky).
+
+    `base` is the stage-1 import-merge result (`_stage1_campaign_import_merge`),
+    or `None`/omitted for a campaign with no imports at all -- this is stage
+    2, the live events applying on top of whatever stage 1 produced.
+    """
+    row: dict[str, Any] = dict(base) if base else {}
     ordered = sorted(
         (e for e in campaign_events if e.get("kind") in _GENERAL_CAMPAIGN_KINDS),
         key=_tie_key,
@@ -209,7 +256,16 @@ def fold_campaign(
             `run_added_events`, `imported_member_events`, and
             `linked_run_ids`).
     """
-    row = _general_merge(campaign_events)
+    # Snapshot chains (spec "Snapshots"): drop superseded import snapshots
+    # for BOTH the campaign's own events and its members' campaign_run
+    # imports before anything folds them (member run histories are deduped
+    # inside `fold_run` itself, called below).
+    campaign_events = dedup_import_snapshots(campaign_events)
+    imported_member_events = dedup_import_snapshots(imported_member_events)
+
+    imported_campaign_events = [e for e in campaign_events if e.get("kind") == "campaign.imported"]
+    stage1_base = _stage1_campaign_import_merge(imported_campaign_events)
+    row = _general_merge(campaign_events, base=stage1_base)
     row["id"] = campaign_id
 
     member_ids: set[str] = set(linked_run_ids)
@@ -296,7 +352,20 @@ def fold_campaign(
         ]
         return row, campaign_runs_rows
 
-    row["stopping_threshold"] = pending_threshold
+    # No candidate contributed (e.g. every member is import-only, so no live
+    # sidecar declaration exists for the walk to recompute from -- the
+    # importer never reads current sidecar files, so it cannot supply one
+    # either): spec-ambiguity call, fold fix (AC-17 finding) -- leave
+    # `stopping_threshold` exactly as the stage-1 import merge produced it,
+    # mirroring the non-sequential branch above's existing "review finding,
+    # LOW" precedent, rather than blanking a real imported value to NULL
+    # just because this fold cannot re-derive it from a sidecar it
+    # structurally cannot see. `setdefault` (not a bare assignment) so a
+    # campaign with no import at all still gets the key, `None`, as before.
+    if pending_threshold is not None:
+        row["stopping_threshold"] = pending_threshold
+    else:
+        row.setdefault("stopping_threshold", None)
     campaign_runs_rows = [
         {
             "campaign_id": campaign_id,

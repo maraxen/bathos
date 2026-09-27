@@ -18,19 +18,26 @@ from __future__ import annotations
 
 from typing import Any
 
+from bathos.runlog.fold_merge import dedup_import_snapshots, latest_whole_event, latest_whole_row
 
-def _latest(events: list[dict], kind: str) -> dict | None:
-    matching = [e for e in events if e.get("kind") == kind]
-    if not matching:
-        return None
-    return max(matching, key=lambda e: (e.get("ts", ""), e.get("eid", "")))
+
+def _latest_data(events: list[dict], live_kind: str, imported_kind: str) -> dict | None:
+    """Two-stage (spec "Fold rules") pick for an append-only ledger entity:
+    a live event of `live_kind` wins outright over any `imported_kind`
+    import for this entity (see `latest_whole_row`); among several imports
+    (e.g. a `warm` row and its own `fragment`), the highest source-class
+    precedence wins, tie-broken by latest `(ts, eid)`. Superseded import
+    snapshots (spec "Snapshots") are dropped first."""
+    events = dedup_import_snapshots(events)
+    live = [e for e in events if e.get("kind") == live_kind]
+    imported = [e for e in events if e.get("kind") == imported_kind]
+    return latest_whole_row(live, imported)
 
 
 def fold_blast_radius(events: list[dict]) -> dict[str, Any] | None:
-    ev = _latest(events, "blast_radius.recorded")
-    if ev is None:
+    data = _latest_data(events, "blast_radius.recorded", "blast_radius.imported")
+    if data is None:
         return None
-    data = ev.get("data") or {}
     return {
         "id": data.get("id"),
         "entity_type": data.get("entity_type"),
@@ -49,10 +56,9 @@ def fold_blast_radius(events: list[dict]) -> dict[str, Any] | None:
 
 
 def fold_trust_ledger(events: list[dict]) -> dict[str, Any] | None:
-    ev = _latest(events, "trust_ledger.recorded")
-    if ev is None:
+    data = _latest_data(events, "trust_ledger.recorded", "trust_ledger.imported")
+    if data is None:
         return None
-    data = ev.get("data") or {}
     return {
         "id": data.get("id"),
         "run_id": data.get("run_id"),
@@ -67,10 +73,9 @@ def fold_trust_ledger(events: list[dict]) -> dict[str, Any] | None:
 
 
 def fold_archived_item(events: list[dict]) -> dict[str, Any] | None:
-    ev = _latest(events, "archived_item.recorded")
-    if ev is None:
+    data = _latest_data(events, "archived_item.recorded", "archived_item.imported")
+    if data is None:
         return None
-    data = ev.get("data") or {}
     return {
         "id": data.get("id"),
         "project_slug": data.get("project_slug"),
@@ -97,8 +102,21 @@ def fold_submit(events: list[dict]) -> dict[str, Any] | None:
     """`submit.recorded`'s `data` carries every legacy Parquet field except
     `submitted_at` (spec: absent from the payload) -- the event's own `ts` IS
     the submission time, so this fold takes it from there rather than the
-    payload."""
-    ev = _latest(events, "submit.recorded")
+    payload. A `submit.imported` event carries `submitted_at` directly in
+    its `data` (the Parquet fragment's own column, per the spec's "`ts` is
+    the source record's own time"), so it is preferred there when present,
+    falling back to the event's own `ts` (its `submitted_at`, by
+    construction) otherwise.
+
+    Two-stage: only one source class exists for submit provenance
+    (`submit_parquet`), so among imports this is just "latest by
+    `(ts, eid)`"; a live `submit.recorded` still wins outright over any
+    import (`latest_whole_event`).
+    """
+    events = dedup_import_snapshots(events)
+    live = [e for e in events if e.get("kind") == "submit.recorded"]
+    imported = [e for e in events if e.get("kind") == "submit.imported"]
+    ev = latest_whole_event(live, imported)
     if ev is None:
         return None
     data = ev.get("data") or {}
@@ -109,7 +127,7 @@ def fold_submit(events: list[dict]) -> dict[str, Any] | None:
         "command": data.get("command"),
         "sidecar_sha256": data.get("sidecar_sha256"),
         "bth_submit_version": data.get("bth_submit_version"),
-        "submitted_at": ev.get("ts"),
+        "submitted_at": data.get("submitted_at") or ev.get("ts"),
         "myxcel_job_id": data.get("myxcel_job_id"),
         "slurm_job_id": data.get("slurm_job_id"),
         "stage_name": data.get("stage_name"),
