@@ -10,8 +10,12 @@ history ... never by applying new events on top of the stored row."
 
 Scope (delivery step 3, wave a): the RUN fold only. Campaign-derived columns
 (`seq_position`, `evalue`) are stubbed to ``None`` here -- they belong to the
-campaign fold (a later wave, "Campaign-derived values" in the spec) and
-require campaign membership/threshold data this module never sees.
+campaign fold ("Campaign-derived values" in the spec, `bathos.runlog.
+fold_campaigns`) and require campaign membership/threshold data this module
+never sees. Wave b fills them in at the ingest layer instead of here
+(`bathos.runlog.ingest._refold_run` consults the run's own folded
+`campaign_id`'s campaign fold after calling `fold_run`), keeping this module
+a pure, single-entity fold exactly as documented below.
 
 Only the event kinds the current write sites (delivery step 2b) actually
 emit are exercised in production: `run.started`, `run.finished`,

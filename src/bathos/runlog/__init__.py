@@ -16,9 +16,15 @@ archived_items.py) is not yet built.
 
 Delivery step 3, wave a (`index.py`, `ingest.py`, `fold_runs.py`): the
 disposable `index.db` schema, generation-swap ingest, the run fold, and the
-`connect_read()` read entry point. The campaign/edge/anchor/ledger folds, the
-25-module reader migration (AC-18), and the legacy importer (Migration steps
-0-4) are not yet built.
+`connect_read()` read entry point.
+
+Delivery step 3, wave b (`fold_campaigns.py`, `fold_edges.py`,
+`fold_anchors.py`, `fold_ledgers.py`): the campaign fold (`campaigns` +
+`campaign_runs`, including the `runs.seq_position`/`runs.evalue` columns wave
+a stubbed to NULL), `campaign_edges`/`run_edges`, `sidecar_anchors`,
+`blast_radius_ledger`, `trust_ledger`, `archived_items`, and submit
+provenance (`submits`). The 25-module reader migration (AC-18) and the legacy
+importer (Migration steps 0-4) are not yet built.
 
 Everything here is inert unless `bathos.runlog.mode.is_log_mode()` is True --
 with the flag off (the default), every write site's legacy behavior is
@@ -40,6 +46,10 @@ from .emit import (
     unit_of_work,
 )
 from .envelope import build_envelope, capture_git_provenance, uuid7
+from .fold_anchors import fold_anchor
+from .fold_campaigns import fold_campaign
+from .fold_edges import fold_edge
+from .fold_ledgers import fold_archived_item, fold_blast_radius, fold_submit, fold_trust_ledger
 from .fold_runs import fold_run
 from .index import connect_read, index_db_path
 from .ingest import IngestReport, IngestWalRemainsError, discover_roots, run_ingest
@@ -108,7 +118,14 @@ __all__ = [
     "emit_or_legacy",
     "ensure_log_ignored",
     "fallback_log_root",
+    "fold_anchor",
+    "fold_archived_item",
+    "fold_blast_radius",
+    "fold_campaign",
+    "fold_edge",
     "fold_run",
+    "fold_submit",
+    "fold_trust_ledger",
     "get_writer",
     "in_unit_of_work",
     "index_db_path",

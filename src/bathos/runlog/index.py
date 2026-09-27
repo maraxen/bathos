@@ -142,6 +142,166 @@ RUNS_COLUMNS: list[str] = [
     if line.strip() and not line.strip().startswith(("CREATE", ")"))
 ]
 
+# --- Delivery step 3, wave b: the campaign fold + the other simple
+# "Authoritative writes" folds (edges, anchors, ledgers, submit provenance).
+# Column sets mirror the legacy warm shape (compact.py's _CAMPAIGNS_TABLE_
+# SCHEMA / _CAMPAIGN_RUNS_TABLE_SCHEMA / _CAMPAIGN_EDGES_TABLE_SCHEMA /
+# _RUN_EDGES_TABLE_SCHEMA, anchor.py's _ANCHORS_TABLE_SCHEMA, blast_radius.py
+# / trust_ledger.py / archived_items.py's _*_TABLE_SCHEMA) for the fields
+# those write sites' event `data` actually carries; `submits` has no legacy
+# warm precedent (sprint_audit.py reads the Parquet fragments directly), so
+# its column set instead mirrors catalog.write_submit_provenance's Parquet
+# schema plus the `slurm_job_id` field the event additionally carries.
+
+CAMPAIGNS_DDL = """
+CREATE TABLE IF NOT EXISTS campaigns (
+    id VARCHAR PRIMARY KEY,
+    project_slug VARCHAR,
+    name VARCHAR,
+    mode VARCHAR,
+    question VARCHAR,
+    hypothesis VARCHAR,
+    status VARCHAR,
+    started_at VARCHAR,
+    concluded_at VARCHAR,
+    conclusion VARCHAR,
+    outcome_label VARCHAR,
+    parent_campaign_id VARCHAR,
+    stopping_threshold DOUBLE,
+    claim_path VARCHAR,
+    claim_sha256 VARCHAR,
+    claim_mode VARCHAR,
+    negative_check VARCHAR
+)
+"""
+
+CAMPAIGN_RUNS_DDL = """
+CREATE TABLE IF NOT EXISTS campaign_runs (
+    campaign_id VARCHAR,
+    run_id VARCHAR,
+    evalue DOUBLE,
+    seq_position BIGINT,
+    PRIMARY KEY (campaign_id, run_id)
+)
+"""
+
+CAMPAIGN_EDGES_DDL = """
+CREATE TABLE IF NOT EXISTS campaign_edges (
+    child_campaign_id VARCHAR,
+    parent_campaign_id VARCHAR,
+    PRIMARY KEY (child_campaign_id, parent_campaign_id)
+)
+"""
+
+RUN_EDGES_DDL = """
+CREATE TABLE IF NOT EXISTS run_edges (
+    child_run_id VARCHAR,
+    parent_run_id VARCHAR,
+    PRIMARY KEY (child_run_id, parent_run_id)
+)
+"""
+
+SIDECAR_ANCHORS_DDL = """
+CREATE TABLE IF NOT EXISTS sidecar_anchors (
+    id VARCHAR PRIMARY KEY,
+    path VARCHAR,
+    sha256 VARCHAR,
+    kind VARCHAR,
+    label VARCHAR,
+    content_hash VARCHAR,
+    campaign_id VARCHAR,
+    anchored_at VARCHAR
+)
+"""
+
+BLAST_RADIUS_LEDGER_DDL = """
+CREATE TABLE IF NOT EXISTS blast_radius_ledger (
+    id VARCHAR PRIMARY KEY,
+    entity_type VARCHAR,
+    entity_id VARCHAR,
+    from_state VARCHAR,
+    to_state VARCHAR,
+    anchor_kind VARCHAR,
+    anchor_value VARCHAR,
+    matched_files VARCHAR,
+    matched_clauses VARCHAR,
+    shadow_verdict VARCHAR,
+    match_reason VARCHAR,
+    reason VARCHAR,
+    amended_at VARCHAR
+)
+"""
+
+TRUST_LEDGER_DDL = """
+CREATE TABLE IF NOT EXISTS trust_ledger (
+    id VARCHAR PRIMARY KEY,
+    run_id VARCHAR,
+    output_path VARCHAR,
+    content_hash VARCHAR,
+    from_state VARCHAR,
+    to_state VARCHAR,
+    attestation_ref VARCHAR,
+    amended_at VARCHAR,
+    reason VARCHAR
+)
+"""
+
+ARCHIVED_ITEMS_DDL = """
+CREATE TABLE IF NOT EXISTS archived_items (
+    id VARCHAR,
+    project_slug VARCHAR,
+    event VARCHAR,
+    kind VARCHAR,
+    paths VARCHAR,
+    pre_archive_sha VARCHAR,
+    stub_commit_sha VARCHAR,
+    verdict VARCHAR,
+    reason VARCHAR,
+    superseded_by VARCHAR,
+    bundle_sha256 VARCHAR,
+    bundle_path VARCHAR,
+    archived_by VARCHAR,
+    recorded_at VARCHAR,
+    record_id VARCHAR PRIMARY KEY
+)
+"""
+
+SUBMITS_DDL = """
+CREATE TABLE IF NOT EXISTS submits (
+    id VARCHAR PRIMARY KEY,
+    project_slug VARCHAR,
+    command VARCHAR,
+    sidecar_sha256 VARCHAR,
+    bth_submit_version VARCHAR,
+    submitted_at VARCHAR,
+    myxcel_job_id VARCHAR,
+    slurm_job_id VARCHAR,
+    stage_name VARCHAR
+)
+"""
+
+
+_DDL_NON_COLUMN_PREFIXES = ("CREATE", ")", "PRIMARY", "UNIQUE", "FOREIGN", "CHECK")
+
+
+def _columns_of(ddl: str) -> list[str]:
+    return [
+        line.strip().split()[0]
+        for line in ddl.strip().splitlines()
+        if line.strip() and not line.strip().startswith(_DDL_NON_COLUMN_PREFIXES)
+    ]
+
+
+CAMPAIGNS_COLUMNS: list[str] = _columns_of(CAMPAIGNS_DDL)
+CAMPAIGN_RUNS_COLUMNS: list[str] = _columns_of(CAMPAIGN_RUNS_DDL)
+CAMPAIGN_EDGES_COLUMNS: list[str] = _columns_of(CAMPAIGN_EDGES_DDL)
+RUN_EDGES_COLUMNS: list[str] = _columns_of(RUN_EDGES_DDL)
+SIDECAR_ANCHORS_COLUMNS: list[str] = _columns_of(SIDECAR_ANCHORS_DDL)
+BLAST_RADIUS_LEDGER_COLUMNS: list[str] = _columns_of(BLAST_RADIUS_LEDGER_DDL)
+TRUST_LEDGER_COLUMNS: list[str] = _columns_of(TRUST_LEDGER_DDL)
+ARCHIVED_ITEMS_COLUMNS: list[str] = _columns_of(ARCHIVED_ITEMS_DDL)
+SUBMITS_COLUMNS: list[str] = _columns_of(SUBMITS_DDL)
+
 
 def index_db_path(catalog_dir: Path | None = None) -> Path:
     return (catalog_dir or default_catalog_dir()) / "index.db"
@@ -152,6 +312,15 @@ def init_index_schema(con: duckdb.DuckDBPyConnection) -> None:
     con.execute(QUARANTINE_DDL)
     con.execute(WATERMARKS_DDL)
     con.execute(RUNS_DDL)
+    con.execute(CAMPAIGNS_DDL)
+    con.execute(CAMPAIGN_RUNS_DDL)
+    con.execute(CAMPAIGN_EDGES_DDL)
+    con.execute(RUN_EDGES_DDL)
+    con.execute(SIDECAR_ANCHORS_DDL)
+    con.execute(BLAST_RADIUS_LEDGER_DDL)
+    con.execute(TRUST_LEDGER_DDL)
+    con.execute(ARCHIVED_ITEMS_DDL)
+    con.execute(SUBMITS_DDL)
 
 
 def connect_read(
@@ -195,16 +364,43 @@ def connect_read(
         con.execute("CREATE VIEW events AS SELECT * FROM idx.events")
         con.execute("CREATE VIEW quarantine AS SELECT * FROM idx.quarantine")
         con.execute("CREATE VIEW ingest_watermarks AS SELECT * FROM idx.ingest_watermarks")
+        con.execute("CREATE VIEW campaigns AS SELECT * FROM idx.campaigns")
+        con.execute("CREATE VIEW campaign_runs AS SELECT * FROM idx.campaign_runs")
+        con.execute("CREATE VIEW campaign_edges AS SELECT * FROM idx.campaign_edges")
+        con.execute("CREATE VIEW run_edges AS SELECT * FROM idx.run_edges")
+        con.execute("CREATE VIEW sidecar_anchors AS SELECT * FROM idx.sidecar_anchors")
+        con.execute("CREATE VIEW blast_radius_ledger AS SELECT * FROM idx.blast_radius_ledger")
+        con.execute("CREATE VIEW trust_ledger AS SELECT * FROM idx.trust_ledger")
+        con.execute("CREATE VIEW archived_items AS SELECT * FROM idx.archived_items")
+        con.execute("CREATE VIEW submits AS SELECT * FROM idx.submits")
     else:
         init_index_schema(con)
     return con
 
 
 __all__ = [
+    "ARCHIVED_ITEMS_COLUMNS",
+    "ARCHIVED_ITEMS_DDL",
+    "BLAST_RADIUS_LEDGER_COLUMNS",
+    "BLAST_RADIUS_LEDGER_DDL",
+    "CAMPAIGNS_COLUMNS",
+    "CAMPAIGNS_DDL",
+    "CAMPAIGN_EDGES_COLUMNS",
+    "CAMPAIGN_EDGES_DDL",
+    "CAMPAIGN_RUNS_COLUMNS",
+    "CAMPAIGN_RUNS_DDL",
     "EVENTS_DDL",
     "QUARANTINE_DDL",
     "RUNS_COLUMNS",
     "RUNS_DDL",
+    "RUN_EDGES_COLUMNS",
+    "RUN_EDGES_DDL",
+    "SIDECAR_ANCHORS_COLUMNS",
+    "SIDECAR_ANCHORS_DDL",
+    "SUBMITS_COLUMNS",
+    "SUBMITS_DDL",
+    "TRUST_LEDGER_COLUMNS",
+    "TRUST_LEDGER_DDL",
     "WATERMARKS_DDL",
     "connect_read",
     "index_db_path",
