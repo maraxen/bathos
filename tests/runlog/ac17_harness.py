@@ -418,22 +418,27 @@ def _finish_run(backend: Backend, op: dict, state: ExecState) -> None:
 
 
 def _reap_run(backend: Backend, op: dict, state: ExecState) -> None:
-    """Reap one run directly, bypassing `bathos.reap.reap_runs()`'s own
-    CANDIDATE DISCOVERY (`read_runs(catalog_dir)`, which reads cool
-    fragments straight off disk).
+    """Reap one run.
 
-    This is a deliberate, documented lower-level substitution, not a
-    shortcut around a fold bug: `reap_runs`'s candidate selection is not yet
-    flag-aware -- making the reaper select on FOLDED status is explicitly
-    delivery step 4 ("the reaper on folded status", not built in this wave)
-    -- so under the flag, a flag-on `bth run` writes no cool fragment at
-    all, and `read_runs()` finds nothing to reap regardless of what
-    `run.reaped` events already say. This function instead calls the EXACT
-    same write action `reap.py`'s own `_reap_runs_impl` calls for a
-    candidate it already selected (`emit_event(kind="run.reaped", ...)` /
-    `write_run` + `_write_reap_ledger_entry`), so the FOLD path this test
-    exists to validate is exercised faithfully; only the (out-of-scope,
-    step-4) candidate-selection step is skipped.
+    New backend (delivery step 4, "the reaper on folded status"): calls the
+    REAL `bathos.reap.reap_runs()`, which now discovers its candidates from
+    the folded index (`bathos.index.connect_read`) rather than cool
+    fragments -- so this exercises real candidate discovery, not just the
+    write action (the earlier version of this function bypassed discovery
+    entirely; see git history / the task brief for why that was needed
+    before this step). `run_ingest` first, so the run's `run.started` event
+    is folded and visible to the scan.
+
+    `reap_runs` sweeps EVERY run whose folded status is `running`, not just
+    the one named by this op -- `ac17_gen.py`'s generator guarantees at most
+    one run is ever `running` when a `reap` op fires (its `pending_finish`
+    mechanism flushes any earlier reap+revert-without-finish first), so this
+    real, catalog-wide sweep reaps exactly `op["run_id"]` here.
+
+    Legacy backend: unchanged from before this step -- writes the cool
+    fragment + ledger JSON directly, `reap_runs`'s own legacy write action.
+    Driving the legacy side through a real `reap_runs()` call too is out of
+    this task's scope (only the new backend's bypass is removed).
     """
     run = state.run_obj[op["run_id"]]
     ledger_record = {
@@ -449,8 +454,14 @@ def _reap_run(backend: Backend, op: dict, state: ExecState) -> None:
     state.run_obj[op["run_id"]] = reaped
 
     if backend.is_new:
-        emit_event(
-            kind="run.reaped", entity=[reaped.id], data=ledger_record, cwd=backend.workspace
+        from bathos.reap import reap_runs
+
+        run_ingest(backend.catalog_dir)
+        reap_runs(
+            backend.catalog_dir,
+            older_than_h=24,
+            apply=True,
+            cwd=backend.workspace,
         )
     else:
         write_run(reaped, backend.catalog_dir)
@@ -458,19 +469,33 @@ def _reap_run(backend: Backend, op: dict, state: ExecState) -> None:
 
 
 def _revert_reap_run(backend: Backend, op: dict, state: ExecState) -> None:
-    """The revert half of `_reap_run` -- same rationale (bypasses
-    `reap_runs(revert=True)`'s candidate/ledger lookup, which also goes
-    through cool fragments; calls the same write action directly)."""
+    """The revert half of `_reap_run`.
+
+    New backend: calls the REAL `reap_runs(revert=True, revert_ids=...)`,
+    which (delivery step 4) reads the ledger record to revert from the
+    folded run's own `metadata.reaped` (set by the `run.reaped` event
+    `_reap_run` above just emitted), not a `reaped/<slug>/<run_id>.json`
+    file -- a flag-on reap writes no such file. `run_ingest` first, so that
+    `run.reaped` event is folded and visible.
+
+    Legacy backend: unchanged -- writes the cool fragment + moves the
+    ledger JSON to `reverted/` directly.
+    """
     run = state.run_obj[op["run_id"]]
     ledger_record = state.reap_ledger[op["run_id"]]
     reverted = replace(run, status=ledger_record["prior_status"])
     state.run_obj[op["run_id"]] = reverted
 
     if backend.is_new:
-        emit_event(
-            kind="run.reap_reverted",
-            entity=[reverted.id],
-            data=ledger_record,
+        from bathos.reap import reap_runs
+
+        run_ingest(backend.catalog_dir)
+        reap_runs(
+            backend.catalog_dir,
+            older_than_h=24,
+            apply=True,
+            revert=True,
+            revert_ids=[reverted.id],
             cwd=backend.workspace,
         )
     else:

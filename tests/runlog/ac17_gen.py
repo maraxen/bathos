@@ -47,6 +47,21 @@ def generate_ops(seed: int) -> list[dict[str, Any]]:
     # pick edge/anchor targets and to avoid reassigning into the SAME campaign.
     run_campaign: dict[str, str | None] = {}
     finished_run_ids: list[str] = []
+    # Run ids left "running" by an earlier reap+revert-without-finish
+    # (harness change, delivery step 4): the AC-17 harness now drives its
+    # "reap" op through the REAL `reap_runs()`, which sweeps EVERY eligible
+    # `running` run in the catalog, not just the one named by the op (the
+    # old bypass -- direct `emit_event`/`write_run` calls -- targeted only
+    # the named run_id, so this never mattered before). If more than one run
+    # were left "running" when a later "reap" op fires, the new backend's
+    # real reap_runs would abandon ALL of them while the legacy backend's own
+    # (still-surgical) canonical-state recipe only reflects the ops actually
+    # generated for each run individually, producing an unexplained AC-17
+    # divergence. Flushed (given a synthetic `finish_run`) immediately before
+    # any subsequent run's own "reap" decision, so at most one run is ever
+    # "running" at a real reap_runs() call -- a test-fixture-only fix, not a
+    # production behaviour change.
+    pending_finish: set[str] = set()
     # AC-17 finding (classification b, legacy quirk -- NOT fixed here, see
     # ac17_harness's reassignment-guard comment for the sibling case):
     # `conclude_campaign`'s own `link_cool_runs_to_campaigns(...,
@@ -101,6 +116,24 @@ def generate_ops(seed: int) -> list[dict[str, Any]]:
         )
         run_campaign[run_id] = campaign_handle
 
+        # Resolve any run left dangling "running" by an earlier reap+revert-
+        # without-finish before THIS run's own reap decision (see
+        # `pending_finish`'s declaration above).
+        for dangling_id in sorted(pending_finish):
+            outcome, status, exit_code = _pick_outcome(rng)
+            ops.append(
+                {
+                    "kind": "finish_run",
+                    "run_id": dangling_id,
+                    "ts": next_ts(),
+                    "outcome": outcome,
+                    "status": status,
+                    "exit_code": exit_code,
+                }
+            )
+            finished_run_ids.append(dangling_id)
+        pending_finish.clear()
+
         branch = rng.random()
         if branch < 0.18:
             ops.append({"kind": "reap", "run_id": run_id, "ts": next_ts()})
@@ -119,6 +152,8 @@ def generate_ops(seed: int) -> list[dict[str, Any]]:
                         }
                     )
                     finished_run_ids.append(run_id)
+                else:
+                    pending_finish.add(run_id)
         else:
             outcome, status, exit_code = _pick_outcome(rng)
             ops.append(

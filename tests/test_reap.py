@@ -570,21 +570,36 @@ def test_reap_flag_off_performs_only_legacy_write(temp_catalog):
 
 def test_reap_flag_on_emits_event_and_skips_legacy_write(temp_catalog, monkeypatch):
     """AC-25 flag-on half: run.reaped only -- no parquet status rewrite, no
-    ledger JSON, no warm-tier reconcile."""
-    from bathos.reap import reap_runs
-    from bathos.runlog.writer import reset_writers_for_test
+    ledger JSON, no warm-tier reconcile.
 
-    run = create_run("run_flagon", age_hours=25, status="running")
-    write_run(run, temp_catalog)
+    Delivery step 4 ("the reaper on folded status"): candidate discovery
+    reads the folded index, not cool fragments, once the flag is on -- so
+    unlike the pre-step-4 version of this test, the fixture is a real
+    `run.started` event (+ an ingest) rather than a legacy `write_run`
+    fragment, matching what a real flag-on `bth run` actually produces.
+    """
+    from bathos.reap import reap_runs
+    from bathos.runlog.emit import emit_event, run_event_data
+    from bathos.runlog.ingest import run_ingest
+    from bathos.runlog.writer import reset_writers_for_test
 
     monkeypatch.setenv("BTH_LOG_MODE", "1")
     monkeypatch.setenv("BTH_CATALOG_DIR", str(temp_catalog))
 
+    run = create_run("run_flagon", age_hours=25, status="running")
+    emit_event(
+        kind="run.started",
+        entity=[run.id],
+        data=run_event_data(run),
+        cwd=temp_catalog.parent,
+        hard_fail=True,
+    )
+    run_ingest(temp_catalog)
+
     reap_runs(temp_catalog, older_than_h=24, dry_run=False, apply=True, cwd=temp_catalog.parent)
 
-    # No legacy write: the cool fragment's status is untouched.
-    still_running = read_runs(temp_catalog)[0]
-    assert still_running.status == "running"
+    # No legacy write: no cool fragment was ever written for this run.
+    assert not list((temp_catalog / "runs").rglob("run_*.parquet"))
     ledger_path = temp_catalog / "reaped" / "test" / "run_flagon.json"
     assert not ledger_path.exists()
     assert not (temp_catalog / "bathos.db").exists()  # no warm-tier reconcile
@@ -599,20 +614,35 @@ def test_reap_flag_on_emits_event_and_skips_legacy_write(temp_catalog, monkeypat
 
 
 def test_reap_revert_flag_on_emits_event_and_skips_legacy_write(temp_catalog, monkeypatch):
-    """AC-25 flag-on half of the revert path: run.reap_reverted only."""
+    """AC-25 flag-on half of the revert path: run.reap_reverted only.
+
+    Delivery step 4: the ledger record for the revert now comes from the
+    folded run's own `metadata.reaped` (set by the earlier flag-on
+    `run.reaped`), never from a `reaped/<slug>/<run_id>.json` file -- a
+    flag-on reap writes no such file at all.
+    """
     from bathos.reap import reap_runs
+    from bathos.runlog.emit import emit_event, run_event_data
+    from bathos.runlog.ingest import run_ingest
     from bathos.runlog.writer import reset_writers_for_test
-
-    run = create_run("run_revert", age_hours=25, status="running")
-    write_run(run, temp_catalog)
-
-    # Reap first under the legacy path so a ledger entry exists to revert.
-    reap_runs(temp_catalog, older_than_h=24, dry_run=False, apply=True)
-    ledger_path = temp_catalog / "reaped" / "test" / "run_revert.json"
-    assert ledger_path.exists()
 
     monkeypatch.setenv("BTH_LOG_MODE", "1")
     monkeypatch.setenv("BTH_CATALOG_DIR", str(temp_catalog))
+
+    run = create_run("run_revert", age_hours=25, status="running")
+    emit_event(
+        kind="run.started",
+        entity=[run.id],
+        data=run_event_data(run),
+        cwd=temp_catalog.parent,
+        hard_fail=True,
+    )
+    run_ingest(temp_catalog)
+
+    # Reap first (flag on) so a folded metadata.reaped ledger record exists
+    # to revert.
+    reap_runs(temp_catalog, older_than_h=24, dry_run=False, apply=True, cwd=temp_catalog.parent)
+    run_ingest(temp_catalog)
 
     reap_runs(
         temp_catalog,
@@ -624,12 +654,10 @@ def test_reap_revert_flag_on_emits_event_and_skips_legacy_write(temp_catalog, mo
         cwd=temp_catalog.parent,
     )
 
-    # No legacy write: status stays "abandoned" (from the earlier legacy reap)
-    # and the ledger file is not moved to reverted/.
-    still_abandoned = read_runs(temp_catalog)[0]
-    assert still_abandoned.status == "abandoned"
-    assert ledger_path.exists()
-    assert not (ledger_path.parent / "reverted").exists()
+    # No legacy write: no cool fragment, no ledger JSON file ever existed.
+    assert not list((temp_catalog / "runs").rglob("run_*.parquet"))
+    ledger_path = temp_catalog / "reaped" / "test" / "run_revert.json"
+    assert not ledger_path.exists()
 
     lines = _read_jsonl_dir(Path.home() / ".bth" / "log" / "unaffiliated")
     reverted_events = [line for line in lines if line["kind"] == "run.reap_reverted"]

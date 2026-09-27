@@ -311,6 +311,11 @@ def fold_campaign(
             {"campaign_id": campaign_id, "run_id": rid, "evalue": None, "seq_position": None}
             for rid in ordered
         ]
+        # `bth verify` (delivery step 4) needs to tell "genuinely no evalue
+        # data" apart from "the threshold walk hit a mismatch and discarded
+        # everything" (BC-12) -- non-sequential campaigns never run the walk
+        # at all, so there is no mismatch to report here.
+        row["_threshold_mismatch"] = False
         return row, campaign_runs_rows
 
     from bathos.sidecar import compute_evalue
@@ -350,6 +355,13 @@ def fold_campaign(
             {"campaign_id": campaign_id, "run_id": rid, "evalue": None, "seq_position": None}
             for rid in ordered
         ]
+        # BC-12 / AC-24 ("threshold mismatch" finding): a NEW key, not a real
+        # persisted column (`bathos.index.CAMPAIGNS_COLUMNS` does not list
+        # it, so `_insert_row` never writes it and it never reaches
+        # `idx.campaigns`) -- `bth verify` recomputes the fold directly to
+        # read this flag rather than re-deriving the mismatch condition
+        # itself, keeping one source of truth for "was there a mismatch".
+        row["_threshold_mismatch"] = True
         return row, campaign_runs_rows
 
     # No candidate contributed (e.g. every member is import-only, so no live
@@ -366,6 +378,7 @@ def fold_campaign(
         row["stopping_threshold"] = pending_threshold
     else:
         row.setdefault("stopping_threshold", None)
+    row["_threshold_mismatch"] = False
     campaign_runs_rows = [
         {
             "campaign_id": campaign_id,

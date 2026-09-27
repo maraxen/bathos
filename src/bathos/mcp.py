@@ -4202,8 +4202,8 @@ def verify_tool(
     archive_dir: str = "",
     authoring: bool = False,
 ) -> dict:
-    """Verify catalog integrity across cool, warm, and archive tiers."""
-    from bathos.verify import verify_all, verify_archive, verify_cool, verify_warm
+    """Verify catalog integrity across cool, warm, archive, and runlog tiers."""
+    from bathos.verify import verify_all, verify_archive, verify_cool, verify_runlog, verify_warm
 
     cat_dir = _get_catalog_dir(catalog_dir or None)
     archive_root = (
@@ -4216,6 +4216,8 @@ def verify_tool(
         results = [verify_warm(cat_dir)]
     elif tier == "archive":
         results = [verify_archive(archive_root)]
+    elif tier == "runlog":
+        results = [verify_runlog(cat_dir)]
     elif tier == "all":
         results = verify_all(cat_dir, archive_root)
     else:
