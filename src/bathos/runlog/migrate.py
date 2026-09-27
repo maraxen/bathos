@@ -131,6 +131,7 @@ class MigrateToLogResult:
     missing_project_ids: list[str] = field(default_factory=list)
     conflicting_jobs: list[str] = field(default_factory=list)
     locked_source: str | None = None
+    unresolved_routing_count: int = 0
     detail: str = ""
 
 
@@ -569,33 +570,106 @@ def _append_import_events(
 
 def _route_candidates(
     candidates: list, roots: list[tuple[Path, ProjectConfig | None]]
-) -> dict[Path | None, list]:
+) -> tuple[dict[Path | None, list], int]:
     """Bucket every candidate by its resolved OWNING root (`None` ==
-    unaffiliated). With 0 or 1 registered roots the routing is unambiguous
-    (everything goes there, or to unaffiliated with none registered).
+    unaffiliated). Returns `(buckets, unresolved_count)`: the latter counts
+    candidates that fell to `unaffiliated/` because their parent entity's
+    project genuinely could not be determined (never because there simply
+    is no registered root) -- a real multi-project catalog can see how many
+    entities need attention.
 
-    With 2+ registered roots (spec-ambiguity call, documented in the module
-    docstring and the task report): only candidates whose OWN legacy fields
-    carry a `project_slug` matching a registered root's slug route there;
-    everything else (edges, `campaign_run.imported`, anchors, the three
-    simple ledgers -- none of which carry `project_slug` on their own
-    fields) falls to `unaffiliated/`. This is a known, deliberate scope
-    limitation for the multi-project catalog case; the common single-
-    project catalog (this wave's fixtures) is unaffected.
+    With 0 or 1 registered roots the routing is unambiguous (everything
+    goes there, or to unaffiliated with none registered) -- `unresolved_
+    count` is always 0 there.
+
+    With 2+ registered roots (review finding (a), 260927 -- the real
+    catalog has 10+ projects sharing one catalog): resolved via the
+    candidate's own `project_slug` field when it carries one directly
+    (runs, campaigns, submits, archived items); else via its PARENT
+    entity's project -- `campaign_run.imported`/a `campaign` edge via the
+    campaign's project, a `run` edge / `blast_radius.imported` /
+    `trust_ledger.imported` keyed on a run via THAT run's project,
+    `anchor.imported` via its `campaign_id` field or (fallback) its `path`
+    resolving under one registered root's own filesystem prefix. Only when
+    NONE of that resolves does a candidate fall to `unaffiliated/`
+    (`legacy_source.unreadable` always does -- it carries no entity data
+    at all to resolve a parent from).
     """
     if not roots:
-        return {None: list(candidates)}
+        return {None: list(candidates)}, 0
     if len(roots) == 1:
         root, _cfg = roots[0]
-        return {root: list(candidates)}
+        return {root: list(candidates)}, 0
 
     slug_to_root = {cfg.slug: root for root, cfg in roots if cfg is not None}
-    buckets: dict[Path | None, list] = {}
+    root_to_slug = {root: cfg.slug for root, cfg in roots if cfg is not None}
+    resolved_roots = {root.resolve(): root for root, _cfg in roots}
+
+    # Pass 1: index the direct project_slug every run/campaign candidate
+    # already carries on its own fields, so pass 2 can resolve their
+    # dependents (edges, campaign_runs, ledgers, anchors) by parent lookup.
+    run_project: dict[str, str] = {}
+    campaign_project: dict[str, str] = {}
     for cand in candidates:
-        slug = cand.fields.get("project_slug") if isinstance(cand.fields, dict) else None
+        fields = cand.fields if isinstance(cand.fields, dict) else {}
+        slug = fields.get("project_slug")
+        if not slug or not cand.entity:
+            continue
+        if cand.kind in ("run.imported", "run_reap.imported"):
+            run_project[cand.entity[0]] = slug
+        elif cand.kind == "campaign.imported":
+            campaign_project[cand.entity[0]] = slug
+
+    def _resolve_slug(cand) -> str | None:
+        fields = cand.fields if isinstance(cand.fields, dict) else {}
+        slug = fields.get("project_slug")
+        if slug:
+            return slug
+        entity = cand.entity or []
+        if cand.kind == "campaign_run.imported" and entity:
+            return campaign_project.get(entity[0])
+        if cand.kind == "edge.imported":
+            etype = fields.get("type")
+            src = fields.get("src") or (entity[0] if entity else None)
+            if etype == "campaign":
+                return campaign_project.get(src)
+            return run_project.get(src)
+        if cand.kind == "trust_ledger.imported":
+            return run_project.get(fields.get("run_id"))
+        if cand.kind == "blast_radius.imported":
+            etype = fields.get("entity_type")
+            eid = fields.get("entity_id")
+            if etype == "run":
+                return run_project.get(eid)
+            if etype == "campaign":
+                return campaign_project.get(eid)
+            return None
+        if cand.kind == "anchor.imported":
+            campaign_id = fields.get("campaign_id")
+            if campaign_id:
+                via_campaign = campaign_project.get(campaign_id)
+                if via_campaign:
+                    return via_campaign
+            path_val = fields.get("path")
+            if path_val:
+                p = Path(path_val)
+                if p.is_absolute():
+                    for resolved, root in resolved_roots.items():
+                        with contextlib.suppress(ValueError):
+                            p.relative_to(resolved)
+                            return root_to_slug.get(root)
+            return None
+        return None
+
+    buckets: dict[Path | None, list] = {}
+    unresolved = 0
+    for cand in candidates:
+        slug = _resolve_slug(cand)
         root = slug_to_root.get(slug) if slug else None
+        if root is None:
+            unresolved += 1
         buckets.setdefault(root, []).append(cand)
-    return buckets
+    return buckets, unresolved
 
 
 def _root_project_info(root: Path | None) -> tuple[str | None, str | None]:
@@ -625,23 +699,25 @@ def _dest_for_root(root: Path | None, *, staging_root: Path | None) -> Path:
 
 def _import_candidates(
     catalog_dir: Path, *, staging_root: Path | None
-) -> ImportReport:
+) -> tuple[ImportReport, int]:
     """The shared body of Migration step 2 and `--import-legacy`: scan every
     legacy source once (`_all_candidates`, AC-18's `connect_legacy`), route
     each candidate to its owning destination, and append. `staging_root`
     picks staging (step 2) vs. direct project logs (`--import-legacy`).
+    Returns `(report, unresolved_routing_count)` -- the latter from
+    `_route_candidates` (0 for a 0/1-root catalog).
     """
     report = ImportReport()
     candidates = _all_candidates(catalog_dir, report)
     roots = _registered_roots_with_config()
-    buckets = _route_candidates(candidates, roots)
+    buckets, unresolved = _route_candidates(candidates, roots)
     for root, bucket in buckets.items():
         dest = _dest_for_root(root, staging_root=staging_root)
         slug, pid = _root_project_info(root)
         main_root = root if root is not None else catalog_dir
         n = _append_import_events(bucket, dest, project=slug, project_id=pid, main_root=main_root)
         report.appended += n
-    return report
+    return report, unresolved
 
 
 # --------------------------------------------------------------------------
@@ -1174,7 +1250,9 @@ def migrate_to_log(
         _cleanup_prior_attempt_state(cd)
         attempt = _new_attempt_id()
 
-        import_report = _import_candidates(cd, staging_root=_attempt_staging_root(attempt))
+        import_report, unresolved_routing = _import_candidates(
+            cd, staging_root=_attempt_staging_root(attempt)
+        )
         if import_report.locked:
             return MigrateToLogResult(
                 status="legacy_db_locked",
@@ -1211,6 +1289,7 @@ def migrate_to_log(
                 report_path=str(report_path),
                 report_sha256=diff.sha256,
                 residual_lines=[rl.to_dict() for rl in diff.lines],
+                unresolved_routing_count=unresolved_routing,
                 detail=(
                     "review the residual report, then re-run with "
                     f"--accept-residual {diff.sha256}"
@@ -1223,6 +1302,7 @@ def migrate_to_log(
             attempt=attempt,
             report_path=str(report_path),
             report_sha256=diff.sha256,
+            unresolved_routing_count=unresolved_routing,
         )
 
 
@@ -1241,7 +1321,7 @@ def import_legacy_post_cutover(catalog_dir: Path | None = None) -> MigrateToLogR
             ),
         )
     with writers_lock(cd, exclusive=True):
-        report = _import_candidates(cd, staging_root=None)
+        report, unresolved_routing = _import_candidates(cd, staging_root=None)
     if report.locked:
         return MigrateToLogResult(
             status="legacy_db_locked",
@@ -1250,6 +1330,7 @@ def import_legacy_post_cutover(catalog_dir: Path | None = None) -> MigrateToLogR
         )
     return MigrateToLogResult(
         status="imported",
+        unresolved_routing_count=unresolved_routing,
         detail=f"appended={report.appended} unchanged={report.unchanged}",
     )
 

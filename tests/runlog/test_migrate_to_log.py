@@ -717,3 +717,218 @@ def test_import_legacy_after_cutover_imports_stale_write_then_converges(tmp_path
     second = import_legacy_post_cutover(backend.catalog_dir)
     assert second.status == "imported"
     assert "appended=0" in second.detail
+
+
+# --------------------------------------------------------------------------
+# Multi-root routing (review finding (a), 260927)
+# --------------------------------------------------------------------------
+
+
+def _legacy_db(catalog_dir: Path):
+    """A live, writable connection to a freshly-compacted `bathos.db` (the
+    same idiom `ac17_harness._refresh_and_get_db` uses for its legacy
+    backend) -- needed by `create_campaign`/`add_run_to_campaign`/
+    `add_run_edge`, which take an already-open connection rather than a
+    bare `catalog_dir`."""
+    compact(catalog_dir)
+    return duckdb.connect(str(catalog_dir / "bathos.db"))
+
+
+def test_multi_root_routing_by_parent_entity(tmp_path: Path):
+    """Review finding (a), 260927: the real catalog has 10+ projects
+    sharing ONE catalog. An entity without its own `project_slug` must
+    route through its PARENT entity's project, not fall to `unaffiliated/`
+    just because 2+ roots are registered.
+
+    Three registered roots share one `catalog_dir`:
+    - proj1: a run, a campaign, and that run's `campaign_run` membership
+      (no `project_slug` of its own -> must route via the campaign);
+      also a blast_radius record and an anchor, both keyed via that
+      campaign/run.
+    - proj2: two runs and a run edge between them (no `project_slug` of
+      its own -> must route via the child run's project).
+    - proj3: a run and a trust_ledger record keyed on it (no `project_slug`
+      of its own -> must route via that run's project).
+    """
+    from bathos.anchor import AnchorRecord, CatalogAnchorStore
+    from bathos.blast_radius import BlastRadiusRecord
+    from bathos.blast_radius import append_ledger_record as append_blast_radius_record
+    from bathos.campaign_edges import add_run_edge
+    from bathos.campaigns import add_run_to_campaign, create_campaign
+    from bathos.runlog.migrate import _attempt_staging_root, _import_candidates, root_id
+    from bathos.trust_ledger import TrustLedgerRecord
+    from bathos.trust_ledger import append_ledger_record as append_trust_ledger_record
+
+    shared_cat = tmp_path / "shared_cat"
+
+    roots: dict[str, Path] = {}
+    for slug in ("proj1", "proj2", "proj3"):
+        root = tmp_path / slug
+        make_git_repo(root)
+        write_bth_toml(root, slug=slug)
+        assign_project_id(root)
+        _commit_all(root, f"assign id for {slug}")
+        register_main_root(root)
+        roots[slug] = root
+
+    # proj1: run + campaign + membership + blast_radius + anchor.
+    write_run(
+        Run(
+            id="run-p1",
+            project_slug="proj1",
+            command="a.py",
+            argv=["python", "a.py"],
+            git_hash="1" * 40,
+            git_branch="main",
+            git_dirty=False,
+            timestamp=BASE_TS,
+            duration_s=1.0,
+            exit_code=0,
+            status="completed",
+        ),
+        shared_cat,
+    )
+    db = _legacy_db(shared_cat)
+    try:
+        campaign = create_campaign(db, "c1", "proj1", "exploration", catalog_dir=shared_cat)
+        add_run_to_campaign(db, campaign.id, "run-p1", catalog_dir=shared_cat)
+    finally:
+        db.close()
+    append_blast_radius_record(
+        BlastRadiusRecord(entity_type="run", entity_id="run-p1", to_state="affected"),
+        shared_cat,
+    )
+    CatalogAnchorStore(shared_cat).insert(
+        AnchorRecord(
+            path="figs/0.svg",
+            sha256="a" * 64,
+            kind="figure",
+            label="fig0",
+            campaign_id=campaign.id,
+            anchored_at=BASE_TS.isoformat(),
+        )
+    )
+
+    # proj2: two runs + a run edge between them.
+    write_run(
+        Run(
+            id="run-p2a",
+            project_slug="proj2",
+            command="b.py",
+            argv=["python", "b.py"],
+            git_hash="2" * 40,
+            git_branch="main",
+            git_dirty=False,
+            timestamp=BASE_TS,
+            duration_s=1.0,
+            exit_code=0,
+            status="completed",
+        ),
+        shared_cat,
+    )
+    write_run(
+        Run(
+            id="run-p2b",
+            project_slug="proj2",
+            command="c.py",
+            argv=["python", "c.py"],
+            git_hash="3" * 40,
+            git_branch="main",
+            git_dirty=False,
+            timestamp=BASE_TS,
+            duration_s=1.0,
+            exit_code=0,
+            status="completed",
+        ),
+        shared_cat,
+    )
+    db = _legacy_db(shared_cat)
+    try:
+        add_run_edge(db, "run-p2b", "run-p2a", catalog_dir=shared_cat)
+    finally:
+        db.close()
+
+    # proj3: a run + a trust_ledger record keyed on it.
+    write_run(
+        Run(
+            id="run-p3",
+            project_slug="proj3",
+            command="d.py",
+            argv=["python", "d.py"],
+            git_hash="4" * 40,
+            git_branch="main",
+            git_dirty=False,
+            timestamp=BASE_TS,
+            duration_s=1.0,
+            exit_code=0,
+            status="completed",
+        ),
+        shared_cat,
+    )
+    append_trust_ledger_record(
+        TrustLedgerRecord(
+            content_hash="c" * 64,
+            from_state="candidate",
+            to_state="promoted",
+            run_id="run-p3",
+        ),
+        shared_cat,
+    )
+    compact(shared_cat)
+
+    staging_root = _attempt_staging_root("test-multi-root")
+    report, unresolved = _import_candidates(shared_cat, staging_root=staging_root)
+    assert report.locked == []
+    assert unresolved == 0, "every entity here has a resolvable parent"
+
+    def _events_under(slug: str) -> list[dict]:
+        d = staging_root / "project" / root_id(roots[slug])
+        events: list[dict] = []
+        if d.is_dir():
+            for f in sorted(d.glob("*.jsonl")):
+                for line in f.read_text().splitlines():
+                    if line.strip():
+                        events.append(json.loads(line))
+        return events
+
+    proj1_events = _events_under("proj1")
+    proj2_events = _events_under("proj2")
+    proj3_events = _events_under("proj3")
+
+    def _has(events: list[dict], kind: str, entity: list[str]) -> bool:
+        return any(e["kind"] == kind and e["entity"] == entity for e in events)
+
+    # proj1: run, campaign, campaign_run (routed via the campaign), blast_radius
+    # (routed via the run), and the anchor (routed via the campaign).
+    assert _has(proj1_events, "run.imported", ["run-p1"])
+    assert _has(proj1_events, "campaign.imported", [campaign.id])
+    assert _has(proj1_events, "campaign_run.imported", [campaign.id, "run-p1"])
+    assert any(e["kind"] == "blast_radius.imported" for e in proj1_events)
+    assert any(e["kind"] == "anchor.imported" for e in proj1_events)
+
+    # proj2: both runs, and the edge (routed via the child run's project).
+    assert _has(proj2_events, "run.imported", ["run-p2a"])
+    assert _has(proj2_events, "run.imported", ["run-p2b"])
+    assert _has(proj2_events, "edge.imported", ["run-p2b", "run-p2a", "run"])
+
+    # proj3: the run, and the trust_ledger record (routed via that run).
+    assert _has(proj3_events, "run.imported", ["run-p3"])
+    assert any(e["kind"] == "trust_ledger.imported" for e in proj3_events)
+
+    # None of proj1/proj2/proj3's own entities leaked into unaffiliated/.
+    unaffiliated_dir = staging_root / "unaffiliated"
+    if unaffiliated_dir.is_dir():
+        unaffiliated_events = []
+        for f in sorted(unaffiliated_dir.glob("*.jsonl")):
+            for line in f.read_text().splitlines():
+                if line.strip():
+                    unaffiliated_events.append(json.loads(line))
+        run_ids_seen = {
+            tuple(e["entity"])
+            for e in unaffiliated_events
+            if e["kind"] in ("run.imported", "campaign.imported", "edge.imported")
+        }
+        assert ("run-p1",) not in run_ids_seen
+        assert ("run-p2a",) not in run_ids_seen
+        assert ("run-p2b",) not in run_ids_seen
+        assert ("run-p3",) not in run_ids_seen
