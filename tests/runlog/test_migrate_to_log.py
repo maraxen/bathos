@@ -291,27 +291,17 @@ def test_residual_report_line_shape(tmp_path: Path):
 
 
 def test_step1_pulled_or_reaped_class(tmp_path: Path):
-    """AC-30's `step1_pulled_or_reaped` half: a stale `running` run that
-    migrate's own step 1 reaps (`reconcile_warm=False`, so `bathos.db` is
-    left exactly as it was) is classified, not left unclassified.
-
-    Note (spec-vs-implementation finding, reported in full in the task
-    report): AC-30 also describes a "warm-only row (absent from every cool
-    fragment)" whose residual lines carry `staged_value: null` -- i.e. the
-    `warm_only_row` class. This wave's importer (`_warm_candidates`,
-    delivery step 4 wave a, reused unchanged here) reads `bathos.db`'s OWN
-    rows as a first-class "warm" source candidate REGARDLESS of cut-over
-    state (gated only on `bathos.db.frozen` vs `bathos.db` existing, not on
-    `is_log_mode()`), so a row present in `bathos.db` but absent from every
-    cool fragment is still correctly imported (via that warm-source
-    candidate) and therefore never actually produces a `staged_value: null`
-    residual for a `runs`/`campaigns`/edge/anchor/ledger row -- confirmed
-    empirically (see the task report). `warm_only_row` is implemented in
-    `_classify` for the case it CAN fire (the importer failing to resolve
-    the entity via ANY source, e.g. a locked/corrupt warm database handled
-    separately as `legacy_db_locked`/`corrupt_legacy_source`), but this test
-    does not attempt to manufacture the AC-30 scenario as literally worded,
-    since doing so would require changing the already-built importer.
+    """AC-30 (spec v35): a stale `running` run that migrate's own step 1
+    reaps (`reconcile_warm=False`, so `bathos.db` is left exactly as it
+    was) is classified `step1_pulled_or_reaped`, not left unclassified; and
+    a warm-only row (present in `bathos.db`, absent from every cool
+    fragment) is imported from the `warm` source, so its staged row equals
+    its warm row and it yields NO residual line -- it survives the
+    migration, which is the property AC-30 guards (v35 corrected v34's
+    "`staged_value: null`" wording, which cannot occur: step 3 diffs
+    against `bathos.db` and the importer reads it as a first-class source
+    regardless of cut-over state -- confirmed empirically before v35
+    landed, see the task report on delivery step 4 wave c).
     """
     backend = make_backend(tmp_path, "legacy", is_new=False)
     _commit_all(backend.workspace, "assign project id")
@@ -330,7 +320,30 @@ def test_step1_pulled_or_reaped_class(tmp_path: Path):
         status="running",
     )
     write_run(stale, backend.catalog_dir)
+
+    warm_only = Run(
+        id="run-warmonly",
+        project_slug="proj",
+        command="scripts/experiments/warmonly.py",
+        argv=["python", "warmonly.py"],
+        git_hash="c" * 40,
+        git_branch="main",
+        git_dirty=False,
+        timestamp=BASE_TS,
+        duration_s=1.0,
+        exit_code=0,
+        status="completed",
+    )
+    write_run(warm_only, backend.catalog_dir)
     compact(backend.catalog_dir)
+
+    # Absent from every cool fragment from this point on -- a genuine
+    # "warm-only row", present only in bathos.db.
+    import pyarrow.parquet as pq
+
+    for f in (backend.catalog_dir / "runs" / "proj").glob("*.parquet"):
+        if pq.read_table(f, columns=["id"]).column("id")[0].as_py() == "run-warmonly":
+            f.unlink()
 
     from bathos.runlog.migrate import migrate_to_log
 
@@ -340,6 +353,8 @@ def test_step1_pulled_or_reaped_class(tmp_path: Path):
         (line["table"], tuple(line["key"])): line["class"] for line in result.residual_lines
     }
     assert classes[("runs", ("run-stale2",))] == "step1_pulled_or_reaped"
+    # AC-30 (v35): the warm-only row yields NO residual line at all.
+    assert ("runs", ("run-warmonly",)) not in classes
 
     # bathos.db itself is untouched by steps 1-3 (spec AC-30: "leave
     # bathos.db byte-identical") -- only its cool fragment and a reap ledger
@@ -349,23 +364,27 @@ def test_step1_pulled_or_reaped_class(tmp_path: Path):
         legacy_status = con.execute(
             "SELECT status FROM runs WHERE id = ?", ["run-stale2"]
         ).fetchone()[0]
+        legacy_warmonly_row = con.execute(
+            "SELECT id, status, command, exit_code FROM runs WHERE id = ?", ["run-warmonly"]
+        ).fetchone()
     finally:
         con.close()
     assert legacy_status == "running"
     assert (backend.catalog_dir / "reaped" / "proj" / "run-stale2.json").is_file()
+    assert legacy_warmonly_row is not None
 
-    # A second call still converges (this time the run is already reaped by
-    # the first call, so it's classified `fragment_not_yet_compacted`
-    # instead -- a DIFFERENT class label than the first call's
-    # `step1_pulled_or_reaped`, so the report is not byte-identical across
-    # calls here; determinism-on-an-unchanged-catalog is asserted instead in
-    # `test_residual_report_format_and_hash`, whose fixture never mutates).
-    other = migrate_to_log(backend.catalog_dir)
-    assert other.status == "residual_pending"
-    other_classes = {
-        (line["table"], tuple(line["key"])): line["class"] for line in other.residual_lines
-    }
-    assert other_classes[("runs", ("run-stale2",))] == "fragment_not_yet_compacted"
+    # Converge to a switch, then assert the warm-only row SURVIVED into the
+    # staged/folded index, equal to its warm row (AC-30 v35's actual guard).
+    final = _converge(backend.catalog_dir)
+    assert final.status == "switched"
+    con = connect_read(backend.catalog_dir)
+    try:
+        staged_warmonly_row = con.execute(
+            "SELECT id, status, command, exit_code FROM runs WHERE id = ?", ["run-warmonly"]
+        ).fetchone()
+    finally:
+        con.close()
+    assert staged_warmonly_row == legacy_warmonly_row
 
 
 # --------------------------------------------------------------------------
