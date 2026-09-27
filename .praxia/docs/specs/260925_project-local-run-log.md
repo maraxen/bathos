@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: v34 (v33 + BC-10..BC-12, legacy-compat gaps found by the AC-17 differential test)
+revision: v35 (v34 + AC-30 warm-only-row wording fixed against the step-3 diff)
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -748,9 +748,13 @@ switched on in one step.
   fragment) and a stale `running` run that `sacct` reports finished, `bth migrate --to-log`
   steps 1-3 leave `bathos.db` byte-identical, reap that run into a cool fragment and ledger
   only, and yield a residual report whose lines are exactly
-  `{table, key, column, class, legacy_value, staged_value}`; the warm-only row's lines carry
-  `staged_value: null`, and the reaped run's lines carry the class of runs pulled or reaped in
-  step 1; changing any one legacy value in the fixture changes the report's sha256. A second
+  `{table, key, column, class, legacy_value, staged_value}`; the warm-only row is imported from
+  the `warm` source, so its staged row equals its warm row and it yields no residual line (it
+  survives the migration, which is the property this fixture guards), and the reaped run's lines
+  carry the class of runs pulled or reaped in step 1; changing any one legacy value that appears
+  in the report changes the report's sha256. (v35: v34 required `staged_value: null` for the
+  warm-only row, which cannot occur, since step 3 diffs against `bathos.db` and the importer
+  reads it.) A second
   fixture whose local fragment was pulled `running` while its `remote-runs/` copy is terminal
   folds that run to the terminal status, not `abandoned`, with `duration_s` and `output_paths`
   from the remote copy; and two projects whose remotes share the name `engaging` keep separate
