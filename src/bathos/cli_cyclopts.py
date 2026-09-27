@@ -959,7 +959,15 @@ def submit(
 
 
 @app.command
-def migrate(dry_run: bool = False, classify: bool = False, project: str | None = None) -> None:
+def migrate(
+    dry_run: bool = False,
+    classify: bool = False,
+    project: str | None = None,
+    to_log: bool = False,
+    import_legacy: bool = False,
+    force: bool = False,
+    accept_residual: str = "",
+) -> None:
     """Migrate cool-tier Parquet fragments to current schema, optionally classifying scripts.
 
     Parameters
@@ -968,8 +976,49 @@ def migrate(dry_run: bool = False, classify: bool = False, project: str | None =
     classify: Classify flat scripts into subdirs (Phase 2).
     project: Scope migration to a single project slug's runs/<project>/ fragments
         (default: all projects in the catalog).
+    to_log: Run the project-local-run-log cut-over (Migration steps 0-4) instead of
+        the schema migration above. See `.praxia/docs/specs/260925_project-local-run-log.md`.
+    import_legacy: Post-cut-over re-import of a stale legacy write (AC-23); refused
+        before cut-over.
+    force: With --to-log, proceed past a squeue/submit-record conflict instead of refusing.
+    accept_residual: With --to-log, the sha256 of a previously-reviewed residual report;
+        proceeds to the switch only if a fresh run reproduces that exact hash.
     """
     from bathos.cli_common import catalog_dir
+
+    if import_legacy:
+        from bathos.runlog.migrate import import_legacy_post_cutover
+
+        result = import_legacy_post_cutover(catalog_dir())
+        print(f"{result.status}: {result.detail}")
+        if result.status not in ("imported",):
+            raise SystemExit(1)
+        return
+
+    if to_log:
+        from bathos.runlog.migrate import migrate_to_log
+
+        result = migrate_to_log(
+            catalog_dir(),
+            force=force,
+            accept_residual=accept_residual or None,
+        )
+        print(f"status: {result.status}")
+        if result.attempt:
+            print(f"  attempt: {result.attempt}")
+        if result.detail:
+            print(f"  {result.detail}")
+        if result.missing_project_ids:
+            print("  roots missing a committed [project] id:", file=sys.stderr)
+            for p in result.missing_project_ids:
+                print(f"    {p}", file=sys.stderr)
+        if result.conflicting_jobs:
+            print(f"  conflicting job(s): {', '.join(result.conflicting_jobs)}", file=sys.stderr)
+        if result.report_sha256:
+            print(f"  report sha256: {result.report_sha256}")
+        if result.status != "switched" and result.status != "already_migrated":
+            raise SystemExit(1)
+        return
 
     if classify:
         from bathos.classifier import apply_classify_plan, build_move_plan, classify_flat_scripts

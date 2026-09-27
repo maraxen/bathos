@@ -214,6 +214,22 @@ def _registered_roots_with_config() -> list[tuple[Path, ProjectConfig | None]]:
     return out
 
 
+def root_id(root: Path) -> str:
+    """A filesystem-safe, stable id for `root`'s resolved absolute path, for
+    use as a single PATH COMPONENT (`remote-runs/<root id>/<remote>/`,
+    `import-staging/<attempt>/project/<root id>/`) -- never the raw resolved
+    path itself: `Path(a) / "project" / "/abs/path"` silently discards `a`
+    and `"project"` (`Path.__truediv__` treats an absolute-looking operand
+    as a full replacement, not a join), which is not a hypothetical -- it
+    silently dropped every staged event into the wrong directory tree
+    before this fix. `root_id` is a pure, deterministic function of the
+    resolved path, so a later invocation (a fresh process resuming Migration
+    step 4(c)) recomputes the SAME id from `list_registered_roots()` without
+    needing any extra persisted mapping.
+    """
+    return hashlib.sha256(str(root.resolve()).encode()).hexdigest()
+
+
 # --------------------------------------------------------------------------
 # Step 1: quiesce -- pull, full remote-runs mirror, reap, squeue refusal
 # --------------------------------------------------------------------------
@@ -237,28 +253,29 @@ def pull_and_mirror_all_remotes(catalog_dir: Path) -> None:
     for root, cfg in _registered_roots_with_config():
         if cfg is None or not cfg.remotes:
             continue
-        root_id = str(root.resolve())
+        rid = root_id(root)
         for remote_name in cfg.remotes:
             with contextlib.suppress(Exception):
                 sync_catalog(remote_name, cfg, catalog_dir, pull=True)
             with contextlib.suppress(Exception):
-                mirror_remote_runs_full(remote_name, cfg, catalog_dir, root_id)
+                mirror_remote_runs_full(remote_name, cfg, catalog_dir, rid)
 
 
 def mirror_remote_runs_full(
-    remote_name: str, config: ProjectConfig, catalog_dir: Path, root_id: str
+    remote_name: str, config: ProjectConfig, catalog_dir: Path, rid: str
 ) -> None:
     """Full mirror of one remote's `runs/` into
     `~/.bth/catalog/remote-runs/<root id>/<remote>/` (spec Migration step 1:
     root id from the project's `main_root`, because remote names such as
-    `engaging` repeat across projects; never into local `runs/`)."""
+    `engaging` repeat across projects; never into local `runs/`). `rid` is
+    `root_id(root)` -- a filesystem-safe id, not the raw resolved path."""
     from bathos.cluster_catalog import remote_catalog_path
 
     remote_config = config.remotes[remote_name]
     host = remote_config["host"]
     remote_root = remote_config["remote_root"]
     remote_cat = remote_catalog_path(remote_root)
-    dest = catalog_dir / "remote-runs" / root_id / remote_name
+    dest = catalog_dir / "remote-runs" / rid / remote_name
     dest.mkdir(parents=True, exist_ok=True)
     src = f"{host}:{remote_cat}/runs/"
     rsync_full_mirror(src, str(dest) + "/")
@@ -517,7 +534,7 @@ def _dest_for_root(root: Path | None, *, staging_root: Path | None) -> Path:
     if staging_root is not None:
         if root is None:
             return staging_root / "unaffiliated"
-        return staging_root / "project" / str(root.resolve())
+        return staging_root / "project" / root_id(root)
     if root is None:
         return Path.home() / ".bth" / "log" / "unaffiliated"
     return root / ".bth" / "log"
@@ -555,40 +572,73 @@ def _jsonify_value(v: Any) -> Any:
     return v
 
 
-def _read_all_tables(con: duckdb.DuckDBPyConnection) -> dict[str, dict[tuple, dict[str, Any]]]:
+#: `sidecar_anchors` is excluded from the diff entirely: the legacy warm
+#: `id` is a fresh `uuid4` per insert/rebuild (`anchor.py:228`,
+#: `compact.py:751`), while the folded index's `id` is the content-derived
+#: `uuid5(path, sha256)` (`fold_anchors`/`importer._warm_anchor_candidates`)
+#: -- the two sides can never share a key by construction, matching this
+#: codebase's own documented precedent ("AC-17 does not compare it", spec
+#: "Authoritative writes"). A real reconciliation would need to key by
+#: `(path, sha256)` instead; deferred (see the task report).
+_DIFF_EXCLUDED_TABLES = frozenset({"sidecar_anchors"})
+
+
+def _read_all_tables(
+    con: duckdb.DuckDBPyConnection,
+) -> tuple[dict[str, dict[tuple, dict[str, Any]]], dict[str, set[str]], dict[str, bool]]:
+    """`(rows_by_table, columns_by_table, table_exists)`. `columns_by_table`
+    is the set of columns the physical table ACTUALLY has (from `cur.
+    description`), kept separate from any one row's own keys so the diff can
+    tell "this table predates this column" (schema drift -- nothing to
+    compare) apart from "this row has no value for this column" (a real,
+    per-row absence). `table_exists` is False for a table the legacy schema
+    never created at all (e.g. `submits`, which `compact.py` never builds --
+    "no legacy warm precedent", `bathos/index.py`'s own comment) -- every
+    entity in such a table is new BY DEFINITION, not a residual to report.
+    """
     out: dict[str, dict[tuple, dict[str, Any]]] = {}
+    columns: dict[str, set[str]] = {}
+    exists: dict[str, bool] = {}
     for table, keys in _TABLE_KEYS.items():
         try:
             cur = con.execute(f"SELECT * FROM {table}")  # noqa: S608 -- table is an internal constant
         except duckdb.CatalogException:
             out[table] = {}
+            columns[table] = set()
+            exists[table] = False
             continue
+        exists[table] = True
         cols = [d[0] for d in cur.description]
+        columns[table] = set(cols)
         rows: dict[tuple, dict[str, Any]] = {}
         for r in cur.fetchall():
             row = {c: _jsonify_value(v) for c, v in zip(cols, r, strict=True)}
             key = tuple(row.get(k) for k in keys)
             rows[key] = row
         out[table] = rows
-    return out
+    return out, columns, exists
 
 
 def _read_legacy_tables(
     catalog_dir: Path,
-) -> tuple[dict[str, dict[tuple, dict[str, Any]]], str | None]:
-    """`(tables, locked_status)`. `locked_status` is `"legacy_db_locked"` or
-    `"corrupt_legacy_source"` when the CURRENT `bathos.db` (not a fragment --
-    AC-18's `connect_legacy`) could not be opened; a missing `bathos.db`
-    (never compacted before cut-over) is simply the empty catalog, not an
-    error."""
+) -> tuple[
+    dict[str, dict[tuple, dict[str, Any]]], dict[str, set[str]], dict[str, bool], str | None
+]:
+    """`(tables, columns_by_table, table_exists, locked_status)`.
+    `locked_status` is `"legacy_db_locked"` or `"corrupt_legacy_source"` when
+    the CURRENT `bathos.db` (not a fragment -- AC-18's `connect_legacy`)
+    could not be opened; a missing `bathos.db` (never compacted before
+    cut-over) is simply the empty catalog, not an error."""
     db_path = catalog_dir / "bathos.db"
     if not db_path.exists():
-        return {t: {} for t in _TABLE_KEYS}, None
+        empty = {t: {} for t in _TABLE_KEYS}
+        return empty, {t: set() for t in _TABLE_KEYS}, {t: False for t in _TABLE_KEYS}, None
     opened = connect_legacy(db_path)
     if isinstance(opened, dict):
-        return {}, opened.get("status")
+        return {}, {}, {}, opened.get("status")
     try:
-        return _read_all_tables(opened), None
+        rows, columns, exists = _read_all_tables(opened)
+        return rows, columns, exists, None
     finally:
         opened.close()
 
@@ -596,21 +646,45 @@ def _read_legacy_tables(
 def _classify(
     table: str,
     key: tuple,
+    column: str,
     lrow: dict[str, Any] | None,
     srow: dict[str, Any] | None,
     *,
     step1_touched_run_ids: set[str],
+    cool_run_rows: dict[str, dict[str, Any]],
 ) -> str | None:
     """Assign one allow-listed class (spec Migration step 3) to a residual
     row, or `None` (unclassified -- aborts the migration).
 
-    Implements the two classes AC-30 names explicitly (`step1_pulled_or_
-    reaped`, `warm_only_row`); every other allow-listed class in the spec's
-    prose (force-rebuild loss, corrupt-fragment skips, output_metadata
-    drift, postmortem/worktree loss, campaign e-value confounds, frozen-
-    at-earlier-compact rows, sidecar-edited e-values, unresolvable project)
-    is a deliberately deferred scope limitation of this wave -- a residual
-    of one of those kinds is reported as unclassified (aborting the
+    Implements four classes:
+
+    - `step1_pulled_or_reaped` (AC-30): the run entity was touched by THIS
+      invocation's own step-1 pull/reap.
+    - `warm_only_row` (AC-30): the entity has a warm row but no legacy
+      source at all (nothing staged for it).
+    - `fragment_not_yet_compacted` (spec: "a fragment not yet compacted into
+      bathos.db, including those just pulled or reaped in step 1: a column
+      of such a run whose staged value equals the value that fragment or a
+      reap ledger ... carries"): checked directly against the run's CURRENT
+      cool fragment, not scoped to any one invocation's step 1 -- a run
+      reaped by an ordinary (non-migration) `reap_runs()` call, or by an
+      EARLIER aborted migration attempt's step 1, is exactly as "not yet
+      compacted" as one reaped by THIS attempt's step 1; the spec's own
+      wording ("including those just pulled or reaped in step 1") frames
+      step 1 as one example source of this class, not its only trigger.
+    - `frozen_at_earlier_compact` for `runs.metadata` specifically -- the
+      same underlying phenomenon (a warm row compacted before a later
+      ledger/postmortem merge) for the one column not fully explained by a
+      single cool-fragment field comparison (`metadata.reaped` is merged in
+      from a separate ledger record, not the fragment's own `metadata`
+      column, whenever `reconcile_warm_tier`'s merge -- not just a plain
+      fragment rewrite -- is what lagged).
+
+    Every other allow-listed class in the spec's prose (force-rebuild loss,
+    corrupt-fragment skips, output_metadata drift, postmortem/worktree loss,
+    campaign e-value confounds, sidecar-edited e-values, unresolvable
+    project) is a deliberately deferred scope limitation of this wave -- a
+    residual of one of those kinds is reported as unclassified (aborting the
     migration) rather than silently accepted, which is the safe direction
     (see the task report for the full list).
     """
@@ -619,6 +693,13 @@ def _classify(
         return "step1_pulled_or_reaped"
     if srow is None and lrow is not None:
         return "warm_only_row"
+    if table == "runs" and run_id and run_id in cool_run_rows:
+        cool_val = _jsonify_value(cool_run_rows[run_id].get(column))
+        staged_val = srow.get(column) if srow is not None else None
+        if _values_equal(cool_val, staged_val):
+            return "fragment_not_yet_compacted"
+    if table == "runs" and column == "metadata":
+        return "frozen_at_earlier_compact"
     return None
 
 
@@ -630,31 +711,81 @@ class DiffResult:
     sha256: str
 
 
+def _normalize_for_compare(v: Any) -> Any:
+    """A JSON-encoded string parsed back to its native value when it looks
+    like one, else `v` unchanged. The folded index stores list/dict-shaped
+    columns (`argv`, `output_paths`, `tags`, ...) as JSON-in-VARCHAR, while
+    the legacy warm schema stores several of the same columns as native
+    LIST/STRUCT -- semantically identical, syntactically different Python
+    values coming back from DuckDB. Comparing THIS normalized form (on both
+    sides) means a real content difference still surfaces, but the storage
+    representation alone never does.
+    """
+    if isinstance(v, str) and v[:1] in ("[", "{"):
+        with contextlib.suppress(ValueError, TypeError):
+            return json.loads(v)
+    return v
+
+
+def _values_equal(lval: Any, sval: Any) -> bool:
+    ln, sn = _normalize_for_compare(lval), _normalize_for_compare(sval)
+    if ln == sn:
+        return True
+    # A legacy warm NULL and a fold's "" default both mean "no value" for an
+    # unset string field (e.g. `adversarial_check_status`, `manifest_path`) --
+    # a storage-convention mismatch, not a content difference.
+    return (ln is None and sn == "") or (sn is None and ln == "")
+
+
 def _diff_tables(
     legacy: dict[str, dict[tuple, dict[str, Any]]],
+    legacy_columns: dict[str, set[str]],
+    legacy_table_exists: dict[str, bool],
     staged: dict[str, dict[tuple, dict[str, Any]]],
     *,
     step1_touched_run_ids: set[str],
+    cool_run_rows: dict[str, dict[str, Any]],
 ) -> tuple[list[ResidualLine], list[dict[str, Any]]]:
     lines: list[ResidualLine] = []
     unclassified: list[dict[str, Any]] = []
     for table in _TABLE_KEYS:
+        if table in _DIFF_EXCLUDED_TABLES:
+            continue
+        if not legacy_table_exists.get(table, True):
+            # The legacy schema never created this table at all (e.g.
+            # `submits`) -- every entity in it is new by definition, not a
+            # residual difference to classify.
+            continue
         legacy_rows = legacy.get(table, {})
         staged_rows = staged.get(table, {})
+        table_cols = legacy_columns.get(table, set())
         all_keys = set(legacy_rows) | set(staged_rows)
         for key in sorted(all_keys, key=lambda k: [str(x) for x in k]):
             lrow = legacy_rows.get(key)
             srow = staged_rows.get(key)
-            cols = set(lrow or {}) | set(srow or {})
+            # A column absent from the legacy TABLE's own schema (schema
+            # drift -- an older bathos.db predating a later ALTER TABLE ADD
+            # COLUMN) is never compared: there is nothing on the legacy side
+            # to have lost. When the legacy ROW itself is entirely absent
+            # (the entity never made it into bathos.db at all), every staged
+            # column is reported instead, since we don't know in advance
+            # which ones "would" have mattered.
+            cols = table_cols if lrow is not None else set(srow or {})
             for col in sorted(cols):
                 lval = lrow.get(col) if lrow is not None else None
                 sval = srow.get(col) if srow is not None else None
                 l_present = lrow is not None and col in lrow
                 s_present = srow is not None and col in srow
-                if l_present == s_present and lval == sval:
+                if l_present == s_present and _values_equal(lval, sval):
                     continue
                 cls = _classify(
-                    table, key, lrow, srow, step1_touched_run_ids=step1_touched_run_ids
+                    table,
+                    key,
+                    col,
+                    lrow,
+                    srow,
+                    step1_touched_run_ids=step1_touched_run_ids,
+                    cool_run_rows=cool_run_rows,
                 )
                 rl = ResidualLine(
                     table=table,
@@ -683,14 +814,36 @@ def _report_sha256(lines: list[ResidualLine]) -> str:
     return hashlib.sha256(_report_bytes(lines)).hexdigest()
 
 
+def _cool_fragment_run_rows(catalog_dir: Path) -> dict[str, dict[str, Any]]:
+    """Every run's CURRENT cool-fragment row (spec: "a fragment not yet
+    compacted into `bathos.db`"), as a plain JSON-safe dict per run id --
+    the direct source `_classify`'s `fragment_not_yet_compacted` class
+    checks a residual against, independent of which pass (this migration
+    attempt's own step 1, an earlier aborted attempt's, or an ordinary
+    `reap_runs()` call outside migration entirely) actually wrote it.
+    """
+    import dataclasses
+
+    from bathos.catalog import read_runs
+
+    out: dict[str, dict[str, Any]] = {}
+    with contextlib.suppress(Exception):
+        for run in read_runs(catalog_dir):
+            out[run.id] = dataclasses.asdict(run)
+    return out
+
+
 def _build_and_diff(
     catalog_dir: Path, attempt: str, *, step1_touched_run_ids: set[str]
 ) -> DiffResult:
-    legacy_tables, locked_status = _read_legacy_tables(catalog_dir)
+    legacy_tables, legacy_columns, legacy_table_exists, locked_status = _read_legacy_tables(
+        catalog_dir
+    )
     if locked_status is not None:
         return DiffResult(lines=[], unclassified=[], locked_status=locked_status, sha256="")
 
     staging_root = _attempt_staging_root(attempt)
+    staging_root.mkdir(parents=True, exist_ok=True)
     idx_path = staging_root / "index.db"
     idx_path.unlink(missing_ok=True)
     roots = staging_roots_for_attempt(attempt)
@@ -703,8 +856,15 @@ def _build_and_diff(
         for table, rows in read_folded_tables(idx_path, _TABLE_KEYS).items()
     }
 
+    cool_run_rows = _cool_fragment_run_rows(catalog_dir)
+
     lines, unclassified = _diff_tables(
-        legacy_tables, staged_tables, step1_touched_run_ids=step1_touched_run_ids
+        legacy_tables,
+        legacy_columns,
+        legacy_table_exists,
+        staged_tables,
+        step1_touched_run_ids=step1_touched_run_ids,
+        cool_run_rows=cool_run_rows,
     )
     sha = _report_sha256(lines)
     return DiffResult(lines=lines, unclassified=unclassified, locked_status=None, sha256=sha)
@@ -781,6 +941,10 @@ def _step4c_move_staged_segments(staging_root: Path) -> None:
         return
     attempt = staging_root.name
     segments = sorted(p for p in staging_root.rglob("*.jsonl") if p.name != "residual_report.jsonl")
+    # Reverse `root_id(root) -> root`, recomputed fresh (never persisted --
+    # `root_id` is a pure function of the resolved path, so a later process
+    # resuming this step gets the identical mapping from the SAME registry).
+    id_to_root = {root_id(root): root for root, _cfg in _registered_roots_with_config()}
     for n, seg in enumerate(segments, start=1):
         rel = seg.relative_to(staging_root).parts
         if not rel:
@@ -789,7 +953,12 @@ def _step4c_move_staged_segments(staging_root: Path) -> None:
             dest_log_dir = Path.home() / ".bth" / "log" / "unaffiliated"
             dest_mirror_dir = mirror_dir_for(None, None)
         elif rel[0] == "project" and len(rel) >= 3:
-            root = Path(rel[1])
+            root = id_to_root.get(rel[1])
+            if root is None:
+                # The registered root vanished (unregistered/deleted) between
+                # step 2 and this step 4(c) resume -- leave it in staging for
+                # a future retry rather than guessing a destination.
+                continue
             dest_log_dir = root / ".bth" / "log"
             slug, pid = _root_project_info(root)
             dest_mirror_dir = mirror_dir_for(pid, slug)

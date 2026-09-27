@@ -4498,6 +4498,48 @@ async def mcp_repair_tool(
     )
 
 
+@cisternal.tool(registry="bathos", name="migrate_to_log")
+@traced_tool
+@require_write_token
+async def mcp_migrate_to_log_tool(
+    catalog_dir: str = "",
+    force: bool = False,
+    accept_residual: str = "",
+    import_legacy: bool = False,
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
+) -> dict:
+    """`bth migrate --to-log` (Migration steps 0-4): the project-local run
+    log cut-over. `import_legacy=True` instead runs the post-cut-over
+    `--import-legacy` re-import (AC-23; refused before cut-over).
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619) — this
+    mutates the real catalog (pulls remotes, reaps, and can rename bathos.db
+    to bathos.db.frozen).
+
+    Args:
+        catalog_dir: Catalog directory (empty = use default)
+        force: Proceed past a squeue/submit-record conflict instead of refusing
+        accept_residual: sha256 of a previously-reviewed residual report; proceeds to
+            the switch only if a fresh run reproduces that exact hash
+        import_legacy: Run `--import-legacy` instead of `--to-log`
+
+    Returns:
+        Dict form of `MigrateToLogResult` (status, attempt, report_path,
+        report_sha256, residual_lines, unclassified, missing_project_ids,
+        conflicting_jobs, locked_source, detail).
+    """
+    import dataclasses
+
+    from bathos.runlog.migrate import import_legacy_post_cutover, migrate_to_log
+
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    if import_legacy:
+        result = import_legacy_post_cutover(cat_dir)
+    else:
+        result = migrate_to_log(cat_dir, force=force, accept_residual=accept_residual or None)
+    return dataclasses.asdict(result)
+
+
 # ============================================================================
 # Wire the "bathos" registry snapshot onto the FastMCP server.
 #
@@ -4718,6 +4760,7 @@ _WIRED = cisternal.wire(
         "doc_schema",
         "claim_author",
         "new_experiment",
+        "migrate_to_log",
     ],
 )
 
