@@ -14,10 +14,16 @@ run.finished, run.outputs_hashed), `catalog.write_submit_provenance`
 campaign_edges.py, anchor.py, blast_radius.py, trust_ledger.py,
 archived_items.py) is not yet built.
 
+Delivery step 3, wave a (`index.py`, `ingest.py`, `fold_runs.py`): the
+disposable `index.db` schema, generation-swap ingest, the run fold, and the
+`connect_read()` read entry point. The campaign/edge/anchor/ledger folds, the
+25-module reader migration (AC-18), and the legacy importer (Migration steps
+0-4) are not yet built.
+
 Everything here is inert unless `bathos.runlog.mode.is_log_mode()` is True --
 with the flag off (the default), every write site's legacy behavior is
-unchanged, byte-for-byte. Step 3+ (index, fold, ingest, migration) is future
-work.
+unchanged, byte-for-byte, and `connect_read()` is a pass-through to the
+legacy `bathos.db`.
 """
 
 from __future__ import annotations
@@ -34,6 +40,9 @@ from .emit import (
     unit_of_work,
 )
 from .envelope import build_envelope, capture_git_provenance, uuid7
+from .fold_runs import fold_run
+from .index import connect_read, index_db_path
+from .ingest import IngestReport, IngestWalRemainsError, discover_roots, run_ingest
 from .mode import (
     LogModeRefusedError,
     RunLogError,
@@ -76,6 +85,8 @@ from .writer import (
 __all__ = [
     "AppendOutcome",
     "AssignResult",
+    "IngestReport",
+    "IngestWalRemainsError",
     "LogModeRefusedError",
     "LogNotIgnoredError",
     "LogRootResolution",
@@ -89,14 +100,18 @@ __all__ = [
     "assign_project_id",
     "build_envelope",
     "capture_git_provenance",
+    "connect_read",
     "current_mode",
     "cutover_marker_path",
+    "discover_roots",
     "emit_event",
     "emit_or_legacy",
     "ensure_log_ignored",
     "fallback_log_root",
+    "fold_run",
     "get_writer",
     "in_unit_of_work",
+    "index_db_path",
     "is_log_ignored",
     "is_log_mode",
     "list_registered_roots",
@@ -112,6 +127,7 @@ __all__ = [
     "resolve_write_project_id",
     "restore_from_mirror",
     "run_event_data",
+    "run_ingest",
     "sidecar_declaration_for_event",
     "unit_of_work",
     "uuid7",
