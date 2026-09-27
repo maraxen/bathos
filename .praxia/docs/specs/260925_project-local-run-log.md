@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: v33 (after adversarial cycle 33; review loop closed, remaining legacy-compat gaps go to AC-17)
+revision: v34 (v33 + BC-10..BC-12, legacy-compat gaps found by the AC-17 differential test)
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -268,7 +268,7 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   COALESCE columns and the postmortem fields (`compact.py:943-1041` then `continue`), so its
   value depends on when compaction ran. Those timing effects are residual classes of Migration
   step 3, not fold rules. Any divergence AC-17 finds from the canonical state is a spec bug to
-  fix here, unless it is one of the stated behaviour changes BC-1..BC-9 (below).
+  fix here, unless it is one of the stated behaviour changes BC-1..BC-12 (below).
 - **Imported history:** the legacy importer emits one `<kind>.imported` event **per (entity,
   legacy source)**, never a pre-merged one: a run with a warm row and a cool fragment gets two
   `run.imported` events; each legacy `campaign_runs` row gives a `campaign_run.imported` carrying
@@ -391,6 +391,23 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
     `attest_parity` updates only the warm row (`claim.py:1062`), so the canonical state keeps the
     registration-time sha (`claim.py:695`) unless a later threshold lock or conclude rewrote the
     campaign JSON (`campaigns.py:514,1229,1268`).
+  - BC-10 (found by AC-17). `campaigns.stopping_threshold` is a `REAL` (float32) column, so a
+    locked threshold reads back rounded and is written into the campaign JSON rounded; the second
+    rebuild inside the canonical recipe (`reconcile_warm_tier`) then sees a threshold that no
+    longer bit-matches the member sidecars and nulls every member's `evalue` and `seq_position`
+    as a mismatch. The fold compares the sidecar values themselves and keeps them. Fixture:
+    `tests/test_ac17_finding_stopping_threshold_real32_drift.py`; AC-17 generates thresholds that
+    are exact in float32, so its comparison is unaffected.
+  - BC-11 (found by AC-17). `runs.slurm_array_task_id`, `manifest_sha256`, `manifest_path` and
+    `adversarial_check_status` exist in the warm schema but `compact.py`'s fresh-row INSERT never
+    lists them, so the canonical state has them NULL; the fold carries the values from the run
+    events. AC-17 excludes exactly these four columns, by name.
+  - BC-12 (found by AC-17). On a sequential-campaign threshold mismatch, legacy
+    `add_run_to_campaign` and `conclude_campaign`'s campaign-scoped relink raise `CampaignError`,
+    while `compact()`'s bulk pass logs and skips; the fold always skips as the bulk pass does (the
+    canonical reference), and `bth verify` reports the mismatch. Fixture:
+    `test_threshold_mismatch_resets_whole_campaign_to_none`; AC-17 does not generate the raising
+    combinations, since the legacy side has no canonical state for them.
 - **Legacy writes after cut-over** (an older bathos still writing fragments, submit Parquet or a
   fresh `bathos.db`) are not imported automatically. `bth verify` reports them with the writing
   host, and the user re-runs `bth migrate --import-legacy`, which appends only new eids.
@@ -656,7 +673,7 @@ switched on in one step.
   runs (runs started and finished, reaped and reverted, postmortems registered, campaigns
   updated), the canonical legacy state (Fold rules) and the new fold produce identical rows in
   `runs`, `campaigns`, `campaign_runs` and `sidecar_anchors` (excluding the legacy anchor `id`),
-  apart from BC-1..BC-9. Fixture postmortems live inside the pinned workspace outside any pruned
+  apart from BC-1..BC-12. Fixture postmortems live inside the pinned workspace outside any pruned
   directory. `campaign_edges` and `run_edges`, which any rebuild (including a mid-sequence reap
   or revert) drops, are compared against the set of `add_campaign_edge`/`add_run_edge` calls
   that succeeded.
@@ -706,7 +723,7 @@ switched on in one step.
   revert has no `metadata.reaped`; a postmortem override `fail` followed by an override `"none"`
   leaves the raw outcome, and the campaign `evalue` follows the folded outcome (BC-7); a terminal claim
   with null `parity_run_type` does not blank a value another status claim carries. Each matches
-  the canonical legacy state on the same sequence (AC-17), and each of BC-1..BC-9 has a fixture
+  the canonical legacy state on the same sequence (AC-17), and each of BC-1..BC-12 has a fixture
   showing the stated new result.
 - AC-27. With two roots sharing a `project_id`, `bth log restore` in one never copies the
   other's events; after moving a project, restore still recovers events written at the old path.
