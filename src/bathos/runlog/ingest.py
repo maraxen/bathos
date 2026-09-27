@@ -155,18 +155,69 @@ class IngestReport:
     ran: bool = True
 
 
-def discover_roots() -> list[tuple[str, str, Path]]:
+def staging_roots_for_attempt(attempt: str) -> list[tuple[str, str, Path]]:
+    """Every `(root_kind="staging", root_id, log_dir)` under one migration
+    attempt's staging tree (spec Migration step 2:
+    `~/.bth/log/import-staging/<attempt>/<root kind>/<root id>/`), flattened
+    to one leaf directory per destination subtree so the generic ingest loop
+    (which globs `*.jsonl` in one directory per root) can read it exactly
+    like any other root.
+    """
+    staging_root = Path.home() / ".bth" / "log" / "import-staging" / attempt
+    if not staging_root.is_dir():
+        return []
+    roots: list[tuple[str, str, Path]] = []
+    for kind_dir in sorted(staging_root.iterdir()):
+        if not kind_dir.is_dir():
+            continue
+        if kind_dir.name == "unaffiliated":
+            roots.append(("staging", f"{attempt}/unaffiliated", kind_dir))
+            continue
+        for sub in sorted(kind_dir.iterdir()):
+            if sub.is_dir():
+                roots.append(("staging", f"{attempt}/{kind_dir.name}/{sub.name}", sub))
+    return roots
+
+
+def _marker_staging_roots(catalog_dir: Path) -> list[tuple[str, str, Path]]:
+    """Spec Migration step 4: "ingest ... enumerate it (kind `staging`) from
+    (b) to (e), i.e. whenever the marker lists an attempt whose staging
+    directory still exists, so nothing is unreadable in between." Reads the
+    cut-over marker (catalog-dir-scoped) to find which attempt, if any, is
+    still mid-switch; a marker naming an attempt whose staging directory has
+    already been removed (step 4(e) completed) contributes nothing.
+    """
+    from bathos.runlog.mode import cutover_marker_path
+
+    marker_path = cutover_marker_path(catalog_dir)
+    if not marker_path.is_file():
+        return []
+    try:
+        marker = json.loads(marker_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+    attempt = marker.get("attempt") if isinstance(marker, dict) else None
+    if not attempt:
+        return []
+    return staging_roots_for_attempt(str(attempt))
+
+
+def discover_roots(catalog_dir: Path | None = None) -> list[tuple[str, str, Path]]:
     """Every `(root_kind, root_id, log_dir)` this wave enumerates -- the
-    registered project roots, the mirror, the fallback, and unaffiliated
+    registered project roots, the mirror, the fallback, unaffiliated, and
+    (spec Migration step 4) any in-progress migration attempt's staging tree
     (spec "Discovery" + "Reads", narrowed per this module's docstring).
 
     `root_id` for a `project` root is the resolved main root's own path
     (spec: "Root ids use `main_root`, not `project_id`, wherever two roots
     can share an id, so every file belongs to exactly one root"). Every root
-    here is resolved from global, HOME-anchored state (`projects.toml`,
-    `~/.bth/log-mirror/`, `~/.bth/log/fallback/`, `~/.bth/log/unaffiliated/`)
-    -- none of it is scoped to a particular `catalog_dir`, so this function
-    takes none; a redirected `HOME` (AC-11) is what isolates it in tests.
+    but the staging one is resolved from global, HOME-anchored state
+    (`projects.toml`, `~/.bth/log-mirror/`, `~/.bth/log/fallback/`,
+    `~/.bth/log/unaffiliated/`) -- none of it is scoped to a particular
+    `catalog_dir`. `catalog_dir` (optional, defaults to
+    `default_catalog_dir()`) is used ONLY to resolve the cut-over marker for
+    the staging root; a redirected `HOME` (AC-11) is what isolates the rest
+    in tests.
     """
     roots: list[tuple[str, str, Path]] = []
     for main_root in list_registered_roots():
@@ -197,6 +248,8 @@ def discover_roots() -> list[tuple[str, str, Path]]:
     unaffiliated_dir = Path.home() / ".bth" / "log" / "unaffiliated"
     if unaffiliated_dir.is_dir():
         roots.append(("unaffiliated", "_unaffiliated", unaffiliated_dir))
+
+    roots.extend(_marker_staging_roots(catalog_dir or default_catalog_dir()))
 
     return roots
 
@@ -663,31 +716,74 @@ def _check_no_wal(tmp_path: Path) -> None:
         )
 
 
-def run_ingest(catalog_dir: Path | None = None) -> IngestReport:
+def run_ingest(
+    catalog_dir: Path | None = None,
+    *,
+    extra_roots: list[tuple[str, str, Path]] | None = None,
+    require_log_mode: bool = True,
+) -> IngestReport:
     """Ingest every discovered root's new bytes into a fresh generation of
     `index.db`, then atomically swap it in.
 
     Skipped (returns `IngestReport(ran=False)`) on a cluster node
-    (`SLURM_JOB_ID` set) or when `BTH_NO_INGEST=1`, and whenever the log-mode
-    flag is off (spec: "`~/.bth/catalog/index.db` is never created before the
-    switch").
+    (`SLURM_JOB_ID` set) or when `BTH_NO_INGEST=1`, and (unless
+    `require_log_mode=False`) whenever the log-mode flag is off (spec:
+    "`~/.bth/catalog/index.db` is never created before the switch").
+
+    `extra_roots`: additional `(root_kind, root_id, log_dir)` triples folded
+    in alongside whatever `discover_roots()` finds -- Migration step 4(a)
+    passes the about-to-be-committed attempt's staging tree here, since the
+    cut-over marker (which `discover_roots()`'s own staging auto-discovery
+    keys off) is not written until step 4(b), one step later.
+
+    `require_log_mode=False` is Migration step 4(a)'s own escape hatch: that
+    build happens strictly BEFORE the marker is written, so `is_log_mode()`
+    is still False at that point even though this ingest pass is exactly
+    what makes the flag meaningful going forward.
     """
     if os.environ.get("SLURM_JOB_ID") or os.environ.get("BTH_NO_INGEST") == "1":
         return IngestReport(ran=False)
     cd = catalog_dir or default_catalog_dir()
-    if not is_log_mode(cd):
+    if require_log_mode and not is_log_mode(cd):
         return IngestReport(ran=False)
     with ingest_lock(cd):
-        return _ingest_locked(cd)
+        return _ingest_locked(cd, extra_roots=extra_roots)
 
 
-def _ingest_locked(cd: Path) -> IngestReport:
+def _ingest_locked(
+    cd: Path, *, extra_roots: list[tuple[str, str, Path]] | None = None
+) -> IngestReport:
     cd.mkdir(parents=True, exist_ok=True)
     real_path = index_db_path(cd)
     tmp_path = cd / f"index.db.{uuid.uuid4().hex[:12]}.tmp"
     if real_path.exists():
         shutil.copy2(real_path, tmp_path)
 
+    roots = discover_roots(cd)
+    if extra_roots:
+        roots = [*roots, *extra_roots]
+
+    report = fold_roots_into(tmp_path, roots)
+
+    _check_no_wal(tmp_path)
+    os.replace(tmp_path, real_path)
+
+    return report
+
+
+def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> IngestReport:
+    """Build (or incrementally re-fold, if `db_path` already exists and is a
+    valid index.db) one DuckDB file from exactly `roots` -- the common
+    builder behind both `_ingest_locked` (the real `index.db`, generation-
+    swapped in by its caller) and Migration steps 3/4(a) (a throwaway
+    staging-only build, and the pre-switch "project logs plus staged
+    events" build, respectively -- spec "reuse it and do not reimplement...
+    the folds").
+
+    Does NOT do the atomic swap or the AC-19 `.wal` check -- callers that
+    write onto the real `index.db` (`_ingest_locked`) do both themselves
+    around this call; a throwaway build (Migration) has no swap to do.
+    """
     new_events = 0
     skipped = 0
     quarantined = 0
@@ -699,9 +795,8 @@ def _ingest_locked(cd: Path) -> IngestReport:
     affected_trust_ledger_ids: set[str] = set()
     affected_archived_item_ids: set[str] = set()
     affected_submit_ids: set[str] = set()
-    roots = discover_roots()
 
-    con = duckdb.connect(str(tmp_path))
+    con = duckdb.connect(str(db_path))
     try:
         init_index_schema(con)
         existing = _load_existing_events(con)
@@ -809,9 +904,6 @@ def _ingest_locked(cd: Path) -> IngestReport:
     finally:
         con.close()
 
-    _check_no_wal(tmp_path)
-    os.replace(tmp_path, real_path)
-
     return IngestReport(
         new_events=new_events,
         skipped_existing=skipped,
@@ -821,11 +913,68 @@ def _ingest_locked(cd: Path) -> IngestReport:
     )
 
 
+def read_folded_tables(db_path: Path, tables: dict[str, list[str]]) -> dict[str, dict]:
+    """Read every row of `tables` (name -> primary-key column list) out of a
+    DuckDB file at `db_path`, keyed by its primary key tuple.
+
+    AC-18 exemption seam: Migration step 3 ("build and diff", `bathos.
+    runlog.migrate._build_and_diff`) needs to read back a throwaway
+    staging-only index built by `fold_roots_into` -- this function keeps
+    that one `duckdb.connect()` call inside the ingest module (AC-18's
+    "no module other than `bathos.index` and the ingest path") rather than
+    in `migrate.py` itself.
+    """
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        out: dict[str, dict] = {}
+        for table, keys in tables.items():
+            try:
+                cur = con.execute(f"SELECT * FROM {table}")  # noqa: S608 -- internal constant
+            except duckdb.CatalogException:
+                out[table] = {}
+                continue
+            cols = [d[0] for d in cur.description]
+            rows: dict[tuple, dict] = {}
+            for r in cur.fetchall():
+                row = dict(zip(cols, r, strict=True))
+                key = tuple(row.get(k) for k in keys)
+                rows[key] = row
+            out[table] = rows
+        return out
+    finally:
+        con.close()
+
+
+def delete_staging_watermarks(catalog_dir: Path, attempt: str) -> None:
+    """Delete the `staging` root kind's `ingest_watermarks` rows for one
+    migration attempt from the real `index.db` (Migration step 4(e): "delete
+    the staging directory and its `ingest_watermarks` rows"). No-op if
+    `index.db` does not exist. AC-18 exemption seam, same rationale as
+    `read_folded_tables`.
+    """
+    real_path = index_db_path(catalog_dir)
+    if not real_path.exists():
+        return
+    con = duckdb.connect(str(real_path))
+    try:
+        con.execute(
+            "DELETE FROM ingest_watermarks WHERE root_kind = 'staging' AND root_id LIKE ?",
+            [f"{attempt}/%"],
+        )
+        con.execute("CHECKPOINT")
+    finally:
+        con.close()
+
+
 __all__ = [
     "IngestReport",
     "IngestWalRemainsError",
+    "delete_staging_watermarks",
     "discover_roots",
+    "fold_roots_into",
     "ingest_lock",
     "ingest_lock_path",
+    "read_folded_tables",
     "run_ingest",
+    "staging_roots_for_attempt",
 ]

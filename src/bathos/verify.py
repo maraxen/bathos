@@ -4,8 +4,9 @@ import contextlib
 import hashlib
 import json
 import logging
+import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -407,7 +408,9 @@ def _watermark_findings(catalog_dir: Path) -> list[dict]:
     if not rows:
         return []
 
-    root_dirs = {(kind, root_id): log_dir for kind, root_id, log_dir in discover_roots()}
+    root_dirs = {
+        (kind, root_id): log_dir for kind, root_id, log_dir in discover_roots(catalog_dir)
+    }
 
     findings: list[dict] = []
     for root_kind, root_id, path, _size, byte_offset in rows:
@@ -440,6 +443,99 @@ def _watermark_findings(catalog_dir: Path) -> list[dict]:
                     "watermark_offset": byte_offset,
                 }
             )
+    return findings
+
+
+_SEGMENT_RE = re.compile(r"^(?P<host>[^.]+)\.(?P<pid>\d+)\.(?P<start_ns>\d+)(?:\.slurm-.*)?\.jsonl$")
+
+_UNTERMINATED_TAIL_STALE_DAYS = 7
+
+
+def _parse_segment_name(name: str) -> tuple[str, int, int] | None:
+    """`<host>.<pid>.<start_ns>[.slurm-...].jsonl` -> `(host, pid, start_ns)`,
+    or None for a name that does not match the segment naming convention
+    (spec "Segments and writers")."""
+    m = _SEGMENT_RE.match(name)
+    if not m:
+        return None
+    return m.group("host"), int(m.group("pid")), int(m.group("start_ns"))
+
+
+def _unterminated_tail_findings(catalog_dir: Path) -> list[dict]:
+    """AC-7 (verify half, delivery step 4): "An unterminated tail is never
+    quarantined by ingest, and `bth verify` reports it once the writer has a
+    later segment[,] or the file is unchanged for 7 days" (spec "Line
+    envelope"). Ingest's own watermark stops at the last `\\n`
+    (`ingest.py:_read_new_lines`), so a segment whose actual size exceeds
+    its recorded watermark has trailing bytes past the last complete line --
+    an unterminated tail, by construction, at every moment between two
+    completed lines. It is reported as torn only once one of the two
+    trigger conditions holds, distinguishing "still being written" from
+    "abandoned mid-line": a later segment from the SAME writer (same host
+    and pid, a higher `start_ns`) proves that writer rotated away and will
+    never complete this line, and a 7-day-stale mtime is the same signal
+    when no later segment exists to prove it directly.
+    """
+    from bathos.index import connect_read
+    from bathos.runlog.ingest import discover_roots
+
+    con = connect_read(catalog_dir)
+    try:
+        rows = con.execute(
+            "SELECT root_kind, root_id, path, size, byte_offset FROM ingest_watermarks"
+        ).fetchall()
+    finally:
+        con.close()
+    if not rows:
+        return []
+
+    root_dirs = {
+        (kind, root_id): log_dir for kind, root_id, log_dir in discover_roots(catalog_dir)
+    }
+    now = datetime.now(UTC)
+
+    findings: list[dict] = []
+    for root_kind, root_id, path, _size, byte_offset in rows:
+        base = root_dirs.get((root_kind, root_id))
+        file_path = (base / path) if base is not None else None
+        if file_path is None or not file_path.exists():
+            continue
+        actual_size = file_path.stat().st_size
+        if actual_size <= byte_offset:
+            continue  # nothing past the last completed line
+
+        later_segment = False
+        parsed = _parse_segment_name(path)
+        if parsed is not None and base is not None:
+            host, pid, start_ns = parsed
+            for sibling in base.glob("*.jsonl"):
+                if sibling.name == path:
+                    continue
+                sib_parsed = _parse_segment_name(sibling.name)
+                if (
+                    sib_parsed
+                    and sib_parsed[0] == host
+                    and sib_parsed[1] == pid
+                    and sib_parsed[2] > start_ns
+                ):
+                    later_segment = True
+                    break
+
+        mtime = datetime.fromtimestamp(file_path.stat().st_mtime, tz=UTC)
+        stale = (now - mtime) >= timedelta(days=_UNTERMINATED_TAIL_STALE_DAYS)
+        if not (later_segment or stale):
+            continue
+
+        findings.append(
+            {
+                "type": "unterminated_tail",
+                "root_kind": root_kind,
+                "root_id": root_id,
+                "path": path,
+                "watermark_offset": byte_offset,
+                "actual_size": actual_size,
+            }
+        )
     return findings
 
 
@@ -594,6 +690,7 @@ def verify_runlog(catalog_dir: Path) -> VerifyResult:
     if is_log_mode(catalog_dir):
         findings.extend(_quarantine_findings(catalog_dir))
         findings.extend(_watermark_findings(catalog_dir))
+        findings.extend(_unterminated_tail_findings(catalog_dir))
         findings.extend(_campaign_findings(catalog_dir))
         findings.extend(_legacy_findings(catalog_dir))
 
