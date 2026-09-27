@@ -899,6 +899,7 @@ def test_postmortem_validate_flag_on_emits_event(tmp_path: Path, monkeypatch):
     assert applied[0]["data"]["hypothesis_status"] == "held"
     assert applied[0]["data"]["verdict_override"] == "pass"
     assert applied[0]["data"]["summary"] == "Validation works!"
+    assert len(applied[0]["data"]["sha256"]) == 64  # postmortem content hash (spec table)
     reset_writers_for_test()
 
 

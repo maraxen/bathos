@@ -623,7 +623,7 @@ def register_claim(
     from dataclasses import asdict as _asdict
 
     from bathos.campaigns import CampaignError, _resolve_campaign_id, ingest_cool_campaigns
-    from bathos.runlog.emit import emit_or_legacy, unit_of_work
+    from bathos.runlog.emit import current_mode, emit_or_legacy, unit_of_work
 
     abs_path = resolve_claim_path(str(path), workspace_root)
     rel_path = abs_path.relative_to(workspace_root.resolve())
@@ -637,7 +637,8 @@ def register_claim(
         except CampaignError as e:
             raise RuntimeError(f"Campaign not found: {e}") from e
 
-        if catalog_dir is not None:
+        # Flag on: events only -- the cool->warm ingest is a legacy write (spec "Mode").
+        if catalog_dir is not None and not current_mode():
             ingest_cool_campaigns(db, catalog_dir)
 
         # Compute SHA256

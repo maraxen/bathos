@@ -889,6 +889,17 @@ def compute_shadow_auto_clear_verdict(run: Run) -> dict:
 def flag_blast_radius(
     report: BlastRadiusReport, catalog_dir: Path | str
 ) -> list[BlastRadiusRecord]:
+    """One unit of work for the whole batch: the mode is read once, so a cut-over
+    can never split one assess into some legacy rows and some events (spec "Mode")."""
+    from bathos.runlog.emit import unit_of_work
+
+    with unit_of_work(Path(catalog_dir)):
+        return _flag_blast_radius_impl(report, catalog_dir)
+
+
+def _flag_blast_radius_impl(
+    report: BlastRadiusReport, catalog_dir: Path | str
+) -> list[BlastRadiusRecord]:
     """Durably record every affected/unverifiable match in `report` (AC-6).
 
     Pure write step -- callers MUST render/print `report` to the user BEFORE

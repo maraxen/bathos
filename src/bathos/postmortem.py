@@ -134,8 +134,11 @@ def postmortem_applied_event_data(postmortem: Postmortem, path: Path) -> dict:
     fields `compact.py`'s legacy fold reads off a validated postmortem file --
     `status`, `verdict_override`, `author`, `path`, `hypothesis_status`,
     `has_anomalies`, `summary`, `asset_links` -- so the fold never has to
-    re-read the file itself."""
+    re-read the file itself. `sha256` is the postmortem file's content hash (the
+    spec's natural key alongside run_id), so two different contents applied to
+    one run stay distinguishable."""
     return {
+        "sha256": hashlib.sha256(Path(path).read_bytes()).hexdigest(),
         "status": postmortem.status,
         "verdict_override": postmortem.verdict_override,
         "author": postmortem.author,

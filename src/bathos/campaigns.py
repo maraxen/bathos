@@ -237,7 +237,7 @@ def create_campaign(
     warm INSERT + cool-JSON write; flag off performs only the legacy writes,
     unchanged. `cwd` resolves the runlog project/root when the flag is on
     (defaults to `Path.cwd()` via `resolve_log_root`)."""
-    from bathos.runlog.emit import emit_or_legacy, unit_of_work
+    from bathos.runlog.emit import current_mode, emit_or_legacy, unit_of_work
 
     if mode not in ("exploration", "confirmation", "sequential"):
         raise CampaignError(
@@ -271,6 +271,9 @@ def create_campaign(
                 parent_campaign_id,
             ],
         )
+        # Same position as before step 2b: after the INSERT, before the cool write.
+        # Use campaign_name field since 'name' is reserved by logging.LogRecord
+        event("campaign.create", campaign_id=campaign_id, campaign_name=name)
         if catalog_dir is not None:
             write_campaign_cool(campaign, catalog_dir)
 
@@ -282,8 +285,8 @@ def create_campaign(
             legacy_write=_legacy_write,
             cwd=cwd,
         )
-    # Use campaign_name field since 'name' is reserved by logging.LogRecord
-    event("campaign.create", campaign_id=campaign_id, campaign_name=name)
+        if current_mode():
+            event("campaign.create", campaign_id=campaign_id, campaign_name=name)
     return campaign
 
 
@@ -320,10 +323,11 @@ def _add_run_to_campaign_impl(
     *,
     cwd: Path | None = None,
 ) -> None:
-    from bathos.runlog.emit import emit_or_legacy
+    from bathos.runlog.emit import current_mode, emit_or_legacy
 
     campaign_id = _resolve_campaign_id(db, campaign_id, catalog_dir=catalog_dir)
-    if catalog_dir is not None:
+    # Flag on: events only -- the cool->warm ingest is a legacy write (spec "Mode").
+    if catalog_dir is not None and not current_mode():
         ingest_cool_campaigns(db, catalog_dir)
     campaign_rows = db.execute(
         "SELECT mode, started_at, stopping_threshold FROM campaigns WHERE id = ?", [campaign_id]
@@ -970,7 +974,10 @@ def _conclude_campaign_impl(
     # catalog scan (warm campaign_runs union cool-tier parquet) for the same call.
     precomputed_member_ids: list[str] | None = None
 
-    if catalog_dir is not None:
+    from bathos.runlog.emit import current_mode as _current_mode
+
+    # Flag on: events only -- the cool->warm ingest/link is a legacy write (spec "Mode").
+    if catalog_dir is not None and not _current_mode():
         from bathos.catalog import read_runs
 
         ingest_cool_campaigns(db, catalog_dir)

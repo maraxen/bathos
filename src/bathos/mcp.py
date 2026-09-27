@@ -723,12 +723,16 @@ def blast_radius_assess_tool(
 
     result = dataclasses.asdict(report)
     if flag:
-        records = flag_blast_radius(report, cat_dir)
-        result["flagged_count"] = len(records)
-        campaign_records = propagate_to_campaigns(report, cat_dir)
-        result["campaign_flagged_count"] = len(campaign_records)
-        claim_records = propagate_to_claims(report, cat_dir, workspace_root=proj_root)
-        result["claim_flagged_count"] = len(claim_records)
+        from bathos.runlog.emit import unit_of_work
+
+        # One unit of work across flag + both propagations: the mode is read once.
+        with unit_of_work(Path(cat_dir)):
+            records = flag_blast_radius(report, cat_dir)
+            result["flagged_count"] = len(records)
+            campaign_records = propagate_to_campaigns(report, cat_dir)
+            result["campaign_flagged_count"] = len(campaign_records)
+            claim_records = propagate_to_claims(report, cat_dir, workspace_root=proj_root)
+            result["claim_flagged_count"] = len(claim_records)
     return result
 
 
