@@ -13,6 +13,7 @@ which cover a different, non-overlapping set of checks.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -494,6 +495,90 @@ time.sleep(10)
     finally:
         proc.terminate()
         proc.wait(timeout=5)
+
+
+# --------------------------------------------------------------------------
+# unterminated_tail (AC-7 verify half)
+# --------------------------------------------------------------------------
+
+
+def test_unterminated_tail_finding_via_stale_mtime(tmp_path: Path):
+    """AC-7: "An unterminated tail is never quarantined by ingest, and
+    `bth verify` reports it once ... the file is unchanged for 7 days."""
+    catalog_dir, project_seg, _mirror_seg = _ingested_project_and_mirror_segment(tmp_path)
+
+    # Append an incomplete trailing line (no closing \n) past the watermark
+    # ingest already recorded for the one complete line above.
+    with open(project_seg, "ab") as f:
+        f.write(b'{"eid": "not-yet-terminated"')
+
+    old = time.time() - 8 * 86400
+    os.utime(project_seg, (old, old))
+
+    result = verify_runlog(catalog_dir)
+    findings = [f for f in result.stats["findings"] if f["type"] == "unterminated_tail"]
+    assert len(findings) == 1
+    assert findings[0]["path"] == "seg1.jsonl"
+    assert findings[0]["root_kind"] == "project"
+
+
+def test_unterminated_tail_not_reported_while_fresh_and_no_later_segment(tmp_path: Path):
+    """The negative case: a fresh, still-being-written tail (neither a
+    later segment from the same writer nor 7 days stale) must NOT be
+    reported -- it may simply be mid-write."""
+    catalog_dir, project_seg, _mirror_seg = _ingested_project_and_mirror_segment(tmp_path)
+
+    with open(project_seg, "ab") as f:
+        f.write(b'{"eid": "still-being-written"')
+    # mtime left at "now" -- neither trigger condition holds.
+
+    result = verify_runlog(catalog_dir)
+    findings = [f for f in result.stats["findings"] if f["type"] == "unterminated_tail"]
+    assert findings == []
+
+
+def test_unterminated_tail_finding_via_later_segment_from_same_writer(tmp_path: Path):
+    """The other trigger: a LATER segment from the same writer (same host
+    and pid, a higher `start_ns`) proves the earlier one will never be
+    completed, regardless of its mtime."""
+    from bathos.runlog.envelope import segment_stem
+
+    repo, pid = setup_project(tmp_path)
+    catalog_dir = tmp_path / "catalog"
+    enable_log_mode(catalog_dir)
+    log_dir = repo / ".bth" / "log"
+    mirror_dir = mirror_dir_for(pid, "repo")
+
+    old_stem = segment_stem("myhost", 4242, 1_700_000_000_000_000_000)
+    new_stem = segment_stem("myhost", 4242, 1_700_000_100_000_000_000)
+
+    line = _envelope_line(
+        kind="run.started",
+        entity=["run-later-seg"],
+        data=_run_started_data(None, "2026-01-01T00:01:00.000000Z"),
+        main_root=repo,
+        worktree_root=repo,
+        project="repo",
+        project_id=pid,
+        writer=old_stem,
+        seq=1,
+        ts="2026-01-01T00:01:00.000000Z",
+        eid="e-later-seg",
+    )
+    # The old segment: one complete line, then an unterminated tail.
+    _write_segment(log_dir, f"{old_stem}.jsonl", line.encode() + b'{"eid": "torn-by-rotation"')
+    _write_segment(mirror_dir, f"{old_stem}.jsonl", line.encode())
+    # The new segment this writer rotated to -- proves the old one is done.
+    _write_segment(log_dir, f"{new_stem}.jsonl", b"")
+    _write_segment(mirror_dir, f"{new_stem}.jsonl", b"")
+
+    report = run_ingest(catalog_dir)
+    assert report.new_events == 1  # only the one complete line
+
+    result = verify_runlog(catalog_dir)
+    findings = [f for f in result.stats["findings"] if f["type"] == "unterminated_tail"]
+    assert len(findings) == 1
+    assert findings[0]["path"] == f"{old_stem}.jsonl"
 
 
 # --------------------------------------------------------------------------
