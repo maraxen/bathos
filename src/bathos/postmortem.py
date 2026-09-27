@@ -401,13 +401,12 @@ def find_run_for_scaffold(run_id: str, catalog_dir: Path) -> tuple[str, str] | N
     warm DB file exists — a freshly-run script only lives in the cool tier until
     the next `bth compact`, and callers here (postmortem scaffold) must still find it.
     """
-    import duckdb
-
     from bathos.catalog import read_runs
+    from bathos.index import connect_read
 
     db_path = catalog_dir / "bathos.db"
     if db_path.exists():
-        con = duckdb.connect(str(db_path))
+        con = connect_read(catalog_dir, read_only=False)
         try:
             row = con.execute(
                 "SELECT command, project_slug FROM runs WHERE id = ?", [run_id]

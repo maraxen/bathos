@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from bathos.config import default_catalog_dir
+from bathos.index import connect_read
 from bathos.verify import verify_cool, verify_warm
 
 logger = logging.getLogger(__name__)
@@ -347,8 +348,6 @@ def _actions_from_warm_only_runs(catalog_dir: Path) -> tuple[list[RepairAction],
     Returns:
         Tuple of (list of RepairAction objects, list of warning strings)
     """
-    import duckdb
-
     actions: list[RepairAction] = []
     warnings: list[str] = []
 
@@ -369,7 +368,7 @@ def _actions_from_warm_only_runs(catalog_dir: Path) -> tuple[list[RepairAction],
 
     # Query warm DB for all run UUIDs
     try:
-        con = duckdb.connect(str(db_path), read_only=True)
+        con = connect_read(catalog_dir, read_only=True)
         try:
             warm_rows = con.execute("SELECT id FROM runs").fetchall()
             warm_uuids = {row[0] for row in warm_rows}
@@ -454,9 +453,7 @@ def repair(
         output_metadata_count = 0
         if db_path.exists():
             try:
-                import duckdb
-
-                con = duckdb.connect(str(db_path), read_only=True)
+                con = connect_read(catalog_dir, read_only=True)
                 try:
                     # Count postmortem annotations (any postmortem_status != 'unassigned')
                     pm_result = con.execute(
@@ -766,8 +763,6 @@ def _handle_reexport_from_warm(
         catalog_dir: Catalog directory
         manifest: Optional RepairManifest to collect warnings about NULL-metadata runs
     """
-    import duckdb
-
     from bathos.catalog import read_runs, write_run
     from bathos.schema import Run
 
@@ -788,7 +783,7 @@ def _handle_reexport_from_warm(
 
     # Get column names for reconstruction (to handle schema variations)
     try:
-        con = duckdb.connect(str(db_path), read_only=True)
+        con = connect_read(catalog_dir, read_only=True)
         try:
             col_info = con.execute("PRAGMA table_info(runs)").fetchall()
             col_names = [col[1] for col in col_info]  # col[1] is the column name
@@ -800,7 +795,7 @@ def _handle_reexport_from_warm(
 
     # Open warm DB and query all runs
     try:
-        con = duckdb.connect(str(db_path), read_only=True)
+        con = connect_read(catalog_dir, read_only=True)
         try:
             # Fetch all columns from runs table
             warm_rows = con.execute(

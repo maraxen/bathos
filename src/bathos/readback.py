@@ -76,6 +76,7 @@ from pathlib import Path
 from bathos.campaign_report import CampaignReport
 from bathos.compact import _collect_output_metadata
 from bathos.figure_manifest import FigureManifest
+from bathos.index import connect_read
 from bathos.query import CatalogError, get_run
 
 
@@ -226,7 +227,7 @@ def _find_run_with_output_sha256(
     if not db_path.exists():
         return None
 
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = connect_read(Path(catalog_dir), read_only=True)
     try:
         rows = con.execute(
             "SELECT id, output_metadata FROM runs "
@@ -569,7 +570,7 @@ def list_candidates(catalog_dir: Path | str, campaign_id: str) -> list[dict]:
 
     db_path = Path(catalog_dir) / "bathos.db"
     if db_path.exists():
-        con = duckdb.connect(str(db_path), read_only=True)
+        con = connect_read(Path(catalog_dir), read_only=True)
         try:
             rows = con.execute(
                 "SELECT id, output_metadata FROM runs WHERE campaign_id = ? "

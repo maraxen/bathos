@@ -7,8 +7,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Literal
 
-import duckdb
-
+from bathos.index import connect_read
 from bathos.schema import Run
 from bathos.sidecar import Sidecar, find_sidecar, parse_sidecar
 from bathos.telemetry import event
@@ -162,7 +161,7 @@ def check_first_of_kind(script_path: Path, catalog_dir: Path, git_hash: str) -> 
         if _resolve_backend(catalog_dir) == "warm":
             db_path = catalog_dir / "bathos.db"
             if db_path.exists():
-                con = duckdb.connect(str(db_path), read_only=True)
+                con = connect_read(catalog_dir, read_only=True)
                 try:
                     rows = con.execute(
                         "SELECT COUNT(*) FROM runs WHERE command LIKE ? AND git_hash = ?",
@@ -209,7 +208,7 @@ def check_sidecar_drift(script_path: Path, catalog_dir: Path, current_sidecar_sh
         if _resolve_backend(catalog_dir) == "warm":
             db_path = catalog_dir / "bathos.db"
             if db_path.exists():
-                con = duckdb.connect(str(db_path), read_only=True)
+                con = connect_read(catalog_dir, read_only=True)
                 try:
                     rows = con.execute(
                         "SELECT sidecar_sha256 FROM runs WHERE command LIKE ? AND sidecar_sha256 != '' "
@@ -267,7 +266,7 @@ def check_component_sidecar_drift(
         if _resolve_backend(catalog_dir) == "warm":
             db_path = catalog_dir / "bathos.db"
             if db_path.exists():
-                con = duckdb.connect(str(db_path), read_only=True)
+                con = connect_read(catalog_dir, read_only=True)
                 try:
                     rows = con.execute(
                         "SELECT component_sidecar_sha256 FROM runs WHERE component_id = ? "
@@ -325,7 +324,7 @@ def check_reproduction_prerequisite(
     # Warm path: query DuckDB if available
     if db_path.exists():
         try:
-            with duckdb.connect(str(db_path), read_only=True) as conn:
+            with connect_read(catalog_dir, read_only=True) as conn:
                 rows = conn.execute(
                     "SELECT 1 FROM runs WHERE command LIKE ? AND outcome = 'pass' LIMIT 1",
                     [f"%{requires_pass_stem}%"],

@@ -237,8 +237,9 @@ def check_parity_confounds_for_submit(sidecar, catalog_dir: Path) -> dict:
     Returns:
         Dict with keys: satisfied (bool|None), tier_enforced (bool)
     """
-    import duckdb
     import pyarrow.parquet as pq
+
+    from bathos.index import connect_read
 
     # If no reproduction block or no requires_parity_stem, gate is satisfied (no check needed)
     if not sidecar.reproduction or not sidecar.reproduction.requires_parity_stem:
@@ -255,7 +256,7 @@ def check_parity_confounds_for_submit(sidecar, catalog_dir: Path) -> dict:
     # Warm path: query DuckDB if available
     if db_path.exists():
         try:
-            with duckdb.connect(str(db_path), read_only=True) as conn:
+            with connect_read(catalog_dir, read_only=True) as conn:
                 # Query for a passing parity run matching the stem.
                 # Use the parity_run_type COLUMN (not json_extract on metadata —
                 # metadata JSON is NULL after cool→warm compaction, making the old

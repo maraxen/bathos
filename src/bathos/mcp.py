@@ -44,6 +44,7 @@ from bathos.config import default_catalog_dir, find_project_config, load_project
 from bathos.errors import RESOLUTION_HINTS, BathosErrorCode
 from bathos.export import ExportError
 from bathos.figure_registry import FigureEntrySchemaError, register_figure_entry
+from bathos.index import connect_read
 from bathos.init import init_project
 from bathos.mcp_auth import McpAuthError, check_token
 from bathos.prereg import GateError
@@ -3087,11 +3088,9 @@ def postmortem_get_tool(
         cat_dir = _get_catalog_dir(None)
         db_path = cat_dir / "bathos.db"
         if db_path.exists():
-            import duckdb
-
             from bathos.schema import Run
 
-            con = duckdb.connect(str(db_path))
+            con = connect_read(cat_dir, read_only=False)
             try:
                 arrow_tbl = con.execute("SELECT * FROM runs WHERE id = ?", [run_id]).arrow()
                 if arrow_tbl.num_rows > 0:
@@ -3223,9 +3222,7 @@ def claim_scaffold_tool(
         ws = resolve_workspace().fs_root
 
     try:
-        import duckdb
-
-        db = duckdb.connect(str(db_path), read_only=False)
+        db = connect_read(cat_dir, read_only=False)
         claim_path = scaffold_claim(campaign_id, db, ws)
         db.close()
         return {
@@ -3264,12 +3261,10 @@ def claim_validate_tool(
     db = None
     if catalog_dir:
         try:
-            import duckdb
-
             cat_dir = Path(catalog_dir).expanduser().resolve()
             db_path = cat_dir / "bathos.db"
             if db_path.exists():
-                db = duckdb.connect(str(db_path), read_only=True)
+                db = connect_read(cat_dir, read_only=True)
         except Exception:
             pass
 
@@ -3639,11 +3634,9 @@ def claim_author_tool(
                     "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.CATALOG_ERROR],
                 }
 
-            import duckdb
-
             from bathos.campaigns import CampaignError, _resolve_campaign_id
 
-            db = duckdb.connect(str(db_path), read_only=False)
+            db = connect_read(cat_dir, read_only=False)
             try:
                 full_id = _resolve_campaign_id(db, campaign_id)
             except CampaignError as e:
@@ -3903,9 +3896,7 @@ def validate_sidecar_tool(
 
     claim = None
     if campaign_id:
-        import duckdb
-
-        db = duckdb.connect(str(_get_catalog_dir(None) / "bathos.db"))
+        db = connect_read(_get_catalog_dir(None), read_only=False, missing="empty")
         try:
             claim = load_registered_claim(db, campaign_id)
         except (CampaignError, FileNotFoundError, ValueError) as e:
@@ -4017,8 +4008,6 @@ def outputs_summary_tool(
 
     Returns summary rows grouped by project.
     """
-    import duckdb
-
     from bathos.config import default_catalog_dir, find_project_config, load_project_config
 
     if catalog_dir:
@@ -4040,7 +4029,7 @@ def outputs_summary_tool(
         }
 
     # Query warm tier
-    con = duckdb.connect(str(db_path))
+    con = connect_read(cat, read_only=False)
     con.execute("SET TimeZone='UTC'")
 
     query = "SELECT project_slug, id, output_metadata FROM runs WHERE output_metadata IS NOT NULL AND output_metadata != '[]'"

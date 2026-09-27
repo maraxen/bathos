@@ -65,9 +65,9 @@ def _project_campaigns(
         # Query DuckDB for aggregates if catalog_dir provided
         if catalog_dir is not None:
             try:
-                import duckdb
+                from bathos.index import connect_read
 
-                conn = duckdb.connect(str(catalog_dir / "bathos.db"), read_only=True)
+                conn = connect_read(catalog_dir, read_only=True)
 
                 agg_sql = """
                     SELECT outcome, COUNT(*) AS n,

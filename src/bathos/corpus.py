@@ -42,6 +42,7 @@ from pathlib import Path
 import duckdb
 
 import bathos
+from bathos.index import connect_read
 from bathos.sidecar import single_row_projection
 
 FRONTMATTER_DELIM = "+++"
@@ -380,7 +381,7 @@ def _catalog_counts(script: Path, catalog_dir: Path) -> dict:
     if not stem:
         return {}
     try:
-        con = duckdb.connect(str(db_path), read_only=True)
+        con = connect_read(Path(catalog_dir), read_only=True)
     except Exception:
         return {}
     try:

@@ -8,8 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import duckdb
-
+from bathos.index import connect_read
 from bathos.schema import CURRENT_SCHEMA_VERSION
 
 
@@ -139,7 +138,7 @@ def signal_control_arm_rate(project_slug: str, db_path: Path) -> SignalResult:
         )
 
     try:
-        with duckdb.connect(str(db_path), read_only=True) as conn:
+        with connect_read(db_path.parent, read_only=True) as conn:
             # Count total runs
             total = conn.execute(
                 "SELECT COUNT(*) FROM runs WHERE project_slug = ?", [project_slug]
@@ -247,7 +246,7 @@ def signal_submit_bypass_rate(project_slug: str, db_path: Path, catalog_dir: Pat
         )
 
     try:
-        with duckdb.connect(str(db_path), read_only=True) as conn:
+        with connect_read(catalog_dir, read_only=True) as conn:
             rows = conn.execute(
                 "SELECT slurm_job_id FROM runs"
                 " WHERE project_slug = ?"
@@ -357,7 +356,7 @@ def sprint_audit(hours: int = 24) -> dict:
 
         # Check schema version before querying
         try:
-            db_check = duckdb.connect(str(db_path), read_only=True)
+            db_check = connect_read(catalog_dir, read_only=True)
             version_rows = db_check.execute(
                 "SELECT value FROM _schema_meta WHERE key = 'warm_version'"
             ).fetchall()
@@ -378,7 +377,7 @@ def sprint_audit(hours: int = 24) -> dict:
 
         # Safe to query
         try:
-            db = duckdb.connect(str(db_path), read_only=True)
+            db = connect_read(catalog_dir, read_only=True)
             db.execute("SET TimeZone='UTC'")
             cutoff = (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
 

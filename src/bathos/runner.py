@@ -434,9 +434,8 @@ def _run_script_impl(
     # store the full UUID — never the raw prefix — on the run record.
     resolved_campaign_id: str | None = None
     if campaign_id:
-        import duckdb
-
         from bathos.campaigns import CampaignError, _resolve_campaign_id
+        from bathos.index import connect_read
 
         db_path = catalog_dir / "bathos.db"
         campaign_db = None
@@ -444,7 +443,7 @@ def _run_script_impl(
             if db_path.exists():
                 # read_only: SLURM array tasks otherwise take exclusive locks on the
                 # same bathos.db and fail with "Conflicting lock is held".
-                campaign_db = duckdb.connect(str(db_path), read_only=True)
+                campaign_db = connect_read(catalog_dir, read_only=True)
             resolved_campaign_id = _resolve_campaign_id(
                 campaign_db, campaign_id, catalog_dir=catalog_dir
             )

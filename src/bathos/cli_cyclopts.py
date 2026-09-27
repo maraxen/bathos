@@ -624,15 +624,14 @@ def query_shadow_log_cmd(limit: int = 20) -> None:
     ----------
     limit: Max records to show.
     """
-    import duckdb
-
     from bathos.cli_common import catalog_dir
+    from bathos.index import connect_read
 
     cat_dir = catalog_dir()
     db_path = cat_dir / "bathos.db"
     if not db_path.exists():
         return
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = connect_read(cat_dir, read_only=True)
     try:
         rows = con.execute(
             "SELECT entity_id, match_reason, amended_at FROM blast_radius_ledger "
@@ -1372,9 +1371,9 @@ def catalog_version_cmd() -> None:
 
     db_path = cat_dir / "bathos.db"
     if db_path.exists():
-        import duckdb
+        from bathos.index import connect_read
 
-        con = duckdb.connect(str(db_path), read_only=True)
+        con = connect_read(cat_dir, read_only=True)
         try:
             rows = con.execute(
                 "SELECT warm_version, migrated_at FROM _schema_migrations "

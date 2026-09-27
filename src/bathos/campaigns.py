@@ -12,6 +12,7 @@ from uuid import uuid4
 
 import duckdb
 
+from bathos.index import connect_read
 from bathos.sidecar import compute_evalue
 from bathos.telemetry import event
 
@@ -164,11 +165,40 @@ def ingest_cool_campaigns(db, catalog_dir: Path) -> int:
 
 
 def connect_catalog_db(catalog_dir: Path, *, read_only: bool = True):
-    """Open bathos.db if it exists; otherwise return None."""
+    """Open the catalog if available; otherwise return None.
+
+    `read_only=True` (the majority of this function's 8+ call sites, spread
+    across mcp.py/cli_cyclopts.py/blast_radius.py) goes through
+    `bathos.index.connect_read` -- AC-18's one flag-gated read entry point.
+    Flag off, this reproduces the old "open bathos.db read-only, or None if
+    it isn't there yet" contract exactly. Flag on, it returns a connection
+    over the folded index instead (its `campaigns`/`campaign_runs`/... views,
+    empty until the first ingest), so every read-only caller of this
+    function -- `bth campaign list`/`show` among them -- sees the folded
+    index once the flag flips, with no caller-side change. A caller's
+    pre-existing `if db is None: return []`-style short circuit still fires
+    before cut-over; once the flag is on there is always a (possibly empty)
+    index to query, so it stops firing -- an empty result reads the same as
+    "not connected" did for every current caller (`by_campaign`/similar
+    lookups over zero rows), which is why no caller needed to change.
+
+    `read_only=False` (writes) is NOT flag-aware here and keeps its own raw
+    `duckdb.connect` (AC-18 allow-list: `campaigns.py`/`connect_catalog_db`)
+    -- this module's own write sites (`create_campaign`, `conclude_campaign`,
+    etc.) flag-gate the actual mutation internally via `emit_or_legacy`, and
+    still need a real legacy connection to write through on their flag-off
+    branch regardless of what this function's read side does.
+    """
     path = Path(catalog_dir) / "bathos.db"
+    if read_only:
+        from bathos.runlog.mode import is_log_mode
+
+        if not is_log_mode(catalog_dir) and not path.exists():
+            return None
+        return connect_read(catalog_dir, read_only=True)
     if not path.exists():
         return None
-    return duckdb.connect(str(path), read_only=read_only)
+    return duckdb.connect(str(path), read_only=False)
 
 
 def union_campaign_member_ids(db, campaign_id: str, catalog_dir: Path | None) -> list[str]:
@@ -203,7 +233,7 @@ def prepare_catalog_for_conclude(catalog_dir: Path) -> None:
     if not db_path.exists():
         compact(catalog_dir)
         return
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = connect_read(catalog_dir, read_only=True)
     try:
         warm_ids = {r[0] for r in con.execute("SELECT id FROM runs").fetchall()}
     except duckdb.Error:

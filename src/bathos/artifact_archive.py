@@ -152,13 +152,13 @@ def _tracked_output_paths_for_script(
     catalog_dir: Path, project_slug: str, script_sha256: str
 ) -> list[str]:
     """Output paths recorded on any run whose script_sha256 matches, deduplicated."""
-    import duckdb
+    from bathos.index import connect_read
 
     db_path = catalog_dir / "bathos.db"
     if not db_path.exists() or not script_sha256:
         return []
     try:
-        con = duckdb.connect(str(db_path), read_only=True)
+        con = connect_read(catalog_dir, read_only=True)
         try:
             rows = con.execute(
                 "SELECT output_paths FROM runs WHERE script_sha256 = ? AND project_slug = ?",
@@ -410,7 +410,7 @@ def _regenerate_index(project_root: Path, catalog_dir: Path) -> None:
     Generated artifact, like .praxia/docs/INDEX.md elsewhere -- never hand-edited,
     rebuilt in full from the archived_items ledger on every archive/restore.
     """
-    import duckdb
+    from bathos.index import connect_read
 
     index_dir = project_root / ".bth"
     index_dir.mkdir(parents=True, exist_ok=True)
@@ -419,7 +419,7 @@ def _regenerate_index(project_root: Path, catalog_dir: Path) -> None:
     db_path = catalog_dir / "bathos.db"
     rows: list[tuple] = []
     if db_path.exists():
-        con = duckdb.connect(str(db_path), read_only=True)
+        con = connect_read(catalog_dir, read_only=True)
         try:
             rows = con.execute(
                 "SELECT id, event, kind, paths, verdict, reason, superseded_by, recorded_at "

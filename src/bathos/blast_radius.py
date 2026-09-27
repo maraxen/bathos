@@ -34,6 +34,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from bathos.checker import check_dependency_lock_drift, check_runs, hash_dependency_lock
+from bathos.index import connect_read
 from bathos.query import get_run, list_runs
 from bathos.schema import Run
 from bathos.telemetry import event
@@ -719,7 +720,7 @@ def assess_blast_radius(
     campaign_by_run: dict[str, str] = {}
     db_path = Path(catalog_dir) / "bathos.db"
     if db_path.exists():
-        con = duckdb.connect(str(db_path), read_only=True)
+        con = connect_read(Path(catalog_dir), read_only=True)
         try:
             rows = con.execute("SELECT run_id, campaign_id FROM campaign_runs").fetchall()
             campaign_by_run = dict(rows)

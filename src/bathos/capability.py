@@ -28,7 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-import duckdb
+from bathos.index import connect_read
 
 SEED_COLUMNS = ("seed", "baseline_hpo_trials", "baseline_hpo_compute_budget")
 
@@ -49,7 +49,7 @@ def _warm_runs_columns(catalog_dir: Path) -> set[str] | None:
     db_path = catalog_dir / "bathos.db"
     if not db_path.exists():
         return None
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = connect_read(catalog_dir, read_only=True)
     try:
         rows = con.execute("PRAGMA table_info('runs')").fetchall()
         return {row[1] for row in rows}

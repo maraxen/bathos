@@ -7,10 +7,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from bathos.index import connect_read
 from bathos.telemetry import event
 
 
@@ -67,7 +67,7 @@ def archive(
         raise RuntimeError("No warm catalog. Run `bth compact` first.")
 
     # Read runs from warm DB
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = connect_read(catalog_dir, read_only=True)
 
     query = "SELECT * FROM runs ORDER BY id"
     params = []
