@@ -3,10 +3,44 @@ from pathlib import Path
 
 import pytest
 
-from bathos.schema import Run
+# Before ANY bathos import: bathos modules resolve HOME-derived paths at import time (e.g.
+# cli_cyclopts calls init_telemetry(), which opened a log handler in the real
+# ~/.bth/catalog/logs/ for the whole session). Redirect HOME session-wide, then arm the tripwire.
+from tests import real_home_guard
+
+real_home_guard.redirect_session_home()
+real_home_guard.install()
+
+from bathos.schema import Run  # noqa: E402
 
 # Guard repair module import for test collection — repair.py is optional at collection time
 pytest.importorskip("bathos.repair")
+
+
+def pytest_configure(config):
+    """Snapshot the real ~/.bth before any test module is imported."""
+    config.stash[_REAL_BTH_BEFORE] = real_home_guard.fingerprint()
+
+
+_REAL_BTH_BEFORE = pytest.StashKey[dict]()
+
+
+def pytest_sessionfinish(session):
+    """Fail the session if anything (in-process or a subprocess) wrote the real ~/.bth."""
+    before = session.config.stash.get(_REAL_BTH_BEFORE, None)
+    changed = real_home_guard.diff(before, real_home_guard.fingerprint()) if before else []
+    if not (changed or real_home_guard.violations):
+        return
+    tr = session.config.pluginmanager.get_plugin("terminalreporter")
+    lines = ["tests wrote the REAL ~/.bth (see tests/real_home_guard.py):", *changed]
+    lines += [f"refused in-process: {v}" for v in real_home_guard.violations]
+    if tr is not None:
+        tr.section("real ~/.bth leak", sep="!", red=True)
+        for line in lines:
+            tr.write_line(line)
+    else:
+        print("\n".join(lines))
+    session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 @pytest.fixture
@@ -51,15 +85,7 @@ def clear_myxcel_env(monkeypatch):
 # BTH_LOG_LEVEL, BTH_TASK_ID, BTH_OBLIGATION_*, BTH_DIFFERENTIAL_* which are not
 # paths). Found via `rg -n 'BTH_[A-Z_]+' src/bathos` and cross-checked against
 # every accessor that treats the value as a Path.
-_BTH_PATH_ENV_VARS = (
-    "BTH_CATALOG_DIR",
-    "BTH_WORKSPACE_ROOT",
-    "BTH_PROJECT_ROOT",
-    "BTH_LOG_DIR",
-    "BTH_MCP_TOKEN_PATH",
-    "BTH_RESULTS_PATH",
-    "BTH_OUTPUT_DIR",
-)
+_BTH_PATH_ENV_VARS = real_home_guard.BTH_PATH_ENV_VARS
 
 
 @pytest.fixture(autouse=True)

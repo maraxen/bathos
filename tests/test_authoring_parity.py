@@ -21,8 +21,6 @@ import asyncio
 import json
 from pathlib import Path
 
-import pytest
-
 SRC = Path(__file__).resolve().parents[1] / "src" / "bathos"
 
 VALID_CLAIM = {
@@ -110,10 +108,6 @@ def _author_via_mcp(target: Path, payload: dict, workspace: Path):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(
-    not (Path.home() / ".bth" / "mcp_token").exists(),
-    reason="MCP write token not present on this machine",
-)
 def test_both_surfaces_produce_identical_bytes(tmp_path):
     """The same payload authored either way yields the same document."""
     cli_target = tmp_path / "cli.claim.toml"
@@ -125,10 +119,6 @@ def test_both_surfaces_produce_identical_bytes(tmp_path):
     assert cli_target.read_bytes() == mcp_target.read_bytes()
 
 
-@pytest.mark.skipif(
-    not (Path.home() / ".bth" / "mcp_token").exists(),
-    reason="MCP write token not present on this machine",
-)
 def test_both_surfaces_refuse_the_same_payload(tmp_path):
     """A typo is refused on both surfaces, and neither writes anything."""
     bad = dict(VALID_CLAIM)
