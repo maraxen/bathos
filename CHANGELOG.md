@@ -78,6 +78,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Migration step 0 now refuses on a per-project `catalog_dir`, plus `bth migrate
+  --consolidate-catalog` to fix it (debt #1998, spec v39).** A registered root whose
+  `.bth.toml` explicitly sets `[project] catalog_dir` to somewhere other than the catalog
+  being migrated is obsolete under the project-local run log: its own `bth run`s write there
+  instead of the migration catalog (real case: asr has 110 runs that exist only in its own
+  private catalog, invisible to `--to-log`), and post-cut-over that catalog would never carry
+  a cutover marker, leaving the project stuck writing legacy-mode forever (split brain).
+  `bth migrate --to-log` now refuses unconditionally (status `foreign_catalogs`, no `--force`
+  override; checked before the dry-run branch, so `--dry-run` reports it too) while any such
+  root remains registered. `bth migrate --consolidate-catalog <root>` (CLI) /
+  `consolidate_project_catalog()` / the new `consolidate_catalog` MCP tool fold the fix:
+  additively copy only `runs/`, `campaigns/`, `submits/`, `reaped/`, `sidecars/` from the
+  foreign catalog into the migration catalog, never touching the source. Run fragments are
+  matched by run id anywhere under the destination's `runs/` (not by relative path), so a
+  flat-layout source fragment already compacted into the destination under its project-slug
+  subdir is recognised rather than duplicated; a run id new to the destination lands under
+  `runs/<project_slug>/`, the slug read off the fragment's own column; a same-id fragment with
+  differing bytes is reported informationally (`already_present_differs`), destination always
+  winning. The other four subtrees stay path-matched, with a same-path differing file reported
+  as a real conflict and left uncopied. `--dry-run` computes the identical plan without
+  writing; a real apply takes the destination's writers lock and runs a normal `bth compact`
+  afterward. Refuses on a destination already past cut-over (use `--import-legacy` instead).
+
+- **PR #74 review fixes for `--consolidate-catalog` (debt #1998, 260927).** An unclean result
+  no longer looks like success: `status` is now `"needs_review"` (never `"ok"`) whenever
+  `conflicts > 0` or `unplaceable` is non-empty, for dry-run and apply alike, and the CLI exits
+  non-zero on anything other than `"ok"`. The subtree allowlist now also folds `anchors/`,
+  `ledger/`, `blast_radius/`, `archived_items/` (path-matched, same as `campaigns/submits/
+  reaped/sidecars` -- each is a flat directory keyed by a globally-unique per-fragment uuid, so
+  there is no id-collision case to resolve the way `runs/` has); attestations already live
+  under `sidecars/attestations/` and needed no new entry. Any other top-level source entry
+  (`harness_runs/`, `quarantine/`, etc.) is now reported in a new `skipped_unknown` list rather
+  than silently ignored. Closed a TOCTOU window: an apply now plans *inside* the destination's
+  writers lock (a dry run still plans without it), and each file additionally gets a per-file
+  no-clobber check immediately before the rename (temp-then-`os.link`-then-unlink, falling back
+  to an exists-checked `os.replace`) -- a file that appeared at the destination since planning
+  is never overwritten; it is reclassified as already-present or a late conflict/differs entry.
+  Every subtree now skips temp/dotfile names (`*.tmp`, `*.tmp.parquet`, `*.json.tmp`,
+  `*.parquet.tmp`, or a leading `.`) on both the source scan and the destination index. A run id
+  repeated within the source itself is now byte-compared against the first queued occurrence
+  instead of assumed identical. `already_present_differs` is now a list of run ids (capped at
+  200, same as `conflict_paths`) with a new uncapped `already_present_differs_count` alongside
+  it. `project_slug` is sanitized before use as a path component (rejecting empty, `.`, `..`,
+  or a value containing `/`, `\`, or NUL) and the resulting destination path is asserted to
+  resolve under `dest/runs/`, both reported as unplaceable rather than trusted. A new
+  `refused_source_log_mode` status refuses when the *source* itself already has a cutover
+  marker (symmetric with the existing destination-side `refused_log_mode`). New
+  `--source-catalog`/MCP `source_catalog` closes the documented race window between
+  consolidating and removing `catalog_dir`: after committing the key's removal, re-run
+  `--consolidate-catalog` a second time with `--source-catalog` pointing at the same foreign
+  catalog and confirm it copies 0 files with `status == "ok"` before retrying `--to-log`.
+
 - **Two more Migration step-3 residual classes, `output_metadata_drift` and
   `postmortem_worktree_deleted`** (debt #1944; spec v37, narrowed further in v38). A
   `runs.output_metadata` residual classifies as `output_metadata_drift` only when both sides
