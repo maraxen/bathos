@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bth init --assign-id` now also registers the project root in `~/.bth/projects.toml` (result gains `registered`). Before cut-over nothing else registered a root, so `bth migrate --to-log` saw zero roots and would have routed every legacy run to `unaffiliated/`. A root registered without an id picks the id up on re-registration. bathos's own `.bth.toml` slug corrected from `prolix` to `bathos` and given a project id.
+
 - **A pre-registered fail/marginal outcome signaled via non-zero exit is no longer laundered
   into `outcome='error'` (debt #1977).** `bth run`'s exit-code guard used to short-circuit
   `evaluate_outcome()` on any non-zero exit, recording `outcome='error'` with reason

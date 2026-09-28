@@ -241,12 +241,19 @@ def init_project(
     return report
 
 
-def assign_id_to_existing_project(project_root: Path) -> tuple[str, bool]:
+def assign_id_to_existing_project(project_root: Path) -> tuple[str, bool, bool]:
     """`bth init --assign-id`: retrofit a `[project] id` onto an existing
     project's `.bth.toml` without redoing the rest of `init_project` (script
-    dirs, .gitignore, catalog, env.sh). Returns `(project_id, minted)`.
+    dirs, .gitignore, catalog, env.sh), and register `project_root` in
+    `~/.bth/projects.toml`. Returns `(project_id, minted, registered)`.
+
+    Registration is what migration step 0/2 route by: before cut-over nothing
+    else registers a root (the writer only does so on its first append to a
+    project log), so without it `bth migrate --to-log` would see zero roots
+    and send every legacy run to `unaffiliated/`.
     """
-    from bathos.runlog.project_id import assign_project_id
+    from bathos.runlog.project_id import assign_project_id, register_main_root
 
     result = assign_project_id(project_root)
-    return result.project_id, result.minted
+    registered = register_main_root(project_root)
+    return result.project_id, result.minted, registered

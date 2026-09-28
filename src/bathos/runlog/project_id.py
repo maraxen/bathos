@@ -189,18 +189,27 @@ def register_main_root(main_root: Path) -> bool:
         if roots_table is None:
             roots_table = tomlkit.aot()
             doc["roots"] = roots_table
+        pid = read_project_id(main_root / ".bth.toml")
         for entry in roots_table:
             if entry.get("root") == key:
-                _registered_this_process.add(cache_key)
+                # A root registered before it had an id (e.g. by the writer)
+                # picks the id up on a later registration.
+                if pid and not entry.get("project_id"):
+                    entry["project_id"] = pid
+                    _write_registry(doc)
+                if entry.get("project_id"):
+                    _registered_this_process.add(cache_key)
                 return False
         entry = tomlkit.table()
         entry["root"] = key
-        pid = read_project_id(main_root / ".bth.toml")
         if pid:
             entry["project_id"] = pid
         roots_table.append(entry)
         _write_registry(doc)
-    _registered_this_process.add(cache_key)
+    # Cache only an entry that carries its id, so a later call after the id
+    # is assigned still reaches the fill-in above.
+    if pid:
+        _registered_this_process.add(cache_key)
     return True
 
 
