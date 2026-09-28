@@ -1,6 +1,7 @@
 [project]
-slug = "prolix"
+slug = "bathos"
 root = "/home/marielle/projects/bathos"
+id = "420c7b48-b39c-4d65-9de2-3baba4d39762"
 
 [remotes.engaging]
 host = "engaging"

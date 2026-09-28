@@ -1676,11 +1676,12 @@ def init_tool(
     if assign_id:
         from bathos.init import assign_id_to_existing_project
 
-        project_id, minted = assign_id_to_existing_project(root)
+        project_id, minted, registered = assign_id_to_existing_project(root)
         return {
             "project_root": str(root),
             "project_id": project_id,
             "minted": minted,
+            "registered": registered,
         }
 
     if not slug:
