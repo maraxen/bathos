@@ -67,6 +67,7 @@ from .ac17_harness import (
     execute_ops,
     make_backend,
     new_fold_state,
+    read_legacy_submits,
 )
 
 SEEDS = [1, 2, 3, 4, 5, 7, 11, 13]
@@ -326,8 +327,7 @@ def _run_differential(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed: int
         for r in legacy_tables["runs"]
     }
     n_runs = {
-        r["id"]: _normalize_row("runs", r, new.workspace, camp_rev_new)
-        for r in new_tables["runs"]
+        r["id"]: _normalize_row("runs", r, new.workspace, camp_rev_new) for r in new_tables["runs"]
     }
     assert set(l_runs) == set(n_runs), (
         f"run id sets differ: only_legacy={set(l_runs) - set(n_runs)} "
@@ -404,7 +404,9 @@ def _run_differential(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed: int
             cols.remove("evalue")
         for col in cols:
             if not _floaty_equal(lr.get(col), nr.get(col)):
-                all_diffs.append(f"campaign_runs[{key}].{col}: legacy={lr.get(col)!r} new={nr.get(col)!r}")
+                all_diffs.append(
+                    f"campaign_runs[{key}].{col}: legacy={lr.get(col)!r} new={nr.get(col)!r}"
+                )
 
     # ---- sidecar_anchors (BC-8) ----------------------------------------
     legacy_anchor_rows = legacy_tables["sidecar_anchors"]
@@ -426,9 +428,13 @@ def _run_differential(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed: int
             all_diffs.append(f"anchor {op['path']}/{op['sha256']} missing from new fold")
             continue
         if row["kind"] != op["anchor_kind"]:
-            all_diffs.append(f"anchor {op['path']} kind: expected {op['anchor_kind']} got {row['kind']}")
+            all_diffs.append(
+                f"anchor {op['path']} kind: expected {op['anchor_kind']} got {row['kind']}"
+            )
         if row["label"] != op["label"]:
-            all_diffs.append(f"anchor {op['path']} label: expected {op['label']} got {row['label']}")
+            all_diffs.append(
+                f"anchor {op['path']} label: expected {op['label']} got {row['label']}"
+            )
         expected_handle = op.get("campaign_handle")
         actual_handle = camp_rev_new.get(row["campaign_id"], row["campaign_id"])
         if actual_handle != expected_handle:
@@ -455,7 +461,9 @@ def _run_differential(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed: int
     # checked against the expected set; the legacy table's emptiness is
     # asserted explicitly (a positive confirmation of this known behaviour,
     # not silently skipped).
-    expected_camp_edges = {(op["child"], op["parent"]) for op in ops if op["kind"] == "add_campaign_edge"}
+    expected_camp_edges = {
+        (op["child"], op["parent"]) for op in ops if op["kind"] == "add_campaign_edge"
+    }
     got_new_camp_edges = {
         (
             camp_rev_new.get(r["child_campaign_id"], r["child_campaign_id"]),
@@ -464,7 +472,9 @@ def _run_differential(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed: int
         for r in new_tables["campaign_edges"]
     }
     if got_new_camp_edges != expected_camp_edges:
-        all_diffs.append(f"new campaign_edges {got_new_camp_edges} != expected {expected_camp_edges}")
+        all_diffs.append(
+            f"new campaign_edges {got_new_camp_edges} != expected {expected_camp_edges}"
+        )
     if legacy_tables["campaign_edges"]:
         all_diffs.append(
             "legacy campaign_edges non-empty after force_rebuild (expected empty -- "
@@ -480,6 +490,59 @@ def _run_differential(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed: int
             "legacy run_edges non-empty after force_rebuild (expected empty -- "
             f"edges have no cool-tier fragment): {legacy_tables['run_edges']}"
         )
+
+    # ---- submits (delivery item 3: submit.recorded / write_submit_provenance) --
+    # There is no warm `submits` DuckDB table at all (`compact.py` never
+    # creates one -- confirmed by `bathos.runlog.migrate`'s own comment), so
+    # unlike every other table here the legacy reference is the RAW Parquet
+    # fragments (`read_legacy_submits`), not a `legacy_tables[...]` dump (that
+    # dump is asserted empty below as a positive confirmation, the same
+    # pattern BC-8/the edges tables use for "no cool-tier fragment exists").
+    #
+    # Known wrinkle (task brief): `submit.recorded` ids are uuid4 with no
+    # stable legacy id -- the legacy Parquet schema has no `submit_id`/`id`
+    # column at all (`write_submit_provenance`'s own docstring: "No legacy
+    # caller threads one through"). Normalised the way this file normalises
+    # every other generated id (the campaign handle<->uuid4 mapping above):
+    # join by `myxcel_job_id` instead, a real field on both sides that
+    # `ac17_gen.py` mints unique per `submit` op.
+    if legacy_tables["submits"]:
+        all_diffs.append(
+            "legacy submits table non-empty after force_rebuild (expected empty -- "
+            f"compact.py never creates a warm 'submits' table): {legacy_tables['submits']}"
+        )
+    l_submits = {r["myxcel_job_id"]: r for r in read_legacy_submits(legacy)}
+    n_submits = {r["myxcel_job_id"]: r for r in new_tables["submits"]}
+    submit_ops = [op for op in ops if op["kind"] == "submit"]
+    expected_job_ids = {op["myxcel_job_id"] for op in submit_ops}
+    assert set(l_submits) == expected_job_ids, (
+        f"legacy submit job-ids {set(l_submits)} != expected {expected_job_ids}"
+    )
+    assert set(n_submits) == expected_job_ids, (
+        f"new-fold submit job-ids {set(n_submits)} != expected {expected_job_ids}"
+    )
+    # id/submit_id: excluded by construction (joined by myxcel_job_id instead,
+    # see above). slurm_job_id: new-fold-only denormalization (
+    # write_submit_provenance always sets it equal to myxcel_job_id; the
+    # legacy Parquet schema has no such column at all) -- same "real,
+    # additional new functionality, no legacy value to compare" class as
+    # runs.evalue/seq_position above. submitted_at: wall-clock, uninjectable
+    # (write_submit_provenance mints it via `datetime.now(UTC)` with no
+    # override point, same class as campaigns.started_at/concluded_at).
+    _SUBMIT_COMPARE_COLS = (
+        "project_slug",
+        "command",
+        "sidecar_sha256",
+        "bth_submit_version",
+        "stage_name",
+    )
+    for jid in expected_job_ids:
+        lr, nr = l_submits[jid], n_submits[jid]
+        for col in _SUBMIT_COMPARE_COLS:
+            if not _floaty_equal(lr.get(col), nr.get(col)):
+                all_diffs.append(
+                    f"submits[{jid}].{col}: legacy={lr.get(col)!r} new={nr.get(col)!r}"
+                )
 
     assert not all_diffs, "AC-17 unexplained divergence(s):\n" + "\n".join(all_diffs)
 
