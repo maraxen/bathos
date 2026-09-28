@@ -169,25 +169,68 @@ def pull_project(remote: str, project: str) -> None:
         raise RuntimeError(result.stderr)
 
 
-def pull_path(remote: str, remote_path: str, local_dest: str) -> None:
-    """Run `myxcel pull <remote> <remote_path> --dest <local_dest>`.
+class MyxcelCapabilityGapError(RuntimeError):
+    """Raised when a bathos call needs a myxcel capability that the installed
+    `myxcel` CLI/API does not currently expose. Not a transient failure --
+    retrying will not help; the gap has to be closed in myxcel itself (see
+    `pull_path`'s docstring)."""
 
-    Generalizes `pull_project`'s myxcel wrapper to an explicit remote
-    directory (rather than a myxcel-registered project name) and an explicit
-    local destination -- used for the cluster run-log pull (spec "Cluster"):
-    the source directories (`<remote root>/.bth/log/`,
+
+def pull_path(remote: str, remote_path: str, local_dest: str) -> None:
+    """Intended to generalize `pull_project`'s myxcel wrapper to an explicit
+    remote directory (rather than a myxcel-registered project name) and an
+    explicit local destination -- needed for the cluster run-log pull (spec
+    "Cluster"): the source directories (`<remote root>/.bth/log/`,
     `~/.bth/log/fallback/<slug>/`, `~/.bth/log-mirror/<project_id>/`) are not
     addressable through `pull_project`'s project-name mapping, and CLAUDE.md
     ("Bathos Sync Delegates to Myxcel") requires the myxcel boundary here
-    rather than a direct rsync call. `local_dest` must already exist -- this
-    wrapper does not create it. Raises `RuntimeError` on a non-zero exit,
-    same convention as `pull_project`/`push_project`.
+    rather than a direct rsync call.
+
+    **This capability does not exist in myxcel (verified 260927).** The
+    previous implementation shelled out to
+    `myxcel pull <remote> <remote_path> --dest <local_dest>`, but the
+    installed `myxcel pull --help` is:
+
+        Usage: myxcel pull [OPTIONS] {remote} {project}
+        Options: --dry-run/-n, --no-preflight, --full, --no-worktree, --worktree
+
+    -- there is no `--dest` option, and the second positional is a
+    myxcel-registered *project name*, not a filesystem path. The Python
+    function backing it, `myxcel.rsync.pull(profile, project, pc, full=,
+    dry_run=, no_preflight=, worktree=)`, is likewise hard-bound: it always
+    writes to `profile.local_workspace / project` (or a `WorktreeContext`'s
+    `local_root`) and always reads from `profile.pull_paths` /
+    `pc.pull.paths` (or the full workspace root under `--full`) under
+    `{profile.host}:{workspace}/{project}/...` -- there is no parameter for
+    an arbitrary remote directory or an arbitrary local destination.
+    `myxcel.log_pull.pull_job_logs` is a separate, SLURM-log-specific path
+    (per-job stdout/stderr, not a directory mirror) and does not help either.
+    `cli.py` has no other path-shaped pull subcommand (`fetch`/`get`/etc.).
+
+    So this previously called a non-existent flag on every real invocation
+    (failing with a myxcel usage error), invisibly, because tests mock this
+    function directly rather than exercising the real subprocess call. Per
+    CLAUDE.md's cluster rules, do NOT invent new myxcel flags here to paper
+    over the gap. Until myxcel exposes an arbitrary-path pull (a new
+    subcommand, or an importable rsync-wrapper API), this wrapper refuses
+    outright and loudly, rather than silently mis-invoking the CLI.
+    `local_dest` must already exist -- this wrapper does not create it.
+
+    Raises `MyxcelCapabilityGapError` (a `RuntimeError` subclass) every time
+    it is called. Callers in the best-effort cluster-log pull path
+    (`bathos.sync.pull_cluster_log`) already catch `Exception` per sub-path
+    and log a warning, so this surfaces as a clear, actionable log line
+    rather than crashing `bth sync --pull`.
     """
-    result = subprocess.run(
-        ["myxcel", "pull", remote, remote_path, "--dest", local_dest],
-        capture_output=True,
-        text=True,
-        timeout=120,
+    raise MyxcelCapabilityGapError(
+        "bathos.cluster.pull_path requires pulling an arbitrary remote path "
+        f"({remote}:{remote_path!r}) to an arbitrary local destination "
+        f"({local_dest!r}), but the installed myxcel CLI has no such "
+        "capability: `myxcel pull` is `myxcel pull [OPTIONS] {remote} "
+        "{project}` (a registered project name, no --dest option), and "
+        "`myxcel.rsync.pull()` only pulls a project's configured pull_paths "
+        "into profile.local_workspace/project. File a myxcel feature "
+        "request for a generic path-pull subcommand or importable API "
+        "before re-enabling this wrapper -- do not add ad-hoc flags to the "
+        "myxcel CLI invocation to work around it."
     )
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr)
