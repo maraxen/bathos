@@ -4579,7 +4579,12 @@ async def mcp_migrate_to_log_tool(
     Returns:
         Dict form of `MigrateToLogResult` (status, attempt, report_path,
         report_sha256, residual_lines, unclassified, missing_project_ids,
-        conflicting_jobs, locked_source, would_pull, detail).
+        foreign_catalogs, conflicting_jobs, locked_source, would_pull,
+        detail). `status="foreign_catalogs"` (checked before
+        `missing_project_ids`'s dry-run branch, so a dry run reports it
+        too) means at least one registered root still sets `[project]
+        catalog_dir` to somewhere other than `catalog_dir` -- consolidate
+        each with `consolidate_catalog` (below) before retrying.
     """
     import dataclasses
 
@@ -4596,6 +4601,74 @@ async def mcp_migrate_to_log_tool(
             dry_run=dry_run,
         )
     return dataclasses.asdict(result)
+
+
+def consolidate_catalog_tool(
+    root: str,
+    catalog_dir: str = "",
+    dry_run: bool = False,
+) -> dict:
+    """`bth migrate --consolidate-catalog <root>`: additively copies a
+    registered root's foreign `[project] catalog_dir` (`runs/`,
+    `campaigns/`, `submits/`, `reaped/`, `sidecars/` only) into the catalog
+    being migrated. Never modifies `root`'s catalog. `dry_run=True` computes
+    the identical plan and counts without writing anything.
+
+    Args:
+        root: Path to the registered root whose `.bth.toml` sets an explicit
+            `[project] catalog_dir`.
+        catalog_dir: The destination catalog directory (empty = use default)
+        dry_run: If True, compute the plan without writing
+
+    Returns:
+        Dict form of `ConsolidateResult` (status, applied, copied,
+        already_present, already_present_differs, conflicts, conflict_paths,
+        unplaceable, per_subtree, detail), or `{"error": ...}` if `root` has
+        no explicit `catalog_dir` to consolidate.
+    """
+    import dataclasses
+
+    from bathos.runlog.migrate import consolidate_project_catalog, explicit_catalog_dir
+
+    root_path = Path(root).expanduser()
+    source = explicit_catalog_dir(root_path)
+    if source is None:
+        return {
+            "error": (
+                f"{root_path}'s .bth.toml has no explicit [project] catalog_dir; "
+                "nothing to consolidate"
+            )
+        }
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    result = consolidate_project_catalog(source, cat_dir, apply=not dry_run)
+    return dataclasses.asdict(result)
+
+
+@cisternal.tool(registry="bathos", name="consolidate_catalog")
+@traced_tool
+@require_write_token
+async def mcp_consolidate_catalog_tool(
+    root: str,
+    catalog_dir: str = "",
+    dry_run: bool = False,
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
+) -> dict:
+    """MCP wrapper for `consolidate_catalog_tool` — see its docstring.
+
+    Requires token= matching the local ~/.bth/mcp_token (debt #619) — this
+    can write into the real catalog (the destination) unless dry_run=True,
+    like every other write-verb tool that also has a dry-run mode.
+
+    Args:
+        root: Path to the registered root whose `.bth.toml` sets an explicit
+            `[project] catalog_dir`.
+        catalog_dir: The destination catalog directory (empty = use default)
+        dry_run: If True, compute the plan without writing
+
+    Returns:
+        Dict form of `ConsolidateResult`, or `{"error": ...}`.
+    """
+    return consolidate_catalog_tool(root=root, catalog_dir=catalog_dir, dry_run=dry_run)
 
 
 # ============================================================================
@@ -4819,6 +4892,7 @@ _WIRED = cisternal.wire(
         "claim_author",
         "new_experiment",
         "migrate_to_log",
+        "consolidate_catalog",
     ],
 )
 

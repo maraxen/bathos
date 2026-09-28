@@ -78,6 +78,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Migration step 0 now refuses on a per-project `catalog_dir`, plus `bth migrate
+  --consolidate-catalog` to fix it (debt #1998, spec v39).** A registered root whose
+  `.bth.toml` explicitly sets `[project] catalog_dir` to somewhere other than the catalog
+  being migrated is obsolete under the project-local run log: its own `bth run`s write there
+  instead of the migration catalog (real case: asr has 110 runs that exist only in its own
+  private catalog, invisible to `--to-log`), and post-cut-over that catalog would never carry
+  a cutover marker, leaving the project stuck writing legacy-mode forever (split brain).
+  `bth migrate --to-log` now refuses unconditionally (status `foreign_catalogs`, no `--force`
+  override; checked before the dry-run branch, so `--dry-run` reports it too) while any such
+  root remains registered. `bth migrate --consolidate-catalog <root>` (CLI) /
+  `consolidate_project_catalog()` / the new `consolidate_catalog` MCP tool fold the fix:
+  additively copy only `runs/`, `campaigns/`, `submits/`, `reaped/`, `sidecars/` from the
+  foreign catalog into the migration catalog, never touching the source. Run fragments are
+  matched by run id anywhere under the destination's `runs/` (not by relative path), so a
+  flat-layout source fragment already compacted into the destination under its project-slug
+  subdir is recognised rather than duplicated; a run id new to the destination lands under
+  `runs/<project_slug>/`, the slug read off the fragment's own column; a same-id fragment with
+  differing bytes is reported informationally (`already_present_differs`), destination always
+  winning. The other four subtrees stay path-matched, with a same-path differing file reported
+  as a real conflict and left uncopied. `--dry-run` computes the identical plan without
+  writing; a real apply takes the destination's writers lock and runs a normal `bth compact`
+  afterward. Refuses on a destination already past cut-over (use `--import-legacy` instead).
+
 - **Two more Migration step-3 residual classes, `output_metadata_drift` and
   `postmortem_worktree_deleted`** (debt #1944; spec v37, narrowed further in v38). A
   `runs.output_metadata` residual classifies as `output_metadata_drift` only when both sides

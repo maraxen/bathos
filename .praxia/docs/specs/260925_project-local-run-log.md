@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: "v38 (v37 + review remediation B, 260927: `output_metadata_drift` narrowed to the actual debt #1944 signature -- one side `status: \"missing\"`, the other `\"present\"` -- so a genuine present/present content mutation stays unclassified; cluster log pull documented non-functional pending myxcel arbitrary-path pull (debt #1993), with `bth sync --pull`/the `sync` MCP tool now reporting `cluster_log_pulled: false` honestly instead of reading \"no exception\" as success; dry-run wording corrected from \"no data writes anywhere\" to \"no data files written\" since the empty `writers.lock` mutex may still be created)"
+revision: "v39 (v38 + debt #1998, 260927: Migration step 0 additionally refuses -- unconditionally, before the dry-run branch -- while any registered root's `.bth.toml` explicitly sets `[project] catalog_dir` to somewhere other than the catalog being migrated (status `foreign_catalogs`), since a per-project catalog_dir is obsolete under the project-local run log and would otherwise leave that project's runs invisible to migration and, post-cut-over, writing legacy-mode into a catalog with no cutover marker; new `bth migrate --consolidate-catalog <root>` / `consolidate_project_catalog()` additively folds such a catalog's runs/campaigns/submits/reaped/sidecars into the migration catalog, run fragments matched by id anywhere under destination runs/ rather than by path, never touching the source)"
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -555,7 +555,18 @@ switched on in one step.
 0. **Ids:** `bth migrate --to-log` refuses to start until every registered root's `.bth.toml`
    has a `[project] id` present in its committed `HEAD`, or, for a root with no git
    repository, present in the file (it lists the roots missing one and the
-   `bth init --assign-id` command).
+   `bth init --assign-id` command). **v39 amendment (260927, debt #1998):** immediately after
+   this check (so `--dry-run` reports it too), `--to-log` also refuses, unconditionally
+   (no `--force` override), while any registered root's `.bth.toml` explicitly sets `[project]
+   catalog_dir` to somewhere other than the catalog being migrated -- status `foreign_catalogs`,
+   listing each `(root, catalog_dir)` pair. A per-project `catalog_dir` is obsolete under the
+   project-local run log: a project's own `bth run`s would keep writing into that catalog
+   instead of the one being migrated (its runs silently absent from migration -- the real
+   trigger, asr, has 110 runs that exist only in its own `~/projects/asr/.bth/catalog`), and
+   post-cut-over `is_log_mode()` checks for a cutover marker under the catalog it is given,
+   which such a project's private catalog would never have -- split brain, with that project
+   stuck writing legacy-mode forever. The fix is mechanical (consolidate, then drop the key),
+   so there is no override; see "Consolidation" below.
 1. **Quiesce:** holding the writers lock shared (as any local writer does), it first pulls the legacy catalog from every configured remote (the existing
    `sync.py` rsync), so finished cluster runs whose fragments were never pulled are imported, and additionally mirrors
    each remote's `runs/` in full (no `--ignore-existing`; `--checksum`, deleting nothing) into
@@ -697,6 +708,36 @@ cut-over marker already exists (a prior attempt already reached step 4(b)), `--d
 recompute or rewrite anything; it reads back that attempt's already-persisted
 `residual_report.jsonl` from staging (or reports `already_migrated` if staging is already gone),
 same as the real re-run path but without ever calling `_do_switch`.
+
+**Consolidation (v39, debt #1998):** `bth migrate --consolidate-catalog <root>` folds a
+registered root's foreign `catalog_dir` into the catalog being migrated, so step 0's new refusal
+above has a mechanical fix. It resolves `<root>`'s `.bth.toml` `[project] catalog_dir` (error if
+the key is not explicitly set) and additively copies only `runs/`, `campaigns/`, `submits/`,
+`reaped/`, `sidecars/` from it into the destination catalog -- never `bathos.db*`, `index.db`,
+`cutover.json`, `writers.lock`, logs, or `remote-runs/`, and never anything in the source, which
+is read-only throughout. Run fragments (`runs/**/run_<id>.parquet`) are matched by run id (their
+filename) *anywhere* under the destination's `runs/`, not by relative path -- a flat-layout
+source fragment (no project-slug subdir, the common shape for an older per-project catalog)
+whose same run already lives at `runs/<slug>/run_<id>.parquet` in the destination is recognised
+as already present rather than duplicated. A run id new to the destination is copied to
+`runs/<project_slug>/<filename>`, the slug read off the fragment's own `project_slug` column (not
+its source-relative path), falling back to its source parent directory name, or else reported as
+unplaceable and left uncopied. A run id present in the destination with differing bytes is never
+a conflict -- reported informationally as `already_present_differs`, destination always winning
+(compaction quirks like `schema_version` drift are common and harmless here). The other four
+subtrees stay path-matched: a byte-identical file at the same relative path is skipped, and a
+same-path file with different bytes is a real conflict, left uncopied and listed. `--dry-run`
+computes the identical plan and counts without writing anything; a real (non-dry-run) apply takes
+the destination's writers lock exclusively for the copy (atomic temp-then-rename per file,
+`shutil.copy2` to preserve mtime) and, if at least one file was actually copied, runs a normal
+(non-force) `bth compact` afterward so the warm tier sees the newly-visible runs. It refuses
+(`refused_log_mode`) if the destination already has a cutover marker: consolidation is a
+pre-cut-over step; a stale legacy write discovered after cut-over is `bth migrate
+--import-legacy`'s job instead, which imports into the *owning* project's own log rather than
+folding raw Parquet into a shared catalog. Once a consolidation run reports clean (no
+`unplaceable`, informational `already_present_differs`/`conflicts` reviewed), the operator removes
+`catalog_dir` from that root's `.bth.toml` and commits the result before retrying
+`bth migrate --to-log`.
 
 ## Acceptance criteria
 

@@ -34,6 +34,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import tomllib
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -119,9 +120,24 @@ class ResidualLine:
 @dataclass
 class MigrateToLogResult:
     """The outcome of one `migrate_to_log()` call. `status` is one of:
-    `missing_project_ids`, `squeue_unavailable`, `squeue_conflict`,
-    `step1_reap_failed`, `legacy_db_locked`, `unclassified_residual`,
-    `residual_pending`, `switched`, `already_migrated`, `dry_run`.
+    `missing_project_ids`, `foreign_catalogs`, `squeue_unavailable`,
+    `squeue_conflict`, `step1_reap_failed`, `legacy_db_locked`,
+    `unclassified_residual`, `residual_pending`, `switched`,
+    `already_migrated`, `dry_run`.
+
+    `foreign_catalogs` (spec Migration step 0 amendment, debt #1998): at
+    least one registered root still explicitly configures `[project]
+    catalog_dir` to somewhere other than the catalog being migrated -- a
+    per-project catalog_dir is obsolete under the project-local run log
+    (its runs would otherwise be invisible to migration, and post-cut-over
+    it would keep writing legacy-mode into a catalog with no cutover
+    marker: split brain). Checked BEFORE `dry_run` branches, so a dry run
+    reports it too. `foreign_catalogs` on the result is a list of
+    `{"root": str, "catalog_dir": str}`, mirroring `would_pull`'s shape.
+    Refused unconditionally -- there is no `--force` override, since the
+    fix (`bth migrate --consolidate-catalog <root>`, then drop `catalog_dir`
+    from that root's `.bth.toml` and commit) is mechanical, not a judgment
+    call like the squeue conflict `--force` overrides.
 
     `dry_run` (spec "Dry run"): `migrate_to_log(..., dry_run=True)` performed
     NO data writes anywhere -- steps 1-3 ran read-effect-only (reap with
@@ -143,6 +159,7 @@ class MigrateToLogResult:
     residual_lines: list[dict[str, Any]] = field(default_factory=list)
     unclassified: list[dict[str, Any]] = field(default_factory=list)
     missing_project_ids: list[str] = field(default_factory=list)
+    foreign_catalogs: list[dict[str, str]] = field(default_factory=list)
     conflicting_jobs: list[str] = field(default_factory=list)
     locked_source: str | None = None
     unresolved_routing_count: int = 0
@@ -209,6 +226,63 @@ def roots_missing_project_id() -> list[Path]:
         if committed_project_id(root) is None:
             missing.append(root)
     return missing
+
+
+def explicit_catalog_dir(root: Path) -> Path | None:
+    """`root`'s `.bth.toml` `[project] catalog_dir`, only if the key is
+    EXPLICITLY present -- never `config.py`'s default-catalog fallback
+    (`load_project_config` always returns a `catalog_dir`, defaulted when
+    the key is absent, which would make "explicit vs. default" impossible
+    to tell apart here). Resolved the same way `config.py`'s
+    `load_project_config` resolves it (`Path(...).expanduser()`); there is
+    no relative-path handling to mirror -- `config.py` does none either.
+
+    Read directly from the current working `.bth.toml` (not `git show
+    HEAD:...`, unlike `committed_project_id`): a catalog location is a live
+    runtime setting a local `bth run` reads off the working file every
+    time, not something Migration step 0's committed-HEAD discipline
+    governs.
+
+    Only the flat `[project] catalog_dir` form is recognised, matching
+    `config.py`'s `load_project_config` exactly -- the nested `[project.
+    catalog] catalog_dir` form is not read by `config.py` (so a project
+    using it is, in practice, on the default catalog) and is deliberately
+    ignored here too, per the same rule.
+    """
+    cfg_path = root / ".bth.toml"
+    if not cfg_path.is_file():
+        return None
+    try:
+        with open(cfg_path, "rb") as f:
+            data = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    project = data.get("project")
+    if not isinstance(project, dict) or "catalog_dir" not in project:
+        return None
+    raw = project["catalog_dir"]
+    if not raw:
+        return None
+    return Path(str(raw)).expanduser()
+
+
+def roots_with_foreign_catalog(cd: Path) -> list[tuple[Path, Path]]:
+    """Every registered, still-existing root whose `.bth.toml` explicitly
+    sets `[project] catalog_dir` to somewhere other than `cd` (spec
+    Migration step 0 amendment, debt #1998): `(root, resolved_catalog)`
+    pairs, in registry order. A root with no `catalog_dir` key at all (the
+    common case -- tests' roots included) never appears here."""
+    out: list[tuple[Path, Path]] = []
+    resolved_cd = cd.resolve()
+    for root in list_registered_roots():
+        if not root.exists():
+            continue
+        configured = explicit_catalog_dir(root)
+        if configured is None:
+            continue
+        if configured.resolve() != resolved_cd:
+            out.append((root, configured))
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -1619,6 +1693,19 @@ def migrate_to_log(
             ),
         )
 
+    foreign = roots_with_foreign_catalog(cd)
+    if foreign:
+        return MigrateToLogResult(
+            status="foreign_catalogs",
+            foreign_catalogs=[{"root": str(r), "catalog_dir": str(c)} for r, c in foreign],
+            detail=(
+                "a per-project [project] catalog_dir is obsolete under the project-local "
+                "run log; for each root listed, run `bth migrate --consolidate-catalog "
+                "<root>`, then remove catalog_dir from that root's .bth.toml and commit "
+                "the result before retrying `bth migrate --to-log`."
+            ),
+        )
+
     if dry_run:
         return _migrate_to_log_dry_run(cd, force=force)
 
@@ -1752,18 +1839,282 @@ def import_legacy_post_cutover(catalog_dir: Path | None = None) -> MigrateToLogR
     )
 
 
+# --------------------------------------------------------------------------
+# Consolidation: fold a registered root's foreign catalog_dir into the
+# catalog being migrated (spec Migration step 0 amendment, debt #1998).
+# --------------------------------------------------------------------------
+
+#: Only these subtrees are ever copied -- never `bathos.db*`, `index.db`,
+#: `cutover.json`, `writers.lock`, logs, `remote-runs/`, or anything else
+#: not explicitly listed (spec: "restricted to an allowlist of subtrees").
+_CONSOLIDATE_PATH_MATCHED_SUBTREES: tuple[str, ...] = (
+    "campaigns",
+    "submits",
+    "reaped",
+    "sidecars",
+)
+_CONSOLIDATE_CONFLICT_PATH_CAP = 200
+
+
+@dataclass
+class ConsolidateResult:
+    """The outcome of one `consolidate_project_catalog()` call. `status` is
+    one of `ok`, `refused_log_mode` (dest already cut over -- see the
+    function docstring), `source_missing`, `same_catalog`. Only `ok` ever
+    populates the counts below. `applied` mirrors the `apply` argument
+    verbatim (True even when the plan was empty) -- it is NOT "something
+    was copied"; check `copied` for that."""
+
+    status: str
+    applied: bool = False
+    copied: int = 0
+    already_present: int = 0
+    already_present_differs: int = 0
+    conflicts: int = 0
+    conflict_paths: list[str] = field(default_factory=list)
+    unplaceable: list[str] = field(default_factory=list)
+    per_subtree: dict[str, dict[str, int]] = field(default_factory=dict)
+    detail: str = ""
+
+
+def _files_identical(a: Path, b: Path) -> bool:
+    try:
+        if a.stat().st_size != b.stat().st_size:
+            return False
+        return a.read_bytes() == b.read_bytes()
+    except OSError:
+        return False
+
+
+def _read_run_project_slug(path: Path) -> str | None:
+    """The `project_slug` column of a single run fragment, read cheaply
+    (one column, no full-table load) -- or `None` if it is missing, empty,
+    or the file cannot be read at all (a source catalog scan must never
+    abort on one bad fragment)."""
+    import pyarrow.parquet as pq
+
+    try:
+        tbl = pq.read_table(path, columns=["project_slug"])
+    except Exception:  # noqa: BLE001 -- unreadable/corrupt source fragment, not fatal here
+        return None
+    if tbl.num_rows == 0:
+        return None
+    val = tbl.column("project_slug")[0].as_py()
+    return str(val) if val else None
+
+
+def _index_dest_run_fragments(dest: Path) -> dict[str, Path]:
+    """`{filename: path}` for every run fragment already anywhere under
+    `dest/runs/` -- matched by FILENAME (the run id lives in it, e.g.
+    `run_<id>.parquet`), not by relative path, so a flat-layout source
+    fragment whose same run already lives at `dest/runs/<slug>/run_<id>.
+    parquet` is recognised as already present rather than duplicated
+    (real case: asr has 322 legacy fragments sitting flat in a foreign
+    catalog's `runs/` whose same run is already compacted into the
+    migration catalog under its slug subdir)."""
+    runs_dir = dest / "runs"
+    if not runs_dir.is_dir():
+        return {}
+    out: dict[str, Path] = {}
+    for f in runs_dir.rglob("run_*.parquet"):
+        if f.name.endswith(".tmp.parquet"):
+            continue
+        out.setdefault(f.name, f)
+    return out
+
+
+def _plan_runs(
+    source: Path, dest: Path
+) -> tuple[list[tuple[Path, Path]], dict[str, int], list[str], int]:
+    """Copy plan for `source/runs/` (spec 260927 refinement -- run fragments
+    are matched by run id, i.e. filename, ANYWHERE under `dest/runs/`, never
+    by relative path; new ones land under `dest/runs/<project_slug>/`, the
+    slug read off the fragment's OWN `project_slug` column, not its source
+    path, so a flat-layout source lands in the canonical layout).
+
+    Returns `(plan, counts, unplaceable_rel_paths, already_present_differs)`.
+    `counts` has `copied`/`already_present` (the diff-by-bytes case for an
+    existing id is NOT a conflict for runs -- it is reported via the 4th
+    return value instead, dest always winning, per the same refinement)."""
+    runs_src = source / "runs"
+    plan: list[tuple[Path, Path]] = []
+    counts = {"copied": 0, "already_present": 0}
+    unplaceable: list[str] = []
+    differs = 0
+    if not runs_src.is_dir():
+        return plan, counts, unplaceable, differs
+
+    dest_index = _index_dest_run_fragments(dest)
+    planned_names: set[str] = set()
+    for f in sorted(runs_src.rglob("run_*.parquet")):
+        if f.name.endswith(".tmp.parquet"):
+            continue
+        existing = dest_index.get(f.name)
+        if existing is not None:
+            if _files_identical(f, existing):
+                counts["already_present"] += 1
+            else:
+                differs += 1
+            continue
+        if f.name in planned_names:
+            # A second source fragment for the same run id (e.g. both a
+            # flat and a slug-subdir copy sitting in the source itself,
+            # neither yet in dest) -- the first occurrence is already
+            # queued for copy, so this one is redundant, not a conflict.
+            counts["already_present"] += 1
+            continue
+        slug = _read_run_project_slug(f) or f.parent.name
+        if slug == "runs":
+            # No project_slug column and the fragment sits directly under
+            # runs/ itself (no subdir to fall back to either) -- nowhere
+            # canonical to place it; report rather than guess.
+            unplaceable.append(str(f.relative_to(source)))
+            continue
+        dest_path = dest / "runs" / slug / f.name
+        plan.append((f, dest_path))
+        planned_names.add(f.name)
+        counts["copied"] += 1
+    return plan, counts, unplaceable, differs
+
+
+def _plan_path_matched(
+    source: Path, dest: Path, subtree: str
+) -> tuple[list[tuple[Path, Path]], dict[str, int], list[str]]:
+    """Copy plan for one of `_CONSOLIDATE_PATH_MATCHED_SUBTREES`: matched by
+    relative path (unlike `runs/`), byte-identical existing files are
+    skipped, and a same-path file with different bytes is a genuine
+    conflict -- never overwritten."""
+    sub_src = source / subtree
+    plan: list[tuple[Path, Path]] = []
+    counts = {"copied": 0, "already_present": 0, "conflicts": 0}
+    conflict_paths: list[str] = []
+    if not sub_src.is_dir():
+        return plan, counts, conflict_paths
+    for f in sorted(p for p in sub_src.rglob("*") if p.is_file()):
+        rel = f.relative_to(source)
+        dest_path = dest / rel
+        if dest_path.exists():
+            if _files_identical(f, dest_path):
+                counts["already_present"] += 1
+            else:
+                counts["conflicts"] += 1
+                conflict_paths.append(str(rel))
+            continue
+        plan.append((f, dest_path))
+        counts["copied"] += 1
+    return plan, counts, conflict_paths
+
+
+def consolidate_project_catalog(source: Path, dest: Path, *, apply: bool) -> ConsolidateResult:
+    """Additively copy `source`'s `runs/`, `campaigns/`, `submits/`,
+    `reaped/`, `sidecars/` subtrees into `dest` (spec Migration step 0
+    amendment, debt #1998: consolidating a registered root's obsolete
+    per-project `catalog_dir` before `bth migrate --to-log` will accept it).
+
+    Never touches `bathos.db*`, `index.db`, `cutover.json`, `writers.lock`,
+    logs, `remote-runs/`, or anything outside the allowlisted subtrees, and
+    NEVER modifies or deletes anything in `source` -- every write lands only
+    under `dest`, atomically (copy to a same-directory temp file, then
+    `os.replace`).
+
+    `apply=False` (dry run) computes the identical plan and counts without
+    writing anything. `apply=True` takes `dest`'s writers lock exclusively
+    for the copy, then -- if at least one file was actually copied -- runs
+    the normal (non-force) `bathos.compact.compact(dest)` outside the lock,
+    so the warm tier sees the newly-visible runs.
+
+    Refuses (`status="refused_log_mode"`) if `dest` already has a cut-over
+    marker: consolidation is a pre-cut-over step; after cut-over, a stale
+    legacy write is handled by `bth migrate --import-legacy` instead, which
+    imports into the OWNING project's own log rather than folding raw
+    Parquet into a shared catalog.
+    """
+    if cutover_marker_path(dest).exists():
+        return ConsolidateResult(
+            status="refused_log_mode",
+            detail=(
+                f"{dest} is already in log mode (cutover marker present); consolidation "
+                "is a pre-cut-over step -- after cut-over, use `bth migrate "
+                "--import-legacy` instead"
+            ),
+        )
+    if not source.is_dir():
+        return ConsolidateResult(
+            status="source_missing", detail=f"source catalog {source} does not exist"
+        )
+    if source.resolve() == dest.resolve():
+        return ConsolidateResult(
+            status="same_catalog", detail=f"source and dest are the same catalog ({dest})"
+        )
+
+    per_subtree: dict[str, dict[str, int]] = {}
+    all_plan: list[tuple[Path, Path]] = []
+    total_copied = 0
+    total_already_present = 0
+    total_conflicts = 0
+    conflict_paths: list[str] = []
+
+    runs_plan, runs_counts, unplaceable, differs = _plan_runs(source, dest)
+    per_subtree["runs"] = {**runs_counts, "already_present_differs": differs}
+    all_plan.extend(runs_plan)
+    total_copied += runs_counts["copied"]
+    total_already_present += runs_counts["already_present"]
+
+    for subtree in _CONSOLIDATE_PATH_MATCHED_SUBTREES:
+        plan, counts, c_paths = _plan_path_matched(source, dest, subtree)
+        per_subtree[subtree] = counts
+        all_plan.extend(plan)
+        total_copied += counts["copied"]
+        total_already_present += counts["already_present"]
+        total_conflicts += counts["conflicts"]
+        conflict_paths.extend(c_paths)
+
+    if apply and all_plan:
+        with writers_lock(dest, exclusive=True):
+            for src_f, dest_f in all_plan:
+                dest_f.parent.mkdir(parents=True, exist_ok=True)
+                tmp = dest_f.parent / f".{dest_f.name}.{uuid.uuid4().hex[:8]}.tmp"
+                shutil.copy2(src_f, tmp)
+                os.replace(tmp, dest_f)
+        from bathos.compact import compact
+
+        compact(dest)
+
+    return ConsolidateResult(
+        status="ok",
+        applied=apply,
+        copied=total_copied,
+        already_present=total_already_present,
+        already_present_differs=differs,
+        conflicts=total_conflicts,
+        conflict_paths=conflict_paths[:_CONSOLIDATE_CONFLICT_PATH_CAP],
+        unplaceable=unplaceable,
+        per_subtree=per_subtree,
+        detail=(
+            f"{'applied' if apply else 'dry run'}: copied={total_copied} "
+            f"already_present={total_already_present} already_present_differs={differs} "
+            f"conflicts={total_conflicts}"
+            + (f" unplaceable={len(unplaceable)}" if unplaceable else "")
+        ),
+    )
+
+
 __all__ = [
+    "ConsolidateResult",
     "DiffResult",
     "MigrateToLogError",
     "MigrateToLogResult",
     "ResidualLine",
     "committed_project_id",
+    "consolidate_project_catalog",
+    "explicit_catalog_dir",
     "import_legacy_post_cutover",
     "migrate_to_log",
     "my_squeue_job_ids",
     "mirror_remote_runs_full",
     "pull_and_mirror_all_remotes",
     "roots_missing_project_id",
+    "roots_with_foreign_catalog",
     "rsync_full_mirror",
     "squeue_conflict",
 ]

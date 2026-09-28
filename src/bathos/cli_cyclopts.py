@@ -990,6 +990,7 @@ def migrate(
     import_legacy: bool = False,
     force: bool = False,
     accept_residual: str = "",
+    consolidate_catalog: str = "",
 ) -> None:
     """Migrate cool-tier Parquet fragments to current schema, optionally classifying scripts.
 
@@ -999,19 +1000,55 @@ def migrate(
         Migration steps 1-3's residual report with no data files written anywhere
         (remote pull/mirror is skipped -- see `would pull` in the output -- and reap
         runs with apply=False; the empty writers.lock mutex may still be created);
-        status `dry_run`. Rejected together with --accept-residual.
+        status `dry_run`. Rejected together with --accept-residual. With
+        --consolidate-catalog, computes the same copy plan without writing anything.
     classify: Classify flat scripts into subdirs (Phase 2).
     project: Scope migration to a single project slug's runs/<project>/ fragments
         (default: all projects in the catalog).
     to_log: Run the project-local-run-log cut-over (Migration steps 0-4) instead of
         the schema migration above. See `.praxia/docs/specs/260925_project-local-run-log.md`.
+        Refuses with status `foreign_catalogs` while any registered root still configures
+        a per-project `[project] catalog_dir` -- consolidate each first.
     import_legacy: Post-cut-over re-import of a stale legacy write (AC-23); refused
         before cut-over.
     force: With --to-log, proceed past a squeue/submit-record conflict instead of refusing.
     accept_residual: With --to-log, the sha256 of a previously-reviewed residual report;
         proceeds to the switch only if a fresh run reproduces that exact hash.
+    consolidate_catalog: Path to a registered root whose `.bth.toml` still sets an
+        explicit `[project] catalog_dir`; additively copies that catalog's runs/
+        campaigns/ submits/ reaped/ sidecars/ into the catalog being migrated (never
+        modifies the source). Mutually exclusive with --to-log/--import-legacy.
+        After it reports clean, remove catalog_dir from that root's .bth.toml, commit,
+        and retry `bth migrate --to-log`.
     """
     from bathos.cli_common import catalog_dir
+
+    if consolidate_catalog and (to_log or import_legacy):
+        print(
+            "--consolidate-catalog is mutually exclusive with --to-log/--import-legacy",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    if consolidate_catalog:
+        import dataclasses
+        import json
+
+        from bathos.runlog.migrate import consolidate_project_catalog, explicit_catalog_dir
+
+        root = Path(consolidate_catalog).expanduser()
+        source = explicit_catalog_dir(root)
+        if source is None:
+            print(
+                f"{root}'s .bth.toml has no explicit [project] catalog_dir; nothing to consolidate",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        result = consolidate_project_catalog(source, catalog_dir(), apply=not dry_run)
+        print(json.dumps(dataclasses.asdict(result), indent=2))
+        if result.status != "ok":
+            raise SystemExit(1)
+        return
 
     if import_legacy:
         from bathos.runlog.migrate import import_legacy_post_cutover
@@ -1044,6 +1081,10 @@ def migrate(
             print("  roots missing a committed [project] id:", file=sys.stderr)
             for p in result.missing_project_ids:
                 print(f"    {p}", file=sys.stderr)
+        if result.foreign_catalogs:
+            print("  roots with a foreign catalog_dir:", file=sys.stderr)
+            for pair in result.foreign_catalogs:
+                print(f"    {pair['root']} -> {pair['catalog_dir']}", file=sys.stderr)
         if result.conflicting_jobs:
             print(f"  conflicting job(s): {', '.join(result.conflicting_jobs)}", file=sys.stderr)
         if result.would_pull:
