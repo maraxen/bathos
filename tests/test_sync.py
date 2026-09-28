@@ -302,13 +302,19 @@ def test_pull_cluster_log_pulls_three_subpaths_via_myxcel_with_project_id(tmp_pa
     config = _cluster_config(tmp_path)
 
     with patch("bathos.cluster.pull_path") as mock_pull:
-        pull_cluster_log("engaging", config, tmp_path, "proj-id-123")
+        result = pull_cluster_log("engaging", config, tmp_path, "proj-id-123")
 
     assert mock_pull.call_count == 3
     calls = {c.args[0:2] for c in mock_pull.call_args_list}
     assert ("engaging", "~/projects/testproj/.bth/log/") in calls
     assert ("engaging", "~/.bth/log/fallback/testproj/") in calls
     assert ("engaging", "~/.bth/log-mirror/proj-id-123/") in calls
+
+    # A mocked pull_path returns normally (no exception) for all three, so
+    # all three must be recorded as pulled.
+    assert set(result.pulled) == {"log", "fallback", "mirror"}
+    assert result.failures == []
+    assert result.any_pulled is True
 
     log_dir, fallback_dir, mirror_dir = cluster_log_remote_dirs(tmp_path, "engaging")
     assert log_dir.is_dir()
@@ -331,7 +337,9 @@ def test_pull_cluster_log_uses_null_slug_mirror_when_no_project_id(tmp_path: Pat
 def test_pull_cluster_log_is_best_effort_per_subpath(tmp_path: Path):
     """One sub-path failing (e.g. a fallback directory that was never
     written on the remote) must not prevent the other two from being
-    attempted."""
+    attempted, and the returned result must record exactly which ones
+    succeeded vs. failed -- a caller must not have to guess from a bare
+    "no exception raised"."""
     config = _cluster_config(tmp_path)
 
     def _side_effect(_remote, remote_path, _dest):
@@ -339,12 +347,35 @@ def test_pull_cluster_log_is_best_effort_per_subpath(tmp_path: Path):
             raise RuntimeError("no such directory")
 
     with patch("bathos.cluster.pull_path", side_effect=_side_effect) as mock_pull:
-        pull_cluster_log("engaging", config, tmp_path, "proj-id-123")
+        result = pull_cluster_log("engaging", config, tmp_path, "proj-id-123")
 
     assert mock_pull.call_count == 3
+    assert set(result.pulled) == {"log", "mirror"}
+    assert [f["label"] for f in result.failures] == ["fallback"]
+    assert "no such directory" in result.failures[0]["error"]
+    assert result.any_pulled is True
 
 
 def test_pull_cluster_log_raises_for_unconfigured_remote(tmp_path: Path):
     config = ProjectConfig(slug="testproj", root=tmp_path, remotes={})
     with pytest.raises(ValueError, match="not in config"):
         pull_cluster_log("engaging", config, tmp_path, "proj-id-123")
+
+
+def test_pull_cluster_log_reports_no_pulls_when_pull_path_unmocked(tmp_path: Path):
+    """With `bathos.cluster.pull_path` NOT mocked, the real implementation
+    always raises `MyxcelCapabilityGapError` (debt #1993: no myxcel
+    capability exists yet for an arbitrary remote-path pull) -- so a real,
+    unmocked `pull_cluster_log` call must report all three sub-pulls as
+    failed, never silently as pulled, which is exactly the bug this
+    structured result exists to prevent (a caller reading "no exception" as
+    success)."""
+    config = _cluster_config(tmp_path)
+
+    result = pull_cluster_log("engaging", config, tmp_path, "proj-id-123")
+
+    assert result.pulled == []
+    assert result.any_pulled is False
+    assert {f["label"] for f in result.failures} == {"log", "fallback", "mirror"}
+    for failure in result.failures:
+        assert "myxcel" in failure["error"].lower()

@@ -184,9 +184,7 @@ def test_full_happy_path_marker_frozen_and_folded_reads_match(tmp_path: Path):
     try:
         rows = {
             r[0]: r
-            for r in con.execute(
-                "SELECT id, status, project_slug, command FROM runs"
-            ).fetchall()
+            for r in con.execute("SELECT id, status, project_slug, command FROM runs").fetchall()
         }
     finally:
         con.close()
@@ -349,9 +347,7 @@ def test_step1_pulled_or_reaped_class(tmp_path: Path):
 
     result = migrate_to_log(backend.catalog_dir)
     assert result.status == "residual_pending"
-    classes = {
-        (line["table"], tuple(line["key"])): line["class"] for line in result.residual_lines
-    }
+    classes = {(line["table"], tuple(line["key"])): line["class"] for line in result.residual_lines}
     assert classes[("runs", ("run-stale2",))] == "step1_pulled_or_reaped"
     # AC-30 (v35): the warm-only row yields NO residual line at all.
     assert ("runs", ("run-warmonly",)) not in classes
@@ -443,9 +439,7 @@ def test_locked_legacy_db_aborts(tmp_path: Path):
 
 def test_squeue_conflict_refuses_without_force(tmp_path: Path, monkeypatch):
     backend = _simple_backend(tmp_path)
-    monkeypatch.setattr(
-        "bathos.runlog.migrate.my_squeue_job_ids", lambda: ["999999"]
-    )
+    monkeypatch.setattr("bathos.runlog.migrate.my_squeue_job_ids", lambda: ["999999"])
     # Make run-a's slurm_job_id (via a submit record) match, so it's a
     # recognized conflict rather than an unrelated queued job.
     write_run(
@@ -479,9 +473,7 @@ def test_squeue_conflict_refuses_without_force(tmp_path: Path, monkeypatch):
     assert forced.status == "switched"
 
 
-def test_squeue_unavailable_refuses_unconditionally_even_with_force(
-    tmp_path: Path, monkeypatch
-):
+def test_squeue_unavailable_refuses_unconditionally_even_with_force(tmp_path: Path, monkeypatch):
     """Review finding (HIGH, 260927): `my_squeue_job_ids()` used to return
     `[]` on an OSError/timeout/non-zero exit, indistinguishable from "no
     jobs" -- an unreachable cluster silently let migration proceed. It must
@@ -1087,6 +1079,242 @@ def test_unresolvable_project_class(tmp_path: Path):
     assert edge_lines, "expected a run_edges residual"
     for line in edge_lines:
         assert line.cls == "unresolvable_project"
+
+
+def test_output_metadata_drift_class(tmp_path: Path, monkeypatch):
+    """spec: "`output_metadata` whose files changed since" (debt #1944,
+    review finding (b), 260927) -- `compact.py`'s per-compact
+    `_collect_output_metadata` refresh resolves a RELATIVE output path
+    against the compacting process's OWN cwd, so two compacts run from
+    different directories can legitimately read a different status for the
+    exact same run and path.
+
+    **v38 narrowing (review remediation B finding 1, 260927):** the ONLY
+    shape this class explains is one side `status: "missing"` and the other
+    `"present"` -- exactly debt #1944's signature (a compact run from the
+    wrong cwd sees the relative path as absent). `monkeypatch.chdir(tmp_path)`
+    makes that deterministic: the real compact below resolves
+    `outputs/result.txt` against `tmp_path`, where it genuinely does not
+    exist, so the frozen/staged snapshot legitimately reads `"missing"`; the
+    mutation below then stands in for "a later compact, run from a cwd where
+    the file IS present", giving legacy=`"present"`. (A present/present
+    content difference -- e.g. a changed sha256 -- must NOT classify here;
+    see the negative control below for that case.)
+
+    Same technique as `test_force_rebuild_loss_class`: import first
+    (freezing the staged snapshot), then mutate `bathos.db` directly to
+    stand in for "a later compact, run from a different cwd, recomputed
+    this run's output_metadata" without actually spawning a second compact
+    from a different directory.
+    """
+    import duckdb
+
+    from bathos.runlog.migrate import _attempt_staging_root, _build_and_diff, _import_candidates
+
+    monkeypatch.chdir(tmp_path)
+    backend = _simple_backend(tmp_path)
+    write_run(
+        Run(
+            id="run-outmeta",
+            project_slug="proj",
+            command="p.py",
+            argv=["python", "p.py"],
+            git_hash="9" * 40,
+            git_branch="main",
+            git_dirty=False,
+            timestamp=BASE_TS,
+            duration_s=1.0,
+            exit_code=0,
+            status="completed",
+            output_paths=["outputs/result.txt"],
+        ),
+        backend.catalog_dir,
+    )
+    compact(backend.catalog_dir)
+
+    staging_root = _attempt_staging_root("outmeta-test")
+    report, _unresolved, _ids = _import_candidates(backend.catalog_dir, staging_root=staging_root)
+    assert report.locked == []
+
+    drifted = json.dumps(
+        [
+            {
+                "path": "outputs/result.txt",
+                "status": "present",
+                "size_bytes": 42,
+                "mtime_unix": 123.0,
+                "sha256": "f" * 64,
+            }
+        ]
+    )
+    con = duckdb.connect(str(backend.catalog_dir / "bathos.db"))
+    try:
+        con.execute("UPDATE runs SET output_metadata = ? WHERE id = ?", [drifted, "run-outmeta"])
+        con.commit()
+    finally:
+        con.close()
+
+    diff = _build_and_diff(backend.catalog_dir, "outmeta-test", step1_touched_run_ids=set())
+    assert diff.unclassified == []
+    lines = [
+        line
+        for line in diff.lines
+        if line.table == "runs" and line.column == "output_metadata" and line.key == ["run-outmeta"]
+    ]
+    assert lines, "expected an output_metadata residual"
+    for line in lines:
+        assert line.cls == "output_metadata_drift"
+
+
+def test_output_metadata_drift_negative_control_absolute_path(tmp_path: Path):
+    """NEGATIVE control for `output_metadata_drift`: the same construction,
+    but the differing path is ABSOLUTE. `Path.exists()`/stat for an absolute
+    path never depends on cwd, so debt #1944's cwd-drift explanation does
+    not apply here, and the residual must stay unclassified rather than
+    being papered over by the same class.
+    """
+    import duckdb
+
+    from bathos.runlog.migrate import _attempt_staging_root, _build_and_diff, _import_candidates
+
+    backend = _simple_backend(tmp_path)
+    abs_path = str(tmp_path / "abs_result.txt")
+    write_run(
+        Run(
+            id="run-outmeta-abs",
+            project_slug="proj",
+            command="p.py",
+            argv=["python", "p.py"],
+            git_hash="a" * 40,
+            git_branch="main",
+            git_dirty=False,
+            timestamp=BASE_TS,
+            duration_s=1.0,
+            exit_code=0,
+            status="completed",
+            output_paths=[abs_path],
+        ),
+        backend.catalog_dir,
+    )
+    compact(backend.catalog_dir)
+
+    staging_root = _attempt_staging_root("outmeta-abs-test")
+    report, _unresolved, _ids = _import_candidates(backend.catalog_dir, staging_root=staging_root)
+    assert report.locked == []
+
+    drifted = json.dumps(
+        [
+            {
+                "path": abs_path,
+                "status": "present",
+                "size_bytes": 99,
+                "mtime_unix": 456.0,
+                "sha256": "e" * 64,
+            }
+        ]
+    )
+    con = duckdb.connect(str(backend.catalog_dir / "bathos.db"))
+    try:
+        con.execute(
+            "UPDATE runs SET output_metadata = ? WHERE id = ?", [drifted, "run-outmeta-abs"]
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    diff = _build_and_diff(backend.catalog_dir, "outmeta-abs-test", step1_touched_run_ids=set())
+    unclassified_lines = [
+        u
+        for u in diff.unclassified
+        if u["table"] == "runs"
+        and u["column"] == "output_metadata"
+        and u["key"] == ["run-outmeta-abs"]
+    ]
+    assert unclassified_lines, (
+        "an absolute-path drift must NOT be explained by output_metadata_drift"
+    )
+
+
+def test_output_metadata_drift_negative_control_present_present_mutation(
+    tmp_path: Path, monkeypatch
+):
+    """NEGATIVE control for `output_metadata_drift`'s v38 narrowing (review
+    remediation B finding 1, 260927): the differing path is workspace-
+    relative (same shape as the positive case) and NAMES THE SAME SET of
+    paths on both sides, but is `status: "present"` on BOTH sides with a
+    different `sha256`/`size_bytes` -- a genuine output mutation or
+    corruption, never debt #1944's cwd-relative "sees it as missing"
+    signature. This must stay unclassified: a HIGH-severity bug this
+    narrowing exists to fix was this exact shape getting the same
+    "explained" label as the missing-vs-present case.
+    """
+    import duckdb
+
+    from bathos.runlog.migrate import _attempt_staging_root, _build_and_diff, _import_candidates
+
+    monkeypatch.chdir(tmp_path)
+    backend = _simple_backend(tmp_path)
+    output_file = tmp_path / "outputs" / "present_result.txt"
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file.write_bytes(b"original content")
+
+    write_run(
+        Run(
+            id="run-outmeta-mutated",
+            project_slug="proj",
+            command="p.py",
+            argv=["python", "p.py"],
+            git_hash="b" * 40,
+            git_branch="main",
+            git_dirty=False,
+            timestamp=BASE_TS,
+            duration_s=1.0,
+            exit_code=0,
+            status="completed",
+            output_paths=["outputs/present_result.txt"],
+        ),
+        backend.catalog_dir,
+    )
+    compact(backend.catalog_dir)
+
+    staging_root = _attempt_staging_root("outmeta-mutated-test")
+    report, _unresolved, _ids = _import_candidates(backend.catalog_dir, staging_root=staging_root)
+    assert report.locked == []
+
+    # Stand in for "the file was mutated/corrupted between compacts": still
+    # present, but a different sha256/size_bytes -- never "missing".
+    mutated = json.dumps(
+        [
+            {
+                "path": "outputs/present_result.txt",
+                "status": "present",
+                "size_bytes": 999,
+                "mtime_unix": 789.0,
+                "sha256": "d" * 64,
+            }
+        ]
+    )
+    con = duckdb.connect(str(backend.catalog_dir / "bathos.db"))
+    try:
+        con.execute(
+            "UPDATE runs SET output_metadata = ? WHERE id = ?",
+            [mutated, "run-outmeta-mutated"],
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    diff = _build_and_diff(backend.catalog_dir, "outmeta-mutated-test", step1_touched_run_ids=set())
+    unclassified_lines = [
+        u
+        for u in diff.unclassified
+        if u["table"] == "runs"
+        and u["column"] == "output_metadata"
+        and u["key"] == ["run-outmeta-mutated"]
+    ]
+    assert unclassified_lines, (
+        "a present/present sha256 mutation must NOT be explained by output_metadata_drift"
+    )
 
 
 # --------------------------------------------------------------------------

@@ -38,6 +38,7 @@ from bathos.runlog.emit import (
 from bathos.schema import Run
 from bathos.sidecar import (
     DifferentialBlock,
+    Sidecar,
     SidecarError,
     evaluate_outcome,
     is_in_enforced_dir,
@@ -130,11 +131,34 @@ def _find_script_path(argv: list[str], cwd: Path) -> Path | None:
     return None
 
 
+@dataclasses.dataclass
+class ResultEmission:
+    """Result of `_read_result_emission`: the JSON text plus provenance for freshness checks.
+
+    `source` is one of:
+      - "env_var": the per-run BTH_RESULTS_PATH temp file. Its filename is unique per run id
+        (`results_temp_path`) and therefore never pre-exists -- inherently fresh, no mtime
+        check needed (`mtime` is always None for this source).
+      - "adjacent_fallback": `<script_stem>.bth-results.json` next to the script.
+      - "out_fallback": the single registered `--out` JSON path.
+      - "none": nothing found, or found but unparseable.
+
+    Sources 2 and 3 are not written fresh per run -- a prior invocation's file can still be
+    sitting there when the current run starts. `mtime` (that file's `st_mtime`) lets callers
+    on the non-zero-exit path (debt #1977 CRITICAL) refuse to trust a payload that predates
+    this run's own subprocess spawn.
+    """
+
+    content: str
+    source: str
+    mtime: float | None
+
+
 def _read_result_emission(
     env_var_path: Path,
     script_path: Path | None,
     output_paths: list[str] | None = None,
-) -> str:
+) -> ResultEmission:
     """
     Read result emission from, in order:
     1. env_var_path (set by BTH_RESULTS_PATH env var)
@@ -143,7 +167,7 @@ def _read_result_emission(
        their result to --out and never to $BTH_RESULTS_PATH — this was the root
        cause of outcome staying 'unknown' for otherwise-passing runs; debt #485/#487/#369)
 
-    Returns JSON string, or "{}" if none exist or none parse as valid JSON.
+    Returns a ResultEmission. `content` is "{}" if none exist or none parse as valid JSON.
     """
     # Try env var path first
     if env_var_path.exists():
@@ -151,9 +175,9 @@ def _read_result_emission(
             content = env_var_path.read_text()
             # Validate it's valid JSON
             json.loads(content)
-            return content
+            return ResultEmission(content, "env_var", None)
         except (json.JSONDecodeError, OSError):
-            return "{}"
+            return ResultEmission("{}", "none", None)
 
     # Try fallback path adjacent to script
     if script_path is not None:
@@ -163,9 +187,10 @@ def _read_result_emission(
                 content = fallback_path.read_text()
                 # Validate it's valid JSON
                 json.loads(content)
-                return content
+                mtime = fallback_path.stat().st_mtime
+                return ResultEmission(content, "adjacent_fallback", mtime)
             except (json.JSONDecodeError, OSError):
-                return "{}"
+                return ResultEmission("{}", "none", None)
 
     # Try a single registered --out JSON path. Only applied when exactly one
     # candidate exists — with zero or multiple, guessing which one is "the"
@@ -178,11 +203,62 @@ def _read_result_emission(
                 try:
                     content = out_path.read_text()
                     json.loads(content)
-                    return content
+                    mtime = out_path.stat().st_mtime
+                    return ResultEmission(content, "out_fallback", mtime)
                 except (json.JSONDecodeError, OSError):
-                    return "{}"
+                    return ResultEmission("{}", "none", None)
 
-    return "{}"
+    return ResultEmission("{}", "none", None)
+
+
+def _result_schema_complete(meta: object, sidecar: Sidecar) -> bool:
+    """Did the emitted result payload contain every declared [result_schema] field?
+
+    Only top-level scalar fields count (nested sub-tables, e.g. `[result_schema.provenance]`,
+    are TOML sub-dicts rather than a type string and are skipped -- same filter as
+    `validate.py`'s dummy-table builder). A sidecar with no scalar result_schema fields at
+    all can never be judged "complete" here: there is nothing to verify was actually
+    produced, so the exit-code guard falls back to its default (conservative) behavior.
+    """
+    if not isinstance(meta, dict):
+        return False
+    schema_keys = [k for k, v in sidecar.result_schema.items() if isinstance(v, str)]
+    if not schema_keys:
+        return False
+    return all(k in meta for k in schema_keys)
+
+
+def _evaluate_sidecar_outcome(
+    sidecar: Sidecar,
+    metadata: str,
+    resolved_mode: str,
+) -> tuple[str, str]:
+    """Parse `metadata` and evaluate it against `sidecar`'s outcome conditions.
+
+    Returns (outcome, outcome_error_reason). A malformed condition (SidecarError) is reported
+    as outcome="error" with a JSON gate-failure payload as the reason -- never propagated as an
+    exception, since a bad SQL fragment must not fail a run whose subprocess otherwise
+    succeeded. Any other exception is re-raised, matching the historical behavior of the
+    zero-exit-code evaluation path this factors out of.
+    """
+    try:
+        meta = json.loads(metadata)
+    except (json.JSONDecodeError, TypeError):
+        meta = {}
+    try:
+        return evaluate_outcome(sidecar, meta), ""
+    except SidecarError as e:
+        payload = _gate_failure_payload(
+            error_code=GateErrorCode.OUTCOME_EVALUATION_ERROR,
+            phase="post_execution",
+            errors=[str(e)],
+            agent_mode=resolved_mode,
+        )
+        event("run.error", phase="evaluate", exc_type=type(e).__name__, exc_msg=str(e))
+        return "error", json.dumps(dataclasses.asdict(payload))
+    except Exception as e:
+        event("run.error", phase="evaluate", exc_type=type(e).__name__, exc_msg=str(e))
+        raise
 
 
 def _write_manifest(
@@ -272,7 +348,7 @@ def _run_differential_preflight(
         env["BTH_DIFFERENTIAL_PHASE"] = phase
         proc = subprocess.Popen(argv, cwd=cwd, env=env)
         exit_code = proc.wait()
-        raw = _read_result_emission(results_path, None, None)
+        raw = _read_result_emission(results_path, None, None).content
         try:
             meta = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
@@ -301,9 +377,7 @@ def _run_differential_preflight(
         reason = (
             f"[differential] knob={differential.knob!r} off={differential.off!r} "
             f"on={differential.on!r} — "
-            + "; ".join(
-                f"{phase} arm exited with code {code}" for phase, code in failed_phases
-            )
+            + "; ".join(f"{phase} arm exited with code {code}" for phase, code in failed_phases)
         )
         return DifferentialResult(
             ok=False,
@@ -832,6 +906,10 @@ def _run_script_impl(
     exit_code = 1
     status = "failed"
     heartbeat_stop = None
+    # Wall-clock timestamp captured immediately before spawn -- the freshness floor for the
+    # non-zero-exit fallback-file check below (debt #1977 CRITICAL). No slack in the
+    # permissive direction: a fallback file's mtime must be >= this to be trusted.
+    spawn_wall_time = time.time()
     try:
         proc = subprocess.Popen(argv, cwd=cwd, env=env)
         event("run.subprocess_spawn", pid=proc.pid, cmd=argv)
@@ -872,36 +950,68 @@ def _run_script_impl(
     event("run.subprocess_exit", exit_code=exit_code, duration_ms=duration_ms)
 
     # Read result emission from BTH_RESULTS_PATH, script-adjacent fallback, or --out
-    metadata = _read_result_emission(results_temp_path, script_path, output_paths)
+    result_emission = _read_result_emission(results_temp_path, script_path, output_paths)
+    metadata = result_emission.content
 
     outcome = ""
     outcome_error_reason = ""
 
-    # Exit code guard: if exit_code != 0, outcome is "error"
+    # Exit code guard: a non-zero exit defaults to outcome="error" -- an infrastructure
+    # failure, not a pre-registered scientific result. But a sidecar whose script signals a
+    # pre-registered fail/marginal branch by exiting non-zero *after* emitting a complete
+    # result payload deserves that honest label, not "error": debt #1977. This is
+    # deliberately conservative in one direction only -- a non-zero exit can never be
+    # laundered into "pass" (a crash is never a pass, no matter what the payload says) -- and
+    # falls back to the historical exit_code=N error whenever the payload can't be trusted
+    # (missing/partial/unparseable, no sidecar at all, or -- debt #1977 CRITICAL -- STALE: a
+    # fallback file left over from an earlier invocation of this same script. Neither the
+    # script-adjacent `.bth-results.json` nor a registered `--out` JSON is removed before a
+    # run, so either can survive untouched across a crash that writes nothing new. Only the
+    # per-run BTH_RESULTS_PATH temp file is inherently fresh (unique per run id); a fallback
+    # file is trusted here only if its mtime is >= the wall-clock timestamp captured right
+    # before this run's subprocess was spawned).
     if exit_code != 0:
         outcome = "error"
         outcome_error_reason = f"exit_code={exit_code}"
+        payload_is_fresh = result_emission.source == "env_var" or (
+            result_emission.mtime is not None and result_emission.mtime >= spawn_wall_time
+        )
+        if sidecar is not None and payload_is_fresh:
+            try:
+                meta_for_completeness = json.loads(metadata)
+            except (json.JSONDecodeError, TypeError):
+                meta_for_completeness = None
+            if _result_schema_complete(meta_for_completeness, sidecar):
+                candidate_outcome, candidate_reason = _evaluate_sidecar_outcome(
+                    sidecar, metadata, resolved_mode
+                )
+                if candidate_outcome == "pass":
+                    # Never a pass on a failed process -- record the honest fact that the
+                    # process crashed *and* that outcome evaluation would otherwise have
+                    # called it a pass, so this can never be mistaken for a genuine pass.
+                    outcome_error_reason = (
+                        f"exit_code={exit_code}; outcomes evaluated to pass despite non-zero exit"
+                    )
+                elif candidate_outcome == "error":
+                    # Outcome evaluation itself failed (e.g. a malformed condition) --
+                    # combine both facts rather than dropping the more specific reason.
+                    if candidate_reason:
+                        outcome_error_reason = f"exit_code={exit_code}; {candidate_reason}"
+                elif candidate_outcome == "unknown":
+                    # No outcome condition matched at all -- this is not a "label" worth
+                    # recording on a crashed process, and an empty reason would silently
+                    # drop the crash fact. Record it as the infrastructure error it is,
+                    # with a reason that names both facts.
+                    outcome = "error"
+                    outcome_error_reason = f"exit_code={exit_code}; no outcome condition matched"
+                else:
+                    # A non-success label (fail/marginal/any custom name) is the honest
+                    # pre-registered outcome -- record it, but keep the exit code fact
+                    # queryable rather than dropping it behind an empty reason.
+                    outcome = candidate_outcome
+                    outcome_error_reason = f"exit_code={exit_code}"
     elif sidecar is not None:
-        # Outcome evaluation: read result_schema fields from metadata
-        try:
-            meta = json.loads(metadata)
-        except (json.JSONDecodeError, TypeError):
-            meta = {}
-        try:
-            outcome = evaluate_outcome(sidecar, meta)
-        except SidecarError as e:
-            outcome = "error"
-            payload = _gate_failure_payload(
-                error_code=GateErrorCode.OUTCOME_EVALUATION_ERROR,
-                phase="post_execution",
-                errors=[str(e)],
-                agent_mode=resolved_mode,
-            )
-            outcome_error_reason = json.dumps(dataclasses.asdict(payload))
-            event("run.error", phase="evaluate", exc_type=type(e).__name__, exc_msg=str(e))
-        except Exception as e:
-            event("run.error", phase="evaluate", exc_type=type(e).__name__, exc_msg=str(e))
-            raise
+        outcome, outcome_error_reason = _evaluate_sidecar_outcome(sidecar, metadata, resolved_mode)
 
     # Auto-register any files written to BTH_OUTPUT_DIR that weren't in --out
     registered_paths = set(output_paths)

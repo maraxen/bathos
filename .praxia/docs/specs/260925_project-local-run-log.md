@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: v35 (v34 + AC-30 warm-only-row wording fixed against the step-3 diff)
+revision: "v38 (v37 + review remediation B, 260927: `output_metadata_drift` narrowed to the actual debt #1944 signature -- one side `status: \"missing\"`, the other `\"present\"` -- so a genuine present/present content mutation stays unclassified; cluster log pull documented non-functional pending myxcel arbitrary-path pull (debt #1993), with `bth sync --pull`/the `sync` MCP tool now reporting `cluster_log_pulled: false` honestly instead of reading \"no exception\" as success; dry-run wording corrected from \"no data writes anywhere\" to \"no data files written\" since the empty `writers.lock` mutex may still be created)"
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -525,6 +525,20 @@ from the entity; if none can be resolved, the event goes to `unaffiliated/`.
   Removing it is future work.
 - Refs created on the cluster clone stay there, as today. Moving provenance refs between
   clones is out of scope (D4).
+- **v38: this cluster log pull is non-functional pending myxcel, not merely undelivered.**
+  `pull_cluster_log` (`sync.py`) goes through `bathos.cluster.pull_path`, a thin myxcel wrapper
+  (CLAUDE.md "Bathos Sync Delegates to Myxcel" forbids calling rsync directly here) -- but the
+  installed `myxcel pull` has no arbitrary remote-path -> local-dest capability at all (verified
+  260927: `myxcel pull [OPTIONS] {remote} {project}` takes a myxcel-registered *project name*,
+  not a filesystem path, and no Python entry point behind it is any more general). `pull_path`
+  therefore raises `MyxcelCapabilityGapError` on every real call, tracked as **praxia debt
+  #1993** (myxcel needs to grow this capability before this feature can do anything). Each of
+  the three sub-pulls (log/fallback/mirror) is caught independently and best-effort, so `bth
+  sync --pull` never crashes over it -- but it also never actually pulls anything today.
+  `pull_cluster_log` returns a `ClusterLogPullResult` (`pulled`, `failures`) instead of `None`,
+  and `bth sync --pull` (and the `sync` MCP tool, the same underlying function) reports
+  `cluster_log_pulled: false` plus per-subpath `cluster_log_pull_failures` honestly, rather than
+  reading "no exception raised" as success. Revisit this note once #1993 lands.
 
 ### Discovery
 
@@ -586,7 +600,29 @@ switched on in one step.
    pulled or reaped in step 1: a column of such a run whose staged value equals the value that
    fragment or a reap ledger written in step 1 itself carries, e.g. a staged status the fragment
    carries, or a `metadata.reaped` equal to a step-1 ledger record, newer than its warm row;
-   a staged value neither explains stays unclassified); unclassified differences abort. The classified residuals are
+   a staged value neither explains stays unclassified); unclassified differences abort. (v37:
+   `output_metadata` whose files changed since is implemented as `output_metadata_drift` --
+   narrowly, only when both sides name the same set of output paths and every differing path
+   is workspace-relative, since debt #1944's compacting-process-cwd sensitivity in
+   `_collect_output_metadata` cannot explain a difference on an absolute path, which stays
+   unclassified instead. **v38 narrowing (review finding, 260927):** naming the same relative
+   path is not enough on its own -- a genuinely mutated or corrupted output (same path, both
+   sides `status: "present"`, differing `sha256`/`size_bytes`) is a real integrity problem, not
+   cwd drift, and must NOT get the same "explained" label. debt #1944's actual signature is
+   narrower still: a relative path resolves against the compacting process's OWN cwd, so a
+   compact run from the wrong directory sees the file as **missing** (`_collect_output_metadata`
+   returns `{"status": "missing", "size_bytes": 0}`) where another compact, run from the right
+   cwd, sees it `"present"`. So `output_metadata_drift` now additionally requires, for every
+   differing path, that the two sides' `status` values are exactly `{"missing", "present"}` (one
+   of each) -- a `"present"`/`"present"` differing pair (or anything involving `"unreadable"`)
+   stays unclassified. Postmortem overrides whose files are only in a deleted worktree
+   (`postmortem_worktree_deleted`) was investigated and is judged structurally unreachable with
+   this importer/fold -- no compared column carries a "which worktree" signal, `compact.py`'s
+   postmortem walk always resolves against the main worktree and prunes nested
+   `.claude/worktrees/` regardless of whether one still exists, and the one live write path that
+   could otherwise diverge from the imported warm value, `run.postmortem_applied`, never fires
+   before cut-over; see `_classify`'s docstring in `migrate.py` for the full trace.) The
+   classified residuals are
    written to a canonical report (exactly one JSON line per differing `(table, key, column)`,
    each line exactly the object `{table, key, column, class, legacy_value, staged_value}` with
    `key` the row's primary key as a JSON array, `class` the allow-listed class name, and each
@@ -628,6 +664,39 @@ switched on in one step.
    and rows of a `bathos.db` recreated beside `bathos.db.frozen`, which clear once imported) with the writing host; re-running
    `bth migrate --import-legacy` imports it (sources: `bathos.db.frozen`, any new `bathos.db`,
    fragments in `runs/` and `remote-runs/`, reap ledgers, submit Parquet, campaign JSON).
+
+**Dry run:** `bth migrate --to-log --dry-run` previews step 3's residual report before a user
+ever commits to `--accept-residual`, with **no data FILES written anywhere**: not to
+`~/.bth/catalog` (no pull, no remote-runs mirror, no reap `apply`, no `index.db`, no
+`cutover.json`), not to `~/.bth/projects.toml`, not to `~/.bth/log/` (including
+`import-staging/`), not to any registered project root, and not to any remote. **v38
+correction:** this is not quite true at the byte level -- `writers_lock` (every reader, dry run
+or not, takes it shared) may still create the empty `writers.lock` mutex file under the catalog
+dir if it does not already exist. That file carries no data of its own (just an `flock` handle),
+so the substantive claim -- no run, event, index, or config data is written -- still holds; the
+wording above and in `_migrate_to_log_dry_run`'s docstring now says "no data FILES" rather than
+the broader "no data writes" to avoid over-claiming. Concretely: step 1's remote pull/mirror
+(`pull_and_mirror_all_remotes`) never runs at all -- the result's `would_pull` field instead
+lists every `(root, remote)` pair a real run would have pulled, so the report is legibly labeled
+as **not including any remote fragment not already locally mirrored from an earlier real run**;
+`reap_runs` runs with `apply=False`, and its candidate list (not a real reap ledger write) becomes
+the `step1_pulled_or_reaped` touched-run set that step 3's classifier uses; the squeue conflict
+check still runs (read-only, same as a real run). Step 2's staged import events, step 3's
+throwaway fold index, and the diff itself all live under one `tempfile.mkdtemp()` scratch
+directory that is removed before the call returns -- never under `~/.bth/log/import-staging/<attempt>/`. Step 1's re-run
+cleanup (`_cleanup_prior_attempt_state`: deleting stray staging directories and `index.db`) never
+runs either, since a dry run touches no prior attempt's state. The result carries a new status,
+`dry_run`, with `report_sha256`, `residual_lines`, and `unclassified` populated exactly as a real
+run's `residual_pending` would be, plus `would_pull`. **`report_sha256` on a `dry_run` result is
+advisory only:** because remote fragments are not mirrored first, a real run's own recomputed
+report may differ from the dry run's, so `--accept-residual` must always be given the hash from a
+real (non-dry-run) invocation, never a dry run's -- passing `--accept-residual` together with
+`--dry-run` is rejected outright with a clear error before anything runs, since a dry run never
+reaches step 4's switch and there is therefore nothing to accept a residual report for. When a
+cut-over marker already exists (a prior attempt already reached step 4(b)), `--dry-run` does not
+recompute or rewrite anything; it reads back that attempt's already-persisted
+`residual_report.jsonl` from staging (or reports `already_migrated` if staging is already gone),
+same as the real re-run path but without ever calling `_do_switch`.
 
 ## Acceptance criteria
 

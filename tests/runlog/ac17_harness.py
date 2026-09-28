@@ -41,14 +41,16 @@ from typing import Any
 
 import duckdb
 
+from bathos import claim as claim_ops
 from bathos.anchor import AnchorRecord, CatalogAnchorStore
 from bathos.campaign_edges import add_campaign_edge, add_run_edge
 from bathos.campaigns import add_run_to_campaign, conclude_campaign, create_campaign
-from bathos.catalog import write_run
+from bathos.catalog import write_run, write_submit_provenance
 from bathos.compact import compact
 from bathos.mcp import postmortem_validate_tool
 from bathos.reap import _write_reap_ledger_entry
 from bathos.runlog.emit import emit_event, run_event_data, sidecar_declaration_for_event
+from bathos.runlog.importer import _iter_parquet_rows
 from bathos.runlog.index import connect_read
 from bathos.runlog.ingest import run_ingest
 from bathos.runlog.mode import cutover_marker_path
@@ -204,9 +206,7 @@ def sidecar_toml(null_rate: float, alt_rate: float, threshold: float) -> str:
     )
 
 
-def postmortem_toml(
-    run_id: str, hypothesis_status: str, verdict_override: str, author: str
-) -> str:
+def postmortem_toml(run_id: str, hypothesis_status: str, verdict_override: str, author: str) -> str:
     return (
         f'run_id = "{run_id}"\n'
         "\n"
@@ -268,6 +268,15 @@ def execute_ops(backend: Backend, ops: list[dict[str, Any]]) -> ExecState:
 
         elif kind == "postmortem":
             _register_postmortem(backend, op)
+
+        elif kind == "register_claim":
+            _register_claim(backend, op, state)
+
+        elif kind == "attest_parity":
+            _attest_parity(backend, op, state)
+
+        elif kind == "submit":
+            _submit(backend, op)
 
         elif kind == "add_run_to_campaign":
             db = _refresh_and_get_db(backend)
@@ -418,6 +427,7 @@ def _finish_run(backend: Backend, op: dict, state: ExecState) -> None:
         exit_code=op["exit_code"],
         duration_s=duration_s,
         outcome=op["outcome"],
+        parity_run_type=op.get("parity_run_type"),
     )
     state.run_obj[op["run_id"]] = finished
 
@@ -539,6 +549,109 @@ def _register_postmortem(backend: Backend, op: dict) -> None:
     )
 
 
+def _register_claim(backend: Backend, op: dict, state: ExecState) -> None:
+    """`bth claim scaffold` + `bth claim register` against the campaign named
+    by `op["campaign_handle"]`, via the REAL public API
+    (`claim.scaffold_claim`/`claim.register_claim`) -- both already branch on
+    the runlog flag internally (`campaign.created` recovery insert,
+    `campaign.claim_bound`), so calling the identical functions twice (once
+    per backend) exercises production code end to end on both sides, same as
+    every other op here.
+
+    `scaffold_claim` derives the claim's filename from the campaign's own
+    NAME (`ac17_gen.py` gives every campaign the same name on both backends,
+    `f"campaign {i}"`), so the stored `claim_path` -- already workspace-
+    RELATIVE (`register_claim`'s own `rel_path = abs_path.relative_to(
+    workspace_root.resolve())`) -- is identical text on both backends with no
+    normalization needed, unlike `sidecar_path` (`_PATH_COLS`).
+    """
+    full_id = state.camp_id[op["campaign_handle"]]
+    db = _refresh_and_get_db(backend)
+    try:
+        claim_path = claim_ops.scaffold_claim(full_id, db, backend.workspace)
+        claim_ops.register_claim(
+            claim_path,
+            full_id,
+            db,
+            backend.workspace,
+            catalog_dir=backend.catalog_dir,
+        )
+    finally:
+        _safe_close(db)
+
+
+def _attest_parity(backend: Backend, op: dict, state: ExecState) -> None:
+    """`bth claim attest-parity` against an already-registered claim, via the
+    REAL `claim.attest_parity` -- requires `op["parity_run_id"]` to already be
+    a FINISHED run with `outcome in ('pass', 'partial')` and
+    `parity_run_type == 'literature_parity'` (`ac17_gen.py` only ever
+    generates this op after such a run's `finish_run` op, and only for a
+    campaign that already got a `register_claim` op -- see that module's
+    `parity_eligible_run_ids`/`campaign_has_claim` bookkeeping).
+    """
+    full_id = state.camp_id[op["campaign_handle"]]
+    db = _refresh_and_get_db(backend)
+    try:
+        claim_ops.attest_parity(
+            full_id,
+            op["parity_run_id"],
+            db,
+            backend.workspace,
+            catalog_dir=backend.catalog_dir,
+        )
+    finally:
+        _safe_close(db)
+
+
+def _submit(backend: Backend, op: dict) -> None:
+    """`bth submit`'s provenance recording, via the REAL
+    `catalog.write_submit_provenance` -- the actual "Authoritative write"
+    site (spec table: `submit.recorded`), called directly rather than
+    through `bth submit`'s CLI/myxcel dispatch. This mirrors every other op
+    in this harness (`_start_run`/`_finish_run` bypass `runner.run_script`'s
+    subprocess spawn the same way): `write_submit_provenance` has no myxcel
+    or SLURM dependency of its own (that boundary lives one layer up, in
+    `cluster.py`'s `submit_job`/`push_project`, which this harness never
+    calls), so there is no cluster boundary left to fake at this layer.
+
+    No `submit_id` is injected (unlike run ids/timestamps elsewhere in this
+    harness): the legacy Parquet schema has no id column of its own at all
+    (`write_submit_provenance`'s docstring: "No legacy caller threads one
+    through"), so the differential test joins legacy and new-fold submit
+    records by `myxcel_job_id` instead (a real field on both sides, and
+    unique per op since `ac17_gen.py` mints one per `submit` op) rather than
+    by any id.
+    """
+    write_submit_provenance(
+        op.get("project_slug", "proj"),
+        op["command"],
+        op.get("sidecar_sha256", ""),
+        op["myxcel_job_id"],
+        op.get("stage_name", "exploration"),
+        backend.catalog_dir,
+        cwd=backend.workspace,
+    )
+
+
+def read_legacy_submits(backend: Backend) -> list[dict]:
+    """Every legacy submit-provenance Parquet record under this backend's
+    catalog, read directly (there is no warm `submits` DuckDB table at all --
+    `compact.py` never creates one, confirmed by `migrate.py`'s own comment:
+    "submits, which compact.py never builds"). Reuses the importer's own
+    `_iter_parquet_rows` (one row per fragment) rather than re-deriving
+    Parquet-reading logic here.
+    """
+    submits_dir = backend.catalog_dir / "submits"
+    if not submits_dir.is_dir():
+        return []
+    out: list[dict] = []
+    for f in sorted(submits_dir.rglob("*_submit.parquet")):
+        rows = _iter_parquet_rows(f)
+        if rows:
+            out.extend(rows)
+    return out
+
+
 # --------------------------------------------------------------------------
 # Canonical state extraction
 # --------------------------------------------------------------------------
@@ -574,7 +687,21 @@ def new_fold_state(backend: Backend) -> dict[str, list[dict]]:
         con.close()
 
 
-_TABLES = ("runs", "campaigns", "campaign_runs", "campaign_edges", "run_edges", "sidecar_anchors")
+_TABLES = (
+    "runs",
+    "campaigns",
+    "campaign_runs",
+    "campaign_edges",
+    "run_edges",
+    "sidecar_anchors",
+    # New-fold-only table (spec: no warm `submits` DuckDB table exists at all,
+    # `compact.py` never creates one) -- on the legacy connection this always
+    # hits the `duckdb.CatalogException` branch below and dumps `[]`, exactly
+    # like `sidecar_anchors`/`campaign_edges`/`run_edges` do when never
+    # created. The real legacy-side comparison is `read_legacy_submits`
+    # (raw Parquet fragments), used separately by the differential test.
+    "submits",
+)
 
 
 def _dump_tables(con) -> dict[str, list[dict]]:
@@ -582,7 +709,8 @@ def _dump_tables(con) -> dict[str, list[dict]]:
     for table in _TABLES:
         try:
             cols = [
-                d[0] for d in con.execute(f"SELECT * FROM {table} LIMIT 0").description  # noqa: S608
+                d[0]
+                for d in con.execute(f"SELECT * FROM {table} LIMIT 0").description  # noqa: S608
             ]
             rows = con.execute(f"SELECT * FROM {table}").fetchall()  # noqa: S608
         except duckdb.CatalogException:

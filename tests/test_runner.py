@@ -673,7 +673,10 @@ def test_outcome_error_on_nonzero_exit(tmp_catalog: Path, tmp_path: Path):
 
 
 def test_evaluate_outcome_not_called_on_error(tmp_catalog: Path, tmp_path: Path):
-    """When exit_code != 0, evaluate_outcome is not called even with a sidecar."""
+    """When exit_code != 0 and the script emits no result at all, outcome stays 'error' with
+    the plain exit_code reason -- evaluate_outcome is never reached because the result payload
+    can't satisfy [result_schema] (debt #1977: only a *complete* payload is ever evaluated
+    after a non-zero exit; an empty one falls back to this historical behavior unchanged)."""
     import textwrap
 
     enforced = tmp_path / "scripts" / "experiments"
@@ -715,6 +718,436 @@ def test_evaluate_outcome_not_called_on_error(tmp_catalog: Path, tmp_path: Path)
     # outcome should be "error", not evaluated against sidecar outcomes
     assert runs[0].outcome == "error"
     assert runs[0].outcome_error_reason == "exit_code=1"
+
+
+def _fail_after_result_sidecar() -> str:
+    import textwrap
+
+    return textwrap.dedent("""
+        [experiment]
+        hypothesis = "test hypothesis"
+        [outcomes.pass]
+        condition = "temp_std < 5"
+        decision = "good"
+        reasoning = "stable temperature"
+        [outcomes.fail]
+        condition = "temp_std >= 5"
+        decision = "debug"
+        reasoning = "unstable temperature"
+        [outcomes.fallback]
+        condition = "1==1"
+        decision = "fallback"
+        reasoning = "catch-all"
+        is_residual = true
+        [result_schema]
+        temp_std = "float"
+        n_steps = "int"
+    """)
+
+
+def test_outcome_honest_fail_on_nonzero_exit(tmp_catalog: Path, tmp_path: Path):
+    """debt #1977: a script that emits a *complete* result payload and then exits non-zero
+    to signal its pre-registered fail branch must be recorded as that honest outcome ('fail'),
+    not laundered into an infrastructure 'error'. exit_code is still recorded as usual."""
+    import textwrap
+
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    script = enforced / "run_test.py"
+    script.write_text(
+        textwrap.dedent("""
+        import os
+        import json
+        import sys
+
+        results_path = os.environ.get("BTH_RESULTS_PATH")
+        if results_path:
+            with open(results_path, "w") as f:
+                json.dump({"temp_std": 12.0, "n_steps": 100}, f)
+        sys.exit(3)
+    """)
+    )
+
+    sidecar = enforced / "run_test.bth.toml"
+    sidecar.write_text(_fail_after_result_sidecar())
+
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 3
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert runs[0].exit_code == 3
+    assert runs[0].outcome == "fail"
+    # debt #1977 HIGH: an honest non-pass label recorded on a non-zero exit must keep the
+    # crash fact queryable, not drop it behind an empty reason.
+    assert runs[0].outcome_error_reason == "exit_code=3"
+
+
+def test_outcome_never_pass_despite_nonzero_exit(tmp_catalog: Path, tmp_path: Path):
+    """NEGATIVE control (debt #1977): a script that emits a result selecting the *pass*
+    branch but still exits non-zero must NEVER be recorded as 'pass' -- a crash is never a
+    pass regardless of what the payload says. It is recorded as 'error', with a reason that
+    names both facts, so this can never be mistaken for either a clean pass or a generic
+    infrastructure failure."""
+    import textwrap
+
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    script = enforced / "run_test.py"
+    script.write_text(
+        textwrap.dedent("""
+        import os
+        import json
+        import sys
+
+        results_path = os.environ.get("BTH_RESULTS_PATH")
+        if results_path:
+            with open(results_path, "w") as f:
+                json.dump({"temp_std": 1.0, "n_steps": 100}, f)
+        sys.exit(1)
+    """)
+    )
+
+    sidecar = enforced / "run_test.bth.toml"
+    sidecar.write_text(_fail_after_result_sidecar())
+
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 1
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert runs[0].outcome == "error"
+    assert "exit_code=1" in runs[0].outcome_error_reason
+    assert "pass despite non-zero exit" in runs[0].outcome_error_reason
+
+
+def test_outcome_error_on_nonzero_exit_partial_result(tmp_catalog: Path, tmp_path: Path):
+    """debt #1977: a non-zero exit whose result payload is missing a declared
+    [result_schema] field is NOT trusted enough to evaluate -- falls back to the historical
+    plain exit_code=N error, same as a script that emitted no result at all."""
+    import textwrap
+
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    script = enforced / "run_test.py"
+    script.write_text(
+        textwrap.dedent("""
+        import os
+        import json
+        import sys
+
+        results_path = os.environ.get("BTH_RESULTS_PATH")
+        if results_path:
+            # Missing "n_steps", declared in [result_schema] -- a partial payload.
+            with open(results_path, "w") as f:
+                json.dump({"temp_std": 12.0}, f)
+        sys.exit(1)
+    """)
+    )
+
+    sidecar = enforced / "run_test.bth.toml"
+    sidecar.write_text(_fail_after_result_sidecar())
+
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 1
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert runs[0].outcome == "error"
+    assert runs[0].outcome_error_reason == "exit_code=1"
+
+
+def test_outcome_pass_on_zero_exit_unchanged(tmp_catalog: Path, tmp_path: Path):
+    """debt #1977 regression guard: the zero-exit-code evaluation path (the common case) is
+    unaffected by the new non-zero-exit handling -- a clean pass is still recorded as 'pass'
+    with no error reason."""
+    import textwrap
+
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    script = enforced / "run_test.py"
+    script.write_text(
+        textwrap.dedent("""
+        import os
+        import json
+
+        results_path = os.environ.get("BTH_RESULTS_PATH")
+        if results_path:
+            with open(results_path, "w") as f:
+                json.dump({"temp_std": 1.0, "n_steps": 100}, f)
+    """)
+    )
+
+    sidecar = enforced / "run_test.bth.toml"
+    sidecar.write_text(_fail_after_result_sidecar())
+
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 0
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert runs[0].outcome == "pass"
+    assert runs[0].outcome_error_reason == ""
+
+
+def _no_catchall_sidecar() -> str:
+    import textwrap
+
+    return textwrap.dedent("""
+        [experiment]
+        hypothesis = "test hypothesis"
+        [outcomes.pass]
+        condition = "temp_std < 5"
+        decision = "good"
+        reasoning = "stable temperature"
+        [outcomes.fail]
+        condition = "temp_std > 100"
+        decision = "debug"
+        reasoning = "wildly unstable temperature"
+        is_residual = true
+        [result_schema]
+        temp_std = "float"
+        n_steps = "int"
+    """)
+
+
+def test_outcome_error_on_stale_adjacent_fallback_nonzero_exit(tmp_catalog: Path, tmp_path: Path):
+    """NEGATIVE control for debt #1977 CRITICAL: a stale `<stem>.bth-results.json` left over
+    from an EARLIER invocation must not be adopted by a crashed run. The file predates this
+    run's subprocess spawn (mtime forced into the past via os.utime), selects a complete
+    'fail' payload, and the script exits 1 without writing anything itself -- the crash must
+    still be recorded as the historical 'error', never laundered into the stale run's 'fail'."""
+    import os
+    import textwrap
+    import time
+
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    script = enforced / "run_test.py"
+    script.write_text(
+        textwrap.dedent("""
+        import sys
+        sys.exit(1)
+    """)
+    )
+
+    sidecar = enforced / "run_test.bth.toml"
+    sidecar.write_text(_fail_after_result_sidecar())
+
+    stale_fallback = enforced / "run_test.bth-results.json"
+    stale_fallback.write_text(json.dumps({"temp_std": 12.0, "n_steps": 100}))
+    stale_time = time.time() - 3600
+    os.utime(stale_fallback, (stale_time, stale_time))
+
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 1
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert runs[0].outcome == "error"
+    assert runs[0].outcome_error_reason == "exit_code=1"
+
+
+def test_outcome_honest_fail_on_nonzero_exit_via_fresh_adjacent_fallback(
+    tmp_catalog: Path, tmp_path: Path
+):
+    """Positive counterpart to the negative control above: when the adjacent fallback file
+    is written FRESH during this run (mtime >= subprocess spawn time), it is trusted the
+    same way the primary BTH_RESULTS_PATH channel is -- a script that only knows how to
+    write its own '<stem>.bth-results.json' (never $BTH_RESULTS_PATH) still gets its honest
+    'fail' outcome recorded on a non-zero exit."""
+    import textwrap
+
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    script = enforced / "run_test.py"
+    script.write_text(
+        textwrap.dedent("""
+        import json
+        import sys
+        from pathlib import Path
+
+        fallback = Path(__file__).parent / "run_test.bth-results.json"
+        fallback.write_text(json.dumps({"temp_std": 12.0, "n_steps": 100}))
+        sys.exit(1)
+    """)
+    )
+
+    sidecar = enforced / "run_test.bth.toml"
+    sidecar.write_text(_fail_after_result_sidecar())
+
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 1
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert runs[0].outcome == "fail"
+    assert runs[0].outcome_error_reason == "exit_code=1"
+
+
+def test_outcome_error_on_stale_out_fallback_nonzero_exit(tmp_catalog: Path, tmp_path: Path):
+    """NEGATIVE control for debt #1977 CRITICAL, `--out` variant: a stale registered `--out`
+    JSON left over from an earlier invocation must not be adopted by a crashed run either."""
+    import os
+    import textwrap
+    import time
+
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    script = enforced / "run_test.py"
+    script.write_text(
+        textwrap.dedent("""
+        import sys
+        sys.exit(1)
+    """)
+    )
+
+    sidecar = enforced / "run_test.bth.toml"
+    sidecar.write_text(_fail_after_result_sidecar())
+
+    out_path = tmp_path / "result.json"
+    out_path.write_text(json.dumps({"temp_std": 12.0, "n_steps": 100}))
+    stale_time = time.time() - 3600
+    os.utime(out_path, (stale_time, stale_time))
+
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[str(out_path)],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 1
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert runs[0].outcome == "error"
+    assert runs[0].outcome_error_reason == "exit_code=1"
+
+
+def test_outcome_error_unknown_on_nonzero_exit(tmp_catalog: Path, tmp_path: Path):
+    """debt #1977 HIGH: when the evaluated label on a non-zero exit is 'unknown' (no branch
+    matched), the crash fact must not be dropped behind an empty reason -- it is recorded as
+    outcome='error' with a reason naming both facts."""
+    import textwrap
+
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    script = enforced / "run_test.py"
+    script.write_text(
+        textwrap.dedent("""
+        import os
+        import json
+        import sys
+
+        results_path = os.environ.get("BTH_RESULTS_PATH")
+        if results_path:
+            with open(results_path, "w") as f:
+                json.dump({"temp_std": 50.0, "n_steps": 100}, f)
+        sys.exit(1)
+    """)
+    )
+
+    sidecar = enforced / "run_test.bth.toml"
+    sidecar.write_text(_no_catchall_sidecar())
+
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 1
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert runs[0].outcome == "error"
+    assert runs[0].outcome_error_reason == "exit_code=1; no outcome condition matched"
+
+
+def test_outcome_zero_exit_stale_adjacent_fallback_unchanged(tmp_catalog: Path, tmp_path: Path):
+    """debt #1977 CRITICAL regression guard: the freshness check applies ONLY to the
+    non-zero-exit path. On a zero exit, a stale adjacent fallback file (mtime forced into
+    the past, predating this run's subprocess spawn) is still read and evaluated exactly as
+    before -- zero-exit behaviour is intentionally unchanged, never widened in scope by this
+    fix."""
+    import os
+    import time
+
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    script = enforced / "run_test.py"
+    script.write_text("pass")
+
+    sidecar = enforced / "run_test.bth.toml"
+    sidecar.write_text(_fail_after_result_sidecar())
+
+    stale_fallback = enforced / "run_test.bth-results.json"
+    stale_fallback.write_text(json.dumps({"temp_std": 12.0, "n_steps": 100}))
+    stale_time = time.time() - 3600
+    os.utime(stale_fallback, (stale_time, stale_time))
+
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 0
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    # Stale, but still read and evaluated on the zero-exit path -- selects "fail" from
+    # temp_std=12.0, same as it always has.
+    assert runs[0].outcome == "fail"
+    assert runs[0].outcome_error_reason == ""
 
 
 def test_manifest_sha256_populated(tmp_catalog: Path, tmp_path: Path):

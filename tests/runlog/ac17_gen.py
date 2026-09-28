@@ -39,7 +39,9 @@ def generate_ops(seed: int) -> list[dict[str, Any]]:
         campaign_mode[handle] = mode
         if mode == "sequential":
             campaign_popper[handle] = (0.1, 0.9, round(rng.uniform(0.01, 0.3), 3))
-        ops.append({"kind": "create_campaign", "handle": handle, "name": f"campaign {i}", "mode": mode})
+        ops.append(
+            {"kind": "create_campaign", "handle": handle, "name": f"campaign {i}", "mode": mode}
+        )
 
     n_runs = rng.randint(4, 7)
     run_ids: list[str] = []
@@ -62,6 +64,32 @@ def generate_ops(seed: int) -> list[dict[str, Any]]:
     # "running" at a real reap_runs() call -- a test-fixture-only fix, not a
     # production behaviour change.
     pending_finish: set[str] = set()
+    # Delivery item 3: runs finished with outcome=="pass" that are ALSO
+    # marked parity_run_type="literature_parity" -- the only pool
+    # `attest_parity` ops (below) may cite (its AC-12 validation requires
+    # outcome in ('pass', 'partial') and this exact parity_run_type; this
+    # generator never produces "partial", so "pass" is the only eligible
+    # outcome label here).
+    parity_eligible_run_ids: list[str] = []
+    # A postmortem's `verdict_override` is folded onto the run's OWN `outcome`
+    # column at compact/fold time (`fold_runs.py`: "the latest postmortem
+    # override if not 'none', else the winning claim's raw outcome" -- both
+    # backends apply this identically, so it is NOT a legacy-vs-fold
+    # divergence). A parity-eligible ("pass") run that later gets a
+    # postmortem overriding it to e.g. "fail" would make `attest_parity`
+    # raise ValueError (its AC-12 check reads the POST-override outcome) on
+    # BOTH backends alike -- a generator bug, not fold coverage. Tracked here
+    # so the attest_parity op generation below can filter such runs out of
+    # its candidate pool rather than crash the whole sequence.
+    postmortem_override_by_run: dict[str, str] = {}
+    # Campaigns that got a register_claim op -- kept out of the `conclude`
+    # loop at the bottom (like campaign_has_deviation below), since
+    # conclude_campaign's Union Gate (empty-membership check, BP-3
+    # negative-outcome check, parity-confound/review-coverage downgrades) is
+    # a separate, already-covered concern (claim-tier test suites) that this
+    # delivery item is not chartered to re-exercise; folding it in here would
+    # risk spurious CampaignError crashes unrelated to fold-vs-legacy parity.
+    campaign_has_claim: dict[str, bool] = {}
     # AC-17 finding (classification b, legacy quirk -- NOT fixed here, see
     # ac17_harness's reassignment-guard comment for the sibling case):
     # `conclude_campaign`'s own `link_cool_runs_to_campaigns(...,
@@ -129,6 +157,9 @@ def generate_ops(seed: int) -> list[dict[str, Any]]:
                     "outcome": outcome,
                     "status": status,
                     "exit_code": exit_code,
+                    "parity_run_type": _maybe_parity_run_type(
+                        rng, outcome, dangling_id, parity_eligible_run_ids
+                    ),
                 }
             )
             finished_run_ids.append(dangling_id)
@@ -149,6 +180,9 @@ def generate_ops(seed: int) -> list[dict[str, Any]]:
                             "outcome": outcome,
                             "status": status,
                             "exit_code": exit_code,
+                            "parity_run_type": _maybe_parity_run_type(
+                                rng, outcome, run_id, parity_eligible_run_ids
+                            ),
                         }
                     )
                     finished_run_ids.append(run_id)
@@ -164,6 +198,9 @@ def generate_ops(seed: int) -> list[dict[str, Any]]:
                     "outcome": outcome,
                     "status": status,
                     "exit_code": exit_code,
+                    "parity_run_type": _maybe_parity_run_type(
+                        rng, outcome, run_id, parity_eligible_run_ids
+                    ),
                 }
             )
             finished_run_ids.append(run_id)
@@ -223,11 +260,14 @@ def generate_ops(seed: int) -> list[dict[str, Any]]:
                         "author": "ac17",
                     }
                 )
+                postmortem_override_by_run[run_id] = verdict
 
     for i in range(1, len(campaign_handles)):
         if rng.random() < 0.5:
             parent = campaign_handles[rng.randrange(i)]
-            ops.append({"kind": "add_campaign_edge", "child": campaign_handles[i], "parent": parent})
+            ops.append(
+                {"kind": "add_campaign_edge", "child": campaign_handles[i], "parent": parent}
+            )
 
     for i in range(1, len(run_ids)):
         if rng.random() < 0.3:
@@ -248,8 +288,57 @@ def generate_ops(seed: int) -> list[dict[str, Any]]:
             }
         )
 
+    # Delivery item 3: claim-tier coverage (`register_claim`/`attest_parity`).
+    # Positioned after every run has started/finished AND after every
+    # postmortem op (so `attestable_run_ids` below reflects each candidate's
+    # FINAL, post-override outcome) and before the `conclude` loop below
+    # (which skips any campaign_has_claim handle -- see that dict's
+    # declaration above).
+    #
+    # Only a run whose postmortem override (if any) left it at "pass" is a
+    # safe attest_parity candidate: `postmortem_override_by_run`'s
+    # declaration above explains why a run overridden to e.g. "fail" would
+    # make attest_parity raise ValueError on BOTH backends alike (not a fold
+    # divergence -- exclude it from the pool rather than let it crash the
+    # sequence).
+    attestable_run_ids = [
+        rid
+        for rid in parity_eligible_run_ids
+        if postmortem_override_by_run.get(rid, "none") in ("none", "pass")
+    ]
     for handle in campaign_handles:
-        if campaign_has_deviation.get(handle):
+        if rng.random() < 0.5:
+            ops.append({"kind": "register_claim", "campaign_handle": handle})
+            campaign_has_claim[handle] = True
+            if attestable_run_ids and rng.random() < 0.6:
+                ops.append(
+                    {
+                        "kind": "attest_parity",
+                        "campaign_handle": handle,
+                        "parity_run_id": rng.choice(attestable_run_ids),
+                    }
+                )
+
+    # Delivery item 3: `bth submit` provenance recording coverage
+    # (`submit.recorded`). Standalone entity, unrelated to campaigns/runs --
+    # `myxcel_job_id` doubles as the join key the differential test uses in
+    # place of the uninjectable uuid4 `submit_id`/`id` (see
+    # `ac17_harness._submit`'s docstring), so it must be unique per op within
+    # one generated sequence.
+    for k in range(rng.randint(0, 3)):
+        ops.append(
+            {
+                "kind": "submit",
+                "myxcel_job_id": f"ac17-job-{seed}-{k}",
+                "command": f"scripts/experiments/ac17_submit_{k}.py",
+                "sidecar_sha256": hashlib.sha256(f"submit-sidecar-{seed}-{k}".encode()).hexdigest(),
+                "stage_name": rng.choice(["exploration", "validation", "production"]),
+                "project_slug": "proj",
+            }
+        )
+
+    for handle in campaign_handles:
+        if campaign_has_deviation.get(handle) or campaign_has_claim.get(handle):
             continue
         if rng.random() < 0.7:
             outcome_label = rng.choice(["pass", "fail", "confirmed", "refuted", "exploratory"])
@@ -263,6 +352,23 @@ def generate_ops(seed: int) -> list[dict[str, Any]]:
             )
 
     return ops
+
+
+def _maybe_parity_run_type(
+    rng: random.Random, outcome: str, run_id: str, parity_eligible_run_ids: list[str]
+) -> str | None:
+    """With some probability, mark a "pass"-outcome run as a literature-parity
+    run (`bathos.claim.attest_parity`'s AC-12 validation requires outcome in
+    ('pass', 'partial') and parity_run_type=='literature_parity'; this
+    generator never produces "partial", so "pass" is the only eligible
+    outcome). Appends to `parity_eligible_run_ids` as a side effect so later
+    `attest_parity` op generation (below) has a pool of real, already-
+    finished candidates to cite.
+    """
+    if outcome == "pass" and rng.random() < 0.35:
+        parity_eligible_run_ids.append(run_id)
+        return "literature_parity"
+    return None
 
 
 def _pick_outcome(rng: random.Random) -> tuple[str, str, int]:

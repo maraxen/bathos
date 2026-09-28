@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from bathos.cluster import pull_path, pull_project, push_project
+from bathos.cluster import MyxcelCapabilityGapError, pull_path, pull_project, push_project
 
 
 def test_push_project_uses_real_myxcel_push_subcommand():
@@ -69,25 +69,41 @@ def test_pull_project_raises_on_failure():
             pull_project("engaging", "myproject")
 
 
-def test_pull_path_uses_real_myxcel_pull_subcommand_with_explicit_path_and_dest():
-    """pull_path (the cluster log/fallback/mirror pull's myxcel wrapper, spec
-    "Cluster") must call `myxcel pull <remote> <remote_path> --dest <local_dest>`,
-    never rsync directly (CLAUDE.md "Bathos Sync Delegates to Myxcel")."""
-    with patch("bathos.cluster.subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stderr="")
+def test_pull_path_refuses_without_calling_subprocess():
+    """`myxcel pull` has no `--dest` flag and no way to target an arbitrary
+    remote path -- `myxcel pull --help` is `myxcel pull [OPTIONS] {remote}
+    {project}` (a registered project name, not a path). pull_path must
+    refuse loudly instead of shelling out to a non-existent flag (debt found
+    260927: the old implementation did exactly that and failed on every real
+    call, masked because this seam is always mocked in tests exercising its
+    callers)."""
+    with (
+        patch("bathos.cluster.subprocess.run") as mock_run,
+        pytest.raises(MyxcelCapabilityGapError),
+    ):
         pull_path("engaging", "~/projects/testproj/.bth/log/", "/local/dest/log/")
 
-    argv = mock_run.call_args[0][0]
-    assert argv[0] == "myxcel"
-    assert argv[1] == "pull"
-    assert argv[2] == "engaging"
-    assert argv[3] == "~/projects/testproj/.bth/log/"
-    assert "--dest" in argv
-    assert argv[argv.index("--dest") + 1] == "/local/dest/log/"
+    mock_run.assert_not_called()
 
 
-def test_pull_path_raises_on_failure():
-    with patch("bathos.cluster.subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=1, stderr="pull failed")
-        with pytest.raises(RuntimeError, match="pull failed"):
-            pull_path("engaging", "~/some/path/", "/local/dest/")
+def test_pull_path_error_message_is_actionable():
+    """The error names the missing capability and the exact call that would
+    have been attempted, so a caller/log-reader knows what's broken and
+    where to file the myxcel feature request -- not just that *something*
+    failed."""
+    with pytest.raises(MyxcelCapabilityGapError) as excinfo:
+        pull_path("engaging", "~/some/path/", "/local/dest/")
+
+    message = str(excinfo.value)
+    assert "engaging" in message
+    assert "~/some/path/" in message
+    assert "/local/dest/" in message
+    assert "--dest" in message
+    assert "myxcel" in message
+
+
+def test_myxcel_capability_gap_error_is_a_runtime_error():
+    """Best-effort callers (e.g. `bathos.sync.pull_cluster_log`) catch bare
+    `Exception`/`RuntimeError` per sub-path; this must not be a new
+    exception hierarchy that slips past that."""
+    assert issubclass(MyxcelCapabilityGapError, RuntimeError)

@@ -33,6 +33,7 @@ import logging
 import os
 import shutil
 import subprocess
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -120,7 +121,20 @@ class MigrateToLogResult:
     """The outcome of one `migrate_to_log()` call. `status` is one of:
     `missing_project_ids`, `squeue_unavailable`, `squeue_conflict`,
     `step1_reap_failed`, `legacy_db_locked`, `unclassified_residual`,
-    `residual_pending`, `switched`, `already_migrated`."""
+    `residual_pending`, `switched`, `already_migrated`, `dry_run`.
+
+    `dry_run` (spec "Dry run"): `migrate_to_log(..., dry_run=True)` performed
+    NO data writes anywhere -- steps 1-3 ran read-effect-only (reap with
+    `apply=False`, remote pull/mirror skipped entirely) and the residual
+    report was built in a throwaway scratch directory, never persisted.
+    `would_pull` is populated only for this status: the `(root, remote)`
+    pairs a real run's step 1 would have pulled/mirrored, since a dry run's
+    report is built WITHOUT that mirroring and may therefore differ from a
+    real run's (a genuinely un-mirrored remote fragment cannot show up as a
+    residual here). `report_sha256` on a `dry_run` result is advisory only
+    -- it is never a value `--accept-residual` should be pre-supplied with
+    (rejected together with `dry_run`, see `migrate_to_log`), and a
+    subsequent real run recomputes its own hash independently."""
 
     status: str
     attempt: str | None = None
@@ -132,6 +146,7 @@ class MigrateToLogResult:
     conflicting_jobs: list[str] = field(default_factory=list)
     locked_source: str | None = None
     unresolved_routing_count: int = 0
+    would_pull: list[dict[str, str]] = field(default_factory=list)
     detail: str = ""
 
 
@@ -285,7 +300,22 @@ def mirror_remote_runs_full(
 def rsync_full_mirror(src: str, dst: str) -> None:
     """The actual rsync invocation for `mirror_remote_runs_full` -- its own
     function so tests can monkeypatch this ONE seam (the myxcel/SSH
-    boundary) rather than every caller."""
+    boundary) rather than every caller.
+
+    Deliberately calls `rsync` directly rather than going through myxcel
+    (verified 260927, see `bathos.cluster.pull_path`'s docstring for the
+    full trail): myxcel has no capability that pulls an arbitrary remote
+    directory into an arbitrary local destination with `--checksum`
+    comparison and no deletion. `myxcel pull` only pulls a
+    myxcel-*registered project*'s configured `pull_paths` into
+    `profile.local_workspace/<project>` (or a worktree's `local_root`); this
+    mirror's destination (`catalog_dir/remote-runs/<root id>/<remote>/`) is
+    neither a registered project nor addressable by project name, and its
+    semantics (full checksum mirror, delete-nothing locally, no
+    `--ignore-existing`) don't match any myxcel pull mode either. If myxcel
+    grows a generic path-pull subcommand or importable rsync-wrapper API,
+    route this through it instead of inventing flags on `myxcel pull`.
+    """
     subprocess.run(
         [
             "rsync",
@@ -808,6 +838,34 @@ def _read_legacy_tables(
         opened.close()
 
 
+def _parse_output_metadata(value: Any) -> dict[str, dict[str, Any]] | None:
+    """`runs.output_metadata`'s JSON-in-VARCHAR shape (a list of `{"path":
+    ..., "status": ..., "size_bytes": ..., "mtime_unix": ..., "sha256":
+    ...}` entries, `compact.py`'s `_collect_output_metadata`), parsed into
+    `{path: entry}` -- or `None` if the value isn't in that shape
+    (conservative: an unparseable or unexpected value never earns
+    `output_metadata_drift`, it stays unclassified like anything else this
+    class doesn't recognize)."""
+    if isinstance(value, str):
+        if not value:
+            value = []
+        else:
+            try:
+                value = json.loads(value)
+            except (ValueError, TypeError):
+                return None
+    if value is None:
+        value = []
+    if not isinstance(value, list):
+        return None
+    out: dict[str, dict[str, Any]] = {}
+    for entry in value:
+        if not isinstance(entry, dict) or "path" not in entry:
+            return None
+        out[entry["path"]] = entry
+    return out
+
+
 def _sidecar_current_sha256(path: str) -> str | None:
     """The CURRENT sha256 of a sidecar file on disk, or `None` if it no
     longer exists (BC-3: "a deleted one gives NULL in the canonical
@@ -878,13 +936,67 @@ def _classify(
       `CatalogAnchorStore` anchors, which write no fragment, so a
       force-rebuild drops them while the fold (driven by durable events)
       keeps every one.
+    - `output_metadata_drift` (spec: "`output_metadata` whose files changed
+      since"; debt #1944, review finding (b), 260927; **narrowed 260927**,
+      review remediation B finding 1): a `runs.output_metadata` residual
+      where BOTH sides parse as the `_collect_output_metadata` list shape,
+      name the SAME set of paths (no output file was added or dropped --
+      that would be a different, unexplained kind of drift), every
+      differing path is workspace-RELATIVE (never absolute), AND -- the
+      narrow part -- for every differing path the two sides' `status`
+      values are exactly `{"missing", "present"}` (one of each, in either
+      order). `compact.py`'s per-compact refresh (`compact.py:964-992`)
+      calls `_collect_output_metadata` relative to THAT COMPACTING
+      PROCESS'S OWN cwd, so a relative `output_path` can genuinely read
+      `"missing"` (`_collect_output_metadata` returns
+      `{"status": "missing", "size_bytes": 0}`, no `sha256`/`mtime_unix` at
+      all) from one compact's cwd and `"present"` from another's -- that is
+      debt #1944's actual signature, and it is the ONLY thing this class
+      explains. A path that is `"present"` on both sides but with a
+      different `sha256`/`size_bytes`/`mtime_unix` is a genuine output
+      mutation or corruption, not cwd drift -- an absolute path's
+      `Path.exists()`/stat never depends on cwd at all, so a residual on an
+      absolute path is NOT explained by this mechanism either, and both
+      cases must stay unclassified rather than getting the same "explained"
+      label (the narrow, testable distinction this class exists to draw).
+    - `postmortem_worktree_deleted`: investigated and NOT implemented --
+      see the docstring's final paragraph below for why.
 
     Deliberately deferred (documented, not silently papered over -- see the
     task report): `corrupt_fragment_skip` (compact.py:787's corrupt-fragment
     skip appears structurally unreachable as a genuine residual given this
     importer's warm-source redundancy, the same class of finding as AC-30's
-    original "warm-only row" wording before v35 corrected it),
-    `output_metadata_drift`, and `postmortem_worktree_deleted`.
+    original "warm-only row" wording before v35 corrected it).
+
+    `postmortem_worktree_deleted` (spec: "postmortem overrides whose files
+    are only in a deleted worktree") is investigated and judged structurally
+    UNREACHABLE with this importer/fold, for the same reason as
+    `corrupt_fragment_skip` -- no column this diff ever compares carries a
+    "which worktree" signal to test against:
+      - `compact.py`'s postmortem walk (`compact.py:807`,
+        `resolve_workspace().fs_root`) always resolves to the repo's MAIN
+        worktree (spec "Log directory resolution": a linked worktree maps to
+        its main worktree), never to the run's own (possibly since-deleted)
+        worktree, and its `iter_project_files` walk is boundary-aware and
+        PRUNES `.claude/worktrees/` (backlog #4233) -- a postmortem file
+        living inside any worktree subtree, deleted or not, is never found
+        by it either way, so no before/after delta is ever produced.
+      - `runs.postmortem_path` is stored workspace-root-relative
+        (`compact.py`'s `rel_path = pm_file.relative_to(workspace_root)`),
+        never worktree-relative, and no compared table (`_TABLE_KEYS`) has a
+        `worktree_root`/similar column for a run or postmortem at all --
+        only the (unrelated to this diff) per-EVENT envelope carries
+        `worktree_root`, and the importer stamps it `main_root` on every
+        import regardless (`_append_import_events`), so it is constant and
+        carries no signal either.
+      - `run.postmortem_applied` (the one live write path that could
+        otherwise diverge from the stage-1 imported warm value) only fires
+        behind `current_mode()` (`mcp.py:3046`), which is never true before
+        cut-over -- so during a migration there is no live event of this
+        kind to disagree with the import in the first place.
+      A residual invented for this class without one of these signals would
+      be exactly the failure this rule exists to prevent: a false-positive
+      classification papering over a genuinely different bug.
     """
     run_id = key[0] if table == "runs" and key else None
     if run_id and run_id in step1_touched_run_ids:
@@ -900,6 +1012,28 @@ def _classify(
             return "fragment_not_yet_compacted"
     if table == "runs" and column == "metadata":
         return "frozen_at_earlier_compact"
+    if table == "runs" and column == "output_metadata":
+        legacy_entries = _parse_output_metadata(lrow.get(column) if lrow is not None else None)
+        staged_entries = _parse_output_metadata(srow.get(column) if srow is not None else None)
+        if (
+            legacy_entries is not None
+            and staged_entries is not None
+            and legacy_entries
+            and set(legacy_entries) == set(staged_entries)
+        ):
+            differing_paths = [
+                p for p, entry in legacy_entries.items() if entry != staged_entries[p]
+            ]
+            if (
+                differing_paths
+                and all(not Path(p).is_absolute() for p in differing_paths)
+                and all(
+                    {legacy_entries[p].get("status"), staged_entries[p].get("status")}
+                    == {"missing", "present"}
+                    for p in differing_paths
+                )
+            ):
+                return "output_metadata_drift"
     if column == "evalue" and table in ("runs", "campaign_runs"):
         member_run_id = key[-1] if table == "campaign_runs" and key else run_id
         run_row = cool_run_rows.get(member_run_id) if member_run_id else None
@@ -1053,24 +1187,61 @@ def _cool_fragment_run_rows(catalog_dir: Path) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _staging_roots_from(staging_root: Path, attempt: str) -> list[tuple[str, str, Path]]:
+    """`ingest.staging_roots_for_attempt`'s own body, parameterized on an
+    explicit `staging_root` directory instead of hardcoding `Path.home() /
+    ".bth" / "log" / "import-staging" / attempt`.
+
+    `--dry-run`'s only seam for pointing Migration step 3's fold at a
+    throwaway scratch tree instead of the real `~/.bth/log/import-staging/`
+    -- `bathos.runlog.ingest` is owned by another fixer's task this sprint,
+    so this is a small, deliberate duplication of its traversal logic rather
+    than an edit there. Keep in sync with `ingest.staging_roots_for_attempt`
+    if that ever changes shape.
+    """
+    if not staging_root.is_dir():
+        return []
+    roots: list[tuple[str, str, Path]] = []
+    for kind_dir in sorted(staging_root.iterdir()):
+        if not kind_dir.is_dir():
+            continue
+        if kind_dir.name == "unaffiliated":
+            roots.append(("staging", f"{attempt}/unaffiliated", kind_dir))
+            continue
+        for sub in sorted(kind_dir.iterdir()):
+            if sub.is_dir():
+                roots.append(("staging", f"{attempt}/{kind_dir.name}/{sub.name}", sub))
+    return roots
+
+
 def _build_and_diff(
     catalog_dir: Path,
     attempt: str,
     *,
     step1_touched_run_ids: set[str],
     unresolved_ids: set[str] | None = None,
+    staging_root: Path | None = None,
 ) -> DiffResult:
+    """`staging_root`: override the attempt's staging directory (default
+    `_attempt_staging_root(attempt)`, the real `~/.bth/log/import-staging/
+    <attempt>`) -- `--dry-run` passes a throwaway `tempfile.mkdtemp()`
+    scratch tree here instead, so the fold's index.db and the diff's own
+    read of the staged events never touch the real one."""
     legacy_tables, legacy_columns, legacy_table_exists, locked_status = _read_legacy_tables(
         catalog_dir
     )
     if locked_status is not None:
         return DiffResult(lines=[], unclassified=[], locked_status=locked_status, sha256="")
 
-    staging_root = _attempt_staging_root(attempt)
-    staging_root.mkdir(parents=True, exist_ok=True)
-    idx_path = staging_root / "index.db"
+    sroot = staging_root if staging_root is not None else _attempt_staging_root(attempt)
+    sroot.mkdir(parents=True, exist_ok=True)
+    idx_path = sroot / "index.db"
     idx_path.unlink(missing_ok=True)
-    roots = staging_roots_for_attempt(attempt)
+    roots = (
+        _staging_roots_from(sroot, attempt)
+        if staging_root is not None
+        else staging_roots_for_attempt(attempt)
+    )
     fold_roots_into(idx_path, roots)
 
     staged_tables = {
@@ -1251,6 +1422,166 @@ def _read_marker(catalog_dir: Path) -> dict[str, Any] | None:
 
 
 # --------------------------------------------------------------------------
+# Dry run (spec "Dry run"): steps 1-3 read-effect-only, no writes anywhere
+# --------------------------------------------------------------------------
+
+
+def _would_pull_pairs(catalog_dir: Path) -> list[dict[str, str]]:  # noqa: ARG001 -- symmetry
+    """Read-only preview of Migration step 1's per-`(root, remote)` pulls
+    (`pull_and_mirror_all_remotes`) for `--dry-run`: every registered root's
+    configured remote name, without any network I/O, rsync, or mirroring.
+    `catalog_dir` is accepted (unused) for signature symmetry with the other
+    step-1 helpers and in case a future revision scopes this per-catalog."""
+    pairs: list[dict[str, str]] = []
+    for root, cfg in _registered_roots_with_config():
+        if cfg is None or not cfg.remotes:
+            continue
+        for remote_name in cfg.remotes:
+            pairs.append({"root": str(root), "remote": remote_name})
+    return pairs
+
+
+def _dry_run_report_from_marker(marker: dict[str, Any]) -> MigrateToLogResult:
+    """`--dry-run` when a cut-over marker already exists: step 4 (spec: "the
+    cut-over marker is the single commit point") has already committed, so
+    there is no fresh diff left to preview -- only whichever residual report
+    step 3 of THAT attempt already wrote to staging, read back here (never
+    recomputed, never rewritten). If staging itself is already gone (step
+    4(e) completed), migration is simply done already."""
+    attempt = marker.get("attempt")
+    if not attempt:
+        return MigrateToLogResult(
+            status="unclassified_residual", detail="cutover.json has no 'attempt' field"
+        )
+    staging_root = _attempt_staging_root(str(attempt))
+    if not staging_root.exists():
+        return MigrateToLogResult(status="already_migrated", attempt=str(attempt))
+    report_path = staging_root / "residual_report.jsonl"
+    lines: list[dict[str, Any]] = []
+    sha: str | None = None
+    if report_path.is_file():
+        text = report_path.read_text()
+        sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        lines = [json.loads(ln) for ln in text.splitlines() if ln.strip()]
+    return MigrateToLogResult(
+        status="dry_run",
+        attempt=str(attempt),
+        report_path=str(report_path) if report_path.is_file() else None,
+        report_sha256=sha,
+        residual_lines=lines,
+        detail=(
+            "a prior attempt already reached the cut-over commit point (step 4(b)); this "
+            "reflects its already-written residual report, not a fresh preview -- re-run "
+            "`bth migrate --to-log` (without --dry-run) to finish it"
+        ),
+    )
+
+
+def _migrate_to_log_dry_run(cd: Path, *, force: bool) -> MigrateToLogResult:
+    """`--dry-run`: steps 1-3 run for their READ effects only -- no data
+    FILES are written to the catalog dir, `~/.bth/projects.toml`,
+    `~/.bth/log/`, any project root, or any remote (spec "Dry run"). The one
+    exception: `writers_lock` (below) may still create the empty
+    `writers.lock` mutex file under the catalog dir if it does not already
+    exist -- every reader takes that lock shared, dry run or not, and the
+    lock file itself carries no data (see `bathos.runlog.mode.writers_lock`).
+
+    - Remote pull/mirror (`pull_and_mirror_all_remotes`) never runs; `
+      would_pull` reports the `(root, remote)` pairs a real run would have
+      pulled instead, so a caller knows the report below may be missing
+      not-yet-locally-mirrored remote fragments (see the result's `detail`).
+    - `reap_runs(..., apply=False)` -- its candidate list becomes the
+      step1-touched set (`_classify`'s `step1_pulled_or_reaped`), matching
+      the spec's "steps 1-3 run for real (read effects only)".
+    - The squeue check still runs (read-only) so a caller previewing the
+      residual report also sees a genuine conflict, if any.
+    - Step 2's staged import events, step 3's throwaway fold index, and the
+      diff all live under one `tempfile.mkdtemp()` scratch directory,
+      removed in a `finally` -- never under `catalog_dir` or
+      `~/.bth/log/import-staging/`.
+    - `_cleanup_prior_attempt_state` never runs (no prior attempt state is
+      touched, per the spec: no cleanup of prior attempt state in dry run).
+    - Never reaches `_do_switch`; the returned `report_sha256` is advisory
+      only (see `MigrateToLogResult.dry_run`'s docstring).
+    """
+    marker = _read_marker(cd)
+    if marker is not None:
+        return _dry_run_report_from_marker(marker)
+
+    would_pull = _would_pull_pairs(cd)
+
+    from bathos.reap import reap_runs
+
+    with writers_lock(cd, exclusive=False):
+        candidates, _skipped = reap_runs(cd, apply=False, reconcile_warm=False)
+        step1_touched = {r.id for r in candidates}
+        conflict, squeue_error = _check_squeue(cd)
+
+    if squeue_error is not None:
+        return MigrateToLogResult(
+            status="squeue_unavailable", detail=squeue_error, would_pull=would_pull
+        )
+    if conflict and not force:
+        return MigrateToLogResult(
+            status="squeue_conflict", conflicting_jobs=conflict, would_pull=would_pull
+        )
+
+    scratch_root = Path(tempfile.mkdtemp(prefix="bth-migrate-dryrun-"))
+    try:
+        attempt = _new_attempt_id()
+        staging_root = scratch_root / "staging"
+
+        import_report, unresolved_routing, unresolved_ids = _import_candidates(
+            cd, staging_root=staging_root
+        )
+        if import_report.locked:
+            return MigrateToLogResult(
+                status="legacy_db_locked",
+                attempt=attempt,
+                locked_source=import_report.locked[0],
+                detail="a legacy source is locked by another process; retry once it is free",
+                would_pull=would_pull,
+            )
+
+        diff = _build_and_diff(
+            cd,
+            attempt,
+            step1_touched_run_ids=step1_touched,
+            unresolved_ids=unresolved_ids,
+            staging_root=staging_root,
+        )
+        if diff.locked_status is not None:
+            return MigrateToLogResult(
+                status="legacy_db_locked",
+                attempt=attempt,
+                locked_source=str(cd / "bathos.db"),
+                detail=f"bathos.db: {diff.locked_status}",
+                would_pull=would_pull,
+            )
+
+        return MigrateToLogResult(
+            status="dry_run",
+            attempt=attempt,
+            report_sha256=diff.sha256,
+            residual_lines=[rl.to_dict() for rl in diff.lines],
+            unclassified=diff.unclassified,
+            unresolved_routing_count=unresolved_routing,
+            would_pull=would_pull,
+            detail=(
+                f"dry run: no data files were written (the empty writers.lock mutex "
+                f"may still be created); {len(diff.lines)} residual line(s), "
+                f"{len(diff.unclassified)} unclassified. Remote fragments were not "
+                "mirrored for this preview (see would_pull) -- a real run's report may "
+                "differ because remotes get pulled and mirrored first. This sha256 is "
+                "advisory only: a real `bth migrate --to-log` recomputes its own report "
+                "independently, and that is the hash `--accept-residual` must match."
+            ),
+        )
+    finally:
+        shutil.rmtree(scratch_root, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
 # Top-level entry points
 # --------------------------------------------------------------------------
 
@@ -1260,8 +1591,20 @@ def migrate_to_log(
     *,
     force: bool = False,
     accept_residual: str | None = None,
+    dry_run: bool = False,
 ) -> MigrateToLogResult:
-    """`bth migrate --to-log` (Migration steps 0-4)."""
+    """`bth migrate --to-log` (Migration steps 0-4). `dry_run=True` (spec
+    "Dry run") runs steps 1-3 read-effect-only and returns status `dry_run`
+    instead of writing anything or ever reaching step 4's switch; combining
+    it with `accept_residual` is rejected outright (a dry run never reaches
+    the switch, so there is nothing to accept a residual report for)."""
+    if dry_run and accept_residual:
+        raise ValueError(
+            "migrate_to_log(): --accept-residual is incompatible with --dry-run -- a dry "
+            "run never reaches the switch, so there is nothing to accept a residual "
+            "report for. Drop --accept-residual, or drop --dry-run and re-run for real."
+        )
+
     cd = catalog_dir or default_catalog_dir()
 
     missing = roots_missing_project_id()
@@ -1275,6 +1618,9 @@ def migrate_to_log(
                 "the result, and retry."
             ),
         )
+
+    if dry_run:
+        return _migrate_to_log_dry_run(cd, force=force)
 
     marker = _read_marker(cd)
     if marker is not None:
