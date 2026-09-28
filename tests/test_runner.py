@@ -673,7 +673,10 @@ def test_outcome_error_on_nonzero_exit(tmp_catalog: Path, tmp_path: Path):
 
 
 def test_evaluate_outcome_not_called_on_error(tmp_catalog: Path, tmp_path: Path):
-    """When exit_code != 0, evaluate_outcome is not called even with a sidecar."""
+    """When exit_code != 0 and the script emits no result at all, outcome stays 'error' with
+    the plain exit_code reason -- evaluate_outcome is never reached because the result payload
+    can't satisfy [result_schema] (debt #1977: only a *complete* payload is ever evaluated
+    after a non-zero exit; an empty one falls back to this historical behavior unchanged)."""
     import textwrap
 
     enforced = tmp_path / "scripts" / "experiments"
@@ -715,6 +718,202 @@ def test_evaluate_outcome_not_called_on_error(tmp_catalog: Path, tmp_path: Path)
     # outcome should be "error", not evaluated against sidecar outcomes
     assert runs[0].outcome == "error"
     assert runs[0].outcome_error_reason == "exit_code=1"
+
+
+def _fail_after_result_sidecar() -> str:
+    import textwrap
+
+    return textwrap.dedent("""
+        [experiment]
+        hypothesis = "test hypothesis"
+        [outcomes.pass]
+        condition = "temp_std < 5"
+        decision = "good"
+        reasoning = "stable temperature"
+        [outcomes.fail]
+        condition = "temp_std >= 5"
+        decision = "debug"
+        reasoning = "unstable temperature"
+        [outcomes.fallback]
+        condition = "1==1"
+        decision = "fallback"
+        reasoning = "catch-all"
+        is_residual = true
+        [result_schema]
+        temp_std = "float"
+        n_steps = "int"
+    """)
+
+
+def test_outcome_honest_fail_on_nonzero_exit(tmp_catalog: Path, tmp_path: Path):
+    """debt #1977: a script that emits a *complete* result payload and then exits non-zero
+    to signal its pre-registered fail branch must be recorded as that honest outcome ('fail'),
+    not laundered into an infrastructure 'error'. exit_code is still recorded as usual."""
+    import textwrap
+
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    script = enforced / "run_test.py"
+    script.write_text(
+        textwrap.dedent("""
+        import os
+        import json
+        import sys
+
+        results_path = os.environ.get("BTH_RESULTS_PATH")
+        if results_path:
+            with open(results_path, "w") as f:
+                json.dump({"temp_std": 12.0, "n_steps": 100}, f)
+        sys.exit(3)
+    """)
+    )
+
+    sidecar = enforced / "run_test.bth.toml"
+    sidecar.write_text(_fail_after_result_sidecar())
+
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 3
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert runs[0].exit_code == 3
+    assert runs[0].outcome == "fail"
+    assert runs[0].outcome_error_reason == ""
+
+
+def test_outcome_never_pass_despite_nonzero_exit(tmp_catalog: Path, tmp_path: Path):
+    """NEGATIVE control (debt #1977): a script that emits a result selecting the *pass*
+    branch but still exits non-zero must NEVER be recorded as 'pass' -- a crash is never a
+    pass regardless of what the payload says. It is recorded as 'error', with a reason that
+    names both facts, so this can never be mistaken for either a clean pass or a generic
+    infrastructure failure."""
+    import textwrap
+
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    script = enforced / "run_test.py"
+    script.write_text(
+        textwrap.dedent("""
+        import os
+        import json
+        import sys
+
+        results_path = os.environ.get("BTH_RESULTS_PATH")
+        if results_path:
+            with open(results_path, "w") as f:
+                json.dump({"temp_std": 1.0, "n_steps": 100}, f)
+        sys.exit(1)
+    """)
+    )
+
+    sidecar = enforced / "run_test.bth.toml"
+    sidecar.write_text(_fail_after_result_sidecar())
+
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 1
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert runs[0].outcome == "error"
+    assert "exit_code=1" in runs[0].outcome_error_reason
+    assert "pass despite non-zero exit" in runs[0].outcome_error_reason
+
+
+def test_outcome_error_on_nonzero_exit_partial_result(tmp_catalog: Path, tmp_path: Path):
+    """debt #1977: a non-zero exit whose result payload is missing a declared
+    [result_schema] field is NOT trusted enough to evaluate -- falls back to the historical
+    plain exit_code=N error, same as a script that emitted no result at all."""
+    import textwrap
+
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    script = enforced / "run_test.py"
+    script.write_text(
+        textwrap.dedent("""
+        import os
+        import json
+        import sys
+
+        results_path = os.environ.get("BTH_RESULTS_PATH")
+        if results_path:
+            # Missing "n_steps", declared in [result_schema] -- a partial payload.
+            with open(results_path, "w") as f:
+                json.dump({"temp_std": 12.0}, f)
+        sys.exit(1)
+    """)
+    )
+
+    sidecar = enforced / "run_test.bth.toml"
+    sidecar.write_text(_fail_after_result_sidecar())
+
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 1
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert runs[0].outcome == "error"
+    assert runs[0].outcome_error_reason == "exit_code=1"
+
+
+def test_outcome_pass_on_zero_exit_unchanged(tmp_catalog: Path, tmp_path: Path):
+    """debt #1977 regression guard: the zero-exit-code evaluation path (the common case) is
+    unaffected by the new non-zero-exit handling -- a clean pass is still recorded as 'pass'
+    with no error reason."""
+    import textwrap
+
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    script = enforced / "run_test.py"
+    script.write_text(
+        textwrap.dedent("""
+        import os
+        import json
+
+        results_path = os.environ.get("BTH_RESULTS_PATH")
+        if results_path:
+            with open(results_path, "w") as f:
+                json.dump({"temp_std": 1.0, "n_steps": 100}, f)
+    """)
+    )
+
+    sidecar = enforced / "run_test.bth.toml"
+    sidecar.write_text(_fail_after_result_sidecar())
+
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 0
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert runs[0].outcome == "pass"
+    assert runs[0].outcome_error_reason == ""
 
 
 def test_manifest_sha256_populated(tmp_catalog: Path, tmp_path: Path):

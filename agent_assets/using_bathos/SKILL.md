@@ -16,7 +16,7 @@ This skill covers the daily-driver workflow: installation, run tracking, sidecar
 
 **Sidecar** — A `.bth.toml` file alongside a script that pre-registers hypothesis, expected outcome conditions (DuckDB SQL), and result schema. Enforced by default at `bth run` time (use `--no-sidecar` to bypass, logs `BYPASSED`).
 
-**Outcome** — Evaluated at run-end by matching result JSON against DuckDB SQL conditions in the sidecar. Values: `pass`, `marginal`, `fail`, `error`. One outcome must be marked `is_residual = true`.
+**Outcome** — Evaluated at run-end by matching result JSON against DuckDB SQL conditions in the sidecar. Values: `pass`, `marginal`, `fail`, `error`, plus any custom label you declare. One outcome must be marked `is_residual = true`. A non-zero exit code does **not** automatically force `outcome='error'`: if the script still emitted a result payload containing every declared `[result_schema]` field, that payload is evaluated as usual and the honest pre-registered label (e.g. `fail`) is recorded — a script that signals its own fail/marginal branch by exiting non-zero after writing results is not the same thing as an infrastructure crash. The one exception is a payload that evaluates to `pass`: that is **never** recorded as `pass` despite a non-zero exit — it is recorded as `error` with a reason noting both facts, since a crashed process is never a pass regardless of what its payload claims. A non-zero exit with no result, a partial result, or no sidecar at all keeps the plain `error` / `exit_code=N` behavior.
 
 **Campaign** — A named group of related runs. Accessible via `bth campaign` subcommands; queries via `campaign_id` field. See **bathos-campaigns** for campaign, claim-tier, postmortem, and lineage workflows.
 

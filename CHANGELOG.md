@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A pre-registered fail/marginal outcome signaled via non-zero exit is no longer laundered
+  into `outcome='error'` (debt #1977).** `bth run`'s exit-code guard used to short-circuit
+  `evaluate_outcome()` on any non-zero exit, recording `outcome='error'` with reason
+  `exit_code=N` even when the script had already written a complete result payload selecting
+  a genuine pre-registered branch (e.g. a script that emits its result JSON and then exits
+  non-zero to signal its own `fail` condition). `runner.py` now evaluates the sidecar's
+  outcome conditions after a non-zero exit too, but only when the result payload parses and
+  contains every declared `[result_schema]` field; a missing/partial/unparseable payload, or
+  no sidecar at all, keeps the old `error` / `exit_code=N` behavior unchanged. This is
+  deliberately one-directional: a payload that evaluates to `pass` is **never** recorded as
+  `pass` when the exit code is non-zero (a crashed process is never a pass) — it is recorded
+  as `error` with a reason naming both facts
+  (`exit_code=N; outcomes evaluated to pass despite non-zero exit`). "Success" is defined as
+  the literal outcome label `pass` (the convention already used by `claim.py`/`gate.py`/
+  `parity.py`), not the broader `derive_pass_labels()` set used for e-value direction, which
+  is not a safe stand-in here since it does not itself exclude a `fail`-named branch.
+
 ## [0.13.0a4] - 2026-08-31
 
 ### Added
