@@ -4607,24 +4607,39 @@ def consolidate_catalog_tool(
     root: str,
     catalog_dir: str = "",
     dry_run: bool = False,
+    source_catalog: str = "",
 ) -> dict:
     """`bth migrate --consolidate-catalog <root>`: additively copies a
     registered root's foreign `[project] catalog_dir` (`runs/`,
-    `campaigns/`, `submits/`, `reaped/`, `sidecars/` only) into the catalog
-    being migrated. Never modifies `root`'s catalog. `dry_run=True` computes
-    the identical plan and counts without writing anything.
+    `campaigns/`, `submits/`, `reaped/`, `sidecars/`, `anchors/`, `ledger/`,
+    `blast_radius/`, `archived_items/` only) into the catalog being
+    migrated. Never modifies `root`'s catalog. `dry_run=True` computes the
+    identical plan and counts without writing anything.
+
+    The result's `status` is `"ok"` only when the run is fully clean;
+    `"needs_review"` means the additive copy still ran (when `dry_run` is
+    False) but `conflicts` or `unplaceable` is non-empty and needs a human
+    look before `bth migrate --to-log` is retried. Procedure: consolidate ->
+    remove `catalog_dir` from that root's `.bth.toml` and commit -> call this
+    tool again with `source_catalog` set (the key is now gone, so there is
+    nothing left in `.bth.toml` to resolve) and confirm it copies 0 files
+    with `status == "ok"` -> only then retry `--to-log`.
 
     Args:
         root: Path to the registered root whose `.bth.toml` sets an explicit
             `[project] catalog_dir`.
         catalog_dir: The destination catalog directory (empty = use default)
         dry_run: If True, compute the plan without writing
+        source_catalog: Explicit source catalog path to use when `root`'s
+            `.bth.toml` no longer has an explicit `[project] catalog_dir`
+            (the second pass of the procedure above).
 
     Returns:
         Dict form of `ConsolidateResult` (status, applied, copied,
-        already_present, already_present_differs, conflicts, conflict_paths,
-        unplaceable, per_subtree, detail), or `{"error": ...}` if `root` has
-        no explicit `catalog_dir` to consolidate.
+        already_present, already_present_differs, already_present_differs_count,
+        conflicts, conflict_paths, unplaceable, skipped_unknown, per_subtree,
+        detail), or `{"error": ...}` if `root` has no explicit `catalog_dir`
+        to consolidate and no `source_catalog` override was given.
     """
     import dataclasses
 
@@ -4633,12 +4648,16 @@ def consolidate_catalog_tool(
     root_path = Path(root).expanduser()
     source = explicit_catalog_dir(root_path)
     if source is None:
-        return {
-            "error": (
-                f"{root_path}'s .bth.toml has no explicit [project] catalog_dir; "
-                "nothing to consolidate"
-            )
-        }
+        if source_catalog:
+            source = Path(source_catalog).expanduser()
+        else:
+            return {
+                "error": (
+                    f"{root_path}'s .bth.toml has no explicit [project] catalog_dir; "
+                    "nothing to consolidate (pass source_catalog to re-run consolidation "
+                    "a second time after the key has already been removed)"
+                )
+            }
     cat_dir = _get_catalog_dir(catalog_dir or None)
     result = consolidate_project_catalog(source, cat_dir, apply=not dry_run)
     return dataclasses.asdict(result)
@@ -4651,6 +4670,7 @@ async def mcp_consolidate_catalog_tool(
     root: str,
     catalog_dir: str = "",
     dry_run: bool = False,
+    source_catalog: str = "",
     token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
     """MCP wrapper for `consolidate_catalog_tool` — see its docstring.
@@ -4664,11 +4684,16 @@ async def mcp_consolidate_catalog_tool(
             `[project] catalog_dir`.
         catalog_dir: The destination catalog directory (empty = use default)
         dry_run: If True, compute the plan without writing
+        source_catalog: Explicit source catalog path to use when `root`'s
+            `.bth.toml` no longer has an explicit `[project] catalog_dir`
+            (the second pass of the consolidate-then-remove-key procedure).
 
     Returns:
         Dict form of `ConsolidateResult`, or `{"error": ...}`.
     """
-    return consolidate_catalog_tool(root=root, catalog_dir=catalog_dir, dry_run=dry_run)
+    return consolidate_catalog_tool(
+        root=root, catalog_dir=catalog_dir, dry_run=dry_run, source_catalog=source_catalog
+    )
 
 
 # ============================================================================

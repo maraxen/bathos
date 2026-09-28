@@ -991,6 +991,7 @@ def migrate(
     force: bool = False,
     accept_residual: str = "",
     consolidate_catalog: str = "",
+    source_catalog: str = "",
 ) -> None:
     """Migrate cool-tier Parquet fragments to current schema, optionally classifying scripts.
 
@@ -1016,10 +1017,19 @@ def migrate(
         proceeds to the switch only if a fresh run reproduces that exact hash.
     consolidate_catalog: Path to a registered root whose `.bth.toml` still sets an
         explicit `[project] catalog_dir`; additively copies that catalog's runs/
-        campaigns/ submits/ reaped/ sidecars/ into the catalog being migrated (never
-        modifies the source). Mutually exclusive with --to-log/--import-legacy.
-        After it reports clean, remove catalog_dir from that root's .bth.toml, commit,
-        and retry `bth migrate --to-log`.
+        campaigns/ submits/ reaped/ sidecars/ anchors/ ledger/ blast_radius/
+        archived_items/ into the catalog being migrated (never modifies the source).
+        Mutually exclusive with --to-log/--import-legacy. Exits non-zero unless the
+        result's status is "ok" -- "needs_review" (conflicts or unplaceable fragments)
+        still applies the additive copy but is NOT clean; review before retrying.
+        Procedure: consolidate -> remove catalog_dir from that root's .bth.toml and
+        commit -> run --consolidate-catalog AGAIN (pass --source-catalog, since the
+        key is now gone and there is nothing left for `.bth.toml` to point at) and
+        confirm it copies 0 files with status "ok" -> only then retry `bth migrate
+        --to-log`.
+    source_catalog: With --consolidate-catalog, an explicit source catalog path to use
+        when the root's `.bth.toml` no longer has an explicit `[project] catalog_dir`
+        (the second pass of the procedure above, after the key was removed).
     """
     from bathos.cli_common import catalog_dir
 
@@ -1039,11 +1049,16 @@ def migrate(
         root = Path(consolidate_catalog).expanduser()
         source = explicit_catalog_dir(root)
         if source is None:
-            print(
-                f"{root}'s .bth.toml has no explicit [project] catalog_dir; nothing to consolidate",
-                file=sys.stderr,
-            )
-            raise SystemExit(1)
+            if source_catalog:
+                source = Path(source_catalog).expanduser()
+            else:
+                print(
+                    f"{root}'s .bth.toml has no explicit [project] catalog_dir; nothing to "
+                    "consolidate (pass --source-catalog to re-run consolidation a second "
+                    "time after the key has already been removed)",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
         result = consolidate_project_catalog(source, catalog_dir(), apply=not dry_run)
         print(json.dumps(dataclasses.asdict(result), indent=2))
         if result.status != "ok":

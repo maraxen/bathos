@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: "v39 (v38 + debt #1998, 260927: Migration step 0 additionally refuses -- unconditionally, before the dry-run branch -- while any registered root's `.bth.toml` explicitly sets `[project] catalog_dir` to somewhere other than the catalog being migrated (status `foreign_catalogs`), since a per-project catalog_dir is obsolete under the project-local run log and would otherwise leave that project's runs invisible to migration and, post-cut-over, writing legacy-mode into a catalog with no cutover marker; new `bth migrate --consolidate-catalog <root>` / `consolidate_project_catalog()` additively folds such a catalog's runs/campaigns/submits/reaped/sidecars into the migration catalog, run fragments matched by id anywhere under destination runs/ rather than by path, never touching the source)"
+revision: "v40 (v39 + debt #1998 review pass, 260927: `consolidate_project_catalog()` now returns `needs_review` (not `ok`) on any conflict or unplaceable fragment, with the CLI failing closed on non-`ok`; folds anchors/ledger/blast_radius/archived_items too, and reports any other top-level source entry as `skipped_unknown`; an apply plans inside the destination's writers lock and no-clobbers each file with a per-file existence recheck immediately before the rename; skips temp/dotfile names in every subtree; byte-compares within-source duplicate run ids against the first queued occurrence; sanitizes `project_slug` and asserts the destination path resolves under dest/runs/; refuses `refused_source_log_mode` if the source itself is already cut over; adds `--source-catalog`/`source_catalog` for the documented two-pass race-window closure. v39: Migration step 0 additionally refuses -- unconditionally, before the dry-run branch -- while any registered root's `.bth.toml` explicitly sets `[project] catalog_dir` to somewhere other than the catalog being migrated (status `foreign_catalogs`), since a per-project catalog_dir is obsolete under the project-local run log and would otherwise leave that project's runs invisible to migration and, post-cut-over, writing legacy-mode into a catalog with no cutover marker; new `bth migrate --consolidate-catalog <root>` / `consolidate_project_catalog()` additively folds such a catalog's runs/campaigns/submits/reaped/sidecars into the migration catalog, run fragments matched by id anywhere under destination runs/ rather than by path, never touching the source)"
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -565,8 +565,9 @@ switched on in one step.
    trigger, asr, has 110 runs that exist only in its own `~/projects/asr/.bth/catalog`), and
    post-cut-over `is_log_mode()` checks for a cutover marker under the catalog it is given,
    which such a project's private catalog would never have -- split brain, with that project
-   stuck writing legacy-mode forever. The fix is mechanical (consolidate, then drop the key),
-   so there is no override; see "Consolidation" below.
+   stuck writing legacy-mode forever. The fix is mechanical (consolidate, then drop the key,
+   commit, and consolidate a SECOND time with `--source-catalog` to confirm the copy is now
+   empty before retrying `--to-log`), so there is no override; see "Consolidation" below.
 1. **Quiesce:** holding the writers lock shared (as any local writer does), it first pulls the legacy catalog from every configured remote (the existing
    `sync.py` rsync), so finished cluster runs whose fragments were never pulled are imported, and additionally mirrors
    each remote's `runs/` in full (no `--ignore-existing`; `--checksum`, deleting nothing) into
@@ -709,35 +710,85 @@ recompute or rewrite anything; it reads back that attempt's already-persisted
 `residual_report.jsonl` from staging (or reports `already_migrated` if staging is already gone),
 same as the real re-run path but without ever calling `_do_switch`.
 
-**Consolidation (v39, debt #1998):** `bth migrate --consolidate-catalog <root>` folds a
-registered root's foreign `catalog_dir` into the catalog being migrated, so step 0's new refusal
-above has a mechanical fix. It resolves `<root>`'s `.bth.toml` `[project] catalog_dir` (error if
-the key is not explicitly set) and additively copies only `runs/`, `campaigns/`, `submits/`,
-`reaped/`, `sidecars/` from it into the destination catalog -- never `bathos.db*`, `index.db`,
-`cutover.json`, `writers.lock`, logs, or `remote-runs/`, and never anything in the source, which
-is read-only throughout. Run fragments (`runs/**/run_<id>.parquet`) are matched by run id (their
-filename) *anywhere* under the destination's `runs/`, not by relative path -- a flat-layout
-source fragment (no project-slug subdir, the common shape for an older per-project catalog)
-whose same run already lives at `runs/<slug>/run_<id>.parquet` in the destination is recognised
-as already present rather than duplicated. A run id new to the destination is copied to
+**Consolidation (v39, debt #1998; hardened 260927 review pass):** `bth migrate
+--consolidate-catalog <root>` folds a registered root's foreign `catalog_dir` into the catalog
+being migrated, so step 0's new refusal above has a mechanical fix. It resolves `<root>`'s
+`.bth.toml` `[project] catalog_dir` (or, when the key is no longer explicitly set, an
+`--source-catalog <path>` override -- see "Race window" below) and additively copies only
+`runs/`, `campaigns/`, `submits/`, `reaped/`, `sidecars/`, `anchors/`, `ledger/`,
+`blast_radius/`, `archived_items/` from it into the destination catalog. `anchors/`, `ledger/`,
+`blast_radius/`, `archived_items/` are flat directories keyed by a globally-unique per-fragment
+uuid in the filename (`anchor_<uuid>.parquet`, `ledger_<id>.parquet`, `blast_radius_<id>.parquet`,
+`archived_<record_id>.parquet` respectively), so they are path-matched exactly like
+`campaigns/submits/reaped/sidecars` -- there is no cross-path id collision to resolve the way
+`runs/` needs. Attestations already live under `sidecars/attestations/`, inside the `sidecars`
+subtree, so need no separate entry. Never `bathos.db*`, `index.db`, `cutover.json`,
+`writers.lock`, `logs/`, or `remote-runs/`, and never anything in the source, which is read-only
+throughout. Any OTHER top-level entry in the source (e.g. `harness_runs/`, `quarantine/` -- real
+catalog subtrees that exist today but are out of scope for this pass) is neither copied nor
+silently dropped: it is listed in the result's `skipped_unknown`.
+
+Run fragments (`runs/**/run_<id>.parquet`) are matched by run id (their filename) *anywhere*
+under the destination's `runs/`, not by relative path -- a flat-layout source fragment (no
+project-slug subdir, the common shape for an older per-project catalog) whose same run already
+lives at `runs/<slug>/run_<id>.parquet` in the destination is recognised as already present
+rather than duplicated. A run id new to the destination is copied to
 `runs/<project_slug>/<filename>`, the slug read off the fragment's own `project_slug` column (not
-its source-relative path), falling back to its source parent directory name, or else reported as
-unplaceable and left uncopied. A run id present in the destination with differing bytes is never
-a conflict -- reported informationally as `already_present_differs`, destination always winning
-(compaction quirks like `schema_version` drift are common and harmless here). The other four
-subtrees stay path-matched: a byte-identical file at the same relative path is skipped, and a
-same-path file with different bytes is a real conflict, left uncopied and listed. `--dry-run`
-computes the identical plan and counts without writing anything; a real (non-dry-run) apply takes
-the destination's writers lock exclusively for the copy (atomic temp-then-rename per file,
-`shutil.copy2` to preserve mtime) and, if at least one file was actually copied, runs a normal
-(non-force) `bth compact` afterward so the warm tier sees the newly-visible runs. It refuses
-(`refused_log_mode`) if the destination already has a cutover marker: consolidation is a
-pre-cut-over step; a stale legacy write discovered after cut-over is `bth migrate
+its source-relative path), falling back to its source parent directory name. The slug is
+sanitized before use as a path component -- empty, `.`/`..`, or containing `/`, `\`, or NUL is
+rejected -- and the resulting destination path is asserted to resolve under `dest/runs/`; either
+failure reports the fragment as unplaceable and leaves it uncopied. A run id present in the
+destination with differing bytes is never a conflict -- reported as a list of run ids in
+`already_present_differs` (capped at 200 entries, with an uncapped `already_present_differs_count`
+alongside it), destination always winning (compaction quirks like `schema_version` drift are
+common and harmless here). A run id repeated *within the source itself* (e.g. both a flat and a
+slug-subdir copy, neither yet in the destination) is byte-compared against the first queued
+occurrence rather than assumed identical -- differing bytes land in the same
+`already_present_differs` list. The other subtrees stay path-matched: a byte-identical file at
+the same relative path is skipped, and a same-path file with different bytes is a real conflict,
+left uncopied and listed in `conflict_paths` (same 200-entry cap; `conflicts` is the uncapped
+count). Every subtree skips temp/dotfile names on both the source scan and the destination index
+-- `*.tmp`, `*.tmp.parquet`, `*.json.tmp`, `*.parquet.tmp`, or a name starting with `.` -- so an
+in-flight write from another process is never read as content.
+
+`--dry-run` computes the plan and counts without writing anything and without taking any lock. A
+real (non-dry-run) apply computes the SAME plan *inside* the destination's writers lock, held
+exclusively for both the planning and the copy -- closing the window between an unlocked plan and
+a locked copy that could otherwise let something else create a destination file the plan already
+decided to write to. Each file is additionally written with a per-file no-clobber check
+immediately before the rename (atomic temp-then-rename via `shutil.copy2` to a same-directory
+temp file, then `os.link(tmp, dest)` + unlink, falling back to an exists-checked `os.replace`): if
+`dest` turns out to already exist -- appeared since planning, or written by something outside
+this module's own locking discipline -- it is never overwritten; the item is reclassified as
+already-present (identical bytes) or a late conflict/differs entry, exactly as the planner would
+have classified it had it seen that state to begin with. If at least one file was actually
+copied, a normal (non-force) `bth compact` runs afterward, outside the lock, so the warm tier
+sees the newly-visible runs.
+
+It refuses (`refused_log_mode`) if the destination already has a cutover marker: consolidation is
+a pre-cut-over step; a stale legacy write discovered after cut-over is `bth migrate
 --import-legacy`'s job instead, which imports into the *owning* project's own log rather than
-folding raw Parquet into a shared catalog. Once a consolidation run reports clean (no
-`unplaceable`, informational `already_present_differs`/`conflicts` reviewed), the operator removes
-`catalog_dir` from that root's `.bth.toml` and commits the result before retrying
-`bth migrate --to-log`.
+folding raw Parquet into a shared catalog. Symmetrically, it refuses (`refused_source_log_mode`)
+if the *source* itself already has a cutover marker: it is no longer a legacy per-project catalog
+to fold in, for the same reason.
+
+`status` is `"ok"` only when the run is fully clean (no conflicts, nothing unplaceable) --
+`"needs_review"` means the additive copy still ran (on a real apply) but `conflicts > 0` or
+`unplaceable` is non-empty and needs a human look before proceeding; a clean result is never
+conflated with one that needs review, and the CLI exits non-zero on anything other than `"ok"`
+(previously it exited 0 whenever the call didn't raise, which could look like success on an
+unclean copy -- fixed in the 260927 review pass).
+
+**Race window:** consolidation and the `catalog_dir` key removal are two separate, unsynchronized
+steps -- a `bth run` between them could still write into the now-doomed foreign catalog. The
+documented procedure closes that window with a second consolidation pass: consolidate once,
+remove `catalog_dir` from that root's `.bth.toml` and commit, then run `--consolidate-catalog`
+*again*. Because the key is now gone, `explicit_catalog_dir()` can no longer resolve a source
+path from `.bth.toml` alone, so the second pass takes `--source-catalog <path>` (MCP:
+`source_catalog`) explicitly, pointing at the same foreign catalog. Only proceed to `bth migrate
+--to-log` once that second pass reports `status == "ok"` with zero files copied -- a non-zero
+copy count means something wrote there during the race window and must be folded in before the
+key removal is truly safe.
 
 ## Acceptance criteria
 
@@ -869,6 +920,24 @@ folding raw Parquet into a shared catalog. Once a consolidation run reports clea
   folds that run to the terminal status, not `abandoned`, with `duration_s` and `output_paths`
   from the remote copy; and two projects whose remotes share the name `engaging` keep separate
   `remote-runs/` mirrors.
+- AC-31. `consolidate_project_catalog()` (260927 review pass, debt #1998): (a) `status` is
+  `"needs_review"`, never `"ok"`, whenever `conflicts > 0` or `unplaceable` is non-empty, for
+  both `apply=True` and `apply=False`, and the CLI exits non-zero on any status other than `"ok"`;
+  (b) `anchors/`, `ledger/`, `blast_radius/`, `archived_items/` fragments are folded in the same
+  as `campaigns/submits/reaped/sidecars`, and any top-level source entry outside the full
+  allowlist and the exclusion list is reported in `skipped_unknown`, never silently dropped; (c) a
+  file that appears at the destination between planning and the per-file rename (simulated by
+  writing it directly, out of band, just before `consolidate_project_catalog` reaches that item)
+  is never overwritten -- it is reclassified as already-present or a late conflict/differs entry,
+  and an `apply=True` plan is built *inside* the destination's writers lock; (d) a name ending in
+  `.tmp`, `.tmp.parquet`, `.json.tmp`, `.parquet.tmp`, or starting with `.` is never read as
+  content in any subtree, source or destination; (e) a run id repeated within the source itself is
+  byte-compared against the first queued occurrence, landing in `already_present_differs` (a list
+  of run ids, capped at 200, with an uncapped `already_present_differs_count`) when the bytes
+  differ; (f) a `project_slug` that is empty, `.`, `..`, or contains `/`, `\`, or NUL is reported
+  unplaceable rather than trusted, and every accepted destination path is asserted to resolve
+  under `dest/runs/`; (g) a source that itself already has a cutover marker refuses with
+  `refused_source_log_mode`, distinct from the destination-side `refused_log_mode`.
 
 ## Order of delivery
 
