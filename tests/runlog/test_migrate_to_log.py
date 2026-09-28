@@ -1089,6 +1089,147 @@ def test_unresolvable_project_class(tmp_path: Path):
         assert line.cls == "unresolvable_project"
 
 
+def test_output_metadata_drift_class(tmp_path: Path):
+    """spec: "`output_metadata` whose files changed since" (debt #1944,
+    review finding (b), 260927) -- `compact.py`'s per-compact
+    `_collect_output_metadata` refresh resolves a RELATIVE output path
+    against the compacting process's OWN cwd, so two compacts run from
+    different directories can legitimately read a different
+    status/size_bytes/mtime_unix/sha256 for the exact same run and path.
+
+    Same technique as `test_force_rebuild_loss_class`: import first
+    (freezing the staged snapshot), then mutate `bathos.db` directly to
+    stand in for "a later compact, run from a different cwd, recomputed
+    this run's output_metadata" without actually spawning a second compact
+    from a different directory.
+    """
+    import duckdb
+
+    from bathos.runlog.migrate import _attempt_staging_root, _build_and_diff, _import_candidates
+
+    backend = _simple_backend(tmp_path)
+    write_run(
+        Run(
+            id="run-outmeta",
+            project_slug="proj",
+            command="p.py",
+            argv=["python", "p.py"],
+            git_hash="9" * 40,
+            git_branch="main",
+            git_dirty=False,
+            timestamp=BASE_TS,
+            duration_s=1.0,
+            exit_code=0,
+            status="completed",
+            output_paths=["outputs/result.txt"],
+        ),
+        backend.catalog_dir,
+    )
+    compact(backend.catalog_dir)
+
+    staging_root = _attempt_staging_root("outmeta-test")
+    report, _unresolved, _ids = _import_candidates(backend.catalog_dir, staging_root=staging_root)
+    assert report.locked == []
+
+    drifted = json.dumps(
+        [
+            {
+                "path": "outputs/result.txt",
+                "status": "present",
+                "size_bytes": 42,
+                "mtime_unix": 123.0,
+                "sha256": "f" * 64,
+            }
+        ]
+    )
+    con = duckdb.connect(str(backend.catalog_dir / "bathos.db"))
+    try:
+        con.execute("UPDATE runs SET output_metadata = ? WHERE id = ?", [drifted, "run-outmeta"])
+        con.commit()
+    finally:
+        con.close()
+
+    diff = _build_and_diff(backend.catalog_dir, "outmeta-test", step1_touched_run_ids=set())
+    assert diff.unclassified == []
+    lines = [
+        line
+        for line in diff.lines
+        if line.table == "runs" and line.column == "output_metadata" and line.key == ["run-outmeta"]
+    ]
+    assert lines, "expected an output_metadata residual"
+    for line in lines:
+        assert line.cls == "output_metadata_drift"
+
+
+def test_output_metadata_drift_negative_control_absolute_path(tmp_path: Path):
+    """NEGATIVE control for `output_metadata_drift`: the same construction,
+    but the differing path is ABSOLUTE. `Path.exists()`/stat for an absolute
+    path never depends on cwd, so debt #1944's cwd-drift explanation does
+    not apply here, and the residual must stay unclassified rather than
+    being papered over by the same class.
+    """
+    import duckdb
+
+    from bathos.runlog.migrate import _attempt_staging_root, _build_and_diff, _import_candidates
+
+    backend = _simple_backend(tmp_path)
+    abs_path = str(tmp_path / "abs_result.txt")
+    write_run(
+        Run(
+            id="run-outmeta-abs",
+            project_slug="proj",
+            command="p.py",
+            argv=["python", "p.py"],
+            git_hash="a" * 40,
+            git_branch="main",
+            git_dirty=False,
+            timestamp=BASE_TS,
+            duration_s=1.0,
+            exit_code=0,
+            status="completed",
+            output_paths=[abs_path],
+        ),
+        backend.catalog_dir,
+    )
+    compact(backend.catalog_dir)
+
+    staging_root = _attempt_staging_root("outmeta-abs-test")
+    report, _unresolved, _ids = _import_candidates(backend.catalog_dir, staging_root=staging_root)
+    assert report.locked == []
+
+    drifted = json.dumps(
+        [
+            {
+                "path": abs_path,
+                "status": "present",
+                "size_bytes": 99,
+                "mtime_unix": 456.0,
+                "sha256": "e" * 64,
+            }
+        ]
+    )
+    con = duckdb.connect(str(backend.catalog_dir / "bathos.db"))
+    try:
+        con.execute(
+            "UPDATE runs SET output_metadata = ? WHERE id = ?", [drifted, "run-outmeta-abs"]
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    diff = _build_and_diff(backend.catalog_dir, "outmeta-abs-test", step1_touched_run_ids=set())
+    unclassified_lines = [
+        u
+        for u in diff.unclassified
+        if u["table"] == "runs"
+        and u["column"] == "output_metadata"
+        and u["key"] == ["run-outmeta-abs"]
+    ]
+    assert unclassified_lines, (
+        "an absolute-path drift must NOT be explained by output_metadata_drift"
+    )
+
+
 # --------------------------------------------------------------------------
 # AC-28: abort leaves no imported event / no index.db; abort-retry-switch
 # imports everything exactly once

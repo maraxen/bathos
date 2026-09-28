@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: "v36 (v35 + a genuine no-write `--to-log --dry-run` preview -- status `dry_run`, `would_pull`, `--accept-residual` rejected together with `--dry-run`)"
+revision: "v37 (v36 + two more Migration step-3 residual classes implemented: `output_metadata_drift` (a `runs.output_metadata` residual on a workspace-relative output path only, per debt #1944's compacting-process-cwd sensitivity) and `postmortem_worktree_deleted`, the latter investigated and judged structurally unreachable given this importer/fold -- see `_classify`'s docstring in `migrate.py`)"
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -586,7 +586,19 @@ switched on in one step.
    pulled or reaped in step 1: a column of such a run whose staged value equals the value that
    fragment or a reap ledger written in step 1 itself carries, e.g. a staged status the fragment
    carries, or a `metadata.reaped` equal to a step-1 ledger record, newer than its warm row;
-   a staged value neither explains stays unclassified); unclassified differences abort. The classified residuals are
+   a staged value neither explains stays unclassified); unclassified differences abort. (v37:
+   `output_metadata` whose files changed since is implemented as `output_metadata_drift` --
+   narrowly, only when both sides name the same set of output paths and every differing path
+   is workspace-relative, since debt #1944's compacting-process-cwd sensitivity in
+   `_collect_output_metadata` cannot explain a difference on an absolute path, which stays
+   unclassified instead. Postmortem overrides whose files are only in a deleted worktree
+   (`postmortem_worktree_deleted`) was investigated and is judged structurally unreachable with
+   this importer/fold -- no compared column carries a "which worktree" signal, `compact.py`'s
+   postmortem walk always resolves against the main worktree and prunes nested
+   `.claude/worktrees/` regardless of whether one still exists, and the one live write path that
+   could otherwise diverge from the imported warm value, `run.postmortem_applied`, never fires
+   before cut-over; see `_classify`'s docstring in `migrate.py` for the full trace.) The
+   classified residuals are
    written to a canonical report (exactly one JSON line per differing `(table, key, column)`,
    each line exactly the object `{table, key, column, class, legacy_value, staged_value}` with
    `key` the row's primary key as a JSON array, `class` the allow-listed class name, and each

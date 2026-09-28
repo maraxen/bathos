@@ -838,6 +838,34 @@ def _read_legacy_tables(
         opened.close()
 
 
+def _parse_output_metadata(value: Any) -> dict[str, dict[str, Any]] | None:
+    """`runs.output_metadata`'s JSON-in-VARCHAR shape (a list of `{"path":
+    ..., "status": ..., "size_bytes": ..., "mtime_unix": ..., "sha256":
+    ...}` entries, `compact.py`'s `_collect_output_metadata`), parsed into
+    `{path: entry}` -- or `None` if the value isn't in that shape
+    (conservative: an unparseable or unexpected value never earns
+    `output_metadata_drift`, it stays unclassified like anything else this
+    class doesn't recognize)."""
+    if isinstance(value, str):
+        if not value:
+            value = []
+        else:
+            try:
+                value = json.loads(value)
+            except (ValueError, TypeError):
+                return None
+    if value is None:
+        value = []
+    if not isinstance(value, list):
+        return None
+    out: dict[str, dict[str, Any]] = {}
+    for entry in value:
+        if not isinstance(entry, dict) or "path" not in entry:
+            return None
+        out[entry["path"]] = entry
+    return out
+
+
 def _sidecar_current_sha256(path: str) -> str | None:
     """The CURRENT sha256 of a sidecar file on disk, or `None` if it no
     longer exists (BC-3: "a deleted one gives NULL in the canonical
@@ -908,13 +936,59 @@ def _classify(
       `CatalogAnchorStore` anchors, which write no fragment, so a
       force-rebuild drops them while the fold (driven by durable events)
       keeps every one.
+    - `output_metadata_drift` (spec: "`output_metadata` whose files changed
+      since"; debt #1944, review finding (b), 260927): a `runs.
+      output_metadata` residual where BOTH sides parse as the
+      `_collect_output_metadata` list shape, name the SAME set of paths (no
+      output file was added or dropped -- that would be a different,
+      unexplained kind of drift), and every differing path is
+      workspace-RELATIVE (never absolute). `compact.py`'s per-compact
+      refresh (`compact.py:964-992`) calls `_collect_output_metadata`
+      relative to THAT COMPACTING PROCESS'S OWN cwd, so a relative
+      `output_path` (`status`/`size_bytes`/`mtime_unix`/`sha256`) can
+      legitimately read differently across two compacts run from different
+      directories -- an absolute path's `Path.exists()`/stat never depends
+      on cwd at all, so a residual on an absolute path is NOT explained by
+      this mechanism and must stay unclassified (the narrow, testable
+      distinction between the two).
+    - `postmortem_worktree_deleted`: investigated and NOT implemented --
+      see the docstring's final paragraph below for why.
 
     Deliberately deferred (documented, not silently papered over -- see the
     task report): `corrupt_fragment_skip` (compact.py:787's corrupt-fragment
     skip appears structurally unreachable as a genuine residual given this
     importer's warm-source redundancy, the same class of finding as AC-30's
-    original "warm-only row" wording before v35 corrected it),
-    `output_metadata_drift`, and `postmortem_worktree_deleted`.
+    original "warm-only row" wording before v35 corrected it).
+
+    `postmortem_worktree_deleted` (spec: "postmortem overrides whose files
+    are only in a deleted worktree") is investigated and judged structurally
+    UNREACHABLE with this importer/fold, for the same reason as
+    `corrupt_fragment_skip` -- no column this diff ever compares carries a
+    "which worktree" signal to test against:
+      - `compact.py`'s postmortem walk (`compact.py:807`,
+        `resolve_workspace().fs_root`) always resolves to the repo's MAIN
+        worktree (spec "Log directory resolution": a linked worktree maps to
+        its main worktree), never to the run's own (possibly since-deleted)
+        worktree, and its `iter_project_files` walk is boundary-aware and
+        PRUNES `.claude/worktrees/` (backlog #4233) -- a postmortem file
+        living inside any worktree subtree, deleted or not, is never found
+        by it either way, so no before/after delta is ever produced.
+      - `runs.postmortem_path` is stored workspace-root-relative
+        (`compact.py`'s `rel_path = pm_file.relative_to(workspace_root)`),
+        never worktree-relative, and no compared table (`_TABLE_KEYS`) has a
+        `worktree_root`/similar column for a run or postmortem at all --
+        only the (unrelated to this diff) per-EVENT envelope carries
+        `worktree_root`, and the importer stamps it `main_root` on every
+        import regardless (`_append_import_events`), so it is constant and
+        carries no signal either.
+      - `run.postmortem_applied` (the one live write path that could
+        otherwise diverge from the stage-1 imported warm value) only fires
+        behind `current_mode()` (`mcp.py:3046`), which is never true before
+        cut-over -- so during a migration there is no live event of this
+        kind to disagree with the import in the first place.
+      A residual invented for this class without one of these signals would
+      be exactly the failure this rule exists to prevent: a false-positive
+      classification papering over a genuinely different bug.
     """
     run_id = key[0] if table == "runs" and key else None
     if run_id and run_id in step1_touched_run_ids:
@@ -930,6 +1004,20 @@ def _classify(
             return "fragment_not_yet_compacted"
     if table == "runs" and column == "metadata":
         return "frozen_at_earlier_compact"
+    if table == "runs" and column == "output_metadata":
+        legacy_entries = _parse_output_metadata(lrow.get(column) if lrow is not None else None)
+        staged_entries = _parse_output_metadata(srow.get(column) if srow is not None else None)
+        if (
+            legacy_entries is not None
+            and staged_entries is not None
+            and legacy_entries
+            and set(legacy_entries) == set(staged_entries)
+        ):
+            differing_paths = [
+                p for p, entry in legacy_entries.items() if entry != staged_entries[p]
+            ]
+            if differing_paths and all(not Path(p).is_absolute() for p in differing_paths):
+                return "output_metadata_drift"
     if column == "evalue" and table in ("runs", "campaign_runs"):
         member_run_id = key[-1] if table == "campaign_runs" and key else run_id
         run_row = cool_run_rows.get(member_run_id) if member_run_id else None
