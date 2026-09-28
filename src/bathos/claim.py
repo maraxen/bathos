@@ -984,7 +984,7 @@ def attest_parity(
     from bathos.runlog.emit import unit_of_work
 
     with unit_of_work(catalog_dir):
-        _attest_parity_impl(campaign_id, parity_run_id, db, workspace_root)
+        _attest_parity_impl(campaign_id, parity_run_id, db, workspace_root, catalog_dir=catalog_dir)
 
 
 def _attest_parity_impl(
@@ -992,6 +992,8 @@ def _attest_parity_impl(
     parity_run_id: str,
     db: duckdb.DuckDBPyConnection,
     workspace_root: Path,
+    *,
+    catalog_dir: Path | None = None,
 ) -> None:
     import logging
     import os
@@ -1120,8 +1122,27 @@ def _attest_parity_impl(
 
         # DB update LAST (after file is safely renamed). AC-25: behind the runlog
         # flag this is a `campaign.claim_bound` event instead of the UPDATE.
+        #
+        # AC-17 finding (real divergence, fixed here -- not a BC): unlike
+        # register_claim's own `_claim_bound_legacy_write` (above), this closure
+        # used to update ONLY the live `db` connection and never called
+        # `write_campaign_cool`, so the new claim_sha256 was never durable to the
+        # cool-tier campaign JSON. It survived an ordinary incremental `compact()`
+        # (which never touches existing warm rows), but a `compact(catalog_dir,
+        # force_rebuild=True)` -- the AC-17 spec's own "canonical legacy state"
+        # recipe, and a real recovery path production already exposes -- deletes
+        # `bathos.db` and rebuilds `campaigns` purely from cool JSON
+        # (`ingest_cool_campaigns`/`read_cool_campaigns`), silently reverting
+        # claim_sha256 to whatever register_claim (or nothing) last wrote there.
+        # Mirrors register_claim's existing pattern exactly.
         def _claim_bound_legacy_write() -> None:
             db.execute("UPDATE campaigns SET claim_sha256 = ? WHERE id = ?", [new_sha256, full_id])
+            if catalog_dir is not None:
+                from bathos.campaigns import get_campaign, write_campaign_cool
+
+                refreshed = get_campaign(db, full_id, catalog_dir=catalog_dir)
+                if refreshed is not None:
+                    write_campaign_cool(refreshed, catalog_dir)
 
         try:
             emit_or_legacy(
