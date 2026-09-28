@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: v35 (v34 + AC-30 warm-only-row wording fixed against the step-3 diff)
+revision: "v36 (v35 + a genuine no-write `--to-log --dry-run` preview -- status `dry_run`, `would_pull`, `--accept-residual` rejected together with `--dry-run`)"
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -628,6 +628,33 @@ switched on in one step.
    and rows of a `bathos.db` recreated beside `bathos.db.frozen`, which clear once imported) with the writing host; re-running
    `bth migrate --import-legacy` imports it (sources: `bathos.db.frozen`, any new `bathos.db`,
    fragments in `runs/` and `remote-runs/`, reap ledgers, submit Parquet, campaign JSON).
+
+**Dry run:** `bth migrate --to-log --dry-run` previews step 3's residual report before a user
+ever commits to `--accept-residual`, with **no data writes anywhere**: not to `~/.bth/catalog`
+(no pull, no remote-runs mirror, no reap `apply`, no `index.db`, no `cutover.json`), not to
+`~/.bth/projects.toml`, not to `~/.bth/log/` (including `import-staging/`), not to any registered
+project root, and not to any remote. Concretely: step 1's remote pull/mirror
+(`pull_and_mirror_all_remotes`) never runs at all -- the result's `would_pull` field instead
+lists every `(root, remote)` pair a real run would have pulled, so the report is legibly labeled
+as **not including any remote fragment not already locally mirrored from an earlier real run**;
+`reap_runs` runs with `apply=False`, and its candidate list (not a real reap ledger write) becomes
+the `step1_pulled_or_reaped` touched-run set that step 3's classifier uses; the squeue conflict
+check still runs (read-only, same as a real run). Step 2's staged import events, step 3's
+throwaway fold index, and the diff itself all live under one `tempfile.mkdtemp()` scratch
+directory that is removed before the call returns -- never under `~/.bth/log/import-staging/<attempt>/`. Step 1's re-run
+cleanup (`_cleanup_prior_attempt_state`: deleting stray staging directories and `index.db`) never
+runs either, since a dry run touches no prior attempt's state. The result carries a new status,
+`dry_run`, with `report_sha256`, `residual_lines`, and `unclassified` populated exactly as a real
+run's `residual_pending` would be, plus `would_pull`. **`report_sha256` on a `dry_run` result is
+advisory only:** because remote fragments are not mirrored first, a real run's own recomputed
+report may differ from the dry run's, so `--accept-residual` must always be given the hash from a
+real (non-dry-run) invocation, never a dry run's -- passing `--accept-residual` together with
+`--dry-run` is rejected outright with a clear error before anything runs, since a dry run never
+reaches step 4's switch and there is therefore nothing to accept a residual report for. When a
+cut-over marker already exists (a prior attempt already reached step 4(b)), `--dry-run` does not
+recompute or rewrite anything; it reads back that attempt's already-persisted
+`residual_report.jsonl` from staging (or reports `already_migrated` if staging is already gone),
+same as the real re-run path but without ever calling `_do_switch`.
 
 ## Acceptance criteria
 

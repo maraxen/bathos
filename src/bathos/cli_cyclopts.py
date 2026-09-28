@@ -995,7 +995,10 @@ def migrate(
 
     Parameters
     ----------
-    dry_run: Show what would be migrated without writing.
+    dry_run: Show what would be migrated without writing. With --to-log, preview
+        Migration steps 1-3's residual report with NO writes anywhere (remote
+        pull/mirror is skipped -- see `would pull` in the output -- and reap runs
+        with apply=False); status `dry_run`. Rejected together with --accept-residual.
     classify: Classify flat scripts into subdirs (Phase 2).
     project: Scope migration to a single project slug's runs/<project>/ fragments
         (default: all projects in the catalog).
@@ -1021,11 +1024,16 @@ def migrate(
     if to_log:
         from bathos.runlog.migrate import migrate_to_log
 
-        result = migrate_to_log(
-            catalog_dir(),
-            force=force,
-            accept_residual=accept_residual or None,
-        )
+        try:
+            result = migrate_to_log(
+                catalog_dir(),
+                force=force,
+                accept_residual=accept_residual or None,
+                dry_run=dry_run,
+            )
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            raise SystemExit(1) from None
         print(f"status: {result.status}")
         if result.attempt:
             print(f"  attempt: {result.attempt}")
@@ -1037,8 +1045,17 @@ def migrate(
                 print(f"    {p}", file=sys.stderr)
         if result.conflicting_jobs:
             print(f"  conflicting job(s): {', '.join(result.conflicting_jobs)}", file=sys.stderr)
+        if result.would_pull:
+            print(f"  would pull ({len(result.would_pull)}):")
+            for pair in result.would_pull:
+                print(f"    {pair['root']} <- {pair['remote']}")
         if result.report_sha256:
             print(f"  report sha256: {result.report_sha256}")
+        if result.status == "dry_run":
+            print(f"  residual lines: {len(result.residual_lines)}")
+            if result.unclassified:
+                print(f"  unclassified: {len(result.unclassified)}", file=sys.stderr)
+            raise SystemExit(0)
         if result.status != "switched" and result.status != "already_migrated":
             raise SystemExit(1)
         return

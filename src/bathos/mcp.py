@@ -4527,15 +4527,21 @@ async def mcp_migrate_to_log_tool(
     force: bool = False,
     accept_residual: str = "",
     import_legacy: bool = False,
+    dry_run: bool = False,
     token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
     """`bth migrate --to-log` (Migration steps 0-4): the project-local run
     log cut-over. `import_legacy=True` instead runs the post-cut-over
-    `--import-legacy` re-import (AC-23; refused before cut-over).
+    `--import-legacy` re-import (AC-23; refused before cut-over). `dry_run=
+    True` previews steps 1-3's residual report with NO writes anywhere
+    (status `dry_run`; see `MigrateToLogResult.dry_run`'s docstring) —
+    rejected together with `accept_residual`.
 
     Requires token= matching the local ~/.bth/mcp_token (debt #619) — this
-    mutates the real catalog (pulls remotes, reaps, and can rename bathos.db
-    to bathos.db.frozen).
+    can mutate the real catalog (pulls remotes, reaps, and can rename
+    bathos.db to bathos.db.frozen) unless dry_run=True, in which case it
+    writes nothing but still requires the token, like every other write-verb
+    tool that also has a dry-run mode (e.g. repair_tool).
 
     Args:
         catalog_dir: Catalog directory (empty = use default)
@@ -4543,11 +4549,13 @@ async def mcp_migrate_to_log_tool(
         accept_residual: sha256 of a previously-reviewed residual report; proceeds to
             the switch only if a fresh run reproduces that exact hash
         import_legacy: Run `--import-legacy` instead of `--to-log`
+        dry_run: Preview the residual report with no writes anywhere; incompatible
+            with accept_residual (there is nothing to accept a residual report for)
 
     Returns:
         Dict form of `MigrateToLogResult` (status, attempt, report_path,
         report_sha256, residual_lines, unclassified, missing_project_ids,
-        conflicting_jobs, locked_source, detail).
+        conflicting_jobs, locked_source, would_pull, detail).
     """
     import dataclasses
 
@@ -4557,7 +4565,12 @@ async def mcp_migrate_to_log_tool(
     if import_legacy:
         result = import_legacy_post_cutover(cat_dir)
     else:
-        result = migrate_to_log(cat_dir, force=force, accept_residual=accept_residual or None)
+        result = migrate_to_log(
+            cat_dir,
+            force=force,
+            accept_residual=accept_residual or None,
+            dry_run=dry_run,
+        )
     return dataclasses.asdict(result)
 
 
