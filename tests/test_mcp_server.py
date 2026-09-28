@@ -430,7 +430,11 @@ class TestSyncTool:
             root=tmp_path,
             remotes={"engaging": {"host": "engaging", "remote_root": "~/projects/test"}},
         )
-        resolution = LogRootResolution(main_root=tmp_path, worktree_root=tmp_path, unaffiliated=False)
+        resolution = LogRootResolution(
+            main_root=tmp_path, worktree_root=tmp_path, unaffiliated=False
+        )
+
+        from bathos.sync import ClusterLogPullResult
 
         with (
             patch("bathos.mcp.find_project_config", return_value=tmp_path / ".bth.toml"),
@@ -441,12 +445,68 @@ class TestSyncTool:
             ),
             patch("bathos.runlog.resolve.resolve_log_root", return_value=resolution),
             patch("bathos.runlog.project_id.read_project_id", return_value="pid-1"),
-            patch("bathos.sync.pull_cluster_log") as mock_pull,
+            patch(
+                "bathos.sync.pull_cluster_log",
+                return_value=ClusterLogPullResult(pulled=["log", "fallback", "mirror"]),
+            ) as mock_pull,
         ):
             result = sync_tool(catalog_dir=str(cat_dir), remote_name="engaging", pull=True)
 
         assert result.get("cluster_log_pulled") is True
+        assert "cluster_log_pull_failures" not in result
         mock_pull.assert_called_once_with("engaging", mock_config, tmp_path, "pid-1")
+
+    def test_sync_tool_reports_cluster_log_pull_false_when_nothing_pulled(
+        self, tmp_path, monkeypatch
+    ):
+        """When `pull_cluster_log` returns normally but pulled NOTHING (the
+        current real-world case: `bathos.cluster.pull_path` has no myxcel
+        capability yet, debt #1993), the tool must report
+        `cluster_log_pulled: False` plus the per-subpath failure reasons --
+        never read a bare "no exception raised" as success."""
+        monkeypatch.delenv("BTH_LOG_MODE", raising=False)
+        from bathos.config import ProjectConfig
+        from bathos.runlog.mode import cutover_marker_path
+        from bathos.runlog.resolve import LogRootResolution
+        from bathos.sync import ClusterLogPullResult, SyncResult
+
+        cat_dir = tmp_path / "catalog"
+        cutover_marker_path(cat_dir).parent.mkdir(parents=True, exist_ok=True)
+        cutover_marker_path(cat_dir).write_text(
+            '{"at": "x", "bathos": "t", "attempt": "1", "segments": []}'
+        )
+
+        mock_config = ProjectConfig(
+            slug="test",
+            root=tmp_path,
+            remotes={"engaging": {"host": "engaging", "remote_root": "~/projects/test"}},
+        )
+        resolution = LogRootResolution(
+            main_root=tmp_path, worktree_root=tmp_path, unaffiliated=False
+        )
+        failed_result = ClusterLogPullResult(
+            pulled=[],
+            failures=[
+                {"label": label, "src": f"src-{label}", "remote": "engaging", "error": "gap"}
+                for label in ("log", "fallback", "mirror")
+            ],
+        )
+
+        with (
+            patch("bathos.mcp.find_project_config", return_value=tmp_path / ".bth.toml"),
+            patch("bathos.mcp.load_project_config", return_value=mock_config),
+            patch(
+                "bathos.mcp.sync_catalog",
+                return_value=SyncResult(transferred=0, duration_s=0.1, remote="engaging"),
+            ),
+            patch("bathos.runlog.resolve.resolve_log_root", return_value=resolution),
+            patch("bathos.runlog.project_id.read_project_id", return_value="pid-1"),
+            patch("bathos.sync.pull_cluster_log", return_value=failed_result),
+        ):
+            result = sync_tool(catalog_dir=str(cat_dir), remote_name="engaging", pull=True)
+
+        assert result.get("cluster_log_pulled") is False
+        assert result.get("cluster_log_pull_failures") == failed_result.failures
 
     def test_sync_tool_skips_cluster_log_pull_when_log_mode_off(self, tmp_path, monkeypatch):
         """Flag off (no cutover marker): sync behaves exactly as today -- no

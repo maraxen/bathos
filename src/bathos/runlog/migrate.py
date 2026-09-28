@@ -937,20 +937,28 @@ def _classify(
       force-rebuild drops them while the fold (driven by durable events)
       keeps every one.
     - `output_metadata_drift` (spec: "`output_metadata` whose files changed
-      since"; debt #1944, review finding (b), 260927): a `runs.
-      output_metadata` residual where BOTH sides parse as the
-      `_collect_output_metadata` list shape, name the SAME set of paths (no
-      output file was added or dropped -- that would be a different,
-      unexplained kind of drift), and every differing path is
-      workspace-RELATIVE (never absolute). `compact.py`'s per-compact
-      refresh (`compact.py:964-992`) calls `_collect_output_metadata`
-      relative to THAT COMPACTING PROCESS'S OWN cwd, so a relative
-      `output_path` (`status`/`size_bytes`/`mtime_unix`/`sha256`) can
-      legitimately read differently across two compacts run from different
-      directories -- an absolute path's `Path.exists()`/stat never depends
-      on cwd at all, so a residual on an absolute path is NOT explained by
-      this mechanism and must stay unclassified (the narrow, testable
-      distinction between the two).
+      since"; debt #1944, review finding (b), 260927; **narrowed 260927**,
+      review remediation B finding 1): a `runs.output_metadata` residual
+      where BOTH sides parse as the `_collect_output_metadata` list shape,
+      name the SAME set of paths (no output file was added or dropped --
+      that would be a different, unexplained kind of drift), every
+      differing path is workspace-RELATIVE (never absolute), AND -- the
+      narrow part -- for every differing path the two sides' `status`
+      values are exactly `{"missing", "present"}` (one of each, in either
+      order). `compact.py`'s per-compact refresh (`compact.py:964-992`)
+      calls `_collect_output_metadata` relative to THAT COMPACTING
+      PROCESS'S OWN cwd, so a relative `output_path` can genuinely read
+      `"missing"` (`_collect_output_metadata` returns
+      `{"status": "missing", "size_bytes": 0}`, no `sha256`/`mtime_unix` at
+      all) from one compact's cwd and `"present"` from another's -- that is
+      debt #1944's actual signature, and it is the ONLY thing this class
+      explains. A path that is `"present"` on both sides but with a
+      different `sha256`/`size_bytes`/`mtime_unix` is a genuine output
+      mutation or corruption, not cwd drift -- an absolute path's
+      `Path.exists()`/stat never depends on cwd at all, so a residual on an
+      absolute path is NOT explained by this mechanism either, and both
+      cases must stay unclassified rather than getting the same "explained"
+      label (the narrow, testable distinction this class exists to draw).
     - `postmortem_worktree_deleted`: investigated and NOT implemented --
       see the docstring's final paragraph below for why.
 
@@ -1016,7 +1024,15 @@ def _classify(
             differing_paths = [
                 p for p, entry in legacy_entries.items() if entry != staged_entries[p]
             ]
-            if differing_paths and all(not Path(p).is_absolute() for p in differing_paths):
+            if (
+                differing_paths
+                and all(not Path(p).is_absolute() for p in differing_paths)
+                and all(
+                    {legacy_entries[p].get("status"), staged_entries[p].get("status")}
+                    == {"missing", "present"}
+                    for p in differing_paths
+                )
+            ):
                 return "output_metadata_drift"
     if column == "evalue" and table in ("runs", "campaign_runs"):
         member_run_id = key[-1] if table == "campaign_runs" and key else run_id
@@ -1462,9 +1478,13 @@ def _dry_run_report_from_marker(marker: dict[str, Any]) -> MigrateToLogResult:
 
 
 def _migrate_to_log_dry_run(cd: Path, *, force: bool) -> MigrateToLogResult:
-    """`--dry-run`: steps 1-3 run for their READ effects only -- no data is
-    written to the catalog dir, `~/.bth/projects.toml`, `~/.bth/log/`, any
-    project root, or any remote (spec "Dry run").
+    """`--dry-run`: steps 1-3 run for their READ effects only -- no data
+    FILES are written to the catalog dir, `~/.bth/projects.toml`,
+    `~/.bth/log/`, any project root, or any remote (spec "Dry run"). The one
+    exception: `writers_lock` (below) may still create the empty
+    `writers.lock` mutex file under the catalog dir if it does not already
+    exist -- every reader takes that lock shared, dry run or not, and the
+    lock file itself carries no data (see `bathos.runlog.mode.writers_lock`).
 
     - Remote pull/mirror (`pull_and_mirror_all_remotes`) never runs; `
       would_pull` reports the `(root, remote)` pairs a real run would have
@@ -1548,7 +1568,8 @@ def _migrate_to_log_dry_run(cd: Path, *, force: bool) -> MigrateToLogResult:
             unresolved_routing_count=unresolved_routing,
             would_pull=would_pull,
             detail=(
-                f"dry run: no data was written; {len(diff.lines)} residual line(s), "
+                f"dry run: no data files were written (the empty writers.lock mutex "
+                f"may still be created); {len(diff.lines)} residual line(s), "
                 f"{len(diff.unclassified)} unclassified. Remote fragments were not "
                 "mirrored for this preview (see would_pull) -- a real run's report may "
                 "differ because remotes get pulled and mirrored first. This sha256 is "

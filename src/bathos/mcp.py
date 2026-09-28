@@ -1577,7 +1577,14 @@ def sync_tool(
         pull: Pull from remote (default: push to remote)
 
     Returns:
-        Dict with sync result
+        Dict with sync result. With `pull=True` in log mode, also carries
+        `cluster_log_pulled` (bool: at least one of the log/fallback/mirror
+        sub-pulls actually succeeded -- NOT merely "no exception raised";
+        currently always False, since `bathos.cluster.pull_path` has no
+        myxcel capability behind it yet, debt #1993) and, when anything
+        failed, `cluster_log_pull_failures` (list of per-subpath reasons) or
+        `cluster_log_pull_error` (a single top-level failure, e.g. an
+        unconfigured remote).
     """
     cat_dir = _get_catalog_dir(catalog_dir or None)
     # Load ProjectConfig from .bth.toml in project root
@@ -1619,10 +1626,23 @@ def sync_tool(
             if not resolution.unaffiliated:
                 project_id = read_project_id(resolution.main_root / ".bth.toml")
                 try:
-                    pull_cluster_log(remote_name, config, resolution.main_root, project_id)
-                    result_dict["cluster_log_pulled"] = True
+                    pull_result = pull_cluster_log(
+                        remote_name, config, resolution.main_root, project_id
+                    )
                 except Exception as e:
+                    result_dict["cluster_log_pulled"] = False
                     result_dict["cluster_log_pull_error"] = str(e)
+                else:
+                    # A normal return is NOT success: pull_cluster_log catches
+                    # each of the three sub-pulls individually and always
+                    # returns, even when every one of them failed (currently
+                    # the case for all of them -- bathos.cluster.pull_path has
+                    # no myxcel capability behind it yet, debt #1993). Report
+                    # honestly from the per-subpath result, not from the
+                    # absence of a raised exception.
+                    result_dict["cluster_log_pulled"] = pull_result.any_pulled
+                    if pull_result.failures:
+                        result_dict["cluster_log_pull_failures"] = pull_result.failures
 
     return result_dict
 
@@ -4533,15 +4553,17 @@ async def mcp_migrate_to_log_tool(
     """`bth migrate --to-log` (Migration steps 0-4): the project-local run
     log cut-over. `import_legacy=True` instead runs the post-cut-over
     `--import-legacy` re-import (AC-23; refused before cut-over). `dry_run=
-    True` previews steps 1-3's residual report with NO writes anywhere
-    (status `dry_run`; see `MigrateToLogResult.dry_run`'s docstring) —
+    True` previews steps 1-3's residual report with no data FILES written
+    anywhere (status `dry_run`; see `MigrateToLogResult.dry_run`'s
+    docstring — the empty `writers.lock` mutex file may still be created) —
     rejected together with `accept_residual`.
 
     Requires token= matching the local ~/.bth/mcp_token (debt #619) — this
     can mutate the real catalog (pulls remotes, reaps, and can rename
     bathos.db to bathos.db.frozen) unless dry_run=True, in which case it
-    writes nothing but still requires the token, like every other write-verb
-    tool that also has a dry-run mode (e.g. repair_tool).
+    writes no data files (only the empty writers.lock mutex, if absent) but
+    still requires the token, like every other write-verb tool that also has
+    a dry-run mode (e.g. repair_tool).
 
     Args:
         catalog_dir: Catalog directory (empty = use default)
@@ -4549,7 +4571,8 @@ async def mcp_migrate_to_log_tool(
         accept_residual: sha256 of a previously-reviewed residual report; proceeds to
             the switch only if a fresh run reproduces that exact hash
         import_legacy: Run `--import-legacy` instead of `--to-log`
-        dry_run: Preview the residual report with no writes anywhere; incompatible
+        dry_run: Preview the residual report with no data files written anywhere
+            (the empty writers.lock mutex may still be created); incompatible
             with accept_residual (there is nothing to accept a residual report for)
 
     Returns:

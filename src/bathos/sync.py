@@ -354,12 +354,38 @@ def cluster_log_remote_dirs(project_root: Path, remote_name: str) -> tuple[Path,
     return base / "log", base / "fallback", base / "mirror"
 
 
+@dataclass
+class ClusterLogPullResult:
+    """Structured, per-subpath outcome of `pull_cluster_log`.
+
+    Each of the three sub-pulls (`log`/`fallback`/`mirror`) is caught
+    individually and best-effort (see `pull_cluster_log`'s docstring), so a
+    call that raises NOTHING can still have pulled NOTHING -- notably, every
+    real invocation currently fails all three, since `bathos.cluster.
+    pull_path` has no myxcel capability to back it and always raises
+    `MyxcelCapabilityGapError` (debt #1993; see `pull_path`'s docstring). A
+    caller must inspect this result -- `bool(pulled)`/`any_pulled` -- rather
+    than treat a normal return as success.
+
+    - `pulled`: labels (`"log"`/`"fallback"`/`"mirror"`) that succeeded.
+    - `failures`: one `{"label", "src", "remote", "error"}` dict per
+      sub-path that raised, in attempt order.
+    """
+
+    pulled: list[str] = field(default_factory=list)
+    failures: list[dict] = field(default_factory=list)
+
+    @property
+    def any_pulled(self) -> bool:
+        return bool(self.pulled)
+
+
 def pull_cluster_log(
     remote_name: str,
     config: ProjectConfig,
     project_root: Path,
     project_id: str | None,
-) -> None:
+) -> ClusterLogPullResult:
     """Cluster log pull (spec "Cluster", delivery step 4 wave d): pull the
     remote checkout's `.bth/log/`, the remote `~/.bth/log/fallback/<slug>/`,
     and the remote `~/.bth/log-mirror/<project_id>/` (or, with no project id,
@@ -380,6 +406,14 @@ def pull_cluster_log(
     that has never been written on the remote (the common case -- most runs
     never fail over to the fallback, or lose an active segment) must not
     abort the other two.
+
+    Returns a `ClusterLogPullResult` recording which sub-paths actually
+    pulled and which failed (with reasons) -- this function itself never
+    raises for a per-subpath failure (see above); it only raises for a bad
+    `remote_name`. **Currently every sub-path fails**: `pull_path` has no
+    myxcel capability behind it (debt #1993), so `pulled` is always empty
+    until that lands. Callers must report that honestly rather than reading
+    "no exception" as "pulled".
     """
     if remote_name not in config.remotes:
         raise ValueError(f"Remote '{remote_name}' not in config")
@@ -395,6 +429,8 @@ def pull_cluster_log(
     from bathos.cluster import pull_path
 
     mirror_component = project_id if project_id else f"_null/{slug}"
+
+    result = ClusterLogPullResult()
 
     for src, dst, label in (
         (f"{remote_root}/.bth/log/", log_dest, "log"),
@@ -412,6 +448,13 @@ def pull_cluster_log(
                 remote_name,
                 exc,
             )
+            result.failures.append(
+                {"label": label, "src": src, "remote": remote_name, "error": str(exc)}
+            )
+        else:
+            result.pulled.append(label)
+
+    return result
 
 
 def _parse_transferred_count(rsync_output: str) -> int:

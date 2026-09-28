@@ -543,6 +543,19 @@ def _run_differential(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed: int
                 all_diffs.append(
                     f"submits[{jid}].{col}: legacy={lr.get(col)!r} new={nr.get(col)!r}"
                 )
+        # slurm_job_id is excluded from _SUBMIT_COMPARE_COLS (new-fold-only
+        # denormalization, no legacy column to compare against) but is NOT
+        # untested: write_submit_provenance always derives it as
+        # `myxcel_job_id or ""` (catalog.py, AC-25 "includes slurm_job_id"),
+        # and `jid` (the join key) IS that op's myxcel_job_id, so the
+        # new-fold row's slurm_job_id must equal it exactly. A regression in
+        # that derivation (e.g. a dropped or mis-mapped slurm_job_id) would
+        # otherwise pass silently since no comparison column ever looks at it.
+        if nr.get("slurm_job_id") != jid:
+            all_diffs.append(
+                f"submits[{jid}].slurm_job_id: new={nr.get('slurm_job_id')!r} != "
+                f"myxcel_job_id {jid!r}"
+            )
 
     assert not all_diffs, "AC-17 unexplained divergence(s):\n" + "\n".join(all_diffs)
 

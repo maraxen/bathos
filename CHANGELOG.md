@@ -25,6 +25,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the literal outcome label `pass` (the convention already used by `claim.py`/`gate.py`/
   `parity.py`), not the broader `derive_pass_labels()` set used for e-value direction, which
   is not a safe stand-in here since it does not itself exclude a `fail`-named branch.
+  - **CRITICAL follow-up: a stale fallback file could be adopted by a crashed run.**
+    `_read_result_emission()`'s fallback sources — the `<script_stem>.bth-results.json` file
+    adjacent to the script, and a single registered `--out` JSON — are never removed before a
+    run, so either can still hold a payload from an *earlier* invocation. Before this fix, a
+    crash that wrote no new result of its own could silently adopt that stale payload and be
+    recorded under its (wrong) outcome. The reader now reports which source it used
+    (`env_var` — the per-run `BTH_RESULTS_PATH` temp file, unique per run id and therefore
+    always fresh — vs. `adjacent_fallback` / `out_fallback`) and that source's `mtime`; on the
+    non-zero-exit path only, a fallback-file payload is evaluated solely when its `mtime` is
+    `>=` a wall-clock timestamp captured immediately before the subprocess was spawned (no
+    slack in the permissive direction). The zero-exit path is unchanged — it still trusts all
+    three sources exactly as before, staleness or not.
+  - **HIGH follow-up: an `unknown` outcome on a crashed run dropped the crash fact.** When a
+    complete, fresh result payload evaluates to `unknown` (no `[outcomes]` condition matched)
+    after a non-zero exit, it is now recorded as `outcome='error'` with reason
+    `exit_code=N; no outcome condition matched`, rather than `outcome='unknown'` with an empty
+    reason. Any other honest non-pass label recorded on a non-zero exit (`fail`/`marginal`/a
+    custom name) now always carries `outcome_error_reason = "exit_code=N"` too, so the crash
+    fact stays queryable instead of sitting behind an empty string.
+- **`bth migrate --to-log --dry-run` is now a genuine no-write preview.** `--dry-run` used to
+  be silently ignored on the `--to-log` path, so a "dry run" actually ran step 1 for real
+  (remote pull + mirror, reap `apply=True`) and staged a real import before stopping at
+  `residual_pending`. It now skips remote pull/mirror (reporting the `(root, remote)` pairs a
+  real run would have pulled as `would_pull`), reaps with `apply=False`, keeps the read-only
+  squeue check, and imports/folds/diffs entirely inside a throwaway scratch directory —
+  never touching the catalog dir, `~/.bth/log/`, or `~/.bth/projects.toml` (one caveat: the
+  empty `writers.lock` mutex file may still be created, see below). New `dry_run` status with
+  an advisory `report_sha256`/`would_pull`; combining `--dry-run` with `--accept-residual` is
+  now rejected outright. Wired into both the CLI and the `migrate_to_log` MCP tool.
+- **`attest_parity`'s legacy (flag-off) path dropped attestations on the next force-rebuild.**
+  It updated only the live `bathos.db` `campaigns.claim_sha256` and never called
+  `write_campaign_cool` (unlike `register_claim`'s equivalent legacy write), so
+  `bth compact --force-rebuild` silently reverted an already-attested claim back to its
+  pre-attestation state. `catalog_dir` is now threaded through `_attest_parity_impl`, which
+  writes the cool campaign JSON too, mirroring `register_claim`; found by the AC-17
+  differential extension.
+- **`bathos.cluster.pull_path` (and therefore the cluster run-log pull) never actually worked
+  — it now fails loudly instead of silently.** The previous implementation shelled out to
+  `myxcel pull <remote> <remote_path> --dest <local_dest>`, but the installed `myxcel pull` is
+  `myxcel pull [OPTIONS] {remote} {project}` — a registered project name, not a filesystem
+  path, and no `--dest` option at all — so every real call failed with a myxcel usage error,
+  invisibly, because tests mocked this function directly. `pull_path` now raises
+  `MyxcelCapabilityGapError` outright rather than mis-invoking the CLI; myxcel needs a new
+  arbitrary remote-path → local-dest pull capability before this can work (tracked as praxia
+  debt #1993). `pull_cluster_log` returns a structured `ClusterLogPullResult` (`pulled`,
+  `failures`) instead of `None`, and `bth sync --pull` / the `sync` MCP tool now report
+  `cluster_log_pulled: false` plus per-subpath failure reasons honestly, rather than reading
+  "no exception raised" as success.
+
+### Added
+
+- **Two more Migration step-3 residual classes, `output_metadata_drift` and
+  `postmortem_worktree_deleted`** (debt #1944; spec v37, narrowed further in v38). A
+  `runs.output_metadata` residual classifies as `output_metadata_drift` only when both sides
+  name the same set of output paths, every differing path is workspace-relative (never
+  absolute), and — the narrow part added in the v38 remediation pass — every differing path's
+  two sides are exactly `{"missing", "present"}` (debt #1944's actual signature: a compact run
+  from the wrong cwd sees a relative output as absent). A genuine content mutation — both
+  sides `"present"` with a different `sha256`/`size_bytes` — now correctly stays
+  unclassified instead of getting the same "explained" label. `postmortem_worktree_deleted`
+  was investigated and documented as structurally unreachable with this importer/fold: no
+  compared column carries a "which worktree" signal, `compact.py`'s postmortem walk always
+  resolves to the main worktree and prunes `.claude/worktrees/`, and `run.postmortem_applied`
+  never fires before cut-over — see `_classify`'s docstring in `migrate.py` for the full trace.
 
 ## [0.13.0a4] - 2026-08-31
 

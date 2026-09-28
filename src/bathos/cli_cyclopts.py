@@ -996,9 +996,10 @@ def migrate(
     Parameters
     ----------
     dry_run: Show what would be migrated without writing. With --to-log, preview
-        Migration steps 1-3's residual report with NO writes anywhere (remote
-        pull/mirror is skipped -- see `would pull` in the output -- and reap runs
-        with apply=False); status `dry_run`. Rejected together with --accept-residual.
+        Migration steps 1-3's residual report with no data files written anywhere
+        (remote pull/mirror is skipped -- see `would pull` in the output -- and reap
+        runs with apply=False; the empty writers.lock mutex may still be created);
+        status `dry_run`. Rejected together with --accept-residual.
     classify: Classify flat scripts into subdirs (Phase 2).
     project: Scope migration to a single project slug's runs/<project>/ fragments
         (default: all projects in the catalog).
