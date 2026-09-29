@@ -32,7 +32,9 @@ dependencies = [
     "fastmcp>=3.3.1",
     # 0.1.1a8: capture_git_state withholds an unverified sidecar/env sha
     # (hash="unknown") unless a schema-v2 tree manifest verifies (praxia debt #2058).
-    "cisternal>=0.1.1a8",
+    # 0.1.1a9: a dangling .git gitfile no longer hides a verified sidecar
+    # (praxia debt #2100).
+    "cisternal>=0.1.1a9",
     # backlog #4702: bathos/cli_cyclopts.py (the real `bth` CLI as of the final
     # cutover) wires directly against cisternal's cyclopts-based wire() --
     # declared here since it's imported directly, not just pulled in
