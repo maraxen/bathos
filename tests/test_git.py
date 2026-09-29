@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from bathos.git import capture_git_state
+from tests._sidecar import write_v1_sidecar, write_v2_sidecar
 
 
 def test_captures_state_in_git_repo(tmp_path: Path):
@@ -66,8 +67,9 @@ def test_no_channel_behavior_is_identical_to_legacy(tmp_path: Path):
 
 
 def test_env_channel_used_when_no_repo(tmp_path: Path, monkeypatch):
-    """Env channel is used when no git repo exists."""
+    """Env channel is used when no git repo exists and the sidecar at its root verifies."""
     test_sha = "a" * 40
+    write_v2_sidecar(tmp_path, test_sha)
     monkeypatch.setenv("MYXCEL_PROVENANCE_SCHEMA", "1")
     monkeypatch.setenv("MYXCEL_PROVENANCE_STATUS", "git")
     monkeypatch.setenv("MYXCEL_GIT_SHA", test_sha)
@@ -80,6 +82,24 @@ def test_env_channel_used_when_no_repo(tmp_path: Path, monkeypatch):
     assert state.branch == "test-branch"
     assert state.dirty is False
     assert state.provenance_source == "myxcel-env"
+    assert state.code_verified is True
+
+
+def test_env_channel_sha_withheld_without_verifiable_sidecar(tmp_path: Path, monkeypatch):
+    """cisternal>=0.1.1a8 (praxia debt #2058): an env sha with no sidecar to verify it
+    against is recorded as "unknown", never trusted on the env var's word."""
+    monkeypatch.setenv("MYXCEL_PROVENANCE_SCHEMA", "1")
+    monkeypatch.setenv("MYXCEL_PROVENANCE_STATUS", "git")
+    monkeypatch.setenv("MYXCEL_GIT_SHA", "a" * 40)
+    monkeypatch.setenv("MYXCEL_GIT_BRANCH", "test-branch")
+    monkeypatch.setenv("MYXCEL_GIT_DIRTY", "0")
+    monkeypatch.setenv("MYXCEL_PROVENANCE_ROOT", str(tmp_path))
+
+    state = capture_git_state(tmp_path)
+    assert state.hash == "unknown"
+    assert state.sha is None
+    assert state.provenance_source == "unverified-env"
+    assert state.code_verified is None  # nothing to verify against
 
 
 def test_env_channel_ignored_when_cwd_outside_provenance_root(tmp_path: Path, monkeypatch):
@@ -124,71 +144,73 @@ def test_env_channel_rejects_unrecognised_provenance_status(tmp_path: Path, monk
 
 # Test sidecar channel
 def test_sidecar_channel_used_when_no_env(tmp_path: Path):
-    """Sidecar channel is used when no env vars set."""
+    """Sidecar channel is used when no env vars set and its tree manifest verifies."""
     test_sha = "b" * 40
-    sidecar_data = {
-        "schema_version": 1,
-        "provenance_status": "git",
-        "git_sha": test_sha,
-        "git_branch": "feature",
-        "git_dirty": False,
-        "dirty_content_id": None,
-        "capture_stage": "push",
-        "sync_state": "verified",
-        "computed_at": "2026-08-20T14:00:00Z",
-        "provenance_root": str(tmp_path),
-        "remote": "test",
-        "project": "testproj",
-        "worktree": None,
-        "myxcel_version": "0.1.0",
-    }
-    sidecar_file = tmp_path / ".myxcel_provenance.json"
-    sidecar_file.write_text(json.dumps(sidecar_data))
+    write_v2_sidecar(tmp_path, test_sha, git_branch="feature")
 
     state = capture_git_state(tmp_path)
     assert state.hash == test_sha
     assert state.branch == "feature"
     assert state.dirty is False
     assert state.provenance_source == "myxcel-sidecar"
+    assert state.code_verified is True
+
+
+def test_v1_sidecar_sha_is_withheld(tmp_path: Path):
+    """cisternal>=0.1.1a8 (praxia debt #2058): a pre-manifest (v1) sidecar's sha is never
+    presented as authoritative -- it could name a commit unrelated to the files on disk."""
+    write_v1_sidecar(tmp_path, "b" * 40, git_branch="feature")
+
+    state = capture_git_state(tmp_path)
+    assert state.hash == "unknown"
+    assert state.sha is None
+    assert state.provenance_source == "unverified-sidecar"
+    assert state.code_verified is None  # no manifest to verify against
+
+
+def test_v2_sidecar_sha_withheld_when_pushed_file_modified(tmp_path: Path):
+    """A v2 sidecar stops vouching for its sha once the tree drifts from the manifest."""
+    write_v2_sidecar(tmp_path, "b" * 40)
+    (tmp_path / "src" / "app.py").write_text("print('edited on the remote')\n")
+
+    state = capture_git_state(tmp_path)
+    assert state.hash == "unknown"
+    assert state.provenance_source == "unverified-sidecar"
+    assert state.code_verified is False  # verification ran and failed
 
 
 def test_env_channel_beats_sidecar(tmp_path: Path, monkeypatch):
-    """Env channel beats sidecar when both present."""
-    # Create sidecar
-    test_sha_sidecar = "c" * 40
-    sidecar_data = {
-        "schema_version": 1,
-        "provenance_status": "git",
-        "git_sha": test_sha_sidecar,
-        "git_branch": "sidecar-branch",
-        "git_dirty": False,
-        "dirty_content_id": None,
-        "capture_stage": "push",
-        "sync_state": "verified",
-        "computed_at": "2026-08-20T14:00:00Z",
-        "provenance_root": str(tmp_path),
-        "remote": "test",
-        "project": "testproj",
-        "worktree": None,
-        "myxcel_version": "0.1.0",
-    }
-    sidecar_file = tmp_path / ".myxcel_provenance.json"
-    sidecar_file.write_text(json.dumps(sidecar_data))
-
-    # Set env vars with different values
-    test_sha_env = "d" * 40
+    """Env channel beats sidecar when both present and agree on the sha."""
+    test_sha = "d" * 40
+    write_v2_sidecar(tmp_path, test_sha, git_branch="sidecar-branch")
     monkeypatch.setenv("MYXCEL_PROVENANCE_SCHEMA", "1")
     monkeypatch.setenv("MYXCEL_PROVENANCE_STATUS", "git")
-    monkeypatch.setenv("MYXCEL_GIT_SHA", test_sha_env)
+    monkeypatch.setenv("MYXCEL_GIT_SHA", test_sha)
     monkeypatch.setenv("MYXCEL_GIT_BRANCH", "env-branch")
     monkeypatch.setenv("MYXCEL_GIT_DIRTY", "0")
     monkeypatch.setenv("MYXCEL_PROVENANCE_ROOT", str(tmp_path))
 
     state = capture_git_state(tmp_path)
     # Env should win
-    assert state.hash == test_sha_env
+    assert state.hash == test_sha
     assert state.branch == "env-branch"
     assert state.provenance_source == "myxcel-env"
+
+
+def test_env_sha_disagreeing_with_sidecar_is_withheld(tmp_path: Path, monkeypatch):
+    """The env sha is only as good as the verified sidecar at its root; if they name
+    different commits, neither is trusted."""
+    write_v2_sidecar(tmp_path, "c" * 40)
+    monkeypatch.setenv("MYXCEL_PROVENANCE_SCHEMA", "1")
+    monkeypatch.setenv("MYXCEL_PROVENANCE_STATUS", "git")
+    monkeypatch.setenv("MYXCEL_GIT_SHA", "d" * 40)
+    monkeypatch.setenv("MYXCEL_GIT_BRANCH", "env-branch")
+    monkeypatch.setenv("MYXCEL_GIT_DIRTY", "0")
+    monkeypatch.setenv("MYXCEL_PROVENANCE_ROOT", str(tmp_path))
+
+    state = capture_git_state(tmp_path)
+    assert state.hash == "unknown"
+    assert state.provenance_source == "unverified-env"
 
 
 def test_real_repo_at_provenance_root_beats_both_channels(tmp_path: Path, monkeypatch):
@@ -253,6 +275,7 @@ def test_ancestor_repo_at_different_root_does_not_beat_channel(tmp_path: Path, m
 
     # Set env to point to project_dir (different from parent)
     channel_sha = "f" * 40
+    write_v2_sidecar(project_dir, channel_sha)
     monkeypatch.setenv("MYXCEL_PROVENANCE_SCHEMA", "1")
     monkeypatch.setenv("MYXCEL_PROVENANCE_STATUS", "git")
     monkeypatch.setenv("MYXCEL_GIT_SHA", channel_sha)
@@ -439,23 +462,9 @@ def test_future_schema_version_is_accepted_with_warning(tmp_path: Path):
     """Forward compatibility: future schema_version accepted, AND warns once (D2's
     "accepts the record... and warns once" -- the acceptance half alone isn't the full
     contract)."""
-    sidecar_data = {
-        "schema_version": 99,  # Future version
-        "provenance_status": "git",
-        "git_sha": "3" * 40,
-        "git_branch": "test",
-        "git_dirty": False,
-        "dirty_content_id": None,
-        "capture_stage": "push",
-        "sync_state": "verified",
-        "computed_at": "2026-08-20T14:00:00Z",
-        "provenance_root": str(tmp_path),
-        "remote": "test",
-        "project": "testproj",
-        "worktree": None,
-        "myxcel_version": "0.1.0",
-    }
-    sidecar_file = tmp_path / ".myxcel_provenance.json"
+    sidecar_file = write_v2_sidecar(tmp_path, "3" * 40)
+    sidecar_data = json.loads(sidecar_file.read_text())
+    sidecar_data["schema_version"] = 99  # Future version
     sidecar_file.write_text(json.dumps(sidecar_data))
 
     with pytest.warns(UserWarning, match="schema_version"):
@@ -465,8 +474,12 @@ def test_future_schema_version_is_accepted_with_warning(tmp_path: Path):
 
 
 def test_dirty_content_id_reaches_gitstate(tmp_path: Path, monkeypatch):
-    """dirty_content_id from channel reaches GitState."""
+    """dirty_content_id reaches GitState. For the env channel it is taken from the
+    verified sidecar at MYXCEL_PROVENANCE_ROOT, not from the env var."""
     content_id = "tree:abcd1234abcd1234abcd1234abcd1234abcd1234"
+    write_v2_sidecar(
+        tmp_path, "4" * 40, matches_commit=False, git_dirty=True, dirty_content_id=content_id
+    )
     monkeypatch.setenv("MYXCEL_PROVENANCE_SCHEMA", "1")
     monkeypatch.setenv("MYXCEL_PROVENANCE_STATUS", "git")
     monkeypatch.setenv("MYXCEL_GIT_SHA", "4" * 40)
@@ -522,23 +535,7 @@ def test_env_channel_rejected_by_d5_falls_through_to_sidecar_with_correct_source
     monkeypatch.setenv("MYXCEL_PROVENANCE_ROOT", str(other_dir))
 
     sidecar_sha = "2" * 40
-    sidecar_data = {
-        "schema_version": 1,
-        "provenance_status": "git",
-        "git_sha": sidecar_sha,
-        "git_branch": "sidecar-branch",
-        "git_dirty": False,
-        "dirty_content_id": None,
-        "capture_stage": "push",
-        "sync_state": "verified",
-        "computed_at": "2026-08-20T14:00:00Z",
-        "provenance_root": str(tmp_path),
-        "remote": "test",
-        "project": "testproj",
-        "worktree": None,
-        "myxcel_version": "0.1.0",
-    }
-    (tmp_path / ".myxcel_provenance.json").write_text(json.dumps(sidecar_data))
+    write_v2_sidecar(tmp_path, sidecar_sha, git_branch="sidecar-branch")
 
     state = capture_git_state(tmp_path)
     assert state.hash == sidecar_sha
@@ -627,6 +624,7 @@ def test_same_root_treats_oserror_as_not_same(tmp_path: Path, monkeypatch):
 
     # Set env channel with root pointing to subdir (so D5 guard passes)
     # but no real repo at subdir
+    write_v2_sidecar(subdir, "6" * 40)
     monkeypatch.setenv("MYXCEL_PROVENANCE_SCHEMA", "1")
     monkeypatch.setenv("MYXCEL_PROVENANCE_STATUS", "git")
     monkeypatch.setenv("MYXCEL_GIT_SHA", "6" * 40)
@@ -642,6 +640,7 @@ def test_same_root_treats_oserror_as_not_same(tmp_path: Path, monkeypatch):
 
 def test_empty_string_env_vars_become_none(tmp_path: Path, monkeypatch):
     """Empty string in env vars is treated as None/null."""
+    write_v2_sidecar(tmp_path, "7" * 40)
     monkeypatch.setenv("MYXCEL_PROVENANCE_SCHEMA", "1")
     monkeypatch.setenv("MYXCEL_PROVENANCE_STATUS", "git")
     monkeypatch.setenv("MYXCEL_GIT_SHA", "7" * 40)
@@ -653,30 +652,21 @@ def test_empty_string_env_vars_become_none(tmp_path: Path, monkeypatch):
     state = capture_git_state(tmp_path)
     assert state.hash == "7" * 40
     assert state.branch == "unknown"  # empty string → None → "unknown"
-    assert state.dirty is False  # empty string → False
+    # empty string → None, which is not an attestation of cleanliness: cisternal>=0.1.1a8
+    # reports dirty=False only when the channel positively says clean.
+    assert state.dirty is True
     assert state.dirty_content_id is None
 
 
 def test_sidecar_with_nonzero_git_dirty(tmp_path: Path):
     """git_dirty=true in sidecar maps to dirty=True in GitState."""
-    sidecar_data = {
-        "schema_version": 1,
-        "provenance_status": "git",
-        "git_sha": "8" * 40,
-        "git_branch": "test",
-        "git_dirty": True,
-        "dirty_content_id": "tree:abcd1234abcd1234abcd1234abcd1234abcd1234",
-        "capture_stage": "push",
-        "sync_state": "verified",
-        "computed_at": "2026-08-20T14:00:00Z",
-        "provenance_root": str(tmp_path),
-        "remote": "test",
-        "project": "testproj",
-        "worktree": None,
-        "myxcel_version": "0.1.0",
-    }
-    sidecar_file = tmp_path / ".myxcel_provenance.json"
-    sidecar_file.write_text(json.dumps(sidecar_data))
+    write_v2_sidecar(
+        tmp_path,
+        "8" * 40,
+        matches_commit=False,
+        git_dirty=True,
+        dirty_content_id="tree:abcd1234abcd1234abcd1234abcd1234abcd1234",
+    )
 
     state = capture_git_state(tmp_path)
     assert state.dirty is True

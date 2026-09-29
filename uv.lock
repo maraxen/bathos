@@ -139,7 +139,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cisternal", git = "https://github.com/maraxen/cisternal?rev=1c3dec56ffacc6ae3b31f7b7ea9e385d80dec1ac" },
+    { name = "cisternal", specifier = ">=0.1.1a8" },
     { name = "cyclopts", specifier = ">=4.18.0" },
     { name = "duckdb", specifier = ">=1.0" },
     { name = "fastapi", marker = "extra == 'viz'", specifier = ">=0.110" },
@@ -322,13 +322,17 @@ wheels = [
 
 [[package]]
 name = "cisternal"
-version = "0.1.1a7"
-source = { git = "https://github.com/maraxen/cisternal?rev=1c3dec56ffacc6ae3b31f7b7ea9e385d80dec1ac#1c3dec56ffacc6ae3b31f7b7ea9e385d80dec1ac" }
+version = "0.1.1a8"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cyclopts" },
     { name = "fastmcp" },
     { name = "opentelemetry-api" },
     { name = "pyyaml" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d4/ae/1a6bcb88f236a7cf6ba5b3e091d6cc82151390d5b5ab78288fd1e26cb520/cisternal-0.1.1a8.tar.gz", hash = "sha256:7cd258a859e79ff6d90554310c0543473f5a590631800bca3b524fff1732ef53", size = 250584, upload-time = "2026-09-29T19:28:30.253Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a4/00/3eeb8cea8219607cd4d1d54e94329c323cd64a7c0c8e1dea20d20004e36b/cisternal-0.1.1a8-py3-none-any.whl", hash = "sha256:2bddbe8d419639f723e878f34b58286effd2f2d537a97d3846f672a331529371", size = 161360, upload-time = "2026-09-29T19:28:29.293Z" },
 ]
 
 [[package]]

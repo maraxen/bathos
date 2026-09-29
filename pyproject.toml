@@ -30,7 +30,9 @@ dependencies = [
     "toml>=0.10",
     "rich>=13",
     "fastmcp>=3.3.1",
-    "cisternal>=0.1.1a4",
+    # 0.1.1a8: capture_git_state withholds an unverified sidecar/env sha
+    # (hash="unknown") unless a schema-v2 tree manifest verifies (praxia debt #2058).
+    "cisternal>=0.1.1a8",
     # backlog #4702: bathos/cli_cyclopts.py (the real `bth` CLI as of the final
     # cutover) wires directly against cisternal's cyclopts-based wire() --
     # declared here since it's imported directly, not just pulled in
@@ -41,26 +43,6 @@ dependencies = [
     # payload models do not rest on an undeclared transitive dependency.
     "pydantic>=2.7",
 ]
-
-# TEMPORARY source override: this branch needs `cisternal.provenance`, which is
-# MERGED (maraxen/cisternal#32, squashed onto main as 6c0819a) but NOT YET
-# RELEASED -- PyPI's newest cisternal is 0.1.1a4, while main is 0.1.1a7.
-#
-# Pinned to a git rev rather than a local path so it resolves on any machine and
-# in CI. A `path = "../cisternal"` override only worked on the author's box, and
-# not even there from inside a git worktree, where `../` resolves relative to the
-# worktree rather than the main checkout.
-#
-# Remove this section once cisternal >= 0.1.1a7 is on PyPI, and raise the pin in
-# [project.dependencies] to that release.
-#
-# FURTHER-TEMPORARY: pinned past 6c0819a to 1c3dec5, the tip of unmerged PR
-# maraxen/cisternal#33 (cli_group/cli_name grouping+aliasing on wire()), needed
-# by backlog #4702's Milestone 1 campaign-CLI pilot (src/bathos/cli_cyclopts.py).
-# Revert this hop to 6c0819a (or whatever commit ends up merged to main) once
-# #33 lands -- do not let this rev silently outlive that PR.
-[tool.uv.sources]
-cisternal = { git = "https://github.com/maraxen/cisternal", rev = "1c3dec56ffacc6ae3b31f7b7ea9e385d80dec1ac" }
 
 [project.optional-dependencies]
 viz = [
