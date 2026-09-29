@@ -12,8 +12,10 @@ keeps working with no signature or behavior change.
 
 from __future__ import annotations
 
+import dataclasses
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from cisternal.provenance.channels import GitState, capture_git_state
 from cisternal.provenance.channels import (
@@ -23,7 +25,29 @@ from cisternal.provenance.channels import (
     _sidecar_channel as _sidecar_channel,  # re-exported: test_git.py imports it directly
 )
 
-__all__ = ["GitState", "capture_git_state", "paths_changed_since"]
+__all__ = ["GitState", "capture_git_state", "git_state_as_dict", "paths_changed_since"]
+
+
+def git_state_as_dict(state: GitState) -> dict[str, Any]:
+    """JSON-ready GitState for event payloads, with `verification` summarised.
+
+    cisternal>=0.1.1a8 attaches the full tree-manifest verification to GitState,
+    including every mismatched/missing/extra path -- unbounded for a stale remote.
+    Events keep the verdict and the counts; the path lists stay out of the log.
+    """
+    data = dataclasses.asdict(state)
+    verification = getattr(state, "verification", None)
+    if verification is not None:
+        data["verification"] = {
+            "verified": verification.verified,
+            "n_files": verification.n_files,
+            "n_match": verification.n_match,
+            "n_mismatched": len(verification.mismatched),
+            "n_missing": len(verification.missing),
+            "n_extra": len(verification.extra_untracked_under_declared_dirs),
+            "error": verification.error,
+        }
+    return data
 
 
 def paths_changed_since(sha: str, paths: list[str], cwd: Path = Path.cwd()) -> bool:

@@ -228,7 +228,9 @@ class Run:
     #: v15. Dirty content identifier: "tree:<40hex>" | "diff-sha256:<64hex>" | None.
     #: From myxcel provenance capture: identifies the state of uncommitted edits.
     git_dirty_content_id: str | None = None
-    #: v15. Source of git provenance: "git" | "myxcel-env" | "myxcel-sidecar" | "none".
+    #: v15. Source of git provenance: "git" | "myxcel-env" | "myxcel-sidecar" | "none",
+    #: or (cisternal>=0.1.1a8) "unverified-env" | "unverified-sidecar" when a channel
+    #: claimed a sha that its tree manifest could not verify -- git_hash is then "unknown".
     #: Indicates which channel provided the git_hash and git_branch values.
     git_provenance_source: str | None = None
 

@@ -31,12 +31,19 @@ def test_decorator_records_git_dirty_content_id_and_provenance_source(tmp_path, 
     monkeypatch.setenv("BTH_PROJECT_SLUG", "test_proj")
     monkeypatch.chdir(tmp_path)
 
+    # cisternal>=0.1.1a8 only trusts the env channel alongside a verified v2 sidecar at
+    # MYXCEL_PROVENANCE_ROOT, and takes dirty_content_id from that sidecar.
+    from tests._sidecar import write_v2_sidecar
+
+    write_v2_sidecar(
+        tmp_path, "a" * 40, matches_commit=False, git_dirty=True, dirty_content_id="tree:" + "b" * 40
+    )
     monkeypatch.setenv("MYXCEL_PROVENANCE_SCHEMA", "1")
     monkeypatch.setenv("MYXCEL_PROVENANCE_STATUS", "git")
     monkeypatch.setenv("MYXCEL_GIT_SHA", "a" * 40)
     monkeypatch.setenv("MYXCEL_GIT_BRANCH", "feature")
     monkeypatch.setenv("MYXCEL_GIT_DIRTY", "1")
-    monkeypatch.setenv("MYXCEL_GIT_DIRTY_CONTENT_ID", "tree:" + "b" * 40)
+    monkeypatch.setenv("MYXCEL_GIT_DIRTY_CONTENT_ID", "tree:" + "e" * 40)  # stale; sidecar wins
     monkeypatch.setenv("MYXCEL_PROVENANCE_ROOT", str(tmp_path))
 
     from bathos.decorators import experiment
