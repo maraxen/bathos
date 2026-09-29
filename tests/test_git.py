@@ -179,6 +179,32 @@ def test_v2_sidecar_sha_withheld_when_pushed_file_modified(tmp_path: Path):
     assert state.code_verified is False  # verification ran and failed
 
 
+def test_git_state_as_dict_summarises_verification_without_path_lists(tmp_path: Path):
+    """Event payloads keep the verdict and counts, never the (unbounded) path lists."""
+    from bathos.git import git_state_as_dict
+
+    write_v2_sidecar(tmp_path, "b" * 40)
+    (tmp_path / "src" / "app.py").write_text("print('edited on the remote')\n")
+    (tmp_path / "src" / "stray.py").write_text("extra\n")
+
+    data = git_state_as_dict(capture_git_state(tmp_path))
+    json.dumps(data)  # must be JSON-ready as-is
+    assert data["code_verified"] is False
+    summary = data["verification"]
+    assert summary["verified"] is False
+    assert summary["n_mismatched"] == 1
+    assert summary["n_extra"] == 1
+    assert "stray.py" not in json.dumps(data)
+
+
+def test_git_state_as_dict_without_verification(tmp_path: Path):
+    from bathos.git import git_state_as_dict
+
+    data = git_state_as_dict(capture_git_state(tmp_path))
+    assert data["verification"] is None
+    assert data["hash"] == "unknown"
+
+
 def test_env_channel_beats_sidecar(tmp_path: Path, monkeypatch):
     """Env channel beats sidecar when both present and agree on the sha."""
     test_sha = "d" * 40

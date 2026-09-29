@@ -12,7 +12,6 @@ deterministic for a fixed event set).
 
 from __future__ import annotations
 
-import dataclasses
 import os
 import time
 import uuid
@@ -117,7 +116,7 @@ def capture_git_provenance(
     its own; this is a thin assembly of the two existing calls into one dict
     shaped for `run.started.data`.
     """
-    from bathos.git import capture_git_state
+    from bathos.git import capture_git_state, git_state_as_dict
     from bathos.git_pin import pin_result_as_dict, pin_run
 
     git_state = capture_git_state(cwd)
@@ -130,6 +129,6 @@ def capture_git_provenance(
         declared_paths=declared_paths,
     )
     return {
-        "git": dataclasses.asdict(git_state),
+        "git": git_state_as_dict(git_state),
         "pin": pin_result_as_dict(pin),
     }

@@ -15,7 +15,7 @@ from pathlib import Path
 
 from bathos.catalog import write_run
 from bathos.checker import hash_dependency_lock
-from bathos.git import capture_git_state
+from bathos.git import capture_git_state, git_state_as_dict
 from bathos.git_pin import ensure_manifest_ignored, pin_result_as_dict, pin_run
 from bathos.prereg import (
     GateErrorCode,
@@ -807,7 +807,7 @@ def _run_script_impl(
         event("run.pin_error", run_uuid=run.id, exc_type=type(e).__name__, exc_msg=str(e))
 
     if pending_started is not None:
-        pending_started["git_state"] = dataclasses.asdict(git)
+        pending_started["git_state"] = git_state_as_dict(git)
         pending_started["pin"] = pin_result_as_dict(pin) if pin is not None else None
         # D6: run.started is not best-effort -- no subprocess unless it is durable.
         try:

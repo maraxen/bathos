@@ -2030,6 +2030,9 @@ def test_flag_on_run_emits_started_and_finished_events_only(
         "dirty",
         "dirty_content_id",
         "provenance_source",
+        # cisternal>=0.1.1a8; `verification` is a bounded summary (git_state_as_dict).
+        "code_verified",
+        "verification",
     }
     assert "pin" in started["data"]
     # Review 3a: the full Run row, so a reaped (never-finished) run folds every column.
