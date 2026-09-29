@@ -43,7 +43,7 @@ def test_decorator_records_git_dirty_content_id_and_provenance_source(tmp_path, 
     monkeypatch.setenv("MYXCEL_GIT_SHA", "a" * 40)
     monkeypatch.setenv("MYXCEL_GIT_BRANCH", "feature")
     monkeypatch.setenv("MYXCEL_GIT_DIRTY", "1")
-    monkeypatch.setenv("MYXCEL_GIT_DIRTY_CONTENT_ID", "tree:" + "b" * 40)
+    monkeypatch.setenv("MYXCEL_GIT_DIRTY_CONTENT_ID", "tree:" + "e" * 40)  # stale; sidecar wins
     monkeypatch.setenv("MYXCEL_PROVENANCE_ROOT", str(tmp_path))
 
     from bathos.decorators import experiment

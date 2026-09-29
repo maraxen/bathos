@@ -393,8 +393,10 @@ def test_sidecar_ascent_is_bounded_to_eight_levels(tmp_path: Path):
     sidecar_file.write_text(json.dumps(sidecar_data))
 
     state = capture_git_state(deep_dir)
-    # Should not find sidecar (too deep)
+    # Should not find sidecar (too deep). hash alone can't tell "not found" from
+    # "found but withheld" (a v1 sidecar), so the source is what proves the bound held.
     assert state.hash == "unknown"
+    assert state.provenance_source == "none"
 
 
 def test_status_nogit_maps_to_hash_nogit(tmp_path: Path, monkeypatch):
@@ -439,6 +441,7 @@ def test_malformed_sidecar_falls_through(tmp_path: Path):
     sidecar_file.write_text(json.dumps({"schema_version": 1}))
     state = capture_git_state(tmp_path)
     assert state.hash == "unknown"
+    assert state.provenance_source == "none"
 
     # Non-int schema_version
     sidecar_file.write_text(
@@ -446,6 +449,7 @@ def test_malformed_sidecar_falls_through(tmp_path: Path):
     )
     state = capture_git_state(tmp_path)
     assert state.hash == "unknown"
+    assert state.provenance_source == "none"
 
     # Present but unrecognised provenance_status (D4's enum is exactly
     # "git" | "nogit" | "unavailable" -- anything else must be rejected, not passed
@@ -485,11 +489,31 @@ def test_dirty_content_id_reaches_gitstate(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("MYXCEL_GIT_SHA", "4" * 40)
     monkeypatch.setenv("MYXCEL_GIT_BRANCH", "test")
     monkeypatch.setenv("MYXCEL_GIT_DIRTY", "1")
-    monkeypatch.setenv("MYXCEL_GIT_DIRTY_CONTENT_ID", content_id)
+    # A different (stale) id in the env var: the verified sidecar's must win.
+    monkeypatch.setenv("MYXCEL_GIT_DIRTY_CONTENT_ID", "tree:" + "e" * 40)
     monkeypatch.setenv("MYXCEL_PROVENANCE_ROOT", str(tmp_path))
 
     state = capture_git_state(tmp_path)
     assert state.dirty_content_id == content_id
+
+
+def test_manifest_not_matching_commit_forces_dirty(tmp_path: Path):
+    """A record claiming clean is overruled when the manifest says the pushed tree is
+    not the commit's tree (e.g. untracked files were pushed)."""
+    write_v2_sidecar(tmp_path, "5" * 40, matches_commit=False, git_dirty=False)
+
+    state = capture_git_state(tmp_path)
+    assert state.hash == "5" * 40
+    assert state.dirty is True
+
+
+def test_record_dirty_wins_even_when_manifest_matches_commit(tmp_path: Path):
+    """dirty is False only when BOTH the record and the manifest say clean."""
+    write_v2_sidecar(tmp_path, "5" * 40, matches_commit=True, git_dirty=True)
+
+    state = capture_git_state(tmp_path)
+    assert state.hash == "5" * 40
+    assert state.dirty is True
 
 
 def test_capture_git_state_never_raises_with_nonexistent_prov_root(tmp_path: Path, monkeypatch):
