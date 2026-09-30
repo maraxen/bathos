@@ -437,11 +437,8 @@ def test_locked_legacy_db_aborts(tmp_path: Path):
 # --------------------------------------------------------------------------
 
 
-def test_squeue_conflict_refuses_without_force(tmp_path: Path, monkeypatch):
-    backend = _simple_backend(tmp_path)
-    monkeypatch.setattr("bathos.runlog.migrate.my_squeue_job_ids", lambda: ["999999"])
-    # Make run-a's slurm_job_id (via a submit record) match, so it's a
-    # recognized conflict rather than an unrelated queued job.
+def _write_running_slurm_run(catalog_dir: Path) -> None:
+    """A stale-dated `running` run that carries a slurm_job_id, then compact."""
     write_run(
         Run(
             id="run-with-job",
@@ -457,9 +454,24 @@ def test_squeue_conflict_refuses_without_force(tmp_path: Path, monkeypatch):
             status="running",
             slurm_job_id="999999",
         ),
-        backend.catalog_dir,
+        catalog_dir,
     )
-    compact(backend.catalog_dir)
+    compact(catalog_dir)
+
+
+def test_squeue_conflict_refuses_without_force(tmp_path: Path, monkeypatch):
+    backend = _simple_backend(tmp_path)
+    monkeypatch.setattr("bathos.runlog.migrate.my_squeue_job_ids", lambda: ["999999"])
+    # Step 1 runs reap_runs(), which asks SLURM (sacct) about run-with-job. Without this
+    # stub the answer depends on the host: CI has no sacct (-> "sacct_error", run skipped,
+    # conflict survives) but a machine whose PATH has a real sacct wrapper answers "no
+    # record", reaps the 2020-dated run, and the conflict this test asserts disappears
+    # (status "residual_pending"). SLURM agreeing that the job is live is the scenario
+    # under test, so say so.
+    monkeypatch.setattr("bathos.reap._query_slurm_job", lambda _job_id: ("RUNNING", None))
+    # Make run-a's slurm_job_id (via a submit record) match, so it's a
+    # recognized conflict rather than an unrelated queued job.
+    _write_running_slurm_run(backend.catalog_dir)
 
     from bathos.runlog.migrate import migrate_to_log
 
@@ -471,6 +483,25 @@ def test_squeue_conflict_refuses_without_force(tmp_path: Path, monkeypatch):
 
     forced = _converge(backend.catalog_dir, force=True)
     assert forced.status == "switched"
+
+
+def test_squeue_conflict_cleared_when_slurm_says_terminal(tmp_path: Path, monkeypatch):
+    """Negative control for the stub above: it must be load-bearing.
+
+    The same scenario with SLURM reporting COMPLETED is reaped by step 1, so there is
+    nothing left to conflict with. If this ever returned "squeue_conflict", the RUNNING stub
+    in the test above would be proving nothing about reap's role.
+    """
+    backend = _simple_backend(tmp_path)
+    monkeypatch.setattr("bathos.runlog.migrate.my_squeue_job_ids", lambda: ["999999"])
+    monkeypatch.setattr("bathos.reap._query_slurm_job", lambda _job_id: ("COMPLETED", None))
+    _write_running_slurm_run(backend.catalog_dir)
+
+    from bathos.runlog.migrate import migrate_to_log
+
+    result = migrate_to_log(backend.catalog_dir)
+    assert result.status != "squeue_conflict"
+    assert not result.conflicting_jobs
 
 
 def test_squeue_unavailable_refuses_unconditionally_even_with_force(tmp_path: Path, monkeypatch):
