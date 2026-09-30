@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import warnings
 from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any
@@ -39,11 +38,6 @@ def init_server_telemetry(
 
 
 def init_via_cisternal(
-    # Accepted for signature symmetry with init_server_telemetry, but NOT forwarded:
-    # cisternal.init() takes (log_dir, max_bytes, backup_count, exporters,
-    # heartbeat_interval) and cisternal has no level, severity or filtering
-    # mechanism to forward it to. Warned about below rather than dropped silently.
-    # Upstream gap tracked as debt #1202; forward it here once cisternal supports it.
     level: str | int | None = None,
     log_dir: str | Path | None = None,
     max_bytes: int = 10_485_760,
@@ -51,23 +45,16 @@ def init_via_cisternal(
 ) -> bool:
     """Initialize cisternal pipeline when cutover flag is set.
 
-    Note: ``level`` has no effect on this path. On the legacy path it is a real
-    stdlib severity filter (``init_telemetry`` calls ``root_logger.setLevel``),
-    but cisternal exposes no equivalent, so an explicitly requested level — via
-    this argument or ``BTH_LOG_LEVEL`` — is dropped and warned about.
+    ``level`` (else ``BTH_LOG_LEVEL``) is forwarded to ``cisternal.init(level=)``
+    (cisternal >= 0.1.1a11), which drops ``emit_event`` records below it. With
+    neither set, cisternal's own default applies (``CISTERNAL_LOG_LEVEL``, else
+    no filtering). Unlike the legacy path there is no implicit INFO floor.
     """
     if not cisternal_cutover_enabled():
         return False
 
-    if level is not None or os.environ.get("BTH_LOG_LEVEL"):
-        warnings.warn(
-            "Telemetry log level is ignored under the cisternal cutover "
-            "(CISTERNAL_TELEMETRY): cisternal provides no severity filtering, so "
-            "every event is emitted regardless of level or BTH_LOG_LEVEL. Unset "
-            "CISTERNAL_TELEMETRY to restore level filtering on the legacy pipeline.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
+    if level is None:
+        level = os.environ.get("BTH_LOG_LEVEL") or None
 
     import cisternal
 
@@ -79,6 +66,7 @@ def init_via_cisternal(
         max_bytes=max_bytes,
         backup_count=backup_count,
         heartbeat_interval=30.0,
+        level=level,
     )
 
     import bathos.telemetry as tel

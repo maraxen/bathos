@@ -91,55 +91,90 @@ def test_cisternal_event_when_flag_set(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert len(files) >= 1
 
 
-# --- level is dropped on the cisternal path, and must say so ------------------
+# --- level is forwarded to cisternal (cisternal >= 0.1.1a11) ------------------
 #
-# On the legacy path `level` is a real severity filter (init_telemetry calls
-# root_logger.setLevel). cisternal.init() takes no level and cisternal has no
-# filtering mechanism at all, so the value cannot be forwarded. It must warn
-# rather than vanish, or opting into the cutover silently disables BTH_LOG_LEVEL.
+# On the legacy path `level` is a stdlib severity filter (init_telemetry calls
+# root_logger.setLevel). cisternal 0.1.1a11 added init(level=...), so the
+# cutover path forwards the same value -- explicit argument, else BTH_LOG_LEVEL
+# -- instead of dropping it (cisternal debt #2272).
 
 
-def test_cisternal_warns_when_explicit_level_is_dropped(
+def test_cisternal_forwards_explicit_level(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     pytest.importorskip("cisternal")
+    import logging
+    import warnings
+
+    import cisternal
+
     from bathos.telemetry_bridge import init_via_cisternal
 
     monkeypatch.setenv("CISTERNAL_TELEMETRY", "bathos")
     monkeypatch.delenv("BTH_LOG_LEVEL", raising=False)
+    monkeypatch.delenv("CISTERNAL_LOG_LEVEL", raising=False)
 
-    with pytest.warns(RuntimeWarning, match="log level is ignored"):
-        assert init_via_cisternal(level="DEBUG", log_dir=tmp_path) is True
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        assert init_via_cisternal(level="WARNING", log_dir=tmp_path) is True
+    assert cisternal.get_pipeline().min_level == logging.WARNING
 
 
-def test_cisternal_warns_when_bth_log_level_is_dropped(
+def test_cisternal_forwards_bth_log_level(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     pytest.importorskip("cisternal")
+    import logging
+
+    import cisternal
+
     from bathos.telemetry_bridge import init_via_cisternal
 
     monkeypatch.setenv("CISTERNAL_TELEMETRY", "bathos")
-    monkeypatch.setenv("BTH_LOG_LEVEL", "DEBUG")
+    monkeypatch.setenv("BTH_LOG_LEVEL", "ERROR")
+    monkeypatch.delenv("CISTERNAL_LOG_LEVEL", raising=False)
 
-    with pytest.warns(RuntimeWarning, match="BTH_LOG_LEVEL"):
-        assert init_via_cisternal(log_dir=tmp_path) is True
+    assert init_via_cisternal(log_dir=tmp_path) is True
+    assert cisternal.get_pipeline().min_level == logging.ERROR
 
 
-def test_cisternal_silent_when_no_level_requested(
+def test_cisternal_explicit_level_beats_bth_log_level(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """No level asked for, nothing lost — the warning must not be noise."""
+    pytest.importorskip("cisternal")
+    import logging
+
+    import cisternal
+
+    from bathos.telemetry_bridge import init_via_cisternal
+
+    monkeypatch.setenv("CISTERNAL_TELEMETRY", "bathos")
+    monkeypatch.setenv("BTH_LOG_LEVEL", "ERROR")
+    monkeypatch.delenv("CISTERNAL_LOG_LEVEL", raising=False)
+
+    assert init_via_cisternal(level="DEBUG", log_dir=tmp_path) is True
+    assert cisternal.get_pipeline().min_level == logging.DEBUG
+
+
+def test_cisternal_no_level_means_no_filtering(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No level asked for: cisternal's default (no filtering) is kept, silently."""
     pytest.importorskip("cisternal")
     import warnings
 
+    import cisternal
+
     from bathos.telemetry_bridge import init_via_cisternal
 
     monkeypatch.setenv("CISTERNAL_TELEMETRY", "bathos")
     monkeypatch.delenv("BTH_LOG_LEVEL", raising=False)
+    monkeypatch.delenv("CISTERNAL_LOG_LEVEL", raising=False)
 
     with warnings.catch_warnings():
         warnings.simplefilter("error", RuntimeWarning)
         assert init_via_cisternal(log_dir=tmp_path) is True
+    assert cisternal.get_pipeline().min_level is None
 
 
 def test_no_warning_when_cutover_disabled(
