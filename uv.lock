@@ -90,7 +90,7 @@ wheels = [
 
 [[package]]
 name = "bathos"
-version = "0.13.0a4"
+version = "0.13.0a5"
 source = { editable = "." }
 dependencies = [
     { name = "cisternal" },
@@ -139,7 +139,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cisternal", specifier = ">=0.1.1a9" },
+    { name = "cisternal", specifier = ">=0.1.1a10" },
     { name = "cyclopts", specifier = ">=4.18.0" },
     { name = "duckdb", specifier = ">=1.0" },
     { name = "fastapi", marker = "extra == 'viz'", specifier = ">=0.110" },
@@ -322,7 +322,7 @@ wheels = [
 
 [[package]]
 name = "cisternal"
-version = "0.1.1a9"
+version = "0.1.1a10"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cyclopts" },
@@ -330,9 +330,9 @@ dependencies = [
     { name = "opentelemetry-api" },
     { name = "pyyaml" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/15/0d/5bff5b43c50cf1a71ca7452138b266ee6bcbc3eca3a732c1babf00463d6b/cisternal-0.1.1a9.tar.gz", hash = "sha256:cc43502082046afe0bb0f273c50dfec71d655458e8f0c5d3dd33b3b333b23b1c", size = 257378, upload-time = "2026-09-29T21:07:19.556Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ea/4f/dcc2e58fc90f4e3b83847f6b0f02bffc83aa4ca637fd5a34b7325388754e/cisternal-0.1.1a10.tar.gz", hash = "sha256:3d9e4ddad95b258c2d384fbc91e0cba82a4bbe01d6e4ff80b1aef5e24ce2730a", size = 261303, upload-time = "2026-09-30T16:53:37.686Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/0e/0a/0b42bb996b8f3ea883f1843abe6a852a6d07683232b995445485697b382d/cisternal-0.1.1a9-py3-none-any.whl", hash = "sha256:eaa6c1827278ba5e3f58de73fc57f72d0b6a4ff32f9b487e7ccf1f56878b5550", size = 163427, upload-time = "2026-09-29T21:07:17.779Z" },
+    { url = "https://files.pythonhosted.org/packages/27/cc/d8ce3d8edc78806a2c746eca4a9f295a5f39dae2ebe23b2255528594514b/cisternal-0.1.1a10-py3-none-any.whl", hash = "sha256:753df151388d534bc291b14da9e5ca762ae356517b586a7223888e34f3f71e3d", size = 164358, upload-time = "2026-09-30T16:53:36.29Z" },
 ]
 
 [[package]]
