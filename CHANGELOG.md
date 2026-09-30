@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`BTH_LOG_LEVEL` works under the cisternal cutover again (debt #1202).** `init_via_cisternal` now
+  forwards `level` (else `BTH_LOG_LEVEL`) to `cisternal.init(level=...)`, added in cisternal
+  0.1.1a11 (cisternal debt #2272), instead of dropping it with a `RuntimeWarning`. Records below
+  the level are dropped at `emit_event`; cisternal never filters spans or heartbeats. With no
+  level set, cisternal's default applies (`CISTERNAL_LOG_LEVEL`, else no filtering). Requires
+  `cisternal>=0.1.1a11`.
+
 - `bth init --assign-id` now also registers the project root in `~/.bth/projects.toml` (result gains `registered`). Before cut-over nothing else registered a root, so `bth migrate --to-log` saw zero roots and would have routed every legacy run to `unaffiliated/`. A root registered without an id picks the id up on re-registration. bathos's own `.bth.toml` slug corrected from `prolix` to `bathos` and given a project id.
 
 - **A pre-registered fail/marginal outcome signaled via non-zero exit is no longer laundered
