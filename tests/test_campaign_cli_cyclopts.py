@@ -312,13 +312,39 @@ class TestCampaignLsCyclopts:
         finally:
             db.close()
 
+        # `campaign ls` defaults its project filter to the CURRENT project's slug (mcp.campaign_list_tool: `project_slug or
+        # _get_project_slug()`), which is this repo's own `.bth.toml` slug ("bathos" since #73) and not the fixture's "prolix". The test
+        # used to rely on the two coinciding, so it failed the moment they stopped; name the project explicitly.
         result = runner.invoke(
-            app, ["campaign", "ls", "--catalog-dir", str(populated_warm_catalog)]
+            app,
+            [
+                "campaign",
+                "ls",
+                "--catalog-dir",
+                str(populated_warm_catalog),
+                "--project-slug",
+                "prolix",
+            ],
         )
         assert result.exit_code == 0, result.output
         payload = json.loads(result.output)
         assert payload["count"] >= 1
         assert any(c["name"] == "Listable" for c in payload["campaigns"])
+
+        # Negative control: the filter is real, so a different project must NOT list it.
+        other = runner.invoke(
+            app,
+            [
+                "campaign",
+                "ls",
+                "--catalog-dir",
+                str(populated_warm_catalog),
+                "--project-slug",
+                "some-other-project",
+            ],
+        )
+        assert other.exit_code == 0, other.output
+        assert not any(c["name"] == "Listable" for c in json.loads(other.output)["campaigns"])
 
 
 # ---------------------------------------------------------------------------

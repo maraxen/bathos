@@ -449,8 +449,8 @@ class DurableAnchorStore(CatalogAnchorStore):
     force-rebuild test and decision memo for the verdict.
     """
 
-    def insert(self, record: AnchorRecord) -> AnchorRecord:
-        written = super().insert(record)
+    def insert(self, record: AnchorRecord, *, cwd: Path | None = None) -> AnchorRecord:
+        written = super().insert(record, cwd=cwd)
         write_anchor_fragment(written, self._catalog_dir)
         return written
 

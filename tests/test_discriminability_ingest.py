@@ -172,8 +172,13 @@ predicted_outcome = "same"
     assert any("positive-testing bias" in w for w in result.warnings)
 
 
-def test_metadata_not_preserved_from_cool_fragments(tmp_catalog: Path, sample_run: Run):
-    """metadata is warm-only; AC-06 was never affected by claim_discriminates ingest bug."""
+def test_metadata_is_preserved_from_cool_fragments(tmp_catalog: Path, sample_run: Run):
+    """metadata round-trips cool fragment -> compact -> warm DB (debt 1997).
+
+    This test used to be named `test_metadata_not_preserved_...` and asserted `"{}"`, pinning an old compact limitation (metadata dropped at
+    compact). compact now preserves it, so the pin was stale and kept main red; debt 1997 named it. The assertion is the current, correct
+    contract, and it can fail: a compact that drops metadata again would read `"{}"` here.
+    """
     init_catalog(tmp_catalog)
     run = dataclasses.replace(
         sample_run,
@@ -185,7 +190,7 @@ def test_metadata_not_preserved_from_cool_fragments(tmp_catalog: Path, sample_ru
     db = duckdb.connect(str(tmp_catalog / "bathos.db"))
     try:
         row = db.execute("SELECT metadata FROM runs WHERE id = ?", [run.id]).fetchone()
-        assert row[0] == "{}"
+        assert json.loads(row[0]) == {"temperature": "300K"}
     finally:
         db.close()
 

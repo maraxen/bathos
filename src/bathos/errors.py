@@ -173,4 +173,33 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     "LogNotIgnoredError": BathosErrorCode.RUNLOG_NOT_IGNORED,
     "ProjectIdMissingError": BathosErrorCode.RUNLOG_PROJECT_ID_MISSING,
     "LogModeRefusedError": BathosErrorCode.RUNLOG_MODE_REFUSED,
+    # ── debt 1996 ────────────────────────────────────────────────────────────
+    # Five more exceptions raised in src/bathos/ with no entry here, which kept
+    # test_every_domain_exception_has_registered_code red on main. Same rule as
+    # backlog #4077 above: map onto EXISTING codes (a new code changes the public
+    # error taxonomy every MCP caller sees, which is a design decision, not a test
+    # fix) and call out the imperfect fits instead of papering over them.
+    #
+    # AC-19: a `.wal` remained after closing the staged index copy, so the swap of
+    # the real index.db was refused. Catalog integrity family.
+    "IngestWalRemainsError": BathosErrorCode.CATALOG_ERROR,
+    # `~/.bth/projects.toml` exists but does not parse, and is deliberately never
+    # overwritten. IMPERFECT FIT: a corrupt project registry is not the catalog
+    # proper, but it is the same never-clobber integrity family and no REGISTRY code
+    # exists.
+    "RegistryUnreadableError": BathosErrorCode.CATALOG_ERROR,
+    # D6: `run.started` could not be appended to the project log or its fallback, so
+    # the script is deliberately not launched. The run log is the catalog's write
+    # path. IMPERFECT FIT: nothing is wrong with the caller's input.
+    "RunNotLaunchedError": BathosErrorCode.CATALOG_ERROR,
+    # `squeue` could not be queried at all (unreachable host, timeout, non-zero
+    # exit) and migration fails closed. IMPERFECT FIT, deliberately: an
+    # environment/cluster condition, not an internal fault; INTERNAL is the
+    # catch-all, as for ScipyUnavailableError, because no DEPENDENCY_UNAVAILABLE
+    # code exists.
+    "SqueueUnavailableError": BathosErrorCode.INTERNAL,
+    # The installed myxcel lacks a capability bathos needs (debt 1993): not
+    # transient, and only fixable in myxcel. IMPERFECT FIT, for the same reason as
+    # above; the INTERNAL hint ("file a bug report") at least points the right way.
+    "MyxcelCapabilityGapError": BathosErrorCode.INTERNAL,
 }

@@ -127,6 +127,29 @@ class TestDurableAnchorSurvivesForceRebuild:
         assert after.label == "v2"
 
 
+class TestDurableInsertAcceptsCwd:
+    """`DurableAnchorStore.insert` must keep the parent's `cwd` keyword.
+
+    The parent `CatalogAnchorStore.insert` takes `*, cwd=None` (forwarded to the
+    runlog emit). The subclass override dropped it, which `ty` reported as an
+    incompatible override and which would raise TypeError for any caller passing
+    `cwd=` to a durable store.
+    """
+
+    def test_insert_with_cwd_keyword_persists_and_survives_rebuild(self, catalog_dir, tmp_path):
+        from bathos.anchor import AnchorRecord
+
+        store = DurableAnchorStore(catalog_dir)
+        record = AnchorRecord(path="cwd.svg", sha256="4" * 64, kind="figure")
+
+        written = store.insert(record, cwd=tmp_path)
+
+        assert written == record
+        assert get_anchor(catalog_dir, "cwd.svg", "4" * 64, store=store) is not None
+        compact_catalog(catalog_dir, force_rebuild=True)
+        assert get_anchor(catalog_dir, "cwd.svg", "4" * 64, store=store) is not None
+
+
 class TestExistingNonDurableSeamUnaffected:
     """Regression guard: this spike must not change CatalogAnchorStore's documented
     behavior (tests/test_anchor.py::TestNoDurabilityGuarantee) — the spike is
