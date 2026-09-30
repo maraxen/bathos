@@ -105,6 +105,9 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
 EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     # Gate errors
     "GateError": BathosErrorCode.INTERNAL,
+    # Project config: an invalid `.bth.toml [enforcement]` block (protamer #1960 / bathos #2210).
+    # Raised, never swallowed, so a typo cannot silently leave the sidecar gate off.
+    "EnforcementConfigError": BathosErrorCode.INVALID_PARAM,
     # Catalog errors
     "CatalogError": BathosErrorCode.CATALOG_ERROR,
     "CorruptDatabaseError": BathosErrorCode.CATALOG_ERROR,

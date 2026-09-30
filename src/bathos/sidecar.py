@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import tomllib
 from dataclasses import dataclass, field
 from enum import Enum
@@ -647,8 +648,32 @@ def find_sidecar(script_path: Path) -> Path | None:
 
 
 def is_in_enforced_dir(script_path: Path) -> bool:
-    """Return True if script is inside a directory name in ENFORCED_DIRS."""
-    return any(part in ENFORCED_DIRS for part in script_path.parts)
+    """Return True if script is inside an enforced directory.
+
+    Enforced = a directory name in the built-in ``ENFORCED_DIRS`` (checked first, so a broken project config never
+    affects those), or one the project adds in ``.bth.toml``::
+
+        [enforcement]
+        dirs = ["scripts/method", "release"]
+
+    An entry without ``/`` is a directory NAME matched at any depth below the project root; an entry with ``/`` is a
+    project-root-relative PREFIX (``scripts/method`` does not match ``scripts/methodology``). Additive only. Raises
+    :class:`bathos.config.EnforcementConfigError` if the project's ``[enforcement]`` block is invalid -- a typo must not
+    silently leave the gate off (protamer debt #1960 / bathos #2210: the gate is fail-open for any directory not named).
+    """
+    if any(part in ENFORCED_DIRS for part in script_path.parts):
+        return True
+    from bathos.config import load_enforcement
+
+    names, prefixes, root = load_enforcement(script_path)
+    if root is None or not (names or prefixes):
+        return False
+    # `root` is an ancestor of the script by construction (the config is found by walking up from its path).
+    rel = Path(os.path.abspath(script_path)).relative_to(root)
+    directories = rel.parts[:-1]  # the file name itself is never a directory match
+    if any(part in names for part in directories):
+        return True
+    return any(directories[: len(p)] == p for p in prefixes)
 
 
 def evaluate_adversarial_check(sidecar: Sidecar, outcome_label: str, result: dict) -> str | None:
