@@ -73,8 +73,9 @@ def unit_of_work(catalog_dir: Path | None = None) -> Iterator[bool]:
     takes [the] lock, then reads the mode, and holds the lock for its
     duration."
     """
-    if _mode_cv.get() is not None:
-        yield _mode_cv.get()  # type: ignore[misc]
+    active = _mode_cv.get()
+    if active is not None:
+        yield active
         return
     with writers_lock(catalog_dir):
         mode = is_log_mode(catalog_dir)
