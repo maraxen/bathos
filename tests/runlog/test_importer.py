@@ -14,6 +14,7 @@ overlap with AC-17's own scope.
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 import subprocess
@@ -530,31 +531,58 @@ def test_locked_warm_db_gives_locked_status_no_crash(tmp_path: Path):
     staging_dir = backend.workspace / ".bth" / "log"
     db_path = backend.catalog_dir / "bathos.db"
 
+    # Drop this process's own handle on the db before the holder starts
+    # (debt #1995). The fixture leaves an unreferenced DuckDB connection to
+    # this same path alive until it is collected, and DuckDB caches one
+    # instance per path, so while it survives: `connect_legacy` hands back
+    # that cached connection instead of the lock error, AND the holder below
+    # cannot take the lock at all -- it dies with `IOException: Could not set
+    # lock on file ... Conflicting lock is held`. The old bare-deadline poll
+    # then spun against a dead holder and failed ~1 run in 3. Collecting
+    # first makes the very first `connect_legacy` call observe the lock.
+    gc.collect()
+
+    ready = tmp_path / "holder-has-the-lock"
     holder_code = f"""
-import duckdb, time
+import pathlib, sys, duckdb
 con = duckdb.connect({str(db_path)!r})
 con.execute("SELECT 1")
-time.sleep(10)
+pathlib.Path({str(ready)!r}).write_text("ready")
+sys.stdin.read()
 """
-    proc = subprocess.Popen([sys.executable, "-c", holder_code])
+    proc = subprocess.Popen(
+        [sys.executable, "-c", holder_code],
+        stdin=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
     try:
-        # Wait until the holder actually has the lock (probing with
-        # `connect_legacy` itself, never the importer -- a probe call would
-        # otherwise import everything ELSE early, and the real assertion
-        # below wants a single call that observes the lock on its first and
-        # only pass).
-        deadline = time.monotonic() + 5
-        locked_confirmed = False
-        while time.monotonic() < deadline:
-            result = connect_legacy(db_path)
-            if isinstance(result, dict):
-                locked_confirmed = result.get("status") == "legacy_db_locked"
-            else:
-                result.close()
-            if locked_confirmed:
-                break
-            time.sleep(0.1)
-        assert locked_confirmed, "never observed the warm db as locked"
+        # Wait for the holder to SAY it holds the lock rather than guessing
+        # with a bare deadline, and surface its own stderr if it died trying.
+        deadline = time.monotonic() + 60
+        while not ready.exists():
+            if proc.poll() is not None:
+                stderr = proc.stderr.read() if proc.stderr else ""
+                raise AssertionError(
+                    f"lock holder exited before acquiring the lock "
+                    f"(returncode={proc.returncode}): {stderr}"
+                )
+            assert time.monotonic() < deadline, "lock holder never signalled it held the lock"
+            time.sleep(0.05)
+
+        # The lock is now definitely held by another process, so a single
+        # call must observe it -- probing with `connect_legacy` itself, never
+        # the importer, since a probe call would otherwise import everything
+        # ELSE early and the real assertion below wants a single call that
+        # observes the lock on its first and only pass.
+        result = connect_legacy(db_path)
+        if not isinstance(result, dict):
+            result.close()
+            raise AssertionError(
+                "connect_legacy returned a live connection while another process held "
+                "the lock -- this process still has a cached DuckDB instance for the db"
+            )
+        assert result.get("status") == "legacy_db_locked", result
 
         report = import_legacy_catalog(
             backend.catalog_dir,
