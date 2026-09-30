@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bathos"
-version = "0.13.0a4"
+version = "0.13.0a5"
 description = "Local-first, zero-server experiment tracking for researchers"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -34,7 +34,9 @@ dependencies = [
     # (hash="unknown") unless a schema-v2 tree manifest verifies (praxia debt #2058).
     # 0.1.1a9: a dangling .git gitfile no longer hides a verified sidecar
     # (praxia debt #2100).
-    "cisternal>=0.1.1a9",
+    # 0.1.1a10: verify_tree exempts untracked bathos lock manifests
+    # (<stem>.bth.<uuid>.bth.lock.toml) from the tree-manifest "extras" check.
+    "cisternal>=0.1.1a10",
     # backlog #4702: bathos/cli_cyclopts.py (the real `bth` CLI as of the final
     # cutover) wires directly against cisternal's cyclopts-based wire() --
     # declared here since it's imported directly, not just pulled in
