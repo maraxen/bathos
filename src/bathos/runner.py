@@ -296,7 +296,8 @@ def _write_manifest(
         f'git_sha = "{run.git_hash}"\n'
         f'script_sha256 = "{run.script_sha256}"\n'
         f'run_id = "{run.id}"\n'
-        f"agent_id = null\n"
+        # No agent_id key: TOML has no null, and `agent_id = null` made this file
+        # unparseable (debt 2318). Absent means "no agent recorded".
     )
 
     try:
