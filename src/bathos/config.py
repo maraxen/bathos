@@ -154,18 +154,33 @@ def load_enforcement(
 ) -> tuple[frozenset[str], tuple[tuple[str, ...], ...], Path | None]:
     """The project's configured extra enforcement dirs for ``script_path`` -> (names, prefixes, project root).
 
-    The project is found by walking up from the script to the nearest ``.bth.toml``. No config file, or no
-    ``[enforcement]`` table, is the built-in behaviour (empty result). A config that cannot be read or parsed, or an
-    invalid ``[enforcement]`` table, raises :class:`EnforcementConfigError`.
+    The project is found by walking up from the script to the NEAREST ``.bth.toml`` (the same rule as everywhere else in bathos: a nested
+    ``.bth.toml`` without ``[enforcement]`` is its own project and hides an outer one's dirs). No config file, or no ``[enforcement]``
+    table, is the built-in behaviour (empty result). An invalid ``[enforcement]`` table raises :class:`EnforcementConfigError`. A config
+    that cannot be PARSED raises only if the file mentions ``enforcement`` (it evidently intended to opt in); otherwise it is logged and
+    treated as the built-in behaviour, because bathos has always tolerated a broken project config and a project that never asked for
+    this must not start having every run refused. An unreadable file is logged and treated the same way.
     """
     cfg_path = find_project_config(Path(os.path.abspath(script_path)).parent)
     if cfg_path is None:
         return frozenset(), (), None
     try:
-        with open(cfg_path, "rb") as f:
-            data = tomllib.load(f)
-    except (OSError, tomllib.TOMLDecodeError) as e:
-        raise EnforcementConfigError(f"cannot read {cfg_path}: {e}") from e
+        raw = cfg_path.read_bytes()
+    except OSError as e:
+        # Unreadable, so we cannot tell whether it opted in. Bathos has always tolerated an unreadable project config; keep that.
+        logger.warning(
+            "cannot read %s, so any [enforcement] setting in it is NOT applied: %s", cfg_path, e
+        )
+        return frozenset(), (), None
+    try:
+        data = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+        if b"enforcement" in raw:
+            # The file evidently intended to opt in, so a parse error must not silently leave the gate off.
+            raise EnforcementConfigError(f"cannot parse {cfg_path}: {e}") from e
+        # Never mentioned enforcement: a broken config that bathos already tolerated must not start refusing every run.
+        logger.warning("cannot parse %s (%s); no [enforcement] setting is applied", cfg_path, e)
+        return frozenset(), (), None
     try:
         names, prefixes = parse_enforcement(data.get("enforcement"))
     except EnforcementConfigError as e:

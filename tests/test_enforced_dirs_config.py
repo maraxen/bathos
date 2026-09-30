@@ -16,6 +16,7 @@ A typo must never silently disable enforcement, so an invalid ``[enforcement]`` 
 
 from __future__ import annotations
 
+import logging
 import sys
 import textwrap
 from pathlib import Path
@@ -193,10 +194,54 @@ def test_a_builtin_dir_short_circuits_before_the_config_is_read(tmp_path):
     )  # already enforced; config irrelevant
 
 
-def test_unparseable_toml_raises_rather_than_silently_dropping_enforcement(tmp_path):
-    (tmp_path / ".bth.toml").write_text("[project\nslug = ")
+def test_unparseable_toml_that_mentions_enforcement_raises_rather_than_silently_dropping_it(
+    tmp_path,
+):
+    # the file clearly intended to opt in, so a parse error must not leave the gate off
+    (tmp_path / ".bth.toml").write_text(
+        '[project\nslug = \n[enforcement]\ndirs = ["scripts/method"]\n'
+    )
     with pytest.raises(EnforcementConfigError):
         is_in_enforced_dir(script_at(tmp_path, "scripts", "method", "a.py"))
+
+
+def test_unparseable_toml_that_never_mentions_enforcement_keeps_the_legacy_tolerance(
+    tmp_path, caplog
+):
+    # code review finding: bathos already tolerated a broken .bth.toml, so a project that never asked for [enforcement] must not start
+    # having every run refused. Fail closed only where intent is evident; warn otherwise.
+    (tmp_path / ".bth.toml").write_text("[project\nslug = ")
+    with caplog.at_level(logging.WARNING, logger="bathos.config"):
+        assert is_in_enforced_dir(script_at(tmp_path, "scripts", "method", "a.py")) is False
+    assert any("enforcement" in r.getMessage().lower() for r in caplog.records)
+
+
+def test_an_unreadable_config_is_tolerated_with_a_warning_because_intent_cannot_be_known(
+    tmp_path, caplog
+):
+    import os
+
+    cfg = tmp_path / ".bth.toml"
+    cfg.write_text('[enforcement]\ndirs = ["scripts/method"]\n')
+    cfg.chmod(0)
+    try:
+        if os.access(cfg, os.R_OK):
+            pytest.skip("running with privileges that ignore file modes")
+        with caplog.at_level(logging.WARNING, logger="bathos.config"):
+            assert is_in_enforced_dir(script_at(tmp_path, "scripts", "method", "a.py")) is False
+        assert any("cannot read" in r.getMessage() for r in caplog.records)
+    finally:
+        cfg.chmod(0o644)
+
+
+def test_a_non_utf8_config_is_handled_the_same_way(tmp_path):
+    (tmp_path / ".bth.toml").write_bytes(b"\xff\xfe[project]\n")
+    assert (
+        is_in_enforced_dir(script_at(tmp_path, "scripts", "method", "a.py")) is False
+    )  # no mention of enforcement
+    (tmp_path / ".bth.toml").write_bytes(b"\xff\xfe[enforcement]\n")
+    with pytest.raises(EnforcementConfigError):
+        is_in_enforced_dir(script_at(tmp_path, "scripts", "method", "b.py"))
 
 
 def test_the_exception_is_registered_in_the_error_code_registry():
@@ -287,6 +332,17 @@ def test_positive_control_without_the_config_the_same_method_script_ran_before_t
     root = _runner_project(tmp_path, None)
     script, marker = _marker_script(root, "scripts", "method", "a.py")
     assert _run(root, script) == 0  # the pre-fix fail-open behaviour, now opt-out by default only
+    assert marker.exists()
+
+
+def test_runner_still_runs_a_script_when_the_project_config_is_broken_and_never_mentions_enforcement(
+    tmp_path,
+):
+    # regression guard for code review finding 2: this worked before the change and must keep working
+    (tmp_path / ".bth.toml").write_text("[project\nslug = ")
+    (tmp_path / "catalog").mkdir()
+    script, marker = _marker_script(tmp_path, "scripts", "method", "a.py")
+    assert _run(tmp_path, script) == 0
     assert marker.exists()
 
 
