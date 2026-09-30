@@ -175,7 +175,8 @@ def load_enforcement(
     try:
         data = tomllib.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
-        if b"enforcement" in raw:
+        # case-insensitive: a miscased header must not read as "never opted in"
+        if b"enforcement" in raw.lower():
             # The file evidently intended to opt in, so a parse error must not silently leave the gate off.
             raise EnforcementConfigError(f"cannot parse {cfg_path}: {e}") from e
         # Never mentioned enforcement: a broken config that bathos already tolerated must not start refusing every run.

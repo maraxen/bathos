@@ -205,6 +205,16 @@ def test_unparseable_toml_that_mentions_enforcement_raises_rather_than_silently_
         is_in_enforced_dir(script_at(tmp_path, "scripts", "method", "a.py"))
 
 
+@pytest.mark.parametrize(
+    "header", ["[Enforcement]", "[ENFORCEMENT]", "[enforcement]", "[eNfOrCeMeNt]"]
+)
+def test_the_intent_check_is_case_insensitive(tmp_path, header):
+    # re-review finding: a miscased table header in a file that also fails to parse must not silently leave the gate off
+    (tmp_path / ".bth.toml").write_text(f'[project\nslug = \n{header}\ndirs = ["scripts/method"]\n')
+    with pytest.raises(EnforcementConfigError):
+        is_in_enforced_dir(script_at(tmp_path, "scripts", "method", "a.py"))
+
+
 def test_unparseable_toml_that_never_mentions_enforcement_keeps_the_legacy_tolerance(
     tmp_path, caplog
 ):
