@@ -608,8 +608,30 @@ def _run_script_impl(
     # invalidating every prior differential/SC result) is a general provenance gap.
     dependency_lock_sha256 = hash_dependency_lock(cwd)
 
-    # Run gate check for enforced dirs
-    if script_path is not None and is_in_enforced_dir(script_path) and not no_sidecar:
+    # Run gate check for enforced dirs (built-in ENFORCED_DIRS plus `.bth.toml [enforcement] dirs`).
+    # An invalid [enforcement] block refuses the run BEFORE anything is launched: a typo in a setting that
+    # adds enforcement must not silently leave the gate off (protamer #1960 / bathos #2210).
+    from bathos.config import EnforcementConfigError
+
+    try:
+        enforced = script_path is not None and not no_sidecar and is_in_enforced_dir(script_path)
+    except EnforcementConfigError as e:
+        print(
+            json.dumps(
+                {
+                    "error_code": "invalid_param",
+                    "error": f"invalid project enforcement config: {e}",
+                    "resolution_hint": (
+                        "Fix [enforcement] in .bth.toml: 'dirs' must be a list of directory names or "
+                        'project-root-relative paths (e.g. "scripts/method")'
+                    ),
+                }
+            ),
+            file=sys.stderr,
+        )
+        return 1
+    if enforced:
+        assert script_path is not None  # narrowed by `enforced`
         gate_result = gate_check(
             script_path=script_path,
             bundle=bundle,

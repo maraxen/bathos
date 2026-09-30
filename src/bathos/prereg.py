@@ -392,9 +392,26 @@ def gate_check(
     allow_stale: bool = False,
 ) -> GateResult:
     """Run the pre-registration gate. Returns GateResult with ok=True or structured error."""
+    from bathos.config import EnforcementConfigError
     from bathos.sidecar import is_in_enforced_dir
 
-    if not is_in_enforced_dir(script_path):
+    try:
+        enforced = is_in_enforced_dir(script_path)
+    except EnforcementConfigError as e:
+        # An invalid `.bth.toml [enforcement]` block fails CLOSED: we cannot tell whether this script is gated.
+        payload = _gate_failure_payload(
+            error_code=GateErrorCode.INTERNAL,
+            phase="pre_execution",
+            errors=[f"invalid project enforcement config: {e}"],
+            agent_mode=mode,
+            taxonomy_label="enforcement_config_invalid",
+        )
+        payload.resolution_hint = (
+            "Fix [enforcement] in .bth.toml: 'dirs' must be a list of directory names or "
+            'project-root-relative paths (e.g. "scripts/method")'
+        )
+        return GateResult(ok=False, mode=mode, bundle=bundle, error_payload=payload)
+    if not enforced:
         # Ungated directory — always pass
         return GateResult(ok=True, mode=mode, bundle=bundle)
 

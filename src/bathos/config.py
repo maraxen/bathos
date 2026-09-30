@@ -93,6 +93,102 @@ def find_project_config(start: Path | None = None) -> Path | None:
     return None
 
 
+class EnforcementConfigError(ValueError):
+    """``.bth.toml [enforcement]`` is unreadable or invalid.
+
+    Raised and never swallowed: a typo in a setting that ADDS enforcement must not silently leave the gate off
+    (the failure class behind protamer debt #1960 / bathos #2210 -- the gate is fail-open for any directory not named).
+    """
+
+
+_ENFORCEMENT_KEYS = frozenset({"dirs"})
+
+
+def parse_enforcement(
+    section: object,
+) -> tuple[frozenset[str], tuple[tuple[str, ...], ...]]:
+    """Validate an ``[enforcement]`` table -> (component names, project-root-relative prefixes).
+
+    ``dirs`` entries are additive to ``bathos.sidecar.ENFORCED_DIRS``. An entry without ``/`` is a path COMPONENT name
+    (matched anywhere below the project root); an entry with ``/`` is a project-root-relative PREFIX, so ``scripts/method``
+    does not match ``scripts/methodology`` or ``vendor/scripts/method``. Ambiguous or escaping entries (empty, absolute,
+    ``.``/``..``, backslash, doubled or trailing ``/``) are rejected rather than guessed at.
+    """
+    if section is None:
+        return frozenset(), ()
+    if not isinstance(section, dict):
+        raise EnforcementConfigError("[enforcement] must be a table")
+    unknown = sorted(set(section) - _ENFORCEMENT_KEYS)
+    if unknown:
+        raise EnforcementConfigError(
+            f"[enforcement] has unknown key(s) {unknown}; the only supported key is 'dirs'"
+        )
+    dirs = section.get("dirs", [])
+    if not isinstance(dirs, list):
+        raise EnforcementConfigError("[enforcement] dirs must be a list of strings")
+    names: set[str] = set()
+    prefixes: list[tuple[str, ...]] = []
+    for entry in dirs:
+        if not isinstance(entry, str) or not entry or entry != entry.strip():
+            raise EnforcementConfigError(
+                f"[enforcement] dirs entry {entry!r} must be a non-empty string without surrounding whitespace"
+            )
+        if "\\" in entry or entry.startswith("/") or entry.endswith("/"):
+            raise EnforcementConfigError(
+                f"[enforcement] dirs entry {entry!r} must be a relative posix path without a leading or trailing '/' or any backslash"
+            )
+        parts = tuple(entry.split("/"))
+        if any(part in ("", ".", "..") for part in parts):
+            raise EnforcementConfigError(
+                f"[enforcement] dirs entry {entry!r} must not contain empty, '.' or '..' components"
+            )
+        if len(parts) == 1:
+            names.add(entry)
+        elif parts not in prefixes:
+            prefixes.append(parts)
+    return frozenset(names), tuple(prefixes)
+
+
+def load_enforcement(
+    script_path: Path,
+) -> tuple[frozenset[str], tuple[tuple[str, ...], ...], Path | None]:
+    """The project's configured extra enforcement dirs for ``script_path`` -> (names, prefixes, project root).
+
+    The project is found by walking up from the script to the NEAREST ``.bth.toml`` (the same rule as everywhere else in bathos: a nested
+    ``.bth.toml`` without ``[enforcement]`` is its own project and hides an outer one's dirs). No config file, or no ``[enforcement]``
+    table, is the built-in behaviour (empty result). An invalid ``[enforcement]`` table raises :class:`EnforcementConfigError`. A config
+    that cannot be PARSED raises only if the file mentions ``enforcement`` (it evidently intended to opt in); otherwise it is logged and
+    treated as the built-in behaviour, because bathos has always tolerated a broken project config and a project that never asked for
+    this must not start having every run refused. An unreadable file is logged and treated the same way.
+    """
+    cfg_path = find_project_config(Path(os.path.abspath(script_path)).parent)
+    if cfg_path is None:
+        return frozenset(), (), None
+    try:
+        raw = cfg_path.read_bytes()
+    except OSError as e:
+        # Unreadable, so we cannot tell whether it opted in. Bathos has always tolerated an unreadable project config; keep that.
+        logger.warning(
+            "cannot read %s, so any [enforcement] setting in it is NOT applied: %s", cfg_path, e
+        )
+        return frozenset(), (), None
+    try:
+        data = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+        # case-insensitive: a miscased header must not read as "never opted in"
+        if b"enforcement" in raw.lower():
+            # The file evidently intended to opt in, so a parse error must not silently leave the gate off.
+            raise EnforcementConfigError(f"cannot parse {cfg_path}: {e}") from e
+        # Never mentioned enforcement: a broken config that bathos already tolerated must not start refusing every run.
+        logger.warning("cannot parse %s (%s); no [enforcement] setting is applied", cfg_path, e)
+        return frozenset(), (), None
+    try:
+        names, prefixes = parse_enforcement(data.get("enforcement"))
+    except EnforcementConfigError as e:
+        raise EnforcementConfigError(f"{cfg_path}: {e}") from e
+    return names, prefixes, cfg_path.parent
+
+
 def load_project_config(path: Path) -> ProjectConfig:
     with open(path, "rb") as f:
         data = tomllib.load(f)

@@ -100,6 +100,17 @@ bth run --output-paths outputs/run_abc.json -- uv run python scripts/experiments
 
 Every script in `scripts/experiments/` and `scripts/benchmarks/` should have a sidecar `.bth.toml` declaring hypothesis and expected outcomes.
 
+**Hard enforcement is path-gated, and fail-open for any directory not named.** `bth run` refuses to launch a script with a missing, invalid, hash-drifted or stale sidecar ONLY when the script is under a built-in enforced directory (`experiments`, `benchmarks`, `validation`). A script anywhere else (e.g. `scripts/method/`, `scripts/release/`) still gets its outcome evaluated when a sidecar binds, but a missing or drifted sidecar does NOT stop the run: it records `sidecar_mode=""` and exits 0. A project that keeps tracked experiment scripts elsewhere adds its directories in the project's `.bth.toml` (additive to the built-ins):
+
+```toml
+[enforcement]
+dirs = ["scripts/method", "scripts/release"]
+```
+
+An entry without `/` is a directory NAME matched at any depth below the project root (`release` also gates `vendor/release/` and `data/release/`; prefer a prefix when that matters); an entry with `/` is a project-root-relative PREFIX (`scripts/method` does not match `scripts/methodology`). Matching is case-sensitive, like the built-ins. An invalid `[enforcement]` block (non-list `dirs`, empty/absolute/`..` entries, unknown keys, or TOML that does not parse but mentions `enforcement`) refuses the run with `invalid_param` instead of being ignored, so a typo cannot silently leave the gate off. A `.bth.toml` that does not parse and never mentions `enforcement` keeps bathos's long-standing tolerance: it is logged and no setting is applied. `--no-sidecar` remains the explicit, recorded bypass (`sidecar_mode='bypassed'`).
+
+Limits worth knowing. (1) The project is the NEAREST `.bth.toml` above the script, as everywhere else in bathos: a nested `.bth.toml` without `[enforcement]` hides an outer one's dirs, and a worktree that has no `.bth.toml` of its own (untracked or ignored there) inherits its parent checkout's, whose project-root-relative prefixes will not match paths under the worktree directory. Track `.bth.toml` so every worktree has its own. (2) The built-in directories are checked first and never read the project config, so a broken config does not affect `scripts/experiments/` scripts but does affect a configured dir such as `scripts/method/`. (3) The runner refuses before writing any run record, exactly as it does for other gate failures.
+
 ### Experiment Sidecar Format
 
 ```toml
