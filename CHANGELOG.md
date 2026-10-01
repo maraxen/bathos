@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A sixth Migration step-3 residual class, `postmortem_unset_default`.** `bth migrate --to-log`
+  aborted with `unclassified_residual` on a catalog holding runs whose five default-bearing
+  `postmortem_*` columns read empty in the warm DB while the fold supplies the typed defaults
+  (`{}` / `unassigned` / `none`); both sides mean "no postmortem", so the pair carries no
+  information. Narrowed three ways so it cannot widen into "legacy is empty, therefore ignore":
+  pinned to an exact (column -> default) table, so an empty legacy value against a *real* staged
+  verdict stays unclassified and still refuses the migration; gated on the whole row showing no
+  postmortem (`postmortem_path`/`author`/`summary` all empty), because `postmortem.py` validates
+  neither `status` nor `hypothesis_status` against an enum and so a genuine postmortem could
+  write `""` into one of the five; and tested last in `_classify`, so it can only convert an
+  otherwise-unclassified residual and never takes one from a class that already owns it
+  (notably `fragment_not_yet_compacted`, which competes for the same rows). Residual reports
+  gain one line per affected column, and the report sha256 changes accordingly.
+
 - **`BTH_LOG_LEVEL` works under the cisternal cutover again (debt #1202).** `init_via_cisternal` now
   forwards `level` (else `BTH_LOG_LEVEL`) to `cisternal.init(level=...)`, added in cisternal
   0.1.1a11 (cisternal debt #2272), instead of dropping it with a `RuntimeWarning`. Records below

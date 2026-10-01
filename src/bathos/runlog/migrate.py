@@ -36,9 +36,11 @@ import subprocess
 import tempfile
 import tomllib
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import duckdb
@@ -70,22 +72,6 @@ logger = logging.getLogger(__name__)
 
 # Primary-key column(s) per folded table (spec "Fold rules" tables; used for
 # both the staging-only diff build and the residual report's `key` field).
-#: The five `runs.postmortem_*` columns and the exact typed default the
-#: importer stages for each. Rows written before these columns gained
-#: defaults hold `""` instead; both encode "no postmortem". Consumed ONLY by
-#: `_classify`'s `postmortem_unset_default` -- see its docstring entry for
-#: why the mapping is pinned per column rather than keyed on "legacy is
-#: empty". Adding a column here widens what the migration will accept as a
-#: non-difference, so each entry needs the same evidence the original five
-#: have (measured against the live catalog, 2026-10-01).
-_POSTMORTEM_UNSET_DEFAULTS: dict[str, str] = {
-    "postmortem_asset_links": "{}",
-    "postmortem_hypothesis_status": "unassigned",
-    "postmortem_override": "none",
-    "postmortem_status": "unassigned",
-    "postmortem_verdict_override": "none",
-}
-
 _TABLE_KEYS: dict[str, list[str]] = {
     "runs": ["id"],
     "campaigns": ["id"],
@@ -98,6 +84,49 @@ _TABLE_KEYS: dict[str, list[str]] = {
     "archived_items": ["record_id"],
     "submits": ["id"],
 }
+
+#: The five `runs.postmortem_*` columns whose legacy value can read as the
+#: empty string while the fold supplies a typed default. The defaults here
+#: MUST equal `fold_runs.py`'s `row.setdefault(...)` calls, which are the
+#: authoritative source; `test_postmortem_defaults_match_the_fold` asserts
+#: that, so a default moving there fails loudly instead of silently
+#: unclassifying every one of these residuals.
+#:
+#: Consumed ONLY by `_classify`'s `postmortem_unset_default`. Adding a column
+#: here widens what the migration accepts as a non-difference, so each entry
+#: needs the same evidence the original five have.
+_POSTMORTEM_UNSET_DEFAULTS: Mapping[str, str] = MappingProxyType(
+    {
+        "postmortem_asset_links": "{}",
+        "postmortem_hypothesis_status": "unassigned",
+        "postmortem_override": "none",
+        "postmortem_status": "unassigned",
+        "postmortem_verdict_override": "none",
+    }
+)
+
+#: Columns that carry POSITIVE evidence a run really has a postmortem. All
+#: must be empty before any `postmortem_unset_default` residual is allowed --
+#: see `_row_has_no_postmortem`.
+_POSTMORTEM_EVIDENCE_COLUMNS = ("postmortem_path", "postmortem_author", "postmortem_summary")
+
+
+def _row_has_no_postmortem(lrow: dict[str, Any]) -> bool:
+    """True if `lrow` shows no sign of a postmortem having been recorded.
+
+    `postmortem.py` does not validate `status`/`hypothesis_status` against an
+    enum (`:83` and `:91` take whatever the TOML holds), so a real postmortem
+    CAN in principle write `""` into one of the five default-bearing columns.
+    Treating such a row as "unset" would silently overwrite a recorded value.
+    Requiring every default-bearing column to be empty AND every evidence
+    column to be empty makes that impossible: a run with any postmortem at
+    all fails this check and its residual stays unclassified, which refuses
+    the migration rather than waving it through.
+    """
+    return all(
+        (lrow.get(col) or "") == ""
+        for col in (*_POSTMORTEM_UNSET_DEFAULTS, *_POSTMORTEM_EVIDENCE_COLUMNS)
+    )
 
 
 class MigrateToLogError(RuntimeError):
@@ -1026,21 +1055,28 @@ def _classify(
       `CatalogAnchorStore` anchors, which write no fragment, so a
       force-rebuild drops them while the fold (driven by durable events)
       keeps every one.
-    - `postmortem_unset_default` (measured 2026-10-01): a `runs` row whose
-      legacy value for one of the five `postmortem_*` columns is the empty
-      string while the staged value is exactly that column's typed default
-      (`_POSTMORTEM_UNSET_DEFAULTS`). Rows written before those columns
-      gained defaults store `""`; the importer stages the default. Both
-      encode "no postmortem", so the pair carries no information.
-      Deliberately the LAST class tested, so it can only ever turn an
-      otherwise-unclassified residual into a classified one and can never
-      reclassify a residual an earlier class already owns. The condition is
-      pinned to an exact (column -> default) table rather than "legacy is
-      empty", so a legacy `""` against any OTHER staged value -- a real
-      postmortem verdict, say -- stays unclassified and still blocks the
-      migration. Measured on the live catalog: all 3380 unclassified
-      residuals were exactly this shape (676 runs x 5 columns), and every
-      one of the five columns had precisely 801 rows holding `""`.
+    - `postmortem_unset_default`: a `runs` row carrying NO postmortem at all
+      (`_row_has_no_postmortem`) whose legacy value for one of the five
+      `postmortem_*` columns reads empty while the staged value is exactly
+      that column's typed default (`_POSTMORTEM_UNSET_DEFAULTS`, which the
+      fold supplies for a run with neither an import nor a postmortem
+      event). Both sides encode "no postmortem", so the pair carries no
+      information. Three separate narrowings keep this from widening into
+      "legacy is empty, therefore ignore":
+        - pinned to an exact (column -> default) table, so a legacy empty
+          against any OTHER staged value -- a real verdict, say -- stays
+          unclassified and still refuses the migration;
+        - gated on the WHOLE row being free of a postmortem, because
+          `postmortem.py` validates neither `status` nor `hypothesis_status`
+          against an enum (`:83`, `:91`) and so a genuine postmortem could
+          in principle write `""` into one of these five columns;
+        - tested LAST, after every other class, so it can only ever turn an
+          otherwise-unclassified residual into a classified one and can
+          never take one away from a class that already owns it (notably
+          `fragment_not_yet_compacted`, which competes for these same rows).
+      Legacy NULL is accepted alongside `""`: both read as "no value", and
+      `_values_equal` already pairs a legacy NULL with a staged `""` but has
+      no equivalent for a staged `"unassigned"`/`"none"`/`"{}"`.
     - `output_metadata_drift` (spec: "`output_metadata` whose files changed
       since"; debt #1944, review finding (b), 260927; **narrowed 260927**,
       review remediation B finding 1): a `runs.output_metadata` residual
@@ -1159,14 +1195,18 @@ def _classify(
         return "force_rebuild_loss"
     # LAST, deliberately: see `postmortem_unset_default` above. Placed after
     # every other class so it can only convert an unclassified residual, never
-    # take one away from a class that already owns it.
+    # take one away from a class that already owns it. (`lrow`/`srow` are both
+    # non-None by here -- `warm_only_row` and `force_rebuild_loss` above have
+    # returned for every single-sided row -- but the guards are kept so the
+    # `.get()` calls below cannot depend on that reasoning staying true.)
     if (
         table == "runs"
+        and column in _POSTMORTEM_UNSET_DEFAULTS
         and lrow is not None
         and srow is not None
-        and lrow.get(column) == ""
-        and column in _POSTMORTEM_UNSET_DEFAULTS
+        and (lrow.get(column) or "") == ""
         and srow.get(column) == _POSTMORTEM_UNSET_DEFAULTS[column]
+        and _row_has_no_postmortem(lrow)
     ):
         return "postmortem_unset_default"
     return None
