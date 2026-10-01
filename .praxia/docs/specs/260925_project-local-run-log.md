@@ -3,7 +3,7 @@ title: Project-local append-only run log with a disposable index
 task_id: 260925_bathos-project-local-log
 date: 260925
 status: draft
-revision: "v40 (v39 + debt #1998 review pass, 260927: `consolidate_project_catalog()` now returns `needs_review` (not `ok`) on any conflict or unplaceable fragment, with the CLI failing closed on non-`ok`; folds anchors/ledger/blast_radius/archived_items too, and reports any other top-level source entry as `skipped_unknown`; an apply plans inside the destination's writers lock and no-clobbers each file with a per-file existence recheck immediately before the rename; skips temp/dotfile names in every subtree; byte-compares within-source duplicate run ids against the first queued occurrence; sanitizes `project_slug` and asserts the destination path resolves under dest/runs/; refuses `refused_source_log_mode` if the source itself is already cut over; adds `--source-catalog`/`source_catalog` for the documented two-pass race-window closure. v39: Migration step 0 additionally refuses -- unconditionally, before the dry-run branch -- while any registered root's `.bth.toml` explicitly sets `[project] catalog_dir` to somewhere other than the catalog being migrated (status `foreign_catalogs`), since a per-project catalog_dir is obsolete under the project-local run log and would otherwise leave that project's runs invisible to migration and, post-cut-over, writing legacy-mode into a catalog with no cutover marker; new `bth migrate --consolidate-catalog <root>` / `consolidate_project_catalog()` additively folds such a catalog's runs/campaigns/submits/reaped/sidecars into the migration catalog, run fragments matched by id anywhere under destination runs/ rather than by path, never touching the source)"
+revision: "v41 (v40 + `postmortem_unset_default`, 261001: a sixth Migration step-3 residual class for a run with NO postmortem whose legacy `postmortem_*` value reads empty while the fold stages that column's typed default; pinned to an exact (column -> default) table, gated on the whole row being free of a postmortem, and tested last in `_classify` so it never takes a residual from an earlier class). v40 (v39 + debt #1998 review pass, 260927: `consolidate_project_catalog()` now returns `needs_review` (not `ok`) on any conflict or unplaceable fragment, with the CLI failing closed on non-`ok`; folds anchors/ledger/blast_radius/archived_items too, and reports any other top-level source entry as `skipped_unknown`; an apply plans inside the destination's writers lock and no-clobbers each file with a per-file existence recheck immediately before the rename; skips temp/dotfile names in every subtree; byte-compares within-source duplicate run ids against the first queued occurrence; sanitizes `project_slug` and asserts the destination path resolves under dest/runs/; refuses `refused_source_log_mode` if the source itself is already cut over; adds `--source-catalog`/`source_catalog` for the documented two-pass race-window closure. v39: Migration step 0 additionally refuses -- unconditionally, before the dry-run branch -- while any registered root's `.bth.toml` explicitly sets `[project] catalog_dir` to somewhere other than the catalog being migrated (status `foreign_catalogs`), since a per-project catalog_dir is obsolete under the project-local run log and would otherwise leave that project's runs invisible to migration and, post-cut-over, writing legacy-mode into a catalog with no cutover marker; new `bth migrate --consolidate-catalog <root>` / `consolidate_project_catalog()` additively folds such a catalog's runs/campaigns/submits/reaped/sidecars into the migration catalog, run fragments matched by id anywhere under destination runs/ rather than by path, never touching the source)"
 brainstorm_session: false
 invest_overrides: []
 ---
@@ -633,7 +633,22 @@ switched on in one step.
    postmortem walk always resolves against the main worktree and prunes nested
    `.claude/worktrees/` regardless of whether one still exists, and the one live write path that
    could otherwise diverge from the imported warm value, `run.postmortem_applied`, never fires
-   before cut-over; see `_classify`'s docstring in `migrate.py` for the full trace.) The
+   before cut-over; see `_classify`'s docstring in `migrate.py` for the full trace.
+   **v41 (261001):** a sixth class, `postmortem_unset_default` -- a run carrying NO postmortem
+   at all whose legacy value for one of the five default-bearing `postmortem_*` columns
+   (`postmortem_status`, `postmortem_hypothesis_status`, `postmortem_override`,
+   `postmortem_verdict_override`, `postmortem_asset_links`) reads empty (`""` or NULL) while the
+   staged value is exactly the default `fold_runs.py` supplies for a run with neither an import
+   nor a postmortem event. Both sides encode "no postmortem", so the pair carries no
+   information. Narrowed three ways, each of which must hold: pinned to an exact
+   (column -> default) table, so an empty legacy value against any OTHER staged value -- a real
+   verdict -- stays unclassified and still aborts; gated on the whole row being free of a
+   postmortem (`postmortem_path`/`postmortem_author`/`postmortem_summary` all empty), since
+   `postmortem.py` validates neither `status` nor `hypothesis_status` against an enum and a
+   genuine postmortem could therefore write `""` into one of the five; and tested LAST in
+   `_classify`, after every other class, so it can only convert an otherwise-unclassified
+   residual and never takes one from a class that already owns it -- `fragment_not_yet_compacted`
+   in particular competes for these same rows and keeps them.) The
    classified residuals are
    written to a canonical report (exactly one JSON line per differing `(table, key, column)`,
    each line exactly the object `{table, key, column, class, legacy_value, staged_value}` with
