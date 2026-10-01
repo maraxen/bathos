@@ -23,6 +23,7 @@
           "bth-mcp"
         ],
         "env": [],
+        "launch": "uvx",
         "name": "bathos"
       }
     ],

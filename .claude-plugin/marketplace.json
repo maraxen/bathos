@@ -1,0 +1,15 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "bathos",
+  "description": "Experiment tracking — pre-registration, provenance, campaigns",
+  "owner": {
+    "name": "bathos"
+  },
+  "plugins": [
+    {
+      "name": "bathos",
+      "source": "./plugin",
+      "description": "Experiment tracking — pre-registration, provenance, campaigns"
+    }
+  ]
+}
