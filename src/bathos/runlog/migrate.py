@@ -70,6 +70,22 @@ logger = logging.getLogger(__name__)
 
 # Primary-key column(s) per folded table (spec "Fold rules" tables; used for
 # both the staging-only diff build and the residual report's `key` field).
+#: The five `runs.postmortem_*` columns and the exact typed default the
+#: importer stages for each. Rows written before these columns gained
+#: defaults hold `""` instead; both encode "no postmortem". Consumed ONLY by
+#: `_classify`'s `postmortem_unset_default` -- see its docstring entry for
+#: why the mapping is pinned per column rather than keyed on "legacy is
+#: empty". Adding a column here widens what the migration will accept as a
+#: non-difference, so each entry needs the same evidence the original five
+#: have (measured against the live catalog, 2026-10-01).
+_POSTMORTEM_UNSET_DEFAULTS: dict[str, str] = {
+    "postmortem_asset_links": "{}",
+    "postmortem_hypothesis_status": "unassigned",
+    "postmortem_override": "none",
+    "postmortem_status": "unassigned",
+    "postmortem_verdict_override": "none",
+}
+
 _TABLE_KEYS: dict[str, list[str]] = {
     "runs": ["id"],
     "campaigns": ["id"],
@@ -1010,6 +1026,21 @@ def _classify(
       `CatalogAnchorStore` anchors, which write no fragment, so a
       force-rebuild drops them while the fold (driven by durable events)
       keeps every one.
+    - `postmortem_unset_default` (measured 2026-10-01): a `runs` row whose
+      legacy value for one of the five `postmortem_*` columns is the empty
+      string while the staged value is exactly that column's typed default
+      (`_POSTMORTEM_UNSET_DEFAULTS`). Rows written before those columns
+      gained defaults store `""`; the importer stages the default. Both
+      encode "no postmortem", so the pair carries no information.
+      Deliberately the LAST class tested, so it can only ever turn an
+      otherwise-unclassified residual into a classified one and can never
+      reclassify a residual an earlier class already owns. The condition is
+      pinned to an exact (column -> default) table rather than "legacy is
+      empty", so a legacy `""` against any OTHER staged value -- a real
+      postmortem verdict, say -- stays unclassified and still blocks the
+      migration. Measured on the live catalog: all 3380 unclassified
+      residuals were exactly this shape (676 runs x 5 columns), and every
+      one of the five columns had precisely 801 rows holding `""`.
     - `output_metadata_drift` (spec: "`output_metadata` whose files changed
       since"; debt #1944, review finding (b), 260927; **narrowed 260927**,
       review remediation B finding 1): a `runs.output_metadata` residual
@@ -1126,6 +1157,18 @@ def _classify(
             return "campaign_evalue_confound"
     if lrow is None and srow is not None:
         return "force_rebuild_loss"
+    # LAST, deliberately: see `postmortem_unset_default` above. Placed after
+    # every other class so it can only convert an unclassified residual, never
+    # take one away from a class that already owns it.
+    if (
+        table == "runs"
+        and lrow is not None
+        and srow is not None
+        and lrow.get(column) == ""
+        and column in _POSTMORTEM_UNSET_DEFAULTS
+        and srow.get(column) == _POSTMORTEM_UNSET_DEFAULTS[column]
+    ):
+        return "postmortem_unset_default"
     return None
 
 

@@ -1518,3 +1518,105 @@ def test_ac29_kill_after_each_step4_substep_then_rerun_matches_uninterrupted(
                 if obj.get("origin") == "migration":
                     all_eids.append(obj["eid"])
     assert len(all_eids) == len(set(all_eids))
+
+
+# --- `postmortem_unset_default` (measured 2026-10-01) -------------------------
+#
+# Unit-level, against `_classify` directly: these assertions are about the
+# class's exact firing conditions and its position in the ordering, which a
+# fixture-built catalog cannot pin down as precisely.
+
+
+def _classify_pm(column: str, legacy, staged, **kw):
+    from bathos.runlog.migrate import _classify
+
+    return _classify(
+        "runs",
+        ("run-1",),
+        column,
+        {column: legacy},
+        {column: staged},
+        step1_touched_run_ids=kw.get("step1", set()),
+        cool_run_rows=kw.get("cool", {}),
+        unresolved_ids=kw.get("unresolved", set()),
+    )
+
+
+@pytest.mark.parametrize(
+    ("column", "default"),
+    [
+        ("postmortem_asset_links", "{}"),
+        ("postmortem_hypothesis_status", "unassigned"),
+        ("postmortem_override", "none"),
+        ("postmortem_status", "unassigned"),
+        ("postmortem_verdict_override", "none"),
+    ],
+)
+def test_postmortem_unset_default_classifies(column: str, default: str):
+    """Legacy "" vs the column's own typed default is a non-difference."""
+    assert _classify_pm(column, "", default) == "postmortem_unset_default"
+
+
+@pytest.mark.parametrize(
+    ("column", "staged"),
+    [
+        ("postmortem_status", "final"),
+        ("postmortem_hypothesis_status", "confirmed"),
+        ("postmortem_override", "amend"),
+        ("postmortem_verdict_override", "invalid"),
+        ("postmortem_asset_links", '{"result": "outputs/r.json"}'),
+    ],
+)
+def test_postmortem_unset_default_does_not_swallow_real_values(column: str, staged: str):
+    """NEGATIVE CONTROL: legacy "" against a REAL staged value is information.
+
+    It must stay unclassified and keep blocking the migration -- the class is
+    pinned to an exact (column -> default) table precisely so it cannot widen
+    into "legacy is empty, therefore ignore".
+    """
+    assert _classify_pm(column, "", staged) is None
+
+
+def test_postmortem_unset_default_requires_the_matching_default():
+    """A default belonging to a DIFFERENT column does not qualify."""
+    assert _classify_pm("postmortem_status", "", "none") is None
+    assert _classify_pm("postmortem_asset_links", "", "unassigned") is None
+
+
+def test_postmortem_unset_default_only_fires_on_empty_legacy():
+    """A legacy value that is not "" is a real difference, not an unset row."""
+    assert _classify_pm("postmortem_status", "final", "unassigned") is None
+
+
+def test_postmortem_unset_default_is_not_applied_to_other_tables():
+    from bathos.runlog.migrate import _classify
+
+    assert (
+        _classify(
+            "campaign_runs",
+            ("c-1", "r-1"),
+            "postmortem_status",
+            {"postmortem_status": ""},
+            {"postmortem_status": "unassigned"},
+            step1_touched_run_ids=set(),
+            cool_run_rows={},
+            unresolved_ids=set(),
+        )
+        is None
+    )
+
+
+def test_postmortem_unset_default_yields_to_earlier_classes():
+    """It is tested LAST, so a residual an earlier class owns keeps that class.
+
+    Without the ordering guarantee this row would read as a harmless unset
+    default and silently stop being reported as step-1 touched.
+    """
+    assert (
+        _classify_pm("postmortem_status", "", "unassigned", step1={"run-1"})
+        == "step1_pulled_or_reaped"
+    )
+    assert (
+        _classify_pm("postmortem_status", "", "unassigned", unresolved={"run-1"})
+        == "unresolvable_project"
+    )
