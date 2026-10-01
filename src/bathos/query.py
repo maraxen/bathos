@@ -293,7 +293,7 @@ def _warm_list_runs(
     """List runs using warm tier (DuckDB)."""
     t_start = time.monotonic()
 
-    con = connect_read(catalog_dir, read_only=False)
+    con = connect_read(catalog_dir)
     con.execute("SET TimeZone='UTC'")
 
     # Build query
@@ -363,7 +363,7 @@ def _warm_get_run(run_id: str, catalog_dir: Path) -> Run | None:
     """Get a single run by ID using warm tier (DuckDB)."""
     t_start = time.monotonic()
 
-    con = connect_read(catalog_dir, read_only=False)
+    con = connect_read(catalog_dir)
     con.execute("SET TimeZone='UTC'")
 
     rows = con.execute("SELECT * FROM runs WHERE id = ?", [run_id]).fetchall()
@@ -500,7 +500,7 @@ def _warm_find_runs(
     """Find runs using warm tier (DuckDB)."""
     t_start = time.monotonic()
 
-    con = connect_read(catalog_dir, read_only=False)
+    con = connect_read(catalog_dir)
     con.execute("SET TimeZone='UTC'")
 
     query = "SELECT * FROM runs"
@@ -543,6 +543,19 @@ def _warm_find_runs(
     return runs
 
 
+def _is_read_only_violation(exc: BaseException) -> bool:
+    """True if `exc` is DuckDB refusing a write on a read-only connection.
+
+    DuckDB rejects the statement at bind time with `InvalidInputException:
+    Cannot execute statement of type "INSERT" on database "..." which is
+    attached in read-only mode!` -- so the write has NOT been partially
+    applied and is safe to retry on a read-write connection. Matching the
+    message is the only way to tell this apart from a genuine SQL error:
+    both arrive as the same exception type.
+    """
+    return "read-only mode" in str(exc)
+
+
 def run_sql(sql: str, catalog_dir: Path | None = None) -> list[tuple]:
     """Execute a raw DuckDB SQL query and return rows as list of tuples.
 
@@ -554,25 +567,39 @@ def run_sql(sql: str, catalog_dir: Path | None = None) -> list[tuple]:
     t_start = time.monotonic()
     result = []
 
-    if catalog_dir is not None:
-        con = connect_read(catalog_dir, read_only=False, missing="empty")
-    else:
-        con = duckdb.connect()
+    def _open(read_only: bool) -> duckdb.DuckDBPyConnection:
+        if catalog_dir is None:
+            return duckdb.connect()
+        return connect_read(catalog_dir, read_only=read_only, missing="empty")
 
-    con.execute("SET TimeZone='UTC'")
-    try:
-        result = con.execute(sql).fetchall()
-    except Exception as e:
-        # If query tried to access the runs table without warm DB, provide helpful error
-        if (
-            "runs" in sql.lower()
-            and catalog_dir is not None
-            and not (catalog_dir / "bathos.db").exists()
-        ):
-            raise RuntimeError("No warm catalog. Run `bth compact` first.") from e
-        raise
-    finally:
-        con.close()
+    # Open read-only first: a read-write connection holds an EXCLUSIVE file
+    # lock and shuts out every concurrent reader, and `bth sql` is almost
+    # always a SELECT. Escalate to read-write only once DuckDB tells us the
+    # statement actually writes.
+    read_only = True
+    while True:
+        con = _open(read_only)
+        con.execute("SET TimeZone='UTC'")
+        try:
+            result = con.execute(sql).fetchall()
+            break
+        except Exception as e:
+            if read_only and _is_read_only_violation(e):
+                # A write. Reopen read-write and run it for real; the
+                # read-only attempt rejected the statement before executing
+                # it, so nothing has been applied twice.
+                read_only = False
+                continue
+            # If query tried to access the runs table without warm DB, provide helpful error
+            if (
+                "runs" in sql.lower()
+                and catalog_dir is not None
+                and not (catalog_dir / "bathos.db").exists()
+            ):
+                raise RuntimeError("No warm catalog. Run `bth compact` first.") from e
+            raise
+        finally:
+            con.close()
 
     # Emit telemetry event
     duration_ms = (time.monotonic() - t_start) * 1000

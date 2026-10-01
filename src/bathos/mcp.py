@@ -3132,7 +3132,7 @@ def postmortem_get_tool(
         if db_path.exists():
             from bathos.schema import Run
 
-            con = connect_read(cat_dir, read_only=False)
+            con = connect_read(cat_dir)
             try:
                 arrow_tbl = con.execute("SELECT * FROM runs WHERE id = ?", [run_id]).arrow()
                 if arrow_tbl.num_rows > 0:
@@ -3264,7 +3264,7 @@ def claim_scaffold_tool(
         ws = resolve_workspace().fs_root
 
     try:
-        db = connect_read(cat_dir, read_only=False)
+        db = connect_read(cat_dir)
         claim_path = scaffold_claim(campaign_id, db, ws)
         db.close()
         return {
@@ -3678,7 +3678,7 @@ def claim_author_tool(
 
             from bathos.campaigns import CampaignError, _resolve_campaign_id
 
-            db = connect_read(cat_dir, read_only=False)
+            db = connect_read(cat_dir)
             try:
                 full_id = _resolve_campaign_id(db, campaign_id)
             except CampaignError as e:
@@ -3938,7 +3938,7 @@ def validate_sidecar_tool(
 
     claim = None
     if campaign_id:
-        db = connect_read(_get_catalog_dir(None), read_only=False, missing="empty")
+        db = connect_read(_get_catalog_dir(None), missing="empty")
         try:
             claim = load_registered_claim(db, campaign_id)
         except (CampaignError, FileNotFoundError, ValueError) as e:
@@ -4071,7 +4071,7 @@ def outputs_summary_tool(
         }
 
     # Query warm tier
-    con = connect_read(cat, read_only=False)
+    con = connect_read(cat)
     con.execute("SET TimeZone='UTC'")
 
     query = "SELECT project_slug, id, output_metadata FROM runs WHERE output_metadata IS NOT NULL AND output_metadata != '[]'"

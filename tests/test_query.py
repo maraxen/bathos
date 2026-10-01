@@ -1,6 +1,11 @@
+import subprocess
+import sys
+import time
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import duckdb
 import pytest
 
 from bathos.catalog import init_catalog, write_run
@@ -398,3 +403,100 @@ def test_filter_runs_by_output_metadata_warm_tier():
     )
     assert len(filtered) == 1
     assert filtered[0].id == run_with_warm.id
+
+
+# --- Concurrent-read contention (reads must not take an exclusive file lock) ---
+
+_HOLDER = """
+import sys, duckdb
+db, ready, mode = sys.argv[1], sys.argv[2], sys.argv[3]
+con = duckdb.connect(db, read_only=(mode == "ro"))
+con.execute("SELECT count(*) FROM runs").fetchall()
+open(ready, "w").write("held")
+sys.stdin.read()          # exits on EOF, so it can never outlive the test
+"""
+
+
+@pytest.fixture
+def warm_catalog(tmp_catalog: Path) -> Path:
+    """A catalog with a real, compacted warm DuckDB file."""
+    from bathos.compact import compact
+
+    init_catalog(tmp_catalog)
+    r = Run(
+        project_slug="testproj",
+        command="python run.py",
+        argv=["python", "run.py"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        timestamp=datetime(2026, 5, 10, 12, 0, 0, tzinfo=UTC),
+        status="completed",
+        exit_code=0,
+    )
+    write_run(r, tmp_catalog)
+    compact(tmp_catalog)
+    return tmp_catalog
+
+
+@contextmanager
+def _holding(catalog: Path, mode: str, tmp_path: Path):
+    """Run a subprocess that holds bathos.db open in `mode` ('ro'/'rw')."""
+    import gc
+
+    gc.collect()  # release any cached in-process DuckDB instance for this path
+    ready = tmp_path / f"ready.{mode}"
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _HOLDER, str(catalog / "bathos.db"), str(ready), mode],
+        stdin=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 30
+        while not ready.exists():
+            if proc.poll() is not None:
+                raise AssertionError(f"holder({mode}) died: {proc.stderr.read()}")
+            if time.monotonic() > deadline:
+                raise AssertionError(f"holder({mode}) never took the lock")
+            time.sleep(0.02)
+        yield
+    finally:
+        proc.stdin.close()
+        proc.wait(timeout=30)
+
+
+def test_reads_do_not_block_a_concurrent_reader(warm_catalog: Path, tmp_path: Path):
+    """Every read path must work while another process reads the same warm DB.
+
+    Regression guard for the contention bug: `_warm_list_runs`, `_warm_get_run`,
+    `_warm_find_runs` and `run_sql` all used to open `bathos.db` read-write,
+    which takes an EXCLUSIVE file lock -- so one `bth ls` locked out every other
+    reader for its whole duration.
+    """
+    with _holding(warm_catalog, "ro", tmp_path):
+        runs = list_runs(warm_catalog)
+        assert len(runs) == 1
+        assert find_runs(warm_catalog, project="testproj")
+        assert get_run(runs[0].id, warm_catalog) is not None
+        assert run_sql("SELECT count(*) FROM runs", warm_catalog) == [(1,)]
+
+
+def test_a_read_write_holder_does_block(warm_catalog: Path, tmp_path: Path):
+    """Negative control: the assertion above is not vacuous.
+
+    A read-WRITE holder genuinely does shut readers out, so if the read paths
+    ever regress to `read_only=False` the test above starts failing.
+    """
+    with (
+        _holding(warm_catalog, "rw", tmp_path),
+        pytest.raises(Exception, match="Conflicting lock|lock on file"),
+    ):
+        duckdb.connect(str(warm_catalog / "bathos.db"), read_only=True)
+
+
+def test_run_sql_still_executes_writes(warm_catalog: Path):
+    """`bth sql` opens read-only first but must still escalate for a real write."""
+    run_sql("CREATE TABLE scratch_t (x INTEGER)", warm_catalog)
+    run_sql("INSERT INTO scratch_t VALUES (7)", warm_catalog)
+    assert run_sql("SELECT x FROM scratch_t", warm_catalog) == [(7,)]
