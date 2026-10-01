@@ -357,11 +357,22 @@ def connect_read(
     and does not use `connect_legacy`"). `read_only` and `missing` let a
     migrated call site reproduce its own pre-migration behaviour exactly:
 
-    - `read_only` is passed straight through to `duckdb.connect()`. Most call
-      sites pass `read_only=True` (a real read-only open); a few historically
-      opened read-write despite only ever executing SELECTs (e.g.
-      `query.run_sql`, `postmortem.find_run_for_scaffold`) -- those pass
-      `read_only=False` here so nothing about the connection's mode changes.
+    - `read_only` is passed straight through to `duckdb.connect()` and
+      defaults to True, which every read call site now takes. It must stay
+      that way: a read-WRITE DuckDB connection holds an EXCLUSIVE lock on the
+      file, so a single read opened read-write shuts out every concurrent
+      reader for as long as it runs. Read-only connections share the file
+      freely. (Measured: two read-only opens coexist; while a read-write one
+      is held, a second open of either kind fails with "Could not set lock on
+      file ... Conflicting lock is held".)
+
+      A set of call sites historically passed `read_only=False` while only
+      ever executing SELECTs -- `query._warm_list_runs`/`_warm_get_run`/
+      `_warm_find_runs`/`run_sql`, `postmortem.find_run_for_scaffold` and
+      five `mcp.py` tools. That was the main source of catalog contention
+      between concurrent `bth` invocations and long-lived MCP servers, and
+      they now all open read-only. Genuine writers do not come through here
+      at all; they use `campaigns.connect_catalog_db` (see its docstring).
     - `missing` controls what happens when `bathos.db` does not exist:
       `"empty"` (the default) returns `duckdb.connect("")`, an anonymous
       in-memory connection with nothing attached -- this matches both the

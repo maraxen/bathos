@@ -405,7 +405,7 @@ def find_run_for_scaffold(run_id: str, catalog_dir: Path) -> tuple[str, str] | N
     from bathos.index import catalog_readable, connect_read
 
     if catalog_readable(catalog_dir):
-        con = connect_read(catalog_dir, read_only=False)
+        con = connect_read(catalog_dir)
         try:
             row = con.execute(
                 "SELECT command, project_slug FROM runs WHERE id = ?", [run_id]
