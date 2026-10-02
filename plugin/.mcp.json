@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "bathos": {
+      "args": [
+        "--from",
+        "bathos==0.13.0a5",
+        "bth-mcp"
+      ],
+      "command": "uvx",
+      "env": {}
+    }
+  }
+}

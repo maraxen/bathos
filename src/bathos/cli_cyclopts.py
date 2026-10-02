@@ -374,6 +374,12 @@ provenance_app = cyclopts.App(
 )
 app.command(provenance_app)
 
+# `bth plugin install|update|export|info`: install bathos's agent plugin via
+# cisternal's shared sub-app. Wheel installs read src/bathos/agent_plugin.json.
+from cisternal.plugin import PluginSpec, plugin_app  # noqa: E402
+
+app.command(plugin_app(PluginSpec(name="bathos", package="bathos", cli="bth")))
+
 
 @provenance_app.command(name="show")
 def provenance_show_cmd(run_id: str) -> None:

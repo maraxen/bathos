@@ -24,6 +24,10 @@ provides = ["readback"]
 # bth-mcp`) when writing mcpServers.bathos into a caller's MCP config.
 # Fixed as part of debt #619 (MCP write-seam auth hardening).
 command = ["bth-mcp"]
+# The plugin bundle (plugin/, installable from GitHub) runs the server via
+# `uvx --from bathos==<this release> bth-mcp`, so a GitHub-installed plugin
+# needs no prior `uv tool install bathos` and always matches its own release.
+launch = "uvx"
 
 # NOTE: `triggers` below is human-readable documentation only — cisternal's
 # ManifestAssetSource._load_skills() (assets/manifest.py) reads only `name`

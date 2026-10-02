@@ -36,7 +36,11 @@ dependencies = [
     # (praxia debt #2100).
     # 0.1.1a10: verify_tree exempts untracked bathos lock manifests
     # (<stem>.bth.<uuid>.bth.lock.toml) from the tree-manifest "extras" check.
-    "cisternal>=0.1.1a11",
+    # 0.1.1a13: cisternal.plugin -- the `bth plugin install|update|export|info`
+    # sub-app and packaged bundle snapshots (src/bathos/agent_plugin.json).
+    # 0.1.1a14: `bth plugin repo-bundle` (plugin/ + .claude-plugin/marketplace.json,
+    # installable from GitHub) and [plugin.mcp] launch = "uvx".
+    "cisternal>=0.1.1a14",
     # backlog #4702: bathos/cli_cyclopts.py (the real `bth` CLI as of the final
     # cutover) wires directly against cisternal's cyclopts-based wire() --
     # declared here since it's imported directly, not just pulled in
@@ -99,6 +103,8 @@ include = [
   "src/bathos/viz/static/alpine.min.js",
   "src/bathos/viz/static/pico.min.css",
   "src/bathos/viz/static/VERSIONS.md",
+  # `bth plugin install` reads this on wheel installs (no .praxia/ on disk).
+  "src/bathos/agent_plugin.json",
 ]
 
 [tool.hatch.build.targets.wheel.force-include]
