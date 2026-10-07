@@ -82,6 +82,11 @@ name     = "bathos-blast-radius"
 path     = "agent_assets/skills/bathos-blast-radius/SKILL.md"
 triggers = ["bth blast-radius", "blast_radius_assess", "blast_radius_ledger", "shadow-check", "install-hook", "query blast-status", "shadow-log"]
 
+[[plugin.skills]]
+name     = "prose-biosafe"
+path     = "agent_assets/skills/prose-biosafe/SKILL.md"
+triggers = ["prose-lint", "prose-biosafe", "biosafe", "classifier false positive", "lint_prose_biosafe", "prose_linter"]
+
 [[plugin.snippets]]
 name           = "bathos-rules"
 path           = "agent_assets/snippets/rules.md"

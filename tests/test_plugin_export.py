@@ -42,6 +42,29 @@ def test_export_plugin_bundle_writes_real_claude_bundle(tmp_path):
     assert "bathos" in mcp["mcpServers"]
 
 
+def test_prose_biosafe_skill_ships_runnable_linter(tmp_path):
+    """The prose-biosafe skill bundles its linter in scripts/; the bundled smoke test must pass
+    from inside the exported bundle (it imports the linter as a sibling file)."""
+    import subprocess
+    import sys
+
+    from bathos.plugin_export import export_plugin_bundle
+
+    out = tmp_path / "plugin-dist"
+    export_plugin_bundle(surface="claude", out=out, dry_run=False)
+    skill = out / "skills" / "prose-biosafe"
+    text = (skill / "SKILL.md").read_text()
+    # cisternal's frontmatter reader does not fold YAML `>` blocks; a folded description
+    # exports as the literal ">" and the skill never triggers.
+    assert "description: >" not in text and 'description: ">"' not in text
+    smoke = skill / "scripts" / "prose_linter_smoke_test.py"
+    assert (skill / "scripts" / "prose_linter.py").exists()
+    proc = subprocess.run(
+        [sys.executable, "-I", str(smoke)], capture_output=True, text=True, cwd=tmp_path
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
 def test_export_plugin_bundle_dry_run_does_not_write(tmp_path):
     from bathos.plugin_export import export_plugin_bundle
 
