@@ -24,10 +24,12 @@ go through myxcel rather than raw `rsync`/`ssh`. Two spots needed checking:
 
 from __future__ import annotations
 
+import ast
 import glob
 import importlib.util
 import inspect
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -106,16 +108,29 @@ def test_installed_myxcel_cli_pull_path_matches_bathos_argv():
     backlog #5880). If the installed myxcel predates it, skip (the wrapper
     then raises `MyxcelCapabilityGapError`); if it has it, pin the signature
     so an argv drift between the two repos fails here, not on a real pull.
-    This doubles as the spec's "grep the installed package" gate before L3."""
-    myxcel_cli = _load_installed_myxcel_module("myxcel.cli")
-    if myxcel_cli is None:
-        pytest.skip("myxcel not installed/importable on this machine")
-    if "def pull_path(" not in inspect.getsource(myxcel_cli):
+    This doubles as the spec's "grep the installed package" gate before L3.
+
+    Reads the installed cli.py with `ast` instead of importing it: myxcel
+    runs as its own uv tool, and executing its CLI module inside bathos's
+    venv fails on dependency skew (observed 261012: cyclopts-era myxcel needs
+    a newer `cisternal.CliContract` than bathos pins), which says nothing
+    about the subprocess contract under test."""
+    candidates = glob.glob(
+        "/home/marielle/.local/share/uv/tools/myxcel/lib/python*/site-packages/myxcel/cli.py"
+    )
+    if not candidates:
+        pytest.skip("myxcel not installed on this machine")
+    tree = ast.parse(Path(candidates[0]).read_text())
+    funcs = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "pull_path"]
+    if not funcs:
         pytest.skip("installed myxcel predates `pull-path` (myxcel backlog #5880)")
 
-    params = list(inspect.signature(myxcel_cli.pull_path).parameters)
-    assert params[:2] == ["remote", "remote_path"]
-    assert "dest" in params
+    args = funcs[0].args
+    positional = [a.arg for a in args.posonlyargs + args.args]
+    assert positional[:2] == ["remote", "remote_path"]
+    assert "dest" in [a.arg for a in args.kwonlyargs] + positional
+    source = Path(candidates[0]).read_text()
+    assert 'name="pull-path"' in source or "pull-path" in source
 
 
 def test_pull_path_never_shells_out_to_old_pull_dest_shape():
