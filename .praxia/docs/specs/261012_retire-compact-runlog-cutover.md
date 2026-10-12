@@ -60,7 +60,7 @@ The remaining work is therefore (A) a small read-side stopgap that survives unti
 | S3 | `bth migrate --to-log --dry-run` writes no data files and does not pull remotes | *verified from the spec* (260925 "Dry run", v38 correction); *unverified in code* |
 | S4 | Cool fragment file names are `runs/<slug>/run_<id>.parquet`, written atomically via tmp+rename | *verified*: `catalog.py:38-47` |
 | S5 | `get_run` takes exact ids only (no prefix match) | *verified*: `query.py:369` |
-| S6 | Bathos's cluster run-log pull (`bth sync --pull`) has never worked | *reported* by debt #1993; *unverified* here. If true, it blocks B |
+| S6 | Bathos's cluster run-log pull (`bth sync --pull`) has never worked | *verified*: `cluster.pull_path` (`cluster.py:179`) is a stub that always raises; `pull_cluster_log` docstring confirms every sub-pull fails. myxcel `pull` is bound to project names (`rsync.py:326`). Fixed in B0 |
 | S7 | Debt #2012 (writers.lock waits print nothing) was fixed by PR #84 (`5443be69`) | *unverified*: close or re-scope the debt after checking |
 | S8 | Cut-over latency meets the runlog AC-12 budget on the real catalog | *unverified*: measured in B4 under a bathos sidecar |
 
@@ -97,9 +97,27 @@ Partly resolves #2110 (single-run lookup only). Leave #2110 open, pointing at B.
 Ordered. Each step is a gate; stop on failure.
 
 - **B0 — blockers.**
-  - Resolve #1993 (cluster run-log pull) or record an explicit, user-signed decision to cut over
-    without it, stating how cluster runs reach the local index in the meantime. With it broken,
-    post-cut-over cluster runs would be invisible locally, which is worse than today's behavior.
+  - **Cluster run-log pull (#1993), folded into this sprint (user decision, 2026-10-12).** After
+    cut-over, SLURM jobs honour `BTH_LOG_MODE` and write log lines, not fragments, so
+    `sync_catalog`'s fragment pull no longer brings them home. Without this, every post-cut-over
+    cluster run is missing from the local index (lagging, not lost: the lines stay in the remote
+    `.bth/log/` and `~/.bth/log-mirror/`). The bathos consumer is already built
+    (`sync.pull_cluster_log`, `sync.py:383`); only `cluster.pull_path` (`cluster.py:179`) is a stub
+    that always raises `MyxcelCapabilityGapError`. Work, in order:
+    1. **myxcel** (backlog #5880, promotes myxcel debt #2166): `rsync.pull_path(profile,
+       remote_path, local_dest)`, CLI `myxcel pull-path`, MCP `pull_path`. It reuses
+       `_rsync_pull_flags`/`stream_command` from `rsync.pull` (`rsync.py:326`) and refuses remote
+       paths outside `$HOME/.bth/` and the registered workspace roots.
+    2. **bathos:** replace the `cluster.pull_path` stub with a call to the myxcel primitive, plus a
+       unit test with myxcel mocked out. Do not implement it as direct rsync in bathos:
+       `sync_catalog` already does that, which is a precedent to remove, not to copy.
+    3. **Cluster test (L3), before B2:** a SLURM job with `BTH_LOG_MODE=1` against a scratch
+       catalog → `bth sync --pull` → ingest → the run is visible locally, and
+       `ClusterLogPullResult.pulled` contains `"log"`. Negative control: a bad remote path must
+       land in `failures`, not return an empty success. Confirm the installed myxcel actually has
+       `pull-path` by grepping the installed package (`--version` is not evidence).
+    - Done when: L3 passes and bathos #1993 and myxcel #2166 are resolved, linking to the L3 job
+      and run id.
   - Verify S7 and close or re-scope #2012.
   - Confirm the runlog test subset passes on main. Run it remotely or narrowly: no whole-suite local
     runs (local-compute rule).
@@ -148,7 +166,8 @@ running B3.
 
 | Risk | Mitigation |
 |---|---|
-| Cut-over with broken cluster pull hides cluster runs | B0 hard gate on #1993 |
+| Cut-over with broken cluster pull hides cluster runs | #1993 fixed inside B0 (myxcel #5880 + bathos stub), gated by a real-cluster L3 test |
+| The installed myxcel lacks `pull-path` even though the release is tagged | Grep the installed package before L3; `--version` does not distinguish commits |
 | Residual report has a class nobody understood and it's signed off anyway | `unclassified == 0` required, plus user review of each class count in B2 |
 | Phase A fallback returns a run missing compact-time fields, and someone reads it as final | `_source` marker plus a rendered notice; fields left absent, not defaulted |
 | B4 thresholds chosen arbitrarily | Stated as judgment calls; pre-registered before measurement; aligned with AC-12 if it specifies a budget |
