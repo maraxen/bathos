@@ -100,22 +100,22 @@ def test_installed_myxcel_rsync_pull_is_project_bound_not_arbitrary_path():
     )
 
 
-def test_installed_myxcel_cli_has_no_path_pull_command():
-    """Pin the absence of a generic path-pull subcommand (`fetch`/`get`/
-    `pull-path`/etc.) on the installed myxcel CLI. If one is added, route
-    `pull_path` and `rsync_full_mirror` through it per the task brief."""
+def test_installed_myxcel_cli_pull_path_matches_bathos_argv():
+    """`bathos.cluster.pull_path` shells out to
+    `myxcel pull-path <remote> <remote_path> --dest <local_dest>` (myxcel
+    backlog #5880). If the installed myxcel predates it, skip (the wrapper
+    then raises `MyxcelCapabilityGapError`); if it has it, pin the signature
+    so an argv drift between the two repos fails here, not on a real pull.
+    This doubles as the spec's "grep the installed package" gate before L3."""
     myxcel_cli = _load_installed_myxcel_module("myxcel.cli")
     if myxcel_cli is None:
         pytest.skip("myxcel not installed/importable on this machine")
+    if "def pull_path(" not in inspect.getsource(myxcel_cli):
+        pytest.skip("installed myxcel predates `pull-path` (myxcel backlog #5880)")
 
-    pull_sig = inspect.signature(myxcel_cli.pull)
-    params = set(pull_sig.parameters)
-    assert "project" in params
-    assert not ({"remote_path", "local_dest", "dest"} & params)
-
-    source = inspect.getsource(myxcel_cli)
-    for forbidden in ("def fetch(", "def get(", "def pull_path(", "def pull_dir("):
-        assert forbidden not in source
+    params = list(inspect.signature(myxcel_cli.pull_path).parameters)
+    assert params[:2] == ["remote", "remote_path"]
+    assert "dest" in params
 
 
 def test_pull_path_never_shells_out_to_old_pull_dest_shape():

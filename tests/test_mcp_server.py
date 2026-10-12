@@ -459,9 +459,8 @@ class TestSyncTool:
     def test_sync_tool_reports_cluster_log_pull_false_when_nothing_pulled(
         self, tmp_path, monkeypatch
     ):
-        """When `pull_cluster_log` returns normally but pulled NOTHING (the
-        current real-world case: `bathos.cluster.pull_path` has no myxcel
-        capability yet, debt #1993), the tool must report
+        """When `pull_cluster_log` returns normally but pulled NOTHING (e.g.
+        an installed myxcel that predates `pull-path`), the tool must report
         `cluster_log_pulled: False` plus the per-subpath failure reasons --
         never read a bare "no exception raised" as success."""
         monkeypatch.delenv("BTH_LOG_MODE", raising=False)
