@@ -342,16 +342,24 @@ def _cool_get_run(run_id: str, catalog_dir: Path) -> Run | None:
     return None
 
 
-def get_run(run_id: str, catalog_dir: Path) -> Run | None:
+def get_run(run_id: str, catalog_dir: Path, *, allow_cool_fallback: bool = False) -> Run | None:
     """Get a single run by ID, or None if not found.
 
     Dispatches to the index, warm, or cool backend based on catalog state.
+
+    `allow_cool_fallback`: on a warm miss, also return a run that exists only
+    as a cool fragment (written after the last compact), tagged
+    `_source="cool_unindexed"`. Such a Run LACKS compact-time fields
+    (`output_metadata` is "[]", postmortem overrides are unapplied), so this is
+    opt-in for display callers only (`get_run_tool` / `bth show`). Callers
+    that act on outputs or outcomes (blast radius, outputs, pin resolution)
+    must keep the default and see None.
     """
     backend = _resolve_backend(catalog_dir)
     if backend == "index":
         return _index_get_run(run_id, catalog_dir)
     if backend == "warm":
-        return _warm_get_run(run_id, catalog_dir)
+        return _warm_get_run(run_id, catalog_dir, allow_cool_fallback=allow_cool_fallback)
     return _cool_get_run(run_id, catalog_dir)
 
 
@@ -424,7 +432,7 @@ def _cool_fallback_get_run(run_id: str, catalog_dir: Path) -> Run | None:
     return run
 
 
-def _warm_get_run(run_id: str, catalog_dir: Path) -> Run | None:
+def _warm_get_run(run_id: str, catalog_dir: Path, *, allow_cool_fallback: bool = False) -> Run | None:
     """Get a single run by ID using warm tier (DuckDB), falling back to cool fragments."""
     t_start = time.monotonic()
 
@@ -439,7 +447,9 @@ def _warm_get_run(run_id: str, catalog_dir: Path) -> Run | None:
         duration_ms = (time.monotonic() - t_start) * 1000
         event("catalog.query", query_kind="get", duration_ms=int(duration_ms), rows=0)
         # A run finished after the last `bth compact` lives only as a cool fragment.
-        return _cool_fallback_get_run(run_id, catalog_dir)
+        if allow_cool_fallback:
+            return _cool_fallback_get_run(run_id, catalog_dir)
+        return None
 
     run = _row_to_run(rows[0])
     con.close()

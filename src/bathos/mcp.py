@@ -405,7 +405,8 @@ def get_run_tool(
     if not run_id:
         return {"error": "run_id is required"}
     cat_dir = _get_catalog_dir(catalog_dir or None)
-    run = get_run(run_id, cat_dir)
+    # Display path only: other get_run callers must not see uncompacted runs.
+    run = get_run(run_id, cat_dir, allow_cool_fallback=True)
     if run is None:
         return {"error": f"Run {run_id} not found"}
     run_dict = {
@@ -430,8 +431,6 @@ def get_run_tool(
             "(output_metadata, postmortem overrides) are absent"
         )
         run_dict["notice"] = notice
-        # The bth CLI renders this tool's dict; stderr keeps the notice visible there too.
-        print(notice, file=sys.stderr)
     return run_dict
 
 
