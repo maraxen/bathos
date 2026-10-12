@@ -1580,8 +1580,8 @@ def sync_tool(
         Dict with sync result. With `pull=True` in log mode, also carries
         `cluster_log_pulled` (bool: at least one of the log/fallback/mirror
         sub-pulls actually succeeded -- NOT merely "no exception raised";
-        currently always False, since `bathos.cluster.pull_path` has no
-        myxcel capability behind it yet, debt #1993) and, when anything
+        False when the installed myxcel predates `pull-path`, myxcel
+        backlog #5880) and, when anything
         failed, `cluster_log_pull_failures` (list of per-subpath reasons) or
         `cluster_log_pull_error` (a single top-level failure, e.g. an
         unconfigured remote).
@@ -1635,9 +1635,8 @@ def sync_tool(
                 else:
                     # A normal return is NOT success: pull_cluster_log catches
                     # each of the three sub-pulls individually and always
-                    # returns, even when every one of them failed (currently
-                    # the case for all of them -- bathos.cluster.pull_path has
-                    # no myxcel capability behind it yet, debt #1993). Report
+                    # returns, even when every one of them failed (e.g. an
+                    # installed myxcel that predates `pull-path`). Report
                     # honestly from the per-subpath result, not from the
                     # absence of a raised exception.
                     result_dict["cluster_log_pulled"] = pull_result.any_pulled

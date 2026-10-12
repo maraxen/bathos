@@ -422,18 +422,19 @@ def rsync_full_mirror(src: str, dst: str) -> None:
     boundary) rather than every caller.
 
     Deliberately calls `rsync` directly rather than going through myxcel
-    (verified 260927, see `bathos.cluster.pull_path`'s docstring for the
-    full trail): myxcel has no capability that pulls an arbitrary remote
-    directory into an arbitrary local destination with `--checksum`
-    comparison and no deletion. `myxcel pull` only pulls a
+    (verified 260927): myxcel has no capability that pulls an arbitrary
+    remote directory into an arbitrary local destination with `--checksum`
+    comparison and no deletion. `myxcel pull-path` (backlog #5880, wrapped
+    by `bathos.cluster.pull_path`) is size+mtime `rsync -az`, not a checksum
+    mirror. `myxcel pull` only pulls a
     myxcel-*registered project*'s configured `pull_paths` into
     `profile.local_workspace/<project>` (or a worktree's `local_root`); this
     mirror's destination (`catalog_dir/remote-runs/<root id>/<remote>/`) is
     neither a registered project nor addressable by project name, and its
     semantics (full checksum mirror, delete-nothing locally, no
-    `--ignore-existing`) don't match any myxcel pull mode either. If myxcel
-    grows a generic path-pull subcommand or importable rsync-wrapper API,
-    route this through it instead of inventing flags on `myxcel pull`.
+    `--ignore-existing`) don't match any myxcel pull mode either. If
+    `myxcel pull-path` grows a checksum mode, route this through it instead
+    of inventing flags on `myxcel pull`.
     """
     subprocess.run(
         [
