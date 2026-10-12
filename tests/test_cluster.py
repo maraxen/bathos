@@ -140,3 +140,39 @@ def test_myxcel_capability_gap_error_is_a_runtime_error():
     `Exception`/`RuntimeError` per sub-path; this must not be a new
     exception hierarchy that slips past that."""
     assert issubclass(MyxcelCapabilityGapError, RuntimeError)
+
+
+def test_pull_path_gap_detected_for_cyclopts_era_myxcel():
+    """A cyclopts-era myxcel without pull-path rejects it as unused tokens,
+    not "No such command"; that is still a capability gap, not a generic
+    failure."""
+    from unittest.mock import MagicMock, patch
+
+    from bathos.cluster import MyxcelCapabilityGapError, pull_path
+
+    stderr = (
+        "╭─ Error ─────────╮\n"
+        "│ Unused Tokens: ['pull-path', 'engaging', '~/.bth/log/', '--dest', '/x/']. │\n"
+        "╰─────────────────╯\n"
+    )
+    with patch("bathos.cluster.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=2, stderr=stderr, stdout="")
+        with pytest.raises(MyxcelCapabilityGapError):
+            pull_path("engaging", "~/.bth/log/", "/x/")
+
+
+def test_pull_path_unused_tokens_for_other_args_is_not_a_gap():
+    """Negative control: an "Unused Tokens" error about some OTHER token (an
+    argv bug on a myxcel that does have pull-path) must stay a RuntimeError,
+    not be misread as an old install."""
+    from unittest.mock import MagicMock, patch
+
+    from bathos.cluster import MyxcelCapabilityGapError, pull_path
+
+    with patch("bathos.cluster.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            returncode=2, stderr="Unused Tokens: ['--bogus'].\n", stdout=""
+        )
+        with pytest.raises(RuntimeError) as excinfo:
+            pull_path("engaging", "~/.bth/log/", "/x/")
+    assert not isinstance(excinfo.value, MyxcelCapabilityGapError)

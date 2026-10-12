@@ -176,6 +176,18 @@ class MyxcelCapabilityGapError(RuntimeError):
     `pull_path`'s docstring)."""
 
 
+# How an installed myxcel that predates `pull-path` rejects it. typer-era
+# myxcel: "No such command 'pull-path'." (exit 2). cyclopts-era myxcel
+# (myxcel #30 onward): "Unused Tokens: ['pull-path', ...]" (exit 2), observed
+# 261012 on myxcel main 9e14d3a.
+_UNKNOWN_SUBCOMMAND_MARKERS = ("no such command", "unused tokens: ['pull-path'")
+
+
+def _is_unknown_subcommand(stderr: str | None) -> bool:
+    text = (stderr or "").lower()
+    return any(marker in text for marker in _UNKNOWN_SUBCOMMAND_MARKERS)
+
+
 def pull_path(remote: str, remote_path: str, local_dest: str) -> None:
     """Pull an arbitrary remote directory to an explicit local destination via
     `myxcel pull-path <remote> <remote_path> --dest <local_dest>`.
@@ -197,8 +209,9 @@ def pull_path(remote: str, remote_path: str, local_dest: str) -> None:
 
     `local_dest` must already exist -- this wrapper does not create it.
 
-    Gap detection: if the installed myxcel predates `pull-path`, typer/click
-    prints "No such command" on stderr and this raises
+    Gap detection: if the installed myxcel predates `pull-path`, it prints
+    "No such command" (typer era) or "Unused Tokens: ['pull-path', ...]"
+    (cyclopts era) on stderr and this raises
     `MyxcelCapabilityGapError` (a `RuntimeError` subclass; retrying will not
     help, myxcel must be upgraded). To verify an installed myxcel, grep its
     package for `def pull_path` in `rsync.py`
@@ -222,7 +235,7 @@ def pull_path(remote: str, remote_path: str, local_dest: str) -> None:
             f"myxcel pull-path {remote}:{remote_path} -> {local_dest} timed out after 900s"
         ) from exc
     if result.returncode != 0:
-        if "no such command" in (result.stderr or "").lower():
+        if _is_unknown_subcommand(result.stderr):
             raise MyxcelCapabilityGapError(
                 "the installed myxcel predates `pull-path` (myxcel backlog #5880); "
                 f"cannot pull {remote}:{remote_path!r} to {local_dest!r}. Upgrade myxcel. "
