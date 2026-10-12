@@ -1,4 +1,4 @@
-# wt-20260828-174806 Internal Docs
+# compact-incremental-spec Internal Docs
 
 ## Daily
 - [260805_overnight-decisions](daily/260805_overnight-decisions.md) — Every decision made without a human gate during the overnight autonomous loop run, with enough context to backtrack
@@ -20,6 +20,8 @@
 - [260515_v02-sprint-plan](plans/260515_v02-sprint-plan.md)
 
 ## Specs
+- [261012_retire-compact-runlog-cutover](specs/261012_retire-compact-runlog-cutover.md) — Do not build an incremental legacy compact; finish delivery step 5 of the project-local run log (260925) behind its blockers, and add a cool-fragment fallback to get_run meanwhile (debts 2344, 2110, 1685, 1647, 1993)
+- [260925_project-local-run-log](specs/260925_project-local-run-log.md) — Project-local append-only run log with a disposable index
 - [260826_blast-radius-assessment-skill](specs/260826_blast-radius-assessment-skill.md) — Blast-radius assessment for bathos-tracked experiments
 - [260826_blast-radius-shadow-trigger](specs/260826_blast-radius-shadow-trigger.md) — Blast-radius shadow-mode git-hook trigger
 - [260729_post-mortem-obligations-targeted-review-schema-and-a-shipped-rule-card-corpus](specs/260729_post-mortem-obligations-targeted-review-schema-and-a-shipped-rule-card-corpus.md) — Unifies post-mortem workflow hooks, a [review] sidecar block for targeted literature/implementation review, and a machine-addressable reference corpus shipped in agent_assets/
