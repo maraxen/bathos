@@ -395,7 +395,7 @@ def test_pull_cluster_log_mixed_real_exit_codes(tmp_path: Path):
     and only the successful ones in `pulled`."""
     config = _cluster_config(tmp_path)
 
-    def fake_run(argv, **kwargs):
+    def fake_run(argv, **_kwargs):
         if argv[3] == "~/projects/testproj/.bth/log/":
             return MagicMock(returncode=1, stderr="Error: pull path refused\n", stdout="")
         return MagicMock(returncode=0, stderr="", stdout="")
