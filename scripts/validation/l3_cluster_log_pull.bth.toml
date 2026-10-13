@@ -1,11 +1,11 @@
 [validation]
 property = "A SLURM job's log-mode run, pulled home with bth's cluster run-log pull via myxcel pull-path and ingested, is visible to get_run; a bad remote root lands in failures, not pulled"
-reference = "spec 261012_retire-compact-runlog-cutover B0.3; fixture: scratch project bth-l3-scratch on engaging, remote_root written ABSOLUTE (/home/maarxaru/projects/bth-l3-scratch) because installed myxcel b5648b5 refuses ~/projects/... roots (spiked 261012, dry-run refused)"
+reference = "spec 261012_retire-compact-runlog-cutover B0.3; fixture: scratch project bth-l3-scratch on engaging (SLURM job 25678772, run 558116ae). Run 1 (261012, record 34e9ca99, pass): remote_root ABSOLUTE because myxcel b5648b5 refuses ~/projects/... roots. Run 2 (261013): remote_root '~/projects/bth-l3-scratch', the form most projects use, with myxcel branch feat/pull-path-remote-home (remote_home profile field) on PATH and remote_home=/home/maarxaru in the engaging profile; same fixture, same criteria"
 tolerance = "exact: all three booleans true; no tolerance"
 
 [outcomes.pass]
 condition = "log_pulled AND neg_log_failed AND fixture_visible"
-decision = "B0.3 met for absolute remote roots; fix the ~/projects remote-root refusal in myxcel before cut-over, then close bathos #1993"
+decision = "Run 1: B0.3 met for absolute roots. Run 2 (~ root): B0.3 met for ~/projects roots; close bathos #1993 once the myxcel remote_home PR is merged and installed"
 reasoning = "All three links (pull brings the log home, a bad root is reported as a failure, ingest makes the run readable) are required for a post-cut-over cluster run to be both visible and honestly reported"
 
 [outcomes.fail]
