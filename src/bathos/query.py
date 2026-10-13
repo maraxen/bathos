@@ -3,12 +3,14 @@ from __future__ import annotations
 import fnmatch
 import json
 import logging
+import re
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
 import duckdb
+import pyarrow.parquet as pq
 
 from bathos.catalog import read_runs
 from bathos.index import connect_read
@@ -340,16 +342,24 @@ def _cool_get_run(run_id: str, catalog_dir: Path) -> Run | None:
     return None
 
 
-def get_run(run_id: str, catalog_dir: Path) -> Run | None:
+def get_run(run_id: str, catalog_dir: Path, *, allow_cool_fallback: bool = False) -> Run | None:
     """Get a single run by ID, or None if not found.
 
     Dispatches to the index, warm, or cool backend based on catalog state.
+
+    `allow_cool_fallback`: on a warm miss, also return a run that exists only
+    as a cool fragment (written after the last compact), tagged
+    `_source="cool_unindexed"`. Such a Run LACKS compact-time fields
+    (`output_metadata` is "[]", postmortem overrides are unapplied), so this is
+    opt-in for display callers only (`get_run_tool` / `bth show`). Callers
+    that act on outputs or outcomes (blast radius, outputs, pin resolution)
+    must keep the default and see None.
     """
     backend = _resolve_backend(catalog_dir)
     if backend == "index":
         return _index_get_run(run_id, catalog_dir)
     if backend == "warm":
-        return _warm_get_run(run_id, catalog_dir)
+        return _warm_get_run(run_id, catalog_dir, allow_cool_fallback=allow_cool_fallback)
     return _cool_get_run(run_id, catalog_dir)
 
 
@@ -359,8 +369,71 @@ def _index_get_run(run_id: str, catalog_dir: Path) -> Run | None:
     return runs[0] if runs else None
 
 
-def _warm_get_run(run_id: str, catalog_dir: Path) -> Run | None:
-    """Get a single run by ID using warm tier (DuckDB)."""
+COOL_UNINDEXED_SOURCE = "cool_unindexed"
+_SOURCE_KEY = "_source"
+_SAFE_RUN_ID = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def run_source(run: Run) -> str | None:
+    """Return the `_source` marker a fallback-read run carries in its metadata, or None."""
+    try:
+        meta = json.loads(run.metadata or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return meta.get(_SOURCE_KEY) if isinstance(meta, dict) else None
+
+
+def _cool_fallback_get_run(run_id: str, catalog_dir: Path) -> Run | None:
+    """Look up a run that exists only as a cool fragment (written after the last compact).
+
+    Only a single, unambiguous fragment is returned; the run is tagged with
+    `_source = "cool_unindexed"` so callers can tell it has not been compacted.
+    run_id is restricted to a safe charset before any glob is built.
+    """
+    if not _SAFE_RUN_ID.fullmatch(run_id or ""):
+        return None
+
+    t_start = time.monotonic()
+    matches = sorted(
+        p
+        for p in (catalog_dir / "runs").glob(f"*/run_{run_id}.parquet")
+        if not p.name.endswith(".tmp.parquet")
+    )
+    if not matches:
+        return None
+    if len(matches) > 1:
+        event(
+            "catalog.cool_fallback_ambiguous",
+            run_id=run_id,
+            paths=[str(p) for p in matches],
+        )
+        return None
+
+    from bathos.compact import _apply_migrations
+
+    try:
+        table = pq.read_table(matches[0])
+        run = _apply_migrations(Run.from_arrow_row(table.to_pydict(), 0))
+    except Exception as exc:
+        logger.warning("Cool fallback for run %s failed to read %s: %s", run_id, matches[0], exc)
+        return None
+
+    try:
+        meta = json.loads(run.metadata or "{}")
+    except (json.JSONDecodeError, TypeError):
+        meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
+    meta[_SOURCE_KEY] = COOL_UNINDEXED_SOURCE
+    run.metadata = json.dumps(meta)
+
+    duration_ms = (time.monotonic() - t_start) * 1000
+    event("catalog.query", query_kind="get_cool_fallback", duration_ms=int(duration_ms), rows=1)
+    return run
+
+
+def _warm_get_run(run_id: str, catalog_dir: Path, *, allow_cool_fallback: bool = False) -> Run | None:
+    """Get a single run by ID using warm tier (DuckDB), falling back to cool fragments."""
     t_start = time.monotonic()
 
     con = connect_read(catalog_dir)
@@ -373,6 +446,9 @@ def _warm_get_run(run_id: str, catalog_dir: Path) -> Run | None:
         # Emit telemetry event (0 rows found)
         duration_ms = (time.monotonic() - t_start) * 1000
         event("catalog.query", query_kind="get", duration_ms=int(duration_ms), rows=0)
+        # A run finished after the last `bth compact` lives only as a cool fragment.
+        if allow_cool_fallback:
+            return _cool_fallback_get_run(run_id, catalog_dir)
         return None
 
     run = _row_to_run(rows[0])

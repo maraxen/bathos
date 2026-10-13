@@ -48,7 +48,15 @@ from bathos.index import connect_read
 from bathos.init import init_project
 from bathos.mcp_auth import McpAuthError, check_token
 from bathos.prereg import GateError
-from bathos.query import CatalogError, find_runs, get_run, list_runs, run_sql
+from bathos.query import (
+    COOL_UNINDEXED_SOURCE,
+    CatalogError,
+    find_runs,
+    get_run,
+    list_runs,
+    run_source,
+    run_sql,
+)
 from bathos.readback import (
     figure_lookup as readback_figure_lookup,
 )
@@ -397,7 +405,8 @@ def get_run_tool(
     if not run_id:
         return {"error": "run_id is required"}
     cat_dir = _get_catalog_dir(catalog_dir or None)
-    run = get_run(run_id, cat_dir)
+    # Display path only: other get_run callers must not see uncompacted runs.
+    run = get_run(run_id, cat_dir, allow_cool_fallback=True)
     if run is None:
         return {"error": f"Run {run_id} not found"}
     run_dict = {
@@ -416,6 +425,12 @@ def get_run_tool(
         "tags": run.tags,
         "hostname": run.hostname,
     }
+    if run_source(run) == COOL_UNINDEXED_SOURCE:
+        notice = (
+            "not yet compacted: fields computed at compact time "
+            "(output_metadata, postmortem overrides) are absent"
+        )
+        run_dict["notice"] = notice
     return run_dict
 
 
