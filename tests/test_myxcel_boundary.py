@@ -9,9 +9,10 @@ go through myxcel rather than raw `rsync`/`ssh`. Two spots needed checking:
 1. `bathos.cluster.pull_path` used to shell out to
    `myxcel pull <remote> <remote_path> --dest <local_dest>` -- a shape that
    does not exist on the installed `myxcel` CLI (`myxcel pull --help` is
-   `myxcel pull [OPTIONS] {remote} {project}`, no `--dest`). It now refuses
-   loudly instead (see `bathos.cluster.MyxcelCapabilityGapError` and that
-   function's docstring for the full investigation trail).
+   `myxcel pull [OPTIONS] {remote} {project}`, no `--dest`). It now calls
+   `myxcel pull-path <remote> <path> --dest <dest>` (myxcel backlog #5880);
+   an installed myxcel that predates that subcommand raises
+   `bathos.cluster.MyxcelCapabilityGapError` (see that function's docstring).
 2. `bathos.runlog.migrate.rsync_full_mirror` calls `rsync` directly on
    purpose, because myxcel has no capability that mirrors an arbitrary
    remote directory into an arbitrary local destination with `--checksum`
@@ -23,15 +24,17 @@ go through myxcel rather than raw `rsync`/`ssh`. Two spots needed checking:
 
 from __future__ import annotations
 
+import ast
 import glob
 import importlib.util
 import inspect
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from bathos.cluster import MyxcelCapabilityGapError, pull_path
+from bathos.cluster import pull_path
 from bathos.runlog.migrate import rsync_full_mirror
 
 
@@ -99,35 +102,49 @@ def test_installed_myxcel_rsync_pull_is_project_bound_not_arbitrary_path():
     )
 
 
-def test_installed_myxcel_cli_has_no_path_pull_command():
-    """Pin the absence of a generic path-pull subcommand (`fetch`/`get`/
-    `pull-path`/etc.) on the installed myxcel CLI. If one is added, route
-    `pull_path` and `rsync_full_mirror` through it per the task brief."""
-    myxcel_cli = _load_installed_myxcel_module("myxcel.cli")
-    if myxcel_cli is None:
-        pytest.skip("myxcel not installed/importable on this machine")
+def test_installed_myxcel_cli_pull_path_matches_bathos_argv():
+    """`bathos.cluster.pull_path` shells out to
+    `myxcel pull-path <remote> <remote_path> --dest <local_dest>` (myxcel
+    backlog #5880). If the installed myxcel predates it, skip (the wrapper
+    then raises `MyxcelCapabilityGapError`); if it has it, pin the signature
+    so an argv drift between the two repos fails here, not on a real pull.
+    This doubles as the spec's "grep the installed package" gate before L3.
 
-    pull_sig = inspect.signature(myxcel_cli.pull)
-    params = set(pull_sig.parameters)
-    assert "project" in params
-    assert not ({"remote_path", "local_dest", "dest"} & params)
+    Reads the installed cli.py with `ast` instead of importing it: myxcel
+    runs as its own uv tool, and executing its CLI module inside bathos's
+    venv fails on dependency skew (observed 261012: cyclopts-era myxcel needs
+    a newer `cisternal.CliContract` than bathos pins), which says nothing
+    about the subprocess contract under test."""
+    candidates = glob.glob(
+        "/home/marielle/.local/share/uv/tools/myxcel/lib/python*/site-packages/myxcel/cli.py"
+    )
+    if not candidates:
+        pytest.skip("myxcel not installed on this machine")
+    tree = ast.parse(Path(candidates[0]).read_text())
+    funcs = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "pull_path"]
+    if not funcs:
+        pytest.skip("installed myxcel predates `pull-path` (myxcel backlog #5880)")
 
-    source = inspect.getsource(myxcel_cli)
-    for forbidden in ("def fetch(", "def get(", "def pull_path(", "def pull_dir("):
-        assert forbidden not in source
+    args = funcs[0].args
+    positional = [a.arg for a in args.posonlyargs + args.args]
+    assert positional[:2] == ["remote", "remote_path"]
+    assert "dest" in [a.arg for a in args.kwonlyargs] + positional
+    source = Path(candidates[0]).read_text()
+    assert 'name="pull-path"' in source or "pull-path" in source
 
 
-def test_pull_path_refuses_without_calling_subprocess():
-    """No installed myxcel shape backs `pull_path`'s old contract, so it
-    must refuse immediately -- never shell out to a `myxcel pull ... --dest`
-    invocation that would fail with a myxcel usage error on every real
-    call."""
-    with (
-        patch("bathos.cluster.subprocess.run") as mock_run,
-        pytest.raises(MyxcelCapabilityGapError),
-    ):
+def test_pull_path_never_shells_out_to_old_pull_dest_shape():
+    """`pull_path` must use the `myxcel pull-path ... --dest` subcommand
+    (backlog #5880), never the old `myxcel pull <remote> <path> --dest`
+    shape, which the installed `myxcel pull` does not accept. Gap handling
+    for an installed myxcel that predates `pull-path` is covered in
+    tests/test_cluster.py."""
+    with patch("bathos.cluster.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
         pull_path("engaging", "~/projects/testproj/.bth/log/", "/local/dest/log/")
-    mock_run.assert_not_called()
+    argv = mock_run.call_args[0][0]
+    assert argv[:2] == ["myxcel", "pull-path"]
+    assert "--dest" in argv
 
 
 def test_rsync_full_mirror_uses_checksum_no_delete_no_ignore_existing():

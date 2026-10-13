@@ -69,37 +69,70 @@ def test_pull_project_raises_on_failure():
             pull_project("engaging", "myproject")
 
 
-def test_pull_path_refuses_without_calling_subprocess():
-    """`myxcel pull` has no `--dest` flag and no way to target an arbitrary
-    remote path -- `myxcel pull --help` is `myxcel pull [OPTIONS] {remote}
-    {project}` (a registered project name, not a path). pull_path must
-    refuse loudly instead of shelling out to a non-existent flag (debt found
-    260927: the old implementation did exactly that and failed on every real
-    call, masked because this seam is always mocked in tests exercising its
-    callers)."""
-    with (
-        patch("bathos.cluster.subprocess.run") as mock_run,
-        pytest.raises(MyxcelCapabilityGapError),
-    ):
-        pull_path("engaging", "~/projects/testproj/.bth/log/", "/local/dest/log/")
+def test_pull_path_argv_is_exact_contract():
+    """pull_path shells out to exactly `myxcel pull-path <remote> <remote_path>
+    --dest <local_dest>` (myxcel backlog #5880), with a bounded timeout."""
+    with patch("bathos.cluster.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+        pull_path("engaging", "~/.bth/log/fallback/proj/", "/local/dest/fallback/")
 
-    mock_run.assert_not_called()
+    args, kwargs = mock_run.call_args
+    assert args[0] == [
+        "myxcel",
+        "pull-path",
+        "engaging",
+        "~/.bth/log/fallback/proj/",
+        "--dest",
+        "/local/dest/fallback/",
+    ]
+    assert kwargs["capture_output"] is True
+    assert kwargs["text"] is True
+    assert kwargs["timeout"] == 900
 
 
-def test_pull_path_error_message_is_actionable():
-    """The error names the missing capability and the exact call that would
-    have been attempted, so a caller/log-reader knows what's broken and
-    where to file the myxcel feature request -- not just that *something*
-    failed."""
-    with pytest.raises(MyxcelCapabilityGapError) as excinfo:
-        pull_path("engaging", "~/some/path/", "/local/dest/")
+def test_pull_path_returns_none_on_success():
+    with patch("bathos.cluster.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+        assert pull_path("engaging", "~/x/", "/local/x/") is None
+
+
+def test_pull_path_no_such_command_raises_capability_gap():
+    """An installed myxcel that predates `pull-path` prints typer's "No such
+    command" on stderr; that must surface as MyxcelCapabilityGapError, and
+    the message must point at the backlog item and the verification grep."""
+    with patch("bathos.cluster.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            returncode=2, stderr="Error: No such command 'pull-path'.\n", stdout=""
+        )
+        with pytest.raises(MyxcelCapabilityGapError) as excinfo:
+            pull_path("engaging", "~/x/", "/local/x/")
 
     message = str(excinfo.value)
-    assert "engaging" in message
-    assert "~/some/path/" in message
-    assert "/local/dest/" in message
-    assert "--dest" in message
-    assert "myxcel" in message
+    assert "#5880" in message
+    assert "def pull_path" in message
+
+
+def test_pull_path_other_failure_is_plain_runtime_error_not_gap():
+    """Negative control: a real refusal/error (not a missing subcommand) must
+    raise RuntimeError carrying stderr, and must NOT be classified as a
+    capability gap."""
+    with patch("bathos.cluster.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=1, stderr="refused: dest missing", stdout="")
+        with pytest.raises(RuntimeError, match="refused: dest missing") as excinfo:
+            pull_path("engaging", "~/x/", "/local/x/")
+
+    assert not isinstance(excinfo.value, MyxcelCapabilityGapError)
+
+
+def test_pull_path_timeout_is_runtime_error_with_clear_message():
+    import subprocess
+
+    with patch("bathos.cluster.subprocess.run") as mock_run:
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="myxcel pull-path", timeout=900)
+        with pytest.raises(RuntimeError, match="timed out after 900s") as excinfo:
+            pull_path("engaging", "~/x/", "/local/x/")
+
+    assert not isinstance(excinfo.value, MyxcelCapabilityGapError)
 
 
 def test_myxcel_capability_gap_error_is_a_runtime_error():
@@ -107,3 +140,39 @@ def test_myxcel_capability_gap_error_is_a_runtime_error():
     `Exception`/`RuntimeError` per sub-path; this must not be a new
     exception hierarchy that slips past that."""
     assert issubclass(MyxcelCapabilityGapError, RuntimeError)
+
+
+def test_pull_path_gap_detected_for_cyclopts_era_myxcel():
+    """A cyclopts-era myxcel without pull-path rejects it as unused tokens,
+    not "No such command"; that is still a capability gap, not a generic
+    failure."""
+    from unittest.mock import MagicMock, patch
+
+    from bathos.cluster import MyxcelCapabilityGapError, pull_path
+
+    stderr = (
+        "╭─ Error ─────────╮\n"
+        "│ Unused Tokens: ['pull-path', 'engaging', '~/.bth/log/', '--dest', '/x/']. │\n"
+        "╰─────────────────╯\n"
+    )
+    with patch("bathos.cluster.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=2, stderr=stderr, stdout="")
+        with pytest.raises(MyxcelCapabilityGapError):
+            pull_path("engaging", "~/.bth/log/", "/x/")
+
+
+def test_pull_path_unused_tokens_for_other_args_is_not_a_gap():
+    """Negative control: an "Unused Tokens" error about some OTHER token (an
+    argv bug on a myxcel that does have pull-path) must stay a RuntimeError,
+    not be misread as an old install."""
+    from unittest.mock import MagicMock, patch
+
+    from bathos.cluster import MyxcelCapabilityGapError, pull_path
+
+    with patch("bathos.cluster.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            returncode=2, stderr="Unused Tokens: ['--bogus'].\n", stdout=""
+        )
+        with pytest.raises(RuntimeError) as excinfo:
+            pull_path("engaging", "~/.bth/log/", "/x/")
+    assert not isinstance(excinfo.value, MyxcelCapabilityGapError)

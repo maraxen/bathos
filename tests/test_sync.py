@@ -305,18 +305,21 @@ def test_pull_cluster_log_pulls_three_subpaths_via_myxcel_with_project_id(tmp_pa
         result = pull_cluster_log("engaging", config, tmp_path, "proj-id-123")
 
     assert mock_pull.call_count == 3
-    calls = {c.args[0:2] for c in mock_pull.call_args_list}
-    assert ("engaging", "~/projects/testproj/.bth/log/") in calls
-    assert ("engaging", "~/.bth/log/fallback/testproj/") in calls
-    assert ("engaging", "~/.bth/log-mirror/proj-id-123/") in calls
+    log_dir, fallback_dir, mirror_dir = cluster_log_remote_dirs(tmp_path, "engaging")
+    # Full (remote, src, dest) triples: a swapped destination must fail here.
+    calls = {tuple(c.args) for c in mock_pull.call_args_list}
+    assert calls == {
+        ("engaging", "~/projects/testproj/.bth/log/", str(log_dir) + "/"),
+        ("engaging", "~/.bth/log/fallback/testproj/", str(fallback_dir) + "/"),
+        ("engaging", "~/.bth/log-mirror/proj-id-123/", str(mirror_dir) + "/"),
+    }
 
     # A mocked pull_path returns normally (no exception) for all three, so
-    # all three must be recorded as pulled.
-    assert set(result.pulled) == {"log", "fallback", "mirror"}
+    # all three must be recorded as pulled, in attempt order.
+    assert result.pulled == ["log", "fallback", "mirror"]
     assert result.failures == []
     assert result.any_pulled is True
 
-    log_dir, fallback_dir, mirror_dir = cluster_log_remote_dirs(tmp_path, "engaging")
     assert log_dir.is_dir()
     assert fallback_dir.is_dir()
     assert mirror_dir.is_dir()
@@ -362,20 +365,46 @@ def test_pull_cluster_log_raises_for_unconfigured_remote(tmp_path: Path):
         pull_cluster_log("engaging", config, tmp_path, "proj-id-123")
 
 
-def test_pull_cluster_log_reports_no_pulls_when_pull_path_unmocked(tmp_path: Path):
-    """With `bathos.cluster.pull_path` NOT mocked, the real implementation
-    always raises `MyxcelCapabilityGapError` (debt #1993: no myxcel
-    capability exists yet for an arbitrary remote-path pull) -- so a real,
-    unmocked `pull_cluster_log` call must report all three sub-pulls as
-    failed, never silently as pulled, which is exactly the bug this
+def test_pull_cluster_log_reports_gap_per_subpath_when_myxcel_predates_pull_path(tmp_path: Path):
+    """With the REAL `bathos.cluster.pull_path` and an installed myxcel that
+    predates `pull-path` (subprocess reports "No such command"), every
+    sub-pull raises MyxcelCapabilityGapError. `pull_cluster_log` must record
+    all three as failures -- never as pulled -- which is the bug the
     structured result exists to prevent (a caller reading "no exception" as
-    success)."""
+    success). subprocess is patched so no real myxcel runs."""
     config = _cluster_config(tmp_path)
 
-    result = pull_cluster_log("engaging", config, tmp_path, "proj-id-123")
+    with patch("bathos.cluster.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            returncode=2, stderr="Error: No such command 'pull-path'.\n", stdout=""
+        )
+        result = pull_cluster_log("engaging", config, tmp_path, "proj-id-123")
 
+    assert mock_run.call_count == 3
     assert result.pulled == []
     assert result.any_pulled is False
-    assert {f["label"] for f in result.failures} == {"log", "fallback", "mirror"}
+    assert [f["label"] for f in result.failures] == ["log", "fallback", "mirror"]
     for failure in result.failures:
-        assert "myxcel" in failure["error"].lower()
+        assert "pull-path" in failure["error"]
+
+
+def test_pull_cluster_log_mixed_real_exit_codes(tmp_path: Path):
+    """Negative control with the REAL wrapper: the log sub-pull is refused by
+    myxcel (exit 1, e.g. a remote root outside the allowlist), the other two
+    succeed. The refused one must land in `failures` with myxcel's stderr,
+    and only the successful ones in `pulled`."""
+    config = _cluster_config(tmp_path)
+
+    def fake_run(argv, **_kwargs):
+        if argv[3] == "~/projects/testproj/.bth/log/":
+            return MagicMock(returncode=1, stderr="Error: pull path refused\n", stdout="")
+        return MagicMock(returncode=0, stderr="", stdout="")
+
+    with patch("bathos.cluster.subprocess.run", side_effect=fake_run) as mock_run:
+        result = pull_cluster_log("engaging", config, tmp_path, "proj-id-123")
+
+    assert mock_run.call_count == 3
+    assert result.pulled == ["fallback", "mirror"]
+    assert [f["label"] for f in result.failures] == ["log"]
+    assert "refused" in result.failures[0]["error"]
+    assert result.any_pulled is True

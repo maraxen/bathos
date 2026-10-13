@@ -360,12 +360,13 @@ class ClusterLogPullResult:
 
     Each of the three sub-pulls (`log`/`fallback`/`mirror`) is caught
     individually and best-effort (see `pull_cluster_log`'s docstring), so a
-    call that raises NOTHING can still have pulled NOTHING -- notably, every
-    real invocation currently fails all three, since `bathos.cluster.
-    pull_path` has no myxcel capability to back it and always raises
-    `MyxcelCapabilityGapError` (debt #1993; see `pull_path`'s docstring). A
-    caller must inspect this result -- `bool(pulled)`/`any_pulled` -- rather
-    than treat a normal return as success.
+    call that returns normally can still have pulled only SOME of the three:
+    each sub-pull is best-effort, and a failing one is recorded here rather
+    than raised (e.g. a fallback directory never written on the remote, or
+    an installed myxcel that predates `pull-path`, which raises
+    `MyxcelCapabilityGapError`; see `bathos.cluster.pull_path`). A caller must
+    inspect this result -- `bool(pulled)`/`any_pulled` and `failures` -- rather
+    than treat a normal return as full success.
 
     - `pulled`: labels (`"log"`/`"fallback"`/`"mirror"`) that succeeded.
     - `failures`: one `{"label", "src", "remote", "error"}` dict per
@@ -408,12 +409,12 @@ def pull_cluster_log(
     abort the other two.
 
     Returns a `ClusterLogPullResult` recording which sub-paths actually
-    pulled and which failed (with reasons) -- this function itself never
-    raises for a per-subpath failure (see above); it only raises for a bad
-    `remote_name`. **Currently every sub-path fails**: `pull_path` has no
-    myxcel capability behind it (debt #1993), so `pulled` is always empty
-    until that lands. Callers must report that honestly rather than reading
-    "no exception" as "pulled".
+    pulled and which failed (with reasons). This function never raises for a
+    per-subpath failure (see above); it only raises for a bad `remote_name`.
+    Each sub-pull runs `bathos.cluster.pull_path` (myxcel `pull-path`, debt
+    #1993), so a sub-path can fail for a missing myxcel subcommand, a
+    transfer error, or a timeout. Callers must report the per-subpath result
+    honestly rather than reading "no exception" as "pulled".
     """
     if remote_name not in config.remotes:
         raise ValueError(f"Remote '{remote_name}' not in config")
@@ -438,6 +439,10 @@ def pull_cluster_log(
         (f"~/.bth/log-mirror/{mirror_component}/", mirror_dest, "mirror"),
     ):
         try:
+            # `host` is passed as the myxcel PROFILE name. This couples to
+            # `remote_config["host"]` being the profile name, which holds for
+            # every current .bth.toml ("engaging", "titanix"). If a remote's
+            # host ever diverges from its myxcel profile name, map it here.
             pull_path(host, src, str(dst) + "/")
         except Exception as exc:  # noqa: BLE001 -- best-effort, see docstring
             logger.warning(
