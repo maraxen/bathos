@@ -1785,6 +1785,31 @@ def log_restore_tool(project_root: str = "") -> dict:
     }
 
 
+def _bare_script_argv(script_path: str, args: list[str], cwd: Path) -> tuple[list[str], str | None]:
+    """argv for a bare ``.py`` script, plus an optional warning (debt #2236).
+
+    ``sys.executable`` is bathos's OWN tool-isolated interpreter, so a project script that
+    imports project-local packages dies with ModuleNotFoundError. When the workspace (cwd)
+    is a project (``pyproject.toml`` or ``.venv`` present) and ``uv`` is on PATH, run
+    through ``uv run --no-sync python`` (``--no-sync``: a bare ``uv run`` silently re-syncs
+    and reverts hand-installed wheels). Otherwise keep the old behaviour but say so.
+    """
+    import shutil
+
+    in_project = (cwd / "pyproject.toml").is_file() or (cwd / ".venv").is_dir()
+    if in_project and shutil.which("uv"):
+        return ["uv", "run", "--no-sync", "python", script_path] + args, None
+    if in_project:
+        reason = "`uv` was not found on PATH, so the project venv could not be used"
+    else:
+        reason = "no pyproject.toml or .venv found in the working directory"
+    return [sys.executable, script_path] + args, (
+        f"script ran under bathos's own interpreter ({sys.executable}), not a project "
+        f"venv: {reason}. Project-local imports may fail; pass an explicit command "
+        "(e.g. script_path='uv', args=['run', 'python', 'script.py']) to choose one."
+    )
+
+
 def run_tool(
     script_path: str = "",
     args: list[str] | None = None,
@@ -1854,8 +1879,9 @@ def run_tool(
     #    (e.g. proxide) is never installed into bathos's own tool venv, so
     #    case 1's prepend fails every such script with a ModuleNotFoundError
     #    that has nothing to do with the script itself.
+    interpreter_warning: str | None = None
     if script_path.endswith(".py"):
-        argv = [sys.executable, script_path] + args
+        argv, interpreter_warning = _bare_script_argv(script_path, args, Path.cwd())
     else:
         argv = [script_path] + args
 
@@ -1896,12 +1922,15 @@ def run_tool(
     # already reads post-call to recover the id without changing run_script's shape.
     run_id = run_uuid_var.get(None) or ""
 
-    return {
+    response = {
         "script_path": script_path,
         "run_id": run_id,
         "exit_code": exit_code,
         "success": exit_code == 0,
     }
+    if interpreter_warning:
+        response["warning"] = interpreter_warning
+    return response
 
 
 @cisternal.tool(registry="bathos-cli", name="run", cli_name="run")

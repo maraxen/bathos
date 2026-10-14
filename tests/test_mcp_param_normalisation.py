@@ -189,3 +189,68 @@ class TestCheckToolUnbounded:
         _write_runs(tmp_catalog, 60)
         out = check_tool(catalog_dir=str(tmp_catalog), project_root=str(tmp_path))
         assert out["count"] == 60
+
+
+class TestRunToolProjectInterpreter:
+    """#2236: a bare .py must run in the project venv, not bathos's own interpreter."""
+
+    @pytest.fixture(autouse=True)
+    def uv_on_path(self, monkeypatch):
+        import shutil
+
+        real_which = shutil.which
+        monkeypatch.setattr(
+            shutil,
+            "which",
+            lambda name, *a, **k: "/usr/bin/uv" if name == "uv" else real_which(name, *a, **k),
+        )
+
+    def test_pyproject_workspace_runs_via_uv(self, captured_run_script, tmp_path, monkeypatch):
+        (tmp_path / "pyproject.toml").write_text("[project]\nname='p'\nversion='0'\n")
+        monkeypatch.chdir(tmp_path)
+        result = run_tool(script_path="scripts/x.py", args=["--n", "1"])
+        assert captured_run_script[0]["argv"] == [
+            "uv",
+            "run",
+            "--no-sync",
+            "python",
+            "scripts/x.py",
+            "--n",
+            "1",
+        ]
+        assert "warning" not in result
+
+    def test_venv_dir_also_triggers_uv(self, captured_run_script, tmp_path, monkeypatch):
+        (tmp_path / ".venv").mkdir()
+        monkeypatch.chdir(tmp_path)
+        run_tool(script_path="x.py")
+        assert captured_run_script[0]["argv"][:5] == ["uv", "run", "--no-sync", "python", "x.py"]
+
+    def test_no_project_keeps_bathos_interpreter_with_warning(
+        self, captured_run_script, tmp_path, monkeypatch
+    ):
+        import sys
+
+        monkeypatch.chdir(tmp_path)
+        result = run_tool(script_path="x.py")
+        assert captured_run_script[0]["argv"] == [sys.executable, "x.py"]
+        assert "warning" in result
+        assert "interpreter" in result["warning"]
+
+    def test_uv_missing_falls_back_with_warning(self, captured_run_script, tmp_path, monkeypatch):
+        import shutil
+        import sys
+
+        (tmp_path / "pyproject.toml").write_text("[project]\nname='p'\nversion='0'\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(shutil, "which", lambda *_a, **_k: None)
+        result = run_tool(script_path="x.py")
+        assert captured_run_script[0]["argv"] == [sys.executable, "x.py"]
+        assert "uv" in result["warning"]
+
+    def test_explicit_command_untouched(self, captured_run_script, tmp_path, monkeypatch):
+        (tmp_path / "pyproject.toml").write_text("[project]\nname='p'\nversion='0'\n")
+        monkeypatch.chdir(tmp_path)
+        result = run_tool(script_path="uv", args=["run", "python", "x.py"])
+        assert captured_run_script[0]["argv"] == ["uv", "run", "python", "x.py"]
+        assert "warning" not in result
