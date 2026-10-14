@@ -2123,6 +2123,7 @@ def campaign_conclude_tool(
     conclusion: str = "",
     catalog_dir: str = "",
     negative_check: str = "",
+    workspace_root: str = "",
 ) -> dict:
     """Conclude a campaign with an outcome label.
 
@@ -2133,6 +2134,8 @@ def campaign_conclude_tool(
         catalog_dir: Catalog directory (empty = use default)
         negative_check: Falsification backing / hedge for a negative outcome label (BP-3);
             required when outcome_label is a negative claim and a claim is registered.
+        workspace_root: Project workspace root that registered claim paths resolve
+            against (empty = auto-resolve from the server's cwd)
 
     Returns:
         Dict with conclusion confirmation
@@ -2156,6 +2159,9 @@ def campaign_conclude_tool(
             campaign_id,
             outcome_label,
             conclusion or "",
+            workspace_root=(
+                Path(workspace_root).expanduser().resolve() if workspace_root else None
+            ),
             negative_check=negative_check or None,
             catalog_dir=cat_dir,
         )
@@ -2965,6 +2971,7 @@ async def mcp_campaign_conclude_tool(
     conclusion: str = "",
     catalog_dir: str = "",
     negative_check: str = "",
+    workspace_root: str = "",
     token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
     """Conclude a campaign with an outcome label.
@@ -2976,6 +2983,7 @@ async def mcp_campaign_conclude_tool(
         conclusion=conclusion,
         catalog_dir=catalog_dir,
         negative_check=negative_check,
+        workspace_root=workspace_root,
     )
 
 

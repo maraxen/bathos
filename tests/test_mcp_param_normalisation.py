@@ -90,3 +90,38 @@ class TestCampaignCreateTool:
         finally:
             db.close()
         assert row[0] == parent["campaign_id"]
+
+
+class TestCampaignConcludeWorkspaceRoot:
+    """#2193: claim resolution must honour an explicit workspace_root."""
+
+    def _make(self, campaign_env):
+        from bathos.mcp import campaign_create_tool
+
+        return campaign_create_tool(name="c", catalog_dir=str(campaign_env))["campaign_id"]
+
+    def test_workspace_root_threaded_to_conclude(self, campaign_env, tmp_path):
+        from bathos.mcp import campaign_conclude_tool
+
+        cid = self._make(campaign_env)
+        ws = tmp_path / "elsewhere"
+        ws.mkdir()
+        with patch.object(mcp_mod, "conclude_campaign") as fake:
+            result = campaign_conclude_tool(
+                campaign_id=cid,
+                outcome_label="success",
+                catalog_dir=str(campaign_env),
+                workspace_root=str(ws),
+            )
+        assert result.get("status") == "concluded", result
+        assert fake.call_args.kwargs["workspace_root"] == ws.resolve()
+
+    def test_workspace_root_defaults_to_none(self, campaign_env):
+        from bathos.mcp import campaign_conclude_tool
+
+        cid = self._make(campaign_env)
+        with patch.object(mcp_mod, "conclude_campaign") as fake:
+            campaign_conclude_tool(
+                campaign_id=cid, outcome_label="success", catalog_dir=str(campaign_env)
+            )
+        assert fake.call_args.kwargs["workspace_root"] is None
