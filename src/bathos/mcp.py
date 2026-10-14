@@ -27,6 +27,7 @@ from bathos.anchor import find_anchors, get_anchor, register_anchor
 from bathos.archive import archive as archive_runs
 from bathos.authoring.models import ClaimPayload
 from bathos.campaigns import (
+    CAMPAIGN_MODES,
     CampaignError,
     add_run_to_campaign,
     conclude_campaign,
@@ -1974,7 +1975,7 @@ def campaign_create_tool(
 
     Args:
         name: Campaign name
-        mode: Campaign mode ('exploration' or 'confirmation')
+        mode: Campaign mode ('exploration', 'confirmation', or 'sequential')
         project_slug: Project slug (default: from config or 'default')
         catalog_dir: Catalog directory (empty = use default)
         question: Research question (optional)
@@ -1985,8 +1986,8 @@ def campaign_create_tool(
     """
     if not name:
         return {"error": "name parameter is required"}
-    if mode not in ("exploration", "confirmation"):
-        return {"error": f"mode must be 'exploration' or 'confirmation', got {mode!r}"}
+    if mode not in CAMPAIGN_MODES:
+        return {"error": f"mode must be one of {list(CAMPAIGN_MODES)}, got {mode!r}"}
 
     cat_dir = _get_catalog_dir(catalog_dir or None)
     slug = project_slug or _get_project_slug()
