@@ -183,9 +183,37 @@ def _resolve_backend(catalog_dir: Path) -> Literal["cool", "warm", "index"]:
 
     if is_log_mode(catalog_dir):
         return "index"
-    if (catalog_dir / "bathos.db").exists():
+    if (catalog_dir / "bathos.db").exists() and _warm_has_runs_table(catalog_dir):
         return "warm"
     return "cool"
+
+
+def _warm_has_runs_table(catalog_dir: Path) -> bool:
+    """True unless bathos.db is readable and definitively lacks a `runs` table (debt #1477).
+
+    A bathos.db can exist without `runs` (a compact that died right after creating
+    the file, a foreign DB); picking "warm" then fails every read with a catalog
+    error even though the cool fragments are fine. Opens read-only via
+    `connect_read`, so it never blocks or is blocked by a writer more than any other
+    read. If the DB cannot be opened at all (lock held by a writer, corrupt file)
+    this answers True: that keeps the pre-existing behaviour of surfacing the real
+    error from the warm path rather than silently serving cool data for a catalog
+    that is merely busy or damaged.
+    """
+    try:
+        con = connect_read(catalog_dir, read_only=True)
+    except duckdb.Error:
+        return True
+    try:
+        row = con.execute(
+            "SELECT COUNT(*) FROM information_schema.tables "
+            "WHERE table_schema = 'main' AND table_name = 'runs'"
+        ).fetchone()
+        return bool(row and row[0])
+    except duckdb.Error:
+        return True
+    finally:
+        con.close()
 
 
 def _run_from_index_row(row: dict) -> Run:
