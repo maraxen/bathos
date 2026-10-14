@@ -72,6 +72,26 @@ def resolve_cluster_config(
     return ClusterConfig(remote=remote, preset=preset, project=project)
 
 
+def _parse_myxcel_json(result, what: str, *, hint: str = "") -> dict:
+    """Parse a myxcel subprocess's JSON stdout, converting empty/invalid output into a
+    RuntimeError (debt #2228) -- callers (e.g. `bth submit --wait`) catch RuntimeError,
+    but not json.JSONDecodeError, so a bare json.loads crashed them with a traceback."""
+    stdout = (result.stdout or "").strip()
+    stderr = (result.stderr or "").strip()
+    if not stdout:
+        msg = f"{what} produced empty stdout (expected JSON)."
+    else:
+        try:
+            return json.loads(stdout)
+        except json.JSONDecodeError as e:
+            msg = f"{what} produced invalid JSON ({e}): {stdout[:200]!r}"
+    if stderr:
+        msg += f" stderr: {stderr[:500]}"
+    if hint:
+        msg += f" {hint}"
+    raise RuntimeError(msg)
+
+
 def push_project(remote: str, project: str) -> None:
     """Run `myxcel push <remote> <project> --apply --yes`.
 
@@ -133,7 +153,7 @@ def submit_job(
     if result.returncode != 0:
         raise RuntimeError(result.stderr)
 
-    return json.loads(result.stdout)
+    return _parse_myxcel_json(result, "myxcel submit-job")
 
 
 def job_wait(remote: str, slurm_job_id: str, timeout: int = 3600) -> dict:
@@ -148,7 +168,14 @@ def job_wait(remote: str, slurm_job_id: str, timeout: int = 3600) -> dict:
     if result.returncode != 0:
         raise RuntimeError(result.stderr)
 
-    return json.loads(result.stdout)
+    return _parse_myxcel_json(
+        result,
+        f"myxcel job-wait for job {slurm_job_id}",
+        hint=(
+            f"The job may still be running; check it with the myxcel job_status "
+            f"monitor (remote {remote}) rather than assuming failure."
+        ),
+    )
 
 
 def pull_project(remote: str, project: str) -> None:
