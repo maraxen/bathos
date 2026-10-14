@@ -38,7 +38,7 @@ from bathos.campaigns import (
 from bathos.capability import probe_capabilities
 from bathos.catalog import init_catalog
 from bathos.checker import check_runs
-from bathos.cli_common import require_project_slug
+from bathos.cli_common import normalise_output_paths, normalise_tags, require_project_slug
 from bathos.compact import compact as compact_catalog
 from bathos.config import default_catalog_dir, find_project_config, load_project_config
 from bathos.errors import RESOLUTION_HINTS, BathosErrorCode
@@ -1811,10 +1811,8 @@ def run_tool(
         return {"error": "script_path parameter is required"}
     if args is None:
         args = []
-    if output_paths is None:
-        output_paths = []
-    if tags is None:
-        tags = []
+    output_paths = normalise_output_paths(output_paths)
+    tags = normalise_tags(tags)
 
     # Construct argv. Two shapes reach this function under the one `script_path`
     # + `*args` signature, and they need DIFFERENT treatment (debt: `bth run`
