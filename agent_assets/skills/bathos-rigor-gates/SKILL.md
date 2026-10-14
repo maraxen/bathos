@@ -9,7 +9,7 @@ triggers: [review_tier, review coverage, obligations, obligation ledger, positiv
 A second layer of confirmatory-campaign machinery that sits **on top of** the Union Gate,
 claim files, and confounds documented in **bathos-campaigns** — read that skill first if you
 haven't registered a claim before. Everything here either (a) fires automatically at `bth run`
-or `bth campaign conclude` once opted in, (b) is a modifier on a `[[union_gate.clauses]]` entry
+or `bth campaign conclude` once opted in, (b) is a modifier on a `[[claim.union_gate.clauses]]` entry
 bathos-campaigns already documents, or (c) is a standalone query surface (`bth ref`, `bth gate`)
 with no campaign dependency at all.
 
@@ -141,10 +141,10 @@ invariant doesn't fire, the main subprocess never runs — the run is recorded w
 `outcome = "invalid_measurement"` instead. A passing pre-flight sets `differential_status =
 "passed"`.
 
-`positive_control` is a modifier on a `[[union_gate.clauses]]` entry bathos-campaigns already documents:
+`positive_control` is a modifier on a `[[claim.union_gate.clauses]]` entry bathos-campaigns already documents:
 
 ```toml
-[[union_gate.clauses]]
+[[claim.union_gate.clauses]]
 id             = "C_instrument_sensitivity"
 description    = "the pipeline can detect a known-real effect"
 hypothesis_ids = []                 # ignored for a positive_control clause

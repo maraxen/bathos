@@ -347,8 +347,8 @@ hypothesis_b      = "H_null_misspec"
 planned_run_label = "sweet_spot"
 predicted_outcome = "advantage_ci_lower_gt_0"
 
-[union_gate]
-[[union_gate.clauses]]
+[claim.union_gate]
+[[claim.union_gate.clauses]]
 id             = "C_main_effect"
 description    = "primary hypothesis distinguishable from the null on the target metric"
 hypothesis_ids = ["H_main_effect", "H_null_misspec"]      # cross-ref to [[hypotheses]] ids
@@ -362,7 +362,7 @@ claim_discriminates = ["H_main_effect", "H_null_misspec"]  # hypotheses this run
 claim_isolates      = ["C_baseline"]                        # confound / variable this run isolates
 ```
 
-**Confirmatory-rigor extensions:** Three related fields — `kill_condition_satisfiable_by_null` (bool, on `[claim]`, AC-23), the `positive_control = true` tag on a `[[union_gate.clauses]]` entry, and the `[confounds.synthetic_recovery]` sub-block — are documented in full in **bathos-rigor-gates**, which covers the confirmatory-rigor layer built on top of this claim schema.
+**Confirmatory-rigor extensions:** Three related fields — `kill_condition_satisfiable_by_null` (bool, on `[claim]`, AC-23), the `positive_control = true` tag on a `[[claim.union_gate.clauses]]` entry, and the `[confounds.synthetic_recovery]` sub-block — are documented in full in **bathos-rigor-gates**, which covers the confirmatory-rigor layer built on top of this claim schema.
 
 **Review Coverage Gate:** A `[review]` sidecar block (separate from the claim file itself) is a sibling gate to the Union Gate below, firing at the same `bth campaign conclude` moment — see **bathos-rigor-gates**.
 
@@ -414,7 +414,7 @@ Sidecar field: `claim_isolates = ["V_sequence_identity"]`
 
 ### Connecting probes to the Union Gate
 
-Each probe maps to one or more `[[union_gate.clauses]]` in `claim.bth.toml`.
+Each probe maps to one or more `[[claim.union_gate.clauses]]` in `claim.bth.toml`.
 A clause is covered when at least one run has all of its `hypothesis_ids` in `claim_discriminates`.
 
 Typical pattern: one scaled-divergence probe covers the main-effect clause; one null-injection probe covers the eval-validity clause; one information-ablation probe covers each isolation clause.
