@@ -26,6 +26,7 @@ from bathos.anchor import find_anchors, get_anchor, register_anchor
 # Import core modules
 from bathos.archive import archive as archive_runs
 from bathos.authoring.models import ClaimPayload
+from bathos.blast_radius import _UNBOUNDED_SCAN_LIMIT
 from bathos.campaigns import (
     CAMPAIGN_MODES,
     CampaignError,
@@ -1500,7 +1501,11 @@ def check_tool(
 
     cat_dir = _get_catalog_dir(catalog_dir or None)
     proj_root = Path(project_root) if project_root else Path.cwd()
-    results = check_runs(cat_dir, proj_root, status_filter=status_filter)
+    # check_runs() defaults to limit=50 over an unordered scan, which would silently drop
+    # an arbitrary subset of runs on a larger catalog (debt #1476) -- scan them all.
+    results = check_runs(
+        cat_dir, proj_root, status_filter=status_filter, limit=_UNBOUNDED_SCAN_LIMIT
+    )
     stale_count = sum(1 for r in results if r.status == "STALE")
     results_json = [
         {

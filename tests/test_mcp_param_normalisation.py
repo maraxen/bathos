@@ -178,3 +178,14 @@ class TestListRunsTruncationSignal:
         out = list_runs_tool(catalog_dir=str(tmp_catalog), limit=2, project="proj")
         assert out["count"] == 2
         assert out["truncated"] is True
+
+
+class TestCheckToolUnbounded:
+    """#1476: check_tool must consider every run, not check_runs()'s default 50."""
+
+    def test_checks_more_than_fifty_runs(self, tmp_catalog, tmp_path):
+        from bathos.mcp import check_tool
+
+        _write_runs(tmp_catalog, 60)
+        out = check_tool(catalog_dir=str(tmp_catalog), project_root=str(tmp_path))
+        assert out["count"] == 60
