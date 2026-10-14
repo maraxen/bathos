@@ -125,3 +125,56 @@ class TestCampaignConcludeWorkspaceRoot:
                 campaign_id=cid, outcome_label="success", catalog_dir=str(campaign_env)
             )
         assert fake.call_args.kwargs["workspace_root"] is None
+
+
+def _write_runs(catalog, n: int, slug: str = "test") -> None:
+    from bathos.catalog import write_run
+    from bathos.schema import Run
+
+    for i in range(n):
+        write_run(
+            Run(
+                project_slug=slug,
+                command=f"cmd {i}",
+                argv=["python", f"s{i}.py"],
+                git_hash=f"h{i}",
+                git_branch="main",
+                git_dirty=False,
+                status="completed",
+                exit_code=0,
+                duration_s=1.0,
+                hostname="test",
+            ),
+            catalog,
+        )
+
+
+class TestListRunsTruncationSignal:
+    """#2206: list_runs must say when more rows exist than were returned."""
+
+    def test_truncated_true_when_more_rows_exist(self, tmp_catalog):
+        from bathos.mcp import list_runs_tool
+
+        _write_runs(tmp_catalog, 5)
+        out = list_runs_tool(catalog_dir=str(tmp_catalog), limit=3)
+        assert out["count"] == 3
+        assert out["limit"] == 3
+        assert out["truncated"] is True
+
+    def test_truncated_false_when_all_rows_fit(self, tmp_catalog):
+        from bathos.mcp import list_runs_tool
+
+        _write_runs(tmp_catalog, 3)
+        for limit in (3, 10):
+            out = list_runs_tool(catalog_dir=str(tmp_catalog), limit=limit)
+            assert out["count"] == 3
+            assert out["limit"] == limit
+            assert out["truncated"] is False
+
+    def test_truncated_with_filters(self, tmp_catalog):
+        from bathos.mcp import list_runs_tool
+
+        _write_runs(tmp_catalog, 5, slug="proj")
+        out = list_runs_tool(catalog_dir=str(tmp_catalog), limit=2, project="proj")
+        assert out["count"] == 2
+        assert out["truncated"] is True

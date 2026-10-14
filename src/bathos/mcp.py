@@ -288,7 +288,8 @@ def list_runs_tool(
         status: Filter by run status
 
     Returns:
-        Dict with runs array and count
+        Dict with runs array, count, the effective limit, and truncated (True when
+        more matching runs exist than were returned)
     """
     from bathos.cli_common import parse_since
 
@@ -300,9 +301,11 @@ def list_runs_tool(
             project=project or None,
             status=status or None,
         )
-        runs = runs[:limit]
     else:
-        runs = list_runs(cat_dir, limit=limit)
+        # Fetch one extra row so truncation is detectable without a COUNT query.
+        runs = list_runs(cat_dir, limit=limit + 1)
+    truncated = len(runs) > limit
+    runs = runs[:limit]
     runs_json = [
         {
             "id": r.id,
@@ -316,7 +319,12 @@ def list_runs_tool(
         }
         for r in runs
     ]
-    return {"runs": runs_json, "count": len(runs_json)}
+    return {
+        "runs": runs_json,
+        "count": len(runs_json),
+        "limit": limit,
+        "truncated": truncated,
+    }
 
 
 # Same wire()-closure/PEP-563 workaround as run_cli_tool's `args` above: a
