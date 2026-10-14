@@ -49,10 +49,81 @@ from bathos.telemetry import event, init_telemetry, run_uuid_var
 logger = logging.getLogger(__name__)
 
 
+# Command-wrapper prefixes that run the real command after consuming their own options and a fixed
+# number of positionals (debt #2725). name -> (options taking the NEXT token as a value,
+# positionals consumed after the options, `NAME=value` tokens allowed among the options).
+_WRAPPER_SPECS: dict[str, tuple[frozenset[str], int, bool]] = {
+    "env": (frozenset({"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}), 0, True),
+    "timeout": (frozenset({"-k", "--kill-after", "-s", "--signal"}), 1, False),  # DURATION
+    "nice": (frozenset({"-n", "--adjustment"}), 0, False),
+    "taskset": (frozenset({"-c", "--cpu-list"}), 1, False),  # MASK, unless -c LIST given
+    "stdbuf": (frozenset({"-i", "-o", "-e", "--input", "--output", "--error"}), 0, False),
+    "ionice": (
+        frozenset({"-c", "--class", "-n", "--classdata", "-p", "--pid", "-P", "--pgid"}),
+        0,
+        False,
+    ),
+    "numactl": (
+        frozenset(
+            {"-N", "--cpunodebind", "-m", "--membind", "-C", "--physcpubind"}
+            | {"-i", "--interleave", "-p", "--preferred"}
+        ),
+        0,
+        False,
+    ),
+    "nohup": (frozenset(), 0, False),
+    "setsid": (frozenset(), 0, False),
+}
+
+
+def _strip_wrapper_prefix(argv: list[str]) -> list[str] | None:
+    """If argv starts with a known command wrapper (env/timeout/nice/taskset/...), return the
+    argv of the wrapped command (possibly empty); None if argv[0] is not a wrapper."""
+    if not argv:
+        return None
+    spec = _WRAPPER_SPECS.get(Path(argv[0]).name.lower())
+    if spec is None:
+        return None
+    value_opts, n_positional, allows_assignments = spec
+    name = Path(argv[0]).name.lower()
+    i = 1
+    has_cpu_list = False
+    while i < len(argv):
+        tok = argv[i]
+        if tok == "--":
+            i += 1
+            continue
+        if tok in value_opts:
+            has_cpu_list = has_cpu_list or (name == "taskset" and tok in ("-c", "--cpu-list"))
+            i += 2
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            # valueless flag, `--opt=value`, or a joined short form (`-oL`, `-c2`, `-5`)
+            has_cpu_list = has_cpu_list or (
+                name == "taskset" and (tok.startswith("-c") or tok.startswith("--cpu-list"))
+            )
+            i += 1
+            continue
+        if allows_assignments and "=" in tok:
+            i += 1
+            continue
+        break
+    if name == "taskset" and has_cpu_list:
+        n_positional = 0
+    return argv[min(i + n_positional, len(argv)) :]
+
+
 def _find_script_path(argv: list[str], cwd: Path) -> Path | None:
     """Extract script path from argv. Returns None if not a file-based script."""
     if not argv:
         return None
+
+    # Look through command wrappers (`env FOO=1 ...`, `timeout 900 ...`, `nice -n 5 ...`):
+    # without this the script is never bound, silently skipping sidecar binding, the prereg
+    # gate and outcome evaluation (debt #2725).
+    wrapped = _strip_wrapper_prefix(argv)
+    if wrapped is not None:
+        return _find_script_path(wrapped, cwd)
 
     # If first arg is not python/python3, assume it's the script
     first = argv[0].lower()
@@ -129,6 +200,30 @@ def _find_script_path(argv: list[str], cwd: Path) -> Path | None:
             return candidate.resolve()
         return None
     return None
+
+
+def _unbound_enforced_scripts(argv: list[str], cwd: Path) -> list[str]:
+    """`.py` files named in argv that sit in a sidecar-enforced dir or have an adjacent sidecar.
+
+    Used only for the "script could not be bound" warning, so it must never raise: an invalid
+    `[enforcement]` config is reported by the real gate path, not here.
+    """
+    from bathos.sidecar import find_sidecar
+
+    found: list[str] = []
+    for tok in argv:
+        if not tok.endswith(".py"):
+            continue
+        candidate = Path(tok) if Path(tok).is_absolute() else cwd / tok
+        if not candidate.is_file():
+            continue
+        try:
+            governed = is_in_enforced_dir(candidate) or find_sidecar(candidate) is not None
+        except Exception:
+            governed = False
+        if governed:
+            found.append(str(candidate))
+    return found
 
 
 @dataclasses.dataclass
@@ -544,6 +639,21 @@ def _run_script_impl(
             )
 
     script_path = _find_script_path(argv, cwd)
+
+    # debt #2725: no script bound, yet a .py file that IS under sidecar enforcement is named in
+    # argv -> sidecar binding, the prereg gate and outcome evaluation are all silently skipped.
+    # Say so rather than proceeding as if nothing were wrong.
+    if script_path is None and not no_sidecar:
+        unbound = _unbound_enforced_scripts(argv, cwd)
+        if unbound:
+            print(
+                "WARNING: could not determine which script this command runs, so sidecar "
+                "binding, the pre-registration gate and outcome evaluation are SKIPPED for it. "
+                f"Sidecar-governed file(s) named in the command: {', '.join(unbound)}. "
+                "Invoke it as `python <script>` / `uv run python <script>` (optionally behind "
+                "env/timeout/nice/taskset) so bathos can bind it.",
+                file=sys.stderr,
+            )
 
     # Calculate script SHA-256 at runtime
     script_sha256_val = ""

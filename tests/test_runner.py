@@ -2161,3 +2161,139 @@ def test_spawn_failure_log_mode_emits_run_finished(tmp_catalog: Path, tmp_path: 
     assert finished["data"]["status"] == "failed"
     assert finished["data"]["exit_code"] == 127
     reset_writers_for_test()
+
+
+# --- debt #2725: _find_script_path must see through command-wrapper prefixes ----------------
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        ["env", "FOO=1", "uv", "run", "python"],
+        ["env", "FOO=1", "BAR=2", "python"],
+        ["env", "-i", "FOO=1", "python"],
+        ["env", "-u", "FOO", "python"],
+        ["env", "-C", "somedir", "python"],
+        ["/usr/bin/env", "FOO=1", "python3"],
+        ["timeout", "900", "python"],
+        ["timeout", "-k", "5", "900", "python"],
+        ["timeout", "--signal=INT", "--foreground", "15m", "uv", "run", "python"],
+        ["timeout", "-s", "KILL", "900", "python"],
+        ["nice", "-n", "5", "python"],
+        ["nice", "-5", "python"],
+        ["nice", "python"],
+        ["taskset", "-c", "0", "python"],
+        ["taskset", "-c", "0-3", "uv", "run", "python"],
+        ["taskset", "0x3", "python"],
+        ["stdbuf", "-oL", "-eL", "python"],
+        ["stdbuf", "-o", "L", "python"],
+        ["ionice", "-c", "3", "python"],
+        ["ionice", "-c2", "-n", "7", "python"],
+        ["numactl", "--cpunodebind=0", "--membind=0", "python"],
+        ["numactl", "-N", "0", "python"],
+        ["nohup", "python"],
+        ["env", "A=1", "timeout", "10", "nice", "-n", "5", "uv", "run", "python"],
+    ],
+    ids=lambda p: " ".join(p),
+)
+def test_find_script_path_sees_through_wrapper_prefix(tmp_path: Path, prefix):
+    """Debt #2725: wrappers in front of the interpreter used to make this return None,
+    silently skipping sidecar binding, the prereg gate and outcome evaluation."""
+    from bathos.runner import _find_script_path
+
+    script = tmp_path / "x.py"
+    script.write_text("pass\n")
+    assert _find_script_path([*prefix, "x.py"], tmp_path) == script.resolve()
+
+
+def test_find_script_path_wrapper_then_bare_script(tmp_path: Path):
+    from bathos.runner import _find_script_path
+
+    script = tmp_path / "x.py"
+    script.write_text("pass\n")
+    assert _find_script_path(["env", "FOO=1", "x.py"], tmp_path) == script.resolve()
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["env", "FOO=1", "pytest", "x.py"],
+        ["timeout", "900"],
+        ["env", "FOO=1"],
+        ["nice", "-n"],
+        ["env", "FOO=1", "python", "-c", "pass"],
+    ],
+    ids=lambda a: " ".join(a),
+)
+def test_find_script_path_wrapper_negative_controls(tmp_path: Path, argv):
+    """Negative controls: stripping must not invent a script where there is none."""
+    from bathos.runner import _find_script_path
+
+    (tmp_path / "x.py").write_text("pass\n")
+    assert _find_script_path(argv, tmp_path) is None
+
+
+def test_env_wrapped_command_still_hits_enforced_dir_gate(tmp_catalog: Path, tmp_path: Path):
+    """Debt #2725 / #2243: `env FOO=1 python scripts/experiments/x.py` with no sidecar must be
+    refused by the pre-registration gate exactly as the unwrapped command is -- before the
+    fix it silently ran ungated."""
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    marker = tmp_path / "ran.marker"
+    script = enforced / "x.py"
+    script.write_text(f"from pathlib import Path\nPath({str(marker)!r}).write_text('1')\n")
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=["env", "FOO=1", sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 1
+    assert not marker.exists(), "gate must refuse before the subprocess runs"
+
+
+def test_unbound_script_in_enforced_dir_warns_on_stderr(tmp_catalog: Path, tmp_path: Path, capsys):
+    """Debt #2725: when a .py file in a sidecar-enforced dir appears in argv but no script
+    could be bound (unrecognised launcher), say so on stderr instead of silently skipping
+    sidecar binding / the gate / outcome evaluation."""
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    script = enforced / "x.py"
+    script.write_text("pass\n")
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=["sh", "-c", 'exec "$0" "$@"', "true", str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 0
+    err = capsys.readouterr().err
+    assert "WARNING" in err
+    assert "could not determine which script" in err
+    assert str(script) in err
+
+
+def test_unbound_script_outside_enforced_dir_does_not_warn(
+    tmp_catalog: Path, tmp_path: Path, capsys
+):
+    """Negative control: a non-enforced .py token (e.g. `pytest tests/x.py`) stays quiet."""
+    scratch = tmp_path / "scripts" / "scratch"
+    scratch.mkdir(parents=True)
+    (scratch / "x.py").write_text("pass\n")
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=["sh", "-c", "true", str(scratch / "x.py")],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 0
+    assert "could not determine which script" not in capsys.readouterr().err
