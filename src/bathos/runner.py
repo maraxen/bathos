@@ -964,7 +964,42 @@ def _run_script_impl(
         status = "killed"
     except Exception as e:
         event("run.error", phase="spawn", exc_type=type(e).__name__, exc_msg=str(e))
-        return 1
+        # debt #2726: the run was already recorded as status=running. Finalize it as failed
+        # through the same write path a normal completion uses, and say so on stderr --
+        # a bare `return 1` left a zombie 'running' record and no message.
+        spawn_exit_code = 127 if isinstance(e, FileNotFoundError) else 1
+        print(
+            f"Error: failed to launch {argv[0]!r}: {type(e).__name__}: {e}"
+            + (" (is the executable on PATH?)" if isinstance(e, FileNotFoundError) else ""),
+            file=sys.stderr,
+        )
+        run = dataclasses.replace(
+            run,
+            duration_s=time.monotonic() - start,
+            exit_code=spawn_exit_code,
+            status="failed",
+            outcome="error",
+            outcome_error_reason=f"spawn_failed: {type(e).__name__}: {e}",
+        )
+        if current_mode():
+            finish_outcome = emit_event(
+                kind="run.finished",
+                entity=[run.id],
+                data=run_event_data(run),
+                cwd=cwd,
+            )
+            return apply_run_finished_exit_semantics(spawn_exit_code, finish_outcome)
+        try:
+            write_run(run, catalog_dir)
+        except Exception as write_err:
+            event(
+                "run.error",
+                phase="persist",
+                exc_type=type(write_err).__name__,
+                exc_msg=str(write_err),
+            )
+            raise
+        return spawn_exit_code
     finally:
         if heartbeat_stop:
             heartbeat_stop.set()

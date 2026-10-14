@@ -2078,3 +2078,86 @@ def test_mode_not_reread_mid_run(tmp_catalog: Path, tmp_path: Path):
     assert len(runs) == 1
     assert not (Path.home() / ".bth" / "log" / "unaffiliated").exists()
     reset_writers_for_test()
+
+
+# --- debt #2726: spawn failure must finalize the run and say so on stderr ---------------
+
+
+def test_spawn_failure_finalizes_run_and_reports_stderr(tmp_catalog: Path, tmp_path: Path, capsys):
+    """debt #2726: when the subprocess cannot be spawned (e.g. `uv` off PATH ->
+    FileNotFoundError), the run record (already written status=running) must be finished as
+    failed with exit_code 127, and a clear message printed to stderr -- not a bare `return 1`."""
+    init_catalog(tmp_catalog)
+    missing = str(tmp_path / "definitely-not-a-real-executable")
+    exit_code = run_script(
+        argv=[missing, "run", "python", "x.py"],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 127
+    err = capsys.readouterr().err
+    assert "failed to launch" in err
+    assert "definitely-not-a-real-executable" in err
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert runs[0].status == "failed"
+    assert runs[0].exit_code == 127
+    assert runs[0].outcome == "error"
+    assert "spawn_failed" in runs[0].outcome_error_reason
+
+
+def test_spawn_failure_other_exception_exits_1(
+    tmp_catalog: Path, tmp_path: Path, capsys, monkeypatch
+):
+    """debt #2726: a non-FileNotFoundError spawn failure finalizes with exit_code 1."""
+    import subprocess as _sp
+
+    def boom(*_args, **_kwargs):
+        raise PermissionError("nope")
+
+    monkeypatch.setattr(_sp, "Popen", boom)
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=[sys.executable, "-c", "pass"],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 1
+    assert "PermissionError" in capsys.readouterr().err
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert runs[0].status == "failed"
+    assert runs[0].exit_code == 1
+
+
+def test_spawn_failure_log_mode_emits_run_finished(tmp_catalog: Path, tmp_path: Path, monkeypatch):
+    """debt #2726, flag-on path: the failed spawn goes through run.finished like a normal
+    completion, so the started-but-never-finished run does not stay 'running' forever."""
+    from bathos.runlog.writer import reset_writers_for_test
+
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_catalog))
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=[str(tmp_path / "no-such-exe")],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 127
+    lines = _read_jsonl_dir(Path.home() / ".bth" / "log" / "unaffiliated")
+    kinds = [line["kind"] for line in lines]
+    assert kinds.count("run.started") == 1
+    assert kinds.count("run.finished") == 1
+    finished = next(line for line in lines if line["kind"] == "run.finished")
+    assert finished["data"]["status"] == "failed"
+    assert finished["data"]["exit_code"] == 127
+    reset_writers_for_test()
