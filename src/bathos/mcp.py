@@ -1970,6 +1970,7 @@ def campaign_create_tool(
     catalog_dir: str = "",
     question: str = "",
     hypothesis: str = "",
+    parent_campaign_id: str = "",
 ) -> dict:
     """Create a new experiment campaign.
 
@@ -1980,6 +1981,7 @@ def campaign_create_tool(
         catalog_dir: Catalog directory (empty = use default)
         question: Research question (optional)
         hypothesis: Research hypothesis (optional)
+        parent_campaign_id: Parent campaign ID, for lineage (optional)
 
     Returns:
         Dict with campaign details or error
@@ -2016,6 +2018,7 @@ def campaign_create_tool(
             mode=mode,
             question=question or None,
             hypothesis=hypothesis or None,
+            parent_campaign_id=parent_campaign_id or None,
             catalog_dir=cat_dir,
         )
         result = {
@@ -2908,6 +2911,7 @@ async def mcp_campaign_create_tool(
     catalog_dir: str = "",
     question: str = "",
     hypothesis: str = "",
+    parent_campaign_id: str = "",
     token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
     """Create a new experiment campaign.
@@ -2920,6 +2924,7 @@ async def mcp_campaign_create_tool(
         catalog_dir=catalog_dir,
         question=question,
         hypothesis=hypothesis,
+        parent_campaign_id=parent_campaign_id,
     )
 
 

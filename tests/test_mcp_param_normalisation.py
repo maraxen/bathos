@@ -67,3 +67,26 @@ class TestCampaignCreateTool:
         result = campaign_create_tool(name="bad", mode="bogus", catalog_dir=str(campaign_env))
         assert "error" in result
         assert "sequential" in result["error"]
+
+    def test_parent_campaign_id_passed_through(self, campaign_env):
+        """#2078: create_campaign supports parent_campaign_id; the tool must expose it."""
+        from bathos.mcp import campaign_create_tool
+
+        parent = campaign_create_tool(name="parent", catalog_dir=str(campaign_env))
+        child = campaign_create_tool(
+            name="child",
+            catalog_dir=str(campaign_env),
+            parent_campaign_id=parent["campaign_id"],
+        )
+        assert "error" not in child, child
+
+        from bathos.campaigns import connect_catalog_db
+
+        db = connect_catalog_db(campaign_env, read_only=True)
+        try:
+            row = db.execute(
+                "SELECT parent_campaign_id FROM campaigns WHERE id=?", [child["campaign_id"]]
+            ).fetchone()
+        finally:
+            db.close()
+        assert row[0] == parent["campaign_id"]
