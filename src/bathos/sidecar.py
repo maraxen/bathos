@@ -236,6 +236,9 @@ class Sidecar:
     # halves the gate reads an always-NULL column and downgrades every confirmation campaign. (#3717)
     claim_discriminates: list[str] = field(default_factory=list)
     claim_isolates: list[str] = field(default_factory=list)
+    # [experiment] keys parse_sidecar did not recognise (e.g. `stage` for `stage_name`);
+    # surfaced as validation warnings, never errors (debt #2195).
+    unknown_experiment_keys: list[str] = field(default_factory=list)
     # popper sequential test fields (experiment sidecars only)
     popper_null_pass_rate: float | None = None
     popper_alt_pass_rate: float | None = None
@@ -294,6 +297,20 @@ def _str_list(value) -> list[str]:
     return []
 
 
+# Every key parse_sidecar reads from the [experiment] table. Keep in sync with the
+# `section.get(...)` calls in the experiment branch of parse_sidecar.
+EXPERIMENT_KEYS: frozenset[str] = frozenset(
+    {
+        "hypothesis",
+        "stage_name",
+        "novel",
+        "agent_mode",
+        "claim_discriminates",
+        "claim_isolates",
+    }
+)
+
+
 def parse_sidecar(path: Path) -> Sidecar:
     try:
         data = tomllib.loads(path.read_text())
@@ -329,6 +346,7 @@ def parse_sidecar(path: Path) -> Sidecar:
             agent_mode=section.get("agent_mode", ""),
             claim_discriminates=_str_list(section.get("claim_discriminates")),
             claim_isolates=_str_list(section.get("claim_isolates")),
+            unknown_experiment_keys=sorted(set(section) - EXPERIMENT_KEYS),
         )
         popper = data.get("popper", {})
         if popper:

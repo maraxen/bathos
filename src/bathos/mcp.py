@@ -3992,8 +3992,11 @@ def validate_sidecar_tool(
     from bathos.sidecar import SidecarError, parse_sidecar
     from bathos.validate import validate_sidecar as validate_sidecar_impl
 
-    def _fail(errors: list[str]) -> dict:
-        return {"validation_ok": False, "errors": errors, "error": "; ".join(errors)}
+    def _fail(errors: list[str], warnings: list[str] | None = None) -> dict:
+        out = {"validation_ok": False, "errors": errors, "error": "; ".join(errors)}
+        if warnings:
+            out["warnings"] = warnings
+        return out
 
     sidecar_path = Path(path)
     if not sidecar_path.exists():
@@ -4018,9 +4021,12 @@ def validate_sidecar_tool(
 
     if result.errors:
         error_msgs = [f"{e.field}: {e.message}" for e in result.errors]
-        return _fail(error_msgs)
+        return _fail(error_msgs, result.warnings)
 
-    return {"validation_ok": True, "path": path}
+    ok_result: dict = {"validation_ok": True, "path": path}
+    if result.warnings:
+        ok_result["warnings"] = result.warnings
+    return ok_result
 
 
 @cisternal.tool(registry="bathos")
