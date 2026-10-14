@@ -2297,3 +2297,132 @@ def test_unbound_script_outside_enforced_dir_does_not_warn(
     )
     assert exit_code == 0
     assert "could not determine which script" not in capsys.readouterr().err
+
+
+# --- debt #2343 / #2241 / #2244: a silent 'unknown' / 'error' outcome must warn on stderr ---
+
+
+_OUTCOME_SIDECAR = """
+[experiment]
+hypothesis = "test hypothesis"
+[outcomes.pass]
+condition = "temp_std < 5"
+decision = "good"
+reasoning = "stable temperature"
+[outcomes.fallback]
+condition = "temp_std >= 5"
+decision = "review"
+reasoning = "unstable"
+is_residual = true
+[result_schema]
+temp_std = "float"
+"""
+
+
+def _outcome_fixture(
+    tmp_path: Path,
+    body: str,
+    sidecar_text: str = _OUTCOME_SIDECAR,
+    subdir: str = "experiments",
+) -> Path:
+    enforced = tmp_path / "scripts" / subdir
+    enforced.mkdir(parents=True)
+    script = enforced / "run_test.py"
+    script.write_text(body)
+    (enforced / "run_test.bth.toml").write_text(sidecar_text)
+    return script
+
+
+def test_missing_result_file_warns_on_stderr_without_changing_exit_code(
+    tmp_catalog: Path, tmp_path: Path, capsys
+):
+    """#2343: sidecar declares [outcomes], the script wrote no result anywhere -> outcome
+    'unknown' and exit 0. Must print a one-line stderr WARNING naming the outcome and the
+    flag that fixes it; the exit code is NOT changed."""
+    script = _outcome_fixture(tmp_path, "pass\n")
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 0
+    assert read_runs(tmp_catalog)[0].outcome == "unknown"
+    err = capsys.readouterr().err
+    warning_lines = [ln for ln in err.splitlines() if "outcome 'unknown'" in ln]
+    assert len(warning_lines) == 1
+    assert warning_lines[0].startswith("WARNING")
+    assert "--output-paths" in warning_lines[0]
+    assert "BTH_RESULTS_PATH" in warning_lines[0]
+
+
+def test_outcome_error_warns_on_stderr_with_reason(tmp_catalog: Path, tmp_path: Path, capsys):
+    """#2241: a malformed outcome condition yields outcome='error' with a reason but exit 0 and
+    no stderr signal. Must print a WARNING carrying the reason; exit code unchanged."""
+    bad = _OUTCOME_SIDECAR.replace("temp_std < 5", "no_such_column < 5")
+    script = _outcome_fixture(
+        tmp_path,
+        "import os, json\n"
+        'json.dump({"temp_std": 1.0}, open(os.environ["BTH_RESULTS_PATH"], "w"))\n',
+        sidecar_text=bad,
+        # Outside the enforced dirs: inside them the pre-run gate already rejects a condition
+        # that does not parse, so the runtime 'error' outcome is only reachable here.
+        subdir="scratch",
+    )
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 0
+    run = read_runs(tmp_catalog)[0]
+    assert run.outcome == "error"
+    err = capsys.readouterr().err
+    warning_lines = [ln for ln in err.splitlines() if "outcome 'error'" in ln]
+    assert len(warning_lines) == 1
+    assert warning_lines[0].startswith("WARNING")
+    assert "no_such_column" in warning_lines[0]
+
+
+def test_resolved_outcome_and_no_sidecar_do_not_warn(tmp_catalog: Path, tmp_path: Path, capsys):
+    """Negative controls: a run whose outcome resolves ('pass'), and a run with no sidecar,
+    print no outcome WARNING."""
+    script = _outcome_fixture(
+        tmp_path,
+        "import os, json\n"
+        'json.dump({"temp_std": 1.0}, open(os.environ["BTH_RESULTS_PATH"], "w"))\n',
+    )
+    init_catalog(tmp_catalog)
+    assert (
+        run_script(
+            argv=[sys.executable, str(script)],
+            project_slug="testproj",
+            catalog_dir=tmp_catalog,
+            output_paths=[],
+            tags=[],
+            cwd=tmp_path,
+        )
+        == 0
+    )
+    assert read_runs(tmp_catalog)[0].outcome == "pass"
+    assert "WARNING: outcome" not in capsys.readouterr().err
+
+    assert (
+        run_script(
+            argv=[sys.executable, "-c", "pass"],
+            project_slug="testproj",
+            catalog_dir=tmp_catalog,
+            output_paths=[],
+            tags=[],
+            cwd=tmp_path,
+        )
+        == 0
+    )
+    assert "WARNING: outcome" not in capsys.readouterr().err

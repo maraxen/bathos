@@ -356,6 +356,44 @@ def _evaluate_sidecar_outcome(
         raise
 
 
+def _unresolved_outcome_warning(
+    sidecar: Sidecar,
+    outcome: str,
+    outcome_error_reason: str,
+    emission_source: str,
+) -> str | None:
+    """One-line stderr WARNING for a sidecar run that finished with exit 0 but whose outcome is
+    'unknown' or 'error', or None when there is nothing to say (debt #2343/#2241/#2244).
+
+    Never changes the exit code -- it only stops the condition from being silent. A result file
+    that was found but matched no outcome condition is reported too, with a distinct reason.
+    """
+    if not sidecar.outcomes or outcome not in ("unknown", "error"):
+        return None
+    if outcome == "error":
+        try:
+            parsed = json.loads(outcome_error_reason)
+            errors = parsed.get("errors") if isinstance(parsed, dict) else None
+            detail = "; ".join(str(e) for e in errors) if errors else outcome_error_reason
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            detail = outcome_error_reason
+        return (
+            f"WARNING: outcome 'error' (exit code left at 0): {detail or 'no reason recorded'}. "
+            "Fix the [outcomes] condition in the sidecar, or check the result file it is "
+            "evaluated against."
+        )
+    if emission_source == "none":
+        return (
+            "WARNING: outcome 'unknown': no usable result file was found, so the sidecar "
+            "[outcomes] could not be evaluated. Pass --output-paths <result.json>, or write the "
+            "result JSON to $BTH_RESULTS_PATH."
+        )
+    return (
+        f"WARNING: outcome 'unknown': a result was read (from {emission_source}) but no [outcomes] "
+        "condition matched it. Add a catch-all outcome or check the result fields."
+    )
+
+
 def _write_manifest(
     run: Run,
     sidecar_path: Path | None,
@@ -1180,6 +1218,15 @@ def _run_script_impl(
                     outcome_error_reason = f"exit_code={exit_code}"
     elif sidecar is not None:
         outcome, outcome_error_reason = _evaluate_sidecar_outcome(sidecar, metadata, resolved_mode)
+
+    # A clean exit whose outcome could not be resolved used to be completely silent.
+    if sidecar is not None and exit_code == 0:
+        unresolved = _unresolved_outcome_warning(
+            sidecar, outcome, outcome_error_reason, result_emission.source
+        )
+        if unresolved:
+            event("run.outcome_unresolved", outcome=outcome, reason=outcome_error_reason)
+            print(unresolved, file=sys.stderr)
 
     # Auto-register any files written to BTH_OUTPUT_DIR that weren't in --out
     registered_paths = set(output_paths)
