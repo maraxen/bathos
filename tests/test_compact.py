@@ -1301,3 +1301,58 @@ def test_compact_refresh_preserves_reaped_metadata(tmp_catalog: Path, sample_run
     assert json.loads(row[5]) == {"k": "v", "reaped": {"reason": "walltime"}}
     # Idempotent: the merged metadata is stable, so no perpetual "refresh".
     assert compact(tmp_catalog).refreshed == 0
+
+
+# ---------------------------------------------------------------------------
+# Debt #2010: a DuckDB index/constraint error in the warm DB must surface as a
+# clear, actionable error naming the remedy -- not a raw traceback -- and must
+# never trigger an automatic (destructive) rebuild.
+# ---------------------------------------------------------------------------
+
+
+def test_compact_index_constraint_error_is_actionable_and_non_destructive(
+    tmp_catalog: Path, sample_run: Run, caplog
+):
+    import logging
+    import uuid
+
+    import pytest
+
+    from bathos.compact import CorruptDatabaseError
+
+    init_catalog(tmp_catalog)
+    compact(tmp_catalog)  # create an empty warm DB with the full schema
+
+    # A real DuckDB constraint violation on the compact INSERT path: a unique index
+    # that two incoming runs collide on (stands in for a stale/conflicting index).
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    con.execute("CREATE UNIQUE INDEX idx_test_unique_host ON runs (hostname)")
+    con.close()
+
+    for _ in range(2):
+        write_run(dataclasses.replace(sample_run, id=str(uuid.uuid4())), tmp_catalog)
+
+    db_path = tmp_catalog / "bathos.db"
+    with (
+        caplog.at_level(logging.ERROR, logger="bathos.compact"),
+        pytest.raises(CorruptDatabaseError) as excinfo,
+    ):
+        compact(tmp_catalog)
+
+    message = str(excinfo.value)
+    assert "bth compact --force-rebuild" in message
+    assert "bth repair" in message
+    assert "ConstraintException" in message  # original duckdb error is quoted
+    assert isinstance(excinfo.value.__cause__, duckdb.ConstraintException)
+    assert excinfo.value.db_path == db_path
+    assert any("force-rebuild" in r.getMessage() for r in caplog.records)
+
+    # Non-destructive: no auto-rebuild happened (DB still there, our index intact, no backup).
+    assert db_path.exists()
+    assert not list(tmp_catalog.glob("bathos.db.bak-*"))
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        names = [r[0] for r in con.execute("SELECT index_name FROM duckdb_indexes()").fetchall()]
+    finally:
+        con.close()
+    assert "idx_test_unique_host" in names

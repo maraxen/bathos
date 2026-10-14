@@ -80,6 +80,34 @@ def _backup_warm_db(db_path: Path) -> None:
         logger.warning(f"Failed to backup bathos.db before force_rebuild: {e}")
 
 
+#: DuckDB error classes that indicate the warm DB's own state (a stale ART/PK index,
+#: or a row that violates a constraint) is blocking compaction, as opposed to a lock
+#: conflict (IOException) or a bug in a query. Debt #2010.
+_WARM_INDEX_ERRORS = (duckdb.ConstraintException, duckdb.InternalException)
+
+
+def _warm_index_error(exc: Exception, db_path: Path) -> CorruptDatabaseError:
+    """Build the actionable error for a stale-index / constraint failure in compact().
+
+    Deliberately does NOT auto-rebuild: `force_rebuild` deletes bathos.db, and rebuild
+    paths have wiped warm-only tables before (debt #2196). The warm tier is a cache
+    re-derivable from the cool fragments, but that is the operator's call. The message
+    names both remedies; the original DuckDB error is chained and quoted.
+    """
+    message = (
+        f"compact failed: DuckDB reported an index/constraint error on {db_path} "
+        f"({type(exc).__name__}: {exc}). This usually means a stale index in the warm "
+        "catalog, or a row that violates a constraint, and it will block every compact "
+        "until fixed. bathos.db has NOT been modified by this recovery path. "
+        "Remedy: back up and rebuild the warm tier from the cool fragments with "
+        "`bth compact --force-rebuild` (a bathos.db.bak-<timestamp> copy is kept), or "
+        "run `bth repair --tier warm` to see the planned repair (add `--no-dry-run "
+        "--acknowledge-warm-loss` to apply)."
+    )
+    logger.error(message)
+    return CorruptDatabaseError(message, db_path=db_path)
+
+
 def _collect_output_metadata(output_path: str) -> dict:
     """Collect metadata about an output file.
 
@@ -857,7 +885,11 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
 
     # Open DuckDB connection (time the connect call to detect lock waits)
     t_connect = time.monotonic()
-    con = duckdb.connect(str(db_path))
+    try:
+        con = duckdb.connect(str(db_path))
+    except _WARM_INDEX_ERRORS as exc:
+        # e.g. WAL replay hitting a stale index at open time (debt #2010)
+        raise _warm_index_error(exc, db_path) from exc
     try:
         waited_ms = (time.monotonic() - t_connect) * 1000
         if waited_ms > 500:
@@ -1262,6 +1294,8 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
             [CURRENT_SCHEMA_VERSION, "compact"],
         )
 
+    except _WARM_INDEX_ERRORS as exc:
+        raise _warm_index_error(exc, db_path) from exc
     finally:
         con.close()
 
