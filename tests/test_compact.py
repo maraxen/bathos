@@ -1211,3 +1211,93 @@ def test_compact_upgrades_v15_fragment_metadata_defaults(tmp_catalog: Path, samp
     assert row[0] == "16"
     assert row[1] == "{}"
     assert row[2] == "[]"
+
+
+# ---------------------------------------------------------------------------
+# Debt #2689 / #1647: a cool fragment rewritten on completion must refresh the
+# already-ingested warm row (status/exit_code/duration_s/outcome/metadata).
+# ---------------------------------------------------------------------------
+
+
+def _warm_row(catalog: Path, run_id: str) -> tuple:
+    con = duckdb.connect(str(catalog / "bathos.db"), read_only=True)
+    try:
+        return con.execute(
+            "SELECT status, exit_code, duration_s, outcome, outcome_error_reason, metadata "
+            "FROM runs WHERE id = ?",
+            [run_id],
+        ).fetchone()
+    finally:
+        con.close()
+
+
+def test_compact_refreshes_warm_row_when_cool_fragment_rewritten(
+    tmp_catalog: Path, sample_run: Run
+):
+    """running -> completed rewrite of the cool fragment reaches the warm tier."""
+    init_catalog(tmp_catalog)
+    running = dataclasses.replace(
+        sample_run, status="running", exit_code=0, duration_s=0.0, outcome=""
+    )
+    write_run(running, tmp_catalog)
+    first = compact(tmp_catalog)
+    assert first.ingested == 1
+    assert _warm_row(tmp_catalog, running.id)[0] == "running"
+
+    done = dataclasses.replace(
+        running,
+        status="completed",
+        exit_code=0,
+        duration_s=12.5,
+        outcome="pass",
+        metadata='{"k": "v"}',
+    )
+    write_run(done, tmp_catalog)  # same id -> overwrites the cool fragment
+
+    second = compact(tmp_catalog)
+    assert second.ingested == 0
+    assert second.skipped == 1
+    assert second.refreshed == 1
+    assert _warm_row(tmp_catalog, running.id) == (
+        "completed",
+        0,
+        12.5,
+        "pass",
+        None,
+        '{"k": "v"}',
+    )
+
+    # Nothing changed since: a further compact refreshes nothing.
+    third = compact(tmp_catalog)
+    assert third.refreshed == 0
+    assert third.skipped == 1
+
+
+def test_compact_refresh_preserves_reaped_metadata(tmp_catalog: Path, sample_run: Run):
+    """The warm-only metadata['reaped'] key (written by reap) survives a refresh."""
+    import json
+
+    init_catalog(tmp_catalog)
+    running = dataclasses.replace(
+        sample_run, status="running", exit_code=0, duration_s=0.0, outcome=""
+    )
+    write_run(running, tmp_catalog)
+    compact(tmp_catalog)
+
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    con.execute(
+        "UPDATE runs SET metadata = ? WHERE id = ?",
+        [json.dumps({"reaped": {"reason": "walltime"}}), running.id],
+    )
+    con.close()
+
+    done = dataclasses.replace(running, status="completed", exit_code=0, metadata='{"k": "v"}')
+    write_run(done, tmp_catalog)
+    result = compact(tmp_catalog)
+
+    assert result.refreshed == 1
+    row = _warm_row(tmp_catalog, running.id)
+    assert row[0] == "completed"
+    assert json.loads(row[5]) == {"k": "v", "reaped": {"reason": "walltime"}}
+    # Idempotent: the merged metadata is stable, so no perpetual "refresh".
+    assert compact(tmp_catalog).refreshed == 0

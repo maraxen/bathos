@@ -129,6 +129,10 @@ class CompactResult:
     skipped: int
     duration_s: float
     corrupt_fragments: list[CorruptFragment] = field(default_factory=list)
+    # Already-ingested runs (counted in `skipped`) whose warm row was updated because
+    # the cool fragment had changed -- e.g. a run rewritten running -> completed
+    # (debt #2689 / #1647).
+    refreshed: int = 0
 
 
 # Migration registry: transforms Run objects from older schema versions to current
@@ -952,14 +956,66 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
         # Track ingested and skipped counts
         ingested = 0
         skipped = 0
+        refreshed_count = 0
+
+        # Load the lifecycle columns of every warm run once (instead of one SELECT per
+        # cool run); doubles as the existence check and the refresh baseline.
+        existing_rows: dict[str, tuple] = {
+            row[0]: row[1:]
+            for row in con.execute(
+                "SELECT id, status, exit_code, duration_s, outcome, outcome_error_reason, "
+                "metadata FROM runs"
+            ).fetchall()
+        }
 
         # Ingest each run
         for run in cool_runs:
-            # Check if run already exists in DuckDB
-            existing = con.execute("SELECT id FROM runs WHERE id = ?", [run.id]).fetchall()
+            existing = existing_rows.get(run.id)
 
-            if existing:
+            if existing is not None:
                 skipped += 1
+
+                # Refresh the lifecycle columns (debt #2689 / #1647). A cool fragment is
+                # rewritten when a run finishes (running -> completed/failed), but the
+                # row was only ever INSERTed, so warm stayed 'running' forever.
+                pm_entry = postmortem_map.get(run.id)
+                if pm_entry is not None and pm_entry[0].verdict_override != "none":
+                    # The postmortem block below pins outcome to the override; compare
+                    # against that so an overridden run is not "refreshed" every compact.
+                    cool_outcome = pm_entry[0].verdict_override
+                else:
+                    cool_outcome = run.outcome or None
+                # metadata: cool wins, but `reaped` is warm-only (merged in by reap.py
+                # after a rebuild) and must survive.
+                cool_metadata = run.metadata or "{}"
+                try:
+                    warm_meta = json.loads(existing[5] or "{}")
+                    if isinstance(warm_meta, dict) and "reaped" in warm_meta:
+                        cool_meta = json.loads(cool_metadata)
+                        if isinstance(cool_meta, dict) and "reaped" not in cool_meta:
+                            cool_meta["reaped"] = warm_meta["reaped"]
+                            cool_metadata = json.dumps(cool_meta)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    pass
+                fresh_state = (
+                    run.status,
+                    run.exit_code,
+                    run.duration_s,
+                    cool_outcome,
+                    run.outcome_error_reason or None,
+                    cool_metadata,
+                )
+                if tuple(existing) != fresh_state:
+                    con.execute(
+                        """
+                        UPDATE runs SET
+                          status = ?, exit_code = ?, duration_s = ?, outcome = ?,
+                          outcome_error_reason = ?, metadata = ?
+                        WHERE id = ?
+                        """,
+                        [*fresh_state, run.id],
+                    )
+                    refreshed_count += 1
 
                 # Refresh output_metadata on every compact so the catalog reflects
                 # the current filesystem state (Debt #71). Re-stat is cheap; we only
@@ -1174,6 +1230,14 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
             )
 
             ingested += 1
+            existing_rows[run.id] = (
+                run.status,
+                run.exit_code,
+                run.duration_s,
+                run.outcome or None,
+                run.outcome_error_reason or None,
+                run.metadata,
+            )
 
         from bathos.campaigns import ingest_cool_campaigns
 
@@ -1229,4 +1293,5 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
         skipped=skipped,
         duration_s=duration_s,
         corrupt_fragments=corrupt_fragments,
+        refreshed=refreshed_count,
     )
