@@ -2391,6 +2391,37 @@ def test_outcome_error_warns_on_stderr_with_reason(tmp_catalog: Path, tmp_path: 
     assert "no_such_column" in warning_lines[0]
 
 
+def test_multiple_out_json_warns_listing_candidates_and_still_does_not_guess(
+    tmp_catalog: Path, tmp_path: Path, capsys
+):
+    """#2244: with several .json --out files the refusal-to-guess stays, but the resulting
+    'unknown' must name the candidate files in a stderr WARNING."""
+    out_a = tmp_path / "a.json"
+    out_b = tmp_path / "b.json"
+    script = _outcome_fixture(
+        tmp_path,
+        "import json\n"
+        f'json.dump({{"temp_std": 1.0}}, open(r"{out_a}", "w"))\n'
+        f'json.dump({{"other": 1}}, open(r"{out_b}", "w"))\n',
+    )
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[str(out_a), str(out_b)],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 0
+    assert read_runs(tmp_catalog)[0].outcome == "unknown"  # still refuses to guess
+    err = capsys.readouterr().err
+    warning_lines = [ln for ln in err.splitlines() if "outcome 'unknown'" in ln]
+    assert len(warning_lines) == 1
+    assert str(out_a) in warning_lines[0] and str(out_b) in warning_lines[0]
+    assert "--output-paths" in warning_lines[0]
+
+
 def test_resolved_outcome_and_no_sidecar_do_not_warn(tmp_catalog: Path, tmp_path: Path, capsys):
     """Negative controls: a run whose outcome resolves ('pass'), and a run with no sidecar,
     print no outcome WARNING."""

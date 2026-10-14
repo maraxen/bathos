@@ -361,6 +361,7 @@ def _unresolved_outcome_warning(
     outcome: str,
     outcome_error_reason: str,
     emission_source: str,
+    output_paths: list[str],
 ) -> str | None:
     """One-line stderr WARNING for a sidecar run that finished with exit 0 but whose outcome is
     'unknown' or 'error', or None when there is nothing to say (debt #2343/#2241/#2244).
@@ -381,6 +382,14 @@ def _unresolved_outcome_warning(
             f"WARNING: outcome 'error' (exit code left at 0): {detail or 'no reason recorded'}. "
             "Fix the [outcomes] condition in the sidecar, or check the result file it is "
             "evaluated against."
+        )
+    json_outs = [p for p in output_paths if p.endswith(".json")]
+    if emission_source == "none" and len(json_outs) > 1:
+        return (
+            "WARNING: outcome 'unknown': no result was written to $BTH_RESULTS_PATH and "
+            f"{len(json_outs)} --out JSON files were registered ({', '.join(json_outs)}); "
+            "bathos will not guess which one is the result. Pass a single "
+            "--output-paths <result.json>, or write the result to $BTH_RESULTS_PATH."
         )
     if emission_source == "none":
         return (
@@ -1222,7 +1231,7 @@ def _run_script_impl(
     # A clean exit whose outcome could not be resolved used to be completely silent.
     if sidecar is not None and exit_code == 0:
         unresolved = _unresolved_outcome_warning(
-            sidecar, outcome, outcome_error_reason, result_emission.source
+            sidecar, outcome, outcome_error_reason, result_emission.source, output_paths
         )
         if unresolved:
             event("run.outcome_unresolved", outcome=outcome, reason=outcome_error_reason)
