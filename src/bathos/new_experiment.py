@@ -9,28 +9,47 @@ _NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 _SCRIPT_TEMPLATE = """\
 #!/usr/bin/env python3
 \"\"\"{name}: one-line description.\"\"\"
+# Standard library only: bathos does not install this script's dependencies, so anything
+# imported here must already be present in a fresh project.
 from __future__ import annotations
 
+import argparse
 import json
+import logging
 import os
 from pathlib import Path
 
-import typer
-
-app = typer.Typer()
+log = logging.getLogger("{name}")
 
 
-@app.command()
-def main(
-    dry_run: bool = typer.Option(False, "--dry-run"),
-):
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="{name}: one-line description.")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="mark this as a dry run (the template does the same work either way)",
+    )
+    args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+
     # TODO: implement experiment logic here
+    if args.dry_run:
+        log.info("dry run: no experiment logic is implemented yet")
 
-    # Write results as JSON to stdout for bathos outcome evaluation
+    # Results keys match [result_schema] in the sidecar. None (JSON null) is a deliberate
+    # placeholder: an unedited run emits nulls, so the outcome conditions compare against NULL
+    # and no branch matches. Replace every None with a real measurement before trusting a run.
     results = {{
-        # "metric_name": value,
+        "metric": None,  # TODO: float, the measured value
+        "n_samples": None,  # TODO: int, the number of samples behind it
     }}
-    print(json.dumps(results))
+    payload = json.dumps(results)
+
+    # bathos sets BTH_RESULTS_PATH to a per-run temp file; it is the primary result channel
+    # for outcome evaluation.
+    results_path = os.environ.get("BTH_RESULTS_PATH")
+    if results_path:
+        Path(results_path).write_text(payload)
 
     # --- Output artifacts ---
     # bathos sets BTH_OUTPUT_DIR to a per-run directory (outputs/<run_id_short>/)
@@ -38,7 +57,7 @@ def main(
     # results.json is the file the exploratory sidecar declares under [observe].outputs.
     out_dir = os.environ.get("BTH_OUTPUT_DIR")
     if out_dir:
-        Path(out_dir, "results.json").write_text(json.dumps(results))
+        Path(out_dir, "results.json").write_text(payload)
 
     # For files outside BTH_OUTPUT_DIR, pass --out to `bth run` explicitly:
     #   bth run scripts/experiments/{name}.py --out path/to/file.json
@@ -46,9 +65,12 @@ def main(
     #   bth outputs list <run_id>
     #   bth outputs summary
 
+    print(payload)
+    return 0
+
 
 if __name__ == "__main__":
-    app()
+    raise SystemExit(main())
 """
 
 _SCAFFOLD_MODES = ("explore", "confirm")
