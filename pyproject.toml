@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bathos"
-version = "0.13.0a5"
+version = "0.13.0a6"
 description = "Local-first, zero-server experiment tracking for researchers"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -23,7 +23,10 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "duckdb>=1.0",
+    # Prerelease floor: every client sharing ~/.bth/catalog/bathos.db must read
+    # DuckDB storage v69+. Unlike [tool.uv] below, a floor here is honoured by
+    # `uv tool install`, PyPI installs and dependents (see [tool.uv] comment).
+    "duckdb>=2.0.0.dev2610011535",
     "pyarrow>=16",
     "pytz>=2026.2",
     "tomlkit>=0.12",
@@ -92,6 +95,36 @@ Repository = "https://github.com/mariellerossi/bathos.git"
 [project.scripts]
 bth = "bathos.cli_cyclopts:app"
 bth-mcp = "bathos.mcp:mcp_server"
+
+[tool.uv]
+# Prereleases are REQUIRED, not merely tolerated.
+#
+# bathos depends on cisternal, which ships only as a pre-release (0.1.1aN), and
+# bathos itself is 0.13.0aN. Without this, a `uv tool install` of bathos resolves
+# duckdb to the newest STABLE release while consumers that do allow prereleases
+# (maraxiom's tool, affigit's workspace) resolve a duckdb dev build instead.
+#
+# That split is not cosmetic: every bathos install shares ONE warm catalog at
+# ~/.bth/catalog/bathos.db, and DuckDB upgrades a file's storage version on write
+# but refuses to read a version newer than the client supports. Measured
+# 2026-10-13 on this machine -- maraxiom's venv (duckdb 2.0.0.dev2610011535, via
+# prerelease = "allow") had written the catalog at storage version 69, while the
+# standalone bathos tool resolved stable duckdb 1.5.6, which reads only 64-68.
+# Result: `bth sql`, `bth show` and the get_run MCP tool all failed identically
+# with "Trying to read a database file with version number 69, but we can only
+# read versions between 64 and 68" -- for ~a day, on a machine where nothing was
+# actually wrong and no data was lost (the cool-tier parquet was intact
+# throughout). Runs could not be verified by record, which is the one check this
+# project's own rules insist on over exit codes.
+#
+# Scope (spiked 2026-10-15, uv 0.11.21): this setting is honoured only when uv
+# resolves THIS project (`uv lock` / `uv sync` / `uv run` in the repo). It is
+# ignored by `uv tool install` (of a dir or a wheel, from any cwd) and by any
+# project that depends on bathos. The guarantee that every client sharing the
+# catalog stays on a mutually readable storage version therefore comes from the
+# duckdb prerelease floor in [project.dependencies]; this setting keeps the
+# repo's own resolution (cisternal 0.1.1aN etc.) prerelease-inclusive.
+prerelease = "allow"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/bathos"]

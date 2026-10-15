@@ -251,6 +251,14 @@ def prepare_catalog_for_conclude(catalog_dir: Path) -> None:
         con.close()
 
 
+CAMPAIGN_MODES: tuple[str, ...] = ("exploration", "confirmation", "sequential")
+
+
+def _modes_phrase() -> str:
+    quoted = [repr(m) for m in CAMPAIGN_MODES]
+    return ", ".join(quoted[:-1]) + f", or {quoted[-1]}"
+
+
 def create_campaign(
     db,
     name: str,
@@ -269,10 +277,8 @@ def create_campaign(
     (defaults to `Path.cwd()` via `resolve_log_root`)."""
     from bathos.runlog.emit import current_mode, emit_or_legacy, unit_of_work
 
-    if mode not in ("exploration", "confirmation", "sequential"):
-        raise CampaignError(
-            f"mode must be 'exploration', 'confirmation', or 'sequential', got {mode!r}"
-        )
+    if mode not in CAMPAIGN_MODES:
+        raise CampaignError(f"mode must be {_modes_phrase()}, got {mode!r}")
     campaign_id = str(uuid4())
     started_at = datetime.now(UTC).isoformat()
     campaign = Campaign(

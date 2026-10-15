@@ -34,9 +34,28 @@ def test_export_plugin_bundle_writes_real_claude_bundle(tmp_path):
     assert (out / "skills" / "bathos-mcp" / "SKILL.md").exists()
     # Skill resource dirs cisternal recognises (assets/) must ship in the bundle:
     # the plugin is the only delivery path, so a dropped template is a lost template.
-    parity_assets = out / "skills" / "bathos-literature-parity" / "assets"
-    assert (parity_assets / "parity.bth.toml.template").exists()
-    assert (parity_assets / "01_reconstruct.md").exists()
+    parity_skill = out / "skills" / "bathos-literature-parity"
+    parity_assets = parity_skill / "assets"
+    for name in (
+        "01_reconstruct.md",
+        "02_reconcile.md",
+        "03_refute.md",
+        "04_adjudicate.md",
+        "05_verdict.md",
+        "example_parity_validate.py",
+        "parity.bth.toml.template",
+    ):
+        assert (parity_assets / name).is_file(), f"missing literature-parity asset: {name}"
+    # The SKILL.md must carry the sections its assets and sibling skills point at;
+    # a bundle that ships the file with the protocol section stripped is not usable.
+    parity_text = (parity_skill / "SKILL.md").read_text(encoding="utf-8")
+    for heading in (
+        "## The 5-phase protocol",
+        "## Configuration: `parity.bth.toml`",
+        "## Integration with claim-tier gates",
+        "## Grading: the cap-lattice ceiling table",
+    ):
+        assert heading in parity_text, f"literature-parity SKILL.md lost section: {heading}"
 
     mcp = json.loads((out / ".mcp.json").read_text())
     assert "bathos" in mcp["mcpServers"]

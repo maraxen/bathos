@@ -528,7 +528,7 @@ def gate_check(
     )
     # Warnings (e.g. migration-window missing sources) are surfaced but never deny the gate.
     for w in validation.warnings:
-        logger.warning(f"sidecar warning for {script_path.name}: [{w.field}] {w.message}")
+        logger.warning(f"sidecar warning for {script_path.name}: {w}")
 
     if not validation.ok:
         payload = _gate_failure_payload(

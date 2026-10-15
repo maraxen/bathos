@@ -55,10 +55,81 @@ from bathos.telemetry import event, init_telemetry, run_uuid_var
 logger = logging.getLogger(__name__)
 
 
+# Command-wrapper prefixes that run the real command after consuming their own options and a fixed
+# number of positionals (debt #2725). name -> (options taking the NEXT token as a value,
+# positionals consumed after the options, `NAME=value` tokens allowed among the options).
+_WRAPPER_SPECS: dict[str, tuple[frozenset[str], int, bool]] = {
+    "env": (frozenset({"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}), 0, True),
+    "timeout": (frozenset({"-k", "--kill-after", "-s", "--signal"}), 1, False),  # DURATION
+    "nice": (frozenset({"-n", "--adjustment"}), 0, False),
+    "taskset": (frozenset({"-c", "--cpu-list"}), 1, False),  # MASK, unless -c LIST given
+    "stdbuf": (frozenset({"-i", "-o", "-e", "--input", "--output", "--error"}), 0, False),
+    "ionice": (
+        frozenset({"-c", "--class", "-n", "--classdata", "-p", "--pid", "-P", "--pgid"}),
+        0,
+        False,
+    ),
+    "numactl": (
+        frozenset(
+            {"-N", "--cpunodebind", "-m", "--membind", "-C", "--physcpubind"}
+            | {"-i", "--interleave", "-p", "--preferred"}
+        ),
+        0,
+        False,
+    ),
+    "nohup": (frozenset(), 0, False),
+    "setsid": (frozenset(), 0, False),
+}
+
+
+def _strip_wrapper_prefix(argv: list[str]) -> list[str] | None:
+    """If argv starts with a known command wrapper (env/timeout/nice/taskset/...), return the
+    argv of the wrapped command (possibly empty); None if argv[0] is not a wrapper."""
+    if not argv:
+        return None
+    spec = _WRAPPER_SPECS.get(Path(argv[0]).name.lower())
+    if spec is None:
+        return None
+    value_opts, n_positional, allows_assignments = spec
+    name = Path(argv[0]).name.lower()
+    i = 1
+    has_cpu_list = False
+    while i < len(argv):
+        tok = argv[i]
+        if tok == "--":
+            i += 1
+            continue
+        if tok in value_opts:
+            has_cpu_list = has_cpu_list or (name == "taskset" and tok in ("-c", "--cpu-list"))
+            i += 2
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            # valueless flag, `--opt=value`, or a joined short form (`-oL`, `-c2`, `-5`)
+            has_cpu_list = has_cpu_list or (
+                name == "taskset" and (tok.startswith("-c") or tok.startswith("--cpu-list"))
+            )
+            i += 1
+            continue
+        if allows_assignments and "=" in tok:
+            i += 1
+            continue
+        break
+    if name == "taskset" and has_cpu_list:
+        n_positional = 0
+    return argv[min(i + n_positional, len(argv)) :]
+
+
 def _find_script_path(argv: list[str], cwd: Path) -> Path | None:
     """Extract script path from argv. Returns None if not a file-based script."""
     if not argv:
         return None
+
+    # Look through command wrappers (`env FOO=1 ...`, `timeout 900 ...`, `nice -n 5 ...`):
+    # without this the script is never bound, silently skipping sidecar binding, the prereg
+    # gate and outcome evaluation (debt #2725).
+    wrapped = _strip_wrapper_prefix(argv)
+    if wrapped is not None:
+        return _find_script_path(wrapped, cwd)
 
     # If first arg is not python/python3, assume it's the script
     first = argv[0].lower()
@@ -135,6 +206,30 @@ def _find_script_path(argv: list[str], cwd: Path) -> Path | None:
             return candidate.resolve()
         return None
     return None
+
+
+def _unbound_enforced_scripts(argv: list[str], cwd: Path) -> list[str]:
+    """`.py` files named in argv that sit in a sidecar-enforced dir or have an adjacent sidecar.
+
+    Used only for the "script could not be bound" warning, so it must never raise: an invalid
+    `[enforcement]` config is reported by the real gate path, not here.
+    """
+    from bathos.sidecar import find_sidecar
+
+    found: list[str] = []
+    for tok in argv:
+        if not tok.endswith(".py"):
+            continue
+        candidate = Path(tok) if Path(tok).is_absolute() else cwd / tok
+        if not candidate.is_file():
+            continue
+        try:
+            governed = is_in_enforced_dir(candidate) or find_sidecar(candidate) is not None
+        except Exception:
+            governed = False
+        if governed:
+            found.append(str(candidate))
+    return found
 
 
 @dataclasses.dataclass
@@ -380,6 +475,56 @@ def _apply_observation_precedence(
         if tentative != "error":
             reason = ""
     return "observed", reason, tentative, metadata
+
+
+def _unresolved_outcome_warning(
+    sidecar: Sidecar,
+    outcome: str,
+    outcome_error_reason: str,
+    emission_source: str,
+    output_paths: list[str],
+) -> str | None:
+    """One-line stderr WARNING for a sidecar run that finished with exit 0 but whose outcome is
+    'unknown' or 'error', or None when there is nothing to say (debt #2343/#2241/#2244).
+
+    Never changes the exit code -- it only stops the condition from being silent. A result file
+    that was found but matched no outcome condition is reported too, with a distinct reason.
+    """
+    if not sidecar.outcomes or outcome not in ("unknown", "error"):
+        return None
+    if outcome in sidecar.outcomes and not outcome_error_reason:
+        # The user declared this label ([outcomes.unknown] / [outcomes.error]) and it matched.
+        return None
+    if outcome == "error":
+        try:
+            parsed = json.loads(outcome_error_reason)
+            errors = parsed.get("errors") if isinstance(parsed, dict) else None
+            detail = "; ".join(str(e) for e in errors) if errors else outcome_error_reason
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            detail = outcome_error_reason
+        return (
+            f"WARNING: outcome 'error' (exit code left at 0): {detail or 'no reason recorded'}. "
+            "Fix the [outcomes] condition in the sidecar, or check the result file it is "
+            "evaluated against."
+        )
+    json_outs = [p for p in output_paths if p.endswith(".json")]
+    if emission_source == "none" and len(json_outs) > 1:
+        return (
+            "WARNING: outcome 'unknown': no result was written to $BTH_RESULTS_PATH and "
+            f"{len(json_outs)} --out JSON files were registered ({', '.join(json_outs)}); "
+            "bathos will not guess which one is the result. Pass a single "
+            "--output-paths <result.json>, or write the result to $BTH_RESULTS_PATH."
+        )
+    if emission_source == "none":
+        return (
+            "WARNING: outcome 'unknown': no usable result file was found, so the sidecar "
+            "[outcomes] could not be evaluated. Pass --output-paths <result.json>, or write the "
+            "result JSON to $BTH_RESULTS_PATH."
+        )
+    return (
+        f"WARNING: outcome 'unknown': a result was read (from {emission_source}) but no [outcomes] "
+        "condition matched it. Add a catch-all outcome or check the result fields."
+    )
 
 
 def _write_manifest(
@@ -665,6 +810,21 @@ def _run_script_impl(
             )
 
     script_path = _find_script_path(argv, cwd)
+
+    # debt #2725: no script bound, yet a .py file that IS under sidecar enforcement is named in
+    # argv -> sidecar binding, the prereg gate and outcome evaluation are all silently skipped.
+    # Say so rather than proceeding as if nothing were wrong.
+    if script_path is None and not no_sidecar:
+        unbound = _unbound_enforced_scripts(argv, cwd)
+        if unbound:
+            print(
+                "WARNING: could not determine which script this command runs, so sidecar "
+                "binding, the pre-registration gate and outcome evaluation are SKIPPED for it. "
+                f"Sidecar-governed file(s) named in the command: {', '.join(unbound)}. "
+                "Invoke it as `python <script>` / `uv run python <script>` (optionally behind "
+                "env/timeout/nice/taskset) so bathos can bind it.",
+                file=sys.stderr,
+            )
 
     # Calculate script SHA-256 at runtime
     script_sha256_val = ""
@@ -1095,7 +1255,42 @@ def _run_script_impl(
         status = "killed"
     except Exception as e:
         event("run.error", phase="spawn", exc_type=type(e).__name__, exc_msg=str(e))
-        return 1
+        # debt #2726: the run was already recorded as status=running. Finalize it as failed
+        # through the same write path a normal completion uses, and say so on stderr --
+        # a bare `return 1` left a zombie 'running' record and no message.
+        spawn_exit_code = 127 if isinstance(e, FileNotFoundError) else 1
+        print(
+            f"Error: failed to launch {argv[0]!r}: {type(e).__name__}: {e}"
+            + (" (is the executable on PATH?)" if isinstance(e, FileNotFoundError) else ""),
+            file=sys.stderr,
+        )
+        run = dataclasses.replace(
+            run,
+            duration_s=time.monotonic() - start,
+            exit_code=spawn_exit_code,
+            status="failed",
+            outcome="error",
+            outcome_error_reason=f"spawn_failed: {type(e).__name__}: {e}",
+        )
+        if current_mode():
+            finish_outcome = emit_event(
+                kind="run.finished",
+                entity=[run.id],
+                data=run_event_data(run),
+                cwd=cwd,
+            )
+            return apply_run_finished_exit_semantics(spawn_exit_code, finish_outcome)
+        try:
+            write_run(run, catalog_dir)
+        except Exception as write_err:
+            event(
+                "run.error",
+                phase="persist",
+                exc_type=type(write_err).__name__,
+                exc_msg=str(write_err),
+            )
+            raise
+        return spawn_exit_code
     finally:
         if heartbeat_stop:
             heartbeat_stop.set()
@@ -1195,6 +1390,15 @@ def _run_script_impl(
     elif sidecar is not None and epistemic_class not in ("exploratory", "calibrating"):
         # Exploratory and calibrating runs take the observation precedence below instead (§3.2).
         outcome, outcome_error_reason = _evaluate_sidecar_outcome(sidecar, metadata, resolved_mode)
+
+    # A clean exit whose outcome could not be resolved used to be completely silent.
+    if sidecar is not None and exit_code == 0:
+        unresolved = _unresolved_outcome_warning(
+            sidecar, outcome, outcome_error_reason, result_emission.source, output_paths
+        )
+        if unresolved:
+            event("run.outcome_unresolved", outcome=outcome, reason=outcome_error_reason)
+            print(unresolved, file=sys.stderr)
 
     # Auto-register any files written to BTH_OUTPUT_DIR that weren't in --out
     registered_paths = set(output_paths)

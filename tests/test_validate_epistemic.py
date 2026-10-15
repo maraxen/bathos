@@ -90,7 +90,7 @@ def test_exploratory_outcome_without_source_is_warning_with_prior_runs(tmp_path)
     content = EXPLORATORY_WITH_OUTCOME.replace('source = "{source}"', "")
     result = _validate(tmp_path, content, prior=True)
     assert result.ok is True
-    assert any(w.field == "outcomes.hub.source" for w in result.warnings)
+    assert any(w.startswith("outcomes.hub.source:") for w in result.warnings)
 
 
 def test_exploratory_well_formed_source_passes(tmp_path):
@@ -298,7 +298,7 @@ def test_gate_check_surfaces_warnings_without_denying(tmp_path, monkeypatch):
     assert result.ok is True
     assert result.error_payload is None
     assert result.validation is not None
-    assert any(w.field == "outcomes.hub.source" for w in result.validation.warnings)
+    assert any(w.startswith("outcomes.hub.source:") for w in result.validation.warnings)
 
 
 def test_gate_check_denies_same_sidecar_on_new_stem(tmp_path, monkeypatch):

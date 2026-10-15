@@ -724,6 +724,10 @@ def submit(
             print(f"Failed to parse sidecar: {e}", file=sys.stderr)
             raise SystemExit(1) from None
     else:
+        # Auto-discovery: the first `.py` token in the command, relative to cwd. Every
+        # miss below used to be silent, which skipped the reproduction/parity submit
+        # gates without a trace (debt #2205) -- say what was looked for instead.
+        discovery_miss: str | None = None
         for cmd_token in command:
             if cmd_token.endswith(".py"):
                 candidate_py = Path(cmd_token)
@@ -734,9 +738,27 @@ def submit(
                             sidecar_path = candidate_sidecar
                             with open(candidate_sidecar, "rb") as f:
                                 sidecar_data = tomllib.load(f)
-                        except (FileNotFoundError, OSError):
-                            pass
+                        except (FileNotFoundError, OSError) as e:
+                            discovery_miss = f"could not read sidecar {candidate_sidecar}: {e}"
+                    else:
+                        discovery_miss = (
+                            f"no sidecar found at {candidate_sidecar} "
+                            f"(looked next to {cmd_token}, relative to {Path.cwd()})"
+                        )
+                else:
+                    discovery_miss = (
+                        f"script {cmd_token} does not exist relative to {Path.cwd()}, "
+                        "so no sidecar could be located"
+                    )
                 break
+        else:
+            discovery_miss = "no .py script found in the command, so no sidecar could be located"
+        if discovery_miss:
+            print(
+                f"Warning: {discovery_miss}; reproduction/parity submit gates were skipped "
+                "(pass --sidecar PATH to enforce them).",
+                file=sys.stderr,
+            )
 
     # 3a. Check reproduction prerequisite gate (before cluster submission)
     parsed_sidecar = None

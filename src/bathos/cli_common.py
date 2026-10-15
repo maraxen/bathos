@@ -12,6 +12,40 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 
+def normalise_tags(tags: list[str] | None) -> list[str]:
+    """Split each tag on commas, strip whitespace, drop empties (debt #2203).
+
+    ``tags=["a,b,c"]`` (how MCP clients and ``--tags a,b,c`` deliver a
+    comma-joined list) must become three tags, not one literal ``"a,b,c"``.
+    """
+    out: list[str] = []
+    for tag in tags or []:
+        out.extend(part.strip() for part in str(tag).split(",") if part.strip())
+    return out
+
+
+def normalise_output_paths(paths: list[str] | None) -> list[str]:
+    """Expand JSON-list-string entries into their member paths (debt #2217).
+
+    An entry that begins with ``[`` and ``json.loads`` to a list of strings is
+    replaced by those strings; anything else is kept verbatim.
+    """
+    import json
+
+    out: list[str] = []
+    for entry in paths or []:
+        if isinstance(entry, str) and entry.lstrip().startswith("["):
+            try:
+                parsed = json.loads(entry)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, list) and all(isinstance(p, str) for p in parsed):
+                out.extend(parsed)
+                continue
+        out.append(entry)
+    return out
+
+
 def catalog_dir() -> Path:
     override = os.environ.get("BTH_CATALOG_DIR")
     if override:

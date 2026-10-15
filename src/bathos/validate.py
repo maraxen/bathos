@@ -37,8 +37,32 @@ class ValidationError:
 class ValidationResult:
     ok: bool
     errors: list[ValidationError] = field(default_factory=list)
-    # Non-blocking findings (spec §3.2 migration posture): never affect `ok`.
-    warnings: list[ValidationError] = field(default_factory=list)
+    # Advisory findings that never flip `ok`: unknown [experiment] keys (debt #2195) and the
+    # spec 261015 §3.2 migration-window findings, each as "<field>: <message>".
+    warnings: list[str] = field(default_factory=list)
+
+
+# Likely misspellings that difflib's similarity cutoff would not catch on its own.
+_EXPERIMENT_KEY_ALIASES = {"stage": "stage_name"}
+
+
+def _unknown_experiment_key_warnings(sidecar: Sidecar) -> list[str]:
+    """One warning per unrecognised [experiment] key, with a did-you-mean if one is close."""
+    import difflib
+
+    from bathos.sidecar import EXPERIMENT_KEYS
+
+    warnings: list[str] = []
+    for key in sidecar.unknown_experiment_keys:
+        suggestion = _EXPERIMENT_KEY_ALIASES.get(key)
+        if suggestion is None:
+            close = difflib.get_close_matches(key, sorted(EXPERIMENT_KEYS), n=1, cutoff=0.6)
+            suggestion = close[0] if close else None
+        msg = f"experiment.{key}: unknown key in [experiment] -- it is ignored"
+        if suggestion:
+            msg += f" (did you mean '{suggestion}'?)"
+        warnings.append(msg)
+    return warnings
 
 
 def validate_popper_block(
@@ -509,6 +533,7 @@ def validate_sidecar(
     Returns ValidationResult with ok=True and errors=[] if valid, or ok=False with a list of errors.
     """
     errors = []
+    warnings = _unknown_experiment_key_warnings(sidecar)
 
     # ── [review] block structural validation (build-order step 2) ────────────────
     # Advisory tier: this validates SHAPE only. Whether the review is adequate is the Review
@@ -586,8 +611,8 @@ def validate_sidecar(
 
     # ── epistemic class (spec §3.1, §3.2, §3.5) ──────────────────────────────────
     # Only experiment sidecars carry a class; every other kind resolves to "legacy" and keeps
-    # today's rules untouched. `warnings` is non-blocking and never changes `ok`.
-    warnings: list[ValidationError] = []
+    # today's rules untouched. `warnings` (initialised above, plain strings) is non-blocking and
+    # never changes `ok`.
     cls = None
     if sidecar.kind == SidecarKind.EXPERIMENT:
         cls = resolve_epistemic_class(sidecar, stem_has_prior_runs=stem_has_prior_runs)
@@ -647,14 +672,16 @@ def validate_sidecar(
                 problem = f"malformed source {spec.source!r}"
             else:
                 continue
-            target = warnings if stem_has_prior_runs else errors
-            target.append(
-                ValidationError(
-                    f"outcomes.{label}.source",
-                    f"branch {label!r}: {problem}; use one of lit:<ref> | run:<id>:<field> | "
-                    "sesoi:<value>:<why> | provisional:<why> | card:<id>",
-                )
+            source_error = ValidationError(
+                f"outcomes.{label}.source",
+                f"branch {label!r}: {problem}; use one of lit:<ref> | run:<id>:<field> | "
+                "sesoi:<value>:<why> | provisional:<why> | card:<id>",
             )
+            if stem_has_prior_runs:
+                # Migration window: a stem with prior runs gets a warning, not an error.
+                warnings.append(f"{source_error.field}: {source_error.message}")
+            else:
+                errors.append(source_error)
     elif cls == "calibrating":
         if sidecar.calibrate is None or not sidecar.calibrate.quantity.strip():
             errors.append(

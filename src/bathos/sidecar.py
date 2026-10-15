@@ -246,6 +246,9 @@ class Sidecar:
     # halves the gate reads an always-NULL column and downgrades every confirmation campaign. (#3717)
     claim_discriminates: list[str] = field(default_factory=list)
     claim_isolates: list[str] = field(default_factory=list)
+    # [experiment] keys parse_sidecar did not recognise (e.g. `stage` for `stage_name`);
+    # surfaced as validation warnings, never errors (debt #2195).
+    unknown_experiment_keys: list[str] = field(default_factory=list)
     # popper sequential test fields (experiment sidecars only)
     popper_null_pass_rate: float | None = None
     popper_alt_pass_rate: float | None = None
@@ -351,6 +354,21 @@ def _str_list(value) -> list[str]:
     return []
 
 
+# Every key parse_sidecar reads from the [experiment] table. Keep in sync with the
+# `section.get(...)` calls in the experiment branch of parse_sidecar.
+EXPERIMENT_KEYS: frozenset[str] = frozenset(
+    {
+        "hypothesis",
+        "question",  # exploratory sidecars state a question instead of a hypothesis (spec 261015)
+        "stage_name",
+        "novel",
+        "agent_mode",
+        "claim_discriminates",
+        "claim_isolates",
+    }
+)
+
+
 def parse_sidecar(path: Path) -> Sidecar:
     try:
         data = tomllib.loads(path.read_text())
@@ -396,6 +414,7 @@ def parse_sidecar(path: Path) -> Sidecar:
             agent_mode=section.get("agent_mode", ""),
             claim_discriminates=_str_list(section.get("claim_discriminates")),
             claim_isolates=_str_list(section.get("claim_isolates")),
+            unknown_experiment_keys=sorted(set(section) - EXPERIMENT_KEYS),
         )
         popper = data.get("popper", {})
         if popper:
@@ -884,6 +903,21 @@ def _sanity_descendants(node: dict) -> list[dict]:
 
 def _sanity_constant_ok(node: dict) -> bool:
     """A literal is allowed only if it is 0, 1, NULL or a boolean (spec §3.2)."""
+    literal = node.get("literal")
+    if isinstance(literal, dict):
+        # DuckDB 2.x serializes a constant as {"literal": {"kind", "text"}}; 1.x used "value"
+        # (handled below). The text is parsed exactly, so `1e9`, `-5`, `0.5` stay rejected.
+        kind = literal.get("kind")
+        if kind in ("NULL_LITERAL", "BOOLEAN"):
+            return True
+        if kind in ("INTEGER", "NUMERIC"):
+            from decimal import Decimal, InvalidOperation
+
+            try:
+                return Decimal(str(literal.get("text", ""))) in (0, 1)
+            except InvalidOperation:
+                return False
+        return False
     value = node.get("value") or {}
     typ = value.get("type") or {}
     type_id = typ.get("id")

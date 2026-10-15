@@ -80,6 +80,74 @@ def _backup_warm_db(db_path: Path) -> None:
         logger.warning(f"Failed to backup bathos.db before force_rebuild: {e}")
 
 
+#: DuckDB error classes that indicate the warm DB's own state (a stale ART/PK index,
+#: or a row that violates a constraint) is blocking compaction, as opposed to a lock
+#: conflict (IOException) or a bug in a query. Debt #2010.
+_WARM_INDEX_ERRORS = (duckdb.ConstraintException, duckdb.InternalException)
+
+# Columns the runner rewrites in the cool fragment when a run finishes, beyond the
+# status/outcome/metadata core; the compact refresh must carry them too (debt #2689).
+_REFRESH_FINISH_COLS = (
+    "outcome_is_residual",
+    "adversarial_check_status",
+    "adversarial_check_result",
+    "output_paths",
+    "parity_run_type",
+    "differential_status",
+    "differential_off_value",
+    "differential_on_value",
+    "tentative_outcome",
+)
+
+# Classes whose runs record an observation, not a verdict (spec 261015 §3.2): a postmortem
+# verdict override is a tentative label for them and never replaces `outcome`.
+_OBSERVATION_CLASSES = ("exploratory", "calibrating")
+
+
+def _cool_finish_value(run: Run, col: str):
+    """A cool finish-time value, normalised the way the warm comparison sees it."""
+    value = getattr(run, col, None)
+    if col == "output_paths":
+        return list(value or [])
+    if col == "outcome_is_residual":
+        return bool(value)
+    return value if value != "" else None
+
+
+def _warm_finish_value(col: str, value):
+    """A warm finish-time value, normalised to match `_cool_finish_value`."""
+    if col == "output_paths":
+        return list(value or [])
+    if col == "outcome_is_residual":
+        return bool(value)
+    return value if value != "" else None
+
+
+def _warm_index_error(exc: Exception, db_path: Path) -> CorruptDatabaseError:
+    """Build the actionable error for a stale-index / constraint failure in compact().
+
+    Deliberately does NOT auto-rebuild: `force_rebuild` deletes bathos.db, and rebuild
+    paths have wiped warm-only tables before (debt #2196). The warm tier is a cache
+    re-derivable from the cool fragments, but that is the operator's call. The message
+    names both remedies; the original DuckDB error is chained and quoted.
+    """
+    message = (
+        f"compact failed: DuckDB reported an index/constraint error on {db_path} "
+        f"({type(exc).__name__}: {exc}). This usually means a stale index in the warm "
+        "catalog, or a row that violates a constraint, and it will block every compact "
+        "until fixed. It can also come from a malformed cool fragment (e.g. a campaign "
+        "row failing a CHECK) -- read the quoted error first, because a rebuild re-ingests "
+        "the same fragments and will fail the same way. Rows ingested earlier in this "
+        "compact are kept; nothing is deleted or rebuilt automatically. "
+        "Remedy for a stale index: back up and rebuild the warm tier from the cool fragments with "
+        "`bth compact --force-rebuild` (a bathos.db.bak-<timestamp> copy is kept), or "
+        "run `bth repair --tier warm` to see the planned repair (add `--no-dry-run "
+        "--acknowledge-warm-loss` to apply)."
+    )
+    logger.error(message)
+    return CorruptDatabaseError(message, db_path=db_path)
+
+
 def _collect_output_metadata(output_path: str) -> dict:
     """Collect metadata about an output file.
 
@@ -129,6 +197,10 @@ class CompactResult:
     skipped: int
     duration_s: float
     corrupt_fragments: list[CorruptFragment] = field(default_factory=list)
+    # Already-ingested runs (counted in `skipped`) whose warm row was updated because
+    # the cool fragment had changed -- e.g. a run rewritten running -> completed
+    # (debt #2689 / #1647).
+    refreshed: int = 0
 
 
 # Migration registry: transforms Run objects from older schema versions to current
@@ -871,7 +943,12 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
 
     # Open DuckDB connection (time the connect call to detect lock waits)
     t_connect = time.monotonic()
-    con = duckdb.connect(str(db_path))
+    try:
+        con = duckdb.connect(str(db_path))
+    except _WARM_INDEX_ERRORS as exc:
+        # e.g. WAL replay hitting a stale index at open time (debt #2010)
+        warm_error = _warm_index_error(exc, db_path)
+        raise warm_error from exc
     try:
         waited_ms = (time.monotonic() - t_connect) * 1000
         if waited_ms > 500:
@@ -973,14 +1050,104 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
         # Track ingested and skipped counts
         ingested = 0
         skipped = 0
+        refreshed_count = 0
+
+        # Load the lifecycle columns of every warm run once (instead of one SELECT per
+        # cool run); doubles as the existence check and the refresh baseline.
+        existing_rows: dict[str, tuple] = {
+            row[0]: row[1:]
+            for row in con.execute(
+                "SELECT id, status, exit_code, duration_s, outcome, outcome_error_reason, "
+                "metadata, postmortem_verdict_override, "
+                + ", ".join(_REFRESH_FINISH_COLS)
+                + " FROM runs"
+            ).fetchall()
+        }
 
         # Ingest each run
         for run in cool_runs:
-            # Check if run already exists in DuckDB
-            existing = con.execute("SELECT id FROM runs WHERE id = ?", [run.id]).fetchall()
+            existing = existing_rows.get(run.id)
 
-            if existing:
+            if existing is not None:
                 skipped += 1
+
+                # Refresh the lifecycle columns (debt #2689 / #1647). A cool fragment is
+                # rewritten when a run finishes (running -> completed/failed), but the
+                # row was only ever INSERTed, so warm stayed 'running' forever.
+                pm_entry = postmortem_map.get(run.id)
+                warm_override = existing[6]
+                if pm_entry is not None and pm_entry[0].verdict_override != "none":
+                    # The postmortem block below pins outcome to the override; compare
+                    # against that so an overridden run is not "refreshed" every compact.
+                    cool_outcome = pm_entry[0].verdict_override
+                elif pm_entry is None and warm_override not in (None, "", "none"):
+                    # The override lives only in warm. postmortem_map covers the current
+                    # workspace alone, so a compact run from another project (or a checkout
+                    # lacking the postmortem file) must not revert the recorded verdict.
+                    cool_outcome = existing[3]
+                else:
+                    cool_outcome = run.outcome or None
+                # Observation runs: the override (pinned above) belongs in tentative_outcome, so
+                # the compared outcome is the cool one and the tentative slot carries the override.
+                tentative_idx = 7 + _REFRESH_FINISH_COLS.index("tentative_outcome")
+                cool_tentative = run.tentative_outcome or None
+                if run.epistemic_class in _OBSERVATION_CLASSES:
+                    if pm_entry is not None and pm_entry[0].verdict_override != "none":
+                        cool_tentative = pm_entry[0].verdict_override
+                    elif pm_entry is None and warm_override not in (None, "", "none"):
+                        cool_tentative = existing[tentative_idx] or None
+                    cool_outcome = run.outcome or None
+                # metadata: cool wins, but `reaped` is warm-only (merged in by reap.py
+                # after a rebuild) and must survive.
+                cool_metadata = run.metadata or "{}"
+                if cool_metadata.strip() in ("", "{}") and (existing[5] or "{}").strip() != "{}":
+                    # An empty cool metadata never replaces real warm metadata: `bth repair`
+                    # re-exports warm-only runs to cool without metadata.
+                    cool_metadata = existing[5]
+                try:
+                    warm_meta = json.loads(existing[5] or "{}")
+                    if isinstance(warm_meta, dict) and "reaped" in warm_meta:
+                        cool_meta = json.loads(cool_metadata)
+                        if isinstance(cool_meta, dict) and "reaped" not in cool_meta:
+                            cool_meta["reaped"] = warm_meta["reaped"]
+                            cool_metadata = json.dumps(cool_meta)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    pass
+                fresh_state = (
+                    run.status,
+                    run.exit_code,
+                    run.duration_s,
+                    cool_outcome,
+                    run.outcome_error_reason or None,
+                    cool_metadata,
+                    # Finish-time columns the runner also rewrites (runner.py finalize).
+                    *(
+                        cool_tentative
+                        if col == "tentative_outcome"
+                        else _cool_finish_value(run, col)
+                        for col in _REFRESH_FINISH_COLS
+                    ),
+                )
+                # Normalise "" to None for outcome: the postmortem block writes "" for
+                # a run with no sidecar outcome, which must not count as a change.
+                warm_state = (
+                    *existing[:3],
+                    existing[3] or None,
+                    *existing[4:6],
+                    *(_warm_finish_value(c, v) for c, v in zip(_REFRESH_FINISH_COLS, existing[7:])),
+                )
+                if warm_state != fresh_state:
+                    set_cols = [
+                        "status", "exit_code", "duration_s", "outcome",
+                        "outcome_error_reason", "metadata", *_REFRESH_FINISH_COLS,
+                    ]  # fmt: skip
+                    con.execute(
+                        "UPDATE runs SET "
+                        + ", ".join(f"{c} = ?" for c in set_cols)
+                        + " WHERE id = ?",
+                        [*fresh_state, run.id],
+                    )
+                    refreshed_count += 1
 
                 # Refresh output_metadata on every compact so the catalog reflects
                 # the current filesystem state (Debt #71). Re-stat is cheap; we only
@@ -1047,6 +1214,14 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                         if postmortem_verdict_override != "none"
                         else curr_outcome
                     )
+                    if run.epistemic_class in _OBSERVATION_CLASSES:
+                        # Spec 261015 §3.2: the override is a tentative label; outcome stays.
+                        outcome = curr_outcome
+                        if postmortem_verdict_override != "none":
+                            con.execute(
+                                "UPDATE runs SET tentative_outcome = ? WHERE id = ?",
+                                [postmortem_verdict_override, run.id],
+                            )
 
                     con.execute(
                         """
@@ -1204,6 +1379,14 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
             )
 
             ingested += 1
+            existing_rows[run.id] = (
+                run.status,
+                run.exit_code,
+                run.duration_s,
+                run.outcome or None,
+                run.outcome_error_reason or None,
+                run.metadata,
+            )
 
         from bathos.campaigns import ingest_cool_campaigns
 
@@ -1228,6 +1411,9 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
             [CURRENT_SCHEMA_VERSION, "compact"],
         )
 
+    except _WARM_INDEX_ERRORS as exc:
+        warm_error = _warm_index_error(exc, db_path)
+        raise warm_error from exc
     finally:
         con.close()
 
@@ -1259,4 +1445,5 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
         skipped=skipped,
         duration_s=duration_s,
         corrupt_fragments=corrupt_fragments,
+        refreshed=refreshed_count,
     )

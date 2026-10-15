@@ -93,11 +93,26 @@ def test_backend_resolution_returns_cool_when_no_warm_db(populated_catalog: Path
 
 
 def test_backend_resolution_returns_warm_when_db_exists(populated_catalog: Path):
-    """When bathos.db exists, _resolve_backend returns 'warm'."""
-    # Create a dummy bathos.db file
-    (populated_catalog / "bathos.db").touch()
+    """When bathos.db exists and has a runs table, _resolve_backend returns 'warm'."""
+    con = duckdb.connect(str(populated_catalog / "bathos.db"))
+    con.execute("CREATE TABLE runs (id TEXT)")
+    con.close()
     backend = _resolve_backend(populated_catalog)
     assert backend == "warm"
+
+
+def test_backend_resolution_falls_back_to_cool_when_db_has_no_runs_table(
+    populated_catalog: Path,
+):
+    """Debt #1477: a bathos.db without a `runs` table (e.g. a compact that died right
+    after creating the file, or a foreign DB) must not be picked as the warm backend."""
+    con = duckdb.connect(str(populated_catalog / "bathos.db"))
+    con.execute("CREATE TABLE _schema_meta (key TEXT PRIMARY KEY, value TEXT)")
+    con.close()
+
+    assert _resolve_backend(populated_catalog) == "cool"
+    # ... and the user-visible symptom: reads still work, served from cool.
+    assert len(list_runs(populated_catalog)) == 3
 
 
 def test_list_runs_uses_cool_when_no_warm_db(populated_catalog: Path):

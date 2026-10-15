@@ -668,10 +668,17 @@ class TestRunTool:
         assert result["success"] is False
 
     @patch("bathos.mcp.run_script")
-    def test_run_tool_prepends_interpreter_for_a_bare_py_script(self, mock_run):
-        """A bare `.py` script_path (no interpreter of its own) is run under
-        THIS process's interpreter -- the fix for machines with no unprefixed
-        `python` on PATH (a python3-only system), per the comment this pins."""
+    def test_run_tool_prepends_interpreter_for_a_bare_py_script(
+        self, mock_run, tmp_path, monkeypatch
+    ):
+        """A bare `.py` script_path (no interpreter of its own) in a directory with no
+        project (no pyproject.toml / .venv) is run under THIS process's interpreter --
+        the fix for machines with no unprefixed `python` on PATH (a python3-only
+        system), per the comment this pins. (Inside a project it runs via
+        `uv run --no-sync python` instead, debt #2236 -- see
+        test_mcp_param_normalisation.py.)"""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
         mock_run.return_value = 0
 
         run_tool(script_path="/tmp/script.py", args=["--n", "10"])
