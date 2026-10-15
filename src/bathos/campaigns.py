@@ -418,7 +418,7 @@ def _add_run_to_campaign_impl(
         seq_position = pos_row[0] if pos_row else 1
 
         # Threshold lock logic (only locks for non-error/non-unknown outcomes)
-        is_neutral_outcome = run_outcome in ("error", "unknown", None, "")
+        is_neutral_outcome = run_outcome in ("error", "unknown", "observed", None, "")
         if not is_neutral_outcome:
             if campaign_threshold is None and sidecar_stopping_threshold is not None:
                 # Lock threshold from this sidecar (AC-25: campaign.threshold_set)
@@ -586,7 +586,7 @@ def link_cool_runs_to_campaigns(
                     sidecar_stopping_threshold = sidecar.popper_stopping_threshold
                 except SidecarError:
                     evalue = None
-            is_neutral_outcome = run.outcome in ("error", "unknown", None, "")
+            is_neutral_outcome = run.outcome in ("error", "unknown", "observed", None, "")
             if (
                 not is_neutral_outcome
                 and pending_threshold is not None
