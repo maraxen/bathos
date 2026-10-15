@@ -261,3 +261,24 @@ def test_exploratory_nonzero_exit_keeps_no_pass_label(tmp_path, tmp_catalog, mon
     assert run.epistemic_class == "exploratory"
     assert run.outcome == "error"
     assert run.tentative_outcome is None
+
+
+def test_exploratory_tentative_pass_does_not_satisfy_requires_pass_stem(tmp_path, tmp_catalog):
+    """Spec §8 negative control: a tentative exploratory pass is not a pass for any gate.
+
+    The legacy twin on another stem proves the prerequisite check does fire on a real pass.
+    """
+    from bathos.compact import compact
+    from bathos.prereg import check_reproduction_prerequisite
+
+    explored = _run_with(tmp_path, tmp_catalog, _EXPLORATORY_SIDECAR, x=1.0, name="explored_stem")
+    assert explored.outcome == "observed"
+    assert explored.tentative_outcome == "pass"
+    compact(tmp_catalog)
+    assert check_reproduction_prerequisite("explored_stem", tmp_catalog) is False
+
+    legacy_catalog = tmp_path / "legacy_catalog"
+    legacy = _run_with(tmp_path, legacy_catalog, _LEGACY_SIDECAR, x=1.0, name="legacy_stem")
+    assert legacy.outcome == "pass"
+    compact(legacy_catalog)
+    assert check_reproduction_prerequisite("legacy_stem", legacy_catalog) is True
