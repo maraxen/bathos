@@ -1790,19 +1790,23 @@ def _bare_script_argv(script_path: str, args: list[str], cwd: Path) -> tuple[lis
 
     ``sys.executable`` is bathos's OWN tool-isolated interpreter, so a project script that
     imports project-local packages dies with ModuleNotFoundError. When the workspace (cwd)
-    is a project (``pyproject.toml`` or ``.venv`` present) and ``uv`` is on PATH, run
-    through ``uv run --no-sync python`` (``--no-sync``: a bare ``uv run`` silently re-syncs
-    and reverts hand-installed wheels). Otherwise keep the old behaviour but say so.
+    has an existing ``.venv`` and ``uv`` is on PATH, run through ``uv run --no-sync python``
+    (``--no-sync``: a bare ``uv run`` silently re-syncs and reverts hand-installed wheels).
+    A ``pyproject.toml`` alone is not enough: ``uv run`` would then create a fresh, empty
+    ``.venv`` in the project as a side effect. Otherwise keep the old behaviour but say so.
     """
     import shutil
 
-    in_project = (cwd / "pyproject.toml").is_file() or (cwd / ".venv").is_dir()
+    in_project = (cwd / ".venv").is_dir()
     if in_project and shutil.which("uv"):
         return ["uv", "run", "--no-sync", "python", script_path] + args, None
     if in_project:
         reason = "`uv` was not found on PATH, so the project venv could not be used"
     else:
-        reason = "no pyproject.toml or .venv found in the working directory"
+        reason = (
+            "no .venv found in the working directory (create one with `uv sync`; "
+            "a pyproject.toml alone is not used, to avoid creating a venv implicitly)"
+        )
     return [sys.executable, script_path] + args, (
         f"script ran under bathos's own interpreter ({sys.executable}), not a project "
         f"venv: {reason}. Project-local imports may fail; pass an explicit command "

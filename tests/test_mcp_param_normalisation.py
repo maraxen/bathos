@@ -205,8 +205,9 @@ class TestRunToolProjectInterpreter:
             lambda name, *a, **k: "/usr/bin/uv" if name == "uv" else real_which(name, *a, **k),
         )
 
-    def test_pyproject_workspace_runs_via_uv(self, captured_run_script, tmp_path, monkeypatch):
+    def test_project_venv_workspace_runs_via_uv(self, captured_run_script, tmp_path, monkeypatch):
         (tmp_path / "pyproject.toml").write_text("[project]\nname='p'\nversion='0'\n")
+        (tmp_path / ".venv").mkdir()
         monkeypatch.chdir(tmp_path)
         result = run_tool(script_path="scripts/x.py", args=["--n", "1"])
         assert captured_run_script[0]["argv"] == [
@@ -237,11 +238,23 @@ class TestRunToolProjectInterpreter:
         assert "warning" in result
         assert "interpreter" in result["warning"]
 
+    def test_pyproject_without_venv_does_not_use_uv(
+        self, captured_run_script, tmp_path, monkeypatch
+    ):
+        """uv run would create a .venv implicitly; a bare pyproject.toml must not trigger it."""
+        import sys
+
+        (tmp_path / "pyproject.toml").write_text("[project]\nname='p'\nversion='0'\n")
+        monkeypatch.chdir(tmp_path)
+        result = run_tool(script_path="x.py")
+        assert captured_run_script[0]["argv"] == [sys.executable, "x.py"]
+        assert ".venv" in result["warning"]
+
     def test_uv_missing_falls_back_with_warning(self, captured_run_script, tmp_path, monkeypatch):
         import shutil
         import sys
 
-        (tmp_path / "pyproject.toml").write_text("[project]\nname='p'\nversion='0'\n")
+        (tmp_path / ".venv").mkdir()
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(shutil, "which", lambda *_a, **_k: None)
         result = run_tool(script_path="x.py")
