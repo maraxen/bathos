@@ -153,6 +153,43 @@ and leaves `bathos.db` untouched. *Open question to verify before B3:* the spec'
 reverting after the switch (`bathos.db.frozen` restore). If none is specified, write one down before
 running B3.
 
+*Resolved 2026-10-15:* the runlog spec gives no post-switch revert; the procedure below is the one
+used for B3. It rests on these code facts, read on main `ef24e9f6`:
+- The switch (`migrate.py:_do_switch`) does these steps in order:
+  - (a) builds the index;
+  - (b) writes `~/.bth/catalog/cutover.json`, the single commit point;
+  - (c) copies staged segments into each project's `.bth/log/` and into `~/.bth/log-mirror/<id or _null/...>/` as `import-<attempt>-<n>.jsonl`;
+  - (d) renames `bathos.db` to `bathos.db.frozen` (`_step4d_rename_warm`);
+  - (e) deletes staging.
+- Log mode is "marker exists" (`mode.py:is_log_mode`). While it is on, every write site skips its
+  legacy write (`emit.py:emit_or_legacy`): **post-switch runs, campaigns and ledgers exist only as
+  log lines, never as cool fragments or warm rows.**
+
+**Pre-B3 backup (required):**
+1. Quiesce: no local `bth run`/`submit`/MCP writers, no running SLURM jobs.
+2. `cp -a ~/.bth/catalog ~/.bth/catalog.pre-cutover-<YYMMDD>`. The catalog was 478 MB on
+   2026-10-15. Check `df -h ~` first: the disk had 7.1 GB free that day.
+3. Record the list of existing `import-*.jsonl` files under every registered root's `.bth/log/` and
+   under `~/.bth/log-mirror/`. It should be empty before the first cut-over.
+
+**Revert after the switch:**
+1. Quiesce, as above.
+2. Delete `~/.bth/catalog/cutover.json`. Log mode is now off, and writes go back to the legacy path.
+3. If `bathos.db.frozen` exists and `bathos.db` does not, run
+   `mv ~/.bth/catalog/bathos.db.frozen ~/.bth/catalog/bathos.db`. If both exist, keep `bathos.db`
+   aside, restore from the step-2 backup, and do not guess.
+4. Remove `import-<attempt>-*.jsonl` for this attempt from every project `.bth/log/` and from
+   `~/.bth/log-mirror/`. The index is rebuildable from logs, so a stale `index.db` may be deleted.
+   Leaving the import files in place is safe for a later retry, because step (c) skips existing
+   names, but deleting them keeps one source of truth while the system is in legacy mode.
+5. `bth compact`, then verify a known pre-cut-over run by record (`bth sql ... WHERE id LIKE`).
+
+**Known loss on revert:** runs recorded between the switch and the revert have no cool fragment.
+They stay in the project logs, so nothing is deleted, but legacy readers do not see them. Note
+their run ids from the log lines (`run.started` events newer than `cutover.json`'s mtime) before
+reverting, and re-run the cut-over to surface them again. Revert only if the index is wrong, not
+merely slow.
+
 ## Out of scope
 
 - Rust/pyo3 reimplementation of compact or the fold. Compact is being retired. Fold/ingest
