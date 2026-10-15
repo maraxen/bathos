@@ -1211,3 +1211,238 @@ def test_compact_upgrades_v15_fragment_metadata_defaults(tmp_catalog: Path, samp
     assert row[0] == "16"
     assert row[1] == "{}"
     assert row[2] == "[]"
+
+
+# ---------------------------------------------------------------------------
+# Debt #2689 / #1647: a cool fragment rewritten on completion must refresh the
+# already-ingested warm row (status/exit_code/duration_s/outcome/metadata).
+# ---------------------------------------------------------------------------
+
+
+def _warm_row(catalog: Path, run_id: str) -> tuple:
+    con = duckdb.connect(str(catalog / "bathos.db"), read_only=True)
+    try:
+        return con.execute(
+            "SELECT status, exit_code, duration_s, outcome, outcome_error_reason, metadata "
+            "FROM runs WHERE id = ?",
+            [run_id],
+        ).fetchone()
+    finally:
+        con.close()
+
+
+def test_compact_refreshes_warm_row_when_cool_fragment_rewritten(
+    tmp_catalog: Path, sample_run: Run
+):
+    """running -> completed rewrite of the cool fragment reaches the warm tier."""
+    init_catalog(tmp_catalog)
+    running = dataclasses.replace(
+        sample_run, status="running", exit_code=0, duration_s=0.0, outcome=""
+    )
+    write_run(running, tmp_catalog)
+    first = compact(tmp_catalog)
+    assert first.ingested == 1
+    assert _warm_row(tmp_catalog, running.id)[0] == "running"
+
+    done = dataclasses.replace(
+        running,
+        status="completed",
+        exit_code=0,
+        duration_s=12.5,
+        outcome="pass",
+        metadata='{"k": "v"}',
+    )
+    write_run(done, tmp_catalog)  # same id -> overwrites the cool fragment
+
+    second = compact(tmp_catalog)
+    assert second.ingested == 0
+    assert second.skipped == 1
+    assert second.refreshed == 1
+    assert _warm_row(tmp_catalog, running.id) == (
+        "completed",
+        0,
+        12.5,
+        "pass",
+        None,
+        '{"k": "v"}',
+    )
+
+    # Nothing changed since: a further compact refreshes nothing.
+    third = compact(tmp_catalog)
+    assert third.refreshed == 0
+    assert third.skipped == 1
+
+
+def test_compact_refresh_preserves_reaped_metadata(tmp_catalog: Path, sample_run: Run):
+    """The warm-only metadata['reaped'] key (written by reap) survives a refresh."""
+    import json
+
+    init_catalog(tmp_catalog)
+    running = dataclasses.replace(
+        sample_run, status="running", exit_code=0, duration_s=0.0, outcome=""
+    )
+    write_run(running, tmp_catalog)
+    compact(tmp_catalog)
+
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    con.execute(
+        "UPDATE runs SET metadata = ? WHERE id = ?",
+        [json.dumps({"reaped": {"reason": "walltime"}}), running.id],
+    )
+    con.close()
+
+    done = dataclasses.replace(running, status="completed", exit_code=0, metadata='{"k": "v"}')
+    write_run(done, tmp_catalog)
+    result = compact(tmp_catalog)
+
+    assert result.refreshed == 1
+    row = _warm_row(tmp_catalog, running.id)
+    assert row[0] == "completed"
+    assert json.loads(row[5]) == {"k": "v", "reaped": {"reason": "walltime"}}
+    # Idempotent: the merged metadata is stable, so no perpetual "refresh".
+    assert compact(tmp_catalog).refreshed == 0
+
+
+def test_compact_refresh_preserves_postmortem_override_from_other_workspace(
+    tmp_catalog: Path, sample_run: Run
+):
+    """A warm-only postmortem verdict override survives a compact run from a workspace
+    whose postmortem map does not contain the run (cross-project / missing file)."""
+    init_catalog(tmp_catalog)
+    run = dataclasses.replace(sample_run, status="completed", outcome="pass")
+    write_run(run, tmp_catalog)
+    compact(tmp_catalog)
+
+    # As left by a compact from the project that owns the postmortem.
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    con.execute(
+        "UPDATE runs SET outcome = 'fail', postmortem_verdict_override = 'fail' WHERE id = ?",
+        [run.id],
+    )
+    con.close()
+
+    result = compact(tmp_catalog)
+    assert result.refreshed == 0
+    assert _warm_row(tmp_catalog, run.id)[3] == "fail"
+
+    # Negative control: without a recorded override, a changed cool outcome still refreshes.
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    con.execute("UPDATE runs SET postmortem_verdict_override = 'none' WHERE id = ?", [run.id])
+    con.close()
+    result = compact(tmp_catalog)
+    assert result.refreshed == 1
+    assert _warm_row(tmp_catalog, run.id)[3] == "pass"
+
+
+def test_compact_refresh_carries_finish_time_columns(tmp_catalog: Path, sample_run: Run):
+    """Columns the runner sets at finish (residual flag, adversarial check, outputs)
+    reach warm on refresh, so a refreshed row equals a freshly ingested one."""
+    init_catalog(tmp_catalog)
+    running = dataclasses.replace(
+        sample_run, status="running", outcome="", outcome_is_residual=False, output_paths=[]
+    )
+    write_run(running, tmp_catalog)
+    compact(tmp_catalog)
+
+    done = dataclasses.replace(
+        running,
+        status="completed",
+        outcome="unknown",
+        outcome_is_residual=True,
+        adversarial_check_status="fired",
+        adversarial_check_result="fired",
+        output_paths=["out/result.json"],
+    )
+    write_run(done, tmp_catalog)
+    assert compact(tmp_catalog).refreshed == 1
+
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        row = con.execute(
+            "SELECT outcome_is_residual, adversarial_check_status, adversarial_check_result, "
+            "output_paths FROM runs WHERE id = ?",
+            [running.id],
+        ).fetchone()
+    finally:
+        con.close()
+    assert row == (True, "fired", "fired", ["out/result.json"])
+    assert compact(tmp_catalog).refreshed == 0
+
+
+def test_compact_refresh_keeps_warm_metadata_over_empty_cool(tmp_catalog: Path, sample_run: Run):
+    """An empty cool metadata (e.g. a `bth repair` re-export) never wipes warm metadata."""
+    init_catalog(tmp_catalog)
+    run = dataclasses.replace(sample_run, metadata='{"k": "v"}')
+    write_run(run, tmp_catalog)
+    compact(tmp_catalog)
+
+    write_run(dataclasses.replace(run, metadata="{}"), tmp_catalog)
+    assert compact(tmp_catalog).refreshed == 0
+    assert _warm_row(tmp_catalog, run.id)[5] == '{"k": "v"}'
+
+
+def test_compact_refresh_treats_empty_outcome_as_null(tmp_catalog: Path, sample_run: Run):
+    """Warm outcome '' (written by the postmortem block) equals a NULL cool outcome."""
+    init_catalog(tmp_catalog)
+    run = dataclasses.replace(sample_run, status="completed", outcome="")
+    write_run(run, tmp_catalog)
+    compact(tmp_catalog)
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    con.execute("UPDATE runs SET outcome = '' WHERE id = ?", [run.id])
+    con.close()
+    assert compact(tmp_catalog).refreshed == 0
+
+
+# ---------------------------------------------------------------------------
+# Debt #2010: a DuckDB index/constraint error in the warm DB must surface as a
+# clear, actionable error naming the remedy -- not a raw traceback -- and must
+# never trigger an automatic (destructive) rebuild.
+# ---------------------------------------------------------------------------
+
+
+def test_compact_index_constraint_error_is_actionable_and_non_destructive(
+    tmp_catalog: Path, sample_run: Run, caplog
+):
+    import logging
+    import uuid
+
+    import pytest
+
+    from bathos.compact import CorruptDatabaseError
+
+    init_catalog(tmp_catalog)
+    compact(tmp_catalog)  # create an empty warm DB with the full schema
+
+    # A real DuckDB constraint violation on the compact INSERT path: a unique index
+    # that two incoming runs collide on (stands in for a stale/conflicting index).
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    con.execute("CREATE UNIQUE INDEX idx_test_unique_host ON runs (hostname)")
+    con.close()
+
+    for _ in range(2):
+        write_run(dataclasses.replace(sample_run, id=str(uuid.uuid4())), tmp_catalog)
+
+    db_path = tmp_catalog / "bathos.db"
+    with (
+        caplog.at_level(logging.ERROR, logger="bathos.compact"),
+        pytest.raises(CorruptDatabaseError) as excinfo,
+    ):
+        compact(tmp_catalog)
+
+    message = str(excinfo.value)
+    assert "bth compact --force-rebuild" in message
+    assert "bth repair" in message
+    assert "ConstraintException" in message  # original duckdb error is quoted
+    assert isinstance(excinfo.value.__cause__, duckdb.ConstraintException)
+    assert excinfo.value.db_path == db_path
+    assert any("force-rebuild" in r.getMessage() for r in caplog.records)
+
+    # Non-destructive: no auto-rebuild happened (DB still there, our index intact, no backup).
+    assert db_path.exists()
+    assert not list(tmp_catalog.glob("bathos.db.bak-*"))
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        names = [r[0] for r in con.execute("SELECT index_name FROM duckdb_indexes()").fetchall()]
+    finally:
+        con.close()
+    assert "idx_test_unique_host" in names
