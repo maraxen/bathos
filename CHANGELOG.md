@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0a6] - 2026-10-15
+
+### Changed
+
+- **duckdb prerelease floor: `duckdb>=2.0.0.dev2610011535` (debt #2688, #2011).** Every bathos
+  client shares `~/.bth/catalog/bathos.db`, and DuckDB refuses to read a storage version newer
+  than it supports. On 2026-10-13 a dev-build client wrote the catalog at storage v69 and the
+  stable-duckdb `bth` (reads 64–68) could no longer open it. A floor in `[project.dependencies]`
+  is honoured by `uv tool install`, PyPI installs and dependents alike; `[tool.uv] prerelease =
+  "allow"` (also added) only affects this repo's own `uv lock`/`sync`/`run` — verified with a
+  spike on uv 0.11.21. Raise the floor to the first stable duckdb 2.x when it ships.
+- **`bth run` binds scripts behind wrapper prefixes (debt #2725).** `env`, `timeout`, `nice`,
+  `taskset`, `stdbuf`, `ionice` and `numactl` prefixes are now seen through, so
+  `bth run -- timeout 900 python scripts/experiments/x.py` finds its sidecar. **Such commands
+  now go through the pre-registration gate**; one without a sidecar is refused instead of
+  running untracked.
+- **MCP `run_tool` normalises `tags` and `output_paths` (debt #2203, #2217).** A comma-separated
+  tag string is split into tags (a tag that itself contains commas is now split too), and a
+  JSON-list string of output paths is expanded.
+- **A bare `.py` script run via MCP uses the project venv (debt #2236)** through
+  `uv run --no-sync python` when the working directory has a `.venv`; otherwise it keeps
+  bathos's own interpreter and says so. A `pyproject.toml` alone is not used, because `uv run`
+  would create a venv as a side effect.
+- **MCP `check` scans every run (debt #1476)** instead of the first 50. Slower on large catalogs.
+- **`compact()` raises `CorruptDatabaseError` (debt #2010)** with remedies, instead of a raw
+  `duckdb.ConstraintException`/`InternalException`, and never rebuilds automatically.
+
 ### Fixed
 
 - **A sixth Migration step-3 residual class, `postmortem_unset_default`.** `bth migrate --to-log`
@@ -29,6 +56,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the level are dropped at `emit_event`; cisternal never filters spans or heartbeats. With no
   level set, cisternal's default applies (`CISTERNAL_LOG_LEVEL`, else no filtering). Requires
   `cisternal>=0.1.1a11`.
+
+- **Finished runs no longer stay `running` in the warm tier (debt #2689, #1647).** `bth compact`
+  only ever INSERTed, so a cool fragment rewritten at run end never reached `bathos.db`. Existing
+  rows are now refreshed (status, exit code, duration, outcome, metadata and the finish-time
+  columns: residual flag, adversarial check, output paths, parity, differential), and
+  `CompactResult.refreshed` counts them. Warm-only data survives: `reaped` metadata, a postmortem
+  verdict override when compact runs from a workspace without that postmortem, and real metadata
+  against an empty cool `{}` from a `bth repair` re-export.
+- **Queries fall back to cool when `bathos.db` has no `runs` table (debt #1477).**
+- **A spawn failure no longer leaves a `running` zombie (debt #2726).** The run is finalized
+  `failed` / `outcome=error` with `spawn_failed: ...`; exit code 127 when the executable is not
+  found, else 1.
+- **Silent `bth run` outcomes now warn on stderr (debt #2343, #2241, #2244)** when a sidecar run
+  exits 0 with outcome `unknown`/`error` (missing result file, no condition matched, or several
+  `--out` JSON files to choose from), unless the user declared that label. Exit code unchanged.
+  Also warns when an enforced script was named but could not be bound.
+- **MCP `campaign_create` accepts `sequential` and `parent_campaign_id` (debt #2080, #2078);
+  `campaign_conclude` accepts `workspace_root` (debt #2193); `list_runs` reports `limit` and
+  `truncated` (debt #2206).**
+- **Empty or invalid myxcel JSON raises `RuntimeError` (debt #2228)**, which `bth submit`
+  handles, instead of an uncaught `JSONDecodeError`.
+- **`bth validate-sidecar` warns on unknown `[experiment]` keys with a did-you-mean (debt #2195)**;
+  `bth submit` warns when sidecar auto-discovery finds no script (debt #2205). Both advisory.
+- **Cluster run-log pull works (debt #1993).** `myxcel pull-path` is wrapped for real, a
+  cyclopts-era myxcel without it is reported as a capability gap, and L3 cluster validation
+  passed for absolute and `~/projects/...` remote roots (records 34e9ca99, 7b3bf8c3; needs
+  myxcel with `remote_home`, myxcel PR #32).
+- **`get_run` falls back to a single cool fragment when warm misses** (debt #2110, partial;
+  display callers only), and catalog reads open read-only so they stop blocking each other.
+- **runlog reports what a command is waiting for** instead of hanging silently on a lock
+  (debt #2012); the lock manifest is valid TOML and `bth run` no longer records `agent_id`
+  (debt #2318).
+- Skill and agent docs: `[claim.union_gate]` table headers (#2222), `--files a,b` for the
+  blast-radius file anchor (#2685), `--` separator in `bth run`/`submit` examples (#2212), and the
+  experiment-runner agent's tool frontmatter (#2209). Guard tests for project-root usage (#1181)
+  and plugin-export asset/section coverage (#236).
+
+### Added
+
+- **`bth plugin install|update|export|info`** via cisternal 0.1.1a13, and the repo is installable
+  from GitHub (`/plugin marketplace add maraxen/bathos`, then `/plugin install bathos@bathos`).
+- **Shared `prose-biosafe` skill** with a bundled prose linter.
+
+## [0.13.0a5] - 2026-09-30
+
+### Fixed
 
 - `bth init --assign-id` now also registers the project root in `~/.bth/projects.toml` (result gains `registered`). Before cut-over nothing else registered a root, so `bth migrate --to-log` saw zero roots and would have routed every legacy run to `unaffiliated/`. A root registered without an id picks the id up on re-registration. bathos's own `.bth.toml` slug corrected from `prolix` to `bathos` and given a project id.
 
