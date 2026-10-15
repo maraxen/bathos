@@ -83,15 +83,11 @@ def test_two_consecutive_runs_on_clean_tree_both_record_dirty_false(tmp_path: Pa
     subprocess.run(
         ["git", "config", "user.email", "t@t.com"], cwd=repo, check=True, capture_output=True
     )
-    subprocess.run(
-        ["git", "config", "user.name", "T"], cwd=repo, check=True, capture_output=True
-    )
+    subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True, capture_output=True)
 
     init_project(repo, slug="p", catalog_dir=catalog)
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "bth init"], cwd=repo, check=True, capture_output=True
-    )
+    subprocess.run(["git", "commit", "-m", "bth init"], cwd=repo, check=True, capture_output=True)
 
     init_catalog(catalog)
     for _ in range(2):
@@ -2078,3 +2074,399 @@ def test_mode_not_reread_mid_run(tmp_catalog: Path, tmp_path: Path):
     assert len(runs) == 1
     assert not (Path.home() / ".bth" / "log" / "unaffiliated").exists()
     reset_writers_for_test()
+
+
+# --- debt #2726: spawn failure must finalize the run and say so on stderr ---------------
+
+
+def test_spawn_failure_finalizes_run_and_reports_stderr(tmp_catalog: Path, tmp_path: Path, capsys):
+    """debt #2726: when the subprocess cannot be spawned (e.g. `uv` off PATH ->
+    FileNotFoundError), the run record (already written status=running) must be finished as
+    failed with exit_code 127, and a clear message printed to stderr -- not a bare `return 1`."""
+    init_catalog(tmp_catalog)
+    missing = str(tmp_path / "definitely-not-a-real-executable")
+    exit_code = run_script(
+        argv=[missing, "run", "python", "x.py"],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 127
+    err = capsys.readouterr().err
+    assert "failed to launch" in err
+    assert "definitely-not-a-real-executable" in err
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert runs[0].status == "failed"
+    assert runs[0].exit_code == 127
+    assert runs[0].outcome == "error"
+    assert "spawn_failed" in runs[0].outcome_error_reason
+
+
+def test_spawn_failure_other_exception_exits_1(
+    tmp_catalog: Path, tmp_path: Path, capsys, monkeypatch
+):
+    """debt #2726: a non-FileNotFoundError spawn failure finalizes with exit_code 1."""
+    import subprocess as _sp
+
+    def boom(*_args, **_kwargs):
+        raise PermissionError("nope")
+
+    monkeypatch.setattr(_sp, "Popen", boom)
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=[sys.executable, "-c", "pass"],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 1
+    assert "PermissionError" in capsys.readouterr().err
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert runs[0].status == "failed"
+    assert runs[0].exit_code == 1
+
+
+def test_spawn_failure_log_mode_emits_run_finished(tmp_catalog: Path, tmp_path: Path, monkeypatch):
+    """debt #2726, flag-on path: the failed spawn goes through run.finished like a normal
+    completion, so the started-but-never-finished run does not stay 'running' forever."""
+    from bathos.runlog.writer import reset_writers_for_test
+
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_catalog))
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=[str(tmp_path / "no-such-exe")],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 127
+    lines = _read_jsonl_dir(Path.home() / ".bth" / "log" / "unaffiliated")
+    kinds = [line["kind"] for line in lines]
+    assert kinds.count("run.started") == 1
+    assert kinds.count("run.finished") == 1
+    finished = next(line for line in lines if line["kind"] == "run.finished")
+    assert finished["data"]["status"] == "failed"
+    assert finished["data"]["exit_code"] == 127
+    reset_writers_for_test()
+
+
+# --- debt #2725: _find_script_path must see through command-wrapper prefixes ----------------
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        ["env", "FOO=1", "uv", "run", "python"],
+        ["env", "FOO=1", "BAR=2", "python"],
+        ["env", "-i", "FOO=1", "python"],
+        ["env", "-u", "FOO", "python"],
+        ["env", "-C", "somedir", "python"],
+        ["/usr/bin/env", "FOO=1", "python3"],
+        ["timeout", "900", "python"],
+        ["timeout", "-k", "5", "900", "python"],
+        ["timeout", "--signal=INT", "--foreground", "15m", "uv", "run", "python"],
+        ["timeout", "-s", "KILL", "900", "python"],
+        ["nice", "-n", "5", "python"],
+        ["nice", "-5", "python"],
+        ["nice", "python"],
+        ["taskset", "-c", "0", "python"],
+        ["taskset", "-c", "0-3", "uv", "run", "python"],
+        ["taskset", "0x3", "python"],
+        ["stdbuf", "-oL", "-eL", "python"],
+        ["stdbuf", "-o", "L", "python"],
+        ["ionice", "-c", "3", "python"],
+        ["ionice", "-c2", "-n", "7", "python"],
+        ["numactl", "--cpunodebind=0", "--membind=0", "python"],
+        ["numactl", "-N", "0", "python"],
+        ["nohup", "python"],
+        ["env", "A=1", "timeout", "10", "nice", "-n", "5", "uv", "run", "python"],
+    ],
+    ids=lambda p: " ".join(p),
+)
+def test_find_script_path_sees_through_wrapper_prefix(tmp_path: Path, prefix):
+    """Debt #2725: wrappers in front of the interpreter used to make this return None,
+    silently skipping sidecar binding, the prereg gate and outcome evaluation."""
+    from bathos.runner import _find_script_path
+
+    script = tmp_path / "x.py"
+    script.write_text("pass\n")
+    assert _find_script_path([*prefix, "x.py"], tmp_path) == script.resolve()
+
+
+def test_find_script_path_wrapper_then_bare_script(tmp_path: Path):
+    from bathos.runner import _find_script_path
+
+    script = tmp_path / "x.py"
+    script.write_text("pass\n")
+    assert _find_script_path(["env", "FOO=1", "x.py"], tmp_path) == script.resolve()
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["env", "FOO=1", "pytest", "x.py"],
+        ["timeout", "900"],
+        ["env", "FOO=1"],
+        ["nice", "-n"],
+        ["env", "FOO=1", "python", "-c", "pass"],
+    ],
+    ids=lambda a: " ".join(a),
+)
+def test_find_script_path_wrapper_negative_controls(tmp_path: Path, argv):
+    """Negative controls: stripping must not invent a script where there is none."""
+    from bathos.runner import _find_script_path
+
+    (tmp_path / "x.py").write_text("pass\n")
+    assert _find_script_path(argv, tmp_path) is None
+
+
+def test_env_wrapped_command_still_hits_enforced_dir_gate(tmp_catalog: Path, tmp_path: Path):
+    """Debt #2725 / #2243: `env FOO=1 python scripts/experiments/x.py` with no sidecar must be
+    refused by the pre-registration gate exactly as the unwrapped command is -- before the
+    fix it silently ran ungated."""
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    marker = tmp_path / "ran.marker"
+    script = enforced / "x.py"
+    script.write_text(f"from pathlib import Path\nPath({str(marker)!r}).write_text('1')\n")
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=["env", "FOO=1", sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 1
+    assert not marker.exists(), "gate must refuse before the subprocess runs"
+
+
+def test_unbound_script_in_enforced_dir_warns_on_stderr(tmp_catalog: Path, tmp_path: Path, capsys):
+    """Debt #2725: when a .py file in a sidecar-enforced dir appears in argv but no script
+    could be bound (unrecognised launcher), say so on stderr instead of silently skipping
+    sidecar binding / the gate / outcome evaluation."""
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    script = enforced / "x.py"
+    script.write_text("pass\n")
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=["sh", "-c", 'exec "$0" "$@"', "true", str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 0
+    err = capsys.readouterr().err
+    assert "WARNING" in err
+    assert "could not determine which script" in err
+    assert str(script) in err
+
+
+def test_unbound_script_outside_enforced_dir_does_not_warn(
+    tmp_catalog: Path, tmp_path: Path, capsys
+):
+    """Negative control: a non-enforced .py token (e.g. `pytest tests/x.py`) stays quiet."""
+    scratch = tmp_path / "scripts" / "scratch"
+    scratch.mkdir(parents=True)
+    (scratch / "x.py").write_text("pass\n")
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=["sh", "-c", "true", str(scratch / "x.py")],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 0
+    assert "could not determine which script" not in capsys.readouterr().err
+
+
+# --- debt #2343 / #2241 / #2244: a silent 'unknown' / 'error' outcome must warn on stderr ---
+
+
+_OUTCOME_SIDECAR = """
+[experiment]
+hypothesis = "test hypothesis"
+[outcomes.pass]
+condition = "temp_std < 5"
+decision = "good"
+reasoning = "stable temperature"
+[outcomes.fallback]
+condition = "temp_std >= 5"
+decision = "review"
+reasoning = "unstable"
+is_residual = true
+[result_schema]
+temp_std = "float"
+"""
+
+
+def _outcome_fixture(
+    tmp_path: Path,
+    body: str,
+    sidecar_text: str = _OUTCOME_SIDECAR,
+    subdir: str = "experiments",
+) -> Path:
+    enforced = tmp_path / "scripts" / subdir
+    enforced.mkdir(parents=True)
+    script = enforced / "run_test.py"
+    script.write_text(body)
+    (enforced / "run_test.bth.toml").write_text(sidecar_text)
+    return script
+
+
+def test_missing_result_file_warns_on_stderr_without_changing_exit_code(
+    tmp_catalog: Path, tmp_path: Path, capsys
+):
+    """#2343: sidecar declares [outcomes], the script wrote no result anywhere -> outcome
+    'unknown' and exit 0. Must print a one-line stderr WARNING naming the outcome and the
+    flag that fixes it; the exit code is NOT changed."""
+    script = _outcome_fixture(tmp_path, "pass\n")
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 0
+    assert read_runs(tmp_catalog)[0].outcome == "unknown"
+    err = capsys.readouterr().err
+    warning_lines = [ln for ln in err.splitlines() if "outcome 'unknown'" in ln]
+    assert len(warning_lines) == 1
+    assert warning_lines[0].startswith("WARNING")
+    assert "--output-paths" in warning_lines[0]
+    assert "BTH_RESULTS_PATH" in warning_lines[0]
+
+
+def test_outcome_error_warns_on_stderr_with_reason(tmp_catalog: Path, tmp_path: Path, capsys):
+    """#2241: a malformed outcome condition yields outcome='error' with a reason but exit 0 and
+    no stderr signal. Must print a WARNING carrying the reason; exit code unchanged."""
+    bad = _OUTCOME_SIDECAR.replace("temp_std < 5", "no_such_column < 5")
+    script = _outcome_fixture(
+        tmp_path,
+        "import os, json\n"
+        'json.dump({"temp_std": 1.0}, open(os.environ["BTH_RESULTS_PATH"], "w"))\n',
+        sidecar_text=bad,
+        # Outside the enforced dirs: inside them the pre-run gate already rejects a condition
+        # that does not parse, so the runtime 'error' outcome is only reachable here.
+        subdir="scratch",
+    )
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 0
+    run = read_runs(tmp_catalog)[0]
+    assert run.outcome == "error"
+    err = capsys.readouterr().err
+    warning_lines = [ln for ln in err.splitlines() if "outcome 'error'" in ln]
+    assert len(warning_lines) == 1
+    assert warning_lines[0].startswith("WARNING")
+    assert "no_such_column" in warning_lines[0]
+
+
+def test_multiple_out_json_warns_listing_candidates_and_still_does_not_guess(
+    tmp_catalog: Path, tmp_path: Path, capsys
+):
+    """#2244: with several .json --out files the refusal-to-guess stays, but the resulting
+    'unknown' must name the candidate files in a stderr WARNING."""
+    out_a = tmp_path / "a.json"
+    out_b = tmp_path / "b.json"
+    script = _outcome_fixture(
+        tmp_path,
+        "import json\n"
+        f'json.dump({{"temp_std": 1.0}}, open(r"{out_a}", "w"))\n'
+        f'json.dump({{"other": 1}}, open(r"{out_b}", "w"))\n',
+    )
+    init_catalog(tmp_catalog)
+    exit_code = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[str(out_a), str(out_b)],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert exit_code == 0
+    assert read_runs(tmp_catalog)[0].outcome == "unknown"  # still refuses to guess
+    err = capsys.readouterr().err
+    warning_lines = [ln for ln in err.splitlines() if "outcome 'unknown'" in ln]
+    assert len(warning_lines) == 1
+    assert str(out_a) in warning_lines[0] and str(out_b) in warning_lines[0]
+    assert "--output-paths" in warning_lines[0]
+
+
+def test_resolved_outcome_and_no_sidecar_do_not_warn(tmp_catalog: Path, tmp_path: Path, capsys):
+    """Negative controls: a run whose outcome resolves ('pass'), and a run with no sidecar,
+    print no outcome WARNING."""
+    script = _outcome_fixture(
+        tmp_path,
+        "import os, json\n"
+        'json.dump({"temp_std": 1.0}, open(os.environ["BTH_RESULTS_PATH"], "w"))\n',
+    )
+    init_catalog(tmp_catalog)
+    assert (
+        run_script(
+            argv=[sys.executable, str(script)],
+            project_slug="testproj",
+            catalog_dir=tmp_catalog,
+            output_paths=[],
+            tags=[],
+            cwd=tmp_path,
+        )
+        == 0
+    )
+    assert read_runs(tmp_catalog)[0].outcome == "pass"
+    assert "WARNING: outcome" not in capsys.readouterr().err
+
+    assert (
+        run_script(
+            argv=[sys.executable, "-c", "pass"],
+            project_slug="testproj",
+            catalog_dir=tmp_catalog,
+            output_paths=[],
+            tags=[],
+            cwd=tmp_path,
+        )
+        == 0
+    )
+    assert "WARNING: outcome" not in capsys.readouterr().err
+
+
+def test_declared_unknown_outcome_does_not_warn(tmp_path: Path):
+    """A user-declared [outcomes.unknown] branch that matched is not 'unresolved'."""
+    from bathos.runner import _unresolved_outcome_warning
+    from bathos.sidecar import parse_sidecar
+
+    sc_path = tmp_path / "x.bth.toml"
+    sc_path.write_text(
+        _OUTCOME_SIDECAR + '[outcomes.unknown]\ncondition = "true"\ndecision = "look"\n'
+    )
+    sidecar = parse_sidecar(sc_path)
+    assert _unresolved_outcome_warning(sidecar, "unknown", "", "results_path", []) is None
+    # Control: an undeclared 'unknown' (no matching branch) still warns.
+    plain = tmp_path / "y.bth.toml"
+    plain.write_text(_OUTCOME_SIDECAR)
+    assert _unresolved_outcome_warning(parse_sidecar(plain), "unknown", "", "results_path", [])
