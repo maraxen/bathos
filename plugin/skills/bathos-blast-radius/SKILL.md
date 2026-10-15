@@ -33,7 +33,7 @@ the fourth is a distinct dependency-lock check:
 |---|---|---|---|
 | `commit` | `--commit <sha>` | Yes — boundary is `<sha>^` | Changed files = `git diff --name-only <sha>^ <sha>`; a run is `affected` only if its `git_hash` is an ancestor of the boundary (predates the fix) AND touches a changed file |
 | `commit_range` | `--commit-range <a..b>` | Yes — boundary is `<a>` | Changed files = `git diff --name-only a..b`. **Two-dot only** — three-dot `a...b` (symmetric-difference) is rejected with a `ValueError`, since its base isn't guaranteed to be an ancestor of its tip |
-| `file` | `--file <path>` (repeatable) | **No** | Any run touching the given path(s) is `affected` regardless of when it ran — there's no commit boundary to compare against |
+| `file` | `--files a,b` (comma-separated) | **No** | Any run touching the given path(s) is `affected` regardless of when it ran — there's no commit boundary to compare against |
 | `dependency` | `--dependency` | N/A | Reuses `check_dependency_lock_drift`/`hash_dependency_lock` as-is (whole-lockfile hash, no per-package diff). A run with **no recorded** `dependency_lock_sha256` goes to `unverifiable`, not `unaffected` — deliberately not reusing that checker's own fail-open default, which would be a silent false negative here |
 
 `--project <slug>` optionally scopes the scan to one `project_slug` (bathos's
@@ -60,7 +60,7 @@ themselves. Don't expect `assess` to be quiet; expect it to be explainable.
 ```bash
 bth blast-radius assess --commit abc1234
 bth blast-radius assess --commit-range abc1234..def5678
-bth blast-radius assess --file scripts/experiments/train.py --file src/mymodel/loss.py
+bth blast-radius assess --files scripts/experiments/train.py,src/mymodel/loss.py
 bth blast-radius assess --dependency
 bth blast-radius assess --commit abc1234 --project myproject   # scope to one project
 bth blast-radius assess --commit abc1234 --no-flag             # report only, no ledger write

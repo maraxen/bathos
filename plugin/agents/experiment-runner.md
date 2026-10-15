@@ -34,6 +34,14 @@ The experiment-runner agent dispatches when a task requires executing or validat
 - **Don't call rsync:** Delegate sync to `bth sync` (owned by myxcel)
 - **No `--no-sidecar` bypass:** Prefer fixing the sidecar
 
+## Fallback: tasks beyond MCP tools
+
+Your tools are MCP-only (`run`, `campaign_create`, `campaign_review`, `check`). If the task
+needs file reads or edits, or shell access beyond these tools (for example editing a sidecar,
+inspecting script source, or running `bth lint` / `uv run` directly), do not improvise a
+workaround. Stop and return a report that starts with `NEEDS: general-purpose agent`, listing
+the specific file or shell steps required and which of them, if any, you completed through MCP.
+
 ## Dispatch Conditions
 
 Invoke experiment-runner when:

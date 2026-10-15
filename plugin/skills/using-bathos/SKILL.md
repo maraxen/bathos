@@ -293,7 +293,7 @@ Two separate gate mechanisms protect experimental discipline (see **bathos-clust
 - Error code: `REPRODUCTION_PREREQUISITE_UNMET`
 
 ```bash
-$ bth submit --preset gpu -- bth run uv run python scripts/validate.py
+$ bth submit --preset gpu -- bth run --project-slug <slug> -- uv run --no-sync python3 scripts/validate.py
 REPRODUCTION_PREREQUISITE_UNMET: no passing run of 'baseline_train' found
 # Exit 1 — submission blocked
 ```
@@ -302,7 +302,7 @@ REPRODUCTION_PREREQUISITE_UNMET: no passing run of 'baseline_train' found
 - If `requires_pass_stem` is set AND `stage_name` is in `("exploration", "calibration")`, **warn but continue**.
 
 ```bash
-$ bth submit --preset gpu -- bth run uv run python scripts/calibrate.py
+$ bth submit --preset gpu -- bth run --project-slug <slug> -- uv run --no-sync python3 scripts/calibrate.py
 WARNING: no passing run of 'baseline_train' found (advisory for calibration stage)
 # Exit 0 — submission proceeds
 ```
