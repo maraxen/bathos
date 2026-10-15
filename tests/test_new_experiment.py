@@ -212,3 +212,43 @@ def test_cli_new_experiment_mode_flag(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     text = (tmp_path / "scripts" / "experiments" / "run_cli_confirm.bth.toml").read_text()
     assert 'stage_name = "validation"' in text
+
+
+def test_scaffolded_script_runs_with_stdlib_only(tmp_path):
+    """The scaffolded script must run in a bare interpreter (-I), dry-run or not.
+
+    Regression for the typer defect: the template imported typer, which a fresh project does
+    not have, so the first `bth run` died with ModuleNotFoundError.
+    """
+    import json
+    import os
+    import subprocess
+    import sys
+
+    from bathos.new_experiment import scaffold_experiment
+
+    result = scaffold_experiment("run_scaffold_probe", tmp_path)
+    assert "typer" not in result.script.read_text()
+
+    for label, extra_args in (("dry", ["--dry-run"]), ("real", [])):
+        run_dir = tmp_path / f"run_{label}"
+        out_dir = run_dir / "outputs"
+        out_dir.mkdir(parents=True)
+        results_path = run_dir / "bth-results.json"
+        env = os.environ.copy()
+        env["BTH_RESULTS_PATH"] = str(results_path)
+        env["BTH_OUTPUT_DIR"] = str(out_dir)
+
+        proc = subprocess.run(
+            [sys.executable, "-I", str(result.script), *extra_args],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert proc.returncode == 0, f"{label}: {proc.stderr}"
+
+        payload = json.loads(results_path.read_text())
+        assert set(payload) >= {"metric", "n_samples"}, label
+        assert json.loads((out_dir / "results.json").read_text()) == payload, label
+        assert json.loads(proc.stdout) == payload, label
