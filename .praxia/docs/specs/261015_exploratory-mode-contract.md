@@ -81,10 +81,14 @@ Resolution at run start, in order:
 |---|---|---|
 | `stage_name` key **absent** | `legacy` | today's rules and today's rendering, unchanged. A Tier-2 lint suggests restaging: "declare stage_name explicitly". Rows written before S1 (column NULL) read as `legacy` |
 | `stage_name` **not canonical** (typo) | `confirmatory` | fail closed, plus a lint **error** naming the canonical set. A typo can never loosen the rules |
-| `exploration` | `exploratory` | §3.2 |
-| `calibration` | `calibrating` | §3.5 |
+| `exploration` **with an `[observe]` block** | `exploratory` | §3.2 |
+| `calibration` **with a `[calibrate]` block** (`quantity = "…"`) | `calibrating` | §3.5 |
+| `exploration` / `calibration` **without** its block, on a stem that already has runs | `legacy` | today's rules; Tier-2 lint "restage: add `[observe]`/`[calibrate]` or choose a confirmatory stage" |
+| the same, on a **new** stem | — | validation **error** with the same message |
 | `validation` / `ablation` / `production` | `confirmatory` | today's rules, unchanged. The class does not alter which stages the existing `requires_pass_stem`/parity gates name. Ablation stays outside them as today |
 | a confirmatory stem whose canonical block drifted (§3.2.1) | `exploratory` | the declared `stage_name` is left as written; only the class is downgraded |
+
+**Shape gating (decision, user 261015).** 44 sidecars across 11 sibling projects declare `stage_name = "exploration"` explicitly, because the old scaffold wrote it, and they carry real pass/fail `[outcomes]`; 22 more declare `calibration`. Honouring the declared stage would demote all of them at once. So the new class takes effect only when the sidecar has the new contract's shape. New work can't reproduce the old pattern, because a new stem without the block fails validation.
 
 | class | Pre-register | `[outcomes]` | Stored `outcome` | Citable as |
 |---|---|---|---|---|
@@ -292,7 +296,7 @@ evidence = "search: 'PDZ3 H71 holo coupling', 2026-10-15, 0 independent hits"
 Non-compensatory across appraisals as well: a later favourable appraisal does not erase an earlier decisive objection. Only an `addressed_by` that meets rule 4 does.
 
 **Appraiser independence (decision, user 261015: a different agent session counts).** At least one qualifying appraisal must have an `appraiser_session` different from the run's `agent_session`. The run's `agent_session` is a new run column, stamped from the same env var on the run that first executes the citing confirmatory sidecar. `blind_to` is attested, not enforced. Two consequences come from the 261015 spike (§2):
-- **Mechanically, "different session" means a different top-level session.** A subagent inherits its parent's `CLAUDE_CODE_SESSION_ID`, so a subagent's appraisal is the *same* session and does not satisfy independence. That is also the right reading of the decision: a subagent's context is set by the session dispatching it.
+- **A fresh subagent counts; a fork does not (§7.8).** A subagent inherits its parent's `CLAUDE_CODE_SESSION_ID`, so the session id alone cannot tell a fresh subagent, a fork and the parent apart. The appraisal therefore also records `appraiser_agent_id` and `appraiser_kind ∈ {session, subagent, fork}`, from a mechanism to be spiked in S3.
 - **Fallback.** Where no session id is available (non-Claude MCP client, plain shell), `appraiser_session` must be passed explicitly and is recorded as attested (`session_attested = true`). Attested sessions are labelled as such in `cite_run`.
 
 `uses_as` states what the author *wants*. `use_tier` states what the appraisals *license*. Validation fails when `uses_as` needs a higher tier than `use_tier` (ordinals above), e.g. `uses_as = "threshold-source"` with tier `contested`.
@@ -388,9 +392,7 @@ Recommended order: S1 + S2 together remove the friction on day one, and S1 alone
 5. **Done:** notebook `1d786e78` was cross-checked, targeted at the appraisal payload. See `research/261015_claim-appraisal-nlm-research.md`.
 6. **Rank-0 (`new_seeds`) holdouts: kill test only.** A seed-only follow-up may set the observation's status to `refuted` or `survived-seed-check` (§3.3). It cannot promote the observation to a confirmatory claim; promotion requires holdout rank ≥ 1. `--from-observation` with `kind = "new_seeds"` scaffolds an exploratory-class kill test. Rationale: new seeds can falsify cheaply but cannot independently confirm, because they share the build and the initial-condition confound.
 7. **Category lists: ship v1 closed, grow via `other` + `other_label`.** A per-domain plugin interface is out of scope, filed as low-priority debt #2743, to be revisited once `other` is used stably and consistently.
-8. **Appraiser independence: a different agent session counts.** It is implemented as a different `appraiser_session` from the citing run's `agent_session` (§3.3.2), plus attested `blind_to`. Spike result (§2): subagents share their parent's session id, so a subagent of the citing session does not count; a separate top-level session does. Same model, different session, is fine.
-
-Review raised no new user question. The review-time refinement to decision 8 (subagents don't count) follows from the spike, and is flagged in the session report so the user can override it.
+8. **Appraiser independence: a different agent session counts, and so does a fresh subagent, but a fork does not (user, 261015, amended).** A fresh subagent sees only its dispatch prompt; a fork inherits the citing session's full context, so it is not independent. Plus attested `blind_to` in every case. Same model is fine. **Mechanism is open (S3 prerequisite spike):** subagents share their parent's `CLAUDE_CODE_SESSION_ID` and no agent-id env var exists (§2), so `appraiser_session` alone cannot distinguish them. The candidate is hook input (`agent_id` / `agent_type`), injected as an identity that `bth appraise` stamps. Until that is verified, a subagent appraisal is accepted only with an attested `appraiser_kind = "subagent"`, labelled as attested. S1 records only `agent_session` on runs.
 
 ## 8. Verification plan
 - **Unit tests:** an exploratory sidecar without `[outcomes]` validates. With a branch lacking `source` it fails, for new stems. With a well-formed `source` it passes, and a malformed `source` fails. The whole existing validate suite must stay green.
@@ -405,7 +407,8 @@ Review raised no new user question. The review-time refinement to decision 8 (su
   - copying an exploratory script to a new stem with retuned cutoffs fires the laundering warning (C3);
   - a self-authored `for` entry does not address a `major` or `decisive` `against` (C12);
   - a `figure-read` value never reaches `threshold-source` (§3.3.2);
-  - a subagent appraisal does not satisfy independence for its parent session (§7.8);
+  - a fork appraisal does not satisfy independence for its parent session, while a fresh-subagent appraisal does (§7.8);
+  - explicit `exploration` without `[observe]` is `legacy` on a stem with runs and a validation error on a new stem;
   - exploratory and calibrating runs never cover a claim clause (C14);
   - a `held_out_split` with `unit = "seed"` ranks 0 and cannot promote (C9).
 - **Positive control for sanity:** a run whose sanity entry is deliberately false records `invalid_measurement` with reason `sanity:<expr>`.
