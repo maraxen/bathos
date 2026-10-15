@@ -1303,6 +1303,96 @@ def test_compact_refresh_preserves_reaped_metadata(tmp_catalog: Path, sample_run
     assert compact(tmp_catalog).refreshed == 0
 
 
+def test_compact_refresh_preserves_postmortem_override_from_other_workspace(
+    tmp_catalog: Path, sample_run: Run
+):
+    """A warm-only postmortem verdict override survives a compact run from a workspace
+    whose postmortem map does not contain the run (cross-project / missing file)."""
+    init_catalog(tmp_catalog)
+    run = dataclasses.replace(sample_run, status="completed", outcome="pass")
+    write_run(run, tmp_catalog)
+    compact(tmp_catalog)
+
+    # As left by a compact from the project that owns the postmortem.
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    con.execute(
+        "UPDATE runs SET outcome = 'fail', postmortem_verdict_override = 'fail' WHERE id = ?",
+        [run.id],
+    )
+    con.close()
+
+    result = compact(tmp_catalog)
+    assert result.refreshed == 0
+    assert _warm_row(tmp_catalog, run.id)[3] == "fail"
+
+    # Negative control: without a recorded override, a changed cool outcome still refreshes.
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    con.execute("UPDATE runs SET postmortem_verdict_override = 'none' WHERE id = ?", [run.id])
+    con.close()
+    result = compact(tmp_catalog)
+    assert result.refreshed == 1
+    assert _warm_row(tmp_catalog, run.id)[3] == "pass"
+
+
+def test_compact_refresh_carries_finish_time_columns(tmp_catalog: Path, sample_run: Run):
+    """Columns the runner sets at finish (residual flag, adversarial check, outputs)
+    reach warm on refresh, so a refreshed row equals a freshly ingested one."""
+    init_catalog(tmp_catalog)
+    running = dataclasses.replace(
+        sample_run, status="running", outcome="", outcome_is_residual=False, output_paths=[]
+    )
+    write_run(running, tmp_catalog)
+    compact(tmp_catalog)
+
+    done = dataclasses.replace(
+        running,
+        status="completed",
+        outcome="unknown",
+        outcome_is_residual=True,
+        adversarial_check_status="fired",
+        adversarial_check_result="fired",
+        output_paths=["out/result.json"],
+    )
+    write_run(done, tmp_catalog)
+    assert compact(tmp_catalog).refreshed == 1
+
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        row = con.execute(
+            "SELECT outcome_is_residual, adversarial_check_status, adversarial_check_result, "
+            "output_paths FROM runs WHERE id = ?",
+            [running.id],
+        ).fetchone()
+    finally:
+        con.close()
+    assert row == (True, "fired", "fired", ["out/result.json"])
+    assert compact(tmp_catalog).refreshed == 0
+
+
+def test_compact_refresh_keeps_warm_metadata_over_empty_cool(tmp_catalog: Path, sample_run: Run):
+    """An empty cool metadata (e.g. a `bth repair` re-export) never wipes warm metadata."""
+    init_catalog(tmp_catalog)
+    run = dataclasses.replace(sample_run, metadata='{"k": "v"}')
+    write_run(run, tmp_catalog)
+    compact(tmp_catalog)
+
+    write_run(dataclasses.replace(run, metadata="{}"), tmp_catalog)
+    assert compact(tmp_catalog).refreshed == 0
+    assert _warm_row(tmp_catalog, run.id)[5] == '{"k": "v"}'
+
+
+def test_compact_refresh_treats_empty_outcome_as_null(tmp_catalog: Path, sample_run: Run):
+    """Warm outcome '' (written by the postmortem block) equals a NULL cool outcome."""
+    init_catalog(tmp_catalog)
+    run = dataclasses.replace(sample_run, status="completed", outcome="")
+    write_run(run, tmp_catalog)
+    compact(tmp_catalog)
+    con = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    con.execute("UPDATE runs SET outcome = '' WHERE id = ?", [run.id])
+    con.close()
+    assert compact(tmp_catalog).refreshed == 0
+
+
 # ---------------------------------------------------------------------------
 # Debt #2010: a DuckDB index/constraint error in the warm DB must surface as a
 # clear, actionable error naming the remedy -- not a raw traceback -- and must

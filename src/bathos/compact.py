@@ -85,6 +85,38 @@ def _backup_warm_db(db_path: Path) -> None:
 #: conflict (IOException) or a bug in a query. Debt #2010.
 _WARM_INDEX_ERRORS = (duckdb.ConstraintException, duckdb.InternalException)
 
+# Columns the runner rewrites in the cool fragment when a run finishes, beyond the
+# status/outcome/metadata core; the compact refresh must carry them too (debt #2689).
+_REFRESH_FINISH_COLS = (
+    "outcome_is_residual",
+    "adversarial_check_status",
+    "adversarial_check_result",
+    "output_paths",
+    "parity_run_type",
+    "differential_status",
+    "differential_off_value",
+    "differential_on_value",
+)
+
+
+def _cool_finish_value(run: Run, col: str):
+    """A cool finish-time value, normalised the way the warm comparison sees it."""
+    value = getattr(run, col, None)
+    if col == "output_paths":
+        return list(value or [])
+    if col == "outcome_is_residual":
+        return bool(value)
+    return value if value != "" else None
+
+
+def _warm_finish_value(col: str, value):
+    """A warm finish-time value, normalised to match `_cool_finish_value`."""
+    if col == "output_paths":
+        return list(value or [])
+    if col == "outcome_is_residual":
+        return bool(value)
+    return value if value != "" else None
+
 
 def _warm_index_error(exc: Exception, db_path: Path) -> CorruptDatabaseError:
     """Build the actionable error for a stale-index / constraint failure in compact().
@@ -98,8 +130,11 @@ def _warm_index_error(exc: Exception, db_path: Path) -> CorruptDatabaseError:
         f"compact failed: DuckDB reported an index/constraint error on {db_path} "
         f"({type(exc).__name__}: {exc}). This usually means a stale index in the warm "
         "catalog, or a row that violates a constraint, and it will block every compact "
-        "until fixed. bathos.db has NOT been modified by this recovery path. "
-        "Remedy: back up and rebuild the warm tier from the cool fragments with "
+        "until fixed. It can also come from a malformed cool fragment (e.g. a campaign "
+        "row failing a CHECK) -- read the quoted error first, because a rebuild re-ingests "
+        "the same fragments and will fail the same way. Rows ingested earlier in this "
+        "compact are kept; nothing is deleted or rebuilt automatically. "
+        "Remedy for a stale index: back up and rebuild the warm tier from the cool fragments with "
         "`bth compact --force-rebuild` (a bathos.db.bak-<timestamp> copy is kept), or "
         "run `bth repair --tier warm` to see the planned repair (add `--no-dry-run "
         "--acknowledge-warm-loss` to apply)."
@@ -889,7 +924,8 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
         con = duckdb.connect(str(db_path))
     except _WARM_INDEX_ERRORS as exc:
         # e.g. WAL replay hitting a stale index at open time (debt #2010)
-        raise _warm_index_error(exc, db_path) from exc
+        warm_error = _warm_index_error(exc, db_path)
+        raise warm_error from exc
     try:
         waited_ms = (time.monotonic() - t_connect) * 1000
         if waited_ms > 500:
@@ -996,7 +1032,9 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
             row[0]: row[1:]
             for row in con.execute(
                 "SELECT id, status, exit_code, duration_s, outcome, outcome_error_reason, "
-                "metadata FROM runs"
+                "metadata, postmortem_verdict_override, "
+                + ", ".join(_REFRESH_FINISH_COLS)
+                + " FROM runs"
             ).fetchall()
         }
 
@@ -1011,15 +1049,25 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                 # rewritten when a run finishes (running -> completed/failed), but the
                 # row was only ever INSERTed, so warm stayed 'running' forever.
                 pm_entry = postmortem_map.get(run.id)
+                warm_override = existing[6]
                 if pm_entry is not None and pm_entry[0].verdict_override != "none":
                     # The postmortem block below pins outcome to the override; compare
                     # against that so an overridden run is not "refreshed" every compact.
                     cool_outcome = pm_entry[0].verdict_override
+                elif pm_entry is None and warm_override not in (None, "", "none"):
+                    # The override lives only in warm. postmortem_map covers the current
+                    # workspace alone, so a compact run from another project (or a checkout
+                    # lacking the postmortem file) must not revert the recorded verdict.
+                    cool_outcome = existing[3]
                 else:
                     cool_outcome = run.outcome or None
                 # metadata: cool wins, but `reaped` is warm-only (merged in by reap.py
                 # after a rebuild) and must survive.
                 cool_metadata = run.metadata or "{}"
+                if cool_metadata.strip() in ("", "{}") and (existing[5] or "{}").strip() != "{}":
+                    # An empty cool metadata never replaces real warm metadata: `bth repair`
+                    # re-exports warm-only runs to cool without metadata.
+                    cool_metadata = existing[5]
                 try:
                     warm_meta = json.loads(existing[5] or "{}")
                     if isinstance(warm_meta, dict) and "reaped" in warm_meta:
@@ -1036,15 +1084,26 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                     cool_outcome,
                     run.outcome_error_reason or None,
                     cool_metadata,
+                    # Finish-time columns the runner also rewrites (runner.py finalize).
+                    *(_cool_finish_value(run, col) for col in _REFRESH_FINISH_COLS),
                 )
-                if tuple(existing) != fresh_state:
+                # Normalise "" to None for outcome: the postmortem block writes "" for
+                # a run with no sidecar outcome, which must not count as a change.
+                warm_state = (
+                    *existing[:3],
+                    existing[3] or None,
+                    *existing[4:6],
+                    *(_warm_finish_value(c, v) for c, v in zip(_REFRESH_FINISH_COLS, existing[7:])),
+                )
+                if warm_state != fresh_state:
+                    set_cols = [
+                        "status", "exit_code", "duration_s", "outcome",
+                        "outcome_error_reason", "metadata", *_REFRESH_FINISH_COLS,
+                    ]  # fmt: skip
                     con.execute(
-                        """
-                        UPDATE runs SET
-                          status = ?, exit_code = ?, duration_s = ?, outcome = ?,
-                          outcome_error_reason = ?, metadata = ?
-                        WHERE id = ?
-                        """,
+                        "UPDATE runs SET "
+                        + ", ".join(f"{c} = ?" for c in set_cols)
+                        + " WHERE id = ?",
                         [*fresh_state, run.id],
                     )
                     refreshed_count += 1
@@ -1295,7 +1354,8 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
         )
 
     except _WARM_INDEX_ERRORS as exc:
-        raise _warm_index_error(exc, db_path) from exc
+        warm_error = _warm_index_error(exc, db_path)
+        raise warm_error from exc
     finally:
         con.close()
 
