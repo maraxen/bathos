@@ -23,7 +23,10 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "duckdb>=1.0",
+    # Prerelease floor: every client sharing ~/.bth/catalog/bathos.db must read
+    # DuckDB storage v69+. Unlike [tool.uv] below, a floor here is honoured by
+    # `uv tool install`, PyPI installs and dependents (see [tool.uv] comment).
+    "duckdb>=2.0.0.dev2610011535",
     "pyarrow>=16",
     "pytz>=2026.2",
     "tomlkit>=0.12",
@@ -114,9 +117,13 @@ bth-mcp = "bathos.mcp:mcp_server"
 # throughout). Runs could not be verified by record, which is the one check this
 # project's own rules insist on over exit codes.
 #
-# Declaring the policy here means every consumer resolves from the same
-# prerelease-inclusive set, so the clients that share the catalog stay on a
-# mutually readable storage version.
+# Scope (spiked 2026-10-15, uv 0.11.21): this setting is honoured only when uv
+# resolves THIS project (`uv lock` / `uv sync` / `uv run` in the repo). It is
+# ignored by `uv tool install` (of a dir or a wheel, from any cwd) and by any
+# project that depends on bathos. The guarantee that every client sharing the
+# catalog stays on a mutually readable storage version therefore comes from the
+# duckdb prerelease floor in [project.dependencies]; this setting keeps the
+# repo's own resolution (cisternal 0.1.1aN etc.) prerelease-inclusive.
 prerelease = "allow"
 
 [tool.hatch.build.targets.wheel]
