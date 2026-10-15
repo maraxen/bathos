@@ -410,3 +410,153 @@ def test_lint_malformed_source_on_confirmatory_warns(tmp_path):
     )
     hits = [i for i in issues if i.issue == "malformed_source"]
     assert hits and hits[0].severity == IssueSeverity.WARNING
+
+
+# --- unfilled ${} placeholders in condition / adversarial_check (fix C) ----------------------
+
+
+def _placeholder_hits(result, field):
+    return [e for e in result.errors if e.field == field]
+
+
+def test_placeholder_in_condition_fails_for_confirmatory(tmp_path):
+    content = """
+    [experiment]
+    stage_name = "validation"
+    hypothesis = "H"
+    [outcomes.pass]
+    condition = "x > ${THRESHOLD}"
+    decision = "go"
+    reasoning = "r"
+    [outcomes.fail]
+    condition = "x <= 1"
+    decision = "stop"
+    reasoning = "r"
+    is_residual = true
+    [result_schema]
+    x = "float"
+    """
+    result = _validate(tmp_path, content)
+    assert result.ok is False
+    hits = _placeholder_hits(result, "outcomes.pass.condition")
+    assert hits
+    assert "${" in hits[0].message and "unfilled placeholder" in hits[0].message
+
+
+def test_placeholder_in_adversarial_check_fails_for_exploratory(tmp_path):
+    # The confirm scaffold puts ${THRESHOLD} in adversarial_check, which was never validated, so
+    # the check was silently disabled. It must now fail on an exploratory sidecar too.
+    content = """
+    [experiment]
+    stage_name = "exploration"
+    question = "Q"
+    [observe]
+    outputs = ["out.csv"]
+    [outcomes.pass]
+    condition = "x > 1"
+    decision = "go"
+    reasoning = "r"
+    source = "provisional:draft"
+    adversarial_check = "x < ${THRESHOLD}"
+    [outcomes.fail]
+    condition = "x <= 1"
+    decision = "stop"
+    reasoning = "r"
+    source = "provisional:draft"
+    is_residual = true
+    [result_schema]
+    x = "float"
+    """
+    result = _validate(tmp_path, content, prior=True)
+    assert result.ok is False
+    hits = _placeholder_hits(result, "outcomes.pass.adversarial_check")
+    assert hits
+    assert "${" in hits[0].message and "unfilled placeholder" in hits[0].message
+
+
+def test_placeholder_free_condition_and_check_are_not_flagged(tmp_path):
+    content = """
+    [experiment]
+    stage_name = "validation"
+    hypothesis = "H"
+    [outcomes.pass]
+    condition = "x > 1"
+    decision = "go"
+    reasoning = "r"
+    adversarial_check = "x < 10"
+    [outcomes.fail]
+    condition = "x <= 1"
+    decision = "stop"
+    reasoning = "r"
+    is_residual = true
+    [result_schema]
+    x = "float"
+    """
+    result = _validate(tmp_path, content)
+    assert not any("unfilled placeholder" in e.message for e in result.errors)
+
+
+# --- declare_stage_name Tier-2 lint (spec 261015 §3.1 row 1, fix E) --------------------------
+
+
+def test_lint_missing_stage_name_with_outcomes_warns_declare(tmp_path):
+    from bathos.linter import IssueSeverity
+
+    issues = _lint_one(
+        tmp_path,
+        "run_nostage",
+        """
+        [experiment]
+        hypothesis = "H"
+        [outcomes.pass]
+        condition = "x > 1"
+        decision = "go"
+        reasoning = "r"
+        [outcomes.fail]
+        condition = "x <= 1"
+        decision = "stop"
+        reasoning = "r"
+        is_residual = true
+        [result_schema]
+        x = "float"
+        """,
+    )
+    hits = [i for i in issues if i.issue == "declare_stage_name"]
+    assert hits and hits[0].severity == IssueSeverity.WARNING
+    assert "declare stage_name explicitly" in hits[0].detail
+
+
+def test_lint_missing_stage_name_without_outcomes_does_not_warn(tmp_path):
+    issues = _lint_one(
+        tmp_path,
+        "run_nostage_noout",
+        """
+        [experiment]
+        hypothesis = "H"
+        """,
+    )
+    assert not [i for i in issues if i.issue == "declare_stage_name"]
+
+
+def test_lint_declared_stage_name_does_not_warn_declare(tmp_path):
+    issues = _lint_one(
+        tmp_path,
+        "run_declared",
+        """
+        [experiment]
+        stage_name = "validation"
+        hypothesis = "H"
+        [outcomes.pass]
+        condition = "x > 1"
+        decision = "go"
+        reasoning = "r"
+        [outcomes.fail]
+        condition = "x <= 1"
+        decision = "stop"
+        reasoning = "r"
+        is_residual = true
+        [result_schema]
+        x = "float"
+        """,
+    )
+    assert not [i for i in issues if i.issue == "declare_stage_name"]

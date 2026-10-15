@@ -699,6 +699,21 @@ def validate_sidecar(
                     field=f"outcomes.{label}",
                     reason=f"{label!r} is reserved",
                 )
+        # An unfilled template placeholder in a condition or adversarial_check is never valid, for
+        # any class. An unfilled adversarial_check would otherwise silently disable the check.
+        # The "${" in the message is load-bearing: scaffold code uses it to classify fill-in items.
+        for placeholder_field, text in (
+            ("condition", spec.condition),
+            ("adversarial_check", spec.adversarial_check),
+        ):
+            if text and "${" in text:
+                errors.append(
+                    ValidationError(
+                        f"outcomes.{label}.{placeholder_field}",
+                        f"unfilled placeholder in {placeholder_field} {text!r}: "
+                        "template '${...}' must be filled in before the sidecar is valid",
+                    )
+                )
         if not spec.condition:
             err = ValidationError(f"outcomes.{label}", "Missing 'condition' field")
             errors.append(err)
@@ -733,8 +748,8 @@ def validate_sidecar(
                     reason="Missing 'reasoning' field",
                 )
 
-        # DuckDB SQL must parse
-        if spec.condition:
+        # DuckDB SQL must parse. A placeholder condition is reported above; it is not parsed here.
+        if spec.condition and "${" not in spec.condition:
             try:
                 con = duckdb.connect()
                 # Build a dummy table from result_schema to validate SQL

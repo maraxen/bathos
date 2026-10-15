@@ -293,3 +293,97 @@ def test_check_sanity_expr_syntax_error_is_reported():
 
     errs = check_sanity_expr("x > )", SCHEMA)
     assert errs and "parse" in errs[0]
+
+
+# --- sanity allowlist, hidden thresholds (spec 261015 §3.2, fix B) -----------------------------
+
+SCHEMA_XN = {"x", "n"}
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "count(*) FILTER (WHERE x > 5) >= 1",  # threshold smuggled under FUNCTION `filter`
+        "sum(x) FILTER (WHERE x > 5) > 0",  # same, but the call does reference a column
+        "CASE WHEN x > 5 THEN true ELSE false END",  # CASE branches
+        "x BETWEEN 0 AND 100",  # BETWEEN is a two-sided literal range
+        "x IN (3, 4)",  # IN list of literals
+        "CAST(x AS INT) > 1",  # general cast
+        "x > -5",  # negative literal
+        "x > 1e9",  # non-0/1 numeric literal
+        "x > 'a'",  # string literal
+        "x > (SELECT 5)",  # subquery
+        "x > 1+1+1",  # literal inside arithmetic
+    ],
+)
+def test_sanity_hidden_threshold_is_rejected(expr):
+    from bathos.sidecar import check_sanity_expr
+
+    errs = check_sanity_expr(expr, SCHEMA_XN)
+    assert errs, f"expected {expr!r} to be rejected"
+
+
+@pytest.mark.parametrize(
+    "expr",
+    ["x > 0", "n >= 1", "x IS NOT NULL", "NOT (x < 0) AND n > 0", "x = x"],
+)
+def test_sanity_allowlist_accepts_plain_checks(expr):
+    from bathos.sidecar import check_sanity_expr
+
+    assert check_sanity_expr(expr, SCHEMA_XN) == [], f"expected {expr!r} to pass"
+
+
+# --- gate_stage: a typo fails closed for the enforcement gates (spec 261015 §3.1, fix A) ------
+
+
+def test_gate_stage_typo_fails_closed_to_validation():
+    from bathos.sidecar import Sidecar, SidecarKind
+
+    s = Sidecar(
+        kind=SidecarKind.EXPERIMENT,
+        result_schema={},
+        stage_name="exploration",  # coerced value, as parse_sidecar stores it
+        stage_name_declared=True,
+        stage_name_raw="validaton",
+    )
+    assert s.gate_stage == "validation"
+    # The stored coerced value is untouched; only the gate reads gate_stage.
+    assert s.stage_name == "exploration"
+
+
+@pytest.mark.parametrize(
+    "stage", ["exploration", "calibration", "validation", "ablation", "production"]
+)
+def test_gate_stage_canonical_stage_is_unchanged(tmp_path, stage):
+    s = _sidecar(tmp_path, f'[experiment]\nstage_name = "{stage}"\nhypothesis = "H"\n')
+    assert s.gate_stage == stage
+
+
+def test_gate_stage_absent_stage_name_is_exploration(tmp_path):
+    s = _sidecar(tmp_path, '[experiment]\nhypothesis = "H"\n')
+    assert s.stage_name_declared is False
+    assert s.gate_stage == "exploration"
+
+
+# --- invalid_measurement is neutral, exactly like observed (fix D) ----------------------------
+
+
+def test_invalid_measurement_is_not_a_failure():
+    from bathos.sidecar import is_failure_outcome
+
+    s = _popper_sidecar()
+    assert is_failure_outcome(s, "invalid_measurement") is False
+    # Same as observed, and a real non-pass still counts.
+    assert is_failure_outcome(s, "observed") is False
+    assert is_failure_outcome(s, "fail") is True
+
+
+def test_invalid_measurement_has_neutral_evalue():
+    from bathos.sidecar import compute_evalue
+
+    s = _popper_sidecar()
+    assert compute_evalue(s, "invalid_measurement") == 1.0
+    # Explicit weights cannot make an instrument failure non-neutral either.
+    s.popper_weights = {"invalid_measurement": 5.0}
+    assert compute_evalue(s, "invalid_measurement") == 1.0
+    assert compute_evalue(s, "pass") == pytest.approx(8.0)

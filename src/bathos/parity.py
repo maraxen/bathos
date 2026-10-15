@@ -246,7 +246,7 @@ def check_parity_confounds_for_submit(sidecar, catalog_dir: Path) -> dict:
         return {"satisfied": True, "tier_enforced": False}
 
     requires_parity_stem = sidecar.reproduction.requires_parity_stem
-    stage_name = sidecar.stage_name or "exploration"
+    stage_name = sidecar.gate_stage
 
     # Determine if tier is enforced (validation/production = enforced, others = advisory)
     is_validation_or_production = stage_name in ("validation", "production")
