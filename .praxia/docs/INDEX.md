@@ -1,4 +1,4 @@
-# compact-incremental-spec Internal Docs
+# spec-exploratory-mode-contract Internal Docs
 
 ## Daily
 - [260805_overnight-decisions](daily/260805_overnight-decisions.md) — Every decision made without a human gate during the overnight autonomous loop run, with enough context to backtrack
@@ -20,6 +20,7 @@
 - [260515_v02-sprint-plan](plans/260515_v02-sprint-plan.md)
 
 ## Specs
+- [261015_exploratory-mode-contract](specs/261015_exploratory-mode-contract.md) — Operationalize exploration vs calibration vs validation in bathos so exploratory runs stop inventing pass/marginal/fail thresholds, with a gated promotion path to confirmatory
 - [261012_retire-compact-runlog-cutover](specs/261012_retire-compact-runlog-cutover.md) — Do not build an incremental legacy compact; finish delivery step 5 of the project-local run log (260925) behind its blockers, and add a cool-fragment fallback to get_run meanwhile (debts 2344, 2110, 1685, 1647, 1993)
 - [260925_project-local-run-log](specs/260925_project-local-run-log.md) — Project-local append-only run log with a disposable index
 - [260826_blast-radius-assessment-skill](specs/260826_blast-radius-assessment-skill.md) — Blast-radius assessment for bathos-tracked experiments
