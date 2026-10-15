@@ -50,3 +50,4 @@
 {"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-08-26T23:18:16Z"}
 {"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-08-26T23:19:41Z"}
 {"hook":"pretool-agent-dedup","error":"cache update failed","ts":"2026-08-26T23:20:18Z"}
+{"hook":"subagent-stop","error":"rescue skipped: rescue lock held for fixer a6f35d186e5b189c2","ts":"2026-10-15T16:29:39Z"}
