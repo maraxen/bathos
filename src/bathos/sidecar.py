@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import tomllib
 from dataclasses import dataclass, field
@@ -213,6 +214,14 @@ class Sidecar:
     # experiment fields
     hypothesis: str = ""
     stage_name: str = "exploration"
+    # True iff [experiment] carries a stage_name key at all. `stage_name` above is coerced for
+    # back-compat with other modules; class resolution reads `stage_name_raw` so that a typo fails
+    # closed instead of silently becoming "exploration".
+    stage_name_declared: bool = False
+    stage_name_raw: str | None = None
+    question: str | None = None
+    observe: ObserveBlock | None = None
+    calibrate: CalibrateBlock | None = None
     novel: bool = False
     # benchmark fields
     baseline_ref: str = ""
@@ -254,6 +263,27 @@ class Sidecar:
     status: StatusBlock | None = None
 
 
+@dataclass(frozen=True)
+class ObserveBlock:
+    """Top-level `[observe]` block: what an exploratory run commits to producing (spec §3.2).
+
+    This is a pre-registration of *what you will look at*, not a test. `sanity` entries are
+    instrument checks over `result_schema` fields, evaluated by `check_sanity_expr`.
+    """
+
+    outputs: list[str] = field(default_factory=list)
+    looking_for: str | None = None
+    sanity: list[str] = field(default_factory=list)
+    planned_tests: int | None = None
+
+
+@dataclass(frozen=True)
+class CalibrateBlock:
+    """Top-level `[calibrate]` block: the quantity a calibration run measures (spec §3.5)."""
+
+    quantity: str
+
+
 ENFORCED_DIRS = {"experiments", "benchmarks", "validation"}
 
 # Outcome labels bathos assigns itself out-of-band, never via evaluate_outcome's condition
@@ -265,7 +295,10 @@ ENFORCED_DIRS = {"experiments", "benchmarks", "validation"}
 # new and bathos-exclusive: set only by the [differential] pre-flight short-circuit in
 # runner.py when the instrument-sensitivity invariant fails to fire -- declaring it yourself
 # would let a sidecar silently redefine what "the measurement is broken" means.
-RESERVED_OUTCOME_LABELS = {"invalid_measurement"}
+#
+# "observed" (spec §3.2, epistemic class) is what exploratory and calibrating runs store as their
+# outcome: a value was recorded, no verdict was reached. It is bathos-exclusive for the same reason.
+RESERVED_OUTCOME_LABELS = {"invalid_measurement", "observed"}
 
 # Canonical set: the advisory vocabulary for stage_name values.
 # These are best-practice values discovered from real stage_name usage.
@@ -277,6 +310,9 @@ CANONICAL_STAGES = {
     "ablation",
     "production",
 }
+
+# Epistemic class of a run (spec §3.1). Resolved once at run start by resolve_epistemic_class.
+EPISTEMIC_CLASSES = ("exploratory", "calibrating", "confirmatory", "legacy")
 
 
 def _str_list(value) -> list[str]:
@@ -307,9 +343,12 @@ def parse_sidecar(path: Path) -> Sidecar:
         section = data["experiment"]
         outcomes = _parse_outcomes(data)
 
-        # Parse stage_name with validation and coercion
+        # Parse stage_name with validation and coercion. The literal is kept in stage_name_raw
+        # so epistemic-class resolution can fail closed on a typo (spec §3.1).
+        stage_declared = "stage_name" in section
+        stage_raw = str(section["stage_name"]) if stage_declared else None
         stage_name = section.get("stage_name", "exploration")
-        if stage_name not in CANONICAL_STAGES:
+        if not (isinstance(stage_name, str) and stage_name in CANONICAL_STAGES):
             logger.warning(
                 f"Invalid stage_name '{stage_name}' in {path}; must be one of {CANONICAL_STAGES}. "
                 "Coercing to 'exploration'."
@@ -319,10 +358,17 @@ def parse_sidecar(path: Path) -> Sidecar:
         # Parse novel field
         novel = bool(section.get("novel", False))
 
+        question = section.get("question")
+        if question is not None:
+            question = str(question)
+
         sidecar = Sidecar(
             kind=kind,
             hypothesis=section.get("hypothesis", ""),
             stage_name=stage_name,
+            stage_name_declared=stage_declared,
+            stage_name_raw=stage_raw,
+            question=question,
             novel=novel,
             outcomes=outcomes,
             result_schema=data.get("result_schema", {}),
@@ -371,6 +417,30 @@ def parse_sidecar(path: Path) -> Sidecar:
             for key in controls_data:
                 if key not in {"positive_outcome", "negative_outcome"}:
                     logger.warning(f"Unknown key in [controls]: {key!r}")
+
+        # Parse [observe] block (optional, exploratory class, spec §3.2)
+        if "observe" in data:
+            obs = data.get("observe", {})
+            planned = obs.get("planned_tests")
+            if planned is not None and (isinstance(planned, bool) or not isinstance(planned, int)):
+                raise SidecarError(f"[observe].planned_tests must be an integer in {path}")
+            sidecar.observe = ObserveBlock(
+                outputs=_str_list(obs.get("outputs")),
+                looking_for=obs.get("looking_for"),
+                sanity=_str_list(obs.get("sanity")),
+                planned_tests=planned,
+            )
+            for key in obs:
+                if key not in {"outputs", "looking_for", "sanity", "planned_tests"}:
+                    logger.warning(f"Unknown key in [observe]: {key!r}")
+
+        # Parse [calibrate] block (optional, calibrating class, spec §3.5)
+        if "calibrate" in data:
+            cal = data.get("calibrate", {})
+            sidecar.calibrate = CalibrateBlock(quantity=str(cal.get("quantity", "")))
+            for key in cal:
+                if key != "quantity":
+                    logger.warning(f"Unknown key in [calibrate]: {key!r}")
 
         # Parse [differential] block (optional, debt #1071)
         if "differential" in data:
@@ -571,13 +641,16 @@ def derive_pass_labels(sidecar: Sidecar) -> set[str]:
     CANONICAL_STAGES, the author names each `[outcomes.<label>]` branch freely — so this is
     derived from the sidecar's own declarations rather than matched against a fixed vocabulary.
 
-    Excluded: residual catch-all branches, and the three bookkeeping labels `marginal` /
-    `error` / `unknown`, none of which is a declared scientific outcome.
+    Excluded: residual catch-all branches, the bookkeeping labels `marginal` / `error` /
+    `unknown`, and every bathos-reserved label (`observed`, `invalid_measurement`), none of which
+    is a declared scientific outcome.
     """
     return {
         label
         for label, spec in sidecar.outcomes.items()
-        if not spec.is_residual and label not in ("marginal", "error", "unknown")
+        if not spec.is_residual
+        and label not in ("marginal", "error", "unknown")
+        and label not in RESERVED_OUTCOME_LABELS
     }
 
 
@@ -593,11 +666,15 @@ def is_failure_outcome(sidecar: Sidecar | None, outcome_label: str) -> bool:
     which is a different thing from an evaluated non-pass, and an obligation to explain a
     result that was never computed would be noise.
 
+    ``"observed"`` is treated the same way: an exploratory or calibrating run records a value,
+    not a verdict, so it never opens a `outcome_failed` obligation whatever its tentative label
+    (spec §3.2, C5).
+
     `marginal`, `error`, and residual catch-all branches **are** failures here: none of them is
     a pass. That is the spec's rule applied literally, and it is the widest of the four
     triggers — see the calibration note in `obligations.TRIGGERS`.
     """
-    if sidecar is None or outcome_label in ("", "unknown"):
+    if sidecar is None or outcome_label in ("", "unknown", "observed"):
         return False
     return outcome_label not in derive_pass_labels(sidecar)
 
@@ -610,12 +687,12 @@ def compute_evalue(
     """Compute the likelihood-ratio e-value for a single run outcome.
 
     Returns 1.0 (neutral) if the sidecar has no [popper] block.
-    Error and unknown outcomes always return 1.0 (non-overridable).
+    Error, unknown and observed outcomes always return 1.0 (non-overridable).
     """
     if sidecar.popper_null_pass_rate is None:
         return 1.0
 
-    if outcome_label in ("error", "unknown"):
+    if outcome_label in ("error", "unknown", "observed"):
         return 1.0
 
     # Explicit weight override takes priority
@@ -639,6 +716,237 @@ def compute_evalue(
         f"compute_evalue produced non-positive value {evalue} for outcome '{outcome_label}'"
     )
     return evalue
+
+
+def resolve_epistemic_class(sidecar: Sidecar, *, stem_has_prior_runs: bool) -> str | None:
+    """Resolve a run's epistemic class from its sidecar (spec §3.1 table, in order).
+
+    Returns one of :data:`EPISTEMIC_CLASSES`, or ``None`` meaning "invalid": an exploration or
+    calibration stage without its block, on a stem with no prior runs. The validator turns
+    ``None`` into an error. Shape gating: a declared stage only takes the new class when the
+    sidecar has the new shape, so the 66 legacy sidecars that declare `exploration`/`calibration`
+    with real `[outcomes]` keep today's rules.
+    """
+    if sidecar.kind != SidecarKind.EXPERIMENT:
+        return "legacy"
+    if not sidecar.stage_name_declared:
+        return "legacy"
+    raw = sidecar.stage_name_raw
+    if raw not in CANONICAL_STAGES:
+        # A typo ("validaton") fails closed: it can never loosen the rules.
+        return "confirmatory"
+    if raw == "exploration":
+        if sidecar.observe is not None:
+            return "exploratory"
+    elif raw == "calibration":
+        if sidecar.calibrate is not None:
+            return "calibrating"
+    else:
+        # validation / ablation / production
+        return "confirmatory"
+    # exploration or calibration, but its block is missing.
+    return "legacy" if stem_has_prior_runs else None
+
+
+# --- source grammar (spec §3.2 "source grammar", closed) ----------------------------------------
+
+
+@dataclass(frozen=True)
+class SourceRef:
+    """A parsed `source = "..."` value. Only the fields its `kind` uses are set."""
+
+    kind: str  # "lit" | "run" | "sesoi" | "provisional" | "card"
+    ref: str = ""  # lit:<ref>, card:<id>
+    field: str = ""  # run:<id>:<field>
+    value: float | None = None  # sesoi:<value>:<why>
+    why: str = ""  # sesoi / provisional
+
+
+def parse_source(s: str) -> SourceRef | None:
+    """Parse a `source` value against the closed grammar. Returns None when malformed.
+
+    Accepted: ``lit:<ref>``, ``run:<id>:<field>``, ``sesoi:<finite float>:<why>``,
+    ``provisional:<why>``, ``card:<id>``. Every part must be non-empty. Any ``${`` is rejected
+    (an unexpanded template placeholder is never a source).
+    """
+    if not isinstance(s, str) or "${" in s:
+        return None
+    kind, sep, rest = s.partition(":")
+    if not sep or not rest.strip():
+        return None
+    if kind == "lit":
+        return SourceRef(kind="lit", ref=rest)
+    if kind == "card":
+        return SourceRef(kind="card", ref=rest)
+    if kind == "provisional":
+        return SourceRef(kind="provisional", why=rest)
+    if kind == "run":
+        parts = rest.split(":")
+        if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
+            return None
+        return SourceRef(kind="run", ref=parts[0], field=parts[1])
+    if kind == "sesoi":
+        value_s, sep2, why = rest.partition(":")
+        if not sep2 or not why.strip():
+            return None
+        try:
+            value = float(value_s)
+        except ValueError:
+            return None
+        if not math.isfinite(value):
+            return None
+        return SourceRef(kind="sesoi", value=value, why=why)
+    return None
+
+
+# --- sanity expressions (spec §3.2 validator rules) ---------------------------------------------
+
+_SANITY_NODE_CLASSES = {
+    "COLUMN_REF",
+    "CONSTANT",
+    "COMPARISON",
+    "CONJUNCTION",
+    "OPERATOR",
+    "FUNCTION",
+    "CAST",
+}
+_SANITY_NUMERIC_TYPES = {
+    "TINYINT",
+    "SMALLINT",
+    "INTEGER",
+    "BIGINT",
+    "HUGEINT",
+    "UTINYINT",
+    "USMALLINT",
+    "UINTEGER",
+    "UBIGINT",
+    "FLOAT",
+    "DOUBLE",
+    "DECIMAL",
+}
+
+
+def _sanity_children(node: dict) -> list[dict]:
+    kids: list[dict] = []
+    for key in ("left", "right", "child"):
+        if isinstance(node.get(key), dict):
+            kids.append(node[key])
+    kids.extend(k for k in node.get("children", []) if isinstance(k, dict))
+    return kids
+
+
+def _sanity_descendants(node: dict) -> list[dict]:
+    out: list[dict] = []
+    stack = _sanity_children(node)
+    while stack:
+        n = stack.pop()
+        out.append(n)
+        stack.extend(_sanity_children(n))
+    return out
+
+
+def _sanity_constant_ok(node: dict) -> bool:
+    """A literal is allowed only if it is 0, 1, NULL or a boolean (spec §3.2)."""
+    value = node.get("value") or {}
+    typ = value.get("type") or {}
+    type_id = typ.get("id")
+    if value.get("is_null") or type_id == "NULL":
+        return True
+    if type_id == "BOOLEAN":
+        return True
+    if type_id in _SANITY_NUMERIC_TYPES:
+        raw = value.get("value")
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            return False
+        if type_id == "DECIMAL":
+            raw = raw / (10 ** int((typ.get("type_info") or {}).get("scale", 0)))
+        return raw in (0, 1)
+    return False
+
+
+def _sanity_bool_cast_ok(node: dict) -> bool:
+    """`TRUE` / `FALSE` parse as CAST(CONSTANT VARCHAR 't'|'f' AS BOOLEAN); accept only that."""
+    child = node.get("child") or {}
+    value = (child.get("value") or {}) if child.get("class") == "CONSTANT" else {}
+    return (
+        (node.get("cast_type") or {}).get("id") == "BOOLEAN"
+        and (value.get("type") or {}).get("id") == "VARCHAR"
+        and value.get("value") in ("t", "f")
+    )
+
+
+def _sanity_walk(node: dict, fields: set[str], errors: list[str], expr: str) -> None:
+    cls = node.get("class")
+    if cls not in _SANITY_NODE_CLASSES:
+        errors.append(f"sanity {expr!r}: unsupported expression ({cls or node.get('type')})")
+        return
+    if cls == "COLUMN_REF":
+        names = node.get("column_names") or []
+        if len(names) != 1:
+            errors.append(f"sanity {expr!r}: qualified reference {'.'.join(names)!r} not allowed")
+        elif names[0] not in fields:
+            errors.append(f"sanity {expr!r}: unknown field {names[0]!r}")
+        return
+    if cls == "CONSTANT":
+        if not _sanity_constant_ok(node):
+            errors.append(f"sanity {expr!r}: literal not allowed (only 0, 1, NULL, true, false)")
+        return
+    if cls == "CAST":
+        if not _sanity_bool_cast_ok(node):
+            errors.append(f"sanity {expr!r}: cast not allowed")
+        return
+    if cls == "FUNCTION":
+        descendants = _sanity_descendants(node)
+        if any(d.get("class") in ("CONSTANT", "CAST") for d in descendants):
+            errors.append(
+                f"sanity {expr!r}: literal inside a function or arithmetic expression "
+                "(e.g. 'x > 1+1+1') is not allowed"
+            )
+            return
+        if not any(d.get("class") == "COLUMN_REF" for d in descendants):
+            errors.append(f"sanity {expr!r}: function call must reference a result field")
+            return
+    for kid in _sanity_children(node):
+        _sanity_walk(kid, fields, errors, expr)
+
+
+def check_sanity_expr(expr: str, schema_fields: set[str]) -> list[str]:
+    """Check one `[observe].sanity` entry. Returns error messages; empty means acceptable.
+
+    The expression is parsed by DuckDB (not regex), so the check sees what will actually run.
+    Only boolean combinations of `schema_fields` columns and the literals 0, 1, NULL and
+    booleans pass. A literal inside arithmetic is rejected, so `x > 1+1+1` cannot hide a cutoff.
+    """
+    if not isinstance(expr, str) or not expr.strip():
+        return ["sanity expression is empty"]
+    try:
+        row = (
+            duckdb.connect()
+            .execute("SELECT json_serialize_sql(?)", ["SELECT (" + expr + ")"])
+            .fetchone()
+        )
+    except duckdb.Error as e:
+        return [f"sanity {expr!r}: does not parse ({e})"]
+    if row is None:
+        return [f"sanity {expr!r}: does not parse (no serialization returned)"]
+    parsed = json.loads(row[0])
+    if parsed.get("error"):
+        return [f"sanity {expr!r}: does not parse ({parsed.get('error_message', 'parse error')})"]
+    statements = parsed.get("statements", [])
+    if len(statements) != 1:
+        return [f"sanity {expr!r}: must be a single expression"]
+    node = statements[0].get("node", {})
+    # Fail closed on anything but a bare `SELECT (<expr>)`: no FROM, WHERE, set ops or extra items.
+    if (
+        node.get("type") != "SELECT_NODE"
+        or len(node.get("select_list", [])) != 1
+        or (node.get("from_table") or {}).get("type") != "EMPTY"
+        or node.get("where_clause") is not None
+    ):
+        return [f"sanity {expr!r}: must be a single expression"]
+    errors: list[str] = []
+    _sanity_walk(node["select_list"][0], schema_fields, errors, expr)
+    return errors
 
 
 def find_sidecar(script_path: Path) -> Path | None:
