@@ -405,7 +405,12 @@ def _add_run_to_campaign_impl(
                 sidecar_path_obj = Path(run_sidecar_path)
                 if sidecar_path_obj.exists():
                     sidecar = parse_sidecar(sidecar_path_obj)
-                    evalue = compute_evalue(sidecar, run_outcome or "unknown")
+                    # invalid_measurement is a non-verdict (spec §3.2): neutral, like observed.
+                    evalue = (
+                        1.0
+                        if run_outcome == "invalid_measurement"
+                        else compute_evalue(sidecar, run_outcome or "unknown")
+                    )
                     sidecar_stopping_threshold = sidecar.popper_stopping_threshold
             except SidecarError:
                 evalue = 1.0
@@ -418,7 +423,14 @@ def _add_run_to_campaign_impl(
         seq_position = pos_row[0] if pos_row else 1
 
         # Threshold lock logic (only locks for non-error/non-unknown outcomes)
-        is_neutral_outcome = run_outcome in ("error", "unknown", "observed", None, "")
+        is_neutral_outcome = run_outcome in (
+            "error",
+            "unknown",
+            "observed",
+            "invalid_measurement",
+            None,
+            "",
+        )
         if not is_neutral_outcome:
             if campaign_threshold is None and sidecar_stopping_threshold is not None:
                 # Lock threshold from this sidecar (AC-25: campaign.threshold_set)
@@ -582,11 +594,23 @@ def link_cool_runs_to_campaigns(
             if sidecar_path_obj is not None and sidecar_path_obj.exists():
                 try:
                     sidecar = parse_sidecar(sidecar_path_obj)
-                    evalue = compute_evalue(sidecar, run.outcome or "unknown")
+                    # invalid_measurement is a non-verdict (spec §3.2): neutral, like observed.
+                    evalue = (
+                        1.0
+                        if run.outcome == "invalid_measurement"
+                        else compute_evalue(sidecar, run.outcome or "unknown")
+                    )
                     sidecar_stopping_threshold = sidecar.popper_stopping_threshold
                 except SidecarError:
                     evalue = None
-            is_neutral_outcome = run.outcome in ("error", "unknown", "observed", None, "")
+            is_neutral_outcome = run.outcome in (
+                "error",
+                "unknown",
+                "observed",
+                "invalid_measurement",
+                None,
+                "",
+            )
             if (
                 not is_neutral_outcome
                 and pending_threshold is not None

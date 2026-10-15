@@ -391,3 +391,20 @@ def test_observed_outcome_is_evalue_neutral(tmp_path, warm_db):
         [campaign.id, run_id],
     ).fetchone()[0]
     assert abs(evalue - 1.0) < 1e-9
+
+
+def test_invalid_measurement_outcome_is_evalue_neutral(tmp_path, warm_db):
+    """`invalid_measurement` (failed sanity check) is a non-verdict: e-value 1.0, no threshold lock."""
+    sidecar_path = _write_popper_sidecar(tmp_path, null=0.30, alt=0.75, threshold=20.0)
+    campaign = create_campaign(warm_db, name="Invalid", project_slug="test", mode="sequential")
+
+    run_id = str(uuid.uuid4())
+    _insert_run(warm_db, run_id, "invalid_measurement", str(sidecar_path))
+
+    add_run_to_campaign(warm_db, campaign.id, run_id)
+
+    evalue = warm_db.execute(
+        "SELECT evalue FROM campaign_runs WHERE campaign_id = ? AND run_id = ?",
+        [campaign.id, run_id],
+    ).fetchone()[0]
+    assert abs(evalue - 1.0) < 1e-9

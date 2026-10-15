@@ -331,11 +331,30 @@ def index_db_path(catalog_dir: Path | None = None) -> Path:
     return (catalog_dir or default_catalog_dir()) / "index.db"
 
 
+def _add_missing_columns(con: duckdb.DuckDBPyConnection, table: str, ddl: str) -> None:
+    """Idempotently add every non-key column of ``ddl`` missing from an existing ``table``.
+
+    ``CREATE TABLE IF NOT EXISTS`` never alters a table that already exists, so an index.db
+    created before a column was added to the DDL would otherwise lack it. Column name and type
+    are parsed from the DDL lines; the PRIMARY KEY column is skipped.
+    """
+    for line in ddl.strip().splitlines():
+        stripped = line.strip().rstrip(",").strip()
+        if not stripped or stripped.startswith(_DDL_NON_COLUMN_PREFIXES):
+            continue
+        parts = stripped.split(None, 1)
+        if len(parts) != 2 or "PRIMARY KEY" in parts[1]:
+            continue
+        name, col_type = parts
+        con.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {name} {col_type}")
+
+
 def init_index_schema(con: duckdb.DuckDBPyConnection) -> None:
     con.execute(EVENTS_DDL)
     con.execute(QUARANTINE_DDL)
     con.execute(WATERMARKS_DDL)
     con.execute(RUNS_DDL)
+    _add_missing_columns(con, "runs", RUNS_DDL)
     con.execute(CAMPAIGNS_DDL)
     con.execute(CAMPAIGN_RUNS_DDL)
     con.execute(CAMPAIGN_EDGES_DDL)
