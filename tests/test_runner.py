@@ -83,15 +83,11 @@ def test_two_consecutive_runs_on_clean_tree_both_record_dirty_false(tmp_path: Pa
     subprocess.run(
         ["git", "config", "user.email", "t@t.com"], cwd=repo, check=True, capture_output=True
     )
-    subprocess.run(
-        ["git", "config", "user.name", "T"], cwd=repo, check=True, capture_output=True
-    )
+    subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True, capture_output=True)
 
     init_project(repo, slug="p", catalog_dir=catalog)
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "bth init"], cwd=repo, check=True, capture_output=True
-    )
+    subprocess.run(["git", "commit", "-m", "bth init"], cwd=repo, check=True, capture_output=True)
 
     init_catalog(catalog)
     for _ in range(2):
@@ -2457,3 +2453,20 @@ def test_resolved_outcome_and_no_sidecar_do_not_warn(tmp_catalog: Path, tmp_path
         == 0
     )
     assert "WARNING: outcome" not in capsys.readouterr().err
+
+
+def test_declared_unknown_outcome_does_not_warn(tmp_path: Path):
+    """A user-declared [outcomes.unknown] branch that matched is not 'unresolved'."""
+    from bathos.runner import _unresolved_outcome_warning
+    from bathos.sidecar import parse_sidecar
+
+    sc_path = tmp_path / "x.bth.toml"
+    sc_path.write_text(
+        _OUTCOME_SIDECAR + '[outcomes.unknown]\ncondition = "true"\ndecision = "look"\n'
+    )
+    sidecar = parse_sidecar(sc_path)
+    assert _unresolved_outcome_warning(sidecar, "unknown", "", "results_path", []) is None
+    # Control: an undeclared 'unknown' (no matching branch) still warns.
+    plain = tmp_path / "y.bth.toml"
+    plain.write_text(_OUTCOME_SIDECAR)
+    assert _unresolved_outcome_warning(parse_sidecar(plain), "unknown", "", "results_path", [])

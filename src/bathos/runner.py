@@ -371,6 +371,9 @@ def _unresolved_outcome_warning(
     """
     if not sidecar.outcomes or outcome not in ("unknown", "error"):
         return None
+    if outcome in sidecar.outcomes and not outcome_error_reason:
+        # The user declared this label ([outcomes.unknown] / [outcomes.error]) and it matched.
+        return None
     if outcome == "error":
         try:
             parsed = json.loads(outcome_error_reason)
