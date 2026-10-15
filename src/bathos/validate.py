@@ -9,6 +9,9 @@ from bathos.sidecar import (
     RESERVED_OUTCOME_LABELS,
     Sidecar,
     SidecarKind,
+    check_sanity_expr,
+    parse_source,
+    resolve_epistemic_class,
 )
 from bathos.telemetry import event
 
@@ -34,6 +37,8 @@ class ValidationError:
 class ValidationResult:
     ok: bool
     errors: list[ValidationError] = field(default_factory=list)
+    # Non-blocking findings (spec §3.2 migration posture): never affect `ok`.
+    warnings: list[ValidationError] = field(default_factory=list)
 
 
 def validate_popper_block(
@@ -483,7 +488,11 @@ def validate_claim_discriminability(
 
 
 def validate_sidecar(
-    sidecar: Sidecar, sidecar_path: Path | None = None, claim=None
+    sidecar: Sidecar,
+    sidecar_path: Path | None = None,
+    claim=None,
+    *,
+    stem_has_prior_runs: bool = False,
 ) -> ValidationResult:
     """Validate a parsed Sidecar for structural integrity and logical consistency.
 
@@ -575,8 +584,95 @@ def validate_sidecar(
                             )
                         )
 
-    # Must have outcomes
-    if not sidecar.outcomes:
+    # ── epistemic class (spec §3.1, §3.2, §3.5) ──────────────────────────────────
+    # Only experiment sidecars carry a class; every other kind resolves to "legacy" and keeps
+    # today's rules untouched. `warnings` is non-blocking and never changes `ok`.
+    warnings: list[ValidationError] = []
+    cls = None
+    if sidecar.kind == SidecarKind.EXPERIMENT:
+        cls = resolve_epistemic_class(sidecar, stem_has_prior_runs=stem_has_prior_runs)
+        if cls is None:
+            raw = sidecar.stage_name_raw
+            errors.append(
+                ValidationError(
+                    "stage_name",
+                    f"stage_name {raw!r} requires an [observe] block (exploration) / "
+                    "[calibrate] block (calibration); add it, or choose a confirmatory stage "
+                    "(validation/ablation/production)",
+                )
+            )
+            return ValidationResult(ok=False, errors=errors, warnings=warnings)
+
+    # Source placeholder guard applies to every class: an unfilled template is never a source.
+    for label, spec in sidecar.outcomes.items():
+        if "${" in (spec.source or ""):
+            errors.append(
+                ValidationError(
+                    f"outcomes.{label}.source",
+                    f"unfilled template placeholder in source {spec.source!r}",
+                )
+            )
+
+    # Exploratory and calibrating sidecars may omit [outcomes]; confirmatory/legacy may not.
+    outcomes_optional = cls in ("exploratory", "calibrating")
+
+    if cls == "exploratory":
+        if not (sidecar.question or sidecar.hypothesis):
+            errors.append(
+                ValidationError(
+                    "question",
+                    "exploratory sidecar needs a 'question' (or 'hypothesis') stating what you are looking at",
+                )
+            )
+        if sidecar.observe is None or not sidecar.observe.outputs:
+            errors.append(
+                ValidationError(
+                    "observe.outputs",
+                    "exploratory sidecar needs a non-empty [observe].outputs list",
+                )
+            )
+        else:
+            schema_fields = set(sidecar.result_schema.keys())
+            for expr in sidecar.observe.sanity:
+                for msg in check_sanity_expr(expr, schema_fields):
+                    errors.append(ValidationError("observe.sanity", f"{expr!r}: {msg}"))
+        # Held lightly (§3.2.1): every non-residual branch needs a source. A missing or malformed
+        # source is an error for a new stem and a warning for a stem that already has runs.
+        for label, spec in sidecar.outcomes.items():
+            if spec.is_residual or "${" in (spec.source or ""):
+                continue
+            if not spec.source:
+                problem = "missing 'source'"
+            elif parse_source(spec.source) is None:
+                problem = f"malformed source {spec.source!r}"
+            else:
+                continue
+            target = warnings if stem_has_prior_runs else errors
+            target.append(
+                ValidationError(
+                    f"outcomes.{label}.source",
+                    f"branch {label!r}: {problem}; use one of lit:<ref> | run:<id>:<field> | "
+                    "sesoi:<value>:<why> | provisional:<why> | card:<id>",
+                )
+            )
+    elif cls == "calibrating":
+        if sidecar.calibrate is None or not sidecar.calibrate.quantity.strip():
+            errors.append(
+                ValidationError(
+                    "calibrate.quantity",
+                    "calibration sidecar needs a non-empty [calibrate].quantity",
+                )
+            )
+        if not sidecar.result_schema:
+            errors.append(
+                ValidationError(
+                    "result_schema",
+                    "calibration sidecar needs a non-empty [result_schema] containing the calibrated field",
+                )
+            )
+
+    # Must have outcomes (confirmatory/legacy always; exploratory/calibrating only when present)
+    if not sidecar.outcomes and not outcomes_optional:
         errors.append(ValidationError("outcomes", "No [outcomes] section found"))
         if sidecar_path:
             event(
@@ -585,7 +681,7 @@ def validate_sidecar(
                 field="outcomes",
                 reason="No [outcomes] section found",
             )
-        return ValidationResult(ok=False, errors=errors)
+        return ValidationResult(ok=False, errors=errors, warnings=warnings)
 
     # Each branch must have condition, decision, reasoning
     for label, spec in sidecar.outcomes.items():
@@ -675,7 +771,7 @@ def validate_sidecar(
                     )
 
     # At least one result_schema field must appear in conditions
-    if sidecar.result_schema:
+    if sidecar.result_schema and sidecar.outcomes:
         schema_keys = set(sidecar.result_schema.keys())
         all_conditions = " ".join(s.condition for s in sidecar.outcomes.values() if s.condition)
         if not any(key in all_conditions for key in schema_keys):
@@ -694,7 +790,7 @@ def validate_sidecar(
 
     # Must have at least one is_residual=true fallback branch
     has_residual = any(s.is_residual for s in sidecar.outcomes.values())
-    if not has_residual:
+    if sidecar.outcomes and not has_residual:
         err = ValidationError(
             "outcomes",
             "No fallback branch with is_residual=true — add a catch-all outcome",
@@ -728,4 +824,4 @@ def validate_sidecar(
     if claim is not None:
         errors.extend(validate_claim_discriminability(sidecar, claim, sidecar_path))
 
-    return ValidationResult(ok=len(errors) == 0, errors=errors)
+    return ValidationResult(ok=len(errors) == 0, errors=errors, warnings=warnings)
