@@ -294,10 +294,11 @@ Resolved:
 4. **Resolved (user, 261015):** no "no concerns", ever. Appraisals carry structured for/against arguments with a basis ladder and a derived, non-compensatory use tier (§3.3.2).
 5. **Done:** notebook `1d786e78` was cross-checked, targeted at the appraisal payload. See `research/261015_claim-appraisal-nlm-research.md`.
 
-Still open, for adversarial review:
-6. **Rank-0 (`new_seeds`) holdouts.** Recommendation (pending user): allow them only as a **kill test**. A seed-only follow-up may record `refuted` or `survived-seed-check` on the *observation*, but it cannot promote the observation to a confirmatory claim; promotion requires rank ≥ 1. Rationale: new seeds can falsify cheaply but cannot independently confirm (same build, same initial-condition confound).
-7. Is the v1 category list right for your domains (MD, protein design, ML ports)? It is our synthesis, not a published instrument.
-8. Does the appraiser-independence condition for `threshold-source` cost too much when you work alone? A same-session agent appraisal can never self-license; a second appraisal by a different agent or a human is required.
+6. **Rank-0 (`new_seeds`) holdouts: kill test only (user, 261015).** A seed-only follow-up may append `refuted` or `survived-seed-check` to the *observation* (as a new, superseding row). It cannot promote the observation to a confirmatory claim; promotion requires holdout rank ≥ 1. `bth new-experiment --from-observation` with `[holdout] kind = "new_seeds"` scaffolds an exploratory-class kill test, not a validation-stage sidecar. Rationale: new seeds can falsify cheaply but cannot independently confirm, because they share the build and the initial-condition confound.
+7. **Category lists: ship v1 closed, grow via `other` + `other_label` (user, 261015).** A per-domain plugin interface for category lists is explicitly out of scope. It is filed as low-priority debt, to be revisited only once `other` is used stably and consistently (debt #2743).
+8. **Appraiser independence: a different agent session counts (user, 261015).** "Different" is defined mechanically: the second appraisal's `appraiser_session` (recorded automatically from the Claude session id or the MCP client id; a human's handle for humans) differs from the session that cites the value as a threshold source, and the second appraisal was written without the first in its context. The second condition is attested (`blind_to = ["<first appraisal id>"]`), not enforceable. Same model, different session, is fine.
+
+No open user questions remain. Next: adversarial review (spec-challenger, then spec-defender on its findings, sequentially).
 
 ## 9. Research grounding
 
