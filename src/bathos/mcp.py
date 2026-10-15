@@ -3829,8 +3829,16 @@ def new_experiment_tool(
     name: str,
     workspace_root: str | None = None,
     force: bool = False,
+    mode: str = "explore",
 ) -> dict:
     """Scaffold an experiment script and its pre-registration sidecar.
+
+    `mode="explore"` (default) writes an exploratory sidecar: a `question`, an
+    `[observe]` block naming the outputs you will look at, and no uncommented
+    `[outcomes]`. It validates clean as written. `mode="confirm"` writes a
+    confirmatory sidecar with `${THRESHOLD}` / `${SOURCE}` placeholders; those
+    show up in `sidecar_validation.needs_filling`, not as errors. Any other
+    mode is rejected.
 
     The scaffold's optional blocks ship commented out on purpose: an
     uncommented `[[review.literature]]` with empty fields is a validation
@@ -3840,8 +3848,6 @@ def new_experiment_tool(
     the caller can see immediately which placeholders still need filling.
     """
     from bathos.new_experiment import scaffold_experiment
-    from bathos.sidecar import parse_sidecar
-    from bathos.validate import validate_sidecar as validate_sidecar_core
 
     if workspace_root:
         ws = Path(workspace_root).expanduser().resolve()
@@ -3851,7 +3857,7 @@ def new_experiment_tool(
         ws = resolve_workspace().fs_root
 
     try:
-        scaffolded = scaffold_experiment(name, ws, force=force)
+        scaffolded = scaffold_experiment(name, ws, force=force, mode=mode)
     except FileExistsError as e:
         return {
             "ok": False,
@@ -3867,16 +3873,14 @@ def new_experiment_tool(
             "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.EXPORT_ERROR],
         }
 
-    validation: dict = {"checked": False}
-    try:
-        result = validate_sidecar_core(parse_sidecar(scaffolded.sidecar), scaffolded.sidecar)
-        validation = {
-            "checked": True,
-            "ok": result.ok,
-            "errors": [f"{e.field}: {e.message}" for e in result.errors],
-        }
-    except (ValueError, FileNotFoundError) as e:
-        validation = {"checked": True, "ok": False, "errors": [str(e)]}
+    # scaffold_experiment already validated the written sidecar: unfilled ${...} placeholders
+    # come back as needs_filling; anything else would have raised and removed the files.
+    validation = {
+        "checked": True,
+        "ok": not scaffolded.needs_filling,
+        "errors": [],
+        "needs_filling": scaffolded.needs_filling,
+    }
 
     return {
         "ok": True,
@@ -3884,13 +3888,20 @@ def new_experiment_tool(
         "error": None,
         "resolution_hint": None,
         "name": name,
+        "mode": scaffolded.mode,
+        "epistemic_class": scaffolded.epistemic_class,
         "script": str(scaffolded.script),
         "sidecar": str(scaffolded.sidecar),
         "name_warning": scaffolded.name_warning or None,
         "sidecar_validation": validation,
         "message": (
-            f"Scaffolded {scaffolded.script} and {scaffolded.sidecar}. Fill the REQUIRED "
-            "placeholders in the sidecar, then validate_sidecar before running."
+            f"Scaffolded {scaffolded.script} and {scaffolded.sidecar} ({scaffolded.mode} mode). "
+            + (
+                f"Fill the {len(scaffolded.needs_filling)} placeholder(s) in the sidecar, "
+                "then validate_sidecar before running."
+                if scaffolded.needs_filling
+                else "Sidecar validates as written."
+            )
         ),
     }
 
@@ -3902,9 +3913,14 @@ async def new_experiment(
     name: str,
     workspace_root: str | None = None,
     force: bool = False,
+    mode: str = "explore",
     token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
     """Scaffold an experiment script and its pre-registration sidecar.
+
+    `mode` is "explore" (default: exploratory sidecar with [observe], validates as written)
+    or "confirm" (confirmatory sidecar with ${THRESHOLD}/${SOURCE} placeholders listed in
+    sidecar_validation.needs_filling). Any other value is rejected.
 
     Closes a real parity gap: `bth new-experiment` existed only on the CLI, so an agent
     driving bathos through MCP had to hand-author `<stem>.bth.toml` from memory -- the
@@ -3912,7 +3928,7 @@ async def new_experiment(
 
     Requires token= matching the local ~/.bth/mcp_token (debt #619).
     """
-    return new_experiment_tool(name=name, workspace_root=workspace_root, force=force)
+    return new_experiment_tool(name=name, workspace_root=workspace_root, force=force, mode=mode)
 
 
 @cisternal.tool(registry="bathos-cli", name="validate_sidecar", cli_name="validate-sidecar")

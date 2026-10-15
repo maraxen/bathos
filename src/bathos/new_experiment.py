@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -12,6 +12,9 @@ _SCRIPT_TEMPLATE = """\
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
+
 import typer
 
 app = typer.Typer()
@@ -32,10 +35,11 @@ def main(
     # --- Output artifacts ---
     # bathos sets BTH_OUTPUT_DIR to a per-run directory (outputs/<run_id_short>/)
     # before launching this script. Any files written there are auto-registered.
-    #
-    #   import os; out_dir = os.environ["BTH_OUTPUT_DIR"]
-    #   Path(out_dir, "results.json").write_text(json.dumps(results))
-    #
+    # results.json is the file the exploratory sidecar declares under [observe].outputs.
+    out_dir = os.environ.get("BTH_OUTPUT_DIR")
+    if out_dir:
+        Path(out_dir, "results.json").write_text(json.dumps(results))
+
     # For files outside BTH_OUTPUT_DIR, pass --out to `bth run` explicitly:
     #   bth run scripts/experiments/{name}.py --out path/to/file.json
     # Query registered outputs with:
@@ -47,33 +51,86 @@ if __name__ == "__main__":
     app()
 """
 
-_SIDECAR_TEMPLATE = """\
+_SCAFFOLD_MODES = ("explore", "confirm")
+
+# Exploratory scaffold (the default). It validates clean as written: no uncommented [outcomes]
+# (optional for exploration, spec §3.2), and [observe].outputs names the file the script
+# template writes into BTH_OUTPUT_DIR.
+_EXPLORE_SIDECAR_TEMPLATE = """\
 [experiment]
-hypothesis = "TODO: state your hypothesis"
 stage_name = "exploration"
+question = "TODO: state what you want to see"
 novel = false
 
+[observe]
+# What you commit to producing and looking at BEFORE you look. This is not a test.
+outputs = ["results.json"]
+looking_for = "TODO: what you expect to notice, if anything (free text, optional)"
+# Instrument checks: DuckDB booleans over [result_schema] fields. They guard the measurement,
+# not the hypothesis. A false one marks the run invalid_measurement.
+sanity = []
+# planned_tests = 2   # optional: how many distinct non-residual branch conditions you plan
+
+[result_schema]
+metric = "float"
+n_samples = "int"
+
+# Exploration runs under heavy epistemic and operational uncertainty: you don't yet know what the
+# right quantity, scale or cutoff is, and the pipeline itself may still be wrong. Treat these labels
+# as sorting hints for what to look at next, not results. Expect to change them, and change them
+# freely; a changed exploratory outcome is not a deviation. Uncomment only if you want triage labels.
+# Every non-residual branch needs a `source`: lit:<ref> | run:<id>:<field> | sesoi:<value>:<why> |
+# provisional:<why> | card:<id>.
+#
+# [outcomes.pass]
+# condition = "metric < 5.0"
+# decision = "TODO: what to look at next if this holds"
+# reasoning = "TODO: why this label sorts runs usefully"
+# is_residual = false
+# source = "provisional:<why this cutoff>"
+#
+# [outcomes.fail]
+# condition = "metric >= 5.0"
+# decision = "TODO: what to look at next otherwise"
+# reasoning = "TODO: why the remainder is the other bin"
+# is_residual = true
+"""
+
+# Confirmatory scaffold (`--mode confirm`): today's template. Thresholds and sources are
+# ${PLACEHOLDER} tokens on purpose. validate_sidecar reports each unfilled source as a
+# "fill these in" item, and the scaffold is only complete once they are replaced.
+_CONFIRM_SIDECAR_TEMPLATE = """\
+[experiment]
+hypothesis = "TODO: state your hypothesis"
+stage_name = "validation"
+novel = false
+
+# ${THRESHOLD} and ${SOURCE} are placeholders: replace every one before running.
+# A source is lit:<ref> | run:<id>:<field> | sesoi:<value>:<why> | provisional:<why> | card:<id>.
+
 [outcomes.pass]
-condition = "metric < 5.0"
+condition = "metric < ${THRESHOLD}"
 decision = "TODO: next step if pass"
 reasoning = "metric below threshold indicates convergence"
 is_residual = false
+source = "${SOURCE}"
 # A STRICTER bar the pass must ALSO clear — not the negation of `condition`.
 # It fires (opens a post-mortem obligation) when it evaluates false on a run that
 # otherwise passed, i.e. the pass was too cheap to believe.
 # Reference a variable that `condition` does NOT use: tightening the same one is weak,
 # and negating `condition` outright is a contradiction that fires on every pass.
 # TODO: replace n_samples with your own control variable, and justify the floor.
-adversarial_check = "metric < 5.0 AND n_samples >= 100"
+adversarial_check = "metric < ${THRESHOLD} AND n_samples >= 100"
 
 [outcomes.marginal]
-condition = "metric >= 5.0 AND metric < 10.0"
+condition = "metric >= ${THRESHOLD} AND metric < 2 * ${THRESHOLD}"
 decision = "TODO: next step if marginal"
 reasoning = "metric in marginal range — tune parameters"
 is_residual = false
+source = "${SOURCE}"
 
 [outcomes.fail]
-condition = "metric >= 10.0"
+condition = "metric >= 2 * ${THRESHOLD}"
 decision = "TODO: next step if fail"
 reasoning = "metric above threshold indicates failure"
 is_residual = true
@@ -112,9 +169,37 @@ class ScaffoldResult:
     script: Path
     sidecar: Path
     name_warning: str = ""
+    mode: str = "explore"
+    #: Unfilled `${...}` placeholders in the sidecar (confirm mode). Expected, not a defect:
+    #: the author fills each one in before the sidecar can validate.
+    needs_filling: list[str] = field(default_factory=list)
+    #: Epistemic class resolved from the written sidecar (spec §3.1).
+    epistemic_class: str | None = None
 
 
-def scaffold_experiment(name: str, project_root: Path, force: bool = False) -> ScaffoldResult:
+def _is_placeholder_error(message: str, field_name: str) -> bool:
+    return "${" in message or "${" in field_name
+
+
+def scaffold_experiment(
+    name: str,
+    project_root: Path,
+    force: bool = False,
+    mode: str = "explore",
+) -> ScaffoldResult:
+    """Write `scripts/experiments/<name>.py` and its `<name>.bth.toml` sidecar.
+
+    ``mode="explore"`` (default) writes an exploratory sidecar: a ``question``, an ``[observe]``
+    block, and no uncommented ``[outcomes]``. It validates clean as written.
+
+    ``mode="confirm"`` writes a confirmatory sidecar with ``${THRESHOLD}``/``${SOURCE}``
+    placeholders. Their validation errors are reported in ``needs_filling``, not raised.
+    Any other validation error means the scaffold itself is broken, and the scaffold is
+    removed again and ``ValueError`` is raised.
+    """
+    if mode not in _SCAFFOLD_MODES:
+        raise ValueError(f"unknown mode {mode!r}: expected one of {', '.join(_SCAFFOLD_MODES)}")
+
     warning = ""
     if not _NAME_RE.match(name):
         warning = f"Name {name!r} should be lowercase with underscores (verb_noun style)."
@@ -131,11 +216,44 @@ def scaffold_experiment(name: str, project_root: Path, force: bool = False) -> S
             paths = ", ".join(str(p) for p in existing)
             raise FileExistsError(f"Already exists (use --force to overwrite): {paths}")
 
+    sidecar_template = _EXPLORE_SIDECAR_TEMPLATE if mode == "explore" else _CONFIRM_SIDECAR_TEMPLATE
+
     script.write_text(_SCRIPT_TEMPLATE.format(name=name))
     script.chmod(0o755)
-    sidecar.write_text(_SIDECAR_TEMPLATE + _REVIEW_STUB + _corpus_guidance())
+    sidecar.write_text(sidecar_template + _REVIEW_STUB + _corpus_guidance())
 
-    return ScaffoldResult(script=script, sidecar=sidecar, name_warning=warning)
+    from bathos.sidecar import parse_sidecar, resolve_epistemic_class
+    from bathos.validate import validate_sidecar
+
+    try:
+        sidecar_obj = parse_sidecar(sidecar)
+        result = validate_sidecar(sidecar_obj, sidecar_path=sidecar)
+    except Exception as exc:
+        script.unlink(missing_ok=True)
+        sidecar.unlink(missing_ok=True)
+        raise ValueError(f"scaffold for {name!r} does not parse: {exc}") from exc
+
+    needs_filling = [
+        f"{e.field}: {e.message}" for e in result.errors if _is_placeholder_error(e.message, e.field)
+    ]
+    broken = [
+        f"{e.field}: {e.message}"
+        for e in result.errors
+        if not _is_placeholder_error(e.message, e.field)
+    ]
+    if broken:
+        script.unlink(missing_ok=True)
+        sidecar.unlink(missing_ok=True)
+        raise ValueError(f"scaffold for {name!r} is broken: " + "; ".join(broken))
+
+    return ScaffoldResult(
+        script=script,
+        sidecar=sidecar,
+        name_warning=warning,
+        mode=mode,
+        needs_filling=needs_filling,
+        epistemic_class=resolve_epistemic_class(sidecar_obj, stem_has_prior_runs=False),
+    )
 
 
 def _corpus_guidance() -> str:

@@ -78,6 +78,12 @@ def _scaffold_experiment(tmp_path, _campaign_db) -> Path:
     return scaffold_experiment("measure_thing", tmp_path).sidecar
 
 
+def _scaffold_experiment_confirm(tmp_path, _campaign_db) -> Path:
+    from bathos.new_experiment import scaffold_experiment
+
+    return scaffold_experiment("measure_thing", tmp_path, mode="confirm").sidecar
+
+
 def _scaffold_postmortem(tmp_path, _campaign_db) -> Path:
     from bathos.postmortem import scaffold_postmortem_template
 
@@ -94,6 +100,11 @@ def _scaffold_attestation(tmp_path, _campaign_db) -> Path:
 SCAFFOLDS = [
     pytest.param("claim", _scaffold_claim, id="claim"),
     pytest.param("experiment_sidecar", _scaffold_experiment, id="experiment_sidecar"),
+    pytest.param(
+        "experiment_sidecar_confirm",
+        _scaffold_experiment_confirm,
+        id="experiment_sidecar_confirm",
+    ),
     pytest.param("postmortem", _scaffold_postmortem, id="postmortem"),
     pytest.param("attestation", _scaffold_attestation, id="attestation"),
 ]
@@ -128,7 +139,7 @@ def test_scaffold_output_round_trips_through_its_reader(kind, scaffold, tmp_path
         from bathos.claim import parse_claim
 
         parse_claim(path)
-    elif kind == "experiment_sidecar":
+    elif kind.startswith("experiment_sidecar"):
         from bathos.sidecar import parse_sidecar
 
         parse_sidecar(path)
