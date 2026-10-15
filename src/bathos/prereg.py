@@ -197,7 +197,6 @@ def check_sidecar_drift(script_path: Path, catalog_dir: Path, current_sidecar_sh
     if not current_sidecar_sha256:
         return False
 
-
     script_str = str(script_path.resolve())
     baseline: str | None = None
     try:
@@ -233,35 +232,91 @@ def check_sidecar_drift(script_path: Path, catalog_dir: Path, current_sidecar_sh
     return baseline != current_sidecar_sha256
 
 
-def _stem_has_prior_runs(script_path: Path, catalog_dir: Path | None) -> bool:
-    """Return True if any catalog run was recorded for `script_path` (spec §3.1 "stem has runs").
+def _sidecar_match_keys(path: Path) -> tuple[str, str]:
+    """Return ``(suffix, exact)`` identifying the sidecar that a script or sidecar path names.
 
-    Same lookup as `check_sidecar_drift`: warm DuckDB first (substring match on `command`),
-    then the cool-tier Parquet scan. Fail-safe: any lookup error returns False, which is the
-    stricter answer (a missing stem is treated as new, so migration warnings become errors).
+    The sidecar is ``<stem>.bth.toml`` beside the script. ``suffix`` is ``/<parent>/<stem>.bth.toml``
+    (matches a stored ``sidecar_path`` under any checkout root); ``exact`` is the resolved sidecar
+    path. A ``.bth.toml`` input contributes its stem directly, because ``Path.stem`` would give
+    ``foo.bth`` there.
+    """
+    resolved = path.resolve()
+    name = resolved.name
+    stem = name[: -len(".bth.toml")] if name.endswith(".bth.toml") else resolved.stem
+    sidecar_name = f"{stem}.bth.toml"
+    parent = resolved.parent
+    return f"/{parent.name}/{sidecar_name}", str(parent / sidecar_name).replace("\\", "/")
+
+
+# Only pre-v17 tracked runs count as "the stem has prior runs". Every post-v17 run carries an
+# epistemic_class, and `bth run --no-sidecar` runs have an empty sidecar_path, so a new stem
+# cannot manufacture history from a throwaway run.
+_PRIOR_RUN_PREDICATE_WARM = (
+    "epistemic_class IS NULL AND COALESCE(sidecar_path, '') <> '' AND "
+    "(ends_with(replace(sidecar_path, ?, '/'), ?) OR replace(sidecar_path, ?, '/') = ?)"
+)
+
+
+def _warm_stem_has_prior_runs(catalog_dir: Path, suffix: str, exact: str) -> bool | None:
+    """Warm-tier half of `_stem_has_prior_runs`. Returns None when the warm DB is not readable."""
+    if not catalog_readable(catalog_dir):
+        return None
+    con = connect_read(catalog_dir, read_only=True)
+    try:
+        rows = con.execute(
+            f"SELECT 1 FROM runs WHERE {_PRIOR_RUN_PREDICATE_WARM} LIMIT 1",
+            ["\\", suffix, "\\", exact],
+        ).fetchall()
+        return bool(rows)
+    finally:
+        # DuckDB connections have no `.closed` attribute, so close unconditionally.
+        con.close()
+
+
+def _cool_stem_has_prior_runs(catalog_dir: Path, suffix: str, exact: str) -> bool:
+    """Cool-tier fallback: the same predicate as `_PRIOR_RUN_PREDICATE_WARM`, in Python."""
+    from bathos.query import list_runs
+
+    for r in list_runs(catalog_dir, limit=100_000):
+        if r.epistemic_class is not None or not r.sidecar_path:
+            continue
+        sp = r.sidecar_path.replace("\\", "/")
+        if sp.endswith(suffix) or sp == exact:
+            return True
+    return False
+
+
+def _stem_has_prior_runs(path: Path, catalog_dir: Path | None) -> bool:
+    """Return True if a pre-v17 tracked run exists for this stem (spec §3.1 "stem has runs").
+
+    `path` is the script or its `.bth.toml` sidecar; both name the same sidecar. A run counts
+    when its stored ``sidecar_path`` ends with ``/<parent>/<stem>.bth.toml`` or equals the
+    resolved sidecar path. The match is on the sidecar, not the ``command`` argv, which stores
+    the path as typed (usually relative). Only pre-v17 runs count: ``epistemic_class IS NULL``
+    and a non-empty ``sidecar_path``. See `_PRIOR_RUN_PREDICATE_WARM`.
+
+    Warm DuckDB is queried first. The cool-tier scan runs only when warm is unreadable or found
+    nothing, or the warm query itself raised. If the cool scan also fails, this returns True
+    (legacy) and logs a warning. A lookup error therefore never turns a legacy sidecar into a
+    validation error.
     """
     if catalog_dir is None:
         return False
-    script_str = str(script_path.resolve())
+    suffix, exact = _sidecar_match_keys(path)
     try:
-        if catalog_readable(catalog_dir):
-            con = connect_read(catalog_dir, read_only=True)
-            try:
-                rows = con.execute(
-                    "SELECT 1 FROM runs WHERE command LIKE ? LIMIT 1",
-                    [f"%{script_str}%"],
-                ).fetchall()
-                if rows:
-                    return True
-            finally:
-                if not con.closed:
-                    con.close()
-        from bathos.query import list_runs
-
-        return any(script_str in (r.command or "") for r in list_runs(catalog_dir, limit=100_000))
+        warm = _warm_stem_has_prior_runs(catalog_dir, suffix, exact)
     except Exception as e:
-        logger.warning(f"Prior-run lookup failed for {script_path}: {e}")
-        return False
+        logger.warning(f"Prior-run warm lookup failed for {path}: {e}; trying cool tier")
+        warm = None
+    if warm:
+        return True
+    try:
+        return _cool_stem_has_prior_runs(catalog_dir, suffix, exact)
+    except Exception as e:
+        logger.warning(
+            f"Prior-run lookup failed for {path}: {e}; treating stem as having prior runs (legacy)"
+        )
+        return True
 
 
 def check_component_sidecar_drift(
@@ -283,7 +338,6 @@ def check_component_sidecar_drift(
     """
     if not current_component_sidecar_sha256 or not component_id:
         return False
-
 
     baseline: str | None = None
     try:
@@ -462,10 +516,12 @@ def gate_check(
         return GateResult(ok=False, mode=mode, bundle=bundle, error_payload=payload)
 
     sidecar = parse_sidecar(bundle.path)
+    # The prior-run lookup only decides exploration/calibration stages (see resolve_epistemic_class).
+    needs_lookup = sidecar.stage_name_raw in ("exploration", "calibration")
     validation = validate_sidecar(
         sidecar,
         sidecar_path=bundle.path,
-        stem_has_prior_runs=_stem_has_prior_runs(script_path, catalog_dir),
+        stem_has_prior_runs=needs_lookup and _stem_has_prior_runs(script_path, catalog_dir),
     )
     # Warnings (e.g. migration-window missing sources) are surfaced but never deny the gate.
     for w in validation.warnings:

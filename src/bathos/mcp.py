@@ -3976,7 +3976,19 @@ def validate_sidecar_tool(
         finally:
             db.close()
 
-    result = validate_sidecar_impl(sidecar, sidecar_path=sidecar_path, claim=claim)
+    # Same prior-run answer `bth run` gets (prereg.gate_check): looked up only for a stage that
+    # needs it, so legacy exploration/calibration sidecars validate as they do at run time.
+    from bathos.prereg import _stem_has_prior_runs
+
+    stem_has_runs = sidecar.stage_name_raw in ("exploration", "calibration") and (
+        _stem_has_prior_runs(sidecar_path, _get_catalog_dir(None))
+    )
+    result = validate_sidecar_impl(
+        sidecar,
+        sidecar_path=sidecar_path,
+        claim=claim,
+        stem_has_prior_runs=stem_has_runs,
+    )
 
     if result.errors:
         error_msgs = [f"{e.field}: {e.message}" for e in result.errors]
