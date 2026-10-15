@@ -500,3 +500,43 @@ def test_run_sql_still_executes_writes(warm_catalog: Path):
     run_sql("CREATE TABLE scratch_t (x INTEGER)", warm_catalog)
     run_sql("INSERT INTO scratch_t VALUES (7)", warm_catalog)
     assert run_sql("SELECT x FROM scratch_t", warm_catalog) == [(7,)]
+
+
+def test_warm_get_and_list_return_all_columns_past_index_36(tmp_catalog: Path):
+    """Regression: warm get_run/list_runs used to read the runs row positionally and stop
+    at column 36, so stage_name and every later column (incl. v17 epistemic_class,
+    tentative_outcome, agent_session) came back as defaults.
+    """
+    from bathos.compact import compact
+
+    init_catalog(tmp_catalog)
+    run = Run(
+        project_slug="testproj",
+        command="python explore.py",
+        argv=["python", "explore.py"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        status="completed",
+        exit_code=0,
+        stage_name="validation",
+        epistemic_class="exploratory",
+        tentative_outcome="pass",
+        agent_session="s1",
+    )
+    write_run(run, tmp_catalog)
+    assert compact(tmp_catalog).ingested == 1
+
+    got = get_run(run.id, tmp_catalog)
+    assert got is not None
+    assert got.stage_name == "validation"
+    assert got.epistemic_class == "exploratory"
+    assert got.tentative_outcome == "pass"
+    assert got.agent_session == "s1"
+
+    listed = [r for r in list_runs(tmp_catalog) if r.id == run.id]
+    assert len(listed) == 1
+    assert listed[0].stage_name == "validation"
+    assert listed[0].epistemic_class == "exploratory"
+    assert listed[0].tentative_outcome == "pass"
+    assert listed[0].agent_session == "s1"

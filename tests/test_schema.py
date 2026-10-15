@@ -43,7 +43,7 @@ def test_run_defaults():
     assert r.tags == []
     assert isinstance(r.timestamp, datetime)
     assert r.timestamp.tzinfo is not None
-    assert r.schema_version == "16"
+    assert r.schema_version == "17"
     assert r.slurm_job_id == ""
     assert r.metadata == "{}"
 
@@ -84,7 +84,7 @@ def test_run_roundtrip_via_arrow():
     assert r2.duration_s == 1.5
     assert r2.output_paths == ["/tmp/out.parquet"]
     assert r2.tags == ["tip3p"]
-    assert r2.schema_version == "16"
+    assert r2.schema_version == "17"
     assert r2.slurm_job_id == ""
 
 
@@ -100,7 +100,7 @@ def test_schema_version_in_cool_parquet():
     )
     table = r.to_arrow()
     assert "schema_version" in table.column_names
-    assert table.column("schema_version")[0].as_py() == "16"
+    assert table.column("schema_version")[0].as_py() == "17"
 
 
 def test_slurm_job_id_captured_from_env():
@@ -244,7 +244,7 @@ def test_schema_version_defaults_to_7():
         git_branch="main",
         git_dirty=False,
     )
-    assert r.schema_version == "16"
+    assert r.schema_version == "17"
 
 
 def test_sample_run_fixture_has_hostname(sample_run):
@@ -381,7 +381,7 @@ def test_schema_v5_fields_exist():
     from bathos.schema import CURRENT_SCHEMA_VERSION, Run
 
     # Current version should be "7" (v5 fields still present)
-    assert CURRENT_SCHEMA_VERSION == "16"
+    assert CURRENT_SCHEMA_VERSION == "17"
 
     # Run should have all 4 new fields
     r = Run(
@@ -455,7 +455,7 @@ def test_schema_version_is_7():
     """Verify CURRENT_SCHEMA_VERSION is now '11'."""
     from bathos.schema import CURRENT_SCHEMA_VERSION
 
-    assert CURRENT_SCHEMA_VERSION == "16"
+    assert CURRENT_SCHEMA_VERSION == "17"
 
 
 def test_run_stage_name_default_none():
@@ -907,6 +907,61 @@ def test_git_provenance_fields_in_cool_and_warm_schema():
             assert field_obj.nullable
 
 
+_V17_RUN_FIELDS = (
+    "epistemic_class",
+    "tentative_outcome",
+    "agent_session",
+)
+
+
+def test_run_v17_fields_default_none():
+    """Verify v17 exploratory-mode run columns default to None (spec 261015 §3.1)."""
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+    )
+    for field_name in _V17_RUN_FIELDS:
+        assert getattr(r, field_name) is None
+
+
+def test_v17_fields_in_cool_and_warm_schema():
+    """Verify the v17 run columns are nullable pa.string() in both COOL_SCHEMA and WARM_SCHEMA."""
+    for schema in (COOL_SCHEMA, WARM_SCHEMA):
+        for field_name in _V17_RUN_FIELDS:
+            assert field_name in schema.names
+            field_obj = next(f for f in schema if f.name == field_name)
+            assert field_obj.type == pa.string()
+            assert field_obj.nullable
+
+
+def test_v17_fields_round_trip_arrow():
+    """Verify the v17 run columns round-trip through Arrow serialization."""
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        epistemic_class="exploratory",
+        tentative_outcome="pass",
+        agent_session="s1",
+    )
+    table = r.to_arrow()
+    assert table.column("epistemic_class")[0].as_py() == "exploratory"
+    assert table.column("tentative_outcome")[0].as_py() == "pass"
+    assert table.column("agent_session")[0].as_py() == "s1"
+
+    r2 = Run.from_arrow_row(table.to_pydict(), 0)
+    assert r2.epistemic_class == "exploratory"
+    assert r2.tentative_outcome == "pass"
+    assert r2.agent_session == "s1"
+
+
 def test_git_provenance_fields_round_trip_arrow():
     """Verify git_dirty_content_id/git_provenance_source round-trip through Arrow serialization."""
     r = Run(
@@ -1026,7 +1081,7 @@ def test_migration_v15_to_v16_adds_metadata_output_metadata(sample_run: Run):
     v15_run = dataclasses.replace(sample_run, schema_version="15")
     result = _apply_migrations(v15_run)
 
-    assert result.schema_version == "16"
+    assert result.schema_version == "17"
     assert result.metadata == "{}"
     assert result.output_metadata == "[]"
 
@@ -1040,6 +1095,6 @@ def test_migration_chain_v0_to_v16_includes_metadata_fields(sample_run: Run):
     v0_run = dataclasses.replace(sample_run, schema_version="0")
     result = _apply_migrations(v0_run)
 
-    assert result.schema_version == "16"
+    assert result.schema_version == "17"
     assert result.metadata == "{}"
     assert result.output_metadata == "[]"

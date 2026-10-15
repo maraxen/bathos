@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import fnmatch
 import json
 import logging
@@ -72,101 +73,82 @@ def _filter_runs_by_output_file(
     return filtered
 
 
-def _row_to_run(row: tuple) -> Run | None:
-    """Convert a DuckDB row (from runs table) to a Run object.
+# Per-field fallbacks the legacy warm reader has always applied to a missing or falsy
+# value. Kept verbatim from the old positional `_row_to_run` so the first 37 columns
+# (`_WARM_LEGACY_COLUMNS`) read exactly as before.
+_WARM_FALSY_DEFAULTS: dict[str, object] = {
+    "argv": [],
+    "output_paths": [],
+    "tags": [],
+    "slurm_job_id": "",
+    "hostname": "",
+    "metadata": "{}",
+    "output_metadata": "[]",
+    "outcome": "",
+    "sidecar_sha256": "",
+    "sidecar_path": "",
+    "parent_run_id": "",
+    "agent_mode": "",
+    "sidecar_mode": "",
+    "skill_sha256": "",
+    "campaign_id": "",
+    "script_sha256": "",
+    "postmortem_status": "unassigned",
+    "postmortem_override": "none",
+    "postmortem_verdict_override": "none",
+    "postmortem_author": "",
+    "postmortem_path": "",
+    "postmortem_hypothesis_status": "unassigned",
+    "postmortem_summary": "",
+    "postmortem_asset_links": "{}",
+}
+_WARM_NONE_FALSE = frozenset({"outcome_is_residual", "postmortem_has_anomalies"})
+_WARM_LEGACY_COLUMNS = frozenset(
+    {
+        "id", "project_slug", "command", "argv", "git_hash", "git_branch", "git_dirty",
+        "timestamp", "duration_s", "exit_code", "status", "output_paths", "tags",
+        "schema_version", "slurm_job_id", "hostname", "metadata", "outcome",
+        "output_metadata", "sidecar_sha256", "sidecar_path", "parent_run_id", "agent_mode",
+        "sidecar_mode", "outcome_is_residual", "skill_sha256", "campaign_id",
+        "script_sha256", "postmortem_status", "postmortem_override",
+        "postmortem_verdict_override", "postmortem_author", "postmortem_path",
+        "postmortem_hypothesis_status", "postmortem_has_anomalies", "postmortem_summary",
+        "postmortem_asset_links",
+    }
+)  # fmt: skip
 
-    DuckDB returns rows as tuples; we need to map back to Run dataclass.
-    Supports dynamic schema lengths by providing fallback defaults.
+
+def _row_to_run(row: tuple, columns: list[str]) -> Run | None:
+    """Convert a warm `runs` row to a Run, keyed by column NAME.
+
+    `columns` is the cursor's `description` names for that row. The previous positional
+    version read `row[0..36]` and silently dropped every later column (stage_name,
+    claim_*, seed, ..., git_provenance_source), so warm get_run/list_runs lost them.
+
+    Fields are looked up by name from the dataclass. Columns absent from the table are
+    skipped (the dataclass default applies). A None in a legacy column passes through
+    unchanged, as before; a None in any later column takes the dataclass default.
     """
+    from dataclasses import fields
+
     try:
-        # Extract fields sequentially, using defaults if row has fewer elements
-        id_ = row[0]
-        project_slug = row[1]
-        command = row[2]
-        argv = row[3]
-        git_hash = row[4]
-        git_branch = row[5]
-        git_dirty = row[6]
-        timestamp = row[7]
-        duration_s = row[8]
-        exit_code = row[9]
-        status = row[10]
-        output_paths = row[11]
-        tags = row[12]
-        schema_version = row[13]
-
-        slurm_job_id = row[14] if len(row) > 14 else ""
-        hostname = row[15] if len(row) > 15 else ""
-        metadata = row[16] if len(row) > 16 else "{}"
-        outcome = row[17] if len(row) > 17 else ""
-        output_metadata = row[18] if len(row) > 18 else "[]"
-
-        sidecar_sha256 = row[19] if len(row) > 19 else ""
-        sidecar_path = row[20] if len(row) > 20 else ""
-        parent_run_id = row[21] if len(row) > 21 else ""
-        agent_mode = row[22] if len(row) > 22 else ""
-        sidecar_mode = row[23] if len(row) > 23 else ""
-        outcome_is_residual = row[24] if len(row) > 24 else False
-        skill_sha256 = row[25] if len(row) > 25 else ""
-        campaign_id = row[26] if len(row) > 26 else ""
-
-        script_sha256 = row[27] if len(row) > 27 else ""
-        postmortem_status = row[28] if len(row) > 28 else "unassigned"
-        postmortem_override = row[29] if len(row) > 29 else "none"
-        postmortem_verdict_override = row[30] if len(row) > 30 else "none"
-        postmortem_author = row[31] if len(row) > 31 else ""
-        postmortem_path = row[32] if len(row) > 32 else ""
-        postmortem_hypothesis_status = row[33] if len(row) > 33 else "unassigned"
-        postmortem_has_anomalies = row[34] if len(row) > 34 else False
-        postmortem_summary = row[35] if len(row) > 35 else ""
-        postmortem_asset_links = row[36] if len(row) > 36 else "{}"
-
-        return Run(
-            id=id_,
-            project_slug=project_slug,
-            command=command,
-            argv=argv if argv else [],
-            git_hash=git_hash,
-            git_branch=git_branch,
-            git_dirty=git_dirty,
-            timestamp=timestamp,
-            duration_s=duration_s,
-            exit_code=exit_code,
-            status=status,
-            output_paths=output_paths if output_paths else [],
-            tags=tags if tags else [],
-            schema_version=schema_version,
-            slurm_job_id=slurm_job_id if slurm_job_id else "",
-            hostname=hostname if hostname else "",
-            metadata=metadata if metadata else "{}",
-            output_metadata=output_metadata if output_metadata else "[]",
-            outcome=outcome if outcome else "",
-            sidecar_sha256=sidecar_sha256 if sidecar_sha256 else "",
-            sidecar_path=sidecar_path if sidecar_path else "",
-            parent_run_id=parent_run_id if parent_run_id else "",
-            agent_mode=agent_mode if agent_mode else "",
-            sidecar_mode=sidecar_mode if sidecar_mode else "",
-            outcome_is_residual=outcome_is_residual if outcome_is_residual is not None else False,
-            skill_sha256=skill_sha256 if skill_sha256 else "",
-            campaign_id=campaign_id if campaign_id else "",
-            script_sha256=script_sha256 if script_sha256 else "",
-            postmortem_status=postmortem_status if postmortem_status else "unassigned",
-            postmortem_override=postmortem_override if postmortem_override else "none",
-            postmortem_verdict_override=postmortem_verdict_override
-            if postmortem_verdict_override
-            else "none",
-            postmortem_author=postmortem_author if postmortem_author else "",
-            postmortem_path=postmortem_path if postmortem_path else "",
-            postmortem_hypothesis_status=postmortem_hypothesis_status
-            if postmortem_hypothesis_status
-            else "unassigned",
-            postmortem_has_anomalies=postmortem_has_anomalies
-            if postmortem_has_anomalies is not None
-            else False,
-            postmortem_summary=postmortem_summary if postmortem_summary else "",
-            postmortem_asset_links=postmortem_asset_links if postmortem_asset_links else "{}",
-        )
-    except (ValueError, TypeError, IndexError) as e:
+        values = dict(zip(columns, row, strict=False))
+        kwargs: dict = {}
+        for f in fields(Run):
+            if f.name not in values:
+                continue
+            value = values[f.name]
+            if f.name in _WARM_FALSY_DEFAULTS:
+                if not value:
+                    value = copy.copy(_WARM_FALSY_DEFAULTS[f.name])
+            elif f.name in _WARM_NONE_FALSE:
+                if value is None:
+                    value = False
+            elif value is None and f.name not in _WARM_LEGACY_COLUMNS:
+                continue
+            kwargs[f.name] = value
+        return Run(**kwargs)
+    except (ValueError, TypeError, IndexError, KeyError) as e:
         raise RuntimeError(f"Failed to convert DuckDB row to Run: {e}") from e
 
 
@@ -315,12 +297,14 @@ def _warm_list_runs(
 
     query += f" LIMIT {limit}"
 
-    rows = con.execute(query, params).fetchall()
+    cur = con.execute(query, params)
+    rows = cur.fetchall()
+    columns = [d[0] for d in cur.description]
 
     # Convert rows to Run objects
     runs = []
     for row in rows:
-        run = _row_to_run(row)
+        run = _row_to_run(row, columns)
         if run:
             runs.append(run)
 
@@ -439,7 +423,9 @@ def _warm_get_run(run_id: str, catalog_dir: Path, *, allow_cool_fallback: bool =
     con = connect_read(catalog_dir)
     con.execute("SET TimeZone='UTC'")
 
-    rows = con.execute("SELECT * FROM runs WHERE id = ?", [run_id]).fetchall()
+    cur = con.execute("SELECT * FROM runs WHERE id = ?", [run_id])
+    rows = cur.fetchall()
+    columns = [d[0] for d in cur.description]
 
     if not rows:
         con.close()
@@ -451,7 +437,7 @@ def _warm_get_run(run_id: str, catalog_dir: Path, *, allow_cool_fallback: bool =
             return _cool_fallback_get_run(run_id, catalog_dir)
         return None
 
-    run = _row_to_run(rows[0])
+    run = _row_to_run(rows[0], columns)
     con.close()
 
     # Emit telemetry event
@@ -599,12 +585,14 @@ def _warm_find_runs(
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
 
-    rows = con.execute(query, params).fetchall()
+    cur = con.execute(query, params)
+    rows = cur.fetchall()
+    columns = [d[0] for d in cur.description]
 
     # For tags filtering, need to check each run (tags are stored as arrays)
     runs = []
     for row in rows:
-        run = _row_to_run(row)
+        run = _row_to_run(row, columns)
         if run:
             if tags and not any(t in run.tags for t in tags):
                 continue
@@ -717,7 +705,7 @@ def lineage(run_id: str, catalog_dir: Path, depth: int = 50) -> list[Run]:
         # COALESCE handles both NULL and empty string for parent_run_id
         # a.depth < ? bounds the walk: it is both the caller's requested limit and
         # the cycle guard. Bound as a parameter, never interpolated.
-        rows = db.execute(
+        cur = db.execute(
             """
             WITH RECURSIVE ancestors AS (
                 SELECT *, 0 AS depth FROM runs WHERE id = ?
@@ -729,8 +717,11 @@ def lineage(run_id: str, catalog_dir: Path, depth: int = 50) -> list[Run]:
             SELECT * EXCLUDE (depth) FROM ancestors ORDER BY timestamp
         """,
             [run_id, depth],
-        ).fetchall()
-        return [_row_to_run(row) for row in rows if _row_to_run(row) is not None]
+        )
+        rows = cur.fetchall()
+        columns = [d[0] for d in cur.description]
+        runs = [_row_to_run(row, columns) for row in rows]
+        return [run for run in runs if run is not None]
     except Exception as e:
         raise CatalogError(f"Failed to query lineage for run {run_id}: {e}") from e
     finally:
