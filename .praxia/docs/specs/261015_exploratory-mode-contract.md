@@ -133,9 +133,93 @@ The failure mode to design against is an agent treating every paper as true, nev
   - `locator`: page, figure or line. Required for run-less observations.
   - `quote`: optional verbatim text.
   - `value_provenance ∈ {published, figure-read, derived, agent-summary}`. This is debt #2345's field. `agent-summary` covers NotebookLM/LLM-relayed content, which is known to splice quotes (research caveats; #2345).
-  - `verification ∈ {unverified, quote-checked, primary-read, independently-reproduced}`, **default `unverified`**. It is derived where possible (`quote-checked` only when #2345's checker matches quote ↔ file:line), and otherwise attested with who/when.
-- **A paper is one draw, too.** A published effect size has the same winner's-curse inflation as an exploratory one (research Q3). So a literature observation is a *hypothesis source*, not a *threshold source*. `source = "lit:<ref>"` on a confirmatory cutoff requires `verification ≥ primary-read` and `value_provenance ∈ {published, derived}`; `figure-read` and `agent-summary` values are refused as threshold sources.
-- **Contradiction is first-class.** `disposition = contradicts` and a free `concerns` field (e.g. "n=3, no seeds reported", "effect only in one cell line") are encouraged. The `using-bathos` skill instructs agents to state at least one reason the cited result might not hold, or to write `concerns = "none found"` explicitly, and sprint-audit tracks the rate of observations with an empty `concerns`.
+  - an `appraisal` (§3.3.2) with `read_depth`, arguments for/against on a basis ladder, and claimed-vs-supported scope. This replaces the earlier single `verification` field. Separately, `quote_checked = true` is set only by #2345's checker, when the quote matches the extracted text at its locator.
+- **A paper is one draw, too.** A published effect size has the same winner's-curse inflation as an exploratory one (research Q3). So a literature observation is a *hypothesis source* by default. `source = "lit:<ref>"` on a confirmatory cutoff requires derived `use_tier = threshold-source` (§3.3.2), which `figure-read` and `agent-summary` values can never reach.
+- **Contradiction is first-class.** `disposition = contradicts` is encouraged. Concerns are not a free-text field with a "none found" escape. Every cited claim carries a structured **appraisal** with arguments *for* and *against* trusting it (§3.3.2).
+#### 3.3.2 The appraisal payload (decision, user 261015: never "no concerns"; split into arguments for and against)
+
+Grounding: `research/261015_claim-appraisal-nlm-research.md` (notebook `1d786e78`). It supplies four design rules, each NotebookLM-reported and not yet read in primary sources:
+- (R1) **Keep dimensions separate, never one score.** "Never emit a monolithic 'this looks right' or 'LGTM' judgment"; "aggregate scores alone cannot characterize the reliability of a comparison".
+- (R2) **Non-compensatory.** "when any of these elementary tests fails, the comparison is fragile": one decisive objection is not outweighed by many positives.
+- (R3) **Disclosed ≠ checked.** "Artifact evaluation checks whether code runs, not whether it produced the reported numbers"; a checklist "verifies intention, not execution".
+- (R4) **No self-grading**, and record the theory-load of interpretations.
+
+Not in that corpus: GRADE domains, Cochrane RoB, Toulmin, and adversarial or red-team appraisal as a role. The categories below are therefore our synthesis of the ML-rigor taxonomies (Pineau, Lipton & Steinhardt, Vaccaro, Oh, Bouthillier) plus MD-specific items. They are not a published instrument.
+
+**Where it lives:** one schema in `sidecar.py`, shared by `[[review.literature]]` entries (an `appraisal` sub-table) and by run-less observations in the ledger (§3.3.1). TOML in sidecars; the same object as JSON in the ledger and the MCP `observe` payload.
+
+```toml
+[[review.literature]]
+ref = "doi:10.1101/2024.01.02.123456"
+locator = "Fig 3B; Results ¶4"
+claim = "H71–E40 MI is elevated only in the holo state"          # what the SOURCE asserts, in its words
+quote = "…coupling between H71 and E40 emerges exclusively upon ligand binding…"   # optional
+value_provenance = "figure-read"          # published | figure-read | derived | agent-summary
+disposition = "supports"                  # supports | contradicts | scope-differs   (existing)
+bears_on = "H1"                           # existing
+
+[review.literature.appraisal]
+appraiser = "agent:claude-opus-5-5"       # agent:<model> | human:<handle>
+appraised = "2026-10-15"
+read_depth = "methods"                    # abstract | full-text | methods | supplement | data-or-code
+uses_as = "hypothesis-source"             # hypothesis-source | threshold-source | contrast-context
+# R6/P6: what the source CLAIMS vs what its evidence SUPPORTS. Required, and never left equal by default.
+scope_claimed = "PDZ3 allostery generally"
+scope_supported = "PDZ3 (1BE9), one ligand, 3×100 ns, one force field"
+# R4: where the appraiser had to interpret (figure reading, ambiguous methods). Required if value_provenance = figure-read.
+interpretation = "Read 'exclusively' off a heatmap with no colour-bar values; apo cell is pale, not zero."
+
+[[review.literature.appraisal.for]]
+id = "f1"
+category = "multi-seed-uncertainty"
+statement = "Three independent replicas per state, with bootstrap CIs shown in Fig S4."
+basis = "inspected"                       # asserted | inspected | executed | reproduced | independent
+evidence = "SI p.6, Fig S4"
+
+[[review.literature.appraisal.against]]
+id = "a1"
+category = "unconverged-sampling"
+statement = "100 ns per replica; the paper's own block analysis (Fig S5) has not plateaued."
+basis = "inspected"
+severity = "major"                        # decisive | major | minor
+evidence = "SI Fig S5"
+
+[[review.literature.appraisal.against]]
+id = "a2"
+category = "single-source"
+statement = "No independent replication found; the only other report is from the same group."
+basis = "inspected"
+severity = "minor"
+evidence = "search: 'PDZ3 H71 holo coupling', 2026-10-15, 0 independent hits"
+addressed_by = []                          # ids of `for` entries that rebut this, each with its own basis
+```
+
+**Field rules (validator, enforced):**
+1. `for` and `against` must **both be non-empty**. There is no sentinel: a statement matching `none|n/?a|no (concerns|issues)|nothing` (case-insensitive) or shorter than 30 characters is rejected. If the appraiser can't find a specific objection, they must still name the strongest *generic* one from the closed list (e.g. `single-source`, `not-reproduced`) with `basis = "asserted"`. Lack of scrutiny then shows up as weak basis instead of reading as clean.
+2. **Basis ladder (R3).** `asserted` means the source or the appraiser says so and nothing was checked. `inspected` means the appraiser read the relevant methods, data or code. `executed` means they ran it. `reproduced` means they obtained the reported number. `independent` means a third-party reproduction, which is itself a citation that needs its own appraisal. A `for` entry of category `artifact-available` with basis `asserted` is legal but contributes nothing to the use tier.
+3. **No combined score field exists (R1).** There is deliberately no `confidence` and no `trust = 0.7`. The only aggregate is the derived `use_tier` below, and it is rule-based and non-compensatory.
+4. `severity` is required on `against`, and absent on `for`, since strength there is carried by `basis`. An `against` entry counts as addressed only if every id in `addressed_by` points to a `for` entry whose basis is ≥ `inspected`.
+5. `scope_supported` must not be byte-equal to `scope_claimed` unless `read_depth ≥ methods`. Otherwise "it says what it says" wins by default.
+6. Closed category lists; `other` is allowed with a mandatory `other_label`. Recurring `other_label`s are evidence for extending the list, the same posture as HYG-002 for stage names.
+
+**Category lists (v1):**
+- `against`: `small-n`, `sampling-variance` (seeds/replicas), `unconverged-sampling`, `no-uncertainty-reported`, `weak-or-untuned-baseline`, `missing-control`, `missing-ablation`, `leakage-or-circularity`, `researcher-degrees-of-freedom` (selective reporting, post-hoc analysis choices, HARKing), `measurement-validity` (metric doesn't measure the claim), `outlier-dominance` (a few cases carry the result), `scope-overreach` (the claim-evidence gap), `not-reproduced`, `artifact-unavailable`, `single-source`, `conflict-of-interest`, `other`.
+- `for`: `preregistered`, `independent-replication`, `multi-seed-uncertainty`, `effect-size-uncertainty`, `controls-present` (positive/negative/placebo), `external-validation` (new system, data or conditions), `artifact-available`, `convergent-methods` (different method, same answer), `mechanistic-consistency`, `other`.
+- What was checked lives in `basis`, not in the category. So there is no separate "code-ran" category: it is `artifact-available` + `basis = "executed"`.
+
+**Derived `use_tier`** (computed, never declared, same posture as the review tier in `sidecar.py:129`):
+
+| tier | requires |
+|---|---|
+| `refuted-for-use` | any unaddressed `against` with `severity = decisive` |
+| `contested` | any unaddressed `against` with `severity = major` |
+| `hypothesis-source` | otherwise. This is the default ceiling for any appraisal. |
+| `threshold-source` | `hypothesis-source`, plus `read_depth ≥ methods`, plus at least one `for` with basis ≥ `inspected`, plus `value_provenance ∈ {published, derived}`, plus an **appraiser independence** condition (R4): the appraiser is not the same agent session that is citing the value as a threshold source, *or* a second appraisal by a different appraiser exists with use tier ≥ `hypothesis-source` |
+
+`uses_as` states what the author *wants*. `use_tier` states what the appraisal *licenses*. Validation fails when `uses_as` exceeds `use_tier`, e.g. `uses_as = "threshold-source"` with tier `contested`.
+
+**Skill guidance (not enforceable, stated anyway):** write the `against` entries *before* the `for` entries. This is the blind-then-reveal idea from R4's corpus, applied against sycophantic, confirmation-seeking appraisal, the failure mode the user named.
+
 - **Promotion from a run-less observation** (§3.4) works the same way. The holdout is trivially "not the paper's data", but the scaffold additionally asks whether the bathos test measures *the same quantity* the paper did. This hooks into estimand discipline (#2677).
 
 ### 3.4 Promotion: observation → confirmatory test
@@ -207,10 +291,13 @@ Resolved:
 2. **Run-less observations: allowed**, through the existing citation surface and skeptical by default. Accepting claims blindly is a known agent failure mode. See §3.3.1.
 3. **`[holdout]` as attestation: acceptable** (no strong preference). Attested holdouts are labelled `holdout_verified = false` and upgraded when #2686 lands. See §3.4.
 
+4. **Resolved (user, 261015):** no "no concerns", ever. Appraisals carry structured for/against arguments with a basis ladder and a derived, non-compensatory use tier (§3.3.2).
+5. **Done:** notebook `1d786e78` was cross-checked, targeted at the appraisal payload. See `research/261015_claim-appraisal-nlm-research.md`.
+
 Still open, for adversarial review:
-4. Is a rank-0 (`new_seeds`) holdout ever acceptable for promotion, or should it be refused outright?
-5. Should `concerns = "none found"` on a literature observation require `verification ≥ primary-read`, so you can't declare "no concerns" about a paper you only read a summary of?
-6. Run cross-check: notebook `1d786e78` (Scientific Rigor and Robustness in AI Research) was not queried. Query it before adversarial review, or skip it?
+6. **Rank-0 (`new_seeds`) holdouts.** Recommendation (pending user): allow them only as a **kill test**. A seed-only follow-up may record `refuted` or `survived-seed-check` on the *observation*, but it cannot promote the observation to a confirmatory claim; promotion requires rank ≥ 1. Rationale: new seeds can falsify cheaply but cannot independently confirm (same build, same initial-condition confound).
+7. Is the v1 category list right for your domains (MD, protein design, ML ports)? It is our synthesis, not a published instrument.
+8. Does the appraiser-independence condition for `threshold-source` cost too much when you work alone? A same-session agent appraisal can never self-license; a second appraisal by a different agent or a human is required.
 
 ## 9. Research grounding
 
