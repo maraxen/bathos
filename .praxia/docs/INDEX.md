@@ -50,6 +50,7 @@
 ## Actuation Surfaces
 
 ## Audits
+- [261015_exploratory-mode-contract-adversarial-review](audits/261015_exploratory-mode-contract-adversarial-review.md) — Spec-challenger findings C1-C25 and spec-defender rulings for specs/261015_exploratory-mode-contract.md, run sequentially
 
 ## Research
 - [261015_claim-appraisal-nlm-research](research/261015_claim-appraisal-nlm-research.md) — NotebookLM (Scientific Rigor notebook 1d786e78) answers on appraisal frameworks, doubt/trust taxonomies, grading and appraiser independence, feeding the spec's appraisal payload
