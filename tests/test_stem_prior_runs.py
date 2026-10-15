@@ -38,7 +38,12 @@ top_hub_score = "float"
 """
 
 
-def _run(command: str, sidecar_path: str = "", epistemic_class: str | None = None) -> Run:
+def _run(
+    command: str,
+    sidecar_path: str = "",
+    epistemic_class: str | None = None,
+    sidecar_mode: str = "",
+) -> Run:
     return Run(
         project_slug="proj",
         command=command,
@@ -51,6 +56,7 @@ def _run(command: str, sidecar_path: str = "", epistemic_class: str | None = Non
         exit_code=0,
         sidecar_path=sidecar_path,
         epistemic_class=epistemic_class,
+        sidecar_mode=sidecar_mode,
     )
 
 
@@ -226,3 +232,41 @@ def test_validate_sidecar_tool_rejects_legacy_shape_on_new_stem(tmp_path, monkey
     result = validate_sidecar_tool(path=str(sidecar))
     assert result["validation_ok"] is False
     assert any(e.startswith("stage_name") for e in result["errors"])
+
+
+def test_bypassed_no_sidecar_row_does_not_count(tmp_path):
+    """`bth run --no-sidecar` stores the skipped sidecar_path with sidecar_mode='bypassed' and no
+    class; such a row must not unlock the legacy path (warm and cool)."""
+    row = _run(
+        "python scripts/experiments/old_style.py",
+        sidecar_path=OLD_SIDECAR,
+        sidecar_mode="bypassed",
+    )
+    script = _script(tmp_path / "checkout", "experiments", "old_style")
+    assert _stem_has_prior_runs(script, _catalog(tmp_path / "w", [row])) is False
+    assert _stem_has_prior_runs(script, _catalog(tmp_path / "c", [row], compacted=False)) is False
+
+
+def test_no_sidecar_run_through_the_runner_does_not_unlock_legacy(tmp_path, tmp_catalog):
+    """End to end: the row is produced by run_script(no_sidecar=True), not hand-built."""
+    import sys
+
+    from bathos.runner import run_script
+
+    init_catalog(tmp_catalog)
+    exp = tmp_path / "scripts" / "experiments"
+    exp.mkdir(parents=True)
+    script = exp / "old_style.py"
+    script.write_text("print('{}')\n")
+    (exp / "old_style.bth.toml").write_text(textwrap.dedent(LEGACY_EXPLORATION))
+    run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="proj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+        no_sidecar=True,
+    )
+    compact(tmp_catalog)
+    assert _stem_has_prior_runs(script, tmp_catalog) is False

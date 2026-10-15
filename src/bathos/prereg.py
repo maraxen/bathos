@@ -249,10 +249,12 @@ def _sidecar_match_keys(path: Path) -> tuple[str, str]:
 
 
 # Only pre-v17 tracked runs count as "the stem has prior runs". Every post-v17 run carries an
-# epistemic_class, and `bth run --no-sidecar` runs have an empty sidecar_path, so a new stem
-# cannot manufacture history from a throwaway run.
+# epistemic_class except a `bth run --no-sidecar` run, which stores the sidecar_path it skipped
+# with sidecar_mode='bypassed' and no class; excluding bypassed runs means a new stem cannot
+# manufacture history from a throwaway run.
 _PRIOR_RUN_PREDICATE_WARM = (
     "epistemic_class IS NULL AND COALESCE(sidecar_path, '') <> '' AND "
+    "COALESCE(sidecar_mode, '') <> 'bypassed' AND "
     "(ends_with(replace(sidecar_path, ?, '/'), ?) OR replace(sidecar_path, ?, '/') = ?)"
 )
 
@@ -278,7 +280,7 @@ def _cool_stem_has_prior_runs(catalog_dir: Path, suffix: str, exact: str) -> boo
     from bathos.query import list_runs
 
     for r in list_runs(catalog_dir, limit=100_000):
-        if r.epistemic_class is not None or not r.sidecar_path:
+        if r.epistemic_class is not None or not r.sidecar_path or r.sidecar_mode == "bypassed":
             continue
         sp = r.sidecar_path.replace("\\", "/")
         if sp.endswith(suffix) or sp == exact:
@@ -292,8 +294,9 @@ def _stem_has_prior_runs(path: Path, catalog_dir: Path | None) -> bool:
     `path` is the script or its `.bth.toml` sidecar; both name the same sidecar. A run counts
     when its stored ``sidecar_path`` ends with ``/<parent>/<stem>.bth.toml`` or equals the
     resolved sidecar path. The match is on the sidecar, not the ``command`` argv, which stores
-    the path as typed (usually relative). Only pre-v17 runs count: ``epistemic_class IS NULL``
-    and a non-empty ``sidecar_path``. See `_PRIOR_RUN_PREDICATE_WARM`.
+    the path as typed (usually relative). Only pre-v17 runs count: ``epistemic_class IS NULL``,
+    a non-empty ``sidecar_path``, and not a ``--no-sidecar`` (bypassed) run.
+    See `_PRIOR_RUN_PREDICATE_WARM`.
 
     Warm DuckDB is queried first. The cool-tier scan runs only when warm is unreadable or found
     nothing, or the warm query itself raised. If the cool scan also fails, this returns True
