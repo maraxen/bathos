@@ -51,7 +51,7 @@ import json
 import os
 import shutil
 import uuid
-from collections.abc import Iterable, Iterator
+from collections.abc import Generator, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -662,7 +662,7 @@ _ACTIVE_FOLD_LOOKUP: contextvars.ContextVar[_FoldLookup | None] = contextvars.Co
 
 
 @contextlib.contextmanager
-def _fold_lookup_scope(lookup: _FoldLookup) -> Iterator[None]:
+def _fold_lookup_scope(lookup: _FoldLookup) -> Generator[None]:
     """Make `lookup` the ambient cache for `_compute_campaign_fold`.
 
     `_cached_campaign_fold` calls `_compute_campaign_fold(con, campaign_id)`
