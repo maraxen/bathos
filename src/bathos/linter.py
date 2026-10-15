@@ -233,7 +233,7 @@ def check_novel_or_reproduces_declared(project_root: Path) -> list[LintIssue]:
             if sidecar.kind != SidecarKind.EXPERIMENT:
                 continue
 
-            if sidecar.stage_name not in ("validation", "production"):
+            if sidecar.gate_stage not in ("validation", "production"):
                 continue
 
             # Check: must have [reproduction] or novel=true
@@ -969,7 +969,25 @@ def check_epistemic_sidecars(project_root: Path) -> list[LintIssue]:
         except Exception:
             # Unparseable sidecars are reported by the other sidecar checks.
             continue
-        if sidecar.kind != SidecarKind.EXPERIMENT or not sidecar.stage_name_declared:
+        if sidecar.kind != SidecarKind.EXPERIMENT:
+            continue
+        if not sidecar.stage_name_declared:
+            # Legacy (spec 261015 §3.1 row 1): behaviour unchanged, but a sidecar that carries
+            # [outcomes] with no stage_name gets a Tier-2 nudge to declare one explicitly.
+            if sidecar.outcomes:
+                issues.append(
+                    LintIssue(
+                        path=sidecar_path,
+                        directory="sidecar",
+                        issue="declare_stage_name",
+                        severity=IssueSeverity.WARNING,
+                        detail=(
+                            "no stage_name declared; treated as legacy. "
+                            "declare stage_name explicitly (exploration | calibration | "
+                            "validation | ablation | production)"
+                        ),
+                    )
+                )
             continue
 
         raw = sidecar.stage_name_raw

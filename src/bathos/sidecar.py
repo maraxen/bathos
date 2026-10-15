@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import hashlib
 import json
 import logging
@@ -262,6 +263,21 @@ class Sidecar:
     # staleness declaration (all sidecar kinds) -- consumed by prereg.gate_check
     status: StatusBlock | None = None
 
+    # `builtins.property`: the class body has a dataclass field named `property` (the validation
+    # kind's `property = "..."`), which shadows the bare decorator name here.
+    @builtins.property
+    def gate_stage(self) -> str:
+        """The stage the enforcement gates (requires_pass_stem, parity submit gate, linter) read.
+
+        A declared but non-canonical `stage_name` (a typo such as "validaton") fails closed to
+        "validation", the strictest enforced stage, so a typo can never make a gate advisory.
+        This is the gate-side twin of `resolve_epistemic_class` (spec 261015 §3.1). The stored
+        `stage_name` is left as coerced for back-compat with other readers.
+        """
+        if self.stage_name_declared and self.stage_name_raw not in CANONICAL_STAGES:
+            return "validation"
+        return self.stage_name or "exploration"
+
 
 @dataclass(frozen=True)
 class ObserveBlock:
@@ -299,6 +315,11 @@ ENFORCED_DIRS = {"experiments", "benchmarks", "validation"}
 # "observed" (spec §3.2, epistemic class) is what exploratory and calibrating runs store as their
 # outcome: a value was recorded, no verdict was reached. It is bathos-exclusive for the same reason.
 RESERVED_OUTCOME_LABELS = {"invalid_measurement", "observed"}
+
+# Labels that never open an outcome_failed obligation (spec 261015 §3.2, C5). "observed" is what
+# exploratory and calibrating runs store; "invalid_measurement" is the instrument-failure label
+# (debt #1071). Both are neutral: no failure, no e-value evidence.
+NEUTRAL_OUTCOME_LABELS = frozenset({"", "unknown", "observed", "invalid_measurement"})
 
 # Canonical set: the advisory vocabulary for stage_name values.
 # These are best-practice values discovered from real stage_name usage.
@@ -674,7 +695,7 @@ def is_failure_outcome(sidecar: Sidecar | None, outcome_label: str) -> bool:
     a pass. That is the spec's rule applied literally, and it is the widest of the four
     triggers — see the calibration note in `obligations.TRIGGERS`.
     """
-    if sidecar is None or outcome_label in ("", "unknown", "observed"):
+    if sidecar is None or outcome_label in NEUTRAL_OUTCOME_LABELS:
         return False
     return outcome_label not in derive_pass_labels(sidecar)
 
@@ -692,7 +713,9 @@ def compute_evalue(
     if sidecar.popper_null_pass_rate is None:
         return 1.0
 
-    if outcome_label in ("error", "unknown", "observed"):
+    # Same neutral set as before plus invalid_measurement; "" is deliberately not here (it
+    # always fell through to the fail-direction formula, and still does).
+    if outcome_label in ("error", "unknown", "observed", "invalid_measurement"):
         return 1.0
 
     # Explicit weight override takes priority
@@ -801,15 +824,19 @@ def parse_source(s: str) -> SourceRef | None:
 
 # --- sanity expressions (spec §3.2 validator rules) ---------------------------------------------
 
+# Allowlist of serialized expression node classes (spec 261015 §3.2). Every class not named here
+# is rejected, so a new DuckDB node type (FUNCTION, CASE, SUBQUERY, BETWEEN, ...) cannot slip in.
+# CAST is admitted only as the bare TRUE/FALSE literal form (see _sanity_bool_cast_ok).
 _SANITY_NODE_CLASSES = {
     "COLUMN_REF",
     "CONSTANT",
     "COMPARISON",
     "CONJUNCTION",
     "OPERATOR",
-    "FUNCTION",
     "CAST",
 }
+# OPERATOR types admitted. `x IN (...)` is an OPERATOR of type COMPARE_IN, so it is rejected here.
+_SANITY_OPERATOR_TYPES = {"OPERATOR_NOT", "OPERATOR_IS_NULL", "OPERATOR_IS_NOT_NULL"}
 _SANITY_NUMERIC_TYPES = {
     "TINYINT",
     "SMALLINT",
@@ -827,22 +854,19 @@ _SANITY_NUMERIC_TYPES = {
 
 
 def _sanity_children(node: dict) -> list[dict]:
+    """Every dict under `node`, whatever the key, including dicts inside lists.
+
+    Deliberately generic. A fixed key list (left/right/child/children) let constants hide under
+    other keys (FUNCTION `filter`, `order_bys`, CASE branches, window parts) and never be
+    inspected. Walking every value means nothing in the serialized tree is skipped.
+    """
     kids: list[dict] = []
-    for key in ("left", "right", "child"):
-        if isinstance(node.get(key), dict):
-            kids.append(node[key])
-    kids.extend(k for k in node.get("children", []) if isinstance(k, dict))
+    for value in node.values():
+        if isinstance(value, dict):
+            kids.append(value)
+        elif isinstance(value, list):
+            kids.extend(v for v in value if isinstance(v, dict))
     return kids
-
-
-def _sanity_descendants(node: dict) -> list[dict]:
-    out: list[dict] = []
-    stack = _sanity_children(node)
-    while stack:
-        n = stack.pop()
-        out.append(n)
-        stack.extend(_sanity_children(n))
-    return out
 
 
 def _sanity_constant_ok(node: dict) -> bool:
@@ -877,8 +901,14 @@ def _sanity_bool_cast_ok(node: dict) -> bool:
 
 def _sanity_walk(node: dict, fields: set[str], errors: list[str], expr: str) -> None:
     cls = node.get("class")
+    if cls is None:
+        # A payload dict (a type, a value, a type_info), not an expression node. Carries no
+        # semantics of its own, but may hold expression nodes, so keep descending.
+        for kid in _sanity_children(node):
+            _sanity_walk(kid, fields, errors, expr)
+        return
     if cls not in _SANITY_NODE_CLASSES:
-        errors.append(f"sanity {expr!r}: unsupported expression ({cls or node.get('type')})")
+        errors.append(f"sanity {expr!r}: unsupported expression ({cls})")
         return
     if cls == "COLUMN_REF":
         names = node.get("column_names") or []
@@ -886,26 +916,23 @@ def _sanity_walk(node: dict, fields: set[str], errors: list[str], expr: str) -> 
             errors.append(f"sanity {expr!r}: qualified reference {'.'.join(names)!r} not allowed")
         elif names[0] not in fields:
             errors.append(f"sanity {expr!r}: unknown field {names[0]!r}")
-        return
-    if cls == "CONSTANT":
+    elif cls == "CONSTANT":
         if not _sanity_constant_ok(node):
             errors.append(f"sanity {expr!r}: literal not allowed (only 0, 1, NULL, true, false)")
-        return
-    if cls == "CAST":
+    elif cls == "CAST":
+        # TRUE / FALSE parse as CAST('t'|'f' AS BOOLEAN). That exact shape is the literal and its
+        # child is consumed here; any other cast (CAST(x AS INT), ...) is rejected outright.
         if not _sanity_bool_cast_ok(node):
             errors.append(f"sanity {expr!r}: cast not allowed")
         return
-    if cls == "FUNCTION":
-        descendants = _sanity_descendants(node)
-        if any(d.get("class") in ("CONSTANT", "CAST") for d in descendants):
+    elif cls == "OPERATOR":
+        op_type = node.get("type")
+        if op_type not in _SANITY_OPERATOR_TYPES:
             errors.append(
-                f"sanity {expr!r}: literal inside a function or arithmetic expression "
-                "(e.g. 'x > 1+1+1') is not allowed"
+                f"sanity {expr!r}: operator not allowed ({op_type}); only NOT, IS NULL, IS NOT NULL"
             )
             return
-        if not any(d.get("class") == "COLUMN_REF" for d in descendants):
-            errors.append(f"sanity {expr!r}: function call must reference a result field")
-            return
+    # COMPARISON and CONJUNCTION are allowed as written; their operands are checked below.
     for kid in _sanity_children(node):
         _sanity_walk(kid, fields, errors, expr)
 
