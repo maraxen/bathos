@@ -1,4 +1,4 @@
-# compact-incremental-spec Internal Docs
+# spec-exploratory-mode-contract Internal Docs
 
 ## Daily
 - [260805_overnight-decisions](daily/260805_overnight-decisions.md) — Every decision made without a human gate during the overnight autonomous loop run, with enough context to backtrack
@@ -20,6 +20,7 @@
 - [260515_v02-sprint-plan](plans/260515_v02-sprint-plan.md)
 
 ## Specs
+- [261015_exploratory-mode-contract](specs/261015_exploratory-mode-contract.md) — Operationalize exploration vs calibration vs validation in bathos so exploratory runs stop inventing pass/marginal/fail thresholds, with a gated promotion path to confirmatory
 - [261012_retire-compact-runlog-cutover](specs/261012_retire-compact-runlog-cutover.md) — Do not build an incremental legacy compact; finish delivery step 5 of the project-local run log (260925) behind its blockers, and add a cool-fragment fallback to get_run meanwhile (debts 2344, 2110, 1685, 1647, 1993)
 - [260925_project-local-run-log](specs/260925_project-local-run-log.md) — Project-local append-only run log with a disposable index
 - [260826_blast-radius-assessment-skill](specs/260826_blast-radius-assessment-skill.md) — Blast-radius assessment for bathos-tracked experiments
@@ -49,8 +50,11 @@
 ## Actuation Surfaces
 
 ## Audits
+- [261015_exploratory-mode-contract-adversarial-review](audits/261015_exploratory-mode-contract-adversarial-review.md) — Spec-challenger findings C1-C25 and spec-defender rulings for specs/261015_exploratory-mode-contract.md, run sequentially
 
 ## Research
+- [261015_claim-appraisal-nlm-research](research/261015_claim-appraisal-nlm-research.md) — NotebookLM (Scientific Rigor notebook 1d786e78) answers on appraisal frameworks, doubt/trust taxonomies, grading and appraiser independence, feeding the spec's appraisal payload
+- [261015_exploratory-mode-nlm-research](research/261015_exploratory-mode-nlm-research.md) — NotebookLM (agentic-science notebook 3f0490aa) answers to 7 questions feeding the exploratory-mode contract spec; quotes spot-checked against raw responses
 - [260617_literature-parity-workflow-seed](research/260617_literature-parity-workflow-seed.md) — **SEED for the `literature-parity` workflow** (reference-parity-by-text for reimplemented methods; operationalizes the §10.1 track of the rigor doc). Validated build-by-doing on asr/Zeinaty (caught a mechanism-nullifying defect 3 sprints of unit tests missed). Pattern: blind reconstruction ×N → reconcile → adversarial refutation ×M → adjudicate → graded verdict + runnable invariant-test lock. Input for a brainstorm → adversarial-spec → impl sprint (named bathos workflow + skill section + claim-tier wiring).
 - [260616_bathos-long-horizon-rigor](research/260616_bathos-long-horizon-rigor.md) — **SEED for claim-level rigor systematization** (from asr worked example): claim-tier pre-registration above the sidecar (Objective-Drift fix); Claim Ledger / Discriminability Map / Confound Register / Union Gate; enforcement ladder L0→L5 + rigor-item→mechanism map; §10 baseline/literature-reimpl fidelity + signal-discrimination probes. Input for research → brainstorm → spec → coherence → backlog DAG.
 - [260526_agentic-science-nlm-research-plan](research/260526_agentic-science-nlm-research-plan.md) — NLM research prompts (3 Deep Research + 6 Queries) for agentic science sources beyond May-2026 synthesis

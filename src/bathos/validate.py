@@ -9,6 +9,9 @@ from bathos.sidecar import (
     RESERVED_OUTCOME_LABELS,
     Sidecar,
     SidecarKind,
+    check_sanity_expr,
+    parse_source,
+    resolve_epistemic_class,
 )
 from bathos.telemetry import event
 
@@ -34,7 +37,8 @@ class ValidationError:
 class ValidationResult:
     ok: bool
     errors: list[ValidationError] = field(default_factory=list)
-    # Advisory findings that never flip `ok` (e.g. unknown [experiment] keys, debt #2195).
+    # Advisory findings that never flip `ok`: unknown [experiment] keys (debt #2195) and the
+    # spec 261015 §3.2 migration-window findings, each as "<field>: <message>".
     warnings: list[str] = field(default_factory=list)
 
 
@@ -508,7 +512,11 @@ def validate_claim_discriminability(
 
 
 def validate_sidecar(
-    sidecar: Sidecar, sidecar_path: Path | None = None, claim=None
+    sidecar: Sidecar,
+    sidecar_path: Path | None = None,
+    claim=None,
+    *,
+    stem_has_prior_runs: bool = False,
 ) -> ValidationResult:
     """Validate a parsed Sidecar for structural integrity and logical consistency.
 
@@ -601,8 +609,97 @@ def validate_sidecar(
                             )
                         )
 
-    # Must have outcomes
-    if not sidecar.outcomes:
+    # ── epistemic class (spec §3.1, §3.2, §3.5) ──────────────────────────────────
+    # Only experiment sidecars carry a class; every other kind resolves to "legacy" and keeps
+    # today's rules untouched. `warnings` (initialised above, plain strings) is non-blocking and
+    # never changes `ok`.
+    cls = None
+    if sidecar.kind == SidecarKind.EXPERIMENT:
+        cls = resolve_epistemic_class(sidecar, stem_has_prior_runs=stem_has_prior_runs)
+        if cls is None:
+            raw = sidecar.stage_name_raw
+            errors.append(
+                ValidationError(
+                    "stage_name",
+                    f"stage_name {raw!r} requires an [observe] block (exploration) / "
+                    "[calibrate] block (calibration); add it, or choose a confirmatory stage "
+                    "(validation/ablation/production)",
+                )
+            )
+            return ValidationResult(ok=False, errors=errors, warnings=warnings)
+
+    # Source placeholder guard applies to every class: an unfilled template is never a source.
+    for label, spec in sidecar.outcomes.items():
+        if "${" in (spec.source or ""):
+            errors.append(
+                ValidationError(
+                    f"outcomes.{label}.source",
+                    f"unfilled template placeholder in source {spec.source!r}",
+                )
+            )
+
+    # Exploratory and calibrating sidecars may omit [outcomes]; confirmatory/legacy may not.
+    outcomes_optional = cls in ("exploratory", "calibrating")
+
+    if cls == "exploratory":
+        if not (sidecar.question or sidecar.hypothesis):
+            errors.append(
+                ValidationError(
+                    "question",
+                    "exploratory sidecar needs a 'question' (or 'hypothesis') stating what you are looking at",
+                )
+            )
+        if sidecar.observe is None or not sidecar.observe.outputs:
+            errors.append(
+                ValidationError(
+                    "observe.outputs",
+                    "exploratory sidecar needs a non-empty [observe].outputs list",
+                )
+            )
+        else:
+            schema_fields = set(sidecar.result_schema.keys())
+            for expr in sidecar.observe.sanity:
+                for msg in check_sanity_expr(expr, schema_fields):
+                    errors.append(ValidationError("observe.sanity", f"{expr!r}: {msg}"))
+        # Held lightly (§3.2.1): every non-residual branch needs a source. A missing or malformed
+        # source is an error for a new stem and a warning for a stem that already has runs.
+        for label, spec in sidecar.outcomes.items():
+            if spec.is_residual or "${" in (spec.source or ""):
+                continue
+            if not spec.source:
+                problem = "missing 'source'"
+            elif parse_source(spec.source) is None:
+                problem = f"malformed source {spec.source!r}"
+            else:
+                continue
+            source_error = ValidationError(
+                f"outcomes.{label}.source",
+                f"branch {label!r}: {problem}; use one of lit:<ref> | run:<id>:<field> | "
+                "sesoi:<value>:<why> | provisional:<why> | card:<id>",
+            )
+            if stem_has_prior_runs:
+                # Migration window: a stem with prior runs gets a warning, not an error.
+                warnings.append(f"{source_error.field}: {source_error.message}")
+            else:
+                errors.append(source_error)
+    elif cls == "calibrating":
+        if sidecar.calibrate is None or not sidecar.calibrate.quantity.strip():
+            errors.append(
+                ValidationError(
+                    "calibrate.quantity",
+                    "calibration sidecar needs a non-empty [calibrate].quantity",
+                )
+            )
+        if not sidecar.result_schema:
+            errors.append(
+                ValidationError(
+                    "result_schema",
+                    "calibration sidecar needs a non-empty [result_schema] containing the calibrated field",
+                )
+            )
+
+    # Must have outcomes (confirmatory/legacy always; exploratory/calibrating only when present)
+    if not sidecar.outcomes and not outcomes_optional:
         errors.append(ValidationError("outcomes", "No [outcomes] section found"))
         if sidecar_path:
             event(
@@ -628,6 +725,21 @@ def validate_sidecar(
                     path=str(sidecar_path),
                     field=f"outcomes.{label}",
                     reason=f"{label!r} is reserved",
+                )
+        # An unfilled template placeholder in a condition or adversarial_check is never valid, for
+        # any class. An unfilled adversarial_check would otherwise silently disable the check.
+        # The "${" in the message is load-bearing: scaffold code uses it to classify fill-in items.
+        for placeholder_field, text in (
+            ("condition", spec.condition),
+            ("adversarial_check", spec.adversarial_check),
+        ):
+            if text and "${" in text:
+                errors.append(
+                    ValidationError(
+                        f"outcomes.{label}.{placeholder_field}",
+                        f"unfilled placeholder in {placeholder_field} {text!r}: "
+                        "template '${...}' must be filled in before the sidecar is valid",
+                    )
                 )
         if not spec.condition:
             err = ValidationError(f"outcomes.{label}", "Missing 'condition' field")
@@ -663,8 +775,8 @@ def validate_sidecar(
                     reason="Missing 'reasoning' field",
                 )
 
-        # DuckDB SQL must parse
-        if spec.condition:
+        # DuckDB SQL must parse. A placeholder condition is reported above; it is not parsed here.
+        if spec.condition and "${" not in spec.condition:
             try:
                 con = duckdb.connect()
                 # Build a dummy table from result_schema to validate SQL
@@ -701,7 +813,7 @@ def validate_sidecar(
                     )
 
     # At least one result_schema field must appear in conditions
-    if sidecar.result_schema:
+    if sidecar.result_schema and sidecar.outcomes:
         schema_keys = set(sidecar.result_schema.keys())
         all_conditions = " ".join(s.condition for s in sidecar.outcomes.values() if s.condition)
         if not any(key in all_conditions for key in schema_keys):
@@ -720,7 +832,7 @@ def validate_sidecar(
 
     # Must have at least one is_residual=true fallback branch
     has_residual = any(s.is_residual for s in sidecar.outcomes.values())
-    if not has_residual:
+    if sidecar.outcomes and not has_residual:
         err = ValidationError(
             "outcomes",
             "No fallback branch with is_residual=true — add a catch-all outcome",

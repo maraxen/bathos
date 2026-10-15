@@ -1,8 +1,13 @@
 {
   "task_id": "unknown",
-  "session_id": "7582d32b-114e-489b-bcf1-1d1ef38533b8",
+  "session_id": "fcb7b7e4-36c0-445c-adc3-bc1c8ebfabcf",
   "workflow_node": "EXECUTE",
-  "timestamp": "2026-08-26T22:42:30Z",
+  "timestamp": "2026-10-15T16:53:53Z",
   "usage_pct": 0,
-  "open_worktrees": []
+  "open_worktrees": [
+    "/home/marielle/projects/bathos/.claude/worktrees/spec-exploratory-mode-contract/.claude/worktrees/agent-ab5a00bc3de56716b",
+    "/home/marielle/projects/bathos/.claude/worktrees/spec-exploratory-mode-contract/.claude/worktrees/agent-a0b710e63f0f17e96",
+    "/home/marielle/projects/bathos/.claude/worktrees/spec-exploratory-mode-contract/.claude/worktrees/agent-ac05bf57ef591d7d7",
+    "/home/marielle/projects/bathos/.claude/worktrees/spec-exploratory-mode-contract/.claude/worktrees/agent-abb3b1af250923119"
+  ]
 }

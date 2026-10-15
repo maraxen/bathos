@@ -203,9 +203,14 @@ def test_the_shipped_scaffold_template_is_lint_clean(tmp_path):
     and (b) were never implemented, nothing caught it. Wiring trigger 3 with the correct
     polarity would then have opened an obligation on every scaffolded experiment's every
     passing run."""
-    from bathos.new_experiment import _SIDECAR_TEMPLATE
+    from bathos.new_experiment import _CONFIRM_SIDECAR_TEMPLATE
 
-    (tmp_path / "scaffolded.bth.toml").write_text(_SIDECAR_TEMPLATE.format(name="demo"))
+    # The confirm template is the one carrying adversarial_check; fill its placeholders the way
+    # an author would before linting.
+    filled = _CONFIRM_SIDECAR_TEMPLATE.replace("${THRESHOLD}", "5.0").replace(
+        "${SOURCE}", "provisional:scaffold regression fixture"
+    )
+    (tmp_path / "scaffolded.bth.toml").write_text(filled)
     assert [i.issue for i in check_adversarial_checks(tmp_path)] == []
 
 

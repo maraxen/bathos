@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pyarrow as pa
 
-CURRENT_SCHEMA_VERSION = "16"
+CURRENT_SCHEMA_VERSION = "17"
 
 # Format validator for stage_name values — used by linter.check_canonical_stage_names.
 # Enforcement at parse time uses CANONICAL_STAGES set-membership (parse_sidecar); this
@@ -92,6 +92,10 @@ COOL_SCHEMA = pa.schema(
         # plus the _migrate_v15 default below.
         pa.field("metadata", pa.string(), nullable=True),
         pa.field("output_metadata", pa.string(), nullable=True),
+        # v17 (spec 261015_exploratory-mode-contract §3.1): written at run time, immutable.
+        pa.field("epistemic_class", pa.string(), nullable=True),
+        pa.field("tentative_outcome", pa.string(), nullable=True),
+        pa.field("agent_session", pa.string(), nullable=True),
     ]
 )
 
@@ -157,6 +161,10 @@ WARM_SCHEMA = pa.schema(
         pa.field("adversarial_check_result", pa.string(), nullable=True),
         pa.field("git_dirty_content_id", pa.string(), nullable=True),
         pa.field("git_provenance_source", pa.string(), nullable=True),
+        # v17 (spec §3.1)
+        pa.field("epistemic_class", pa.string(), nullable=True),
+        pa.field("tentative_outcome", pa.string(), nullable=True),
+        pa.field("agent_session", pa.string(), nullable=True),
     ]
 )
 
@@ -233,6 +241,12 @@ class Run:
     #: claimed a sha that its tree manifest could not verify -- git_hash is then "unknown".
     #: Indicates which channel provided the git_hash and git_branch values.
     git_provenance_source: str | None = None
+    #: v17 (spec 261015 §3.1). Epistemic class of the run, written at run time, immutable.
+    epistemic_class: str | None = None
+    #: v17. Tentative outcome recorded alongside an exploratory run, immutable.
+    tentative_outcome: str | None = None
+    #: v17. Agent session identifier that produced the run, immutable.
+    agent_session: str | None = None
 
     def to_arrow(self) -> pa.Table:
         return pa.table(
@@ -295,6 +309,9 @@ class Run:
                 "adversarial_check_result": [self.adversarial_check_result],
                 "git_dirty_content_id": [self.git_dirty_content_id],
                 "git_provenance_source": [self.git_provenance_source],
+                "epistemic_class": [self.epistemic_class],
+                "tentative_outcome": [self.tentative_outcome],
+                "agent_session": [self.agent_session],
                 "metadata": [self.metadata],
                 "output_metadata": [self.output_metadata],
             },
@@ -434,6 +451,13 @@ class Run:
             git_provenance_source=pydict.get("git_provenance_source", [None])[i]
             if "git_provenance_source" in pydict
             else None,
+            epistemic_class=pydict.get("epistemic_class", [None])[i]
+            if "epistemic_class" in pydict
+            else None,
+            tentative_outcome=pydict.get("tentative_outcome", [None])[i]
+            if "tentative_outcome" in pydict
+            else None,
+            agent_session=pydict.get("agent_session", [None])[i] if "agent_session" in pydict else None,
             metadata=(pydict.get("metadata", ["{}"])[i] or "{}") if "metadata" in pydict else "{}",
             output_metadata=(pydict.get("output_metadata", ["[]"])[i] or "[]")
             if "output_metadata" in pydict

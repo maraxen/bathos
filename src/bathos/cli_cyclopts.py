@@ -771,7 +771,7 @@ def submit(
 
             if parsed_sidecar and parsed_sidecar.reproduction:
                 requires_pass_stem = parsed_sidecar.reproduction.requires_pass_stem
-                stage_name = parsed_sidecar.stage_name or "exploration"
+                stage_name = parsed_sidecar.gate_stage
 
                 if requires_pass_stem and stage_name in ("validation", "production"):
                     found = check_reproduction_prerequisite(requires_pass_stem, cat_dir)
@@ -801,7 +801,7 @@ def submit(
 
         try:
             result = check_parity_confounds_for_submit(parsed_sidecar, cat_dir)
-            stage_name = parsed_sidecar.stage_name or "exploration"
+            stage_name = parsed_sidecar.gate_stage
 
             if result["satisfied"] is False and result["tier_enforced"]:
                 print(

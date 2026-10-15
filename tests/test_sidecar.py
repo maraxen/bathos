@@ -966,9 +966,7 @@ def test_parse_experiment_sidecar_status_block(tmp_path):
     sidecar = parse_sidecar(path)
     assert sidecar.status is not None
     assert sidecar.status.stale is True
-    assert sidecar.status.stale_reason == (
-        "wt-summary-json default points at a mismatched input"
-    )
+    assert sidecar.status.stale_reason == ("wt-summary-json default points at a mismatched input")
     assert sidecar.status.superseded_by == "run_abc123"
 
 
@@ -1083,3 +1081,90 @@ def test_parse_benchmark_sidecar_status_block(tmp_path):
     assert sidecar.status is not None
     assert sidecar.status.stale is True
     assert sidecar.status.stale_reason == "baseline script superseded"
+
+
+def test_parse_question_observe_calibrate_blocks(tmp_path):
+    from bathos.sidecar import CalibrateBlock, ObserveBlock, parse_sidecar
+
+    path = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        stage_name = "exploration"
+        question = "How does MI distribute across the loop?"
+        [observe]
+        outputs = ["mi_heatmap.png", "per_residue_mi.csv"]
+        looking_for = "hubs and asymmetry"
+        sanity = ["n_frames_pooled > 0"]
+        planned_tests = 2
+        [result_schema]
+        n_frames_pooled = "int"
+    """,
+    )
+    s = parse_sidecar(path)
+    assert s.question == "How does MI distribute across the loop?"
+    assert s.observe == ObserveBlock(
+        outputs=["mi_heatmap.png", "per_residue_mi.csv"],
+        looking_for="hubs and asymmetry",
+        sanity=["n_frames_pooled > 0"],
+        planned_tests=2,
+    )
+    assert s.calibrate is None
+    assert s.stage_name_declared is True
+    assert s.stage_name_raw == "exploration"
+
+    (tmp_path / "cal").mkdir()
+    cal_path = _write_toml(
+        tmp_path / "cal",
+        """
+        [experiment]
+        stage_name = "calibration"
+        [calibrate]
+        quantity = "noise floor of mean MI"
+        [result_schema]
+        mi_noise = "float"
+    """,
+    )
+    c = parse_sidecar(cal_path)
+    assert c.calibrate == CalibrateBlock(quantity="noise floor of mean MI")
+    assert c.observe is None
+
+
+def test_parse_stage_name_absent_is_not_declared(tmp_path):
+    from bathos.sidecar import parse_sidecar
+
+    path = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "legacy"
+        [outcomes.pass]
+        condition = "x > 0"
+        decision = "ok"
+        [result_schema]
+        x = "float"
+    """,
+    )
+    s = parse_sidecar(path)
+    assert s.stage_name_declared is False
+    assert s.stage_name_raw is None
+    assert s.stage_name == "exploration"  # back-compat coercion default is unchanged
+
+
+def test_parse_non_canonical_stage_name_keeps_raw_and_coerces(tmp_path):
+    from bathos.sidecar import parse_sidecar
+
+    path = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        stage_name = "validaton"
+        [result_schema]
+        x = "float"
+    """,
+    )
+    s = parse_sidecar(path)
+    # Other modules still see the coerced value, but the literal survives for class resolution.
+    assert s.stage_name == "exploration"
+    assert s.stage_name_declared is True
+    assert s.stage_name_raw == "validaton"

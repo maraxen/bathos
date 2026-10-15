@@ -96,7 +96,12 @@ _REFRESH_FINISH_COLS = (
     "differential_status",
     "differential_off_value",
     "differential_on_value",
+    "tentative_outcome",
 )
+
+# Classes whose runs record an observation, not a verdict (spec 261015 §3.2): a postmortem
+# verdict override is a tentative label for them and never replaces `outcome`.
+_OBSERVATION_CLASSES = ("exploratory", "calibrating")
 
 
 def _cool_finish_value(run: Run, col: str):
@@ -397,6 +402,20 @@ def _migrate_v15(run_dict: dict) -> dict:
     return run_dict
 
 
+def _migrate_v16(run_dict: dict) -> dict:
+    """Migrate v16 fragment to v17 by adding the exploratory-mode run columns.
+
+    epistemic_class, tentative_outcome and agent_session (spec 261015 §3.1) are written at
+    run time and are immutable. A v16 fragment predates them, so they default to None:
+    the run's class is genuinely unrecorded, not an empty string.
+    """
+    run_dict["epistemic_class"] = None
+    run_dict["tentative_outcome"] = None
+    run_dict["agent_session"] = None
+    run_dict["schema_version"] = "17"
+    return run_dict
+
+
 MIGRATIONS["0"] = _migrate_v0
 MIGRATIONS["1"] = _migrate_v1
 MIGRATIONS["2"] = _migrate_v2
@@ -413,6 +432,7 @@ MIGRATIONS["12"] = _migrate_v12
 MIGRATIONS["13"] = _migrate_v13
 MIGRATIONS["14"] = _migrate_v14
 MIGRATIONS["15"] = _migrate_v15
+MIGRATIONS["16"] = _migrate_v16
 
 
 _RUNS_TABLE_SCHEMA = """
@@ -475,7 +495,10 @@ CREATE TABLE IF NOT EXISTS runs (
     dependency_lock_sha256 TEXT,
     adversarial_check_result TEXT,
     git_dirty_content_id TEXT,
-    git_provenance_source TEXT
+    git_provenance_source TEXT,
+    epistemic_class TEXT,
+    tentative_outcome TEXT,
+    agent_session TEXT
 )
 """
 
@@ -972,6 +995,9 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
             "ALTER TABLE runs ADD COLUMN IF NOT EXISTS adversarial_check_result TEXT",
             "ALTER TABLE runs ADD COLUMN IF NOT EXISTS git_dirty_content_id TEXT",
             "ALTER TABLE runs ADD COLUMN IF NOT EXISTS git_provenance_source TEXT",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS epistemic_class TEXT",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS tentative_outcome TEXT",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS agent_session TEXT",
         ]:
             with contextlib.suppress(Exception):
                 con.execute(_runs_alter_sql)
@@ -1061,6 +1087,16 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                     cool_outcome = existing[3]
                 else:
                     cool_outcome = run.outcome or None
+                # Observation runs: the override (pinned above) belongs in tentative_outcome, so
+                # the compared outcome is the cool one and the tentative slot carries the override.
+                tentative_idx = 7 + _REFRESH_FINISH_COLS.index("tentative_outcome")
+                cool_tentative = run.tentative_outcome or None
+                if run.epistemic_class in _OBSERVATION_CLASSES:
+                    if pm_entry is not None and pm_entry[0].verdict_override != "none":
+                        cool_tentative = pm_entry[0].verdict_override
+                    elif pm_entry is None and warm_override not in (None, "", "none"):
+                        cool_tentative = existing[tentative_idx] or None
+                    cool_outcome = run.outcome or None
                 # metadata: cool wins, but `reaped` is warm-only (merged in by reap.py
                 # after a rebuild) and must survive.
                 cool_metadata = run.metadata or "{}"
@@ -1085,7 +1121,12 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                     run.outcome_error_reason or None,
                     cool_metadata,
                     # Finish-time columns the runner also rewrites (runner.py finalize).
-                    *(_cool_finish_value(run, col) for col in _REFRESH_FINISH_COLS),
+                    *(
+                        cool_tentative
+                        if col == "tentative_outcome"
+                        else _cool_finish_value(run, col)
+                        for col in _REFRESH_FINISH_COLS
+                    ),
                 )
                 # Normalise "" to None for outcome: the postmortem block writes "" for
                 # a run with no sidecar outcome, which must not count as a change.
@@ -1173,6 +1214,14 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                         if postmortem_verdict_override != "none"
                         else curr_outcome
                     )
+                    if run.epistemic_class in _OBSERVATION_CLASSES:
+                        # Spec 261015 §3.2: the override is a tentative label; outcome stays.
+                        outcome = curr_outcome
+                        if postmortem_verdict_override != "none":
+                            con.execute(
+                                "UPDATE runs SET tentative_outcome = ? WHERE id = ?",
+                                [postmortem_verdict_override, run.id],
+                            )
 
                     con.execute(
                         """
@@ -1223,7 +1272,12 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                 run.postmortem_summary = pm.summary
                 run.postmortem_asset_links = json.dumps(pm.asset_links)
                 if pm.verdict_override != "none":
-                    run.outcome = pm.verdict_override
+                    # Spec §3.2: exploratory/calibrating runs record an observation, so an
+                    # override is a tentative label only and never replaces outcome.
+                    if run.epistemic_class in ("exploratory", "calibrating"):
+                        run.tentative_outcome = pm.verdict_override
+                    else:
+                        run.outcome = pm.verdict_override
 
             # Collect output metadata
             output_metadata = []
@@ -1249,8 +1303,9 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                     stdout_sha256, component_id, component_sidecar_sha256,
                     differential_status, differential_off_value, differential_on_value, differential_effect, dependency_lock_sha256,
                     adversarial_check_result, git_dirty_content_id, git_provenance_source,
-                    outcome_error_reason
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    outcome_error_reason,
+                    epistemic_class, tentative_outcome, agent_session
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     run.id,
@@ -1317,6 +1372,9 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                     # add the one missing column/value pair here rather than restructure the
                     # insert.
                     run.outcome_error_reason or None,
+                    run.epistemic_class,
+                    run.tentative_outcome,
+                    run.agent_session,
                 ],
             )
 

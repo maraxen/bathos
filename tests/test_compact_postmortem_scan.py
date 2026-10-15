@@ -228,3 +228,95 @@ def test_find_postmortem_ignores_nested_git_boundary(tmp_path):
     assert find_postmortem(ws, run_id=rid) is None, (
         "a postmortem from a nested checkout was returned as this workspace's answer"
     )
+
+
+def _tentative(catalog: Path, run_id: str) -> str:
+    con = duckdb.connect(str(catalog / "bathos.db"), read_only=True)
+    try:
+        row = con.execute("SELECT tentative_outcome FROM runs WHERE id = ?", [run_id]).fetchone()
+        return (row[0] if row else "") or ""
+    finally:
+        con.close()
+
+
+def test_exploratory_postmortem_override_is_tentative_only(tmp_catalog, workspace):
+    """Spec §3.2: an override on an exploratory run is a tentative label, never the outcome."""
+    init_catalog(tmp_catalog)
+    run = _run()
+    run.epistemic_class = "exploratory"
+    run.outcome = "observed"
+    write_run(run, tmp_catalog)
+
+    exp = workspace / "scripts" / "experiments"
+    (exp / f"explore.py.{run.id}.bth.postmortem.toml").write_text(
+        SUBMITTED_PM.format(run_id=run.id, override="pass")
+    )
+
+    compact(tmp_catalog)
+
+    assert _outcome(tmp_catalog, run.id) == "observed"
+    assert _tentative(tmp_catalog, run.id) == "pass"
+
+
+def test_legacy_postmortem_override_still_sets_outcome(tmp_catalog, workspace):
+    """Legacy twin: without an epistemic class the override still writes outcome."""
+    init_catalog(tmp_catalog)
+    run = _run()
+    run.epistemic_class = "legacy"
+    run.outcome = "fail"
+    write_run(run, tmp_catalog)
+
+    exp = workspace / "scripts" / "experiments"
+    (exp / f"legacy.py.{run.id}.bth.postmortem.toml").write_text(
+        SUBMITTED_PM.format(run_id=run.id, override="pass")
+    )
+
+    compact(tmp_catalog)
+
+    assert _outcome(tmp_catalog, run.id) == "pass"
+
+
+def test_exploratory_postmortem_added_after_ingest_stays_tentative(tmp_catalog, workspace):
+    """The existing-row path: a postmortem written after the run was already compacted must not
+    overwrite an exploratory run's outcome either, and a later compact must not flip it back."""
+    init_catalog(tmp_catalog)
+    run = _run()
+    run.epistemic_class = "exploratory"
+    run.outcome = "observed"
+    write_run(run, tmp_catalog)
+    compact(tmp_catalog)  # ingested with no postmortem
+
+    exp = workspace / "scripts" / "experiments"
+    (exp / f"explore.py.{run.id}.bth.postmortem.toml").write_text(
+        SUBMITTED_PM.format(run_id=run.id, override="pass")
+    )
+    compact(tmp_catalog)
+    assert _outcome(tmp_catalog, run.id) == "observed"
+    assert _tentative(tmp_catalog, run.id) == "pass"
+
+    result = compact(tmp_catalog)  # stable: nothing to refresh
+    assert result.refreshed == 0
+    assert _outcome(tmp_catalog, run.id) == "observed"
+    assert _tentative(tmp_catalog, run.id) == "pass"
+
+
+@pytest.mark.usefixtures("workspace")  # isolates the postmortem scan to an empty workspace
+def test_exploratory_refresh_carries_tentative_outcome(tmp_catalog):
+    """A run compacted while running, then rewritten on finish with a tentative label: the
+    refresh (debt #2689) must carry tentative_outcome to warm."""
+    import dataclasses
+
+    init_catalog(tmp_catalog)
+    run = _run()
+    running = dataclasses.replace(run, status="running", outcome="", epistemic_class="exploratory")
+    write_run(running, tmp_catalog)
+    compact(tmp_catalog)
+
+    done = dataclasses.replace(
+        running, status="completed", outcome="observed", tentative_outcome="fail"
+    )
+    write_run(done, tmp_catalog)
+    assert compact(tmp_catalog).refreshed == 1
+    assert _outcome(tmp_catalog, run.id) == "observed"
+    assert _tentative(tmp_catalog, run.id) == "fail"
+    assert compact(tmp_catalog).refreshed == 0

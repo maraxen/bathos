@@ -13,6 +13,8 @@ import tomllib
 from contextlib import suppress
 from pathlib import Path
 
+import duckdb
+
 from bathos.catalog import write_run
 from bathos.checker import hash_dependency_lock
 from bathos.git import capture_git_state, git_state_as_dict
@@ -20,6 +22,7 @@ from bathos.git_pin import ensure_manifest_ignored, pin_result_as_dict, pin_run
 from bathos.prereg import (
     GateErrorCode,
     _gate_failure_payload,
+    _stem_has_prior_runs,
     gate_check,
     resolve_agent_mode,
     resolve_sidecar,
@@ -40,9 +43,12 @@ from bathos.sidecar import (
     DifferentialBlock,
     Sidecar,
     SidecarError,
+    derive_pass_labels,
     evaluate_outcome,
     is_in_enforced_dir,
     parse_sidecar,
+    resolve_epistemic_class,
+    single_row_projection,
 )
 from bathos.telemetry import event, init_telemetry, run_uuid_var
 
@@ -354,6 +360,121 @@ def _evaluate_sidecar_outcome(
     except Exception as e:
         event("run.error", phase="evaluate", exc_type=type(e).__name__, exc_msg=str(e))
         raise
+
+
+def _resolve_run_epistemic_class(
+    sidecar: Sidecar | None,
+    script_path: Path | None,
+    catalog_dir: Path,
+) -> str | None:
+    """Epistemic class stored on the run at start (spec §3.1). None when there is no sidecar.
+
+    An invalid new-stem shape (``resolve_epistemic_class`` returns None) fails closed to
+    ``confirmatory``. The prior-run lookup is only needed for an exploration/calibration stage,
+    where it decides between ``legacy`` and an invalid shape; every other stage ignores it.
+    """
+    if sidecar is None:
+        return None
+    needs_lookup = sidecar.stage_name_raw in ("exploration", "calibration")
+    stem_has_runs = (
+        script_path is not None and needs_lookup and _stem_has_prior_runs(script_path, catalog_dir)
+    )
+    resolved = resolve_epistemic_class(sidecar, stem_has_prior_runs=stem_has_runs)
+    return resolved if resolved is not None else "confirmatory"
+
+
+def _parse_result_dict(metadata: str) -> dict:
+    """Parse the result payload; anything that is not a JSON object reads as an empty result."""
+    try:
+        parsed = json.loads(metadata) if metadata else {}
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _with_metadata_key(metadata: str, key: str, value: object, *, append: bool = False) -> str:
+    """Return `metadata` with `key` set (or `value` appended to a list at `key`).
+
+    A payload that is not a JSON object is returned untouched: rewriting it would destroy the
+    script's own output, and the reason is already recorded in outcome_error_reason.
+    """
+    try:
+        parsed = json.loads(metadata) if metadata else {}
+    except (json.JSONDecodeError, TypeError):
+        return metadata
+    if not isinstance(parsed, dict):
+        return metadata
+    if append:
+        existing = parsed.get(key)
+        items = list(existing) if isinstance(existing, list) else []
+        items.append(value)
+        parsed[key] = items
+    else:
+        parsed[key] = value
+    return json.dumps(parsed)
+
+
+def _sanity_failures(sanity_exprs: list[str], result: dict) -> list[str]:
+    """Return ``sanity:<expr>`` for each `[observe].sanity` entry that is false, NULL, or unevaluable.
+
+    Evaluated exactly as outcome conditions are (`single_row_projection` over the result dict,
+    DuckDB ``SELECT (<expr>)``). A missing field raises in DuckDB and counts as a failure, as
+    does an empty result: nothing was measured, so no instrument check can have passed.
+    """
+    failures: list[str] = []
+    for expr in sanity_exprs:
+        ok = False
+        if result:
+            try:
+                rows = duckdb.execute(
+                    f"SELECT ({expr}) FROM (SELECT {single_row_projection(result)})"
+                ).fetchall()
+                value = rows[0][0] if rows else None
+                ok = value is not None and bool(value)
+            except Exception as e:
+                logger.debug(f"sanity expression {expr!r} did not evaluate: {e}")
+        if not ok:
+            failures.append(f"sanity:{expr}")
+    return failures
+
+
+def _apply_observation_precedence(
+    sidecar: Sidecar,
+    epistemic_class: str,
+    metadata: str,
+    bth_output_dir: Path,
+    resolved_mode: str,
+) -> tuple[str, str, str | None, str]:
+    """Outcome precedence for exploratory and calibrating runs that exited 0 (spec §3.2, rows 3-5).
+
+    Returns (outcome, outcome_error_reason, tentative_outcome, metadata). A failed sanity check
+    short-circuits to ``invalid_measurement`` with no tentative label. Otherwise the run is
+    ``observed``, and any `[outcomes]` label is kept as ``tentative_outcome`` only. A declared
+    `[observe].outputs` file that is missing is a warning in metadata and changes nothing else.
+    """
+    observe = sidecar.observe
+    if epistemic_class == "exploratory" and observe is not None and observe.sanity:
+        failures = _sanity_failures(observe.sanity, _parse_result_dict(metadata))
+        if failures:
+            reason = "; ".join(failures)
+            metadata = _with_metadata_key(metadata, "sanity_failed", reason)
+            return "invalid_measurement", reason, None, metadata
+
+    if epistemic_class == "exploratory" and observe is not None and observe.outputs:
+        present = {p.name for p in bth_output_dir.rglob("*") if p.is_file()}
+        for name in observe.outputs:
+            if name not in present:
+                metadata = _with_metadata_key(
+                    metadata, "warnings", f"missing_output:{name}", append=True
+                )
+
+    tentative: str | None = None
+    reason = ""
+    if sidecar.outcomes:
+        tentative, reason = _evaluate_sidecar_outcome(sidecar, metadata, resolved_mode)
+        if tentative != "error":
+            reason = ""
+    return "observed", reason, tentative, metadata
 
 
 def _unresolved_outcome_warning(
@@ -816,6 +937,14 @@ def _run_script_impl(
         sidecar_mode_str = "declared"
     else:
         sidecar_mode_str = ""
+    # Epistemic class (spec §3.1) and agent session are fixed at run start and never rewritten:
+    # editing the sidecar afterwards must not change what this run was recorded as.
+    epistemic_class = (
+        None if no_sidecar else _resolve_run_epistemic_class(sidecar, script_path, catalog_dir)
+    )
+    agent_session = (
+        os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("BTH_AGENT_SESSION") or None
+    )
     run = Run(
         project_slug=project_slug,
         command=" ".join(argv),
@@ -836,6 +965,8 @@ def _run_script_impl(
         campaign_id=resolved_campaign_id or "",
         script_sha256=script_sha256_val,
         stage_name=sidecar.stage_name if sidecar else None,
+        epistemic_class=epistemic_class,
+        agent_session=agent_session,
         # (#3717) Propagate claim-tier discriminability from the sidecar. The warm columns and
         # the cool->warm compact path already existed (#2276), but nothing ever populated them
         # AT THE ORIGIN, so runs.claim_discriminates was NULL for all 1418 runs in the catalog
@@ -1173,6 +1304,9 @@ def _run_script_impl(
 
     outcome = ""
     outcome_error_reason = ""
+    # Initialised before the exit guard so the non-zero exit path can set it for exploratory and
+    # calibrating runs (spec §3.2); the observation precedence block below only runs for exit 0.
+    tentative_outcome = None
 
     # Exit code guard: a non-zero exit defaults to outcome="error" -- an infrastructure
     # failure, not a pre-registered scientific result. But a sidecar whose script signals a
@@ -1188,7 +1322,32 @@ def _run_script_impl(
     # per-run BTH_RESULTS_PATH temp file is inherently fresh (unique per run id); a fallback
     # file is trusted here only if its mtime is >= the wall-clock timestamp captured right
     # before this run's subprocess was spawned).
-    if exit_code != 0:
+    if exit_code != 0 and epistemic_class in ("exploratory", "calibrating"):
+        # Observation runs (spec §3.2): a non-zero exit is an error, never a verdict. A fresh,
+        # complete payload's evaluated label is kept as tentative_outcome only, for the record.
+        outcome = "error"
+        outcome_error_reason = f"exit_code={exit_code}"
+        payload_is_fresh = result_emission.source == "env_var" or (
+            result_emission.mtime is not None and result_emission.mtime >= spawn_wall_time
+        )
+        if sidecar is not None and payload_is_fresh:
+            try:
+                meta_for_completeness = json.loads(metadata)
+            except (json.JSONDecodeError, TypeError):
+                meta_for_completeness = None
+            if _result_schema_complete(meta_for_completeness, sidecar):
+                candidate_outcome, candidate_reason = _evaluate_sidecar_outcome(
+                    sidecar, metadata, resolved_mode
+                )
+                # Like the legacy guard ("never a pass on a failed process"), a crash keeps no
+                # pass-direction label, not even a tentative one.
+                if candidate_outcome not in ("error", "unknown") and (
+                    candidate_outcome not in derive_pass_labels(sidecar)
+                ):
+                    tentative_outcome = candidate_outcome
+                elif candidate_outcome == "error" and candidate_reason:
+                    outcome_error_reason = f"exit_code={exit_code}; {candidate_reason}"
+    elif exit_code != 0:
         outcome = "error"
         outcome_error_reason = f"exit_code={exit_code}"
         payload_is_fresh = result_emission.source == "env_var" or (
@@ -1228,7 +1387,8 @@ def _run_script_impl(
                     # queryable rather than dropping it behind an empty reason.
                     outcome = candidate_outcome
                     outcome_error_reason = f"exit_code={exit_code}"
-    elif sidecar is not None:
+    elif sidecar is not None and epistemic_class not in ("exploratory", "calibrating"):
+        # Exploratory and calibrating runs take the observation precedence below instead (§3.2).
         outcome, outcome_error_reason = _evaluate_sidecar_outcome(sidecar, metadata, resolved_mode)
 
     # A clean exit whose outcome could not be resolved used to be completely silent.
@@ -1248,9 +1408,17 @@ def _run_script_impl(
         output_paths = list(output_paths) + new_paths
         event("run.output_dir_discovered", count=len(new_paths), bth_output_dir=str(bth_output_dir))
 
+    # Observation precedence (spec §3.2 rows 3-5): exploratory and calibrating runs that exited 0
+    # store `observed`, with any [outcomes] label kept as tentative_outcome. A failed sanity check
+    # short-circuits to invalid_measurement. Runs with a non-zero exit were handled by the guard.
+    if sidecar is not None and exit_code == 0 and epistemic_class in ("exploratory", "calibrating"):
+        outcome, outcome_error_reason, tentative_outcome, metadata = _apply_observation_precedence(
+            sidecar, epistemic_class, metadata, bth_output_dir, resolved_mode
+        )
+
     # Populate outcome_is_residual flag
     outcome_is_residual = False
-    if sidecar and outcome and outcome not in ("unknown", "", "error"):
+    if sidecar and outcome and outcome not in ("unknown", "", "error", "observed"):
         spec = sidecar.outcomes.get(outcome)
         if spec:
             outcome_is_residual = getattr(spec, "is_residual", False)
@@ -1299,6 +1467,7 @@ def _run_script_impl(
         metadata=metadata,
         outcome=outcome,
         outcome_error_reason=outcome_error_reason,
+        tentative_outcome=tentative_outcome,
         outcome_is_residual=outcome_is_residual,
         adversarial_check_status=adversarial_check_status,
         adversarial_check_result=adversarial_check_result,
@@ -1329,7 +1498,12 @@ def _run_script_impl(
             from bathos.workspace import resolve_workspace
 
             ws_root = resolve_workspace(cwd).fs_root
-            if is_failure_outcome(sidecar, outcome):
+            # Exploratory and calibrating runs record an observation, not a verdict, so no
+            # outcome_failed obligation opens whatever the tentative label or invalid_measurement
+            # (spec §3.2, C5).
+            if epistemic_class not in ("exploratory", "calibrating") and is_failure_outcome(
+                sidecar, outcome
+            ):
                 maybe_open(
                     ws_root,
                     "run",
