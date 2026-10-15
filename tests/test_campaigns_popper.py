@@ -374,3 +374,20 @@ def test_backward_compat_existing_campaign_row(warm_db):
     ).fetchone()
     assert row is not None
     assert row[0] is None
+
+
+def test_observed_outcome_is_evalue_neutral(tmp_path, warm_db):
+    """`observed` (exploratory/calibrating) is a non-verdict: e-value 1.0, never a threshold lock."""
+    sidecar_path = _write_popper_sidecar(tmp_path, null=0.30, alt=0.75, threshold=20.0)
+    campaign = create_campaign(warm_db, name="Observed", project_slug="test", mode="sequential")
+
+    run_id = str(uuid.uuid4())
+    _insert_run(warm_db, run_id, "observed", str(sidecar_path))
+
+    add_run_to_campaign(warm_db, campaign.id, run_id)
+
+    evalue = warm_db.execute(
+        "SELECT evalue FROM campaign_runs WHERE campaign_id = ? AND run_id = ?",
+        [campaign.id, run_id],
+    ).fetchone()[0]
+    assert abs(evalue - 1.0) < 1e-9
