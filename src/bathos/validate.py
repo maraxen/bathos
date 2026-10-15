@@ -34,6 +34,31 @@ class ValidationError:
 class ValidationResult:
     ok: bool
     errors: list[ValidationError] = field(default_factory=list)
+    # Advisory findings that never flip `ok` (e.g. unknown [experiment] keys, debt #2195).
+    warnings: list[str] = field(default_factory=list)
+
+
+# Likely misspellings that difflib's similarity cutoff would not catch on its own.
+_EXPERIMENT_KEY_ALIASES = {"stage": "stage_name"}
+
+
+def _unknown_experiment_key_warnings(sidecar: Sidecar) -> list[str]:
+    """One warning per unrecognised [experiment] key, with a did-you-mean if one is close."""
+    import difflib
+
+    from bathos.sidecar import EXPERIMENT_KEYS
+
+    warnings: list[str] = []
+    for key in sidecar.unknown_experiment_keys:
+        suggestion = _EXPERIMENT_KEY_ALIASES.get(key)
+        if suggestion is None:
+            close = difflib.get_close_matches(key, sorted(EXPERIMENT_KEYS), n=1, cutoff=0.6)
+            suggestion = close[0] if close else None
+        msg = f"experiment.{key}: unknown key in [experiment] -- it is ignored"
+        if suggestion:
+            msg += f" (did you mean '{suggestion}'?)"
+        warnings.append(msg)
+    return warnings
 
 
 def validate_popper_block(
@@ -500,6 +525,7 @@ def validate_sidecar(
     Returns ValidationResult with ok=True and errors=[] if valid, or ok=False with a list of errors.
     """
     errors = []
+    warnings = _unknown_experiment_key_warnings(sidecar)
 
     # ── [review] block structural validation (build-order step 2) ────────────────
     # Advisory tier: this validates SHAPE only. Whether the review is adequate is the Review
@@ -585,7 +611,7 @@ def validate_sidecar(
                 field="outcomes",
                 reason="No [outcomes] section found",
             )
-        return ValidationResult(ok=False, errors=errors)
+        return ValidationResult(ok=False, errors=errors, warnings=warnings)
 
     # Each branch must have condition, decision, reasoning
     for label, spec in sidecar.outcomes.items():
@@ -728,4 +754,4 @@ def validate_sidecar(
     if claim is not None:
         errors.extend(validate_claim_discriminability(sidecar, claim, sidecar_path))
 
-    return ValidationResult(ok=len(errors) == 0, errors=errors)
+    return ValidationResult(ok=len(errors) == 0, errors=errors, warnings=warnings)

@@ -26,7 +26,9 @@ from bathos.anchor import find_anchors, get_anchor, register_anchor
 # Import core modules
 from bathos.archive import archive as archive_runs
 from bathos.authoring.models import ClaimPayload
+from bathos.blast_radius import _UNBOUNDED_SCAN_LIMIT
 from bathos.campaigns import (
+    CAMPAIGN_MODES,
     CampaignError,
     add_run_to_campaign,
     conclude_campaign,
@@ -38,7 +40,7 @@ from bathos.campaigns import (
 from bathos.capability import probe_capabilities
 from bathos.catalog import init_catalog
 from bathos.checker import check_runs
-from bathos.cli_common import require_project_slug
+from bathos.cli_common import normalise_output_paths, normalise_tags, require_project_slug
 from bathos.compact import compact as compact_catalog
 from bathos.config import default_catalog_dir, find_project_config, load_project_config
 from bathos.errors import RESOLUTION_HINTS, BathosErrorCode
@@ -287,7 +289,8 @@ def list_runs_tool(
         status: Filter by run status
 
     Returns:
-        Dict with runs array and count
+        Dict with runs array, count, the effective limit, and truncated (True when
+        more matching runs exist than were returned)
     """
     from bathos.cli_common import parse_since
 
@@ -299,9 +302,11 @@ def list_runs_tool(
             project=project or None,
             status=status or None,
         )
-        runs = runs[:limit]
     else:
-        runs = list_runs(cat_dir, limit=limit)
+        # Fetch one extra row so truncation is detectable without a COUNT query.
+        runs = list_runs(cat_dir, limit=limit + 1)
+    truncated = len(runs) > limit
+    runs = runs[:limit]
     runs_json = [
         {
             "id": r.id,
@@ -315,7 +320,12 @@ def list_runs_tool(
         }
         for r in runs
     ]
-    return {"runs": runs_json, "count": len(runs_json)}
+    return {
+        "runs": runs_json,
+        "count": len(runs_json),
+        "limit": limit,
+        "truncated": truncated,
+    }
 
 
 # Same wire()-closure/PEP-563 workaround as run_cli_tool's `args` above: a
@@ -1491,7 +1501,11 @@ def check_tool(
 
     cat_dir = _get_catalog_dir(catalog_dir or None)
     proj_root = Path(project_root) if project_root else Path.cwd()
-    results = check_runs(cat_dir, proj_root, status_filter=status_filter)
+    # check_runs() defaults to limit=50 over an unordered scan, which would silently drop
+    # an arbitrary subset of runs on a larger catalog (debt #1476) -- scan them all.
+    results = check_runs(
+        cat_dir, proj_root, status_filter=status_filter, limit=_UNBOUNDED_SCAN_LIMIT
+    )
     stale_count = sum(1 for r in results if r.status == "STALE")
     results_json = [
         {
@@ -1771,6 +1785,35 @@ def log_restore_tool(project_root: str = "") -> dict:
     }
 
 
+def _bare_script_argv(script_path: str, args: list[str], cwd: Path) -> tuple[list[str], str | None]:
+    """argv for a bare ``.py`` script, plus an optional warning (debt #2236).
+
+    ``sys.executable`` is bathos's OWN tool-isolated interpreter, so a project script that
+    imports project-local packages dies with ModuleNotFoundError. When the workspace (cwd)
+    has an existing ``.venv`` and ``uv`` is on PATH, run through ``uv run --no-sync python``
+    (``--no-sync``: a bare ``uv run`` silently re-syncs and reverts hand-installed wheels).
+    A ``pyproject.toml`` alone is not enough: ``uv run`` would then create a fresh, empty
+    ``.venv`` in the project as a side effect. Otherwise keep the old behaviour but say so.
+    """
+    import shutil
+
+    in_project = (cwd / ".venv").is_dir()
+    if in_project and shutil.which("uv"):
+        return ["uv", "run", "--no-sync", "python", script_path] + args, None
+    if in_project:
+        reason = "`uv` was not found on PATH, so the project venv could not be used"
+    else:
+        reason = (
+            "no .venv found in the working directory (create one with `uv sync`; "
+            "a pyproject.toml alone is not used, to avoid creating a venv implicitly)"
+        )
+    return [sys.executable, script_path] + args, (
+        f"script ran under bathos's own interpreter ({sys.executable}), not a project "
+        f"venv: {reason}. Project-local imports may fail; pass an explicit command "
+        "(e.g. script_path='uv', args=['run', 'python', 'script.py']) to choose one."
+    )
+
+
 def run_tool(
     script_path: str = "",
     args: list[str] | None = None,
@@ -1811,10 +1854,8 @@ def run_tool(
         return {"error": "script_path parameter is required"}
     if args is None:
         args = []
-    if output_paths is None:
-        output_paths = []
-    if tags is None:
-        tags = []
+    output_paths = normalise_output_paths(output_paths)
+    tags = normalise_tags(tags)
 
     # Construct argv. Two shapes reach this function under the one `script_path`
     # + `*args` signature, and they need DIFFERENT treatment (debt: `bth run`
@@ -1842,8 +1883,9 @@ def run_tool(
     #    (e.g. proxide) is never installed into bathos's own tool venv, so
     #    case 1's prepend fails every such script with a ModuleNotFoundError
     #    that has nothing to do with the script itself.
+    interpreter_warning: str | None = None
     if script_path.endswith(".py"):
-        argv = [sys.executable, script_path] + args
+        argv, interpreter_warning = _bare_script_argv(script_path, args, Path.cwd())
     else:
         argv = [script_path] + args
 
@@ -1884,12 +1926,15 @@ def run_tool(
     # already reads post-call to recover the id without changing run_script's shape.
     run_id = run_uuid_var.get(None) or ""
 
-    return {
+    response = {
         "script_path": script_path,
         "run_id": run_id,
         "exit_code": exit_code,
         "success": exit_code == 0,
     }
+    if interpreter_warning:
+        response["warning"] = interpreter_warning
+    return response
 
 
 @cisternal.tool(registry="bathos-cli", name="run", cli_name="run")
@@ -1971,24 +2016,26 @@ def campaign_create_tool(
     catalog_dir: str = "",
     question: str = "",
     hypothesis: str = "",
+    parent_campaign_id: str = "",
 ) -> dict:
     """Create a new experiment campaign.
 
     Args:
         name: Campaign name
-        mode: Campaign mode ('exploration' or 'confirmation')
+        mode: Campaign mode ('exploration', 'confirmation', or 'sequential')
         project_slug: Project slug (default: from config or 'default')
         catalog_dir: Catalog directory (empty = use default)
         question: Research question (optional)
         hypothesis: Research hypothesis (optional)
+        parent_campaign_id: Parent campaign ID, for lineage (optional)
 
     Returns:
         Dict with campaign details or error
     """
     if not name:
         return {"error": "name parameter is required"}
-    if mode not in ("exploration", "confirmation"):
-        return {"error": f"mode must be 'exploration' or 'confirmation', got {mode!r}"}
+    if mode not in CAMPAIGN_MODES:
+        return {"error": f"mode must be one of {list(CAMPAIGN_MODES)}, got {mode!r}"}
 
     cat_dir = _get_catalog_dir(catalog_dir or None)
     slug = project_slug or _get_project_slug()
@@ -2017,6 +2064,7 @@ def campaign_create_tool(
             mode=mode,
             question=question or None,
             hypothesis=hypothesis or None,
+            parent_campaign_id=parent_campaign_id or None,
             catalog_dir=cat_dir,
         )
         result = {
@@ -2121,6 +2169,7 @@ def campaign_conclude_tool(
     conclusion: str = "",
     catalog_dir: str = "",
     negative_check: str = "",
+    workspace_root: str = "",
 ) -> dict:
     """Conclude a campaign with an outcome label.
 
@@ -2131,6 +2180,8 @@ def campaign_conclude_tool(
         catalog_dir: Catalog directory (empty = use default)
         negative_check: Falsification backing / hedge for a negative outcome label (BP-3);
             required when outcome_label is a negative claim and a claim is registered.
+        workspace_root: Project workspace root that registered claim paths resolve
+            against (empty = auto-resolve from the server's cwd)
 
     Returns:
         Dict with conclusion confirmation
@@ -2154,6 +2205,9 @@ def campaign_conclude_tool(
             campaign_id,
             outcome_label,
             conclusion or "",
+            workspace_root=(
+                Path(workspace_root).expanduser().resolve() if workspace_root else None
+            ),
             negative_check=negative_check or None,
             catalog_dir=cat_dir,
         )
@@ -2909,6 +2963,7 @@ async def mcp_campaign_create_tool(
     catalog_dir: str = "",
     question: str = "",
     hypothesis: str = "",
+    parent_campaign_id: str = "",
     token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
     """Create a new experiment campaign.
@@ -2921,6 +2976,7 @@ async def mcp_campaign_create_tool(
         catalog_dir=catalog_dir,
         question=question,
         hypothesis=hypothesis,
+        parent_campaign_id=parent_campaign_id,
     )
 
 
@@ -2961,6 +3017,7 @@ async def mcp_campaign_conclude_tool(
     conclusion: str = "",
     catalog_dir: str = "",
     negative_check: str = "",
+    workspace_root: str = "",
     token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
     """Conclude a campaign with an outcome label.
@@ -2972,6 +3029,7 @@ async def mcp_campaign_conclude_tool(
         conclusion=conclusion,
         catalog_dir=catalog_dir,
         negative_check=negative_check,
+        workspace_root=workspace_root,
     )
 
 
@@ -3938,8 +3996,11 @@ def validate_sidecar_tool(
     from bathos.sidecar import SidecarError, parse_sidecar
     from bathos.validate import validate_sidecar as validate_sidecar_impl
 
-    def _fail(errors: list[str]) -> dict:
-        return {"validation_ok": False, "errors": errors, "error": "; ".join(errors)}
+    def _fail(errors: list[str], warnings: list[str] | None = None) -> dict:
+        out = {"validation_ok": False, "errors": errors, "error": "; ".join(errors)}
+        if warnings:
+            out["warnings"] = warnings
+        return out
 
     sidecar_path = Path(path)
     if not sidecar_path.exists():
@@ -3964,9 +4025,12 @@ def validate_sidecar_tool(
 
     if result.errors:
         error_msgs = [f"{e.field}: {e.message}" for e in result.errors]
-        return _fail(error_msgs)
+        return _fail(error_msgs, result.warnings)
 
-    return {"validation_ok": True, "path": path}
+    ok_result: dict = {"validation_ok": True, "path": path}
+    if result.warnings:
+        ok_result["warnings"] = result.warnings
+    return ok_result
 
 
 @cisternal.tool(registry="bathos")
