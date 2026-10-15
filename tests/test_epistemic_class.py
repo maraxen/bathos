@@ -325,7 +325,17 @@ def test_sanity_hidden_threshold_is_rejected(expr):
 
 @pytest.mark.parametrize(
     "expr",
-    ["x > 0", "n >= 1", "x IS NOT NULL", "NOT (x < 0) AND n > 0", "x = x"],
+    [
+        "x > 0",
+        "n >= 1",
+        "x IS NOT NULL",
+        "NOT (x < 0) AND n > 0",
+        "x = x",
+        # Functions over result fields with no literal beneath them are instrument checks.
+        "isfinite(x)",
+        "abs(x) <= abs(n)",
+        "x - n < 0",
+    ],
 )
 def test_sanity_allowlist_accepts_plain_checks(expr):
     from bathos.sidecar import check_sanity_expr
@@ -387,3 +397,17 @@ def test_invalid_measurement_has_neutral_evalue():
     s.popper_weights = {"invalid_measurement": 5.0}
     assert compute_evalue(s, "invalid_measurement") == 1.0
     assert compute_evalue(s, "pass") == pytest.approx(8.0)
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "abs(x) > abs(1)",  # even an allowed literal is refused under a function
+        "count(*) >= 1",  # function reads no result field
+        "isfinite(CAST(x AS DOUBLE))",  # cast beneath a function
+    ],
+)
+def test_sanity_function_rules(expr):
+    from bathos.sidecar import check_sanity_expr
+
+    assert check_sanity_expr(expr, SCHEMA_XN) != [], f"expected {expr!r} to be rejected"

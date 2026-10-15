@@ -825,8 +825,10 @@ def parse_source(s: str) -> SourceRef | None:
 # --- sanity expressions (spec §3.2 validator rules) ---------------------------------------------
 
 # Allowlist of serialized expression node classes (spec 261015 §3.2). Every class not named here
-# is rejected, so a new DuckDB node type (FUNCTION, CASE, SUBQUERY, BETWEEN, ...) cannot slip in.
-# CAST is admitted only as the bare TRUE/FALSE literal form (see _sanity_bool_cast_ok).
+# is rejected, so a new DuckDB node type (CASE, SUBQUERY, BETWEEN, WINDOW, ...) cannot slip in.
+# CAST is admitted only as the bare TRUE/FALSE literal form (see _sanity_bool_cast_ok). FUNCTION
+# is admitted only over result fields with no literal anywhere beneath it (see _sanity_walk), so
+# `isfinite(x)` is an instrument check while `x > 1+1+1` or `sum(x) FILTER (WHERE x > 5)` is not.
 _SANITY_NODE_CLASSES = {
     "COLUMN_REF",
     "CONSTANT",
@@ -834,6 +836,7 @@ _SANITY_NODE_CLASSES = {
     "CONJUNCTION",
     "OPERATOR",
     "CAST",
+    "FUNCTION",
 }
 # OPERATOR types admitted. `x IN (...)` is an OPERATOR of type COMPARE_IN, so it is rejected here.
 _SANITY_OPERATOR_TYPES = {"OPERATOR_NOT", "OPERATOR_IS_NULL", "OPERATOR_IS_NOT_NULL"}
@@ -867,6 +870,16 @@ def _sanity_children(node: dict) -> list[dict]:
         elif isinstance(value, list):
             kids.extend(v for v in value if isinstance(v, dict))
     return kids
+
+
+def _sanity_descendants(node: dict) -> list[dict]:
+    out: list[dict] = []
+    stack = _sanity_children(node)
+    while stack:
+        n = stack.pop()
+        out.append(n)
+        stack.extend(_sanity_children(n))
+    return out
 
 
 def _sanity_constant_ok(node: dict) -> bool:
@@ -932,7 +945,22 @@ def _sanity_walk(node: dict, fields: set[str], errors: list[str], expr: str) -> 
                 f"sanity {expr!r}: operator not allowed ({op_type}); only NOT, IS NULL, IS NOT NULL"
             )
             return
-    # COMPARISON and CONJUNCTION are allowed as written; their operands are checked below.
+    elif cls == "FUNCTION":
+        # Spec §3.2: a function (arithmetic included) may not carry any literal, even 0 or 1,
+        # because that is how a cutoff hides (`x > 1+1+1`). The walk is over the whole subtree,
+        # so a literal under `filter`/`order_bys` counts too. It must also read a result field.
+        descendants = _sanity_descendants(node)
+        if any(d.get("class") in ("CONSTANT", "CAST") for d in descendants):
+            errors.append(
+                f"sanity {expr!r}: literal inside a function or arithmetic expression "
+                "(e.g. 'x > 1+1+1') is not allowed"
+            )
+            return
+        if not any(d.get("class") == "COLUMN_REF" for d in descendants):
+            errors.append(f"sanity {expr!r}: function call must reference a result field")
+            return
+    # COMPARISON, CONJUNCTION and an admitted FUNCTION are allowed as written; their operands are
+    # checked below.
     for kid in _sanity_children(node):
         _sanity_walk(kid, fields, errors, expr)
 
