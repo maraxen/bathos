@@ -182,6 +182,9 @@ def lint_project(project_root: Path) -> list[LintIssue]:
     # Tier-1 check: uncorrected multiple-comparisons in outcome conditions (debt #1071)
     issues.extend(check_multiple_comparisons(project_root))
 
+    # Epistemic-class contract: stage_name canonicality, restage hints, source grammar (spec §3.1-3.2)
+    issues.extend(check_epistemic_sidecars(project_root))
+
     return issues
 
 
@@ -939,6 +942,86 @@ def check_threshold_basis(project_root: Path) -> list[LintIssue]:
                     )
                 )
 
+    return issues
+
+
+def check_epistemic_sidecars(project_root: Path) -> list[LintIssue]:
+    """Tier-1/Tier-2 lint for the epistemic-class contract (spec §3.1, §3.2 source grammar).
+
+    - ERROR: a declared `stage_name` that is not canonical (a typo fails closed as confirmatory).
+    - WARNING: `exploration`/`calibration` declared without its `[observe]`/`[calibrate]` block.
+      Lint does not know prior runs, so it warns unconditionally; the validator decides error vs.
+      legacy at run time.
+    - WARNING: a `source` on a confirmatory/legacy branch that `parse_source` rejects.
+    """
+    from bathos.sidecar import (
+        CANONICAL_STAGES,
+        SidecarKind,
+        parse_sidecar,
+        parse_source,
+        resolve_epistemic_class,
+    )
+
+    issues: list[LintIssue] = []
+    for sidecar_path in iter_project_sidecars(project_root):
+        try:
+            sidecar = parse_sidecar(sidecar_path)
+        except Exception:
+            # Unparseable sidecars are reported by the other sidecar checks.
+            continue
+        if sidecar.kind != SidecarKind.EXPERIMENT or not sidecar.stage_name_declared:
+            continue
+
+        raw = sidecar.stage_name_raw
+        if raw not in CANONICAL_STAGES:
+            issues.append(
+                LintIssue(
+                    path=sidecar_path,
+                    directory="sidecar",
+                    issue="non_canonical_stage_name",
+                    severity=IssueSeverity.ERROR,
+                    detail=(
+                        f"non-canonical stage_name {raw!r}; treated as confirmatory; "
+                        f"must be one of {sorted(CANONICAL_STAGES)}"
+                    ),
+                )
+            )
+            continue
+
+        if (raw == "exploration" and sidecar.observe is None) or (
+            raw == "calibration" and sidecar.calibrate is None
+        ):
+            block = "[observe]" if raw == "exploration" else "[calibrate]"
+            issues.append(
+                LintIssue(
+                    path=sidecar_path,
+                    directory="sidecar",
+                    issue="restage",
+                    severity=IssueSeverity.WARNING,
+                    detail=(
+                        f"stage_name {raw!r} without {block} block; "
+                        "restage: add [observe]/[calibrate] or choose a confirmatory stage"
+                    ),
+                )
+            )
+
+        cls = resolve_epistemic_class(sidecar, stem_has_prior_runs=True)
+        if cls in ("confirmatory", "legacy"):
+            for label, spec in sidecar.outcomes.items():
+                if spec.source and parse_source(spec.source) is None:
+                    issues.append(
+                        LintIssue(
+                            path=sidecar_path,
+                            directory="sidecar",
+                            issue="malformed_source",
+                            severity=IssueSeverity.WARNING,
+                            detail=(
+                                f"outcomes.{label}.source {spec.source!r} is not in the closed grammar "
+                                "(lit:<ref> | run:<id>:<field> | sesoi:<value>:<why> | "
+                                "provisional:<why> | card:<id>)"
+                            ),
+                        )
+                    )
     return issues
 
 

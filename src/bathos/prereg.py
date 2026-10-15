@@ -233,6 +233,37 @@ def check_sidecar_drift(script_path: Path, catalog_dir: Path, current_sidecar_sh
     return baseline != current_sidecar_sha256
 
 
+def _stem_has_prior_runs(script_path: Path, catalog_dir: Path | None) -> bool:
+    """Return True if any catalog run was recorded for `script_path` (spec §3.1 "stem has runs").
+
+    Same lookup as `check_sidecar_drift`: warm DuckDB first (substring match on `command`),
+    then the cool-tier Parquet scan. Fail-safe: any lookup error returns False, which is the
+    stricter answer (a missing stem is treated as new, so migration warnings become errors).
+    """
+    if catalog_dir is None:
+        return False
+    script_str = str(script_path.resolve())
+    try:
+        if catalog_readable(catalog_dir):
+            con = connect_read(catalog_dir, read_only=True)
+            try:
+                rows = con.execute(
+                    "SELECT 1 FROM runs WHERE command LIKE ? LIMIT 1",
+                    [f"%{script_str}%"],
+                ).fetchall()
+                if rows:
+                    return True
+            finally:
+                if not con.closed:
+                    con.close()
+        from bathos.query import list_runs
+
+        return any(script_str in (r.command or "") for r in list_runs(catalog_dir, limit=100_000))
+    except Exception as e:
+        logger.warning(f"Prior-run lookup failed for {script_path}: {e}")
+        return False
+
+
 def check_component_sidecar_drift(
     component_id: str, catalog_dir: Path, current_component_sidecar_sha256: str
 ) -> bool:
@@ -431,7 +462,14 @@ def gate_check(
         return GateResult(ok=False, mode=mode, bundle=bundle, error_payload=payload)
 
     sidecar = parse_sidecar(bundle.path)
-    validation = validate_sidecar(sidecar, sidecar_path=bundle.path)
+    validation = validate_sidecar(
+        sidecar,
+        sidecar_path=bundle.path,
+        stem_has_prior_runs=_stem_has_prior_runs(script_path, catalog_dir),
+    )
+    # Warnings (e.g. migration-window missing sources) are surfaced but never deny the gate.
+    for w in validation.warnings:
+        logger.warning(f"sidecar warning for {script_path.name}: [{w.field}] {w.message}")
 
     if not validation.ok:
         payload = _gate_failure_payload(
