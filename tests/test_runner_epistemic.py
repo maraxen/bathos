@@ -248,3 +248,16 @@ def test_legacy_nonzero_exit_still_stores_fail_outcome(tmp_path, tmp_catalog):
     assert run.outcome == "fail"
     assert run.outcome_error_reason == "exit_code=1"
     assert run.tentative_outcome is None
+
+
+def test_exploratory_nonzero_exit_keeps_no_pass_label(tmp_path, tmp_catalog, monkeypatch):
+    """A crash keeps no pass-direction label, not even a tentative one (mirrors the legacy guard)."""
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_CRASH_AFTER_FAIL_SCRIPT",
+        _CRASH_AFTER_FAIL_SCRIPT.replace('{"x": -1.0}', '{"x": 1.0}'),
+    )
+    run = _crash_run_with(tmp_path, tmp_catalog, _EXPLORATORY_SIDECAR, name="run_crash_pass")
+    assert run.epistemic_class == "exploratory"
+    assert run.outcome == "error"
+    assert run.tentative_outcome is None

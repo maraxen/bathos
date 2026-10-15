@@ -43,6 +43,7 @@ from bathos.sidecar import (
     DifferentialBlock,
     Sidecar,
     SidecarError,
+    derive_pass_labels,
     evaluate_outcome,
     is_in_enforced_dir,
     parse_sidecar,
@@ -1143,7 +1144,11 @@ def _run_script_impl(
                 candidate_outcome, candidate_reason = _evaluate_sidecar_outcome(
                     sidecar, metadata, resolved_mode
                 )
-                if candidate_outcome not in ("error", "unknown"):
+                # Like the legacy guard ("never a pass on a failed process"), a crash keeps no
+                # pass-direction label, not even a tentative one.
+                if candidate_outcome not in ("error", "unknown") and (
+                    candidate_outcome not in derive_pass_labels(sidecar)
+                ):
                     tentative_outcome = candidate_outcome
                 elif candidate_outcome == "error" and candidate_reason:
                     outcome_error_reason = f"exit_code={exit_code}; {candidate_reason}"
