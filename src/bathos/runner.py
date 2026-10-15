@@ -1108,6 +1108,9 @@ def _run_script_impl(
 
     outcome = ""
     outcome_error_reason = ""
+    # Initialised before the exit guard so the non-zero exit path can set it for exploratory and
+    # calibrating runs (spec §3.2); the observation precedence block below only runs for exit 0.
+    tentative_outcome = None
 
     # Exit code guard: a non-zero exit defaults to outcome="error" -- an infrastructure
     # failure, not a pre-registered scientific result. But a sidecar whose script signals a
@@ -1123,7 +1126,28 @@ def _run_script_impl(
     # per-run BTH_RESULTS_PATH temp file is inherently fresh (unique per run id); a fallback
     # file is trusted here only if its mtime is >= the wall-clock timestamp captured right
     # before this run's subprocess was spawned).
-    if exit_code != 0:
+    if exit_code != 0 and epistemic_class in ("exploratory", "calibrating"):
+        # Observation runs (spec §3.2): a non-zero exit is an error, never a verdict. A fresh,
+        # complete payload's evaluated label is kept as tentative_outcome only, for the record.
+        outcome = "error"
+        outcome_error_reason = f"exit_code={exit_code}"
+        payload_is_fresh = result_emission.source == "env_var" or (
+            result_emission.mtime is not None and result_emission.mtime >= spawn_wall_time
+        )
+        if sidecar is not None and payload_is_fresh:
+            try:
+                meta_for_completeness = json.loads(metadata)
+            except (json.JSONDecodeError, TypeError):
+                meta_for_completeness = None
+            if _result_schema_complete(meta_for_completeness, sidecar):
+                candidate_outcome, candidate_reason = _evaluate_sidecar_outcome(
+                    sidecar, metadata, resolved_mode
+                )
+                if candidate_outcome not in ("error", "unknown"):
+                    tentative_outcome = candidate_outcome
+                elif candidate_outcome == "error" and candidate_reason:
+                    outcome_error_reason = f"exit_code={exit_code}; {candidate_reason}"
+    elif exit_code != 0:
         outcome = "error"
         outcome_error_reason = f"exit_code={exit_code}"
         payload_is_fresh = result_emission.source == "env_var" or (
@@ -1178,7 +1202,6 @@ def _run_script_impl(
     # Observation precedence (spec §3.2 rows 3-5): exploratory and calibrating runs that exited 0
     # store `observed`, with any [outcomes] label kept as tentative_outcome. A failed sanity check
     # short-circuits to invalid_measurement. Runs with a non-zero exit were handled by the guard.
-    tentative_outcome = None
     if sidecar is not None and exit_code == 0 and epistemic_class in ("exploratory", "calibrating"):
         outcome, outcome_error_reason, tentative_outcome, metadata = _apply_observation_precedence(
             sidecar, epistemic_class, metadata, bth_output_dir, resolved_mode

@@ -195,3 +195,56 @@ def test_stored_class_is_fixed_at_run_start(tmp_path, tmp_catalog):
 
     stored = read_runs(tmp_catalog)[0]
     assert stored.epistemic_class == "exploratory"
+
+
+_CRASH_AFTER_FAIL_SCRIPT = textwrap.dedent("""
+    import os, json, sys
+    p = os.environ.get("BTH_RESULTS_PATH")
+    if p:
+        json.dump({"x": -1.0}, open(p, "w"))
+    sys.exit(1)
+""")
+
+
+def _crash_run_with(tmp_path: Path, tmp_catalog: Path, sidecar: str, name: str = "run_crash"):
+    """Run a script that writes a complete fail-branch payload and then exits 1."""
+    init_catalog(tmp_catalog)
+    scripts = tmp_path / "scripts" / "explore"
+    scripts.mkdir(parents=True, exist_ok=True)
+    (scripts / f"{name}.py").write_text(_CRASH_AFTER_FAIL_SCRIPT)
+    (scripts / f"{name}.bth.toml").write_text(sidecar)
+    rc = run_script(
+        argv=[sys.executable, str(scripts / f"{name}.py")],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert rc != 0
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    return runs[0]
+
+
+def test_exploratory_nonzero_exit_stays_error_with_tentative_label(
+    tmp_path, tmp_catalog, monkeypatch
+):
+    """Spec §3.2: a crash never becomes a verdict; the fail label survives only as tentative."""
+    monkeypatch.setenv("BTH_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("BTH_OBLIGATION_OUTCOME_FAILED", "1")
+    run = _crash_run_with(tmp_path, tmp_catalog, _EXPLORATORY_SIDECAR)
+    assert run.epistemic_class == "exploratory"
+    assert run.outcome == "error"
+    assert run.outcome_error_reason == "exit_code=1"
+    assert run.tentative_outcome == "fail"
+    assert list_obligations(tmp_path) == []
+
+
+def test_legacy_nonzero_exit_still_stores_fail_outcome(tmp_path, tmp_catalog):
+    """Legacy twin: the non-zero exit guard keeps storing the evaluated fail label as outcome."""
+    run = _crash_run_with(tmp_path, tmp_catalog, _LEGACY_SIDECAR)
+    assert run.epistemic_class == "legacy"
+    assert run.outcome == "fail"
+    assert run.outcome_error_reason == "exit_code=1"
+    assert run.tentative_outcome is None

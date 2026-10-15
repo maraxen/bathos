@@ -1097,7 +1097,12 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                 run.postmortem_summary = pm.summary
                 run.postmortem_asset_links = json.dumps(pm.asset_links)
                 if pm.verdict_override != "none":
-                    run.outcome = pm.verdict_override
+                    # Spec §3.2: exploratory/calibrating runs record an observation, so an
+                    # override is a tentative label only and never replaces outcome.
+                    if run.epistemic_class in ("exploratory", "calibrating"):
+                        run.tentative_outcome = pm.verdict_override
+                    else:
+                        run.outcome = pm.verdict_override
 
             # Collect output metadata
             output_metadata = []
