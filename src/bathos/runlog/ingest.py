@@ -45,16 +45,19 @@ into ingest_watermarks' single VARCHAR `root_id` column the same way the
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import fcntl
 import json
 import os
 import shutil
 import uuid
+from collections.abc import Generator, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 import duckdb
+import pyarrow as pa
 
 from bathos.config import default_catalog_dir
 from bathos.runlog.fold_anchors import fold_anchor
@@ -382,29 +385,83 @@ def _insert_quarantine(
     )
 
 
-def _insert_event(con: duckdb.DuckDBPyConnection, obj: dict) -> None:
+_EVENT_COLUMNS = [
+    "eid",
+    "v",
+    "kind",
+    "entity_key",
+    "entity",
+    "ts",
+    "project",
+    "project_id",
+    "writer",
+    "seq",
+    "main_root",
+    "worktree_root",
+    "origin",
+    "data",
+]
+_EVENT_INSERT_SQL = (
+    f"INSERT INTO events ({', '.join(_EVENT_COLUMNS)}) "  # noqa: S608 -- internal constant
+    f"VALUES ({', '.join('?' for _ in _EVENT_COLUMNS)})"
+)
+# Arrow types matching the `events` DDL in `bathos.index` (`v`/`seq` INTEGER,
+# everything else VARCHAR).
+_EVENT_ARROW_SCHEMA = pa.schema(
+    [(c, pa.int32() if c in ("v", "seq") else pa.string()) for c in _EVENT_COLUMNS]
+)
+
+
+def _event_row(obj: dict) -> list:
+    """The 14 `events` column values for one validated envelope, in
+    `_EVENT_COLUMNS` order. Shared by the per-row and bulk insert paths."""
     entity_json = json.dumps(obj["entity"])
-    con.execute(
-        "INSERT INTO events (eid, v, kind, entity_key, entity, ts, project, project_id, "
-        "writer, seq, main_root, worktree_root, origin, data) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [
-            obj["eid"],
-            obj.get("v"),
-            obj["kind"],
-            entity_json,
-            entity_json,
-            obj["ts"],
-            obj.get("project"),
-            obj.get("project_id"),
-            obj.get("writer"),
-            obj.get("seq"),
-            obj.get("main_root"),
-            obj.get("worktree_root"),
-            obj.get("origin", "live"),
-            json.dumps(obj["data"]),
-        ],
-    )
+    return [
+        obj["eid"],
+        obj.get("v"),
+        obj["kind"],
+        entity_json,
+        entity_json,
+        obj["ts"],
+        obj.get("project"),
+        obj.get("project_id"),
+        obj.get("writer"),
+        obj.get("seq"),
+        obj.get("main_root"),
+        obj.get("worktree_root"),
+        obj.get("origin", "live"),
+        json.dumps(obj["data"]),
+    ]
+
+
+def _insert_event(con: duckdb.DuckDBPyConnection, obj: dict) -> None:
+    con.execute(_EVENT_INSERT_SQL, _event_row(obj))
+
+
+def _bulk_insert_events(con: duckdb.DuckDBPyConnection, rows: list[list]) -> None:
+    """Insert many `_event_row`s in one statement (an Arrow batch registered
+    as a temp view, then `INSERT ... SELECT`), preserving list order.
+
+    If Arrow cannot represent some value under the events schema (e.g. a
+    non-integer `seq`), fall back to the per-row statement so the outcome is
+    exactly what the row-at-a-time path would have produced.
+    """
+    if not rows:
+        return
+    try:
+        columns = {name: [r[i] for r in rows] for i, name in enumerate(_EVENT_COLUMNS)}
+        table = pa.Table.from_pydict(columns, schema=_EVENT_ARROW_SCHEMA)
+    except (pa.ArrowException, TypeError, ValueError, OverflowError):
+        for r in rows:
+            con.execute(_EVENT_INSERT_SQL, r)
+        return
+    view = "_fold_event_batch"
+    cols = ", ".join(_EVENT_COLUMNS)
+    con.register(view, table)
+    try:
+        con.execute(f"INSERT INTO events ({cols}) SELECT {cols} FROM {view}")  # noqa: S608
+    finally:
+        con.unregister(view)
 
 
 def _insert_row(con: duckdb.DuckDBPyConnection, table: str, columns: list[str], row: dict) -> None:
@@ -482,11 +539,162 @@ def _fetch_events_by_kinds(con: duckdb.DuckDBPyConnection, kinds: frozenset[str]
     return [_row_to_event(r) for r in rows]
 
 
-# --- Run fold ----------------------------------------------------------
+# --- Per-batch event lookup -------------------------------------------------
+
+
+class _FoldLookup:
+    """Read cache over `events` for one fold batch (the refold section).
+
+    Every method returns exactly what the uncached helper it replaces would
+    return (same members, same list order). Memoized results are shared, so
+    callers must only read them -- the fold functions build new row dicts and
+    never mutate their input events.
+
+    Valid only while nothing writes `events`. The refold section writes
+    `runs`/`campaigns`/`campaign_runs`/edges/ledgers only, and
+    `fold_roots_into` constructs this strictly after its bulk event insert.
+    """
+
+    def __init__(self, con: duckdb.DuckDBPyConnection) -> None:
+        self.con = con
+        self._kinds: dict[frozenset[str], list[dict]] = {}
+        self._keys: dict[str, list[dict]] = {}
+        self._built = False
+        self._member_campaigns_by_run: dict[str, set[str]] = {}
+        self._started_campaigns_by_run: dict[str, set[str]] = {}
+        self._member_runs_by_campaign: dict[str, set[str]] = {}
+        self._started_runs_by_campaign: dict[object, set[str]] = {}
+        self._run_added_by_run: dict[str, list[dict]] = {}
+        self._run_added_by_campaign: dict[object, list[dict]] = {}
+        self._imported_by_campaign: dict[object, list[dict]] = {}
+
+    def by_kinds(self, kinds: frozenset[str]) -> list[dict]:
+        if kinds not in self._kinds:
+            self._kinds[kinds] = _fetch_events_by_kinds(self.con, kinds)
+        return self._kinds[kinds]
+
+    def events_for_entity_key(self, key: list[str]) -> list[dict]:
+        k = json.dumps(key)
+        if k not in self._keys:
+            self._keys[k] = _fetch_events_by_entity_key(self.con, key)
+        return self._keys[k]
+
+    def prefetch_entity_keys(self, keys: Iterable[list[str]]) -> None:
+        """Fill the entity-key memo for many keys with ONE query. Each key's
+        rows come back in the same (rowid) order a single-key scan yields;
+        keys with no rows memoize as `[]`."""
+        wanted: dict[str, None] = {}
+        for key in keys:
+            k = json.dumps(key)
+            if k not in self._keys:
+                wanted[k] = None
+        if not wanted:
+            return
+        wanted_list = list(wanted)
+        rows = self.con.execute(
+            "SELECT entity_key, eid, kind, entity, ts, project, project_id, writer, seq, "
+            "main_root, worktree_root, origin, data FROM events "
+            "WHERE entity_key IN (SELECT unnest(?::VARCHAR[])) ORDER BY rowid",
+            [wanted_list],
+        ).fetchall()
+        for k in wanted_list:
+            self._keys[k] = []
+        for r in rows:
+            self._keys[r[0]].append(_row_to_event(r[1:]))
+
+    def _ensure_derived(self) -> None:
+        if self._built:
+            return
+        for e in self.by_kinds(_CAMPAIGN_MEMBER_KINDS):
+            entity = e.get("entity") or []
+            if len(entity) >= 2:
+                self._member_campaigns_by_run.setdefault(entity[1], set()).add(entity[0])
+                self._member_runs_by_campaign.setdefault(entity[0], set()).add(entity[1])
+        for e in self.by_kinds(_RUN_STARTED_KINDS):
+            entity = e.get("entity") or []
+            if not entity:
+                continue
+            cid = (e.get("data") or {}).get("campaign_id")
+            if cid:
+                self._started_campaigns_by_run.setdefault(entity[0], set()).add(cid)
+            self._started_runs_by_campaign.setdefault(cid, set()).add(entity[0])
+        for e in self.by_kinds(frozenset({"campaign.run_added"})):
+            entity = e.get("entity") or []
+            if len(entity) >= 2:
+                self._run_added_by_run.setdefault(entity[1], []).append(e)
+            self._run_added_by_campaign.setdefault((e["entity"] or [None])[0], []).append(e)
+        for e in self.by_kinds(frozenset({"campaign_run.imported"})):
+            self._imported_by_campaign.setdefault((e["entity"] or [None])[0], []).append(e)
+        self._built = True
+
+    def campaign_ids_for_run(self, run_id: str) -> set[str]:
+        self._ensure_derived()
+        return set(self._member_campaigns_by_run.get(run_id, ())) | set(
+            self._started_campaigns_by_run.get(run_id, ())
+        )
+
+    def campaign_member_run_ids(self, campaign_id: str) -> set[str]:
+        self._ensure_derived()
+        return set(self._member_runs_by_campaign.get(campaign_id, ())) | set(
+            self._started_runs_by_campaign.get(campaign_id, ())
+        )
+
+    def run_added_events_for_run(self, run_id: str) -> list[dict]:
+        self._ensure_derived()
+        return list(self._run_added_by_run.get(run_id, []))
+
+    def run_added_events_for_campaign(self, campaign_id: str) -> list[dict]:
+        self._ensure_derived()
+        return list(self._run_added_by_campaign.get(campaign_id, []))
+
+    def imported_member_events_for_campaign(self, campaign_id: str) -> list[dict]:
+        self._ensure_derived()
+        return list(self._imported_by_campaign.get(campaign_id, []))
+
+    def linked_run_ids_for_campaign(self, campaign_id: str) -> set[str]:
+        self._ensure_derived()
+        return set(self._started_runs_by_campaign.get(campaign_id, ()))
+
+
+_ACTIVE_FOLD_LOOKUP: contextvars.ContextVar[_FoldLookup | None] = contextvars.ContextVar(
+    "_ACTIVE_FOLD_LOOKUP", default=None
+)
+
+
+@contextlib.contextmanager
+def _fold_lookup_scope(lookup: _FoldLookup) -> Generator[None]:
+    """Make `lookup` the ambient cache for `_compute_campaign_fold`.
+
+    `_cached_campaign_fold` calls `_compute_campaign_fold(con, campaign_id)`
+    with no extra argument: the wave-b test monkeypatches that function with a
+    two-argument stand-in, so the batch cache reaches it through this scope.
+    """
+    token = _ACTIVE_FOLD_LOOKUP.set(lookup)
+    try:
+        yield
+    finally:
+        _ACTIVE_FOLD_LOOKUP.reset(token)
+
+
+def _resolve_lookup(con: duckdb.DuckDBPyConnection, lookup: _FoldLookup | None) -> _FoldLookup:
+    """Explicit `lookup` (if it is for `con`), else the ambient batch cache
+    (if it is for `con`), else a fresh single-use cache."""
+    if lookup is not None and lookup.con is con:
+        return lookup
+    if lookup is None:
+        active = _ACTIVE_FOLD_LOOKUP.get()
+        if active is not None and active.con is con:
+            return active
+    return _FoldLookup(con)
+
+
+# --- Run fold----------------------------------------------------------
 
 
 def _compute_campaign_fold(
-    con: duckdb.DuckDBPyConnection, campaign_id: str
+    con: duckdb.DuckDBPyConnection,
+    campaign_id: str,
+    lookup: _FoldLookup | None = None,
 ) -> tuple[dict, list[dict]]:
     """Pure computation (no writes) of one campaign's fold -- shared by
     `_refold_run` (to look up a single member's `seq_position`/`evalue`) and
@@ -497,29 +705,18 @@ def _compute_campaign_fold(
     two entities (the run, or its campaign) happens to be refolded first in
     a given ingest batch.
     """
-    campaign_events = _fetch_events_by_entity_key(con, [campaign_id])
-    run_added_events = [
-        e
-        for e in _fetch_events_by_kinds(con, frozenset({"campaign.run_added"}))
-        if (e["entity"] or [None])[0] == campaign_id
-    ]
-    imported_member_events = [
-        e
-        for e in _fetch_events_by_kinds(con, frozenset({"campaign_run.imported"}))
-        if (e["entity"] or [None])[0] == campaign_id
-    ]
-    linked_run_ids = {
-        e["entity"][0]
-        for e in _fetch_events_by_kinds(con, _RUN_STARTED_KINDS)
-        if e.get("entity") and (e.get("data") or {}).get("campaign_id") == campaign_id
-    }
+    lk = _resolve_lookup(con, lookup)
+    campaign_events = lk.events_for_entity_key([campaign_id])
+    run_added_events = lk.run_added_events_for_campaign(campaign_id)
+    imported_member_events = lk.imported_member_events_for_campaign(campaign_id)
+    linked_run_ids = lk.linked_run_ids_for_campaign(campaign_id)
 
     member_ids: set[str] = set(linked_run_ids)
     for ev in run_added_events + imported_member_events:
         entity = ev.get("entity") or []
         if len(entity) >= 2:
             member_ids.add(entity[1])
-    member_run_events = {rid: _fetch_events_by_entity_key(con, [rid]) for rid in member_ids}
+    member_run_events = {rid: lk.events_for_entity_key([rid]) for rid in member_ids}
 
     return fold_campaign(
         campaign_id,
@@ -531,49 +728,31 @@ def _compute_campaign_fold(
     )
 
 
-def _campaign_ids_for_run(con: duckdb.DuckDBPyConnection, run_id: str) -> set[str]:
+def _campaign_ids_for_run(
+    con: duckdb.DuckDBPyConnection, run_id: str, lookup: _FoldLookup | None = None
+) -> set[str]:
     """Every campaign that currently counts `run_id` as a member (spec:
     "Any event on a member run marks its campaign(s) as affected") --
     reverse lookup of `_compute_campaign_fold`'s own membership sources.
     """
-    ids: set[str] = set()
-    for e in _fetch_events_by_kinds(con, _CAMPAIGN_MEMBER_KINDS):
-        entity = e.get("entity") or []
-        if len(entity) >= 2 and entity[1] == run_id:
-            ids.add(entity[0])
-    for e in _fetch_events_by_kinds(con, _RUN_STARTED_KINDS):
-        entity = e.get("entity") or []
-        if entity and entity[0] == run_id:
-            cid = (e.get("data") or {}).get("campaign_id")
-            if cid:
-                ids.add(cid)
-    return ids
+    return _resolve_lookup(con, lookup).campaign_ids_for_run(run_id)
 
 
-def _campaign_member_run_ids(con: duckdb.DuckDBPyConnection, campaign_id: str) -> set[str]:
+def _campaign_member_run_ids(
+    con: duckdb.DuckDBPyConnection, campaign_id: str, lookup: _FoldLookup | None = None
+) -> set[str]:
     """Every run id counted as a member of `campaign_id` right now (the same
     union `_compute_campaign_fold` derives, exposed separately so the ingest
     loop can mark every current member's run entity for refold whenever the
     CAMPAIGN side changes -- e.g. a new `campaign.run_added`/`campaign.
     concluded` with no new event on the run entity itself)."""
-    ids: set[str] = set()
-    for e in _fetch_events_by_kinds(con, _CAMPAIGN_MEMBER_KINDS):
-        entity = e.get("entity") or []
-        if len(entity) >= 2 and entity[0] == campaign_id:
-            ids.add(entity[1])
-    for e in _fetch_events_by_kinds(con, _RUN_STARTED_KINDS):
-        entity = e.get("entity") or []
-        if entity and (e.get("data") or {}).get("campaign_id") == campaign_id:
-            ids.add(entity[0])
-    return ids
+    return _resolve_lookup(con, lookup).campaign_member_run_ids(campaign_id)
 
 
-def _run_added_events_for_run(con: duckdb.DuckDBPyConnection, run_id: str) -> list[dict]:
-    return [
-        e
-        for e in _fetch_events_by_kinds(con, frozenset({"campaign.run_added"}))
-        if len(e.get("entity") or []) >= 2 and e["entity"][1] == run_id
-    ]
+def _run_added_events_for_run(
+    con: duckdb.DuckDBPyConnection, run_id: str, lookup: _FoldLookup | None = None
+) -> list[dict]:
+    return _resolve_lookup(con, lookup).run_added_events_for_run(run_id)
 
 
 def _cached_campaign_fold(
@@ -601,6 +780,7 @@ def _refold_run(
     con: duckdb.DuckDBPyConnection,
     run_id: str,
     campaign_fold_cache: dict[str, tuple[dict, list[dict]]] | None = None,
+    lookup: _FoldLookup | None = None,
 ) -> None:
     """Refold one run entity, then fill `campaign_id` (review finding, HIGH),
     `seq_position`, and `evalue` (wave a's stub) from that resolved
@@ -624,17 +804,19 @@ def _refold_run(
     """
     if campaign_fold_cache is None:
         campaign_fold_cache = {}
-    events = _fetch_events_by_entity_key(con, [run_id])
+    lk = _resolve_lookup(con, lookup)
+    events = lk.events_for_entity_key([run_id])
     con.execute("DELETE FROM runs WHERE id = ?", [run_id])
     if not events:
         return
     row = fold_run(events)
-    row["campaign_id"] = resolve_run_campaign_id(events, _run_added_events_for_run(con, run_id))
+    row["campaign_id"] = resolve_run_campaign_id(events, lk.run_added_events_for_run(run_id))
     campaign_id = row.get("campaign_id")
     if campaign_id:
-        _campaign_row, campaign_runs_rows = _cached_campaign_fold(
-            con, campaign_id, campaign_fold_cache
-        )
+        with _fold_lookup_scope(lk):
+            _campaign_row, campaign_runs_rows = _cached_campaign_fold(
+                con, campaign_id, campaign_fold_cache
+            )
         for cr in campaign_runs_rows:
             if cr["run_id"] == run_id:
                 row["seq_position"] = cr["seq_position"]
@@ -647,10 +829,13 @@ def _refold_campaign(
     con: duckdb.DuckDBPyConnection,
     campaign_id: str,
     campaign_fold_cache: dict[str, tuple[dict, list[dict]]] | None = None,
+    lookup: _FoldLookup | None = None,
 ) -> None:
     if campaign_fold_cache is None:
         campaign_fold_cache = {}
-    row, campaign_runs_rows = _cached_campaign_fold(con, campaign_id, campaign_fold_cache)
+    lk = _resolve_lookup(con, lookup)
+    with _fold_lookup_scope(lk):
+        row, campaign_runs_rows = _cached_campaign_fold(con, campaign_id, campaign_fold_cache)
     con.execute("DELETE FROM campaigns WHERE id = ?", [campaign_id])
     con.execute("DELETE FROM campaign_runs WHERE campaign_id = ?", [campaign_id])
     if not row.get("mode") and not campaign_runs_rows:
@@ -663,8 +848,10 @@ def _refold_campaign(
         _insert_row(con, "campaign_runs", CAMPAIGN_RUNS_COLUMNS, cr)
 
 
-def _refold_edge(con: duckdb.DuckDBPyConnection, entity_key: list[str]) -> None:
-    events = _fetch_events_by_entity_key(con, entity_key)
+def _refold_edge(
+    con: duckdb.DuckDBPyConnection, entity_key: list[str], lookup: _FoldLookup | None = None
+) -> None:
+    events = _resolve_lookup(con, lookup).events_for_entity_key(entity_key)
     folded = fold_edge(events)
     src, dst = entity_key[0], entity_key[1]
     etype = entity_key[2] if len(entity_key) > 2 else None
@@ -696,8 +883,10 @@ def _refold_edge(con: duckdb.DuckDBPyConnection, entity_key: list[str]) -> None:
     )
 
 
-def _refold_anchor(con: duckdb.DuckDBPyConnection, anchor_id: str) -> None:
-    events = _fetch_events_by_entity_key(con, [anchor_id])
+def _refold_anchor(
+    con: duckdb.DuckDBPyConnection, anchor_id: str, lookup: _FoldLookup | None = None
+) -> None:
+    events = _resolve_lookup(con, lookup).events_for_entity_key([anchor_id])
     con.execute("DELETE FROM sidecar_anchors WHERE id = ?", [anchor_id])
     folded = fold_anchor(events)
     if folded is None:
@@ -706,8 +895,10 @@ def _refold_anchor(con: duckdb.DuckDBPyConnection, anchor_id: str) -> None:
     _insert_row(con, "sidecar_anchors", SIDECAR_ANCHORS_COLUMNS, folded)
 
 
-def _refold_blast_radius(con: duckdb.DuckDBPyConnection, record_id: str) -> None:
-    events = _fetch_events_by_entity_key(con, [record_id])
+def _refold_blast_radius(
+    con: duckdb.DuckDBPyConnection, record_id: str, lookup: _FoldLookup | None = None
+) -> None:
+    events = _resolve_lookup(con, lookup).events_for_entity_key([record_id])
     con.execute("DELETE FROM blast_radius_ledger WHERE id = ?", [record_id])
     folded = fold_blast_radius(events)
     if folded is None:
@@ -715,8 +906,10 @@ def _refold_blast_radius(con: duckdb.DuckDBPyConnection, record_id: str) -> None
     _insert_row(con, "blast_radius_ledger", BLAST_RADIUS_LEDGER_COLUMNS, folded)
 
 
-def _refold_trust_ledger(con: duckdb.DuckDBPyConnection, record_id: str) -> None:
-    events = _fetch_events_by_entity_key(con, [record_id])
+def _refold_trust_ledger(
+    con: duckdb.DuckDBPyConnection, record_id: str, lookup: _FoldLookup | None = None
+) -> None:
+    events = _resolve_lookup(con, lookup).events_for_entity_key([record_id])
     con.execute("DELETE FROM trust_ledger WHERE id = ?", [record_id])
     folded = fold_trust_ledger(events)
     if folded is None:
@@ -724,8 +917,10 @@ def _refold_trust_ledger(con: duckdb.DuckDBPyConnection, record_id: str) -> None
     _insert_row(con, "trust_ledger", TRUST_LEDGER_COLUMNS, folded)
 
 
-def _refold_archived_item(con: duckdb.DuckDBPyConnection, record_id: str) -> None:
-    events = _fetch_events_by_entity_key(con, [record_id])
+def _refold_archived_item(
+    con: duckdb.DuckDBPyConnection, record_id: str, lookup: _FoldLookup | None = None
+) -> None:
+    events = _resolve_lookup(con, lookup).events_for_entity_key([record_id])
     con.execute("DELETE FROM archived_items WHERE record_id = ?", [record_id])
     folded = fold_archived_item(events)
     if folded is None:
@@ -733,8 +928,10 @@ def _refold_archived_item(con: duckdb.DuckDBPyConnection, record_id: str) -> Non
     _insert_row(con, "archived_items", ARCHIVED_ITEMS_COLUMNS, folded)
 
 
-def _refold_submit(con: duckdb.DuckDBPyConnection, submit_id: str) -> None:
-    events = _fetch_events_by_entity_key(con, [submit_id])
+def _refold_submit(
+    con: duckdb.DuckDBPyConnection, submit_id: str, lookup: _FoldLookup | None = None
+) -> None:
+    events = _resolve_lookup(con, lookup).events_for_entity_key([submit_id])
     con.execute("DELETE FROM submits WHERE id = ?", [submit_id])
     folded = fold_submit(events)
     if folded is None:
@@ -836,10 +1033,21 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
     affected_submit_ids: set[str] = set()
 
     con = duckdb.connect(str(db_path))
+    in_txn = False
     try:
         init_index_schema(con)
         existing = _load_existing_events(con)
         watermarks = _load_watermarks(con)
+
+        # One transaction for the whole fold (inserts, refolds, watermarks):
+        # a failure leaves `db_path` at its pre-fold state. Callers only ever
+        # fold into a throwaway copy, so the commit is the only visible effect.
+        con.execute("BEGIN")
+        in_txn = True
+        # Event rows are collected here and bulk-inserted once after the
+        # segment loop; nothing in that loop reads `events` back (duplicate
+        # eids are caught by the in-memory `existing` map).
+        pending_event_rows: list[list] = []
 
         for root_kind, root_id, log_dir in roots:
             if not log_dir.is_dir():
@@ -875,7 +1083,7 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
                             _insert_quarantine(con, str(seg), byte_offset, "eid_conflict", raw)
                             quarantined += 1
                         continue
-                    _insert_event(con, obj)
+                    pending_event_rows.append(_event_row(obj))
                     existing[eid] = candidate_key
                     new_events += 1
 
@@ -907,39 +1115,68 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
                     watermarks[wm_key] = new_offset
                     _upsert_watermark(con, root_kind, root_id, seg.name, size, new_offset)
 
+        # Every event is now in `events`; the refold section below only ever
+        # writes derived tables, so one lookup cache is valid for all of it.
+        _bulk_insert_events(con, pending_event_rows)
+        lookup = _FoldLookup(con)
+
         # "Any event on a member run marks its campaign(s) as affected" --
         # and symmetrically, any campaign-side change must refold every
         # current member run (so its seq_position/evalue denormalization
         # stays in sync even when the run entity itself got no new event
         # this batch).
         for run_id in list(affected_run_ids):
-            affected_campaign_ids |= _campaign_ids_for_run(con, run_id)
+            affected_campaign_ids |= _campaign_ids_for_run(con, run_id, lookup=lookup)
         for campaign_id in list(affected_campaign_ids):
-            affected_run_ids |= _campaign_member_run_ids(con, campaign_id)
+            affected_run_ids |= _campaign_member_run_ids(con, campaign_id, lookup=lookup)
+
+        # One batched read of every entity history the refolds will touch,
+        # instead of one query per entity (any key missed here is still
+        # fetched on demand, so this is only a performance measure).
+        lookup.prefetch_entity_keys(
+            [[r] for r in affected_run_ids]
+            + [[c] for c in affected_campaign_ids]
+            + [list(k) for k in affected_edge_keys]
+            + [[a] for a in affected_anchor_ids]
+            + [[b] for b in affected_blast_radius_ids]
+            + [[t] for t in affected_trust_ledger_ids]
+            + [[a] for a in affected_archived_item_ids]
+            + [[s] for s in affected_submit_ids]
+        )
 
         # Shared across every refold in this batch (review finding, MEDIUM):
         # see `_cached_campaign_fold` -- a campaign touched by several
         # members' refolds, or by both a member refold and its own direct
         # persist, is computed exactly once.
         campaign_fold_cache: dict[str, tuple[dict, list[dict]]] = {}
-        for run_id in affected_run_ids:
-            _refold_run(con, run_id, campaign_fold_cache=campaign_fold_cache)
-        for campaign_id in affected_campaign_ids:
-            _refold_campaign(con, campaign_id, campaign_fold_cache=campaign_fold_cache)
-        for edge_key in affected_edge_keys:
-            _refold_edge(con, list(edge_key))
-        for anchor_id in affected_anchor_ids:
-            _refold_anchor(con, anchor_id)
-        for record_id in affected_blast_radius_ids:
-            _refold_blast_radius(con, record_id)
-        for record_id in affected_trust_ledger_ids:
-            _refold_trust_ledger(con, record_id)
-        for record_id in affected_archived_item_ids:
-            _refold_archived_item(con, record_id)
-        for submit_id in affected_submit_ids:
-            _refold_submit(con, submit_id)
+        with _fold_lookup_scope(lookup):
+            for run_id in affected_run_ids:
+                _refold_run(con, run_id, campaign_fold_cache=campaign_fold_cache, lookup=lookup)
+            for campaign_id in affected_campaign_ids:
+                _refold_campaign(
+                    con, campaign_id, campaign_fold_cache=campaign_fold_cache, lookup=lookup
+                )
+            for edge_key in affected_edge_keys:
+                _refold_edge(con, list(edge_key), lookup=lookup)
+            for anchor_id in affected_anchor_ids:
+                _refold_anchor(con, anchor_id, lookup=lookup)
+            for record_id in affected_blast_radius_ids:
+                _refold_blast_radius(con, record_id, lookup=lookup)
+            for record_id in affected_trust_ledger_ids:
+                _refold_trust_ledger(con, record_id, lookup=lookup)
+            for record_id in affected_archived_item_ids:
+                _refold_archived_item(con, record_id, lookup=lookup)
+            for submit_id in affected_submit_ids:
+                _refold_submit(con, submit_id, lookup=lookup)
 
+        con.execute("COMMIT")
+        in_txn = False
         con.execute("CHECKPOINT")
+    except BaseException:
+        if in_txn:
+            with contextlib.suppress(duckdb.Error):
+                con.execute("ROLLBACK")
+        raise
     finally:
         con.close()
 
