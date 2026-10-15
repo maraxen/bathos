@@ -330,6 +330,20 @@ def _migrate_v15(run_dict: dict) -> dict:
     return run_dict
 
 
+def _migrate_v16(run_dict: dict) -> dict:
+    """Migrate v16 fragment to v17 by adding the exploratory-mode run columns.
+
+    epistemic_class, tentative_outcome and agent_session (spec 261015 §3.1) are written at
+    run time and are immutable. A v16 fragment predates them, so they default to None:
+    the run's class is genuinely unrecorded, not an empty string.
+    """
+    run_dict["epistemic_class"] = None
+    run_dict["tentative_outcome"] = None
+    run_dict["agent_session"] = None
+    run_dict["schema_version"] = "17"
+    return run_dict
+
+
 MIGRATIONS["0"] = _migrate_v0
 MIGRATIONS["1"] = _migrate_v1
 MIGRATIONS["2"] = _migrate_v2
@@ -346,6 +360,7 @@ MIGRATIONS["12"] = _migrate_v12
 MIGRATIONS["13"] = _migrate_v13
 MIGRATIONS["14"] = _migrate_v14
 MIGRATIONS["15"] = _migrate_v15
+MIGRATIONS["16"] = _migrate_v16
 
 
 _RUNS_TABLE_SCHEMA = """
@@ -408,7 +423,10 @@ CREATE TABLE IF NOT EXISTS runs (
     dependency_lock_sha256 TEXT,
     adversarial_check_result TEXT,
     git_dirty_content_id TEXT,
-    git_provenance_source TEXT
+    git_provenance_source TEXT,
+    epistemic_class TEXT,
+    tentative_outcome TEXT,
+    agent_session TEXT
 )
 """
 
@@ -900,6 +918,9 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
             "ALTER TABLE runs ADD COLUMN IF NOT EXISTS adversarial_check_result TEXT",
             "ALTER TABLE runs ADD COLUMN IF NOT EXISTS git_dirty_content_id TEXT",
             "ALTER TABLE runs ADD COLUMN IF NOT EXISTS git_provenance_source TEXT",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS epistemic_class TEXT",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS tentative_outcome TEXT",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS agent_session TEXT",
         ]:
             with contextlib.suppress(Exception):
                 con.execute(_runs_alter_sql)
@@ -1102,8 +1123,9 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                     stdout_sha256, component_id, component_sidecar_sha256,
                     differential_status, differential_off_value, differential_on_value, differential_effect, dependency_lock_sha256,
                     adversarial_check_result, git_dirty_content_id, git_provenance_source,
-                    outcome_error_reason
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    outcome_error_reason,
+                    epistemic_class, tentative_outcome, agent_session
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     run.id,
@@ -1170,6 +1192,9 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                     # add the one missing column/value pair here rather than restructure the
                     # insert.
                     run.outcome_error_reason or None,
+                    run.epistemic_class,
+                    run.tentative_outcome,
+                    run.agent_session,
                 ],
             )
 

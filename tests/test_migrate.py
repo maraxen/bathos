@@ -397,6 +397,49 @@ def test_cli_migrate_project_flag(tmp_path, monkeypatch):
     assert "alpha" in result.output
 
 
+def test_migrate_v16_to_v17_exploratory_fields_null_backfill(tmp_path):
+    """v16->v17 migration: epistemic_class/tentative_outcome/agent_session backfill to None
+    (spec 261015 §3.1). A run predating exploratory mode has no recorded class, which is a
+    different fact from an empty string, so the backfill must not write "".
+    """
+    from bathos.migrate import migrate_catalog
+    from bathos.schema import COOL_SCHEMA, CURRENT_SCHEMA_VERSION
+
+    v17_field_names = {"epistemic_class", "tentative_outcome", "agent_session"}
+    v16_schema = pa.schema([f for f in COOL_SCHEMA if f.name not in v17_field_names])
+
+    r = Run(
+        project_slug="test-project",
+        command="python test.py",
+        argv=["python", "test.py"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+    )
+    v16_tbl = r.to_arrow().select([f.name for f in v16_schema])
+
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    fragment_path = runs_dir / "run_v16_test.parquet"
+    pq.write_table(v16_tbl, fragment_path)
+
+    tbl_before = pq.read_table(fragment_path)
+    for field_name in v17_field_names:
+        assert field_name not in tbl_before.schema.names
+
+    result = migrate_catalog(tmp_path, dry_run=False)
+    assert result.scanned == 1
+    assert result.migrated == 1
+
+    tbl_after = pq.read_table(fragment_path)
+    for field_name in v17_field_names:
+        assert field_name in tbl_after.schema.names
+        values = tbl_after.column(field_name).to_pylist()
+        assert all(v is None for v in values), f"{field_name}: expected all None, got {values}"
+    assert set(tbl_after.column("schema_version").to_pylist()) == {CURRENT_SCHEMA_VERSION}
+    assert CURRENT_SCHEMA_VERSION == "17"
+
+
 def test_migrate_v14_to_v15_git_provenance_fields_null_backfill(tmp_path):
     """v14→v15 migration: git_dirty_content_id/git_provenance_source backfill to None, not
     ''. A run predating the myxcel provenance-capture feature has no recorded content id or
