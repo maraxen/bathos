@@ -740,7 +740,8 @@ def run_script(
     long-running script can never straddle a cut-over mid-process."""
     init_telemetry()
     with unit_of_work(catalog_dir):
-        return _run_script_impl(
+        log_mode = current_mode()
+        exit_code = _run_script_impl(
             argv,
             project_slug,
             catalog_dir,
@@ -755,6 +756,13 @@ def run_script(
             component_id=component_id,
             component_sidecar_sha256=component_sidecar_sha256,
         )
+    if log_mode:
+        # Fold the run's events into index.db so every reader sees this run
+        # without `bth compact` (no-op on SLURM / BTH_NO_INGEST=1; never raises).
+        from bathos.runlog.ingest import ingest_after_write
+
+        ingest_after_write(catalog_dir)
+    return exit_code
 
 
 def _run_script_impl(

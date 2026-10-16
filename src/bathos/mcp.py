@@ -1221,6 +1221,20 @@ def compact_tool(
         "duration_s": result.duration_s,
         "corrupt_fragments": [str(cf.path) for cf in result.corrupt_fragments],
     }
+    if result.log_mode:
+        result_dict["log_mode"] = True
+        result_dict["ingest_ran"] = result.ingest_ran
+        result_dict["quarantined"] = result.quarantined
+        if not result.ingest_ran:
+            result_dict["note"] = (
+                "log mode: ingest skipped (SLURM_JOB_ID set or BTH_NO_INGEST=1); "
+                "index.db was not refreshed"
+            )
+        else:
+            result_dict["note"] = (
+                "log mode: folded new log events into index.db "
+                "(ingested = new events, skipped = already-known events)"
+            )
     if result.corrupt_fragments and strict:
         # Singular "error" key -- see cli_render.render_or_exit -- matches the shipped
         # Typer `compact --strict` command's `if strict: raise typer.Exit(1)` behavior.
