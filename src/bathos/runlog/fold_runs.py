@@ -402,6 +402,25 @@ def fold_run(events: list[dict]) -> dict[str, Any]:
         for field in STATUS_BUNDLE_FIELDS:
             if data.get(field) is not None:
                 bundle[field] = data[field]
+        if winning_kind == "abandoned":
+            # Legacy reap.py flips only `status` in place, so every other
+            # bundle field keeps the value the still-running row had. A
+            # ledger-shaped abandon carries none of them; without this
+            # fallback a reaped run silently loses its declared
+            # `output_paths` (found at the real cut-over: 70 runs).
+            earlier = sorted(
+                (c for c in claims if c.rank < 2 and not c.is_revert and c is not winning),
+                key=lambda c: c.tie_key,
+                reverse=True,
+            )
+            for field in STATUS_BUNDLE_FIELDS:
+                if field == "status" or data.get(field) is not None:
+                    continue
+                for c in earlier:
+                    prior = (c.ev.get("data") or {}).get(field)
+                    if prior is not None:
+                        bundle[field] = prior
+                        break
     if winning_kind == "abandoned":
         bundle["status"] = "abandoned"
     elif winning_kind == "running":

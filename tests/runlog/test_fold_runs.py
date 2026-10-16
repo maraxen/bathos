@@ -606,3 +606,41 @@ def test_import_stage2_live_overrides_stage1_import():
     live_started = started(git_branch="live-branch", ts=T1, eid="e_live")
     row = fold_run([warm_ev, live_started])
     assert row["git_branch"] == "live-branch"
+
+
+# --- abandoned claim must not blank bundle fields legacy reap keeps -------
+
+
+def test_abandoned_keeps_output_paths_of_the_running_row():
+    """Legacy reap.py flips only `status`; the fold used to reset the whole
+    status bundle to defaults, so a reaped run lost its declared
+    `output_paths` (found at the real cut-over, 70 runs)."""
+    row = fold_run([started(output_paths=["outputs/a.json"]), reaped()])
+    assert row["status"] == "abandoned"
+    assert row["output_paths"] == ["outputs/a.json"]
+
+
+def test_abandoned_without_any_earlier_output_paths_stays_default():
+    """Negative control: with nothing to inherit the default `[]` still holds
+    (the fallback must not invent a value)."""
+    row = fold_run([started(), reaped()])
+    assert row["status"] == "abandoned"
+    assert row["output_paths"] == []
+
+
+def test_abandoned_own_output_paths_beat_the_fallback():
+    """A claim that does carry the field wins over an earlier running row's."""
+    row = fold_run(
+        [
+            started(output_paths=["old.json"]),
+            reaped(output_paths=["new.json"]),
+        ]
+    )
+    assert row["output_paths"] == ["new.json"]
+
+
+def test_terminal_claim_unaffected_by_abandoned_fallback():
+    """A real finish still wins wholesale; its own output_paths are used."""
+    row = fold_run([started(output_paths=["old.json"]), reaped(), finished()])
+    assert row["status"] == "completed"
+    assert row["output_paths"] == ["out.json"]
