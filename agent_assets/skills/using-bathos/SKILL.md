@@ -477,6 +477,16 @@ Signal 10 (submit_bypass_rate): submit_bypass_rate=3.0% (1/34 validation/product
 Status: OK
 ```
 
+### Before binding a claim, audit any review pages (maraxiom projects)
+
+If this project shows run results to a reviewer on a maraxiom review page, run `mrx review audit` (for example `mrx review audit --campaign <campaign_id>`; over MCP the tool is `review_audit`) BEFORE `bth claim register` and BEFORE `bth campaign add` of a shown run into a claim-bound campaign.
+
+Why: bathos does not check timing. `claim register` records the claim path and sha256 and emits `campaign.claim_bound`; it does not compare that time with when a run was first looked at. A run that a person saw on a page and that is then added to a claim-bound campaign is a laundering path (the hypothesis can be chosen after the data was seen). The audit finds it from the review ledger.
+
+This is a manual pre-step: bathos does not enforce it. A pre-bind hook that would let the audit refuse the bind is tracked in maraxen/bathos#104.
+
+Exit 3 (`LAUNDERING` over MCP) means do not bind and do not add. Fix the pre-registration or re-run; never override by editing the ledger. The command needs `MRX_REVIEW_ROOT` or a configured review root. It is read-only: exit 3 on a hit, exit 2 on a refusal.
+
 ## Query and Inspect
 
 ### List Recent Runs
