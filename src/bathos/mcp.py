@@ -50,6 +50,7 @@ from bathos.index import connect_read
 from bathos.init import init_project
 from bathos.mcp_auth import McpAuthError, check_token
 from bathos.prereg import GateError
+from bathos.progress import progress_path_for, read_progress
 from bathos.query import (
     COOL_UNINDEXED_SOURCE,
     CatalogError,
@@ -441,6 +442,11 @@ def get_run_tool(
             "(output_metadata, postmortem overrides) are absent"
         )
         run_dict["notice"] = notice
+    if run.status == "running":
+        # Advisory progress (#105): present only while running and only when a usable file exists.
+        progress = read_progress(progress_path_for(run.id))
+        if progress is not None:
+            run_dict["progress"] = progress
     return run_dict
 
 
