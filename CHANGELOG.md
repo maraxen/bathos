@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is removed when the run ends. A missing, partial or malformed file reads as unknown. `bth show`
   (`get_run`) adds a `progress` key only while the run is `running` and a usable file exists.
 
+### Fixed
+
+- **`read_runs` no longer reads `run_<id>.tmp.parquet` files.** A stale tmp fragment pulled from a remote duplicated a run as `running` and made reap re-reap it on every migrate pass.
+
 ## [0.13.0a6] - 2026-10-15
 
 ### Changed
