@@ -76,7 +76,10 @@ def read_runs_report(catalog_dir: Path) -> tuple[list[Run], list[CorruptFragment
     runs_dir = catalog_dir / "runs"
     if not runs_dir.exists():
         return [], []
-    parquet_files = sorted(runs_dir.rglob("run_*.parquet"))
+    # Skip run_<id>.tmp.parquet: a write-then-rename temp or a stale remote pull.
+    parquet_files = sorted(
+        f for f in runs_dir.rglob("run_*.parquet") if not f.name.endswith(".tmp.parquet")
+    )
     if not parquet_files:
         return [], []
 

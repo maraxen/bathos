@@ -5,6 +5,7 @@ import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pyarrow.parquet as pq
 import pytest
 
 from bathos.catalog import read_runs, write_run
@@ -665,3 +666,40 @@ def test_reap_revert_flag_on_emits_event_and_skips_legacy_write(temp_catalog, mo
     assert reverted_events[0]["entity"] == ["run_revert"]
     assert reverted_events[0]["data"]["prior_status"] == "running"
     reset_writers_for_test()
+
+
+def _stale_tmp_sibling_setup(catalog_dir: Path, run_id: str) -> None:
+    """Reproduce the migrate --to-log remote-pull shape for one run id.
+
+    The real fragment is `abandoned`; a stale `run_<id>.tmp.parquet` holding the
+    earlier `running` state sits beside it, as an interrupted remote write or a
+    `write_run` tmp target would leave it.
+    """
+    abandoned = create_run(run_id, age_hours=25, status="abandoned")
+    write_run(abandoned, catalog_dir)
+    running = create_run(run_id, age_hours=25, status="running")
+    tmp = catalog_dir / "runs" / "test" / f"run_{run_id}.tmp.parquet"
+    pq.write_table(running.to_arrow(), tmp)
+    assert tmp.exists()
+
+
+def test_read_runs_skips_tmp_fragment_sibling(temp_catalog):
+    """A stale run_<id>.tmp.parquet must not duplicate the real fragment's run."""
+    _stale_tmp_sibling_setup(temp_catalog, "tmpsib")
+
+    runs = read_runs(temp_catalog)
+    matching = [r for r in runs if r.id == "tmpsib"]
+    assert len(matching) == 1
+    assert matching[0].status == "abandoned"
+
+
+def test_reap_ignores_tmp_fragment_sibling(temp_catalog):
+    """Reap must not re-list an already-abandoned run because of a tmp duplicate."""
+    from bathos.reap import reap_runs
+
+    _stale_tmp_sibling_setup(temp_catalog, "tmpreap")
+
+    candidates, _skipped = reap_runs(
+        temp_catalog, older_than_h=24, dry_run=True, apply=False
+    )
+    assert "tmpreap" not in [c.id for c in candidates]
