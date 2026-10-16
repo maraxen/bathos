@@ -1,6 +1,6 @@
 # bathos Rules
 
-**bathos (`bth`)** — Experiment tracking and sidecar discipline. Flags below were checked against `bth run --help` on bathos 0.13.0a6 (2026-10-16); the source is `agent_assets/snippets/rules.md` in the bathos repo, so edit it there, not in the rendered copy.
+**bathos (`bth`)** — Experiment tracking and sidecar discipline. Flags below were checked against `bth run --help` on bathos 0.13.0a6 (2026-10-16). Shipped as a reference of the `using-bathos` skill via `bth plugin update` (moved from the praxia-rendered `agent_assets/snippets/rules.md`, 261016).
 
 ## `bth run` Invocation Pattern
 
