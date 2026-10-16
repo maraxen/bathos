@@ -50,6 +50,7 @@ import fcntl
 import json
 import os
 import shutil
+import time
 import uuid
 from collections.abc import Generator, Iterable
 from dataclasses import dataclass
@@ -144,13 +145,32 @@ def ingest_lock_path(catalog_dir: Path | None = None) -> Path:
     return (catalog_dir or default_catalog_dir()) / "ingest.lock"
 
 
+class IngestLockTimeout(TimeoutError):
+    """`ingest_lock(timeout_s=...)` could not take the lock in time."""
+
+
 @contextlib.contextmanager
-def ingest_lock(catalog_dir: Path | None = None):
+def ingest_lock(catalog_dir: Path | None = None, *, timeout_s: float | None = None):
+    """Exclusive ingest lock. `timeout_s=None` blocks until acquired;
+    otherwise raises `IngestLockTimeout` after `timeout_s` seconds."""
     path = ingest_lock_path(catalog_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        if timeout_s is None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        else:
+            deadline = time.monotonic() + timeout_s
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise IngestLockTimeout(
+                            f"ingest lock {path} still held after {timeout_s:g}s"
+                        ) from None
+                    time.sleep(0.05)
         try:
             yield
         finally:
@@ -957,6 +977,7 @@ def run_ingest(
     *,
     extra_roots: list[tuple[str, str, Path]] | None = None,
     require_log_mode: bool = True,
+    lock_timeout_s: float | None = None,
 ) -> IngestReport:
     """Ingest every discovered root's new bytes into a fresh generation of
     `index.db`, then atomically swap it in.
@@ -976,14 +997,52 @@ def run_ingest(
     build happens strictly BEFORE the marker is written, so `is_log_mode()`
     is still False at that point even though this ingest pass is exactly
     what makes the flag meaningful going forward.
+
+    `lock_timeout_s`: bound the wait for the ingest lock (default: block).
+    Raises `IngestLockTimeout` on expiry.
     """
     if os.environ.get("SLURM_JOB_ID") or os.environ.get("BTH_NO_INGEST") == "1":
         return IngestReport(ran=False)
     cd = catalog_dir or default_catalog_dir()
     if require_log_mode and not is_log_mode(cd):
         return IngestReport(ran=False)
-    with ingest_lock(cd):
+    with ingest_lock(cd, timeout_s=lock_timeout_s):
         return _ingest_locked(cd, extra_roots=extra_roots)
+
+
+def ingest_after_write(
+    catalog_dir: Path | None = None, *, lock_timeout_s: float = 60.0
+) -> IngestReport | None:
+    """Best-effort index refresh at the end of an event-writing command, so
+    the event it just wrote is visible to every reader without `bth compact`
+    (spec "When ingest runs"). Never raises: a failed refresh must not turn a
+    finished run into a failed one; the next ingest folds the same events.
+
+    The wait for the lock is bounded rather than skipped (spec: "skipped if the
+    lock is held"): a holder that started before our event was appended will
+    not fold it, so skipping would leave exactly this command's event invisible.
+    Returns None when the refresh failed or timed out.
+    """
+    from bathos.telemetry import event
+
+    t0 = time.monotonic()
+    try:
+        report = run_ingest(catalog_dir, lock_timeout_s=lock_timeout_s)
+    except Exception as exc:  # noqa: BLE001 -- best-effort by contract
+        event(
+            "ingest.after_write_failed",
+            exc_type=type(exc).__name__,
+            exc_msg=str(exc)[:300],
+            duration_ms=int((time.monotonic() - t0) * 1000),
+        )
+        return None
+    event(
+        "ingest.after_write",
+        ran=report.ran,
+        new_events=report.new_events,
+        duration_ms=int((time.monotonic() - t0) * 1000),
+    )
+    return report
 
 
 def _ingest_locked(

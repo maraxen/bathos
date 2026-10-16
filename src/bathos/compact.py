@@ -201,6 +201,13 @@ class CompactResult:
     # the cool fragment had changed -- e.g. a run rewritten running -> completed
     # (debt #2689 / #1647).
     refreshed: int = 0
+    # Log mode (post-cutover): compact is the explicit ingest trigger, not a cool->warm
+    # fold. `ingested`/`skipped`/`refreshed` then count new events / known events /
+    # re-folded entities; `ingest_ran` is False when ingest was skipped (SLURM node
+    # or BTH_NO_INGEST=1), in which case the index was NOT refreshed.
+    log_mode: bool = False
+    ingest_ran: bool = True
+    quarantined: int = 0
 
 
 # Migration registry: transforms Run objects from older schema versions to current
@@ -869,6 +876,32 @@ def _ingest_anchor_fragments(con: duckdb.DuckDBPyConnection, catalog_dir: Path) 
     return len(records)
 
 
+def _compact_log_mode(catalog_dir: Path, force_rebuild: bool, start_time: float) -> CompactResult:
+    """`bth compact` after cutover: fold new log events into `index.db`.
+
+    The legacy cool->warm path must not run here: it would create an empty
+    `bathos.db` beside the frozen one and make rollback ambiguous.
+    """
+    from bathos.runlog.ingest import run_ingest
+
+    if force_rebuild:
+        raise ValueError(
+            "force_rebuild is not supported in log mode: index.db is derived data. "
+            f"Delete {catalog_dir / 'index.db'} and run `bth compact` to rebuild it "
+            "from the logs."
+        )
+    report = run_ingest(catalog_dir)
+    return CompactResult(
+        ingested=report.new_events,
+        skipped=report.skipped_existing,
+        duration_s=time.time() - start_time,
+        refreshed=report.entities_refolded,
+        log_mode=True,
+        ingest_ran=report.ran,
+        quarantined=report.quarantined,
+    )
+
+
 def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
     """Ingest all cool fragments into bathos.db DuckDB database.
 
@@ -885,6 +918,11 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
         CompactResult with ingested count, skipped count, and duration
     """
     start_time = time.time()
+
+    from bathos.runlog.mode import is_log_mode
+
+    if is_log_mode(catalog_dir):
+        return _compact_log_mode(catalog_dir, force_rebuild, start_time)
 
     # Count cool files at start for telemetry
     cool_files = _fragment_count(catalog_dir)
