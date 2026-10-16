@@ -1,0 +1,64 @@
+[validation]
+property = "After the runlog cut-over, a just-finished `bth run` is visible to every reader (bth show / ls / sql and get_run / find_runs / run_sql) with no explicit `bth compact`, and the p95 CLI read latency on the real catalog meets the pre-registered budget"
+reference = "spec .praxia/docs/specs/261012_retire-compact-runlog-cutover.md step B4 (pre-registered outcomes l.132-143); runlog spec 260925_project-local-run-log.md AC-12. Requires PR #111 (run-end ingest trigger) in the INSTALLED bth; the script checks this and records invalid otherwise. Live catalog cut over 2026-10-16T19:43:53Z (attempt 20261016T193347Z-b345cbcf)."
+tolerance = "Budget: p95 of all CLI read invocations <= 2 s pass, 2-10 s marginal, > 10 s fail. Basis (judgment calls, not derived; set before measurement): 10 s is the conventional limit for keeping a user's attention on a single interactive response (Nielsen's 0.1/1/10 s response-time limits) and sits well inside the 120 s agent tool timeout; 2 s allows the ~1 s Python+DuckDB CLI start-up on top of the 1 s 'uninterrupted flow' limit. AC-12 sets no number of its own. Visibility is exact: every reader must see every probe run."
+stage_name = "validation"
+novel = true
+
+[outcomes.invalid]
+condition = "NOT (trigger_installed AND neg_control_detected)"
+decision = "Measurement not valid: either the installed bth lacks the trigger (update the main checkout to origin/main and re-run) or a reader saw a run whose ingest was suppressed, so the visibility check cannot detect a miss. Fix the instrument; cite nothing."
+reasoning = "Without a detectable miss, all_visible = true would be vacuous; without the trigger the wrong build was measured"
+
+[outcomes.pass]
+condition = "trigger_installed AND neg_control_detected AND stale_refold_visible AND all_visible AND p95_read_s <= 2.0"
+decision = "B4 met: proceed to B5 (retire the compact ritual, propose the CLAUDE.md edit to the user, close #2344 #2110 #1685 #1647 citing this run id)"
+reasoning = "Every reader sees fresh runs without compact, the stale-index re-fold recovers a missed run, and reads are interactive"
+
+[outcomes.marginal]
+condition = "trigger_installed AND neg_control_detected AND stale_refold_visible AND all_visible AND p95_read_s > 2.0 AND p95_read_s <= 10.0"
+decision = "Visibility met but reads are slow: profile the slowest reader (per-reader p95 fields) before B5; B5 waits on the user's call"
+reasoning = "Correct but not interactive by the stated budget"
+
+[outcomes.fail]
+condition = "trigger_installed AND neg_control_detected AND (NOT stale_refold_visible OR NOT all_visible OR p95_read_s > 10.0)"
+decision = "B4 not met: diagnose from misses / stale_snapshot_had_ctrl / per-reader latencies; B5 blocked"
+reasoning = "A reader missed a just-finished run, the stale-index re-fold did not recover the control run, or reads exceed the attention limit"
+
+[outcomes.residual]
+condition = "TRUE"
+decision = "Result did not evaluate (missing or null fields); treat as fail and inspect the script output"
+reasoning = "Catch-all so a malformed result is never mislabelled pass"
+is_residual = true
+
+[result_schema]
+trigger_installed = "bool"
+installed_runner = "str"
+n_probes = "int"
+neg_control_detected = "bool"
+neg_control_seen_by = "str"
+ctrl_run_id = "str"
+stale_snapshot_had_ctrl = "bool"
+stale_refold_visible = "bool"
+full_refold_s = "float"
+all_visible = "bool"
+misses = "str"
+n_cli_reads = "int"
+p95_read_s = "float"
+median_read_s = "float"
+max_read_s = "float"
+p95_inproc_read_s = "float"
+p95_cli_show_s = "float"
+p95_cli_ls_s = "float"
+p95_cli_sql_s = "float"
+p95_py_get_run_s = "float"
+p95_py_find_runs_s = "float"
+p95_py_run_sql_s = "float"
+n_ingest_samples = "int"
+median_ingest_s = "float"
+p95_ingest_s = "float"
+median_run_wall_s = "float"
+baseline_p95_read_s = "float"
+baseline_median_read_s = "float"
+baseline_all_seen = "bool"
+baseline_since_h = "int"
