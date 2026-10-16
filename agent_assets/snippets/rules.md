@@ -1,32 +1,36 @@
 # bathos Rules
 
-**bathos v0.5+** — Experiment tracking and sidecar discipline.
+**bathos (`bth`)** — Experiment tracking and sidecar discipline. Flags below were checked against `bth run --help` on bathos 0.13.0a6 (2026-10-16); the source is `agent_assets/snippets/rules.md` in the bathos repo, so edit it there, not in the rendered copy.
 
 ## `bth run` Invocation Pattern
 
-Always invoke scripts via `uv run python`, never plain `python`. This ensures the project's `.venv` is activated and dependency isolation is preserved.
+Always invoke scripts via `uv run python`, never plain `python`. This ensures the project's `.venv` is activated and dependency isolation is preserved. Add `--no-sync` (a bare `uv run` silently re-syncs and reverts hand-installed wheels).
 
 ```bash
 # ✓ Correct
-bth run -- uv run python scripts/experiments/my_experiment.py --seed 42
+bth run --project-slug myproject -- uv run --no-sync python3 scripts/experiments/my_experiment.py --seed 42
 
 # ✗ Wrong (will fail with FileNotFoundError on cluster)
 bth run -- python scripts/experiments/my_experiment.py --seed 42
 ```
 
+Run it as `bth`, never `uv run bth`: with a project-pinned bathos that predates enforcement, `uv run bth` silently skips sidecar enforcement and exits 0. After the run, check the record, not the exit code: `bth sql "SELECT id, status, outcome, exit_code FROM runs WHERE id LIKE '<prefix>%'"` (run `bth compact` first if the run is missing). `outcome = 'unknown'` means no sidecar was bound or no result was read, so the run is not a pre-registered finding.
+
 **Critical for SLURM:** Compute nodes lack global Python; only `uv run` activates the local `.venv`.
 
-## No `--` Separator Unless Script Expects Positional Args
+## One `--` Before the Wrapped Command
 
-`bth run` arguments end before the script command. Arguments for the script are forwarded as-is. Do NOT use `--` to separate bath args from script args unless the script itself expects positional arguments after named flags.
+`bth run` options (`--project-slug`, `--output-paths`, `--tags`, `--campaign-id`, `--no-sidecar`) come first. A single `--` then ends them and starts the command to run; that command's own flags (`--no-sync`, `--seed 42`) are forwarded to it untouched. A second `--` is not a separator for the script: the script receives it as an argument.
 
 ```bash
-# ✓ Correct — smoke test run directly (not via bth run; /tmp is ok for smoke-only validation)
-uv run python script.py --smoke --out /tmp/result.json
+# ✓ Correct — bth options, one `--`, then the command with its own flags
+bth run --project-slug myproject --output-paths outputs/result.json -- uv run --no-sync python3 scripts/experiments/train.py --seed 42
 
-# ✗ Wrong — script sees an extra "--" argument
-bth run -- -- uv run python script.py --smoke --out /tmp/result.json
+# ✗ Wrong — the second `--` is passed to the script as an argument
+bth run -- -- uv run python scripts/experiments/train.py --seed 42
 ```
+
+Smoke tests do not go through `bth run` at all (see Output Path Convention below).
 
 ## Sidecar Outcome Conditions: Valid DuckDB SQL
 

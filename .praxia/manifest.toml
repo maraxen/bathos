@@ -1,6 +1,6 @@
 [plugin]
 name            = "bathos"
-version         = "0.5.0"
+version         = "0.5.1"
 description     = "Experiment tracking — pre-registration, provenance, campaigns"
 requires_praxia = ">=1.0"
 # Skills reach Claude Code only via the plugin bundle (bathos:<skill>); skip
@@ -45,7 +45,7 @@ launch = "uvx"
 [[plugin.skills]]
 name     = "using-bathos"
 path     = "agent_assets/skills/using-bathos/SKILL.md"
-triggers = ["bth run", "sidecar", "catalog", "controls", "stage_name", "bth init", "bth check"]
+triggers = ["bth run", "sidecar", ".bth.toml", "[outcomes]", "pre-registration", "bth compact", "bth find", "catalog", "controls", "stage_name", "bth init", "bth check"]
 
 [[plugin.skills]]
 name     = "bathos-cluster"
