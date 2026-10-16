@@ -315,7 +315,7 @@ DOC_SURFACES = [
     "README.md",
     "agent_assets/using_bathos/SKILL.md",
     "agent_assets/skills/using-bathos/SKILL.md",
-    "agent_assets/snippets/rules.md",
+    "agent_assets/skills/using-bathos/references/run-invocation-rules.md",
     "agent_assets/skills/bathos-campaigns/SKILL.md",
     "agent_assets/skills/bathos-cluster/SKILL.md",
     "agent_assets/skills/bathos-trust-ledger/SKILL.md",

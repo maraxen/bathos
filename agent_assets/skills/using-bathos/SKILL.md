@@ -695,5 +695,6 @@ bth export --html --out ~/reports/latest.html
 - **bathos-literature-parity** — validating a reimplemented baseline against a published method
 - **bathos-blast-radius** — trace which past runs a bug fix/commit implicates
 - **bathos-mcp** — MCP tool error envelope and integration contract
-- **CLAUDE.md**: Bathos architecture, schema versions, backlog
-- **Global rules**: `~/.claude/rules/BATHOS.md` — verify the measurement pipeline on synthetic ground truth (folded into **Discipline** above); `~/.claude/rules/ephemeral_scripts.md` — inline vs tracked scripts
+- **Writing a `bth run` / `bth submit` command line, an `[outcomes]` condition, or choosing `--output-paths`** → `references/run-invocation-rules.md` (`--` placement, `uv run python`, DuckDB-valid conditions, `bth sync` ownership, campaigns, `--no-sidecar`)
+- **AGENTS.md** (bathos repo): bathos architecture, schema versions, backlog
+- **Global rules**: `~/.claude/rules/ephemeral_scripts.md` — inline vs tracked scripts (the synthetic-ground-truth rule formerly in `~/.claude/rules/BATHOS.md` is folded into **Discipline** above)

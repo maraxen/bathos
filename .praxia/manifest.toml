@@ -1,6 +1,6 @@
 [plugin]
 name            = "bathos"
-version         = "0.5.1"
+version         = "0.5.2"
 description     = "Experiment tracking — pre-registration, provenance, campaigns"
 requires_praxia = ">=1.0"
 # Skills reach Claude Code only via the plugin bundle (bathos:<skill>); skip
@@ -87,16 +87,8 @@ name     = "prose-biosafe"
 path     = "agent_assets/skills/prose-biosafe/SKILL.md"
 triggers = ["prose-lint", "prose-biosafe", "biosafe", "classifier false positive", "lint_prose_biosafe", "prose_linter"]
 
-[[plugin.snippets]]
-name           = "bathos-rules"
-path           = "agent_assets/snippets/rules.md"
-scope          = "project"
-scope_detector = "glob:scripts/**/*.bth.toml"
-
 [[plugin.agents]]
 name  = "experiment-runner"
 path  = "agent_assets/agents/experiment-runner.md"
 tools = ["run", "campaign_create", "campaign_review", "check"]
 
-[plugin.dependencies]
-myxcel = ">=0.3"
