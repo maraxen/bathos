@@ -1,7 +1,7 @@
 ---
 name: using-bathos
-description: Experiment tracking with bathos — run tracking, sidecar pre-registration, controls discipline, catalog queries
-triggers: [bathos, bth, experiment, run, sidecar, catalog, init, lint, controls, stage_name]
+description: Experiment tracking with bathos — run tracking, sidecar pre-registration, controls discipline, catalog queries. Use when writing or editing a .bth.toml sidecar or its [outcomes], running `bth run` or `bth submit`, citing or verifying a run (outcome, catalog, `bth sql`, `bth find`, `bth compact`), or deciding whether a metric can be trusted (synthetic positive/negative controls).
+triggers: [bathos, bth, experiment, run, sidecar, .bth.toml, outcomes, pre-registration, catalog, compact, init, lint, controls, stage_name]
 ---
 
 # using-bathos
@@ -24,12 +24,85 @@ This skill covers the daily-driver workflow: installation, run tracking, sidecar
 
 **@bth.experiment** — An alternative Python-embedding entry point to provenance capture. Decorate a function with `@bth.experiment` (`bathos.decorators`) to get the same provenance capture as `bth run`, without a CLI invocation. Silently no-ops with a warning if `BTH_PROJECT_SLUG` is unset.
 
+## Discipline: pre-register, run as `bth`, verify by the record
+
+*(Moved here from the global `~/.claude/CLAUDE.md` bullet "STAGE EVERY EXPERIMENT WITH BATHOS" on 2026-10-16, at the user's direction; the global file keeps only a three-line core: pre-register before the run, use `bth` never `uv run bth`, verify by the run record never by exit code. The text below keeps the global bullet's wording, failure modes, measurements and dates. Merged with `~/.claude/rules/BATHOS.md`.)*
+
+### The sidecar is a PRE-registration, not a receipt
+
+Any run that will produce a finding (a number, a breakdown, a statistic, a pass/fail, anything that could end up in a doc, a deck, a ledger claim or a decision) gets a tracked script plus a `.bth.toml` sidecar **written and committed before the run**, stating the hypothesis and the `[outcomes]` pass/fail criteria. Then `bth run` (local) or `bth submit` (cluster).
+
+Writing the sidecar after seeing the numbers is the failure this rule exists to stop: outcome criteria chosen post-hoc always pass. If an exploratory run has already happened, say so explicitly and re-run under a sidecar before citing a single number from it.
+
+Promote findings to a ledger **claim** (`bth claim`) rather than citing a dated doc; dated docs are an append-only log and go stale (see **bathos-campaigns**).
+
+### Verify the measurement pipeline on synthetic ground truth first — positive AND negative control
+
+When introducing or first using a metric/eval function, run a sanity-check on synthetic ground truth before trusting it for any research conclusion. A positive control that can only pass is not a check. Pair it with a **negative** control that must fail, or the instrument is untested.
+
+- Measured 2026-09-25: a six-site ligation fidelity model scored a lone junction at 1.000 — trivially, by construction — and only a deliberately cross-reactive pair at 0.728 proved it fires at all.
+- Example: if a function claims `small T → sharp softmax`, test it — feed one-hot logits, call with `temperature=0.01`, and assert `max(output) > 0.9`. If the assertion fails, the temperature convention is inverted. These checks take 30 seconds. **They would have caught the SP-0.6 `update_seq` temperature-inversion bug** — `softmax(logits * 0.01)` silently uniformized posteriors instead of sharpening them, costing 2+ hours across four runs before it was traced.
+- **Heuristic:** if you have falsified 3+ research hypotheses in a row and each falsification yields numerically suspicious results (everything uniform, metrics agree by coincidence), stop and verify the measurement pipeline against synthetic invariants. The probability that "every hypothesis was wrong" drops sharply with each falsification — the measurement is probably broken.
+- For the post-Union-Gate version (instrument-sensitivity positive controls, synthetic-recovery gates) see **bathos-rigor-gates**.
+
+### Run it as `bth`, NOT `uv run bth`
+
+The project-pinned bathos (0.4.1) **silently skips sidecar enforcement** under `uv run bth` — it exits 0 and tracks nothing, which is indistinguishable from a clean tracked run.
+
+### Pick the invocation that gets the PROJECT venv
+
+`bth run --script-path foo.py` (as of the 2026-09 builds) prepends bathos's OWN interpreter (its isolated uv-tool Python), so any script importing project-local packages dies with ModuleNotFoundError. Use the wrapped form instead:
+
+```bash
+bth run --project-slug <slug> -- uv run --no-sync python3 scripts/foo.py --args
+```
+
+`--no-sync` because bare `uv run` silently re-syncs and reverts hand-installed wheels.
+
+**Current-code check, 2026-10-16 (read from the source, not from a memory note).** Two older claims are superseded, one in each direction:
+
+1. *The wrapped form does bind the script and its adjacent sidecar.* `_find_script_path` (`src/bathos/runner.py:122`) walks `uv run --no-sync python3 scripts/foo.py` and returns `scripts/foo.py`: `run`/`python`/`python3` are passthrough tokens (`runner.py:189`), and a valueless flag such as `--no-sync` advances by exactly one token (`runner.py:197-202`, from commit a5ea72a4, 2026-09-25; test `tests/test_runner.py:1862`). The result feeds `resolve_sidecar` / `parse_sidecar` (`runner.py:847-850`). Behind an `env`/`timeout`/`nice`/`taskset` prefix the script is also found (`runner.py:130-132`, commit 4d7f7823, 2026-10-14, debt #2725); if no script can be bound but a sidecar-governed `.py` is named in argv, `bth run` now prints a stderr `WARNING ... SKIPPED` (`runner.py:816-830`, via `_unbound_enforced_scripts`, `runner.py:211`). A praxia measurement of 260926 recorded the wrapped form attaching no sidecar (`script_path` was `"uv"`, `outcome=unknown`) while `--script-path` evaluated the pre-registered outcome. That is **not reproducible against current source**; the likeliest explanation is an install that predated a5ea72a4, but the installed build was not recorded, so it is unproven. Keep the posture it taught: after any wrapped run, confirm the record's `outcome` is not `unknown` before citing it.
+2. *`--script-path` no longer always uses bathos's own interpreter.* `_bare_script_argv` (`src/bathos/mcp.py:1788`, commit 58813250, 2026-10-14, debt #2236) runs a bare `.py` as `uv run --no-sync python <script>` when the working directory has a `.venv` and `uv` is on PATH (`mcp.py:1801`); only otherwise does it fall back to bathos's interpreter, and it then says so on stderr (`mcp.py:1810`). A `pyproject.toml` without a `.venv` does not count. So the ModuleNotFoundError above applies to builds before 2026-10-14, or to a cwd with no `.venv`.
+
+### Verify a run by its RECORD, never by exit code or console text
+
+Resolve the returned id and check its `outcome` actually evaluated:
+
+```bash
+bth sql "SELECT id, status, outcome, exit_code, command FROM runs WHERE id LIKE '<prefix>%'"
+```
+
+Spot-check that its claimed paths resolve. A script emitting confident, schema-valid, entirely fabricated output exits 0.
+
+- **The catalog is tiered and the warm index lags — `bth compact` before you conclude a run is missing.** `bth run` writes the cool tier (`~/.bth/catalog/runs/<project>/run_<id>.parquet`) immediately, but `sql`/`show`/`find`/`ls` read the warm DuckDB (`bathos.db`), which only updates when `bth compact` runs ("Compact cool-tier Parquet to warm-tier DuckDB"). A run finished seconds ago is invisible to every reader until then. Plain `bth compact` is the safe form; `--force-rebuild` is the one that has wiped a table before.
+  - Measured 2026-09-25: a run was unretrievable by `bth show` for minutes, then appeared on its own; a later one stayed invisible past 20 s and `bth compact` returned `{"ingested": 1, "skipped": 4322, "corrupt_fragments": []}` and made it visible. **Nothing was ever lost.** Do not file a data-loss bug off a probe taken right after a write.
+- **`bth find` takes FILTERS, not a search term** (`--project`, `--since`, `--status`, `--tags`, `--output-file`). `bth find <script-name>` matches nothing and returns `{"runs": [], "count": 0}` — that is malformed usage, not a missing run. Likewise `bth ls` is not newest-first unless you pass `--since`.
+
+### `bth --version` cannot tell you whether an install is current
+
+It prints pyproject's `version` field, which is not bumped between releases — 0.13.0a4 reports identically at the tag and 9 commits past it, on every machine. bathos **is on PyPI** (0.13.0a1–a5 as of 2026-10-01), but dev installs come from a local dir or a git rev, where the same version string covers many commits. To know what an install actually has, grep the installed code. Same trap as aminx `__version__`.
+
+The wrapped-command fix is the guard `script_path.endswith(".py")` in `mcp.py` (`src/bathos/mcp.py:1887`). Locate the installed `mcp.py` through the tool venv's own import system, not by guessing a `site-packages` path:
+
+```bash
+F=$("$(uv tool dir)/bathos/bin/python" -I -c 'import importlib.util as u; print(u.find_spec("bathos.mcp").origin)')
+grep -nF 'endswith(".py")' "$F"      # a hit = the guard is installed
+```
+
+Verified 2026-10-16 on a machine where `bth` is an editable install of `~/projects/bathos` (`$F` resolves to `~/projects/bathos/src/bathos/mcp.py`, hit at line 1887). The older form, `grep -q 'endswith(".py")' $(ls -d ~/.local/share/uv/tools/bathos/lib/python*/site-packages/bathos)/mcp.py`, works only for a PyPI or wheel install: for an editable install `site-packages/bathos/` holds only `agent_assets/` and there is no `mcp.py` there to grep. Note that this guard is the 2026-09 `.py` check; the later `_bare_script_argv` behaviour above (commit 58813250) is a separate, newer marker (`grep -nF '_bare_script_argv' "$F"`).
+
+### Inline Python is for inspection, not findings
+
+Ephemeral inline `uv run python3 <<PY` is for inspection that produces **no finding** only — `ls`/`wc`/schema peeks. Anything that yields a number someone might cite is a tracked script plus sidecar. The full boundary is in `~/.claude/rules/ephemeral_scripts.md`.
+
 ## Installation
 
 ```bash
 uv tool install bathos
 bth --version
 ```
+
+`bth --version` does not prove the install is current — see "`bth --version` cannot tell you whether an install is current" above.
 
 ## Project Initialization
 
@@ -44,10 +117,10 @@ Creates `.bth.toml` and initializes catalog. Defines project slug (required for 
 ### Basic Tracking
 
 ```bash
-bth run -- uv run python scripts/experiments/train_model.py --epochs 10 --out outputs/result.json
+bth run -- uv run --no-sync python scripts/experiments/train_model.py --epochs 10 --out outputs/result.json
 ```
 
-Runs script, captures git state, and records run in catalog with auto-generated UUID.
+(Run it as `bth`, never `uv run bth`, and prefer `uv run --no-sync`: see **Discipline** above.) Runs script, captures git state, and records run in catalog with auto-generated UUID.
 
 ### With Metadata
 
@@ -576,7 +649,8 @@ path = "~/projects/myproject"
 - **Result schema must include all outcome columns** — if `condition = "metric >= 0.9"`, declare `metric = "float"` in `[result_schema]`
 - **Exactly one residual outcome** — one outcome must have `is_residual = true` for gate evaluation
 - **No `--no-sidecar` in production** — bypassing logs `BYPASSED` and breaks pre-registration discipline
-- **Test measurement pipeline on synthetic data** — verify metrics work before trusting research conclusions
+- **Test measurement pipeline on synthetic data** — verify metrics work before trusting research conclusions, with a positive AND a negative control (see **Discipline** above)
+- **Pre-register before the run; run as `bth`; verify by the record** — the three-line core of the **Discipline** section
 - **Postmortem colocated with script** — `<script>.bth.postmortem.toml` alongside `<script>.py` (see **bathos-campaigns**)
 
 ## Typical Workflow
@@ -594,7 +668,8 @@ bth validate-sidecar scripts/experiments/baseline_training.bth.toml
 uv run python scripts/experiments/baseline_training.py --smoke --out /tmp/test.json  # NOT via bth run — smoke outputs are ephemeral, not tracked
 
 # 4. Run locally or submit to cluster (see bathos-cluster for bth submit)
-bth run -- uv run python scripts/experiments/baseline_training.py --out outputs/run.json
+bth run -- uv run --no-sync python scripts/experiments/baseline_training.py --out outputs/run.json
+# Then verify by the RECORD (outcome != unknown), `bth compact` first if it is not visible yet
 
 # 5. Query results
 bth sql "SELECT * FROM runs WHERE outcome='pass' AND project_slug='myproject'"
@@ -611,4 +686,4 @@ bth export --html --out ~/reports/latest.html
 - **bathos-blast-radius** — trace which past runs a bug fix/commit implicates
 - **bathos-mcp** — MCP tool error envelope and integration contract
 - **CLAUDE.md**: Bathos architecture, schema versions, backlog
-- **Global rules**: `~/.claude/rules/BATHOS.md` — `uv run python` discipline, sidecar validation, DuckDB conditions
+- **Global rules**: `~/.claude/rules/BATHOS.md` — verify the measurement pipeline on synthetic ground truth (folded into **Discipline** above); `~/.claude/rules/ephemeral_scripts.md` — inline vs tracked scripts
