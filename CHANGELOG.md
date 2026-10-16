@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`$BTH_PROGRESS_PATH`, an advisory per-run progress file (#105).** `bth run` exports the
+  path of a per-run file in the temp directory. A script may overwrite it atomically with a
+  small JSON object `{"done": int, "total": int, "unit": str, "updated_at": iso8601}`. It is
+  optional and never read as a result, is not part of the run hash, and produces no event. It
+  is removed when the run ends. A missing, partial or malformed file reads as unknown. `bth show`
+  (`get_run`) adds a `progress` key only while the run is `running` and a usable file exists.
+
 ## [0.13.0a6] - 2026-10-15
 
 ### Changed

@@ -27,6 +27,7 @@ from bathos.prereg import (
     resolve_agent_mode,
     resolve_sidecar,
 )
+from bathos.progress import progress_path_for
 from bathos.runlog.emit import (
     RunNotLaunchedError as RunLogNotLaunchedError,
 )
@@ -1208,10 +1209,14 @@ def _run_script_impl(
 
     # Create temporary results file path for subprocess to write to
     results_temp_path = results_temp_dir / f"{run.id}.bth-results.json"
+    # Advisory progress file (#105): optional for the script, never read as a result,
+    # never hashed or evented, removed with the results temp file at run end.
+    progress_temp_path = progress_path_for(run.id, results_temp_dir)
 
     # Set up environment with results path and per-run output directory
     env = os.environ.copy()
     env["BTH_RESULTS_PATH"] = str(results_temp_path)
+    env["BTH_PROGRESS_PATH"] = str(progress_temp_path)
     bth_output_dir = cwd / "outputs" / run.id[:8]
     bth_output_dir.mkdir(parents=True, exist_ok=True)
     env["BTH_OUTPUT_DIR"] = str(bth_output_dir)
@@ -1571,6 +1576,9 @@ def _run_script_impl(
     if results_temp_path.exists():
         with suppress(OSError):
             results_temp_path.unlink()
+    # Advisory progress file (#105) goes with it; absent is the normal case.
+    with suppress(OSError):
+        progress_temp_path.unlink(missing_ok=True)
 
     # Link this run into campaign_runs (the table campaign review/conclude actually
     # read from). The run only exists in the cool tier until compacted, so compact
