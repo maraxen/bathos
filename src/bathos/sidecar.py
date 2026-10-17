@@ -500,6 +500,7 @@ def parse_sidecar(path: Path) -> Sidecar:
     elif "benchmark" in data:
         kind = SidecarKind.BENCHMARK
         section = data["benchmark"]
+        outcomes = _parse_outcomes(data)
         sidecar = Sidecar(
             kind=kind,
             baseline_ref=section.get("baseline_ref", ""),
@@ -507,6 +508,7 @@ def parse_sidecar(path: Path) -> Sidecar:
             regression_threshold=section.get("regression_threshold", 0.0),
             regression_threshold_basis=section.get("regression_threshold_basis", ""),
             target=section.get("target", ""),
+            outcomes=outcomes,
             result_schema=data.get("result_schema", {}),
             agent_mode=section.get("agent_mode", ""),
         )
