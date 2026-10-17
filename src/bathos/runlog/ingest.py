@@ -189,15 +189,22 @@ class IngestReport:
     ran: bool = True
 
 
-def staging_roots_for_attempt(attempt: str) -> list[tuple[str, str, Path]]:
+def staging_roots_for_attempt(
+    attempt: str, *, staging_root: Path | None = None
+) -> list[tuple[str, str, Path]]:
     """Every `(root_kind="staging", root_id, log_dir)` under one migration
     attempt's staging tree (spec Migration step 2:
     `~/.bth/log/import-staging/<attempt>/<root kind>/<root id>/`), flattened
     to one leaf directory per destination subtree so the generic ingest loop
     (which globs `*.jsonl` in one directory per root) can read it exactly
     like any other root.
+
+    `staging_root` overrides the attempt's directory (default
+    `~/.bth/log/import-staging/<attempt>`); `bth migrate --to-log --dry-run`
+    uses it to fold a throwaway scratch tree instead of the real one (debt #1994).
     """
-    staging_root = Path.home() / ".bth" / "log" / "import-staging" / attempt
+    if staging_root is None:
+        staging_root = Path.home() / ".bth" / "log" / "import-staging" / attempt
     if not staging_root.is_dir():
         return []
     roots: list[tuple[str, str, Path]] = []
@@ -1054,14 +1061,22 @@ def _ingest_locked(
     if real_path.exists():
         shutil.copy2(real_path, tmp_path)
 
-    roots = discover_roots(cd)
-    if extra_roots:
-        roots = [*roots, *extra_roots]
+    try:
+        roots = discover_roots(cd)
+        if extra_roots:
+            roots = [*roots, *extra_roots]
 
-    report = fold_roots_into(tmp_path, roots)
+        report = fold_roots_into(tmp_path, roots)
 
-    _check_no_wal(tmp_path)
-    os.replace(tmp_path, real_path)
+        _check_no_wal(tmp_path)
+        os.replace(tmp_path, real_path)
+    except BaseException:
+        # The generation copy is a full copy of index.db; a failed fold must not leave one
+        # behind per attempt (ingest_after_write swallows the error, so a persistent failure
+        # would otherwise leak a copy on every command). The live index.db is untouched.
+        tmp_path.unlink(missing_ok=True)
+        Path(f"{tmp_path}.wal").unlink(missing_ok=True)
+        raise
 
     return report
 

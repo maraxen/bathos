@@ -435,6 +435,12 @@ def get_run_tool(
         "output_paths": run.output_paths,
         "tags": run.tags,
         "hostname": run.hostname,
+        # Verification fields (rule: verify a run by its record, not its exit
+        # code). Empty strings are emitted as-is so an unset value is explicit.
+        "outcome": run.outcome,
+        "sidecar_mode": run.sidecar_mode,
+        "sidecar_path": run.sidecar_path,
+        "sidecar_sha256": run.sidecar_sha256,
     }
     if run_source(run) == COOL_UNINDEXED_SOURCE:
         notice = (
@@ -718,7 +724,9 @@ def blast_radius_assess_tool(
 
     Returns:
         Dict with anchor_kind/anchor_value/changed_files/affected/unverifiable/
-        unaffected_run_ids (report), plus flagged_count/campaign_flagged_count/
+        unaffected_run_ids/warnings (report; warnings lists coverage caveats such
+        as a file anchor that matched no run, which is unverified rather than
+        clean, and a locked-catalog fallback), plus flagged_count/campaign_flagged_count/
         claim_flagged_count if flag=True. Or {"error": ...} if the anchor
         arguments are malformed.
     """
@@ -1848,6 +1856,7 @@ def run_tool(
     allow_stale: bool = False,
     component_id: str = "",
     component_sidecar_sha256: str = "",
+    seed: int | None = None,
 ) -> dict:
     """Run a script and record provenance.
 
@@ -1866,6 +1875,10 @@ def run_tool(
         component_id: xtrax composition-node/StageBundle-slot ID this run binds to (B2-08 bridge)
         component_sidecar_sha256: SHA256 of the component-level sidecar for
             component_id (B2-08 bridge)
+        seed: RNG seed this run was launched with, recorded as Run.seed so seed-floor gates can
+            see it. bathos does not seed anything itself: the value is exported to the script as
+            $BTH_SEED and the script must honour it. A `--seed` placed AFTER the script path
+            belongs to the script and is not read here.
 
     Returns:
         Dict with run result or structured gate error
@@ -1937,6 +1950,7 @@ def run_tool(
         campaign_id=campaign_id or None,
         component_id=component_id or None,
         component_sidecar_sha256=component_sidecar_sha256 or None,
+        seed=seed,
     )
 
     # run_script doesn't return the Run it creates (its return type is a plain
@@ -1972,10 +1986,16 @@ def run_cli_tool(
     allow_stale: bool = False,
     component_id: str = "",
     component_sidecar_sha256: str = "",
+    bth_seed: int | None = None,
 ) -> dict:
     """CLI-facing wrapper over run_tool: propagates the run script's own exit
     code as the `bth run` process's exit code (matching the shipped Typer
     `run` command's `raise typer.Exit(exit_code)` behavior).
+
+    The CLI flag is `--bth-seed`, not `--seed`: cyclopts consumes a known option anywhere on the
+    line, so a `--seed` flag would silently steal a script's own `bth run train.py --seed 3`,
+    leaving Run.seed recorded as 3 while the script ran with its default (a false provenance
+    claim). The MCP `run` tool passes script args as a separate list, so it keeps `seed`.
 
     A separate function from run_tool (rather than folding this into run_tool
     itself) because cli_render.render_or_exit's generic dict-error convention
@@ -2000,6 +2020,7 @@ def run_cli_tool(
         allow_stale=allow_stale,
         component_id=component_id,
         component_sidecar_sha256=component_sidecar_sha256,
+        seed=bth_seed,
     )
     print(json.dumps(result, indent=2, default=str))
     raise SystemExit(1 if result.get("error") else result.get("exit_code", 0))
@@ -3345,7 +3366,7 @@ def claim_scaffold_tool(
     db_path = cat_dir / "bathos.db"
 
     if not db_path.exists():
-        return {"error": f"Catalog database not found at {db_path}"}
+        return {"error": _missing_catalog_message(db_path, cat_dir)}
 
     # Explicit workspace_root wins; else resolve live fs_root (worktree-aware).
     if workspace_root:
@@ -3461,6 +3482,31 @@ async def claim_validate(
     return claim_validate_tool(path, catalog_dir=catalog_dir)
 
 
+def _missing_catalog_message(db_path: Path, cat_dir: Path) -> str:
+    """Explain a missing catalog database; name the .bth.toml declaration when it caused it.
+
+    A declared `[project] catalog_dir` that does not exist is never replaced by the global
+    catalog. The message says so, so the user creates the catalog or removes the key.
+    """
+    message = f"Catalog database not found at {db_path}"
+    cfg = find_project_config(Path.cwd())
+    if cfg is None:
+        return message
+    try:
+        from bathos.runlog.migrate import explicit_catalog_dir
+
+        declared = explicit_catalog_dir(cfg.parent)
+    except Exception:
+        return message
+    if declared is None or Path(declared) != Path(cat_dir):
+        return message
+    return (
+        f"{message}: the catalog_dir declared in {cfg} ({declared}) does not exist; "
+        "bth takes no fallback to the global catalog. Create that catalog "
+        "(bth init in this project) or remove catalog_dir from .bth.toml."
+    )
+
+
 def _claim_register_sync(
     path: str,
     campaign_id: str,
@@ -3476,7 +3522,7 @@ def _claim_register_sync(
 
     db_path = Path(cat_dir) / "bathos.db"
     if not db_path.exists():
-        return {"ok": False, "error": f"Catalog database not found at {db_path}"}
+        return {"ok": False, "error": _missing_catalog_message(db_path, cat_dir)}
     db = duckdb.connect(str(db_path), read_only=False)
     try:
         register_claim(
@@ -4432,6 +4478,7 @@ def lint_tool(project_root: str = "", concentration_threshold: int = 20) -> dict
         check_canonical_stage_names,
         check_claim_opaque_labels,
         check_ephemeral_output_paths,
+        check_popper_adversarial,
         check_residual_rates,
         check_run_concentration,
         check_stale_scripts_without_reason,
@@ -4445,6 +4492,7 @@ def lint_tool(project_root: str = "", concentration_threshold: int = 20) -> dict
     issues = lint_project(root.resolve())
     issues.extend(check_claim_opaque_labels(root.resolve()))
     issues.extend(check_adversarial_checks(root.resolve()))
+    issues.extend(check_popper_adversarial(root.resolve()))
     issues.extend(check_threshold_basis(root.resolve()))
     issues.extend(check_todo_strings_in_scaffold(root.resolve()))
     issues.extend(check_stale_scripts_without_reason(root.resolve()))

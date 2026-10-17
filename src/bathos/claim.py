@@ -323,8 +323,15 @@ def validate_claim(
 
         # State 1: parity_run_id empty or missing
         if not parity_run_id:
+            # A present [confounds.reference_parity] block asserts a literature baseline, so
+            # parity_run_id is required. Name both ways out: bind a run, or drop the block.
             errors.append(
-                ValidationError(f"baseline admissibility not established for '{confound_label}'")
+                ValidationError(
+                    f"baseline admissibility not established for '{confound_label}': "
+                    "[confounds.reference_parity] has no parity_run_id; bind a parity run "
+                    "with `bth campaign attest-parity`, or delete the reference_parity block "
+                    "if this confound has no literature baseline"
+                )
             )
             continue
 

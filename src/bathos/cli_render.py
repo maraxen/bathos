@@ -48,12 +48,36 @@ def render_or_exit(result: dict, success_template: str | None = None) -> None:
         print(f"Error: {error}", file=sys.stderr)
         sys.exit(1)
 
+    if _is_blast_radius_report(result) and result.get("warnings"):
+        _print_warning_block(result["warnings"])
+
     if success_template is not None:
         print(success_template)
     elif "message" in result:
         print(result["message"])
     else:
         print(json.dumps(result, indent=2, default=str))
+
+
+def _is_blast_radius_report(result: dict) -> bool:
+    """True for a `BlastRadiusReport` dict (bathos.blast_radius.assess_blast_radius).
+
+    Matched on shape, not command name, so no other command's output changes.
+    """
+    return "anchor_kind" in result and "unaffected_run_ids" in result
+
+
+def _print_warning_block(warnings: list[str]) -> None:
+    """Coverage warnings go to stderr before the JSON on stdout, so stdout stays
+    parseable and the caveats are read before any bucket counts."""
+    print(
+        "WARNING: this blast-radius assessment has unverified coverage. "
+        "Zero matches below are not evidence of a clean result.",
+        file=sys.stderr,
+    )
+    for w in warnings:
+        print(f"  WARNING: {w}", file=sys.stderr)
+    print(file=sys.stderr)
 
 
 def cyclopts_result_action(result: Any) -> None:

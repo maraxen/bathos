@@ -33,7 +33,9 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from bathos.catalog import read_runs
 from bathos.checker import check_dependency_lock_drift, check_runs, hash_dependency_lock
+from bathos.index import _LOCK_ERROR_MARKER as _DUCKDB_LOCK_MARKER
 from bathos.index import catalog_readable, connect_read
 from bathos.query import get_run, list_runs
 from bathos.schema import Run
@@ -458,12 +460,19 @@ class BlastRadiusReport:
     pass this to flag_blast_radius() to durably record it (AC-11: report-then-flag,
     this dataclass IS the "report" shown to the user before that write happens)."""
 
-    anchor_kind: str  # "commit" | "commit_range" | "file"
+    anchor_kind: str  # "commit" | "commit_range" | "file" | "dependency"
     anchor_value: str
     changed_files: list[str]
     affected: list[BlastRadiusMatch]
     unverifiable: list[BlastRadiusMatch]
     unaffected_run_ids: list[str]
+    #: Coverage caveats for this assessment, shown to the user alongside the buckets.
+    #: For file anchors, a file that matched no run is reported here as "unverified":
+    #: zero matches does not mean no run depends on the file (bathos records no import
+    #: closure or runtime reads). Also covers catalog reads that fell back or were
+    #: skipped because the catalog was locked, and sidecar/manifest texts that were
+    #: only partly searched. Does not change what `unaffected_run_ids` means.
+    warnings: list[str] = field(default_factory=list)
 
 
 def _reject_flag_like(value: str) -> None:
@@ -558,28 +567,163 @@ def _is_ancestor(candidate_sha: str, boundary_sha: str, project_root: Path) -> b
     return None
 
 
-def _run_touches_files(run: Run, changed_files: list[str]) -> list[str]:
-    """v1 file-path heuristic (spec Decision Log #2): a changed file "matches" a run
-    if it appears as a substring of the run's command or any argv entry, in either
-    direction. Deliberately coarse -- see spec Pre-mortem Record: the accepted v1
-    mitigation is AC-13's match_reason auditability, not precision here.
+#: Cap on how much of a run's sidecar or manifest is read and searched. A file over
+#: the cap is searched only up to it, and that is reported as a warning: a reference
+#: past the cap would be missed, which is the false-negative direction.
+_TEXT_SOURCE_CAP_BYTES = 1 << 20
+
+
+class _MatchContext:
+    """Per-assess-call state for file matching.
+
+    `text_of` reads each sidecar/manifest at most once per call (keyed by the raw
+    path recorded on the run), so thousands of runs sharing one sidecar cost one
+    read. Unreadable paths resolve to None and are skipped silently. `contains`
+    memoizes the substring test for the same reason.
     """
-    haystacks = [run.command or "", *(run.argv or [])]
-    matched: list[str] = []
+
+    def __init__(self, project_root: Path) -> None:
+        self.project_root = project_root
+        self._texts: dict[str, tuple[str, str] | None] = {}
+        self._contains: dict[tuple[str, str], bool] = {}
+        #: resolved paths whose text was longer than the cap (first-seen order)
+        self.truncated: list[str] = []
+
+    def text_of(self, raw: str | None) -> str | None:
+        if not raw:
+            return None
+        if raw not in self._texts:
+            self._texts[raw] = self._load(raw)
+        loaded = self._texts[raw]
+        return loaded[1] if loaded is not None else None
+
+    def _load(self, raw: str) -> tuple[str, str] | None:
+        p = Path(raw)
+        candidates = [p] if p.is_absolute() else [self.project_root / p, p]
+        for cand in candidates:
+            try:
+                with cand.open("rb") as fh:
+                    data = fh.read(_TEXT_SOURCE_CAP_BYTES + 1)
+            except OSError:
+                continue
+            key = str(cand)
+            if len(data) > _TEXT_SOURCE_CAP_BYTES:
+                data = data[:_TEXT_SOURCE_CAP_BYTES]
+                if key not in self.truncated:
+                    self.truncated.append(key)
+            return key, data.decode("utf-8", errors="replace")
+        return None
+
+    def contains(self, memo_id: str | None, text: str, needle: str) -> bool:
+        if memo_id is None:
+            return needle in text
+        ck = (memo_id, needle)
+        if ck not in self._contains:
+            self._contains[ck] = needle in text
+        return self._contains[ck]
+
+
+def _run_match_sources(
+    run: Run, changed_files: list[str], ctx: _MatchContext | None = None
+) -> dict[str, list[str]]:
+    """Map each changed file that matches `run` to the source(s) it matched on.
+
+    Sources, in order (the label is what match_reason reports):
+      - "command": run.command and each run.argv entry. Two-way substring, the
+        original v1 heuristic (spec Decision Log #2): a changed path matches if it
+        is a substring of the haystack or the haystack is a substring of it.
+        Deliberately coarse; the accepted mitigation is match_reason auditability.
+      - "sidecar path" / "manifest path": run.sidecar_path / run.manifest_path,
+        same two-way test.
+      - "metadata": run.metadata JSON text. One-way: the changed path appears in it.
+      - "sidecar text" / "manifest text": the text of those files, when readable.
+        One-way, for the same reason: a two-way test against a whole file body would
+        let any short body match every path.
+
+    Only bathos's recorded fields and the text of the run's own sidecar/manifest are
+    consulted. bathos records no import closure or runtime reads, so a module or
+    input that the run loads at runtime, and that no recorded field names, cannot
+    match here. See the warnings on BlastRadiusReport.
+    """
+    if ctx is None:
+        ctx = _MatchContext(Path.cwd())
+
+    two_way: list[tuple[str, str]] = [("command", run.command or "")]
+    two_way += [("command", arg or "") for arg in (run.argv or [])]
+    two_way += [
+        ("sidecar path", run.sidecar_path or ""),
+        ("manifest path", run.manifest_path or ""),
+    ]
+
+    one_way: list[tuple[str, str, str | None]] = [("metadata", run.metadata or "", None)]
+    for label, raw in (("sidecar text", run.sidecar_path), ("manifest text", run.manifest_path)):
+        text = ctx.text_of(raw)
+        if text is not None:
+            one_way.append((label, text, raw))
+
+    sources: dict[str, list[str]] = {}
     for changed in changed_files:
         changed_norm = changed.replace("\\", "/")
-        for hay in haystacks:
-            hay_norm = (hay or "").replace("\\", "/")
+        if not changed_norm:
+            continue
+        labels: list[str] = []
+        for label, hay in two_way:
+            hay_norm = hay.replace("\\", "/")
             if not hay_norm:
                 continue
             # Just the two `in` checks: `s.endswith(t)` implies `t in s`, so an
             # endswith clause here could never independently flip the result --
             # dropped per code-review finding (verified: exhaustive brute-force
             # check found no case where the two endswith clauses mattered).
-            if changed_norm in hay_norm or hay_norm in changed_norm:
-                matched.append(changed)
-                break
-    return matched
+            if (changed_norm in hay_norm or hay_norm in changed_norm) and label not in labels:
+                labels.append(label)
+        for label, text, memo_id in one_way:
+            if label not in labels and ctx.contains(memo_id, text, changed_norm):
+                labels.append(label)
+        if labels:
+            sources[changed] = labels
+    return sources
+
+
+def _run_touches_files(
+    run: Run, changed_files: list[str], ctx: _MatchContext | None = None
+) -> list[str]:
+    """Changed files that match `run`, in `changed_files` order. See _run_match_sources."""
+    return list(_run_match_sources(run, changed_files, ctx))
+
+
+def _via(sources: dict[str, list[str]], matched_files: list[str]) -> str:
+    """Human label for which source(s) produced these matches, for match_reason."""
+    labels: list[str] = []
+    for f in matched_files:
+        for label in sources.get(f, []):
+            if label not in labels:
+                labels.append(label)
+    return ", ".join(labels)
+
+
+def _cool_tier_runs(catalog_dir: Path, project: str | None) -> list[Run]:
+    """Run list from the cool tier (Parquet fragments). Fallback for when the warm
+    DuckDB catalog cannot be opened because another process holds its lock."""
+    runs = read_runs(catalog_dir)
+    if project:
+        runs = [r for r in runs if r.project_slug == project]
+    return runs
+
+
+def _campaign_read_warning(exc: duckdb.Error) -> str:
+    """User-facing text for a failed campaign-membership read. Deliberately does not
+    echo the DuckDB message: the lock text names a PID and the message is not a
+    user-facing instruction."""
+    if _DUCKDB_LOCK_MARKER in str(exc):
+        cause = "the catalog database is locked by another process"
+    else:
+        cause = f"the catalog read failed ({type(exc).__name__})"
+    return (
+        f"campaign membership was not read because {cause}; only each run's own "
+        "campaign_id was used, so campaign-level and claim-level propagation may be "
+        "incomplete. Unverified, not clean."
+    )
 
 
 #: list_runs()/check_runs() require an int limit (no "unbounded" sentinel) and build
@@ -695,10 +839,24 @@ def assess_blast_radius(
         anchor_kind, anchor_value = "file", ",".join(files)
         changed_files = list(files)
 
+    warnings: list[str] = []
+
     # Single catalog scan, reused for both the check-results lookup and the per-run
     # loop below (debt #1486: check_runs() used to call list_runs() again internally
     # with the same catalog_dir/project/limit, scanning the same rows twice).
-    all_runs = list_runs(Path(catalog_dir), project=project, limit=_UNBOUNDED_SCAN_LIMIT)
+    # debt #2684: if another process holds the warm DuckDB lock, answer from the cool
+    # tier instead of failing the whole assessment, and say which tier answered.
+    try:
+        all_runs = list_runs(Path(catalog_dir), project=project, limit=_UNBOUNDED_SCAN_LIMIT)
+    except duckdb.Error as exc:
+        if _DUCKDB_LOCK_MARKER not in str(exc):
+            raise
+        all_runs = _cool_tier_runs(Path(catalog_dir), project)
+        warnings.append(
+            "run list was read from the cool tier (Parquet fragments), not the warm "
+            "DuckDB catalog, because the catalog database is locked by another process. "
+            "The cool tier can differ from the warm tier until the next compact."
+        )
     check_results = {
         r.run_id: r
         for r in check_runs(
@@ -719,15 +877,21 @@ def assess_blast_radius(
     # Built once here, not per-run, mirroring check_results above.
     campaign_by_run: dict[str, str] = {}
     if catalog_readable(Path(catalog_dir)):
-        con = connect_read(Path(catalog_dir), read_only=True)
+        # The connect itself can raise on a held lock (log-mode reads ATTACH index.db
+        # inside connect_read), so the try covers connect as well as the query.
         try:
-            rows = con.execute("SELECT run_id, campaign_id FROM campaign_runs").fetchall()
+            con = connect_read(Path(catalog_dir), read_only=True)
+            try:
+                rows = con.execute("SELECT run_id, campaign_id FROM campaign_runs").fetchall()
+            finally:
+                con.close()
             campaign_by_run = dict(rows)
-        except duckdb.Error:
-            pass
-        finally:
-            con.close()
+        except duckdb.Error as exc:
+            warnings.append(_campaign_read_warning(exc))
 
+    ctx = _MatchContext(project_root)
+    #: changed files that matched at least one run on any source (file-anchor coverage)
+    matched_anywhere: set[str] = set()
     affected: list[BlastRadiusMatch] = []
     unverifiable: list[BlastRadiusMatch] = []
     unaffected_run_ids: list[str] = []
@@ -772,10 +936,13 @@ def assess_blast_radius(
                 unaffected_run_ids.append(run.id)
             continue
 
-        matched_files = _run_touches_files(run, changed_files)
+        sources = _run_match_sources(run, changed_files, ctx)
+        matched_files = list(sources)
         if not matched_files:
             unaffected_run_ids.append(run.id)
             continue
+        matched_anywhere.update(matched_files)
+        touch = f"touches {matched_files} via {_via(sources, matched_files)}"
 
         status = check_results[run.id].status if run.id in check_results else "OK"
 
@@ -788,7 +955,7 @@ def assess_blast_radius(
                     campaign_id=run.campaign_id or campaign_by_run.get(run.id, ""),
                     matched_files=matched_files,
                     reason=(
-                        f"touches {matched_files} but git status is {status} -- "
+                        f"{touch} but git status is {status} -- "
                         "cannot verify which code actually ran"
                     ),
                 )
@@ -803,10 +970,7 @@ def assess_blast_radius(
                     command=run.command,
                     campaign_id=run.campaign_id or campaign_by_run.get(run.id, ""),
                     matched_files=matched_files,
-                    reason=(
-                        f"touches {matched_files} (file anchor -- no commit "
-                        "ancestry check applied)"
-                    ),
+                    reason=f"{touch} (file anchor -- no commit ancestry check applied)",
                 )
             )
             continue
@@ -821,7 +985,7 @@ def assess_blast_radius(
                     campaign_id=run.campaign_id or campaign_by_run.get(run.id, ""),
                     matched_files=matched_files,
                     reason=(
-                        f"touches {matched_files}; ancestry of git_hash "
+                        f"{touch}; ancestry of git_hash "
                         f"{run.git_hash[:9]} vs fix boundary {boundary} could not be "
                         "determined (git error) -- flagged conservatively"
                     ),
@@ -836,13 +1000,30 @@ def assess_blast_radius(
                     campaign_id=run.campaign_id or campaign_by_run.get(run.id, ""),
                     matched_files=matched_files,
                     reason=(
-                        f"touches {matched_files}; git_hash {run.git_hash[:9]} "
+                        f"{touch}; git_hash {run.git_hash[:9]} "
                         f"predates fix boundary {boundary}"
                     ),
                 )
             )
         else:
             unaffected_run_ids.append(run.id)
+
+    if anchor_kind == "file":
+        for path in dict.fromkeys(changed_files):
+            if path not in matched_anywhere:
+                warnings.append(
+                    f"file anchor '{path}' matched no run's command/argv/sidecar/manifest "
+                    "(or metadata). This does NOT mean no run depends on it: bathos "
+                    "records no import closure or runtime reads, so an imported module "
+                    "or a runtime-read input is invisible here. Zero matches is "
+                    "unverified, not clean."
+                )
+    for key in ctx.truncated:
+        warnings.append(
+            f"only the first 1 MiB of '{key}' was searched for file references; a "
+            "reference past that point would be missed, so zero matches from it are "
+            "unverified, not clean."
+        )
 
     return BlastRadiusReport(
         anchor_kind=anchor_kind,
@@ -851,6 +1032,7 @@ def assess_blast_radius(
         affected=affected,
         unverifiable=unverifiable,
         unaffected_run_ids=unaffected_run_ids,
+        warnings=warnings,
     )
 
 

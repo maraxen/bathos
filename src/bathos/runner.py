@@ -17,7 +17,7 @@ import duckdb
 
 from bathos.catalog import write_run
 from bathos.checker import hash_dependency_lock
-from bathos.git import capture_git_state, git_state_as_dict
+from bathos.git import capture_run_git_state, git_state_as_dict
 from bathos.git_pin import ensure_manifest_ignored, pin_result_as_dict, pin_run
 from bathos.prereg import (
     GateErrorCode,
@@ -732,6 +732,7 @@ def run_script(
     campaign_id: str | None = None,
     component_id: str | None = None,
     component_sidecar_sha256: str | None = None,
+    seed: int | None = None,
 ) -> int:
     """Public entry point: one call is one `bth run` unit of work (runlog
     Mode section). `unit_of_work()` fixes the log-mode flag for the whole
@@ -739,8 +740,9 @@ def run_script(
     (run.started) and held through its last (run.finished) -- so a
     long-running script can never straddle a cut-over mid-process."""
     init_telemetry()
+    # Log mode: the unit's outermost exit folds this run's events into index.db
+    # (debt #2811); there is no separate ingest call here, so one per command.
     with unit_of_work(catalog_dir):
-        log_mode = current_mode()
         exit_code = _run_script_impl(
             argv,
             project_slug,
@@ -755,13 +757,8 @@ def run_script(
             campaign_id=campaign_id,
             component_id=component_id,
             component_sidecar_sha256=component_sidecar_sha256,
+            seed=seed,
         )
-    if log_mode:
-        # Fold the run's events into index.db so every reader sees this run
-        # without `bth compact` (no-op on SLURM / BTH_NO_INGEST=1; never raises).
-        from bathos.runlog.ingest import ingest_after_write
-
-        ingest_after_write(catalog_dir)
     return exit_code
 
 
@@ -779,6 +776,7 @@ def _run_script_impl(
     campaign_id: str | None = None,
     component_id: str | None = None,
     component_sidecar_sha256: str | None = None,
+    seed: int | None = None,
 ) -> int:
     # Resolve --campaign up front (fail fast, before running the subprocess) and
     # store the full UUID — never the raw prefix — on the run record.
@@ -892,7 +890,9 @@ def _run_script_impl(
         else None,
     )
 
-    git = capture_git_state(cwd)
+    # Git provenance (hash/branch/dirty and the lock file's git_sha) comes from the checkout
+    # the executed script lives in, not necessarily the run's cwd (backlog #5609).
+    git = capture_run_git_state(script_path, cwd)
 
     # Dependency-lock provenance (debt #1071): captured unconditionally on every run, not
     # just differential ones -- the incident this guards against (a package re-pin silently
@@ -992,6 +992,7 @@ def _run_script_impl(
         ),
         component_id=component_id,
         component_sidecar_sha256=component_sidecar_sha256,
+        seed=seed,
         dependency_lock_sha256=dependency_lock_sha256,
         git_dirty_content_id=git.dirty_content_id,
         git_provenance_source=git.provenance_source,
@@ -1228,6 +1229,10 @@ def _run_script_impl(
     bth_output_dir = cwd / "outputs" / run.id[:8]
     bth_output_dir.mkdir(parents=True, exist_ok=True)
     env["BTH_OUTPUT_DIR"] = str(bth_output_dir)
+    if seed is not None:
+        # The recorded seed is only a claim about the run if the script can read the same
+        # value. bathos does not seed anything itself; the script must honour $BTH_SEED.
+        env["BTH_SEED"] = str(seed)
 
     start = time.monotonic()
     exit_code = 1
@@ -1452,14 +1457,22 @@ def _run_script_impl(
     # above: that records whether a check was DECLARED, this records what happened when it ran.
     adversarial_check_result = None
     if sidecar is not None and outcome:
+        adversarial_check_error = ""
         try:
-            from bathos.sidecar import evaluate_adversarial_check
+            from bathos.sidecar import evaluate_adversarial_check_detailed
 
-            adversarial_check_result = evaluate_adversarial_check(
+            adversarial_check_result, adversarial_check_error = evaluate_adversarial_check_detailed(
                 sidecar, outcome, json.loads(metadata) if metadata else {}
             )
         except (json.JSONDecodeError, TypeError):
             adversarial_check_result = None
+        # A declared check that could not be evaluated must not vanish: record why, without
+        # changing the outcome label (the check is advisory).
+        if adversarial_check_error:
+            detail = f"adversarial_check: {adversarial_check_error}"
+            outcome_error_reason = (
+                f"{outcome_error_reason}; {detail}" if outcome_error_reason else detail
+            )
 
     # Step 4: Extract parity_run_type from doubly-nested metadata (AC-19)
     # parity_validate.py emits result["metadata"]["parity_run_type"] = "literature_parity"

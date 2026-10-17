@@ -13,7 +13,7 @@ from pathlib import Path
 
 import duckdb
 
-from bathos.catalog import CorruptFragment, read_runs_report
+from bathos.catalog import CorruptFragment, iter_run_fragments, read_runs_report
 from bathos.schema import CURRENT_SCHEMA_VERSION, Run
 from bathos.telemetry import event
 from bathos.walk import iter_project_files
@@ -576,7 +576,7 @@ def _fragment_count(catalog_dir: Path) -> int:
     runs_dir = catalog_dir / "runs"
     if not runs_dir.exists():
         return 0
-    return len(list(runs_dir.rglob("run_*.parquet")))
+    return len(iter_run_fragments(runs_dir))
 
 
 def should_compact(catalog_dir: Path) -> bool:

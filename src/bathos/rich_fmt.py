@@ -102,6 +102,7 @@ def render_run_detail(run: Run, console: Console | None = None) -> None:
         f"[bold]Git Status:[/bold] {git_dirty_str}\n"
         f"[bold]Script SHA256:[/bold] {run.script_sha256 or '—'}\n"
         f"[bold]Sidecar Path:[/bold] {run.sidecar_path or '—'}\n"
+        f"[bold]Sidecar SHA256:[/bold] {run.sidecar_sha256 or '—'}\n"
         f"[bold]Sidecar Mode:[/bold] {run.sidecar_mode or '—'}\n"
         f"[bold]Agent Mode:[/bold] {run.agent_mode or '—'}\n"
         f"[bold]Parent Run ID:[/bold] {parent_id_short}"

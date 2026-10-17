@@ -609,7 +609,7 @@ def test_real_emitter_campaign_created(tmp_path: Path):
     )
 
     report = run_ingest(catalog_dir)
-    assert report.new_events == 1
+    assert report.new_events == 0  # already folded at the write's unit exit (debt #2811)
 
     con = connect_read(catalog_dir)
     row = con.execute(
@@ -633,7 +633,7 @@ def test_real_emitter_campaign_edge(tmp_path: Path):
     add_campaign_edge(db, "child-camp", "parent-camp", catalog_dir=catalog_dir, cwd=repo)
 
     report = run_ingest(catalog_dir)
-    assert report.new_events == 1
+    assert report.new_events == 0  # already folded at the write's unit exit (debt #2811)
 
     con = connect_read(catalog_dir)
     row = con.execute("SELECT child_campaign_id, parent_campaign_id FROM campaign_edges").fetchone()
@@ -654,7 +654,7 @@ def test_real_emitter_anchor(tmp_path: Path):
     store.insert(record, cwd=repo)
 
     report = run_ingest(catalog_dir)
-    assert report.new_events == 1
+    assert report.new_events == 0  # already folded at the write's unit exit (debt #2811)
 
     con = connect_read(catalog_dir)
     row = con.execute(
@@ -680,7 +680,7 @@ def test_real_emitter_blast_radius(tmp_path: Path):
     append_ledger_record(record, catalog_dir, cwd=repo)
 
     report = run_ingest(catalog_dir)
-    assert report.new_events == 1
+    assert report.new_events == 0  # already folded at the write's unit exit (debt #2811)
 
     con = connect_read(catalog_dir)
     row = con.execute(
@@ -702,7 +702,7 @@ def test_real_emitter_trust_ledger(tmp_path: Path):
     append_ledger_record(record, catalog_dir, cwd=repo)
 
     report = run_ingest(catalog_dir)
-    assert report.new_events == 1
+    assert report.new_events == 0  # already folded at the write's unit exit (debt #2811)
 
     con = connect_read(catalog_dir)
     row = con.execute(
@@ -724,7 +724,7 @@ def test_real_emitter_archived_item(tmp_path: Path):
     append_archived_item_record(record, catalog_dir, cwd=repo)
 
     report = run_ingest(catalog_dir)
-    assert report.new_events == 1
+    assert report.new_events == 0  # already folded at the write's unit exit (debt #2811)
 
     con = connect_read(catalog_dir)
     row = con.execute("SELECT id, project_slug, event, paths FROM archived_items").fetchone()
@@ -762,7 +762,7 @@ def test_real_emitter_postmortem_path_is_workspace_relative(tmp_path: Path):
     assert result["validation_ok"] is True
 
     report = run_ingest(catalog_dir)
-    assert report.new_events == 1
+    assert report.new_events == 0  # already folded at the write's unit exit (debt #2811)
 
     con = connect_read(catalog_dir)
     row = con.execute(
@@ -791,7 +791,7 @@ def test_real_emitter_submit_provenance(tmp_path: Path):
     )
 
     report = run_ingest(catalog_dir)
-    assert report.new_events == 1
+    assert report.new_events == 0  # already folded at the write's unit exit (debt #2811)
 
     con = connect_read(catalog_dir)
     row = con.execute(

@@ -9,6 +9,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from bathos.catalog import iter_run_fragments
 from bathos.schema import COOL_SCHEMA, CURRENT_SCHEMA_VERSION
 
 logger = logging.getLogger(__name__)
@@ -55,7 +56,7 @@ def migrate_catalog(
     if not runs_dir.exists():
         return MigrateResult(scanned=0, already_current=0, migrated=0, dry_run=dry_run)
 
-    fragments = sorted(runs_dir.rglob("run_*.parquet"))
+    fragments = iter_run_fragments(runs_dir)
     current_names = {f.name for f in COOL_SCHEMA}
     migrated = 0
     corrupt: list[Path] = []
@@ -151,7 +152,7 @@ def migrate_to_project_subdirs(catalog_dir: Path, dry_run: bool = False) -> Migr
         return MigrateToSubdirsResult(moved=0, skipped=0, by_slug={}, dry_run=dry_run)
 
     # Only consider directly-nested parquets (flat layout), not already-subdir'd ones
-    flat_files = [f for f in runs_dir.glob("run_*.parquet")]
+    flat_files = iter_run_fragments(runs_dir, recursive=False)
 
     moves = []
     for parquet in flat_files:

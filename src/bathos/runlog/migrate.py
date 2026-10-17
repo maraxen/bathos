@@ -1346,30 +1346,15 @@ def _cool_fragment_run_rows(catalog_dir: Path) -> dict[str, dict[str, Any]]:
 
 
 def _staging_roots_from(staging_root: Path, attempt: str) -> list[tuple[str, str, Path]]:
-    """`ingest.staging_roots_for_attempt`'s own body, parameterized on an
-    explicit `staging_root` directory instead of hardcoding `Path.home() /
-    ".bth" / "log" / "import-staging" / attempt`.
+    """`ingest.staging_roots_for_attempt` pointed at an explicit `staging_root`.
 
-    `--dry-run`'s only seam for pointing Migration step 3's fold at a
-    throwaway scratch tree instead of the real `~/.bth/log/import-staging/`
-    -- `bathos.runlog.ingest` is owned by another fixer's task this sprint,
-    so this is a small, deliberate duplication of its traversal logic rather
-    than an edit there. Keep in sync with `ingest.staging_roots_for_attempt`
-    if that ever changes shape.
+    `--dry-run`'s only seam for pointing Migration step 3's fold at a throwaway
+    scratch tree instead of the real `~/.bth/log/import-staging/`. The traversal
+    itself lives in ingest (debt #1994 removed the copy that used to live here).
     """
-    if not staging_root.is_dir():
-        return []
-    roots: list[tuple[str, str, Path]] = []
-    for kind_dir in sorted(staging_root.iterdir()):
-        if not kind_dir.is_dir():
-            continue
-        if kind_dir.name == "unaffiliated":
-            roots.append(("staging", f"{attempt}/unaffiliated", kind_dir))
-            continue
-        for sub in sorted(kind_dir.iterdir()):
-            if sub.is_dir():
-                roots.append(("staging", f"{attempt}/{kind_dir.name}/{sub.name}", sub))
-    return roots
+    from bathos.runlog.ingest import staging_roots_for_attempt
+
+    return staging_roots_for_attempt(attempt, staging_root=staging_root)
 
 
 def _build_and_diff(

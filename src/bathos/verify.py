@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 
+from bathos.catalog import iter_run_fragments
+
 logger = logging.getLogger(__name__)
 
 
@@ -54,8 +56,8 @@ def verify_cool(catalog_dir: Path) -> VerifyResult:
         errors.append(f"Interrupted write: temporary file exists at {tmp_file}")
         logger.error(f"Interrupted write: {tmp_file}")
 
-    # Check each fragment (exclude .tmp.parquet files which are sentinel markers)
-    fragments = [f for f in runs_dir.rglob("run_*.parquet") if not f.name.endswith(".tmp.parquet")]
+    # Check each fragment (iter_run_fragments excludes .tmp.parquet sentinel markers)
+    fragments = iter_run_fragments(runs_dir)
     for frag in fragments:
         stats["fragments_checked"] += 1
         try:
@@ -143,7 +145,7 @@ def verify_warm(catalog_dir: Path) -> VerifyResult:
 
     # Check if cool fragments exist but runs table is empty
     runs_dir = catalog_dir / "runs"
-    cool_fragments = list(runs_dir.rglob("run_*.parquet")) if runs_dir.exists() else []
+    cool_fragments = iter_run_fragments(runs_dir) if runs_dir.exists() else []
 
     if cool_fragments and stats.get("runs_count", 0) == 0:
         warnings.append("Cool fragments exist but runs table is empty — run bth compact")

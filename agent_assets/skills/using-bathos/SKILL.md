@@ -251,6 +251,18 @@ metric = "ns_per_day"
 regression_threshold = 0.05
 target = "> 50 ns/day on pi_so3"
 
+[outcomes.pass]
+condition = "ns_per_day >= 50"
+decision = "accept benchmark"
+reasoning = "meets the target"
+is_residual = false
+
+[outcomes.fail]
+condition = "ns_per_day < 50"
+decision = "investigate regression"
+reasoning = "below the target"
+is_residual = true
+
 [result_schema]
 ns_per_day = "float"
 system = "str"
