@@ -1454,14 +1454,22 @@ def _run_script_impl(
     # above: that records whether a check was DECLARED, this records what happened when it ran.
     adversarial_check_result = None
     if sidecar is not None and outcome:
+        adversarial_check_error = ""
         try:
-            from bathos.sidecar import evaluate_adversarial_check
+            from bathos.sidecar import evaluate_adversarial_check_detailed
 
-            adversarial_check_result = evaluate_adversarial_check(
+            adversarial_check_result, adversarial_check_error = evaluate_adversarial_check_detailed(
                 sidecar, outcome, json.loads(metadata) if metadata else {}
             )
         except (json.JSONDecodeError, TypeError):
             adversarial_check_result = None
+        # A declared check that could not be evaluated must not vanish: record why, without
+        # changing the outcome label (the check is advisory).
+        if adversarial_check_error:
+            detail = f"adversarial_check: {adversarial_check_error}"
+            outcome_error_reason = (
+                f"{outcome_error_reason}; {detail}" if outcome_error_reason else detail
+            )
 
     # Step 4: Extract parity_run_type from doubly-nested metadata (AC-19)
     # parity_validate.py emits result["metadata"]["parity_run_type"] = "literature_parity"

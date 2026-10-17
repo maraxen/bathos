@@ -653,27 +653,73 @@ def single_row_projection(row: dict) -> str:
     outcome is `unknown` unless a condition tests `x IS NULL` explicitly.
     """
 
-    def _sql_literal(v: object, k: str) -> str:
-        if v is None:
-            return f"NULL AS {k}"
-        if isinstance(v, bool):
-            return f"{'TRUE' if v else 'FALSE'} AS {k}"
-        if isinstance(v, float):
-            if v != v:  # NaN: NULL so it can never satisfy a comparison (see docstring)
-                return f"NULL::DOUBLE AS {k}"
-            if v == float("inf"):
-                return f"'inf'::DOUBLE AS {k}"
-            if v == float("-inf"):
-                return f"'-inf'::DOUBLE AS {k}"
-            return f"{v!r}::DOUBLE AS {k}"
-        if isinstance(v, int):
-            return f"{v!r} AS {k}"
-        if isinstance(v, (dict, list)):
-            v = json.dumps(v)
-        escaped = str(v).replace("'", "''")
-        return f"'{escaped}' AS {k}"
+    return ", ".join(f"{_sql_scalar_expr(v)} AS {k}" for k, v in row.items())
 
-    return ", ".join(_sql_literal(v, k) for k, v in row.items())
+
+def _sql_scalar_expr(v: object) -> str:
+    """Render a non-nested value as a DuckDB scalar literal (see single_row_projection)."""
+    if v is None:
+        return "NULL"
+    if isinstance(v, bool):
+        return "TRUE" if v else "FALSE"
+    if isinstance(v, float):
+        if v != v:  # NaN: NULL so it can never satisfy a comparison (see single_row_projection)
+            return "NULL::DOUBLE"
+        if v == float("inf"):
+            return "'inf'::DOUBLE"
+        if v == float("-inf"):
+            return "'-inf'::DOUBLE"
+        return f"{v!r}::DOUBLE"
+    if isinstance(v, int):
+        return f"{v!r}"
+    if isinstance(v, (dict, list)):
+        v = json.dumps(v)
+    escaped = str(v).replace("'", "''")
+    return f"'{escaped}'"
+
+
+def _sql_struct_expr(d: dict) -> str:
+    """Render a dict as a DuckDB STRUCT literal, recursing into nested dicts.
+
+    Lists inside a struct stay inert JSON text, as they do at top level. An empty dict has no
+    DuckDB STRUCT form (`{}` is rejected), so it is NULL: any `a.b` on it is NULL, not a match.
+    """
+    if not d:
+        return "NULL"
+    fields = []
+    for key, value in d.items():
+        value_sql = _sql_struct_expr(value) if isinstance(value, dict) else _sql_scalar_expr(value)
+        fields.append(f"{_sql_scalar_expr(str(key))}: {value_sql}")
+    return "{" + ", ".join(fields) + "}"
+
+
+def _struct_row_projection(row: dict) -> str:
+    """Like single_row_projection, but each dict-valued column is a STRUCT, so `a.b` addresses it."""
+    return ", ".join(
+        f"{_sql_struct_expr(v) if isinstance(v, dict) else _sql_scalar_expr(v)} AS {k}"
+        for k, v in row.items()
+    )
+
+
+def _condition_value(condition: str, result: dict) -> object:
+    """Evaluate one outcome SQL fragment against `result` and return its value (None if no row).
+
+    Top-level values bind exactly as they always have (single_row_projection). Only when that
+    raises AND the result holds a nested dict is the fragment retried with dicts bound as STRUCTs,
+    so `a.b` addresses a nested field. A fragment that evaluates the legacy way is never re-bound,
+    so every case that already worked keeps its meaning. A failure raises; callers must report it.
+    """
+    try:
+        rows = duckdb.execute(
+            f"SELECT ({condition}) FROM (SELECT {single_row_projection(result)})"
+        ).fetchall()
+    except Exception:
+        if not any(isinstance(v, dict) for v in result.values()):
+            raise
+        rows = duckdb.execute(
+            f"SELECT ({condition}) FROM (SELECT {_struct_row_projection(result)})"
+        ).fetchall()
+    return rows[0][0] if rows else None
 
 
 def derive_pass_labels(sidecar: Sidecar) -> set[str]:
@@ -1098,38 +1144,52 @@ def evaluate_adversarial_check(sidecar: Sidecar, outcome_label: str, result: dic
     check declared, or no result data. Absent must stay distinguishable from cleared.
 
     A malformed check returns None rather than raising: it is an advisory signal, and a bad
-    SQL fragment must not fail a run whose outcome already evaluated successfully.
+    SQL fragment must not fail a run whose outcome already evaluated successfully. It is not
+    silent, though: use evaluate_adversarial_check_detailed to get the error text.
+    """
+    status, _error = evaluate_adversarial_check_detailed(sidecar, outcome_label, result)
+    return status
+
+
+def evaluate_adversarial_check_detailed(
+    sidecar: Sidecar, outcome_label: str, result: dict
+) -> tuple[str | None, str]:
+    """Same as evaluate_adversarial_check, but also returns why evaluation failed.
+
+    Returns (status, error): status is "passed" | "fired" | None, and error is the SQL error text
+    when a declared check could not be evaluated (status None), or "" otherwise. The error lets
+    the runner record the failure in outcome_error_reason instead of dropping it silently.
     """
     if not outcome_label or outcome_label in ("error", "unknown") or not result:
-        return None
+        return None, ""
     spec = sidecar.outcomes.get(outcome_label)
     check = getattr(spec, "adversarial_check", None) if spec else None
     if not check:
-        return None
+        return None, ""
 
-    cols = single_row_projection(result)
     try:
-        rows = duckdb.execute(f"SELECT ({check}) FROM (SELECT {cols})").fetchall()
-    except Exception:
-        return None
-    if not rows or rows[0][0] is None:
-        return None
-    return "passed" if rows[0][0] else "fired"
+        value = _condition_value(check, result)
+    except Exception as e:
+        return None, str(e)
+    if value is None:
+        return None, ""
+    return ("passed" if value else "fired"), ""
 
 
 def evaluate_outcome(sidecar: Sidecar, result: dict) -> str:
     """Evaluate DuckDB SQL fragments against result dict; return matching label or 'unknown'.
+
+    Nested dict fields are addressable with dotted struct access (`a.b`); see _condition_value.
 
     Raises SidecarError if a SQL condition is malformed.
     """
     if not sidecar.outcomes or not result:
         return "unknown"
 
-    cols = single_row_projection(result)
     for label, spec in sidecar.outcomes.items():
         try:
-            rows = duckdb.execute(f"SELECT ({spec.condition}) FROM (SELECT {cols})").fetchall()
-            if rows and rows[0][0]:
+            value = _condition_value(spec.condition, result)
+            if value:
                 return label
         except Exception as e:
             raise SidecarError(f"Failed to evaluate outcome '{label}': {e}") from e
