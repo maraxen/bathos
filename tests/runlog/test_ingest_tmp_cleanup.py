@@ -26,7 +26,7 @@ def test_failed_fold_leaves_no_generation_copy_and_live_index_untouched(
     live = index_db_path(cd)
     live.write_bytes(b"live-index-bytes")
 
-    def boom(db_path, roots):
+    def boom(db_path, _roots):
         db_path.write_bytes(b"half-written generation")
         Path(f"{db_path}.wal").write_bytes(b"wal")
         raise _FoldBoom("fold failed")
