@@ -1,18 +1,7 @@
 ---
 name: bathos-rigor-gates
 description: Post-Union-Gate confirmatory rigor — review coverage, post-mortem obligations, instrument-sensitivity positive controls, synthetic-recovery gates, negative-outcome hedging, the rule-card corpus, and multi-parent lineage/stats tooling for bathos campaigns
-triggers:
-  - review_tier
-  - obligations
-  - positive_control
-  - differential
-  - synthetic_recovery
-  - bth gate
-  - negative_check
-  - bth ref
-  - campaign_edges
-  - stats_gates
-  - capability_probe
+when_to_use: "Triggers: review_tier, obligations, positive_control, differential, synthetic_recovery, bth gate, negative_check, bth ref, campaign_edges, stats_gates, capability_probe, review coverage, obligation ledger, rule card."
 ---
 # bathos-rigor-gates
 
