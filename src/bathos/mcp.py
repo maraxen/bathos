@@ -3345,7 +3345,7 @@ def claim_scaffold_tool(
     db_path = cat_dir / "bathos.db"
 
     if not db_path.exists():
-        return {"error": f"Catalog database not found at {db_path}"}
+        return {"error": _missing_catalog_message(db_path, cat_dir)}
 
     # Explicit workspace_root wins; else resolve live fs_root (worktree-aware).
     if workspace_root:
@@ -3461,6 +3461,31 @@ async def claim_validate(
     return claim_validate_tool(path, catalog_dir=catalog_dir)
 
 
+def _missing_catalog_message(db_path: Path, cat_dir: Path) -> str:
+    """Explain a missing catalog database; name the .bth.toml declaration when it caused it.
+
+    A declared `[project] catalog_dir` that does not exist is never replaced by the global
+    catalog. The message says so, so the user creates the catalog or removes the key.
+    """
+    message = f"Catalog database not found at {db_path}"
+    cfg = find_project_config(Path.cwd())
+    if cfg is None:
+        return message
+    try:
+        from bathos.runlog.migrate import explicit_catalog_dir
+
+        declared = explicit_catalog_dir(cfg.parent)
+    except Exception:
+        return message
+    if declared is None or Path(declared) != Path(cat_dir):
+        return message
+    return (
+        f"{message}: the catalog_dir declared in {cfg} ({declared}) does not exist; "
+        "bth takes no fallback to the global catalog. Create that catalog "
+        "(bth init in this project) or remove catalog_dir from .bth.toml."
+    )
+
+
 def _claim_register_sync(
     path: str,
     campaign_id: str,
@@ -3476,7 +3501,7 @@ def _claim_register_sync(
 
     db_path = Path(cat_dir) / "bathos.db"
     if not db_path.exists():
-        return {"ok": False, "error": f"Catalog database not found at {db_path}"}
+        return {"ok": False, "error": _missing_catalog_message(db_path, cat_dir)}
     db = duckdb.connect(str(db_path), read_only=False)
     try:
         register_claim(
