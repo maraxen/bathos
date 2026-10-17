@@ -1011,10 +1011,10 @@ def test_create_campaign_flag_off_is_legacy_only(tmp_catalog: Path):
 def test_create_campaign_flag_on_emits_event_only(tmp_catalog: Path, monkeypatch):
     from bathos.runlog.writer import reset_writers_for_test
 
-    monkeypatch.setenv("BTH_LOG_MODE", "1")
     monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_catalog))
     init_catalog(tmp_catalog)
-    compact(tmp_catalog)  # creates the `campaigns` table schema
+    compact(tmp_catalog)  # creates the `campaigns` table schema (legacy compact: flag off)
+    monkeypatch.setenv("BTH_LOG_MODE", "1")  # after compact(): in log mode compact() is an ingest
     db = duckdb.connect(str(tmp_catalog / "bathos.db"))
     try:
         campaign = create_campaign(
@@ -1120,10 +1120,9 @@ def test_add_run_to_campaign_flag_on_emits_threshold_set_and_run_added(
 ):
     from bathos.runlog.writer import reset_writers_for_test
 
-    monkeypatch.setenv("BTH_LOG_MODE", "1")
     monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_catalog))
     init_catalog(tmp_catalog)
-    compact(tmp_catalog)  # creates the `campaigns`/`campaign_runs` table schema
+    compact(tmp_catalog)  # creates the `campaigns`/`campaign_runs` table schema (legacy compact: flag off)
     db = duckdb.connect(str(tmp_catalog / "bathos.db"))
     try:
         # Insert the campaign row directly (flag-off) so this test isolates
@@ -1152,6 +1151,9 @@ def test_add_run_to_campaign_flag_on_emits_threshold_set_and_run_added(
         compact(tmp_catalog)
         db = duckdb.connect(str(tmp_catalog / "bathos.db"))
 
+        # Only now: in log mode compact() is an ingest (PR #111), so both bootstrap compacts
+        # above must run with the flag off.
+        monkeypatch.setenv("BTH_LOG_MODE", "1")
         add_run_to_campaign(
             db, campaign_id, run.id, catalog_dir=tmp_catalog, cwd=tmp_catalog.parent
         )
