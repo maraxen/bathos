@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -147,6 +149,67 @@ def parse_enforcement(
         elif parts not in prefixes:
             prefixes.append(parts)
     return frozenset(names), tuple(prefixes)
+
+
+_GATE_KEYS = frozenset({"requires_enforce_after"})
+
+
+def _parse_requires_enforce_after(value: object, cfg_path: Path) -> date:
+    """Validate ``[gate] requires_enforce_after``: a TOML date or a strict ``YYYY-MM-DD`` string."""
+    if isinstance(value, datetime):
+        # A TOML date-time is not a date; refuse it rather than silently truncating the time.
+        raise EnforcementConfigError(
+            f"{cfg_path}: [gate] requires_enforce_after must be a date (YYYY-MM-DD), not a date-time"
+        )
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            pass
+    raise EnforcementConfigError(
+        f'{cfg_path}: [gate] requires_enforce_after must be a TOML date or a "YYYY-MM-DD" '
+        f"string, got {value!r}"
+    )
+
+
+def load_requires_enforce_after(start: Path) -> date | None:
+    """The ``[gate] requires_enforce_after`` cutoff from the nearest ``.bth.toml``, or None if unset.
+
+    The cutoff is the date from which ``[requires]``/``[budget]`` violations block at validation and production
+    stages (spec 261016 B2). It has no default: unset means warn-only. A malformed value, unknown ``[gate]`` key, or
+    a config that cannot be parsed while mentioning ``requires_enforce_after`` raises :class:`EnforcementConfigError`
+    (fail closed). A config that never mentions the key is tolerated and reads as unset, as ``[enforcement]`` does.
+    """
+    cfg_path = find_project_config(Path(os.path.abspath(start)))
+    if cfg_path is None:
+        return None
+    try:
+        raw = cfg_path.read_bytes()
+    except OSError as e:
+        raise EnforcementConfigError(f"cannot read {cfg_path}: {e}") from e
+    try:
+        data = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+        if b"requires_enforce_after" in raw.lower():
+            raise EnforcementConfigError(f"cannot parse {cfg_path}: {e}") from e
+        logger.warning("cannot parse %s (%s); no [gate] setting is applied", cfg_path, e)
+        return None
+    gate = data.get("gate")
+    if gate is None:
+        return None
+    if not isinstance(gate, dict):
+        raise EnforcementConfigError(f"{cfg_path}: [gate] must be a table")
+    unknown = sorted(set(gate) - _GATE_KEYS)
+    if unknown:
+        raise EnforcementConfigError(
+            f"{cfg_path}: [gate] has unknown key(s) {unknown}; the only supported key is "
+            "'requires_enforce_after'"
+        )
+    if "requires_enforce_after" not in gate:
+        return None
+    return _parse_requires_enforce_after(gate["requires_enforce_after"], cfg_path)
 
 
 def load_enforcement(

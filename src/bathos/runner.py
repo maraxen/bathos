@@ -921,6 +921,7 @@ def _run_script_impl(
             file=sys.stderr,
         )
         return 1
+    requires_waiver_reason: str | None = None
     if enforced:
         assert script_path is not None  # narrowed by `enforced`
         gate_result = gate_check(
@@ -938,6 +939,7 @@ def _run_script_impl(
             )
             print(json.dumps(payload_dict), file=sys.stderr)
             return 1
+        requires_waiver_reason = gate_result.waiver_reason
 
     # Determine sidecar_mode string
     if no_sidecar:
@@ -996,6 +998,12 @@ def _run_script_impl(
         dependency_lock_sha256=dependency_lock_sha256,
         git_dirty_content_id=git.dirty_content_id,
         git_provenance_source=git.provenance_source,
+        # Waiver of a [requires] check (spec 261016 B2) lands in the run's free-form metadata JSON.
+        metadata=(
+            json.dumps({"requires_waiver": {"reason": requires_waiver_reason}})
+            if requires_waiver_reason
+            else "{}"
+        ),
     )
     run_uuid_var.set(run.id)
     event(

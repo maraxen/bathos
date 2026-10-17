@@ -254,9 +254,7 @@ def remote_test_cmd(name: str) -> None:
         raise SystemExit(1)
 
 
-report_app = cyclopts.App(
-    name="report", help="Generate and emit campaign reports and manifests"
-)
+report_app = cyclopts.App(name="report", help="Generate and emit campaign reports and manifests")
 app.command(report_app)
 
 
@@ -649,6 +647,112 @@ def query_shadow_log_cmd(limit: int = 20) -> None:
         print(f"{amended_at}  {commit[:9]}  {reason}")
 
 
+def _print_requires_outcome(outcome, stream) -> None:
+    """Render a [requires]/[budget] verdict: one line per unmet item, then the hint (block/warn only)."""
+    if outcome.waiver_reason and outcome.status == "pass":
+        print(f"[requires] waived: {outcome.waiver_reason}", file=stream)
+    if outcome.status == "pass":
+        return
+    tag = outcome.error_code.value.upper() if outcome.error_code else "JAX_WITHOUT_REQUIRES"
+    label = "BLOCKED" if outcome.status == "block" else "WARNING"
+    for err in outcome.errors:
+        print(f"{label} {tag}: {err}", file=stream)
+    if outcome.hint:
+        print(f"  hint: {outcome.hint}", file=stream)
+
+
+@app.command
+def preflight(
+    script: str,
+    json_output: Annotated[bool, cyclopts.Parameter(name="--json")] = False,
+) -> None:
+    """Check a script's sidecar [requires]/[budget] tables before running or submitting it.
+
+    Exit 0 for pass or warn, 1 for block (or a sidecar that cannot be parsed), 2 when the script or
+    its sidecar cannot be found and the script is in an enforced directory. An unenforced script with
+    no sidecar exits 0 as not gated.
+
+    Parameters
+    ----------
+    script: Path to the experiment script; its sidecar is the adjacent <stem>.bth.toml.
+    json_output: Print {"status", "error_code", "errors", "hint", "waiver_reason"} as JSON.
+    """
+    import json
+
+    from bathos.config import EnforcementConfigError
+    from bathos.requires_gate import discover_sidecar
+    from bathos.requires_gate import preflight as run_preflight
+    from bathos.sidecar import is_in_enforced_dir
+
+    script_path = Path(script)
+    sidecar_path = discover_sidecar(script_path)
+    if sidecar_path is None or not script_path.is_file():
+        try:
+            enforced = is_in_enforced_dir(script_path)
+        except EnforcementConfigError as e:
+            print(f"invalid project enforcement config: {e}", file=sys.stderr)
+            raise SystemExit(2) from None
+        if enforced:
+            missing = "script" if not script_path.is_file() else "sidecar"
+            print(
+                f"preflight: {missing} not found for {script} (enforced directory; "
+                f"expected {script_path.stem}.bth.toml beside the script)",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        if sidecar_path is None:
+            if json_output:
+                print(
+                    json.dumps(
+                        {
+                            "status": "pass",
+                            "error_code": None,
+                            "errors": [],
+                            "hint": "",
+                            "waiver_reason": None,
+                        }
+                    )
+                )
+            else:
+                print(f"{script}: no sidecar, not gated")
+            return
+
+    try:
+        outcome = run_preflight(script_path, sidecar_path)
+    except Exception as e:  # fail closed: an unreadable sidecar or gate config blocks
+        if json_output:
+            payload = {
+                "status": "block",
+                "error_code": "internal",
+                "errors": [f"{type(e).__name__}: {e}"],
+                "hint": "Fix the sidecar or the [gate] config in .bth.toml",
+                "waiver_reason": None,
+            }
+            print(json.dumps(payload))
+        else:
+            print(f"BLOCKED preflight failed: {type(e).__name__}: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "status": outcome.status,
+                    "error_code": outcome.error_code.value if outcome.error_code else None,
+                    "errors": outcome.errors,
+                    "hint": outcome.hint,
+                    "waiver_reason": outcome.waiver_reason,
+                }
+            )
+        )
+    else:
+        _print_requires_outcome(outcome, sys.stdout if outcome.status != "block" else sys.stderr)
+        if outcome.status == "pass" and not outcome.waiver_reason:
+            print(f"{script}: requires preflight pass")
+    if outcome.status == "block":
+        raise SystemExit(1)
+
+
 @app.command
 def submit(
     command: list[str],
@@ -759,6 +863,20 @@ def submit(
                 "(pass --sidecar PATH to enforce them).",
                 file=sys.stderr,
             )
+
+    # 3-pre. [requires]/[budget] preflight (spec 261016 B2), before any push or queueing. It FAILS
+    # CLOSED: an exception here blocks the submit, unlike the reproduction gate below.
+    from bathos.requires_gate import preflight as requires_preflight
+
+    script_token = next((Path(t) for t in command if t.endswith(".py") and Path(t).is_file()), None)
+    try:
+        requires_outcome = requires_preflight(script_token, sidecar_path if sidecar_data else None)
+    except Exception as e:
+        print(f"BLOCKED requires preflight failed: {type(e).__name__}: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+    _print_requires_outcome(requires_outcome, sys.stderr)
+    if requires_outcome.status == "block":
+        raise SystemExit(1)
 
     # 3a. Check reproduction prerequisite gate (before cluster submission)
     parsed_sidecar = None
@@ -1178,7 +1296,10 @@ def migrate(
     else:
         print("  Nothing to migrate.")
     if result.corrupt:
-        print(f"  WARNING: skipped {len(result.corrupt)} corrupt/unreadable fragment(s):", file=sys.stderr)
+        print(
+            f"  WARNING: skipped {len(result.corrupt)} corrupt/unreadable fragment(s):",
+            file=sys.stderr,
+        )
         for p in result.corrupt:
             print(f"    {p}", file=sys.stderr)
         print("  Run 'bth repair --tier cool' to quarantine them.", file=sys.stderr)
