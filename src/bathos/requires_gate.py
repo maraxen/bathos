@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -36,6 +37,7 @@ _ENFORCED_STAGES = ("validation", "production")
 _JAX_IMPORT = re.compile(r"^\s*(import jax|from jax\b)", re.MULTILINE)
 _HEX = re.compile(r"[0-9a-fA-F]{7,}")
 _GENERIC_HINT = 'Produce the artifact named in [requires] at the current commit, or add [requires.waiver] reason = "..."'
+_BUDGET_HINT = "Re-measure with the probe and update [budget] per_unit_s / est_wall_s to at least the measured value"
 _JAX_HINT = (
     "Profile one unit with `xtrax profile` and cite it, or add a [requires] table to the sidecar"
 )
@@ -86,11 +88,17 @@ def _walk_key(data: object, dotted: str) -> tuple[bool, object]:
     return True, current
 
 
-def _hashes_match(value: str, expected: str) -> bool:
-    """Equal strings, or two hex strings (>= 7 chars) where the longer starts with the shorter."""
+def _inside(path: Path, root: Path) -> bool:
+    """True iff ``path`` (symlinks followed) lies within ``root`` (symlinks followed)."""
+    return path.resolve().is_relative_to(root.resolve())
+
+
+def _hashes_match(value: str, expected: str, *, allow_prefix: bool) -> bool:
+    """Equal strings; with ``allow_prefix`` (HEAD only), two hex strings (>= 7 chars) where the longer
+    starts with the shorter. A literal ``must_equal`` never prefix-matches."""
     if value == expected:
         return True
-    if _HEX.fullmatch(value) and _HEX.fullmatch(expected):
+    if allow_prefix and _HEX.fullmatch(value) and _HEX.fullmatch(expected):
         short, long_ = sorted((value.lower(), expected.lower()), key=len)
         return long_.startswith(short)
     return False
@@ -98,12 +106,16 @@ def _hashes_match(value: str, expected: str) -> bool:
 
 def _resolve_head(sidecar_dir: Path) -> str:
     """The current commit of the repository holding the sidecar. Raises on any failure."""
+    # Drop every GIT_* redirect (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_COMMON_DIR, ...): an
+    # ambient one would make `-C dir` resolve HEAD in another repository and pass a stale sha.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     proc = subprocess.run(
         ["git", "-C", str(sidecar_dir), "rev-parse", "HEAD"],
         capture_output=True,
         text=True,
         timeout=_GIT_TIMEOUT_S,
         check=False,
+        env=env,
     )
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or f"git exited {proc.returncode}")
@@ -122,6 +134,10 @@ def _requires_errors(requires: RequiresBlock, sidecar_path: Path) -> list[str]:
     if not matches:
         return [f"no file matches artifact glob {glob}"]
     chosen = max(matches, key=lambda p: p.stat().st_mtime)
+    if not _inside(chosen, sidecar_path.parent):
+        return [
+            f"artifact resolves outside the sidecar directory: {chosen.name} -> {chosen.resolve()}"
+        ]
     notes: list[str] = []
     if len(matches) > 1:
         notes.append(f"{len(matches)} files match {glob}; used the newest, {chosen.name}")
@@ -136,24 +152,27 @@ def _requires_errors(requires: RequiresBlock, sidecar_path: Path) -> list[str]:
     found, raw_value = _walk_key(data, requires.json_key)
     if not found:
         return [*notes, f"{chosen.name} has no key {requires.json_key}"]
-    value = str(raw_value)
+    if not isinstance(raw_value, str):
+        return [*notes, f"{requires.json_key} is {type(raw_value).__name__}, expected a string"]
+    value = raw_value.strip()
 
     errors: list[str] = []
     for suffix in requires.reject_suffixes:
-        if value.endswith(suffix):
+        if value.casefold().endswith(suffix.casefold()):
             errors.append(f"{requires.json_key} = {value} ends with {suffix}")
             break
 
     if requires.must_equal is not None:
-        if requires.must_equal == "HEAD":
+        token = requires.must_equal.strip()
+        if token == "HEAD":
             try:
                 expected = _resolve_head(sidecar_path.parent)
             except Exception as e:  # noqa: BLE001 - any failure to resolve HEAD is unmet
                 return [*notes, *errors, f"cannot resolve HEAD: {e}"]
-            if not _hashes_match(value, expected):
+            if not _hashes_match(value, expected, allow_prefix=True):
                 errors.append(f"{requires.json_key} = {value}, expected HEAD {expected}")
-        elif not _hashes_match(value, requires.must_equal):
-            errors.append(f"{requires.json_key} = {value}, expected {requires.must_equal}")
+        elif not _hashes_match(value, token, allow_prefix=False):
+            errors.append(f"{requires.json_key} = {value}, expected {token}")
 
     if errors:
         errors = [*notes, *errors]
@@ -165,6 +184,8 @@ def _budget_errors(budget: BudgetBlock, sidecar_path: Path) -> list[str]:
     if budget.probe_record is None:
         return []
     probe = sidecar_path.parent / budget.probe_record
+    if probe.exists() and not _inside(probe, sidecar_path.parent):
+        return [f"probe_record {budget.probe_record} resolves outside the sidecar directory"]
     try:
         record = json.loads(probe.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -183,9 +204,10 @@ def _budget_errors(budget: BudgetBlock, sidecar_path: Path) -> list[str]:
             f"{raw_value!r}"
         ]
     measured = float(raw_value)
-    if not math.isfinite(measured):
+    if not math.isfinite(measured) or measured <= 0:
         return [
-            f"probe_record {budget.probe_record} key {budget.record_per_unit_key} is not finite"
+            f"probe record value at {budget.record_per_unit_key} is {raw_value}, "
+            "not a positive finite number"
         ]
     floor = measured * (1 - budget.tolerance)
     if budget.per_unit_s < floor:
@@ -232,6 +254,7 @@ def check_requires(
 
     unmet: list[str] = []
     codes: list[GateErrorCode] = []
+    hints: list[str] = []
     waiver_reason: str | None = None
 
     if requires is not None:
@@ -246,6 +269,7 @@ def check_requires(
             if errors:
                 unmet.extend(errors)
                 codes.append(GateErrorCode.REQUIRES_UNMET)
+                hints.append((requires.hint if requires.hint else None) or _GENERIC_HINT)
 
     if budget is not None:
         try:
@@ -253,10 +277,12 @@ def check_requires(
         except Exception as e:  # noqa: BLE001 - fail closed on anything unexpected
             unmet.append(f"internal error in requires gate: {type(e).__name__}: {e}")
             codes.append(GateErrorCode.REQUIRES_UNMET)
+            hints.append(_BUDGET_HINT)
         else:
             if errors:
                 unmet.extend(errors)
                 codes.append(GateErrorCode.BUDGET_UNMET)
+                hints.append(_BUDGET_HINT)
 
     if not unmet:
         return _pass(waiver_reason)
@@ -270,8 +296,7 @@ def check_requires(
     status: Literal["warn", "block"] = (
         "block" if (stage in _ENFORCED_STAGES and enforce) else "warn"
     )
-    hint = (requires.hint if requires is not None and requires.hint else None) or _GENERIC_HINT
-    return RequiresOutcome(status, error_code, unmet, hint, waiver_reason)
+    return RequiresOutcome(status, error_code, unmet, " ; ".join(hints), waiver_reason)
 
 
 def discover_sidecar(script_path: Path) -> Path | None:
@@ -295,6 +320,12 @@ def preflight(
 
     from bathos.sidecar import parse_sidecar
 
+    if script_path is not None:
+        from bathos.sidecar import is_in_enforced_dir
+
+        # Same rule as gate_check: a script outside an enforced directory is not gated (pass).
+        if not is_in_enforced_dir(script_path):
+            return _pass()
     if sidecar_path is None:
         return _jax_heuristic(script_path)
     # A sidecar that declares neither table (e.g. a [cluster]-only sidecar used for submit config)

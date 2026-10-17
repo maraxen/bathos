@@ -1493,6 +1493,11 @@ def _run_script_impl(
         # If metadata is invalid/empty JSON, parity_run_type stays None
         pass
 
+    if requires_waiver_reason:
+        # The script's own result JSON replaces the Run's metadata here; merge the waiver back in.
+        metadata = _with_metadata_key(
+            metadata, "requires_waiver", {"reason": requires_waiver_reason}
+        )
     run = dataclasses.replace(
         run,
         duration_s=time.monotonic() - start,

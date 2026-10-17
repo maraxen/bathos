@@ -93,7 +93,7 @@ _RESOLUTION_HINTS: dict[GateErrorCode, str] = {
     GateErrorCode.DIFFERENTIAL_INVARIANT_VIOLATED: "Investigate why the measurement pipeline produces the same/different result regardless of the [differential] knob",
     GateErrorCode.SCRIPT_STALE: "Remove [status] stale=true once the script is fixed, or pass --allow-stale to run it anyway despite the flag",
     GateErrorCode.REQUIRES_UNMET: 'Produce the artifact named in [requires] at the current commit, or add [requires.waiver] reason = "..."',
-    GateErrorCode.BUDGET_UNMET: 'Update [budget] per_unit_s to the measured probe value, or add [requires.waiver] reason = "..."',
+    GateErrorCode.BUDGET_UNMET: "Re-measure with the probe and update [budget] per_unit_s / est_wall_s to at least the measured value",
     GateErrorCode.INTERNAL: "File a bug report with the full error message",
 }
 

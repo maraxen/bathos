@@ -718,6 +718,7 @@ def preflight(
             return
 
     try:
+        enforced = is_in_enforced_dir(script_path)
         outcome = run_preflight(script_path, sidecar_path)
     except Exception as e:  # fail closed: an unreadable sidecar or gate config blocks
         if json_output:
@@ -732,6 +733,24 @@ def preflight(
         else:
             print(f"BLOCKED preflight failed: {type(e).__name__}: {e}", file=sys.stderr)
         raise SystemExit(1) from None
+
+    if not enforced:
+        # Same verdict gate_check gives an ungated script (pass); the note says why.
+        if json_output:
+            print(
+                json.dumps(
+                    {
+                        "status": "pass",
+                        "error_code": None,
+                        "errors": [],
+                        "hint": "",
+                        "waiver_reason": None,
+                    }
+                )
+            )
+        else:
+            print(f"{script}: not in an enforced directory; gate not applied")
+        return
 
     if json_output:
         print(

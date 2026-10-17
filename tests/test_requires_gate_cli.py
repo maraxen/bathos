@@ -209,3 +209,43 @@ def test_submit_fails_closed_on_malformed_gate_config(tmp_path, monkeypatch):
     assert "requires preflight failed" in result.stderr
     mock_push.assert_not_called()
     mock_submit.assert_not_called()
+
+
+# ── review fixes: preflight agrees with gate_check on ungated directories (finding 8) ──
+
+
+def test_preflight_ungated_script_with_unmet_requires_passes(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _project(tmp_path, cutoff=PAST)
+    d = tmp_path / "scripts" / "other"
+    d.mkdir(parents=True)
+    (d / "run_nvt.py").write_text("print(1)\n")
+    (d / "run_nvt.bth.toml").write_text(
+        '[experiment]\nhypothesis = "h"\nstage_name = "validation"\n' + MISSING + OUTCOMES
+    )
+    result = runner.invoke(app, ["preflight", "scripts/other/run_nvt.py"])
+    assert result.exit_code == 0, result.output
+    assert "not in an enforced directory; gate not applied" in result.output
+
+
+def test_preflight_json_and_gate_check_agree_on_ungated_script(tmp_path, monkeypatch):
+    from bathos.prereg import gate_check, resolve_sidecar
+    from bathos.requires_gate import preflight
+
+    monkeypatch.chdir(tmp_path)
+    _project(tmp_path, cutoff=PAST)
+    d = tmp_path / "scripts" / "other"
+    d.mkdir(parents=True)
+    script = d / "run_nvt.py"
+    script.write_text("print(1)\n")
+    (d / "run_nvt.bth.toml").write_text(
+        '[experiment]\nhypothesis = "h"\nstage_name = "validation"\n' + MISSING + OUTCOMES
+    )
+    bundle = resolve_sidecar(script)
+    assert gate_check(script, bundle, "collaborative", catalog_dir=None, git_hash="").ok
+    outcome = preflight(script, bundle.path)
+    assert outcome.status == "pass"
+    assert outcome.errors == []
+    result = runner.invoke(app, ["preflight", "scripts/other/run_nvt.py", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["status"] == "pass"

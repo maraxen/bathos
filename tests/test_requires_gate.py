@@ -501,3 +501,196 @@ def test_cluster_only_sidecar_is_not_parsed_as_experiment(tmp_path):
     script = sidecar.with_suffix(".py")
     script.write_text("print(1)\n")
     assert preflight(script, sidecar).status == "pass"
+
+
+# ── review fixes (spec 261016 B2 review): fail-open paths ───────────────────
+
+
+def test_ambient_git_dir_does_not_redirect_head(tmp_path, monkeypatch):
+    """An ambient GIT_DIR must not make HEAD resolve to another repository (finding 3)."""
+    other = tmp_path / "other"
+    other_head = _git_repo(other)
+    proj = tmp_path / "proj"
+    _git_repo(proj)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(proj),
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.com",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "second",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    proj_head = subprocess.run(
+        ["git", "-C", str(proj), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    assert other_head != proj_head
+    _gate_config(proj, f'"{PAST_CUTOFF}"')
+    (proj / "scripts/experiments").mkdir(parents=True)
+    (proj / "scripts/experiments/out.json").write_text(json.dumps({"git_sha": other_head}))
+    sc = _sidecar(
+        proj,
+        extra='[requires]\nartifact = "out.json"\njson_key = "git_sha"\nmust_equal = "HEAD"\n',
+    )
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    outcome = _check(sc)
+    assert outcome.status == "block", outcome
+    assert any(f"expected HEAD {proj_head}" in e for e in outcome.errors)
+
+
+@pytest.mark.parametrize("measured", [0.0, -2.0])
+def test_budget_non_positive_probe_value_is_unmet(tmp_path, measured):
+    """A measured per-unit time <= 0 is not a valid probe and must not pass (finding 4)."""
+    sc = _budget_sidecar(tmp_path, per_unit_s=1.0, measured=measured)
+    outcome = _check(sc)
+    assert outcome.status == "block"
+    assert outcome.error_code == GateErrorCode.BUDGET_UNMET
+    assert (
+        f"probe record value at timing.per_unit_s is {measured}, not a positive finite number"
+        in outcome.errors[0]
+    )
+
+
+def test_json_key_non_string_value_is_unmet(tmp_path):
+    """A numeric git_sha is not a commit hash; the value must be a string (finding 5)."""
+    _git_repo(tmp_path)
+    _gate_config(tmp_path, f'"{PAST_CUTOFF}"')
+    (tmp_path / "scripts/experiments").mkdir(parents=True)
+    (tmp_path / "scripts/experiments/out.json").write_text(json.dumps({"git_sha": 1234567}))
+    sc = _sidecar(
+        tmp_path,
+        extra='[requires]\nartifact = "out.json"\njson_key = "git_sha"\nmust_equal = "HEAD"\n',
+    )
+    outcome = _check(sc)
+    assert outcome.status == "block"
+    assert "git_sha is int, expected a string" in outcome.errors[0]
+
+
+def test_json_value_whitespace_is_stripped_before_matching(tmp_path):
+    head = _git_repo(tmp_path)
+    _gate_config(tmp_path, f'"{PAST_CUTOFF}"')
+    (tmp_path / "scripts/experiments").mkdir(parents=True)
+    (tmp_path / "scripts/experiments/out.json").write_text(json.dumps({"git_sha": f" {head}\n"}))
+    sc = _sidecar(
+        tmp_path,
+        extra='[requires]\nartifact = "out.json"\njson_key = "git_sha"\nmust_equal = "HEAD"\n',
+    )
+    assert _check(sc).status == "pass"
+
+
+def test_reject_suffix_match_is_case_insensitive(tmp_path):
+    _git_repo(tmp_path)
+    _gate_config(tmp_path, f'"{PAST_CUTOFF}"')
+    (tmp_path / "scripts/experiments").mkdir(parents=True)
+    (tmp_path / "scripts/experiments/out.json").write_text(json.dumps({"git_sha": "abc1234-DIRTY"}))
+    sc = _sidecar(tmp_path, extra='[requires]\nartifact = "out.json"\njson_key = "git_sha"\n')
+    outcome = _check(sc)
+    assert outcome.status == "block"
+    assert "ends with -dirty" in outcome.errors[0]
+
+
+def test_literal_must_equal_is_exact_not_hex_prefix(tmp_path):
+    """Hex-prefix matching is for HEAD only; a literal 7-char must_equal does not prefix-match (finding 6)."""
+    _git_repo(tmp_path)
+    _gate_config(tmp_path, f'"{PAST_CUTOFF}"')
+    (tmp_path / "scripts/experiments").mkdir(parents=True)
+    (tmp_path / "scripts/experiments/out.json").write_text(json.dumps({"tag": "abcdef1234"}))
+    sc = _sidecar(
+        tmp_path,
+        extra='[requires]\nartifact = "out.json"\njson_key = "tag"\nmust_equal = "abcdef1"\n',
+    )
+    outcome = _check(sc)
+    assert outcome.status == "block"
+    assert "tag = abcdef1234, expected abcdef1" in outcome.errors[0]
+
+
+def test_budget_only_failure_gets_budget_hint_not_requires_hint(tmp_path):
+    """A budget-only failure must not point at [requires] or a waiver (finding 7)."""
+    sc = _budget_sidecar(tmp_path, per_unit_s=1.0, measured=10.0)
+    outcome = _check(sc)
+    assert outcome.status == "block"
+    assert "Re-measure with the probe and update [budget] per_unit_s / est_wall_s" in outcome.hint
+    assert "[requires]" not in outcome.hint
+    assert "waiver" not in outcome.hint
+
+
+def test_both_failures_include_both_hints(tmp_path):
+    _gate_config(tmp_path, f'"{PAST_CUTOFF}"')
+    sc = _sidecar(
+        tmp_path,
+        extra='[requires]\nartifact = "missing.json"\n\n[budget]\nper_unit_s = 1.0\n'
+        'probe_record = "absent.json"\n',
+    )
+    outcome = _check(sc)
+    assert "Produce the artifact named in [requires]" in outcome.hint
+    assert "Re-measure with the probe" in outcome.hint
+
+
+def test_budget_resolution_hint_does_not_suggest_waiver():
+    """The waiver does not cover [budget]; the catalogued BUDGET_UNMET hint must not offer one (finding 7)."""
+    from bathos.prereg import _RESOLUTION_HINTS
+
+    hint = _RESOLUTION_HINTS[GateErrorCode.BUDGET_UNMET]
+    assert "waiver" not in hint
+    assert "[budget]" in hint
+
+
+def test_artifact_symlink_escaping_sidecar_dir_is_unmet(tmp_path):
+    head = _git_repo(tmp_path)
+    _gate_config(tmp_path, f'"{PAST_CUTOFF}"')
+    outside = tmp_path / "outside.json"
+    outside.write_text(json.dumps({"git_sha": head}))
+    d = tmp_path / "scripts/experiments"
+    d.mkdir(parents=True)
+    (d / "out.json").symlink_to(outside)
+    sc = _sidecar(
+        tmp_path,
+        extra='[requires]\nartifact = "out.json"\njson_key = "git_sha"\nmust_equal = "HEAD"\n',
+    )
+    outcome = _check(sc)
+    assert outcome.status == "block"
+    assert any("artifact resolves outside the sidecar directory" in e for e in outcome.errors)
+
+
+def test_probe_record_symlink_escaping_sidecar_dir_is_unmet(tmp_path):
+    _gate_config(tmp_path, f'"{PAST_CUTOFF}"')
+    outside = tmp_path / "outside_probe.json"
+    outside.write_text(json.dumps({"timing": {"per_unit_s": 1.0}}))  # would pass the budget
+    d = tmp_path / "scripts/experiments"
+    d.mkdir(parents=True)
+    (d / "probe.json").symlink_to(outside)
+    sc = _sidecar(
+        tmp_path,
+        extra=(
+            '[budget]\nper_unit_s = 10.0\nprobe_record = "probe.json"\n'
+            'record_per_unit_key = "timing.per_unit_s"\n'
+        ),
+    )
+    outcome = _check(sc)
+    assert outcome.status == "block"
+    assert any("resolves outside the sidecar directory" in e for e in outcome.errors)
+
+
+def test_nested_bth_toml_without_gate_uses_ancestor_cutoff(tmp_path, caplog):
+    """A nearer .bth.toml with no [gate] must not silently turn enforcement off (finding 10)."""
+    import logging
+
+    _git_repo(tmp_path)
+    _gate_config(tmp_path, f'"{PAST_CUTOFF}"')
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / ".bth.toml").write_text('[project]\nslug = "nested"\nroot = "."\n')
+    sc = _sidecar(sub, extra='[requires]\nartifact = "missing.json"\n')
+    with caplog.at_level(logging.WARNING, logger="bathos.config"):
+        outcome = _check(sc)
+    assert outcome.status == "block", outcome
+    assert any(".bth.toml" in r.getMessage() and "sub" in r.getMessage() for r in caplog.records)

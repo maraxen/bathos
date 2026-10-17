@@ -174,17 +174,12 @@ def _parse_requires_enforce_after(value: object, cfg_path: Path) -> date:
     )
 
 
-def load_requires_enforce_after(start: Path) -> date | None:
-    """The ``[gate] requires_enforce_after`` cutoff from the nearest ``.bth.toml``, or None if unset.
+def _read_gate_table(cfg_path: Path) -> dict | None:
+    """The ``[gate]`` table of one ``.bth.toml``, or None when it declares none.
 
-    The cutoff is the date from which ``[requires]``/``[budget]`` violations block at validation and production
-    stages (spec 261016 B2). It has no default: unset means warn-only. A malformed value, unknown ``[gate]`` key, or
-    a config that cannot be parsed while mentioning ``requires_enforce_after`` raises :class:`EnforcementConfigError`
-    (fail closed). A config that never mentions the key is tolerated and reads as unset, as ``[enforcement]`` does.
+    Raises :class:`EnforcementConfigError` on an unreadable file, a non-table ``[gate]``, or unknown keys. A
+    config that cannot be parsed is tolerated (None) unless it mentions ``requires_enforce_after``.
     """
-    cfg_path = find_project_config(Path(os.path.abspath(start)))
-    if cfg_path is None:
-        return None
     try:
         raw = cfg_path.read_bytes()
     except OSError as e:
@@ -207,9 +202,60 @@ def load_requires_enforce_after(start: Path) -> date | None:
             f"{cfg_path}: [gate] has unknown key(s) {unknown}; the only supported key is "
             "'requires_enforce_after'"
         )
+    return gate
+
+
+def _git_root(start: Path) -> Path | None:
+    """The nearest directory at or above ``start`` that holds a ``.git`` entry, or None."""
+    for directory in [start, *start.parents]:
+        if (directory / ".git").exists():
+            return directory
+    return None
+
+
+def load_requires_enforce_after(start: Path) -> date | None:
+    """The ``[gate] requires_enforce_after`` cutoff for a path, or None if unset.
+
+    The cutoff is the date from which ``[requires]``/``[budget]`` violations block at validation and production
+    stages (spec 261016 B2). It has no default: unset means warn-only. A malformed value, unknown ``[gate]`` key, or
+    a config that cannot be parsed while mentioning ``requires_enforce_after`` raises :class:`EnforcementConfigError`
+    (fail closed). A config that never mentions the key is tolerated and reads as unset, as ``[enforcement]`` does.
+
+    The cutoff is project policy, so the OUTERMOST ``.bth.toml`` that declares ``[gate]`` within the git repository
+    wins (searched from ``start`` up to the git root; with no git root, only the nearest config is consulted). When
+    that is not the nearest ``.bth.toml``, a warning names both files.
+    """
+    start_abs = Path(os.path.abspath(start))
+    nearest = find_project_config(start_abs)
+    if nearest is None:
+        return None
+    candidates = [nearest]
+    root = _git_root(nearest.parent)
+    if root is not None and root != nearest.parent:
+        for directory in nearest.parent.parents:
+            candidate = directory / ".bth.toml"
+            if candidate.exists():
+                candidates.append(candidate)
+            if directory == root:
+                break
+    declaring: list[tuple[Path, dict]] = []
+    for cfg in candidates:
+        gate = _read_gate_table(cfg)
+        if gate is not None:
+            declaring.append((cfg, gate))
+    if not declaring:
+        return None
+    chosen_path, gate = declaring[-1]
+    if chosen_path != nearest:
+        logger.warning(
+            "%s does not set [gate]; using [gate] requires_enforce_after from %s (the outermost "
+            "declaration within the repository)",
+            nearest,
+            chosen_path,
+        )
     if "requires_enforce_after" not in gate:
         return None
-    return _parse_requires_enforce_after(gate["requires_enforce_after"], cfg_path)
+    return _parse_requires_enforce_after(gate["requires_enforce_after"], chosen_path)
 
 
 def load_enforcement(
