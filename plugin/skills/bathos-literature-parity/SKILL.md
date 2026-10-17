@@ -1,11 +1,7 @@
 ---
 name: bathos-literature-parity
 description: Validating a reimplemented baseline against a published method before trusting it as a claim-tier confound control
-triggers:
-  - literature parity
-  - reimplemented baseline
-  - parity.bth.toml
-  - reference_parity
+when_to_use: "Triggers: literature parity, reimplemented baseline, parity.bth.toml, reference_parity, blind reconstruction, adversarial refutation."
 ---
 # bathos-literature-parity
 

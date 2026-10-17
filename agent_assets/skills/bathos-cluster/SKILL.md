@@ -1,9 +1,8 @@
 ---
 name: bathos-cluster
 description: SLURM cluster submission, catalog sync, and remote profiles for bathos experiment tracking
-triggers: [bth submit, slurm, sbatch, myxcel, cluster, bth sync, bth remote, remote profile]
+when_to_use: 'Triggers: bth submit, slurm, sbatch, myxcel, bth sync, bth remote, cluster, remote profile.'
 ---
-
 # bathos-cluster
 
 Cluster submission, catalog sync, and remote profile management for bathos (`bth`). Assumes a project already initialized with `bth init` — see **using-bathos** for that and for the core run-tracking / sidecar workflow this builds on.

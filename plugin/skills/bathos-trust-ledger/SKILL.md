@@ -1,19 +1,7 @@
 ---
 name: bathos-trust-ledger
 description: Promote products via the trust ledger — attestation TOML, PASS-before-promote ratchet, trust states, readback trio, pin freshness
-triggers:
-  - graduate_product
-  - register_attestation
-  - resolve_pin
-  - get_trust_state
-  - query_attestation
-  - list_candidates
-  - GRADUATION_REFUSED
-  - GraduationRefused
-  - oracle_match
-  - repro_floor
-  - attestation.bth.toml
-  - trust_state
+when_to_use: "Triggers: graduate_product, register_attestation, resolve_pin, get_trust_state, query_attestation, list_candidates, GRADUATION_REFUSED, GraduationRefused, oracle_match, repro_floor, attestation.bth.toml, trust_state."
 ---
 # bathos-trust-ledger
 
