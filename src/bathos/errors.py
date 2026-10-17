@@ -111,6 +111,8 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     # Catalog errors
     "CatalogError": BathosErrorCode.CATALOG_ERROR,
     "CorruptDatabaseError": BathosErrorCode.CATALOG_ERROR,
+    # The ingest lock stayed held past a caller's bounded wait (run-end ingest, PR #111).
+    "IngestLockTimeout": BathosErrorCode.CATALOG_ERROR,
     # Campaign errors
     "CampaignError": BathosErrorCode.CAMPAIGN_ERROR,
     # Sidecar errors

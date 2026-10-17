@@ -126,10 +126,12 @@ def test_legacy_mode_run_does_not_create_index_db(tmp_path: Path):
 
 
 def test_ingest_lock_timeout_raises(tmp_path: Path):
-    with ingest_lock(tmp_path):
-        with pytest.raises(IngestLockTimeout):
-            with ingest_lock(tmp_path, timeout_s=0.2):
-                pass
+    with (
+        ingest_lock(tmp_path),
+        pytest.raises(IngestLockTimeout),
+        ingest_lock(tmp_path, timeout_s=0.2),
+    ):
+        pass
 
 
 def test_ingest_after_write_never_raises_when_lock_is_held(log_mode_project):
