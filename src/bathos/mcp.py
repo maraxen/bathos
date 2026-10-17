@@ -4432,6 +4432,7 @@ def lint_tool(project_root: str = "", concentration_threshold: int = 20) -> dict
         check_canonical_stage_names,
         check_claim_opaque_labels,
         check_ephemeral_output_paths,
+        check_popper_adversarial,
         check_residual_rates,
         check_run_concentration,
         check_stale_scripts_without_reason,
@@ -4445,6 +4446,7 @@ def lint_tool(project_root: str = "", concentration_threshold: int = 20) -> dict
     issues = lint_project(root.resolve())
     issues.extend(check_claim_opaque_labels(root.resolve()))
     issues.extend(check_adversarial_checks(root.resolve()))
+    issues.extend(check_popper_adversarial(root.resolve()))
     issues.extend(check_threshold_basis(root.resolve()))
     issues.extend(check_todo_strings_in_scaffold(root.resolve()))
     issues.extend(check_stale_scripts_without_reason(root.resolve()))

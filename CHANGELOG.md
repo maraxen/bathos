@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **`read_runs` no longer reads `run_<id>.tmp.parquet` files.** A stale tmp fragment pulled from a remote duplicated a run as `running` and made reap re-reap it on every migrate pass.
+- **The POPPER adversarial-check advisory is now actually run (backlog #4234).** `check_popper_adversarial()` was documented as a shipped Tier-2 lint advisory (0.8.0) but no lint path called it. It is now part of the shared `lint` aggregator, so `bth lint` and the MCP lint tool both report `popper_missing_adversarial_check` as a WARNING for a `scripts/experiments/` sidecar with a `[popper]` block and no `adversarial_check` in any `[outcomes.*]` branch. It is a WARNING only and does not make `ok` false.
 
 ## [0.13.0a6] - 2026-10-15
 
