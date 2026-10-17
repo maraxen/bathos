@@ -14,7 +14,7 @@ import duckdb
 import pyarrow.parquet as pq
 
 from bathos.catalog import read_runs
-from bathos.index import connect_read
+from bathos.index import catalog_readable, connect_read
 from bathos.schema import Run
 from bathos.telemetry import event
 
@@ -648,6 +648,19 @@ def _is_read_only_violation(exc: BaseException) -> bool:
     return "read-only mode" in str(exc)
 
 
+def _is_missing_runs_table(exc: BaseException) -> bool:
+    """True only if `exc` is DuckDB reporting that the `runs` table does not exist.
+
+    DuckDB raises `CatalogException` ("Table with name runs does not exist!")
+    for this condition. Syntax errors (`ParserException`), binder errors, and
+    I/O or lock errors (`IOException`) arrive as other types, so they never
+    match. Debt #2812: any SQL error used to be reported as a missing catalog.
+    """
+    return isinstance(exc, duckdb.CatalogException) and bool(
+        re.search(r"\bruns\b", str(exc), re.IGNORECASE)
+    )
+
+
 def run_sql(sql: str, catalog_dir: Path | None = None) -> list[tuple]:
     """Execute a raw DuckDB SQL query and return rows as list of tuples.
 
@@ -682,13 +695,21 @@ def run_sql(sql: str, catalog_dir: Path | None = None) -> list[tuple]:
                 # it, so nothing has been applied twice.
                 read_only = False
                 continue
-            # If query tried to access the runs table without warm DB, provide helpful error
-            if (
-                "runs" in sql.lower()
-                and catalog_dir is not None
-                and not (catalog_dir / "bathos.db").exists()
-            ):
-                raise RuntimeError("No warm catalog. Run `bth compact` first.") from e
+            # A genuinely missing `runs` table gets a remedy hint. Every other
+            # error (lock, I/O, syntax, binder) re-raises with its original text.
+            if catalog_dir is not None and _is_missing_runs_table(e):
+                from bathos.runlog.mode import is_log_mode
+
+                if is_log_mode(catalog_dir):
+                    # `bth compact` builds the legacy warm tier only; in log mode
+                    # the runs view is folded from the event log instead.
+                    raise RuntimeError(
+                        "No warm catalog (log mode): the run index for "
+                        f"{catalog_dir} has not been folded from the event log yet. "
+                        "Ingest with run_ingest()."
+                    ) from e
+                if not catalog_readable(catalog_dir):
+                    raise RuntimeError("No warm catalog. Run `bth compact` first.") from e
             raise
         finally:
             con.close()
