@@ -52,6 +52,10 @@ from bathos.runlog.writer import AppendOutcome, append_event, resolve_write_proj
 logger = logging.getLogger(__name__)
 
 _mode_cv: ContextVar[bool | None] = ContextVar("bth_runlog_mode", default=None)
+# Events `emit_event` appended during the current outermost unit of work. The
+# outermost exit refreshes index.db when this is non-zero (debt #2811), so every
+# event-writing command leaves the index current, not only `bth run`.
+_appended_cv: ContextVar[int] = ContextVar("bth_runlog_appended", default=0)
 
 
 class RunNotLaunchedError(RuntimeError):
@@ -72,18 +76,51 @@ def unit_of_work(catalog_dir: Path | None = None) -> Iterator[bool]:
     context's duration, matching "every local command that writes ... first
     takes [the] lock, then reads the mode, and holds the lock for its
     duration."
+
+    On the OUTERMOST exit, after the writers lock is released, a log-mode unit
+    that appended at least one event refreshes index.db (`ingest_after_write`,
+    best-effort). That is the only ingest trigger for event writers, so
+    `bth run` gets exactly one per command. The refresh runs after the lock is
+    released so a queued `migrate --to-log` is not held up by it. It never
+    raises out of this context manager and never masks an exception from the
+    body.
     """
     active = _mode_cv.get()
     if active is not None:
         yield active
         return
-    with writers_lock(catalog_dir):
-        mode = is_log_mode(catalog_dir)
-        token = _mode_cv.set(mode)
-        try:
-            yield mode
-        finally:
-            _mode_cv.reset(token)
+    mode = False
+    appended = 0
+    try:
+        with writers_lock(catalog_dir):
+            mode = is_log_mode(catalog_dir)
+            token = _mode_cv.set(mode)
+            count_token = _appended_cv.set(0)
+            try:
+                yield mode
+            finally:
+                appended = _appended_cv.get()
+                _appended_cv.reset(count_token)
+                _mode_cv.reset(token)
+    finally:
+        if mode and appended:
+            _refresh_index_after_unit(catalog_dir)
+
+
+def _refresh_index_after_unit(catalog_dir: Path | None) -> None:
+    """Best-effort index.db refresh at the end of a log-mode unit of work.
+
+    `run_ingest` owns the SLURM / `BTH_NO_INGEST=1` no-op guards, so they apply
+    here too. Any failure is logged and swallowed: a failed refresh must not
+    turn a finished write into an error, and the next ingest folds the same
+    events.
+    """
+    from bathos.runlog.ingest import ingest_after_write
+
+    try:
+        ingest_after_write(catalog_dir)
+    except Exception:  # noqa: BLE001 -- best-effort by contract; never mask the body
+        logger.warning("runlog: index refresh after unit of work failed", exc_info=True)
 
 
 def current_mode() -> bool:
@@ -152,7 +189,10 @@ def emit_event(
         project=project,
         project_id=project_id,
     )
-    if not outcome.ok:
+    if outcome.ok:
+        if _mode_cv.get() is not None:
+            _appended_cv.set(_appended_cv.get() + 1)
+    else:
         if hard_fail:
             raise RunNotLaunchedError(
                 f"{kind}: could not be appended to the project log or the fallback "

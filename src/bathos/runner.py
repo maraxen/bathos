@@ -739,8 +739,9 @@ def run_script(
     (run.started) and held through its last (run.finished) -- so a
     long-running script can never straddle a cut-over mid-process."""
     init_telemetry()
+    # Log mode: the unit's outermost exit folds this run's events into index.db
+    # (debt #2811); there is no separate ingest call here, so one per command.
     with unit_of_work(catalog_dir):
-        log_mode = current_mode()
         exit_code = _run_script_impl(
             argv,
             project_slug,
@@ -756,12 +757,6 @@ def run_script(
             component_id=component_id,
             component_sidecar_sha256=component_sidecar_sha256,
         )
-    if log_mode:
-        # Fold the run's events into index.db so every reader sees this run
-        # without `bth compact` (no-op on SLURM / BTH_NO_INGEST=1; never raises).
-        from bathos.runlog.ingest import ingest_after_write
-
-        ingest_after_write(catalog_dir)
     return exit_code
 
 
