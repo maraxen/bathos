@@ -17,7 +17,7 @@ import duckdb
 
 from bathos.catalog import write_run
 from bathos.checker import hash_dependency_lock
-from bathos.git import capture_git_state, git_state_as_dict
+from bathos.git import capture_run_git_state, git_state_as_dict
 from bathos.git_pin import ensure_manifest_ignored, pin_result_as_dict, pin_run
 from bathos.prereg import (
     GateErrorCode,
@@ -892,7 +892,9 @@ def _run_script_impl(
         else None,
     )
 
-    git = capture_git_state(cwd)
+    # Git provenance (hash/branch/dirty and the lock file's git_sha) comes from the checkout
+    # the executed script lives in, not necessarily the run's cwd (backlog #5609).
+    git = capture_run_git_state(script_path, cwd)
 
     # Dependency-lock provenance (debt #1071): captured unconditionally on every run, not
     # just differential ones -- the incident this guards against (a package re-pin silently
