@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`[requires]` and `[budget]` sidecar tables are parsed and validated (spec 261016 B1).** Both are optional and allowed only on `[experiment]` sidecars. `[requires]` declares a precondition on an artifact (`workload`, `artifact`, `json_key`, `must_equal`, `reject_suffixes`, `applies_if`, and a `[requires.waiver]` with a required `reason`). `[budget]` declares a wall-time estimate (`est_wall_s`, `per_unit_s`, `n_units`, `probe_record`, `tolerance`) and rejects an estimate that contradicts its own parts. This change parses and validates only; no gate enforces either table yet.
+
 - **`$BTH_PROGRESS_PATH`, an advisory per-run progress file (#105).** `bth run` exports the
   path of a per-run file in the temp directory. A script may overwrite it atomically with a
   small JSON object `{"done": int, "total": int, "unit": str, "updated_at": iso8601}`. It is

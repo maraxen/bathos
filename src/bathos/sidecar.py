@@ -57,6 +57,48 @@ class ReproductionBlock:
 
 
 @dataclass
+class RequiresWaiver:
+    """`[requires.waiver]` sub-table: a reasoned opt-out from a `[requires]` check."""
+
+    reason: str = ""
+
+
+@dataclass
+class RequiresBlock:
+    """Optional `[requires]` block (experiment sidecars only): a precondition on an artifact.
+
+    Parsed only; enforcement is the B2 gate, not this module. The gate reads the JSON value at
+    `json_key` in the artifact and compares `str(value)` to `must_equal`. `must_equal` is stored
+    as given: a literal, or the token "HEAD", which the gate resolves to the current commit.
+    A `[requires]` table with no `artifact` and no waiver is accepted by the parser but the gate
+    reports it as unmet. `applies_if` is stored as given and not evaluated yet; the requirement
+    always applies.
+    """
+
+    workload: str | None = None  # free string, e.g. "jax"
+    artifact: str | None = None  # glob, relative to the sidecar's directory (stored as given)
+    json_key: str | None = None  # dotted key path into the artifact JSON
+    must_equal: str | None = None  # literal value, or "HEAD"
+    reject_suffixes: list[str] = field(default_factory=lambda: ["-dirty", "-unverified"])
+    applies_if: str | None = None  # free-form condition string (stored as given)
+    waiver: RequiresWaiver | None = None
+
+
+@dataclass
+class BudgetBlock:
+    """Optional `[budget]` block (experiment sidecars only): a wall-time estimate for a run.
+
+    Parsed only; `tolerance` is the relative slack the later budget check will apply, in (0, 1).
+    """
+
+    est_wall_s: float | None = None
+    per_unit_s: float | None = None
+    n_units: int | None = None
+    probe_record: str | None = None  # path, stored as given
+    tolerance: float = 0.5
+
+
+@dataclass
 class ControlsBlock:
     """Control arm specification for experiment sidecars (optional [controls] block)."""
 
@@ -265,6 +307,9 @@ class Sidecar:
     review: ReviewBlock | None = None
     # staleness declaration (all sidecar kinds) -- consumed by prereg.gate_check
     status: StatusBlock | None = None
+    # precondition and wall-time budget (experiment sidecars only; parsed here, enforced later)
+    requires: RequiresBlock | None = None
+    budget: BudgetBlock | None = None
 
     # `builtins.property`: the class body has a dataclass field named `property` (the validation
     # kind's `property = "..."`), which shadows the bare decorator name here.
@@ -606,7 +651,203 @@ def parse_sidecar(path: Path) -> Sidecar:
             if key not in {"stale", "stale_reason", "superseded_by"}:
                 logger.warning(f"Unknown key in [status]: {key!r}")
 
+    # Parse [requires] and [budget] (optional, experiment sidecars only). Parsing only: the
+    # gate that enforces them reads these fields later.
+    if ("requires" in data or "budget" in data) and sidecar.kind != SidecarKind.EXPERIMENT:
+        raise SidecarError(
+            f"{path}: [requires] and [budget] are only allowed on [experiment] sidecars, "
+            f"not on [{sidecar.kind.value}]"
+        )
+    if "requires" in data:
+        sidecar.requires = _parse_requires(data["requires"], path)
+    if "budget" in data:
+        sidecar.budget = _parse_budget(data["budget"], path)
+
     return sidecar
+
+
+def _parse_requires(raw, path: Path) -> RequiresBlock:
+    if not isinstance(raw, dict):
+        raise SidecarError(f"{path}: [requires] must be a table")
+
+    def opt_str(key: str) -> str | None:
+        value = raw.get(key)
+        if value is not None and not isinstance(value, str):
+            raise SidecarError(
+                f"{path}: [requires].{key} must be a string, got {type(value).__name__}"
+            )
+        return value
+
+    def opt_nonblank(key: str) -> str | None:
+        value = opt_str(key)
+        if value is not None and not value.strip():
+            raise SidecarError(f"{path}: [requires].{key} must be a non-empty string")
+        return value
+
+    workload = opt_str("workload")
+    artifact = opt_nonblank("artifact")
+    json_key = opt_nonblank("json_key")
+    must_equal = opt_nonblank("must_equal")
+    applies_if = opt_str("applies_if")
+
+    if artifact is not None:
+        artifact_parts = Path(artifact).parts
+        if Path(artifact).is_absolute() or ".." in artifact_parts:
+            raise SidecarError(
+                f"{path}: [requires].artifact must be a glob relative to the sidecar's "
+                f"directory and stay inside it (no absolute path, no '..'), got {artifact!r}"
+            )
+    if json_key is not None and any(seg == "" for seg in json_key.split(".")):
+        raise SidecarError(
+            f"{path}: [requires].json_key must be a dotted key path with no empty segments, "
+            f"got {json_key!r}"
+        )
+
+    if "reject_suffixes" in raw:
+        suffixes = raw["reject_suffixes"]
+        if not (isinstance(suffixes, list) and all(isinstance(s, str) for s in suffixes)):
+            raise SidecarError(f"{path}: [requires].reject_suffixes must be a list of strings")
+        if any(s == "" for s in suffixes):
+            raise SidecarError(
+                f"{path}: [requires].reject_suffixes must not contain an empty string "
+                "(an empty list means no suffix rejection)"
+            )
+        reject_suffixes = list(suffixes)
+    else:
+        reject_suffixes = ["-dirty", "-unverified"]
+
+    if json_key is not None and artifact is None:
+        raise SidecarError(f"{path}: [requires].json_key is set but [requires].artifact is not")
+    if must_equal is not None and artifact is None:
+        raise SidecarError(f"{path}: [requires].must_equal is set but [requires].artifact is not")
+    if must_equal is not None and json_key is None:
+        raise SidecarError(f"{path}: [requires].must_equal is set but [requires].json_key is not")
+
+    if applies_if is not None:
+        logger.warning("[requires] applies_if is not evaluated yet; the requirement always applies")
+
+    waiver = None
+    if "waiver" in raw:
+        waiver_raw = raw["waiver"]
+        if not isinstance(waiver_raw, dict):
+            raise SidecarError(f"{path}: [requires.waiver] must be a table")
+        reason = waiver_raw.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise SidecarError(f"{path}: [requires.waiver].reason must be a non-empty string")
+        for key in waiver_raw:
+            if key != "reason":
+                logger.warning(f"Unknown key in [requires.waiver]: {key!r}")
+        waiver = RequiresWaiver(reason=reason)
+
+    for key in raw:
+        if key not in {
+            "workload",
+            "artifact",
+            "json_key",
+            "must_equal",
+            "reject_suffixes",
+            "applies_if",
+            "waiver",
+        }:
+            logger.warning(f"Unknown key in [requires]: {key!r}")
+
+    return RequiresBlock(
+        workload=workload,
+        artifact=artifact,
+        json_key=json_key,
+        must_equal=must_equal,
+        reject_suffixes=reject_suffixes,
+        applies_if=applies_if,
+        waiver=waiver,
+    )
+
+
+def _budget_float(path: Path, key: str, value) -> float:
+    """Convert a validated TOML number to float; an int too large for float is a SidecarError."""
+    try:
+        return float(value)
+    except OverflowError as exc:
+        raise SidecarError(f"{path}: [budget].{key} is too large to be a finite number") from exc
+
+
+def _parse_budget(raw, path: Path) -> BudgetBlock:
+    if not isinstance(raw, dict):
+        raise SidecarError(f"{path}: [budget] must be a table")
+
+    def opt_positive_float(key: str) -> float | None:
+        value = raw.get(key)
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise SidecarError(
+                f"{path}: [budget].{key} must be a number, got {type(value).__name__}"
+            )
+        number = _budget_float(path, key, value)
+        if not math.isfinite(number) or number <= 0:
+            raise SidecarError(f"{path}: [budget].{key} must be finite and > 0, got {value!r}")
+        return number
+
+    est_wall_s = opt_positive_float("est_wall_s")
+    per_unit_s = opt_positive_float("per_unit_s")
+
+    n_units = raw.get("n_units")
+    if n_units is not None:
+        if isinstance(n_units, bool) or not isinstance(n_units, int):
+            raise SidecarError(
+                f"{path}: [budget].n_units must be an integer, got {type(n_units).__name__}"
+            )
+        if n_units <= 0:
+            raise SidecarError(f"{path}: [budget].n_units must be > 0, got {n_units}")
+
+    probe_record = raw.get("probe_record")
+    if probe_record is not None and not isinstance(probe_record, str):
+        raise SidecarError(
+            f"{path}: [budget].probe_record must be a string, got {type(probe_record).__name__}"
+        )
+
+    # Relative slack for the later budget check: the estimate may undershoot per_unit_s * n_units
+    # by at most this fraction. Must be in (0, 1): at >= 1 the consistency floor is non-positive
+    # and the check is vacuous. Bools, NaN and inf are rejected.
+    tolerance_raw = raw.get("tolerance", 0.5)
+    if isinstance(tolerance_raw, bool) or not isinstance(tolerance_raw, (int, float)):
+        raise SidecarError(
+            f"{path}: [budget].tolerance must be a number, got {type(tolerance_raw).__name__}"
+        )
+    tolerance = _budget_float(path, "tolerance", tolerance_raw)
+    if not math.isfinite(tolerance) or not (0 < tolerance < 1):
+        raise SidecarError(
+            f"{path}: [budget].tolerance must be finite and in (0, 1), got {tolerance_raw!r}"
+        )
+
+    # The estimate must not contradict its own parts (beyond the stated tolerance).
+    if est_wall_s is not None and per_unit_s is not None and n_units is not None:
+        overflow_msg = (
+            f"{path}: [budget].per_unit_s and [budget].n_units are too large to check "
+            "est_wall_s against their product"
+        )
+        try:
+            floor = per_unit_s * n_units * (1 - tolerance)
+        except OverflowError as exc:
+            raise SidecarError(overflow_msg) from exc
+        if not math.isfinite(floor):
+            raise SidecarError(overflow_msg)
+        if est_wall_s < floor:
+            raise SidecarError(
+                f"{path}: [budget].est_wall_s={est_wall_s} contradicts per_unit_s * n_units = "
+                f"{per_unit_s * n_units} at tolerance {tolerance}; est_wall_s must be >= {floor}"
+            )
+
+    for key in raw:
+        if key not in {"est_wall_s", "per_unit_s", "n_units", "probe_record", "tolerance"}:
+            logger.warning(f"Unknown key in [budget]: {key!r}")
+
+    return BudgetBlock(
+        est_wall_s=est_wall_s,
+        per_unit_s=per_unit_s,
+        n_units=n_units,
+        probe_record=probe_record,
+        tolerance=tolerance,
+    )
 
 
 def _parse_outcomes(data: dict) -> dict[str, OutcomeSpec]:
