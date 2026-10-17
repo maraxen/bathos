@@ -85,8 +85,8 @@ bth sql "SELECT id, status, outcome, exit_code, command FROM runs WHERE id LIKE 
 
 Spot-check that its claimed paths resolve. A script emitting confident, schema-valid, entirely fabricated output exits 0.
 
-- **The catalog is tiered and the warm index lags — `bth compact` before you conclude a run is missing.** `bth run` writes the cool tier (`~/.bth/catalog/runs/<project>/run_<id>.parquet`) immediately, but `sql`/`show`/`find`/`ls` read the warm DuckDB (`bathos.db`), which only updates when `bth compact` runs ("Compact cool-tier Parquet to warm-tier DuckDB"). A run finished seconds ago is invisible to every reader until then. Plain `bth compact` is the safe form; `--force-rebuild` is the one that has wiped a table before.
-  - Measured 2026-09-25: a run was unretrievable by `bth show` for minutes, then appeared on its own; a later one stayed invisible past 20 s and `bth compact` returned `{"ingested": 1, "skipped": 4322, "corrupt_fragments": []}` and made it visible. **Nothing was ever lost.** Do not file a data-loss bug off a probe taken right after a write.
+- **In log mode a finished run is visible at once; only a legacy catalog needs `bth compact`.** A catalog is in log mode once `~/.bth/catalog/cutover.json` exists (the real catalog since 2026-10-16). There, `bth run` appends its events to the project log and, as its last step, folds them into the derived index `index.db` (skipped on SLURM or with `BTH_NO_INGEST=1`). `sql`/`show`/`find`/`ls` read that index, so no compact is needed. Measured 2026-10-16 (B4, run `27fffb85-ba69-4b21-8208-b51e50b446f9`, pass): 20 of 20 just-finished runs visible to all six readers, p95 CLI read 0.96 s, run-end ingest median 1.8 s. If a run still looks missing in log mode, `bth compact` runs the same ingest on demand and reports `ingest_ran`/`quarantined`; it never creates `bathos.db`, and `--force-rebuild` is refused (delete `index.db` and run `bth compact` to rebuild it from the logs). Other catalogs (a remote or an old install without `cutover.json`) are still tiered: `bth run` writes the cool tier, the warm `bathos.db` only updates on `bth compact`, and a run finished seconds ago is invisible until then.
+  - Measured 2026-09-25 (legacy catalog): a run was unretrievable by `bth show` for minutes, then appeared on its own; a later one stayed invisible past 20 s and `bth compact` made it visible. **Nothing was ever lost.** Do not file a data-loss bug off a probe taken right after a write.
 - **`bth find` takes FILTERS, not a search term** (`--project`, `--since`, `--status`, `--tags`, `--output-file`). `bth find <script-name>` matches nothing and returns `{"runs": [], "count": 0}` — that is malformed usage, not a missing run. Likewise `bth ls` is not newest-first unless you pass `--since`.
 
 ### `bth --version` cannot tell you whether an install is current
@@ -560,7 +560,7 @@ bth compact --strict          # exit non-zero if any cool fragment is corrupt (C
 bth compact --force-rebuild   # rebuild bathos.db from cool fragments if the warm DB is corrupt
 ```
 
-Merges per-run Parquet fragments into DuckDB database. Automatic (banner shown) on `bth ls` if fragmentation is high. A corrupt/unreadable fragment is skipped and reported by default rather than aborting compaction catalog-wide (`bth repair --tier cool` quarantines it); `--strict` restores the old hard-fail behavior.
+In log mode (`cutover.json` present) this instead folds new log events into `index.db` (the same ingest `bth run` does at its end) and never touches `bathos.db`. In a legacy catalog it merges per-run Parquet fragments into the DuckDB database. Automatic (banner shown) on `bth ls` if fragmentation is high. A corrupt/unreadable fragment is skipped and reported by default rather than aborting compaction catalog-wide (`bth repair --tier cool` quarantines it); `--strict` restores the old hard-fail behavior.
 
 ### Archive Old Runs
 
@@ -690,7 +690,7 @@ uv run python scripts/experiments/baseline_training.py --smoke --out /tmp/test.j
 
 # 4. Run locally or submit to cluster (see bathos-cluster for bth submit)
 bth run -- uv run --no-sync python scripts/experiments/baseline_training.py --out outputs/run.json
-# Then verify by the RECORD (outcome != unknown), `bth compact` first if it is not visible yet
+# Then verify by the RECORD (outcome != unknown), `bth compact` only on a legacy (no cutover.json) catalog
 
 # 5. Query results
 bth sql "SELECT * FROM runs WHERE outcome='pass' AND project_slug='myproject'"

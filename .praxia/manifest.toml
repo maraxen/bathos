@@ -1,6 +1,6 @@
 [plugin]
 name            = "bathos"
-version         = "0.5.2"
+version         = "0.5.3"
 description     = "Experiment tracking — pre-registration, provenance, campaigns"
 requires_praxia = ">=1.0"
 # Skills reach Claude Code only via the plugin bundle (bathos:<skill>); skip
