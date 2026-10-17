@@ -732,6 +732,7 @@ def run_script(
     campaign_id: str | None = None,
     component_id: str | None = None,
     component_sidecar_sha256: str | None = None,
+    seed: int | None = None,
 ) -> int:
     """Public entry point: one call is one `bth run` unit of work (runlog
     Mode section). `unit_of_work()` fixes the log-mode flag for the whole
@@ -756,6 +757,7 @@ def run_script(
             campaign_id=campaign_id,
             component_id=component_id,
             component_sidecar_sha256=component_sidecar_sha256,
+            seed=seed,
         )
     return exit_code
 
@@ -774,6 +776,7 @@ def _run_script_impl(
     campaign_id: str | None = None,
     component_id: str | None = None,
     component_sidecar_sha256: str | None = None,
+    seed: int | None = None,
 ) -> int:
     # Resolve --campaign up front (fail fast, before running the subprocess) and
     # store the full UUID — never the raw prefix — on the run record.
@@ -989,6 +992,7 @@ def _run_script_impl(
         ),
         component_id=component_id,
         component_sidecar_sha256=component_sidecar_sha256,
+        seed=seed,
         dependency_lock_sha256=dependency_lock_sha256,
         git_dirty_content_id=git.dirty_content_id,
         git_provenance_source=git.provenance_source,
@@ -1225,6 +1229,10 @@ def _run_script_impl(
     bth_output_dir = cwd / "outputs" / run.id[:8]
     bth_output_dir.mkdir(parents=True, exist_ok=True)
     env["BTH_OUTPUT_DIR"] = str(bth_output_dir)
+    if seed is not None:
+        # The recorded seed is only a claim about the run if the script can read the same
+        # value. bathos does not seed anything itself; the script must honour $BTH_SEED.
+        env["BTH_SEED"] = str(seed)
 
     start = time.monotonic()
     exit_code = 1

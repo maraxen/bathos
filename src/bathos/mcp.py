@@ -1856,6 +1856,7 @@ def run_tool(
     allow_stale: bool = False,
     component_id: str = "",
     component_sidecar_sha256: str = "",
+    seed: int | None = None,
 ) -> dict:
     """Run a script and record provenance.
 
@@ -1874,6 +1875,10 @@ def run_tool(
         component_id: xtrax composition-node/StageBundle-slot ID this run binds to (B2-08 bridge)
         component_sidecar_sha256: SHA256 of the component-level sidecar for
             component_id (B2-08 bridge)
+        seed: RNG seed this run was launched with, recorded as Run.seed so seed-floor gates can
+            see it. bathos does not seed anything itself: the value is exported to the script as
+            $BTH_SEED and the script must honour it. A `--seed` placed AFTER the script path
+            belongs to the script and is not read here.
 
     Returns:
         Dict with run result or structured gate error
@@ -1945,6 +1950,7 @@ def run_tool(
         campaign_id=campaign_id or None,
         component_id=component_id or None,
         component_sidecar_sha256=component_sidecar_sha256 or None,
+        seed=seed,
     )
 
     # run_script doesn't return the Run it creates (its return type is a plain
@@ -1980,10 +1986,16 @@ def run_cli_tool(
     allow_stale: bool = False,
     component_id: str = "",
     component_sidecar_sha256: str = "",
+    bth_seed: int | None = None,
 ) -> dict:
     """CLI-facing wrapper over run_tool: propagates the run script's own exit
     code as the `bth run` process's exit code (matching the shipped Typer
     `run` command's `raise typer.Exit(exit_code)` behavior).
+
+    The CLI flag is `--bth-seed`, not `--seed`: cyclopts consumes a known option anywhere on the
+    line, so a `--seed` flag would silently steal a script's own `bth run train.py --seed 3`,
+    leaving Run.seed recorded as 3 while the script ran with its default (a false provenance
+    claim). The MCP `run` tool passes script args as a separate list, so it keeps `seed`.
 
     A separate function from run_tool (rather than folding this into run_tool
     itself) because cli_render.render_or_exit's generic dict-error convention
@@ -2008,6 +2020,7 @@ def run_cli_tool(
         allow_stale=allow_stale,
         component_id=component_id,
         component_sidecar_sha256=component_sidecar_sha256,
+        seed=bth_seed,
     )
     print(json.dumps(result, indent=2, default=str))
     raise SystemExit(1 if result.get("error") else result.get("exit_code", 0))
