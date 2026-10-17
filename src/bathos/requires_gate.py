@@ -7,7 +7,8 @@ Outcomes:
   * ``pass``  -- nothing to enforce, every requirement met, or a ``[requires.waiver]`` is present.
   * ``warn``  -- a requirement is unmet but not enforced yet (exploration/calibration stage, or the
     ``[gate] requires_enforce_after`` cutoff is unset or in the future), or the JAX heuristic fired.
-  * ``block`` -- a requirement is unmet at a validation/production stage once enforcement is active.
+  * ``block`` -- a requirement is unmet at a validation, ablation or production stage once enforcement is
+    active. A sidecar with no stage resolves to exploration and only warns.
 
 Every unexpected failure inside the checks is reported as unmet, never as a pass (fail closed).
 """
@@ -33,7 +34,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_ENFORCED_STAGES = ("validation", "production")
+_ENFORCED_STAGES = ("validation", "ablation", "production")
 _JAX_IMPORT = re.compile(r"^\s*(import jax|from jax\b)", re.MULTILINE)
 _HEX = re.compile(r"[0-9a-fA-F]{7,}")
 _GENERIC_HINT = 'Produce the artifact named in [requires] at the current commit, or add [requires.waiver] reason = "..."'

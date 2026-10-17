@@ -9,6 +9,8 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from bathos.cli_cyclopts import app
 from tests._cyclopts_runner import CyclopticRunner
 
@@ -249,3 +251,92 @@ def test_preflight_json_and_gate_check_agree_on_ungated_script(tmp_path, monkeyp
     result = runner.invoke(app, ["preflight", "scripts/other/run_nvt.py", "--json"])
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["status"] == "pass"
+
+
+# ── submit sidecar discovery under enforcement (spec 261016 B2 review, finding #1) ──
+
+REPRO_COMMANDS = {
+    "bash_wrapper": ["bash", "run.sh"],
+    "python_m": ["python", "-m", "x"],
+    "helper_first": ["python", "helper.py", "scripts/experiments/run_nvt.py"],
+}
+
+
+def _repro_setup(root: Path, *, sidecar: bool) -> Path:
+    _script(root)
+    (root / "run.sh").write_text("python scripts/experiments/run_nvt.py\n")
+    (root / "helper.py").write_text("")
+    if sidecar:
+        return _sidecar(root, "validation", MISSING)
+    return root / "scripts" / "experiments" / "run_nvt.bth.toml"
+
+
+@pytest.mark.parametrize("label", sorted(REPRO_COMMANDS))
+def test_submit_blocks_repro_command_without_sidecar_under_enforcement(
+    tmp_path, monkeypatch, label
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_path / "catalog"))
+    _project(tmp_path, cutoff=PAST)
+    _repro_setup(tmp_path, sidecar=False)
+    argv = ["submit", "--no-wait", "--", *REPRO_COMMANDS[label]]
+    with (
+        patch("bathos.cluster.push_project") as mock_push,
+        patch("bathos.cluster.submit_job", return_value=_SUBMIT_RESULT) as mock_submit,
+    ):
+        result = runner.invoke(app, argv)
+    assert result.exit_code != 0, result.output
+    assert "BLOCKED NO_SIDECAR" in result.stderr
+    assert "pass --sidecar PATH (no sidecar could be found from the command)" in result.stderr
+    mock_push.assert_not_called()
+    mock_submit.assert_not_called()
+
+
+@pytest.mark.parametrize("label", sorted(REPRO_COMMANDS))
+def test_submit_warns_repro_command_without_sidecar_when_not_enforced(tmp_path, monkeypatch, label):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_path / "catalog"))
+    _project(tmp_path, cutoff=None)
+    _repro_setup(tmp_path, sidecar=False)
+    argv = ["submit", "--no-wait", "--", *REPRO_COMMANDS[label]]
+    with (
+        patch("bathos.cluster.push_project"),
+        patch("bathos.cluster.submit_job", return_value=_SUBMIT_RESULT) as mock_submit,
+    ):
+        result = runner.invoke(app, argv)
+    assert result.exit_code == 0, result.output
+    assert "Warning:" in result.stderr
+    assert "BLOCKED" not in result.stderr
+    mock_submit.assert_called_once()
+
+
+@pytest.mark.parametrize("label", sorted(REPRO_COMMANDS))
+def test_submit_sidecar_flag_evaluates_real_sidecar(tmp_path, monkeypatch, label):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_path / "catalog"))
+    _project(tmp_path, cutoff=PAST)
+    sidecar_path = _repro_setup(tmp_path, sidecar=True)
+    argv = ["submit", "--no-wait", "--sidecar", str(sidecar_path), "--", *REPRO_COMMANDS[label]]
+    with (
+        patch("bathos.cluster.push_project") as mock_push,
+        patch("bathos.cluster.submit_job", return_value=_SUBMIT_RESULT) as mock_submit,
+    ):
+        result = runner.invoke(app, argv)
+    assert result.exit_code != 0, result.output
+    assert "BLOCKED REQUIRES_UNMET" in result.stderr
+    assert "NO_SIDECAR" not in result.stderr
+    mock_push.assert_not_called()
+    mock_submit.assert_not_called()
+
+
+def test_preflight_sidecar_flag_names_sidecar_explicitly(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _project(tmp_path, cutoff=PAST)
+    script = _script(tmp_path)
+    other = tmp_path / "elsewhere.bth.toml"
+    other.write_text(
+        '[experiment]\nhypothesis = "h"\nstage_name = "validation"\n' + MISSING + OUTCOMES
+    )
+    result = runner.invoke(app, ["preflight", str(script), "--sidecar", str(other)])
+    assert result.exit_code == 1, result.output
+    assert "REQUIRES_UNMET" in result.output

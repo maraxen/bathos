@@ -602,7 +602,7 @@ def gate_check(
             agent_mode=mode,
         )
 
-    # [requires] / [budget] (spec 261016 B2): block at validation/production once enforcement
+    # [requires] / [budget] (spec 261016 B2): block at validation/ablation/production once enforcement
     # is active, otherwise warn. Runs in BOTH modes, like the stale check above.
     from bathos.requires_gate import check_requires
 

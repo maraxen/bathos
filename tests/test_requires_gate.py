@@ -694,3 +694,15 @@ def test_nested_bth_toml_without_gate_uses_ancestor_cutoff(tmp_path, caplog):
         outcome = _check(sc)
     assert outcome.status == "block", outcome
     assert any(".bth.toml" in r.getMessage() and "sub" in r.getMessage() for r in caplog.records)
+
+
+# ── ablation is an enforced stage (spec 261016 B2 review, finding #9) ──
+
+
+def test_ablation_stage_blocks_unmet_requires_when_enforced(tmp_path):
+    _git_repo(tmp_path)
+    _gate_config(tmp_path, f'"{PAST_CUTOFF}"')
+    sc = _sidecar(tmp_path, stage="ablation", extra='[requires]\nartifact = "missing.json"\n')
+    outcome = _check(sc)
+    assert outcome.status == "block"
+    assert outcome.error_code == GateErrorCode.REQUIRES_UNMET

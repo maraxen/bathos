@@ -216,7 +216,7 @@ def _git_root(start: Path) -> Path | None:
 def load_requires_enforce_after(start: Path) -> date | None:
     """The ``[gate] requires_enforce_after`` cutoff for a path, or None if unset.
 
-    The cutoff is the date from which ``[requires]``/``[budget]`` violations block at validation and production
+    The cutoff is the date from which ``[requires]``/``[budget]`` violations block at validation, ablation and production
     stages (spec 261016 B2). It has no default: unset means warn-only. A malformed value, unknown ``[gate]`` key, or
     a config that cannot be parsed while mentioning ``requires_enforce_after`` raises :class:`EnforcementConfigError`
     (fail closed). A config that never mentions the key is tolerated and reads as unset, as ``[enforcement]`` does.

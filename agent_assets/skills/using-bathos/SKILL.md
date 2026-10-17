@@ -412,7 +412,7 @@ probe_record = "out/probe.json"             # relative to the sidecar's director
 tolerance = 0.5                             # per_unit_s may not undershoot the measured value by more
 ```
 
-Severity: an unmet requirement **blocks** at `validation` or `production` stage once enforcement is active, and **warns** otherwise. Enforcement is active from a date set in the project's `.bth.toml`:
+Severity: an unmet requirement **blocks** at `validation`, `ablation` or `production` stage once enforcement is active, and **warns** otherwise. A sidecar with no `stage_name` resolves to exploration and only warns. Enforcement is active from a date set in the project's `.bth.toml`:
 
 ```toml
 [gate]
@@ -421,7 +421,9 @@ requires_enforce_after = 2026-11-01   # TOML date or "YYYY-MM-DD"; unset means w
 
 A malformed `[gate]` value fails closed. A JAX script with no `[requires]` table only warns; profile one unit with `xtrax profile` and cite it.
 
-Exit codes for `bth preflight`: 0 pass or warn, 1 block, 2 the script or its sidecar is missing in an enforced directory. `--json` prints `{"status", "error_code", "errors", "hint", "waiver_reason"}`.
+Exit codes for `bth preflight`: 0 pass or warn (and pass for a script outside an enforced directory, as `gate_check` does), 1 block, 2 the script or its sidecar is missing in an enforced directory. `--json` prints `{"status", "error_code", "errors", "hint", "waiver_reason"}`. `--sidecar PATH` names the sidecar explicitly.
+
+`bth submit` scans every `.py` token of the command for an adjacent `<stem>.bth.toml`. When enforcement is active and no sidecar can be found (no `.py` in the command, as with `bash run.sh` or `python -m x`, or an enforced-directory script without one), submit blocks; pass `--sidecar PATH`. Without enforcement it warns and continues.
 
 ### Lint Checks
 

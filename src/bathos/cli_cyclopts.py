@@ -665,6 +665,7 @@ def _print_requires_outcome(outcome, stream) -> None:
 def preflight(
     script: str,
     json_output: Annotated[bool, cyclopts.Parameter(name="--json")] = False,
+    sidecar: str | None = None,
 ) -> None:
     """Check a script's sidecar [requires]/[budget] tables before running or submitting it.
 
@@ -676,6 +677,7 @@ def preflight(
     ----------
     script: Path to the experiment script; its sidecar is the adjacent <stem>.bth.toml.
     json_output: Print {"status", "error_code", "errors", "hint", "waiver_reason"} as JSON.
+    sidecar: Explicit sidecar path, used instead of the adjacent <stem>.bth.toml.
     """
     import json
 
@@ -685,7 +687,7 @@ def preflight(
     from bathos.sidecar import is_in_enforced_dir
 
     script_path = Path(script)
-    sidecar_path = discover_sidecar(script_path)
+    sidecar_path = Path(sidecar) if sidecar else discover_sidecar(script_path)
     if sidecar_path is None or not script_path.is_file():
         try:
             enforced = is_in_enforced_dir(script_path)
@@ -838,6 +840,7 @@ def submit(
     # 3. Load sidecar [cluster] override (optional)
     sidecar_data = None
     sidecar_path = None
+    pairs: list[tuple[Path, Path]] = []  # (script, adjacent sidecar) for every .py that has one
     if sidecar:
         try:
             sidecar_path = Path(sidecar)
@@ -847,55 +850,95 @@ def submit(
             print(f"Failed to parse sidecar: {e}", file=sys.stderr)
             raise SystemExit(1) from None
     else:
-        # Auto-discovery: the first `.py` token in the command, relative to cwd. Every
-        # miss below used to be silent, which skipped the reproduction/parity submit
-        # gates without a trace (debt #2205) -- say what was looked for instead.
-        discovery_miss: str | None = None
+        # Auto-discovery (spec 261016 B2 review, finding #1): EVERY `.py` token is scanned for an
+        # adjacent sidecar, not only the first, so `python helper.py scripts/experiments/x.py` finds
+        # x's sidecar. Every miss below used to be silent (debt #2205) -- say what was looked for.
+        discovery_misses: list[str] = []
         for cmd_token in command:
-            if cmd_token.endswith(".py"):
-                candidate_py = Path(cmd_token)
-                if candidate_py.exists():
-                    candidate_sidecar = candidate_py.with_suffix(".bth.toml")
-                    if candidate_sidecar.exists():
-                        try:
-                            sidecar_path = candidate_sidecar
-                            with open(candidate_sidecar, "rb") as f:
-                                sidecar_data = tomllib.load(f)
-                        except (FileNotFoundError, OSError) as e:
-                            discovery_miss = f"could not read sidecar {candidate_sidecar}: {e}"
-                    else:
-                        discovery_miss = (
-                            f"no sidecar found at {candidate_sidecar} "
-                            f"(looked next to {cmd_token}, relative to {Path.cwd()})"
-                        )
-                else:
-                    discovery_miss = (
-                        f"script {cmd_token} does not exist relative to {Path.cwd()}, "
-                        "so no sidecar could be located"
-                    )
-                break
-        else:
-            discovery_miss = "no .py script found in the command, so no sidecar could be located"
-        if discovery_miss:
+            if not cmd_token.endswith(".py"):
+                continue
+            candidate_py = Path(cmd_token)
+            if not candidate_py.exists():
+                discovery_misses.append(
+                    f"script {cmd_token} does not exist relative to {Path.cwd()}"
+                )
+                continue
+            candidate_sidecar = candidate_py.with_suffix(".bth.toml")
+            if candidate_sidecar.exists():
+                pairs.append((candidate_py, candidate_sidecar))
+            else:
+                discovery_misses.append(
+                    f"no sidecar found at {candidate_sidecar} "
+                    f"(looked next to {cmd_token}, relative to {Path.cwd()})"
+                )
+        if not any(t.endswith(".py") for t in command):
+            discovery_misses.append(
+                "no .py script found in the command, so no sidecar could be located"
+            )
+        if pairs:
+            sidecar_path = pairs[0][1]
+            try:
+                with open(sidecar_path, "rb") as f:
+                    sidecar_data = tomllib.load(f)
+            except (FileNotFoundError, OSError) as e:
+                print(f"Failed to read sidecar {sidecar_path}: {e}", file=sys.stderr)
+                raise SystemExit(1) from None
+        elif discovery_misses:
             print(
-                f"Warning: {discovery_miss}; reproduction/parity submit gates were skipped "
+                f"Warning: {discovery_misses[0]}; reproduction/parity submit gates were skipped "
                 "(pass --sidecar PATH to enforce them).",
                 file=sys.stderr,
             )
 
     # 3-pre. [requires]/[budget] preflight (spec 261016 B2), before any push or queueing. It FAILS
     # CLOSED: an exception here blocks the submit, unlike the reproduction gate below.
-    from bathos.requires_gate import preflight as requires_preflight
+    from datetime import date
 
-    script_token = next((Path(t) for t in command if t.endswith(".py") and Path(t).is_file()), None)
-    try:
-        requires_outcome = requires_preflight(script_token, sidecar_path if sidecar_data else None)
-    except Exception as e:
-        print(f"BLOCKED requires preflight failed: {type(e).__name__}: {e}", file=sys.stderr)
-        raise SystemExit(1) from None
-    _print_requires_outcome(requires_outcome, sys.stderr)
-    if requires_outcome.status == "block":
-        raise SystemExit(1)
+    from bathos.config import EnforcementConfigError, load_requires_enforce_after
+    from bathos.requires_gate import preflight as requires_preflight
+    from bathos.sidecar import is_in_enforced_dir
+
+    existing_py = [Path(t) for t in command if t.endswith(".py") and Path(t).is_file()]
+    if sidecar:
+        # Explicit sidecar: evaluate it against the enforced script, or against no script when the
+        # command names none enforced (so a `bash run.sh` submit is still checked).
+        enforced_py = [p for p in existing_py if is_in_enforced_dir(p)]
+        checks = [(enforced_py[0] if enforced_py else None, sidecar_path)]
+    else:
+        checks = list(pairs)
+        # No sidecar could be found for something the gate must cover: no script at all (a wrapper
+        # like `bash run.sh` or `python -m x`), or an enforced-directory script without one.
+        unresolved = not existing_py or any(
+            is_in_enforced_dir(p) and not p.with_suffix(".bth.toml").exists() for p in existing_py
+        )
+        if unresolved:
+            try:
+                cutoff = load_requires_enforce_after(cfg_path.parent)
+            except EnforcementConfigError as e:
+                print(f"BLOCKED invalid project gate config: {e}", file=sys.stderr)
+                raise SystemExit(1) from None
+            if cutoff is not None and date.today() >= cutoff:
+                print(
+                    "BLOCKED NO_SIDECAR: no sidecar could be found from the command "
+                    "(requires_enforce_after is active)",
+                    file=sys.stderr,
+                )
+                print(
+                    "  hint: pass --sidecar PATH (no sidecar could be found from the command)",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
+        if not checks:
+            checks = [(existing_py[0] if existing_py else None, None)]
+    for script_for_gate, sidecar_for_gate in checks:
+        try:
+            requires_outcome = requires_preflight(script_for_gate, sidecar_for_gate)
+        except Exception as e:
+            print(f"BLOCKED requires preflight failed: {type(e).__name__}: {e}", file=sys.stderr)
+            raise SystemExit(1) from None
+        _print_requires_outcome(requires_outcome, sys.stderr)
+        if requires_outcome.status == "block":
+            raise SystemExit(1)
 
     # 3a. Check reproduction prerequisite gate (before cluster submission)
     parsed_sidecar = None
