@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -147,6 +149,113 @@ def parse_enforcement(
         elif parts not in prefixes:
             prefixes.append(parts)
     return frozenset(names), tuple(prefixes)
+
+
+_GATE_KEYS = frozenset({"requires_enforce_after"})
+
+
+def _parse_requires_enforce_after(value: object, cfg_path: Path) -> date:
+    """Validate ``[gate] requires_enforce_after``: a TOML date or a strict ``YYYY-MM-DD`` string."""
+    if isinstance(value, datetime):
+        # A TOML date-time is not a date; refuse it rather than silently truncating the time.
+        raise EnforcementConfigError(
+            f"{cfg_path}: [gate] requires_enforce_after must be a date (YYYY-MM-DD), not a date-time"
+        )
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            pass
+    raise EnforcementConfigError(
+        f'{cfg_path}: [gate] requires_enforce_after must be a TOML date or a "YYYY-MM-DD" '
+        f"string, got {value!r}"
+    )
+
+
+def _read_gate_table(cfg_path: Path) -> dict | None:
+    """The ``[gate]`` table of one ``.bth.toml``, or None when it declares none.
+
+    Raises :class:`EnforcementConfigError` on an unreadable file, a non-table ``[gate]``, or unknown keys. A
+    config that cannot be parsed is tolerated (None) unless it mentions ``requires_enforce_after``.
+    """
+    try:
+        raw = cfg_path.read_bytes()
+    except OSError as e:
+        raise EnforcementConfigError(f"cannot read {cfg_path}: {e}") from e
+    try:
+        data = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+        if b"requires_enforce_after" in raw.lower():
+            raise EnforcementConfigError(f"cannot parse {cfg_path}: {e}") from e
+        logger.warning("cannot parse %s (%s); no [gate] setting is applied", cfg_path, e)
+        return None
+    gate = data.get("gate")
+    if gate is None:
+        return None
+    if not isinstance(gate, dict):
+        raise EnforcementConfigError(f"{cfg_path}: [gate] must be a table")
+    unknown = sorted(set(gate) - _GATE_KEYS)
+    if unknown:
+        raise EnforcementConfigError(
+            f"{cfg_path}: [gate] has unknown key(s) {unknown}; the only supported key is "
+            "'requires_enforce_after'"
+        )
+    return gate
+
+
+def _git_root(start: Path) -> Path | None:
+    """The nearest directory at or above ``start`` that holds a ``.git`` entry, or None."""
+    for directory in [start, *start.parents]:
+        if (directory / ".git").exists():
+            return directory
+    return None
+
+
+def load_requires_enforce_after(start: Path) -> date | None:
+    """The ``[gate] requires_enforce_after`` cutoff for a path, or None if unset.
+
+    The cutoff is the date from which ``[requires]``/``[budget]`` violations block at validation, ablation and production
+    stages (spec 261016 B2). It has no default: unset means warn-only. A malformed value, unknown ``[gate]`` key, or
+    a config that cannot be parsed while mentioning ``requires_enforce_after`` raises :class:`EnforcementConfigError`
+    (fail closed). A config that never mentions the key is tolerated and reads as unset, as ``[enforcement]`` does.
+
+    The cutoff is project policy, so the OUTERMOST ``.bth.toml`` that declares ``[gate]`` within the git repository
+    wins (searched from ``start`` up to the git root; with no git root, only the nearest config is consulted). When
+    that is not the nearest ``.bth.toml``, a warning names both files.
+    """
+    start_abs = Path(os.path.abspath(start))
+    nearest = find_project_config(start_abs)
+    if nearest is None:
+        return None
+    candidates = [nearest]
+    root = _git_root(nearest.parent)
+    if root is not None and root != nearest.parent:
+        for directory in nearest.parent.parents:
+            candidate = directory / ".bth.toml"
+            if candidate.exists():
+                candidates.append(candidate)
+            if directory == root:
+                break
+    declaring: list[tuple[Path, dict]] = []
+    for cfg in candidates:
+        gate = _read_gate_table(cfg)
+        if gate is not None:
+            declaring.append((cfg, gate))
+    if not declaring:
+        return None
+    chosen_path, gate = declaring[-1]
+    if chosen_path != nearest:
+        logger.warning(
+            "%s does not set [gate]; using [gate] requires_enforce_after from %s (the outermost "
+            "declaration within the repository)",
+            nearest,
+            chosen_path,
+        )
+    if "requires_enforce_after" not in gate:
+        return None
+    return _parse_requires_enforce_after(gate["requires_enforce_after"], chosen_path)
 
 
 def load_enforcement(
