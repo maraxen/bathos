@@ -189,15 +189,22 @@ class IngestReport:
     ran: bool = True
 
 
-def staging_roots_for_attempt(attempt: str) -> list[tuple[str, str, Path]]:
+def staging_roots_for_attempt(
+    attempt: str, *, staging_root: Path | None = None
+) -> list[tuple[str, str, Path]]:
     """Every `(root_kind="staging", root_id, log_dir)` under one migration
     attempt's staging tree (spec Migration step 2:
     `~/.bth/log/import-staging/<attempt>/<root kind>/<root id>/`), flattened
     to one leaf directory per destination subtree so the generic ingest loop
     (which globs `*.jsonl` in one directory per root) can read it exactly
     like any other root.
+
+    `staging_root` overrides the attempt's directory (default
+    `~/.bth/log/import-staging/<attempt>`); `bth migrate --to-log --dry-run`
+    uses it to fold a throwaway scratch tree instead of the real one (debt #1994).
     """
-    staging_root = Path.home() / ".bth" / "log" / "import-staging" / attempt
+    if staging_root is None:
+        staging_root = Path.home() / ".bth" / "log" / "import-staging" / attempt
     if not staging_root.is_dir():
         return []
     roots: list[tuple[str, str, Path]] = []
