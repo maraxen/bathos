@@ -307,6 +307,9 @@ def test_import_then_fold_matches_canonical_legacy_state(
     # the spec's "Fold rules" reference recipe -- mutates backend.catalog_dir
     # in place, so this MUST run after the importer has already read it.
     monkeypatch.setenv("BTH_WORKSPACE_ROOT", str(backend.workspace))
+    # The reference is the LEGACY rebuild; in log mode compact() is an ingest and refuses
+    # --force-rebuild (PR #111), so drop the marker the fold needed first.
+    cutover_marker_path(backend.catalog_dir).unlink()
     compact(backend.catalog_dir, force_rebuild=True)
     reconcile_warm_tier(backend.catalog_dir)
     warm = duckdb.connect(str(backend.catalog_dir / "bathos.db"), read_only=True)
