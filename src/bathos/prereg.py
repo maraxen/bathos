@@ -164,11 +164,9 @@ def check_first_of_kind(script_path: Path, catalog_dir: Path, git_hash: str) -> 
                     "SELECT COUNT(*) FROM runs WHERE command LIKE ? AND git_hash = ?",
                     [f"%{script_str}%", git_hash],
                 ).fetchall()
-                con.close()
                 return rows[0][0] == 0
             finally:
-                if not con.closed:
-                    con.close()
+                con.close()
     except Exception as e:
         logger.warning(f"Warm tier gate check failed: {e}")
     # If warm tier unavailable, scan cool tier
@@ -211,8 +209,7 @@ def check_sidecar_drift(script_path: Path, catalog_dir: Path, current_sidecar_sh
                 if rows:
                     baseline = rows[0][0]
             finally:
-                if not con.closed:
-                    con.close()
+                con.close()
         if baseline is None:
             from bathos.query import list_runs
 
@@ -356,8 +353,7 @@ def check_component_sidecar_drift(
                 if rows:
                     baseline = rows[0][0]
             finally:
-                if not con.closed:
-                    con.close()
+                con.close()
         if baseline is None:
             from bathos.query import list_runs
 

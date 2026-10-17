@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from bathos.catalog import iter_run_fragments
 from bathos.cluster_catalog import ensure_remote_catalog_dir, remote_catalog_path
 from bathos.config import ProjectConfig
 from bathos.telemetry import event
@@ -88,9 +89,9 @@ def sync_catalog(
         # Count filtered runs (total in catalog minus this project's runs)
         runs_root = catalog_dir / "runs"
         if not pull and runs_root.exists():
-            total = len(list(runs_root.rglob("run_*.parquet")))
+            total = len(iter_run_fragments(runs_root))
             project_count = (
-                len(list(local_runs.glob("run_*.parquet"))) if local_runs.exists() else 0
+                len(iter_run_fragments(local_runs, recursive=False)) if local_runs.exists() else 0
             )
             filtered = total - project_count
         else:
@@ -326,7 +327,7 @@ def sync_catalog(
         import pyarrow.parquet as pq
 
         scan_window_start = start_time - 5.0  # 5s buffer for clock skew
-        for parquet_file in Path(dst.rstrip("/ ")).rglob("run_*.parquet"):
+        for parquet_file in iter_run_fragments(Path(dst.rstrip("/ "))):
             if parquet_file.stat().st_mtime < scan_window_start:
                 continue  # skip files that predate this pull
             try:

@@ -51,6 +51,17 @@ def write_run(run: Run, catalog_dir: Path) -> None:
     event("catalog.write_parquet", path=str(target), rows=1, duration_ms=int(duration_ms))
 
 
+def iter_run_fragments(runs_dir: Path, *, recursive: bool = True) -> list[Path]:
+    """Sorted `run_*.parquet` fragments under `runs_dir`, excluding in-flight temps.
+
+    `run_<id>.tmp.parquet` is a write-then-rename temp (or a stale remote pull) that
+    also matches the `run_*.parquet` glob; counting or reading one reports a run that
+    does not exist yet. Every cool-tier scan goes through here (debt #2814).
+    """
+    pattern = runs_dir.rglob if recursive else runs_dir.glob
+    return sorted(f for f in pattern("run_*.parquet") if not f.name.endswith(".tmp.parquet"))
+
+
 def read_runs(catalog_dir: Path) -> list[Run]:
     """Read all runs from Parquet fragments, sorted by timestamp DESC.
 
@@ -76,10 +87,7 @@ def read_runs_report(catalog_dir: Path) -> tuple[list[Run], list[CorruptFragment
     runs_dir = catalog_dir / "runs"
     if not runs_dir.exists():
         return [], []
-    # Skip run_<id>.tmp.parquet: a write-then-rename temp or a stale remote pull.
-    parquet_files = sorted(
-        f for f in runs_dir.rglob("run_*.parquet") if not f.name.endswith(".tmp.parquet")
-    )
+    parquet_files = iter_run_fragments(runs_dir)
     if not parquet_files:
         return [], []
 
