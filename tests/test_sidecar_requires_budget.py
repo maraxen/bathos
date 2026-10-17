@@ -294,9 +294,7 @@ def test_requires_json_key_empty_segment_is_error(tmp_path, value):
 
 @pytest.mark.parametrize("value", ["/etc/x.json", "../x.json", "out/../../x.json", "a/.."])
 def test_requires_artifact_must_stay_inside_sidecar_dir(tmp_path, value):
-    with pytest.raises(
-        SidecarError, match=r"artifact must be a glob relative to the sidecar's directory"
-    ):
+    with pytest.raises(SidecarError, match=r"artifact must be a glob relative to the project root"):
         parse_sidecar(make(tmp_path, f'[requires]\nartifact = "{value}"\n'))
 
 

@@ -604,12 +604,15 @@ def gate_check(
 
     # [requires] / [budget] (spec 261016 B2): block at validation/ablation/production once enforcement
     # is active, otherwise warn. Runs in BOTH modes, like the stale check above.
-    from bathos.requires_gate import check_requires
+    from bathos.requires_gate import _project_root, check_requires
 
     assert bundle.path is not None  # narrowed by `bundle.found` above
     try:
         requires_outcome = check_requires(
-            sidecar, bundle.path, script_path=script_path, project_root=None
+            sidecar,
+            bundle.path,
+            script_path=script_path,
+            project_root=_project_root(bundle.path),
         )
     except EnforcementConfigError as e:
         # An invalid [gate] requires_enforce_after fails CLOSED, as an invalid [enforcement] does.

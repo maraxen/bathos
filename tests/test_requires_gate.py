@@ -97,11 +97,11 @@ def events(monkeypatch):
 def test_positive_control_passes_at_validation(tmp_path):
     head = _git_repo(tmp_path)
     _gate_config(tmp_path, f'"{PAST_CUTOFF}"')
-    (tmp_path / "scripts/experiments").mkdir(parents=True)
-    (tmp_path / "scripts/experiments/out.json").write_text(json.dumps({"git_sha": head}))
+    (tmp_path / "outputs/profiling").mkdir(parents=True)
+    (tmp_path / "outputs/profiling/out.json").write_text(json.dumps({"git_sha": head}))
     sc = _sidecar(
         tmp_path,
-        extra='[requires]\nartifact = "out.json"\njson_key = "git_sha"\nmust_equal = "HEAD"\n',
+        extra='[requires]\nartifact = "outputs/profiling/out.json"\njson_key = "git_sha"\nmust_equal = "HEAD"\n',
     )
     outcome = _check(sc)
     assert outcome.status == "pass", outcome
@@ -112,11 +112,11 @@ def test_positive_control_passes_at_validation(tmp_path):
 def test_short_sha_prefix_passes(tmp_path):
     head = _git_repo(tmp_path)
     _gate_config(tmp_path, f'"{PAST_CUTOFF}"')
-    (tmp_path / "scripts/experiments").mkdir(parents=True)
-    (tmp_path / "scripts/experiments/out.json").write_text(json.dumps({"git_sha": head[:8]}))
+    (tmp_path / "outputs/profiling").mkdir(parents=True)
+    (tmp_path / "outputs/profiling/out.json").write_text(json.dumps({"git_sha": head[:8]}))
     sc = _sidecar(
         tmp_path,
-        extra='[requires]\nartifact = "out.json"\njson_key = "git_sha"\nmust_equal = "HEAD"\n',
+        extra='[requires]\nartifact = "outputs/profiling/out.json"\njson_key = "git_sha"\nmust_equal = "HEAD"\n',
     )
     assert _check(sc).status == "pass"
 
@@ -124,11 +124,11 @@ def test_short_sha_prefix_passes(tmp_path):
 def test_non_hex_mismatch_blocks(tmp_path):
     _git_repo(tmp_path)
     _gate_config(tmp_path, f'"{PAST_CUTOFF}"')
-    (tmp_path / "scripts/experiments").mkdir(parents=True)
-    (tmp_path / "scripts/experiments/out.json").write_text(json.dumps({"git_sha": "not-a-sha"}))
+    (tmp_path / "outputs/profiling").mkdir(parents=True)
+    (tmp_path / "outputs/profiling/out.json").write_text(json.dumps({"git_sha": "not-a-sha"}))
     sc = _sidecar(
         tmp_path,
-        extra='[requires]\nartifact = "out.json"\njson_key = "git_sha"\nmust_equal = "HEAD"\n',
+        extra='[requires]\nartifact = "outputs/profiling/out.json"\njson_key = "git_sha"\nmust_equal = "HEAD"\n',
     )
     outcome = _check(sc)
     assert outcome.status == "block"
@@ -142,12 +142,12 @@ def test_non_hex_mismatch_blocks(tmp_path):
 def _dirty_setup(tmp_path: Path, stage: str, cutoff_toml: str | None):
     head = _git_repo(tmp_path)
     _gate_config(tmp_path, cutoff_toml)
-    (tmp_path / "scripts/experiments").mkdir(parents=True)
-    (tmp_path / "scripts/experiments/out.json").write_text(json.dumps({"git_sha": head + "-dirty"}))
+    (tmp_path / "outputs/profiling").mkdir(parents=True)
+    (tmp_path / "outputs/profiling/out.json").write_text(json.dumps({"git_sha": head + "-dirty"}))
     return _sidecar(
         tmp_path,
         stage=stage,
-        extra='[requires]\nartifact = "out.json"\njson_key = "git_sha"\nmust_equal = "HEAD"\n',
+        extra='[requires]\nartifact = "outputs/profiling/out.json"\njson_key = "git_sha"\nmust_equal = "HEAD"\n',
     )
 
 
@@ -199,9 +199,12 @@ def test_missing_artifact_glob_blocks(tmp_path):
 def test_bad_json_blocks(tmp_path):
     _git_repo(tmp_path)
     _gate_config(tmp_path, f'"{PAST_CUTOFF}"')
-    (tmp_path / "scripts/experiments").mkdir(parents=True)
-    (tmp_path / "scripts/experiments/out.json").write_text("{not json")
-    sc = _sidecar(tmp_path, extra='[requires]\nartifact = "out.json"\njson_key = "git_sha"\n')
+    (tmp_path / "outputs/profiling").mkdir(parents=True)
+    (tmp_path / "outputs/profiling/out.json").write_text("{not json")
+    sc = _sidecar(
+        tmp_path,
+        extra='[requires]\nartifact = "outputs/profiling/out.json"\njson_key = "git_sha"\n',
+    )
     outcome = _check(sc)
     assert outcome.status == "block"
     assert "cannot read out.json as JSON" in outcome.errors[0]
@@ -210,9 +213,12 @@ def test_bad_json_blocks(tmp_path):
 def test_missing_json_key_blocks(tmp_path):
     _git_repo(tmp_path)
     _gate_config(tmp_path, f'"{PAST_CUTOFF}"')
-    (tmp_path / "scripts/experiments").mkdir(parents=True)
-    (tmp_path / "scripts/experiments/out.json").write_text(json.dumps({"other": "x"}))
-    sc = _sidecar(tmp_path, extra='[requires]\nartifact = "out.json"\njson_key = "git_sha"\n')
+    (tmp_path / "outputs/profiling").mkdir(parents=True)
+    (tmp_path / "outputs/profiling/out.json").write_text(json.dumps({"other": "x"}))
+    sc = _sidecar(
+        tmp_path,
+        extra='[requires]\nartifact = "outputs/profiling/out.json"\njson_key = "git_sha"\n',
+    )
     outcome = _check(sc)
     assert outcome.status == "block"
     assert "has no key git_sha" in outcome.errors[0]
@@ -230,7 +236,7 @@ def test_requires_without_artifact_blocks(tmp_path):
 def test_multiple_matches_uses_newest_and_names_it_on_failure(tmp_path):
     _git_repo(tmp_path)
     _gate_config(tmp_path, f'"{PAST_CUTOFF}"')
-    d = tmp_path / "scripts/experiments"
+    d = tmp_path / "outputs/profiling"
     d.mkdir(parents=True)
     old = d / "out_a.json"
     new = d / "out_b.json"
@@ -240,7 +246,7 @@ def test_multiple_matches_uses_newest_and_names_it_on_failure(tmp_path):
     os.utime(new, (2_000_000_000, 2_000_000_000))
     sc = _sidecar(
         tmp_path,
-        extra='[requires]\nartifact = "out_*.json"\njson_key = "git_sha"\nmust_equal = "HEAD"\n',
+        extra='[requires]\nartifact = "outputs/profiling/out_*.json"\njson_key = "git_sha"\nmust_equal = "HEAD"\n',
     )
     outcome = _check(sc)
     assert outcome.status == "block"
@@ -268,14 +274,14 @@ def test_waiver_passes_and_emits_event(tmp_path, events):
 
 def _budget_sidecar(tmp_path: Path, per_unit_s: float, measured: float) -> Path:
     _gate_config(tmp_path, f'"{PAST_CUTOFF}"')
-    (tmp_path / "scripts/experiments").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "scripts/experiments/probe.json").write_text(
+    (tmp_path / "outputs/profiling").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "outputs/profiling/probe.json").write_text(
         json.dumps({"timing": {"per_unit_s": measured}})
     )
     return _sidecar(
         tmp_path,
         extra=(
-            f'[budget]\nper_unit_s = {per_unit_s}\nprobe_record = "probe.json"\n'
+            f'[budget]\nper_unit_s = {per_unit_s}\nprobe_record = "outputs/profiling/probe.json"\n'
             'record_per_unit_key = "timing.per_unit_s"\ntolerance = 0.5\n'
         ),
     )
@@ -325,11 +331,11 @@ def test_requires_and_budget_both_failing_report_requires_code(tmp_path):
 def test_internal_error_is_unmet_not_pass(tmp_path, monkeypatch):
     head = _git_repo(tmp_path)
     _gate_config(tmp_path, f'"{PAST_CUTOFF}"')
-    (tmp_path / "scripts/experiments").mkdir(parents=True)
-    (tmp_path / "scripts/experiments/out.json").write_text(json.dumps({"git_sha": head}))
+    (tmp_path / "outputs/profiling").mkdir(parents=True)
+    (tmp_path / "outputs/profiling/out.json").write_text(json.dumps({"git_sha": head}))
     sc = _sidecar(
         tmp_path,
-        extra='[requires]\nartifact = "out.json"\njson_key = "git_sha"\nmust_equal = "HEAD"\n',
+        extra='[requires]\nartifact = "outputs/profiling/out.json"\njson_key = "git_sha"\nmust_equal = "HEAD"\n',
     )
 
     def boom(*_a, **_k):
@@ -379,11 +385,11 @@ def test_unknown_gate_key_raises(tmp_path):
 def test_malformed_cutoff_blocks_in_gate_check(tmp_path):
     head = _git_repo(tmp_path)
     _gate_config(tmp_path, '"next week"')
-    (tmp_path / "scripts/experiments").mkdir(parents=True)
-    (tmp_path / "scripts/experiments/out.json").write_text(json.dumps({"git_sha": head}))
+    (tmp_path / "outputs/profiling").mkdir(parents=True)
+    (tmp_path / "outputs/profiling/out.json").write_text(json.dumps({"git_sha": head}))
     _sidecar(
         tmp_path,
-        extra='[requires]\nartifact = "out.json"\njson_key = "git_sha"\nmust_equal = "HEAD"\n',
+        extra='[requires]\nartifact = "outputs/profiling/out.json"\njson_key = "git_sha"\nmust_equal = "HEAD"\n',
     )
     script = tmp_path / "scripts/experiments/run_nvt.py"
     script.write_text("print(1)\n")
@@ -535,11 +541,11 @@ def test_ambient_git_dir_does_not_redirect_head(tmp_path, monkeypatch):
     ).stdout.strip()
     assert other_head != proj_head
     _gate_config(proj, f'"{PAST_CUTOFF}"')
-    (proj / "scripts/experiments").mkdir(parents=True)
-    (proj / "scripts/experiments/out.json").write_text(json.dumps({"git_sha": other_head}))
+    (proj / "outputs/profiling").mkdir(parents=True)
+    (proj / "outputs/profiling/out.json").write_text(json.dumps({"git_sha": other_head}))
     sc = _sidecar(
         proj,
-        extra='[requires]\nartifact = "out.json"\njson_key = "git_sha"\nmust_equal = "HEAD"\n',
+        extra='[requires]\nartifact = "outputs/profiling/out.json"\njson_key = "git_sha"\nmust_equal = "HEAD"\n',
     )
     monkeypatch.setenv("GIT_DIR", str(other / ".git"))
     outcome = _check(sc)
@@ -564,11 +570,11 @@ def test_json_key_non_string_value_is_unmet(tmp_path):
     """A numeric git_sha is not a commit hash; the value must be a string (finding 5)."""
     _git_repo(tmp_path)
     _gate_config(tmp_path, f'"{PAST_CUTOFF}"')
-    (tmp_path / "scripts/experiments").mkdir(parents=True)
-    (tmp_path / "scripts/experiments/out.json").write_text(json.dumps({"git_sha": 1234567}))
+    (tmp_path / "outputs/profiling").mkdir(parents=True)
+    (tmp_path / "outputs/profiling/out.json").write_text(json.dumps({"git_sha": 1234567}))
     sc = _sidecar(
         tmp_path,
-        extra='[requires]\nartifact = "out.json"\njson_key = "git_sha"\nmust_equal = "HEAD"\n',
+        extra='[requires]\nartifact = "outputs/profiling/out.json"\njson_key = "git_sha"\nmust_equal = "HEAD"\n',
     )
     outcome = _check(sc)
     assert outcome.status == "block"
@@ -578,11 +584,11 @@ def test_json_key_non_string_value_is_unmet(tmp_path):
 def test_json_value_whitespace_is_stripped_before_matching(tmp_path):
     head = _git_repo(tmp_path)
     _gate_config(tmp_path, f'"{PAST_CUTOFF}"')
-    (tmp_path / "scripts/experiments").mkdir(parents=True)
-    (tmp_path / "scripts/experiments/out.json").write_text(json.dumps({"git_sha": f" {head}\n"}))
+    (tmp_path / "outputs/profiling").mkdir(parents=True)
+    (tmp_path / "outputs/profiling/out.json").write_text(json.dumps({"git_sha": f" {head}\n"}))
     sc = _sidecar(
         tmp_path,
-        extra='[requires]\nartifact = "out.json"\njson_key = "git_sha"\nmust_equal = "HEAD"\n',
+        extra='[requires]\nartifact = "outputs/profiling/out.json"\njson_key = "git_sha"\nmust_equal = "HEAD"\n',
     )
     assert _check(sc).status == "pass"
 
@@ -590,9 +596,12 @@ def test_json_value_whitespace_is_stripped_before_matching(tmp_path):
 def test_reject_suffix_match_is_case_insensitive(tmp_path):
     _git_repo(tmp_path)
     _gate_config(tmp_path, f'"{PAST_CUTOFF}"')
-    (tmp_path / "scripts/experiments").mkdir(parents=True)
-    (tmp_path / "scripts/experiments/out.json").write_text(json.dumps({"git_sha": "abc1234-DIRTY"}))
-    sc = _sidecar(tmp_path, extra='[requires]\nartifact = "out.json"\njson_key = "git_sha"\n')
+    (tmp_path / "outputs/profiling").mkdir(parents=True)
+    (tmp_path / "outputs/profiling/out.json").write_text(json.dumps({"git_sha": "abc1234-DIRTY"}))
+    sc = _sidecar(
+        tmp_path,
+        extra='[requires]\nartifact = "outputs/profiling/out.json"\njson_key = "git_sha"\n',
+    )
     outcome = _check(sc)
     assert outcome.status == "block"
     assert "ends with -dirty" in outcome.errors[0]
@@ -602,11 +611,11 @@ def test_literal_must_equal_is_exact_not_hex_prefix(tmp_path):
     """Hex-prefix matching is for HEAD only; a literal 7-char must_equal does not prefix-match (finding 6)."""
     _git_repo(tmp_path)
     _gate_config(tmp_path, f'"{PAST_CUTOFF}"')
-    (tmp_path / "scripts/experiments").mkdir(parents=True)
-    (tmp_path / "scripts/experiments/out.json").write_text(json.dumps({"tag": "abcdef1234"}))
+    (tmp_path / "outputs/profiling").mkdir(parents=True)
+    (tmp_path / "outputs/profiling/out.json").write_text(json.dumps({"tag": "abcdef1234"}))
     sc = _sidecar(
         tmp_path,
-        extra='[requires]\nartifact = "out.json"\njson_key = "tag"\nmust_equal = "abcdef1"\n',
+        extra='[requires]\nartifact = "outputs/profiling/out.json"\njson_key = "tag"\nmust_equal = "abcdef1"\n',
     )
     outcome = _check(sc)
     assert outcome.status == "block"
@@ -647,37 +656,85 @@ def test_budget_resolution_hint_does_not_suggest_waiver():
 def test_artifact_symlink_escaping_sidecar_dir_is_unmet(tmp_path):
     head = _git_repo(tmp_path)
     _gate_config(tmp_path, f'"{PAST_CUTOFF}"')
-    outside = tmp_path / "outside.json"
+    outside_dir = tmp_path.parent / f"{tmp_path.name}-outside"  # beyond the project root
+    outside_dir.mkdir(exist_ok=True)
+    outside = outside_dir / "outside.json"
     outside.write_text(json.dumps({"git_sha": head}))
-    d = tmp_path / "scripts/experiments"
+    d = tmp_path / "outputs/profiling"
     d.mkdir(parents=True)
     (d / "out.json").symlink_to(outside)
     sc = _sidecar(
         tmp_path,
-        extra='[requires]\nartifact = "out.json"\njson_key = "git_sha"\nmust_equal = "HEAD"\n',
+        extra='[requires]\nartifact = "outputs/profiling/out.json"\njson_key = "git_sha"\nmust_equal = "HEAD"\n',
     )
     outcome = _check(sc)
     assert outcome.status == "block"
-    assert any("artifact resolves outside the sidecar directory" in e for e in outcome.errors)
+    assert any("artifact resolves outside the project root" in e for e in outcome.errors)
 
 
 def test_probe_record_symlink_escaping_sidecar_dir_is_unmet(tmp_path):
     _gate_config(tmp_path, f'"{PAST_CUTOFF}"')
-    outside = tmp_path / "outside_probe.json"
+    outside_dir = tmp_path.parent / f"{tmp_path.name}-outside"  # beyond the project root
+    outside_dir.mkdir(exist_ok=True)
+    outside = outside_dir / "outside_probe.json"
     outside.write_text(json.dumps({"timing": {"per_unit_s": 1.0}}))  # would pass the budget
-    d = tmp_path / "scripts/experiments"
+    d = tmp_path / "outputs/profiling"
     d.mkdir(parents=True)
     (d / "probe.json").symlink_to(outside)
     sc = _sidecar(
         tmp_path,
         extra=(
-            '[budget]\nper_unit_s = 10.0\nprobe_record = "probe.json"\n'
+            '[budget]\nper_unit_s = 10.0\nprobe_record = "outputs/profiling/probe.json"\n'
             'record_per_unit_key = "timing.per_unit_s"\n'
         ),
     )
     outcome = _check(sc)
     assert outcome.status == "block"
-    assert any("resolves outside the sidecar directory" in e for e in outcome.errors)
+    assert any("resolves outside the project root" in e for e in outcome.errors)
+
+
+def test_sidecar_in_scripts_cites_record_under_project_root(tmp_path):
+    """Spec 261016 B2 user decision: a sidecar next to its script cites outputs/profiling/ at the root."""
+    head = _git_repo(tmp_path)
+    _gate_config(tmp_path, f'"{PAST_CUTOFF}"')
+    (tmp_path / "outputs/profiling").mkdir(parents=True)
+    (tmp_path / "outputs/profiling/x.json").write_text(json.dumps({"git_sha": head}))
+    sc = _sidecar(
+        tmp_path,
+        extra='[requires]\nartifact = "outputs/profiling/x.json"\njson_key = "git_sha"\nmust_equal = "HEAD"\n',
+    )
+    assert sc.parent == tmp_path / "scripts" / "experiments"
+    assert _check(sc).status == "pass"
+
+
+def test_artifact_beside_sidecar_is_not_found_by_project_root_rule(tmp_path):
+    """A record next to the sidecar, not under the project root, is no longer where the glob looks."""
+    head = _git_repo(tmp_path)
+    _gate_config(tmp_path, f'"{PAST_CUTOFF}"')
+    (tmp_path / "scripts/experiments").mkdir(parents=True)
+    (tmp_path / "scripts/experiments/x.json").write_text(json.dumps({"git_sha": head}))
+    sc = _sidecar(
+        tmp_path,
+        extra='[requires]\nartifact = "outputs/profiling/x.json"\njson_key = "git_sha"\nmust_equal = "HEAD"\n',
+    )
+    outcome = _check(sc)
+    assert outcome.status == "block"
+    assert any(
+        "no file matches artifact glob outputs/profiling/x.json" in e for e in outcome.errors
+    )
+
+
+def test_project_root_is_outermost_bth_toml_within_git_root(tmp_path):
+    from bathos.requires_gate import _project_root
+
+    _git_repo(tmp_path)
+    _gate_config(tmp_path, None)
+    sub = tmp_path / "sub"
+    (sub / "scripts/experiments").mkdir(parents=True)
+    (sub / ".bth.toml").write_text('[project]\nslug = "nested"\nroot = "."\n')
+    sidecar = sub / "scripts/experiments/run_nvt.bth.toml"
+    sidecar.write_text('[experiment]\nhypothesis = "h"\n')
+    assert _project_root(sidecar) == tmp_path
 
 
 def test_nested_bth_toml_without_gate_uses_ancestor_cutoff(tmp_path, caplog):

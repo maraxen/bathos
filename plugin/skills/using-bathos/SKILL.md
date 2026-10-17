@@ -402,12 +402,12 @@ WARNING: no passing run of 'baseline_train' found (advisory for calibration stag
 
 ### `[requires]`, `[budget]` and the preflight gate
 
-Experiment sidecars may declare a precondition on an artifact and a wall-time budget. `bth preflight <script>` checks them; `bth submit` runs the same check before pushing or queueing and fails closed on any error in it. `bth run` checks them in enforced directories through `gate_check`.
+Experiment sidecars may declare a precondition on an artifact and a wall-time budget. `artifact` and `probe_record` resolve from the project root (the outermost `.bth.toml` within the git repository, else the git root), not from the sidecar's directory, and a match that resolves outside the project root (symlink escape) is unmet. `bth preflight <script>` checks them; `bth submit` runs the same check before pushing or queueing and fails closed on any error in it. `bth run` checks them in enforced directories through `gate_check`.
 
 ```toml
 [requires]
 workload = "jax"
-artifact = "out/run_*.json"    # glob relative to the sidecar's directory
+artifact = "outputs/profiling/run_*.json"    # glob relative to the project root (where .bth.toml sits)
 json_key = "git_sha"           # dotted path into the artifact JSON
 must_equal = "HEAD"            # a literal, or "HEAD" (a short-sha prefix of HEAD matches)
 reject_suffixes = ["-dirty", "-unverified"]   # the default
@@ -419,7 +419,7 @@ reason = "pilot run, not cited"
 [budget]
 per_unit_s = 4.0
 record_per_unit_key = "timing.per_unit_s"   # dotted path into the probe record
-probe_record = "out/probe.json"             # relative to the sidecar's directory
+probe_record = "outputs/profiling/probe.json"   # relative to the project root
 tolerance = 0.5                             # per_unit_s may not undershoot the measured value by more
 ```
 

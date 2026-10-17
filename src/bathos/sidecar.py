@@ -76,7 +76,7 @@ class RequiresBlock:
     """
 
     workload: str | None = None  # free string, e.g. "jax"
-    artifact: str | None = None  # glob, relative to the sidecar's directory (stored as given)
+    artifact: str | None = None  # glob, relative to the project root (stored as given)
     json_key: str | None = None  # dotted key path into the artifact JSON
     must_equal: str | None = None  # literal value, or "HEAD"
     reject_suffixes: list[str] = field(default_factory=lambda: ["-dirty", "-unverified"])
@@ -95,7 +95,7 @@ class BudgetBlock:
     est_wall_s: float | None = None
     per_unit_s: float | None = None
     n_units: int | None = None
-    probe_record: str | None = None  # path relative to the sidecar's directory (stored as given)
+    probe_record: str | None = None  # path relative to the project root (stored as given)
     record_per_unit_key: str | None = None  # dotted key path into probe_record's JSON
     tolerance: float = 0.5
 
@@ -671,11 +671,11 @@ def parse_sidecar(path: Path) -> Sidecar:
 def _check_sidecar_relative_path(
     path: Path, field_name: str, value: str, noun: str = "path"
 ) -> None:
-    """Reject an absolute path or one with '..' in a sidecar-relative glob or path."""
+    """Reject an absolute path or one with '..' in a project-root-relative glob or path."""
     parts = Path(value).parts
     if Path(value).is_absolute() or ".." in parts:
         raise SidecarError(
-            f"{path}: {field_name} must be a {noun} relative to the sidecar's directory and stay "
+            f"{path}: {field_name} must be a {noun} relative to the project root and stay "
             f"inside it (no absolute path, no '..'), got {value!r}"
         )
 

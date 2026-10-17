@@ -26,6 +26,7 @@ from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from bathos.config import _git_root, find_project_config
 from bathos.prereg import GateErrorCode
 from bathos.telemetry import event
 
@@ -89,6 +90,29 @@ def _walk_key(data: object, dotted: str) -> tuple[bool, object]:
     return True, current
 
 
+def _project_root(sidecar_path: Path) -> Path:
+    """The project root that ``[requires].artifact`` and ``[budget].probe_record`` resolve from.
+
+    Spec 261016 B2, user decision: sidecars sit next to scripts while ``xtrax profile`` records go to
+    ``outputs/profiling/``, so these paths are relative to the project root, not the sidecar's directory.
+    The root is the same one the ``[gate]`` lookup uses: the outermost ``.bth.toml`` between the
+    sidecar's directory and the git root. Without a ``.bth.toml`` on that walk it is the git root; with
+    no git root it is the nearest ``.bth.toml``'s directory; failing both, the sidecar's directory.
+    """
+    start = Path(os.path.abspath(sidecar_path.parent))
+    git = _git_root(start)
+    if git is not None:
+        outermost: Path | None = None
+        for directory in [start, *start.parents]:
+            if (directory / ".bth.toml").exists():
+                outermost = directory
+            if directory == git:
+                break
+        return outermost if outermost is not None else git
+    nearest = find_project_config(start)
+    return nearest.parent if nearest is not None else start
+
+
 def _inside(path: Path, root: Path) -> bool:
     """True iff ``path`` (symlinks followed) lies within ``root`` (symlinks followed)."""
     return path.resolve().is_relative_to(root.resolve())
@@ -126,19 +150,17 @@ def _resolve_head(sidecar_dir: Path) -> str:
     return sha
 
 
-def _requires_errors(requires: RequiresBlock, sidecar_path: Path) -> list[str]:
+def _requires_errors(requires: RequiresBlock, sidecar_path: Path, project_root: Path) -> list[str]:
     """Unmet-requirement messages for a [requires] table. Empty means met."""
     if requires.artifact is None:
         return ["[requires] declares no artifact"]
     glob = requires.artifact
-    matches = [p for p in sidecar_path.parent.glob(glob) if p.is_file()]
+    matches = [p for p in project_root.glob(glob) if p.is_file()]
     if not matches:
         return [f"no file matches artifact glob {glob}"]
     chosen = max(matches, key=lambda p: p.stat().st_mtime)
-    if not _inside(chosen, sidecar_path.parent):
-        return [
-            f"artifact resolves outside the sidecar directory: {chosen.name} -> {chosen.resolve()}"
-        ]
+    if not _inside(chosen, project_root):
+        return [f"artifact resolves outside the project root: {chosen.name} -> {chosen.resolve()}"]
     notes: list[str] = []
     if len(matches) > 1:
         notes.append(f"{len(matches)} files match {glob}; used the newest, {chosen.name}")
@@ -180,13 +202,13 @@ def _requires_errors(requires: RequiresBlock, sidecar_path: Path) -> list[str]:
     return errors
 
 
-def _budget_errors(budget: BudgetBlock, sidecar_path: Path) -> list[str]:
+def _budget_errors(budget: BudgetBlock, project_root: Path) -> list[str]:
     """Unmet-budget messages for a [budget] table. Empty means met."""
     if budget.probe_record is None:
         return []
-    probe = sidecar_path.parent / budget.probe_record
-    if probe.exists() and not _inside(probe, sidecar_path.parent):
-        return [f"probe_record {budget.probe_record} resolves outside the sidecar directory"]
+    probe = project_root / budget.probe_record
+    if probe.exists() and not _inside(probe, project_root):
+        return [f"probe_record {budget.probe_record} resolves outside the project root"]
     try:
         record = json.loads(probe.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -237,14 +259,15 @@ def check_requires(
 ) -> RequiresOutcome:
     """Decide the [requires]/[budget] verdict for one sidecar. See the module docstring.
 
-    ``project_root`` is accepted for the gate's call shape; the ``.bth.toml`` that carries
-    ``[gate] requires_enforce_after`` is found by walking up from the sidecar's directory, which is
-    the same rule every other project setting uses.
+    ``project_root`` is where ``[requires].artifact`` and ``[budget].probe_record`` resolve. None means
+    :func:`_project_root` of the sidecar. The ``[gate] requires_enforce_after`` cutoff is found by the
+    outermost-``.bth.toml`` rule in :func:`bathos.config.load_requires_enforce_after`, from the sidecar's
+    directory.
 
     Raises :class:`bathos.config.EnforcementConfigError` when a sidecar has a [requires]/[budget] table
     and the ``[gate]`` cutoff is malformed (the caller maps that to a block).
     """
-    del project_root  # documented above; the config is located from the sidecar's directory
+    root = project_root if project_root is not None else _project_root(sidecar_path)
     requires = sidecar.requires
     budget = sidecar.budget
     if requires is None and budget is None:
@@ -264,7 +287,7 @@ def check_requires(
             event("prereg.requires_waived", sidecar=str(sidecar_path), reason=waiver_reason)
         else:
             try:
-                errors = _requires_errors(requires, sidecar_path)
+                errors = _requires_errors(requires, sidecar_path, root)
             except Exception as e:  # noqa: BLE001 - fail closed on anything unexpected
                 errors = [f"internal error in requires gate: {type(e).__name__}: {e}"]
             if errors:
@@ -274,7 +297,7 @@ def check_requires(
 
     if budget is not None:
         try:
-            errors = _budget_errors(budget, sidecar_path)
+            errors = _budget_errors(budget, root)
         except Exception as e:  # noqa: BLE001 - fail closed on anything unexpected
             unmet.append(f"internal error in requires gate: {type(e).__name__}: {e}")
             codes.append(GateErrorCode.REQUIRES_UNMET)
@@ -336,5 +359,9 @@ def preflight(
         return _jax_heuristic(script_path)
     sidecar = parse_sidecar(sidecar_path)
     return check_requires(
-        sidecar, sidecar_path, script_path=script_path, project_root=None, today=today
+        sidecar,
+        sidecar_path,
+        script_path=script_path,
+        project_root=_project_root(sidecar_path),
+        today=today,
     )
