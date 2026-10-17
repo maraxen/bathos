@@ -35,6 +35,8 @@ class GateErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(En
     OUTCOME_AMBIGUOUS = "outcome_ambiguous"  # reserved: multiple outcome conditions evaluating true
     DIFFERENTIAL_INVARIANT_VIOLATED = "differential_invariant_violated"  # debt #1071
     SCRIPT_STALE = "script_stale"
+    REQUIRES_UNMET = "requires_unmet"  # [requires] precondition not met (spec 261016 B2)
+    BUDGET_UNMET = "budget_unmet"  # [budget] per_unit_s underestimates the probe record (B2)
     INTERNAL = "internal"
 
 
@@ -74,6 +76,7 @@ class GateResult:
     bundle: SidecarBundle
     validation: ValidationResult | None = None
     error_payload: GateErrorPayload | None = None  # structured MCP-ready error
+    waiver_reason: str | None = None  # set when a [requires.waiver] let the run through
 
 
 _RESOLUTION_HINTS: dict[GateErrorCode, str] = {
@@ -89,6 +92,8 @@ _RESOLUTION_HINTS: dict[GateErrorCode, str] = {
     GateErrorCode.OUTCOME_AMBIGUOUS: "Ensure exactly one outcome condition evaluates to true",
     GateErrorCode.DIFFERENTIAL_INVARIANT_VIOLATED: "Investigate why the measurement pipeline produces the same/different result regardless of the [differential] knob",
     GateErrorCode.SCRIPT_STALE: "Remove [status] stale=true once the script is fixed, or pass --allow-stale to run it anyway despite the flag",
+    GateErrorCode.REQUIRES_UNMET: 'Produce the artifact named in [requires] at the current commit, or add [requires.waiver] reason = "..."',
+    GateErrorCode.BUDGET_UNMET: "Re-measure with the probe and update [budget] per_unit_s / est_wall_s to at least the measured value",
     GateErrorCode.INTERNAL: "File a bug report with the full error message",
 }
 
@@ -597,6 +602,70 @@ def gate_check(
             agent_mode=mode,
         )
 
+    # [requires] / [budget] (spec 261016 B2): block at validation/ablation/production once enforcement
+    # is active, otherwise warn. Runs in BOTH modes, like the stale check above.
+    from bathos.requires_gate import _project_root, check_requires
+
+    assert bundle.path is not None  # narrowed by `bundle.found` above
+    try:
+        requires_outcome = check_requires(
+            sidecar,
+            bundle.path,
+            script_path=script_path,
+            project_root=_project_root(bundle.path),
+        )
+    except EnforcementConfigError as e:
+        # An invalid [gate] requires_enforce_after fails CLOSED, as an invalid [enforcement] does.
+        payload = _gate_failure_payload(
+            error_code=GateErrorCode.INTERNAL,
+            phase="pre_execution",
+            errors=[f"invalid project gate config: {e}"],
+            agent_mode=mode,
+            taxonomy_label="gate_config_invalid",
+        )
+        payload.resolution_hint = (
+            'Fix [gate] requires_enforce_after in .bth.toml: a TOML date or a "YYYY-MM-DD" string'
+        )
+        event(
+            "prereg.gate_deny",
+            script_path=str(script_path),
+            reason="gate_config_invalid",
+            agent_mode=mode,
+        )
+        return GateResult(ok=False, mode=mode, bundle=bundle, error_payload=payload)
+    if requires_outcome.status == "block":
+        assert requires_outcome.error_code is not None
+        code = requires_outcome.error_code
+        payload = _gate_failure_payload(
+            error_code=code,
+            phase="pre_execution",
+            errors=requires_outcome.errors,
+            agent_mode=mode,
+            taxonomy_label=code.value,
+        )
+        payload.resolution_hint = requires_outcome.hint
+        event(
+            "prereg.gate_deny",
+            script_path=str(script_path),
+            reason=code.value,
+            agent_mode=mode,
+        )
+        return GateResult(
+            ok=False, mode=mode, bundle=bundle, validation=validation, error_payload=payload
+        )
+    if requires_outcome.status == "warn":
+        for w in requires_outcome.errors:
+            logger.warning(f"requires gate warning for {script_path.name}: {w}")
+        event(
+            "prereg.requires_warn",
+            script_path=str(script_path),
+            reason=requires_outcome.error_code.value
+            if requires_outcome.error_code
+            else "jax_without_requires",
+            agent_mode=mode,
+        )
+    waiver_reason = requires_outcome.waiver_reason
+
     # Autonomous mode: enforce first-of-kind
     if (
         mode == "autonomous"
@@ -655,4 +724,6 @@ def gate_check(
         sidecar_sha256=bundle.sha256,
         agent_mode=mode,
     )
-    return GateResult(ok=True, mode=mode, bundle=bundle, validation=validation)
+    return GateResult(
+        ok=True, mode=mode, bundle=bundle, validation=validation, waiver_reason=waiver_reason
+    )

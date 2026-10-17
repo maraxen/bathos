@@ -25,6 +25,8 @@ class TestGateErrorCode:
             "OUTCOME_AMBIGUOUS",
             "DIFFERENTIAL_INVARIANT_VIOLATED",
             "SCRIPT_STALE",
+            "REQUIRES_UNMET",
+            "BUDGET_UNMET",
             "INTERNAL",
         }
         actual_codes = {code.name for code in GateErrorCode}
