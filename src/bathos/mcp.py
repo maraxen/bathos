@@ -3954,6 +3954,7 @@ def new_experiment_tool(
     workspace_root: str | None = None,
     force: bool = False,
     mode: str = "explore",
+    workload: str | None = None,
 ) -> dict:
     """Scaffold an experiment script and its pre-registration sidecar.
 
@@ -3962,7 +3963,10 @@ def new_experiment_tool(
     `[outcomes]`. It validates clean as written. `mode="confirm"` writes a
     confirmatory sidecar with `${THRESHOLD}` / `${SOURCE}` placeholders; those
     show up in `sidecar_validation.needs_filling`, not as errors. Any other
-    mode is rejected.
+    mode is rejected. `workload="jax"` appends the launch-gate tables: a live
+    `[requires]` (a probe record under outputs/profiling/<name>/ at HEAD) and a
+    commented `[budget]` to fill from the `xtrax profile` report. Any other
+    workload is rejected.
 
     The scaffold's optional blocks ship commented out on purpose: an
     uncommented `[[review.literature]]` with empty fields is a validation
@@ -3981,7 +3985,7 @@ def new_experiment_tool(
         ws = resolve_workspace().fs_root
 
     try:
-        scaffolded = scaffold_experiment(name, ws, force=force, mode=mode)
+        scaffolded = scaffold_experiment(name, ws, force=force, mode=mode, workload=workload)
     except FileExistsError as e:
         return {
             "ok": False,
@@ -4038,13 +4042,15 @@ async def new_experiment(
     workspace_root: str | None = None,
     force: bool = False,
     mode: str = "explore",
+    workload: str | None = None,
     token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
     """Scaffold an experiment script and its pre-registration sidecar.
 
     `mode` is "explore" (default: exploratory sidecar with [observe], validates as written)
     or "confirm" (confirmatory sidecar with ${THRESHOLD}/${SOURCE} placeholders listed in
-    sidecar_validation.needs_filling). Any other value is rejected.
+    sidecar_validation.needs_filling). Any other value is rejected. `workload` is None
+    (default) or "jax" (adds the launch-gate [requires] table and a commented [budget]).
 
     Closes a real parity gap: `bth new-experiment` existed only on the CLI, so an agent
     driving bathos through MCP had to hand-author `<stem>.bth.toml` from memory -- the
@@ -4052,7 +4058,9 @@ async def new_experiment(
 
     Requires token= matching the local ~/.bth/mcp_token (debt #619).
     """
-    return new_experiment_tool(name=name, workspace_root=workspace_root, force=force, mode=mode)
+    return new_experiment_tool(
+        name=name, workspace_root=workspace_root, force=force, mode=mode, workload=workload
+    )
 
 
 @cisternal.tool(registry="bathos-cli", name="validate_sidecar", cli_name="validate-sidecar")
