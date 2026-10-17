@@ -435,6 +435,12 @@ def get_run_tool(
         "output_paths": run.output_paths,
         "tags": run.tags,
         "hostname": run.hostname,
+        # Verification fields (rule: verify a run by its record, not its exit
+        # code). Empty strings are emitted as-is so an unset value is explicit.
+        "outcome": run.outcome,
+        "sidecar_mode": run.sidecar_mode,
+        "sidecar_path": run.sidecar_path,
+        "sidecar_sha256": run.sidecar_sha256,
     }
     if run_source(run) == COOL_UNINDEXED_SOURCE:
         notice = (
