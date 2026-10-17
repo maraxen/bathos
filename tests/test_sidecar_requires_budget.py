@@ -294,9 +294,7 @@ def test_requires_json_key_empty_segment_is_error(tmp_path, value):
 
 @pytest.mark.parametrize("value", ["/etc/x.json", "../x.json", "out/../../x.json", "a/.."])
 def test_requires_artifact_must_stay_inside_sidecar_dir(tmp_path, value):
-    with pytest.raises(
-        SidecarError, match=r"artifact must be a glob relative to the sidecar's directory"
-    ):
+    with pytest.raises(SidecarError, match=r"artifact must be a glob relative to the project root"):
         parse_sidecar(make(tmp_path, f'[requires]\nartifact = "{value}"\n'))
 
 
@@ -414,3 +412,63 @@ def test_both_blocks_serialize_to_json(tmp_path):
     dumped = json.dumps(dataclasses.asdict(sc))
     assert '"json_key": "meta.git.sha"' in dumped
     assert '"n_units": 50' in dumped
+
+
+# ── B2 additions: [requires].hint and [budget].record_per_unit_key ───────────
+
+
+def test_requires_hint_is_parsed_verbatim(tmp_path):
+    sc = parse_sidecar(
+        make(tmp_path, '[requires]\nartifact = "a.json"\nhint = "Run make_probe.py first"\n')
+    )
+    assert sc.requires is not None
+    assert sc.requires.hint == "Run make_probe.py first"
+
+
+def test_requires_hint_defaults_to_none(tmp_path):
+    sc = parse_sidecar(make(tmp_path, '[requires]\nartifact = "a.json"\n'))
+    assert sc.requires.hint is None
+
+
+@pytest.mark.parametrize("bad", ['""', '"   "', "7"])
+def test_requires_hint_must_be_nonblank_string(tmp_path, bad):
+    with pytest.raises(SidecarError, match=r"\[requires\]\.hint"):
+        parse_sidecar(make(tmp_path, f'[requires]\nartifact = "a.json"\nhint = {bad}\n'))
+
+
+def test_budget_record_per_unit_key_parsed(tmp_path):
+    sc = parse_sidecar(
+        make(
+            tmp_path,
+            '[budget]\nper_unit_s = 2.0\nprobe_record = "probe.json"\n'
+            'record_per_unit_key = "timing.per_unit_s"\n',
+        )
+    )
+    assert sc.budget.record_per_unit_key == "timing.per_unit_s"
+
+
+def test_budget_record_per_unit_key_requires_probe_record(tmp_path):
+    with pytest.raises(SidecarError, match=r"record_per_unit_key is set but .*probe_record is not"):
+        parse_sidecar(make(tmp_path, '[budget]\nper_unit_s = 2.0\nrecord_per_unit_key = "a.b"\n'))
+
+
+@pytest.mark.parametrize("bad", ['"a..b"', '".a"', '""', "3"])
+def test_budget_record_per_unit_key_rejects_bad_paths(tmp_path, bad):
+    with pytest.raises(SidecarError, match=r"record_per_unit_key"):
+        parse_sidecar(
+            make(
+                tmp_path,
+                f'[budget]\nprobe_record = "p.json"\nrecord_per_unit_key = {bad}\n',
+            )
+        )
+
+
+def test_budget_record_per_unit_key_is_not_an_unknown_key(tmp_path, caplog):
+    with caplog.at_level(logging.WARNING):
+        parse_sidecar(
+            make(
+                tmp_path,
+                '[budget]\nprobe_record = "p.json"\nrecord_per_unit_key = "a.b"\n',
+            )
+        )
+    assert not any("Unknown key in [budget]" in r.message for r in caplog.records)

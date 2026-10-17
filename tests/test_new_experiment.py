@@ -252,3 +252,73 @@ def test_scaffolded_script_runs_with_stdlib_only(tmp_path):
         assert set(payload) >= {"metric", "n_samples"}, label
         assert json.loads((out_dir / "results.json").read_text()) == payload, label
         assert json.loads(proc.stdout) == payload, label
+
+
+# ── --workload jax (spec 261016 B3) ──────────────────────────────────────────
+
+
+def test_jax_workload_scaffolds_requires_and_commented_budget(tmp_path):
+    from bathos.new_experiment import scaffold_experiment
+    from bathos.sidecar import parse_sidecar
+
+    result = scaffold_experiment("run_jaxy", tmp_path, workload="jax")
+    text = result.sidecar.read_text()
+    assert 'artifact = "outputs/profiling/run_jaxy/*.json"' in text
+    assert 'json_key = "git_sha"' in text
+    assert 'must_equal = "HEAD"' in text
+    assert "# [budget]" in text and "\n[budget]" not in text
+    assert '# probe_record = "outputs/profiling/run_jaxy/<record>.json"' in text
+    sidecar = parse_sidecar(result.sidecar)
+    assert sidecar.requires is not None
+    assert sidecar.requires.workload == "jax"
+    assert sidecar.requires.artifact == "outputs/profiling/run_jaxy/*.json"
+    assert sidecar.requires.hint is not None and "xtrax profile" in sidecar.requires.hint
+    assert sidecar.budget is None
+    assert not result.needs_filling
+
+
+def test_jax_scaffold_preflight_warns_before_any_record(tmp_path):
+    from bathos.new_experiment import scaffold_experiment
+    from bathos.requires_gate import preflight
+
+    result = scaffold_experiment("run_jaxy", tmp_path, workload="jax")
+    outcome = preflight(result.script, result.sidecar)
+    assert outcome.status == "warn"
+    assert any("no file matches artifact glob" in e for e in outcome.errors)
+
+
+def test_unknown_workload_is_rejected_before_writing(tmp_path):
+    from bathos.new_experiment import scaffold_experiment
+
+    with pytest.raises(ValueError, match="unknown workload 'tf'"):
+        scaffold_experiment("run_tf", tmp_path, workload="tf")
+    assert not (tmp_path / "scripts" / "experiments" / "run_tf.bth.toml").exists()
+
+
+def test_no_workload_writes_no_launch_gate_tables(tmp_path):
+    from bathos.new_experiment import scaffold_experiment
+
+    text = scaffold_experiment("run_plain", tmp_path).sidecar.read_text()
+    assert "[requires]" not in text
+    assert "[budget]" not in text
+
+
+def test_cli_workload_flag(tmp_path, monkeypatch):
+    from bathos.cli_cyclopts import app
+
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["new-experiment", "run_cli_jax", "--workload", "jax"])
+    assert result.exit_code == 0, result.output
+    assert 'artifact = "outputs/profiling/run_cli_jax/*.json"' in (
+        tmp_path / "scripts" / "experiments" / "run_cli_jax.bth.toml"
+    ).read_text()
+
+
+def test_mcp_tool_accepts_workload(tmp_path):
+    from bathos.mcp import new_experiment_tool
+
+    out = new_experiment_tool("run_mcp_jax", workspace_root=str(tmp_path), workload="jax")
+    assert out["ok"] is True
+    assert out["sidecar_validation"]["ok"] is True
+    bad = new_experiment_tool("run_mcp_bad", workspace_root=str(tmp_path), workload="tf")
+    assert bad["ok"] is False
