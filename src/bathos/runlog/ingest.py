@@ -1061,14 +1061,22 @@ def _ingest_locked(
     if real_path.exists():
         shutil.copy2(real_path, tmp_path)
 
-    roots = discover_roots(cd)
-    if extra_roots:
-        roots = [*roots, *extra_roots]
+    try:
+        roots = discover_roots(cd)
+        if extra_roots:
+            roots = [*roots, *extra_roots]
 
-    report = fold_roots_into(tmp_path, roots)
+        report = fold_roots_into(tmp_path, roots)
 
-    _check_no_wal(tmp_path)
-    os.replace(tmp_path, real_path)
+        _check_no_wal(tmp_path)
+        os.replace(tmp_path, real_path)
+    except BaseException:
+        # The generation copy is a full copy of index.db; a failed fold must not leave one
+        # behind per attempt (ingest_after_write swallows the error, so a persistent failure
+        # would otherwise leak a copy on every command). The live index.db is untouched.
+        tmp_path.unlink(missing_ok=True)
+        Path(f"{tmp_path}.wal").unlink(missing_ok=True)
+        raise
 
     return report
 
