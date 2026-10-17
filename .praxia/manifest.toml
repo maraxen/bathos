@@ -1,6 +1,6 @@
 [plugin]
 name            = "bathos"
-version         = "0.5.3"
+version         = "0.5.4"
 description     = "Experiment tracking — pre-registration, provenance, campaigns"
 requires_praxia = ">=1.0"
 # Skills reach Claude Code only via the plugin bundle (bathos:<skill>); skip
@@ -92,3 +92,14 @@ name  = "experiment-runner"
 path  = "agent_assets/agents/experiment-runner.md"
 tools = ["run", "campaign_create", "campaign_review", "check"]
 
+
+# PreToolUse backstop (spec 261016 P1): runs `bth preflight --command` before a job submission that
+# bypasses `bth submit` (sbatch, myxcel submit-job, the myxcel MCP submit_job tool) and denies the
+# call when the [requires]/[budget] preflight blocks. It is a backstop, not the gate: `bth submit`
+# runs the same check in-process. stdlib-only (bathos startup is heavy and the hook runs before
+# every matching call). One regex matcher covers both tool families; cisternal copies it verbatim.
+[[plugin.hook_specs]]
+event    = "PreToolUse"
+matcher  = "Bash|mcp__.*__submit_job"
+script   = "bth-preflight-hook"
+surfaces = ["claude"]
