@@ -724,7 +724,9 @@ def blast_radius_assess_tool(
 
     Returns:
         Dict with anchor_kind/anchor_value/changed_files/affected/unverifiable/
-        unaffected_run_ids (report), plus flagged_count/campaign_flagged_count/
+        unaffected_run_ids/warnings (report; warnings lists coverage caveats such
+        as a file anchor that matched no run, which is unverified rather than
+        clean, and a locked-catalog fallback), plus flagged_count/campaign_flagged_count/
         claim_flagged_count if flag=True. Or {"error": ...} if the anchor
         arguments are malformed.
     """
