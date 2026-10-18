@@ -15,7 +15,18 @@
       }
     ],
     "commands": [],
-    "hook_specs": [],
+    "hook_specs": [
+      {
+        "content": "",
+        "event": "PreToolUse",
+        "matcher": "Bash|mcp__.*__submit_job",
+        "script": "bth-preflight-hook",
+        "surfaces": [
+          "claude"
+        ],
+        "tier": ""
+      }
+    ],
     "marketplace": null,
     "mcp_servers": [
       {
@@ -30,7 +41,7 @@
     "metadata": {
       "description": "Experiment tracking — pre-registration, provenance, campaigns",
       "name": "bathos",
-      "version": "0.5.3"
+      "version": "0.5.4"
     },
     "skills": [
       {
