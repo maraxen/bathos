@@ -207,4 +207,7 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     # transient, and only fixable in myxcel. IMPERFECT FIT, for the same reason as
     # above; the INTERNAL hint ("file a bug report") at least points the right way.
     "MyxcelCapabilityGapError": BathosErrorCode.INTERNAL,
+    # The bth-preflight-hook could not run or parse `bth preflight` (spec 261016 P1).
+    # Caught inside the hook and reported on stderr; never crosses the MCP boundary.
+    "HookInternalError": BathosErrorCode.INTERNAL,
 }
