@@ -1,9 +1,8 @@
 ---
 name: using-bathos
 description: Experiment tracking with bathos — run tracking, sidecar pre-registration, controls discipline, catalog queries. Use when writing or editing a .bth.toml sidecar or its [outcomes], running `bth run` or `bth submit`, citing or verifying a run (outcome, catalog, `bth sql`, `bth find`, `bth compact`), or deciding whether a metric can be trusted (synthetic positive/negative controls).
-triggers: [bathos, bth, experiment, run, sidecar, .bth.toml, outcomes, pre-registration, catalog, compact, init, lint, controls, stage_name]
+when_to_use: 'Triggers: bth run, sidecar, .bth.toml, [outcomes], pre-registration, bth compact, bth find, catalog, controls, stage_name, bth init, bth check, bathos, bth, experiment, run, outcomes, compact, init, lint.'
 ---
-
 # using-bathos
 
 bathos (`bth`) is a standalone experiment tracking CLI for researchers running 10+ projects across local and SLURM cluster environments. It tracks script runs, pre-registers hypotheses via sidecars, syncs results to/from clusters, and provides rich query and reporting interfaces.
