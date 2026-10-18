@@ -425,6 +425,15 @@ Exit codes for `bth preflight`: 0 pass or warn (and pass for a script outside an
 
 `bth submit` scans every `.py` token of the command for an adjacent `<stem>.bth.toml`. When enforcement is active and no sidecar can be found (no `.py` in the command, as with `bash run.sh` or `python -m x`, or an enforced-directory script without one), submit blocks; pass `--sidecar PATH`. Without enforcement it warns and continues.
 
+
+#### JAX workloads: the launch gate
+
+`bth new-experiment <stem> --workload jax` scaffolds the sidecar with a live `[requires]` table: `artifact = "outputs/profiling/<stem>/*.json"`, `json_key = "git_sha"`, `must_equal = "HEAD"`, and a hint naming the profiling command. The `[budget]` table ships commented, because zero placeholders fail validation by design. The scaffold validates as written, and `bth preflight` on it reports unmet (no record yet) as a warning.
+
+The loop: profile one unit at production shapes with `xtrax profile --fn <module>:<unit> --shapes "<name>=(<dims>)f32" --extent-axis <name> --n-units <N> --out outputs/profiling/<stem>` (see the `xtrax-probing` skill), commit the record, copy `est. wall per unit s` and `est. total wall s` into `[budget]` and uncomment it, then `bth preflight <script>`. Use `[requires.waiver] reason = "..."` only for a pilot that will not be cited; `[budget]` is still checked.
+
+Enforcement follows the same rule as the rest of the gate: unmet blocks at `validation`, `ablation` or `production` once `[gate] requires_enforce_after` is reached, and warns everywhere else. Until that date is set, the gate warns.
+
 ### Lint Checks
 
 #### Tier-1 (Error)
