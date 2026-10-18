@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import cyclopts
 from cisternal import wire
@@ -26,6 +26,9 @@ from cisternal import wire
 from bathos.cli_render import cyclopts_result_action
 from bathos.mcp_auth import get_or_create_token
 from bathos.telemetry import init_telemetry
+
+if TYPE_CHECKING:
+    from bathos.runlog.migrate import MigrateToLogResult
 
 app = cyclopts.App(name="bth", result_action=cyclopts_result_action)
 
@@ -1309,6 +1312,43 @@ def submit(
     raise SystemExit(0)
 
 
+#: How many unclassified lines `bth migrate --to-log` prints before eliding the rest.
+_MAX_UNCLASSIFIED_SHOWN = 50
+
+
+def _print_residual_summary(result: MigrateToLogResult) -> None:
+    """Residual count by class, then each unclassified line (debt #2828).
+
+    Unclassified lines are what block the cut-over, so they go to stderr in full
+    (up to `_MAX_UNCLASSIFIED_SHOWN`) rather than as a bare count.
+    """
+    from collections import Counter
+
+    lines = result.residual_lines
+    print(f"  residual lines: {len(lines)}")
+    for cls, n in sorted(Counter(rl.get("class", "?") for rl in lines).items()):
+        print(f"    {cls}: {n}")
+    if not result.unclassified:
+        return
+    print(
+        f"  unclassified: {len(result.unclassified)} (these block the cut-over; "
+        "--accept-residual cannot clear them)",
+        file=sys.stderr,
+    )
+    for u in result.unclassified[:_MAX_UNCLASSIFIED_SHOWN]:
+        legacy = u.get("legacy_value")
+        staged = u.get("staged_value")
+        text = (
+            f"    {u.get('table')} {u.get('key')} {u.get('column')}: "
+            f"legacy={'<absent>' if legacy is None else repr(legacy[0])} "
+            f"staged={'<absent>' if staged is None else repr(staged[0])}"
+        )
+        print(text[:300], file=sys.stderr)
+    hidden = len(result.unclassified) - _MAX_UNCLASSIFIED_SHOWN
+    if hidden > 0:
+        print(f"    ... and {hidden} more", file=sys.stderr)
+
+
 @app.command
 def migrate(
     dry_run: bool = False,
@@ -1342,7 +1382,11 @@ def migrate(
         before cut-over.
     force: With --to-log, proceed past a squeue/submit-record conflict instead of refusing.
     accept_residual: With --to-log, the sha256 of a previously-reviewed residual report;
-        proceeds to the switch only if a fresh run reproduces that exact hash.
+        proceeds to the switch only if a fresh run reproduces that exact hash. It only
+        confirms an already-classified residual (status `residual_pending`): any
+        unclassified line aborts first, whatever hash is passed. Take the hash from a
+        real (non-dry) run -- a real step 1 reaps stale runs, so its residual and hash
+        can differ from the dry-run's.
     consolidate_catalog: Path to a registered root whose `.bth.toml` still sets an
         explicit `[project] catalog_dir`; additively copies that catalog's runs/
         campaigns/ submits/ reaped/ sidecars/ anchors/ ledger/ blast_radius/
@@ -1436,10 +1480,9 @@ def migrate(
                 print(f"    {pair['root']} <- {pair['remote']}")
         if result.report_sha256:
             print(f"  report sha256: {result.report_sha256}")
+        if result.status in ("dry_run", "residual_pending", "unclassified_residual"):
+            _print_residual_summary(result)
         if result.status == "dry_run":
-            print(f"  residual lines: {len(result.residual_lines)}")
-            if result.unclassified:
-                print(f"  unclassified: {len(result.unclassified)}", file=sys.stderr)
             raise SystemExit(0)
         if result.status != "switched" and result.status != "already_migrated":
             raise SystemExit(1)

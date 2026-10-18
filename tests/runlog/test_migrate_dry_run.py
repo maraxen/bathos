@@ -334,3 +334,87 @@ def test_dry_run_with_marker_present_reads_persisted_report_only(tmp_path: Path)
     assert dry.residual_lines == [ln.to_dict() for ln in lines]
     assert _fingerprint(backend.catalog_dir) == catalog_before
     assert _fingerprint(staging_root) == staging_before
+
+
+# --------------------------------------------------------------------------
+# (g) CLI residual summary (debt #2828): unclassified lines are printed, not
+#     just counted, on every status that carries them.
+# --------------------------------------------------------------------------
+
+
+def _unclassified_line(i: int) -> dict:
+    return {
+        "table": "runs",
+        "key": [f"run-{i:03d}"],
+        "column": "postmortem_summary",
+        "class": "unclassified",
+        "legacy_value": [f"hand-written {i}"],
+        "staged_value": None,
+    }
+
+
+def _invoke_with_result(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, result, args):
+    import bathos.runlog.migrate as migrate_mod
+    from bathos.cli_cyclopts import app
+    from tests._cyclopts_runner import CyclopticRunner
+
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_path / "catalog"))
+    monkeypatch.setattr(migrate_mod, "migrate_to_log", lambda *_a, **_k: result)
+    return CyclopticRunner().invoke(app, ["migrate", "--to-log", *args])
+
+
+def test_cli_unclassified_residual_lists_each_line_and_exits_nonzero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from bathos.runlog.migrate import MigrateToLogResult
+
+    result = MigrateToLogResult(
+        status="unclassified_residual",
+        unclassified=[_unclassified_line(1), _unclassified_line(2)],
+    )
+    out = _invoke_with_result(monkeypatch, tmp_path, result, [])
+
+    assert out.exit_code == 1, out.output
+    assert "unclassified: 2" in out.stderr
+    assert "--accept-residual cannot clear them" in out.stderr
+    assert (
+        "runs ['run-001'] postmortem_summary: legacy='hand-written 1' staged=<absent>" in out.stderr
+    )
+    assert "run-002" in out.stderr
+
+
+def test_cli_residual_pending_prints_count_by_class(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from bathos.runlog.migrate import MigrateToLogResult
+
+    lines = [{"class": "warm_only_row"}] * 3 + [{"class": "step1_pulled_or_reaped"}] * 2
+    result = MigrateToLogResult(
+        status="residual_pending", report_sha256="ab" * 32, residual_lines=lines
+    )
+    out = _invoke_with_result(monkeypatch, tmp_path, result, [])
+
+    assert out.exit_code == 1, out.output
+    assert "residual lines: 5" in out.output
+    assert "warm_only_row: 3" in out.output
+    assert "step1_pulled_or_reaped: 2" in out.output
+    assert "unclassified" not in out.output
+
+
+def test_cli_dry_run_elides_unclassified_past_the_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from bathos.cli_cyclopts import _MAX_UNCLASSIFIED_SHOWN
+    from bathos.runlog.migrate import MigrateToLogResult
+
+    n = _MAX_UNCLASSIFIED_SHOWN + 7
+    result = MigrateToLogResult(
+        status="dry_run", unclassified=[_unclassified_line(i) for i in range(n)]
+    )
+    out = _invoke_with_result(monkeypatch, tmp_path, result, ["--dry-run"])
+
+    assert out.exit_code == 0, out.output
+    assert f"unclassified: {n}" in out.stderr
+    assert f"run-{_MAX_UNCLASSIFIED_SHOWN - 1:03d}" in out.stderr
+    assert f"run-{_MAX_UNCLASSIFIED_SHOWN:03d}" not in out.stderr
+    assert "... and 7 more" in out.stderr
