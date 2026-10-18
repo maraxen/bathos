@@ -76,12 +76,13 @@ class RequiresBlock:
     """
 
     workload: str | None = None  # free string, e.g. "jax"
-    artifact: str | None = None  # glob, relative to the sidecar's directory (stored as given)
+    artifact: str | None = None  # glob, relative to the project root (stored as given)
     json_key: str | None = None  # dotted key path into the artifact JSON
     must_equal: str | None = None  # literal value, or "HEAD"
     reject_suffixes: list[str] = field(default_factory=lambda: ["-dirty", "-unverified"])
     applies_if: str | None = None  # free-form condition string (stored as given)
     waiver: RequiresWaiver | None = None
+    hint: str | None = None  # echoed verbatim as the resolution hint when the requirement fails
 
 
 @dataclass
@@ -94,7 +95,8 @@ class BudgetBlock:
     est_wall_s: float | None = None
     per_unit_s: float | None = None
     n_units: int | None = None
-    probe_record: str | None = None  # path, stored as given
+    probe_record: str | None = None  # path relative to the project root (stored as given)
+    record_per_unit_key: str | None = None  # dotted key path into probe_record's JSON
     tolerance: float = 0.5
 
 
@@ -666,6 +668,26 @@ def parse_sidecar(path: Path) -> Sidecar:
     return sidecar
 
 
+def _check_sidecar_relative_path(
+    path: Path, field_name: str, value: str, noun: str = "path"
+) -> None:
+    """Reject an absolute path or one with '..' in a project-root-relative glob or path."""
+    parts = Path(value).parts
+    if Path(value).is_absolute() or ".." in parts:
+        raise SidecarError(
+            f"{path}: {field_name} must be a {noun} relative to the project root and stay "
+            f"inside it (no absolute path, no '..'), got {value!r}"
+        )
+
+
+def _check_dotted_key(path: Path, field_name: str, value: str) -> None:
+    """Reject a dotted key path with an empty segment (e.g. 'a..b', '.a', 'a.')."""
+    if any(seg == "" for seg in value.split(".")):
+        raise SidecarError(
+            f"{path}: {field_name} must be a dotted key path with no empty segments, got {value!r}"
+        )
+
+
 def _parse_requires(raw, path: Path) -> RequiresBlock:
     if not isinstance(raw, dict):
         raise SidecarError(f"{path}: [requires] must be a table")
@@ -690,18 +712,12 @@ def _parse_requires(raw, path: Path) -> RequiresBlock:
     must_equal = opt_nonblank("must_equal")
     applies_if = opt_str("applies_if")
 
+    hint = opt_nonblank("hint")
+
     if artifact is not None:
-        artifact_parts = Path(artifact).parts
-        if Path(artifact).is_absolute() or ".." in artifact_parts:
-            raise SidecarError(
-                f"{path}: [requires].artifact must be a glob relative to the sidecar's "
-                f"directory and stay inside it (no absolute path, no '..'), got {artifact!r}"
-            )
-    if json_key is not None and any(seg == "" for seg in json_key.split(".")):
-        raise SidecarError(
-            f"{path}: [requires].json_key must be a dotted key path with no empty segments, "
-            f"got {json_key!r}"
-        )
+        _check_sidecar_relative_path(path, "[requires].artifact", artifact, noun="glob")
+    if json_key is not None:
+        _check_dotted_key(path, "[requires].json_key", json_key)
 
     if "reject_suffixes" in raw:
         suffixes = raw["reject_suffixes"]
@@ -748,6 +764,7 @@ def _parse_requires(raw, path: Path) -> RequiresBlock:
             "reject_suffixes",
             "applies_if",
             "waiver",
+            "hint",
         }:
             logger.warning(f"Unknown key in [requires]: {key!r}")
 
@@ -759,6 +776,7 @@ def _parse_requires(raw, path: Path) -> RequiresBlock:
         reject_suffixes=reject_suffixes,
         applies_if=applies_if,
         waiver=waiver,
+        hint=hint,
     )
 
 
@@ -804,6 +822,21 @@ def _parse_budget(raw, path: Path) -> BudgetBlock:
         raise SidecarError(
             f"{path}: [budget].probe_record must be a string, got {type(probe_record).__name__}"
         )
+    if probe_record is not None:
+        _check_sidecar_relative_path(path, "[budget].probe_record", probe_record)
+
+    record_per_unit_key = raw.get("record_per_unit_key")
+    if record_per_unit_key is not None:
+        if not isinstance(record_per_unit_key, str) or not record_per_unit_key.strip():
+            raise SidecarError(
+                f"{path}: [budget].record_per_unit_key must be a non-empty string, "
+                f"got {record_per_unit_key!r}"
+            )
+        _check_dotted_key(path, "[budget].record_per_unit_key", record_per_unit_key)
+        if probe_record is None:
+            raise SidecarError(
+                f"{path}: [budget].record_per_unit_key is set but [budget].probe_record is not"
+            )
 
     # Relative slack for the later budget check: the estimate may undershoot per_unit_s * n_units
     # by at most this fraction. Must be in (0, 1): at >= 1 the consistency floor is non-positive
@@ -838,7 +871,14 @@ def _parse_budget(raw, path: Path) -> BudgetBlock:
             )
 
     for key in raw:
-        if key not in {"est_wall_s", "per_unit_s", "n_units", "probe_record", "tolerance"}:
+        if key not in {
+            "est_wall_s",
+            "per_unit_s",
+            "n_units",
+            "probe_record",
+            "record_per_unit_key",
+            "tolerance",
+        }:
             logger.warning(f"Unknown key in [budget]: {key!r}")
 
     return BudgetBlock(
@@ -846,6 +886,7 @@ def _parse_budget(raw, path: Path) -> BudgetBlock:
         per_unit_s=per_unit_s,
         n_units=n_units,
         probe_record=probe_record,
+        record_per_unit_key=record_per_unit_key,
         tolerance=tolerance,
     )
 

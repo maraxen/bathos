@@ -108,7 +108,16 @@ _POSTMORTEM_UNSET_DEFAULTS: Mapping[str, str] = MappingProxyType(
 #: Columns that carry POSITIVE evidence a run really has a postmortem. All
 #: must be empty before any `postmortem_unset_default` residual is allowed --
 #: see `_row_has_no_postmortem`.
-_POSTMORTEM_EVIDENCE_COLUMNS = ("postmortem_path", "postmortem_author", "postmortem_summary")
+#:
+#: `postmortem_summary` is deliberately NOT listed (measured 2026-10-17 on the
+#: Engaging catalog: four `oaf` runs carry a hand-written summary with every
+#: other postmortem column empty, which blocked the cut-over). Both writers of
+#: a real postmortem (`compact.py`'s apply and `fold_runs.py`'s event fold) set
+#: `postmortem_path`/`postmortem_author` from the postmortem record together
+#: with the summary, so a summary alone is a free-text annotation, not a
+#: postmortem. The summary itself is still compared by the diff, so a summary
+#: the fold failed to carry would surface as its own residual line.
+_POSTMORTEM_EVIDENCE_COLUMNS = ("postmortem_path", "postmortem_author")
 
 
 def _row_has_no_postmortem(lrow: dict[str, Any]) -> bool:

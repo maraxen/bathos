@@ -95,6 +95,8 @@ Repository = "https://github.com/mariellerossi/bathos.git"
 [project.scripts]
 bth = "bathos.cli_cyclopts:app"
 bth-mcp = "bathos.mcp:mcp_server"
+# PreToolUse backstop (`.praxia/manifest.toml` hook_specs): stdlib-only, so it skips bathos startup.
+bth-preflight-hook = "bathos.hooks.preflight_hook:main"
 
 [tool.uv]
 # Prereleases are REQUIRED, not merely tolerated.
