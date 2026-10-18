@@ -389,6 +389,42 @@ WARNING: no passing run of 'baseline_train' found (advisory for calibration stag
 **Silent skip:**
 - If `[reproduction]` block is absent or `requires_pass_stem` is empty, gate is skipped silently.
 
+### `[requires]`, `[budget]` and the preflight gate
+
+Experiment sidecars may declare a precondition on an artifact and a wall-time budget. `artifact` and `probe_record` resolve from the project root (the outermost `.bth.toml` within the git repository, else the git root), not from the sidecar's directory, and a match that resolves outside the project root (symlink escape) is unmet. `bth preflight <script>` checks them; `bth submit` runs the same check before pushing or queueing and fails closed on any error in it. `bth run` checks them in enforced directories through `gate_check`.
+
+```toml
+[requires]
+workload = "jax"
+artifact = "outputs/profiling/run_*.json"    # glob relative to the project root (where .bth.toml sits)
+json_key = "git_sha"           # dotted path into the artifact JSON
+must_equal = "HEAD"            # a literal, or "HEAD" (a short-sha prefix of HEAD matches)
+reject_suffixes = ["-dirty", "-unverified"]   # the default
+hint = "Run scripts/experiments/make_probe.py at the current commit first"
+
+[requires.waiver]              # reasoned opt-out of [requires] only; [budget] is still checked
+reason = "pilot run, not cited"
+
+[budget]
+per_unit_s = 4.0
+record_per_unit_key = "timing.per_unit_s"   # dotted path into the probe record
+probe_record = "outputs/profiling/probe.json"   # relative to the project root
+tolerance = 0.5                             # per_unit_s may not undershoot the measured value by more
+```
+
+Severity: an unmet requirement **blocks** at `validation`, `ablation` or `production` stage once enforcement is active, and **warns** otherwise. A sidecar with no `stage_name` resolves to exploration and only warns. Enforcement is active from a date set in the project's `.bth.toml`:
+
+```toml
+[gate]
+requires_enforce_after = 2026-11-01   # TOML date or "YYYY-MM-DD"; unset means warn-only
+```
+
+A malformed `[gate]` value fails closed. A JAX script with no `[requires]` table only warns; profile one unit with `xtrax profile` and cite it.
+
+Exit codes for `bth preflight`: 0 pass or warn (and pass for a script outside an enforced directory, as `gate_check` does), 1 block, 2 the script or its sidecar is missing in an enforced directory. `--json` prints `{"status", "error_code", "errors", "hint", "waiver_reason"}`. `--sidecar PATH` names the sidecar explicitly.
+
+`bth submit` scans every `.py` token of the command for an adjacent `<stem>.bth.toml`. When enforcement is active and no sidecar can be found (no `.py` in the command, as with `bash run.sh` or `python -m x`, or an enforced-directory script without one), submit blocks; pass `--sidecar PATH`. Without enforcement it warns and continues.
+
 ### Lint Checks
 
 #### Tier-1 (Error)

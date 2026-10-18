@@ -2470,3 +2470,51 @@ def test_declared_unknown_outcome_does_not_warn(tmp_path: Path):
     plain = tmp_path / "y.bth.toml"
     plain.write_text(_OUTCOME_SIDECAR)
     assert _unresolved_outcome_warning(parse_sidecar(plain), "unknown", "", "results_path", [])
+
+
+def test_requires_waiver_reaches_run_record(tmp_path):
+    """A [requires.waiver] must survive into the catalog row's metadata (finding 2)."""
+    import json
+    import textwrap
+
+    from bathos.runner import run_script
+
+    (tmp_path / "catalog").mkdir()
+    enforced = tmp_path / "scripts" / "experiments"
+    enforced.mkdir(parents=True)
+    script = enforced / "run_nvt.py"
+    script.write_text("print('hi')")
+    (enforced / "run_nvt.bth.toml").write_text(
+        textwrap.dedent("""
+        [experiment]
+        hypothesis = "test hypothesis"
+        [requires]
+        artifact = "missing.json"
+        [requires.waiver]
+        reason = "pilot run"
+        [outcomes.pass]
+        condition = "x == 1"
+        decision = "good"
+        reasoning = "expected behavior"
+        [outcomes.fallback]
+        condition = "1==1"
+        decision = "other"
+        reasoning = "catch-all"
+        is_residual = true
+        [result_schema]
+        x = "float"
+    """)
+    )
+
+    result = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="proj",
+        catalog_dir=tmp_path / "catalog",
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert result == 0
+    runs = read_runs(tmp_path / "catalog")
+    assert len(runs) == 1
+    assert json.loads(runs[0].metadata)["requires_waiver"] == {"reason": "pilot run"}
