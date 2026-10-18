@@ -74,6 +74,32 @@ if __name__ == "__main__":
 """
 
 _SCAFFOLD_MODES = ("explore", "confirm")
+_WORKLOADS = ("jax",)
+
+# `--workload jax` appends the launch-gate tables (spec 261016 B3). [requires] is live; [budget] is
+# commented because placeholder numbers fail validation by design, so the author fills it from the
+# `xtrax profile` report first. `{stem}` is replaced with the experiment name; the TOML hint is a
+# basic string, so its inner quotes are escaped.
+_JAX_GATE_TEMPLATE = r'''
+# JAX launch gate (spec 261016 B3). [requires] is checked by `bth preflight` and `bth submit`:
+# the probe record must exist, carry git_sha = HEAD, and be committed. Paths resolve from the
+# project root. Unmet at validation/ablation/production blocks once [gate] requires_enforce_after
+# is active; before that, and in exploration, it only warns.
+[requires]
+workload = "jax"
+artifact = "outputs/profiling/{stem}/*.json"
+json_key = "git_sha"
+must_equal = "HEAD"
+hint = "Profile one unit at production shapes: xtrax profile --fn <module>:<unit> --shapes \"<name>=(<dims>)f32\" --extent-axis <name> --n-units <N> --out outputs/profiling/{stem}, commit, then re-run bth preflight. See the xtrax-probing skill."
+
+# [budget] -- fill from the `xtrax profile` report (`est. wall per unit s`, `est. total wall s`), then uncomment.
+# [budget]
+# per_unit_s = 0.0
+# n_units = 0
+# est_wall_s = 0.0
+# probe_record = "outputs/profiling/{stem}/<record>.json"
+# record_per_unit_key = "metrics.total_step_seconds"
+'''
 
 # Exploratory scaffold (the default). It validates clean as written: no uncommented [outcomes]
 # (optional for exploration, spec §3.2), and [observe].outputs names the file the script
@@ -208,6 +234,7 @@ def scaffold_experiment(
     project_root: Path,
     force: bool = False,
     mode: str = "explore",
+    workload: str | None = None,
 ) -> ScaffoldResult:
     """Write `scripts/experiments/<name>.py` and its `<name>.bth.toml` sidecar.
 
@@ -218,9 +245,14 @@ def scaffold_experiment(
     placeholders. Their validation errors are reported in ``needs_filling``, not raised.
     Any other validation error means the scaffold itself is broken, and the scaffold is
     removed again and ``ValueError`` is raised.
+
+    ``workload="jax"`` appends the launch-gate tables (``[requires]`` live, ``[budget]`` commented).
+    ``workload=None`` writes exactly the same sidecar as before the option existed.
     """
     if mode not in _SCAFFOLD_MODES:
         raise ValueError(f"unknown mode {mode!r}: expected one of {', '.join(_SCAFFOLD_MODES)}")
+    if workload is not None and workload not in _WORKLOADS:
+        raise ValueError(f"unknown workload {workload!r}: expected one of {', '.join(_WORKLOADS)}")
 
     warning = ""
     if not _NAME_RE.match(name):
@@ -242,7 +274,8 @@ def scaffold_experiment(
 
     script.write_text(_SCRIPT_TEMPLATE.format(name=name))
     script.chmod(0o755)
-    sidecar.write_text(sidecar_template + _REVIEW_STUB + _corpus_guidance())
+    workload_block = _JAX_GATE_TEMPLATE.replace("{stem}", name) if workload == "jax" else ""
+    sidecar.write_text(sidecar_template + workload_block + _REVIEW_STUB + _corpus_guidance())
 
     from bathos.sidecar import parse_sidecar, resolve_epistemic_class
     from bathos.validate import validate_sidecar

@@ -1704,6 +1704,70 @@ def test_postmortem_unset_default_refuses_a_row_that_has_a_postmortem():
     )
 
 
+_PM_FIVE_EMPTY = dict.fromkeys(
+    (
+        "postmortem_asset_links",
+        "postmortem_hypothesis_status",
+        "postmortem_override",
+        "postmortem_status",
+        "postmortem_verdict_override",
+    ),
+    "",
+)
+
+
+def _classify_pm_row(column: str, staged: str, **evidence):
+    """`_classify` on a whole legacy row: five empty columns plus `evidence` overrides."""
+    from bathos.runlog.migrate import _classify
+
+    lrow = {**_PM_FIVE_EMPTY, "postmortem_path": "", "postmortem_author": "", **evidence}
+    srow = {**lrow, column: staged}
+    return _classify(
+        "runs",
+        ("run-1",),
+        column,
+        lrow,
+        srow,
+        step1_touched_run_ids=set(),
+        cool_run_rows={},
+        unresolved_ids=set(),
+    )
+
+
+def test_postmortem_unset_default_accepts_a_summary_only_annotation():
+    """Measured 2026-10-17 on Engaging: four `oaf` runs carry a free-text
+    `postmortem_summary` and nothing else of a postmortem. A real postmortem sets
+    `postmortem_path`/`postmortem_author` with the summary (compact.py's apply and
+    fold_runs's event fold both write them together), so a summary alone must not
+    block the cut-over."""
+    assert (
+        _classify_pm_row("postmortem_status", "unassigned", postmortem_summary="M2.7 spike PASS.")
+        == "postmortem_unset_default"
+    )
+
+
+@pytest.mark.parametrize("evidence", ["postmortem_path", "postmortem_author"])
+def test_postmortem_unset_default_still_refuses_path_or_author_evidence(evidence: str):
+    """NEGATIVE CONTROL for the narrowed gate: path or author present, even with
+    a summary, means a postmortem record exists; the empty status column is then
+    information and the residual must stay unclassified."""
+    assert (
+        _classify_pm_row(
+            "postmortem_status",
+            "unassigned",
+            postmortem_summary="M2.7 spike PASS.",
+            **{evidence: "x"},
+        )
+        is None
+    )
+
+
+def test_postmortem_unset_default_summary_only_does_not_swallow_a_real_value():
+    """NEGATIVE CONTROL: a summary-only row whose staged column holds a real
+    value (not the typed default) is still a difference."""
+    assert _classify_pm_row("postmortem_status", "final", postmortem_summary="note") is None
+
+
 def test_postmortem_unset_default_accepts_legacy_null():
     """A legacy NULL reads as "no value" exactly as "" does."""
     assert _classify_pm("postmortem_status", None, "unassigned") == "postmortem_unset_default"
