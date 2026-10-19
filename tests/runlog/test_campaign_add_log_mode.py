@@ -15,7 +15,13 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from bathos.campaigns import CampaignError, add_run_to_campaign, create_campaign
+from bathos.campaigns import (
+    Campaign,
+    CampaignError,
+    add_run_to_campaign,
+    create_campaign,
+    write_campaign_cool,
+)
 from bathos.catalog import write_run
 from bathos.mcp import campaign_add_tool
 from bathos.runlog.emit import emit_event, run_event_data
@@ -164,3 +170,49 @@ def test_confirmation_ordering_holds_on_index_timestamps(log_mode_project) -> No
 
     with pytest.raises(CampaignError, match="predates campaign creation"):
         add_run_to_campaign(None, campaign_id, "early-run", catalog_dir=catalog_dir, cwd=workspace)
+
+
+def test_tmp_fragment_or_id_prefix_gets_no_import_hint(log_mode_project) -> None:
+    """Only an exact `run_<id>.parquet` fragment means "not imported yet"."""
+    workspace, catalog_dir = log_mode_project
+    campaign_id = _create(workspace, catalog_dir, "exploration")
+    write_run(_make_run("full-run-id", datetime.now(UTC)), catalog_dir)
+    tmp_run = _make_run("tmp-run", datetime.now(UTC))
+    write_run(tmp_run, catalog_dir)
+    frag = catalog_dir / "runs" / "proj" / "run_tmp-run.parquet"
+    frag.rename(frag.with_name("run_tmp-run.tmp.parquet"))
+
+    for run_id in ("full-run", "tmp-run"):
+        result = campaign_add_tool(
+            run_id=run_id, campaign_id=campaign_id, catalog_dir=str(catalog_dir)
+        )
+        assert result.get("ok") is False
+        assert result["error"] == f"Run not found: {run_id}"
+
+
+def test_cool_only_campaign_names_import_legacy(log_mode_project) -> None:
+    workspace, catalog_dir = log_mode_project
+    _emit_run(workspace, "run-1", datetime.now(UTC))
+    cool = Campaign(
+        id="99999999-9999-9999-9999-999999999999",
+        project_slug="proj",
+        name="synced",
+        mode="exploration",
+        started_at=datetime.now(UTC).isoformat(),
+    )
+    write_campaign_cool(cool, catalog_dir)
+
+    result = campaign_add_tool(run_id="run-1", campaign_id=cool.id, catalog_dir=str(catalog_dir))
+
+    assert result.get("ok") is False
+    assert "bth migrate --import-legacy" in result["error"]
+
+
+def test_flag_off_without_bathos_db_is_a_clean_error(tmp_path: Path) -> None:
+    catalog_dir = tmp_path / "legacy_catalog"
+    catalog_dir.mkdir()
+
+    result = campaign_add_tool(run_id="r", campaign_id="c", catalog_dir=str(catalog_dir))
+
+    assert result.get("ok") is False
+    assert "error" in result

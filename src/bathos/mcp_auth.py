@@ -70,7 +70,11 @@ def token_required() -> bool:
 
     False only over stdio, unless `BTH_MCP_REQUIRE_TOKEN=1` forces the check.
     """
-    if os.environ.get("BTH_MCP_REQUIRE_TOKEN") == "1":
+    value = os.environ.get("BTH_MCP_REQUIRE_TOKEN", "").strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value not in ("", "0", "false", "no", "off"):
+        # An unrecognised value is an attempt to opt in; fail closed.
         return True
     return not _stdio_transport
 

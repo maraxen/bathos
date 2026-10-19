@@ -4358,11 +4358,21 @@ def campaign_add_tool(
 
     cat_dir = _get_catalog_dir(catalog_dir or None)
     from bathos.campaigns import connect_catalog_db, prepare_catalog_for_conclude
+    from bathos.runlog.mode import is_log_mode
 
     prepare_catalog_for_conclude(cat_dir)
-    # None after cut-over once `bathos.db` is renamed away; add_run_to_campaign
-    # then reads the folded index itself and writes events only (debt #2841).
-    db = connect_catalog_db(cat_dir, read_only=False)
+    # After cut-over add_run_to_campaign reads the folded index itself and
+    # writes events only, so the frozen `bathos.db` is never opened or locked
+    # (debt #2841).
+    db = None
+    if not is_log_mode(cat_dir):
+        db = connect_catalog_db(cat_dir, read_only=False)
+        if db is None:
+            return {
+                "ok": False,
+                "error": f"Catalog database not found at {cat_dir / 'bathos.db'}; "
+                "run `bth compact` first",
+            }
     try:
         add_run_to_campaign(db, campaign_id, run_id, catalog_dir=cat_dir)
         return {
@@ -5117,5 +5127,7 @@ def mcp_server():
     """
     init_server_telemetry()
     # The caller owns this process, so write tools need no token (debt #2841).
+    # Pin the transport: a bare run() follows FASTMCP_TRANSPORT, which could
+    # serve HTTP while the process is marked as stdio.
     mark_stdio_transport()
-    app.run()
+    app.run(transport="stdio")

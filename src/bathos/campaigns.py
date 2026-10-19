@@ -376,7 +376,20 @@ def _unimported_legacy_run(catalog_dir: Path | None, run_id: str) -> bool:
     """
     if catalog_dir is None:
         return False
-    return any(Path(catalog_dir).glob(f"runs/*/run_{run_id}*.parquet"))
+    from bathos.catalog import iter_run_fragments
+
+    name = f"run_{run_id}.parquet"
+    return any(f.name == name for f in iter_run_fragments(Path(catalog_dir) / "runs"))
+
+
+def _unimported_legacy_campaign(catalog_dir: Path | None, campaign_id: str) -> bool:
+    """True if `campaign_id` exists only as a cool campaign JSON (debt #2841)."""
+    if catalog_dir is None:
+        return False
+    return any(
+        c.id == campaign_id or c.id.startswith(campaign_id)
+        for c in read_cool_campaigns(catalog_dir)
+    )
 
 
 def _add_run_to_campaign_impl(
@@ -392,9 +405,20 @@ def _add_run_to_campaign_impl(
     log_mode = current_mode()
     # Flag on: the cool campaign JSONs were imported at cut-over and new
     # campaigns are events only, so the index is the sole source of ids.
-    campaign_id = _resolve_campaign_id(
-        db, campaign_id, catalog_dir=None if log_mode else catalog_dir
-    )
+    try:
+        campaign_id = _resolve_campaign_id(
+            db, campaign_id, catalog_dir=None if log_mode else catalog_dir
+        )
+    except CampaignError as e:
+        if log_mode and "not found" in str(e) and _unimported_legacy_campaign(
+            catalog_dir, campaign_id
+        ):
+            raise CampaignError(
+                f"Campaign not found in the log index: {campaign_id}. It exists only as a "
+                "legacy cool campaign JSON (synced from a host that is not cut over, or "
+                "written by an older bathos); run `bth migrate --import-legacy`, then retry."
+            ) from e
+        raise
     # Flag on: events only -- the cool->warm ingest is a legacy write (spec "Mode").
     if catalog_dir is not None and not log_mode:
         ingest_cool_campaigns(db, catalog_dir)

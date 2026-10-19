@@ -257,9 +257,24 @@ class TestStdioTransportIsExempt:
         import bathos.mcp as mcp_mod
 
         monkeypatch.setattr(mcp_mod, "init_server_telemetry", lambda: None)
-        monkeypatch.setattr(mcp_mod.app, "run", lambda: None)
+        calls: list[dict] = []
+        monkeypatch.setattr(mcp_mod.app, "run", lambda **kw: calls.append(kw))
         assert token_required() is True
         mcp_mod.mcp_server()
+        assert token_required() is False
+        # Pinned, so FASTMCP_TRANSPORT cannot serve HTTP while marked as stdio.
+        assert calls == [{"transport": "stdio"}]
+
+    @pytest.mark.usefixtures("stdio")
+    @pytest.mark.parametrize("value", ["1", "true", "YES", "on", "bogus"])
+    def test_require_token_env_spellings_turn_the_check_on(self, monkeypatch, value):
+        monkeypatch.setenv("BTH_MCP_REQUIRE_TOKEN", value)
+        assert token_required() is True
+
+    @pytest.mark.usefixtures("stdio")
+    @pytest.mark.parametrize("value", ["", "0", "false", "no", "off"])
+    def test_require_token_env_off_spellings_keep_stdio_exempt(self, monkeypatch, value):
+        monkeypatch.setenv("BTH_MCP_REQUIRE_TOKEN", value)
         assert token_required() is False
 
     @pytest.mark.usefixtures("stdio")
