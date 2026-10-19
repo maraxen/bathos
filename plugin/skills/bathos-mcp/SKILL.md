@@ -43,8 +43,11 @@ use `result.get("ok", False)` rather than indexing.
 
 Mutating tools (`run`, `init`, `compact`, `archive`, `sync`, `repair`, `attestation_register`, the
 scaffold/register/conclude family, `blast_radius_assess`/`blast_radius_clear`, `claim_author`/
-`new_experiment`, and others) require a `token=` parameter matching the local `~/.bth/mcp_token`.
-A missing or invalid token raises `auth_error`.
+`new_experiment`, and others) take a `token=` parameter, which is **not needed over stdio**, the
+transport `bth-mcp` always serves today: the caller owns the server process, so do not read
+`~/.bth/mcp_token` to call them (debt #2841). The check applies when the tools are served any
+other way, or when `BTH_MCP_REQUIRE_TOKEN=1` is set; then `token=` must match
+`~/.bth/mcp_token`, and a missing or invalid token raises `auth_error`.
 
 ## BathosErrorCode Values (24 total)
 

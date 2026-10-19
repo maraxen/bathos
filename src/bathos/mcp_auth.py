@@ -30,6 +30,18 @@ token file that only the local OS user (i.e. someone already inside the
 stdio trust boundary) can read. It is not, and is not meant to be, a
 substitute for real bearer-token auth in a genuinely multi-tenant/networked
 deployment.
+
+## Stdio is exempt (debt #2841)
+
+Agent sessions run under an access guard that will not let them read
+`~/.bth/mcp_token`, so with the check always on, no agent could call any
+write tool (`run`, `campaign_add`, `claim_register`, ...), while the
+equivalent `bth` CLI commands needed no token at all. Over stdio the
+caller already owns the server process, which is exactly the trust boundary
+above, so `bth-mcp`'s stdio entry point calls `mark_stdio_transport()` and
+the check is skipped. It still applies when the tools are served any other
+way (nothing marks the transport), and `BTH_MCP_REQUIRE_TOKEN=1` forces it
+back on even over stdio.
 """
 
 from __future__ import annotations
@@ -42,6 +54,25 @@ from pathlib import Path
 
 class McpAuthError(Exception):
     """Raised when a write-verb MCP tool call carries a missing/invalid token."""
+
+
+_stdio_transport = False
+
+
+def mark_stdio_transport() -> None:
+    """Record that this process serves MCP over stdio (see module docstring)."""
+    global _stdio_transport
+    _stdio_transport = True
+
+
+def token_required() -> bool:
+    """Whether write-verb tools must carry a valid token in this process.
+
+    False only over stdio, unless `BTH_MCP_REQUIRE_TOKEN=1` forces the check.
+    """
+    if os.environ.get("BTH_MCP_REQUIRE_TOKEN") == "1":
+        return True
+    return not _stdio_transport
 
 
 def token_path() -> Path:

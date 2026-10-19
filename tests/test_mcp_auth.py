@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from bathos import mcp_auth
 from bathos.errors import BathosErrorCode
 from bathos.mcp import (
     claim_attest_parity,
@@ -47,7 +48,7 @@ from bathos.mcp import (
     mcp_run_tool,
     mcp_sync_tool,
 )
-from bathos.mcp_auth import check_token, get_or_create_token, token_path
+from bathos.mcp_auth import check_token, get_or_create_token, token_path, token_required
 
 # All 19 write-verb MCP tools gated with @require_write_token (debt #619).
 # Kept as an explicit enumeration (rather than introspecting mcp.py) so this
@@ -100,6 +101,9 @@ def isolated_token_path(tmp_path: Path, monkeypatch):
     real ~/.bth/mcp_token, and each test starts with no token file."""
     token_file = tmp_path / "mcp_token"
     monkeypatch.setenv("BTH_MCP_TOKEN_PATH", str(token_file))
+    # Tools called directly (not through the stdio server) keep the check on.
+    monkeypatch.setattr(mcp_auth, "_stdio_transport", False)
+    monkeypatch.delenv("BTH_MCP_REQUIRE_TOKEN", raising=False)
     return token_file
 
 
@@ -239,3 +243,49 @@ class TestReadOnlyToolsRemainUngated:
         assert result.get("error_code") != BathosErrorCode.AUTH_ERROR.value, (
             f"{tool.__name__} unexpectedly required a token"
         )
+
+
+class TestStdioTransportIsExempt:
+    """Debt #2841: agent sessions cannot read ~/.bth/mcp_token, so over stdio
+    (where the caller owns the server process) write tools need no token."""
+
+    @pytest.fixture
+    def stdio(self, monkeypatch):
+        monkeypatch.setattr(mcp_auth, "_stdio_transport", True)
+
+    def test_mcp_server_marks_stdio_transport(self, monkeypatch):
+        import bathos.mcp as mcp_mod
+
+        monkeypatch.setattr(mcp_mod, "init_server_telemetry", lambda: None)
+        monkeypatch.setattr(mcp_mod.app, "run", lambda: None)
+        assert token_required() is True
+        mcp_mod.mcp_server()
+        assert token_required() is False
+
+    @pytest.mark.usefixtures("stdio")
+    @pytest.mark.parametrize("tool", WRITE_TOOLS, ids=lambda t: t.__name__)
+    def test_every_write_tool_is_not_auth_blocked_without_token(self, tool):
+        result = asyncio.run(tool())
+        assert result.get("error_code") != BathosErrorCode.AUTH_ERROR.value, (
+            f"{tool.__name__} was auth-blocked over stdio: {result}"
+        )
+
+    @pytest.mark.usefixtures("stdio")
+    def test_anchor_insert_without_token_succeeds(self, tmp_catalog):
+        result = asyncio.run(
+            mcp_anchor_insert_tool(
+                path="fig.png", sha256="a" * 64, kind="figure", catalog_dir=str(tmp_catalog)
+            )
+        )
+        assert result["ok"] is True, result
+
+    @pytest.mark.usefixtures("stdio")
+    def test_require_token_env_forces_the_check(self, monkeypatch, tmp_catalog):
+        monkeypatch.setenv("BTH_MCP_REQUIRE_TOKEN", "1")
+        result = asyncio.run(
+            mcp_anchor_insert_tool(
+                path="fig.png", sha256="a" * 64, kind="figure", catalog_dir=str(tmp_catalog)
+            )
+        )
+        assert result["ok"] is False
+        assert result["error_code"] == BathosErrorCode.AUTH_ERROR.value

@@ -48,7 +48,7 @@ from bathos.export import ExportError
 from bathos.figure_registry import FigureEntrySchemaError, register_figure_entry
 from bathos.index import connect_read
 from bathos.init import init_project
-from bathos.mcp_auth import McpAuthError, check_token
+from bathos.mcp_auth import McpAuthError, check_token, mark_stdio_transport, token_required
 from bathos.prereg import GateError
 from bathos.progress import progress_path_for, read_progress
 from bathos.query import (
@@ -206,6 +206,9 @@ def traced_tool(fn):
 def require_write_token(fn):
     """Require a valid shared-secret MCP token on a write-verb tool (debt #619).
 
+    Skipped when `bth-mcp` serves over stdio unless `BTH_MCP_REQUIRE_TOKEN=1`
+    (debt #2841; see `bathos.mcp_auth.token_required`).
+
     Applied to every mutating MCP tool (anchor_insert, attestation_register,
     figure_entry_register, run, init, compact, archive, sync, repair, the
     scaffold/register/conclude family, etc. — see mcp_auth module docstring
@@ -226,10 +229,11 @@ def require_write_token(fn):
 
     @functools.wraps(fn)
     async def wrapper(*args, **kwargs):
-        if not check_token(kwargs.get("token", "")):
+        if token_required() and not check_token(kwargs.get("token", "")):
             raise McpAuthError(
-                "Missing or invalid MCP write token. Write-verb MCP tools require "
-                "token= to match the local ~/.bth/mcp_token file (debt #619)."
+                "Missing or invalid MCP write token. Outside the stdio server (or with "
+                "BTH_MCP_REQUIRE_TOKEN=1), write-verb MCP tools require token= to match "
+                "the local ~/.bth/mcp_token file (debt #619, #2841)."
             )
         return await fn(*args, **kwargs)
 
@@ -704,7 +708,7 @@ def blast_radius_assess_tool(
 ) -> dict:
     """Assess which runs a bug/fix implicates (backlog #4551/#4552; real).
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619) at the MCP
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841) at the MCP
     wrapper layer — see mcp_blast_radius_assess_tool. Gated because flag=True by
     default performs a durable ledger write (security-audit finding, PR #54).
 
@@ -788,7 +792,7 @@ def blast_radius_clear_tool(
 ) -> dict:
     """Manually clear a blast-radius flag (backlog #4551, AC-9; real).
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619) at the MCP
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841) at the MCP
     wrapper layer — see mcp_blast_radius_clear_tool.
 
     Args:
@@ -2563,7 +2567,7 @@ async def mcp_anchor_insert_tool(
 ) -> dict:
     """Anchor a sidecar by (path, sha256) into the catalog (S2 write seam; real).
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
     return anchor_insert_tool(
         path=path,
         sha256=sha256,
@@ -2622,7 +2626,7 @@ async def mcp_figure_entry_register_tool(
 ) -> dict:
     """Register a typed figure_entry, anchored by asset_sha256 (S7 write seam; real).
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
     return figure_entry_register_tool(
         asset_sha256=asset_sha256,
         sidecar_ref=sidecar_ref,
@@ -2648,7 +2652,7 @@ async def mcp_attestation_scaffold_tool(
     """Scaffold a new attestation.bth.toml template (S4; real; separate kind from
     `bath.claim` — see gate #3488).
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
     return attestation_scaffold_tool(kind=kind, workspace_root=workspace_root, label=label)
 
 
@@ -2673,7 +2677,7 @@ async def mcp_attestation_register_tool(
     """Register an attestation file: anchor it by its own SHA256 (S4; real; durable by
     default via DurableAnchorStore).
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
     return attestation_register_tool(path=path, catalog_dir=catalog_dir, campaign_id=campaign_id)
 
 
@@ -2696,7 +2700,7 @@ async def mcp_graduate_product_tool(
     exists for content_hash at the requested min_strength — the ratchet invariant
     (bathos.trust_ledger.graduate_product's own docstring).
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
     return graduate_product_tool(
         content_hash=content_hash,
         attestation_ref=attestation_ref,
@@ -2725,7 +2729,7 @@ async def mcp_blast_radius_assess_tool(
     """Assess which runs a bug/fix implicates, then flag + propagate to
     campaign/claim records (backlog #4551/#4552).
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619) — gated because
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841) — gated because
     flag=True by default performs a durable ledger write (security-audit finding,
     PR #54: this was previously the only mutating tool in this file without the gate)."""
     return blast_radius_assess_tool(
@@ -2752,7 +2756,7 @@ async def mcp_blast_radius_clear_tool(
 ) -> dict:
     """Manually clear a blast-radius flag (backlog #4551, AC-9).
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
     return blast_radius_clear_tool(
         catalog_dir=catalog_dir, entity_type=entity_type, entity_id=entity_id, reason=reason
     )
@@ -2780,7 +2784,7 @@ async def mcp_compact_tool(
 ) -> dict:
     """Compact cool-tier Parquet to warm-tier DuckDB.
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
     return compact_tool(catalog_dir=catalog_dir)
 
 
@@ -2794,7 +2798,7 @@ async def mcp_archive_tool(
 ) -> dict:
     """Archive warm-tier DuckDB to cold-tier Parquet.
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
     # `keep_cool` used to be declared here and forwarded to archive_tool(), which
     # has no such parameter — so every authenticated call raised TypeError, which
     # @traced_tool shaped into an ok=False envelope rather than letting it crash.
@@ -2821,7 +2825,7 @@ async def mcp_archive_artifact_tool(
 ) -> dict:
     """Archive a script + its sidecar + its tracked outputs (stub-in-place, git-native).
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
     return archive_artifact_tool(
         script_path=script_path,
         project_root=project_root,
@@ -2847,7 +2851,7 @@ async def mcp_restore_tool(
 ) -> dict:
     """Restore a previously archived script+output bundle.
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
     return restore_tool(
         item_id=item_id,
         project_root=project_root,
@@ -2871,7 +2875,7 @@ async def mcp_reap_tool(
 ) -> dict:
     """Reap orphaned runs by marking them abandoned.
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
     return reap_tool(
         catalog_dir=catalog_dir,
         older_than_h=older_than_h,
@@ -2919,7 +2923,7 @@ async def mcp_sync_tool(
 ) -> dict:
     """Sync catalog to/from remote.
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
     return sync_tool(catalog_dir=catalog_dir, remote_name=remote_name, pull=pull)
 
 
@@ -2937,7 +2941,7 @@ async def mcp_init_tool(
 ) -> dict:
     """Initialize project with bathos, or retrofit a project id (D7).
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
     return init_tool(
         project_root=project_root,
         catalog_dir=catalog_dir,
@@ -2957,7 +2961,7 @@ async def mcp_log_restore_tool(
 ) -> dict:
     """Restore a project's run log from its mirror (spec 260925 D7, AC-14, AC-27).
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
     return log_restore_tool(project_root=project_root)
 
 
@@ -2979,7 +2983,7 @@ async def mcp_run_tool(
 ) -> dict:
     """Run a script and record provenance.
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
     return run_tool(
         script_path=script_path,
         args=args,
@@ -3009,7 +3013,7 @@ async def mcp_campaign_create_tool(
 ) -> dict:
     """Create a new experiment campaign.
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
     return campaign_create_tool(
         name=name,
         mode=mode,
@@ -3063,7 +3067,7 @@ async def mcp_campaign_conclude_tool(
 ) -> dict:
     """Conclude a campaign with an outcome label.
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
     return campaign_conclude_tool(
         campaign_id=campaign_id,
         outcome_label=outcome_label,
@@ -3308,7 +3312,7 @@ async def postmortem_scaffold(
 
     Pass exactly one of run_id / campaign_id. Returns the path where the template was written.
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619).
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841).
     """
     return postmortem_scaffold_tool(
         run_id=run_id,
@@ -3462,7 +3466,7 @@ async def claim_scaffold(
 
     Returns the path where the template was written.
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619).
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841).
     """
     return claim_scaffold_tool(
         campaign_id=campaign_id, catalog_dir=catalog_dir, workspace_root=workspace_root
@@ -3644,7 +3648,7 @@ async def claim_register(
 ) -> dict:
     """Register a claim TOML file with a campaign (path + SHA256 anchor).
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
     return claim_register_tool(
         path, campaign_id, catalog_dir=catalog_dir, workspace_root=workspace_root, force=force
     )
@@ -3662,7 +3666,8 @@ async def gate_stamp(
     """Record a self-attested pass/fail for a BP-2 synthetic-recovery gate at current git HEAD.
 
     bathos does not run the test itself — run your project's own invariant test first, then
-    stamp the result here. Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    stamp the result here.
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
     return gate_stamp_tool(gate_name, result, workspace_root=workspace_root)
 
 
@@ -3692,7 +3697,7 @@ async def claim_attest_parity(
     Wraps attest_parity(): validates the run, updates the claim file atomically,
     and re-anchors the campaign claim_sha256 in the warm catalog.
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619).
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841).
     """
     return campaign_attest_parity_tool(
         campaign_id=campaign_id,
@@ -3935,7 +3940,7 @@ async def claim_author(
     (a document already exists -- pass force=true to overwrite). Call `doc_schema` for the
     field list.
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619).
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841).
     """
     return claim_author_tool(
         claim=claim,
@@ -4056,7 +4061,7 @@ async def new_experiment(
     driving bathos through MCP had to hand-author `<stem>.bth.toml` from memory -- the
     exact situation the structured authoring layer exists to remove.
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619).
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841).
     """
     return new_experiment_tool(
         name=name, workspace_root=workspace_root, force=force, mode=mode, workload=workload
@@ -4352,12 +4357,12 @@ def campaign_add_tool(
         return {"error": "campaign_id parameter is required"}
 
     cat_dir = _get_catalog_dir(catalog_dir or None)
-    import duckdb
-
-    from bathos.campaigns import prepare_catalog_for_conclude
+    from bathos.campaigns import connect_catalog_db, prepare_catalog_for_conclude
 
     prepare_catalog_for_conclude(cat_dir)
-    db = duckdb.connect(str(cat_dir / "bathos.db"))
+    # None after cut-over once `bathos.db` is renamed away; add_run_to_campaign
+    # then reads the folded index itself and writes events only (debt #2841).
+    db = connect_catalog_db(cat_dir, read_only=False)
     try:
         add_run_to_campaign(db, campaign_id, run_id, catalog_dir=cat_dir)
         return {
@@ -4369,7 +4374,8 @@ def campaign_add_tool(
     except CampaignError as e:
         return {"ok": False, "error": str(e)}
     finally:
-        db.close()
+        if db is not None:
+            db.close()
 
 
 @cisternal.tool(registry="bathos-cli", name="campaign_show", cli_group="campaign", cli_name="show")
@@ -4563,7 +4569,7 @@ async def mcp_campaign_add_tool(
 ) -> dict:
     """Add a run to a campaign.
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619)."""
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
     return campaign_add_tool(run_id=run_id, campaign_id=campaign_id, catalog_dir=catalog_dir)
 
 
@@ -4711,7 +4717,7 @@ async def mcp_repair_tool(
     Returns:
         JSON dict with manifest (actions and metadata) or error
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619) — including
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841) — including
     for dry_run=True scans, since the same tool can also apply real changes.
     """
     return repair_tool(
@@ -4741,7 +4747,7 @@ async def mcp_migrate_to_log_tool(
     docstring — the empty `writers.lock` mutex file may still be created) —
     rejected together with `accept_residual`.
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619) — this
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841) — this
     can mutate the real catalog (pulls remotes, reaps, and can rename
     bathos.db to bathos.db.frozen) unless dry_run=True, in which case it
     writes no data files (only the empty writers.lock mutex, if absent) but
@@ -4857,7 +4863,7 @@ async def mcp_consolidate_catalog_tool(
 ) -> dict:
     """MCP wrapper for `consolidate_catalog_tool` — see its docstring.
 
-    Requires token= matching the local ~/.bth/mcp_token (debt #619) — this
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841) — this
     can write into the real catalog (the destination) unless dry_run=True,
     like every other write-verb tool that also has a dry-run mode.
 
@@ -5110,4 +5116,6 @@ def mcp_server():
     Called by pyproject.toml entry point: bth-mcp
     """
     init_server_telemetry()
+    # The caller owns this process, so write tools need no token (debt #2841).
+    mark_stdio_transport()
     app.run()

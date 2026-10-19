@@ -1154,6 +1154,41 @@ def test_add_run_to_campaign_flag_on_emits_threshold_set_and_run_added(
         # Only now: in log mode compact() is an ingest (PR #111), so both bootstrap compacts
         # above must run with the flag off.
         monkeypatch.setenv("BTH_LOG_MODE", "1")
+        # Flag on, add_run_to_campaign reads the folded index (debt #2841), so
+        # record the same campaign and run as events, as the cut-over import would.
+        from dataclasses import asdict
+
+        from bathos.campaigns import Campaign
+        from bathos.runlog.emit import emit_event, run_event_data
+        from bathos.runlog.ingest import run_ingest
+
+        campaign = Campaign(
+            id=campaign_id,
+            project_slug="prolix",
+            name="Seq",
+            mode="sequential",
+            started_at=datetime.now(UTC).isoformat(),
+        )
+        emit_event(
+            kind="campaign.created",
+            entity=[campaign_id],
+            data=asdict(campaign),
+            cwd=tmp_catalog.parent,
+        )
+        emit_event(
+            kind="run.started",
+            entity=[run.id],
+            data=run_event_data(run),
+            cwd=tmp_catalog.parent,
+            hard_fail=True,
+        )
+        emit_event(
+            kind="run.finished",
+            entity=[run.id],
+            data=run_event_data(run),
+            cwd=tmp_catalog.parent,
+        )
+        run_ingest(tmp_catalog)
         add_run_to_campaign(
             db, campaign_id, run.id, catalog_dir=tmp_catalog, cwd=tmp_catalog.parent
         )
