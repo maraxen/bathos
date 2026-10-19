@@ -105,14 +105,6 @@ ALLOWLIST: dict[tuple[str, str], str] = {
     ("checker.py", "_legacy_write"): (
         "output_metadata backfill UPDATE; already named for its flag-off-only role"
     ),
-    ("mcp.py", "campaign_attest_parity_tool"): (
-        "opens db for claim.attest_parity(), which flag-gates its warm UPDATE "
-        "via emit_or_legacy"
-    ),
-    ("mcp.py", "_claim_register_sync"): (
-        "opens db for claim.register_claim(), which flag-gates its warm writes "
-        "via emit_or_legacy/unit_of_work"
-    ),
 }
 
 
