@@ -1,9 +1,8 @@
 ---
 name: bathos-blast-radius
 description: Trace which past runs, campaigns, and claims a bug fix implicates — blast-radius anchors (commit, commit-range, file, dependency), the blast_radius_ledger flag/clear/propagate flow, and the shadow-mode git-hook trigger that calibrates before it ever acts
-triggers: [blast-radius, blast_radius_assess, blast_radius_clear, get_blast_radius_status, blast_radius_ledger, blast-status, shadow-log, install-hook, shadow-check, shadow_trigger]
+when_to_use: 'Triggers: bth blast-radius, blast_radius_assess, blast_radius_ledger, shadow-check, install-hook, query blast-status, shadow-log, blast-radius, blast_radius_clear, get_blast_radius_status, blast-status, shadow_trigger.'
 ---
-
 # bathos-blast-radius
 
 **30-second mental model:** a bug is found or fixed in commit/file X — which past

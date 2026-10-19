@@ -1,9 +1,8 @@
 ---
 name: bathos-campaigns
 description: Campaigns, figure manifests, lineage/citation, postmortems, and claim-tier pre-registration for confirmatory bathos campaigns
-triggers: [bth campaign, claim, union gate, figure manifest, postmortem, bth lineage, bth cite, maraxiom, confirmatory campaign]
+when_to_use: 'Triggers: bth campaign, claim, union gate, figure manifest, postmortem, bth lineage, bth cite, maraxiom, confirmatory campaign.'
 ---
-
 # bathos-campaigns
 
 Grouping runs into campaigns, registering falsifiable claims for confirmatory campaigns, and the lineage/citation/postmortem tooling that closes a campaign out. Assumes the core run-tracking and sidecar workflow from **using-bathos**.

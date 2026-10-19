@@ -1,11 +1,7 @@
 ---
 name: bathos-mcp
 description: bathos MCP tool integration contract — error envelope shape, BathosErrorCode values, and caller patterns
-triggers:
-  - bathos mcp
-  - BathosErrorCode
-  - error envelope
-  - validation_ok
+when_to_use: "Triggers: bathos mcp, BathosErrorCode, error envelope, validation_ok, mcp tool integration, bth-mcp."
 ---
 # bathos-mcp
 

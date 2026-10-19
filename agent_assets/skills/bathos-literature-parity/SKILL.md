@@ -1,9 +1,8 @@
 ---
 name: bathos-literature-parity
 description: Validating a reimplemented baseline against a published method before trusting it as a claim-tier confound control
-triggers: [literature parity, reimplemented baseline, parity.bth.toml, reference_parity, blind reconstruction, adversarial refutation]
+when_to_use: 'Triggers: literature parity, reimplemented baseline, parity.bth.toml, reference_parity, blind reconstruction, adversarial refutation.'
 ---
-
 # bathos-literature-parity
 
 When you reimplement a method from a published paper — especially one that publishes no reference code — the reimplementation can silently diverge from the described method, confounding any downstream comparison (`[confounds.reference_parity]` in claim-tier language, see **bathos-campaigns**). A unit test cannot catch this: the reimplemented method runs, passes internal checks, and produces plausible numbers. This skill documents bathos's structured validation protocol.

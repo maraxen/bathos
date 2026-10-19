@@ -1,9 +1,8 @@
 ---
 name: bathos-trust-ledger
 description: Promote products via the trust ledger — attestation TOML, PASS-before-promote ratchet, trust states, readback trio, pin freshness
-triggers: [graduate_product, register_attestation, resolve_pin, get_trust_state, query_attestation, list_candidates, GRADUATION_REFUSED, GraduationRefused, oracle_match, repro_floor, attestation.bth.toml, trust_state]
+when_to_use: 'Triggers: graduate_product, register_attestation, resolve_pin, get_trust_state, query_attestation, list_candidates, GRADUATION_REFUSED, GraduationRefused, oracle_match, repro_floor, attestation.bth.toml, trust_state.'
 ---
-
 # bathos-trust-ledger
 
 **30-second mental model:** every product is identified by its `content_hash` (a sha256). Products sit in one of three trust states — `unknown`, `candidate`, `promoted`. The ONLY way to `promoted` is `bathos.trust_ledger.graduate_product`, which refuses (`GRADUATION_REFUSED`) unless a **PASS** attestation for that `content_hash` already exists in the catalog. Attestations are TOML sidecars anchored durably by their OWN sha256, pointing AT the product via their `attested.content_hash`. Registering an attestation promotes nothing; graduating without a registered PASS attestation is refused.

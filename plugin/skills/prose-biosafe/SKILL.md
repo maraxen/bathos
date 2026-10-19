@@ -1,13 +1,7 @@
 ---
 name: prose-biosafe
 description: Precise, field-standard terminology for biology-context prose in legitimate protein engineering and therapeutic projects, so docs do not trip biosecurity-classifier false positives — use when writing or reviewing docs, docstrings, research notes, bathos sidecar hypothesis fields or memory entries about enzyme engineering, continuous selection, binder design or variant libraries, and when running, extending or adopting a project prose linter (just prose-lint, scripts/prose_linter.py, scripts/lint_prose_biosafe.sh)
-triggers:
-  - prose-lint
-  - prose-biosafe
-  - biosafe
-  - classifier false positive
-  - lint_prose_biosafe
-  - prose_linter
+when_to_use: "Triggers: prose-lint, prose-biosafe, biosafe, classifier false positive, lint_prose_biosafe, prose_linter, terminology, mutant, gain-of-function, dead control, destabilized, directed evolution."
 ---
 # prose-biosafe
 

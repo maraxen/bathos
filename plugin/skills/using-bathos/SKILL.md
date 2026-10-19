@@ -1,19 +1,7 @@
 ---
 name: using-bathos
 description: Experiment tracking with bathos — run tracking, sidecar pre-registration, controls discipline, catalog queries. Use when writing or editing a .bth.toml sidecar or its [outcomes], running `bth run` or `bth submit`, citing or verifying a run (outcome, catalog, `bth sql`, `bth find`, `bth compact`), or deciding whether a metric can be trusted (synthetic positive/negative controls).
-triggers:
-  - bth run
-  - sidecar
-  - .bth.toml
-  - "[outcomes]"
-  - pre-registration
-  - bth compact
-  - bth find
-  - catalog
-  - controls
-  - stage_name
-  - bth init
-  - bth check
+when_to_use: "Triggers: bth run, sidecar, .bth.toml, [outcomes], pre-registration, bth compact, bth find, catalog, controls, stage_name, bth init, bth check, bathos, bth, experiment, run, outcomes, compact, init, lint."
 ---
 # using-bathos
 

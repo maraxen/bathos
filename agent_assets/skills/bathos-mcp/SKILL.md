@@ -1,9 +1,8 @@
 ---
 name: bathos-mcp
 description: bathos MCP tool integration contract — error envelope shape, BathosErrorCode values, and caller patterns
-triggers: [bathos mcp, BathosErrorCode, mcp tool integration, error envelope, validation_ok, bth-mcp]
+when_to_use: 'Triggers: bathos mcp, BathosErrorCode, error envelope, validation_ok, mcp tool integration, bth-mcp.'
 ---
-
 # bathos-mcp
 
 Integration contract for programmatic callers of bathos's MCP server (`bth-mcp`). All bathos MCP tools (registered via the `_WIRED = cisternal.wire(...)` list at the bottom of `mcp.py` — 62 as of this writing, see that file for the current enumerated set) return a typed envelope with consistent structure. Understanding the envelope shape and error codes is essential for robust integrations.

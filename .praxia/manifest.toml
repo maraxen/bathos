@@ -45,47 +45,38 @@ launch = "uvx"
 [[plugin.skills]]
 name     = "using-bathos"
 path     = "agent_assets/skills/using-bathos/SKILL.md"
-triggers = ["bth run", "sidecar", ".bth.toml", "[outcomes]", "pre-registration", "bth compact", "bth find", "catalog", "controls", "stage_name", "bth init", "bth check"]
 
 [[plugin.skills]]
 name     = "bathos-cluster"
 path     = "agent_assets/skills/bathos-cluster/SKILL.md"
-triggers = ["bth submit", "slurm", "sbatch", "myxcel", "bth sync", "bth remote"]
 
 [[plugin.skills]]
 name     = "bathos-campaigns"
 path     = "agent_assets/skills/bathos-campaigns/SKILL.md"
-triggers = ["bth campaign", "claim", "union gate", "figure manifest", "postmortem", "bth lineage", "bth cite"]
 
 [[plugin.skills]]
 name     = "bathos-rigor-gates"
 path     = "agent_assets/skills/bathos-rigor-gates/SKILL.md"
-triggers = ["review_tier", "obligations", "positive_control", "differential", "synthetic_recovery", "bth gate", "negative_check", "bth ref", "campaign_edges", "stats_gates", "capability_probe"]
 
 [[plugin.skills]]
 name     = "bathos-literature-parity"
 path     = "agent_assets/skills/bathos-literature-parity/SKILL.md"
-triggers = ["literature parity", "reimplemented baseline", "parity.bth.toml", "reference_parity"]
 
 [[plugin.skills]]
 name     = "bathos-mcp"
 path     = "agent_assets/skills/bathos-mcp/SKILL.md"
-triggers = ["bathos mcp", "BathosErrorCode", "error envelope", "validation_ok"]
 
 [[plugin.skills]]
 name     = "bathos-trust-ledger"
 path     = "agent_assets/skills/bathos-trust-ledger/SKILL.md"
-triggers = ["graduate_product", "register_attestation", "resolve_pin", "get_trust_state", "query_attestation", "list_candidates", "GRADUATION_REFUSED", "GraduationRefused", "oracle_match", "repro_floor", "attestation.bth.toml", "trust_state"]
 
 [[plugin.skills]]
 name     = "bathos-blast-radius"
 path     = "agent_assets/skills/bathos-blast-radius/SKILL.md"
-triggers = ["bth blast-radius", "blast_radius_assess", "blast_radius_ledger", "shadow-check", "install-hook", "query blast-status", "shadow-log"]
 
 [[plugin.skills]]
 name     = "prose-biosafe"
 path     = "agent_assets/skills/prose-biosafe/SKILL.md"
-triggers = ["prose-lint", "prose-biosafe", "biosafe", "classifier false positive", "lint_prose_biosafe", "prose_linter"]
 
 [[plugin.agents]]
 name  = "experiment-runner"
