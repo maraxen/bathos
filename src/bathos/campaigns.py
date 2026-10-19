@@ -226,8 +226,15 @@ def prepare_catalog_for_conclude(catalog_dir: Path) -> None:
     """Ensure warm rows and campaign_runs membership exist for conclude and threshold checks."""
     from bathos.catalog import read_runs
     from bathos.compact import compact
+    from bathos.runlog.mode import is_log_mode
 
     catalog_dir = Path(catalog_dir)
+    if is_log_mode(catalog_dir):
+        # After cut-over `compact` only folds new log events into the index;
+        # the cool->warm campaign ingest below would write into the frozen
+        # `bathos.db` (debt #2841).
+        compact(catalog_dir)
+        return
     db_path = catalog_dir / "bathos.db"
     cool = read_runs(catalog_dir)
     if not db_path.exists():
@@ -345,10 +352,44 @@ def add_run_to_campaign(
     and `run.started.data.campaign_id`). `cwd` resolves the runlog project/root
     when the flag is on (defaults to `Path.cwd()` via `resolve_log_root`).
     """
-    from bathos.runlog.emit import unit_of_work
+    from bathos.runlog.emit import current_mode, unit_of_work
 
     with unit_of_work(catalog_dir):
+        # Flag on, the legacy `bathos.db` a caller hands in is frozen at
+        # cut-over: campaigns and runs recorded since then live only in the
+        # folded index (debt #2841). Read from the index instead.
+        if catalog_dir is not None and current_mode():
+            read_db = connect_read(catalog_dir)
+            try:
+                return _add_run_to_campaign_impl(read_db, campaign_id, run_id, catalog_dir, cwd=cwd)
+            finally:
+                read_db.close()
         return _add_run_to_campaign_impl(db, campaign_id, run_id, catalog_dir, cwd=cwd)
+
+
+def _unimported_legacy_run(catalog_dir: Path | None, run_id: str) -> bool:
+    """True if `run_id` exists only as a legacy cool fragment (debt #2841).
+
+    After cut-over, a fragment pulled from a host that is not cut over (or
+    written by an older bathos) never reaches the index until
+    `bth migrate --import-legacy` turns it into a `run.imported` event.
+    """
+    if catalog_dir is None:
+        return False
+    from bathos.catalog import iter_run_fragments
+
+    name = f"run_{run_id}.parquet"
+    return any(f.name == name for f in iter_run_fragments(Path(catalog_dir) / "runs"))
+
+
+def _unimported_legacy_campaign(catalog_dir: Path | None, campaign_id: str) -> bool:
+    """True if `campaign_id` exists only as a cool campaign JSON (debt #2841)."""
+    if catalog_dir is None:
+        return False
+    return any(
+        c.id == campaign_id or c.id.startswith(campaign_id)
+        for c in read_cool_campaigns(catalog_dir)
+    )
 
 
 def _add_run_to_campaign_impl(
@@ -361,9 +402,25 @@ def _add_run_to_campaign_impl(
 ) -> None:
     from bathos.runlog.emit import current_mode, emit_or_legacy
 
-    campaign_id = _resolve_campaign_id(db, campaign_id, catalog_dir=catalog_dir)
+    log_mode = current_mode()
+    # Flag on: the cool campaign JSONs were imported at cut-over and new
+    # campaigns are events only, so the index is the sole source of ids.
+    try:
+        campaign_id = _resolve_campaign_id(
+            db, campaign_id, catalog_dir=None if log_mode else catalog_dir
+        )
+    except CampaignError as e:
+        if log_mode and "not found" in str(e) and _unimported_legacy_campaign(
+            catalog_dir, campaign_id
+        ):
+            raise CampaignError(
+                f"Campaign not found in the log index: {campaign_id}. It exists only as a "
+                "legacy cool campaign JSON (synced from a host that is not cut over, or "
+                "written by an older bathos); run `bth migrate --import-legacy`, then retry."
+            ) from e
+        raise
     # Flag on: events only -- the cool->warm ingest is a legacy write (spec "Mode").
-    if catalog_dir is not None and not current_mode():
+    if catalog_dir is not None and not log_mode:
         ingest_cool_campaigns(db, catalog_dir)
     campaign_rows = db.execute(
         "SELECT mode, started_at, stopping_threshold FROM campaigns WHERE id = ?", [campaign_id]
@@ -376,6 +433,12 @@ def _add_run_to_campaign_impl(
         "SELECT timestamp, outcome, sidecar_path FROM runs WHERE id = ?", [run_id]
     ).fetchall()
     if not run_rows:
+        if log_mode and _unimported_legacy_run(catalog_dir, run_id):
+            raise CampaignError(
+                f"Run not found in the log index: {run_id}. It exists only as a legacy "
+                "cool fragment (pulled from a host that is not cut over, or written by an "
+                "older bathos); run `bth migrate --import-legacy`, then retry."
+            )
         raise CampaignError(f"Run not found: {run_id}")
     run_timestamp, run_outcome, run_sidecar_path = run_rows[0]
 
@@ -388,7 +451,12 @@ def _add_run_to_campaign_impl(
         except (ValueError, TypeError):
             campaign_dt = None
 
+        # The index stores `runs.timestamp` as VARCHAR; the legacy warm tier
+        # as TIMESTAMP. Accept both so the ordering check holds in log mode.
         run_dt = run_timestamp if isinstance(run_timestamp, datetime) else None
+        if isinstance(run_timestamp, str):
+            with suppress(ValueError):
+                run_dt = datetime.fromisoformat(run_timestamp)
         if run_dt is not None and run_dt.tzinfo is None:
             run_dt = run_dt.replace(tzinfo=UTC)
 
