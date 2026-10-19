@@ -338,3 +338,53 @@ def test_prepare_for_conclude_uses_the_unit_of_work_mode(
         # If prepare re-read the flag it would now see legacy mode.
         cutover_marker_path(catalog_dir).unlink()
         prepare_catalog_for_conclude(catalog_dir)
+
+
+def test_add_holds_the_campaign_add_lock_from_read_to_emit(
+    log_mode_project, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The add itself takes the lock, so concurrent adds serialise (#2843 item 2)."""
+    import fcntl
+    import os
+
+    import bathos.campaigns as campaigns_mod
+    from bathos.campaigns import campaign_add_lock_path
+
+    workspace, catalog_dir = log_mode_project
+    campaign_id = _create(workspace, catalog_dir, "exploration")
+    _emit_run(workspace, "run-1", datetime.now(UTC))
+    held: list[bool] = []
+    real_impl = campaigns_mod._add_run_to_campaign_impl
+
+    def _probe(*args, **kwargs):
+        fd = os.open(campaign_add_lock_path(catalog_dir), os.O_CREAT | os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            held.append(False)
+        except BlockingIOError:
+            held.append(True)
+        finally:
+            os.close(fd)
+        return real_impl(*args, **kwargs)
+
+    monkeypatch.setattr(campaigns_mod, "_add_run_to_campaign_impl", _probe)
+    add_run_to_campaign(None, campaign_id, "run-1", catalog_dir=catalog_dir, cwd=workspace)
+
+    assert held == [True]
+    assert _members(catalog_dir, campaign_id) == ["run-1"]
+
+
+def test_claim_register_does_not_need_bathos_db(log_mode_project) -> None:
+    """`claim register` reads the index after cut-over (#2843 review)."""
+    from bathos.mcp import _claim_register_sync
+
+    workspace, catalog_dir = log_mode_project
+    (catalog_dir / "bathos.db").rename(catalog_dir / "bathos.db.frozen")
+    campaign_id = _create(workspace, catalog_dir, "exploration")
+
+    result = _claim_register_sync("missing.claim.toml", campaign_id, catalog_dir, workspace)
+
+    assert result["ok"] is False
+    assert "Catalog database not found" not in result["error"]
+    assert not (catalog_dir / "bathos.db").exists()

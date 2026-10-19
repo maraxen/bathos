@@ -2308,9 +2308,6 @@ def campaign_attest_parity_tool(
         return {"error": "parity_run_id parameter is required"}
 
     cat_dir = _get_catalog_dir(catalog_dir or None)
-    db_path = cat_dir / "bathos.db"
-    if not db_path.exists():
-        return {"error": f"Catalog database not found at {db_path}"}
 
     if workspace_root:
         ws = Path(workspace_root).expanduser().resolve()
@@ -2319,22 +2316,27 @@ def campaign_attest_parity_tool(
 
         ws = resolve_workspace().fs_root
 
-    import duckdb
-
+    from bathos.campaigns import connect_catalog_db
     from bathos.claim import attest_parity
+    from bathos.runlog.emit import unit_of_work
 
-    db = duckdb.connect(str(db_path), read_only=False)
-    try:
-        attest_parity(campaign_id, parity_run_id, db, ws, catalog_dir=cat_dir)
-        return {
-            "campaign_id": campaign_id,
-            "parity_run_id": parity_run_id,
-            "message": f"Attested parity run {parity_run_id} on campaign {campaign_id}",
-        }
-    except (ValueError, RuntimeError, FileNotFoundError) as e:
-        return {"error": str(e)}
-    finally:
-        db.close()
+    # After cut-over this is the index, not the frozen `bathos.db`; attest_parity
+    # flag-gates its write via emit_or_legacy (debt #2843).
+    with unit_of_work(cat_dir):
+        db = connect_catalog_db(cat_dir, read_only=False)
+        if db is None:
+            return {"error": f"Catalog database not found at {cat_dir / 'bathos.db'}"}
+        try:
+            attest_parity(campaign_id, parity_run_id, db, ws, catalog_dir=cat_dir)
+            return {
+                "campaign_id": campaign_id,
+                "parity_run_id": parity_run_id,
+                "message": f"Attested parity run {parity_run_id} on campaign {campaign_id}",
+            }
+        except (ValueError, RuntimeError, FileNotFoundError) as e:
+            return {"error": str(e)}
+        finally:
+            db.close()
 
 
 # ============================================================================
@@ -3526,29 +3528,32 @@ def _claim_register_sync(
     force: bool = False,
 ) -> dict:
     """Register a claim; always close the DuckDB write connection."""
-    import duckdb
-
+    from bathos.campaigns import connect_catalog_db
     from bathos.claim import register_claim
+    from bathos.runlog.emit import unit_of_work
 
-    db_path = Path(cat_dir) / "bathos.db"
-    if not db_path.exists():
-        return {"ok": False, "error": _missing_catalog_message(db_path, cat_dir)}
-    db = duckdb.connect(str(db_path), read_only=False)
-    try:
-        register_claim(
-            Path(path), campaign_id, db, workspace_root, force=force, catalog_dir=cat_dir
-        )
-        return {
-            "ok": True,
-            "path": path,
-            "campaign_id": campaign_id,
-            "force": force,
-            "message": f"Registered claim for campaign {campaign_id}",
-        }
-    except (RuntimeError, FileNotFoundError) as e:
-        return {"ok": False, "error": str(e), "error_code": "register_failed"}
-    finally:
-        db.close()
+    # After cut-over this is the index, not the frozen `bathos.db`; register_claim
+    # flag-gates its writes via emit_or_legacy (debt #2843).
+    with unit_of_work(cat_dir):
+        db = connect_catalog_db(Path(cat_dir), read_only=False)
+        if db is None:
+            db_path = Path(cat_dir) / "bathos.db"
+            return {"ok": False, "error": _missing_catalog_message(db_path, cat_dir)}
+        try:
+            register_claim(
+                Path(path), campaign_id, db, workspace_root, force=force, catalog_dir=cat_dir
+            )
+            return {
+                "ok": True,
+                "path": path,
+                "campaign_id": campaign_id,
+                "force": force,
+                "message": f"Registered claim for campaign {campaign_id}",
+            }
+        except (RuntimeError, FileNotFoundError) as e:
+            return {"ok": False, "error": str(e), "error_code": "register_failed"}
+        finally:
+            db.close()
 
 
 @cisternal.tool(registry="bathos-cli", name="claim_register", cli_group="claim", cli_name="register")

@@ -249,17 +249,19 @@ def _fold_pending_events(catalog_dir: Path) -> None:
     """Fold log events not yet in the index before a campaign add reads it.
 
     The previous write's own post-write ingest is best-effort, and library
-    callers and SLURM-written events never trigger one (debt #2843).
+    callers and SLURM-written events never trigger one (debt #2843). Where
+    `run_ingest` is a no-op by design (a SLURM job, `BTH_NO_INGEST=1`) the add
+    reads the index as it stands.
     """
-    from bathos.runlog.ingest import IngestLockTimeout, run_ingest
+    from bathos.runlog.ingest import run_ingest
 
     try:
         # The enclosing unit of work already fixed log mode; don't re-read it.
         run_ingest(catalog_dir, require_log_mode=False, lock_timeout_s=60.0)
-    except IngestLockTimeout as e:
+    except Exception as e:  # noqa: BLE001 -- surfaced to the caller as a CampaignError
         raise CampaignError(
-            f"Could not bring the index up to date before adding to the campaign ({e}); "
-            "retry once the running ingest finishes."
+            f"Could not bring the index up to date before adding to the campaign "
+            f"({type(e).__name__}: {e}); retry, or run `bth compact` to see the ingest error."
         ) from e
 
 
@@ -1586,6 +1588,13 @@ def _conclude_campaign_impl(
         cwd=workspace_root,
     )
     event("campaign.conclude", campaign_id=full_id, verdict=outcome_label)
+
+    if catalog_dir is not None and _current_mode():
+        # Hooks may re-query the catalog and must see the campaign concluded;
+        # the unit-of-work refresh only runs after they return (debt #2843).
+        from bathos.runlog.ingest import ingest_after_write
+
+        ingest_after_write(catalog_dir)
 
     _run_campaign_conclude_hooks(
         db, full_id, outcome_label, catalog_dir, member_ids=precomputed_member_ids
