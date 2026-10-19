@@ -284,7 +284,8 @@ def report_emit_cmd(campaign_id: str) -> None:
 
     cat_dir = catalog_dir()
     prepare_catalog_for_conclude(cat_dir)
-    db = connect_catalog_db(cat_dir, read_only=False)
+    # Report emission only reads the catalog; after cut-over that is the index.
+    db = connect_catalog_db(cat_dir, read_only=True)
     try:
         if db is None:
             print("Catalog database not found; run `bth compact` first", file=sys.stderr)

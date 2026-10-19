@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import fcntl
 import importlib.metadata
 import json
 import logging
+import os
 from collections import defaultdict
-from contextlib import suppress
+from collections.abc import Generator
+from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -182,23 +185,82 @@ def connect_catalog_db(catalog_dir: Path, *, read_only: bool = True):
     "not connected" did for every current caller (`by_campaign`/similar
     lookups over zero rows), which is why no caller needed to change.
 
-    `read_only=False` (writes) is NOT flag-aware here and keeps its own raw
-    `duckdb.connect` (AC-18 allow-list: `campaigns.py`/`connect_catalog_db`)
-    -- this module's own write sites (`create_campaign`, `conclude_campaign`,
-    etc.) flag-gate the actual mutation internally via `emit_or_legacy`, and
-    still need a real legacy connection to write through on their flag-off
-    branch regardless of what this function's read side does.
+    `read_only=False` (writes): flag off, a raw read-write `duckdb.connect`
+    (AC-18 allow-list: `campaigns.py`/`connect_catalog_db`), because this
+    module's write sites (`create_campaign`, `conclude_campaign`, ...) write
+    through it on their flag-off branch. Flag on, those same sites only emit
+    events (`emit_or_legacy`) and read, so this returns the index read view
+    too: cut-over renames `bathos.db` away, and a stray legacy write must
+    fail rather than land in a frozen file (debt #2843).
     """
     path = Path(catalog_dir) / "bathos.db"
-    if read_only:
-        from bathos.runlog.mode import is_log_mode
-
-        if not is_log_mode(catalog_dir) and not path.exists():
-            return None
+    if _log_mode(catalog_dir):
         return connect_read(catalog_dir, read_only=True)
     if not path.exists():
         return None
+    if read_only:
+        return connect_read(catalog_dir, read_only=True)
     return duckdb.connect(str(path), read_only=False)
+
+
+def _log_mode(catalog_dir: Path | None) -> bool:
+    """The flag fixed by the enclosing `unit_of_work`, else a fresh read.
+
+    Inside a unit of work the flag is read once per call tree; re-reading it
+    here could disagree with what the write sites decide (debt #2843).
+    """
+    from bathos.runlog.emit import current_mode, in_unit_of_work
+    from bathos.runlog.mode import is_log_mode
+
+    return current_mode() if in_unit_of_work() else is_log_mode(catalog_dir)
+
+
+def campaign_add_lock_path(catalog_dir: Path) -> Path:
+    return Path(catalog_dir) / "campaign_add.lock"
+
+
+@contextmanager
+def campaign_add_lock(catalog_dir: Path) -> Generator[None]:
+    """Serialise log-mode `campaign add`s on one catalog (debt #2843).
+
+    The add reads the index (threshold, membership) and then emits events
+    based on it. The writers lock is shared, so without this two adds can
+    both read the same index and emit a conflicting `campaign.threshold_set`.
+    Legacy mode got this from `bathos.db`'s exclusive write lock. SLURM jobs
+    skip it, as they skip the writers lock.
+    """
+    if os.environ.get("SLURM_JOB_ID"):
+        yield
+        return
+    path = campaign_add_lock_path(catalog_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def _fold_pending_events(catalog_dir: Path) -> None:
+    """Fold log events not yet in the index before a campaign add reads it.
+
+    The previous write's own post-write ingest is best-effort, and library
+    callers and SLURM-written events never trigger one (debt #2843).
+    """
+    from bathos.runlog.ingest import IngestLockTimeout, run_ingest
+
+    try:
+        # The enclosing unit of work already fixed log mode; don't re-read it.
+        run_ingest(catalog_dir, require_log_mode=False, lock_timeout_s=60.0)
+    except IngestLockTimeout as e:
+        raise CampaignError(
+            f"Could not bring the index up to date before adding to the campaign ({e}); "
+            "retry once the running ingest finishes."
+        ) from e
 
 
 def union_campaign_member_ids(db, campaign_id: str, catalog_dir: Path | None) -> list[str]:
@@ -226,14 +288,15 @@ def prepare_catalog_for_conclude(catalog_dir: Path) -> None:
     """Ensure warm rows and campaign_runs membership exist for conclude and threshold checks."""
     from bathos.catalog import read_runs
     from bathos.compact import compact
-    from bathos.runlog.mode import is_log_mode
 
     catalog_dir = Path(catalog_dir)
-    if is_log_mode(catalog_dir):
-        # After cut-over `compact` only folds new log events into the index;
-        # the cool->warm campaign ingest below would write into the frozen
-        # `bathos.db` (debt #2841).
-        compact(catalog_dir)
+    if _log_mode(catalog_dir):
+        # After cut-over `compact` is only this ingest; the cool->warm
+        # campaign ingest below would write into the frozen `bathos.db`
+        # (debt #2841). Called directly so the mode is not re-read (#2843).
+        from bathos.runlog.ingest import run_ingest
+
+        run_ingest(catalog_dir, require_log_mode=False)
         return
     db_path = catalog_dir / "bathos.db"
     cool = read_runs(catalog_dir)
@@ -357,13 +420,18 @@ def add_run_to_campaign(
     with unit_of_work(catalog_dir):
         # Flag on, the legacy `bathos.db` a caller hands in is frozen at
         # cut-over: campaigns and runs recorded since then live only in the
-        # folded index (debt #2841). Read from the index instead.
+        # folded index (debt #2841). Read from the index instead, current as
+        # of now and with no other add between the read and the emit (#2843).
         if catalog_dir is not None and current_mode():
-            read_db = connect_read(catalog_dir)
-            try:
-                return _add_run_to_campaign_impl(read_db, campaign_id, run_id, catalog_dir, cwd=cwd)
-            finally:
-                read_db.close()
+            with campaign_add_lock(catalog_dir):
+                _fold_pending_events(catalog_dir)
+                read_db = connect_read(catalog_dir)
+                try:
+                    return _add_run_to_campaign_impl(
+                        read_db, campaign_id, run_id, catalog_dir, cwd=cwd
+                    )
+                finally:
+                    read_db.close()
         return _add_run_to_campaign_impl(db, campaign_id, run_id, catalog_dir, cwd=cwd)
 
 

@@ -2088,45 +2088,48 @@ def campaign_create_tool(
     from bathos.campaigns import connect_catalog_db, list_campaigns
     from bathos.catalog import init_catalog
     from bathos.compact import compact
+    from bathos.runlog.emit import unit_of_work
 
-    db = connect_catalog_db(cat_dir, read_only=False)
-    if db is None:
-        init_catalog(cat_dir)
-        compact(cat_dir)
+    # One unit of work: connecting and creating see the same mode (#2843).
+    with unit_of_work(cat_dir):
         db = connect_catalog_db(cat_dir, read_only=False)
-    if db is None:
-        return {"error": f"Catalog database not found at {cat_dir / 'bathos.db'}"}
-    try:
-        existing = [
-            c
-            for c in list_campaigns(db, project_slug=slug, status="open", catalog_dir=cat_dir)
-            if c.name == name
-        ]
-        campaign = create_campaign(
-            db,
-            name=name,
-            project_slug=slug,
-            mode=mode,
-            question=question or None,
-            hypothesis=hypothesis or None,
-            parent_campaign_id=parent_campaign_id or None,
-            catalog_dir=cat_dir,
-        )
-        result = {
-            "campaign_id": campaign.id,
-            "name": campaign.name,
-            "mode": campaign.mode,
-            "status": campaign.status,
-            "started_at": campaign.started_at,
-        }
-        if existing:
-            ids = ", ".join(c.id[:8] for c in existing)
-            result["warning"] = (
-                f"{len(existing)} open campaign(s) named {name!r} already exist: {ids}"
+        if db is None:
+            init_catalog(cat_dir)
+            compact(cat_dir)
+            db = connect_catalog_db(cat_dir, read_only=False)
+        if db is None:
+            return {"error": f"Catalog database not found at {cat_dir / 'bathos.db'}"}
+        try:
+            existing = [
+                c
+                for c in list_campaigns(db, project_slug=slug, status="open", catalog_dir=cat_dir)
+                if c.name == name
+            ]
+            campaign = create_campaign(
+                db,
+                name=name,
+                project_slug=slug,
+                mode=mode,
+                question=question or None,
+                hypothesis=hypothesis or None,
+                parent_campaign_id=parent_campaign_id or None,
+                catalog_dir=cat_dir,
             )
-        return result
-    finally:
-        db.close()
+            result = {
+                "campaign_id": campaign.id,
+                "name": campaign.name,
+                "mode": campaign.mode,
+                "status": campaign.status,
+                "started_at": campaign.started_at,
+            }
+            if existing:
+                ids = ", ".join(c.id[:8] for c in existing)
+                result["warning"] = (
+                    f"{len(existing)} open campaign(s) named {name!r} already exist: {ids}"
+                )
+            return result
+        finally:
+            db.close()
 
 
 @cisternal.tool(registry="bathos-cli", name="campaign_list", cli_group="campaign", cli_name="ls")
@@ -2239,32 +2242,35 @@ def campaign_conclude_tool(
     cat_dir = _get_catalog_dir(catalog_dir or None)
 
     from bathos.campaigns import CampaignError, connect_catalog_db, prepare_catalog_for_conclude
+    from bathos.runlog.emit import unit_of_work
 
-    prepare_catalog_for_conclude(cat_dir)
-    db = connect_catalog_db(cat_dir, read_only=False)
-    if db is None:
-        return {"error": f"Catalog database not found at {cat_dir / 'bathos.db'}"}
-    try:
-        conclude_campaign(
-            db,
-            campaign_id,
-            outcome_label,
-            conclusion or "",
-            workspace_root=(
-                Path(workspace_root).expanduser().resolve() if workspace_root else None
-            ),
-            negative_check=negative_check or None,
-            catalog_dir=cat_dir,
-        )
-        return {
-            "status": "concluded",
-            "campaign_id": campaign_id,
-            "outcome_label": outcome_label,
-        }
-    except CampaignError as e:
-        return {"error": str(e)}
-    finally:
-        db.close()
+    # One unit of work: prepare, connect and conclude see the same mode (#2843).
+    with unit_of_work(cat_dir):
+        prepare_catalog_for_conclude(cat_dir)
+        db = connect_catalog_db(cat_dir, read_only=False)
+        if db is None:
+            return {"error": f"Catalog database not found at {cat_dir / 'bathos.db'}"}
+        try:
+            conclude_campaign(
+                db,
+                campaign_id,
+                outcome_label,
+                conclusion or "",
+                workspace_root=(
+                    Path(workspace_root).expanduser().resolve() if workspace_root else None
+                ),
+                negative_check=negative_check or None,
+                catalog_dir=cat_dir,
+            )
+            return {
+                "status": "concluded",
+                "campaign_id": campaign_id,
+                "outcome_label": outcome_label,
+            }
+        except CampaignError as e:
+            return {"error": str(e)}
+        finally:
+            db.close()
 
 
 @cisternal.tool(
@@ -4358,34 +4364,36 @@ def campaign_add_tool(
 
     cat_dir = _get_catalog_dir(catalog_dir or None)
     from bathos.campaigns import connect_catalog_db, prepare_catalog_for_conclude
-    from bathos.runlog.mode import is_log_mode
+    from bathos.runlog.emit import unit_of_work
 
-    prepare_catalog_for_conclude(cat_dir)
-    # After cut-over add_run_to_campaign reads the folded index itself and
-    # writes events only, so the frozen `bathos.db` is never opened or locked
-    # (debt #2841).
-    db = None
-    if not is_log_mode(cat_dir):
-        db = connect_catalog_db(cat_dir, read_only=False)
-        if db is None:
+    # One unit of work, so the mode is read once for the whole add (#2843).
+    with unit_of_work(cat_dir) as log_mode:
+        # After cut-over add_run_to_campaign folds pending events, reads the
+        # index and writes events only, so the frozen `bathos.db` is never
+        # opened or locked (debts #2841, #2843).
+        db = None
+        if not log_mode:
+            prepare_catalog_for_conclude(cat_dir)
+            db = connect_catalog_db(cat_dir, read_only=False)
+            if db is None:
+                return {
+                    "ok": False,
+                    "error": f"Catalog database not found at {cat_dir / 'bathos.db'}; "
+                    "run `bth compact` first",
+                }
+        try:
+            add_run_to_campaign(db, campaign_id, run_id, catalog_dir=cat_dir)
             return {
-                "ok": False,
-                "error": f"Catalog database not found at {cat_dir / 'bathos.db'}; "
-                "run `bth compact` first",
+                "ok": True,
+                "run_id": run_id,
+                "campaign_id": campaign_id,
+                "message": f"Added run {run_id} to campaign {campaign_id}",
             }
-    try:
-        add_run_to_campaign(db, campaign_id, run_id, catalog_dir=cat_dir)
-        return {
-            "ok": True,
-            "run_id": run_id,
-            "campaign_id": campaign_id,
-            "message": f"Added run {run_id} to campaign {campaign_id}",
-        }
-    except CampaignError as e:
-        return {"ok": False, "error": str(e)}
-    finally:
-        if db is not None:
-            db.close()
+        except CampaignError as e:
+            return {"ok": False, "error": str(e)}
+        finally:
+            if db is not None:
+                db.close()
 
 
 @cisternal.tool(registry="bathos-cli", name="campaign_show", cli_group="campaign", cli_name="show")

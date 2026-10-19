@@ -24,12 +24,13 @@ from bathos.campaigns import (
 )
 from bathos.catalog import write_run
 from bathos.mcp import campaign_add_tool
-from bathos.runlog.emit import emit_event, run_event_data
+from bathos.runlog.emit import emit_event, run_event_data, sidecar_declaration_for_event
 from bathos.runlog.index import connect_read
 from bathos.runlog.ingest import run_ingest
 from bathos.runlog.mode import cutover_marker_path
 from bathos.runlog.project_id import assign_project_id, register_main_root
 from bathos.schema import Run
+from bathos.sidecar import parse_sidecar
 
 from .conftest import make_git_repo, write_bth_toml
 
@@ -216,3 +217,124 @@ def test_flag_off_without_bathos_db_is_a_clean_error(tmp_path: Path) -> None:
 
     assert result.get("ok") is False
     assert "error" in result
+
+
+# Debt #2843: the rest of the campaign write path after cut-over.
+
+
+def _write_popper_sidecar(directory: Path, threshold: float) -> Path:
+    p = directory / f"seq_{str(threshold).replace('.', '_')}.bth.toml"
+    p.write_text(
+        "[experiment]\n"
+        'hypothesis = "h"\n'
+        "[outcomes.pass]\n"
+        'condition = "x > 0"\n'
+        'decision = "proceed"\n'
+        "[outcomes.fail]\n"
+        'condition = "x <= 0"\n'
+        'decision = "debug"\n'
+        "[result_schema]\n"
+        'x = "float"\n'
+        "[popper]\n"
+        "null_pass_rate = 0.1\n"
+        "alt_pass_rate = 0.9\n"
+        f"stopping_threshold = {threshold}\n"
+    )
+    return p
+
+
+def _emit_finished_run(workspace: Path, run_id: str, sidecar: Path) -> None:
+    run = _make_run(run_id, datetime.now(UTC))
+    run.exit_code = 0
+    run.outcome = "pass"
+    run.sidecar_path = str(sidecar)
+    data = run_event_data(run)
+    # As `bth run` does: the declaration is frozen into run.started (BC-3).
+    started = {**data, "sidecar": sidecar_declaration_for_event(parse_sidecar(sidecar))}
+    emit_event(kind="run.started", entity=[run_id], data=started, cwd=workspace, hard_fail=True)
+    emit_event(kind="run.finished", entity=[run_id], data=data, cwd=workspace)
+
+
+def test_create_and_conclude_work_after_bathos_db_is_renamed(log_mode_project) -> None:
+    """Cut-over renames `bathos.db`; create/conclude must not need it (#2843 item 7)."""
+    from bathos.mcp import campaign_conclude_tool, campaign_create_tool
+
+    _workspace, catalog_dir = log_mode_project
+    (catalog_dir / "bathos.db").rename(catalog_dir / "bathos.db.frozen")
+
+    created = campaign_create_tool(
+        name="after-rename", mode="exploration", project_slug="proj", catalog_dir=str(catalog_dir)
+    )
+    assert "error" not in created, created
+    concluded = campaign_conclude_tool(
+        campaign_id=created["campaign_id"], outcome_label="pass", catalog_dir=str(catalog_dir)
+    )
+
+    assert concluded.get("status") == "concluded", concluded
+    assert not (catalog_dir / "bathos.db").exists()
+
+
+def test_library_add_folds_pending_events_first(log_mode_project) -> None:
+    """A run whose events are not yet in the index is still found (#2843 item 8)."""
+    workspace, catalog_dir = log_mode_project
+    campaign_id = _create(workspace, catalog_dir, "exploration")
+    _emit_run(workspace, "run-1", datetime.now(UTC))  # no ingest after this
+
+    add_run_to_campaign(None, campaign_id, "run-1", catalog_dir=catalog_dir, cwd=workspace)
+
+    assert _members(catalog_dir, campaign_id) == ["run-1"]
+
+
+def test_sequential_threshold_lock_holds_when_the_post_write_ingest_fails(
+    log_mode_project, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Back-to-back adds must see each other's events (#2843 item 2).
+
+    With the post-write ingest failing, the second add used to read an index
+    with no threshold yet and emit a conflicting `campaign.threshold_set`.
+    """
+    workspace, catalog_dir = log_mode_project
+    campaign_id = _create(workspace, catalog_dir, "sequential")
+    _emit_finished_run(workspace, "run-a", _write_popper_sidecar(workspace, 0.05))
+    _emit_finished_run(workspace, "run-b", _write_popper_sidecar(workspace, 0.1))
+    run_ingest(catalog_dir)
+    monkeypatch.setattr("bathos.runlog.emit._refresh_index_after_unit", lambda _cd: None)
+
+    add_run_to_campaign(None, campaign_id, "run-a", catalog_dir=catalog_dir, cwd=workspace)
+    with pytest.raises(CampaignError, match="Cannot change stopping_threshold"):
+        add_run_to_campaign(None, campaign_id, "run-b", catalog_dir=catalog_dir, cwd=workspace)
+
+
+def test_campaign_add_lock_is_exclusive(tmp_path: Path) -> None:
+    import fcntl
+    import os
+
+    from bathos.campaigns import campaign_add_lock, campaign_add_lock_path
+
+    with campaign_add_lock(tmp_path):
+        fd = os.open(campaign_add_lock_path(tmp_path), os.O_RDWR)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd)
+
+
+def test_prepare_for_conclude_uses_the_unit_of_work_mode(
+    log_mode_project, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The flag is read once per call tree, not again by prepare (#2843 item 9)."""
+    from bathos.campaigns import prepare_catalog_for_conclude
+    from bathos.runlog.emit import unit_of_work
+
+    _workspace, catalog_dir = log_mode_project
+
+    def _legacy_ingest(*_a, **_k):
+        raise AssertionError("prepare took the legacy path inside a log-mode unit of work")
+
+    monkeypatch.setattr("bathos.campaigns.ingest_cool_campaigns", _legacy_ingest)
+    with unit_of_work(catalog_dir) as mode:
+        assert mode is True
+        # If prepare re-read the flag it would now see legacy mode.
+        cutover_marker_path(catalog_dir).unlink()
+        prepare_catalog_for_conclude(catalog_dir)
