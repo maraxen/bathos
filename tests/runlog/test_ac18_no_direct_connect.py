@@ -113,10 +113,6 @@ ALLOWLIST: dict[tuple[str, str], str] = {
         "opens db for claim.register_claim(), which flag-gates its warm writes "
         "via emit_or_legacy/unit_of_work"
     ),
-    ("mcp.py", "campaign_add_tool"): (
-        "opens db for campaigns.add_run_to_campaign(), which flag-gates its "
-        "campaign_runs insert"
-    ),
 }
 
 
