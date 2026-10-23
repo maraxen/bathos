@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import json
 import logging
 import shutil
@@ -155,38 +154,12 @@ def _collect_output_metadata(output_path: str) -> dict:
     - status: "present", "missing", or "unreadable"
     - size_bytes: file size (0 if missing/unreadable)
     - mtime_unix: modification time (Unix timestamp)
-    - sha256: file hash (None if >100MB or unreadable)
+    - sha256: file hash (None for a directory or an unreadable file; no size cap since the
+      output-tiering standard, spec 261023 section 3.1 -- `hash_file` streams)
     """
-    path = Path(output_path)
+    from bathos.output_tiers.reference import file_metadata
 
-    try:
-        if not path.exists():
-            return {"status": "missing", "size_bytes": 0}
-
-        stat = path.stat()
-        size_bytes = stat.st_size
-        mtime_unix = stat.st_mtime
-
-        # Skip SHA256 for large files (>100MB)
-        sha256_hash = None
-        if size_bytes < 100 * 1024 * 1024:
-            try:
-                h = hashlib.sha256()
-                with open(path, "rb") as f:
-                    while chunk := f.read(8192):
-                        h.update(chunk)
-                sha256_hash = h.hexdigest()
-            except Exception:
-                sha256_hash = None
-
-        return {
-            "status": "present",
-            "size_bytes": size_bytes,
-            "mtime_unix": mtime_unix,
-            "sha256": sha256_hash,
-        }
-    except (PermissionError, OSError):
-        return {"status": "unreadable", "size_bytes": 0}
+    return file_metadata(output_path)
 
 
 @dataclass

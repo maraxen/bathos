@@ -161,7 +161,9 @@ def rebaseline_run_outputs(
         emit_or_legacy(
             kind="run.outputs_hashed",
             entity=[run.id],
-            data={"output_metadata": output_metadata},
+            # `phase: "rebaseline"` keeps this out of the reference hash set (spec 261023 section
+            # 3.3): a rebaseline replaces `output_metadata` for drift purposes, never the reference.
+            data={"output_metadata": output_metadata, "phase": "rebaseline"},
             legacy_write=_legacy_write,
             cwd=cwd,
         )

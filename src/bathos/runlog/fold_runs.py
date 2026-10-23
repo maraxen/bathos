@@ -30,8 +30,10 @@ events directly.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
+from bathos.output_tiers.reference import fold_adopted
 from bathos.runlog.fold_merge import dedup_import_snapshots, stage1_field_merge
 
 TERMINAL_STATUSES = frozenset({"completed", "failed", "killed"})
@@ -471,7 +473,20 @@ def fold_run(events: list[dict]) -> dict[str, Any]:
     # already filled it from a warm/fragment source's own column, if any
     # (BC-1's "never blanks a field ... that a warm import set" applied to
     # a field with no live GENERAL write site).
-    outputs_events = [ev for ev in events if ev.get("kind") == "run.outputs_hashed"]
+    #
+    # `phase: "adopted"` events are skipped here (output-tiering spec 261023 section 3.3): an
+    # adopt event carries only the adopted paths, so letting it win whole-list would drop the
+    # run-end entries, and `readback` matches any `output_metadata` sha with no phase filter, so
+    # an adopted file must never appear here. They fold into `adopted_outputs` instead (latest
+    # non-retracted entry per relpath). Run-end and rebaseline events keep latest-wins.
+    outputs_events = [
+        ev
+        for ev in events
+        if ev.get("kind") == "run.outputs_hashed"
+        and (ev.get("data") or {}).get("phase") != "adopted"
+    ]
+    adopted = fold_adopted(events)
+    row["adopted_outputs"] = json.dumps(adopted) if adopted else None
     if outputs_events:
         latest_outputs = max(outputs_events, key=lambda ev: (ev.get("ts", ""), ev.get("eid", "")))
         row["output_metadata"] = (latest_outputs.get("data") or {}).get("output_metadata")
