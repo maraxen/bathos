@@ -68,12 +68,17 @@ class ColdProfile:
     cold_root: str
     source: Path
 
-    def destination(self, project_slug: str, run_id: str) -> str:
-        """``<cold_root>/bathos-cold/<project_slug>/<run_id>``, a POSIX path on ``host``."""
+    def relative_destination(self, project_slug: str, run_id: str) -> str:
+        """``bathos-cold/<project_slug>/<run_id>``, relative to ``cold_root``: the form myxcel ``cold`` takes,
+        since it refuses absolute paths (spec sections 5.1 and 6.2)."""
         for label, part in (("project_slug", project_slug), ("run_id", run_id)):
             if not part or "/" in part or part in {".", ".."}:
                 raise OutputTiersConfigError(f"{label} {part!r} cannot be used as a path component")
-        return f"{self.cold_root.rstrip('/')}/bathos-cold/{project_slug}/{run_id}"
+        return f"bathos-cold/{project_slug}/{run_id}"
+
+    def display_destination(self, project_slug: str, run_id: str) -> str:
+        """``<cold_root>/bathos-cold/<project_slug>/<run_id>`` on ``host``, for display only."""
+        return f"{self.cold_root.rstrip('/')}/{self.relative_destination(project_slug, run_id)}"
 
 
 def user_config_path() -> Path:

@@ -167,8 +167,11 @@ def test_load_profile_reads_contract_keys(tmp_path):
     )
     profile = load_profile("titanix", config_dir=d)
     assert (profile.host, profile.cold_root) == ("titanix", "/home/solab/marielle")
+    rel = profile.relative_destination("denxity", "1e4596c6-7a55")
+    assert rel == "bathos-cold/denxity/1e4596c6-7a55"
+    assert not rel.startswith("/")
     assert (
-        profile.destination("denxity", "1e4596c6-7a55")
+        profile.display_destination("denxity", "1e4596c6-7a55")
         == "/home/solab/marielle/bathos-cold/denxity/1e4596c6-7a55"
     )
 
@@ -199,4 +202,6 @@ def test_destination_rejects_path_components(tmp_path):
     d = _profile(tmp_path, "eng", 'host = "engaging"\ncold_root = "/orcd/data"\n')
     profile = load_profile("eng", config_dir=d)
     with pytest.raises(OutputTiersConfigError):
-        profile.destination("denxity", "../x")
+        profile.relative_destination("denxity", "../x")
+    with pytest.raises(OutputTiersConfigError):
+        profile.display_destination("..", "run")
