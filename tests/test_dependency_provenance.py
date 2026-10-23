@@ -319,7 +319,14 @@ def test_uv_lock_supplies_the_wheel_hash_matching_the_installed_tags(site: Path,
         + '" },\n'
         "]\n"
     )
-    prov = _capture(["fakepkg"], script)
+    # The lock is only consulted for the project's own interpreter.
+    venv_py = script.parent.parent / ".venv" / "bin" / "python"
+    venv_py.parent.mkdir(parents=True)
+    venv_py.symlink_to(PY)
+    prov = capture_dependency_provenance(
+        ["fakepkg"], [str(venv_py), str(script)], script.parent.parent
+    )
+    assert prov is not None and prov["probe_status"] == "ok", prov
     assert prov["fakepkg_wheel_sha256"] == "22" * 32
     assert prov["fakepkg_wheel_sha256_source"] == "uv.lock"
 

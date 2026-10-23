@@ -1238,13 +1238,17 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                     UPDATE runs SET
                       claim_discriminates = COALESCE(?, claim_discriminates),
                       claim_isolates = COALESCE(?, claim_isolates),
-                      parity_run_type = COALESCE(?, parity_run_type)
+                      parity_run_type = COALESCE(?, parity_run_type),
+                      dependency_provenance = COALESCE(?, dependency_provenance)
                     WHERE id = ?
                     """,
                     [
                         run.claim_discriminates,
                         run.claim_isolates,
                         run.parity_run_type,
+                        # A row first ingested by a pre-v18 bathos has NULL here even though
+                        # the fragment carries it (debt #2946 review).
+                        run.dependency_provenance,
                         run.id,
                     ],
                 )

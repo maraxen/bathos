@@ -930,30 +930,6 @@ def _run_script_impl(
             file=sys.stderr,
         )
         return 1
-    dependency_provenance = capture_dependency_provenance(tracked_packages, argv, cwd)
-    if dependency_provenance is not None:
-        if dependency_provenance.get("probe_status") != "ok":
-            print(
-                "Warning: dependency provenance probe did not run "
-                f"({dependency_provenance.get('probe_status')}); tracked packages "
-                f"{tracked_packages} are recorded as 'unknown'.",
-                file=sys.stderr,
-            )
-        shadowed = shadowed_packages(dependency_provenance, tracked_packages)
-        if shadowed:
-            print(
-                f"Warning: {', '.join(shadowed)}: the module `import` resolves to is NOT the "
-                "installed distribution (a vendored or source copy shadows it), so the "
-                "recorded version describes code that will not execute. Recorded as "
-                "<pkg>_module_in_dist=false.",
-                file=sys.stderr,
-            )
-        event(
-            "run.dependency_provenance",
-            packages=tracked_packages,
-            probe_status=dependency_provenance.get("probe_status"),
-            shadowed=shadowed,
-        )
 
     # Run gate check for enforced dirs (built-in ENFORCED_DIRS plus `.bth.toml [enforcement] dirs`).
     # An invalid [enforcement] block refuses the run BEFORE anything is launched: a typo in a setting that
@@ -996,6 +972,34 @@ def _run_script_impl(
             print(json.dumps(payload_dict), file=sys.stderr)
             return 1
         requires_waiver_reason = gate_result.waiver_reason
+
+    # Probe only once the gates have let the run through: a refused run must not first spend
+    # up to PROBE_TIMEOUT_S (or a `uv run` sync) describing an environment it will never use.
+    # capture_dependency_provenance never raises.
+    dependency_provenance = capture_dependency_provenance(tracked_packages, argv, cwd)
+    if dependency_provenance is not None:
+        if dependency_provenance.get("probe_status") != "ok":
+            print(
+                "Warning: dependency provenance probe did not run "
+                f"({dependency_provenance.get('probe_status')}); tracked packages "
+                f"{tracked_packages} are recorded as 'unknown'.",
+                file=sys.stderr,
+            )
+        shadowed = shadowed_packages(dependency_provenance, tracked_packages)
+        if shadowed:
+            print(
+                f"Warning: {', '.join(shadowed)}: the module `import` resolves to is NOT the "
+                "installed distribution (a vendored or source copy shadows it), so the "
+                "recorded version describes code that will not execute. Recorded as "
+                "<pkg>_module_in_dist=false.",
+                file=sys.stderr,
+            )
+        event(
+            "run.dependency_provenance",
+            packages=tracked_packages,
+            probe_status=dependency_provenance.get("probe_status"),
+            shadowed=shadowed,
+        )
 
     # Determine sidecar_mode string
     if no_sidecar:
