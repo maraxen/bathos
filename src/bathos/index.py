@@ -157,7 +157,8 @@ CREATE TABLE IF NOT EXISTS runs (
     postmortem_summary VARCHAR,
     postmortem_asset_links VARCHAR,
     seq_position BIGINT,
-    evalue DOUBLE
+    evalue DOUBLE,
+    adopted_outputs VARCHAR
 )
 """
 
