@@ -82,6 +82,16 @@ class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(
     RUN_NOT_FOUND = "run_not_found"
     RUN_PREFIX_AMBIGUOUS = "run_prefix_ambiguous"
     REQUIRES_LOG_MODE = "requires_log_mode"
+    # `bth cold` (step 6).
+    OUTPUTS_DRIFTED = "outputs_drifted"
+    NO_COLD_ROOT = "no_cold_root"
+    ARCHIVE_CONFLICT = "archive_conflict"
+    MYXCEL_CAPABILITY_GAP = "myxcel_capability_gap"
+    MYXCEL_ERROR = "myxcel_error"
+    LOCK_HELD = "lock_held"
+    COPY_VERIFY_FAILED = "copy_verify_failed"
+    COPY_UNVERIFIABLE = "copy_unverifiable"
+    COLD_RUNS_FAILED = "cold_runs_failed"
 
 
 # Resolution hints registry: every BathosErrorCode member must have a non-empty entry
@@ -130,6 +140,15 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.RUN_NOT_FOUND: "No run matches that id or prefix; check it with `bth list`",
     BathosErrorCode.RUN_PREFIX_AMBIGUOUS: "The run-id prefix matches several runs; pass more characters of the id",
     BathosErrorCode.REQUIRES_LOG_MODE: "Output tiering reads the run log; run `bth migrate --to-log` first (legacy catalogs are not supported)",
+    BathosErrorCode.OUTPUTS_DRIFTED: "A live output file differs from (or is missing against) the hash the run recorded; nothing was uploaded. A drifted run_end path is never re-referenced: re-run instead (see `bth outputs hash`)",
+    BathosErrorCode.NO_COLD_ROOT: "No cold profile resolves, or its myxcel profile has no absolute cold_root: pass --profile, set $BTH_COLD_PROFILE, [tool.bathos.outputs] cold_profile, or ~/.config/bathos/config.toml [outputs]",
+    BathosErrorCode.ARCHIVE_CONFLICT: "A final cold name already exists with different content (or only one of the pair exists: half_committed). Nothing was overwritten; to replace it, rerun with --supersede --reason <text>, which renames the old pair aside",
+    BathosErrorCode.MYXCEL_CAPABILITY_GAP: "The installed myxcel lacks the `cold` subcommands (or --clean-partials needs a primitive myxcel does not have); upgrade myxcel",
+    BathosErrorCode.MYXCEL_ERROR: "A myxcel cold call failed; read the message, check `myxcel socket-status`, then rerun (a rerun resumes, nothing is overwritten)",
+    BathosErrorCode.LOCK_HELD: "Another writer (or a killed one) holds <dest>/.bth-lock; if you are sure no writer is alive, rerun with --break-lock (removes the lock only, then resumes)",
+    BathosErrorCode.COPY_VERIFY_FAILED: "The remote bytes did not match what was sent; this attempt's partials were left under their .partial-<attempt> names (not committed). Check the host's disk and quota, then rerun with a fresh attempt",
+    BathosErrorCode.COPY_UNVERIFIABLE: "The remote bytes could not be re-read (host unreachable, Duo, sandbox); nothing was certified. Fix the connection and rerun, which resumes",
+    BathosErrorCode.COLD_RUNS_FAILED: "At least one run failed under --all-uncopied; the message names each run's error_code. Fix those runs and rerun, which skips the copied ones",
 }
 
 

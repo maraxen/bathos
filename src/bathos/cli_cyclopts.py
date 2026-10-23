@@ -106,6 +106,8 @@ wire(
         "outputs_summary",
         "outputs_hash",
         "outputs_adopt",
+        "outputs_where",
+        "cold_outputs",
         # query group (Milestone 2)
         "resolve_pin",
         "get_trust_state",
