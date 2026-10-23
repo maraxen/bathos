@@ -132,6 +132,40 @@ def test_reap_preserves_all_fields_except_status_metadata(temp_catalog):
     assert warm_metadata["reaped"]["reason"] == "orphan_window_exceeded"
 
 
+def test_reap_tool_apply_reconciles_warm_tier_once(temp_catalog, monkeypatch):
+    """`reap_tool(apply=True)` on a legacy catalog rebuilds the warm tier once.
+
+    `reap_runs` reconciles by itself; `reap_tool` used to reconcile a second time.
+    """
+    import bathos.compact as compact_mod
+    from bathos.compact import compact
+    from bathos.mcp import reap_tool
+    from bathos.query import list_runs
+
+    write_run(create_run("run_tool", age_hours=25, status="running"), temp_catalog)
+    compact(temp_catalog)
+
+    real_compact = compact_mod.compact
+    rebuilds = []
+
+    def counting_compact(catalog_dir, force_rebuild=False):
+        if force_rebuild:
+            rebuilds.append(catalog_dir)
+        return real_compact(catalog_dir, force_rebuild=force_rebuild)
+
+    monkeypatch.setattr(compact_mod, "compact", counting_compact)
+
+    result = reap_tool(
+        catalog_dir=str(temp_catalog), older_than_h=24, dry_run=False, apply=True
+    )
+
+    assert "error" not in result, result
+    assert result["candidate_ids"] == ["run_tool"]
+    assert len(rebuilds) == 1
+    warm = list_runs(temp_catalog)
+    assert json.loads(warm[0].metadata or "{}")["reaped"]["reason"] == "orphan_window_exceeded"
+
+
 def test_reap_idempotent(temp_catalog):
     """Test (iii) - running apply twice reaps 0 the second time."""
     from bathos.reap import reap_runs
