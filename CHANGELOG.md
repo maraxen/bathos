@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0a7] - 2026-10-23
+
 ### Added
 
 - **Per-run provenance of named installed dependencies (debt #2946, schema v18).** A project opts in with `track_packages = ["aminx", ...]` under `[provenance]` in a sidecar or `.bth.toml`, or under `[tool.bathos]` in `pyproject.toml` (lists are combined; `dist:module` when the import name differs). Every run then records a new nullable `dependency_provenance` column: a JSON object of flat scalar keys per package (`<pkg>_version`, `<pkg>_wheel_sha256`, `<pkg>_wheel_sha256_source`, `<pkg>_source_commit`, `<pkg>_module_path`, `<pkg>_module_in_dist`) plus `probe_python` and `probe_status`, queryable with `json_extract_string`. Values that cannot be established are the literal `"unknown"`. The probe runs under the script's own interpreter, rebuilt from argv, because `bth` usually lives in its own tool venv. It resolves modules with `importlib.util.find_spec`, so nothing is imported. `<pkg>_module_in_dist` is true only when the file `import` would load is listed in that distribution's RECORD, or lies in an editable install's source tree. A vendored or source copy shadowing the installed dist reads false and prints a stderr warning. The wheel hash comes from `direct_url.json`, then from the local wheel file (trusted only if its RECORD matches the installed one), then from `uv.lock` for the installed version and wheel tags. The source commit comes from PEP 610 `vcs_info`, an editable checkout's `HEAD` (`-dirty` if modified) or a `+g<sha>` version label. A malformed `track_packages` refuses the run. Runs without the setting record `null`, and v17 fragments migrate to `null`.
