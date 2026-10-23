@@ -4,6 +4,7 @@
 - [260805_overnight-decisions](daily/260805_overnight-decisions.md) — Every decision made without a human gate during the overnight autonomous loop run, with enough context to backtrack
 
 ## Handoffs
+- [261023_myxcel-cold-primitives-brief](handoffs/261023_myxcel-cold-primitives-brief.md) — Paste-ready brief for implementing myxcel cold put/commit/verify-file/get/lock/unlock with JSON contracts pinned by the bathos output-tiering spec, plus the owner-gated hard-link probe on so3 and titanix
 - [260616_worktree-prune-backlog-assess](handoffs/260616_worktree-prune-backlog-assess.md) — repo consolidated to single main worktree; bathos backlog drained (only #1774 P3 remains)
 - [260601_v061-audit-close](handoffs/260601_v061-audit-close.md)
 - [260601_v061-sprint-close](handoffs/260601_v061-sprint-close.md)

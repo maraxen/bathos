@@ -509,3 +509,15 @@ needs_work: 2 blockers, 4 major, 5 minor. The orchestrator checked every code ci
 | m3 | `os.rename` replaces an empty `<dir>` | §4 warm: `renameat2(RENAME_NOREPLACE)`. Step 7 test |
 | m4 | Retract wiring scheduled after retract ships | Moved to Step 3 |
 | m5 | Hard links unprobed; `ts` resolution misstated | A27 (U) with probe and fallback; A24 corrected |
+
+### 13.4 Decisions made during implementation (Steps 1-4)
+
+These are binding for later steps. Each is listed in its PR.
+
+| Step / PR | Decision |
+|---|---|
+| 1 / #130 | `none`/empty disables a leg at every layer. Only reached config files are parsed (§5.1). `ColdProfile.relative_destination()` is what myxcel receives; `display_destination()` is display-only. |
+| 2 / #131 | A declared `[outputs]` root that does not exist becomes a `status: "missing"` entry, not a refusal. A failed hard-fail run-end emit exits 1 but still writes `run.finished`, so the run isn't left `running`. Legacy phase-less events must be strictly earlier than `run.finished`. Legacy paths outside `worktree_root` are skipped by `reference_hashes()`, and `legacy_relpath()` reports them for `legacy_path_unresolved`. |
+| 3 / #133 | Commands take `--run-id <prefix>`, not a positional. A relative `--root` resolves against the run's worktree root. An abandoned run refuses `run_not_terminal`. A legacy entry whose file no longer exists shows `missing` in `outputs hash` and cannot be adopted. Retraction is `run.outputs_adopt_retracted` with `data.retracts=<eid>` and `data.reason`. New codes: `root_missing`, `adopt_event_not_found`, `run_not_found`, `run_prefix_ambiguous`. |
+| 4 / #132 | Tar header `mtime = 0`. §5.2's "event ts" conflicted with "no wall-clock", and 0 satisfies both. The manifest `worktree_root` is the run's recorded root, not the directory read from, so building from a different read dir gives an identical manifest. Commit inside staging is `os.link`, manifest first. `verify_archive` never raises on a bad archive; it returns a structured result. |
+| 5a | myxcel brief: `handoffs/261023_myxcel-cold-primitives-brief.md`. |
