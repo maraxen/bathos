@@ -200,7 +200,12 @@ class MyxcelCapabilityGapError(RuntimeError):
     """Raised when a bathos call needs a myxcel capability that the installed
     `myxcel` CLI/API does not currently expose. Not a transient failure --
     retrying will not help; the gap has to be closed in myxcel itself (see
-    `pull_path`'s docstring)."""
+    `pull_path`'s docstring).
+
+    ``error_code`` is the JSON error code a command reports for it (output tiering,
+    spec 261023 section 6.1 step 1)."""
+
+    error_code = "myxcel_capability_gap"
 
 
 # How an installed myxcel that predates `pull-path` rejects it. typer-era
