@@ -28,6 +28,8 @@ command:
 | `myxcel cold verify-file <profile> <remote_path> <sha256> <size>` | Plain sha256 (not `_tree_hash`). Re-reads cache-cold the way coldify verify does (fsync + `posix_fadvise(DONTNEED)`, see `coldify.py`). Uses login ssh at or below the size threshold (D3: a config key, default 2 GiB) and a `mit_data_transfer` job above it (reuse `_submit_coldify_job`, `coldify.py:95`). Returns `verified` / `failed` / `unverifiable`, plus `sha256_observed`, `size_observed`, `method` (`login_ssh` / `slurm_job`) and `message`. Unreachable host or job failure is `unverifiable`, never `failed`. |
 | `myxcel cold get <profile> <remote_path> <local_dir>` | `{"status","local_path","bytes"}`. Refuses if the local target exists. |
 | `myxcel cold lock` / `unlock <profile> <remote_dir>` | `mkdir -p <parent>` then an atomic `mkdir <remote_dir>/.bth-lock`, holding a small JSON file with host, pid, attempt and start time. Returns `acquired`, or `held` plus `holder`. `unlock` removes only the lock directory. |
+| `myxcel cold ls <profile> <remote_dir>` | One directory, not recursive. `{"status":"ok"\|"missing"\|"error","entries":[{"name","size_bytes","mtime"}],"message"}`, regular files only, plus the `.bth-lock` directory as `{"name":".bth-lock","lock":true,"holder"}`. `missing` if the directory does not exist. (Added after bathos Step 6, owner decision 2026-10-23.) |
+| `myxcel cold rm-partial <profile> <remote_path>` | Refuses, **before any ssh call**, a path whose last segment does not match `*.partial-[0-9a-f]{8}`. Plain `rm` of one regular file: never `-r`, never a directory, never `-f` on a glob. `{"status":"removed"\|"absent"\|"refused"\|"error","message"}`. (Added with `ls`.) |
 
 Every command refuses an absolute remote path, any `..` segment, or an empty path, **before** any ssh call.
 Remote paths are joined under the profile's `cold_root`. A profile without `cold_root` refuses.
@@ -40,6 +42,8 @@ file with threads capped. Each test must fail on a broken implementation:
 - `verify-file` returns all three states: a flipped byte gives `failed`, an ssh failure gives `unverifiable`.
 - `lock` twice gives `held` with the holder.
 - `put` into a missing parent creates it.
+- `rm-partial` on a final name (`archive.tar.zst`), on `.bth-lock`, or on `x.partial-zz` is refused with no ssh call; on a real partial it removes exactly that file and leaves its sibling final untouched.
+- `ls` on a missing directory returns `missing`; on a directory with a held lock it lists the lock with its holder.
 - Every command's `--json` output parses and matches §6.2 exactly.
 
 **Live hard-link probe (A27). It is owner-gated, so ask before running.** The sandbox blocks SSH, so this needs the

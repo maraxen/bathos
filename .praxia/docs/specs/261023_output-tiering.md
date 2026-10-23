@@ -309,8 +309,17 @@ is a no-op by design, and cluster nodes don't refresh `index.db`. Correctness th
 | `myxcel cold verify-file <profile> <remote_path> <sha256> <size>` | `{"status":"verified"\|"failed"\|"unverifiable","sha256_observed","size_observed","method":"login_ssh"\|"slurm_job","message"}`. Plain sha256, not `_tree_hash`. |
 | `myxcel cold get <profile> <remote_path> <local_dir>` | `{"status","local_path","bytes"}` |
 | `myxcel cold lock` / `unlock <profile> <remote_dir>` | `{"status":"acquired"\|"held","holder"}` |
+| `myxcel cold ls <profile> <remote_dir>` | `{"status":"ok"\|"missing"\|"error","entries":[{"name","size_bytes","mtime"}],"message"}`. One directory, not recursive. Regular files only; the `.bth-lock` directory is reported as `{"name":".bth-lock","lock":true,"holder"}` so step 3 and `--clean-partials` can name it. `missing` when the directory does not exist. |
+| `myxcel cold rm-partial <profile> <remote_path>` | `{"status":"removed"\|"absent"\|"refused"\|"error","message"}`. Refuses, before any ssh call, any path whose last segment does not match `*.partial-[0-9a-f]{8}`. Plain `rm` of one regular file, never `-r`, never a directory. |
 
 Paths are relative to the profile's `cold_root`. myxcel refuses absolute paths and any `..` segment.
+
+**`ls` and `rm-partial` were added on 2026-10-23 after Step 6** (owner decision). Step 6 found that §6.1 step 5 ("delete this
+attempt's partials"), step 4 ("leftovers from other attempts are listed") and `--clean-partials` had no primitive to stand
+on. Until they land, bathos refuses `--clean-partials` with `myxcel_capability_gap` and names the partials it left in the
+error (PR #135). Follow-up Step 6b wires them in: step 5 removes only this attempt's partials, step 4 lists other
+attempts' partials, and `--clean-partials` removes only `*.partial-<attempt8>` files in the run's own destination
+directory, only while holding the lock. bathos never removes a final name or a lock via `rm-partial`.
 
 ### 6.3 Log-mode guard
 
