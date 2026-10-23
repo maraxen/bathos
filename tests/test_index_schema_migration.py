@@ -62,3 +62,24 @@ def test_init_index_schema_is_idempotent(tmp_path: Path):
         assert set(V17_COLUMNS) <= _columns(con, "runs")
     finally:
         con.close()
+
+
+def test_init_index_schema_adds_missing_dependency_provenance(tmp_path: Path):
+    """An index.db from before schema v18 gains dependency_provenance on init (#2946)."""
+    kept = [
+        line
+        for line in RUNS_DDL.splitlines()
+        if not line.strip().startswith("dependency_provenance ")
+    ]
+    db = tmp_path / "index.db"
+    old = duckdb.connect(str(db))
+    old.execute("\n".join(kept))
+    assert "dependency_provenance" not in _columns(old, "runs")
+    old.close()
+
+    con = duckdb.connect(str(db))
+    try:
+        init_index_schema(con)
+        assert "dependency_provenance" in _columns(con, "runs")
+    finally:
+        con.close()
