@@ -56,6 +56,35 @@ def test_reap_tool_apply_succeeds_in_log_mode_with_frozen_warm_db(tmp_path, monk
     assert list(catalog_dir.glob("bathos.db.bak-*")) == []
 
 
+def test_reap_tool_revert_succeeds_in_log_mode_with_frozen_warm_db(tmp_path, monkeypatch):
+    repo = setup_project(tmp_path)
+    monkeypatch.chdir(repo)
+    catalog_dir = tmp_path / "catalog"
+    enable_log_mode(catalog_dir)
+    frozen = _freeze_warm_db(catalog_dir)
+
+    _start(repo, _make_run("run-revert", age_hours=25))
+    run_ingest(catalog_dir)
+    reap_tool(catalog_dir=str(catalog_dir), older_than_h=24, dry_run=False, apply=True)
+    run_ingest(catalog_dir)
+    assert _folded_run(catalog_dir, "run-revert")["status"] == "abandoned"
+
+    result = reap_tool(
+        catalog_dir=str(catalog_dir),
+        dry_run=False,
+        apply=True,
+        revert=True,
+        revert_ids="run-revert",
+    )
+
+    assert "error" not in result, result
+    assert result["candidate_ids"] == ["run-revert"]
+    run_ingest(catalog_dir)
+    assert _folded_run(catalog_dir, "run-revert")["status"] == "running"
+    assert (catalog_dir / "bathos.db").read_bytes() == frozen
+    assert list(catalog_dir.glob("bathos.db.bak-*")) == []
+
+
 def test_reconcile_warm_tier_is_noop_in_log_mode(tmp_path):
     catalog_dir = tmp_path / "catalog"
     enable_log_mode(catalog_dir)
