@@ -215,5 +215,6 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     # Output tiering (spec 261023). Both carry their own, more specific `error_code` attribute
     # (one of the output-tiering members above, or `invalid_param`); this is the fallback for a
     # caller that only has the class.
+    "OutputTierError": BathosErrorCode.INVALID_PARAM,
     "OutputTiersConfigError": BathosErrorCode.INVALID_PARAM,
 }
