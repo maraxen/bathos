@@ -54,6 +54,7 @@ dependencies = [
     # figure_manifest.py and campaign_report.py -- declared here so the authoring
     # payload models do not rest on an undeclared transitive dependency.
     "pydantic>=2.7",
+    "zstandard>=0.25.0",
 ]
 
 [project.optional-dependencies]
