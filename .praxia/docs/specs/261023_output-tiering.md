@@ -5,13 +5,13 @@ status: draft
 task_id: 261023_bathos-output-tiering
 date: '261023'
 backlog_ids: ''
-adversarial_review: ''
+adversarial_review: audits/261023_output-tiering-argon-review.md
 ---
 # Output tiering: warm, cold and mirror copies of run outputs
 
 **Status:** draft, not reviewed. Supersedes the denxity-worktree draft
 `denxity/.claude/worktrees/qb-r6/.praxia/docs/specs/261023_bathos-output-tiering.md` (uncommitted, treated as input,
-not as a decision). **task_id:** 261023_bathos-output-tiering. Decisions are recorded in §11 (all decided).
+not as a decision). **task_id:** 261023_bathos-output-tiering. Decisions are in §11 (D9 open). Revised after an adversarial review (§13).
 
 ## 1. Problem
 
@@ -53,164 +53,228 @@ spike whose number must not be cited until re-run under a sidecar (plan step 0).
 | A17 | `bth reap --apply` fails in log mode from a shared log/index cause | **V, fixed on main, not deployed** | `reconcile_warm_tier` called `compact(force_rebuild=True)` (`reap.py:457`), which log mode rejects (`compact.py:900-905`) **after** the `run.reaped` events were written. Fixed by `fce4b803` + `c99271f0` (PR #127, merged into `main` 164a6b7d today). The fix is **not** in v0.13.0a7 and **not** in the installed `bth` (`~/.local/share/uv/tools/bathos/.../reap.py` lacks the guard). Cause: a legacy post-step not gated on log mode. It is not shared with output tiering, apart from the general rule in §6.3. |
 | A18 | Remote cache-cold verify on a login node is allowed | **U** | myxcel moved its worker to a SLURM job, citing a login-node ban (myxcel design deviation (a)). Whether hashing ~200 MB over ssh on a login node breaks Engaging policy is not checked. See D3. |
 | A19 | The so3 pool's setgid group and quota accept bathos-cold writes | **V for the one manual copy, U in general** | The manual copy landed group `orcd_rg_hstor012_pi_so3`, setgid (denxity draft). Quota headroom and file-count cap are not probed. Archives are few, large files, so the file count is low by construction. |
-| A20 | A new event kind folds without touching the run fold | **U** | `_RUN_KINDS` is an allow-list (`runlog/ingest.py:97-107`), but affected entities are derived from `entity`. A new `output_copy.*` family needs its own fold module and an `index.db` table. Not prototyped. |
+| A20 | A new event kind folds without touching existing folds | **V, false (corrected after review)** | `fold_roots_into` (`runlog/ingest.py:1164-1190`) dispatches per kind family with an explicit `if/elif` and advances the watermark past unknown kinds. `connect_read` (`index.py:440-456`) lists every view by hand. A new kind needs wiring in both, plus an `INDEX_SCHEMA_VERSION` bump (§5.3). |
+| A21 | `mv -n` fails when the target exists | **V, version-dependent** | GNU coreutils 9.4 (this box): exit 1, source kept. Older coreutils exit 0 without moving. Engaging/titanix versions: U. Replaced by `ln && rm` (§6.1). |
+| A22 | Existing `output_metadata` paths are project-relative | **V, false** | `BTH_OUTPUT_DIR` discovery records absolute paths (`runner.py:1302,1496`). `--output-paths` stores the raw string. `_collect_output_metadata` resolves against the process cwd. |
+| A23 | Rebaseline events are distinguishable from run-end events | **V, false today** | `rebaseline_run_outputs` (`checker.py:116-167`) and the run-end emit (`runner.py:1636-1646`) both emit `run.outputs_hashed` with no `phase`. Migrated runs carry `output_metadata` in `run.imported` (`importer.py:197-209`). |
+| A24 | Event writes and index refresh are reliable | **V, with gaps** | `emit_event` defaults to `hard_fail=False` (`runlog/emit.py:167`). `ingest_after_write` is skipped under `SLURM_JOB_ID` / `BTH_NO_INGEST=1` (`ingest.py:1006-1017`). `uuid7` is ms + random, so same-ms events order randomly (`runlog/envelope.py:29-40`). |
+| A25 | CLI layer | **V** | No `cli.py`. Commands are `@cisternal.tool` in `mcp.py`, wired by `cli_cyclopts.py`. `render_or_exit` always exits 1 on error (`cli_render.py:35-50`). |
+| A26 | bathos has no user-level config file | **V, false** | `~/.bth/config.toml` `[defaults]` is read at `runner.py:875`. It conflicts with the global XDG rule. See D9. |
 
 ## 3. The standard (what bathos enforces)
 
 1. **A run declares its whole output set.** A sidecar may declare `[outputs] roots = [...]`, files or directories,
-   relative to the project root. At run end bathos expands every root to regular files and records per-file
-   `{relpath, size_bytes, sha256}`, with no size cap and no directory skip, in a **frozen** `run.outputs_hashed`
-   event marked `"phase": "run_end"`. `--output-paths` keeps working and is treated as extra roots.
-   `bth lint` warns when a script passes a `--resume-dir`/`--out-dir`-like argument that is not under a declared root
-   (heuristic, Tier-2).
-2. **The run-end hash is the reference.** Archive, warm and verify compare against the `run_end` event, never against
-   the latest rebaseline. If a later rebaseline differs from `run_end`, tiering refuses with `outputs_drifted` until
-   the owner chooses (D5).
-3. **Three tiers per run:** `warm` (a local directory, path recorded), `cold` (one zstd tar + manifest on the cold
-   profile's root) and `mirror` (the same bytes on a second profile's root). Each copy is a row in `output_copies`
-   (§5.3). The run record stays the source of truth for file hashes. Copy rows say only where bytes are and when
-   they last verified.
-4. **Copies are written two-phase and never overwritten.** Write `<name>.partial`, verify from a fresh cache-cold
-   read, then rename. A final name that already exists with a different sha256 is a hard error.
-5. **bathos never deletes warm files.** Freeing space is a separate, explicit command (out of scope here, §10). It
-   requires `cold` and `mirror` both `verified` within a window.
-6. **No defaults for locations.** If no cold profile resolves, every tiering command refuses and names the layers
-   it checked.
+   relative to the run's **live worktree root**: `resolve_workspace(cwd).fs_root` (`workspace.py:24-30`), not the
+   recorded `identity_root`. At run end bathos expands every root to regular files, with no size cap and no directory
+   skip, and emits `run.outputs_hashed` with `"phase": "run_end"`. Each entry keeps today's keys (`path`, `status`,
+   `size_bytes`, `mtime_unix`, `sha256`) so `checker.py:223`, `query.py:64`, `readback.py` and `mcp.py` keep working,
+   and adds `relpath` (POSIX, relative to `fs_root`) and `phase`. The run's `worktree_root` is already on the event
+   envelope. `--output-paths` and auto-discovered `BTH_OUTPUT_DIR` files (absolute today, `runner.py:1302,1496`) are
+   normalised to `relpath` the same way.
+2. **Expansion refuses anything that is not a regular file inside `fs_root`.** A symlink (to a file or dangling),
+   FIFO, socket or device under a root is a `symlink_in_outputs` / `special_file_in_outputs` refusal at run end. The
+   run still finishes; its record carries the refusal and has no reference set. Paths that resolve outside `fs_root`
+   are refused the same way.
+3. **The reference set is fixed per path and never rewritten.** `reference_hashes(run_id)` = per-path union of:
+   (a) entries from the event with `phase: "run_end"`; (b) for runs from before this standard, the `output_metadata`
+   carried by `run.imported` (`importer.py:197-209`) or the **earliest** phase-less `run.outputs_hashed`, labelled
+   `run_end_legacy`; (c) `adopted` entries, only for paths with no (a)/(b) entry. Rebaseline events
+   (`checker.py:116-167`, which from Step 2 tag `"phase": "rebaseline"`) are never part of the reference.
+   `runs.output_metadata` folding (`fold_runs.py:474-477`) stays "latest event" for drift display, except that an
+   `adopted` event can never replace a `run_end`/`run_end_legacy` entry there either. That closes the adopt-laundering
+   path into AC-20 (`claim.py:1300-1305`) and trust-ledger candidacy (`readback.py`).
+4. **Drift is measured on the live files, not on history.** `outputs_drifted` means a live file under the run's
+   `worktree_root` differs from its reference hash. A past rebaseline that later got restored is not drift (D5).
+   A drifted `run_end` path can never be re-referenced. The fix is a new run, not `adopt`.
+5. **Three tiers per run:** `warm` (a local directory), `cold` (one zstd tar + manifest on the cold profile's root)
+   and `mirror` (the same files on a second profile). Each physical copy is one row in `output_copies` (§5.3). The run
+   record stays the source of truth for file hashes.
+6. **Copies are written two-phase, per attempt, and never overwritten** (§6.1). A final name that exists with
+   different content is a hard error. Superseding is a rename-aside, never a delete (§6.4).
+7. **bathos never deletes warm files** (§10).
+8. **No defaults for locations.** If no cold profile resolves, every tiering command refuses and names the layers it
+   checked.
 
 ## 4. Command surface
 
-All commands print JSON with `--json`, exit non-zero on anything but full success, and have MCP mirrors (`cli.py`
-and `mcp.py` stay thin layers over a new `bathos/output_tiers.py`).
+Commands live in a package `src/bathos/output_tiers/` (`config`, `reference`, `archive`, `cold`, `warm`, `verify`).
+They are registered as `@cisternal.tool(registry="bathos-cli", ...)` in `mcp.py` and wired by `cli_cyclopts.py`.
+There is no `cli.py`. Errors go through `render_or_exit` (`cli_render.py:35-50`), so every failure exits 1. Callers
+branch on the JSON `error_code`, never on exit status. Every command accepts a unique run-id **prefix** and resolves
+it to the full UUID before doing anything (0 or more than 1 match is a refusal). `adopt` and `cold` take `--dry-run`,
+which prints the file list, byte total and destinations and writes nothing.
 
-| Command | Does | Refuses when |
+| Command | Does | Refuses when (`error_code`) |
 |---|---|---|
-| `bth outputs hash <run_id>` | Recomputes per-file hashes for the run's roots and compares with `run_end`. Read-only: reports `match` / `drift` / `missing`. | No `run_end` event exists (legacy run). Points to `adopt`. |
-| `bth outputs adopt <run_id> --root <path>...` | For runs that finished before this standard (r6/r7). Hashes the given roots **now** and emits `run.outputs_hashed` with `"phase": "adopted"`, `adopted_at` and the operator's reason. Adopted hashes are weaker than `run_end`, and every report shows the phase. | The run is not terminal. A root lies outside the project. A `run_end` already exists for that path with a different hash. |
-| `bth cold <run_id> [--profile P] [--mirror M]` | Builds `run-<id8>.tar.zst` + `run-<id8>.manifest.json` in a local staging dir, checks every member against the reference hashes, then pushes to cold (and mirror) two-phase. Emits `output_copy.recorded` per copy. | No reference hashes. Any file differs from its reference. Profile has no `cold_root`. Final archive exists with a different sha256. |
-| `bth warm <run_id> --to <dir>` | Fetches the archive from the first `verified` copy, checks its sha256, extracts into `<dir>/.bth-warm-<id8>.partial/`, hashes every file against the manifest **and** the reference hashes, then renames to `<dir>/<layout>` and emits `output_copy.recorded tier=warm`. | Any mismatch, extra or missing file. Target exists and is non-empty (no merge, no overwrite). |
-| `bth verify --tier outputs [--run R] [--profile P]` | For each cold/mirror copy: cache-cold re-hash of the archive on its host, compared with the recorded archive sha256, then cold vs mirror agreement. Emits `output_copy.verified`. Status per copy: `verified` / `failed` / `unverifiable`. | Nothing. A non-zero exit means any copy is `failed`. `unverifiable` exits non-zero only with `--strict`. |
-| `bth outputs where <run_id>` | Lists copies: tier, profile, host, path, archive sha256, last verified state and timestamp, and the config layer that chose the profile. | — |
+| `bth outputs hash <run>` | Re-hashes the live files under the run's `worktree_root` against `reference_hashes`. Reports `match` / `drift` / `missing` per path. Read-only. | No reference set (`no_reference_hashes`). |
+| `bth outputs adopt <run> --root <path>... --reason <text>` | Hashes the given roots **now** and emits `run.outputs_hashed` with `phase: "adopted"`, containing only paths with no `run_end`/`run_end_legacy` entry. `--retract <eid> --reason` emits `run.outputs_adopt_retracted`, and the fold drops those entries. | Run not terminal (`run_not_terminal`). Root outside the run's `worktree_root` (`root_outside_worktree`). A path already has a `run_end` entry with a different hash (`run_end_conflict`, meaning re-run instead). Symlink or special file (§3.2). |
+| `bth cold <run> [--profile P] [--mirror M]` / `--all-uncopied` | Builds archive + manifest (§5.2), checks every member against `reference_hashes`, then writes cold, then mirror (§6.1). `--all-uncopied` covers the current project only: completed runs that have a reference set and no verified copy on the profile. It keeps going past per-run failures and exits 1 at the end if any run failed. | `no_reference_hashes`, `outputs_drifted`, `no_cold_root`, `archive_conflict`, `myxcel_capability_gap`. |
+| `bth warm <run> --to <dir>` | `<dir>` must not exist. Fetches the archive and manifest from the first `verified` copy via `myxcel cold get`, checks both sha256s **before** opening the tar, checks that the member set equals the manifest exactly, then extracts with `tarfile` `filter="data"` into the sibling `<dir>.bth-warm-<attempt8>.partial/`. Every file is hashed against the manifest and `reference_hashes`, then the staging directory is renamed to `<dir>` (same filesystem, atomic). Emits `output_copy.recorded tier=warm`. | `<dir>` exists (`warm_target_exists`). Any mismatch, extra or missing member (`warm_mismatch`), after which bathos deletes only its own staging directory. No verified copy (`no_verified_copy`). |
+| `bth verify --tier outputs [--run R] [--profile P] [--strict]` | For each cold/mirror copy, calls `myxcel cold verify-file` on both archive and manifest, then checks cold and mirror agree. Emits `output_copy.verified`. Each copy is `verified` / `failed` / `unverifiable`. **`--tier all` does not include `outputs`**, because it needs the network. | Never refuses. Exits 1 if any copy is `failed`, or `unverifiable` with `--strict`. |
+| `bth outputs where <run>` | Lists rows from `output_copies`, each with the config layer that chose it. | Ships in Step 6, together with the table. |
 
-**Three-state rule** (aligned with myxcel `VerifyResult`, `coldify.py:919-922`). `verified` means the bytes were
-re-read and matched. `failed` means the bytes were read and did not match, or a manifest member does not match its
-reference. `unverifiable` means the bytes could not be read (host down, path missing, ssh error, no recorded
-sha256). `unverifiable` never upgrades to `verified` and never downgrades to `failed`.
+**Three-state rule** (aligned with myxcel `VerifyResult`). `verified`: the bytes were re-read and matched. `failed`:
+the bytes were read and did not match. `unverifiable`: the bytes could not be read. `unverifiable` never turns into
+either of the other two.
 
 ## 5. Data formats
 
-### 5.1 Config (`OutputTierConfig`)
+### 5.1 Config
 
-Resolution follows isochore's order, applied to **profile names**, not paths. bathos never stores a cold path, so it
-cannot disagree with myxcel:
+Resolution applies to **profile names**, not paths, in this order:
 
-1. explicit `--profile/--mirror`;
+1. explicit `--profile` / `--mirror`;
 2. `$BTH_COLD_PROFILE` / `$BTH_MIRROR_PROFILE` (`none` or empty disables);
-3. nearest `pyproject.toml` `[tool.bathos.outputs] cold_profile = "engaging"`, `mirror_profile = "titanix"`;
-4. `${XDG_CONFIG_HOME:-~/.config}/bathos/config.toml` `[outputs]` with the same keys;
+3. the nearest `pyproject.toml` `[tool.bathos.outputs]` `cold_profile`, `mirror_profile`;
+4. the user config file (D9: XDG `${XDG_CONFIG_HOME:-~/.config}/bathos/config.toml` vs the existing `~/.bth/config.toml`,
+   which `runner.py:875` already reads), `[outputs]` with the same keys;
 5. off.
 
-The profile name resolves to `host` and `cold_root` through `myxcel.config.load_profile` if importable. Otherwise
-bathos reads `~/.config/myxcel/<name>.toml` with `tomllib`, D2. A profile without `cold_root` is a refusal that names
-the profile file. Each resolution returns `(value, layer_label)`, which every command shows and which goes into the
-copy row. A malformed TOML at any layer raises, naming the file. Archives land at
-`<cold_root>/bathos-cold/<project_slug>/<run_id>/`.
+bathos stores no paths, so a project setting cannot point the mirror leg at the cold host's path (the split-brain
+risk in F-21 doesn't arise). Each profile name resolves through `tomllib` on `~/.config/myxcel/<name>.toml` (D2).
+The **pinned key contract** is top-level `host` (str, the ssh alias) and `cold_root` (str, absolute on that host).
+Any other key is ignored. A missing `cold_root` refuses, naming the file. Every TOML parse error at every layer
+raises, naming the file. The `dependency_provenance._load_toml` swallow pattern (`dependency_provenance.py:86-97`) is
+explicitly not reused. Each resolution returns `(value, layer_label)`, which every command shows and which goes into
+the copy row. Archives land at `<cold_root>/bathos-cold/<project_slug>/<full_run_id>/`.
 
 ### 5.2 Archive and manifest
 
-- `run-<id8>.tar.zst`: a POSIX tar of the reference file set, members relative to the project root (the paths
-  `output_metadata` already uses), sorted, `mtime` kept, uid/gid zeroed. Compressed with zstd level 19,
-  long-distance mode, through `zstandard` (new dependency, D6) or the `zstd` binary. Byte-reproducibility is **not**
-  promised. Identity is the manifest, not the tar bytes.
-- `run-<id8>.manifest.json`:
+- `run-<full_run_id>.tar.zst`: a POSIX tar of the reference set, member names = `relpath`, sorted, with normalised
+  headers (`mtime` = the reference event's ts, uid/gid 0, empty uname/gname, mode 0644). zstd level 19,
+  single-threaded, through `zstandard` (D6; Python 3.13 has no stdlib zstd). Deterministic by construction, but resume
+  does **not** depend on byte identity (§6.1 step 2).
+- `run-<full_run_id>.manifest.json` has no wall-clock fields, so the same reference set always yields the same bytes:
 
 ```jsonc
 {
   "manifest_version": 1,
   "run_id": "1e4596c6-7a55-4595-9083-2091b1719a0b",
   "project_slug": "denxity",
-  "reference_phase": "run_end",            // or "adopted"
-  "reference_event_eid": "<eid>",
-  "created_at": "2026-10-23T18:00:00Z",
-  "bathos_version": "0.14.0",
-  "archive": {"name": "run-1e4596c6.tar.zst", "sha256": "…", "size_bytes": 0, "codec": "zstd-19-long"},
-  "files": [{"relpath": "outputs/validation/qb_mi_coverage_r6.json", "size_bytes": 1658975, "sha256": "df15d2…"}]
+  "worktree_root": "/home/marielle/projects/denxity/.claude/worktrees/qb-r6",
+  "archive": {"name": "run-1e4596c6-….tar.zst", "sha256": "…", "size_bytes": 0, "codec": "zstd-19-st"},
+  "files": [{"relpath": "outputs/validation/qb_mi_coverage_r6.json", "size_bytes": 1658975,
+             "sha256": "df15d2…", "phase": "run_end", "origin_eid": "<eid>"}]
 }
 ```
 
-Before upload, bathos asserts that `files[]` equals the reference hash set exactly. Neither a superset nor a subset
-is accepted.
+`phase` and `origin_eid` are **per file**, so a mixed `run_end` + `adopted` set (the r6/r7 case) is representable.
+Before upload, bathos asserts that `files[]` equals `reference_hashes(run_id)` exactly.
 
 ### 5.3 Catalog record: `output_copy.*` events → `index.db.output_copies`
 
-Event kinds: `output_copy.recorded` and `output_copy.verified`. The entity is `[run_id, copy_id]`. `copy_id` is
-`sha256(run_id|tier|profile|path)[:16]`.
+Kinds: `output_copy.recorded` (written by `cold`/`warm`, carrying the full row including `state` and `verified_at` from
+its own pre-commit verify), `output_copy.verified` (written by `verify`: `state`, `verified_at`, `detail`) and
+`output_copy.superseded` (§6.4). Entity: `[run_id, copy_id]`.
+
+`copy_id = sha256(json.dumps([run_id, host, profile or "", canonical_path]))[:16]`. `host` is included, so warm copies
+on two machines never collide. `tier` is an attribute, not part of identity, so one remote file is one row whichever
+leg wrote it.
 
 | column | type | note |
 |---|---|---|
-| `run_id`, `copy_id` | str | PK `(copy_id)` |
-| `tier` | `warm` \| `cold` \| `mirror` | |
-| `profile` / `host` / `path` | str | warm: host = local hostname, path = extracted dir |
-| `config_layer` | str | which layer chose the profile |
-| `archive_sha256`, `manifest_sha256` | str | null for warm |
-| `reference_phase`, `reference_event_eid` | str | pins which hash set the copy was checked against |
-| `state` | `verified` \| `failed` \| `unverifiable` | latest `output_copy.verified` |
-| `verified_at`, `recorded_at` | ts | |
+| `copy_id` (PK), `run_id` | str | |
+| `tier` | `warm` \| `cold` \| `mirror` | attribute |
+| `profile`, `host`, `path` | str | warm: `profile` = "" |
+| `config_layer` | str | |
+| `archive_sha256`, `manifest_sha256`, `archive_size_bytes` | str/int | null for warm |
+| `state`, `verified_at`, `recorded_at`, `superseded_at` | | |
 
-Folded by a new `runlog/fold_output_copies.py`, by latest `(ts, eid)` per `copy_id`, as `fold_runs` does for
-`output_metadata`. Legacy (non-log) catalogs: tiering commands refuse with `requires_log_mode`. No legacy write path
-is added (D7).
+**Fold (`runlog/fold_output_copies.py`), a merge rather than "latest wins":** the base fields come from the latest
+`recorded`. `state`/`verified_at` come from the latest of {`recorded`, `verified`}, ordered by `(ts, kind_rank, eid)`
+with `recorded` = 0 and `verified` = 1. `uuid7` is a millisecond stamp plus random bits (`envelope.py:29-40`), so
+`eid` alone does not order same-millisecond events. `superseded` sets `superseded_at`, and the row is then excluded
+from "verified copy" lookups.
+
+**Index wiring (all required in the same step):** `OUTPUT_COPIES_DDL` in `init_index_schema`; an `output_copies` view
+in `connect_read` (`index.py:440-456`, which lists every view explicitly); bump `INDEX_SCHEMA_VERSION` so existing
+`index.db` files rebuild; `_OUTPUT_COPY_KINDS` dispatched in `fold_roots_into` (`ingest.py:1164-1190`). That function
+uses an explicit `if/elif` per kind family and advances the watermark past kinds it doesn't know, so an unwired kind
+is silently never folded. Also a fold-parity check in `verify_runlog`.
+
+Legacy (non-log) catalogs: refuse with `requires_log_mode` (D7).
 
 ## 6. Mechanics
 
-### 6.1 Cold write (per profile, sequential: cold, then mirror)
+### 6.1 Cold write (per profile, cold first, then mirror)
 
-1. Resolve the profile (`host`, `cold_root`, layer).
-2. `ssh host mkdir -p <dest>`, then check whether `<dest>/run-<id8>.tar.zst` exists. If it exists with the same
-   sha256 as the local archive, record the copy and verify it (idempotent resume). If it exists with a different
-   sha256, refuse with `archive_conflict`.
-3. `rsync --partial-dir=.bth-partial <archive> <manifest> host:<dest>/run-<id8>.tar.zst.partial` (and the same for
-   the manifest).
-4. Remote cache-cold sha256 of the `.partial` files, using myxcel's `_cache_cold_sha256` semantics (D3 decides
-   whether this runs on the login node or as a job).
-5. On match, `ssh host mv -n …partial final` (`mv -n` never overwrites), then re-stat the final file.
-6. Emit `output_copy.recorded` + `output_copy.verified state=verified`. On mismatch, leave the `.partial` in place,
-   emit `failed`, and exit non-zero. The next attempt overwrites only the `.partial`.
+All remote steps are `myxcel cold …` calls (D1). Each attempt mints `attempt8` (random).
 
-Each run is one unit with its own process and timeout. A batch (`bth cold --all-uncopied`) persists each unit's
-`verified` event as it completes and skips units already `verified` with matching sha256. That is the preemption
-rule.
+1. Resolve the profile (`host`, `cold_root`, layer). Probe `myxcel cold --help` once and refuse with
+   `myxcel_capability_gap` if the subcommands are missing, as `cluster.py` does for `pull-path`.
+2. **Resume check.** If the final manifest and archive both exist remotely: fetch the remote manifest. If its
+   `files[]` equals `reference_hashes` and `verify-file` passes on both files against the remote manifest's own
+   hashes, emit `output_copy.recorded` for that copy and stop (no upload). If they exist but differ: `archive_conflict`.
+   If exactly one exists: `archive_conflict` with detail `half_committed`, so the owner can supersede (§6.4).
+3. **Take the remote lock:** `mkdir <dest>/.bth-lock` (atomic; it fails if the lock is held). The lock directory
+   records the holder's pid, host and attempt, so a stale lock can be identified. Stale locks are broken only with
+   `--break-lock`.
+4. Upload the manifest, then the archive, each as its own call to its own name:
+   `<name>.partial-<attempt8>`. A fresh name per attempt means rsync can't skip a corrupt leftover. Leftovers from
+   other attempts are listed in the output, never reused, and removed only by `--clean-partials`.
+5. `verify-file` on both partials (cache-cold, D3). On a mismatch, delete **this attempt's** partials, release the lock,
+   emit nothing and exit 1.
+6. **Commit, manifest first and archive last:** `ln <partial> <final> && rm <partial>`. POSIX `ln` without `-f` fails
+   if `final` exists, whatever the coreutils version. Do not use `mv -n`: GNU coreutils 9.4 exits 1 when the target
+   exists, but older releases exit 0 without moving (A21). The archive's final name existing is the single commit
+   point.
+7. `verify-file` on both **final** names (post-commit, so a pre-existing different file can never be certified).
+   Release the lock. Emit one `output_copy.recorded` with `state=verified` (`emit_event(..., hard_fail=True)`).
 
-### 6.2 Transport ownership (D1)
+**Crash windows:** after 6a (manifest committed, archive not), resume sees `half_committed`. After 6b with no event,
+resume's step 2 finds both files matching and records the copy. Either way nothing is lost or overwritten.
 
-Recommended: **myxcel gains the primitive and bathos calls it**, as `cluster.py` already shells out to myxcel
-(`cluster.py:104-255`). New myxcel commands: `myxcel cold put <profile> <local_file> <cold_rel> --json` (steps 2-5)
-and `myxcel cold verify-file <profile> <cold_rel> <sha256> --json` (cache-cold, three-state, plain sha256, not
-`_tree_hash`). This fixes A10 (`.partial`) inside myxcel for both tools, and gives naurmalade a JSON verify output
-that ends the A14 bug. Alternative: bathos does rsync/ssh itself (§11 D1).
+**Unit of work and preemption:** each run is its own unit, with its own process and timeout. All events go through
+`with unit_of_work(cat) as log_mode:` (not a separate `is_log_mode` pre-check) with `hard_fail=True`. Before
+**reading** `output_copies`, the commands call `ingest_all` explicitly, because `ingest_after_write` is skipped under
+`SLURM_JOB_ID` / `BTH_NO_INGEST=1` (`ingest.py:1006-1017`). Without that, a batch run in a transfer job would never see
+its own progress.
 
-### 6.3 Log-mode guard (from the reap bug)
+### 6.2 myxcel primitives (D1), with JSON contracts pinned here so bathos tests can mock them
 
-All new write paths go through `unit_of_work()` + `emit_event`, with no legacy branch. The reap bug came from a
-legacy post-step reachable after cutover. The rule here: tiering commands check `is_log_mode(catalog_dir)` once at
-entry and never call `compact`. No further reap change is proposed. PR #127 is the fix and needs only a release and a
-`uv tool install` (owner).
+| Command | Output (`--json`) |
+|---|---|
+| `myxcel cold put <profile> <local_file> <remote_rel_name>` | `{"status":"ok"\|"error","remote_path","bytes","message"}`. Uploads to the exact name given (bathos chooses the `.partial-<attempt8>` name). |
+| `myxcel cold commit <profile> <remote_partial> <remote_final>` | `{"status":"ok"\|"exists"\|"error"}` via `ln && rm`. |
+| `myxcel cold verify-file <profile> <remote_path> <sha256> <size>` | `{"status":"verified"\|"failed"\|"unverifiable","sha256_observed","size_observed","method":"login_ssh"\|"slurm_job","message"}`. Plain sha256, not `_tree_hash`. |
+| `myxcel cold get <profile> <remote_path> <local_dir>` | `{"status","local_path","bytes"}` |
+| `myxcel cold lock` / `unlock <profile> <remote_dir>` | `{"status":"acquired"\|"held","holder"}` |
+
+Paths are relative to the profile's `cold_root`. myxcel refuses absolute paths and any `..` segment.
+
+### 6.3 Log-mode guard
+
+There is no legacy branch, and nothing calls `compact`. The reap bug (`compact(force_rebuild=True)` from a legacy
+post-step, `reap.py:457`) is fixed on main by PR #127. Deploying it is an owner release item.
+
+### 6.4 Supersede (rollback for live mistakes)
+
+`bth cold <run> --supersede --reason <text>` renames the remote final pair to
+`run-<id>.superseded-<utc>.{tar.zst,manifest.json}` via `myxcel cold commit` (so nothing is deleted), emits
+`output_copy.superseded`, and lets a fresh cold write proceed. Combined with `adopt --retract`, every Step 9 mistake can
+be recovered without deleting anything.
 
 ## 7. Failure modes
 
 | Failure | Detection | Behaviour |
 |---|---|---|
-| Output changed after run end | `outputs hash` vs `run_end` | `cold` refuses with `outputs_drifted`, listing the paths. No archive. |
-| Reference set incomplete (legacy run, ≥100 MiB file or directory recorded with null sha) | null sha in reference | `cold` refuses with `reference_incomplete`, pointing to `adopt`. |
-| Copy interrupted mid-transfer | `.partial` left, no `verified` event | Retry overwrites the `.partial` only. |
-| Final archive exists, different bytes | step 6.1.2 | `archive_conflict`. Never overwrite. The owner investigates. |
-| Cold and mirror disagree | `verify --tier outputs` | Both rows stay as measured. The run-level verdict is `failed`. |
-| Host unreachable / Duo / sandbox blocks ssh | ssh exit | `unverifiable`. The message names the sandbox cause when stderr matches `Operation not permitted`. |
-| Warm target non-empty | pre-check | Refuse. No merge. |
-| Warm extraction mismatch | per-file hash | Delete only the `.partial` dir bathos created. Report `failed`. |
-| myxcel profile missing `cold_root` | config | Refuse, naming the profile file and layer. |
-| Malformed bathos/pyproject config | resolver | Raise, naming the file. Never fall through to "off". |
-| Login node policy (A18) | — | D3. |
-| Group quota / setgid on so3 | `rsync` error | Surface the stderr. Pre-flight `df`/`lfs quota` is optional (U). |
+| Live file differs from reference | `outputs hash` | `cold` refuses `outputs_drifted`. A drifted `run_end` path needs a new run. |
+| Legacy run, or ≥100 MiB / directory entry with null sha | reference has a null sha | `no_reference_hashes` for those paths. `adopt` covers paths with no `run_end` entry. |
+| Symlink / special file / path escaping `fs_root` under a root | expansion | `symlink_in_outputs` / `special_file_in_outputs` at run end. No reference for that run. |
+| Run invoked from another worktree or the main checkout | reference uses `relpath` + the event's `worktree_root` | Files are looked up under the recorded `worktree_root`. If that is gone: `worktree_missing` (warm from cold instead). |
+| Interrupted upload | partial left, no commit | Next attempt uses a new name. Leftovers are reported. |
+| Concurrent writers on one run/profile | `.bth-lock` | Second writer refuses with `lock_held` and the holder. |
+| Commit target already exists | `ln` fails | `archive_conflict`, never overwritten. |
+| Half-committed pair | resume step 2 | `archive_conflict detail=half_committed`, fixed with `--supersede`. |
+| Cold and mirror disagree | `verify --tier outputs` | Both rows as measured, run verdict `failed`. |
+| Host unreachable / Duo / sandbox | myxcel `unverifiable` | Reported as such. |
+| Old myxcel without `cold` subcommands | capability probe | `myxcel_capability_gap`. |
+| Tar member set ≠ manifest, or traversal / link members | pre-extract check + `filter="data"` | `warm_mismatch`, nothing written outside staging. |
+| Warm target exists | pre-check | `warm_target_exists`. |
+| Event write fails | `hard_fail=True` | Command exits 1 even if the remote copy succeeded. Resume step 2 records it next time. |
+| Ingest suppressed (SLURM, `BTH_NO_INGEST`) | explicit `ingest_all` before reads | Reads stay current. |
+| Malformed config at any layer | resolver | Raise naming the file. |
+| Group quota / setgid on so3 | myxcel error | Surface stderr (pre-flight optional, U). |
 
 ## 8. naurmalade alignment
 
@@ -222,30 +286,30 @@ exist. Alignment:
   it is the manifest plus `output_copies`. bathos does not ingest `trajectory_segments`.
 - Fix A14 by having naurmalade read the sha256 from `myxcel cold verify-file --json` (or from `coldified.jsonl`),
   not from stdout prose. This is a draft bug report (§12), not filed.
-- When a naurmalade analysis run cites a trajectory, its `[outputs] roots` should **not** include cold-relocated
-  trajectory paths. Those are inputs, already tiered by myxcel. Lint: a root that is a symlink into a `cold_root`
-  gets a Tier-2 warning.
-- Shared field names: `sha256`, `size_bytes`, `created_at` (not `content_sha256`). Noted as a naurmalade follow-up,
-  not a requirement.
+- A cold-relocated trajectory is a symlink into a `cold_root`, so §3.2 already refuses it as an output root. Those
+  trajectories are inputs, already tiered by myxcel.
+- Shared field names: `sha256`, `size_bytes`, `created_at` (not `content_sha256`). Noted as a naurmalade follow-up.
 
 ## 9. Implementation plan
 
-Each step is one PR off `main`, ending with narrow tests (`uv run pytest tests/<file> -k …`, threads capped, never
-the whole suite locally).
+Each step is one PR off `main` with narrow tests (`uv run pytest tests/<file> -k …`, threads capped, never the whole
+suite locally). Steps 5a and 5b are myxcel PRs. Every later bathos step mocks them against the §6.2 contracts until
+they land.
 
-| Step | Scope | Acceptance |
+| Step | Scope | Acceptance (each must fail on a broken implementation) |
 |---|---|---|
-| **0. Pre-register the r6/r7 check** | `scripts/validation/check_output_copies_r6r7.py` + `.bth.toml` committed **before** it runs: re-derive A3-A5 (8 recorded hashes vs archive and live, archive `SHA256SUMS`, 888-file count). | Run record has `outcome` evaluated and `output_paths` resolving. Numbers in this spec are then cited from that run, not from the spike. |
-| **1. Config resolver** | `bathos/output_tiers/config.py`: `resolve_output_profiles(explicit, start) -> (cold, mirror, layers)`, myxcel profile read. | Table tests for each layer, `none` disabling, malformed file raising with its path, a profile missing `cold_root` refusing. No default path anywhere (grep test). |
-| **2. Full output hashing** | `[outputs] roots` in the sidecar schema and validator. Run-end expansion of directories, no size cap for declared roots, `phase: run_end`. Fold keeps the `run_end` event reachable (`reference_hashes(run_id)`). | A directory root yields one entry per file. A 150 MiB file gets a sha256. A rebaseline does not change `reference_hashes`. Legacy `output_metadata` consumers are unchanged (existing `checker` tests pass). |
-| **3. `outputs hash` / `outputs adopt` / `outputs where`** | Read-only compare plus the adopt event. | Adopt on a non-terminal run refuses. Adopted entries carry `phase: adopted` in every report. |
-| **4. Archive builder (local only)** | Tar + zstd + manifest into staging, members checked against reference. | Round-trip: build → extract → per-file hash equals reference. A tampered member makes the build refuse. |
-| **5. Transport** (myxcel if D1 = myxcel) | `cold put` / `cold verify-file` with `.partial` + `mv -n`, cache-cold, JSON. | Fake-ssh tests: interrupted copy leaves only `.partial`. Existing final with a different sha → `archive_conflict`. Rerun is idempotent. |
-| **6. `bth cold`** | Wires 1+4+5. `output_copy.*` events and fold. | `index.db.output_copies` rows after cold+mirror. Kill mid-mirror → rerun skips the verified cold copy. |
-| **7. `bth warm`** | Fetch, verify, extract to `.partial`, rename. | Mismatch, extra or missing file each refuse and leave the target untouched. A non-empty target refuses. |
-| **8. `bth verify --tier outputs`** | Three-state per copy, plus agreement. | Unreachable host → `unverifiable`. A flipped byte in a test archive → `failed`. |
-| **9. r6/r7 migration (live, owner-gated)** | `adopt` the 4 runs with roots covering all 888 files, `cold` to engaging + titanix, `warm` into a scratch dir, `verify`. A sidecar-tracked run for the whole sequence. | The run record shows every one of the 888 files hashed. Both copies `verified`. Warm into scratch matches. Manual copies and worktree originals are untouched. |
-| **10. Docs** | `/using-bathos` section, lint rule for undeclared resume dirs. | Skill text names the commands and the three states. |
+| **0. Pre-register the r6/r7 check (denxity repo, `qb-r6` worktree)** | `scripts/validation/check_output_copies_r6r7.py` + `.bth.toml` committed before it runs. Inputs: the 4 run ids, the 3 staged archives, the worktree. Result fields: `n_recorded`, `n_match_archive`, `n_match_live`, `n_files_archive`, `n_files_disk`, `sha256sums_ok`, plus a built-in **negative control**: one archive member copied with a byte flipped must count as a mismatch. | `outcome` = `all_match` only if 8/8/8, 888/888, `sha256sums_ok` and `negative_control_detected`. A version with the comparison stubbed out lands on `fail` via the control. |
+| **1. Config resolver** (`output_tiers/config.py`) | §5.1 incl. D9 | Unit tests: each layer wins over the next; `none` disables; malformed TOML at each layer raises naming the file; profile without `cold_root` refuses; **no layers set → `off` with the layer list** (not a grep check). |
+| **2. Reference hashing** (`runner.py`, `checker.py`, `fold_runs.py`, `output_tiers/reference.py`) | §3.1-3.4: `[outputs] roots`, expansion rules, `relpath` + `phase` alongside the legacy keys, rebaseline tagged, `reference_hashes()`, adopted-never-overrides in the fold | Fixture events of each shape (run_end, phase-less, `run.imported`, rebaseline, adopted). `check_output_sha_drift` and `bth find --output-file` return the same results on a new-shape record as on a legacy one (new test, not just the old ones passing). A symlink root refuses. A 150 MiB file gets a sha. Prefix resolution: 0 or 2 matches refuse. |
+| **3. `outputs hash` / `adopt` (+ `--retract`, `--dry-run`)** | §4 rows | Adopt over a `run_end` path → `run_end_conflict`. Adopt on a running run refuses. Retract removes the entries from `reference_hashes`. `--dry-run` writes no event (log byte count unchanged). |
+| **4. Archive builder** (`output_tiers/archive.py`) | §5.2 | Same reference set built twice → identical archive and manifest sha256s. Round-trip per-file hashes match. A tampered staging file refuses. |
+| **5a. myxcel `cold put/commit/verify-file/get/lock`** | §6.2 | Fake-ssh tests: `commit` onto an existing final → `exists`. Per-attempt names. A `..` path refuses. Verify three-state. |
+| **5b. myxcel capability probe in bathos** | §6.1 step 1 | An old-myxcel stub → `myxcel_capability_gap`. |
+| **6. `bth cold` + `output_copies` + `bth outputs where`** | §5.3 wiring, §6.1, §6.4 | Kill after manifest commit → rerun reports `half_committed`. Kill after archive commit but before the event → rerun records without uploading. Two concurrent writers → one gets `lock_held`. `INDEX_SCHEMA_VERSION` bump rebuilds an old `index.db` and `where` works on it. A same-millisecond recorded+verified pair folds to `verified` in 1000 shuffled orderings. `--all-uncopied` continues past a failing run and exits 1. Under `SLURM_JOB_ID`, progress is still visible. |
+| **7. `bth warm`** | §4 row | Archive containing a `../` member, an extra member or a symlink member → `warm_mismatch` with nothing outside staging. Existing `<dir>` refuses. Success leaves no staging directory. |
+| **8. `bth verify --tier outputs`** | §4 row | Unreachable host → `unverifiable`. Flipped byte → `failed`. `bth verify` (default `--tier all`) makes **no** network call (asserted with a stubbed myxcel that fails if invoked). |
+| **9. r6/r7 migration (live, owner-gated)** | `--dry-run` first and owner review, then `adopt` (the cells dirs, review HTML) on the 4 runs, `cold` engaging + titanix, `warm` into scratch, `verify`. A sidecar-tracked run records the whole sequence. | All 888 files in `reference_hashes` (8 `run_end_legacy` + 880 `adopted`). Both copies `verified`. Warm-into-scratch per-file match. Manual copies and originals untouched (sha256 of the manual tars unchanged before and after). |
+| **10. Docs** | `/using-bathos` section, lint for undeclared resume dirs (flags `--resume-dir`/`--out-dir` argv values not under a declared root, using the run record's argv, so it works whether or not the directory exists). | Skill names the commands, the three states and the supersede path. |
 
 ## 10. Non-goals
 
@@ -253,7 +317,7 @@ Deleting warm files (a later `bth outputs release` gated on cold+mirror `verifie
 rejected it for the same low-duplication reason). Automatic tiering. Tiering naurmalade trajectories. Legacy-mode
 catalogs.
 
-## 11. Decisions (all decided 2026-10-23)
+## 11. Decisions (D1-D8 decided 2026-10-23; D9 open)
 
 - **D1 transport owner: myxcel.** myxcel gains `cold put` / `cold verify-file --json`, and bathos shells out to them
   (§6.2). Step 5 is a myxcel PR.
@@ -263,12 +327,18 @@ catalogs.
   (login-node policy) stays unverified. The threshold is a config key, not a constant.
 - **D4 titanix `cold_root`: done.** The owner added `cold_root = "/home/solab/marielle"` to
   `~/.config/myxcel/titanix.toml:40`. It parses with `tomllib`.
-- **D5 drift policy: refuse.** When the latest rebaseline differs from `run_end`, tiering refuses with
-  `outputs_drifted` until `bth outputs adopt` records a new reference.
+- **D5 drift policy: refuse.** Tiering refuses with `outputs_drifted`. **Remedy changed after review (F-04/F-16):**
+  drift is measured on live files, and a drifted `run_end` path is never re-referenced by `adopt`; it needs a new
+  run. `adopt` only covers paths that have no `run_end` entry.
 - **D6 zstd: the `zstandard` Python dependency.**
 - **D7 legacy catalogs: refuse** tiering with `requires_log_mode`. No legacy write path.
 - **D8 manual r6/r7 copies: leave them as they are.** Step 9 writes bathos-format archives alongside them. The manual
   tars are never adopted, moved or deleted by bathos.
+
+- **D9 user config file (open, raised by review F-21).** bathos already reads `~/.bth/config.toml`
+  (`runner.py:875`), while the global rule asks for `${XDG_CONFIG_HOME:-~/.config}/<name>/config.toml`. Options:
+  XDG, per the global rule (recommended, with `~/.bth/config.toml` left as is); `~/.bth/config.toml` `[outputs]`,
+  per bathos convention; or read both and refuse if they disagree.
 
 ## 12. Owner items (drafted, not filed)
 
@@ -285,3 +355,48 @@ catalogs.
    (`coldify_remote.py:139-145`). `coldify_verify` ignores `state = "pending"`.
 7. **Global rule (candidate):** "Every directory a run writes is declared under `[outputs] roots`, and outputs leave
    a machine only through `bth cold`." Needs your edit of global rules.
+
+## 13. Adversarial review dispositions (Gemini 4 Argon, 2026-10-23)
+
+Reviewer: `gemini-4-argon-high` via praxia `surface_dispatch` (Antigravity headless, dispatch `c0daf6d7`), against
+`2b4c68c4`. Raw output: `audits/261023_output-tiering-argon-review.md`. Every code claim was re-checked by reading the
+code. The reviewer **misquoted the spec in places** (it said `--to` defaults to the project root, gave exit code `2`,
+named `state="unverified"`, flag-style myxcel signatures, `.npz` cells, `261022_`-prefixed paths), and its §2 matrix
+mislabels rows. Those parts were discarded.
+
+| ID | Verdict | Disposition |
+|---|---|---|
+| F-01 `mv -n` | **Partly**: version-dependent (A21) | §6.1 step 6-7: `ln && rm`, then verify finals after commit |
+| F-02 non-reproducible resume | **Confirmed** | §5.2 deterministic manifest/tar. §6.1 step 2 resumes on manifest content, not bytes |
+| F-03 two-file rsync / crash window | **Confirmed** | §6.1 step 4 one file per call. Manifest-first commit. `half_committed` |
+| F-04 adopt contradiction + laundering | **Confirmed** | §3.3-3.4, §4 adopt row, D5 remedy changed |
+| F-05 `path`→`relpath` breaks consumers; absolute paths | **Confirmed** (A22) | §3.1 keeps legacy keys and adds `relpath`. Step 2 acceptance |
+| F-06 fold dispatch + views | **Confirmed** (A20 corrected) | §5.3 index wiring |
+| F-07 phase-less / `run.imported` references | **Confirmed** (A23) | §3.3 (b) `run_end_legacy`. Per-file phase in the manifest |
+| F-08 `where` before its table | **Confirmed** | `where` moved to Step 6 |
+| F-09 no fetch primitive | **Confirmed** | `myxcel cold get` + capability probe (§6.2, Step 5b) |
+| F-10 warm staging inside target | **Partly**: "default project root" was fabricated; the in-target staging was a real defect | Sibling staging, `<dir>` must not exist |
+| F-11 fold clobber + same-ms order | **Confirmed** (A24) | Merge fold with `kind_rank`. One `recorded` event carries state |
+| F-12 worktree vs identity root | **Confirmed** | §3.1 `fs_root` + recorded `worktree_root` |
+| F-13 `copy_id` lacks host | **Confirmed** | JSON-encoded id incl. host. Tier is an attribute |
+| F-14 `hard_fail`, ingest skip | **Confirmed** (A24) | §6.1 unit-of-work paragraph |
+| F-15 no `cli.py`, exit codes | **Partly**: no exit-2 requirement existed; the `cli.py` reference was wrong | §4 preamble: cyclopts wiring, branch on `error_code` |
+| F-16 rebaseline untagged; history-based drift | **Confirmed**, wrong citation (`mcp.py:2171` is campaign code; the real site is `checker.py:116-167`) | §3.3-3.4 |
+| F-17 no rollback | **Confirmed** | `--dry-run`, `adopt --retract`, `--supersede` (§6.4) |
+| F-18 vacuous checks | **Partly**: Step 4 lint claim fabricated; Step 0/1/8 points real | Step 0 control, Step 1 unit test, Step 8 `--tier all` no network |
+| F-19 symlinks, unsafe extraction | **Confirmed** | §3.2, §4 warm row, Step 7 |
+| F-20 shared partial, rsync skip | **Confirmed** | Per-attempt names, remote lock |
+| F-21 config split-brain | **Partly**: per-layer `cold_root` split-brain is moot (no paths stored); `~/.bth/config.toml` and the swallow pattern are real (A26) | §5.1, new D9 |
+| F-22 run-id prefixes | **Confirmed** | §4 preamble |
+| F-23 module vs package | **Confirmed** | `output_tiers/` package |
+| F-24 `--all-uncopied` scope | **Confirmed** | §4 cold row |
+| F-25 external refs unverifiable | **By design** (they were verified from their own repos) | Pinned myxcel profile keys and JSON contracts in §5.1/§6.2 |
+
+**Process notes for praxia (draft, not filed):** (1) The dispatch admission rejected this read-only review because
+of praxia's own `.praxia/dispatch/<id>/envelope.json`, which is missing from the materialization allowlist; the
+retry-precondition check has the same gap (`dispatch_run.rs:393`). (2) The `agy` executor returned the review in
+`run.log` `response` but `structured_output` was `{}`. (3) The MCP `surface_dispatch run` action needs the full
+19-field envelope; the `EnvelopeRequest` front door described in the skill is not reachable from MCP. (4) The installed
+praxia binary embeds a registry whose antigravity `power` id (`gemini-3.1-pro-high`) no longer exists in agy 1.4.6.
+Fixed on praxia `origin/main` (#261) and bridged locally with `~/.praxia/model_registry.toml`.
+

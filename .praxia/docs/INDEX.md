@@ -51,6 +51,7 @@
 ## Actuation Surfaces
 
 ## Audits
+- [261023_output-tiering-argon-review](audits/261023_output-tiering-argon-review.md) — Verbatim spec-challenger review of specs/261023_output-tiering.md at 2b4c68c4 by gemini-4-argon-high through praxia surface_dispatch c0daf6d7; dispositions (confirmed, version-dependent, fabricated) are in the spec section 13
 - [261015_exploratory-mode-contract-adversarial-review](audits/261015_exploratory-mode-contract-adversarial-review.md) — Spec-challenger findings C1-C25 and spec-defender rulings for specs/261015_exploratory-mode-contract.md, run sequentially
 
 ## Research
