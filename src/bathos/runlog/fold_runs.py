@@ -109,6 +109,7 @@ GENERAL_FIELDS = (
     "stage_name",
     "epistemic_class",
     "agent_session",
+    "dependency_provenance",
     "claim_discriminates",
     "claim_isolates",
     "slurm_job_id",

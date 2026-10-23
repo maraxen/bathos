@@ -899,6 +899,62 @@ def _run_script_impl(
     # invalidating every prior differential/SC result) is a general provenance gap.
     dependency_lock_sha256 = hash_dependency_lock(cwd)
 
+    # Per-package provenance (debt #2946): opt-in via `track_packages`. A malformed setting
+    # refuses the run before anything launches, like [enforcement]: a typo in a setting that
+    # opts INTO provenance must not silently record nothing.
+    from bathos.dependency_provenance import (
+        DependencyProvenanceConfigError,
+        capture_dependency_provenance,
+        resolve_tracked_packages,
+        shadowed_packages,
+    )
+
+    try:
+        tracked_packages = resolve_tracked_packages(
+            bundle.path if bundle and bundle.found else None,
+            script_path.parent if script_path is not None else cwd,
+        )
+    except DependencyProvenanceConfigError as e:
+        print(
+            json.dumps(
+                {
+                    "error_code": "invalid_param",
+                    "error": f"invalid track_packages config: {e}",
+                    "resolution_hint": (
+                        "track_packages must be a list of distribution names, e.g. "
+                        'track_packages = ["aminx"] under [provenance] in the sidecar or '
+                        ".bth.toml, or under [tool.bathos] in pyproject.toml"
+                    ),
+                }
+            ),
+            file=sys.stderr,
+        )
+        return 1
+    dependency_provenance = capture_dependency_provenance(tracked_packages, argv, cwd)
+    if dependency_provenance is not None:
+        if dependency_provenance.get("probe_status") != "ok":
+            print(
+                "Warning: dependency provenance probe did not run "
+                f"({dependency_provenance.get('probe_status')}); tracked packages "
+                f"{tracked_packages} are recorded as 'unknown'.",
+                file=sys.stderr,
+            )
+        shadowed = shadowed_packages(dependency_provenance, tracked_packages)
+        if shadowed:
+            print(
+                f"Warning: {', '.join(shadowed)}: the module `import` resolves to is NOT the "
+                "installed distribution (a vendored or source copy shadows it), so the "
+                "recorded version describes code that will not execute. Recorded as "
+                "<pkg>_module_in_dist=false.",
+                file=sys.stderr,
+            )
+        event(
+            "run.dependency_provenance",
+            packages=tracked_packages,
+            probe_status=dependency_provenance.get("probe_status"),
+            shadowed=shadowed,
+        )
+
     # Run gate check for enforced dirs (built-in ENFORCED_DIRS plus `.bth.toml [enforcement] dirs`).
     # An invalid [enforcement] block refuses the run BEFORE anything is launched: a typo in a setting that
     # adds enforcement must not silently leave the gate off (protamer #1960 / bathos #2210).
@@ -996,6 +1052,11 @@ def _run_script_impl(
         component_sidecar_sha256=component_sidecar_sha256,
         seed=seed,
         dependency_lock_sha256=dependency_lock_sha256,
+        dependency_provenance=(
+            json.dumps(dependency_provenance, sort_keys=True)
+            if dependency_provenance is not None
+            else None
+        ),
         git_dirty_content_id=git.dirty_content_id,
         git_provenance_source=git.provenance_source,
         # Waiver of a [requires] check (spec 261016 B2) lands in the run's free-form metadata JSON.

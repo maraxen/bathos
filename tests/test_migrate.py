@@ -437,7 +437,46 @@ def test_migrate_v16_to_v17_exploratory_fields_null_backfill(tmp_path):
         values = tbl_after.column(field_name).to_pylist()
         assert all(v is None for v in values), f"{field_name}: expected all None, got {values}"
     assert set(tbl_after.column("schema_version").to_pylist()) == {CURRENT_SCHEMA_VERSION}
-    assert CURRENT_SCHEMA_VERSION == "17"
+    assert CURRENT_SCHEMA_VERSION == "18"
+
+
+def test_migrate_v17_to_v18_dependency_provenance_null_backfill(tmp_path):
+    """v17->v18 migration (debt #2946): dependency_provenance backfills to None. A v17 run
+    tracked no packages, which is a different fact from a tracked package recorded as
+    "unknown", so the backfill must not write "" or "{}"."""
+    from bathos.compact import MIGRATIONS
+    from bathos.migrate import migrate_catalog
+    from bathos.schema import COOL_SCHEMA
+
+    v17_schema = pa.schema([f for f in COOL_SCHEMA if f.name != "dependency_provenance"])
+    r = Run(
+        project_slug="test-project",
+        command="python test.py",
+        argv=["python", "test.py"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+    )
+    v17_tbl = r.to_arrow().select([f.name for f in v17_schema])
+    v17_tbl = v17_tbl.set_column(
+        v17_tbl.schema.get_field_index("schema_version"),
+        "schema_version",
+        pa.array(["17"], type=pa.string()),
+    )
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    fragment_path = runs_dir / "run_v17_test.parquet"
+    pq.write_table(v17_tbl, fragment_path)
+
+    result = migrate_catalog(tmp_path, dry_run=False)
+    assert result.migrated == 1
+    tbl_after = pq.read_table(fragment_path)
+    assert tbl_after.column("dependency_provenance").to_pylist() == [None]
+    assert tbl_after.column("schema_version").to_pylist() == ["18"]
+
+    migrated = MIGRATIONS["17"]({"schema_version": "17", "agent_session": None})
+    assert migrated["dependency_provenance"] is None
+    assert migrated["schema_version"] == "18"
 
 
 def test_migrate_v14_to_v15_git_provenance_fields_null_backfill(tmp_path):

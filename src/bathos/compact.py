@@ -423,6 +423,17 @@ def _migrate_v16(run_dict: dict) -> dict:
     return run_dict
 
 
+def _migrate_v17(run_dict: dict) -> dict:
+    """Migrate v17 fragment to v18 by adding dependency_provenance (debt #2946).
+
+    A v17 run predates per-package provenance, so it is None: nothing was recorded,
+    which is a different fact from a tracked package recorded as "unknown".
+    """
+    run_dict["dependency_provenance"] = None
+    run_dict["schema_version"] = "18"
+    return run_dict
+
+
 MIGRATIONS["0"] = _migrate_v0
 MIGRATIONS["1"] = _migrate_v1
 MIGRATIONS["2"] = _migrate_v2
@@ -440,6 +451,7 @@ MIGRATIONS["13"] = _migrate_v13
 MIGRATIONS["14"] = _migrate_v14
 MIGRATIONS["15"] = _migrate_v15
 MIGRATIONS["16"] = _migrate_v16
+MIGRATIONS["17"] = _migrate_v17
 
 
 _RUNS_TABLE_SCHEMA = """
@@ -505,7 +517,8 @@ CREATE TABLE IF NOT EXISTS runs (
     git_provenance_source TEXT,
     epistemic_class TEXT,
     tentative_outcome TEXT,
-    agent_session TEXT
+    agent_session TEXT,
+    dependency_provenance TEXT
 )
 """
 
@@ -1036,6 +1049,7 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
             "ALTER TABLE runs ADD COLUMN IF NOT EXISTS epistemic_class TEXT",
             "ALTER TABLE runs ADD COLUMN IF NOT EXISTS tentative_outcome TEXT",
             "ALTER TABLE runs ADD COLUMN IF NOT EXISTS agent_session TEXT",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS dependency_provenance TEXT",
         ]:
             with contextlib.suppress(Exception):
                 con.execute(_runs_alter_sql)
@@ -1342,8 +1356,8 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                     differential_status, differential_off_value, differential_on_value, differential_effect, dependency_lock_sha256,
                     adversarial_check_result, git_dirty_content_id, git_provenance_source,
                     outcome_error_reason,
-                    epistemic_class, tentative_outcome, agent_session
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    epistemic_class, tentative_outcome, agent_session, dependency_provenance
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     run.id,
@@ -1413,6 +1427,7 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                     run.epistemic_class,
                     run.tentative_outcome,
                     run.agent_session,
+                    run.dependency_provenance,
                 ],
             )
 
