@@ -212,4 +212,9 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     # The bth-preflight-hook could not run or parse `bth preflight` (spec 261016 P1).
     # Caught inside the hook and reported on stderr; never crosses the MCP boundary.
     "HookInternalError": BathosErrorCode.INTERNAL,
+    # Output tiering (spec 261023). Both carry their own, more specific `error_code` attribute
+    # (one of the output-tiering members above, or `invalid_param`); this is the fallback for a
+    # caller that only has the class.
+    "OutputTierError": BathosErrorCode.INVALID_PARAM,
+    "OutputTiersConfigError": BathosErrorCode.INVALID_PARAM,
 }
