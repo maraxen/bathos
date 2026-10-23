@@ -165,6 +165,7 @@ def emit_event(
     data: dict[str, Any],
     cwd: Path | None = None,
     hard_fail: bool = False,
+    worktree_root: Path | None = None,
 ) -> AppendOutcome:
     """Append one event for a write site, resolving the log root and project
     id fresh on every call (only the MODE is cached per unit of work; the
@@ -177,8 +178,15 @@ def emit_event(
     where the script must not be launched. Any other failure (mirror-only,
     or project+fallback failure on a `hard_fail=False` site) is logged as a
     warning only, per "other callers may choose to warn only".
+
+    `worktree_root` overrides the envelope's `worktree_root` (default: the resolved
+    live directory of `cwd`). It is for events about a run that happened elsewhere:
+    an `outputs adopt` run from another checkout must stamp the RUN's recorded root,
+    never the adopter's cwd (output-tiering spec 261023, section 3.3).
     """
     log_root = resolve_log_root(cwd)
+    if worktree_root is not None:
+        log_root = dataclasses.replace(log_root, worktree_root=worktree_root)
     project = _project_slug_for(log_root)
     project_id = resolve_write_project_id(log_root)
     outcome = append_event(

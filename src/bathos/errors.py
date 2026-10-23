@@ -65,6 +65,24 @@ class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(
     RUNLOG_PROJECT_ID_MISSING = "runlog_project_id_missing"
     RUNLOG_MODE_REFUSED = "runlog_mode_refused"
 
+    # Output tiering (bathos.output_tiers, spec 261023_output-tiering): refusals of
+    # `bth outputs hash` / `adopt`, and of the commands built on the same reference set.
+    NO_REFERENCE_HASHES = "no_reference_hashes"
+    RUN_NOT_TERMINAL = "run_not_terminal"
+    ROOT_OUTSIDE_WORKTREE = "root_outside_worktree"
+    ROOT_MISSING = "root_missing"
+    RUN_END_CONFLICT = "run_end_conflict"
+    ADOPT_CLOSED = "adopt_closed"
+    ADOPT_EVENT_NOT_FOUND = "adopt_event_not_found"
+    WORKTREE_UNKNOWN = "worktree_unknown"
+    WORKTREE_MISSING = "worktree_missing"
+    LEGACY_PATH_UNRESOLVED = "legacy_path_unresolved"
+    SYMLINK_IN_OUTPUTS = "symlink_in_outputs"
+    SPECIAL_FILE_IN_OUTPUTS = "special_file_in_outputs"
+    RUN_NOT_FOUND = "run_not_found"
+    RUN_PREFIX_AMBIGUOUS = "run_prefix_ambiguous"
+    REQUIRES_LOG_MODE = "requires_log_mode"
+
 
 # Resolution hints registry: every BathosErrorCode member must have a non-empty entry
 RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
@@ -97,6 +115,21 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.RUNLOG_NOT_IGNORED: "Add '/.bth/log/' to .gitignore in the main checkout (or run `bth init` there) before recording runs",
     BathosErrorCode.RUNLOG_PROJECT_ID_MISSING: "Run `bth init --assign-id` in the main checkout, then commit the updated .bth.toml",
     BathosErrorCode.RUNLOG_MODE_REFUSED: "Unset BTH_LOG_MODE, or run `bth migrate --to-log` to write the real cut-over marker",
+    BathosErrorCode.NO_REFERENCE_HASHES: "The run has no reference hash set: declare [outputs] roots in its sidecar and re-run, or (a pre-standard run only) `bth outputs adopt` its output roots",
+    BathosErrorCode.RUN_NOT_TERMINAL: "Wait for the run to finish (or reap it) before adopting outputs; a running run's files are still changing",
+    BathosErrorCode.ROOT_OUTSIDE_WORKTREE: "Pass --root paths under the run's recorded worktree root (relative paths resolve against it)",
+    BathosErrorCode.ROOT_MISSING: "The --root path does not exist under the run's worktree root; check the path or restore the files first",
+    BathosErrorCode.RUN_END_CONFLICT: "A live file differs from the hash the run recorded at its end; adopt never re-references a drifted run_end path. Re-run instead",
+    BathosErrorCode.ADOPT_CLOSED: "This run declared [outputs] roots, so its reference set is closed to adopt. The fix is a new run",
+    BathosErrorCode.ADOPT_EVENT_NOT_FOUND: "No live adopt event with that eid on this run; list the run's adopt events (bth sql over events) and pass the exact eid",
+    BathosErrorCode.WORKTREE_UNKNOWN: "This run was imported and its worktree root is not trustworthy: pass --worktree-root <path> to the directory its outputs live under",
+    BathosErrorCode.WORKTREE_MISSING: "The run's recorded worktree root does not exist on this machine; restore it, or (imported runs) pass --worktree-root",
+    BathosErrorCode.LEGACY_PATH_UNRESOLVED: "A pre-standard output path cannot be placed under the worktree root; pass --worktree-root for an imported run, or accept that path is unrecoverable",
+    BathosErrorCode.SYMLINK_IN_OUTPUTS: "A symlink sits under the output roots; replace it with the real file or narrow the roots (links are never followed)",
+    BathosErrorCode.SPECIAL_FILE_IN_OUTPUTS: "A FIFO, socket or device sits under the output roots; remove it or narrow the roots",
+    BathosErrorCode.RUN_NOT_FOUND: "No run matches that id or prefix; check it with `bth list`",
+    BathosErrorCode.RUN_PREFIX_AMBIGUOUS: "The run-id prefix matches several runs; pass more characters of the id",
+    BathosErrorCode.REQUIRES_LOG_MODE: "Output tiering reads the run log; run `bth migrate --to-log` first (legacy catalogs are not supported)",
 }
 
 

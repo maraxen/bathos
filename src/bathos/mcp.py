@@ -4352,6 +4352,132 @@ async def mcp_outputs_summary_tool(
     )
 
 
+def _output_tier_error_result(exc: Exception) -> dict:
+    """Shape an output-tiering refusal as the tool error dict: the `error` text leads with the code (the CLI
+    prints only that text), `error_code` carries it for MCP callers."""
+    from bathos.output_tiers.reference import OutputTierError
+    from bathos.runlog.emit import RunNotLaunchedError
+
+    if isinstance(exc, OutputTierError):
+        try:
+            code = BathosErrorCode(exc.error_code)
+        except ValueError:
+            code = BathosErrorCode.INVALID_PARAM
+        message = f"{exc.error_code}: {exc.detail}"
+    elif isinstance(exc, RunNotLaunchedError):
+        code = BathosErrorCode.CATALOG_ERROR
+        message = f"catalog_error: {exc}"
+    else:  # callers only pass the two types above; never mislabel anything else as a refusal
+        code = BathosErrorCode.INTERNAL
+        message = f"internal: {exc}"
+    return {"error": message, "error_code": code.value, "resolution_hint": RESOLUTION_HINTS[code]}
+
+
+@cisternal.tool(registry="bathos", name="outputs_hash")
+@traced_tool
+async def mcp_outputs_hash_tool(
+    run_id: str,
+    worktree_root: str = "",
+    catalog_dir: str | None = None,
+) -> dict:
+    """Re-hash a run's live output files against its reference hashes (read-only)."""
+    return outputs_hash_tool(
+        run_id=run_id, worktree_root=worktree_root, catalog_dir=catalog_dir or ""
+    )
+
+
+@cisternal.tool(registry="bathos", name="outputs_adopt")
+@traced_tool
+async def mcp_outputs_adopt_tool(
+    run_id: str,
+    root: list[str] | None = None,
+    reason: str = "",
+    retract: str = "",
+    worktree_root: str = "",
+    dry_run: bool = False,
+    catalog_dir: str | None = None,
+) -> dict:
+    """Adopt output files of a finished pre-standard run into its reference hashes, or retract an adopt."""
+    return outputs_adopt_tool(
+        run_id=run_id,
+        root=root,
+        reason=reason,
+        retract=retract,
+        worktree_root=worktree_root,
+        dry_run=dry_run,
+        catalog_dir=catalog_dir or "",
+    )
+
+
+@cisternal.tool(registry="bathos-cli", name="outputs_hash", cli_group="outputs", cli_name="hash")
+def outputs_hash_tool(
+    run_id: str = "",
+    worktree_root: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Re-hash a run's live output files against its reference hashes (read-only).
+
+    Reports match / drift / missing per path. `run_id` may be a unique prefix. `worktree_root` is required
+    only for an imported run, whose recorded root is not trustworthy.
+    """
+    from bathos.output_tiers.adopt import hash_outputs
+    from bathos.output_tiers.reference import OutputTierError
+    from bathos.runlog.emit import RunNotLaunchedError
+
+    if not run_id:
+        return {"error": "run_id parameter is required"}
+    try:
+        return hash_outputs(
+            _get_catalog_dir(catalog_dir or None),
+            run_id,
+            worktree_root=worktree_root or None,
+        )
+    except (OutputTierError, RunNotLaunchedError) as e:
+        return _output_tier_error_result(e)
+
+
+@cisternal.tool(registry="bathos-cli", name="outputs_adopt", cli_group="outputs", cli_name="adopt")
+def outputs_adopt_tool(
+    run_id: str = "",
+    root: list[str] | None = None,
+    reason: str = "",
+    retract: str = "",
+    worktree_root: str = "",
+    dry_run: bool = False,
+    catalog_dir: str = "",
+) -> dict:
+    """Adopt output files of a finished pre-standard run into its reference hashes.
+
+    Hashes each `root` now and records the paths that have no run_end entry as an `adopted` event. A relative
+    root resolves against the run's worktree root. Closed to a run that declared `[outputs] roots`
+    (adopt_closed), and never re-references a path whose bytes differ from the run's own record
+    (run_end_conflict). `retract` takes the eid of an earlier adopt event and withdraws it instead.
+    `dry_run` lists the files and byte total and writes nothing.
+    """
+    from bathos.output_tiers.adopt import adopt_outputs, retract_adopt
+    from bathos.output_tiers.reference import OutputTierError
+    from bathos.runlog.emit import RunNotLaunchedError
+
+    if not run_id:
+        return {"error": "run_id parameter is required"}
+    try:
+        cat_dir = _get_catalog_dir(catalog_dir or None)
+        if retract:
+            if root:
+                raise OutputTierError("invalid_param", "--retract takes no --root")
+            return retract_adopt(cat_dir, run_id, retract, reason, dry_run=dry_run)
+        return adopt_outputs(
+            cat_dir,
+            run_id,
+            list(root or []),
+            reason,
+            worktree_root=worktree_root or None,
+            dry_run=dry_run,
+        )
+    except (OutputTierError, RunNotLaunchedError) as e:
+        return _output_tier_error_result(e)
+
+
 @cisternal.tool(registry="bathos-cli", name="campaign_add", cli_group="campaign", cli_name="add")
 def campaign_add_tool(
     run_id: str = "",
@@ -5105,6 +5231,8 @@ _WIRED = cisternal.wire(
         "validate_sidecar",
         "list_outputs",
         "outputs_summary",
+        "outputs_hash",
+        "outputs_adopt",
         "campaign_add",
         "campaign_show",
         "verify",
