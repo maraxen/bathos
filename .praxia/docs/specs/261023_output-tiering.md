@@ -255,15 +255,15 @@ catalogs.
 
 ## 11. Decisions needed
 
-- **D1 transport owner.** Option 1: myxcel `cold put` / `cold verify-file` (recommended: one transport, fixes the
-  `.partial` gap and the naurmalade sha bug for everyone, cross-repo change). Option 2: bathos does rsync/ssh itself
-  (faster to ship, duplicates the cache-cold verify).
+- **D1 transport owner. DECIDED 2026-10-23: myxcel.** myxcel gains `cold put` / `cold verify-file --json`, and
+  bathos shells out to them (§6.2). Step 5 is a myxcel PR.
 - **D2 how bathos reads myxcel profiles.** Option 1: `tomllib` on `~/.config/myxcel/<name>.toml` (recommended: no
   import coupling, myxcel and bathos run on different Pythons). Option 2: optional `import myxcel.config`.
-- **D3 where the remote verify runs.** Option 1: ssh on the login node for archives ≤ 2 GiB, a `mit_data_transfer` job
-  above that. Option 2: always a job, as myxcel does. Option 3: always ssh.
-- **D4 titanix `cold_root`.** It has to be added to `~/.config/myxcel/titanix.toml` (`/home/solab/marielle`, so
-  archives land in `…/bathos-cold/`). It is your config file, so it's your call.
+- **D3 where the remote verify runs. DECIDED 2026-10-23:** ssh on the login node for archives ≤ 2 GiB, a
+  `mit_data_transfer` job above that. A18 (login-node policy) stays unverified. The threshold is a config key, not a
+  constant.
+- **D4 titanix `cold_root`.** The owner adds `cold_root = "/home/solab/marielle"` to `~/.config/myxcel/titanix.toml`
+  (owner-applied, pending).
 - **D5 drift policy.** When the latest rebaseline differs from `run_end`: refuse until `adopt` (recommended), or
   archive against the latest with a flag.
 - **D6 zstd.** `zstandard` Python dependency (recommended) or the system `zstd` binary.
