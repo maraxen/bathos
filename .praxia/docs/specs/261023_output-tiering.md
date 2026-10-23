@@ -11,7 +11,7 @@ adversarial_review: audits/261023_output-tiering-argon-review.md
 
 **Status:** draft, not reviewed. Supersedes the denxity-worktree draft
 `denxity/.claude/worktrees/qb-r6/.praxia/docs/specs/261023_bathos-output-tiering.md` (uncommitted, treated as input,
-not as a decision). **task_id:** 261023_bathos-output-tiering. Decisions are in §11 (D9 open). Revised after an adversarial review (§13).
+not as a decision). **task_id:** 261023_bathos-output-tiering. Decisions are in §11 (all decided). Revised after an adversarial review (§13).
 
 ## 1. Problem
 
@@ -126,8 +126,8 @@ Resolution applies to **profile names**, not paths, in this order:
 1. explicit `--profile` / `--mirror`;
 2. `$BTH_COLD_PROFILE` / `$BTH_MIRROR_PROFILE` (`none` or empty disables);
 3. the nearest `pyproject.toml` `[tool.bathos.outputs]` `cold_profile`, `mirror_profile`;
-4. the user config file (D9: XDG `${XDG_CONFIG_HOME:-~/.config}/bathos/config.toml` vs the existing `~/.bth/config.toml`,
-   which `runner.py:875` already reads), `[outputs]` with the same keys;
+4. `${XDG_CONFIG_HOME:-~/.config}/bathos/config.toml` `[outputs]` with the same keys (D9; `~/.bth/config.toml` is
+   not read for this);
 5. off.
 
 bathos stores no paths, so a project setting cannot point the mirror leg at the cold host's path (the split-brain
@@ -317,7 +317,7 @@ Deleting warm files (a later `bth outputs release` gated on cold+mirror `verifie
 rejected it for the same low-duplication reason). Automatic tiering. Tiering naurmalade trajectories. Legacy-mode
 catalogs.
 
-## 11. Decisions (D1-D8 decided 2026-10-23; D9 open)
+## 11. Decisions (all decided 2026-10-23)
 
 - **D1 transport owner: myxcel.** myxcel gains `cold put` / `cold verify-file --json`, and bathos shells out to them
   (§6.2). Step 5 is a myxcel PR.
@@ -335,10 +335,9 @@ catalogs.
 - **D8 manual r6/r7 copies: leave them as they are.** Step 9 writes bathos-format archives alongside them. The manual
   tars are never adopted, moved or deleted by bathos.
 
-- **D9 user config file (open, raised by review F-21).** bathos already reads `~/.bth/config.toml`
-  (`runner.py:875`), while the global rule asks for `${XDG_CONFIG_HOME:-~/.config}/<name>/config.toml`. Options:
-  XDG, per the global rule (recommended, with `~/.bth/config.toml` left as is); `~/.bth/config.toml` `[outputs]`,
-  per bathos convention; or read both and refuse if they disagree.
+- **D9 user config file: XDG, decided 2026-10-23 (raised by review F-21).** Layer 4 is
+  `${XDG_CONFIG_HOME:-~/.config}/bathos/config.toml` `[outputs]`, per the global derived-data rule. `~/.bth/config.toml`
+  (`runner.py:875`) keeps its existing `[defaults]` role and is not read for `[outputs]`.
 
 ## 12. Owner items (drafted, not filed)
 
