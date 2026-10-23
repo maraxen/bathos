@@ -11,7 +11,7 @@ adversarial_review: ''
 
 **Status:** draft, not reviewed. Supersedes the denxity-worktree draft
 `denxity/.claude/worktrees/qb-r6/.praxia/docs/specs/261023_bathos-output-tiering.md` (uncommitted, treated as input,
-not as a decision). **task_id:** 261023_bathos-output-tiering. Decisions still open are listed in §11.
+not as a decision). **task_id:** 261023_bathos-output-tiering. Decisions are recorded in §11 (all decided).
 
 ## 1. Problem
 
@@ -45,7 +45,7 @@ spike whose number must not be cited until re-run under a sidecar (plan step 0).
 | A9 | myxcel's pieces are reusable | **V** | `load_profile()` (`myxcel/config.py:82`, `cold_root` parsed at `:125`, optional). Cache-cold sha256 is fsync + `POSIX_FADV_DONTNEED` + fresh fd (`coldify_remote.py:38-56`), with a three-state `VerifyResult` (`coldify.py:919-922`). ssh is bare `ssh <host>` riding the user's ControlMaster. No `config show --json` exists. |
 | A10 | myxcel writes `.partial` and renames | **V, no** | No `.partial` anywhere in `src/` or `scripts/`. The worker copies straight to the final cold path and refuses if it exists (`coldify_remote.py:139-145`). A failed attempt therefore blocks its own retry. |
 | A11 | myxcel `_tree_hash` equals a plain sha256 | **V, no** | Single file → `sha256("" + ":" + filehash)` (`coldify_remote.py:30-32,59-67`). Any reuse must compute the same form or add a file mode. |
-| A12 | titanix has a `cold_root` | **V, no** | Only `~/.config/myxcel/engaging.toml:54` sets one. `~/.config/bathos/` does not exist. |
+| A12 | titanix has a `cold_root` | **V, yes since D4** | Originally only `engaging.toml:54` set one. The owner added `titanix.toml:40` (`/home/solab/marielle`) on 2026-10-23. `~/.config/bathos/` does not exist. |
 | A13 | naurmalade already systematizes cold storage | **V, partly** | `naurmalade/campaign/coldify.py:82-227` wraps `myxcel coldify` per campaign trajectory and appends a `trajectory_segments` row (`content_sha256`, `size_bytes`, `is_external`, `catalog/tables.py:71-73`). No per-file manifest, no zstd, no mirror, no restore, no bathos link. |
 | A14 | naurmalade's recorded `content_sha256` is populated | **V, false (bug)** | `parse_sha256(verify_text)` (`coldify.py:42-44,173`) regex-searches `myxcel coldify verify` stdout, which prints only `verified` (`myxcel/cli.py:2688-2689`). The result is always `None`. The real hash is in myxcel's `.myxcel/coldified.jsonl`. |
 | A15 | The isochore resolver is the reference pattern | **V** | `isochore traj_cache.cache_root_source` (`traj_cache.py:156-186`): explicit > `$TRAJ_CACHE_ROOT` (`none`/empty disables) > nearest `[tool.traj_cache]` > `${XDG_CONFIG_HOME:-~/.config}/traj_cache/config.toml` > unset. Returns `(value, layer)` and raises `ValueError` naming a malformed file. |
@@ -244,7 +244,7 @@ the whole suite locally).
 | **6. `bth cold`** | Wires 1+4+5. `output_copy.*` events and fold. | `index.db.output_copies` rows after cold+mirror. Kill mid-mirror → rerun skips the verified cold copy. |
 | **7. `bth warm`** | Fetch, verify, extract to `.partial`, rename. | Mismatch, extra or missing file each refuse and leave the target untouched. A non-empty target refuses. |
 | **8. `bth verify --tier outputs`** | Three-state per copy, plus agreement. | Unreachable host → `unverifiable`. A flipped byte in a test archive → `failed`. |
-| **9. r6/r7 migration (live, owner-gated)** | `adopt` the 4 runs with roots covering all 888 files, `cold` to engaging + titanix (after D4), `warm` into a scratch dir, `verify`. A sidecar-tracked run for the whole sequence. | The run record shows every one of the 888 files hashed. Both copies `verified`. Warm into scratch matches. Manual copies and worktree originals are untouched. |
+| **9. r6/r7 migration (live, owner-gated)** | `adopt` the 4 runs with roots covering all 888 files, `cold` to engaging + titanix, `warm` into a scratch dir, `verify`. A sidecar-tracked run for the whole sequence. | The run record shows every one of the 888 files hashed. Both copies `verified`. Warm into scratch matches. Manual copies and worktree originals are untouched. |
 | **10. Docs** | `/using-bathos` section, lint rule for undeclared resume dirs. | Skill text names the commands and the three states. |
 
 ## 10. Non-goals
@@ -253,24 +253,22 @@ Deleting warm files (a later `bth outputs release` gated on cold+mirror `verifie
 rejected it for the same low-duplication reason). Automatic tiering. Tiering naurmalade trajectories. Legacy-mode
 catalogs.
 
-## 11. Decisions needed
+## 11. Decisions (all decided 2026-10-23)
 
-- **D1 transport owner. DECIDED 2026-10-23: myxcel.** myxcel gains `cold put` / `cold verify-file --json`, and
-  bathos shells out to them (§6.2). Step 5 is a myxcel PR.
-- **D2 how bathos reads myxcel profiles.** Option 1: `tomllib` on `~/.config/myxcel/<name>.toml` (recommended: no
-  import coupling, myxcel and bathos run on different Pythons). Option 2: optional `import myxcel.config`.
-- **D3 where the remote verify runs. DECIDED 2026-10-23:** ssh on the login node for archives ≤ 2 GiB, a
-  `mit_data_transfer` job above that. A18 (login-node policy) stays unverified. The threshold is a config key, not a
-  constant.
-- **D4 titanix `cold_root`.** The owner adds `cold_root = "/home/solab/marielle"` to `~/.config/myxcel/titanix.toml`
-  (owner-applied, pending).
-- **D5 drift policy.** When the latest rebaseline differs from `run_end`: refuse until `adopt` (recommended), or
-  archive against the latest with a flag.
-- **D6 zstd.** `zstandard` Python dependency (recommended) or the system `zstd` binary.
-- **D7 legacy catalogs.** Refuse tiering on non-log catalogs (recommended), or add a legacy write path.
-- **D8 the existing manual r6/r7 copies.** Leave them as they are and let step 9 write bathos-format archives
-  alongside (recommended: the manual tars lack per-file manifests). Or write a manifest for the manual tars and adopt
-  them as copies.
+- **D1 transport owner: myxcel.** myxcel gains `cold put` / `cold verify-file --json`, and bathos shells out to them
+  (§6.2). Step 5 is a myxcel PR.
+- **D2 profile reading: `tomllib`** on `~/.config/myxcel/<name>.toml`. bathos does not import myxcel, since the two
+  run on different Pythons.
+- **D3 remote verify: ssh on the login node for archives ≤ 2 GiB, a `mit_data_transfer` job above that.** A18
+  (login-node policy) stays unverified. The threshold is a config key, not a constant.
+- **D4 titanix `cold_root`: done.** The owner added `cold_root = "/home/solab/marielle"` to
+  `~/.config/myxcel/titanix.toml:40`. It parses with `tomllib`.
+- **D5 drift policy: refuse.** When the latest rebaseline differs from `run_end`, tiering refuses with
+  `outputs_drifted` until `bth outputs adopt` records a new reference.
+- **D6 zstd: the `zstandard` Python dependency.**
+- **D7 legacy catalogs: refuse** tiering with `requires_log_mode`. No legacy write path.
+- **D8 manual r6/r7 copies: leave them as they are.** Step 9 writes bathos-format archives alongside them. The manual
+  tars are never adopted, moved or deleted by bathos.
 
 ## 12. Owner items (drafted, not filed)
 
