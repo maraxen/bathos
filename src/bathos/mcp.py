@@ -1467,7 +1467,7 @@ def reap_tool(
     Returns:
         Dict with reap results
     """
-    from bathos.reap import reap_runs, reconcile_warm_tier, ReapError  # noqa: I001
+    from bathos.reap import reap_runs, ReapError  # noqa: I001
 
     cat_dir = _get_catalog_dir(catalog_dir or None)
 
@@ -1487,10 +1487,7 @@ def reap_tool(
             "error_code": BathosErrorCode.INVALID_PARAM.value,
         }
 
-    # Reconcile warm tier after apply
-    if apply:
-        reconcile_warm_tier(cat_dir)
-
+    # No warm-tier reconcile here: reap_runs does it itself (legacy only).
     skipped_list = [{"run_id": r.id, "reason": reason} for r, reason in skipped]
 
     return {

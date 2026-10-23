@@ -437,6 +437,14 @@ def reconcile_warm_tier(catalog_dir: Path) -> None:
         catalog_dir: Catalog directory path
     """
     from bathos.compact import _backup_warm_db, compact
+    from bathos.runlog.mode import is_log_mode
+
+    # Log mode: `reap_runs` already emitted run.reaped / run.reap_reverted, which
+    # `bth compact` folds into index.db. `bathos.db` is the frozen pre-cutover
+    # copy (it still exists, so the guard below does not fire) and compact
+    # rejects force_rebuild there -- after the events were written.
+    if is_log_mode(catalog_dir):
+        return
 
     db_path = catalog_dir / "bathos.db"
     if not db_path.exists():
