@@ -43,7 +43,7 @@ def test_run_defaults():
     assert r.tags == []
     assert isinstance(r.timestamp, datetime)
     assert r.timestamp.tzinfo is not None
-    assert r.schema_version == "17"
+    assert r.schema_version == "18"
     assert r.slurm_job_id == ""
     assert r.metadata == "{}"
 
@@ -84,7 +84,7 @@ def test_run_roundtrip_via_arrow():
     assert r2.duration_s == 1.5
     assert r2.output_paths == ["/tmp/out.parquet"]
     assert r2.tags == ["tip3p"]
-    assert r2.schema_version == "17"
+    assert r2.schema_version == "18"
     assert r2.slurm_job_id == ""
 
 
@@ -100,7 +100,7 @@ def test_schema_version_in_cool_parquet():
     )
     table = r.to_arrow()
     assert "schema_version" in table.column_names
-    assert table.column("schema_version")[0].as_py() == "17"
+    assert table.column("schema_version")[0].as_py() == "18"
 
 
 def test_slurm_job_id_captured_from_env():
@@ -244,7 +244,7 @@ def test_schema_version_defaults_to_7():
         git_branch="main",
         git_dirty=False,
     )
-    assert r.schema_version == "17"
+    assert r.schema_version == "18"
 
 
 def test_sample_run_fixture_has_hostname(sample_run):
@@ -381,7 +381,7 @@ def test_schema_v5_fields_exist():
     from bathos.schema import CURRENT_SCHEMA_VERSION, Run
 
     # Current version should be "7" (v5 fields still present)
-    assert CURRENT_SCHEMA_VERSION == "17"
+    assert CURRENT_SCHEMA_VERSION == "18"
 
     # Run should have all 4 new fields
     r = Run(
@@ -455,7 +455,7 @@ def test_schema_version_is_7():
     """Verify CURRENT_SCHEMA_VERSION is now '11'."""
     from bathos.schema import CURRENT_SCHEMA_VERSION
 
-    assert CURRENT_SCHEMA_VERSION == "17"
+    assert CURRENT_SCHEMA_VERSION == "18"
 
 
 def test_run_stage_name_default_none():
@@ -826,6 +826,32 @@ def test_differential_fields_in_cool_and_warm_schema():
         assert effect_field.nullable
 
 
+def test_dependency_provenance_in_both_schemas_and_round_trips():
+    """v18 (debt #2946): dependency_provenance is a nullable string in COOL and WARM and
+    survives to_arrow/from_arrow_row unchanged; None stays None (nothing tracked)."""
+    for schema in (COOL_SCHEMA, WARM_SCHEMA):
+        f = schema.field("dependency_provenance")
+        assert f.type == pa.string()
+        assert f.nullable
+    payload = '{"aminx_module_in_dist": true, "aminx_version": "0.2.0a3"}'
+    r = Run(
+        project_slug="p",
+        command="c",
+        argv=["c"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        dependency_provenance=payload,
+    )
+    table = r.to_arrow()
+    assert table.column("dependency_provenance")[0].as_py() == payload
+    assert Run.from_arrow_row(table.to_pydict(), 0).dependency_provenance == payload
+    bare = Run(
+        project_slug="p", command="c", argv=["c"], git_hash="a", git_branch="m", git_dirty=False
+    )
+    assert Run.from_arrow_row(bare.to_arrow().to_pydict(), 0).dependency_provenance is None
+
+
 def test_differential_fields_round_trip_arrow():
     """Verify differential_*/dependency_lock_sha256 round-trip through Arrow serialization."""
     r = Run(
@@ -1081,7 +1107,7 @@ def test_migration_v15_to_v16_adds_metadata_output_metadata(sample_run: Run):
     v15_run = dataclasses.replace(sample_run, schema_version="15")
     result = _apply_migrations(v15_run)
 
-    assert result.schema_version == "17"
+    assert result.schema_version == "18"
     assert result.metadata == "{}"
     assert result.output_metadata == "[]"
 
@@ -1095,6 +1121,6 @@ def test_migration_chain_v0_to_v16_includes_metadata_fields(sample_run: Run):
     v0_run = dataclasses.replace(sample_run, schema_version="0")
     result = _apply_migrations(v0_run)
 
-    assert result.schema_version == "17"
+    assert result.schema_version == "18"
     assert result.metadata == "{}"
     assert result.output_metadata == "[]"

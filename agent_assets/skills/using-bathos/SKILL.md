@@ -77,6 +77,25 @@ Spot-check that its claimed paths resolve. A script emitting confident, schema-v
   - Measured 2026-09-25 (legacy catalog): a run was unretrievable by `bth show` for minutes, then appeared on its own; a later one stayed invisible past 20 s and `bth compact` made it visible. **Nothing was ever lost.** Do not file a data-loss bug off a probe taken right after a write.
 - **`bth find` takes FILTERS, not a search term** (`--project`, `--since`, `--status`, `--tags`, `--output-file`). `bth find <script-name>` matches nothing and returns `{"runs": [], "count": 0}` — that is malformed usage, not a missing run. Likewise `bth ls` is not newest-first unless you pass `--since`.
 
+### Record which build of a dependency ran: `track_packages` (0.13.0a7, debt #2946)
+
+`git_hash`, `script_sha256` and `dependency_lock_sha256` describe the project. They cannot say which aminx commit executed: the lockfile hash only says "something drifted", and `importlib.metadata.version()` reports the installed distribution even when a vendored or source copy on `sys.path` shadows it. Opt in per project or per sidecar:
+
+```toml
+# .bth.toml (or a sidecar)          # or pyproject.toml
+[provenance]                         # [tool.bathos]
+track_packages = ["aminx"]           # track_packages = ["aminx", "scikit-learn:sklearn"]
+```
+
+Lists from all three places are combined. A malformed value refuses the run. Each run then records a `dependency_provenance` JSON column with flat keys per package: `<pkg>_version`, `<pkg>_wheel_sha256` plus `<pkg>_wheel_sha256_source` (`direct_url`, `wheel_file` (the local wheel, checked against the installed RECORD), or `uv.lock`), `<pkg>_source_commit` (PEP 610 `vcs_info`, an editable checkout's `HEAD` with `-dirty` if modified, or a `+g<sha>` version label), `<pkg>_module_path`, `<pkg>_module_in_dist`, and `probe_python` / `probe_status`. `<pkg>` is the name lowercased with `-`/`.` as `_`. A value that cannot be established is the literal `"unknown"`, never guessed. The probe runs the script's own interpreter (rebuilt from argv: `python ...`, `uv run ... python ...`, a python shebang, behind `env`/`timeout`) and resolves modules with `find_spec`, so it imports nothing.
+
+```bash
+bth sql "SELECT id, json_extract_string(dependency_provenance, '\$.aminx_source_commit'),
+         json_extract_string(dependency_provenance, '\$.aminx_module_in_dist') FROM runs"
+```
+
+`<pkg>_module_in_dist = false` (also printed as a stderr warning) means the recorded version describes code that did not execute. Do not cite that run's dependency identity. A plain wheel install has no source commit (`unknown`) unless the wheel carries one. Keep a pin record (e.g. tev_design's `AMINX_PIN.md`) for that half.
+
 ### `bth --version` cannot tell you whether an install is current
 
 It prints pyproject's `version` field, which is not bumped between releases — 0.13.0a4 reports identically at the tag and 9 commits past it, on every machine. bathos **is on PyPI** (0.13.0a1–a5 as of 2026-10-01), but dev installs come from a local dir or a git rev, where the same version string covers many commits. To know what an install actually has, grep the installed code. Same trap as aminx `__version__`.

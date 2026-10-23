@@ -877,6 +877,7 @@ def _handle_reexport_from_warm(
                 outcome_error_reason=row_dict.get("outcome_error_reason", ""),
                 adversarial_check_status=row_dict.get("adversarial_check_status", ""),
                 adversarial_check_result=row_dict.get("adversarial_check_result"),
+                dependency_provenance=row_dict.get("dependency_provenance"),
             )
 
             # Check if cool fragment already exists (safety check)

@@ -644,3 +644,10 @@ def test_terminal_claim_unaffected_by_abandoned_fallback():
     row = fold_run([started(output_paths=["old.json"]), reaped(), finished()])
     assert row["status"] == "completed"
     assert row["output_paths"] == ["out.json"]
+
+
+def test_dependency_provenance_folds_from_run_started():
+    """The JSON column rides run.started into the folded row unchanged (#2946)."""
+    dp = '{"aminx_version": "0.2.0a3", "aminx_module_in_dist": true}'
+    row = fold_run([started(dependency_provenance=dp)])
+    assert row["dependency_provenance"] == dp

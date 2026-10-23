@@ -133,6 +133,7 @@ CREATE TABLE IF NOT EXISTS runs (
     epistemic_class VARCHAR,
     tentative_outcome VARCHAR,
     agent_session VARCHAR,
+    dependency_provenance VARCHAR,
     dependency_lock_sha256 VARCHAR,
     component_id VARCHAR,
     component_sidecar_sha256 VARCHAR,
