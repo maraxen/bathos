@@ -104,6 +104,8 @@ wire(
         # outputs group (Milestone 2)
         "list_outputs",
         "outputs_summary",
+        "outputs_hash",
+        "outputs_adopt",
         # query group (Milestone 2)
         "resolve_pin",
         "get_trust_state",

@@ -310,8 +310,18 @@ def legacy_relpath(path: str, worktree_root: str) -> str | None:
     return Path(norm).as_posix()
 
 
-def _event_entries(ev: dict, phase_label: str) -> Iterable[ReferenceEntry]:
-    root = ev.get("worktree_root") or ""
+def _event_root(ev: dict, imported_root: str | None) -> str:
+    """The worktree root a relpath of ``ev`` resolves against. A ``run.imported`` event's own root is untrusted
+    (the importer defaults it to the catalog dir, spec 3.3), so a caller-supplied ``imported_root`` replaces it."""
+    if imported_root and ev.get("kind") == "run.imported":
+        return imported_root
+    return ev.get("worktree_root") or ""
+
+
+def _event_entries(
+    ev: dict, phase_label: str, imported_root: str | None = None
+) -> Iterable[ReferenceEntry]:
+    root = _event_root(ev, imported_root)
     for e in _entries_of((ev.get("data") or {}).get("output_metadata")):
         sha = e.get("sha256")
         if not sha:  # null sha (>=100 MiB legacy, directory, unreadable) counts as absent
@@ -395,12 +405,30 @@ def _legacy_events(events: list[dict]) -> list[dict]:
     return [min(phaseless, key=_ev_key)] if phaseless else []
 
 
-def reference_hashes(events: list[dict]) -> dict[str, ReferenceEntry]:
+def unresolved_legacy_paths(events: list[dict], *, imported_root: str | None = None) -> list[str]:
+    """``path`` of every pre-standard entry that has a sha but whose relpath cannot be derived (an absolute path
+    outside the worktree root, or a relative one that escapes it). :func:`reference_hashes` drops such entries
+    silently; the tiering commands refuse with ``legacy_path_unresolved`` naming them (spec 3.3)."""
+    out: list[str] = []
+    for ev in _legacy_events(events):
+        root = _event_root(ev, imported_root)
+        for e in _entries_of((ev.get("data") or {}).get("output_metadata")):
+            if not e.get("sha256") or e.get("relpath"):
+                continue
+            if not legacy_relpath(str(e.get("path", "")), root):
+                out.append(str(e.get("path", "")))
+    return sorted(set(out))
+
+
+def reference_hashes(
+    events: list[dict], *, imported_root: str | None = None
+) -> dict[str, ReferenceEntry]:
     """``{relpath: ReferenceEntry}`` for one run, from that run's events (spec 3.3).
 
     Per path: the ``run_end`` entry if any, else the ``run_end_legacy`` entry if any, else the adopted entry.
     Entries without a sha256 count as absent. ``phase: "rebaseline"`` events never contribute. ``events`` may be in
-    any order, and may contain other kinds (ignored).
+    any order, and may contain other kinds (ignored). ``imported_root`` is the ``--worktree-root`` a caller
+    supplied for a ``run.imported`` run; it replaces that event's own (untrusted) root when deriving relpaths.
     """
     result: dict[str, ReferenceEntry] = {}
 
@@ -418,7 +446,7 @@ def reference_hashes(events: list[dict]) -> dict[str, ReferenceEntry]:
             result.setdefault(entry.relpath, entry)
 
     for ev in _legacy_events(events):
-        for entry in _event_entries(ev, PHASE_RUN_END_LEGACY):
+        for entry in _event_entries(ev, PHASE_RUN_END_LEGACY, imported_root):
             result.setdefault(entry.relpath, entry)
 
     for e in fold_adopted(events):
