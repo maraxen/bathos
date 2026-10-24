@@ -4,6 +4,7 @@
 - [260805_overnight-decisions](daily/260805_overnight-decisions.md) — Every decision made without a human gate during the overnight autonomous loop run, with enough context to backtrack
 
 ## Handoffs
+- [261023_myxcel-cold-primitives-brief](handoffs/261023_myxcel-cold-primitives-brief.md) — Paste-ready brief for implementing myxcel cold put/commit/verify-file/get/lock/unlock with JSON contracts pinned by the bathos output-tiering spec, plus the owner-gated hard-link probe on so3 and titanix
 - [260616_worktree-prune-backlog-assess](handoffs/260616_worktree-prune-backlog-assess.md) — repo consolidated to single main worktree; bathos backlog drained (only #1774 P3 remains)
 - [260601_v061-audit-close](handoffs/260601_v061-audit-close.md)
 - [260601_v061-sprint-close](handoffs/260601_v061-sprint-close.md)
@@ -20,6 +21,7 @@
 - [260515_v02-sprint-plan](plans/260515_v02-sprint-plan.md)
 
 ## Specs
+- [261023_output-tiering](specs/261023_output-tiering.md) — Standard for where a run's output files live (warm local path, checksummed cold archive, mirror), how bathos records and verifies each copy, and how `bth warm` restores them; reuses myxcel profiles and transport, folds in naurmalade's coldify wrapper, and notes the already-fixed reap log-mode bug
 - [261015_exploratory-mode-contract](specs/261015_exploratory-mode-contract.md) — Operationalize exploration vs calibration vs validation in bathos so exploratory runs stop inventing pass/marginal/fail thresholds, with a gated promotion path to confirmatory
 - [261012_retire-compact-runlog-cutover](specs/261012_retire-compact-runlog-cutover.md) — Do not build an incremental legacy compact; finish delivery step 5 of the project-local run log (260925) behind its blockers, and add a cool-fragment fallback to get_run meanwhile (debts 2344, 2110, 1685, 1647, 1993)
 - [260925_project-local-run-log](specs/260925_project-local-run-log.md) — Project-local append-only run log with a disposable index
@@ -50,6 +52,7 @@
 ## Actuation Surfaces
 
 ## Audits
+- [261023_output-tiering-argon-review](audits/261023_output-tiering-argon-review.md) — Verbatim spec-challenger review of specs/261023_output-tiering.md at 2b4c68c4 by gemini-4-argon-high through praxia surface_dispatch c0daf6d7; dispositions (confirmed, version-dependent, fabricated) are in the spec section 13
 - [261015_exploratory-mode-contract-adversarial-review](audits/261015_exploratory-mode-contract-adversarial-review.md) — Spec-challenger findings C1-C25 and spec-defender rulings for specs/261015_exploratory-mode-contract.md, run sequentially
 
 ## Research
