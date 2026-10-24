@@ -45,6 +45,10 @@ def render_or_exit(result: dict, success_template: str | None = None) -> None:
     """
     error = result.get("error")
     if error:
+        report = result.get("outputs_report")
+        if isinstance(report, dict):
+            # `bth verify --tier outputs`: a failing run still owes the per-copy JSON on stdout.
+            print(json.dumps(report, indent=2, default=str))
         print(f"Error: {error}", file=sys.stderr)
         sys.exit(1)
 

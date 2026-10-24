@@ -92,6 +92,9 @@ class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(
     COPY_VERIFY_FAILED = "copy_verify_failed"
     COPY_UNVERIFIABLE = "copy_unverifiable"
     COLD_RUNS_FAILED = "cold_runs_failed"
+    # `bth verify --tier outputs` (step 8).
+    OUTPUT_COPIES_FAILED = "output_copies_failed"
+    OUTPUT_COPIES_UNVERIFIABLE = "output_copies_unverifiable"
 
 
 # Resolution hints registry: every BathosErrorCode member must have a non-empty entry
@@ -149,6 +152,8 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.COPY_VERIFY_FAILED: "The remote bytes did not match what was sent; this attempt's partials were left under their .partial-<attempt> names (not committed). Check the host's disk and quota, then rerun with a fresh attempt",
     BathosErrorCode.COPY_UNVERIFIABLE: "The remote bytes could not be re-read (host unreachable, Duo, sandbox); nothing was certified. Fix the connection and rerun, which resumes",
     BathosErrorCode.COLD_RUNS_FAILED: "At least one run failed under --all-uncopied; the message names each run's error_code. Fix those runs and rerun, which skips the copied ones",
+    BathosErrorCode.OUTPUT_COPIES_FAILED: "A cold or mirror copy was re-read and its bytes differ from the recorded sha256 (or the cold and mirror records disagree). The measured state is recorded; see `bth outputs where <run>`. Nothing was changed on the host: rewrite the copy with `bth cold <run> --supersede --reason <text>`",
+    BathosErrorCode.OUTPUT_COPIES_UNVERIFIABLE: "--strict: at least one copy could not be re-read (host unreachable, Duo, sandbox), so nothing was certified; its state is recorded as unverifiable, not failed. Check `myxcel socket-status` and rerun `bth verify --tier outputs`",
 }
 
 
