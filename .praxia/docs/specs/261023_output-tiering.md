@@ -305,14 +305,23 @@ is a no-op by design, and cluster nodes don't refresh `index.db`. Correctness th
 | Command | Output (`--json`) |
 |---|---|
 | `myxcel cold put <profile> <local_file> <remote_rel_name>` | `{"status":"ok"\|"error","remote_path","bytes","message"}`. Uploads to the exact name given (bathos chooses the `.partial-<attempt8>` name). |
-| `myxcel cold commit <profile> <remote_partial> <remote_final>` | `{"status":"ok"\|"exists"\|"error"}` via `ln && rm`. |
+| `myxcel cold commit <profile> <remote_partial> <remote_final>` | `{"status":"ok"\|"exists"\|"error","message"}` via `ln && rm`. |
 | `myxcel cold verify-file <profile> <remote_path> <sha256> <size>` | `{"status":"verified"\|"failed"\|"unverifiable","sha256_observed","size_observed","method":"login_ssh"\|"slurm_job","message"}`. Plain sha256, not `_tree_hash`. |
-| `myxcel cold get <profile> <remote_path> <local_dir>` | `{"status","local_path","bytes"}` |
-| `myxcel cold lock` / `unlock <profile> <remote_dir>` | `{"status":"acquired"\|"held","holder"}` |
+| `myxcel cold get <profile> <remote_path> <local_dir>` | `{"status","local_path","bytes","message"}`. `<local_dir>` must already exist. |
+| `myxcel cold lock <profile> <remote_dir>` | `{"status":"acquired"\|"held"\|"error","holder","message"}` |
+| `myxcel cold unlock <profile> <remote_dir>` | `{"status":"released"\|"held"\|"error","holder","message"}`. Unlocking a directory with no lock is `error`; bathos's `--break-lock` treats that as nothing to break and proceeds to `lock`. |
 | `myxcel cold ls <profile> <remote_dir>` | `{"status":"ok"\|"missing"\|"error","entries":[{"name","size_bytes","mtime"}],"message"}`. One directory, not recursive. Regular files only; the `.bth-lock` directory is reported as `{"name":".bth-lock","lock":true,"holder"}` so step 3 and `--clean-partials` can name it. `missing` when the directory does not exist. |
 | `myxcel cold rm-partial <profile> <remote_path>` | `{"status":"removed"\|"absent"\|"refused"\|"error","message"}`. Refuses, before any ssh call, any path whose last segment does not match `*.partial-[0-9a-f]{8}`. Plain `rm` of one regular file, never `-r`, never a directory. |
 
-Paths are relative to the profile's `cold_root`. myxcel refuses absolute paths and any `..` segment.
+Paths are relative to the profile's `cold_root`. myxcel refuses absolute paths and any `..` segment, and accepts only
+segments of `[A-Za-z0-9._@+=,%-]` that do not start with `-`; bathos mirrors that rule so a bad slug refuses before any
+myxcel call. Every non-ok status prints its JSON on stdout and exits 1.
+
+**Reconciled with merged myxcel on 2026-10-23** (myxcel PR #41, `72f69df`; read-only audit of `cold.py` and `cli.py`). The
+six primitives match on argv, keys, types and safety. Changes to this table: `unlock` returns `released` rather than
+`acquired`; `message` keys on `commit`, `get`, `lock` and `unlock`; an `error` status on `lock`; `get` needs an existing
+`<local_dir>`. Hard-link probe A27 is reported passed on so3 and titanix in that PR. `ls` and `rm-partial` were not in
+#41 and follow in a separate myxcel PR.
 
 **`ls` and `rm-partial` were added on 2026-10-23 after Step 6** (owner decision). Step 6 found that §6.1 step 5 ("delete this
 attempt's partials"), step 4 ("leftovers from other attempts are listed") and `--clean-partials` had no primitive to stand
