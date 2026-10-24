@@ -10,9 +10,12 @@ step. Each test names the broken implementation it guards against.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
+import shutil
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import duckdb
 import pytest
@@ -20,8 +23,10 @@ import pytest
 from bathos.cli_cyclopts import app
 from bathos.index import connect_read, index_db_path
 from bathos.mcp import cold_outputs_tool, mcp_cold_outputs_tool, outputs_where_tool
+from bathos.output_tiers import cold as cold_module
 from bathos.output_tiers import myxcel as mx
-from bathos.output_tiers.cold import cold_outputs, where_outputs
+from bathos.output_tiers.cold import _get_bytes, cold_outputs, where_outputs
+from bathos.output_tiers.config import OutputTiersConfigError
 from bathos.output_tiers.reference import OutputTierError
 from bathos.runlog.envelope import build_envelope
 from bathos.runlog.mode import cutover_marker_path
@@ -593,6 +598,154 @@ def test_a_stale_lock_is_lock_held_and_break_lock_recovers_and_records_the_holde
     (rec,) = cw.copy_events("output_copy.recorded")
     assert rec["data"]["broken_lock"] == {"holder": stale}
     assert not cw.fake.lock_exists(COLD, cw.dest())
+
+
+def test_fake_unlock_of_an_absent_lock_is_an_error_like_real_myxcel(cw: ColdWorld):
+    """Real `myxcel cold unlock` exits 2 'lock does not exist' (status error) when there is no `.bth-lock`."""
+    res = mx.unlock(COLD, "bathos-cold/repo/nothing-here", runner=cw.fake)
+    assert res.status == "error" and "does not exist" in res.message
+    assert mx.lock(COLD, "bathos-cold/repo/nothing-here", runner=cw.fake).status == "acquired"
+    assert mx.unlock(COLD, "bathos-cold/repo/nothing-here", runner=cw.fake).status == "released"
+    assert mx.unlock(COLD, "bathos-cold/repo/nothing-here", runner=cw.fake).status == "error"
+
+
+def test_break_lock_when_the_holder_releases_first_tolerates_the_unlock_error_and_records_no_break(
+    cw: ColdWorld,
+):
+    """`lock` says held, the holder releases, our `unlock` then errors 'lock does not exist': nothing is left to
+    break, and the relock decides. It acquires, so the run proceeds and no broken holder is recorded."""
+    cw.standard_run()
+    cw.ingest()
+    cw.fake.hold_lock(COLD, cw.dest())
+
+    def holder_releases(args: list[str], base: Path) -> None:
+        shutil.rmtree(base / args[0] / ".bth-lock", ignore_errors=True)
+
+    cw.fake.before("unlock", holder_releases)
+
+    result = cw.cold(break_lock=True)
+
+    assert result["legs"][0]["state"] == "verified"
+    assert result["legs"][0]["broken_lock"] is None
+    (rec,) = cw.copy_events("output_copy.recorded")
+    assert rec["data"]["broken_lock"] is None
+    assert not cw.fake.lock_exists(COLD, cw.dest())
+
+
+def test_break_lock_whose_unlock_fails_for_another_reason_is_lock_held_with_the_message(
+    cw: ColdWorld,
+):
+    """An unlock `error` that left the lock in place is not 'nothing to break': the relock answers held, and the
+    run refuses (lock_held) naming the unlock error. Nothing is uploaded."""
+    cw.standard_run()
+    cw.ingest()
+    cw.fake.hold_lock(COLD, cw.dest())
+    cw.fake.fail("unlock", "rmdir: permission denied")
+
+    with pytest.raises(OutputTierError) as e:
+        cw.cold(break_lock=True)
+
+    assert _code(e) == "lock_held" and "permission denied" in e.value.detail
+    assert cw.fake.mutating_calls().count("put") == 0
+    assert cw.fake.lock_exists(COLD, cw.dest())  # the planted lock was not touched
+
+
+def test_break_lock_on_a_directory_with_no_lock_just_locks(cw: ColdWorld):
+    """No lock to break: `lock` acquires at once, `unlock` is not called to break anything (only the normal
+    release at the end), and no break is recorded."""
+    cw.standard_run()
+    cw.ingest()
+
+    result = cw.cold(break_lock=True)
+
+    assert result["legs"][0]["state"] == "verified" and result["legs"][0]["broken_lock"] is None
+    assert len(cw.fake.calls_named("lock")) == 1
+    assert len(cw.fake.calls_named("unlock")) == 1  # the release, after the writes
+    assert not cw.fake.lock_exists(COLD, cw.dest())
+
+
+def test_a_failed_normal_release_after_we_held_the_lock_is_still_a_reported_warning(
+    cw: ColdWorld,
+):
+    """Once we hold the lock, an unlock `error` (the fake now answers it for a missing lock too) stays a real
+    problem and is surfaced, not swallowed."""
+    cw.standard_run()
+    cw.ingest()
+    cw.fake.fail("unlock", "lock does not exist")
+
+    result = cw.cold()
+
+    (warning,) = result["legs"][0]["warnings"]
+    assert "was not released" in warning and "lock does not exist" in warning
+
+
+def test_fake_get_refuses_a_missing_local_dir_like_real_myxcel(cw: ColdWorld, tmp_path: Path):
+    cw.fake.remote(COLD, "d").mkdir(parents=True)
+    cw.fake.remote(COLD, "d/f.txt").write_text("hello")
+    missing = tmp_path / "no-such-dir"
+
+    res = mx.get(COLD, "d/f.txt", str(missing), runner=cw.fake)
+
+    assert res.status == "error" and "local_dir does not exist" in res.message
+    assert not missing.exists()  # the fake no longer creates it
+
+
+def test_bathos_creates_the_scratch_directory_before_get(cw: ColdWorld, tmp_path: Path):
+    """`_get_bytes` mkdirs its scratch target (real `get` will not), so a fetch through it works against the
+    strict fake."""
+    cw.fake.remote(COLD, "d").mkdir(parents=True)
+    cw.fake.remote(COLD, "d/f.txt").write_text("hello")
+    leg = SimpleNamespace(profile=SimpleNamespace(name=COLD))
+    scratch = tmp_path / "scratch-not-yet-created"
+
+    got = _get_bytes(leg, "d/f.txt", scratch, cw.fake, [0])  # type: ignore[arg-type]
+
+    assert got == b"hello"
+    assert (scratch / "get-1").is_dir()
+
+
+@pytest.mark.parametrize(
+    "bad_slug", ["my project", "-leading-dash", "naïve", "tab\there", "dollar$sign"]
+)
+def test_a_bad_project_slug_is_refused_before_any_myxcel_call(
+    cw: ColdWorld, monkeypatch: pytest.MonkeyPatch, bad_slug: str
+):
+    """Real myxcel accepts only `[A-Za-z0-9._@+=,%-]` segments, none starting with '-'. bathos mirrors that, so a
+    bad slug refuses locally (invalid_param) and the fake sees zero calls."""
+    cw.standard_run()
+    cw.ingest()
+    real_open_run = cold_module.open_run
+    monkeypatch.setattr(
+        cold_module,
+        "open_run",
+        lambda *a, **k: dataclasses.replace(real_open_run(*a, **k), project_slug=bad_slug),
+    )
+
+    with pytest.raises(OutputTiersConfigError) as e:
+        cw.cold()
+
+    assert e.value.error_code == "invalid_param"
+    assert cw.fake.calls == []
+
+
+def test_a_normal_slug_with_the_allowed_punctuation_passes(
+    cw: ColdWorld, monkeypatch: pytest.MonkeyPatch
+):
+    cw.standard_run()
+    cw.ingest()
+    slug = "my-proj_1.2+x@y=z,w%"
+    real_open_run = cold_module.open_run
+    monkeypatch.setattr(
+        cold_module,
+        "open_run",
+        lambda *a, **k: dataclasses.replace(real_open_run(*a, **k), project_slug=slug),
+    )
+
+    result = cw.cold()
+
+    assert result["legs"][0]["state"] == "verified"
+    assert cw.fake.lock_exists(COLD, cw.dest(slug=slug)) is False
+    assert cw.fake.calls_named("lock")[0][1] == cw.dest(slug=slug)  # [profile, dir]
 
 
 def test_two_concurrent_writers_one_gets_lock_held_and_the_other_finishes(cw: ColdWorld):

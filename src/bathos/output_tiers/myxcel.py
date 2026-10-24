@@ -151,13 +151,42 @@ def _check_positional(label: str, value: str) -> str:
     return value
 
 
-def check_remote_path(path: str, label: str = "remote path") -> str:
-    """Refuse a remote path that is empty, absolute, or has a ``..`` segment (relative to ``cold_root``)."""
+# myxcel's own rule (myxcel/cold.py ``_COLD_SEGMENT_RE`` and ``validate_cold_rel_path``), mirrored so a path myxcel
+# would refuse is refused here before any subprocess runs.
+_COLD_SEGMENT = re.compile(r"[A-Za-z0-9._@+=,%-]+")
+
+
+def check_remote_path(
+    path: str, label: str = "remote path", *, allow_trailing_slash: bool = False
+) -> str:
+    """Refuse a remote path myxcel would refuse (relative to ``cold_root``).
+
+    Same rule as ``myxcel.cold.validate_cold_rel_path``: non-empty, not absolute, not starting with ``~`` or ``-``,
+    no control characters, no empty segment, no ``.`` or ``..`` segment, no segment starting with ``-``, and every
+    segment drawn from ``[A-Za-z0-9._@+=,%-]``. ``..`` inside a name (``run..1``) is fine. A trailing ``/`` is
+    allowed only for a directory argument (``lock`` / ``unlock``), as in myxcel."""
     _check_positional(label, path)
+    if "\r" in path:
+        _refuse(f"{label} {path!r} holds a control character")
     if path.startswith("/") or PurePosixPath(path).is_absolute():
         _refuse(f"{label} {path!r} is absolute; myxcel takes paths relative to cold_root")
-    if ".." in path.split("/"):
-        _refuse(f"{label} {path!r} contains a '..' segment")
+    if path.startswith("~"):
+        _refuse(f"{label} {path!r} starts with '~'; myxcel takes paths relative to cold_root")
+    body = path[:-1] if (allow_trailing_slash and path.endswith("/")) else path
+    if not body or body.endswith("/"):
+        _refuse(f"{label} {path!r} must not end with '/'")
+    for seg in body.split("/"):
+        if seg == "":
+            _refuse(f"{label} {path!r} contains an empty segment")
+        if seg in {".", ".."}:
+            _refuse(f"{label} {path!r} contains a {seg!r} segment")
+        if seg.startswith("-"):
+            _refuse(f"{label} {path!r} has a segment starting with '-'")
+        if not _COLD_SEGMENT.fullmatch(seg):
+            _refuse(
+                f"{label} {path!r} has segment {seg!r} with characters myxcel refuses "
+                "(allowed: A-Z a-z 0-9 . _ @ + = , % -)"
+            )
     return path
 
 
@@ -446,7 +475,7 @@ def lock(
     """``myxcel cold lock <profile> <remote_dir> --json``: atomic ``mkdir <remote_dir>/.bth-lock``.
 
     ``held`` carries the holder. ``acquired`` is believed only on exit 0; every doubt is ``error``."""
-    check_remote_path(remote_dir, "remote_dir")
+    check_remote_path(remote_dir, "remote_dir", allow_trailing_slash=True)
     reply = _call(_argv("lock", profile, remote_dir), runner, timeout)
     if reply.data is None:
         return LockResult("error", message=reply.problem or "")
@@ -474,7 +503,7 @@ def unlock(
     timeout: float = LOCK_TIMEOUT,
 ) -> UnlockResult:
     """``myxcel cold unlock <profile> <remote_dir> --json``: remove only the lock directory."""
-    check_remote_path(remote_dir, "remote_dir")
+    check_remote_path(remote_dir, "remote_dir", allow_trailing_slash=True)
     reply = _call(_argv("unlock", profile, remote_dir), runner, timeout)
     if reply.data is None:
         return UnlockResult("error", message=reply.problem or "")

@@ -186,7 +186,14 @@ class FakeMyxcel:
         p = base / rel
         if not p.is_file():
             return 1, {"status": "error", "message": f"no such file {rel}"}
-        local_dir.mkdir(parents=True, exist_ok=True)
+        if not local_dir.is_dir():
+            # real myxcel (cold.py cold_get) never creates local_dir
+            return 1, {
+                "status": "error",
+                "local_path": None,
+                "bytes": None,
+                "message": f"local_dir does not exist or is not a directory: {local_dir}",
+            }
         out = local_dir / p.name
         if out.exists():
             return 1, {"status": "error", "message": "local target exists"}
@@ -209,8 +216,14 @@ class FakeMyxcel:
 
     def _do_unlock(self, base: Path, args: list[str]):
         d = base / args[0] / LOCK
-        if d.is_dir():
-            for child in d.iterdir():
-                child.unlink()
-            d.rmdir()
-        return 0, {"status": "released"}
+        if not d.is_dir():
+            # real myxcel (cold.py cold_unlock): ssh exits 2 "lock does not exist" -> status error
+            return 1, {
+                "status": "error",
+                "holder": None,
+                "message": "lock does not exist",
+            }
+        for child in d.iterdir():
+            child.unlink()
+        d.rmdir()
+        return 0, {"status": "released", "holder": None, "message": ""}

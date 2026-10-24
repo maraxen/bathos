@@ -190,7 +190,13 @@ def _acquire_lock(
         )
     broken = res.holder
     freed = mx.unlock(prof, dest, runner=runner)
-    if freed.status != "released":
+    # Real `myxcel cold unlock` answers `error` ("lock does not exist") when there is no `.bth-lock`, which here
+    # means the holder released between our `lock` and our `unlock`: nothing is left to break. An `error` is
+    # therefore not fatal by itself; the relock below decides. If the lock is still there (an unlock that failed
+    # for another reason) the relock answers `held` and that is refused with the unlock message attached.
+    # Any other non-`released` status (a malformed reply) is refused as before.
+    unlock_error = (freed.message or freed.status) if freed.status == "error" else None
+    if freed.status not in {"released", "error"}:
         raise OutputTierError(
             LOCK_HELD,
             f"{where} (holder {_holder_text(broken)}) could not be broken: "
@@ -198,11 +204,18 @@ def _acquire_lock(
         )
     again = mx.lock(prof, dest, runner=runner)
     if again.status == "held":
+        if unlock_error is not None:
+            raise OutputTierError(
+                LOCK_HELD,
+                f"{where} (holder {_holder_text(broken)}) could not be broken: {unlock_error}",
+            )
         raise OutputTierError(
             LOCK_HELD, f"{where} was retaken by {_holder_text(again.holder)} after it was broken"
         )
     if again.status != "acquired":
         _fail_myxcel(f"cannot relock {display_dest}", again.message)
+    if unlock_error is not None:
+        return None  # the lock vanished before we could remove it: nothing was broken
     return broken if broken is not None else "unknown"
 
 
