@@ -15,6 +15,15 @@ For each leg (cold first, then mirror) the order is the spec's, and it is what t
 5. ``verify-file`` both partials; commit the manifest and then the archive (``ln && rm``, never an overwrite);
 6. ``verify-file`` both finals; release the lock; emit one ``output_copy.recorded``.
 
+``myxcel cold ls`` and ``cold rm-partial`` are optional capabilities (``myxcel.cold_capabilities``). With them: the
+resume check lists the destination directory and reports other attempts' ``*.partial-<8 hex>`` files by name in the
+leg result (``partials.other_attempts``), never removing them; a failed partial verify or a failed commit removes
+only THIS attempt's two partials, still holding the lock; ``--clean-partials`` removes every ``*.partial-<8 hex>``
+in the run's own destination directory (from ``ls``), only while holding the lock, then continues the normal write.
+A removal that fails is a warning, not a failure of an otherwise verified copy. Without them (an older myxcel)
+nothing is listed or removed: partials are left and named in the error, and ``--clean-partials`` refuses
+``myxcel_capability_gap``.
+
 A kill anywhere after the lock leaves it held: the plain rerun is ``lock_held`` and the owner reruns with
 ``--break-lock``, which then lands in the resume check. Nothing here ever deletes or overwrites a remote final.
 
@@ -28,9 +37,12 @@ Interpretations of the spec, each flagged where it matters (see also the Step 6 
 * The existence of a remote final is inferred: the manifest by ``get`` (its bytes are needed anyway), the archive
   by ``verify-file`` (``verified`` or ``failed`` mean the file was read; ``unverifiable`` means absent or
   unreadable). The contract has no ``stat``.
-* Section 6.1 step 5 says to delete a failed attempt's partials and ``--clean-partials`` to remove leftovers, but
-  section 6.2 has no ``rm`` or ``ls``. Partials are therefore left, and named in the error; ``--clean-partials``
-  refuses with ``myxcel_capability_gap`` until myxcel grows the primitive.
+* Section 6.1 step 5 says to delete a failed attempt's partials "on a mismatch". Cleanup here runs on any partial
+  verify that is not ``verified`` (``failed`` and ``unverifiable``) and on any failed commit, because a partial is
+  never reused (every attempt has a fresh name). A failed ``put`` still leaves its partials, named in the error
+  (INTERPRETATION: the brief names verify and commit failures only).
+* ``--clean-partials`` runs after the resume check passes, so a ``lock_held`` / ``archive_conflict`` refusal removes
+  nothing, and it also runs on a record-only (resumed) pass.
 * ``--supersede`` supersedes and then writes the fresh copy in the same invocation, holding the lock throughout.
 """
 
@@ -46,6 +58,7 @@ import sys
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NoReturn
@@ -296,6 +309,8 @@ class _Env:
     supersede: bool
     reason: str
     gets: list[int]
+    caps: mx.Capabilities
+    clean_partials: bool
 
 
 def _verify_one(
@@ -438,6 +453,113 @@ def _resume_check(env: _Env, leg: Leg, p: _Paths) -> dict[str, Any] | None:
     }
 
 
+@dataclass
+class _Partials:
+    """What the destination directory held in the way of ``*.partial-<8 hex>`` files, and what was done about it."""
+
+    listed: bool = False
+    list_error: str | None = None
+    other_attempts: list[str] = dataclass_field(default_factory=list)
+    removed: list[str] = dataclass_field(default_factory=list)
+    absent: list[str] = dataclass_field(default_factory=list)
+    failed: list[dict[str, str]] = dataclass_field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "listed": self.listed,
+            "list_error": self.list_error,
+            "other_attempts": self.other_attempts,
+            "removed": self.removed,
+            "absent": self.absent,
+            "failed": self.failed,
+        }
+
+
+def _list_partials(env: _Env, leg: Leg, p: _Paths, attempt: str) -> _Partials:
+    """Spec 6.1 step 3/4: name the other attempts' partials in this run's destination directory. Never removes.
+    Without ``ls`` nothing is listed (``listed`` stays False); a failed ``ls`` is recorded, not raised."""
+    rep = _Partials()
+    if not env.caps.ls:
+        return rep
+    res = mx.ls(leg.profile.name, p.dest, runner=env.runner)
+    if res.status == "missing":
+        rep.listed = True
+        return rep
+    if res.status != "ok":
+        rep.list_error = res.message or "myxcel cold ls failed"
+        return rep
+    rep.listed = True
+    rep.other_attempts = sorted(
+        e.name
+        for e in res.entries
+        if not e.lock
+        and e.name != LOCK_DIR_NAME
+        and mx.is_partial_name(e.name)
+        and not e.name.endswith(f".partial-{attempt}")
+    )
+    return rep
+
+
+def _rm_partial(env: _Env, leg: Leg, rel: str) -> mx.RmPartialResult:
+    """One ``rm-partial``. Never raises for a path problem: that is a reported ``error``."""
+    try:
+        return mx.rm_partial(leg.profile.name, rel, runner=env.runner)
+    except OutputTiersConfigError as e:
+        return mx.RmPartialResult("error", str(e))
+
+
+def _clean_listed(env: _Env, leg: Leg, p: _Paths, rep: _Partials, warnings: list[str]) -> None:
+    """``--clean-partials``: remove the listed ``*.partial-<8 hex>`` files of this run's own directory. The caller
+    holds the lock. A final name or the lock is never passed to ``rm-partial``."""
+    if rep.list_error is not None:
+        warnings.append(f"--clean-partials could not list {p.display_dest}: {rep.list_error}")
+        return
+    finals = {Path(p.manifest_rel).name, Path(p.archive_rel).name}
+    for name in rep.other_attempts:
+        if name in finals or name == LOCK_DIR_NAME or not mx.is_partial_name(name):
+            continue
+        res = _rm_partial(env, leg, f"{p.dest}/{name}")
+        if res.status == "removed":
+            rep.removed.append(name)
+        elif res.status == "absent":
+            rep.absent.append(name)
+        else:
+            rep.failed.append({"name": name, "status": res.status, "message": res.message})
+            warnings.append(
+                f"--clean-partials could not remove {p.display_dest}/{name} ({res.status}): {res.message}"
+            )
+
+
+def _cleanup_attempt(env: _Env, leg: Leg, p: _Paths, attempt: str) -> str:
+    """Spec 6.1 step 5: remove only THIS attempt's two partials (the caller holds the lock). Returns the sentence
+    that goes into the error. Without ``rm-partial`` nothing is removed and the partials are named instead. Never
+    raises: a failed removal is reported in the sentence."""
+    names = (f"{p.manifest_rel}.partial-{attempt}", f"{p.archive_rel}.partial-{attempt}")
+    shown = (f"{p.display_manifest}.partial-{attempt}", f"{p.display_archive}.partial-{attempt}")
+    if not env.caps.rm_partial:
+        return f"left in place: {shown[0]}, {shown[1]}"
+    removed: list[str] = []
+    absent: list[str] = []
+    failed: list[str] = []
+    for rel, display in zip(names, shown, strict=True):
+        res = _rm_partial(env, leg, rel)
+        if res.status == "removed":
+            removed.append(display)
+        elif res.status == "absent":
+            absent.append(display)
+        else:
+            failed.append(f"{display} ({res.status}: {res.message})")
+    parts = []
+    if removed:
+        parts.append(f"removed this attempt's partials: {', '.join(removed)}")
+    if absent:
+        parts.append(f"already absent: {', '.join(absent)}")
+    if failed:
+        parts.append(f"could not remove: {'; '.join(failed)}")
+        logger.warning("partials of attempt %s not removed: %s", attempt, "; ".join(failed))
+    return "; ".join(parts)
+
+
 def _upload_and_commit(env: _Env, leg: Leg, p: _Paths, attempt: str) -> None:
     """Spec 6.1 steps 4 to 6: partial names per attempt, verify, then commit manifest first and archive last."""
     built, prof, runner = env.built, leg.profile.name, env.runner
@@ -460,26 +582,33 @@ def _upload_and_commit(env: _Env, leg: Leg, p: _Paths, attempt: str) -> None:
         raise OutputTierError(
             code,
             f"the partials did not verify ({'manifest ' + vm.status}, {'archive ' + va.status}); "
-            f"nothing was committed; left in place: {left}",
+            f"nothing was committed; {_cleanup_attempt(env, leg, p, attempt)}",
         )
 
     cm = mx.commit(prof, m_part, p.manifest_rel, runner=runner)
     if cm.status == "exists":
         raise OutputTierError(
             ARCHIVE_CONFLICT,
-            f"{p.display_manifest} appeared while this attempt was uploading; nothing was overwritten",
+            f"{p.display_manifest} appeared while this attempt was uploading; nothing was overwritten; "
+            f"{_cleanup_attempt(env, leg, p, attempt)}",
         )
     if cm.status != "ok":
-        _fail_myxcel("committing the manifest failed", cm.message)
+        _fail_myxcel(
+            "committing the manifest failed",
+            f"{cm.message}; {_cleanup_attempt(env, leg, p, attempt)}",
+        )
     ca = mx.commit(prof, a_part, p.archive_rel, runner=runner)
     if ca.status == "exists":
         raise OutputTierError(
             ARCHIVE_CONFLICT,
             f"{HALF_COMMITTED}: the manifest was committed but {p.display_archive} already exists; "
-            "nothing was overwritten",
+            f"nothing was overwritten; {_cleanup_attempt(env, leg, p, attempt)}",
         )
     if ca.status != "ok":
-        _fail_myxcel("committing the archive failed", ca.message)
+        _fail_myxcel(
+            "committing the archive failed",
+            f"{ca.message}; {_cleanup_attempt(env, leg, p, attempt)}",
+        )
 
 
 def _write_leg(env: _Env, leg: Leg) -> dict[str, Any]:
@@ -494,10 +623,18 @@ def _write_leg(env: _Env, leg: Leg) -> dict[str, Any]:
     uploaded = False
     resumed = False
     superseded: dict[str, Any] | None = None
+    partials = _Partials()
     try:
         if env.supersede:
             superseded = _supersede_pair(env, leg, p)
+        partials = _list_partials(env, leg, p, attempt)
+        if partials.list_error is not None and not env.clean_partials:
+            warnings.append(
+                f"could not list leftover partials in {p.display_dest}: {partials.list_error}"
+            )
         found = _resume_check(env, leg, p)
+        if env.clean_partials:
+            _clean_listed(env, leg, p, partials, warnings)
         if found is None:
             _upload_and_commit(env, leg, p, attempt)
             uploaded = True
@@ -556,6 +693,7 @@ def _write_leg(env: _Env, leg: Leg) -> dict[str, Any]:
         "resumed": resumed,
         "superseded": superseded,
         "broken_lock": broken,
+        "partials": partials.as_dict(),
         "eid": eid,
         "warnings": warnings,
     }
@@ -611,6 +749,7 @@ def _cold_one(
     supersede: bool,
     reason: str,
     break_lock: bool,
+    clean_partials: bool,
     worktree_root: str | None,
     runner: mx.Runner | None,
     progress: Progress | None,
@@ -643,7 +782,7 @@ def _cold_one(
             if dry_run:
                 return _dry_run(ctx, ref, legs)
 
-            mx.probe_cold_capability(runner)
+            caps = mx.cold_capabilities(runner)
             log_cwd = _log_cwd(ctx, None)
 
             def emit(kind: str, entity: list[str], data: dict[str, Any]) -> str | None:
@@ -682,6 +821,8 @@ def _cold_one(
                     supersede=supersede,
                     reason=reason,
                     gets=[0],
+                    caps=caps,
+                    clean_partials=clean_partials,
                 )
                 results: list[dict[str, Any]] = []
                 for leg in legs:
@@ -777,12 +918,6 @@ def cold_outputs(
     carries ``error_code == "cold_runs_failed"`` so the command exits 1."""
     if all_uncopied == bool(run_prefix):
         raise OutputTierError(INVALID_PARAM, "give exactly one of --run-id or --all-uncopied")
-    if clean_partials:
-        raise OutputTierError(
-            MYXCEL_CAPABILITY_GAP,
-            "--clean-partials needs `myxcel cold` list and remove primitives that the spec (section 6.2) "
-            "does not define; remove the named .partial-* files on the host by hand",
-        )
     if supersede and (not reason or not reason.strip()):
         raise OutputTierError(INVALID_PARAM, "--supersede requires --reason")
     if all_uncopied and (supersede or worktree_root):
@@ -791,6 +926,16 @@ def cold_outputs(
         )
     require_log_mode(catalog_dir)
     legs = resolve_legs(profile, mirror, config_dir)
+    if clean_partials and not dry_run:
+        caps = mx.cold_capabilities(runner)
+        if not (caps.ls and caps.rm_partial):
+            missing = [n for n, ok in (("ls", caps.ls), ("rm-partial", caps.rm_partial)) if not ok]
+            raise OutputTierError(
+                MYXCEL_CAPABILITY_GAP,
+                "--clean-partials needs the `myxcel cold ls` and `myxcel cold rm-partial` primitives "
+                f"(spec section 6.2); the installed myxcel lacks: {', '.join(missing)}. Upgrade myxcel, "
+                "or remove the .partial-* files on the host by hand",
+            )
     emit_progress = progress if progress is not None else default_progress()
 
     def one(run: str) -> dict[str, Any]:
@@ -802,6 +947,7 @@ def cold_outputs(
             supersede=supersede,
             reason=reason,
             break_lock=break_lock,
+            clean_partials=clean_partials,
             worktree_root=worktree_root,
             runner=runner,
             progress=emit_progress,

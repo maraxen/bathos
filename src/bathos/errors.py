@@ -143,10 +143,10 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.OUTPUTS_DRIFTED: "A live output file differs from (or is missing against) the hash the run recorded; nothing was uploaded. A drifted run_end path is never re-referenced: re-run instead (see `bth outputs hash`)",
     BathosErrorCode.NO_COLD_ROOT: "No cold profile resolves, or its myxcel profile has no absolute cold_root: pass --profile, set $BTH_COLD_PROFILE, [tool.bathos.outputs] cold_profile, or ~/.config/bathos/config.toml [outputs]",
     BathosErrorCode.ARCHIVE_CONFLICT: "A final cold name already exists with different content (or only one of the pair exists: half_committed). Nothing was overwritten; to replace it, rerun with --supersede --reason <text>, which renames the old pair aside",
-    BathosErrorCode.MYXCEL_CAPABILITY_GAP: "The installed myxcel lacks the `cold` subcommands (or --clean-partials needs a primitive myxcel does not have); upgrade myxcel",
+    BathosErrorCode.MYXCEL_CAPABILITY_GAP: "The installed myxcel lacks the `cold` subcommands, or --clean-partials needs `myxcel cold ls` and `myxcel cold rm-partial` and one is missing; upgrade myxcel",
     BathosErrorCode.MYXCEL_ERROR: "A myxcel cold call failed; read the message, check `myxcel socket-status`, then rerun (a rerun resumes, nothing is overwritten)",
     BathosErrorCode.LOCK_HELD: "Another writer (or a killed one) holds <dest>/.bth-lock; if you are sure no writer is alive, rerun with --break-lock (removes the lock only, then resumes)",
-    BathosErrorCode.COPY_VERIFY_FAILED: "The remote bytes did not match what was sent; this attempt's partials were left under their .partial-<attempt> names (not committed). Check the host's disk and quota, then rerun with a fresh attempt",
+    BathosErrorCode.COPY_VERIFY_FAILED: "The remote bytes did not match what was sent; nothing was committed and this attempt's partials were removed (an older myxcel without `cold rm-partial` leaves them under their .partial-<attempt> names, named in the message). Check the host's disk and quota, then rerun with a fresh attempt",
     BathosErrorCode.COPY_UNVERIFIABLE: "The remote bytes could not be re-read (host unreachable, Duo, sandbox); nothing was certified. Fix the connection and rerun, which resumes",
     BathosErrorCode.COLD_RUNS_FAILED: "At least one run failed under --all-uncopied; the message names each run's error_code. Fix those runs and rerun, which skips the copied ones",
 }
