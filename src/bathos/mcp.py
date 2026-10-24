@@ -4355,6 +4355,8 @@ async def mcp_outputs_summary_tool(
 def _output_tier_error_result(exc: Exception) -> dict:
     """Shape an output-tiering refusal as the tool error dict: the `error` text leads with the code (the CLI
     prints only that text), `error_code` carries it for MCP callers."""
+    from bathos.cluster import MyxcelCapabilityGapError
+    from bathos.output_tiers.config import OutputTiersConfigError
     from bathos.output_tiers.reference import OutputTierError
     from bathos.runlog.emit import RunNotLaunchedError
 
@@ -4364,6 +4366,12 @@ def _output_tier_error_result(exc: Exception) -> dict:
         except ValueError:
             code = BathosErrorCode.INVALID_PARAM
         message = f"{exc.error_code}: {exc.detail}"
+    elif isinstance(exc, OutputTiersConfigError | MyxcelCapabilityGapError):
+        try:
+            code = BathosErrorCode(exc.error_code)
+        except ValueError:
+            code = BathosErrorCode.INVALID_PARAM
+        message = f"{exc.error_code}: {exc}"
     elif isinstance(exc, RunNotLaunchedError):
         code = BathosErrorCode.CATALOG_ERROR
         message = f"catalog_error: {exc}"
@@ -4474,6 +4482,129 @@ def outputs_adopt_tool(
             worktree_root=worktree_root or None,
             dry_run=dry_run,
         )
+    except (OutputTierError, RunNotLaunchedError) as e:
+        return _output_tier_error_result(e)
+
+
+@cisternal.tool(registry="bathos", name="cold_outputs")
+@traced_tool
+async def mcp_cold_outputs_tool(
+    run_id: str = "",
+    all_uncopied: bool = False,
+    profile: str = "",
+    mirror: str = "",
+    dry_run: bool = False,
+    supersede: bool = False,
+    reason: str = "",
+    break_lock: bool = False,
+    clean_partials: bool = False,
+    worktree_root: str = "",
+    catalog_dir: str | None = None,
+) -> dict:
+    """Write a run's reference-hashed outputs to the cold profile (and a mirror) through myxcel."""
+    return cold_outputs_tool(
+        run_id=run_id,
+        all_uncopied=all_uncopied,
+        profile=profile,
+        mirror=mirror,
+        dry_run=dry_run,
+        supersede=supersede,
+        reason=reason,
+        break_lock=break_lock,
+        clean_partials=clean_partials,
+        worktree_root=worktree_root,
+        catalog_dir=catalog_dir or "",
+    )
+
+
+@cisternal.tool(registry="bathos", name="outputs_where")
+@traced_tool
+async def mcp_outputs_where_tool(
+    run_id: str,
+    catalog_dir: str | None = None,
+) -> dict:
+    """List the recorded copies (warm, cold, mirror) of a run's outputs and the config layer that chose each."""
+    return outputs_where_tool(run_id=run_id, catalog_dir=catalog_dir or "")
+
+
+@cisternal.tool(registry="bathos-cli", name="cold_outputs", cli_name="cold")
+def cold_outputs_tool(
+    run_id: str = "",
+    all_uncopied: bool = False,
+    profile: str = "",
+    mirror: str = "",
+    dry_run: bool = False,
+    supersede: bool = False,
+    reason: str = "",
+    break_lock: bool = False,
+    clean_partials: bool = False,
+    worktree_root: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Write a run's reference-hashed outputs to the cold profile, then the mirror, through myxcel.
+
+    Builds the archive and manifest from the run's reference hashes (a drifted live file refuses with
+    outputs_drifted before anything is uploaded), takes the remote lock first, resumes an interrupted write,
+    never overwrites a final name. `run_id` may be a unique prefix; `all_uncopied` covers the current project's
+    completed runs with no verified copy on the profile and continues past a failing run. `profile` / `mirror`
+    name myxcel profiles (see `bth outputs where` for the layer that chose them). `dry_run` lists files, bytes
+    and destinations and writes nothing. `break_lock` removes a dead writer's lock and then resumes.
+    `supersede` + `reason` renames an existing pair aside and writes a fresh one. `worktree_root` is required
+    only for an imported run. Under SLURM each run prints one JSON progress line on stdout.
+    """
+    from bathos.cluster import MyxcelCapabilityGapError
+    from bathos.output_tiers.cold import cold_outputs
+    from bathos.output_tiers.config import OutputTiersConfigError
+    from bathos.output_tiers.reference import OutputTierError
+    from bathos.runlog.emit import RunNotLaunchedError
+
+    if not run_id and not all_uncopied:
+        return {"error": "run_id parameter is required (or all_uncopied)"}
+    try:
+        result = cold_outputs(
+            _get_catalog_dir(catalog_dir or None),
+            run_id,
+            all_uncopied=all_uncopied,
+            profile=profile or None,
+            mirror=mirror or None,
+            dry_run=dry_run,
+            supersede=supersede,
+            reason=reason,
+            break_lock=break_lock,
+            clean_partials=clean_partials,
+            worktree_root=worktree_root or None,
+        )
+    except (
+        OutputTierError,
+        OutputTiersConfigError,
+        MyxcelCapabilityGapError,
+        RunNotLaunchedError,
+    ) as e:
+        return _output_tier_error_result(e)
+    if result.get("error_code") and "resolution_hint" not in result:
+        with contextlib.suppress(ValueError):
+            result["resolution_hint"] = RESOLUTION_HINTS[BathosErrorCode(result["error_code"])]
+    return result
+
+
+@cisternal.tool(registry="bathos-cli", name="outputs_where", cli_group="outputs", cli_name="where")
+def outputs_where_tool(
+    run_id: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """List the recorded copies of a run's outputs (warm, cold, mirror) and the config layer that chose each.
+
+    Reads `output_copies` from the folded index; a catalog whose index predates the table shows no copies
+    until the next ingest. `run_id` may be a unique prefix.
+    """
+    from bathos.output_tiers.cold import where_outputs
+    from bathos.output_tiers.reference import OutputTierError
+    from bathos.runlog.emit import RunNotLaunchedError
+
+    if not run_id:
+        return {"error": "run_id parameter is required"}
+    try:
+        return where_outputs(_get_catalog_dir(catalog_dir or None), run_id)
     except (OutputTierError, RunNotLaunchedError) as e:
         return _output_tier_error_result(e)
 
@@ -5233,6 +5364,8 @@ _WIRED = cisternal.wire(
         "outputs_summary",
         "outputs_hash",
         "outputs_adopt",
+        "outputs_where",
+        "cold_outputs",
         "campaign_add",
         "campaign_show",
         "verify",

@@ -306,6 +306,30 @@ CREATE TABLE IF NOT EXISTS submits (
 )
 """
 
+# One row per physical copy of a run's outputs (output tiering spec 261023, section 5.3). The key is
+# `copy_id`, which is the same for a copy and for its rewrite after a supersede (same remote path), so a
+# superseded-then-rewritten copy is ONE row whose `superseded_at` the fold clears. The renamed-aside old pair
+# is its own row (`renamed_from` = the live row's copy_id, state `superseded`).
+OUTPUT_COPIES_DDL = """
+CREATE TABLE IF NOT EXISTS output_copies (
+    copy_id VARCHAR PRIMARY KEY,
+    run_id VARCHAR,
+    tier VARCHAR,
+    profile VARCHAR,
+    host VARCHAR,
+    path VARCHAR,
+    config_layer VARCHAR,
+    archive_sha256 VARCHAR,
+    manifest_sha256 VARCHAR,
+    archive_size_bytes BIGINT,
+    state VARCHAR,
+    verified_at VARCHAR,
+    recorded_at VARCHAR,
+    superseded_at VARCHAR,
+    renamed_from VARCHAR
+)
+"""
+
 
 _DDL_NON_COLUMN_PREFIXES = ("CREATE", ")", "PRIMARY", "UNIQUE", "FOREIGN", "CHECK")
 
@@ -327,6 +351,7 @@ BLAST_RADIUS_LEDGER_COLUMNS: list[str] = _columns_of(BLAST_RADIUS_LEDGER_DDL)
 TRUST_LEDGER_COLUMNS: list[str] = _columns_of(TRUST_LEDGER_DDL)
 ARCHIVED_ITEMS_COLUMNS: list[str] = _columns_of(ARCHIVED_ITEMS_DDL)
 SUBMITS_COLUMNS: list[str] = _columns_of(SUBMITS_DDL)
+OUTPUT_COPIES_COLUMNS: list[str] = _columns_of(OUTPUT_COPIES_DDL)
 
 
 def index_db_path(catalog_dir: Path | None = None) -> Path:
@@ -366,6 +391,20 @@ def init_index_schema(con: duckdb.DuckDBPyConnection) -> None:
     con.execute(TRUST_LEDGER_DDL)
     con.execute(ARCHIVED_ITEMS_DDL)
     con.execute(SUBMITS_DDL)
+    con.execute(OUTPUT_COPIES_DDL)
+
+
+def _empty_select(ddl: str) -> str:
+    """``SELECT CAST(NULL AS <type>) AS <col>, ... WHERE false`` for the columns of ``ddl``: a typed, empty
+    stand-in for a table an older ``index.db`` does not have yet."""
+    cols = []
+    for line in ddl.strip().splitlines():
+        stripped = line.strip().rstrip(",").strip()
+        if not stripped or stripped.startswith(_DDL_NON_COLUMN_PREFIXES):
+            continue
+        name, col_type = stripped.split(None, 1)
+        cols.append(f"CAST(NULL AS {col_type.replace(' PRIMARY KEY', '')}) AS {name}")
+    return "SELECT " + ", ".join(cols) + " WHERE false"
 
 
 def connect_read(
@@ -454,6 +493,18 @@ def connect_read(
         con.execute("CREATE VIEW trust_ledger AS SELECT * FROM idx.trust_ledger")
         con.execute("CREATE VIEW archived_items AS SELECT * FROM idx.archived_items")
         con.execute("CREATE VIEW submits AS SELECT * FROM idx.submits")
+        # `idx` is attached read-only, so a table added after this index.db was built cannot be created
+        # here (it self-creates on the next ingest, `init_index_schema`). A view over a missing table would
+        # raise CatalogException for every reader, so such a table reads as empty until then (spec 261023,
+        # section 5.3, "Existing index.db files").
+        have_copies = con.execute(
+            "SELECT count(*) FROM duckdb_tables() "
+            "WHERE database_name = 'idx' AND table_name = 'output_copies'"
+        ).fetchone()
+        if have_copies and have_copies[0]:
+            con.execute("CREATE VIEW output_copies AS SELECT * FROM idx.output_copies")
+        else:
+            con.execute(f"CREATE VIEW output_copies AS {_empty_select(OUTPUT_COPIES_DDL)}")
     else:
         init_index_schema(con)
     return con

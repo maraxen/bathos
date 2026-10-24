@@ -220,7 +220,30 @@ def test_default_runner_uses_list_argv_without_shell(monkeypatch):
 
 # ------------------------------------------------------------------------------------------- local refusals
 
-BAD_PATHS = ["/abs/path", "", "   ", "a/../b", "..", "a/..", "-rf", "a\nb"]
+BAD_PATHS = [
+    "/abs/path",
+    "",
+    "   ",
+    "a/../b",
+    "..",
+    "a/..",
+    "-rf",
+    "a\nb",
+    "a\rb",
+    "~/x",
+    "~",
+    "a//b",
+    "a/./b",
+    ".",
+    "a b/c",
+    "bathos-cold/my project/r",
+    "bathos-cold/-x/r",
+    "a/-b",
+    "bathos-cold/naïve/r",
+    "a;b",
+    "a$b",
+    "a`b`",
+]
 
 
 @pytest.mark.parametrize("bad", BAD_PATHS)
@@ -251,6 +274,23 @@ def test_bad_profile_sha_and_size_are_refused_without_running():
     with pytest.raises(OutputTiersConfigError):
         mx.verify_file("so3", "d/f", SHA, -1, runner=r)
     assert r.calls == []
+
+
+def test_the_allowed_charset_passes_and_a_trailing_slash_is_for_directories_only():
+    r = FakeRunner(ok({"status": "acquired"}))
+    assert mx.check_remote_path("bathos-cold/my-proj_1.2+x@y=z,w%/run-1") == (
+        "bathos-cold/my-proj_1.2+x@y=z,w%/run-1"
+    )
+    assert mx.lock("so3", "bathos-cold/p/r/", runner=r).status == "acquired"  # as in myxcel
+    for call in (
+        lambda: mx.check_remote_path("bathos-cold/p/r/"),
+        lambda: mx.put("so3", "/tmp/a", "d/", runner=r),
+        lambda: mx.get("so3", "d/", "/tmp/w", runner=r),
+        lambda: mx.lock("so3", "/", runner=r),
+    ):
+        with pytest.raises(OutputTiersConfigError):
+            call()
+    assert len(r.calls) == 1
 
 
 def test_dotdot_inside_a_name_is_not_a_traversal():

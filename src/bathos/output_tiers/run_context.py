@@ -39,6 +39,7 @@ class RunContext:
     worktree_root: Path | None
     root_source: str
     imported_root: str | None
+    project_slug: str = ""
 
 
 def require_log_mode(catalog_dir: Path) -> None:
@@ -123,8 +124,9 @@ def open_run(
     try:
         ids = [r[0] for r in con.execute("SELECT id FROM runs").fetchall()]
         run_id = resolve_run_id(run_prefix, ids)
-        row = con.execute("SELECT status FROM runs WHERE id = ?", [run_id]).fetchone()
+        row = con.execute("SELECT status, project_slug FROM runs WHERE id = ?", [run_id]).fetchone()
         status = (row[0] if row else "") or ""
+        project_slug = (row[1] if row else "") or ""
         events = read_run_events(con, run_id)
     finally:
         con.close()
@@ -143,6 +145,7 @@ def open_run(
         worktree_root=None,
         root_source="",
         imported_root=None,
+        project_slug=project_slug,
     )
     return attach_root(ctx, worktree_root) if need_root else ctx
 
