@@ -4517,6 +4517,20 @@ async def mcp_cold_outputs_tool(
     )
 
 
+@cisternal.tool(registry="bathos", name="warm_outputs")
+@traced_tool
+async def mcp_warm_outputs_tool(
+    run_id: str,
+    to: str,
+    worktree_root: str = "",
+    catalog_dir: str | None = None,
+) -> dict:
+    """Restore a run's reference-hashed outputs from a verified cold/mirror copy into a new local directory."""
+    return warm_outputs_tool(
+        run_id=run_id, to=to, worktree_root=worktree_root, catalog_dir=catalog_dir or ""
+    )
+
+
 @cisternal.tool(registry="bathos", name="outputs_where")
 @traced_tool
 async def mcp_outputs_where_tool(
@@ -4585,6 +4599,48 @@ def cold_outputs_tool(
         with contextlib.suppress(ValueError):
             result["resolution_hint"] = RESOLUTION_HINTS[BathosErrorCode(result["error_code"])]
     return result
+
+
+@cisternal.tool(registry="bathos-cli", name="warm_outputs", cli_name="warm")
+def warm_outputs_tool(
+    run_id: str = "",
+    to: str = "",
+    worktree_root: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Restore a run's reference-hashed outputs from a verified cold (or mirror) copy into a NEW local directory.
+
+    `to` must not exist. The archive and manifest are fetched through `myxcel cold get`, both sha256s are
+    checked before the tar is opened, the member set must equal the manifest exactly (no `..`, absolute, link or
+    device members), the files are extracted into a sibling `<to>.bth-warm-<id>.partial/`, every file is hashed
+    against the manifest and the run's reference hashes, and the directory is renamed into place with
+    `renameat2(RENAME_NOREPLACE)`, so it never replaces anything. Records the copy as tier=warm. `run_id` may be
+    a unique prefix. `worktree_root` is required only for an imported run.
+    """
+    from bathos.cluster import MyxcelCapabilityGapError
+    from bathos.output_tiers.config import OutputTiersConfigError
+    from bathos.output_tiers.reference import OutputTierError
+    from bathos.output_tiers.warm import warm_outputs
+    from bathos.runlog.emit import RunNotLaunchedError
+
+    if not run_id:
+        return {"error": "run_id parameter is required"}
+    if not to:
+        return {"error": "to parameter is required"}
+    try:
+        return warm_outputs(
+            _get_catalog_dir(catalog_dir or None),
+            run_id,
+            to,
+            worktree_root=worktree_root or None,
+        )
+    except (
+        OutputTierError,
+        OutputTiersConfigError,
+        MyxcelCapabilityGapError,
+        RunNotLaunchedError,
+    ) as e:
+        return _output_tier_error_result(e)
 
 
 @cisternal.tool(registry="bathos-cli", name="outputs_where", cli_group="outputs", cli_name="where")
@@ -5366,6 +5422,7 @@ _WIRED = cisternal.wire(
         "outputs_adopt",
         "outputs_where",
         "cold_outputs",
+        "warm_outputs",
         "campaign_add",
         "campaign_show",
         "verify",

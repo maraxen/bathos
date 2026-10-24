@@ -92,6 +92,12 @@ class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(
     COPY_VERIFY_FAILED = "copy_verify_failed"
     COPY_UNVERIFIABLE = "copy_unverifiable"
     COLD_RUNS_FAILED = "cold_runs_failed"
+    # `bth warm` (step 7).
+    WARM_TARGET_EXISTS = "warm_target_exists"
+    WARM_MISMATCH = "warm_mismatch"
+    NO_VERIFIED_COPY = "no_verified_copy"
+    WARM_NOREPLACE_UNSUPPORTED = "warm_noreplace_unsupported"
+    WARM_PUBLISH_FAILED = "warm_publish_failed"
 
 
 # Resolution hints registry: every BathosErrorCode member must have a non-empty entry
@@ -149,6 +155,11 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.COPY_VERIFY_FAILED: "The remote bytes did not match what was sent; this attempt's partials were left under their .partial-<attempt> names (not committed). Check the host's disk and quota, then rerun with a fresh attempt",
     BathosErrorCode.COPY_UNVERIFIABLE: "The remote bytes could not be re-read (host unreachable, Duo, sandbox); nothing was certified. Fix the connection and rerun, which resumes",
     BathosErrorCode.COLD_RUNS_FAILED: "At least one run failed under --all-uncopied; the message names each run's error_code. Fix those runs and rerun, which skips the copied ones",
+    BathosErrorCode.WARM_TARGET_EXISTS: "`bth warm --to <dir>` writes a new directory only and never replaces one, even an empty one: pick a path that does not exist (nothing at the existing path was touched)",
+    BathosErrorCode.WARM_MISMATCH: "The fetched archive, manifest or extracted files do not match the copy record, the manifest or the run's reference hashes (or the archive holds an unsafe or extra member); bathos deleted only its own staging directory and wrote nothing at --to. Run `bth verify --tier outputs`, and supersede the cold copy if it is bad",
+    BathosErrorCode.NO_VERIFIED_COPY: "The run has no verified, non-superseded cold or mirror copy to restore from; run `bth cold <run>` or `bth verify --tier outputs` (see `bth outputs where`)",
+    BathosErrorCode.WARM_NOREPLACE_UNSUPPORTED: "This kernel or filesystem lacks renameat2 RENAME_NOREPLACE, so bathos will not publish by a replacing rename; the verified copy is kept in the <dir>.bth-warm-<attempt>.partial directory named in the message: move it into place by hand, or use a filesystem that supports the flag",
+    BathosErrorCode.WARM_PUBLISH_FAILED: "The final rename of the verified staging directory failed (permissions, space, a vanished parent); the verified copy is kept in the .partial directory named in the message: fix the cause and move it into place by hand",
 }
 
 
