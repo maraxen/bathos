@@ -4706,16 +4706,74 @@ def verify_tool(
     catalog_dir: str = "",
     archive_dir: str = "",
     authoring: bool = False,
+    run_id: str = "",
+    profile: str = "",
+    strict: bool = False,
 ) -> dict:
-    """Verify catalog integrity across cool, warm, archive, and runlog tiers."""
-    from bathos.verify import verify_all, verify_archive, verify_cool, verify_runlog, verify_warm
+    """Verify catalog integrity across cool, warm, archive, and runlog tiers.
+
+    `tier="outputs"` is opt-in and is never part of `all`, because it needs the network: it re-reads each live
+    cold/mirror copy of a run's outputs on its host through `myxcel cold verify-file` and records the measured
+    state (`verified` / `failed` / `unverifiable`) so `bth outputs where` shows it. `run_id` (a unique prefix)
+    limits it to one run, `profile` to one myxcel profile; `strict` makes an `unverifiable` copy a failure too.
+    """
+    from bathos.verify import (
+        VerifyResult,
+        verify_all,
+        verify_archive,
+        verify_cool,
+        verify_runlog,
+        verify_warm,
+    )
 
     cat_dir = _get_catalog_dir(catalog_dir or None)
     archive_root = (
         Path(archive_dir).expanduser() if archive_dir else Path.home() / ".bth" / "archive"
     )
 
-    if tier == "cool":
+    outputs_report: dict | None = None
+    if tier == "outputs":
+        from bathos.cluster import MyxcelCapabilityGapError
+        from bathos.output_tiers.config import OutputTiersConfigError
+        from bathos.output_tiers.reference import OutputTierError
+        from bathos.output_tiers.verify import verify_outputs
+        from bathos.runlog.emit import RunNotLaunchedError
+
+        try:
+            outputs_report = verify_outputs(cat_dir, run_id, profile=profile or None, strict=strict)
+        except (
+            OutputTierError,
+            OutputTiersConfigError,
+            MyxcelCapabilityGapError,
+            RunNotLaunchedError,
+        ) as e:
+            return _output_tier_error_result(e)
+        failing = [
+            f"{c['tier']}:{c['profile']} {c['path']} {c['state']} ({c['detail']})"
+            for run in outputs_report["runs"]
+            for c in run["copies"]
+            if c["state"] == "failed" or (strict and c["state"] == "unverifiable")
+        ]
+        disagreeing = [
+            f"{run['run_id']}: {run['agree_detail']}"
+            for run in outputs_report["runs"]
+            if not run["agree"]
+        ]
+        warnings = [
+            f"{c['tier']}:{c['profile']} {c['path']} unverifiable ({c['detail']})"
+            for run in outputs_report["runs"]
+            for c in run["copies"]
+            if c["state"] == "unverifiable" and not strict
+        ]
+        results: list = [
+            VerifyResult(
+                tier="outputs",
+                ok=outputs_report["ok"],
+                warnings=warnings,
+                errors=[*failing, *disagreeing],
+            )
+        ]
+    elif tier == "cool":
         results = [verify_cool(cat_dir)]
     elif tier == "warm":
         results = [verify_warm(cat_dir)]
@@ -4753,6 +4811,15 @@ def verify_tool(
         # Singular "error" key -- see cli_render.render_or_exit -- matches the shipped
         # Typer `verify` command's `if any_errors: raise typer.Exit(1)`.
         payload["error"] = "; ".join(all_errors)
+    if outputs_report is not None:
+        # The per-run, per-copy JSON: the CLI prints it on stdout even on failure (cli_render), MCP callers get it
+        # as a field, and `error_code` is what a caller branches on (not the exit status).
+        payload["outputs_report"] = outputs_report
+        code = outputs_report.get("error_code")
+        if code:
+            payload["error_code"] = code
+            payload["resolution_hint"] = RESOLUTION_HINTS[BathosErrorCode(code)]
+            payload["error"] = f"{outputs_report['error']}: {payload.get('error', '')}"
     return payload
 
 
@@ -4866,9 +4933,19 @@ async def mcp_verify_tool(
     tier: str = "all",
     catalog_dir: str = "",
     archive_dir: str = "",
+    run_id: str = "",
+    profile: str = "",
+    strict: bool = False,
 ) -> dict:
-    """Verify catalog integrity."""
-    result = verify_tool(tier=tier, catalog_dir=catalog_dir, archive_dir=archive_dir)
+    """Verify catalog integrity. `tier="outputs"` re-reads cold/mirror output copies on their hosts (opt-in)."""
+    result = verify_tool(
+        tier=tier,
+        catalog_dir=catalog_dir,
+        archive_dir=archive_dir,
+        run_id=run_id,
+        profile=profile,
+        strict=strict,
+    )
     # verify_tool injects an "error" key for CLI rendering purposes
     # (render_or_exit's uniform contract) -- strip it here like
     # validate_sidecar's wrapper does, since "ok"/"results" already carry

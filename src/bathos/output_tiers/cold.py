@@ -488,6 +488,7 @@ def _resume_check(
         "archive_sha256": want_sha,
         "archive_size_bytes": want_size,
         "manifest_sha256": manifest_sha,
+        "manifest_size_bytes": len(remote_bytes),
     }
 
 
@@ -691,6 +692,7 @@ def _write_leg(env: _Env, leg: Leg) -> dict[str, Any]:
                 "archive_sha256": built.archive_sha256,
                 "archive_size_bytes": built.archive_size_bytes,
                 "manifest_sha256": built.manifest_sha256,
+                "manifest_size_bytes": len(env.manifest_bytes),
             }
         else:
             resumed = True
