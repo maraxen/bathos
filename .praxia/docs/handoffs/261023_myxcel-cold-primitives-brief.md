@@ -1,12 +1,17 @@
 ---
 title: Brief for a myxcel session to implement myxcel cold primitives (output tiering step 5a)
-description: Paste-ready brief for implementing myxcel cold put/commit/verify-file/get/lock/unlock with JSON contracts pinned by the bathos output-tiering spec, plus the owner-gated hard-link probe on so3 and titanix
-status: active
+description: Completed brief for myxcel cold put, commit, verify-file, get, lock, unlock, ls and rm-partial, all merged in myxcel; spec section 6.2 is the authoritative contract, not this brief
+status: completed
 task_id: 261023_bathos-output-tiering
 date: '261023'
 backlog_ids: ''
 adversarial_review: ''
 ---
+> **Completed — do not re-run (2026-10-24).** All eight commands are merged in myxcel: six in #41 (`72f69df`), `ls`
+> and `rm-partial` in #42 (`689730c`). The authoritative contract is spec §6.2 as reconciled with merged myxcel. Where
+> this brief and §6.2 differ, §6.2 wins. A myxcel session must not "fix" merged commands toward this brief: the bathos
+> client mocks §6.2 exactly. The rows below were corrected to §6.2 on 2026-10-24 (`get`, `lock`, `unlock`).
+
 task_id: 261023_bathos-output-tiering (Step 5a: myxcel `cold` primitives)
 
 Run this from a session in a **myxcel** worktree, on a new branch off myxcel `main` (for example
@@ -26,8 +31,8 @@ command:
 | `myxcel cold put <profile> <local_file> <remote_rel_name>` | Uploads to exactly that name. Creates missing parent directories (`mkdir -p` on the parent). Never overwrites an existing final name; a partial name is the caller's choice. |
 | `myxcel cold commit <profile> <remote_partial> <remote_final>` | Runs `ln <partial> <final> && rm <partial>` on the remote. POSIX `ln` without `-f` fails if `final` exists, which gives `{"status":"exists"}`. Never `mv`, never `-f`. |
 | `myxcel cold verify-file <profile> <remote_path> <sha256> <size>` | Plain sha256 (not `_tree_hash`). Re-reads cache-cold the way coldify verify does (fsync + `posix_fadvise(DONTNEED)`, see `coldify.py`). Uses login ssh at or below the size threshold (D3: a config key, default 2 GiB) and a `mit_data_transfer` job above it (reuse `_submit_coldify_job`, `coldify.py:95`). Returns `verified` / `failed` / `unverifiable`, plus `sha256_observed`, `size_observed`, `method` (`login_ssh` / `slurm_job`) and `message`. Unreachable host or job failure is `unverifiable`, never `failed`. |
-| `myxcel cold get <profile> <remote_path> <local_dir>` | `{"status","local_path","bytes"}`. Refuses if the local target exists. |
-| `myxcel cold lock` / `unlock <profile> <remote_dir>` | `mkdir -p <parent>` then an atomic `mkdir <remote_dir>/.bth-lock`, holding a small JSON file with host, pid, attempt and start time. Returns `acquired`, or `held` plus `holder`. `unlock` removes only the lock directory. |
+| `myxcel cold get <profile> <remote_path> <local_dir>` | `{"status":"ok"\|"error","local_path","bytes","message"}`. `<local_dir>` must already exist. |
+| `myxcel cold lock` / `unlock <profile> <remote_dir>` | `lock`: `mkdir -p <parent>` then an atomic `mkdir <remote_dir>/.bth-lock`, holding a small JSON file with host, pid, attempt and start time. Returns `{"status":"acquired"\|"held"\|"error","holder","message"}`. `unlock`: removes only `.bth-lock/holder.json` and the lock directory, whoever holds it (bathos `--break-lock` relies on this). Returns `{"status":"released"\|"held"\|"error","holder","message"}`; no lock at all is `error`. |
 | `myxcel cold ls <profile> <remote_dir>` | One directory, not recursive. `{"status":"ok"\|"missing"\|"error","entries":[{"name","size_bytes","mtime"}],"message"}`, regular files only, plus the `.bth-lock` directory as `{"name":".bth-lock","lock":true,"holder"}`. `missing` if the directory does not exist. (Added after bathos Step 6, owner decision 2026-10-23.) |
 | `myxcel cold rm-partial <profile> <remote_path>` | Refuses, **before any ssh call**, a path whose last segment does not match `*.partial-[0-9a-f]{8}`. Plain `rm` of one regular file: never `-r`, never a directory, never `-f` on a glob. `{"status":"removed"\|"absent"\|"refused"\|"error","message"}`. (Added with `ls`.) |
 
