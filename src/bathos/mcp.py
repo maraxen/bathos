@@ -4898,6 +4898,7 @@ def lint_tool(project_root: str = "", concentration_threshold: int = 20) -> dict
         check_stale_scripts_without_reason,
         check_threshold_basis,
         check_todo_strings_in_scaffold,
+        check_undeclared_resume_dirs,
         check_unfired_branches,
         lint_project,
     )
@@ -4922,6 +4923,8 @@ def lint_tool(project_root: str = "", concentration_threshold: int = 20) -> dict
     )
 
     catalog_dir = _get_catalog_dir(None)
+    # Reads run.started events, which only a log-mode index has: gated by catalog_readable inside, not by bathos.db.
+    issues.extend(check_undeclared_resume_dirs(catalog_dir, project_slug=soft_project_slug() or ""))
     db_path = catalog_dir / "bathos.db"
     if db_path.exists():
         issues.extend(check_residual_rates(catalog_dir))
