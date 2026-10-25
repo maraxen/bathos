@@ -300,15 +300,6 @@ def test_an_imported_run_without_worktree_root_is_worktree_unknown_and_nothing_r
     assert rec["data"]["state"] == "verified"
 
 
-def test_clean_partials_refuses_because_the_contract_has_no_remove_primitive(cw: ColdWorld):
-    cw.standard_run()
-    cw.ingest()
-    with pytest.raises(OutputTierError) as e:
-        cw.cold(clean_partials=True)
-    assert _code(e) == "myxcel_capability_gap" and "6.2" in e.value.detail
-    assert cw.fake.calls == []
-
-
 def test_supersede_needs_a_reason_and_one_target_is_required(cw: ColdWorld):
     cw.standard_run()
     cw.ingest()
@@ -1150,3 +1141,335 @@ def test_mcp_wrapper_returns_the_error_envelope_with_code_and_hint(cw: ColdWorld
     monkeypatch.delenv("BTH_COLD_PROFILE")
     nocold = cold_outputs_tool(run_id=RID, catalog_dir=str(cw.w.catalog))
     assert nocold["error_code"] == "no_cold_root" and "$BTH_COLD_PROFILE" in nocold["error"]
+
+
+# --------------------------------------------------------------------------------------------------
+# step 6b: partials (myxcel cold ls / rm-partial)
+
+
+def _corrupt_archive_partial(cw: ColdWorld) -> None:
+    def hook(args, base):
+        if ".tar.zst.partial-" in args[1]:
+            target = base / args[1]
+            target.write_bytes(target.read_bytes()[:-1] + b"\x00")
+
+    cw.fake.after("put", hook)
+
+
+def _token(rel: str) -> str:
+    return rel.rsplit(".partial-", 1)[1]
+
+
+def test_a_verify_failure_removes_exactly_this_attempts_partials_and_touches_nothing_else(
+    cw: ColdWorld,
+):
+    """Step 5. Broken: leave the partials (Step 6 behaviour), or remove by pattern and take the neighbours."""
+    cw.standard_run()
+    cw.ingest()
+    d = cw.dest()
+    other_attempt = f"{d}/run-{RID}.tar.zst.partial-aaaaaaaa"
+    sibling_final = f"{d}/run-{RID}.superseded-20260101T000000Z.tar.zst"
+    cw.fake.plant(COLD, other_attempt)
+    cw.fake.plant(COLD, sibling_final, b"an older, superseded pair")
+    planted = cw.fake.snapshot(COLD)
+    _corrupt_archive_partial(cw)
+
+    with pytest.raises(OutputTierError) as e:
+        cw.cold()
+
+    assert _code(e) == "copy_verify_failed"
+    assert "removed this attempt's partials" in e.value.detail
+    assert (
+        cw.fake.snapshot(COLD) == planted
+    )  # this attempt's two partials are gone, the two planted stay
+    removed = [rel for rel, _ in cw.fake.rm_log]
+    assert len(removed) == 2
+    assert {_token(r) for r in removed} != {"aaaaaaaa"} and len({_token(r) for r in removed}) == 1
+    assert {r.rsplit(".partial-", 1)[0] for r in removed} == {
+        f"{d}/run-{RID}.manifest.json",
+        f"{d}/run-{RID}.tar.zst",
+    }
+    assert all(held for _, held in cw.fake.rm_log), "every removal happens while the lock is held"
+    assert not cw.fake.lock_exists(COLD, d)  # and the lock is released afterwards
+    assert cw.copy_events() == []
+
+
+def test_a_failed_commit_removes_this_attempts_partials_while_still_locked(cw: ColdWorld):
+    cw.standard_run()
+    cw.ingest()
+    cw.fake.fail("commit", "disk full")
+
+    with pytest.raises(OutputTierError) as e:
+        cw.cold()
+
+    assert _code(e) == "myxcel_error" and "disk full" in e.value.detail
+    assert "removed this attempt's partials" in e.value.detail
+    assert cw.fake.snapshot(COLD) == {}
+    assert len(cw.fake.rm_log) == 2 and all(held for _, held in cw.fake.rm_log)
+    assert not cw.fake.lock_exists(COLD, cw.dest())
+
+
+def test_a_failed_archive_commit_removes_the_archive_partial_and_never_the_committed_manifest(
+    cw: ColdWorld,
+):
+    """The manifest final was committed (so its partial is already linked away): cleanup reports it absent and
+    the final stays (half_committed is fixed by --supersede, never by deleting)."""
+    cw.standard_run()
+    cw.ingest()
+    m_name, a_name = cw.final_names()
+    d = cw.dest()
+
+    def archive_final_appears_first(args, base):
+        if args[1].endswith(".tar.zst"):
+            (base / args[1]).write_bytes(b"someone else's archive")
+
+    cw.fake.before("commit", archive_final_appears_first)
+
+    with pytest.raises(OutputTierError) as e:
+        cw.cold()
+
+    assert _code(e) == "archive_conflict" and "half_committed" in e.value.detail
+    assert "already absent" in e.value.detail  # the manifest partial was committed away
+    remote = cw.fake.snapshot(COLD)
+    assert set(remote) == {f"{d}/{m_name}", f"{d}/{a_name}"}  # no partials, both finals kept
+    assert remote[f"{d}/{a_name}"] != "" and (
+        cw.fake.remote(COLD, f"{d}/{a_name}")
+    ).read_bytes() == (b"someone else's archive")
+
+
+def test_resume_reports_another_attempts_partial_by_name_and_does_not_remove_it(cw: ColdWorld):
+    """Step 4. Broken: no listing, or a listing that deletes."""
+    cw.standard_run()
+    cw.ingest()
+    d = cw.dest()
+    leftover = f"run-{RID}.tar.zst.partial-aaaaaaaa"
+    cw.fake.plant(COLD, f"{d}/{leftover}")
+
+    first = cw.cold()
+    again = cw.cold()  # the resume path: record only
+
+    for res in (first, again):
+        parts = res["legs"][0]["partials"]
+        assert parts["listed"] is True and parts["other_attempts"] == [leftover]
+        assert parts["removed"] == [] and parts["failed"] == []
+    assert again["legs"][0]["resumed"] is True
+    assert cw.fake.rm_log == [] and cw.fake.calls_named("rm-partial") == []
+    assert f"{d}/{leftover}" in cw.fake.snapshot(COLD)
+
+
+def test_a_clean_directory_lists_no_partials_and_a_missing_directory_is_not_an_error(
+    cw: ColdWorld,
+):
+    cw.standard_run()
+    cw.ingest()
+    res = cw.cold()
+    assert res["legs"][0]["partials"]["listed"] is True
+    assert res["legs"][0]["partials"]["other_attempts"] == []
+    assert res["legs"][0]["warnings"] == []
+    (ls_args,) = cw.fake.calls_named("ls")
+    assert ls_args == [COLD, cw.dest()]  # the run's own directory, and only that
+
+
+def test_clean_partials_removes_stale_partials_in_the_runs_own_directory_only(cw: ColdWorld):
+    """Broken: remove a final or the lock, reach into another run's directory, or remove a near-miss name."""
+    cw.standard_run()
+    cw.ingest()
+    d = cw.dest()
+    stale = [
+        f"{d}/run-{RID}.manifest.json.partial-bbbbbbbb",
+        f"{d}/run-{RID}.tar.zst.partial-aaaaaaaa",
+    ]
+    keep = [
+        f"{d}/notes.txt",
+        f"{d}/x.partial-0123abc",  # 7 hex: not a partial
+        f"{d}/x.partial-0123ABCD",  # upper case: not a partial
+        f"{d}/run-{RID}.superseded-20260101T000000Z.tar.zst",
+        f"bathos-cold/repo/{RID2}/run-{RID2}.tar.zst.partial-cccccccc",  # another run's directory
+        f"bathos-cold/other/{RID}/run-{RID}.tar.zst.partial-dddddddd",  # another project
+    ]
+    for rel in (*stale, *keep):
+        cw.fake.plant(COLD, rel)
+
+    res = cw.cold(clean_partials=True)
+
+    leg = res["legs"][0]
+    assert leg["state"] == "verified" and leg["uploaded"] is True
+    assert leg["partials"]["removed"] == sorted(Path(r).name for r in stale)
+    assert leg["partials"]["failed"] == [] and leg["warnings"] == []
+    remote = cw.fake.snapshot(COLD)
+    assert not any(r in remote for r in stale)
+    assert all(r in remote for r in keep)
+    m_name, a_name = cw.final_names()
+    assert f"{d}/{m_name}" in remote and f"{d}/{a_name}" in remote
+    assert sorted(rel for rel, _ in cw.fake.rm_log) == sorted(
+        stale
+    )  # nothing else was ever asked for
+    assert all(held for _, held in cw.fake.rm_log), "removals happen only while the lock is held"
+    assert all(not Path(rel).name.startswith(".bth-lock") for rel, _ in cw.fake.rm_log)
+    assert not cw.fake.lock_exists(COLD, d)
+    # the lock was taken before the first removal and released after the last
+    subs = [s for s, _ in cw.fake.calls]
+    assert subs.index("lock") < subs.index("rm-partial")
+    assert max(i for i, s in enumerate(subs) if s == "rm-partial") < len(subs) - 1 - subs[
+        ::-1
+    ].index("unlock")
+
+
+def test_clean_partials_with_the_lock_held_by_someone_else_removes_nothing(cw: ColdWorld):
+    cw.standard_run()
+    cw.ingest()
+    d = cw.dest()
+    stale = f"{d}/run-{RID}.tar.zst.partial-aaaaaaaa"
+    cw.fake.plant(COLD, stale)
+    cw.fake.hold_lock(COLD, d)
+
+    with pytest.raises(OutputTierError) as e:
+        cw.cold(clean_partials=True)
+
+    assert _code(e) == "lock_held"
+    assert cw.fake.rm_log == [] and stale in cw.fake.snapshot(COLD)
+
+
+def test_a_failed_removal_under_clean_partials_is_a_warning_not_a_failed_copy(cw: ColdWorld):
+    cw.standard_run()
+    cw.ingest()
+    d = cw.dest()
+    stale = f"{d}/run-{RID}.tar.zst.partial-aaaaaaaa"
+    cw.fake.plant(COLD, stale)
+    cw.fake.fail("rm-partial", "permission denied")
+
+    res = cw.cold(clean_partials=True)
+
+    leg = res["legs"][0]
+    assert leg["state"] == "verified"
+    assert leg["partials"]["removed"] == []
+    assert [f["name"] for f in leg["partials"]["failed"]] == [Path(stale).name]
+    assert any("permission denied" in w for w in leg["warnings"])
+    assert stale in cw.fake.snapshot(COLD)
+    assert cw.where()["n_verified"] == 1
+
+
+def test_a_failed_ls_is_reported_and_does_not_fail_an_otherwise_good_copy(cw: ColdWorld):
+    cw.standard_run()
+    cw.ingest()
+    cw.fake.fail("ls", "ssh: connection reset")
+
+    res = cw.cold()
+
+    leg = res["legs"][0]
+    assert leg["state"] == "verified"
+    assert (
+        leg["partials"]["listed"] is False and "connection reset" in leg["partials"]["list_error"]
+    )
+    assert any("connection reset" in w for w in leg["warnings"])
+
+
+def test_a_listed_manifest_that_cannot_be_fetched_is_unverifiable_not_absent(cw: ColdWorld):
+    """Review finding 3. Broken (Step 6 inference): a failed `get` reads as "no manifest", so the run is reported
+    half_committed (or, with no archive, re-uploaded) although both finals are there."""
+    cw.standard_run()
+    cw.ingest()
+    cw.cold()
+    puts_before = len(cw.fake.calls_named("put"))
+    finals_before = cw.fake.finals(COLD)
+    cw.fake.fail("get", "ssh: Duo push timed out")
+
+    with pytest.raises(OutputTierError) as e:
+        cw.cold()
+
+    assert _code(e) == "copy_unverifiable"
+    assert "half_committed" not in str(e.value)
+    assert len(cw.fake.calls_named("put")) == puts_before  # nothing uploaded
+    assert cw.fake.finals(COLD) == finals_before
+    assert not cw.fake.lock_exists(COLD, cw.dest())
+
+
+def test_a_listed_archive_that_cannot_be_verified_is_unverifiable_not_half_committed(
+    cw: ColdWorld,
+):
+    """Review finding 3. Broken: an `unverifiable` archive verify reads as "archive missing" -> half_committed,
+    which would send the owner to --supersede a perfectly good pair."""
+    cw.standard_run()
+    cw.ingest()
+    cw.cold()
+    puts_before = len(cw.fake.calls_named("put"))
+    cw.fake.fail("verify-file", "slurm job failed", status="unverifiable")
+
+    with pytest.raises(OutputTierError) as e:
+        cw.cold()
+
+    assert _code(e) == "copy_unverifiable"
+    assert "half_committed" not in str(e.value)
+    assert len(cw.fake.calls_named("put")) == puts_before
+    assert not cw.fake.lock_exists(COLD, cw.dest())
+
+
+def test_with_ls_failing_the_resume_falls_back_to_step_6_inference(cw: ColdWorld):
+    """A failed `ls` is a warning, not a refusal: the resume still finds both finals through get/verify-file."""
+    cw.standard_run()
+    cw.ingest()
+    cw.cold()
+    puts_before = len(cw.fake.calls_named("put"))
+    cw.fake.fail("ls", "ssh: connection reset")
+
+    res = cw.cold()
+
+    leg = res["legs"][0]
+    assert leg["resumed"] is True and leg["state"] == "verified"
+    assert len(cw.fake.calls_named("put")) == puts_before
+    assert any("connection reset" in w for w in leg["warnings"])
+
+
+def test_an_old_myxcel_without_ls_and_rm_partial_behaves_as_step_6(cw: ColdWorld):
+    """No listing, no removal, partials left and named, and --clean-partials refuses myxcel_capability_gap."""
+    cw.fake.without_ls_rm_partial()
+    cw.standard_run()
+    cw.ingest()
+    d = cw.dest()
+    other = f"{d}/run-{RID}.tar.zst.partial-aaaaaaaa"
+    cw.fake.plant(COLD, other)
+
+    # --clean-partials refuses before anything touches the remote
+    with pytest.raises(OutputTierError) as e:
+        cw.cold(clean_partials=True)
+    assert _code(e) == "myxcel_capability_gap" and "6.2" in e.value.detail
+    assert "ls, rm-partial" in e.value.detail
+    assert cw.fake.calls == [] and other in cw.fake.snapshot(COLD)
+
+    # a verify failure leaves this attempt's partials in place and names them
+    before = set(cw.fake.snapshot(COLD))
+    _corrupt_archive_partial(cw)
+    with pytest.raises(OutputTierError) as e:
+        cw.cold()
+    assert _code(e) == "copy_verify_failed" and "left in place" in e.value.detail
+    leftovers = set(cw.fake.snapshot(COLD)) - before
+    assert len(leftovers) == 2 and all(".partial-" in k for k in leftovers)
+    assert all(Path(k).name in e.value.detail for k in leftovers)
+
+    # a good copy lists nothing
+    cw.fake.after("put", lambda _args, _base: None)
+    ok = cw.cold()
+    assert ok["legs"][0]["partials"]["listed"] is False
+    assert ok["legs"][0]["partials"]["other_attempts"] == []
+    assert cw.fake.calls_named("ls") == [] and cw.fake.calls_named("rm-partial") == []
+    assert cw.fake.unsupported_calls == [], (
+        "bathos never invoked a primitive the probe said was missing"
+    )
+
+
+def test_a_myxcel_with_ls_but_no_rm_partial_lists_but_cannot_clean(cw: ColdWorld):
+    cw.fake.has_rm_partial = False
+    cw.standard_run()
+    cw.ingest()
+    d = cw.dest()
+    leftover = f"run-{RID}.tar.zst.partial-aaaaaaaa"
+    cw.fake.plant(COLD, f"{d}/{leftover}")
+
+    with pytest.raises(OutputTierError) as e:
+        cw.cold(clean_partials=True)
+    assert _code(e) == "myxcel_capability_gap" and "rm-partial" in e.value.detail
+    assert "lacks: rm-partial" in e.value.detail
+
+    res = cw.cold()  # no cleaning requested: the listing still works
+    assert res["legs"][0]["partials"]["other_attempts"] == [leftover]
+    assert cw.fake.unsupported_calls == []

@@ -92,6 +92,9 @@ class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(
     COPY_VERIFY_FAILED = "copy_verify_failed"
     COPY_UNVERIFIABLE = "copy_unverifiable"
     COLD_RUNS_FAILED = "cold_runs_failed"
+    # `bth verify --tier outputs` (step 8).
+    OUTPUT_COPIES_FAILED = "output_copies_failed"
+    OUTPUT_COPIES_UNVERIFIABLE = "output_copies_unverifiable"
     # `bth warm` (step 7).
     WARM_TARGET_EXISTS = "warm_target_exists"
     WARM_MISMATCH = "warm_mismatch"
@@ -149,12 +152,14 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.OUTPUTS_DRIFTED: "A live output file differs from (or is missing against) the hash the run recorded; nothing was uploaded. A drifted run_end path is never re-referenced: re-run instead (see `bth outputs hash`)",
     BathosErrorCode.NO_COLD_ROOT: "No cold profile resolves, or its myxcel profile has no absolute cold_root: pass --profile, set $BTH_COLD_PROFILE, [tool.bathos.outputs] cold_profile, or ~/.config/bathos/config.toml [outputs]",
     BathosErrorCode.ARCHIVE_CONFLICT: "A final cold name already exists with different content (or only one of the pair exists: half_committed). Nothing was overwritten; to replace it, rerun with --supersede --reason <text>, which renames the old pair aside",
-    BathosErrorCode.MYXCEL_CAPABILITY_GAP: "The installed myxcel lacks the `cold` subcommands (or --clean-partials needs a primitive myxcel does not have); upgrade myxcel",
+    BathosErrorCode.MYXCEL_CAPABILITY_GAP: "The installed myxcel lacks the `cold` subcommands, or --clean-partials needs `myxcel cold ls` and `myxcel cold rm-partial` and one is missing; upgrade myxcel",
     BathosErrorCode.MYXCEL_ERROR: "A myxcel cold call failed; read the message, check `myxcel socket-status`, then rerun (a rerun resumes, nothing is overwritten)",
     BathosErrorCode.LOCK_HELD: "Another writer (or a killed one) holds <dest>/.bth-lock; if you are sure no writer is alive, rerun with --break-lock (removes the lock only, then resumes)",
-    BathosErrorCode.COPY_VERIFY_FAILED: "The remote bytes did not match what was sent; this attempt's partials were left under their .partial-<attempt> names (not committed). Check the host's disk and quota, then rerun with a fresh attempt",
+    BathosErrorCode.COPY_VERIFY_FAILED: "The remote bytes did not match what was sent; nothing was committed and this attempt's partials were removed (an older myxcel without `cold rm-partial` leaves them under their .partial-<attempt> names, named in the message). Check the host's disk and quota, then rerun with a fresh attempt",
     BathosErrorCode.COPY_UNVERIFIABLE: "The remote bytes could not be re-read (host unreachable, Duo, sandbox); nothing was certified. Fix the connection and rerun, which resumes",
     BathosErrorCode.COLD_RUNS_FAILED: "At least one run failed under --all-uncopied; the message names each run's error_code. Fix those runs and rerun, which skips the copied ones",
+    BathosErrorCode.OUTPUT_COPIES_FAILED: "A cold or mirror copy was re-read and its bytes differ from the recorded sha256 (or the cold and mirror records disagree). The measured state is recorded; see `bth outputs where <run>`. Nothing was changed on the host: rewrite the copy with `bth cold <run> --supersede --reason <text>`",
+    BathosErrorCode.OUTPUT_COPIES_UNVERIFIABLE: "--strict: at least one copy could not be re-read (host unreachable, Duo, sandbox), so nothing was certified; its state is recorded as unverifiable, not failed. Check `myxcel socket-status` and rerun `bth verify --tier outputs`",
     BathosErrorCode.WARM_TARGET_EXISTS: "`bth warm --to <dir>` writes a new directory only and never replaces one, even an empty one: pick a path that does not exist (nothing at the existing path was touched)",
     BathosErrorCode.WARM_MISMATCH: "The fetched archive, manifest or extracted files do not match the copy record, the manifest or the run's reference hashes (or the archive holds an unsafe or extra member); bathos deleted only its own staging directory and wrote nothing at --to. Run `bth verify --tier outputs`, and supersede the cold copy if it is bad",
     BathosErrorCode.NO_VERIFIED_COPY: "The run has no verified, non-superseded cold or mirror copy to restore from; run `bth cold <run>` or `bth verify --tier outputs` (see `bth outputs where`)",

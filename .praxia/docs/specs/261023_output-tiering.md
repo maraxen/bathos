@@ -178,7 +178,9 @@ the copy row. Archives land at `<cold_root>/bathos-cold/<project_slug>/<full_run
 ### 5.2 Archive and manifest
 
 - `run-<full_run_id>.tar.zst`: a POSIX tar of the reference set, member names = `relpath`, sorted, with normalised
-  headers (`mtime` = the reference event's ts, uid/gid 0, empty uname/gname, mode 0644). zstd level 19,
+  headers (`mtime` = 0, uid/gid 0, empty uname/gname, mode 0644; corrected 2026-10-24 to match the Step 4 decision
+  and `archive.py`: an earlier draft said "the reference event's ts", which every archive writer must not follow,
+  or archives of the same reference set stop being byte-identical). zstd level 19,
   single-threaded, through `zstandard` (D6; Python 3.13 has no stdlib zstd). Deterministic by construction, but resume
   does **not** depend on byte identity (§6.1 step 3).
 - `run-<full_run_id>.manifest.json` has no wall-clock fields, so the same reference set always yields the same bytes:
@@ -255,7 +257,11 @@ Legacy (non-log) catalogs: refuse with `requires_log_mode` (D7).
 All remote steps are `myxcel cold …` calls (D1). Each attempt mints `attempt8` (random).
 
 1. Resolve the profile (`host`, `cold_root`, layer). Probe `myxcel cold put --help` once (form unverified, Step 5b) and refuse with
-   `myxcel_capability_gap` if the subcommands are missing, as `cluster.py` does for `pull-path`.
+   `myxcel_capability_gap` if the subcommands are missing, as `cluster.py` does for `pull-path`. `ls` and `rm-partial`
+   shipped later (myxcel #42) than the other six (#41), so they are probed separately and lazily
+   (`cold_capabilities()`, Step 6b). Without them bathos keeps the Step 6 behaviour (steps 3–5 below say what changes),
+   and `--clean-partials` refuses with `myxcel_capability_gap` naming the missing primitive. A myxcel that passes the
+   `put` probe is never assumed to have `ls`.
 2. **Take the remote lock first (review cycle 2, F-20: the resume check must not race a live writer):**
    `mkdir <dest>/.bth-lock` (atomic; it fails if the lock is held). The lock directory records the holder's local host,
    pid, attempt and start time. Every exit path, including the step 6 mismatch exit, releases it. If it is held:
@@ -268,11 +274,22 @@ All remote steps are `myxcel cold …` calls (D1). Each attempt mints `attempt8`
    the local manifest's sha256, and on the archive against the `archive.sha256` that manifest names. If both hold, emit `output_copy.recorded` for that copy, release the lock and stop (no upload). If they exist but differ:
    `archive_conflict`. If exactly one exists: `archive_conflict` with detail `half_committed`, so the owner can
    supersede (§6.4).
+   **How existence is known (corrected 2026-10-24, review finding 3; implemented on PR #136, `c18d6c2b`).** When `ls`
+   answers, the destination listing decides. `missing`, or neither final name listed, means absent. Exactly one
+   listed is `half_committed`. A final that is listed but whose `get` or `verify-file` comes back unreadable refuses
+   with `copy_unverifiable` and uploads nothing, so a transient failure on an already-committed pair never reads as
+   "absent" or as `half_committed`. When there is no listing (a myxcel before #42, or an `ls` `error`, which is a
+   warning rather than a refusal so a flaky `ls` alone does not block a copy), existence is inferred from `get`
+   (manifest) and `verify-file` (archive). That inference cannot tell absent from unreachable. It is still safe,
+   because the commit's `ln` never overwrites, so a final that was really there surfaces as `archive_conflict` at
+   commit, and an unreachable host fails at `put`.
 4. Upload the manifest, then the archive, each as its own call to its own name:
    `<name>.partial-<attempt8>`. A fresh name per attempt means rsync can't skip a corrupt leftover. Leftovers from
-   other attempts are listed in the output, never reused, and removed only by `--clean-partials`.
-5. `verify-file` on both partials (cache-cold, D3). On a mismatch, delete **this attempt's** partials, release the lock,
-   emit nothing and exit 1.
+   other attempts are never reused. With `ls` (Step 6b) they are listed in the output (`partials.other_attempts`) and
+   removed only by `--clean-partials`. Without `ls` they are not listed.
+5. `verify-file` on both partials (cache-cold, D3). If they are not `verified`, release the lock, emit nothing and exit 1.
+   Before releasing, with `rm-partial` (Step 6b), delete **this attempt's** two partials. Without it, leave them and
+   name them in the error. A failed commit (step 6) cleans up the same way.
 6. **Commit, manifest first and archive last:** `ln <partial> <final> && rm <partial>`. POSIX `ln` without `-f` fails
    if `final` exists, whatever the coreutils version. Do not use `mv -n`: GNU coreutils 9.4 exits 1 when the target
    exists, but older releases exit 0 without moving (A21). The archive's final name existing is the single commit
@@ -315,13 +332,17 @@ is a no-op by design, and cluster nodes don't refresh `index.db`. Correctness th
 
 Paths are relative to the profile's `cold_root`. myxcel refuses absolute paths and any `..` segment, and accepts only
 segments of `[A-Za-z0-9._@+=,%-]` that do not start with `-`; bathos mirrors that rule so a bad slug refuses before any
-myxcel call. Every non-ok status prints its JSON on stdout and exits 1.
+myxcel call. Every command prints its JSON on stdout, and exits 0 only on its success status. That is `ok` for `put`,
+`commit`, `get` and `ls`; `verified` for `verify-file`; `acquired` for `lock`; `released` for `unlock`; and `removed`
+for `rm-partial` (read from myxcel `cli.py` on 2026-10-24; `ls`/`rm-partial` per #42). Every other status exits 1,
+including the expected, non-error answers `ls` `missing`, `rm-partial` `absent`, `commit` `exists`, `lock` `held`
+and `verify-file` `failed`/`unverifiable`. bathos therefore branches on the JSON `status`, never on the exit code.
 
 **Reconciled with merged myxcel on 2026-10-23** (myxcel PR #41, `72f69df`; read-only audit of `cold.py` and `cli.py`). The
 six primitives match on argv, keys, types and safety. Changes to this table: `unlock` returns `released` rather than
 `acquired`; `message` keys on `commit`, `get`, `lock` and `unlock`; an `error` status on `lock`; `get` needs an existing
 `<local_dir>`. Hard-link probe A27 is reported passed on so3 and titanix in that PR. `ls` and `rm-partial` were not in
-#41 and follow in a separate myxcel PR.
+#41. They merged separately as myxcel #42 (`689730c`, 2026-10-24) with the shapes in the table above.
 
 **`ls` and `rm-partial` were added on 2026-10-23 after Step 6** (owner decision). Step 6 found that §6.1 step 5 ("delete this
 attempt's partials"), step 4 ("leftovers from other attempts are listed") and `--clean-partials` had no primitive to stand
@@ -415,7 +436,13 @@ catalogs.
 - **D2 profile reading: `tomllib`** on `~/.config/myxcel/<name>.toml`. bathos does not import myxcel, since the two
   run on different Pythons.
 - **D3 remote verify: ssh on the login node for archives ≤ 2 GiB, a `mit_data_transfer` job above that.** A18
-  (login-node policy) stays unverified. The threshold is a config key, not a constant.
+  (login-node policy) stays unverified. The threshold is a config key, not a constant: the per-profile myxcel key
+  `cold_verify_ssh_max_bytes` (default 2 GiB, `myxcel/config.py:23`).
+  **A profile on a host without SLURM must set it high (review finding 5, 2026-10-24).** titanix has no SLURM, so at
+  the default every titanix archive over 2 GiB would take the `slurm_job` path and come back `unverifiable` forever.
+  `verify --strict` and any release gate on cold+mirror `verified` could then never pass. Done for titanix:
+  `cold_verify_ssh_max_bytes = 1099511627776` (1 TiB) in `~/.config/myxcel/titanix.toml`, checked to load through
+  `myxcel.config.load_profile`. Any new non-SLURM mirror profile needs the same line.
 - **D4 titanix `cold_root`: done.** The owner added `cold_root = "/home/solab/marielle"` to
   `~/.config/myxcel/titanix.toml:40`. It parses with `tomllib`.
 - **D5 drift policy: refuse.** Tiering refuses with `outputs_drifted`. **Remedy changed after review (F-04/F-16):**
@@ -539,3 +566,4 @@ These are binding for later steps. Each is listed in its PR.
 | 3 / #133 | Commands take `--run-id <prefix>`, not a positional. A relative `--root` resolves against the run's worktree root. An abandoned run refuses `run_not_terminal`. A legacy entry whose file no longer exists shows `missing` in `outputs hash` and cannot be adopted. Retraction is `run.outputs_adopt_retracted` with `data.retracts=<eid>` and `data.reason`. New codes: `root_missing`, `adopt_event_not_found`, `run_not_found`, `run_prefix_ambiguous`. |
 | 4 / #132 | Tar header `mtime = 0`. §5.2's "event ts" conflicted with "no wall-clock", and 0 satisfies both. The manifest `worktree_root` is the run's recorded root, not the directory read from, so building from a different read dir gives an identical manifest. Commit inside staging is `os.link`, manifest first. `verify_archive` never raises on a bad archive; it returns a structured result. |
 | 5a | myxcel brief: `handoffs/261023_myxcel-cold-primitives-brief.md`. |
+| 6b | `ls` and `rm-partial` are optional capabilities, probed separately (`cold ls --help` / `cold rm-partial --help`: exit 0 and `--json`); absent means Step 6 behaviour. Cleanup after a failed attempt runs on any non-`verified` partial verify and on any failed commit (not on a failed `put`). `--clean-partials` runs after the resume check passes, removes only `*.partial-<8hex>` files listed in the run's own directory, and refuses `myxcel_capability_gap` naming whichever primitive is missing. A removal or `ls` failure is a warning in the leg result (`partials`, `warnings`), never a failed copy. bathos refuses a non-partial last segment itself, with no myxcel call. |

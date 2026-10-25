@@ -454,3 +454,186 @@ def test_probe_nonzero_exit_is_a_gap_even_if_the_output_mentions_json():
     with pytest.raises(MyxcelCapabilityGapError) as e:
         mx.probe_cold_capability(runner=r)
     assert "exited 2" in str(e.value)
+
+
+# ------------------------------------------------------------------------------------------- optional capabilities
+
+
+class ByArgv:
+    """Replies by subcommand of ``myxcel cold <sub> --help``; records every argv."""
+
+    def __init__(self, replies: dict[str, object]):
+        self.replies = replies
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv, _timeout):
+        self.calls.append(list(argv))
+        reply = self.replies[argv[2]]
+        if isinstance(reply, BaseException):
+            raise reply
+        return reply
+
+
+GOOD = mx.RunResult(0, HELP_OK, "")
+NO_CMD = mx.RunResult(2, "", "Unused Tokens: ['ls']")
+
+
+def test_ls_and_rm_partial_are_probed_separately_after_the_base_probe():
+    r = ByArgv({"put": GOOD, "ls": GOOD, "rm-partial": NO_CMD})
+    assert mx.cold_capabilities(runner=r) == mx.Capabilities(ls=True, rm_partial=False)
+    assert r.calls == [
+        ["myxcel", "cold", "put", "--help"],
+        ["myxcel", "cold", "ls", "--help"],
+        ["myxcel", "cold", "rm-partial", "--help"],
+    ]
+    mx.reset_capability_cache()
+    r = ByArgv({"put": GOOD, "ls": NO_CMD, "rm-partial": GOOD})
+    assert mx.cold_capabilities(runner=r) == mx.Capabilities(ls=False, rm_partial=True)
+
+
+def test_an_optional_probe_that_exits_zero_without_json_or_cannot_run_is_absent():
+    r = ByArgv(
+        {
+            "put": GOOD,
+            "ls": mx.RunResult(0, "Usage: myxcel cold [OPTIONS] COMMAND\n", ""),
+            "rm-partial": subprocess.TimeoutExpired(["myxcel"], 30),
+        }
+    )
+    assert mx.cold_capabilities(runner=r) == mx.Capabilities(ls=False, rm_partial=False)
+
+
+def test_the_base_failure_still_raises_and_skips_the_optional_probes():
+    r = ByArgv({"put": mx.RunResult(2, "", "nope")})
+    with pytest.raises(MyxcelCapabilityGapError):
+        mx.cold_capabilities(runner=r)
+    assert r.calls == [["myxcel", "cold", "put", "--help"]]
+
+
+def test_capabilities_are_cached_and_reset_with_the_probe():
+    r = ByArgv({"put": GOOD, "ls": GOOD, "rm-partial": GOOD})
+    mx.cold_capabilities(runner=r)
+    mx.cold_capabilities(runner=r)
+    assert len(r.calls) == 3
+    mx.reset_capability_cache()
+    mx.cold_capabilities(runner=r)
+    assert len(r.calls) == 6
+
+
+# ------------------------------------------------------------------------------------------- ls
+
+
+def test_ls_argv_and_entries_including_the_lock_entry():
+    holder = {"host": "box", "pid": 1}
+    payload = {
+        "status": "ok",
+        "entries": [
+            {"name": "a.json", "size_bytes": 7, "mtime": 1.5},
+            {"name": ".bth-lock", "lock": True, "holder": holder},
+        ],
+        "message": "",
+    }
+    r = FakeRunner(ok(payload))
+    res = mx.ls("so3", "bathos-cold/p/r", runner=r)
+    assert r.calls[0][0] == ["myxcel", "cold", "ls", "so3", "bathos-cold/p/r", "--json"]
+    assert res.status == "ok"
+    assert res.entries == (
+        mx.LsEntry("a.json", 7, 1.5),
+        mx.LsEntry(".bth-lock", lock=True, holder=holder),
+    )
+
+
+def test_ls_missing_needs_a_nonzero_exit_and_ok_needs_zero():
+    missing = {"status": "missing", "entries": [], "message": "no such directory"}
+    assert mx.ls("so3", "d", runner=FakeRunner(ok(missing, 1))).status == "missing"
+    assert mx.ls("so3", "d", runner=FakeRunner(ok(missing, 0))).status == "error"
+    assert (
+        mx.ls("so3", "d", runner=FakeRunner(ok({"status": "ok", "entries": []}, 1))).status
+        == "error"
+    )
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        "nope",
+        [1],
+        [{"size_bytes": 1, "mtime": 1.0}],
+        [{"name": "a", "size_bytes": "1", "mtime": 1.0}],
+        [{"name": "a", "size_bytes": True, "mtime": 1.0}],
+        [{"name": "a", "size_bytes": 1}],
+        [{"name": "a/b", "size_bytes": 1, "mtime": 1.0}],
+    ],
+)
+def test_ls_with_a_malformed_entries_array_is_an_error_never_a_listing(entries):
+    res = mx.ls("so3", "d", runner=FakeRunner(ok({"status": "ok", "entries": entries})))
+    assert res.status == "error" and res.entries == ()
+
+
+def test_ls_non_json_unknown_status_and_bad_dir_are_errors():
+    for reply in (mx.RunResult(0, "x", ""), ok({"status": "weird"}), ok({})):
+        assert mx.ls("so3", "d", runner=FakeRunner(reply)).status == "error"
+    r = FakeRunner(ok({"status": "ok", "entries": []}))
+    with pytest.raises(OutputTiersConfigError):
+        mx.ls("so3", "../d", runner=r)
+    assert r.calls == []
+
+
+# ------------------------------------------------------------------------------------------- rm_partial
+
+
+def test_rm_partial_argv_and_statuses():
+    r = FakeRunner(ok({"status": "removed", "message": ""}))
+    res = mx.rm_partial("so3", "d/run-1.tar.zst.partial-0123abcd", runner=r)
+    assert r.calls[0][0] == [
+        "myxcel",
+        "cold",
+        "rm-partial",
+        "so3",
+        "d/run-1.tar.zst.partial-0123abcd",
+        "--json",
+    ]
+    assert res.status == "removed"
+    path = "d/x.partial-0123abcd"
+
+    def status(reply):
+        return mx.rm_partial("so3", path, runner=FakeRunner(reply)).status
+
+    assert status(ok({"status": "absent"}, 1)) == "absent"
+    assert status(ok({"status": "refused"}, 1)) == "refused"
+    assert status(ok({"status": "error"}, 1)) == "error"
+    # removed on a non-zero exit, unknown status, non-JSON: never removed
+    assert status(ok({"status": "removed"}, 1)) == "error"
+    assert status(ok({"status": "gone"})) == "error"
+    assert status(mx.RunResult(1, "", "ssh")) == "error"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "d/run-1.tar.zst",
+        "d/run-1.manifest.json",
+        "d/.bth-lock",
+        "d/.bth-lock/holder.json",
+        "d/x.partial-0123abc",  # 7 hex
+        "d/x.partial-0123abcde",  # 9 hex
+        "d/x.partial-0123ABCD",  # upper case
+        "d/x.partial-0123abcg",
+        "d/x.partial-",
+        "d/.partial-0123abcd",  # nothing before the suffix
+        "d/x.partial-0123abcd.bak",
+        "x.partial-0123abcd/y",  # the partial-looking segment is not the last
+    ],
+)
+def test_rm_partial_refuses_a_non_partial_name_without_calling_myxcel(path):
+    r = FakeRunner(ok({"status": "removed"}))
+    res = mx.rm_partial("so3", path, runner=r)
+    assert res.status == "refused"
+    assert r.calls == []
+
+
+def test_rm_partial_bad_path_is_refused_locally_too():
+    r = FakeRunner(ok({"status": "removed"}))
+    for bad in ("/abs/x.partial-0123abcd", "../x.partial-0123abcd", "d/x.partial-0123abcd/"):
+        with pytest.raises(OutputTiersConfigError):
+            mx.rm_partial("so3", bad, runner=r)
+    assert r.calls == []

@@ -18,6 +18,12 @@ Rules that hold for every command:
 The capability probe (section 6.1 step 1, section 9 row 5b) is :func:`probe_cold_capability`. Its form is
 UNVERIFIED against a real myxcel (``myxcel cold put --help``, exit 0 and ``--json`` in the output); it lives in
 :func:`_probe_once` so it can be adjusted when myxcel 5a lands.
+
+``ls`` and ``rm-partial`` (section 6.2, added after Step 6) are OPTIONAL: an older myxcel has the base primitives
+without them. :func:`cold_capabilities` probes each separately (``myxcel cold ls --help`` / ``myxcel cold
+rm-partial --help``: exit 0 and ``--json`` in the output) and reports what exists; their absence is never an error
+here. :func:`rm_partial` refuses, before any subprocess runs, a path whose last segment is not exactly
+``<name>.partial-<8 lowercase hex>``, so bathos can never ask myxcel to remove a final name or the lock.
 """
 
 from __future__ import annotations
@@ -34,20 +40,28 @@ from bathos.cluster import MyxcelCapabilityGapError
 from bathos.output_tiers.config import OutputTiersConfigError
 
 __all__ = [
+    "Capabilities",
     "CommitResult",
     "GetResult",
     "LockResult",
+    "LsEntry",
+    "LsResult",
     "MyxcelCapabilityGapError",
     "PutResult",
+    "RmPartialResult",
     "RunResult",
     "UnlockResult",
     "VerifyResult",
+    "cold_capabilities",
     "commit",
     "get",
+    "is_partial_name",
     "lock",
+    "ls",
     "probe_cold_capability",
     "put",
     "reset_capability_cache",
+    "rm_partial",
     "unlock",
     "verify_file",
 ]
@@ -62,6 +76,8 @@ GET_TIMEOUT = 3600.0
 COMMIT_TIMEOUT = 300.0
 VERIFY_TIMEOUT = 7200.0
 LOCK_TIMEOUT = 120.0
+LS_TIMEOUT = 120.0
+RM_PARTIAL_TIMEOUT = 120.0
 
 
 @dataclass(frozen=True)
@@ -89,12 +105,22 @@ def default_runner(argv: list[str], timeout: float) -> RunResult:
 # --------------------------------------------------------------------------------------- capability probe
 
 _probe_ok = False
+_optional: Capabilities | None = None
+
+
+@dataclass(frozen=True)
+class Capabilities:
+    """The optional ``cold`` primitives the installed myxcel has, probed separately (see the module docstring)."""
+
+    ls: bool
+    rm_partial: bool
 
 
 def reset_capability_cache() -> None:
     """Forget a successful probe (tests; a long-lived process after a myxcel upgrade)."""
-    global _probe_ok
+    global _probe_ok, _optional
     _probe_ok = False
+    _optional = None
 
 
 def _probe_once(runner: Runner, timeout: float) -> None:
@@ -132,6 +158,30 @@ def probe_cold_capability(runner: Runner | None = None, timeout: float = PROBE_T
         return
     _probe_once(runner or default_runner, timeout)
     _probe_ok = True
+
+
+def _probe_optional(runner: Runner, timeout: float, sub: str) -> bool:
+    """``myxcel cold <sub> --help`` exits 0 and mentions ``--json``. Any failure to run it means "absent"."""
+    try:
+        res = runner([MYXCEL, "cold", sub, "--help"], timeout)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+    return res.returncode == 0 and "--json" in f"{res.stdout}\n{res.stderr}"
+
+
+def cold_capabilities(runner: Runner | None = None, timeout: float = PROBE_TIMEOUT) -> Capabilities:
+    """The base probe (raises :class:`~bathos.cluster.MyxcelCapabilityGapError` as :func:`probe_cold_capability`),
+    then which of ``ls`` / ``rm-partial`` exist. Cached for the life of the process with the base probe; a base
+    failure is not cached."""
+    global _optional
+    probe_cold_capability(runner, timeout)
+    if _optional is None:
+        run = runner or default_runner
+        _optional = Capabilities(
+            ls=_probe_optional(run, timeout, "ls"),
+            rm_partial=_probe_optional(run, timeout, "rm-partial"),
+        )
+    return _optional
 
 
 # --------------------------------------------------------------------------------------- argument checks
@@ -320,6 +370,44 @@ class UnlockResult:
     status: str
     holder: Any = None
     message: str = ""
+
+
+@dataclass(frozen=True)
+class LsEntry:
+    """One directory entry. A regular file has ``size_bytes`` and ``mtime``; the lock directory is
+    ``name == ".bth-lock"`` with ``lock=True`` and ``holder`` (a dict, or ``None`` if unreadable)."""
+
+    name: str
+    size_bytes: int | None = None
+    mtime: float | None = None
+    lock: bool = False
+    holder: Any = None
+
+
+@dataclass(frozen=True)
+class LsResult:
+    """``status``: ``ok``, ``missing`` (the directory does not exist) or ``error``."""
+
+    status: str
+    entries: tuple[LsEntry, ...] = ()
+    message: str = ""
+
+
+@dataclass(frozen=True)
+class RmPartialResult:
+    """``status``: ``removed``, ``absent``, ``refused`` (not a partial name; bathos's own guard or myxcel's) or
+    ``error``."""
+
+    status: str
+    message: str = ""
+
+
+_PARTIAL_NAME = re.compile(r".+\.partial-[0-9a-f]{8}")
+
+
+def is_partial_name(name: str) -> bool:
+    """True iff ``name`` (one path segment) is exactly ``<something>.partial-<8 lowercase hex>``."""
+    return "/" not in name and _PARTIAL_NAME.fullmatch(name) is not None
 
 
 # --------------------------------------------------------------------------------------- commands
@@ -521,3 +609,102 @@ def unlock(
     if status == "error":
         return UnlockResult("error", message=msg or "myxcel reported error")
     return UnlockResult("error", message=_unknown_status("unlock", data))
+
+
+def _parse_entries(raw: Any) -> tuple[LsEntry, ...] | None:
+    """The ``entries`` array of an ``ls`` reply, or ``None`` if any element has an unexpected shape."""
+    if not isinstance(raw, list):
+        return None
+    out: list[LsEntry] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            return None
+        name = item.get("name")
+        if not isinstance(name, str) or not name or "/" in name:
+            return None
+        if item.get("lock") is True:
+            holder = item.get("holder")
+            out.append(
+                LsEntry(name, lock=True, holder=holder if isinstance(holder, dict) else None)
+            )
+            continue
+        size, mtime = item.get("size_bytes"), item.get("mtime")
+        if isinstance(size, bool) or not isinstance(size, int):
+            return None
+        if isinstance(mtime, bool) or not isinstance(mtime, (int, float)):
+            return None
+        out.append(LsEntry(name, size_bytes=size, mtime=float(mtime)))
+    return tuple(out)
+
+
+def ls(
+    profile: str,
+    remote_dir: str,
+    *,
+    runner: Runner | None = None,
+    timeout: float = LS_TIMEOUT,
+) -> LsResult:
+    """``myxcel cold ls <profile> <remote_dir> --json``: one directory, not recursive, regular files and the lock.
+
+    ``ok`` is believed only on exit 0 with a well-formed ``entries`` array; ``missing`` only on a non-zero exit
+    (myxcel exits 1 for every non-ok status). Every other doubt is ``error``."""
+    check_remote_path(remote_dir, "remote_dir", allow_trailing_slash=True)
+    reply = _call(_argv("ls", profile, remote_dir), runner, timeout)
+    if reply.data is None:
+        return LsResult("error", message=reply.problem or "")
+    data = reply.data
+    status = data.get("status")
+    msg = _message(data, "")
+    if status == "ok":
+        if reply.returncode != 0:
+            return LsResult("error", message=_exit_disagrees("ls", "ok", reply.returncode))
+        entries = _parse_entries(data.get("entries"))
+        if entries is None:
+            return LsResult("error", message="`myxcel cold ls` returned a malformed entries array")
+        return LsResult("ok", entries, msg)
+    if status == "missing":
+        if reply.returncode == 0:
+            return LsResult("error", message=_exit_disagrees("ls", "missing", 0))
+        return LsResult("missing", message=msg or "directory does not exist")
+    if status == "error":
+        return LsResult("error", message=msg or "myxcel reported error")
+    return LsResult("error", message=_unknown_status("ls", data))
+
+
+def rm_partial(
+    profile: str,
+    remote_path: str,
+    *,
+    runner: Runner | None = None,
+    timeout: float = RM_PARTIAL_TIMEOUT,
+) -> RmPartialResult:
+    """``myxcel cold rm-partial <profile> <remote_path> --json``: remove one ``*.partial-<8 hex>`` file.
+
+    A path whose last segment does not fully match ``.+\\.partial-[0-9a-f]{8}`` comes back ``refused`` WITHOUT a
+    subprocess: bathos's own guard, so a final name or the lock can never reach myxcel through this call. ``removed``
+    is believed only on exit 0; ``absent`` and ``refused`` as myxcel reports them."""
+    check_remote_path(remote_path, "remote_path")
+    last = remote_path.rsplit("/", 1)[-1]
+    if not is_partial_name(last):
+        return RmPartialResult(
+            "refused",
+            f"{last!r} is not a partial upload name (<name>.partial-<8 hex>); not removed",
+        )
+    reply = _call(_argv("rm-partial", profile, remote_path), runner, timeout)
+    if reply.data is None:
+        return RmPartialResult("error", reply.problem or "")
+    status = reply.data.get("status")
+    msg = _message(reply.data, "")
+    if status == "removed":
+        if reply.returncode != 0:
+            return RmPartialResult(
+                "error", _exit_disagrees("rm-partial", "removed", reply.returncode)
+            )
+        return RmPartialResult("removed", msg)
+    if status == "absent":
+        return RmPartialResult("absent", msg or "no such partial")
+    if status == "refused":
+        return RmPartialResult("refused", msg or "myxcel refused the path")
+    if status == "error":
+        return RmPartialResult("error", msg or "myxcel reported error")
+    return RmPartialResult("error", _unknown_status("rm-partial", reply.data))
