@@ -274,14 +274,15 @@ All remote steps are `myxcel cold …` calls (D1). Each attempt mints `attempt8`
    the local manifest's sha256, and on the archive against the `archive.sha256` that manifest names. If both hold, emit `output_copy.recorded` for that copy, release the lock and stop (no upload). If they exist but differ:
    `archive_conflict`. If exactly one exists: `archive_conflict` with detail `half_committed`, so the owner can
    supersede (§6.4).
-   **How existence is known (corrected 2026-10-24, review finding 3).** With `ls`, the destination listing decides:
-   `missing` or neither final name listed means absent; an `ls` `error` refuses with `copy_unverifiable` before any
-   upload, because an unreachable host must never read as "absent"; a final that is listed but whose `get` or
-   `verify-file` is `unverifiable` also refuses with `copy_unverifiable`. Without `ls` (a myxcel before #42),
-   existence is inferred from `get` (manifest) and `verify-file` (archive), which cannot tell absent from
-   unreachable. That is still safe, because the commit's `ln` never overwrites, so a final that was really there
-   surfaces as `archive_conflict` at commit. But it costs a wasted upload and gives a misleading error, so `ls` is
-   the supported path.
+   **How existence is known (corrected 2026-10-24, review finding 3; implemented on PR #136, `c18d6c2b`).** When `ls`
+   answers, the destination listing decides. `missing`, or neither final name listed, means absent. Exactly one
+   listed is `half_committed`. A final that is listed but whose `get` or `verify-file` comes back unreadable refuses
+   with `copy_unverifiable` and uploads nothing, so a transient failure on an already-committed pair never reads as
+   "absent" or as `half_committed`. When there is no listing (a myxcel before #42, or an `ls` `error`, which is a
+   warning rather than a refusal so a flaky `ls` alone does not block a copy), existence is inferred from `get`
+   (manifest) and `verify-file` (archive). That inference cannot tell absent from unreachable. It is still safe,
+   because the commit's `ln` never overwrites, so a final that was really there surfaces as `archive_conflict` at
+   commit, and an unreachable host fails at `put`.
 4. Upload the manifest, then the archive, each as its own call to its own name:
    `<name>.partial-<attempt8>`. A fresh name per attempt means rsync can't skip a corrupt leftover. Leftovers from
    other attempts are never reused. With `ls` (Step 6b) they are listed in the output (`partials.other_attempts`) and
