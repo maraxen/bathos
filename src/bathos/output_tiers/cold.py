@@ -34,9 +34,11 @@ Interpretations of the spec, each flagged where it matters (see also the Step 6 
   both "byte-identical to the manifest built locally" and "resume does not depend on byte identity" of the
   archive; the manifest embeds the archive's hash, so the two cannot both hold if a zstd build differs.
 * ``myxcel.lock`` takes no holder argument (section 6.2), so the holder record is whatever myxcel writes.
-* The existence of a remote final is inferred: the manifest by ``get`` (its bytes are needed anyway), the archive
-  by ``verify-file`` (``verified`` or ``failed`` mean the file was read; ``unverifiable`` means absent or
-  unreadable). The contract has no ``stat``.
+* The existence of a remote final comes from ``ls`` when it answered (``ok`` / ``missing``): a final that is
+  listed but cannot be fetched or verified refuses ``copy_unverifiable`` rather than reading as absent. Without
+  a listing (no ``ls``, or it failed: a warning, not a refusal) it is inferred as in Step 6: the manifest by
+  ``get`` (its bytes are needed anyway), the archive by ``verify-file`` (``verified`` or ``failed`` mean the file
+  was read; ``unverifiable`` means absent or unreadable). That inference is safe because commit never overwrites.
 * Section 6.1 step 5 says to delete a failed attempt's partials "on a mismatch". Cleanup here runs on any partial
   verify that is not ``verified`` (``failed`` and ``unverifiable``) and on any failed commit, because a partial is
   never reused (every attempt has a fresh name). A failed ``put`` still leaves its partials, named in the error
@@ -391,11 +393,42 @@ def _supersede_pair(env: _Env, leg: Leg, p: _Paths) -> dict[str, Any] | None:
     return {**detail, "copy_id": copy_id, "eid": eid}
 
 
-def _resume_check(env: _Env, leg: Leg, p: _Paths) -> dict[str, Any] | None:
+def _resume_check(
+    env: _Env, leg: Leg, p: _Paths, listed: frozenset[str] | None = None
+) -> dict[str, Any] | None:
     """Spec 6.1 step 3. ``None``: nothing on the remote, write. A dict: both finals are present and consistent
-    (record, do not upload). Anything else raises ``archive_conflict`` (``half_committed`` if exactly one exists)."""
+    (record, do not upload). Anything else raises ``archive_conflict`` (``half_committed`` if exactly one exists).
+
+    ``listed`` is the destination's entry names from a successful ``ls`` (``frozenset()`` for ``missing``), or
+    ``None`` when there is no listing (no ``ls``, or it failed). With a listing, existence is what ``ls`` says, and a
+    final that is listed but cannot be read refuses ``copy_unverifiable``: an unreachable host or a transient failure
+    must not read as "absent" (review finding 3). Without one, existence is inferred from ``get`` / ``verify-file``
+    as in Step 6, which is safe (commit never overwrites) but cannot tell absent from unreadable."""
     built = env.built
+    m_name, a_name = Path(p.manifest_rel).name, Path(p.archive_rel).name
+    if listed is not None:
+        has_m, has_a = m_name in listed, a_name in listed
+        if not has_m and not has_a:
+            return None
+        if not has_m:
+            raise OutputTierError(
+                ARCHIVE_CONFLICT,
+                f"{HALF_COMMITTED}: {p.display_archive} exists but {p.display_manifest} does not; "
+                "rerun with --supersede --reason <text> to rename it aside",
+            )
+        if not has_a:
+            raise OutputTierError(
+                ARCHIVE_CONFLICT,
+                f"{HALF_COMMITTED}: {p.display_manifest} exists but {p.display_archive} does not; "
+                "rerun with --supersede --reason <text> to rename the pair aside",
+            )
     remote_bytes = _get_bytes(leg, p.manifest_rel, env.scratch, env.runner, env.gets)
+    if remote_bytes is None and listed is not None:
+        raise OutputTierError(
+            COPY_UNVERIFIABLE,
+            f"{p.display_manifest} is listed but could not be fetched; nothing was uploaded. Rerun when the "
+            "host is reachable",
+        )
     if remote_bytes is None:
         probe = _verify_one(
             leg, p.archive_rel, built.archive_sha256, built.archive_size_bytes, env.runner
@@ -424,6 +457,11 @@ def _resume_check(env: _Env, leg: Leg, p: _Paths) -> dict[str, Any] | None:
             "overwritten. Rerun with --supersede --reason <text> to rename it aside",
         )
     a = _verify_one(leg, p.archive_rel, want_sha, want_size, env.runner)
+    if a.status == "unverifiable" and listed is not None:
+        raise OutputTierError(
+            COPY_UNVERIFIABLE,
+            f"{p.display_archive} is listed but could not be verified ({a.message}); nothing was uploaded",
+        )
     if a.status == "unverifiable":
         raise OutputTierError(
             ARCHIVE_CONFLICT,
@@ -463,6 +501,8 @@ class _Partials:
     removed: list[str] = dataclass_field(default_factory=list)
     absent: list[str] = dataclass_field(default_factory=list)
     failed: list[dict[str, str]] = dataclass_field(default_factory=list)
+    #: Every entry name ``ls`` returned (empty for ``missing``); ``None`` when not listed. Not reported.
+    names: frozenset[str] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -484,11 +524,13 @@ def _list_partials(env: _Env, leg: Leg, p: _Paths, attempt: str) -> _Partials:
     res = mx.ls(leg.profile.name, p.dest, runner=env.runner)
     if res.status == "missing":
         rep.listed = True
+        rep.names = frozenset()
         return rep
     if res.status != "ok":
         rep.list_error = res.message or "myxcel cold ls failed"
         return rep
     rep.listed = True
+    rep.names = frozenset(e.name for e in res.entries if not e.lock)
     rep.other_attempts = sorted(
         e.name
         for e in res.entries
@@ -632,7 +674,7 @@ def _write_leg(env: _Env, leg: Leg) -> dict[str, Any]:
             warnings.append(
                 f"could not list leftover partials in {p.display_dest}: {partials.list_error}"
             )
-        found = _resume_check(env, leg, p)
+        found = _resume_check(env, leg, p, partials.names)
         if env.clean_partials:
             _clean_listed(env, leg, p, partials, warnings)
         if found is None:

@@ -1364,6 +1364,62 @@ def test_a_failed_ls_is_reported_and_does_not_fail_an_otherwise_good_copy(cw: Co
     assert any("connection reset" in w for w in leg["warnings"])
 
 
+def test_a_listed_manifest_that_cannot_be_fetched_is_unverifiable_not_absent(cw: ColdWorld):
+    """Review finding 3. Broken (Step 6 inference): a failed `get` reads as "no manifest", so the run is reported
+    half_committed (or, with no archive, re-uploaded) although both finals are there."""
+    cw.standard_run()
+    cw.ingest()
+    cw.cold()
+    puts_before = len(cw.fake.calls_named("put"))
+    finals_before = cw.fake.finals(COLD)
+    cw.fake.fail("get", "ssh: Duo push timed out")
+
+    with pytest.raises(OutputTierError) as e:
+        cw.cold()
+
+    assert _code(e) == "copy_unverifiable"
+    assert "half_committed" not in str(e.value)
+    assert len(cw.fake.calls_named("put")) == puts_before  # nothing uploaded
+    assert cw.fake.finals(COLD) == finals_before
+    assert not cw.fake.lock_exists(COLD, cw.dest())
+
+
+def test_a_listed_archive_that_cannot_be_verified_is_unverifiable_not_half_committed(
+    cw: ColdWorld,
+):
+    """Review finding 3. Broken: an `unverifiable` archive verify reads as "archive missing" -> half_committed,
+    which would send the owner to --supersede a perfectly good pair."""
+    cw.standard_run()
+    cw.ingest()
+    cw.cold()
+    puts_before = len(cw.fake.calls_named("put"))
+    cw.fake.fail("verify-file", "slurm job failed", status="unverifiable")
+
+    with pytest.raises(OutputTierError) as e:
+        cw.cold()
+
+    assert _code(e) == "copy_unverifiable"
+    assert "half_committed" not in str(e.value)
+    assert len(cw.fake.calls_named("put")) == puts_before
+    assert not cw.fake.lock_exists(COLD, cw.dest())
+
+
+def test_with_ls_failing_the_resume_falls_back_to_step_6_inference(cw: ColdWorld):
+    """A failed `ls` is a warning, not a refusal: the resume still finds both finals through get/verify-file."""
+    cw.standard_run()
+    cw.ingest()
+    cw.cold()
+    puts_before = len(cw.fake.calls_named("put"))
+    cw.fake.fail("ls", "ssh: connection reset")
+
+    res = cw.cold()
+
+    leg = res["legs"][0]
+    assert leg["resumed"] is True and leg["state"] == "verified"
+    assert len(cw.fake.calls_named("put")) == puts_before
+    assert any("connection reset" in w for w in leg["warnings"])
+
+
 def test_an_old_myxcel_without_ls_and_rm_partial_behaves_as_step_6(cw: ColdWorld):
     """No listing, no removal, partials left and named, and --clean-partials refuses myxcel_capability_gap."""
     cw.fake.without_ls_rm_partial()
