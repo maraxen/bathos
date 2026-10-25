@@ -4,14 +4,22 @@ It honours the section 6.2 contracts of the output-tiering spec (261023): paths 
 ``cold_root``; ``put`` creates parents and never overwrites; ``commit`` is ``ln && rm`` and answers ``exists``
 when the final is taken; ``lock`` is an atomic ``mkdir`` of ``<dir>/.bth-lock`` holding a holder record;
 ``verify-file`` hashes the file it finds (``verified`` / ``failed``, and ``unverifiable`` when it cannot be read);
-``get`` copies one file into a local directory. No real myxcel or ssh is ever run.
+``get`` copies one file into a local directory; ``ls`` lists one directory (regular files, plus the lock directory
+as ``{"name": ".bth-lock", "lock": true, "holder"}``; ``missing`` for an absent directory); ``rm-partial`` removes
+one regular file whose last segment is ``*.partial-<8 hex>`` and refuses everything else (a directory is an
+``error``, an absent file is ``absent``). No real myxcel or ssh is ever run.
+
+:meth:`FakeMyxcel.without_ls_rm_partial` simulates an older myxcel that has the base primitives but neither ``ls``
+nor ``rm-partial``: their ``--help`` probe exits 2, and any real call of them is recorded in ``unsupported_calls``
+(a test asserts it stays empty). :attr:`FakeMyxcel.rm_log` records, for every ``rm-partial`` call, the path and
+whether the lock directory of that directory existed at that moment.
 
 Crash windows are tested by killing the "process" at a chosen step: :meth:`FakeMyxcel.kill_after` makes the call
 that completes the Nth matching command raise :class:`KillSwitch` (a ``BaseException``, so no bathos handler
 swallows it) and puts the fake in the ``dead`` state, where every further call from the killed process raises too
 (a killed process cannot release its lock). :meth:`revive` is the next process. The fake has NO operation that
-deletes a final file: the only removals are the partial a ``commit`` links away and an ``unlock`` of the lock
-directory, which is what the contract allows.
+deletes a final file: the only removals are the partial a ``commit`` links away, a ``rm-partial`` of a
+``*.partial-<8 hex>`` file, and an ``unlock`` of the lock directory, which is what the contract allows.
 """
 
 from __future__ import annotations
@@ -19,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import threading
 from collections.abc import Callable
@@ -28,6 +37,7 @@ from bathos.output_tiers.myxcel import RunResult
 
 HELP = "Usage: myxcel cold put PROFILE LOCAL REMOTE [--json]\n  --json  machine output\n"
 LOCK = ".bth-lock"
+_PARTIAL = re.compile(r".+\.partial-[0-9a-f]{8}")
 
 
 class KillSwitch(BaseException):
@@ -50,6 +60,10 @@ class FakeMyxcel:
         self._after_hooks: dict[str, Callable[[list[str], Path], None]] = {}
         self._mu = threading.RLock()
         self._fail: dict[str, str] = {}
+        self.has_ls = True
+        self.has_rm_partial = True
+        self.unsupported_calls: list[list[str]] = []
+        self.rm_log: list[tuple[str, bool]] = []  # (remote path, lock held at that moment)
         self.holder = {
             "host": "fake-host",
             "pid": 4242,
@@ -79,7 +93,18 @@ class FakeMyxcel:
         return [a for s, a in self.calls if s == sub]
 
     def mutating_calls(self) -> list[str]:
-        return [s for s, _ in self.calls if s in {"put", "commit", "lock", "unlock"}]
+        return [s for s, _ in self.calls if s in {"put", "commit", "lock", "unlock", "rm-partial"}]
+
+    def without_ls_rm_partial(self) -> None:
+        """Become an older myxcel: the base primitives only."""
+        self.has_ls = False
+        self.has_rm_partial = False
+
+    def plant(self, profile: str, rel: str, data: bytes = b"stale") -> None:
+        """Put a file on the remote as if an earlier attempt (or anything else) had left it."""
+        target = self.root / profile / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
 
     def hold_lock(self, profile: str, dest: str, holder: dict | None = None) -> None:
         """Plant a lock as if another (live or dead) writer took it."""
@@ -116,8 +141,21 @@ class FakeMyxcel:
             raise KillSwitch("process is dead")
         if argv[:4] == ["myxcel", "cold", "put", "--help"]:
             return RunResult(0, HELP, "")
+        if (
+            argv[:2] == ["myxcel", "cold"]
+            and argv[3:] == ["--help"]
+            and argv[2] in {"ls", "rm-partial"}
+        ):
+            has = self.has_ls if argv[2] == "ls" else self.has_rm_partial
+            if has:
+                return RunResult(0, HELP, "")
+            return RunResult(2, "", f"Unused Tokens: ['{argv[2]}']")
         assert argv[:2] == ["myxcel", "cold"] and argv[-1] == "--json", argv
         sub, profile, args = argv[2], argv[3], argv[4:-1]
+        if (sub == "ls" and not self.has_ls) or (sub == "rm-partial" and not self.has_rm_partial):
+            with self._mu:
+                self.unsupported_calls.append(argv)
+            return RunResult(2, "", f"Unused Tokens: ['{sub}']")
         base = self.root / profile
         with self._mu:
             self.calls.append((sub, [profile, *args]))
@@ -227,3 +265,39 @@ class FakeMyxcel:
             child.unlink()
         d.rmdir()
         return 0, {"status": "released", "holder": None, "message": ""}
+
+    def _do_ls(self, base: Path, args: list[str]):
+        d = base / args[0].rstrip("/")
+        if not d.is_dir():
+            return 1, {
+                "status": "missing",
+                "entries": [],
+                "message": f"no such directory {args[0]}",
+            }
+        entries: list[dict] = []
+        for child in sorted(d.iterdir()):
+            if child.name == LOCK and child.is_dir() and not child.is_symlink():
+                try:
+                    holder = json.loads((child / "holder.json").read_text())
+                except (OSError, ValueError):
+                    holder = None
+                entries.append({"name": LOCK, "lock": True, "holder": holder})
+            elif child.is_file() and not child.is_symlink():
+                st = child.stat()
+                entries.append({"name": child.name, "size_bytes": st.st_size, "mtime": st.st_mtime})
+            # other directories are omitted, as in real myxcel
+        return 0, {"status": "ok", "entries": entries, "message": ""}
+
+    def _do_rm_partial(self, base: Path, args: list[str]):
+        rel = args[0]
+        last = rel.rsplit("/", 1)[-1]
+        target = base / rel
+        self.rm_log.append((rel, (target.parent / LOCK).is_dir()))
+        if not _PARTIAL.fullmatch(last):
+            return 1, {"status": "refused", "message": f"not a partial upload name: {last!r}"}
+        if not target.parent.is_dir() or not (target.exists() or target.is_symlink()):
+            return 1, {"status": "absent", "message": f"no such partial: {rel}"}
+        if target.is_symlink() or target.is_dir() or not target.is_file():
+            return 1, {"status": "error", "message": "target is not a regular file, not removed"}
+        target.unlink()
+        return 0, {"status": "removed", "message": ""}
