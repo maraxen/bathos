@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -20,6 +21,27 @@ class ValidationError:
 class ValidationResult:
     ok: bool
     errors: list[ValidationError] = field(default_factory=list)
+    #: advisory findings that never flip `ok` (spec 261026 D5): format-2 checks skipped for want of
+    #: a catalog, `[fork]`/`[[amendments]]` present without `format = 2`
+    warnings: list[str] = field(default_factory=list)
+
+
+#: the postmortem file formats `parse_postmortem` accepts; absent `format` means 1
+POSTMORTEM_FORMATS = (1, 2)
+
+
+@dataclass
+class Amendment:
+    """One `[[amendments]]` entry (format 2, spec 261026 D5): later evidence about a run's
+    verdict. Recorded alongside the run; it never alters `runs.outcome`."""
+
+    analysis_run_id: str = ""
+    #: the run being amended; "" means this postmortem's own run (required when campaign-scoped)
+    amends_run_id: str = ""
+    kind: str = ""
+    outlier_units: list[str] = field(default_factory=list)
+    effect: str = ""
+    note: str = ""
 
 
 @dataclass
@@ -52,6 +74,35 @@ class Postmortem:
     #: accreting forever.
     violated_cards: list[str] = field(default_factory=list)
     anomalies: dict = field(default_factory=dict)
+    #: file format: 1 (default, today's behaviour) or 2 (enables `[fork]` and `[[amendments]]`)
+    format: int = 1
+    #: the raw `[fork]` table (format 2); checked by the near_bound discharge, not parsed here
+    fork: dict = field(default_factory=dict)
+    amendments: list[Amendment] = field(default_factory=list)
+
+
+def _parse_format(data: dict) -> int:
+    fmt = data.get("format", 1)
+    if isinstance(fmt, bool) or fmt not in POSTMORTEM_FORMATS:
+        raise ValueError(f"Unsupported postmortem format {fmt!r}: format must be 1 or 2")
+    return fmt
+
+
+def _parse_amendments(data: dict) -> list[Amendment]:
+    raw = data.get("amendments", [])
+    if not isinstance(raw, list) or not all(isinstance(e, dict) for e in raw):
+        raise ValueError("amendments must be an array of tables ([[amendments]])")
+    return [
+        Amendment(
+            analysis_run_id=str(e.get("analysis_run_id", "") or ""),
+            amends_run_id=str(e.get("amends_run_id", "") or ""),
+            kind=str(e.get("kind", "") or ""),
+            outlier_units=[str(u) for u in (e.get("outlier_units", []) or [])],
+            effect=str(e.get("effect", "") or ""),
+            note=str(e.get("note", "") or ""),
+        )
+        for e in raw
+    ]
 
 
 def parse_postmortem(path: Path) -> Postmortem:
@@ -106,6 +157,10 @@ def parse_postmortem(path: Path) -> Postmortem:
     asset_links = data.get("asset_links", {})
     anomalies = data.get("anomalies", {})
 
+    fork = data.get("fork", {})
+    if not isinstance(fork, dict):
+        raise ValueError("fork must be a table ([fork])")
+
     return Postmortem(
         run_id=run_id or "",
         campaign_id=campaign_id,
@@ -126,6 +181,9 @@ def parse_postmortem(path: Path) -> Postmortem:
         script_sha256=script_sha256,
         refutation_criteria_met=refutation_criteria_met,
         anomalies=anomalies,
+        format=_parse_format(data),
+        fork=fork,
+        amendments=_parse_amendments(data),
     )
 
 
@@ -156,8 +214,12 @@ def validate_postmortem(
     run: Run | None = None,
     strict_files: bool = False,
     postmortem_path: Path | None = None,
+    run_lookup: Callable[[str], object | None] | None = None,  # noqa: ARG001 -- format-2 checks (T6)
 ) -> ValidationResult:
+    """Validate a postmortem. `run_lookup(run_id) -> Run | None` (unique-prefix resolution) feeds
+    only the format-2 checks; format-1 files validate exactly as they always did."""
     errors = []
+    warnings: list[str] = []
 
     # 1. Check refutation mapping consistency
     # refuted and pass -> invalid
@@ -287,6 +349,12 @@ def validate_postmortem(
                         "postmortem.validate_error", path=str(postmortem_path), reason=err.message
                     )
 
+    # 4. Format-2 sections (spec 261026 D5). Format 1 ignores them, but says so.
+    if postmortem.format != 2 and (postmortem.fork or postmortem.amendments):
+        warnings.append(
+            "[fork]/[[amendments]] present but not enforced: add format = 2 to enable them"
+        )
+
     ok = len(errors) == 0
     if ok and postmortem_path:
         event(
@@ -295,7 +363,7 @@ def validate_postmortem(
             run_id=postmortem.run_id,
             sprint_id=None,
         )
-    return ValidationResult(ok=ok, errors=errors)
+    return ValidationResult(ok=ok, errors=errors, warnings=warnings)
 
 
 def find_postmortem(
