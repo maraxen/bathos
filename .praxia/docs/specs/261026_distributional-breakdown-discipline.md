@@ -5,11 +5,11 @@ status: draft
 task_id: 261026_distributional-breakdown-debt
 date: '261026'
 backlog_ids: ''
-adversarial_review: 'cycles 1-4 done; v5 revision'
+adversarial_review: 'cycles 1-5 done; v6 revision'
 ---
 # Distributional breakdown, amendments and fork records for aggregate verdicts
 
-**v5** (after adversarial cycles 1-4; see §6). Debt #3045. Source postmortem: lathex
+**v6** (after adversarial cycles 1-5; see §6). Debt #3045. Source postmortem: lathex
 `postmortems/bathos-debt-distributional-breakdown.md` (commit a0b1f5a). Companion bug #3046
 (scaffold path) is fixed separately (commit 1ed684bb).
 
@@ -30,7 +30,7 @@ record of what was decided after a near-bound result, or why.
 User decision (261026): **WARNING everywhere; ERROR only where the run is cited (entry into a
 claim-bound campaign).** Internal validation runs stay unblocked.
 
-**Acceptance walk-through (78db9e04 under v5).** Before the run, `bth run` prints to stderr
+**Acceptance walk-through (78db9e04 under v6).** Before the run, `bth run` prints to stderr
 that `e_max_placement` and `e_max_iptm` gate outcomes with no `[breakdown]` (D2). Over MCP,
 the same advisories come back in the `run_tool` response's `warnings`. Had the author declared
 `[breakdown]` with `bound = 0.5`, the run would have recorded `e_max_placement__n_over = 1`
@@ -221,11 +221,24 @@ note = "1 of 24 binders over; median binder max 0.004 A"
 **Validation plumbing.** `validate_postmortem(..., run_lookup=None)`; `ValidationResult` gains
 `warnings`. `run_lookup` feeds **only** format-2 checks. **Wiring:** the catalog lookup
 inside `postmortem_get_tool` (warm query, then `read_runs` fallback, ≈`mcp.py:3240-3270`) is
-factored into `_lookup_run(cat_dir, run_id) -> Run | None`. Both `postmortem_validate_tool`
-and `postmortem_get_tool` pass `run_lookup=partial(_lookup_run, cat_dir)`, while
-`postmortem_validate_tool` keeps `run=None`. `discharge_from_postmortem` (no catalog) keeps
-`run_lookup=None` and so gets warnings. Callers keep passing `run=None`, so
-the existing drift block (A11) does not newly fire on format-1 files. With `run_lookup`
+factored into `_lookup_run(cat_dir, run_id) -> Run | None`. It does **unique-prefix
+matching**, which the existing code does not (exact `WHERE id = ?`, `mcp.py:3259`;
+`r.id == run_id`, `:3270`):
+1. Try an exact id.
+2. Otherwise try `id LIKE ? || '%'` in warm, plus the same filter over `read_runs` for cool.
+3. Exactly one match resolves.
+4. More than one raises `AmbiguousRunId`. Validation reports it as an error naming the
+   candidates.
+
+The D5 example `analysis_run_id = "797b791e"` therefore resolves. This one helper serves
+`run_lookup`, the near_bound entity check, the scaffold's full-id resolution, and conclude's
+Run-row fetch for cool-only members.
+
+Both `postmortem_validate_tool` and `postmortem_get_tool` pass
+`run_lookup=partial(_lookup_run, cat_dir)`. `postmortem_validate_tool` keeps `run=None`;
+`postmortem_get_tool` keeps its existing `run=` (A11). `discharge_from_postmortem` (no
+catalog) keeps `run_lookup=None` and so gets warnings. The drift block (A11) therefore does
+not newly fire anywhere. With `run_lookup`
 absent, run-dependent checks become warnings ("skipped: no catalog"). `[fork]` or
 `[[amendments]]` present without `format = 2` is a warning ("not enforced: add format = 2").
 
@@ -260,8 +273,8 @@ guard at `runner.py:1608`, so exploratory runs like 78db9e04 open one. The oblig
 
 **Default ON, mechanized.** `near_bound` is added to `TRIGGERS` and `WIRED_TRIGGERS`. A new
 `DEFAULT_ON = frozenset({"near_bound"})` lives in `obligations.py`. `resolve_flag` gains
-`default: bool = False`, used when env and config are unset (≈`config.py:82-83`) and on the
-exception path. `trigger_enabled` passes `default=trigger in DEFAULT_ON`. The ledger's
+`default: bool = False`, threaded through all three non-env returns (`config.py:82` no config
+file, `:83` key absent, `:85` exception). `trigger_enabled` passes `default=trigger in DEFAULT_ON`. The ledger's
 default-OFF rationale (`obligations.py:20-24`) is to avoid retroactively burdening every
 existing script. `near_bound` fires only for sidecars that declare the new `[breakdown]`
 `bound`, so no existing script is touched. The docstrings at `obligations.py:13-24,68-73`
@@ -296,10 +309,19 @@ run-independent wrapper.
 
 **Entity check (new).** `discharge` does no entity check today. For `near_bound` ids it now
 requires one of two things:
-- `pm.run_id` resolves to the obligation's run, by prefix match through `catalog_dir`.
+- `pm.run_id` resolves to the obligation's run via `_lookup_run(catalog_dir, …)` (unique
+  prefix).
 - The postmortem is campaign-scoped and its members include that run
   (`union_campaign_member_ids`). Otherwise the id is reported as not discharged,
 with a reason.
+
+**Re-discharge (near_bound only).** `discharge()` does nothing on an already-discharged
+obligation (`obligations.py:256-259`). Without a change, a run first closed by an internal
+`stop`/`cited = false` postmortem could never be re-recorded once it is later cited.
+`discharge_validated` therefore **re-points** an already-discharged `near_bound` obligation
+when a newer postmortem passes the fork checks and the entity check. It sets `discharged_by`
+to the new file and appends the old path to a new `superseded_by_paths: list[str]` field,
+defaulting to `[]` so old ledger JSON reads unchanged. Other triggers keep first-discharge-wins.
 
 **Fork checks are run-independent.** They read only `pm.fork` and `pm.discharges`; the
 trigger is `any(oid.endswith("_near_bound"))`. So they fire with `run=None`, as at
@@ -323,12 +345,15 @@ Fork errors: missing `[fork]` or empty `reason` while discharging `near_bound`;
 **Scaffold.** It writes `format = 2`, an uncommented `[fork]` with empty `choice` and `reason`,
 and a **commented** checklist of open obligation ids, e.g. `# run_<fullid>_near_bound`. It
 never fills `discharges`, per the ledger principle (`postmortem.py:358-361`,
-`test_postmortem_campaign_scope.py:140-144`). It resolves a prefix run id to the full id
-first; `find_run_for_scaffold` (`postmortem.py:397-420`) is widened to return it.
+`test_postmortem_campaign_scope.py:140-144`). It resolves a prefix run id to the full id with
+`_lookup_run`. `find_run_for_scaffold` (`postmortem.py:397-420`) is left unchanged, so its
+2-tuple callers (`mcp.py:3137-3140`, `tests/runlog/test_ac18_catalog_readable.py:183-189`) are
+untouched.
 
 **Conclude** (at the D3 insertion point): open `near_bound` obligations are listed for every
 campaign, as all obligations are. On a claim-bound confirmation/sequential campaign, the
-check runs per member. It recomputes `near_bound(resolve_run_sidecar(run), results)` from the
+check runs per member. Run rows come from `_lookup_run`, which covers cool-only members
+through `read_runs`. It recomputes `near_bound(resolve_run_sidecar(run), results)` from the
 run-time sidecar and `runs.metadata`, independent of whether the ledger entry was ever opened.
 If the recomputation is non-empty:
 - If no `run_<fullid>_near_bound` entry exists (opt-out, swallowed failure, or a pre-feature
@@ -340,7 +365,9 @@ If the recomputation is non-empty:
   (`obligations.py:137`), resolved against the workspace root and re-parsed. That catches a
   file edited after discharge, and the postmortem is not looked up via `find_postmortem`.
   The conclude raises if that file is missing, unreadable or unparseable, if it lacks a valid
-  `[fork]`, or if it has `cited = false`.
+  `[fork]`, or if it has `cited = false`. The message names the `discharged_by` file and
+  gives both remedies: edit that file, or validate a new format-2 postmortem, which
+  re-points the obligation (Re-discharge).
 
 There is no refusal at add, since refusing there would bias which runs get included.
 
@@ -362,7 +389,7 @@ auto-computed breakdowns, aggregates in `[differential].metric` and benchmark me
 | T5 | `ValidationResult.warnings`, `run_lookup` (format-2 only); `parse_postmortem` gains `format`, `fork`, `amendments` | format-1 files unchanged under drift |
 | T6 | D5 amendments + rendering | `tests/test_postmortem_amendments.py` |
 | T7 | D6 `near_bound` (pure fn, run-end advisory outside the exploratory guard, `TRIGGERS` gains `near_bound` — `open_obligation` rejects unknown triggers, `obligations.py:200` — `DEFAULT_ON` + `resolve_flag(default=)`, fork checks, scaffold) | 78db9e04 fixture (exploration, `bound = 0.5`, 0.521, `n_over = 1`, `n_units = 24`) opens `near_bound` without blocking; `n_units = 1` does not fire single_unit; margin trigger; NaN unevaluated; `bound = 0` validation; default-ON/opt-out tests and the edited closed-set tests (incl. the `TRIGGERS - DEFAULT_ON` comprehension at `test_obligation_triggers.py:110`); scaffold leaves `discharges` empty with a full-id checklist |
-| T7a (after T7) | Discharge wiring: `discharge_validated(ws, pm, pm_path, catalog_dir)` from `postmortem_validate_tool`; `"discharged"` in the response; workspace-relative `discharged_by`; near_bound entity check; `_lookup_run` factored and passed as `run_lookup`; conclude recomputation | `tests/test_obligation_discharge_wiring.py`: `bth postmortem validate` discharges; a postmortem for run X cannot discharge `run_Y_near_bound`; legacy triggers still discharge; D5 errors fire through the tool (not warnings); **end-to-end: open near_bound → claim-bound confirmation conclude raises `FORK_RECORD_MISSING` → validate a format-2 `[fork]` postmortem → conclude proceeds**; opt-out run (`near_bound = false`) still raises at claim-bound conclude; moved/deleted discharging postmortem raises; `cited = false` raises; exploration-mode conclude warns |
+| T7a (after T7) | Discharge wiring: `discharge_validated(ws, pm, pm_path, catalog_dir)` from `postmortem_validate_tool`; `"discharged"` in the response; workspace-relative `discharged_by`; near_bound entity check; `_lookup_run` factored and passed as `run_lookup`; conclude recomputation | `tests/test_obligation_discharge_wiring.py`: `bth postmortem validate` discharges; a postmortem for run X cannot discharge `run_Y_near_bound`; legacy triggers still discharge; D5 errors fire through the tool (not warnings); **end-to-end: open near_bound → claim-bound confirmation conclude raises `FORK_RECORD_MISSING` → validate a format-2 `[fork]` postmortem → conclude proceeds**; opt-out run (`near_bound = false`) still raises at claim-bound conclude; moved/deleted discharging postmortem raises; `cited = false` raises; **re-discharge: `cited = false` discharge → conclude raises → new `cited = true` postmortem validated → `discharged_by` re-pointed, old path in `superseded_by_paths` → conclude proceeds**; `_lookup_run` resolves an 8-char prefix and errors on an ambiguous one; cool-only member is checked; exploration-mode conclude warns |
 | T8 | Skills (`using-bathos`, `bathos-rigor-gates`; edit both the source and the exported copy), CHANGELOG | — |
 
 Narrow pytest per task locally; full suite on CI; a reviewer with a different lens.
@@ -422,3 +449,12 @@ changes:
 - M2 no catalog handle; verbatim `discharged_by` → `catalog_dir` param; workspace-relative storage; unreadable discharging postmortem raises.
 - M3 nothing supplied `run_lookup` → `_lookup_run` factored and passed by both postmortem tools.
 - minors: T7 before T7a; `test_obligation_triggers.py:110`; aggregate-half-only at ≈861; cool-only members via `union_campaign_member_ids`; A11 corrected; T8 both skill copies.
+
+**Cycle 5**: challenger on v5 (`toolu_01Sa1fwisGqkWheE3AfbRE95.1.md`; 0 blocking, 2 major, 1
+minor). The orchestrator confirmed the anchors: exact-match `mcp.py:3259,3270`; the
+`find_run_for_scaffold` 2-tuple at `mcp.py:3140` and in the ac18 test; `discharge()`
+first-wins. v6 changes:
+- M1 prefix vs exact lookup → `_lookup_run` does unique-prefix matching with an ambiguity error, as the single helper for all lookups.
+- M2 already-discharged obligation cannot be re-recorded → near_bound re-discharge with `superseded_by_paths`; the conclude message names both remedies.
+- m3 → `find_run_for_scaffold` unchanged; the scaffold resolves via `_lookup_run`.
+- Unstated cool-only Run-row source → `_lookup_run` via `read_runs`. `resolve_flag` default is threaded through all three returns. The stale "callers keep passing `run=None`" sentence is corrected.
