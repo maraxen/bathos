@@ -135,3 +135,68 @@ def test_invalid_ignore_outputs_env_fails_loudly(tmp_path: Path, monkeypatch):
 
     with pytest.raises(LockConfigError):
         _run(script, repo, tmp_path / "cat")
+
+
+# -- run-time warnings about legacy in-tree bookkeeping (spec 261026 P3) -------------------------
+
+
+@pytest.fixture
+def fresh_warning_state(monkeypatch):
+    monkeypatch.setattr(runner, "_LEGACY_BOOKKEEPING_WARNED", False)
+
+
+@pytest.mark.usefixtures("fresh_warning_state")
+def test_run_warns_about_tracked_manifest(tmp_path: Path, capsys):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    script = _repo(repo)
+    manifest = repo / ".bth" / "refs" / "manifest.jsonl"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}\n")
+    _git(repo, "add", "-f", ".bth/refs/manifest.jsonl")
+    _git(repo, "commit", "-qm", "legacy")
+
+    assert _run(script, repo, tmp_path / "cat") == 0
+
+    err = capsys.readouterr().err
+    assert "bth lock untrack" in err and "G31" in err
+
+
+@pytest.mark.usefixtures("fresh_warning_state")
+def test_run_warns_about_untracked_locks_in_tree(tmp_path: Path, capsys):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    script = _repo(repo)
+    (script.parent / "run_x.run_x.old-id.bth.lock.toml").write_text("[manifest]\n")
+
+    assert _run(script, repo, tmp_path / "cat") == 0
+
+    assert "bth lock relocate" in capsys.readouterr().err
+
+
+@pytest.mark.usefixtures("fresh_warning_state")
+def test_legacy_warning_is_once_per_process(tmp_path: Path, capsys):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    script = _repo(repo)
+    (script.parent / "run_x.run_x.old-id.bth.lock.toml").write_text("[manifest]\n")
+
+    _run(script, repo, tmp_path / "cat")
+    first = capsys.readouterr().err
+    _run(script, repo, tmp_path / "cat")
+    second = capsys.readouterr().err
+
+    assert "bth lock relocate" in first
+    assert "bth lock relocate" not in second
+
+
+@pytest.mark.usefixtures("fresh_warning_state")
+def test_clean_repo_gets_no_legacy_warning(tmp_path: Path, capsys):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    script = _repo(repo)
+
+    assert _run(script, repo, tmp_path / "cat") == 0
+
+    err = capsys.readouterr().err
+    assert "bth lock" not in err

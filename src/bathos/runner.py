@@ -551,6 +551,53 @@ def _bookkeeping_roots(script_path: Path | None, cwd: Path) -> list[Path]:
     return roots
 
 
+_LEGACY_BOOKKEEPING_WARNED = False
+
+
+def _warn_legacy_bookkeeping_once(root: Path) -> None:
+    """One stderr warning per process when the script's repo tracks the manifest or holds untracked locks.
+
+    Two bounded git calls, never a filesystem walk (spec 261026 P3). Names the command that cleans each up.
+    """
+    global _LEGACY_BOOKKEEPING_WARNED  # noqa: PLW0603 - once per process by design
+    if _LEGACY_BOOKKEEPING_WARNED:
+        return
+    _LEGACY_BOOKKEEPING_WARNED = True
+    manifest_rel = ".bth/refs/manifest.jsonl"
+    try:
+        tracked = (
+            subprocess.run(
+                ["git", "ls-files", "--error-unmatch", "--", manifest_rel],
+                cwd=root,
+                capture_output=True,
+                timeout=30,
+            ).returncode
+            == 0
+        )
+        others = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "--", "*.bth.lock.toml"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout.split()
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    if tracked:
+        print(
+            f"warning: {manifest_rel} is tracked in {root}, so every run modifies it. `bth lock untrack` "
+            "stages its removal (caveat: G31 clean-run proof reads this file per worktree; the command "
+            "prints the consequences).",
+            file=sys.stderr,
+        )
+    if others:
+        print(
+            f"warning: {len(others)} untracked *.bth.lock.toml file(s) in {root} from earlier runs. "
+            "`bth lock relocate` classifies them and gives each a lock ref; it never deletes.",
+            file=sys.stderr,
+        )
+
+
 def _write_lock_fallback(lock_dir: Path, project_slug: str, run_id: str, body: bytes) -> Path:
     """Atomically write the lock to ``<lock_dir>/<project_slug>/<run_id>.bth.lock.toml``; never into the tree."""
     target = (lock_dir / project_slug / f"{run_id}.bth.lock.toml").resolve()
@@ -1304,6 +1351,10 @@ def _run_script_impl(
                     "un-ignores it.",
                     file=sys.stderr,
                 )
+
+        legacy_roots = _bookkeeping_roots(script_path, cwd)
+        if legacy_roots:
+            _warn_legacy_bookkeeping_once(legacy_roots[0])
 
         pin = pin_run(
             run_id=run.id,

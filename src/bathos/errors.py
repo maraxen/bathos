@@ -104,6 +104,9 @@ class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(
 
     # Sidecar lock as a commit ref (spec 261026): the lock ref could not be written or did not read back.
     LOCK_REF_WRITE_FAILED = "lock_ref_write_failed"
+    # `bth lock *` (spec 261026 P3): no refs/bathos/locks/<run_id>, or a command that would stage found a dirty index.
+    LOCK_NOT_FOUND = "lock_not_found"
+    INDEX_DIRTY = "index_dirty"
 
 
 # Resolution hints registry: every BathosErrorCode member must have a non-empty entry
@@ -168,6 +171,8 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.NO_VERIFIED_COPY: "The run has no verified, non-superseded cold or mirror copy to restore from; run `bth cold <run>` or `bth verify --tier outputs` (see `bth outputs where`)",
     BathosErrorCode.WARM_NOREPLACE_UNSUPPORTED: "This kernel or filesystem lacks renameat2 RENAME_NOREPLACE, so bathos will not publish by a replacing rename; the verified copy is kept in the <dir>.bth-warm-<attempt>.partial directory named in the message: move it into place by hand, or use a filesystem that supports the flag",
     BathosErrorCode.LOCK_REF_WRITE_FAILED: "The lock commit-ref under refs/bathos/locks/ could not be written or did not read back identically; check write access to the repo's .git (and that git is installed). `bth run` falls back to the lock_dir and records ref_error in run.lock_written",
+    BathosErrorCode.LOCK_NOT_FOUND: "No lock ref refs/bathos/locks/<run_id> in this repo: check the run id, or run `bth lock fetch --apply` to bring locks from a remote clone",
+    BathosErrorCode.INDEX_DIRTY: "The git index has staged changes and this `bth lock` command would stage: commit or `git restore --staged` them, then rerun",
     BathosErrorCode.WARM_PUBLISH_FAILED: "The final rename of the verified staging directory failed (permissions, space, a vanished parent); the verified copy is kept in the .partial directory named in the message: fix the cause and move it into place by hand",
 }
 
@@ -292,4 +297,6 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     # Lock location (spec 261026): bad lock_location / lock_dir / ignore_outputs configuration.
     "LockConfigError": BathosErrorCode.INVALID_PARAM,
     "LockRefError": BathosErrorCode.LOCK_REF_WRITE_FAILED,
+    # `bth lock *`: carries its own, more specific `code`; this is the fallback for a caller with only the class.
+    "LockAdminError": BathosErrorCode.INVALID_PARAM,
 }

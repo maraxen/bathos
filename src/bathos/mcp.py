@@ -2780,6 +2780,216 @@ async def mcp_get_blast_radius_status_tool(
     )
 
 
+# ============================================================================
+# `bth lock` group (spec 261026 P3): administer sidecar locks stored as commit refs.
+#
+# CLI tools default --project-root to the git toplevel of cwd; the MCP mirrors REQUIRE project_root (an MCP server's
+# cwd is not the caller's). Everything is dry-run unless apply=True. The write verbs are token-gated at the MCP layer.
+# ============================================================================
+
+
+def _lock_error(exc) -> dict:
+    return {
+        "ok": False,
+        "error": str(exc),
+        "error_code": exc.code.value,
+        "resolution_hint": RESOLUTION_HINTS.get(exc.code, ""),
+    }
+
+
+def _lock_call(project_root: str, fn, *args, **kwargs) -> dict:
+    """Run a `bathos.lock_admin` command and shape a LockAdminError into the error envelope."""
+    from bathos.lock_admin import LockAdminError, repo_toplevel
+
+    try:
+        root = repo_toplevel(Path(project_root) if project_root else Path.cwd())
+        return fn(root, *args, **kwargs)
+    except LockAdminError as e:
+        return _lock_error(e)
+
+
+@cisternal.tool(registry="bathos-cli", name="lock_materialize", cli_group="lock", cli_name="materialize")
+def lock_materialize_tool(run_id: str = "", project_root: str = "", apply: bool = False) -> dict:
+    """Write a run's lock ref (refs/bathos/locks/<run_id>) to its G19 path so it can be committed.
+
+    Dry-run unless --apply. Byte-identical to the ref's blob; never overwrites different content.
+
+    Args:
+        run_id: Run whose lock to materialize (required).
+        project_root: Repo to act in (empty = git toplevel of the current directory).
+        apply: Write the file (default: only report).
+    """
+    from bathos.lock_admin import lock_materialize
+
+    if not run_id:
+        return {
+            "ok": False,
+            "error": "run_id is required",
+            "error_code": BathosErrorCode.INVALID_PARAM.value,
+            "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.INVALID_PARAM],
+        }
+    return _lock_call(project_root, lock_materialize, run_id, apply=apply)
+
+
+@cisternal.tool(registry="bathos-cli", name="lock_relocate", cli_group="lock", cli_name="relocate")
+def lock_relocate_tool(project_root: str = "", catalog_dir: str = "", apply: bool = False) -> dict:
+    """Classify in-tree lock files and make sure each has its lock ref. Never deletes.
+
+    Tracked locks are 'keep (committed evidence)'; untracked locks matching a catalog run's manifest_sha256 are
+    'safe to delete'. Dry-run unless --apply.
+
+    Args:
+        project_root: Repo to act in (empty = git toplevel of the current directory).
+        catalog_dir: Catalog directory used to match untracked locks (empty = use default).
+        apply: Create the missing refs (default: only report).
+    """
+    from bathos.lock_admin import lock_relocate
+
+    return _lock_call(
+        project_root, lock_relocate, _get_catalog_dir(catalog_dir or None), apply=apply
+    )
+
+
+@cisternal.tool(registry="bathos-cli", name="lock_untrack", cli_group="lock", cli_name="untrack")
+def lock_untrack_tool(project_root: str = "", apply: bool = False) -> dict:
+    """Untrack (git rm --cached) a tracked .bth/refs/manifest.jsonl / .manifest.lock, then re-run the ignores.
+
+    The on-disk file is never touched and lock files are never untracked. Prints the G31 and merge caveats.
+    Dry-run unless --apply; refuses a dirty index.
+
+    Args:
+        project_root: Repo to act in (empty = git toplevel of the current directory).
+        apply: Stage the deletion (default: only report).
+    """
+    from bathos.lock_admin import lock_untrack
+
+    return _lock_call(project_root, lock_untrack, apply=apply)
+
+
+@cisternal.tool(registry="bathos-cli", name="lock_push", cli_group="lock", cli_name="push")
+def lock_push_tool(project_root: str = "", remote: str = "origin", apply: bool = False) -> dict:
+    """Push refs/bathos/locks/* to a remote (explicit refspec). Dry-run unless --apply.
+
+    Args:
+        project_root: Repo to act in (empty = git toplevel of the current directory).
+        remote: Git remote name.
+        apply: Actually push (default: git push --dry-run).
+    """
+    from bathos.lock_admin import lock_push
+
+    return _lock_call(project_root, lock_push, remote=remote, apply=apply)
+
+
+@cisternal.tool(registry="bathos-cli", name="lock_fetch", cli_group="lock", cli_name="fetch")
+def lock_fetch_tool(project_root: str = "", remote: str = "origin", apply: bool = False) -> dict:
+    """Fetch refs/bathos/locks/* from a remote (explicit refspec). Dry-run lists them; --apply fetches.
+
+    Args:
+        project_root: Repo to act in (empty = git toplevel of the current directory).
+        remote: Git remote name.
+        apply: Actually fetch (default: only list the remote's lock refs).
+    """
+    from bathos.lock_admin import lock_fetch
+
+    return _lock_call(project_root, lock_fetch, remote=remote, apply=apply)
+
+
+def _lock_project_root_required(project_root: str) -> dict | None:
+    """MCP: `project_root` has no cwd default. Returns an INVALID_PARAM envelope when it is empty."""
+    if project_root:
+        return None
+    return {
+        "ok": False,
+        "error": "project_root is required over MCP (the server's cwd is not the caller's)",
+        "error_code": BathosErrorCode.INVALID_PARAM.value,
+        "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.INVALID_PARAM],
+    }
+
+
+@cisternal.tool(registry="bathos", name="lock_materialize")
+@traced_tool
+@require_write_token
+async def mcp_lock_materialize_tool(
+    project_root: str = "",
+    run_id: str = "",
+    apply: bool = False,
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
+) -> dict:
+    """Write a run's lock ref to its G19 path so it can be committed (dry-run unless apply=True).
+
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
+    return _lock_project_root_required(project_root) or lock_materialize_tool(
+        run_id=run_id, project_root=project_root, apply=apply
+    )
+
+
+@cisternal.tool(registry="bathos", name="lock_relocate")
+@traced_tool
+@require_write_token
+async def mcp_lock_relocate_tool(
+    project_root: str = "",
+    catalog_dir: str = "",
+    apply: bool = False,
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
+) -> dict:
+    """Classify in-tree locks and ensure each has its lock ref; never deletes (dry-run unless apply=True).
+
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
+    return _lock_project_root_required(project_root) or lock_relocate_tool(
+        project_root=project_root, catalog_dir=catalog_dir, apply=apply
+    )
+
+
+@cisternal.tool(registry="bathos", name="lock_untrack")
+@traced_tool
+@require_write_token
+async def mcp_lock_untrack_tool(
+    project_root: str = "",
+    apply: bool = False,
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
+) -> dict:
+    """Untrack a tracked manifest.jsonl / .manifest.lock (git rm --cached); dry-run unless apply=True.
+
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
+    return _lock_project_root_required(project_root) or lock_untrack_tool(
+        project_root=project_root, apply=apply
+    )
+
+
+@cisternal.tool(registry="bathos", name="lock_push")
+@traced_tool
+@require_write_token
+async def mcp_lock_push_tool(
+    project_root: str = "",
+    remote: str = "origin",
+    apply: bool = False,
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
+) -> dict:
+    """Push refs/bathos/locks/* to a remote (dry-run unless apply=True).
+
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
+    return _lock_project_root_required(project_root) or lock_push_tool(
+        project_root=project_root, remote=remote, apply=apply
+    )
+
+
+@cisternal.tool(registry="bathos", name="lock_fetch")
+@traced_tool
+@require_write_token
+async def mcp_lock_fetch_tool(
+    project_root: str = "",
+    remote: str = "origin",
+    apply: bool = False,
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
+) -> dict:
+    """Fetch refs/bathos/locks/* from a remote (dry-run lists them unless apply=True).
+
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
+    return _lock_project_root_required(project_root) or lock_fetch_tool(
+        project_root=project_root, remote=remote, apply=apply
+    )
+
+
 @cisternal.tool(registry="bathos", name="compact")
 @traced_tool
 @require_write_token
@@ -5519,6 +5729,11 @@ _WIRED = cisternal.wire(
         "blast_radius_assess",
         "blast_radius_clear",
         "get_blast_radius_status",
+        "lock_materialize",
+        "lock_relocate",
+        "lock_untrack",
+        "lock_push",
+        "lock_fetch",
         "doc_schema",
         "claim_author",
         "new_experiment",

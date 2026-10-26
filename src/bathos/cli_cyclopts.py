@@ -130,6 +130,12 @@ wire(
         "postmortem_scaffold",
         "postmortem_validate",
         "postmortem_get",
+        # lock group (spec 261026 P3)
+        "lock_materialize",
+        "lock_relocate",
+        "lock_untrack",
+        "lock_push",
+        "lock_fetch",
         # ref group (Milestone 2)
         "reference_list",
         "reference_get",
