@@ -2021,7 +2021,14 @@ def review_campaign(
         "blast_radius_status": blast_radius_status,
         "claim_blast_radius_status": claim_blast_radius_status,
         "amendments": _member_amendments(workspace_root, [r[0] for r in rows]),
+        "waivers": _member_waivers(db, workspace_root, [r[0] for r in rows], catalog_dir),
     }
+
+
+def _member_waivers(db, workspace_root, run_ids: list[str], catalog_dir) -> list[dict]:
+    from bathos.breakdown_gate import member_waivers
+
+    return member_waivers(db, run_ids, workspace_root, catalog_dir, _log_mode(catalog_dir))
 
 
 def _member_amendments(workspace_root: Path | None, run_ids: list[str]) -> list[dict]:

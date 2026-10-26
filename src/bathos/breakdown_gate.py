@@ -280,6 +280,27 @@ def check_near_bound(
     return findings
 
 
+def member_waivers(
+    db, run_ids: list[str], workspace_root: Path | None, catalog_dir: Path | None, log_mode: bool
+) -> list[dict]:
+    """Each member's run-time `[breakdown] waive`, read from the resolved run-time sidecar
+    (campaign review visibility, spec 261026 D3). A member whose sidecar has no waiver, or cannot
+    be resolved, lists nothing; `[]` without a workspace root to resolve against."""
+    if workspace_root is None or not run_ids:
+        return []
+    runs = fetch_member_runs(db, run_ids, catalog_dir, log_mode=log_mode)
+    out: list[dict] = []
+    for run_id, run in runs.items():
+        if run is None:
+            continue
+        sidecar = resolve_run_sidecar(run, workspace_root, db=db, log_mode=log_mode)
+        if isinstance(sidecar, Sidecar) and sidecar.breakdown is not None:
+            reason = (sidecar.breakdown.waive or "").strip()
+            if reason:
+                out.append({"run_id": run_id, "reason": reason})
+    return sorted(out, key=lambda w: w["run_id"])
+
+
 def format_findings(findings: list[Finding], where: str) -> str:
     lines = [f"{where}: {len(findings)} breakdown finding(s) on claim-bound runs"]
     lines += [f"  {f.run_id[:8]}: {f.message}" for f in findings[:10]]
