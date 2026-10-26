@@ -26,6 +26,8 @@ from bathos.lock_ref import LOCK_REF_PREFIX, LockRefError, lock_ref_name, write_
 _GIT_TIMEOUT = 120.0
 LOCK_REFSPEC = f"{LOCK_REF_PREFIX}/*:{LOCK_REF_PREFIX}/*"
 _LOCK_SUFFIX = ".bth.lock.toml"
+_RUN_ID_OK = re.compile(r"[0-9A-Za-z][0-9A-Za-z_-]*")
+_FULL_SHA = re.compile(r"[0-9a-f]{40}")
 # Tracked bookkeeping that `untrack` may remove from the index. Lock files are deliberately absent.
 UNTRACKABLE = (MANIFEST_RELPATH.as_posix(), (MANIFEST_RELPATH.parent / ".manifest.lock").as_posix())
 
@@ -50,14 +52,21 @@ class LockAdminError(Exception):
 def _git(
     root: Path, *args: str, input_bytes: bytes | None = None
 ) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(
-        ["git", *args],
-        cwd=root,
-        capture_output=True,
-        env=clean_git_env(),
-        input=input_bytes,
-        timeout=_GIT_TIMEOUT,
-    )
+    try:
+        return subprocess.run(
+            ["git", *args],
+            cwd=root,
+            capture_output=True,
+            env=clean_git_env(),
+            input=input_bytes,
+            timeout=_GIT_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise LockAdminError(
+            BathosErrorCode.INTERNAL, f"git {args[0] if args else ''} timed out after {_GIT_TIMEOUT:.0f}s in {root}"
+        ) from e
+    except OSError as e:
+        raise LockAdminError(BathosErrorCode.INTERNAL, f"cannot run git in {root}: {e}") from e
 
 
 def _text(proc: subprocess.CompletedProcess[bytes]) -> str:
@@ -115,6 +124,8 @@ def lock_materialize(project_root: Path, run_id: str, apply: bool = False) -> di
     The owner then commits it, so praxia G19/G31 see it unchanged. Never overwrites a file with different
     content (``INVALID_PARAM``). Does not stage anything, so no index check.
     """
+    if not _RUN_ID_OK.fullmatch(run_id or ""):
+        raise LockAdminError(BathosErrorCode.INVALID_PARAM, f"run_id {run_id!r} is not a valid run id")
     root = repo_toplevel(project_root)
     relpath = _lock_relpath_in_ref(root, run_id)
     if relpath is None:
@@ -127,12 +138,30 @@ def lock_materialize(project_root: Path, run_id: str, apply: bool = False) -> di
             BathosErrorCode.LOCK_NOT_FOUND, f"{lock_ref_name(run_id)} has no blob at {relpath}"
         )
     target = root / relpath
-    present = target.is_file()
-    if present and target.read_bytes() != body:
+    if target.is_symlink():
+        raise LockAdminError(
+            BathosErrorCode.INVALID_PARAM, f"{relpath} is a symlink; refusing to write through it"
+        )
+    try:
+        parent_ok = target.parent.resolve().is_relative_to(root.resolve())
+    except OSError:
+        parent_ok = False
+    if not parent_ok:
         raise LockAdminError(
             BathosErrorCode.INVALID_PARAM,
-            f"{relpath} already exists with different content; not overwriting",
+            f"{relpath}: its directory resolves outside the repo root {root}; refusing",
         )
+    try:
+        present = target.is_file()
+        if present and target.read_bytes() != body:
+            raise LockAdminError(
+                BathosErrorCode.INVALID_PARAM,
+                f"{relpath} already exists with different content; not overwriting",
+            )
+        if target.is_dir():
+            raise LockAdminError(BathosErrorCode.INVALID_PARAM, f"{relpath} is a directory")
+    except OSError as e:
+        raise LockAdminError(BathosErrorCode.INVALID_PARAM, f"cannot read {relpath}: {e}") from e
     result = {
         "apply": apply,
         "run_id": run_id,
@@ -144,8 +173,11 @@ def lock_materialize(project_root: Path, run_id: str, apply: bool = False) -> di
         "written": False,
     }
     if apply and not present:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(body)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(body)
+        except OSError as e:  # IsADirectoryError, PermissionError, ...
+            raise LockAdminError(BathosErrorCode.INVALID_PARAM, f"cannot write {relpath}: {e}") from e
         result["written"] = True
     return result
 
@@ -210,13 +242,18 @@ def lock_relocate(project_root: Path, catalog_dir: Path | None = None, apply: bo
         sha = hashlib.sha256(body).hexdigest()
         entry["sha256"] = sha
         run_id = entry["run_id"]
+        entry["ref"] = _ensure_ref(root, run_id, relpath, body, apply)
         if is_tracked:
             entry["action"] = "keep (committed evidence)"
         elif run_id and _catalog_sha(catalog_dir, run_id) == sha:
-            entry["action"] = "safe to delete"
+            # "safe to delete" needs the bytes to be held by a ref: present or just created. A ref that is only
+            # planned ("would create") or that holds a different blob ("ref_conflict") does not make it safe.
+            if entry["ref"] in ("present", "created"):
+                entry["action"] = "safe to delete"
+            else:
+                entry["action"] = f"matches catalog; not safe until its ref exists ({entry['ref']})"
         else:
             entry["action"] = "unmatched"
-        entry["ref"] = _ensure_ref(root, run_id, relpath, body, apply)
         entries.append(entry)
     return {
         "apply": apply,
@@ -240,6 +277,9 @@ def _ensure_ref(root: Path, run_id: str | None, relpath: str, body: bytes, apply
     with contextlib.suppress(UnicodeDecodeError, tomllib.TOMLDecodeError):
         parsed = tomllib.loads(body.decode("utf-8")).get("manifest", {})
     git_sha = str(parsed.get("git_sha", ""))
+    if not _FULL_SHA.fullmatch(git_sha):
+        # Same 40-hex gate as select_lock_repo: never hand an arbitrary string to git. The carrier is parentless.
+        git_sha = "0" * 40
     try:
         write_lock_ref(root, git_sha, run_id, relpath, body)
     except (LockRefError, OSError, subprocess.SubprocessError) as e:
@@ -281,15 +321,31 @@ def _remote_check(root: Path, remote: str) -> None:
         raise LockAdminError(BathosErrorCode.INVALID_PARAM, f"no git remote named {remote!r}")
 
 
+PUSH_NOTE = (
+    "Each lock carrier's parent is the run's git_hash, so pushing refs/bathos/locks/* also sends every commit "
+    "reachable from those hashes (their whole history), not just the lock blobs."
+)
+
+
 def lock_push(project_root: Path, remote: str = "origin", apply: bool = False) -> dict:
-    """Push ``refs/bathos/locks/*`` to ``remote`` with an explicit refspec (dry-run unless ``apply``)."""
+    """Push ``refs/bathos/locks/*`` to ``remote`` with an explicit refspec (dry-run unless ``apply``).
+
+    Note: each lock carrier's parent is the run's ``git_hash``, so this also sends every commit reachable from
+    those hashes, i.e. their whole history (see ``PUSH_NOTE``).
+    """
     root = repo_toplevel(project_root)
     _remote_check(root, remote)
     args = ["push", *([] if apply else ["--dry-run"]), remote, LOCK_REFSPEC]
     proc = _git(root, *args)
     if proc.returncode != 0:
         raise LockAdminError(BathosErrorCode.INVALID_PARAM, f"git push failed: {_text(proc)}")
-    return {"apply": apply, "remote": remote, "refspec": LOCK_REFSPEC, "output": _text(proc)}
+    return {
+        "apply": apply,
+        "remote": remote,
+        "refspec": LOCK_REFSPEC,
+        "note": PUSH_NOTE,
+        "output": _text(proc),
+    }
 
 
 def lock_fetch(project_root: Path, remote: str = "origin", apply: bool = False) -> dict:

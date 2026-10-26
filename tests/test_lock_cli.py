@@ -170,7 +170,10 @@ def test_relocate_marks_matching_untracked_lock_safe_and_never_deletes(repo, sam
 
     dry = lock_relocate(repo, cat)
     assert dry["apply"] is False
-    assert [e["relpath"] for e in dry["locks"] if e["action"] == "safe to delete"] == [_relpath()]
+    # Not safe yet: nothing holds these bytes until the ref exists (item 6 of the review).
+    assert dry["safe_to_delete"] == []
+    assert dry["locks"][0]["ref"] == "would create"
+    assert dry["locks"][0]["action"].startswith("matches catalog")
     assert _git(repo, "for-each-ref", "refs/bathos/locks") == ""  # dry-run created nothing
 
     applied = lock_relocate(repo, cat, apply=True)
@@ -388,3 +391,77 @@ def test_lock_admin_error_is_registered():
 
     assert "LockAdminError" in EXCEPTION_TO_CODE
     assert lock_admin.LockAdminError.__name__ == "LockAdminError"
+
+
+def test_relocate_ref_conflict_is_never_safe_to_delete(repo, sample_run, tmp_path):
+    run = _lock(sample_run, repo, tmp_path, location="git")  # the ref holds the genuine blob
+    cat = _catalog_with(run, tmp_path)
+    forged = repo / _relpath()
+    forged.write_text("# a different body\n")  # untracked in-tree file, same name, other bytes
+    entry = lock_relocate(repo, cat, apply=True)["locks"][0]
+    assert entry["ref"] == "ref_conflict"
+    assert entry["action"] != "safe to delete"
+
+
+def test_relocate_with_non_hex_git_sha_writes_a_parentless_carrier(repo):
+    body = '[manifest]\ngit_sha = "--upload-pack=evil"\nrun_id = "abc"\n'
+    lock = repo / "scripts" / "x.bth.abc.bth.lock.toml"
+    lock.write_text(body)
+    lock_relocate(repo, None, apply=True)
+    assert _git(repo, "rev-list", "--count", "refs/bathos/locks/abc") == "1"
+
+
+def test_materialize_refuses_symlink_target(repo, sample_run, tmp_path):
+    _lock(sample_run, repo, tmp_path, location="git")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep")
+    (repo / _relpath()).symlink_to(outside)
+    with pytest.raises(LockAdminError):
+        lock_materialize(repo, _RUN_ID, apply=True)
+    assert outside.read_text() == "keep"
+
+
+def test_materialize_refuses_directory_and_escaping_parent(repo, sample_run, tmp_path):
+    _lock(sample_run, repo, tmp_path, location="git")
+    (repo / _relpath()).mkdir()
+    with pytest.raises(LockAdminError):
+        lock_materialize(repo, _RUN_ID, apply=True)
+    (repo / _relpath()).rmdir()
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (repo / "scripts").rename(tmp_path / "scripts_moved")
+    (repo / "scripts").symlink_to(outside)
+    with pytest.raises(LockAdminError) as ei:
+        lock_materialize(repo, _RUN_ID, apply=True)
+    assert "outside" in str(ei.value)
+    assert list(outside.iterdir()) == []
+
+
+def test_materialize_rejects_odd_run_ids(repo):
+    for bad in ("", "../x", "--all", "a b"):
+        with pytest.raises(LockAdminError) as ei:
+            lock_materialize(repo, bad)
+        assert ei.value.code is BathosErrorCode.INVALID_PARAM
+
+
+def test_git_timeout_and_oserror_are_shaped(repo, monkeypatch):
+    def boom(*_a, **_k):
+        raise subprocess.TimeoutExpired("git", 1)
+
+    monkeypatch.setattr(lock_admin.subprocess, "run", boom)
+    with pytest.raises(LockAdminError) as ei:
+        lock_untrack(repo)
+    assert ei.value.code is BathosErrorCode.INTERNAL
+
+    def nogit(*_a, **_k):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(lock_admin.subprocess, "run", nogit)
+    with pytest.raises(LockAdminError):
+        lock_untrack(repo)
+
+
+@pytest.mark.usefixtures("remote_pair")
+def test_push_output_carries_the_history_note(repo):
+    result = lock_push(repo)
+    assert "whole history" in result["note"]

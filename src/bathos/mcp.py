@@ -11,6 +11,7 @@ import dataclasses
 import functools
 import json
 import os
+import subprocess
 import sys
 import time
 import uuid
@@ -234,6 +235,26 @@ def require_write_token(fn):
                 "Missing or invalid MCP write token. Outside the stdio server (or with "
                 "BTH_MCP_REQUIRE_TOKEN=1), write-verb MCP tools require token= to match "
                 "the local ~/.bth/mcp_token file (debt #619, #2841)."
+            )
+        return await fn(*args, **kwargs)
+
+    return wrapper
+
+
+def require_write_token_when_applying(fn):
+    """Like :func:`require_write_token`, but only when the call has ``apply=True`` (spec 261026 P3).
+
+    A dry-run of ``bth lock untrack`` / ``relocate`` only reports, so it needs no token; the same call with
+    ``apply=True`` stages or writes, so it does. Same stdio exemption and error as ``require_write_token``.
+    """
+
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        if kwargs.get("apply") and token_required() and not check_token(kwargs.get("token", "")):
+            raise McpAuthError(
+                "Missing or invalid MCP write token for apply=True. Outside the stdio server (or with "
+                "BTH_MCP_REQUIRE_TOKEN=1), applying needs token= to match the local ~/.bth/mcp_token file "
+                "(debt #619, #2841). A dry-run (apply=False) needs no token."
             )
         return await fn(*args, **kwargs)
 
@@ -2806,6 +2827,8 @@ def _lock_call(project_root: str, fn, *args, **kwargs) -> dict:
         return fn(root, *args, **kwargs)
     except LockAdminError as e:
         return _lock_error(e)
+    except (OSError, subprocess.SubprocessError) as e:  # a git call that timed out or could not start
+        return _lock_error(LockAdminError(BathosErrorCode.INTERNAL, f"{type(e).__name__}: {e}"))
 
 
 @cisternal.tool(registry="bathos-cli", name="lock_materialize", cli_group="lock", cli_name="materialize")
@@ -2870,6 +2893,9 @@ def lock_untrack_tool(project_root: str = "", apply: bool = False) -> dict:
 def lock_push_tool(project_root: str = "", remote: str = "origin", apply: bool = False) -> dict:
     """Push refs/bathos/locks/* to a remote (explicit refspec). Dry-run unless --apply.
 
+    Each lock carrier's parent is the run's git_hash, so this also sends every commit reachable from those
+    hashes (their whole history), not just the lock blobs.
+
     Args:
         project_root: Repo to act in (empty = git toplevel of the current directory).
         remote: Git remote name.
@@ -2925,16 +2951,16 @@ async def mcp_lock_materialize_tool(
 
 @cisternal.tool(registry="bathos", name="lock_relocate")
 @traced_tool
-@require_write_token
+@require_write_token_when_applying
 async def mcp_lock_relocate_tool(
     project_root: str = "",
     catalog_dir: str = "",
     apply: bool = False,
-    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token_when_applying, not the tool body
 ) -> dict:
     """Classify in-tree locks and ensure each has its lock ref; never deletes (dry-run unless apply=True).
 
-    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
+    token= (~/.bth/mcp_token) is required only with apply=True, except over stdio (debt #619, #2841)."""
     return _lock_project_root_required(project_root) or lock_relocate_tool(
         project_root=project_root, catalog_dir=catalog_dir, apply=apply
     )
@@ -2942,15 +2968,15 @@ async def mcp_lock_relocate_tool(
 
 @cisternal.tool(registry="bathos", name="lock_untrack")
 @traced_tool
-@require_write_token
+@require_write_token_when_applying
 async def mcp_lock_untrack_tool(
     project_root: str = "",
     apply: bool = False,
-    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token_when_applying, not the tool body
 ) -> dict:
     """Untrack a tracked manifest.jsonl / .manifest.lock (git rm --cached); dry-run unless apply=True.
 
-    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
+    token= (~/.bth/mcp_token) is required only with apply=True, except over stdio (debt #619, #2841)."""
     return _lock_project_root_required(project_root) or lock_untrack_tool(
         project_root=project_root, apply=apply
     )
@@ -2965,7 +2991,7 @@ async def mcp_lock_push_tool(
     apply: bool = False,
     token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
-    """Push refs/bathos/locks/* to a remote (dry-run unless apply=True).
+    """Push refs/bathos/locks/* to a remote (dry-run unless apply=True); also sends the history reachable from them.
 
     Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
     return _lock_project_root_required(project_root) or lock_push_tool(

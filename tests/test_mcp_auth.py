@@ -85,8 +85,6 @@ WRITE_TOOLS = [
     mcp_blast_radius_assess_tool,
     mcp_blast_radius_clear_tool,
     mcp_lock_materialize_tool,
-    mcp_lock_relocate_tool,
-    mcp_lock_untrack_tool,
     mcp_lock_push_tool,
     mcp_lock_fetch_tool,
 ]
@@ -314,3 +312,24 @@ class TestStdioTransportIsExempt:
         )
         assert result["ok"] is False
         assert result["error_code"] == BathosErrorCode.AUTH_ERROR.value
+
+
+class TestLockToolsTokenOnlyWhenApplying:
+    """Spec 261026 P3: `lock untrack` / `lock relocate` need the write token only with apply=True;
+    materialize, push and fetch always do (they are in WRITE_TOOLS above)."""
+
+    @pytest.mark.parametrize("tool", [mcp_lock_untrack_tool, mcp_lock_relocate_tool], ids=lambda t: t.__name__)
+    def test_apply_without_token_is_rejected(self, tool, tmp_path):
+        result = asyncio.run(tool(project_root=str(tmp_path), apply=True))
+        assert result["ok"] is False
+        assert result["error_code"] == BathosErrorCode.AUTH_ERROR.value
+
+    @pytest.mark.parametrize("tool", [mcp_lock_untrack_tool, mcp_lock_relocate_tool], ids=lambda t: t.__name__)
+    def test_dry_run_without_token_is_not_auth_blocked(self, tool, tmp_path):
+        result = asyncio.run(tool(project_root=str(tmp_path)))
+        assert result.get("error_code") != BathosErrorCode.AUTH_ERROR.value
+
+    @pytest.mark.parametrize("tool", [mcp_lock_untrack_tool, mcp_lock_relocate_tool], ids=lambda t: t.__name__)
+    def test_apply_with_token_is_not_auth_blocked(self, tool, tmp_path):
+        result = asyncio.run(tool(project_root=str(tmp_path), apply=True, token=get_or_create_token()))
+        assert result.get("error_code") != BathosErrorCode.AUTH_ERROR.value
