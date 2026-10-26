@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import dataclasses
 import hashlib
 import json
 import logging
@@ -8,6 +9,8 @@ import math
 import os
 import re
 import tomllib
+import types
+import typing
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -320,6 +323,22 @@ class Sidecar:
     breakdown: BreakdownBlock | None = None
     result_schema_meta: dict[str, dict] = field(default_factory=dict)
 
+    @classmethod
+    def from_declaration(cls, decl: dict) -> Sidecar:
+        """Rebuild the whole parsed sidecar from the JSON-safe dict `run.started.data["sidecar"]`
+        carries (`dataclasses.asdict(sidecar)` after a JSON round trip; spec 261026 D3).
+
+        Tolerant of older declarations: a missing key takes the field default and an unknown key
+        is ignored, so a snapshot written before `[breakdown]` existed loads with
+        `breakdown=None`. Nested blocks, `OutcomeSpec` entries and `kind` are rehydrated into
+        their dataclass / enum types.
+        """
+        try:
+            defaults = {"kind": SidecarKind.EXPERIMENT, "result_schema": {}}
+            return _hydrate_dataclass(cls, {**defaults, **decl})
+        except (TypeError, ValueError) as e:
+            raise SidecarError(f"cannot rebuild a Sidecar from the declaration: {e}") from e
+
     # `builtins.property`: the class body has a dataclass field named `property` (the validation
     # kind's `property = "..."`), which shadows the bare decorator name here.
     @builtins.property
@@ -440,6 +459,58 @@ CANONICAL_STAGES = {
 
 # Epistemic class of a run (spec §3.1). Resolved once at run start by resolve_epistemic_class.
 EPISTEMIC_CLASSES = ("exploratory", "calibrating", "confirmatory", "legacy")
+
+
+def _hydrate(tp, value):
+    """Rebuild `value` (JSON-decoded) as the annotated type `tp`: dataclasses and enums are
+    reconstructed, `list` becomes `tuple` where annotated, everything else passes through."""
+    if value is None:
+        return None
+    origin = typing.get_origin(tp)
+    if origin in (typing.Union, types.UnionType):
+        args = [a for a in typing.get_args(tp) if a is not type(None)]
+        return _hydrate(args[0], value) if len(args) == 1 else value
+    if origin is dict:
+        args = typing.get_args(tp)
+        if len(args) == 2 and isinstance(value, dict):
+            # a null table entry (e.g. `outcomes = {"x": null}`) reads as an empty one
+            empty = {} if dataclasses.is_dataclass(args[1]) else None
+            return {
+                k: _hydrate(args[1], empty if v is None and empty is not None else v)
+                for k, v in value.items()
+            }
+        return value
+    if origin in (list, tuple):
+        args = typing.get_args(tp)
+        if not isinstance(value, (list, tuple)):
+            return value
+        items = [_hydrate(args[0], v) if args else v for v in value]
+        return tuple(items) if origin is tuple else items
+    if isinstance(tp, type):
+        if issubclass(tp, Enum):
+            return tp(value)
+        if dataclasses.is_dataclass(tp) and isinstance(value, dict):
+            return _hydrate_dataclass(tp, value)
+    return value
+
+
+def _hydrate_dataclass(cls, data: dict):
+    hints = typing.get_type_hints(cls)
+    kwargs = {}
+    for f in dataclasses.fields(cls):
+        if not f.init:
+            continue
+        if f.name in data:
+            kwargs[f.name] = _hydrate(hints[f.name], data[f.name])
+        elif (
+            f.default is dataclasses.MISSING
+            and f.default_factory is dataclasses.MISSING
+            and hints[f.name] is str
+        ):
+            # A required string the declaration never carried (e.g. an outcome with no
+            # `decision`): the old rebuild read these as "", and so does this one.
+            kwargs[f.name] = ""
+    return cls(**kwargs)
 
 
 def _str_list(value) -> list[str]:
