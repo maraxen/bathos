@@ -1375,6 +1375,125 @@ def check_ephemeral_output_paths(catalog_dir: Path) -> list[LintIssue]:
         return []
 
 
+# argv flags that name a directory a script writes into (output tiering spec 261023, section 9 row 10).
+RESUME_DIR_FLAGS = ("--resume-dir", "--out-dir")
+
+
+def _flag_values(argv: list[str]) -> list[tuple[str, str]]:
+    """``(flag, value)`` for every RESUME_DIR_FLAGS occurrence in ``argv``, both ``--flag v`` and ``--flag=v``."""
+    out: list[tuple[str, str]] = []
+    for i, tok in enumerate(argv):
+        for flag in RESUME_DIR_FLAGS:
+            if tok == flag and i + 1 < len(argv):
+                out.append((flag, argv[i + 1]))
+            elif tok.startswith(flag + "="):
+                out.append((flag, tok[len(flag) + 1 :]))
+    return out
+
+
+def _as_relpath(value: str, worktree_root: str | None) -> str:
+    """POSIX path of ``value`` relative to the run's worktree root when it is under it, else as given (lexical)."""
+    import os
+
+    if os.path.isabs(value):
+        if worktree_root:
+            rel = os.path.relpath(os.path.normpath(value), os.path.normpath(worktree_root))
+            if not rel.startswith(".."):
+                return Path(rel).as_posix()
+        return Path(os.path.normpath(value)).as_posix()
+    return Path(os.path.normpath(value)).as_posix()
+
+
+def _under(path: str, root: str) -> bool:
+    return path == root or path.startswith(root.rstrip("/") + "/")
+
+
+def _json_list(value: object) -> list:
+    import json
+
+    if value is None:
+        return []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return []
+    return list(value) if isinstance(value, list) else []
+
+
+def check_undeclared_resume_dirs(catalog_dir: Path, project_slug: str = "") -> list[LintIssue]:
+    """Flag runs whose argv passes ``--resume-dir`` / ``--out-dir`` a directory outside every declared root.
+
+    Reads only the run record (``argv``, the ``run.started`` sidecar declaration, ``adopted_outputs``), so it works
+    whether or not the directory still exists. A directory is covered when it lies under one of the run's declared
+    ``[outputs] roots``, or when ``bth outputs adopt`` recorded files under it. Anything else gets no reference hashes,
+    so ``bth cold`` cannot copy it and the worktree cannot be removed without losing it (the r6/r7 ``*_cells/``
+    case). A relative value is read against the run's worktree root. ``project_slug`` limits the check to that
+    project's runs (the catalog is commonly shared); empty checks every run.
+    """
+    if not catalog_readable(catalog_dir):
+        return []
+    try:
+        db = connect_read(catalog_dir, read_only=True)
+    except Exception:
+        return []
+    try:
+        where = "(" + " OR ".join(f"CAST(argv AS VARCHAR) LIKE '%{flag}%'" for flag in RESUME_DIR_FLAGS) + ")"
+        params: list[str] = []
+        if project_slug:
+            where += " AND project_slug = ?"
+            params.append(project_slug)
+        try:
+            rows = db.execute(
+                f"SELECT id, command, argv, adopted_outputs FROM runs WHERE {where} ORDER BY id", params
+            ).fetchall()
+        except duckdb.Error:  # a legacy warm catalog has no adopted_outputs column
+            rows = [
+                (rid, cmd, argv, None)
+                for rid, cmd, argv in db.execute(
+                    f"SELECT id, command, argv FROM runs WHERE {where} ORDER BY id", params
+                ).fetchall()
+            ]
+        started: dict[str, tuple[str | None, list]] = {}
+        with suppress(duckdb.Error):  # no events table before the run-log cut-over
+            for key, wroot, roots in db.execute(
+                "SELECT entity_key, worktree_root, json_extract(data, '$.sidecar.outputs.roots') "
+                "FROM events WHERE kind = 'run.started'"
+            ).fetchall():
+                ids = _json_list(key)
+                if ids:
+                    started[str(ids[0])] = (wroot, _json_list(roots))
+    finally:
+        db.close()
+
+    issues: list[LintIssue] = []
+    for run_id, command, argv, adopted in rows:
+        wroot, roots = started.get(run_id, (None, []))
+        declared = [_as_relpath(str(r), wroot) for r in roots]
+        adopted_rels = [str(e.get("relpath", "")) for e in _json_list(adopted) if isinstance(e, dict)]
+        for flag, value in _flag_values([str(t) for t in _json_list(argv)]):
+            rel = _as_relpath(value, wroot)
+            if any(_under(rel, r) for r in declared) or any(_under(a, rel) for a in adopted_rels if a):
+                continue
+            issues.append(
+                LintIssue(
+                    path=catalog_dir,
+                    directory="catalog",
+                    issue="undeclared_resume_dir",
+                    severity=IssueSeverity.WARNING,
+                    detail=(
+                        f"Run {run_id[:8]} ({(command or '')[:40]!r}) passed {flag} {value}, which is under no "
+                        "declared [outputs] root: its files get no reference hashes and bth cold cannot copy "
+                        "them. Declare the directory in the sidecar's [outputs] roots, or `bth outputs adopt` "
+                        "it for a run that predates the standard"
+                    ),
+                )
+            )
+            if len(issues) >= 50:
+                return issues
+    return issues
+
+
 def check_canonical_stage_names(catalog_dir: Path) -> list[LintIssue]:
     """ADVISORY: warn on non-canonical stage_name values in runs.
 

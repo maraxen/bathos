@@ -70,6 +70,7 @@ from bathos.runlog.fold_ledgers import (
     fold_submit,
     fold_trust_ledger,
 )
+from bathos.runlog.fold_output_copies import OUTPUT_COPY_KINDS, fold_output_copy
 from bathos.runlog.fold_runs import fold_run
 from bathos.runlog.index import (
     ARCHIVED_ITEMS_COLUMNS,
@@ -77,6 +78,7 @@ from bathos.runlog.index import (
     CAMPAIGN_EDGES_COLUMNS,
     CAMPAIGN_RUNS_COLUMNS,
     CAMPAIGNS_COLUMNS,
+    OUTPUT_COPIES_COLUMNS,
     RUN_EDGES_COLUMNS,
     RUNS_COLUMNS,
     SIDECAR_ANCHORS_COLUMNS,
@@ -101,6 +103,7 @@ _RUN_KINDS = frozenset(
         "run.reaped",
         "run.reap_reverted",
         "run.outputs_hashed",
+        "run.outputs_adopt_retracted",
         "run.postmortem_applied",
         "run.imported",
         "run_reap.imported",
@@ -132,6 +135,10 @@ _BLAST_RADIUS_KINDS = frozenset({"blast_radius.recorded", "blast_radius.imported
 _TRUST_LEDGER_KINDS = frozenset({"trust_ledger.recorded", "trust_ledger.imported"})
 _ARCHIVED_ITEM_KINDS = frozenset({"archived_item.recorded", "archived_item.imported"})
 _SUBMIT_KINDS = frozenset({"submit.recorded", "submit.imported"})
+# Output tiering (spec 261023, section 5.3): entity `[run_id, copy_id]`. Unlike the kinds above this one has NO
+# `*.imported` counterpart. It MUST be dispatched in `fold_roots_into`: that loop advances the watermark past a
+# kind it does not know, so an unwired kind would be stored in `events` and never folded.
+_OUTPUT_COPY_KINDS = OUTPUT_COPY_KINDS
 
 
 class IngestWalRemainsError(RunLogError):
@@ -966,6 +973,22 @@ def _refold_submit(
     _insert_row(con, "submits", SUBMITS_COLUMNS, folded)
 
 
+def _refold_output_copy(
+    con: duckdb.DuckDBPyConnection,
+    run_id: str,
+    copy_id: str,
+    lookup: _FoldLookup | None = None,
+) -> None:
+    """Refold one ``[run_id, copy_id]``: the live row and the renamed-aside rows its ``superseded`` events name."""
+    events = _resolve_lookup(con, lookup).events_for_entity_key([run_id, copy_id])
+    con.execute(
+        "DELETE FROM output_copies WHERE run_id = ? AND (copy_id = ? OR renamed_from = ?)",
+        [run_id, copy_id, copy_id],
+    )
+    for row in fold_output_copy(events):
+        _insert_row(con, "output_copies", OUTPUT_COPIES_COLUMNS, row)
+
+
 def _check_no_wal(tmp_path: Path) -> None:
     """AC-19: refuse the swap when a `.wal` remains after `close()`."""
     wal_path = tmp_path.with_name(tmp_path.name + ".wal")
@@ -1105,6 +1128,7 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
     affected_trust_ledger_ids: set[str] = set()
     affected_archived_item_ids: set[str] = set()
     affected_submit_ids: set[str] = set()
+    affected_output_copy_keys: set[tuple[str, str]] = set()
 
     con = duckdb.connect(str(db_path))
     in_txn = False
@@ -1185,6 +1209,8 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
                         affected_archived_item_ids.add(entity[0])
                     elif kind in _SUBMIT_KINDS and len(entity) == 1:
                         affected_submit_ids.add(entity[0])
+                    elif kind in _OUTPUT_COPY_KINDS and len(entity) == 2:
+                        affected_output_copy_keys.add((entity[0], entity[1]))
                 if new_offset != prev_offset:
                     watermarks[wm_key] = new_offset
                     _upsert_watermark(con, root_kind, root_id, seg.name, size, new_offset)
@@ -1216,6 +1242,7 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
             + [[t] for t in affected_trust_ledger_ids]
             + [[a] for a in affected_archived_item_ids]
             + [[s] for s in affected_submit_ids]
+            + [list(k) for k in affected_output_copy_keys]
         )
 
         # Shared across every refold in this batch (review finding, MEDIUM):
@@ -1242,6 +1269,8 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
                 _refold_archived_item(con, record_id, lookup=lookup)
             for submit_id in affected_submit_ids:
                 _refold_submit(con, submit_id, lookup=lookup)
+            for oc_run_id, oc_copy_id in affected_output_copy_keys:
+                _refold_output_copy(con, oc_run_id, oc_copy_id, lookup=lookup)
 
         con.execute("COMMIT")
         in_txn = False

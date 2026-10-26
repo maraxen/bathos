@@ -187,6 +187,88 @@ uv run python scripts/experiments/train.py --smoke --out /tmp/test.json
 bth run --output-paths outputs/run_abc.json -- uv run python scripts/experiments/train.py
 ```
 
+## Output Tiering: warm, cold and mirror copies of a run's files
+
+*(bathos main after the 0.13.0a7 tag (config from PR #130, complete with #138, 2026-10-25); the a7 release has none of it. Spec `.praxia/docs/specs/261023_output-tiering.md`. First used on the denxity r6/r7 outputs, 2026-10-25,
+run `84b7fae2`: 888 files, 4 runs, cold + mirror verified.)*
+
+A run's files live in its worktree, and the run record holds their sha256. Output tiering gives those files verified
+copies so the worktree can go: one zstd tar + manifest per run on a **cold** host, the same bytes on a **mirror**
+host, and a **warm** restore into a fresh local directory. The run record stays the source of truth for the hashes;
+every copy is checked against it.
+
+**1. Get a reference set.** A copy covers only the files in the run's reference hashes.
+
+- *New runs:* declare every file and directory the script writes in the sidecar. At run end bathos hashes everything
+  under the roots, uncapped:
+  ```toml
+  [outputs]
+  roots = ["outputs/validation/my_run.json", "outputs/validation/my_run_cells"]
+  ```
+  Declare resume and cell directories too. A `--resume-dir` outside every root is never hashed, and `bth lint` warns
+  about it (`undeclared_resume_dir`, below). A run that declares `[outputs]` is closed to `adopt`; fix a mistake with a
+  new run.
+- *Runs that predate the standard:* adopt the files their record does not cite. Paths already recorded with the same
+  bytes are skipped; different bytes refuse (`run_end_conflict`, re-run instead).
+  ```bash
+  bth outputs adopt <run> --root outputs/validation/r6_cells --reason "resume dir, not in output_paths" --dry-run
+  bth outputs adopt <run> --root outputs/validation/r6_cells --reason "resume dir, not in output_paths"
+  bth outputs adopt <run> --retract <eid> --reason "wrong root"     # withdraws an earlier adopt event
+  ```
+- `bth outputs hash <run>` re-hashes the live files against the reference set (`match` / `drift` / `missing`, per
+  file). Read-only.
+
+**2. Pick the hosts.** There are no default locations. The cold and mirror legs each resolve a myxcel profile name:
+`--profile` / `--mirror` > `$BTH_COLD_PROFILE` / `$BTH_MIRROR_PROFILE` > `[tool.bathos.outputs] cold_profile` /
+`mirror_profile` in the nearest `pyproject.toml` > `[outputs]` in `${XDG_CONFIG_HOME:-~/.config}/bathos/config.toml`
+> off (`no_cold_root`, naming every layer checked). `none` or empty at any layer turns the leg off. The profile's
+`~/.config/myxcel/<name>.toml` must set `host` and an absolute `cold_root`. **A host without SLURM** (titanix) also
+needs `cold_verify_ssh_max_bytes` set high, or every archive over 2 GiB comes back `unverifiable` forever.
+
+**3. Write the copies.**
+```bash
+bth cold <run> --profile engaging --mirror titanix --dry-run   # file list, bytes, destinations; writes nothing, no ssh
+bth cold <run> --profile engaging --mirror titanix
+bth cold --all-uncopied --profile engaging --mirror titanix    # current project: completed runs with no verified copy
+```
+Each leg builds the archive, checks every member against the reference set, uploads to a per-attempt partial name,
+commits without overwriting (`ln && rm`), and verifies. A final that already exists with different content is
+`archive_conflict`, never an overwrite. A rerun after an interruption resumes: an existing, matching pair is reused.
+`lock_held` after a crash: rerun with `--break-lock` (removes the lock only, never a partial or a final).
+`--clean-partials` removes this run's leftover `*.partial-*` files and needs myxcel's `cold ls` / `rm-partial`
+(myxcel #42); without them it refuses `myxcel_capability_gap` and the partials are named in the output instead.
+`bth outputs where <run>` lists the recorded copies and the config layer that chose each one.
+
+**4. Restore and re-verify.**
+```bash
+bth warm <run> --to ~/scratch/restore/r6        # <dir> must not exist; staged, hashed, then renamed into place
+bth verify --tier outputs --run-id <run> --strict
+```
+`warm` fetches from the first `verified` copy, checks both sha256s before opening the tar, requires the member set to
+equal the manifest, and hashes every file against the manifest and the reference set before publishing. `verify`
+re-reads each cold/mirror copy and checks cold and mirror agree; `--tier all` does **not** include `outputs` (it
+needs the network). Its CLI JSON nests the counts under `outputs_report` (`n_verified`, `n_failed`,
+`n_unverifiable`, per-run `verdict`).
+
+**The three states** (every copy, every check): `verified` — the bytes were re-read and matched; `failed` — read and
+did not match; `unverifiable` — could not be read (host down, SLURM path on a host without SLURM). `unverifiable`
+never turns into either of the others. `verify` exits 1 on any `failed`, and on `unverifiable` only with `--strict`.
+
+**Supersede, the rollback.** bathos never deletes a copy and never deletes warm files. To replace a bad or
+half-committed cold pair (`archive_conflict detail=half_committed`):
+```bash
+bth cold <run> --profile engaging --supersede --reason "half-committed after a crash"
+```
+It takes the remote lock, renames whichever final files exist to `run-<id>.superseded-<utc>.*` (still findable in
+`bth outputs where`), records `output_copy.superseded`, and lets a fresh `bth cold` write the pair again.
+
+**Branch on `error_code`, never on exit status.** Every refusal exits 1 with a JSON `error_code`: `no_reference_hashes`,
+`outputs_drifted`, `no_cold_root`, `archive_conflict`, `myxcel_capability_gap`, `lock_held`, `warm_target_exists`,
+`warm_mismatch`, `no_verified_copy`, `run_end_conflict`, `adopt_closed`, `root_outside_worktree`. Every command
+takes a unique run-id prefix. A migration of real outputs belongs in a tracked script + sidecar like any other
+finding (the r6/r7 one: denxity `scripts/validation/migrate_output_tiers_r6r7.py`, with a negative control and
+pre/post hashes of the originals).
+
 ## Sidecar Pre-Registration
 
 Every script in `scripts/experiments/` and `scripts/benchmarks/` should have a sidecar `.bth.toml` declaring hypothesis and expected outcomes.
@@ -505,6 +587,14 @@ Example:
 ```
 WARNING: Non-canonical stage_name 'pilot' in warm catalog (1 run). Consider renaming to one of: exploration, calibration, validation, ablation, production
 ```
+
+**`check_undeclared_resume_dirs`** (`undeclared_resume_dir`) — Flags this project's runs whose argv passed
+`--resume-dir` / `--out-dir` (either `--flag v` or `--flag=v`) a directory under none of the run's declared
+`[outputs] roots` and not adopted. Reads the run record only, so it fires whether or not the directory still exists.
+Such a directory has no reference hashes, so `bth cold` cannot copy it (see **Output Tiering**). Fix: add it to
+`[outputs] roots` for future runs; `bth outputs adopt` it for a run that predates the standard.
+
+Triggered by: `bth lint` (Tier-2 advisory; scoped to the current project's slug, capped at 50)
 
 ### Sprint Audit Signals
 
