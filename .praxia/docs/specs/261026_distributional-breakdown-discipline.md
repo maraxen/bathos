@@ -5,11 +5,11 @@ status: draft
 task_id: 261026_distributional-breakdown-debt
 date: '261026'
 backlog_ids: ''
-adversarial_review: 'cycles 1-8 done; v9 revision'
+adversarial_review: 'converged at cycle 9; v10'
 ---
 # Distributional breakdown, amendments and fork records for aggregate verdicts
 
-**v9** (after adversarial cycles 1-8; see §6). Debt #3045. Source postmortem: lathex
+**v10** (converged after adversarial cycles 1-9; see §6). Debt #3045. Source postmortem: lathex
 `postmortems/bathos-debt-distributional-breakdown.md` (commit a0b1f5a). Companion bug #3046
 (scaffold path) is fixed separately (commit 1ed684bb).
 
@@ -30,7 +30,7 @@ record of what was decided after a near-bound result, or why.
 User decision (261026): **WARNING everywhere; ERROR only where the run is cited (entry into a
 claim-bound campaign).** Internal validation runs stay unblocked.
 
-**Acceptance walk-through (78db9e04 under v9).** Before the run, `bth run` prints to stderr
+**Acceptance walk-through (78db9e04 under v10).** Before the run, `bth run` prints to stderr
 that `e_max_placement` and `e_max_iptm` gate outcomes with no `[breakdown]` (D2). Over MCP,
 the same advisories come back in the `run_tool` response's `warnings`. Had the author declared
 `[breakdown]` with `bound = 0.5`, the run would have recorded `e_max_placement__n_over = 1`
@@ -263,6 +263,13 @@ this function. It does **unique-prefix matching**, which the existing code does 
      `bth compact` and retry".
    - Claim-bound conclude is unaffected: `prepare_catalog_for_conclude` ingests before any
      gate, and an unresolved member fails closed (`SIDECAR_UNVERIFIABLE`).
+   - **Read tools now fold.** On a miss, `postmortem_get_tool` folds events into `index.db`.
+     That is derived data, swapped in atomically by ingest. The tool's "reads never write"
+     docstring (`mcp.py:3284`) is reworded: "never emits run events; may fold pending
+     events into the index".
+   - **One fold per operation.** `lookup_run` takes `ingest_state: dict | None`. A
+     validation's `run_lookup` partial and conclude's member loop pass one shared dict, so at
+     most one ingest runs per validation or conclude, however many ids miss.
 
    `metadata`, `sidecar_path` and `sidecar_sha256`, which the resolver and `near_bound` need,
    are present in every tier (index columns at `index.py:117-148`).
@@ -520,3 +527,11 @@ that log mode writes events only (`runner.py:1109-1126`) and read `_fold_pending
 (`campaigns.py:248-266`). v9 changes:
 - M1 the cool-object fallback cannot find log-mode runs (no fragment is written) → it is restricted to the warm and cool backends; the index backend does a one-shot `run_ingest` on a miss; the no-ingest residual is stated, with a `bth compact` hint in the errors; claim-bound conclude stays fail-closed; T7a tests rewritten.
 - m LIKE wildcards and empty prefix → escaped, non-empty.
+
+**Cycle 9**: challenger on v9: **converged**, with no blocking or major findings. It
+verified the `run_ingest` signature (`ingest.py:982`), the no-op guards (`:1011`), the flock
+(`:153-179`), the atomic generation swap (`:1055-1081`), fresh read-only attaches
+(`index.py:436-458`) and the empty-schema behaviour on a missing index. v10 polish from its
+advisories, with no further cycle needed:
+- the read-tool docstring is reworded because the tool can now fold;
+- one fold per validation or conclude, via a shared `ingest_state`.
