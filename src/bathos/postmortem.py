@@ -8,7 +8,7 @@ from pathlib import Path
 from bathos.git import capture_git_state
 from bathos.schema import Run
 from bathos.telemetry import event
-from bathos.walk import iter_project_files
+from bathos.walk import PRUNE_DIRS, iter_project_files
 
 
 @dataclass
@@ -423,6 +423,37 @@ def find_run_for_scaffold(run_id: str, catalog_dir: Path) -> tuple[str, str] | N
     return None
 
 
+def _script_from_command(command: str, workspace_root: Path) -> Path | None:
+    """The run's script, from its recorded command string, or None.
+
+    Only tokens inside the workspace and outside `PRUNE_DIRS` count, and a `.py` token
+    wins over any other existing file. Otherwise an absolute interpreter such as
+    `/abs/.venv/bin/python3` is taken for the script, and the postmortem lands in
+    `.venv/bin/` (EDQUOT on Engaging, debt #3046) where no walk can find it.
+    """
+    import shlex
+
+    root = Path(workspace_root).resolve()
+    candidates = []
+    for part in shlex.split(command) if command else []:
+        p = (root / part).resolve()
+        try:
+            rel = p.relative_to(root)
+        except ValueError:
+            continue
+        if PRUNE_DIRS.intersection(rel.parts):
+            continue
+        candidates.append(p)
+
+    for p in candidates:
+        if p.suffix == ".py":
+            return p
+    for p in candidates:
+        if p.is_file():
+            return p
+    return None
+
+
 def scaffold_postmortem_template(command: str, run_id: str, workspace_root: Path) -> Path:
     """Resolve the script path from a run's command string and write a draft postmortem TOML.
 
@@ -431,24 +462,15 @@ def scaffold_postmortem_template(command: str, run_id: str, workspace_root: Path
 
     Returns the path to the written template.
     """
-    import shlex
-
-    parts = shlex.split(command) if command else []
-    script_path = None
-    for part in parts:
-        p = Path(part)
-        if p.suffix == ".py":
-            script_path = workspace_root / p
-            break
-        if (workspace_root / p).is_file():
-            script_path = workspace_root / p
-            break
-
+    script_path = _script_from_command(command, workspace_root)
     if script_path is None:
-        script_path = workspace_root / "run.py"
-
-    script_path.parent.mkdir(parents=True, exist_ok=True)
-    postmortem_path = script_path.parent / f"{script_path.name}.{run_id}.bth.postmortem.toml"
+        # Same home as campaign postmortems; `find_postmortem` walks `.bth/`.
+        pm_dir = Path(workspace_root) / ".bth" / "postmortems"
+        pm_dir.mkdir(parents=True, exist_ok=True)
+        postmortem_path = pm_dir / f"run_{run_id}.bth.postmortem.toml"
+    else:
+        script_path.parent.mkdir(parents=True, exist_ok=True)
+        postmortem_path = script_path.parent / f"{script_path.name}.{run_id}.bth.postmortem.toml"
 
     toml_content = f"""run_id = "{run_id}"
 
