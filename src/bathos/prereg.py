@@ -459,17 +459,46 @@ def verify_run_manifest(run: Run) -> bool:
         responsible for the "loud" part; this function only answers the yes/no question).
         True iff the manifest file exists and its hash matches exactly.
     """
+    return verify_run_manifest_detail(run).ok
+
+
+@dataclass(frozen=True)
+class ManifestVerification:
+    """Why :func:`verify_run_manifest` answered as it did.
+
+    ``reason``: ``ok``, ``no_manifest_recorded``, ``hash_mismatch``, ``lock_unlocatable`` (no repo or file could be
+    found to look in) or ``lock_not_found`` (a repo was found but holds neither the file nor the lock ref).
+    """
+
+    ok: bool
+    reason: str
+    source: str = ""
+
+
+def verify_run_manifest_detail(run: Run) -> ManifestVerification:
+    """:func:`verify_run_manifest` with the reason, over the three forms of ``run.manifest_path``.
+
+    A ``git:`` URI, a plain existing path, or a plain missing path whose lock ref still holds the blob (a record
+    relocated by ``bth lock relocate``). See :func:`bathos.lock_ref.locate_lock_bytes`. The hash is taken over
+    the bytes read (``cat-file blob`` for refs), so it equals ``run.manifest_sha256`` iff the body is unchanged.
+    **Limit:** a record synced from another host whose ``sidecar_path`` does not exist here, or a worktree outside
+    the repo whose directory was removed, is unverifiable (``lock_unlocatable``) until ``bth lock fetch`` runs in
+    a local clone and the path exists.
+    """
+    from bathos.lock_ref import locate_lock_bytes
+
     if not run.manifest_sha256 or not run.manifest_path:
-        return False
-    manifest_file = Path(run.manifest_path)
+        return ManifestVerification(False, "no_manifest_recorded")
     try:
-        if not manifest_file.exists():
-            return False
-        actual_sha256 = hashlib.sha256(manifest_file.read_bytes()).hexdigest()
-    except OSError as e:
-        logger.warning(f"Manifest verification failed to read {manifest_file}: {e}")
-        return False
-    return actual_sha256 == run.manifest_sha256
+        lookup = locate_lock_bytes(run.manifest_path, run.id, run.sidecar_path or "")
+    except (OSError, ValueError) as e:
+        logger.warning(f"Manifest verification failed to read {run.manifest_path}: {e}")
+        return ManifestVerification(False, "lock_unlocatable")
+    if lookup.data is None:
+        return ManifestVerification(False, lookup.reason)
+    if hashlib.sha256(lookup.data).hexdigest() != run.manifest_sha256:
+        return ManifestVerification(False, "hash_mismatch", lookup.source)
+    return ManifestVerification(True, "ok", lookup.source)
 
 
 def gate_check(

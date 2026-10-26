@@ -167,21 +167,107 @@ def write_lock_ref(
     )
 
 
-def read_lock_bytes(manifest_path: str, run_id: str | None = None) -> bytes:
-    """Bytes of a lock named by a ``git:`` URI or a plain path. ``cat-file blob``, never text-mode ``show``."""
+def _cat_blob(git_dir: Path, ref: str, relpath: str) -> bytes | None:
+    proc = _git("--git-dir", str(git_dir), "cat-file", "blob", f"{ref}:{relpath}", cwd=Path.cwd())
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def _repo_near(path: Path) -> tuple[Path, Path] | None:
+    """``(common_dir, toplevel)`` of the repo holding the nearest EXISTING ancestor of ``path``, else None."""
+    probe = path
+    while not probe.exists():
+        if probe.parent == probe:
+            return None
+        probe = probe.parent
+    if probe.is_file():
+        probe = probe.parent
+    try:
+        top = _git("rev-parse", "--show-toplevel", cwd=probe)
+    except OSError:
+        return None
+    if top.returncode != 0 or not top.stdout.strip():
+        return None
+    root = Path(top.stdout.decode().strip())
+    try:
+        return _common_dir(root), root
+    except (LockRefError, OSError):
+        return None
+
+
+@dataclass(frozen=True)
+class LockLookup:
+    """Result of locating a run's lock: its bytes, or why none was found.
+
+    ``reason`` is ``ok``, ``lock_unlocatable`` (no repo could be found to look in) or ``lock_not_found``
+    (a repo was found but holds neither the file nor the ref).
+    """
+
+    data: bytes | None
+    reason: str
+    source: str = ""
+
+
+def locate_lock_bytes(
+    manifest_path: str, run_id: str | None = None, sidecar_path: str = ""
+) -> LockLookup:
+    """Find a run's lock in any of the three forms of ``manifest_path`` (spec 261026 P4).
+
+    1. ``git:`` URI: read from its common dir; if that dir is absent here (a record synced from another host) or
+       lacks the ref, retry ``refs/bathos/locks/<run_id>:<relpath from the URI>`` in the repo holding the nearest
+       existing ancestor of ``sidecar_path`` (``Run`` has no script path, B15).
+    2. A plain path that exists: read it.
+    3. A plain path that is missing: locate the repo from the nearest existing ancestor of the path and try
+       ``refs/bathos/locks/<run_id>:<path relative to that repo's root>``. This verifies records relocated by
+       ``bth lock relocate`` after their files are deleted.
+    """
     if manifest_path.startswith(URI_SCHEME):
         common, ref, relpath = parse_lock_uri(manifest_path, run_id)
-        proc = _git(
-            "--git-dir", str(common), "cat-file", "blob", f"{ref}:{relpath}", cwd=Path.cwd()
-        )
-        if proc.returncode != 0:
-            raise FileNotFoundError(
-                f"{manifest_path}: {proc.stderr.decode(errors='replace').strip()}"
-            )
-        return proc.stdout
-    return Path(manifest_path).read_bytes()
+        if common.is_dir():
+            data = _cat_blob(common, ref, relpath)
+            if data is not None:
+                return LockLookup(data, "ok", f"uri:{common}")
+        found = _repo_near(Path(sidecar_path)) if sidecar_path else None
+        if found is None:
+            return LockLookup(None, "lock_not_found" if common.is_dir() else "lock_unlocatable")
+        data = _cat_blob(found[0], ref, relpath)
+        if data is None:
+            return LockLookup(None, "lock_not_found")
+        return LockLookup(data, "ok", f"sidecar-repo:{found[0]}")
+
+    path = Path(manifest_path)
+    try:
+        if path.is_file():
+            return LockLookup(path.read_bytes(), "ok", f"file:{path}")
+    except OSError:
+        pass
+    found = _repo_near(path)
+    if found is None or run_id is None:
+        return LockLookup(None, "lock_unlocatable")
+    common, root = found
+    probe = path
+    while not probe.exists() and probe.parent != probe:
+        probe = probe.parent
+    try:
+        rel = (probe.resolve() / path.relative_to(probe)).relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return LockLookup(None, "lock_unlocatable")
+    data = _cat_blob(common, lock_ref_name(run_id), rel)
+    if data is None:
+        return LockLookup(None, "lock_not_found")
+    return LockLookup(data, "ok", f"relocated:{common}")
 
 
-def read_lock_text(manifest_path: str, run_id: str | None = None) -> str:
-    """The single text resolver for ``run.manifest_path`` in either form (``git:`` URI or plain path)."""
-    return read_lock_bytes(manifest_path, run_id).decode("utf-8")
+def read_lock_bytes(manifest_path: str, run_id: str | None = None, sidecar_path: str = "") -> bytes:
+    """Bytes of a lock named by ``run.manifest_path`` in any form (see :func:`locate_lock_bytes`).
+
+    Uses ``cat-file blob``, never text-mode ``show``. Raises ``FileNotFoundError`` when it cannot be found.
+    """
+    lookup = locate_lock_bytes(manifest_path, run_id, sidecar_path)
+    if lookup.data is None:
+        raise FileNotFoundError(f"{manifest_path}: {lookup.reason}")
+    return lookup.data
+
+
+def read_lock_text(manifest_path: str, run_id: str | None = None, sidecar_path: str = "") -> str:
+    """The single text resolver for ``run.manifest_path`` in any form (``git:`` URI or plain path)."""
+    return read_lock_bytes(manifest_path, run_id, sidecar_path).decode("utf-8")
