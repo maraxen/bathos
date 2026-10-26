@@ -231,12 +231,25 @@ def test_malformed_bth_toml_without_provenance_still_fails(tmp_path, catalog):
         _resolve(tmp_path, catalog)
 
 
-def test_unknown_key_and_wrong_types_fail(tmp_path, catalog):
+def test_other_provenance_keys_are_ignored_not_rejected(tmp_path, catalog):
+    """`track_packages` (dependency provenance) lives in the same `[provenance]` table; the lock resolver must
+    leave it alone, whether it is alone or beside lock keys, in every file layer."""
+    cfg = _write(tmp_path / ".bth.toml", '[provenance]\ntrack_packages = ["aminx"]\n')
+    s = _resolve(tmp_path, catalog)
+    assert (s.lock_location, s.ignore_outputs) == ("git", False)
+
+    _write(cfg, '[provenance]\ntrack_packages = ["aminx"]\nlock_location = "tree"\nsome_future_key = 1\n')
+    s = _resolve(tmp_path, catalog)
+    assert s.lock_location == "tree"
+
+    _write(tmp_path / "pyproject.toml", '[tool.bathos.provenance]\ntrack_packages = ["x"]\n')
+    _user_config(tmp_path, '[provenance]\ntrack_packages = ["y"]\nignore_outputs = true\n')
+    assert _resolve(tmp_path, catalog).ignore_outputs is True
+
+
+def test_wrong_value_types_still_fail(tmp_path, catalog):
     cfg = tmp_path / ".bth.toml"
-    _write(cfg, '[provenance]\nlock_locaton = "git"\n')
-    with pytest.raises(LockConfigError, match="unknown"):
-        _resolve(tmp_path, catalog)
-    _write(cfg, '[provenance]\nignore_outputs = "yes"\n')
+    _write(cfg, "[provenance]\nignore_outputs = \"yes\"\n")
     with pytest.raises(LockConfigError, match="ignore_outputs"):
         _resolve(tmp_path, catalog)
     _write(cfg, "[provenance]\nlock_dir = 3\n")
@@ -245,6 +258,28 @@ def test_unknown_key_and_wrong_types_fail(tmp_path, catalog):
     _write(cfg, 'provenance = "x"\n')
     with pytest.raises(LockConfigError, match="table"):
         _resolve(tmp_path, catalog)
+
+
+@pytest.mark.parametrize("where", ["pyproject", "user"])
+def test_malformed_lower_file_fails_even_when_higher_layer_decides(tmp_path, catalog, where):
+    """Spec P1: a malformed file at ANY layer raises, not only a consulted one."""
+    _write(
+        tmp_path / ".bth.toml",
+        '[provenance]\nlock_location = "git"\nlock_dir = "none"\nignore_outputs = false\n',
+    )
+    bad = "[provenance\nlock_location = "
+    path = (
+        _write(tmp_path / "pyproject.toml", bad) if where == "pyproject" else _user_config(tmp_path, bad)
+    )
+    with pytest.raises(LockConfigError, match="cannot read") as ei:
+        _resolve(tmp_path, catalog)
+    assert str(path) in str(ei.value)
+
+
+def test_explicit_args_do_not_skip_malformed_file_detection(tmp_path, catalog):
+    _write(tmp_path / ".bth.toml", "= broken")
+    with pytest.raises(LockConfigError):
+        _resolve(tmp_path, catalog, lock_location="git", lock_dir="none", ignore_outputs=False)
 
 
 # -- repo selection (P0) ---------------------------------------------------------------------------

@@ -124,17 +124,29 @@ def test_one_warning_per_unignorable_path(tmp_path: Path, monkeypatch, capsys):
     assert "/outputs/provenance/" not in err
 
 
-def test_invalid_ignore_outputs_env_fails_loudly(tmp_path: Path, monkeypatch):
-    """Not swallowed by the best-effort pin block: a bad setting must stop the run."""
-    from bathos.lock_config import LockConfigError
+@pytest.mark.parametrize(
+    ("var", "value"), [("BTH_IGNORE_OUTPUTS", "maybe"), ("BTH_LOCK_LOCATION", "elsewhere")]
+)
+def test_invalid_lock_setting_fails_the_run_before_anything_is_recorded(
+    tmp_path: Path, monkeypatch, capsys, var, value
+):
+    """Not swallowed by the best-effort pin block, and not raised after `run.start`: a bad setting stops the
+    run up front, so no run record or event exists for it."""
+    from bathos.catalog import read_runs
 
-    monkeypatch.setenv("BTH_IGNORE_OUTPUTS", "maybe")
+    monkeypatch.setenv(var, value)
     repo = tmp_path / "repo"
     repo.mkdir()
     script = _repo(repo)
+    catalog = tmp_path / "cat"
+    events: list[str] = []
+    monkeypatch.setattr(runner, "event", lambda name, **_k: events.append(name))
 
-    with pytest.raises(LockConfigError):
-        _run(script, repo, tmp_path / "cat")
+    assert _run(script, repo, catalog) == 1
+
+    assert var in capsys.readouterr().err
+    assert read_runs(catalog) == []
+    assert "run.start" not in events and "run.lock_written" not in events
 
 
 # -- run-time warnings about legacy in-tree bookkeeping (spec 261026 P3) -------------------------

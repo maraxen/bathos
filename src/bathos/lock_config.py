@@ -19,8 +19,9 @@ Spec ``261026_provenance-out-of-working-tree``. Two independent pieces, both pur
   6. the defaults ``"git"``, ``<catalog_dir>/locks``, ``False``.
 
   ``resolve_flag`` swallows a malformed config to False (B10), which is wrong for a setting that decides where
-  provenance lands, so nothing here is swallowed: a consulted file that cannot be parsed, an unknown key, a wrong
-  type or an invalid value raises :class:`LockConfigError`. ``lock_dir`` of ``none`` or empty disables the
+  provenance lands, so nothing here is swallowed: a file that cannot be parsed (every layer's file is read up front,
+  whether or not a higher layer decides), a wrong type or an invalid value of a lock key raises. Other keys in the
+  shared ``[provenance]`` table (``track_packages``, ...) are ignored :class:`LockConfigError`. ``lock_dir`` of ``none`` or empty disables the
   fallback directory at any layer, and that decision is final. Every resolution reports the layer that decided each
   key, for the ``run.lock_written`` event.
 """
@@ -95,17 +96,16 @@ def _nearest_pyproject(start: Path) -> Path | None:
 def _provenance_table(table: object, where: str) -> dict:
     if not isinstance(table, dict):
         raise LockConfigError(f"{where} must be a table")
-    unknown = sorted(set(table) - set(_KEYS))
-    if unknown:
-        raise LockConfigError(f"{where} has unknown key(s) {unknown}; supported: {list(_KEYS)}")
+    # Other features share this table (`track_packages`, ...), so keys outside the three lock keys are ignored here,
+    # not rejected: only an invalid VALUE of a lock key raises (in `_convert`).
     return table
 
 
 def _file_layers(cwd: Path) -> list[tuple[str, Path, Callable[[], dict | None]]]:
-    """The three file layers, highest first, each a (label, base dir, lazy table loader).
+    """The three file layers, highest first, each a (label, base dir, table loader).
 
-    Lazy so a lower file that no higher layer made necessary is never opened. A file that IS opened and cannot be
-    parsed raises even when it holds no provenance table: a broken config is a broken config.
+    The caller loads every layer up front, so a file that cannot be parsed raises even when a higher layer decides
+    all three keys, and even when it holds no provenance table: a broken config is a broken config.
     """
     layers: list[tuple[str, Path, Callable[[], dict | None]]] = []
 
@@ -215,7 +215,8 @@ def resolve_lock_settings(
         "ignore_outputs": ignore_outputs,
     }
     file_layers = _file_layers(base_cwd)
-    tables: dict[int, dict | None] = {}
+    # Eager: a malformed file at ANY layer raises, even when a higher layer would decide every key (spec P1).
+    tables: dict[int, dict | None] = {i: load() for i, (_label, _base, load) in enumerate(file_layers)}
 
     values: dict[str, object] = {}
     layers: dict[str, str] = {}
@@ -237,9 +238,7 @@ def resolve_lock_settings(
                 " (disabled)" if key == "lock_dir" and values[key] is None else ""
             )
             continue
-        for index, (label, base, load) in enumerate(file_layers):
-            if index not in tables:
-                tables[index] = load()
+        for index, (label, base, _load) in enumerate(file_layers):
             table = tables[index]
             if table is not None and key in table:
                 values[key] = _convert(key, table[key], f"{label} {key}", base)

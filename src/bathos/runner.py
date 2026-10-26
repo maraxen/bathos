@@ -25,7 +25,7 @@ from bathos.git_pin import (
     pin_run,
 )
 from bathos.git_pin import repo_root as git_repo_root
-from bathos.lock_config import resolve_lock_settings, select_lock_repo
+from bathos.lock_config import LockConfigError, resolve_lock_settings, select_lock_repo
 from bathos.lock_ref import write_lock_ref
 from bathos.prereg import (
     GateErrorCode,
@@ -945,6 +945,15 @@ def _run_script_impl(
     component_sidecar_sha256: str | None = None,
     seed: int | None = None,
 ) -> int:
+    # Resolve the lock/ignore settings FIRST, before any run record or event is written: a malformed config or an
+    # invalid BTH_LOCK_LOCATION / BTH_IGNORE_OUTPUTS must fail the run cleanly, not leave a started run with no
+    # terminal record (spec 261026 P1). Never swallowed with the best-effort pin errors below.
+    try:
+        lock_settings = resolve_lock_settings(cwd=cwd, catalog_dir=catalog_dir)
+    except LockConfigError as e:
+        print(f"Error: invalid provenance configuration: {e}", file=sys.stderr)
+        return 1
+
     # Resolve --campaign up front (fail fast, before running the subprocess) and
     # store the full UUID — never the raw prefix — on the run record.
     resolved_campaign_id: str | None = None
@@ -1310,9 +1319,6 @@ def _run_script_impl(
     # dirty tree the ref points at a snapshot of what actually ran.
     #
     # Best-effort by construction: provenance capture must never be able to fail a run.
-    # Resolved OUTSIDE the best-effort block below: a malformed or invalid lock/ignore setting must
-    # stop the run (LockConfigError), not be swallowed with the pin errors.
-    lock_settings = resolve_lock_settings(cwd=cwd, catalog_dir=catalog_dir)
     pin = None
     try:
         # Declared, load-bearing paths. bathos cannot discover UNdeclared inputs, but it can refuse
