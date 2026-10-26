@@ -67,7 +67,7 @@ The design must keep all three working.
 
 | # | Assumption | Tag | Evidence |
 |---|---|---|---|
-| B1 | Consumers: `prereg.verify_run_manifest` (live caller in xtrax); praxia G19 (committed lock at rev); praxia G31 (committed lock at `--head` **and** on-disk `manifest.jsonl` per worktree root); `blast_radius` (path text); `cite.py:25,36,50` and `index.py:145` (path text); cisternal `tree_manifest.py:58-73` exempts untracked locks on no-`.git` hosts (harmless: those hosts use the fallback dir) | verified | as cited; G31 `:65,181-189` read by orchestrator |
+| B1 | Consumers: `prereg.verify_run_manifest` (live caller in xtrax); praxia G19 (committed lock at rev); praxia G31 (committed lock at `--head` **and** on-disk `manifest.jsonl` per worktree root); `blast_radius` (path text); `cite.py:25,36,50` and `index.py:145` only display or store `manifest_path` and never read the manifest (corrected after implementation); cisternal `tree_manifest.py:58-73` exempts untracked locks on no-`.git` hosts (harmless: those hosts use the fallback dir) | verified | as cited; G31 `:65,181-189` read by orchestrator |
 | B2 | cisternal `update_ref` verifies `ref^{commit}` and returns False for a non-commit, after writing the ref | verified | `durable.py:238-241,249` |
 | B3 | Every lock-body field except `written_at` is already in the run record | verified | `runner.py:557-568` |
 | B4 | `ensure_manifest_ignored` returns early when the manifest is already ignored, before writing any other line; `MANIFEST_GITIGNORE_LINES` is shared with `init.py:39` | verified | `git_pin.py:161-162` |
@@ -268,9 +268,9 @@ worktree outside the repo whose directory was removed, is unverifiable until `bt
 runs in a local clone and the path exists. Tests cover a `git:` URI with a missing common dir
 located via the `sidecar_path` ancestor, and the unlocatable case.
 
-`blast_radius` "manifest text", `cite.py` and `index.py` go through one
-`read_lock_text(manifest_path)` resolver. Tests cover the `git:` form so no match source is
-silently dropped.
+`blast_radius` "manifest text" goes through one `read_lock_text(manifest_path)` resolver.
+`cite.py` and `index.py` only display or store `manifest_path`, so they need no resolver. Tests
+cover the `git:` form so no match source is silently dropped.
 
 ### P5. Honest scope statement (goes into the CHANGELOG)
 
