@@ -29,6 +29,7 @@ from bathos.authoring.models import ClaimPayload
 from bathos.blast_radius import _UNBOUNDED_SCAN_LIMIT
 from bathos.campaigns import (
     CAMPAIGN_MODES,
+    BreakdownRefused,
     CampaignError,
     add_run_to_campaign,
     conclude_campaign,
@@ -116,6 +117,17 @@ def _shape_error(tool_name: str, code: BathosErrorCode, exc: BaseException) -> d
     }
 
 
+def _breakdown_refusal_result(exc: BreakdownRefused) -> dict:
+    """Error envelope for a tool that catches `BreakdownRefused` itself: the specific code
+    (breakdown_missing / sidecar_unverifiable / fork_record_missing), never the generic one."""
+    return {
+        "ok": False,
+        "error": str(exc),
+        "error_code": exc.code.value,
+        "resolution_hint": RESOLUTION_HINTS.get(exc.code, ""),
+    }
+
+
 def traced_tool(fn):
     """Wrap a FastMCP tool function to catch and shape all exceptions into structured envelopes.
 
@@ -185,6 +197,8 @@ def traced_tool(fn):
             return _shape_error(tool_name, BathosErrorCode.INTERNAL, e)
         except CatalogError as e:
             return _shape_error(tool_name, BathosErrorCode.CATALOG_ERROR, e)
+        except BreakdownRefused as e:
+            return _shape_error(tool_name, e.code, e)
         except CampaignError as e:
             return _shape_error(tool_name, BathosErrorCode.CAMPAIGN_ERROR, e)
         except SidecarError as e:
@@ -2273,6 +2287,8 @@ def campaign_conclude_tool(
                 "campaign_id": campaign_id,
                 "outcome_label": outcome_label,
             }
+        except BreakdownRefused as e:
+            return _breakdown_refusal_result(e)
         except CampaignError as e:
             return {"error": str(e)}
         finally:
@@ -3556,6 +3572,8 @@ def _claim_register_sync(
                 "force": force,
                 "message": f"Registered claim for campaign {campaign_id}",
             }
+        except BreakdownRefused as e:
+            return _breakdown_refusal_result(e)
         except (RuntimeError, FileNotFoundError) as e:
             return {"ok": False, "error": str(e), "error_code": "register_failed"}
         finally:
@@ -4713,6 +4731,8 @@ def campaign_add_tool(
                 "campaign_id": campaign_id,
                 "message": f"Added run {run_id} to campaign {campaign_id}",
             }
+        except BreakdownRefused as e:
+            return _breakdown_refusal_result(e)
         except CampaignError as e:
             return {"ok": False, "error": str(e)}
         finally:

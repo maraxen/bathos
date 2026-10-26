@@ -24,6 +24,19 @@ class CampaignError(Exception):
     pass
 
 
+class BreakdownRefused(CampaignError, RuntimeError):  # noqa: N818 -- spec 261026 D3 name
+    """A run cited by a claim-bound campaign failed the breakdown gate (spec 261026 D3).
+
+    `.code` is a `BathosErrorCode`: BREAKDOWN_MISSING, SIDECAR_UNVERIFIABLE or
+    FORK_RECORD_MISSING. A `RuntimeError` too, so `register_claim`'s callers that catch
+    `RuntimeError` still see it; catch it first where the specific code matters.
+    """
+
+    def __init__(self, code, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 @dataclass
 class Campaign:
     id: str
@@ -498,6 +511,14 @@ def _add_run_to_campaign_impl(
     if not campaign_rows:
         raise CampaignError(f"Campaign not found: {campaign_id}")
     campaign_mode, campaign_started_at, campaign_threshold = campaign_rows[0]
+    # A catalog from before claim registration has no claim_path column: nothing is claim-bound.
+    try:
+        claim_row = db.execute(
+            "SELECT claim_path FROM campaigns WHERE id = ?", [campaign_id]
+        ).fetchone()
+    except duckdb.Error:
+        claim_row = None
+    campaign_claim_path = claim_row[0] if claim_row else None
 
     run_rows = db.execute(
         "SELECT timestamp, outcome, sidecar_path FROM runs WHERE id = ?", [run_id]
@@ -511,6 +532,26 @@ def _add_run_to_campaign_impl(
             )
         raise CampaignError(f"Run not found: {run_id}")
     run_timestamp, run_outcome, run_sidecar_path = run_rows[0]
+
+    # Spec 261026 D3: a run entering a claim-bound campaign (claim_path IS NOT NULL) must have
+    # declared [breakdown] for the worst-case aggregates its verdict reads. Refused before
+    # `threshold_set` below so a refused add leaves no trace.
+    if campaign_claim_path:
+        from pathlib import Path as _Path  # `Path` is rebound locally further down this function
+
+        from bathos.breakdown_gate import check_runs, fetch_member_runs, refuse_on_findings
+        from bathos.workspace import resolve_workspace
+
+        gate_root = resolve_workspace(cwd or _Path.cwd()).fs_root
+        refuse_on_findings(
+            check_runs(
+                fetch_member_runs(db, [run_id], catalog_dir),
+                gate_root,
+                db=db,
+                log_mode=log_mode,
+            ),
+            f"Cannot add run {run_id[:8]} to claim-bound campaign {campaign_id[:8]}",
+        )
 
     # Enforce temporal ordering for confirmation campaigns
     if campaign_mode == "confirmation":
@@ -1226,6 +1267,31 @@ def _conclude_campaign_impl(
                 f"Cannot conclude campaign {full_id[:8]}: empty membership with a registered claim"
             )
         precomputed_member_ids = members
+
+        # Spec 261026 D3 breakdown gate: every claim-bound member's run-time sidecar must cover the
+        # worst-case aggregates its verdict reads. Confirmation/sequential campaigns RAISE (a
+        # deliberate departure from the downgrade-to-confounded style of the gates below, per the
+        # user's decision) and `force_verdict` does not bypass; exploration only warns. Placed
+        # before any outcome mutation and outside any `try`.
+        from bathos.breakdown_gate import (
+            check_runs,
+            fetch_member_runs,
+            format_findings,
+            refuse_on_findings,
+        )
+
+        gate_findings = check_runs(
+            fetch_member_runs(db, members, catalog_dir),
+            workspace_root,
+            db=db,
+            log_mode=_log_mode(catalog_dir),
+        )
+        if gate_findings:
+            gate_where = f"Cannot conclude claim-bound campaign {full_id[:8]}"
+            if campaign_mode == "exploration":
+                print(f"WARNING: {format_findings(gate_findings, gate_where)}")
+            else:
+                refuse_on_findings(gate_findings, gate_where)
 
         # BP-3: negative-claim backing check (opt-in via claim registration, same as Union Gate)
         if (

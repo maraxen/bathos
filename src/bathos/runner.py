@@ -12,6 +12,7 @@ import time
 import tomllib
 from contextlib import suppress
 from pathlib import Path
+from types import SimpleNamespace
 
 import duckdb
 
@@ -60,6 +61,26 @@ from bathos.sidecar import (
 from bathos.telemetry import event, init_telemetry, run_advisories_var, run_uuid_var
 
 logger = logging.getLogger(__name__)
+
+
+def _campaign_is_claim_bound(catalog_dir: Path, campaign_id: str) -> bool:
+    """Is the campaign claim-bound (`claim_path IS NOT NULL`)? A read that fails answers False:
+    the gate then stays advisory rather than refusing on a catalog it could not read."""
+    from bathos.campaigns import get_campaign
+    from bathos.index import connect_read
+
+    db = None
+    try:
+        if (catalog_dir / "bathos.db").exists():
+            db = connect_read(catalog_dir, read_only=True)
+        campaign = get_campaign(db, campaign_id, catalog_dir=catalog_dir)
+        return bool(campaign and campaign.claim_path)
+    except Exception as e:  # noqa: BLE001 -- see docstring
+        logger.warning(f"could not read the claim binding of campaign {campaign_id}: {e}")
+        return False
+    finally:
+        if db is not None:
+            db.close()
 
 
 def _advise(code: str, message: str, **fields: object) -> None:
@@ -888,6 +909,37 @@ def _run_script_impl(
             message = uncovered_aggregate_message(uncovered)
             event("run.aggregate_uncovered", column=uncovered.column, sources=uncovered.sources)
             _advise("aggregate_uncovered", message, column=uncovered.column)
+        # Spec 261026 D3: `bth run --campaign` into a claim-bound campaign refuses before compute
+        # is spent. No result exists yet, so only the aggregate half of the gate applies here
+        # (the summary-column half runs at add, register and conclude). The campaign connection
+        # opened above is closed by now, so read the claim binding on a fresh one.
+        if (
+            resolved_campaign_id
+            and uncovered_aggregates(sidecar)
+            and _campaign_is_claim_bound(catalog_dir, resolved_campaign_id)
+        ):
+            from bathos.breakdown_gate import breakdown_gate
+
+            reasons = breakdown_gate(
+                SimpleNamespace(outcome=None, tentative_outcome=None, metadata=""),
+                sidecar,
+                check_columns=False,
+            )
+            refusal = (
+                f"campaign {resolved_campaign_id[:8]} is claim-bound and this run would be "
+                f"cited, but: {'; '.join(reasons)}"
+            )
+            event(
+                "run.error",
+                phase="breakdown_gate",
+                exc_type="BreakdownRefused",
+                exc_msg=refusal,
+            )
+            print(f"Error: breakdown_missing: {refusal}", file=sys.stderr)
+            collected = run_advisories_var.get(None)
+            if collected is not None:
+                collected.append({"code": "breakdown_missing", "message": refusal})
+            return 1
 
     # Read project config for agent_mode default
     project_config_mode = ""

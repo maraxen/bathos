@@ -648,6 +648,23 @@ def register_claim(
         if catalog_dir is not None and not current_mode():
             ingest_cool_campaigns(db, catalog_dir)
 
+        # Spec 261026 D3 breakdown gate: registering a claim makes every member run cited, so each
+        # must already carry a covering [breakdown]/waiver in its run-time sidecar. Members come
+        # from the warm and cool tiers alike; `force` re-registers a claim but never bypasses this.
+        from bathos.breakdown_gate import check_runs, fetch_member_runs, refuse_on_findings
+        from bathos.campaigns import _log_mode, union_campaign_member_ids
+
+        member_ids = union_campaign_member_ids(db, full_id, catalog_dir)
+        refuse_on_findings(
+            check_runs(
+                fetch_member_runs(db, member_ids, catalog_dir),
+                workspace_root,
+                db=db,
+                log_mode=_log_mode(catalog_dir),
+            ),
+            f"Cannot register a claim for campaign {full_id[:8]}",
+        )
+
         # Compute SHA256
         claim_content = abs_path.read_bytes()
         claim_sha256 = hashlib.sha256(claim_content).hexdigest()
