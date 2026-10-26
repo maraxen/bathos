@@ -5,11 +5,11 @@ status: draft
 task_id: 261026_distributional-breakdown-debt
 date: '261026'
 backlog_ids: ''
-adversarial_review: 'cycles 1-7 done; v8 revision'
+adversarial_review: 'cycles 1-8 done; v9 revision'
 ---
 # Distributional breakdown, amendments and fork records for aggregate verdicts
 
-**v8** (after adversarial cycles 1-7; see §6). Debt #3045. Source postmortem: lathex
+**v9** (after adversarial cycles 1-8; see §6). Debt #3045. Source postmortem: lathex
 `postmortems/bathos-debt-distributional-breakdown.md` (commit a0b1f5a). Companion bug #3046
 (scaffold path) is fixed separately (commit 1ed684bb).
 
@@ -30,7 +30,7 @@ record of what was decided after a near-bound result, or why.
 User decision (261026): **WARNING everywhere; ERROR only where the run is cited (entry into a
 claim-bound campaign).** Internal validation runs stay unblocked.
 
-**Acceptance walk-through (78db9e04 under v8).** Before the run, `bth run` prints to stderr
+**Acceptance walk-through (78db9e04 under v9).** Before the run, `bth run` prints to stderr
 that `e_max_placement` and `e_max_iptm` gate outcomes with no `[breakdown]` (D2). Over MCP,
 the same advisories come back in the `run_tool` response's `warnings`. Had the author declared
 `[breakdown]` with `bound = 0.5`, the run would have recorded `e_max_placement__n_over = 1`
@@ -230,24 +230,42 @@ this function. It does **unique-prefix matching**, which the existing code does 
 1. Collect candidate **full ids** whose id starts with `run_id`. This is the **union** of the
    active backend (index or warm, `_resolve_backend`) and the cool fragments, read once or
    taken from `cool_runs`. The backend side needs a **new** prefix query,
-   `SELECT id FROM runs WHERE id LIKE ? || '%'`, on both index and warm. None exists today;
-   `get_run` is exact-only.
+   `SELECT id FROM runs WHERE id LIKE ? || '%' ESCAPE '\'`, on both index and warm. None
+   exists today; `get_run` is exact-only. The prefix must be non-empty, with `%`, `_` and `\`
+   escaped. An empty `run_id` returns None. In **index (log) mode** the cool list holds only
+   legacy and pre-cutover fragments: log-mode runs are written as `run.started` and
+   `run.finished` events only (`runner.py:1109-1126`), and `write_run` sits in the legacy
+   branch.
 2. **Dedupe by full id** before counting. Cool fragments are kept after compaction, so a
    compacted run appears in both.
 3. No candidate returns None. More than one distinct full id raises `AmbiguousRunId`, which
    validation reports as an error naming the candidates.
 4. Exactly one: fetch the backend row with an exact query on the active backend
    (`_index_get_run` / `_warm_get_run`), so the compacted or ingested row wins when it exists.
-   If that returns None and the full id came from the cool list, return **that cool `Run`
-   object itself**, tagged `_source = "cool_unindexed"` as `_cool_fallback_get_run` does,
-   with compact-time fields absent. This does **not** route through
-   `get_run(..., allow_cool_fallback=True)`: the index branch ignores that flag
-   (`query.py:370-381`), and the cool backend would rescan (`query.py:348-354`). A run that
-   is not yet ingested is therefore found in log mode, when ingest is skipped (SLURM or
-   `BTH_NO_INGEST=1`, `campaigns.py:253`), and on the postmortem tools, which never call
-   `prepare_catalog_for_conclude`. That matches today's `postmortem_get_tool` `read_runs`
-   fallback. `metadata`, `sidecar_path` and `sidecar_sha256`, which the resolver and
-   `near_bound` need, are present in every tier (index columns at `index.py:117-148`).
+   **Warm and cool backends:** if that returns None and the full id came from the cool list,
+   return **that cool `Run` object itself**, tagged `_source = "cool_unindexed"` as
+   `_cool_fallback_get_run` does, with compact-time fields absent. It does not route through
+   `get_run(..., allow_cool_fallback=True)`, because the cool backend would rescan
+   (`query.py:348-354`). This preserves today's `postmortem_get_tool` `read_runs` fallback.
+   **Index (log) backend:** the cool-object fallback does not apply (`get_run` ignores the
+   flag there, `query.py:370-381`, and fresh runs have no fragment). On a miss, which
+   includes no prefix candidate at all, `lookup_run` folds pending events **once** and
+   retries:
+   - It calls `runlog.ingest.run_ingest(catalog_dir, require_log_mode=False,
+     lock_timeout_s=60.0)` directly, the same call `_fold_pending_events` makes
+     (`campaigns.py:248-266`). It is called directly so that `query.py` does not import
+     `campaigns.py`.
+   - An ingest exception is logged and treated as a miss.
+   - Where ingest is a no-op by design (SLURM, `BTH_NO_INGEST=1`), a not-yet-ingested run
+     stays unresolved and `lookup_run` returns None. Callers say so. D5's
+     "`analysis_run_id` unresolvable" error and the entity check's "not discharged" reason
+     append: "if this is a log-mode run not yet ingested (SLURM / `BTH_NO_INGEST`), run
+     `bth compact` and retry".
+   - Claim-bound conclude is unaffected: `prepare_catalog_for_conclude` ingests before any
+     gate, and an unresolved member fails closed (`SIDECAR_UNVERIFIABLE`).
+
+   `metadata`, `sidecar_path` and `sidecar_sha256`, which the resolver and `near_bound` need,
+   are present in every tier (index columns at `index.py:117-148`).
 
 The `cool_runs` parameter lets a caller doing many lookups pass one pre-read list, so the
 cost is a single `read_runs` scan rather than N. `union_campaign_member_ids` (which calls
@@ -415,7 +433,7 @@ auto-computed breakdowns, aggregates in `[differential].metric` and benchmark me
 | T5 | `ValidationResult.warnings`, `run_lookup` (format-2 only); `parse_postmortem` gains `format`, `fork`, `amendments` | format-1 files unchanged under drift |
 | T6 | D5 amendments + rendering | `tests/test_postmortem_amendments.py` |
 | T7 | D6 `near_bound` (pure fn, run-end advisory outside the exploratory guard, `TRIGGERS` gains `near_bound` — `open_obligation` rejects unknown triggers, `obligations.py:200` — `DEFAULT_ON` + `resolve_flag(default=)`, fork checks, scaffold) | 78db9e04 fixture (exploration, `bound = 0.5`, 0.521, `n_over = 1`, `n_units = 24`) opens `near_bound` without blocking; `n_units = 1` does not fire single_unit; margin trigger; NaN unevaluated; `bound = 0` validation; default-ON/opt-out tests and the edited closed-set tests (incl. the `TRIGGERS - DEFAULT_ON` comprehension at `test_obligation_triggers.py:110`); scaffold leaves `discharges` empty with a full-id checklist |
-| T7a (after T7) | Discharge wiring: `discharge_validated(ws, pm, pm_path, catalog_dir)` from `postmortem_validate_tool`; `"discharged"` in the response; workspace-relative `discharged_by`; near_bound entity check; `_lookup_run` factored and passed as `run_lookup`; conclude recomputation | `tests/test_obligation_discharge_wiring.py`: `bth postmortem validate` discharges; a postmortem for run X cannot discharge `run_Y_near_bound`; legacy triggers still discharge; D5 errors fire through the tool (not warnings); **end-to-end: open near_bound → claim-bound confirmation conclude raises `FORK_RECORD_MISSING` → validate a format-2 `[fork]` postmortem → conclude proceeds**; opt-out run (`near_bound = false`) still raises at claim-bound conclude; moved/deleted discharging postmortem raises; `cited = false` raises; **re-discharge: `cited = false` discharge → conclude raises → new `cited = true` postmortem validated → `discharged_by` re-pointed, old path in `superseded_by_paths` → conclude proceeds**; `query.lookup_run` resolves an 8-char prefix, errors on a genuinely ambiguous one, and does **not** report a compacted run (present in warm and cool) as ambiguous; unresolvable claim-bound member raises `SIDECAR_UNVERIFIABLE`; cool-only member is checked; **log/index mode with ingest suppressed (`BTH_NO_INGEST=1`): a cool-only member and a just-finished `analysis_run_id` both resolve via the cool object**; conclude reads `read_runs` once and passes it to `union_campaign_member_ids` and `lookup_run` (assert one scan); exploration-mode conclude warns |
+| T7a (after T7) | Discharge wiring: `discharge_validated(ws, pm, pm_path, catalog_dir)` from `postmortem_validate_tool`; `"discharged"` in the response; workspace-relative `discharged_by`; near_bound entity check; `_lookup_run` factored and passed as `run_lookup`; conclude recomputation | `tests/test_obligation_discharge_wiring.py`: `bth postmortem validate` discharges; a postmortem for run X cannot discharge `run_Y_near_bound`; legacy triggers still discharge; D5 errors fire through the tool (not warnings); **end-to-end: open near_bound → claim-bound confirmation conclude raises `FORK_RECORD_MISSING` → validate a format-2 `[fork]` postmortem → conclude proceeds**; opt-out run (`near_bound = false`) still raises at claim-bound conclude; moved/deleted discharging postmortem raises; `cited = false` raises; **re-discharge: `cited = false` discharge → conclude raises → new `cited = true` postmortem validated → `discharged_by` re-pointed, old path in `superseded_by_paths` → conclude proceeds**; `query.lookup_run` resolves an 8-char prefix, errors on a genuinely ambiguous one, and does **not** report a compacted run (present in warm and cool) as ambiguous; unresolvable claim-bound member raises `SIDECAR_UNVERIFIABLE`; cool-only member is checked; **warm mode: a cool-only (uncompacted) run resolves via the cool object; log/index mode: a just-finished `analysis_run_id` resolves after `lookup_run`'s one-shot ingest, and with `BTH_NO_INGEST=1` returns None and the validate error names `bth compact`**; prefix with `_`/`%` is matched literally; empty prefix → None; conclude reads `read_runs` once and passes it to `union_campaign_member_ids` and `lookup_run` (assert one scan); exploration-mode conclude warns |
 | T8 | Skills (`using-bathos`, `bathos-rigor-gates`; edit both the source and the exported copy), CHANGELOG | — |
 
 Narrow pytest per task locally; full suite on CI; a reviewer with a different lens.
@@ -496,3 +514,9 @@ fail-closed rules held, and the index columns were confirmed (`index.py:117-148`
 orchestrator had already read `query.py:370-381`, so it revised directly. v8 changes:
 - M1 `get_run(allow_cool_fallback=True)` is ignored by the index backend, so a not-yet-ingested cool-only run resolved to None in log mode (and regressed the postmortem tools) → step 4 returns the cool `Run` object itself when the backend row is absent; new prefix queries on index/warm stated; log-mode no-ingest test.
 - m `union_campaign_member_ids` scanned `read_runs` separately → it takes the same `cool_runs` list.
+
+**Cycle 8**: challenger on v8 (0 blocking, 1 major, 1 minor). The orchestrator confirmed
+that log mode writes events only (`runner.py:1109-1126`) and read `_fold_pending_events`
+(`campaigns.py:248-266`). v9 changes:
+- M1 the cool-object fallback cannot find log-mode runs (no fragment is written) → it is restricted to the warm and cool backends; the index backend does a one-shot `run_ingest` on a miss; the no-ingest residual is stated, with a `bth compact` hint in the errors; claim-bound conclude stays fail-closed; T7a tests rewritten.
+- m LIKE wildcards and empty prefix → escaped, non-empty.
