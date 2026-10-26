@@ -86,7 +86,7 @@ from bathos.sidecar import SidecarError
 from bathos.sync import sync_catalog
 
 # Telemetry imports
-from bathos.telemetry import event, mcp_request_id_var, run_uuid_var
+from bathos.telemetry import event, mcp_request_id_var, run_advisories_var, run_uuid_var
 from bathos.telemetry_bridge import init_server_telemetry
 
 app = FastMCP("bathos")
@@ -1937,22 +1937,30 @@ def run_tool(
     # this reset a failed call in the same context could report a prior call's ID.
     run_uuid_var.set(None)
 
+    # run_script runs in-process, so its stderr advisories never reach an MCP caller: collect
+    # them through run_advisories_var and return them as `warnings` (spec 261026 D2).
+    advisories: list[dict] = []
+    advisories_token = run_advisories_var.set(advisories)
+
     # Call run_script with new parameters
-    exit_code = run_script(
-        argv=argv,
-        project_slug=slug,
-        catalog_dir=cat_dir,
-        output_paths=output_paths,
-        tags=tags,
-        agent_mode=agent_mode or None,
-        no_sidecar=no_sidecar,
-        allow_stale=allow_stale,
-        derived_from=derived_from or None,
-        campaign_id=campaign_id or None,
-        component_id=component_id or None,
-        component_sidecar_sha256=component_sidecar_sha256 or None,
-        seed=seed,
-    )
+    try:
+        exit_code = run_script(
+            argv=argv,
+            project_slug=slug,
+            catalog_dir=cat_dir,
+            output_paths=output_paths,
+            tags=tags,
+            agent_mode=agent_mode or None,
+            no_sidecar=no_sidecar,
+            allow_stale=allow_stale,
+            derived_from=derived_from or None,
+            campaign_id=campaign_id or None,
+            component_id=component_id or None,
+            component_sidecar_sha256=component_sidecar_sha256 or None,
+            seed=seed,
+        )
+    finally:
+        run_advisories_var.reset(advisories_token)
 
     # run_script doesn't return the Run it creates (its return type is a plain
     # exit_code int, relied on elsewhere — cli.py's typer.Exit(exit_code) and 29
@@ -1966,6 +1974,7 @@ def run_tool(
         "run_id": run_id,
         "exit_code": exit_code,
         "success": exit_code == 0,
+        "warnings": advisories,
     }
     if interpreter_warning:
         response["warning"] = interpreter_warning

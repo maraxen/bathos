@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from enum import Enum
@@ -314,6 +315,10 @@ class Sidecar:
     # precondition and wall-time budget (experiment sidecars only; parsed here, enforced later)
     requires: RequiresBlock | None = None
     budget: BudgetBlock | None = None
+    # per-unit breakdown for worst-case aggregates (all kinds; spec 261026 D1) and the
+    # separate [result_schema_meta.<col>] table (opt-in `aggregate = true`, D2)
+    breakdown: BreakdownBlock | None = None
+    result_schema_meta: dict[str, dict] = field(default_factory=dict)
 
     # `builtins.property`: the class body has a dataclass field named `property` (the validation
     # kind's `property = "..."`), which shadows the bare decorator name here.
@@ -359,6 +364,39 @@ class OutputsBlock:
 
 # Every key parse_sidecar accepts in the top-level [outputs] table; anything else refuses.
 OUTPUTS_KEYS: frozenset[str] = frozenset({"roots"})
+
+
+@dataclass(frozen=True)
+class BreakdownAggregate:
+    """One `[breakdown.aggregates.<column>]` entry. The key may end in `*` (prefix, see
+    `expand_breakdown_aggregates`); `bound`/`margin` are None when not declared."""
+
+    direction: str = ""
+    bound: float | None = None
+    margin: float | None = None
+
+
+@dataclass(frozen=True)
+class BreakdownBlock:
+    """Top-level `[breakdown]` block (spec 261026 D1): the per-unit breakdown a run commits to
+    emitting for each worst-case aggregate that gates its verdict, or a `waive` reason.
+
+    `waive` must sit directly under `[breakdown]`, before any sub-table: TOML would otherwise
+    attach it to the preceding `[breakdown.aggregates.<col>]` table, where it is flagged.
+    """
+
+    unit: str = ""
+    artifact: str | None = None
+    waive: str | None = None
+    aggregates: dict[str, BreakdownAggregate] = field(default_factory=dict)
+    # Keys found inside an aggregate table that are not aggregate settings (e.g. a misplaced
+    # `waive`); `validate_sidecar` turns each into an error.
+    stray_aggregate_keys: tuple[str, ...] = ()
+
+
+BREAKDOWN_KEYS: frozenset[str] = frozenset({"unit", "artifact", "waive", "aggregates"})
+BREAKDOWN_AGGREGATE_KEYS: frozenset[str] = frozenset({"direction", "bound", "margin"})
+BREAKDOWN_DIRECTIONS: frozenset[str] = frozenset({"max", "min"})
 
 
 @dataclass(frozen=True)
@@ -623,6 +661,13 @@ def parse_sidecar(path: Path) -> Sidecar:
     if "outputs" in data:
         sidecar.outputs = _parse_outputs(data["outputs"], path)
 
+    # Parse [breakdown] and [result_schema_meta] (optional, all sidecar kinds). Parsing only:
+    # `validate_sidecar` reports the semantic errors; the runner and gates read the fields.
+    if "breakdown" in data:
+        sidecar.breakdown = _parse_breakdown(data["breakdown"], path)
+    if "result_schema_meta" in data:
+        sidecar.result_schema_meta = _parse_result_schema_meta(data["result_schema_meta"], path)
+
     # Parse [review] block (optional, build-order step 2). Applies to every sidecar kind,
     # not just experiments: a benchmark or validation script can equally rest on prior work.
     if "review" in data:
@@ -688,6 +733,56 @@ def parse_sidecar(path: Path) -> Sidecar:
         sidecar.budget = _parse_budget(data["budget"], path)
 
     return sidecar
+
+
+def _breakdown_number(path: Path, where: str, value) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SidecarError(f"{path}: {where} must be a number, got {value!r}")
+    return float(value)
+
+
+def _parse_breakdown(raw, path: Path) -> BreakdownBlock:
+    """Parse the top-level `[breakdown]` table. Shape errors (not a table, a non-table aggregate,
+    a non-numeric bound/margin) raise; meaning errors are `validate_sidecar`'s."""
+    if not isinstance(raw, dict):
+        raise SidecarError(f"{path}: [breakdown] must be a table")
+    for key in raw:
+        if key not in BREAKDOWN_KEYS:
+            logger.warning(f"Unknown key in [breakdown]: {key!r}")
+    aggs_raw = raw.get("aggregates", {})
+    if not isinstance(aggs_raw, dict):
+        raise SidecarError(f"{path}: [breakdown.aggregates] must be a table")
+    aggregates: dict[str, BreakdownAggregate] = {}
+    stray: list[str] = []
+    for col, entry in aggs_raw.items():
+        if not isinstance(entry, dict):
+            raise SidecarError(f"{path}: [breakdown.aggregates.{col}] must be a table")
+        stray += [f"{col}.{key}" for key in entry if key not in BREAKDOWN_AGGREGATE_KEYS]
+        where = f"[breakdown.aggregates.{col}]"
+        bound = entry.get("bound")
+        margin = entry.get("margin")
+        aggregates[col] = BreakdownAggregate(
+            direction=str(entry.get("direction", "")),
+            bound=None if bound is None else _breakdown_number(path, f"{where} bound", bound),
+            margin=None if margin is None else _breakdown_number(path, f"{where} margin", margin),
+        )
+    artifact = raw.get("artifact")
+    waive = raw.get("waive")
+    return BreakdownBlock(
+        unit=str(raw.get("unit", "")),
+        artifact=None if artifact is None else str(artifact),
+        waive=None if waive is None else str(waive),
+        aggregates=aggregates,
+        stray_aggregate_keys=tuple(stray),
+    )
+
+
+def _parse_result_schema_meta(raw, path: Path) -> dict[str, dict]:
+    """Parse the top-level `[result_schema_meta.<col>]` tables (kept raw; `validate_sidecar`
+    checks the keys and values)."""
+    if not isinstance(raw, dict) or not all(isinstance(v, dict) for v in raw.values()):
+        raise SidecarError(f"{path}: [result_schema_meta] must hold one table per column")
+    return {str(k): dict(v) for k, v in raw.items()}
 
 
 def _parse_outputs(raw, path: Path) -> OutputsBlock:
@@ -1411,6 +1506,154 @@ def check_sanity_expr(expr: str, schema_fields: set[str]) -> list[str]:
     errors: list[str] = []
     _sanity_walk(node["select_list"][0], schema_fields, errors, expr)
     return errors
+
+
+# ── distributional breakdown (spec 261026) ───────────────────────────────────────────
+
+#: Name heuristic for a worst-case aggregate: a max/min/worst/peak token, or a leading p_max.
+_AGGREGATE_NAME_RE = re.compile(r"(?i)(^|_)(max|min|worst|peak)(_|$)|^p_?max")
+_AGGREGATE_NAME_PREFIXES = ("n_", "is_", "has_")
+_AGGREGATE_NAME_SUFFIXES = ("_n", "_count", "_samples", "_steps", "_idx", "_flag")
+#: Result labels a breakdown check never applies to (no verdict was reached).
+_BREAKDOWN_EXEMPT_LABELS = frozenset({"", "error", "invalid_measurement"})
+
+
+@dataclass(frozen=True)
+class UncoveredAggregate:
+    """A worst-case aggregate that gates a verdict with no `[breakdown]` entry or waiver."""
+
+    column: str
+    sources: tuple[str, ...]  # e.g. ("outcomes.pass", "observe.sanity")
+    reason: str  # "result_schema_meta" (opt-in) or "name" (heuristic)
+
+
+def columns_referenced(fragment: str, known_columns) -> set[str]:
+    """Which declared result_schema columns a SQL fragment mentions (word-boundary match)."""
+    return {c for c in known_columns if re.search(rf"\b{re.escape(c)}\b", fragment)}
+
+
+def expand_breakdown_aggregates(
+    sidecar: Sidecar,
+) -> tuple[dict[str, BreakdownAggregate], list[str]]:
+    """Expand `[breakdown.aggregates]` keys against `[result_schema]` (spec D1).
+
+    A key ending in `*` matches every **float** `[result_schema]` column that starts with the
+    prefix and contains no `__`, so a prefix never matches its own summary columns. Returns
+    (column -> settings, unmatched prefix keys). Explicit keys pass through unchanged; whether
+    they are declared is `validate_sidecar`'s check. Expand first, then check summary columns.
+    """
+    block = sidecar.breakdown
+    if block is None:
+        return {}, []
+    float_cols = [
+        c for c, t in sidecar.result_schema.items() if isinstance(t, str) and t == "float"
+    ]
+    expanded: dict[str, BreakdownAggregate] = {}
+    unmatched: list[str] = []
+    for key, agg in block.aggregates.items():
+        if not key.endswith("*"):
+            expanded[key] = agg
+            continue
+        prefix = key[:-1]
+        matches = [c for c in float_cols if "__" not in c and c.startswith(prefix)]
+        if not matches:
+            unmatched.append(key)
+        for c in matches:
+            expanded.setdefault(c, agg)
+    return expanded, unmatched
+
+
+def breakdown_summary_columns(sidecar: Sidecar) -> dict[str, str]:
+    """Required summary columns (column -> declared type) for every expanded aggregate (D1)."""
+    cols: dict[str, str] = {}
+    expanded, _ = expand_breakdown_aggregates(sidecar)
+    for col, agg in expanded.items():
+        cols[f"{col}__worst_unit"] = "str"
+        cols[f"{col}__second"] = "float"
+        cols[f"{col}__median"] = "float"
+        cols[f"{col}__n_units"] = "int"
+        if agg.bound is not None:
+            cols[f"{col}__n_over"] = "int"
+    return cols
+
+
+def effective_label(outcome: str | None, tentative_outcome: str | None) -> str | None:
+    """The label a breakdown check reads: an exploratory run's `observed` defers to its
+    `tentative_outcome` (spec D1, A18)."""
+    if outcome == "observed" and tentative_outcome:
+        return tentative_outcome
+    return outcome
+
+
+def label_names_nonresidual_outcome(sidecar: Sidecar, label: str | None) -> bool:
+    """True iff `label` is a declared, non-residual `[outcomes.*]` label (None, `error`,
+    `invalid_measurement` and residual labels are exempt from the breakdown checks)."""
+    if label is None or label in _BREAKDOWN_EXEMPT_LABELS:
+        return False
+    spec = sidecar.outcomes.get(label)
+    return spec is not None and not spec.is_residual
+
+
+def missing_breakdown_columns(sidecar: Sidecar, result: dict) -> list[str]:
+    """Summary columns a declared `[breakdown]` requires that `result` lacks."""
+    return [c for c in breakdown_summary_columns(sidecar) if c not in result]
+
+
+def _aggregate_like_name(col: str, declared_type: str) -> bool:
+    if declared_type != "float" or "__" in col:
+        return False
+    if col.startswith(_AGGREGATE_NAME_PREFIXES) or col.endswith(_AGGREGATE_NAME_SUFFIXES):
+        return False
+    return _AGGREGATE_NAME_RE.search(col) is not None
+
+
+def uncovered_aggregates(sidecar: Sidecar) -> list[UncoveredAggregate]:
+    """Worst-case aggregates referenced by a verdict that no `[breakdown]` entry covers (D2).
+
+    Reads every `[outcomes.*].condition` and every `[observe].sanity` expression. A column is
+    aggregate-like when it opts in via `[result_schema_meta.<col>] aggregate = true` (which
+    overrides the type and name rules), or when it is a float column with no `__` whose name
+    matches the max/min/worst/peak heuristic and is not a count/flag/index. A `[breakdown]`
+    `waive` covers everything. Pure; no I/O.
+    """
+    if sidecar.breakdown is not None and sidecar.breakdown.waive:
+        return []
+    schema = {c: t for c, t in sidecar.result_schema.items() if isinstance(t, str)}
+    fragments: list[tuple[str, str]] = [
+        (f"outcomes.{label}", spec.condition)
+        for label, spec in sidecar.outcomes.items()
+        if spec.condition
+    ]
+    if sidecar.observe is not None:
+        fragments += [("observe.sanity", expr) for expr in sidecar.observe.sanity]
+    covered, _ = expand_breakdown_aggregates(sidecar)
+    found: dict[str, list[str]] = {}
+    for source, fragment in fragments:
+        for col in sorted(columns_referenced(fragment, schema)):
+            sources = found.setdefault(col, [])
+            if source not in sources:
+                sources.append(source)
+    out: list[UncoveredAggregate] = []
+    for col, sources in found.items():
+        if col in covered:
+            continue
+        if sidecar.result_schema_meta.get(col, {}).get("aggregate") is True:
+            reason = "result_schema_meta"
+        elif _aggregate_like_name(col, schema[col]):
+            reason = "name"
+        else:
+            continue
+        out.append(UncoveredAggregate(col, tuple(sources), reason))
+    return out
+
+
+def uncovered_aggregate_message(u: UncoveredAggregate) -> str:
+    """One-line advisory for an uncovered aggregate, shared by the runner and `validate_sidecar`."""
+    return (
+        f"{u.column!r} gates a verdict ({', '.join(u.sources)}) with no [breakdown] covering it; "
+        f"declare [breakdown.aggregates.{u.column}] (per-unit worst/second/median/n_units/n_over) "
+        'or [breakdown] waive = "reason" (rule STAT-005)'
+    )
 
 
 def find_sidecar(script_path: Path) -> Path | None:

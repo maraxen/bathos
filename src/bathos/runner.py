@@ -44,16 +44,31 @@ from bathos.sidecar import (
     DifferentialBlock,
     Sidecar,
     SidecarError,
+    breakdown_summary_columns,
     derive_pass_labels,
+    effective_label,
     evaluate_outcome,
     is_in_enforced_dir,
+    label_names_nonresidual_outcome,
+    missing_breakdown_columns,
     parse_sidecar,
     resolve_epistemic_class,
     single_row_projection,
+    uncovered_aggregate_message,
+    uncovered_aggregates,
 )
-from bathos.telemetry import event, init_telemetry, run_uuid_var
+from bathos.telemetry import event, init_telemetry, run_advisories_var, run_uuid_var
 
 logger = logging.getLogger(__name__)
+
+
+def _advise(code: str, message: str, **fields: object) -> None:
+    """Print a runner advisory to stderr and, when a caller is collecting (the MCP `run` tool,
+    which cannot see stderr), append it as `{"code", "message", **fields}`."""
+    print(f"WARNING: {message}", file=sys.stderr)
+    collected = run_advisories_var.get(None)
+    if collected is not None:
+        collected.append({"code": code, "message": message, **fields})
 
 
 # Command-wrapper prefixes that run the real command after consuming their own options and a fixed
@@ -324,7 +339,12 @@ def _result_schema_complete(meta: object, sidecar: Sidecar) -> bool:
     """
     if not isinstance(meta, dict):
         return False
-    schema_keys = [k for k, v in sidecar.result_schema.items() if isinstance(v, str)]
+    # [breakdown] summary columns are emitted only on a clean run's verdict path, so a crashed
+    # run never owes them (spec 261026 D1): they do not count toward completeness.
+    summary_cols = breakdown_summary_columns(sidecar)
+    schema_keys = [
+        k for k, v in sidecar.result_schema.items() if isinstance(v, str) and k not in summary_cols
+    ]
     if not schema_keys:
         return False
     return all(k in meta for k in schema_keys)
@@ -859,6 +879,15 @@ def _run_script_impl(
                 event("run.error", phase="validate", exc_type=type(e).__name__, exc_msg=str(e))
                 print(f"Error: invalid sidecar — {e}", file=sys.stderr)
                 return 1
+
+    # Spec 261026 D2: a worst-case aggregate that gates a verdict with no [breakdown] is said
+    # out loud before the run, in every directory (the prereg gate that logs sidecar warnings
+    # only runs for enforced ones, and its warnings never reach a terminal).
+    if sidecar is not None:
+        for uncovered in uncovered_aggregates(sidecar):
+            message = uncovered_aggregate_message(uncovered)
+            event("run.aggregate_uncovered", column=uncovered.column, sources=uncovered.sources)
+            _advise("aggregate_uncovered", message, column=uncovered.column)
 
     # Read project config for agent_mode default
     project_config_mode = ""
@@ -1510,6 +1539,22 @@ def _run_script_impl(
         outcome, outcome_error_reason, tentative_outcome, metadata = _apply_observation_precedence(
             sidecar, epistemic_class, metadata, bth_output_dir, resolved_mode
         )
+
+    # Spec 261026 D1 emission check: a clean run whose verdict names a declared non-residual
+    # outcome must have emitted the [breakdown] summary columns. Advisory only: the outcome is
+    # unchanged (the claim-bound gates refuse later). Exploratory runs read tentative_outcome.
+    if sidecar is not None and sidecar.breakdown is not None and exit_code == 0:
+        label = effective_label(outcome, tentative_outcome)
+        if label_names_nonresidual_outcome(sidecar, label):
+            missing = missing_breakdown_columns(sidecar, _parse_result_dict(metadata))
+            if missing:
+                event("run.breakdown_incomplete", outcome=label, missing=missing)
+                _advise(
+                    "breakdown_incomplete",
+                    f"outcome {label!r} was reached but the run did not emit its [breakdown] "
+                    f"summary columns: {', '.join(missing)}",
+                    columns=missing,
+                )
 
     # Populate outcome_is_residual flag
     outcome_is_residual = False

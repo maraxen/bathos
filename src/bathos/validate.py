@@ -1,17 +1,25 @@
 from __future__ import annotations
 
+import math
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import duckdb
 
 from bathos.sidecar import (
+    BREAKDOWN_DIRECTIONS,
     RESERVED_OUTCOME_LABELS,
     Sidecar,
     SidecarKind,
+    breakdown_summary_columns,
     check_sanity_expr,
+    columns_referenced,
+    expand_breakdown_aggregates,
     parse_source,
     resolve_epistemic_class,
+    uncovered_aggregate_message,
+    uncovered_aggregates,
 )
 from bathos.telemetry import event
 
@@ -511,6 +519,122 @@ def validate_claim_discriminability(
     return errors
 
 
+def _bound_in_condition_literals(bound: float, condition: str) -> bool:
+    """Does `bound` appear as a numeric literal in a SQL condition?"""
+    for lit in re.findall(r"(?<![\w.])\d+(?:\.\d+)?(?:[eE][-+]?\d+)?|(?<![\w.])\.\d+", condition):
+        try:
+            if math.isclose(float(lit), abs(bound), rel_tol=1e-9, abs_tol=0.0):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def validate_breakdown_block(sidecar: Sidecar) -> tuple[list[ValidationError], list[str]]:
+    """Validate `[breakdown]` and `[result_schema_meta]` (spec 261026 D1/D2).
+
+    Returns (errors, warnings). Warnings are the advisories (uncovered aggregates, a `bound`
+    that no outcome condition uses); neither the absence of `[breakdown]` nor an uncovered
+    aggregate ever errors here -- the claim-bound gates are what refuse.
+    """
+    errors: list[ValidationError] = []
+    warnings: list[str] = []
+    schema = {k: v for k, v in sidecar.result_schema.items() if isinstance(v, str)}
+
+    for col, meta in sidecar.result_schema_meta.items():
+        where = f"result_schema_meta.{col}"
+        if col not in schema:
+            errors.append(ValidationError(where, f"{col!r} is not a [result_schema] column"))
+        for key, value in meta.items():
+            if key != "aggregate":
+                errors.append(
+                    ValidationError(where, f"unknown key {key!r}; only 'aggregate' is allowed")
+                )
+            elif not isinstance(value, bool):
+                errors.append(ValidationError(f"{where}.aggregate", "must be a boolean"))
+
+    block = sidecar.breakdown
+    if block is not None:
+        expanded, unmatched = expand_breakdown_aggregates(sidecar)
+        for key in block.stray_aggregate_keys:
+            col, _, stray = key.partition(".")
+            hint = (
+                "; `waive` belongs directly under [breakdown], before any sub-table"
+                if stray == "waive"
+                else ""
+            )
+            errors.append(
+                ValidationError(f"breakdown.aggregates.{col}", f"unknown key {stray!r}{hint}")
+            )
+        if not block.aggregates and not block.waive:
+            errors.append(
+                ValidationError(
+                    "breakdown",
+                    "declare [breakdown.aggregates.<column>] or a `waive` reason",
+                )
+            )
+        if block.aggregates and not block.unit:
+            errors.append(
+                ValidationError("breakdown.unit", "required when aggregates are declared")
+            )
+        for key in unmatched:
+            errors.append(
+                ValidationError(
+                    f"breakdown.aggregates.{key}",
+                    "prefix matches no float [result_schema] column without '__'",
+                )
+            )
+        for key, agg in block.aggregates.items():
+            where = f"breakdown.aggregates.{key}"
+            if "__" in key:
+                errors.append(
+                    ValidationError(where, "aggregate key must not contain '__' (summary columns)")
+                )
+            elif not key.endswith("*") and key not in schema:
+                errors.append(ValidationError(where, f"{key!r} is not in [result_schema]"))
+            if agg.direction not in BREAKDOWN_DIRECTIONS:
+                errors.append(
+                    ValidationError(
+                        f"{where}.direction", f"must be one of {sorted(BREAKDOWN_DIRECTIONS)}"
+                    )
+                )
+            if agg.margin is not None and agg.bound is None:
+                errors.append(ValidationError(f"{where}.margin", "requires a `bound`"))
+            if agg.bound == 0 and agg.margin is None:
+                errors.append(
+                    ValidationError(
+                        where,
+                        "bound = 0 needs an explicit `margin` (the default band is 10% of the bound)",
+                    )
+                )
+        for col in breakdown_summary_columns(sidecar):
+            if col not in schema:
+                errors.append(
+                    ValidationError(
+                        "result_schema", f"breakdown summary column {col!r} is not declared"
+                    )
+                )
+        for col, agg in expanded.items():
+            if agg.bound is None:
+                continue
+            referencing = [
+                s.condition
+                for s in sidecar.outcomes.values()
+                if s.condition and columns_referenced(s.condition, [col])
+            ]
+            if referencing and not any(
+                _bound_in_condition_literals(agg.bound, c) for c in referencing
+            ):
+                warnings.append(
+                    f"breakdown.aggregates.{col}: bound {agg.bound:g} does not appear as a literal "
+                    "in any outcome condition referencing it"
+                )
+
+    for u in uncovered_aggregates(sidecar):
+        warnings.append(f"breakdown.aggregates.{u.column}: {uncovered_aggregate_message(u)}")
+    return errors, warnings
+
+
 def validate_sidecar(
     sidecar: Sidecar,
     sidecar_path: Path | None = None,
@@ -865,5 +989,10 @@ def validate_sidecar(
     # Cross-check claim_discriminates/claim_isolates if a registered claim was supplied (#3719)
     if claim is not None:
         errors.extend(validate_claim_discriminability(sidecar, claim, sidecar_path))
+
+    # Validate [breakdown] / [result_schema_meta] and surface the aggregate advisories (spec 261026)
+    breakdown_errors, breakdown_warnings = validate_breakdown_block(sidecar)
+    errors.extend(breakdown_errors)
+    warnings.extend(breakdown_warnings)
 
     return ValidationResult(ok=len(errors) == 0, errors=errors, warnings=warnings)
