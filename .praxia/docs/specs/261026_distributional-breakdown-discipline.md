@@ -5,53 +5,61 @@ status: draft
 task_id: 261026_distributional-breakdown-debt
 date: '261026'
 backlog_ids: ''
-adversarial_review: 'cycle 1 challenger+defender done; v2 revision'
+adversarial_review: 'cycles 1-2 challenger+defender done; v3 revision'
 ---
 # Distributional breakdown, amendments and fork records for aggregate verdicts
 
-**v2** (after adversarial cycle 1; see §6). Debt #3045. Source postmortem: lathex
+**v3** (after adversarial cycles 1 and 2; see §6). Debt #3045. Source postmortem: lathex
 `postmortems/bathos-debt-distributional-breakdown.md` (commit a0b1f5a). Companion bug #3046
 (scaffold path) is fixed separately (commit 1ed684bb).
 
 ## 0. Problem
 
 lathex bth `78db9e04` (`rf3_dtype_probe_compare.bth.toml`) was an **exploration-stage** run
-with an `[observe]` block and outcome labels `x64_floor_*`. It recorded `outcome = observed`
-and `tentative_outcome = x64_floor_still_exceeds_tolerance`. The verdict rested on one number:
-`e_max_placement` = 0.521 Å against a 0.5 Å bound (4 % over). "Marginal" was the human reading,
-not a recorded label. A per-binder breakdown afterwards (bth `797b791e`) showed the maximum
-came from 1 binder of 24 (median binder maximum 0.004 Å). The deciding statistic there was
-`n_binders_over`: 1-2 binders over versus 3 or more.
+(`[observe]`, labels `x64_floor_*`, conditions such as `e_max_placement <= 0.5`), with no
+`[breakdown]` and no marginal label. It recorded `outcome = observed` and
+`tentative_outcome = x64_floor_still_exceeds_tolerance`. The verdict rested on one number,
+`e_max_placement` = 0.521 Å against 0.5 Å. "Marginal" was the human reading. A per-binder
+breakdown afterwards (bth `797b791e`) showed the maximum came from 1 binder of 24 (median
+binder maximum 0.004 Å). The deciding statistic was `n_binders_over`: 1-2 versus 3 or more.
 
-Gaps:
-1. Nothing prompts a per-unit breakdown before a run whose verdict rests on a worst-case
-   aggregate, so the breakdown was pre-registered after the verdict.
-2. No first-class way to attach later evidence naming the outlier unit to a judged run.
-3. No record of what was decided after a near-bound result (stop, extend, replicate) or why.
+Gaps: (1) nothing prompts a per-unit breakdown before a run whose verdict rests on a worst-case
+aggregate; (2) no first-class way to attach later evidence naming the outlier unit; (3) no
+record of what was decided after a near-bound result, or why.
 
 User decision (261026): **WARNING everywhere; ERROR only where the run is cited (entry into a
-claim-bound campaign).** Internal validation runs such as 78db9e04 stay unblocked.
+claim-bound campaign).** Internal validation runs stay unblocked.
 
-## 1. Assumptions (re-verified in cycle 1)
+**Acceptance walk-through (78db9e04 under v3).** Before the run, `bth run` prints to stderr
+that `e_max_placement` and `e_max_iptm` gate outcomes with no `[breakdown]` (D2). Had the
+author declared `[breakdown]` with `bound = 0.5`, the run would have recorded
+`e_max_placement__n_over = 1`, matched the parameter-free `single_unit` near-bound trigger
+(D6), printed an advisory, and opened a `near_bound` obligation. That obligation stays open
+until a format-2 postmortem with a `[fork]` discharges it. The run is never blocked. If the
+author ignores the D2 warning and declares nothing, D6 cannot fire. That residual gap is
+accepted, since the warning is the intervention point.
+
+## 1. Assumptions (re-verified in cycles 1-2)
 
 | # | Assumption | Tag | Evidence |
 |---|---|---|---|
-| A1 | Outcome conditions are DuckDB SQL over result columns; `OutcomeSpec` fields as listed | verified | `sidecar.py:32-44` |
-| A2 | `marginal` is a bookkeeping label: undeclared-allowed, not a pass branch, e-value 1.0 | verified | `validate.py:183`, `sidecar.py:1014-1022,1078` |
-| A3 | `validate_sidecar` warnings are logged before every `bth run` executes | verified | `prereg.py:525-533` |
-| A4 | Claim-bound iff `campaigns.claim_path IS NOT NULL`; `claim_path` can be NULL while runs are added and is set at register | verified | `claim.py:189-228,716` |
-| A5 | `bth run --campaign` resolves the campaign before spawn | verified | `runner.py:788-800` |
-| A6 | `_add_run_to_campaign_impl` reads the run row at ≈513; the sequential branch reads the live sidecar at 539-560; `threshold_set` is emitted at ≈591 | verified (defender) | `campaigns.py:502-591` |
-| A7 | `link_cool_runs_to_campaigns` is compaction ingest and must not raise; `campaign_run.imported` is another membership path | verified (challenger+defender) | `campaigns.py:652-676` |
-| A8 | Log mode: `run.started` carries `asdict(sidecar)`, so new `Sidecar` fields are snapshotted per run; legacy mode has no such snapshot | verified (challenger) | `runlog/emit.py:285` |
-| A9 | `refs/bathos/runs/<id>` pins the run's commit (or WIP snapshot); `git show <ref>:<relpath>` can recover a committed sidecar | verified for the ref (`git_pin.py:56`); **unverified** that a dirty WIP snapshot contains an untracked sidecar — T0 |
-| A10 | `[result_schema]` completeness is **not** checked on exit 0; `_result_schema_complete` runs only on non-zero exit for label recovery | verified FALSE-premise (v1 assumed enforcement) | `runner.py:316-330,1429,1452,1481-1483` |
-| A11 | `validate_postmortem` is called without a run by `postmortem_validate_tool` and `obligations.discharge_from_postmortem`; only `postmortem_get` passes one | verified | `mcp.py:3179,3274`, `obligations.py:277` |
+| A1 | Outcome conditions are DuckDB SQL over result columns; `OutcomeSpec` has no `is_marginal` | verified | `sidecar.py:32-44` |
+| A2 | `marginal` is a bookkeeping label (undeclared-allowed, e-value 1.0) | verified | `validate.py:183`, `sidecar.py:1078` |
+| A3 | `validate_sidecar` warnings logged at `prereg.py:531` reach **only** `events.*.jsonl`: the root logger has just the telemetry queue handler, so `lastResort` never prints. The gate is skipped for non-enforced dirs | verified FALSE as a surfacing channel | `telemetry.py:282-285`, `runner.py:742,957`, `prereg.py:503` |
+| A4 | Claim-bound predicates differ by site: add/register use `claim_path IS NOT NULL`; the conclude Union Gate uses `claim_path and registered_sha` | verified | `claim.py:716`, `campaigns.py:1203` |
+| A5 | `bth run --campaign` resolves the campaign at ≈795 and closes `campaign_db` at ≈806, **before** the sidecar parse at ≈857-861 | verified | `runner.py:795-861` |
+| A6 | `_add_run_to_campaign_impl` selects only `(mode, started_at, stopping_threshold)` and `(timestamp, outcome, sidecar_path)`; `threshold_set` is emitted at ≈591 | verified | `campaigns.py:495-513,591` |
+| A7 | `link_cool_runs_to_campaigns` is compaction ingest and must not raise | verified | `campaigns.py:652-676` |
+| A8 | Log mode `run.started` stores `asdict(sidecar)`; its only reader, `fold_campaigns._sidecar_from_declaration`, rebuilds 7 fields (lossy) | verified | `runner.py:1117`, `runlog/emit.py:285`, `fold_campaigns.py:127-160` |
+| A9 | `git show refs/bathos/runs/<id>:<relpath>` recovers a committed sidecar | verified for the ref; **unverified** for an untracked sidecar in a WIP snapshot (T0) |
+| A10 | `[result_schema]` completeness is not checked on exit 0 | verified | `runner.py:316-330,1429,1452,1481-1483` |
+| A11 | `validate_postmortem` errors on `git_dirty`/HEAD drift whenever `run` is passed; the main callers pass none | verified | `postmortem.py:270-288`, `mcp.py:3179`, `obligations.py:277` |
 | A12 | `ValidationResult` has no warnings channel | verified | `postmortem.py:20-22` |
-| A13 | `campaign_add_tool` returns `{ok: false, error}` with no `error_code`; `register_claim` raises `RuntimeError`; `traced_tool` maps `CampaignError` → `CAMPAIGN_ERROR`; `EXCEPTION_TO_CODE` is keyed by class name and AST-checked | verified | `mcp.py:4355-4395,3550,188`, `claim.py:645,706`, `errors.py:105-119`, `tests/test_errors.py:56` |
-| A14 | `tests/test_corpus.py` requires a rule card for every `def check_*` in `linter.py` (`:241`) whose `source_check` names a linter function (`:226`) | verified | — |
-| A15 | `linter._columns_referenced` extracts identifiers from a condition | verified (defender) | `linter.py:761` |
-| A16 | `parse_postmortem` tolerates unknown tables but the dataclass and `postmortem_get` output drop them | verified | `postmortem.py:57-129`, `mcp.py:3286-3303` |
+| A13 | `EXCEPTION_TO_CODE` is class-name keyed with one value; `campaign_add_tool` returns no `error_code`; `register_claim` raises `RuntimeError` | verified | `errors.py:105-119`, `mcp.py:4355-4395,3550`, `claim.py:645,706` |
+| A14 | Each `def check_*` in `linter.py` needs a rule card; `build_context` already holds the parsed sidecar | verified | `tests/test_corpus.py:226,241`, `corpus.py:314` |
+| A15 | `linter._columns_referenced` does word-boundary extraction | verified | `linter.py:761-768` |
+| A16 | Obligations ledger: per-trigger flags default OFF, opened idempotently, discharged by a valid postmortem's `discharges`, listed at conclude; `TRIGGERS` is a closed set asserted by tests | verified | `obligations.py:13-64,84-123,181-200,277` |
+| A17 | Run results are parsed from `runs.metadata` (JSON string) | verified | `runner._parse_result_dict:387`, `schema.py:195` |
 
 ## 2. Design
 
@@ -59,142 +67,163 @@ claim-bound campaign).** Internal validation runs such as 78db9e04 stay unblocke
 
 ```toml
 [breakdown]
-unit = "binder"                         # the unit the aggregate is taken over
+unit = "binder"
 artifact = "per_unit.parquet"           # optional, relative to BTH_OUTPUT_DIR
 
 [breakdown.aggregates.e_max_placement]
-direction = "max"                       # "max" | "min": which tail is the worst case
-bound = 0.5                             # optional: the judgement bound this aggregate is read against
-near = 0.10                             # optional: relative band around bound that counts as near-bound (D6)
+direction = "max"                       # "max" | "min"
+bound = 0.5                             # optional judgement bound
+margin = 0.05                           # optional absolute near-bound band (D6); see default below
 
-# waive = "reason"                      # top-level alternative; see D3 for when it counts
+# waive = "reason"                      # top-level alternative (D3: only the run-time sidecar counts)
 ```
 
-For each aggregate `A`, the run emits these result columns (declared in `[result_schema]`):
+Aggregate keys may end in `*` (`e_max_placement_*`). The prefix expands over **float**
+`[result_schema]` keys; an unmatched prefix is a validation error. Each expanded column is an
+aggregate with the same settings.
+
+For each aggregate `A` the run emits (declared in `[result_schema]`):
 
 | Column | Type | Meaning |
 |---|---|---|
 | `A__worst_unit` | str | unit at the worst value (argmax for `max`, argmin for `min`) |
 | `A__second` | float | the second-worst unit's value |
-| `A__median` | float | median over units of the per-unit aggregate (for e_max: median of per-binder maxima) |
+| `A__median` | float | median over units of the per-unit aggregate |
 | `A__n_units` | int | number of units |
-| `A__n_over` | int | units beyond `bound` in the worst direction (required iff `bound` is set) |
+| `A__n_over` | int | units **strictly** beyond `bound` in the worst direction (required iff `bound` is set) |
 
-On 78db9e04 these would have read `n_over = 1`, `second ≈ 0.0x`, `median = 0.004`, `n_units = 24`
-next to 0.521, which is the same information `n_binders_over` gave after the fact.
+`validate_sidecar` errors: no `aggregates` and no `waive`; empty `unit` with `aggregates`;
+`direction` outside {max, min}; `margin` without `bound`; `bound = 0` with no explicit
+`margin`; an aggregate or required summary column missing from `[result_schema]`. It
+**warns** when `bound` does not appear as a literal in any outcome condition referencing `A`.
 
-`validate_sidecar` errors when: `[breakdown]` has neither `aggregates` nor `waive`; `unit` is
-empty while `aggregates` is set; `direction` not in {max, min}; `near` set without `bound`;
-an aggregate or any required summary column is missing from `[result_schema]`.
+**Emission check (exit 0).** If the effective label names a declared **non-residual**
+`OutcomeSpec` and summary columns are missing from the metadata, `bth run` prints a stderr
+warning and emits `run.breakdown_incomplete`. The outcome is unchanged. Residual, `error` and
+`invalid_measurement` runs are exempt. Summary columns are excluded from
+`_result_schema_complete`, so non-zero-exit label recovery is untouched.
 
-**Emission check (new, exit 0 only).** At run end, if the sidecar has `[breakdown]` and the
-script exited 0, missing summary columns produce a stderr warning and a
-`run.breakdown_incomplete` event. The run's outcome is unchanged. Summary columns are
-**excluded** from `_result_schema_complete`, so the non-zero-exit label-recovery path
-(debt 1977) is not made harder. D3 re-checks emission from the run's recorded metadata.
+### D2. Aggregate detection, surfaced before the run
 
-### D2. Aggregate detection (WARNING, surfaced before the run)
+`uncovered_aggregates(sidecar) -> list[UncoveredAggregate]` (pure, `sidecar.py`):
 
-`uncovered_aggregates(sidecar) -> list[UncoveredAggregate]`, a pure helper in `sidecar.py`:
+1. Identifiers from every `[outcomes.*].condition` and `[sanity]` condition via
+   `_columns_referenced`, intersected with `[result_schema]` keys.
+2. **Aggregate-like** means: a float-typed column, no `__` in the name, matching
+   `(?i)(^|_)(max|min|worst|peak)(_|$)|^p_?max`, not starting with `n_|is_|has_`, and not
+   ending in `_n|_count|_samples|_steps|_idx|_flag`. Alternatively, any column with
+   `aggregate = true` in `[result_schema_meta.<col>]` (the opt-in overrides type and name
+   rules).
+3. Uncovered: not an `[breakdown.aggregates]` key or expanded prefix match, and no `waive`.
 
-1. Collect identifiers from every `[outcomes.*].condition` and `[sanity]` condition via
-   `linter._columns_referenced` (A15), intersected with `[result_schema]` keys.
-2. An identifier is **aggregate-like** if it matches
-   `(?i)(^|_)(max|min|worst|peak)(_|$)|^p_?max` and is not of the counter/flag form
-   `(?i)^(n|is|has)_`, or if it is declared `aggregate = true` in an optional
-   `[result_schema_meta.<col>]` table. The meta table is the opt-in for names the regex
-   cannot see (`ratio_placement`, `leak_c12o`, a boolean `within_tol`).
-3. An aggregate-like identifier is uncovered if it is not a key of `[breakdown.aggregates]`
-   (exact name, or a declared prefix: an aggregate key ending in `*` such as
-   `e_max_placement_*` covers the suffixed family) and there is no `waive`.
+**Surfaces.**
+- `_run_script_impl`, right after the sidecar parse (≈861), **unconditionally** (also for
+  non-enforced dirs): print each uncovered aggregate to stderr in the style of
+  `runner.py:813/829`, and emit `run.aggregate_uncovered`.
+- The same entries as `validate_sidecar` warnings, for MCP/`bth validate`.
+- `bth lint` `check_aggregate_without_breakdown` and STAT-005 (D4).
 
-Surfaces: (a) a `validate_sidecar` **warning**, so it is printed before every `bth run` (A3),
-which is the point where 78db9e04 would have been caught; (b) `bth lint`
-`check_aggregate_without_breakdown`; (c) rule card STAT-005 (D4). No SQL-wrapper heuristic
-(v1's `greatest(`/`max(` clause): it misfires on threshold floors such as
-`greatest(0.005, 10 * x)` and does not say which column is aggregated.
-
-Known misses, accepted and documented in STAT-005: derived ratios of maxima, booleans
-computed in the script from a maximum. The opt-in is the remedy; the card asks the author.
+No SQL-wrapper heuristic. Known misses (derived ratios, booleans computed from a maximum) are
+covered by the meta opt-in, and STAT-005 names them.
 
 ### D3. Enforcement where cited (ERROR)
 
-**Resolver.** `resolve_run_sidecar(run, workspace_root) -> Sidecar | Unresolvable`:
-1. log mode: the `run.started` snapshot (A8);
-2. else the live file at `run.sidecar_path`, if its sha256 equals `runs.sidecar_sha256`;
-3. else `git show refs/bathos/runs/<run_id>:<sidecar relpath>`, if its sha matches;
+**Resolver** `resolve_run_sidecar(run, workspace_root) -> Sidecar | Unresolvable`:
+1. log mode: `Sidecar.from_declaration(run.started.sidecar)`. This is a new full
+   rehydration (breakdown, meta, waive, sanity, observe), replacing the lossy
+   `_sidecar_from_declaration`. The append-only declaration needs no sha recheck;
+2. else the live file at `run.sidecar_path` whose sha256 equals `runs.sidecar_sha256`;
+3. else `git show refs/bathos/runs/<run_id>:<relpath>` with a matching sha;
 4. else `Unresolvable`.
+Only the run-time sidecar counts, so a later waiver or `[breakdown]` never passes. Runs with
+no sidecar are outside this gate.
 
-Only the run-time sidecar counts, so a waiver or `[breakdown]` added after the run never
-passes. Runs with no sidecar (`--no-sidecar`, empty sha) are outside this gate. They cannot
-carry a pre-registered aggregate verdict, and the existing bypass signals already count them.
+**Check** `breakdown_gate(run, sidecar)` fails if `uncovered_aggregates(sidecar)` is
+non-empty with no run-time `waive`, or if the effective label names a non-residual
+`OutcomeSpec`, `[breakdown]` is declared, and summary columns are missing from the metadata.
 
-**Check.** `breakdown_gate(run, sidecar)` fails if `uncovered_aggregates(sidecar)` is
-non-empty and there is no run-time `waive`, or if `[breakdown]` is declared and the run's
-recorded metadata lacks a required summary column.
+**Gate points** (each states its claim-bound predicate):
+- `bth run --campaign`: after the sidecar parse (≈861), with a fresh read-only connection
+  (the earlier one is closed at ≈806). Predicate: `claim_path IS NOT NULL`. It refuses before
+  compute is spent.
+- `_add_run_to_campaign_impl`: widen the queries to also select `claim_path`,
+  `sidecar_sha256` and `metadata`. Gate after the run-row read, **before** `threshold_set`
+  (≈591). Predicate: `claim_path IS NOT NULL`.
+- `register_claim`: over all members. `--force` does not bypass.
+- `conclude_campaign`: after the member list is built (≈1228). Predicate:
+  `claim_path and registered_sha`, as the Union Gate uses. Confirmation/sequential modes
+  **raise**; exploration mode warns. This intentionally departs from the downgrade-to-
+  `confounded` style of the existing gates, per the user's decision. `force_verdict` does not
+  bypass.
+- `link_cool_runs_to_campaigns` is not gated (A7); register and conclude backstop it.
 
-**Gate points**, only when the campaign is claim-bound at that moment:
-- `bth run --campaign`: after sidecar parse, before spawn (`runner.py` ≈795). It refuses
-  before compute is spent.
-- `_add_run_to_campaign_impl`: after the run-row read (≈513), **before** the `threshold_set`
-  emit (≈591), so a refused run never locks a threshold.
-- Backstops over **all** members (they cover `link_cool_runs_to_campaigns`, which must not
-  raise, and `campaign_run.imported`): `register_claim` (claim-bound starts here) and
-  `conclude_campaign`. `--force` on register does **not** bypass; a run-time waiver does.
-- `Unresolvable` on a claim-bound campaign refuses with its own code.
+**Errors.** `class BreakdownRefused(CampaignError, RuntimeError)`, registered in
+`EXCEPTION_TO_CODE` as `CAMPAIGN_ERROR`. Its `.code` is one of `BREAKDOWN_MISSING`,
+`SIDECAR_UNVERIFIABLE`, `FORK_RECORD_MISSING`; all three are added to `BathosErrorCode` and
+`RESOLUTION_HINTS`. It is caught first at `campaign_add_tool` (which now returns
+`error_code = exc.code`), `_claim_register_sync`, `traced_tool` and the CLI handlers.
 
-**Errors.** `class BreakdownRefused(CampaignError, RuntimeError)` with `.code` in
-{`BREAKDOWN_MISSING`, `SIDECAR_UNVERIFIABLE`}. Both codes are added to `BathosErrorCode`,
-`EXCEPTION_TO_CODE` and `RESOLUTION_HINTS`. The exception is caught **first** at
-`campaign_add_tool` (which now returns `error_code`), `_claim_register_sync`, `traced_tool`'s
-`CampaignError` branch, and the CLI handlers.
+**Visibility.** `bth campaign review` lists each member's run-time waiver, read from the
+resolved sidecar.
 
-**Visibility.** `bth campaign review` lists each member's run-time waiver text, read from the
-resolved sidecar (no event-schema change).
+### D4. Rule card STAT-005 (same commit as the lint)
 
-### D4. Rule card STAT-005 (same commit as the lint, A14)
-
-`agent_assets/corpus/stat/STAT-005_aggregate-verdict-breakdown.md`,
-`source_check = "check_aggregate_without_breakdown"`. New context column
-`has_uncovered_aggregate` (bool, from `uncovered_aggregates`), with
+`source_check = "check_aggregate_without_breakdown"`, context column
+`has_uncovered_aggregate` (one line in `build_context`, A14), and
 `applies_when = "has_uncovered_aggregate"`. The body covers the 78db9e04 story, reading
-`n_over` / `second` / `median` before the maximum, and the regex's known misses.
+`n_over`/`second`/`median` before the maximum, and the known misses.
 
 ### D5. Postmortem `[[amendments]]` (format 2 only)
 
 ```toml
-format = 2                                  # top-level; written by the new scaffold
+format = 2
 [[amendments]]
 analysis_run_id = "797b791e"
-amends_run_id = ""                          # required in campaign-scoped postmortems; defaults to run_id
-kind = "distributional_outlier"             # distributional_outlier | reanalysis | correction
-outlier_units = ["binder_17"]               # required for distributional_outlier
-effect = "verdict_contextualized"           # verdict_unchanged | verdict_contextualized | verdict_changed
+amends_run_id = ""                       # required in campaign-scoped postmortems
+kind = "distributional_outlier"          # distributional_outlier | reanalysis | correction
+outlier_units = ["binder_17"]
+effect = "verdict_contextualized"        # verdict_unchanged | verdict_contextualized | verdict_changed
 note = "1 of 24 binders over; median binder max 0.004 A"
 ```
 
-Amendments are post-verdict by definition. The v1 self-reported
-`preregistered_after_verdict` is dropped as uninformative.
-
-**Validation signature.** `validate_postmortem(..., run_lookup: Callable[[str], Run | None] | None)`.
-`ValidationResult` gains `warnings: list[str]`. When `run_lookup` is None, run-dependent
-checks are emitted as `warnings` ("skipped: no catalog"), never silently skipped.
-`postmortem_validate_tool` and `obligations.discharge_from_postmortem` pass a lookup over
-the log index or warm tier.
+**Validation plumbing.** `validate_postmortem(..., run_lookup=None)`; `ValidationResult` gains
+`warnings`. `run_lookup` feeds **only** format-2 checks. Callers keep passing `run=None`, so
+the existing drift block (A11) does not newly fire on format-1 files. With `run_lookup`
+absent, run-dependent checks become warnings ("skipped: no catalog"). `[fork]` or
+`[[amendments]]` present without `format = 2` is a warning ("not enforced: add format = 2").
 
 Errors (format 2): `analysis_run_id` unresolvable or equal to the amended run;
-`distributional_outlier` with empty `outlier_units`; `effect = verdict_changed` while
-`verdict_override = "none"`. An amendment never alters `runs.outcome`. Changing a verdict goes
-through the existing override, which itself pins the outcome (`compact.py:1270`); that is the
-only path, and it leaves its own trail.
+`distributional_outlier` with empty `outlier_units`; `verdict_changed` with
+`verdict_override = "none"`. Amendments never alter `runs.outcome`; only the existing
+override does (`compact.py:1270`).
 
-**Rendering.** `bth postmortem show`, `postmortem_get` and `bth campaign review` render
-amendments from the postmortem file, with no run-schema change. They show regardless of
-HEAD drift (`postmortem.py:280`), with a drift banner. `amendment_removed` (a previously
-applied sha listed an amendment the current file drops) is a **warning**, enforced only in
-log mode, where applied shas are events.
+**Rendering** from the file in `bth postmortem show`, `postmortem_get` and campaign review.
+Amendments show regardless of drift, with a banner. `amendment_removed` is a warning in log
+mode only.
 
-### D6. Postmortem `[fork]` for near-bound results (format 2 only)
+### D6. Near-bound runs and `[fork]` (format 2), enforced by the obligations ledger
+
+`near_bound(sidecar, results) -> list[NearBound]` (pure; `results` parsed from
+`runs.metadata`, A17; a missing, None, NaN or non-numeric value means "unevaluated", never
+near-bound). For each aggregate with `bound`:
+- **single_unit** (parameter-free): the bound is crossed strictly in the worst direction and
+  `A__n_over == 1`. This fires on 78db9e04.
+- **margin**: `|A - bound| <= margin`. The default when `bound != 0` is
+  `0.10 * |bound|`. **The 10 % is arbitrary**, a default chosen so the check is never off.
+  It is frozen in the run-time sidecar, and a false positive costs one fork record, never a
+  block. Authors should set `margin` from the instrument's known noise floor where one exists.
+  The band is symmetric on purpose: just under the bound is as fragile as just over.
+
+**At run end (exit 0):** if `near_bound` is non-empty, print a stderr advisory and open
+obligation trigger **`near_bound`** for the run. `near_bound` is added to `TRIGGERS` and
+`WIRED_TRIGGERS`, and the closed-set tests are updated. It **defaults ON**, unlike the four
+existing triggers. The ledger's default-OFF rationale (`obligations.py:20-24`) is to avoid
+retroactively burdening every existing script; `near_bound` fires only for sidecars that
+declare the new `[breakdown]` `bound`, so no existing script is touched.
+`BTH_OBLIGATION_NEAR_BOUND=0` disables it.
+
+**Discharge:** a format-2 postmortem whose `discharges` names the obligation, with a valid
+`[fork]`:
 
 ```toml
 [fork]
@@ -204,75 +233,69 @@ cited = false
 follow_up_run_ids = []
 ```
 
-**Trigger: the run is near-bound.** Take the effective label: `verdict_override` if not
-`none`, else `tentative_outcome` for observation classes (`compact.py:1273-1280,1333-1334`),
-else `outcome`. The run is near-bound if either:
-- that label is `marginal`, or its `OutcomeSpec` sets `is_marginal = true`; or
-- for some `[breakdown.aggregates.A]` with `bound` and `near`, the recorded value satisfies
-  `|A - bound| <= near * |bound|`. This fires on 78db9e04 (0.521 against 0.5 ± 0.05).
+Fork errors: missing `[fork]` or empty `reason` while discharging `near_bound`;
+`choice = "stop"` with `cited = true`. Format-1 postmortems never discharge `near_bound`.
+The scaffold pre-fills `format = 2`, an uncommented empty `[fork]`, and the obligation id in
+`discharges` when one is open.
 
-**Validation** (format 2, run resolvable): near-bound and no `[fork]`, or empty `reason` →
-error. `choice = "stop"` with `cited = true` → error. Format-1 postmortems are untouched (no
-retroactive invalidation; `discharge_from_postmortem` keeps working).
-
-**Scaffold.** When the run is near-bound, the scaffold writes `format = 2` and an uncommented
-`[fork]` with `choice = ""` and `reason = ""`, which validation then requires to be filled.
-
-**Claim-bound enforcement at conclude, not at add.** Refusing near-bound runs at add would be
-selective inclusion, and the postmortem is normally written after add. Instead,
-`conclude_campaign` on a claim-bound campaign refuses (`BreakdownRefused`, code
-`FORK_RECORD_MISSING`) while any near-bound member lacks a postmortem with
-`status != "draft"` and a valid `[fork]` with `cited = true`. The conclude report records
-that postmortem's sha256.
+**Conclude:** open `near_bound` obligations are listed for every campaign, as all
+obligations are. On a claim-bound confirmation/sequential campaign, an open `near_bound`
+obligation for a member, or a discharging postmortem with `cited = false`, raises
+`BreakdownRefused(FORK_RECORD_MISSING)`. No refusal at add, which would bias which runs get
+included.
 
 ## 3. Out of scope
 
-- Estimand / null-role discipline (#2677). Keep `[breakdown].unit` reusable as `estimand.unit`.
-- Exploratory threshold-setting (#2945).
-- Auto-computing breakdowns: the project's script emits the columns.
-- Scanning `[differential].metric` and benchmark metrics for aggregates (follow-up debt).
+Estimand discipline (#2677; keep `unit` reusable), exploratory thresholds (#2945),
+auto-computed breakdowns, aggregates in `[differential].metric` and benchmark metrics
+(follow-up debt).
 
 ## 4. Fixer tasks (one commit each)
 
 | Task | Scope | Tests |
 |---|---|---|
-| T0 | Probe A9 (WIP snapshot contains an untracked sidecar?); confirm `run.started` snapshot shape for a new dataclass field | spike, throwaway |
-| T1 | `BreakdownBlock` parse + validate (D1); `uncovered_aggregates`; `validate_sidecar` warning (D2a); `_result_schema_complete` excludes summary columns; run-end emission check | `tests/test_breakdown_sidecar.py`: parse/validate errors; regex on real lathex names: hits `e_max_placement`, `p_max_iptm`, `max_abs_delta`, `min_dist`; misses `n_max`, `is_inf`, `min_samples`, `kendall_tau`; prefix family; meta opt-in; warning printed by `bth run`; exit-0 missing column → event, outcome unchanged; non-zero exit recovery unchanged |
-| T2 | `check_aggregate_without_breakdown` + STAT-005 + `has_uncovered_aggregate` (single commit, A14) | `tests/test_breakdown_lint.py` + corpus tests stay green |
-| T3 | `resolve_run_sidecar`; `breakdown_gate`; `BreakdownRefused` + codes + hints + catch sites; gates at run --campaign, add, register, conclude | `tests/test_breakdown_gate.py`: claim-bound refuses at each point; unbound accepts; run-time waiver accepts; post-hoc waiver refused; sha mismatch → git-show path; unresolvable → `SIDECAR_UNVERIFIABLE`; refused add leaves no `threshold_set`; `link_cool_runs_to_campaigns` never raises and the register backstop catches it; MCP returns `error_code` |
-| T4 | `ValidationResult.warnings`; `run_lookup` plumbing at both callers | `tests/test_postmortem_validate_lookup.py` |
-| T5 | D5 amendments (format 2) + rendering | `tests/test_postmortem_amendments.py` |
-| T6 | D6 near-bound, fork validation, scaffold, conclude gate | `tests/test_postmortem_fork.py`, incl. a 78db9e04-shaped fixture: exploration stage, `e_max_placement = 0.521`, `bound = 0.5`, `near = 0.1` → near-bound |
-| T7 | Skill sections (`using-bathos`, `bathos-rigor-gates`), CHANGELOG | — |
+| T0 | Probe A9 (WIP snapshot with untracked sidecar) | spike |
+| T1 | `BreakdownBlock` parse/validate incl. prefix expansion; `uncovered_aggregates`; stderr surfacing at ≈861; `validate_sidecar` warnings; emission check; `_result_schema_complete` exclusion | `tests/test_breakdown_sidecar.py`: lathex names hit (`e_max_placement`, `p_max_iptm`, `max_abs_delta`, `min_dist`) and miss (`n_max`, `is_inf`, `min_samples`, `kendall_tau`, `e_max_placement__n_over`, int columns); `capsys` asserts stderr from a real `bth run` in a non-enforced dir; residual run exempt from the emission check |
+| T2 | Lint + STAT-005 + `has_uncovered_aggregate` | `tests/test_breakdown_lint.py`; corpus tests green |
+| T3 | `Sidecar.from_declaration` (full) replacing the lossy rebuild | round-trip test against a pre-v3 `run.started` snapshot |
+| T4 | Resolver, `breakdown_gate`, `BreakdownRefused` and codes/hints/catch sites, four gate points | `tests/test_breakdown_gate.py`: each gate; unbound accepts; run-time waiver accepts; post-hoc waiver refused; residual run accepted; no `threshold_set` after a refused add; link path never raises and the register backstop catches it; MCP `error_code`; `force_verdict` does not bypass; exploration conclude warns |
+| T5 | `ValidationResult.warnings`, `run_lookup` (format-2 only) | format-1 files unchanged under drift |
+| T6 | D5 amendments + rendering | `tests/test_postmortem_amendments.py` |
+| T7 | D6 `near_bound` (pure fn, run-end advisory, obligation trigger default ON, fork discharge, scaffold, conclude) | 78db9e04 fixture (exploration, `bound = 0.5`, 0.521, `n_over = 1`) opens `near_bound` without blocking; margin trigger; NaN unevaluated; `bound = 0` validation; discharge by format-2 fork; claim-bound conclude raises |
+| T8 | Skills (`using-bathos`, `bathos-rigor-gates`), CHANGELOG | — |
 
-Narrow pytest per task locally; full suite on CI. A reviewer with a different lens signs off.
+Narrow pytest per task locally; full suite on CI; a reviewer with a different lens.
 
 ## 5. Risks
 
 | Risk | Mitigation |
 |---|---|
-| Regex noise | WARNING outside claim-bound; counter/flag exclusion; waiver; lathex-name tests |
-| Regex misses | Meta opt-in; STAT-005 names the known misses |
-| `near` chosen after the fact | `near` lives in the run-time sidecar; the resolver ignores later edits |
-| Existing claim-bound campaigns break at next register/conclude | CHANGELOG; a run-time waiver is not retrofittable, so the honest remedy for an old run is a re-run or narrowing the claim. This is intended for cited results |
-| Legacy-mode runs whose sidecar changed and whose WIP snapshot lacks it | `SIDECAR_UNVERIFIABLE` on claim-bound only; T0 sizes the population |
-| Amendments soften verdicts | They cannot touch `runs.outcome`; `verdict_changed` requires the override path |
+| Regex noise / misses | Type and name exclusions, meta opt-in, waiver; tested on real lathex names |
+| Arbitrary 10 % margin | Stated as arbitrary; author-settable; costs a record, never a block; single_unit trigger is parameter-free |
+| `near_bound` defaulting ON breaks the ledger convention | Scoped to new `[breakdown]` bounds; env opt-out; reasoning recorded |
+| Existing claim-bound campaigns break at register/conclude | CHANGELOG; the remedy is a re-run or a narrowed claim, intended for cited results |
+| Unresolvable legacy sidecars | `SIDECAR_UNVERIFIABLE` on claim-bound only; T0 sizes it |
+| Amendments soften verdicts | Cannot touch `runs.outcome`; `verdict_changed` requires the override |
 
 ## 6. Adversarial review log
 
-**Cycle 1** (challenger then defender, both Sonnet; reports in `.praxia/subagent_outputs/`
-`toolu_01CntgWuq7hyxt7jFYQcoDby.1.md`, `toolu_01DRbSo7x16MbZnrK9oCR5LV.1.md`). 13 findings
-(2 blocking, 9 major, 2 minor); defender conceded or partly conceded all, rebutted none. v2 changes:
-- B1 run --campaign bypass → gates at run --campaign + add; register/conclude backstops; compaction link not gated.
-- B2 no sha resolver / post-hoc waiver / A10 false → `resolve_run_sidecar`, run-time-only waiver, exit-0 emission check.
-- M postmortem validate lacks run → `run_lookup` + warnings channel.
-- M 78db9e04 was exploration, not marginal → effective-label + near-bound trigger.
-- M summary columns could not separate 1 from 3 of 24 → `n_over`, `second`, defined `median`, `direction`.
-- M selective inclusion / ordering → fork enforced at conclude, non-draft, sha-bound.
-- M retroactive invalidation → `format = 2` scoping.
-- M card applies_when too broad; T2/T4 split breaks corpus test → `has_uncovered_aggregate`; merged task.
-- M unreachable error code → `BreakdownRefused` subclass, catch-first sites.
-- M rendering/drift → render from file, show despite drift.
-- M regex FP/FN → `_columns_referenced`, counter exclusion, prefix families, no SQL-wrapper clause.
-- m A6b verified; verdict_changed semantics stated.
-- New (defender): event keys fixed → waivers read from the resolved sidecar.
+**Cycle 1**: challenger `toolu_01CntgWuq7hyxt7jFYQcoDby.1.md`, defender
+`toolu_01DRbSo7x16MbZnrK9oCR5LV.1.md`. 13 findings (2 blocking, 9 major, 2 minor), none
+rebutted. v2 fixed: campaign-entry bypass, missing sha resolver and post-hoc waivers,
+postmortem validation without a run, the 78db9e04 premise, weak summary columns, selective
+inclusion, retroactive invalidation, card scope, error reachability, rendering, regex.
+
+**Cycle 2**: challenger (no blocking; 4 major, 6 minor), defender
+`toolu_01K4UFnV7Ef88g2VwRxYCoxh.1.md` (8 conceded, 2 partial; STAT-005 context sub-point
+rebutted). v3 changes:
+- M1 warnings never reached the terminal → explicit stderr at ≈861, unconditional; A3 retagged false.
+- M2 no fork forced for unblocked runs; `is_marginal` nonexistent; arbitrary `near` → parameter-free `single_unit` trigger, absolute `margin` with an honest default, `near_bound` obligation (default ON, reasoned), conclude enforcement.
+- M3 regex self-flagging → `__` skip, float-only, trailing-token exclusions.
+- M4 residual runs refused → summary columns required only for non-residual labels.
+- m5 three codes / name-keyed map → `CAMPAIGN_ERROR` registration + `.code`.
+- m6 gate anchors → after ≈861 with a fresh read-only connection; widened queries.
+- m7 lossy declaration rebuild → `Sidecar.from_declaration`.
+- m8 conclude placement and predicates → named per site; raise vs downgrade stated; `force_verdict` no bypass.
+- m9 drift block → `run_lookup` format-2 only; format-less warning.
+- m10 value source, NaN, strictness, `bound = 0`, wildcard families → specified.
+- New (defender): obligations ledger reused instead of a parallel mechanism.
