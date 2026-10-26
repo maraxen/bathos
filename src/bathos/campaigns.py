@@ -521,7 +521,9 @@ def _add_run_to_campaign_impl(
         claim_row = db.execute(
             "SELECT claim_path FROM campaigns WHERE id = ?", [campaign_id]
         ).fetchone()
-    except duckdb.Error:
+    except (duckdb.BinderException, duckdb.CatalogException):
+        # DuckDB reports a missing column as a BinderException (a missing table as a
+        # CatalogException); any other error is a real failure and propagates.
         claim_row = None
     campaign_claim_path = claim_row[0] if claim_row else None
 
