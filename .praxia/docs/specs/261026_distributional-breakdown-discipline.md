@@ -84,7 +84,8 @@ bound = 0.5                             # optional judgement bound
 margin = 0.05                           # optional absolute near-bound band (D6); see default below
 ```
 
-Aggregate keys may end in `*` (`e_max_placement_*`). The prefix expands over **float**
+Aggregate keys may end in `*` (`e_max_placement_*`). `*` is not valid in a bare TOML key, so a
+prefix key must be quoted: `[breakdown.aggregates."e_max_placement_*"]`. The prefix expands over **float**
 `[result_schema]` keys **that contain no `__`**, so a prefix never matches its own summary
 columns (`e_max_placement__second`). An unmatched prefix is a validation error, and so is an
 explicit aggregate key containing `__`. Each expanded column is an aggregate with the same
