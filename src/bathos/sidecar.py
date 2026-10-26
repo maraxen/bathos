@@ -267,6 +267,8 @@ class Sidecar:
     question: str | None = None
     observe: ObserveBlock | None = None
     calibrate: CalibrateBlock | None = None
+    # Top-level [outputs] roots (all sidecar kinds); None when the table is absent.
+    outputs: OutputsBlock | None = None
     novel: bool = False
     # benchmark fields
     baseline_ref: str = ""
@@ -341,6 +343,22 @@ class ObserveBlock:
     looking_for: str | None = None
     sanity: list[str] = field(default_factory=list)
     planned_tests: int | None = None
+
+
+@dataclass(frozen=True)
+class OutputsBlock:
+    """Top-level `[outputs]` block: the files and directories a run declares as its whole output set
+    (output-tiering standard, spec 261023 section 3.1).
+
+    `roots` are POSIX paths relative to the run's live worktree root, expanded to regular files at run end.
+    Distinct from `[observe].outputs`, which names what an exploratory run commits to looking at.
+    """
+
+    roots: tuple[str, ...] = ()
+
+
+# Every key parse_sidecar accepts in the top-level [outputs] table; anything else refuses.
+OUTPUTS_KEYS: frozenset[str] = frozenset({"roots"})
 
 
 @dataclass(frozen=True)
@@ -601,6 +619,10 @@ def parse_sidecar(path: Path) -> Sidecar:
             kind=sidecar.kind.value,
         )
 
+    # Parse [outputs] block (optional, all sidecar kinds): the declared output roots.
+    if "outputs" in data:
+        sidecar.outputs = _parse_outputs(data["outputs"], path)
+
     # Parse [review] block (optional, build-order step 2). Applies to every sidecar kind,
     # not just experiments: a benchmark or validation script can equally rest on prior work.
     if "review" in data:
@@ -666,6 +688,29 @@ def parse_sidecar(path: Path) -> Sidecar:
         sidecar.budget = _parse_budget(data["budget"], path)
 
     return sidecar
+
+
+def _parse_outputs(raw, path: Path) -> OutputsBlock:
+    """Parse and validate the top-level `[outputs]` table. Strict: an unknown key, a non-list `roots`, or a
+    root that is absolute, has `..`, or is not a string refuses (a typo must not silently declare nothing)."""
+    from bathos.output_tiers.reference import check_root_syntax
+
+    if not isinstance(raw, dict):
+        raise SidecarError(f"{path}: [outputs] must be a table")
+    unknown = sorted(set(raw) - OUTPUTS_KEYS)
+    if unknown:
+        raise SidecarError(
+            f"{path}: unknown key(s) in [outputs]: {', '.join(repr(k) for k in unknown)} "
+            f"(allowed: {', '.join(sorted(OUTPUTS_KEYS))})"
+        )
+    roots = raw.get("roots", [])
+    if not isinstance(roots, list):
+        raise SidecarError(f"{path}: [outputs].roots must be a list of paths")
+    for value in roots:
+        problem = check_root_syntax(value)
+        if problem:
+            raise SidecarError(f"{path}: [outputs].roots entry {value!r} {problem}")
+    return OutputsBlock(roots=tuple(roots))
 
 
 def _check_sidecar_relative_path(

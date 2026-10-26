@@ -4437,6 +4437,319 @@ async def mcp_outputs_summary_tool(
     )
 
 
+def _output_tier_error_result(exc: Exception) -> dict:
+    """Shape an output-tiering refusal as the tool error dict: the `error` text leads with the code (the CLI
+    prints only that text), `error_code` carries it for MCP callers."""
+    from bathos.cluster import MyxcelCapabilityGapError
+    from bathos.output_tiers.config import OutputTiersConfigError
+    from bathos.output_tiers.reference import OutputTierError
+    from bathos.runlog.emit import RunNotLaunchedError
+
+    if isinstance(exc, OutputTierError):
+        try:
+            code = BathosErrorCode(exc.error_code)
+        except ValueError:
+            code = BathosErrorCode.INVALID_PARAM
+        message = f"{exc.error_code}: {exc.detail}"
+    elif isinstance(exc, OutputTiersConfigError | MyxcelCapabilityGapError):
+        try:
+            code = BathosErrorCode(exc.error_code)
+        except ValueError:
+            code = BathosErrorCode.INVALID_PARAM
+        message = f"{exc.error_code}: {exc}"
+    elif isinstance(exc, RunNotLaunchedError):
+        code = BathosErrorCode.CATALOG_ERROR
+        message = f"catalog_error: {exc}"
+    else:  # callers only pass the two types above; never mislabel anything else as a refusal
+        code = BathosErrorCode.INTERNAL
+        message = f"internal: {exc}"
+    return {"error": message, "error_code": code.value, "resolution_hint": RESOLUTION_HINTS[code]}
+
+
+@cisternal.tool(registry="bathos", name="outputs_hash")
+@traced_tool
+async def mcp_outputs_hash_tool(
+    run_id: str,
+    worktree_root: str = "",
+    catalog_dir: str | None = None,
+) -> dict:
+    """Re-hash a run's live output files against its reference hashes (read-only)."""
+    return outputs_hash_tool(
+        run_id=run_id, worktree_root=worktree_root, catalog_dir=catalog_dir or ""
+    )
+
+
+@cisternal.tool(registry="bathos", name="outputs_adopt")
+@traced_tool
+async def mcp_outputs_adopt_tool(
+    run_id: str,
+    root: list[str] | None = None,
+    reason: str = "",
+    retract: str = "",
+    worktree_root: str = "",
+    dry_run: bool = False,
+    catalog_dir: str | None = None,
+) -> dict:
+    """Adopt output files of a finished pre-standard run into its reference hashes, or retract an adopt."""
+    return outputs_adopt_tool(
+        run_id=run_id,
+        root=root,
+        reason=reason,
+        retract=retract,
+        worktree_root=worktree_root,
+        dry_run=dry_run,
+        catalog_dir=catalog_dir or "",
+    )
+
+
+@cisternal.tool(registry="bathos-cli", name="outputs_hash", cli_group="outputs", cli_name="hash")
+def outputs_hash_tool(
+    run_id: str = "",
+    worktree_root: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Re-hash a run's live output files against its reference hashes (read-only).
+
+    Reports match / drift / missing per path. `run_id` may be a unique prefix. `worktree_root` is required
+    only for an imported run, whose recorded root is not trustworthy.
+    """
+    from bathos.output_tiers.adopt import hash_outputs
+    from bathos.output_tiers.reference import OutputTierError
+    from bathos.runlog.emit import RunNotLaunchedError
+
+    if not run_id:
+        return {"error": "run_id parameter is required"}
+    try:
+        return hash_outputs(
+            _get_catalog_dir(catalog_dir or None),
+            run_id,
+            worktree_root=worktree_root or None,
+        )
+    except (OutputTierError, RunNotLaunchedError) as e:
+        return _output_tier_error_result(e)
+
+
+@cisternal.tool(registry="bathos-cli", name="outputs_adopt", cli_group="outputs", cli_name="adopt")
+def outputs_adopt_tool(
+    run_id: str = "",
+    root: list[str] | None = None,
+    reason: str = "",
+    retract: str = "",
+    worktree_root: str = "",
+    dry_run: bool = False,
+    catalog_dir: str = "",
+) -> dict:
+    """Adopt output files of a finished pre-standard run into its reference hashes.
+
+    Hashes each `root` now and records the paths that have no run_end entry as an `adopted` event. A relative
+    root resolves against the run's worktree root. Closed to a run that declared `[outputs] roots`
+    (adopt_closed), and never re-references a path whose bytes differ from the run's own record
+    (run_end_conflict). `retract` takes the eid of an earlier adopt event and withdraws it instead.
+    `dry_run` lists the files and byte total and writes nothing.
+    """
+    from bathos.output_tiers.adopt import adopt_outputs, retract_adopt
+    from bathos.output_tiers.reference import OutputTierError
+    from bathos.runlog.emit import RunNotLaunchedError
+
+    if not run_id:
+        return {"error": "run_id parameter is required"}
+    try:
+        cat_dir = _get_catalog_dir(catalog_dir or None)
+        if retract:
+            if root:
+                raise OutputTierError("invalid_param", "--retract takes no --root")
+            return retract_adopt(cat_dir, run_id, retract, reason, dry_run=dry_run)
+        return adopt_outputs(
+            cat_dir,
+            run_id,
+            list(root or []),
+            reason,
+            worktree_root=worktree_root or None,
+            dry_run=dry_run,
+        )
+    except (OutputTierError, RunNotLaunchedError) as e:
+        return _output_tier_error_result(e)
+
+
+@cisternal.tool(registry="bathos", name="cold_outputs")
+@traced_tool
+async def mcp_cold_outputs_tool(
+    run_id: str = "",
+    all_uncopied: bool = False,
+    profile: str = "",
+    mirror: str = "",
+    dry_run: bool = False,
+    supersede: bool = False,
+    reason: str = "",
+    break_lock: bool = False,
+    clean_partials: bool = False,
+    worktree_root: str = "",
+    catalog_dir: str | None = None,
+) -> dict:
+    """Write a run's reference-hashed outputs to the cold profile (and a mirror) through myxcel."""
+    return cold_outputs_tool(
+        run_id=run_id,
+        all_uncopied=all_uncopied,
+        profile=profile,
+        mirror=mirror,
+        dry_run=dry_run,
+        supersede=supersede,
+        reason=reason,
+        break_lock=break_lock,
+        clean_partials=clean_partials,
+        worktree_root=worktree_root,
+        catalog_dir=catalog_dir or "",
+    )
+
+
+@cisternal.tool(registry="bathos", name="warm_outputs")
+@traced_tool
+async def mcp_warm_outputs_tool(
+    run_id: str,
+    to: str,
+    worktree_root: str = "",
+    catalog_dir: str | None = None,
+) -> dict:
+    """Restore a run's reference-hashed outputs from a verified cold/mirror copy into a new local directory."""
+    return warm_outputs_tool(
+        run_id=run_id, to=to, worktree_root=worktree_root, catalog_dir=catalog_dir or ""
+    )
+
+
+@cisternal.tool(registry="bathos", name="outputs_where")
+@traced_tool
+async def mcp_outputs_where_tool(
+    run_id: str,
+    catalog_dir: str | None = None,
+) -> dict:
+    """List the recorded copies (warm, cold, mirror) of a run's outputs and the config layer that chose each."""
+    return outputs_where_tool(run_id=run_id, catalog_dir=catalog_dir or "")
+
+
+@cisternal.tool(registry="bathos-cli", name="cold_outputs", cli_name="cold")
+def cold_outputs_tool(
+    run_id: str = "",
+    all_uncopied: bool = False,
+    profile: str = "",
+    mirror: str = "",
+    dry_run: bool = False,
+    supersede: bool = False,
+    reason: str = "",
+    break_lock: bool = False,
+    clean_partials: bool = False,
+    worktree_root: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Write a run's reference-hashed outputs to the cold profile, then the mirror, through myxcel.
+
+    Builds the archive and manifest from the run's reference hashes (a drifted live file refuses with
+    outputs_drifted before anything is uploaded), takes the remote lock first, resumes an interrupted write,
+    never overwrites a final name. `run_id` may be a unique prefix; `all_uncopied` covers the current project's
+    completed runs with no verified copy on the profile and continues past a failing run. `profile` / `mirror`
+    name myxcel profiles (see `bth outputs where` for the layer that chose them). `dry_run` lists files, bytes
+    and destinations and writes nothing. `break_lock` removes a dead writer's lock and then resumes.
+    `supersede` + `reason` renames an existing pair aside and writes a fresh one. `worktree_root` is required
+    only for an imported run. Under SLURM each run prints one JSON progress line on stdout.
+    """
+    from bathos.cluster import MyxcelCapabilityGapError
+    from bathos.output_tiers.cold import cold_outputs
+    from bathos.output_tiers.config import OutputTiersConfigError
+    from bathos.output_tiers.reference import OutputTierError
+    from bathos.runlog.emit import RunNotLaunchedError
+
+    if not run_id and not all_uncopied:
+        return {"error": "run_id parameter is required (or all_uncopied)"}
+    try:
+        result = cold_outputs(
+            _get_catalog_dir(catalog_dir or None),
+            run_id,
+            all_uncopied=all_uncopied,
+            profile=profile or None,
+            mirror=mirror or None,
+            dry_run=dry_run,
+            supersede=supersede,
+            reason=reason,
+            break_lock=break_lock,
+            clean_partials=clean_partials,
+            worktree_root=worktree_root or None,
+        )
+    except (
+        OutputTierError,
+        OutputTiersConfigError,
+        MyxcelCapabilityGapError,
+        RunNotLaunchedError,
+    ) as e:
+        return _output_tier_error_result(e)
+    if result.get("error_code") and "resolution_hint" not in result:
+        with contextlib.suppress(ValueError):
+            result["resolution_hint"] = RESOLUTION_HINTS[BathosErrorCode(result["error_code"])]
+    return result
+
+
+@cisternal.tool(registry="bathos-cli", name="warm_outputs", cli_name="warm")
+def warm_outputs_tool(
+    run_id: str = "",
+    to: str = "",
+    worktree_root: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Restore a run's reference-hashed outputs from a verified cold (or mirror) copy into a NEW local directory.
+
+    `to` must not exist. The archive and manifest are fetched through `myxcel cold get`, both sha256s are
+    checked before the tar is opened, the member set must equal the manifest exactly (no `..`, absolute, link or
+    device members), the files are extracted into a sibling `<to>.bth-warm-<id>.partial/`, every file is hashed
+    against the manifest and the run's reference hashes, and the directory is renamed into place with
+    `renameat2(RENAME_NOREPLACE)`, so it never replaces anything. Records the copy as tier=warm. `run_id` may be
+    a unique prefix. `worktree_root` is required only for an imported run.
+    """
+    from bathos.cluster import MyxcelCapabilityGapError
+    from bathos.output_tiers.config import OutputTiersConfigError
+    from bathos.output_tiers.reference import OutputTierError
+    from bathos.output_tiers.warm import warm_outputs
+    from bathos.runlog.emit import RunNotLaunchedError
+
+    if not run_id:
+        return {"error": "run_id parameter is required"}
+    if not to:
+        return {"error": "to parameter is required"}
+    try:
+        return warm_outputs(
+            _get_catalog_dir(catalog_dir or None),
+            run_id,
+            to,
+            worktree_root=worktree_root or None,
+        )
+    except (
+        OutputTierError,
+        OutputTiersConfigError,
+        MyxcelCapabilityGapError,
+        RunNotLaunchedError,
+    ) as e:
+        return _output_tier_error_result(e)
+
+
+@cisternal.tool(registry="bathos-cli", name="outputs_where", cli_group="outputs", cli_name="where")
+def outputs_where_tool(
+    run_id: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """List the recorded copies of a run's outputs (warm, cold, mirror) and the config layer that chose each.
+
+    Reads `output_copies` from the folded index; a catalog whose index predates the table shows no copies
+    until the next ingest. `run_id` may be a unique prefix.
+    """
+    from bathos.output_tiers.cold import where_outputs
+    from bathos.output_tiers.reference import OutputTierError
+    from bathos.runlog.emit import RunNotLaunchedError
+
+    if not run_id:
+        return {"error": "run_id parameter is required"}
+    try:
+        return where_outputs(_get_catalog_dir(catalog_dir or None), run_id)
+    except (OutputTierError, RunNotLaunchedError) as e:
+        return _output_tier_error_result(e)
+
+
 @cisternal.tool(registry="bathos-cli", name="campaign_add", cli_group="campaign", cli_name="add")
 def campaign_add_tool(
     run_id: str = "",
@@ -4534,16 +4847,74 @@ def verify_tool(
     catalog_dir: str = "",
     archive_dir: str = "",
     authoring: bool = False,
+    run_id: str = "",
+    profile: str = "",
+    strict: bool = False,
 ) -> dict:
-    """Verify catalog integrity across cool, warm, archive, and runlog tiers."""
-    from bathos.verify import verify_all, verify_archive, verify_cool, verify_runlog, verify_warm
+    """Verify catalog integrity across cool, warm, archive, and runlog tiers.
+
+    `tier="outputs"` is opt-in and is never part of `all`, because it needs the network: it re-reads each live
+    cold/mirror copy of a run's outputs on its host through `myxcel cold verify-file` and records the measured
+    state (`verified` / `failed` / `unverifiable`) so `bth outputs where` shows it. `run_id` (a unique prefix)
+    limits it to one run, `profile` to one myxcel profile; `strict` makes an `unverifiable` copy a failure too.
+    """
+    from bathos.verify import (
+        VerifyResult,
+        verify_all,
+        verify_archive,
+        verify_cool,
+        verify_runlog,
+        verify_warm,
+    )
 
     cat_dir = _get_catalog_dir(catalog_dir or None)
     archive_root = (
         Path(archive_dir).expanduser() if archive_dir else Path.home() / ".bth" / "archive"
     )
 
-    if tier == "cool":
+    outputs_report: dict | None = None
+    if tier == "outputs":
+        from bathos.cluster import MyxcelCapabilityGapError
+        from bathos.output_tiers.config import OutputTiersConfigError
+        from bathos.output_tiers.reference import OutputTierError
+        from bathos.output_tiers.verify import verify_outputs
+        from bathos.runlog.emit import RunNotLaunchedError
+
+        try:
+            outputs_report = verify_outputs(cat_dir, run_id, profile=profile or None, strict=strict)
+        except (
+            OutputTierError,
+            OutputTiersConfigError,
+            MyxcelCapabilityGapError,
+            RunNotLaunchedError,
+        ) as e:
+            return _output_tier_error_result(e)
+        failing = [
+            f"{c['tier']}:{c['profile']} {c['path']} {c['state']} ({c['detail']})"
+            for run in outputs_report["runs"]
+            for c in run["copies"]
+            if c["state"] == "failed" or (strict and c["state"] == "unverifiable")
+        ]
+        disagreeing = [
+            f"{run['run_id']}: {run['agree_detail']}"
+            for run in outputs_report["runs"]
+            if not run["agree"]
+        ]
+        warnings = [
+            f"{c['tier']}:{c['profile']} {c['path']} unverifiable ({c['detail']})"
+            for run in outputs_report["runs"]
+            for c in run["copies"]
+            if c["state"] == "unverifiable" and not strict
+        ]
+        results: list = [
+            VerifyResult(
+                tier="outputs",
+                ok=outputs_report["ok"],
+                warnings=warnings,
+                errors=[*failing, *disagreeing],
+            )
+        ]
+    elif tier == "cool":
         results = [verify_cool(cat_dir)]
     elif tier == "warm":
         results = [verify_warm(cat_dir)]
@@ -4581,6 +4952,15 @@ def verify_tool(
         # Singular "error" key -- see cli_render.render_or_exit -- matches the shipped
         # Typer `verify` command's `if any_errors: raise typer.Exit(1)`.
         payload["error"] = "; ".join(all_errors)
+    if outputs_report is not None:
+        # The per-run, per-copy JSON: the CLI prints it on stdout even on failure (cli_render), MCP callers get it
+        # as a field, and `error_code` is what a caller branches on (not the exit status).
+        payload["outputs_report"] = outputs_report
+        code = outputs_report.get("error_code")
+        if code:
+            payload["error_code"] = code
+            payload["resolution_hint"] = RESOLUTION_HINTS[BathosErrorCode(code)]
+            payload["error"] = f"{outputs_report['error']}: {payload.get('error', '')}"
     return payload
 
 
@@ -4603,6 +4983,7 @@ def lint_tool(project_root: str = "", concentration_threshold: int = 20) -> dict
         check_stale_scripts_without_reason,
         check_threshold_basis,
         check_todo_strings_in_scaffold,
+        check_undeclared_resume_dirs,
         check_unfired_branches,
         lint_project,
     )
@@ -4627,6 +5008,8 @@ def lint_tool(project_root: str = "", concentration_threshold: int = 20) -> dict
     )
 
     catalog_dir = _get_catalog_dir(None)
+    # Reads run.started events, which only a log-mode index has: gated by catalog_readable inside, not by bathos.db.
+    issues.extend(check_undeclared_resume_dirs(catalog_dir, project_slug=soft_project_slug() or ""))
     db_path = catalog_dir / "bathos.db"
     if db_path.exists():
         issues.extend(check_residual_rates(catalog_dir))
@@ -4694,9 +5077,19 @@ async def mcp_verify_tool(
     tier: str = "all",
     catalog_dir: str = "",
     archive_dir: str = "",
+    run_id: str = "",
+    profile: str = "",
+    strict: bool = False,
 ) -> dict:
-    """Verify catalog integrity."""
-    result = verify_tool(tier=tier, catalog_dir=catalog_dir, archive_dir=archive_dir)
+    """Verify catalog integrity. `tier="outputs"` re-reads cold/mirror output copies on their hosts (opt-in)."""
+    result = verify_tool(
+        tier=tier,
+        catalog_dir=catalog_dir,
+        archive_dir=archive_dir,
+        run_id=run_id,
+        profile=profile,
+        strict=strict,
+    )
     # verify_tool injects an "error" key for CLI rendering purposes
     # (render_or_exit's uniform contract) -- strip it here like
     # validate_sidecar's wrapper does, since "ok"/"results" already carry
@@ -5190,6 +5583,11 @@ _WIRED = cisternal.wire(
         "validate_sidecar",
         "list_outputs",
         "outputs_summary",
+        "outputs_hash",
+        "outputs_adopt",
+        "outputs_where",
+        "cold_outputs",
+        "warm_outputs",
         "campaign_add",
         "campaign_show",
         "verify",

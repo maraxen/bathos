@@ -592,6 +592,58 @@ def _campaign_findings(catalog_dir: Path) -> list[dict]:
     return findings
 
 
+def _output_copy_findings(catalog_dir: Path) -> list[dict]:
+    """Fold parity for ``output_copies`` (output tiering spec 261023, section 5.3, "Index wiring"): refold every
+    ``output_copy.*`` event in memory with the same fold ingest uses and compare with the table. A row missing
+    from the index is the signature of an event kind that ingest stored but never folded (it advances the
+    watermark past kinds it does not dispatch); an orphan row has no event behind it; a differing row means the
+    fold and the table drifted apart."""
+    from bathos.index import OUTPUT_COPIES_COLUMNS, connect_read
+    from bathos.runlog.fold_output_copies import OUTPUT_COPY_KINDS, fold_output_copy
+    from bathos.runlog.ingest import _fetch_events_by_kinds
+
+    con = connect_read(catalog_dir)
+    try:
+        events = _fetch_events_by_kinds(con, OUTPUT_COPY_KINDS)
+        cols = ", ".join(OUTPUT_COPIES_COLUMNS)
+        actual = {
+            r[0]: dict(zip(OUTPUT_COPIES_COLUMNS, r, strict=True))
+            for r in con.execute(f"SELECT {cols} FROM output_copies").fetchall()  # noqa: S608
+        }
+    finally:
+        con.close()
+
+    by_entity: dict[tuple[str, ...], list[dict]] = {}
+    for ev in events:
+        by_entity.setdefault(tuple(ev.get("entity") or []), []).append(ev)
+    expected: dict[str, dict] = {}
+    for evs in by_entity.values():
+        for row in fold_output_copy(evs):
+            expected[row["copy_id"]] = row
+
+    findings: list[dict] = []
+    for copy_id in sorted(set(expected) | set(actual)):
+        want, got = expected.get(copy_id), actual.get(copy_id)
+        if got is None:
+            detail = "missing_from_index"
+        elif want is None:
+            detail = "orphan_row"
+        elif any(want.get(c) != got.get(c) for c in OUTPUT_COPIES_COLUMNS):
+            detail = "differs_from_fold"
+        else:
+            continue
+        run_id = (want or got or {}).get("run_id")
+        findings.append(
+            {
+                "type": "output_copies_fold_mismatch",
+                "run_id": run_id,
+                "copy_id": copy_id,
+                "detail": detail,
+            }
+        )
+    return findings
+
+
 def _known_import_chains(catalog_dir: Path) -> dict[tuple[str, ...], tuple[int, str]]:
     """The already-ingested equivalent of `importer._existing_chains`
     (which reads staging JSONL files pre-cutover): `(kind, *entity,
@@ -764,6 +816,7 @@ def verify_runlog(catalog_dir: Path) -> VerifyResult:
         findings.extend(_watermark_findings(catalog_dir))
         findings.extend(_unterminated_tail_findings(catalog_dir))
         findings.extend(_campaign_findings(catalog_dir))
+        findings.extend(_output_copy_findings(catalog_dir))
         findings.extend(_legacy_findings(catalog_dir))
 
     advisory = [f for f in findings if f["type"] in _ADVISORY_FINDINGS]

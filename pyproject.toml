@@ -43,7 +43,8 @@ dependencies = [
     # sub-app and packaged bundle snapshots (src/bathos/agent_plugin.json).
     # 0.1.1a14: `bth plugin repo-bundle` (plugin/ + .claude-plugin/marketplace.json,
     # installable from GitHub) and [plugin.mcp] launch = "uvx".
-    "cisternal>=0.1.3",
+    # 0.1.4: `bth plugin install|update antigravity` (via `agy plugin install`).
+    "cisternal>=0.1.5",
     # backlog #4702: bathos/cli_cyclopts.py (the real `bth` CLI as of the final
     # cutover) wires directly against cisternal's cyclopts-based wire() --
     # declared here since it's imported directly, not just pulled in
@@ -53,6 +54,7 @@ dependencies = [
     # figure_manifest.py and campaign_report.py -- declared here so the authoring
     # payload models do not rest on an undeclared transitive dependency.
     "pydantic>=2.7",
+    "zstandard>=0.25.0",
 ]
 
 [project.optional-dependencies]

@@ -65,6 +65,43 @@ class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(
     RUNLOG_PROJECT_ID_MISSING = "runlog_project_id_missing"
     RUNLOG_MODE_REFUSED = "runlog_mode_refused"
 
+    # Output tiering (bathos.output_tiers, spec 261023_output-tiering): refusals of
+    # `bth outputs hash` / `adopt`, and of the commands built on the same reference set.
+    NO_REFERENCE_HASHES = "no_reference_hashes"
+    RUN_NOT_TERMINAL = "run_not_terminal"
+    ROOT_OUTSIDE_WORKTREE = "root_outside_worktree"
+    ROOT_MISSING = "root_missing"
+    RUN_END_CONFLICT = "run_end_conflict"
+    ADOPT_CLOSED = "adopt_closed"
+    ADOPT_EVENT_NOT_FOUND = "adopt_event_not_found"
+    WORKTREE_UNKNOWN = "worktree_unknown"
+    WORKTREE_MISSING = "worktree_missing"
+    LEGACY_PATH_UNRESOLVED = "legacy_path_unresolved"
+    SYMLINK_IN_OUTPUTS = "symlink_in_outputs"
+    SPECIAL_FILE_IN_OUTPUTS = "special_file_in_outputs"
+    RUN_NOT_FOUND = "run_not_found"
+    RUN_PREFIX_AMBIGUOUS = "run_prefix_ambiguous"
+    REQUIRES_LOG_MODE = "requires_log_mode"
+    # `bth cold` (step 6).
+    OUTPUTS_DRIFTED = "outputs_drifted"
+    NO_COLD_ROOT = "no_cold_root"
+    ARCHIVE_CONFLICT = "archive_conflict"
+    MYXCEL_CAPABILITY_GAP = "myxcel_capability_gap"
+    MYXCEL_ERROR = "myxcel_error"
+    LOCK_HELD = "lock_held"
+    COPY_VERIFY_FAILED = "copy_verify_failed"
+    COPY_UNVERIFIABLE = "copy_unverifiable"
+    COLD_RUNS_FAILED = "cold_runs_failed"
+    # `bth verify --tier outputs` (step 8).
+    OUTPUT_COPIES_FAILED = "output_copies_failed"
+    OUTPUT_COPIES_UNVERIFIABLE = "output_copies_unverifiable"
+    # `bth warm` (step 7).
+    WARM_TARGET_EXISTS = "warm_target_exists"
+    WARM_MISMATCH = "warm_mismatch"
+    NO_VERIFIED_COPY = "no_verified_copy"
+    WARM_NOREPLACE_UNSUPPORTED = "warm_noreplace_unsupported"
+    WARM_PUBLISH_FAILED = "warm_publish_failed"
+
 
 # Resolution hints registry: every BathosErrorCode member must have a non-empty entry
 RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
@@ -97,6 +134,37 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.RUNLOG_NOT_IGNORED: "Add '/.bth/log/' to .gitignore in the main checkout (or run `bth init` there) before recording runs",
     BathosErrorCode.RUNLOG_PROJECT_ID_MISSING: "Run `bth init --assign-id` in the main checkout, then commit the updated .bth.toml",
     BathosErrorCode.RUNLOG_MODE_REFUSED: "Unset BTH_LOG_MODE, or run `bth migrate --to-log` to write the real cut-over marker",
+    BathosErrorCode.NO_REFERENCE_HASHES: "The run has no reference hash set: declare [outputs] roots in its sidecar and re-run, or (a pre-standard run only) `bth outputs adopt` its output roots",
+    BathosErrorCode.RUN_NOT_TERMINAL: "Wait for the run to finish (or reap it) before adopting outputs; a running run's files are still changing",
+    BathosErrorCode.ROOT_OUTSIDE_WORKTREE: "Pass --root paths under the run's recorded worktree root (relative paths resolve against it)",
+    BathosErrorCode.ROOT_MISSING: "The --root path does not exist under the run's worktree root; check the path or restore the files first",
+    BathosErrorCode.RUN_END_CONFLICT: "A live file differs from the hash the run recorded at its end; adopt never re-references a drifted run_end path. Re-run instead",
+    BathosErrorCode.ADOPT_CLOSED: "This run declared [outputs] roots, so its reference set is closed to adopt. The fix is a new run",
+    BathosErrorCode.ADOPT_EVENT_NOT_FOUND: "No live adopt event with that eid on this run; list the run's adopt events (bth sql over events) and pass the exact eid",
+    BathosErrorCode.WORKTREE_UNKNOWN: "This run was imported and its worktree root is not trustworthy: pass --worktree-root <path> to the directory its outputs live under",
+    BathosErrorCode.WORKTREE_MISSING: "The run's recorded worktree root does not exist on this machine; restore it, or (imported runs) pass --worktree-root",
+    BathosErrorCode.LEGACY_PATH_UNRESOLVED: "A pre-standard output path cannot be placed under the worktree root; pass --worktree-root for an imported run, or accept that path is unrecoverable",
+    BathosErrorCode.SYMLINK_IN_OUTPUTS: "A symlink sits under the output roots; replace it with the real file or narrow the roots (links are never followed)",
+    BathosErrorCode.SPECIAL_FILE_IN_OUTPUTS: "A FIFO, socket or device sits under the output roots; remove it or narrow the roots",
+    BathosErrorCode.RUN_NOT_FOUND: "No run matches that id or prefix; check it with `bth list`",
+    BathosErrorCode.RUN_PREFIX_AMBIGUOUS: "The run-id prefix matches several runs; pass more characters of the id",
+    BathosErrorCode.REQUIRES_LOG_MODE: "Output tiering reads the run log; run `bth migrate --to-log` first (legacy catalogs are not supported)",
+    BathosErrorCode.OUTPUTS_DRIFTED: "A live output file differs from (or is missing against) the hash the run recorded; nothing was uploaded. A drifted run_end path is never re-referenced: re-run instead (see `bth outputs hash`)",
+    BathosErrorCode.NO_COLD_ROOT: "No cold profile resolves, or its myxcel profile has no absolute cold_root: pass --profile, set $BTH_COLD_PROFILE, [tool.bathos.outputs] cold_profile, or ~/.config/bathos/config.toml [outputs]",
+    BathosErrorCode.ARCHIVE_CONFLICT: "A final cold name already exists with different content (or only one of the pair exists: half_committed). Nothing was overwritten; to replace it, rerun with --supersede --reason <text>, which renames the old pair aside",
+    BathosErrorCode.MYXCEL_CAPABILITY_GAP: "The installed myxcel lacks the `cold` subcommands, or --clean-partials needs `myxcel cold ls` and `myxcel cold rm-partial` and one is missing; upgrade myxcel",
+    BathosErrorCode.MYXCEL_ERROR: "A myxcel cold call failed; read the message, check `myxcel socket-status`, then rerun (a rerun resumes, nothing is overwritten)",
+    BathosErrorCode.LOCK_HELD: "Another writer (or a killed one) holds <dest>/.bth-lock; if you are sure no writer is alive, rerun with --break-lock (removes the lock only, then resumes)",
+    BathosErrorCode.COPY_VERIFY_FAILED: "The remote bytes did not match what was sent; nothing was committed and this attempt's partials were removed (an older myxcel without `cold rm-partial` leaves them under their .partial-<attempt> names, named in the message). Check the host's disk and quota, then rerun with a fresh attempt",
+    BathosErrorCode.COPY_UNVERIFIABLE: "The remote bytes could not be re-read (host unreachable, Duo, sandbox); nothing was certified. Fix the connection and rerun, which resumes",
+    BathosErrorCode.COLD_RUNS_FAILED: "At least one run failed under --all-uncopied; the message names each run's error_code. Fix those runs and rerun, which skips the copied ones",
+    BathosErrorCode.OUTPUT_COPIES_FAILED: "A cold or mirror copy was re-read and its bytes differ from the recorded sha256 (or the cold and mirror records disagree). The measured state is recorded; see `bth outputs where <run>`. Nothing was changed on the host: rewrite the copy with `bth cold <run> --supersede --reason <text>`",
+    BathosErrorCode.OUTPUT_COPIES_UNVERIFIABLE: "--strict: at least one copy could not be re-read (host unreachable, Duo, sandbox), so nothing was certified; its state is recorded as unverifiable, not failed. Check `myxcel socket-status` and rerun `bth verify --tier outputs`",
+    BathosErrorCode.WARM_TARGET_EXISTS: "`bth warm --to <dir>` writes a new directory only and never replaces one, even an empty one: pick a path that does not exist (nothing at the existing path was touched)",
+    BathosErrorCode.WARM_MISMATCH: "The fetched archive, manifest or extracted files do not match the copy record, the manifest or the run's reference hashes (or the archive holds an unsafe or extra member); bathos deleted only its own staging directory and wrote nothing at --to. Run `bth verify --tier outputs`, and supersede the cold copy if it is bad",
+    BathosErrorCode.NO_VERIFIED_COPY: "The run has no verified, non-superseded cold or mirror copy to restore from; run `bth cold <run>` or `bth verify --tier outputs` (see `bth outputs where`)",
+    BathosErrorCode.WARM_NOREPLACE_UNSUPPORTED: "This kernel or filesystem lacks renameat2 RENAME_NOREPLACE, so bathos will not publish by a replacing rename; the verified copy is kept in the <dir>.bth-warm-<attempt>.partial directory named in the message: move it into place by hand, or use a filesystem that supports the flag",
+    BathosErrorCode.WARM_PUBLISH_FAILED: "The final rename of the verified staging directory failed (permissions, space, a vanished parent); the verified copy is kept in the .partial directory named in the message: fix the cause and move it into place by hand",
 }
 
 
@@ -214,4 +282,9 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     # The bth-preflight-hook could not run or parse `bth preflight` (spec 261016 P1).
     # Caught inside the hook and reported on stderr; never crosses the MCP boundary.
     "HookInternalError": BathosErrorCode.INTERNAL,
+    # Output tiering (spec 261023). Both carry their own, more specific `error_code` attribute
+    # (one of the output-tiering members above, or `invalid_param`); this is the fallback for a
+    # caller that only has the class.
+    "OutputTierError": BathosErrorCode.INVALID_PARAM,
+    "OutputTiersConfigError": BathosErrorCode.INVALID_PARAM,
 }

@@ -1120,6 +1120,10 @@ def _run_script_impl(
             "campaign_id": resolved_campaign_id or None,
             "agent_mode": resolved_mode,
         }
+        if sidecar is not None and sidecar.outputs is not None and sidecar.outputs.roots:
+            # Output-tiering standard (spec 261023 section 3.3): a run that declares [outputs]
+            # roots is a standard run, and `adopt` is closed to it.
+            started_data["outputs_declared"] = True
         # D4: run.started embeds GitState and PinResult, so it is emitted after
         # pin_run below (still before the subprocess), not here.
         pending_started: dict | None = started_data
@@ -1636,15 +1640,49 @@ def _run_script_impl(
         # run.outputs_hashed (new at run end, flag-on only -- legacy leaves
         # output_metadata to be recomputed at compact, so there is no legacy
         # write to skip here per se; this is purely additive behavior).
-        from bathos.compact import _collect_output_metadata
+        #
+        # Output-tiering standard (spec 261023 sections 3.1-3.3): the entries keep the legacy keys
+        # and add `relpath` + `phase: "run_end"`, hashed uncapped; declared [outputs] roots are
+        # expanded; a refused expansion is recorded as a tombstone (`refused`, no entries). When
+        # roots are declared the emit is hard_fail, because `adopt` is closed to such a run and
+        # a lost run-end event would leave it with no reference set at all.
+        from bathos.output_tiers.reference import run_end_payload
+        from bathos.workspace import resolve_workspace
 
-        output_metadata = [{"path": p, **_collect_output_metadata(p)} for p in output_paths]
-        emit_event(
-            kind="run.outputs_hashed",
-            entity=[run.id],
-            data={"output_metadata": output_metadata},
+        declared_roots = list(sidecar.outputs.roots) if sidecar and sidecar.outputs else []
+        outputs_payload = run_end_payload(
+            output_paths,
+            declared_roots,
+            fs_root=resolve_workspace(cwd).fs_root,
             cwd=cwd,
         )
+        if outputs_payload.get("refused"):
+            event(
+                "run.outputs_refused",
+                code=outputs_payload["refused"],
+                detail=outputs_payload.get("refused_detail"),
+            )
+            print(
+                f"warning: output roots refused ({outputs_payload['refused']}: "
+                f"{outputs_payload.get('refused_detail')}); this run has no reference hash set",
+                file=sys.stderr,
+            )
+        try:
+            emit_event(
+                kind="run.outputs_hashed",
+                entity=[run.id],
+                data=outputs_payload,
+                cwd=cwd,
+                hard_fail=bool(declared_roots),
+            )
+        except RunLogNotLaunchedError as e:
+            # Not swallowed: the command exits non-zero. run.finished is still written so the
+            # run does not stay "running" for the reaper; it has `outputs_declared` and no
+            # run-end event, which is what keeps `adopt` closed.
+            event("run.error", phase="outputs_hashed", exc_type=type(e).__name__, exc_msg=str(e))
+            print(f"Error: {e}", file=sys.stderr)
+            if exit_code == 0:
+                exit_code = 1
 
         finish_outcome = emit_event(
             kind="run.finished",
