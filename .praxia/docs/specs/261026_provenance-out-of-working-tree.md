@@ -5,11 +5,11 @@ status: draft
 task_id: 261026_provenance-out-of-working-tree
 date: '261026'
 backlog_ids: ''
-adversarial_review: 'cycles 1-3 done; v4 revision'
+adversarial_review: 'converged at cycle 4; v5'
 ---
 # Keep bth run provenance out of the working tree
 
-**v4** (after adversarial cycles 1-3 and two user decisions; see §6). Debt #3049. User report
+**v5** (converged after adversarial cycles 1-4 and two user decisions; see §6). Debt #3049. User report
 (261026): every bathos run leaves provenance files in the tree (a sidecar lock file and a
 manifest update), and they block the next fixer dispatch until committed.
 
@@ -81,6 +81,7 @@ The design must keep all three working.
 | B15 | `Run` has no script-path field: only `script_sha256`, `sidecar_path`, `command`, `argv` (`schema.py:177-250`) | verified | `schema.py:199,206,217` |
 | B16 | `require_log_ignored` (`runlog/resolve.py:237`) has no caller in `src/`, so no gate refuses a run over an unignored `.bth/log/` (settles B12) | verified (orchestrator grep) | as cited |
 | B17 | The runner reads `cwd/.bth.toml` (`runner.py:866`); `find_project_config` walks up (`config.py:88`); `load_project_config` requires `[project]` (`config.py:304`) | verified (challenger) | as cited |
+| B19 | On cluster / no-`.git` hosts (myxcel env hash, no `.git`), locks now go to `<catalog_dir>/locks/<slug>/` instead of the sidecar dir, and `bth sync` does not move that directory (B7). Whether myxcel pulls the sidecar dir back today, and whether its rsync honours `.gitignore` (relevant to `bth init` ignoring `outputs/`), is unknown | **unverified**; T0 probes | `sync.py:87-100`; myxcel push/pull |
 | B18 | Existing tests that glob or assert in-tree locks / exclude content: `test_lock_manifest_toml.py:40-42,93`; `test_runner_linked_worktree_provenance.py:70-75` (used at `:98,:119,:150`, the #5609 guards); `test_git_pin.py:9` (imports `ensure_manifest_ignored`), `:801-812,815-826,829-835` | verified (orchestrator read) | as cited |
 | B10 | `resolve_flag` (`config.py:60-85`) reads env then `.bth.toml [section] key` and **swallows** a malformed config to False | verified (orchestrator read) | so `lock_location` needs its own resolver (P1) |
 | B11 | MCP error envelopes use `BathosErrorCode` (`errors.py:15`) with `RESOLUTION_HINTS` (`errors.py:70`), completeness enforced by `test_errors.py:67-70`; `GateErrorCode` (`prereg.py:28`) is pinned to an exact set by `test_gate_error_taxonomy.py:15-33` | verified | as cited |
@@ -93,7 +94,8 @@ The design must keep all three working.
 The **lock writer** and the **ignore check** use the sidecar's checkout root, never `cwd` (B5).
 `GitState` has no root field (B13), so the root is derived as
 `git -C <sidecar dir> rev-parse --show-toplevel` under `clean_git_env` (`capture.py:79`). The
-sidecar directory is used because the lock relpath is relative to it.
+sidecar directory is used because the lock lives beside the sidecar. The `--cacheinfo` path is
+the lock's path **relative to the repo root** (`<sidecar relpath dir>/<stem>.<run_id>.bth.lock.toml`).
 
 The ref path is taken only when all three hold:
 - `GitState.hash` is 40 hex characters. This excludes empty, `unknown`, `nogit` and
@@ -124,8 +126,10 @@ index is set after it):
    `commit-tree [-p <git_hash>]` with the bathos identity. This commit is a **lock carrier**:
    HEAD plus the lock, not a WIP snapshot.
 3. `update_ref("refs/bathos/locks/<run_id>", commit)` via cisternal, unmodified (B2 satisfied).
-4. Read back with `git show <ref>:<relpath>` and compare sha256 to the body. A mismatch is a
-   write failure.
+4. Read back with `git cat-file blob <ref>:<relpath>` (bytes, not text-mode `show`) and
+   compare sha256 to the body. A mismatch is a write failure. `hash-object -w --stdin`
+   receives the body's UTF-8 bytes, since the lock header contains non-ASCII characters
+   (an em dash). P4 and `read_lock_text` read the same way.
 5. `run.manifest_path = "git:<common-dir>#refs/bathos/locks/<run_id>:<relpath>"` where
    `<common-dir>` comes from `rev-parse --path-format=absolute --git-common-dir`. On git
    older than 2.31 (B14), the relative output is resolved against the root.
@@ -285,6 +289,7 @@ that when wanted. The default trades portability for a clean tree.
 | protamer, asr, plegadx, tev_design | New lock files stop appearing (where any were written). The tracked manifest dirties every run until `untrack` plus commit. No G31 dependency is known. |
 | biosensors | Locks stop. The manifest, `.bth/log/` and `outputs/provenance/` are ignored by P2. The tree is clean **if** its scripts write nothing under `outputs/<run8>/` (`runner.py:1302`), or once `ignore_outputs = true`. The 35 stray locks: `relocate`, then delete. |
 | clean repos | No change. |
+| cluster / no-`.git` hosts (any repo) | Locks go to `<catalog_dir>/locks/` (B19), not the sidecar dir, and do not travel with `bth sync`. Evidence on those hosts is the catalog record plus that directory until T0 settles B19; if needed, a follow-up adds `locks/` to `bth sync`. |
 
 Migration order: read the run-time warnings, then `lock relocate`, then `lock untrack`
 (with its caveats), then `materialize` where G19 evidence is wanted.
@@ -293,7 +298,7 @@ Migration order: read the run-time warnings, then `lock relocate`, then `lock un
 
 | Task | Scope | Tests |
 |---|---|---|
-| T0 | Probe B8: commit-ref lock survives `gc --prune=now`; fetch with explicit refspec; `commit-tree` with a temp index in a linked worktree; parentless carrier in a shallow clone; `skip-worktree` as an untrack alternative; B14 cluster git version; `read-tree` cost on a praxia-size repo | spike |
+| T0 | Probe B8: commit-ref lock survives `gc --prune=now`; fetch with explicit refspec; `commit-tree` with a temp index in a linked worktree; parentless carrier in a shallow clone; `skip-worktree` as an untrack alternative; B14 cluster git version; `read-tree` cost on a praxia-size repo; B19 (does myxcel pull the sidecar dir; does its rsync honour `.gitignore`) | spike |
 | T1 | P0 repo selection (`rev-parse --show-toplevel` from the sidecar dir; 40-hex gate; inside-root check); dedicated resolver for `lock_location`/`lock_dir`/`ignore_outputs` with layer reporting | `tests/test_lock_config.py`: each layer incl. `cwd/.bth.toml [provenance]` without `[project]`; `BTH_LOCK_DIR=none` disables; invalid `BTH_LOCK_LOCATION` fails; malformed file fails; foreign-cwd run uses the sidecar repo; `nogit`/`unknown`/broken-gitlink → fallback with reason |
 | T2 | P1 commit-ref writer + read-back + fallback + `ref_error` event; tree opt-out; URI grammar; keyword-only signature additions. **Existing tests (B18):** `test_lock_manifest_toml.py:40-42` passes `lock_location="tree"` explicitly (it tests the TOML body); `:93` (non-git tmp dir) now asserts the lock in the fallback dir; `test_runner_linked_worktree_provenance.py` `_lock_git_sha` reads the lock via `read_lock_text(run.manifest_path)` so the #5609 guards cover the default `git` mode, plus one parametrized `tree` case | `tests/test_lock_out_of_tree.py`: no lock in tree after `bth run`; ref body hash == `manifest_sha256`; G19 relpath; sentinel hashes → fallback; sidecar outside repo → fallback; parentless when hash absent; common dir containing `#`; `"tree"` unchanged |
 | T3 | P2 per-path ignores incl. `/.bth/log/`; `ensure_manifest_ignored` kept as a wrapper; per-path warnings; `bth init` outputs entry; `ignore_outputs`. **Existing tests (B18):** `test_git_pin.py:815-826` is rewritten to assert that the manifest line is not duplicated and only missing lines are appended (the old "unchanged" assertion encoded the early-return bug); `:801-812,829-835` checked and updated to the new line set | extend git_pin/init tests: each missing line added once; early-return bug covered; both roots when script root ≠ cwd root |
@@ -354,4 +359,11 @@ separate defender, since the findings were confirmed gaps with no design dispute
 - F1 `git.toplevel` does not exist → root from `rev-parse --show-toplevel` in the sidecar dir; 40-hex gate covering all sentinels; inside-root check; B13.
 - F2 existing tests break → B18 lists them; T2/T3 say which pin `tree`, which are rewritten, and why; `ensure_manifest_ignored` kept as a wrapper; keyword-only signature additions.
 - F3 no script path on `Run`, no "old path" for `git:` → `sidecar_path` ancestor; relpath from the URI; unlocatable reason and tests; B15.
-- minors → `clean_git_env` anchor `:79`; config file = `cwd/.bth.toml` read with raw tomllib, pyproject walk from cwd; untrack re-runs the ignore routine; sidecar outside repo → fallback; biosensors claim qualified; git 2.31 (B14) + T0; `<run_id>` marker; bounded warning scan and `read-tree` cost budget; B1 lists cisternal `tree_manifest`; front-matter task_id; per-path return value and warnings; T6(iii) runs with the runlog flag on; B12 settled (B16).
+- minors (cycle 3) → `clean_git_env` anchor `:79`; config file = `cwd/.bth.toml` read with raw tomllib, pyproject walk from cwd; untrack re-runs the ignore routine; sidecar outside repo → fallback; biosensors claim qualified; git 2.31 (B14) + T0; `<run_id>` marker; bounded warning scan and `read-tree` cost budget; B1 lists cisternal `tree_manifest`; front-matter task_id; per-path return value and warnings; T6(iii) runs with the runlog flag on; B12 settled (B16).
+
+**Cycle 4** (Sonnet challenger `toolu_01HBSYjyef91bAhDzd9aAkfD.1.md`): **converged**, with no
+blocking or major findings. It re-verified F1-F3 and the B13/B16/B18 anchors. v5 polish, with
+no further cycle needed:
+- residual cluster / no-`.git` lock location → B19, a P5 row, a T0 probe;
+- fixer minors → `--cacheinfo` takes a repo-root-relative path; `hash-object` receives UTF-8
+  bytes; read-back and verification use `cat-file blob`.
