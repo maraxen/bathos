@@ -347,15 +347,7 @@ def token_env(tmp_path, monkeypatch):
     return mcp_auth.get_or_create_token()
 
 
-@pytest.mark.usefixtures("token_env")
-def test_mcp_tools_registered_and_token_gated(repo):
-    from bathos import mcp
-
-    for name in ("untrack", "relocate", "materialize", "push", "fetch"):
-        tool = getattr(mcp, f"mcp_lock_{name}_tool")
-        result = asyncio.run(tool(project_root=str(repo)))
-        assert result["ok"] is False
-        assert result["error_code"] == BathosErrorCode.AUTH_ERROR.value
+# Token gating of the five write tools is covered by tests/test_mcp_auth.py (WRITE_TOOLS).
 
 
 def test_mcp_project_root_is_required(token_env):

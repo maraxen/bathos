@@ -44,6 +44,11 @@ from bathos.mcp import (
     mcp_figure_lookup_tool,
     mcp_init_tool,
     mcp_list_runs_tool,
+    mcp_lock_fetch_tool,
+    mcp_lock_materialize_tool,
+    mcp_lock_push_tool,
+    mcp_lock_relocate_tool,
+    mcp_lock_untrack_tool,
     mcp_repair_tool,
     mcp_run_tool,
     mcp_sync_tool,
@@ -79,6 +84,11 @@ WRITE_TOOLS = [
     mcp_repair_tool,
     mcp_blast_radius_assess_tool,
     mcp_blast_radius_clear_tool,
+    mcp_lock_materialize_tool,
+    mcp_lock_relocate_tool,
+    mcp_lock_untrack_tool,
+    mcp_lock_push_tool,
+    mcp_lock_fetch_tool,
 ]
 
 # postmortem_scaffold is imported separately below since its name collides
