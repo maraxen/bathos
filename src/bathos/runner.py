@@ -12,6 +12,7 @@ import time
 import tomllib
 from contextlib import suppress
 from pathlib import Path
+from types import SimpleNamespace
 
 import duckdb
 
@@ -44,16 +45,59 @@ from bathos.sidecar import (
     DifferentialBlock,
     Sidecar,
     SidecarError,
+    breakdown_summary_columns,
     derive_pass_labels,
+    effective_label,
     evaluate_outcome,
     is_in_enforced_dir,
+    label_names_nonresidual_outcome,
+    missing_breakdown_columns,
     parse_sidecar,
     resolve_epistemic_class,
     single_row_projection,
+    uncovered_aggregate_message,
+    uncovered_aggregates,
 )
-from bathos.telemetry import event, init_telemetry, run_uuid_var
+from bathos.telemetry import event, init_telemetry, run_advisories_var, run_uuid_var
 
 logger = logging.getLogger(__name__)
+
+
+def _campaign_is_claim_bound(catalog_dir: Path, campaign_id: str) -> bool:
+    """Is the campaign claim-bound (`claim_path IS NOT NULL`)? A READ failure (unreadable catalog,
+    unknown campaign) answers False and is reported loudly (log, stderr and the advisory
+    channel): the gate then stays advisory, per spec D3, rather than refusing on a catalog it
+    could not read. Anything else is a bug and propagates."""
+    import duckdb
+
+    from bathos.campaigns import CampaignError, connect_catalog_db, get_campaign
+
+    db = None
+    try:
+        # The flag-aware connection: the folded index after cut-over, else `bathos.db`.
+        db = connect_catalog_db(catalog_dir, read_only=True)
+        campaign = get_campaign(db, campaign_id, catalog_dir=catalog_dir)
+        return bool(campaign and campaign.claim_path)
+    except (duckdb.Error, OSError, CampaignError) as e:
+        message = (
+            f"could not read the claim binding of campaign {campaign_id[:8]} ({e}); the "
+            "breakdown gate for a claim-bound campaign is NOT applied to this run"
+        )
+        logger.warning(message)
+        _advise("claim_binding_unreadable", message, campaign_id=campaign_id)
+        return False
+    finally:
+        if db is not None:
+            db.close()
+
+
+def _advise(code: str, message: str, **fields: object) -> None:
+    """Print a runner advisory to stderr and, when a caller is collecting (the MCP `run` tool,
+    which cannot see stderr), append it as `{"code", "message", **fields}`."""
+    print(f"WARNING: {message}", file=sys.stderr)
+    collected = run_advisories_var.get(None)
+    if collected is not None:
+        collected.append({"code": code, "message": message, **fields})
 
 
 # Command-wrapper prefixes that run the real command after consuming their own options and a fixed
@@ -324,7 +368,12 @@ def _result_schema_complete(meta: object, sidecar: Sidecar) -> bool:
     """
     if not isinstance(meta, dict):
         return False
-    schema_keys = [k for k, v in sidecar.result_schema.items() if isinstance(v, str)]
+    # [breakdown] summary columns are emitted only on a clean run's verdict path, so a crashed
+    # run never owes them (spec 261026 D1): they do not count toward completeness.
+    summary_cols = breakdown_summary_columns(sidecar)
+    schema_keys = [
+        k for k, v in sidecar.result_schema.items() if isinstance(v, str) and k not in summary_cols
+    ]
     if not schema_keys:
         return False
     return all(k in meta for k in schema_keys)
@@ -782,16 +831,16 @@ def _run_script_impl(
     # store the full UUID — never the raw prefix — on the run record.
     resolved_campaign_id: str | None = None
     if campaign_id:
-        from bathos.campaigns import CampaignError, _resolve_campaign_id
-        from bathos.index import connect_read
+        from bathos.campaigns import CampaignError, _resolve_campaign_id, connect_catalog_db
 
         db_path = catalog_dir / "bathos.db"
         campaign_db = None
         try:
-            if db_path.exists():
-                # read_only: SLURM array tasks otherwise take exclusive locks on the
-                # same bathos.db and fail with "Conflicting lock is held".
-                campaign_db = connect_read(catalog_dir, read_only=True)
+            # read_only: SLURM array tasks otherwise take exclusive locks on the same
+            # bathos.db and fail with "Conflicting lock is held". After cut-over this is the
+            # folded index (campaigns are event-only there, and `bathos.db` is frozen), the
+            # same connection `campaign add` resolves against.
+            campaign_db = connect_catalog_db(catalog_dir, read_only=True)
             resolved_campaign_id = _resolve_campaign_id(
                 campaign_db, campaign_id, catalog_dir=catalog_dir
             )
@@ -859,6 +908,46 @@ def _run_script_impl(
                 event("run.error", phase="validate", exc_type=type(e).__name__, exc_msg=str(e))
                 print(f"Error: invalid sidecar — {e}", file=sys.stderr)
                 return 1
+
+    # Spec 261026 D2: a worst-case aggregate that gates a verdict with no [breakdown] is said
+    # out loud before the run, in every directory (the prereg gate that logs sidecar warnings
+    # only runs for enforced ones, and its warnings never reach a terminal).
+    if sidecar is not None:
+        for uncovered in uncovered_aggregates(sidecar):
+            message = uncovered_aggregate_message(uncovered)
+            event("run.aggregate_uncovered", column=uncovered.column, sources=uncovered.sources)
+            _advise("aggregate_uncovered", message, column=uncovered.column)
+        # Spec 261026 D3: `bth run --campaign` into a claim-bound campaign refuses before compute
+        # is spent. No result exists yet, so only the aggregate half of the gate applies here
+        # (the summary-column half runs at add, register and conclude). The campaign connection
+        # opened above is closed by now, so read the claim binding on a fresh one.
+        if (
+            resolved_campaign_id
+            and uncovered_aggregates(sidecar)
+            and _campaign_is_claim_bound(catalog_dir, resolved_campaign_id)
+        ):
+            from bathos.breakdown_gate import breakdown_gate
+
+            reasons = breakdown_gate(
+                SimpleNamespace(outcome=None, tentative_outcome=None, metadata=""),
+                sidecar,
+                check_columns=False,
+            )
+            refusal = (
+                f"campaign {resolved_campaign_id[:8]} is claim-bound and this run would be "
+                f"cited, but: {'; '.join(reasons)}"
+            )
+            event(
+                "run.error",
+                phase="breakdown_gate",
+                exc_type="BreakdownRefused",
+                exc_msg=refusal,
+            )
+            print(f"Error: breakdown_missing: {refusal}", file=sys.stderr)
+            collected = run_advisories_var.get(None)
+            if collected is not None:
+                collected.append({"code": "breakdown_missing", "message": refusal})
+            return 1
 
     # Read project config for agent_mode default
     project_config_mode = ""
@@ -1511,6 +1600,22 @@ def _run_script_impl(
             sidecar, epistemic_class, metadata, bth_output_dir, resolved_mode
         )
 
+    # Spec 261026 D1 emission check: a clean run whose verdict names a declared non-residual
+    # outcome must have emitted the [breakdown] summary columns. Advisory only: the outcome is
+    # unchanged (the claim-bound gates refuse later). Exploratory runs read tentative_outcome.
+    if sidecar is not None and sidecar.breakdown is not None and exit_code == 0:
+        label = effective_label(outcome, tentative_outcome)
+        if label_names_nonresidual_outcome(sidecar, label):
+            missing = missing_breakdown_columns(sidecar, _parse_result_dict(metadata))
+            if missing:
+                event("run.breakdown_incomplete", outcome=label, missing=missing)
+                _advise(
+                    "breakdown_incomplete",
+                    f"outcome {label!r} was reached but the run did not emit its [breakdown] "
+                    f"summary columns: {', '.join(missing)}",
+                    columns=missing,
+                )
+
     # Populate outcome_is_residual flag
     outcome_is_residual = False
     if sidecar and outcome and outcome not in ("unknown", "", "error", "observed"):
@@ -1635,6 +1740,31 @@ def _run_script_impl(
                 )
         except Exception as e:
             event("run.error", phase="obligation", exc_type=type(e).__name__, exc_msg=str(e))
+
+    # Spec 261026 D6: a clean run whose worst-case aggregate sits at its bound opens a `near_bound`
+    # obligation (default ON; env / .bth.toml opt out the advisory and the open, never the
+    # claim-bound conclude check, which recomputes). Outside the exploratory guard above, so
+    # observation runs open one too. Never fatal, like every obligation open.
+    if sidecar is not None and sidecar.breakdown is not None and exit_code == 0:
+        try:
+            from bathos.obligations import maybe_open, trigger_enabled
+            from bathos.sidecar import near_bound
+            from bathos.workspace import resolve_workspace
+
+            nb_root = resolve_workspace(cwd).fs_root
+            if trigger_enabled("near_bound", nb_root):
+                hits = near_bound(sidecar, _parse_result_dict(metadata))
+                if hits:
+                    detail = "; ".join(f"{h.column}: {h.detail} ({h.kind})" for h in hits)
+                    ob = maybe_open(nb_root, "run", run.id, "near_bound", detail=detail)
+                    _advise(
+                        "near_bound",
+                        f"near_bound: result sits at its declared bound: {detail}. Record what was decided: "
+                        "bth postmortem scaffold, fill [fork], then bth postmortem validate",
+                        obligation_id=ob.obligation_id if ob else f"run_{run.id}_near_bound",
+                    )
+        except Exception as e:
+            event("run.error", phase="near_bound", exc_type=type(e).__name__, exc_msg=str(e))
 
     if current_mode():
         # run.outputs_hashed (new at run end, flag-on only -- legacy leaves

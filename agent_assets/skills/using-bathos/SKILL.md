@@ -389,6 +389,69 @@ Checks TOML syntax, schema completeness, DuckDB condition validity, and residual
 
 Note: `bth check` (see **Query and Inspect** below) is a *different* command — it checks already-recorded runs for git-drift against current HEAD, it does not validate sidecars.
 
+## Distributional Breakdown: worst-case aggregates, `[breakdown]`, amendments and forks
+
+A verdict that rests on a maximum, minimum or peak over many units (an `e_max_placement`
+against a 0.5 A bound) says nothing about how many units produced it. In lathex bth 78db9e04 the
+maximum came from 1 binder of 24 (median 0.004 A) and nothing in the sidecar had asked. The rule
+is **warn everywhere, refuse only where the run is cited** (entry into a claim-bound campaign).
+
+```toml
+[breakdown]
+unit = "binder"
+# waive = "reason"      # alternative to aggregates; keep it directly under [breakdown],
+                        # before any sub-table, and write it BEFORE the run
+
+[breakdown.aggregates.e_max_placement]     # a key ending in * is a prefix: "e_max_*"
+direction = "max"                          # "max" | "min"
+bound = 0.5                                # optional; enables n_over and near_bound
+margin = 0.05                              # optional absolute band; default 10% of bound
+```
+
+The run emits, and `[result_schema]` must declare, `<col>__worst_unit` (str), `__second`,
+`__median` (float), `__n_units`, and with a `bound`, `__n_over` (int, units strictly beyond it).
+Read `n_over`, `second` and `median` before the maximum. Prefix keys expand over float columns
+without `__`, so a prefix never matches its own summary columns.
+
+- **Detection.** `bth run` prints to stderr (and the MCP `run` tool returns in `warnings`) an
+  `aggregate_uncovered` advisory for a float column named `*max*`/`*min*`/`*worst*`/`*peak*` that
+  an outcome condition or `[observe].sanity` reads with no `[breakdown]`. `bth lint` raises
+  `AGGREGATE_WITHOUT_BREAKDOWN` (rule card STAT-005); `bth validate-sidecar` warns. A column the
+  heuristic misses (a derived ratio) opts in with `[result_schema_meta.<col>] aggregate = true`.
+- **Emission check.** A clean run whose label names a non-residual outcome but lacks the summary
+  columns warns (`breakdown_incomplete`); the outcome is unchanged. An exploratory run reads its
+  `tentative_outcome`. Residual, `error` and `invalid_measurement` runs owe nothing.
+- **Refusal where cited.** `bth run --campaign`, `bth campaign add`, `bth claim register` and
+  `bth campaign conclude` on a claim-bound campaign raise `BreakdownRefused` (error codes
+  `breakdown_missing`, `sidecar_unverifiable`) when a member's **run-time** sidecar leaves an
+  aggregate uncovered or its summary columns missing. A waiver or `[breakdown]` added afterwards
+  never passes; the run-time sidecar is the frozen `run.started` declaration, a live file whose
+  sha256 still matches, or the pinned git ref. `--force` and `force_verdict` do not bypass.
+  Exploration campaigns only warn. Compaction never refuses; register and conclude backstop it.
+- **`near_bound` obligation (default ON).** A clean run with a `bound` where exactly one of at
+  least two units is over it (`single_unit`), or the value lies within `margin` of the bound
+  (`margin`; the 10% default is arbitrary, set it from the instrument's noise floor), opens
+  `run_<fullid>_near_bound` and prints an advisory. It never blocks a run and also opens for
+  exploratory runs. Opt out with `BTH_OBLIGATION_NEAR_BOUND=0` or `[obligations] near_bound =
+  false`; that silences only the run-time open, because claim-bound conclude recomputes it.
+- **Discharge.** `bth postmortem scaffold` writes a `format = 2` postmortem with an empty `[fork]`
+  and a commented checklist of open ids (it never fills `discharges`). Name the id in
+  `discharges`, fill `[fork]` (`choice` = stop | extend | replicate | breakdown | escalate, a
+  non-empty `reason`, `cited`, `follow_up_run_ids`; `stop` cannot be `cited = true`), then
+  `bth postmortem validate <path>`: that is what discharges, and the response lists `discharged` and
+  `not_discharged` with reasons (the postmortem must be for that run, or campaign-scoped with it
+  as a member). Claim-bound conclude requires the discharging file to still hold a valid `[fork]`
+  with `cited = true`; if the run was first closed by an internal `cited = false` record, validate a
+  newer postmortem and it re-points the obligation (`superseded_by_paths`).
+- **`[[amendments]]` (format 2 postmortems).** Later evidence about a verdict, for example the
+  per-unit analysis run: `analysis_run_id`, `amends_run_id` (required when campaign-scoped), `kind`
+  (`distributional_outlier` | `reanalysis` | `correction`), `outlier_units`, `effect`
+  (`verdict_unchanged` | `verdict_contextualized` | `verdict_changed`), `note`. An unresolvable
+  `analysis_run_id`, one equal to the amended run, an outlier amendment with no units, and
+  `verdict_changed` with no `verdict_override` are errors. Amendments never change `runs.outcome`;
+  only `verdict_override` does. They render in `bth postmortem show` and `bth campaign review`
+  under a banner, drift or not.
+
 ## Controls Discipline (v0.11.0)
 
 ### Stage Classification

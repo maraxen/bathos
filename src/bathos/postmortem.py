@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -20,6 +22,39 @@ class ValidationError:
 class ValidationResult:
     ok: bool
     errors: list[ValidationError] = field(default_factory=list)
+    #: advisory findings that never flip `ok` (spec 261026 D5): format-2 checks skipped for want of
+    #: a catalog, `[fork]`/`[[amendments]]` present without `format = 2`
+    warnings: list[str] = field(default_factory=list)
+
+
+#: banner shown wherever amendments are rendered (spec 261026 D5)
+AMENDMENTS_BANNER = (
+    "Amendments record later evidence about a verdict. They do not change the run's recorded "
+    "outcome; only verdict_override does."
+)
+FORK_CHOICES = ("stop", "extend", "replicate", "breakdown", "escalate")
+AMENDMENT_KINDS = ("distributional_outlier", "reanalysis", "correction")
+AMENDMENT_EFFECTS = ("verdict_unchanged", "verdict_contextualized", "verdict_changed")
+
+#: the postmortem file formats `parse_postmortem` accepts; absent `format` means 1
+POSTMORTEM_FORMATS = (1, 2)
+
+
+@dataclass
+class Amendment:
+    """One `[[amendments]]` entry (format 2, spec 261026 D5): later evidence about a run's
+    verdict. Recorded alongside the run; it never alters `runs.outcome`."""
+
+    analysis_run_id: str = ""
+    #: the run being amended; "" means this postmortem's own run (required when campaign-scoped)
+    amends_run_id: str = ""
+    kind: str = ""
+    outlier_units: list[str] = field(default_factory=list)
+    effect: str = ""
+    note: str = ""
+    #: shape problems found while parsing (e.g. `outlier_units` not a list of strings), reported
+    #: as validation errors rather than guessed around
+    shape_errors: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -52,6 +87,88 @@ class Postmortem:
     #: accreting forever.
     violated_cards: list[str] = field(default_factory=list)
     anomalies: dict = field(default_factory=dict)
+    #: file format: 1 (default, today's behaviour) or 2 (enables `[fork]` and `[[amendments]]`)
+    format: int = 1
+    #: the raw `[fork]` table (format 2); checked by the near_bound discharge, not parsed here
+    fork: dict = field(default_factory=dict)
+    amendments: list[Amendment] = field(default_factory=list)
+
+
+def amendments_as_dicts(postmortem: Postmortem) -> list[dict]:
+    return [dataclasses.asdict(a) for a in postmortem.amendments]
+
+
+def removed_amendments(previous: list[dict], postmortem: Postmortem) -> list[str]:
+    """Amendments recorded by an earlier validation that this file no longer carries, as
+    "<analysis_run_id> (<kind>)" (the `amendment_removed` warning, log mode only)."""
+    current = {(a.analysis_run_id, a.kind) for a in postmortem.amendments}
+    return [
+        f"{a.get('analysis_run_id', '')} ({a.get('kind', '')})"
+        for a in previous
+        if (a.get("analysis_run_id", ""), a.get("kind", "")) not in current
+    ]
+
+
+def amendments_by_run(workspace_root: Path | str, run_ids) -> list[dict]:
+    """Amendments under `workspace_root` that amend a run in `run_ids`, one dict per amendment
+    with the full member `run_id` (campaign review). Run-scoped postmortems match on their
+    `run_id` as a unique prefix; campaign-scoped ones on each amendment's `amends_run_id`."""
+    wanted = set(run_ids)
+    out: list[dict] = []
+    root = Path(workspace_root)
+    if not wanted or not root.exists():
+        return out
+    for pm_file in iter_project_files(
+        root, ".bth.postmortem.toml", event_name="postmortem.boundary_pruned"
+    ):
+        try:
+            pm = parse_postmortem(pm_file)
+        except Exception:
+            continue
+        for d in amendments_as_dicts(pm):
+            # A run-scoped postmortem is keyed on its run_id (which may be a prefix); a
+            # campaign-scoped one has none, so each amendment names the run it amends.
+            key = pm.run_id or d.get("amends_run_id", "")
+            matches = [w for w in wanted if key and w.startswith(key)]
+            if len(matches) == 1:  # an empty or ambiguous key matches nothing
+                out.append({**d, "run_id": matches[0]})
+    return out
+
+
+def _parse_format(data: dict) -> int:
+    fmt = data.get("format", 1)
+    if isinstance(fmt, bool) or fmt not in POSTMORTEM_FORMATS:
+        raise ValueError(f"Unsupported postmortem format {fmt!r}: format must be 1 or 2")
+    return fmt
+
+
+def _parse_amendments(data: dict) -> list[Amendment]:
+    raw = data.get("amendments", [])
+    if not isinstance(raw, list) or not all(isinstance(e, dict) for e in raw):
+        raise ValueError("amendments must be an array of tables ([[amendments]])")
+    amendments = []
+    for e in raw:
+        units_raw = e.get("outlier_units", [])
+        shape_errors: list[str] = []
+        units: list[str] = []
+        if units_raw in (None, []):
+            pass
+        elif isinstance(units_raw, list) and all(isinstance(u, str) for u in units_raw):
+            units = list(units_raw)
+        else:
+            shape_errors.append("outlier_units must be a list of strings")
+        amendments.append(
+            Amendment(
+                analysis_run_id=str(e.get("analysis_run_id", "") or ""),
+                amends_run_id=str(e.get("amends_run_id", "") or ""),
+                kind=str(e.get("kind", "") or ""),
+                outlier_units=units,
+                effect=str(e.get("effect", "") or ""),
+                note=str(e.get("note", "") or ""),
+                shape_errors=shape_errors,
+            )
+        )
+    return amendments
 
 
 def parse_postmortem(path: Path) -> Postmortem:
@@ -106,6 +223,10 @@ def parse_postmortem(path: Path) -> Postmortem:
     asset_links = data.get("asset_links", {})
     anomalies = data.get("anomalies", {})
 
+    fork = data.get("fork", {})
+    if not isinstance(fork, dict):
+        raise ValueError("fork must be a table ([fork])")
+
     return Postmortem(
         run_id=run_id or "",
         campaign_id=campaign_id,
@@ -126,6 +247,9 @@ def parse_postmortem(path: Path) -> Postmortem:
         script_sha256=script_sha256,
         refutation_criteria_met=refutation_criteria_met,
         anomalies=anomalies,
+        format=_parse_format(data),
+        fork=fork,
+        amendments=_parse_amendments(data),
     )
 
 
@@ -147,6 +271,7 @@ def postmortem_applied_event_data(postmortem: Postmortem, path: Path) -> dict:
         "has_anomalies": bool(postmortem.anomalies),
         "summary": postmortem.summary,
         "asset_links": postmortem.asset_links,
+        "amendments": amendments_as_dicts(postmortem),
     }
 
 
@@ -156,8 +281,12 @@ def validate_postmortem(
     run: Run | None = None,
     strict_files: bool = False,
     postmortem_path: Path | None = None,
+    run_lookup: Callable[[str], object | None] | None = None,
 ) -> ValidationResult:
+    """Validate a postmortem. `run_lookup(run_id) -> Run | None` (unique-prefix resolution) feeds
+    only the format-2 checks; format-1 files validate exactly as they always did."""
     errors = []
+    warnings: list[str] = []
 
     # 1. Check refutation mapping consistency
     # refuted and pass -> invalid
@@ -287,6 +416,16 @@ def validate_postmortem(
                         "postmortem.validate_error", path=str(postmortem_path), reason=err.message
                     )
 
+    # 4. Format-2 sections (spec 261026 D5). Format 1 ignores them, but says so.
+    if postmortem.format != 2 and (postmortem.fork or postmortem.amendments):
+        warnings.append(
+            "[fork]/[[amendments]] present but not enforced: add format = 2 to enable them"
+        )
+
+    if postmortem.format == 2:
+        _validate_amendments(postmortem, run_lookup, errors, warnings, postmortem_path)
+    _validate_fork(postmortem, errors, postmortem_path)
+
     ok = len(errors) == 0
     if ok and postmortem_path:
         event(
@@ -295,7 +434,108 @@ def validate_postmortem(
             run_id=postmortem.run_id,
             sprint_id=None,
         )
-    return ValidationResult(ok=ok, errors=errors)
+    return ValidationResult(ok=ok, errors=errors, warnings=warnings)
+
+
+def fork_problems(postmortem: Postmortem) -> list[str]:
+    """Why `postmortem` is not a valid near_bound fork record (empty = valid). Run-independent:
+    reads only `format` and `fork`. A fork with `cited = false` is valid here; whether a CITED
+    result may rest on it is the claim-bound conclude check."""
+    if postmortem.format != 2:
+        return ["a near_bound obligation can only be discharged by a postmortem with format = 2"]
+    fork = postmortem.fork
+    if not fork:
+        return ["discharging near_bound requires a [fork] record (choice, reason, cited)"]
+    problems = []
+    choice = str(fork.get("choice", "") or "")
+    if choice not in FORK_CHOICES:
+        problems.append(f"[fork] choice {choice!r} is not one of {list(FORK_CHOICES)}")
+    if not str(fork.get("reason", "") or "").strip():
+        problems.append("[fork] reason must not be empty")
+    if choice == "stop" and fork.get("cited") is True:
+        problems.append(
+            "[fork] choice = stop cannot have cited = true: a cited result needs a follow-up"
+        )
+    return problems
+
+
+def _validate_fork(
+    postmortem: Postmortem, errors: list[ValidationError], postmortem_path: Path | None
+) -> None:
+    """Fork checks for a postmortem that discharges a `near_bound` obligation (spec 261026 D6).
+    They fire with no run (`obligations.py` calls validate with none)."""
+    if not any(oid.endswith("_near_bound") for oid in postmortem.discharges):
+        return
+    for message in fork_problems(postmortem):
+        errors.append(ValidationError(message))
+        if postmortem_path:
+            event("postmortem.validate_error", path=str(postmortem_path), reason=message)
+
+
+def _validate_amendments(
+    postmortem: Postmortem,
+    run_lookup: Callable[[str], object | None] | None,
+    errors: list[ValidationError],
+    warnings: list[str],
+    postmortem_path: Path | None,
+) -> None:
+    """Format-2 `[[amendments]]` checks (spec 261026 D5). Run-independent rules always apply;
+    the ones that resolve a run id need `run_lookup` and become a warning without it."""
+
+    def err(message: str) -> None:
+        errors.append(ValidationError(message))
+        if postmortem_path:
+            event("postmortem.validate_error", path=str(postmortem_path), reason=message)
+
+    def resolve(run_id: str) -> tuple[str | None, str | None]:
+        """(full id or None, error text or None) for `run_id` through `run_lookup`."""
+        try:
+            found = run_lookup(run_id)  # type: ignore[misc]
+        except Exception as e:  # noqa: BLE001 -- an ambiguous prefix or a failed read
+            return None, str(e)
+        return (getattr(found, "id", None) if found is not None else None), None
+
+    skipped = False
+    for i, a in enumerate(postmortem.amendments):
+        where = f"amendments[{i}]"
+        for problem in a.shape_errors:
+            err(f"{where}: {problem}")
+        if not a.analysis_run_id:
+            err(f"{where}: analysis_run_id is required")
+        if a.kind not in AMENDMENT_KINDS:
+            err(f"{where}: kind {a.kind!r} is not one of {list(AMENDMENT_KINDS)}")
+        if a.effect not in AMENDMENT_EFFECTS:
+            err(f"{where}: effect {a.effect!r} is not one of {list(AMENDMENT_EFFECTS)}")
+        if a.kind == "distributional_outlier" and not a.outlier_units and not a.shape_errors:
+            err(f"{where}: a distributional_outlier amendment must name outlier_units")
+        if a.effect == "verdict_changed" and postmortem.verdict_override in ("", "none"):
+            err(f"{where}: effect verdict_changed requires a verdict_override other than none")
+        if postmortem.campaign_id and not a.amends_run_id:
+            err(f"{where}: amends_run_id is required in a campaign-scoped postmortem")
+        if not a.analysis_run_id:
+            continue
+        amended = a.amends_run_id or postmortem.run_id
+        if run_lookup is None:
+            skipped = True
+            continue
+        full, problem = resolve(a.analysis_run_id)
+        if problem is not None:
+            err(f"{where}: analysis_run_id {a.analysis_run_id!r} cannot be resolved: {problem}")
+            continue
+        if full is None:
+            err(
+                f"{where}: analysis_run_id {a.analysis_run_id!r} is not in the catalog; if this "
+                "is a log-mode run not yet ingested (SLURM / BTH_NO_INGEST), run `bth compact` "
+                "and retry"
+            )
+            continue
+        amended_full, _ = resolve(amended) if amended else (None, None)
+        if full == (amended_full or amended):
+            err(f"{where}: analysis_run_id must not equal the amended run ({amended!r})")
+    if skipped:
+        warnings.append(
+            "amendments: run-id checks skipped: no catalog to resolve analysis_run_id against"
+        )
 
 
 def find_postmortem(
@@ -363,17 +603,10 @@ def scaffold_campaign_postmortem_template(
     pm_dir.mkdir(parents=True, exist_ok=True)
     postmortem_path = pm_dir / f"campaign_{campaign_id}.bth.postmortem.toml"
 
-    if open_obligation_ids:
-        checklist = "\n".join(f"#   {oid}" for oid in open_obligation_ids)
-        obligation_block = (
-            "# Open obligations for this campaign and its member runs. Copy the ids this\n"
-            "# write-up actually explains into `discharges` above — a valid postmortem\n"
-            "# discharges exactly what it names, and nothing else.\n" + checklist + "\n"
-        )
-    else:
-        obligation_block = "# No open obligations recorded for this campaign.\n"
+    obligation_block = _obligation_checklist(open_obligation_ids, "campaign and its member runs")
 
     toml_content = f"""campaign_id = "{campaign_id}"
+format = 2
 
 [postmortem]
 hypothesis_status = "unassigned"
@@ -387,6 +620,7 @@ status = "draft"
 discharges = []
 violated_cards = []
 
+{_FORK_SCAFFOLD}
 {obligation_block}
 [asset_links]
 """
@@ -462,7 +696,33 @@ def _script_from_command(command: str, workspace_root: Path) -> Path | None:
     return None
 
 
-def scaffold_postmortem_template(command: str, run_id: str, workspace_root: Path) -> Path:
+_FORK_SCAFFOLD = """[fork]
+# What was decided after a near-bound result, and why. Required to discharge a near_bound
+# obligation. choice: stop | extend | replicate | breakdown | escalate
+choice = ""
+reason = ""
+cited = false
+follow_up_run_ids = []
+"""
+
+
+def _obligation_checklist(open_obligation_ids, scope: str) -> str:
+    if open_obligation_ids:
+        checklist = "\n".join(f"#   {oid}" for oid in open_obligation_ids)
+        return (
+            f"# Open obligations for this {scope}. Copy the ids this write-up actually explains\n"
+            "# into `discharges` above: a valid postmortem discharges exactly what it names,\n"
+            "# and nothing else.\n" + checklist + "\n"
+        )
+    return f"# No open obligations recorded for this {scope}.\n"
+
+
+def scaffold_postmortem_template(
+    command: str,
+    run_id: str,
+    workspace_root: Path,
+    open_obligation_ids: list[str] | tuple[str, ...] = (),
+) -> Path:
     """Resolve the script path from a run's command string and write a draft postmortem TOML.
 
     Shared by the CLI (`bth postmortem scaffold`) and the MCP tool
@@ -481,6 +741,7 @@ def scaffold_postmortem_template(command: str, run_id: str, workspace_root: Path
         postmortem_path = script_path.parent / f"{script_path.name}.{run_id}.bth.postmortem.toml"
 
     toml_content = f"""run_id = "{run_id}"
+format = 2
 
 [postmortem]
 hypothesis_status = "unassigned"
@@ -491,7 +752,10 @@ verdict_override = "none"
 next_steps = ""
 author = ""
 status = "draft"
+discharges = []
 
+{_FORK_SCAFFOLD}
+{_obligation_checklist(open_obligation_ids, "run")}
 [asset_links]
 """
     postmortem_path.write_text(toml_content)

@@ -10,7 +10,7 @@ from pathlib import Path
 import duckdb
 
 from bathos.index import catalog_readable, connect_read
-from bathos.sidecar import find_sidecar
+from bathos.sidecar import columns_referenced, find_sidecar
 from bathos.walk import iter_project_files
 
 
@@ -182,6 +182,9 @@ def lint_project(project_root: Path) -> list[LintIssue]:
     # Tier-1 check: uncorrected multiple-comparisons in outcome conditions (debt #1071)
     issues.extend(check_multiple_comparisons(project_root))
 
+    # Worst-case aggregates gating a verdict with no [breakdown] (spec 261026 D4)
+    issues.extend(check_aggregate_without_breakdown(project_root))
+
     # Epistemic-class contract: stage_name canonicality, restage hints, source grammar (spec §3.1-3.2)
     issues.extend(check_epistemic_sidecars(project_root))
 
@@ -326,6 +329,52 @@ def check_positive_control_missing(project_root: Path) -> list[LintIssue]:
                 )
             )
 
+    return issues
+
+
+def check_aggregate_without_breakdown(project_root: Path) -> list[LintIssue]:
+    """Flag sidecars whose verdict rests on a worst-case aggregate with no `[breakdown]` (STAT-005).
+
+    Filesystem-only (Tier-1, WARNING). A maximum over units says nothing about how many units
+    produced it; `[breakdown]` makes the run emit the worst unit, the runner-up, the median and
+    the count over the bound. Covered by a `[breakdown.aggregates]` entry or a run-time `waive`.
+    Detection is `bathos.sidecar.uncovered_aggregates` (the same one `bth run` prints from).
+    """
+    from bathos.sidecar import parse_sidecar, uncovered_aggregates
+
+    scripts_dir = project_root / "scripts"
+    if not scripts_dir.exists():
+        return []
+
+    issues: list[LintIssue] = []
+    for dir_name in ["experiments", "benchmarks", "validation"]:
+        dir_path = scripts_dir / dir_name
+        if not dir_path.exists():
+            continue
+        for script in sorted(dir_path.iterdir()):
+            if script.name.startswith(".") or script.name.startswith("_") or script.is_dir():
+                continue
+            if not script.name.endswith(".bth.toml"):
+                continue
+            try:
+                sidecar = parse_sidecar(script)
+            except Exception:
+                # Unparseable sidecars are reported by the other checks
+                continue
+            for u in uncovered_aggregates(sidecar):
+                issues.append(
+                    LintIssue(
+                        path=script,
+                        directory=dir_name,
+                        issue="AGGREGATE_WITHOUT_BREAKDOWN",
+                        severity=IssueSeverity.WARNING,
+                        detail=(
+                            f"{u.column!r} gates a verdict ({', '.join(u.sources)}) with no "
+                            f"[breakdown]; declare [breakdown.aggregates.{u.column}] or "
+                            '[breakdown] waive = "reason" (rule STAT-005)'
+                        ),
+                    )
+                )
     return issues
 
 
@@ -758,14 +807,9 @@ _TAUTOLOGY_RES = (
 )
 
 
-def _columns_referenced(fragment: str, known_columns) -> set[str]:
-    """Which declared result_schema columns a SQL fragment mentions.
-
-    Matching against the declared schema rather than parsing SQL: the column set is already
-    known from `[result_schema]`, so a word-boundary search is exact for the names that
-    matter and cannot be confused by SQL syntax it would otherwise have to parse.
-    """
-    return {c for c in known_columns if re.search(rf"\b{re.escape(c)}\b", fragment)}
+# Which declared result_schema columns a SQL fragment mentions: a word-boundary search against
+# the declared schema, not a SQL parse. One implementation, shared with `uncovered_aggregates`.
+_columns_referenced = columns_referenced
 
 
 def check_adversarial_checks(project_root: Path) -> list[LintIssue]:

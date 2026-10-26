@@ -81,6 +81,11 @@ class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(
     SPECIAL_FILE_IN_OUTPUTS = "special_file_in_outputs"
     RUN_NOT_FOUND = "run_not_found"
     RUN_PREFIX_AMBIGUOUS = "run_prefix_ambiguous"
+    # Distributional breakdown discipline (spec 261026 D3): a run cited by a claim-bound
+    # campaign is refused. `BreakdownRefused.code` carries one of these.
+    BREAKDOWN_MISSING = "breakdown_missing"
+    SIDECAR_UNVERIFIABLE = "sidecar_unverifiable"
+    FORK_RECORD_MISSING = "fork_record_missing"
     REQUIRES_LOG_MODE = "requires_log_mode"
     # `bth cold` (step 6).
     OUTPUTS_DRIFTED = "outputs_drifted"
@@ -148,6 +153,9 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.SPECIAL_FILE_IN_OUTPUTS: "A FIFO, socket or device sits under the output roots; remove it or narrow the roots",
     BathosErrorCode.RUN_NOT_FOUND: "No run matches that id or prefix; check it with `bth list`",
     BathosErrorCode.RUN_PREFIX_AMBIGUOUS: "The run-id prefix matches several runs; pass more characters of the id",
+    BathosErrorCode.BREAKDOWN_MISSING: "Re-run with [breakdown] declared for each worst-case aggregate the verdict reads (or a [breakdown] waive reason written BEFORE the run), or narrow the claim; a waiver added afterwards does not count",
+    BathosErrorCode.SIDECAR_UNVERIFIABLE: "The run-time sidecar cannot be recovered (the live file changed since the run and no pinned git ref holds it); re-run the experiment so its sidecar is recorded",
+    BathosErrorCode.FORK_RECORD_MISSING: "Validate a format-2 postmortem with a [fork] record that discharges the near_bound obligation (bth postmortem validate <path>)",
     BathosErrorCode.REQUIRES_LOG_MODE: "Output tiering reads the run log; run `bth migrate --to-log` first (legacy catalogs are not supported)",
     BathosErrorCode.OUTPUTS_DRIFTED: "A live output file differs from (or is missing against) the hash the run recorded; nothing was uploaded. A drifted run_end path is never re-referenced: re-run instead (see `bth outputs hash`)",
     BathosErrorCode.NO_COLD_ROOT: "No cold profile resolves, or its myxcel profile has no absolute cold_root: pass --profile, set $BTH_COLD_PROFILE, [tool.bathos.outputs] cold_profile, or ~/.config/bathos/config.toml [outputs]",
@@ -185,6 +193,11 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     "IngestLockTimeout": BathosErrorCode.CATALOG_ERROR,
     # Campaign errors
     "CampaignError": BathosErrorCode.CAMPAIGN_ERROR,
+    # Claim-bound breakdown refusal (spec 261026 D3). Carries its own, more specific `.code`
+    # (breakdown_missing / sidecar_unverifiable / fork_record_missing); this is the class fallback.
+    "BreakdownRefused": BathosErrorCode.CAMPAIGN_ERROR,
+    # A run-id prefix matching several runs (bathos.query.lookup_run).
+    "AmbiguousRunId": BathosErrorCode.RUN_PREFIX_AMBIGUOUS,
     # Sidecar errors
     "SidecarError": BathosErrorCode.SIDECAR_ERROR,
     # Export errors

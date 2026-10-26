@@ -11,14 +11,16 @@ conclude and warns at submit. Nothing to bypass means the bypass metrics stay ho
 fragile script-stem key never sits behind anything binding.
 
 **What is wired, and what is not — read this before relying on it.** All four §5 triggers
-have live call sites, each behind its **own** opt-in environment flag, and every flag
-defaults OFF (see `WIRED_TRIGGERS` and `_FLAG_PREFIX`):
+have live call sites, each behind its **own** flag, and every flag defaults OFF except
+`near_bound` (see `DEFAULT_ON`, `WIRED_TRIGGERS` and `_FLAG_PREFIX`):
 
 - `outcome_failed` and `adversarial_check_fired` — `runner.run_script`, at run end.
 - `campaign_confounded` and `citation_contradicted` — `campaigns.conclude_campaign`.
+- `near_bound` — `runner.run_script` at run end, default ON (spec 261026 D6); it fires only for
+  a sidecar that declares a `[breakdown]` `bound`.
 
-With every flag unset — the default — nothing calls `open_obligation` automatically, so the
-ledger stays empty and no verdict or exit code changes anywhere. That is the same posture the
+With every flag unset — the default, `near_bound` aside — nothing calls `open_obligation`
+automatically, so the ledger stays empty and no verdict or exit code changes anywhere. That is the same posture the
 Review Coverage Gate ships in, and for the same reason: auto-opening obligations changes
 behaviour on every run, and enabling it wholesale would retroactively burden every existing
 script, which is the failure §7's sequencing constraint exists to prevent.
@@ -50,10 +52,17 @@ TRIGGERS = frozenset(
         "campaign_confounded",  # (2) a campaign concluded confounded / was downgraded
         "adversarial_check_fired",  # (3) the selected branch's stricter bar evaluated FALSE
         "citation_contradicted",  # (4) a [review] 'supports' entry the outcome contradicted
+        "near_bound",  # (5) a run's worst-case aggregate sits at its declared bound (spec 261026 D6)
     }
 )
 
-#: Triggers with a live call site — now all four.
+#: Triggers that are ON unless switched off (env `BTH_OBLIGATION_<T>=0` or `[obligations] <t> =
+#: false`). The ledger's default-OFF posture exists so enabling a trigger cannot retroactively
+#: burden existing scripts; `near_bound` fires only for sidecars that declare the new
+#: `[breakdown]` `bound`, so no existing script is touched and default-ON is safe.
+DEFAULT_ON = frozenset({"near_bound"})
+
+#: Triggers with a live call site — all of them.
 #:
 #: Trigger 3's **polarity is settled**: `adversarial_check` is a *stricter conjunct* the
 #: outcome must also clear, so it FIRES when it evaluates FALSE. See
@@ -86,13 +95,20 @@ def trigger_enabled(trigger: str, workspace_root: Path | str | None = None) -> b
 
     Resolution order: `BTH_OBLIGATION_<TRIGGER>` env var wins in **both** directions, then
     `[obligations] <trigger>` in `.bth.toml`, then off — see :func:`config.resolve_flag`,
-    which is shared with the review-coverage gate so the two cannot drift.
+    which is shared with the review-coverage gate so the two cannot drift. A trigger in
+    `DEFAULT_ON` resolves True where neither env nor config says anything.
     """
     if trigger not in TRIGGERS:
         return False
     from bathos.config import resolve_flag
 
-    return resolve_flag(f"{_FLAG_PREFIX}{trigger.upper()}", "obligations", trigger, workspace_root)
+    return resolve_flag(
+        f"{_FLAG_PREFIX}{trigger.upper()}",
+        "obligations",
+        trigger,
+        workspace_root,
+        default=trigger in DEFAULT_ON,
+    )
 
 
 def enforcement_enabled(workspace_root: Path | str | None = None) -> bool:
@@ -136,6 +152,8 @@ class Obligation:
     discharged_at: str = ""
     discharged_by: str = ""  # path to the postmortem that discharged it
     notes: list[str] = field(default_factory=list)
+    #: earlier discharging postmortems a later one replaced (near_bound re-discharge only)
+    superseded_by_paths: list[str] = field(default_factory=list)
 
     @property
     def is_open(self) -> bool:
@@ -260,8 +278,114 @@ def discharge(workspace_root: Path | str, obligation_id: str, by_path: str) -> O
     return ob
 
 
+def stored_postmortem_path(workspace_root: Path | str, pm_path: Path | str) -> str:
+    """How `Obligation.discharged_by` stores a postmortem path: workspace-relative POSIX when the
+    file is under the workspace, absolute otherwise. Never cwd-relative."""
+    p = Path(pm_path)
+    try:
+        return p.resolve().relative_to(Path(workspace_root).resolve()).as_posix()
+    except ValueError:
+        return str(p.resolve())
+
+
+def _near_bound_entity_problem(
+    ob: Obligation, pm, catalog_dir: Path | None, lookup_state: dict
+) -> str | None:
+    """Why `pm` may not discharge this near_bound obligation, or None when it may: its run
+    resolves to the obligation's run, or it is campaign-scoped with that run as a member."""
+    if catalog_dir is None:
+        return "no catalog to check that this postmortem is about that run"
+    from bathos.query import AmbiguousRunId, lookup_run
+
+    hint = (
+        "if this is a log-mode run not yet ingested (SLURM / BTH_NO_INGEST), run `bth compact` "
+        "and retry"
+    )
+    if pm.run_id:
+        try:
+            found = lookup_run(pm.run_id, catalog_dir, ingest_state=lookup_state)
+        except AmbiguousRunId as e:
+            return str(e)
+        if found is None:
+            return f"run {pm.run_id!r} is not in the catalog; {hint}"
+        if found.id == ob.entity_id:
+            return None
+        return f"this postmortem is for run {found.id}, not {ob.entity_id}"
+    if pm.campaign_id:
+        from bathos.campaigns import (
+            CampaignError,
+            _resolve_campaign_id,
+            connect_catalog_db,
+            union_campaign_member_ids,
+        )
+
+        db = connect_catalog_db(catalog_dir, read_only=True)
+        try:
+            try:
+                cid = _resolve_campaign_id(db, pm.campaign_id, catalog_dir=catalog_dir)
+            except CampaignError as e:
+                return str(e)
+            if ob.entity_id in union_campaign_member_ids(db, cid, catalog_dir):
+                return None
+        finally:
+            if db is not None:
+                db.close()
+        return f"run {ob.entity_id} is not a member of campaign {pm.campaign_id}"
+    return "the postmortem names neither a run nor a campaign"
+
+
+def discharge_validated(
+    workspace_root: Path | str,
+    pm,
+    pm_path: Path | str,
+    catalog_dir: Path | str | None = None,
+) -> dict:
+    """Discharge the obligations an ALREADY-VALIDATED postmortem names (no second validation).
+
+    Returns `{"discharged": [ids], "not_discharged": {id: reason}}`. `discharged_by` is stored
+    via `stored_postmortem_path`. A `near_bound` id also needs the entity check (the postmortem
+    is about that run, or is campaign-scoped with it as a member) and is the one trigger that
+    re-discharges: a newer passing postmortem re-points an already-discharged obligation,
+    appending the old path to `superseded_by_paths`, so a run first closed by an internal
+    `stop` / `cited = false` record can be re-recorded once it is cited. Other triggers keep
+    first-discharge-wins.
+    """
+    workspace_root = Path(workspace_root)
+    by = stored_postmortem_path(workspace_root, pm_path)
+    cat = Path(catalog_dir) if catalog_dir is not None else None
+    lookup_state: dict = {}
+    discharged: list[str] = []
+    refused: dict[str, str] = {}
+    for oid in pm.discharges or []:
+        path = ledger_dir(workspace_root) / f"{oid}.json"
+        ob = _read(path)
+        if ob is None:
+            refused[oid] = "no such obligation in the ledger"
+            continue
+        if ob.trigger != "near_bound":
+            if discharge(workspace_root, oid, by) is not None:
+                discharged.append(oid)
+            continue
+        problem = _near_bound_entity_problem(ob, pm, cat, lookup_state)
+        if problem:
+            refused[oid] = problem
+            continue
+        if ob.is_open:
+            discharge(workspace_root, oid, by)
+        elif ob.discharged_by != by:
+            if ob.discharged_by:
+                ob.superseded_by_paths = [*ob.superseded_by_paths, ob.discharged_by]
+            ob.discharged_by = by
+            ob.discharged_at = datetime.now(UTC).isoformat()
+            _atomic_write(path, asdict(ob))
+        discharged.append(oid)
+    return {"discharged": discharged, "not_discharged": refused}
+
+
 def discharge_from_postmortem(workspace_root: Path | str, postmortem_path: Path | str) -> list[str]:
-    """Discharge every obligation a post-mortem names in `discharges`.
+    """Discharge every obligation a post-mortem names in `discharges` (the run-independent
+    wrapper: no catalog, so a `near_bound` id is never discharged here -- it needs the entity
+    check; `bth postmortem validate` is what discharges those).
 
     Only a *valid* post-mortem discharges: validity is the existing
     hypothesis_status/verdict_override consistency check, so no new validation tier is
@@ -278,11 +402,7 @@ def discharge_from_postmortem(workspace_root: Path | str, postmortem_path: Path 
     if not getattr(result, "ok", False):
         return []
 
-    discharged = []
-    for oid in getattr(pm, "discharges", []) or []:
-        if discharge(workspace_root, oid, str(p)) is not None:
-            discharged.append(oid)
-    return discharged
+    return discharge_validated(workspace_root, pm, p, None)["discharged"]
 
 
 def list_obligations_for_scope(

@@ -67,6 +67,7 @@ CONTEXT_COLUMNS: dict[str, str] = {
     "declares_novel": "bool — [experiment].novel is true",
     "n_adversarial_checks": "int  — outcome branches carrying an adversarial_check",
     "n_threshold_sources": "int  — outcome branches carrying a source justification",
+    "has_uncovered_aggregate": "bool — a worst-case aggregate gates a verdict with no [breakdown]/waive",
     "run_count": "int  — runs of this script in the catalog (0 when unavailable)",
     "campaign_run_count": "int  — runs in the script's campaign (0 when unavailable)",
 }
@@ -278,7 +279,7 @@ def build_context(script: Path, catalog_dir: Path | None = None) -> dict:
     cannot be read, which is why ``run_count``/``campaign_run_count`` are documented as
     "0 when unavailable" rather than as trustworthy zeroes.
     """
-    from bathos.sidecar import SidecarError, find_sidecar, parse_sidecar
+    from bathos.sidecar import SidecarError, find_sidecar, parse_sidecar, uncovered_aggregates
 
     script = Path(script)
     ctx: dict = {
@@ -298,6 +299,7 @@ def build_context(script: Path, catalog_dir: Path | None = None) -> dict:
         "declares_novel": False,
         "n_adversarial_checks": 0,
         "n_threshold_sources": 0,
+        "has_uncovered_aggregate": False,
         "run_count": 0,
         "campaign_run_count": 0,
     }
@@ -347,6 +349,7 @@ def build_context(script: Path, catalog_dir: Path | None = None) -> dict:
         ctx["has_controls"] = bool(controls is not None and controls.positive_outcome)
         ctx["has_differential"] = getattr(sc, "differential", None) is not None
         ctx["declares_novel"] = bool(getattr(sc, "novel", False))
+        ctx["has_uncovered_aggregate"] = bool(uncovered_aggregates(sc))
 
         # A "null-capable" outcome could legitimately fire when the effect is genuinely
         # absent — a `fail` label or any residual catch-all. check_positive_control_missing

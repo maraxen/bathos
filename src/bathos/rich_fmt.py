@@ -224,6 +224,35 @@ def render_campaign_review(
         )
         console.print(anomaly_panel)
 
+    # Postmortem amendments (spec 261026 D5): later evidence, never a change of outcome.
+    amendments = review.get("amendments", [])
+    if amendments:
+        from bathos.postmortem import AMENDMENTS_BANNER
+
+        amend_table = Table(title="Amendments", caption=AMENDMENTS_BANNER)
+        for column in ("Run", "Analysis run", "Kind", "Effect", "Units", "Note"):
+            amend_table.add_column(column)
+        for a in amendments:
+            amend_table.add_row(
+                str(a.get("run_id", ""))[:8],
+                str(a.get("analysis_run_id", "")),
+                str(a.get("kind", "")),
+                str(a.get("effect", "")),
+                ", ".join(a.get("outlier_units", []) or []),
+                str(a.get("note", "")),
+            )
+        console.print(amend_table)
+
+    # Run-time `[breakdown] waive` of each member (spec 261026 D3 visibility).
+    waivers = review.get("waivers", [])
+    if waivers:
+        waiver_table = Table(title="Breakdown waivers (declared before the run)")
+        waiver_table.add_column("Run")
+        waiver_table.add_column("Reason")
+        for w in waivers:
+            waiver_table.add_row(str(w.get("run_id", ""))[:8], str(w.get("reason", "")))
+        console.print(waiver_table)
+
     # AC-12 slice (Phase 2a, #4552): informational, non-gating blast-radius status.
     # campaigns.review_campaign() always populates these keys when catalog_dir was
     # passed; .get() with a "clean" default covers the case it wasn't (e.g. a caller

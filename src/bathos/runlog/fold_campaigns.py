@@ -125,39 +125,18 @@ def _general_merge(campaign_events: list[dict], base: dict[str, Any] | None = No
 
 
 def _sidecar_from_declaration(decl: dict | None):
-    """Reconstruct just enough of a `bathos.sidecar.Sidecar` from the
-    JSON-safe dict `run.started.data["sidecar"]` carries (spec BC-3: "A run's
-    e-value uses the sidecar declaration frozen in run.started.data") to call
-    `compute_evalue`/`derive_pass_labels` against it. `None`/`{}` (no sidecar
-    at run time, `sidecar_declaration_for_event(None)` in the emitter) means
-    "no declaration" -- returns `None`.
+    """Rebuild the `bathos.sidecar.Sidecar` frozen in `run.started.data["sidecar"]` (spec BC-3:
+    "A run's e-value uses the sidecar declaration frozen in run.started.data") to call
+    `compute_evalue`/`derive_pass_labels` against it. `None`/`{}` (no sidecar at run time,
+    `sidecar_declaration_for_event(None)` in the emitter) means "no declaration" -- returns
+    `None`. The rebuild is `Sidecar.from_declaration`, which keeps every field (it used to keep
+    seven; spec 261026 D3).
     """
     if not decl:
         return None
-    from bathos.sidecar import OutcomeSpec, Sidecar
+    from bathos.sidecar import Sidecar
 
-    outcomes_raw = decl.get("outcomes") or {}
-    outcomes = {}
-    for label, spec in outcomes_raw.items():
-        spec = spec or {}
-        outcomes[label] = OutcomeSpec(
-            condition=spec.get("condition", ""),
-            decision=spec.get("decision", ""),
-            reasoning=spec.get("reasoning", ""),
-            is_residual=bool(spec.get("is_residual", False)),
-            adversarial_check=spec.get("adversarial_check"),
-            source=spec.get("source", ""),
-            multiple_comparisons_correction=spec.get("multiple_comparisons_correction", ""),
-        )
-    return Sidecar(
-        kind=decl.get("kind", "experiment"),
-        result_schema=decl.get("result_schema") or {},
-        outcomes=outcomes,
-        popper_null_pass_rate=decl.get("popper_null_pass_rate"),
-        popper_alt_pass_rate=decl.get("popper_alt_pass_rate"),
-        popper_stopping_threshold=decl.get("popper_stopping_threshold"),
-        popper_weights=decl.get("popper_weights") or {},
-    )
+    return Sidecar.from_declaration(decl)
 
 
 def member_sidecar_declaration(run_events: list[dict]) -> dict | None:

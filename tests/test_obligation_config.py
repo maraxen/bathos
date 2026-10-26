@@ -12,7 +12,13 @@ from pathlib import Path
 
 import pytest
 
-from bathos.obligations import TRIGGERS, enforcement_enabled, list_obligations, trigger_enabled
+from bathos.obligations import (
+    DEFAULT_ON,
+    TRIGGERS,
+    enforcement_enabled,
+    list_obligations,
+    trigger_enabled,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -48,11 +54,11 @@ def test_explicit_false_in_config_stays_off(tmp_path):
 
 def test_no_obligations_section_is_all_off(tmp_path):
     root = _project(tmp_path, "")
-    assert [t for t in TRIGGERS if trigger_enabled(t, root)] == []
+    assert [t for t in TRIGGERS - DEFAULT_ON if trigger_enabled(t, root)] == []
 
 
 def test_no_project_config_at_all_is_all_off(tmp_path):
-    assert [t for t in TRIGGERS if trigger_enabled(t, tmp_path)] == []
+    assert [t for t in TRIGGERS - DEFAULT_ON if trigger_enabled(t, tmp_path)] == []
 
 
 def test_enforce_reads_from_config(tmp_path):
