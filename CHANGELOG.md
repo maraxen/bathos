@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`bth backfill-declarations` and the `run.declaration_backfilled` event (log mode).** Runs recorded before #3717 (260729) carry NULL `claim_discriminates` / `claim_isolates` even when their sidecar declared them, so the Union Gate reports their clauses as unmapped and downgrades the campaign to `confounded`. The command finds those runs and fills a field only from sidecar bytes whose sha256 equals the run's recorded `sidecar_sha256`. It looks at the recorded `sidecar_path` first, then the same project-relative path under each registered local root (cluster runs record a remote path, debt #2225), then that path's git history. A sidecar edited after the run hashes differently and is never used. The fold applies the event only to a field still NULL, so a value the run recorded itself always stands. It is a dry run unless `--apply`; `--run-ids` (prefixes) and `--project` narrow it, and `--show all` lists every candidate with its status (`backfillable`, `no_declaration`, `unresolved`, `parse_error`). The event goes to the run's own project log. MCP mirror: `backfill_declarations` (write token). Legacy mode is refused: a warm-tier UPDATE is lost on the next rebuild from cool fragments.
+
+### Fixed
+
+- **`bth migrate` no longer rewrites frozen cool fragments in log mode, and `bth verify` tells a schema-only rewrite from a data change.** On 261025 a plain `bth migrate` upgraded all 6,964 cool fragments to schema v18 after cut-over. Every import hash changed, so `bth verify` failed with 6,964 `legacy_write_after_cutover` findings although no folded value changed. A real (non-dry) `bth migrate` now refuses in log mode. Verify reports a fragment whose imported fields are unchanged apart from `schema_version`, and whose new columns hold exactly the defaults the upgrade inserts, as one advisory `legacy_schema_upgrade_after_cutover` warning that does not fail the runlog tier; per-fragment details stay in `stats["findings"]`. Any other change is still `legacy_write_after_cutover`.
+- **`bth repair` no longer plans a warm-tier rebuild in log mode (debt #2819 item 7).** `bathos.db` is frozen after cut-over and `compact(force_rebuild=True)` refuses there, so a `rebuild_warm` action could only fail at apply. The scan now reports a warning pointing at rebuilding `index.db` instead, and the handler refuses explicitly.
+
 ## [0.13.0a7] - 2026-10-23
 
 ### Added

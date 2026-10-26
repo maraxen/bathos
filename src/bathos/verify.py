@@ -651,6 +651,19 @@ def _known_import_chains(catalog_dir: Path) -> dict[tuple[str, ...], tuple[int, 
     from `idx.events` instead, so a post-cutover legacy write can be told
     apart from one the importer already knows about (spec "Legacy writes
     after cut-over" / AC-23 / Migration step 5)."""
+    return _known_import_chains_and_fields(catalog_dir)[0]
+
+
+# Importer bookkeeping keys on a `*.imported` event's `data` (importer.py),
+# stripped to recover the source's own fields.
+_IMPORT_BOOKKEEPING = ("source_class", "source_locator", "canon", "snapshot", "source_sha256")
+
+
+def _known_import_chains_and_fields(
+    catalog_dir: Path,
+) -> tuple[dict[tuple[str, ...], tuple[int, str]], dict[tuple[str, ...], dict]]:
+    """`_known_import_chains`, plus each chain's latest-snapshot source fields
+    (bookkeeping stripped), for telling a schema-only rewrite from a data change."""
     from bathos.index import connect_read
     from bathos.runlog.importer import _existing_chains
 
@@ -671,7 +684,46 @@ def _known_import_chains(catalog_dir: Path) -> dict[tuple[str, ...], tuple[int, 
         }
         for kind, entity, origin, data in rows
     ]
-    return _existing_chains(events)
+    chains = _existing_chains(events)
+    fields: dict[tuple[str, ...], dict] = {}
+    for ev in events:
+        data = ev["data"] or {}
+        key = (
+            ev["kind"],
+            *(ev["entity"] or []),
+            data.get("source_class", ""),
+            data.get("source_locator", ""),
+        )
+        known = chains.get(key)
+        if known is not None and (data.get("snapshot") or 0) == known[0]:
+            fields[key] = {k: v for k, v in data.items() if k not in _IMPORT_BOOKKEEPING}
+    return chains, fields
+
+
+def _is_schema_only_rewrite(prior: dict, current: dict) -> bool:
+    """True when `current` is `prior` re-written by a fragment schema upgrade
+    (`bathos.migrate.migrate_catalog`): every prior field unchanged except
+    `schema_version`, and every new column holding exactly the default the
+    upgrade inserts. Compared in the importer's canonical JSON form, which is
+    the form `prior` was stored in."""
+    from bathos.migrate import _default_array
+    from bathos.runlog.importer import _canon_bytes
+    from bathos.schema import COOL_SCHEMA
+
+    cur = json.loads(_canon_bytes(current))
+    if set(prior) - set(cur):
+        return False
+    for k, v in prior.items():
+        if k != "schema_version" and cur.get(k) != v:
+            return False
+    schema = {f.name: f.type for f in COOL_SCHEMA}
+    for k in set(cur) - set(prior):
+        if k not in schema:
+            return False
+        default = _default_array(schema[k], 1, k).to_pylist()[0]
+        if cur[k] != json.loads(_canon_bytes({"v": default}))["v"]:
+            return False
+    return True
 
 
 def _legacy_findings(catalog_dir: Path) -> list[dict]:
@@ -695,13 +747,31 @@ def _legacy_findings(catalog_dir: Path) -> list[dict]:
     for locator in report.unreadable:
         findings.append({"type": "corrupt_legacy_source", "source_locator": locator})
 
-    known_chains = _known_import_chains(catalog_dir)
+    known_chains, known_fields = _known_import_chains_and_fields(catalog_dir)
     for cand in candidates:
         if cand.kind == "legacy_source.unreadable":
             continue  # already reported above via report.unreadable
         sha = _source_sha256(cand.fields)
         chain_key = (cand.kind, *cand.entity, cand.source_class, cand.source_locator)
         known = known_chains.get(chain_key)
+        prior = known_fields.get(chain_key)
+        if (
+            known is not None
+            and known[1] != sha
+            and prior is not None
+            and _is_schema_only_rewrite(prior, cand.fields)
+        ):
+            # A post-cutover `bth migrate` schema upgrade of a frozen fragment
+            # (261025): no value the fold reads changed. Reported as a warning.
+            findings.append(
+                {
+                    "type": "legacy_schema_upgrade_after_cutover",
+                    "kind": cand.kind,
+                    "entity": cand.entity,
+                    "source_locator": cand.source_locator,
+                }
+            )
+            continue
         if known is None or known[1] != sha:
             findings.append(
                 {
@@ -749,13 +819,27 @@ def verify_runlog(catalog_dir: Path) -> VerifyResult:
         findings.extend(_output_copy_findings(catalog_dir))
         findings.extend(_legacy_findings(catalog_dir))
 
+    advisory = [f for f in findings if f["type"] in _ADVISORY_FINDINGS]
+    blocking = [f for f in findings if f["type"] not in _ADVISORY_FINDINGS]
+    warnings: list[str] = []
+    if advisory:
+        # One line, not thousands: a single schema pass rewrites every fragment.
+        warnings.append(
+            f"legacy_schema_upgrade_after_cutover: {len(advisory)} frozen cool fragment(s) were "
+            "rewritten by a fragment schema upgrade after cut-over; no folded value changed "
+            "(details in stats['findings'])"
+        )
     return VerifyResult(
         tier="runlog",
-        ok=len(findings) == 0,
-        errors=[_format_finding(f) for f in findings],
-        warnings=[],
+        ok=len(blocking) == 0,
+        errors=[_format_finding(f) for f in blocking],
+        warnings=warnings,
         stats={"findings": findings, "finding_count": len(findings)},
     )
+
+
+# Finding types that are reported but do not fail the runlog tier.
+_ADVISORY_FINDINGS = frozenset({"legacy_schema_upgrade_after_cutover"})
 
 
 def verify_all(catalog_dir: Path, archive_root: Path | None = None) -> list[VerifyResult]:

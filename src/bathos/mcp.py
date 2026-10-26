@@ -1499,6 +1499,68 @@ def reap_tool(
     }
 
 
+@cisternal.tool(
+    registry="bathos-cli",
+    name="backfill_declarations",
+    cli_group="catalog",
+    cli_name="backfill-declarations",
+)
+def backfill_declarations_tool(
+    catalog_dir: str = "",
+    run_ids: str = "",
+    project: str = "",
+    apply: bool = False,
+    show: str = "backfillable",
+) -> dict:
+    """Backfill claim_discriminates/claim_isolates from a run's own pre-registered sidecar.
+
+    For runs recorded before #3717 with NULL claim fields. A field is filled only from
+    sidecar bytes (recorded path, a registered local root, or git history) whose sha256
+    equals the run's recorded sidecar_sha256, and only where the run's value is NULL.
+    Writes a run.declaration_backfilled event; log mode only. Dry run unless apply.
+
+    Args:
+        catalog_dir: Catalog directory (empty = use default)
+        run_ids: Comma-separated run IDs or unique prefixes (empty = all candidates)
+        project: Restrict to one project slug
+        apply: Emit the events (default False: report only)
+        show: Which candidates to list in detail: backfillable, all, or none
+
+    Returns:
+        Dict with per-status counts and the listed candidates
+    """
+    from bathos.backfill import BackfillError, backfill_declarations
+
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    ids = [x.strip() for x in run_ids.split(",") if x.strip()] or None
+    try:
+        candidates = backfill_declarations(
+            cat_dir, run_ids=ids, project=project or None, apply=apply
+        )
+    except BackfillError as e:
+        return {
+            "error": str(e),
+            "error_code": BathosErrorCode.INVALID_PARAM.value,
+            "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.INVALID_PARAM],
+        }
+
+    counts: dict[str, int] = {}
+    for c in candidates:
+        counts[c.status] = counts.get(c.status, 0) + 1
+    if show == "all":
+        listed = candidates
+    elif show == "none":
+        listed = []
+    else:
+        listed = [c for c in candidates if c.status == "backfillable"]
+    return {
+        "applied": apply,
+        "backfilled": counts.get("backfillable", 0) if apply else 0,
+        "counts": counts,
+        "candidates": [dataclasses.asdict(c) for c in listed],
+    }
+
+
 @cisternal.tool(registry="bathos-cli", name="check", cli_name="check")
 def check_tool(
     catalog_dir: str = "",
@@ -2888,6 +2950,29 @@ async def mcp_reap_tool(
         apply=apply,
         revert=revert,
         revert_ids=revert_ids,
+    )
+
+
+@cisternal.tool(registry="bathos", name="backfill_declarations")
+@traced_tool
+@require_write_token
+async def mcp_backfill_declarations_tool(
+    catalog_dir: str = "",
+    run_ids: str = "",
+    project: str = "",
+    apply: bool = False,
+    show: str = "backfillable",
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
+) -> dict:
+    """Backfill a run's claim_discriminates/claim_isolates from its own sha-verified sidecar.
+
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
+    return backfill_declarations_tool(
+        catalog_dir=catalog_dir,
+        run_ids=run_ids,
+        project=project,
+        apply=apply,
+        show=show,
     )
 
 
@@ -5516,6 +5601,7 @@ _WIRED = cisternal.wire(
         "archive_artifact",
         "restore",
         "reap",
+        "backfill_declarations",
         "blast_radius_assess",
         "blast_radius_clear",
         "get_blast_radius_status",

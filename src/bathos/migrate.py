@@ -49,7 +49,21 @@ def migrate_catalog(
     the paths skipped, which are never auto-deleted or auto-quarantined by
     this function (use `bth repair --tier cool` for that, with its own
     explicit dry-run/--apply gate).
+
+    Raises ValueError for a real (non-dry) run in log mode: cool fragments are
+    frozen legacy sources after cut-over, and rewriting them changes every
+    fragment's import hash, so `bth verify` then reports each one as a legacy
+    write after cut-over (261025: one such pass rewrote 6,964 fragments).
     """
+    if not dry_run:
+        from bathos.runlog.mode import is_log_mode
+
+        if is_log_mode(catalog_dir):
+            raise ValueError(
+                "bth migrate (fragment schema upgrade) is refused in log mode: cool-tier "
+                "fragments are frozen legacy sources after cut-over, and index.db carries "
+                "the current schema. Use --dry-run to inspect."
+            )
     runs_dir = catalog_dir / "runs"
     if project is not None:
         runs_dir = runs_dir / project
