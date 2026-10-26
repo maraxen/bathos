@@ -333,6 +333,13 @@ class Sidecar:
         `breakdown=None`. Nested blocks, `OutcomeSpec` entries and `kind` are rehydrated into
         their dataclass / enum types.
         """
+        if not any(key in decl for key in ("kind", "result_schema", "outcomes")):
+            # e.g. the `{"repr": ...}` fallback `sidecar_declaration_for_event` writes when a
+            # sidecar cannot be serialised: not a declaration, and an empty rebuild of it would
+            # pass the breakdown gate.
+            raise SidecarError(
+                "the declaration carries no sidecar fields (kind/result_schema/outcomes)"
+            )
         try:
             defaults = {"kind": SidecarKind.EXPERIMENT, "result_schema": {}}
             return _hydrate_dataclass(cls, {**defaults, **decl})
