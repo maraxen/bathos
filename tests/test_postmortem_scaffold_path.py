@@ -69,3 +69,29 @@ def test_no_script_token_falls_back_to_bth_postmortems(tmp_path):
 
     assert out == tmp_path / ".bth" / "postmortems" / f"run_{RUN_ID}.bth.postmortem.toml"
     assert find_postmortem(tmp_path, run_id=RUN_ID) is not None
+
+
+def test_script_symlinked_from_outside_stays_beside_the_link(tmp_path):
+    real = _touch(tmp_path / "shared" / "x.py")
+    workspace = tmp_path / "ws"
+    link = workspace / "scripts" / "x.py"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(real)
+
+    out = scaffold_postmortem_template("python scripts/x.py", RUN_ID, workspace)
+
+    assert out == link.parent / f"x.py.{RUN_ID}.bth.postmortem.toml"
+    assert find_postmortem(workspace, run_id=RUN_ID) is not None
+
+
+def test_venv_interpreter_symlinked_to_system_python_is_still_excluded(tmp_path):
+    system_python = _touch(tmp_path / "usr" / "bin" / "python3.13")
+    workspace = tmp_path / "ws"
+    interpreter = workspace / ".venv" / "bin" / "python3"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.symlink_to(system_python)
+    script = _touch(workspace / "scripts" / "x.py")
+
+    out = scaffold_postmortem_template(f"{interpreter} scripts/x.py", RUN_ID, workspace)
+
+    assert out == script.parent / f"x.py.{RUN_ID}.bth.postmortem.toml"

@@ -430,18 +430,26 @@ def _script_from_command(command: str, workspace_root: Path) -> Path | None:
     wins over any other existing file. Otherwise an absolute interpreter such as
     `/abs/.venv/bin/python3` is taken for the script, and the postmortem lands in
     `.venv/bin/` (EDQUOT on Engaging, debt #3046) where no walk can find it.
+
+    Containment is lexical (`normpath`, no symlink resolution): a script symlinked into
+    the workspace from elsewhere still counts, and its postmortem sits beside the link.
     """
+    import os
     import shlex
 
-    root = Path(workspace_root).resolve()
+    given = Path(os.path.abspath(workspace_root))
+    roots = {given, Path(workspace_root).resolve()}
     candidates = []
     for part in shlex.split(command) if command else []:
-        p = (root / part).resolve()
-        try:
-            rel = p.relative_to(root)
-        except ValueError:
-            continue
-        if PRUNE_DIRS.intersection(rel.parts):
+        p = Path(os.path.normpath(given / part))
+        rel = None
+        for root in roots:
+            try:
+                rel = p.relative_to(root)
+                break
+            except ValueError:
+                continue
+        if rel is None or PRUNE_DIRS.intersection(rel.parts):
             continue
         candidates.append(p)
 
