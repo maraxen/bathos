@@ -1,3 +1,4 @@
+# fix-postmortem-scaffold-path Internal Docs
 # 261023-output-tiering-spec Internal Docs
 
 ## Daily
@@ -21,6 +22,8 @@
 - [260515_v02-sprint-plan](plans/260515_v02-sprint-plan.md)
 
 ## Specs
+- [261026_distributional-breakdown-discipline](specs/261026_distributional-breakdown-discipline.md) — Spec for debt #3045: [breakdown] sidecar block + aggregate-verdict lint, postmortem [[amendments]], postmortem [fork] for marginal results; warn everywhere, refuse when claim-bound.
+- [261026_provenance-out-of-working-tree](specs/261026_provenance-out-of-working-tree.md) — Spec for debt #3049: move the per-run sidecar lock into the git object store, untrack legacy manifest/lock files, and warn when bookkeeping would dirty the tree.
 - [261023_output-tiering](specs/261023_output-tiering.md) — Standard for where a run's output files live (warm local path, checksummed cold archive, mirror), how bathos records and verifies each copy, and how `bth warm` restores them; reuses myxcel profiles and transport, folds in naurmalade's coldify wrapper, and notes the already-fixed reap log-mode bug
 - [261015_exploratory-mode-contract](specs/261015_exploratory-mode-contract.md) — Operationalize exploration vs calibration vs validation in bathos so exploratory runs stop inventing pass/marginal/fail thresholds, with a gated promotion path to confirmatory
 - [261012_retire-compact-runlog-cutover](specs/261012_retire-compact-runlog-cutover.md) — Do not build an incremental legacy compact; finish delivery step 5 of the project-local run log (260925) behind its blockers, and add a cool-fragment fallback to get_run meanwhile (debts 2344, 2110, 1685, 1647, 1993)
