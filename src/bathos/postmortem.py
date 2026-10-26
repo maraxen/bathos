@@ -416,33 +416,39 @@ def validate_postmortem(
     return ValidationResult(ok=ok, errors=errors, warnings=warnings)
 
 
+def fork_problems(postmortem: Postmortem) -> list[str]:
+    """Why `postmortem` is not a valid near_bound fork record (empty = valid). Run-independent:
+    reads only `format` and `fork`. A fork with `cited = false` is valid here; whether a CITED
+    result may rest on it is the claim-bound conclude check."""
+    if postmortem.format != 2:
+        return ["a near_bound obligation can only be discharged by a postmortem with format = 2"]
+    fork = postmortem.fork
+    if not fork:
+        return ["discharging near_bound requires a [fork] record (choice, reason, cited)"]
+    problems = []
+    choice = str(fork.get("choice", "") or "")
+    if choice not in FORK_CHOICES:
+        problems.append(f"[fork] choice {choice!r} is not one of {list(FORK_CHOICES)}")
+    if not str(fork.get("reason", "") or "").strip():
+        problems.append("[fork] reason must not be empty")
+    if choice == "stop" and fork.get("cited") is True:
+        problems.append(
+            "[fork] choice = stop cannot have cited = true: a cited result needs a follow-up"
+        )
+    return problems
+
+
 def _validate_fork(
     postmortem: Postmortem, errors: list[ValidationError], postmortem_path: Path | None
 ) -> None:
     """Fork checks for a postmortem that discharges a `near_bound` obligation (spec 261026 D6).
-    Run-independent: they read only `pm.fork` and `pm.discharges`, so they fire with no run."""
+    They fire with no run (`obligations.py` calls validate with none)."""
     if not any(oid.endswith("_near_bound") for oid in postmortem.discharges):
         return
-
-    def err(message: str) -> None:
+    for message in fork_problems(postmortem):
         errors.append(ValidationError(message))
         if postmortem_path:
             event("postmortem.validate_error", path=str(postmortem_path), reason=message)
-
-    if postmortem.format != 2:
-        err("a near_bound obligation can only be discharged by a postmortem with format = 2")
-        return
-    fork = postmortem.fork
-    if not fork:
-        err("discharging near_bound requires a [fork] record (choice, reason, cited)")
-        return
-    choice = str(fork.get("choice", "") or "")
-    if choice not in FORK_CHOICES:
-        err(f"[fork] choice {choice!r} is not one of {list(FORK_CHOICES)}")
-    if not str(fork.get("reason", "") or "").strip():
-        err("[fork] reason must not be empty")
-    if choice == "stop" and fork.get("cited") is True:
-        err("[fork] choice = stop cannot have cited = true: a cited result needs a follow-up")
 
 
 def _validate_amendments(

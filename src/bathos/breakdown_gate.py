@@ -202,6 +202,84 @@ def check_runs(
     return findings
 
 
+def check_near_bound(
+    runs: dict[str, object | None],
+    workspace_root: Path,
+    *,
+    db=None,
+    log_mode: bool = False,
+) -> list[Finding]:
+    """The claim-bound fork-record check (spec 261026 D6), run per member at conclude.
+
+    Recomputes `near_bound` from each run's run-time sidecar and results, independent of whether
+    the ledger entry was ever opened (an opt-out or a swallowed failure must not let a near-bound
+    run through). With no entry the obligation is opened now (`open_obligation` bypasses the
+    flag). An open entry fails. A discharged entry is re-read from `Obligation.discharged_by`: a
+    missing, unparseable or fork-less file, or `cited = false`, fails. Unresolvable members are
+    `check_runs`' business and are skipped here.
+    """
+    from bathos.obligations import _read, ledger_dir, open_obligation
+    from bathos.postmortem import fork_problems, parse_postmortem
+    from bathos.sidecar import near_bound
+
+    workspace_root = Path(workspace_root)
+    findings: list[Finding] = []
+    for run_id, run in runs.items():
+        if run is None:
+            continue
+        sidecar = resolve_run_sidecar(run, workspace_root, db=db, log_mode=log_mode)
+        if not isinstance(sidecar, Sidecar) or sidecar.breakdown is None:
+            continue
+        hits = near_bound(sidecar, _result_dict(run.metadata))
+        if not hits:
+            continue
+        what = "; ".join(f"{h.column}: {h.detail}" for h in hits)
+        oid = f"run_{run.id}_near_bound"
+        remedy = (
+            "record what was decided: bth postmortem scaffold, fill [fork], then "
+            "bth postmortem validate <path>"
+        )
+        ob = _read(ledger_dir(workspace_root) / f"{oid}.json")
+        if ob is None:
+            open_obligation(workspace_root, "run", run.id, "near_bound", detail=what)
+            findings.append(
+                Finding(run_id, BathosErrorCode.FORK_RECORD_MISSING, f"{what}; {remedy}")
+            )
+            continue
+        if ob.is_open:
+            findings.append(
+                Finding(run_id, BathosErrorCode.FORK_RECORD_MISSING, f"{what}; {remedy}")
+            )
+            continue
+        pm_file = Path(ob.discharged_by)
+        if not pm_file.is_absolute():
+            pm_file = workspace_root / pm_file
+        problem = None
+        try:
+            pm = parse_postmortem(pm_file)
+        except Exception as e:  # noqa: BLE001 -- missing, unreadable or unparseable
+            problem = f"the discharging postmortem {ob.discharged_by!r} cannot be read ({e})"
+        else:
+            bad = fork_problems(pm)
+            if bad:
+                problem = f"{ob.discharged_by!r} has no valid [fork]: {'; '.join(bad)}"
+            elif pm.fork.get("cited") is not True:
+                problem = (
+                    f"{ob.discharged_by!r} records cited = false, but this run is cited by a "
+                    "claim-bound campaign"
+                )
+        if problem:
+            findings.append(
+                Finding(
+                    run_id,
+                    BathosErrorCode.FORK_RECORD_MISSING,
+                    f"{what}; {problem}. Edit that file, or validate a new format-2 postmortem "
+                    "with cited = true, which re-points the obligation",
+                )
+            )
+    return findings
+
+
 def format_findings(findings: list[Finding], where: str) -> str:
     lines = [f"{where}: {len(findings)} breakdown finding(s) on claim-bound runs"]
     lines += [f"  {f.run_id[:8]}: {f.message}" for f in findings[:10]]
@@ -212,15 +290,19 @@ def format_findings(findings: list[Finding], where: str) -> str:
 
 def refuse_on_findings(findings: list[Finding], where: str) -> None:
     """Raise `BreakdownRefused` for `findings`; `.code` is BREAKDOWN_MISSING when any run
-    failed the check itself, else SIDECAR_UNVERIFIABLE."""
+    failed the check itself, else SIDECAR_UNVERIFIABLE, else FORK_RECORD_MISSING."""
     if not findings:
         return
     from bathos.campaigns import BreakdownRefused
 
-    code = (
-        BathosErrorCode.BREAKDOWN_MISSING
-        if any(f.code is BathosErrorCode.BREAKDOWN_MISSING for f in findings)
-        else BathosErrorCode.SIDECAR_UNVERIFIABLE
+    code = next(
+        c
+        for c in (
+            BathosErrorCode.BREAKDOWN_MISSING,
+            BathosErrorCode.SIDECAR_UNVERIFIABLE,
+            BathosErrorCode.FORK_RECORD_MISSING,
+        )
+        if any(f.code is c for f in findings)
     )
     raise BreakdownRefused(code, format_findings(findings, where))
 

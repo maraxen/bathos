@@ -3171,13 +3171,31 @@ def postmortem_scaffold_tool(
         pm_path = scaffold_campaign_postmortem_template(campaign.id, ws, open_ids)
         return {"path": str(pm_path), "campaign_id": campaign.id, "open_obligations": open_ids}
 
-    run_row = find_run_for_scaffold(run_id, cat_dir)
+    # Obligations are keyed by the FULL run id: resolve a prefix first (an ambiguous one is an
+    # error naming the candidates), then look up the command under the full id.
+    full_id = run_id
+    try:
+        from bathos.query import AmbiguousRunId, lookup_run
+
+        resolved = lookup_run(run_id, cat_dir)
+        if resolved is not None:
+            full_id = resolved.id
+    except AmbiguousRunId as e:
+        return {"error": str(e)}
+    except Exception:  # noqa: BLE001 -- an unreadable lookup keeps the id as given
+        pass
+    run_row = find_run_for_scaffold(full_id, cat_dir)
     if not run_row:
         return {"error": f"Run '{run_id}' not found"}
     command, _project_slug = run_row
 
-    postmortem_path = scaffold_postmortem_template(command, run_id, ws)
-    return {"path": str(postmortem_path), "run_id": run_id}
+    from bathos.obligations import list_obligations
+
+    open_ids = [o.obligation_id for o in list_obligations(ws) if o.entity_id == full_id]
+    postmortem_path = scaffold_postmortem_template(
+        command, full_id, ws, open_obligation_ids=open_ids
+    )
+    return {"path": str(postmortem_path), "run_id": full_id, "open_obligations": open_ids}
 
 
 @cisternal.tool(
@@ -3213,7 +3231,13 @@ def postmortem_validate_tool(
 
         ws = resolve_workspace().fs_root
 
-    result = validate_postmortem(pm, workspace_root=ws, strict_files=strict_files)
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    result = validate_postmortem(
+        pm,
+        workspace_root=ws,
+        strict_files=strict_files,
+        run_lookup=_postmortem_run_lookup(cat_dir),
+    )
     warnings = list(result.warnings)
     if result.ok:
         if pm.run_id:
@@ -3222,7 +3246,6 @@ def postmortem_validate_tool(
             # (the legacy fold still comes from compact.py re-reading the file).
             from bathos.runlog.emit import current_mode, emit_event, unit_of_work
 
-            cat_dir = _get_catalog_dir(catalog_dir or None)
             with unit_of_work(cat_dir):
                 if current_mode():
                     # amendment_removed (spec 261026 D5, log mode only): an amendment an earlier
@@ -3247,18 +3270,45 @@ def postmortem_validate_tool(
                         data=event_data,
                         cwd=ws,
                     )
+        # Only a valid postmortem discharges, and the one place that does is here, so this one
+        # point covers both the CLI (`bth postmortem validate`) and MCP callers.
+        from bathos.obligations import discharge_validated
+
+        outcome = discharge_validated(ws, pm, pm_path, cat_dir)
         return {
             "validation_ok": True,
             "run_id": pm.run_id,
             "campaign_id": pm.campaign_id,
             "hypothesis_status": pm.hypothesis_status,
             "warnings": warnings,
+            "discharged": outcome["discharged"],
+            "not_discharged": outcome["not_discharged"],
         }
     return {
         "validation_ok": False,
         "errors": [e.message for e in result.errors],
         "warnings": warnings,
     }
+
+
+def _postmortem_run_lookup(cat_dir: Path):
+    """`run_lookup` for postmortem validation: unique-prefix `query.lookup_run`, with ONE shared
+    ingest state and one cool-tier scan across the validation (spec 261026 D5)."""
+    from bathos.catalog import read_runs
+    from bathos.query import lookup_run
+
+    state: dict = {}
+    pool: list = []
+
+    def lookup(run_id: str):
+        if not pool:
+            try:
+                pool.append(read_runs(cat_dir))
+            except Exception:  # noqa: BLE001 -- an unreadable cool tier is a miss, not a crash
+                pool.append([])
+        return lookup_run(run_id, cat_dir, cool_runs=pool[0], ingest_state=state)
+
+    return lookup
 
 
 def _previous_amendments(cat_dir: Path, run_id: str) -> list[dict]:
@@ -3348,7 +3398,11 @@ def postmortem_get_tool(
                     break
 
     validation = validate_postmortem(
-        pm, workspace_root=ws, run=run_obj, strict_files=strict_files
+        pm,
+        workspace_root=ws,
+        run=run_obj,
+        strict_files=strict_files,
+        run_lookup=_postmortem_run_lookup(_get_catalog_dir(None)),
     )
     # Amendments render from the file whether or not validation passes (drift included), under a
     # banner saying they never change the recorded outcome (spec 261026 D5).
@@ -3368,8 +3422,8 @@ def postmortem_get_tool(
             **amendment_fields,
         }
 
-    # Read-only: run.postmortem_applied is emitted by postmortem validate/register
-    # (spec BC-2), never by a read.
+    # Never emits run events (run.postmortem_applied comes from postmortem validate/register,
+    # spec BC-2); it may fold pending log events into the derived index while resolving ids.
     return {
         "run_id": pm.run_id,
         "campaign_id": pm.campaign_id,

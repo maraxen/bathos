@@ -196,6 +196,8 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     # Claim-bound breakdown refusal (spec 261026 D3). Carries its own, more specific `.code`
     # (breakdown_missing / sidecar_unverifiable / fork_record_missing); this is the class fallback.
     "BreakdownRefused": BathosErrorCode.CAMPAIGN_ERROR,
+    # A run-id prefix matching several runs (bathos.query.lookup_run).
+    "AmbiguousRunId": BathosErrorCode.RUN_PREFIX_AMBIGUOUS,
     # Sidecar errors
     "SidecarError": BathosErrorCode.SIDECAR_ERROR,
     # Export errors

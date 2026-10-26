@@ -266,10 +266,10 @@ def test_postmortem_get_without_amendments_adds_no_banner(tmp_path, tmp_catalog,
 def test_postmortem_validate_tool_returns_warnings(tmp_path):
     from bathos.mcp import postmortem_validate_tool
 
-    path, _ = _pm(tmp_path, _amendment())
+    path, _ = _pm(tmp_path, _amendment(), header='run_id = "abcdef12"\n')  # format 1
     result = postmortem_validate_tool(path=str(path), workspace_root=str(tmp_path))
     assert result["validation_ok"] is True
-    assert any("no catalog" in w for w in result["warnings"])
+    assert any("not enforced" in w for w in result["warnings"])
 
 
 def test_campaign_review_lists_amendments_and_the_renderer_shows_them(tmp_catalog, tmp_path):
@@ -359,6 +359,10 @@ def test_log_mode_validate_warns_when_a_recorded_amendment_disappears(tmp_path, 
     )
     monkeypatch.chdir(ws)
     monkeypatch.delenv("BTH_PROJECT_ID", raising=False)
+    # the amendment's analysis run is not in this empty catalog; resolving it is T7a's concern
+    monkeypatch.setattr(
+        "bathos.mcp._postmortem_run_lookup", lambda _cat: lambda rid: SimpleNamespace(id=rid)
+    )
     try:
         path = ws / "pm.bth.postmortem.toml"
         path.write_text(_HEADER + _PM.format(override="none") + _amendment())

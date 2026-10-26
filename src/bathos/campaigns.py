@@ -278,8 +278,13 @@ def _fold_pending_events(catalog_dir: Path) -> None:
         ) from e
 
 
-def union_campaign_member_ids(db, campaign_id: str, catalog_dir: Path | None) -> list[str]:
-    """Warm campaign_runs union cool parquet rows stamped with campaign_id."""
+def union_campaign_member_ids(
+    db, campaign_id: str, catalog_dir: Path | None, *, cool_runs=None
+) -> list[str]:
+    """Warm campaign_runs union cool parquet rows stamped with campaign_id.
+
+    `cool_runs` is a pre-read `read_runs` list, so a caller that already scanned the cool tier
+    (conclude's breakdown gate) does not scan it again."""
     ids: set[str] = set()
     if db is not None:
         try:
@@ -293,7 +298,7 @@ def union_campaign_member_ids(db, campaign_id: str, catalog_dir: Path | None) ->
     if catalog_dir is not None:
         from bathos.catalog import read_runs
 
-        for run in read_runs(catalog_dir):
+        for run in cool_runs if cool_runs is not None else read_runs(catalog_dir):
             if run.campaign_id == campaign_id:
                 ids.add(run.id)
     return sorted(ids)
@@ -1261,7 +1266,11 @@ def _conclude_campaign_impl(
         # Parse the claim
         claim = parse_claim(abs_path)
 
-        members = union_campaign_member_ids(db, full_id, catalog_dir)
+        # One scan of the cool tier serves the membership union and the breakdown gate below.
+        from bathos.catalog import read_runs as _read_cool_runs
+
+        cool_runs = _read_cool_runs(catalog_dir) if catalog_dir is not None else None
+        members = union_campaign_member_ids(db, full_id, catalog_dir, cool_runs=cool_runs)
         if not members:
             raise CampaignError(
                 f"Cannot conclude campaign {full_id[:8]}: empty membership with a registered claim"
@@ -1274,18 +1283,20 @@ def _conclude_campaign_impl(
         # user's decision) and `force_verdict` does not bypass; exploration only warns. Placed
         # before any outcome mutation and outside any `try`.
         from bathos.breakdown_gate import (
+            check_near_bound,
             check_runs,
             fetch_member_runs,
             format_findings,
             refuse_on_findings,
         )
 
-        gate_findings = check_runs(
-            fetch_member_runs(db, members, catalog_dir, log_mode=_log_mode(catalog_dir)),
-            workspace_root,
-            db=db,
-            log_mode=_log_mode(catalog_dir),
+        gate_log_mode = _log_mode(catalog_dir)
+        gate_runs = fetch_member_runs(
+            db, members, catalog_dir, cool_runs=cool_runs, log_mode=gate_log_mode
         )
+        gate_findings = check_runs(gate_runs, workspace_root, db=db, log_mode=gate_log_mode)
+        # D6: a near-bound member needs a discharged fork record that says it is cited
+        gate_findings += check_near_bound(gate_runs, workspace_root, db=db, log_mode=gate_log_mode)
         if gate_findings:
             gate_where = f"Cannot conclude claim-bound campaign {full_id[:8]}"
             if campaign_mode == "exploration":
