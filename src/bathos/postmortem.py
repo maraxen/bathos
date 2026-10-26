@@ -107,8 +107,9 @@ def removed_amendments(previous: list[dict], postmortem: Postmortem) -> list[str
 
 
 def amendments_by_run(workspace_root: Path | str, run_ids) -> list[dict]:
-    """Amendments from every run-scoped postmortem under `workspace_root` whose run is in
-    `run_ids`, one dict per amendment with the postmortem's `run_id` (campaign review)."""
+    """Amendments under `workspace_root` that amend a run in `run_ids`, one dict per amendment
+    with the full member `run_id` (campaign review). Run-scoped postmortems match on their
+    `run_id` as a unique prefix; campaign-scoped ones on each amendment's `amends_run_id`."""
     wanted = set(run_ids)
     out: list[dict] = []
     root = Path(workspace_root)
@@ -121,8 +122,13 @@ def amendments_by_run(workspace_root: Path | str, run_ids) -> list[dict]:
             pm = parse_postmortem(pm_file)
         except Exception:
             continue
-        if pm.run_id in wanted:
-            out += [{"run_id": pm.run_id, **d} for d in amendments_as_dicts(pm)]
+        for d in amendments_as_dicts(pm):
+            # A run-scoped postmortem is keyed on its run_id (which may be a prefix); a
+            # campaign-scoped one has none, so each amendment names the run it amends.
+            key = pm.run_id or d.get("amends_run_id", "")
+            matches = [w for w in wanted if key and w.startswith(key)]
+            if len(matches) == 1:  # an empty or ambiguous key matches nothing
+                out.append({**d, "run_id": matches[0]})
     return out
 
 
