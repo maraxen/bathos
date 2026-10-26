@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bth migrate` no longer rewrites frozen cool fragments in log mode, and `bth verify` tells a schema-only rewrite from a data change.** On 261025 a plain `bth migrate` upgraded all 6,964 cool fragments to schema v18 after cut-over. Every import hash changed, so `bth verify` failed with 6,964 `legacy_write_after_cutover` findings although no folded value changed. A real (non-dry) `bth migrate` now refuses in log mode. Verify reports a fragment whose imported fields are unchanged apart from `schema_version`, and whose new columns hold exactly the defaults the upgrade inserts, as one advisory `legacy_schema_upgrade_after_cutover` warning that does not fail the runlog tier; per-fragment details stay in `stats["findings"]`. Any other change is still `legacy_write_after_cutover`.
 - **`bth repair` no longer plans a warm-tier rebuild in log mode (debt #2819 item 7).** `bathos.db` is frozen after cut-over and `compact(force_rebuild=True)` refuses there, so a `rebuild_warm` action could only fail at apply. The scan now reports a warning pointing at rebuilding `index.db` instead, and the handler refuses explicitly.
 
 ## [0.13.0a7] - 2026-10-23
