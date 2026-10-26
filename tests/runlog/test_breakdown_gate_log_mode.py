@@ -241,5 +241,6 @@ def test_conclude_not_refused_for_covered_and_waived_members(log_project):
         run_id = _real_run(workspace, catalog_dir, sidecar, result_payload)
         _inject_member(workspace, campaign_id, run_id)
         result = _conclude(workspace, catalog_dir, campaign_id)
-        assert result.get("error_code") != "breakdown_missing", result
-        assert result.get("error_code") != "sidecar_unverifiable", result
+        # the actual expected outcome, not merely "not refused for these two codes"
+        assert result.get("status") == "concluded", result
+        assert result.get("error_code") is None, result

@@ -80,6 +80,17 @@ def test_lathex_non_aggregate_names_miss(tmp_path, col):
     assert _uncovered(tmp_path, {col: "float"}) == set()
 
 
+@pytest.mark.parametrize("col", ["worst_rmsd", "peak_force", "rmsd_worst", "force_peak_ns"])
+def test_worst_and_peak_names_hit(tmp_path, col):
+    assert _uncovered(tmp_path, {col: "float"}) == {col}
+
+
+@pytest.mark.parametrize("col", ["max_loss_steps", "max_hit_count", "min_idx", "peak_flag"])
+def test_count_step_index_and_flag_suffixes_miss_even_as_float_columns(tmp_path, col):
+    """FLOAT columns, so the type check cannot be what rejects them: the suffix rules must."""
+    assert _uncovered(tmp_path, {col: "float"}) == set()
+
+
 def test_int_columns_miss_even_with_aggregate_like_names(tmp_path):
     assert _uncovered(tmp_path, {"max_steps_taken": "int", "peak_count": "int"}) == set()
 

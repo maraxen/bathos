@@ -133,3 +133,27 @@ def test_format_2_drift_block_does_not_newly_fire_without_a_run(tmp_path):
 def test_postmortem_dataclass_defaults_are_format_1():
     pm = Postmortem(run_id="r")
     assert (pm.format, pm.fork, pm.amendments) == (1, {}, [])
+
+
+def test_a_fork_alone_without_amendments_is_inert_in_format_2(tmp_path):
+    """[fork] with nothing discharged is only checked when a near_bound id is named."""
+    path = _append(_write(tmp_path, fmt="format = 2"), _FORK)
+    pm = parse_postmortem(path)
+    assert pm.fork["choice"] == "stop" and pm.amendments == []
+    result = validate_postmortem(pm, workspace_root=tmp_path)
+    assert result.ok and result.warnings == []
+
+
+def test_a_fork_alone_in_format_1_warns_not_enforced(tmp_path):
+    path = _append(_write(tmp_path), _FORK)
+    result = validate_postmortem(parse_postmortem(path), workspace_root=tmp_path)
+    assert result.ok
+    assert any("not enforced" in w for w in result.warnings)
+
+
+def test_a_non_table_fork_is_a_parse_error(tmp_path):
+    path = _write(tmp_path, fmt="format = 2", extra="")
+    text = path.read_text().replace("[postmortem]", 'fork = "stop"\n[postmortem]', 1)
+    path.write_text(text)  # a top-level `fork = "stop"`, not a [fork] table
+    with pytest.raises(ValueError, match="fork must be a table"):
+        parse_postmortem(path)

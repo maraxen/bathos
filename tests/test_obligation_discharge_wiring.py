@@ -483,30 +483,54 @@ def test_exploration_mode_conclude_warns_and_proceeds(cat, tmp_path, capsys):
 
 
 def test_conclude_reads_the_cool_tier_once_for_the_gate(cat, tmp_path, monkeypatch):
+    """Count `read_runs` calls: from the membership union to the end of the gate (fork check
+    included) the cool tier is scanned zero further times, and one list serves both users."""
     import bathos.breakdown_gate as gate
     import bathos.campaigns as campaigns_module
+    import bathos.catalog as catalog_module
 
     campaign = _campaign(cat, tmp_path)
     far = {**_NEAR, "e_max_placement": 0.05, "e_max_placement__n_over": 0}
     _run(cat, tmp_path, campaign, results=far)
-    seen: dict[str, list] = {"union": [], "fetch": []}
+    scans = {"n": 0}
+    real_read = catalog_module.read_runs
+
+    def counting_read(*args, **kwargs):
+        scans["n"] += 1
+        return real_read(*args, **kwargs)
+
+    seen: dict = {"union": [], "fetch": [], "at_union": None, "at_gate_end": None}
     real_union = campaigns_module.union_campaign_member_ids
     real_fetch = gate.fetch_member_runs
+    real_near = gate.check_near_bound
 
     def spy_union(db, cid, catalog_dir, *, cool_runs=None):
         seen["union"].append(cool_runs)
+        if cool_runs is not None:
+            seen["at_union"] = scans["n"]
         return real_union(db, cid, catalog_dir, cool_runs=cool_runs)
 
     def spy_fetch(db, ids, catalog_dir, **kw):
         seen["fetch"].append(kw.get("cool_runs"))
         return real_fetch(db, ids, catalog_dir, **kw)
 
+    def spy_near(*args, **kwargs):
+        try:
+            return real_near(*args, **kwargs)
+        finally:
+            seen["at_gate_end"] = scans["n"]
+
+    monkeypatch.setattr(catalog_module, "read_runs", counting_read)
     monkeypatch.setattr(campaigns_module, "union_campaign_member_ids", spy_union)
     monkeypatch.setattr(gate, "fetch_member_runs", spy_fetch)
+    monkeypatch.setattr(gate, "check_near_bound", spy_near)
     _conclude(cat, tmp_path, campaign)
     gate_union = [c for c in seen["union"] if c is not None]
     assert len(gate_union) == 1 and len(seen["fetch"]) == 1
     assert seen["fetch"][0] is gate_union[0]  # one list, passed to both
+    assert seen["at_union"] is not None and seen["at_gate_end"] is not None
+    assert seen["at_gate_end"] == seen["at_union"]  # no scan between the union and the gate end
+    assert seen["at_union"] >= 1  # and the one scan really happened through read_runs
 
 
 # ── scaffold resolves a prefix to the full id ────────────────────────────────────────

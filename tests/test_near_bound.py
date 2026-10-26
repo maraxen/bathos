@@ -351,3 +351,38 @@ def test_the_untouched_scaffold_does_not_validate_as_a_discharge(tmp_path):
     pm = parse_postmortem(path)
     pm.discharges = ["run_abcdef12_near_bound"]
     assert not validate_postmortem(pm, workspace_root=tmp_path).ok
+
+
+def test_run_tool_returns_the_near_bound_advisory_with_its_obligation_id(tmp_path, monkeypatch):
+    import json
+    from unittest.mock import patch
+
+    from bathos import mcp as mcp_module
+    from bathos.catalog import read_runs
+    from bathos.mcp import run_tool
+    from bathos.runner import run_script as real_run_script
+
+    monkeypatch.setenv("BTH_WORKSPACE_ROOT", str(tmp_path))
+    catalog = tmp_path / "catalog"
+    catalog.mkdir()
+    scripts = tmp_path / "scripts" / "explore"
+    scripts.mkdir(parents=True)
+    (scripts / "probe.py").write_text(_SCRIPT)
+    (scripts / "probe.bth.toml").write_text(_sidecar_text())
+    monkeypatch.chdir(tmp_path)
+
+    def in_tmp(**kwargs):
+        return real_run_script(cwd=tmp_path, **kwargs)
+
+    with patch.object(mcp_module, "run_script", side_effect=in_tmp):
+        result = run_tool(
+            script_path=str(scripts / "probe.py"),
+            args=[json.dumps(_FULL_RESULT)],
+            project_slug="proj",
+            catalog_dir=str(catalog),
+        )
+    assert result["success"] is True
+    run_id = read_runs(catalog)[0].id
+    (entry,) = [w for w in result["warnings"] if w["code"] == "near_bound"]
+    assert entry["obligation_id"] == f"run_{run_id}_near_bound"
+    assert "e_max_placement" in entry["message"]
