@@ -49,7 +49,7 @@ def _locked_run(tmp_path: Path, sample_run: Run, **kw) -> tuple[Run, Path]:
     repo, sha = _repo(tmp_path / "repo")
     side = repo / "scripts" / "x.bth.toml"
     run = dataclasses.replace(sample_run, id=_RUN_ID, git_hash=sha, sidecar_path=str(side))
-    msha, mpath = _write_manifest(run, side, "a" * 64, tmp_path / "cat", **kw)
+    msha, mpath = _write_manifest(run, side, "a" * 64, tmp_path / "cat", **kw, cwd=tmp_path)
     return dataclasses.replace(run, manifest_sha256=msha, manifest_path=mpath), repo
 
 
@@ -141,7 +141,7 @@ def test_common_dir_with_hash_sign_verifies(tmp_path, sample_run):
     repo, sha = _repo(tmp_path / "we#ird")
     side = repo / "scripts" / "x.bth.toml"
     run = dataclasses.replace(sample_run, id=_RUN_ID, git_hash=sha, sidecar_path=str(side))
-    msha, mpath = _write_manifest(run, side, "a" * 64, tmp_path / "cat")
+    msha, mpath = _write_manifest(run, side, "a" * 64, tmp_path / "cat", cwd=tmp_path)
     assert verify_run_manifest(dataclasses.replace(run, manifest_sha256=msha, manifest_path=mpath))
 
 
@@ -149,4 +149,17 @@ def test_blast_radius_text_source_reads_git_uri(tmp_path, sample_run):
     """The `manifest text` match source must not silently drop the `git:` form."""
     run, repo = _locked_run(tmp_path, sample_run)
     text = _MatchContext(repo).text_of(run.manifest_path)
+    assert text is not None and f'run_id = "{_RUN_ID}"' in text
+
+
+def test_blast_radius_text_source_falls_back_to_the_sidecar_repo(tmp_path, sample_run):
+    """A `git:` URI whose common dir is absent here (a record synced from another host) is read via the repo near
+    `sidecar_path`, so the manifest-text match source is not silently dropped."""
+    run, repo = _locked_run(tmp_path, sample_run)
+    real_common = run.manifest_path[len("git:") :].split("#refs/", 1)[0]
+    moved = run.manifest_path.replace(real_common, "/nonexistent/host/repo/.git", 1)
+    ctx = _MatchContext(repo)
+
+    assert ctx.text_of(moved) is None  # without the run context it cannot be located
+    text = _MatchContext(repo).text_of(moved, run.id, run.sidecar_path)
     assert text is not None and f'run_id = "{_RUN_ID}"' in text

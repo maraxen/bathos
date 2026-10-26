@@ -24,6 +24,8 @@ never existed, and two runs in five cited a commit that is simply gone.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import os
 import subprocess
 from pathlib import Path
@@ -149,6 +151,39 @@ def ignored_provenance_paths(cwd: Path) -> tuple[str, ...]:
     return _ignored_provenance_paths(cwd, PROVENANCE_PATHS)
 
 
+def _append_exclude_lines(exclude: Path, pending: list[str]) -> None:
+    """Append the lines of ``pending`` that ``exclude`` lacks, without ever truncating the file.
+
+    SLURM array tasks start together and each runs this, so the read-modify-write is serialised with an exclusive
+    flock on a sibling lock file and the new content is written to a temp file in the same directory and moved over
+    ``exclude`` with ``os.replace``: a reader or a crash sees the old file or the new one, never a half-written
+    file, and one task cannot overwrite another's append or the user's own lines.
+    """
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    with open(exclude.with_name(exclude.name + ".bth-lock"), "a") as guard:
+        fcntl.flock(guard, fcntl.LOCK_EX)
+        try:
+            existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+            present = set(existing.splitlines())
+            missing = [line for line in pending if line not in present]
+            if not missing:
+                return
+            new_text = existing
+            if new_text and not new_text.endswith("\n"):
+                new_text += "\n"
+            new_text += "".join(f"{line}\n" for line in missing)
+            tmp = exclude.with_name(f".{exclude.name}.{os.getpid()}.tmp")
+            try:
+                tmp.write_text(new_text, encoding="utf-8")
+                if exclude.exists():
+                    os.chmod(tmp, exclude.stat().st_mode & 0o7777)
+                os.replace(tmp, exclude)
+            finally:
+                tmp.unlink(missing_ok=True)
+        finally:
+            fcntl.flock(guard, fcntl.LOCK_UN)
+
+
 def ensure_bookkeeping_ignored(repo_root_path: Path, *, ignore_outputs: bool = False) -> dict[str, bool]:
     """Best-effort: make sure each bookkeeping path is ignored before `bth run` writes to it.
 
@@ -205,19 +240,9 @@ def ensure_bookkeeping_ignored(repo_root_path: Path, *, ignore_outputs: bool = F
             exclude = Path(git_path.stdout.strip())
             if not exclude.is_absolute():
                 exclude = root / exclude
-            try:
-                existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
-                present = set(existing.splitlines())
-                missing = [line for line in pending if line not in present]
-                if missing:
-                    new_text = existing
-                    if new_text and not new_text.endswith("\n"):
-                        new_text += "\n"
-                    new_text += "".join(f"{line}\n" for line in missing)
-                    exclude.parent.mkdir(parents=True, exist_ok=True)
-                    exclude.write_text(new_text, encoding="utf-8")
-            except OSError:
-                pass  # best-effort; the authoritative check below still runs
+            # best-effort; the authoritative check below still runs
+            with contextlib.suppress(OSError):
+                _append_exclude_lines(exclude, pending)
 
     return {line: _is_ignored(line) for line in lines}
 

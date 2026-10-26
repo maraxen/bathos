@@ -65,7 +65,7 @@ def test_ref_lock_leaves_tree_clean_and_body_matches_hash(tmp_path, sample_run):
     run = _run(sample_run, sha)
     side = repo / "scripts" / "x.bth.toml"
 
-    msha, mpath = _write_manifest(run, side, "a" * 64, tmp_path / "cat")
+    msha, mpath = _write_manifest(run, side, "a" * 64, tmp_path / "cat", cwd=tmp_path)
 
     assert _porcelain(repo) == ""
     assert not list((repo / "scripts").glob("*.bth.lock.toml"))
@@ -79,7 +79,7 @@ def test_ref_lock_leaves_tree_clean_and_body_matches_hash(tmp_path, sample_run):
 def test_ref_uses_g19_relpath_and_carrier_parent(tmp_path, sample_run):
     repo, sha = _repo(tmp_path / "repo")
     run = _run(sample_run, sha)
-    _write_manifest(run, repo / "scripts" / "x.bth.toml", "a" * 64, tmp_path / "cat")
+    _write_manifest(run, repo / "scripts" / "x.bth.toml", "a" * 64, tmp_path / "cat", cwd=tmp_path)
     ref = f"refs/bathos/locks/{_RUN_ID}"
     # Path("x.bth.toml").stem is "x.bth": the same name tree mode uses
     rel = f"scripts/x.bth.{_RUN_ID}.bth.lock.toml"
@@ -94,7 +94,9 @@ def test_tree_opt_out_is_unchanged(tmp_path, sample_run):
     run = _run(sample_run, sha)
     side = repo / "scripts" / "x.bth.toml"
 
-    msha, mpath = _write_manifest(run, side, "a" * 64, tmp_path / "cat", lock_location="tree")
+    msha, mpath = _write_manifest(
+        run, side, "a" * 64, tmp_path / "cat", lock_location="tree", cwd=tmp_path
+    )
 
     expected = (repo / "scripts" / f"x.bth.{_RUN_ID}.bth.lock.toml").resolve()
     assert mpath == str(expected)
@@ -108,7 +110,7 @@ def test_sentinel_hash_falls_back_to_lock_dir(tmp_path, sample_run, hash_):
     run = _run(sample_run, hash_)
     cat = tmp_path / "cat"
 
-    _, mpath = _write_manifest(run, repo / "scripts" / "x.bth.toml", "a" * 64, cat)
+    _, mpath = _write_manifest(run, repo / "scripts" / "x.bth.toml", "a" * 64, cat, cwd=tmp_path)
 
     assert Path(mpath) == (cat / "locks" / run.project_slug / f"{_RUN_ID}.bth.lock.toml").resolve()
     assert Path(mpath).is_file()
@@ -123,7 +125,7 @@ def test_no_repo_falls_back(tmp_path, sample_run):
     side.write_text(_SIDECAR)
     run = _run(sample_run, "a" * 40)
 
-    _, mpath = _write_manifest(run, side, "a" * 64, tmp_path / "cat")
+    _, mpath = _write_manifest(run, side, "a" * 64, tmp_path / "cat", cwd=tmp_path)
 
     assert str(tmp_path / "cat" / "locks") in mpath
     assert not list(plain.glob("*.bth.lock.toml"))
@@ -136,7 +138,11 @@ def test_sidecar_outside_repo_falls_back(tmp_path, sample_run, monkeypatch):
     monkeypatch.setattr("bathos.lock_config._show_toplevel", lambda _d: other)
 
     _, mpath = _write_manifest(
-        _run(sample_run, sha), repo / "scripts" / "x.bth.toml", "a" * 64, tmp_path / "cat"
+        _run(sample_run, sha),
+        repo / "scripts" / "x.bth.toml",
+        "a" * 64,
+        tmp_path / "cat",
+        cwd=tmp_path,
     )
 
     assert str(tmp_path / "cat" / "locks") in mpath
@@ -147,10 +153,37 @@ def test_lock_dir_none_disables_fallback_non_autonomous(tmp_path, sample_run, mo
     repo, _ = _repo(tmp_path / "repo")
     run = _run(sample_run, "unknown")
 
-    assert _write_manifest(run, repo / "scripts" / "x.bth.toml", "a" * 64, tmp_path / "cat") == (
+    assert _write_manifest(
+        run, repo / "scripts" / "x.bth.toml", "a" * 64, tmp_path / "cat", cwd=tmp_path
+    ) == (
         "",
         "",
     )
+
+
+@pytest.mark.parametrize("slug", ["../../escape", "/abs/slug", "a/b", "..", ""])
+def test_fallback_confines_hostile_project_slug(tmp_path, sample_run, slug):
+    repo, _ = _repo(tmp_path / "repo")
+    cat = tmp_path / "cat"
+    run = dataclasses.replace(_run(sample_run, "unknown"), project_slug=slug)
+
+    _, mpath = _write_manifest(run, repo / "scripts" / "x.bth.toml", "a" * 64, cat, cwd=tmp_path)
+
+    assert Path(mpath).resolve().is_relative_to((cat / "locks").resolve())
+    assert not (tmp_path / "escape").exists()
+
+
+def test_no_lock_written_is_not_silent(tmp_path, sample_run, monkeypatch, capsys):
+    monkeypatch.setenv("BTH_LOCK_DIR", "none")
+    repo, _ = _repo(tmp_path / "repo")
+    run = _run(sample_run, "unknown")
+
+    assert _write_manifest(
+        run, repo / "scripts" / "x.bth.toml", "a" * 64, tmp_path / "cat", cwd=tmp_path
+    ) == ("", "")
+
+    err = capsys.readouterr().err
+    assert "no lock was written" in err and "sentinel_hash" in err
 
 
 def test_lock_dir_none_is_fatal_when_autonomous(tmp_path, sample_run, monkeypatch):
@@ -159,7 +192,9 @@ def test_lock_dir_none_is_fatal_when_autonomous(tmp_path, sample_run, monkeypatc
     run = dataclasses.replace(_run(sample_run, "unknown"), agent_mode="autonomous")
 
     with pytest.raises(RuntimeError):
-        _write_manifest(run, repo / "scripts" / "x.bth.toml", "a" * 64, tmp_path / "cat")
+        _write_manifest(
+            run, repo / "scripts" / "x.bth.toml", "a" * 64, tmp_path / "cat", cwd=tmp_path
+        )
 
 
 def test_ref_write_failure_falls_back_and_records_ref_error(tmp_path, sample_run, monkeypatch):
@@ -173,7 +208,11 @@ def test_ref_write_failure_falls_back_and_records_ref_error(tmp_path, sample_run
     monkeypatch.setattr(runner, "event", lambda name, **kw: events.append((name, kw)))
 
     _, mpath = _write_manifest(
-        _run(sample_run, sha), repo / "scripts" / "x.bth.toml", "a" * 64, tmp_path / "cat"
+        _run(sample_run, sha),
+        repo / "scripts" / "x.bth.toml",
+        "a" * 64,
+        tmp_path / "cat",
+        cwd=tmp_path,
     )
 
     assert str(tmp_path / "cat" / "locks") in mpath
@@ -188,7 +227,11 @@ def test_lock_written_event_for_ref(tmp_path, sample_run, monkeypatch):
     monkeypatch.setattr(runner, "event", lambda name, **kw: events.append((name, kw)))
 
     _write_manifest(
-        _run(sample_run, sha), repo / "scripts" / "x.bth.toml", "a" * 64, tmp_path / "cat"
+        _run(sample_run, sha),
+        repo / "scripts" / "x.bth.toml",
+        "a" * 64,
+        tmp_path / "cat",
+        cwd=tmp_path,
     )
 
     _, data = next(e for e in events if e[0] == "run.lock_written")
@@ -214,7 +257,9 @@ def test_common_dir_containing_hash_sign(tmp_path, sample_run):
     repo, sha = _repo(tmp_path / "we#ird:dir")
     run = _run(sample_run, sha)
 
-    _, mpath = _write_manifest(run, repo / "scripts" / "x.bth.toml", "a" * 64, tmp_path / "cat")
+    _, mpath = _write_manifest(
+        run, repo / "scripts" / "x.bth.toml", "a" * 64, tmp_path / "cat", cwd=tmp_path
+    )
 
     common, ref, rel = parse_lock_uri(mpath, run.id)
     assert "we#ird:dir" in str(common) and ref == f"refs/bathos/locks/{_RUN_ID}"
@@ -250,6 +295,18 @@ def test_readback_mismatch_is_a_write_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(lock_ref, "_git", tampered)
     with pytest.raises(LockRefError, match="read-back"):
         write_lock_ref(repo, sha, "rid", "scripts/x.lock", b"body\n")
+    # No dangling ref holding the wrong bytes is left behind.
+    monkeypatch.undo()
+    assert _git(repo, "for-each-ref", "refs/bathos/locks") == ""
+
+
+def test_existing_lock_ref_is_never_overwritten(tmp_path):
+    repo, sha = _repo(tmp_path / "repo")
+    first = write_lock_ref(repo, sha, "rid", "scripts/x.lock", b"first\n")
+    with pytest.raises(LockRefError, match="could not create"):
+        write_lock_ref(repo, sha, "rid", "scripts/x.lock", b"second\n")
+    assert _git(repo, "rev-parse", "refs/bathos/locks/rid") == first.commit
+    assert read_lock_text(first.uri).encode() == b"first\n"
 
 
 def _enforced_project(tmp_path: Path):

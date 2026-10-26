@@ -75,6 +75,8 @@ class LockSettings:
     lock_dir: Path | None
     ignore_outputs: bool
     layers: dict[str, str] = field(default_factory=dict)
+    #: non-fatal notes (a tolerated, malformed project config); the runner prints them to stderr
+    warnings: tuple[str, ...] = ()
 
 
 def _read_toml(path: Path) -> dict:
@@ -101,7 +103,9 @@ def _provenance_table(table: object, where: str) -> dict:
     return table
 
 
-def _file_layers(cwd: Path) -> list[tuple[str, Path, Callable[[], dict | None]]]:
+def _file_layers(
+    cwd: Path, warnings: list[str] | None = None
+) -> list[tuple[str, Path, Callable[[], dict | None]]]:
     """The three file layers, highest first, each a (label, base dir, table loader).
 
     The caller loads every layer up front, so a file that cannot be parsed raises even when a higher layer decides
@@ -114,7 +118,15 @@ def _file_layers(cwd: Path) -> list[tuple[str, Path, Callable[[], dict | None]]]
     def load_bth_toml() -> dict | None:
         if not bth_toml.is_file():
             return None
-        data = _read_toml(bth_toml)
+        try:
+            data = _read_toml(bth_toml)
+        except LockConfigError as e:
+            if warnings is None:
+                raise
+            # The runner has always tolerated an unreadable cwd/.bth.toml (its other settings fall back to
+            # defaults); say so, and treat only this layer as absent.
+            warnings.append(f"{e}; ignoring this file's [provenance] settings")
+            return None
         if "provenance" not in data:
             return None
         return _provenance_table(data["provenance"], f"{bth_toml} [provenance]")
@@ -202,8 +214,13 @@ def resolve_lock_settings(
     ignore_outputs: bool | None = None,
     cwd: Path | str | None = None,
     catalog_dir: Path | str,
+    tolerate_malformed_project_config: bool = False,
 ) -> LockSettings:
     """Resolve the three lock settings and the layer that decided each. See the module docstring for the order.
+
+    ``tolerate_malformed_project_config`` (the runner passes True) keeps the long-standing runner contract that an
+    unreadable ``cwd/.bth.toml`` does not stop a run: that one layer is treated as absent and a note is returned in
+    ``warnings``. Pyproject and user-config files, and invalid values, still raise.
 
     ``catalog_dir`` is only used for the ``<catalog_dir>/locks`` default. An argument of ``None`` means "not given";
     pass ``lock_dir="none"`` to disable the fallback directory explicitly.
@@ -214,7 +231,8 @@ def resolve_lock_settings(
         "lock_dir": lock_dir,
         "ignore_outputs": ignore_outputs,
     }
-    file_layers = _file_layers(base_cwd)
+    notes: list[str] = []
+    file_layers = _file_layers(base_cwd, notes if tolerate_malformed_project_config else None)
     # Eager: a malformed file at ANY layer raises, even when a higher layer would decide every key (spec P1).
     tables: dict[int, dict | None] = {i: load() for i, (_label, _base, load) in enumerate(file_layers)}
 
@@ -259,6 +277,7 @@ def resolve_lock_settings(
         lock_dir=values["lock_dir"],  # type: ignore[arg-type]
         ignore_outputs=values["ignore_outputs"],  # type: ignore[arg-type]
         layers=layers,
+        warnings=tuple(notes),
     )
 
 

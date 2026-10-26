@@ -1,8 +1,10 @@
 """Error codes and resolution hints for bathos MCP tools.
 
-Provides a unified BathosErrorCode enum that includes:
+Provides a unified BathosErrorCode enum (61 members) that includes:
 - 11 aliased codes from GateErrorCode (pre-registration gate failures)
-- 5 new codes for domain exceptions (catalog, campaign, sidecar, export, invalid params)
+- 5 codes for domain exceptions (catalog, campaign, sidecar, export, invalid params)
+- later families: trust ledger, MCP auth, artifact archival, document authoring, the run log, output tiering,
+  and the sidecar-lock family (lock_ref_write_failed, lock_not_found, index_dirty; spec 261026)
 
 All MCP tools return envelopes with error_code values from this enum.
 """
@@ -15,8 +17,8 @@ from enum import Enum
 class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(Enum) returning Enum member value for serialization
     """Unified error code enumeration for all bathos MCP tools.
 
-    Aliases 11 codes from GateErrorCode, plus 5 new codes for domain exceptions.
-    All codes are lowercase snake_case strings.
+    Aliases 11 codes from GateErrorCode, plus the domain-exception codes and the later families listed in the
+    module docstring (61 members in all). All codes are lowercase snake_case strings.
     """
 
     # Aliased from GateErrorCode (11 members)

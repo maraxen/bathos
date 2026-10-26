@@ -590,19 +590,25 @@ class _MatchContext:
         #: resolved paths whose text was longer than the cap (first-seen order)
         self.truncated: list[str] = []
 
-    def text_of(self, raw: str | None) -> str | None:
+    def text_of(
+        self, raw: str | None, run_id: str | None = None, sidecar_path: str = ""
+    ) -> str | None:
+        """Text of the file `raw` names. For a `git:` lock URI, `run_id` and `sidecar_path` let the reader fall
+        through to the repo near the sidecar when the URI's own common dir is absent here (spec 261026 P4)."""
         if not raw:
             return None
         if raw not in self._texts:
-            self._texts[raw] = self._load(raw)
+            self._texts[raw] = self._load(raw, run_id, sidecar_path)
         loaded = self._texts[raw]
         return loaded[1] if loaded is not None else None
 
-    def _load(self, raw: str) -> tuple[str, str] | None:
+    def _load(
+        self, raw: str, run_id: str | None = None, sidecar_path: str = ""
+    ) -> tuple[str, str] | None:
         if raw.startswith("git:"):
             # A lock stored as a commit ref (spec 261026): same text, read through the one resolver.
             try:
-                data = read_lock_bytes(raw)
+                data = read_lock_bytes(raw, run_id, sidecar_path)
             except (OSError, ValueError):
                 return None
             if len(data) > _TEXT_SOURCE_CAP_BYTES:
@@ -669,7 +675,7 @@ def _run_match_sources(
 
     one_way: list[tuple[str, str, str | None]] = [("metadata", run.metadata or "", None)]
     for label, raw in (("sidecar text", run.sidecar_path), ("manifest text", run.manifest_path)):
-        text = ctx.text_of(raw)
+        text = ctx.text_of(raw, run.id, run.sidecar_path or "")
         if text is not None:
             one_way.append((label, text, raw))
 

@@ -390,3 +390,17 @@ def test_ambient_git_env_does_not_redirect_probe(tmp_path, monkeypatch):
     monkeypatch.setenv("GIT_DIR", str(repo_b / ".git"))
     choice = select_lock_repo(repo_a / "scripts" / "x.bth.toml", sha_a)
     assert choice.root == repo_a.resolve()
+
+
+def test_tolerated_malformed_project_config_is_skipped_with_a_warning(tmp_path, catalog):
+    """The runner passes tolerate_malformed_project_config=True: an unreadable cwd/.bth.toml is the one file it has
+    always tolerated. Other layers and invalid values still raise."""
+    _write(tmp_path / ".bth.toml", "[project\nslug = ")
+    s = resolve_lock_settings(cwd=tmp_path, catalog_dir=catalog, tolerate_malformed_project_config=True)
+    assert s.lock_location == "git" and s.warnings and "cannot read" in s.warnings[0]
+    with pytest.raises(LockConfigError):
+        resolve_lock_settings(cwd=tmp_path, catalog_dir=catalog)  # strict by default
+
+    _user_config(tmp_path, "[provenance\n")
+    with pytest.raises(LockConfigError):
+        resolve_lock_settings(cwd=tmp_path, catalog_dir=catalog, tolerate_malformed_project_config=True)

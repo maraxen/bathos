@@ -4,6 +4,7 @@ import dataclasses
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -598,9 +599,23 @@ def _warn_legacy_bookkeeping_once(root: Path) -> None:
         )
 
 
+def _safe_component(text: str) -> str:
+    """One path component from ``text``: separators, ``..``, absolute prefixes and other odd characters become ``_``."""
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", text or "")
+    cleaned = cleaned.lstrip(".") or "_"
+    return cleaned
+
+
 def _write_lock_fallback(lock_dir: Path, project_slug: str, run_id: str, body: bytes) -> Path:
-    """Atomically write the lock to ``<lock_dir>/<project_slug>/<run_id>.bth.lock.toml``; never into the tree."""
-    target = (lock_dir / project_slug / f"{run_id}.bth.lock.toml").resolve()
+    """Atomically write the lock to ``<lock_dir>/<project_slug>/<run_id>.bth.lock.toml``; never into the tree.
+
+    The slug and run id are sanitised to single path components and the final path is checked to lie under
+    ``lock_dir``, so a hostile or odd slug (``../..``, an absolute path) cannot write elsewhere.
+    """
+    root = lock_dir.resolve()
+    target = (root / _safe_component(project_slug) / f"{_safe_component(run_id)}.bth.lock.toml").resolve()
+    if not target.is_relative_to(root):
+        raise OSError(f"lock path {target} escapes lock_dir {root}")
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
     try:
@@ -651,6 +666,7 @@ def _write_manifest(
         lock_dir=lock_dir,
         cwd=cwd,
         catalog_dir=catalog_dir,
+        tolerate_malformed_project_config=True,  # same contract as the up-front resolution in _run_script_impl
     )
     manifest_filename = f"{sidecar_path.stem}.{run.id}.bth.lock.toml"
     manifest_path = sidecar_path.parent / manifest_filename
@@ -734,6 +750,11 @@ def _write_manifest(
     if run.agent_mode == "autonomous":
         raise RuntimeError(f"Failed to write manifest: {ref_error}")
     logger.warning(f"Lock for run {run.id} not written: {ref_error}")
+    print(
+        f"warning: no lock was written for run {run.id[:8]} ({ref_error}); its manifest_sha256 and "
+        "manifest_path are empty, so the run cannot be verified against a lock.",
+        file=sys.stderr,
+    )
     event(
         "run.lock_written",
         run_uuid=run.id,
@@ -949,10 +970,16 @@ def _run_script_impl(
     # invalid BTH_LOCK_LOCATION / BTH_IGNORE_OUTPUTS must fail the run cleanly, not leave a started run with no
     # terminal record (spec 261026 P1). Never swallowed with the best-effort pin errors below.
     try:
-        lock_settings = resolve_lock_settings(cwd=cwd, catalog_dir=catalog_dir)
+        # A broken cwd/.bth.toml has always been tolerated by the runner (regression guard in
+        # test_enforced_dirs_config); it is reported on stderr and its layer skipped. Everything else is strict.
+        lock_settings = resolve_lock_settings(
+            cwd=cwd, catalog_dir=catalog_dir, tolerate_malformed_project_config=True
+        )
     except LockConfigError as e:
         print(f"Error: invalid provenance configuration: {e}", file=sys.stderr)
         return 1
+    for note in lock_settings.warnings:
+        print(f"warning: {note}", file=sys.stderr)
 
     # Resolve --campaign up front (fail fast, before running the subprocess) and
     # store the full UUID — never the raw prefix — on the run record.

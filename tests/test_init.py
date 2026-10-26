@@ -158,11 +158,12 @@ def test_new_project_gitignores_outputs(tmp_path: Path):
     per-run output (`outputs/<run8>/`), so a run does not dirty the tree."""
     init_project(tmp_path, slug="myproj", catalog_dir=tmp_path / ".bth" / "catalog")
     lines = (tmp_path / ".gitignore").read_text().splitlines()
-    assert "outputs/" in lines
+    assert "/outputs/" in lines  # anchored: matches git_pin.OUTPUTS_IGNORE_LINE
+    assert "outputs/" not in lines
 
 
 def test_init_outputs_entry_is_not_duplicated_on_rerun(tmp_path: Path):
     catalog = tmp_path / ".bth" / "catalog"
     init_project(tmp_path, slug="myproj", catalog_dir=catalog)
     init_project(tmp_path, slug="myproj", catalog_dir=catalog)
-    assert (tmp_path / ".gitignore").read_text().splitlines().count("outputs/") == 1
+    assert (tmp_path / ".gitignore").read_text().splitlines().count("/outputs/") == 1

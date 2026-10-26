@@ -23,9 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | protamer, asr, plegadx, tev_design | New lock files stop appearing (where any were written). The tracked manifest dirties every run until `untrack` plus a commit. No G31 dependency is known. |
 | biosensors | Locks stop. The manifest, `.bth/log/` and `outputs/provenance/` are ignored. The tree is clean if its scripts write nothing under `outputs/<run8>/`, or once `ignore_outputs = true`. The 35 stray locks: `relocate`, then delete. |
 | clean repos (lathex, colliculix, denxity, mpnn_ext, prolix) | No change. |
-| cluster / no-`.git` hosts (any repo) | Locks go to `<catalog_dir>/locks/`, not the sidecar directory, and do not travel with `bth sync` (which syncs only `runs/` and `campaigns/`). The default myxcel pull is `outputs/` only. Evidence on those hosts is the catalog record plus that directory. |
+| cluster / no-`.git` hosts (any repo) | Locks go to `<catalog_dir>/locks/`, not the sidecar directory, and do not travel with `bth sync` (which syncs only `runs/` and `campaigns/`). Per myxcel's config and source (read, not exercised), its default pull is `outputs/` only, so the lock directory is not pulled either. Evidence on those hosts is the catalog record plus that directory. |
 
 Migration order: read the run-time warnings, then `lock relocate`, then `lock untrack` (with its caveats), then `materialize` where G19 evidence is wanted.
+
+**Known limits.** (1) Repositories using the sha256 object format fall back to the lock file (the ref path assumes 40-hex object ids and a create-only `update-ref` against the zero oid). (2) A `safe.directory` ownership failure from git is indistinguishable from a missing ref and reads as `lock_not_found`. (3) A commit-ref lock is parentless when `run.git_hash` comes from a different repo than the sidecar's (the commit is absent there). (4) `bth lock push` sends the whole history reachable from each lock carrier's parent, not just the lock blobs.
 
 **Notes for the spec (corrections found while implementing):** `cite.py` (lines 25, 36, 50) and `index.py` (line 145) only display or store `manifest_path` as a string and never open the file, so they needed no resolver and are unchanged; only `verify_run_manifest` and blast-radius manifest-text matching read the lock.
 

@@ -21,8 +21,6 @@ from pathlib import Path
 
 from cisternal.provenance.capture import clean_git_env
 
-from bathos.git_pin import update_ref
-
 LOCK_REF_PREFIX = "refs/bathos/locks"
 URI_SCHEME = "git:"
 _GIT_TIMEOUT = 60.0
@@ -151,13 +149,22 @@ def write_lock_ref(
             "commit-tree",
         )
     ref = lock_ref_name(run_id)
-    if not update_ref(ref, commit, root, root=root):
-        raise LockRefError(f"could not create {ref} -> {commit}")
+    # Create-only: the old value is the zero oid, so an existing ref is never overwritten. Run ids are fresh uuids, so
+    # a collision means something is wrong (a rerun of the same id, a forged ref); failing back to the lock_dir
+    # fallback is safer than silently replacing evidence. (cisternal's update_ref takes no old value, so the call is
+    # made directly.) sha256-object-format repos have 64-char oids, so this also fails there and falls back.
+    created = _git("update-ref", ref, commit, "0" * 40, cwd=root)
+    if created.returncode != 0:
+        raise LockRefError(
+            f"could not create {ref} -> {commit}: {created.stderr.decode(errors='replace').strip()}"
+        )
     back = _git("cat-file", "blob", f"{ref}:{relpath}", cwd=root)
     if (
         back.returncode != 0
         or hashlib.sha256(back.stdout).hexdigest() != hashlib.sha256(body).hexdigest()
     ):
+        # Do not leave a ref that holds the wrong bytes: delete it, but only if it still points at our commit.
+        _git("update-ref", "-d", ref, commit, cwd=root)
         raise LockRefError(f"read-back of {ref}:{relpath} did not match the written body")
     return LockRefResult(
         uri=lock_uri(_common_dir(root), run_id, relpath),

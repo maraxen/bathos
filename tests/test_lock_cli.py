@@ -81,6 +81,7 @@ def _lock(sample_run, repo, tmp_path, *, location: str, run_id: str = _RUN_ID):
         "a" * 64,
         tmp_path / "cat",
         lock_location=location,
+        cwd=tmp_path,
     )
     return dataclasses.replace(run, manifest_sha256=sha, manifest_path=path)
 

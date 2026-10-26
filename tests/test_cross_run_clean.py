@@ -73,8 +73,8 @@ def _make_repo(
     return repo, exp / "run_x.py", catalog
 
 
-def _execute(repo: Path, script: Path, catalog: Path) -> bool:
-    """Run once through the real runner; return that run's recorded git_dirty."""
+def _execute_run(repo: Path, script: Path, catalog: Path):
+    """Run once through the real runner; return that run's record."""
     before = {r.id for r in read_runs(catalog)}
     rc = run_script(
         argv=[sys.executable, str(script)],
@@ -88,7 +88,12 @@ def _execute(repo: Path, script: Path, catalog: Path) -> bool:
     (new,) = [
         r for r in read_runs(catalog) if r.id not in before
     ]  # read_runs order is not chronological
-    return bool(new.git_dirty)
+    return new
+
+
+def _execute(repo: Path, script: Path, catalog: Path) -> bool:
+    """Run once; return that run's recorded git_dirty."""
+    return bool(_execute_run(repo, script, catalog).git_dirty)
 
 
 def test_committed_manifest_dirties_run_two_until_untracked(tmp_path: Path):
@@ -124,9 +129,14 @@ def test_tracked_lock_with_default_git_mode_writes_no_new_lock_file(tmp_path: Pa
         tmp_path, extra_files={tracked_lock: "# committed evidence\n[manifest]\n"}
     )
 
-    assert _execute(repo, script, catalog) is False
-    assert _execute(repo, script, catalog) is False
+    first = _execute_run(repo, script, catalog)
+    second = _execute_run(repo, script, catalog)
+    assert first.git_dirty is False and second.git_dirty is False
 
+    # Not vacuous: the locks really were written, as refs, which is why no file appeared.
+    for run in (first, second):
+        assert run.manifest_path.startswith("git:"), run.manifest_path
+        _git(repo, "rev-parse", "--verify", f"refs/bathos/locks/{run.id}^{{commit}}")
     locks = sorted(p.name for p in repo.rglob("*.bth.lock.toml"))
     assert locks == ["run_x.old.bth.lock.toml"]
     assert _porcelain(repo) == ""

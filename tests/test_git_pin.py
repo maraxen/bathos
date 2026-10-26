@@ -960,3 +960,37 @@ def test_ensure_bookkeeping_ignored_reports_only_the_defeated_path(tmp_path: Pat
 
 def test_ensure_bookkeeping_ignored_outside_a_repo_is_empty(tmp_path: Path):
     assert ensure_bookkeeping_ignored(tmp_path / "nowhere") == {}
+
+
+def test_concurrent_bookkeeping_ignores_never_lose_lines(tmp_path: Path):
+    """SLURM array tasks all run ensure_bookkeeping_ignored at start: the exclude file keeps the user's own lines,
+    holds each bookkeeping line exactly once, and is never left half-written."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    _init_repo(tmp_path)
+    exclude = _exclude_file(tmp_path)
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    user_lines = [f"# user rule {i}\nmy-pattern-{i}/" for i in range(200)]
+    exclude.write_text("\n".join(user_lines) + "\n")
+    before = exclude.read_text().splitlines()
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        results = list(pool.map(lambda _i: ensure_bookkeeping_ignored(tmp_path), range(32)))
+
+    assert all(all(r.values()) for r in results)
+    after = exclude.read_text().splitlines()
+    assert after[: len(before)] == before  # user lines untouched, in order
+    for line in BOOKKEEPING_IGNORE_LINES:
+        assert after.count(line) == 1
+    assert not list(exclude.parent.glob(".exclude.*.tmp"))
+
+
+def test_exclude_write_preserves_file_mode(tmp_path: Path):
+    _init_repo(tmp_path)
+    exclude = _exclude_file(tmp_path)
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    exclude.write_text("keep-me\n")
+    exclude.chmod(0o600)
+    ensure_bookkeeping_ignored(tmp_path)
+    assert exclude.stat().st_mode & 0o777 == 0o600
+    assert "keep-me" in exclude.read_text().splitlines()

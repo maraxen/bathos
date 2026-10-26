@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from bathos.catalog import init_catalog
-from bathos.git_pin import MANIFEST_GITIGNORE_LINES
+from bathos.git_pin import MANIFEST_GITIGNORE_LINES, OUTPUTS_IGNORE_LINE
 from bathos.runlog.project_id import mint_project_id
 
 SCRIPT_DIRS = [
@@ -39,7 +39,7 @@ id = "{project_id}"
 # `outputs/` (spec 261026, user decision): scripts write per-run output under `outputs/<run8>/`,
 # which an unignored tree reports as untracked and the next run's dirty check then counts. Only NEW
 # projects get it; an existing project opts in with `ignore_outputs = true` (-> info/exclude).
-_GITIGNORE_ENTRIES: tuple[str, ...] = ("scripts/scratch/", *MANIFEST_GITIGNORE_LINES, "outputs/")
+_GITIGNORE_ENTRIES: tuple[str, ...] = ("scripts/scratch/", *MANIFEST_GITIGNORE_LINES, OUTPUTS_IGNORE_LINE)
 
 
 @dataclass
