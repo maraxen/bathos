@@ -18,7 +18,13 @@ import duckdb
 from bathos.catalog import write_run
 from bathos.checker import hash_dependency_lock
 from bathos.git import capture_run_git_state, git_state_as_dict
-from bathos.git_pin import ensure_manifest_ignored, pin_result_as_dict, pin_run
+from bathos.git_pin import (
+    MANIFEST_RELPATH_LINE,
+    ensure_bookkeeping_ignored,
+    pin_result_as_dict,
+    pin_run,
+)
+from bathos.git_pin import repo_root as git_repo_root
 from bathos.lock_config import resolve_lock_settings, select_lock_repo
 from bathos.lock_ref import write_lock_ref
 from bathos.prereg import (
@@ -528,6 +534,21 @@ def _unresolved_outcome_warning(
         f"WARNING: outcome 'unknown': a result was read (from {emission_source}) but no [outcomes] "
         "condition matched it. Add a catch-all outcome or check the result fields."
     )
+
+
+def _bookkeeping_roots(script_path: Path | None, cwd: Path) -> list[Path]:
+    """Distinct repo roots whose bookkeeping ignores must hold: the script's checkout, then cwd's.
+
+    They differ when a run is launched from another repo than its script (backlog #5609).
+    """
+    roots: list[Path] = []
+    for start in (script_path.parent if script_path is not None else None, cwd):
+        if start is None:
+            continue
+        root = git_repo_root(start)
+        if root is not None and root.resolve() not in [r.resolve() for r in roots]:
+            roots.append(root)
+    return roots
 
 
 def _write_lock_fallback(lock_dir: Path, project_slug: str, run_id: str, body: bytes) -> Path:
@@ -1242,6 +1263,9 @@ def _run_script_impl(
     # dirty tree the ref points at a snapshot of what actually ran.
     #
     # Best-effort by construction: provenance capture must never be able to fail a run.
+    # Resolved OUTSIDE the best-effort block below: a malformed or invalid lock/ignore setting must
+    # stop the run (LockConfigError), not be swallowed with the pin errors.
+    lock_settings = resolve_lock_settings(cwd=cwd, catalog_dir=catalog_dir)
     pin = None
     try:
         # Declared, load-bearing paths. bathos cannot discover UNdeclared inputs, but it can refuse
@@ -1256,15 +1280,30 @@ def _run_script_impl(
         # untracked .git/info/exclude, never the tracked .gitignore) BEFORE pin_run appends. Otherwise the manifest write itself -- which
         # happens on every run -- is what makes the NEXT run's git-dirty capture see an
         # uncommitted change, even on an otherwise-clean tree.
-        if not ensure_manifest_ignored(cwd):
-            event("run.manifest_gitignore_warning", run_uuid=run.id, cwd=str(cwd))
-            print(
-                "warning: could not ensure the run manifest (.bth/refs/manifest.jsonl) is "
-                "ignored -- a future run's git-dirty state may be polluted by this run's "
-                "own provenance bookkeeping. Check .gitignore for a rule (e.g. a `!` negation) "
-                "that un-ignores it.",
-                file=sys.stderr,
-            )
+        # Spec 261026 P2: the same for every bookkeeping path, in the script's repo AND in cwd's
+        # repo when they differ (`pin_run` and the manifest still live under cwd; the lock ref
+        # and script outputs follow the script).
+        for ignore_root in _bookkeeping_roots(script_path, cwd):
+            for ignore_line, ignored in ensure_bookkeeping_ignored(
+                ignore_root, ignore_outputs=lock_settings.ignore_outputs
+            ).items():
+                if ignored:
+                    continue
+                event(
+                    "run.manifest_gitignore_warning"
+                    if ignore_line == MANIFEST_RELPATH_LINE
+                    else "run.bookkeeping_gitignore_warning",
+                    run_uuid=run.id,
+                    cwd=str(ignore_root),
+                    path=ignore_line,
+                )
+                print(
+                    f"warning: could not ensure {ignore_line} is ignored in {ignore_root} -- a "
+                    "future run's git-dirty state may be polluted by this run's own provenance "
+                    "bookkeeping. Check .gitignore for a rule (e.g. a `!` negation) that "
+                    "un-ignores it.",
+                    file=sys.stderr,
+                )
 
         pin = pin_run(
             run_id=run.id,

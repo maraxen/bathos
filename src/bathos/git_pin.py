@@ -83,15 +83,38 @@ PROVENANCE_PATHS = (".bth/claims", ".bth/refs")
 # `.bth/claims` is unaffected: it holds authored, reviewed content (claim-tier
 # pre-registrations) with its own PROVENANCE_PATHS warning path, unchanged here.
 MANIFEST_GITIGNORE_LINES = ("/.bth/refs/manifest.jsonl", "/.bth/refs/.manifest.lock")
+MANIFEST_RELPATH_LINE = MANIFEST_GITIGNORE_LINES[0]
+
+# Spec 261026 P2: every path `bth run` writes that is bookkeeping rather than authored content.
+# `/.bth/log/` is the run log (`bth init` ignores it via `ensure_log_ignored`; old projects never ran
+# that), `/outputs/provenance/` is the SLURM / BTH_FORCE_PROVENANCE_EXPORT bundle export. Lock files
+# are deliberately absent so a materialized lock can be committed. `/outputs/` itself is opt-in
+# (`ignore_outputs`) because existing projects may track files there.
+BOOKKEEPING_IGNORE_LINES = (
+    *MANIFEST_GITIGNORE_LINES,
+    "/.bth/log/",
+    "/outputs/provenance/",
+)
+OUTPUTS_IGNORE_LINE = "/outputs/"
+# One representative path per line, for `git check-ignore --no-index`.
+_BOOKKEEPING_PROBES = {
+    "/.bth/refs/manifest.jsonl": ".bth/refs/manifest.jsonl",
+    "/.bth/refs/.manifest.lock": ".bth/refs/.manifest.lock",
+    "/.bth/log/": ".bth/log/runs/probe.jsonl",
+    "/outputs/provenance/": "outputs/provenance/probe.json",
+    "/outputs/": "outputs/probe/result.json",
+}
 
 EXPORT_DIRNAME = Path("outputs") / "provenance"
 
 __all__ = [
+    "BOOKKEEPING_IGNORE_LINES",
     "DEFAULT_MAX_SNAPSHOT_BYTES",
     "EXPORT_DIRNAME",
     "AUTHORING_RELPATH",
     "MANIFEST_GITIGNORE_LINES",
     "MANIFEST_RELPATH",
+    "OUTPUTS_IGNORE_LINE",
     "PROVENANCE_PATHS",
     "RUN_REF_PREFIX",
     "SNAPSHOT_FULL",
@@ -103,6 +126,7 @@ __all__ = [
     "SnapshotResult",
     "append_authoring_manifest",
     "append_manifest",
+    "ensure_bookkeeping_ignored",
     "ensure_manifest_ignored",
     "export_bundle",
     "ignored_declared_paths",
@@ -125,70 +149,89 @@ def ignored_provenance_paths(cwd: Path) -> tuple[str, ...]:
     return _ignored_provenance_paths(cwd, PROVENANCE_PATHS)
 
 
-def ensure_manifest_ignored(cwd: Path) -> bool:
-    """Best-effort: make sure the run manifest is ignored before `pin_run` writes to it.
+def ensure_bookkeeping_ignored(repo_root_path: Path, *, ignore_outputs: bool = False) -> dict[str, bool]:
+    """Best-effort: make sure each bookkeeping path is ignored before `bth run` writes to it.
 
-    Covers projects initialized before `bth init` added the manifest to `.gitignore`
-    (`bathos.init._ensure_gitignore_entries`). `bth run` must not edit the tracked
-    `.gitignore` itself -- that edit would dirty the very tree whose cleanliness it is
-    protecting -- so the patterns go into the repository's local, untracked exclude file
-    (`git rev-parse --git-path info/exclude`, shared by every linked worktree). Then git is
-    asked whether the manifest is actually ignored, since a `!` negation in `.gitignore`
-    (which outranks info/exclude) can defeat it.
+    Covers projects initialized before `bth init` ignored these paths
+    (`bathos.init._ensure_gitignore_entries`). `bth run` must not edit the tracked `.gitignore`
+    itself -- that edit would dirty the very tree whose cleanliness it is protecting -- so the
+    patterns go into the repository's local, untracked exclude file
+    (`git rev-parse --git-path info/exclude`, shared by every linked worktree). For each path in
+    `BOOKKEEPING_IGNORE_LINES` (plus `/outputs/` when `ignore_outputs`), git is asked whether a
+    representative file is ignored, ignoring the index; only the lines whose path is NOT already
+    ignored are appended, so one already-ignored path never hides the others (the early-return
+    this replaces skipped them all). Git is then asked again, since a `!` negation in
+    `.gitignore` (which outranks info/exclude) can defeat an appended line.
 
-    Never raises -- provenance bookkeeping must not be able to fail a run (see this
-    module's docstring). Returns whether the manifest is (now) ignored; `False` means
-    "manifest hygiene is degraded" (the caller should warn, not abort).
+    Lock files are deliberately not ignored: a materialized lock must be committable without
+    `add -f`. A TRACKED path is not made clean by an ignore rule; `bth lock untrack` covers that.
+
+    Never raises -- provenance bookkeeping must not be able to fail a run (see this module's
+    docstring). Returns `{exclude line: ignored after the call}`; a False entry means "hygiene
+    for that path is degraded" (the caller should warn, not abort). Outside a repo: `{}`.
     """
-    root = repo_root(cwd)
+    root = repo_root(repo_root_path)
     if root is None:
-        return True  # nothing to ignore: pin_run is a no-op outside a repo anyway
+        return {}
 
-    manifest_rel = MANIFEST_RELPATH.as_posix()
+    lines = (*BOOKKEEPING_IGNORE_LINES, *((OUTPUTS_IGNORE_LINE,) if ignore_outputs else ()))
 
-    def _is_ignored() -> bool | None:
+    def _is_ignored(line: str) -> bool:
         try:
             result = subprocess.run(
-                ["git", "check-ignore", "-q", "--no-index", manifest_rel],
+                ["git", "check-ignore", "-q", "--no-index", _BOOKKEEPING_PROBES[line]],
                 cwd=root,
                 capture_output=True,
                 text=True,
             )
         except OSError:
-            return None
+            return False
         return result.returncode == 0
 
-    if _is_ignored():
+    # `/outputs/` first: when it is ignored, `/outputs/provenance/` is already covered and needs no line.
+    ordered = sorted(lines, key=lambda line: line != OUTPUTS_IGNORE_LINE)
+    pending = [line for line in ordered if not _is_ignored(line)]
+    if pending:
+        try:
+            git_path = subprocess.run(
+                ["git", "rev-parse", "--git-path", "info/exclude"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+        except OSError:
+            git_path = None
+        if git_path is not None and git_path.returncode == 0 and git_path.stdout.strip():
+            exclude = Path(git_path.stdout.strip())
+            if not exclude.is_absolute():
+                exclude = root / exclude
+            try:
+                existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+                present = set(existing.splitlines())
+                missing = [line for line in pending if line not in present]
+                if missing:
+                    new_text = existing
+                    if new_text and not new_text.endswith("\n"):
+                        new_text += "\n"
+                    new_text += "".join(f"{line}\n" for line in missing)
+                    exclude.parent.mkdir(parents=True, exist_ok=True)
+                    exclude.write_text(new_text, encoding="utf-8")
+            except OSError:
+                pass  # best-effort; the authoritative check below still runs
+
+    return {line: _is_ignored(line) for line in lines}
+
+
+def ensure_manifest_ignored(cwd: Path) -> bool:
+    """Thin wrapper over :func:`ensure_bookkeeping_ignored` returning only the manifest's entry.
+
+    Kept so existing importers keep working. Note it now ensures every bookkeeping path, not just
+    the manifest. Outside a repo it returns True: nothing to ignore (`pin_run` is a no-op there).
+    """
+    result = ensure_bookkeeping_ignored(cwd)
+    if not result:
         return True
-
-    try:
-        git_path = subprocess.run(
-            ["git", "rev-parse", "--git-path", "info/exclude"],
-            cwd=root,
-            capture_output=True,
-            text=True,
-        )
-    except OSError:
-        return False
-    if git_path.returncode != 0 or not git_path.stdout.strip():
-        return False
-    exclude = Path(git_path.stdout.strip())
-    if not exclude.is_absolute():
-        exclude = root / exclude
-    try:
-        existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
-        missing = [line for line in MANIFEST_GITIGNORE_LINES if line not in existing]
-        if missing:
-            new_text = existing
-            if new_text and not new_text.endswith("\n"):
-                new_text += "\n"
-            new_text += "".join(f"{line}\n" for line in missing)
-            exclude.parent.mkdir(parents=True, exist_ok=True)
-            exclude.write_text(new_text, encoding="utf-8")
-    except OSError:
-        pass  # best-effort; the authoritative check below still runs
-
-    return bool(_is_ignored())
+    return result[MANIFEST_RELPATH_LINE]
 
 
 def ignored_declared_paths(paths: list[str] | tuple[str, ...], cwd: Path) -> tuple[str, ...]:

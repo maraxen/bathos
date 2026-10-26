@@ -3,9 +3,12 @@ import subprocess
 from pathlib import Path
 
 from bathos.git_pin import (
+    BOOKKEEPING_IGNORE_LINES,
     EXPORT_DIRNAME,
     MANIFEST_GITIGNORE_LINES,
     MANIFEST_RELPATH,
+    OUTPUTS_IGNORE_LINE,
+    ensure_bookkeeping_ignored,
     ensure_manifest_ignored,
     ignored_provenance_paths,
     import_bundles,
@@ -808,22 +811,26 @@ def test_ensure_manifest_ignored_writes_local_exclude_not_gitignore(tmp_path: Pa
 
     assert (tmp_path / ".gitignore").read_text() == "*.pyc\n"
     exclude = _exclude_file(tmp_path).read_text()
-    for line in MANIFEST_GITIGNORE_LINES:
+    for line in (*MANIFEST_GITIGNORE_LINES, *BOOKKEEPING_IGNORE_LINES):
         assert line in exclude
 
 
-def test_ensure_manifest_ignored_leaves_everything_alone_when_already_ignored(
+def test_ensure_manifest_ignored_appends_only_the_missing_lines_when_manifest_already_ignored(
     tmp_path: Path,
 ):
+    """Spec 261026 P2. The old version of this test asserted the exclude file was UNCHANGED
+    when the manifest was already ignored, which encoded the early-return bug: that return
+    skipped every other bookkeeping path. Now the manifest line is not duplicated, and only
+    the still-missing lines are appended."""
     _init_repo(tmp_path)
     (tmp_path / ".gitignore").write_text("/.bth/refs/manifest.jsonl\n")
-    exclude_before = _exclude_file(tmp_path)
-    before = exclude_before.read_text() if exclude_before.exists() else None
 
     assert ensure_manifest_ignored(tmp_path) is True
 
-    after = exclude_before.read_text() if exclude_before.exists() else None
-    assert after == before
+    exclude = _exclude_file(tmp_path).read_text().splitlines()
+    assert "/.bth/refs/manifest.jsonl" not in exclude  # already ignored by .gitignore: not duplicated
+    for line in ("/.bth/refs/.manifest.lock", "/.bth/log/", "/outputs/provenance/"):
+        assert exclude.count(line) == 1
 
 
 def test_ensure_manifest_ignored_is_idempotent(tmp_path: Path):
@@ -872,3 +879,84 @@ def test_manifest_write_does_not_dirty_the_tree_once_ignored(tmp_path: Path):
         ["git", "status", "--porcelain"], cwd=tmp_path, text=True, capture_output=True
     ).stdout
     assert status_after_second.strip() == ""
+
+
+# ---------------------------------------------------------------------------
+# ensure_bookkeeping_ignored (spec 261026 P2): per-path ignores
+# ---------------------------------------------------------------------------
+
+
+def _is_ignored(repo: Path, rel: str) -> bool:
+    return (
+        subprocess.run(
+            ["git", "check-ignore", "-q", "--no-index", rel], cwd=repo, capture_output=True
+        ).returncode
+        == 0
+    )
+
+
+def test_bookkeeping_line_set_covers_the_four_paths():
+    assert set(BOOKKEEPING_IGNORE_LINES) == {
+        "/.bth/refs/manifest.jsonl",
+        "/.bth/refs/.manifest.lock",
+        "/.bth/log/",
+        "/outputs/provenance/",
+    }
+
+
+def test_ensure_bookkeeping_ignored_adds_each_missing_line_once(tmp_path: Path):
+    _init_repo(tmp_path)
+
+    result = ensure_bookkeeping_ignored(tmp_path)
+
+    assert result == dict.fromkeys(BOOKKEEPING_IGNORE_LINES, True)
+    exclude = _exclude_file(tmp_path).read_text().splitlines()
+    for line in BOOKKEEPING_IGNORE_LINES:
+        assert exclude.count(line) == 1
+    for rel in (
+        ".bth/refs/manifest.jsonl",
+        ".bth/log/runs/2026.jsonl",
+        "outputs/provenance/r.json",
+    ):
+        assert _is_ignored(tmp_path, rel)
+    # second call is a no-op
+    before = _exclude_file(tmp_path).read_text()
+    assert ensure_bookkeeping_ignored(tmp_path) == result
+    assert _exclude_file(tmp_path).read_text() == before
+
+
+def test_ensure_bookkeeping_ignored_does_not_ignore_locks_or_outputs_by_default(tmp_path: Path):
+    """Lock files stay un-ignored so a materialized lock commits without `add -f`; `/outputs/`
+    is opt-in (`ignore_outputs`)."""
+    _init_repo(tmp_path)
+    ensure_bookkeeping_ignored(tmp_path)
+    assert not _is_ignored(tmp_path, "scripts/x.r1.bth.lock.toml")
+    assert not _is_ignored(tmp_path, "outputs/abcd1234/result.json")
+    assert OUTPUTS_IGNORE_LINE not in _exclude_file(tmp_path).read_text().splitlines()
+
+
+def test_ensure_bookkeeping_ignored_ignore_outputs_adds_outputs(tmp_path: Path):
+    _init_repo(tmp_path)
+
+    result = ensure_bookkeeping_ignored(tmp_path, ignore_outputs=True)
+
+    assert result[OUTPUTS_IGNORE_LINE] is True
+    assert _is_ignored(tmp_path, "outputs/abcd1234/result.json")
+    assert all(result.values())
+
+
+def test_ensure_bookkeeping_ignored_reports_only_the_defeated_path(tmp_path: Path):
+    """A `!` negation on one path leaves that one False; the others are still ignored."""
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text("!/.bth/log/\n")
+
+    result = ensure_bookkeeping_ignored(tmp_path)
+
+    assert result["/.bth/log/"] is False
+    assert result["/.bth/refs/manifest.jsonl"] is True
+    assert result["/outputs/provenance/"] is True
+    assert ensure_manifest_ignored(tmp_path) is True  # wrapper reports the manifest entry only
+
+
+def test_ensure_bookkeeping_ignored_outside_a_repo_is_empty(tmp_path: Path):
+    assert ensure_bookkeeping_ignored(tmp_path / "nowhere") == {}

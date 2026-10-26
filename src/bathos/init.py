@@ -36,7 +36,10 @@ id = "{project_id}"
 # the first sees a dirty tree purely from bathos's own bookkeeping. See
 # `bathos.git_pin.ensure_manifest_ignored` for the full rationale and the `bth run`-side half
 # of this fix (covers projects that never re-run `bth init`).
-_GITIGNORE_ENTRIES: tuple[str, ...] = ("scripts/scratch/", *MANIFEST_GITIGNORE_LINES)
+# `outputs/` (spec 261026, user decision): scripts write per-run output under `outputs/<run8>/`,
+# which an unignored tree reports as untracked and the next run's dirty check then counts. Only NEW
+# projects get it; an existing project opts in with `ignore_outputs = true` (-> info/exclude).
+_GITIGNORE_ENTRIES: tuple[str, ...] = ("scripts/scratch/", *MANIFEST_GITIGNORE_LINES, "outputs/")
 
 
 @dataclass
@@ -70,7 +73,9 @@ def _ensure_gitignore_entries(project_root: Path, entries: tuple[str, ...]) -> l
     """
     gitignore = project_root / ".gitignore"
     existing = gitignore.read_text() if gitignore.exists() else ""
-    missing = [e for e in entries if e not in existing]
+    # Whole-line match: a substring test would treat `outputs/provenance/` as already covering `outputs/`.
+    present = {line.strip() for line in existing.splitlines()}
+    missing = [e for e in entries if e not in present]
     if missing:
         with open(gitignore, "a") as f:
             if existing and not existing.endswith("\n"):
