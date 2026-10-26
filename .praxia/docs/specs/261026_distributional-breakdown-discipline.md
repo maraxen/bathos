@@ -5,11 +5,11 @@ status: draft
 task_id: 261026_distributional-breakdown-debt
 date: '261026'
 backlog_ids: ''
-adversarial_review: 'cycles 1-2 challenger+defender done; v3 revision'
+adversarial_review: 'cycles 1-3 challenger+defender done; v4 revision'
 ---
 # Distributional breakdown, amendments and fork records for aggregate verdicts
 
-**v3** (after adversarial cycles 1 and 2; see §6). Debt #3045. Source postmortem: lathex
+**v4** (after adversarial cycles 1-3; see §6). Debt #3045. Source postmortem: lathex
 `postmortems/bathos-debt-distributional-breakdown.md` (commit a0b1f5a). Companion bug #3046
 (scaffold path) is fixed separately (commit 1ed684bb).
 
@@ -30,12 +30,14 @@ record of what was decided after a near-bound result, or why.
 User decision (261026): **WARNING everywhere; ERROR only where the run is cited (entry into a
 claim-bound campaign).** Internal validation runs stay unblocked.
 
-**Acceptance walk-through (78db9e04 under v3).** Before the run, `bth run` prints to stderr
-that `e_max_placement` and `e_max_iptm` gate outcomes with no `[breakdown]` (D2). Had the
-author declared `[breakdown]` with `bound = 0.5`, the run would have recorded
-`e_max_placement__n_over = 1`, matched the parameter-free `single_unit` near-bound trigger
-(D6), printed an advisory, and opened a `near_bound` obligation. That obligation stays open
-until a format-2 postmortem with a `[fork]` discharges it. The run is never blocked. If the
+**Acceptance walk-through (78db9e04 under v4).** Before the run, `bth run` prints to stderr
+that `e_max_placement` and `e_max_iptm` gate outcomes with no `[breakdown]` (D2). Over MCP,
+the same advisories come back in the `run_tool` response's `warnings`. Had the author declared
+`[breakdown]` with `bound = 0.5`, the run would have recorded `e_max_placement__n_over = 1`
+with `n_units = 24`. It would then have matched the parameter-free `single_unit` near-bound
+trigger (D6), printed an advisory, and opened a `near_bound` obligation. That obligation is
+default ON and opens for exploratory runs too. It stays open until
+`bth postmortem validate` passes on a format-2 postmortem with a `[fork]` that discharges it. The run is never blocked. If the
 author ignores the D2 warning and declares nothing, D6 cannot fire. That residual gap is
 accepted, since the warning is the intervention point.
 
@@ -58,8 +60,12 @@ accepted, since the warning is the intervention point.
 | A13 | `EXCEPTION_TO_CODE` is class-name keyed with one value; `campaign_add_tool` returns no `error_code`; `register_claim` raises `RuntimeError` | verified | `errors.py:105-119`, `mcp.py:4355-4395,3550`, `claim.py:645,706` |
 | A14 | Each `def check_*` in `linter.py` needs a rule card; `build_context` already holds the parsed sidecar | verified | `tests/test_corpus.py:226,241`, `corpus.py:314` |
 | A15 | `linter._columns_referenced` does word-boundary extraction | verified | `linter.py:761-768` |
-| A16 | Obligations ledger: per-trigger flags default OFF, opened idempotently, discharged by a valid postmortem's `discharges`, listed at conclude; `TRIGGERS` is a closed set asserted by tests | verified | `obligations.py:13-64,84-123,181-200,277` |
+| A16 | Obligations ledger: per-trigger flags default OFF (`resolve_flag` returns False when env and `.bth.toml [obligations]` are unset, `config.py:60-85`; `trigger_enabled` has no default, `obligations.py:84-95`), opened idempotently, listed at conclude; `TRIGGERS` is a closed set asserted by tests (`test_obligation_config.py:51,55`, `test_obligation_triggers.py:95-110`). **Discharge is UNWIRED**: `discharge_from_postmortem` (`obligations.py:263`) has no caller in `src/`, and `postmortem_validate_tool` (`mcp.py:3179`, wrapped by `cli_cyclopts.py:126`) validates without discharging | verified (cycle 3; orchestrator grep) | as cited |
 | A17 | Run results are parsed from `runs.metadata` (JSON string) | verified | `runner._parse_result_dict:387`, `schema.py:195` |
+| A18 | Exploratory runs store `outcome = "observed"` plus `tentative_outcome` (`runner.py:472-478`); a postmortem override for observation classes also lands in `tentative_outcome` (`compact.py:1273-1280,1333-1334`) | verified | as cited |
+| A19 | The run-end `outcome_failed` open sits behind `epistemic_class not in ("exploratory","calibrating")` (`runner.py:1608`); run obligations are keyed by the full `run.id` (`runner.py:1611-1614`) | verified (orchestrator read) | as cited |
+| A20 | `run_tool` calls `run_script` in-process (`mcp.py:1941`) and returns a fixed dict (`mcp.py:1964-1971`), so runner stderr never reaches an MCP caller; `run_uuid_var` (`telemetry.py`, imported at `runner.py:54`) is an existing ContextVar precedent | verified | as cited |
+| A21 | Sanity is `[observe].sanity: list[str]` (`sidecar.py:342,517`), not a table; `validate.py:787-790` skips non-str `result_schema` values | verified | as cited |
 
 ## 2. Design
 
@@ -69,18 +75,25 @@ accepted, since the warning is the intervention point.
 [breakdown]
 unit = "binder"
 artifact = "per_unit.parquet"           # optional, relative to BTH_OUTPUT_DIR
+# waive = "reason"                      # alternative to aggregates; must sit here, before any
+                                        # sub-table (D3: only the run-time sidecar counts)
 
 [breakdown.aggregates.e_max_placement]
 direction = "max"                       # "max" | "min"
 bound = 0.5                             # optional judgement bound
 margin = 0.05                           # optional absolute near-bound band (D6); see default below
-
-# waive = "reason"                      # top-level alternative (D3: only the run-time sidecar counts)
 ```
 
 Aggregate keys may end in `*` (`e_max_placement_*`). The prefix expands over **float**
-`[result_schema]` keys; an unmatched prefix is a validation error. Each expanded column is an
-aggregate with the same settings.
+`[result_schema]` keys **that contain no `__`**, so a prefix never matches its own summary
+columns (`e_max_placement__second`). An unmatched prefix is a validation error, and so is an
+explicit aggregate key containing `__`. Each expanded column is an aggregate with the same
+settings. Order: expand first, then check the required summary columns.
+
+**Effective label** (used by the emission check and `breakdown_gate`):
+`tentative_outcome if outcome == "observed" and tentative_outcome else outcome` (A18). It is
+exempt when it is None, `error`, `invalid_measurement` or a residual label.
+`_add_run_to_campaign_impl` also selects `tentative_outcome` (`schema.py:251`).
 
 For each aggregate `A` the run emits (declared in `[result_schema]`):
 
@@ -107,19 +120,29 @@ warning and emits `run.breakdown_incomplete`. The outcome is unchanged. Residual
 
 `uncovered_aggregates(sidecar) -> list[UncoveredAggregate]` (pure, `sidecar.py`):
 
-1. Identifiers from every `[outcomes.*].condition` and `[sanity]` condition via
-   `_columns_referenced`, intersected with `[result_schema]` keys.
+1. Identifiers from every `[outcomes.*].condition` and every `[observe].sanity` expression
+   string (A21) via `_columns_referenced`, intersected with `[result_schema]` keys.
 2. **Aggregate-like** means: a float-typed column, no `__` in the name, matching
    `(?i)(^|_)(max|min|worst|peak)(_|$)|^p_?max`, not starting with `n_|is_|has_`, and not
    ending in `_n|_count|_samples|_steps|_idx|_flag`. Alternatively, any column with
    `aggregate = true` in `[result_schema_meta.<col>]` (the opt-in overrides type and name
-   rules).
+   rules). `[result_schema_meta]` is a **new separate top-level table**, not nested in
+   `[result_schema]`. T1 adds its parse field and validation: every key must be a
+   `[result_schema]` column, and only the bool key `aggregate` is allowed.
 3. Uncovered: not an `[breakdown.aggregates]` key or expanded prefix match, and no `waive`.
 
 **Surfaces.**
 - `_run_script_impl`, right after the sidecar parse (≈861), **unconditionally** (also for
-  non-enforced dirs): print each uncovered aggregate to stderr in the style of
-  `runner.py:813/829`, and emit `run.aggregate_uncovered`.
+  non-enforced dirs): call `_advise("aggregate_uncovered", msg, column=c)` for each uncovered
+  aggregate, and emit `run.aggregate_uncovered`.
+- **Advisory channel (A20).** A new `run_advisories_var: ContextVar[list[dict] | None]` sits
+  beside `run_uuid_var`. The runner helper `_advise(code, message, **kw)` prints to stderr in
+  the style of `runner.py:813/829` and, if the var is set, appends
+  `{"code", "message", **kw}`. `run_tool` sets it to `[]` before calling `run_script`
+  (≈`mcp.py:1938`). It always returns `"warnings": [...]`, an empty list when there is
+  nothing, and keeps the existing singular `"warning"` key. Codes: `aggregate_uncovered`,
+  `breakdown_incomplete`, `near_bound` (with `obligation_id`). The existing 813/829 prints are
+  left alone.
 - The same entries as `validate_sidecar` warnings, for MCP/`bth validate`.
 - `bth lint` `check_aggregate_without_breakdown` and STAT-005 (D4).
 
@@ -150,11 +173,17 @@ non-empty with no run-time `waive`, or if the effective label names a non-residu
   `sidecar_sha256` and `metadata`. Gate after the run-row read, **before** `threshold_set`
   (≈591). Predicate: `claim_path IS NOT NULL`.
 - `register_claim`: over all members. `--force` does not bypass.
-- `conclude_campaign`: after the member list is built (≈1228). Predicate:
+- `conclude_campaign`: inside the claim-bound block, immediately after
+  `precomputed_member_ids = members` (`campaigns.py:1228`) and before the BP-3 check (≈1230).
+  This is outside any `try`, and before any outcome mutation. The existing obligation scan at
+  ≈1460-1472 swallows exceptions and reads only warm `campaign_runs`, so it is not used.
+  Iterate `members`, which includes cool-tier members (`union_campaign_member_ids`,
+  ≈268-286). Both the breakdown gate and the D6 fork check run here. Predicate:
   `claim_path and registered_sha`, as the Union Gate uses. Confirmation/sequential modes
   **raise**; exploration mode warns. This intentionally departs from the downgrade-to-
   `confounded` style of the existing gates, per the user's decision. `force_verdict` does not
-  bypass.
+  bypass. The existing obligation gate at ≈1474 is left as is; under ENFORCE it would also
+  downgrade on the same open obligation, which is harmless because the raise comes first.
 - `link_cool_runs_to_campaigns` is not gated (A7); register and conclude backstop it.
 
 **Errors.** `class BreakdownRefused(CampaignError, RuntimeError)`, registered in
@@ -206,24 +235,60 @@ mode only.
 `near_bound(sidecar, results) -> list[NearBound]` (pure; `results` parsed from
 `runs.metadata`, A17; a missing, None, NaN or non-numeric value means "unevaluated", never
 near-bound). For each aggregate with `bound`:
-- **single_unit** (parameter-free): the bound is crossed strictly in the worst direction and
-  `A__n_over == 1`. This fires on 78db9e04.
+- **single_unit** (parameter-free): the bound is crossed strictly in the worst direction,
+  `A__n_over == 1` and `A__n_units >= 2`. With one unit, "one unit over" carries no
+  distributional information. This fires on 78db9e04.
 - **margin**: `|A - bound| <= margin`. The default when `bound != 0` is
   `0.10 * |bound|`. **The 10 % is arbitrary**, a default chosen so the check is never off.
   It is frozen in the run-time sidecar, and a false positive costs one fork record, never a
   block. Authors should set `margin` from the instrument's known noise floor where one exists.
   The band is symmetric on purpose: just under the bound is as fragile as just over.
 
-**At run end (exit 0):** if `near_bound` is non-empty, print a stderr advisory and open
-obligation trigger **`near_bound`** for the run. `near_bound` is added to `TRIGGERS` and
-`WIRED_TRIGGERS`, and the closed-set tests are updated. It **defaults ON**, unlike the four
-existing triggers. The ledger's default-OFF rationale (`obligations.py:20-24`) is to avoid
-retroactively burdening every existing script; `near_bound` fires only for sidecars that
-declare the new `[breakdown]` `bound`, so no existing script is touched.
-`BTH_OBLIGATION_NEAR_BOUND=0` disables it.
+**At run end (exit 0):** if `near_bound` is non-empty, call `_advise("near_bound", …)` and
+open obligation trigger **`near_bound`** for entity `("run", run.id)`, with the full id
+(A19). The open sits **outside** the `epistemic_class not in ("exploratory","calibrating")`
+guard at `runner.py:1608`, so exploratory runs like 78db9e04 open one. The obligation id is
+`run_<fullid>_near_bound` (format `obligations.py:182`).
 
-**Discharge:** a format-2 postmortem whose `discharges` names the obligation, with a valid
-`[fork]`:
+**Default ON, mechanized.** `near_bound` is added to `TRIGGERS` and `WIRED_TRIGGERS`. A new
+`DEFAULT_ON = frozenset({"near_bound"})` lives in `obligations.py`. `resolve_flag` gains
+`default: bool = False`, used when env and config are unset (≈`config.py:82-83`) and on the
+exception path. `trigger_enabled` passes `default=trigger in DEFAULT_ON`. The ledger's
+default-OFF rationale (`obligations.py:20-24`) is to avoid retroactively burdening every
+existing script. `near_bound` fires only for sidecars that declare the new `[breakdown]`
+`bound`, so no existing script is touched. The docstrings at `obligations.py:13-24,68-73`
+are updated to say so.
+
+**Opt-outs:** `BTH_OBLIGATION_NEAR_BOUND=0` (env wins, `config.py:76-78`), or durably
+`[obligations] near_bound = false` in `.bth.toml`. The latter is the form SLURM jobs honour.
+
+**Test edits:**
+- `test_obligation_config.py:51,55` iterate `TRIGGERS - DEFAULT_ON`.
+- `test_obligation_triggers.py:95-98` does the same and is renamed.
+- `test_obligation_triggers.py:101-110` is parametrized over `TRIGGERS - DEFAULT_ON`.
+- `WIRED_TRIGGERS == TRIGGERS` (≈:133) is unchanged.
+- New tests: on with empty config; off with config false; off with env 0; env 0 beats
+  config true.
+
+**Discharge wiring (A16 was unwired).** In `postmortem_validate_tool`, after `result.ok`
+(≈`mcp.py:3180`), call a new `obligations.discharge_validated(ws, pm, pm_path)`. It discharges
+the ids in `pm.discharges` without validating a second time. Its response gains
+`"discharged": [ids]`. `bth postmortem validate` wraps that tool (`cli_cyclopts.py:126`), so
+this one point covers the CLI and MCP. `discharge_from_postmortem` stays as the
+run-independent wrapper.
+
+**Entity check (new).** `discharge` does no entity check today. For `near_bound` ids it now
+requires either `pm.run_id` resolving to the obligation's run, or a campaign-scoped
+postmortem whose members include that run. Otherwise the id is reported as not discharged,
+with a reason.
+
+**Fork checks are run-independent.** They read only `pm.fork` and `pm.discharges`; the
+trigger is `any(oid.endswith("_near_bound"))`. So they fire with `run=None`, as at
+`obligations.py:277`. `parse_postmortem` (`postmortem.py:109-129`) builds fields explicitly,
+so T5 adds `format`, `fork` and `amendments` to it.
+
+**Discharge** therefore needs a format-2 postmortem whose `discharges` names the obligation,
+with a valid `[fork]`:
 
 ```toml
 [fork]
@@ -235,14 +300,23 @@ follow_up_run_ids = []
 
 Fork errors: missing `[fork]` or empty `reason` while discharging `near_bound`;
 `choice = "stop"` with `cited = true`. Format-1 postmortems never discharge `near_bound`.
-The scaffold pre-fills `format = 2`, an uncommented empty `[fork]`, and the obligation id in
-`discharges` when one is open.
 
-**Conclude:** open `near_bound` obligations are listed for every campaign, as all
-obligations are. On a claim-bound confirmation/sequential campaign, an open `near_bound`
-obligation for a member, or a discharging postmortem with `cited = false`, raises
-`BreakdownRefused(FORK_RECORD_MISSING)`. No refusal at add, which would bias which runs get
-included.
+**Scaffold.** It writes `format = 2`, an uncommented `[fork]` with empty `choice` and `reason`,
+and a **commented** checklist of open obligation ids, e.g. `# run_<fullid>_near_bound`. It
+never fills `discharges`, per the ledger principle (`postmortem.py:358-361`,
+`test_postmortem_campaign_scope.py:140-144`). It resolves a prefix run id to the full id
+first; `find_run_for_scaffold` (`postmortem.py:397-420`) is widened to return it.
+
+**Conclude** (at the D3 insertion point): open `near_bound` obligations are listed for every
+campaign, as all obligations are. On a claim-bound confirmation/sequential campaign, either of
+these raises `BreakdownRefused(FORK_RECORD_MISSING)`:
+- an open `near_bound` obligation for a member. The message names
+  `bth postmortem validate <path>`.
+- a discharged one whose postmortem has `cited = false`. That postmortem is read from
+  `Obligation.discharged_by` (`obligations.py:137`) and re-parsed, which also catches a file
+  edited after discharge. It is not found via `find_postmortem`.
+
+There is no refusal at add, since refusing there would bias which runs get included.
 
 ## 3. Out of scope
 
@@ -255,13 +329,14 @@ auto-computed breakdowns, aggregates in `[differential].metric` and benchmark me
 | Task | Scope | Tests |
 |---|---|---|
 | T0 | Probe A9 (WIP snapshot with untracked sidecar) | spike |
-| T1 | `BreakdownBlock` parse/validate incl. prefix expansion; `uncovered_aggregates`; stderr surfacing at ≈861; `validate_sidecar` warnings; emission check; `_result_schema_complete` exclusion | `tests/test_breakdown_sidecar.py`: lathex names hit (`e_max_placement`, `p_max_iptm`, `max_abs_delta`, `min_dist`) and miss (`n_max`, `is_inf`, `min_samples`, `kendall_tau`, `e_max_placement__n_over`, int columns); `capsys` asserts stderr from a real `bth run` in a non-enforced dir; residual run exempt from the emission check |
+| T1 | `BreakdownBlock` parse/validate incl. prefix expansion (`__` excluded, expand-then-check); `[result_schema_meta]` parse/validate; `uncovered_aggregates` (outcomes + `observe.sanity`); effective label; `run_advisories_var` + `_advise` + `run_tool` `warnings`; stderr surfacing at ≈861; `validate_sidecar` warnings; emission check; `_result_schema_complete` exclusion | `tests/test_breakdown_sidecar.py`: lathex names hit (`e_max_placement`, `p_max_iptm`, `max_abs_delta`, `min_dist`) and miss (`n_max`, `is_inf`, `min_samples`, `kendall_tau`, `e_max_placement__n_over`, int columns); prefix `e_max_placement_*` with summary columns declared validates; `capsys` asserts stderr from a real `bth run` in a non-enforced dir; `run_tool` returns `warnings` with `aggregate_uncovered`; exploratory run uses `tentative_outcome` for the emission check; residual run exempt |
 | T2 | Lint + STAT-005 + `has_uncovered_aggregate` | `tests/test_breakdown_lint.py`; corpus tests green |
 | T3 | `Sidecar.from_declaration` (full) replacing the lossy rebuild | round-trip test against a pre-v3 `run.started` snapshot |
 | T4 | Resolver, `breakdown_gate`, `BreakdownRefused` and codes/hints/catch sites, four gate points | `tests/test_breakdown_gate.py`: each gate; unbound accepts; run-time waiver accepts; post-hoc waiver refused; residual run accepted; no `threshold_set` after a refused add; link path never raises and the register backstop catches it; MCP `error_code`; `force_verdict` does not bypass; exploration conclude warns |
-| T5 | `ValidationResult.warnings`, `run_lookup` (format-2 only) | format-1 files unchanged under drift |
+| T5 | `ValidationResult.warnings`, `run_lookup` (format-2 only); `parse_postmortem` gains `format`, `fork`, `amendments` | format-1 files unchanged under drift |
 | T6 | D5 amendments + rendering | `tests/test_postmortem_amendments.py` |
-| T7 | D6 `near_bound` (pure fn, run-end advisory, obligation trigger default ON, fork discharge, scaffold, conclude) | 78db9e04 fixture (exploration, `bound = 0.5`, 0.521, `n_over = 1`) opens `near_bound` without blocking; margin trigger; NaN unevaluated; `bound = 0` validation; discharge by format-2 fork; claim-bound conclude raises |
+| T7a | Discharge wiring: `discharge_validated` called from `postmortem_validate_tool`; `"discharged"` in the response; near_bound entity check | `tests/test_obligation_discharge_wiring.py`: `bth postmortem validate` discharges; a postmortem for run X cannot discharge `run_Y_near_bound`; legacy triggers still discharge |
+| T7 | D6 `near_bound` (pure fn, run-end advisory outside the exploratory guard, `DEFAULT_ON` + `resolve_flag(default=)`, fork checks, scaffold, conclude) | 78db9e04 fixture (exploration, `bound = 0.5`, 0.521, `n_over = 1`, `n_units = 24`) opens `near_bound` without blocking; `n_units = 1` does not fire single_unit; margin trigger; NaN unevaluated; `bound = 0` validation; default-ON/opt-out tests and the edited closed-set tests; scaffold leaves `discharges` empty with a full-id checklist; **end-to-end: open near_bound → claim-bound confirmation conclude raises `FORK_RECORD_MISSING` → validate a format-2 `[fork]` postmortem → conclude proceeds**; `cited = false` raises; exploration-mode conclude warns |
 | T8 | Skills (`using-bathos`, `bathos-rigor-gates`), CHANGELOG | — |
 
 Narrow pytest per task locally; full suite on CI; a reviewer with a different lens.
@@ -299,3 +374,15 @@ rebutted). v3 changes:
 - m9 drift block → `run_lookup` format-2 only; format-less warning.
 - m10 value source, NaN, strictness, `bound = 0`, wildcard families → specified.
 - New (defender): obligations ledger reused instead of a parallel mechanism.
+
+**Cycle 3**: challenger on v3 (1 blocking, 4 major, 6 minor), then defender (9 conceded, 2
+partial, none rebutted). The orchestrator confirmed by grep that `discharge_from_postmortem`
+has no `src/` caller, and read the mcp.py:3180 hook, the runner.py:1608 guard and the
+campaigns.py:1228 insertion point. v4 changes:
+- B1 discharge unwired, so `FORK_RECORD_MISSING` was permanent → T7a wires `discharge_validated` into `postmortem_validate_tool` (CLI + MCP); fork checks are run-independent; conclude reads `discharged_by`; end-to-end test; A16 retagged.
+- M2 default-ON unmechanized → `DEFAULT_ON` + `resolve_flag(default=)`; `.bth.toml` opt-out; named test edits.
+- M3 stderr invisible over MCP → `run_advisories_var` + `_advise`; `run_tool` returns `warnings`.
+- M4 prefix matched its own summary columns → `__` excluded from expansion; expand then check.
+- M5 effective label undefined for exploratory runs → `tentative_outcome` counts when `outcome = observed`.
+- m6 `waive` placement; m7 `observe.sanity` and a separate `[result_schema_meta]` table with validation; m8 `n_units >= 2`; m9 scaffold never fills `discharges`; m10 exact conclude insertion point outside the swallowing `try`; m11 full-id resolution.
+- New (defender): near_bound open sits outside the exploratory guard; discharge entity check.
