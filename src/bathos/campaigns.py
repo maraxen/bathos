@@ -24,6 +24,19 @@ class CampaignError(Exception):
     pass
 
 
+class BreakdownRefused(CampaignError, RuntimeError):  # noqa: N818 -- spec 261026 D3 name
+    """A run cited by a claim-bound campaign failed the breakdown gate (spec 261026 D3).
+
+    `.code` is a `BathosErrorCode`: BREAKDOWN_MISSING, SIDECAR_UNVERIFIABLE or
+    FORK_RECORD_MISSING. A `RuntimeError` too, so `register_claim`'s callers that catch
+    `RuntimeError` still see it; catch it first where the specific code matters.
+    """
+
+    def __init__(self, code, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 @dataclass
 class Campaign:
     id: str
@@ -265,8 +278,13 @@ def _fold_pending_events(catalog_dir: Path) -> None:
         ) from e
 
 
-def union_campaign_member_ids(db, campaign_id: str, catalog_dir: Path | None) -> list[str]:
-    """Warm campaign_runs union cool parquet rows stamped with campaign_id."""
+def union_campaign_member_ids(
+    db, campaign_id: str, catalog_dir: Path | None, *, cool_runs=None
+) -> list[str]:
+    """Warm campaign_runs union cool parquet rows stamped with campaign_id.
+
+    `cool_runs` is a pre-read `read_runs` list, so a caller that already scanned the cool tier
+    (conclude's breakdown gate) does not scan it again."""
     ids: set[str] = set()
     if db is not None:
         try:
@@ -280,7 +298,7 @@ def union_campaign_member_ids(db, campaign_id: str, catalog_dir: Path | None) ->
     if catalog_dir is not None:
         from bathos.catalog import read_runs
 
-        for run in read_runs(catalog_dir):
+        for run in cool_runs if cool_runs is not None else read_runs(catalog_dir):
             if run.campaign_id == campaign_id:
                 ids.add(run.id)
     return sorted(ids)
@@ -498,6 +516,16 @@ def _add_run_to_campaign_impl(
     if not campaign_rows:
         raise CampaignError(f"Campaign not found: {campaign_id}")
     campaign_mode, campaign_started_at, campaign_threshold = campaign_rows[0]
+    # A catalog from before claim registration has no claim_path column: nothing is claim-bound.
+    try:
+        claim_row = db.execute(
+            "SELECT claim_path FROM campaigns WHERE id = ?", [campaign_id]
+        ).fetchone()
+    except (duckdb.BinderException, duckdb.CatalogException):
+        # DuckDB reports a missing column as a BinderException (a missing table as a
+        # CatalogException); any other error is a real failure and propagates.
+        claim_row = None
+    campaign_claim_path = claim_row[0] if claim_row else None
 
     run_rows = db.execute(
         "SELECT timestamp, outcome, sidecar_path FROM runs WHERE id = ?", [run_id]
@@ -511,6 +539,26 @@ def _add_run_to_campaign_impl(
             )
         raise CampaignError(f"Run not found: {run_id}")
     run_timestamp, run_outcome, run_sidecar_path = run_rows[0]
+
+    # Spec 261026 D3: a run entering a claim-bound campaign (claim_path IS NOT NULL) must have
+    # declared [breakdown] for the worst-case aggregates its verdict reads. Refused before
+    # `threshold_set` below so a refused add leaves no trace.
+    if campaign_claim_path:
+        from pathlib import Path as _Path  # `Path` is rebound locally further down this function
+
+        from bathos.breakdown_gate import check_runs, fetch_member_runs, refuse_on_findings
+        from bathos.workspace import resolve_workspace
+
+        gate_root = resolve_workspace(cwd or _Path.cwd()).fs_root
+        refuse_on_findings(
+            check_runs(
+                fetch_member_runs(db, [run_id], catalog_dir, log_mode=log_mode),
+                gate_root,
+                db=db,
+                log_mode=log_mode,
+            ),
+            f"Cannot add run {run_id[:8]} to claim-bound campaign {campaign_id[:8]}",
+        )
 
     # Enforce temporal ordering for confirmation campaigns
     if campaign_mode == "confirmation":
@@ -1220,12 +1268,43 @@ def _conclude_campaign_impl(
         # Parse the claim
         claim = parse_claim(abs_path)
 
-        members = union_campaign_member_ids(db, full_id, catalog_dir)
+        # One scan of the cool tier serves the membership union and the breakdown gate below.
+        from bathos.catalog import read_runs as _read_cool_runs
+
+        cool_runs = _read_cool_runs(catalog_dir) if catalog_dir is not None else None
+        members = union_campaign_member_ids(db, full_id, catalog_dir, cool_runs=cool_runs)
         if not members:
             raise CampaignError(
                 f"Cannot conclude campaign {full_id[:8]}: empty membership with a registered claim"
             )
         precomputed_member_ids = members
+
+        # Spec 261026 D3 breakdown gate: every claim-bound member's run-time sidecar must cover the
+        # worst-case aggregates its verdict reads. Confirmation/sequential campaigns RAISE (a
+        # deliberate departure from the downgrade-to-confounded style of the gates below, per the
+        # user's decision) and `force_verdict` does not bypass; exploration only warns. Placed
+        # before any outcome mutation and outside any `try`.
+        from bathos.breakdown_gate import (
+            check_near_bound,
+            check_runs,
+            fetch_member_runs,
+            format_findings,
+            refuse_on_findings,
+        )
+
+        gate_log_mode = _log_mode(catalog_dir)
+        gate_runs = fetch_member_runs(
+            db, members, catalog_dir, cool_runs=cool_runs, log_mode=gate_log_mode
+        )
+        gate_findings = check_runs(gate_runs, workspace_root, db=db, log_mode=gate_log_mode)
+        # D6: a near-bound member needs a discharged fork record that says it is cited
+        gate_findings += check_near_bound(gate_runs, workspace_root, db=db, log_mode=gate_log_mode)
+        if gate_findings:
+            gate_where = f"Cannot conclude claim-bound campaign {full_id[:8]}"
+            if campaign_mode == "exploration":
+                print(f"WARNING: {format_findings(gate_findings, gate_where)}")
+            else:
+                refuse_on_findings(gate_findings, gate_where)
 
         # BP-3: negative-claim backing check (opt-in via claim registration, same as Union Gate)
         if (
@@ -1782,8 +1861,13 @@ def list_campaigns(
     return campaigns
 
 
-def review_campaign(db, campaign_id: str, catalog_dir: Path | None = None) -> dict:
-    """Generate campaign review: residual rate, bypass rate, outcome distribution, anomalies, and POPPER summary."""
+def review_campaign(
+    db, campaign_id: str, catalog_dir: Path | None = None, workspace_root: Path | None = None
+) -> dict:
+    """Generate campaign review: residual rate, bypass rate, outcome distribution, anomalies, and POPPER summary.
+
+    With `workspace_root`, also lists the postmortem `[[amendments]]` of member runs (spec
+    261026 D5); they never change a recorded outcome."""
     try:
         campaign_id = _resolve_campaign_id(db, campaign_id, catalog_dir=catalog_dir)
     except CampaignError as e:
@@ -1938,7 +2022,23 @@ def review_campaign(db, campaign_id: str, catalog_dir: Path | None = None) -> di
         "popper": popper_data,
         "blast_radius_status": blast_radius_status,
         "claim_blast_radius_status": claim_blast_radius_status,
+        "amendments": _member_amendments(workspace_root, [r[0] for r in rows]),
+        "waivers": _member_waivers(db, workspace_root, [r[0] for r in rows], catalog_dir),
     }
+
+
+def _member_waivers(db, workspace_root, run_ids: list[str], catalog_dir) -> list[dict]:
+    from bathos.breakdown_gate import member_waivers
+
+    return member_waivers(db, run_ids, workspace_root, catalog_dir, _log_mode(catalog_dir))
+
+
+def _member_amendments(workspace_root: Path | None, run_ids: list[str]) -> list[dict]:
+    if workspace_root is None:
+        return []
+    from bathos.postmortem import amendments_by_run
+
+    return amendments_by_run(workspace_root, run_ids)
 
 
 def emit_campaign_report(

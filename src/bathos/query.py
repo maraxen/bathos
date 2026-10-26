@@ -345,6 +345,115 @@ def _warm_list_runs(
     return runs
 
 
+class AmbiguousRunId(Exception):  # noqa: N818 -- spec 261026 D5 name
+    """A run-id prefix matches more than one distinct run."""
+
+    def __init__(self, prefix: str, candidates: list[str]) -> None:
+        self.prefix = prefix
+        self.candidates = candidates
+        super().__init__(f"run id prefix {prefix!r} is ambiguous: matches {', '.join(candidates)}")
+
+
+def _escape_like(prefix: str) -> str:
+    return prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _backend_prefix_ids(catalog_dir: Path, prefix: str) -> list[str]:
+    """Full ids starting with `prefix` on the index or warm backend (literal prefix match)."""
+    try:
+        con = connect_read(catalog_dir)
+    except Exception:  # noqa: BLE001 -- no readable backend: only the cool tier can answer
+        return []
+    try:
+        rows = con.execute(
+            "SELECT id FROM runs WHERE id LIKE ? || '%' ESCAPE '\\'", [_escape_like(prefix)]
+        ).fetchall()
+    except duckdb.Error:
+        return []
+    finally:
+        con.close()
+    return [r[0] for r in rows]
+
+
+def lookup_run(
+    run_id: str,
+    catalog_dir: Path,
+    *,
+    cool_runs: list[Run] | None = None,
+    ingest_state: dict | None = None,
+) -> Run | None:
+    """Resolve a run by unique id prefix, or None (spec 261026 D5; the one helper behind
+    postmortem validation, the `near_bound` entity check, scaffold and conclude).
+
+    Candidate full ids are the union of the active backend (index or warm) and the cool
+    fragments, deduplicated (a compacted run is in both). More than one distinct id raises
+    `AmbiguousRunId`. Exactly one: the backend row wins when it exists; on a warm or cool
+    catalog a cool-only run is returned as the cool `Run` itself, tagged `cool_unindexed`. On
+    the index (log) backend there is no cool fallback (fresh runs write events only), so a miss
+    folds pending events once (`ingest_state` shares that one fold across a whole validation or
+    conclude) and retries. Where ingest is a no-op by design (SLURM, `BTH_NO_INGEST=1`) a
+    not-yet-ingested run stays unresolved and None comes back.
+
+    `cool_runs` lets a caller doing many lookups pass one pre-read list (one scan, not N).
+    """
+    if not run_id:
+        return None
+    backend = _resolve_backend(catalog_dir)
+
+    def candidates() -> tuple[list[str], dict[str, Run]]:
+        ids = set(_backend_prefix_ids(catalog_dir, run_id)) if backend != "cool" else set()
+        cool_by_id: dict[str, Run] = {}
+        if backend != "index":
+            pool = cool_runs if cool_runs is not None else read_runs(catalog_dir)
+            cool_by_id = {r.id: r for r in pool if r.id.startswith(run_id)}
+            ids |= set(cool_by_id)
+        return sorted(ids), cool_by_id
+
+    ids, cool_by_id = candidates()
+    if not ids and backend == "index" and _fold_once(catalog_dir, ingest_state):
+        ids, cool_by_id = candidates()
+    if not ids:
+        return None
+    if len(ids) > 1:
+        raise AmbiguousRunId(run_id, ids)
+    full = ids[0]
+    row: Run | None = None
+    if backend == "index":
+        row = _index_get_run(full, catalog_dir)
+    elif backend == "warm":
+        row = _warm_get_run(full, catalog_dir)
+    if row is not None:
+        return row
+    cool = cool_by_id.get(full)
+    if cool is None:
+        return None
+    try:
+        meta = json.loads(cool.metadata or "{}")
+    except (json.JSONDecodeError, TypeError):
+        meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
+    meta[_SOURCE_KEY] = COOL_UNINDEXED_SOURCE
+    tagged = copy.copy(cool)
+    tagged.metadata = json.dumps(meta)
+    return tagged
+
+
+def _fold_once(catalog_dir: Path, ingest_state: dict | None) -> bool:
+    """Fold pending log events into the index once per `ingest_state`. True if one ran now."""
+    if ingest_state is not None and ingest_state.get("done"):
+        return False
+    if ingest_state is not None:
+        ingest_state["done"] = True
+    from bathos.runlog.ingest import run_ingest
+
+    try:
+        return bool(run_ingest(catalog_dir, require_log_mode=False, lock_timeout_s=60.0).ran)
+    except Exception as e:  # noqa: BLE001 -- an ingest failure is a miss, not a crash
+        logger.warning("lookup_run: ingest failed: %s", e)
+        return False
+
+
 def _cool_get_run(run_id: str, catalog_dir: Path) -> Run | None:
     """Get a single run by ID using cool tier (PyArrow)."""
     runs = read_runs(catalog_dir)

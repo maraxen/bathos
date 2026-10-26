@@ -21,6 +21,7 @@ Public API:
 
 Contextvars (set by callers):
   run_uuid_var — set by runner.py at bth run start
+  run_advisories_var — set by mcp.py's `run` tool to collect runner advisories
   mcp_request_id_var — set by mcp.py per tool invocation
   task_id_var — read from $BTH_TASK_ID at init_telemetry()
 """
@@ -49,6 +50,11 @@ from pathlib import Path
 
 run_uuid_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "bathos.run_uuid", default=None
+)
+# Advisories a run raised (aggregate_uncovered, breakdown_incomplete, ...), collected for an
+# in-process caller that cannot see runner stderr (the MCP `run` tool). None = nobody collecting.
+run_advisories_var: contextvars.ContextVar[list[dict] | None] = contextvars.ContextVar(
+    "bathos.run_advisories", default=None
 )
 mcp_request_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "bathos.mcp_request_id", default=None

@@ -30,6 +30,7 @@ from bathos.authoring.models import ClaimPayload
 from bathos.blast_radius import _UNBOUNDED_SCAN_LIMIT
 from bathos.campaigns import (
     CAMPAIGN_MODES,
+    BreakdownRefused,
     CampaignError,
     add_run_to_campaign,
     conclude_campaign,
@@ -87,7 +88,7 @@ from bathos.sidecar import SidecarError
 from bathos.sync import sync_catalog
 
 # Telemetry imports
-from bathos.telemetry import event, mcp_request_id_var, run_uuid_var
+from bathos.telemetry import event, mcp_request_id_var, run_advisories_var, run_uuid_var
 from bathos.telemetry_bridge import init_server_telemetry
 
 app = FastMCP("bathos")
@@ -114,6 +115,27 @@ def _shape_error(tool_name: str, code: BathosErrorCode, exc: BaseException) -> d
         "error_code": code.value,
         "error": str(exc),
         "resolution_hint": RESOLUTION_HINTS.get(code, ""),
+    }
+
+
+def _review_workspace() -> Path | None:
+    """The live workspace root for postmortem amendments in a campaign review, or None."""
+    try:
+        from bathos.workspace import resolve_workspace
+
+        return resolve_workspace().fs_root
+    except Exception:  # noqa: BLE001 -- a review without amendments beats no review
+        return None
+
+
+def _breakdown_refusal_result(exc: BreakdownRefused) -> dict:
+    """Error envelope for a tool that catches `BreakdownRefused` itself: the specific code
+    (breakdown_missing / sidecar_unverifiable / fork_record_missing), never the generic one."""
+    return {
+        "ok": False,
+        "error": str(exc),
+        "error_code": exc.code.value,
+        "resolution_hint": RESOLUTION_HINTS.get(exc.code, ""),
     }
 
 
@@ -186,6 +208,8 @@ def traced_tool(fn):
             return _shape_error(tool_name, BathosErrorCode.INTERNAL, e)
         except CatalogError as e:
             return _shape_error(tool_name, BathosErrorCode.CATALOG_ERROR, e)
+        except BreakdownRefused as e:
+            return _shape_error(tool_name, e.code, e)
         except CampaignError as e:
             return _shape_error(tool_name, BathosErrorCode.CAMPAIGN_ERROR, e)
         except SidecarError as e:
@@ -1520,6 +1544,68 @@ def reap_tool(
     }
 
 
+@cisternal.tool(
+    registry="bathos-cli",
+    name="backfill_declarations",
+    cli_group="catalog",
+    cli_name="backfill-declarations",
+)
+def backfill_declarations_tool(
+    catalog_dir: str = "",
+    run_ids: str = "",
+    project: str = "",
+    apply: bool = False,
+    show: str = "backfillable",
+) -> dict:
+    """Backfill claim_discriminates/claim_isolates from a run's own pre-registered sidecar.
+
+    For runs recorded before #3717 with NULL claim fields. A field is filled only from
+    sidecar bytes (recorded path, a registered local root, or git history) whose sha256
+    equals the run's recorded sidecar_sha256, and only where the run's value is NULL.
+    Writes a run.declaration_backfilled event; log mode only. Dry run unless apply.
+
+    Args:
+        catalog_dir: Catalog directory (empty = use default)
+        run_ids: Comma-separated run IDs or unique prefixes (empty = all candidates)
+        project: Restrict to one project slug
+        apply: Emit the events (default False: report only)
+        show: Which candidates to list in detail: backfillable, all, or none
+
+    Returns:
+        Dict with per-status counts and the listed candidates
+    """
+    from bathos.backfill import BackfillError, backfill_declarations
+
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    ids = [x.strip() for x in run_ids.split(",") if x.strip()] or None
+    try:
+        candidates = backfill_declarations(
+            cat_dir, run_ids=ids, project=project or None, apply=apply
+        )
+    except BackfillError as e:
+        return {
+            "error": str(e),
+            "error_code": BathosErrorCode.INVALID_PARAM.value,
+            "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.INVALID_PARAM],
+        }
+
+    counts: dict[str, int] = {}
+    for c in candidates:
+        counts[c.status] = counts.get(c.status, 0) + 1
+    if show == "all":
+        listed = candidates
+    elif show == "none":
+        listed = []
+    else:
+        listed = [c for c in candidates if c.status == "backfillable"]
+    return {
+        "applied": apply,
+        "backfilled": counts.get("backfillable", 0) if apply else 0,
+        "counts": counts,
+        "candidates": [dataclasses.asdict(c) for c in listed],
+    }
+
+
 @cisternal.tool(registry="bathos-cli", name="check", cli_name="check")
 def check_tool(
     catalog_dir: str = "",
@@ -1958,22 +2044,30 @@ def run_tool(
     # this reset a failed call in the same context could report a prior call's ID.
     run_uuid_var.set(None)
 
+    # run_script runs in-process, so its stderr advisories never reach an MCP caller: collect
+    # them through run_advisories_var and return them as `warnings` (spec 261026 D2).
+    advisories: list[dict] = []
+    advisories_token = run_advisories_var.set(advisories)
+
     # Call run_script with new parameters
-    exit_code = run_script(
-        argv=argv,
-        project_slug=slug,
-        catalog_dir=cat_dir,
-        output_paths=output_paths,
-        tags=tags,
-        agent_mode=agent_mode or None,
-        no_sidecar=no_sidecar,
-        allow_stale=allow_stale,
-        derived_from=derived_from or None,
-        campaign_id=campaign_id or None,
-        component_id=component_id or None,
-        component_sidecar_sha256=component_sidecar_sha256 or None,
-        seed=seed,
-    )
+    try:
+        exit_code = run_script(
+            argv=argv,
+            project_slug=slug,
+            catalog_dir=cat_dir,
+            output_paths=output_paths,
+            tags=tags,
+            agent_mode=agent_mode or None,
+            no_sidecar=no_sidecar,
+            allow_stale=allow_stale,
+            derived_from=derived_from or None,
+            campaign_id=campaign_id or None,
+            component_id=component_id or None,
+            component_sidecar_sha256=component_sidecar_sha256 or None,
+            seed=seed,
+        )
+    finally:
+        run_advisories_var.reset(advisories_token)
 
     # run_script doesn't return the Run it creates (its return type is a plain
     # exit_code int, relied on elsewhere — cli.py's typer.Exit(exit_code) and 29
@@ -1987,6 +2081,7 @@ def run_tool(
         "run_id": run_id,
         "exit_code": exit_code,
         "success": exit_code == 0,
+        "warnings": advisories,
     }
     if interpreter_warning:
         response["warning"] = interpreter_warning
@@ -2219,7 +2314,9 @@ def campaign_review_tool(
 
     db = connect_catalog_db(cat_dir, read_only=True)
     try:
-        review = review_campaign(db, campaign_id, catalog_dir=cat_dir)
+        review = review_campaign(
+            db, campaign_id, catalog_dir=cat_dir, workspace_root=_review_workspace()
+        )
         return review
     finally:
         if db is not None:
@@ -2285,6 +2382,8 @@ def campaign_conclude_tool(
                 "campaign_id": campaign_id,
                 "outcome_label": outcome_label,
             }
+        except BreakdownRefused as e:
+            return _breakdown_refusal_result(e)
         except CampaignError as e:
             return {"error": str(e)}
         finally:
@@ -3127,6 +3226,29 @@ async def mcp_reap_tool(
     )
 
 
+@cisternal.tool(registry="bathos", name="backfill_declarations")
+@traced_tool
+@require_write_token
+async def mcp_backfill_declarations_tool(
+    catalog_dir: str = "",
+    run_ids: str = "",
+    project: str = "",
+    apply: bool = False,
+    show: str = "backfillable",
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
+) -> dict:
+    """Backfill a run's claim_discriminates/claim_isolates from its own sha-verified sidecar.
+
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
+    return backfill_declarations_tool(
+        catalog_dir=catalog_dir,
+        run_ids=run_ids,
+        project=project,
+        apply=apply,
+        show=show,
+    )
+
+
 @cisternal.tool(registry="bathos", name="check")
 @traced_tool
 async def mcp_check_tool(
@@ -3370,13 +3492,31 @@ def postmortem_scaffold_tool(
         pm_path = scaffold_campaign_postmortem_template(campaign.id, ws, open_ids)
         return {"path": str(pm_path), "campaign_id": campaign.id, "open_obligations": open_ids}
 
-    run_row = find_run_for_scaffold(run_id, cat_dir)
+    # Obligations are keyed by the FULL run id: resolve a prefix first (an ambiguous one is an
+    # error naming the candidates), then look up the command under the full id.
+    full_id = run_id
+    try:
+        from bathos.query import AmbiguousRunId, lookup_run
+
+        resolved = lookup_run(run_id, cat_dir)
+        if resolved is not None:
+            full_id = resolved.id
+    except AmbiguousRunId as e:
+        return {"error": str(e)}
+    except Exception:  # noqa: BLE001 -- an unreadable lookup keeps the id as given
+        pass
+    run_row = find_run_for_scaffold(full_id, cat_dir)
     if not run_row:
         return {"error": f"Run '{run_id}' not found"}
     command, _project_slug = run_row
 
-    postmortem_path = scaffold_postmortem_template(command, run_id, ws)
-    return {"path": str(postmortem_path), "run_id": run_id}
+    from bathos.obligations import list_obligations
+
+    open_ids = [o.obligation_id for o in list_obligations(ws) if o.entity_id == full_id]
+    postmortem_path = scaffold_postmortem_template(
+        command, full_id, ws, open_obligation_ids=open_ids
+    )
+    return {"path": str(postmortem_path), "run_id": full_id, "open_obligations": open_ids}
 
 
 @cisternal.tool(
@@ -3412,7 +3552,14 @@ def postmortem_validate_tool(
 
         ws = resolve_workspace().fs_root
 
-    result = validate_postmortem(pm, workspace_root=ws, strict_files=strict_files)
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    result = validate_postmortem(
+        pm,
+        workspace_root=ws,
+        strict_files=strict_files,
+        run_lookup=_postmortem_run_lookup(cat_dir),
+    )
+    warnings = list(result.warnings)
     if result.ok:
         if pm.run_id:
             # run.postmortem_applied (delivery step 2b / AC-25): behind the flag
@@ -3420,9 +3567,14 @@ def postmortem_validate_tool(
             # (the legacy fold still comes from compact.py re-reading the file).
             from bathos.runlog.emit import current_mode, emit_event, unit_of_work
 
-            cat_dir = _get_catalog_dir(catalog_dir or None)
             with unit_of_work(cat_dir):
                 if current_mode():
+                    # amendment_removed (spec 261026 D5, log mode only): an amendment an earlier
+                    # validation recorded that this file has dropped.
+                    from bathos.postmortem import removed_amendments
+
+                    dropped = removed_amendments(_previous_amendments(cat_dir, pm.run_id), pm)
+                    warnings += [f"amendment_removed: {item}" for item in dropped]
                     event_data = postmortem_applied_event_data(pm, pm_path)
                     # AC-17 finding: the legacy fold (compact.py's cwd walk)
                     # always stores `postmortem_path` workspace-RELATIVE
@@ -3439,13 +3591,72 @@ def postmortem_validate_tool(
                         data=event_data,
                         cwd=ws,
                     )
+        # Only a valid postmortem discharges, and the one place that does is here, so this one
+        # point covers both the CLI (`bth postmortem validate`) and MCP callers.
+        from bathos.obligations import discharge_validated
+
+        outcome = discharge_validated(ws, pm, pm_path, cat_dir)
         return {
             "validation_ok": True,
             "run_id": pm.run_id,
             "campaign_id": pm.campaign_id,
             "hypothesis_status": pm.hypothesis_status,
+            "warnings": warnings,
+            "discharged": outcome["discharged"],
+            "not_discharged": outcome["not_discharged"],
         }
-    return {"validation_ok": False, "errors": [e.message for e in result.errors]}
+    return {
+        "validation_ok": False,
+        "errors": [e.message for e in result.errors],
+        "warnings": warnings,
+    }
+
+
+def _postmortem_run_lookup(cat_dir: Path):
+    """`run_lookup` for postmortem validation: unique-prefix `query.lookup_run`, with ONE shared
+    ingest state and one cool-tier scan across the validation (spec 261026 D5)."""
+    from bathos.catalog import read_runs
+    from bathos.query import lookup_run
+
+    state: dict = {}
+    pool: list = []
+
+    def lookup(run_id: str):
+        if not pool:
+            try:
+                pool.append(read_runs(cat_dir))
+            except Exception:  # noqa: BLE001 -- an unreadable cool tier is a miss, not a crash
+                pool.append([])
+        return lookup_run(run_id, cat_dir, cool_runs=pool[0], ingest_state=state)
+
+    return lookup
+
+
+def _previous_amendments(cat_dir: Path, run_id: str) -> list[dict]:
+    """Amendments recorded by the latest `run.postmortem_applied` event for `run_id` ([] if none
+    or unreadable): the baseline `amendment_removed` is measured against."""
+    from bathos.runlog.index import connect_read
+    from bathos.runlog.ingest import _fetch_events_by_entity_key
+
+    try:
+        db = connect_read(cat_dir)
+    except Exception:  # noqa: BLE001 -- no readable index: nothing to compare against
+        return []
+    try:
+        events = [
+            e
+            for e in _fetch_events_by_entity_key(db, [run_id])
+            if e.get("kind") == "run.postmortem_applied"
+        ]
+    except Exception:  # noqa: BLE001
+        return []
+    finally:
+        db.close()
+    if not events:
+        return []
+    latest = max(events, key=lambda e: (e.get("ts", ""), e.get("eid", "")))
+    recorded = (latest.get("data") or {}).get("amendments")
+    return [a for a in recorded if isinstance(a, dict)] if isinstance(recorded, list) else []
 
 
 @cisternal.tool(registry="bathos-cli", name="postmortem_get", cli_group="postmortem", cli_name="show")
@@ -3485,40 +3696,44 @@ def postmortem_get_tool(
     # -- a campaign has no single git hash or dirty flag to compare against.
     run_obj = None
     if run_id:
-        cat_dir = _get_catalog_dir(None)
-        db_path = cat_dir / "bathos.db"
-        if db_path.exists():
-            from bathos.schema import Run
+        # `query.lookup_run`: unique-prefix resolution across the active backend and the cool
+        # fragments, so a prefix run id (as scaffolds and the docs use) is drift-checked too.
+        from bathos.query import AmbiguousRunId, lookup_run
 
-            con = connect_read(cat_dir)
-            try:
-                arrow_tbl = con.execute("SELECT * FROM runs WHERE id = ?", [run_id]).arrow()
-                if arrow_tbl.num_rows > 0:
-                    run_obj = Run.from_arrow_row(arrow_tbl.to_pydict(), 0)
-            except Exception:
-                pass
-            finally:
-                con.close()
-        if not run_obj:
-            from bathos.catalog import read_runs
-
-            for r in read_runs(cat_dir):
-                if r.id == run_id:
-                    run_obj = r
-                    break
+        try:
+            run_obj = lookup_run(run_id, _get_catalog_dir(None))
+        except AmbiguousRunId as e:
+            return {"error": str(e)}
+        except Exception:  # noqa: BLE001 -- an unreadable catalog skips the drift check
+            run_obj = None
 
     validation = validate_postmortem(
-        pm, workspace_root=ws, run=run_obj, strict_files=strict_files
+        pm,
+        workspace_root=ws,
+        run=run_obj,
+        strict_files=strict_files,
+        run_lookup=_postmortem_run_lookup(_get_catalog_dir(None)),
     )
+    # Amendments render from the file whether or not validation passes (drift included), under a
+    # banner saying they never change the recorded outcome (spec 261026 D5).
+    from bathos.postmortem import AMENDMENTS_BANNER, amendments_as_dicts
+
+    amendment_fields = {
+        "format": pm.format,
+        "amendments": amendments_as_dicts(pm),
+        "amendments_banner": AMENDMENTS_BANNER if pm.amendments else None,
+        "warnings": list(validation.warnings),
+    }
     if not validation.ok:
         return {
             "error": "Validation failed: " + "; ".join(e.message for e in validation.errors),
             "hypothesis_status": pm.hypothesis_status,
             "verdict_override": pm.verdict_override,
+            **amendment_fields,
         }
 
-    # Read-only: run.postmortem_applied is emitted by postmortem validate/register
-    # (spec BC-2), never by a read.
+    # Never emits run events (run.postmortem_applied comes from postmortem validate/register,
+    # spec BC-2); it may fold pending log events into the derived index while resolving ids.
     return {
         "run_id": pm.run_id,
         "campaign_id": pm.campaign_id,
@@ -3536,6 +3751,7 @@ def postmortem_get_tool(
         "discharges": pm.discharges,
         "violated_cards": pm.violated_cards,
         "path": str(pm_file),
+        **amendment_fields,
     }
 
 
@@ -3783,6 +3999,8 @@ def _claim_register_sync(
                 "force": force,
                 "message": f"Registered claim for campaign {campaign_id}",
             }
+        except BreakdownRefused as e:
+            return _breakdown_refusal_result(e)
         except (RuntimeError, FileNotFoundError) as e:
             return {"ok": False, "error": str(e), "error_code": "register_failed"}
         finally:
@@ -4940,6 +5158,8 @@ def campaign_add_tool(
                 "campaign_id": campaign_id,
                 "message": f"Added run {run_id} to campaign {campaign_id}",
             }
+        except BreakdownRefused as e:
+            return _breakdown_refusal_result(e)
         except CampaignError as e:
             return {"ok": False, "error": str(e)}
         finally:
@@ -5752,6 +5972,7 @@ _WIRED = cisternal.wire(
         "archive_artifact",
         "restore",
         "reap",
+        "backfill_declarations",
         "blast_radius_assess",
         "blast_radius_clear",
         "get_blast_radius_status",

@@ -105,6 +105,7 @@ _RUN_KINDS = frozenset(
         "run.outputs_hashed",
         "run.outputs_adopt_retracted",
         "run.postmortem_applied",
+        "run.declaration_backfilled",
         "run.imported",
         "run_reap.imported",
     }

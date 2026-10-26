@@ -9,6 +9,7 @@ build-order step 2 can carry a `[review]` block.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import duckdb
@@ -106,6 +107,8 @@ def _campaign(tmp_path: Path, sidecar_body: str, enforce_cfg: bool | None):
         status="completed",
         exit_code=0,
         sidecar_path=str(sidecar),
+        # a real run records its sidecar's sha; the claim-bound breakdown gate needs it
+        sidecar_sha256=hashlib.sha256(sidecar.read_bytes()).hexdigest(),
         outcome="pass",
     )
     write_run(run, catalog_dir)

@@ -7,6 +7,7 @@ fires on every pre-existing entity is a retroactive verdict change, not a gate.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import duckdb
@@ -14,7 +15,13 @@ import pytest
 
 from bathos.catalog import init_catalog, write_run
 from bathos.compact import compact
-from bathos.obligations import TRIGGERS, WIRED_TRIGGERS, list_obligations, trigger_enabled
+from bathos.obligations import (
+    DEFAULT_ON,
+    TRIGGERS,
+    WIRED_TRIGGERS,
+    list_obligations,
+    trigger_enabled,
+)
 from bathos.schema import Run
 from bathos.sidecar import (
     OutcomeSpec,
@@ -92,13 +99,13 @@ def test_no_sidecar_is_not_a_failure():
 # triggers), so these would silently stop testing what they claim to.
 
 
-def test_every_trigger_defaults_off(monkeypatch, tmp_path):
-    for trig in TRIGGERS:
+def test_every_non_default_on_trigger_defaults_off(monkeypatch, tmp_path):
+    for trig in TRIGGERS - DEFAULT_ON:
         monkeypatch.delenv(f"BTH_OBLIGATION_{trig.upper()}", raising=False)
         assert trigger_enabled(trig, tmp_path) is False
 
 
-@pytest.mark.parametrize("trig", sorted(TRIGGERS))
+@pytest.mark.parametrize("trig", sorted(TRIGGERS - DEFAULT_ON))
 def test_each_flag_enables_only_its_own_trigger(monkeypatch, tmp_path, trig):
     """Independently toggleable: the four differ sharply in blast radius, so enabling the
     safest must not enable the widest."""
@@ -107,7 +114,7 @@ def test_each_flag_enables_only_its_own_trigger(monkeypatch, tmp_path, trig):
     monkeypatch.setenv(f"BTH_OBLIGATION_{trig.upper()}", "1")
 
     assert trigger_enabled(trig, tmp_path) is True
-    assert [t for t in TRIGGERS if trigger_enabled(t, tmp_path)] == [trig]
+    assert [t for t in TRIGGERS - DEFAULT_ON if trigger_enabled(t, tmp_path)] == [trig]
 
 
 def test_unknown_trigger_is_never_enabled(monkeypatch):
@@ -353,6 +360,8 @@ def _campaign_with_contradicted_citation(tmp_path: Path):
         status="completed",
         exit_code=0,
         sidecar_path=str(sidecar),
+        # a real run records the sha of the sidecar it ran under; the breakdown gate needs it
+        sidecar_sha256=hashlib.sha256(sidecar.read_bytes()).hexdigest(),
         outcome="fail",
     )
     write_run(run, catalog_dir)

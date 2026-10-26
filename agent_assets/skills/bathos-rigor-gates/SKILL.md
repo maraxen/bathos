@@ -93,7 +93,7 @@ Off (default): warns, verdict unchanged. On: forces `outcome_label` to `confound
 
 ## Post-mortem Obligations
 
-Four triggers, each independently opt-in, each writing one JSON file to
+Five triggers, four opt-in and `near_bound` default ON, each writing one JSON file to
 `.bth/obligations/<kind>_<entity_id>_<trigger>.json`:
 
 | Trigger | Fires when | Flag |
@@ -102,8 +102,9 @@ Four triggers, each independently opt-in, each writing one JSON file to
 | `adversarial_check_fired` | the selected branch's `adversarial_check` evaluates FALSE | `BTH_OBLIGATION_ADVERSARIAL_CHECK_FIRED` |
 | `campaign_confounded` | a campaign concluded `confounded` | `BTH_OBLIGATION_CAMPAIGN_CONFOUNDED` |
 | `citation_contradicted` | a `[[review.literature]]` entry with `disposition = "supports"` cites a hypothesis the observed outcome disfavors | `BTH_OBLIGATION_CITATION_CONTRADICTED` |
+| `near_bound` | a clean run's `[breakdown]` aggregate sits at its `bound` (one of >=2 units over, or within `margin`); **default ON**, set `=0` / `near_bound = false` to opt out; discharged by a format-2 postmortem `[fork]`, see **using-bathos** (Distributional Breakdown) | `BTH_OBLIGATION_NEAR_BOUND` |
 
-Resolution order: env var → `.bth.toml [obligations] <trigger>` → off. Opening is idempotent per
+Resolution order: env var → `.bth.toml [obligations] <trigger>` → off (on for `near_bound`). Opening is idempotent per
 `(entity_kind, entity_id, trigger)`. `outcome_failed`/`adversarial_check_fired` open at `bth run`
 end; `campaign_confounded`/`citation_contradicted` open at `bth campaign conclude`.
 
@@ -207,7 +208,7 @@ registration — a campaign with no claim never hits this regardless of outcome 
 
 ## Rule-Card Corpus (`bth ref`)
 
-18 shipped rule cards (`agent_assets/corpus/<domain>/<ID>_<slug>.md`), independently citable by id:
+20 shipped rule cards (`agent_assets/corpus/<domain>/<ID>_<slug>.md`), independently citable by id:
 
 ```bash
 bth ref list                          # every card, one line each, severity + title
