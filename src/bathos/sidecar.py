@@ -842,7 +842,7 @@ def _parse_breakdown(raw, path: Path) -> BreakdownBlock:
     return BreakdownBlock(
         unit=str(raw.get("unit", "")),
         artifact=None if artifact is None else str(artifact),
-        waive=None if waive is None else str(waive),
+        waive=None if waive is None else str(waive).strip(),
         aggregates=aggregates,
         stray_aggregate_keys=tuple(stray),
     )

@@ -52,6 +52,9 @@ class Amendment:
     outlier_units: list[str] = field(default_factory=list)
     effect: str = ""
     note: str = ""
+    #: shape problems found while parsing (e.g. `outlier_units` not a list of strings), reported
+    #: as validation errors rather than guessed around
+    shape_errors: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -143,17 +146,29 @@ def _parse_amendments(data: dict) -> list[Amendment]:
     raw = data.get("amendments", [])
     if not isinstance(raw, list) or not all(isinstance(e, dict) for e in raw):
         raise ValueError("amendments must be an array of tables ([[amendments]])")
-    return [
-        Amendment(
-            analysis_run_id=str(e.get("analysis_run_id", "") or ""),
-            amends_run_id=str(e.get("amends_run_id", "") or ""),
-            kind=str(e.get("kind", "") or ""),
-            outlier_units=[str(u) for u in (e.get("outlier_units", []) or [])],
-            effect=str(e.get("effect", "") or ""),
-            note=str(e.get("note", "") or ""),
+    amendments = []
+    for e in raw:
+        units_raw = e.get("outlier_units", [])
+        shape_errors: list[str] = []
+        units: list[str] = []
+        if units_raw in (None, []):
+            pass
+        elif isinstance(units_raw, list) and all(isinstance(u, str) for u in units_raw):
+            units = list(units_raw)
+        else:
+            shape_errors.append("outlier_units must be a list of strings")
+        amendments.append(
+            Amendment(
+                analysis_run_id=str(e.get("analysis_run_id", "") or ""),
+                amends_run_id=str(e.get("amends_run_id", "") or ""),
+                kind=str(e.get("kind", "") or ""),
+                outlier_units=units,
+                effect=str(e.get("effect", "") or ""),
+                note=str(e.get("note", "") or ""),
+                shape_errors=shape_errors,
+            )
         )
-        for e in raw
-    ]
+    return amendments
 
 
 def parse_postmortem(path: Path) -> Postmortem:
@@ -483,13 +498,15 @@ def _validate_amendments(
     skipped = False
     for i, a in enumerate(postmortem.amendments):
         where = f"amendments[{i}]"
+        for problem in a.shape_errors:
+            err(f"{where}: {problem}")
         if not a.analysis_run_id:
             err(f"{where}: analysis_run_id is required")
         if a.kind not in AMENDMENT_KINDS:
             err(f"{where}: kind {a.kind!r} is not one of {list(AMENDMENT_KINDS)}")
         if a.effect not in AMENDMENT_EFFECTS:
             err(f"{where}: effect {a.effect!r} is not one of {list(AMENDMENT_EFFECTS)}")
-        if a.kind == "distributional_outlier" and not a.outlier_units:
+        if a.kind == "distributional_outlier" and not a.outlier_units and not a.shape_errors:
             err(f"{where}: a distributional_outlier amendment must name outlier_units")
         if a.effect == "verdict_changed" and postmortem.verdict_override in ("", "none"):
             err(f"{where}: effect verdict_changed requires a verdict_override other than none")

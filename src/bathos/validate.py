@@ -566,6 +566,8 @@ def validate_breakdown_block(sidecar: Sidecar) -> tuple[list[ValidationError], l
             errors.append(
                 ValidationError(f"breakdown.aggregates.{col}", f"unknown key {stray!r}{hint}")
             )
+        if block.waive is not None and not block.waive:
+            errors.append(ValidationError("breakdown.waive", "waive reason must not be blank"))
         if not block.aggregates and not block.waive:
             errors.append(
                 ValidationError(
