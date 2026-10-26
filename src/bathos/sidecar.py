@@ -1727,6 +1727,56 @@ def uncovered_aggregate_message(u: UncoveredAggregate) -> str:
     )
 
 
+@dataclass(frozen=True)
+class NearBound:
+    """One aggregate whose result sits at its declared bound (spec 261026 D6)."""
+
+    column: str
+    kind: str  # "single_unit" | "margin"
+    detail: str
+
+
+def _finite_number(value) -> float | None:
+    """`value` as a finite float, or None (missing, None, bool, str, NaN, inf = unevaluated)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if math.isfinite(value) else None
+
+
+def near_bound(sidecar: Sidecar, results: dict) -> list[NearBound]:
+    """Aggregates whose result is near the declared `bound` (spec 261026 D6). Pure.
+
+    For each expanded `[breakdown]` aggregate with a `bound`:
+    - **single_unit** (parameter-free): `__n_over == 1` with `__n_units >= 2`. With one unit,
+      "one unit over" carries no distributional information.
+    - **margin**: `|value - bound| <= margin`, the band symmetric (just under is as fragile as
+      just over). The default margin when `bound != 0` is `0.10 * |bound|` -- **an arbitrary
+      10 %**, chosen so the check is never off; a false positive costs one fork record, never a
+      block. `bound = 0` with no explicit margin is a validation error and never fires here.
+    A missing, None, NaN or non-numeric value is "unevaluated", never near-bound.
+    """
+    hits: list[NearBound] = []
+    expanded, _ = expand_breakdown_aggregates(sidecar)
+    for col, agg in expanded.items():
+        if agg.bound is None:
+            continue
+        n_over = _finite_number(results.get(f"{col}__n_over"))
+        n_units = _finite_number(results.get(f"{col}__n_units"))
+        if n_over == 1 and n_units is not None and n_units >= 2:
+            hits.append(
+                NearBound(col, "single_unit", f"1 of {int(n_units)} units is over {agg.bound:g}")
+            )
+        value = _finite_number(results.get(col))
+        margin = agg.margin if agg.margin is not None else 0.10 * abs(agg.bound)
+        if value is not None and margin > 0 and abs(value - agg.bound) <= margin:
+            hits.append(
+                NearBound(
+                    col, "margin", f"{value:g} is within {margin:g} of the bound {agg.bound:g}"
+                )
+            )
+    return hits
+
+
 def find_sidecar(script_path: Path) -> Path | None:
     """Return the .bth.toml adjacent to script_path, or None if absent."""
     candidate = script_path.parent / f"{script_path.stem}.bth.toml"

@@ -32,6 +32,7 @@ AMENDMENTS_BANNER = (
     "Amendments record later evidence about a verdict. They do not change the run's recorded "
     "outcome; only verdict_override does."
 )
+FORK_CHOICES = ("stop", "extend", "replicate", "breakdown", "escalate")
 AMENDMENT_KINDS = ("distributional_outlier", "reanalysis", "correction")
 AMENDMENT_EFFECTS = ("verdict_unchanged", "verdict_contextualized", "verdict_changed")
 
@@ -402,6 +403,7 @@ def validate_postmortem(
 
     if postmortem.format == 2:
         _validate_amendments(postmortem, run_lookup, errors, warnings, postmortem_path)
+    _validate_fork(postmortem, errors, postmortem_path)
 
     ok = len(errors) == 0
     if ok and postmortem_path:
@@ -412,6 +414,35 @@ def validate_postmortem(
             sprint_id=None,
         )
     return ValidationResult(ok=ok, errors=errors, warnings=warnings)
+
+
+def _validate_fork(
+    postmortem: Postmortem, errors: list[ValidationError], postmortem_path: Path | None
+) -> None:
+    """Fork checks for a postmortem that discharges a `near_bound` obligation (spec 261026 D6).
+    Run-independent: they read only `pm.fork` and `pm.discharges`, so they fire with no run."""
+    if not any(oid.endswith("_near_bound") for oid in postmortem.discharges):
+        return
+
+    def err(message: str) -> None:
+        errors.append(ValidationError(message))
+        if postmortem_path:
+            event("postmortem.validate_error", path=str(postmortem_path), reason=message)
+
+    if postmortem.format != 2:
+        err("a near_bound obligation can only be discharged by a postmortem with format = 2")
+        return
+    fork = postmortem.fork
+    if not fork:
+        err("discharging near_bound requires a [fork] record (choice, reason, cited)")
+        return
+    choice = str(fork.get("choice", "") or "")
+    if choice not in FORK_CHOICES:
+        err(f"[fork] choice {choice!r} is not one of {list(FORK_CHOICES)}")
+    if not str(fork.get("reason", "") or "").strip():
+        err("[fork] reason must not be empty")
+    if choice == "stop" and fork.get("cited") is True:
+        err("[fork] choice = stop cannot have cited = true: a cited result needs a follow-up")
 
 
 def _validate_amendments(
@@ -543,17 +574,10 @@ def scaffold_campaign_postmortem_template(
     pm_dir.mkdir(parents=True, exist_ok=True)
     postmortem_path = pm_dir / f"campaign_{campaign_id}.bth.postmortem.toml"
 
-    if open_obligation_ids:
-        checklist = "\n".join(f"#   {oid}" for oid in open_obligation_ids)
-        obligation_block = (
-            "# Open obligations for this campaign and its member runs. Copy the ids this\n"
-            "# write-up actually explains into `discharges` above — a valid postmortem\n"
-            "# discharges exactly what it names, and nothing else.\n" + checklist + "\n"
-        )
-    else:
-        obligation_block = "# No open obligations recorded for this campaign.\n"
+    obligation_block = _obligation_checklist(open_obligation_ids, "campaign and its member runs")
 
     toml_content = f"""campaign_id = "{campaign_id}"
+format = 2
 
 [postmortem]
 hypothesis_status = "unassigned"
@@ -567,6 +591,7 @@ status = "draft"
 discharges = []
 violated_cards = []
 
+{_FORK_SCAFFOLD}
 {obligation_block}
 [asset_links]
 """
@@ -642,7 +667,33 @@ def _script_from_command(command: str, workspace_root: Path) -> Path | None:
     return None
 
 
-def scaffold_postmortem_template(command: str, run_id: str, workspace_root: Path) -> Path:
+_FORK_SCAFFOLD = """[fork]
+# What was decided after a near-bound result, and why. Required to discharge a near_bound
+# obligation. choice: stop | extend | replicate | breakdown | escalate
+choice = ""
+reason = ""
+cited = false
+follow_up_run_ids = []
+"""
+
+
+def _obligation_checklist(open_obligation_ids, scope: str) -> str:
+    if open_obligation_ids:
+        checklist = "\n".join(f"#   {oid}" for oid in open_obligation_ids)
+        return (
+            f"# Open obligations for this {scope}. Copy the ids this write-up actually explains\n"
+            "# into `discharges` above: a valid postmortem discharges exactly what it names,\n"
+            "# and nothing else.\n" + checklist + "\n"
+        )
+    return f"# No open obligations recorded for this {scope}.\n"
+
+
+def scaffold_postmortem_template(
+    command: str,
+    run_id: str,
+    workspace_root: Path,
+    open_obligation_ids: list[str] | tuple[str, ...] = (),
+) -> Path:
     """Resolve the script path from a run's command string and write a draft postmortem TOML.
 
     Shared by the CLI (`bth postmortem scaffold`) and the MCP tool
@@ -661,6 +712,7 @@ def scaffold_postmortem_template(command: str, run_id: str, workspace_root: Path
         postmortem_path = script_path.parent / f"{script_path.name}.{run_id}.bth.postmortem.toml"
 
     toml_content = f"""run_id = "{run_id}"
+format = 2
 
 [postmortem]
 hypothesis_status = "unassigned"
@@ -671,7 +723,10 @@ verdict_override = "none"
 next_steps = ""
 author = ""
 status = "draft"
+discharges = []
 
+{_FORK_SCAFFOLD}
+{_obligation_checklist(open_obligation_ids, "run")}
 [asset_links]
 """
     postmortem_path.write_text(toml_content)

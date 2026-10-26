@@ -62,16 +62,17 @@ def resolve_flag(
     section: str,
     key: str,
     workspace_root: Path | str | None = None,
+    default: bool = False,
 ) -> bool:
-    """Resolve a boolean gate: env var (both directions) → `.bth.toml [section] key` → False.
+    """Resolve a boolean gate: env var (both directions) → `.bth.toml [section] key` → `default`.
 
     Single implementation so the obligation triggers and the review-coverage gate cannot
     drift apart on the subtle half (the tri-state env read above).
 
     The config file is the durable home for these settings: a SLURM job reads the same
     `.bth.toml`, whereas a shell-only export is honoured locally and silently skipped on the
-    cluster. A malformed or missing config resolves to False — the safe direction for a gate
-    that changes verdicts or writes ledger entries — rather than raising mid-run.
+    cluster. A malformed or missing config resolves to `default` (False unless a caller opts a
+    gate in by default, as the `near_bound` obligation does) rather than raising mid-run.
     """
     override = env_override(env_name)
     if override is not None:
@@ -79,10 +80,10 @@ def resolve_flag(
     try:
         cfg_path = find_project_config(Path(workspace_root) if workspace_root else None)
         if cfg_path is None:
-            return False
-        return bool(getattr(load_project_config(cfg_path), section, {}).get(key, False))
+            return default
+        return bool(getattr(load_project_config(cfg_path), section, {}).get(key, default))
     except Exception:
-        return False
+        return default
 
 
 def find_project_config(start: Path | None = None) -> Path | None:

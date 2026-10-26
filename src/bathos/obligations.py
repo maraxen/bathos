@@ -11,14 +11,16 @@ conclude and warns at submit. Nothing to bypass means the bypass metrics stay ho
 fragile script-stem key never sits behind anything binding.
 
 **What is wired, and what is not — read this before relying on it.** All four §5 triggers
-have live call sites, each behind its **own** opt-in environment flag, and every flag
-defaults OFF (see `WIRED_TRIGGERS` and `_FLAG_PREFIX`):
+have live call sites, each behind its **own** flag, and every flag defaults OFF except
+`near_bound` (see `DEFAULT_ON`, `WIRED_TRIGGERS` and `_FLAG_PREFIX`):
 
 - `outcome_failed` and `adversarial_check_fired` — `runner.run_script`, at run end.
 - `campaign_confounded` and `citation_contradicted` — `campaigns.conclude_campaign`.
+- `near_bound` — `runner.run_script` at run end, default ON (spec 261026 D6); it fires only for
+  a sidecar that declares a `[breakdown]` `bound`.
 
-With every flag unset — the default — nothing calls `open_obligation` automatically, so the
-ledger stays empty and no verdict or exit code changes anywhere. That is the same posture the
+With every flag unset — the default, `near_bound` aside — nothing calls `open_obligation`
+automatically, so the ledger stays empty and no verdict or exit code changes anywhere. That is the same posture the
 Review Coverage Gate ships in, and for the same reason: auto-opening obligations changes
 behaviour on every run, and enabling it wholesale would retroactively burden every existing
 script, which is the failure §7's sequencing constraint exists to prevent.
@@ -50,10 +52,17 @@ TRIGGERS = frozenset(
         "campaign_confounded",  # (2) a campaign concluded confounded / was downgraded
         "adversarial_check_fired",  # (3) the selected branch's stricter bar evaluated FALSE
         "citation_contradicted",  # (4) a [review] 'supports' entry the outcome contradicted
+        "near_bound",  # (5) a run's worst-case aggregate sits at its declared bound (spec 261026 D6)
     }
 )
 
-#: Triggers with a live call site — now all four.
+#: Triggers that are ON unless switched off (env `BTH_OBLIGATION_<T>=0` or `[obligations] <t> =
+#: false`). The ledger's default-OFF posture exists so enabling a trigger cannot retroactively
+#: burden existing scripts; `near_bound` fires only for sidecars that declare the new
+#: `[breakdown]` `bound`, so no existing script is touched and default-ON is safe.
+DEFAULT_ON = frozenset({"near_bound"})
+
+#: Triggers with a live call site — all of them.
 #:
 #: Trigger 3's **polarity is settled**: `adversarial_check` is a *stricter conjunct* the
 #: outcome must also clear, so it FIRES when it evaluates FALSE. See
@@ -86,13 +95,20 @@ def trigger_enabled(trigger: str, workspace_root: Path | str | None = None) -> b
 
     Resolution order: `BTH_OBLIGATION_<TRIGGER>` env var wins in **both** directions, then
     `[obligations] <trigger>` in `.bth.toml`, then off — see :func:`config.resolve_flag`,
-    which is shared with the review-coverage gate so the two cannot drift.
+    which is shared with the review-coverage gate so the two cannot drift. A trigger in
+    `DEFAULT_ON` resolves True where neither env nor config says anything.
     """
     if trigger not in TRIGGERS:
         return False
     from bathos.config import resolve_flag
 
-    return resolve_flag(f"{_FLAG_PREFIX}{trigger.upper()}", "obligations", trigger, workspace_root)
+    return resolve_flag(
+        f"{_FLAG_PREFIX}{trigger.upper()}",
+        "obligations",
+        trigger,
+        workspace_root,
+        default=trigger in DEFAULT_ON,
+    )
 
 
 def enforcement_enabled(workspace_root: Path | str | None = None) -> bool:

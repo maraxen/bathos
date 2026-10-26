@@ -1733,6 +1733,31 @@ def _run_script_impl(
         except Exception as e:
             event("run.error", phase="obligation", exc_type=type(e).__name__, exc_msg=str(e))
 
+    # Spec 261026 D6: a clean run whose worst-case aggregate sits at its bound opens a `near_bound`
+    # obligation (default ON; env / .bth.toml opt out the advisory and the open, never the
+    # claim-bound conclude check, which recomputes). Outside the exploratory guard above, so
+    # observation runs open one too. Never fatal, like every obligation open.
+    if sidecar is not None and sidecar.breakdown is not None and exit_code == 0:
+        try:
+            from bathos.obligations import maybe_open, trigger_enabled
+            from bathos.sidecar import near_bound
+            from bathos.workspace import resolve_workspace
+
+            nb_root = resolve_workspace(cwd).fs_root
+            if trigger_enabled("near_bound", nb_root):
+                hits = near_bound(sidecar, _parse_result_dict(metadata))
+                if hits:
+                    detail = "; ".join(f"{h.column}: {h.detail} ({h.kind})" for h in hits)
+                    ob = maybe_open(nb_root, "run", run.id, "near_bound", detail=detail)
+                    _advise(
+                        "near_bound",
+                        f"near_bound: result sits at its declared bound: {detail}. Record what was decided: "
+                        "bth postmortem scaffold, fill [fork], then bth postmortem validate",
+                        obligation_id=ob.obligation_id if ob else f"run_{run.id}_near_bound",
+                    )
+        except Exception as e:
+            event("run.error", phase="near_bound", exc_type=type(e).__name__, exc_msg=str(e))
+
     if current_mode():
         # run.outputs_hashed (new at run end, flag-on only -- legacy leaves
         # output_metadata to be recomputed at compact, so there is no legacy
