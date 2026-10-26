@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`bth run` keeps its provenance out of the working tree (debt #3049; spec `261026_provenance-out-of-working-tree`).** The per-run sidecar lock is now a commit under `refs/bathos/locks/<run_id>` in the sidecar's repo (HEAD's tree plus the lock at its G19 path, built with a temporary index, read back by sha256), and `run.manifest_path` holds a `git:<common-dir>#refs/bathos/locks/<run_id>:<relpath>` URI instead of a file path. `verify_run_manifest` (new `verify_run_manifest_detail` returns the reason) and blast-radius manifest-text matching read all three forms: a `git:` URI, a plain path, and a missing path whose lock ref still holds the blob. When no ref can be written (no repo, a sentinel git hash, a sidecar outside the repo, a failed write) the lock goes to `<lock_dir>/<project_slug>/<run_id>.bth.lock.toml` (default `<catalog_dir>/locks`), never beside the sidecar, and `run.lock_written` records `ref_error`. `lock_location`, `lock_dir` and `ignore_outputs` resolve argument, `BTH_LOCK_LOCATION`/`BTH_LOCK_DIR`/`BTH_IGNORE_OUTPUTS`, `cwd/.bth.toml [provenance]`, `[tool.bathos.provenance]`, `~/.bth/config.toml [provenance]`, default, and a malformed file or invalid value fails loudly (`BTH_LOCK_DIR=none` disables the fallback directory). `lock_location = "tree"` restores the old in-tree file. Each run now adds only the missing lines of `/.bth/refs/manifest.jsonl`, `/.bth/refs/.manifest.lock`, `/.bth/log/` and `/outputs/provenance/` to `.git/info/exclude` (the old early return skipped the rest whenever the manifest was already ignored), in the script's repo and in cwd's, and warns once per path it cannot ignore. `bth init` puts `outputs/` in the `.gitignore` of new projects; existing projects opt in with `ignore_outputs = true`. **Portability trade-off:** a lock in a ref is not a file in the working tree, so it no longer travels with commits, `bth sync` or myxcel rsync; `bth lock push`/`fetch` move the refs and `bth lock materialize` writes the identical file at its G19 path for the owner to commit.
+
+### Added
+
+- **`bth lock` command group (and MCP tools `lock_materialize`, `lock_relocate`, `lock_untrack`, `lock_push`, `lock_fetch`).** Dry-run unless `--apply`, idempotent, refusing a dirty index when they would stage; the MCP forms require `project_root` and a write token. `materialize --run-id X` writes a ref's lock byte-identically at its G19 path. `relocate` classifies in-tree locks (tracked: "keep (committed evidence)"; untracked and matching a catalog run: "safe to delete") and gives each a ref, and never deletes. `untrack` is `git rm --cached` for a tracked `manifest.jsonl`/`.manifest.lock` only, never touches the on-disk file, re-runs the ignores, and prints the G31 and merge-conflict consequences. `push`/`fetch` use the explicit refspec `refs/bathos/locks/*`. New error codes `lock_ref_write_failed`, `lock_not_found`, `index_dirty`. `bth run` warns once per process when it finds a tracked manifest or untracked in-tree locks.
+
+#### Per-repo outcome on upgrade
+
+| Repos | Outcome |
+|---|---|
+| praxia | New lock files stop appearing. The **tracked manifest keeps dirtying every run** until `bth lock untrack` plus a commit, and untrack costs G31 history. Full relief needs praxia-side work (G31 accepting clean-run proof from something other than a per-worktree file; handoff `261026_provenance-praxia-g31-handoff`, tracked as praxia debt #3062, **blocking** praxia's relief). G19/G31 evidence runs still need `materialize` plus a commit. |
+| protamer, asr, plegadx, tev_design | New lock files stop appearing (where any were written). The tracked manifest dirties every run until `untrack` plus a commit. No G31 dependency is known. |
+| biosensors | Locks stop. The manifest, `.bth/log/` and `outputs/provenance/` are ignored. The tree is clean if its scripts write nothing under `outputs/<run8>/`, or once `ignore_outputs = true`. The 35 stray locks: `relocate`, then delete. |
+| clean repos (lathex, colliculix, denxity, mpnn_ext, prolix) | No change. |
+| cluster / no-`.git` hosts (any repo) | Locks go to `<catalog_dir>/locks/`, not the sidecar directory, and do not travel with `bth sync` (which syncs only `runs/` and `campaigns/`). The default myxcel pull is `outputs/` only. Evidence on those hosts is the catalog record plus that directory. |
+
+Migration order: read the run-time warnings, then `lock relocate`, then `lock untrack` (with its caveats), then `materialize` where G19 evidence is wanted.
+
+**Notes for the spec (corrections found while implementing):** `cite.py` (lines 25, 36, 50) and `index.py` (line 145) only display or store `manifest_path` as a string and never open the file, so they needed no resolver and are unchanged; only `verify_run_manifest` and blast-radius manifest-text matching read the lock.
+
+
 ## [0.13.0a7] - 2026-10-23
 
 ### Added

@@ -269,6 +269,37 @@ takes a unique run-id prefix. A migration of real outputs belongs in a tracked s
 finding (the r6/r7 one: denxity `scripts/validation/migrate_output_tiers_r6r7.py`, with a negative control and
 pre/post hashes of the originals).
 
+## Run Provenance Stays Out of the Working Tree
+
+*(Spec `.praxia/docs/specs/261026_provenance-out-of-working-tree.md`, debt #3049. On this branch; not in the 0.13.0a7 release.)*
+
+`bth run` used to leave a new untracked `<sidecar-stem>.<run_id>.bth.lock.toml` beside the sidecar on every run and
+modify a tracked `.bth/refs/manifest.jsonl`; the next run's `git_dirty` then read true from bathos's own bookkeeping.
+
+- **Where the lock goes.** `lock_location = "git"` (default): a commit under `refs/bathos/locks/<run_id>` in the
+  sidecar's repo (not cwd's). `run.manifest_path` is a `git:<common-dir>#refs/bathos/locks/<run_id>:<relpath>` URI;
+  read it with `bathos.lock_ref.read_lock_text(run.manifest_path, run.id, run.sidecar_path)`, never `open()`.
+  `manifest_sha256` is unchanged. No repo, a sentinel git hash (`nogit`, `unknown`, empty), a sidecar outside the repo,
+  or a failed ref write falls back to `<lock_dir>/<project_slug>/<run_id>.bth.lock.toml` (default `<catalog_dir>/locks`);
+  `run.lock_written` records `ref_error`. `lock_location = "tree"` keeps the old in-tree file.
+- **Settings** `lock_location`, `lock_dir`, `ignore_outputs` resolve: argument, `BTH_LOCK_LOCATION` / `BTH_LOCK_DIR` /
+  `BTH_IGNORE_OUTPUTS`, `cwd/.bth.toml [provenance]`, `[tool.bathos.provenance]` in `pyproject.toml`,
+  `~/.bth/config.toml [provenance]`, default. A malformed file or invalid value raises; `BTH_LOCK_DIR=none` disables the
+  fallback directory. Cluster jobs read `.bth.toml`, since `_bth_env.sh` exports none of the env vars.
+- **Ignores.** Each run adds only the missing lines of `/.bth/refs/manifest.jsonl`, `/.bth/refs/.manifest.lock`,
+  `/.bth/log/` and `/outputs/provenance/` to `.git/info/exclude`, in the script's repo and in cwd's. Lock files are
+  deliberately not ignored. `ignore_outputs = true` also ignores `/outputs/`; `bth init` puts `outputs/` in the
+  `.gitignore` of new projects only.
+- **`bth lock`** (dry-run unless `--apply`; MCP mirrors take a required `project_root` and a write token):
+  `materialize --run-id X` writes the ref's lock byte-for-byte at its G19 path so it can be committed **(do this before
+  committing evidence that praxia G19/G31 will check)**; `relocate` classifies in-tree locks (tracked: keep; untracked
+  matching the catalog: safe to delete; never deletes) and gives each a ref; `untrack` stages `git rm --cached` of a
+  tracked `manifest.jsonl` / `.manifest.lock` only and prints the G31 and merge caveats; `push` / `fetch` move
+  `refs/bathos/locks/*` between clones. Errors: `lock_not_found`, `index_dirty`, `lock_ref_write_failed`.
+- **Limits.** A tracked manifest still dirties every run until `untrack` plus a commit. Locks no longer travel with
+  commits or `bth sync`/rsync by default (use `push`/`fetch`, or `materialize`). A record synced from another host is
+  unverifiable until its repo has the ref (`verify_run_manifest_detail` reason `lock_unlocatable`).
+
 ## Sidecar Pre-Registration
 
 Every script in `scripts/experiments/` and `scripts/benchmarks/` should have a sidecar `.bth.toml` declaring hypothesis and expected outcomes.
