@@ -3375,27 +3375,16 @@ def postmortem_get_tool(
     # -- a campaign has no single git hash or dirty flag to compare against.
     run_obj = None
     if run_id:
-        cat_dir = _get_catalog_dir(None)
-        db_path = cat_dir / "bathos.db"
-        if db_path.exists():
-            from bathos.schema import Run
+        # `query.lookup_run`: unique-prefix resolution across the active backend and the cool
+        # fragments, so a prefix run id (as scaffolds and the docs use) is drift-checked too.
+        from bathos.query import AmbiguousRunId, lookup_run
 
-            con = connect_read(cat_dir)
-            try:
-                arrow_tbl = con.execute("SELECT * FROM runs WHERE id = ?", [run_id]).arrow()
-                if arrow_tbl.num_rows > 0:
-                    run_obj = Run.from_arrow_row(arrow_tbl.to_pydict(), 0)
-            except Exception:
-                pass
-            finally:
-                con.close()
-        if not run_obj:
-            from bathos.catalog import read_runs
-
-            for r in read_runs(cat_dir):
-                if r.id == run_id:
-                    run_obj = r
-                    break
+        try:
+            run_obj = lookup_run(run_id, _get_catalog_dir(None))
+        except AmbiguousRunId as e:
+            return {"error": str(e)}
+        except Exception:  # noqa: BLE001 -- an unreadable catalog skips the drift check
+            run_obj = None
 
     validation = validate_postmortem(
         pm,
