@@ -10,8 +10,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from bathos.catalog import init_catalog, read_runs
 from bathos.init import init_project
+from bathos.lock_ref import read_lock_text
 from bathos.runner import run_script
 
 _SIDECAR = (
@@ -66,13 +69,14 @@ def _primary_with_linked_worktree(tmp_path: Path) -> tuple[Path, Path, Path, str
     return primary, wt, catalog, sha_primary, sha_wt
 
 
-def _lock_git_sha(script_dir: Path) -> str:
-    locks = list(script_dir.glob("*.bth.lock.toml"))
-    assert len(locks) == 1, locks
-    for line in locks[0].read_text().splitlines():
+def _lock_git_sha(run) -> str:
+    """git_sha recorded in the run's lock, read through the same resolver consumers use
+    (a `git:` ref URI in the default mode, a plain path in `tree` mode)."""
+    text = read_lock_text(run.manifest_path, run.id)
+    for line in text.splitlines():
         if line.startswith("git_sha"):
             return line.split('"')[1]
-    raise AssertionError(f"no git_sha in {locks[0]}")
+    raise AssertionError(f"no git_sha in lock {run.manifest_path}")
 
 
 def test_linked_worktree_script_records_worktree_head(tmp_path: Path):
@@ -95,7 +99,31 @@ def test_linked_worktree_script_records_worktree_head(tmp_path: Path):
     assert run.git_hash == sha_wt
     assert run.git_hash != sha_primary
     assert run.git_branch == "feat"
-    assert _lock_git_sha(wt / "scripts") == sha_wt
+    assert _lock_git_sha(run) == sha_wt
+
+
+@pytest.mark.parametrize("lock_location", ["git", "tree"])
+def test_linked_worktree_lock_records_worktree_head_in_both_modes(
+    tmp_path: Path, monkeypatch, lock_location: str
+):
+    """The #5609 guard must hold for the default ref lock and for the `tree` opt-out."""
+    monkeypatch.setenv("BTH_LOCK_LOCATION", lock_location)
+    primary, wt, catalog, _sha_primary, sha_wt = _primary_with_linked_worktree(tmp_path)
+    init_catalog(catalog)
+
+    rc = run_script(
+        argv=[sys.executable, str(wt / "scripts" / "x.py")],
+        project_slug="p",
+        catalog_dir=catalog,
+        output_paths=[],
+        tags=[],
+        cwd=primary,
+    )
+
+    assert rc == 0
+    run = read_runs(catalog)[-1]
+    assert run.manifest_path.startswith("git:") == (lock_location == "git")
+    assert _lock_git_sha(run) == sha_wt
 
 
 def test_linked_worktree_script_records_worktree_head_when_run_from_worktree(tmp_path: Path):
@@ -116,7 +144,7 @@ def test_linked_worktree_script_records_worktree_head_when_run_from_worktree(tmp
     run = read_runs(catalog)[-1]
     assert run.git_hash == sha_wt
     assert run.git_branch == "feat"
-    assert _lock_git_sha(wt / "scripts") == sha_wt
+    assert _lock_git_sha(run) == sha_wt
 
 
 def test_single_checkout_script_in_primary_records_primary_head(tmp_path: Path):
@@ -147,7 +175,7 @@ def test_single_checkout_script_in_primary_records_primary_head(tmp_path: Path):
     run = read_runs(catalog)[-1]
     assert run.git_hash == sha_head
     assert run.git_branch == "main"
-    assert _lock_git_sha(repo / "scripts") == sha_head
+    assert _lock_git_sha(run) == sha_head
 
 
 def test_script_outside_any_repo_falls_back_to_cwd_git_state(tmp_path: Path):

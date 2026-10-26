@@ -151,3 +151,19 @@ def test_reinit_on_unparseable_bth_toml_does_not_raise_or_overwrite(tmp_path: Pa
 
     assert (tmp_path / ".bth.toml").read_text() == "this is not [ valid toml"
     assert report.created is False
+
+
+def test_new_project_gitignores_outputs(tmp_path: Path):
+    """Spec 261026 (user decision): a NEW `bth init` ignores `outputs/`, where scripts write
+    per-run output (`outputs/<run8>/`), so a run does not dirty the tree."""
+    init_project(tmp_path, slug="myproj", catalog_dir=tmp_path / ".bth" / "catalog")
+    lines = (tmp_path / ".gitignore").read_text().splitlines()
+    assert "/outputs/" in lines  # anchored: matches git_pin.OUTPUTS_IGNORE_LINE
+    assert "outputs/" not in lines
+
+
+def test_init_outputs_entry_is_not_duplicated_on_rerun(tmp_path: Path):
+    catalog = tmp_path / ".bth" / "catalog"
+    init_project(tmp_path, slug="myproj", catalog_dir=catalog)
+    init_project(tmp_path, slug="myproj", catalog_dir=catalog)
+    assert (tmp_path / ".gitignore").read_text().splitlines().count("/outputs/") == 1

@@ -4,6 +4,7 @@ import dataclasses
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -19,7 +20,15 @@ import duckdb
 from bathos.catalog import write_run
 from bathos.checker import hash_dependency_lock
 from bathos.git import capture_run_git_state, git_state_as_dict
-from bathos.git_pin import ensure_manifest_ignored, pin_result_as_dict, pin_run
+from bathos.git_pin import (
+    MANIFEST_RELPATH_LINE,
+    ensure_bookkeeping_ignored,
+    pin_result_as_dict,
+    pin_run,
+)
+from bathos.git_pin import repo_root as git_repo_root
+from bathos.lock_config import LockConfigError, resolve_lock_settings, select_lock_repo
+from bathos.lock_ref import write_lock_ref
 from bathos.prereg import (
     GateErrorCode,
     _gate_failure_payload,
@@ -577,22 +586,123 @@ def _unresolved_outcome_warning(
     )
 
 
+def _bookkeeping_roots(script_path: Path | None, cwd: Path) -> list[Path]:
+    """Distinct repo roots whose bookkeeping ignores must hold: the script's checkout, then cwd's.
+
+    They differ when a run is launched from another repo than its script (backlog #5609).
+    """
+    roots: list[Path] = []
+    for start in (script_path.parent if script_path is not None else None, cwd):
+        if start is None:
+            continue
+        root = git_repo_root(start)
+        if root is not None and root.resolve() not in [r.resolve() for r in roots]:
+            roots.append(root)
+    return roots
+
+
+_LEGACY_BOOKKEEPING_WARNED = False
+
+
+def _warn_legacy_bookkeeping_once(root: Path) -> None:
+    """One stderr warning per process when the script's repo tracks the manifest or holds untracked locks.
+
+    Two bounded git calls, never a filesystem walk (spec 261026 P3). Names the command that cleans each up.
+    """
+    global _LEGACY_BOOKKEEPING_WARNED  # noqa: PLW0603 - once per process by design
+    if _LEGACY_BOOKKEEPING_WARNED:
+        return
+    _LEGACY_BOOKKEEPING_WARNED = True
+    manifest_rel = ".bth/refs/manifest.jsonl"
+    try:
+        tracked = (
+            subprocess.run(
+                ["git", "ls-files", "--error-unmatch", "--", manifest_rel],
+                cwd=root,
+                capture_output=True,
+                timeout=30,
+            ).returncode
+            == 0
+        )
+        others = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "--", "*.bth.lock.toml"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout.split()
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    if tracked:
+        print(
+            f"warning: {manifest_rel} is tracked in {root}, so every run modifies it. `bth lock untrack` "
+            "stages its removal (caveat: G31 clean-run proof reads this file per worktree; the command "
+            "prints the consequences).",
+            file=sys.stderr,
+        )
+    if others:
+        print(
+            f"warning: {len(others)} untracked *.bth.lock.toml file(s) in {root} from earlier runs. "
+            "`bth lock relocate` classifies them and gives each a lock ref; it never deletes.",
+            file=sys.stderr,
+        )
+
+
+def _safe_component(text: str) -> str:
+    """One path component from ``text``: separators, ``..``, absolute prefixes and other odd characters become ``_``."""
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", text or "")
+    cleaned = cleaned.lstrip(".") or "_"
+    return cleaned
+
+
+def _write_lock_fallback(lock_dir: Path, project_slug: str, run_id: str, body: bytes) -> Path:
+    """Atomically write the lock to ``<lock_dir>/<project_slug>/<run_id>.bth.lock.toml``; never into the tree.
+
+    The slug and run id are sanitised to single path components and the final path is checked to lie under
+    ``lock_dir``, so a hostile or odd slug (``../..``, an absolute path) cannot write elsewhere.
+    """
+    root = lock_dir.resolve()
+    target = (root / _safe_component(project_slug) / f"{_safe_component(run_id)}.bth.lock.toml").resolve()
+    if not target.is_relative_to(root):
+        raise OSError(f"lock path {target} escapes lock_dir {root}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_bytes(body)
+        os.replace(tmp, target)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return target
+
+
 def _write_manifest(
     run: Run,
     sidecar_path: Path | None,
     sidecar_sha256: str,
-    catalog_dir: Path,  # noqa: ARG001 - kept for manifest helper interface
+    catalog_dir: Path,
+    *,
+    repo_root: Path | None = None,
+    lock_location: str | None = None,
+    lock_dir: Path | str | None = None,
+    cwd: Path | None = None,
 ) -> tuple[str, str]:
-    """Write pre-execution manifest file and return (manifest_sha256, manifest_path).
+    """Write the pre-execution lock and return (manifest_sha256, manifest_path).
 
-    Manifest is written adjacent to the sidecar (same directory).
-    Format: <script_stem>.<run_id>.bth.lock.toml
+    ``lock_location = "git"`` (default) stores the lock as a commit under
+    ``refs/bathos/locks/<run_id>`` in the sidecar's repo and returns a ``git:`` URI as the path
+    (see :mod:`bathos.lock_ref`). ``"tree"`` writes ``<sidecar_dir>/<stem>.<run_id>.bth.lock.toml``
+    as before. When the ref path is unavailable (no repo, sentinel hash, sidecar outside the repo,
+    or a failed write/read-back) the lock goes to ``<lock_dir>/<project_slug>/<run_id>.bth.lock.toml``
+    and ``ref_error`` names why; it is never written beside the sidecar in that case. Settings come
+    from :func:`bathos.lock_config.resolve_lock_settings` and a malformed config raises
+    ``LockConfigError``. Emits ``run.lock_written``.
 
     Returns:
-        Tuple of (manifest_sha256 hex string, manifest_path absolute string)
+        Tuple of (manifest_sha256 hex string, manifest_path: absolute path or ``git:`` URI)
 
     Raises:
-        RuntimeError if write fails in --agent-mode; logs warning otherwise.
+        RuntimeError if the lock cannot be placed anywhere in --agent-mode autonomous; logs a
+        warning and returns ("", "") otherwise.
     """
     import hashlib
     from datetime import UTC, datetime
@@ -600,6 +710,13 @@ def _write_manifest(
     if sidecar_path is None:
         return "", ""
 
+    settings = resolve_lock_settings(
+        lock_location=lock_location,
+        lock_dir=lock_dir,
+        cwd=cwd,
+        catalog_dir=catalog_dir,
+        tolerate_malformed_project_config=True,  # same contract as the up-front resolution in _run_script_impl
+    )
     manifest_filename = f"{sidecar_path.stem}.{run.id}.bth.lock.toml"
     manifest_path = sidecar_path.parent / manifest_filename
 
@@ -615,16 +732,87 @@ def _write_manifest(
         # No agent_id key: TOML has no null, and `agent_id = null` made this file
         # unparseable (debt 2318). Absent means "no agent recorded".
     )
+    body = manifest_content.encode("utf-8")
+    manifest_sha = hashlib.sha256(body).hexdigest()
 
-    try:
-        manifest_path.write_text(manifest_content)
-        manifest_sha = hashlib.sha256(manifest_content.encode()).hexdigest()
-        return manifest_sha, str(manifest_path.resolve())
-    except Exception as e:
-        if run.agent_mode == "autonomous":
-            raise RuntimeError(f"Failed to write manifest: {e}") from e
-        logger.warning(f"Failed to write manifest {manifest_path}: {e}")
-        return "", ""
+    if settings.lock_location == "tree":
+        try:
+            manifest_path.write_text(manifest_content)
+            event(
+                "run.lock_written",
+                run_uuid=run.id,
+                location="tree",
+                ref_error=None,
+                parentless=False,
+                layers=settings.layers,
+            )
+            return manifest_sha, str(manifest_path.resolve())
+        except Exception as e:
+            if run.agent_mode == "autonomous":
+                raise RuntimeError(f"Failed to write manifest: {e}") from e
+            logger.warning(f"Failed to write manifest {manifest_path}: {e}")
+            return "", ""
+
+    # lock_location == "git": the commit-ref path, with a fallback directory outside the tree.
+    choice = select_lock_repo(sidecar_path, run.git_hash, root=repo_root)
+    ref_error = choice.ref_error
+    if choice.root is not None:
+        try:
+            result = write_lock_ref(
+                choice.root,
+                run.git_hash,
+                run.id,
+                choice.lock_relpath(sidecar_path.stem, run.id),
+                body,
+            )
+        except Exception as e:  # bookkeeping must not fail a run: fall back, and say why
+            ref_error = f"ref_write_failed: {e}"
+        else:
+            event(
+                "run.lock_written",
+                run_uuid=run.id,
+                location="ref",
+                ref_error=None,
+                parentless=result.parentless,
+                layers=settings.layers,
+            )
+            return manifest_sha, result.uri
+
+    if settings.lock_dir is not None:
+        try:
+            target = _write_lock_fallback(settings.lock_dir, run.project_slug, run.id, body)
+        except Exception as e:
+            ref_error = f"{ref_error}; fallback_write_failed: {e}"
+        else:
+            event(
+                "run.lock_written",
+                run_uuid=run.id,
+                location="fallback",
+                ref_error=ref_error,
+                parentless=False,
+                layers=settings.layers,
+            )
+            return manifest_sha, str(target)
+    else:
+        ref_error = f"{ref_error}; lock_dir disabled"
+
+    if run.agent_mode == "autonomous":
+        raise RuntimeError(f"Failed to write manifest: {ref_error}")
+    logger.warning(f"Lock for run {run.id} not written: {ref_error}")
+    print(
+        f"warning: no lock was written for run {run.id[:8]} ({ref_error}); its manifest_sha256 and "
+        "manifest_path are empty, so the run cannot be verified against a lock.",
+        file=sys.stderr,
+    )
+    event(
+        "run.lock_written",
+        run_uuid=run.id,
+        location="none",
+        ref_error=ref_error,
+        parentless=False,
+        layers=settings.layers,
+    )
+    return "", ""
 
 
 @dataclasses.dataclass
@@ -827,6 +1015,21 @@ def _run_script_impl(
     component_sidecar_sha256: str | None = None,
     seed: int | None = None,
 ) -> int:
+    # Resolve the lock/ignore settings FIRST, before any run record or event is written: a malformed config or an
+    # invalid BTH_LOCK_LOCATION / BTH_IGNORE_OUTPUTS must fail the run cleanly, not leave a started run with no
+    # terminal record (spec 261026 P1). Never swallowed with the best-effort pin errors below.
+    try:
+        # A broken cwd/.bth.toml has always been tolerated by the runner (regression guard in
+        # test_enforced_dirs_config); it is reported on stderr and its layer skipped. Everything else is strict.
+        lock_settings = resolve_lock_settings(
+            cwd=cwd, catalog_dir=catalog_dir, tolerate_malformed_project_config=True
+        )
+    except LockConfigError as e:
+        print(f"Error: invalid provenance configuration: {e}", file=sys.stderr)
+        return 1
+    for note in lock_settings.warnings:
+        print(f"warning: {note}", file=sys.stderr)
+
     # Resolve --campaign up front (fail fast, before running the subprocess) and
     # store the full UUID — never the raw prefix — on the run record.
     resolved_campaign_id: str | None = None
@@ -1246,15 +1449,34 @@ def _run_script_impl(
         # untracked .git/info/exclude, never the tracked .gitignore) BEFORE pin_run appends. Otherwise the manifest write itself -- which
         # happens on every run -- is what makes the NEXT run's git-dirty capture see an
         # uncommitted change, even on an otherwise-clean tree.
-        if not ensure_manifest_ignored(cwd):
-            event("run.manifest_gitignore_warning", run_uuid=run.id, cwd=str(cwd))
-            print(
-                "warning: could not ensure the run manifest (.bth/refs/manifest.jsonl) is "
-                "ignored -- a future run's git-dirty state may be polluted by this run's "
-                "own provenance bookkeeping. Check .gitignore for a rule (e.g. a `!` negation) "
-                "that un-ignores it.",
-                file=sys.stderr,
-            )
+        # Spec 261026 P2: the same for every bookkeeping path, in the script's repo AND in cwd's
+        # repo when they differ (`pin_run` and the manifest still live under cwd; the lock ref
+        # and script outputs follow the script).
+        for ignore_root in _bookkeeping_roots(script_path, cwd):
+            for ignore_line, ignored in ensure_bookkeeping_ignored(
+                ignore_root, ignore_outputs=lock_settings.ignore_outputs
+            ).items():
+                if ignored:
+                    continue
+                event(
+                    "run.manifest_gitignore_warning"
+                    if ignore_line == MANIFEST_RELPATH_LINE
+                    else "run.bookkeeping_gitignore_warning",
+                    run_uuid=run.id,
+                    cwd=str(ignore_root),
+                    path=ignore_line,
+                )
+                print(
+                    f"warning: could not ensure {ignore_line} is ignored in {ignore_root} -- a "
+                    "future run's git-dirty state may be polluted by this run's own provenance "
+                    "bookkeeping. Check .gitignore for a rule (e.g. a `!` negation) that "
+                    "un-ignores it.",
+                    file=sys.stderr,
+                )
+
+        legacy_roots = _bookkeeping_roots(script_path, cwd)
+        if legacy_roots:
+            _warn_legacy_bookkeeping_once(legacy_roots[0])
 
         pin = pin_run(
             run_id=run.id,
@@ -1372,7 +1594,7 @@ def _run_script_impl(
     if bundle and bundle.found:
         try:
             manifest_sha256, manifest_path = _write_manifest(
-                run, bundle.path, bundle.sha256, catalog_dir
+                run, bundle.path, bundle.sha256, catalog_dir, cwd=cwd
             )
             # Update run object with manifest info
             run.manifest_sha256 = manifest_sha256

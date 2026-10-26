@@ -73,6 +73,7 @@ BTH_PATH_ENV_VARS = (
     "BTH_MCP_TOKEN_PATH",
     "BTH_RESULTS_PATH",
     "BTH_OUTPUT_DIR",
+    "BTH_LOCK_DIR",
 )
 
 

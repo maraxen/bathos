@@ -1,8 +1,10 @@
 """Error codes and resolution hints for bathos MCP tools.
 
-Provides a unified BathosErrorCode enum that includes:
+Provides a unified BathosErrorCode enum (61 members) that includes:
 - 11 aliased codes from GateErrorCode (pre-registration gate failures)
-- 5 new codes for domain exceptions (catalog, campaign, sidecar, export, invalid params)
+- 5 codes for domain exceptions (catalog, campaign, sidecar, export, invalid params)
+- later families: trust ledger, MCP auth, artifact archival, document authoring, the run log, output tiering,
+  and the sidecar-lock family (lock_ref_write_failed, lock_not_found, index_dirty; spec 261026)
 
 All MCP tools return envelopes with error_code values from this enum.
 """
@@ -15,8 +17,8 @@ from enum import Enum
 class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(Enum) returning Enum member value for serialization
     """Unified error code enumeration for all bathos MCP tools.
 
-    Aliases 11 codes from GateErrorCode, plus 5 new codes for domain exceptions.
-    All codes are lowercase snake_case strings.
+    Aliases 11 codes from GateErrorCode, plus the domain-exception codes and the later families listed in the
+    module docstring (61 members in all). All codes are lowercase snake_case strings.
     """
 
     # Aliased from GateErrorCode (11 members)
@@ -107,6 +109,12 @@ class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(
     WARM_NOREPLACE_UNSUPPORTED = "warm_noreplace_unsupported"
     WARM_PUBLISH_FAILED = "warm_publish_failed"
 
+    # Sidecar lock as a commit ref (spec 261026): the lock ref could not be written or did not read back.
+    LOCK_REF_WRITE_FAILED = "lock_ref_write_failed"
+    # `bth lock *` (spec 261026 P3): no refs/bathos/locks/<run_id>, or a command that would stage found a dirty index.
+    LOCK_NOT_FOUND = "lock_not_found"
+    INDEX_DIRTY = "index_dirty"
+
 
 # Resolution hints registry: every BathosErrorCode member must have a non-empty entry
 RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
@@ -115,7 +123,7 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.SIDECAR_INVALID: "Fix the sidecar TOML syntax or missing required sections",
     BathosErrorCode.SIDECAR_HASH_MISMATCH: "Re-run 'bth hypothesis lock' to regenerate the manifest",
     BathosErrorCode.NOT_FIRST_OF_KIND: "Use --derived-from to link to the parent run",
-    BathosErrorCode.MANIFEST_WRITE_FAILED: "Check write permissions in the script directory",
+    BathosErrorCode.MANIFEST_WRITE_FAILED: "Check write permissions where the lock is written (the repo's .git for lock_location=git, the lock_dir fallback, or the script directory for lock_location=tree)",
     BathosErrorCode.ADVERSARIAL_CHECK_MISSING: "Add adversarial_check to all outcomes.pass blocks in the sidecar",
     BathosErrorCode.HYPOTHESIS_LOCK_MISSING: "Run 'bth hypothesis lock <script>' before executing",
     BathosErrorCode.OUTCOME_EVALUATION_ERROR: "Fix the DuckDB SQL condition in the sidecar outcomes block",
@@ -172,6 +180,9 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.WARM_MISMATCH: "The fetched archive, manifest or extracted files do not match the copy record, the manifest or the run's reference hashes (or the archive holds an unsafe or extra member); bathos deleted only its own staging directory and wrote nothing at --to. Run `bth verify --tier outputs`, and supersede the cold copy if it is bad",
     BathosErrorCode.NO_VERIFIED_COPY: "The run has no verified, non-superseded cold or mirror copy to restore from; run `bth cold <run>` or `bth verify --tier outputs` (see `bth outputs where`)",
     BathosErrorCode.WARM_NOREPLACE_UNSUPPORTED: "This kernel or filesystem lacks renameat2 RENAME_NOREPLACE, so bathos will not publish by a replacing rename; the verified copy is kept in the <dir>.bth-warm-<attempt>.partial directory named in the message: move it into place by hand, or use a filesystem that supports the flag",
+    BathosErrorCode.LOCK_REF_WRITE_FAILED: "The lock commit-ref under refs/bathos/locks/ could not be written or did not read back identically; check write access to the repo's .git (and that git is installed). `bth run` falls back to the lock_dir and records ref_error in run.lock_written",
+    BathosErrorCode.LOCK_NOT_FOUND: "No lock ref refs/bathos/locks/<run_id> in this repo: check the run id, or run `bth lock fetch --apply` to bring locks from a remote clone",
+    BathosErrorCode.INDEX_DIRTY: "The git index has staged changes and this `bth lock` command would stage: commit or `git restore --staged` them, then rerun",
     BathosErrorCode.WARM_PUBLISH_FAILED: "The final rename of the verified staging directory failed (permissions, space, a vanished parent); the verified copy is kept in the .partial directory named in the message: fix the cause and move it into place by hand",
 }
 
@@ -300,4 +311,9 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     # caller that only has the class.
     "OutputTierError": BathosErrorCode.INVALID_PARAM,
     "OutputTiersConfigError": BathosErrorCode.INVALID_PARAM,
+    # Lock location (spec 261026): bad lock_location / lock_dir / ignore_outputs configuration.
+    "LockConfigError": BathosErrorCode.INVALID_PARAM,
+    "LockRefError": BathosErrorCode.LOCK_REF_WRITE_FAILED,
+    # `bth lock *`: carries its own, more specific `code`; this is the fallback for a caller with only the class.
+    "LockAdminError": BathosErrorCode.INVALID_PARAM,
 }
