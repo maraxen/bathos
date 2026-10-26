@@ -102,6 +102,9 @@ class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(
     WARM_NOREPLACE_UNSUPPORTED = "warm_noreplace_unsupported"
     WARM_PUBLISH_FAILED = "warm_publish_failed"
 
+    # Sidecar lock as a commit ref (spec 261026): the lock ref could not be written or did not read back.
+    LOCK_REF_WRITE_FAILED = "lock_ref_write_failed"
+
 
 # Resolution hints registry: every BathosErrorCode member must have a non-empty entry
 RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
@@ -110,7 +113,7 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.SIDECAR_INVALID: "Fix the sidecar TOML syntax or missing required sections",
     BathosErrorCode.SIDECAR_HASH_MISMATCH: "Re-run 'bth hypothesis lock' to regenerate the manifest",
     BathosErrorCode.NOT_FIRST_OF_KIND: "Use --derived-from to link to the parent run",
-    BathosErrorCode.MANIFEST_WRITE_FAILED: "Check write permissions in the script directory",
+    BathosErrorCode.MANIFEST_WRITE_FAILED: "Check write permissions where the lock is written (the repo's .git for lock_location=git, the lock_dir fallback, or the script directory for lock_location=tree)",
     BathosErrorCode.ADVERSARIAL_CHECK_MISSING: "Add adversarial_check to all outcomes.pass blocks in the sidecar",
     BathosErrorCode.HYPOTHESIS_LOCK_MISSING: "Run 'bth hypothesis lock <script>' before executing",
     BathosErrorCode.OUTCOME_EVALUATION_ERROR: "Fix the DuckDB SQL condition in the sidecar outcomes block",
@@ -164,6 +167,7 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.WARM_MISMATCH: "The fetched archive, manifest or extracted files do not match the copy record, the manifest or the run's reference hashes (or the archive holds an unsafe or extra member); bathos deleted only its own staging directory and wrote nothing at --to. Run `bth verify --tier outputs`, and supersede the cold copy if it is bad",
     BathosErrorCode.NO_VERIFIED_COPY: "The run has no verified, non-superseded cold or mirror copy to restore from; run `bth cold <run>` or `bth verify --tier outputs` (see `bth outputs where`)",
     BathosErrorCode.WARM_NOREPLACE_UNSUPPORTED: "This kernel or filesystem lacks renameat2 RENAME_NOREPLACE, so bathos will not publish by a replacing rename; the verified copy is kept in the <dir>.bth-warm-<attempt>.partial directory named in the message: move it into place by hand, or use a filesystem that supports the flag",
+    BathosErrorCode.LOCK_REF_WRITE_FAILED: "The lock commit-ref under refs/bathos/locks/ could not be written or did not read back identically; check write access to the repo's .git (and that git is installed). `bth run` falls back to the lock_dir and records ref_error in run.lock_written",
     BathosErrorCode.WARM_PUBLISH_FAILED: "The final rename of the verified staging directory failed (permissions, space, a vanished parent); the verified copy is kept in the .partial directory named in the message: fix the cause and move it into place by hand",
 }
 
@@ -285,4 +289,7 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     # caller that only has the class.
     "OutputTierError": BathosErrorCode.INVALID_PARAM,
     "OutputTiersConfigError": BathosErrorCode.INVALID_PARAM,
+    # Lock location (spec 261026): bad lock_location / lock_dir / ignore_outputs configuration.
+    "LockConfigError": BathosErrorCode.INVALID_PARAM,
+    "LockRefError": BathosErrorCode.LOCK_REF_WRITE_FAILED,
 }

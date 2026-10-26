@@ -19,6 +19,8 @@ from bathos.catalog import write_run
 from bathos.checker import hash_dependency_lock
 from bathos.git import capture_run_git_state, git_state_as_dict
 from bathos.git_pin import ensure_manifest_ignored, pin_result_as_dict, pin_run
+from bathos.lock_config import resolve_lock_settings, select_lock_repo
+from bathos.lock_ref import write_lock_ref
 from bathos.prereg import (
     GateErrorCode,
     _gate_failure_payload,
@@ -528,22 +530,47 @@ def _unresolved_outcome_warning(
     )
 
 
+def _write_lock_fallback(lock_dir: Path, project_slug: str, run_id: str, body: bytes) -> Path:
+    """Atomically write the lock to ``<lock_dir>/<project_slug>/<run_id>.bth.lock.toml``; never into the tree."""
+    target = (lock_dir / project_slug / f"{run_id}.bth.lock.toml").resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_bytes(body)
+        os.replace(tmp, target)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return target
+
+
 def _write_manifest(
     run: Run,
     sidecar_path: Path | None,
     sidecar_sha256: str,
-    catalog_dir: Path,  # noqa: ARG001 - kept for manifest helper interface
+    catalog_dir: Path,
+    *,
+    repo_root: Path | None = None,
+    lock_location: str | None = None,
+    lock_dir: Path | str | None = None,
+    cwd: Path | None = None,
 ) -> tuple[str, str]:
-    """Write pre-execution manifest file and return (manifest_sha256, manifest_path).
+    """Write the pre-execution lock and return (manifest_sha256, manifest_path).
 
-    Manifest is written adjacent to the sidecar (same directory).
-    Format: <script_stem>.<run_id>.bth.lock.toml
+    ``lock_location = "git"`` (default) stores the lock as a commit under
+    ``refs/bathos/locks/<run_id>`` in the sidecar's repo and returns a ``git:`` URI as the path
+    (see :mod:`bathos.lock_ref`). ``"tree"`` writes ``<sidecar_dir>/<stem>.<run_id>.bth.lock.toml``
+    as before. When the ref path is unavailable (no repo, sentinel hash, sidecar outside the repo,
+    or a failed write/read-back) the lock goes to ``<lock_dir>/<project_slug>/<run_id>.bth.lock.toml``
+    and ``ref_error`` names why; it is never written beside the sidecar in that case. Settings come
+    from :func:`bathos.lock_config.resolve_lock_settings` and a malformed config raises
+    ``LockConfigError``. Emits ``run.lock_written``.
 
     Returns:
-        Tuple of (manifest_sha256 hex string, manifest_path absolute string)
+        Tuple of (manifest_sha256 hex string, manifest_path: absolute path or ``git:`` URI)
 
     Raises:
-        RuntimeError if write fails in --agent-mode; logs warning otherwise.
+        RuntimeError if the lock cannot be placed anywhere in --agent-mode autonomous; logs a
+        warning and returns ("", "") otherwise.
     """
     import hashlib
     from datetime import UTC, datetime
@@ -551,6 +578,12 @@ def _write_manifest(
     if sidecar_path is None:
         return "", ""
 
+    settings = resolve_lock_settings(
+        lock_location=lock_location,
+        lock_dir=lock_dir,
+        cwd=cwd,
+        catalog_dir=catalog_dir,
+    )
     manifest_filename = f"{sidecar_path.stem}.{run.id}.bth.lock.toml"
     manifest_path = sidecar_path.parent / manifest_filename
 
@@ -566,16 +599,82 @@ def _write_manifest(
         # No agent_id key: TOML has no null, and `agent_id = null` made this file
         # unparseable (debt 2318). Absent means "no agent recorded".
     )
+    body = manifest_content.encode("utf-8")
+    manifest_sha = hashlib.sha256(body).hexdigest()
 
-    try:
-        manifest_path.write_text(manifest_content)
-        manifest_sha = hashlib.sha256(manifest_content.encode()).hexdigest()
-        return manifest_sha, str(manifest_path.resolve())
-    except Exception as e:
-        if run.agent_mode == "autonomous":
-            raise RuntimeError(f"Failed to write manifest: {e}") from e
-        logger.warning(f"Failed to write manifest {manifest_path}: {e}")
-        return "", ""
+    if settings.lock_location == "tree":
+        try:
+            manifest_path.write_text(manifest_content)
+            event(
+                "run.lock_written",
+                run_uuid=run.id,
+                location="tree",
+                ref_error=None,
+                parentless=False,
+                layers=settings.layers,
+            )
+            return manifest_sha, str(manifest_path.resolve())
+        except Exception as e:
+            if run.agent_mode == "autonomous":
+                raise RuntimeError(f"Failed to write manifest: {e}") from e
+            logger.warning(f"Failed to write manifest {manifest_path}: {e}")
+            return "", ""
+
+    # lock_location == "git": the commit-ref path, with a fallback directory outside the tree.
+    choice = select_lock_repo(sidecar_path, run.git_hash, root=repo_root)
+    ref_error = choice.ref_error
+    if choice.root is not None:
+        try:
+            result = write_lock_ref(
+                choice.root,
+                run.git_hash,
+                run.id,
+                choice.lock_relpath(sidecar_path.stem, run.id),
+                body,
+            )
+        except Exception as e:  # bookkeeping must not fail a run: fall back, and say why
+            ref_error = f"ref_write_failed: {e}"
+        else:
+            event(
+                "run.lock_written",
+                run_uuid=run.id,
+                location="ref",
+                ref_error=None,
+                parentless=result.parentless,
+                layers=settings.layers,
+            )
+            return manifest_sha, result.uri
+
+    if settings.lock_dir is not None:
+        try:
+            target = _write_lock_fallback(settings.lock_dir, run.project_slug, run.id, body)
+        except Exception as e:
+            ref_error = f"{ref_error}; fallback_write_failed: {e}"
+        else:
+            event(
+                "run.lock_written",
+                run_uuid=run.id,
+                location="fallback",
+                ref_error=ref_error,
+                parentless=False,
+                layers=settings.layers,
+            )
+            return manifest_sha, str(target)
+    else:
+        ref_error = f"{ref_error}; lock_dir disabled"
+
+    if run.agent_mode == "autonomous":
+        raise RuntimeError(f"Failed to write manifest: {ref_error}")
+    logger.warning(f"Lock for run {run.id} not written: {ref_error}")
+    event(
+        "run.lock_written",
+        run_uuid=run.id,
+        location="none",
+        ref_error=ref_error,
+        parentless=False,
+        layers=settings.layers,
+    )
+    return "", ""
 
 
 @dataclasses.dataclass
@@ -1283,7 +1382,7 @@ def _run_script_impl(
     if bundle and bundle.found:
         try:
             manifest_sha256, manifest_path = _write_manifest(
-                run, bundle.path, bundle.sha256, catalog_dir
+                run, bundle.path, bundle.sha256, catalog_dir, cwd=cwd
             )
             # Update run object with manifest info
             run.manifest_sha256 = manifest_sha256

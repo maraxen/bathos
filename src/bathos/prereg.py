@@ -84,7 +84,7 @@ _RESOLUTION_HINTS: dict[GateErrorCode, str] = {
     GateErrorCode.SIDECAR_INVALID: "Fix the sidecar TOML syntax or missing required sections",
     GateErrorCode.SIDECAR_HASH_MISMATCH: "Re-run 'bth hypothesis lock' to regenerate the manifest",
     GateErrorCode.NOT_FIRST_OF_KIND: "Use --derived-from to link to the parent run",
-    GateErrorCode.MANIFEST_WRITE_FAILED: "Check write permissions in the script directory",
+    GateErrorCode.MANIFEST_WRITE_FAILED: "Check write permissions where the lock is written (the repo's .git for lock_location=git, the lock_dir fallback, or the script directory for lock_location=tree)",
     GateErrorCode.ADVERSARIAL_CHECK_MISSING: "Add adversarial_check to all outcomes.pass blocks in the sidecar",
     GateErrorCode.HYPOTHESIS_LOCK_MISSING: "Run 'bth hypothesis lock <script>' before executing",
     GateErrorCode.OUTCOME_EVALUATION_ERROR: "Fix the DuckDB SQL condition in the sidecar outcomes block",

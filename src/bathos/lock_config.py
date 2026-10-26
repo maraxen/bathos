@@ -301,17 +301,20 @@ def _show_toplevel(directory: Path) -> Path | None:
     return Path(top)
 
 
-def select_lock_repo(sidecar_path: Path, git_hash: str) -> LockRepoChoice:
+def select_lock_repo(
+    sidecar_path: Path, git_hash: str, *, root: Path | None = None
+) -> LockRepoChoice:
     """Pick the repo for a run's lock ref from the SIDECAR's directory (never cwd).
 
     The ref path needs all of: ``git_hash`` is a 40-hex commit id (excludes empty, ``unknown`` incl. a broken
     gitlink, and ``nogit``), a root probe from the sidecar directory succeeds (a myxcel-env hash can be real on a
-    host with no ``.git``), and the sidecar directory lies inside that root.
+    host with no ``.git``), and the sidecar directory lies inside that root. A caller that already knows the root
+    passes ``root`` to skip the probe; the hash gate and the inside-root check still apply.
     """
     if not _FULL_SHA.fullmatch(git_hash or ""):
         return LockRepoChoice(None, ref_error="sentinel_hash")
     sidecar_dir = sidecar_path.parent
-    top = _show_toplevel(sidecar_dir)
+    top = root if root is not None else _show_toplevel(sidecar_dir)
     if top is None:
         return LockRepoChoice(None, ref_error="no_repo")
     root = top.resolve()

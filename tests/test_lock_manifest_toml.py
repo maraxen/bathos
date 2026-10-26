@@ -37,7 +37,7 @@ def test_manifest_is_valid_toml_and_carries_identity(tmp_path: Path, sample_run:
     run = dataclasses.replace(sample_run, id="11111111-2222-3333-4444-555555555555")
     sidecar = _sidecar(tmp_path)
 
-    sha, path = _write_manifest(run, sidecar, "a" * 64, tmp_path)
+    sha, path = _write_manifest(run, sidecar, "a" * 64, tmp_path, lock_location="tree")
 
     assert path == str((tmp_path / f"exp.bth.{run.id}.bth.lock.toml").resolve())
     raw = Path(path).read_bytes()
@@ -51,7 +51,9 @@ def test_manifest_is_valid_toml_and_carries_identity(tmp_path: Path, sample_run:
 
 def test_manifest_does_not_invent_an_agent_id(tmp_path: Path, sample_run: Run):
     """Absent, not null and not an empty string: a reader must not mistake it for an agent."""
-    _, path = _write_manifest(sample_run, _sidecar(tmp_path), "b" * 64, tmp_path)
+    _, path = _write_manifest(
+        sample_run, _sidecar(tmp_path), "b" * 64, tmp_path, lock_location="tree"
+    )
     assert "agent_id" not in tomllib.loads(Path(path).read_text())["manifest"]
 
 
@@ -90,7 +92,10 @@ def test_run_script_writes_a_parseable_lock_manifest(tmp_path: Path):
     )
 
     assert rc == 0
-    locks = sorted(enforced.glob("*.bth.lock.toml"))
+    # tmp_path is not a repo, so the ref path is unavailable: the lock goes to the fallback
+    # dir under the catalog (spec 261026 P1), never beside the sidecar.
+    assert not list(enforced.glob("*.bth.lock.toml"))
+    locks = sorted((tmp_path / "catalog" / "locks" / "proj").glob("*.bth.lock.toml"))
     assert len(locks) == 1, locks
     parsed = tomllib.loads(locks[0].read_text())
     assert parsed["manifest"]["run_id"] in locks[0].name
