@@ -187,6 +187,88 @@ uv run python scripts/experiments/train.py --smoke --out /tmp/test.json
 bth run --output-paths outputs/run_abc.json -- uv run python scripts/experiments/train.py
 ```
 
+## Output Tiering: warm, cold and mirror copies of a run's files
+
+*(bathos main after the 0.13.0a7 tag (config from PR #130, complete with #138, 2026-10-25); the a7 release has none of it. Spec `.praxia/docs/specs/261023_output-tiering.md`. First used on the denxity r6/r7 outputs, 2026-10-25,
+run `84b7fae2`: 888 files, 4 runs, cold + mirror verified.)*
+
+A run's files live in its worktree, and the run record holds their sha256. Output tiering gives those files verified
+copies so the worktree can go: one zstd tar + manifest per run on a **cold** host, the same bytes on a **mirror**
+host, and a **warm** restore into a fresh local directory. The run record stays the source of truth for the hashes;
+every copy is checked against it.
+
+**1. Get a reference set.** A copy covers only the files in the run's reference hashes.
+
+- *New runs:* declare every file and directory the script writes in the sidecar. At run end bathos hashes everything
+  under the roots, uncapped:
+  ```toml
+  [outputs]
+  roots = ["outputs/validation/my_run.json", "outputs/validation/my_run_cells"]
+  ```
+  Declare resume and cell directories too. A `--resume-dir` outside every root is never hashed, and `bth lint` warns
+  about it (`undeclared_resume_dir`, below). A run that declares `[outputs]` is closed to `adopt`; fix a mistake with a
+  new run.
+- *Runs that predate the standard:* adopt the files their record does not cite. Paths already recorded with the same
+  bytes are skipped; different bytes refuse (`run_end_conflict`, re-run instead).
+  ```bash
+  bth outputs adopt <run> --root outputs/validation/r6_cells --reason "resume dir, not in output_paths" --dry-run
+  bth outputs adopt <run> --root outputs/validation/r6_cells --reason "resume dir, not in output_paths"
+  bth outputs adopt <run> --retract <eid> --reason "wrong root"     # withdraws an earlier adopt event
+  ```
+- `bth outputs hash <run>` re-hashes the live files against the reference set (`match` / `drift` / `missing`, per
+  file). Read-only.
+
+**2. Pick the hosts.** There are no default locations. The cold and mirror legs each resolve a myxcel profile name:
+`--profile` / `--mirror` > `$BTH_COLD_PROFILE` / `$BTH_MIRROR_PROFILE` > `[tool.bathos.outputs] cold_profile` /
+`mirror_profile` in the nearest `pyproject.toml` > `[outputs]` in `${XDG_CONFIG_HOME:-~/.config}/bathos/config.toml`
+> off (`no_cold_root`, naming every layer checked). `none` or empty at any layer turns the leg off. The profile's
+`~/.config/myxcel/<name>.toml` must set `host` and an absolute `cold_root`. **A host without SLURM** (titanix) also
+needs `cold_verify_ssh_max_bytes` set high, or every archive over 2 GiB comes back `unverifiable` forever.
+
+**3. Write the copies.**
+```bash
+bth cold <run> --profile engaging --mirror titanix --dry-run   # file list, bytes, destinations; writes nothing, no ssh
+bth cold <run> --profile engaging --mirror titanix
+bth cold --all-uncopied --profile engaging --mirror titanix    # current project: completed runs with no verified copy
+```
+Each leg builds the archive, checks every member against the reference set, uploads to a per-attempt partial name,
+commits without overwriting (`ln && rm`), and verifies. A final that already exists with different content is
+`archive_conflict`, never an overwrite. A rerun after an interruption resumes: an existing, matching pair is reused.
+`lock_held` after a crash: rerun with `--break-lock` (removes the lock only, never a partial or a final).
+`--clean-partials` removes this run's leftover `*.partial-*` files and needs myxcel's `cold ls` / `rm-partial`
+(myxcel #42); without them it refuses `myxcel_capability_gap` and the partials are named in the output instead.
+`bth outputs where <run>` lists the recorded copies and the config layer that chose each one.
+
+**4. Restore and re-verify.**
+```bash
+bth warm <run> --to ~/scratch/restore/r6        # <dir> must not exist; staged, hashed, then renamed into place
+bth verify --tier outputs --run-id <run> --strict
+```
+`warm` fetches from the first `verified` copy, checks both sha256s before opening the tar, requires the member set to
+equal the manifest, and hashes every file against the manifest and the reference set before publishing. `verify`
+re-reads each cold/mirror copy and checks cold and mirror agree; `--tier all` does **not** include `outputs` (it
+needs the network). Its CLI JSON nests the counts under `outputs_report` (`n_verified`, `n_failed`,
+`n_unverifiable`, per-run `verdict`).
+
+**The three states** (every copy, every check): `verified` — the bytes were re-read and matched; `failed` — read and
+did not match; `unverifiable` — could not be read (host down, SLURM path on a host without SLURM). `unverifiable`
+never turns into either of the others. `verify` exits 1 on any `failed`, and on `unverifiable` only with `--strict`.
+
+**Supersede, the rollback.** bathos never deletes a copy and never deletes warm files. To replace a bad or
+half-committed cold pair (`archive_conflict detail=half_committed`):
+```bash
+bth cold <run> --profile engaging --supersede --reason "half-committed after a crash"
+```
+It takes the remote lock, renames whichever final files exist to `run-<id>.superseded-<utc>.*` (still findable in
+`bth outputs where`), records `output_copy.superseded`, and lets a fresh `bth cold` write the pair again.
+
+**Branch on `error_code`, never on exit status.** Every refusal exits 1 with a JSON `error_code`: `no_reference_hashes`,
+`outputs_drifted`, `no_cold_root`, `archive_conflict`, `myxcel_capability_gap`, `lock_held`, `warm_target_exists`,
+`warm_mismatch`, `no_verified_copy`, `run_end_conflict`, `adopt_closed`, `root_outside_worktree`. Every command
+takes a unique run-id prefix. A migration of real outputs belongs in a tracked script + sidecar like any other
+finding (the r6/r7 one: denxity `scripts/validation/migrate_output_tiers_r6r7.py`, with a negative control and
+pre/post hashes of the originals).
+
 ## Sidecar Pre-Registration
 
 Every script in `scripts/experiments/` and `scripts/benchmarks/` should have a sidecar `.bth.toml` declaring hypothesis and expected outcomes.
@@ -306,6 +388,69 @@ bth validate-sidecar scripts/experiments/train.bth.toml --campaign-id my-campaig
 Checks TOML syntax, schema completeness, DuckDB condition validity, and residual outcome presence. Prints `field: message` for each error and exits 1 if invalid; prints `✓ <path> is valid` on success.
 
 Note: `bth check` (see **Query and Inspect** below) is a *different* command — it checks already-recorded runs for git-drift against current HEAD, it does not validate sidecars.
+
+## Distributional Breakdown: worst-case aggregates, `[breakdown]`, amendments and forks
+
+A verdict that rests on a maximum, minimum or peak over many units (an `e_max_placement`
+against a 0.5 A bound) says nothing about how many units produced it. In lathex bth 78db9e04 the
+maximum came from 1 binder of 24 (median 0.004 A) and nothing in the sidecar had asked. The rule
+is **warn everywhere, refuse only where the run is cited** (entry into a claim-bound campaign).
+
+```toml
+[breakdown]
+unit = "binder"
+# waive = "reason"      # alternative to aggregates; keep it directly under [breakdown],
+                        # before any sub-table, and write it BEFORE the run
+
+[breakdown.aggregates.e_max_placement]     # a key ending in * is a prefix: "e_max_*"
+direction = "max"                          # "max" | "min"
+bound = 0.5                                # optional; enables n_over and near_bound
+margin = 0.05                              # optional absolute band; default 10% of bound
+```
+
+The run emits, and `[result_schema]` must declare, `<col>__worst_unit` (str), `__second`,
+`__median` (float), `__n_units`, and with a `bound`, `__n_over` (int, units strictly beyond it).
+Read `n_over`, `second` and `median` before the maximum. Prefix keys expand over float columns
+without `__`, so a prefix never matches its own summary columns.
+
+- **Detection.** `bth run` prints to stderr (and the MCP `run` tool returns in `warnings`) an
+  `aggregate_uncovered` advisory for a float column named `*max*`/`*min*`/`*worst*`/`*peak*` that
+  an outcome condition or `[observe].sanity` reads with no `[breakdown]`. `bth lint` raises
+  `AGGREGATE_WITHOUT_BREAKDOWN` (rule card STAT-005); `bth validate-sidecar` warns. A column the
+  heuristic misses (a derived ratio) opts in with `[result_schema_meta.<col>] aggregate = true`.
+- **Emission check.** A clean run whose label names a non-residual outcome but lacks the summary
+  columns warns (`breakdown_incomplete`); the outcome is unchanged. An exploratory run reads its
+  `tentative_outcome`. Residual, `error` and `invalid_measurement` runs owe nothing.
+- **Refusal where cited.** `bth run --campaign`, `bth campaign add`, `bth claim register` and
+  `bth campaign conclude` on a claim-bound campaign raise `BreakdownRefused` (error codes
+  `breakdown_missing`, `sidecar_unverifiable`) when a member's **run-time** sidecar leaves an
+  aggregate uncovered or its summary columns missing. A waiver or `[breakdown]` added afterwards
+  never passes; the run-time sidecar is the frozen `run.started` declaration, a live file whose
+  sha256 still matches, or the pinned git ref. `--force` and `force_verdict` do not bypass.
+  Exploration campaigns only warn. Compaction never refuses; register and conclude backstop it.
+- **`near_bound` obligation (default ON).** A clean run with a `bound` where exactly one of at
+  least two units is over it (`single_unit`), or the value lies within `margin` of the bound
+  (`margin`; the 10% default is arbitrary, set it from the instrument's noise floor), opens
+  `run_<fullid>_near_bound` and prints an advisory. It never blocks a run and also opens for
+  exploratory runs. Opt out with `BTH_OBLIGATION_NEAR_BOUND=0` or `[obligations] near_bound =
+  false`; that silences only the run-time open, because claim-bound conclude recomputes it.
+- **Discharge.** `bth postmortem scaffold` writes a `format = 2` postmortem with an empty `[fork]`
+  and a commented checklist of open ids (it never fills `discharges`). Name the id in
+  `discharges`, fill `[fork]` (`choice` = stop | extend | replicate | breakdown | escalate, a
+  non-empty `reason`, `cited`, `follow_up_run_ids`; `stop` cannot be `cited = true`), then
+  `bth postmortem validate <path>`: that is what discharges, and the response lists `discharged` and
+  `not_discharged` with reasons (the postmortem must be for that run, or campaign-scoped with it
+  as a member). Claim-bound conclude requires the discharging file to still hold a valid `[fork]`
+  with `cited = true`; if the run was first closed by an internal `cited = false` record, validate a
+  newer postmortem and it re-points the obligation (`superseded_by_paths`).
+- **`[[amendments]]` (format 2 postmortems).** Later evidence about a verdict, for example the
+  per-unit analysis run: `analysis_run_id`, `amends_run_id` (required when campaign-scoped), `kind`
+  (`distributional_outlier` | `reanalysis` | `correction`), `outlier_units`, `effect`
+  (`verdict_unchanged` | `verdict_contextualized` | `verdict_changed`), `note`. An unresolvable
+  `analysis_run_id`, one equal to the amended run, an outlier amendment with no units, and
+  `verdict_changed` with no `verdict_override` are errors. Amendments never change `runs.outcome`;
+  only `verdict_override` does. They render in `bth postmortem show` and `bth campaign review`
+  under a banner, drift or not.
 
 ## Controls Discipline (v0.11.0)
 
@@ -505,6 +650,14 @@ Example:
 ```
 WARNING: Non-canonical stage_name 'pilot' in warm catalog (1 run). Consider renaming to one of: exploration, calibration, validation, ablation, production
 ```
+
+**`check_undeclared_resume_dirs`** (`undeclared_resume_dir`) — Flags this project's runs whose argv passed
+`--resume-dir` / `--out-dir` (either `--flag v` or `--flag=v`) a directory under none of the run's declared
+`[outputs] roots` and not adopted. Reads the run record only, so it fires whether or not the directory still exists.
+Such a directory has no reference hashes, so `bth cold` cannot copy it (see **Output Tiering**). Fix: add it to
+`[outputs] roots` for future runs; `bth outputs adopt` it for a run that predates the standard.
+
+Triggered by: `bth lint` (Tier-2 advisory; scoped to the current project's slug, capped at 50)
 
 ### Sprint Audit Signals
 
