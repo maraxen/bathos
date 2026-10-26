@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import tomllib
 from collections.abc import Callable
@@ -25,6 +26,14 @@ class ValidationResult:
     #: a catalog, `[fork]`/`[[amendments]]` present without `format = 2`
     warnings: list[str] = field(default_factory=list)
 
+
+#: banner shown wherever amendments are rendered (spec 261026 D5)
+AMENDMENTS_BANNER = (
+    "Amendments record later evidence about a verdict. They do not change the run's recorded "
+    "outcome; only verdict_override does."
+)
+AMENDMENT_KINDS = ("distributional_outlier", "reanalysis", "correction")
+AMENDMENT_EFFECTS = ("verdict_unchanged", "verdict_contextualized", "verdict_changed")
 
 #: the postmortem file formats `parse_postmortem` accepts; absent `format` means 1
 POSTMORTEM_FORMATS = (1, 2)
@@ -79,6 +88,41 @@ class Postmortem:
     #: the raw `[fork]` table (format 2); checked by the near_bound discharge, not parsed here
     fork: dict = field(default_factory=dict)
     amendments: list[Amendment] = field(default_factory=list)
+
+
+def amendments_as_dicts(postmortem: Postmortem) -> list[dict]:
+    return [dataclasses.asdict(a) for a in postmortem.amendments]
+
+
+def removed_amendments(previous: list[dict], postmortem: Postmortem) -> list[str]:
+    """Amendments recorded by an earlier validation that this file no longer carries, as
+    "<analysis_run_id> (<kind>)" (the `amendment_removed` warning, log mode only)."""
+    current = {(a.analysis_run_id, a.kind) for a in postmortem.amendments}
+    return [
+        f"{a.get('analysis_run_id', '')} ({a.get('kind', '')})"
+        for a in previous
+        if (a.get("analysis_run_id", ""), a.get("kind", "")) not in current
+    ]
+
+
+def amendments_by_run(workspace_root: Path | str, run_ids) -> list[dict]:
+    """Amendments from every run-scoped postmortem under `workspace_root` whose run is in
+    `run_ids`, one dict per amendment with the postmortem's `run_id` (campaign review)."""
+    wanted = set(run_ids)
+    out: list[dict] = []
+    root = Path(workspace_root)
+    if not wanted or not root.exists():
+        return out
+    for pm_file in iter_project_files(
+        root, ".bth.postmortem.toml", event_name="postmortem.boundary_pruned"
+    ):
+        try:
+            pm = parse_postmortem(pm_file)
+        except Exception:
+            continue
+        if pm.run_id in wanted:
+            out += [{"run_id": pm.run_id, **d} for d in amendments_as_dicts(pm)]
+    return out
 
 
 def _parse_format(data: dict) -> int:
@@ -205,6 +249,7 @@ def postmortem_applied_event_data(postmortem: Postmortem, path: Path) -> dict:
         "has_anomalies": bool(postmortem.anomalies),
         "summary": postmortem.summary,
         "asset_links": postmortem.asset_links,
+        "amendments": amendments_as_dicts(postmortem),
     }
 
 
@@ -214,7 +259,7 @@ def validate_postmortem(
     run: Run | None = None,
     strict_files: bool = False,
     postmortem_path: Path | None = None,
-    run_lookup: Callable[[str], object | None] | None = None,  # noqa: ARG001 -- format-2 checks (T6)
+    run_lookup: Callable[[str], object | None] | None = None,
 ) -> ValidationResult:
     """Validate a postmortem. `run_lookup(run_id) -> Run | None` (unique-prefix resolution) feeds
     only the format-2 checks; format-1 files validate exactly as they always did."""
@@ -355,6 +400,9 @@ def validate_postmortem(
             "[fork]/[[amendments]] present but not enforced: add format = 2 to enable them"
         )
 
+    if postmortem.format == 2:
+        _validate_amendments(postmortem, run_lookup, errors, warnings, postmortem_path)
+
     ok = len(errors) == 0
     if ok and postmortem_path:
         event(
@@ -364,6 +412,70 @@ def validate_postmortem(
             sprint_id=None,
         )
     return ValidationResult(ok=ok, errors=errors, warnings=warnings)
+
+
+def _validate_amendments(
+    postmortem: Postmortem,
+    run_lookup: Callable[[str], object | None] | None,
+    errors: list[ValidationError],
+    warnings: list[str],
+    postmortem_path: Path | None,
+) -> None:
+    """Format-2 `[[amendments]]` checks (spec 261026 D5). Run-independent rules always apply;
+    the ones that resolve a run id need `run_lookup` and become a warning without it."""
+
+    def err(message: str) -> None:
+        errors.append(ValidationError(message))
+        if postmortem_path:
+            event("postmortem.validate_error", path=str(postmortem_path), reason=message)
+
+    def resolve(run_id: str) -> tuple[str | None, str | None]:
+        """(full id or None, error text or None) for `run_id` through `run_lookup`."""
+        try:
+            found = run_lookup(run_id)  # type: ignore[misc]
+        except Exception as e:  # noqa: BLE001 -- an ambiguous prefix or a failed read
+            return None, str(e)
+        return (getattr(found, "id", None) if found is not None else None), None
+
+    skipped = False
+    for i, a in enumerate(postmortem.amendments):
+        where = f"amendments[{i}]"
+        if not a.analysis_run_id:
+            err(f"{where}: analysis_run_id is required")
+        if a.kind not in AMENDMENT_KINDS:
+            err(f"{where}: kind {a.kind!r} is not one of {list(AMENDMENT_KINDS)}")
+        if a.effect not in AMENDMENT_EFFECTS:
+            err(f"{where}: effect {a.effect!r} is not one of {list(AMENDMENT_EFFECTS)}")
+        if a.kind == "distributional_outlier" and not a.outlier_units:
+            err(f"{where}: a distributional_outlier amendment must name outlier_units")
+        if a.effect == "verdict_changed" and postmortem.verdict_override in ("", "none"):
+            err(f"{where}: effect verdict_changed requires a verdict_override other than none")
+        if postmortem.campaign_id and not a.amends_run_id:
+            err(f"{where}: amends_run_id is required in a campaign-scoped postmortem")
+        if not a.analysis_run_id:
+            continue
+        amended = a.amends_run_id or postmortem.run_id
+        if run_lookup is None:
+            skipped = True
+            continue
+        full, problem = resolve(a.analysis_run_id)
+        if problem is not None:
+            err(f"{where}: analysis_run_id {a.analysis_run_id!r} cannot be resolved: {problem}")
+            continue
+        if full is None:
+            err(
+                f"{where}: analysis_run_id {a.analysis_run_id!r} is not in the catalog; if this "
+                "is a log-mode run not yet ingested (SLURM / BTH_NO_INGEST), run `bth compact` "
+                "and retry"
+            )
+            continue
+        amended_full, _ = resolve(amended) if amended else (None, None)
+        if full == (amended_full or amended):
+            err(f"{where}: analysis_run_id must not equal the amended run ({amended!r})")
+    if skipped:
+        warnings.append(
+            "amendments: run-id checks skipped: no catalog to resolve analysis_run_id against"
+        )
 
 
 def find_postmortem(

@@ -1848,8 +1848,13 @@ def list_campaigns(
     return campaigns
 
 
-def review_campaign(db, campaign_id: str, catalog_dir: Path | None = None) -> dict:
-    """Generate campaign review: residual rate, bypass rate, outcome distribution, anomalies, and POPPER summary."""
+def review_campaign(
+    db, campaign_id: str, catalog_dir: Path | None = None, workspace_root: Path | None = None
+) -> dict:
+    """Generate campaign review: residual rate, bypass rate, outcome distribution, anomalies, and POPPER summary.
+
+    With `workspace_root`, also lists the postmortem `[[amendments]]` of member runs (spec
+    261026 D5); they never change a recorded outcome."""
     try:
         campaign_id = _resolve_campaign_id(db, campaign_id, catalog_dir=catalog_dir)
     except CampaignError as e:
@@ -2004,7 +2009,16 @@ def review_campaign(db, campaign_id: str, catalog_dir: Path | None = None) -> di
         "popper": popper_data,
         "blast_radius_status": blast_radius_status,
         "claim_blast_radius_status": claim_blast_radius_status,
+        "amendments": _member_amendments(workspace_root, [r[0] for r in rows]),
     }
+
+
+def _member_amendments(workspace_root: Path | None, run_ids: list[str]) -> list[dict]:
+    if workspace_root is None:
+        return []
+    from bathos.postmortem import amendments_by_run
+
+    return amendments_by_run(workspace_root, run_ids)
 
 
 def emit_campaign_report(

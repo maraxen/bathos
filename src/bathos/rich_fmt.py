@@ -224,6 +224,25 @@ def render_campaign_review(
         )
         console.print(anomaly_panel)
 
+    # Postmortem amendments (spec 261026 D5): later evidence, never a change of outcome.
+    amendments = review.get("amendments", [])
+    if amendments:
+        from bathos.postmortem import AMENDMENTS_BANNER
+
+        amend_table = Table(title="Amendments", caption=AMENDMENTS_BANNER)
+        for column in ("Run", "Analysis run", "Kind", "Effect", "Units", "Note"):
+            amend_table.add_column(column)
+        for a in amendments:
+            amend_table.add_row(
+                str(a.get("run_id", ""))[:8],
+                str(a.get("analysis_run_id", "")),
+                str(a.get("kind", "")),
+                str(a.get("effect", "")),
+                ", ".join(a.get("outlier_units", []) or []),
+                str(a.get("note", "")),
+            )
+        console.print(amend_table)
+
     # AC-12 slice (Phase 2a, #4552): informational, non-gating blast-radius status.
     # campaigns.review_campaign() always populates these keys when catalog_dir was
     # passed; .get() with a "clean" default covers the case it wasn't (e.g. a caller

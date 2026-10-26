@@ -117,6 +117,16 @@ def _shape_error(tool_name: str, code: BathosErrorCode, exc: BaseException) -> d
     }
 
 
+def _review_workspace() -> Path | None:
+    """The live workspace root for postmortem amendments in a campaign review, or None."""
+    try:
+        from bathos.workspace import resolve_workspace
+
+        return resolve_workspace().fs_root
+    except Exception:  # noqa: BLE001 -- a review without amendments beats no review
+        return None
+
+
 def _breakdown_refusal_result(exc: BreakdownRefused) -> dict:
     """Error envelope for a tool that catches `BreakdownRefused` itself: the specific code
     (breakdown_missing / sidecar_unverifiable / fork_record_missing), never the generic one."""
@@ -2221,7 +2231,9 @@ def campaign_review_tool(
 
     db = connect_catalog_db(cat_dir, read_only=True)
     try:
-        review = review_campaign(db, campaign_id, catalog_dir=cat_dir)
+        review = review_campaign(
+            db, campaign_id, catalog_dir=cat_dir, workspace_root=_review_workspace()
+        )
         return review
     finally:
         if db is not None:
@@ -3202,6 +3214,7 @@ def postmortem_validate_tool(
         ws = resolve_workspace().fs_root
 
     result = validate_postmortem(pm, workspace_root=ws, strict_files=strict_files)
+    warnings = list(result.warnings)
     if result.ok:
         if pm.run_id:
             # run.postmortem_applied (delivery step 2b / AC-25): behind the flag
@@ -3212,6 +3225,12 @@ def postmortem_validate_tool(
             cat_dir = _get_catalog_dir(catalog_dir or None)
             with unit_of_work(cat_dir):
                 if current_mode():
+                    # amendment_removed (spec 261026 D5, log mode only): an amendment an earlier
+                    # validation recorded that this file has dropped.
+                    from bathos.postmortem import removed_amendments
+
+                    dropped = removed_amendments(_previous_amendments(cat_dir, pm.run_id), pm)
+                    warnings += [f"amendment_removed: {item}" for item in dropped]
                     event_data = postmortem_applied_event_data(pm, pm_path)
                     # AC-17 finding: the legacy fold (compact.py's cwd walk)
                     # always stores `postmortem_path` workspace-RELATIVE
@@ -3233,8 +3252,40 @@ def postmortem_validate_tool(
             "run_id": pm.run_id,
             "campaign_id": pm.campaign_id,
             "hypothesis_status": pm.hypothesis_status,
+            "warnings": warnings,
         }
-    return {"validation_ok": False, "errors": [e.message for e in result.errors]}
+    return {
+        "validation_ok": False,
+        "errors": [e.message for e in result.errors],
+        "warnings": warnings,
+    }
+
+
+def _previous_amendments(cat_dir: Path, run_id: str) -> list[dict]:
+    """Amendments recorded by the latest `run.postmortem_applied` event for `run_id` ([] if none
+    or unreadable): the baseline `amendment_removed` is measured against."""
+    from bathos.runlog.index import connect_read
+    from bathos.runlog.ingest import _fetch_events_by_entity_key
+
+    try:
+        db = connect_read(cat_dir)
+    except Exception:  # noqa: BLE001 -- no readable index: nothing to compare against
+        return []
+    try:
+        events = [
+            e
+            for e in _fetch_events_by_entity_key(db, [run_id])
+            if e.get("kind") == "run.postmortem_applied"
+        ]
+    except Exception:  # noqa: BLE001
+        return []
+    finally:
+        db.close()
+    if not events:
+        return []
+    latest = max(events, key=lambda e: (e.get("ts", ""), e.get("eid", "")))
+    recorded = (latest.get("data") or {}).get("amendments")
+    return [a for a in recorded if isinstance(a, dict)] if isinstance(recorded, list) else []
 
 
 @cisternal.tool(registry="bathos-cli", name="postmortem_get", cli_group="postmortem", cli_name="show")
@@ -3299,11 +3350,22 @@ def postmortem_get_tool(
     validation = validate_postmortem(
         pm, workspace_root=ws, run=run_obj, strict_files=strict_files
     )
+    # Amendments render from the file whether or not validation passes (drift included), under a
+    # banner saying they never change the recorded outcome (spec 261026 D5).
+    from bathos.postmortem import AMENDMENTS_BANNER, amendments_as_dicts
+
+    amendment_fields = {
+        "format": pm.format,
+        "amendments": amendments_as_dicts(pm),
+        "amendments_banner": AMENDMENTS_BANNER if pm.amendments else None,
+        "warnings": list(validation.warnings),
+    }
     if not validation.ok:
         return {
             "error": "Validation failed: " + "; ".join(e.message for e in validation.errors),
             "hypothesis_status": pm.hypothesis_status,
             "verdict_override": pm.verdict_override,
+            **amendment_fields,
         }
 
     # Read-only: run.postmortem_applied is emitted by postmortem validate/register
@@ -3325,6 +3387,7 @@ def postmortem_get_tool(
         "discharges": pm.discharges,
         "violated_cards": pm.violated_cards,
         "path": str(pm_file),
+        **amendment_fields,
     }
 
 
