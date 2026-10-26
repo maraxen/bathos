@@ -64,19 +64,27 @@ logger = logging.getLogger(__name__)
 
 
 def _campaign_is_claim_bound(catalog_dir: Path, campaign_id: str) -> bool:
-    """Is the campaign claim-bound (`claim_path IS NOT NULL`)? A read that fails answers False:
-    the gate then stays advisory rather than refusing on a catalog it could not read."""
-    from bathos.campaigns import get_campaign
-    from bathos.index import connect_read
+    """Is the campaign claim-bound (`claim_path IS NOT NULL`)? A READ failure (unreadable catalog,
+    unknown campaign) answers False and is reported loudly (log, stderr and the advisory
+    channel): the gate then stays advisory, per spec D3, rather than refusing on a catalog it
+    could not read. Anything else is a bug and propagates."""
+    import duckdb
+
+    from bathos.campaigns import CampaignError, connect_catalog_db, get_campaign
 
     db = None
     try:
-        if (catalog_dir / "bathos.db").exists():
-            db = connect_read(catalog_dir, read_only=True)
+        # The flag-aware connection: the folded index after cut-over, else `bathos.db`.
+        db = connect_catalog_db(catalog_dir, read_only=True)
         campaign = get_campaign(db, campaign_id, catalog_dir=catalog_dir)
         return bool(campaign and campaign.claim_path)
-    except Exception as e:  # noqa: BLE001 -- see docstring
-        logger.warning(f"could not read the claim binding of campaign {campaign_id}: {e}")
+    except (duckdb.Error, OSError, CampaignError) as e:
+        message = (
+            f"could not read the claim binding of campaign {campaign_id[:8]} ({e}); the "
+            "breakdown gate for a claim-bound campaign is NOT applied to this run"
+        )
+        logger.warning(message)
+        _advise("claim_binding_unreadable", message, campaign_id=campaign_id)
         return False
     finally:
         if db is not None:
@@ -823,16 +831,16 @@ def _run_script_impl(
     # store the full UUID — never the raw prefix — on the run record.
     resolved_campaign_id: str | None = None
     if campaign_id:
-        from bathos.campaigns import CampaignError, _resolve_campaign_id
-        from bathos.index import connect_read
+        from bathos.campaigns import CampaignError, _resolve_campaign_id, connect_catalog_db
 
         db_path = catalog_dir / "bathos.db"
         campaign_db = None
         try:
-            if db_path.exists():
-                # read_only: SLURM array tasks otherwise take exclusive locks on the
-                # same bathos.db and fail with "Conflicting lock is held".
-                campaign_db = connect_read(catalog_dir, read_only=True)
+            # read_only: SLURM array tasks otherwise take exclusive locks on the same
+            # bathos.db and fail with "Conflicting lock is held". After cut-over this is the
+            # folded index (campaigns are event-only there, and `bathos.db` is frozen), the
+            # same connection `campaign add` resolves against.
+            campaign_db = connect_catalog_db(catalog_dir, read_only=True)
             resolved_campaign_id = _resolve_campaign_id(
                 campaign_db, campaign_id, catalog_dir=catalog_dir
             )
