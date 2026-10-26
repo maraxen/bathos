@@ -5,11 +5,11 @@ status: draft
 task_id: 261026_distributional-breakdown-debt
 date: '261026'
 backlog_ids: ''
-adversarial_review: 'cycles 1-3 challenger+defender done; v4 revision'
+adversarial_review: 'cycles 1-4 done; v5 revision'
 ---
 # Distributional breakdown, amendments and fork records for aggregate verdicts
 
-**v4** (after adversarial cycles 1-3; see §6). Debt #3045. Source postmortem: lathex
+**v5** (after adversarial cycles 1-4; see §6). Debt #3045. Source postmortem: lathex
 `postmortems/bathos-debt-distributional-breakdown.md` (commit a0b1f5a). Companion bug #3046
 (scaffold path) is fixed separately (commit 1ed684bb).
 
@@ -30,7 +30,7 @@ record of what was decided after a near-bound result, or why.
 User decision (261026): **WARNING everywhere; ERROR only where the run is cited (entry into a
 claim-bound campaign).** Internal validation runs stay unblocked.
 
-**Acceptance walk-through (78db9e04 under v4).** Before the run, `bth run` prints to stderr
+**Acceptance walk-through (78db9e04 under v5).** Before the run, `bth run` prints to stderr
 that `e_max_placement` and `e_max_iptm` gate outcomes with no `[breakdown]` (D2). Over MCP,
 the same advisories come back in the `run_tool` response's `warnings`. Had the author declared
 `[breakdown]` with `bound = 0.5`, the run would have recorded `e_max_placement__n_over = 1`
@@ -55,7 +55,7 @@ accepted, since the warning is the intervention point.
 | A8 | Log mode `run.started` stores `asdict(sidecar)`; its only reader, `fold_campaigns._sidecar_from_declaration`, rebuilds 7 fields (lossy) | verified | `runner.py:1117`, `runlog/emit.py:285`, `fold_campaigns.py:127-160` |
 | A9 | `git show refs/bathos/runs/<id>:<relpath>` recovers a committed sidecar | verified for the ref; **unverified** for an untracked sidecar in a WIP snapshot (T0) |
 | A10 | `[result_schema]` completeness is not checked on exit 0 | verified | `runner.py:316-330,1429,1452,1481-1483` |
-| A11 | `validate_postmortem` errors on `git_dirty`/HEAD drift whenever `run` is passed; the main callers pass none | verified | `postmortem.py:270-288`, `mcp.py:3179`, `obligations.py:277` |
+| A11 | `validate_postmortem` errors on `git_dirty`/HEAD drift whenever `run` is passed. `postmortem_validate_tool` and `discharge_from_postmortem` pass none; `postmortem_get_tool` **does** pass `run=` (drift already applies there and is unchanged) | verified (corrected cycle 4) | `postmortem.py:270-288`, `mcp.py:3179,3274`, `obligations.py:277` |
 | A12 | `ValidationResult` has no warnings channel | verified | `postmortem.py:20-22` |
 | A13 | `EXCEPTION_TO_CODE` is class-name keyed with one value; `campaign_add_tool` returns no `error_code`; `register_claim` raises `RuntimeError` | verified | `errors.py:105-119`, `mcp.py:4355-4395,3550`, `claim.py:645,706` |
 | A14 | Each `def check_*` in `linter.py` needs a rule card; `build_context` already holds the parsed sidecar | verified | `tests/test_corpus.py:226,241`, `corpus.py:314` |
@@ -165,10 +165,13 @@ no sidecar are outside this gate.
 non-empty with no run-time `waive`, or if the effective label names a non-residual
 `OutcomeSpec`, `[breakdown]` is declared, and summary columns are missing from the metadata.
 
-**Gate points** (each states its claim-bound predicate):
+**Gate points** (each states its claim-bound predicate). `register_claim` and conclude take
+membership from `union_campaign_member_ids`, so members that exist only in the cool tier
+are gated too.
 - `bth run --campaign`: after the sidecar parse (≈861), with a fresh read-only connection
   (the earlier one is closed at ≈806). Predicate: `claim_path IS NOT NULL`. It refuses before
-  compute is spent.
+  compute is spent. No run result exists yet, so only the **aggregate half** of
+  `breakdown_gate` applies here. The summary-column half runs at add, register and conclude.
 - `_add_run_to_campaign_impl`: widen the queries to also select `claim_path`,
   `sidecar_sha256` and `metadata`. Gate after the run-row read, **before** `threshold_set`
   (≈591). Predicate: `claim_path IS NOT NULL`.
@@ -216,7 +219,12 @@ note = "1 of 24 binders over; median binder max 0.004 A"
 ```
 
 **Validation plumbing.** `validate_postmortem(..., run_lookup=None)`; `ValidationResult` gains
-`warnings`. `run_lookup` feeds **only** format-2 checks. Callers keep passing `run=None`, so
+`warnings`. `run_lookup` feeds **only** format-2 checks. **Wiring:** the catalog lookup
+inside `postmortem_get_tool` (warm query, then `read_runs` fallback, ≈`mcp.py:3240-3270`) is
+factored into `_lookup_run(cat_dir, run_id) -> Run | None`. Both `postmortem_validate_tool`
+and `postmortem_get_tool` pass `run_lookup=partial(_lookup_run, cat_dir)`, while
+`postmortem_validate_tool` keeps `run=None`. `discharge_from_postmortem` (no catalog) keeps
+`run_lookup=None` and so gets warnings. Callers keep passing `run=None`, so
 the existing drift block (A11) does not newly fire on format-1 files. With `run_lookup`
 absent, run-dependent checks become warnings ("skipped: no catalog"). `[fork]` or
 `[[amendments]]` present without `format = 2` is a warning ("not enforced: add format = 2").
@@ -261,6 +269,10 @@ are updated to say so.
 
 **Opt-outs:** `BTH_OBLIGATION_NEAR_BOUND=0` (env wins, `config.py:76-78`), or durably
 `[obligations] near_bound = false` in `.bth.toml`. The latter is the form SLURM jobs honour.
+The opt-out turns off only the **run-time** advisory and ledger open. It never bypasses the
+claim-bound conclude check, which recomputes `near_bound` itself (see Conclude). The
+run-time open also sits in a `try` that swallows errors (`runner.py:1632`), so the ledger
+alone is not trusted for enforcement.
 
 **Test edits:**
 - `test_obligation_config.py:51,55` iterate `TRIGGERS - DEFAULT_ON`.
@@ -271,15 +283,22 @@ are updated to say so.
   config true.
 
 **Discharge wiring (A16 was unwired).** In `postmortem_validate_tool`, after `result.ok`
-(≈`mcp.py:3180`), call a new `obligations.discharge_validated(ws, pm, pm_path)`. It discharges
-the ids in `pm.discharges` without validating a second time. Its response gains
+(≈`mcp.py:3180`), call a new
+`obligations.discharge_validated(ws, pm, pm_path, catalog_dir)`. It discharges the ids in
+`pm.discharges` without validating a second time. `catalog_dir` comes from
+`_get_catalog_dir`, as the tool already resolves it, and serves the entity check.
+`discharged_by` is stored **workspace-relative** (POSIX) when the file is under `ws`, and
+absolute otherwise. It is never cwd-relative; the existing `discharge()` stores `by_path`
+verbatim (`obligations.py:258`), and this fixes that for all triggers. Its response gains
 `"discharged": [ids]`. `bth postmortem validate` wraps that tool (`cli_cyclopts.py:126`), so
 this one point covers the CLI and MCP. `discharge_from_postmortem` stays as the
 run-independent wrapper.
 
 **Entity check (new).** `discharge` does no entity check today. For `near_bound` ids it now
-requires either `pm.run_id` resolving to the obligation's run, or a campaign-scoped
-postmortem whose members include that run. Otherwise the id is reported as not discharged,
+requires one of two things:
+- `pm.run_id` resolves to the obligation's run, by prefix match through `catalog_dir`.
+- The postmortem is campaign-scoped and its members include that run
+  (`union_campaign_member_ids`). Otherwise the id is reported as not discharged,
 with a reason.
 
 **Fork checks are run-independent.** They read only `pm.fork` and `pm.discharges`; the
@@ -308,13 +327,20 @@ never fills `discharges`, per the ledger principle (`postmortem.py:358-361`,
 first; `find_run_for_scaffold` (`postmortem.py:397-420`) is widened to return it.
 
 **Conclude** (at the D3 insertion point): open `near_bound` obligations are listed for every
-campaign, as all obligations are. On a claim-bound confirmation/sequential campaign, either of
-these raises `BreakdownRefused(FORK_RECORD_MISSING)`:
-- an open `near_bound` obligation for a member. The message names
+campaign, as all obligations are. On a claim-bound confirmation/sequential campaign, the
+check runs per member. It recomputes `near_bound(resolve_run_sidecar(run), results)` from the
+run-time sidecar and `runs.metadata`, independent of whether the ledger entry was ever opened.
+If the recomputation is non-empty:
+- If no `run_<fullid>_near_bound` entry exists (opt-out, swallowed failure, or a pre-feature
+  run), it is opened now with `open_obligation`, which bypasses the flag, and the conclude
+  raises.
+- An open entry raises `BreakdownRefused(FORK_RECORD_MISSING)`. The message names
   `bth postmortem validate <path>`.
-- a discharged one whose postmortem has `cited = false`. That postmortem is read from
-  `Obligation.discharged_by` (`obligations.py:137`) and re-parsed, which also catches a file
-  edited after discharge. It is not found via `find_postmortem`.
+- A discharged entry is checked against the postmortem in `Obligation.discharged_by`
+  (`obligations.py:137`), resolved against the workspace root and re-parsed. That catches a
+  file edited after discharge, and the postmortem is not looked up via `find_postmortem`.
+  The conclude raises if that file is missing, unreadable or unparseable, if it lacks a valid
+  `[fork]`, or if it has `cited = false`.
 
 There is no refusal at add, since refusing there would bias which runs get included.
 
@@ -335,9 +361,9 @@ auto-computed breakdowns, aggregates in `[differential].metric` and benchmark me
 | T4 | Resolver, `breakdown_gate`, `BreakdownRefused` and codes/hints/catch sites, four gate points | `tests/test_breakdown_gate.py`: each gate; unbound accepts; run-time waiver accepts; post-hoc waiver refused; residual run accepted; no `threshold_set` after a refused add; link path never raises and the register backstop catches it; MCP `error_code`; `force_verdict` does not bypass; exploration conclude warns |
 | T5 | `ValidationResult.warnings`, `run_lookup` (format-2 only); `parse_postmortem` gains `format`, `fork`, `amendments` | format-1 files unchanged under drift |
 | T6 | D5 amendments + rendering | `tests/test_postmortem_amendments.py` |
-| T7a | Discharge wiring: `discharge_validated` called from `postmortem_validate_tool`; `"discharged"` in the response; near_bound entity check | `tests/test_obligation_discharge_wiring.py`: `bth postmortem validate` discharges; a postmortem for run X cannot discharge `run_Y_near_bound`; legacy triggers still discharge |
-| T7 | D6 `near_bound` (pure fn, run-end advisory outside the exploratory guard, `DEFAULT_ON` + `resolve_flag(default=)`, fork checks, scaffold, conclude) | 78db9e04 fixture (exploration, `bound = 0.5`, 0.521, `n_over = 1`, `n_units = 24`) opens `near_bound` without blocking; `n_units = 1` does not fire single_unit; margin trigger; NaN unevaluated; `bound = 0` validation; default-ON/opt-out tests and the edited closed-set tests; scaffold leaves `discharges` empty with a full-id checklist; **end-to-end: open near_bound → claim-bound confirmation conclude raises `FORK_RECORD_MISSING` → validate a format-2 `[fork]` postmortem → conclude proceeds**; `cited = false` raises; exploration-mode conclude warns |
-| T8 | Skills (`using-bathos`, `bathos-rigor-gates`), CHANGELOG | — |
+| T7 | D6 `near_bound` (pure fn, run-end advisory outside the exploratory guard, `TRIGGERS` gains `near_bound` — `open_obligation` rejects unknown triggers, `obligations.py:200` — `DEFAULT_ON` + `resolve_flag(default=)`, fork checks, scaffold) | 78db9e04 fixture (exploration, `bound = 0.5`, 0.521, `n_over = 1`, `n_units = 24`) opens `near_bound` without blocking; `n_units = 1` does not fire single_unit; margin trigger; NaN unevaluated; `bound = 0` validation; default-ON/opt-out tests and the edited closed-set tests (incl. the `TRIGGERS - DEFAULT_ON` comprehension at `test_obligation_triggers.py:110`); scaffold leaves `discharges` empty with a full-id checklist |
+| T7a (after T7) | Discharge wiring: `discharge_validated(ws, pm, pm_path, catalog_dir)` from `postmortem_validate_tool`; `"discharged"` in the response; workspace-relative `discharged_by`; near_bound entity check; `_lookup_run` factored and passed as `run_lookup`; conclude recomputation | `tests/test_obligation_discharge_wiring.py`: `bth postmortem validate` discharges; a postmortem for run X cannot discharge `run_Y_near_bound`; legacy triggers still discharge; D5 errors fire through the tool (not warnings); **end-to-end: open near_bound → claim-bound confirmation conclude raises `FORK_RECORD_MISSING` → validate a format-2 `[fork]` postmortem → conclude proceeds**; opt-out run (`near_bound = false`) still raises at claim-bound conclude; moved/deleted discharging postmortem raises; `cited = false` raises; exploration-mode conclude warns |
+| T8 | Skills (`using-bathos`, `bathos-rigor-gates`; edit both the source and the exported copy), CHANGELOG | — |
 
 Narrow pytest per task locally; full suite on CI; a reviewer with a different lens.
 
@@ -386,3 +412,13 @@ campaigns.py:1228 insertion point. v4 changes:
 - M5 effective label undefined for exploratory runs → `tentative_outcome` counts when `outcome = observed`.
 - m6 `waive` placement; m7 `observe.sanity` and a separate `[result_schema_meta]` table with validation; m8 `n_units >= 2`; m9 scaffold never fills `discharges`; m10 exact conclude insertion point outside the swallowing `try`; m11 full-id resolution.
 - New (defender): near_bound open sits outside the exploratory guard; discharge entity check.
+
+**Cycle 4**: challenger on v4 (`toolu_01PpRTzv2SY1dbnaLjv6LRH8.1.md`; 0 blocking, 3 major, 5
+minor). The orchestrator verified the anchors (`obligations.py:258`, the `runner.py:1632`
+swallow, `postmortem_get_tool` passing `run=` at `mcp.py:3274`) and revised without a
+separate defender, since every finding was a confirmed gap with no design dispute. v5
+changes:
+- M1 opt-out or swallowed open let a near-bound run into a claim-bound conclude → conclude recomputes `near_bound` from the resolved sidecar; opt-out is run-time only.
+- M2 no catalog handle; verbatim `discharged_by` → `catalog_dir` param; workspace-relative storage; unreadable discharging postmortem raises.
+- M3 nothing supplied `run_lookup` → `_lookup_run` factored and passed by both postmortem tools.
+- minors: T7 before T7a; `test_obligation_triggers.py:110`; aggregate-half-only at ≈861; cool-only members via `union_campaign_member_ids`; A11 corrected; T8 both skill copies.
