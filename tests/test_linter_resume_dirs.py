@@ -11,13 +11,24 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from bathos.linter import check_undeclared_resume_dirs
-from tests.test_output_tiers_adopt import RID, T0, World, world  # noqa: F401  (world is a fixture)
+from tests.test_output_tiers_adopt import RID, T0, World
 
 RID2 = "22222222-bbbb-4bbb-8bbb-222222222222"
 
 
-def _started(w: World, argv: list[str], *, roots: list[str] | None = None, run_id: str = RID) -> None:
+@pytest.fixture
+def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
+    w = World(tmp_path)
+    monkeypatch.chdir(w.elsewhere)
+    return w
+
+
+def _started(
+    w: World, argv: list[str], *, roots: list[str] | None = None, run_id: str = RID
+) -> None:
     data = {
         "id": run_id,
         "project_slug": "repo",
@@ -36,7 +47,11 @@ def _started(w: World, argv: list[str], *, roots: list[str] | None = None, run_i
 
 
 def _flagged(w: World) -> list[str]:
-    return [i.detail for i in check_undeclared_resume_dirs(w.catalog) if i.issue == "undeclared_resume_dir"]
+    return [
+        i.detail
+        for i in check_undeclared_resume_dirs(w.catalog)
+        if i.issue == "undeclared_resume_dir"
+    ]
 
 
 def test_an_undeclared_resume_dir_is_flagged_even_though_it_does_not_exist(world: World):
@@ -53,7 +68,11 @@ def test_an_undeclared_resume_dir_is_flagged_even_though_it_does_not_exist(world
 
 def test_a_dir_under_a_declared_root_is_not_flagged_in_either_flag_form(world: World):
     """Guards a lint that ignores the sidecar's [outputs] roots, or parses only `--flag value`."""
-    _started(world, ["python", "x.py", "--resume-dir", "out/cells", "--out-dir=out/tables"], roots=["out"])
+    _started(
+        world,
+        ["python", "x.py", "--resume-dir", "out/cells", "--out-dir=out/tables"],
+        roots=["out"],
+    )
     world.finished()
     world.ingest()
 

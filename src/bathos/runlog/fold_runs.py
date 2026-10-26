@@ -466,6 +466,24 @@ def fold_run(events: list[dict]) -> dict[str, Any]:
     for field, default in _GENERAL_FIELD_DEFAULTS.items():
         row.setdefault(field, default)
 
+    # run.declaration_backfilled (bathos.backfill): fills a claim field the run
+    # never recorded (pre-#3717 runs), from sidecar bytes the emitter proved
+    # hash to the run's own sidecar_sha256. It only fills a gap -- a value set
+    # by an import or a live event always stands -- and the latest backfill
+    # wins among backfills.
+    backfills = sorted(
+        (ev for ev in events if ev.get("kind") == "run.declaration_backfilled"),
+        key=lambda ev: (ev.get("ts", ""), ev.get("eid", "")),
+    )
+    for field in ("claim_discriminates", "claim_isolates"):
+        if row.get(field) is not None:
+            continue
+        for ev in reversed(backfills):
+            value = (ev.get("data") or {}).get(field)
+            if value is not None:
+                row[field] = value
+                break
+
     row["parity_run_type"] = _parity_run_type(claims)
 
     # output_metadata: latest run.outputs_hashed (clock-skew-sensitive field)
