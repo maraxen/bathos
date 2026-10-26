@@ -545,7 +545,7 @@ def _add_run_to_campaign_impl(
         gate_root = resolve_workspace(cwd or _Path.cwd()).fs_root
         refuse_on_findings(
             check_runs(
-                fetch_member_runs(db, [run_id], catalog_dir),
+                fetch_member_runs(db, [run_id], catalog_dir, log_mode=log_mode),
                 gate_root,
                 db=db,
                 log_mode=log_mode,
@@ -1281,7 +1281,7 @@ def _conclude_campaign_impl(
         )
 
         gate_findings = check_runs(
-            fetch_member_runs(db, members, catalog_dir),
+            fetch_member_runs(db, members, catalog_dir, log_mode=_log_mode(catalog_dir)),
             workspace_root,
             db=db,
             log_mode=_log_mode(catalog_dir),

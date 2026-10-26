@@ -225,13 +225,35 @@ def refuse_on_findings(findings: list[Finding], where: str) -> None:
     raise BreakdownRefused(code, format_findings(findings, where))
 
 
+def _run_finished_metadata(db, run_id: str) -> str | None:
+    """The result payload (`Run.metadata` JSON) the run recorded in its latest `run.finished`
+    event, or None. Log mode only: the folded index keeps `runs.metadata` for reap bookkeeping
+    alone, so the script's own results live only in the event."""
+    from bathos.runlog.ingest import _fetch_events_by_entity_key
+
+    try:
+        events = _fetch_events_by_entity_key(db, [run_id])
+    except Exception:  # noqa: BLE001 -- no events table: not log-mode data
+        return None
+    finished = sorted(
+        (e for e in events if e.get("kind") == "run.finished"),
+        key=lambda e: (e.get("ts", ""), e.get("eid", "")),
+    )
+    if not finished:
+        return None
+    metadata = (finished[-1].get("data") or {}).get("metadata")
+    return metadata if isinstance(metadata, str) else None
+
+
 def fetch_member_runs(
-    db, run_ids: list[str], catalog_dir: Path | None, *, cool_runs=None
+    db, run_ids: list[str], catalog_dir: Path | None, *, cool_runs=None, log_mode: bool = False
 ) -> dict[str, object | None]:
     """Rows for `run_ids` from the active backend, falling back to cool fragments (members that
     exist only in the cool tier are gated too). An id found nowhere maps to None.
 
     `cool_runs` lets a caller that already read the cool tier pass it in (one scan per conclude).
+    In `log_mode` a row's `metadata` is the result payload from its `run.finished` event, because
+    the index's `runs.metadata` does not carry results.
     """
     wanted = list(dict.fromkeys(run_ids))
     found: dict[str, object | None] = {}
@@ -249,6 +271,8 @@ def fetch_member_runs(
             except duckdb.Error:
                 continue
             for rid, outcome, tentative, sidecar_path, sha, metadata in rows:
+                if log_mode:
+                    metadata = _run_finished_metadata(db, rid) or metadata
                 found[rid] = SimpleNamespace(
                     id=rid,
                     outcome=outcome,

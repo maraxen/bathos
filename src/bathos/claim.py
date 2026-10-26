@@ -657,7 +657,7 @@ def register_claim(
         member_ids = union_campaign_member_ids(db, full_id, catalog_dir)
         refuse_on_findings(
             check_runs(
-                fetch_member_runs(db, member_ids, catalog_dir),
+                fetch_member_runs(db, member_ids, catalog_dir, log_mode=_log_mode(catalog_dir)),
                 workspace_root,
                 db=db,
                 log_mode=_log_mode(catalog_dir),
