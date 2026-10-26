@@ -235,6 +235,19 @@ def _actions_from_warm_verify(result, catalog_dir: Path) -> tuple[list[RepairAct
     warnings: list[str] = []
     db_path = catalog_dir / "bathos.db"
 
+    from bathos.runlog.mode import is_log_mode
+
+    if is_log_mode(catalog_dir):
+        # Debt #2819 (7): bathos.db is frozen after cut-over and compact refuses
+        # force_rebuild there, so a rebuild_warm action could only fail at apply.
+        if result.errors:
+            warnings.append(
+                f"Warm database {db_path} reported errors but is frozen in log mode; not "
+                "rebuilding it. index.db is the live read tier (delete it and run "
+                "`bth compact` to rebuild it from the logs)."
+            )
+        return actions, warnings
+
     for error in result.errors:
         if "Database integrity check failed" in error or "Could not open database" in error:
             detail = f"Warm database corrupt; rebuild needed: {db_path}"
@@ -730,6 +743,13 @@ def _handle_rebuild_warm(action: RepairAction, catalog_dir: Path) -> None:
     of bathos.db before deletion and rebuilds the database from cool fragments.
     """
     from bathos.compact import compact
+    from bathos.runlog.mode import is_log_mode
+
+    if is_log_mode(catalog_dir):
+        raise RuntimeError(
+            "rebuild_warm is not applicable in log mode: bathos.db is frozen and index.db "
+            "is rebuilt from the logs (delete it and run `bth compact`)."
+        )
 
     db_path = Path(action.path)
     logger.info(f"Rebuilding warm database: {db_path}")

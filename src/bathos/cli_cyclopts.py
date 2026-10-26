@@ -75,6 +75,7 @@ wire(
         "archive_artifact",
         "restore",
         "reap",
+        "backfill_declarations",
         "check",
         "sync",
         "init",
@@ -1512,7 +1513,11 @@ def migrate(
 
     from bathos.migrate import migrate_catalog
 
-    result = migrate_catalog(catalog_dir(), dry_run=dry_run, project=project)
+    try:
+        result = migrate_catalog(catalog_dir(), dry_run=dry_run, project=project)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        raise SystemExit(1) from None
     scope = f"project {project!r}" if project else "ALL projects"
     print(f"Scanned {result.scanned} fragments ({scope}).")
     print(f"  {result.already_current} already at current schema")

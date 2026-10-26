@@ -102,6 +102,7 @@ _RUN_KINDS = frozenset(
         "run.reap_reverted",
         "run.outputs_hashed",
         "run.postmortem_applied",
+        "run.declaration_backfilled",
         "run.imported",
         "run_reap.imported",
     }

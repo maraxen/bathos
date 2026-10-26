@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`bth backfill-declarations` and the `run.declaration_backfilled` event (log mode).** Runs recorded before #3717 (260729) carry NULL `claim_discriminates` / `claim_isolates` even when their sidecar declared them, so the Union Gate reports their clauses as unmapped and downgrades the campaign to `confounded`. The command finds those runs and fills a field only from sidecar bytes whose sha256 equals the run's recorded `sidecar_sha256`. It looks at the recorded `sidecar_path` first, then the same project-relative path under each registered local root (cluster runs record a remote path, debt #2225), then that path's git history. A sidecar edited after the run hashes differently and is never used. The fold applies the event only to a field still NULL, so a value the run recorded itself always stands. It is a dry run unless `--apply`; `--run-ids` (prefixes) and `--project` narrow it, and `--show all` lists every candidate with its status (`backfillable`, `no_declaration`, `unresolved`, `parse_error`). The event goes to the run's own project log. MCP mirror: `backfill_declarations` (write token). Legacy mode is refused: a warm-tier UPDATE is lost on the next rebuild from cool fragments.
+
+### Fixed
+
+- **`bth repair` no longer plans a warm-tier rebuild in log mode (debt #2819 item 7).** `bathos.db` is frozen after cut-over and `compact(force_rebuild=True)` refuses there, so a `rebuild_warm` action could only fail at apply. The scan now reports a warning pointing at rebuilding `index.db` instead, and the handler refuses explicitly.
+
 ## [0.13.0a7] - 2026-10-23
 
 ### Added
