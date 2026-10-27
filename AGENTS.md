@@ -1,6 +1,6 @@
 # bathos CLAUDE.md
 
-CLI tool: `bth` | Install: `uv tool install bathos` | Stack: Python 3.13, Typer, DuckDB, PyArrow, cisternal
+CLI tool: `bth` | Install: `uv tool install bathos` | Stack: Python 3.13, cyclopts, DuckDB, PyArrow, cisternal
 
 ## What This Is
 
@@ -119,15 +119,17 @@ fix = "str"
 | Sidecar lookup | `<script-stem>.bth.toml` adjacent to script | Consistent, predictable; resolve real path under symlinks |
 | v0.2 option | **Frontmatter** (`# ---bth---` YAML block in-file) | Cleaner long-term (one file, language-agnostic via comment); ship sidecar first |
 | Catalog storage | **DuckDB + Parquet** (not pyiceberg) | pyiceberg is for distributed data lakes; DuckDB+Parquet is simpler, no overhead |
-| FastMCP | Mirror CLI tool-for-tool | `cli.py` and `mcp.py` both thin layers over same core modules |
+| FastMCP | Mirror CLI tool-for-tool | `cli_cyclopts.py` and `mcp.py` both thin layers over same core modules |
 
 ### Source Layout
 
 ```
 src/bathos/
   __init__.py
-  cli.py          # Typer app (thin — calls core)
-  mcp.py          # FastMCP server (thin — mirrors cli.py)
+  cli_cyclopts.py # cyclopts app, the `bth` entry point (thin — calls core); no cli.py, no Typer
+  cli_common.py   # shared CLI helpers
+  cli_render.py   # CLI presentation for registry-driven cyclopts commands
+  mcp.py          # FastMCP server (thin — mirrors cli_cyclopts.py)
   schema.py       # Run dataclass, RUN_SCHEMA PyArrow schema
   catalog.py      # DuckDB+Parquet write/read (cool tier)
   compact.py      # cool → warm compaction
