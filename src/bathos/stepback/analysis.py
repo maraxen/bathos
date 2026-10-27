@@ -277,10 +277,20 @@ def validate_campaign_evidence(
     for cit in cited_evidence:
         cit_str = str(cit).strip()
         kind, ref = parse_citation(cit_str)
+        ref_target = ref.split("#")[0].strip()
+
+        # F-05: Empty reference target must be rejected (cannot match all runs/sidecars)
+        if not ref_target:
+            invalid_citations.append(cit_str)
+            if raise_on_invalid:
+                raise StepBackCitationInvalidError(
+                    f"Citation '{cit_str}' contains an empty reference target"
+                )
+            continue
 
         if kind == "run":
             # Check uuid or prefix
-            run_ref = ref.split("#")[0].strip()
+            run_ref = ref_target
             if run_ref in campaign_run_ids or any(rid.startswith(run_ref) for rid in campaign_run_ids):
                 valid_citations.append(cit_str)
             else:
@@ -291,7 +301,7 @@ def validate_campaign_evidence(
                     )
 
         elif kind == "sidecar":
-            sidecar_ref = ref.split("#")[0].strip()
+            sidecar_ref = ref_target
             if sidecar_ref in campaign_sidecars or any(sc.endswith(sidecar_ref) or sidecar_ref.endswith(sc) for sc in campaign_sidecars):
                 valid_citations.append(cit_str)
             else:
@@ -303,9 +313,9 @@ def validate_campaign_evidence(
 
         elif kind == "outcome":
             # outcome:<run_id>:<label>
-            parts = ref.split(":")
+            parts = ref_target.split(":")
             run_ref = parts[0].strip()
-            if run_ref in campaign_run_ids or any(rid.startswith(run_ref) for rid in campaign_run_ids):
+            if run_ref and (run_ref in campaign_run_ids or any(rid.startswith(run_ref) for rid in campaign_run_ids)):
                 valid_citations.append(cit_str)
             else:
                 invalid_citations.append(cit_str)
@@ -316,7 +326,7 @@ def validate_campaign_evidence(
 
         elif kind == "clause":
             # clause:<claim_path>#<clause_id>
-            clause_path = ref.split("#")[0].strip()
+            clause_path = ref_target
             if claim_path and (clause_path == claim_path or clause_path.endswith(str(claim_path)) or str(claim_path).endswith(clause_path)):
                 valid_citations.append(cit_str)
             elif not claim_path and clause_path.endswith(".toml"):
@@ -330,7 +340,7 @@ def validate_campaign_evidence(
                     )
 
         elif kind == "git":
-            git_ref = ref.split("#")[0].strip()
+            git_ref = ref_target
             if not campaign_git_shas or git_ref in campaign_git_shas or any(g.startswith(git_ref) for g in campaign_git_shas):
                 valid_citations.append(cit_str)
             else:
@@ -369,9 +379,40 @@ def check_reviewer_independence(
     - Agents that executed member runs (agent_mode, agent_id)
     - Authors of member runs (metadata.author, author)
     - Campaign creator
-    - Git commit authors
+    - Git commit authors (Name, email, and Full Name <email>)
     """
+    clean_reviewer = str(reviewer_id).strip().lower() if reviewer_id is not None else ""
+    if not clean_reviewer:
+        if raise_on_conflict:
+            raise StepBackInvalidSchemaError("Reviewer identity cannot be empty or whitespace")
+        return False
+
     forbidden_authors: set[str] = set()
+
+    def _add_forbidden(val: Any) -> None:
+        if not val:
+            return
+        s = str(val).strip().lower()
+        if not s:
+            return
+        forbidden_authors.add(s)
+        if "<" in s and ">" in s:
+            try:
+                name_part = s.split("<")[0].strip()
+                email_part = s.split("<")[1].split(">")[0].strip()
+                if name_part:
+                    forbidden_authors.add(name_part)
+                if email_part:
+                    forbidden_authors.add(email_part)
+            except Exception:
+                pass
+        with contextlib.suppress(Exception):
+            import email.utils
+            p_name, p_email = email.utils.parseaddr(str(val))
+            if p_name.strip():
+                forbidden_authors.add(p_name.strip().lower())
+            if p_email.strip():
+                forbidden_authors.add(p_email.strip().lower())
 
     # Campaign creator
     creator = None
@@ -380,7 +421,7 @@ def check_reviewer_independence(
     else:
         creator = getattr(campaign, "creator", None) or getattr(campaign, "author", None)
     if creator:
-        forbidden_authors.add(str(creator).strip().lower())
+        _add_forbidden(creator)
 
     for r in member_runs:
         if isinstance(r, dict):
@@ -406,13 +447,12 @@ def check_reviewer_independence(
             git_author = getattr(r, "git_author", None)
 
         if agent:
-            forbidden_authors.add(str(agent).strip().lower())
+            _add_forbidden(agent)
         if author:
-            forbidden_authors.add(str(author).strip().lower())
+            _add_forbidden(author)
         if git_author:
-            forbidden_authors.add(str(git_author).strip().lower())
+            _add_forbidden(git_author)
 
-    clean_reviewer = str(reviewer_id).strip().lower()
     is_independent = clean_reviewer not in forbidden_authors
 
     if not is_independent and raise_on_conflict:

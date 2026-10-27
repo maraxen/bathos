@@ -440,6 +440,9 @@ def record_stepback_review(
         )
         member_runs = [r for r in raw_runs.values() if r is not None] if isinstance(raw_runs, dict) else [r for r in raw_runs if r is not None]
 
+        if reviewer_id is not None and not str(reviewer_id).strip():
+            raise StepBackInvalidSchemaError("Reviewer identity cannot be empty or whitespace")
+
         eff_reviewer = reviewer_id or os.environ.get("AGENT_NAME") or os.environ.get("USER") or "reviewer"
         is_indep = check_reviewer_independence(
             eff_reviewer, camp, member_runs, raise_on_conflict=True
@@ -520,6 +523,7 @@ def record_stepback_review(
 
         # Process dissents
         dissent_objs: list[DissentRecord] = []
+        has_dissent_hold = False
         if dissents:
             for d in dissents:
                 d_obj = DissentRecord(
@@ -531,6 +535,16 @@ def record_stepback_review(
                     majority_rebuttal=d.get("majority_rebuttal", ""),
                 )
                 dissent_objs.append(d_obj)
+
+            # F-01: Minority dissent recommendation of HOLD, ESCALATE, or CONCLUDE_ABANDON
+            # (or any non-CONTINUE recommendation) automatically elevates escalation level to Level 2 Hold.
+            has_dissent_hold = any(
+                str(d.minority_recommendation).upper().strip() in ("HOLD", "ESCALATE", "CONCLUDE_ABANDON")
+                or str(d.minority_recommendation).upper().strip() != "CONTINUE"
+                for d in dissent_objs
+            )
+            if has_dissent_hold:
+                esc_level = max(esc_level, 2)
 
         now_iso = datetime.now(UTC).isoformat()
         rev_id = f"rev_{os.urandom(6).hex()}"
@@ -565,6 +579,8 @@ def record_stepback_review(
             # If review recommends CONTINUE (0) and state was Warning (1), de-escalate
             # If review recommends HOLD (2), escalate to Hold
             reason = f"Step-back review {rev_id} recommendation {final_rec}"
+            if has_dissent_hold and final_rec == "CONTINUE" and esc_level == 2:
+                reason = f"Step-back review {rev_id} minority dissent forced Level 2 Hold"
             new_state, esc_rec = transition_escalation(
                 state,
                 target_level=esc_level,

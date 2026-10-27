@@ -449,8 +449,8 @@ def signal_stepback_low_evidence_rate(
             valid_citations = 0
             for c in r.cited_evidence:
                 try:
-                    res = parse_citation(c)
-                    if res is not None:
+                    kind, ref = parse_citation(c)
+                    if kind != "unknown" and bool(ref.strip()):
                         valid_citations += 1
                 except Exception:
                     pass
@@ -628,7 +628,8 @@ def signal_stepback_turnaround_anomalies(
                 valid_cit = 0
                 for c in r.cited_evidence:
                     try:
-                        if parse_citation(c) is not None:
+                        kind, ref = parse_citation(c)
+                        if kind != "unknown" and bool(ref.strip()):
                             valid_cit += 1
                     except Exception:
                         pass

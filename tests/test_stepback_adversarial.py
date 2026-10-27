@@ -762,6 +762,50 @@ class TestReviewerIndependence(unittest.TestCase):
         # Independent outsider charlie passes
         self.assertTrue(check_reviewer_independence("charlie", camp, runs, raise_on_conflict=True))
 
+    def test_whitespace_reviewer_id_rejected(self):
+        """Whitespace-only reviewer identity is rejected in check_reviewer_independence and record_stepback_review."""
+        camp = MockCampaign("camp_ws", creator="other_user")
+        runs = [{"run_id": "r_1", "author": "alice"}]
+
+        self.assertFalse(check_reviewer_independence("   ", camp, runs))
+        self.assertFalse(check_reviewer_independence("", camp, runs))
+        with self.assertRaises(StepBackInvalidSchemaError):
+            check_reviewer_independence("   ", camp, runs, raise_on_conflict=True)
+
+        with (
+            tempfile.TemporaryDirectory() as tmp_d,
+            patch("bathos.stepback.engine.get_campaign", return_value=camp),
+            patch("bathos.stepback.engine.fetch_member_runs", return_value=runs),
+            self.assertRaises(StepBackInvalidSchemaError),
+        ):
+            record_stepback_review(
+                campaign_id="camp_ws",
+                path_kind="rubric",
+                scores={"question_validity": 4, "empirical_progress": 4, "theoretical_grounding": 4, "resource_efficiency": 4, "risk_confound_surface": 4},
+                reviewer_id="   ",
+                catalog_dir=Path(tmp_d),
+            )
+
+    def test_git_author_name_and_email_forbidden(self):
+        """Git author Name and email are both unpacked into forbidden authors."""
+        camp = MockCampaign("camp_git", creator="other_user")
+        runs = [{"run_id": "r_1", "git_author": "Diana Prince <diana@themyscira.io>"}]
+
+        # Full string forbidden
+        with self.assertRaises(StepBackIndependenceViolationError):
+            check_reviewer_independence("Diana Prince <diana@themyscira.io>", camp, runs, raise_on_conflict=True)
+
+        # Name only forbidden
+        with self.assertRaises(StepBackIndependenceViolationError):
+            check_reviewer_independence("Diana Prince", camp, runs, raise_on_conflict=True)
+
+        # Email only forbidden
+        with self.assertRaises(StepBackIndependenceViolationError):
+            check_reviewer_independence("diana@themyscira.io", camp, runs, raise_on_conflict=True)
+
+        # Independent party permitted
+        self.assertTrue(check_reviewer_independence("Bruce Wayne", camp, runs, raise_on_conflict=True))
+
 
 class TestFloorVetoAndFlawCapping(unittest.TestCase):
     """Harness 7: Floor Veto & Flaw Capping in Rubrics."""
@@ -899,6 +943,9 @@ class TestPanelDissentAutomaticEscalation(unittest.TestCase):
                 )
 
         self.assertTrue(res["ok"])
+        self.assertEqual(res["escalation_level"], 2)
+        state_after = get_escalation_state(self.camp_id, catalog_dir=self.cat_dir)
+        self.assertEqual(state_after.current_level, 2)
         # Check review was recorded
         rev = list_reviews(campaign_id=self.camp_id, catalog_dir=self.cat_dir)[0]
         self.assertEqual(len(rev.dissents), 1)

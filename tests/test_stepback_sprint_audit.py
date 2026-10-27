@@ -236,3 +236,31 @@ def test_signal_18_turnaround_anomalies(mock_catalog: Path):
     assert res_warn.level == "WARNING"
     assert res_warn.value == 1.0
     assert "stepback_turnaround_anomalies detected" in res_warn.message
+
+
+def test_signal_16_invalid_citation_strings_trigger_warning(mock_catalog: Path):
+    db_path = mock_catalog / "bathos.db"
+    # Reviews with invalid citation strings like ["foo", "bar"] must have valid_citations == 0 (< 2)
+    for i in range(4):
+        r = StepBackReview(
+            review_id=f"rev_bogus_{i}",
+            campaign_id="camp_bogus",
+            project_slug="testproj2",
+            created_at=f"2026-10-27T10:0{i}:00Z",
+            reviewer_id=f"r_{i}",
+            reviewer_kind="human",
+            is_independent=True,
+            path_kind="rubric",
+            input_snapshot_sha256="sha",
+            input_snapshot="{}",
+            recommendation="CONTINUE",
+            escalation_level=0,
+            cited_evidence=["foo", "bar"],
+        )
+        save_review_cool(r, mock_catalog)
+
+    res = signal_stepback_low_evidence_rate("testproj2", db_path, catalog_dir=mock_catalog)
+    assert res.level == "WARNING"
+    assert res.value == 1.0
+    assert "4/4 reviews lack >= 2 valid citations" in res.message
+

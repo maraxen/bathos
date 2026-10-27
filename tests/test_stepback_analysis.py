@@ -188,6 +188,25 @@ def test_campaign_evidence_verification_and_laundering_rejection():
             member_runs,
         )
 
+    # F-05: Empty prefix citations rejected
+    for empty_cit in ["run:", "run:   ", "sidecar:", "sidecar:   ", "clause:", "git:"]:
+        with pytest.raises(StepBackCitationInvalidError, match="empty reference target"):
+            validate_campaign_evidence(
+                [empty_cit, "run:run_nvt_001"],
+                campaign,
+                member_runs,
+            )
+
+    val_res, inval_res = validate_campaign_evidence(
+        ["run:", "run:run_nvt_001"],
+        campaign,
+        member_runs,
+        min_citations=1,
+        raise_on_invalid=False,
+    )
+    assert val_res == ["run:run_nvt_001"]
+    assert inval_res == ["run:"]
+
 
 def test_insufficient_evidence_threshold():
     campaign = {"id": "camp_nvt"}
@@ -201,7 +220,7 @@ def test_insufficient_evidence_threshold():
 def test_reviewer_independence():
     campaign = {"id": "camp_nvt", "creator": "alice"}
     member_runs = [
-        {"run_id": "r1", "agent_mode": "agent_alpha", "metadata": {"author": "bob"}},
+        {"run_id": "r1", "agent_mode": "agent_alpha", "metadata": {"author": "bob"}, "git_author": "Diana Prince <diana@themyscira.io>"},
     ]
 
     # alice (creator) is forbidden
@@ -213,12 +232,25 @@ def test_reviewer_independence():
     # bob (run author) is forbidden
     assert not check_reviewer_independence("bob", campaign, member_runs)
 
+    # F-04: git_author name, email, and full string are all forbidden
+    assert not check_reviewer_independence("Diana Prince", campaign, member_runs)
+    assert not check_reviewer_independence("diana@themyscira.io", campaign, member_runs)
+    assert not check_reviewer_independence("Diana Prince <diana@themyscira.io>", campaign, member_runs)
+
+    # F-03: whitespace-only reviewer ID is rejected
+    assert not check_reviewer_independence("   ", campaign, member_runs)
+    assert not check_reviewer_independence("", campaign, member_runs)
+    with pytest.raises(StepBackInvalidSchemaError, match="empty or whitespace"):
+        check_reviewer_independence("   ", campaign, member_runs, raise_on_conflict=True)
+
     # Independent third party (charlie) is independent
     assert check_reviewer_independence("charlie", campaign, member_runs)
 
     # Conflict raises if requested
     with pytest.raises(StepBackIndependenceViolationError, match="conflict of interest"):
         check_reviewer_independence("alice", campaign, member_runs, raise_on_conflict=True)
+    with pytest.raises(StepBackIndependenceViolationError, match="conflict of interest"):
+        check_reviewer_independence("Diana Prince", campaign, member_runs, raise_on_conflict=True)
 
 
 def test_mode_prompts_replicate_and_unfalsifiable_inquiry():
