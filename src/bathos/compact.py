@@ -862,6 +862,16 @@ def _ingest_anchor_fragments(con: duckdb.DuckDBPyConnection, catalog_dir: Path) 
     return len(records)
 
 
+def _ingest_stepback_fragments(con: duckdb.DuckDBPyConnection, catalog_dir: Path) -> tuple[int, int]:
+    """Re-derive warm stepback_reviews and stepback_escalations from cool fragments.
+
+    Spec 261027 Section 8.2 & 8.3.
+    """
+    from bathos.stepback.catalog import ingest_stepback_fragments
+
+    return ingest_stepback_fragments(con, catalog_dir)
+
+
 def _compact_log_mode(catalog_dir: Path, force_rebuild: bool, start_time: float) -> CompactResult:
     """`bth compact` after cutover: fold new log events into `index.db`.
 
@@ -1071,6 +1081,10 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
         # pattern as trust_ledger above. Unconditional, cheap no-op if no
         # archived_items/ fragments exist, fires on force_rebuild too.
         _ingest_archived_item_fragments(con, catalog_dir)
+
+        # Step-back reviews & escalations (spec 261027 Section 8.2/8.3): re-derive
+        # stepback_reviews and stepback_escalations from cool-tier fragments.
+        _ingest_stepback_fragments(con, catalog_dir)
 
         # Track ingested and skipped counts
         ingested = 0

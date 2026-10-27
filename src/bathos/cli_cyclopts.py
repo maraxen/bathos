@@ -16,6 +16,7 @@ caught immediately rather than silently absent from the app.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
@@ -1925,6 +1926,328 @@ def catalog_version_cmd() -> None:
             con.close()
     else:
         print("Warm DB: not yet created (run bth compact).")
+
+
+# ---------------------------------------------------------------------------
+# Step-Back Reviews CLI (spec 261027 Section 7.1)
+# ---------------------------------------------------------------------------
+
+stepback_app = cyclopts.App(name="stepback", help="Step-back review and escalation subsystem.")
+app.command(stepback_app)
+
+
+@stepback_app.command(name="status")
+def stepback_status_cmd(
+    campaign_id: str,
+    *,
+    catalog_dir: str = "",
+    verbose: bool = False,
+    json_output: bool = False,
+) -> None:
+    """Query current step-back review and escalation status for a campaign."""
+    from bathos.stepback.engine import get_stepback_status
+
+    cat_p = Path(catalog_dir) if catalog_dir else None
+    try:
+        res = get_stepback_status(campaign_id, catalog_dir=cat_p, verbose=verbose)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+
+    if json_output:
+        print(json.dumps(res, indent=2, default=str))
+        return
+
+    level_names = {0: "Nominal", 1: "Warning", 2: "Hold", 3: "Human Chair Escalation"}
+    lvl = res["escalation_level"]
+    lvl_name = level_names.get(lvl, f"Level {lvl}")
+    print(f"Step-Back Status: Campaign '{res['campaign_id']}'")
+    print(f"  Escalation Level: {lvl} ({lvl_name})")
+    print(f"  Hold Active:      {res['hold_active']}")
+    print(f"  Active Triggers:  {', '.join(res['active_triggers']) if res['active_triggers'] else 'none'}")
+    print(f"  Review Count:     {res['review_count']}")
+    if res["latest_recommendation"]:
+        print(f"  Latest Verdict:   {res['latest_recommendation']}")
+
+
+@stepback_app.command(name="run")
+def stepback_run_cmd(
+    campaign_id: str,
+    *,
+    catalog_dir: str = "",
+    window: int = 5,
+    dry_run: bool = False,
+    json_output: bool = False,
+) -> None:
+    """Evaluate event triggers for a campaign and report active triggers."""
+    from bathos.stepback.engine import run_stepback_triggers
+
+    cat_p = Path(catalog_dir) if catalog_dir else None
+    try:
+        res = run_stepback_triggers(
+            campaign_id, catalog_dir=cat_p, window=window, dry_run=dry_run
+        )
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+
+    if json_output:
+        print(json.dumps(res, indent=2, default=str))
+        return
+
+    print(f"Event Trigger Evaluation: Campaign '{campaign_id}'")
+    print(f"  Fired:           {res['fired']}")
+    print(f"  Active Triggers: {', '.join(res['active_triggers']) if res['active_triggers'] else 'none'}")
+
+
+@stepback_app.command(name="trigger")
+def stepback_trigger_cmd(
+    campaign_id: str,
+    *,
+    catalog_dir: str = "",
+    window: int = 5,
+    dry_run: bool = False,
+    json_output: bool = False,
+) -> None:
+    """Evaluate event triggers for a campaign (alias for 'run')."""
+    stepback_run_cmd(
+        campaign_id,
+        catalog_dir=catalog_dir,
+        window=window,
+        dry_run=dry_run,
+        json_output=json_output,
+    )
+
+
+@stepback_app.command(name="record")
+def stepback_record_cmd(
+    campaign_id: str,
+    *,
+    path_kind: str = "rubric",
+    rubric_id: str = "",
+    scores: str = "",
+    mode: str = "",
+    narrative: str = "",
+    evidence: str = "",
+    recommendation: str = "",
+    reviewer_id: str = "",
+    reviewer_kind: str = "human",
+    catalog_dir: str = "",
+    json_output: bool = False,
+) -> None:
+    """Record a completed step-back review."""
+    from bathos.stepback.engine import record_stepback_review
+
+    cat_p = Path(catalog_dir) if catalog_dir else None
+
+    # Parse scores
+    scores_dict: dict[str, int] | None = None
+    if scores:
+        scores_text = scores
+        try:
+            if len(scores) < 260 and Path(scores).is_file():
+                scores_text = Path(scores).read_text(encoding="utf-8")
+        except OSError:
+            pass
+        try:
+            scores_dict = json.loads(scores_text)
+        except Exception:
+            scores_dict = {}
+            for pair in scores_text.split(","):
+                if "=" in pair:
+                    k, v = pair.split("=", 1)
+                    scores_dict[k.strip()] = int(v.strip())
+
+    # Parse narrative
+    narrative_dict: dict[str, str] | None = None
+    if narrative:
+        narrative_text = narrative
+        try:
+            if len(narrative) < 260 and Path(narrative).is_file():
+                narrative_text = Path(narrative).read_text(encoding="utf-8")
+        except OSError:
+            pass
+        try:
+            narrative_dict = json.loads(narrative_text)
+        except Exception:
+            narrative_dict = {"narrative": narrative_text}
+
+    # Parse evidence
+    evidence_list: list[str] = []
+    if evidence:
+        evidence_list = [e.strip() for e in evidence.split(",") if e.strip()]
+
+    try:
+        res = record_stepback_review(
+            campaign_id,
+            path_kind=path_kind,
+            rubric_id=rubric_id or None,
+            scores=scores_dict,
+            mode=mode or None,
+            narrative=narrative_dict,
+            evidence=evidence_list,
+            reviewer_id=reviewer_id or None,
+            reviewer_kind=reviewer_kind,
+            recommendation=recommendation or None,
+            catalog_dir=cat_p,
+        )
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+
+    if json_output:
+        print(json.dumps(res, indent=2, default=str))
+        return
+
+    print(
+        f"Recorded step-back review {res['review_id']}: recommendation={res['recommendation']}, "
+        f"escalation_level={res['escalation_level']}"
+    )
+
+
+@stepback_app.command(name="review")
+def stepback_review_cmd(
+    campaign_id: str,
+    *,
+    path_kind: str = "rubric",
+    rubric_id: str = "",
+    scores: str = "",
+    mode: str = "",
+    narrative: str = "",
+    evidence: str = "",
+    recommendation: str = "",
+    reviewer_id: str = "",
+    reviewer_kind: str = "human",
+    catalog_dir: str = "",
+    json_output: bool = False,
+) -> None:
+    """Record a completed step-back review (alias for 'record')."""
+    stepback_record_cmd(
+        campaign_id,
+        path_kind=path_kind,
+        rubric_id=rubric_id,
+        scores=scores,
+        mode=mode,
+        narrative=narrative,
+        evidence=evidence,
+        recommendation=recommendation,
+        reviewer_id=reviewer_id,
+        reviewer_kind=reviewer_kind,
+        catalog_dir=catalog_dir,
+        json_output=json_output,
+    )
+
+
+@stepback_app.command(name="escalate")
+def stepback_escalate_cmd(
+    campaign_id: str,
+    target_level: int,
+    *,
+    reason: str = "",
+    catalog_dir: str = "",
+    json_output: bool = False,
+) -> None:
+    """Escalate a campaign to a specified level (1, 2, or 3)."""
+    from bathos.stepback.engine import escalate_stepback
+
+    cat_p = Path(catalog_dir) if catalog_dir else None
+    try:
+        res = escalate_stepback(
+            campaign_id,
+            target_level=target_level,
+            reason=reason or f"Escalated via CLI to Level {target_level}",
+            catalog_dir=cat_p,
+            opened_by_kind="human",
+        )
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+
+    if json_output:
+        print(json.dumps(res, indent=2, default=str))
+        return
+
+    print(
+        f"Escalated campaign '{campaign_id}' to Level {res['current_level']} "
+        f"(escalation_id: {res['escalation_id']})"
+    )
+
+
+@stepback_app.command(name="show")
+def stepback_show_cmd(
+    review_id: str = "",
+    *,
+    campaign: str = "",
+    catalog_dir: str = "",
+    json_output: bool = False,  # noqa: ARG001
+) -> None:
+    """Show details of a step-back review or reviews in a campaign."""
+    from bathos.stepback.engine import show_stepback
+
+    cat_p = Path(catalog_dir) if catalog_dir else None
+    rev_id = review_id or None
+    camp_id = campaign or None
+
+    try:
+        res = show_stepback(
+            campaign_id=camp_id,
+            review_id=rev_id,
+            catalog_dir=cat_p,
+        )
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+
+    print(json.dumps(res, indent=2, default=str))
+
+
+@stepback_app.command(name="resolve")
+def stepback_resolve_cmd(
+    campaign_id: str = "",
+    *,
+    escalation_id: str = "",
+    deescalate_to: int = 0,
+    note: str = "",
+    as_human_chair: bool = False,
+    chair_token: str = "",
+    catalog_dir: str = "",
+    json_output: bool = False,
+) -> None:
+    """Resolve or de-escalate an active campaign escalation.
+
+    Level 3 resolution requires interactive TTY or valid chair token (~/.bth/chair_token).
+    Autonomous agent environments are strictly forbidden from overriding Level 3.
+    """
+    from bathos.stepback.engine import resolve_stepback
+
+    cat_p = Path(catalog_dir) if catalog_dir else None
+    camp_id = campaign_id or None
+    esc_id = escalation_id or None
+
+    try:
+        res = resolve_stepback(
+            campaign_id=camp_id,
+            escalation_id=esc_id,
+            deescalate_to=deescalate_to,
+            note=note,
+            as_human_chair=as_human_chair,
+            chair_token=chair_token or None,
+            interactive_tty=sys.stdin.isatty(),
+            catalog_dir=cat_p,
+            strict_agent_refusal=False,
+        )
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+
+    if json_output:
+        print(json.dumps(res, indent=2, default=str))
+        return
+
+    print(
+        f"Resolved escalation {res['escalation_id']}: status={res['status']}, "
+        f"deescalated_to={res['deescalated_to']}"
+    )
 
 
 if __name__ == "__main__":

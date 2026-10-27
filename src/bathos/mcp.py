@@ -16,7 +16,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import cisternal
 import cyclopts
@@ -45,7 +45,7 @@ from bathos.checker import check_runs
 from bathos.cli_common import normalise_output_paths, normalise_tags, require_project_slug
 from bathos.compact import compact as compact_catalog
 from bathos.config import default_catalog_dir, find_project_config, load_project_config
-from bathos.errors import RESOLUTION_HINTS, BathosErrorCode
+from bathos.errors import RESOLUTION_HINTS, BathosErrorCode, StepBackError
 from bathos.export import ExportError
 from bathos.figure_registry import FigureEntrySchemaError, register_figure_entry
 from bathos.index import connect_read
@@ -204,6 +204,11 @@ def traced_tool(fn):
 
         except McpAuthError as e:
             return _shape_error(tool_name, BathosErrorCode.AUTH_ERROR, e)
+        except StepBackError as e:
+            from bathos.errors import EXCEPTION_TO_CODE
+
+            code = EXCEPTION_TO_CODE.get(type(e).__name__, BathosErrorCode.INTERNAL)
+            return _shape_error(tool_name, code, e)
         except GateError as e:
             return _shape_error(tool_name, BathosErrorCode.INTERNAL, e)
         except CatalogError as e:
@@ -5900,6 +5905,169 @@ async def reference_applicable(script: str, catalog_dir: str | None = None) -> d
     return reference_applicable_tool(script, catalog_dir=catalog_dir)
 
 
+# ---------------------------------------------------------------------------
+# Step-Back Reviews & Escalation Subsystem (spec 261027 Section 7.1)
+# ---------------------------------------------------------------------------
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def stepback_status(campaign_id: str, verbose: bool = False) -> dict:
+    """Query current step-back review and escalation status for a campaign."""
+    from bathos.stepback.engine import get_stepback_status
+
+    return get_stepback_status(campaign_id=campaign_id, verbose=verbose)
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def stepback_trigger(campaign_id: str, window: int = 5, dry_run: bool = False) -> dict:
+    """Evaluate event triggers for a campaign and report active triggers."""
+    from bathos.stepback.engine import run_stepback_triggers
+
+    return run_stepback_triggers(campaign_id=campaign_id, window=window, dry_run=dry_run)
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def stepback_run(
+    campaign_id: str,
+    reviewer_id: str | None = None,  # noqa: ARG001 -- Spec Section 7.1 signature parity
+) -> dict:
+    """Run step-back evaluation triggers for a campaign (alias for stepback_trigger)."""
+    from bathos.stepback.engine import run_stepback_triggers
+
+    return run_stepback_triggers(campaign_id=campaign_id)
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def stepback_record(
+    campaign_id: str,
+    path_kind: str = "rubric",
+    rubric_id: str | None = None,
+    scores: dict[str, int] | None = None,
+    mode: str | None = None,
+    narrative: dict[str, str] | None = None,
+    evidence: list[str] | None = None,
+    reviewer_id: str | None = None,
+    reviewer_kind: str = "agent",
+    recommendation: str | None = None,
+    dissents: list[dict[str, Any]] | None = None,
+    input_snapshot_sha256: str | None = None,
+    dispatched_at: str | None = None,
+) -> dict:
+    """Execute and record a full step-back review."""
+    from bathos.stepback.engine import record_stepback_review
+
+    return record_stepback_review(
+        campaign_id=campaign_id,
+        path_kind=path_kind,
+        rubric_id=rubric_id,
+        scores=scores,
+        mode=mode,
+        narrative=narrative,
+        evidence=evidence,
+        reviewer_id=reviewer_id,
+        reviewer_kind=reviewer_kind,
+        recommendation=recommendation,
+        dissents=dissents,
+        input_snapshot_sha256=input_snapshot_sha256,
+        dispatched_at=dispatched_at,
+    )
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def stepback_review(
+    campaign_id: str,
+    path_kind: str = "rubric",
+    rubric_id: str | None = None,
+    scores: dict[str, int] | None = None,
+    mode: str | None = None,
+    narrative: dict[str, str] | None = None,
+    evidence: list[str] | None = None,
+    reviewer_id: str | None = None,
+    reviewer_kind: str = "agent",
+    recommendation: str | None = None,
+    dissents: list[dict[str, Any]] | None = None,
+    input_snapshot_sha256: str | None = None,
+    dispatched_at: str | None = None,
+) -> dict:
+    """Execute and record a full step-back review (alias for stepback_record)."""
+    return await stepback_record(
+        campaign_id=campaign_id,
+        path_kind=path_kind,
+        rubric_id=rubric_id,
+        scores=scores,
+        mode=mode,
+        narrative=narrative,
+        evidence=evidence,
+        reviewer_id=reviewer_id,
+        reviewer_kind=reviewer_kind,
+        recommendation=recommendation,
+        dissents=dissents,
+        input_snapshot_sha256=input_snapshot_sha256,
+        dispatched_at=dispatched_at,
+    )
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def stepback_escalate(campaign_id: str, target_level: int, reason: str) -> dict:
+    """Escalate a campaign to a target level."""
+    from bathos.stepback.engine import escalate_stepback
+
+    return escalate_stepback(
+        campaign_id=campaign_id,
+        target_level=target_level,
+        reason=reason,
+        opened_by_kind="agent",
+    )
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def stepback_show(
+    campaign_id: str | None = None,
+    review_id: str | None = None,
+    json_format: bool = False,  # noqa: ARG001
+) -> dict:
+    """Show details of a step-back review or campaign reviews."""
+    from bathos.stepback.engine import show_stepback
+
+    return show_stepback(campaign_id=campaign_id, review_id=review_id)
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def stepback_resolve(
+    campaign_id: str | None = None,
+    escalation_id: str | None = None,
+    deescalate_to: int = 0,
+    note: str = "",
+    as_human_chair: bool = False,
+    chair_token: str | None = None,
+) -> dict:
+    """Resolve or de-escalate an active campaign escalation.
+
+    INVIOLABLE HUMAN CHAIR INVARIANCE:
+    In FastMCP, callers are autonomous agents. Any attempt to resolve Level 3
+    is strictly and unconditionally refused.
+    """
+    from bathos.stepback.engine import resolve_stepback
+
+    return resolve_stepback(
+        campaign_id=campaign_id,
+        escalation_id=escalation_id,
+        deescalate_to=deescalate_to,
+        note=note,
+        as_human_chair=as_human_chair,
+        chair_token=chair_token,
+        strict_agent_refusal=True,
+    )
+
+
 if __name__ == "__main__":
     init_server_telemetry()
     app.run()
@@ -5986,6 +6154,14 @@ _WIRED = cisternal.wire(
         "new_experiment",
         "migrate_to_log",
         "consolidate_catalog",
+        "stepback_status",
+        "stepback_trigger",
+        "stepback_run",
+        "stepback_record",
+        "stepback_review",
+        "stepback_escalate",
+        "stepback_show",
+        "stepback_resolve",
     ],
 )
 

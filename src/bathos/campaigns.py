@@ -1577,6 +1577,41 @@ def _conclude_campaign_impl(
                 f"(advisory until {ENFORCE_FLAG}=1)"
             )
 
+    # ── STEPBACK REVIEW & ESCALATION GATE (Decision D1) ─────────────────
+    # If an unaddressed Level 2 Hold or Level 3 Escalation is active:
+    # Confirmation & sequential campaigns automatically downgrade conclusion verdict to 'confounded'
+    # unless force_verdict is specified (which logs stepback_status = "bypassed").
+    # Exploration campaigns emit a prominent warning banner without downgrade.
+    from bathos.stepback.catalog import get_escalation_state
+
+    esc_state = get_escalation_state(full_id, catalog_dir=catalog_dir, db=db)
+    stepback_bypassed = False
+    stepback_downgraded = False
+    if esc_state.current_level >= 2:
+        level_name = "Hold (Level 2)" if esc_state.current_level == 2 else "Human Chair Escalation (Level 3)"
+        eff_mode = campaign_mode
+        if eff_mode is None and catalog_dir is not None:
+            cool_c = next((c for c in read_cool_campaigns(catalog_dir) if c.id == full_id), None)
+            if cool_c is not None:
+                eff_mode = cool_c.mode
+        if eff_mode in ("confirmation", "sequential"):
+            if force_verdict:
+                print(
+                    f"WARNING: Step-back review {level_name} is active on campaign {full_id[:8]}! "
+                    "Bypassed via --force-verdict."
+                )
+                stepback_bypassed = True
+            else:
+                print(f"Step-back review gate: Campaign {full_id[:8]} has an active {level_name}")
+                print("Step-back review gate: verdict downgraded to 'confounded'")
+                outcome_label = "confounded"
+                stepback_downgraded = True
+        elif eff_mode == "exploration":
+            print(
+                f"WARNING: Campaign {full_id[:8]} has an active step-back {level_name} at conclusion "
+                "(exploration mode, no downgrade)"
+            )
+
     # OBLIGATION TRIGGER 2 (§5.2): the campaign concluded 'confounded' — whether the
     # researcher labelled it so directly, or one of the gates above downgraded it. Opened
     # AFTER the gate so a campaign cannot downgrade itself on an obligation this same
@@ -1662,6 +1697,7 @@ def _conclude_campaign_impl(
             "outcome_label": outcome_label,
             "conclusion": conclusion,
             "negative_check": negative_check,
+            "stepback_status": "bypassed" if stepback_bypassed else ("hold_downgraded" if stepback_downgraded else "nominal"),
         },
         legacy_write=_concluded_legacy_write,
         cwd=workspace_root,

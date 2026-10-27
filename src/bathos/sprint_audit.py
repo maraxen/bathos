@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -329,9 +330,335 @@ def signal_unarchived_stale_scripts(
     except Exception as e:
         return SignalResult(
             signal="unarchived_stale_scripts_count",
-            value=None,
+            value=0.0,
             level="INFO",
             message=f"error computing unarchived_stale_scripts_count: {e}",
+        )
+
+
+def _count_telemetry_catalog_reads(catalog_dir: Path | None, t0: datetime, t1: datetime) -> int:
+    if catalog_dir is None:
+        return 0
+    logs_dir = catalog_dir / "logs"
+    if not logs_dir.exists():
+        return 0
+    reads = 0
+    for log_file in logs_dir.glob("events.*.jsonl"):
+        try:
+            for line in log_file.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                evt = json.loads(line)
+                name = str(evt.get("name") or evt.get("event") or evt.get("tool") or "")
+                if any(k in name.lower() for k in ("read", "query", "list", "get", "status")):
+                    evt_time_str = evt.get("timestamp") or evt.get("time") or evt.get("created_at")
+                    if evt_time_str:
+                        evt_time = datetime.fromisoformat(str(evt_time_str).replace("Z", "+00:00"))
+                        if t0 <= evt_time <= t1:
+                            reads += 1
+        except Exception:
+            continue
+    return reads
+
+
+def signal_stepback_unvarying_verdicts(
+    project_slug: str, db_path: Path, catalog_dir: Path | None = None  # noqa: ARG001 -- kept for API stability
+) -> SignalResult:
+    """Signal 15: stepback_unvarying_verdicts (spec 261027 Section 6.1).
+
+    Detects low score variance (sigma_S^2 < 0.005) or recommendation uniformity (U_rec == 1.0)
+    across N >= 4 reviews in the project.
+    """
+    try:
+        from bathos.stepback.catalog import list_reviews
+
+        reviews = list_reviews(catalog_dir=catalog_dir)
+        proj_reviews = [r for r in reviews if not r.project_slug or r.project_slug == project_slug]
+        n_reviews = len(proj_reviews)
+        if n_reviews < 4:
+            return SignalResult(
+                signal="stepback_unvarying_verdicts",
+                value=None,
+                level="INFO",
+                message=f"Project {project_slug}: insufficient step-back reviews ({n_reviews} < 4)",
+            )
+
+        scored = [r.composite_score for r in proj_reviews if r.composite_score is not None]
+        var = 0.0
+        if len(scored) >= 2:
+            mean_s = sum(scored) / len(scored)
+            var = sum((s - mean_s) ** 2 for s in scored) / (len(scored) - 1)
+
+        rec_counts: dict[str, int] = {}
+        for r in proj_reviews:
+            rec_counts[r.recommendation] = rec_counts.get(r.recommendation, 0) + 1
+        max_rec_count = max(rec_counts.values()) if rec_counts else 0
+        uniformity = max_rec_count / n_reviews
+
+        if (len(scored) >= 2 and var < 0.005) or uniformity >= 1.0:
+            val = var if (len(scored) >= 2 and var < 0.005) else uniformity
+            return SignalResult(
+                signal="stepback_unvarying_verdicts",
+                value=val,
+                level="WARNING",
+                message=(
+                    f"Project {project_slug}: stepback_unvarying_verdicts detected — "
+                    f"score variance {var:.4f} < 0.005 or uniformity {uniformity:.1%} == 100% "
+                    f"across {n_reviews} reviews"
+                ),
+            )
+        return SignalResult(
+            signal="stepback_unvarying_verdicts",
+            value=var,
+            level="OK",
+            message=f"Project {project_slug}: stepback_unvarying_verdicts nominal (var={var:.4f}, uniformity={uniformity:.1%})",
+        )
+    except Exception as e:
+        return SignalResult(
+            signal="stepback_unvarying_verdicts",
+            value=None,
+            level="INFO",
+            message=f"error computing stepback_unvarying_verdicts: {e}",
+        )
+
+
+def signal_stepback_low_evidence_rate(
+    project_slug: str, db_path: Path, catalog_dir: Path | None = None  # noqa: ARG001 -- kept for API stability
+) -> SignalResult:
+    """Signal 16: stepback_low_evidence_rate (spec 261027 Section 6.2).
+
+    Flags if > 15% of reviews lack >= 2 valid primary citations when total reviews >= 3.
+    """
+    try:
+        from bathos.stepback.analysis import parse_citation
+        from bathos.stepback.catalog import list_reviews
+
+        reviews = list_reviews(catalog_dir=catalog_dir)
+        proj_reviews = [r for r in reviews if not r.project_slug or r.project_slug == project_slug]
+        n_reviews = len(proj_reviews)
+        if n_reviews < 3:
+            return SignalResult(
+                signal="stepback_low_evidence_rate",
+                value=0.0,
+                level="INFO",
+                message=f"Project {project_slug}: insufficient step-back reviews ({n_reviews} < 3)",
+            )
+
+        low_ev_count = 0
+        for r in proj_reviews:
+            valid_citations = 0
+            for c in r.cited_evidence:
+                try:
+                    res = parse_citation(c)
+                    if res is not None:
+                        valid_citations += 1
+                except Exception:
+                    pass
+            if valid_citations < 2:
+                low_ev_count += 1
+
+        rate = low_ev_count / n_reviews
+        if rate > 0.15:
+            return SignalResult(
+                signal="stepback_low_evidence_rate",
+                value=rate,
+                level="WARNING",
+                message=(
+                    f"Project {project_slug}: stepback_low_evidence_rate {rate:.1%} > 15% "
+                    f"({low_ev_count}/{n_reviews} reviews lack >= 2 valid citations)"
+                ),
+            )
+        return SignalResult(
+            signal="stepback_low_evidence_rate",
+            value=rate,
+            level="OK",
+            message=f"Project {project_slug}: stepback_low_evidence_rate nominal ({rate:.1%})",
+        )
+    except Exception as e:
+        return SignalResult(
+            signal="stepback_low_evidence_rate",
+            value=None,
+            level="INFO",
+            message=f"error computing stepback_low_evidence_rate: {e}",
+        )
+
+
+def signal_stepback_ignored_escalations(
+    project_slug: str, db_path: Path, catalog_dir: Path | None = None
+) -> SignalResult:
+    """Signal 17: stepback_ignored_escalations (spec 261027 Section 6.3).
+
+    Flags if any active Level 2/3 escalation remains open > 7 days or has >= 3 subsequent runs.
+    """
+    try:
+        from bathos.stepback.catalog import list_escalations
+
+        escalations = list_escalations(catalog_dir=catalog_dir)
+        proj_escs = [
+            e
+            for e in escalations
+            if (not e.project_slug or e.project_slug == project_slug)
+            and e.level >= 2
+            and e.status == "active"
+        ]
+
+        if not proj_escs:
+            return SignalResult(
+                signal="stepback_ignored_escalations",
+                value=0.0,
+                level="OK",
+                message=f"Project {project_slug}: no active Level 2/3 escalations",
+            )
+
+        now = datetime.now(UTC)
+        ignored_count = 0
+
+        con = None
+        target_cat = catalog_dir or db_path.parent
+        if catalog_readable(target_cat):
+            try:
+                con = connect_read(target_cat, read_only=True)
+            except Exception:
+                con = None
+
+        try:
+            for esc in proj_escs:
+                opened_dt = datetime.fromisoformat(esc.opened_at.replace("Z", "+00:00"))
+                age_days = (now - opened_dt).total_seconds() / 86400.0
+
+                subsequent_runs = 0
+                if con is not None:
+                    try:
+                        row = con.execute(
+                            """
+                            SELECT COUNT(*) FROM runs r
+                            JOIN campaign_runs cr ON r.id = cr.run_id
+                            WHERE (cr.campaign_id = ? OR cr.campaign_id LIKE ?)
+                            AND r.started_at > ?
+                            """,
+                            [esc.campaign_id, f"{esc.campaign_id}%", esc.opened_at],
+                        ).fetchone()
+                        if row:
+                            subsequent_runs = row[0]
+                    except Exception:
+                        pass
+
+                if age_days > 7.0 or subsequent_runs >= 3:
+                    ignored_count += 1
+        finally:
+            if con is not None:
+                con.close()
+
+        if ignored_count > 0:
+            return SignalResult(
+                signal="stepback_ignored_escalations",
+                value=float(ignored_count),
+                level="WARNING",
+                message=(
+                    f"Project {project_slug}: stepback_ignored_escalations detected — "
+                    f"{ignored_count} active Level 2/3 escalation(s) open > 7d or >= 3 subsequent runs"
+                ),
+            )
+        return SignalResult(
+            signal="stepback_ignored_escalations",
+            value=0.0,
+            level="OK",
+            message=f"Project {project_slug}: active escalations within nominal response window",
+        )
+    except Exception as e:
+        return SignalResult(
+            signal="stepback_ignored_escalations",
+            value=None,
+            level="INFO",
+            message=f"error computing stepback_ignored_escalations: {e}",
+        )
+
+
+def signal_stepback_turnaround_anomalies(
+    project_slug: str, db_path: Path, catalog_dir: Path | None = None  # noqa: ARG001 -- kept for API stability
+) -> SignalResult:
+    """Signal 18: stepback_turnaround_anomalies (spec 261027 Section 6.4).
+
+    Flags automated agent reviews completed in < 2.0s or with > 500 words and 0 telemetry catalog reads.
+    Gated by presence of dispatched_at timestamp and telemetry enabled.
+    """
+    try:
+        if os.environ.get("BTH_NO_TELEMETRY") == "1":
+            return SignalResult(
+                signal="stepback_turnaround_anomalies",
+                value=0.0,
+                level="INFO",
+                message=f"Project {project_slug}: telemetry disabled via BTH_NO_TELEMETRY=1",
+            )
+
+        from bathos.stepback.analysis import parse_citation
+        from bathos.stepback.catalog import list_reviews
+
+        reviews = list_reviews(catalog_dir=catalog_dir)
+        agent_reviews = [
+            r
+            for r in reviews
+            if (not r.project_slug or r.project_slug == project_slug)
+            and r.reviewer_kind == "agent"
+            and r.dispatched_at is not None
+        ]
+
+        if not agent_reviews:
+            return SignalResult(
+                signal="stepback_turnaround_anomalies",
+                value=0.0,
+                level="OK",
+                message=f"Project {project_slug}: no agent reviews with dispatch timestamps",
+            )
+
+        anomaly_count = 0
+        for r in agent_reviews:
+            t_disp = datetime.fromisoformat(r.dispatched_at.replace("Z", "+00:00"))
+            t_creat = datetime.fromisoformat(r.created_at.replace("Z", "+00:00"))
+            duration_s = (t_creat - t_disp).total_seconds()
+
+            if duration_s < 2.0:
+                anomaly_count += 1
+                continue
+
+            word_count = 0
+            if r.open_analysis and r.open_analysis.sections:
+                word_count = sum(len(text.split()) for text in r.open_analysis.sections.values())
+            if word_count > 500:
+                valid_cit = 0
+                for c in r.cited_evidence:
+                    try:
+                        if parse_citation(c) is not None:
+                            valid_cit += 1
+                    except Exception:
+                        pass
+                if valid_cit < 2:
+                    reads = _count_telemetry_catalog_reads(catalog_dir, t_disp, t_creat)
+                    if reads == 0:
+                        anomaly_count += 1
+
+        if anomaly_count > 0:
+            return SignalResult(
+                signal="stepback_turnaround_anomalies",
+                value=float(anomaly_count),
+                level="WARNING",
+                message=(
+                    f"Project {project_slug}: stepback_turnaround_anomalies detected — "
+                    f"{anomaly_count} automated review(s) completed in < 2.0s or with > 500 words and 0 catalog reads"
+                ),
+            )
+        return SignalResult(
+            signal="stepback_turnaround_anomalies",
+            value=0.0,
+            level="OK",
+            message=f"Project {project_slug}: stepback review turnaround nominal",
+        )
+    except Exception as e:
+        return SignalResult(
+            signal="stepback_turnaround_anomalies",
+            value=None,
+            level="INFO",
+            message=f"error computing stepback_turnaround_anomalies: {e}",
         )
 
 
@@ -713,6 +1040,30 @@ def sprint_audit(hours: int = 24) -> dict:
             )
             if signal_result_unarchived.level == "WARNING":
                 anomalies.append(signal_result_unarchived.message)
+
+            # Signal 15: stepback_unvarying_verdicts
+            sig15 = signal_stepback_unvarying_verdicts(project["slug"], db_path, catalog_dir)
+            signals["stepback_unvarying_verdicts"] = sig15.value
+            if sig15.level == "WARNING":
+                anomalies.append(sig15.message)
+
+            # Signal 16: stepback_low_evidence_rate
+            sig16 = signal_stepback_low_evidence_rate(project["slug"], db_path, catalog_dir)
+            signals["stepback_low_evidence_rate"] = sig16.value
+            if sig16.level == "WARNING":
+                anomalies.append(sig16.message)
+
+            # Signal 17: stepback_ignored_escalations
+            sig17 = signal_stepback_ignored_escalations(project["slug"], db_path, catalog_dir)
+            signals["stepback_ignored_escalations"] = sig17.value
+            if sig17.level == "WARNING":
+                anomalies.append(sig17.message)
+
+            # Signal 18: stepback_turnaround_anomalies
+            sig18 = signal_stepback_turnaround_anomalies(project["slug"], db_path, catalog_dir)
+            signals["stepback_turnaround_anomalies"] = sig18.value
+            if sig18.level == "WARNING":
+                anomalies.append(sig18.message)
 
             # Check signal thresholds and add anomalies.
             # All thresholds are CALIBRATION TARGETS (v0.6), not hard gates.

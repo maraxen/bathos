@@ -115,6 +115,25 @@ class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(
     LOCK_NOT_FOUND = "lock_not_found"
     INDEX_DIRTY = "index_dirty"
 
+    # Step-back reviews & escalation engine (spec 261027).
+    STEPBACK_NOT_FOUND = "stepback_not_found"
+    STEPBACK_INVALID_SCHEMA = "stepback_invalid_schema"
+    STEPBACK_INVALID_RUBRIC = "stepback_invalid_rubric"
+    STEPBACK_INDEPENDENCE_VIOLATION = "stepback_independence_violation"
+    STEPBACK_INSUFFICIENT_EVIDENCE = "stepback_insufficient_evidence"
+    STEPBACK_AGENT_OVERRIDE_REFUSED = "stepback_agent_override_refused"
+    STEPBACK_ESCALATION_ACTIVE = "stepback_escalation_active"
+    STEPBACK_UNAUTHORIZED_CHAIR = "stepback_unauthorized_chair"
+    # Additional stepback codes from spec Section 7.2
+    STEPBACK_ACTIVE_HOLD = "stepback_active_hold"
+    STEPBACK_CITATION_INVALID = "stepback_citation_invalid"
+    RUBRIC_NOT_FOUND = "rubric_not_found"
+    RUBRIC_INVALID = "rubric_invalid"
+    RUBRIC_VERSION_MISMATCH = "rubric_version_mismatch"
+    REVIEWER_CONFLICT_OF_INTEREST = "reviewer_conflict_of_interest"
+    ESCALATION_LEVEL_INVALID = "escalation_level_invalid"
+    CHAIR_TOKEN_INVALID = "chair_token_invalid"
+
 
 # Resolution hints registry: every BathosErrorCode member must have a non-empty entry
 RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
@@ -184,6 +203,23 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.LOCK_NOT_FOUND: "No lock ref refs/bathos/locks/<run_id> in this repo: check the run id, or run `bth lock fetch --apply` to bring locks from a remote clone",
     BathosErrorCode.INDEX_DIRTY: "The git index has staged changes and this `bth lock` command would stage: commit or `git restore --staged` them, then rerun",
     BathosErrorCode.WARM_PUBLISH_FAILED: "The final rename of the verified staging directory failed (permissions, space, a vanished parent); the verified copy is kept in the .partial directory named in the message: fix the cause and move it into place by hand",
+    # Step-back reviews & escalation engine (spec 261027).
+    BathosErrorCode.STEPBACK_NOT_FOUND: "Verify the review or escalation ID with `bth stepback status <campaign_id>`",
+    BathosErrorCode.STEPBACK_INVALID_SCHEMA: "Correct fields in review payload; ensure recommendation is provided for Path B and narrative sections are non-empty",
+    BathosErrorCode.STEPBACK_INVALID_RUBRIC: "Fix syntax errors in the rubric TOML definition; ensure all 5 dimensions and weights sum to 1.0",
+    BathosErrorCode.STEPBACK_INDEPENDENCE_VIOLATION: "Assign review to an independent agent or researcher who did not author runs in this campaign",
+    BathosErrorCode.STEPBACK_INSUFFICIENT_EVIDENCE: "Include at least 2 verified primary catalog citations (e.g. run:<id>, sidecar:<path>#clause) in the review",
+    BathosErrorCode.STEPBACK_AGENT_OVERRIDE_REFUSED: "Ask the human committee chair to run `bth stepback resolve --as-human-chair` from an interactive TTY; AI agents cannot resolve Level 3 escalations",
+    BathosErrorCode.STEPBACK_ESCALATION_ACTIVE: "Address the active escalation or hold by conducting an independent step-back review before concluding",
+    BathosErrorCode.STEPBACK_UNAUTHORIZED_CHAIR: "Verify the chair token in `~/.bth/chair_token` or invoke from an interactive TTY",
+    BathosErrorCode.STEPBACK_ACTIVE_HOLD: "Address the active Level 2 hold by conducting an independent step-back review before concluding",
+    BathosErrorCode.STEPBACK_CITATION_INVALID: "Verify that all cited runs and sidecars belong to the active campaign under review",
+    BathosErrorCode.RUBRIC_NOT_FOUND: "Specify a valid rubric ID from `agent_assets/rubrics/` or install the required rubric file",
+    BathosErrorCode.RUBRIC_INVALID: "Fix syntax errors in the rubric TOML definition; ensure all 5 dimensions and weights sum to 1.0",
+    BathosErrorCode.RUBRIC_VERSION_MISMATCH: "Use the canonical rubric version matching the content hash; do not modify existing rubric files without bumping version",
+    BathosErrorCode.REVIEWER_CONFLICT_OF_INTEREST: "Assign review to an independent agent or researcher who did not author runs in this campaign",
+    BathosErrorCode.ESCALATION_LEVEL_INVALID: "Specify a valid escalation level between 0 and 3",
+    BathosErrorCode.CHAIR_TOKEN_INVALID: "Verify the chair token in `~/.bth/chair_token` or invoke from an interactive TTY",
 }
 
 
@@ -316,4 +352,99 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     "LockRefError": BathosErrorCode.LOCK_REF_WRITE_FAILED,
     # `bth lock *`: carries its own, more specific `code`; this is the fallback for a caller with only the class.
     "LockAdminError": BathosErrorCode.INVALID_PARAM,
+    # Step-back reviews & escalation engine (spec 261027).
+    "BathosError": BathosErrorCode.INTERNAL,
+    "StepBackError": BathosErrorCode.INTERNAL,
+    "StepBackNotFoundError": BathosErrorCode.STEPBACK_NOT_FOUND,
+    "StepBackInvalidSchemaError": BathosErrorCode.STEPBACK_INVALID_SCHEMA,
+    "StepBackInvalidRubricError": BathosErrorCode.STEPBACK_INVALID_RUBRIC,
+    "RubricInvalidError": BathosErrorCode.RUBRIC_INVALID,
+    "RubricNotFoundError": BathosErrorCode.RUBRIC_NOT_FOUND,
+    "RubricVersionMismatchError": BathosErrorCode.RUBRIC_VERSION_MISMATCH,
+    "StepBackIndependenceViolationError": BathosErrorCode.STEPBACK_INDEPENDENCE_VIOLATION,
+    "ReviewerConflictError": BathosErrorCode.REVIEWER_CONFLICT_OF_INTEREST,
+    "StepBackInsufficientEvidenceError": BathosErrorCode.STEPBACK_INSUFFICIENT_EVIDENCE,
+    "StepBackCitationInvalidError": BathosErrorCode.STEPBACK_CITATION_INVALID,
+    "StepBackAgentOverrideRefusedError": BathosErrorCode.STEPBACK_AGENT_OVERRIDE_REFUSED,
+    "StepBackEscalationActiveError": BathosErrorCode.STEPBACK_ESCALATION_ACTIVE,
+    "StepBackActiveHoldError": BathosErrorCode.STEPBACK_ACTIVE_HOLD,
+    "StepBackUnauthorizedChairError": BathosErrorCode.STEPBACK_UNAUTHORIZED_CHAIR,
+    "ChairTokenInvalidError": BathosErrorCode.CHAIR_TOKEN_INVALID,
+    "EscalationLevelInvalidError": BathosErrorCode.ESCALATION_LEVEL_INVALID,
 }
+
+
+# ── Step-Back Review & Escalation Domain Exceptions (spec 261027) ─────────────
+
+
+class BathosError(Exception):
+    """Base class for bathos domain exceptions."""
+
+
+class StepBackError(BathosError):
+    """Base class for step-back review and escalation errors."""
+
+
+class StepBackNotFoundError(StepBackError):
+    """Requested review or escalation record does not exist."""
+
+
+class StepBackInvalidSchemaError(StepBackError):
+    """Review payload or configuration violates required schema."""
+
+
+class StepBackInvalidRubricError(StepBackError):
+    """Rubric TOML is malformed or invalid."""
+
+
+class RubricInvalidError(StepBackInvalidRubricError):
+    """Rubric TOML syntax error or invalid dimension weights."""
+
+
+class RubricNotFoundError(StepBackError):
+    """Specified rubric asset could not be found."""
+
+
+class RubricVersionMismatchError(StepBackError):
+    """Rubric content hash does not match recorded version hash."""
+
+
+class StepBackIndependenceViolationError(StepBackError):
+    """Reviewer is not independent from campaign authoring."""
+
+
+class ReviewerConflictError(StepBackIndependenceViolationError):
+    """Reviewer has a conflict of interest with the campaign."""
+
+
+class StepBackInsufficientEvidenceError(StepBackError):
+    """Review lacks required minimum valid primary evidence citations."""
+
+
+class StepBackCitationInvalidError(StepBackError):
+    """A cited run or sidecar does not belong to the campaign under review."""
+
+
+class StepBackAgentOverrideRefusedError(StepBackError):
+    """Agent attempted to resolve or override a Level 3 Human Chair escalation."""
+
+
+class StepBackEscalationActiveError(StepBackError):
+    """Operation blocked because campaign has an active escalation or hold."""
+
+
+class StepBackActiveHoldError(StepBackEscalationActiveError):
+    """Campaign has an active Level 2 committee hold."""
+
+
+class StepBackUnauthorizedChairError(StepBackError):
+    """Caller is not authorized to act as human committee chair."""
+
+
+class ChairTokenInvalidError(StepBackUnauthorizedChairError):
+    """Invalid or missing chair token."""
+
+
+class EscalationLevelInvalidError(StepBackError):
+    """Specified escalation level is outside 0-3 range."""
+
