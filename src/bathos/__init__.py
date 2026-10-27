@@ -1,4 +1,4 @@
-__version__ = "0.13.0a7"
+__version__ = "0.13.0a8"
 
 __all__ = ["experiment", "CorruptDatabaseError", "CompactionLockedError"]
 
