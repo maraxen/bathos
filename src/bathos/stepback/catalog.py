@@ -27,6 +27,7 @@ from bathos.stepback.schema import (
     EscalationState,
     StepBackReview,
 )
+from bathos.telemetry import event
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +129,22 @@ def save_review_cool(
         except Exception as e:
             logger.warning(f"Could not mirror review to workspace: {e}")
 
+    event(
+        "stepback.review_recorded",
+        review_id=review.review_id,
+        campaign_id=review.campaign_id,
+        project_slug=review.project_slug,
+        reviewer_id=review.reviewer_id,
+        reviewer_kind=review.reviewer_kind,
+        is_independent=review.is_independent,
+        path_kind=review.path_kind,
+        recommendation=review.recommendation,
+        escalation_level=review.escalation_level,
+        composite_score=review.composite_score,
+        has_dissent=bool(review.dissents),
+        cited_evidence_count=len(review.cited_evidence),
+    )
+
     return nested_path
 
 
@@ -149,6 +166,20 @@ def save_escalation_cool(
     esc_dir = catalog_dir / "stepback" / "escalations"
     target_path = esc_dir / f"{esc.campaign_id}_{esc.escalation_id}.json"
     _atomic_write_json(target_path, esc.to_dict())
+
+    event(
+        "stepback.escalation_created",
+        escalation_id=esc.escalation_id,
+        campaign_id=esc.campaign_id,
+        project_slug=esc.project_slug,
+        level=esc.level,
+        status=esc.status,
+        opened_by_kind=esc.opened_by_kind,
+        opened_by_review_id=esc.opened_by_review_id,
+        trigger_name=esc.trigger_name,
+        trigger_reason=esc.trigger_reason,
+    )
+
     return target_path
 
 

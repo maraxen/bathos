@@ -316,3 +316,268 @@ def test_evaluate_all_triggers_with_scale_up_and_threshold():
     assert "threshold_edit" in res["active_triggers"]
     assert "scale_up" in res["active_triggers"]
 
+
+def test_evaluate_all_triggers_snooze_filtering():
+    camp = {"status": "open"}
+    # 3 consecutive marginal runs normally fires repeated_marginal
+    runs = [
+        {"run_id": "r1", "outcome": "marginal"},
+        {"run_id": "r2", "outcome": "marginal"},
+        {"run_id": "r3", "outcome": "marginal"},
+    ]
+
+    now = datetime.now(UTC)
+    # Active snooze: until run 5, epoch 24h in future
+    snooze_active = {
+        "repeated_marginal": {
+            "snooze_until_runs": 5,
+            "snooze_until_epoch": (now + timedelta(hours=24)).isoformat(),
+        }
+    }
+
+    res_active = evaluate_all_triggers(
+        camp, runs, snoozed_triggers=snooze_active, now_dt=now
+    )
+    # repeated_marginal fired internally, but is snoozed, so excluded from active_triggers
+    assert res_active["triggers_evaluated"]["repeated_marginal"]["fired"] is True
+    assert res_active["triggers_evaluated"]["repeated_marginal"]["snoozed"] is True
+    assert "repeated_marginal" not in res_active["active_triggers"]
+    assert "repeated_marginal" in res_active["snoozed_triggers"]
+    assert res_active["fired"] is False
+
+    # Expired by run count: runs length 6 > snooze_until_runs 5
+    runs_more = runs + [
+        {"run_id": "r4", "outcome": "marginal"},
+        {"run_id": "r5", "outcome": "marginal"},
+        {"run_id": "r6", "outcome": "marginal"},
+    ]
+    res_run_expired = evaluate_all_triggers(
+        camp, runs_more, snoozed_triggers=snooze_active, now_dt=now
+    )
+    assert "repeated_marginal" in res_run_expired["active_triggers"]
+    assert "repeated_marginal" not in res_run_expired["snoozed_triggers"]
+    assert res_run_expired["fired"] is True
+
+    # Expired by epoch: now is 25h later
+    res_epoch_expired = evaluate_all_triggers(
+        camp, runs, snoozed_triggers=snooze_active, now_dt=now + timedelta(hours=25)
+    )
+    assert "repeated_marginal" in res_epoch_expired["active_triggers"]
+    assert "repeated_marginal" not in res_epoch_expired["snoozed_triggers"]
+    assert res_epoch_expired["fired"] is True
+
+
+def test_snooze_stepback_trigger_persistence_and_refusal(tmp_path):
+    import duckdb
+    import pytest
+    from bathos.campaigns import create_campaign
+    from bathos.errors import StepBackAgentOverrideRefusedError
+    from bathos.stepback.catalog import get_escalation_state, save_escalation_cool
+    from bathos.stepback.engine import run_stepback_triggers, snooze_stepback_trigger
+    from bathos.stepback.schema import EscalationRecord
+
+    cat_dir = tmp_path / "catalog"
+    cat_dir.mkdir(parents=True)
+    db_path = cat_dir / "bathos.db"
+    con = duckdb.connect(str(db_path))
+    con.execute(
+        """
+        CREATE TABLE campaigns (
+            id TEXT PRIMARY KEY,
+            project_slug TEXT,
+            name TEXT,
+            mode TEXT,
+            question TEXT,
+            hypothesis TEXT,
+            status TEXT,
+            started_at TEXT,
+            concluded_at TEXT,
+            conclusion TEXT,
+            outcome_label TEXT,
+            parent_campaign_id TEXT,
+            stopping_threshold REAL,
+            negative_check TEXT,
+            claim_path TEXT,
+            claim_sha256 TEXT,
+            claim_mode TEXT
+        );
+        CREATE TABLE campaign_runs (campaign_id TEXT, run_id TEXT);
+        CREATE TABLE runs (id TEXT PRIMARY KEY, outcome TEXT, duration_s REAL);
+        CREATE TABLE IF NOT EXISTS stepback_escalations (
+            id TEXT PRIMARY KEY,
+            campaign_id TEXT,
+            project_slug TEXT,
+            level INTEGER,
+            status TEXT,
+            opened_at TEXT,
+            opened_by_kind TEXT,
+            trigger_name TEXT,
+            trigger_reason TEXT,
+            resolution_note TEXT,
+            review_epoch INTEGER,
+            metadata TEXT
+        );
+        """
+    )
+    camp = create_campaign(
+        con,
+        name="Snooze Test",
+        project_slug="snooze_proj",
+        mode="exploration",
+        catalog_dir=cat_dir,
+    )
+    con.close()
+
+    # 1. Validation: Rationale required
+    with pytest.raises(ValueError, match="Rationale is required"):
+        snooze_stepback_trigger(
+            camp.id,
+            trigger_name="repeated_marginal",
+            rationale="   ",
+            catalog_dir=cat_dir,
+        )
+
+    # 2. Refusal: Cannot snooze Level 3 trigger name
+    with pytest.raises(StepBackAgentOverrideRefusedError, match="Cannot snooze Level 3"):
+        snooze_stepback_trigger(
+            camp.id,
+            trigger_name="level_3",
+            rationale="Trying to bypass chair",
+            catalog_dir=cat_dir,
+        )
+
+    # 3. Successful snooze
+    snooze_res = snooze_stepback_trigger(
+        camp.id,
+        trigger_name="repeated_marginal",
+        runs_window=5,
+        epoch_hours=24,
+        rationale="Expected noise in pilot phase",
+        reviewer_id="reviewer_01",
+        catalog_dir=cat_dir,
+    )
+    assert snooze_res["ok"] is True
+    assert snooze_res["status"] == "snoozed"
+    assert snooze_res["trigger_name"] == "repeated_marginal"
+    assert snooze_res["snooze_until_runs"] == 5
+
+    # 4. Refusal when campaign is at Level 3
+    esc3 = EscalationRecord(
+        escalation_id="esc_l3_test",
+        campaign_id=camp.id,
+        project_slug="snooze_proj",
+        level=3,
+        status="active",
+        opened_at=datetime.now(UTC).isoformat(),
+        opened_by_kind="chair",
+        trigger_reason="Human Chair escalation",
+    )
+    save_escalation_cool(esc3, cat_dir)
+    assert get_escalation_state(camp.id, catalog_dir=cat_dir).current_level == 3
+
+    with pytest.raises(StepBackAgentOverrideRefusedError, match="Cannot snooze Level 3"):
+        snooze_stepback_trigger(
+            camp.id,
+            trigger_name="repeated_marginal",
+            rationale="Attempting to snooze during L3 hold",
+            catalog_dir=cat_dir,
+        )
+
+
+def test_cli_and_mcp_snooze(tmp_path, monkeypatch):
+    import asyncio
+    import duckdb
+    from bathos.campaigns import create_campaign
+    from bathos.cli_cyclopts import app
+    from bathos.mcp import stepback_snooze
+    from tests._cyclopts_runner import CyclopticRunner
+
+    cat_dir = tmp_path / "catalog"
+    cat_dir.mkdir(parents=True)
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(cat_dir))
+
+    db_path = cat_dir / "bathos.db"
+    con = duckdb.connect(str(db_path))
+    con.execute(
+        """
+        CREATE TABLE campaigns (
+            id TEXT PRIMARY KEY,
+            project_slug TEXT,
+            name TEXT,
+            mode TEXT,
+            question TEXT,
+            hypothesis TEXT,
+            status TEXT,
+            started_at TEXT,
+            concluded_at TEXT,
+            conclusion TEXT,
+            outcome_label TEXT,
+            parent_campaign_id TEXT,
+            stopping_threshold REAL,
+            negative_check TEXT,
+            claim_path TEXT,
+            claim_sha256 TEXT,
+            claim_mode TEXT
+        );
+        CREATE TABLE campaign_runs (campaign_id TEXT, run_id TEXT);
+        CREATE TABLE runs (id TEXT PRIMARY KEY, outcome TEXT, duration_s REAL);
+        CREATE TABLE IF NOT EXISTS stepback_escalations (
+            id TEXT PRIMARY KEY,
+            campaign_id TEXT,
+            project_slug TEXT,
+            level INTEGER,
+            status TEXT,
+            opened_at TEXT,
+            opened_by_kind TEXT,
+            trigger_name TEXT,
+            trigger_reason TEXT,
+            resolution_note TEXT,
+            review_epoch INTEGER,
+            metadata TEXT
+        );
+        """
+    )
+    camp = create_campaign(
+        con,
+        name="CLI Snooze Test",
+        project_slug="cli_snooze",
+        mode="exploration",
+        catalog_dir=cat_dir,
+    )
+    con.close()
+
+    # Test CLI snooze
+    runner = CyclopticRunner()
+    res = runner.invoke(
+        app,
+        [
+            "stepback",
+            "snooze",
+            camp.id,
+            "--trigger",
+            "repeated_marginal",
+            "--runs",
+            "5",
+            "--rationale",
+            "Acknowledged for exploratory sweep",
+            "--catalog-dir",
+            str(cat_dir),
+        ],
+    )
+    assert res.exit_code == 0
+    assert "Snoozed trigger 'repeated_marginal'" in res.stdout
+
+    # Test MCP snooze
+    mcp_res = asyncio.run(
+        stepback_snooze(
+            campaign_id=camp.id,
+            trigger_name="near_bound",
+            runs_window=3,
+            rationale="Known boundary testing",
+        )
+    )
+    assert mcp_res["ok"] is True
+    assert mcp_res["status"] == "snoozed"
+    assert mcp_res["trigger_name"] == "near_bound"
+
+

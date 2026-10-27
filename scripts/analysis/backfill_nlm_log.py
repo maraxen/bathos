@@ -139,12 +139,9 @@ def extract_notebook_id(
     if output_json and isinstance(output_json, dict):
         if "notebook_id" in output_json:
             return output_json.get("notebook_id")
-        if (
-            "data" in output_json
-            and isinstance(output_json["data"], dict)
-            and "notebook_id" in output_json["data"]
-        ):
-            return output_json["data"].get("notebook_id")
+        if "data" in output_json and isinstance(output_json["data"], dict):
+            if "notebook_id" in output_json["data"]:
+                return output_json["data"].get("notebook_id")
 
     return None
 

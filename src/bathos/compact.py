@@ -407,6 +407,17 @@ def _migrate_v17(run_dict: dict) -> dict:
     return run_dict
 
 
+def _migrate_v18(run_dict: dict) -> dict:
+    """Migrate v18 fragment to v19 (warm stepback_reviews/stepback_escalations tables).
+
+    Schema v19 introduces warm DuckDB tables for step-back reviews and escalations
+    re-derived from cool-tier JSON fragments. No new run-level Parquet columns are
+    added; this migration stamps the version upgrade.
+    """
+    run_dict["schema_version"] = "19"
+    return run_dict
+
+
 MIGRATIONS["0"] = _migrate_v0
 MIGRATIONS["1"] = _migrate_v1
 MIGRATIONS["2"] = _migrate_v2
@@ -425,6 +436,7 @@ MIGRATIONS["14"] = _migrate_v14
 MIGRATIONS["15"] = _migrate_v15
 MIGRATIONS["16"] = _migrate_v16
 MIGRATIONS["17"] = _migrate_v17
+MIGRATIONS["18"] = _migrate_v18
 
 
 _RUNS_TABLE_SCHEMA = """

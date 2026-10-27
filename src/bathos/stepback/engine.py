@@ -15,7 +15,7 @@ import dataclasses
 import hashlib
 import json
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +43,7 @@ from bathos.stepback.catalog import (
     get_escalation,
     get_escalation_state,
     get_review,
+    list_escalations,
     list_reviews,
     save_escalation_cool,
     save_review_cool,
@@ -164,7 +165,17 @@ def get_stepback_status(
             else []
         )
         member_runs = [r for r in raw_runs.values() if r is not None] if isinstance(raw_runs, dict) else [r for r in raw_runs if r is not None]
-        triggers_res = evaluate_all_triggers(camp, member_runs, state=state)
+
+        escalations = list_escalations(campaign_id=full_id, catalog_dir=cat_dir, db=con)
+        snoozed_map: dict[str, dict[str, Any]] = {}
+        for esc in escalations:
+            if esc.status == "snoozed" and esc.trigger_name:
+                snoozed_map[esc.trigger_name] = dict(esc.metadata)
+        setattr(state, "snoozed_triggers", snoozed_map)
+
+        triggers_res = evaluate_all_triggers(
+            camp, member_runs, state=state, snoozed_triggers=snoozed_map
+        )
 
         latest_rec = reviews[-1].recommendation if reviews else None
         res: dict[str, Any] = {
@@ -173,6 +184,7 @@ def get_stepback_status(
             "escalation_level": state.current_level,
             "hold_active": state.current_level >= 2,
             "active_triggers": triggers_res.get("active_triggers", []),
+            "snoozed_triggers": triggers_res.get("snoozed_triggers", []),
             "review_count": len(reviews),
             "latest_recommendation": latest_rec,
             "epoch": state.review_epoch,
@@ -210,7 +222,16 @@ def run_stepback_triggers(
         )
         member_runs = [r for r in raw_runs.values() if r is not None] if isinstance(raw_runs, dict) else [r for r in raw_runs if r is not None]
 
-        eval_res = evaluate_all_triggers(camp, member_runs, state=state, window_size=window)
+        escalations = list_escalations(campaign_id=full_id, catalog_dir=cat_dir, db=con)
+        snoozed_map: dict[str, dict[str, Any]] = {}
+        for esc in escalations:
+            if esc.status == "snoozed" and esc.trigger_name:
+                snoozed_map[esc.trigger_name] = dict(esc.metadata)
+        setattr(state, "snoozed_triggers", snoozed_map)
+
+        eval_res = evaluate_all_triggers(
+            camp, member_runs, state=state, window_size=window, snoozed_triggers=snoozed_map
+        )
         active = eval_res.get("active_triggers", [])
         fired = len(active) > 0
 
@@ -225,11 +246,162 @@ def run_stepback_triggers(
             "ok": True,
             "triggers_evaluated": eval_res.get("triggers_evaluated", {}),
             "active_triggers": active,
+            "snoozed_triggers": eval_res.get("snoozed_triggers", []),
             "fired": fired,
         }
     finally:
         if owns_db and con is not None:
             con.close()
+
+
+def snooze_stepback_trigger(
+    campaign_id: str,
+    trigger_name: str,
+    runs_window: int = 5,
+    epoch_hours: int | float = 24.0,
+    rationale: str = "",
+    reviewer_id: str | None = None,
+    catalog_dir: Path | str | None = None,
+    db: Any | None = None,
+) -> dict[str, Any]:
+    """Snooze/acknowledge a step-back trigger for a bounded run and epoch window.
+
+    Strict Refusal:
+    - Attempting to snooze Level 3 or a Human Chair escalation raises StepBackAgentOverrideRefusedError.
+    - Rationale is required and must be non-empty.
+    - Window is clamped between 1 and 10 runs (default 5, max 10).
+    """
+    if not rationale or not rationale.strip():
+        raise ValueError("Rationale is required to snooze a step-back trigger")
+
+    clean_trigger = trigger_name.strip().lower()
+    if clean_trigger in ("level_3", "l3", "chair", "human_chair"):
+        raise StepBackAgentOverrideRefusedError("Cannot snooze Level 3 Human Chair escalations")
+
+    runs_window = max(1, min(int(runs_window), 10))
+    epoch_hours = max(0.1, float(epoch_hours))
+
+    cat_dir, con, owns_db = resolve_catalog_and_db(catalog_dir, db, read_only=False)
+    try:
+        camp = get_campaign(con, campaign_id, catalog_dir=cat_dir)
+        if camp is None:
+            raise CampaignError(f"Campaign not found: {campaign_id}")
+        full_id = camp.id
+
+        # Ingest any cool fragments to DuckDB so state is fully synchronized
+        try:
+            from bathos.stepback.catalog import ingest_stepback_fragments
+            if con is not None and cat_dir is not None:
+                ingest_stepback_fragments(con, cat_dir)
+        except Exception:
+            pass
+
+        state = get_escalation_state(full_id, catalog_dir=cat_dir, db=con)
+        if state.current_level == 3:
+            raise StepBackAgentOverrideRefusedError("Cannot snooze Level 3 Human Chair escalations")
+
+        cool_escs = list_escalations(campaign_id=full_id, catalog_dir=cat_dir)
+        if any(e.level == 3 and e.status == "active" for e in cool_escs):
+            raise StepBackAgentOverrideRefusedError("Cannot snooze Level 3 Human Chair escalations")
+
+        members = union_campaign_member_ids(con, full_id, cat_dir)
+        current_run_count = len(members)
+
+        now = datetime.now(UTC)
+        now_iso = now.isoformat()
+        target_runs = current_run_count + runs_window
+        target_epoch = (now + timedelta(hours=epoch_hours)).isoformat()
+
+        esc_id = f"esc_{os.urandom(6).hex()}"
+        esc_rec = EscalationRecord(
+            escalation_id=esc_id,
+            campaign_id=full_id,
+            project_slug=camp.project_slug,
+            level=0,
+            status="snoozed",
+            opened_at=now_iso,
+            opened_by_kind="reviewer",
+            trigger_name=trigger_name.strip(),
+            trigger_reason=f"Snoozed trigger '{trigger_name.strip()}' for {runs_window} runs / {epoch_hours}h: {rationale.strip()}",
+            resolution_note=rationale.strip(),
+            review_epoch=state.review_epoch,
+            pivot_anchor_run_id=state.pivot_anchor_run_id,
+            metadata={
+                "snooze_trigger_name": trigger_name.strip(),
+                "snooze_runs_window": runs_window,
+                "snooze_epoch_hours": epoch_hours,
+                "snooze_start_runs": current_run_count,
+                "snooze_until_runs": target_runs,
+                "snooze_until_epoch": target_epoch,
+                "snoozed_by": reviewer_id or "reviewer",
+                "rationale": rationale.strip(),
+            },
+        )
+        save_escalation_cool(esc_rec, cat_dir)
+
+        # Ingest to DB if writable connection
+        try:
+            if con is not None:
+                metadata_json = json.dumps(esc_rec.metadata)
+                con.execute(
+                    """
+                    INSERT INTO stepback_escalations (
+                        id, campaign_id, project_slug, level, status, opened_at,
+                        opened_by_kind, trigger_name, trigger_reason, resolution_note,
+                        review_epoch, metadata
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    [
+                        esc_rec.escalation_id,
+                        esc_rec.campaign_id,
+                        esc_rec.project_slug,
+                        esc_rec.level,
+                        esc_rec.status,
+                        esc_rec.opened_at,
+                        esc_rec.opened_by_kind,
+                        esc_rec.trigger_name,
+                        esc_rec.trigger_reason,
+                        esc_rec.resolution_note,
+                        esc_rec.review_epoch,
+                        metadata_json,
+                    ],
+                )
+        except Exception:
+            pass
+
+        # Emit telemetry event
+        try:
+            from bathos.telemetry import event
+
+            event(
+                "stepback.trigger_snoozed",
+                campaign_id=full_id,
+                trigger_name=trigger_name.strip(),
+                runs_window=runs_window,
+                epoch_hours=epoch_hours,
+                rationale=rationale.strip(),
+                reviewer_id=reviewer_id,
+            )
+        except Exception:
+            pass
+
+        return {
+            "ok": True,
+            "campaign_id": full_id,
+            "escalation_id": esc_id,
+            "status": "snoozed",
+            "trigger_name": trigger_name.strip(),
+            "runs_window": runs_window,
+            "epoch_hours": epoch_hours,
+            "snooze_until_runs": target_runs,
+            "snooze_until_epoch": target_epoch,
+            "rationale": rationale.strip(),
+        }
+    finally:
+        if owns_db and con is not None:
+            con.close()
+
 
 
 def record_stepback_review(

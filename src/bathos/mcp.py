@@ -6068,6 +6068,46 @@ async def stepback_resolve(
     )
 
 
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def stepback_brief(campaign_id: str) -> dict:
+    """Render an advisor-ready 8-section Markdown brief and project status entry."""
+    from bathos.stepback.brief import format_project_status_entry, render_advisor_brief
+
+    brief_md = render_advisor_brief(campaign_id=campaign_id)
+    status_entry = format_project_status_entry(campaign_id=campaign_id)
+    return {
+        "ok": True,
+        "campaign_id": campaign_id,
+        "brief_markdown": brief_md,
+        "project_status_entry": status_entry,
+    }
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def stepback_snooze(
+    campaign_id: str,
+    trigger_name: str,
+    runs_window: int = 5,
+    epoch_hours: float = 24.0,
+    rationale: str = "",
+    reviewer_id: str | None = None,
+) -> dict:
+    """Snooze/acknowledge a step-back event trigger for a bounded run and epoch window."""
+    from bathos.stepback.engine import snooze_stepback_trigger
+
+    return snooze_stepback_trigger(
+        campaign_id=campaign_id,
+        trigger_name=trigger_name,
+        runs_window=runs_window,
+        epoch_hours=epoch_hours,
+        rationale=rationale,
+        reviewer_id=reviewer_id,
+    )
+
+
+
 if __name__ == "__main__":
     init_server_telemetry()
     app.run()
@@ -6162,6 +6202,8 @@ _WIRED = cisternal.wire(
         "stepback_escalate",
         "stepback_show",
         "stepback_resolve",
+        "stepback_brief",
+        "stepback_snooze",
     ],
 )
 

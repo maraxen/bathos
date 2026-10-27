@@ -804,8 +804,13 @@ def evaluate_all_triggers(
     now_dt: datetime | None = None,
     window_size: int = 5,
     proposed_tasks: int | list[Any] | str | None = None,
+    snoozed_triggers: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Evaluate all event triggers for a campaign and member runs."""
+    """Evaluate all event triggers for a campaign and member runs.
+
+    If a trigger has fired but is currently snoozed (by run count and epoch window),
+    it is marked with `snoozed: True` and excluded from `active_triggers`.
+    """
     if isinstance(member_runs, dict):
         member_runs = list(member_runs.values())
     anchor_id = getattr(state, "pivot_anchor_run_id", None) if state else None
@@ -846,10 +851,56 @@ def evaluate_all_triggers(
         "scale_up": res_scale_up,
     }
 
-    active_triggers = [name for name, res in evaluated.items() if res.get("fired")]
+    # Resolve snooze configuration
+    snooze_dict = snoozed_triggers
+    if snooze_dict is None:
+        snooze_dict = getattr(state, "snoozed_triggers", None)
+    if snooze_dict is None and isinstance(state, dict):
+        snooze_dict = state.get("snoozed_triggers")
+    snooze_dict = snooze_dict or {}
+
+    current_runs = len(member_runs)
+    now = now_dt or datetime.now(UTC)
+
+    active_triggers: list[str] = []
+    snoozed_list: list[str] = []
+
+    for name, res in evaluated.items():
+        if res.get("fired"):
+            s_info = snooze_dict.get(name)
+            is_snoozed = False
+            if s_info:
+                until_runs = s_info.get("snooze_until_runs")
+                until_epoch_raw = s_info.get("snooze_until_epoch")
+                until_epoch = _parse_iso_utc(until_epoch_raw)
+
+                # Snooze is active if not expired by runs and not expired by epoch
+                snooze_active = True
+                if until_runs is not None and current_runs > until_runs:
+                    snooze_active = False
+                if until_epoch is not None and now > until_epoch:
+                    snooze_active = False
+
+                if snooze_active:
+                    is_snoozed = True
+                    res["snoozed"] = True
+                    res["snooze_info"] = s_info
+                    snoozed_list.append(name)
+
+            if not is_snoozed:
+                active_triggers.append(name)
 
     return {
         "triggers_evaluated": evaluated,
         "active_triggers": active_triggers,
+        "snoozed_triggers": snoozed_list,
         "fired": len(active_triggers) > 0,
     }
+
+
+def snooze_stepback_trigger(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    """Snooze a step-back event trigger for a bounded run/epoch window."""
+    from bathos.stepback.engine import snooze_stepback_trigger as _snooze
+
+    return _snooze(*args, **kwargs)
+

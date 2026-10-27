@@ -5,6 +5,7 @@ import importlib.metadata
 import json
 import logging
 import os
+import sys
 from collections import defaultdict
 from collections.abc import Generator
 from contextlib import contextmanager, suppress
@@ -539,6 +540,49 @@ def _add_run_to_campaign_impl(
             )
         raise CampaignError(f"Run not found: {run_id}")
     run_timestamp, run_outcome, run_sidecar_path = run_rows[0]
+
+    # ── STEPBACK REVIEW & ESCALATION LIFECYCLE HOOK (Decision D1) ───────────────
+    # Non-blocking advisory warning by default; blocks only when opt-in enforce=true.
+    from bathos.stepback.catalog import get_escalation_state
+
+    try:
+        esc_state = get_escalation_state(campaign_id, catalog_dir=catalog_dir, db=db)
+        if esc_state.current_level > 0:
+            level_label = {
+                1: "Advisory Warning (Level 1)",
+                2: "Step-Back Hold (Level 2)",
+                3: "Human Chair Escalation (Level 3)",
+            }.get(esc_state.current_level, f"Level {esc_state.current_level}")
+            reason = esc_state.active_triggers or "Active escalation"
+            print(
+                f"WARNING: Active step-back {level_label} on campaign {campaign_id[:8]}! Reason: {reason}",
+                file=sys.stderr,
+            )
+
+            enforce = os.environ.get("BTH_STEP_BACK_ENFORCE", "").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+            )
+            if not enforce and run_sidecar_path:
+                with suppress(Exception):
+                    from pathlib import Path as _P
+                    from bathos.sidecar import parse_sidecar
+
+                    sc = parse_sidecar(_P(run_sidecar_path))
+                    stepback_cfg = getattr(sc, "stepback", {})
+                    if isinstance(stepback_cfg, dict) and stepback_cfg.get("enforce"):
+                        enforce = True
+
+            if enforce and esc_state.current_level >= 2:
+                raise CampaignError(
+                    f"Cannot add run {run_id[:8]} to campaign {campaign_id[:8]}: "
+                    f"step-back enforcement enabled and campaign has active {level_label}"
+                )
+    except CampaignError:
+        raise
+    except Exception as e:
+        logger.debug(f"Stepback escalation check in add_run skipped: {e}")
 
     # Spec 261026 D3: a run entering a claim-bound campaign (claim_path IS NOT NULL) must have
     # declared [breakdown] for the worst-case aggregates its verdict reads. Refused before

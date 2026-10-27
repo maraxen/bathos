@@ -2179,14 +2179,30 @@ def stepback_show_cmd(
     *,
     campaign: str = "",
     catalog_dir: str = "",
+    format: str = "json",
     json_output: bool = False,  # noqa: ARG001
 ) -> None:
     """Show details of a step-back review or reviews in a campaign."""
-    from bathos.stepback.engine import show_stepback
-
     cat_p = Path(catalog_dir) if catalog_dir else None
     rev_id = review_id or None
     camp_id = campaign or None
+
+    if format == "brief":
+        target_camp = camp_id or rev_id
+        if not target_camp:
+            print("Error: Campaign ID required for --format brief", file=sys.stderr)
+            raise SystemExit(1)
+        from bathos.stepback.brief import render_advisor_brief
+
+        try:
+            brief_md = render_advisor_brief(target_camp, catalog_dir=cat_p)
+            print(brief_md)
+            return
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            raise SystemExit(1) from None
+
+    from bathos.stepback.engine import show_stepback
 
     try:
         res = show_stepback(
@@ -2199,6 +2215,79 @@ def stepback_show_cmd(
         raise SystemExit(1) from None
 
     print(json.dumps(res, indent=2, default=str))
+
+
+@stepback_app.command(name="brief")
+def stepback_brief_cmd(
+    campaign_id: str,
+    *,
+    catalog_dir: str = "",
+    json_output: bool = False,
+) -> None:
+    """Render an 8-section Markdown brief for advisor/committee review."""
+    from bathos.stepback.brief import format_project_status_entry, render_advisor_brief
+
+    cat_p = Path(catalog_dir) if catalog_dir else None
+    try:
+        brief_md = render_advisor_brief(campaign_id, catalog_dir=cat_p)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+
+    if json_output:
+        status_entry = format_project_status_entry(campaign_id, catalog_dir=cat_p)
+        print(json.dumps({"brief": brief_md, "project_status_entry": status_entry}, indent=2))
+        return
+
+    print(brief_md)
+
+
+@stepback_app.command(name="snooze")
+def stepback_snooze_cmd(
+    campaign_id: str,
+    *,
+    trigger: str = "",
+    runs: int = 5,
+    epoch_hours: float = 24.0,
+    rationale: str = "",
+    reviewer_id: str = "",
+    catalog_dir: str = "",
+    json_output: bool = False,
+) -> None:
+    """Snooze/acknowledge a step-back event trigger for a bounded run and epoch window."""
+    if not trigger:
+        print("Error: --trigger <name> is required", file=sys.stderr)
+        raise SystemExit(1)
+    if not rationale:
+        print("Error: --rationale <reason> is required", file=sys.stderr)
+        raise SystemExit(1)
+
+    from bathos.stepback.engine import snooze_stepback_trigger
+
+    cat_p = Path(catalog_dir) if catalog_dir else None
+    try:
+        res = snooze_stepback_trigger(
+            campaign_id,
+            trigger_name=trigger,
+            runs_window=runs,
+            epoch_hours=epoch_hours,
+            rationale=rationale,
+            reviewer_id=reviewer_id or None,
+            catalog_dir=cat_p,
+        )
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+
+    if json_output:
+        print(json.dumps(res, indent=2, default=str))
+        return
+
+    print(
+        f"Snoozed trigger '{trigger}' for campaign '{campaign_id}' until "
+        f"run count {res['snooze_until_runs']} or {res['snooze_until_epoch']}."
+    )
+
 
 
 @stepback_app.command(name="resolve")

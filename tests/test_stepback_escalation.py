@@ -165,3 +165,109 @@ def test_decision_d1_conclusion_downgrade():
     should_down_e, verdict_e, status_e = check_conclude_posture({"mode": "exploration"}, state2)
     assert should_down_e is False
     assert status_e == "warning_unaddressed"
+
+
+def test_lifecycle_warn_only_hook_on_add_run(tmp_path: Path, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch):
+    import duckdb
+    from bathos.campaigns import add_run_to_campaign, create_campaign, CampaignError
+    from bathos.stepback.catalog import save_escalation_cool
+    from bathos.stepback.schema import EscalationRecord
+
+    cat_dir = tmp_path / "catalog"
+    cat_dir.mkdir(parents=True)
+    db_path = cat_dir / "bathos.db"
+    con = duckdb.connect(str(db_path))
+    con.execute(
+        """
+        CREATE TABLE campaigns (
+            id TEXT PRIMARY KEY,
+            project_slug TEXT,
+            name TEXT,
+            mode TEXT,
+            question TEXT,
+            hypothesis TEXT,
+            status TEXT,
+            started_at TEXT,
+            concluded_at TEXT,
+            conclusion TEXT,
+            outcome_label TEXT,
+            parent_campaign_id TEXT,
+            stopping_threshold REAL,
+            negative_check TEXT,
+            claim_path TEXT,
+            claim_sha256 TEXT,
+            claim_mode TEXT
+        );
+        CREATE TABLE campaign_runs (
+            campaign_id TEXT,
+            run_id TEXT,
+            evalue REAL,
+            seq_position INTEGER,
+            PRIMARY KEY (campaign_id, run_id)
+        );
+        CREATE TABLE runs (
+            id TEXT PRIMARY KEY,
+            timestamp TEXT,
+            outcome TEXT,
+            sidecar_path TEXT
+        );
+        CREATE TABLE IF NOT EXISTS stepback_escalations (
+            id TEXT PRIMARY KEY,
+            campaign_id TEXT,
+            project_slug TEXT,
+            level INTEGER,
+            status TEXT,
+            opened_at TEXT,
+            opened_by_kind TEXT,
+            trigger_name TEXT,
+            trigger_reason TEXT,
+            resolution_note TEXT,
+            review_epoch INTEGER,
+            metadata TEXT
+        );
+        """
+    )
+    camp = create_campaign(
+        con,
+        name="Lifecycle Warn Test",
+        project_slug="lifecycle_proj",
+        mode="exploration",
+        catalog_dir=cat_dir,
+    )
+    con.execute("INSERT INTO runs (id, timestamp, outcome, sidecar_path) VALUES ('run_001', '2026-10-27T12:00:00Z', 'pass', NULL)")
+    con.execute("INSERT INTO runs (id, timestamp, outcome, sidecar_path) VALUES ('run_002', '2026-10-27T12:01:00Z', 'pass', NULL)")
+
+    # 1. No escalation -> add_run succeeds silently without warning
+    add_run_to_campaign(con, camp.id, "run_001", catalog_dir=cat_dir)
+    captured = capsys.readouterr()
+    assert "WARNING: Active step-back" not in captured.err
+
+    # 2. Add Level 2 active escalation
+    esc = EscalationRecord(
+        escalation_id="esc_l2_warn",
+        campaign_id=camp.id,
+        project_slug="lifecycle_proj",
+        level=2,
+        status="active",
+        opened_at="2026-10-27T12:05:00Z",
+        opened_by_kind="system",
+        trigger_reason="Repeated marginal outcomes",
+    )
+    save_escalation_cool(esc, cat_dir)
+
+    # Adding run_002 emits non-blocking warning to stderr, but does NOT raise by default
+    add_run_to_campaign(con, camp.id, "run_002", catalog_dir=cat_dir)
+    captured = capsys.readouterr()
+    assert "WARNING: Active step-back Step-Back Hold (Level 2)" in captured.err
+
+    # Verify run_002 was actually added to campaign
+    added = con.execute("SELECT run_id FROM campaign_runs WHERE campaign_id = ?", [camp.id]).fetchall()
+    assert ('run_002',) in added
+
+    # 3. Opt-in enforcement blocks adding run when level >= 2
+    monkeypatch.setenv("BTH_STEP_BACK_ENFORCE", "1")
+    con.execute("INSERT INTO runs (id, timestamp, outcome, sidecar_path) VALUES ('run_003', '2026-10-27T12:02:00Z', 'pass', NULL)")
+
+    with pytest.raises(CampaignError, match="step-back enforcement enabled and campaign has active Step-Back Hold"):
+        add_run_to_campaign(con, camp.id, "run_003", catalog_dir=cat_dir)
+
