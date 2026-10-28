@@ -398,8 +398,15 @@ def get_stepback_status(
                 snoozed_map[esc.trigger_name] = dict(esc.metadata)
         setattr(state, "snoozed_triggers", snoozed_map)
 
+        # Status must stay inspectable even when a sidecar cannot be verified: report the hold
+        # and mark the metric-dependent triggers unavailable, instead of failing the campaign.
+        unverifiable_reason: str | None = None
+        try:
+            sidecar = member_sidecar(member_runs, db=con, log_mode=is_log_mode(cat_dir))
+        except StepBackInvalidSchemaError as exc:
+            sidecar, unverifiable_reason = None, str(exc)
         triggers_res = evaluate_all_triggers(
-            camp, member_runs, state=state, sidecar=member_sidecar(member_runs, db=con, log_mode=is_log_mode(cat_dir)), snoozed_triggers=snoozed_map
+            camp, member_runs, state=state, sidecar=sidecar, snoozed_triggers=snoozed_map
         )
 
         latest_rec = reviews[-1].recommendation if reviews else None
@@ -413,6 +420,10 @@ def get_stepback_status(
             "review_count": len(reviews),
             "latest_recommendation": latest_rec,
             "epoch": state.review_epoch,
+            "sidecar_verified": unverifiable_reason is None,
+            "unverifiable_reason": unverifiable_reason,
+            # Triggers that read the declared metric cannot run without a verified sidecar.
+            "triggers_unavailable": ["near_bound", "metric_plateau"] if unverifiable_reason else [],
         }
         if verbose:
             res["state"] = dataclasses.asdict(state)
