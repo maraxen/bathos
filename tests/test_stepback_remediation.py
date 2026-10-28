@@ -65,7 +65,8 @@ def test_clause_needs_a_registered_claim():
         )
 
 
-def test_postmortem_must_exist_and_name_the_obligation(tmp_path: Path):
+def test_postmortem_must_exist_and_name_the_obligation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("BTH_WORKSPACE_ROOT", str(tmp_path))
     with pytest.raises(StepBackCitationInvalidError):
         validate_campaign_evidence(
             [f"postmortem:{tmp_path / 'missing.bth.postmortem.toml'}#ob-1"], _campaign(), [], min_citations=1
@@ -78,13 +79,54 @@ def test_postmortem_must_exist_and_name_the_obligation(tmp_path: Path):
     assert valid == [f"postmortem:{pm}#ob-1"]
 
 
-def test_postmortem_for_another_campaign_is_not_evidence(tmp_path: Path):
+def test_postmortem_for_another_campaign_is_not_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("BTH_WORKSPACE_ROOT", str(tmp_path))
     pm = tmp_path / "other.bth.postmortem.toml"
     pm.write_text('campaign_id = "camp_other"\n\n[obligations."ob-1"]\nstatus = "discharged"\n')
     with pytest.raises(StepBackCitationInvalidError):
         validate_campaign_evidence(
             [f"postmortem:{pm}#ob-1"], _campaign(), [], min_citations=1
         )
+
+
+def test_postmortem_outside_the_workspace_is_not_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    monkeypatch.setenv("BTH_WORKSPACE_ROOT", str(workspace))
+    outside = tmp_path / "elsewhere.bth.postmortem.toml"
+    outside.write_text('campaign_id = "camp_rem"\n\n[obligations."ob-1"]\nstatus = "discharged"\n')
+    with pytest.raises(StepBackCitationInvalidError):
+        validate_campaign_evidence(
+            [f"postmortem:{outside}#ob-1"], _campaign(), [], min_citations=1
+        )
+
+
+def test_signal17_attributes_a_cool_only_campaign(tmp_path: Path):
+    """An uncompacted campaign lives only in cool JSON; its open hold must still be charged."""
+    from bathos.campaigns import Campaign, write_campaign_cool
+    from bathos.sprint_audit import signal_stepback_ignored_escalations
+
+    write_campaign_cool(
+        Campaign(id="camp_cool_only", project_slug="proj", name="cool", mode="confirmation"), tmp_path
+    )
+    save_escalation_cool(
+        EscalationRecord(
+            escalation_id="esc_cool_only",
+            campaign_id="camp_cool_only",
+            project_slug="",
+            level=2,
+            status="active",
+            opened_at=(datetime.now(UTC) - timedelta(days=10)).isoformat(),
+            opened_by_kind="system",
+            trigger_reason="hold",
+        ),
+        tmp_path,
+    )
+
+    result = signal_stepback_ignored_escalations("proj", tmp_path / "bathos.db", catalog_dir=tmp_path)
+
+    assert result.value == 1.0
+    assert result.level == "WARNING"
 
 
 def test_respellings_of_one_run_count_once():

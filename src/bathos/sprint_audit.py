@@ -508,13 +508,24 @@ def signal_stepback_ignored_escalations(
         needs_lookup = any(
             not e.project_slug and e.level >= 2 and e.status == "active" for e in latest_by_campaign.values()
         )
-        if needs_lookup and catalog_readable(target_cat):
-            lookup = connect_read(target_cat, read_only=True)
+        if needs_lookup:
+            # list_campaigns unions the warm table with cool JSON, so an uncompacted campaign
+            # is still attributed. If the warm tier cannot be opened, the cool tier alone is used.
+            from bathos.campaigns import list_campaigns
+
+            lookup = None
+            if catalog_readable(target_cat):
+                try:
+                    lookup = connect_read(target_cat, read_only=True)
+                except Exception:
+                    logging.getLogger(__name__).warning("campaign lookup: warm tier unreadable", exc_info=True)
             try:
-                for cid, slug in lookup.execute("SELECT id, project_slug FROM campaigns").fetchall():
-                    campaign_projects[str(cid)] = str(slug or "")
+                campaign_projects = {
+                    c.id: c.project_slug or "" for c in list_campaigns(lookup, catalog_dir=target_cat)
+                }
             finally:
-                lookup.close()
+                if lookup is not None:
+                    lookup.close()
         proj_escs = [
             e
             for e in latest_by_campaign.values()

@@ -408,12 +408,32 @@ def _toml_strings(node: Any) -> set[str]:
     return out
 
 
+def _workspace_root() -> Path:
+    """The directory holding the nearest .bth.toml, else BTH_WORKSPACE_ROOT or the cwd."""
+    import os
+
+    from bathos.config import find_project_config
+
+    start = Path(os.environ.get("BTH_WORKSPACE_ROOT", Path.cwd()))
+    cfg = find_project_config(start)
+    return cfg.parent if cfg is not None else start
+
+
 def _postmortem_cites(path_str: str, obligation: str, campaign_id: str) -> bool:
     """A postmortem citation holds only for a real *.bth.postmortem.toml that names both
     this campaign and the cited obligation (as a table key or string value)."""
     if not path_str or not obligation or not campaign_id:
         return False
+    # Resolve against the workspace root (not the cwd) and stay inside it.
+    root = _workspace_root().resolve()
     path = Path(path_str)
+    if not path.is_absolute():
+        path = root / path
+    path = path.resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
     if not path.name.endswith(".bth.postmortem.toml") or not path.is_file():
         return False
     try:
