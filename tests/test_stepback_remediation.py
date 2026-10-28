@@ -314,13 +314,67 @@ def _save_escalation(tmp_path: Path, camp_id: str, level: int) -> None:
     )
 
 
-def test_agent_filed_review_cannot_lift_a_level2_hold(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def _workspace_policy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, policy: str) -> None:
+    (tmp_path / ".bth.toml").write_text(f'[stepback]\nagent_hold_discharge = "{policy}"\n')
+    monkeypatch.setenv("BTH_WORKSPACE_ROOT", str(tmp_path))
+
+
+def test_agent_review_lifts_a_hold_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from bathos.stepback.catalog import get_escalation_state
+    from bathos.stepback.engine import record_stepback_review
+
+    camp = _review_campaign("camp_hold_default")
+    _save_escalation(tmp_path, camp.id, 2)
+    monkeypatch.setenv("CLAUDE_AGENT", "1")
+    monkeypatch.delenv("BTH_STEP_BACK_POLICY", raising=False)
+    monkeypatch.setenv("BTH_WORKSPACE_ROOT", str(tmp_path))  # no .bth.toml: default policy
+    with (
+        patch("bathos.stepback.engine.get_campaign", return_value=camp),
+        patch("bathos.stepback.engine.fetch_member_runs", return_value=[]),
+    ):
+        record_stepback_review(
+            campaign_id=camp.id,
+            path_kind="rubric",
+            scores=CONTINUE_SCORES,
+            reviewer_id="independent_agent",
+            catalog_dir=tmp_path,
+        )
+    assert get_escalation_state(camp.id, catalog_dir=tmp_path).current_level == 0
+
+
+def test_unknown_hold_policy_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from bathos.stepback.engine import _hold_discharge_policy
+
+    _workspace_policy(tmp_path, monkeypatch, "anarchic")
+    with pytest.raises(StepBackInvalidSchemaError):
+        _hold_discharge_policy()
+
+
+def test_missing_sidecar_is_named_not_guessed():
+    from bathos.stepback.engine import member_sidecar
+
+    with pytest.raises(StepBackInvalidSchemaError, match="no sidecar on disk"):
+        member_sidecar([SimpleNamespace(id=RUN_ID, sidecar_path="")])
+
+
+def test_missing_timestamp_is_refused(tmp_path: Path):
+    with (
+        patch("bathos.stepback.engine.fetch_member_runs", return_value={"r1": SimpleNamespace(id="r1")}),
+        patch("bathos.stepback.engine.is_log_mode", return_value=False),
+        patch("bathos.stepback.engine._run_timestamps", return_value={}),
+        pytest.raises(StepBackInvalidSchemaError, match="no recorded timestamp"),
+    ):
+        member_runs_chronological(None, ["r1"], tmp_path)
+
+
+def test_agent_filed_review_cannot_lift_a_level2_hold_when_human_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from bathos.errors import StepBackUnauthorizedChairError
     from bathos.stepback.catalog import list_reviews
     from bathos.stepback.engine import record_stepback_review
 
     camp = _review_campaign("camp_hold_agent")
     _save_escalation(tmp_path, camp.id, 2)
+    _workspace_policy(tmp_path, monkeypatch, "human_only")
     monkeypatch.setenv("CLAUDE_AGENT", "1")
     with (
         patch("bathos.stepback.engine.get_campaign", return_value=camp),

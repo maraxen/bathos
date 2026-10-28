@@ -1147,12 +1147,14 @@ class TestMutationResilience(unittest.TestCase):
         self.runs = [
             {
                 "run_id": "run_01_mut",
+                "started_at": "2026-10-27T10:00:00Z",
                 "author": "run_author_alice",
                 "agent_mode": "agent_worker_bob",
                 "git_author": "committer_charlie",
             },
             {
                 "run_id": "run_02_mut",
+                "started_at": "2026-10-27T11:00:00Z",
                 "author": "run_author_david",
                 "agent_mode": "agent_worker_eve",
             },

@@ -129,16 +129,22 @@ def _run_timestamps(con: Any, run_ids: list[str], catalog_dir: Path) -> dict[str
     stamps: dict[str, datetime] = {}
     if con is not None and run_ids:
         marks = ", ".join("?" for _ in run_ids)
-        try:
-            for rid, ts in con.execute(
-                f"SELECT id, timestamp FROM runs WHERE id IN ({marks})",  # noqa: S608
-                run_ids,
-            ).fetchall():
+        # The warm table records the run time as `timestamp`; older indexes use `started_at`.
+        for column in ("timestamp", "started_at"):
+            try:
+                rows = con.execute(
+                    f"SELECT id, {column} FROM runs WHERE id IN ({marks})",  # noqa: S608
+                    run_ids,
+                ).fetchall()
+            except Exception:
+                continue
+            for rid, ts in rows:
                 parsed = _as_utc(ts)
                 if parsed is not None:
                     stamps[str(rid)] = parsed
-        except Exception:
-            _log.warning("warm-tier timestamp lookup failed; falling back to cool fragments", exc_info=True)
+            break
+        else:
+            _log.warning("warm-tier timestamp lookup failed; falling back to cool fragments")
     missing = {rid for rid in run_ids if rid not in stamps}
     if missing:
         from bathos.catalog import read_runs
@@ -151,24 +157,56 @@ def _run_timestamps(con: Any, run_ids: list[str], catalog_dir: Path) -> dict[str
     return stamps
 
 
+HOLD_DISCHARGE_POLICIES = ("agentic", "human_only")
+
+
+def _hold_discharge_policy(cwd: Path | str | None = None) -> str:
+    """Whether an agent-filed independent review may lift a Level 2 hold.
+
+    Read from [stepback] agent_hold_discharge in the workspace .bth.toml. Default "agentic"
+    (per user decision); "human_only" keeps holds liftable only by a human at a TTY or with a
+    chair token. An unknown value is refused, not guessed.
+    """
+    import tomllib
+
+    search_root = Path(cwd) if cwd is not None else Path(os.environ.get("BTH_WORKSPACE_ROOT", Path.cwd()))
+    policy = "agentic"
+    bth_toml = search_root / ".bth.toml"
+    if bth_toml.is_file():
+        data = tomllib.loads(bth_toml.read_text(encoding="utf-8"))
+        sb_cfg = data.get("stepback", {})
+        if isinstance(sb_cfg, dict) and "agent_hold_discharge" in sb_cfg:
+            policy = str(sb_cfg["agent_hold_discharge"]).strip()
+    if policy not in HOLD_DISCHARGE_POLICIES:
+        raise StepBackInvalidSchemaError(
+            f"[stepback] agent_hold_discharge must be one of {HOLD_DISCHARGE_POLICIES}, got '{policy}'"
+        )
+    return policy
+
+
 def member_sidecar(member_runs: list[Any]) -> dict[str, Any] | None:
-    """Parsed pre-registration sidecar of the latest member run, if it is on disk.
+    """Parsed pre-registration sidecar of the latest member run.
 
     Triggers need the sidecar to know the metric a campaign is judged on
-    ([benchmark].metric, [stepback].target_metric, [result_schema]).
+    ([benchmark].metric, [stepback].target_metric, [result_schema]). Fails loud: a member run
+    with no sidecar on disk is named rather than judged on guessed data.
     """
+    import tomllib
+
+    for run in member_runs:
+        sidecar_path = _attr(run, "sidecar_path")
+        if not sidecar_path or not Path(sidecar_path).is_file():
+            raise StepBackInvalidSchemaError(
+                f"run {_run_id(run)} has no sidecar on disk ({sidecar_path or 'no path recorded'}); "
+                "triggers and reviews need every member run's pre-registration"
+            )
     if not member_runs:
         return None
-    sidecar_path = _attr(member_runs[-1], "sidecar_path")
-    if not sidecar_path or not Path(sidecar_path).is_file():
-        return None
+    latest = member_runs[-1]
     try:
-        import tomllib
-
-        return tomllib.loads(Path(sidecar_path).read_text(encoding="utf-8"))
-    except Exception:
-        _log.warning("could not parse sidecar %s; triggers run without it", sidecar_path, exc_info=True)
-        return None
+        return tomllib.loads(Path(_attr(latest, "sidecar_path")).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise StepBackInvalidSchemaError(f"sidecar of run {_run_id(latest)} is unreadable: {exc}") from exc
 
 
 def member_runs_chronological(con: Any, members: list[str], cat_dir: Path) -> list[Any]:
@@ -183,7 +221,19 @@ def member_runs_chronological(con: Any, members: list[str], cat_dir: Path) -> li
     runs = list(raw_runs.values()) if isinstance(raw_runs, dict) else list(raw_runs)
     runs = [r for r in runs if r is not None]
     ids = [rid for rid in (_run_id(r) for r in runs) if rid]
-    stamps = _run_timestamps(con, ids, cat_dir)
+    # A run that already carries its recorded time keeps it; the database fills the rest.
+    stamps: dict[str, datetime] = {}
+    for r in runs:
+        parsed = _as_utc(_attr(r, "timestamp") or _attr(r, "started_at"))
+        rid = _run_id(r)
+        if parsed is not None and rid:
+            stamps[rid] = parsed
+    stamps.update(_run_timestamps(con, [rid for rid in ids if rid not in stamps], cat_dir))
+    unstamped = [rid for rid in ids if rid not in stamps]
+    if unstamped:
+        raise StepBackInvalidSchemaError(
+            f"run(s) {', '.join(unstamped)} have no recorded timestamp; cannot order the campaign's runs"
+        )
     return sorted(runs, key=lambda r: (stamps.get(_run_id(r) or "", _EPOCH), _run_id(r) or ""))
 
 
@@ -726,7 +776,7 @@ def record_stepback_review(
                 reason=reason,
                 opened_by_kind="reviewer",
                 reviewer_id=eff_reviewer,
-                independent_review=is_indep and not agent_mode,
+                independent_review=is_indep and (not agent_mode or _hold_discharge_policy() == "agentic"),
                 agent_mode=agent_mode,
             )
             esc_rec.project_slug = project_slug

@@ -36,6 +36,17 @@ from bathos.stepback.catalog import (
 from bathos.stepback.schema import EscalationRecord
 
 
+def _stamp_runs(con, cat_dir: Path, run_ids: list[str]) -> None:
+    """Give fixture runs the recorded time and on-disk sidecar that real runs carry."""
+    for i, rid in enumerate(run_ids):
+        sidecar = cat_dir / f"{rid}.bth.toml"
+        sidecar.write_text('[experiment]\nhypothesis = "fixture"\n')
+        con.execute(
+            "UPDATE runs SET started_at = ?, sidecar_path = ? WHERE id = ?",
+            [f"2026-10-27T{10 + i:02d}:00:00Z", str(sidecar), rid],
+        )
+
+
 @pytest.fixture
 def mcp_test_env(tmp_path: Path, monkeypatch):
     cat_dir = tmp_path / "catalog"
@@ -146,6 +157,7 @@ def mcp_test_env(tmp_path: Path, monkeypatch):
         """,
         [camp.id, camp.id],
     )
+    _stamp_runs(con, cat_dir, ["run_mcp_1", "run_mcp_2"])
     con.commit()
     con.close()
 

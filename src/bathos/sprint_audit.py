@@ -501,11 +501,22 @@ def signal_stepback_ignored_escalations(
         latest_by_campaign: dict[str, Any] = {}
         for e in sorted((e for e in escalations if e.status != "snoozed"), key=lambda e: e.opened_at or ""):
             latest_by_campaign[e.campaign_id] = e
-        # A record with no project_slug is not charged to every project.
+        # A record with no project_slug is attributed through its campaign's project.
+        campaign_projects: dict[str, str] = {}
+        target_cat = catalog_dir or db_path.parent
+        if any(not e.project_slug for e in latest_by_campaign.values()) and catalog_readable(target_cat):
+            lookup = connect_read(target_cat, read_only=True)
+            try:
+                for cid, slug in lookup.execute("SELECT id, project_slug FROM campaigns").fetchall():
+                    campaign_projects[str(cid)] = str(slug or "")
+            finally:
+                lookup.close()
         proj_escs = [
             e
             for e in latest_by_campaign.values()
-            if e.project_slug == project_slug and e.level >= 2 and e.status == "active"
+            if (e.project_slug or campaign_projects.get(e.campaign_id, "")) == project_slug
+            and e.level >= 2
+            and e.status == "active"
         ]
 
         if not proj_escs:

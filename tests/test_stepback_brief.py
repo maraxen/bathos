@@ -144,6 +144,17 @@ def brief_test_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return cat_dir
 
 
+
+def _stamp_runs(con, cat_dir: Path, run_ids: list[str]) -> None:
+    """Give fixture runs the recorded time and on-disk sidecar that real runs carry."""
+    for i, rid in enumerate(run_ids):
+        sidecar = cat_dir / f"{rid}.bth.toml"
+        sidecar.write_text('[experiment]\nhypothesis = "fixture"\n')
+        con.execute(
+            "UPDATE runs SET started_at = ?, sidecar_path = ? WHERE id = ?",
+            [f"2026-10-27T{10 + i:02d}:00:00Z", str(sidecar), rid],
+        )
+
 def test_format_project_status_entry_l0(brief_test_env: Path):
     cat_dir = brief_test_env
     db_path = cat_dir / "bathos.db"
@@ -167,6 +178,7 @@ def test_format_project_status_entry_l0(brief_test_env: Path):
         ('r4', 'fail', 8.0)
         """
     )
+    _stamp_runs(con, cat_dir, ["r1", "r2", "r3", "r4"])
     con.execute(
         """
         INSERT INTO campaign_runs (campaign_id, run_id) VALUES
@@ -326,6 +338,7 @@ def test_render_advisor_brief_full(brief_test_env: Path):
         ('r14', 'marginal', 140.0)
         """
     )
+    _stamp_runs(con, cat_dir, [f"r{n}" for n in range(10, 15)])
     con.execute(
         """
         INSERT INTO campaign_runs (campaign_id, run_id) VALUES
