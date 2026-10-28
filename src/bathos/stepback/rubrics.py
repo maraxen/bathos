@@ -160,10 +160,9 @@ def evaluate_rubric(
         if dim_name not in scores:
             raise StepBackInvalidSchemaError(f"Missing required rubric dimension: '{dim_name}'")
         raw_val = scores[dim_name]
-        try:
-            val = int(raw_val)
-        except (ValueError, TypeError):
+        if isinstance(raw_val, bool) or not isinstance(raw_val, int):
             raise StepBackInvalidSchemaError(f"Dimension '{dim_name}' score must be integer, got: {raw_val}")
+        val = raw_val
 
         if val < 1 or val > 5:
             raise StepBackInvalidSchemaError(

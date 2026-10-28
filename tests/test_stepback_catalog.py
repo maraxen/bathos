@@ -10,6 +10,7 @@ from bathos.stepback.catalog import (
     get_review,
     ingest_stepback_fragments,
     iter_cool_reviews,
+    list_escalations,
     list_reviews,
     load_escalation_cool,
     load_review_cool,
@@ -419,3 +420,248 @@ def test_telemetry_events_emitted(mock_catalog: Path, monkeypatch: pytest.Monkey
     assert esc_fields["level"] == 2
     assert esc_fields["status"] == "active"
     assert esc_fields["trigger_name"] == "repeated_marginal"
+
+
+def test_escalation_state_snooze_preserves_level2_hold(mock_catalog: Path):
+    """L2-F01: Snoozing a trigger pauses trigger firing but does NOT reset Level 2 hold to Level 0."""
+    esc_hold = EscalationRecord(
+        escalation_id="esc_h1",
+        campaign_id="camp_snooze_test",
+        project_slug="p",
+        level=2,
+        status="active",
+        opened_at="2026-10-27T08:00:00Z",
+        opened_by_kind="trigger",
+        trigger_name="repeated_marginal",
+        trigger_reason="streak=3",
+    )
+    save_escalation_cool(esc_hold, mock_catalog)
+
+    state_before = get_escalation_state("camp_snooze_test", catalog_dir=mock_catalog)
+    assert state_before.current_level == 2
+    assert state_before.status == "hold"
+    assert "repeated_marginal" in state_before.active_triggers
+
+    # Now add a snooze record for 'repeated_marginal'
+    esc_snooze = EscalationRecord(
+        escalation_id="esc_s1",
+        campaign_id="camp_snooze_test",
+        project_slug="p",
+        level=0,
+        status="snoozed",
+        opened_at="2026-10-27T09:00:00Z",
+        opened_by_kind="reviewer",
+        trigger_name="repeated_marginal",
+        trigger_reason="Investigating margin bounds",
+        metadata={"snooze_trigger_name": "repeated_marginal"},
+    )
+    save_escalation_cool(esc_snooze, mock_catalog)
+
+    state_after = get_escalation_state("camp_snooze_test", catalog_dir=mock_catalog)
+    # MUST still be level 2 and hold!
+    assert state_after.current_level == 2
+    assert state_after.status == "hold"
+    # Trigger firing is paused for repeated_marginal
+    assert "repeated_marginal" not in state_after.active_triggers
+
+
+def test_list_reviews_and_escalations_merges_warm_and_cool(mock_catalog: Path):
+    """L2-F02: list_reviews and list_escalations must merge warm DuckDB records with uncompacted cool fragments."""
+    db_path = mock_catalog / "bathos.db"
+    con = duckdb.connect(str(db_path))
+
+    # Ingest r1 into warm DB
+    r1 = StepBackReview(
+        review_id="rev_merge_1",
+        campaign_id="camp_merge",
+        project_slug="p",
+        created_at="2026-10-27T10:00:00Z",
+        reviewer_id="r1",
+        reviewer_kind="agent",
+        is_independent=True,
+        path_kind="rubric",
+        input_snapshot_sha256="sha1",
+        input_snapshot="{}",
+        recommendation="CONTINUE",
+        escalation_level=0,
+    )
+    e1 = EscalationRecord(
+        escalation_id="esc_merge_1",
+        campaign_id="camp_merge",
+        project_slug="p",
+        level=1,
+        status="active",
+        opened_at="2026-10-27T10:00:00Z",
+        opened_by_kind="trigger",
+        trigger_name="near_bound",
+        trigger_reason="d=0.20",
+    )
+    save_review_cool(r1, mock_catalog)
+    save_escalation_cool(e1, mock_catalog)
+    ingest_stepback_fragments(con, mock_catalog)
+
+    # Now write new cool-only review and escalation (uncompacted)
+    r2 = StepBackReview(
+        review_id="rev_merge_2",
+        campaign_id="camp_merge",
+        project_slug="p",
+        created_at="2026-10-27T11:00:00Z",
+        reviewer_id="r2",
+        reviewer_kind="agent",
+        is_independent=True,
+        path_kind="rubric",
+        input_snapshot_sha256="sha2",
+        input_snapshot="{}",
+        recommendation="PIVOT",
+        escalation_level=1,
+    )
+    e2 = EscalationRecord(
+        escalation_id="esc_merge_2",
+        campaign_id="camp_merge",
+        project_slug="p",
+        level=2,
+        status="active",
+        opened_at="2026-10-27T11:00:00Z",
+        opened_by_kind="trigger",
+        trigger_name="repeated_marginal",
+        trigger_reason="streak=3",
+    )
+    save_review_cool(r2, mock_catalog)
+    save_escalation_cool(e2, mock_catalog)
+
+    # Calling list_reviews and list_escalations with BOTH db and catalog_dir
+    reviews = list_reviews(campaign_id="camp_merge", catalog_dir=mock_catalog, db=con)
+    escalations = list_escalations(campaign_id="camp_merge", catalog_dir=mock_catalog, db=con)
+
+    assert len(reviews) == 2
+    review_ids = [r.review_id for r in reviews]
+    assert "rev_merge_1" in review_ids
+    assert "rev_merge_2" in review_ids
+
+    assert len(escalations) == 2
+    esc_ids = [e.escalation_id for e in escalations]
+    assert "esc_merge_1" in esc_ids
+    assert "esc_merge_2" in esc_ids
+
+    con.close()
+
+
+def test_save_cool_telemetry_failure_isolation(mock_catalog: Path, monkeypatch: pytest.MonkeyPatch):
+    """L3-F03: telemetry failure must never raise out of save_review_cool or save_escalation_cool."""
+    def broken_event(*args, **kwargs):
+        raise RuntimeError("Telemetry failure!")
+
+    monkeypatch.setattr("bathos.stepback.catalog.event", broken_event)
+
+    r = StepBackReview(
+        review_id="rev_telem_fail",
+        campaign_id="camp_tf",
+        project_slug="p",
+        created_at="2026-10-27T10:00:00Z",
+        reviewer_id="r1",
+        reviewer_kind="agent",
+        is_independent=True,
+        path_kind="rubric",
+        input_snapshot_sha256="sha1",
+        input_snapshot="{}",
+        recommendation="CONTINUE",
+        escalation_level=0,
+    )
+    e = EscalationRecord(
+        escalation_id="esc_telem_fail",
+        campaign_id="camp_tf",
+        project_slug="p",
+        level=1,
+        status="active",
+        opened_at="2026-10-27T10:00:00Z",
+        opened_by_kind="trigger",
+        trigger_name="near_bound",
+        trigger_reason="d=0.20",
+    )
+
+    # Both must succeed without error
+    rev_path = save_review_cool(r, mock_catalog)
+    assert rev_path.is_file()
+
+    esc_path = save_escalation_cool(e, mock_catalog)
+    assert esc_path.is_file()
+
+
+def test_signature_sha256_duckdb_roundtrip(mock_catalog: Path):
+    """L3-F04: signature_sha256 is persisted in DuckDB and recovered verbatim."""
+    db_path = mock_catalog / "bathos.db"
+    con = duckdb.connect(str(db_path))
+
+    r = StepBackReview(
+        review_id="rev_sig_1",
+        campaign_id="camp_sig",
+        project_slug="p",
+        created_at="2026-10-27T10:00:00Z",
+        reviewer_id="r1",
+        reviewer_kind="agent",
+        is_independent=True,
+        path_kind="rubric",
+        input_snapshot_sha256="sha1",
+        input_snapshot="{}",
+        recommendation="CONTINUE",
+        escalation_level=0,
+    )
+    orig_sig = r.signature_sha256
+    assert orig_sig is not None
+    assert len(orig_sig) == 64
+
+    save_review_cool(r, mock_catalog)
+    ingest_stepback_fragments(con, mock_catalog)
+
+    reviews = list_reviews(campaign_id="camp_sig", db=con)
+    assert len(reviews) == 1
+    loaded = reviews[0]
+    assert loaded.signature_sha256 == orig_sig
+    assert loaded.compute_signature() == orig_sig
+
+    con.close()
+
+
+def test_escalation_resolved_telemetry_on_resolution_and_deescalation(mock_catalog: Path, monkeypatch: pytest.MonkeyPatch):
+    """L3-F06: escalation resolution and de-escalation emit stepback.escalation_resolved."""
+    events = []
+    monkeypatch.setattr("bathos.stepback.catalog.event", lambda name, **fields: events.append((name, fields)))
+
+    # Resolution (level 0)
+    e_res = EscalationRecord(
+        escalation_id="esc_r1",
+        campaign_id="camp_res",
+        project_slug="p",
+        level=0,
+        status="resolved",
+        opened_at="2026-10-27T10:00:00Z",
+        opened_by_kind="chair",
+        resolved_at="2026-10-27T11:00:00Z",
+        resolved_by="human_chair",
+        resolution_note="Resolved",
+        deescalated_to=0,
+    )
+    save_escalation_cool(e_res, mock_catalog)
+    assert len(events) == 1
+    assert events[0][0] == "stepback.escalation_resolved"
+    assert events[0][1]["deescalated_to"] == 0
+
+    # De-escalation (level 1 from 2)
+    e_deesc = EscalationRecord(
+        escalation_id="esc_d1",
+        campaign_id="camp_res",
+        project_slug="p",
+        level=1,
+        status="active",
+        opened_at="2026-10-27T10:00:00Z",
+        opened_by_kind="chair",
+        resolved_at="2026-10-27T11:00:00Z",
+        resolved_by="human_chair",
+        resolution_note="De-escalated to warning",
+        deescalated_to=1,
+    )
+    save_escalation_cool(e_deesc, mock_catalog)
+    assert len(events) == 2
+    assert events[1][0] == "stepback.escalation_resolved"
+    assert events[1][1]["deescalated_to"] == 1
+

@@ -152,3 +152,11 @@ def test_exhaustive_gap_free_partition_coverage():
             assert rec != "CONTINUE"
 
     assert count == 3125
+
+
+def test_rubric_eval_strictly_rejects_boolean():
+    scores = {dim: 4 for dim in CANONICAL_DIMENSIONS}
+    scores["question_validity"] = True
+    with pytest.raises(StepBackInvalidSchemaError, match="must be integer"):
+        evaluate_rubric(scores)
+

@@ -351,7 +351,7 @@ def _count_telemetry_catalog_reads(catalog_dir: Path | None, t0: datetime, t1: d
                 evt = json.loads(line)
                 name = str(evt.get("name") or evt.get("event") or evt.get("tool") or "")
                 if any(k in name.lower() for k in ("read", "query", "list", "get", "status")):
-                    evt_time_str = evt.get("timestamp") or evt.get("time") or evt.get("created_at")
+                    evt_time_str = evt.get("ts") or evt.get("timestamp") or evt.get("time") or evt.get("created_at")
                     if evt_time_str:
                         evt_time = datetime.fromisoformat(str(evt_time_str).replace("Z", "+00:00"))
                         if t0 <= evt_time <= t1:
@@ -534,14 +534,14 @@ def signal_stepback_ignored_escalations(
                             SELECT COUNT(*) FROM runs r
                             JOIN campaign_runs cr ON r.id = cr.run_id
                             WHERE (cr.campaign_id = ? OR cr.campaign_id LIKE ?)
-                            AND r.started_at > ?
+                            AND r.timestamp > ?
                             """,
                             [esc.campaign_id, f"{esc.campaign_id}%", esc.opened_at],
                         ).fetchone()
                         if row:
                             subsequent_runs = row[0]
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning("Failed to count subsequent runs for escalation %s: %s", esc.escalation_id, e)
 
                 if age_days > 7.0 or subsequent_runs >= 3:
                     ignored_count += 1

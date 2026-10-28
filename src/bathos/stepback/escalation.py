@@ -11,6 +11,7 @@ Implements:
 from __future__ import annotations
 
 import os
+import stat
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -38,17 +39,28 @@ AGENT_ENV_VARS = (
 CHAIR_TOKEN_PATH = Path.home() / ".bth" / "chair_token"
 
 
+def get_chair_token_path() -> Path:
+    env_path = os.environ.get("BTH_CHAIR_TOKEN_PATH")
+    if env_path:
+        return Path(env_path)
+    return CHAIR_TOKEN_PATH
+
+
 def is_agent_environment() -> bool:
     """Detect whether caller is executing within an autonomous agent session."""
     return any(bool(os.environ.get(var)) for var in AGENT_ENV_VARS)
 
 
 def verify_chair_token(token: str | None = None) -> bool:
-    """Verify chair token against ~/.bth/chair_token."""
-    if not CHAIR_TOKEN_PATH.is_file():
+    """Verify chair token against ~/.bth/chair_token or BTH_CHAIR_TOKEN_PATH with 0600 permissions."""
+    token_path = get_chair_token_path()
+    if not token_path.is_file():
         return False
     try:
-        expected = CHAIR_TOKEN_PATH.read_text().strip()
+        mode = token_path.stat().st_mode
+        if mode & (stat.S_IRWXG | stat.S_IRWXO):
+            return False
+        expected = token_path.read_text().strip()
         if not expected:
             return False
         return bool(token and token.strip() == expected)

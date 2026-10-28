@@ -107,6 +107,7 @@ def test_level_3_human_chair_authorization_gates(monkeypatch: pytest.MonkeyPatch
     # With valid chair token -> succeeds
     token_file = tmp_path / "chair_token"
     token_file.write_text("secret_chair_token_123\n")
+    token_file.chmod(0o600)
     monkeypatch.setattr("bathos.stepback.escalation.CHAIR_TOKEN_PATH", token_file)
 
     state3 = EscalationState(campaign_id="camp_01", current_level=3, status="escalated")
@@ -271,4 +272,60 @@ def test_lifecycle_warn_only_hook_on_add_run(tmp_path: Path, capsys: pytest.Capt
 
     with pytest.raises(CampaignError, match="step-back enforcement enabled and campaign has active Step-Back Hold"):
         add_run_to_campaign(con, camp.id, "run_003", catalog_dir=cat_dir)
+
+
+def test_sidecar_stepback_enforce_blocks_addition(tmp_path: Path):
+    import duckdb
+
+    from bathos.campaigns import CampaignError, add_run_to_campaign, create_campaign
+    from bathos.stepback.catalog import save_escalation_cool
+    from bathos.stepback.schema import EscalationRecord
+
+    cat_dir = tmp_path / "catalog"
+    cat_dir.mkdir(parents=True)
+    con = duckdb.connect(str(cat_dir / "bathos.db"))
+    con.execute("CREATE TABLE runs (id VARCHAR, timestamp TIMESTAMP, outcome VARCHAR, sidecar_path VARCHAR)")
+    con.execute("CREATE TABLE campaign_runs (campaign_id VARCHAR, run_id VARCHAR, added_at TIMESTAMP)")
+    con.execute("CREATE TABLE campaigns (id VARCHAR PRIMARY KEY, name VARCHAR, project_slug VARCHAR, mode VARCHAR, question TEXT, hypothesis TEXT, started_at TEXT, parent_campaign_id TEXT, stopping_threshold REAL, claim_path VARCHAR, threshold_set VARCHAR, status VARCHAR, verdict VARCHAR, metadata TEXT)")
+
+    camp = create_campaign(con, name="enforce_camp", project_slug="proj", mode="confirmation")
+    esc = EscalationRecord(
+        escalation_id="esc_enf",
+        campaign_id=camp.id,
+        project_slug="proj",
+        level=2,
+        status="active",
+        opened_at="2026-10-27T12:00:00Z",
+        opened_by_kind="system",
+        trigger_reason="Test hold",
+    )
+    save_escalation_cool(esc, cat_dir)
+
+    sc_path = tmp_path / "exp.bth.toml"
+    sc_path.write_text('[experiment]\nhypothesis = "test"\n[stepback]\nenforce = true\n')
+
+    con.execute("INSERT INTO runs (id, timestamp, outcome, sidecar_path) VALUES ('run_enf', '2026-10-27T12:01:00Z', 'pass', ?)", [str(sc_path)])
+
+    with pytest.raises(CampaignError, match="step-back enforcement enabled and campaign has active Step-Back Hold"):
+        add_run_to_campaign(con, camp.id, "run_enf", catalog_dir=cat_dir)
+
+
+def test_verify_chair_token_env_and_permissions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from bathos.stepback.escalation import verify_chair_token
+
+    token_file = tmp_path / "custom_chair_token"
+    token_file.write_text("chair_secret_999\n")
+    token_file.chmod(0o600)
+
+    monkeypatch.setenv("BTH_CHAIR_TOKEN_PATH", str(token_file))
+    assert verify_chair_token("chair_secret_999") is True
+    assert verify_chair_token("wrong") is False
+
+    # Group/other writable or readable must fail permission check
+    token_file.chmod(0o664)
+    assert verify_chair_token("chair_secret_999") is False
+
+    token_file.chmod(0o600)
+    assert verify_chair_token("chair_secret_999") is True
+
 

@@ -336,6 +336,7 @@ def test_cli_stepback_resolve_level3_allowed_with_chair_token(cli_test_env, monk
     # Set up chair token file
     token_file = tmp_path / "chair_token"
     token_file.write_text("secret_chair_token_12345")
+    token_file.chmod(0o600)
     monkeypatch.setattr("bathos.stepback.escalation.CHAIR_TOKEN_PATH", token_file)
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
 
@@ -381,6 +382,7 @@ def test_cli_stepback_resolve_level3_refused_in_agent_environment(cli_test_env, 
 
     token_file = tmp_path / "chair_token"
     token_file.write_text("secret_chair_token_12345")
+    token_file.chmod(0o600)
     monkeypatch.setattr("bathos.stepback.escalation.CHAIR_TOKEN_PATH", token_file)
 
     # Export agent environment variable

@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -31,13 +32,25 @@ from bathos.telemetry import event
 
 logger = logging.getLogger(__name__)
 
+
+def _format_timestamp(val: Any) -> str | None:
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val.astimezone(UTC).isoformat()
+    s = str(val).strip()
+    if " " in s and "T" not in s:
+        s = s.replace(" ", "T", 1)
+    return s
+
+
 STEPBACK_REVIEWS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS stepback_reviews (
     id VARCHAR PRIMARY KEY,
     campaign_id VARCHAR NOT NULL,
     project_slug VARCHAR NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
-    dispatched_at TIMESTAMP WITH TIME ZONE,
+    created_at VARCHAR NOT NULL,
+    dispatched_at VARCHAR,
     reviewer_id VARCHAR NOT NULL,
     reviewer_kind VARCHAR NOT NULL,
     is_independent BOOLEAN NOT NULL,
@@ -57,6 +70,7 @@ CREATE TABLE IF NOT EXISTS stepback_reviews (
     is_dissent BOOLEAN NOT NULL DEFAULT FALSE,
     parent_panel_id VARCHAR,
     dissents_json TEXT,
+    signature_sha256 VARCHAR,
     metadata TEXT
 );
 """
@@ -68,12 +82,12 @@ CREATE TABLE IF NOT EXISTS stepback_escalations (
     project_slug VARCHAR NOT NULL,
     level INTEGER NOT NULL,
     status VARCHAR NOT NULL,
-    opened_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    opened_at VARCHAR NOT NULL,
     opened_by_kind VARCHAR NOT NULL,
     opened_by_review_id VARCHAR,
     trigger_name VARCHAR,
     trigger_reason VARCHAR NOT NULL,
-    resolved_at TIMESTAMP WITH TIME ZONE,
+    resolved_at VARCHAR,
     resolved_by VARCHAR,
     resolved_kind VARCHAR,
     resolution_note TEXT,
@@ -129,21 +143,24 @@ def save_review_cool(
         except Exception as e:
             logger.warning(f"Could not mirror review to workspace: {e}")
 
-    event(
-        "stepback.review_recorded",
-        review_id=review.review_id,
-        campaign_id=review.campaign_id,
-        project_slug=review.project_slug,
-        reviewer_id=review.reviewer_id,
-        reviewer_kind=review.reviewer_kind,
-        is_independent=review.is_independent,
-        path_kind=review.path_kind,
-        recommendation=review.recommendation,
-        escalation_level=review.escalation_level,
-        composite_score=review.composite_score,
-        has_dissent=bool(review.dissents),
-        cited_evidence_count=len(review.cited_evidence),
-    )
+    try:
+        event(
+            "stepback.review_recorded",
+            review_id=review.review_id,
+            campaign_id=review.campaign_id,
+            project_slug=review.project_slug,
+            reviewer_id=review.reviewer_id,
+            reviewer_kind=review.reviewer_kind,
+            is_independent=review.is_independent,
+            path_kind=review.path_kind,
+            recommendation=review.recommendation,
+            escalation_level=review.escalation_level,
+            composite_score=review.composite_score,
+            has_dissent=bool(review.dissents),
+            cited_evidence_count=len(review.cited_evidence),
+        )
+    except Exception as e:
+        logger.debug("Failed to emit telemetry: %s", e)
 
     return nested_path
 
@@ -167,18 +184,33 @@ def save_escalation_cool(
     target_path = esc_dir / f"{esc.campaign_id}_{esc.escalation_id}.json"
     _atomic_write_json(target_path, esc.to_dict())
 
-    event(
-        "stepback.escalation_created",
-        escalation_id=esc.escalation_id,
-        campaign_id=esc.campaign_id,
-        project_slug=esc.project_slug,
-        level=esc.level,
-        status=esc.status,
-        opened_by_kind=esc.opened_by_kind,
-        opened_by_review_id=esc.opened_by_review_id,
-        trigger_name=esc.trigger_name,
-        trigger_reason=esc.trigger_reason,
-    )
+    try:
+        if esc.status == "resolved" or esc.level == 0 or esc.deescalated_to is not None:
+            event(
+                "stepback.escalation_resolved",
+                escalation_id=esc.escalation_id,
+                campaign_id=esc.campaign_id,
+                project_slug=esc.project_slug,
+                level=esc.level,
+                resolved_by=esc.resolved_by,
+                resolution_note=esc.resolution_note,
+                deescalated_to=esc.deescalated_to,
+            )
+        else:
+            event(
+                "stepback.escalation_created",
+                escalation_id=esc.escalation_id,
+                campaign_id=esc.campaign_id,
+                project_slug=esc.project_slug,
+                level=esc.level,
+                status=esc.status,
+                opened_by_kind=esc.opened_by_kind,
+                opened_by_review_id=esc.opened_by_review_id,
+                trigger_name=esc.trigger_name,
+                trigger_reason=esc.trigger_reason,
+            )
+    except Exception as e:
+        logger.debug("Failed to emit telemetry: %s", e)
 
     return target_path
 
@@ -244,10 +276,14 @@ def list_reviews(
     workspace_root: Path | None = None,
     db: duckdb.DuckDBPyConnection | None = None,
 ) -> list[StepBackReview]:
-    """List reviews optionally filtered by campaign_id."""
-    reviews: list[StepBackReview] = []
+    """List reviews optionally filtered by campaign_id.
 
-    # Try warm DB first if available
+    Queries warm DuckDB database and reads uncompacted cool-tier fragments,
+    merging them by ID (cool fragments take precedence/augment).
+    """
+    reviews_by_id: dict[str, StepBackReview] = {}
+
+    # 1. Warm DB if available
     if db is not None:
         try:
             query = "SELECT * FROM stepback_reviews"
@@ -265,8 +301,8 @@ def list_reviews(
                     "review_id": row_dict["id"],
                     "campaign_id": row_dict["campaign_id"],
                     "project_slug": row_dict["project_slug"],
-                    "created_at": str(row_dict["created_at"]),
-                    "dispatched_at": str(row_dict["dispatched_at"]) if row_dict.get("dispatched_at") else None,
+                    "created_at": _format_timestamp(row_dict["created_at"]),
+                    "dispatched_at": _format_timestamp(row_dict.get("dispatched_at")),
                     "reviewer_id": row_dict["reviewer_id"],
                     "reviewer_kind": row_dict["reviewer_kind"],
                     "is_independent": bool(row_dict["is_independent"]),
@@ -282,6 +318,7 @@ def list_reviews(
                     "cited_evidence": json.loads(row_dict.get("cited_evidence_json") or "[]"),
                     "rubric_scores": json.loads(row_dict.get("scores_json") or "{}"),
                     "dissents": json.loads(row_dict.get("dissents_json") or "[]"),
+                    "signature_sha256": row_dict.get("signature_sha256"),
                     "metadata": json.loads(row_dict.get("metadata") or "{}"),
                 }
                 if row_dict.get("open_analysis_mode") and row_dict.get("open_analysis_json"):
@@ -289,24 +326,24 @@ def list_reviews(
                         "mode": row_dict["open_analysis_mode"],
                         "sections": json.loads(row_dict["open_analysis_json"]),
                     }
-                reviews.append(StepBackReview.from_dict(rev_dict))
-            if reviews:
-                return reviews
-        except Exception:
-            pass
+                rev = StepBackReview.from_dict(rev_dict)
+                reviews_by_id[rev.review_id] = rev
+        except Exception as e:
+            logger.debug("Failed to query warm reviews: %s", e)
 
-    # Cool tier fallback
+    # 2. Cool tier (uncompacted fragments take precedence or augment)
     if catalog_dir is not None:
         file_paths = iter_cool_reviews(catalog_dir, workspace_root=workspace_root)
         for p in file_paths:
             try:
                 rev = load_review_cool(p)
                 if campaign_id is None or rev.campaign_id == campaign_id or rev.campaign_id.startswith(campaign_id):
-                    reviews.append(rev)
+                    reviews_by_id[rev.review_id] = rev
             except Exception:
                 continue
 
-    reviews.sort(key=lambda r: r.created_at)
+    reviews = list(reviews_by_id.values())
+    reviews.sort(key=lambda r: str(r.created_at))
     return reviews
 
 
@@ -329,8 +366,12 @@ def list_escalations(
     catalog_dir: Path | None = None,
     db: duckdb.DuckDBPyConnection | None = None,
 ) -> list[EscalationRecord]:
-    """List escalation events optionally filtered by campaign_id."""
-    records: list[EscalationRecord] = []
+    """List escalation events optionally filtered by campaign_id.
+
+    Queries warm DuckDB database and reads uncompacted cool-tier fragments,
+    merging them by ID (cool fragments take precedence/augment).
+    """
+    records_by_id: dict[str, EscalationRecord] = {}
 
     if db is not None:
         try:
@@ -350,12 +391,12 @@ def list_escalations(
                     "project_slug": row_dict["project_slug"],
                     "level": int(row_dict["level"]),
                     "status": row_dict["status"],
-                    "opened_at": str(row_dict["opened_at"]),
+                    "opened_at": _format_timestamp(row_dict["opened_at"]),
                     "opened_by_kind": row_dict["opened_by_kind"],
                     "opened_by_review_id": row_dict.get("opened_by_review_id"),
                     "trigger_name": row_dict.get("trigger_name"),
                     "trigger_reason": row_dict["trigger_reason"],
-                    "resolved_at": str(row_dict["resolved_at"]) if row_dict.get("resolved_at") else None,
+                    "resolved_at": _format_timestamp(row_dict.get("resolved_at")),
                     "resolved_by": row_dict.get("resolved_by"),
                     "resolved_kind": row_dict.get("resolved_kind"),
                     "resolution_note": row_dict.get("resolution_note") or "",
@@ -364,11 +405,10 @@ def list_escalations(
                     "pivot_anchor_run_id": row_dict.get("pivot_anchor_run_id"),
                     "metadata": json.loads(row_dict.get("metadata") or "{}"),
                 }
-                records.append(EscalationRecord.from_dict(esc_dict))
-            if records:
-                return records
-        except Exception:
-            pass
+                esc = EscalationRecord.from_dict(esc_dict)
+                records_by_id[esc.escalation_id] = esc
+        except Exception as e:
+            logger.debug("Failed to query warm escalations: %s", e)
 
     if catalog_dir is not None:
         file_paths = iter_cool_escalations(catalog_dir)
@@ -376,11 +416,12 @@ def list_escalations(
             try:
                 rec = load_escalation_cool(p)
                 if campaign_id is None or rec.campaign_id == campaign_id or rec.campaign_id.startswith(campaign_id):
-                    records.append(rec)
+                    records_by_id[rec.escalation_id] = rec
             except Exception:
                 continue
 
-    records.sort(key=lambda r: r.opened_at)
+    records = list(records_by_id.values())
+    records.sort(key=lambda r: str(r.opened_at))
     return records
 
 
@@ -428,6 +469,16 @@ def get_escalation_state(
     active_triggers: list[str] = []
 
     for esc in escalations:
+        if esc.status == "snoozed":
+            # Snoozing a trigger pauses trigger firing; it must never reset or dismantle an active Level 2 Step-Back Hold.
+            state.review_epoch = max(state.review_epoch, esc.review_epoch)
+            if esc.pivot_anchor_run_id:
+                state.pivot_anchor_run_id = esc.pivot_anchor_run_id
+            snoozed_trigger = (esc.metadata or {}).get("snooze_trigger_name") or esc.trigger_name
+            if snoozed_trigger and snoozed_trigger in active_triggers:
+                active_triggers.remove(snoozed_trigger)
+            continue
+
         state.current_level = esc.level
         state.status = status_map.get(esc.level, "nominal")
         state.review_epoch = max(state.review_epoch, esc.review_epoch)
@@ -485,8 +536,8 @@ def ingest_stepback_fragments(
                     input_snapshot_sha256, input_snapshot, rubric_id, rubric_version,
                     rubric_sha256, scores_json, composite_score, open_analysis_mode,
                     open_analysis_json, cited_evidence_json, recommendation,
-                    escalation_level, is_dissent, parent_panel_id, dissents_json, metadata
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    escalation_level, is_dissent, parent_panel_id, dissents_json, signature_sha256, metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     rev.review_id,
@@ -513,6 +564,7 @@ def ingest_stepback_fragments(
                     False,
                     None,
                     dissents_json,
+                    rev.signature_sha256,
                     metadata_json,
                 ],
             )

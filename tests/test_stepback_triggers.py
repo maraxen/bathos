@@ -372,7 +372,10 @@ def test_snooze_stepback_trigger_persistence_and_refusal(tmp_path):
     import pytest
 
     from bathos.campaigns import create_campaign
-    from bathos.errors import StepBackAgentOverrideRefusedError
+    from bathos.errors import (
+        StepBackAgentOverrideRefusedError,
+        StepBackInvalidSchemaError,
+    )
     from bathos.stepback.catalog import get_escalation_state, save_escalation_cool
     from bathos.stepback.engine import snooze_stepback_trigger
     from bathos.stepback.schema import EscalationRecord
@@ -430,7 +433,7 @@ def test_snooze_stepback_trigger_persistence_and_refusal(tmp_path):
     con.close()
 
     # 1. Validation: Rationale required
-    with pytest.raises(ValueError, match="Rationale is required"):
+    with pytest.raises(StepBackInvalidSchemaError, match="Rationale is required"):
         snooze_stepback_trigger(
             camp.id,
             trigger_name="repeated_marginal",

@@ -5932,12 +5932,14 @@ async def stepback_trigger(campaign_id: str, window: int = 5, dry_run: bool = Fa
 @traced_tool
 async def stepback_run(
     campaign_id: str,
+    window: int = 5,
+    dry_run: bool = False,
     reviewer_id: str | None = None,  # noqa: ARG001 -- Spec Section 7.1 signature parity
 ) -> dict:
     """Run step-back evaluation triggers for a campaign (alias for stepback_trigger)."""
     from bathos.stepback.engine import run_stepback_triggers
 
-    return run_stepback_triggers(campaign_id=campaign_id)
+    return run_stepback_triggers(campaign_id=campaign_id, window=window, dry_run=dry_run)
 
 
 @cisternal.tool(registry="bathos")
@@ -6032,8 +6034,24 @@ async def stepback_show(
     campaign_id: str | None = None,
     review_id: str | None = None,
     json_format: bool = False,  # noqa: ARG001
+    format: str = "json",
 ) -> dict:
     """Show details of a step-back review or campaign reviews."""
+    if format == "brief":
+        if not campaign_id:
+            from bathos.errors import StepBackInvalidSchemaError
+
+            raise StepBackInvalidSchemaError("campaign_id is required when format='brief'")
+        from bathos.stepback.brief import render_advisor_brief
+
+        brief_md = render_advisor_brief(campaign_id=campaign_id)
+        return {
+            "ok": True,
+            "campaign_id": campaign_id,
+            "brief_markdown": brief_md,
+            "format": "brief",
+        }
+
     from bathos.stepback.engine import show_stepback
 
     return show_stepback(campaign_id=campaign_id, review_id=review_id)
@@ -6090,24 +6108,32 @@ async def stepback_brief(campaign_id: str) -> dict:
 @traced_tool
 async def stepback_snooze(
     campaign_id: str,
-    trigger_name: str,
+    trigger_name: str = "",
+    trigger: str | None = None,
     runs_window: int = 5,
+    runs: int | None = None,
     epoch_hours: float = 24.0,
     rationale: str = "",
     reviewer_id: str | None = None,
 ) -> dict:
     """Snooze/acknowledge a step-back event trigger for a bounded run and epoch window."""
+    from bathos.errors import StepBackInvalidSchemaError
     from bathos.stepback.engine import snooze_stepback_trigger
+
+    eff_trigger = trigger or trigger_name
+    if not eff_trigger:
+        raise StepBackInvalidSchemaError("Either trigger_name or trigger must be provided")
+
+    eff_runs = runs if runs is not None else runs_window
 
     return snooze_stepback_trigger(
         campaign_id=campaign_id,
-        trigger_name=trigger_name,
-        runs_window=runs_window,
+        trigger_name=eff_trigger,
+        runs_window=eff_runs,
         epoch_hours=epoch_hours,
         rationale=rationale,
         reviewer_id=reviewer_id,
     )
-
 
 
 if __name__ == "__main__":

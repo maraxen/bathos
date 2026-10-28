@@ -572,8 +572,10 @@ def _add_run_to_campaign_impl(
 
                     sc = parse_sidecar(_P(run_sidecar_path))
                     stepback_cfg = getattr(sc, "stepback", {})
-                    if isinstance(stepback_cfg, dict) and stepback_cfg.get("enforce"):
-                        enforce = True
+                    if isinstance(stepback_cfg, dict):
+                        enf_val = stepback_cfg.get("enforce")
+                        if (isinstance(enf_val, bool) and enf_val) or str(enf_val).strip().lower() in ("1", "true", "yes"):
+                            enforce = True
 
             if enforce and esc_state.current_level >= 2:
                 raise CampaignError(

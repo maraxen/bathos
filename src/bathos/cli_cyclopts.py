@@ -2235,8 +2235,21 @@ def stepback_brief_cmd(
         raise SystemExit(1) from None
 
     if json_output:
-        status_entry = format_project_status_entry(campaign_id, catalog_dir=cat_p)
-        print(json.dumps({"brief": brief_md, "project_status_entry": status_entry}, indent=2))
+        status_entry = format_project_status_entry(
+            campaign_id, catalog_dir=cat_p, include_nominal=True
+        )
+        advisor_entry = format_project_status_entry(
+            campaign_id, catalog_dir=cat_p, include_nominal=False
+        )
+        payload = {
+            "ok": True,
+            "campaign_id": campaign_id,
+            "brief": brief_md,
+            "brief_markdown": brief_md,
+            "project_status_entry": status_entry,
+            "advisor_status_entry": advisor_entry,
+        }
+        print(json.dumps(payload, indent=2))
         return
 
     print(brief_md)

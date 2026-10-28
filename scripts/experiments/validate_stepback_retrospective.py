@@ -33,7 +33,8 @@ def load_campaigns_with_db_enrichment() -> list[dict]:
     """Load campaigns from committed fixtures and enrich with database records if available."""
     campaigns = get_historical_campaign_fixtures()
 
-    db_path = Path("/tmp/claude-1000/e261026b/asr/.bth/catalog/bathos.db")
+    db_env = os.environ.get("BTH_CATALOG_DIR")
+    db_path = (Path(db_env) / "bathos.db") if db_env else (Path.home() / ".bth" / "catalog" / "bathos.db")
     if db_path.is_file():
         try:
             import duckdb

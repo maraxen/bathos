@@ -117,11 +117,25 @@ def compute_input_snapshot(
 
     if not git_head and workspace_root is not None:
         try:
-            head_file = Path(workspace_root) / ".git" / "HEAD"
+            ws_git = Path(workspace_root) / ".git"
+            git_dir = ws_git
+            if ws_git.is_file():
+                txt = ws_git.read_text().strip()
+                if txt.startswith("gitdir:"):
+                    git_dir = Path(txt.split(":", 1)[1].strip())
+                    if not git_dir.is_absolute():
+                        git_dir = (Path(workspace_root) / git_dir).resolve()
+
+            head_file = git_dir / "HEAD"
             if head_file.is_file():
                 content = head_file.read_text().strip()
                 if content.startswith("ref: "):
-                    ref_path = Path(workspace_root) / ".git" / content[5:]
+                    ref_rel = content[5:].strip()
+                    ref_path = git_dir / ref_rel
+                    if not ref_path.is_file() and (git_dir / "commondir").is_file():
+                        common_rel = (git_dir / "commondir").read_text().strip()
+                        common_dir = (git_dir / common_rel).resolve()
+                        ref_path = common_dir / ref_rel
                     if ref_path.is_file():
                         git_head = ref_path.read_text().strip()
                 else:
@@ -311,13 +325,13 @@ def snooze_stepback_trigger(
       confirmation/sequential campaigns, max 10 runs on exploratory campaigns, <= 72 hours).
     """
     if not rationale or not rationale.strip():
-        raise ValueError("Rationale is required to snooze a step-back trigger")
+        raise StepBackInvalidSchemaError("Rationale is required to snooze a step-back trigger")
 
     clean_trigger = trigger_name.strip().lower()
     if clean_trigger in ("level_3", "l3", "chair", "human_chair"):
         raise StepBackAgentOverrideRefusedError("Cannot snooze Level 3 Human Chair escalations")
 
-    cat_dir, con, owns_db = resolve_catalog_and_db(catalog_dir, db, read_only=False)
+    cat_dir, con, owns_db = resolve_catalog_and_db(catalog_dir, db, read_only=True)
     try:
         camp = get_campaign(con, campaign_id, catalog_dir=cat_dir)
         if camp is None:
@@ -327,14 +341,6 @@ def snooze_stepback_trigger(
         max_runs_cap, max_hours_cap = _resolve_snooze_caps(getattr(camp, "mode", "exploration"), cwd=cwd)
         runs_window = max(1, min(int(runs_window), max_runs_cap))
         epoch_hours = max(0.1, min(float(epoch_hours), max_hours_cap))
-
-        # Ingest any cool fragments to DuckDB so state is fully synchronized
-        try:
-            from bathos.stepback.catalog import ingest_stepback_fragments
-            if con is not None and cat_dir is not None:
-                ingest_stepback_fragments(con, cat_dir)
-        except Exception:
-            pass
 
         state = get_escalation_state(full_id, catalog_dir=cat_dir, db=con)
         if state.current_level == 3:
@@ -513,7 +519,7 @@ def record_stepback_review(
             rubric_version = rubric_dict.get("version", "1.0.0")
             rubric_sha = r_sha
 
-        elif norm_path_kind in ("open_analysis", "path_b"):
+        elif norm_path_kind in ("open_analysis", "path_b", "analysis"):
             if not recommendation:
                 raise StepBackInvalidSchemaError(
                     "Recommendation parameter is strictly required for Path B open analysis"
@@ -551,6 +557,10 @@ def record_stepback_review(
             if mode or narrative:
                 analysis_dict = {"mode": mode, "sections": narrative or {}}
                 open_analysis_obj = validate_open_analysis(analysis_dict, recommendation=final_rec)
+            if mode or narrative or evidence:
+                validate_campaign_evidence(
+                    evidence or [], camp, member_runs, min_citations=2, raise_on_invalid=True
+                )
         else:
             raise StepBackInvalidSchemaError(
                 f"Unknown path_kind '{path_kind}'. Must be 'rubric', 'open_analysis', or 'hybrid'"
@@ -733,6 +743,7 @@ def resolve_stepback(
     try:
         camp_full_id: str | None = None
         target_esc: EscalationRecord | None = None
+        camp: Any | None = None
 
         if escalation_id:
             target_esc = get_escalation(escalation_id, catalog_dir=cat_dir, db=con)
@@ -771,6 +782,9 @@ def resolve_stepback(
             chair_token=chair_token,
             interactive_tty=interactive_tty,
         )
+        project_slug = camp.project_slug if camp else (target_esc.project_slug if target_esc else "")
+        if project_slug:
+            esc_rec.project_slug = project_slug
         save_escalation_cool(esc_rec, cat_dir)
 
         return {
