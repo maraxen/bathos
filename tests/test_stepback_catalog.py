@@ -548,7 +548,7 @@ def test_list_reviews_and_escalations_merges_warm_and_cool(mock_catalog: Path):
 
 def test_save_cool_telemetry_failure_isolation(mock_catalog: Path, monkeypatch: pytest.MonkeyPatch):
     """L3-F03: telemetry failure must never raise out of save_review_cool or save_escalation_cool."""
-    def broken_event(*args, **kwargs):
+    def broken_event(*_args, **_kwargs):
         raise RuntimeError("Telemetry failure!")
 
     monkeypatch.setattr("bathos.stepback.catalog.event", broken_event)

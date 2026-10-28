@@ -323,7 +323,7 @@ class Sidecar:
     breakdown: BreakdownBlock | None = None
     result_schema_meta: dict[str, dict] = field(default_factory=dict)
     # step-back review configuration (optional [stepback] block, spec 261027)
-    stepback: dict[str, Any] = field(default_factory=dict)
+    stepback: dict[str, typing.Any] = field(default_factory=dict)
 
     @classmethod
     def from_declaration(cls, decl: dict) -> Sidecar:

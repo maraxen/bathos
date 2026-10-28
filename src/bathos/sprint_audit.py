@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 from dataclasses import dataclass
@@ -541,7 +542,11 @@ def signal_stepback_ignored_escalations(
                         if row:
                             subsequent_runs = row[0]
                     except Exception as e:
-                        logger.warning("Failed to count subsequent runs for escalation %s: %s", esc.escalation_id, e)
+                        logging.getLogger(__name__).warning(
+                            "Failed to count subsequent runs for escalation %s: %s",
+                            esc.escalation_id,
+                            e,
+                        )
 
                 if age_days > 7.0 or subsequent_runs >= 3:
                     ignored_count += 1
