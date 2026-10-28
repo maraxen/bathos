@@ -170,6 +170,21 @@ def test_unrecoverable_older_member_does_not_block_the_campaign(tmp_path: Path, 
     assert got["result_schema"] == {"ns_per_day": "float"}
 
 
+def test_latest_sidecar_with_stale_sha_uses_live_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A sidecar edited after its run is read as it stands (and logged), not refused."""
+    from bathos.stepback.engine import member_sidecar
+
+    monkeypatch.setenv("BTH_WORKSPACE_ROOT", str(tmp_path))
+    sidecar = tmp_path / "edited.bth.toml"
+    sidecar.write_text('[experiment]\nhypothesis = "fixture"\n\n[result_schema]\nns_per_day = "float"\n')
+    run = SimpleNamespace(id=RUN_ID, sidecar_path=str(sidecar), sidecar_sha256="0" * 64)
+
+    got = member_sidecar([run], workspace_root=tmp_path)
+
+    assert got is not None
+    assert got["result_schema"] == {"ns_per_day": "float"}
+
+
 def test_respellings_of_one_run_count_once():
     members = [SimpleNamespace(id=RUN_ID, sidecar_path="", git_commit=None)]
     with pytest.raises(StepBackInsufficientEvidenceError):

@@ -221,6 +221,15 @@ def member_sidecar(
             if index < len(member_runs) - 1:
                 _log.warning("older member run %s has no recoverable sidecar (%s); skipped", _run_id(run), reason)
                 continue
+            # A sidecar that is still on disk but no longer matches its recorded sha is used
+            # as it stands, and the mismatch is logged so the status is visibly unverified.
+            live = Path(_attr(run, "sidecar_path") or "")
+            if isinstance(sidecar, Unresolvable) and live.is_file():
+                from bathos.sidecar import parse_sidecar
+
+                _log.warning("latest run %s: sidecar changed since the run (%s); using the live file, unverified", _run_id(run), reason)
+                latest_sidecar = parse_sidecar(live)
+                continue
             raise StepBackInvalidSchemaError(
                 f"latest run {_run_id(run)} has no recoverable sidecar ({reason}); "
                 "triggers and reviews need the current pre-registration"
