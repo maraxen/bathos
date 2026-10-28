@@ -457,3 +457,5 @@ def test_mcp_stepback_brief(brief_test_env: Path):
     assert res["campaign_id"] == camp.id
     assert "# Advisor Brief: MCP Brief Test" in res["brief_markdown"]
     assert "[NOMINAL: 0 runs, pass rate 0.00]" in res["project_status_entry"]
+    assert res["advisor_status_entry"] == ""
+    assert format_project_status_entry(camp.id, catalog_dir=cat_dir, include_nominal=False) == ""

@@ -6075,12 +6075,14 @@ async def stepback_brief(campaign_id: str) -> dict:
     from bathos.stepback.brief import format_project_status_entry, render_advisor_brief
 
     brief_md = render_advisor_brief(campaign_id=campaign_id)
-    status_entry = format_project_status_entry(campaign_id=campaign_id)
+    status_entry = format_project_status_entry(campaign_id=campaign_id, include_nominal=True)
+    advisor_status_entry = format_project_status_entry(campaign_id=campaign_id, include_nominal=False)
     return {
         "ok": True,
         "campaign_id": campaign_id,
         "brief_markdown": brief_md,
         "project_status_entry": status_entry,
+        "advisor_status_entry": advisor_status_entry,
     }
 
 

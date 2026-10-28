@@ -584,3 +584,88 @@ def test_cli_and_mcp_snooze(tmp_path, monkeypatch):
     assert mcp_res["trigger_name"] == "near_bound"
 
 
+def test_snooze_confirmatory_and_bth_toml_caps(tmp_path):
+    import duckdb
+
+    from bathos.campaigns import create_campaign
+    from bathos.stepback.engine import snooze_stepback_trigger
+
+    cat_dir = tmp_path / "catalog"
+    cat_dir.mkdir(parents=True)
+    con = duckdb.connect(str(cat_dir / "bathos.db"))
+    con.execute(
+        """
+        CREATE TABLE campaigns (
+            id TEXT PRIMARY KEY,
+            project_slug TEXT,
+            name TEXT,
+            mode TEXT,
+            question TEXT,
+            hypothesis TEXT,
+            status TEXT,
+            started_at TEXT,
+            concluded_at TEXT,
+            conclusion TEXT,
+            outcome_label TEXT,
+            parent_campaign_id TEXT,
+            stopping_threshold REAL,
+            negative_check TEXT,
+            claim_path TEXT,
+            claim_sha256 TEXT,
+            claim_mode TEXT
+        );
+        CREATE TABLE campaign_runs (campaign_id TEXT, run_id TEXT);
+        CREATE TABLE runs (id TEXT PRIMARY KEY, outcome TEXT, duration_s REAL);
+        CREATE TABLE IF NOT EXISTS stepback_escalations (
+            id TEXT PRIMARY KEY,
+            campaign_id TEXT,
+            project_slug TEXT,
+            level INTEGER,
+            status TEXT,
+            opened_at TEXT,
+            opened_by_kind TEXT,
+            trigger_name TEXT,
+            trigger_reason TEXT,
+            resolution_note TEXT,
+            review_epoch INTEGER,
+            metadata TEXT
+        );
+        """
+    )
+    conf_camp = create_campaign(
+        con,
+        name="Confirmatory Snooze Cap Test",
+        project_slug="conf_snooze",
+        mode="confirmation",
+        catalog_dir=cat_dir,
+    )
+    con.close()
+
+    # Default confirmatory cap clamps runs_window=8 to 3
+    res_default = snooze_stepback_trigger(
+        conf_camp.id,
+        trigger_name="repeated_marginal",
+        runs_window=8,
+        rationale="Testing confirmatory cap",
+        catalog_dir=cat_dir,
+        cwd=tmp_path,
+    )
+    assert res_default["snooze_until_runs"] == 3
+
+    # .bth.toml [stepback] override clamps confirmatory_max_snooze_runs to 2
+    (tmp_path / ".bth.toml").write_text(
+        '[project]\nslug = "conf_snooze"\n\n[stepback]\nconfirmatory_max_snooze_runs = 2\n',
+        encoding="utf-8",
+    )
+    res_override = snooze_stepback_trigger(
+        conf_camp.id,
+        trigger_name="near_bound",
+        runs_window=8,
+        rationale="Testing .bth.toml confirmatory cap override",
+        catalog_dir=cat_dir,
+        cwd=tmp_path,
+    )
+    assert res_override["snooze_until_runs"] == 2
+
+
+

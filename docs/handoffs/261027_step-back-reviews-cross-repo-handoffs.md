@@ -70,14 +70,14 @@ Enable the researcher's global portfolio dashboard (`PROJECT_STATUS.advisor.md`)
 `scripts/projects/project_status.py` queries `bth stepback brief <campaign-id>` or the FastMCP tool `stepback_brief(campaign_id)` and populates the `"End / reconsider"` table cell for each project.
 
 #### Contracted Tag Syntax & Semantics
-The `"End / reconsider"` cell must parse and display one of four standard status tags:
+Per locked user decision (`261027_step-back-reviews`), the `"End / reconsider"` cell in `PROJECT_STATUS.advisor.md` surfaces tags **only for campaigns at Level $\ge 1$** (`format_project_status_entry(campaign_id, include_nominal=False)` / `stepback_brief(campaign_id)["advisor_status_entry"]`), keeping Level 0 nominal campaigns concise/blank in the advisor table while retaining `[NOMINAL: N runs, pass rate X.XX]` in full `bth stepback brief` outputs:
 
-| Escalation Level | Tag Syntax | Meaning | UI Badging / Formatting |
+| Escalation Level | Tag Syntax (`include_nominal=True`) | `PROJECT_STATUS.advisor.md` Cell (`include_nominal=False`) | Meaning |
 |---|---|---|---|
-| **Level 0 (Nominal)** | `[NOMINAL: N runs, pass rate X.XX]` | Campaign operating cleanly within nominal variance; no triggers active. | Subtle / Dim text |
-| **Level 1 (Advisory)** | `[ADVISORY L1: <trigger_name> active; review recommended]` | Single trigger firing (e.g. `repeated_marginal`, `near_bound`); review pending. | Yellow / Advisory banner |
-| **Level 2 (Hold)** | `[HOLD L2: <trigger_reason>; review <review_id> recommends <rec>]` | Hard-floor veto or multiple triggers; conclusion verdict downgraded to `confounded`. | Orange / Bold Hold |
-| **Level 3 (Escalation)** | `[ESCALATE L3: Human Chair disposition required; <reason>]` | Critical anomaly or human referral; autonomous progress suspended. | Red / Blinking Urgent |
+| **Level 0 (Nominal)** | `[NOMINAL: N runs, pass rate X.XX]` | `""` *(blank/concise)* | Campaign operating cleanly within nominal variance; no triggers active. |
+| **Level 1 (Advisory)** | `[ADVISORY L1: <trigger_name> active; review recommended]` | `[ADVISORY L1: <trigger_name> active; review recommended]` | Single trigger firing (e.g. `repeated_marginal`, `near_bound`); single blind reviewer dispatched. |
+| **Level 2 (Hold)** | `[HOLD L2: <trigger_reason>; review <review_id> recommends <rec>]` | `[HOLD L2: <trigger_reason>; review <review_id> recommends <rec>]` | Hard-floor veto, dissent, or multiple triggers; 3-persona committee dispatched; conclusion downgraded to `confounded`. |
+| **Level 3 (Escalation)** | `[ESCALATE L3: Human Chair disposition required; <reason>]` | `[ESCALATE L3: Human Chair disposition required; <reason>]` | Critical anomaly or human referral; autonomous progress awaits Human Chair. |
 
 #### Implementation in `scripts/projects/project_status.py`
 ```python

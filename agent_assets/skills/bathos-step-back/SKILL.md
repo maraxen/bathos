@@ -360,3 +360,15 @@ To prevent the step-back review mechanism itself from becoming a rubber-stamp ri
 - **bathos-campaigns** — Campaign lifecycle, runs, claims, and Union Gate.
 - **bathos-rigor-gates** — Decision D1 non-blocking posture, obligation ledger, and blind reviewer isolation.
 - **using-bathos** — Run tracking, pre-registration sidecars, outcome evaluation.
+
+## 9. Locked User Governance Policies (Task `261027_step-back-reviews`)
+
+1. **Tiered Reviewer Dispatch Policy**:
+   - **Level 1 (Advisory Warning)**: Dispatch a **single blind independent reviewer** (`outsider` or `pre_mortem` + `stepback_v1` rubric).
+   - **Level 2 (Step-Back Hold) or on `HOLD` / Minority Dissent**: Escalate to a **3-persona committee** (Advisor, Methodologist, Outside Skeptic).
+2. **Per-Project & Mode Snooze Caps**:
+   - Exploratory campaigns default to max `10` runs ($\le 72$ hours).
+   - Confirmatory and sequential campaigns default to max `3` runs (`confirmatory_max_snooze_runs = 3`).
+   - `.bth.toml` `[stepback]` may configure `max_snooze_runs`, `confirmatory_max_snooze_runs`, and `max_snooze_hours`.
+3. **Portfolio Status Matrix Filtering (`PROJECT_STATUS.advisor.md`)**:
+   - Populate the `"End / reconsider"` column only for campaigns at **Level $\ge 1$** (`format_project_status_entry(..., include_nominal=False)` / `stepback_brief()["advisor_status_entry"]`), keeping Level 0 nominal campaigns blank/concise in the advisor table.

@@ -254,6 +254,43 @@ def run_stepback_triggers(
             con.close()
 
 
+def _resolve_snooze_caps(
+    camp_mode: str = "exploration",
+    cwd: Path | str | None = None,
+) -> tuple[int, float]:
+    """Resolve per-project [stepback] snooze caps from .bth.toml if present.
+
+    Defaults:
+    - Exploratory campaigns: max_snooze_runs = 10, max_snooze_hours = 72.0
+    - Confirmatory / sequential campaigns: confirmatory_max_snooze_runs = 3, max_snooze_hours = 72.0
+    """
+    max_runs = 3 if str(camp_mode).lower() in ("confirmation", "sequential") else 10
+    max_hours = 72.0
+
+    search_root = Path(cwd) if cwd is not None else Path(os.environ.get("BTH_WORKSPACE_ROOT", Path.cwd()))
+    bth_toml = search_root / ".bth.toml"
+    if bth_toml.is_file():
+        try:
+            import tomllib
+
+            data = tomllib.loads(bth_toml.read_text(encoding="utf-8"))
+            sb_cfg = data.get("stepback", {})
+            if isinstance(sb_cfg, dict):
+                if str(camp_mode).lower() in ("confirmation", "sequential"):
+                    if "confirmatory_max_snooze_runs" in sb_cfg:
+                        max_runs = int(sb_cfg["confirmatory_max_snooze_runs"])
+                    elif "max_snooze_runs" in sb_cfg:
+                        max_runs = int(sb_cfg["max_snooze_runs"])
+                elif "max_snooze_runs" in sb_cfg:
+                    max_runs = int(sb_cfg["max_snooze_runs"])
+                if "max_snooze_hours" in sb_cfg:
+                    max_hours = float(sb_cfg["max_snooze_hours"])
+        except Exception:
+            pass
+
+    return max(1, min(max_runs, 10)), max(0.1, min(max_hours, 72.0))
+
+
 def snooze_stepback_trigger(
     campaign_id: str,
     trigger_name: str,
@@ -263,13 +300,15 @@ def snooze_stepback_trigger(
     reviewer_id: str | None = None,
     catalog_dir: Path | str | None = None,
     db: Any | None = None,
+    cwd: Path | str | None = None,
 ) -> dict[str, Any]:
     """Snooze/acknowledge a step-back trigger for a bounded run and epoch window.
 
     Strict Refusal:
     - Attempting to snooze Level 3 or a Human Chair escalation raises StepBackAgentOverrideRefusedError.
     - Rationale is required and must be non-empty.
-    - Window is clamped between 1 and 10 runs (default 5, max 10).
+    - Window is clamped by mode and per-project .bth.toml [stepback] caps (default max 3 runs on
+      confirmation/sequential campaigns, max 10 runs on exploratory campaigns, <= 72 hours).
     """
     if not rationale or not rationale.strip():
         raise ValueError("Rationale is required to snooze a step-back trigger")
@@ -278,15 +317,16 @@ def snooze_stepback_trigger(
     if clean_trigger in ("level_3", "l3", "chair", "human_chair"):
         raise StepBackAgentOverrideRefusedError("Cannot snooze Level 3 Human Chair escalations")
 
-    runs_window = max(1, min(int(runs_window), 10))
-    epoch_hours = max(0.1, float(epoch_hours))
-
     cat_dir, con, owns_db = resolve_catalog_and_db(catalog_dir, db, read_only=False)
     try:
         camp = get_campaign(con, campaign_id, catalog_dir=cat_dir)
         if camp is None:
             raise CampaignError(f"Campaign not found: {campaign_id}")
         full_id = camp.id
+
+        max_runs_cap, max_hours_cap = _resolve_snooze_caps(getattr(camp, "mode", "exploration"), cwd=cwd)
+        runs_window = max(1, min(int(runs_window), max_runs_cap))
+        epoch_hours = max(0.1, min(float(epoch_hours), max_hours_cap))
 
         # Ingest any cool fragments to DuckDB so state is fully synchronized
         try:

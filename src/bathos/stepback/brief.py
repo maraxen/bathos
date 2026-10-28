@@ -32,11 +32,16 @@ def format_project_status_entry(
     campaign_id: str,
     catalog_dir: Path | str | None = None,
     db: Any | None = None,
+    *,
+    include_nominal: bool = True,
 ) -> str:
     """Format structured status string feeding the 'End / reconsider' column of PROJECT_STATUS.advisor.md.
 
+    When `include_nominal=False` (default for the PROJECT_STATUS.advisor.md matrix column),
+    Level 0 returns `""` (concise/blank) so only campaigns at Level >= 1 surface tags.
+
     Formats:
-    - L0: [NOMINAL: N runs, pass rate X.XX]
+    - L0: [NOMINAL: N runs, pass rate X.XX] (or "" when include_nominal=False)
     - L1: [ADVISORY L1: <trigger_name> active; review recommended]
     - L2: [HOLD L2: <trigger_reason>; review <review_id> recommends <rec>]
     - L3: [ESCALATE L3: Human Chair disposition required; <reason>]
@@ -54,6 +59,8 @@ def format_project_status_entry(
 
         level = state.current_level
         if level == 0:
+            if not include_nominal:
+                return ""
             members = union_campaign_member_ids(con, full_id, cat_dir)
             raw_runs = (
                 fetch_member_runs(con, members, cat_dir, log_mode=is_log_mode(cat_dir))
