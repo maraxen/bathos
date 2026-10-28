@@ -266,9 +266,14 @@ def test_cli_stepback_escalate_and_show(cli_test_env):
     assert '"ok": true' in res_show.output
 
 
-def test_cli_stepback_resolve_level2(cli_test_env):
+def test_cli_stepback_resolve_level2(cli_test_env, monkeypatch):
     camp_id = cli_test_env["campaign_id"]
     cat_dir = str(cli_test_env["catalog_dir"])
+
+    # A Level 2 hold is discharged by an authorized human at a terminal (or an independent review).
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    for var in ("BTH_AGENT_MODE", "CLAUDE_AGENT", "CLAUDE_AGENT_ID", "AGENT_NAME", "SUBAGENT_ID", "ANTIGRAVITY_AGENT"):
+        monkeypatch.delenv(var, raising=False)
 
     # Escalate to Level 2
     runner.invoke(app, ["stepback", "escalate", camp_id, "2", "--reason", "Hold", "--catalog-dir", cat_dir])

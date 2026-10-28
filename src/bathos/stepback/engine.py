@@ -87,6 +87,99 @@ def resolve_catalog_and_db(
     return cat_dir, db, owns_db
 
 
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+# Level implied by a recommendation (spec 8.2 / Path B mapping).
+_REC_LEVEL = {
+    Recommendation.CONTINUE.value: 0,
+    Recommendation.PIVOT.value: 1,
+    Recommendation.HOLD.value: 2,
+    Recommendation.ESCALATE.value: 2,
+    Recommendation.CONCLUDE_ABANDON.value: 2,
+}
+
+
+def _attr(item: Any, name: str) -> Any:
+    if isinstance(item, dict):
+        return item.get(name)
+    return getattr(item, name, None)
+
+
+def _run_id(run: Any) -> str | None:
+    rid = _attr(run, "id") or _attr(run, "run_id") or _attr(run, "uuid")
+    return str(rid) if rid else None
+
+
+def _as_utc(ts: Any) -> datetime | None:
+    if isinstance(ts, datetime):
+        return ts if ts.tzinfo else ts.replace(tzinfo=UTC)
+    if isinstance(ts, str) and ts.strip():
+        try:
+            parsed = datetime.fromisoformat(ts.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    return None
+
+
+def _run_timestamps(con: Any, run_ids: list[str], catalog_dir: Path) -> dict[str, datetime]:
+    """Recorded run timestamps: warm table first, cool fragments for the rest."""
+    stamps: dict[str, datetime] = {}
+    if con is not None and run_ids:
+        marks = ", ".join("?" for _ in run_ids)
+        try:
+            for rid, ts in con.execute(
+                f"SELECT id, timestamp FROM runs WHERE id IN ({marks})",  # noqa: S608
+                run_ids,
+            ).fetchall():
+                parsed = _as_utc(ts)
+                if parsed is not None:
+                    stamps[str(rid)] = parsed
+        except Exception:
+            pass
+    missing = {rid for rid in run_ids if rid not in stamps}
+    if missing:
+        from bathos.catalog import read_runs
+
+        for run in read_runs(catalog_dir):
+            if run.id in missing:
+                parsed = _as_utc(getattr(run, "timestamp", None))
+                if parsed is not None:
+                    stamps[run.id] = parsed
+    return stamps
+
+
+def member_runs_chronological(con: Any, members: list[str], cat_dir: Path) -> list[Any]:
+    """Fetch campaign member runs ordered by recorded time (ties broken by id).
+
+    Trigger logic reads the last element as the latest run, so the order must be
+    chronological, not the UUID order the membership lookup returns.
+    """
+    if not members:
+        return []
+    raw_runs = fetch_member_runs(con, members, cat_dir, log_mode=is_log_mode(cat_dir))
+    runs = list(raw_runs.values()) if isinstance(raw_runs, dict) else list(raw_runs)
+    runs = [r for r in runs if r is not None]
+    ids = [rid for rid in (_run_id(r) for r in runs) if rid]
+    stamps = _run_timestamps(con, ids, cat_dir)
+    return sorted(runs, key=lambda r: (stamps.get(_run_id(r) or "", _EPOCH), _run_id(r) or ""))
+
+
+def _check_canonical_rubric(rubric_id: str | None) -> None:
+    """Accept only the bundled canonical rubric.
+
+    A rubric_id is an identifier, never a filesystem path: a caller-supplied file
+    could carry its own dimension weights and so set its own verdict.
+    """
+    if rubric_id is None or not str(rubric_id).strip():
+        return
+    canonical_id = load_rubric()[0].get("id", "stepback_v1")
+    if str(rubric_id).strip() != canonical_id:
+        raise StepBackInvalidSchemaError(
+            f"Unknown rubric '{rubric_id}': only the canonical rubric '{canonical_id}' is accepted"
+        )
+
+
 def compute_input_snapshot(
     campaign: Any,
     member_runs: list[Any],
@@ -111,6 +204,10 @@ def compute_input_snapshot(
             run_ids.append(str(rid))
         if git_sha:
             git_head = str(git_sha)
+        # Bind sidecar content so editing a member sidecar changes the snapshot (spec 7.1).
+        sc_sha = _attr(r, "sidecar_sha256")
+        if rid and sc_sha:
+            sidecar_shas[str(rid)] = str(sc_sha)
 
     if run_ids:
         latest_run_sha = hashlib.sha256(run_ids[-1].encode()).hexdigest()
@@ -173,12 +270,7 @@ def get_stepback_status(
         reviews = [r for r in list_reviews(catalog_dir=cat_dir) if r.campaign_id == full_id]
 
         members = union_campaign_member_ids(con, full_id, cat_dir)
-        raw_runs = (
-            fetch_member_runs(con, members, cat_dir, log_mode=is_log_mode(cat_dir))
-            if members
-            else []
-        )
-        member_runs = [r for r in raw_runs.values() if r is not None] if isinstance(raw_runs, dict) else [r for r in raw_runs if r is not None]
+        member_runs = member_runs_chronological(con, members, cat_dir)
 
         escalations = list_escalations(campaign_id=full_id, catalog_dir=cat_dir, db=con)
         snoozed_map: dict[str, dict[str, Any]] = {}
@@ -229,12 +321,7 @@ def run_stepback_triggers(
         full_id = camp.id
         state = get_escalation_state(full_id, catalog_dir=cat_dir, db=con)
         members = union_campaign_member_ids(con, full_id, cat_dir)
-        raw_runs = (
-            fetch_member_runs(con, members, cat_dir, log_mode=is_log_mode(cat_dir))
-            if members
-            else []
-        )
-        member_runs = [r for r in raw_runs.values() if r is not None] if isinstance(raw_runs, dict) else [r for r in raw_runs if r is not None]
+        member_runs = member_runs_chronological(con, members, cat_dir)
 
         escalations = list_escalations(campaign_id=full_id, catalog_dir=cat_dir, db=con)
         snoozed_map: dict[str, dict[str, Any]] = {}
@@ -254,6 +341,7 @@ def run_stepback_triggers(
             new_state, esc_rec = transition_escalation(
                 state, target_level=1, reason=reason, opened_by_kind="system"
             )
+            esc_rec.project_slug = camp.project_slug or ""
             save_escalation_cool(esc_rec, cat_dir)
 
         return {
@@ -479,15 +567,14 @@ def record_stepback_review(
         state = get_escalation_state(full_id, catalog_dir=cat_dir, db=con)
 
         members = union_campaign_member_ids(con, full_id, cat_dir)
-        raw_runs = (
-            fetch_member_runs(con, members, cat_dir, log_mode=is_log_mode(cat_dir))
-            if members
-            else []
-        )
-        member_runs = [r for r in raw_runs.values() if r is not None] if isinstance(raw_runs, dict) else [r for r in raw_runs if r is not None]
+        member_runs = member_runs_chronological(con, members, cat_dir)
 
         if reviewer_id is not None and not str(reviewer_id).strip():
             raise StepBackInvalidSchemaError("Reviewer identity cannot be empty or whitespace")
+        # An agent session cannot file its review as human, whatever the caller claims.
+        agent_mode = is_agent_environment()
+        if agent_mode:
+            reviewer_kind = "agent"
 
         eff_reviewer = reviewer_id or os.environ.get("AGENT_NAME") or os.environ.get("USER") or "reviewer"
         is_indep = check_reviewer_independence(
@@ -504,20 +591,23 @@ def record_stepback_review(
         open_analysis_obj: OpenAnalysis | None = None
 
         norm_path_kind = str(path_kind).lower().strip()
-        if norm_path_kind in ("rubric", "path_a"):
+        if norm_path_kind in ("rubric", "path_a", "hybrid"):
             if not scores:
-                raise StepBackInvalidSchemaError("Scores dictionary is required for Path A rubric evaluation")
+                raise StepBackInvalidSchemaError(
+                    f"Scores dictionary is required for {'hybrid' if norm_path_kind == 'hybrid' else 'Path A rubric'} evaluation"
+                )
+            _check_canonical_rubric(rubric_id)
             rubric_scores_dict = {str(k): int(v) for k, v in scores.items()}
-            composite, calc_rec, calc_lvl, r_sha = evaluate_rubric(
-                rubric_scores_dict, rubric_path=rubric_id
-            )
+            composite, calc_rec, calc_lvl, r_sha = evaluate_rubric(rubric_scores_dict)
             final_composite = composite
-            final_rec = calc_rec
-            esc_level = calc_lvl
-            rubric_dict, _ = load_rubric(rubric_path=rubric_id)
+            rubric_dict, _ = load_rubric()
             rubric_meta_id = rubric_dict.get("id", "stepback_v1")
             rubric_version = rubric_dict.get("version", "1.0.0")
             rubric_sha = r_sha
+
+        if norm_path_kind in ("rubric", "path_a"):
+            final_rec = calc_rec
+            esc_level = calc_lvl
 
         elif norm_path_kind in ("open_analysis", "path_b", "analysis"):
             if not recommendation:
@@ -527,14 +617,7 @@ def record_stepback_review(
             analysis_dict = {"mode": mode, "sections": narrative or {}}
             open_analysis_obj = validate_open_analysis(analysis_dict, recommendation=recommendation)
             final_rec = str(recommendation).upper().strip()
-            rec_to_lvl = {
-                Recommendation.CONTINUE.value: 0,
-                Recommendation.PIVOT.value: 1,
-                Recommendation.HOLD.value: 2,
-                Recommendation.ESCALATE.value: 2,
-                Recommendation.CONCLUDE_ABANDON.value: 2,
-            }
-            esc_level = rec_to_lvl.get(final_rec, 2)
+            esc_level = _REC_LEVEL.get(final_rec, 2)
 
             # Validate cited evidence
             ev_list = evidence or []
@@ -543,17 +626,9 @@ def record_stepback_review(
             )
 
         elif norm_path_kind == "hybrid":
-            if not scores:
-                raise StepBackInvalidSchemaError("Scores dictionary is required for hybrid evaluation")
-            rubric_scores_dict = {str(k): int(v) for k, v in scores.items()}
-            composite, calc_rec, calc_lvl, r_sha = evaluate_rubric(rubric_scores_dict)
-            final_composite = composite
-            final_rec = recommendation.upper() if recommendation else calc_rec
-            esc_level = calc_lvl
-            rubric_dict, _ = load_rubric()
-            rubric_meta_id = rubric_dict.get("id", "stepback_v1")
-            rubric_version = rubric_dict.get("version", "1.0.0")
-            rubric_sha = r_sha
+            # The rubric and the stated recommendation both bind: the more severe level wins.
+            final_rec = recommendation.upper().strip() if recommendation else calc_rec
+            esc_level = max(calc_lvl, _REC_LEVEL.get(final_rec, 2))
             if mode or narrative:
                 analysis_dict = {"mode": mode, "sections": narrative or {}}
                 open_analysis_obj = validate_open_analysis(analysis_dict, recommendation=final_rec)
@@ -566,10 +641,12 @@ def record_stepback_review(
                 f"Unknown path_kind '{path_kind}'. Must be 'rubric', 'open_analysis', or 'hybrid'"
             )
 
-        # Snapshot computation
+        # Snapshot computation: a caller-supplied snapshot must match the current inputs.
         snap_json, snap_sha = compute_input_snapshot(camp, member_runs)
         if input_snapshot_sha256 and input_snapshot_sha256 != snap_sha:
-            pass  # Allowed if passed, but computed is canonical
+            raise StepBackInvalidSchemaError(
+                "input_snapshot_sha256 does not match the current campaign inputs; re-read the campaign before reviewing"
+            )
 
         # Process dissents
         dissent_objs: list[DissentRecord] = []
@@ -586,15 +663,31 @@ def record_stepback_review(
                 )
                 dissent_objs.append(d_obj)
 
-            # F-01: Minority dissent recommendation of HOLD, ESCALATE, or CONCLUDE_ABANDON
-            # (or any non-CONTINUE recommendation) automatically elevates escalation level to Level 2 Hold.
+            # Spec 8.2: a minority HOLD, ESCALATE or CONCLUDE_ABANDON forces a Level 2 Hold.
             has_dissent_hold = any(
                 str(d.minority_recommendation).upper().strip() in ("HOLD", "ESCALATE", "CONCLUDE_ABANDON")
-                or str(d.minority_recommendation).upper().strip() != "CONTINUE"
                 for d in dissent_objs
             )
             if has_dissent_hold:
                 esc_level = max(esc_level, 2)
+
+        # Validate the level transition before anything is persisted: a refused
+        # transition must not leave a review behind as the latest recommendation.
+        esc_rec = None
+        if esc_level != state.current_level:
+            reason = f"Step-back review recommendation {final_rec}"
+            if has_dissent_hold and final_rec == "CONTINUE" and esc_level == 2:
+                reason = "Minority dissent forced Level 2 Hold"
+            _, esc_rec = transition_escalation(
+                state,
+                target_level=esc_level,
+                reason=reason,
+                opened_by_kind="reviewer",
+                reviewer_id=eff_reviewer,
+                independent_review=is_indep,
+                agent_mode=agent_mode,
+            )
+            esc_rec.project_slug = project_slug
 
         now_iso = datetime.now(UTC).isoformat()
         rev_id = f"rev_{os.urandom(6).hex()}"
@@ -624,20 +717,8 @@ def record_stepback_review(
 
         save_review_cool(review, cat_dir)
 
-        # Update escalation state if recommendation modifies level
-        if esc_level != state.current_level:
-            # If review recommends CONTINUE (0) and state was Warning (1), de-escalate
-            # If review recommends HOLD (2), escalate to Hold
-            reason = f"Step-back review {rev_id} recommendation {final_rec}"
-            if has_dissent_hold and final_rec == "CONTINUE" and esc_level == 2:
-                reason = f"Step-back review {rev_id} minority dissent forced Level 2 Hold"
-            new_state, esc_rec = transition_escalation(
-                state,
-                target_level=esc_level,
-                reason=reason,
-                opened_by_kind="reviewer",
-                reviewer_id=eff_reviewer,
-            )
+        # The transition was validated above; persist it alongside the review.
+        if esc_rec is not None:
             save_escalation_cool(esc_rec, cat_dir)
 
         return {
@@ -672,12 +753,24 @@ def escalate_stepback(
         state = get_escalation_state(full_id, catalog_dir=cat_dir, db=con)
         prev_level = state.current_level
 
+        # This tool only raises a level. Lowering one goes through resolve_stepback
+        # (human chair or Level 2 discharge) or an independent review, never here.
+        if target_level < prev_level:
+            if prev_level == 3:
+                raise StepBackAgentOverrideRefusedError(
+                    "Level 3 can only be lowered by the human chair; escalate cannot de-escalate"
+                )
+            raise StepBackUnauthorizedChairError(
+                "escalate cannot lower a campaign's level; use stepback resolve or an independent review"
+            )
+
         new_state, esc_rec = transition_escalation(
             state,
             target_level=target_level,
             reason=reason,
             opened_by_kind=opened_by_kind,
         )
+        esc_rec.project_slug = camp.project_slug or ""
         save_escalation_cool(esc_rec, cat_dir)
 
         return {
@@ -760,12 +853,14 @@ def resolve_stepback(
 
         state = get_escalation_state(camp_full_id, catalog_dir=cat_dir, db=con)
 
-        # Check current level
-        current_lvl = target_esc.level if target_esc else state.current_level
+        # The guard keys on the campaign's actual level. A named escalation record at a
+        # lower level must not lower the bar for a campaign that is at Level 3.
+        current_lvl = max(state.current_level, target_esc.level if target_esc else 0)
+        agent_mode = bool(strict_agent_refusal) or is_agent_environment()
 
         # STRICT AGENT INVARIANCE CHECK
         if current_lvl == 3:
-            if strict_agent_refusal or is_agent_environment():
+            if agent_mode:
                 raise StepBackAgentOverrideRefusedError(
                     "Autonomous agents are strictly forbidden from overriding or resolving Level 3 Human Chair escalations"
                 )
@@ -781,6 +876,7 @@ def resolve_stepback(
             as_human_chair=as_human_chair,
             chair_token=chair_token,
             interactive_tty=interactive_tty,
+            agent_mode=agent_mode,
         )
         project_slug = camp.project_slug if camp else (target_esc.project_slug if target_esc else "")
         if project_slug:

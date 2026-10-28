@@ -76,9 +76,10 @@ def _resolve_numeric_metric(run: Any, target_metric: str | None = None, sidecar:
         if "metric" in benchmark_cfg:
             candidates.append(benchmark_cfg["metric"])
         result_schema = sidecar.get("result_schema", {})
-        for k, v in result_schema.items():
-            if str(v).lower() in ("float", "double", "int", "integer"):
-                candidates.append(k)
+        # Counts and seeds are not metrics: only an unambiguous single float column is a default.
+        float_cols = [k for k, v in result_schema.items() if str(v).lower() in ("float", "double")]
+        if len(float_cols) == 1:
+            candidates.append(float_cols[0])
 
     # Check candidates first
     results = _get_item_attr(run, "results") or {}
@@ -94,15 +95,7 @@ def _resolve_numeric_metric(run: Any, target_metric: str | None = None, sidecar:
                 except (ValueError, TypeError):
                     pass
 
-    # If no candidates resolved, try looking for any numeric float in results
-    if isinstance(results, dict):
-        for k, val in results.items():
-            try:
-                f_val = float(val)
-                if not isinstance(val, bool):  # booleans are int subclasses in python
-                    return f_val
-            except (ValueError, TypeError):
-                continue
+    # No declared or unambiguous metric: return None rather than guess the first numeric column.
 
     # Try root level fields
     for field_name in ("metric", "score", "value", "primary_metric"):

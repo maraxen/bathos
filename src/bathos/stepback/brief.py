@@ -22,9 +22,8 @@ from pathlib import Path
 from typing import Any
 
 from bathos.campaigns import CampaignError, get_campaign, union_campaign_member_ids
-from bathos.runlog.mode import is_log_mode
 from bathos.stepback.catalog import get_escalation_state, list_escalations, list_reviews
-from bathos.stepback.engine import fetch_member_runs, resolve_catalog_and_db
+from bathos.stepback.engine import member_runs_chronological, resolve_catalog_and_db
 from bathos.stepback.triggers import _get_item_attr, evaluate_all_triggers
 
 
@@ -62,12 +61,7 @@ def format_project_status_entry(
             if not include_nominal:
                 return ""
             members = union_campaign_member_ids(con, full_id, cat_dir)
-            raw_runs = (
-                fetch_member_runs(con, members, cat_dir, log_mode=is_log_mode(cat_dir))
-                if members
-                else []
-            )
-            member_runs = [r for r in raw_runs.values() if r is not None] if isinstance(raw_runs, dict) else [r for r in raw_runs if r is not None]
+            member_runs = member_runs_chronological(con, members, cat_dir)
             n_runs = len(member_runs)
             passes = sum(1 for r in member_runs if _get_item_attr(r, "outcome") == "pass")
             pass_rate = (passes / n_runs) if n_runs > 0 else 0.0
@@ -137,15 +131,11 @@ def render_advisor_brief(
         reviews = [r for r in list_reviews(catalog_dir=cat_dir) if r.campaign_id == full_id]
 
         members = union_campaign_member_ids(con, full_id, cat_dir)
-        raw_runs = (
-            fetch_member_runs(con, members, cat_dir, log_mode=is_log_mode(cat_dir))
-            if members
-            else []
-        )
-        member_runs = [r for r in raw_runs.values() if r is not None] if isinstance(raw_runs, dict) else [r for r in raw_runs if r is not None]
+        member_runs = member_runs_chronological(con, members, cat_dir)
 
-        # Evaluate triggers
-        triggers_res = evaluate_all_triggers(camp, member_runs, state=state)
+        # Evaluate triggers with the same snoozes the engine honours
+        snoozed_map = {e.trigger_name: dict(e.metadata) for e in escalations if e.status == "snoozed" and e.trigger_name}
+        triggers_res = evaluate_all_triggers(camp, member_runs, state=state, snoozed_triggers=snoozed_map)
         active_triggers = triggers_res.get("active_triggers", [])
         snoozed_triggers = triggers_res.get("snoozed_triggers", [])
 
@@ -225,7 +215,9 @@ def render_advisor_brief(
         # Check threshold edits
         thresh_eval = triggers_res.get("triggers_evaluated", {}).get("threshold_edit", {})
         if thresh_eval.get("fired"):
-            lines.append(f"- **Threshold Drift Warning**: Detected {thresh_eval.get('edit_count', 0)} sidecar threshold edits during execution.")
+            lines.append(
+                f"- **Threshold Drift Warning**: sidecar threshold condition changed at run `{thresh_eval.get('offending_run_id', 'unknown')}`."
+            )
         else:
             lines.append("- **Threshold Stability**: Stable (no mid-campaign threshold edits detected).")
         lines.append("")

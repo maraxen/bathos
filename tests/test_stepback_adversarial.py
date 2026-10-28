@@ -228,30 +228,116 @@ class TestHumanChairInvariance(unittest.TestCase):
             self.assertEqual(state.current_level, 0)
             self.assertEqual(state.status, "nominal")
 
-    def test_non_level3_escalation_resolvable_by_reviewer(self):
-        """Level 1 or Level 2 escalations can be resolved without human chair gate."""
-        esc_l2 = EscalationRecord(
-            escalation_id="esc_l2_test",
-            campaign_id="camp_l2",
-            project_slug="test_proj",
-            level=2,
-            status="active",
-            opened_at="2026-10-27T12:00:00Z",
-            opened_by_kind="system",
-            trigger_reason="Repeated marginal outcomes",
+    def _save_level2_hold(self, campaign_id: str = "camp_l2", opened_at: str = "2026-10-27T12:00:00Z") -> None:
+        save_escalation_cool(
+            EscalationRecord(
+                escalation_id=f"esc_{campaign_id}",
+                campaign_id=campaign_id,
+                project_slug="test_proj",
+                level=2,
+                status="active",
+                opened_at=opened_at,
+                opened_by_kind="system",
+                trigger_reason="Repeated marginal outcomes",
+            ),
+            self.cat_dir,
         )
-        save_escalation_cool(esc_l2, self.cat_dir)
 
-        res = resolve_stepback(
-            escalation_id="esc_l2_test",
-            campaign_id="camp_l2",
-            deescalate_to=1,
-            note="De-escalating to warning after pivot",
-            catalog_dir=self.cat_dir,
-            strict_agent_refusal=False,
-        )
+    def test_level2_hold_not_clearable_without_authorization(self):
+        """A Level 2 hold is discharged only by an independent review or an authorized human."""
+        self._save_level2_hold()
+        clean_env = {v: "" for v in AGENT_ENV_VARS}
+        with patch.dict(os.environ, clean_env, clear=False):
+            # Unauthenticated caller (no TTY, no token) is refused.
+            with self.assertRaises(StepBackUnauthorizedChairError):
+                resolve_stepback(
+                    escalation_id="esc_camp_l2",
+                    campaign_id="camp_l2",
+                    deescalate_to=1,
+                    note="unauthenticated",
+                    interactive_tty=False,
+                    catalog_dir=self.cat_dir,
+                )
+            # FastMCP surface (strict) is refused even with a TTY claim.
+            with self.assertRaises(StepBackUnauthorizedChairError):
+                resolve_stepback(
+                    escalation_id="esc_camp_l2",
+                    campaign_id="camp_l2",
+                    deescalate_to=0,
+                    note="agent clearing hold",
+                    interactive_tty=True,
+                    strict_agent_refusal=True,
+                    catalog_dir=self.cat_dir,
+                )
+            # Authorized human at a TTY may clear it.
+            res = resolve_stepback(
+                escalation_id="esc_camp_l2",
+                campaign_id="camp_l2",
+                deescalate_to=1,
+                note="PI reviewed the hold",
+                interactive_tty=True,
+                catalog_dir=self.cat_dir,
+            )
         self.assertTrue(res["ok"])
         self.assertEqual(res["deescalated_to"], 1)
+
+    def test_escalate_cannot_lower_a_campaign_level(self):
+        """The escalate tool only raises a level; lowering it clears a hold without review."""
+        from types import SimpleNamespace
+
+        from bathos.stepback.engine import escalate_stepback
+
+        self._save_level2_hold()
+        stub_campaign = SimpleNamespace(id="camp_l2", project_slug="test_proj")
+        with (
+            patch("bathos.stepback.engine.get_campaign", return_value=stub_campaign),
+            self.assertRaises(StepBackUnauthorizedChairError),
+        ):
+            escalate_stepback(
+                campaign_id="camp_l2",
+                target_level=0,
+                reason="agent clearing hold",
+                catalog_dir=self.cat_dir,
+                opened_by_kind="agent",
+            )
+        self.assertEqual(get_escalation_state("camp_l2", catalog_dir=self.cat_dir).current_level, 2)
+
+    def test_level3_guard_keys_on_campaign_level_not_named_record(self):
+        """Naming a lower-level record for a Level 3 campaign must not bypass the agent refusal."""
+        # Level 2 record opened first, then the Level 3 record that holds the campaign at 3.
+        save_escalation_cool(
+            EscalationRecord(
+                escalation_id="esc_l2_under_l3",
+                campaign_id=self.camp_id,
+                project_slug="test_proj",
+                level=2,
+                status="active",
+                opened_at="2026-10-26T12:00:00Z",
+                opened_by_kind="system",
+                trigger_reason="earlier hold",
+            ),
+            self.cat_dir,
+        )
+        clean_env = {v: "" for v in AGENT_ENV_VARS}
+        with patch.dict(os.environ, clean_env, clear=False):
+            # Surface-level strict refusal, using the lower-level record id and a valid chair token.
+            token_file = self.cat_dir / "chair_token"
+            token_file.write_text("tok_123\n")
+            token_file.chmod(0o600)
+            with (
+                patch("bathos.stepback.escalation.CHAIR_TOKEN_PATH", token_file),
+                self.assertRaises(StepBackAgentOverrideRefusedError),
+            ):
+                resolve_stepback(
+                    escalation_id="esc_l2_under_l3",
+                    campaign_id=self.camp_id,
+                    deescalate_to=0,
+                    as_human_chair=True,
+                    chair_token="tok_123",
+                    strict_agent_refusal=True,
+                    catalog_dir=self.cat_dir,
+                )
+        self.assertEqual(get_escalation_state(self.camp_id, catalog_dir=self.cat_dir).current_level, 3)
 
 
 class TestEvidenceLaundering(unittest.TestCase):

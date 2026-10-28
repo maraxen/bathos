@@ -9,6 +9,7 @@ import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from bathos.index import catalog_readable, connect_read
 from bathos.runlog.mode import is_log_mode
@@ -331,7 +332,7 @@ def signal_unarchived_stale_scripts(
     except Exception as e:
         return SignalResult(
             signal="unarchived_stale_scripts_count",
-            value=0.0,
+            value=None,
             level="INFO",
             message=f"error computing unarchived_stale_scripts_count: {e}",
         )
@@ -495,12 +496,16 @@ def signal_stepback_ignored_escalations(
         from bathos.stepback.catalog import list_escalations
 
         escalations = list_escalations(catalog_dir=catalog_dir)
+        # Snoozes do not change a campaign's level; the latest other record per campaign
+        # is the one that is open or resolved.
+        latest_by_campaign: dict[str, Any] = {}
+        for e in sorted((e for e in escalations if e.status != "snoozed"), key=lambda e: e.opened_at or ""):
+            latest_by_campaign[e.campaign_id] = e
+        # A record with no project_slug is not charged to every project.
         proj_escs = [
             e
-            for e in escalations
-            if (not e.project_slug or e.project_slug == project_slug)
-            and e.level >= 2
-            and e.status == "active"
+            for e in latest_by_campaign.values()
+            if e.project_slug == project_slug and e.level >= 2 and e.status == "active"
         ]
 
         if not proj_escs:

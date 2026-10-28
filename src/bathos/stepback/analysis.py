@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import secrets
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from bathos.errors import (
@@ -291,7 +292,7 @@ def validate_campaign_evidence(
         if kind == "run":
             # Check uuid or prefix
             run_ref = ref_target
-            if run_ref in campaign_run_ids or any(rid.startswith(run_ref) for rid in campaign_run_ids):
+            if _matches_run(run_ref, campaign_run_ids):
                 valid_citations.append(cit_str)
             else:
                 invalid_citations.append(cit_str)
@@ -302,7 +303,7 @@ def validate_campaign_evidence(
 
         elif kind == "sidecar":
             sidecar_ref = ref_target
-            if sidecar_ref in campaign_sidecars or any(sc.endswith(sidecar_ref) or sidecar_ref.endswith(sc) for sc in campaign_sidecars):
+            if _matches_path(sidecar_ref, campaign_sidecars):
                 valid_citations.append(cit_str)
             else:
                 invalid_citations.append(cit_str)
@@ -315,7 +316,7 @@ def validate_campaign_evidence(
             # outcome:<run_id>:<label>
             parts = ref_target.split(":")
             run_ref = parts[0].strip()
-            if run_ref and (run_ref in campaign_run_ids or any(rid.startswith(run_ref) for rid in campaign_run_ids)):
+            if run_ref and _matches_run(run_ref, campaign_run_ids):
                 valid_citations.append(cit_str)
             else:
                 invalid_citations.append(cit_str)
@@ -327,10 +328,9 @@ def validate_campaign_evidence(
         elif kind == "clause":
             # clause:<claim_path>#<clause_id>
             clause_path = ref_target
-            if claim_path and (clause_path == claim_path or clause_path.endswith(str(claim_path)) or str(claim_path).endswith(clause_path)):
-                valid_citations.append(cit_str)
-            elif not claim_path and clause_path.endswith(".toml"):
-                # If claim path wasn't formally registered, allow if path exists
+            # A clause only verifies against the campaign's registered claim; with no claim
+            # registered there is nothing to check it against, so it is not valid evidence.
+            if claim_path and _matches_path(clause_path, {str(claim_path)}):
                 valid_citations.append(cit_str)
             else:
                 invalid_citations.append(cit_str)
@@ -341,7 +341,7 @@ def validate_campaign_evidence(
 
         elif kind == "git":
             git_ref = ref_target
-            if not campaign_git_shas or git_ref in campaign_git_shas or any(g.startswith(git_ref) for g in campaign_git_shas):
+            if git_ref in campaign_git_shas or (len(git_ref) >= 7 and any(g.startswith(git_ref) for g in campaign_git_shas)):
                 valid_citations.append(cit_str)
             else:
                 invalid_citations.append(cit_str)
@@ -351,20 +351,51 @@ def validate_campaign_evidence(
                     )
 
         elif kind == "postmortem":
-            # postmortem:<path>#<obligation_id>
-            valid_citations.append(cit_str)
+            # postmortem:<path>#<obligation_id>: must point at a real postmortem naming the obligation
+            pm_path, _, obligation = ref.partition("#")
+            if _postmortem_cites(pm_path.strip(), obligation.strip()):
+                valid_citations.append(cit_str)
+            else:
+                invalid_citations.append(cit_str)
+                if raise_on_invalid:
+                    raise StepBackCitationInvalidError(
+                        f"Postmortem citation '{cit_str}' does not resolve to a postmortem naming that obligation"
+                    )
 
         else:
             invalid_citations.append(cit_str)
             if raise_on_invalid:
                 raise StepBackCitationInvalidError(f"Unsupported citation syntax or prefix: '{cit_str}'")
 
-    if len(valid_citations) < min_citations:
+    # Distinct citations only: repeating one valid citation must not satisfy min_citations.
+    distinct_valid = len(set(valid_citations))
+    if distinct_valid < min_citations:
         raise StepBackInsufficientEvidenceError(
-            f"Review requires at least {min_citations} valid primary domain citations; found {len(valid_citations)}"
+            f"Review requires at least {min_citations} valid primary domain citations; found {distinct_valid}"
         )
 
     return valid_citations, invalid_citations
+
+
+def _matches_run(ref: str, run_ids: set[str]) -> bool:
+    """Exact run id, or an unambiguous-length prefix (>= 8 chars) of one."""
+    return ref in run_ids or (len(ref) >= 8 and any(rid.startswith(ref) for rid in run_ids))
+
+
+def _matches_path(ref: str, paths: set[str]) -> bool:
+    """Exact path, or a match at a path-component boundary (no bare substring matches)."""
+    return any(p == ref or p.endswith("/" + ref) or ref.endswith("/" + p) for p in paths)
+
+
+def _postmortem_cites(path_str: str, obligation: str) -> bool:
+    """A postmortem citation holds only if the file exists and names the obligation."""
+    if not path_str:
+        return False
+    try:
+        text = Path(path_str).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return not obligation or obligation in text
 
 
 def check_reviewer_independence(

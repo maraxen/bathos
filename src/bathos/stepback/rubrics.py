@@ -44,19 +44,21 @@ DEFAULT_WEIGHTS: dict[str, float] = {
 
 
 def find_default_rubric_path() -> Path:
-    """Resolve default rubric path relative to workspace or package."""
-    # Check current directory and parents
-    cwd = Path.cwd()
-    for parent in [cwd, *cwd.parents]:
-        cand = parent / DEFAULT_RUBRIC_REL_PATH
+    """Resolve the bundled canonical rubric, never one found from the working directory.
+
+    A checked-out repository must not be able to shadow the canonical rubric. Looks for the
+    copy shipped in the installed package (wheel: bathos/agent_assets), then the source
+    checkout's top-level agent_assets/.
+    """
+    module_dir = Path(__file__).resolve().parent
+    candidates = [
+        module_dir.parent / "agent_assets" / "rubrics" / "stepback_v1.toml",  # installed wheel
+        module_dir.parents[2] / DEFAULT_RUBRIC_REL_PATH,  # source checkout
+    ]
+    for cand in candidates:
         if cand.is_file():
             return cand
-    # Fallback: check relative to bathos package
-    pkg_root = Path(__file__).parent.parent.parent.parent
-    cand = pkg_root / DEFAULT_RUBRIC_REL_PATH
-    if cand.is_file():
-        return cand
-    return cand
+    return candidates[0]
 
 
 def load_rubric(rubric_path: Path | str | None = None) -> tuple[dict[str, Any], str]:

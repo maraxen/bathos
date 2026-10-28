@@ -122,8 +122,7 @@ def can_transition(
     if from_level == 1 and to_level == 0:
         return True, "De-escalation from Warning to Nominal"
     if from_level == 2 and to_level == 0:
-        if is_human_chair or not is_agent:
-            return True, "Direct de-escalation from Hold to Nominal"
+        # Authorization for discharging a hold is enforced in transition_escalation.
         return True, "De-escalation from Hold to Nominal"
 
     return True, "Permitted transition"
@@ -138,15 +137,22 @@ def transition_escalation(
     as_human_chair: bool = False,
     chair_token: str | None = None,
     interactive_tty: bool | None = None,
+    independent_review: bool = False,
+    agent_mode: bool | None = None,
 ) -> tuple[EscalationState, EscalationRecord]:
     """Execute a state transition for campaign escalation state.
 
-    Enforces Human Chair Invariance when transitioning from Level 3.
+    Enforces Human Chair Invariance when transitioning from Level 3, and the
+    Blind Reviewer Protocol (spec 8.1) when discharging a Level 2 hold: a hold
+    is discharged only by an independent review or by an authorized human.
+
+    `agent_mode` lets a caller force agent treatment (e.g. the FastMCP surface)
+    regardless of environment variables; None falls back to env detection.
     """
     target_level = validate_level(target_level)
     from_level = state.current_level
 
-    agent_detected = is_agent_environment()
+    agent_detected = is_agent_environment() if agent_mode is None else bool(agent_mode)
 
     # If de-escalating from Level 3, apply strict human chair gates
     if from_level == 3 and target_level < 3:
@@ -165,6 +171,20 @@ def transition_escalation(
         if as_human_chair and not tty_ok and not token_ok:
             raise StepBackUnauthorizedChairError(
                 "Cannot claim human chair authority without interactive TTY or valid chair token"
+            )
+
+    # Discharging a Level 2 hold: only an independent approving review, or an
+    # authorized human at a TTY / with a chair token, may lift it.
+    if from_level == 2 and target_level < 2 and not independent_review:
+        if agent_detected:
+            raise StepBackUnauthorizedChairError(
+                "Only an independent approving review can discharge a Level 2 hold when acting as an agent"
+            )
+        tty_ok = sys.stdin.isatty() if interactive_tty is None else interactive_tty
+        token_ok = verify_chair_token(chair_token)
+        if not tty_ok and not token_ok:
+            raise StepBackUnauthorizedChairError(
+                "Discharging a Level 2 hold requires an independent approving review or human authorization"
             )
 
     permitted, msg = can_transition(
