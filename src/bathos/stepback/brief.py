@@ -18,11 +18,10 @@ Provides:
 from __future__ import annotations
 
 from collections import Counter
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from bathos.campaigns import Campaign, CampaignError, get_campaign, union_campaign_member_ids
+from bathos.campaigns import CampaignError, get_campaign, union_campaign_member_ids
 from bathos.runlog.mode import is_log_mode
 from bathos.stepback.catalog import get_escalation_state, list_escalations, list_reviews
 from bathos.stepback.engine import fetch_member_runs, resolve_catalog_and_db

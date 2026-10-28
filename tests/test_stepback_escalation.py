@@ -169,7 +169,8 @@ def test_decision_d1_conclusion_downgrade():
 
 def test_lifecycle_warn_only_hook_on_add_run(tmp_path: Path, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch):
     import duckdb
-    from bathos.campaigns import add_run_to_campaign, create_campaign, CampaignError
+
+    from bathos.campaigns import CampaignError, add_run_to_campaign, create_campaign
     from bathos.stepback.catalog import save_escalation_cool
     from bathos.stepback.schema import EscalationRecord
 

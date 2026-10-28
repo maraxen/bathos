@@ -567,6 +567,7 @@ def _add_run_to_campaign_impl(
             if not enforce and run_sidecar_path:
                 with suppress(Exception):
                     from pathlib import Path as _P
+
                     from bathos.sidecar import parse_sidecar
 
                     sc = parse_sidecar(_P(run_sidecar_path))
@@ -582,7 +583,7 @@ def _add_run_to_campaign_impl(
     except CampaignError:
         raise
     except Exception as e:
-        logger.debug(f"Stepback escalation check in add_run skipped: {e}")
+        logging.getLogger(__name__).debug(f"Stepback escalation check in add_run skipped: {e}")
 
     # Spec 261026 D3: a run entering a claim-bound campaign (claim_path IS NOT NULL) must have
     # declared [breakdown] for the worst-case aggregates its verdict reads. Refused before

@@ -370,10 +370,11 @@ def test_evaluate_all_triggers_snooze_filtering():
 def test_snooze_stepback_trigger_persistence_and_refusal(tmp_path):
     import duckdb
     import pytest
+
     from bathos.campaigns import create_campaign
     from bathos.errors import StepBackAgentOverrideRefusedError
     from bathos.stepback.catalog import get_escalation_state, save_escalation_cool
-    from bathos.stepback.engine import run_stepback_triggers, snooze_stepback_trigger
+    from bathos.stepback.engine import snooze_stepback_trigger
     from bathos.stepback.schema import EscalationRecord
 
     cat_dir = tmp_path / "catalog"
@@ -486,7 +487,9 @@ def test_snooze_stepback_trigger_persistence_and_refusal(tmp_path):
 
 def test_cli_and_mcp_snooze(tmp_path, monkeypatch):
     import asyncio
+
     import duckdb
+
     from bathos.campaigns import create_campaign
     from bathos.cli_cyclopts import app
     from bathos.mcp import stepback_snooze

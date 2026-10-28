@@ -437,7 +437,7 @@ def test_cli_stepback_brief(brief_test_env: Path):
     assert "# Advisor Brief: CLI Brief Test" in res_show.stdout
 
 
-def test_mcp_stepback_brief(brief_test_env: Path, monkeypatch: pytest.MonkeyPatch):
+def test_mcp_stepback_brief(brief_test_env: Path):
     cat_dir = brief_test_env
     db_path = cat_dir / "bathos.db"
     con = duckdb.connect(str(db_path))
