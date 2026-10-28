@@ -153,14 +153,20 @@ def cli_test_env(tmp_path: Path, monkeypatch):
 
 
 
+
+def _sha256_file(path: Path) -> str:
+    import hashlib
+
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
 def _stamp_runs(con, cat_dir: Path, run_ids: list[str]) -> None:
     """Give fixture runs the recorded time and on-disk sidecar that real runs carry."""
     for i, rid in enumerate(run_ids):
         sidecar = cat_dir / f"{rid}.bth.toml"
         sidecar.write_text('[experiment]\nhypothesis = "fixture"\n')
         con.execute(
-            "UPDATE runs SET started_at = ?, sidecar_path = ? WHERE id = ?",
-            [f"2026-10-27T{10 + i:02d}:00:00Z", str(sidecar), rid],
+            "UPDATE runs SET started_at = ?, sidecar_path = ?, sidecar_sha256 = ? WHERE id = ?",
+            [f"2026-10-27T{10 + i:02d}:00:00Z", str(sidecar), _sha256_file(sidecar), rid],
         )
 
 def test_cli_stepback_status_and_triggers(cli_test_env):

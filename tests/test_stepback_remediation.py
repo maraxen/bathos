@@ -326,8 +326,9 @@ def test_agent_review_lifts_a_hold_by_default(tmp_path: Path, monkeypatch: pytes
     camp = _review_campaign("camp_hold_default")
     _save_escalation(tmp_path, camp.id, 2)
     monkeypatch.setenv("CLAUDE_AGENT", "1")
-    monkeypatch.delenv("BTH_STEP_BACK_POLICY", raising=False)
-    monkeypatch.setenv("BTH_WORKSPACE_ROOT", str(tmp_path))  # no .bth.toml: default policy
+    # A workspace config without the key keeps the default policy ("agentic").
+    (tmp_path / ".bth.toml").write_text("[stepback]\n")
+    monkeypatch.setenv("BTH_WORKSPACE_ROOT", str(tmp_path))
     with (
         patch("bathos.stepback.engine.get_campaign", return_value=camp),
         patch("bathos.stepback.engine.fetch_member_runs", return_value=[]),
@@ -353,7 +354,7 @@ def test_unknown_hold_policy_is_refused(tmp_path: Path, monkeypatch: pytest.Monk
 def test_missing_sidecar_is_named_not_guessed():
     from bathos.stepback.engine import member_sidecar
 
-    with pytest.raises(StepBackInvalidSchemaError, match="no sidecar on disk"):
+    with pytest.raises(StepBackInvalidSchemaError, match="no recoverable sidecar"):
         member_sidecar([SimpleNamespace(id=RUN_ID, sidecar_path="")])
 
 

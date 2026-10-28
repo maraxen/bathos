@@ -504,7 +504,11 @@ def signal_stepback_ignored_escalations(
         # A record with no project_slug is attributed through its campaign's project.
         campaign_projects: dict[str, str] = {}
         target_cat = catalog_dir or db_path.parent
-        if any(not e.project_slug for e in latest_by_campaign.values()) and catalog_readable(target_cat):
+        # Only an open hold can be charged to a project, so only those need the lookup.
+        needs_lookup = any(
+            not e.project_slug and e.level >= 2 and e.status == "active" for e in latest_by_campaign.values()
+        )
+        if needs_lookup and catalog_readable(target_cat):
             lookup = connect_read(target_cat, read_only=True)
             try:
                 for cid, slug in lookup.execute("SELECT id, project_slug FROM campaigns").fetchall():

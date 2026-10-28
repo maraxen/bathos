@@ -169,9 +169,15 @@ def _hold_discharge_policy(cwd: Path | str | None = None) -> str:
     """
     import tomllib
 
+    from bathos.config import find_project_config
+
     search_root = Path(cwd) if cwd is not None else Path(os.environ.get("BTH_WORKSPACE_ROOT", Path.cwd()))
+    # Walk up to the nearest workspace config. With no config at all, fail closed: agents
+    # cannot lift holds until a workspace declares otherwise.
+    bth_toml = find_project_config(search_root)
+    if bth_toml is None:
+        return "human_only"
     policy = "agentic"
-    bth_toml = search_root / ".bth.toml"
     if bth_toml.is_file():
         try:
             data = tomllib.loads(bth_toml.read_text(encoding="utf-8"))
@@ -189,29 +195,37 @@ def _hold_discharge_policy(cwd: Path | str | None = None) -> str:
     return policy
 
 
-def member_sidecar(member_runs: list[Any]) -> dict[str, Any] | None:
-    """Parsed pre-registration sidecar of the latest member run.
+def member_sidecar(
+    member_runs: list[Any],
+    workspace_root: Path | str | None = None,
+    db: Any | None = None,
+    log_mode: bool = False,
+) -> dict[str, Any] | None:
+    """Pre-registration of the latest member run, in the shape triggers read.
 
-    Triggers need the sidecar to know the metric a campaign is judged on
-    ([benchmark].metric, [stepback].target_metric, [result_schema]). Fails loud: a member run
-    with no sidecar on disk is named rather than judged on guessed data.
+    Each member's sidecar is recovered the way the breakdown gate does it (the frozen log-mode
+    declaration, the live file if its sha matches, or the pinned git ref). Fails loud: a member
+    whose sidecar cannot be recovered is named rather than judged on guessed data.
     """
-    import tomllib
+    from bathos.breakdown_gate import Unresolvable, resolve_run_sidecar
 
+    root = Path(workspace_root) if workspace_root else Path(os.environ.get("BTH_WORKSPACE_ROOT", Path.cwd()))
+    latest_sidecar = None
     for run in member_runs:
-        sidecar_path = _attr(run, "sidecar_path")
-        if not sidecar_path or not Path(sidecar_path).is_file():
+        sidecar = resolve_run_sidecar(run, root, db=db, log_mode=log_mode)
+        if sidecar is None or isinstance(sidecar, Unresolvable):
+            reason = "no sidecar was recorded" if sidecar is None else sidecar.reason
             raise StepBackInvalidSchemaError(
-                f"run {_run_id(run)} has no sidecar on disk ({sidecar_path or 'no path recorded'}); "
+                f"run {_run_id(run)} has no recoverable sidecar ({reason}); "
                 "triggers and reviews need every member run's pre-registration"
             )
-    if not member_runs:
+        latest_sidecar = sidecar
+    if latest_sidecar is None:
         return None
-    latest = member_runs[-1]
-    try:
-        return tomllib.loads(Path(_attr(latest, "sidecar_path")).read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise StepBackInvalidSchemaError(f"sidecar of run {_run_id(latest)} is unreadable: {exc}") from exc
+    return {
+        "result_schema": dict(latest_sidecar.result_schema),
+        "benchmark": {"metric": latest_sidecar.metric} if latest_sidecar.metric else {},
+    }
 
 
 def member_runs_chronological(con: Any, members: list[str], cat_dir: Path) -> list[Any]:
@@ -363,7 +377,7 @@ def get_stepback_status(
         setattr(state, "snoozed_triggers", snoozed_map)
 
         triggers_res = evaluate_all_triggers(
-            camp, member_runs, state=state, sidecar=member_sidecar(member_runs), snoozed_triggers=snoozed_map
+            camp, member_runs, state=state, sidecar=member_sidecar(member_runs, db=con, log_mode=is_log_mode(cat_dir)), snoozed_triggers=snoozed_map
         )
 
         latest_rec = reviews[-1].recommendation if reviews else None
@@ -417,7 +431,7 @@ def run_stepback_triggers(
             camp,
             member_runs,
             state=state,
-            sidecar=member_sidecar(member_runs),
+            sidecar=member_sidecar(member_runs, db=con, log_mode=is_log_mode(cat_dir)),
             window_size=window,
             snoozed_triggers=snoozed_map,
         )
