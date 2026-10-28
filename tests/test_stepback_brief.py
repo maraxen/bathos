@@ -478,3 +478,28 @@ def test_mcp_stepback_brief(brief_test_env: Path):
     assert "[NOMINAL: 0 runs, pass rate 0.00]" in res["project_status_entry"]
     assert res["advisor_status_entry"] == ""
     assert format_project_status_entry(camp.id, catalog_dir=cat_dir, include_nominal=False) == ""
+
+
+def test_render_advisor_brief_unverifiable_latest_member(brief_test_env: Path):
+    cat_dir = brief_test_env
+    con = duckdb.connect(str(cat_dir / "bathos.db"))
+    camp = create_campaign(
+        con,
+        name="Unverifiable Brief",
+        project_slug="unverifiable_proj",
+        mode="exploration",
+        catalog_dir=cat_dir,
+    )
+    con.execute("INSERT INTO runs (id, outcome, duration_s) VALUES ('r20', 'pass', 10.0)")
+    con.execute("INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, 'r20')", [camp.id])
+    # The recorded sidecar is gone and its sha is stale, so the latest member cannot be verified.
+    con.execute(
+        "UPDATE runs SET started_at = ?, sidecar_path = ?, sidecar_sha256 = ? WHERE id = 'r20'",
+        ["2026-10-27T10:00:00Z", str(cat_dir / "gone.bth.toml"), "0" * 64],
+    )
+    con.close()
+
+    brief = render_advisor_brief(camp.id, catalog_dir=cat_dir)
+
+    assert "> **UNVERIFIED**: the member sidecars could not be verified" in brief
+    assert "latest run r20 has no recoverable sidecar" in brief
