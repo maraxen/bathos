@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from bathos.campaigns import CampaignError, get_campaign, union_campaign_member_ids
+from bathos.errors import StepBackInvalidSchemaError
 from bathos.runlog.mode import is_log_mode
 from bathos.stepback.catalog import get_escalation_state, list_escalations, list_reviews
 from bathos.stepback.engine import member_runs_chronological, member_sidecar, resolve_catalog_and_db
@@ -136,8 +137,14 @@ def render_advisor_brief(
 
         # Evaluate triggers with the same snoozes the engine honours
         snoozed_map = {e.trigger_name: dict(e.metadata) for e in escalations if e.status == "snoozed" and e.trigger_name}
+        # An unverifiable sidecar is shown in the brief, not hidden by a refusal (see status).
+        unverifiable_reason: str | None = None
+        try:
+            sidecar = member_sidecar(member_runs, db=con, log_mode=is_log_mode(cat_dir))
+        except StepBackInvalidSchemaError as exc:
+            sidecar, unverifiable_reason = None, str(exc)
         triggers_res = evaluate_all_triggers(
-            camp, member_runs, state=state, sidecar=member_sidecar(member_runs, db=con, log_mode=is_log_mode(cat_dir)), snoozed_triggers=snoozed_map
+            camp, member_runs, state=state, sidecar=sidecar, snoozed_triggers=snoozed_map
         )
         active_triggers = triggers_res.get("active_triggers", [])
         snoozed_triggers = triggers_res.get("snoozed_triggers", [])
@@ -182,6 +189,13 @@ def render_advisor_brief(
         # Title
         lines.append(f"# Advisor Brief: {camp.name} ({full_id})")
         lines.append("")
+        if unverifiable_reason is not None:
+            lines.append(
+                f"> **UNVERIFIED**: the member sidecars could not be verified ({unverifiable_reason}). "
+                "The metric-dependent triggers (near_bound, metric_plateau) are unavailable, and nothing "
+                "below that depends on the declared metric is verified."
+            )
+            lines.append("")
 
         # Section 1: Stakes & Scientific Question
         lines.append("## 1. Stakes & Scientific Question (Stakes & Gap)")
