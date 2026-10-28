@@ -14,6 +14,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import logging
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -88,6 +89,7 @@ def resolve_catalog_and_db(
 
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+_log = logging.getLogger(__name__)
 
 # Level implied by a recommendation (spec 8.2 / Path B mapping).
 _REC_LEVEL = {
@@ -136,7 +138,7 @@ def _run_timestamps(con: Any, run_ids: list[str], catalog_dir: Path) -> dict[str
                 if parsed is not None:
                     stamps[str(rid)] = parsed
         except Exception:
-            pass
+            _log.warning("warm-tier timestamp lookup failed; falling back to cool fragments", exc_info=True)
     missing = {rid for rid in run_ids if rid not in stamps}
     if missing:
         from bathos.catalog import read_runs
@@ -147,6 +149,26 @@ def _run_timestamps(con: Any, run_ids: list[str], catalog_dir: Path) -> dict[str
                 if parsed is not None:
                     stamps[run.id] = parsed
     return stamps
+
+
+def member_sidecar(member_runs: list[Any]) -> dict[str, Any] | None:
+    """Parsed pre-registration sidecar of the latest member run, if it is on disk.
+
+    Triggers need the sidecar to know the metric a campaign is judged on
+    ([benchmark].metric, [stepback].target_metric, [result_schema]).
+    """
+    if not member_runs:
+        return None
+    sidecar_path = _attr(member_runs[-1], "sidecar_path")
+    if not sidecar_path or not Path(sidecar_path).is_file():
+        return None
+    try:
+        import tomllib
+
+        return tomllib.loads(Path(sidecar_path).read_text(encoding="utf-8"))
+    except Exception:
+        _log.warning("could not parse sidecar %s; triggers run without it", sidecar_path, exc_info=True)
+        return None
 
 
 def member_runs_chronological(con: Any, members: list[str], cat_dir: Path) -> list[Any]:
@@ -280,7 +302,7 @@ def get_stepback_status(
         setattr(state, "snoozed_triggers", snoozed_map)
 
         triggers_res = evaluate_all_triggers(
-            camp, member_runs, state=state, snoozed_triggers=snoozed_map
+            camp, member_runs, state=state, sidecar=member_sidecar(member_runs), snoozed_triggers=snoozed_map
         )
 
         latest_rec = reviews[-1].recommendation if reviews else None
@@ -331,7 +353,12 @@ def run_stepback_triggers(
         setattr(state, "snoozed_triggers", snoozed_map)
 
         eval_res = evaluate_all_triggers(
-            camp, member_runs, state=state, window_size=window, snoozed_triggers=snoozed_map
+            camp,
+            member_runs,
+            state=state,
+            sidecar=member_sidecar(member_runs),
+            window_size=window,
+            snoozed_triggers=snoozed_map,
         )
         active = eval_res.get("active_triggers", [])
         fired = len(active) > 0
@@ -554,8 +581,13 @@ def record_stepback_review(
     catalog_dir: Path | str | None = None,
     db: Any | None = None,
     dispatched_at: str | None = None,
+    force_agent: bool = False,
 ) -> dict[str, Any]:
-    """Execute and record a full step-back review."""
+    """Execute and record a full step-back review.
+
+    `force_agent` marks the call as coming from an agent surface (the FastMCP tools) regardless
+    of environment variables, so the caller cannot claim a human reviewer or lift a hold.
+    """
     cat_dir, con, owns_db = resolve_catalog_and_db(catalog_dir, db, read_only=True)
     try:
         camp = get_campaign(con, campaign_id, catalog_dir=cat_dir)
@@ -572,7 +604,7 @@ def record_stepback_review(
         if reviewer_id is not None and not str(reviewer_id).strip():
             raise StepBackInvalidSchemaError("Reviewer identity cannot be empty or whitespace")
         # An agent session cannot file its review as human, whatever the caller claims.
-        agent_mode = is_agent_environment()
+        agent_mode = force_agent or is_agent_environment()
         if agent_mode:
             reviewer_kind = "agent"
 
@@ -628,7 +660,11 @@ def record_stepback_review(
         elif norm_path_kind == "hybrid":
             # The rubric and the stated recommendation both bind: the more severe level wins.
             final_rec = recommendation.upper().strip() if recommendation else calc_rec
-            esc_level = max(calc_lvl, _REC_LEVEL.get(final_rec, 2))
+            if final_rec not in _REC_LEVEL:
+                raise StepBackInvalidSchemaError(
+                    f"Unknown recommendation '{recommendation}'; must be one of {sorted(_REC_LEVEL)}"
+                )
+            esc_level = max(calc_lvl, _REC_LEVEL[final_rec])
             if mode or narrative:
                 analysis_dict = {"mode": mode, "sections": narrative or {}}
                 open_analysis_obj = validate_open_analysis(analysis_dict, recommendation=final_rec)
@@ -655,7 +691,7 @@ def record_stepback_review(
             for d in dissents:
                 d_obj = DissentRecord(
                     dissenting_reviewer_id=d.get("dissenting_reviewer_id", "dissenter"),
-                    minority_recommendation=d.get("minority_recommendation", "HOLD"),
+                    minority_recommendation=d.get("minority_recommendation", ""),
                     minority_composite_score=d.get("minority_composite_score"),
                     dissent_summary=d.get("dissent_summary", ""),
                     cited_counter_evidence=d.get("cited_counter_evidence", []),
@@ -673,18 +709,24 @@ def record_stepback_review(
 
         # Validate the level transition before anything is persisted: a refused
         # transition must not leave a review behind as the latest recommendation.
+        # Only the human chair lowers Level 3 (spec 9.2). A review at Level 3 is recorded as
+        # advice and leaves the level where it is.
         esc_rec = None
-        if esc_level != state.current_level:
+        lowers_chair_level = state.current_level == 3 and esc_level < 3
+        if esc_level != state.current_level and not lowers_chair_level:
             reason = f"Step-back review recommendation {final_rec}"
             if has_dissent_hold and final_rec == "CONTINUE" and esc_level == 2:
                 reason = "Minority dissent forced Level 2 Hold"
+            # A review discharges a hold only when it is independent AND not filed by an
+            # agent surface: the reviewer identity is caller-asserted, so under an agent
+            # session only a human (TTY or chair token) can lift a Level 2 hold.
             _, esc_rec = transition_escalation(
                 state,
                 target_level=esc_level,
                 reason=reason,
                 opened_by_kind="reviewer",
                 reviewer_id=eff_reviewer,
-                independent_review=is_indep,
+                independent_review=is_indep and not agent_mode,
                 agent_mode=agent_mode,
             )
             esc_rec.project_slug = project_slug

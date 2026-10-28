@@ -228,6 +228,7 @@ def validate_campaign_evidence(
     """
     # Collect campaign domain membership sets
     campaign_run_ids: set[str] = set()
+    campaign_full_run_ids: set[str] = set()
     campaign_sidecars: set[str] = set()
     campaign_git_shas: set[str] = set()
 
@@ -247,6 +248,7 @@ def validate_campaign_evidence(
         if rid:
             s_rid = str(rid)
             campaign_run_ids.add(s_rid)
+            campaign_full_run_ids.add(s_rid)
             # Add short prefixes (first 8+ chars)
             if len(s_rid) >= 8:
                 campaign_run_ids.add(s_rid[:8])
@@ -353,7 +355,9 @@ def validate_campaign_evidence(
         elif kind == "postmortem":
             # postmortem:<path>#<obligation_id>: must point at a real postmortem naming the obligation
             pm_path, _, obligation = ref.partition("#")
-            if _postmortem_cites(pm_path.strip(), obligation.strip()):
+            if _postmortem_cites(
+                pm_path.strip(), obligation.strip(), str(getattr(campaign, "id", "") or "")
+            ):
                 valid_citations.append(cit_str)
             else:
                 invalid_citations.append(cit_str)
@@ -368,7 +372,7 @@ def validate_campaign_evidence(
                 raise StepBackCitationInvalidError(f"Unsupported citation syntax or prefix: '{cit_str}'")
 
     # Distinct citations only: repeating one valid citation must not satisfy min_citations.
-    distinct_valid = len(set(valid_citations))
+    distinct_valid = len({_citation_key(*_split_citation(c), campaign_full_run_ids) for c in valid_citations})
     if distinct_valid < min_citations:
         raise StepBackInsufficientEvidenceError(
             f"Review requires at least {min_citations} valid primary domain citations; found {distinct_valid}"
@@ -387,15 +391,58 @@ def _matches_path(ref: str, paths: set[str]) -> bool:
     return any(p == ref or p.endswith("/" + ref) or ref.endswith("/" + p) for p in paths)
 
 
-def _postmortem_cites(path_str: str, obligation: str) -> bool:
-    """A postmortem citation holds only if the file exists and names the obligation."""
-    if not path_str:
+def _toml_strings(node: Any) -> set[str]:
+    """Every string value and table key in a parsed TOML tree."""
+    out: set[str] = set()
+    if isinstance(node, dict):
+        for k, v in node.items():
+            out.add(str(k))
+            out |= _toml_strings(v)
+    elif isinstance(node, list):
+        for v in node:
+            out |= _toml_strings(v)
+    elif isinstance(node, str):
+        out.add(node)
+    return out
+
+
+def _postmortem_cites(path_str: str, obligation: str, campaign_id: str) -> bool:
+    """A postmortem citation holds only for a real *.bth.postmortem.toml that names both
+    this campaign and the cited obligation (as a table key or string value)."""
+    if not path_str or not obligation or not campaign_id:
+        return False
+    path = Path(path_str)
+    if not path.name.endswith(".bth.postmortem.toml") or not path.is_file():
         return False
     try:
-        text = Path(path_str).read_text(encoding="utf-8", errors="replace")
-    except OSError:
+        import tomllib
+
+        strings = _toml_strings(tomllib.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
         return False
-    return not obligation or obligation in text
+    return obligation in strings and campaign_id in strings
+
+
+def _split_citation(cit: str) -> tuple[str, str]:
+    kind, ref = parse_citation(str(cit).strip())
+    return kind, ref.split("#")[0].strip()
+
+
+def _citation_key(kind: str, ref_target: str, full_run_ids: set[str]) -> tuple[str, str]:
+    """What a citation resolves to, so spellings of one target count once.
+
+    A run reference (or an outcome of it) resolves to the full member run id it names; an
+    unmatched reference keeps its own text.
+    """
+    if kind in ("run", "outcome"):
+        ref = ref_target.split(":")[0].strip()
+        for rid in sorted(full_run_ids):
+            if rid == ref or (len(ref) >= 8 and rid.startswith(ref)):
+                return ("run", rid)
+        return ("run", ref)
+    if kind == "git":
+        return (kind, ref_target[:7])
+    return (kind, ref_target)
 
 
 def check_reviewer_independence(

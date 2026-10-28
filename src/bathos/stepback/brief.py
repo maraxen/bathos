@@ -23,7 +23,7 @@ from typing import Any
 
 from bathos.campaigns import CampaignError, get_campaign, union_campaign_member_ids
 from bathos.stepback.catalog import get_escalation_state, list_escalations, list_reviews
-from bathos.stepback.engine import member_runs_chronological, resolve_catalog_and_db
+from bathos.stepback.engine import member_runs_chronological, member_sidecar, resolve_catalog_and_db
 from bathos.stepback.triggers import _get_item_attr, evaluate_all_triggers
 
 
@@ -135,7 +135,9 @@ def render_advisor_brief(
 
         # Evaluate triggers with the same snoozes the engine honours
         snoozed_map = {e.trigger_name: dict(e.metadata) for e in escalations if e.status == "snoozed" and e.trigger_name}
-        triggers_res = evaluate_all_triggers(camp, member_runs, state=state, snoozed_triggers=snoozed_map)
+        triggers_res = evaluate_all_triggers(
+            camp, member_runs, state=state, sidecar=member_sidecar(member_runs), snoozed_triggers=snoozed_map
+        )
         active_triggers = triggers_res.get("active_triggers", [])
         snoozed_triggers = triggers_res.get("snoozed_triggers", [])
 

@@ -5976,6 +5976,7 @@ async def stepback_record(
         dissents=dissents,
         input_snapshot_sha256=input_snapshot_sha256,
         dispatched_at=dispatched_at,
+        force_agent=True,
     )
 
 

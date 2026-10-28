@@ -68,14 +68,34 @@ def test_clause_needs_a_registered_claim():
 def test_postmortem_must_exist_and_name_the_obligation(tmp_path: Path):
     with pytest.raises(StepBackCitationInvalidError):
         validate_campaign_evidence(
-            [f"postmortem:{tmp_path / 'missing.md'}#ob-1"], _campaign(), [], min_citations=1
+            [f"postmortem:{tmp_path / 'missing.bth.postmortem.toml'}#ob-1"], _campaign(), [], min_citations=1
         )
-    pm = tmp_path / "pm.md"
-    pm.write_text("obligation ob-1 discharged\n")
+    pm = tmp_path / "x.bth.postmortem.toml"
+    pm.write_text('campaign_id = "camp_rem"\n\n[obligations."ob-1"]\nstatus = "discharged"\n')
     valid, _ = validate_campaign_evidence(
         [f"postmortem:{pm}#ob-1"], _campaign(), [], min_citations=1
     )
     assert valid == [f"postmortem:{pm}#ob-1"]
+
+
+def test_postmortem_for_another_campaign_is_not_evidence(tmp_path: Path):
+    pm = tmp_path / "other.bth.postmortem.toml"
+    pm.write_text('campaign_id = "camp_other"\n\n[obligations."ob-1"]\nstatus = "discharged"\n')
+    with pytest.raises(StepBackCitationInvalidError):
+        validate_campaign_evidence(
+            [f"postmortem:{pm}#ob-1"], _campaign(), [], min_citations=1
+        )
+
+
+def test_respellings_of_one_run_count_once():
+    members = [SimpleNamespace(id=RUN_ID, sidecar_path="", git_commit=None)]
+    with pytest.raises(StepBackInsufficientEvidenceError):
+        validate_campaign_evidence(
+            [f"run:{RUN_ID}", f"run:{RUN_ID[:8]}", f"outcome:{RUN_ID}:pass"],
+            _campaign(),
+            members,
+            min_citations=2,
+        )
 
 
 # --- Finding 4: rubric is an identifier, not a path ----------------------------------------
@@ -222,9 +242,8 @@ def test_minority_pivot_dissent_does_not_force_a_hold(tmp_path: Path):
     assert res["escalation_level"] == 0
 
 
-def test_refused_transition_persists_no_review(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    from bathos.errors import StepBackAgentOverrideRefusedError
-    from bathos.stepback.catalog import list_reviews
+def test_level3_review_under_agent_is_advice_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from bathos.stepback.catalog import get_escalation_state, list_reviews
     from bathos.stepback.engine import record_stepback_review
 
     camp = _review_campaign("camp_refused_l3")
@@ -245,7 +264,6 @@ def test_refused_transition_persists_no_review(tmp_path: Path, monkeypatch: pyte
     with (
         patch("bathos.stepback.engine.get_campaign", return_value=camp),
         patch("bathos.stepback.engine.fetch_member_runs", return_value=[]),
-        pytest.raises(StepBackAgentOverrideRefusedError),
     ):
         record_stepback_review(
             campaign_id=camp.id,
@@ -254,7 +272,9 @@ def test_refused_transition_persists_no_review(tmp_path: Path, monkeypatch: pyte
             reviewer_id="panel_chair",
             catalog_dir=tmp_path,
         )
-    assert list_reviews(campaign_id=camp.id, catalog_dir=tmp_path) == []
+    # Recorded as advice; an agent cannot lower Level 3 (spec 9.2).
+    assert len(list_reviews(campaign_id=camp.id, catalog_dir=tmp_path)) == 1
+    assert get_escalation_state(camp.id, catalog_dir=tmp_path).current_level == 3
 
 
 def test_agent_session_cannot_file_review_as_human(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -276,3 +296,107 @@ def test_agent_session_cannot_file_review_as_human(tmp_path: Path, monkeypatch: 
             catalog_dir=tmp_path,
         )
     assert list_reviews(campaign_id=camp.id, catalog_dir=tmp_path)[0].reviewer_kind == "agent"
+
+
+def _save_escalation(tmp_path: Path, camp_id: str, level: int) -> None:
+    save_escalation_cool(
+        EscalationRecord(
+            escalation_id=f"esc_{camp_id}_{level}",
+            campaign_id=camp_id,
+            project_slug="proj",
+            level=level,
+            status="active",
+            opened_at="2026-10-27T12:00:00Z",
+            opened_by_kind="system",
+            trigger_reason="test",
+        ),
+        tmp_path,
+    )
+
+
+def test_agent_filed_review_cannot_lift_a_level2_hold(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from bathos.errors import StepBackUnauthorizedChairError
+    from bathos.stepback.catalog import list_reviews
+    from bathos.stepback.engine import record_stepback_review
+
+    camp = _review_campaign("camp_hold_agent")
+    _save_escalation(tmp_path, camp.id, 2)
+    monkeypatch.setenv("CLAUDE_AGENT", "1")
+    with (
+        patch("bathos.stepback.engine.get_campaign", return_value=camp),
+        patch("bathos.stepback.engine.fetch_member_runs", return_value=[]),
+        pytest.raises(StepBackUnauthorizedChairError),
+    ):
+        record_stepback_review(
+            campaign_id=camp.id,
+            path_kind="rubric",
+            scores=CONTINUE_SCORES,
+            reviewer_id="any_name_the_agent_claims",
+            catalog_dir=tmp_path,
+        )
+    assert list_reviews(campaign_id=camp.id, catalog_dir=tmp_path) == []
+
+
+def test_level3_review_is_recorded_as_advice_without_lowering(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from bathos.stepback.catalog import get_escalation_state, list_reviews
+    from bathos.stepback.engine import record_stepback_review
+
+    camp = _review_campaign("camp_l3_advice")
+    _save_escalation(tmp_path, camp.id, 3)
+    for var in ("BTH_AGENT_MODE", "CLAUDE_AGENT", "CLAUDE_AGENT_ID", "AGENT_NAME", "SUBAGENT_ID", "ANTIGRAVITY_AGENT"):
+        monkeypatch.delenv(var, raising=False)
+    with (
+        patch("bathos.stepback.engine.get_campaign", return_value=camp),
+        patch("bathos.stepback.engine.fetch_member_runs", return_value=[]),
+    ):
+        record_stepback_review(
+            campaign_id=camp.id,
+            path_kind="rubric",
+            scores=CONTINUE_SCORES,
+            reviewer_id="panel_chair",
+            catalog_dir=tmp_path,
+        )
+    assert len(list_reviews(campaign_id=camp.id, catalog_dir=tmp_path)) == 1
+    assert get_escalation_state(camp.id, catalog_dir=tmp_path).current_level == 3
+
+
+def test_force_agent_overrides_a_claimed_human_reviewer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from bathos.stepback.catalog import list_reviews
+    from bathos.stepback.engine import record_stepback_review
+
+    camp = _review_campaign("camp_force_agent")
+    for var in ("BTH_AGENT_MODE", "CLAUDE_AGENT", "CLAUDE_AGENT_ID", "AGENT_NAME", "SUBAGENT_ID", "ANTIGRAVITY_AGENT"):
+        monkeypatch.delenv(var, raising=False)
+    with (
+        patch("bathos.stepback.engine.get_campaign", return_value=camp),
+        patch("bathos.stepback.engine.fetch_member_runs", return_value=[]),
+    ):
+        record_stepback_review(
+            campaign_id=camp.id,
+            path_kind="rubric",
+            scores=CONTINUE_SCORES,
+            reviewer_id="panel_chair",
+            reviewer_kind="human",
+            catalog_dir=tmp_path,
+            force_agent=True,
+        )
+    assert list_reviews(campaign_id=camp.id, catalog_dir=tmp_path)[0].reviewer_kind == "agent"
+
+
+def test_hybrid_rejects_an_unknown_recommendation(tmp_path: Path):
+    from bathos.stepback.engine import record_stepback_review
+
+    camp = _review_campaign("camp_hybrid_bad")
+    with (
+        patch("bathos.stepback.engine.get_campaign", return_value=camp),
+        patch("bathos.stepback.engine.fetch_member_runs", return_value=[]),
+        pytest.raises(StepBackInvalidSchemaError),
+    ):
+        record_stepback_review(
+            campaign_id=camp.id,
+            path_kind="hybrid",
+            scores=CONTINUE_SCORES,
+            recommendation="FOO",
+            reviewer_id="panel_chair",
+            catalog_dir=tmp_path,
+        )
