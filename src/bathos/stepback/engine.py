@@ -211,16 +211,22 @@ def member_sidecar(
     from bathos.stepback.analysis import _workspace_root
 
     root = Path(workspace_root) if workspace_root else _workspace_root()
+    # Only the latest member's pre-registration decides the metric, so only it must be
+    # recoverable. An unrecoverable older member is logged and does not block the campaign.
     latest_sidecar = None
-    for run in member_runs:
+    for index, run in enumerate(member_runs):
         sidecar = resolve_run_sidecar(run, root, db=db, log_mode=log_mode)
         if sidecar is None or isinstance(sidecar, Unresolvable):
             reason = "no sidecar was recorded" if sidecar is None else sidecar.reason
+            if index < len(member_runs) - 1:
+                _log.warning("older member run %s has no recoverable sidecar (%s); skipped", _run_id(run), reason)
+                continue
             raise StepBackInvalidSchemaError(
-                f"run {_run_id(run)} has no recoverable sidecar ({reason}); "
-                "triggers and reviews need every member run's pre-registration"
+                f"latest run {_run_id(run)} has no recoverable sidecar ({reason}); "
+                "triggers and reviews need the current pre-registration"
             )
-        latest_sidecar = sidecar
+        if index == len(member_runs) - 1:
+            latest_sidecar = sidecar
     if latest_sidecar is None:
         return None
     benchmark: dict[str, Any] = {}
