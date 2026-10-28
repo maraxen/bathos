@@ -173,9 +173,14 @@ def _hold_discharge_policy(cwd: Path | str | None = None) -> str:
     policy = "agentic"
     bth_toml = search_root / ".bth.toml"
     if bth_toml.is_file():
-        data = tomllib.loads(bth_toml.read_text(encoding="utf-8"))
+        try:
+            data = tomllib.loads(bth_toml.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise StepBackInvalidSchemaError(f"{bth_toml} is not valid TOML: {exc}") from exc
         sb_cfg = data.get("stepback", {})
-        if isinstance(sb_cfg, dict) and "agent_hold_discharge" in sb_cfg:
+        if not isinstance(sb_cfg, dict):
+            raise StepBackInvalidSchemaError(f"[stepback] in {bth_toml} must be a table")
+        if "agent_hold_discharge" in sb_cfg:
             policy = str(sb_cfg["agent_hold_discharge"]).strip()
     if policy not in HOLD_DISCHARGE_POLICIES:
         raise StepBackInvalidSchemaError(
@@ -218,6 +223,12 @@ def member_runs_chronological(con: Any, members: list[str], cat_dir: Path) -> li
     if not members:
         return []
     raw_runs = fetch_member_runs(con, members, cat_dir, log_mode=is_log_mode(cat_dir))
+    if isinstance(raw_runs, dict):
+        absent = [rid for rid, r in raw_runs.items() if r is None]
+        if absent:
+            raise StepBackInvalidSchemaError(
+                f"campaign member run(s) {', '.join(absent)} are not in the catalog; cannot review or trigger on a partial campaign"
+            )
     runs = list(raw_runs.values()) if isinstance(raw_runs, dict) else list(raw_runs)
     runs = [r for r in runs if r is not None]
     ids = [rid for rid in (_run_id(r) for r in runs) if rid]
@@ -776,7 +787,11 @@ def record_stepback_review(
                 reason=reason,
                 opened_by_kind="reviewer",
                 reviewer_id=eff_reviewer,
-                independent_review=is_indep and (not agent_mode or _hold_discharge_policy() == "agentic"),
+                independent_review=is_indep
+                and (
+                    not agent_mode
+                    or (state.current_level == 2 and esc_level < 2 and _hold_discharge_policy() == "agentic")
+                ),
                 agent_mode=agent_mode,
             )
             esc_rec.project_slug = project_slug
@@ -819,6 +834,9 @@ def record_stepback_review(
             "composite_score": final_composite,
             "recommendation": final_rec,
             "escalation_level": esc_level,
+            # At Level 3 a review is advice: the campaign stays where it is (spec 9.2).
+            "campaign_level": state.current_level,
+            "advisory_only": lowers_chair_level,
         }
     finally:
         if owns_db and con is not None:

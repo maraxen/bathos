@@ -372,7 +372,9 @@ def validate_campaign_evidence(
                 raise StepBackCitationInvalidError(f"Unsupported citation syntax or prefix: '{cit_str}'")
 
     # Distinct citations only: repeating one valid citation must not satisfy min_citations.
-    distinct_valid = len({_citation_key(*_split_citation(c), campaign_full_run_ids) for c in valid_citations})
+    distinct_valid = len(
+        {_citation_key(*_split_citation(c), campaign_full_run_ids, campaign_sidecars) for c in valid_citations}
+    )
     if distinct_valid < min_citations:
         raise StepBackInsufficientEvidenceError(
             f"Review requires at least {min_citations} valid primary domain citations; found {distinct_valid}"
@@ -388,7 +390,7 @@ def _matches_run(ref: str, run_ids: set[str]) -> bool:
 
 def _matches_path(ref: str, paths: set[str]) -> bool:
     """Exact path, or a match at a path-component boundary (no bare substring matches)."""
-    return any(p == ref or p.endswith("/" + ref) or ref.endswith("/" + p) for p in paths)
+    return any(p == ref or p.endswith("/" + ref) for p in paths)
 
 
 def _toml_strings(node: Any) -> set[str]:
@@ -428,7 +430,9 @@ def _split_citation(cit: str) -> tuple[str, str]:
     return kind, ref.split("#")[0].strip()
 
 
-def _citation_key(kind: str, ref_target: str, full_run_ids: set[str]) -> tuple[str, str]:
+def _citation_key(
+    kind: str, ref_target: str, full_run_ids: set[str], sidecars: set[str] | None = None
+) -> tuple[str, str]:
     """What a citation resolves to, so spellings of one target count once.
 
     A run reference (or an outcome of it) resolves to the full member run id it names; an
@@ -442,6 +446,10 @@ def _citation_key(kind: str, ref_target: str, full_run_ids: set[str]) -> tuple[s
         return ("run", ref)
     if kind == "git":
         return (kind, ref_target[:7])
+    if kind == "sidecar" and sidecars:
+        for p in sorted(sidecars):
+            if p == ref_target or p.endswith("/" + ref_target):
+                return (kind, p)
     return (kind, ref_target)
 
 
