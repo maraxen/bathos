@@ -414,7 +414,7 @@ def _workspace_root() -> Path:
 
     from bathos.config import find_project_config
 
-    start = Path(os.environ.get("BTH_WORKSPACE_ROOT", Path.cwd()))
+    start = Path(os.environ.get("BTH_WORKSPACE_ROOT", Path.cwd())).resolve()
     cfg = find_project_config(start)
     return cfg.parent if cfg is not None else start
 

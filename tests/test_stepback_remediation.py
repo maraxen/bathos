@@ -129,6 +129,28 @@ def test_signal17_attributes_a_cool_only_campaign(tmp_path: Path):
     assert result.level == "WARNING"
 
 
+def test_member_sidecar_carries_the_keys_triggers_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A declared stepback bound must reach the triggers, not be dropped at recovery."""
+    from bathos.stepback.engine import member_sidecar
+
+    monkeypatch.setenv("BTH_WORKSPACE_ROOT", str(tmp_path))
+    sidecar = tmp_path / "exp.bth.toml"
+    sidecar.write_text(
+        '[experiment]\nhypothesis = "fixture"\n\n[result_schema]\nns_per_day = "float"\n\n'
+        '[stepback]\nbound = 50.0\n'
+    )
+    run = SimpleNamespace(
+        id=RUN_ID,
+        sidecar_path=str(sidecar),
+        sidecar_sha256=__import__("hashlib").sha256(sidecar.read_bytes()).hexdigest(),
+    )
+
+    got = member_sidecar([run], workspace_root=tmp_path)
+
+    assert got is not None
+    assert got["stepback"]["bound"] == 50.0
+
+
 def test_respellings_of_one_run_count_once():
     members = [SimpleNamespace(id=RUN_ID, sidecar_path="", git_commit=None)]
     with pytest.raises(StepBackInsufficientEvidenceError):

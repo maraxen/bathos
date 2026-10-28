@@ -208,8 +208,9 @@ def member_sidecar(
     whose sidecar cannot be recovered is named rather than judged on guessed data.
     """
     from bathos.breakdown_gate import Unresolvable, resolve_run_sidecar
+    from bathos.stepback.analysis import _workspace_root
 
-    root = Path(workspace_root) if workspace_root else Path(os.environ.get("BTH_WORKSPACE_ROOT", Path.cwd()))
+    root = Path(workspace_root) if workspace_root else _workspace_root()
     latest_sidecar = None
     for run in member_runs:
         sidecar = resolve_run_sidecar(run, root, db=db, log_mode=log_mode)
@@ -222,9 +223,15 @@ def member_sidecar(
         latest_sidecar = sidecar
     if latest_sidecar is None:
         return None
+    benchmark: dict[str, Any] = {}
+    if latest_sidecar.metric:
+        benchmark["metric"] = latest_sidecar.metric
+    if latest_sidecar.regression_threshold:
+        benchmark["regression_threshold"] = latest_sidecar.regression_threshold
     return {
         "result_schema": dict(latest_sidecar.result_schema),
-        "benchmark": {"metric": latest_sidecar.metric} if latest_sidecar.metric else {},
+        "benchmark": benchmark,
+        "stepback": dict(latest_sidecar.stepback),
     }
 
 

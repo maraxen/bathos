@@ -520,9 +520,13 @@ def signal_stepback_ignored_escalations(
                 except Exception:
                     logging.getLogger(__name__).warning("campaign lookup: warm tier unreadable", exc_info=True)
             try:
-                campaign_projects = {
-                    c.id: c.project_slug or "" for c in list_campaigns(lookup, catalog_dir=target_cat)
-                }
+                try:
+                    listed = list_campaigns(lookup, catalog_dir=target_cat)
+                except Exception:
+                    # A warm table that is missing or unreadable must not hide open holds.
+                    logging.getLogger(__name__).warning("campaign lookup: warm query failed; cool tier only", exc_info=True)
+                    listed = list_campaigns(None, catalog_dir=target_cat)
+                campaign_projects = {c.id: c.project_slug or "" for c in listed}
             finally:
                 if lookup is not None:
                     lookup.close()
