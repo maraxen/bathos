@@ -414,10 +414,153 @@ Typical pattern: one scaled-divergence probe covers the main-effect clause; one 
 
 Signal 12 (`bth sprint-audit`): fires when a confirmation campaign has no `claim_path` registered — the Union Gate will not run at conclude, and the probe design above will have no enforcement.
 
+## Step-Back Reviews & Trajectory Escalation
+
+While the Union Gate and claim tier look **inward and downward** (*is this run valid, is this claim supported?*), the Step-Back Review subsystem looks **outward and upward** (*is this line of work still worth doing, and does it still matter?*).
+
+Step-back reviews protect campaigns from behavioral lock-in, endless parameter-tweaking loops, creeping thresholds with diminishing returns, and proxy optimization (Goodharting). They are evaluated automatically on a system cadence and event triggers, or can be invoked on demand.
+
+### Checking Step-Back Status
+
+Check whether a campaign has active triggers, pending reviews, or open escalation holds:
+
+```bash
+bth stepback status <campaign-id>
+bth stepback status <campaign-id> --verbose
+```
+
+FastMCP equivalent: `stepback_status(campaign_id="<campaign-id>", verbose=True)`.
+
+Returns:
+- `current_level`: `0` (Nominal), `1` (Advisory Warning), `2` (Step-Back Hold), or `3` (Human Chair Escalation)
+- `active_triggers`: list of firing trigger names and metrics
+- `review_count`: total reviews recorded
+- `last_review`: summary of most recent review (recommendation, score, reviewer)
+- `snoozed_triggers`: list of active snooze windows and expiration conditions
+
+### Evaluating System Triggers
+
+Evaluate whether campaign trajectory triggers are currently firing:
+
+```bash
+bth stepback trigger <campaign-id>
+bth stepback trigger <campaign-id> --window 5 --dry-run
+```
+
+FastMCP equivalent: `stepback_trigger(campaign_id="<campaign-id>", window=5, dry_run=False)`.
+
+Triggers evaluate mathematical properties over the member run sequence:
+1. `repeated_marginal`: 3 consecutive marginal runs ($s \ge 3$) or $\ge 60\%$ marginal in last $k$ runs.
+2. `near_bound`: 2+ runs skating within 10% of decision boundary ($d_i \le 1.0$) or 1 run within 2.5% ($d_N \le 0.25$).
+3. `entropy_collapse`: Shannon outcome entropy collapsing ($H_e < 0.35$ nats over $k \ge 5$ runs).
+4. `metric_plateau`: OLS relative moving slope $< 1\%$/run ($\bar{\beta}_{\text{rel}} < 0.01$) with $CV < 0.02$.
+5. `stale`: 14 days idle, or 15 runs without resolving a single hypothesis or Union Gate clause.
+
+### Snoozing and Acknowledging Triggers
+
+When an intentional parameter sweep or exploratory phase fires a non-L3 trigger, acknowledge and snooze it to prevent review fatigue while maintaining safety:
+
+```bash
+bth stepback snooze <campaign-id> --trigger repeated_marginal --runs 5 --rationale "Exploring solvent density bounds"
+```
+
+FastMCP equivalent: `stepback_snooze(campaign_id="<campaign-id>", trigger_name="repeated_marginal", runs_window=5, rationale="...")`.
+
+Constraints:
+- Bounded: max 10 runs (`--runs 10`) or 72 hours (`--hours 72`).
+- Rationale is mandatory and non-empty.
+- **Invariance**: Level 3 Human Chair escalations can **never** be snoozed.
+
+### Running a Step-Back Review Workflow
+
+Execute the full step-back review orchestration workflow:
+
+```bash
+bth stepback run <campaign-id>
+```
+
+FastMCP equivalent: `stepback_run(campaign_id="<campaign-id>")`.
+
+Orchestration pipeline:
+1. Evaluates all 5 system triggers over member runs.
+2. If triggers fire and campaign is at Level 0, escalates to Level 1 (Advisory Warning).
+3. Dispatches an independent reviewer (see **bathos-rigor-gates** and **bathos-step-back** for Blind Reviewer Protocol).
+4. Emits advisor brief and logs telemetry.
+
+### Recording a Review
+
+Record an independent evaluation using either Path A (Scored Rubric) or Path B (Qualitative Open Analysis):
+
+```bash
+# Path A: Scored, versioned 5-dimension rubric (1-5 scale)
+bth stepback record <campaign-id> \
+  --path rubric \
+  --scores '{"question_validity": 4, "empirical_progress": 3, "theoretical_grounding": 4, "resource_efficiency": 4, "risk_confound_surface": 3}' \
+  --evidence '["run:run_1234abcd", "sidecar:scripts/experiments/opt.bth.toml#outcomes.pass"]' \
+  --reviewer-id "critic_agent_1"
+
+# Path B: Qualitative open analysis (Advisor, Pre-Mortem, So-What, Outsider, Steelman-The-Stop)
+bth stepback record <campaign-id> \
+  --path open_analysis \
+  --mode pre_mortem \
+  --recommendation PIVOT \
+  --text "Assuming this campaign fails at 6 months, the root cause will be unmodelled solvent polarization." \
+  --evidence '["run:run_1234abcd", "run:run_5678ef01"]' \
+  --reviewer-id "critic_agent_1"
+```
+
+FastMCP equivalents: `stepback_record(...)` and `stepback_review(...)`.
+
+### Rendering the Advisor Brief & Project Status Matrix
+
+Generate an advisor-ready briefing document (Markdown) suitable for a real thesis committee or advisor one-on-one, and export the status string for the `"End / reconsider"` column of `PROJECT_STATUS.advisor.md`:
+
+```bash
+bth stepback brief <campaign-id>
+bth stepback show <campaign-id> --format brief
+```
+
+FastMCP equivalent: `stepback_brief(campaign_id="<campaign-id>")` or `stepback_show(campaign_id="<campaign-id>", format="brief")`.
+
+The brief summarizes:
+1. Stakes & Scientific Question
+2. Trajectory & Outcomes
+3. Threshold Basis & Drift
+4. Alternative Hypotheses & Dissent
+5. Exit Criteria & Sunk Cost
+6. Escalation Status & Chair Disposition
+7. Project Status Matrix Entry (e.g. `[HOLD L2: repeated marginals (3/5 runs); review rev_1234 recommending PIVOT]`)
+
+### Escalation Ladder and Resolution
+
+Transition a campaign along the 4-tier escalation ladder:
+- **Level 0 (Nominal)**: Normal progression.
+- **Level 1 (Advisory Warning)**: Soft warning banner on run launches and CLI queries.
+- **Level 2 (Step-Back Hold)**: Active hold. In confirmation/sequential mode, conclusion verdict downgrades to `"confounded"` unless resolved or forced.
+- **Level 3 (Human Chair Escalation)**: Highest escalation. Reached via catastrophic findings or committee referral.
+
+```bash
+# Escalate campaign
+bth stepback escalate <campaign-id> --target-level 2 --reason "3 consecutive marginal runs skate decision bound"
+
+# Resolve / De-escalate campaign (Levels 0, 1, 2)
+bth stepback resolve <campaign-id> --deescalate-to 0 --note "Pivot plan accepted; new hypothesis registered"
+```
+
+FastMCP equivalents: `stepback_escalate(...)` and `stepback_resolve(...)`.
+
+**Human Chair Invariance (Iron Law)**:
+FastMCP `stepback_resolve` strictly and unconditionally **refuses** to resolve Level 3 escalations (`STEPBACK_AGENT_OVERRIDE_REFUSED`). Level 3 resolution requires an interactive human session via TTY (`sys.stdin.isatty()`) or a secure chair token at `~/.bth/chair_token`. Autonomous agents can **never** close, de-escalate, or override a Level 3 escalation.
+
+For exhaustive methodology, blind reviewer isolation rules, and rubric dimension definitions, consult **bathos-step-back** and **bathos-rigor-gates**.
+
 ## Related
 
 - **using-bathos** — run tracking, sidecar pre-registration, controls discipline, catalog queries
+- **bathos-step-back** — dedicated skill for step-back review orchestration, rubric dimensions, cognitive modes, and blind reviewer protocol
+- **bathos-rigor-gates** — post-Union-Gate confirmatory rigor, Decision D1 non-blocking posture, and blind reviewer isolation
 - **bathos-cluster** — SLURM submission and sync for the runs grouped here
 - **bathos-literature-parity** — validating a reimplemented baseline, feeds `[confounds.reference_parity]` above
-- **bathos-mcp** — `claim_scaffold`/`claim_validate` MCP tool contracts
+- **bathos-mcp** — `claim_scaffold`/`claim_validate` and `stepback_*` MCP tool contracts
 - **CLAUDE.md**: Bathos architecture, schema versions, backlog
+

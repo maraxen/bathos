@@ -31,19 +31,17 @@
     "mcp_servers": [
       {
         "command": [
-          "uvx",
-          "--from",
-          "bathos==0.13.0a9",
           "bth-mcp"
         ],
         "env": [],
+        "launch": "uvx",
         "name": "bathos"
       }
     ],
     "metadata": {
       "description": "Experiment tracking — pre-registration, provenance, campaigns",
       "name": "bathos",
-      "version": "0.13.0a9"
+      "version": "0.5.4"
     },
     "skills": [
       {
