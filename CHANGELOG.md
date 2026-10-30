@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0a9] - 2026-10-30
+
+### Added
+- **Step-back reviews** (PR #149): the `bathos-step-back` skill ships in the plugin bundle.
+
+### Fixed
+- **Plugin snapshot regenerated.** `src/bathos/agent_plugin.json` was stale (plugin version `0.5.4`, plain `uvx` launch) and lacked the step-back skill. It is now built from `.praxia/manifest.toml` at this version.
+
 ## [0.13.0a8] - 2026-10-26
 
 ### Changed
