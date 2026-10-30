@@ -75,6 +75,10 @@ name     = "bathos-blast-radius"
 path     = "agent_assets/skills/bathos-blast-radius/SKILL.md"
 
 [[plugin.skills]]
+name     = "bathos-step-back"
+path     = "agent_assets/skills/bathos-step-back/SKILL.md"
+
+[[plugin.skills]]
 name     = "prose-biosafe"
 path     = "agent_assets/skills/prose-biosafe/SKILL.md"
 
