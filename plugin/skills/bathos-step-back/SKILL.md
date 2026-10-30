@@ -1,7 +1,7 @@
 ---
 name: bathos-step-back
 description: System-evaluated step-back reviews, 5-dimension rubric (Path A), 5 cognitive modes (Path B), blind reviewer protocol, and advisor committee escalation ladder for bathos campaigns
-when_to_use: 'Triggers: stepback, step-back review, bth stepback, advisor brief, committee escalation, campaign hold, rubric evaluation, pre-mortem, outsider read, steelman-the-stop, blind reviewer, repeated_marginal, near_bound, entropy_collapse, metric_plateau, campaign staleness, decision D1.'
+when_to_use: "Triggers: stepback, step-back review, bth stepback, advisor brief, committee escalation, campaign hold, rubric evaluation, pre-mortem, outsider read, steelman-the-stop, blind reviewer, repeated_marginal, near_bound, entropy_collapse, metric_plateau, campaign staleness, decision D1."
 ---
 # bathos-step-back
 

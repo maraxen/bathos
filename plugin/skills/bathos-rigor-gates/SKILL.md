@@ -1,7 +1,7 @@
 ---
 name: bathos-rigor-gates
-description: Post-Union-Gate confirmatory rigor — review coverage, post-mortem obligations, instrument-sensitivity positive controls, synthetic-recovery gates, negative-outcome hedging, the rule-card corpus, and multi-parent lineage/stats tooling for bathos campaigns
-when_to_use: "Triggers: review_tier, obligations, positive_control, differential, synthetic_recovery, bth gate, negative_check, bth ref, campaign_edges, stats_gates, capability_probe, review coverage, obligation ledger, rule card."
+description: Post-Union-Gate confirmatory rigor — review coverage, post-mortem obligations, instrument-sensitivity positive controls, synthetic-recovery gates, negative-outcome hedging, the rule-card corpus, step-back review holds (Decision D1), blind reviewer protocols, and multi-parent lineage/stats tooling for bathos campaigns
+when_to_use: "Triggers: review_tier, obligations, positive_control, differential, synthetic_recovery, bth gate, negative_check, bth ref, campaign_edges, stats_gates, capability_probe, review coverage, obligation ledger, rule card, stepback, step-back review, blind reviewer, escalation hold, decision D1."
 ---
 # bathos-rigor-gates
 
@@ -35,7 +35,11 @@ bathos-campaigns. A confirmation campaign with no `[obligations]`/`[claim]` flag
 5. **Obligation trigger 4** (`citation_contradicted`) — a `supports` review entry the outcome disfavors
 6. Claim-coverage JSON sidecar emitted
 7. **Obligation Gate** — any open obligation on the campaign or its member runs
-8. **Obligation trigger 2** (`campaign_confounded`) — opened *after* step 7, so a downgrade can't
+7.5. **Step-Back Review & Escalation Gate (Decision D1)** — if an active Level 2 Hold or Level 3
+   Human Chair Escalation exists: for confirmation/sequential campaigns, outcome is downgraded to
+   `"confounded"` unless `--force-verdict` / `--force` is supplied (which records a `bypassed`
+   state); for exploration campaigns, prints a warning banner with no downgrade (see below)
+8. **Obligation trigger 2** (`campaign_confounded`) — opened *after* step 7 and 7.5, so a downgrade can't
    trigger an obligation that then downgrades itself
 
 Each of 2, 3, 5, and 7 is independently opt-in and prints a `WARNING:` with no verdict change when
@@ -263,6 +267,76 @@ this is a manual toolkit, not an automatic campaign gate.
 `capability_probe` (MCP tool only) checks whether a bathos instance can support either of the
 above (`seed_live`, `stats_battery_live` + unavailable reason).
 
+## Decision D1 Posture & Step-Back Review Gate
+
+In accordance with bathos Decision **D1** (`src/bathos/obligations.py`: obligations and rigor gates never block execution by default; they warn or downgrade, with blocking strictly opt-in), the Step-Back Review subsystem enforces:
+
+1. **Non-Blocking Execution (Default)**:
+   - When a campaign is placed under Level 1 Advisory Warning, Level 2 Step-Back Hold, or Level 3 Human Chair Escalation, running member experiments (`bth run`, `bth submit`) or adding runs (`bth campaign add`) is **never blocked**.
+   - Instead, the system prints a prominent warning banner to stderr:
+     ```
+     WARNING: Active step-back Step-Back Hold (Level 2) on campaign 6f792f0d! Reason: repeated_marginal
+     ```
+   - This posture prevents deadlocks during exploratory parameter sweeps or intentional stress tests.
+
+2. **Opt-in Execution Enforcement**:
+   - For high-stakes or budget-capped campaigns, strict blocking can be enabled in `.bth.toml`:
+     ```toml
+     [stepback]
+     enforce = true  # or BTH_STEP_BACK_ENFORCE=1
+     ```
+   - When `enforce = true`, `bth run` and `bth submit` refuse execution if an active Level 2 or Level 3 hold is open, returning exit code 1.
+
+3. **Conclusion Verdict Downgrade**:
+   - At `bth campaign conclude`:
+     - **Confirmation & Sequential Campaigns**: If an unaddressed Level 2 Hold or Level 3 Escalation is active, the campaign's conclusion outcome is automatically downgraded to `"confounded"`, regardless of the user-supplied `--outcome`.
+     - **Bypass Mechanism**: Passing `--force-verdict` (or `--force`) overrides the downgrade and allows conclusion under the specified outcome, while logging `stepback_status = "bypassed"` in the catalog record.
+     - **Exploration Campaigns**: Never downgraded; emits an advisory warning banner.
+
+## The Blind Reviewer Protocol
+
+A core lesson from bathos and praxia history is that **"an agent's report is a claim, not evidence"** (praxia lessons #46, #51, #134, #310, #435, #471, #477, #521) and that **"a proposer should not grade their own work"** (praxia #246, where an independent refuter found six load-bearing errors, all in the author's favor). Furthermore, mechanizing a lesson often moves the failure mode: agents game visible gates by inventing arbitrary passes or negating check conditions (e.g. self-negating adversarial checks in `bth new-experiment`, `CHANGELOG.md` lines 740–748).
+
+The **Blind Reviewer Protocol** eliminates these failure modes through rigorous isolation:
+
+### 1. Operationalizing Reviewer Independence
+- **Attribution Barrier**: The reviewer's authenticated identity (`reviewer_id`) must not match any entity in the campaign author set $\mathcal{A}_{\text{forbidden}}$:
+  - The campaign creator.
+  - Any agent session ID that authored or executed member runs in the campaign.
+  - The author of any git commits modifying experiment scripts during the campaign window.
+- If $R_{\text{id}} \in \mathcal{A}_{\text{forbidden}}$, the review is marked `is_independent = false`, emits `REVIEWER_CONFLICT_OF_INTEREST`, and **cannot** discharge holds or de-escalate the campaign.
+
+### 2. Primary Record Ingestion (Blindness to Advocacy)
+- The blind reviewer **does not read** the doing agent's summary narrative, chat justification, or advocacy.
+- Instead, the reviewer evaluates **primary catalog records directly**:
+  - Raw member runs (`run_*.parquet` and warm `runs` table in `bathos.db`).
+  - Pre-registered sidecars (`*.bth.toml`) and outcome SQL fragments.
+  - Registered claim definitions, clauses, and literature reviews.
+  - Output artifacts and metric distributions.
+- **Evidence Citation Requirement**: Every assertion in an open analysis review (Path B) must cite verifiable primary entities:
+  - `run:<uuid>` (must be a valid member run of the campaign)
+  - `sidecar:<path>#<clause>` (must match an executed script)
+  - `clause:<path>#<id>` (must match the registered claim)
+  - At least 2 valid primary citations ($N_{\text{valid}} \ge 2$) are required, or the review is rejected (`STEPBACK_INSUFFICIENT_EVIDENCE`).
+
+### 3. Protein Science Domain Failure Checks
+Reviewers are prompted with targeted domain diagnostic inquiries that written rules alone fail to prevent (research grounding §9 & §10):
+- **Replicate Pooling vs Convergence (#1 Domain Failure)**:
+  - In computational biophysics and molecular dynamics, simulation replicates are samples of a single thermodynamic ensemble that are intentionally pooled/concatenated—**not** independent experimental units that must each converge.
+  - The reviewer explicitly asks: *"What is the unit of independence here, and what does pooling assume?"*
+  - Flags any campaign that treats replicate spread as experimental uncertainty or gates on per-replica convergence.
+- **Checks That Cannot Fail or Discriminate**:
+  - Flags census fields that are structurally 0, tautological controls, primary metrics sharing formulas with optimization objectives (trusted-broken-pipeline), and richer models winning on shuffled data.
+- **Variance Inflation & Noise Floors**:
+  - Distinguishes between-build vs within-build variance (e.g. 5.7x inflation in sweetprots) and verifies paired effects are not gated against irrelevant unpaired floors.
+- **Silently Inert Gates or Knobs**:
+  - Flags campaigns where a null result is accepted without a positive control proving the knob/instrument actually moves the output.
+
+### 4. Preservation of Minority Dissent
+- When review panels evaluate a campaign, consensus aggregation must never erase minority critiques.
+- Review records embed an immutable `dissents` array capturing the dissenting reviewer's ID, recommendation, rationale, and cited counter-evidence.
+- **Dissent Escalation Trigger**: If any panel reviewer recommends `HOLD`, `ESCALATE`, or `CONCLUDE_ABANDON`, the campaign is placed under an automatic Level 2 Advisory Hold, ensuring that minority warnings cannot be outvoted or buried.
+
 ## What could not be fully verified (flag before treating as settled)
 
 - `signal_open_obligation_age`'s own docstring claims "Signal 11," but `bathos.sprint_audit`'s real
@@ -281,8 +355,10 @@ above (`seed_live`, `stats_battery_live` + unavailable reason).
 
 ## Related
 
+- **using-bathos** — sidecar basics (`[experiment]`, `[controls]`, `stage_name`).
 - **bathos-campaigns** — campaigns, claim-tier pre-registration, Union Gate basics, hypotheses/
   confounds/discriminability, probe design. Read first.
+- **bathos-step-back** — dedicated skill for step-back review orchestration, rubric dimensions, cognitive modes, and blind reviewer protocol.
 - **bathos-literature-parity** — the C2/`parity` review tier and `[confounds.reference_parity]`.
 - **bathos-mcp** — error envelope shape for `capability_probe` and other MCP tools named above.
-- **using-bathos** — sidecar basics (`[experiment]`, `[controls]`, `stage_name`).
+
