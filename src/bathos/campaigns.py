@@ -5,6 +5,7 @@ import importlib.metadata
 import json
 import logging
 import os
+import sys
 from collections import defaultdict
 from collections.abc import Generator
 from contextlib import contextmanager, suppress
@@ -539,6 +540,52 @@ def _add_run_to_campaign_impl(
             )
         raise CampaignError(f"Run not found: {run_id}")
     run_timestamp, run_outcome, run_sidecar_path = run_rows[0]
+
+    # ── STEPBACK REVIEW & ESCALATION LIFECYCLE HOOK (Decision D1) ───────────────
+    # Non-blocking advisory warning by default; blocks only when opt-in enforce=true.
+    from bathos.stepback.catalog import get_escalation_state
+
+    try:
+        esc_state = get_escalation_state(campaign_id, catalog_dir=catalog_dir, db=db)
+        if esc_state.current_level > 0:
+            level_label = {
+                1: "Advisory Warning (Level 1)",
+                2: "Step-Back Hold (Level 2)",
+                3: "Human Chair Escalation (Level 3)",
+            }.get(esc_state.current_level, f"Level {esc_state.current_level}")
+            reason = esc_state.active_triggers or "Active escalation"
+            print(
+                f"WARNING: Active step-back {level_label} on campaign {campaign_id[:8]}! Reason: {reason}",
+                file=sys.stderr,
+            )
+
+            enforce = os.environ.get("BTH_STEP_BACK_ENFORCE", "").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+            )
+            if not enforce and run_sidecar_path:
+                with suppress(Exception):
+                    from pathlib import Path as _P
+
+                    from bathos.sidecar import parse_sidecar
+
+                    sc = parse_sidecar(_P(run_sidecar_path))
+                    stepback_cfg = getattr(sc, "stepback", {})
+                    if isinstance(stepback_cfg, dict):
+                        enf_val = stepback_cfg.get("enforce")
+                        if (isinstance(enf_val, bool) and enf_val) or str(enf_val).strip().lower() in ("1", "true", "yes"):
+                            enforce = True
+
+            if enforce and esc_state.current_level >= 2:
+                raise CampaignError(
+                    f"Cannot add run {run_id[:8]} to campaign {campaign_id[:8]}: "
+                    f"step-back enforcement enabled and campaign has active {level_label}"
+                )
+    except CampaignError:
+        raise
+    except Exception as e:
+        logging.getLogger(__name__).debug(f"Stepback escalation check in add_run skipped: {e}")
 
     # Spec 261026 D3: a run entering a claim-bound campaign (claim_path IS NOT NULL) must have
     # declared [breakdown] for the worst-case aggregates its verdict reads. Refused before
@@ -1577,6 +1624,41 @@ def _conclude_campaign_impl(
                 f"(advisory until {ENFORCE_FLAG}=1)"
             )
 
+    # ── STEPBACK REVIEW & ESCALATION GATE (Decision D1) ─────────────────
+    # If an unaddressed Level 2 Hold or Level 3 Escalation is active:
+    # Confirmation & sequential campaigns automatically downgrade conclusion verdict to 'confounded'
+    # unless force_verdict is specified (which logs stepback_status = "bypassed").
+    # Exploration campaigns emit a prominent warning banner without downgrade.
+    from bathos.stepback.catalog import get_escalation_state
+
+    esc_state = get_escalation_state(full_id, catalog_dir=catalog_dir, db=db)
+    stepback_bypassed = False
+    stepback_downgraded = False
+    if esc_state.current_level >= 2:
+        level_name = "Hold (Level 2)" if esc_state.current_level == 2 else "Human Chair Escalation (Level 3)"
+        eff_mode = campaign_mode
+        if eff_mode is None and catalog_dir is not None:
+            cool_c = next((c for c in read_cool_campaigns(catalog_dir) if c.id == full_id), None)
+            if cool_c is not None:
+                eff_mode = cool_c.mode
+        if eff_mode in ("confirmation", "sequential"):
+            if force_verdict:
+                print(
+                    f"WARNING: Step-back review {level_name} is active on campaign {full_id[:8]}! "
+                    "Bypassed via --force-verdict."
+                )
+                stepback_bypassed = True
+            else:
+                print(f"Step-back review gate: Campaign {full_id[:8]} has an active {level_name}")
+                print("Step-back review gate: verdict downgraded to 'confounded'")
+                outcome_label = "confounded"
+                stepback_downgraded = True
+        elif eff_mode == "exploration":
+            print(
+                f"WARNING: Campaign {full_id[:8]} has an active step-back {level_name} at conclusion "
+                "(exploration mode, no downgrade)"
+            )
+
     # OBLIGATION TRIGGER 2 (§5.2): the campaign concluded 'confounded' — whether the
     # researcher labelled it so directly, or one of the gates above downgraded it. Opened
     # AFTER the gate so a campaign cannot downgrade itself on an obligation this same
@@ -1662,6 +1744,7 @@ def _conclude_campaign_impl(
             "outcome_label": outcome_label,
             "conclusion": conclusion,
             "negative_check": negative_check,
+            "stepback_status": "bypassed" if stepback_bypassed else ("hold_downgraded" if stepback_downgraded else "nominal"),
         },
         legacy_write=_concluded_legacy_write,
         cwd=workspace_root,

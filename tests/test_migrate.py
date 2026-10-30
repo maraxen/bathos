@@ -437,7 +437,7 @@ def test_migrate_v16_to_v17_exploratory_fields_null_backfill(tmp_path):
         values = tbl_after.column(field_name).to_pylist()
         assert all(v is None for v in values), f"{field_name}: expected all None, got {values}"
     assert set(tbl_after.column("schema_version").to_pylist()) == {CURRENT_SCHEMA_VERSION}
-    assert CURRENT_SCHEMA_VERSION == "18"
+    assert CURRENT_SCHEMA_VERSION == "19"
 
 
 def test_migrate_v17_to_v18_dependency_provenance_null_backfill(tmp_path):
@@ -446,7 +446,7 @@ def test_migrate_v17_to_v18_dependency_provenance_null_backfill(tmp_path):
     "unknown", so the backfill must not write "" or "{}"."""
     from bathos.compact import MIGRATIONS
     from bathos.migrate import migrate_catalog
-    from bathos.schema import COOL_SCHEMA
+    from bathos.schema import COOL_SCHEMA, CURRENT_SCHEMA_VERSION
 
     v17_schema = pa.schema([f for f in COOL_SCHEMA if f.name != "dependency_provenance"])
     r = Run(
@@ -472,7 +472,7 @@ def test_migrate_v17_to_v18_dependency_provenance_null_backfill(tmp_path):
     assert result.migrated == 1
     tbl_after = pq.read_table(fragment_path)
     assert tbl_after.column("dependency_provenance").to_pylist() == [None]
-    assert tbl_after.column("schema_version").to_pylist() == ["18"]
+    assert tbl_after.column("schema_version").to_pylist() == [CURRENT_SCHEMA_VERSION]
 
     migrated = MIGRATIONS["17"]({"schema_version": "17", "agent_session": None})
     assert migrated["dependency_provenance"] is None

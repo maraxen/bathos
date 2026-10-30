@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pyarrow as pa
 
-CURRENT_SCHEMA_VERSION = "18"
+CURRENT_SCHEMA_VERSION = "19"
 
 # Format validator for stage_name values — used by linter.check_canonical_stage_names.
 # Enforcement at parse time uses CANONICAL_STAGES set-membership (parse_sidecar); this

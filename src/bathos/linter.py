@@ -188,6 +188,9 @@ def lint_project(project_root: Path) -> list[LintIssue]:
     # Epistemic-class contract: stage_name canonicality, restage hints, source grammar (spec §3.1-3.2)
     issues.extend(check_epistemic_sidecars(project_root))
 
+    # Step-back review records lint
+    issues.extend(check_stepback_reviews(project_root))
+
     return issues
 
 
@@ -1794,4 +1797,61 @@ def check_single_cell_gate(
                 detail=f"all {len(metas)} confirmatory runs use identical values for: {sorted(uniform_keys)[:5]}; claim.regime may not be covered",
             )
         )
+    return issues
+
+
+def check_stepback_reviews(project_root: Path) -> list[LintIssue]:
+    """Check stepback review files and sidecar [stepback] sections in project.
+
+    Checks:
+    - Review records in .bth/stepback/reviews/: validates JSON syntax, schema compliance,
+      and evidence citations count.
+    """
+    import json
+
+    issues: list[LintIssue] = []
+    stepback_reviews_dir = project_root / ".bth" / "stepback" / "reviews"
+    if stepback_reviews_dir.exists():
+        for p in stepback_reviews_dir.rglob("*.json"):
+            if not p.is_file():
+                continue
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except Exception as e:
+                issues.append(
+                    LintIssue(
+                        path=p,
+                        directory=".bth/stepback/reviews",
+                        issue="stepback_invalid_json",
+                        severity=IssueSeverity.ERROR,
+                        detail=f"Invalid JSON: {e}",
+                    )
+                )
+                continue
+
+            rec = data.get("recommendation")
+            valid_recs = {"CONTINUE", "PIVOT", "HOLD", "ESCALATE", "CONCLUDE_ABANDON"}
+            if rec not in valid_recs:
+                issues.append(
+                    LintIssue(
+                        path=p,
+                        directory=".bth/stepback/reviews",
+                        issue="stepback_invalid_recommendation",
+                        severity=IssueSeverity.ERROR,
+                        detail=f"Recommendation {rec!r} not in {valid_recs}",
+                    )
+                )
+
+            evidence = data.get("cited_evidence", [])
+            if not isinstance(evidence, list) or len(evidence) < 2:
+                issues.append(
+                    LintIssue(
+                        path=p,
+                        directory=".bth/stepback/reviews",
+                        issue="stepback_insufficient_evidence",
+                        severity=IssueSeverity.WARNING,
+                        detail=f"Review has {len(evidence) if isinstance(evidence, list) else 0} cited evidence items, expected >= 2",
+                    )
+                )
+
     return issues

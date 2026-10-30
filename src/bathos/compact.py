@@ -407,6 +407,17 @@ def _migrate_v17(run_dict: dict) -> dict:
     return run_dict
 
 
+def _migrate_v18(run_dict: dict) -> dict:
+    """Migrate v18 fragment to v19 (warm stepback_reviews/stepback_escalations tables).
+
+    Schema v19 introduces warm DuckDB tables for step-back reviews and escalations
+    re-derived from cool-tier JSON fragments. No new run-level Parquet columns are
+    added; this migration stamps the version upgrade.
+    """
+    run_dict["schema_version"] = "19"
+    return run_dict
+
+
 MIGRATIONS["0"] = _migrate_v0
 MIGRATIONS["1"] = _migrate_v1
 MIGRATIONS["2"] = _migrate_v2
@@ -425,6 +436,7 @@ MIGRATIONS["14"] = _migrate_v14
 MIGRATIONS["15"] = _migrate_v15
 MIGRATIONS["16"] = _migrate_v16
 MIGRATIONS["17"] = _migrate_v17
+MIGRATIONS["18"] = _migrate_v18
 
 
 _RUNS_TABLE_SCHEMA = """
@@ -862,6 +874,16 @@ def _ingest_anchor_fragments(con: duckdb.DuckDBPyConnection, catalog_dir: Path) 
     return len(records)
 
 
+def _ingest_stepback_fragments(con: duckdb.DuckDBPyConnection, catalog_dir: Path) -> tuple[int, int]:
+    """Re-derive warm stepback_reviews and stepback_escalations from cool fragments.
+
+    Spec 261027 Section 8.2 & 8.3.
+    """
+    from bathos.stepback.catalog import ingest_stepback_fragments
+
+    return ingest_stepback_fragments(con, catalog_dir)
+
+
 def _compact_log_mode(catalog_dir: Path, force_rebuild: bool, start_time: float) -> CompactResult:
     """`bth compact` after cutover: fold new log events into `index.db`.
 
@@ -1071,6 +1093,10 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
         # pattern as trust_ledger above. Unconditional, cheap no-op if no
         # archived_items/ fragments exist, fires on force_rebuild too.
         _ingest_archived_item_fragments(con, catalog_dir)
+
+        # Step-back reviews & escalations (spec 261027 Section 8.2/8.3): re-derive
+        # stepback_reviews and stepback_escalations from cool-tier fragments.
+        _ingest_stepback_fragments(con, catalog_dir)
 
         # Track ingested and skipped counts
         ingested = 0

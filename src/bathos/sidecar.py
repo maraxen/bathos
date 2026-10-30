@@ -322,6 +322,8 @@ class Sidecar:
     # separate [result_schema_meta.<col>] table (opt-in `aggregate = true`, D2)
     breakdown: BreakdownBlock | None = None
     result_schema_meta: dict[str, dict] = field(default_factory=dict)
+    # step-back review configuration (optional [stepback] block, spec 261027)
+    stepback: dict[str, typing.Any] = field(default_factory=dict)
 
     @classmethod
     def from_declaration(cls, decl: dict) -> Sidecar:
@@ -809,6 +811,10 @@ def parse_sidecar(path: Path) -> Sidecar:
         sidecar.requires = _parse_requires(data["requires"], path)
     if "budget" in data:
         sidecar.budget = _parse_budget(data["budget"], path)
+
+    # Parse [stepback] block (optional, all sidecar kinds; spec 261027).
+    if "stepback" in data and isinstance(data["stepback"], dict):
+        sidecar.stepback = dict(data["stepback"])
 
     return sidecar
 

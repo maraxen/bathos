@@ -1,0 +1,61 @@
+id = "stepback_v1"
+name = "Step-Back Review Rubric v1"
+version = "1.0.0"
+description = "Canonical 5-dimension scored rubric for bathos step-back campaign reviews"
+min_score = 1
+max_score = 5
+
+[dimensions.question_validity]
+name = "Question Validity"
+weight = 0.20
+
+[dimensions.question_validity.anchors]
+1 = "Fatal / Hard-Floor Veto: Question is trivial, untestable, superseded by external literature, or framed unfalsifiably with tautological checks that cannot fail."
+2 = "Vague: Question is exploratory but lacks discriminability between candidate mechanisms."
+3 = "Adequate: Question is testable with reasonable scope, but lacks clear high-impact pivot criteria."
+4 = "Strong: Well-posed scientific question addressing an established confound or mechanism."
+5 = "Decisive: Pivotal question whose answer fundamentally discriminates competing scientific theories."
+
+[dimensions.empirical_progress]
+name = "Empirical Progress"
+weight = 0.25
+
+[dimensions.empirical_progress.anchors]
+1 = "Stalled / Degenerate: Runs produce random noise, contradictory outputs, persistent errors, or execution crashes."
+2 = "Inconclusive: High variance; effect size within measurement noise."
+3 = "Moderate: Detectable signal emerging, but confidence intervals remain wide."
+4 = "Clear: Consistent monotonic or clustered signals across seeds and conditions."
+5 = "Decisive: Statistically rigorous separation; effect size exceeds 3 standard deviations; highly reproducible."
+
+[dimensions.theoretical_grounding]
+name = "Theoretical Grounding"
+weight = 0.20
+
+[dimensions.theoretical_grounding.anchors]
+1 = "Flailing / Ad-Hoc / Replicate Pooling Error: Tweaking parameters with no mechanistic hypothesis; treating MD simulation replicates as independent experiments that must converge, or reporting between-replica spread as uncertainty."
+2 = "Superficial: Borrowed heuristics without mechanistic modeling."
+3 = "Plausible: Hypothesized mechanism is plausible and consistent with domain physics."
+4 = "Sound: Strongly supported by physical or statistical first principles."
+5 = "First-Principles: Rigorous mathematical or biophysical derivation; predictive accuracy verified."
+
+[dimensions.resource_efficiency]
+name = "Resource Efficiency"
+weight = 0.15
+
+[dimensions.resource_efficiency.anchors]
+1 = "Wasteful: Massive compute or GPU hours expended with negligible information gain; endless marginal loops."
+2 = "Inefficient: Sub-optimal sample allocation; redundant parameter grids."
+3 = "Acceptable: Run count is commensurate with campaign complexity."
+4 = "Frugal: High information gain per run; early stopping properly leveraged."
+5 = "Optimal: Minimal necessary run count; near-optimal Bayesian information acquisition."
+
+[dimensions.risk_confound_surface]
+name = "Risk & Confound Surface"
+weight = 0.20
+
+[dimensions.risk_confound_surface.anchors]
+1 = "Fatal Confounds / Hard-Floor Veto: Unfalsifiable or tautological checks that cannot fail; replicate pooling errors (treating simulation replicates as independent experiments that must converge, or reporting between-replica spread as uncertainty); uncontrolled batch effects, data leakage, mutated baseline artifacts, unverified positive controls."
+2 = "High Risk: Known confounds unhedged; missing synthetic recovery controls; between-replica spread reported as ensemble uncertainty without pooled sampling."
+3 = "Standard Controls: Standard controls present; basic confound checks pass."
+4 = "Well-Isolated: All major confounds actively controlled; baseline parity verified."
+5 = "Impenetrable Rigor: Confounds rigorously eliminated; positive/negative controls GREEN; baseline parity attested."

@@ -1,0 +1,20 @@
+[experiment]
+hypothesis = "Step-back review triggers, rubric evaluation, and escalation ladders accurately discriminate problematic historical campaign trajectories (plateau, entropy collapse, repeated marginals) from healthy lines with high precision and recall."
+
+[outcomes.pass]
+condition = "accuracy >= 0.85 AND recall >= 0.80 AND false_positive_rate <= 0.15"
+decision = "Retrospective validation passed; step-back review triggers accurately discriminate problematic trajectories."
+reasoning = "Classification metrics satisfy pre-registered discrimination thresholds on historical campaign testbed."
+
+[outcomes.fail]
+condition = "accuracy < 0.85 OR recall < 0.80 OR false_positive_rate > 0.15"
+decision = "Retrospective validation failed; calibrate trigger sensitivities and classification thresholds."
+reasoning = "Classification metrics fell below pre-registered discrimination targets."
+is_residual = true
+
+[result_schema]
+accuracy = "float"
+recall = "float"
+precision = "float"
+false_positive_rate = "float"
+n_campaigns_evaluated = "int"
