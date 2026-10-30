@@ -1374,6 +1374,7 @@ def migrate(
     accept_residual: str = "",
     consolidate_catalog: str = "",
     source_catalog: str = "",
+    no_scheduler: bool = False,
 ) -> None:
     """Migrate cool-tier Parquet fragments to current schema, optionally classifying scripts.
 
@@ -1395,6 +1396,9 @@ def migrate(
     import_legacy: Post-cut-over re-import of a stale legacy write (AC-23); refused
         before cut-over.
     force: With --to-log, proceed past a squeue/submit-record conflict instead of refusing.
+    no_scheduler: With --to-log, for a host with no SLURM (titanix): do not query squeue,
+        so the cut-over runs where it does not exist. Asserts no job of yours is running
+        here; still refuses while a running run carries a slurm job id.
     accept_residual: With --to-log, the sha256 of a previously-reviewed residual report;
         proceeds to the switch only if a fresh run reproduces that exact hash. It only
         confirms an already-classified residual (status `residual_pending`): any
@@ -1469,6 +1473,7 @@ def migrate(
                 force=force,
                 accept_residual=accept_residual or None,
                 dry_run=dry_run,
+                no_scheduler=no_scheduler,
             )
         except ValueError as e:
             print(str(e), file=sys.stderr)

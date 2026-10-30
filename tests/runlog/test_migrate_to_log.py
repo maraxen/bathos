@@ -81,7 +81,9 @@ def _simple_backend(tmp_path: Path):
     return backend
 
 
-def _converge(catalog_dir: Path, *, max_attempts: int = 5, force: bool = False):
+def _converge(
+    catalog_dir: Path, *, max_attempts: int = 5, force: bool = False, no_scheduler: bool = False
+):
     """Drive `migrate_to_log` to a terminal outcome, following
     `residual_pending`'s own freshly-recomputed sha256 each time (spec: "a
     fresh run of steps 1-3 reproduces a report with exactly that hash" --
@@ -94,7 +96,9 @@ def _converge(catalog_dir: Path, *, max_attempts: int = 5, force: bool = False):
     accept = None
     result = None
     for _ in range(max_attempts):
-        result = migrate_to_log(catalog_dir, force=force, accept_residual=accept)
+        result = migrate_to_log(
+            catalog_dir, force=force, accept_residual=accept, no_scheduler=no_scheduler
+        )
         if result.status != "residual_pending":
             return result
         accept = result.report_sha256
@@ -1804,3 +1808,60 @@ def test_postmortem_unset_default_clears_the_residual_end_to_end():
     assert unclassified == [], unclassified
     assert {line.cls for line in lines} == {"postmortem_unset_default"}
     assert len(lines) == len(five)
+
+
+# no_scheduler: a host with no SLURM (titanix)
+def test_no_scheduler_cuts_over_without_querying_squeue(tmp_path: Path, monkeypatch):
+    """`--no-scheduler` is the operator's assertion that this host runs no
+    SLURM. A host without `squeue` must reach the switch: the queue is not
+    queried at all, so its absence cannot refuse the cut-over."""
+
+    backend = _simple_backend(tmp_path)
+
+    def _must_not_run():
+        raise AssertionError("squeue must not be queried under no_scheduler")
+
+    monkeypatch.setattr("bathos.runlog.migrate.my_squeue_job_ids", _must_not_run)
+
+    result = _converge(backend.catalog_dir, no_scheduler=True)
+    assert result.status == "switched"
+    assert cutover_marker_path(backend.catalog_dir).exists()
+
+
+def test_no_scheduler_refuses_while_a_running_run_carries_a_slurm_job_id(
+    tmp_path: Path, monkeypatch
+):
+    """A `running` run with a slurm job id is a job this host cannot rule
+    out, so `no_scheduler` must refuse rather than assume an empty queue."""
+    from types import SimpleNamespace
+
+    from bathos.runlog.migrate import _check_squeue
+
+    monkeypatch.setattr(
+        "bathos.catalog.read_runs",
+        lambda _cd: [SimpleNamespace(status="running", slurm_job_id="424242")],
+    )
+    monkeypatch.setattr(
+        "bathos.runlog.migrate.my_squeue_job_ids",
+        lambda: (_ for _ in ()).throw(AssertionError("squeue must not be queried")),
+    )
+
+    conflict, error = _check_squeue(tmp_path, no_scheduler=True)
+    assert conflict == []
+    assert error is not None
+    assert "424242" in error
+    assert "cannot rule those jobs out" in error
+
+
+def test_no_scheduler_ignores_finished_runs_and_old_submit_records(tmp_path: Path, monkeypatch):
+    """Only `running` rows count: a host that once submitted and finished
+    jobs must not refuse forever on stale slurm ids."""
+    from types import SimpleNamespace
+
+    from bathos.runlog.migrate import _check_squeue
+
+    monkeypatch.setattr(
+        "bathos.catalog.read_runs",
+        lambda _cd: [SimpleNamespace(status="finished", slurm_job_id="424242")],
+    )
+    assert _check_squeue(tmp_path, no_scheduler=True) == ([], None)

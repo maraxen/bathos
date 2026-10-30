@@ -536,11 +536,36 @@ def squeue_conflict(catalog_dir: Path) -> list[str]:
     return sorted(j for j in mine if j in known)
 
 
-def _check_squeue(catalog_dir: Path) -> tuple[list[str], str | None]:
+def _check_squeue(
+    catalog_dir: Path, *, no_scheduler: bool = False
+) -> tuple[list[str], str | None]:
     """`(conflicting_jobs, unavailable_message)`. `unavailable_message` is
     set (and `conflicting_jobs` empty) when `squeue` itself could not be
     queried -- callers must refuse on this UNCONDITIONALLY, `--force` or
-    not (see `SqueueUnavailableError`)."""
+    not (see `SqueueUnavailableError`).
+
+    `no_scheduler=True` is the operator's assertion that this host runs no
+    SLURM (titanix): `squeue` is not queried and there is no queue conflict.
+    It still refuses when a `running` run row carries a slurm job id, since
+    this host cannot rule that job out. Only `running` rows count here: a
+    host that once submitted and finished jobs would otherwise refuse on
+    stale submit records forever."""
+    if no_scheduler:
+        from bathos.catalog import read_runs
+
+        running = sorted(
+            {
+                str(run.slurm_job_id)
+                for run in read_runs(catalog_dir)
+                if run.status == "running" and run.slurm_job_id
+            }
+        )
+        if running:
+            return [], (
+                f"--no-scheduler, but {len(running)} running run(s) carry a slurm job id "
+                f"({', '.join(running[:5])}); this host cannot rule those jobs out"
+            )
+        return [], None
     try:
         return squeue_conflict(catalog_dir), None
     except SqueueUnavailableError as exc:
@@ -548,7 +573,7 @@ def _check_squeue(catalog_dir: Path) -> tuple[list[str], str | None]:
 
 
 def _run_step1_shared(
-    catalog_dir: Path, *, force: bool
+    catalog_dir: Path, *, force: bool, no_scheduler: bool = False
 ) -> tuple[list[str], set[str], str | None, str | None]:
     """Step 1's shared-lock phase: pull + mirror + reap(reconcile_warm=False),
     then the squeue/submit-record refusal. Returns `(conflicting_jobs,
@@ -592,7 +617,7 @@ def _run_step1_shared(
                     tbl = pq.read_table(f, columns=["id"])
                     touched.update(v for v in tbl.column("id").to_pylist() if v)
 
-        conflict, squeue_error = _check_squeue(catalog_dir)
+        conflict, squeue_error = _check_squeue(catalog_dir, no_scheduler=no_scheduler)
         if squeue_error is not None:
             return [], touched, squeue_error, None
         if force:
@@ -1629,7 +1654,9 @@ def _dry_run_report_from_marker(marker: dict[str, Any]) -> MigrateToLogResult:
     )
 
 
-def _migrate_to_log_dry_run(cd: Path, *, force: bool) -> MigrateToLogResult:
+def _migrate_to_log_dry_run(
+    cd: Path, *, force: bool, no_scheduler: bool = False
+) -> MigrateToLogResult:
     """`--dry-run`: steps 1-3 run for their READ effects only -- no data
     FILES are written to the catalog dir, `~/.bth/projects.toml`,
     `~/.bth/log/`, any project root, or any remote (spec "Dry run"). The one
@@ -1667,7 +1694,7 @@ def _migrate_to_log_dry_run(cd: Path, *, force: bool) -> MigrateToLogResult:
     with writers_lock(cd, exclusive=False):
         candidates, _skipped = reap_runs(cd, apply=False, reconcile_warm=False)
         step1_touched = {r.id for r in candidates}
-        conflict, squeue_error = _check_squeue(cd)
+        conflict, squeue_error = _check_squeue(cd, no_scheduler=no_scheduler)
 
     if squeue_error is not None:
         return MigrateToLogResult(
@@ -1744,8 +1771,12 @@ def migrate_to_log(
     force: bool = False,
     accept_residual: str | None = None,
     dry_run: bool = False,
+    no_scheduler: bool = False,
 ) -> MigrateToLogResult:
-    """`bth migrate --to-log` (Migration steps 0-4). `dry_run=True` (spec
+    """`bth migrate --to-log` (Migration steps 0-4). `no_scheduler=True` is
+    for a host with no SLURM (see `_check_squeue`): the queue is not
+    consulted, so the cut-over can proceed where `squeue` does not exist.
+    `dry_run=True` (spec
     "Dry run") runs steps 1-3 read-effect-only and returns status `dry_run`
     instead of writing anything or ever reaching step 4's switch; combining
     it with `accept_residual` is rejected outright (a dry run never reaches
@@ -1785,7 +1816,7 @@ def migrate_to_log(
         )
 
     if dry_run:
-        return _migrate_to_log_dry_run(cd, force=force)
+        return _migrate_to_log_dry_run(cd, force=force, no_scheduler=no_scheduler)
 
     marker = _read_marker(cd)
     if marker is not None:
@@ -1797,7 +1828,9 @@ def migrate_to_log(
         with writers_lock(cd, exclusive=True):
             return _finish_remainder(cd, str(attempt))
 
-    conflict, step1_touched, squeue_error, reap_error = _run_step1_shared(cd, force=force)
+    conflict, step1_touched, squeue_error, reap_error = _run_step1_shared(
+        cd, force=force, no_scheduler=no_scheduler
+    )
     if reap_error is not None:
         return MigrateToLogResult(
             status="step1_reap_failed",
@@ -1818,7 +1851,7 @@ def migrate_to_log(
             if attempt:
                 return _finish_remainder(cd, str(attempt))
 
-        conflict2, squeue_error2 = _check_squeue(cd)
+        conflict2, squeue_error2 = _check_squeue(cd, no_scheduler=no_scheduler)
         if squeue_error2 is not None:
             return MigrateToLogResult(status="squeue_unavailable", detail=squeue_error2)
         if conflict2 and not force:
