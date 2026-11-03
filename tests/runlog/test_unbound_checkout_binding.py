@@ -78,6 +78,58 @@ def test_nongit_run_records_project_id_and_is_queryable(tmp_path: Path, monkeypa
     assert (work / ".bth" / "log").is_dir()
 
 
+def _slurm_run_project_id(tmp_path: Path, monkeypatch, *, export_project_id: bool):
+    """Run as a SLURM job would (SLURM_JOB_ID set, BTH_PROJECT_ID exported or not), ingest
+    afterwards from a non-job process, and return (event project, event project_id, expected id)."""
+    from bathos.runlog.ingest import ingest_after_write
+
+    work, _stale = _nongit_project(tmp_path)
+    catalog = tmp_path / "catalog"
+    enable_log_mode(catalog)
+    pid = read_project_id(work / ".bth.toml")
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.setenv("SLURM_JOB_ID", "27707634")
+    if export_project_id:
+        monkeypatch.setenv("BTH_PROJECT_ID", pid)
+    else:
+        monkeypatch.delenv("BTH_PROJECT_ID", raising=False)
+    code = run_script(
+        argv=[sys.executable, str(_script(work))],
+        project_slug="demo",
+        catalog_dir=catalog,
+        output_paths=[],
+        tags=[],
+        cwd=work,
+    )
+    assert code == 0
+    assert (work / ".bth" / "log").is_dir()  # bound to the project log either way
+    monkeypatch.delenv("SLURM_JOB_ID")  # the later local ingest is not a job
+    ingest_after_write(catalog)
+    ev = run_sql(
+        "SELECT project, project_id FROM events WHERE kind = 'run.started'", catalog_dir=catalog
+    )
+    assert len(ev) == 1
+    return ev[0][0], ev[0][1], pid
+
+
+def test_slurm_run_with_exported_project_id_carries_it(tmp_path: Path, monkeypatch):
+    project, project_id, pid = _slurm_run_project_id(tmp_path, monkeypatch, export_project_id=True)
+    assert (project, project_id) == ("demo", pid)
+
+
+def test_slurm_run_without_exported_project_id_known_gap(tmp_path: Path, monkeypatch):
+    """PINS A KNOWN GAP (debt #3201, out of this PR's scope): a job that did not go through
+    `bth submit` has no BTH_PROJECT_ID, and `resolve_write_project_id` never reads .bth.toml
+    under SLURM. The run IS bound to the project (right log, `project` = slug, so
+    `bth sql --project <slug>` finds it) but its `project_id` stays null. Flip this assertion
+    to `== pid` when a `.bth.toml` fallback for project_id lands."""
+    project, project_id, _pid = _slurm_run_project_id(
+        tmp_path, monkeypatch, export_project_id=False
+    )
+    assert project == "demo"
+    assert project_id is None
+
+
 def test_slug_without_bth_toml_fails_loudly(tmp_path: Path, monkeypatch, capsys):
     bare = tmp_path / "bare"
     bare.mkdir()
