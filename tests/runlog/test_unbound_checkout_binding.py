@@ -145,6 +145,17 @@ def test_resolve_write_project_id_slurm_env_wins_over_toml(tmp_path: Path, monke
     assert resolve_write_project_id(res) == env_id
 
 
+def test_resolve_write_project_id_slurm_empty_env_falls_back_to_toml(tmp_path: Path, monkeypatch):
+    """`BTH_PROJECT_ID=` (set but empty) counts as unset: the `.bth.toml` id is used, never ''."""
+    work, _stale = _nongit_project(tmp_path)
+    toml_id = read_project_id(work / ".bth.toml")
+    assert toml_id
+    monkeypatch.setenv("SLURM_JOB_ID", "27707634")
+    monkeypatch.setenv("BTH_PROJECT_ID", "")
+    res = LogRootResolution(main_root=work, worktree_root=work, unaffiliated=False)
+    assert resolve_write_project_id(res) == toml_id
+
+
 def test_resolve_write_project_id_slurm_unaffiliated_without_env_is_none(
     tmp_path: Path, monkeypatch
 ):
