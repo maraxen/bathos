@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.3] - 2026-11-03
+
+### Changed
 - `UnaffiliatedProjectError` now maps to its own error code, `runlog_unaffiliated_project`, with a hint about running under the project's `.bth.toml` or setting `BTH_WORKSPACE_ROOT`. It previously reused `runlog_project_id_missing`, whose `bth init --assign-id` hint did not fix an unbound checkout (praxia debt #3210).
 - `bth run` in log mode now warns on stderr when the resolved project's `.bth.toml` has no `[project] id` (and no `BTH_PROJECT_ID` under SLURM), since the run is recorded with `project_id` null. The run still proceeds (praxia debt #3211).
 
