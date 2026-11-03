@@ -391,8 +391,9 @@ def pull_cluster_log(
     """Cluster log pull (spec "Cluster", delivery step 4 wave d): pull the
     remote checkout's `.bth/log/`, the remote `~/.bth/log/fallback/<slug>/`,
     and the remote `~/.bth/log-mirror/<project_id>/` (or, with no project id,
-    `~/.bth/log-mirror/_null/<slug>/` -- the same fallback path a SLURM job
-    with no `BTH_PROJECT_ID` mirrors to, per D7/`resolve_write_project_id`)
+    `~/.bth/log-mirror/_null/<slug>/` -- `bth submit` exports `BTH_PROJECT_ID`,
+    and the writer also falls back to the resolved `.bth.toml` id when that
+    env var is absent, per D7/`resolve_write_project_id`)
     into the local main checkout's
     `.bth/log/remote/<remote_name>/{log,fallback,mirror}/`.
 

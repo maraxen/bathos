@@ -9,9 +9,9 @@ including a segment copied mid-line by the first pull), the cluster variants
 of AC-8 (a `run.started` that landed in the remote fallback is in the local
 index after one pull + ingest) and AC-9 (deleting the local copy of a
 cluster segment loses nothing because of the pulled mirror), idempotent
-re-pull, and a job with no `BTH_PROJECT_ID` (`project_id: null`) still
-folding to a queryable `runs.project_slug` (spec D7: "ingest maps it by
-slug").
+re-pull, and a job with neither `BTH_PROJECT_ID` nor a `[project] id` in
+`.bth.toml` (`project_id: null`) still folding to a queryable
+`runs.project_slug` (spec D7: "ingest maps it by slug").
 
 No real SSH/rsync/myxcel: only the local filesystem layout `pull_cluster_log`
 would have produced is simulated directly, exactly as `bathos.sync.
@@ -422,7 +422,10 @@ def test_idempotent_repull_appends_nothing_new(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# A job with no BTH_PROJECT_ID writes project_id null; ingest still folds a
+# A job with neither BTH_PROJECT_ID nor a `[project] id` in `.bth.toml` writes
+# project_id null (a job with only the `.bth.toml` id now records it, debt
+# #3202; this test hand-builds the null-id envelope and does not call the
+# writer); ingest still folds a
 # queryable `runs.project_slug` (spec D7: "ingest maps it by slug") -- the
 # `project_slug` comes from the run's own `data.project_slug`, which a
 # compute node's `_bth_env.sh` (existing, pre-runlog mechanism) already
@@ -443,7 +446,7 @@ def test_null_project_id_run_still_folds_queryable_project_slug(tmp_path: Path):
         main_root=repo,
         worktree_root=repo,
         project="repo",
-        project_id=None,  # no BTH_PROJECT_ID in the job environment
+        project_id=None,  # neither BTH_PROJECT_ID nor a .bth.toml id for the job
         writer="node06.666.6000",
         seq=1,
         ts="2026-01-01T00:00:00.000000Z",

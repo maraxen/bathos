@@ -1210,10 +1210,12 @@ def submit(
     # environment (spec "Mode" / "Cluster jobs"): a compute node has no
     # cut-over marker of its own (its catalog is the remote one,
     # `cluster_catalog.py:21-26`), so it relies on `BTH_LOG_MODE=1` from here
-    # to know it should append events rather than write legacy fragments;
-    # `BTH_PROJECT_ID` lets its writer mirror to the right `~/.bth/log-mirror/
-    # <project_id>/` instead of `_null/<slug>` (D7). Pre-cut-over (flag off
-    # locally), neither is exported and the job's own behaviour is unchanged.
+    # to know it should append events rather than write legacy fragments.
+    # `bth submit` exports `BTH_PROJECT_ID` so the writer mirrors to
+    # `~/.bth/log-mirror/<project_id>/` (D7); the writer also falls back to
+    # the resolved `.bth.toml` id when that env var is absent. Pre-cut-over
+    # (flag off locally), neither is exported and the job's own behaviour is
+    # unchanged.
     # `myxcel submit-job` has no generic `--env` passthrough (see
     # `myxcel-slurm-submit`), so these are exported by prefixing the shell
     # command itself, which `--command` already passes through verbatim.

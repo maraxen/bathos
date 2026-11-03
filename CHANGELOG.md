@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-11-03
+
+### Fixed
+- **A SLURM job without an exported `BTH_PROJECT_ID` records the resolved `.bth.toml` id (praxia debt #3202).** `resolve_write_project_id` returned `None` for every event under `SLURM_JOB_ID` unless `bth submit` had exported `BTH_PROJECT_ID`, even when the run was bound to its project log. An exported id still wins; an unaffiliated root stays `None`; otherwise the writer reads `[project] id` from the resolved main root's `.bth.toml`.
+
 ## [0.13.1] - 2026-11-03
 
 ### Fixed
