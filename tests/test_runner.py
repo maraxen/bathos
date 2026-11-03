@@ -1993,6 +1993,8 @@ def test_flag_on_run_emits_started_and_finished_events_only(
     monkeypatch.setenv("BTH_LOG_MODE", "1")
     monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_catalog))
     init_catalog(tmp_catalog)
+    # debt #3201: a slug-bearing run must bind to a project; a bare cwd now fails loudly.
+    (tmp_path / ".bth.toml").write_text(f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n')
 
     exit_code = run_script(
         argv=[sys.executable, "-c", "pass"],
@@ -2007,8 +2009,7 @@ def test_flag_on_run_emits_started_and_finished_events_only(
     # No legacy parquet fragment: the cool tier is untouched.
     assert read_runs(tmp_catalog) == []
 
-    unaffiliated_log = Path.home() / ".bth" / "log" / "unaffiliated"
-    lines = _read_jsonl_dir(unaffiliated_log)
+    lines = _read_jsonl_dir(tmp_path / ".bth" / "log")
     kinds = [line["kind"] for line in lines]
     assert kinds.count("run.started") == 1
     assert kinds.count("run.finished") == 1
@@ -2140,6 +2141,8 @@ def test_spawn_failure_log_mode_emits_run_finished(tmp_catalog: Path, tmp_path: 
     monkeypatch.setenv("BTH_LOG_MODE", "1")
     monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_catalog))
     init_catalog(tmp_catalog)
+    # debt #3201: bind the run to a project (a bare cwd with a slug now fails loudly).
+    (tmp_path / ".bth.toml").write_text(f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n')
     exit_code = run_script(
         argv=[str(tmp_path / "no-such-exe")],
         project_slug="testproj",
@@ -2149,7 +2152,7 @@ def test_spawn_failure_log_mode_emits_run_finished(tmp_catalog: Path, tmp_path: 
         cwd=tmp_path,
     )
     assert exit_code == 127
-    lines = _read_jsonl_dir(Path.home() / ".bth" / "log" / "unaffiliated")
+    lines = _read_jsonl_dir(tmp_path / ".bth" / "log")
     kinds = [line["kind"] for line in lines]
     assert kinds.count("run.started") == 1
     assert kinds.count("run.finished") == 1

@@ -7,7 +7,9 @@
   filesystem root (catalog identity must not fragment across worktrees).
 - **filesystem root** (`fs_root`) — the LIVE directory for workspace-relative
   file operations (postmortem asset validation/scan), resolved via the ladder
-  `BTH_WORKSPACE_ROOT -> git toplevel -> recorded [project] root -> cwd`.
+  `BTH_WORKSPACE_ROOT -> git toplevel -> directory holding the found .bth.toml -> cwd`.
+  The recorded `[project] root` is never a rung: it is a path on whichever machine
+  wrote the file and need not exist where the checkout now lives (debt #3201).
 
 See `.praxia/docs/specs/260611_worktree-workspace-resolution.md`.
 """
@@ -27,7 +29,7 @@ class WorkspaceContext:
     fs_root: Path  # live filesystem root for workspace-relative file ops (never None)
     is_worktree: bool
     worktree_name: str | None
-    source: str  # which rung resolved fs_root: "env" | "git" | "config" | "cwd"
+    source: str  # rung for fs_root: "env" | "git" | "config" (.bth.toml's dir) | "cwd"
 
 
 def _git_anchors(cwd: Path) -> tuple[Path, bool] | None:
@@ -75,13 +77,11 @@ def resolve_workspace(cwd: Path | None = None) -> WorkspaceContext:
 
     slug: str | None = os.environ.get("BTH_PROJECT_SLUG")
     identity_root: Path | None = None
-    project_root: Path | None = None
     cfg_path = find_project_config(cwd)
     if cfg_path is not None:
         try:
             pc = load_project_config(cfg_path)
             identity_root = pc.root
-            project_root = pc.root
             if slug is None:
                 slug = pc.slug
         except Exception:
@@ -92,7 +92,11 @@ def resolve_workspace(cwd: Path | None = None) -> WorkspaceContext:
     git = _git_anchors(cwd)
     is_worktree = git[1] if git is not None else False
 
-    # --- fs_root precedence ladder: env -> git toplevel -> recorded root -> cwd ---
+    # --- fs_root precedence ladder: env -> git toplevel -> found .bth.toml's dir -> cwd ---
+    # The recorded [project] root (identity_root) is deliberately NOT a rung. It is a path
+    # from the machine that wrote .bth.toml; on a non-git copy elsewhere (an Engaging
+    # worktree of a locally-recorded project) it does not exist, and using it made
+    # resolve_log_root see no .bth.toml and file the run as unaffiliated (debt #3201).
     env_root = os.environ.get("BTH_WORKSPACE_ROOT")
     if env_root:
         fs_root = Path(env_root).expanduser().resolve()
@@ -100,8 +104,8 @@ def resolve_workspace(cwd: Path | None = None) -> WorkspaceContext:
     elif git is not None:
         fs_root = git[0]
         source = "git"
-    elif project_root is not None:
-        fs_root = project_root
+    elif cfg_path is not None:
+        fs_root = cfg_path.parent.resolve()
         source = "config"
     else:
         fs_root = cwd

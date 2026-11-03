@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A non-git checkout now binds to its project (praxia debt #3201).** `resolve_workspace` used the recorded `[project] root` as `fs_root` when no `BTH_WORKSPACE_ROOT` or git toplevel applied. On a host where that path does not exist (an Engaging worktree of a project recorded on a laptop), `resolve_log_root` then found no `.bth.toml` and filed the run under `~/.bth/log/unaffiliated/` with `project_id` null, so `bth sql --project <slug>` missed it. The config rung now uses the directory where `.bth.toml` was found walking up from cwd; the recorded root stays identity/display only (`identity_root`). Ladder order is unchanged: `BTH_WORKSPACE_ROOT`, git toplevel, found `.bth.toml` directory, cwd.
+- **A slug-bearing `bth run` never falls back to `unaffiliated` silently.** In log mode, a run whose log root resolves to unaffiliated now fails before launch (exit 1, no subprocess) with an error naming the slug, cwd, recorded root and resolved `fs_root`. A run with no slug (other writers) is unchanged. Existing runs already in `~/.bth/log/unaffiliated/` are not moved; re-ingest is a separate follow-up.
+
 ## [0.13.0a9] - 2026-10-30
 
 ### Added

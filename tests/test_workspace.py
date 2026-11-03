@@ -98,16 +98,44 @@ def test_env_override_relative_is_resolved(tmp_path: Path, monkeypatch):  # AC-4
     assert ctx.fs_root == (tmp_path / "ws").resolve()
 
 
-def test_not_in_git_uses_recorded_root(tmp_path: Path):  # AC-5
+def test_not_in_git_uses_found_bth_toml_dir(tmp_path: Path):  # AC-5, amended by debt #3201
+    # Previously asserted fs_root == recorded root. The recorded [project] root is
+    # identity/display only: it names a path on the machine that wrote .bth.toml.
     work = tmp_path / "plain"
     work.mkdir()
     recorded = tmp_path / "recorded"
     recorded.mkdir()
     _write_bth_toml(work, "proj", recorded)
     ctx = resolve_workspace(work)
-    assert ctx.fs_root == recorded
+    assert ctx.fs_root == work.resolve()
+    assert ctx.identity_root == recorded  # identity still carries the recorded root
     assert ctx.is_worktree is False
     assert ctx.source == "config"
+
+
+def test_not_in_git_stale_recorded_root_and_subdir_cwd(tmp_path: Path):  # debt #3201
+    work = tmp_path / "plain"
+    (work / "scripts" / "x").mkdir(parents=True)
+    stale = tmp_path / "does" / "not" / "exist"
+    _write_bth_toml(work, "proj", stale)
+    ctx = resolve_workspace(work / "scripts" / "x")
+    assert ctx.fs_root == work.resolve()  # dir where .bth.toml was FOUND walking up
+    assert ctx.identity_root == stale
+    assert ctx.source == "config"
+
+
+def test_git_worktree_ignores_stale_recorded_root(tmp_path: Path):  # debt #3201: unchanged
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _write_bth_toml(repo, "proj", tmp_path / "does-not-exist")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "toml"], cwd=repo, check=True, capture_output=True)
+    wt = tmp_path / "wt1"
+    subprocess.run(["git", "worktree", "add", str(wt)], cwd=repo, check=True, capture_output=True)
+    ctx = resolve_workspace(wt)
+    assert ctx.fs_root.resolve() == wt.resolve()
+    assert ctx.is_worktree is True
+    assert ctx.source == "git"
 
 
 def test_no_git_no_config_uses_cwd(tmp_path: Path):  # AC-6
