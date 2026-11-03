@@ -65,6 +65,7 @@ class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(
     # section's BTH_LOG_MODE guard. Inert while the flag is off.
     RUNLOG_NOT_IGNORED = "runlog_not_ignored"
     RUNLOG_PROJECT_ID_MISSING = "runlog_project_id_missing"
+    RUNLOG_UNAFFILIATED_PROJECT = "runlog_unaffiliated_project"
     RUNLOG_MODE_REFUSED = "runlog_mode_refused"
 
     # Output tiering (bathos.output_tiers, spec 261023_output-tiering): refusals of
@@ -165,6 +166,7 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.DOCUMENT_CONFLICT: "A document already exists at that path. Pass force=true to overwrite it, or author to a different path",
     BathosErrorCode.RUNLOG_NOT_IGNORED: "Add '/.bth/log/' to .gitignore in the main checkout (or run `bth init` there) before recording runs",
     BathosErrorCode.RUNLOG_PROJECT_ID_MISSING: "Run `bth init --assign-id` in the main checkout, then commit the updated .bth.toml",
+    BathosErrorCode.RUNLOG_UNAFFILIATED_PROJECT: "Run from a directory under the project's .bth.toml, or set BTH_WORKSPACE_ROOT to the checkout root; the run would otherwise be filed as unaffiliated with project_id null",
     BathosErrorCode.RUNLOG_MODE_REFUSED: "Unset BTH_LOG_MODE, or run `bth migrate --to-log` to write the real cut-over marker",
     BathosErrorCode.NO_REFERENCE_HASHES: "The run has no reference hash set: declare [outputs] roots in its sidecar and re-run, or (a pre-standard run only) `bth outputs adopt` its output roots",
     BathosErrorCode.RUN_NOT_TERMINAL: "Wait for the run to finish (or reap it) before adopting outputs; a running run's files are still changing",
@@ -310,11 +312,10 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     "LogNotIgnoredError": BathosErrorCode.RUNLOG_NOT_IGNORED,
     "ProjectIdMissingError": BathosErrorCode.RUNLOG_PROJECT_ID_MISSING,
     "LogModeRefusedError": BathosErrorCode.RUNLOG_MODE_REFUSED,
-    # IMPERFECT FIT, deliberately (debt #3201): a slug-bearing run resolved to the unaffiliated
-    # log, so it would carry no project_id. Same outcome as ProjectIdMissingError, but the cause
-    # is an unbound checkout (no .bth.toml / repo at the resolved root), not a missing id, so the
-    # resolution hint is only approximate. A dedicated code is a taxonomy decision, not a fix.
-    "UnaffiliatedProjectError": BathosErrorCode.RUNLOG_PROJECT_ID_MISSING,
+    # Debt #3201 / #3210: a slug-bearing run resolved to the unaffiliated log, so it would carry
+    # no project_id. The cause is an unbound checkout (no .bth.toml / repo at the resolved root),
+    # not a missing id, so it gets its own code and hint (`bth init --assign-id` would not help).
+    "UnaffiliatedProjectError": BathosErrorCode.RUNLOG_UNAFFILIATED_PROJECT,
     # ── debt 1996 ────────────────────────────────────────────────────────────
     # Five more exceptions raised in src/bathos/ with no entry here, which kept
     # test_every_domain_exception_has_registered_code red on main. Same rule as
