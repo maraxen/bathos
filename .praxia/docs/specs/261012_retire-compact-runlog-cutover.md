@@ -161,9 +161,16 @@ used for B3. It rests on these code facts, read on main `ef24e9f6`:
   - (c) copies staged segments into each project's `.bth/log/` and into `~/.bth/log-mirror/<id or _null/...>/` as `import-<attempt>-<n>.jsonl`;
   - (d) renames `bathos.db` to `bathos.db.frozen` (`_step4d_rename_warm`);
   - (e) deletes staging.
-- Log mode is "marker exists" (`mode.py:is_log_mode`). While it is on, every write site skips its
-  legacy write (`emit.py:emit_or_legacy`): **post-switch runs, campaigns and ledgers exist only as
-  log lines, never as cool fragments or warm rows.**
+- Log mode is "marker exists" (`mode.py:is_log_mode`), or `BTH_LOG_MODE=1` inside a SLURM job
+  (`is_log_mode_env_honored`). While it is on, every write site skips its legacy write
+  (`emit.py:emit_or_legacy`): **post-switch runs, campaigns and ledgers exist only as log lines,
+  never as cool fragments or warm rows.**
+
+*Revalidated 2026-11-03 against main `2a82be56` (the cut-over has since happened):* the (a)-(e) step
+order in `_do_switch`, the `import-<attempt>-<n>.jsonl` naming, and `emit_or_legacy` skipping the
+legacy write are unchanged. One correction: the marker is not the only way into log mode, which
+matters for the revert below. The "Pre-B3 backup" figures (478 MB, 7.1 GB free) are dated 2026-10-15,
+so re-measure before reusing them.
 
 **Pre-B3 backup (required):**
 1. Quiesce: no local `bth run`/`submit`/MCP writers, no running SLURM jobs.
@@ -174,7 +181,9 @@ used for B3. It rests on these code facts, read on main `ef24e9f6`:
 
 **Revert after the switch:**
 1. Quiesce, as above.
-2. Delete `~/.bth/catalog/cutover.json`. Log mode is now off, and writes go back to the legacy path.
+2. Delete `~/.bth/catalog/cutover.json`. Log mode is now off for local commands, and writes go back
+   to the legacy path. A SLURM job that exports `BTH_LOG_MODE=1` still writes log lines, so
+   unset that in job scripts (or wait for in-flight jobs to finish) before relying on the revert.
 3. If `bathos.db.frozen` exists and `bathos.db` does not, run
    `mv ~/.bth/catalog/bathos.db.frozen ~/.bth/catalog/bathos.db`. If both exist, keep `bathos.db`
    aside, restore from the step-2 backup, and do not guess.
