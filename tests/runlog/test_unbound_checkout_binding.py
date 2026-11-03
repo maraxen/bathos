@@ -196,6 +196,80 @@ def test_slug_without_bth_toml_fails_loudly(tmp_path: Path, monkeypatch, capsys)
     assert not (Path.home() / ".bth" / "log" / "unaffiliated").exists()
 
 
+def test_unaffiliated_error_has_its_own_code_and_accurate_hint():
+    # debt #3210: an unbound checkout is not a missing id, so it must not borrow
+    # RUNLOG_PROJECT_ID_MISSING, whose hint ("run `bth init --assign-id`") would not fix it.
+    from bathos.errors import EXCEPTION_TO_CODE, RESOLUTION_HINTS, BathosErrorCode
+
+    code = EXCEPTION_TO_CODE["UnaffiliatedProjectError"]
+    assert code is BathosErrorCode.RUNLOG_UNAFFILIATED_PROJECT
+    assert code is not EXCEPTION_TO_CODE["ProjectIdMissingError"]
+    assert "BTH_WORKSPACE_ROOT" in RESOLUTION_HINTS[code]
+    assert "--assign-id" not in RESOLUTION_HINTS[code]
+
+
+def _run_demo(work: Path, catalog: Path) -> int:
+    return run_script(
+        argv=[sys.executable, str(_script(work))],
+        project_slug="demo",
+        catalog_dir=catalog,
+        output_paths=[],
+        tags=[],
+        cwd=work,
+    )
+
+
+def test_run_without_project_id_warns_but_is_not_refused(tmp_path: Path, monkeypatch, capsys):
+    # debt #3211: a checkout with a .bth.toml but no [project] id records project_id null.
+    # Warn (refusing would break projects that predate ids); the run itself still succeeds.
+    work = tmp_path / "noid"
+    work.mkdir()
+    (work / ".bth.toml").write_text('[project]\nslug = "demo"\n')
+    assert read_project_id(work / ".bth.toml") is None
+    catalog = tmp_path / "catalog"
+    enable_log_mode(catalog)
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+    monkeypatch.delenv("BTH_PROJECT_ID", raising=False)
+
+    assert _run_demo(work, catalog) == 0
+    err = capsys.readouterr().err
+    assert "has no [project] id" in err
+    assert "bth init --assign-id" in err
+    assert str(work.resolve()) in err
+
+
+def test_run_with_project_id_does_not_warn(tmp_path: Path, monkeypatch, capsys):
+    # Negative control for the warning above: same project once an id is assigned.
+    work = tmp_path / "hasid"
+    work.mkdir()
+    (work / ".bth.toml").write_text('[project]\nslug = "demo"\n')
+    assign_project_id(work)
+    catalog = tmp_path / "catalog"
+    enable_log_mode(catalog)
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+    monkeypatch.delenv("BTH_PROJECT_ID", raising=False)
+
+    assert _run_demo(work, catalog) == 0
+    assert "has no [project] id" not in capsys.readouterr().err
+
+
+def test_slurm_run_with_exported_project_id_does_not_warn(tmp_path: Path, monkeypatch, capsys):
+    # Under SLURM an exported BTH_PROJECT_ID supplies the id even if .bth.toml has none.
+    work = tmp_path / "slurmnoid"
+    work.mkdir()
+    (work / ".bth.toml").write_text('[project]\nslug = "demo"\n')
+    catalog = tmp_path / "catalog"
+    enable_log_mode(catalog)
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.setenv("SLURM_JOB_ID", "27707634")
+    monkeypatch.setenv("BTH_PROJECT_ID", "9afede4f-e52c-42c6-a6f3-3f32d3ad3f6a")
+
+    assert _run_demo(work, catalog) == 0
+    assert "has no [project] id" not in capsys.readouterr().err
+
+
 def test_unaffiliated_without_slug_unchanged(tmp_path: Path):
     plain = tmp_path / "plain"
     plain.mkdir()
