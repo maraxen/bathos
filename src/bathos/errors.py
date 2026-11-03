@@ -310,6 +310,11 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     "LogNotIgnoredError": BathosErrorCode.RUNLOG_NOT_IGNORED,
     "ProjectIdMissingError": BathosErrorCode.RUNLOG_PROJECT_ID_MISSING,
     "LogModeRefusedError": BathosErrorCode.RUNLOG_MODE_REFUSED,
+    # IMPERFECT FIT, deliberately (debt #3201): a slug-bearing run resolved to the unaffiliated
+    # log, so it would carry no project_id. Same outcome as ProjectIdMissingError, but the cause
+    # is an unbound checkout (no .bth.toml / repo at the resolved root), not a missing id, so the
+    # resolution hint is only approximate. A dedicated code is a taxonomy decision, not a fix.
+    "UnaffiliatedProjectError": BathosErrorCode.RUNLOG_PROJECT_ID_MISSING,
     # ── debt 1996 ────────────────────────────────────────────────────────────
     # Five more exceptions raised in src/bathos/ with no entry here, which kept
     # test_every_domain_exception_has_registered_code red on main. Same rule as

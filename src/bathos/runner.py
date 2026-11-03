@@ -49,6 +49,7 @@ from bathos.runlog.emit import (
     sidecar_declaration_for_event,
     unit_of_work,
 )
+from bathos.runlog.resolve import UnaffiliatedProjectError, require_affiliated
 from bathos.schema import Run
 from bathos.sidecar import (
     DifferentialBlock,
@@ -1029,6 +1030,16 @@ def _run_script_impl(
         return 1
     for note in lock_settings.warnings:
         print(f"warning: {note}", file=sys.stderr)
+
+    # A slug-bearing log-mode run whose log root resolves to unaffiliated would silently land in
+    # ~/.bth/log/unaffiliated/ with project_id null (debt #3201). Refuse here, before any run id,
+    # telemetry event or git capture exists, so no caller sees a run_id for a run never persisted.
+    if project_slug and current_mode():
+        try:
+            require_affiliated(project_slug, cwd)
+        except UnaffiliatedProjectError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
 
     # Resolve --campaign up front (fail fast, before running the subprocess) and
     # store the full UUID — never the raw prefix — on the run record.
