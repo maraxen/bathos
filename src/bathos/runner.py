@@ -1031,6 +1031,16 @@ def _run_script_impl(
     for note in lock_settings.warnings:
         print(f"warning: {note}", file=sys.stderr)
 
+    # A slug-bearing log-mode run whose log root resolves to unaffiliated would silently land in
+    # ~/.bth/log/unaffiliated/ with project_id null (debt #3201). Refuse here, before any run id,
+    # telemetry event or git capture exists, so no caller sees a run_id for a run never persisted.
+    if project_slug and current_mode():
+        try:
+            require_affiliated(project_slug, cwd)
+        except UnaffiliatedProjectError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+
     # Resolve --campaign up front (fail fast, before running the subprocess) and
     # store the full UUID — never the raw prefix — on the run record.
     resolved_campaign_id: str | None = None
@@ -1400,14 +1410,6 @@ def _run_script_impl(
 
     catalog_dir.mkdir(parents=True, exist_ok=True)
     if current_mode():
-        # A run always carries a slug; one whose log root resolves to unaffiliated would
-        # silently land in ~/.bth/log/unaffiliated/ with project_id null (debt #3201).
-        try:
-            require_affiliated(project_slug, cwd)
-        except UnaffiliatedProjectError as e:
-            event("run.error", phase="persist", exc_type=type(e).__name__, exc_msg=str(e))
-            print(f"Error: {e}", file=sys.stderr)
-            return 1
         # D6: run.started is not best-effort -- if this raises, the caller (below)
         # must return before ever spawning the subprocess.
         # The full Run row (same encoding as run.finished), so a run that never
