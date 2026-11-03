@@ -15,10 +15,12 @@ import pytest
 from bathos.query import run_sql
 from bathos.runlog.project_id import assign_project_id, read_project_id
 from bathos.runlog.resolve import (
+    LogRootResolution,
     UnaffiliatedProjectError,
     require_affiliated,
     resolve_log_root,
 )
+from bathos.runlog.writer import resolve_write_project_id
 from bathos.runner import run_script
 
 from .test_ac18_flag_on_reads import enable_log_mode
@@ -117,17 +119,40 @@ def test_slurm_run_with_exported_project_id_carries_it(tmp_path: Path, monkeypat
     assert (project, project_id) == ("demo", pid)
 
 
-def test_slurm_run_without_exported_project_id_known_gap(tmp_path: Path, monkeypatch):
-    """PINS A KNOWN GAP (debt #3201, out of this PR's scope): a job that did not go through
-    `bth submit` has no BTH_PROJECT_ID, and `resolve_write_project_id` never reads .bth.toml
-    under SLURM. The run IS bound to the project (right log, `project` = slug, so
-    `bth sql --project <slug>` finds it) but its `project_id` stays null. Flip this assertion
-    to `== pid` when a `.bth.toml` fallback for project_id lands."""
-    project, project_id, _pid = _slurm_run_project_id(
+def test_slurm_run_without_exported_project_id_falls_back_to_toml_id(
+    tmp_path: Path, monkeypatch
+):
+    """A job that did not go through `bth submit` has no BTH_PROJECT_ID. The run stays bound
+    to the project (right log, `project` = slug) and `project_id` falls back to the resolved
+    main root's `.bth.toml` `[project] id` (debt #3202)."""
+    project, project_id, pid = _slurm_run_project_id(
         tmp_path, monkeypatch, export_project_id=False
     )
     assert project == "demo"
-    assert project_id is None
+    assert project_id == pid
+
+
+def test_resolve_write_project_id_slurm_env_wins_over_toml(tmp_path: Path, monkeypatch):
+    """Under SLURM, a non-empty BTH_PROJECT_ID wins even when it differs from .bth.toml."""
+    work, _stale = _nongit_project(tmp_path)
+    toml_id = read_project_id(work / ".bth.toml")
+    assert toml_id
+    env_id = "00000000-0000-4000-8000-000000000001"
+    assert env_id != toml_id
+    monkeypatch.setenv("SLURM_JOB_ID", "27707634")
+    monkeypatch.setenv("BTH_PROJECT_ID", env_id)
+    res = LogRootResolution(main_root=work, worktree_root=work, unaffiliated=False)
+    assert resolve_write_project_id(res) == env_id
+
+
+def test_resolve_write_project_id_slurm_unaffiliated_without_env_is_none(
+    tmp_path: Path, monkeypatch
+):
+    """Under SLURM with BTH_PROJECT_ID unset, an unaffiliated root yields None."""
+    monkeypatch.setenv("SLURM_JOB_ID", "27707634")
+    monkeypatch.delenv("BTH_PROJECT_ID", raising=False)
+    res = LogRootResolution(main_root=tmp_path, worktree_root=tmp_path, unaffiliated=True)
+    assert resolve_write_project_id(res) is None
 
 
 def test_slug_without_bth_toml_fails_loudly(tmp_path: Path, monkeypatch, capsys):
