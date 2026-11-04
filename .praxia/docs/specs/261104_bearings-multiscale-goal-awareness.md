@@ -61,6 +61,7 @@ Frame: agents do honest, pre-registered, green work that stops serving any large
 
 - [OWNER 261104] **Frame deviation, recorded explicitly.** The confirmed frame fixed "pushed, not remembered" and "makes a working agent aware". v1 does neither for the working agent: it is observe-only, and the brief goes to the owner. Agent push is deferred to T5, after the shadow exit. The owner chose this through AskUserQuestion ("Cold reader + ledger, shadow"). Merging v1 does not give agents goal awareness.
 - [OWNER 261104] Scope is runs plus project docs. Goals come from an owner-confirmed charter, and `project_status.toml` is not a seed.
+- [OWNER 261104] **Build plan.** The build stacks on this spec branch, and PR #160 stays open until the owner merges it. It ships as three staged dispatches, each ending with tests and a review gate before the next starts: (1) charter and confirmation, AC-1 to AC-3; (2) packet and reading record, AC-4 and AC-5; (3) brief, labels, due notice and cadence, AC-6 and AC-8. AC-7 is kept out of the build. After slice 2, the orchestrator drafts the AC-7 sidecar, including how tev_design's local episodes are classified. The owner approves it, and it is committed before any replay runs. The agent that builds the reader does not define what counts as success for it.
 
 ## Assumptions
 
