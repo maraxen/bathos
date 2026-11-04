@@ -11,6 +11,7 @@
 - [260601_v061-sprint-close](handoffs/260601_v061-sprint-close.md)
 
 ## Plans
+- [261104_bearings-slice1-charter](plans/261104_bearings-slice1-charter.md) — Build plan for Bearings slice 1 (AC-1, AC-2, AC-3 ext half): charter file, human-only hash-bound confirmation, purpose-ledger pivot, folds; dispatch brief for agy.
 - [260828_cyclopts-migration-milestone-2-scope](plans/260828_cyclopts-migration-milestone-2-scope.md) — Cyclopts CLI migration — Milestone 2 scope (backlog
 - [260805_deferred-item-triage-reconcile-the-handoff-backlog](plans/260805_deferred-item-triage-reconcile-the-handoff-backlog.md) — Scope for a one-time sweep of 42 deferred handoff entries plus a session-close reconciliation step, after Postgres evidence showed the defect is stale handoffs rather than untracked work
 - [260710_asr-rigor-ports-sprint-composition](plans/260710_asr-rigor-ports-sprint-composition.md) — port asr's C1–C5 rigor mechanisms into bathos core: BP-1 C3 concentration lint (`linter.py`), BP-2 C1 `[confounds.synthetic_recovery]` gate (`claim.py` AC-13 + `parity.py` submit-gate templates), BP-3 C5 negative-claim check (`validate_claim`); C2 needs a schema field (Appendix A), C4 stays in asr (Appendix B)
@@ -57,6 +58,7 @@
 ## Actuation Surfaces
 
 ## Audits
+- [261104_bearings-coherence-rounds](audits/261104_bearings-coherence-rounds.md)
 - [261023_output-tiering-argon-review](audits/261023_output-tiering-argon-review.md) — Verbatim spec-challenger review of specs/261023_output-tiering.md at 2b4c68c4 by gemini-4-argon-high through praxia surface_dispatch c0daf6d7; dispositions (confirmed, version-dependent, fabricated) are in the spec section 13
 - [261015_exploratory-mode-contract-adversarial-review](audits/261015_exploratory-mode-contract-adversarial-review.md) — Spec-challenger findings C1-C25 and spec-defender rulings for specs/261015_exploratory-mode-contract.md, run sequentially
 
