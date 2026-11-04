@@ -24,6 +24,7 @@ import tomlkit
 
 from bathos.errors import (
     CharterInvalidError,
+    CharterLedgerUnavailableError,
     CharterMandateChangedError,
     CharterNotFoundError,
     CharterPivotIncompleteError,
@@ -178,6 +179,30 @@ def _resolve_catalog_dir(catalog_dir: Path | None = None) -> Path:
     return default_catalog_dir()
 
 
+def _emit_charter_event(
+    *, kind: str, slug: str, data: dict[str, Any], root: Path, cat_dir: Path
+) -> None:
+    """Append one charter event or raise.
+
+    Charter state lives only in the event log and its fold, so a catalog that is not in
+    log mode could record the event but never fold it (status would stay
+    ``never_confirmed`` and mandate immutability would not hold). Refuse instead.
+    """
+    with unit_of_work(cat_dir) as log_mode:
+        if not log_mode:
+            raise CharterLedgerUnavailableError(
+                f"{kind}: the catalog at {cat_dir} is not in log mode, so the event "
+                "could not be folded into the charter ledger"
+            )
+        outcome = emit_event(kind=kind, entity=[slug], data=data, cwd=root)
+        if not outcome.ok:
+            raise CharterLedgerUnavailableError(
+                f"{kind}: event could not be appended "
+                f"(project_error={outcome.project_error!r}, "
+                f"fallback_error={outcome.fallback_error!r})"
+            )
+
+
 def status(
     project_root: Path | str,
     *,
@@ -280,20 +305,20 @@ def confirm(
         for pid, p in sorted(charter.purposes.items())
     }
 
-    with unit_of_work(cat_dir):
-        emit_event(
-            kind="charter.confirmed",
-            entity=[slug],
-            data={
-                "charter_sha256": curr_sha,
-                "mandate_sha256": curr_mandate_sha,
-                "mandate_text": charter.mandate,
-                "purposes": purposes_payload,
-                "auth_mode": auth_mode,
-                "amended_mandate_from": amended_mandate_from,
-            },
-            cwd=root,
-        )
+    _emit_charter_event(
+        kind="charter.confirmed",
+        slug=slug,
+        data={
+            "charter_sha256": curr_sha,
+            "mandate_sha256": curr_mandate_sha,
+            "mandate_text": charter.mandate,
+            "purposes": purposes_payload,
+            "auth_mode": auth_mode,
+            "amended_mandate_from": amended_mandate_from,
+        },
+        root=root,
+        cat_dir=cat_dir,
+    )
 
     return {
         "ok": True,
@@ -365,22 +390,28 @@ def pivot(
     st_before = status(root, catalog_dir=catalog_dir)
     confirmed_before = st_before["state"] == "confirmed"
 
-    # Mutate charter
+    # Edit the owner's file in place with tomlkit so comments, key order and any keys
+    # bathos does not interpret survive the pivot. Only state / retired_reason change.
+    doc = tomlkit.parse(charter_p.read_text(encoding="utf-8"))
     for pid, disp in dispositions.items():
         if disp == "retire":
-            charter.purposes[pid].state = "retired"
-            charter.purposes[pid].retired_reason = clean_retired_reasons[pid]
-
-    charter_p.write_text(dump_charter(charter), encoding="utf-8")
-    charter_sha256_after = charter_sha256(charter_p)
+            doc["purpose"][pid]["state"] = "retired"
+            doc["purpose"][pid]["retired_reason"] = clean_retired_reasons[pid]
+    new_bytes = tomlkit.dumps(doc).encode("utf-8")
+    charter_sha256_after = hashlib.sha256(new_bytes).hexdigest()
 
     slug = _resolve_project_slug(root)
     cat_dir = _resolve_catalog_dir(catalog_dir)
 
-    with unit_of_work(cat_dir):
-        emit_event(
+    # Stage the new file beside the old one, record the event, then rename. A refusal
+    # (non-log catalog) or a failed append leaves charter.toml untouched, so the file
+    # and the ledger cannot diverge.
+    tmp_p = charter_p.with_name(f".{charter_p.name}.pivot.tmp")
+    tmp_p.write_bytes(new_bytes)
+    try:
+        _emit_charter_event(
             kind="charter.pivot",
-            entity=[slug],
+            slug=slug,
             data={
                 "reason": reason,
                 "dispositions": dispositions,
@@ -390,8 +421,13 @@ def pivot(
                 "charter_sha256_after": charter_sha256_after,
                 "confirmed_before": confirmed_before,
             },
-            cwd=root,
+            root=root,
+            cat_dir=cat_dir,
         )
+    except BaseException:
+        tmp_p.unlink(missing_ok=True)
+        raise
+    os.replace(tmp_p, charter_p)
 
     return {
         "ok": True,

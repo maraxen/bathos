@@ -141,6 +141,7 @@ class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(
     CHARTER_MANDATE_CHANGED = "charter_mandate_changed"
     CHARTER_AGENT_CONFIRM_REFUSED = "charter_agent_confirm_refused"
     CHARTER_UNAUTHORIZED = "charter_unauthorized"
+    CHARTER_LEDGER_UNAVAILABLE = "charter_ledger_unavailable"
 
 
 # Resolution hints registry: every BathosErrorCode member must have a non-empty entry
@@ -235,6 +236,7 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.CHARTER_MANDATE_CHANGED: "Pass --amend-mandate to confirm a charter whose mandate text differs from the last confirmed mandate",
     BathosErrorCode.CHARTER_AGENT_CONFIRM_REFUSED: "Confirmation must be performed directly by the human chair in an interactive terminal or with a chair token",
     BathosErrorCode.CHARTER_UNAUTHORIZED: "Run in an interactive terminal or supply a valid chair token via --chair-token or BTH_CHAIR_TOKEN_PATH",
+    BathosErrorCode.CHARTER_LEDGER_UNAVAILABLE: "Charter events need a log-mode catalog whose project log is writable; run 'bth migrate --to-log' or fix the log path, then retry",
 }
 
 
@@ -394,6 +396,7 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     "CharterMandateChangedError": BathosErrorCode.CHARTER_MANDATE_CHANGED,
     "CharterAgentConfirmRefusedError": BathosErrorCode.CHARTER_AGENT_CONFIRM_REFUSED,
     "CharterUnauthorizedError": BathosErrorCode.CHARTER_UNAUTHORIZED,
+    "CharterLedgerUnavailableError": BathosErrorCode.CHARTER_LEDGER_UNAVAILABLE,
 }
 
 
@@ -501,5 +504,9 @@ class CharterAgentConfirmRefusedError(CharterError):
 
 class CharterUnauthorizedError(CharterError):
     """Caller is not authorized to confirm charter (missing TTY / chair token)."""
+
+
+class CharterLedgerUnavailableError(CharterError):
+    """A charter event could not be recorded: the catalog is not in log mode, or the append failed."""
 
 
