@@ -85,8 +85,8 @@ Tags follow the global spike-test rule. *Verified* means read at a file:line or 
 | # | Open question | Owner | Must be settled before |
 |---|---|---|---|
 | T1 | Shadow exit numbers: how many labelled readings, the precision needed to enable push, and the decision date. These numbers go in the evaluation sidecar. | Owner (gate-tier) | First reading |
-| T2 | Whether agent-written narrative docs (handoffs, daily logs) go into the blind packet, or only ADRs, specs, sidecars, runs and backlog. Handoffs carry the doing agent's own framing, which the 261027 blind protocol excludes. | Owner | Packet builder (AC-4) |
-| T3 | Which agent runs the reader, and on what schedule: a praxia dispatch, a scheduled routine, or a manual `bth bearings due` check. Bathos only builds packets and records results; it does not dispatch. | Owner | AC-5 in use |
+| T2 | **Resolved by the owner 261104: exclude narratives.** The packet holds ADRs, specs, sidecars, runs, backlog titles and git subjects. Handoffs, daily logs and other agent-written narrative are left out, because they carry the doing agent's framing. | Owner | Resolved |
+| T3 | **Resolved by the owner 261104: more than one way.** Readings can be run (a) by a dispatched cadence (a scheduled routine or praxia dispatch that calls `bth bearings due` and runs readings) or (b) on demand, prompted by a due notice that says a bearings reading is needed (Design item 7). Bathos still does not dispatch. It computes due state and reports it. | Owner | Resolved |
 | T4 | Whether portfolio scale (burn against priority across projects) is v2, and whether it belongs in bathos or praxia. | Owner | v2 |
 | T5 | Whether a run-end reminder for unconfirmed charter edits ships after shadow. It would be a fact rather than a judgment. The pre-mortem proposed a reminder for an "unreconciled pivot", but that state no longer exists because a pivot that skips a live purpose is refused (Design item 3). An unconfirmed charter edit is the nearest fact that remains. A pivot made with no ledger event at all can only be seen by the reader, as unmapped work. | Owner | After the shadow exit |
 
@@ -107,7 +107,7 @@ Tags follow the global spike-test rule. *Verified* means read at a file:line or 
    - A pivot is advisory until the owner confirms the resulting charter.
 4. **Blind packet.** `bth bearings packet --project <slug>` writes a deterministic, hashed bundle of primary records only:
    - runs and their sidecars over the window;
-   - ADRs, specs and backlog titles under the project's `.praxia/docs`, scope per T2;
+   - ADRs, specs and backlog titles under the project's `.praxia/docs`. Handoffs, daily logs and other agent narrative are excluded (T2);
    - git log subjects.
    It never includes the charter, so the reader cannot echo it.
 5. **Reading record.** `bth bearings record` takes the reader's structured output:
@@ -116,8 +116,11 @@ Tags follow the global spike-test rule. *Verified* means read at a file:line or 
    - open lines of work with no visible purpose.
    Bathos then compares the reading with the confirmed charter and stores `mapped`, `unmapped` (work toward no charter purpose) and `silent` (live purposes with no work in the window).
 6. **Brief and labels.** `bth bearings brief` shows the owner the unmapped and silent items for each project. `bth bearings label <item> useful|noise|unsure` appends an owner-only event, using the same check as item 2.
-7. **Cadence.** `bth bearings due` lists projects where a reading is due: active in the last 28 days and either 20 new runs or 7 days since the last reading. These numbers are starting values with no empirical basis, and T1 revisits them.
-8. **Not in v1:** run-end push, detours, decision-follow and drift signals, the portfolio view and the rival/fork/argument features. Wiring step-back triggers to run end waits on debt #3236.
+7. **Cadence and due notice.** `bth bearings due` lists projects where a reading is due: active in the last 28 days and either 20 new runs or 7 days since the last reading. These numbers are starting values with no empirical basis, and T1 revisits them. The due state reaches people in two ways (T3):
+   - **Dispatched cadence:** a scheduled routine or praxia dispatch calls `bth bearings due` and runs the readings.
+   - **Due notice:** while a project is due, `bth run` returns one advisory line in its existing `warnings` channel: "bearings reading due for <slug>: N runs / D days since last reading". `bth sprint-audit` reports the same state as a signal. Each notice appends a `bearings.due_notified` event.
+   - The notice says only that a reading is due, a fact. It carries no reading content, unmapped items or judgment, so it does not breach the observe-only decision: findings still go only to the owner's brief.
+8. **Not in v1:** run-end push of reading content or findings (the due notice in item 7 is the one run-end line, and it carries no findings), detours, decision-follow and drift signals, the portfolio view and the rival/fork/argument features. Wiring step-back triggers to run end waits on debt #3236.
 
 ## Acceptance Criteria (v1, testable)
 
@@ -126,8 +129,9 @@ Tags follow the global spike-test rule. *Verified* means read at a file:line or 
   - Given a confirmed charter, when the file is edited, then `bth charter status` reports `unconfirmed` and names the sha256 it last confirmed.
 - **AC-2 A pivot must dispose of every live purpose.** Given a confirmed charter with live purposes P1 and P2, when `bth charter pivot` names only P1, then it is refused and lists P2. When it names both and includes `cheapest_next_test`, then one `charter.pivot` event is appended and folds into the index.
 - **AC-3 The seam is preserved.** Given `[purpose.p1.ext]` with arbitrary keys, when the charter is parsed, folded and drafted again, then the `ext` keys come back byte-identical. Given an `atom:` citation, when a reading is recorded, then that citation is stored as `flag_for_review`, never dropped and never counted toward the 2-citation minimum. That includes an `atom:` citation with extra fields, such as an ordered `context` list of `{start_line, end_line, role}` (allostery draft spec `261104_atom-context-chains`, not merged): the extra fields are stored verbatim and the citation resolves to `flag_for_review`.
-- **AC-4 The packet is blind by content, deterministic, and scoped per T2.**
-  - Given a project with a confirmed charter and doc scope resolved per T2, when `bth bearings packet` runs twice over the same window, then both packets have the same sha256.
+- **AC-4 The packet is blind by content, deterministic, and free of narrative.**
+  - Given a project with a handoff and a daily log under `.praxia/docs`, when the packet is built, then neither is in it and the manifest names both with reason `narrative`.
+  - Given a project with a confirmed charter, when `bth bearings packet` runs twice over the same window, then both packets have the same sha256.
   - Blindness is defined by content, not path. The packet excludes `.bth/charter.toml`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, and any doc containing a purpose `text` or the mandate verbatim, using normalised whitespace. It lists each exclusion by path and reason in a manifest that is never shown to the reader.
   - Negative case: given a project whose ADR quotes a charter purpose (as colliculix's `.praxia/docs/decisions/260707_identity-charter.md` would), the packet must not contain that ADR, and the manifest must name it.
 - **AC-5 Readings need evidence.** Given a reading where a purpose has fewer than 2 resolvable citations, when it is recorded, then that purpose is rejected with `STEPBACK_INSUFFICIENT_EVIDENCE`. Given a valid reading and a confirmed charter, then each reading purpose is stored as `mapped` or `unmapped`, and each live charter purpose with no mapped work as `silent`.
@@ -137,9 +141,9 @@ Tags follow the global spike-test rule. *Verified* means read at a file:line or 
     - The packet reads only history reachable from the cut. Some of the record sat on `worktree-n4-calibration` before PR #1, so reachability is checked rather than assumed.
     - Negative check: a grep of the built packet for colliculix-drift-full-diagnosis, identity-charter, refoundation handoff, purpose ledger and .bth/charter.toml must return nothing. If it does, the control is contaminated and the run is invalid.
     - Expected: the seven purposes from the diagnosis show as multiple concurrent purposes, scored against the owner's labels.
-  - Negative controls: two projects the owner names as on course over a window.
+  - Negative controls, named by the owner 261104: **tev_design** and **plegadx**, each over a window the sidecar pins by commit. tev_design is a hard negative: it has had local episodes such as k=4 vs k=9 and the target swap of 260714. The sidecar must say whether those count as drift at project scale or as claim-scale slips, before the reading is seen.
   - The sidecar states what each reading must contain, judged by the owner's labels, not by the reader itself. The A9 result is reported either way.
-- **AC-8 Cadence and shadow exit are testable and pre-registered.** Given a set of projects, when bth bearings due runs, it lists exactly those active in the last 28 days with >= 20 new runs or >= 7 days since their last reading. Before the first live reading, an evaluation sidecar fixes T1 and the excess-spend metric (261027 §8, including chains that paid off; not the `excess_spend_avoided` heuristic in `stepback/analysis.py`). It also counts confirmed charters among active projects, testing A10.
+- **AC-8 Cadence and shadow exit are testable and pre-registered.** Given a set of projects, when bth bearings due runs, it lists exactly those active in the last 28 days with >= 20 new runs or >= 7 days since their last reading. Given a due project, `bth run` in it returns exactly one due advisory with no reading content and appends `bearings.due_notified`; given a project that is not due, it returns none. Before the first live reading, an evaluation sidecar fixes T1 and the excess-spend metric (261027 §8, including chains that paid off; not the `excess_spend_avoided` heuristic in `stepback/analysis.py`). It also counts confirmed charters among active projects, testing A10.
 
 ## Pre-mortem Record
 **User:** Six months later it has failed. The likeliest story: charters were drafted for three projects and confirmed for one, because owner review was the bottleneck, so the cold reader compared against nothing elsewhere and its disagreements could not be told apart from noise. The owner's brief became one more unread page. Pivots happened inside sessions without a ledger event, because nothing at the moment of pivoting asked for one, and the ledger recorded 'unreconciled' quietly. A second failure path: the cold reader's three lines were plausible but generic ('project is developing X tooling'), passed every review, and never named a retired purpose. A third: the shadow phase never ended, because no exit criterion was pre-registered and nobody labelled the deliveries. Remediations for the spec: pre-register the shadow exit, with label counts and a decision date; limit the charter to the projects with activity in the last 28 days; give the cold reader output a mandatory structure (named purposes found in the record, each mapped to a charter purpose or marked unmapped, with citations); emit a run-end reminder only for an unreconciled pivot, which is a fact, not a judgment.
