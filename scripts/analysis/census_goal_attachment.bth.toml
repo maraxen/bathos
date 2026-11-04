@@ -1,0 +1,41 @@
+[experiment]
+hypothesis = "Campaigns cannot serve as the attachment point for goal awareness because a material share of recent runs has no campaign, while sidecars cover nearly all of them. Disclosure: spike queries on 2026-11-04 already showed about 57% of all runs with no campaign and about 96% of recent runs with a sidecar. This run is a reproducible record of a known census, not a blind test, and its pass label carries no evidential weight beyond reproduction."
+stage_name = "validation"
+novel = true
+
+[outcomes.instrument_broken]
+condition = "NOT controls_ok"
+decision = "Do not cite any number; fix the blank-handling SQL first."
+reasoning = "The synthetic positive and negative controls did not return their known answers."
+
+[outcomes.pass]
+condition = "controls_ok AND frac_recent_no_campaign >= 0.25 AND frac_recent_with_sidecar >= 0.75"
+decision = "Design the goal link to attach at the sidecar and project, with campaign as an optional layer."
+reasoning = "0.25 and 0.75 are judgment cutoffs with no empirical basis: 'a material share' and 'nearly all'. The design choice is what they gate, and a reader should look at the fractions themselves."
+
+[outcomes.fail]
+condition = "controls_ok AND NOT (frac_recent_no_campaign >= 0.25 AND frac_recent_with_sidecar >= 0.75)"
+decision = "Re-open the attachment point: campaign may suffice, or sidecars may not reach the work."
+reasoning = "Either recent work is mostly in campaigns or sidecars do not cover it."
+is_residual = true
+
+[result_schema]
+controls_ok = "bool"
+runs_total = "int"
+runs_no_campaign = "int"
+frac_no_campaign = "float"
+recent_runs_total = "int"
+recent_runs_no_campaign = "int"
+frac_recent_no_campaign = "float"
+frac_recent_with_sidecar = "float"
+frac_recent_with_session = "float"
+campaigns_total = "int"
+campaigns_null_mode = "int"
+campaigns_stub = "int"
+campaigns_no_question = "int"
+campaign_edges = "int"
+stepback_artifact_files = "int"
+recent_sidecars_distinct = "int"
+recent_sidecars_readable = "int"
+recent_sidecars_with_outcomes = "int"
+recent_sidecars_with_decision = "int"
