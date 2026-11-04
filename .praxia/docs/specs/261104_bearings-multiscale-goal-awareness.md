@@ -59,6 +59,9 @@ Frame: agents do honest, pre-registered, green work that stops serving any large
 - [REJECT] Rival T: wire existing step-back triggers into run end: Critic, FATAL as the whole answer: it represents no aims, so the multi-scale ask goes unmet. It would also push likely false positives to every agent: entropy_collapse probably fires on all-observed exploratory runs (triggers.py:365-375), and rule 3 fires on any exploration campaign with 25 or more runs (triggers.py:532). The wiring can be merged later, once those are fixed.
 - [DEFER] Detours (part 6), argument and multiverse seam (part 8), decision-follow and question-drift signals: Critic. Detours need the rabbit hole to be named in advance, which by nature it is not. The seam rests on an unmerged branch with unstable atom ids. Decision follow and question drift need a semantic judge and an audit of TODO decision text, so they run in shadow only. None of these changes the colliculix episode.
 
+- [OWNER 261104] **Frame deviation, recorded explicitly.** The confirmed frame fixed "pushed, not remembered" and "makes a working agent aware". v1 does neither for the working agent: it is observe-only, and the brief goes to the owner. Agent push is deferred to T5, after the shadow exit. The owner chose this through AskUserQuestion ("Cold reader + ledger, shadow"). Merging v1 does not give agents goal awareness.
+- [OWNER 261104] Scope is runs plus project docs. Goals come from an owner-confirmed charter, and `project_status.toml` is not a seed.
+
 ## Assumptions
 
 Tags follow the global spike-test rule. *Verified* means read at a file:line or measured in a tracked run. *Unverified* means not checked.
@@ -123,11 +126,17 @@ Tags follow the global spike-test rule. *Verified* means read at a file:line or 
   - Given a confirmed charter, when the file is edited, then `bth charter status` reports `unconfirmed` and names the sha256 it last confirmed.
 - **AC-2 A pivot must dispose of every live purpose.** Given a confirmed charter with live purposes P1 and P2, when `bth charter pivot` names only P1, then it is refused and lists P2. When it names both and includes `cheapest_next_test`, then one `charter.pivot` event is appended and folds into the index.
 - **AC-3 The seam is preserved.** Given `[purpose.p1.ext]` with arbitrary keys, when the charter is parsed, folded and drafted again, then the `ext` keys come back byte-identical. Given an `atom:` citation, when a reading is recorded, then that citation is stored as `flag_for_review`, never dropped and never counted toward the 2-citation minimum.
-- **AC-4 The packet is blind and deterministic.** Given a project with a charter, when `bth bearings packet` runs twice over the same window, then both packets have the same sha256 and neither contains the charter text or any `.bth/charter.toml` path.
+- **AC-4 The packet is blind by content, and deterministic.**
+  - Given a project with a confirmed charter, when `bth bearings packet` runs twice over the same window, then both packets have the same sha256.
+  - Blindness is defined by content, not path. The packet excludes `.bth/charter.toml`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, and any doc containing a purpose `text` or the mandate verbatim, using normalised whitespace. It lists each exclusion by path and reason in a manifest that is never shown to the reader.
+  - Negative case: given a project whose ADR quotes a charter purpose (as colliculix's `.praxia/docs/decisions/260707_identity-charter.md` would), the packet must not contain that ADR, and the manifest must name it.
 - **AC-5 Readings need evidence.** Given a reading where a purpose has fewer than 2 resolvable citations, when it is recorded, then that purpose is rejected with `STEPBACK_INSUFFICIENT_EVIDENCE`. Given a valid reading and a confirmed charter, then each reading purpose is stored as `mapped` or `unmapped`, and each live charter purpose with no mapped work as `silent`.
 - **AC-6 Delivery and labels are recorded.** Every `bearings brief` render appends a `bearings.delivered` event listing the item ids shown, and every `label` appends a `bearings.labelled` event. Precision for any window can be computed from events alone with no other state.
 - **AC-7 Replay with positive and negative controls, pre-registered.** A tracked script with a sidecar committed before the run builds packets from reconstructed history.
-  - Positive control: colliculix as of 2026-07-07, where the owner-confirmed charter's predecessor purposes should show as `unmapped`.
+  - Positive control: colliculix cut at a **commit, not a date**: the tree at `14c3804` (2026-07-07 13:01:25 -0700). That precedes the earliest diagnosis artifact, the refoundation handoff `24ef9a6` (13:15), and the charter draft `588d175` (14:46). Both were checked with `git log --all` on 261104.
+    - The packet reads only history reachable from the cut. Some of the record sat on `worktree-n4-calibration` before PR #1, so reachability is checked rather than assumed.
+    - Negative check: a grep of the built packet for `charter`, `refoundation`, `drift`, `identity` and `purpose ledger` must return nothing. If it does, the control is contaminated and the run is invalid.
+    - Expected: the seven purposes from the diagnosis show as multiple concurrent purposes, scored against the owner's labels.
   - Negative controls: two projects the owner names as on course over a window.
   - The sidecar states what each reading must contain, judged by the owner's labels, not by the reader itself. The A9 result is reported either way.
 - **AC-8 Shadow exit is pre-registered.** Before the first live reading, an evaluation sidecar fixes T1 and the excess-spend metric (261027 §8, including chains that paid off). It also counts confirmed charters among active projects, because A10 is the first failure path.
