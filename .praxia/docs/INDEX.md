@@ -12,6 +12,7 @@
 
 ## Plans
 - [261104_bearings-slice1-charter](plans/261104_bearings-slice1-charter.md) — Build plan for Bearings slice 1 (AC-1, AC-2, AC-3 ext half): charter file, human-only hash-bound confirmation, purpose-ledger pivot, folds; dispatch brief for agy.
+- [261104_bearings-slice2-packet-reading](plans/261104_bearings-slice2-packet-reading.md) — Build plan for Bearings slice 2 (AC-4, AC-5, AC-3 atom half): deterministic blind packet read from a git ref, citation-checked reading record, separate mapper step that produces mapped/unmapped/silent items.
 - [260828_cyclopts-migration-milestone-2-scope](plans/260828_cyclopts-migration-milestone-2-scope.md) — Cyclopts CLI migration — Milestone 2 scope (backlog
 - [260805_deferred-item-triage-reconcile-the-handoff-backlog](plans/260805_deferred-item-triage-reconcile-the-handoff-backlog.md) — Scope for a one-time sweep of 42 deferred handoff entries plus a session-close reconciliation step, after Postgres evidence showed the defect is stale handoffs rather than untracked work
 - [260710_asr-rigor-ports-sprint-composition](plans/260710_asr-rigor-ports-sprint-composition.md) — port asr's C1–C5 rigor mechanisms into bathos core: BP-1 C3 concentration lint (`linter.py`), BP-2 C1 `[confounds.synthetic_recovery]` gate (`claim.py` AC-13 + `parity.py` submit-gate templates), BP-3 C5 negative-claim check (`validate_claim`); C2 needs a schema field (Appendix A), C4 stays in asr (Appendix B)
