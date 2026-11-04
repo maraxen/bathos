@@ -134,6 +134,14 @@ class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(
     ESCALATION_LEVEL_INVALID = "escalation_level_invalid"
     CHAIR_TOKEN_INVALID = "chair_token_invalid"
 
+    # Project Charter & Confirmation (spec 261104, slice 1).
+    CHARTER_NOT_FOUND = "charter_not_found"
+    CHARTER_INVALID = "charter_invalid"
+    CHARTER_PIVOT_INCOMPLETE = "charter_pivot_incomplete"
+    CHARTER_MANDATE_CHANGED = "charter_mandate_changed"
+    CHARTER_AGENT_CONFIRM_REFUSED = "charter_agent_confirm_refused"
+    CHARTER_UNAUTHORIZED = "charter_unauthorized"
+
 
 # Resolution hints registry: every BathosErrorCode member must have a non-empty entry
 RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
@@ -220,6 +228,13 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.REVIEWER_CONFLICT_OF_INTEREST: "Assign review to an independent agent or researcher who did not author runs in this campaign",
     BathosErrorCode.ESCALATION_LEVEL_INVALID: "Specify a valid escalation level between 0 and 3",
     BathosErrorCode.CHAIR_TOKEN_INVALID: "Verify the chair token in `~/.bth/chair_token` or invoke from an interactive TTY",
+    # Project Charter & Confirmation (spec 261104, slice 1).
+    BathosErrorCode.CHARTER_NOT_FOUND: "Create a charter at .bth/charter.toml or scaffold one with 'bth charter draft'",
+    BathosErrorCode.CHARTER_INVALID: "Fix syntax, schema, or missing fields in .bth/charter.toml",
+    BathosErrorCode.CHARTER_PIVOT_INCOMPLETE: "Provide a disposition ('reaffirm' or 'retire') for every live purpose",
+    BathosErrorCode.CHARTER_MANDATE_CHANGED: "Pass --amend-mandate to confirm a charter whose mandate text differs from the last confirmed mandate",
+    BathosErrorCode.CHARTER_AGENT_CONFIRM_REFUSED: "Confirmation must be performed directly by the human chair in an interactive terminal or with a chair token",
+    BathosErrorCode.CHARTER_UNAUTHORIZED: "Run in an interactive terminal or supply a valid chair token via --chair-token or BTH_CHAIR_TOKEN_PATH",
 }
 
 
@@ -371,6 +386,14 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     "StepBackUnauthorizedChairError": BathosErrorCode.STEPBACK_UNAUTHORIZED_CHAIR,
     "ChairTokenInvalidError": BathosErrorCode.CHAIR_TOKEN_INVALID,
     "EscalationLevelInvalidError": BathosErrorCode.ESCALATION_LEVEL_INVALID,
+    # Project charter & confirmation (spec 261104, slice 1).
+    "CharterError": BathosErrorCode.INTERNAL,
+    "CharterNotFoundError": BathosErrorCode.CHARTER_NOT_FOUND,
+    "CharterInvalidError": BathosErrorCode.CHARTER_INVALID,
+    "CharterPivotIncompleteError": BathosErrorCode.CHARTER_PIVOT_INCOMPLETE,
+    "CharterMandateChangedError": BathosErrorCode.CHARTER_MANDATE_CHANGED,
+    "CharterAgentConfirmRefusedError": BathosErrorCode.CHARTER_AGENT_CONFIRM_REFUSED,
+    "CharterUnauthorizedError": BathosErrorCode.CHARTER_UNAUTHORIZED,
 }
 
 
@@ -447,4 +470,36 @@ class ChairTokenInvalidError(StepBackUnauthorizedChairError):
 
 class EscalationLevelInvalidError(StepBackError):
     """Specified escalation level is outside 0-3 range."""
+
+
+# ── Charter Domain Exceptions (spec 261104) ───────────────────────────────────
+
+
+class CharterError(BathosError):
+    """Base class for project charter errors."""
+
+
+class CharterNotFoundError(CharterError):
+    """Charter file does not exist."""
+
+
+class CharterInvalidError(CharterError):
+    """Charter syntax, schema, or field is invalid."""
+
+
+class CharterPivotIncompleteError(CharterError):
+    """Pivot did not dispose of every live purpose."""
+
+
+class CharterMandateChangedError(CharterError):
+    """Mandate text changed without --amend-mandate."""
+
+
+class CharterAgentConfirmRefusedError(CharterError):
+    """Autonomous agent attempted to confirm charter via MCP."""
+
+
+class CharterUnauthorizedError(CharterError):
+    """Caller is not authorized to confirm charter (missing TTY / chair token)."""
+
 

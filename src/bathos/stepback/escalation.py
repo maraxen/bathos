@@ -68,6 +68,36 @@ def verify_chair_token(token: str | None = None) -> bool:
         return False
 
 
+def require_human_chair(
+    *,
+    interactive_tty: bool | None = None,
+    chair_token: str | None = None,
+) -> str:
+    """Verify human chair authority via chair token or interactive TTY.
+
+    Returns the auth mode used: 'token' or 'tty'.
+    Raises StepBackUnauthorizedChairError if an agent environment is detected
+    and no valid chair token is present, or if neither an interactive TTY
+    nor a valid chair token is available.
+    """
+    token_ok = verify_chair_token(chair_token)
+    if token_ok:
+        return "token"
+
+    if is_agent_environment():
+        raise StepBackUnauthorizedChairError(
+            "Autonomous agents cannot act as human chair without a valid chair token"
+        )
+
+    tty_ok = sys.stdin.isatty() if interactive_tty is None else interactive_tty
+    if tty_ok:
+        return "tty"
+
+    raise StepBackUnauthorizedChairError(
+        "Human chair resolution requires interactive TTY CLI or valid chair token"
+    )
+
+
 def validate_level(level: int) -> int:
     """Validate that escalation level is within 0-3 integer range."""
     if not isinstance(level, int) or level < 0 or level > 3:
@@ -161,16 +191,15 @@ def transition_escalation(
                 "Autonomous agents are strictly forbidden from overriding or resolving Level 3 Human Chair escalations"
             )
 
-        tty_ok = sys.stdin.isatty() if interactive_tty is None else interactive_tty
-        token_ok = verify_chair_token(chair_token)
-
-        if not as_human_chair and not tty_ok and not token_ok:
+        try:
+            require_human_chair(interactive_tty=interactive_tty, chair_token=chair_token)
+        except StepBackUnauthorizedChairError:
+            if as_human_chair:
+                raise StepBackUnauthorizedChairError(
+                    "Cannot claim human chair authority without interactive TTY or valid chair token"
+                )
             raise StepBackUnauthorizedChairError(
                 "Human chair resolution requires interactive TTY CLI or valid chair token"
-            )
-        if as_human_chair and not tty_ok and not token_ok:
-            raise StepBackUnauthorizedChairError(
-                "Cannot claim human chair authority without interactive TTY or valid chair token"
             )
 
     # Discharging a Level 2 hold: only an independent approving review, or an
@@ -180,9 +209,9 @@ def transition_escalation(
             raise StepBackUnauthorizedChairError(
                 "Only an independent approving review can discharge a Level 2 hold when acting as an agent"
             )
-        tty_ok = sys.stdin.isatty() if interactive_tty is None else interactive_tty
-        token_ok = verify_chair_token(chair_token)
-        if not tty_ok and not token_ok:
+        try:
+            require_human_chair(interactive_tty=interactive_tty, chair_token=chair_token)
+        except StepBackUnauthorizedChairError:
             raise StepBackUnauthorizedChairError(
                 "Discharging a Level 2 hold requires an independent approving review or human authorization"
             )

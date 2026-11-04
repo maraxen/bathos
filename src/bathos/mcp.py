@@ -45,7 +45,7 @@ from bathos.checker import check_runs
 from bathos.cli_common import normalise_output_paths, normalise_tags, require_project_slug
 from bathos.compact import compact as compact_catalog
 from bathos.config import default_catalog_dir, find_project_config, load_project_config
-from bathos.errors import RESOLUTION_HINTS, BathosErrorCode, StepBackError
+from bathos.errors import RESOLUTION_HINTS, BathosErrorCode, CharterError, StepBackError
 from bathos.export import ExportError
 from bathos.figure_registry import FigureEntrySchemaError, register_figure_entry
 from bathos.index import connect_read
@@ -205,6 +205,11 @@ def traced_tool(fn):
         except McpAuthError as e:
             return _shape_error(tool_name, BathosErrorCode.AUTH_ERROR, e)
         except StepBackError as e:
+            from bathos.errors import EXCEPTION_TO_CODE
+
+            code = EXCEPTION_TO_CODE.get(type(e).__name__, BathosErrorCode.INTERNAL)
+            return _shape_error(tool_name, code, e)
+        except CharterError as e:
             from bathos.errors import EXCEPTION_TO_CODE
 
             code = EXCEPTION_TO_CODE.get(type(e).__name__, BathosErrorCode.INTERNAL)
@@ -6137,6 +6142,98 @@ async def stepback_snooze(
     )
 
 
+# ---------------------------------------------------------------------------
+# Project Charter MCP Tools (spec 261104, slice 1)
+# ---------------------------------------------------------------------------
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def charter_status(
+    project_root: str | None = None,
+    catalog_dir: str | None = None,
+) -> dict:
+    """Query current confirmation status for the project charter."""
+    from bathos.charter import status
+    from bathos.workspace import resolve_workspace
+
+    root = Path(project_root) if project_root else resolve_workspace().fs_root
+    cat_p = Path(catalog_dir) if catalog_dir else None
+    res = status(root, catalog_dir=cat_p)
+    return {"ok": True, **res}
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def charter_draft(
+    project_root: str | None = None,
+) -> dict:
+    """Generate a proposal draft at .bth/charter.draft.toml."""
+    from bathos.charter import draft
+    from bathos.workspace import resolve_workspace
+
+    root = Path(project_root) if project_root else resolve_workspace().fs_root
+    draft_path = draft(root)
+    return {
+        "ok": True,
+        "draft_path": str(draft_path),
+        "note": "A draft has no standing until it is copied to .bth/charter.toml and confirmed.",
+    }
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def charter_pivot(
+    reason: str,
+    dispositions: dict[str, str],
+    retired_reasons: dict[str, str] | None = None,
+    cheapest_next_test: str = "none_pending",
+    project_root: str | None = None,
+    catalog_dir: str | None = None,
+) -> dict:
+    """Execute purpose ledger pivot, reaffirming or retiring all live purposes."""
+    from bathos.charter import pivot
+    from bathos.workspace import resolve_workspace
+
+    root = Path(project_root) if project_root else resolve_workspace().fs_root
+    cat_p = Path(catalog_dir) if catalog_dir else None
+    res = pivot(
+        root,
+        reason=reason,
+        dispositions=dispositions,
+        retired_reasons=retired_reasons,
+        cheapest_next_test=cheapest_next_test,
+        catalog_dir=cat_p,
+    )
+    return {
+        "ok": True,
+        "message": "Pivot recorded",
+        **res,
+    }
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def charter_confirm(
+    project_root: str | None = None,
+    amend_mandate: bool = False,
+    chair_token: str | None = None,
+    catalog_dir: str | None = None,
+) -> dict:
+    """Confirm the project charter in .bth/charter.toml.
+
+    HUMAN CHAIR INVARIANCE:
+    In FastMCP, callers are autonomous agents. Any attempt to confirm a charter
+    via MCP is strictly and unconditionally refused.
+    """
+    _ = (project_root, amend_mandate, chair_token, catalog_dir)
+    from bathos.errors import CharterAgentConfirmRefusedError
+
+    raise CharterAgentConfirmRefusedError(
+        "Charter confirmation is strictly human-only; autonomous agents calling via MCP are unconditionally refused."
+    )
+
+
 if __name__ == "__main__":
     init_server_telemetry()
     app.run()
@@ -6233,6 +6330,10 @@ _WIRED = cisternal.wire(
         "stepback_resolve",
         "stepback_brief",
         "stepback_snooze",
+        "charter_status",
+        "charter_draft",
+        "charter_pivot",
+        "charter_confirm",
     ],
 )
 

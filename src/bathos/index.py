@@ -330,6 +330,37 @@ CREATE TABLE IF NOT EXISTS output_copies (
 )
 """
 
+# Project charter confirmation events folded into one append-only index table (spec 261104, slice 1).
+CHARTER_CONFIRMATIONS_DDL = """
+CREATE TABLE IF NOT EXISTS charter_confirmations (
+    project VARCHAR,
+    eid VARCHAR PRIMARY KEY,
+    ts VARCHAR,
+    charter_sha256 VARCHAR,
+    mandate_sha256 VARCHAR,
+    mandate_text VARCHAR,
+    purposes_json VARCHAR,
+    auth_mode VARCHAR,
+    amended_mandate_from VARCHAR
+)
+"""
+
+# Project charter pivot events folded into one append-only index table (spec 261104, slice 1).
+CHARTER_PIVOTS_DDL = """
+CREATE TABLE IF NOT EXISTS charter_pivots (
+    project VARCHAR,
+    eid VARCHAR PRIMARY KEY,
+    ts VARCHAR,
+    reason VARCHAR,
+    dispositions_json VARCHAR,
+    retired_reasons_json VARCHAR,
+    cheapest_next_test VARCHAR,
+    charter_sha256_before VARCHAR,
+    charter_sha256_after VARCHAR,
+    confirmed_before BOOLEAN
+)
+"""
+
 
 _DDL_NON_COLUMN_PREFIXES = ("CREATE", ")", "PRIMARY", "UNIQUE", "FOREIGN", "CHECK")
 
@@ -352,6 +383,8 @@ TRUST_LEDGER_COLUMNS: list[str] = _columns_of(TRUST_LEDGER_DDL)
 ARCHIVED_ITEMS_COLUMNS: list[str] = _columns_of(ARCHIVED_ITEMS_DDL)
 SUBMITS_COLUMNS: list[str] = _columns_of(SUBMITS_DDL)
 OUTPUT_COPIES_COLUMNS: list[str] = _columns_of(OUTPUT_COPIES_DDL)
+CHARTER_CONFIRMATIONS_COLUMNS: list[str] = _columns_of(CHARTER_CONFIRMATIONS_DDL)
+CHARTER_PIVOTS_COLUMNS: list[str] = _columns_of(CHARTER_PIVOTS_DDL)
 
 
 def index_db_path(catalog_dir: Path | None = None) -> Path:
@@ -392,6 +425,8 @@ def init_index_schema(con: duckdb.DuckDBPyConnection) -> None:
     con.execute(ARCHIVED_ITEMS_DDL)
     con.execute(SUBMITS_DDL)
     con.execute(OUTPUT_COPIES_DDL)
+    con.execute(CHARTER_CONFIRMATIONS_DDL)
+    con.execute(CHARTER_PIVOTS_DDL)
 
 
 def _empty_select(ddl: str) -> str:
@@ -505,6 +540,24 @@ def connect_read(
             con.execute("CREATE VIEW output_copies AS SELECT * FROM idx.output_copies")
         else:
             con.execute(f"CREATE VIEW output_copies AS {_empty_select(OUTPUT_COPIES_DDL)}")
+
+        have_confirmations = con.execute(
+            "SELECT count(*) FROM duckdb_tables() "
+            "WHERE database_name = 'idx' AND table_name = 'charter_confirmations'"
+        ).fetchone()
+        if have_confirmations and have_confirmations[0]:
+            con.execute("CREATE VIEW charter_confirmations AS SELECT * FROM idx.charter_confirmations")
+        else:
+            con.execute(f"CREATE VIEW charter_confirmations AS {_empty_select(CHARTER_CONFIRMATIONS_DDL)}")
+
+        have_pivots = con.execute(
+            "SELECT count(*) FROM duckdb_tables() "
+            "WHERE database_name = 'idx' AND table_name = 'charter_pivots'"
+        ).fetchone()
+        if have_pivots and have_pivots[0]:
+            con.execute("CREATE VIEW charter_pivots AS SELECT * FROM idx.charter_pivots")
+        else:
+            con.execute(f"CREATE VIEW charter_pivots AS {_empty_select(CHARTER_PIVOTS_DDL)}")
     else:
         init_index_schema(con)
     return con
@@ -614,7 +667,13 @@ __all__ = [
     "CAMPAIGN_EDGES_DDL",
     "CAMPAIGN_RUNS_COLUMNS",
     "CAMPAIGN_RUNS_DDL",
+    "CHARTER_CONFIRMATIONS_COLUMNS",
+    "CHARTER_CONFIRMATIONS_DDL",
+    "CHARTER_PIVOTS_COLUMNS",
+    "CHARTER_PIVOTS_DDL",
     "EVENTS_DDL",
+    "OUTPUT_COPIES_COLUMNS",
+    "OUTPUT_COPIES_DDL",
     "QUARANTINE_DDL",
     "RUNS_COLUMNS",
     "RUNS_DDL",

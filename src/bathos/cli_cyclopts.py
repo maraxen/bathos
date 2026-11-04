@@ -2357,5 +2357,148 @@ def stepback_resolve_cmd(
     )
 
 
+# ---------------------------------------------------------------------------
+# Charter CLI (spec 261104, slice 1)
+# ---------------------------------------------------------------------------
+
+charter_app = cyclopts.App(name="charter", help="Project charter and confirmation subsystem.")
+app.command(charter_app)
+
+
+@charter_app.command(name="draft")
+def charter_draft_cmd(
+    *,
+    project_root: str = "",
+) -> None:
+    """Generate a proposal draft at .bth/charter.draft.toml."""
+    from bathos.charter import draft
+    from bathos.workspace import resolve_workspace
+
+    root = Path(project_root) if project_root else resolve_workspace().fs_root
+    try:
+        draft_path = draft(root)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+
+    print(f"Draft written to {draft_path}")
+    print("Note: A draft has no standing until it is copied to .bth/charter.toml and confirmed.")
+
+
+@charter_app.command(name="confirm")
+def charter_confirm_cmd(
+    *,
+    project_root: str = "",
+    amend_mandate: bool = False,
+    chair_token: str | None = None,
+    catalog_dir: str = "",
+) -> None:
+    """Confirm the project charter in .bth/charter.toml (human-chair only)."""
+    from bathos.charter import confirm
+    from bathos.workspace import resolve_workspace
+
+    root = Path(project_root) if project_root else resolve_workspace().fs_root
+    cat_p = Path(catalog_dir) if catalog_dir else None
+    try:
+        res = confirm(
+            root,
+            amend_mandate=amend_mandate,
+            chair_token=chair_token or None,
+            interactive_tty=sys.stdin.isatty(),
+            catalog_dir=cat_p,
+        )
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+
+    print(f"Charter confirmed: sha256={res['charter_sha256'][:16]} (auth_mode={res['auth_mode']})")
+
+
+@charter_app.command(name="status")
+def charter_status_cmd(
+    *,
+    project_root: str = "",
+    catalog_dir: str = "",
+    json_output: bool = False,
+) -> None:
+    """Query current confirmation status for the project charter."""
+    from bathos.charter import status
+    from bathos.workspace import resolve_workspace
+
+    root = Path(project_root) if project_root else resolve_workspace().fs_root
+    cat_p = Path(catalog_dir) if catalog_dir else None
+    try:
+        res = status(root, catalog_dir=cat_p)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+
+    if json_output:
+        print(json.dumps(res, indent=2))
+        return
+
+    print("Charter Status:")
+    print(f"  State:                 {res['state']}")
+    print(f"  Current SHA256:        {res['current_sha256']}")
+    print(f"  Last Confirmed SHA256: {res['last_confirmed_sha256'] or 'none'}")
+    if res.get("confirmed_at"):
+        print(f"  Confirmed At:          {res['confirmed_at']}")
+
+
+@charter_app.command(name="pivot")
+def charter_pivot_cmd(
+    *,
+    reason: str,
+    reaffirm: tuple[str, ...] = (),
+    retire: tuple[str, ...] = (),
+    cheapest_next_test: str,
+    project_root: str = "",
+    catalog_dir: str = "",
+) -> None:
+    """Execute purpose ledger pivot, reaffirming or retiring all live purposes."""
+    from bathos.charter import pivot
+    from bathos.workspace import resolve_workspace
+
+    root = Path(project_root) if project_root else resolve_workspace().fs_root
+    cat_p = Path(catalog_dir) if catalog_dir else None
+
+    dispositions: dict[str, str] = {}
+    retired_reasons: dict[str, str] = {}
+
+    for r_item in reaffirm:
+        for p in r_item.split(","):
+            if p.strip():
+                dispositions[p.strip()] = "reaffirm"
+
+    for item in retire:
+        if "=" in item:
+            pid, ret_reason = item.split("=", 1)
+        elif ":" in item:
+            pid, ret_reason = item.split(":", 1)
+        else:
+            pid = item
+            ret_reason = ""
+        pid = pid.strip()
+        dispositions[pid] = "retire"
+        retired_reasons[pid] = ret_reason.strip()
+
+    try:
+        res = pivot(
+            root,
+            reason=reason,
+            dispositions=dispositions,
+            retired_reasons=retired_reasons,
+            cheapest_next_test=cheapest_next_test,
+            catalog_dir=cat_p,
+        )
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+
+    print(
+        f"Pivot recorded: charter updated and unconfirmed (sha256={res['charter_sha256_after'][:16]})"
+    )
+
+
 if __name__ == "__main__":
     app()
