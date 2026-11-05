@@ -223,6 +223,58 @@ def test_adr_quoting_purpose_with_different_wrapping_excluded(env):
     assert not any(k.endswith("quote.md") for k in files)
 
 
+def test_adr_quoting_purpose_in_wrapped_blockquote_excluded(env):
+    """A wrapped markdown blockquote puts '>' inside the quote at each line break."""
+    repo = confirmed_repo(env)
+    quoted = P1.replace(" ", "\n> ", 2)
+    assert quoted != P1
+    commit_files(repo, {".praxia/docs/decisions/bq.md": f"# ADR\n\n> {quoted}\n\nDecided.\n"})
+    out, _ = build(env)
+    assert excluded(out)[".praxia/docs/decisions/bq.md"] == "quotes_charter"
+    assert not any(k.endswith("bq.md") for k in reader_files(out))
+
+
+@pytest.mark.parametrize(
+    "recorded",
+    [
+        "{repo}/.claude/worktrees/some-branch/scripts/sub/w.bth.toml",
+        "/orcd/pool/008/so3_shared/marielle/projects/pkt/scripts/sub/w.bth.toml",
+        "/home/someone/projects/.worktrees/pkt/loop-e1/scripts/sub/w.bth.toml",
+        "scripts/sub/w.bth.toml",
+    ],
+)
+def test_sidecar_recorded_from_a_worktree_or_cluster_path_is_found(env, recorded):
+    """Most real runs record an absolute path from a worktree or cluster copy, not this checkout."""
+    repo = confirmed_repo(env)
+    sha = commit_files(repo, {"scripts/sub/w.bth.toml": '[experiment]\nhypothesis = "fine"\n'})
+    insert_runs(
+        env,
+        [{"id": "cccccccc33333333", "project_slug": "pkt", "timestamp": DATE, "git_hash": sha,
+          "sidecar_path": recorded.format(repo=repo), "command": "python w"}],
+    )
+    out, _ = build(env)
+    idx = json.loads((out / "reader/index.json").read_text())
+    assert [s["path"] for s in idx["sidecars"]] == ["scripts/sub/w.bth.toml"]
+    run = json.loads((out / "reader/runs.jsonl").read_text().splitlines()[0])
+    assert run["sidecar_path"] == "scripts/sub/w.bth.toml"
+    assert manifest(out)["sidecar_unresolved"] == []
+
+
+def test_unfindable_sidecar_is_reported_and_its_path_never_reaches_the_reader(env):
+    repo = confirmed_repo(env)
+    sha = commit_files(repo, {"scripts/other.py": "print(1)\n"})
+    gone = "/orcd/pool/secret-host/projects/pkt/scripts/gone.bth.toml"
+    insert_runs(
+        env,
+        [{"id": "dddddddd44444444", "project_slug": "pkt", "timestamp": DATE, "git_hash": sha,
+          "sidecar_path": gone, "command": "python g"}],
+    )
+    out, _ = build(env)
+    assert manifest(out)["sidecar_unresolved"] == [{"run": "dddddddd44444444", "path": gone}]
+    assert json.loads((out / "reader/runs.jsonl").read_text().splitlines()[0])["sidecar_path"] is None
+    assert not any(b"secret-host" in data for data in reader_files(out).values())
+
+
 @pytest.mark.parametrize("which,text", [("mandate", MANDATE), ("retired", P3)])
 def test_mandate_and_retired_purpose_quotes_excluded(env, which, text):
     repo = confirmed_repo(env)

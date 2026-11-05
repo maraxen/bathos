@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import subprocess
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -48,8 +49,16 @@ def canonical_json(obj: Any) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+_BLOCKQUOTE_RE = re.compile(r"^[ \t]*(?:>[ \t]*)+", re.MULTILINE)
+
+
 def _norm(text: str) -> str:
-    return " ".join(text.split())
+    """Collapse whitespace after dropping line-leading blockquote markers.
+
+    A purpose quoted in a wrapped markdown blockquote has a ``>`` inside it at each line
+    break, which would otherwise defeat the verbatim match and leak it to the reader.
+    """
+    return " ".join(_BLOCKQUOTE_RE.sub("", text).split())
 
 
 def parse_ts(value: str) -> datetime:
@@ -146,16 +155,16 @@ def _scrub(value: Any, root_str: str) -> Any:
     return value
 
 
-def _rel_sidecar(path_str: str | None, root: Path) -> str | None:
-    if not path_str:
-        return None
-    p = Path(path_str)
-    if p.is_absolute():
-        try:
-            return p.relative_to(root).as_posix()
-        except ValueError:
-            return None
-    return p.as_posix().removeprefix("./")
+def _sidecar_candidates(path_str: str) -> list[str]:
+    """Repo-relative guesses for a recorded sidecar path, longest first.
+
+    Runs are recorded with whatever absolute path they ran from: a linked worktree
+    (``<repo>/.claude/worktrees/<name>/scripts/x.bth.toml``), another checkout, or a cluster
+    copy (``/orcd/.../tev_design/scripts/x.bth.toml``). No prefix can be assumed, so try each
+    suffix against the commit the run recorded and take the longest that exists.
+    """
+    parts = [p for p in path_str.split("/") if p not in ("", ".")]
+    return ["/".join(parts[i:]) for i in range(len(parts))]
 
 
 def _packet_hash(reader_dir: Path) -> str:
@@ -313,41 +322,48 @@ def build_packet(
             if any(isinstance(v, str) and _quotes(v, needles) for v in rec.values()):
                 exclusions.append({"path": f"run:{rid}", "reason": "quotes_charter"})
                 continue
-            rel = _rel_sidecar(rec.get("sidecar_path"), repo)
-            if rec.get("sidecar_path") and rel is None:
-                sidecar_unresolved.append({"run": rid, "path": "outside_repo"})
-            rec["sidecar_path"] = rel
             runs.append((ts, rec))  # type: ignore[arg-type]
     runs_sorted = [rec for _, rec in sorted(runs, key=lambda t: (t[0], str(t[1]["id"])))]  # type: ignore[index]
+    # Many runs share a sidecar and commit, and a miss tries every suffix of the path.
+    blob_cache: dict[str, subprocess.CompletedProcess[bytes]] = {}
+
+    def _cat_blob(spec: str) -> subprocess.CompletedProcess[bytes]:
+        if spec not in blob_cache:
+            blob_cache[spec] = _git(repo, "cat-file", "blob", spec, check=False)
+        return blob_cache[spec]
+
     for rec in runs_sorted:
-        rel = rec.get("sidecar_path")
-        if not rel:
+        recorded = rec.get("sidecar_path")
+        if not recorded:
             continue
-        found = False
+        # Only a path proven to exist in the repo reaches the reader; never the recorded one.
+        rec["sidecar_path"] = None
+        found = None
         for rev in (str(rec.get("git_hash") or ""), ref_sha):
-            if not rev:
+            if not rev or found:
                 continue
-            proc = _git(repo, "cat-file", "blob", f"{rev}:{rel}", check=False)
-            if proc.returncode != 0:
-                continue
-            blob = _git(repo, "rev-parse", f"{rev}:{rel}").stdout.decode().strip()
-            if (rel, blob) in sidecars or any(s["path"] == f"sidecar:{rel}@{blob}" for s in exclusions):
-                found = True
-                break
-            try:
-                text = proc.stdout.decode("utf-8")
-            except UnicodeDecodeError:
-                exclusions.append({"path": f"sidecar:{rel}@{blob}", "reason": "not_text"})
-                found = True
-                break
-            if _quotes(text, needles):
-                exclusions.append({"path": f"sidecar:{rel}@{blob}", "reason": "quotes_charter"})
-            else:
-                sidecars[(rel, blob)] = proc.stdout
-            found = True
-            break
+            for cand in _sidecar_candidates(str(recorded)):
+                proc = _cat_blob(f"{rev}:{cand}")
+                if proc.returncode == 0:
+                    found = (rev, cand, proc)
+                    break
         if not found:
-            sidecar_unresolved.append({"run": str(rec["id"]), "path": rel})
+            sidecar_unresolved.append({"run": str(rec["id"]), "path": str(recorded)})
+            continue
+        rev, rel, proc = found
+        rec["sidecar_path"] = rel
+        blob = _git(repo, "rev-parse", f"{rev}:{rel}").stdout.decode().strip()
+        if (rel, blob) in sidecars or any(s["path"] == f"sidecar:{rel}@{blob}" for s in exclusions):
+            continue
+        try:
+            text = proc.stdout.decode("utf-8")
+        except UnicodeDecodeError:
+            exclusions.append({"path": f"sidecar:{rel}@{blob}", "reason": "not_text"})
+            continue
+        if _quotes(text, needles):
+            exclusions.append({"path": f"sidecar:{rel}@{blob}", "reason": "quotes_charter"})
+        else:
+            sidecars[(rel, blob)] = proc.stdout
 
     # ── Git subjects in the window ──────────────────────────────────────────────
     git_log: list[dict[str, str]] = []
