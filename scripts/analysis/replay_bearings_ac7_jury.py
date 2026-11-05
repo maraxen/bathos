@@ -352,7 +352,11 @@ def adjudicate(work: Path) -> None:
     out = jury / "adjudicate"
     out.mkdir(exist_ok=True)
     (out / "prompt.md").write_text("\n".join(lines), encoding="utf-8")
+    # The Cursor redo (seventh amendment, second note) takes the same text as a system and a user prompt.
+    (out / "system.md").write_text(ADJ_SYSTEM + "\n", encoding="utf-8")
+    (out / "user.md").write_text("\n".join(lines[2:]), encoding="utf-8")
     (out / "schema.json").write_text(json.dumps(adjudicator_schema()), encoding="utf-8")
+    init_folder(jury / "base", jury / "folders" / "adjudicator")
     logger.info("adjudicator prompt holds %d disputed entries", n)
 
 
