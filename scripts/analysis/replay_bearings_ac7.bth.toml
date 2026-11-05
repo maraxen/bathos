@@ -10,6 +10,8 @@ Disclosures. The positive control was chosen after the fact, and this sidecar's 
 
 Departure from the spec's AC-7 wording, approved by the owner 261104. AC-7 says the packet reads only history reachable from the cut. Docs and git subjects do. Runs do not: design probes on 261104 found 5 of 35 colliculix runs, 4 of 101 tev_design runs and 77 of 95 plegadx runs reachable, because most runs happened on branches or dirty snapshots. Requiring reachability would remove most of the record the reader is meant to see, and colliculix's drift lived partly on unmerged branches. Runs are therefore bounded by time, every run predates the cut, and contamination is tested directly by the grep below.
 
+Amendment 261105, approved by the owner, committed before the second set of readers and before anything was labelled or scored. The first nine readers read little of the record: 3-6 of 48 docs on plegadx and 0-5 sidecars on any arm, because the prompt did not explain the sidecar path or ask for a full read. One used Bash, and the audit forbids that. Their readings are kept in outputs/ac7/readings_attempt1 and are not scored. The prompt now explains the path and asks for a full read. The audit now also allows SubagentHandback, the harness tool that returns a reader's final report and reads no project data. The result gains descriptive coverage fields, which gate nothing. Conditions and thresholds are unchanged. Readers carry the neutral task id 261104_project-reading and the dispatch header the hook requires. The author saw one first-attempt reader's short summary (colliculix reader 2) and no other reading text; the prompt change was made because of coverage, not because of any reading's content.
+
 Protocol. (1) Commit this sidecar. (2) Run the script with --build-only. (3) Run three fresh Sonnet readers per arm, each with the committed prompt scripts/analysis/replay_bearings_ac7_reader_prompt.md, filling in only its paths and ids, each writing outputs/ac7/readings/<arm>/<reader>.json. A rejected reading gets one redo, which is disclosed. (4) The owner labels every entry into outputs/ac7/labels.json. (5) bth run this script. The result is reported either way."""
 stage_name = "validation"
 novel = true
@@ -50,3 +52,9 @@ plegadx_identities_median = "float"
 colliculix_unresolved_sidecars = "int"
 tev_design_unresolved_sidecars = "int"
 plegadx_unresolved_sidecars = "int"
+colliculix_min_docs_read_frac = "float"
+tev_design_min_docs_read_frac = "float"
+plegadx_min_docs_read_frac = "float"
+colliculix_min_sidecars_read_frac = "float"
+tev_design_min_sidecars_read_frac = "float"
+plegadx_min_sidecars_read_frac = "float"

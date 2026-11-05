@@ -95,8 +95,9 @@ def audit_transcript(path: Path, allowed_roots: list[str]) -> list[str]:
             if not isinstance(block, dict) or block.get("type") != "tool_use":
                 continue
             name, args = block.get("name"), block.get("input") or {}
-            # The dispatch header requires agent_result, and ToolSearch loads it. Neither reads project data.
-            if name == "ToolSearch" or str(name).endswith("__agent_result"):
+            # The dispatch header requires agent_result, ToolSearch loads it, and SubagentHandback returns
+            # the final report. None of them reads project data.
+            if name in ("ToolSearch", "SubagentHandback") or str(name).endswith("__agent_result"):
                 continue
             if name not in ALLOWED_TOOLS:
                 bad.append(f"{name}: tool not allowed")
@@ -106,6 +107,27 @@ def audit_transcript(path: Path, allowed_roots: list[str]) -> list[str]:
             if not target or not any(str(target).startswith(r) for r in allowed_roots):
                 bad.append(f"{name}: {target}")
     return bad
+
+
+def read_fractions(transcript: Path, reader_dir: Path) -> tuple[float, float]:
+    """Fractions of the packet's docs and sidecars this reader opened. Descriptive; gates nothing."""
+    opened = set()
+    for line in transcript.read_text(encoding="utf-8").split("\n"):
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        content = (rec.get("message") or {}).get("content")
+        for block in content if isinstance(content, list) else []:
+            if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "Read":
+                opened.add(str(block.get("input", {}).get("file_path", "")))
+    index = json.loads((reader_dir / "index.json").read_text(encoding="utf-8"))
+    docs = [str(reader_dir / "docs" / d["path"]) for d in index["docs"]]
+    sidecars = [str(reader_dir / "sidecars" / s["blob_sha"] / s["path"]) for s in index["sidecars"]]
+    frac = lambda paths: sum(p in opened for p in paths) / len(paths) if paths else 1.0  # noqa: E731
+    return frac(docs), frac(sidecars)
 
 
 def score_arm(labels_by_reader: dict[str, dict]) -> dict[str, float]:
@@ -198,6 +220,8 @@ def main() -> None:
 
     contamination = hash_mismatches = audit_bad = rejected = n_readings = n_unlabelled = 0
     unresolved_sidecars = {}
+    min_docs: dict[str, float] = {}
+    min_sidecars: dict[str, float] = {}
     by_arm: dict[str, dict[str, dict]] = {}
     for name in ARMS:
         packet = work / "packets" / name
@@ -229,6 +253,9 @@ def main() -> None:
             audit_bad += len(bad)
             for b in bad:
                 logger.error("%s left its packet: %s", key, b)
+            doc_frac, sidecar_frac = read_fractions(Path(transcripts[key]), packet / "reader")
+            min_docs[name] = min(min_docs.get(name, 1.0), doc_frac)
+            min_sidecars[name] = min(min_sidecars.get(name, 1.0), sidecar_frac)
             reader_labels = labels.get(key, {})
             expected = {p["id"] for p in reading.get("purposes", [])}
             expected |= {f"open:{i}" for i in range(len(reading.get("open_lines", [])))}
@@ -251,6 +278,8 @@ def main() -> None:
         "colliculix_unresolved_sidecars": unresolved_sidecars["colliculix"],
         "tev_design_unresolved_sidecars": unresolved_sidecars["tev_design"],
         "plegadx_unresolved_sidecars": unresolved_sidecars["plegadx"],
+        **{f"{n}_min_docs_read_frac": min_docs.get(n, 0.0) for n in ARMS},
+        **{f"{n}_min_sidecars_read_frac": min_sidecars.get(n, 0.0) for n in ARMS},
     }
     text = json.dumps(results, indent=2, sort_keys=True)
     logger.info(text)

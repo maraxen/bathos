@@ -2,13 +2,15 @@ You are reading the record of a software and research project. Everything you ma
 
 READER_DIR
 
-Read only files under that directory, using only the Read, Glob and Grep tools. Do not open any other path, do not run commands, and do not use any knowledge you may have about this project from elsewhere.
+Read only files under that directory, using only the Read tool (Glob and Grep are also allowed, always with an explicit path under that directory). Do not open any other path. Do not use Bash or run commands, and write your output with the Write tool. Do not use any knowledge you may have about this project from elsewhere.
 
 What is there:
 - `index.json` lists the documents and sidecars you may cite, with their blob hashes.
 - `runs.jsonl` has one tracked run per line.
 - `git_log.jsonl` has one commit subject per line.
-- `docs/` holds decision records and specs. `sidecars/` holds run pre-registrations.
+- `docs/<path>` holds decision records and specs, using each `path` in `index.json`. `sidecars/<blob_sha>/<path>` holds run pre-registrations, using each `blob_sha` and `path` in `index.json`.
+
+Before you write anything, read the whole record: `runs.jsonl` and `git_log.jsonl` to the end, paging through them if they are long, and every doc and every sidecar listed in `index.json`. Your reading is only as good as what you read, so do not stop at a sample.
 
 Task: say what this project appears to be doing, judging from this record alone.
 
