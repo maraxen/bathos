@@ -71,6 +71,30 @@ Frame: agents do honest, pre-registered, green work that stops serving any large
 
   Purposes form a graph, not a tree. Hierarchy is allowed, but cross-relevance that defies a strict hierarchy must be representable. **Results flow binds:** two aims belong together when one's results are used by another (`feeds`, `serves`). A shared method or code (`shares`) does not bind. Drift is effort split into groups that pass no results to each other. The reading record gains typed links and uncertainty (Design item 5), and AC-7b re-tests A9 under this rule.
 
+- [261105] **AC-7b failed: the graph count runs opposite to the hypothesis.** Run `b85be024` (sidecar `scripts/analysis/replay_bearings_ac7b.bth.toml`, sha `13827865…`) recorded `fail`, with every instrument check clean:
+  - controls pass;
+  - 0 contamination;
+  - 0 hash mismatches;
+  - 0 rejected readings;
+  - 9 readings;
+  - 0 unlabelled bridges.
+
+  | | colliculix (positive) | demistify (hard negative) | plegadx (negative) |
+  |---|---|---|---|
+  | Median drift groups, strict | 1 | 2 | 3 |
+  | Median drift groups, lenient | 1 | 2 | 2 |
+  | Groups in each reading (strict) | 1, 1, 1 | 3, 2, 1 | 3, 2, 5 |
+
+  - Every colliculix reading gave one group under both rules, so the positive arm's failure does not depend on the unsure labels. plegadx reaches 3 only when unsure bridges are removed.
+  - The readers were 2 Cursor and 1 Antigravity per arm, all at praxia's power tier. The labeller was 1 Opus agent: of 44 bridges, 29 supported, 12 unsure, 3 unsupported.
+  - The registered decision applies: **do not build slice 3 on the blind reader. Re-open the mechanism with the owner.**
+  - This is the second consecutive fail of A9. Neither run can tell "colliculix's drift does not show as disconnected effort in its record" from "the readers and scorer cannot detect disconnected effort at all". The synthetic controls test only the graph arithmetic, not readers plus scorer on a case known to drift.
+  - **Not a finding:** group counts rise with packet size (colliculix 7 docs and 35 runs; demistify 20 and 5; plegadx 48 and 95). That ordering was noticed after the result, over 3 arms. It is a hypothesis for a next experiment, not an explanation of this one.
+  - **Process faults found while running:**
+    - praxia's agy executor cannot take a prompt over 128 KiB (debt 3289).
+    - praxia rejects Cursor answers without a fence, and its retry trips on its own lock (debt 3290).
+    - Both were worked around under registered rules; see the sidecar notes.
+
 ## Assumptions
 
 Tags follow the global spike-test rule. *Verified* means read at a file:line or measured in a tracked run. *Unverified* means not checked.
@@ -174,6 +198,7 @@ Tags follow the global spike-test rule. *Verified* means read at a file:line or 
   - The scorer counts **drift groups**: connected components under binding links, after removing unsupported bridges and ignoring direction, that hold at least a set share of the reading's effort. `shares` and `competes` links never join groups.
   - The scorer passes synthetic controls before any real score: a planted two-island graph must give 2, a planted fully-fed graph 1, and a graph joined only by `shares` links must give 2.
   - Controls are colliculix (positive) and two negatives with several connected aims. The tev_design cut moves to a date when the lagoon simulation, design libraries and active learning are all active, so the negative is the hard case the rule must survive.
+  - **Result 261105: fail** (run `b85be024`; per-reading table run `2eeaeca9`, outcome consistent). See the decision log, AC-7b 261105.
 - **AC-8 Cadence and shadow exit are testable and pre-registered.** Given a set of projects, when bth bearings due runs, it lists exactly those active in the last 28 days with >= 20 new runs or >= 7 days since their last reading. Given a due project, `bth run` in it returns exactly one due advisory with no reading content and appends `bearings.due_notified`; given a project that is not due, it returns none. Before the first live reading, an evaluation sidecar fixes T1 and the excess-spend metric (261027 §8, including chains that paid off; not the `excess_spend_avoided` heuristic in `stepback/analysis.py`). It also counts confirmed charters among active projects, testing A10.
 
 ## Pre-mortem Record
