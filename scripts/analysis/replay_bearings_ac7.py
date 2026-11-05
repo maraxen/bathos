@@ -69,7 +69,7 @@ CONTAMINATION_TERMS = (
     "purpose ledger",
     ".bth/charter.toml",
 )
-ALLOWED_TOOLS = {"Read", "Glob", "Grep", "Write"}
+ALLOWED_TOOLS = {"Read", "Glob", "Grep", "Write", "Edit"}  # Write and Edit pass only on the reader's own reading
 
 
 def contamination_hits(reader_dir: Path) -> list[str]:
