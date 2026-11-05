@@ -85,6 +85,11 @@ New arm 261105, named by the owner from a size probe before any scored reader ra
     - This departs from "send through surface_dispatch", but keeps the registered surface split. Because their first attempt never started, these runs count as each reader's first attempt.
     - A smoke test on a toy prompt confirmed the input format and the result event before any reader ran.
   - **Containment evidence:** collect counts each reader's log events by type, including tool calls, and writes surface/event_counts.json. Every packet is inline, so zero tool events means the reader read nothing outside its prompt. Any nonzero count is reported before scoring.
+  - **Reader result, 261105, counts only:**
+    - **Antigravity:** all 3 direct runs ended with status SUCCESS and no cut-off.
+    - **Extraction:** the rule gave a reading for all 9 readers. 1 came from praxia's own rule (colliculix/reader3, identical to praxia's admitted answer) and 8 from the recovery rule.
+    - **Validity:** all 9 readings pass the v2 validator, with 0 links lacking a resolvable citation. No redo was needed.
+    - **Containment:** every log holds only reasoning, answer and result events, so 0 tool events in any reader (surface/event_counts.json).
   - **Blindness disclosure:** while diagnosing the Cursor failures, a content search of colliculix/reader1's log printed about 30 short fragments of that reader's reasoning. They include purpose ids up to r16, which hints at its purpose count. No link, group or bridge content was seen. From then on, logs were inspected by event counts and structure only.
 - Disclosure: demistify has only 5 runs, so its effort comes mostly from commits. Effort counts run: and git: citations equally, so that is in scope, but it differs from colliculix, whose effort is spread over runs and commits. (4) Run the readers. (5) Label. (6) bth run the scorer. The result is reported either way."""
 stage_name = "validation"
