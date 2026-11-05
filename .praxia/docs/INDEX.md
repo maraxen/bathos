@@ -1,17 +1,18 @@
-# fix-postmortem-scaffold-path Internal Docs
-# 261023-output-tiering-spec Internal Docs
+# 261104_multiscale-goal-awareness Internal Docs
 
 ## Daily
 - [260805_overnight-decisions](daily/260805_overnight-decisions.md) — Every decision made without a human gate during the overnight autonomous loop run, with enough context to backtrack
 
 ## Handoffs
-- [261026_provenance-praxia-g31-handoff](handoffs/261026_provenance-praxia-g31-handoff.md) — What bathos changed (sidecar locks as commit refs, untrackable manifest) and the praxia-side work it needs; blocks praxia's relief from per-run tree dirtying. Tracking item praxia debt #3062.
+- [261026_provenance-praxia-g31-handoff](handoffs/261026_provenance-praxia-g31-handoff.md) — What bathos changed (sidecar locks as commit refs, untrackable manifest) and the praxia-side work it needs; blocks praxia's relief from per-run tree dirtying. Tracking item praxia debt
 - [261023_myxcel-cold-primitives-brief](handoffs/261023_myxcel-cold-primitives-brief.md) — Completed brief for myxcel cold put, commit, verify-file, get, lock, unlock, ls and rm-partial, all merged in myxcel; spec section 6.2 is the authoritative contract, not this brief
 - [260616_worktree-prune-backlog-assess](handoffs/260616_worktree-prune-backlog-assess.md) — repo consolidated to single main worktree; bathos backlog drained (only #1774 P3 remains)
 - [260601_v061-audit-close](handoffs/260601_v061-audit-close.md)
 - [260601_v061-sprint-close](handoffs/260601_v061-sprint-close.md)
 
 ## Plans
+- [261104_bearings-slice1-charter](plans/261104_bearings-slice1-charter.md) — Build plan for Bearings slice 1 (AC-1, AC-2, AC-3 ext half): charter file, human-only hash-bound confirmation, purpose-ledger pivot, folds; dispatch brief for agy.
+- [261104_bearings-slice2-packet-reading](plans/261104_bearings-slice2-packet-reading.md) — Build plan for Bearings slice 2 (AC-4, AC-5, AC-3 atom half): deterministic blind packet read from a git ref, citation-checked reading record, separate mapper step that produces mapped/unmapped/silent items.
 - [260828_cyclopts-migration-milestone-2-scope](plans/260828_cyclopts-migration-milestone-2-scope.md) — Cyclopts CLI migration — Milestone 2 scope (backlog
 - [260805_deferred-item-triage-reconcile-the-handoff-backlog](plans/260805_deferred-item-triage-reconcile-the-handoff-backlog.md) — Scope for a one-time sweep of 42 deferred handoff entries plus a session-close reconciliation step, after Postgres evidence showed the defect is stale handoffs rather than untracked work
 - [260710_asr-rigor-ports-sprint-composition](plans/260710_asr-rigor-ports-sprint-composition.md) — port asr's C1–C5 rigor mechanisms into bathos core: BP-1 C3 concentration lint (`linter.py`), BP-2 C1 `[confounds.synthetic_recovery]` gate (`claim.py` AC-13 + `parity.py` submit-gate templates), BP-3 C5 negative-claim check (`validate_claim`); C2 needs a schema field (Appendix A), C4 stays in asr (Appendix B)
@@ -23,6 +24,8 @@
 - [260515_v02-sprint-plan](plans/260515_v02-sprint-plan.md)
 
 ## Specs
+- [261104_bearings-multiscale-goal-awareness](specs/261104_bearings-multiscale-goal-awareness.md) — Owner-confirmed project charter, purpose ledger and blind cold reader over runs and docs, observe-only, with pre-registered shadow exit
+- [261027_step-back-reviews-advisor-committee-escalation](specs/261027_step-back-reviews-advisor-committee-escalation.md) — Exhaustive architectural specification for Task 261027_step-back-reviews: automated event triggers with mathematical guard clauses, 5-dimension scored rubric with hierarchical gap-free evaluation and hard-floor veto, 5 qualitative cognitive modes with campaign domain evidence citations, authenticated reviewer independence constraints, 4-tier escalation ladder terminating at the human chair with unconditional FastMCP refusal and TTY/chair-token enforcement, meta-signals 15-18 with dispatch-telemetry guards, Cyclopts CLI/FastMCP tooling parity, DuckDB schema v19 migration, and advisor brief matrix integration.
 - [261026_distributional-breakdown-discipline](specs/261026_distributional-breakdown-discipline.md) — Spec for debt #3045: [breakdown] sidecar block + aggregate-verdict lint, postmortem [[amendments]], postmortem [fork] for marginal results; warn everywhere, refuse when claim-bound.
 - [261026_provenance-out-of-working-tree](specs/261026_provenance-out-of-working-tree.md) — Spec for debt #3049: move the per-run sidecar lock into the git object store, untrack legacy manifest/lock files, and warn when bookkeeping would dirty the tree.
 - [261023_output-tiering](specs/261023_output-tiering.md) — Standard for where a run's output files live (warm local path, checksummed cold archive, mirror), how bathos records and verifies each copy, and how `bth warm` restores them; reuses myxcel profiles and transport, folds in naurmalade's coldify wrapper, and notes the already-fixed reap log-mode bug
@@ -56,10 +59,12 @@
 ## Actuation Surfaces
 
 ## Audits
+- [261104_bearings-coherence-rounds](audits/261104_bearings-coherence-rounds.md)
 - [261023_output-tiering-argon-review](audits/261023_output-tiering-argon-review.md) — Verbatim spec-challenger review of specs/261023_output-tiering.md at 2b4c68c4 by gemini-4-argon-high through praxia surface_dispatch c0daf6d7; dispositions (confirmed, version-dependent, fabricated) are in the spec section 13
 - [261015_exploratory-mode-contract-adversarial-review](audits/261015_exploratory-mode-contract-adversarial-review.md) — Spec-challenger findings C1-C25 and spec-defender rulings for specs/261015_exploratory-mode-contract.md, run sequentially
 
 ## Research
+- [261104_multiscale-goal-awareness-background](research/261104_multiscale-goal-awareness-background.md) — From-memory literature grounding, measured bathos surface and documented drift episodes behind the multi-scale goal awareness brainstorm
 - [261015_claim-appraisal-nlm-research](research/261015_claim-appraisal-nlm-research.md) — NotebookLM (Scientific Rigor notebook 1d786e78) answers on appraisal frameworks, doubt/trust taxonomies, grading and appraiser independence, feeding the spec's appraisal payload
 - [261015_exploratory-mode-nlm-research](research/261015_exploratory-mode-nlm-research.md) — NotebookLM (agentic-science notebook 3f0490aa) answers to 7 questions feeding the exploratory-mode contract spec; quotes spot-checked against raw responses
 - [260617_literature-parity-workflow-seed](research/260617_literature-parity-workflow-seed.md) — **SEED for the `literature-parity` workflow** (reference-parity-by-text for reimplemented methods; operationalizes the §10.1 track of the rigor doc). Validated build-by-doing on asr/Zeinaty (caught a mechanism-nullifying defect 3 sprints of unit tests missed). Pattern: blind reconstruction ×N → reconcile → adversarial refutation ×M → adjudicate → graded verdict + runnable invariant-test lock. Input for a brainstorm → adversarial-spec → impl sprint (named bathos workflow + skill section + claim-tier wiring).
