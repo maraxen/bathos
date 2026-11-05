@@ -12,6 +12,7 @@ collect: reads praxia's dispatch records and writes readings/<arm>/<reader>.json
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import subprocess
@@ -159,6 +160,131 @@ def build(work: Path) -> None:
         logger.info("%s: prompt %d bytes", arm, len(body))
 
 
+def last_json_block(text: str) -> dict | None:
+    """praxia's own rule, ported from praxia-dispatch/src/materialize.rs:399: the last ```json block that parses."""
+    last = None
+    start = 0
+    while (i := text.find("```json", start)) != -1:
+        body_start = i + len("```json")
+        j = text.find("```", body_start)
+        if j == -1:
+            break
+        with contextlib.suppress(json.JSONDecodeError):
+            last = json.loads(text[body_start:j].strip())
+        start = j + 3
+    return last if isinstance(last, dict) else None
+
+
+def recover_result(text: str) -> dict | None:
+    """The extraction rule (sidecar note 261105, registered before any count on a recovered reading).
+
+    First praxia's own rule (``last_json_block``). praxia reads a Cursor answer only that way,
+    so a reader that returns bare JSON, or JSON with only a closing fence, is rejected although
+    its answer is complete. Failing that, this rule strips at most one opening fence line
+    (``` or ```json) and at most one closing ``` line from the final text, and requires the rest
+    to parse as one JSON object. Anything else is invalid, and the reader gets its one redo.
+    """
+    if (obj := last_json_block(text)) is not None:
+        return obj
+    body = text.strip()
+    if body.startswith("```"):
+        body = body.split("\n", 1)[1] if "\n" in body else ""
+    if body.rstrip().endswith("```"):
+        body = body.rstrip()[:-3]
+    try:
+        obj = json.loads(body)
+    except json.JSONDecodeError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def read_log(log: Path) -> tuple[dict[str, int], str | None]:
+    """Count stream-json events by type (tool calls included) and return the final result text.
+
+    Handles both Cursor's stream (``type``; ``result`` is the text) and agy's (``event``;
+    ``step_update.step_type`` names the step; ``result.response`` is the text, kept only when
+    ``result.status`` is SUCCESS and the turn was not cut off).
+    """
+    counts: dict[str, int] = {}
+    result = None
+    for line in log.read_text(encoding="utf-8").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            counts["unparsed_line"] = counts.get("unparsed_line", 0) + 1
+            continue
+        if "event" in event:
+            kind = event["event"]
+            if kind == "step_update":
+                kind = f"step:{event['step_update'].get('step_type', '?')}"
+        else:
+            kind = event.get("type", "?")
+        counts[kind] = counts.get(kind, 0) + 1
+        if kind == "result":
+            res = event.get("result")
+            if isinstance(res, dict):
+                ok = res.get("status") == "SUCCESS" and not res.get("finished_reason")
+                result = res.get("response") if ok else None
+            else:
+                result = res
+    return counts, result
+
+
+# Praxia's completion instruction, copied verbatim (praxia-dispatch/src/materialize.rs:21) so a
+# direct agy reader gets the same prompt a praxia dispatch would have rendered.
+FENCED_JSON_OUTPUT_INSTRUCTION = (
+    "\n## Structured Output\n"
+    "When you are finished, end your final message with exactly one fenced "
+    "```json code block containing your structured output. This CLI has no "
+    "--json-schema flag, so that fenced block IS the structured-output contract -- "
+    "if you emit more than one fenced json block, only the LAST one is read.\n"
+)
+AGY_MODEL = "gemini-4-argon-high"  # praxia model_registry.toml [backends.antigravity] power
+AGY_TIMEOUT_S = 2400  # matches the Cursor readers' wall_timeout_secs
+
+
+def agy_argv() -> list[str]:
+    return ["agy", "--print=", "--input-format", "stream-json", "--output-format", "stream-json",
+            "--sandbox", "--mode", "plan", "--print-timeout", f"{AGY_TIMEOUT_S}s", "--model", AGY_MODEL]  # fmt: skip
+
+
+def run_agy(work: Path) -> None:
+    """Run the three reader2 (Antigravity) readers directly, prompt on stdin, one per empty folder.
+
+    praxia passes the prompt to agy as one argv element (praxia-agy-executor/src/lib.rs:912),
+    which the kernel refuses above 128 KiB, so these readers never started through praxia.
+    The prompt is the one praxia's render_completion_prompt would build (materialize.rs:368).
+    """
+    root = work / "surface"
+    prompts = root / "prompts"
+    system = (prompts / "system.md").read_text(encoding="utf-8").rstrip()
+    procs = {}
+    record = {}
+    for arm in ARMS:
+        key = f"{arm}/reader2"
+        folder = root / "folders" / f"{arm}_reader2"
+        user = (prompts / f"{arm}_reader2.md").read_text(encoding="utf-8").rstrip()
+        prompt = system + "\n\n" + user + "\n" + FENCED_JSON_OUTPUT_INSTRUCTION
+        line = json.dumps({"event": "user", "message": {"role": "user", "content": prompt}})
+        (folder / "agy_input.ndjson").write_text(line + "\n", encoding="utf-8")
+        log = folder / "agy_run.ndjson"
+        with (folder / "agy_input.ndjson").open("rb") as stdin:
+            procs[key] = subprocess.Popen(agy_argv(), cwd=folder, stdin=stdin, stdout=log.open("wb"),
+                                          stderr=(folder / "agy_err.txt").open("wb"))  # fmt: skip
+        record[key] = {"argv": agy_argv(), "folder": str(folder), "log": str(log), "prompt_bytes": len(prompt)}
+        logger.info("%s: started, prompt %d bytes", key, len(prompt))
+    (root / "agy_runs.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    for key, proc in procs.items():
+        try:
+            code = proc.wait(timeout=AGY_TIMEOUT_S + 300)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            code = "killed"
+        record[key]["exit"] = code
+        logger.info("%s: exit %s", key, code)
+    (root / "agy_runs.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+
+
 def collect(work: Path) -> None:
     root = work / "surface"
     dispatches = json.loads((root / "dispatches.json").read_text())
@@ -169,32 +295,53 @@ def collect(work: Path) -> None:
         for rec in (obj, *(v for v in obj.values() if isinstance(v, dict))):
             if "dispatch_id" in rec and "terminal_state" in rec:
                 records[rec["dispatch_id"]] = rec
+    agy_file = root / "agy_runs.json"
+    agy_runs = json.loads(agy_file.read_text()) if agy_file.exists() else {}
     transcripts = {}
+    events = {}
     for key, dispatch_id in sorted(dispatches.items()):
-        rec = records.get(dispatch_id)
+        arm, reader = key.split("/")
+        if key in agy_runs:  # run directly on agy; praxia's dispatch never started (see run_agy)
+            rec = {"terminal_state": f"agy exit {agy_runs[key].get('exit', 'running')}"}
+            log = Path(agy_runs[key]["log"])
+            dispatch_id = f"agy:{arm}_{reader}"
+        else:
+            rec = records.get(dispatch_id)
+            log = root / "folders" / f"{arm}_{reader}" / ".praxia" / "dispatch" / dispatch_id / "run.log"
         if rec is None:
             logger.info("%s: running", key)
             continue
         admitted = rec.get("admission") == "admitted"
-        reasons = [] if admitted else (rec.get("admission") or {}).get("rejected", {}).get("reasons", [])
-        out = rec.get("structured_output")
-        if admitted and isinstance(out, dict):
-            arm, reader = key.split("/")
+        out = rec.get("structured_output") if admitted else None
+        source = "praxia" if isinstance(out, dict) else None
+        if log.exists():
+            counts, text = read_log(log)
+            events[key] = counts
+            recovered = recover_result(text) if text is not None else None
+            if source == "praxia" and recovered is not None and recovered != out:
+                raise SystemExit(f"{key}: recovery rule disagrees with praxia's admitted output")
+            if source is None and recovered is not None:
+                out, source = recovered, "recovered"
+        if isinstance(out, dict):
             path = work / "readings" / arm / f"{reader}.json"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
             transcripts[key] = f"inline:{dispatch_id}"
-        logger.info("%s: %s, usable=%s, rejection reasons=%d", key, rec["terminal_state"], admitted, len(reasons))
+        logger.info("%s: %s, admitted=%s, reading source=%s", key, rec["terminal_state"], admitted, source)
     (work / "reader_transcripts.json").write_text(json.dumps(transcripts, indent=2) + "\n", encoding="utf-8")
+    (root / "event_counts.json").write_text(json.dumps(events, indent=2) + "\n", encoding="utf-8")
+    for key, counts in sorted(events.items()):
+        tools = {k: v for k, v in counts.items() if "tool" in k}
+        logger.info("%s: events=%d, tool events=%s", key, sum(counts.values()), tools or 0)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("build", "collect"))
+    parser.add_argument("command", choices=("build", "agy", "collect"))
     parser.add_argument("--work-dir", type=Path, required=True)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    (build if args.command == "build" else collect)(args.work_dir.resolve())
+    {"build": build, "agy": run_agy, "collect": collect}[args.command](args.work_dir.resolve())
 
 
 if __name__ == "__main__":
