@@ -324,8 +324,11 @@ def merge(work: Path) -> None:
     logger.info("entries with a tick note, not sent to the owner: %d", sum(bool(v) for v in tick_notes.values()))
 
 
-def adjudicate(work: Path) -> None:
-    """Write the adjudicator's prompt: each reader holding a flagged entry, with settled labels and the jurors' votes."""
+def adjudicate(work: Path, exclude: tuple[str, ...] = (), out_name: str = "adjudicate") -> None:
+    """Write the adjudicator's prompt: each reader holding a flagged entry, with settled labels and the jurors' votes.
+
+    exclude drops whole arms; it is used only for the post-result Opus check, which leaves out tev_design.
+    """
     jury = work / "jury"
     state = json.loads((jury / "merged.json").read_text())
     merged, flags = state["merged"], state["flags"]
@@ -334,7 +337,7 @@ def adjudicate(work: Path) -> None:
     n = 0
     for r in load_entries(work):
         keys = [key(r["arm"], r["reader"], e["id"]) for e in r["entries"]]
-        if not any(flags[k] for k in keys):
+        if r["arm"] in exclude or not any(flags[k] for k in keys):
             continue
         lines.append(f"## project={r['arm']} reader={r['reader']}")
         for e, k in zip(r["entries"], keys):
@@ -349,8 +352,14 @@ def adjudicate(work: Path) -> None:
                 label = f'project, name "{m["identity"]}"' if m["choice"] == "project" else m["choice"]
                 lines.append(f"- settled entry={e['id']} ({e['kind']}): {e['text']}\n  - label: {label}")
         lines.append("")
-    out = jury / "adjudicate"
+    out = jury / out_name
     out.mkdir(exist_ok=True)
+    if exclude:
+        (out / "prompt.md").write_text("\n".join(lines), encoding="utf-8")
+        (out / "schema.json").write_text(json.dumps(adjudicator_schema()), encoding="utf-8")
+        (out / "rows").mkdir(exist_ok=True)
+        logger.info("check prompt holds %d disputed entries (excluded: %s)", n, ", ".join(exclude))
+        return
     (out / "prompt.md").write_text("\n".join(lines), encoding="utf-8")
     # The Cursor redo (seventh amendment, second note) takes the same text as a system and a user prompt.
     (out / "system.md").write_text(ADJ_SYSTEM + "\n", encoding="utf-8")
@@ -451,6 +460,8 @@ def main() -> None:
     parser.add_argument("command", choices=("build", "collect", "merge", "adjudicate", "join", "finalize", "sensitivity"))
     parser.add_argument("--work-dir", type=Path, required=True)
     parser.add_argument("--owner-dir", type=Path, help="finalize: directory of the owner's label documents")
+    parser.add_argument("--exclude-arm", action="append", default=[], help="adjudicate: leave out this arm")
+    parser.add_argument("--out-name", default="adjudicate", help="adjudicate: output folder under jury/")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     if args.command == "build":
@@ -460,7 +471,7 @@ def main() -> None:
     elif args.command == "merge":
         merge(args.work_dir)
     elif args.command == "adjudicate":
-        adjudicate(args.work_dir)
+        adjudicate(args.work_dir, tuple(args.exclude_arm), args.out_name)
     elif args.command == "join":
         join_adjudicator(args.work_dir)
     elif args.command == "sensitivity":
