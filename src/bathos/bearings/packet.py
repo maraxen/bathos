@@ -7,11 +7,13 @@ reader may see; ``manifest.json`` (exclusions, hash) sits beside it and is never
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
 import re
 import subprocess
+import tomllib
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -49,16 +51,18 @@ def canonical_json(obj: Any) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-_BLOCKQUOTE_RE = re.compile(r"^[ \t]*(?:>[ \t]*)+", re.MULTILINE)
+_LINE_MARKER_RE = re.compile(r"^[ \t]*(?:[>#][ \t]*)+", re.MULTILINE)
+# An absolute path token in a run's command or tags, not part of a URL or a relative path.
+_ABS_PATH_RE = re.compile(r"(?<![\w./:~-])/[^\s'\"=,;:\]\[]+")
 
 
 def _norm(text: str) -> str:
-    """Collapse whitespace after dropping line-leading blockquote markers.
+    """Collapse whitespace after dropping line-leading quote and comment markers.
 
-    A purpose quoted in a wrapped markdown blockquote has a ``>`` inside it at each line
-    break, which would otherwise defeat the verbatim match and leak it to the reader.
+    A purpose quoted in a wrapped markdown blockquote or in TOML ``#`` comments has a marker
+    inside it at each line break, which would otherwise defeat the verbatim match.
     """
-    return " ".join(_BLOCKQUOTE_RE.sub("", text).split())
+    return " ".join(_LINE_MARKER_RE.sub("", text).split())
 
 
 def parse_ts(value: str) -> datetime:
@@ -71,8 +75,10 @@ def parse_ts(value: str) -> datetime:
 
 
 def _git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[bytes]:
+    # Pin the config that changes output, so the user's git settings cannot move the hash.
+    pins = ("-c", "log.showSignature=false", "-c", "i18n.logOutputEncoding=UTF-8", "-c", "core.quotepath=off")
     return subprocess.run(  # noqa: S603 -- explicit argv, no shell
-        ["git", "-C", str(root), *args], check=check, capture_output=True
+        ["git", *pins, "-C", str(root), *args], check=check, capture_output=True
     )
 
 
@@ -87,14 +93,16 @@ def _json_bytes(obj: Any) -> bytes:
 
 def _needles(
     root: Path,
+    repo: Path,
+    ref_sha: str,
     slug: str,
     charter_files: Sequence[Path],
     cat_dir: Path,
 ) -> tuple[list[tuple[str, str]], list[dict[str, Any]]]:
     """Return ``([(source, normalised text)], short_needles_skipped)``.
 
-    Sources: the current charter file, every ``--charter-file``, and the latest
-    ``charter_confirmations`` row (so a pivot cannot leak an older purpose).
+    Sources: the current charter file, every ``--charter-file``, the charter committed at the
+    ref, and every ``charter_confirmations`` row, so no older purpose can leak.
     """
     from bathos.charter import parse_charter
     from bathos.index import catalog_readable, connect_read
@@ -111,17 +119,32 @@ def _needles(
         for pid in sorted(ch.purposes):
             raw.append((f"{label}:purpose:{pid}", ch.purposes[pid].text))
 
+    at_ref = _git(repo, "cat-file", "blob", f"{ref_sha}:.bth/charter.toml", check=False)
+    if at_ref.returncode == 0:
+        try:
+            doc = tomllib.loads(at_ref.stdout.decode("utf-8"))
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+            logger.warning("charter at %s is unreadable, not used for blindness: %s", ref_sha[:12], e)
+        else:
+            raw.append(("ref:mandate", str(doc.get("mandate", ""))))
+            ref_purposes = doc.get("purpose", {})
+            if isinstance(ref_purposes, dict):
+                for pid in sorted(ref_purposes):
+                    entry = ref_purposes[pid]
+                    if isinstance(entry, dict):
+                        raw.append((f"ref:purpose:{pid}", str(entry.get("text", ""))))
+
     if catalog_readable(cat_dir):
         con = connect_read(cat_dir)
         try:
-            row = con.execute(
+            rows = con.execute(
                 "SELECT mandate_text, purposes_json FROM charter_confirmations WHERE project = ? "
-                "ORDER BY ts DESC, eid DESC LIMIT 1",
+                "ORDER BY ts, eid",
                 [slug],
-            ).fetchone()
+            ).fetchall()
         finally:
             con.close()
-        if row:
+        for row in rows:
             raw.append(("confirmed:mandate", row[0] or ""))
             purposes = json.loads(row[1]) if row[1] else {}
             for pid in sorted(purposes):
@@ -149,10 +172,21 @@ def _quotes(text: str, needles: list[tuple[str, str]]) -> bool:
     return any(n in hay for _, n in needles)
 
 
-def _scrub(value: Any, root_str: str) -> Any:
-    if isinstance(value, str):
-        return value.replace(root_str + "/", "").replace(root_str, "")
-    return value
+def _scrub_abs_paths(text: str) -> str:
+    """Reduce absolute paths to their basename.
+
+    The checkout a run or build happened in must not reach the reader or move the hash.
+    """
+    return _ABS_PATH_RE.sub(lambda m: "<abs>/" + m.group(0).rstrip("/").rsplit("/", 1)[-1], text)
+
+
+def _run_quotes(value: str, needles: list[tuple[str, str]]) -> bool:
+    """Match a run field raw, without shell escapes, and decoded if it holds JSON (``tags``)."""
+    forms = [value, value.replace("\\", "")]
+    if value[:1] in ("[", "{"):
+        with contextlib.suppress(ValueError):
+            forms.append(json.dumps(json.loads(value), ensure_ascii=False))
+    return any(_quotes(f, needles) for f in forms)
 
 
 def _sidecar_candidates(path_str: str) -> list[str]:
@@ -239,7 +273,6 @@ def build_packet(
             f"Cannot resolve --ref {ref!r} in {root}: {e.stderr.decode(errors='replace').strip()}"
         ) from e
     repo = Path(top).resolve()
-    root_str = str(repo)
 
     slug = project or _resolve_project_slug(root)
     cat_dir = _resolve_catalog_dir(catalog_dir)
@@ -249,7 +282,7 @@ def build_packet(
         charter_files = [Path(charter_file)]
     else:
         charter_files = [Path(c) for c in charter_file]
-    needles, short_skipped = _needles(root, slug, charter_files, cat_dir)
+    needles, short_skipped = _needles(root, repo, ref_sha, slug, charter_files, cat_dir)
 
     exclusions: list[dict[str, str]] = []
 
@@ -314,14 +347,20 @@ def build_packet(
                 continue
             if not (since_dt <= ts < until_dt):
                 continue
+            if rec.get("status") == "running":
+                # Its status and outcome will change, which would move the hash of a later build.
+                exclusions.append({"path": f"run:{rid}", "reason": "not_terminal"})
+                continue
             gh = rec.get("git_hash")
             if reachable_only and not (gh and _reachable(repo, str(gh), ref_sha, reach_cache)):
                 exclusions.append({"path": f"run:{rid}", "reason": "unreachable_from_ref"})
                 continue
-            rec = {k: _scrub(v, root_str) for k, v in rec.items()}
-            if any(isinstance(v, str) and _quotes(v, needles) for v in rec.values()):
+            if any(isinstance(v, str) and _run_quotes(v, needles) for v in rec.values()):
                 exclusions.append({"path": f"run:{rid}", "reason": "quotes_charter"})
                 continue
+            for field in ("command", "tags"):
+                if isinstance(rec.get(field), str):
+                    rec[field] = _scrub_abs_paths(rec[field])
             runs.append((ts, rec))  # type: ignore[arg-type]
     runs_sorted = [rec for _, rec in sorted(runs, key=lambda t: (t[0], str(t[1]["id"])))]  # type: ignore[index]
     # Many runs share a sidecar and commit, and a miss tries every suffix of the path.
@@ -342,11 +381,20 @@ def build_packet(
         for rev in (str(rec.get("git_hash") or ""), ref_sha):
             if not rev or found:
                 continue
-            for cand in _sidecar_candidates(str(recorded)):
+            candidates = _sidecar_candidates(str(recorded))
+            for cand in candidates:
                 proc = _cat_blob(f"{rev}:{cand}")
-                if proc.returncode == 0:
-                    found = (rev, cand, proc)
-                    break
+                if proc.returncode != 0:
+                    continue
+                # A bare filename could be an unrelated file, so it must match the recorded hash.
+                if (
+                    "/" not in cand
+                    and len(candidates) > 1
+                    and hashlib.sha256(proc.stdout).hexdigest() != rec.get("sidecar_sha256")
+                ):
+                    continue
+                found = (rev, cand, proc)
+                break
         if not found:
             sidecar_unresolved.append({"run": str(rec["id"]), "path": str(recorded)})
             continue
@@ -369,7 +417,8 @@ def build_packet(
     git_log: list[dict[str, str]] = []
     log_out = _git(repo, "log", ref_sha, "--format=%H%x00%cI%x00%s").stdout.decode("utf-8", errors="replace")
     parsed_log: list[tuple[datetime, dict[str, str]]] = []
-    for line in log_out.splitlines():
+    # split("\n"), not splitlines(): a subject may hold \x0b, \x85 or \u2028.
+    for line in log_out.split("\n"):
         parts = line.split("\0", 2)
         if len(parts) != 3:
             continue

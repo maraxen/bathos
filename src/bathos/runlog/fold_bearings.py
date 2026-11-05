@@ -7,7 +7,7 @@ Entity: ``[project_slug, reading_id]``. Two kinds:
 - ``bearings.compared``: written by ``bth bearings compare``; carries the mapper id, the charter
   sha256 compared against, and one item per mapped / unmapped / silent finding.
 
-Both tables are append-only. Readings are idempotent on ``eid``; items on ``(compare_eid, item_id)``.
+``bearings_readings`` has one row per reading. ``bearings_items`` holds the latest comparison per reading.
 """
 
 from __future__ import annotations
@@ -38,15 +38,17 @@ def _project_reading(ev: dict) -> tuple[str, str]:
 def fold_bearings_readings(events: list[dict]) -> list[dict[str, Any]]:
     """Fold ``bearings.reading_recorded`` events into ``bearings_readings`` rows."""
     evs = [e for e in events if e.get("kind") == KIND_READING_RECORDED]
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     rows: list[dict[str, Any]] = []
     for ev in sorted(evs, key=lambda e: (e.get("ts", ""), e.get("eid", ""))):
         eid = ev.get("eid")
-        if not eid or eid in seen:
-            continue
-        seen.add(eid)
         project, reading_id = _project_reading(ev)
         data = ev.get("data") or {}
+        # One row per reading, the earliest: two racing writers can both append the same reading.
+        key = (project, str(data.get("reading_id", reading_id)))
+        if not eid or key in seen:
+            continue
+        seen.add(key)
         rows.append(
             {
                 "project": project,
@@ -66,16 +68,23 @@ def fold_bearings_readings(events: list[dict]) -> list[dict[str, Any]]:
 
 
 def fold_bearings_items(events: list[dict]) -> list[dict[str, Any]]:
-    """Fold ``bearings.compared`` events into ``bearings_items`` rows."""
-    evs = [e for e in events if e.get("kind") == KIND_COMPARED]
-    seen_events: set[str] = set()
+    """Fold the latest ``bearings.compared`` event per reading into ``bearings_items`` rows.
+
+    A later comparison supersedes an earlier one. The table says what the current comparison
+    is; superseded comparisons stay in the event log, so nothing is lost and counts of
+    mapped, unmapped and silent items cannot double.
+    """
+    latest: dict[tuple[str, str], dict] = {}
+    for ev in sorted(
+        (e for e in events if e.get("kind") == KIND_COMPARED and e.get("eid")),
+        key=lambda e: (e.get("ts", ""), e.get("eid", "")),
+    ):
+        project, reading_id = _project_reading(ev)
+        latest[(project, str((ev.get("data") or {}).get("reading_id", reading_id)))] = ev
     seen_items: set[tuple[str, str]] = set()
     rows: list[dict[str, Any]] = []
-    for ev in sorted(evs, key=lambda e: (e.get("ts", ""), e.get("eid", ""))):
-        eid = ev.get("eid")
-        if not eid or eid in seen_events:
-            continue
-        seen_events.add(eid)
+    for ev in latest.values():
+        eid = ev["eid"]
         project, reading_id = _project_reading(ev)
         data = ev.get("data") or {}
         for item in data.get("items", []):

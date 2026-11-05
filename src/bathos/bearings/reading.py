@@ -47,14 +47,15 @@ class _PacketView:
         reader = packet_dir / "reader"
         self.reader = reader
         self.index = json.loads((reader / "index.json").read_text(encoding="utf-8"))
+        # split("\n"), not splitlines(): a commit subject may hold \x0b, \x85 or  .
         self.run_ids = [
             str(json.loads(line)["id"])
-            for line in (reader / "runs.jsonl").read_text(encoding="utf-8").splitlines()
+            for line in (reader / "runs.jsonl").read_text(encoding="utf-8").split("\n")
             if line
         ]
         self.git_shas = [
             str(json.loads(line)["sha"])
-            for line in (reader / "git_log.jsonl").read_text(encoding="utf-8").splitlines()
+            for line in (reader / "git_log.jsonl").read_text(encoding="utf-8").split("\n")
             if line
         ]
         self.docs = {d["path"]: d["blob_sha"] for d in self.index["docs"]}
@@ -346,10 +347,19 @@ def compare_reading(
 
     items: list[dict[str, Any]] = []
 
-    def add(kind: str, key: str, subject: Any, matched_retired: str | None = None, **extra_fields: Any) -> None:
+    def add(
+        kind: str,
+        key: str,
+        subject: Any,
+        target: str | None = None,
+        matched_retired: str | None = None,
+        **extra_fields: Any,
+    ) -> None:
+        # The target is part of the identity: r1->P1 and r1->P2 are different claims, and an
+        # owner's label on one must not attach to the other.
         items.append(
             {
-                "item_id": _item_id(reading_id, charter_sha, kind, subject),
+                "item_id": _item_id(reading_id, charter_sha, kind, [subject, target]),
                 "kind": kind,
                 key: subject,
                 "matched_retired": matched_retired,
@@ -363,15 +373,33 @@ def compare_reading(
         if target is None:
             add("unmapped", "reading_purpose_id", rp)
         elif charter_purposes[target].get("state") == "retired":
-            add("unmapped", "reading_purpose_id", rp, matched_retired=target)
+            add("unmapped", "reading_purpose_id", rp, target=target, matched_retired=target)
         else:
             mapped_live.add(target)
-            add("mapped", "reading_purpose_id", rp, charter_purpose_id=target)
+            add("mapped", "reading_purpose_id", rp, target=target, charter_purpose_id=target)
     for i in range(len(reading["open_lines"])):
         add("unmapped", "open_line_index", i)
     for pid in sorted(charter_purposes):
         if charter_purposes[pid].get("state") == "live" and pid not in mapped_live:
             add("silent", "charter_purpose_id", pid)
+
+    counts = {k: sum(1 for it in items if it["kind"] == k) for k in ("mapped", "unmapped", "silent")}
+    result = {"ok": True, "reading_id": reading_id, "charter_sha256": charter_sha, "counts": counts, "items": items}
+
+    # The same mapper repeating the same comparison is a no-op. Only a changed comparison
+    # supersedes the current one (the fold keeps the latest per reading).
+    con = connect_read(cat_dir)
+    try:
+        current = con.execute(
+            "SELECT item_id, mapper_id FROM bearings_items WHERE project = ? AND reading_id = ?",
+            [slug, reading_id],
+        ).fetchall()
+    finally:
+        con.close()
+    if current and {r[1] for r in current} == {mapper_id} and {r[0] for r in current} == {
+        it["item_id"] for it in items
+    }:
+        return {**result, "status": "already_compared"}
 
     emit_ledger_event(
         kind="bearings.compared",
@@ -386,5 +414,4 @@ def compare_reading(
         root=root,
         cat_dir=cat_dir,
     )
-    counts = {k: sum(1 for it in items if it["kind"] == k) for k in ("mapped", "unmapped", "silent")}
-    return {"ok": True, "reading_id": reading_id, "charter_sha256": charter_sha, "counts": counts, "items": items}
+    return {**result, "status": "compared"}

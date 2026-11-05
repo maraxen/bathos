@@ -74,12 +74,12 @@ def test_item_rows_and_subjects():
     assert {r["mapper_id"] for r in rows} == {"mapper-B"}
 
 
-def test_items_idempotent_per_compare_event_but_kept_across_compares():
+def test_items_hold_only_the_latest_comparison_per_reading():
     dup = _compared()
-    again = _compared(eid="c2", ts="2026-11-04T12:00:00Z")
-    rows = fold_bearings_items([dup, dup, again])
-    assert len(rows) == 8  # four items per distinct compare event, the same event twice adds nothing
-    assert {(r["compare_eid"], r["item_id"]) for r in rows} == {(c, i) for c in ("c1", "c2") for i in ("i1", "i2", "i3", "i4")}
+    later = _compared(eid="c2", ts="2026-11-04T12:00:00Z")
+    rows = fold_bearings_items([later, dup, dup])  # arrival order must not decide which is latest
+    assert len(rows) == 4
+    assert {(r["compare_eid"], r["item_id"]) for r in rows} == {("c2", i) for i in ("i1", "i2", "i3", "i4")}
 
 
 def test_item_without_id_is_dropped():
@@ -88,6 +88,7 @@ def test_item_without_id_is_dropped():
 
 
 def test_fold_bearings_returns_both_tables_in_ts_order():
+    """Two writers can race and both append one reading: the earliest row stands, once."""
     readings, items = fold_bearings([_compared(), _reading(eid="e2", ts="2026-11-04T09:00:00Z"), _reading()])
-    assert [r["eid"] for r in readings] == ["e2", "e1"]
+    assert [r["eid"] for r in readings] == ["e2"]
     assert len(items) == 4

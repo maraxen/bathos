@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -11,6 +12,7 @@ import duckdb
 import pytest
 
 from bathos.bearings.packet import build_packet, verify_packet
+from bathos.bearings.reading import _PacketView
 from bathos.charter import Charter, Purpose, confirm, dump_charter
 from bathos.errors import BearingsPacketInvalidError, BearingsPacketMismatchError
 from bathos.index import RUNS_COLUMNS, index_db_path, init_index_schema
@@ -20,6 +22,7 @@ MANDATE = "Build tools that let one researcher trust what ran"
 P1 = "Validate binding affinity across the designed library"
 P2 = "Verify thermostability of the lead scaffolds under load"
 P3 = "Retired idea about screening an old fragment collection"
+OLD_PURPOSE = "An earlier purpose that was committed but never confirmed"
 SINCE = "2026-01-01T00:00:00+00:00"
 UNTIL = "2026-12-31T00:00:00+00:00"
 DATE = "2026-06-01T12:00:00+00:00"
@@ -184,12 +187,93 @@ def test_non_primary_category_and_index_excluded(env):
 
 def test_deterministic_and_byte_identical(env):
     confirmed_repo(env)
-    commit_files(env["repo"], {".praxia/docs/specs/s.md": "# spec\nunrelated text\n"}, msg="spec")
+    sha = commit_files(
+        env["repo"],
+        {
+            ".praxia/docs/specs/s.md": "# spec\nunrelated text\n",
+            "scripts/a.bth.toml": '[experiment]\nhypothesis = "fine"\n',
+        },
+        msg="spec",
+    )
+    # Inserted out of timestamp order, so a build that kept row order would differ from a sorted one.
+    insert_runs(
+        env,
+        [
+            {"id": "bbbbbbbb00000002", "project_slug": "pkt", "timestamp": "2026-06-02T00:00:00+00:00",
+             "git_hash": sha, "sidecar_path": "scripts/a.bth.toml", "command": "python a", "status": "completed"},
+            {"id": "aaaaaaaa00000001", "project_slug": "pkt", "timestamp": DATE,
+             "git_hash": sha, "sidecar_path": "scripts/a.bth.toml", "command": "python a", "status": "completed"},
+        ],
+    )
     a, ra = build(env, "a")
     b, rb = build(env, "b")
     assert ra["packet_sha256"] == rb["packet_sha256"]
     assert reader_files(a) == reader_files(b)
     assert verify_packet(a) == ra["packet_sha256"]
+    assert run_ids(a) == ["aaaaaaaa00000001", "bbbbbbbb00000002"]
+    assert ra["n_sidecars"] == 1
+
+    # An unrelated run outside the window must not move the hash.
+    insert_runs(
+        env,
+        [{"id": "cccccccc00000003", "project_slug": "pkt", "timestamp": "2025-01-01T00:00:00+00:00",
+          "git_hash": sha, "command": "python old", "status": "completed"}],
+    )
+    assert build(env, "c")[1]["packet_sha256"] == ra["packet_sha256"]
+
+
+def test_absolute_paths_do_not_reach_the_reader_or_move_the_hash(env):
+    """The same work recorded from two checkouts must give the same packet."""
+    confirmed_repo(env)
+    sha = commit_files(env["repo"], {"scripts/a.py": "print(1)\n"})
+
+    def run(rid, command):
+        return {"id": rid, "project_slug": "pkt", "timestamp": DATE, "git_hash": sha,
+                "command": command, "status": "completed"}
+
+    insert_runs(env, [run("aaaaaaaa00000001", "python /home/me/projects/pkt/scripts/a.py --out=/orcd/host9/x.json")])
+    a, ra = build(env, "a")
+    text = (a / "reader/runs.jsonl").read_text()
+    assert "/home/me" not in text and "/orcd" not in text and "host9" not in text
+    assert "<abs>/a.py" in text and "<abs>/x.json" in text
+
+    con = duckdb.connect(str(index_db_path(env["cat"])))
+    con.execute("DELETE FROM runs")
+    con.close()
+    insert_runs(env, [run("aaaaaaaa00000001", "python /scratch/wt/pkt/scripts/a.py --out=/tmp/other/x.json")])
+    assert build(env, "b")[1]["packet_sha256"] == ra["packet_sha256"]
+
+
+def test_url_in_a_command_is_left_alone(env):
+    confirmed_repo(env)
+    sha = commit_files(env["repo"], {"scripts/a.py": "print(1)\n"})
+    insert_runs(env, [{"id": "aaaaaaaa00000001", "project_slug": "pkt", "timestamp": DATE, "git_hash": sha,
+                       "command": "curl https://example.org/a/b.json -o rel/c.json", "status": "completed"}])
+    out, _ = build(env)
+    assert "https://example.org/a/b.json -o rel/c.json" in (out / "reader/runs.jsonl").read_text()
+
+
+def test_running_run_is_excluded_so_a_later_build_cannot_differ(env):
+    confirmed_repo(env)
+    sha = commit_files(env["repo"], {"scripts/a.py": "print(1)\n"})
+    insert_runs(env, [{"id": "aaaaaaaa00000001", "project_slug": "pkt", "timestamp": DATE, "git_hash": sha,
+                       "command": "python a", "status": "running"}])
+    out, _ = build(env)
+    assert run_ids(out) == []
+    assert excluded(out)["run:aaaaaaaa00000001"] == "not_terminal"
+
+
+def test_commit_subject_with_a_unicode_line_separator_is_kept_whole(env):
+    """splitlines() would truncate this subject going in, and break the record coming back."""
+    confirmed_repo(env)
+    sha = commit_files(env["repo"], {"scripts/a.py": "print(1)\n"}, msg="ordinary subject")
+    out, _ = build(env)
+    log = {
+        e["sha"]: e["subject"]
+        for e in (json.loads(line) for line in (out / "reader/git_log.jsonl").read_text().split("\n") if line)
+    }
+    assert log[sha] == "ordinary subject"
+    assert sha in _PacketView(out).git_shas
 
 
 def test_working_tree_edit_does_not_move_hash_but_commit_does(env):
@@ -232,6 +316,95 @@ def test_adr_quoting_purpose_in_wrapped_blockquote_excluded(env):
     out, _ = build(env)
     assert excluded(out)[".praxia/docs/decisions/bq.md"] == "quotes_charter"
     assert not any(k.endswith("bq.md") for k in reader_files(out))
+
+
+def test_sidecar_quoting_purpose_in_wrapped_toml_comments_excluded(env):
+    repo = confirmed_repo(env)
+    commented = P1.replace(" ", "\n# ", 2)
+    sha = commit_files(repo, {"scripts/c.bth.toml": f'# {commented}\n[experiment]\nhypothesis = "x"\n'})
+    insert_runs(env, [{"id": "aaaaaaaa00000001", "project_slug": "pkt", "timestamp": DATE, "git_hash": sha,
+                       "sidecar_path": "scripts/c.bth.toml", "command": "python c", "status": "completed"}])
+    out, _ = build(env)
+    assert any(k.startswith("sidecar:scripts/c.bth.toml@") and v == "quotes_charter" for k, v in excluded(out).items())
+    assert not any(k.endswith("c.bth.toml") for k in reader_files(out))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("tags", json.dumps([f"note:{P1}"])),
+        ("command", "python x --note " + P1.replace(" ", "\\ ")),
+    ],
+)
+def test_run_field_quoting_purpose_through_an_escape_excluded(env, field, value):
+    confirmed_repo(env)
+    sha = commit_files(env["repo"], {"scripts/a.py": "print(1)\n"})
+    row = {"id": "aaaaaaaa00000001", "project_slug": "pkt", "timestamp": DATE, "git_hash": sha,
+           "command": "python x", "status": "completed"}
+    row[field] = value
+    insert_runs(env, [row])
+    out, _ = build(env)
+    assert excluded(out)["run:aaaaaaaa00000001"] == "quotes_charter"
+
+
+def test_tag_with_json_unicode_escape_quoting_purpose_excluded(env):
+    """ensure_ascii tags store non-ASCII as \\\\uXXXX, which a raw match cannot see."""
+    purpose = "Validate café binding across the library"
+    repo = confirmed_repo(env)
+    write_charter(repo, {"P1": Purpose(id="P1", text=purpose, state="live")})
+    sha = commit_files(repo, {"scripts/a.py": "print(1)\n"})
+    insert_runs(env, [{"id": "aaaaaaaa00000001", "project_slug": "pkt", "timestamp": DATE, "git_hash": sha,
+                       "command": "python x", "status": "completed",
+                       "tags": json.dumps([purpose], ensure_ascii=True)}])
+    out, _ = build(env)
+    assert excluded(out)["run:aaaaaaaa00000001"] == "quotes_charter"
+
+
+def test_charter_committed_at_the_ref_is_a_needle(env):
+    """A purpose that exists only in the charter at --ref still must not reach the reader."""
+    repo = confirmed_repo(env)
+    commit_files(
+        repo,
+        {
+            ".bth/charter.toml": f'mandate = "m"\n[purpose.old]\ntext = "{OLD_PURPOSE}"\nstate = "live"\n',
+            ".praxia/docs/specs/old.md": f"see {OLD_PURPOSE} here\n",
+        },
+    )
+    ref = git(repo, "rev-parse", "HEAD")
+    write_charter(repo)  # the working file no longer has it
+    out, _ = build(env, ref=ref)
+    assert excluded(out)[".praxia/docs/specs/old.md"] == "quotes_charter"
+
+
+def test_every_confirmed_charter_is_a_needle_not_only_the_latest(env):
+    repo = confirmed_repo(env)
+    write_charter(repo, {"P1": Purpose(id="P1", text=P1, state="live")})
+    confirm(repo, chair_token=TOKEN, interactive_tty=False, catalog_dir=env["cat"])  # P2 gone from latest row
+    write_charter(repo, {"P1": Purpose(id="P1", text=P1, state="live")})
+    commit_files(repo, {".praxia/docs/specs/p2.md": f"see {P2} here\n"})
+    out, _ = build(env)
+    assert excluded(out)[".praxia/docs/specs/p2.md"] == "quotes_charter"
+
+
+def test_bare_filename_needs_the_recorded_hash(env):
+    """A same-named file at the root is not the sidecar unless its bytes match."""
+    repo = confirmed_repo(env)
+    body = b'[experiment]\nhypothesis = "unrelated root file"\n'
+    sha = commit_files(repo, {"w.bth.toml": body.decode()})
+
+    def run(rid, recorded_sha):
+        return {"id": rid, "project_slug": "pkt", "timestamp": DATE, "git_hash": sha, "command": "python w",
+                "status": "completed", "sidecar_path": "/orcd/host/pkt/scripts/w.bth.toml",
+                "sidecar_sha256": recorded_sha}
+
+    insert_runs(env, [run("aaaaaaaa00000001", "0" * 64)])
+    wrong, _ = build(env, "wrong")
+    assert json.loads((wrong / "reader/index.json").read_text())["sidecars"] == []
+    assert manifest(wrong)["sidecar_unresolved"][0]["run"] == "aaaaaaaa00000001"
+
+    insert_runs(env, [run("bbbbbbbb00000002", hashlib.sha256(body).hexdigest())])
+    right, _ = build(env, "right")
+    assert [s["path"] for s in json.loads((right / "reader/index.json").read_text())["sidecars"]] == ["w.bth.toml"]
 
 
 @pytest.mark.parametrize(
@@ -359,7 +532,7 @@ def test_empty_mandate_does_not_exclude_everything_and_short_needle_listed(env):
     out, _ = build(env)
     assert "docs/.praxia/docs/specs/s.md" in reader_files(out)
     skipped = manifest(out)["short_needles_skipped"]
-    assert [s["source"] for s in skipped] == ["charter:purpose:S"]
+    assert [s["source"] for s in skipped] == ["charter:purpose:S", "ref:purpose:S"]
 
 
 def test_harness_and_charter_files_absent(env):
@@ -424,7 +597,7 @@ def test_no_absolute_or_out_paths_in_reader(env):
     assert str(env["tmp"]) not in blob
     run = json.loads((out / "reader/runs.jsonl").read_text().splitlines()[0])
     assert run["sidecar_path"] == "scripts/s.bth.toml"
-    assert run["command"] == "python scripts/s.py"
+    assert run["command"] == "python <abs>/s.py"
     idx = json.loads((out / "reader/index.json").read_text())
     assert [s["path"] for s in idx["sidecars"]] == ["scripts/s.bth.toml"]
 

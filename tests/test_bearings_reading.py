@@ -348,6 +348,32 @@ def test_item_ids_are_stable_across_identical_runs_and_differ_across_items(world
     assert {i["item_id"] for i in other["items"]} != {i["item_id"] for i in first["items"]}
 
 
+def test_item_id_differs_when_only_the_mapping_target_differs(world):
+    """r1->P1 and r1->P2 are different claims, so a label on one must not attach to the other."""
+    rid = record_three(world)
+    first = cmp(world, rid, write_mapping(world, {"r1": "P1", "r2": None, "r3": None}))
+    other = cmp(world, rid, write_mapping(world, {"r1": "P2", "r2": None, "r3": None}, name="m2"))
+    id_of = lambda res: next(i["item_id"] for i in res["items"] if i.get("reading_purpose_id") == "r1")  # noqa: E731
+    assert id_of(first) != id_of(other)
+
+
+def test_repeating_a_comparison_is_a_noop_and_a_changed_one_supersedes(world):
+    rid = record_three(world)
+    m = write_mapping(world, {"r1": "P1", "r2": None, "r3": None})
+    assert cmp(world, rid, m)["status"] == "compared"
+    n_items = len(rows(world, "SELECT item_id FROM bearings_items"))
+
+    assert cmp(world, rid, m)["status"] == "already_compared"
+    assert n_events(world, "bearings.compared") == 1
+    assert len(rows(world, "SELECT item_id FROM bearings_items")) == n_items
+
+    changed = cmp(world, rid, write_mapping(world, {"r1": "P2", "r2": None, "r3": None}, name="m2"))
+    assert changed["status"] == "compared"
+    assert n_events(world, "bearings.compared") == 2
+    folded = rows(world, "SELECT item_id FROM bearings_items")
+    assert sorted(r[0] for r in folded) == sorted(i["item_id"] for i in changed["items"])
+
+
 def test_a_mapped_live_purpose_is_not_silent(world):
     rid = record_three(world)
     res = cmp(world, rid, write_mapping(world, {"r1": "P1", "r2": "P2", "r3": None}))

@@ -417,6 +417,11 @@ def pivot(
     tmp_p = charter_p.with_name(f".{charter_p.name}.pivot.tmp")
     tmp_p.write_bytes(new_bytes)
     try:
+        # The in-place edit must still parse to what was asked, whatever TOML shape the owner used.
+        edited = parse_charter(tmp_p)
+        for pid, disp in dispositions.items():
+            if disp == "retire" and edited.purposes[pid].state != "retired":
+                raise CharterInvalidError(f"Could not retire purpose '{pid}' in place in {charter_p}")
         emit_ledger_event(
             kind="charter.pivot",
             slug=slug,
@@ -439,7 +444,8 @@ def pivot(
 
     return {
         "ok": True,
-        "state": "unconfirmed",
+        # A reaffirm-only pivot leaves the file's bytes alone, so a confirmed charter stays confirmed.
+        "state": "confirmed" if confirmed_before and charter_sha256_after == charter_sha256_before else "unconfirmed",
         "charter_sha256_before": charter_sha256_before,
         "charter_sha256_after": charter_sha256_after,
         "confirmed_before": confirmed_before,

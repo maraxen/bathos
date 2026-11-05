@@ -517,6 +517,67 @@ def test_failed_append_raises_and_leaves_charter_untouched(charter_env, monkeypa
     assert not list(charter_file.parent.glob(".charter.toml.pivot.tmp"))
 
 
+def test_reaffirm_only_pivot_leaves_a_confirmed_charter_confirmed(charter_env, monkeypatch: pytest.MonkeyPatch):
+    """Nothing in the file changed, so the result must not claim the charter became unconfirmed."""
+    charter_file = charter_env["write_charter"]()
+    proj = charter_env["project_dir"]
+    cat = charter_env["catalog_dir"]
+    _clear_agent_vars(monkeypatch)
+    confirm(proj, chair_token="secret_chair_token_xyz", interactive_tty=False, catalog_dir=cat)
+    before = charter_file.read_bytes()
+
+    res = pivot(
+        proj,
+        reason="r",
+        dispositions={"P1": "reaffirm", "P2": "reaffirm"},
+        cheapest_next_test="none_pending",
+        catalog_dir=cat,
+    )
+    assert charter_file.read_bytes() == before
+    assert res["state"] == "confirmed"
+    assert status(proj, catalog_dir=cat)["state"] == "confirmed"
+    assert _count_pivot_events(cat) == 1
+
+
+def test_pivot_handles_dotted_key_purposes(charter_env, monkeypatch: pytest.MonkeyPatch):
+    proj = charter_env["project_dir"]
+    cat = charter_env["catalog_dir"]
+    _clear_agent_vars(monkeypatch)
+    charter_file = proj / ".bth" / "charter.toml"
+    charter_file.write_text(
+        'mandate = "m"\npurpose.P1.text = "first purpose"\npurpose.P1.state = "live"\n'
+        'purpose.P2.text = "second purpose"\npurpose.P2.state = "live"\n',
+        encoding="utf-8",
+    )
+
+    _pivot_retiring_p2(proj, cat)
+    parsed = parse_charter(charter_file)
+    assert parsed.purposes["P2"].state == "retired"
+    assert parsed.purposes["P2"].retired_reason == "superseded"
+    assert parsed.purposes["P1"].state == "live"
+    assert _count_pivot_events(cat) == 1
+
+
+def test_pivot_refuses_a_shape_it_cannot_edit_and_changes_nothing(charter_env, monkeypatch: pytest.MonkeyPatch):
+    """tomlkit writes a broken file when editing inline-table purposes, so pivot must refuse them."""
+    proj = charter_env["project_dir"]
+    cat = charter_env["catalog_dir"]
+    _clear_agent_vars(monkeypatch)
+    charter_file = proj / ".bth" / "charter.toml"
+    charter_file.write_text(
+        'mandate = "m"\n[purpose]\nP1 = {text = "first purpose", state = "live"}\n'
+        'P2 = {text = "second purpose", state = "live"}\n',
+        encoding="utf-8",
+    )
+    before = charter_file.read_bytes()
+
+    with pytest.raises(CharterInvalidError):
+        _pivot_retiring_p2(proj, cat)
+    assert charter_file.read_bytes() == before
+    assert not list(charter_file.parent.glob(".charter.toml.pivot.tmp"))
+    assert _count_pivot_events(cat) == 0
+
+
 def test_pivot_preserves_comments_and_unknown_keys(charter_env, monkeypatch: pytest.MonkeyPatch):
     """Pivot edits the owner's file in place: comments, uninterpreted keys and ext survive."""
     proj = charter_env["project_dir"]
