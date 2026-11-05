@@ -31,6 +31,7 @@ ARM_ORDERS = {
 AUDIT_SEED = 261105
 AUDIT_SIZE = 10
 AUDIT_MAX_OVERTURNED = 2
+MIN_UNCERTAIN = 3  # Owner's choice, fifth sidecar amendment.
 
 LABEL_SYSTEM = """You are classifying statements about research projects. Each statement is one entry written by an \
 independent reader describing what a project's record shows. Work only from the text in this prompt. Do not open files, \
@@ -168,10 +169,16 @@ def collect(work: Path) -> None:
             logger.info("%s: running", name)
             continue
         admitted = rec.get("admission") == "admitted"
+        reject = (rec.get("admission") or {}).get("rejected", {}).get("reasons", []) if not admitted else []
+        # A pilot's rollback patch left in the folder is praxia's own file, not an act of this juror.
+        leftover = "out-of-scope change: .praxia/patches/"
+        only_leftover = bool(reject) and all(r.startswith(leftover) and dispatch_id not in r for r in reject)
+        if only_leftover and rec.get("structured_output") is not None:
+            admitted = True
+            logger.info("%s: rejected only for a leftover patch from an earlier dispatch; verdict kept", name)
         if admitted:
             (jury / "verdicts" / f"{name}.json").write_text(json.dumps(rec["structured_output"]), encoding="utf-8")
-        reasons = len((rec.get("admission") or {}).get("rejected", {}).get("reasons", [])) if not admitted else 0
-        logger.info("%s: %s, admitted=%s, rejection reasons=%d", name, rec["terminal_state"], admitted, reasons)
+        logger.info("%s: %s, usable=%s, rejection reasons=%d", name, rec["terminal_state"], admitted, len(reject))
 
 
 def key(arm: str, reader: str, entry: str) -> str:
@@ -227,14 +234,14 @@ def merge(work: Path) -> None:
                 reasons.append("choice")
             elif votes[0]["choice"] == "project":
                 project_keys.append(k)
-            if any(v["uncertain"] for v in votes):
+            if sum(v["uncertain"] for v in votes) >= MIN_UNCERTAIN:
                 reasons.append("uncertain")
             ticks: list[str] = []
             if r["arm"] == "colliculix":
                 map_votes = [maps[j][k] for j in maps]
                 if len({tuple(sorted(v["maps_to"])) for v in map_votes}) > 1:
                     reasons.append("ticks")
-                if any(v["uncertain"] for v in map_votes):
+                if sum(v["uncertain"] for v in map_votes) >= MIN_UNCERTAIN:
                     reasons.append("ticks_uncertain")
                 ticks = sorted(map_votes[0]["maps_to"])
             choice = labels[first][k]["choice"]

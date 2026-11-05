@@ -95,6 +95,7 @@ input[type=text]{width:100%;padding:8px 10px;font:inherit;color:var(--fg);backgr
 </div></div>
 <main class="wrap">
 <section id="work">
+<p class="hint" id="intro">The jury settled the other entries. These need your judgment. If a suggested name fits, use it, because a name counts once per reader.</p>
 <p class="where" id="where"></p>
 <blockquote id="text"></blockquote>
 <details id="citeBox"><summary id="citeSum"></summary><div id="cites"></div></details>
@@ -129,6 +130,7 @@ input[type=text]{width:100%;padding:8px 10px;font:inherit;color:var(--fg);backgr
 </main>
 <script>
 const DATA=__DATA__;const AG=__PURPOSES__;
+const JURY_NAMES=__NAMES__;
 const KEY="ac7-labels-v2";
 const entries=DATA.flatMap(r=>r.entries.map((x,i)=>({...x,arm:r.arm,reader:r.reader,rkey:r.key,k:r.arm+"."+r.reader+"."+x.id,pos:i+1,n:r.entries.length})));
 const $=id=>document.getElementById(id);
@@ -164,7 +166,7 @@ h.className=again?"hint warn":"hint";
 h.textContent=again?"This reader already has an entry with this name. A name counts once per reader.":"Pick a name you already used, or type a new one.";}
 
 function chips(){const x=cur(),s=get(x.k),v=(s.identity||"").trim(),box=$("chips");box.replaceChildren();
-for(const n of armNames(x.arm).keys()){const b=el("button",{type:"button",className:"chip",textContent:n});b.setAttribute("aria-pressed",String(n===v));
+for(const n of new Set([...(JURY_NAMES[x.arm]||[]),...armNames(x.arm).keys()])){const b=el("button",{type:"button",className:"chip",textContent:n});b.setAttribute("aria-pressed",String(n===v));
 b.onclick=()=>{setName(n);$("name").value=n;chips();};box.append(b);}nameHint();}
 
 const savedName={};
@@ -175,7 +177,6 @@ if(v==="project"){if(x.arm!=="colliculix")$("name").focus();return;}
 if(v==="generic"||x.arm!=="colliculix")next();}
 
 function toggle(c){const x=cur();const s=state[x.k]||(state[x.k]={});const on=(s.maps||[]).includes(c);s.maps=on?s.maps.filter(m=>m!==c):[...(s.maps||[]),c];
-if(!on&&s.choice==="project"&&!(s.identity||"").trim())s.identity=AG[c];
 acted=true;persist(x.k);render();chrome();}
 
 function render(){const x=cur(),s=get(x.k);$("work").hidden=false;$("overview").hidden=true;
@@ -268,14 +269,29 @@ def load_entries(work: Path) -> list[dict]:
     return data
 
 
-def build(work: Path, out: Path) -> None:
-    """Write the labelling page, escaping the data so a reading's text cannot close the inline script."""
+def build(work: Path, out: Path, only_jury: bool = False) -> None:
+    """Write the labelling page, escaping the data so a reading's text cannot close the inline script.
+
+    With only_jury, the page holds just the entries the jury sends to the owner, in reading order, so the
+    audit entries cannot be told from the flagged ones, and it offers the first juror's names as suggestions.
+    """
     data = load_entries(work)
+    names: dict[str, list[str]] = {}
+    if only_jury:
+        keys = set(json.loads((work / "jury" / "for_owner.json").read_text())["keys"])
+        for r in data:
+            r["entries"] = [e for e in r["entries"] if f"{r['arm']}.{r['reader']}.{e['id']}" in keys]
+        data = [r for r in data if r["entries"]]
+        merged = json.loads((work / "jury" / "merged.json").read_text())["merged"]
+        for k, v in sorted(merged.items()):
+            if v["identity"] and v["identity"] not in names.setdefault(k.split(".")[0], []):
+                names[k.split(".")[0]].append(v["identity"])
 
     def embed(obj: object) -> str:
         return json.dumps(obj, ensure_ascii=False).replace("</", "<\\/").replace("<!--", "<\\!--")
 
-    out.write_text(PAGE.replace("__DATA__", embed(data)).replace("__PURPOSES__", embed(PURPOSES)), encoding="utf-8")
+    page = PAGE.replace("__DATA__", embed(data)).replace("__PURPOSES__", embed(PURPOSES))
+    out.write_text(page.replace("__NAMES__", embed(names)), encoding="utf-8")
     logger.info("wrote %s: %d readings, %d entries", out, len(data), sum(len(r["entries"]) for r in data))
 
 
@@ -313,13 +329,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work-dir", type=Path, required=True)
     parser.add_argument("--export-from", type=Path, help="directory of label documents read from the artifact")
+    parser.add_argument("--only-jury", action="store_true", help="show only the entries the jury sends to the owner")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     if args.export_from:
         export(args.work_dir, args.export_from)
     else:
-        build(args.work_dir, args.work_dir / "ac7-labels.html")
+        build(args.work_dir, args.work_dir / "ac7-labels.html", args.only_jury)
 
 
 if __name__ == "__main__":
