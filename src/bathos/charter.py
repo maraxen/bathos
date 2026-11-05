@@ -179,10 +179,18 @@ def _resolve_catalog_dir(catalog_dir: Path | None = None) -> Path:
     return default_catalog_dir()
 
 
-def _emit_charter_event(
-    *, kind: str, slug: str, data: dict[str, Any], root: Path, cat_dir: Path
+def emit_ledger_event(
+    *,
+    kind: str,
+    slug: str,
+    data: dict[str, Any],
+    root: Path,
+    cat_dir: Path,
+    entity: list[str] | None = None,
 ) -> None:
-    """Append one charter event or raise.
+    """Append one ledger event (charter or bearings) or raise.
+
+    ``entity`` defaults to ``[slug]``; bearings events pass ``[slug, reading_id]``.
 
     Charter state lives only in the event log and its fold, so a catalog that is not in
     log mode could record the event but never fold it (status would stay
@@ -194,7 +202,7 @@ def _emit_charter_event(
                 f"{kind}: the catalog at {cat_dir} is not in log mode, so the event "
                 "could not be folded into the charter ledger"
             )
-        outcome = emit_event(kind=kind, entity=[slug], data=data, cwd=root)
+        outcome = emit_event(kind=kind, entity=entity or [slug], data=data, cwd=root)
         if not outcome.ok:
             raise CharterLedgerUnavailableError(
                 f"{kind}: event could not be appended "
@@ -305,7 +313,7 @@ def confirm(
         for pid, p in sorted(charter.purposes.items())
     }
 
-    _emit_charter_event(
+    emit_ledger_event(
         kind="charter.confirmed",
         slug=slug,
         data={
@@ -409,7 +417,7 @@ def pivot(
     tmp_p = charter_p.with_name(f".{charter_p.name}.pivot.tmp")
     tmp_p.write_bytes(new_bytes)
     try:
-        _emit_charter_event(
+        emit_ledger_event(
             kind="charter.pivot",
             slug=slug,
             data={

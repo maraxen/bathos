@@ -142,6 +142,14 @@ class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(
     CHARTER_AGENT_CONFIRM_REFUSED = "charter_agent_confirm_refused"
     CHARTER_UNAUTHORIZED = "charter_unauthorized"
     CHARTER_LEDGER_UNAVAILABLE = "charter_ledger_unavailable"
+    # Bearings blind packet and reading record (spec 261104, slice 2).
+    BEARINGS_PACKET_INVALID = "bearings_packet_invalid"
+    BEARINGS_PACKET_MISMATCH = "bearings_packet_mismatch"
+    BEARINGS_READING_INVALID = "bearings_reading_invalid"
+    BEARINGS_READING_NOT_FOUND = "bearings_reading_not_found"
+    BEARINGS_NO_CONFIRMED_CHARTER = "bearings_no_confirmed_charter"
+    BEARINGS_MAPPING_INVALID = "bearings_mapping_invalid"
+    BEARINGS_MAPPER_IS_READER = "bearings_mapper_is_reader"
 
 
 # Resolution hints registry: every BathosErrorCode member must have a non-empty entry
@@ -237,6 +245,14 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.CHARTER_AGENT_CONFIRM_REFUSED: "Confirmation must be performed directly by the human chair in an interactive terminal or with a chair token",
     BathosErrorCode.CHARTER_UNAUTHORIZED: "Run in an interactive terminal or supply a valid chair token via --chair-token or BTH_CHAIR_TOKEN_PATH",
     BathosErrorCode.CHARTER_LEDGER_UNAVAILABLE: "Charter events need a log-mode catalog whose project log is writable; run 'bth migrate --to-log' or fix the log path, then retry",
+    # Bearings blind packet and reading record (spec 261104, slice 2).
+    BathosErrorCode.BEARINGS_PACKET_INVALID: "The packet directory is missing, malformed or not empty; build it with 'bth bearings packet' into an empty --out",
+    BathosErrorCode.BEARINGS_PACKET_MISMATCH: "The packet bytes or packet_sha256 do not match the reading; rebuild the packet or fix the reading's packet_sha256",
+    BathosErrorCode.BEARINGS_READING_INVALID: "Fix the reading file: it needs packet_sha256, reader_id, purposes with ids and text, and citations that are strings or objects",
+    BathosErrorCode.BEARINGS_READING_NOT_FOUND: "No recorded reading has that reading_id; record it with 'bth bearings record' first",
+    BathosErrorCode.BEARINGS_NO_CONFIRMED_CHARTER: "The charter must be confirmed (and unedited since) before a reading can be compared; ask the owner to run 'bth charter confirm'",
+    BathosErrorCode.BEARINGS_MAPPING_INVALID: "The mapping must cover every reading purpose exactly once and name only confirmed charter purpose ids (or null)",
+    BathosErrorCode.BEARINGS_MAPPER_IS_READER: "The mapper must be a different agent from the reader; give the mapper its own mapper_id",
 }
 
 
@@ -397,6 +413,15 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     "CharterAgentConfirmRefusedError": BathosErrorCode.CHARTER_AGENT_CONFIRM_REFUSED,
     "CharterUnauthorizedError": BathosErrorCode.CHARTER_UNAUTHORIZED,
     "CharterLedgerUnavailableError": BathosErrorCode.CHARTER_LEDGER_UNAVAILABLE,
+    # Bearings (spec 261104, slice 2).
+    "BearingsError": BathosErrorCode.INTERNAL,
+    "BearingsPacketInvalidError": BathosErrorCode.BEARINGS_PACKET_INVALID,
+    "BearingsPacketMismatchError": BathosErrorCode.BEARINGS_PACKET_MISMATCH,
+    "BearingsReadingInvalidError": BathosErrorCode.BEARINGS_READING_INVALID,
+    "BearingsReadingNotFoundError": BathosErrorCode.BEARINGS_READING_NOT_FOUND,
+    "BearingsNoConfirmedCharterError": BathosErrorCode.BEARINGS_NO_CONFIRMED_CHARTER,
+    "BearingsMappingInvalidError": BathosErrorCode.BEARINGS_MAPPING_INVALID,
+    "BearingsMapperIsReaderError": BathosErrorCode.BEARINGS_MAPPER_IS_READER,
 }
 
 
@@ -510,3 +535,36 @@ class CharterLedgerUnavailableError(CharterError):
     """A charter event could not be recorded: the catalog is not in log mode, or the append failed."""
 
 
+# ── Bearings Domain Exceptions (spec 261104, slice 2) ────────────────────────
+
+
+class BearingsError(BathosError):
+    """Base class for bearings packet, reading and comparison errors."""
+
+
+class BearingsPacketInvalidError(BearingsError):
+    """The packet is missing, malformed, or the output directory is not empty."""
+
+
+class BearingsPacketMismatchError(BearingsError):
+    """Packet bytes or hash do not match the reading."""
+
+
+class BearingsReadingInvalidError(BearingsError):
+    """The reading file is malformed."""
+
+
+class BearingsReadingNotFoundError(BearingsError):
+    """No recorded reading has that id."""
+
+
+class BearingsNoConfirmedCharterError(BearingsError):
+    """No confirmed charter to compare against."""
+
+
+class BearingsMappingInvalidError(BearingsError):
+    """The mapping is incomplete or names unknown charter purposes."""
+
+
+class BearingsMapperIsReaderError(BearingsError):
+    """The mapper is the same agent as the reader."""
