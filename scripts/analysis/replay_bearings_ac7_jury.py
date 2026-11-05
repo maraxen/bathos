@@ -50,8 +50,8 @@ inside one aim, so an entry that reports either as a separate purpose is "sub".
 Set "uncertain" to true for any entry where a careful person could reasonably choose differently. Use it honestly: an \
 uncertain entry goes to the owner, and this has no penalty.
 
-Return one row for every entry, with its project, reader and entry id copied exactly. "name" is null unless the choice \
-is "project"."""
+Return one JSON object of the form {"rows": [...]}, with one row for every entry: {"project", "reader", "entry", \
+"choice", "name", "uncertain"}. Copy project, reader and entry id exactly. "name" is null unless the choice is "project"."""
 
 MAP_SYSTEM = """You are comparing statements about a research project with a list of purposes. Each statement is one \
 entry written by an independent reader describing what the project's record shows. Work only from the text in this \
@@ -63,7 +63,8 @@ that work, even as a part of something larger. A passing mention does not count.
 Set "uncertain" to true for any entry where a careful person could reasonably tick differently. Use it honestly: an \
 uncertain entry goes to the owner, and this has no penalty.
 
-Return one row for every entry, with its reader and entry id copied exactly."""
+Return one JSON object of the form {"rows": [...]}, with one row for every entry: {"reader", "entry", "maps_to", \
+"uncertain"}. Copy reader and entry id exactly."""
 
 
 def label_schema() -> dict:
@@ -148,6 +149,29 @@ def build(work: Path) -> None:
         init_folder(jury / "base", jury / "folders" / f"label_{juror}")
         init_folder(jury / "base", jury / "folders" / f"map_{juror}")
     logger.info("built %d folders", 2 * len(JURORS))
+
+
+def collect(work: Path) -> None:
+    """Save admitted verdicts from praxia's records to disk, and print only each dispatch's status."""
+    jury = work / "jury"
+    dispatches = json.loads((jury / "dispatches.json").read_text())
+    records: dict[str, dict] = {}
+    for line in (jury / "base" / ".praxia" / "dispatch_runs.jsonl").read_text().splitlines():
+        obj = json.loads(line)
+        for rec in (obj, *(v for v in obj.values() if isinstance(v, dict))):
+            if "dispatch_id" in rec and "terminal_state" in rec:
+                records[rec["dispatch_id"]] = rec
+    (jury / "verdicts").mkdir(exist_ok=True)
+    for name, dispatch_id in sorted(dispatches.items()):
+        rec = records.get(dispatch_id)
+        if rec is None:
+            logger.info("%s: running", name)
+            continue
+        admitted = rec.get("admission") == "admitted"
+        if admitted:
+            (jury / "verdicts" / f"{name}.json").write_text(json.dumps(rec["structured_output"]), encoding="utf-8")
+        reasons = len((rec.get("admission") or {}).get("rejected", {}).get("reasons", [])) if not admitted else 0
+        logger.info("%s: %s, admitted=%s, rejection reasons=%d", name, rec["terminal_state"], admitted, reasons)
 
 
 def key(arm: str, reader: str, entry: str) -> str:
@@ -297,13 +321,15 @@ def finalize(work: Path, owner_dir: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("build", "merge", "finalize"))
+    parser.add_argument("command", choices=("build", "collect", "merge", "finalize"))
     parser.add_argument("--work-dir", type=Path, required=True)
     parser.add_argument("--owner-dir", type=Path, help="finalize: directory of the owner's label documents")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     if args.command == "build":
         build(args.work_dir)
+    elif args.command == "collect":
+        collect(args.work_dir)
     elif args.command == "merge":
         merge(args.work_dir)
     else:
