@@ -1,0 +1,83 @@
+# DRAFT 261105, not approved. Do not run. The owner approves the OPEN items before this is final;
+# the final version is committed before any packet is built or any reader runs.
+[experiment]
+hypothesis = """A blind reader that writes a typed purpose graph separates colliculix's drift from projects that have several connected aims. Its graph shows more groups of effort that pass no results to each other (spec 261104, AC-7b, assumption A9b).
+
+Why this exists. AC-7 (run 530b1a32) failed. The readers found all 7 colliculix purposes, but purpose counts did not separate the arms: plegadx had a median of 4 against colliculix's 2. The owner then ruled that plegadx and tev_design genuinely have several aims, so counting cannot work. Purposes form a rhizome, not a tree, and results flow binds: aims belong together when one's results are used by another (spec decision log, OWNER 261105).
+
+Arms. Cuts are commits; each window is the 28 days before the cut, matching the Design item 7 cadence.
+- Positive control: colliculix at 14c3804, as in AC-7. The contamination grep and the run-reachability departure are both unchanged.
+- Negative control: plegadx at 1472ee54, as in AC-7. The owner says it genuinely has several aims.
+- Negative control: tev_design, at a NEW cut, OPEN. A probe on 261105 found the lagoon simulation and active-learning work first appear on 2026-08-05, after the AC-7 cut of 2026-07-28. The new cut is a commit at which the lagoon simulation, the design libraries and active learning are all active, so this is the hard negative the rule must survive. The owner picks the commit before any packet is built.
+
+Readers. Three fresh Sonnet readers per arm, each using scripts/analysis/replay_bearings_ac7b_reader_prompt.md and writing a v2 reading (spec Design item 5): purposes, open lines and typed links (feeds, serves, shares, competes), each with citations and an uncertainty flag. The AC-7 readings are not reused, because they hold almost no links. A rejected reading gets one disclosed redo.
+
+Labels. A labeller who is not the reader judges:
+- every node as real or generic;
+- every binding link (feeds, serves) as supported, unsupported or unsure, by checking its citations against the packet.
+Labeller: OPEN, either the owner for every arm, or the owner for tev_design and one Opus agent for colliculix and plegadx. tev_design text twice stopped Opus at a safety classifier in AC-7.
+
+Scoring, mechanical (replay_bearings_ac7b.py, to be written and tested before approval).
+- A node's effort is the number of distinct resolved run: and git: citations it carries.
+- Drift groups are the connected components of real nodes under supported binding links, ignoring direction, that hold at least 10% of the reading's total effort.
+- shares and competes links never join groups.
+- Unsure links count as unsupported for the outcome. The scorer also reports groups with unsure links counted as supported, descriptively.
+- Each arm's figure is the median over its readers.
+
+Synthetic controls, which must pass before any real score is read:
+- two disjoint fed chains of equal effort give 2;
+- one fully fed graph gives 1;
+- two chains joined only by a shares link give 2;
+- a tiny third island below 10% of effort is ignored.
+
+Disclosures.
+- The positive control was chosen after the fact. The author and the owner both know the diagnosis and the AC-7 readings.
+- The rule was chosen after seeing AC-7's readings, which is why its readings are not reused and the tev_design cut moves.
+- Effort counted by citations rewards a reader who cites more; the 10% floor and the median over readers soften this.
+- Three readers per arm show consistency, not a rate. One model on one prompt.
+
+Protocol. (1) The owner settles the OPEN items, and the final sidecar is committed. (2) The scorer and its synthetic controls are committed and pass. (3) Build packets. (4) Run the readers. (5) Label. (6) bth run the scorer. The result is reported either way."""
+stage_name = "validation"
+novel = true
+
+[outcomes.instrument_broken]
+condition = "NOT controls_ok OR contamination_hits > 0 OR packet_hash_mismatches > 0 OR reader_audit_violations > 0 OR rejected_readings > 0 OR n_readings <> 9 OR n_unlabelled > 0"
+decision = "The run is invalid: report it, cite no number from it, fix the cause, and pre-register a new run."
+reasoning = "As in AC-7. controls_ok now also covers the graph scorer's four synthetic controls."
+
+[outcomes.pass]
+condition = "colliculix_groups_median >= 3 AND tev_design_groups_median <= 2 AND plegadx_groups_median <= 2 AND colliculix_groups_median > greatest(tev_design_groups_median, plegadx_groups_median)"
+decision = "A9b stands for this reader and prompt. Build the v2 reading record (AC-5b) into slice 3, and open T1 with these readings as the first calibration."
+reasoning = "3 and 2 are judgment cutoffs with no empirical basis. 3 means at least three groups of effort pass no results to each other; the diagnosis has at least that many unconnected lines. 2 allows a healthy project one independent side line. The last clause requires separation."
+
+[outcomes.marginal]
+condition = "colliculix_groups_median > greatest(tev_design_groups_median, plegadx_groups_median)"
+decision = "The owner reads the graphs before anything is built. A changed prompt, rule or threshold needs a new pre-registration."
+reasoning = "The graph separates the arms, but not by the registered margins."
+
+[outcomes.fail]
+condition = "NOT (colliculix_groups_median > greatest(tev_design_groups_median, plegadx_groups_median))"
+decision = "Do not build slice 3 on the blind reader. Re-open the mechanism with the owner."
+reasoning = "Even with results flow as the binding rule, the reader cannot tell drift from a busy project with several aims."
+is_residual = true
+
+[result_schema]
+controls_ok = "bool"
+contamination_hits = "int"
+packet_hash_mismatches = "int"
+reader_audit_violations = "int"
+rejected_readings = "int"
+n_readings = "int"
+n_unlabelled = "int"
+colliculix_groups_median = "float"
+tev_design_groups_median = "float"
+plegadx_groups_median = "float"
+colliculix_groups_unsure_supported_median = "float"
+tev_design_groups_unsure_supported_median = "float"
+plegadx_groups_unsure_supported_median = "float"
+colliculix_supported_link_frac = "float"
+tev_design_supported_link_frac = "float"
+plegadx_supported_link_frac = "float"
+colliculix_uncertain_node_frac = "float"
+tev_design_uncertain_node_frac = "float"
+plegadx_uncertain_node_frac = "float"

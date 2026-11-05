@@ -63,6 +63,14 @@ Frame: agents do honest, pre-registered, green work that stops serving any large
 - [OWNER 261104] Scope is runs plus project docs. Goals come from an owner-confirmed charter, and `project_status.toml` is not a seed.
 - [OWNER 261104] **Build plan.** The build stacks on this spec branch, and PR #160 stays open until the owner merges it. It ships as three staged dispatches, each ending with tests and a review gate before the next starts: (1) charter and confirmation, AC-1 to AC-3; (2) packet and reading record, AC-4 and AC-5; (3) brief, labels, due notice and cadence, AC-6 and AC-8. AC-7 is kept out of the build. After slice 2, the orchestrator drafts the AC-7 sidecar, including how tev_design's local episodes are classified. The owner approves it, and it is committed before any replay runs. The agent that builds the reader does not define what counts as success for it.
 
+- [OWNER 261105] **AC-7 failed; project structure is rhizomatic.** AC-7 (run `530b1a32`, sidecar `scripts/analysis/replay_bearings_ac7.bth.toml`) recorded `fail`. The colliculix readers recovered all 7 diagnosed purposes (median 7), but the labels counted 2 project-level purposes, against 2 for tev_design and 4 for plegadx. Reading the readings, the owner ruled:
+  - The colliculix drift is visible, and the labels' "sub" rule was too strict.
+  - plegadx genuinely has several purposes.
+  - tev_design has several interacting aims: the lagoon simulation, the design libraries and active learning. A probe on 261105 found those first appear on 2026-08-05, after the AC-7 tev_design cut of 2026-07-28, so that packet could not show them.
+  - So a count of purposes cannot tell drift from a healthy project with several aims.
+
+  Purposes form a graph, not a tree. Hierarchy is allowed, but cross-relevance that defies a strict hierarchy must be representable. **Results flow binds:** two aims belong together when one's results are used by another (`feeds`, `serves`). A shared method or code (`shares`) does not bind. Drift is effort split into groups that pass no results to each other. The reading record gains typed links and uncertainty (Design item 5), and AC-7b re-tests A9 under this rule.
+
 ## Assumptions
 
 Tags follow the global spike-test rule. *Verified* means read at a file:line or measured in a tracked run. *Unverified* means not checked.
@@ -77,7 +85,9 @@ Tags follow the global spike-test rule. *Verified* means read at a file:line or 
 | A6 | A citation resolver exists and can be extended with new kinds. | Verified: `stepback/analysis.py:196-355` |
 | A7 | New run-log event kinds with their own fold are feasible. | Verified: `runlog/fold_output_copies.py` |
 | A8 | `[outcomes].decision` text is meaningful. | **Weakened**: the scaffold writes `"TODO: ..."` (`new_experiment.py:161,175,182`) and the census counted those. Not used in v1. |
-| A9 | A blind reader with primary records reproduces a diagnosis like colliculix's. | **Unverified.** AC-7 tests it. |
+| A9 | A blind reader with primary records reproduces a diagnosis like colliculix's. | **Not supported as a count of purposes.** AC-7 run `530b1a32` failed: the readers found all 7 colliculix purposes, but purpose counts did not separate colliculix from the controls. |
+| A9b | A blind reader's typed purpose graph separates colliculix's drift from projects with several connected aims: more groups of effort with no results passing between them. | **Unverified.** AC-7b tests it. |
+| A12 | Readers can state, with citations, where one line's results are used by another. | **Unverified.** AC-7 readings were mostly flat lists; a few entries named links ("motivated the later library design", "no stated link"). AC-7b measures how many links are supported. |
 | A10 | The owner will confirm a charter for each active project. | **Unverified.** This is the pre-mortem's first failure path. AC-8 measures it. |
 | A11 | The colliculix charter stopped the sprawl. | **Unverified.** The project went idle the day the charter was accepted (`project_status.toml:694`), so stopping sprawl and stopping work cannot be told apart. |
 
@@ -114,7 +124,18 @@ Tags follow the global spike-test rule. *Verified* means read at a file:line or 
 5. **Reading record.** `bth bearings record` takes the reader's structured output:
    - each purpose the record shows work toward, with at least 2 resolvable citations, using `run:`, `sidecar:`, `git:` and a new `doc:<path>@<blob-sha>#Lx-Ly`;
    - a reserved `atom:(slug, seal_sha256, start, end, claim_sha256)` kind that is parsed and, until allostery's ids are stable, always resolves to `flag_for_review` rather than failing;
-   - open lines of work with no visible purpose.
+   - open lines of work with no visible purpose;
+   - **v2 (owner 261105):** a typed graph over purposes and open lines.
+     - Every purpose and open line may carry `uncertain` (bool) and `uncertain_reason` (text): the reader's own channel for flagging doubt.
+     - `links: [{from, to, type, citations, uncertain}]`, where `type` is one of:
+       - `feeds`: a result of `from` is used by `to`.
+       - `serves`: `from` exists for `to`'s sake.
+       - `shares`: common method, code or data, with no result passing.
+       - `competes`: a stated trade-off of effort, such as a deferral, a decline or a scheduling choice.
+     - `from` and `to` name purpose ids, or open lines as `open:<i>`. A node may have several parents, and a link may cross any level.
+     - Each link needs at least 1 resolvable citation. A self-link or a link to an unknown id is refused.
+     - `links` is optional, so a v1 reading stays valid. Bathos validates and stores the graph and never judges it.
+   - **Effort**, computed mechanically and never by the reader: each node's effort is the number of distinct resolved records it cites, counting runs and commits only. Docs and sidecars show intent, not spent effort.
    Bathos then compares the reading with the confirmed charter and stores `mapped`, `unmapped` (work toward no charter purpose) and `silent` (live purposes with no work in the window).
 6. **Brief and labels.** `bth bearings brief` shows the owner the unmapped and silent items for each project. `bth bearings label <item> useful|noise|unsure` appends an owner-only event, using the same check as item 2.
 7. **Cadence and due notice.** `bth bearings due` lists projects where a reading is due: active in the last 28 days and either 20 new runs or 7 days since the last reading. These numbers are starting values with no empirical basis, and T1 revisits them. The due state reaches people in two ways (T3):
@@ -136,6 +157,7 @@ Tags follow the global spike-test rule. *Verified* means read at a file:line or 
   - Blindness is defined by content, not path. The packet excludes `.bth/charter.toml`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, and any doc containing a purpose `text` or the mandate verbatim, using normalised whitespace. It lists each exclusion by path and reason in a manifest that is never shown to the reader.
   - Negative case: given a project whose ADR quotes a charter purpose (as colliculix's `.praxia/docs/decisions/260707_identity-charter.md` would), the packet must not contain that ADR, and the manifest must name it.
 - **AC-5 Readings need evidence.** Given a reading where a purpose has fewer than 2 resolvable citations, when it is recorded, then that purpose is rejected with `STEPBACK_INSUFFICIENT_EVIDENCE`. Given a valid reading and a confirmed charter, then each reading purpose is stored as `mapped` or `unmapped`, and each live charter purpose with no mapped work as `silent`.
+- **AC-5b The graph is validated, not judged.** Given a reading with a link whose `from` or `to` is not a purpose id or `open:<i>`, or a self-link, or a link with no resolvable citation, when it is recorded, then it is rejected with `BearingsReadingInvalidError`, and nothing is recorded. Given a v1 reading with no `links`, it records exactly as before. Given a valid v2 reading, every link is stored with its type, uncertainty and resolved citations. `uncertain` and `uncertain_reason` are stored verbatim on every node.
 - **AC-6 Delivery and labels are recorded.** Every `bearings brief` render appends a `bearings.delivered` event listing the item ids shown. Labeling reuses the human-only check from AC-1; given an authorized session, every label appends a `bearings.labelled` event. Precision for any window can be computed from events alone with no other state.
 - **AC-7 Replay with positive and negative controls, pre-registered.** A tracked script with a sidecar committed before the run builds packets from reconstructed history.
   - Positive control: colliculix cut at a **commit, not a date**: the tree at `14c3804` (2026-07-07 13:01:25 -0700). That precedes the earliest diagnosis artifact, the refoundation handoff `24ef9a6` (13:15), and the charter draft `588d175` (14:46). Both were checked with `git log --all` on 261104.
@@ -144,6 +166,13 @@ Tags follow the global spike-test rule. *Verified* means read at a file:line or 
     - Expected: the seven purposes from the diagnosis show as multiple concurrent purposes, scored against the owner's labels.
   - Negative controls, named by the owner 261104: **tev_design** and **plegadx**, each over a window the sidecar pins by commit. tev_design is a hard negative: it has had local episodes such as k=4 vs k=9 and the target swap of 260714. The sidecar must say whether those count as drift at project scale or as claim-scale slips, before the reading is seen.
   - The sidecar states what each reading must contain, judged by the owner's labels, not by the reader itself. The A9 result is reported either way.
+  - **Result 261105: fail** (run `530b1a32`). See the decision log, OWNER 261105.
+- **AC-7b Graph replay, pre-registered** (`scripts/analysis/replay_bearings_ac7b.bth.toml`, committed and approved before any reader runs).
+  - Fresh readers write v2 readings with typed links, from the same packet builder.
+  - A labeller who is not the reader checks every binding link (`feeds`, `serves`) as `supported`, `unsupported` or `unsure`, and every node as `real` or `generic`. Only supported links bind; unsure links are scored both ways and reported.
+  - The scorer counts **drift groups**: connected components of real nodes under supported binding links, ignoring direction, that hold at least a set share of the reading's effort. `shares` and `competes` links never join groups.
+  - The scorer passes synthetic controls before any real score: a planted two-island graph must give 2, a planted fully-fed graph 1, and a graph joined only by `shares` links must give 2.
+  - Controls are colliculix (positive) and two negatives with several connected aims. The tev_design cut moves to a date when the lagoon simulation, design libraries and active learning are all active, so the negative is the hard case the rule must survive.
 - **AC-8 Cadence and shadow exit are testable and pre-registered.** Given a set of projects, when bth bearings due runs, it lists exactly those active in the last 28 days with >= 20 new runs or >= 7 days since their last reading. Given a due project, `bth run` in it returns exactly one due advisory with no reading content and appends `bearings.due_notified`; given a project that is not due, it returns none. Before the first live reading, an evaluation sidecar fixes T1 and the excess-spend metric (261027 §8, including chains that paid off; not the `excess_spend_avoided` heuristic in `stepback/analysis.py`). It also counts confirmed charters among active projects, testing A10.
 
 ## Pre-mortem Record
