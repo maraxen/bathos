@@ -1,4 +1,4 @@
-# Design approved by the owner 261105 (AskUserQuestion): tev_design cut 5f4856c7, Opus plus the owner as
+# Arms revised 261105 (see "New arm"): demistify replaces tev_design. Earlier approval: tev_design cut 5f4856c7, Opus plus the owner as
 # labellers, thresholds 3 / 2 / 10%. Not runnable yet: Protocol step 2 (the scorer and its synthetic
 # controls, committed and passing) must come first. No packet is built and no reader runs before that.
 [experiment]
@@ -16,7 +16,7 @@ Readers. Three fresh Sonnet readers per arm, each using scripts/analysis/replay_
 Labels, reduced by the owner 261105 to bridge links only. Labelling exists so the reader cannot set its own score by drawing too many or too few binding links. Only a bridge can change the score: a binding link (feeds, serves) whose removal would split a group. The scorer lists each reading's bridges mechanically, and a labeller who is not the reader judges each one as supported, unsupported or unsure, by checking its citations against the packet. Nodes are not labelled, because the 10% effort floor already drops vague nodes. Non-bridge links stand as the reader wrote them. Removing a bridge never turns another link into a bridge, so a single labelling pass is enough. Weakness, disclosed: a reader that invents a redundant loop of binding links creates no bridges, and nothing checks those links.
 Labellers, chosen by the owner 261105:
 - One fresh Opus agent labels colliculix and plegadx, working only from a prompt file holding the readings and the cited packet lines. It is not shown A-G, this hypothesis or the thresholds.
-- The owner labels tev_design, because its text twice stopped Opus at a safety classifier in AC-7.
+- The owner labels tev_design, because its text twice stopped Opus at a safety classifier in AC-7. (Superseded by the arm change below: demistify replaces tev_design, and Opus labels all three arms.)
 - If the Opus labeller is stopped or returns an invalid label set, it gets one disclosed redo, and after that the owner labels the rest.
 
 Scoring, mechanical (replay_bearings_ac7b.py, to be written and tested before approval).
@@ -55,7 +55,15 @@ Pilot result and arm change 261105, chosen by the owner before any other reader 
 - One reader cannot read this packet. Cutting sidecars to their hypothesis and outcomes still leaves 2.52 MB, and the docs alone are 0.71 MB. Arms read to such different depths cannot be compared, so the owner replaces tev_design@5f4856c7 with a hard negative that can be fully read: a project with several connected aims and a packet near 0.3-0.6 MB. The owner names it from a size probe, before any reader runs.
 - The pilot is retired to ~/scratch/ac7b/attempts/pilot_tev_5f4856c7. It is not scored and does not use the one redo. The author saw only its counts and its hand-back, which gave counts and named three purposes by id only.
 - The scaling problem is recorded as spec TBD T6 and is separate work.
-- All 9 readers will be fresh. (4) Run the readers. (5) Label. (6) bth run the scorer. The result is reported either way."""
+- All 9 readers will be fresh.
+
+New arm 261105, named by the owner from a size probe before any scored reader ran: **demistify** at 3417ca40 (author date 2026-11-02T20:58:00-05:00, the latest commit on main), over 2026-10-05 to 2026-11-02.
+- The probe (~/scratch/ac7b/probe_candidates.py, throwaway, counts only) built 28-day packets ending at each candidate's main HEAD. demistify's packet holds 5 runs, 146 commits, 20 docs and 5 sidecars, 0.53 MB, close to plegadx's 0.55 MB.
+- The owner judges demistify a healthy project with several connected aims.
+- The outcome conditions and result fields are renamed from tev_design_* to demistify_*. The conditions and thresholds are otherwise unchanged.
+- Opus labels the bridges of all three arms, because the tev_design text that stopped Opus is no longer an arm.
+- Packets were rebuilt fresh for all three arms. colliculix 4e5c3b80e3cf and plegadx c3424761414f are unchanged. demistify is 842f3230675b: 5 runs, 146 commits, 20 docs, 5 sidecars, 51 excluded, 0.53 MB.
+- Disclosure: demistify has only 5 runs, so its effort comes mostly from commits. Effort counts run: and git: citations equally, so that is in scope, but it differs from colliculix, whose effort is spread over runs and commits. (4) Run the readers. (5) Label. (6) bth run the scorer. The result is reported either way."""
 stage_name = "validation"
 novel = true
 
@@ -65,17 +73,17 @@ decision = "The run is invalid: report it, cite no number from it, fix the cause
 reasoning = "As in AC-7. controls_ok now also covers the graph scorer's four synthetic controls."
 
 [outcomes.pass]
-condition = "colliculix_groups_median >= 3 AND tev_design_groups_median <= 2 AND plegadx_groups_median <= 2 AND colliculix_groups_median > greatest(tev_design_groups_median, plegadx_groups_median)"
+condition = "colliculix_groups_median >= 3 AND demistify_groups_median <= 2 AND plegadx_groups_median <= 2 AND colliculix_groups_median > greatest(demistify_groups_median, plegadx_groups_median)"
 decision = "A9b stands for this reader and prompt. Build the v2 reading record (AC-5b) into slice 3, and open T1 with these readings as the first calibration."
 reasoning = "3 and 2 are judgment cutoffs with no empirical basis. 3 means at least three groups of effort pass no results to each other; the diagnosis has at least that many unconnected lines. 2 allows a healthy project one independent side line. The last clause requires separation."
 
 [outcomes.marginal]
-condition = "colliculix_groups_median > greatest(tev_design_groups_median, plegadx_groups_median)"
+condition = "colliculix_groups_median > greatest(demistify_groups_median, plegadx_groups_median)"
 decision = "The owner reads the graphs before anything is built. A changed prompt, rule or threshold needs a new pre-registration."
 reasoning = "The graph separates the arms, but not by the registered margins."
 
 [outcomes.fail]
-condition = "NOT (colliculix_groups_median > greatest(tev_design_groups_median, plegadx_groups_median))"
+condition = "NOT (colliculix_groups_median > greatest(demistify_groups_median, plegadx_groups_median))"
 decision = "Do not build slice 3 on the blind reader. Re-open the mechanism with the owner."
 reasoning = "Even with results flow as the binding rule, the reader cannot tell drift from a busy project with several aims."
 is_residual = true
@@ -89,25 +97,25 @@ rejected_readings = "int"
 n_readings = "int"
 n_unlabelled = "int"
 colliculix_groups_median = "float"
-tev_design_groups_median = "float"
+demistify_groups_median = "float"
 plegadx_groups_median = "float"
 colliculix_groups_unsure_supported_median = "float"
-tev_design_groups_unsure_supported_median = "float"
+demistify_groups_unsure_supported_median = "float"
 plegadx_groups_unsure_supported_median = "float"
 colliculix_supported_bridge_frac = "float"
-tev_design_supported_bridge_frac = "float"
+demistify_supported_bridge_frac = "float"
 plegadx_supported_bridge_frac = "float"
 colliculix_uncertain_node_frac = "float"
-tev_design_uncertain_node_frac = "float"
+demistify_uncertain_node_frac = "float"
 plegadx_uncertain_node_frac = "float"
 colliculix_min_docs_read_frac = "float"
 colliculix_min_sidecars_read_frac = "float"
 colliculix_min_runs_read_frac = "float"
 colliculix_min_git_read_frac = "float"
-tev_design_min_docs_read_frac = "float"
-tev_design_min_sidecars_read_frac = "float"
-tev_design_min_runs_read_frac = "float"
-tev_design_min_git_read_frac = "float"
+demistify_min_docs_read_frac = "float"
+demistify_min_sidecars_read_frac = "float"
+demistify_min_runs_read_frac = "float"
+demistify_min_git_read_frac = "float"
 plegadx_min_docs_read_frac = "float"
 plegadx_min_sidecars_read_frac = "float"
 plegadx_min_runs_read_frac = "float"

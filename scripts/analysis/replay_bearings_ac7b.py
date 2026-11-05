@@ -54,7 +54,8 @@ from bathos.errors import BearingsReadingInvalidError
 logger = logging.getLogger("replay_bearings_ac7b")
 
 # Cuts are commits, and each window is the 28 days before its cut. colliculix and plegadx are as in
-# AC-7; tev_design moves to 5f4856c7, chosen by the owner 261105.
+# AC-7. demistify replaces tev_design (owner 261105): the tev_design packet at 5f4856c7 was too large
+# for one reader to read.
 ARMS = {
     "colliculix": {
         "repo": HOME / "projects/colliculix",
@@ -62,11 +63,11 @@ ARMS = {
         "since": "2026-06-09T13:01:25-07:00",
         "until": "2026-07-07T13:01:25-07:00",
     },
-    "tev_design": {
-        "repo": HOME / "projects/tev_design",
-        "ref": "5f4856c7",
-        "since": "2026-09-25T11:22:53-04:00",
-        "until": "2026-10-23T11:22:53-04:00",
+    "demistify": {
+        "repo": HOME / "projects/demistify",
+        "ref": "3417ca40",
+        "since": "2026-10-05T20:58:00-05:00",
+        "until": "2026-11-02T20:58:00-05:00",
     },
     "plegadx": {
         "repo": HOME / "projects/plegadx",
