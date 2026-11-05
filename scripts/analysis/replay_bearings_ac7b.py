@@ -302,11 +302,18 @@ def score(work: Path) -> dict:
             if reading["packet_sha256"] != sha:
                 rejected += 1
             rejected += citation_failures(reading, packet) + link_failures(reading, view)
-            bad = audit_transcript(Path(transcripts[key]), [str(packet / "reader"), str(path)])
-            audit_bad += len(bad)
-            for b in bad:
-                logger.error("%s left its packet: %s", key, b)
-            for k, v in coverage(Path(transcripts[key]), packet / "reader").items():
+            transcript = transcripts.get(key, "")
+            if transcript.startswith("inline:"):
+                # Surface reader (owner 261105): the packet was inside its prompt, so it saw all of it. It had
+                # no file to open, and its tool log cannot be verified by praxia; see the sidecar.
+                cov = {"docs": 1.0, "sidecars": 1.0, "runs": 1.0, "git": 1.0}
+            else:
+                bad = audit_transcript(Path(transcript), [str(packet / "reader"), str(path)])
+                audit_bad += len(bad)
+                for b in bad:
+                    logger.error("%s left its packet: %s", key, b)
+                cov = coverage(Path(transcript), packet / "reader")
+            for k, v in cov.items():
                 per_arm[name][k].append(v)
 
             effort, edges = reading_graph(reading, view)

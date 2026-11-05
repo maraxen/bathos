@@ -63,6 +63,12 @@ New arm 261105, named by the owner from a size probe before any scored reader ra
 - The outcome conditions and result fields are renamed from tev_design_* to demistify_*. The conditions and thresholds are otherwise unchanged.
 - Opus labels the bridges of all three arms, because the tev_design text that stopped Opus is no longer an arm.
 - Packets were rebuilt fresh for all three arms. colliculix 4e5c3b80e3cf and plegadx c3424761414f are unchanged. demistify is 842f3230675b: 5 runs, 146 commits, 20 docs, 5 sidecars, 51 excluded, 0.53 MB.
+- Reader change 261105, requested by the owner after all 9 Sonnet readers hit an account usage limit partway through reading (none wrote a reading file, so none is used and none counts as a redo).
+  - The readers are now Cursor and Antigravity agents sent through praxia surface_dispatch: reader1 and reader3 on Cursor, reader2 on Antigravity, the same in every arm, all at the power tier. They are not Sonnet, and their model families differ from AC-7's readers.
+  - Each reader gets its whole packet inside its prompt, rendered with line numbers (replay_bearings_ac7b_surface.py). It runs under the completion role in its own empty folder, a linked worktree of an empty repository, and returns its reading as one structured verdict that must match the v2 reading schema. The prompt text is the committed reader prompt, reworded only where it explained file access.
+  - Coverage is complete by construction, so the coverage fields read 1.0 for these readers. The prompts are 345 KB (colliculix), 553 KB (demistify) and 582 KB (plegadx).
+  - praxia cannot verify Cursor's or Antigravity's tool logs. The transcript audit is therefore replaced by its construction: the folder holds nothing to read, and the prompt forbids tools. Staying inside the folder is instructed, not proven.
+  - A verdict that is rejected or fails validation gets one disclosed redo.
 - Disclosure: demistify has only 5 runs, so its effort comes mostly from commits. Effort counts run: and git: citations equally, so that is in scope, but it differs from colliculix, whose effort is spread over runs and commits. (4) Run the readers. (5) Label. (6) bth run the scorer. The result is reported either way."""
 stage_name = "validation"
 novel = true
