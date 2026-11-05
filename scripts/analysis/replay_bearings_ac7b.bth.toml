@@ -1,5 +1,6 @@
-# DRAFT 261105, not approved. Do not run. The owner approves the OPEN items before this is final;
-# the final version is committed before any packet is built or any reader runs.
+# Design approved by the owner 261105 (AskUserQuestion): tev_design cut 5f4856c7, Opus plus the owner as
+# labellers, thresholds 3 / 2 / 10%. Not runnable yet: Protocol step 2 (the scorer and its synthetic
+# controls, committed and passing) must come first. No packet is built and no reader runs before that.
 [experiment]
 hypothesis = """A blind reader that writes a typed purpose graph separates colliculix's drift from projects that have several connected aims. Its graph shows more groups of effort that pass no results to each other (spec 261104, AC-7b, assumption A9b).
 
@@ -8,14 +9,17 @@ Why this exists. AC-7 (run 530b1a32) failed. The readers found all 7 colliculix 
 Arms. Cuts are commits; each window is the 28 days before the cut, matching the Design item 7 cadence.
 - Positive control: colliculix at 14c3804, as in AC-7. The contamination grep and the run-reachability departure are both unchanged.
 - Negative control: plegadx at 1472ee54, as in AC-7. The owner says it genuinely has several aims.
-- Negative control: tev_design, at a NEW cut, OPEN. A probe on 261105 found the lagoon simulation and active-learning work first appear on 2026-08-05, after the AC-7 cut of 2026-07-28. The new cut is a commit at which the lagoon simulation, the design libraries and active learning are all active, so this is the hard negative the rule must survive. The owner picks the commit before any packet is built.
+- Negative control: tev_design at a new cut, 5f4856c7 (2026-10-23 11:22:53 -0400, the last commit on main before November), over 2026-09-25 to 2026-10-23. The owner chose it on 261105. A probe on 261105 found the lagoon simulation and active-learning work first appear on 2026-08-05, after the AC-7 cut of 2026-07-28. October is the only month in which commit subjects show the lagoon simulation (200), the design libraries (59) and active learning (3) together, so this is the hard negative the rule must survive. Active learning is thin by subject and may be named otherwise in the record. These subject counts are a design probe and gate nothing.
 
 Readers. Three fresh Sonnet readers per arm, each using scripts/analysis/replay_bearings_ac7b_reader_prompt.md and writing a v2 reading (spec Design item 5): purposes, open lines and typed links (feeds, serves, shares, competes), each with citations and an uncertainty flag. The AC-7 readings are not reused, because they hold almost no links. A rejected reading gets one disclosed redo.
 
 Labels. A labeller who is not the reader judges:
 - every node as real or generic;
 - every binding link (feeds, serves) as supported, unsupported or unsure, by checking its citations against the packet.
-Labeller: OPEN, either the owner for every arm, or the owner for tev_design and one Opus agent for colliculix and plegadx. tev_design text twice stopped Opus at a safety classifier in AC-7.
+Labellers, chosen by the owner 261105:
+- One fresh Opus agent labels colliculix and plegadx, working only from a prompt file holding the readings and the cited packet lines. It is not shown A-G, this hypothesis or the thresholds.
+- The owner labels tev_design, because its text twice stopped Opus at a safety classifier in AC-7.
+- If the Opus labeller is stopped or returns an invalid label set, it gets one disclosed redo, and after that the owner labels the rest.
 
 Scoring, mechanical (replay_bearings_ac7b.py, to be written and tested before approval).
 - A node's effort is the number of distinct resolved run: and git: citations it carries.
@@ -36,7 +40,7 @@ Disclosures.
 - Effort counted by citations rewards a reader who cites more; the 10% floor and the median over readers soften this.
 - Three readers per arm show consistency, not a rate. One model on one prompt.
 
-Protocol. (1) The owner settles the OPEN items, and the final sidecar is committed. (2) The scorer and its synthetic controls are committed and pass. (3) Build packets. (4) Run the readers. (5) Label. (6) bth run the scorer. The result is reported either way."""
+Protocol. (1) Done 261105: the owner settled the design, and this sidecar is committed. (2) The scorer and its synthetic controls are committed and pass. (3) Build packets. (4) Run the readers. (5) Label. (6) bth run the scorer. The result is reported either way."""
 stage_name = "validation"
 novel = true
 
