@@ -108,7 +108,7 @@ def render_entries(readings: list[dict], with_project: bool) -> str:
     return "\n".join(lines)
 
 
-def init_folder(path: Path) -> None:
+def init_base(path: Path) -> None:
     """Create an empty repository with one commit, because a dispatch needs a base sha to admit against."""
     path.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init", "-q", str(path)], check=True)
@@ -117,6 +117,13 @@ def init_folder(path: Path) -> None:
          "commit", "-q", "--allow-empty", "-m", "empty"],
         check=True,
     )  # fmt: skip
+
+
+def init_folder(base: Path, path: Path) -> None:
+    """Add an empty linked worktree, because praxia refuses a primary checkout as a dispatch folder."""
+    if path.exists():
+        return
+    subprocess.run(["git", "-C", str(base), "worktree", "add", "-q", "-b", path.name, str(path)], check=True)
 
 
 def build(work: Path) -> None:
@@ -128,6 +135,8 @@ def build(work: Path) -> None:
     (prompts / "map_system.md").write_text(MAP_SYSTEM + "\n", encoding="utf-8")
     (jury / "label_schema.json").write_text(json.dumps(label_schema()), encoding="utf-8")
     (jury / "map_schema.json").write_text(json.dumps(map_schema()), encoding="utf-8")
+    if not (jury / "base").exists():
+        init_base(jury / "base")
     positive = [r for r in readings if r["arm"] == "colliculix"]
     purposes = "\n".join(f"- {k}: {v}" for k, v in PURPOSES.items())
     for juror in JURORS:
@@ -136,8 +145,8 @@ def build(work: Path) -> None:
         (prompts / f"map_{juror}.md").write_text(
             f"Purposes:\n{purposes}\n\n{render_entries(positive, False)}", encoding="utf-8"
         )
-        init_folder(jury / "folders" / f"label_{juror}")
-        init_folder(jury / "folders" / f"map_{juror}")
+        init_folder(jury / "base", jury / "folders" / f"label_{juror}")
+        init_folder(jury / "base", jury / "folders" / f"map_{juror}")
     logger.info("built %d folders", 2 * len(JURORS))
 
 
