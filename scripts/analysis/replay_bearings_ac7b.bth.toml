@@ -43,7 +43,12 @@ Protocol. (1) Done 261105: the owner settled the design, and this sidecar is com
 - colliculix 4e5c3b80e3cf: 35 runs, 154 commits, 7 docs, 11 sidecars, 18 excluded.
 - tev_design fa42f5281358: 350 runs, 56 commits, 22 docs, 204 sidecars, 152 excluded.
 - plegadx c3424761414f: 95 runs, 265 commits, 48 docs, 22 sidecars, 44 excluded.
-The colliculix and plegadx hashes equal AC-7's, so the builder is deterministic, and the colliculix contamination grep found 0. The tev_design packet has 79 files mentioning the lagoon simulation and 3 mentioning active learning. It is 2.84 MB, against 0.34 MB for colliculix and 0.55 MB for plegadx, so a reader may not read all of it. (4) Run the readers. (5) Label. (6) bth run the scorer. The result is reported either way."""
+The colliculix and plegadx hashes equal AC-7's, so the builder is deterministic, and the colliculix contamination grep found 0. The tev_design packet has 79 files mentioning the lagoon simulation and 3 mentioning active learning. It is 2.84 MB, against 0.34 MB for colliculix and 0.55 MB for plegadx, so a reader may not read all of it.
+
+Coverage note 261105, chosen by the owner before any reader ran. The registered 28-day tev_design packet is kept. A 14-day window was considered and declined, though it still held lagoon in 28 files and active learning in 3. A reader that skims writes fewer links and so inflates its group count, so the result gains descriptive coverage fields, which gate nothing:
+- the minimum fraction of docs and of sidecars opened per arm;
+- the minimum fraction of runs.jsonl and git_log.jsonl lines read per arm.
+They are computed from each reader's transcript, which is copied to ~/scratch/ac7b/transcripts when the reader finishes. One tev_design reader runs alone first as a pilot, because the new window holds the lagoon content and a classifier stop is possible. If it completes with a valid reading, it is reader1, and the other 8 readers follow. If it is stopped or invalid, the one disclosed redo waits for the owner. (4) Run the readers. (5) Label. (6) bth run the scorer. The result is reported either way."""
 stage_name = "validation"
 novel = true
 
@@ -88,3 +93,15 @@ plegadx_supported_bridge_frac = "float"
 colliculix_uncertain_node_frac = "float"
 tev_design_uncertain_node_frac = "float"
 plegadx_uncertain_node_frac = "float"
+colliculix_min_docs_read_frac = "float"
+colliculix_min_sidecars_read_frac = "float"
+colliculix_min_runs_read_frac = "float"
+colliculix_min_git_read_frac = "float"
+tev_design_min_docs_read_frac = "float"
+tev_design_min_sidecars_read_frac = "float"
+tev_design_min_runs_read_frac = "float"
+tev_design_min_git_read_frac = "float"
+plegadx_min_docs_read_frac = "float"
+plegadx_min_sidecars_read_frac = "float"
+plegadx_min_runs_read_frac = "float"
+plegadx_min_git_read_frac = "float"

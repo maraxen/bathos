@@ -41,6 +41,7 @@ from replay_bearings_ac7 import (
     audit_transcript,
     citation_failures,
     contamination_hits,
+    read_fractions,
 )
 from replay_bearings_ac7 import (
     controls_pass as ac7_controls_pass,
@@ -153,7 +154,59 @@ def graph_controls_pass() -> bool:
     # Removing an unsupported bridge splits the graph.
     eff = {n: 5 for n in nodes}
     ok &= drift_groups(eff, edges, set()) == 1 and drift_groups(eff, edges, {30}) == 2
+    # Coverage: overlapping Read windows count each line once; another file's reads do not count.
+    with tempfile.TemporaryDirectory() as td:
+        f = Path(td) / "runs.jsonl"
+        f.write_text("".join(f"{i}\n" for i in range(10)))
+        reads = [{"file_path": str(f), "offset": 1, "limit": 4}, {"file_path": str(f), "offset": 3, "limit": 3}]
+        ok &= lines_read_frac(reads, f) == 0.5
+        ok &= lines_read_frac([{"file_path": str(f)}], f) == 1.0
+        ok &= lines_read_frac([{"file_path": str(Path(td) / "other")}], f) == 0.0
     return bool(ok)
+
+
+# ── coverage (descriptive, owner 261105; gates nothing) ───────────────────────
+
+READ_DEFAULT_LIMIT = 2000  # lines the Read tool returns when no limit is given
+
+
+def _read_calls(transcript: Path) -> list[dict]:
+    calls = []
+    for line in transcript.read_text(encoding="utf-8").split("\n"):
+        try:
+            rec = json.loads(line) if line.strip() else None
+        except ValueError:
+            continue
+        content = ((rec or {}).get("message") or {}).get("content")
+        for block in content if isinstance(content, list) else []:
+            if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "Read":
+                calls.append(block.get("input") or {})
+    return calls
+
+
+def lines_read_frac(calls: list[dict], path: Path) -> float:
+    """Fraction of a file's lines covered by Read calls, from their offset and limit."""
+    total = len(path.read_text(encoding="utf-8").splitlines())
+    if total == 0:
+        return 1.0
+    seen: set[int] = set()
+    for c in calls:
+        if str(c.get("file_path", "")) != str(path):
+            continue
+        start = max(int(c.get("offset") or 1), 1)
+        seen.update(range(start, min(start + int(c.get("limit") or READ_DEFAULT_LIMIT), total + 1)))
+    return len(seen) / total
+
+
+def coverage(transcript: Path, reader_dir: Path) -> dict[str, float]:
+    docs, sidecars = read_fractions(transcript, reader_dir)
+    calls = _read_calls(transcript)
+    return {
+        "docs": docs,
+        "sidecars": sidecars,
+        "runs": lines_read_frac(calls, reader_dir / "runs.jsonl"),
+        "git": lines_read_frac(calls, reader_dir / "git_log.jsonl"),
+    }
 
 
 # ── readings ──────────────────────────────────────────────────────────────────
@@ -221,7 +274,8 @@ def score(work: Path) -> dict:
     transcripts = json.loads((work / "reader_transcripts.json").read_text(encoding="utf-8"))
     contamination = hash_mismatches = audit_bad = rejected = n_readings = n_unlabelled = 0
     per_arm: dict[str, dict[str, list[float]]] = {
-        n: {"groups": [], "lenient": [], "supp": [], "unc": []} for n in ARMS
+        n: {"groups": [], "lenient": [], "supp": [], "unc": [], "docs": [], "sidecars": [], "runs": [], "git": []}
+        for n in ARMS
     }
     for name in ARMS:
         packet = work / "packets" / name
@@ -251,6 +305,8 @@ def score(work: Path) -> dict:
             audit_bad += len(bad)
             for b in bad:
                 logger.error("%s left its packet: %s", key, b)
+            for k, v in coverage(Path(transcripts[key]), packet / "reader").items():
+                per_arm[name][k].append(v)
 
             effort, edges = reading_graph(reading, view)
             found = bridges(list(effort), edges)
@@ -283,6 +339,11 @@ def score(work: Path) -> dict:
         **{f"{n}_groups_unsure_supported_median": med(a["lenient"]) for n, a in per_arm.items()},
         **{f"{n}_supported_bridge_frac": mean(a["supp"]) for n, a in per_arm.items()},
         **{f"{n}_uncertain_node_frac": mean(a["unc"]) for n, a in per_arm.items()},
+        **{
+            f"{n}_min_{k}_read_frac": min(a[k]) if a[k] else 0.0
+            for n, a in per_arm.items()
+            for k in ("docs", "sidecars", "runs", "git")
+        },
     }
 
 
