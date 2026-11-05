@@ -586,3 +586,28 @@ async def test_mcp_confirm_refusal_writes_no_event(charter_env, monkeypatch: pyt
     )
     assert res["ok"] is False
     assert _count_confirmed_events(cat) == 0
+
+
+def test_old_index_db_without_charter_tables_reads_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """An index.db built before the charter tables existed still opens; the tables read as empty."""
+    import duckdb
+
+    from bathos.index import index_db_path, init_index_schema
+
+    cat = tmp_path / "catalog"
+    cat.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(cat))
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    con = duckdb.connect(str(index_db_path(cat)))
+    init_index_schema(con)
+    con.execute("DROP TABLE charter_confirmations")
+    con.execute("DROP TABLE charter_pivots")
+    con.close()
+    ro = connect_read(cat)
+    try:
+        assert ro.execute("SELECT count(*) FROM charter_confirmations").fetchone()[0] == 0
+        assert ro.execute("SELECT count(*) FROM charter_pivots").fetchone()[0] == 0
+        assert "purposes_json" in [d[0] for d in ro.execute("SELECT * FROM charter_confirmations").description]
+    finally:
+        ro.close()

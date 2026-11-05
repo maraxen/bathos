@@ -2499,6 +2499,103 @@ def charter_pivot_cmd(
         f"Pivot recorded: charter updated and unconfirmed (sha256={res['charter_sha256_after'][:16]})"
     )
 
+# ---------------------------------------------------------------------------
+# Bearings CLI (spec 261104, slice 2)
+# ---------------------------------------------------------------------------
+
+bearings_app = cyclopts.App(name="bearings", help="Blind packet, reading record and charter comparison.")
+app.command(bearings_app)
+
+
+@bearings_app.command(name="packet")
+def bearings_packet_cmd(
+    *,
+    out: str,
+    since: str,
+    until: str,
+    ref: str = "HEAD",
+    project: str = "",
+    charter_file: tuple[str, ...] = (),
+    backlog_titles: str = "",
+    reachable_only: bool = False,
+    project_root: str = "",
+    catalog_dir: str = "",
+) -> None:
+    """Build the deterministic blind packet for a reader into an empty --out directory."""
+    from bathos.bearings.packet import build_packet
+    from bathos.workspace import resolve_workspace
+
+    root = Path(project_root) if project_root else resolve_workspace().fs_root
+    try:
+        res = build_packet(
+            root,
+            out=Path(out),
+            since=since,
+            until=until,
+            ref=ref,
+            project=project or None,
+            charter_file=list(charter_file) or None,
+            backlog_titles=backlog_titles or None,
+            reachable_only=reachable_only,
+            catalog_dir=Path(catalog_dir) if catalog_dir else None,
+        )
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+    print(json.dumps(res, indent=2))
+
+
+@bearings_app.command(name="record")
+def bearings_record_cmd(
+    *,
+    reading: str,
+    packet: str,
+    project_root: str = "",
+    catalog_dir: str = "",
+) -> None:
+    """Record a blind reader's cited reading against the packet it was written from."""
+    from bathos.bearings.reading import record_reading
+    from bathos.workspace import resolve_workspace
+
+    root = Path(project_root) if project_root else resolve_workspace().fs_root
+    try:
+        res = record_reading(
+            root,
+            reading_file=Path(reading),
+            packet_dir=Path(packet),
+            catalog_dir=Path(catalog_dir) if catalog_dir else None,
+        )
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+    print(json.dumps(res, indent=2))
+
+
+@bearings_app.command(name="compare")
+def bearings_compare_cmd(
+    *,
+    reading_id: str,
+    mapping: str,
+    project_root: str = "",
+    catalog_dir: str = "",
+) -> None:
+    """Compare a recorded reading with the confirmed charter using a different agent's mapping."""
+    from bathos.bearings.reading import compare_reading
+    from bathos.workspace import resolve_workspace
+
+    root = Path(project_root) if project_root else resolve_workspace().fs_root
+    try:
+        res = compare_reading(
+            root,
+            reading_id=reading_id,
+            mapping_file=Path(mapping),
+            catalog_dir=Path(catalog_dir) if catalog_dir else None,
+        )
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+    print(json.dumps(res, indent=2))
+
 
 if __name__ == "__main__":
     app()

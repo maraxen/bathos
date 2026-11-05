@@ -447,3 +447,89 @@ def test_object_citation_of_other_kind_is_unresolvable_not_atom(world):
     rec(world, reading)
     stored = json.loads(rows(world, "SELECT purposes_json FROM bearings_readings")[0][0])[0]["citations"]
     assert stored[-1]["resolution"] == "unresolvable"
+
+
+# ── Wiring ───────────────────────────────────────────────────────────────────
+
+
+def rows_for(e, sql: str):
+    con = connect_read(e["cat"])
+    try:
+        return con.execute(sql).fetchall()
+    finally:
+        con.close()
+
+
+def test_end_to_end_through_the_cli(env):  # noqa: F811
+    from bathos.cli_cyclopts import app
+    from tests._cyclopts_runner import CyclopticRunner
+
+    runner = CyclopticRunner()
+    repo, cat = env["repo"], env["cat"]
+    write_charter(repo)
+    confirm(repo, chair_token=TOKEN, interactive_tty=False, catalog_dir=cat)
+    sha = commit_files(repo, {SPEC_PATH: SPEC_TEXT}, msg="spec work")
+    insert_runs(env, [{"id": "22222222cccccccc", "project_slug": "pkt", "timestamp": DATE, "git_hash": sha}])
+    common = ["--project-root", str(repo), "--catalog-dir", str(cat)]
+
+    out = env["tmp"] / "cli_packet"
+    res = runner.invoke(app, ["bearings", "packet", "--out", str(out), "--since", SINCE, "--until", UNTIL, *common])
+    assert res.exit_code == 0, res.output
+    packet_sha = json.loads(res.output)["packet_sha256"]
+
+    # A non-empty --out is refused with a non-zero exit.
+    res = runner.invoke(app, ["bearings", "packet", "--out", str(out), "--since", SINCE, "--until", UNTIL, *common])
+    assert res.exit_code != 0
+
+    blob = git(repo, "rev-parse", f"HEAD:{SPEC_PATH}")
+    reading = env["tmp"] / "cli_reading.json"
+    reading.write_text(
+        json.dumps(
+            {
+                "packet_sha256": packet_sha,
+                "reader_id": "reader-A",
+                "purposes": [purpose("r1", ["run:22222222cccccccc", f"doc:{SPEC_PATH}@{blob}#L1-L3"])],
+                "open_lines": [],
+            }
+        )
+    )
+    res = runner.invoke(app, ["bearings", "record", "--reading", str(reading), "--packet", str(out), *common])
+    assert res.exit_code == 0, res.output
+    rid = json.loads(res.output)["reading_id"]
+
+    mapping = env["tmp"] / "cli_mapping.json"
+    mapping.write_text(json.dumps({"mapper_id": "reader-A", "mapping": {"r1": "P1"}}))
+    res = runner.invoke(app, ["bearings", "compare", "--reading-id", rid, "--mapping", str(mapping), *common])
+    assert res.exit_code != 0  # mapper is the reader
+    assert rows_for(env, "SELECT count(*) FROM bearings_items")[0][0] == 0
+
+    mapping.write_text(json.dumps({"mapper_id": "mapper-B", "mapping": {"r1": "P1"}}))
+    res = runner.invoke(app, ["bearings", "compare", "--reading-id", rid, "--mapping", str(mapping), *common])
+    assert res.exit_code == 0, res.output
+    items = rows_for(env, "SELECT kind, subject_json FROM bearings_items ORDER BY kind")
+    assert [k for k, _ in items] == ["mapped", "silent"]
+    assert json.loads(items[1][1]) == {"charter_purpose_id": "P2"}
+
+
+def test_old_index_db_without_bearings_tables_reads_empty(tmp_path, monkeypatch):
+    import duckdb
+
+    from bathos.index import index_db_path, init_index_schema
+
+    cat = tmp_path / "catalog"
+    cat.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(cat))
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    con = duckdb.connect(str(index_db_path(cat)))
+    init_index_schema(con)
+    con.execute("DROP TABLE bearings_readings")
+    con.execute("DROP TABLE bearings_items")
+    con.close()
+    ro = connect_read(cat)
+    try:
+        assert ro.execute("SELECT count(*) FROM bearings_items").fetchone()[0] == 0
+        assert ro.execute("SELECT count(*) FROM bearings_readings").fetchone()[0] == 0
+        assert "matched_retired" in [d[0] for d in ro.execute("SELECT * FROM bearings_items").description]
+    finally:
+        ro.close()

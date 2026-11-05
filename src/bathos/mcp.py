@@ -45,7 +45,13 @@ from bathos.checker import check_runs
 from bathos.cli_common import normalise_output_paths, normalise_tags, require_project_slug
 from bathos.compact import compact as compact_catalog
 from bathos.config import default_catalog_dir, find_project_config, load_project_config
-from bathos.errors import RESOLUTION_HINTS, BathosErrorCode, CharterError, StepBackError
+from bathos.errors import (
+    RESOLUTION_HINTS,
+    BathosErrorCode,
+    BearingsError,
+    CharterError,
+    StepBackError,
+)
 from bathos.export import ExportError
 from bathos.figure_registry import FigureEntrySchemaError, register_figure_entry
 from bathos.index import connect_read
@@ -209,7 +215,7 @@ def traced_tool(fn):
 
             code = EXCEPTION_TO_CODE.get(type(e).__name__, BathosErrorCode.INTERNAL)
             return _shape_error(tool_name, code, e)
-        except CharterError as e:
+        except (CharterError, BearingsError) as e:
             from bathos.errors import EXCEPTION_TO_CODE
 
             code = EXCEPTION_TO_CODE.get(type(e).__name__, BathosErrorCode.INTERNAL)
@@ -6233,6 +6239,88 @@ async def charter_confirm(
         "Charter confirmation is strictly human-only; autonomous agents calling via MCP are unconditionally refused."
     )
 
+# ---------------------------------------------------------------------------
+# Bearings MCP Tools (spec 261104, slice 2)
+# ---------------------------------------------------------------------------
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def bearings_packet(
+    out: str,
+    since: str,
+    until: str,
+    ref: str = "HEAD",
+    project: str | None = None,
+    charter_files: list[str] | None = None,
+    backlog_titles: str | None = None,
+    reachable_only: bool = False,
+    project_root: str | None = None,
+    catalog_dir: str | None = None,
+) -> dict:
+    """Build the deterministic blind packet for a bearings reader into an empty directory."""
+    from bathos.bearings.packet import build_packet
+    from bathos.workspace import resolve_workspace
+
+    root = Path(project_root) if project_root else resolve_workspace().fs_root
+    res = build_packet(
+        root,
+        out=Path(out),
+        since=since,
+        until=until,
+        ref=ref,
+        project=project,
+        charter_file=charter_files,
+        backlog_titles=backlog_titles,
+        reachable_only=reachable_only,
+        catalog_dir=Path(catalog_dir) if catalog_dir else None,
+    )
+    return {"ok": True, **res}
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def bearings_record(
+    reading_file: str,
+    packet_dir: str,
+    project_root: str | None = None,
+    catalog_dir: str | None = None,
+) -> dict:
+    """Record a blind reader's cited reading; every purpose needs 2 resolvable citations."""
+    from bathos.bearings.reading import record_reading
+    from bathos.workspace import resolve_workspace
+
+    root = Path(project_root) if project_root else resolve_workspace().fs_root
+    res = record_reading(
+        root,
+        reading_file=Path(reading_file),
+        packet_dir=Path(packet_dir),
+        catalog_dir=Path(catalog_dir) if catalog_dir else None,
+    )
+    return {"ok": True, **res}
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def bearings_compare(
+    reading_id: str,
+    mapping_file: str,
+    project_root: str | None = None,
+    catalog_dir: str | None = None,
+) -> dict:
+    """Compare a recorded reading with the confirmed charter using a different agent's mapping."""
+    from bathos.bearings.reading import compare_reading
+    from bathos.workspace import resolve_workspace
+
+    root = Path(project_root) if project_root else resolve_workspace().fs_root
+    res = compare_reading(
+        root,
+        reading_id=reading_id,
+        mapping_file=Path(mapping_file),
+        catalog_dir=Path(catalog_dir) if catalog_dir else None,
+    )
+    return {"ok": True, **res}
+
 
 if __name__ == "__main__":
     init_server_telemetry()
@@ -6334,6 +6422,9 @@ _WIRED = cisternal.wire(
         "charter_draft",
         "charter_pivot",
         "charter_confirm",
+        "bearings_packet",
+        "bearings_record",
+        "bearings_compare",
     ],
 )
 
