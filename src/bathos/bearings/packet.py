@@ -53,7 +53,10 @@ def canonical_json(obj: Any) -> str:
 
 _LINE_MARKER_RE = re.compile(r"^[ \t]*(?:[>#][ \t]*)+", re.MULTILINE)
 # An absolute path token in a run's command or tags, not part of a URL or a relative path.
-_ABS_PATH_RE = re.compile(r"(?<![\w./:~-])/[^\s'\"=,;:\]\[]+")
+# Covers `-I/x` (a one-letter flag glued to its path) and `A=/a:/b`. The `(?!/)` keeps a URL's
+# `//` out, and the path after it is then preceded by a word character. A path containing a
+# space is only scrubbed up to the space.
+_ABS_PATH_RE = re.compile(r"(?:(?<=\s-[A-Za-z])|(?<![\w./~]))/(?!/)[^\s'\",;:\]\[]+")
 
 
 def _norm(text: str) -> str:
@@ -160,10 +163,11 @@ def _needles(
         if len(n) < MIN_NEEDLE_CHARS:
             short.append({"source": source, "length": len(n)})
             continue
-        if n in seen:
-            continue
-        seen.add(n)
-        needles.append((source, n))
+        # A needle whose own line starts with a marker can be quoted inline with the marker kept.
+        for form in (n, " ".join(text.split())):
+            if form not in seen:
+                seen.add(form)
+                needles.append((source, form))
     return needles, short
 
 
@@ -177,7 +181,8 @@ def _scrub_abs_paths(text: str) -> str:
 
     The checkout a run or build happened in must not reach the reader or move the hash.
     """
-    return _ABS_PATH_RE.sub(lambda m: "<abs>/" + m.group(0).rstrip("/").rsplit("/", 1)[-1], text)
+    unschemed = text.replace("file:///", "/")
+    return _ABS_PATH_RE.sub(lambda m: "<abs>/" + m.group(0).rstrip("/").rsplit("/", 1)[-1], unschemed)
 
 
 def _run_quotes(value: str, needles: list[tuple[str, str]]) -> bool:

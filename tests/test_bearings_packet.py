@@ -11,7 +11,7 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from bathos.bearings.packet import build_packet, verify_packet
+from bathos.bearings.packet import _scrub_abs_paths, build_packet, verify_packet
 from bathos.bearings.reading import _PacketView
 from bathos.charter import Charter, Purpose, confirm, dump_charter
 from bathos.errors import BearingsPacketInvalidError, BearingsPacketMismatchError
@@ -242,6 +242,31 @@ def test_absolute_paths_do_not_reach_the_reader_or_move_the_hash(env):
     con.close()
     insert_runs(env, [run("aaaaaaaa00000001", "python /scratch/wt/pkt/scripts/a.py --out=/tmp/other/x.json")])
     assert build(env, "b")[1]["packet_sha256"] == ra["packet_sha256"]
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("gcc -I/home/u/proj/inc -o a", "gcc -I<abs>/inc -o a"),
+        ("PATH=/a/b:/c/d run", "PATH=<abs>/b:<abs>/d run"),
+        ("open file:///home/u/x.txt", "open <abs>/x.txt"),
+        ("cat /home/u/a=b", "cat <abs>/a=b"),
+        ("--flag=/x/y", "--flag=<abs>/y"),
+        ("a/b ./c 1/2 ../d", "a/b ./c 1/2 ../d"),
+        ("curl https://example.org/a/b", "curl https://example.org/a/b"),
+    ],
+)
+def test_scrub_abs_paths(raw, expected):
+    assert _scrub_abs_paths(raw) == expected
+
+
+def test_needle_with_a_line_leading_marker_matches_when_quoted_inline(env):
+    repo = env["repo"]
+    text = "close the long-standing issue\n#12 about affinity drift"
+    write_charter(repo, {"P1": Purpose(id="P1", text=text, state="live")})
+    commit_files(repo, {".praxia/docs/specs/q.md": "We will close the long-standing issue #12 about affinity drift.\n"})
+    out, _ = build(env)
+    assert excluded(out)[".praxia/docs/specs/q.md"] == "quotes_charter"
 
 
 def test_url_in_a_command_is_left_alone(env):
