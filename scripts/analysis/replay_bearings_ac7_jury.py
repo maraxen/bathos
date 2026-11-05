@@ -2,7 +2,8 @@
 
 build: writes prompts, schemas and one empty git folder per dispatch, so a juror's folder holds nothing to read.
 merge: compares verdicts, applies the sidecar's flag rules, and writes merged.json and for_owner.json.
-finalize: combines merged.json with the owner's label documents into labels.json and labels_majority.json.
+adjudicate: writes the prompt for one Opus adjudicator that decides the flagged entries (seventh sidecar amendment).
+finalize: combines the owner's labels, then the adjudicator's, then the jury's into labels.json and labels_majority.json.
 sensitivity: after the tracked run, prints recovered under union ticks and under ticks from at least 3 of 4 jurors.
 
 Build, collect, merge and finalize print only counts of flags, so the score stays hidden until the tracked run.
@@ -65,6 +66,42 @@ uncertain entry goes to the owner, and this has no penalty.
 
 Return one JSON object of the form {"rows": [...]}, with one row for every entry: {"reader", "entry", "maps_to", \
 "uncertain"}. Copy reader and entry id exactly."""
+
+
+ADJ_SYSTEM = """You are the adjudicator for a panel that classified statements about research projects. Each statement \
+is one entry written by an independent reader describing what a project's record shows. Four jurors labelled every \
+entry. The entries below are the ones where their choices differed or at least three of them were unsure. You decide \
+each of these. Work only from the text in this prompt.
+
+Give every disputed entry exactly one choice:
+- "project": the entry shows a purpose of the whole project. Give it a short name in "name".
+- "sub": the entry is part of something larger, or describes work that serves another purpose, or is not a purpose at all.
+- "generic": the entry is too vague for anyone to disagree with.
+
+Names matter only inside one reader: two entries of the same reader with the same name count as one purpose. If a \
+disputed entry shows the same purpose as another entry of the same reader that is already labelled "project", reuse \
+that name exactly, character for character. If it shows a purpose no other entry of that reader names, give a new name. \
+Apply the same reuse rule between disputed entries of the same reader.
+
+Apply the same standard to every project. A project usually has few purposes, but do not aim for any particular number.
+
+Ruling from the project owner for tev_design: the k=4 vs k=9 episode and the 260714 target swap are claim-scale slips \
+inside one aim, so an entry that reports either as a separate purpose is "sub".
+
+The jurors' votes are evidence, not a vote count to follow. Set "uncertain" to true if a careful person could reasonably \
+choose differently, and give a one-sentence "reason" for every decision.
+
+Return one JSON object of the form {"rows": [...]}, with one row for every disputed entry: {"project", "reader", \
+"entry", "choice", "name", "uncertain", "reason"}. Copy project, reader and entry id exactly. "name" is null unless the \
+choice is "project"."""
+
+
+def adjudicator_schema() -> dict:
+    schema = label_schema()
+    row = schema["properties"]["rows"]["items"]
+    row["required"].append("reason")
+    row["properties"]["reason"] = {"type": "string"}
+    return schema
 
 
 def label_schema() -> dict:
@@ -287,17 +324,64 @@ def merge(work: Path) -> None:
     logger.info("entries with a tick note, not sent to the owner: %d", sum(bool(v) for v in tick_notes.values()))
 
 
-def finalize(work: Path, owner_dir: Path) -> None:
+def adjudicate(work: Path) -> None:
+    """Write the adjudicator's prompt: each reader holding a flagged entry, with settled labels and the jurors' votes."""
+    jury = work / "jury"
+    state = json.loads((jury / "merged.json").read_text())
+    merged, flags = state["merged"], state["flags"]
+    votes = json.loads((jury / "for_owner.json").read_text())["votes"]
+    lines = [ADJ_SYSTEM, ""]
+    n = 0
+    for r in load_entries(work):
+        keys = [key(r["arm"], r["reader"], e["id"]) for e in r["entries"]]
+        if not any(flags[k] for k in keys):
+            continue
+        lines.append(f"## project={r['arm']} reader={r['reader']}")
+        for e, k in zip(r["entries"], keys):
+            if flags[k]:
+                n += 1
+                lines.append(f"- DISPUTED entry={e['id']} ({e['kind']}): {e['text']}")
+                for j, v in votes[k].items():
+                    name = f', name "{v["name"]}"' if v["choice"] == "project" else ""
+                    lines.append(f"  - juror {j}: {v['choice']}{name}{', unsure' if v['uncertain'] else ''}")
+            else:
+                m = merged[k]
+                label = f'project, name "{m["identity"]}"' if m["choice"] == "project" else m["choice"]
+                lines.append(f"- settled entry={e['id']} ({e['kind']}): {e['text']}\n  - label: {label}")
+        lines.append("")
+    out = jury / "adjudicate"
+    out.mkdir(exist_ok=True)
+    (out / "prompt.md").write_text("\n".join(lines), encoding="utf-8")
+    (out / "schema.json").write_text(json.dumps(adjudicator_schema()), encoding="utf-8")
+    logger.info("adjudicator prompt holds %d disputed entries", n)
+
+
+def load_adjudicator(work: Path, flagged: set[str]) -> dict[str, dict]:
+    """Read the adjudicator's verdict. It must cover exactly the flagged entries, or it is not used at all."""
+    path = work / "jury" / "verdicts" / "adjudicator.json"
+    if not path.exists():
+        return {}
+    rows = {key(r["project"], r["reader"], r["entry"]): r for r in json.loads(path.read_text())["rows"]}
+    bad = [k for k, r in rows.items() if r["choice"] not in ("project", "sub", "generic")]
+    if set(rows) != flagged or bad:
+        raise SystemExit(f"adjudicator verdict invalid: {len(flagged - set(rows))} missing, "
+                         f"{len(set(rows) - flagged)} extra, {len(bad)} bad choices")  # fmt: skip
+    logger.info("adjudicator: %d rows, %d marked uncertain", len(rows), sum(r["uncertain"] for r in rows.values()))
+    return {k: {"choice": r["choice"], "identity": r["name"]} for k, r in rows.items()}
+
+
+def finalize(work: Path, owner_dir: Path | None) -> None:
     state = json.loads((work / "jury" / "merged.json").read_text())
     merged, flags = state["merged"], state["flags"]
     owner = {}
-    for path in owner_dir.glob("*.json"):
+    for path in owner_dir.glob("*.json") if owner_dir else ():
         raw = json.loads(path.read_text())
         owner[path.stem] = raw["data"] if isinstance(raw.get("data"), dict) else raw
+    adjudicated = load_adjudicator(work, {k for k, v in flags.items() if v})
 
     labels: dict[str, dict] = {}
     majority: dict[str, dict] = {}
-    n_from_owner = n_from_jury = n_missing = 0
+    n_from_owner = n_from_jury = n_from_adjudicator = n_missing = 0
     for r in load_entries(work):
         out = labels[f"{r['arm']}/{r['reader']}"] = {}
         out_majority = majority[f"{r['arm']}/{r['reader']}"] = {}
@@ -306,6 +390,8 @@ def finalize(work: Path, owner_dir: Path) -> None:
             o = owner.get(k) or {}
             if o.get("choice"):
                 source, n_from_owner = o, n_from_owner + 1
+            elif k in adjudicated:
+                source, n_from_adjudicator = adjudicated[k], n_from_adjudicator + 1
             elif not flags[k]:
                 source, n_from_jury = merged[k], n_from_jury + 1
             else:
@@ -324,7 +410,8 @@ def finalize(work: Path, owner_dir: Path) -> None:
             out_majority[e["id"]] = {**row, "maps_to": sorted(owner_ticks | set(merged[k]["maps_majority"]))}
     (work / "labels.json").write_text(json.dumps(labels, indent=2) + "\n", encoding="utf-8")
     (work / "labels_majority.json").write_text(json.dumps(majority, indent=2) + "\n", encoding="utf-8")
-    logger.info("wrote labels: %d from the owner, %d from the jury, %d unlabelled", n_from_owner, n_from_jury, n_missing)
+    logger.info("wrote labels: %d from the owner, %d from the adjudicator, %d from the jury, %d unlabelled",
+                n_from_owner, n_from_adjudicator, n_from_jury, n_missing)  # fmt: skip
 
 
 def sensitivity(work: Path) -> None:
@@ -344,7 +431,7 @@ def sensitivity(work: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("build", "collect", "merge", "finalize", "sensitivity"))
+    parser.add_argument("command", choices=("build", "collect", "merge", "adjudicate", "finalize", "sensitivity"))
     parser.add_argument("--work-dir", type=Path, required=True)
     parser.add_argument("--owner-dir", type=Path, help="finalize: directory of the owner's label documents")
     args = parser.parse_args()
@@ -355,6 +442,8 @@ def main() -> None:
         collect(args.work_dir)
     elif args.command == "merge":
         merge(args.work_dir)
+    elif args.command == "adjudicate":
+        adjudicate(args.work_dir)
     elif args.command == "sensitivity":
         sensitivity(args.work_dir)
     else:
