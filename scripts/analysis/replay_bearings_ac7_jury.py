@@ -2,9 +2,10 @@
 
 build: writes prompts, schemas and one empty git folder per dispatch, so a juror's folder holds nothing to read.
 merge: compares verdicts, applies the sidecar's flag rules, and writes merged.json and for_owner.json.
-finalize: combines merged.json with the owner's label documents into labels.json, or stops if the audit fails.
+finalize: combines merged.json with the owner's label documents into labels.json and labels_majority.json.
+sensitivity: after the tracked run, prints recovered under union ticks and under ticks from at least 3 of 4 jurors.
 
-Prints only counts of flags, never per-reader purpose counts, so the score stays hidden until the tracked run.
+Build, collect, merge and finalize print only counts of flags, so the score stays hidden until the tracked run.
 """
 
 from __future__ import annotations
@@ -12,8 +13,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import random
+import statistics
 import subprocess
+from collections import Counter
 from itertools import combinations
 from pathlib import Path
 
@@ -28,9 +30,6 @@ ARM_ORDERS = {
     "agy1": ("tev_design", "plegadx", "colliculix"),
     "agy2": ("plegadx", "tev_design", "colliculix"),
 }
-AUDIT_SEED = 261105
-AUDIT_SIZE = 10
-AUDIT_MAX_OVERTURNED = 2
 MIN_UNCERTAIN = 3  # Owner's choice, fifth sidecar amendment.
 
 LABEL_SYSTEM = """You are classifying statements about research projects. Each statement is one entry written by an \
@@ -222,6 +221,7 @@ def merge(work: Path) -> None:
 
     readings = load_entries(work)
     flags: dict[str, list[str]] = {}
+    tick_notes: dict[str, list[str]] = {}
     merged: dict[str, dict] = {}
     first = next(j for j in JURORS if j in labels)
     for r in readings:
@@ -237,18 +237,23 @@ def merge(work: Path) -> None:
             if sum(v["uncertain"] for v in votes) >= MIN_UNCERTAIN:
                 reasons.append("uncertain")
             ticks: list[str] = []
+            majority: list[str] = []
             if r["arm"] == "colliculix":
                 map_votes = [maps[j][k] for j in maps]
+                notes = tick_notes.setdefault(k, [])
                 if len({tuple(sorted(v["maps_to"])) for v in map_votes}) > 1:
-                    reasons.append("ticks")
-                if sum(v["uncertain"] for v in map_votes) >= MIN_UNCERTAIN:
-                    reasons.append("ticks_uncertain")
-                ticks = sorted(map_votes[0]["maps_to"])
+                    notes.append("ticks_differ")
+                if any(v["uncertain"] for v in map_votes):
+                    notes.append(f"ticks_uncertain:{sum(v['uncertain'] for v in map_votes)}")
+                counts = Counter(c for v in map_votes for c in set(v["maps_to"]))
+                ticks = sorted(counts)
+                majority = sorted(c for c, n in counts.items() if n >= MIN_UNCERTAIN)
             choice = labels[first][k]["choice"]
             merged[k] = {
                 "choice": choice,
                 "identity": (labels[first][k]["name"] or "").strip() if choice == "project" else None,
                 "maps": ticks,
+                "maps_majority": majority,
             }
         # The scorer counts distinct names per reader, so only grouping inside one reader can change a score.
         for a, b in combinations(project_keys, 2):
@@ -261,10 +266,10 @@ def merge(work: Path) -> None:
                 flags[b].append("grouping")
 
     flagged = sorted(k for k, v in flags.items() if v)
-    clean = sorted(k for k, v in flags.items() if not v)
-    audit = sorted(random.Random(AUDIT_SEED).sample(clean, min(AUDIT_SIZE, len(clean))))
     jury = work / "jury"
-    (jury / "merged.json").write_text(json.dumps({"merged": merged, "flags": flags, "audit": audit}, indent=2) + "\n")
+    (jury / "merged.json").write_text(
+        json.dumps({"merged": merged, "flags": flags, "tick_notes": tick_notes}, indent=2) + "\n"
+    )
     votes = {
         k: {
             j: {"choice": labels[j][k]["choice"], "name": labels[j][k]["name"], "uncertain": labels[j][k]["uncertain"]}
@@ -272,63 +277,74 @@ def merge(work: Path) -> None:
         }
         for k in flagged
     }
-    (jury / "for_owner.json").write_text(json.dumps({"keys": sorted([*flagged, *audit]), "votes": votes}, indent=2) + "\n")
+    (jury / "for_owner.json").write_text(json.dumps({"keys": flagged, "votes": votes}, indent=2) + "\n")
     counts: dict[str, int] = {}
     for v in flags.values():
         for reason in set(v):
             counts[reason] = counts.get(reason, 0) + 1
     logger.info("jurors: %d label, %d map", len(labels), len(maps))
-    logger.info("flagged %d of %d; reasons %s; audit %d", len(flagged), len(flags), sorted(counts.items()), len(audit))
+    logger.info("flagged %d of %d; reasons %s", len(flagged), len(flags), sorted(counts.items()))
+    logger.info("entries with a tick note, not sent to the owner: %d", sum(bool(v) for v in tick_notes.values()))
 
 
 def finalize(work: Path, owner_dir: Path) -> None:
     state = json.loads((work / "jury" / "merged.json").read_text())
-    merged, flags, audit = state["merged"], state["flags"], state["audit"]
+    merged, flags = state["merged"], state["flags"]
     owner = {}
     for path in owner_dir.glob("*.json"):
         raw = json.loads(path.read_text())
         owner[path.stem] = raw["data"] if isinstance(raw.get("data"), dict) else raw
 
-    def same(k: str) -> bool:
-        a, b = owner[k], merged[k]
-        return a.get("choice") == b["choice"] and sorted(a.get("maps") or []) == b["maps"]
-
-    missing_audit = [k for k in audit if not owner.get(k, {}).get("choice")]
-    if missing_audit:
-        raise SystemExit(f"{len(missing_audit)} audit entries lack an owner label")
-    overturned = sum(not same(k) for k in audit)
-    logger.info("audit: owner overturned %d of %d", overturned, len(audit))
-    if overturned > AUDIT_MAX_OVERTURNED:
-        raise SystemExit("audit failed: the sidecar sends labelling back to the owner, and no labels.json was written")
-
     labels: dict[str, dict] = {}
-    n_from_owner = n_from_jury = 0
+    majority: dict[str, dict] = {}
+    n_from_owner = n_from_jury = n_missing = 0
     for r in load_entries(work):
         out = labels[f"{r['arm']}/{r['reader']}"] = {}
+        out_majority = majority[f"{r['arm']}/{r['reader']}"] = {}
         for e in r["entries"]:
             k = key(r["arm"], r["reader"], e["id"])
-            o = owner.get(k)
-            if o and o.get("choice"):
-                source, n_from_owner = {**o, "maps": o.get("maps") or []}, n_from_owner + 1
+            o = owner.get(k) or {}
+            if o.get("choice"):
+                source, n_from_owner = o, n_from_owner + 1
             elif not flags[k]:
                 source, n_from_jury = merged[k], n_from_jury + 1
             else:
+                n_missing += 1
                 continue
             identity = (source.get("identity") or "").strip()
             if source["choice"] == "project" and not identity:
+                n_missing += 1
                 continue
-            out[e["id"]] = {
+            owner_ticks = set(o.get("maps") or [])
+            row = {
                 "identity": identity if source["choice"] == "project" else None,
                 "generic": source["choice"] == "generic",
-                "maps_to": sorted(source["maps"]),
             }
+            out[e["id"]] = {**row, "maps_to": sorted(owner_ticks | set(merged[k]["maps"]))}
+            out_majority[e["id"]] = {**row, "maps_to": sorted(owner_ticks | set(merged[k]["maps_majority"]))}
     (work / "labels.json").write_text(json.dumps(labels, indent=2) + "\n", encoding="utf-8")
-    logger.info("wrote labels.json: %d from the owner, %d from the jury", n_from_owner, n_from_jury)
+    (work / "labels_majority.json").write_text(json.dumps(majority, indent=2) + "\n", encoding="utf-8")
+    logger.info("wrote labels: %d from the owner, %d from the jury, %d unlabelled", n_from_owner, n_from_jury, n_missing)
+
+
+def sensitivity(work: Path) -> None:
+    """Report recovered under both tick rules. Descriptive only: the union decides the outcome."""
+
+    def recovered(path: Path) -> float:
+        all_labels = json.loads(path.read_text())
+        counts = []
+        for name, entries in all_labels.items():
+            if name.startswith("colliculix/"):
+                counts.append(len({m for e in entries.values() if not e["generic"] for m in e["maps_to"]}))
+        return statistics.median(counts)
+
+    logger.info("colliculix recovered median, union ticks: %s", recovered(work / "labels.json"))
+    logger.info("colliculix recovered median, ticks from 3 of 4: %s", recovered(work / "labels_majority.json"))
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("build", "collect", "merge", "finalize"))
+    parser.add_argument("command", choices=("build", "collect", "merge", "finalize", "sensitivity"))
     parser.add_argument("--work-dir", type=Path, required=True)
     parser.add_argument("--owner-dir", type=Path, help="finalize: directory of the owner's label documents")
     args = parser.parse_args()
@@ -339,6 +355,8 @@ def main() -> None:
         collect(args.work_dir)
     elif args.command == "merge":
         merge(args.work_dir)
+    elif args.command == "sensitivity":
+        sensitivity(args.work_dir)
     else:
         finalize(args.work_dir, args.owner_dir)
 

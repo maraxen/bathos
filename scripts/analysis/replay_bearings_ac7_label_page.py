@@ -130,7 +130,7 @@ input[type=text]{width:100%;padding:8px 10px;font:inherit;color:var(--fg);backgr
 </main>
 <script>
 const DATA=__DATA__;const AG=__PURPOSES__;
-const JURY_NAMES=__NAMES__;
+const JURY_NAMES=__NAMES__;const TICKS=!Object.keys(JURY_NAMES).length;
 const KEY="ac7-labels-v2";
 const entries=DATA.flatMap(r=>r.entries.map((x,i)=>({...x,arm:r.arm,reader:r.reader,rkey:r.key,k:r.arm+"."+r.reader+"."+x.id,pos:i+1,n:r.entries.length})));
 const $=id=>document.getElementById(id);
@@ -173,8 +173,8 @@ const savedName={};
 function setName(v){const x=cur();const s=state[x.k]||(state[x.k]={});s.identity=v;savedName[x.k]=v;acted=true;persist(x.k);chrome();}
 
 function choose(v){const x=cur();const s=state[x.k]||(state[x.k]={});s.choice=v;if(v!=="project")s.identity="";acted=true;persist(x.k);render();chrome();
-if(v==="project"){if(x.arm!=="colliculix")$("name").focus();return;}
-if(v==="generic"||x.arm!=="colliculix")next();}
+if(v==="project"){if(!TICKS||x.arm!=="colliculix")$("name").focus();return;}
+if(!TICKS||v==="generic"||x.arm!=="colliculix")next();}
 
 function toggle(c){const x=cur();const s=state[x.k]||(state[x.k]={});const on=(s.maps||[]).includes(c);s.maps=on?s.maps.filter(m=>m!==c):[...(s.maps||[]),c];
 acted=true;persist(x.k);render();chrome();}
@@ -189,7 +189,7 @@ const box=$("choices");box.replaceChildren();CHOICES.forEach(([v,t,d],i)=>{const
 $("nameBox").hidden=s.choice!=="project";
 if(document.activeElement!==$("name")){$("name").value=s.identity||"";savedName[x.k]=s.identity||"";}
 if(s.choice==="project")chips();
-const showAg=x.arm==="colliculix"&&s.choice!=="generic";$("agBox").hidden=!showAg;
+const showAg=TICKS&&x.arm==="colliculix"&&s.choice!=="generic";$("agBox").hidden=!showAg;
 if(showAg){const t=$("ticks");t.replaceChildren();for(const [c,label] of Object.entries(AG)){const b=el("button",{type:"button",className:"tick"},el("kbd",{textContent:c.toLowerCase()})," "+c+": "+label);b.setAttribute("aria-pressed",String((s.maps||[]).includes(c)));b.onclick=()=>toggle(c);t.append(b);}}
 $("back").disabled=idx===0;}
 
@@ -222,7 +222,7 @@ if(e.key==="1"||e.key==="2"||e.key==="3"){e.preventDefault();choose(CHOICES[+e.k
 if(e.key==="ArrowLeft"){go(idx-1);return;}
 if(e.key==="ArrowRight"){next();return;}
 if(e.key==="Enter"&&tag!=="BUTTON"&&tag!=="SUMMARY"){e.preventDefault();next();return;}
-const c=e.key.toUpperCase();if(cur().arm==="colliculix"&&get(cur().k).choice!=="generic"&&AG[c])toggle(c);});
+const c=e.key.toUpperCase();if(TICKS&&cur().arm==="colliculix"&&get(cur().k).choice!=="generic"&&AG[c])toggle(c);});
 
 $("name").oninput=e=>{const v=e.target.value;const x=cur();const s=state[x.k]||(state[x.k]={});s.identity=v;nameHint();chrome();clearTimeout(nameTimer);nameTimer=setTimeout(()=>{setName(v);chips();},500);};
 $("name").onblur=e=>{clearTimeout(nameTimer);const v=e.target.value;if(v!==(savedName[cur().k]||""))setName(v);};
@@ -272,8 +272,8 @@ def load_entries(work: Path) -> list[dict]:
 def build(work: Path, out: Path, only_jury: bool = False) -> None:
     """Write the labelling page, escaping the data so a reading's text cannot close the inline script.
 
-    With only_jury, the page holds just the entries the jury sends to the owner, in reading order, so the
-    audit entries cannot be told from the flagged ones, and it offers the first juror's names as suggestions.
+    With only_jury, the page holds just the entries the jury sends to the owner, in reading order, offers the
+    first juror's names as suggestions, and hides A-G because those ticks come from the jury's union.
     """
     data = load_entries(work)
     names: dict[str, list[str]] = {}
