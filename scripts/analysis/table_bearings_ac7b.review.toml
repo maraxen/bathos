@@ -1,0 +1,78 @@
+schema_version = 2
+title = "Blind readers found fewest separate lines of work in the drifting project"
+takeaway = "The drifting project scored lowest (median 1 group), below both healthy controls (2 and 3), so the pre-registered test failed."
+question = "Do blind readers split a drifting project's record into at least three separate lines of work, more than in healthy controls?"
+refs = [
+  { kind = "run", id = "b85be024", label = "scored run, outcome fail" },
+  { kind = "run", id = "2eeaeca9", label = "reshape of that run into this table, outcome consistent" },
+  { kind = "task", id = "261104_multiscale-goal-awareness", label = "Bearings goal awareness" },
+  { kind = "debt", id = "3289", label = "Antigravity prompt-size limit" },
+  { kind = "debt", id = "3290", label = "Cursor answers without a fence rejected" },
+]
+
+[glossary]
+"AC" = "acceptance check in the Bearings spec"
+
+[toolchain]
+project = "review_toolchain"
+group = "figures"
+lock_sha256 = "39ac75d318f30b6b5edfbb348ced51aefcf98340f0267b448cb4943ecd92a9c8"
+
+[experiment]
+run_ref = "b85be024"
+
+[[panel]]
+panel = "panel-1"
+heading = "Strict count: the drifting project never splits"
+component_id = "vegalite.grouped_distribution"
+table = "outputs/bearings_ac7b/groups_by_reading.csv"
+caption = "One point per blind reading, three per project. A group is a set of lines of work joined by results flow, holding at least a tenth of the effort. Links a labeller marked unsure are cut [[ref:run:b85be024]]."
+refs = [{ kind = "run", id = "2eeaeca9" }]
+
+[panel.payload]
+panel = "panel-1"
+title = "Drift groups per reading (unsure bridges removed)"
+theme_colours = ["#0072b2"]
+theme_schemes = []
+group_field = "arm"
+unit_field = "reading"
+value_field = "groups_strict"
+chart_type = "strip"
+bin_count = 30
+uncertainty_intent = "show_full_distribution"
+error_semantics = "none"
+axis_labels = ["Drift groups", "Arm"]
+
+[panel.eda]
+unit_columns = ["reading"]
+condition_column = "arm"
+value_column = "groups_strict"
+expected_units = [["colliculix-reader1"], ["colliculix-reader2"], ["colliculix-reader3"], ["demistify-reader1"], ["demistify-reader2"], ["demistify-reader3"], ["plegadx-reader1"], ["plegadx-reader2"], ["plegadx-reader3"]]
+
+[[panel]]
+panel = "panel-2"
+heading = "Lenient count: same order, the negative control drops to two"
+component_id = "vegalite.grouped_distribution"
+table = "outputs/bearings_ac7b/groups_by_reading.csv"
+caption = "Same readings, keeping links the labeller marked unsure; only links marked unsupported are cut. The drifting project stays at one group in every reading [[ref:run:b85be024]]."
+refs = [{ kind = "run", id = "2eeaeca9" }]
+
+[panel.payload]
+panel = "panel-2"
+title = "Drift groups per reading (unsure bridges kept)"
+theme_colours = ["#0072b2"]
+theme_schemes = []
+group_field = "arm"
+unit_field = "reading"
+value_field = "groups_lenient"
+chart_type = "strip"
+bin_count = 30
+uncertainty_intent = "show_full_distribution"
+error_semantics = "none"
+axis_labels = ["Drift groups", "Arm"]
+
+[panel.eda]
+unit_columns = ["reading"]
+condition_column = "arm"
+value_column = "groups_lenient"
+expected_units = [["colliculix-reader1"], ["colliculix-reader2"], ["colliculix-reader3"], ["demistify-reader1"], ["demistify-reader2"], ["demistify-reader3"], ["plegadx-reader1"], ["plegadx-reader2"], ["plegadx-reader3"]]
