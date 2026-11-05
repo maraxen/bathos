@@ -62,6 +62,7 @@ def fold_bearings_readings(events: list[dict]) -> list[dict[str, Any]]:
                 "reader_id": str(data.get("reader_id", "")),
                 "purposes_json": _canonical_json(data.get("purposes", [])),
                 "open_lines_json": _canonical_json(data.get("open_lines", [])),
+                "links_json": _canonical_json(data.get("links", [])),
             }
         )
     return rows

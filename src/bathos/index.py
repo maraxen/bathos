@@ -375,7 +375,8 @@ CREATE TABLE IF NOT EXISTS bearings_readings (
     until VARCHAR,
     reader_id VARCHAR,
     purposes_json VARCHAR,
-    open_lines_json VARCHAR
+    open_lines_json VARCHAR,
+    links_json VARCHAR
 )
 """
 
@@ -464,6 +465,7 @@ def init_index_schema(con: duckdb.DuckDBPyConnection) -> None:
     con.execute(CHARTER_CONFIRMATIONS_DDL)
     con.execute(CHARTER_PIVOTS_DDL)
     con.execute(BEARINGS_READINGS_DDL)
+    _add_missing_columns(con, "bearings_readings", BEARINGS_READINGS_DDL)  # links_json, AC-5b
     con.execute(BEARINGS_ITEMS_DDL)
 
 

@@ -559,3 +559,131 @@ def test_old_index_db_without_bearings_tables_reads_empty(tmp_path, monkeypatch)
         assert "matched_retired" in [d[0] for d in ro.execute("SELECT * FROM bearings_items").description]
     finally:
         ro.close()
+
+
+# ── AC-5b: typed links and the reader's uncertainty ──────────────────────────
+
+
+def write_v2(w, name: str, links, purposes=None, open_lines=None) -> Path:
+    path = w["tmp"] / f"{name}.json"
+    good = w["good"]
+    path.write_text(
+        json.dumps(
+            {
+                "packet_sha256": w["packet_sha"],
+                "reader_id": "reader-A",
+                "purposes": purposes
+                or [
+                    {
+                        **purpose("r1", good),
+                        "uncertain": True,
+                        "uncertain_reason": "could be two lines",
+                    },
+                    purpose("r2", [w["doc_cite"], "run:22222222cccccccc"]),
+                ],
+                "open_lines": open_lines
+                if open_lines is not None
+                else [{"text": "stray", "citations": good[:1]}],
+                "links": links,
+            }
+        )
+    )
+    return path
+
+
+def link(frm: str, to: str, kind: str = "feeds", cites=None, **extra) -> dict:
+    return {
+        "from": frm,
+        "to": to,
+        "type": kind,
+        "citations": cites or ["run:22222222cccccccc"],
+        **extra,
+    }
+
+
+def test_v2_reading_stores_links_and_uncertainty_verbatim(world):
+    links = [
+        link("r2", "r1", uncertain=True),
+        link("open:0", "r1", "competes"),
+        link("r1", "r2", "shares"),
+    ]
+    res = rec(world, write_v2(world, "v2", links))
+    assert res["status"] == "recorded" and res["n_links"] == 3
+    stored_links, stored_p = rows(world, "SELECT links_json, purposes_json FROM bearings_readings")[
+        0
+    ]
+    got = json.loads(stored_links)
+    assert [(lk["from"], lk["to"], lk["type"]) for lk in got] == [
+        ("r2", "r1", "feeds"),
+        ("open:0", "r1", "competes"),
+        ("r1", "r2", "shares"),
+    ]
+    assert got[0]["uncertain"] is True
+    assert got[0]["citations"] == [{"citation": "run:22222222cccccccc", "resolution": "resolved"}]
+    p1 = json.loads(stored_p)[0]
+    assert p1["uncertain"] is True and p1["uncertain_reason"] == "could be two lines"
+
+
+def test_v1_reading_records_as_before_with_empty_links(world):
+    res = rec(world, write_reading(world, "v1", [purpose("r1", world["good"])]))
+    assert res["status"] == "recorded" and res["n_links"] == 0
+    assert rows(world, "SELECT links_json FROM bearings_readings")[0][0] == "[]"
+
+
+@pytest.mark.parametrize(
+    "bad_link",
+    [
+        link("r9", "r1"),  # unknown purpose id
+        link("r1", "open:1"),  # only open:0 exists
+        link("r1", "open:x"),  # malformed open ref
+        link("r1", "r1"),  # self-link
+        link("r1", "r2", "relates"),  # unknown type
+        {"from": "r1", "to": "r2", "type": "feeds"},  # no citations list
+        link("r1", "r2", uncertain="yes"),  # uncertain not a bool
+        "r1->r2",  # not an object
+    ],
+)
+def test_malformed_link_refused_and_nothing_recorded(world, bad_link):
+    before = n_events(world)
+    with pytest.raises(BearingsReadingInvalidError):
+        rec(world, write_v2(world, "badlink", [link("r2", "r1"), bad_link]))
+    assert n_events(world) == before
+
+
+def test_link_without_resolvable_citation_refused_and_named(world):
+    before = n_events(world)
+    with pytest.raises(BearingsReadingInvalidError) as exc:
+        rec(
+            world,
+            write_v2(
+                world, "unres", [link("r2", "r1"), link("r1", "r2", cites=["run:deadbeefdeadbeef"])]
+            ),
+        )
+    assert "link(s) 1" in str(exc.value)
+    assert n_events(world) == before
+
+
+@pytest.mark.parametrize("field,value", [("uncertain", "maybe"), ("uncertain_reason", 3)])
+def test_malformed_node_uncertainty_refused(world, field, value):
+    purposes = [{**purpose("r1", world["good"]), field: value}]
+    with pytest.raises(BearingsReadingInvalidError):
+        rec(world, write_v2(world, "badunc", [], purposes=purposes))
+
+
+def test_old_index_db_without_links_column_gains_it(tmp_path):
+    import duckdb
+
+    from bathos.index import BEARINGS_READINGS_DDL, index_db_path, init_index_schema
+
+    cat = tmp_path / "catalog"
+    cat.mkdir()
+    con = duckdb.connect(str(index_db_path(cat)))
+    try:
+        con.execute(BEARINGS_READINGS_DDL.replace(",\n    links_json VARCHAR", ""))
+        assert "links_json" not in [
+            r[0] for r in con.execute("DESCRIBE bearings_readings").fetchall()
+        ]
+        init_index_schema(con)
+        assert "links_json" in [r[0] for r in con.execute("DESCRIBE bearings_readings").fetchall()]
+    finally:
+        con.close()

@@ -1,7 +1,8 @@
 """Reading record and charter comparison (spec 261104, Design item 5; slice 2 plan C3).
 
 ``record_reading`` stores a blind reader's cited reading after resolving every citation against
-the packet it was written from. ``compare_reading`` takes a mapping written by a *different*
+the packet it was written from. A v2 reading (AC-5b) also carries typed ``links`` between its
+purposes and open lines, and an optional ``uncertain`` / ``uncertain_reason`` on every node. ``compare_reading`` takes a mapping written by a *different*
 agent (the mapper) and computes ``mapped`` / ``unmapped`` / ``silent`` items against the
 confirmed charter. Bathos only checks completeness and validity; it never judges text.
 """
@@ -31,6 +32,12 @@ logger = logging.getLogger(__name__)
 
 MIN_PURPOSE_CITATIONS = 2  # spec AC-5: at least 2 distinct resolvable citations per purpose
 MIN_OPEN_LINE_CITATIONS = 1  # plan Q15
+MIN_LINK_CITATIONS = 1  # spec AC-5b
+
+# Spec Design item 5, v2 (owner 261105). feeds and serves bind lines into one group; shares and
+# competes record relations that do not.
+LINK_TYPES = ("feeds", "serves", "shares", "competes")
+_OPEN_REF_RE = re.compile(r"^open:(\d+)$")
 
 RESOLVED = "resolved"
 FLAG = "flag_for_review"
@@ -138,10 +145,54 @@ def _load_reading(reading_file: Path) -> dict[str, Any]:
             raise BearingsReadingInvalidError(f"Purpose {p['id']!r} needs non-empty 'text'")
         _require_list(p.get("citations"), f"purpose {p['id']!r} 'citations'")
     for i, ol in enumerate(open_lines):
-        if not isinstance(ol, dict) or not isinstance(ol.get("text"), str) or not ol["text"].strip():
+        if (
+            not isinstance(ol, dict)
+            or not isinstance(ol.get("text"), str)
+            or not ol["text"].strip()
+        ):
             raise BearingsReadingInvalidError(f"Open line {i} needs non-empty 'text'")
         _require_list(ol.get("citations"), f"open line {i} 'citations'")
+    for label, node in [(f"purpose {p['id']!r}", p) for p in purposes] + [
+        (f"open line {i}", ol) for i, ol in enumerate(open_lines)
+    ]:
+        _check_uncertainty(node, label)
+    _check_links(_require_list(reading.get("links", []), "'links'"), seen, len(open_lines))
     return reading
+
+
+def _check_uncertainty(node: dict[str, Any], label: str) -> None:
+    """The reader's own doubt channel (AC-5b): optional, typed, stored verbatim."""
+    if "uncertain" in node and not isinstance(node["uncertain"], bool):
+        raise BearingsReadingInvalidError(f"{label} 'uncertain' must be true or false")
+    reason = node.get("uncertain_reason")
+    if reason is not None and not isinstance(reason, str):
+        raise BearingsReadingInvalidError(f"{label} 'uncertain_reason' must be text or null")
+
+
+def _check_links(links: list, purpose_ids: set[str], n_open: int) -> None:
+    """Validate the graph's shape: endpoints exist, no self-links, known types. Bathos never judges a link."""
+    for i, link in enumerate(links):
+        if not isinstance(link, dict):
+            raise BearingsReadingInvalidError(f"Link {i} must be an object")
+        if link.get("type") not in LINK_TYPES:
+            raise BearingsReadingInvalidError(
+                f"Link {i} type {link.get('type')!r} is not one of {', '.join(LINK_TYPES)}"
+            )
+        for end in ("from", "to"):
+            ref = link.get(end)
+            m = _OPEN_REF_RE.match(ref) if isinstance(ref, str) else None
+            known = isinstance(ref, str) and (
+                ref in purpose_ids or (m is not None and int(m[1]) < n_open)
+            )
+            if not known:
+                raise BearingsReadingInvalidError(
+                    f"Link {i} '{end}' names {ref!r}, which is not a purpose id or open:<i>"
+                )
+        if link["from"] == link["to"]:
+            raise BearingsReadingInvalidError(f"Link {i} links {link['from']!r} to itself")
+        if "uncertain" in link and not isinstance(link["uncertain"], bool):
+            raise BearingsReadingInvalidError(f"Link {i} 'uncertain' must be true or false")
+        _require_list(link.get("citations"), f"link {i} 'citations'")
 
 
 def _resolve_all(
@@ -229,12 +280,25 @@ def record_reading(
         raise StepBackInsufficientEvidenceError(
             "Reading rejected, nothing recorded: " + "; ".join(failures)
         )
+    links, l_counts = _resolve_all(reading.get("links", []), view)
+    bad_links = [i for i, n in enumerate(l_counts) if n < MIN_LINK_CITATIONS]
+    if bad_links:
+        raise BearingsReadingInvalidError(
+            "Reading rejected, nothing recorded: link(s) "
+            + ", ".join(str(i) for i in bad_links)
+            + f" need {MIN_LINK_CITATIONS} resolvable citation(s)"
+        )
 
     rid = reading_id_of(reading)
     slug = _resolve_project_slug(root)
     cat_dir = _resolve_catalog_dir(catalog_dir)
     if _existing_reading(cat_dir, slug, rid) is not None:
-        return {"ok": True, "status": "already_recorded", "reading_id": rid, "packet_sha256": packet_sha}
+        return {
+            "ok": True,
+            "status": "already_recorded",
+            "reading_id": rid,
+            "packet_sha256": packet_sha,
+        }
 
     emit_ledger_event(
         kind="bearings.reading_recorded",
@@ -249,6 +313,7 @@ def record_reading(
             "reader_id": reading["reader_id"],
             "purposes": purposes,
             "open_lines": open_lines,
+            "links": links,
         },
         root=root,
         cat_dir=cat_dir,
@@ -260,11 +325,14 @@ def record_reading(
         "packet_sha256": packet_sha,
         "n_purposes": len(purposes),
         "n_open_lines": len(open_lines),
+        "n_links": len(links),
     }
 
 
 def _item_id(reading_id: str, charter_sha: str, kind: str, subject: Any) -> str:
-    return hashlib.sha256(canonical_json([reading_id, charter_sha, kind, subject]).encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(
+        canonical_json([reading_id, charter_sha, kind, subject]).encode("utf-8")
+    ).hexdigest()[:16]
 
 
 def _load_mapping(mapping_file: Path) -> tuple[str, dict[str, Any]]:
@@ -305,7 +373,9 @@ def compare_reading(
 
     reading = _existing_reading(cat_dir, slug, reading_id)
     if reading is None:
-        raise BearingsReadingNotFoundError(f"No recorded reading {reading_id!r} for project {slug!r}")
+        raise BearingsReadingNotFoundError(
+            f"No recorded reading {reading_id!r} for project {slug!r}"
+        )
     mapper_id, mapping = _load_mapping(Path(mapping_file))
     if mapper_id == reading["reader_id"]:
         raise BearingsMapperIsReaderError(
@@ -383,8 +453,16 @@ def compare_reading(
         if charter_purposes[pid].get("state") == "live" and pid not in mapped_live:
             add("silent", "charter_purpose_id", pid)
 
-    counts = {k: sum(1 for it in items if it["kind"] == k) for k in ("mapped", "unmapped", "silent")}
-    result = {"ok": True, "reading_id": reading_id, "charter_sha256": charter_sha, "counts": counts, "items": items}
+    counts = {
+        k: sum(1 for it in items if it["kind"] == k) for k in ("mapped", "unmapped", "silent")
+    }
+    result = {
+        "ok": True,
+        "reading_id": reading_id,
+        "charter_sha256": charter_sha,
+        "counts": counts,
+        "items": items,
+    }
 
     # The same mapper repeating the same comparison is a no-op. Only a changed comparison
     # supersedes the current one (the fold keeps the latest per reading).
@@ -396,9 +474,11 @@ def compare_reading(
         ).fetchall()
     finally:
         con.close()
-    if current and {r[1] for r in current} == {mapper_id} and {r[0] for r in current} == {
-        it["item_id"] for it in items
-    }:
+    if (
+        current
+        and {r[1] for r in current} == {mapper_id}
+        and {r[0] for r in current} == {it["item_id"] for it in items}
+    ):
         return {**result, "status": "already_compared"}
 
     emit_ledger_event(
