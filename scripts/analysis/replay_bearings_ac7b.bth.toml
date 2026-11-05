@@ -13,9 +13,7 @@ Arms. Cuts are commits; each window is the 28 days before the cut, matching the 
 
 Readers. Three fresh Sonnet readers per arm, each using scripts/analysis/replay_bearings_ac7b_reader_prompt.md and writing a v2 reading (spec Design item 5): purposes, open lines and typed links (feeds, serves, shares, competes), each with citations and an uncertainty flag. The AC-7 readings are not reused, because they hold almost no links. A rejected reading gets one disclosed redo.
 
-Labels. A labeller who is not the reader judges:
-- every node as real or generic;
-- every binding link (feeds, serves) as supported, unsupported or unsure, by checking its citations against the packet.
+Labels, reduced by the owner 261105 to bridge links only. Labelling exists so the reader cannot set its own score by drawing too many or too few binding links. Only a bridge can change the score: a binding link (feeds, serves) whose removal would split a group. The scorer lists each reading's bridges mechanically, and a labeller who is not the reader judges each one as supported, unsupported or unsure, by checking its citations against the packet. Nodes are not labelled, because the 10% effort floor already drops vague nodes. Non-bridge links stand as the reader wrote them. Removing a bridge never turns another link into a bridge, so a single labelling pass is enough. Weakness, disclosed: a reader that invents a redundant loop of binding links creates no bridges, and nothing checks those links.
 Labellers, chosen by the owner 261105:
 - One fresh Opus agent labels colliculix and plegadx, working only from a prompt file holding the readings and the cited packet lines. It is not shown A-G, this hypothesis or the thresholds.
 - The owner labels tev_design, because its text twice stopped Opus at a safety classifier in AC-7.
@@ -23,16 +21,17 @@ Labellers, chosen by the owner 261105:
 
 Scoring, mechanical (replay_bearings_ac7b.py, to be written and tested before approval).
 - A node's effort is the number of distinct resolved run: and git: citations it carries.
-- Drift groups are the connected components of real nodes under supported binding links, ignoring direction, that hold at least 10% of the reading's total effort.
+- Drift groups are the connected components of nodes under binding links, ignoring direction, after removing bridges labelled unsupported, that hold at least 10% of the reading's total effort.
 - shares and competes links never join groups.
-- Unsure links count as unsupported for the outcome. The scorer also reports groups with unsure links counted as supported, descriptively.
+- Unsure bridges count as unsupported for the outcome. The scorer also reports groups with unsure bridges counted as supported, descriptively.
 - Each arm's figure is the median over its readers.
 
 Synthetic controls, which must pass before any real score is read:
 - two disjoint fed chains of equal effort give 2;
 - one fully fed graph gives 1;
 - two chains joined only by a shares link give 2;
-- a tiny third island below 10% of effort is ignored.
+- a tiny third island below 10% of effort is ignored;
+- in a planted graph, exactly the planted bridges are listed for labelling, and a link inside a cycle is not.
 
 Disclosures.
 - The positive control was chosen after the fact. The author and the owner both know the diagnosis and the AC-7 readings.
@@ -79,9 +78,9 @@ plegadx_groups_median = "float"
 colliculix_groups_unsure_supported_median = "float"
 tev_design_groups_unsure_supported_median = "float"
 plegadx_groups_unsure_supported_median = "float"
-colliculix_supported_link_frac = "float"
-tev_design_supported_link_frac = "float"
-plegadx_supported_link_frac = "float"
+colliculix_supported_bridge_frac = "float"
+tev_design_supported_bridge_frac = "float"
+plegadx_supported_bridge_frac = "float"
 colliculix_uncertain_node_frac = "float"
 tev_design_uncertain_node_frac = "float"
 plegadx_uncertain_node_frac = "float"
