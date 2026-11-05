@@ -95,6 +95,9 @@ def audit_transcript(path: Path, allowed_roots: list[str]) -> list[str]:
             if not isinstance(block, dict) or block.get("type") != "tool_use":
                 continue
             name, args = block.get("name"), block.get("input") or {}
+            # The dispatch header requires agent_result, and ToolSearch loads it. Neither reads project data.
+            if name == "ToolSearch" or str(name).endswith("__agent_result"):
+                continue
             if name not in ALLOWED_TOOLS:
                 bad.append(f"{name}: tool not allowed")
                 continue
@@ -147,6 +150,9 @@ def controls_pass() -> bool:
         call["message"]["content"][0] = {"type": "tool_use", "name": "Grep", "input": {"pattern": "x"}}
         (root / "nopath.jsonl").write_text(json.dumps(call) + "\n")
         ok &= len(audit_transcript(root / "nopath.jsonl", ["/pkt"])) == 1
+        call["message"]["content"][0] = {"type": "tool_use", "name": "mcp__praxia__agent_result", "input": {}}
+        (root / "result.jsonl").write_text(json.dumps(call) + "\n")
+        ok &= audit_transcript(root / "result.jsonl", ["/pkt"]) == []
     return bool(ok)
 
 
