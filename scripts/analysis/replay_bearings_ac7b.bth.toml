@@ -48,7 +48,14 @@ The colliculix and plegadx hashes equal AC-7's, so the builder is deterministic,
 Coverage note 261105, chosen by the owner before any reader ran. The registered 28-day tev_design packet is kept. A 14-day window was considered and declined, though it still held lagoon in 28 files and active learning in 3. A reader that skims writes fewer links and so inflates its group count, so the result gains descriptive coverage fields, which gate nothing:
 - the minimum fraction of docs and of sidecars opened per arm;
 - the minimum fraction of runs.jsonl and git_log.jsonl lines read per arm.
-They are computed from each reader's transcript, which is copied to ~/scratch/ac7b/transcripts when the reader finishes. One tev_design reader runs alone first as a pilot, because the new window holds the lagoon content and a classifier stop is possible. If it completes with a valid reading, it is reader1, and the other 8 readers follow. If it is stopped or invalid, the one disclosed redo waits for the owner. (4) Run the readers. (5) Label. (6) bth run the scorer. The result is reported either way."""
+They are computed from each reader's transcript, which is copied to ~/scratch/ac7b/transcripts when the reader finishes. One tev_design reader runs alone first as a pilot, because the new window holds the lagoon content and a classifier stop is possible. If it completes with a valid reading, it is reader1, and the other 8 readers follow. If it is stopped or invalid, the one disclosed redo waits for the owner.
+
+Pilot result and arm change 261105, chosen by the owner before any other reader ran.
+- The pilot completed with no classifier stop: a valid v2 reading, 0 citation or link failures, 0 audit violations. Its coverage was 1.00 of runs and commits, 0.23 of docs and 0.02 of sidecars, with one Grep or Glob call that touched neither docs nor sidecars.
+- One reader cannot read this packet. Cutting sidecars to their hypothesis and outcomes still leaves 2.52 MB, and the docs alone are 0.71 MB. Arms read to such different depths cannot be compared, so the owner replaces tev_design@5f4856c7 with a hard negative that can be fully read: a project with several connected aims and a packet near 0.3-0.6 MB. The owner names it from a size probe, before any reader runs.
+- The pilot is retired to ~/scratch/ac7b/attempts/pilot_tev_5f4856c7. It is not scored and does not use the one redo. The author saw only its counts and its hand-back, which gave counts and named three purposes by id only.
+- The scaling problem is recorded as spec TBD T6 and is separate work.
+- All 9 readers will be fresh. (4) Run the readers. (5) Label. (6) bth run the scorer. The result is reported either way."""
 stage_name = "validation"
 novel = true
 
