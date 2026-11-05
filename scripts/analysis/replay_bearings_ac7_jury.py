@@ -356,6 +356,19 @@ def adjudicate(work: Path) -> None:
     logger.info("adjudicator prompt holds %d disputed entries", n)
 
 
+def join_adjudicator(work: Path) -> None:
+    """Join the redo's one-file-per-entry rows into verdicts/adjudicator.json. Prints counts only."""
+    jury = work / "jury"
+    rows, bad = [], 0
+    for path in sorted((jury / "adjudicate" / "rows").glob("*.json")):
+        try:
+            rows.append(json.loads(path.read_text()))
+        except json.JSONDecodeError:
+            bad += 1
+    (jury / "verdicts" / "adjudicator.json").write_text(json.dumps({"rows": rows}), encoding="utf-8")
+    logger.info("joined %d row files, %d unreadable", len(rows), bad)
+
+
 def load_adjudicator(work: Path, flagged: set[str]) -> dict[str, dict]:
     """Read the adjudicator's verdict. It must cover exactly the flagged entries, or it is not used at all."""
     path = work / "jury" / "verdicts" / "adjudicator.json"
@@ -431,7 +444,7 @@ def sensitivity(work: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("build", "collect", "merge", "adjudicate", "finalize", "sensitivity"))
+    parser.add_argument("command", choices=("build", "collect", "merge", "adjudicate", "join", "finalize", "sensitivity"))
     parser.add_argument("--work-dir", type=Path, required=True)
     parser.add_argument("--owner-dir", type=Path, help="finalize: directory of the owner's label documents")
     args = parser.parse_args()
@@ -444,6 +457,8 @@ def main() -> None:
         merge(args.work_dir)
     elif args.command == "adjudicate":
         adjudicate(args.work_dir)
+    elif args.command == "join":
+        join_adjudicator(args.work_dir)
     elif args.command == "sensitivity":
         sensitivity(args.work_dir)
     else:
