@@ -39,7 +39,7 @@ Disclosures.
 - Effort counted by citations rewards a reader who cites more; the 10% floor and the median over readers soften this.
 - Three readers per arm show consistency, not a rate. One model on one prompt.
 
-Protocol. (1) Done 261105: the owner settled the design, and this sidecar is committed. (2) The scorer and its synthetic controls are committed and pass. (3) Build packets. (4) Run the readers. (5) Label. (6) bth run the scorer. The result is reported either way."""
+Protocol. (1) Done 261105: the owner settled the design, and this sidecar is committed. (2) Done 261105 in f433f861: the scorer is committed, and `--controls-only` passes. Beyond the sidecar's list, the controls also check that a competes link does not join groups, that zero effort gives 0 groups, and that a doubled link is not a bridge. They fail on three deliberately broken scorers: shares counted as binding, no 10% floor, and every link treated as a bridge. (3) Build packets. (4) Run the readers. (5) Label. (6) bth run the scorer. The result is reported either way."""
 stage_name = "validation"
 novel = true
 
