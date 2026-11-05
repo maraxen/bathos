@@ -31,6 +31,7 @@ import argparse
 import json
 import logging
 import os
+import random
 import statistics
 import tempfile
 from pathlib import Path
@@ -48,7 +49,7 @@ from replay_bearings_ac7 import (
 )
 
 from bathos.bearings.packet import build_packet, verify_packet
-from bathos.bearings.reading import RESOLVED, _load_reading, _PacketView, resolve_citation
+from bathos.bearings.reading import _DOC_RE, RESOLVED, _load_reading, _PacketView, resolve_citation
 from bathos.errors import BearingsReadingInvalidError
 
 logger = logging.getLogger("replay_bearings_ac7b")
@@ -355,6 +356,114 @@ def score(work: Path) -> dict:
     }
 
 
+LABELLER_SEED = 261105
+LABELLER_PROMPT = """You are checking links that readers drew between lines of work in a project's record. For each link \
+below you are given the two lines of work as the reader described them, the type the reader gave the link, and the \
+records the reader cited for the link, quoted from the record. Judge each link only from those quoted records.
+
+Link types, as the readers were told them:
+- feeds: a result of "from" is actually used by "to".
+- serves: "from" was done for "to"'s sake, but no result has passed yet.
+- shares: they use a common method, code or data, but neither uses the other's results.
+- competes: the record shows a trade-off between them.
+
+For each link, answer:
+- supported: the quoted records show this relation, of this type, between these two lines.
+- unsupported: the quoted records do not show it, or show a different relation.
+- unsure: a careful reader could reasonably answer either way.
+
+Write one JSON object to the file named in your task, keyed by reading id and then by link index, exactly as below:
+{"R01": {"3": "supported", "7": "unsure"}, "R02": {...}}
+Label every link listed, use only the three values above, and add nothing else.
+"""
+
+
+def _evidence(citation: str, packet: Path, view: _PacketView) -> str:
+    """Quote what a resolved citation points at in the packet; unresolvable ones are said so."""
+    res, key = resolve_citation(citation, view)
+    if res != RESOLVED or key is None:
+        return f"{citation}: (does not resolve in the record)"
+    reader = packet / "reader"
+    kind, _, rest = key.partition(":")
+    if kind == "run":
+        for line in (reader / "runs.jsonl").read_text(encoding="utf-8").split("\n"):
+            if line and json.loads(line)["id"] == rest:
+                return f"{citation}: run record {line}"
+    if kind == "git":
+        for line in (reader / "git_log.jsonl").read_text(encoding="utf-8").split("\n"):
+            if line and json.loads(line)["sha"] == rest:
+                return f"{citation}: commit {line}"
+    if kind == "sidecar":
+        path = rest.split("#", 1)[0]
+        blob = next(s["blob_sha"] for s in view.index["sidecars"] if s["path"] == path)
+        text = (reader / "sidecars" / blob / path).read_text(encoding="utf-8").splitlines()
+        body = "\n".join(f"  {i}\t{t}" for i, t in enumerate(text[:150], 1))
+        more = f"\n  ... ({len(text) - 150} more lines)" if len(text) > 150 else ""
+        return f"{citation}: sidecar {path}\n{body}{more}"
+    m = _DOC_RE.match(citation)
+    if m:
+        x, y = int(m["x"]), int(m["y"])
+        text = (reader / "docs" / m["path"]).read_text(encoding="utf-8").splitlines()
+        shown = list(range(x, min(y, x + 79) + 1))
+        body = "\n".join(f"  {i}\t{text[i - 1]}" for i in shown)
+        more = f"\n  ... (range continues to line {y})" if y > shown[-1] else ""
+        return f"{citation}: {m['path']} lines {x}-{y}\n{body}{more}"
+    return f"{citation}: (resolved, not quotable)"
+
+
+def labeller_packet(work: Path) -> None:
+    """Write labeller/prompt.md (opaque reading ids, links with quoted evidence) and labeller/key.json."""
+    listed = json.loads((work / "bridges.json").read_text(encoding="utf-8"))
+    keys = sorted(listed)
+    random.Random(LABELLER_SEED).shuffle(keys)
+    key_map = {f"R{i:02d}": k for i, k in enumerate(keys, 1)}
+    parts = [LABELLER_PROMPT]
+    n = 0
+    for rid, key in key_map.items():
+        arm, reader = key.split("/")
+        packet = work / "packets" / arm
+        view = _PacketView(packet)
+        reading = json.loads((work / "readings" / arm / f"{reader}.json").read_text(encoding="utf-8"))
+        nodes = {p["id"]: p["text"] for p in reading.get("purposes", [])}
+        nodes |= {f"open:{i}": o["text"] for i, o in enumerate(reading.get("open_lines", []))}
+        parts.append(f"\n## Reading {rid}\n")
+        for b in listed[key]:
+            n += 1
+            ev = "\n".join(f"- {_evidence(c, packet, view)}" for c in b.get("citations", []))
+            parts.append(
+                f"\n### {rid} link {b['index']}: {b['type']}\n"
+                f"from ({b['from']}): {nodes.get(b['from'], '(unknown line)')}\n"
+                f"to ({b['to']}): {nodes.get(b['to'], '(unknown line)')}\n"
+                f"Cited records:\n{ev}\n"
+            )
+    out = work / "labeller"
+    out.mkdir(exist_ok=True)
+    (out / "prompt.md").write_text("".join(parts), encoding="utf-8")
+    (out / "key.json").write_text(json.dumps(key_map, indent=2) + "\n", encoding="utf-8")
+    logger.info("labeller prompt: %d links over %d readings, %d bytes", n, len(key_map), len("".join(parts)))
+
+
+def apply_labels(work: Path) -> None:
+    """Check labeller/labels.json by counts and map it back to bridge_labels.json."""
+    listed = json.loads((work / "bridges.json").read_text(encoding="utf-8"))
+    key_map = json.loads((work / "labeller" / "key.json").read_text(encoding="utf-8"))
+    raw = json.loads((work / "labeller" / "labels.json").read_text(encoding="utf-8"))
+    out: dict[str, dict[str, str]] = {}
+    missing = bad_value = extra = 0
+    for rid, key in key_map.items():
+        want = {str(b["index"]) for b in listed[key]}
+        got = raw.get(rid, {})
+        extra += len(set(got) - want)
+        bad_value += sum(1 for v in got.values() if v not in LABELS)
+        missing += len(want - set(got))
+        out[key] = {i: got[i] for i in want if got.get(i) in LABELS}
+    (work / "bridge_labels.json").write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
+    total = sum(map(len, out.values()))
+    logger.info("labels kept=%d missing=%d bad_value=%d extra=%d", total, missing, bad_value, extra)
+    if missing or bad_value or extra:
+        raise SystemExit(1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work-dir", type=Path, required=True)
@@ -367,6 +476,12 @@ def main() -> None:
     )
     mode.add_argument(
         "--controls-only", action="store_true", help="Run the synthetic controls and stop."
+    )
+    mode.add_argument(
+        "--labeller-packet", action="store_true", help="Write the labeller prompt and key, and stop."
+    )
+    mode.add_argument(
+        "--apply-labels", action="store_true", help="Check the labeller's labels and write bridge_labels.json."
     )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -387,6 +502,12 @@ def main() -> None:
         return
     if args.list_bridges:
         list_bridges(work)
+        return
+    if args.labeller_packet:
+        labeller_packet(work)
+        return
+    if args.apply_labels:
+        apply_labels(work)
         return
 
     results = score(work)

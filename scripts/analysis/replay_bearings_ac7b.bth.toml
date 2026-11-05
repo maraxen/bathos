@@ -90,6 +90,17 @@ New arm 261105, named by the owner from a size probe before any scored reader ra
     - **Extraction:** the rule gave a reading for all 9 readers. 1 came from praxia's own rule (colliculix/reader3, identical to praxia's admitted answer) and 8 from the recovery rule.
     - **Validity:** all 9 readings pass the v2 validator, with 0 links lacking a resolvable citation. No redo was needed.
     - **Containment:** every log holds only reasoning, answer and result events, so 0 tool events in any reader (surface/event_counts.json).
+  - **Labeller input, 261105, written before dispatch:** `--labeller-packet` writes labeller/prompt.md and labeller/key.json, and `--apply-labels` maps the answers back.
+    - The labeller works from labeller/prompt.md alone. It holds only the 44 listed links over 9 readings, 123 KB in total, small enough for one reader's budget (T6).
+    - Readings carry opaque ids R01-R09 in a shuffled order (seed 261105). The key file mapping ids to readings is never shown to the labeller.
+    - Each link shows its two endpoint texts as the reader wrote them, its type, and each cited record quoted from the packet:
+      - the run line;
+      - the commit line;
+      - the cited doc lines, capped at 80;
+      - the sidecar, capped at 150 lines.
+    - The prompt gives the four type definitions and the three labels. It does not mention the hypothesis, the arms, the thresholds, groups, or why these links were chosen.
+    - `--apply-labels` fails unless every listed link has exactly one label from {supported, unsupported, unsure}.
+    - The labeller is one fresh Opus agent with one disclosed redo, as registered. The labels are inspected by counts only before the scored run.
   - **Blindness disclosure:** while diagnosing the Cursor failures, a content search of colliculix/reader1's log printed about 30 short fragments of that reader's reasoning. They include purpose ids up to r16, which hints at its purpose count. No link, group or bridge content was seen. From then on, logs were inspected by event counts and structure only.
 - Disclosure: demistify has only 5 runs, so its effort comes mostly from commits. Effort counts run: and git: citations equally, so that is in scope, but it differs from colliculix, whose effort is spread over runs and commits. (4) Run the readers. (5) Label. (6) bth run the scorer. The result is reported either way."""
 stage_name = "validation"
