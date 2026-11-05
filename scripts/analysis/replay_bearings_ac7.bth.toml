@@ -1,21 +1,16 @@
-# DRAFT for owner approval. [status] stale = true makes `bth run` refuse this script until the owner
-# approves and that block is removed in a commit made before any packet is built.
-[status]
-stale = true
-stale_reason = "Draft awaiting owner approval; no packet may be built before the approved sidecar is committed."
-
+# Approved by the owner 261104 (AskUserQuestion) and committed before any packet was built.
 [experiment]
 hypothesis = """A blind reader given only primary records finds several concurrent project-level purposes in colliculix before its drift diagnosis, and does not find them in two projects with no diagnosed drift (spec 261104, AC-7, assumption A9).
 
 Positive control: colliculix at commit 14c3804, the tree before the refoundation handoff 24ef9a6 and the charter draft 588d175. The diagnosis (colliculix memory, 2026-07-07) names seven purposes: (A) cascade router, (B) praxia crystallize/remelt cost gate, (C) MTT/rhizome program, (D) SWE-bench recon line, (E) contamination-immune methodology paper, (F) semantic compiler vision, (G) interpretability mandate.
 
-Negative controls, named by the owner: tev_design at b2b5386f and plegadx at 1472ee54, each over the 28 days before the commit. tev_design is a hard negative. Classified before any reading is seen: the k=4 vs k=9 episode and the target swap of 260714 are claim-scale slips inside one project aim, so a reader that reports them as separate project purposes has raised a false alarm, and the owner labels those entries as sub-lines. PROPOSED, for the owner to confirm or change.
+Negative controls, named by the owner: tev_design at b2b5386f and plegadx at 1472ee54, each over the 28 days before the commit. tev_design is a hard negative. Classified before any reading is seen: the k=4 vs k=9 episode and the target swap of 260714 are claim-scale slips inside one project aim, so a reader that reports them as separate project purposes has raised a false alarm, and the owner labels those entries as sub-lines. Confirmed by the owner 261104.
 
 Disclosures. The positive control was chosen after the fact, and this sidecar's author has read the diagnosis, which is why the negative controls and owner labels exist. The owner also knows the diagnosis and cannot be blind to which project a reading describes. Three readers per arm is a small sample that shows consistency, not a rate. The reader is one model on one prompt, so a pass says nothing about other readers.
 
-Departure from the spec's AC-7 wording, for the owner to rule on. AC-7 says the packet reads only history reachable from the cut. Docs and git subjects do. Runs do not: design probes on 261104 found 5 of 35 colliculix runs, 4 of 101 tev_design runs and 77 of 95 plegadx runs reachable, because most runs happened on branches or dirty snapshots. Requiring reachability would remove most of the record the reader is meant to see, and colliculix's drift lived partly on unmerged branches. Runs are therefore bounded by time, every run predates the cut, and contamination is tested directly by the grep below.
+Departure from the spec's AC-7 wording, approved by the owner 261104. AC-7 says the packet reads only history reachable from the cut. Docs and git subjects do. Runs do not: design probes on 261104 found 5 of 35 colliculix runs, 4 of 101 tev_design runs and 77 of 95 plegadx runs reachable, because most runs happened on branches or dirty snapshots. Requiring reachability would remove most of the record the reader is meant to see, and colliculix's drift lived partly on unmerged branches. Runs are therefore bounded by time, every run predates the cut, and contamination is tested directly by the grep below.
 
-Protocol. (1) Commit this sidecar without [status]. (2) Run the script with --build-only. (3) Run three fresh Sonnet readers per arm, each with the committed prompt scripts/analysis/replay_bearings_ac7_reader_prompt.md, filling in only its paths and ids, each writing outputs/ac7/readings/<arm>/<reader>.json. A rejected reading gets one redo, which is disclosed. (4) The owner labels every entry into outputs/ac7/labels.json. (5) bth run this script. The result is reported either way."""
+Protocol. (1) Commit this sidecar. (2) Run the script with --build-only. (3) Run three fresh Sonnet readers per arm, each with the committed prompt scripts/analysis/replay_bearings_ac7_reader_prompt.md, filling in only its paths and ids, each writing outputs/ac7/readings/<arm>/<reader>.json. A rejected reading gets one redo, which is disclosed. (4) The owner labels every entry into outputs/ac7/labels.json. (5) bth run this script. The result is reported either way."""
 stage_name = "validation"
 novel = true
 
