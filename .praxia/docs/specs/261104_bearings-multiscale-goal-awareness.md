@@ -94,6 +94,31 @@ Frame: agents do honest, pre-registered, green work that stops serving any large
     - praxia's agy executor cannot take a prompt over 128 KiB (debt 3289).
     - praxia rejects Cursor answers without a fence, and its retry trips on its own lock (debt 3290).
     - Both were worked around under registered rules; see the sidecar notes.
+    - Both debts moved to praxia's store 261106 (now praxia 3298 and 3299).
+- [261106] **AC-7c passed: readers plus scorer do see a planted drift.** Run `2032d774` (sidecar `scripts/analysis/replay_bearings_ac7c.bth.toml`, sha `b370eff0…`) recorded `pass`, with every instrument check clean:
+  - controls pass, including the new merge and seam controls;
+  - 0 leaked names;
+  - 0 hash mismatches;
+  - 0 rejected readings;
+  - 9 readings;
+  - 0 unlabelled bridges;
+  - size matched.
+
+  Design, chosen by the owner 261106: isochore and alynxr pass no results between them. The planted arm splices both over the same 14 days into one merged tree, with both names scrubbed to `proj`. Each control is one project alone over 28 days, scrubbed the same way. The planted arm has 92 items against 96 for the alynxr control, and fewer bytes.
+
+  | | k1: isochore alone | k2: planted splice | k3: alynxr alone |
+  |---|---|---|---|
+  | Median drift groups, strict | 1 | 2 | 1 |
+  | Median drift groups, lenient | 1 | 2 | 1 |
+  | Groups in each reading (strict) | 1, 1, 2 | 2, 2, 2 | 1, 1, 1 |
+  | Groups in each reading, no labels | 1, 1, 1 | 2, 2, 3 | 1, 1, 1 |
+
+  - All 3 planted readings split along the true seam, with a purity of 1.0 (descriptive, fixed before the scored run).
+  - Table run `c456be51` (outcome consistent) shows the readers made the split themselves. With no labels applied, the planted median is still 2, and no reader drew a binding bridge across the seam. The labeller did not create the split.
+  - Readers: 2 Cursor and 1 Antigravity per arm, 0 tool events. The Opus labeller marked 36 bridges: 26 supported, 6 unsupported, 4 unsure.
+  - Registered decision: the instrument sees a planted split, so AC-7b's result is about colliculix. Its drift does not show as disconnected effort in its record. **Re-open with the owner what drift means for Bearings before slice 3 is built on any signal.**
+  - **Qualifier:** this plant is strong. The two halves differ completely in domain and vocabulary (free energy against sequence alignment). The pass shows a cross-domain split can be detected. It does not show that a split within one domain, like colliculix's, can be. Synthetic planted-structure work reports an "undetectable" regime for weak plants (Shi et al. 2019).
+  - Review page (private): https://claude.ai/artifact/GFZAw4H4nkZRu8ZKJZEZtZ.
 
 ## Assumptions
 
@@ -111,7 +136,7 @@ Tags follow the global spike-test rule. *Verified* means read at a file:line or 
 | A8 | `[outcomes].decision` text is meaningful. | **Weakened**: the scaffold writes `"TODO: ..."` (`new_experiment.py:161,175,182`) and the census counted those. Not used in v1. |
 | A9 | A blind reader with primary records reproduces a diagnosis like colliculix's. | **Not supported as a count of purposes.** AC-7 run `530b1a32` failed: the readers found all 7 colliculix purposes, but purpose counts did not separate colliculix from the controls. |
 | A9b | A blind reader's typed purpose graph separates colliculix's drift from projects with several connected aims: more groups of effort with no results passing between them. | **Unverified.** AC-7b tests it. |
-| A12 | Readers can state, with citations, where one line's results are used by another. | **Unverified.** AC-7 readings were mostly flat lists; a few entries named links ("motivated the later library design", "no stated link"). AC-7b measures how many links are supported. |
+| A12 | Readers can state, with citations, where one line's results are used by another. | **Unverified.** AC-7 readings were mostly flat lists; a few entries named links ("motivated the later library design", "no stated link"). AC-7b measures how many links are supported. **AC-7c (261106):** no reader drew a binding link between two unrelated projects spliced together, so readers do not invent results flow across a strong seam. |
 | A10 | The owner will confirm a charter for each active project. | **Unverified.** This is the pre-mortem's first failure path. AC-8 measures it. |
 | A11 | The colliculix charter stopped the sprawl. | **Unverified.** The project went idle the day the charter was accepted (`project_status.toml:694`), so stopping sprawl and stopping work cannot be told apart. |
 
@@ -199,6 +224,8 @@ Tags follow the global spike-test rule. *Verified* means read at a file:line or 
   - The scorer passes synthetic controls before any real score: a planted two-island graph must give 2, a planted fully-fed graph 1, and a graph joined only by `shares` links must give 2.
   - Controls are colliculix (positive) and two negatives with several connected aims. The tev_design cut moves to a date when the lagoon simulation, design libraries and active learning are all active, so the negative is the hard case the rule must survive.
   - **Result 261105: fail** (run `b85be024`; per-reading table run `2eeaeca9`, outcome consistent). See the decision log, AC-7b 261105.
+- **AC-7c Planted-drift control, pre-registered** (`scripts/analysis/replay_bearings_ac7c.bth.toml`, committed before any reader ran). Two projects that pass no results between them are spliced into one neutralised packet, size-matched to a single-project control. The planted arm must reach a median of at least 2 groups and at least 1 above either project read alone.
+  - **Result 261106: pass** (run `2032d774`; per-reading table run `c456be51`, outcome consistent). See the decision log, AC-7c 261106.
 - **AC-8 Cadence and shadow exit are testable and pre-registered.** Given a set of projects, when bth bearings due runs, it lists exactly those active in the last 28 days with >= 20 new runs or >= 7 days since their last reading. Given a due project, `bth run` in it returns exactly one due advisory with no reading content and appends `bearings.due_notified`; given a project that is not due, it returns none. Before the first live reading, an evaluation sidecar fixes T1 and the excess-spend metric (261027 §8, including chains that paid off; not the `excess_spend_avoided` heuristic in `stepback/analysis.py`). It also counts confirmed charters among active projects, testing A10.
 
 ## Pre-mortem Record
