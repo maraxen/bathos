@@ -1,0 +1,76 @@
+schema_version = 2
+title = "Blind readers split a weaker planted seam, by the minimum margin"
+takeaway = "The neighbour splice gave three groups against two and one for its halves alone, so the test passed by one group."
+question = "Do blind readers split a record that splices two neighbouring-field projects with no results flow into more groups than either project alone?"
+refs = [
+  { kind = "run", id = "3e6410b2", label = "scored run, outcome pass" },
+  { kind = "run", id = "93e2b7e3", label = "reshape of that run into this table, outcome consistent" },
+  { kind = "task", id = "261104_multiscale-goal-awareness", label = "Bearings goal awareness" },
+]
+
+[glossary]
+"AC" = "acceptance check in the Bearings spec"
+
+[toolchain]
+project = "review_toolchain"
+group = "figures"
+lock_sha256 = "39ac75d318f30b6b5edfbb348ced51aefcf98340f0267b448cb4943ecd92a9c8"
+
+[experiment]
+run_ref = "3e6410b2"
+
+[[panel]]
+panel = "panel-1"
+heading = "Registered count: the neighbour splice reads as three groups"
+component_id = "vegalite.grouped_distribution"
+table = "outputs/bearings_ac7d/groups_by_reading.csv"
+caption = "One point per blind reading, three per arm. A group is lines of work joined by results flow, holding a tenth of the effort. Unsure and unsupported links are cut [[ref:run:3e6410b2]]."
+refs = [{ kind = "run", id = "93e2b7e3" }]
+
+[panel.payload]
+panel = "panel-1"
+title = "Drift groups per reading (unsure bridges removed)"
+theme_colours = ["#0072b2"]
+theme_schemes = []
+group_field = "arm"
+unit_field = "reading"
+value_field = "groups_strict"
+chart_type = "strip"
+bin_count = 30
+uncertainty_intent = "show_full_distribution"
+error_semantics = "none"
+axis_labels = ["Drift groups", "Arm"]
+
+[panel.eda]
+unit_columns = ["reading"]
+condition_column = "arm"
+value_column = "groups_strict"
+expected_units = [["m1-reader1"], ["m1-reader2"], ["m1-reader3"], ["m2-reader1"], ["m2-reader2"], ["m2-reader3"], ["m3-reader1"], ["m3-reader2"], ["m3-reader3"], ["m4-reader1"], ["m4-reader2"], ["m4-reader3"]]
+
+[[panel]]
+panel = "panel-2"
+heading = "Without labels the result is the same: three against two"
+component_id = "vegalite.grouped_distribution"
+table = "outputs/bearings_ac7d/groups_by_reading.csv"
+caption = "Same readings, no link removed. No results link crossed the seam. Field A alone reads 2 here and 1 strict, because cut pieces fall under the tenth-of-effort rule. Descriptive [[ref:run:93e2b7e3]]."
+refs = [{ kind = "run", id = "93e2b7e3" }]
+
+[panel.payload]
+panel = "panel-2"
+title = "Drift groups per reading (no labels applied)"
+theme_colours = ["#0072b2"]
+theme_schemes = []
+group_field = "arm"
+unit_field = "reading"
+value_field = "groups_no_labels"
+chart_type = "strip"
+bin_count = 30
+uncertainty_intent = "show_full_distribution"
+error_semantics = "none"
+axis_labels = ["Drift groups", "Arm"]
+
+[panel.eda]
+unit_columns = ["reading"]
+condition_column = "arm"
+value_column = "groups_no_labels"
+expected_units = [["m1-reader1"], ["m1-reader2"], ["m1-reader3"], ["m2-reader1"], ["m2-reader2"], ["m2-reader3"], ["m3-reader1"], ["m3-reader2"], ["m3-reader3"], ["m4-reader1"], ["m4-reader2"], ["m4-reader3"]]
