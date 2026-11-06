@@ -341,7 +341,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("build", "agy", "collect"))
     parser.add_argument("--work-dir", type=Path, required=True)
-    parser.add_argument("--study", choices=("ac7b", "ac7c", "ac7d"), default="ac7b")
+    parser.add_argument("--study", choices=("ac7b", "ac7c", "ac7d", "ac7e"), default="ac7b")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     if args.study != "ac7b":

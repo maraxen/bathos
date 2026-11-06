@@ -1,0 +1,130 @@
+[experiment]
+hypothesis = """The blind reader plus AC-7b's drift-group scorer can see a planted split between two aims inside ONE project. A packet that splices tev_design's lagoon-simulation work with its design-library work scores at least 2 drift groups, and at least 1 more than either aim read alone (spec 261104, AC-7e).
+
+Why this exists. AC-7c (run 2032d774, strong cross-field plant) and AC-7d (run 3e6410b2, neighbouring-field plant, passed by the minimum margin) both passed. colliculix, the known drifter, still reads as 1 group (AC-7b, run b85be024), and its drift is a split inside one project. AC-7e is the first test of that case. A pass means a within-project split between separate aims is visible as disconnected effort, so colliculix's single group is a finding about colliculix. A fail is ambiguous and is read by the rule below.
+
+Design, chosen by the owner 261106 through AskUserQuestion before anything was built: test a within-project split next; build it from two sub-areas of one project; use tev_design; cap the larger aim to match the smaller one.
+
+Ground truth, stated plainly. The owner's own review (261105) is that tev_design has several aims: the lagoon simulation, the design libraries and active learning. Unlike AC-7c and AC-7d, nothing independent shows that no results pass between the lagoon and library aims. A fail may therefore mean the readers saw a real link (not a reader error), and that is the first thing the cross-seam fields below check. The arms are not a planted fiction: they are the project's real records, cut by aim.
+
+Aims, selected mechanically by sidecar path, because commit subjects and docs do not carry the aim (counts 261106: 1 of 157 commit subjects since 2026-09-01 names lagoon, none names libraries).
+- A, lagoon simulation: sidecar path contains "lagoon".
+- B, design libraries: sidecar path contains "librar", "proximity" or "diversity".
+- Everything else (other sidecars, runs with no sidecar, active learning) is left out of every arm. Commits and docs are left out of every arm, so both halves have the same record types (runs and their sidecars). This removes the record-type confound AC-7d left open.
+
+Window: 2026-09-28T00:00 to 2026-10-21T00:00 (-04:00), the span of the library work. ref 6c8bd22f (the last tev_design commit before the end), frozen. In that window the project has 391 lagoon runs (57 sidecars) and 15 library runs (9 sidecars).
+
+Cap rule, fixed in code and committed before any reader: each aim's runs are ranked by sha256("261108:" + run id) and the lowest-ranked n are kept, with the sidecars they name. The splice's lagoon half is the first 15 of the lagoon-alone control's runs (nested).
+
+Arms. Opaque ids, because a reader can see its folder name.
+- p1, size control: lagoon alone, 45 runs.
+- p2, positive anchor: AC-7c's planted splice (isochore + alynxr), rebuilt by AC-7c's own code. Its packet must hash to 8170941186c0 (AC-7c's k2). Fresh readers. The anchor rule is as AC-7d: its median must be at least 2, or the run is invalid.
+- p3, control: library alone, all 15 runs.
+- p4, within-project splice: 15 lagoon runs + 15 library runs.
+
+Neutralisation: identifiers only. The project name (tev_design, tev-design) becomes "proj" in every path and text (scrub_ids). Domain words stay, as in AC-7c and AC-7d. The leak check covers the name only. The two halves share one project name, so the scrub makes no difference between them.
+
+Packets, built 261106 before any reader (counts only; rebuilt with equal hashes):
+- p1 966cd7433c02: 0 docs, 9 sidecars, 45 runs, 0 commits; 54 items, 171,401 B.
+- p2 8170941186c0: 5 docs, 16 sidecars, 20 runs, 51 commits; 92 items, 197,559 B (equals AC-7c k2).
+- p3 90c17847d464: 0 docs, 12 sidecars, 15 runs, 0 commits; 27 items, 66,497 B.
+- p4 6d991a469e8e: 0 docs, 17 sidecars, 30 runs, 0 commits; 47 items, 145,956 B.
+- 0 leaked identifiers in each.
+
+Size match, as in AC-7c against p1: the splice's items are within 15% of p1's, and its bytes are no more than p1's. The lagoon-alone size (45 runs) was FITTED to this rule from counts (30 runs gave 37 items against the splice's 47, and the splice had more bytes). The splice has fewer runs (30) than its size control (45).
+
+Threshold (owner, as AC-7c and AC-7d): the splice's median over its 3 readers is at least 2 and at least 1 above the greater of the two single-aim medians. Strict groups remove bridges labelled unsupported or unsure. Each arm's figure is the median of 3 readers.
+
+Readers, as in AC-7d: reader1 and reader3 on Cursor via praxia surface_dispatch (completion role, power tier), reader2 on Antigravity run directly on stdin (replay_bearings_ac7b_surface.py agy --study ac7e). The registered extraction rule (recover_result) applies to every reader. Log events are counted for containment. A reading that fails extraction or validation gets one disclosed redo. A failure at start-up, before any reading, is infrastructure, not a reading (owner 261106). The first complete reading of a reader counts. Antigravity runs only the praxia plugin. Launches are staggered, and each attempt's own log file is checked for errors.
+
+Labelling and scoring, as AC-7d, reused unchanged through AC-7d's own scorer rebound to this study's arms: bridges listed mechanically; one fresh Opus labeller works from labeller/prompt.md alone (opaque ids, shuffled with seed 261108, quoted evidence); each arm's figure is the median over its 3 readers. Labeller stop rule: if the labeller is stopped by a safety classifier or returns an invalid set, it gets one disclosed redo; after that the owner decides.
+
+Synthetic controls, which must pass before any score is read (--controls-only passes at commit): the AC-7, AC-7b, AC-7c and AC-7d controls, and AC-7e split controls: the aim selector sends lagoon, library, proximity and diversity sidecars to the right aim and sends a verification sidecar, an empty path and no path to neither (negative control); a sub-packet keeps only the asked aim's runs and their sidecars, drops commits and docs, and keeps nothing when asked for none; the sample is deterministic, nested, and differs from taking the first runs by id (negative control); a merge of two sub-packets verifies its hash and leaks no project name. Checked 261106 against two broken versions (a selector that sends every sidecar to A, and a sample ranked by run id): each fails. AC-7d's code path was reused by rebinding, and its own controls still pass.
+
+Descriptive fields, which gate nothing (for p4 and p2):
+- seam_readings and seam_purity_mean, as in AC-7c.
+- cross_seam_links: every feeds or serves link whose two ends draw their run citations mostly from different aims. cross_seam_bridges and cross_seam_bridges_supported: how many of those were bridges, and how many the labeller supported.
+- halves_joined_readings: readings where a cross-seam binding link survives the strict removal.
+How a fail will be read, fixed now:
+- The halves are joined by cross-seam binding links that the labeller supported: the readers found real results flow between the aims. The aims are not separate in the record, and a within-project split between them cannot be planted from this project. That is a finding about tev_design, not a defect.
+- The halves are joined by cross-seam binding links that cite only shared runner, tools or data: the readers bound the halves on shared method (a reader error the labeller did not catch).
+- The halves are not joined and the splice still scores 1: the within-project split did not register, so the instrument's sensitivity ends between neighbouring projects and a within-project split.
+How a pass will be read: the detection limit lies below this plant's contrast. It does not show that colliculix's drift, which is a split inside one project by an unrelated mechanism, would also register.
+
+Disclosures.
+- The author knows which arm is planted and fitted the lagoon-alone size from counts.
+- The library half is thin (15 runs, 9 sidecars), so the splice is half runs of one aim and half a small set of the other; groups require at least a tenth of the effort.
+- The packets are small (27 to 54 items) next to AC-7d's (121 to 220), so group counts are not comparable across studies.
+- A is selected by a name pattern, so runs of a lagoon aim whose sidecar does not name lagoon, or runs with no sidecar, are left out. In the window, 223 runs (92 sidecars) match neither aim.
+- Three readers per arm show consistency, not a rate. Two model families, one prompt.
+
+Protocol. (1) Done 261106: design settled by the owner; selection, cap, scorer and controls committed; packets built (counts above). This sidecar is committed before any reader runs. (2) Build prompts (surface build --study ac7e) and run the 12 readers. No pilot reader is needed, because every prompt is smaller than AC-7d's largest, which ran. (3) List bridges, labeller packet, label. (4) bth run the scorer. The result is reported either way."""
+stage_name = "validation"
+novel = true
+
+[outcomes.instrument_broken]
+condition = "NOT controls_ok OR leak_hits > 0 OR packet_hash_mismatches > 0 OR NOT anchor_hash_ok OR reader_audit_violations > 0 OR rejected_readings > 0 OR n_readings <> 12 OR n_unlabelled > 0 OR NOT size_matched OR p2_groups_median < 2"
+decision = "The run is invalid: report it, cite no number from it, fix the cause, and pre-register a new run."
+reasoning = "As in AC-7c and AC-7d, including the anchor: if the strong splice no longer reads as at least 2 groups, this run cannot say anything about the within-project one."
+
+[outcomes.pass]
+condition = "p4_groups_median >= 2 AND p4_groups_median >= greatest(p1_groups_median, p3_groups_median) + 1"
+decision = "The instrument sees a within-project split between separate aims. With the owner, redefine the drift signal for Bearings before slice 3 is built on any signal, and read colliculix's single group as a finding about colliculix."
+reasoning = "Owner thresholds as in AC-7c and AC-7d."
+
+[outcomes.fail]
+condition = "NOT (p4_groups_median >= 2 AND p4_groups_median >= greatest(p1_groups_median, p3_groups_median) + 1)"
+decision = "Read the cross-seam fields first, by the rule above, to tell real results flow between the aims, reader binding on shared method, and an invisible within-project split."
+reasoning = "A within-project plant has no independent proof of separation, so a fail is ambiguous until the cross-seam fields are read."
+is_residual = true
+
+[result_schema]
+controls_ok = "bool"
+leak_hits = "int"
+packet_hash_mismatches = "int"
+anchor_hash_ok = "bool"
+reader_audit_violations = "int"
+rejected_readings = "int"
+n_readings = "int"
+n_unlabelled = "int"
+size_matched = "bool"
+p1_items = "int"
+p2_items = "int"
+p3_items = "int"
+p4_items = "int"
+p1_bytes = "int"
+p2_bytes = "int"
+p3_bytes = "int"
+p4_bytes = "int"
+p1_groups_median = "float"
+p2_groups_median = "float"
+p3_groups_median = "float"
+p4_groups_median = "float"
+p1_groups_min = "int"
+p2_groups_min = "int"
+p3_groups_min = "int"
+p4_groups_min = "int"
+p1_groups_unsure_supported_median = "float"
+p2_groups_unsure_supported_median = "float"
+p3_groups_unsure_supported_median = "float"
+p4_groups_unsure_supported_median = "float"
+p1_groups_no_labels_median = "float"
+p2_groups_no_labels_median = "float"
+p3_groups_no_labels_median = "float"
+p4_groups_no_labels_median = "float"
+p1_supported_bridge_frac = "float"
+p2_supported_bridge_frac = "float"
+p3_supported_bridge_frac = "float"
+p4_supported_bridge_frac = "float"
+p2_seam_readings = "int"
+p2_seam_purity_mean = "float"
+p2_cross_seam_links = "int"
+p2_cross_seam_bridges = "int"
+p2_cross_seam_bridges_supported = "int"
+p2_halves_joined_readings = "int"
+p4_seam_readings = "int"
+p4_seam_purity_mean = "float"
+p4_cross_seam_links = "int"
+p4_cross_seam_bridges = "int"
+p4_cross_seam_bridges_supported = "int"
+p4_halves_joined_readings = "int"
