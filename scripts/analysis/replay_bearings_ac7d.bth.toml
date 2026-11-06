@@ -50,7 +50,20 @@ Disclosures.
 - The author knows which arm is planted and fitted the window from counts.
 - Three readers per arm show consistency, not a rate. Two model families, one prompt.
 
-Protocol. (1) Done 261106: design settled by the owner; scrub, merge, scorer and controls committed; packets built (counts above). This sidecar is committed before any reader runs. (2) Pilot reader on m1, then the other 11. (3) List bridges, labeller packet, label. (4) bth run the scorer. The result is reported either way."""
+Protocol. (1) Done 261106: design settled by the owner; scrub, merge, scorer and controls committed; packets built (counts above). This sidecar is committed before any reader runs. (2) Pilot reader on m1, then the other 11. (3) List bridges, labeller packet, label. (4) bth run the scorer. The result is reported either way.
+
+Readers, 261106, counts only, written before labelling and before the scored run.
+- Pilot: m1/reader1 (Cursor, prompt about 890 KB) gave a valid reading with 0 tool events, so the other 11 ran. No reader failed on size.
+- 12 of 12 readings are counted. All pass the v2 validator, with matching packet hashes and reader ids, 0 citation failures and 0 link failures. Every counted log has 0 tool events (surface/event_counts.json).
+- Cursor: each of the 6 ran once. 4 were admitted by praxia. 2 (m3/reader3, m4/reader1) have praxia terminal_state "failed" because the final answer had no json fence (m3/reader3 is bare JSON; m4/reader1 is one JSON object followed by 4 characters), so praxia found no structured output. Both streams ended in success, not error, after 670 s and 571 s (limit 2400 s), with 140k and 282k input tokens (m1/reader1 used 288k and was admitted). The registered extraction rule took both readings. This is a format failure, not a size failure.
+- Antigravity. Every attempt file is kept on disk; surface/agy_runs.json lists them, rebuilt from the files.
+  - First launch, all four at once: m1, m2 and m3 exited 3 at executor start-up, before any reading ("tool name conflict": praxia was registered twice). m4 exited 0 with status ERROR "stream interrupted" and no extractable reading. Its prompt (892,296 B) is smaller than m1's (894,502 B), which later succeeded, so this was not size.
+  - Owner ruling 261106: a failure at start-up, before any reading, is infrastructure and not a reading; resubmit and disclose.
+  - Staggered relaunch of m1, m2 and m3 (90 s apart): all three gave complete readings. These are the counted readings.
+  - A watcher read stale first-launch error files for m2 and m3 and wrongly reported them as failing again. On that report, and at the owner's direction, the duplicate praxia registration in ~/.gemini (an asset-export MCP entry plus duplicate agent and skill files) was moved to a backup so that only the praxia plugin remains, and m2 and m3 were launched a second time while the staggered runs were still going, in the same folders with byte-identical prompts. Both gave complete readings.
+  - Owner ruling 261106, made before the counted set was collected and with no reading opened: the first complete reading counts. The second m2 and m3 readings are kept aside (readings_unused/attempt2) and are not labelled or scored. Before the error was found they had been collected and passed the validator (counts only); their content was not read.
+  - m4's disclosed redo ran once, after the ~/.gemini change, and gave a complete reading.
+  - Configuration per counted reading: m1, m2 and m3 reader2 started before the ~/.gemini change (m2 and m3 were still running across it); m4 reader2 started after it. Model and prompt did not change. The change removed duplicate tool registrations, and every counted reader logged 0 tool events."""
 stage_name = "validation"
 novel = true
 
