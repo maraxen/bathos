@@ -84,6 +84,7 @@ far that evidence is from the present; the historical ledger is intact and one f
 | E16 | Leak example: tev `specs/260705_design-additional-analysis-tooling-to-me.md` (pre-a22) cited by an agent on 2026-07-22 as "not up for revisiting" (memory `feedback_cite_claim_not_dated_doc.md`) | unverified |
 | E17 | bathos plugin has only a PreToolUse hook (`plugin/hooks/hooks.json`); no SessionStart | verified |
 | E18 | praxia docs registry has `superseded`/`archived` statuses, `supersedes` frontmatter, an `archive` category of `.tar.zst` + `.md` manifest pairs | unverified |
+| E19 | `dependency_provenance` is null because capture is **opt-in**: `runner.py:1205,1271` calls `capture_dependency_provenance(tracked_packages, …)`, and `resolve_tracked_packages` (`dependency_provenance.py:100`) unions `track_packages` from sidecar `[provenance]`, `.bth.toml` and `[tool.bathos]`; neither asr nor tev_design sets `track_packages` anywhere | verified |
 
 The spec phase must re-verify every *unverified* row by reading code before building on it.
 
@@ -215,6 +216,40 @@ builder's call); n where the result schema exposes it; `version_source`. No auto
    `instrument_wheel`, `refuted_or_superseded`) and asr `.verdicts/`; owner approves each batch.
    Retire the hand ledgers to read-only pointers once parity is shown.
 3. Archive sweep proposals in batches, owner approves.
+
+### D10. Resolutions from the builder check (all designer's calls; the owner should skim these)
+- **Choke point.** One core `resolve_validity(run_ids) -> {id: Validity}` used by every surface
+  (CLI and MCP share it); surfaces never re-implement the rule. Batched, not one fold per run.
+- **Derived validity cache is allowed.** A2 forbids mutating history, not caching. Validity may be
+  materialized into a rebuildable derived table (keyed by run id + hashes of the ledgers and
+  registry it was computed from; rebuilt when any input hash changes). Version resolution (D2,
+  `git show` per distinct `(git_hash, lock)` pair) is computed once and cached the same way. The
+  spec phase must name the run source of truth (catalog vs project run log) the fold reads.
+- **Clear semantics.** A defect-range flag cleared by the owner is a per-run exemption tied to the
+  registry entry's id + revision; re-resolution respects it until the entry is revised.
+- **`estimand_change` is not a blast state.** It is a comparability marker: both sides stay
+  `current`; any finding, campaign or claim mixing runs across the boundary is refused/bannered
+  as non-comparable. It never hides a run.
+- **Partial membership.** `campaign conclude`, `claim register` and `graduate` refuse if any
+  load-bearing run is hidden and list those runs; `lineage` and `campaign review` show hidden
+  members with a banner. Nothing drops members silently.
+- **`run_sql`.** To make "cannot accidentally cite" true for arbitrary SQL, the default
+  connection exposes `runs` as the *current-only* view; full history is `runs_all` (and the
+  explicit opt-in flag). Acceptance test: a raw `SELECT * FROM runs` never returns a hidden run.
+  This changes the meaning of existing saved queries — the spec must list callers that depend on
+  `runs` (migrate, repair, verify, compact use the base tables directly, not the view).
+- **Predicate scope.** Predicates evaluate over run columns + `metadata` JSON params + the
+  resolved package versions exposed as columns. A run lacking a field the predicate needs
+  resolves to `suspect`, never to a silent non-match and never to `void`.
+- **Commit ranges.** Matched only when the run's package source commit is resolvable (recorded
+  provenance, or a wheel whose metadata/sha maps to a commit). Otherwise the entry's version range
+  applies and an inferred match caps at `suspect`.
+- **Registry scope in P1.** A per-user registry (resolved via the D8 config chain) that projects
+  opt into, plus optional project-local entries; aminx entries are shared by asr and tev_design.
+  Packages named in active registry entries are added to `track_packages` automatically (E19),
+  and P1 also sets `track_packages` explicitly in both repos' config.
+- **`archived` identity.** An archived script hides the runs whose `script_sha256` matches the
+  archived bundle (E5's rule); the spec phase verifies the key and the latest-wins fold.
 
 ## 5. Phasing (owner: stop the leak first; full design now)
 - **P1 — stop the leak:** D1, D2, D3 (all surfaces), tier + distance display (D4 display part, D6),
