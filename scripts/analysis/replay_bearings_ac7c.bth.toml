@@ -1,0 +1,96 @@
+[experiment]
+hypothesis = """The blind reader plus AC-7b's drift-group scorer can see a planted drift. A packet that splices the records of two projects that pass no results to each other scores at least 2 drift groups, and at least 1 more than either project read alone (spec 261104, AC-7c).
+
+Why this exists. AC-7 (run 530b1a32) and AC-7b (run b85be024) both failed. In AC-7b the drifting project (colliculix) scored 1 group in every reading, against controls at 2 and 3. Only the graph arithmetic had synthetic controls, so neither run can tell "colliculix's drift is not disconnected effort" from "readers plus scorer cannot see drift at all". AC-7c is the end-to-end positive control, with drift that is there by construction.
+
+Design, chosen by the owner 261106 through AskUserQuestion before anything was built.
+- Pair: isochore (a binding free-energy engine) and alynxr (an MSA and structure-search toolkit). Neither uses the other's results. Two alynxr specs (261001, 261002) name isochore's cache_root_source as a pattern to copy. That is a shares relation (method), which never binds. It survives the scrub as "proj.traj_cache.cache_root_source", so a reader-drawn feeds link across it is possible and would be checked by the labeller like any other bridge.
+- Size: half windows. The planted arm takes the same 14 days from both, 2026-09-28 to 2026-10-12 (-04:00). Docs are not windowed by the bathos builder (all primary docs at the ref), and every doc in these packets is dated inside its window.
+- Neutralisation (owner 261106, after correction): one merged tree, no source prefix. Every case-insensitive "isochore" or "alynxr" in any path or text becomes "proj", in all three arms, so the arms differ only by splicing. Blob shas are recomputed, runs and commits interleave by time, and any path two sources (or two scrubbed paths) share is refused. The earlier choice of a/ and b/ prefixes was withdrawn: per-source prefixes give the split away, and would let the labeller tell the arms apart.
+- Labeller: one Opus agent, as in AC-7b (owner 261106).
+
+Arms. Opaque ids, because a reader can see its folder name. Refs are the last commits before each window ends.
+- k1, control: isochore alone, 2026-09-21 to 2026-10-19, ref 25df9678.
+- k2, planted: isochore at d637a6d0 plus alynxr at c1114913, 2026-09-28 to 2026-10-12.
+- k3, size-matched control: alynxr alone, 2026-09-21 to 2026-10-19, ref f919e872.
+
+Packets, built 261106 before any reader (counts only; deterministic, rebuilt with equal hashes):
+- k1 b4bdc5d9f070: 2 docs, 0 sidecars, 0 runs, 38 commits; 40 items, 23 KB.
+- k2 8170941186c0: 5 docs, 16 sidecars, 20 runs, 51 commits; 92 items, 198 KB.
+- k3 a524703323b6: 5 docs, 28 sidecars, 32 runs, 31 commits; 96 items, 438 KB.
+- 0 leaked names in each.
+
+Size match, registered: the planted arm's items (docs + sidecars + runs + commits) are within 15% of k3's, and its bytes are no more than k3's. 15% is a judgment cutoff. In AC-7b, group count rose with packet size (noticed after that result, so a hypothesis), and k3 is the larger in bytes, so size favours the control. k1 is much smaller; it is a floor, not a size match.
+
+Readers. As AC-7b's final reader set, unchanged: reader1 and reader3 on Cursor through praxia surface_dispatch (completion role, power tier), reader2 on Antigravity run directly on stdin (replay_bearings_ac7b_surface.py agy --study ac7c), because praxia cannot pass agy a prompt over 128 KiB (debt 3289). Each reader gets its whole packet inline, in its own empty folder, with the committed prompt. The registered extraction rule (recover_result) applies to every reader. Log events are counted for containment, and any tool event is reported before scoring. A reading that fails extraction or validation gets one disclosed redo.
+
+Labelling and scoring, as AC-7b, reused unchanged (replay_bearings_ac7b.py): bridges listed mechanically; one fresh Opus labeller works from labeller/prompt.md alone (opaque reading ids, shuffled with seed 261106, quoted evidence); strict groups remove bridges labelled unsupported or unsure; lenient groups remove only unsupported; drift groups are components under feeds and serves links holding at least 10% of effort; each arm's figure is the median over its 3 readers.
+
+Synthetic controls, which must pass before any score is read (--controls-only passes at commit):
+- AC-7 and AC-7b controls, unchanged.
+- Merge controls: the scrub replaces names in text and paths; git blob shas match git hash-object; the leak check fires on an unscrubbed source and finds 0 after the merge; runs and commits interleave by time when id and sha order contradict it; doc blobs are recomputed after the scrub; a path two sources share, and two paths that collide only after the scrub, are refused. Checked 261106 against three broken merges (scrub off, time order off, paths unscrubbed): each fails the controls.
+- Seam controls (for the descriptive seam fields below): two groups with one source each follow the seam; one mixed group, or two mixed groups, do not.
+
+Descriptive fields, which gate nothing:
+- k2_seam_readings: planted readings whose counted strict groups are dominated by different source projects (by the run and commit citations of their nodes; source membership sits in manifest.json, never in reader/).
+- k2_seam_purity_mean: mean share of each counted group's citations from its dominant source.
+- Per-arm minimum groups, lenient medians, supported-bridge fraction, uncertain-node fraction, items and bytes.
+
+Disclosures.
+- The author knows which arm is planted and chose the pair's windows from commit and run counts (probe 261106, counts only).
+- isochore has no bathos runs under its own slug (11 runs that use it sit under naurmalade, sweetprots and adaptyv), so its effort is commits only. alynxr's comes from runs and commits.
+- Domain vocabulary (free energy versus sequence alignment) is left in place on purpose: Bearings must split by content.
+- Three readers per arm show consistency, not a rate. Two model families, one prompt.
+
+Protocol. (1) Done 261106: design settled by the owner; scorer, merge and controls committed; packets built (counts above). This sidecar is committed before any reader runs. (2) Build prompts (surface build --study ac7c) and run the 9 readers. (3) List bridges, write the labeller packet, label. (4) bth run the scorer. The result is reported either way."""
+stage_name = "validation"
+novel = true
+
+[outcomes.instrument_broken]
+condition = "NOT controls_ok OR leak_hits > 0 OR packet_hash_mismatches > 0 OR reader_audit_violations > 0 OR rejected_readings > 0 OR n_readings <> 9 OR n_unlabelled > 0 OR NOT size_matched"
+decision = "The run is invalid: report it, cite no number from it, fix the cause, and pre-register a new run."
+reasoning = "As in AC-7b, plus the leak check over every arm and the registered size match."
+
+[outcomes.pass]
+condition = "k2_groups_median >= 2 AND k2_groups_median >= greatest(k1_groups_median, k3_groups_median) + 1"
+decision = "The instrument sees a planted split, so AC-7b's colliculix result is about colliculix: its drift does not show as disconnected effort in its record. Re-open with the owner what drift means for Bearings before slice 3 is built on any signal."
+reasoning = "Owner thresholds 261106. 2 is the least a split can score. Requiring 1 above the higher control keeps a project that already reads as several groups from passing on its own."
+
+[outcomes.fail]
+condition = "NOT (k2_groups_median >= 2 AND k2_groups_median >= greatest(k1_groups_median, k3_groups_median) + 1)"
+decision = "Retire the drift-group count as Bearings' drift signal: readers plus scorer cannot see even a planted split. Re-open the drift signal with the owner."
+reasoning = "If two unconnected projects in one packet do not separate from each project alone, the group count cannot detect real drift either."
+is_residual = true
+
+[result_schema]
+controls_ok = "bool"
+leak_hits = "int"
+packet_hash_mismatches = "int"
+reader_audit_violations = "int"
+rejected_readings = "int"
+n_readings = "int"
+n_unlabelled = "int"
+size_matched = "bool"
+k1_items = "int"
+k2_items = "int"
+k3_items = "int"
+k1_bytes = "int"
+k2_bytes = "int"
+k3_bytes = "int"
+k1_groups_median = "float"
+k2_groups_median = "float"
+k3_groups_median = "float"
+k1_groups_min = "int"
+k2_groups_min = "int"
+k3_groups_min = "int"
+k1_groups_unsure_supported_median = "float"
+k2_groups_unsure_supported_median = "float"
+k3_groups_unsure_supported_median = "float"
+k1_supported_bridge_frac = "float"
+k2_supported_bridge_frac = "float"
+k3_supported_bridge_frac = "float"
+k1_uncertain_node_frac = "float"
+k2_uncertain_node_frac = "float"
+k3_uncertain_node_frac = "float"
+k2_seam_readings = "int"
+k2_seam_purity_mean = "float"

@@ -23,6 +23,8 @@ from replay_bearings_ac7b import ARMS
 
 from bathos.bearings.packet import verify_packet
 
+STUDY = "ac7b"  # main() rebinds STUDY and ARMS for --study ac7c (planted-drift control)
+
 logger = logging.getLogger("replay_bearings_ac7b_surface")
 
 # Two Cursor readers and one Antigravity reader per arm, the same in every arm.
@@ -152,7 +154,7 @@ def build(work: Path) -> None:
         sha = verify_packet(packet)
         body = render_packet(packet)
         for reader in READERS:
-            head = f"packet_sha256: {sha}\nreader_id: ac7b-{arm}-{reader}\n\n"
+            head = f"packet_sha256: {sha}\nreader_id: {STUDY}-{arm}-{reader}\n\n"
             (prompts / f"{arm}_{reader}.md").write_text(head + body, encoding="utf-8")
             folder = root / "folders" / f"{arm}_{reader}"
             if not folder.exists():
@@ -339,8 +341,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("build", "agy", "collect"))
     parser.add_argument("--work-dir", type=Path, required=True)
+    parser.add_argument("--study", choices=("ac7b", "ac7c"), default="ac7b")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    if args.study == "ac7c":
+        import replay_bearings_ac7c
+
+        global ARMS, STUDY
+        ARMS, STUDY = replay_bearings_ac7c.ARMS, "ac7c"
     {"build": build, "agy": run_agy, "collect": collect}[args.command](args.work_dir.resolve())
 
 
