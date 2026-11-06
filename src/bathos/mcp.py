@@ -5654,7 +5654,8 @@ async def mcp_migrate_to_log_tool(
 
     cat_dir = _get_catalog_dir(catalog_dir or None)
     if import_legacy:
-        result = import_legacy_post_cutover(cat_dir)
+        # #6527: dry_run used to be dropped here too, so a preview imported for real.
+        result = import_legacy_post_cutover(cat_dir, dry_run=dry_run)
     else:
         result = migrate_to_log(
             cat_dir,

@@ -75,6 +75,9 @@ class ImportReport:
     unreadable: list[str] = field(default_factory=list)
     locked: list[str] = field(default_factory=list)
     events: list[dict[str, Any]] = field(default_factory=list)
+    #: `--import-legacy` only: per destination log dir, `{"dest", "project",
+    #: "appended", "unchanged"}` -- what was (or, under dry run, would be) written.
+    destinations: list[dict[str, Any]] = field(default_factory=list)
 
 
 # --- canon / hashing / eid -----------------------------------------------

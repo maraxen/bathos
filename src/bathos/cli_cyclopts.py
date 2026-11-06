@@ -1396,7 +1396,9 @@ def migrate(
         Refuses with status `foreign_catalogs` while any registered root still configures
         a per-project `[project] catalog_dir` -- consolidate each first.
     import_legacy: Post-cut-over re-import of a stale legacy write (AC-23); refused
-        before cut-over.
+        before cut-over. Writes into EVERY registered project's `.bth/log/` unless
+        --project names one slug. With --dry-run, writes nothing and prints the
+        per-project counts a real run would append (status `dry_run`).
     force: With --to-log, proceed past a squeue/submit-record conflict instead of refusing.
     no_scheduler: With --to-log, for a host with no SLURM (titanix): do not query squeue,
         so the cut-over runs where it does not exist. Asserts no job of yours is running
@@ -1460,9 +1462,9 @@ def migrate(
     if import_legacy:
         from bathos.runlog.migrate import import_legacy_post_cutover
 
-        result = import_legacy_post_cutover(catalog_dir())
+        result = import_legacy_post_cutover(catalog_dir(), dry_run=dry_run, project=project)
         print(f"{result.status}: {result.detail}")
-        if result.status not in ("imported",):
+        if result.status not in ("imported", "dry_run"):
             raise SystemExit(1)
         return
 

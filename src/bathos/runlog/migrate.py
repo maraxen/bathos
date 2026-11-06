@@ -686,8 +686,12 @@ def _append_import_events(
     project: str | None,
     project_id: str | None,
     main_root: Path,
-) -> int:
-    """Append `*.imported` / `legacy_source.unreadable` events for
+    apply: bool = True,
+) -> tuple[int, int]:
+    """Returns `(appended, unchanged)`. With `apply=False` nothing is written:
+    the counts are what a real call would append / skip (#6527 dry run).
+
+    Append `*.imported` / `legacy_source.unreadable` events for
     `candidates` into `dest`, stamped with ONE destination's
     project/project_id/main_root. The per-destination half of
     `import_legacy_catalog`'s own per-candidate logic (spec Migration step
@@ -700,6 +704,7 @@ def _append_import_events(
     existing = _existing_chains(_read_staging_events(dest))
     new_lines: list[str] = []
     appended = 0
+    unchanged = 0
     for cand in candidates:
         chain_key = (cand.kind, *cand.entity, cand.source_class, cand.source_locator)
         if cand.kind == "legacy_source.unreadable":
@@ -708,6 +713,7 @@ def _append_import_events(
             sha_val = _source_sha256(cand.fields)
         prior = existing.get(chain_key)
         if prior is not None and prior[1] == sha_val:
+            unchanged += 1
             continue
         ordinal = 0 if prior is None else prior[0] + 1
         data = dict(cand.fields)
@@ -741,7 +747,7 @@ def _append_import_events(
         existing[chain_key] = (ordinal, sha_val)
         appended += 1
 
-    if new_lines:
+    if new_lines and apply:
         dest.mkdir(parents=True, exist_ok=True)
         seg_path = dest / f"import_{uuid.uuid4().hex[:12]}.jsonl"
         tmp_path = seg_path.with_suffix(".jsonl.tmp")
@@ -749,7 +755,7 @@ def _append_import_events(
             for line in new_lines:
                 fh.write(line + "\n")
         tmp_path.replace(seg_path)
-    return appended
+    return appended, unchanged
 
 
 def _route_candidates(
@@ -888,7 +894,11 @@ def _dest_for_root(root: Path | None, *, staging_root: Path | None) -> Path:
 
 
 def _import_candidates(
-    catalog_dir: Path, *, staging_root: Path | None
+    catalog_dir: Path,
+    *,
+    staging_root: Path | None,
+    apply: bool = True,
+    project: str | None = None,
 ) -> tuple[ImportReport, int, set[str]]:
     """The shared body of Migration step 2 and `--import-legacy`: scan every
     legacy source once (`_all_candidates`, AC-18's `connect_legacy`), route
@@ -896,17 +906,29 @@ def _import_candidates(
     picks staging (step 2) vs. direct project logs (`--import-legacy`).
     Returns `(report, unresolved_routing_count, unresolved_ids)` -- the
     latter two from `_route_candidates` (empty for a 0/1-root catalog).
+
+    `apply=False` writes nothing and reports what would be appended (#6527).
+    `project` keeps only the destination whose root's slug matches; every other
+    destination, including `unaffiliated`, is left untouched.
     """
     report = ImportReport()
     candidates = _all_candidates(catalog_dir, report)
     roots = _registered_roots_with_config()
     buckets, unresolved, unresolved_ids = _route_candidates(candidates, roots)
     for root, bucket in buckets.items():
-        dest = _dest_for_root(root, staging_root=staging_root)
         slug, pid = _root_project_info(root)
+        if project is not None and slug != project:
+            continue
+        dest = _dest_for_root(root, staging_root=staging_root)
         main_root = root if root is not None else catalog_dir
-        n = _append_import_events(bucket, dest, project=slug, project_id=pid, main_root=main_root)
+        n, same = _append_import_events(
+            bucket, dest, project=slug, project_id=pid, main_root=main_root, apply=apply
+        )
         report.appended += n
+        report.unchanged += same
+        report.destinations.append(
+            {"dest": str(dest), "project": slug, "appended": n, "unchanged": same}
+        )
     return report, unresolved, unresolved_ids
 
 
@@ -1921,11 +1943,21 @@ def migrate_to_log(
         )
 
 
-def import_legacy_post_cutover(catalog_dir: Path | None = None) -> MigrateToLogResult:
+def import_legacy_post_cutover(
+    catalog_dir: Path | None = None,
+    *,
+    dry_run: bool = False,
+    project: str | None = None,
+) -> MigrateToLogResult:
     """`bth migrate --import-legacy` (spec Migration step 2 / step 5 / AC-23):
     refuses before cut-over; after it, imports every legacy source directly
     into the owning project's real `.bth/log/` (unresolvable ones to
-    `unaffiliated/`)."""
+    `unaffiliated/`).
+
+    `dry_run=True` writes nothing anywhere and returns status `dry_run` with the
+    per-destination counts a real run would append (#6527: the flag used to be
+    dropped, so a "dry run" imported into every registered project's log).
+    `project` scopes the import to the one root whose slug matches."""
     cd = catalog_dir or default_catalog_dir()
     if _read_marker(cd) is None:
         return MigrateToLogResult(
@@ -1935,18 +1967,29 @@ def import_legacy_post_cutover(catalog_dir: Path | None = None) -> MigrateToLogR
                 "run `bth migrate --to-log` first."
             ),
         )
-    with writers_lock(cd, exclusive=True):
-        report, unresolved_routing, _unresolved_ids = _import_candidates(cd, staging_root=None)
+    # A dry run only reads, so a shared lock is enough.
+    with writers_lock(cd, exclusive=not dry_run):
+        report, unresolved_routing, _unresolved_ids = _import_candidates(
+            cd, staging_root=None, apply=not dry_run, project=project
+        )
     if report.locked:
         return MigrateToLogResult(
             status="legacy_db_locked",
             locked_source=report.locked[0],
             detail="a legacy source is locked by another process; retry once it is free",
         )
+    verb = "would_append" if dry_run else "appended"
+    lines = [f"{verb}={report.appended} unchanged={report.unchanged}"]
+    for d in report.destinations:
+        if d["appended"]:
+            lines.append(
+                f"  {d['project'] or 'unaffiliated'}: {verb}={d['appended']} "
+                f"unchanged={d['unchanged']} -> {d['dest']}"
+            )
     return MigrateToLogResult(
-        status="imported",
+        status="dry_run" if dry_run else "imported",
         unresolved_routing_count=unresolved_routing,
-        detail=f"appended={report.appended} unchanged={report.unchanged}",
+        detail="\n".join(lines),
     )
 
 

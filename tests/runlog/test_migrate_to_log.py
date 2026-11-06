@@ -763,6 +763,63 @@ def test_import_legacy_after_cutover_imports_stale_write_then_converges(tmp_path
     second = import_legacy_post_cutover(backend.catalog_dir)
     assert second.status == "imported"
     assert "appended=0" in second.detail
+    # #6527: skipped chains are counted, not silently reported as unchanged=0.
+    assert "unchanged=0" not in second.detail
+
+
+def _late_run_after_cutover(tmp_path: Path):
+    backend = _simple_backend(tmp_path)
+    assert _converge(backend.catalog_dir).status == "switched"
+    write_run(
+        Run(
+            id="run-late",
+            project_slug="proj",
+            command="scripts/experiments/late.py",
+            argv=["python", "late.py"],
+            git_hash="f" * 40,
+            git_branch="main",
+            git_dirty=False,
+            timestamp=BASE_TS + timedelta(days=1),
+            duration_s=1.0,
+            exit_code=0,
+            status="completed",
+        ),
+        backend.catalog_dir,
+    )
+    return backend
+
+
+def test_import_legacy_dry_run_writes_nothing(tmp_path: Path):
+    """#6527: --import-legacy --dry-run used to drop the flag and import for real."""
+    from bathos.runlog.migrate import import_legacy_post_cutover
+
+    backend = _late_run_after_cutover(tmp_path)
+
+    preview = import_legacy_post_cutover(backend.catalog_dir, dry_run=True)
+    assert preview.status == "dry_run"
+    assert "would_append=1" in preview.detail.splitlines()[0]
+
+    # A second preview sees the same pending event: the first wrote nothing.
+    again = import_legacy_post_cutover(backend.catalog_dir, dry_run=True)
+    assert "would_append=1" in again.detail.splitlines()[0]
+
+    real = import_legacy_post_cutover(backend.catalog_dir)
+    assert real.status == "imported"
+    assert "appended=1" in real.detail.splitlines()[0]
+
+
+def test_import_legacy_project_filter_skips_other_projects(tmp_path: Path):
+    from bathos.runlog.migrate import import_legacy_post_cutover
+
+    backend = _late_run_after_cutover(tmp_path)
+
+    other = import_legacy_post_cutover(backend.catalog_dir, project="not-this-project")
+    assert other.status == "imported"
+    assert "appended=0" in other.detail.splitlines()[0]
+
+    # The run is still pending for its own project, so nothing was written above.
+    own = import_legacy_post_cutover(backend.catalog_dir, dry_run=True, project="proj")
+    assert "would_append=1" in own.detail.splitlines()[0]
 
 
 # --------------------------------------------------------------------------
