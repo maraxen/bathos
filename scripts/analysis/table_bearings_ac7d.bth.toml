@@ -1,0 +1,45 @@
+# Reshape of the scored AC-7d run (3e6410b2-78a3-43b0-930a-6de617107c80) into a per-reading table for its review page.
+# Written and committed before this script runs. Its outcome only checks that the reshape reproduces the scored medians;
+# the extra columns are descriptive, chosen after the scored result was seen, and gate nothing.
+
+[experiment]
+hypothesis = """Recomputing each AC-7d reading's drift groups with the scorer's own functions from the same readings, packets and bridge labels gives one row per reading (12) whose per-arm medians equal what run 3e6410b2 recorded: strict m1 1, m2 2, m3 2, m4 3; lenient m1 2, m2 2, m3 2, m4 3; no labels m1 2, m2 2, m3 2, m4 3.
+
+Descriptive columns, added after the scored result (post-hoc, gating nothing), to answer one question: m1's strict median (1) is below its lenient and no-label medians (2), although strict removes more bridges. Is that the 10% effort-share rule (removing bridges splits a qualifying group into pieces that each fall below the share, so fewer groups qualify) or a scorer defect?
+- components_no_labels and components_strict: raw connected components before and after strict removal.
+- strict_below_no_labels_rows, strict_above_no_labels_rows, components_decrease_rows: counts over the 12 rows.
+
+How these will be read, fixed before running:
+- components_decrease_rows = 0 (removal never lowers the raw component count): the drop is the share rule, by design, not a defect.
+- components_decrease_rows > 0: a scorer defect, disclosed in the spec; the registered run is not re-scored."""
+stage_name = "validation"
+novel = false
+
+[outcomes.consistent]
+condition = "n_rows = 12 AND m1_strict_median = 1 AND m2_strict_median = 2 AND m3_strict_median = 2 AND m4_strict_median = 3 AND m1_lenient_median = 2 AND m2_lenient_median = 2 AND m3_lenient_median = 2 AND m4_lenient_median = 3 AND m1_no_labels_median = 2 AND m2_no_labels_median = 2 AND m3_no_labels_median = 2 AND m4_no_labels_median = 3"
+decision = "Use the table for the review page."
+reasoning = "The page shows the scored run's numbers, so the reshape must reproduce them exactly."
+
+[outcomes.instrument_broken]
+condition = "TRUE"
+is_residual = true
+decision = "Do not build the page from this table; find why the reshape differs from the scored run."
+reasoning = "Any mismatch means the table is not the scored result."
+
+[result_schema]
+n_rows = "int"
+strict_above_no_labels_rows = "int"
+strict_below_no_labels_rows = "int"
+components_decrease_rows = "int"
+m1_strict_median = "float"
+m2_strict_median = "float"
+m3_strict_median = "float"
+m4_strict_median = "float"
+m1_lenient_median = "float"
+m2_lenient_median = "float"
+m3_lenient_median = "float"
+m4_lenient_median = "float"
+m1_no_labels_median = "float"
+m2_no_labels_median = "float"
+m3_no_labels_median = "float"
+m4_no_labels_median = "float"
