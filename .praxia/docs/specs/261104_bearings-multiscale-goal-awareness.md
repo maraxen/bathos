@@ -137,7 +137,7 @@ Frame: agents do honest, pre-registered, green work that stops serving any large
   - Readers: 2 Cursor and 1 Antigravity per arm, 0 tool events. Two Cursor readings were format failures (no fence), not size, and were taken by the extraction rule. Antigravity start-up conflicts (praxia registered twice) were ruled infrastructure by the owner. A stale-file watcher false positive caused a second m2/m3 launch; the owner ruled the first complete reading counts. Full history in the sidecar's readers note.
   - Labeller: one Opus agent, no redo. 60 bridges: 39 supported, 8 unsupported, 13 unsure.
   - **Qualifiers.** (1) The margin is the minimum the rule allows. (2) The halves differ in record type as well as vocabulary: only sweetprots contributes docs, and sweetprots has no commits in the window, so the seam may be separable by source type alone, and a purity of 1.0 is partly easy by construction. (3) The pass shows the detection limit lies below this plant's contrast. It does not locate the limit, and it says nothing about a split within one project (literature note `research/261106_bearings-ac7d-literature-notes.md`).
-  - Still open: the colliculix question and **the owner item on what drift means for Bearings, before slice 3 is built on any signal.**
+  - Still open: the colliculix question and **the owner item on what drift means for Bearings, before slice 3 is built on any signal.** Owner 261106, asked after the pass: test a within-project split next (AC-7e, not yet designed or registered). The definition of drift is not yet settled.
   - Review page (private): https://claude.ai/artifact/2tqLFZWRyezKKGd4N2j7kQ. Both panels carry "dirty run, data not pinned" (untracked local files at run time); the audit is clean.
 
 ## Assumptions
