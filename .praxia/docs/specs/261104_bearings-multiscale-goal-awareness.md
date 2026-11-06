@@ -119,6 +119,27 @@ Frame: agents do honest, pre-registered, green work that stops serving any large
   - Registered decision: the instrument sees a planted split, so AC-7b's result is about colliculix. Its drift does not show as disconnected effort in its record. **Re-open with the owner what drift means for Bearings before slice 3 is built on any signal.**
   - **Qualifier:** this plant is strong. The two halves differ completely in domain and vocabulary (free energy against sequence alignment). The pass shows a cross-domain split can be detected. It does not show that a split within one domain, like colliculix's, can be. Synthetic planted-structure work reports an "undetectable" regime for weak plants (Shi et al. 2019).
   - Review page (private): https://claude.ai/artifact/GFZAw4H4nkZRu8ZKJZEZtZ.
+- [261106] **AC-7d passed, by the minimum margin: readers split a weaker, neighbouring-field plant.** Run `3e6410b2` (sidecar `scripts/analysis/replay_bearings_ac7d.bth.toml`, sha `5f4ef8ae…`, commit `f0e4a26f`) recorded `pass`, with every instrument check clean: controls pass, 0 leaked identifiers, 0 hash mismatches, 0 rejected readings, 12 readings, 0 unlabelled bridges, size matched, anchor hash matched.
+
+  Design, chosen by the owner 261106: sweetprots and nanobody, two neighbouring-field projects that pass no results between them. The neighbour splice (m4) covers both over about 3.75 days. Each project alone (m1 nanobody, m3 sweetprots) covers 28 days. AC-7c's strong splice is rerun unchanged as a positive anchor (m2). Only identifiers are scrubbed; the word "nanobody" stays.
+
+  | | m1: field A alone | m2: anchor (strong splice) | m3: field B alone | m4: neighbour splice |
+  |---|---|---|---|---|
+  | Median drift groups, strict | 1 | 2 | 2 | 3 |
+  | Median, unsure counted as supported | 2 | 2 | 2 | 3 |
+  | Median, no labels | 2 | 2 | 2 | 3 |
+  | Groups in each reading (strict) | 1, 2, 1 | 2, 2, 2 | 2, 1, 3 | 3, 3, 3 |
+  | Groups in each reading, no labels | 2, 2, 1 | 3, 2, 2 | 2, 1, 3 | 3, 2, 3 |
+
+  - The anchor's median is 2, so the run is valid. m4 beats both single-project arms by exactly 1 group under all three label variants (3 against 2), so the outcome does not depend on the labeller.
+  - All 3 m4 readings split along the true seam, with a purity of 1.0. **No feeds or serves link of any kind crossed the seam** (cross_seam_links 0, not only bridges), and no reading joined the halves.
+  - m4's 3 equals m1's 1 plus m3's 2: readers read each half much as they read it alone.
+  - m1's strict median (1) is below its lenient and no-label medians (2) although strict removes more bridges. Table run `93e2b7e3` (outcome consistent) shows this is the 10% effort-share rule, not a defect: strict removal never lowered a raw component count (0 of 12 readings), but in m1/reader1 it cut one qualifying group into pieces that each fall below a tenth of the effort.
+  - Readers: 2 Cursor and 1 Antigravity per arm, 0 tool events. Two Cursor readings were format failures (no fence), not size, and were taken by the extraction rule. Antigravity start-up conflicts (praxia registered twice) were ruled infrastructure by the owner. A stale-file watcher false positive caused a second m2/m3 launch; the owner ruled the first complete reading counts. Full history in the sidecar's readers note.
+  - Labeller: one Opus agent, no redo. 60 bridges: 39 supported, 8 unsupported, 13 unsure.
+  - **Qualifiers.** (1) The margin is the minimum the rule allows. (2) The halves differ in record type as well as vocabulary: only sweetprots contributes docs, and sweetprots has no commits in the window, so the seam may be separable by source type alone, and a purity of 1.0 is partly easy by construction. (3) The pass shows the detection limit lies below this plant's contrast. It does not locate the limit, and it says nothing about a split within one project (literature note `research/261106_bearings-ac7d-literature-notes.md`).
+  - Still open: the colliculix question and **the owner item on what drift means for Bearings, before slice 3 is built on any signal.**
+  - Review page (private): https://claude.ai/artifact/2tqLFZWRyezKKGd4N2j7kQ. Both panels carry "dirty run, data not pinned" (untracked local files at run time); the audit is clean.
 
 ## Assumptions
 
@@ -226,6 +247,8 @@ Tags follow the global spike-test rule. *Verified* means read at a file:line or 
   - **Result 261105: fail** (run `b85be024`; per-reading table run `2eeaeca9`, outcome consistent). See the decision log, AC-7b 261105.
 - **AC-7c Planted-drift control, pre-registered** (`scripts/analysis/replay_bearings_ac7c.bth.toml`, committed before any reader ran). Two projects that pass no results between them are spliced into one neutralised packet, size-matched to a single-project control. The planted arm must reach a median of at least 2 groups and at least 1 above either project read alone.
   - **Result 261106: pass** (run `2032d774`; per-reading table run `c456be51`, outcome consistent). See the decision log, AC-7c 261106.
+- **AC-7d Graded planted-drift control, pre-registered** (`scripts/analysis/replay_bearings_ac7d.bth.toml`, committed before any reader ran). Two neighbouring-field projects with no results flow are spliced over a short window and compared with each project alone, with AC-7c's strong splice as a positive anchor (median at least 2, or the run is invalid). Same thresholds as AC-7c.
+  - **Result 261106: pass, by the minimum margin** (run `3e6410b2`; per-reading table run `93e2b7e3`, outcome consistent). See the decision log, AC-7d 261106.
 - **AC-8 Cadence and shadow exit are testable and pre-registered.** Given a set of projects, when bth bearings due runs, it lists exactly those active in the last 28 days with >= 20 new runs or >= 7 days since their last reading. Given a due project, `bth run` in it returns exactly one due advisory with no reading content and appends `bearings.due_notified`; given a project that is not due, it returns none. Before the first live reading, an evaluation sidecar fixes T1 and the excess-spend metric (261027 §8, including chains that paid off; not the `excess_spend_avoided` heuristic in `stepback/analysis.py`). It also counts confirmed charters among active projects, testing A10.
 
 ## Pre-mortem Record
