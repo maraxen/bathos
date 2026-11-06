@@ -1,4 +1,4 @@
-# 261104_multiscale-goal-awareness Internal Docs
+# agent-a3507d8df4756150c Internal Docs
 
 ## Daily
 - [260805_overnight-decisions](daily/260805_overnight-decisions.md) — Every decision made without a human gate during the overnight autonomous loop run, with enough context to backtrack
@@ -63,6 +63,7 @@
 - [261015_exploratory-mode-contract-adversarial-review](audits/261015_exploratory-mode-contract-adversarial-review.md) — Spec-challenger findings C1-C25 and spec-defender rulings for specs/261015_exploratory-mode-contract.md, run sequentially
 
 ## Research
+- [261106_bearings-ac7d-literature-notes](research/261106_bearings-ac7d-literature-notes.md) — Pre-score notes on planted-partition detectability limits, framing how an AC-7d pass or fail will be read
 - [261104_multiscale-goal-awareness-background](research/261104_multiscale-goal-awareness-background.md) — From-memory literature grounding, measured bathos surface and documented drift episodes behind the multi-scale goal awareness brainstorm
 - [261015_claim-appraisal-nlm-research](research/261015_claim-appraisal-nlm-research.md) — NotebookLM (Scientific Rigor notebook 1d786e78) answers on appraisal frameworks, doubt/trust taxonomies, grading and appraiser independence, feeding the spec's appraisal payload
 - [261015_exploratory-mode-nlm-research](research/261015_exploratory-mode-nlm-research.md) — NotebookLM (agentic-science notebook 3f0490aa) answers to 7 questions feeding the exploratory-mode contract spec; quotes spot-checked against raw responses
