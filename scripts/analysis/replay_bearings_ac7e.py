@@ -1,10 +1,11 @@
 """Bearings AC-7e (spec 261104): a within-project planted split. Does the instrument see two aims inside ONE project?
 
-AC-7c and AC-7d spliced two different projects. AC-7e takes one project (tev_design) and splices two of its own aims
-that the owner confirmed are separate: A, the lagoon simulation (sidecars whose path names "lagoon"), and B, the
-design-library work (sidecars naming "librar", "proximity" or "diversity"). The halves share one project's runner,
-tools and vocabulary, so the split is weaker than AC-7d's. There is no independent proof of "no results flow"
-between the aims; the ground truth is the owner's own review of the project's aims (spec 261104).
+AC-7c and AC-7d spliced two different projects. AC-7e takes one project (tev_design) and splices two of its own aims,
+A, the lagoon simulation (sidecars whose path names "lagoon"), and B, the design-library work (sidecars naming
+"librar", "proximity" or "diversity"). The halves share one project's runner, tools and vocabulary, so the split is
+weaker than AC-7d's. WHETHER THE TWO AIMS PASS RESULTS TO EACH OTHER IS NOT ESTABLISHED. The owner's 261105 review
+says tev_design has several aims "each with sub-goals that interact", and the spec used tev_design as a
+connected-aims negative control in AC-7b. The sidecar records the owner's ruling on this pair before any reader runs.
 
 Selection is mechanical, by sidecar path, because commit subjects and docs do not carry the aim. Commits and docs are
 left out of every arm. A is far larger than B in the record, so A is capped by a deterministic rule (below). AC-7c's
