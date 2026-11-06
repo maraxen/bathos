@@ -42,7 +42,13 @@ Disclosures.
 - Domain vocabulary (free energy versus sequence alignment) is left in place on purpose: Bearings must split by content.
 - Three readers per arm show consistency, not a rate. Two model families, one prompt.
 
-Protocol. (1) Done 261106: design settled by the owner; scorer, merge and controls committed; packets built (counts above). This sidecar is committed before any reader runs. (2) Build prompts (surface build --study ac7c) and run the 9 readers. (3) List bridges, write the labeller packet, label. (4) bth run the scorer. The result is reported either way."""
+Protocol. (1) Done 261106: design settled by the owner; scorer, merge and controls committed; packets built (counts above). This sidecar is committed before any reader runs. (2) Build prompts (surface build --study ac7c) and run the 9 readers. (3) List bridges, write the labeller packet, label. (4) bth run the scorer. The result is reported either way.
+
+Readers and labels, 261106, counts only, written before the scored run.
+- Readers: 9 of 9 gave a reading. The 6 Cursor readers were admitted by praxia. The 3 Antigravity readers exited 0 and were taken by the registered extraction rule. All 9 pass the v2 validator, with matching packet hashes and reader ids, 0 citation failures and 0 link failures. No redo was needed. Every log has 0 tool events (surface/event_counts.json).
+- Bridges: 36 over 9 readings. The labeller packet (101 KB, seed 261106) contains no project name.
+- Labeller: one Opus agent. It read only labeller/prompt.md and wrote only labeller/labels.json, by its tool calls. Labels: 26 supported, 6 unsupported, 4 unsure. --apply-labels found 0 missing, 0 bad and 0 extra.
+- How the seam fields will be read, fixed now and gating nothing: a pass with k2_seam_readings below 2 means the planted readings did not split along the plant. It is then reported as a pass of the registered rule, but not as evidence that the instrument finds the planted seam."""
 stage_name = "validation"
 novel = true
 
