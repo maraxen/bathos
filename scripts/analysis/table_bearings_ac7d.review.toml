@@ -1,6 +1,6 @@
 schema_version = 2
 title = "Blind readers split a weaker planted seam, by the minimum margin"
-takeaway = "The neighbour splice gave three groups against two and one for its halves alone, so the test passed by one group."
+takeaway = "The neighbour splice gave three groups against two and one for each project read alone, so the test passed by one group."
 question = "Do blind readers split a record that splices two neighbouring-field projects with no results flow into more groups than either project alone?"
 refs = [
   { kind = "run", id = "3e6410b2", label = "scored run, outcome pass" },
