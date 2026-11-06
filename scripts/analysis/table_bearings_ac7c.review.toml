@@ -52,7 +52,7 @@ panel = "panel-2"
 heading = "Without any labels the readers already split the planted record"
 component_id = "vegalite.grouped_distribution"
 table = "outputs/bearings_ac7c/groups_by_reading.csv"
-caption = "Same readings with no link removed: the readers' own graphs. No reader drew a binding link across the planted seam, so the split is the readers', not the labeller's. Descriptive, chosen after the result [[ref:run:c456be51]]."
+caption = "Same readings with no link removed: the readers' own graphs. No reader's binding bridge crossed the planted seam, and each counted group cited one project, so the split is the readers'. Descriptive, chosen after the result [[ref:run:c456be51]]."
 refs = [{ kind = "run", id = "c456be51" }]
 
 [panel.payload]
