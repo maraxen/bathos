@@ -63,7 +63,11 @@ Readers, 261106, counts only, written before labelling and before the scored run
   - A watcher read stale first-launch error files for m2 and m3 and wrongly reported them as failing again. On that report, and at the owner's direction, the duplicate praxia registration in ~/.gemini (an asset-export MCP entry plus duplicate agent and skill files) was moved to a backup so that only the praxia plugin remains, and m2 and m3 were launched a second time while the staggered runs were still going, in the same folders with byte-identical prompts. Both gave complete readings.
   - Owner ruling 261106, made before the counted set was collected and with no reading opened: the first complete reading counts. The second m2 and m3 readings are kept aside (readings_unused/attempt2) and are not labelled or scored. Before the error was found they had been collected and passed the validator (counts only); their content was not read.
   - m4's disclosed redo ran once, after the ~/.gemini change, and gave a complete reading.
-  - Configuration per counted reading: m1, m2 and m3 reader2 started before the ~/.gemini change (m2 and m3 were still running across it); m4 reader2 started after it. Model and prompt did not change. The change removed duplicate tool registrations, and every counted reader logged 0 tool events."""
+  - Configuration per counted reading: m1, m2 and m3 reader2 started before the ~/.gemini change (m2 and m3 were still running across it); m4 reader2 started after it. Model and prompt did not change. The change removed duplicate tool registrations, and every counted reader logged 0 tool events.
+
+Labels, 261106, counts only, written before the scored run.
+- Bridges: 60 over the 12 counted readings. The labeller packet (413 KB, opaque reading ids) contains neither arm's identifiers. It contains the tracker's name 44 times (AC-7c's packet: 8) and one path to an unrelated third project, quoted from readings.
+- Labeller: one Opus agent, run once, no redo. Its instructions were to read only labeller/prompt.md and write only labeller/labels.json; the labeller folder holds only the expected files afterwards. Labels: 39 supported, 8 unsupported, 13 unsure. --apply-labels found 0 missing, 0 bad and 0 extra."""
 stage_name = "validation"
 novel = true
 
