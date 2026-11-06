@@ -25,6 +25,7 @@ import os
 import re
 import statistics
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 import replay_bearings_ac7b as ac7b
@@ -73,18 +74,23 @@ def git_blob_sha(data: bytes) -> str:
     return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()  # noqa: S324 -- git's object id, not security
 
 
-def _scrub_value(v: object) -> object:
+def _scrub_value(v: object, fn: Callable[[str], str] = scrub) -> object:
     if isinstance(v, str):
-        return scrub(v)
+        return fn(v)
     if isinstance(v, list):
-        return [_scrub_value(x) for x in v]
+        return [_scrub_value(x, fn) for x in v]
     if isinstance(v, dict):
-        return {k: _scrub_value(x) for k, x in v.items()}
+        return {k: _scrub_value(x, fn) for k, x in v.items()}
     return v
 
 
-def merge(sources: list[Path], out: Path, *, since: str, until: str, refs: list[str]) -> str:
-    """Merge built source packets into one neutral packet at ``out``; return its hash. Refuses path collisions."""
+def merge(
+    sources: list[Path], out: Path, *, since: str, until: str, refs: list[str], scrub_fn: Callable[[str], str] = scrub
+) -> str:
+    """Merge built source packets into one neutral packet at ``out``; return its hash. Refuses path collisions.
+
+    ``scrub_fn`` neutralises every path and text; it defaults to AC-7c's scrub (AC-7d passes its own).
+    """
     docs: dict[str, bytes] = {}
     sidecars: dict[tuple[str, str], bytes] = {}
     side_owner: dict[str, tuple[int, str]] = {}  # new sidecar path -> (source index, old path)
@@ -96,17 +102,17 @@ def merge(sources: list[Path], out: Path, *, since: str, until: str, refs: list[
         index = json.loads((reader / "index.json").read_text(encoding="utf-8"))
         new_sha: dict[tuple[str, str], str] = {}  # (old path, sha256 of old bytes) -> sha256 of scrubbed bytes
         for d in index["docs"]:
-            path = scrub(d["path"])
+            path = scrub_fn(d["path"])
             if path in docs:
                 raise ValueError(f"doc path collision after merge: {path}")
-            docs[path] = scrub((reader / "docs" / d["path"]).read_text(encoding="utf-8")).encode("utf-8")
+            docs[path] = scrub_fn((reader / "docs" / d["path"]).read_text(encoding="utf-8")).encode("utf-8")
         for s in index["sidecars"]:
-            path = scrub(s["path"])
+            path = scrub_fn(s["path"])
             # One source may hold several blobs of one path; two sources, or two paths, may not share one.
             if side_owner.setdefault(path, (i, s["path"])) != (i, s["path"]):
                 raise ValueError(f"sidecar path collision after merge: {path}")
             old = (reader / "sidecars" / s["blob_sha"] / s["path"]).read_bytes()
-            data = scrub(old.decode("utf-8")).encode("utf-8")
+            data = scrub_fn(old.decode("utf-8")).encode("utf-8")
             sidecars[(path, git_blob_sha(data))] = data
             new_sha[(s["path"], hashlib.sha256(old).hexdigest())] = hashlib.sha256(data).hexdigest()
         for line in (reader / "runs.jsonl").read_text(encoding="utf-8").split("\n"):
@@ -114,14 +120,14 @@ def merge(sources: list[Path], out: Path, *, since: str, until: str, refs: list[
                 continue
             rec = json.loads(line)
             key = (rec.get("sidecar_path"), rec.get("sidecar_sha256"))
-            rec = _scrub_value(rec)
+            rec = _scrub_value(rec, scrub_fn)
             if key in new_sha:  # keep the run's hash consistent with the scrubbed sidecar it names
                 rec["sidecar_sha256"] = new_sha[key]
             runs.append(rec)
             members[f"run:{rec['id']}"] = i
         for line in (reader / "git_log.jsonl").read_text(encoding="utf-8").split("\n"):
             if line:
-                commits.append(_scrub_value(json.loads(line)))
+                commits.append(_scrub_value(json.loads(line), scrub_fn))
                 members[f"git:{commits[-1]['sha']}"] = i
     if len({r["id"] for r in runs}) != len(runs) or len({c["sha"] for c in commits}) != len(commits):
         raise ValueError("run id or commit sha collision after merge")

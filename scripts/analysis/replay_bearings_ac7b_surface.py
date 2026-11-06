@@ -341,14 +341,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("build", "agy", "collect"))
     parser.add_argument("--work-dir", type=Path, required=True)
-    parser.add_argument("--study", choices=("ac7b", "ac7c"), default="ac7b")
+    parser.add_argument("--study", choices=("ac7b", "ac7c", "ac7d"), default="ac7b")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    if args.study == "ac7c":
-        import replay_bearings_ac7c
+    if args.study != "ac7b":
+        import importlib
 
         global ARMS, STUDY
-        ARMS, STUDY = replay_bearings_ac7c.ARMS, "ac7c"
+        ARMS, STUDY = importlib.import_module(f"replay_bearings_{args.study}").ARMS, args.study
     {"build": build, "agy": run_agy, "collect": collect}[args.command](args.work_dir.resolve())
 
 

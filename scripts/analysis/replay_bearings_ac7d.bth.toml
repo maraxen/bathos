@@ -1,0 +1,122 @@
+[experiment]
+hypothesis = """The blind reader plus AC-7b's drift-group scorer can see a planted split between two projects in NEIGHBOURING fields. A packet that splices two protein molecular-dynamics analysis projects that pass no results to each other scores at least 2 drift groups, and at least 1 more than either project read alone (spec 261104, AC-7d).
+
+Why this exists. AC-7c (run 2032d774) passed: two projects in unrelated fields (a free-energy engine and a sequence-alignment toolkit), spliced and scrubbed, read as 2 groups in every reading, against 1 for each alone. That was a strong, cross-field plant. colliculix, the known drifter, read as 1 group in AC-7b (run b85be024). AC-7d asks whether the instrument also sees a weaker, within-field split. A pass means colliculix's drift does not show as disconnected effort; a fail means the group count sees only strong splits and cannot rule on colliculix. Synthetic planted-structure work reports an undetectable regime for weak plants (Shi et al. 2019).
+
+Design, chosen by the owner 261106 through AskUserQuestion before anything was built.
+- Next step: a graded-plant test (owner).
+- Pair: sweetprots (molecular dynamics and conformational analysis of a sweet-taste receptor) and nanobody (molecular dynamics and conformational-entropy analysis of binder-target complexes). Checked 261106: neither uses the other's results. nanobody borrows sweetprots' frame-selection recipe and a launch script (shares, method), and sweetprots' storage notes list a shared raw-data folder named nanobody_trajs (shares, data). Shares links never bind. In the packets, only nanobody's sidecars name sweetprots (8 mentions); sweetprots' packet never names nanobody.
+- Size fix (owner): a shorter planted window, because both projects did most of their work between 2026-09-29 and 2026-10-09, so AC-7c's 14-day halves would give about 310 items and 1.07 MB.
+- Neutralisation (owner, after a correction): identifiers only. Repo paths, project slugs, the nanobody_trajs folder name and every "sweetprots" become "proj" (scrub_ids). The word "nanobody" stays: it is the subject of one project, so it is domain vocabulary, and AC-7c kept domain vocabulary. It hints at which half is which, as real drift would. The leak check covers identifier forms only.
+- Cross-references: scrubbed and disclosed (owner).
+- Threshold (owner): as AC-7c, plus the anchor rule below.
+- Labeller: one Opus agent, as AC-7b and AC-7c.
+
+Arms. Opaque ids, because a reader can see its folder name. Refs are the last commit before each window ends.
+- m1, size control: nanobody alone, 2026-09-21 to 2026-10-19 (-04:00), ref 7decc6d6.
+- m2, positive anchor: AC-7c's planted splice (isochore + alynxr), rebuilt by AC-7c's own code with AC-7c's scrub. Its packet must hash to 8170941186c0 (AC-7c's k2). Fresh readers.
+- m3, control: sweetprots alone, 2026-09-21 to 2026-10-19, ref d7ceea84.
+- m4, neighbour splice: sweetprots + nanobody, 2026-09-29T00:00 to 2026-10-02T18:00 (-04:00), same refs.
+
+Packets, built 261106 before any reader (counts only; rebuilt with equal hashes):
+- m1 4ae67fc237d9: 0 docs, 86 sidecars, 123 runs, 11 commits; 220 items, 857,965 B.
+- m2 8170941186c0: 5 docs, 16 sidecars, 20 runs, 51 commits; 92 items, 197,559 B (equals AC-7c k2).
+- m3 fd53faefcc9b: 12 docs, 37 sidecars, 71 runs, 1 commit; 121 items, 374,717 B.
+- m4 80cfb7cd9f09: 12 docs, 72 sidecars, 113 runs, 5 commits; 202 items, 857,005 B.
+- 0 leaked identifiers in each.
+
+Size match, registered as in AC-7c against m1: the planted arm's items are within 15% of m1's, and its bytes are no more than m1's. The window 2026-09-29T00:00 to 2026-10-02T18:00 was FITTED to this rule from counts (probe 261106, 10 candidate windows, no reading content seen). The byte margin is about 1 KB.
+
+Positive anchor (owner): the anchor's median must be at least 2, or the run is invalid. Its controls are AC-7c's k1 and k3 (both scored 1) and are not rerun.
+
+Readers, as in AC-7c: reader1 and reader3 on Cursor via praxia surface_dispatch (completion role, power tier, grok-4.7-high), reader2 on Antigravity run directly on stdin (gemini-4-argon-high; replay_bearings_ac7b_surface.py agy --study ac7d; praxia debt 3298). The registered extraction rule (recover_result) applies to every reader. Log events are counted for containment. A reading that fails extraction or validation gets one disclosed redo.
+
+Pilot, registered because m1 and m4 prompts are about 860 KB, about 1.5 times the largest prompt a reader has handled (580 KB), and neither model's context limit has been verified: one Cursor reader on m1 runs first. If its reading is valid it is m1/reader1 and the other 11 run. If it fails on size (truncation, context error, or an invalid reading caused by length), the run stops and the owner decides before any other reader runs.
+
+Labelling and scoring, as AC-7c, reused unchanged: bridges listed mechanically; one fresh Opus labeller works from labeller/prompt.md alone (opaque ids, shuffled with seed 261107, quoted evidence); strict groups remove bridges labelled unsupported or unsure; each arm's figure is the median over its 3 readers. Labeller stop rule: if the labeller is stopped by a safety classifier or returns an invalid set, it gets one disclosed redo; after that the owner decides between labelling the rest themself and a non-Claude labeller.
+
+Synthetic controls, which must pass before any score is read (--controls-only passes at commit): the AC-7, AC-7b and AC-7c controls; AC-7c's merge and seam controls; and AC-7d scrub controls. The scrub replaces repo paths, slugs, the data folder and "sweetprots" while leaving "nanobody"/"nanobodies" as words; the leak check fires on unscrubbed identifiers and not on the word; cross-seam counting counts parallel cross links that are not bridges. Checked 261106 against three broken versions (over-scrub of the word, no scrub, cross links counted from bridges only): each fails. AC-7c's code path was given an optional scrub argument; its controls still pass and its three packet hashes are unchanged.
+
+Descriptive fields, which gate nothing (for m4 and m2):
+- seam_readings and seam_purity_mean, as in AC-7c.
+- cross_seam_links: every feeds or serves link whose two ends draw their run and commit citations mostly from different sources, not only bridges. cross_seam_bridges and cross_seam_bridges_supported: how many of those were bridges, and how many the labeller supported.
+- halves_joined_readings: readings where a cross-seam binding link survives the strict removal.
+- groups_no_labels_median per arm.
+How a fail will be read, fixed now: if the halves are joined by cross-seam binding links that cite the shared recipe, launch script or data folder, the readers bound the halves on shared method (a reader error the labeller did not catch). If they are not joined and still score 1, the weaker split did not register.
+
+Disclosures.
+- Plant strength differs in window length as well as field: the neighbour halves cover about 3.75 days, the anchor's 14 + 14.
+- Only sweetprots contributes docs (12, dated June to August, unwindowed by the builder). sweetprots' half is runs only (no commits in the window).
+- The author knows which arm is planted and fitted the window from counts.
+- Three readers per arm show consistency, not a rate. Two model families, one prompt.
+
+Protocol. (1) Done 261106: design settled by the owner; scrub, merge, scorer and controls committed; packets built (counts above). This sidecar is committed before any reader runs. (2) Pilot reader on m1, then the other 11. (3) List bridges, labeller packet, label. (4) bth run the scorer. The result is reported either way."""
+stage_name = "validation"
+novel = true
+
+[outcomes.instrument_broken]
+condition = "NOT controls_ok OR leak_hits > 0 OR packet_hash_mismatches > 0 OR NOT anchor_hash_ok OR reader_audit_violations > 0 OR rejected_readings > 0 OR n_readings <> 12 OR n_unlabelled > 0 OR NOT size_matched OR m2_groups_median < 2"
+decision = "The run is invalid: report it, cite no number from it, fix the cause, and pre-register a new run."
+reasoning = "As in AC-7c, plus the anchor: if the strong splice no longer reads as at least 2 groups, this run cannot say anything about the weaker one."
+
+[outcomes.pass]
+condition = "m4_groups_median >= 2 AND m4_groups_median >= greatest(m1_groups_median, m3_groups_median) + 1"
+decision = "The instrument sees a within-field split, so colliculix's drift does not show as disconnected effort in its record. With the owner, redefine the drift signal for Bearings before slice 3 is built on any signal."
+reasoning = "Owner thresholds as in AC-7c."
+
+[outcomes.fail]
+condition = "NOT (m4_groups_median >= 2 AND m4_groups_median >= greatest(m1_groups_median, m3_groups_median) + 1)"
+decision = "The group count sees only strong, cross-field splits, so it cannot rule on colliculix. Re-open the drift signal with the owner; read the cross-seam fields first to tell reader binding on shared method from an invisible split."
+reasoning = "If two neighbouring projects in one packet do not separate from each alone while the strong anchor does, the signal's sensitivity ends between them."
+is_residual = true
+
+[result_schema]
+controls_ok = "bool"
+leak_hits = "int"
+packet_hash_mismatches = "int"
+anchor_hash_ok = "bool"
+reader_audit_violations = "int"
+rejected_readings = "int"
+n_readings = "int"
+n_unlabelled = "int"
+size_matched = "bool"
+m1_items = "int"
+m2_items = "int"
+m3_items = "int"
+m4_items = "int"
+m1_bytes = "int"
+m2_bytes = "int"
+m3_bytes = "int"
+m4_bytes = "int"
+m1_groups_median = "float"
+m2_groups_median = "float"
+m3_groups_median = "float"
+m4_groups_median = "float"
+m1_groups_min = "int"
+m2_groups_min = "int"
+m3_groups_min = "int"
+m4_groups_min = "int"
+m1_groups_unsure_supported_median = "float"
+m2_groups_unsure_supported_median = "float"
+m3_groups_unsure_supported_median = "float"
+m4_groups_unsure_supported_median = "float"
+m1_groups_no_labels_median = "float"
+m2_groups_no_labels_median = "float"
+m3_groups_no_labels_median = "float"
+m4_groups_no_labels_median = "float"
+m1_supported_bridge_frac = "float"
+m2_supported_bridge_frac = "float"
+m3_supported_bridge_frac = "float"
+m4_supported_bridge_frac = "float"
+m2_seam_readings = "int"
+m2_seam_purity_mean = "float"
+m2_cross_seam_links = "int"
+m2_cross_seam_bridges = "int"
+m2_cross_seam_bridges_supported = "int"
+m2_halves_joined_readings = "int"
+m4_seam_readings = "int"
+m4_seam_purity_mean = "float"
+m4_cross_seam_links = "int"
+m4_cross_seam_bridges = "int"
+m4_cross_seam_bridges_supported = "int"
+m4_halves_joined_readings = "int"
