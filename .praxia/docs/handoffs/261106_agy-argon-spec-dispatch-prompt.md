@@ -12,8 +12,9 @@ Paste everything inside the fence into agy.
 /goal /teamwork /boost
 
 task_id: 261106_archive-supersession
-Repo: /home/marielle/projects/bathos (work in a new git worktree off origin/main, branch
-spec/261106_result-validity). Read-only research repos: /home/marielle/projects/asr,
+Repo: /home/marielle/projects/bathos (work in a new git worktree branched from
+origin/wt/261106_archive-supersession, which carries the design doc; new branch
+spec/261106_result-validity; PR base: main). Read-only research repos: /home/marielle/projects/asr,
 /home/marielle/projects/tev_design. Do NOT modify asr or tev_design, and do NOT write to ~/.bth.
 
 GOAL
