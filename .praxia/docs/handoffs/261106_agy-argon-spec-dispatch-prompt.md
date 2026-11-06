@@ -19,7 +19,11 @@ spec/261106_result-validity; PR base: main). Read-only research repos: /home/mar
 
 GOAL
 Turn the approved design into an implementable, adversarially-reviewed specification for bathos.
-Input design (owner-approved decisions, read it first and treat its section-4 decisions as fixed):
+Input design (read it first). Only decisions marked "(owner: ...)" are fixed. D10 and anything
+marked "designer's call" or "designer's guess" are open to challenge; flag any you would reverse
+as an owner question rather than silently changing it. Highest-stakes designer calls to attack:
+shadowing `runs` as a current-only view in run_sql (changes every existing saved query, incl.
+scripts in asr/tev_design) and the estimand_change-as-comparability-marker semantics.
   .praxia/docs/specs/261106_result-validity-supersession-archive-design.md
 The problem: results produced by defective or since-changed instruments (chiefly the aminx MPNN
 wrapper) keep resurfacing as current in asr and tev_design, agents over-trust old readings, and
@@ -73,8 +77,11 @@ CONSTRAINTS
   modules. Ledgers append-only with latest-wins folds; SLURM-safe atomic writes.
 - Do not write product code in this dispatch. Specs, research and audit docs only.
 - Do not run the whole test suite locally (it is blocked and kills the machine).
-- Owner decisions in the design's section 4 are fixed; if research argues against one, record
-  it as an "owner question" in the spec, do not silently change it.
+- Decisions marked "(owner: ...)" are fixed; if research argues against one, record it as an
+  "owner question" in the spec, do not silently change it. Designer's calls may be revised with
+  a stated rationale, listed in the spec's change log.
+- The design's section-3 counts (E9, E10, E11) are spike numbers; re-derive any you cite with a
+  shown command.
 - Every count you cite from asr/tev_design comes from a command you show, not an estimate.
 
 DELIVERABLES (commit each on the branch; push; open a DRAFT PR titled

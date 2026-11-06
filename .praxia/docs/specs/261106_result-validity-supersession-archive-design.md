@@ -1,7 +1,7 @@
 ---
 title: "Result validity, supersession and archive: stop stale readings reaching agents"
 description: "Design (pre-spec) for task 261106_archive-supersession: instrument defect ranges with version backfill from uv.lock, hidden-by-default reads/cites for void/affected/superseded/archived results, evidence tiers incl. spike, distance-from-present annotations, a lightweight findings register with supersession edges, session-start current-beliefs view, and a batch archive sweep with a self-contained doc store that can be pointed at .praxia/docs. Phased: P1 stop the leak, P2 findings + tiers, P3 archive sweep."
-status: DESIGN_APPROVED_PENDING_SPEC
+status: DRAFT_PENDING_OWNER_REVIEW
 task_id: 261106_archive-supersession
 authors:
   - "Claude Opus 5.5 (brainstorming session, decisions by the owner)"
@@ -87,6 +87,9 @@ far that evidence is from the present; the historical ledger is intact and one f
 | E19 | `dependency_provenance` is null because capture is **opt-in**: `runner.py:1205,1271` calls `capture_dependency_provenance(tracked_packages, …)`, and `resolve_tracked_packages` (`dependency_provenance.py:100`) unions `track_packages` from sidecar `[provenance]`, `.bth.toml` and `[tool.bathos]`; neither asr nor tev_design sets `track_packages` anywhere | verified |
 
 The spec phase must re-verify every *unverified* row by reading code before building on it.
+Counts in E9, E10 and E11 come from throwaway inline probes (jq over `.bth/log/*.jsonl`, a
+25-pair `git show … | sha256sum` sample); they are spike numbers and must be re-derived under a
+tracked script + sidecar before any spec or deliverable cites them.
 
 ## 4. Decisions (made by the owner unless marked "builder's call" or "designer's guess")
 
