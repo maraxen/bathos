@@ -44,3 +44,26 @@ instrument still separates them, or whether the split falls below what it can de
   does not transfer to a split within one project (colliculix).
 - The analogy is loose: readers are not a block-model inference method, and the "contrast" here is
   vocabulary and results flow, not edge densities. No threshold from this literature is applied.
+
+## Addendum for AC-7e (written 261106, after the AC-7e packets were built and the readers launched, before any
+## reading was collected, labelled or scored)
+
+AC-7e cuts one project's own record into two aims. Two points from the same literature apply, and no new
+source is used.
+
+- **Ground truth is the weak point, not the detector.** The detectability results above assume a planted
+  partition whose true groups are known. In AC-7c and AC-7d the groups were known by construction (different
+  projects). In AC-7e they are known only by the owner's statement that the lagoon and library aims pass no
+  results, which sits uneasily with the owner's earlier review ("sub-goals that interact") and with tev_design's
+  use as a connected-aims negative in AC-7b. Fortunato and Hric's point that grouping is ill-defined without a
+  stated model of what a group is applies directly: here the model is "results flow binds", and whether it holds
+  between these two aims is an empirical question the readings can only partly answer.
+- **A within-project split sits nearer the detection limit.** The two halves share a runner, tools and
+  vocabulary, so the contrast between them is lower than in AC-7d. A fail is therefore expected under the
+  project's prior, and the registered fail reading (supported cross-seam links, shared-method links, or an
+  invisible split) is how the sidecar separates "the aims are linked" from "the instrument is blind".
+- The pass rule still rewards a split. A pass would show the instrument separates these two aims in this record;
+  it would not show that colliculix's drift, a different within-project mechanism, would register.
+
+Fixed now, and gating nothing: the numbers will be reported either way, and the sidecar's reading rules decide
+what a fail means.
