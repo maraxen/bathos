@@ -1,0 +1,674 @@
+"""Acceptance tests for Project Charter, Confirmation, and Purpose Ledger (spec 261104 slice 1).
+
+Covers:
+- AC-1: Human-only hash-bound confirmation, agent refusal, mandate immutability, MCP refusal.
+- AC-2: Pivot live-purpose completeness, state transition to retired, cheapest_next_test validation.
+- AC-3 (ext half): Preservation of arbitrary ext keys across parse, fold, and draft.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from bathos.charter import (
+    Charter,
+    Purpose,
+    charter_sha256,
+    confirm,
+    draft,
+    dump_charter,
+    parse_charter,
+    pivot,
+    status,
+)
+from bathos.cli_cyclopts import app
+from bathos.errors import (
+    CharterInvalidError,
+    CharterLedgerUnavailableError,
+    CharterMandateChangedError,
+    CharterPivotIncompleteError,
+    CharterUnauthorizedError,
+)
+from bathos.index import connect_read
+from bathos.mcp import charter_confirm
+from bathos.stepback.escalation import AGENT_ENV_VARS
+from tests._cyclopts_runner import CyclopticRunner
+
+runner = CyclopticRunner()
+
+
+@pytest.fixture
+def charter_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Set up isolated test catalog and project environment."""
+    home_dir = tmp_path / "home"
+    home_dir.mkdir(parents=True, exist_ok=True)
+    (home_dir / ".bth").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(home_dir))
+
+    from bathos.runlog.writer import reset_writers_for_test
+    reset_writers_for_test()
+
+    cat_dir = tmp_path / "catalog"
+    cat_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(cat_dir))
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+
+    proj_dir = tmp_path / "project"
+    bth_dir = proj_dir / ".bth"
+    bth_dir.mkdir(parents=True, exist_ok=True)
+
+    # .bth.toml
+    (proj_dir / ".bth.toml").write_text(
+        f'[project]\nslug = "charter_test"\nroot = "{proj_dir}"\nid = "12345678-1234-5678-1234-567812345678"\n'
+    )
+    monkeypatch.setenv("BTH_PROJECT_SLUG", "charter_test")
+    monkeypatch.setenv("BTH_WORKSPACE_ROOT", str(proj_dir))
+
+    # Chair token path in tmp_path with 0600 permissions
+    token_file = home_dir / ".bth" / "chair_token"
+    token_file.write_text("secret_chair_token_xyz\n")
+    token_file.chmod(0o600)
+    monkeypatch.setenv("BTH_CHAIR_TOKEN_PATH", str(token_file))
+
+    # Helper to create initial charter
+    def write_charter(mandate: str = "Explore multiscale protein design", purposes: dict | None = None) -> Path:
+        if purposes is None:
+            purposes = {
+                "P1": Purpose(id="P1", text="Validate binding affinity", state="live"),
+                "P2": Purpose(id="P2", text="Verify thermostability", state="live"),
+            }
+        ch = Charter(mandate=mandate, purposes=purposes)
+        charter_file = bth_dir / "charter.toml"
+        charter_file.write_text(dump_charter(ch), encoding="utf-8")
+        return charter_file
+
+    yield {
+        "catalog_dir": cat_dir,
+        "project_dir": proj_dir,
+        "token_file": token_file,
+        "write_charter": write_charter,
+    }
+    reset_writers_for_test()
+
+
+def _clear_agent_vars(monkeypatch: pytest.MonkeyPatch):
+    for var in AGENT_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+
+
+def _count_confirmed_events(cat_dir: Path) -> int:
+    con = connect_read(cat_dir)
+    try:
+        row = con.execute("SELECT count(*) FROM charter_confirmations").fetchone()
+        return row[0] if row else 0
+    finally:
+        con.close()
+
+
+def _count_pivot_events(cat_dir: Path) -> int:
+    con = connect_read(cat_dir)
+    try:
+        row = con.execute("SELECT count(*) FROM charter_pivots").fetchone()
+        return row[0] if row else 0
+    finally:
+        con.close()
+
+
+# ── AC-1 Tests ───────────────────────────────────────────────────────────────
+
+
+def test_ac1_confirm_refused_under_agent_without_token(charter_env, monkeypatch: pytest.MonkeyPatch):
+    """bth charter confirm with CLAUDE_AGENT set and no chair token exits non-zero and appends no event."""
+    charter_env["write_charter"]()
+    proj = charter_env["project_dir"]
+    cat = charter_env["catalog_dir"]
+
+    # Autonomous agent environment without token
+    monkeypatch.setenv("CLAUDE_AGENT", "1")
+    monkeypatch.setenv("BTH_CHAIR_TOKEN_PATH", str(charter_env["project_dir"] / "nonexistent_token"))
+
+    # Direct API raises CharterUnauthorizedError
+    with pytest.raises(CharterUnauthorizedError):
+        confirm(proj, chair_token=None, interactive_tty=False, catalog_dir=cat)
+
+    # CLI exits non-zero
+    res = runner.invoke(app, ["charter", "confirm", "--project-root", str(proj), "--catalog-dir", str(cat)])
+    assert res.exit_code != 0
+    assert _count_confirmed_events(cat) == 0
+
+
+def test_ac1_confirm_success_with_chair_token(charter_env, monkeypatch: pytest.MonkeyPatch):
+    """With agent vars cleared and valid 0600 chair token, appends one event that folds into charter_confirmations."""
+    charter_file = charter_env["write_charter"]()
+    proj = charter_env["project_dir"]
+    cat = charter_env["catalog_dir"]
+
+    _clear_agent_vars(monkeypatch)
+
+    res = confirm(proj, chair_token="secret_chair_token_xyz", interactive_tty=False, catalog_dir=cat)
+    assert res["ok"] is True
+    assert res["auth_mode"] == "token"
+    assert _count_confirmed_events(cat) == 1
+
+    # Status reports confirmed
+    st = status(proj, catalog_dir=cat)
+    assert st["state"] == "confirmed"
+    assert st["current_sha256"] == charter_sha256(charter_file)
+    assert st["last_confirmed_sha256"] == st["current_sha256"]
+    assert st["confirmed_at"] is not None
+
+
+def test_ac1_confirm_success_with_tty(charter_env, monkeypatch: pytest.MonkeyPatch):
+    """With agent vars cleared and interactive_tty=True, confirmation succeeds with auth_mode='tty'."""
+    charter_env["write_charter"]()
+    proj = charter_env["project_dir"]
+    cat = charter_env["catalog_dir"]
+
+    _clear_agent_vars(monkeypatch)
+    # Point away from token file to ensure tty was used
+    monkeypatch.setenv("BTH_CHAIR_TOKEN_PATH", str(proj / "no_token"))
+
+    res = confirm(proj, interactive_tty=True, catalog_dir=cat)
+    assert res["ok"] is True
+    assert res["auth_mode"] == "tty"
+    assert _count_confirmed_events(cat) == 1
+
+
+def test_ac1_status_unconfirmed_after_file_edit(charter_env, monkeypatch: pytest.MonkeyPatch):
+    """After editing .bth/charter.toml, bth charter status reports unconfirmed and names last confirmed sha256."""
+    charter_file = charter_env["write_charter"]()
+    proj = charter_env["project_dir"]
+    cat = charter_env["catalog_dir"]
+
+    _clear_agent_vars(monkeypatch)
+    confirm(proj, chair_token="secret_chair_token_xyz", interactive_tty=False, catalog_dir=cat)
+    pre_edit_sha = charter_sha256(charter_file)
+
+    # Edit file
+    charter_file.write_text(charter_file.read_text(encoding="utf-8") + "\n# comment\n", encoding="utf-8")
+    post_edit_sha = charter_sha256(charter_file)
+    assert pre_edit_sha != post_edit_sha
+
+    st = status(proj, catalog_dir=cat)
+    assert st["state"] == "unconfirmed"
+    assert st["current_sha256"] == post_edit_sha
+    assert st["last_confirmed_sha256"] == pre_edit_sha
+
+    # Test via CLI status command
+    cli_res = runner.invoke(app, ["charter", "status", "--project-root", str(proj), "--catalog-dir", str(cat)])
+    assert cli_res.exit_code == 0
+    assert "State:                 unconfirmed" in cli_res.output
+    assert pre_edit_sha in cli_res.output
+
+
+def test_ac1_mandate_changed_refused_without_amend_flag(charter_env, monkeypatch: pytest.MonkeyPatch):
+    """A changed mandate is refused without --amend-mandate; with the flag it records amended_mandate_from."""
+    charter_env["write_charter"](mandate="Initial Mandate Text")
+    proj = charter_env["project_dir"]
+    cat = charter_env["catalog_dir"]
+
+    _clear_agent_vars(monkeypatch)
+    confirm(proj, chair_token="secret_chair_token_xyz", interactive_tty=False, catalog_dir=cat)
+    orig_mandate_sha = hashlib_sha("Initial Mandate Text")
+
+    # Change mandate text
+    charter_env["write_charter"](mandate="Changed Mandate Text")
+
+    # Refused without --amend-mandate
+    with pytest.raises(CharterMandateChangedError):
+        confirm(proj, amend_mandate=False, chair_token="secret_chair_token_xyz", interactive_tty=False, catalog_dir=cat)
+
+    cli_res = runner.invoke(app, ["charter", "confirm", "--project-root", str(proj), "--chair-token", "secret_chair_token_xyz", "--catalog-dir", str(cat)])
+    assert cli_res.exit_code != 0
+
+    # Allowed with amend_mandate=True
+    res = confirm(proj, amend_mandate=True, chair_token="secret_chair_token_xyz", interactive_tty=False, catalog_dir=cat)
+    assert res["ok"] is True
+    assert res["amended_mandate_from"] == orig_mandate_sha
+    assert _count_confirmed_events(cat) == 2
+
+
+@pytest.mark.anyio
+async def test_ac1_mcp_confirm_always_refuses():
+    """MCP charter_confirm always unconditionally refuses."""
+    res = await charter_confirm(project_root="/tmp/any")
+    assert res["ok"] is False
+    assert res["error_code"] == "charter_agent_confirm_refused"
+    assert "strictly human-only" in res["error"]
+
+
+def hashlib_sha(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+# ── AC-2 Tests ───────────────────────────────────────────────────────────────
+
+
+def test_ac2_pivot_incomplete_refused(charter_env):
+    """With live purposes P1 and P2, pivot naming only P1 is refused with CHARTER_PIVOT_INCOMPLETE listing P2."""
+    charter_file = charter_env["write_charter"]()
+    content_before = charter_file.read_text(encoding="utf-8")
+    proj = charter_env["project_dir"]
+    cat = charter_env["catalog_dir"]
+
+    # Pivot naming only P1
+    with pytest.raises(CharterPivotIncompleteError) as exc_info:
+        pivot(
+            proj,
+            reason="Pivoting direction",
+            dispositions={"P1": "reaffirm"},
+            cheapest_next_test="none_pending",
+            catalog_dir=cat,
+        )
+    assert "P2" in str(exc_info.value)
+
+    # CLI refusal
+    res = runner.invoke(
+        app,
+        [
+            "charter",
+            "pivot",
+            "--project-root",
+            str(proj),
+            "--reason",
+            "Pivoting direction",
+            "--reaffirm",
+            "P1",
+            "--cheapest-next-test",
+            "none_pending",
+            "--catalog-dir",
+            str(cat),
+        ],
+    )
+    assert res.exit_code != 0
+    assert "P2" in res.output
+
+    # File must be untouched and no event appended
+    assert charter_file.read_text(encoding="utf-8") == content_before
+    assert _count_pivot_events(cat) == 0
+
+
+def test_ac2_pivot_success_reaffirm_and_retire(charter_env, monkeypatch: pytest.MonkeyPatch):
+    """Naming both live purposes with valid cheapest_next_test appends 1 event, retires purpose, leaves charter unconfirmed."""
+    charter_file = charter_env["write_charter"]()
+    proj = charter_env["project_dir"]
+    cat = charter_env["catalog_dir"]
+
+    # Confirm initially
+    _clear_agent_vars(monkeypatch)
+    confirm(proj, chair_token="secret_chair_token_xyz", interactive_tty=False, catalog_dir=cat)
+    assert status(proj, catalog_dir=cat)["state"] == "confirmed"
+
+    # Pivot reaffirming P1 and retiring P2
+    res = pivot(
+        proj,
+        reason="P2 hypothesis disproved by run_001",
+        dispositions={"P1": "reaffirm", "P2": "retire"},
+        retired_reasons={"P2": "Binding failed in run_001"},
+        cheapest_next_test="executed:run_001",
+        catalog_dir=cat,
+    )
+    assert res["ok"] is True
+    assert _count_pivot_events(cat) == 1
+
+    # Check updated file
+    ch = parse_charter(charter_file)
+    assert ch.purposes["P1"].state == "live"
+    assert ch.purposes["P2"].state == "retired"
+    assert ch.purposes["P2"].retired_reason == "Binding failed in run_001"
+
+    # Status is now unconfirmed
+    st = status(proj, catalog_dir=cat)
+    assert st["state"] == "unconfirmed"
+
+
+def test_ac2_pivot_cheapest_next_test_validation(charter_env):
+    """cheapest_next_test must match executed:<run>, cancelled:<reason>, or none_pending."""
+    charter_env["write_charter"]()
+    proj = charter_env["project_dir"]
+    cat = charter_env["catalog_dir"]
+
+    for bad_cnt in ("executed:", "cancelled:", "invalid_format", "", "executed"):
+        with pytest.raises(CharterInvalidError):
+            pivot(
+                proj,
+                reason="Pivot test",
+                dispositions={"P1": "reaffirm", "P2": "reaffirm"},
+                cheapest_next_test=bad_cnt,
+                catalog_dir=cat,
+            )
+
+    for good_cnt in ("executed:run_42", "cancelled:budget_cut", "none_pending"):
+        res = pivot(
+            proj,
+            reason="Pivot test",
+            dispositions={"P1": "reaffirm", "P2": "reaffirm"},
+            cheapest_next_test=good_cnt,
+            catalog_dir=cat,
+        )
+        assert res["ok"] is True
+
+
+# ── AC-3 (ext half) Tests ───────────────────────────────────────────────────
+
+
+def test_ac3_ext_canonical_json_preserved(charter_env, monkeypatch: pytest.MonkeyPatch):
+    """Arbitrary [purpose.p1.ext] keys give equal canonical JSON across parse, fold, and draft."""
+    proj = charter_env["project_dir"]
+    cat = charter_env["catalog_dir"]
+
+    ext_arbitrary = {
+        "bool_val": True,
+        "float_val": 3.14159,
+        "int_val": 42,
+        "list_val": [1, "two", 3.0],
+        "nested_table": {
+            "inner_int": 99,
+            "inner_list": [True, False],
+            "sub_table": {"alpha": "val"},
+        },
+        "unicode_str": "Test with \u00e9, \u03c0, and \u2603",
+    }
+
+    purposes = {
+        "P1": Purpose(id="P1", text="Purpose with complex ext", state="live", ext=ext_arbitrary),
+    }
+
+    charter_file = charter_env["write_charter"](mandate="Ext preservation mandate", purposes=purposes)
+
+    # 1. Canonical JSON of parsed charter
+    parsed = parse_charter(charter_file)
+    p1_ext = parsed.purposes["P1"].ext
+    canonical_from_parse = json.dumps(p1_ext, sort_keys=True, separators=(",", ":"))
+
+    # 2. Confirm and check canonical JSON from folded charter_confirmations row
+    _clear_agent_vars(monkeypatch)
+    confirm(proj, chair_token="secret_chair_token_xyz", interactive_tty=False, catalog_dir=cat)
+
+    con = connect_read(cat)
+    try:
+        row = con.execute(
+            "SELECT purposes_json FROM charter_confirmations WHERE project = 'charter_test' ORDER BY ts DESC, eid DESC"
+        ).fetchone()
+        assert row is not None
+        folded_purposes = json.loads(row[0])
+        folded_p1_ext = folded_purposes["P1"]["ext"]
+        canonical_from_fold = json.dumps(folded_p1_ext, sort_keys=True, separators=(",", ":"))
+    finally:
+        con.close()
+
+    # 3. Draft output re-parsed
+    draft_file = draft(proj)
+    drafted = parse_charter(draft_file)
+    draft_p1_ext = drafted.purposes["P1"].ext
+    canonical_from_draft = json.dumps(draft_p1_ext, sort_keys=True, separators=(",", ":"))
+
+    # Assert equality of all three canonical JSON representations
+    assert canonical_from_parse == canonical_from_fold
+    assert canonical_from_fold == canonical_from_draft
+
+
+def test_draft_scaffold_when_no_charter_exists(tmp_path: Path):
+    """bth charter draft without an existing charter creates a scaffold at .bth/charter.draft.toml."""
+    empty_proj = tmp_path / "empty_project"
+    empty_proj.mkdir()
+    d_path = draft(empty_proj)
+    assert d_path.is_file()
+    assert d_path.name == "charter.draft.toml"
+    content = d_path.read_text(encoding="utf-8")
+    assert 'mandate = ""' in content
+    assert "# [purpose.example]" in content
+
+
+# ── Review fixes (reviewer dsp_68ff16dbb0efa3c8) ─────────────────────────────
+
+
+def test_ac1_agent_refused_even_at_a_tty(charter_env, monkeypatch: pytest.MonkeyPatch):
+    """An agent marker blocks confirmation even when stdin is a TTY, unless a valid token exists.
+
+    Without this test, deleting the agent check from require_human_chair leaves the
+    suite green, because every other refusal case also lacks a TTY.
+    """
+    charter_env["write_charter"]()
+    proj = charter_env["project_dir"]
+    cat = charter_env["catalog_dir"]
+    _clear_agent_vars(monkeypatch)
+    monkeypatch.setenv("CLAUDE_AGENT", "1")
+    monkeypatch.setenv("BTH_CHAIR_TOKEN_PATH", str(proj / "no_token"))
+
+    with pytest.raises(CharterUnauthorizedError):
+        confirm(proj, interactive_tty=True, catalog_dir=cat)
+    assert _count_confirmed_events(cat) == 0
+
+
+def test_ac1_agent_with_valid_token_succeeds(charter_env, monkeypatch: pytest.MonkeyPatch):
+    """The step-back rule: a valid chair token authorizes even under an agent marker."""
+    charter_env["write_charter"]()
+    proj = charter_env["project_dir"]
+    cat = charter_env["catalog_dir"]
+    _clear_agent_vars(monkeypatch)
+    monkeypatch.setenv("CLAUDE_AGENT", "1")
+
+    res = confirm(proj, chair_token="secret_chair_token_xyz", interactive_tty=False, catalog_dir=cat)
+    assert res["auth_mode"] == "token"
+    assert _count_confirmed_events(cat) == 1
+
+
+def _pivot_retiring_p2(proj: Path, cat: Path) -> dict:
+    return pivot(
+        proj,
+        reason="r",
+        dispositions={"P1": "reaffirm", "P2": "retire"},
+        retired_reasons={"P2": "superseded"},
+        cheapest_next_test="none_pending",
+        catalog_dir=cat,
+    )
+
+
+def test_confirm_and_pivot_refused_outside_log_mode(charter_env, monkeypatch: pytest.MonkeyPatch):
+    """A non-log catalog could append but never fold, so status would lie. Both writers refuse."""
+    charter_file = charter_env["write_charter"]()
+    proj = charter_env["project_dir"]
+    cat = charter_env["catalog_dir"]
+    _clear_agent_vars(monkeypatch)
+    monkeypatch.delenv("BTH_LOG_MODE", raising=False)
+    before = charter_file.read_bytes()
+
+    with pytest.raises(CharterLedgerUnavailableError):
+        confirm(proj, chair_token="secret_chair_token_xyz", interactive_tty=False, catalog_dir=cat)
+    with pytest.raises(CharterLedgerUnavailableError):
+        _pivot_retiring_p2(proj, cat)
+    assert charter_file.read_bytes() == before
+    assert not list(charter_file.parent.glob(".charter.toml.pivot.tmp"))
+
+
+def test_failed_append_raises_and_leaves_charter_untouched(charter_env, monkeypatch: pytest.MonkeyPatch):
+    """If the event cannot be appended, confirm and pivot raise, and pivot does not rewrite the file."""
+    import bathos.charter as charter_mod
+    from bathos.runlog.writer import AppendOutcome
+
+    charter_file = charter_env["write_charter"]()
+    proj = charter_env["project_dir"]
+    cat = charter_env["catalog_dir"]
+    _clear_agent_vars(monkeypatch)
+    before = charter_file.read_bytes()
+
+    def _failing_emit(**_kwargs):
+        return AppendOutcome(
+            target="none",
+            envelope=None,
+            mirror_ok=False,
+            project_error=OSError("disk"),
+            fallback_error=OSError("disk"),
+        )
+
+    monkeypatch.setattr(charter_mod, "emit_event", _failing_emit)
+
+    with pytest.raises(CharterLedgerUnavailableError):
+        confirm(proj, chair_token="secret_chair_token_xyz", interactive_tty=False, catalog_dir=cat)
+    with pytest.raises(CharterLedgerUnavailableError):
+        _pivot_retiring_p2(proj, cat)
+    assert charter_file.read_bytes() == before
+    assert not list(charter_file.parent.glob(".charter.toml.pivot.tmp"))
+
+
+def test_reaffirm_only_pivot_leaves_a_confirmed_charter_confirmed(charter_env, monkeypatch: pytest.MonkeyPatch):
+    """Nothing in the file changed, so the result must not claim the charter became unconfirmed."""
+    charter_file = charter_env["write_charter"]()
+    proj = charter_env["project_dir"]
+    cat = charter_env["catalog_dir"]
+    _clear_agent_vars(monkeypatch)
+    confirm(proj, chair_token="secret_chair_token_xyz", interactive_tty=False, catalog_dir=cat)
+    before = charter_file.read_bytes()
+
+    res = pivot(
+        proj,
+        reason="r",
+        dispositions={"P1": "reaffirm", "P2": "reaffirm"},
+        cheapest_next_test="none_pending",
+        catalog_dir=cat,
+    )
+    assert charter_file.read_bytes() == before
+    assert res["state"] == "confirmed"
+    assert status(proj, catalog_dir=cat)["state"] == "confirmed"
+    assert _count_pivot_events(cat) == 1
+
+
+def test_pivot_handles_dotted_key_purposes(charter_env, monkeypatch: pytest.MonkeyPatch):
+    proj = charter_env["project_dir"]
+    cat = charter_env["catalog_dir"]
+    _clear_agent_vars(monkeypatch)
+    charter_file = proj / ".bth" / "charter.toml"
+    charter_file.write_text(
+        'mandate = "m"\npurpose.P1.text = "first purpose"\npurpose.P1.state = "live"\n'
+        'purpose.P2.text = "second purpose"\npurpose.P2.state = "live"\n',
+        encoding="utf-8",
+    )
+
+    _pivot_retiring_p2(proj, cat)
+    parsed = parse_charter(charter_file)
+    assert parsed.purposes["P2"].state == "retired"
+    assert parsed.purposes["P2"].retired_reason == "superseded"
+    assert parsed.purposes["P1"].state == "live"
+    assert _count_pivot_events(cat) == 1
+
+
+def test_pivot_refuses_a_shape_it_cannot_edit_and_changes_nothing(charter_env, monkeypatch: pytest.MonkeyPatch):
+    """tomlkit writes a broken file when editing inline-table purposes, so pivot must refuse them."""
+    proj = charter_env["project_dir"]
+    cat = charter_env["catalog_dir"]
+    _clear_agent_vars(monkeypatch)
+    charter_file = proj / ".bth" / "charter.toml"
+    charter_file.write_text(
+        'mandate = "m"\n[purpose]\nP1 = {text = "first purpose", state = "live"}\n'
+        'P2 = {text = "second purpose", state = "live"}\n',
+        encoding="utf-8",
+    )
+    before = charter_file.read_bytes()
+
+    with pytest.raises(CharterInvalidError):
+        _pivot_retiring_p2(proj, cat)
+    assert charter_file.read_bytes() == before
+    assert not list(charter_file.parent.glob(".charter.toml.pivot.tmp"))
+    assert _count_pivot_events(cat) == 0
+
+
+def test_pivot_preserves_comments_and_unknown_keys(charter_env, monkeypatch: pytest.MonkeyPatch):
+    """Pivot edits the owner's file in place: comments, uninterpreted keys and ext survive."""
+    proj = charter_env["project_dir"]
+    cat = charter_env["catalog_dir"]
+    _clear_agent_vars(monkeypatch)
+    charter_file = proj / ".bth" / "charter.toml"
+    charter_file.write_text(
+        "# Owner's note: keep this comment.\n"
+        'mandate = "Explore multiscale protein design"\n'
+        'owner_note = "uninterpreted top-level key"\n'
+        "\n"
+        "[purpose.P1]\n"
+        'text = "Validate binding affinity"\n'
+        'state = "live"  # inline comment\n'
+        'priority = "high"\n'
+        "\n"
+        "[purpose.P1.ext]\n"
+        "rival = 3\n"
+        "\n"
+        "[purpose.P2]\n"
+        'text = "Verify thermostability"\n'
+        'state = "live"\n',
+        encoding="utf-8",
+    )
+
+    res = _pivot_retiring_p2(proj, cat)
+    text = charter_file.read_text(encoding="utf-8")
+    assert "# Owner's note: keep this comment." in text
+    assert "# inline comment" in text
+    assert 'owner_note = "uninterpreted top-level key"' in text
+    assert 'priority = "high"' in text
+    parsed = parse_charter(charter_file)
+    assert parsed.purposes["P2"].state == "retired"
+    assert parsed.purposes["P2"].retired_reason == "superseded"
+    assert parsed.purposes["P1"].ext == {"rival": 3}
+    assert res["charter_sha256_after"] == charter_sha256(charter_file)
+    assert _count_pivot_events(cat) == 1
+
+
+def test_malformed_cheapest_next_test_changes_nothing(charter_env, monkeypatch: pytest.MonkeyPatch):
+    charter_file = charter_env["write_charter"]()
+    proj = charter_env["project_dir"]
+    cat = charter_env["catalog_dir"]
+    _clear_agent_vars(monkeypatch)
+    before = charter_file.read_bytes()
+    with pytest.raises(CharterInvalidError):
+        pivot(
+            proj,
+            reason="r",
+            dispositions={"P1": "reaffirm", "P2": "reaffirm"},
+            cheapest_next_test="maybe:later",
+            catalog_dir=cat,
+        )
+    assert charter_file.read_bytes() == before
+    assert _count_pivot_events(cat) == 0
+
+
+@pytest.mark.anyio
+async def test_mcp_confirm_refusal_writes_no_event(charter_env, monkeypatch: pytest.MonkeyPatch):
+    """MCP confirm refuses even when handed a valid token, and appends nothing."""
+    charter_env["write_charter"]()
+    proj = charter_env["project_dir"]
+    cat = charter_env["catalog_dir"]
+    _clear_agent_vars(monkeypatch)
+    res = await charter_confirm(
+        project_root=str(proj), chair_token="secret_chair_token_xyz", catalog_dir=str(cat)
+    )
+    assert res["ok"] is False
+    assert _count_confirmed_events(cat) == 0
+
+
+def test_old_index_db_without_charter_tables_reads_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """An index.db built before the charter tables existed still opens; the tables read as empty."""
+    import duckdb
+
+    from bathos.index import index_db_path, init_index_schema
+
+    cat = tmp_path / "catalog"
+    cat.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(cat))
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    con = duckdb.connect(str(index_db_path(cat)))
+    init_index_schema(con)
+    con.execute("DROP TABLE charter_confirmations")
+    con.execute("DROP TABLE charter_pivots")
+    con.close()
+    ro = connect_read(cat)
+    try:
+        assert ro.execute("SELECT count(*) FROM charter_confirmations").fetchone()[0] == 0
+        assert ro.execute("SELECT count(*) FROM charter_pivots").fetchone()[0] == 0
+        assert "purposes_json" in [d[0] for d in ro.execute("SELECT * FROM charter_confirmations").description]
+    finally:
+        ro.close()

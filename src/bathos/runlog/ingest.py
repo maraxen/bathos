@@ -61,8 +61,24 @@ import duckdb
 import pyarrow as pa
 
 from bathos.config import default_catalog_dir
+from bathos.index import (
+    BEARINGS_ITEMS_COLUMNS,
+    BEARINGS_READINGS_COLUMNS,
+    CHARTER_CONFIRMATIONS_COLUMNS,
+    CHARTER_PIVOTS_COLUMNS,
+)
 from bathos.runlog.fold_anchors import fold_anchor
+from bathos.runlog.fold_bearings import (
+    BEARINGS_KINDS,
+    fold_bearings_items,
+    fold_bearings_readings,
+)
 from bathos.runlog.fold_campaigns import fold_campaign, resolve_run_campaign_id
+from bathos.runlog.fold_charter import (
+    CHARTER_KINDS,
+    fold_charter_confirmations,
+    fold_charter_pivots,
+)
 from bathos.runlog.fold_edges import fold_edge
 from bathos.runlog.fold_ledgers import (
     fold_archived_item,
@@ -140,6 +156,9 @@ _SUBMIT_KINDS = frozenset({"submit.recorded", "submit.imported"})
 # `*.imported` counterpart. It MUST be dispatched in `fold_roots_into`: that loop advances the watermark past a
 # kind it does not know, so an unwired kind would be stored in `events` and never folded.
 _OUTPUT_COPY_KINDS = OUTPUT_COPY_KINDS
+_CHARTER_KINDS = CHARTER_KINDS
+# Bearings (spec 261104, slice 2): entity `[project, reading_id]`, no `*.imported` counterpart; wired in `fold_roots_into`.
+_BEARINGS_KINDS = BEARINGS_KINDS
 
 
 class IngestWalRemainsError(RunLogError):
@@ -990,6 +1009,35 @@ def _refold_output_copy(
         _insert_row(con, "output_copies", OUTPUT_COPIES_COLUMNS, row)
 
 
+def _refold_charter(
+    con: duckdb.DuckDBPyConnection,
+    project: str,
+    lookup: _FoldLookup | None = None,
+) -> None:
+    events = _resolve_lookup(con, lookup).events_for_entity_key([project])
+    con.execute("DELETE FROM charter_confirmations WHERE project = ?", [project])
+    con.execute("DELETE FROM charter_pivots WHERE project = ?", [project])
+    for row in fold_charter_confirmations(events):
+        _insert_row(con, "charter_confirmations", CHARTER_CONFIRMATIONS_COLUMNS, row)
+    for row in fold_charter_pivots(events):
+        _insert_row(con, "charter_pivots", CHARTER_PIVOTS_COLUMNS, row)
+
+
+def _refold_bearings(
+    con: duckdb.DuckDBPyConnection,
+    project: str,
+    reading_id: str,
+    lookup: _FoldLookup | None = None,
+) -> None:
+    events = _resolve_lookup(con, lookup).events_for_entity_key([project, reading_id])
+    con.execute("DELETE FROM bearings_readings WHERE project = ? AND reading_id = ?", [project, reading_id])
+    con.execute("DELETE FROM bearings_items WHERE project = ? AND reading_id = ?", [project, reading_id])
+    for row in fold_bearings_readings(events):
+        _insert_row(con, "bearings_readings", BEARINGS_READINGS_COLUMNS, row)
+    for row in fold_bearings_items(events):
+        _insert_row(con, "bearings_items", BEARINGS_ITEMS_COLUMNS, row)
+
+
 def _check_no_wal(tmp_path: Path) -> None:
     """AC-19: refuse the swap when a `.wal` remains after `close()`."""
     wal_path = tmp_path.with_name(tmp_path.name + ".wal")
@@ -1130,6 +1178,8 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
     affected_archived_item_ids: set[str] = set()
     affected_submit_ids: set[str] = set()
     affected_output_copy_keys: set[tuple[str, str]] = set()
+    affected_charter_projects: set[str] = set()
+    affected_bearings_keys: set[tuple[str, str]] = set()
 
     con = duckdb.connect(str(db_path))
     in_txn = False
@@ -1212,6 +1262,10 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
                         affected_submit_ids.add(entity[0])
                     elif kind in _OUTPUT_COPY_KINDS and len(entity) == 2:
                         affected_output_copy_keys.add((entity[0], entity[1]))
+                    elif kind in _CHARTER_KINDS and len(entity) == 1:
+                        affected_charter_projects.add(entity[0])
+                    elif kind in _BEARINGS_KINDS and len(entity) == 2:
+                        affected_bearings_keys.add((entity[0], entity[1]))
                 if new_offset != prev_offset:
                     watermarks[wm_key] = new_offset
                     _upsert_watermark(con, root_kind, root_id, seg.name, size, new_offset)
@@ -1244,6 +1298,8 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
             + [[a] for a in affected_archived_item_ids]
             + [[s] for s in affected_submit_ids]
             + [list(k) for k in affected_output_copy_keys]
+            + [[p] for p in affected_charter_projects]
+            + [list(k) for k in affected_bearings_keys]
         )
 
         # Shared across every refold in this batch (review finding, MEDIUM):
@@ -1272,6 +1328,10 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
                 _refold_submit(con, submit_id, lookup=lookup)
             for oc_run_id, oc_copy_id in affected_output_copy_keys:
                 _refold_output_copy(con, oc_run_id, oc_copy_id, lookup=lookup)
+            for project in affected_charter_projects:
+                _refold_charter(con, project, lookup=lookup)
+            for b_project, b_reading_id in affected_bearings_keys:
+                _refold_bearings(con, b_project, b_reading_id, lookup=lookup)
 
         con.execute("COMMIT")
         in_txn = False

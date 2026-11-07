@@ -330,6 +330,72 @@ CREATE TABLE IF NOT EXISTS output_copies (
 )
 """
 
+# Project charter confirmation events folded into one append-only index table (spec 261104, slice 1).
+CHARTER_CONFIRMATIONS_DDL = """
+CREATE TABLE IF NOT EXISTS charter_confirmations (
+    project VARCHAR,
+    eid VARCHAR PRIMARY KEY,
+    ts VARCHAR,
+    charter_sha256 VARCHAR,
+    mandate_sha256 VARCHAR,
+    mandate_text VARCHAR,
+    purposes_json VARCHAR,
+    auth_mode VARCHAR,
+    amended_mandate_from VARCHAR
+)
+"""
+
+# Project charter pivot events folded into one append-only index table (spec 261104, slice 1).
+CHARTER_PIVOTS_DDL = """
+CREATE TABLE IF NOT EXISTS charter_pivots (
+    project VARCHAR,
+    eid VARCHAR PRIMARY KEY,
+    ts VARCHAR,
+    reason VARCHAR,
+    dispositions_json VARCHAR,
+    retired_reasons_json VARCHAR,
+    cheapest_next_test VARCHAR,
+    charter_sha256_before VARCHAR,
+    charter_sha256_after VARCHAR,
+    confirmed_before BOOLEAN
+)
+"""
+
+
+# Bearings readings and comparison items (spec 261104, slice 2): append-only, one row per event / item.
+BEARINGS_READINGS_DDL = """
+CREATE TABLE IF NOT EXISTS bearings_readings (
+    project VARCHAR,
+    reading_id VARCHAR,
+    eid VARCHAR PRIMARY KEY,
+    ts VARCHAR,
+    packet_sha256 VARCHAR,
+    ref_sha VARCHAR,
+    since VARCHAR,
+    until VARCHAR,
+    reader_id VARCHAR,
+    purposes_json VARCHAR,
+    open_lines_json VARCHAR,
+    links_json VARCHAR
+)
+"""
+
+BEARINGS_ITEMS_DDL = """
+CREATE TABLE IF NOT EXISTS bearings_items (
+    project VARCHAR,
+    reading_id VARCHAR,
+    item_id VARCHAR,
+    compare_eid VARCHAR,
+    ts VARCHAR,
+    mapper_id VARCHAR,
+    charter_sha256 VARCHAR,
+    kind VARCHAR,
+    subject_json VARCHAR,
+    matched_retired VARCHAR,
+    PRIMARY KEY (compare_eid, item_id)
+)
+"""
+
 
 _DDL_NON_COLUMN_PREFIXES = ("CREATE", ")", "PRIMARY", "UNIQUE", "FOREIGN", "CHECK")
 
@@ -352,6 +418,10 @@ TRUST_LEDGER_COLUMNS: list[str] = _columns_of(TRUST_LEDGER_DDL)
 ARCHIVED_ITEMS_COLUMNS: list[str] = _columns_of(ARCHIVED_ITEMS_DDL)
 SUBMITS_COLUMNS: list[str] = _columns_of(SUBMITS_DDL)
 OUTPUT_COPIES_COLUMNS: list[str] = _columns_of(OUTPUT_COPIES_DDL)
+CHARTER_CONFIRMATIONS_COLUMNS: list[str] = _columns_of(CHARTER_CONFIRMATIONS_DDL)
+CHARTER_PIVOTS_COLUMNS: list[str] = _columns_of(CHARTER_PIVOTS_DDL)
+BEARINGS_READINGS_COLUMNS: list[str] = _columns_of(BEARINGS_READINGS_DDL)
+BEARINGS_ITEMS_COLUMNS: list[str] = _columns_of(BEARINGS_ITEMS_DDL)
 
 
 def index_db_path(catalog_dir: Path | None = None) -> Path:
@@ -392,6 +462,11 @@ def init_index_schema(con: duckdb.DuckDBPyConnection) -> None:
     con.execute(ARCHIVED_ITEMS_DDL)
     con.execute(SUBMITS_DDL)
     con.execute(OUTPUT_COPIES_DDL)
+    con.execute(CHARTER_CONFIRMATIONS_DDL)
+    con.execute(CHARTER_PIVOTS_DDL)
+    con.execute(BEARINGS_READINGS_DDL)
+    _add_missing_columns(con, "bearings_readings", BEARINGS_READINGS_DDL)  # links_json, AC-5b
+    con.execute(BEARINGS_ITEMS_DDL)
 
 
 def _empty_select(ddl: str) -> str:
@@ -505,6 +580,34 @@ def connect_read(
             con.execute("CREATE VIEW output_copies AS SELECT * FROM idx.output_copies")
         else:
             con.execute(f"CREATE VIEW output_copies AS {_empty_select(OUTPUT_COPIES_DDL)}")
+
+        have_confirmations = con.execute(
+            "SELECT count(*) FROM duckdb_tables() "
+            "WHERE database_name = 'idx' AND table_name = 'charter_confirmations'"
+        ).fetchone()
+        if have_confirmations and have_confirmations[0]:
+            con.execute("CREATE VIEW charter_confirmations AS SELECT * FROM idx.charter_confirmations")
+        else:
+            con.execute(f"CREATE VIEW charter_confirmations AS {_empty_select(CHARTER_CONFIRMATIONS_DDL)}")
+
+        have_pivots = con.execute(
+            "SELECT count(*) FROM duckdb_tables() "
+            "WHERE database_name = 'idx' AND table_name = 'charter_pivots'"
+        ).fetchone()
+        if have_pivots and have_pivots[0]:
+            con.execute("CREATE VIEW charter_pivots AS SELECT * FROM idx.charter_pivots")
+        else:
+            con.execute(f"CREATE VIEW charter_pivots AS {_empty_select(CHARTER_PIVOTS_DDL)}")
+
+        for tbl, tbl_ddl in (("bearings_readings", BEARINGS_READINGS_DDL), ("bearings_items", BEARINGS_ITEMS_DDL)):
+            have_tbl = con.execute(
+                "SELECT count(*) FROM duckdb_tables() "
+                f"WHERE database_name = 'idx' AND table_name = '{tbl}'"  # noqa: S608 -- internal constant
+            ).fetchone()
+            if have_tbl and have_tbl[0]:
+                con.execute(f"CREATE VIEW {tbl} AS SELECT * FROM idx.{tbl}")
+            else:
+                con.execute(f"CREATE VIEW {tbl} AS {_empty_select(tbl_ddl)}")
     else:
         init_index_schema(con)
     return con
@@ -614,7 +717,17 @@ __all__ = [
     "CAMPAIGN_EDGES_DDL",
     "CAMPAIGN_RUNS_COLUMNS",
     "CAMPAIGN_RUNS_DDL",
+    "BEARINGS_ITEMS_COLUMNS",
+    "BEARINGS_ITEMS_DDL",
+    "BEARINGS_READINGS_COLUMNS",
+    "BEARINGS_READINGS_DDL",
+    "CHARTER_CONFIRMATIONS_COLUMNS",
+    "CHARTER_CONFIRMATIONS_DDL",
+    "CHARTER_PIVOTS_COLUMNS",
+    "CHARTER_PIVOTS_DDL",
     "EVENTS_DDL",
+    "OUTPUT_COPIES_COLUMNS",
+    "OUTPUT_COPIES_DDL",
     "QUARANTINE_DDL",
     "RUNS_COLUMNS",
     "RUNS_DDL",
