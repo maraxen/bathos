@@ -1,11 +1,11 @@
-# fix-postmortem-scaffold-path Internal Docs
-# 261023-output-tiering-spec Internal Docs
+# 261106_archive-supersession Internal Docs
 
 ## Daily
 - [260805_overnight-decisions](daily/260805_overnight-decisions.md) — Every decision made without a human gate during the overnight autonomous loop run, with enough context to backtrack
 
 ## Handoffs
-- [261026_provenance-praxia-g31-handoff](handoffs/261026_provenance-praxia-g31-handoff.md) — What bathos changed (sidecar locks as commit refs, untrackable manifest) and the praxia-side work it needs; blocks praxia's relief from per-run tree dirtying. Tracking item praxia debt #3062.
+- [261106_agy-argon-spec-dispatch-prompt](handoffs/261106_agy-argon-spec-dispatch-prompt.md) — Paste-ready /goal /teamwork /boost prompt for Antigravity (Gemini Argon) to run recon, prior-art research, specification and adversarial spec-review cycles for task 261106_archive-supersession, starting from the approved design doc.
+- [261026_provenance-praxia-g31-handoff](handoffs/261026_provenance-praxia-g31-handoff.md) — What bathos changed (sidecar locks as commit refs, untrackable manifest) and the praxia-side work it needs; blocks praxia's relief from per-run tree dirtying. Tracking item praxia debt
 - [261023_myxcel-cold-primitives-brief](handoffs/261023_myxcel-cold-primitives-brief.md) — Completed brief for myxcel cold put, commit, verify-file, get, lock, unlock, ls and rm-partial, all merged in myxcel; spec section 6.2 is the authoritative contract, not this brief
 - [260616_worktree-prune-backlog-assess](handoffs/260616_worktree-prune-backlog-assess.md) — repo consolidated to single main worktree; bathos backlog drained (only #1774 P3 remains)
 - [260601_v061-audit-close](handoffs/260601_v061-audit-close.md)
@@ -23,6 +23,8 @@
 - [260515_v02-sprint-plan](plans/260515_v02-sprint-plan.md)
 
 ## Specs
+- [261106_result-validity-supersession-archive-design](specs/261106_result-validity-supersession-archive-design.md) — Design (pre-spec) for task 261106_archive-supersession: instrument defect ranges with version backfill from uv.lock, hidden-by-default reads/cites for void/affected/superseded/archived results, evidence tiers incl. spike, distance-from-present annotations, a lightweight findings register with supersession edges, session-start current-beliefs view, and a batch archive sweep with a self-contained doc store that can be pointed at .praxia/docs. Phased: P1 stop the leak, P2 findings + tiers, P3 archive sweep.
+- [261027_step-back-reviews-advisor-committee-escalation](specs/261027_step-back-reviews-advisor-committee-escalation.md) — Exhaustive architectural specification for Task 261027_step-back-reviews: automated event triggers with mathematical guard clauses, 5-dimension scored rubric with hierarchical gap-free evaluation and hard-floor veto, 5 qualitative cognitive modes with campaign domain evidence citations, authenticated reviewer independence constraints, 4-tier escalation ladder terminating at the human chair with unconditional FastMCP refusal and TTY/chair-token enforcement, meta-signals 15-18 with dispatch-telemetry guards, Cyclopts CLI/FastMCP tooling parity, DuckDB schema v19 migration, and advisor brief matrix integration.
 - [261026_distributional-breakdown-discipline](specs/261026_distributional-breakdown-discipline.md) — Spec for debt #3045: [breakdown] sidecar block + aggregate-verdict lint, postmortem [[amendments]], postmortem [fork] for marginal results; warn everywhere, refuse when claim-bound.
 - [261026_provenance-out-of-working-tree](specs/261026_provenance-out-of-working-tree.md) — Spec for debt #3049: move the per-run sidecar lock into the git object store, untrack legacy manifest/lock files, and warn when bookkeeping would dirty the tree.
 - [261023_output-tiering](specs/261023_output-tiering.md) — Standard for where a run's output files live (warm local path, checksummed cold archive, mirror), how bathos records and verifies each copy, and how `bth warm` restores them; reuses myxcel profiles and transport, folds in naurmalade's coldify wrapper, and notes the already-fixed reap log-mode bug
