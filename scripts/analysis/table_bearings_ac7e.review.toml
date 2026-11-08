@@ -1,0 +1,76 @@
+schema_version = 2
+title = "Within-project test failed: the lagoon aim alone read seven groups"
+takeaway = "The lagoon-only record read as seven groups, more than the splice's four, so the test failed; readers disagreed widely."
+question = "Do blind readers split a record that splices two aims of one project into more groups than either aim read alone?"
+refs = [
+  { kind = "run", id = "65dbecd1", label = "scored run, outcome fail" },
+  { kind = "run", id = "4d7d3f38", label = "reshape of that run into this table, outcome consistent" },
+  { kind = "task", id = "261104_multiscale-goal-awareness", label = "Bearings goal awareness" },
+]
+
+[glossary]
+"AC" = "acceptance check in the Bearings spec"
+
+[toolchain]
+project = "review_toolchain"
+group = "figures"
+lock_sha256 = "39ac75d318f30b6b5edfbb348ced51aefcf98340f0267b448cb4943ecd92a9c8"
+
+[experiment]
+run_ref = "65dbecd1"
+
+[[panel]]
+panel = "panel-1"
+heading = "Registered count: the lagoon aim alone read seven groups, the splice four"
+component_id = "vegalite.grouped_distribution"
+table = "outputs/bearings_ac7e/groups_by_reading.csv"
+caption = "One point per blind reading, three per arm. A group is lines of work joined by results flow, holding a tenth of the effort. Unsure and unsupported links are cut [[ref:run:65dbecd1]]."
+refs = [{ kind = "run", id = "4d7d3f38" }]
+
+[panel.payload]
+panel = "panel-1"
+title = "Drift groups per reading (unsure bridges removed)"
+theme_colours = ["#0072b2"]
+theme_schemes = []
+group_field = "arm"
+unit_field = "reading"
+value_field = "groups_strict"
+chart_type = "strip"
+bin_count = 30
+uncertainty_intent = "show_full_distribution"
+error_semantics = "none"
+axis_labels = ["Drift groups", "Arm"]
+
+[panel.eda]
+unit_columns = ["reading"]
+condition_column = "arm"
+value_column = "groups_strict"
+expected_units = [["p1-reader1"], ["p1-reader2"], ["p1-reader3"], ["p2-reader1"], ["p2-reader2"], ["p2-reader3"], ["p3-reader1"], ["p3-reader2"], ["p3-reader3"], ["p4-reader1"], ["p4-reader2"], ["p4-reader3"]]
+
+[[panel]]
+panel = "panel-2"
+heading = "Unlabelled, the lagoon aim still reads anywhere from one to eight groups"
+component_id = "vegalite.grouped_distribution"
+table = "outputs/bearings_ac7e/groups_by_reading.csv"
+caption = "Same readings, no link removed. Medians hide the spread: the lagoon aim alone reads 1, 6 and 8. One cross-aim link appeared in the splice, and it was not supported [[ref:run:4d7d3f38]]."
+refs = [{ kind = "run", id = "4d7d3f38" }]
+
+[panel.payload]
+panel = "panel-2"
+title = "Drift groups per reading (no labels applied)"
+theme_colours = ["#0072b2"]
+theme_schemes = []
+group_field = "arm"
+unit_field = "reading"
+value_field = "groups_no_labels"
+chart_type = "strip"
+bin_count = 30
+uncertainty_intent = "show_full_distribution"
+error_semantics = "none"
+axis_labels = ["Drift groups", "Arm"]
+
+[panel.eda]
+unit_columns = ["reading"]
+condition_column = "arm"
+value_column = "groups_no_labels"
+expected_units = [["p1-reader1"], ["p1-reader2"], ["p1-reader3"], ["p2-reader1"], ["p2-reader2"], ["p2-reader3"], ["p3-reader1"], ["p3-reader2"], ["p3-reader3"], ["p4-reader1"], ["p4-reader2"], ["p4-reader3"]]
