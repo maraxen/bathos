@@ -30,10 +30,13 @@ import replay_bearings_ac7b as ac7b
 import replay_bearings_ac7c as ac7c
 import replay_bearings_ac7d as ac7d
 from replay_bearings_ac7 import HOME
+from replay_bearings_ac7 import citation_failures as ac7_citation_failures
 
 from bathos.bearings.packet import build_packet, verify_packet
+from bathos.bearings.reading import _DOC_RE
 
 logger = logging.getLogger("replay_bearings_ac7e")
+_ac7b_link_failures = ac7b.link_failures
 
 PROJECT = "tev_design"
 SINCE, UNTIL = "2026-09-28T00:00:00-04:00", "2026-10-21T00:00:00-04:00"  # the library work's span, counts only
@@ -100,6 +103,38 @@ def sub_packet(src: Path, out: Path, aim: str, n: int) -> int:
     return len(keep)
 
 
+def sidecar_as_doc(reading: dict, view) -> dict:
+    """Owner ruling 261108, made after two readers failed validation twice and before any label or score.
+
+    A ``doc:<path>@<blob>#Lx-Ly`` citation that names a listed SIDECAR (path and blob as in index.json, no document of
+    that path) with a line range inside that file counts as ``sidecar:<path>``. Anything else is left alone. Returns a
+    copy; the reading on disk is never changed. The packets of this study hold no docs, so a doc: citation there can
+    only be meant for a sidecar.
+    """
+    out = json.loads(json.dumps(reading))
+    sidecar_blobs = {(s["path"], s["blob_sha"]) for s in view.index["sidecars"]}
+    for section in ("purposes", "open_lines", "links"):
+        for entry in out.get(section, []):
+            cites = entry.get("citations", [])
+            for i, c in enumerate(cites):
+                m = _DOC_RE.match(c) if isinstance(c, str) and c.startswith("doc:") else None
+                if not m or m["path"] in view.docs or (m["path"], m["blob"]) not in sidecar_blobs:
+                    continue
+                f = view.reader / "sidecars" / m["blob"] / m["path"]
+                x, y = int(m["x"]), int(m["y"])
+                if f.is_file() and 1 <= x <= y <= len(f.read_text(encoding="utf-8").splitlines()):
+                    cites[i] = f"sidecar:{m['path']}"
+    return out
+
+
+def citation_failures_e(reading: dict, packet_dir: Path) -> int:
+    return ac7_citation_failures(sidecar_as_doc(reading, ac7b._PacketView(packet_dir)), packet_dir)
+
+
+def link_failures_e(reading: dict, view) -> int:
+    return _ac7b_link_failures(sidecar_as_doc(reading, view), view)
+
+
 def leak_hits(reader_dir: Path, *, anchor: bool = False) -> list[str]:
     if anchor:
         return ac7c.leak_hits(reader_dir)
@@ -143,9 +178,9 @@ def _fake_full(root: Path, specs: list[tuple[str, str]]) -> Path:
         runs.append({"id": rid, "timestamp": f"2026-10-{i + 1:02d}T00:00:00+00:00", "sidecar_path": path})
         if not path:
             continue
-        (r / "sidecars" / f"b{i}" / path).parent.mkdir(parents=True, exist_ok=True)
-        (r / "sidecars" / f"b{i}" / path).write_text(f"sidecar {i}\n")
-        side.append({"path": path, "blob_sha": f"b{i}"})
+        (r / "sidecars" / f"{i:040x}" / path).parent.mkdir(parents=True, exist_ok=True)
+        (r / "sidecars" / f"{i:040x}" / path).write_text(f"sidecar {i}\n")
+        side.append({"path": path, "blob_sha": f"{i:040x}"})
     (r / "runs.jsonl").write_text("".join(json.dumps(x) + "\n" for x in runs))
     (r / "git_log.jsonl").write_text(json.dumps({"sha": "c1", "committed_at": "x", "subject": "s"}) + "\n")
     (r / "index.json").write_text(json.dumps({"docs": [{"path": "d.md", "blob_sha": "x"}], "sidecars": side}))
@@ -182,6 +217,24 @@ def split_controls_pass() -> bool:
         sub_packet(full, t / "b", "B", 3)
         sha = ac7c.merge([t / "a", t / "b"], t / "m", since="x", until="y", refs=["1", "1"], scrub_fn=scrub_ids)
         ok &= verify_packet(t / "m") == sha and leak_hits(t / "m" / "reader") == []
+        # Sidecar-as-doc citations: counted only when path, blob and line range all match a listed sidecar.
+        view = ac7b._PacketView(t / "full")
+        sc = [(s["path"], s["blob_sha"]) for s in view.index["sidecars"]][:2]
+        good = [f"doc:{p}@{b}#L1-L1" for p, b in sc]
+        cases = {
+            "wrong blob": f"doc:{sc[0][0]}@{'f' * 40}#L1-L1",
+            "line beyond file": f"doc:{sc[0][0]}@{sc[0][1]}#L1-L9",
+            "path not in index": f"doc:s/nothing.bth.toml@{sc[0][1]}#L1-L1",
+            "a real doc": f"doc:d.md@{'a' * 40}#L1-L1",  # d.md is a listed doc, so it is never rewritten
+        }
+        rd = {"purposes": [{"id": "a", "text": "t", "citations": good}], "open_lines": [], "links": []}
+        fixed = sidecar_as_doc(rd, view)["purposes"][0]["citations"]
+        ok &= fixed == [f"sidecar:{p}" for p, _ in sc] and rd["purposes"][0]["citations"] == good  # copy, not edit
+        ok &= ac7_citation_failures(rd, t / "full") == 1  # negative control: the strict rule rejects the same reading
+        ok &= citation_failures_e(rd, t / "full") == 0
+        for cite in cases.values():
+            rd2 = {"purposes": [{"id": "a", "text": "t", "citations": [cite]}], "open_lines": [], "links": []}
+            ok &= sidecar_as_doc(rd2, view)["purposes"][0]["citations"] == [cite]
     return bool(ok)
 
 
@@ -206,6 +259,8 @@ def use_this_study() -> None:
     # AC-7d's scorer, rebound to this study's arms, build, leak check and controls.
     ac7d.ARMS, ac7d.PLANTED, ac7d.ANCHOR, ac7d.SIZE_CONTROL, ac7d.SPLICES = ARMS, PLANTED, ANCHOR, SIZE_CONTROL, SPLICES
     ac7d.build_arm, ac7d.leak_hits, ac7d.controls_ok = build_arm, leak_hits, controls_ok
+    # Sidecar-as-doc citations count as sidecar citations (owner ruling 261108); validity is the only thing this touches.
+    ac7d.citation_failures, ac7b.link_failures = citation_failures_e, link_failures_e
 
 
 def main() -> None:
