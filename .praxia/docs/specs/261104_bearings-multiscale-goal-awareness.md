@@ -141,6 +141,23 @@ Frame: agents do honest, pre-registered, green work that stops serving any large
 - [261106] **AC-7e pre-registered, no reader run yet** (`scripts/analysis/replay_bearings_ac7e.bth.toml`, commits `4d3d8d4d`, corrected in `c3045f8e`). Owner choices: within-project split; two sub-areas of one project; tev_design (lagoon simulation vs design libraries, selected by sidecar path; commits and docs left out); cap the larger aim by a deterministic hash-ranked sample. Same pass rule and anchor rule as AC-7d (p4 median at least 2 and at least 1 above each single-aim arm; AC-7c's splice as anchor).
   - **Correction, disclosed in the sidecar.** I first described the two aims to the owner as "owner-confirmed separate". The owner's 261105 review said tev_design's aims have "sub-goals that interact", and AC-7b used tev_design as a connected-aims negative. On being asked again, the owner ruled that the two aims pass no results to each other. That is the owner's statement and not shown by the record, and it conflicts with the earlier review. Supported cross-seam links in the readings would count against it.
   - Packets: p1 lagoon alone 54 items, p2 anchor 92, p3 library alone 27, p4 splice 47. The lagoon-alone size (45 runs) was fitted to the size rule from counts. 37 of p1's 45 runs come from one repeated script, so one group is cheap there.
+- [261108] **AC-7e failed on the registered rule, and the measure was unstable.** Run `65dbecd1` (sidecar `scripts/analysis/replay_bearings_ac7e.bth.toml`, sha `8776ba59…`, commit `156a266b`) recorded `fail`. The run was valid: controls pass, 0 leaked identifiers, 0 hash mismatches, 0 rejected readings, 12 readings, 0 unlabelled bridges, size matched, anchor hash matched, anchor median 2.
+
+  | | p1: lagoon alone | p2: anchor | p3: library alone | p4: within-project splice |
+  |---|---|---|---|---|
+  | Median drift groups, strict | 7 | 2 | 3 | 4 |
+  | Median, unsure counted as supported | 6 | 2 | 3 | 4 |
+  | Median, no labels | 6 | 2 | 3 | 4 |
+  | Groups in each reading (strict) | 7, 1, 8 | 2, 2, 3 | 3, 2, 3 | 5, 4, 3 |
+  | Groups in each reading, no labels | 6, 1, 8 | 2, 2, 2 | 3, 1, 3 | 5, 3, 4 |
+
+  - The pass rule needs the splice at least 1 above each single-aim arm, so with the lagoon aim alone at 7 it could not be met: 4 is below 8.
+  - **The measure was unstable, not the splice low.** The lagoon-alone readings are 7, 1 and 8 groups. One reader found a single group in a record of 45 runs, and two found six to eight. Table run `4d7d3f38` (outcome consistent) shows this. Three readers per arm is too few for a median to carry this much spread.
+  - The splice's readings split along the aim seam in all 3 readings, with a purity of 1.0, and no reading joined the halves (halves joined 0 of 3). One cross-aim link appeared and it was not supported. None of the three registered fail readings fits exactly: the halves were not joined, but the splice did not score 1, and the cause was a control that scored high. This is reported as it stands.
+  - It says nothing for or against the owner's statement that the aims pass no results: no supported cross-aim link appeared, but the readers were not asked to find one.
+  - Readers: 2 Cursor and 1 Antigravity per arm, 0 tool events. Two Cursor readers (p3/reader1, p4/reader3) failed validation twice; the cause was `doc:` citations naming sidecars, and the owner ruled 261108 that those count as sidecar citations (a post-failure change to the validity rule, disclosed in the sidecar). Antigravity's first launch failed in 0 s on the sandbox network allowlist and was relaunched. The Opus labeller marked 33 bridges: 15 supported, 11 unsupported, 7 unsure.
+  - **What it changes for the open drift question.** Within one project, the group count moves with how finely a reader splits the record, and a single reader can return one group for a large record. So colliculix's 1 group (every reading, AC-7b) is a weaker signal than it looked, and so is any drift claim built on this count. The drift definition is still open.
+  - Review page (private): https://claude.ai/artifact/C5o4zzmkRNYE5wVcRgERZa. Both panels carry "dirty run, data not pinned"; the audit is clean.
   - Review page (private): https://claude.ai/artifact/2tqLFZWRyezKKGd4N2j7kQ. Both panels carry "dirty run, data not pinned" (untracked local files at run time); the audit is clean.
 
 ## Assumptions
@@ -251,6 +268,8 @@ Tags follow the global spike-test rule. *Verified* means read at a file:line or 
   - **Result 261106: pass** (run `2032d774`; per-reading table run `c456be51`, outcome consistent). See the decision log, AC-7c 261106.
 - **AC-7d Graded planted-drift control, pre-registered** (`scripts/analysis/replay_bearings_ac7d.bth.toml`, committed before any reader ran). Two neighbouring-field projects with no results flow are spliced over a short window and compared with each project alone, with AC-7c's strong splice as a positive anchor (median at least 2, or the run is invalid). Same thresholds as AC-7c.
   - **Result 261106: pass, by the minimum margin** (run `3e6410b2`; per-reading table run `93e2b7e3`, outcome consistent). See the decision log, AC-7d 261106.
+- **AC-7e Within-project planted-drift control, pre-registered** (`scripts/analysis/replay_bearings_ac7e.bth.toml`, committed before any reader ran). Two aims of one project (tev_design: lagoon simulation and design libraries, cut by sidecar path, runs and sidecars only) are spliced and compared with each aim alone, with AC-7c's strong splice as a positive anchor. Same thresholds as AC-7d.
+  - **Result 261108: fail** (run `65dbecd1`; per-reading table run `4d7d3f38`, outcome consistent). The lagoon-alone control read 7 groups against the splice's 4, with readings of 7, 1 and 8. See the decision log, AC-7e 261108.
 - **AC-8 Cadence and shadow exit are testable and pre-registered.** Given a set of projects, when bth bearings due runs, it lists exactly those active in the last 28 days with >= 20 new runs or >= 7 days since their last reading. Given a due project, `bth run` in it returns exactly one due advisory with no reading content and appends `bearings.due_notified`; given a project that is not due, it returns none. Before the first live reading, an evaluation sidecar fixes T1 and the excess-spend metric (261027 §8, including chains that paid off; not the `excess_spend_avoided` heuristic in `stepback/analysis.py`). It also counts confirmed charters among active projects, testing A10.
 
 ## Pre-mortem Record
