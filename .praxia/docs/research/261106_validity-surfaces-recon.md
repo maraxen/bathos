@@ -65,8 +65,12 @@ All counts below were derived with live commands executed against the research r
 
 **Commands & Outputs:**
 
-1. asr sidecars in `scripts/`:
+1. asr sidecars (full repository vs `scripts/`):
 ```bash
+# Total sidecars across full asr repository (357 in asr + 130 in tev_design = 487 total across both repos):
+fd -e bth.toml . /home/marielle/projects/asr | wc -l
+# Result: 357
+
 # Total sidecars in asr/scripts:
 fd -e bth.toml . /home/marielle/projects/asr/scripts | wc -l
 # Result: 209
@@ -319,73 +323,72 @@ Where `ValidityResult` contains: `state` (`current` | `suspect` | `unverifiable`
 
 ### 1. `ls` (`list_runs`)
 - **Core Function**: `src/bathos/query.py:259-275` (`list_runs`), dispatching to `_index_list_runs:277-296`, `_warm_list_runs:299-346`, and `_cool_list_runs:244-256`.
-- **Tool / CLI Entry**: `src/bathos/mcp.py:2370-2440` (`list_runs_tool`).
+- **Tool / CLI Entry**: `src/bathos/mcp.py:329-384` (`list_runs_tool`, `registry="bathos-cli"`, `cli_name="ls"`) and `src/bathos/mcp.py:2469-2476` (`mcp_list_runs_tool`, `registry="bathos"`).
 - **Insertion Point**: In `list_runs()`, after fetching candidate runs, pass candidate IDs to `resolve_validity()`.
 - **Contract**: If `include_superseded` is False (default), filter out runs with state in `("void", "affected", "superseded", "archived")`. If any were hidden, attach metadata: `{"hidden_count": N, "notice": "N superseded/void/archived results hidden — --include-superseded to show"}`. If `include_superseded` is True, include all runs and attach their validity state.
 
 ### 2. `find` (`find_runs`)
 - **Core Function**: `src/bathos/query.py:610-649` (`find_runs`), dispatching to `_index_find_runs:652-698`, `_warm_find_runs:701-748`, and `_cool_find_runs:587-608`.
-- **Tool / CLI Entry**: `src/bathos/mcp.py:2442-2498` (`find_runs_tool`).
+- **Tool / CLI Entry**: `src/bathos/mcp.py:401-454` (`find_runs_tool`, `registry="bathos-cli"`, `cli_name="find"`) and `src/bathos/mcp.py:2479-2487` (`mcp_find_runs_tool`, `registry="bathos"`).
 - **Insertion Point**: In `find_runs()`, evaluate `resolve_validity()` on the matched runs.
 - **Contract**: Filter hidden runs by default; support `include_superseded=True`; display count of hidden items.
 
 ### 3. `get_run` / `show`
 - **Core Function**: `src/bathos/query.py:466-485` (`get_run`) and `src/bathos/query.py:379-440` (`lookup_run`).
-- **Tool / CLI Entry**: `src/bathos/mcp.py:2320-2368` (`get_run_tool` backing `bth show`).
+- **Tool / CLI Entry**: `src/bathos/mcp.py:456-510` (`get_run_tool`, `registry="bathos-cli"`, `cli_name="show"`) and `src/bathos/mcp.py:2490-2497` (`mcp_get_run_tool`, `registry="bathos"`).
 - **Insertion Point**: In `get_run_tool()`, after fetching `run`, call `resolve_validity([run.id])`.
 - **Contract**: If validity state is `void`, `affected`, `superseded`, or `archived` and `include_superseded=False`, refuse with `BathosErrorCode.RESULT_HIDDEN` naming state, reason, and replacement. If `suspect` or `unverifiable`, return run with an explicit banner.
 
 ### 4. `run_sql`
 - **Core Function**: `src/bathos/query.py:773-830` (`run_sql`).
-- **Index / Catalog Connection**: `src/bathos/index.py:440-456` (`connect_read`) and `src/bathos/catalog.py`.
-- **Insertion Point**: Inside `connect_read()`, define a view:
-  `CREATE VIEW runs AS SELECT * FROM runs_all WHERE validity = 'current' OR validity IN ('suspect', 'unverifiable');`
-  Raw historical table is renamed to `runs_all`.
-- **Contract**: `SELECT * FROM runs` never returns a hidden run. Callers requiring full history query `runs_all`. If a query against `runs_all` encounters hidden rows, banner warning to stderr.
+- **Tool / CLI Entry**: `src/bathos/mcp.py:513-535` (`run_sql_tool`, `registry="bathos-cli"`, `cli_name="sql"`) and `src/bathos/mcp.py:2598-2605` (`mcp_run_sql_tool`, `registry="bathos"`).
+- **Index / Catalog Connection**: `src/bathos/index.py:476-510` (`connect_read`) and `src/bathos/catalog.py`.
+- **Insertion Point**: Inside `connect_read()`, define view `runs_current` filtering out hidden IDs via `validity_cache`, while keeping `runs` as the full historical table (settled per `OD-3`).
+- **Contract**: `runs_current` is the documented target and never returns a hidden run; raw `runs` stays full history and emits a notice banner if hidden rows exist unless `--include-superseded` (or `--allow-hidden`) is passed.
 
 ### 5. `cite` (`cite_run`)
 - **Core Function**: `src/bathos/cite.py:13-55` (`format_citation`).
-- **Tool / CLI Entry**: `src/bathos/mcp.py:2500-2525` (`cite_run_tool`).
+- **Tool / CLI Entry**: `src/bathos/mcp.py:2500-2524` (`cite_run_tool`, `registry="bathos-cli"`, `cli_name="cite"`) and `src/bathos/mcp.py:2526-2544` (`mcp_cite_run_tool`, `registry="bathos"`).
 - **Insertion Point**: In `cite_run_tool` at line 2521, immediately after `_get_run(run_id)`.
-- **Contract**: If validity is `void`, `affected`, `superseded`, or `archived`, raise `CatalogError` / return envelope with `BathosErrorCode.RESULT_HIDDEN`. If `suspect` or `unverifiable`, refuse unless caller passes `acknowledged_suspect=True`; format citation with validity banner.
+- **Contract**: If validity is `void`, `affected`, `superseded`, or `archived`, raise `CatalogError` / return envelope with the specific state error code (`RESULT_VOID`, `RESULT_AFFECTED`, `RESULT_SUPERSEDED`, `RESULT_ARCHIVED`). If `suspect` or `unverifiable`, refuse unless caller passes a non-empty rationale string `ack_suspect="..."` / `ack_unverifiable="..."` (`OD-5`); format citation with validity banner.
 
 ### 6. `claim register` / `claim validate`
-- **Core Functions**: `src/bathos/claim.py:604-660` (`register_claim`) and `src/bathos/claim.py:232-280` (`validate_claim`).
-- **Tool / CLI Entry**: `src/bathos/mcp.py:4210-4260` (`claim_register_tool`, `claim_validate_tool`).
+- **Core Functions**: `src/bathos/claim.py:604-660` (`register_claim`) and `src/bathos/claim.py:232-360` (`validate_claim`), plus `src/bathos/claim.py:1063` (`attest_parity`).
+- **Tool / CLI Entry**: `src/bathos/mcp.py:2404` (`campaign_attest_parity_tool`) and `claim_register_tool` / `claim_validate_tool`.
 - **Insertion Point**:
   - In `register_claim` at line 657, where `member_ids = union_campaign_member_ids(...)` is resolved.
-  - In `validate_claim` at line 248, when checking campaign supporting runs.
-- **Contract**: Call `resolve_validity(member_ids)`. If any member run backing a hypothesis or clause is hidden (`void`, `affected`, `superseded`, `archived`), refuse registration with `BathosErrorCode.RESULT_HIDDEN`, listing the implicated runs and their defect/supersession reasons.
+  - In `validate_claim` at line 344 and `attest_parity` at line 1063, when checking `parity_run_id`.
+- **Contract**: Call `resolve_validity(...)`. If any member run or parity run is hidden (`void`, `affected`, `superseded`, `archived`), refuse with the specific state refusal code (`RESULT_VOID`, `RESULT_AFFECTED`, `RESULT_SUPERSEDED`, `RESULT_ARCHIVED`), listing the implicated runs and their defect/supersession reasons. Also enforce `ESTIMAND_BOUNDARY_MIXED` on `register_claim` unless `allow_mixed_estimand` rationale is supplied (`OD-6`).
 
 ### 7. `campaign add` / `campaign conclude` / `campaign review`
 - **Core Functions**:
-  - `add_run_to_campaign`: `src/bathos/campaigns.py:420-456` and `_add_run_to_campaign_impl:484-535` (line 532). Refuse adding a run whose validity is hidden.
-  - `conclude_campaign`: `src/bathos/campaigns.py:1139-1167` and `_conclude_campaign_impl:1169-1240`. In Union Gate resolution, check validity of all covering runs. If any load-bearing run is hidden, refuse conclusion and list implicated runs.
-  - `review_campaign`: `src/bathos/campaigns.py:1947-2105` (lines 2075-2097). Currently only checks blast radius as informational. Upgrade to resolve validity for all member runs; report breakdown of current vs hidden runs and display banners for hidden members.
+  - `add_run_to_campaign`: `src/bathos/campaigns.py:420-456` and `_add_run_to_campaign_impl:484-535` (line 532). Refuse adding a run whose validity is hidden; emit a warning banner (without refusing) if adding the run mixes estimand epochs (`OD-6`).
+  - `conclude_campaign`: `src/bathos/campaigns.py:1139-1167` and `_conclude_campaign_impl:1169-1315` (before line 1298). Check validity of all member runs unconditionally (`union_campaign_member_ids`) before the optional `if claim_path_rel and registered_sha:` Union Gate check, and filter covering runs in `run_union_gate` (`claim.py:932`) and `differential_confound_check` (`claim.py:851`) to `runs_current`. Also enforce `ESTIMAND_BOUNDARY_MIXED` unless `allow_mixed_estimand` rationale is supplied (`OD-6`).
+  - `review_campaign`: `src/bathos/campaigns.py:1947-2105` (lines 2075-2097). Upgrade to resolve validity for all member runs; report breakdown of current vs hidden runs and display banners for hidden members and mixed estimand epochs.
 
 ### 8. `resolve_pin`
-- **Core Function**: `src/bathos/readback.py:113-170` (`resolve_pin`).
-- **Tool / CLI Entry**: `src/bathos/mcp.py:551-578` (`resolve_pin_tool`).
+- **Core Function**: `src/bathos/readback.py:113-175` (`resolve_pin`) and `ResolvedPin` dataclass (`:96-111`).
+- **Tool / CLI Entry**: `src/bathos/mcp.py:550-576` (`resolve_pin_tool`) and `:2608-2616` (`mcp_resolve_pin_tool`).
 - **Insertion Point**: At line 140, after `get_run(run_id, cat_dir)`.
-- **Contract**: Call `resolve_validity([run_id])`. If run is hidden, return `fresh=False`, `trust_state="unknown"`, and set `validity_state` naming the defect/supersession reason.
+- **Contract**: Add `validity_state: str = "current"` and `validity_reason: str | None = None` to `ResolvedPin`. Call `resolve_validity([run_id])`. If run is hidden, return `fresh=False`, `trust_state="unknown"`, and set `validity_state` and `validity_reason`.
 
 ### 9. `get_trust_state`
 - **Core Function**: `src/bathos/readback.py:253-280` (`get_trust_state`).
-- **Tool / CLI Entry**: `src/bathos/mcp.py:579-610` (`get_trust_state_tool`).
+- **Tool / CLI Entry**: `src/bathos/mcp.py:578-610` (`get_trust_state_tool`) and `:2619-2626` (`mcp_get_trust_state_tool`).
 - **Insertion Point**: At line 262, when resolving promotion state.
-- **Contract**: If `content_hash` has a promotion record, look up the producing `run_id` (via `output_metadata` or anchor). If that run resolves to a hidden state (`void`, `affected`, `superseded`, `archived`), drop trust state from `promoted` to `candidate` (or `unknown`) at read time without mutating ledger rows.
+- **Contract**: If `content_hash` has a promotion record, look up all producing `run_id`s (via `output_metadata` or anchor). If ALL producing runs resolve to a hidden state (`void`, `affected`, `superseded`, `archived`), drop trust state from `promoted` to `candidate` (or `unknown`) at read time without mutating ledger rows.
 
 ### 10. `graduate_product`
-- **Core Function**: `src/bathos/trust_ledger.py:308-370` (`graduate_product`).
-- **Tool / CLI Entry**: `src/bathos/mcp.py:1212-1250` (`graduate_product_tool`).
-- **Insertion Point**: At line 364, alongside attestation verification.
-- **Contract**: If `run_id` is supplied or discoverable for `content_hash`, check its validity. Refuse graduation with `BathosErrorCode.GRADUATION_REFUSED` if the producing run is hidden.
+- **Core Function**: `src/bathos/trust_ledger.py:308-375` (`graduate_product`).
+- **Tool / CLI Entry**: `src/bathos/mcp.py:1212-1258` (`graduate_product_tool`).
+- **Insertion Point**: Before line 360 (`existing = latest_ledger_record(catalog_dir, content_hash)`), so already-promoted products whose producing run became hidden do not return early!
+- **Contract**: Resolve validity of `run_id` and any producing runs for `content_hash`. Refuse graduation with `GraduationRefused` (`BathosErrorCode.GRADUATION_REFUSED`) if all producing runs are hidden.
 
 ### 11. `lineage`
 - **Core Function**: `src/bathos/query.py:833-885` (`lineage`).
-- **Tool / CLI Entry**: `src/bathos/mcp.py:2550-2590` (`lineage_tool`).
-- **Insertion Point**: At line 880, after fetching ancestor chain.
-- **Contract**: Annotate each ancestor in the chain with its validity state. Do not drop hidden ancestors silently (lineage must reflect true causal history), but clearly flag them with banner/metadata so agents do not treat them as valid current readings.
+- **Tool / CLI Entry**: `src/bathos/mcp.py:2546-2574` (`lineage_prov_tool`, `registry="bathos-cli"`, `cli_name="lineage"`) and `src/bathos/mcp.py:2577-2595` (`mcp_lineage_prov_tool`, `registry="bathos"`).
+- **Insertion Point**: At line 855 (`if not catalog_readable(catalog_dir): return []`) and line 880, after fetching ancestor chain.
+- **Contract**: Annotate each ancestor in the chain with its validity state and estimand epoch. Do not drop hidden ancestors silently (lineage must reflect true causal history), but clearly flag them with banner/metadata so agents do not treat them as valid current readings.
 
 ### 12. Maraxiom `review_build` Bridge
 - **Consumer Site**: `maraxiom/src/maraxiom/review_build.py:223-235` (calling `bathos_bridge.get_run_record`).
@@ -394,10 +397,10 @@ Where `ValidityResult` contains: `state` (`current` | `suspect` | `unverifiable`
 - **Contract**: Refuse review page build (`BuildRefused("result_hidden", ...)`) if the target run or any supporting run is `void`, `affected`, `superseded`, or `archived`.
 
 ### 13. `SessionStart` Hook
-- **Hook Configuration**: `plugin/hooks/hooks.json`.
-- **Implementation**: Add `"SessionStart"` array alongside `"PreToolUse"`.
-- **Target Command**: `bth session-start --byte-cap 2048` (backed by new module `src/bathos/session_start.py` and MCP tool `session_start`).
-- **Contract**: Emits brief summary of active defect ranges, open/settled findings with tier and distance, and `needs-recheck` findings; capped at ≤ 2 KB; never includes superseded or void items.
+- **Hook Configuration**: `.praxia/manifest.toml:96-100` (`[[plugin.hook_specs]]`) and `plugin/hooks/hooks.json`.
+- **Implementation**: Add `"SessionStart"` hook spec alongside `"PreToolUse"`.
+- **Target Command**: `bth-session-start-hook` (stdlib-only fast-path script reading `.bth/cache/session_start.json`, backed by `src/bathos/session_start.py` and MCP tool `session_start`).
+- **Contract**: Emits `{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "..."}}` with a brief summary of active defect ranges, `needs-recheck` findings, and settled/open findings; capped at ≤ 2 KB; never includes superseded or void items.
 
 ---
 
@@ -405,15 +408,15 @@ Where `ValidityResult` contains: `state` (`current` | `suspect` | `unverifiable`
 
 Based on code reconnaissance, the following design decisions are recommended for Phase 3:
 
-1. **Registry Storage & Structure**:
-   Store defect declarations as `.toml` files under `.bth/instruments/` (project-local) and support user-global entries at `${XDG_CONFIG_HOME:-~/.config}/bathos/instruments/`. Use existing DuckDB SQL predicate evaluation from `sidecar.py` for conditional ranges (e.g. `S > 1`).
+1. **Registry Storage & Structure (`OD-4`)**:
+   Store defect declarations as `.toml` files under `.bth/instruments/` (project-local) and support opted-in user-global entries at `${XDG_CONFIG_HOME:-~/.config}/bathos/instruments/`. Use existing DuckDB SQL predicate evaluation from `sidecar.py` for conditional ranges (e.g. `sample_s > 1`, with missing predicate fields resolving to `suspect` per `OD-2`).
 2. **Version Resolution Hierarchy**:
-   Implement the exact 4-tier fallback:
-   - Tier 1: Recorded `dependency_provenance` (when populated).
+   Implement the exact 4-tier fallback (incorporating runtime `metadata.<pkg>_version` recovery):
+   - Tier 1: Recorded `dependency_provenance` (when populated) or lock-verified `metadata.<pkg>_version`.
    - Tier 2: Verified lock hash (`git show <hash>:uv.lock` matching recorded `dependency_lock_sha256`).
-   - Tier 3: Inferred from commit (`uv.lock` at `git_hash` without hash match; dirty trees capped at `suspect`).
+   - Tier 3: Inferred from commit (`metadata.<pkg>_version` or `uv.lock` at `git_hash` without hash match; capped at `suspect` unless `hide_inferred = true` per `OD-1`).
    - Tier 4: Unknown.
 3. **Choke Point Cache**:
-   Materialize derived validity into a derived SQLite/DuckDB table or Parquet cache keyed on `(run_id, registry_hash, blast_ledger_hash, archive_ledger_hash)`. Never mutate historical run rows (conforming to Anti-Goal A2).
-4. **`run_sql` View Strategy**:
-   In `index.py` and `compact.py`, establish `runs_current` as a view over `runs_all`. Default `runs` alias points to `runs_current`. System maintenance tools (`compact`, `migrate`, `verify`, `repair`) explicitly target base tables (`runs_all`), ensuring zero disruption to internal maintenance operations.
+   Materialize derived validity into `<catalog_dir>/validity_cache.db` keyed on `inputs_hash`. Never mutate historical run rows (conforming to Anti-Goal A2).
+4. **`run_sql` View Strategy (`OD-3`)**:
+   In `index.py` (`connect_read`), expose `runs_current` as a filtered view over `runs` (excluding `void`, `affected`, `superseded`, and `archived` runs). Per `OD-3`, `runs` is **not** shadowed or renamed to `runs_all`; `runs` remains the full historical table and emits a notice banner when queried if hidden rows exist.

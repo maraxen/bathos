@@ -772,7 +772,7 @@ In this Cycle 3 Challenger Pass, every finding from the owner's final-pass audit
 | **M-d** | §1.4 "Settlement of Section 7 Open Items" settles a made-up list (7.1–7.6) instead of design §7; acknowledgment is a bare bool with no rationale audit trail; threshold justifications invent false claims instead of labeling arbitrary cutoffs. | **CONFIRMED** | Design §7 (lines 274–280) lists 6 open builder items (registry format/sharing, `run_sql` mechanism & ack field shape, `"reproduced"` definition & reopen question-matching method, why `dependency_provenance` is null, telemetry rotation thresholds, session-start byte cap & ordering). Spec §1.4 (lines 112–134) replaces several of these, specifies bare booleans `acknowledged_suspect: bool = False` (§3.6 line 421) contradicting its own hint *"with an explicit rationale"* (§3.7 line 469) and `OD-5`, and fabricates threshold rationales ("<1% of context", "jq multi-second on >10 MB") instead of marking arbitrary cutoffs as *"arbitrary, revisit after P1 dry-run"* (A6). |
 | **M-e** | P1 scope items lack tasks in §3.9 (Maraxiom `review_build` bridge is cross-repo with no task or bathos export; `graduate_product` insertion at `:364` is after the early return at `:360-362`). | **CONFIRMED** | Spec §3.4 item 12 (lines 366–367) and item 13 (lines 368–369) are in the P1 diagram, but §3.9 Tasks P1.1–P1.7 (lines 515–521) have no task for Maraxiom bridge integration or `bth-session-start-hook`. In `src/bathos/trust_ledger.py:360-362`, `if existing is not None and existing.to_state == "promoted": return existing` returns early before line 364! |
 | **M-f** | Prior-art doc (`.praxia/docs/research/261106_validity-prior-art.md`) §4.1–4.2 wasn't produced from the repos (claims repos weren't visible, uses wrong `jq` commands, contradicts recon on praxia statuses). | **CONFIRMED** | `261106_validity-prior-art.md:459-466` claims `asr`/`tev_design`/`praxia` were inaccessible; lines 482–486 give `jq -s 'length' .bth/log/*.jsonl` (which counts all 3,234 events, not run events) and `select(.dependency_lock_sha256 != null)` at top-level instead of `.data.dependency_lock_sha256`; line 440 lists praxia `status_enum` as `draft, accepted, reviewed, superseded, archived` whereas `261106_validity-surfaces-recon.md:24, 55` verified `["draft", "active", "complete", "superseded", "archived"]`. |
-| **M-g** | 117 `tev_design` runs record `metadata.aminx_version` directly (`0.2.0a1` ×53, `0.2.0a3` ×12, `0.2.1` ×49, `0.2.1+armask` ×3), including PEP 440 local version `+armask`, which the 4-tier hierarchy ignores. | **CONFIRMED** | Verified via live `jq` query on `tev_design/.bth/log/*.jsonl`: 117 runs have `.data.metadata.aminx_version` (`53` `0.2.0a1`, `12` `0.2.0a3`, `49` `0.2.1`, `3` `0.2.1+armask`). Spec §1.3.C (lines 67–79) ignores `metadata.<pkg>_version` and never specifies how PEP 440 local version identifiers (`+armask`) are compared against `ECOSYSTEM` intervals. |
+| **M-g** | 117 `tev_design` run events (36 distinct runs) record `metadata.aminx_version` directly (`0.2.0a1` ×53 events / 13 runs, `0.2.0a3` ×12 / 4, `0.2.1` ×49 / 17, `0.2.1+armask` ×3 / 1, `0.4.0` ×1 / 1), including PEP 440 local version `+armask`, which the 4-tier hierarchy ignores. | **CONFIRMED** | Verified via live query on `tev_design/.bth/log/*.jsonl`: 117 run events across 36 distinct run entities have `.data.metadata.aminx_version` (`0.2.0a1`: 53 events / 13 runs; `0.2.0a3`: 12 events / 4 runs; `0.2.1`: 49 events / 17 runs; `0.2.1+armask`: 3 events / 1 run; `0.4.0`: 1 event / 1 run), plus `scores_aminx_version` (3 runs), `tev_pinned_aminx_wheel` (3 runs), `aminx_installed_dist_version` (7 runs). Spec §1.3.C (lines 67–79) ignores `metadata.<pkg>_version` and never specifies how PEP 440 local version identifiers (`+armask`) are compared against `ECOSYSTEM` intervals. |
 | **M-h** | Leftover inconsistencies across spec and recon (`--include-superseded` vs `--allow-hidden`; `RESULT_VOID (or RESULT_HIDDEN)` in `cite`; recon `mcp.py` line numbers vs spec; recon sidecar total 487 vs 209+130 / 357+130). | **CONFIRMED** | Spec §1.4 line 106 & §3.4 line 349 use `--allow-hidden` while §1.2 line 32 & §3.6 use `--include-superseded`; §3.4 item 5 (line 351) says `refuse with BathosErrorCode.RESULT_VOID (or RESULT_HIDDEN)` leaving the exact code ambiguous; `261106_validity-surfaces-recon.md:21` states 487 sidecars (`357` in `asr` + `130` in `tev_design` = `487`), while `:72` counts only `asr/scripts` (`209`), creating an unexplained `487` vs `209+130` discrepancy; recon `:322-386` retains stale `mcp.py` line numbers (`2370`, `2442`, `2320`). |
 
 ---
@@ -851,9 +851,9 @@ In this Cycle 3 Challenger Pass, every finding from the owner's final-pass audit
 
 ---
 
-##### Finding B3-5 (S5): SessionStart Hook Emits `{"systemMessage": ...}` Which Only Reaches the User UI, Never Agent Context
+##### Finding B3-5 (S5): SessionStart Hook Emits `{"systemMessage": ...}` Which Only Reaches the User UI, Never Agent Context, and Omits `.praxia/manifest.toml`
 - **Severity**: **BLOCKING**
-- **Spec Section**: §1.4 item 7.5 (line 123), §4.5 (lines 661–663), §4.8 (AC-P2-07).
+- **Spec Section**: §1.4 item 7.5 (line 123), §3.4 item 13 (lines 368–369), §4.5 (lines 661–691), §4.8 (AC-P2-07, AC-P2-15), §4.9 (Task P2.5).
 - **Evidence**:
   - Spec §4.5 states: *"Claude Code hooks require a structured JSON envelope on stdout: `{"systemMessage": "..."}`. Emitting raw text crashes the Claude Code hook parser."*
   - As documented in `src/bathos/hooks/preflight_hook.py:21` (`preflight warn (exit 0): {"systemMessage": "..."}, shown to the user, not a deny`) and Claude Code's hooks specification:
@@ -867,7 +867,8 @@ In this Cycle 3 Challenger Pass, every finding from the owner's final-pass audit
         }
       }
       ```
-- **Why It Matters**: Goal G5 ("A short, byte-capped 'current beliefs' view surfaced at session start" so agents don't re-litigate settled questions or cite void runs) completely fails if the agent never sees the output!
+  - Additionally, `.praxia/manifest.toml:96-100` is the source-of-truth manifest (`[[plugin.hook_specs]]`) from which `cisternal` generates `plugin/hooks/hooks.json` (`src/bathos/hooks/preflight_hook.py:3`). Spec §4.5 and Task P2.5 edit `plugin/hooks/hooks.json` directly without adding `[[plugin.hook_specs]]` to `.praxia/manifest.toml`, so the next plugin bundle export would overwrite `hooks.json` and wipe the `SessionStart` hook.
+- **Why It Matters**: Goal G5 ("A short, byte-capped 'current beliefs' view surfaced at session start" so agents don't re-litigate settled questions or cite void runs) completely fails if the agent never sees the output, or if the hook registration is wiped on plugin export!
 - **Required Resolution**:
   1. Update §1.4 item 7.5, §4.5, and AC-P2-07 so `bth-session-start-hook` outputs:
      ```json
@@ -880,6 +881,7 @@ In this Cycle 3 Challenger Pass, every finding from the owner's final-pass audit
      ```
      (or plain stdout on exit 0, with the `hookSpecificOutput.additionalContext` JSON envelope preferred for structured compatibility).
   2. Remove the false statement that raw text crashes the Claude Code SessionStart hook parser.
+  3. In §4.5, AC-P2-15, and Task P2.5, specify registering `[[plugin.hook_specs]]` (`event = "SessionStart"`, `matcher = ".*"`, `script = "bth-session-start-hook"`, `surfaces = ["claude"]`) in `.praxia/manifest.toml` alongside `plugin/hooks/hooks.json`.
 
 ---
 
@@ -974,20 +976,25 @@ In this Cycle 3 Challenger Pass, every finding from the owner's final-pass audit
 
 ---
 
-##### Finding M3-4 (M-b): CLI and FastMCP Tool Signatures in §3.6 Break Existing `bth ls`, `bth find`, `bth show`, and `bth cite` Commands
+##### Finding M3-4 (M-b): CLI and FastMCP Tool Signatures in §3.6 & §4.6 Break Existing `bth ls`, `bth find`, `bth show`, `bth cite`, and `bth restore`, and Omit Dual-Registry Wiring & Write-Token Auth
 - **Severity**: **MAJOR**
-- **Spec Section**: §3.6 (lines 386–445).
+- **Spec Section**: §3.6 (lines 386–445), §3.9 (Task P1.4), §4.6 (lines 708–751), §4.9 (Task P2.5), §5.6 (lines 886–909), §5.9 (Task P3.5).
 - **Evidence**:
   - Inspecting `src/bathos/mcp.py`:
-    - Line 329: `@cisternal.tool(registry="bathos-cli", name="list_runs", cli_name="ls")` with `(catalog_dir: str = "", limit: int = 20, project: str = "", since: str = "", status: str = "")` plus short flag annotations `-n`/`-p` (`:393-398`) and MCP wrapper `mcp_list_runs_tool` (`:2481`).
-    - Line 401: `@cisternal.tool(registry="bathos-cli", name="find_runs", cli_name="find")` (top-level `bth find`, no `cli_group="run"`), plus `mcp_find_runs_tool` (`:2462`).
-    - Line 456: `@cisternal.tool(registry="bathos-cli", name="get_run", cli_name="show")` with `(run_id: str = "", catalog_dir: str = "")` (top-level `bth show`, no `cli_group="run"`), plus `mcp_get_run_tool` (`:2491`).
-    - Line 2500: `@cisternal.tool(registry="bathos-cli", name="cite_run", cli_name="cite")` (top-level `bth cite`, no `cli_group="run"`), plus `mcp_cite_run_tool` (`:2526`).
-  - Spec §3.6 adds `cli_group="run"` to all four tools, changes `cli_name="ls"` to `cli_name="list"`, changes `limit=20` to `limit=50`, drops `since: str = ""` from `list_runs_tool`, and omits the `registry="bathos"` async MCP tool wrappers.
-- **Why It Matters**: Implementing §3.6 literally would remove top-level `bth ls`, `bth find`, `bth show`, and `bth cite` from the CLI, breaking every existing user workflow, skill, and CLI test in bathos!
+    - Line 329: `@cisternal.tool(registry="bathos-cli", name="list_runs", cli_name="ls")` with `(catalog_dir: str = "", limit: int = 20, project: str = "", since: str = "", status: str = "")` plus short flag annotations `-n`/`-p` (`:393-398`) and MCP wrapper `mcp_list_runs_tool` (`:2471`).
+    - Line 401: `@cisternal.tool(registry="bathos-cli", name="find_runs", cli_name="find")` (top-level `bth find`, no `cli_group="run"`), plus `mcp_find_runs_tool` (`:2481`).
+    - Line 456: `@cisternal.tool(registry="bathos-cli", name="get_run", cli_name="show")` with `(run_id: str = "", catalog_dir: str = "")` (top-level `bth show`, no `cli_group="run"`), plus `mcp_get_run_tool` (`:2492`).
+    - Line 2500: `@cisternal.tool(registry="bathos-cli", name="cite_run", cli_name="cite")` (top-level `bth cite`, no `cli_group="run"`), plus `mcp_cite_run_tool` (`:2528`).
+    - Line 1437: `@cisternal.tool(registry="bathos-cli", name="restore", cli_name="restore")` (`restore_tool`) and `mcp_restore_tool` (`:3186`) ALREADY exist! Spec §5.6 (lines 898–902) defines a duplicate `archive_restore_tool` (`name="archive_restore", cli_group="archive", cli_name="restore"`), which collides with or duplicates the existing `restore` tool.
+  - Spec §3.6 adds `cli_group="run"` to all four query/cite tools, changes `cli_name="ls"` to `cli_name="list"`, changes `limit=20` to `limit=50`, drops `since: str = ""` from `list_runs_tool`, and omits the `@cisternal.tool(registry="bathos", ...)` async MCP tool wrappers and `src/bathos/mcp.py:6145` `_WIRED = cisternal.wire(app, registry="bathos", expected=[...])` list!
+  - Furthermore, mutating MCP tools in `src/bathos/mcp.py:236-280` require `@require_write_token` (with `token: str = ""`) or `@require_write_token_when_applying` (for tools with `apply: bool = False` like `archive_sweep`), which the spec completely omits on `defect_declare`, `finding_create`, `supersede_edge_add`, `archive_sweep`, and `telemetry_rotate`.
+  - Finally, `tests/test_errors.py:56-64` (`test_every_domain_exception_has_registered_code`) AST-scans `src/bathos/` and fails if any raised domain exception class is missing from `EXCEPTION_TO_CODE` in `src/bathos/errors.py:278-375`.
+- **Why It Matters**: Implementing §3.6, §4.6, and §5.6 literally would remove top-level `bth ls`, `bth find`, `bth show`, and `bth cite`, raise `CisternalWireError` on `bth-mcp` startup (`mcp.py:6145`), bypass MCP write-token security (debt #619), duplicate `bth restore`, and fail `tests/test_errors.py` if any new domain exception is raised!
 - **Required Resolution**:
   1. Preserve the exact existing decorator arguments (`cli_name="ls"`, `cli_name="find"`, `cli_name="show"`, `cli_name="cite"` with **no** `cli_group="run"`), parameter defaults (`limit: int = 20`, `since: str = ""`), and parameter order in `src/bathos/mcp.py`, appending only the new optional parameters (`include_superseded: bool = False`, `ack_suspect: str = ""`, `ack_unverifiable: str = ""`).
-  2. Explicitly specify updating the corresponding `@cisternal.tool(registry="bathos", ...)` async MCP wrappers (`mcp_list_runs_tool`, `mcp_find_runs_tool`, `mcp_get_run_tool`, `mcp_cite_run_tool`) so MCP callers receive the new parameters too.
+  2. Reuse the existing `restore_tool` (`mcp.py:1437`) / `mcp_restore_tool` (`:3186`) (adding an optional `bth archive restore` alias if desired) rather than registering a conflicting `archive_restore` tool with a missing `project_root` / `stub_path` signature.
+  3. Specify both the sync `@cisternal.tool(registry="bathos-cli", ...)` functions (registered in `cli_cyclopts.py:60` `expected=[...]`) AND the async `@cisternal.tool(registry="bathos", ...)` `@traced_tool` wrappers (registered in `mcp.py:6145` `expected=[...]`), decorating write tools (`defect_declare`, `finding_create`, `supersede_edge_add`, `telemetry_rotate`) with `@require_write_token` (`token: str = ""`) and `archive_sweep` with `@require_write_token_when_applying`.
+  4. Require any new domain exception class raised in `src/bathos/` to be registered in `EXCEPTION_TO_CODE` (`src/bathos/errors.py`) so `test_every_domain_exception_has_registered_code` passes.
 
 ---
 
@@ -1027,22 +1034,35 @@ In this Cycle 3 Challenger Pass, every finding from the owner's final-pass audit
 
 ---
 
-##### Finding M3-7 (M-e): Missing Fixer Tasks for Maraxiom Bridge & Hook Wiring in P1, and Buggy `graduate_product` Insertion Line (`trust_ledger.py:364`)
+##### Finding M3-7 (M-e): Missing Fixer Tasks for Maraxiom Bridge & Hook Wiring in P1, Buggy `graduate_product` Insertion Line (`trust_ledger.py:364`), `ResolvedPin` Schema Gap, and Unfiltered `run_union_gate` / `validate_claim` Covering Queries
 - **Severity**: **MAJOR**
-- **Spec Section**: §3.4 item 10 (lines 362–363), item 12 (lines 366–367), item 13 (lines 368–369), §3.9 (lines 500–522).
+- **Spec Section**: §3.4 items 6–10 & 12–13 (lines 352–370), §3.9 (lines 500–522).
 - **Evidence**:
-  - In `src/bathos/trust_ledger.py:360-362`:
+  - **1. `graduate_product` early return (`src/bathos/trust_ledger.py:360-362`)**:
     ```python
     existing = latest_ledger_record(catalog_dir, content_hash)
     if existing is not None and existing.to_state == "promoted":
         return existing
     ```
     Spec §3.4 item 10 instructs inserting the `resolve_validity` check at **line 364**—which is *after* the idempotency early return at lines 360–362! If a product was previously promoted from a run that is now `void`, calling `graduate_product` again returns the `promoted` record at line 362 without refusing! Furthermore, `graduate_product` takes `run_id: str | None = None` (`:314`); if `run_id` is `None`, `graduate_product` must also look up producing runs for `content_hash` (via `_find_runs_with_output_sha256` / `attestation.run_id`).
-  - Spec §3.4 item 12 lists `maraxiom/src/maraxiom/bathos_bridge.py:1240` (`review_build` refusal), which is in a separate repository (`maraxiom`), but §3.9 Tasks P1.1–P1.7 contain no task to export a bathos bridge helper or coordinate the maraxiom check.
-- **Why It Matters**: Placing the check at line 364 in `trust_ledger.py` allows already-promoted void products to bypass `graduate_product` refusal, and omitting P1 tasks for all 13 surfaces leaves fixer subagents with unowned scope.
+  - **2. `ResolvedPin` frozen dataclass (`src/bathos/readback.py:96-105`)**:
+    Spec §3.4 item 8 (line 359) says: *"populate `validity_state` with defect summary"*, and `resolve_pin_tool` (`src/bathos/mcp.py:575`) returns `dataclasses.asdict(pin)`. However, `ResolvedPin` (`readback.py:97-105`) only has fields `(run_id, output_path, content_hash, trust_state, fresh, live_content_hash)`—it has no `validity_state` or `validity_reason` field!
+  - **3. `validate_claim`, `attest_parity`, `run_union_gate`, and `differential_confound_check` (`src/bathos/claim.py`)**:
+    - Spec §3.4 item 6 (line 353) says *"In `validate_claim()` (line 248), call `resolve_validity(member_ids)`"*, but `validate_claim(claim, db, workspace_root)` (`src/bathos/claim.py:232-236`) has **no `campaign_id` or `member_ids` parameter**! Instead, `validate_claim` queries `runs` for `parity_run_id` at lines 344–347 (`SELECT outcome, parity_run_type FROM runs WHERE id=? OR id LIKE ?`). Similarly, `attest_parity` (`claim.py:1063-1066`) binds `parity_run_id` without checking `resolve_validity([parity_run_id])`.
+    - In `conclude_campaign` (`src/bathos/campaigns.py:1298`), Union Gate only runs `if claim_path_rel and registered_sha:`. If a campaign has no registered claim file, a check put only inside Union Gate is completely skipped! And inside `run_union_gate` (`claim.py:932-940`) and `differential_confound_check` (`claim.py:851-859`), covering runs are queried via `JOIN runs r ON cr.run_id = r.id` without filtering out hidden runs (`runs_current`).
+  - **4. Missing P1 tasks for Surfaces 12 & 13**:
+    Spec §3.4 item 12 (lines 366–367) lists `maraxiom/src/maraxiom/bathos_bridge.py:1240` (`review_build` refusal) and item 13 lists `SessionStart`, but §3.9 Tasks P1.1–P1.7 contain no task to export a bathos bridge helper or wire the maraxiom check.
+- **Why It Matters**:
+  - Placing the check at line 364 in `trust_ledger.py` allows already-promoted void products to bypass `graduate_product` refusal.
+  - `ResolvedPin` raises `TypeError: ResolvedPin.__init__() got an unexpected keyword argument 'validity_state'`.
+  - Unclaimed campaigns can conclude with `void` member runs, and `validate_claim` / `attest_parity` can accept a `void` baseline parity run!
 - **Required Resolution**:
   1. In §3.4 item 10 (`src/bathos/trust_ledger.py:308`), specify inserting the `resolve_validity` check **before** line 360 (`latest_ledger_record`), checking both the passed `run_id` and any producing `run_id` recorded on `existing` or resolved from `content_hash` / `attestation`. If all producing runs are hidden, refuse with `GraduationRefused` (`BathosErrorCode.GRADUATION_REFUSED`).
-  2. In §3.4 item 12 and §3.9 Task P1.6, specify the bathos-side exported function (e.g., `bathos.readback.verify_run_drawable(run_id, catalog_dir)` or `get_run(..., include_superseded=False)` raising `RESULT_HIDDEN`) that `maraxiom.bathos_bridge.get_run_record` calls, and clearly scope the cross-repo maraxiom follow-up.
+  2. In §3.4 item 8 (`src/bathos/readback.py:96-105`), explicitly add `validity_state: str = "current"` and `validity_reason: str | None = None` to the `ResolvedPin` dataclass.
+  3. In §3.4 items 6 & 7:
+     - In `validate_claim` (`src/bathos/claim.py:344`) and `attest_parity` (`claim.py:1063`), check `resolve_validity([parity_run_id])` and refuse if `parity_run_id` is hidden.
+     - In `conclude_campaign` (`src/bathos/campaigns.py:1280`), resolve validity for **all** campaign member runs (`union_campaign_member_ids`) unconditionally before the `if claim_path_rel and registered_sha:` block, refusing conclusion (or requiring `--ack-suspect`/`--ack-unverifiable` for suspect/unverifiable runs) even when no claim file is bound; and in `run_union_gate` (`claim.py:932`) and `differential_confound_check` (`claim.py:851`), restrict covering runs to `runs_current` (non-hidden runs).
+  4. In §3.4 item 12 and §3.9 Task P1.6, specify the bathos-side exported function (e.g., `bathos.readback.verify_run_drawable(run_id, catalog_dir)` or `get_run(..., include_superseded=False)` raising `RESULT_HIDDEN`) that `maraxiom.bathos_bridge.get_run_record` calls, and clearly scope the cross-repo maraxiom follow-up.
 
 ---
 
@@ -1065,14 +1085,16 @@ In this Cycle 3 Challenger Pass, every finding from the owner's final-pass audit
 - **Severity**: **MAJOR**
 - **Spec Section**: §1.3.C (lines 67–79), §3.2.A (lines 237–242).
 - **Evidence**:
-  - Live query on `tev_design/.bth/log/*.jsonl` shows **117 runs** explicitly record `metadata.aminx_version`:
-    - `0.2.0a1`: 53 runs
-    - `0.2.0a3`: 12 runs
-    - `0.2.1`: 49 runs
-    - `0.2.1+armask`: 3 runs
+  - Live query on `tev_design/.bth/log/*.jsonl` shows **117 run events across 36 distinct run entities** explicitly record `metadata.aminx_version` (plus 1 run started after the earlier probe):
+    - `0.2.0a1`: 53 events (13 distinct runs)
+    - `0.2.0a3`: 12 events (4 distinct runs)
+    - `0.2.1`: 49 events (17 distinct runs)
+    - `0.2.1+armask`: 3 events (1 distinct run)
+    - `0.4.0`: 1 event (1 distinct run)
+    (In addition, 7 runs record `aminx_installed_dist_version`, 3 record `tev_pinned_aminx_wheel`, and 3 record `scores_aminx_version`.)
   - Spec §1.3.C's 4-tier hierarchy checks only `dependency_provenance` $\rightarrow$ `verified-from-lock` $\rightarrow$ `inferred-from-commit` $\rightarrow$ `unknown`, ignoring `metadata.<pkg>_version`.
   - Furthermore, `0.2.1+armask` is a PEP 440 local version (`packaging.version.Version("0.2.1+armask") > Version("0.2.1")`). Under standard `packaging.version`, if a defect has `fixed = "0.2.1"`, `0.2.1+armask` is `>= 0.2.1` (fixed), whereas if a defect has `last_affected = "0.2.1"`, `Version("0.2.1+armask") > Version("0.2.1")` unless `.base_version` or PEP 440 local-version comparison rules are specified.
-- **Why It Matters**: Ignoring `metadata.aminx_version` discards direct runtime-recorded version evidence on 117 runs, and unspecifed PEP 440 local version comparison (`+armask`) risks misclassifying custom-patched wheels.
+- **Why It Matters**: Ignoring `metadata.aminx_version` discards direct runtime-recorded version evidence on 36 distinct runs (117 events), and unspecified PEP 440 local version comparison (`+armask`) risks misclassifying custom-patched wheels.
 - **Required Resolution**:
   1. In §1.3.C and `src/bathos/version_resolver.py`, incorporate `metadata.<pkg>_version` (when present in `run.metadata`, e.g., `metadata.aminx_version`, cross-checked against lockfile or tagged `recorded-in-metadata` / `inferred-from-commit` depending on lock verification).
   2. Explicitly specify that `ECOSYSTEM = "PyPI"` interval comparisons use `packaging.version.Version` with `[introduced, fixed)` half-open interval semantics (`Version(introduced) <= v < Version(fixed)`), and define how PEP 440 local versions (e.g. `0.2.1+armask`) are compared (comparing `Version(v)` directly or stripping local segment via `Version(v.base_version)` unless the range boundary itself specifies a local version).
@@ -1142,14 +1164,16 @@ In this Cycle 3 Challenger Pass, every finding from the owner's final-pass audit
 
 ---
 
-##### Finding m3-4: Reopen Guard Question Matching Scope on New Experiments (Design §4 D7 / §7)
+##### Finding m3-4: Reopen Guard Question Matching Scope on New Experiments (Design §4 D7 / §7) and `STAGE_TO_EPISTEMIC_TIER` Integration With `sidecar.py`
 - **Severity**: **MINOR**
-- **Spec Section**: §1.4 item 7.4 (lines 119–120), §4.4.C (lines 637–647).
+- **Spec Section**: §1.4 item 7.4 (lines 119–120), §4.2.B (lines 541–562), §4.4.C (lines 637–647).
 - **Evidence**:
   - Design §4 D7 states: *"Re-opening guard: creating a finding or experiment whose `question` matches a settled finding prints the settled answer and requires an explicit 'reopen because …' reason. (Targets 'twice proposed as new work', E14.) Matching method is a builder's call; exact-slug first."*
   - Cycle 1 Finding M6 rightly noted that reopening a finding at raw `bth run` time should not prematurely mark the existing settled finding `superseded`. However, completely removing the reopen check from experiment scaffolding/sidecars (`bth new-experiment` or optional `[experiment] question_slug` in `.bth.toml` sidecars) means an agent scaffolding a new experiment on a settled question receives no warning until after the experiment finishes and it calls `bth findings create`.
+  - Additionally, in `src/bathos/sidecar.py:570-578`, `parse_sidecar` checks `stage_name in CANONICAL_STAGES` and coerces any unrecognized `stage_name` to `"exploration"`, while keeping `sidecar.stage_name_declared: bool` and `sidecar.stage_name_raw: str | None` (`:591-592`). Spec §4.2.B (lines 556–561) defines `resolve_epistemic_tier(stage_name, sidecar_class)` without consulting `stage_name_declared` or `stage_name_raw` (and without adding `"spike"` to `CANONICAL_STAGES` / `EPISTEMIC_CLASSES` at `sidecar.py:461-470`), so an undeclared stage (which `parse_sidecar` defaults to `stage_name="exploration"`) would resolve to `"exploratory"` instead of `"undeclared"` (`AC-P2-03`), and `"confirmatory"`/`"power"` would be coerced to `"exploration"` before `resolve_epistemic_tier` sees them (`AC-P2-12`)!
 - **Required Resolution**:
-  - Keep supersession state transitions strictly on `finding_create` / finding settlement (preserving M6's fix so raw runs never mutate finding status), AND allow sidecars/`bth new-experiment` to optionally declare `question_slug`: if declared and matching a `settled` finding, `bth run` / `bth preflight` prints the settled finding's answer as a warning (or requires `--reopen-reason` / sidecar `reopen_reason` without mutating the settled finding).
+  1. Keep supersession state transitions strictly on `finding_create` / finding settlement (preserving M6's fix so raw runs never mutate finding status), AND allow sidecars/`bth new-experiment` to optionally declare `question_slug` (added to `EXPERIMENT_KEYS` in `sidecar.py:542`): if declared and matching a `settled` finding, `bth run` / `bth preflight` prints the settled finding's answer as a warning (or requires `--reopen-reason` / sidecar `reopen_reason` without mutating the settled finding).
+  2. In §4.2.B (`src/bathos/sidecar.py:461-470, 570-593`), add `"spike"` to `CANONICAL_STAGES` and `EPISTEMIC_CLASSES`, and specify that `resolve_epistemic_tier` inspects `stage_name_declared` and `stage_name_raw` (returning `"undeclared"` when `not stage_name_declared` and mapping `stage_name_raw in ("confirmatory", "power")` to `"confirmatory"`).
 
 ---
 
@@ -1158,3 +1182,292 @@ In this Cycle 3 Challenger Pass, every finding from the owner's final-pass audit
 **Verdict**: **CHANGES_REQUIRED (BLOCKED — 7 Blocking, 10 Major, 4 Minor findings)**.
 
 The specification `.praxia/docs/specs/261106_result-validity-supersession-archive.md` (v0.3.0) **cannot** proceed to implementation until the Defender + Revise pass resolves all 7 Blocking findings (`B3-1`–`B3-7`), all 10 Major findings (`M3-1`–`M3-10`), and the 4 Minor findings (`m3-1`–`m3-4`), incorporating all 6 owner decisions (`OD-1` through `OD-6`) with `(owner: 2026-11-06)` provenance.
+
+
+---
+
+## Cycle 3: Defender Pass
+
+- **Date**: 2026-11-08
+- **Role**: Defender & Spec Revision Pass (Cycle 3)
+- **Target Specification**: `.praxia/docs/specs/261106_result-validity-supersession-archive.md` (bumped `0.3.0` $\rightarrow$ `0.4.0`)
+- **Companion Documents Updated**:
+  - `.praxia/docs/research/261106_validity-prior-art.md`
+  - `.praxia/docs/research/261106_validity-surfaces-recon.md`
+- **Owner Decisions Integrated**: `OD-1` through `OD-6` (`(owner: 2026-11-06)`)
+
+---
+
+### 1. Summary of Cycle 3 Dispositions
+
+All **21 findings** from the Cycle 3 Challenger Pass (**7 Blocking**: `B3-1`–`B3-7`, **10 Major**: `M3-1`–`M3-10`, **4 Minor**: `m3-1`–`m3-4`) and all **6 settled owner decisions** (`OD-1`–`OD-6`) have been accepted and resolved in `.praxia/docs/specs/261106_result-validity-supersession-archive.md` (v0.4.0) and the two companion research documents.
+
+| Finding ID | Severity | Owner Decision / Item | Disposition | Spec v0.4.0 / Research Doc Location |
+|---|---|---|---|---|
+| **B3-1** | **BLOCKING** | `S1` + `OD-2` | **ACCEPTED & RESOLVED** | Spec §1.4.A `OD-2` (line 113), §2.1 step 4 Case B (lines 234–244), §3.2.A (lines 354–356), §3.8 AC-P1-01 & AC-P1-02 (lines 813–814), §3.9.A test 1 (lines 839–842) |
+| **B3-2** | **BLOCKING** | `S2` + `OD-1` | **ACCEPTED & RESOLVED** | Spec §1.2 Invariant I3 (line 35), §1.3.B (lines 65, 69), §1.4.A `OD-1` (line 112), §2.1 step 4 (lines 232–244), §3.2.A (line 341), §3.6 `defect_declare_tool` (lines 727, 748), §3.8 AC-P1-03 (line 815), §5.5 Step 1 (lines 1300–1307), §5.8 AC-P3-05 (line 1405) |
+| **B3-3** | **BLOCKING** | `S3` | **ACCEPTED & RESOLVED** | Spec §1.4.C item 5 (lines 149–151), §5.2.A item 5 (line 1247), §5.4 (lines 1286–1291), §5.8 AC-P3-08 (line 1408), §5.9.A test 1 & R-P3-1 (lines 1420–1421, 1434), §6.2 (lines 1476–1493) |
+| **B3-4** | **BLOCKING** | `S4` + `OD-4` | **ACCEPTED & RESOLVED** | Spec §2.2.A–C (lines 252–318), §3.8 AC-P1-13 & AC-P1-14 (lines 825–826), §3.9.A test 3 & R-P1-2 (lines 847–848, 858) |
+| **B3-5** | **BLOCKING** | `S5` | **ACCEPTED & RESOLVED** | Spec §1.2 Invariant I4 (line 37), §1.4.C item 6 (lines 152–155), §3.4 item 13 (lines 573–574), §4.5 (lines 1019–1047), §4.8 AC-P2-07 & AC-P2-15 (lines 1186, 1194), §4.9.A test 4 & R-P2-1 (lines 1209–1215), §4.10 Task P2.5 (line 1226) |
+| **B3-6** | **BLOCKING** | `S6` | **ACCEPTED & RESOLVED** | Spec §2.1 steps 3–4 (lines 214–246), §3.2.A (lines 336–417), §3.6 `defect_declare_tool` (lines 718–756), §3.8 AC-P1-19 (line 831), §3.9.A test 2 (lines 843–845), §3.10 Task P1.2 (line 882) |
+| **B3-7** | **BLOCKING** | `S7` + `OD-4` | **ACCEPTED & RESOLVED** | Spec §1.3.C (lines 75–95), §1.4.A `OD-4` (line 115), §1.4.C item 1 (lines 136–139), §2.1 (lines 194–203), §3.2.B (lines 419–427) |
+| **M3-1** | **MAJOR** | `OD-5` | **ACCEPTED & RESOLVED** | Spec §1.3.B (lines 69–70), §1.4.A `OD-5` (line 116), §1.4.C item 2 (line 142), §3.2.C `acknowledgment_ledger` (lines 428–443), §3.4 items 5–7 & 10 (lines 532–566), §3.6 `cite_run_tool` (lines 686–710, 779), §3.7 (lines 794–795, 805–806), §3.8 AC-P1-08 (line 820) |
+| **M3-2** | **MAJOR** | `OD-6` | **ACCEPTED & RESOLVED** | Spec §1.3.A (lines 50–59), §1.4.A `OD-6` (line 117), §2.1 step 4 (lines 224–226), §3.2.C (lines 428–443), §3.4 items 6, 7, 11 (lines 538–552, 567–569), §3.8 AC-P1-18 (line 830), §4.4.B item 3 (line 1011), §4.6 `finding_create_tool` (lines 1055–1082), §4.8 AC-P2-16 (line 1195) |
+| **M3-3** | **MAJOR** | `M-a` + `OD-3` | **ACCEPTED & RESOLVED** | Spec §1.4.A–B (lines 104–134), §3.8 AC-P1-13 (line 825), §3.9 P1 Test Plan & Risks (lines 835–859), §4.9 P2 Test Plan & Risks (lines 1199–1217), §5.9 P3 Test Plan & Risks (lines 1416–1436) |
+| **M3-4** | **MAJOR** | `M-b` | **ACCEPTED & RESOLVED** | Spec §3.6 (lines 590–780), §3.7 (lines 784–797), §3.10 Tasks P1.1 & P1.4 (lines 881, 884), §4.6 (lines 1050–1154), §4.10 Task P2.5 (line 1226), §5.2.B step 4 (line 1264), §5.6 (lines 1323–1377), §5.10 Task P3.5 (line 1445) |
+| **M3-5** | **MAJOR** | `M-c` | **ACCEPTED & RESOLVED** | Spec §2.1 step 1 (lines 205–211), §3.2.D item 3 (lines 452–453), §5.2.B step 3 (line 1256), §5.8 AC-P3-09 (line 1409) |
+| **M3-6** | **MAJOR** | `M-d` | **ACCEPTED & RESOLVED** | Spec §1.4.C items 1–7 (lines 135–162), §3.5 `reproduction_count` (line 584) |
+| **M3-7** | **MAJOR** | `M-e` | **ACCEPTED & RESOLVED** | Spec §3.4 items 6, 7, 8, 10, 12 (lines 538–572), §3.10 Tasks P1.5 & P1.6 (lines 885–886) |
+| **M3-8** | **MAJOR** | `M-f` | **ACCEPTED & RESOLVED** | `.praxia/docs/research/261106_validity-prior-art.md` §3.3 (lines 434–450) & §4.1–4.2 (lines 454–478) |
+| **M3-9** | **MAJOR** | `M-g` | **ACCEPTED & RESOLVED** | Spec §1.3.C (lines 73–101), §3.9.A test 1 (line 840), §3.10 Task P1.3 (line 883) |
+| **M3-10** | **MAJOR** | `M7` regression | **ACCEPTED & RESOLVED** | Spec §5.2.B steps 3–4 (lines 1252–1265), §5.8 AC-P3-02 & AC-P3-03 (lines 1402–1403), §5.9.A test 2 (lines 1422–1425), §5.10 Task P3.1 (line 1441) |
+| **m3-1** | **MINOR** | `M-h` | **ACCEPTED & RESOLVED** | Spec §1.2 Invariant I1 (line 31), §1.4.B item 4 (lines 131–133), §3.4 `HIDDEN_STATE_TO_ERROR_CODE` & items 3–7 (lines 505–552), §3.6 `run_sql_tool` (lines 663–684) |
+| **m3-2** | **MINOR** | `run_sql` regex | **ACCEPTED & RESOLVED** | Spec §1.4.B item 4 `_RAW_RUNS_RE` (lines 125–129), §3.4 item 4 (line 531), §3.8 AC-P1-15 (line 827) |
+| **m3-3** | **MINOR** | `M-h` | **ACCEPTED & RESOLVED** | `.praxia/docs/research/261106_validity-surfaces-recon.md` §3 E9 (lines 68–77), §6 (lines 324–404), & §7 (lines 411–422) |
+| **m3-4** | **MINOR** | Reopen + `sidecar.py` | **ACCEPTED & RESOLVED** | Spec §1.4.C item 3 (line 145), §4.2.A–B (lines 898–952), §4.4.C items 1–2 (lines 1013–1016), §4.8 AC-P2-03, AC-P2-05, AC-P2-12 (lines 1182, 1184, 1191) |
+
+---
+
+### 2. Detailed Point-by-Point Defender Responses
+
+#### A. Blocking Findings (`B3-1` through `B3-7`)
+
+##### Response to B3-1 (`S1` + `OD-2`): Defect Predicate Evaluation Violates `OD-2` and Fails to Match Flagship `aminx <= 0.1.0a22` Runs
+- **Disposition**: **ACCEPTED & RESOLVED**
+- **What Changed**:
+  1. Removed `[entries.predicate.defaults]` and `COALESCE(try_cast(json_extract(metadata, '$.sample_s') AS DOUBLE), 0.0) > 1.0` ("missing evaluates to `False`") from §2.1 step 4 Case B (lines 234–244) and §3.2.A (lines 354–356).
+  2. Specified DuckDB AST `COLUMN_REF` extraction (`json_serialize_sql`, reusing `src/bathos/sidecar.py:1514-1520`) for every `[entries.predicate] condition`: before evaluating `<sql_expr>`, `resolve_validity` checks whether every referenced field `<f>` exists with a non-null value in the run's top-level columns, `run.metadata` JSON, or parsed CLI `--<f>` in `run.argv`.
+  3. Per `OD-2` `(owner: 2026-11-06)`, if **any** referenced field `<f>` is missing or null (as `sample_s` is across all 3,170 run events in `tev_design`), the run **never** silently evaluates to `False` (`current`) and **never** resolves to `void` on a missing field alone; instead it resolves to `state = "suspect"`, `reason = f"missing predicate field: {f}"` (unless `entry.hide_inferred is True` is opted in for that cohort after dry-run review per `OD-1`).
+  4. Updated `AC-P1-01` & `AC-P1-02` (§3.8 lines 813–814) and §3.9.A test 1 (lines 839–842) to test all three branches: (a) present `sample_s = 4` $\rightarrow$ `void`, (b) present `sample_s = 1` $\rightarrow$ `current`, and (c) missing `sample_s` $\rightarrow$ `suspect` with `reason = "missing predicate field: sample_s"`.
+
+##### Response to B3-2 (`S2` + `OD-1`): Inferred-Version Cap Leaves `aminx <= 0.1.0a22` Unhidden and Lacks `OD-1` `hide_inferred` Opt-In
+- **Disposition**: **ACCEPTED & RESOLVED**
+- **What Changed**:
+  1. Removed `OQ-1` from §6 and recorded `OD-1` `(owner: 2026-11-06)` in §1.4.A (line 112), §1.2 Invariant I3 (line 35), §1.3.B (lines 65, 69), and §2.1 step 4 (lines 232–244).
+  2. Added `hide_inferred: bool = False` to the `[[entries]]` schema in `.bth/instruments/<pkg>.toml` (§3.2.A line 341) and `defect_declare_tool` / `mcp_defect_declare_tool` (§3.6 lines 727, 748).
+  3. Specified in §1.2 Invariant I3, §1.3.B, and §2.1 step 4 (lines 232–244) that a defect match on `version_source == "inferred-from-commit"` (including one with a missing predicate field on an inferred cohort) caps at `state = "suspect"` (`is_hidden = False`) by default when `hide_inferred = false`, and resolves to `state = entry.severity` (`"void"`, `is_hidden = True`) when the registry entry sets `hide_inferred = true` (`AC-P1-03`, line 815).
+  4. In §5.5 Step 1 (lines 1300–1307) and `AC-P3-05` (§5.8 line 1405), specified that the P1 dry-run outputs side-by-side counts with `hide_inferred = false` vs `hide_inferred = true` (documenting the 1,574 `nolock` vs 1,596 `lock` split in `tev_design` where `<= 0.1.0a22` runs from `2026-07-15..2026-07-28` lack lock hashes), and that `hide_inferred = true` is enabled on `AMINX-2026-001` only after the owner reviews those counts.
+
+##### Response to B3-3 (`S3`): Telemetry Rotation Targets and Corrupts the Authoritative Project Run Log (`.bth/log/*.jsonl`)
+- **Disposition**: **ACCEPTED & RESOLVED**
+- **What Changed**:
+  1. Reconciled §1.4.C item 5 (lines 149–151), §5.2.A item 5 (line 1247), §5.4 (lines 1286–1291), `AC-P3-08` (§5.8 line 1408), §5.9.A test 1 & R-P3-1 (lines 1420–1421, 1434), and §6.2 (lines 1476–1493) with `src/bathos/telemetry.py:271, 448-461` and `src/bathos/runlog/resolve.py:35-38`.
+  2. Routed diagnostic telemetry (`validity.resolved`, `validity.filter_applied`, `validity.override_used`) exclusively through `bathos.telemetry.event()` into `~/.bth/catalog/logs/events.<hostname>.<pid>.jsonl`, **never** into the authoritative project runlog `<main_root>/.bth/log/*.jsonl`.
+  3. Scoped `bth telemetry rotate` (`telemetry_rotate_tool`) strictly to `~/.bth/catalog/logs/events.*.jsonl*` (`telemetry._get_default_log_dir()`), compressing closed files exceeding 10 MB or 30 days into `~/.bth/catalog/logs/archive/<year>/events_<timestamp>.jsonl.zst` and indexing them in `telemetry_index`, while enforcing as a hard invariant (`AC-P3-08`, tested by `test_telemetry_rotation_never_touches_runlog`) that `<main_root>/.bth/log/*.jsonl` runlog files are **never** rotated, compressed, truncated, or moved.
+
+##### Response to B3-4 (`S4` + `OD-4`): `validity_cache` Placement Fails on Read-Only `connect_read` Connections and `inputs_hash` Misses Edits, New Runs, and User Registry
+- **Disposition**: **ACCEPTED & RESOLVED**
+- **What Changed**:
+  1. Rewrote §2.2.A–C (lines 252–318) to match `src/bathos/index.py:468-510`, where `connect_read()` in log mode opens `duckdb.connect(":memory:")` and executes `ATTACH '<index.db>' AS idx (READ_ONLY)` (and in legacy warm mode opens `bathos.db` with `read_only=True`).
+  2. Placed `validity_cache`, `validity_cache_meta`, and `version_cache` in a dedicated derived DuckDB file `<catalog_dir>/validity_cache.db` (never inside read-only `index.db` or `bathos.db`).
+  3. Specified `compute_validity_inputs_hash(catalog_dir, con)` (§2.2.B lines 292–303) as the SHA256 over:
+     - Sorted `(canonical_path, sha256(file_bytes))` for all `.toml` files in `${XDG_CONFIG_HOME:-~/.config}/bathos/instruments/*.toml` (`OD-4`) and every registered project's `<main_root>/.bth/instruments/*.toml`, plus each project's `use_user_registry` flag;
+     - Run catalog state (`(count(*), max(rowid))` from `events`, `ingest_watermarks` offsets, and `count(*)` from `runs`);
+     - Ledger states (`(count(*), max(amended_at))` from `blast_radius_ledger`, `(count(*), max(recorded_at))` from `archived_items`, and `(count(*), max(declared_at))` from `supersession_edges`, guarded by `duckdb_tables()` for pre-existing `index.db` files per `src/bathos/index.py:500-507`).
+  4. Specified `ensure_validity_cache(catalog_dir, con)` (§2.2.C lines 304–318): before `connect_read()` returns `con`, if `validity_cache.db` is missing, `inputs_hash` mismatches, or any `runs.id` is absent from `vcache.validity_cache`, it acquires `<catalog_dir>/validity_cache.lock`, refreshes `validity_cache.db`, closes the write handle, and attaches `validity_cache.db` `READ_ONLY` as `vcache` so `runs_current` is 100% complete (`AC-P1-13`, `AC-P1-14`, §3.9.A test 3).
+
+##### Response to B3-5 (`S5`): SessionStart Hook Emits `{"systemMessage": ...}` Which Only Reaches the User UI, Never Agent Context, and Omits `.praxia/manifest.toml`
+- **Disposition**: **ACCEPTED & RESOLVED**
+- **What Changed**:
+  1. Updated §1.2 Invariant I4 (line 37), §1.4.C item 6 (lines 152–155), §3.4 item 13 (lines 573–574), §4.5 (lines 1019–1047), `AC-P2-07` & `AC-P2-15` (§4.8 lines 1186, 1194), §4.9.A test 4 & R-P2-1 (lines 1209–1215), and Task P2.5 (§4.10 line 1226).
+  2. Removed the false claim from v0.3.0 that raw text crashes Claude Code's hook parser and replaced `{"systemMessage": "..."}` (which `src/bathos/hooks/preflight_hook.py:21` documents is user-UI only) with Claude Code's context-injection JSON envelope:
+     `{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "..."}}`.
+  3. Specified registering `[[plugin.hook_specs]]` (`event = "SessionStart"`, `matcher = ".*"`, `script = "bth-session-start-hook"`, `surfaces = ["claude"]`) in `.praxia/manifest.toml:96-100` alongside `plugin/hooks/hooks.json` so `cisternal` plugin exports never wipe the hook registration.
+
+##### Response to B3-6 (`S6`): Owner Decision D1 & D10 Dropped — Missing Git Commit Ranges, `dependency_range` Blast-Radius Anchor, Propagation, and Exemption Revision Semantics
+- **Disposition**: **ACCEPTED & RESOLVED**
+- **What Changed**:
+  1. Added `revision: int = 1` and `type = "GIT"` commit ranges (`events = [{ introduced = "<sha>" }, { fixed = "<sha>" }]`) to `.bth/instruments/<pkg>.toml` (§3.2.A lines 336–417, including `AMINX-2026-003` for `e5f40cb8b..d930bbad` while pinned at `0.1.0a24` and `ASR-LG-2026-001` for `asr.lg_model` `56286cf..d4a17b3`) and to `defect_declare_tool` / `mcp_defect_declare_tool` (§3.6 lines 718–756).
+  2. Specified commit-range matching rules per D10 in §2.1 step 4 (line 222): matched via `git merge-base --is-ancestor` against `dependency_provenance.<pkg>.commit`, wheel SHA/commit metadata in `wheels/`, or `run.git_hash` when `<pkg>` is the repository's own editable package (e.g., `asr`).
+  3. Specified `blast_radius_ledger` integration in §2.1 step 3 & step 4 (lines 214–217, 245–246) and Task P1.2 (§3.10 line 882): extended `BlastRadiusRecord.anchor_kind` (`src/bathos/blast_radius.py:97`) with `"dependency_range"` and `anchor_value = "<entry_id>@r<revision>"`, reusing `propagate_to_campaigns()` (`:1200`) and `propagate_to_claims()` (`:1286`).
+  4. Specified per-revision exemption semantics (`AC-P1-19`, line 831; §3.9.A test 2, lines 843–845): clearing a flag via `bth blast-radius clear` records `to_state = "cleared"` for `anchor_value = "<entry_id>@r<revision>"`, exempting the run at `<revision>` and automatically re-evaluating if `<entry_id>`'s `revision` is incremented.
+
+##### Response to B3-7 (`S7` + `OD-4`): `resolve_validity` Cannot Map `project_slug` to Repository Root or Resolve Multi-Layer Instrument Registries
+- **Disposition**: **ACCEPTED & RESOLVED**
+- **What Changed**:
+  1. Defined deterministic batch resolution from global `index.db` runs to `main_root` in §2.1 (lines 194–203): primary lookup queries `events.main_root` (`src/bathos/index.py:60`) cross-referenced with `src/bathos/runlog/project_id.py:list_registered_roots()` (`:216`) and `src/bathos/config.py:list_registered_projects()` (`:341`). If a run's repo root is missing locally or unaffiliated (`src/bathos/runlog/ingest.py:325-327`), git subprocesses are skipped cleanly and version resolution falls back to Tier 1 (`dependency_provenance`) / Tier 3 (`metadata.<pkg>_version`) or `"unknown"` (`state = "unverifiable"` if an active defect entry exists for `<pkg>`, else `"current"`).
+  2. Implemented `OD-4` `(owner: 2026-11-06)` in §1.4.A (line 115), §1.4.C item 1 (lines 136–139), §2.1 step 4 (line 219), and §3.2.B (lines 419–427): dropped `~/.bth/instruments/`, added `.bth.toml` `[instruments] use_user_registry = true` opt-in for `${XDG_CONFIG_HOME:-~/.config}/bathos/instruments/*.toml`, and specified that project-local `<main_root>/.bth/instruments/<pkg>.toml` entries override user-global entries with the same `id`.
+
+---
+
+#### B. Major Findings (`M3-1` through `M3-10`)
+
+##### Response to M3-1 (`OD-5`): Acknowledgment Parameters Use Bare Booleans Instead of Required Rationale Strings With Append-Only Audit Records
+- **Disposition**: **ACCEPTED & RESOLVED**
+- **What Changed**:
+  1. Replaced `acknowledged_suspect: bool = False` and `acknowledged_unverifiable: bool = False` with `ack_suspect: str = ""` (`--ack-suspect "<reason>"`) and `ack_unverifiable: str = ""` (`--ack-unverifiable "<reason>"`) across `cite_run`, `claim_register`, `campaign_conclude`, and `graduate_product` (§1.3.B lines 69–70, §1.4.A `OD-5` line 116, §3.4 items 5–7 & 10 lines 532–566, §3.6 lines 686–710, 779).
+  2. Specified refusal with `BathosErrorCode.RESULT_SUSPECT_UNACKNOWLEDGED` / `RESULT_UNVERIFIABLE_UNACKNOWLEDGED` when the rationale string is empty or whitespace-only (§3.4 item 5 lines 534–535, §3.7 lines 794–795, 805–806).
+  3. Added append-only event emission (`validity.acknowledged` via `emit_event()` inside `unit_of_work`) folding into the `acknowledgment_ledger` table (`id, kind, entity_type, entity_id, run_ids, surface, reason, actor, recorded_at`) in §3.2.C (lines 428–443) and `AC-P1-08` (§3.8 line 820).
+
+##### Response to M3-2 (`OD-6`): `estimand_change` Refusal Surfaces, Justification Override, and `unknown`-Version Epoch Handling Conflict With `OD-6`
+- **Disposition**: **ACCEPTED & RESOLVED**
+- **What Changed**:
+  1. Updated §1.3.A (lines 50–59), §1.4.A `OD-6` (line 117), §2.1 step 4 (lines 224–226), §3.4 items 6, 7, 11 (lines 538–552, 567–569), `AC-P1-18` (§3.8 line 830), §4.4.B item 3 (line 1011), §4.6 `finding_create_tool` (lines 1055–1082), and `AC-P2-16` (§4.8 line 1195).
+  2. Changed `campaign add` (`src/bathos/campaigns.py:420`) from refusing on mixed estimand epochs to emitting a warning banner only (`OD-6`).
+  3. Enforced `BathosErrorCode.ESTIMAND_BOUNDARY_MIXED` refusal at the three confirmatory gates required by `OD-6`: `campaign conclude` (`campaigns.py:1139`), `claim register` (`claim.py:604`), and settling a finding (`finding_create` when `status == "settled"` and `len(supporting_runs) > 1`), with override parameter `allow_mixed_estimand: str = ""` (`--allow-mixed-estimand "<reason>"`) recording an append-only `validity.estimand_override_recorded` event into `acknowledgment_ledger`.
+  4. Defined the epoch rule for `version_source == "unknown"` runs: any run with `"unknown"` version for a package with an active `estimand_change` entry receives `estimand_marker = "<pkg>:unknown"`, which triggers `ESTIMAND_BOUNDARY_MIXED` when pooled with runs from a known epoch unless overridden with `--allow-mixed-estimand "<reason>"`.
+
+##### Response to M3-3 (`M-a` + `OD-3`): Missing Per-Phase *Test Plan* and *Risks* Sections, and Missing *Change Log* (Including `OD-1`–`OD-6` Ratifications)
+- **Disposition**: **ACCEPTED & RESOLVED**
+- **What Changed**:
+  1. Added §1.4.A ("Change Log of Settled Owner Decisions & Revisions to Designer Calls", lines 106–118) and §1.4.B ("Rationale for `OD-3` (No Shadowing of `runs` in `run_sql`)", lines 119–134) recording `OD-1` through `OD-6` with `(owner: 2026-11-06)` provenance.
+  2. Added dedicated **Test Plan** and **Risks & Mitigations** subsections to every phase:
+     - **§3.9 Test Plan & Risks (P1)** (lines 835–859), including `test_non_obliteration_invariant_ac_p1_13` (lines 851–852).
+     - **§4.9 Test Plan & Risks (P2)** (lines 1199–1217).
+     - **§5.9 Test Plan & Risks (P3)** (lines 1416–1436).
+  3. Reconciled `AC-P1-13` (§3.8 line 825) with `validity_cache.db` so that read-time validity resolution produces zero byte or row modifications in cool-tier Parquet fragments, `.bth/log/*.jsonl`, `index.db`, `bathos.db`, or any historical ledger.
+
+##### Response to M3-4 (`M-b`): CLI and FastMCP Tool Signatures in §3.6 & §4.6 Break Existing `bth ls`, `bth find`, `bth show`, `bth cite`, and `bth restore`, and Omit Dual-Registry Wiring & Write-Token Auth
+- **Disposition**: **ACCEPTED & RESOLVED**
+- **What Changed**:
+  1. Updated §3.6 (lines 590–780), §4.6 (lines 1050–1154), and §5.6 (lines 1323–1377) to preserve exact existing decorator arguments (`cli_name="ls"`, `cli_name="find"`, `cli_name="show"`, `cli_name="sql"`, `cli_name="cite"` with **no** `cli_group="run"`), defaults (`limit: int = 20`, `since: str = ""`), and parameter orders in `src/bathos/mcp.py`.
+  2. Used `cli_name="session-start"` on `session_start_tool` (§4.6 line 1139) and `cli_name="archive-sweep"` on `archive_sweep_tool` (§5.6 line 1330, matching `archive_artifact_tool` at `mcp.py:1345` so it never collides with top-level `archive_tool` at `mcp.py:1310`), and reused existing `restore_tool` (`mcp.py:1437`) / `mcp_restore_tool` (`mcp.py:3186`) instead of creating a duplicate `archive_restore` tool (§5.2.B step 4 line 1264, §5.6 line 1325).
+  3. Specified both the sync `@cisternal.tool(registry="bathos-cli", ...)` functions and the async `@cisternal.tool(registry="bathos", ...)` `@traced_tool` wrappers, decorated mutating MCP tools with `@require_write_token` (`defect_declare`, `finding_create`, `supersede_edge_add`, `telemetry_rotate`) or `@require_write_token_when_applying` (`archive_sweep`), listed the exact `expected=[...]` additions for `src/bathos/cli_cyclopts.py:60-147` and `src/bathos/mcp.py:6145-6240` in §3.6 (line 780), §4.6 (line 1154), and §5.6 (line 1377), and required `EXCEPTION_TO_CODE` registration in `src/bathos/errors.py:278-375` (§3.7 line 784).
+
+##### Response to M3-5 (`M-c`): `archived` Validity State Lacks a Join Key Between `runs` and `archived_items`
+- **Disposition**: **ACCEPTED & RESOLVED**
+- **What Changed**:
+  1. Specified adding nullable `script_sha256 TEXT` and `run_ids TEXT` (JSON list of associated run IDs recorded at archive time before stubbing the script on disk) to `ArchivedItemRecord`, `_TABLE_SCHEMA` (`src/bathos/archived_items.py:30-48`), `_FRAGMENT_SCHEMA` (`:52-70`), and `ARCHIVED_ITEMS_DDL` (`src/bathos/index.py`) in §3.2.D item 3 (lines 452–453) and §5.2.B step 3 (line 1256).
+  2. Specified the exact 3-part join rule in §2.1 step 1 (lines 205–211) and `AC-P3-09` (§5.8 line 1409): folding `archived_items` latest-wins per `id` (`ORDER BY recorded_at DESC`), a run resolves to `state = "archived"` (`is_hidden = True`) when the latest `event == 'archived'` and (a) `run.id` is in `archived_items.run_ids`, OR (b) `run.script_sha256` matches `archived_items.script_sha256` or `archived_items.pre_archive_sha`, OR (c) `run.project_slug == archived_items.project_slug` and `run.sidecar_path` or any path in `run.output_paths` (or script path in `run.command`/`run.argv`) is contained in `archived_items.paths`. Restoring the item via `bth restore` appends `event = 'restored'`, returning those runs to `state = "current"`.
+
+##### Response to M3-6 (`M-d`): Section 1.4 "Settlement of Section 7 Open Items" Drops Design §7 Items and Invents Unverified Threshold Rationales
+- **Disposition**: **ACCEPTED & RESOLVED**
+- **What Changed**:
+  1. Rewrote §1.4.C (lines 135–162) to align item-for-item with Design §7's open builder items (`§7.1` registry format/sharing per `OD-4`, `§7.2` `run_sql` mechanism & ack field shape per `OD-3`/`OD-5`, `§7.3` `"reproduced"` definition & reopen question-matching method, `§7.4` why `dependency_provenance` is null & runner auto-population, `§7.5` telemetry destination & rotation thresholds, `§7.6` session-start byte cap, ordering, and hook protocol).
+  2. Added §1.4.C item 7 ("Classification of Numerical Cutoffs (Anti-Goal A6 Compliance)", lines 156–162), removing all invented performance claims and explicitly labeling the 2,048-byte session-start cap, 100 ms hook timeout, 90-day archive sweep age, and 10 MB / 30-day telemetry rotation cutoffs as **initial engineering heuristics / arbitrary cutoffs to be revisited after P1–P3 operational data**.
+  3. Restricted `reproduction_count` (§1.4.C item 3 line 144, §3.5 line 584) to subsequent completed `current` runs sharing non-null `sidecar_sha256` whose `outcome == run.outcome` and `run.outcome not in ("", "unknown", "observed", "invalid_measurement", "error")` (`NEUTRAL_OUTCOME_LABELS` in `src/bathos/sidecar.py:456`), so exploratory/calibrating runs (`outcome = "observed"`) never count as confirmatory reproductions.
+
+##### Response to M3-7 (`M-e`): Missing Fixer Tasks for Maraxiom Bridge & Hook Wiring in P1, Buggy `graduate_product` Insertion Line (`trust_ledger.py:364`), `ResolvedPin` Schema Gap, and Unfiltered `run_union_gate` / `validate_claim` Covering Queries
+- **Disposition**: **ACCEPTED & RESOLVED**
+- **What Changed**:
+  1. **`graduate_product` (`src/bathos/trust_ledger.py:308-375`)**: Specified in §3.4 item 10 (lines 563–566), `AC-P1-11` (line 823), and Task P1.6 (line 886) that the validity check is inserted at line 359 **before** the idempotency early return (`if existing is not None and existing.to_state == "promoted": return existing` at lines 360–362), checking caller `run_id`, `existing.run_id`, and `_find_all_runs_with_output_sha256(catalog_dir, content_hash)` and raising `GraduationRefused` (`BathosErrorCode.GRADUATION_REFUSED`) if all producing runs are hidden.
+  2. **`ResolvedPin` (`src/bathos/readback.py:96-111`)**: Specified in §3.4 item 8 (lines 553–559) and Task P1.6 (line 886) adding `validity_state: str = "current"` and `validity_reason: str | None = None` to the `ResolvedPin` frozen dataclass.
+  3. **`claim.py` & `campaigns.py` (`src/bathos/claim.py:232, 604, 851, 932, 966` & `src/bathos/campaigns.py:1280`)**: Specified in §3.4 items 6–7 (lines 538–552), `AC-P1-09` & `AC-P1-10` (lines 821–822), and Task P1.5 (line 885) checking `resolve_validity([parity_run_id])` in `validate_claim` (`:344`) and `_attest_parity_impl` (`:1063`), filtering covering runs in `differential_confound_check` (`:851`) and `run_union_gate` (`:932`) via `JOIN runs_current r ON cr.run_id = r.id`, and running `resolve_validity(member_ids)` unconditionally in `_conclude_campaign_impl` at `campaigns.py:1280` **before** `if claim_path_rel and registered_sha:` (line 1298).
+  4. **Maraxiom Bridge (`src/bathos/readback.py` & Task P1.6)**: Specified exporting `verify_run_drawable(run_id, catalog_dir)` in `src/bathos/readback.py` (§3.4 item 12 lines 570–572, Task P1.6 line 886) raising `ResultHiddenError` (`BathosErrorCode.RESULT_HIDDEN`) for `maraxiom.bathos_bridge.get_run_record`.
+
+##### Response to M3-8 (`M-f`): Prior-Art Research Doc (`261106_validity-prior-art.md`) §4 Contains Unexecuted Commands, Wrong `jq` Paths, and Status Contradictions
+- **Disposition**: **ACCEPTED & RESOLVED**
+- **What Changed**:
+  1. Updated `.praxia/docs/research/261106_validity-prior-art.md` §3.3 (lines 434–450) to match Praxia's verified `/home/marielle/projects/praxia/crates/praxia-tools/src/docs/default_registry.toml` (`status_enum = ["draft", "active", "complete", "superseded", "archived"]`, optional `supersedes`, and `[categories.archive] manifest_pair = true`).
+  2. Rewrote `.praxia/docs/research/261106_validity-prior-art.md` §4.1–4.2 (lines 454–478), removing the false claim that host repos were inaccessible and replacing the broken commands with the exact verified commands and live counts (`ls -1 /home/marielle/projects/asr/.praxia/verdicts | wc -l`, `select(.kind == "run.imported" or .kind == "run.started")`, `.data.dependency_lock_sha256`, `.data.dependency_provenance`, 117 events / 36 runs with `.data.metadata.aminx_version`, and `357 + 130 = 487` full-repo sidecars vs `209` in `asr/scripts`).
+
+##### Response to M3-9 (`M-g`): Version Resolution Hierarchy Ignores `metadata.<pkg>_version` (`metadata.aminx_version`) and PEP 440 Local Version Identifiers (`+armask`)
+- **Disposition**: **ACCEPTED & RESOLVED**
+- **What Changed**:
+  1. Updated the 4-tier version resolution hierarchy in §1.3.C (lines 73–99) and Task P1.3 (§3.10 line 883) to recover runtime version keys recorded in `run.metadata` (`metadata.<pkg>_version`, `<pkg>_installed_dist_version`, `tev_pinned_<pkg>_wheel`, `scores_<pkg>_version` — capturing the 117 run events across 36 distinct runs in `tev_design` with `metadata.aminx_version`: `0.2.0a1` ×13 runs, `0.2.0a3` ×4, `0.2.1` ×17, `0.2.1+armask` ×1, `0.4.0` ×1).
+  2. Specified PEP 440 interval and local-version comparison semantics in §1.3.C (lines 99–101) and §3.9.A test 1 (line 840): `ECOSYSTEM = "PyPI"` ranges use `packaging.version.Version` with half-open `[introduced, fixed)` intervals (`Version(A) <= v < Version(B)`), comparing `Version(v.base_version)` when a run's version carries a local segment like `0.2.1+armask` unless the registry boundary itself explicitly contains `"+"`.
+
+##### Response to M3-10 (`M7` Regression): Archive Sweep `.tar.zst` Bundle Specification Breaks `restore_archived_item` (`git clone` on `.bundle`)
+- **Disposition**: **ACCEPTED & RESOLVED**
+- **What Changed**:
+  1. Reconciled §5.2.B steps 3–4 (lines 1252–1265), `AC-P3-02` & `AC-P3-03` (§5.8 lines 1402–1403), §5.9.A test 2 (lines 1422–1425), and Task P3.1 (§5.10 line 1441) with `src/bathos/artifact_archive.py:236-375, 379-410, 450-554`:
+     - **Experiment Scripts, Sidecars & Untracked Outputs (`kind = "experiment"`)**: preserve `artifact_archive.py`'s git `.bundle` format (`.bth/archive_bundles/<item_id>.bundle` built via `_build_untracked_bundle()`) and add `commit: bool = True` to `archive_experiment_bundle` (`commit=False` per item during the sweep loop, followed by a single atomic git commit at batch end) so `restore_archived_item()` (`git clone` on `.bundle`) works without regression.
+     - **Documentation Files (`kind = "doc"`) and Telemetry Archives**: pack archived docs into `<doc_store>/archive/<year>/<slug>.tar.zst` + paired `.md` manifest sidecar (matching Praxia's `[categories.archive]` convention) and extend `restore_archived_item` (`src/bathos/artifact_archive.py:526-554`) to extract `.tar.zst` archives when `bundle_path.endswith(".tar.zst")`.
+
+---
+
+#### C. Minor Findings (`m3-1` through `m3-4`)
+
+##### Response to m3-1 (`M-h`): Inconsistent Flag Names (`--allow-hidden` vs `--include-superseded`) and Ambiguous Refusal Code in `cite`
+- **Disposition**: **ACCEPTED & RESOLVED**
+- **What Changed**:
+  1. Standardized on `include_superseded: bool = False` (`--include-superseded`) across all read surfaces including `bth sql` / `run_sql_tool`, while keeping `allow_hidden: bool = False` (`--allow-hidden`) as a backward-compatible alias on `bth sql` (§1.2 Invariant I1 line 31, §1.4.B item 4 line 133, §3.4 item 4 line 529, §3.6 `run_sql_tool` lines 663–684).
+  2. Defined the deterministic `HIDDEN_STATE_TO_ERROR_CODE` mapping in §3.4 (lines 505–514) and `AC-P1-07` (line 819): gates map `void` $\rightarrow$ `RESULT_VOID`, `affected` $\rightarrow$ `RESULT_AFFECTED`, `superseded` $\rightarrow$ `RESULT_SUPERSEDED`, and `archived` $\rightarrow$ `RESULT_ARCHIVED`, whereas `get_run_tool` (`bth show`) on any hidden run with `include_superseded=False` returns `RESULT_HIDDEN`.
+
+##### Response to m3-2: `run_sql` Regex Trigger Misses Quoted, Schema-Qualified, and Newline/Tab-Separated `runs` References
+- **Disposition**: **ACCEPTED & RESOLVED**
+- **What Changed**:
+  - Updated §1.4.B item 4 (lines 125–129), §3.4 item 4 (line 531), and `AC-P1-15` (§3.8 line 827) to use the case-insensitive, schema- and quote-aware regex:
+    `_RAW_RUNS_RE = re.compile(r'(?i)\b(?:FROM|JOIN)\s+(?:[a-zA-Z_]\w*\s*\.\s*)?"?runs"?(?!_current\b)\b')`
+    matching `FROM runs`, `JOIN runs`, `FROM "runs"`, `FROM idx.runs`, and `FROM main."runs"` across newlines/tabs while excluding `runs_current`.
+
+##### Response to m3-3 (`M-h`): Recon Document Discrepancies (`mcp.py` Line Citations and Sidecar Total Breakdown)
+- **Disposition**: **ACCEPTED & RESOLVED**
+- **What Changed**:
+  1. Updated `.praxia/docs/research/261106_validity-surfaces-recon.md` §3 E9 (lines 68–77) to show both the full-repo sidecar count (`357` across `/home/marielle/projects/asr` + `130` across `/home/marielle/projects/tev_design` = `487` total) and the `scripts/`-scoped count (`209` in `/home/marielle/projects/asr/scripts`).
+  2. Updated `.praxia/docs/research/261106_validity-surfaces-recon.md` §6 (lines 324–404) and §7 (lines 411–422) so all `src/bathos/mcp.py` line numbers (`329`, `401`, `456`, `513`, `2500`, `2546` plus async `mcp_*` wrappers), `trust_ledger.py:308-375` (before line 360), `SessionStart` hook registration, and `OD-3` (`runs_current` view without renaming `runs` to `runs_all`) match the codebase and Spec v0.4.0.
+
+##### Response to m3-4: Reopen Guard Question Matching Scope on New Experiments (Design §4 D7 / §7) and `STAGE_TO_EPISTEMIC_TIER` Integration With `sidecar.py`
+- **Disposition**: **ACCEPTED & RESOLVED**
+- **What Changed**:
+  1. Updated §1.4.C item 3 (line 145), §4.2.B item 3 (line 951), §4.4.C items 1–2 (lines 1013–1016), and `AC-P2-05` (§4.8 line 1184): added optional `"question_slug"` and `"reopen_reason"` to `EXPERIMENT_KEYS` in `src/bathos/sidecar.py:542` and `--question-slug` / `--reopen-reason` to `bth new-experiment` / `bth preflight` / `bth run`. When `question_slug` matches an existing `settled` finding, bathos prints the settled answer and refuses with `FINDING_REOPEN_REASON_REQUIRED` unless `reopen_reason` is provided, while keeping finding status transitions strictly on `finding_create`.
+  2. Updated §4.2.B items 1–2 (lines 908–950) and `AC-P2-03` / `AC-P2-12` (§4.8 lines 1182, 1191): added `"spike"` to `CANONICAL_STAGES` and `EPISTEMIC_CLASSES` in `src/bathos/sidecar.py:461-470`, added `STAGE_ALIASES` (`"confirmatory"` and `"power"` $\rightarrow$ `"validation"`), and defined `resolve_epistemic_tier(stage_name_declared=..., stage_name_raw=..., epistemic_class=...)` so omitted stages (`not stage_name_declared`) return `"undeclared"` instead of `"exploratory"`, and `"confirmatory"`/`"power"` map to `"confirmatory"`.
+
+
+---
+
+## Cycle 4: Challenger Pass
+
+- **Date**: 2026-11-08
+- **Role**: Adversarial Challenger (Cycle 4 — Re-Verification of Cycle 3 Findings `B3-1`–`B3-7`, `M3-1`–`M3-10`, `m3-1`–`m3-4`, and Owner Decisions `OD-1`–`OD-6`)
+- **Target Specification**: `.praxia/docs/specs/261106_result-validity-supersession-archive.md` (v0.4.0, 1,493 lines)
+- **Companion Documents Audited**:
+  - `.praxia/docs/research/261106_validity-prior-art.md`
+  - `.praxia/docs/research/261106_validity-surfaces-recon.md`
+  - `/home/marielle/.gemini/antigravity-cli/brain/6254dead-409d-4e92-b890-0bda0d334572/owner_decisions.md` (`OD-1`–`OD-6`, settled `2026-11-06`)
+
+---
+
+### 1. Executive Summary & Verdict
+
+- **Overall Cycle 4 Verdict**: **PASS / UNBLOCKED**
+- **Blocking Findings Remaining**: **0** (all 7 Cycle 3 Blocking findings `B3-1`–`B3-7` verified resolved; 0 new Blocking findings introduced)
+- **Major Findings Remaining**: **0** (all 10 Cycle 3 Major findings `M3-1`–`M3-10` verified resolved; 0 new Major findings introduced)
+- **Minor Findings Remaining**: **0** (all 4 Cycle 3 Minor findings `m3-1`–`m3-4` verified resolved; 0 new Minor findings introduced)
+- **Owner Decisions (`OD-1`–`OD-6`) Audit**: **6 / 6 VERIFIED INTEGRATED** with `(owner: 2026-11-06)` provenance in §1.4.A and across all affected specification sections, acceptance criteria, and test plans.
+
+---
+
+### 2. Verification Matrix: Owner Decisions (`OD-1`–`OD-6`)
+
+| Owner Decision | Settled Requirement (`owner_decisions.md`) | Spec v0.4.0 Locations | Codebase Alignment (`src/bathos/`) | Status |
+|---|---|---|---|---|
+| **`OD-1`** | Keep global `suspect` cap (A1). A registry entry may opt in with `hide_inferred = true`; use it for `aminx <= 0.1.0a22` **only after P1 dry-run counts are reviewed**. | §1.2 Invariant I3 (line 35), §1.3.B (lines 65, 69), §1.4.A (line 112), §2.1 step 4 (lines 232–244), §3.2.A (`hide_inferred = false`, line 343), §3.6 (`defect_declare_tool`, lines 727, 748), §3.8 `AC-P1-03` (line 815), §5.5 Step 1 (lines 1300–1307), §5.8 `AC-P3-05` (line 1405) | Matches `tev_design/.bth/log/*.jsonl` where all `<= 0.1.0a22` runs (`2026-07-15..2026-07-28`) predate lock-hash recording (`2026-08-13`) and resolve to `inferred-from-commit`. | **VERIFIED RESOLVED** |
+| **`OD-2`** | When a run lacks a field the predicate needs, resolve to `suspect` with reason `'missing predicate field: <f>'`. Never silent non-match, never `void`. | §1.3.B (line 69), §1.4.A (line 113), §2.1 step 4 Case B (lines 234–244), §3.2.A (lines 356–358), §3.8 `AC-P1-02` (line 814), §3.9.A test 1 (line 841) | Reuses DuckDB `json_serialize_sql` `COLUMN_REF` AST walker (`src/bathos/sidecar.py:1514-1520`) to verify non-null field presence before predicate evaluation; removes `[entries.predicate.defaults]` and `COALESCE(..., 0.0)`. | **VERIFIED RESOLVED** |
+| **`OD-3`** | **No shadowing** of `runs` in `run_sql`. `runs_current` view is the documented target; `runs` stays full history; notice when `runs` is queried and hidden rows exist. | §1.4.A (line 114), §1.4.B (lines 119–134), §2.2.C (lines 310–318), §3.4 item 4 (lines 528–531), §3.8 `AC-P1-14` & `AC-P1-15` (lines 826–827) | Preserves `CREATE VIEW runs AS SELECT * FROM idx.runs` in `src/bathos/index.py:483` while adding `runs_current` view and `_RAW_RUNS_RE` notice in `src/bathos/query.py:773`. | **VERIFIED RESOLVED** |
+| **`OD-4`** | Per-user registry `${XDG_CONFIG_HOME:-~/.config}/bathos/instruments/` that projects opt into, plus project-local `.bth/instruments/` entries that override it. | §1.4.A (line 115), §1.4.C item 1 (lines 136–139), §2.1 step 4 (line 219), §2.2.B item 1 (lines 294–295), §3.2.B (lines 421–428), §3.8 `AC-P1-16` (line 828) | Drops `~/.bth/instruments/`; specifies `.bth.toml` `[instruments] use_user_registry = true` opt-in (`src/bathos/config.py`), entry `id` override precedence, and `inputs_hash` inclusion for both directories. | **VERIFIED RESOLVED** |
+| **`OD-5`** | Acknowledging `suspect`/`unverifiable` at gates requires a rationale string (`--ack-suspect "reason"` / `ack_suspect: str`), recorded append-only with actor + timestamp. | §1.3.B (lines 69–70), §1.4.A (line 116), §1.4.C item 2 (line 142), §3.2.C (`acknowledgment_ledger`, lines 430–445), §3.4 items 5–7 & 10 (lines 532–566), §3.6 (lines 686–710, 779), §3.7 (lines 794–795, 805–806), §3.8 `AC-P1-08` (line 820) | Replaces boolean flags with `ack_suspect: str = ""` and `ack_unverifiable: str = ""` across `cite_run`, `claim_register`, `campaign_conclude`, and `graduate_product`; emits `validity.acknowledged` via `unit_of_work` (`src/bathos/runlog/emit.py`). | **VERIFIED RESOLVED** |
+| **`OD-6`** | Mixing runs across an estimand change is refused at `campaign conclude`, `claim register`, and settling a finding; allow with a recorded justification. Reads, `campaign add`, and `lineage` show a banner only. | §1.3.A (lines 50–59), §1.4.A (line 117), §2.1 step 4 (lines 224–226), §3.2.C (lines 430–445), §3.4 items 6, 7, 11 (lines 538–552, 567–569), §3.8 `AC-P1-18` (line 830), §4.4.B item 3 (line 1011), §4.6 (lines 1064, 1079), §4.8 `AC-P2-16` (line 1195) | `campaign add` (`campaigns.py:532`) warns without refusing; `campaign conclude` (`campaigns.py:1280`), `claim register` (`claim.py:657`), and `finding_create(status="settled")` refuse with `ESTIMAND_BOUNDARY_MIXED` unless `allow_mixed_estimand` is non-empty; defines `"<pkg>:unknown"` epoch. | **VERIFIED RESOLVED** |
+
+---
+
+### 3. Verification Matrix: Cycle 3 Findings (`B3-1`–`B3-7`, `M3-1`–`M3-10`, `m3-1`–`m3-4`)
+
+| Finding ID | Cycle 3 Severity & Summary | Verification in Spec v0.4.0 & Companion Docs | Code Citation & Edge-Case Verification | Status |
+|---|---|---|---|---|
+| **B3-1** | **BLOCKING** — Predicate evaluation violated `OD-2` (`COALESCE(..., 0.0) -> False`) and missed all `tev_design` runs lacking `sample_s`. | §2.1 step 4 Case B (lines 234–244), §3.2.A (lines 356–358), §3.8 `AC-P1-01` & `AC-P1-02` (lines 813–814), §3.9.A test 1 (line 841). | Verified: `[entries.predicate.defaults]` is completely removed. `COLUMN_REF` extraction checks field presence in top-level columns, `run.metadata`, and `run.argv`; missing `<f>` resolves to `suspect` (`reason = "missing predicate field: <f>"`), while present `sample_s = 1` evaluates to `False` (`current`). | **VERIFIED RESOLVED** |
+| **B3-2** | **BLOCKING** — Inferred-version cap left `aminx <= 0.1.0a22` unhidden and lacked `OD-1` `hide_inferred` opt-in. | §1.2 Invariant I3 (line 35), §1.4.A `OD-1` (line 112), §2.1 step 4 (lines 232–244), §3.2.A (line 343), §3.6 (lines 727, 748), §3.8 `AC-P1-03` (line 815), §5.5 Step 1 (lines 1300–1307), §5.8 `AC-P3-05` (line 1405). | Verified: `OQ-1` is gone; `hide_inferred: bool = False` is in entry schema and `defect_declare_tool`; P1 dry-run reports side-by-side counts before enabling `hide_inferred = true` on `AMINX-2026-001`. | **VERIFIED RESOLVED** |
+| **B3-3** | **BLOCKING** — Telemetry rotation targeted `.bth/log/*.jsonl` runlog instead of `~/.bth/catalog/logs/`. | §1.4.C item 5 (lines 149–151), §5.2.A item 5 (line 1247), §5.4 (lines 1286–1291), §5.8 `AC-P3-08` (line 1408), §5.9.A test 1 & R-P3-1 (lines 1420–1421, 1434), §6.2 (lines 1476–1493). | Verified against `src/bathos/telemetry.py:271, 448-461` (`~/.bth/catalog/logs/events.<host>.<pid>.jsonl`) and `src/bathos/index.py:77-85` (`ingest_watermarks`). `<main_root>/.bth/log/*.jsonl` is explicitly protected from rotation/truncation. | **VERIFIED RESOLVED** |
+| **B3-4** | **BLOCKING** — `validity_cache` failed on `READ_ONLY` `connect_read()` and `inputs_hash` missed edits, new runs, and user registry. | §2.2.A–C (lines 252–318), §3.8 `AC-P1-13` & `AC-P1-14` (lines 825–826), §3.9.A test 3 & R-P1-2 (lines 846–848, 858). | Verified against `src/bathos/index.py:468-510`: `validity_cache.db` is separate from `READ_ONLY` `index.db` / `bathos.db`, guarded by `validity_cache.lock`, attached `READ_ONLY` as `vcache`, and `compute_validity_inputs_hash` hashes both registry directories (`OD-4`), `events`/`ingest_watermarks`/`runs`, and all 3 ledgers (with `duckdb_tables()` guard per `index.py:500-507`). | **VERIFIED RESOLVED** |
+| **B3-5** | **BLOCKING** — `SessionStart` hook emitted `{"systemMessage": ...}` (user UI only) and omitted `.praxia/manifest.toml`. | §1.2 Invariant I4 (line 37), §1.4.C item 6 (lines 152–155), §3.4 item 13 (lines 573–574), §4.5 (lines 1019–1047), §4.8 `AC-P2-07` & `AC-P2-15` (lines 1186, 1194), §4.9.A test 4 & R-P2-1 (lines 1209–1215), §4.10 Task P2.5 (line 1226). | Verified against `src/bathos/hooks/preflight_hook.py:21` and `.praxia/manifest.toml:96-100`: `bth-session-start-hook` emits `{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "..."}}` and is registered in both `.praxia/manifest.toml` and `plugin/hooks/hooks.json`. | **VERIFIED RESOLVED** |
+| **B3-6** | **BLOCKING** — Missing `type = "GIT"` commit ranges, `dependency_range` blast-radius anchor, propagation, and per-revision exemptions. | §2.1 steps 3–4 (lines 214–246), §3.2.A (`AMINX-2026-003` and `ASR-LG-2026-001`, lines 336–419), §3.6 (`defect_declare_tool`, lines 718–756), §3.8 `AC-P1-19` (line 831), §3.9.A test 2 (lines 843–845), §3.10 Task P1.2 (line 882). | Verified against `src/bathos/blast_radius.py:97, 411, 1171, 1200, 1286`: adds `anchor_kind = "dependency_range"`, `anchor_value = "<entry_id>@r<revision>"`, `type = "GIT"` commit ancestry (`git merge-base --is-ancestor`), and `@r<revision>` exemption invalidation on revision bump. | **VERIFIED RESOLVED** |
+| **B3-7** | **BLOCKING** — `resolve_validity` could not map `project_slug` in global `index.db` to `main_root` or resolve `OD-4` registries. | §1.3.C (lines 75–95), §1.4.A `OD-4` (line 115), §1.4.C item 1 (lines 136–139), §2.1 (lines 194–203), §3.2.B (lines 421–428). | Verified against `src/bathos/index.py:60, 94` and `src/bathos/runlog/project_id.py:216`: maps via `events.main_root` and `list_registered_roots()`, with non-crashing fallback to user-global registry and Tier 1/3 metadata when repo root is unavailable locally. | **VERIFIED RESOLVED** |
+| **M3-1** | **MAJOR** — Bare boolean acknowledgment parameters instead of required rationale strings with append-only audit records (`OD-5`). | §1.3.B (lines 69–70), §1.4.A `OD-5` (line 116), §3.2.C (`acknowledgment_ledger`, lines 430–445), §3.4 items 5–7 & 10 (lines 532–566), §3.6 (lines 686–710, 779), §3.8 `AC-P1-08` (line 820). | Verified: `ack_suspect: str = ""` and `ack_unverifiable: str = ""` replace booleans on all 4 gates; empty/whitespace strings are refused; `validity.acknowledged` events fold into `acknowledgment_ledger`. | **VERIFIED RESOLVED** |
+| **M3-2** | **MAJOR** — `estimand_change` refusal surfaces, override, and `unknown`-version epoch conflicted with `OD-6`. | §1.3.A (lines 50–59), §1.4.A `OD-6` (line 117), §2.1 step 4 (lines 224–226), §3.4 items 6, 7, 11 (lines 538–552, 567–569), §3.8 `AC-P1-18` (line 830), §4.4.B item 3 (line 1011), §4.8 `AC-P2-16` (line 1195). | Verified: `campaign add` warns only; `campaign conclude`, `claim register`, and `finding_create(status="settled")` refuse with `ESTIMAND_BOUNDARY_MIXED` unless `allow_mixed_estimand` rationale is supplied; `"<pkg>:unknown"` epoch rule specified. | **VERIFIED RESOLVED** |
+| **M3-3** | **MAJOR** — Missing per-phase Test Plans, Risks sections, Change Log (`OD-1`–`OD-6`), and `AC-P1-13` cache contradiction. | §1.4.A–B (lines 104–134), §3.8 `AC-P1-13` (line 825), §3.9 P1 Test Plan & Risks (lines 835–859), §4.9 P2 Test Plan & Risks (lines 1199–1217), §5.9 P3 Test Plan & Risks (lines 1416–1436). | Verified: all three phases have concrete `tmp_path` test plans and risk tables; §1.4.A–B documents all 6 owner decisions and the `OD-3` reversal; `AC-P1-13` is consistent with `validity_cache.db`. | **VERIFIED RESOLVED** |
+| **M3-4** | **MAJOR** — CLI/MCP signatures broke `bth ls/find/show/cite/restore` and omitted dual-registry wiring & `@require_write_token`. | §3.6 (lines 590–780), §3.7 (lines 784–797), §4.6 (lines 1050–1154), §5.2.B step 4 (line 1264), §5.6 (lines 1323–1377). | Verified against `src/bathos/mcp.py:329, 401, 456, 513, 1310, 1345, 1437, 2469-2605, 6145` and `src/bathos/cli_cyclopts.py:60`: preserves top-level `ls`, `find`, `show`, `sql`, `cite`, `restore`; uses `cli_name="archive-sweep"` (no collision with `archive`); includes `@require_write_token` / `@require_write_token_when_applying`, `expected=[...]` lists, and `EXCEPTION_TO_CODE` registration. | **VERIFIED RESOLVED** |
+| **M3-5** | **MAJOR** — `archived` validity state lacked a join key between `runs` and `archived_items`. | §2.1 step 1 (lines 205–211), §3.2.D item 3 (lines 452–453), §5.2.B step 3 (line 1256), §5.8 `AC-P3-09` (line 1409). | Verified against `src/bathos/archived_items.py:30-70` and `src/bathos/index.py:275-293`: adds `script_sha256` and `run_ids` to `archived_items` and defines the 3-way fallback join (`run_ids`, `script_sha256`, or `paths`). | **VERIFIED RESOLVED** |
+| **M3-6** | **MAJOR** — Section 1.4 dropped Design §7 items, invented threshold rationales (violating A6), and counted `"observed"` as reproductions. | §1.4.C items 1–7 (lines 135–162), §3.5 `reproduction_count` (line 584). | Verified against `src/bathos/sidecar.py:456` (`NEUTRAL_OUTCOME_LABELS`): excludes `("", "unknown", "observed", "invalid_measurement", "error")` from `reproduction_count`, aligns §1.4.C with Design §7, and explicitly declares the 4 numerical cutoffs as arbitrary initial engineering heuristics per A6. | **VERIFIED RESOLVED** |
+| **M3-7** | **MAJOR** — `graduate_product` check placed after line 360 early return, `ResolvedPin` missing fields, unfiltered `claim.py` queries, and missing bridge task. | §3.4 items 6, 7, 8, 10, 12 (lines 538–572), §3.8 `AC-P1-09`–`AC-P1-11` (lines 821–823), §3.10 Tasks P1.5 & P1.6 (lines 885–886). | Verified against `src/bathos/trust_ledger.py:360-362`, `src/bathos/readback.py:96-111`, `src/bathos/claim.py:344, 657, 851, 932, 1063`, and `src/bathos/campaigns.py:1280-1298`: all insertion points and dataclass fields are exact. | **VERIFIED RESOLVED** |
+| **M3-8** | **MAJOR** — `261106_validity-prior-art.md` §3.3 & §4 contained unexecuted commands, wrong `jq` paths, and status contradictions. | `.praxia/docs/research/261106_validity-prior-art.md` §3.3 (lines 434–450) & §4.1–4.2 (lines 453–478). | Verified: all commands in `261106_validity-prior-art.md:463-478` use exact verified paths (`asr/.praxia/verdicts`, `.data.dependency_lock_sha256`, `.data.dependency_provenance`, `select(.kind == "run.imported" or .kind == "run.started")`) and match `261106_validity-surfaces-recon.md`. | **VERIFIED RESOLVED** |
+| **M3-9** | **MAJOR** — Version resolution ignored `metadata.<pkg>_version` (`metadata.aminx_version`) and PEP 440 local versions (`+armask`). | §1.3.C (lines 73–101), §3.9.A test 1 (line 840), §3.10 Task P1.3 (line 883). | Verified: Tiers 1–3 inspect `metadata.<pkg>_version` (recovering the 36 runs / 117 events in `tev_design`), and PEP 440 comparisons use `packaging.version.Version(v.base_version)` for local version labels like `0.2.1+armask` unless the boundary specifies `"+"`. | **VERIFIED RESOLVED** |
+| **M3-10** | **MAJOR** — Archive sweep `.tar.zst` bundle spec broke `restore_archived_item` (`git clone` on `.bundle`). | §5.2.B steps 3–4 (lines 1252–1265), §5.8 `AC-P3-02` & `AC-P3-03` (lines 1402–1403), §5.9.A test 2 (lines 1422–1425), §5.10 Task P3.1 (line 1441). | Verified against `src/bathos/artifact_archive.py:236-375, 379-410, 450-554`: experiment outputs use git `.bundle` (`archive_experiment_bundle` with `commit=False` per item + single batch commit), while docs use `.tar.zst` + `.md` manifest and `restore_archived_item` dispatches on suffix. | **VERIFIED RESOLVED** |
+| **m3-1** | **MINOR** — Inconsistent `--allow-hidden` vs `--include-superseded` flag names and ambiguous refusal codes in `cite`. | §1.2 Invariant I1 (line 31), §1.4.B item 4 (lines 131–133), §3.4 `HIDDEN_STATE_TO_ERROR_CODE` (lines 505–515), §3.6 `run_sql_tool` (lines 663–684), §3.8 `AC-P1-07` (line 819). | Verified: `--include-superseded` is standardized across all read surfaces (with `--allow-hidden` kept as an alias on `bth sql`), and `HIDDEN_STATE_TO_ERROR_CODE` deterministically maps each hidden state. | **VERIFIED RESOLVED** |
+| **m3-2** | **MINOR** — `run_sql` regex missed quoted, schema-qualified, and newline-separated `runs` references. | §1.4.B item 4 (lines 125–129), §3.4 item 4 (line 531), §3.8 `AC-P1-15` (line 827). | Verified: `_RAW_RUNS_RE = re.compile(r'(?i)\b(?:FROM|JOIN)\s+(?:[a-zA-Z_]\w*\s*\.\s*)?"?runs"?(?!_current\b)\b')` matches `FROM runs`, `FROM "runs"`, `FROM idx.runs`, `FROM main."runs"` while excluding `runs_current`. | **VERIFIED RESOLVED** |
+| **m3-3** | **MINOR** — Recon doc (`261106_validity-surfaces-recon.md`) had stale `mcp.py` line numbers and unexplained `357` vs `209` sidecar count. | `.praxia/docs/research/261106_validity-surfaces-recon.md` §3 E9 (lines 68–77), §6 (lines 324–404), §7 (lines 411–422). | Verified: recon doc explicitly shows `357` (full `asr` repo) vs `209` (`asr/scripts`) + `130` (`tev_design`) = `487` total sidecars, and all `mcp.py` line citations (`329`, `401`, `456`, `513`, `2500`, `2546`) match `src/bathos/mcp.py`. | **VERIFIED RESOLVED** |
+| **m3-4** | **MINOR** — Reopen guard scope on new experiments (`question_slug`) and `STAGE_TO_EPISTEMIC_TIER` integration with `sidecar.py`. | §1.4.C item 3 (line 145), §4.2.B (lines 907–952), §4.4.C (lines 1013–1016), §4.8 `AC-P2-03`, `AC-P2-05`, `AC-P2-12` (lines 1182, 1184, 1191). | Verified against `src/bathos/sidecar.py:461-470, 542, 570-600`: adds `"spike"` to `CANONICAL_STAGES` and `EPISTEMIC_CLASSES`, adds `"question_slug"` and `"reopen_reason"` to `EXPERIMENT_KEYS`, and resolves `"undeclared"` when `not stage_name_declared` and `"confirmatory"` when `stage_name_raw in ("confirmatory", "power")`. | **VERIFIED RESOLVED** |
+
+---
+
+### 4. Remaining New Findings
+
+None (**0 Blocking, 0 Major, 0 Minor**).
+
+---
+
+### 5. Final Cycle 4 Challenger Sign-Off
+
+The production specification `.praxia/docs/specs/261106_result-validity-supersession-archive.md` (v0.4.0) and its companion research documents (`.praxia/docs/research/261106_validity-prior-art.md` and `.praxia/docs/research/261106_validity-surfaces-recon.md`) are internally consistent, aligned with `src/bathos/` line-for-line, and faithfully incorporate all 6 owner decisions (`OD-1` through `OD-6`).
+
+**Verdict**: **PASS / UNBLOCKED — Ready for P1/P2/P3 implementation.**
+

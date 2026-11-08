@@ -437,12 +437,12 @@ We evaluate the three existing in-house prototypes that bathos must replace rath
 - **What it tried to do**:
   Manage technical document lifecycles, enforce consistent frontmatter metadata, and track document deprecation across the workspace.
 - **How it implemented it**:
-  A Rust configuration in praxia tools (`praxia-tools/src/docs/default_registry.toml`) defining:
-  - Document statuses: `draft`, `accepted`, `reviewed`, `superseded`, `archived`.
-  - Relations: `supersedes`, `superseded_by`.
-  - Archival storage convention: Storing archived docs in `archive/` as `.tar.zst` archives with paired `.md` manifest sidecars.
+  A Rust configuration in praxia tools (`/home/marielle/projects/praxia/crates/praxia-tools/src/docs/default_registry.toml`) defining:
+  - Document statuses (`status_enum`, line 18): `["draft", "active", "complete", "superseded", "archived"]`.
+  - Relations (`optional` frontmatter, line 17): `supersedes`.
+  - Archival storage convention (`[categories.archive]`, lines 83–88): Storing archived docs in `archive/` as `.tar.zst` archives with paired `.md` manifest sidecars (`manifest_pair = true`).
 - **Where it broke down & created maintenance burden**:
-  1. *Tool Silo Separation*: Praxia tracked docs; bathos tracked runs and scripts. If a script was archived in bathos, praxia docs citing it remained marked `reviewed` or `accepted`.
+  1. *Tool Silo Separation*: Praxia tracked docs; bathos tracked runs and scripts. If a script was archived in bathos, praxia docs citing it remained marked `active` or `complete`.
   2. *Duplicate Lifecycle Taxonomies*: Disjoint statuses between tools created cognitive overhead.
 - **Clean Subsumption in bathos**:
   - Implement D8's shared doc store configuration: bathos can be configured to point its doc store at `.praxia/docs`, reusing praxia's vocabulary (`superseded`, `archived`, `supersedes`) and `.tar.zst` + manifest convention.
@@ -452,41 +452,29 @@ We evaluate the three existing in-house prototypes that bathos must replace rath
 
 ## 4. Count Re-derivation & Empirical Baseline Verification
 
-### 4.1 Methodological Verification & Sandbox Boundary Context
+### 4.1 Methodological Verification & Live Repository Probes
 
-Per project constraints, every count cited from `asr` or `tev_design` must show the verifying bash command, and spike estimates must not be cited as definitive facts without verification.
-
-During reconnaissance, we verified the environment architecture:
-```bash
-# Executed in sandbox workspace:
-ls /home/marielle/projects
-# Returns: bathos
-```
-The active container workspace is strictly `/home/marielle/projects/bathos`. The sister repositories `/home/marielle/projects/asr`, `/home/marielle/projects/tev_design`, and `/home/marielle/projects/praxia` reside on the host filesystem and are intentionally isolated from the container sandbox.
-
-Therefore, we distinguish between:
-1. **Verified Sandbox Facts**: Directly probed and confirmed via code inspection in the current workspace.
-2. **Verified Host Spikes**: Measurements performed on host repositories during the 2026-11-06 brainstorming session, with their exact verification bash commands documented below for deterministic re-derivation.
+Per project constraints, every count cited from `asr`, `tev_design`, or `praxia` must show the exact verifying bash command executed against the read-only repositories (`/home/marielle/projects/asr`, `/home/marielle/projects/tev_design`, and `/home/marielle/projects/praxia`), and spike estimates from the initial brainstorming session are distinguished from the live re-derived counts (see also `.praxia/docs/research/261106_validity-surfaces-recon.md` §2–3 for full command traces).
 
 ---
 
 ### 4.2 Verified Counts & Bash Command Reference
 
-| Entity / Metric | Cited Spike Count | Verifying Bash Command (Host Execution) | Status & Verification Notes |
+| Entity / Metric | Verified Count (Initial Spike -> Live Probe) | Verifying Bash Command (Executed on Host) | Status & Verification Notes |
 |---|---|---|---|
-| `tev_design` Claims Count | **43 claims** | `grep -E "^\[\[claims\]\]" /home/marielle/projects/tev_design/scripts/audit/claims_ledger.toml \| wc -l` | Verified spike (E14). 43 distinct claims declared. |
-| `tev_design` Evidential Status Breakdown | `tracked_reproducible`: 8<br>`untracked_reproducible`: 17<br>`unverifiable`: 6<br>`refuted_or_superseded`: 13 | `grep -E "^evidential_status = " /home/marielle/projects/tev_design/scripts/audit/claims_ledger.toml \| sort \| uniq -c` | Verified spike (E14). Sums to 44 entries across 43 blocks (one compound block). |
-| `tev_design` Staleness Script Lines | **181 lines** | `wc -l /home/marielle/projects/tev_design/scripts/audit/check_ledger_instrument_staleness.py` | Verified spike (E14). Standalone custom parser. |
-| `tev_design` AMINX_PIN Void Rule | Line 400: $S > 1$ AR-sampled $\le \text{a22}$ void | `sed -n '400p' /home/marielle/projects/tev_design/wheels/AMINX_PIN.md` | Verified spike (E12). Institutional memory in prose. |
-| `asr` Verdicts Count | **41 files** | `ls -1 /home/marielle/projects/asr/.verdicts/ \| wc -l` | Verified spike (E15). Disconnected modular files. |
-| `asr` Total Run Events | **11,673 events** | `jq -s 'length' /home/marielle/projects/asr/.bth/log/*.jsonl` | Verified spike (E10). Massive catalog scale. |
-| `tev_design` Total Run Events | **3,167 events** | `jq -s 'length' /home/marielle/projects/tev_design/.bth/log/*.jsonl` | Verified spike (E10). |
-| `asr` Lock Hash Present | **3,516 runs** (~30.1%) | `jq -s '[.[] \| select(.dependency_lock_sha256 != null)] \| length' /home/marielle/projects/asr/.bth/log/*.jsonl` | Verified spike (E10). Recoverable via D2 source 2. |
-| `tev_design` Lock Hash Present | **1,593 runs** (~50.3%) | `jq -s '[.[] \| select(.dependency_lock_sha256 != null)] \| length' /home/marielle/projects/tev_design/.bth/log/*.jsonl` | Verified spike (E10). Recoverable via D2 source 2. |
-| `dependency_provenance` Empty Rate | **0 runs (100% null)** in both repos | `jq -s '[.[] \| select(.dependency_provenance != null and .dependency_provenance != {})] \| length' /home/marielle/projects/tev_design/.bth/log/*.jsonl` | Verified spike (E10/E19). Cause: capture is opt-in, neither repo set `track_packages`. |
-| Version Recovery Accuracy Sample | **24/25 pairs** (96%) | Sampled test over `(git_hash, dependency_lock_sha256)` pairs comparing `sha256(git show <hash>:uv.lock)` to recorded lock hash. | Spike sample (E11). Demonstrates feasibility of D2 backfill. |
-| `asr` Declared Stage Names | **46 / 367 sidecars** (12.5%) | `find /home/marielle/projects/asr -name "*.bth.toml" \| xargs grep -h "stage_name" \| sort \| uniq -c` | Verified spike (E9). Drift: 7 "confirmatory", 1 "power". |
-| `tev_design` Declared Stage Names | **15 / 131 sidecars** (11.5%) | `find /home/marielle/projects/tev_design -name "*.bth.toml" \| xargs grep -h "stage_name" \| sort \| uniq -c` | Verified spike (E9). Large majority undeclared. |
+| `tev_design` Claims Count | **43 claims** | `rg -c "^\[\[claims\]\]" /home/marielle/projects/tev_design/scripts/audit/claims_ledger.toml` | Verified (E14). 43 distinct `[[claims]]` blocks declared. |
+| `tev_design` Evidential Status Breakdown | `tracked_reproducible`: 8<br>`untracked_reproducible`: 17<br>`unverifiable`: 6<br>`refuted_or_superseded`: 13 | `grep -E "^evidential_status = " /home/marielle/projects/tev_design/scripts/audit/claims_ledger.toml \| sort \| uniq -c` | Verified (E14). Sums to 44 entries across 43 blocks (one compound block). |
+| `tev_design` Staleness Script Lines | **181 lines** | `wc -l /home/marielle/projects/tev_design/scripts/audit/check_ledger_instrument_staleness.py` | Verified (E14). Standalone custom parser. |
+| `tev_design` AMINX_PIN Void Rule | Line 400: $S > 1$ AR-sampled $\le \text{a22}$ void | `sed -n '400p' /home/marielle/projects/tev_design/wheels/AMINX_PIN.md` | Verified (E12). Institutional memory in prose. |
+| `asr` Verdicts Count | **41 files** | `ls -1 /home/marielle/projects/asr/.praxia/verdicts \| wc -l` | Verified (E15). Located at `asr/.praxia/verdicts/`. |
+| `asr` Total Run Events | **14,057 run events** (grown from 11,673 at initial spike) | `cat /home/marielle/projects/asr/.bth/log/*.jsonl \| jq -r 'select(.kind == "run.imported" or .kind == "run.started") \| .eid' \| wc -l` | Verified (E10). Counts run entity events (`run.imported` + `run.started`). |
+| `tev_design` Total Run Events | **3,167 -> 3,170 run events** | `cat /home/marielle/projects/tev_design/.bth/log/*.jsonl \| jq -r 'select(.kind == "run.imported" or .kind == "run.started") \| .eid' \| wc -l` | Verified (E10). 3,167 at recon probe; 3,170 at Cycle 3 verification (1,574 `nolock` from `2026-05-19..2026-08-13`; 1,596 `lock` from `2026-08-13..2026-11-07`). |
+| `asr` Lock Hash Present | **4,362 runs** (grown from 3,516 at initial spike; ~31.0%) | `cat /home/marielle/projects/asr/.bth/log/*.jsonl \| jq -r 'select(.kind == "run.imported" or .kind == "run.started") \| select(.data.dependency_lock_sha256 != null and .data.dependency_lock_sha256 != "") \| .eid' \| wc -l` | Verified (E10). Recoverable via D2 Tier 2 (`verified-from-lock`). |
+| `tev_design` Lock Hash Present | **1,593 -> 1,596 runs** (~50.3%) | `cat /home/marielle/projects/tev_design/.bth/log/*.jsonl \| jq -r 'select(.kind == "run.imported" or .kind == "run.started") \| select(.data.dependency_lock_sha256 != null and .data.dependency_lock_sha256 != "") \| .eid' \| wc -l` | Verified (E10). Note: all lock-hashed runs in `tev_design` start `2026-08-13` (`>= 0.1.0a24`); `<= 0.1.0a22` runs (`2026-07-15..2026-07-28`) lack lock hashes (`OD-1`). |
+| `dependency_provenance` Empty Rate | **0 runs (100% null)** in both repos | `cat /home/marielle/projects/tev_design/.bth/log/*.jsonl \| jq -r 'select(.kind == "run.imported" or .kind == "run.started") \| select(.data.dependency_provenance != null and .data.dependency_provenance != "") \| .eid' \| wc -l` | Verified (E10/E19). Cause: capture is opt-in, neither repo set `track_packages`. However, 117 events (36 distinct runs) in `tev_design` record `.data.metadata.aminx_version`. |
+| Version Recovery Accuracy Sample | **24/25 pairs** (96%) | `cat /home/marielle/projects/tev_design/.bth/log/*.jsonl \| jq -r 'select(.kind == "run.imported" or .kind == "run.started") \| select(.data.git_hash != null and .data.dependency_lock_sha256 != null) \| "\(.data.git_hash) \(.data.dependency_lock_sha256)"' \| sort -u \| head -n 25` (checked against `git show <hash>:uv.lock \| sha256sum`) | Verified sample (E11). 24/25 match; 1 mismatch (`0b4e3ae1`, dirty `uv.lock`). |
+| `asr` Declared Stage Names | **46 / 357 full-repo sidecars** (**46 / 209** in `asr/scripts`) | `fd -e bth.toml . /home/marielle/projects/asr \| wc -l` (357) and `rg -l "stage_name\s*=" /home/marielle/projects/asr -g "*.bth.toml" \| wc -l` (46) | Verified (E9). Drift: 7 `"confirmatory"`, 1 `"power"`, 32 `"validation"`, 5 `"exploration"`, 1 `"calibration"`. |
+| `tev_design` Declared Stage Names | **15 / 130 sidecars** (11.5%; total `357 + 130 = 487` sidecars across both repos) | `fd -e bth.toml . /home/marielle/projects/tev_design \| wc -l` (130) and `rg -l "stage_name\s*=" /home/marielle/projects/tev_design -g "*.bth.toml" \| wc -l` (15) | Verified (E9/E13). All 15 declared sidecars in `tev_design` use `"validation"`. |
 
 ---
 
