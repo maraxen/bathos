@@ -1,12 +1,13 @@
 # PROVISIONAL DRAFT for AC-9 (spec 261104, T7). Not confirmed by the owner. Nothing live may run on it.
-# Purposes L1-L6 are the assistant's reading of tev_design's AGENTS.md and the AC-7e sidecar;
-# the owner said (261109) the real goals are multipronged and different, and will correct them.
+# Purposes L2-L6 are the assistant's reading of tev_design's AGENTS.md and the AC-7e sidecar,
+# kept by the owner 261109 as drafted. L1 was rewritten and L7 added by the owner 261109.
+# L7 is "not an immediate goal"; the format has only live/retired, so it is marked live (owner to confirm).
 # Two retired purposes: R1 (degenerate codons) and R2 (QM/MM reaction-state ensembles, chosen by the owner 261109, wording provisional).
 # The tev_design split is being scoped; this charter covers the repo as one project.
 mandate = "Build a scarless TEV: broaden the S1' pocket while preserving S1 Gln specificity and catalysis, through a multi-prong library program for the Chory collaboration. (PROVISIONAL: the project's real goals are multipronged and differ.)"
 
 [purpose.L1]
-text = "Deliver the Chory collaborator libraries: scarless assembly, 96 libraries, 40 selections, tube and deliverable shape."
+text = "Deliver the Chory collaborator libraries: scarless TEV stretch goal, up to 96 libraries subjected to multiplex selection, demonstrating turboPRANCE multiplexability."
 state = "live"
 
 [purpose.L2]
@@ -27,6 +28,10 @@ state = "live"
 
 [purpose.L6]
 text = "Active learning over designs."
+state = "live"
+
+[purpose.L7]
+text = "Distal versus local mutation impact on specificity (not an immediate goal)."
 state = "live"
 
 [purpose.R1]
