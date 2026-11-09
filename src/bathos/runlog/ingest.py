@@ -65,6 +65,7 @@ from bathos.runlog.fold_anchors import fold_anchor
 from bathos.runlog.fold_campaigns import fold_campaign, resolve_run_campaign_id
 from bathos.runlog.fold_edges import fold_edge
 from bathos.runlog.fold_ledgers import (
+    fold_acknowledgment,
     fold_archived_item,
     fold_blast_radius,
     fold_submit,
@@ -73,6 +74,7 @@ from bathos.runlog.fold_ledgers import (
 from bathos.runlog.fold_output_copies import OUTPUT_COPY_KINDS, fold_output_copy
 from bathos.runlog.fold_runs import fold_run
 from bathos.runlog.index import (
+    ACKNOWLEDGMENT_LEDGER_COLUMNS,
     ARCHIVED_ITEMS_COLUMNS,
     BLAST_RADIUS_LEDGER_COLUMNS,
     CAMPAIGN_EDGES_COLUMNS,
@@ -136,6 +138,9 @@ _BLAST_RADIUS_KINDS = frozenset({"blast_radius.recorded", "blast_radius.imported
 _TRUST_LEDGER_KINDS = frozenset({"trust_ledger.recorded", "trust_ledger.imported"})
 _ARCHIVED_ITEM_KINDS = frozenset({"archived_item.recorded", "archived_item.imported"})
 _SUBMIT_KINDS = frozenset({"submit.recorded", "submit.imported"})
+_ACKNOWLEDGMENT_KINDS = frozenset(
+    {"validity.acknowledged", "validity.estimand_override_recorded", "validity.acknowledged.imported"}
+)
 # Output tiering (spec 261023, section 5.3): entity `[run_id, copy_id]`. Unlike the kinds above this one has NO
 # `*.imported` counterpart. It MUST be dispatched in `fold_roots_into`: that loop advances the watermark past a
 # kind it does not know, so an unwired kind would be stored in `events` and never folded.
@@ -963,6 +968,17 @@ def _refold_archived_item(
     _insert_row(con, "archived_items", ARCHIVED_ITEMS_COLUMNS, folded)
 
 
+def _refold_acknowledgment(
+    con: duckdb.DuckDBPyConnection, record_id: str, lookup: _FoldLookup | None = None
+) -> None:
+    events = _resolve_lookup(con, lookup).events_for_entity_key([record_id])
+    con.execute("DELETE FROM acknowledgment_ledger WHERE id = ?", [record_id])
+    folded = fold_acknowledgment(events)
+    if folded is None:
+        return
+    _insert_row(con, "acknowledgment_ledger", ACKNOWLEDGMENT_LEDGER_COLUMNS, folded)
+
+
 def _refold_submit(
     con: duckdb.DuckDBPyConnection, submit_id: str, lookup: _FoldLookup | None = None
 ) -> None:
@@ -1128,6 +1144,7 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
     affected_blast_radius_ids: set[str] = set()
     affected_trust_ledger_ids: set[str] = set()
     affected_archived_item_ids: set[str] = set()
+    affected_ack_ids: set[str] = set()
     affected_submit_ids: set[str] = set()
     affected_output_copy_keys: set[tuple[str, str]] = set()
 
@@ -1208,6 +1225,8 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
                         affected_trust_ledger_ids.add(entity[0])
                     elif kind in _ARCHIVED_ITEM_KINDS and len(entity) == 1:
                         affected_archived_item_ids.add(entity[0])
+                    elif kind in _ACKNOWLEDGMENT_KINDS and len(entity) == 1:
+                        affected_ack_ids.add(entity[0])
                     elif kind in _SUBMIT_KINDS and len(entity) == 1:
                         affected_submit_ids.add(entity[0])
                     elif kind in _OUTPUT_COPY_KINDS and len(entity) == 2:
@@ -1242,6 +1261,7 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
             + [[b] for b in affected_blast_radius_ids]
             + [[t] for t in affected_trust_ledger_ids]
             + [[a] for a in affected_archived_item_ids]
+            + [[a] for a in affected_ack_ids]
             + [[s] for s in affected_submit_ids]
             + [list(k) for k in affected_output_copy_keys]
         )
@@ -1268,6 +1288,8 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
                 _refold_trust_ledger(con, record_id, lookup=lookup)
             for record_id in affected_archived_item_ids:
                 _refold_archived_item(con, record_id, lookup=lookup)
+            for record_id in affected_ack_ids:
+                _refold_acknowledgment(con, record_id, lookup=lookup)
             for submit_id in affected_submit_ids:
                 _refold_submit(con, submit_id, lookup=lookup)
             for oc_run_id, oc_copy_id in affected_output_copy_keys:

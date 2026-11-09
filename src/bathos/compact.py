@@ -418,6 +418,13 @@ def _migrate_v18(run_dict: dict) -> dict:
     return run_dict
 
 
+def _migrate_v19(run_dict: dict) -> dict:
+    """Migrate v19 fragment to v20 by adding nullable toolchain_version_source."""
+    run_dict["toolchain_version_source"] = None
+    run_dict["schema_version"] = "20"
+    return run_dict
+
+
 MIGRATIONS["0"] = _migrate_v0
 MIGRATIONS["1"] = _migrate_v1
 MIGRATIONS["2"] = _migrate_v2
@@ -437,6 +444,7 @@ MIGRATIONS["15"] = _migrate_v15
 MIGRATIONS["16"] = _migrate_v16
 MIGRATIONS["17"] = _migrate_v17
 MIGRATIONS["18"] = _migrate_v18
+MIGRATIONS["19"] = _migrate_v19
 
 
 _RUNS_TABLE_SCHEMA = """
@@ -1342,7 +1350,12 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                     output_metadata.append({"path": output_path, **meta})
 
             # Serialize metadata to JSON
-            output_metadata_json = json.dumps(output_metadata) if output_metadata else "[]"
+            if output_metadata:
+                output_metadata_json = json.dumps(output_metadata)
+            elif run.output_metadata and run.output_metadata != "[]":
+                output_metadata_json = run.output_metadata
+            else:
+                output_metadata_json = "[]"
 
             # Insert into DuckDB
             con.execute(

@@ -314,6 +314,8 @@ def graduate_product(
     run_id: str | None = None,
     output_path: str | None = None,
     reason: str | None = None,
+    ack_suspect: str = "",
+    ack_unverifiable: str = "",
 ) -> TrustLedgerRecord:
     """Graduate a product from ``candidate`` to ``promoted``. The ONLY function in
     bathos that appends a promotion record — enforces the ratchet invariant.
@@ -337,6 +339,8 @@ def graduate_product(
         run_id: Optional run_id to record on the ledger entry.
         output_path: Optional output_path to record on the ledger entry.
         reason: Optional free-form reason/justification to record.
+        ack_suspect: Non-empty rationale if producing run is suspect.
+        ack_unverifiable: Non-empty rationale if producing run is unverifiable.
 
     Returns:
         The appended :class:`TrustLedgerRecord` (``from_state="candidate"``,
@@ -344,20 +348,70 @@ def graduate_product(
 
     Raises:
         GraduationRefused: If no PASS attestation (at the requested min_strength)
-            exists for ``content_hash``. No ledger record is appended.
-
-    Idempotency (debt #640): if ``content_hash`` is already ``promoted`` (per
-    :func:`fold_trust_state`), this is a no-op — it returns the EXISTING latest
-    ledger record for ``content_hash`` instead of appending a second, distinct
-    ``candidate -> promoted`` record. Two prior calls with the same
-    ``content_hash`` used to each mint a fresh-UUID ledger record; `fold_trust_state`
-    still resolved correctly either way (latest-wins), so this was a data-hygiene
-    smell rather than a correctness bug, but callers relying on "call this exactly
-    once per graduation" now get that guarantee. The returned record's
-    ``attestation_ref``/``run_id``/``output_path``/``reason`` reflect whichever
-    call actually performed the promotion, not necessarily this call's arguments.
+            exists for ``content_hash``, or if all producing runs are hidden.
     """
+    producing_run_ids: set[str] = set()
+    if run_id:
+        producing_run_ids.add(run_id)
     existing = latest_ledger_record(catalog_dir, content_hash)
+    if existing is not None and existing.run_id:
+        producing_run_ids.add(existing.run_id)
+    from bathos.readback import _find_all_runs_with_output_sha256
+
+    for pid in _find_all_runs_with_output_sha256(catalog_dir, content_hash):
+        producing_run_ids.add(pid)
+
+    if producing_run_ids:
+        from bathos.errors import (
+            ResultSuspectUnacknowledgedError,
+            ResultUnverifiableUnacknowledgedError,
+        )
+        from bathos.index import record_acknowledgment
+        from bathos.validity import resolve_validity
+
+        v_map = resolve_validity(list(producing_run_ids), catalog_dir)
+        if all(v_map.get(rid) and v_map[rid].is_hidden for rid in producing_run_ids):
+            raise GraduationRefused(
+                f"graduate_product refused: all producing runs ({sorted(producing_run_ids)}) are hidden. "
+                "Cannot graduate a product with void/affected/superseded/archived provenance."
+            )
+        for rid, v in v_map.items():
+            if not v.is_hidden:
+                if v.state == "suspect":
+                    if not ack_suspect.strip():
+                        raise ResultSuspectUnacknowledgedError(
+                            f"graduate_product refused: producing run {rid} is suspect: {v.reason or ''}. "
+                            "Pass --ack-suspect '<reason>' to acknowledge.",
+                            run_id=rid,
+                            reason=v.reason,
+                        )
+                    record_acknowledgment(
+                        catalog_dir,
+                        kind="validity.acknowledged",
+                        entity_type="product",
+                        entity_id=content_hash,
+                        run_ids=[rid],
+                        surface="graduate_product",
+                        reason=ack_suspect.strip(),
+                    )
+                elif v.state == "unverifiable":
+                    if not ack_unverifiable.strip():
+                        raise ResultUnverifiableUnacknowledgedError(
+                            f"graduate_product refused: producing run {rid} is unverifiable: {v.reason or ''}. "
+                            "Pass --ack-unverifiable '<reason>' to acknowledge.",
+                            run_id=rid,
+                            reason=v.reason,
+                        )
+                    record_acknowledgment(
+                        catalog_dir,
+                        kind="validity.acknowledged",
+                        entity_type="product",
+                        entity_id=content_hash,
+                        run_ids=[rid],
+                        surface="graduate_product",
+                        reason=ack_unverifiable.strip(),
+                    )
+
     if existing is not None and existing.to_state == "promoted":
         return existing
 

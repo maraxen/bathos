@@ -326,6 +326,29 @@ def _get_project_slug(project_slug: str = "") -> str:
 # ============================================================================
 
 
+def _get_hidden_count(cat_dir: Path) -> int:
+    try:
+        from bathos.index import connect_read
+
+        con = connect_read(cat_dir, read_only=True)
+        tables = {
+            r[0]
+            for r in con.execute(
+                "SELECT table_name FROM duckdb_tables()"
+            ).fetchall()
+        }
+        if "validity_cache" in tables:
+            row = con.execute(
+                "SELECT count(*) FROM validity_cache WHERE validity_state IN ('void', 'affected', 'superseded', 'archived')"
+            ).fetchone()
+            con.close()
+            return int(row[0]) if row else 0
+        con.close()
+    except Exception:
+        pass
+    return 0
+
+
 @cisternal.tool(registry="bathos-cli", name="list_runs", cli_name="ls")
 def list_runs_tool(
     catalog_dir: str = "",
@@ -333,6 +356,7 @@ def list_runs_tool(
     project: str = "",
     since: str = "",
     status: str = "",
+    include_superseded: bool = False,
 ) -> dict:
     """List recent runs from catalog.
 
@@ -342,12 +366,14 @@ def list_runs_tool(
         project: Filter by project slug. CLI aliases: --project/-p.
         since: Relative time filter, e.g. '7d' or '24h'
         status: Filter by run status
+        include_superseded: If True, include void, affected, superseded, and archived runs
 
     Returns:
         Dict with runs array, count, the effective limit, and truncated (True when
         more matching runs exist than were returned)
     """
     from bathos.cli_common import parse_since
+    from bathos.validity import compute_distance_from_present, resolve_validity
 
     cat_dir = _get_catalog_dir(catalog_dir or None)
     if project or since or status:
@@ -356,12 +382,15 @@ def list_runs_tool(
             since=parse_since(since or None),
             project=project or None,
             status=status or None,
+            include_superseded=include_superseded,
         )
     else:
         # Fetch one extra row so truncation is detectable without a COUNT query.
-        runs = list_runs(cat_dir, limit=limit + 1)
+        runs = list_runs(cat_dir, limit=limit + 1, include_superseded=include_superseded)
     truncated = len(runs) > limit
     runs = runs[:limit]
+
+    v_map = resolve_validity([r.id for r in runs], cat_dir)
     runs_json = [
         {
             "id": r.id,
@@ -372,15 +401,34 @@ def list_runs_tool(
             "exit_code": r.exit_code,
             "duration_s": r.duration_s,
             "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+            "evidence_tier": v_map[r.id].evidence_tier if r.id in v_map else "undeclared",
+            "version_source": v_map[r.id].version_source
+            if r.id in v_map
+            else (r.toolchain_version_source or "unknown"),
+            "validity_state": v_map[r.id].state if r.id in v_map else "current",
+            "estimand_marker": v_map[r.id].estimand_marker if r.id in v_map else None,
+            "distance": compute_distance_from_present(r, v_map[r.id])
+            if r.id in v_map
+            else None,
         }
         for r in runs
     ]
-    return {
+    hidden_count = _get_hidden_count(cat_dir)
+    notice = (
+        f"{hidden_count} superseded/void/archived results hidden — --include-superseded to show"
+        if (hidden_count > 0 and not include_superseded)
+        else None
+    )
+    res = {
         "runs": runs_json,
         "count": len(runs_json),
         "limit": limit,
         "truncated": truncated,
+        "hidden_count": hidden_count,
     }
+    if notice:
+        res["notice"] = notice
+    return res
 
 
 # Same wire()-closure/PEP-563 workaround as run_cli_tool's `args` above: a
@@ -407,6 +455,7 @@ def find_runs_tool(
     status: str = "",
     slurm_job: str = "",
     output_file: str = "",
+    include_superseded: bool = False,
 ) -> dict:
     """Find runs matching filters.
 
@@ -418,12 +467,14 @@ def find_runs_tool(
         status: Filter by run status
         slurm_job: Filter by SLURM job ID
         output_file: Filter to runs with a matching output file path (glob pattern)
+        include_superseded: If True, include void, affected, superseded, and archived runs
 
     Returns:
         Dict with matching runs
     """
     from bathos.cli_common import parse_since
     from bathos.query import _filter_runs_by_output_file
+    from bathos.validity import compute_distance_from_present, resolve_validity
 
     cat_dir = _get_catalog_dir(catalog_dir or None)
     runs = find_runs(
@@ -433,9 +484,11 @@ def find_runs_tool(
         status=status or None,
         tags=tags or None,
         slurm_job_id=slurm_job or None,
+        include_superseded=include_superseded,
     )
     if output_file:
         runs = _filter_runs_by_output_file(runs, pattern=output_file)
+    v_map = resolve_validity([r.id for r in runs], cat_dir)
     runs_json = [
         {
             "id": r.id,
@@ -447,22 +500,42 @@ def find_runs_tool(
             "duration_s": r.duration_s,
             "timestamp": r.timestamp.isoformat() if r.timestamp else None,
             "tags": r.tags,
+            "evidence_tier": v_map[r.id].evidence_tier if r.id in v_map else "undeclared",
+            "version_source": v_map[r.id].version_source
+            if r.id in v_map
+            else (r.toolchain_version_source or "unknown"),
+            "validity_state": v_map[r.id].state if r.id in v_map else "current",
+            "estimand_marker": v_map[r.id].estimand_marker if r.id in v_map else None,
+            "distance": compute_distance_from_present(r, v_map[r.id])
+            if r.id in v_map
+            else None,
         }
         for r in runs
     ]
-    return {"runs": runs_json, "count": len(runs_json)}
+    hidden_count = _get_hidden_count(cat_dir)
+    notice = (
+        f"{hidden_count} superseded/void/archived results hidden — --include-superseded to show"
+        if (hidden_count > 0 and not include_superseded)
+        else None
+    )
+    res = {"runs": runs_json, "count": len(runs_json), "hidden_count": hidden_count}
+    if notice:
+        res["notice"] = notice
+    return res
 
 
 @cisternal.tool(registry="bathos-cli", name="get_run", cli_name="show")
 def get_run_tool(
     run_id: str = "",
     catalog_dir: str = "",
+    include_superseded: bool = False,
 ) -> dict:
     """Get details for a specific run.
 
     Args:
         catalog_dir: Catalog directory (empty = use default)
         run_id: Run ID to fetch
+        include_superseded: If True, allow fetching hidden/void runs
 
     Returns:
         Dict with run details
@@ -471,7 +544,25 @@ def get_run_tool(
         return {"error": "run_id is required"}
     cat_dir = _get_catalog_dir(catalog_dir or None)
     # Display path only: other get_run callers must not see uncompacted runs.
-    run = get_run(run_id, cat_dir, allow_cool_fallback=True)
+    from bathos.errors import ResultHiddenError
+
+    try:
+        run = get_run(
+            run_id,
+            cat_dir,
+            allow_cool_fallback=True,
+            include_superseded=include_superseded,
+        )
+    except ResultHiddenError as e:
+        return {
+            "error": str(e),
+            "error_code": "result_hidden",
+            "state": getattr(e, "state", "hidden"),
+            "validity_state": getattr(e, "state", "hidden"),
+            "defect_id": getattr(e, "defect_id", None),
+            "reason": getattr(e, "reason", None),
+            "replacement_id": getattr(e, "replacement_id", None),
+        }
     if run is None:
         return {"error": f"Run {run_id} not found"}
     run_dict = {
@@ -496,6 +587,25 @@ def get_run_tool(
         "sidecar_path": run.sidecar_path,
         "sidecar_sha256": run.sidecar_sha256,
     }
+    from bathos.validity import resolve_validity
+
+    v_map = resolve_validity([run.id], cat_dir)
+    v = v_map.get(run.id)
+    if v:
+        run_dict["validity_state"] = v.state
+        run_dict["version_source"] = v.version_source
+        run_dict["evidence_tier"] = v.evidence_tier
+        run_dict["estimand_marker"] = v.estimand_marker
+        if (
+            v.state in ("suspect", "unverifiable")
+            or include_superseded
+            or v.estimand_marker is not None
+        ):
+            run_dict["validity"] = v.state
+            banner_parts = [f"[{v.state.upper()}]"]
+            if v.reason:
+                banner_parts.append(v.reason)
+            run_dict["validity_banner"] = " ".join(banner_parts)
     if run_source(run) == COOL_UNINDEXED_SOURCE:
         notice = (
             "not yet compacted: fields computed at compact time "
@@ -514,12 +624,16 @@ def get_run_tool(
 def run_sql_tool(
     sql: str = "",
     catalog_dir: str = "",
+    include_superseded: bool = False,
+    allow_hidden: bool = False,
 ) -> dict:
     """Execute SQL query against catalog.
 
     Args:
         catalog_dir: Catalog directory (empty = use default)
         sql: SQL query string
+        include_superseded: If True, suppress warning notice on unmuted runs table
+        allow_hidden: Alias for include_superseded
 
     Returns:
         Dict with rows array
@@ -528,11 +642,242 @@ def run_sql_tool(
         return {"error": "sql parameter is required"}
     cat_dir = _get_catalog_dir(catalog_dir or None)
     try:
-        rows = run_sql(sql, cat_dir)
+        rows = run_sql(
+            sql,
+            cat_dir,
+            include_superseded=include_superseded,
+            allow_hidden=allow_hidden,
+        )
     except RuntimeError as e:
         return {"error": str(e)}
     rows_json = [list(row) for row in rows]
-    return {"rows": rows_json, "count": len(rows_json)}
+    hidden_count = _get_hidden_count(cat_dir)
+    res = {"rows": rows_json, "count": len(rows_json), "hidden_count": hidden_count, "notice": None}
+    from bathos.query import _RAW_RUNS_RE
+
+    if (
+        _RAW_RUNS_RE.search(sql)
+        and hidden_count > 0
+        and not (include_superseded or allow_hidden)
+    ):
+        res["notice"] = (
+            f"Query targets unmuted history via table 'runs' ({hidden_count} void/affected/superseded/archived runs present). "
+            "Query 'runs_current' for current results, or pass --include-superseded (alias: --allow-hidden) to suppress this notice."
+        )
+    return res
+
+
+@cisternal.tool(
+    registry="bathos-cli",
+    name="defect_declare",
+    cli_group="instrument",
+    cli_name="declare-defect",
+)
+def defect_declare_tool(
+    package: str,
+    defect_id: str,
+    introduced: str = "",
+    fixed: str = "",
+    commit_introduced: str = "",
+    commit_fixed: str = "",
+    kind: str = "defect",
+    severity: str = "void",
+    hide_inferred: bool = False,
+    revision: int = 1,
+    predicate: str = "",
+    summary: str = "",
+    evidence: str = "",
+    user_scope: bool = False,
+    catalog_dir: str = "",
+) -> dict:
+    """Declare an instrument defect or estimand change in instrument registry.
+
+    Args:
+        package: Package name (e.g. aminx, asr)
+        defect_id: Defect identifier (e.g. AMINX-2026-001)
+        introduced: PyPI version introduced
+        fixed: PyPI version fixed
+        commit_introduced: Git commit introduced
+        commit_fixed: Git commit fixed
+        kind: defect | estimand_change
+        severity: void | suspect
+        hide_inferred: OD-1 opt-in to void inferred matches
+        revision: Integer revision
+        predicate: SQL condition string, e.g. sample_s > 1
+        summary: Human description
+        evidence: Evidence reference
+        user_scope: Store in user registry instead of project
+        catalog_dir: Optional catalog directory
+    """
+    from datetime import UTC, datetime
+    import tomlkit
+    from bathos.workspace import resolve_workspace
+
+    if user_scope:
+        xdg_config = os.environ.get("XDG_CONFIG_HOME")
+        inst_dir = (
+            Path(xdg_config) / "bathos" / "instruments"
+            if xdg_config
+            else Path.home() / ".config" / "bathos" / "instruments"
+        )
+    else:
+        ws = resolve_workspace(Path.cwd()).fs_root
+        inst_dir = ws / ".bth" / "instruments"
+
+    inst_dir.mkdir(parents=True, exist_ok=True)
+    target_file = inst_dir / f"{package}.toml"
+
+    entry_data = {
+        "id": defect_id,
+        "revision": revision,
+        "kind": kind,
+        "severity": severity,
+        "hide_inferred": hide_inferred,
+        "summary": summary,
+        "evidence": evidence,
+        "declared_at": datetime.now(UTC).isoformat(),
+        "declared_by": os.environ.get("USER", "unknown"),
+    }
+    ranges = []
+    if introduced or fixed:
+        evs = []
+        if introduced:
+            evs.append({"introduced": introduced})
+        if fixed:
+            evs.append({"fixed": fixed})
+        ranges.append({"type": "ECOSYSTEM", "events": evs})
+    if commit_introduced or commit_fixed:
+        evs = []
+        if commit_introduced:
+            evs.append({"introduced": commit_introduced})
+        if commit_fixed:
+            evs.append({"fixed": commit_fixed})
+        ranges.append({"type": "GIT", "events": evs})
+    if ranges:
+        entry_data["ranges"] = ranges
+    if predicate:
+        entry_data["predicate"] = {"condition": predicate}
+
+    if target_file.is_file():
+        doc = tomlkit.loads(target_file.read_text(encoding="utf-8"))
+        entries = doc.get("entries", [])
+        replaced = False
+        for i, existing in enumerate(entries):
+            if existing.get("id") == defect_id:
+                entries[i] = entry_data
+                replaced = True
+                break
+        if not replaced:
+            entries.append(entry_data)
+        doc["entries"] = entries
+    else:
+        doc = tomlkit.document()
+        doc["schema_version"] = "1.0.0"
+        doc["package"] = package
+        doc["ecosystem"] = (
+            "GIT"
+            if (commit_introduced or commit_fixed) and not (introduced or fixed)
+            else "PyPI"
+        )
+        doc["entries"] = [entry_data]
+
+    target_file.write_text(tomlkit.dumps(doc), encoding="utf-8")
+    return {
+        "status": "declared",
+        "file": str(target_file),
+        "package": package,
+        "defect_id": defect_id,
+        "revision": revision,
+    }
+
+
+@cisternal.tool(registry="bathos", name="defect_declare")
+@traced_tool
+@require_write_token
+async def mcp_defect_declare_tool(
+    package: str,
+    defect_id: str,
+    introduced: str = "",
+    fixed: str = "",
+    commit_introduced: str = "",
+    commit_fixed: str = "",
+    kind: str = "defect",
+    severity: str = "void",
+    hide_inferred: bool = False,
+    revision: int = 1,
+    predicate: str = "",
+    summary: str = "",
+    evidence: str = "",
+    user_scope: bool = False,
+    catalog_dir: str = "",
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token
+) -> dict:
+    return defect_declare_tool(
+        package=package,
+        defect_id=defect_id,
+        introduced=introduced,
+        fixed=fixed,
+        commit_introduced=commit_introduced,
+        commit_fixed=commit_fixed,
+        kind=kind,
+        severity=severity,
+        hide_inferred=hide_inferred,
+        revision=revision,
+        predicate=predicate,
+        summary=summary,
+        evidence=evidence,
+        user_scope=user_scope,
+        catalog_dir=catalog_dir,
+    )
+
+
+@cisternal.tool(
+    registry="bathos-cli",
+    name="defect_list",
+    cli_group="instrument",
+    cli_name="list-defects",
+)
+def defect_list_tool(
+    package: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """List declared instrument defects across registries."""
+    from bathos.version_resolver import load_instrument_registries
+    from bathos.workspace import resolve_workspace
+
+    ws = resolve_workspace(Path.cwd()).fs_root
+    registries = load_instrument_registries(ws)
+    defects = []
+    for pkg_name, reg in registries.items():
+        if package and pkg_name != package:
+            continue
+        for e in reg.entries:
+            defects.append(
+                {
+                    "package": pkg_name,
+                    "defect_id": e.id,
+                    "revision": e.revision,
+                    "kind": e.kind,
+                    "severity": e.severity,
+                    "hide_inferred": e.hide_inferred,
+                    "description": e.description,
+                    "ranges": [
+                        {"type": r.type, "introduced": r.introduced, "fixed": r.fixed}
+                        for r in e.ranges
+                    ],
+                    "predicate": e.predicate.condition if e.predicate else None,
+                }
+            )
+    return {"defects": defects, "count": len(defects)}
+
+
+@cisternal.tool(registry="bathos", name="defect_list")
+@traced_tool
+async def mcp_defect_list_tool(
+    package: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    return defect_list_tool(package=package, catalog_dir=catalog_dir)
 
 
 # ============================================================================
@@ -1217,6 +1562,8 @@ def graduate_product_tool(
     run_id: str = "",
     output_path: str = "",
     reason: str = "",
+    ack_suspect: str = "",
+    ack_unverifiable: str = "",
 ) -> dict:
     """Graduate a product from candidate to promoted in the trust ledger (S3; real).
 
@@ -1231,12 +1578,15 @@ def graduate_product_tool(
         run_id: Optional run_id to record on the ledger entry.
         output_path: Optional output_path to record on the ledger entry.
         reason: Optional free-form reason/justification to record.
+        ack_suspect: Non-empty rationale if producing run is suspect.
+        ack_unverifiable: Non-empty rationale if producing run is unverifiable.
 
     Returns:
         Dict with ok + the appended (or, if already promoted, existing) ledger
         record, or ok=False + error_code="graduation_refused" if no PASS
         attestation exists for content_hash at the requested min_strength.
     """
+    from bathos.errors import BathosError
     from bathos.trust_ledger import GraduationRefused, graduate_product
 
     if not content_hash or not attestation_ref:
@@ -1251,10 +1601,18 @@ def graduate_product_tool(
             run_id=run_id or None,
             output_path=output_path or None,
             reason=reason or None,
+            ack_suspect=ack_suspect,
+            ack_unverifiable=ack_unverifiable,
         )
         return {"ok": True, "record": dataclasses.asdict(record)}
     except GraduationRefused as e:
         return {"ok": False, "error": str(e), "error_code": "graduation_refused"}
+    except BathosError as e:
+        return {
+            "ok": False,
+            "error": str(e),
+            "error_code": e.code.value if hasattr(e, "code") else "graduation_refused",
+        }
 
 
 @cisternal.tool(registry="bathos-cli", name="compact", cli_name="compact")
@@ -2338,6 +2696,9 @@ def campaign_conclude_tool(
     catalog_dir: str = "",
     negative_check: str = "",
     workspace_root: str = "",
+    ack_suspect: str = "",
+    ack_unverifiable: str = "",
+    allow_mixed_estimand: str = "",
 ) -> dict:
     """Conclude a campaign with an outcome label.
 
@@ -2350,6 +2711,9 @@ def campaign_conclude_tool(
             required when outcome_label is a negative claim and a claim is registered.
         workspace_root: Project workspace root that registered claim paths resolve
             against (empty = auto-resolve from the server's cwd)
+        ack_suspect: Non-empty rationale if any member run is suspect
+        ack_unverifiable: Non-empty rationale if any member run is unverifiable
+        allow_mixed_estimand: Non-empty rationale if member runs span mixed estimand epochs
 
     Returns:
         Dict with conclusion confirmation
@@ -2362,6 +2726,7 @@ def campaign_conclude_tool(
     cat_dir = _get_catalog_dir(catalog_dir or None)
 
     from bathos.campaigns import CampaignError, connect_catalog_db, prepare_catalog_for_conclude
+    from bathos.errors import BathosError
     from bathos.runlog.emit import unit_of_work
 
     # One unit of work: prepare, connect and conclude see the same mode (#2843).
@@ -2381,6 +2746,9 @@ def campaign_conclude_tool(
                 ),
                 negative_check=negative_check or None,
                 catalog_dir=cat_dir,
+                ack_suspect=ack_suspect,
+                ack_unverifiable=ack_unverifiable,
+                allow_mixed_estimand=allow_mixed_estimand,
             )
             return {
                 "status": "concluded",
@@ -2389,6 +2757,8 @@ def campaign_conclude_tool(
             }
         except BreakdownRefused as e:
             return _breakdown_refusal_result(e)
+        except BathosError as e:
+            return {"error": str(e), "error_code": e.code.value if hasattr(e, "code") else "conclude_failed"}
         except CampaignError as e:
             return {"error": str(e)}
         finally:
@@ -2471,9 +2841,12 @@ def campaign_attest_parity_tool(
 async def mcp_list_runs_tool(
     catalog_dir: str = "",
     limit: int = 10,
+    include_superseded: bool = False,
 ) -> dict:
     """List recent runs from catalog."""
-    return list_runs_tool(catalog_dir=catalog_dir, limit=limit)
+    return list_runs_tool(
+        catalog_dir=catalog_dir, limit=limit, include_superseded=include_superseded
+    )
 
 
 @cisternal.tool(registry="bathos", name="find_runs")
@@ -2482,9 +2855,15 @@ async def mcp_find_runs_tool(
     catalog_dir: str = "",
     pattern: str = "",
     tags: list[str] | None = None,
+    include_superseded: bool = False,
 ) -> dict:
     """Find runs by pattern (project) and/or tags."""
-    return find_runs_tool(catalog_dir=catalog_dir, project=pattern, tags=tags)
+    return find_runs_tool(
+        catalog_dir=catalog_dir,
+        project=pattern,
+        tags=tags,
+        include_superseded=include_superseded,
+    )
 
 
 @cisternal.tool(registry="bathos", name="get_run")
@@ -2492,9 +2871,12 @@ async def mcp_find_runs_tool(
 async def mcp_get_run_tool(
     catalog_dir: str = "",
     run_id: str = "",
+    include_superseded: bool = False,
 ) -> dict:
     """Get details for a specific run."""
-    return get_run_tool(catalog_dir=catalog_dir, run_id=run_id)
+    return get_run_tool(
+        catalog_dir=catalog_dir, run_id=run_id, include_superseded=include_superseded
+    )
 
 
 @cisternal.tool(registry="bathos-cli", name="cite_run", cli_name="cite")
@@ -2502,6 +2884,8 @@ def cite_run_tool(
     run_id: str,
     catalog_dir: str = "",
     format: str = "markdown",
+    ack_suspect: str = "",
+    ack_unverifiable: str = "",
 ) -> dict:
     """Return a structured citation for a run linking output to hypothesis and manifest.
 
@@ -2509,18 +2893,82 @@ def cite_run_tool(
         run_id: The run ID to cite.
         catalog_dir: Path to catalog directory (uses default if empty).
         format: Output format ('markdown' or 'json').
+        ack_suspect: Non-empty rationale if run is suspect.
+        ack_unverifiable: Non-empty rationale if run is unverifiable.
 
     Returns:
         Formatted citation string.
     """
     from bathos.cite import format_citation
+    from bathos.errors import (
+        HIDDEN_STATE_TO_EXCEPTION,
+        ResultSuspectUnacknowledgedError,
+        ResultUnverifiableUnacknowledgedError,
+    )
+    from bathos.index import record_acknowledgment
     from bathos.query import get_run as _get_run
+    from bathos.validity import resolve_validity
 
     cat_dir = _get_catalog_dir(catalog_dir)
-    run = _get_run(run_id, cat_dir)
+    run = _get_run(run_id, cat_dir, include_superseded=True)
     if run is None:
         raise CatalogError(f"Run not found: {run_id}")
-    return {"citation": format_citation(run, fmt=format)}
+
+    v_map = resolve_validity([run.id], cat_dir)
+    v = v_map.get(run.id)
+    banner = None
+    if v:
+        if v.is_hidden:
+            exc_cls = HIDDEN_STATE_TO_EXCEPTION.get(v.state)
+            raise exc_cls(
+                f"Cannot cite run {run.id}: run is hidden ({v.state}): {v.reason or ''}",
+                run_id=run.id,
+                state=v.state,
+                defect_id=v.defect_id,
+                reason=v.reason,
+                replacement_id=v.replacement_id,
+            )
+        if v.state == "suspect":
+            if not ack_suspect.strip():
+                raise ResultSuspectUnacknowledgedError(
+                    f"Cannot cite run {run.id}: run is suspect: {v.reason or ''}. Pass --ack-suspect '<reason>' to acknowledge.",
+                    run_id=run.id,
+                    reason=v.reason,
+                )
+            record_acknowledgment(
+                cat_dir,
+                kind="validity.acknowledged",
+                entity_type="run",
+                entity_id=run.id,
+                run_ids=[run.id],
+                surface="cite_run",
+                reason=ack_suspect.strip(),
+            )
+            banner = f"[SUSPECT — ACKNOWLEDGED: {ack_suspect.strip()}]"
+        elif v.state == "unverifiable":
+            if not ack_unverifiable.strip():
+                raise ResultUnverifiableUnacknowledgedError(
+                    f"Cannot cite run {run.id}: run is unverifiable: {v.reason or ''}. Pass --ack-unverifiable '<reason>' to acknowledge.",
+                    run_id=run.id,
+                    reason=v.reason,
+                )
+            record_acknowledgment(
+                cat_dir,
+                kind="validity.acknowledged",
+                entity_type="run",
+                entity_id=run.id,
+                run_ids=[run.id],
+                surface="cite_run",
+                reason=ack_unverifiable.strip(),
+            )
+            banner = f"[UNVERIFIABLE — ACKNOWLEDGED: {ack_unverifiable.strip()}]"
+
+    raw_citation = format_citation(run, fmt=format)
+    if banner and format == "markdown":
+        citation = f"{banner}\n{raw_citation}"
+    else:
+        citation = raw_citation
+    return {"citation": citation}
 
 
 @cisternal.tool(registry="bathos", name="cite_run")
@@ -2529,6 +2977,8 @@ async def mcp_cite_run_tool(
     run_id: str,
     catalog_dir: str = "",
     format: str = "markdown",
+    ack_suspect: str = "",
+    ack_unverifiable: str = "",
 ) -> dict:
     """Return a structured citation for a run linking output to hypothesis and manifest.
 
@@ -2536,11 +2986,19 @@ async def mcp_cite_run_tool(
         run_id: The run ID to cite.
         catalog_dir: Path to catalog directory (uses default if empty).
         format: Output format ('markdown' or 'json').
+        ack_suspect: Non-empty rationale if run is suspect.
+        ack_unverifiable: Non-empty rationale if run is unverifiable.
 
     Returns:
         Formatted citation string.
     """
-    return cite_run_tool(run_id=run_id, catalog_dir=catalog_dir, format=format)
+    return cite_run_tool(
+        run_id=run_id,
+        catalog_dir=catalog_dir,
+        format=format,
+        ack_suspect=ack_suspect,
+        ack_unverifiable=ack_unverifiable,
+    )
 
 
 @cisternal.tool(registry="bathos-cli", name="lineage_prov", cli_name="lineage")
@@ -2563,6 +3021,7 @@ def lineage_prov_tool(
     from bathos.provenance import format_prov_json
     from bathos.query import CatalogError
     from bathos.query import lineage as get_lineage
+    from bathos.validity import resolve_validity
 
     cat_dir = _get_catalog_dir(catalog_dir)
     ancestors = get_lineage(run_id, cat_dir, depth=depth)
@@ -2570,8 +3029,33 @@ def lineage_prov_tool(
     if not ancestors:
         raise CatalogError(f"Run not found or no lineage: {run_id}")
 
-    prov_output = format_prov_json(ancestors)
-    return {"prov": prov_output}
+    validity_map = resolve_validity([r.id for r in ancestors], cat_dir)
+    prov_output = format_prov_json(ancestors, validity_map=validity_map)
+
+    banners = {}
+    estimand_warnings = []
+    markers_by_pkg: dict[str, set[str]] = {}
+    for r in ancestors:
+        v = validity_map.get(r.id)
+        if v:
+            if v.is_hidden or v.state in ("suspect", "unverifiable"):
+                banners[r.id] = f"[{v.state.upper()}] {v.reason or ''}"
+            if v.estimand_marker:
+                pkg = v.estimand_marker.split(":")[0]
+                markers_by_pkg.setdefault(pkg, set()).add(v.estimand_marker)
+
+    for pkg, markers in markers_by_pkg.items():
+        if len(markers) > 1:
+            estimand_warnings.append(
+                f"Lineage spans multiple estimand epochs for {pkg}: {sorted(markers)}"
+            )
+
+    result = {"prov": prov_output}
+    if banners:
+        result["validity_banners"] = banners
+    if estimand_warnings:
+        result["estimand_warnings"] = estimand_warnings
+    return result
 
 
 @cisternal.tool(registry="bathos", name="lineage_prov")
@@ -2600,9 +3084,16 @@ async def mcp_lineage_prov_tool(
 async def mcp_run_sql_tool(
     catalog_dir: str = "",
     sql: str = "",
+    include_superseded: bool = False,
+    allow_hidden: bool = False,
 ) -> dict:
     """Execute SQL query against catalog."""
-    return run_sql_tool(catalog_dir=catalog_dir, sql=sql)
+    return run_sql_tool(
+        catalog_dir=catalog_dir,
+        sql=sql,
+        include_superseded=include_superseded,
+        allow_hidden=allow_hidden,
+    )
 
 
 @cisternal.tool(registry="bathos", name="resolve_pin")
@@ -2822,6 +3313,8 @@ async def mcp_graduate_product_tool(
     run_id: str = "",
     output_path: str = "",
     reason: str = "",
+    ack_suspect: str = "",
+    ack_unverifiable: str = "",
     token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
     """Graduate a product from candidate to promoted in the trust ledger (S3; real).
@@ -2839,6 +3332,8 @@ async def mcp_graduate_product_tool(
         run_id=run_id,
         output_path=output_path,
         reason=reason,
+        ack_suspect=ack_suspect,
+        ack_unverifiable=ack_unverifiable,
     )
 
 
@@ -3431,6 +3926,9 @@ async def mcp_campaign_conclude_tool(
     catalog_dir: str = "",
     negative_check: str = "",
     workspace_root: str = "",
+    ack_suspect: str = "",
+    ack_unverifiable: str = "",
+    allow_mixed_estimand: str = "",
     token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
     """Conclude a campaign with an outcome label.
@@ -3443,6 +3941,9 @@ async def mcp_campaign_conclude_tool(
         catalog_dir=catalog_dir,
         negative_check=negative_check,
         workspace_root=workspace_root,
+        ack_suspect=ack_suspect,
+        ack_unverifiable=ack_unverifiable,
+        allow_mixed_estimand=allow_mixed_estimand,
     )
 
 
@@ -3980,10 +4481,14 @@ def _claim_register_sync(
     workspace_root: Path,
     *,
     force: bool = False,
+    ack_suspect: str = "",
+    ack_unverifiable: str = "",
+    allow_mixed_estimand: str = "",
 ) -> dict:
     """Register a claim; always close the DuckDB write connection."""
     from bathos.campaigns import connect_catalog_db
     from bathos.claim import register_claim
+    from bathos.errors import BathosError
     from bathos.runlog.emit import unit_of_work
 
     # After cut-over this is the index, not the frozen `bathos.db`; register_claim
@@ -3995,7 +4500,15 @@ def _claim_register_sync(
             return {"ok": False, "error": _missing_catalog_message(db_path, cat_dir)}
         try:
             register_claim(
-                Path(path), campaign_id, db, workspace_root, force=force, catalog_dir=cat_dir
+                Path(path),
+                campaign_id,
+                db,
+                workspace_root,
+                force=force,
+                catalog_dir=cat_dir,
+                ack_suspect=ack_suspect,
+                ack_unverifiable=ack_unverifiable,
+                allow_mixed_estimand=allow_mixed_estimand,
             )
             return {
                 "ok": True,
@@ -4006,6 +4519,12 @@ def _claim_register_sync(
             }
         except BreakdownRefused as e:
             return _breakdown_refusal_result(e)
+        except BathosError as e:
+            return {
+                "ok": False,
+                "error": str(e),
+                "error_code": e.code.value if hasattr(e, "code") else "register_failed",
+            }
         except (RuntimeError, FileNotFoundError) as e:
             return {"ok": False, "error": str(e), "error_code": "register_failed"}
         finally:
@@ -4019,6 +4538,9 @@ def claim_register_tool(
     catalog_dir: str | None = None,
     workspace_root: str | None = None,
     force: bool = False,
+    ack_suspect: str = "",
+    ack_unverifiable: str = "",
+    allow_mixed_estimand: str = "",
 ) -> dict:
     """Register a claim TOML file with a campaign (path + SHA256 anchor).
 
@@ -4041,7 +4563,16 @@ def claim_register_tool(
 
         ws = resolve_workspace().fs_root
 
-    return _claim_register_sync(path, campaign_id, cat_dir, ws, force=force)
+    return _claim_register_sync(
+        path,
+        campaign_id,
+        cat_dir,
+        ws,
+        force=force,
+        ack_suspect=ack_suspect,
+        ack_unverifiable=ack_unverifiable,
+        allow_mixed_estimand=allow_mixed_estimand,
+    )
 
 
 @cisternal.tool(registry="bathos-cli", name="gate_stamp", cli_group="gate", cli_name="stamp")
@@ -4111,13 +4642,23 @@ async def claim_register(
     catalog_dir: str | None = None,
     workspace_root: str | None = None,
     force: bool = False,
+    ack_suspect: str = "",
+    ack_unverifiable: str = "",
+    allow_mixed_estimand: str = "",
     token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
     """Register a claim TOML file with a campaign (path + SHA256 anchor).
 
     Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
     return claim_register_tool(
-        path, campaign_id, catalog_dir=catalog_dir, workspace_root=workspace_root, force=force
+        path,
+        campaign_id,
+        catalog_dir=catalog_dir,
+        workspace_root=workspace_root,
+        force=force,
+        ack_suspect=ack_suspect,
+        ack_unverifiable=ack_unverifiable,
+        allow_mixed_estimand=allow_mixed_estimand,
     )
 
 
@@ -6233,6 +6774,8 @@ _WIRED = cisternal.wire(
         "stepback_resolve",
         "stepback_brief",
         "stepback_snooze",
+        "defect_declare",
+        "defect_list",
     ],
 )
 

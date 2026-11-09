@@ -134,6 +134,16 @@ class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(
     ESCALATION_LEVEL_INVALID = "escalation_level_invalid"
     CHAIR_TOKEN_INVALID = "chair_token_invalid"
 
+    # Result validity, supersession & archive (spec 261106).
+    RESULT_VOID = "result_void"
+    RESULT_AFFECTED = "result_affected"
+    RESULT_SUPERSEDED = "result_superseded"
+    RESULT_ARCHIVED = "result_archived"
+    RESULT_HIDDEN = "result_hidden"
+    RESULT_SUSPECT_UNACKNOWLEDGED = "result_suspect_unacknowledged"
+    RESULT_UNVERIFIABLE_UNACKNOWLEDGED = "result_unverifiable_unacknowledged"
+    ESTIMAND_BOUNDARY_MIXED = "estimand_boundary_mixed"
+
 
 # Resolution hints registry: every BathosErrorCode member must have a non-empty entry
 RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
@@ -220,6 +230,14 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.REVIEWER_CONFLICT_OF_INTEREST: "Assign review to an independent agent or researcher who did not author runs in this campaign",
     BathosErrorCode.ESCALATION_LEVEL_INVALID: "Specify a valid escalation level between 0 and 3",
     BathosErrorCode.CHAIR_TOKEN_INVALID: "Verify the chair token in `~/.bth/chair_token` or invoke from an interactive TTY",
+    BathosErrorCode.RESULT_VOID: "The requested run was produced by a defective instrument version and is void. Query runs_current or use a replacement run. Pass --include-superseded to inspect history.",
+    BathosErrorCode.RESULT_AFFECTED: "The requested run is implicated by an active blast-radius ledger entry. Re-run or clear the flag with audit justification via 'bth blast-radius clear'.",
+    BathosErrorCode.RESULT_SUPERSEDED: "The requested run was superseded by a newer run. Use --include-superseded to inspect, or query the successor run.",
+    BathosErrorCode.RESULT_ARCHIVED: "The requested script or outputs were archived. Use 'bth restore --item-id <id>' to restore files to workspace.",
+    BathosErrorCode.RESULT_HIDDEN: "The requested run is hidden by default due to void, affected, superseded, or archived status. Pass --include-superseded to inspect.",
+    BathosErrorCode.RESULT_SUSPECT_UNACKNOWLEDGED: "Run was produced by an unverified toolchain matching a defect range or lacks a required predicate field. To proceed, pass --ack-suspect '<rationale>' (ack_suspect='<rationale>').",
+    BathosErrorCode.RESULT_UNVERIFIABLE_UNACKNOWLEDGED: "Run provenance cannot be verified against repository lockfiles. To proceed, pass --ack-unverifiable '<rationale>' (ack_unverifiable='<rationale>').",
+    BathosErrorCode.ESTIMAND_BOUNDARY_MIXED: "Attempted to combine runs across an estimand change boundary at a confirmatory gate. Results compute different quantities; separate by epoch or pass --allow-mixed-estimand '<rationale>'.",
 }
 
 
@@ -371,6 +389,15 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     "StepBackUnauthorizedChairError": BathosErrorCode.STEPBACK_UNAUTHORIZED_CHAIR,
     "ChairTokenInvalidError": BathosErrorCode.CHAIR_TOKEN_INVALID,
     "EscalationLevelInvalidError": BathosErrorCode.ESCALATION_LEVEL_INVALID,
+    # Result validity (spec 261106)
+    "ResultHiddenError": BathosErrorCode.RESULT_HIDDEN,
+    "ResultVoidError": BathosErrorCode.RESULT_VOID,
+    "ResultAffectedError": BathosErrorCode.RESULT_AFFECTED,
+    "ResultSupersededError": BathosErrorCode.RESULT_SUPERSEDED,
+    "ResultArchivedError": BathosErrorCode.RESULT_ARCHIVED,
+    "ResultSuspectUnacknowledgedError": BathosErrorCode.RESULT_SUSPECT_UNACKNOWLEDGED,
+    "ResultUnverifiableUnacknowledgedError": BathosErrorCode.RESULT_UNVERIFIABLE_UNACKNOWLEDGED,
+    "EstimandBoundaryMixedError": BathosErrorCode.ESTIMAND_BOUNDARY_MIXED,
 }
 
 
@@ -447,4 +474,111 @@ class ChairTokenInvalidError(StepBackUnauthorizedChairError):
 
 class EscalationLevelInvalidError(StepBackError):
     """Specified escalation level is outside 0-3 range."""
+
+
+# ── Result Validity Domain Exceptions (spec 261106) ──────────────────────────
+
+
+class ResultHiddenError(BathosError):
+    """Raised when an operation encounters or requests a hidden run without permission."""
+
+    def __init__(
+        self,
+        message: str = "Result is hidden",
+        *,
+        run_id: str | None = None,
+        state: str = "void",
+        defect_id: str | None = None,
+        reason: str | None = None,
+        replacement_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.run_id = run_id
+        self.state = state
+        self.defect_id = defect_id
+        self.reason = reason
+        self.replacement_id = replacement_id
+
+
+class ResultVoidError(ResultHiddenError):
+    """Run was produced by a defective toolchain version and is void."""
+
+
+class ResultAffectedError(ResultHiddenError):
+    """Run is implicated by an active blast-radius ledger entry."""
+
+
+class ResultSupersededError(ResultHiddenError):
+    """Run was superseded by a newer run."""
+
+
+class ResultArchivedError(ResultHiddenError):
+    """Run scripts or outputs were archived."""
+
+
+class ResultSuspectUnacknowledgedError(BathosError):
+    """Run is suspect (inferred version or missing predicate field) and lacked required acknowledgment."""
+
+    def __init__(
+        self,
+        message: str = "Suspect result requires acknowledgment",
+        *,
+        run_id: str | None = None,
+        defect_id: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.run_id = run_id
+        self.defect_id = defect_id
+        self.reason = reason
+
+
+class ResultUnverifiableUnacknowledgedError(BathosError):
+    """Run toolchain version is unverifiable against repository lockfiles and lacked required acknowledgment."""
+
+    def __init__(
+        self,
+        message: str = "Unverifiable result requires acknowledgment",
+        *,
+        run_id: str | None = None,
+        defect_id: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.run_id = run_id
+        self.defect_id = defect_id
+        self.reason = reason
+
+
+class EstimandBoundaryMixedError(BathosError):
+    """Runs across an estimand change boundary were pooled at a confirmatory gate without override."""
+
+    def __init__(
+        self,
+        message: str = "Cannot pool runs across estimand change boundary without override",
+        *,
+        estimand_markers: list[str] | None = None,
+        conflicting_runs: dict[str, list[str]] | None = None,
+        epochs: list[str] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message)
+        self.estimand_markers = estimand_markers or epochs or []
+        self.epochs = self.estimand_markers
+        self.conflicting_runs = conflicting_runs or {}
+
+
+HIDDEN_STATE_TO_ERROR_CODE: dict[str, BathosErrorCode] = {
+    "void": BathosErrorCode.RESULT_VOID,
+    "affected": BathosErrorCode.RESULT_AFFECTED,
+    "superseded": BathosErrorCode.RESULT_SUPERSEDED,
+    "archived": BathosErrorCode.RESULT_ARCHIVED,
+}
+
+HIDDEN_STATE_TO_EXCEPTION: dict[str, type[ResultHiddenError]] = {
+    "void": ResultVoidError,
+    "affected": ResultAffectedError,
+    "superseded": ResultSupersededError,
+    "archived": ResultArchivedError,
+}
 

@@ -233,6 +233,7 @@ def validate_claim(
     claim: ClaimFile,
     db: duckdb.DuckDBPyConnection | None = None,
     workspace_root: Path | None = None,
+    catalog_dir: Path | None = None,
 ) -> ValidationResult:
     """Validate a parsed claim file.
 
@@ -354,6 +355,18 @@ def validate_claim(
                     )
                 )
             else:
+                from bathos.errors import HIDDEN_STATE_TO_ERROR_CODE
+                from bathos.validity import resolve_validity
+
+                v_map = resolve_validity([parity_run_id], catalog_dir or workspace_root or Path.cwd(), db=db)
+                v = v_map.get(parity_run_id)
+                if v and v.is_hidden:
+                    err_code = HIDDEN_STATE_TO_ERROR_CODE.get(v.state, "result_hidden")
+                    errors.append(
+                        ValidationError(
+                            f"parity run '{parity_run_id}' is hidden ({v.state}): {v.reason or ''} (code: {err_code})"
+                        )
+                    )
                 run_outcome, run_parity_type = row
 
                 # GRADED PATH (F-1): if the run is a literature_parity run, use graded verdict
@@ -608,6 +621,9 @@ def register_claim(
     workspace_root: Path,
     force: bool = False,
     catalog_dir: Path | None = None,
+    ack_suspect: str = "",
+    ack_unverifiable: str = "",
+    allow_mixed_estimand: str = "",
 ) -> None:
     """Register a claim file with a campaign.
 
@@ -655,6 +671,87 @@ def register_claim(
         from bathos.campaigns import _log_mode, union_campaign_member_ids
 
         member_ids = union_campaign_member_ids(db, full_id, catalog_dir)
+        if member_ids:
+            from bathos.errors import (
+                EstimandBoundaryMixedError,
+                HIDDEN_STATE_TO_EXCEPTION,
+                ResultSuspectUnacknowledgedError,
+                ResultUnverifiableUnacknowledgedError,
+            )
+            from bathos.index import record_acknowledgment
+            from bathos.validity import resolve_validity
+
+            validity_map = resolve_validity(
+                member_ids, catalog_dir or workspace_root, db=db, workspace_root=workspace_root
+            )
+            for mid, v in validity_map.items():
+                if v.is_hidden:
+                    exc_cls = HIDDEN_STATE_TO_EXCEPTION.get(v.state)
+                    raise exc_cls(
+                        f"Campaign member run {mid} is hidden ({v.state}): {v.reason or ''}",
+                        run_id=mid,
+                        state=v.state,
+                        defect_id=v.defect_id,
+                        reason=v.reason,
+                        replacement_id=v.replacement_id,
+                    )
+                if v.state == "suspect":
+                    if not ack_suspect.strip():
+                        raise ResultSuspectUnacknowledgedError(
+                            f"Campaign member run {mid} is suspect: {v.reason or ''}. Pass --ack-suspect '<reason>' to acknowledge.",
+                            run_id=mid,
+                            reason=v.reason,
+                        )
+                    record_acknowledgment(
+                        catalog_dir,
+                        kind="validity.acknowledged",
+                        entity_type="campaign",
+                        entity_id=full_id,
+                        run_ids=[mid],
+                        surface="claim_register",
+                        reason=ack_suspect.strip(),
+                    )
+                elif v.state == "unverifiable":
+                    if not ack_unverifiable.strip():
+                        raise ResultUnverifiableUnacknowledgedError(
+                            f"Campaign member run {mid} is unverifiable: {v.reason or ''}. Pass --ack-unverifiable '<reason>' to acknowledge.",
+                            run_id=mid,
+                            reason=v.reason,
+                        )
+                    record_acknowledgment(
+                        catalog_dir,
+                        kind="validity.acknowledged",
+                        entity_type="campaign",
+                        entity_id=full_id,
+                        run_ids=[mid],
+                        surface="claim_register",
+                        reason=ack_unverifiable.strip(),
+                    )
+
+            # Estimand Boundary Check (OD-6):
+            markers_by_pkg: dict[str, set[str]] = {}
+            for mid, v in validity_map.items():
+                if v.estimand_marker:
+                    pkg = v.estimand_marker.split(":")[0]
+                    markers_by_pkg.setdefault(pkg, set()).add(v.estimand_marker)
+
+            for pkg, markers in markers_by_pkg.items():
+                if len(markers) > 1:
+                    if not allow_mixed_estimand.strip():
+                        raise EstimandBoundaryMixedError(
+                            f"Campaign member runs span multiple estimand epochs for {pkg}: {sorted(markers)}. "
+                            "Pass --allow-mixed-estimand '<reason>' to justify pooling across the boundary.",
+                            epochs=sorted(markers),
+                        )
+                    record_acknowledgment(
+                        catalog_dir,
+                        kind="validity.estimand_override_recorded",
+                        entity_type="campaign",
+                        entity_id=full_id,
+                        run_ids=member_ids,
+                        surface="claim_register",
+                        reason=allow_mixed_estimand.strip(),
+                    )
         refuse_on_findings(
             check_runs(
                 fetch_member_runs(db, member_ids, catalog_dir, log_mode=_log_mode(catalog_dir)),
@@ -848,10 +945,21 @@ def differential_confound_check(
         hypothesis_ids = clause.get("hypothesis_ids", [])
         label = format_clause_ref(clause)
 
+        runs_tbl = (
+            "runs_current"
+            if "runs_current"
+            in [
+                r[0]
+                for r in db.execute(
+                    "SELECT table_name FROM duckdb_tables() WHERE table_name='runs_current'"
+                ).fetchall()
+            ]
+            else "runs"
+        )
         covered_runs = db.execute(
-            """
+            f"""
             SELECT cr.run_id FROM campaign_runs cr
-            JOIN runs r ON cr.run_id = r.id
+            JOIN {runs_tbl} r ON cr.run_id = r.id
             WHERE cr.campaign_id = ?
               AND r.claim_discriminates IS NOT NULL
             """,
@@ -861,8 +969,8 @@ def differential_confound_check(
         status = "uncontrolled"
         for (run_id,) in covered_runs:
             rows = db.execute(
-                "SELECT claim_discriminates, differential_status, dependency_lock_sha256 "
-                "FROM runs WHERE id = ?",
+                f"SELECT claim_discriminates, differential_status, dependency_lock_sha256 "
+                f"FROM {runs_tbl} WHERE id = ?",
                 [run_id],
             ).fetchall()
             if not rows or not rows[0][0]:
@@ -929,10 +1037,21 @@ def run_union_gate(
             continue
 
         # Find a run that covers ALL hypothesis_ids in this clause
+        runs_tbl = (
+            "runs_current"
+            if "runs_current"
+            in [
+                r[0]
+                for r in db.execute(
+                    "SELECT table_name FROM duckdb_tables() WHERE table_name='runs_current'"
+                ).fetchall()
+            ]
+            else "runs"
+        )
         covered_runs = db.execute(
-            """
+            f"""
             SELECT cr.run_id FROM campaign_runs cr
-            JOIN runs r ON cr.run_id = r.id
+            JOIN {runs_tbl} r ON cr.run_id = r.id
             WHERE cr.campaign_id = ?
               AND r.claim_discriminates IS NOT NULL
             """,
@@ -943,7 +1062,7 @@ def run_union_gate(
         for (run_id,) in covered_runs:
             # Get claim_discriminates JSON array
             rows = db.execute(
-                "SELECT claim_discriminates FROM runs WHERE id = ?", [run_id]
+                f"SELECT claim_discriminates FROM {runs_tbl} WHERE id = ?", [run_id]
             ).fetchall()
             if rows and rows[0][0]:
                 try:
@@ -1069,6 +1188,22 @@ def _attest_parity_impl(
         raise ValueError(f"Parity run '{parity_run_id}' not found in catalog")
 
     outcome, metadata_json, parity_run_type_col = run_rows[0]
+
+    from bathos.errors import HIDDEN_STATE_TO_EXCEPTION
+    from bathos.validity import resolve_validity
+
+    v_map = resolve_validity([parity_run_id], catalog_dir or workspace_root or Path.cwd(), db=db)
+    v = v_map.get(parity_run_id)
+    if v and v.is_hidden:
+        exc_cls = HIDDEN_STATE_TO_EXCEPTION.get(v.state, ValueError)
+        raise exc_cls(
+            f"Parity run '{parity_run_id}' is hidden ({v.state}): {v.reason or ''}",
+            run_id=parity_run_id,
+            state=v.state,
+            defect_id=v.defect_id,
+            reason=v.reason,
+            replacement_id=v.replacement_id,
+        )
 
     # Validate outcome is pass or partial
     if outcome not in ("pass", "partial"):

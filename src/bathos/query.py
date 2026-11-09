@@ -246,6 +246,7 @@ def _cool_list_runs(
     project: str | None = None,
     status: str | None = None,
     limit: int = 50,
+    include_superseded: bool = False,
 ) -> list[Run]:
     """List runs using cool tier (PyArrow Parquet files)."""
     runs = read_runs(catalog_dir)
@@ -253,6 +254,11 @@ def _cool_list_runs(
         runs = [r for r in runs if r.project_slug == project]
     if status:
         runs = [r for r in runs if r.status == status]
+    if not include_superseded:
+        from bathos.validity import resolve_validity
+
+        v_map = resolve_validity([r.id for r in runs], catalog_dir)
+        runs = [r for r in runs if not v_map.get(r.id) or not v_map[r.id].is_hidden]
     return runs[:limit]
 
 
@@ -261,6 +267,7 @@ def list_runs(
     project: str | None = None,
     status: str | None = None,
     limit: int = 50,
+    include_superseded: bool = False,
 ) -> list[Run]:
     """List runs from catalog, with optional filtering and limit.
 
@@ -268,10 +275,16 @@ def list_runs(
     """
     backend = _resolve_backend(catalog_dir)
     if backend == "index":
-        return _index_list_runs(catalog_dir, project=project, status=status, limit=limit)
+        return _index_list_runs(
+            catalog_dir, project=project, status=status, limit=limit, include_superseded=include_superseded
+        )
     if backend == "warm":
-        return _warm_list_runs(catalog_dir, project=project, status=status, limit=limit)
-    return _cool_list_runs(catalog_dir, project=project, status=status, limit=limit)
+        return _warm_list_runs(
+            catalog_dir, project=project, status=status, limit=limit, include_superseded=include_superseded
+        )
+    return _cool_list_runs(
+        catalog_dir, project=project, status=status, limit=limit, include_superseded=include_superseded
+    )
 
 
 def _index_list_runs(
@@ -279,9 +292,11 @@ def _index_list_runs(
     project: str | None = None,
     status: str | None = None,
     limit: int = 50,
+    include_superseded: bool = False,
 ) -> list[Run]:
     """List runs from the folded index (flag on; spec AC-3)."""
-    query = "SELECT * FROM runs"
+    table = "runs" if include_superseded else "runs_current"
+    query = f"SELECT * FROM {table}"
     params: list = []
     conditions = []
     if project:
@@ -301,6 +316,7 @@ def _warm_list_runs(
     project: str | None = None,
     status: str | None = None,
     limit: int = 50,
+    include_superseded: bool = False,
 ) -> list[Run]:
     """List runs using warm tier (DuckDB)."""
     t_start = time.monotonic()
@@ -309,7 +325,8 @@ def _warm_list_runs(
     con.execute("SET TimeZone='UTC'")
 
     # Build query
-    query = "SELECT * FROM runs"
+    table = "runs" if include_superseded else "runs_current"
+    query = f"SELECT * FROM {table}"
     params = []
     conditions = []
 
@@ -463,7 +480,13 @@ def _cool_get_run(run_id: str, catalog_dir: Path) -> Run | None:
     return None
 
 
-def get_run(run_id: str, catalog_dir: Path, *, allow_cool_fallback: bool = False) -> Run | None:
+def get_run(
+    run_id: str,
+    catalog_dir: Path,
+    *,
+    allow_cool_fallback: bool = False,
+    include_superseded: bool = False,
+) -> Run | None:
     """Get a single run by ID, or None if not found.
 
     Dispatches to the index, warm, or cool backend based on catalog state.
@@ -478,10 +501,30 @@ def get_run(run_id: str, catalog_dir: Path, *, allow_cool_fallback: bool = False
     """
     backend = _resolve_backend(catalog_dir)
     if backend == "index":
-        return _index_get_run(run_id, catalog_dir)
-    if backend == "warm":
-        return _warm_get_run(run_id, catalog_dir, allow_cool_fallback=allow_cool_fallback)
-    return _cool_get_run(run_id, catalog_dir)
+        run = _index_get_run(run_id, catalog_dir)
+    elif backend == "warm":
+        run = _warm_get_run(run_id, catalog_dir, allow_cool_fallback=allow_cool_fallback)
+    else:
+        run = _cool_get_run(run_id, catalog_dir)
+
+    if run is not None and not include_superseded:
+        from bathos.errors import HIDDEN_STATE_TO_EXCEPTION, ResultHiddenError
+        from bathos.validity import resolve_validity
+
+        v_map = resolve_validity([run.id], catalog_dir)
+        v = v_map.get(run.id)
+        if v and v.is_hidden:
+            exc_cls = HIDDEN_STATE_TO_EXCEPTION.get(v.state, ResultHiddenError)
+            raise exc_cls(
+                f"Result {run.id} is hidden ({v.state}): {v.reason or ''}",
+                run_id=run.id,
+                state=v.state,
+                defect_id=v.defect_id,
+                reason=v.reason,
+                replacement_id=v.replacement_id,
+            )
+
+    return run
 
 
 def _index_get_run(run_id: str, catalog_dir: Path) -> Run | None:
@@ -591,9 +634,15 @@ def _cool_find_runs(
     status: str | None = None,
     tags: list[str] | None = None,
     slurm_job_id: str | None = None,
+    include_superseded: bool = False,
 ) -> list[Run]:
     """Find runs using cool tier (PyArrow)."""
     runs = read_runs(catalog_dir)
+    if not include_superseded:
+        from bathos.validity import resolve_validity
+
+        v_map = resolve_validity([r.id for r in runs], catalog_dir)
+        runs = [r for r in runs if not v_map.get(r.id) or not v_map[r.id].is_hidden]
     if since:
         runs = [r for r in runs if r.timestamp >= since]
     if project:
@@ -614,6 +663,7 @@ def find_runs(
     status: str | None = None,
     tags: list[str] | None = None,
     slurm_job_id: str | None = None,
+    include_superseded: bool = False,
 ) -> list[Run]:
     """Find runs with multiple filter criteria.
 
@@ -628,6 +678,7 @@ def find_runs(
             status=status,
             tags=tags,
             slurm_job_id=slurm_job_id,
+            include_superseded=include_superseded,
         )
     if backend == "warm":
         return _warm_find_runs(
@@ -637,6 +688,7 @@ def find_runs(
             status=status,
             tags=tags,
             slurm_job_id=slurm_job_id,
+            include_superseded=include_superseded,
         )
     return _cool_find_runs(
         catalog_dir,
@@ -645,6 +697,7 @@ def find_runs(
         status=status,
         tags=tags,
         slurm_job_id=slurm_job_id,
+        include_superseded=include_superseded,
     )
 
 
@@ -655,6 +708,7 @@ def _index_find_runs(
     status: str | None = None,
     tags: list[str] | None = None,
     slurm_job_id: str | None = None,
+    include_superseded: bool = False,
 ) -> list[Run]:
     """Find runs in the folded index (flag on; spec AC-3).
 
@@ -665,7 +719,8 @@ def _index_find_runs(
     values, not as a SQL predicate; `tags` is JSON-encoded text for the same
     reason `_warm_find_runs` also filters it in Python.
     """
-    query = "SELECT * FROM runs"
+    table = "runs" if include_superseded else "runs_current"
+    query = f"SELECT * FROM {table}"
     params: list = []
     conditions = []
     if project:
@@ -695,6 +750,7 @@ def _warm_find_runs(
     status: str | None = None,
     tags: list[str] | None = None,
     slurm_job_id: str | None = None,
+    include_superseded: bool = False,
 ) -> list[Run]:
     """Find runs using warm tier (DuckDB)."""
     t_start = time.monotonic()
@@ -702,7 +758,8 @@ def _warm_find_runs(
     con = connect_read(catalog_dir)
     con.execute("SET TimeZone='UTC'")
 
-    query = "SELECT * FROM runs"
+    table = "runs" if include_superseded else "runs_current"
+    query = f"SELECT * FROM {table}"
     params = []
     conditions = []
 
@@ -770,7 +827,16 @@ def _is_missing_runs_table(exc: BaseException) -> bool:
     )
 
 
-def run_sql(sql: str, catalog_dir: Path | None = None) -> list[tuple]:
+_RAW_RUNS_RE = re.compile(r'(?i)\b(?:FROM|JOIN)\s+(?:[a-zA-Z_]\w*\s*\.\s*)?"?runs"?(?!_current\b)\b')
+
+
+def run_sql(
+    sql: str,
+    catalog_dir: Path | None = None,
+    *,
+    include_superseded: bool = False,
+    allow_hidden: bool = False,
+) -> list[tuple]:
     """Execute a raw DuckDB SQL query and return rows as list of tuples.
 
     If catalog_dir is provided, attempts to open warm tier catalog (bathos.db).
@@ -785,6 +851,31 @@ def run_sql(sql: str, catalog_dir: Path | None = None) -> list[tuple]:
         if catalog_dir is None:
             return duckdb.connect()
         return connect_read(catalog_dir, read_only=read_only, missing="empty")
+
+    if catalog_dir is not None and _RAW_RUNS_RE.search(sql) and not (include_superseded or allow_hidden):
+        try:
+            chk_con = _open(True)
+            tables = {
+                r[0]
+                for r in chk_con.execute(
+                    "SELECT table_name FROM duckdb_tables()"
+                ).fetchall()
+            }
+            if "validity_cache" in tables:
+                cnt_row = chk_con.execute(
+                    "SELECT count(*) FROM validity_cache WHERE validity_state IN ('void', 'affected', 'superseded', 'archived')"
+                ).fetchone()
+                if cnt_row and cnt_row[0] > 0:
+                    import sys
+
+                    print(
+                        f"Notice: query targets 'runs' (unmuted history including {cnt_row[0]} hidden/void results). "
+                        "Query 'runs_current' to inspect active results or pass --allow-hidden / --include-superseded.",
+                        file=sys.stderr,
+                    )
+            chk_con.close()
+        except Exception:
+            pass
 
     # Open read-only first: a read-write connection holds an EXCLUSIVE file
     # lock and shuts out every concurrent reader, and `bth sql` is almost
@@ -852,8 +943,7 @@ def lineage(run_id: str, catalog_dir: Path, depth: int = 50) -> list[Run]:
     if depth < 0:
         raise ValueError(f"depth must be >= 0, got {depth}")
 
-    db_path = catalog_dir / "bathos.db"
-    if not db_path.exists():
+    if not catalog_readable(catalog_dir):
         return []
 
     db = connect_read(catalog_dir, read_only=True)

@@ -23,6 +23,7 @@ def format_prov_json(
     runs: list[Run],
     *,
     run_parent_edges: Mapping[str, list[str]] | None = None,
+    validity_map: Mapping[str, Any] | None = None,
 ) -> dict:
     """Format a lineage chain as W3C PROV-JSON 1.0.
 
@@ -38,6 +39,8 @@ def format_prov_json(
             instead of just its single `parent_run_id` field. A run ABSENT from this mapping
             (or when the whole parameter is omitted) falls back to the existing single-parent
             `run.parent_run_id` behavior.
+        validity_map: optional; `run_id -> ValidityResult`. If provided, attaches
+            `bth:validity_state`, `bth:validity_reason`, and `bth:estimand_marker`.
 
     Returns:
         Dictionary conforming to W3C PROV-JSON 1.0 schema with bth: namespace.
@@ -53,7 +56,7 @@ def format_prov_json(
         run_key = f"bth:run_{run.id[:8]}"
 
         # Entity: the run outcome
-        entities[run_key] = {
+        ent = {
             "prov:type": "bth:Run",
             "bth:run_id": run.id,
             "bth:outcome": run.outcome or "",
@@ -61,6 +64,14 @@ def format_prov_json(
             "bth:git_sha": run.git_hash or "",
             "bth:timestamp": str(run.timestamp),
         }
+        if validity_map and run.id in validity_map:
+            v = validity_map[run.id]
+            ent["bth:validity_state"] = getattr(v, "state", str(v))
+            if getattr(v, "reason", None):
+                ent["bth:validity_reason"] = v.reason
+            if getattr(v, "estimand_marker", None):
+                ent["bth:estimand_marker"] = v.estimand_marker
+        entities[run_key] = ent
 
         # Activity: the subprocess execution
         activity_key = f"bth:exec_{run.id[:8]}"

@@ -9,6 +9,8 @@ tests) do not need to change; new code should `import bathos.index` directly.
 from __future__ import annotations
 
 from bathos.index import (
+    ACKNOWLEDGMENT_LEDGER_COLUMNS,
+    ACKNOWLEDGMENT_LEDGER_DDL,
     ARCHIVED_ITEMS_COLUMNS,
     ARCHIVED_ITEMS_DDL,
     BLAST_RADIUS_LEDGER_COLUMNS,
@@ -42,6 +44,8 @@ from bathos.index import (
 )
 
 __all__ = [
+    "ACKNOWLEDGMENT_LEDGER_COLUMNS",
+    "ACKNOWLEDGMENT_LEDGER_DDL",
     "ARCHIVED_ITEMS_COLUMNS",
     "ARCHIVED_ITEMS_DDL",
     "BLAST_RADIUS_LEDGER_COLUMNS",

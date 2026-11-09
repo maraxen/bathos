@@ -221,6 +221,7 @@ def _default_array(arrow_type: pa.DataType, n: int, field_name: str = "") -> pa.
         "tentative_outcome",
         "agent_session",
         "dependency_provenance",
+        "toolchain_version_source",
     ) and (pa.types.is_string(arrow_type) or pa.types.is_large_string(arrow_type)):
         return pa.array([None] * n, type=arrow_type)
     # B2-02: seed/baseline_hpo_trials/baseline_hpo_compute_budget/differential_effect must

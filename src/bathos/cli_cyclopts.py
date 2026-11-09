@@ -143,6 +143,9 @@ wire(
         "reference_get",
         "reference_search",
         "reference_applicable",
+        # instrument group (P1 defect tools)
+        "defect_declare",
+        "defect_list",
     ],
 )
 
