@@ -397,6 +397,13 @@ def _add_missing_columns(con: duckdb.DuckDBPyConnection, table: str, ddl: str) -
     created before a column was added to the DDL would otherwise lack it. Column name and type
     are parsed from the DDL lines; the PRIMARY KEY column is skipped.
     """
+    existing = {
+        row[0]
+        for row in con.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = ?",
+            [table],
+        ).fetchall()
+    }
     for line in ddl.strip().splitlines():
         stripped = line.strip().rstrip(",").strip()
         if not stripped or stripped.startswith(_DDL_NON_COLUMN_PREFIXES):
@@ -405,7 +412,10 @@ def _add_missing_columns(con: duckdb.DuckDBPyConnection, table: str, ddl: str) -
         if len(parts) != 2 or "PRIMARY KEY" in parts[1]:
             continue
         name, col_type = parts
-        con.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {name} {col_type}")
+        if name in existing:
+            continue
+        col_type_clean = col_type.replace(" NOT NULL", "")
+        con.execute(f"ALTER TABLE {table} ADD COLUMN {name} {col_type_clean}")
 
 
 def init_index_schema(con: duckdb.DuckDBPyConnection) -> None:
@@ -424,9 +434,7 @@ def init_index_schema(con: duckdb.DuckDBPyConnection) -> None:
     con.execute(ARCHIVED_ITEMS_DDL)
     _add_missing_columns(con, "archived_items", ARCHIVED_ITEMS_DDL)
     con.execute(ACKNOWLEDGMENT_LEDGER_DDL)
-    _add_missing_columns(con, "acknowledgment_ledger", ACKNOWLEDGMENT_LEDGER_DDL)
     con.execute(SUPERSESSION_EDGES_DDL)
-    _add_missing_columns(con, "supersession_edges", SUPERSESSION_EDGES_DDL)
     con.execute(SUBMITS_DDL)
     con.execute(OUTPUT_COPIES_DDL)
 
@@ -506,63 +514,6 @@ def record_acknowledgment(
     return ack_id
 
 
-def connect_read(
-    catalog_dir: Path | None = None,
-    *,
-    read_only: bool = True,
-    missing: str = "empty",
-) -> duckdb.DuckDBPyConnection:
-    """The one flag-gated read entry point (spec `bathos.index.connect_read`).
-
-    Flag OFF (before cut-over): a pass-through. Opens `bathos.db` read-only,
-    exactly as today's ad hoc call sites do (spec "Reads": "creates no views
-    and does not use `connect_legacy`"). `read_only` and `missing` let a
-    migrated call site reproduce its own pre-migration behaviour exactly:
-
-    - `read_only` is passed straight through to `duckdb.connect()` and
-      defaults to True, which every read call site now takes. It must stay
-      that way: a read-WRITE DuckDB connection holds an EXCLUSIVE lock on the
-      file, so a single read opened read-write shuts out every concurrent
-      reader for as long as it runs. Read-only connections share the file
-      freely. (Measured: two read-only opens coexist; while a read-write one
-      is held, a second open of either kind fails with "Could not set lock on
-      file ... Conflicting lock is held".)
-
-      A set of call sites historically passed `read_only=False` while only
-      ever executing SELECTs -- `query._warm_list_runs`/`_warm_get_run`/
-      `_warm_find_runs`/`run_sql`, `postmortem.find_run_for_scaffold` and
-      five `mcp.py` tools. That was the main source of catalog contention
-      between concurrent `bth` invocations and long-lived MCP servers, and
-      they now all open read-only. Genuine writers do not come through here
-      at all; they use `campaigns.connect_catalog_db` (see its docstring).
-    - `missing` controls what happens when `bathos.db` does not exist:
-      `"empty"` (the default) returns `duckdb.connect("")`, an anonymous
-      in-memory connection with nothing attached -- this matches both the
-      pre-existing default behaviour of this function and `query.run_sql`'s
-      explicit `str(db_path) if db_path.exists() else ""` fallback. Most
-      other call sites this wave moved onto `connect_read` guard with
-      `catalog_readable(catalog_dir)` before calling (see below), so
-      `missing` is never exercised there; it exists so a call site with a
-      different contract (or none at all -- `run_sql`, and any future
-      caller) does not have to re-invent the pass-through. (An earlier
-      revision of this docstring claimed EVERY migrated call site guards
-      this way; a review caught one that didn't -- `viz/html.py`'s
-      `_project_campaigns`, fixed alongside `catalog_readable` itself.)
-
-    Flag ON (after cut-over): ATTACHes `index.db` read-only for this call
-    only (never held across calls) and exposes `runs`/`events`/... as views
-    over it. If `index.db` does not exist yet, the views are the empty tables
-    from a freshly-initialized in-memory schema (spec: "the views are built
-    from the events alone"). `read_only`/`missing` are flag-off-only knobs --
-    once on, every read is through a fresh read-only ATTACH by construction
-    and there is no "missing bathos.db" question to ask.
-
-    Every call is independent -- the connection is never cached or held by a
-    caller across calls, so a long-lived process (the MCP server) never pins
-    a stale generation.
-    """
-    from bathos.runlog.mode import is_log_mode
-
 def _wire_validity_cache_and_views(con: duckdb.DuckDBPyConnection, catalog_dir: Path) -> None:
     from bathos.validity import (
         VALIDITY_CACHE_DDL,
@@ -609,14 +560,36 @@ def connect_read(
     catalog_dir: Path | None = None,
     *,
     read_only: bool = True,
-    missing: str = "raise",
+    missing: str = "empty",
 ) -> duckdb.DuckDBPyConnection:
-    """Return a DuckDB connection for reading from the catalog.
+    """The one flag-gated read entry point (spec `bathos.index.connect_read`).
 
-    Mode-aware:
-    Flag OFF (legacy): returns `duckdb.connect("bathos.db", read_only=...)`.
-      `missing="empty"` returns an empty in-memory connection on missing
-      `bathos.db` instead of raising FileNotFoundError; all twelve
+    Flag OFF (before cut-over): a pass-through. Opens `bathos.db` read-only,
+    exactly as today's ad hoc call sites do (spec "Reads": "creates no views
+    and does not use `connect_legacy`"). `read_only` and `missing` let a
+    migrated call site reproduce its own pre-migration behaviour exactly:
+
+    - `read_only` is passed straight through to `duckdb.connect()` and
+      defaults to True, which every read call site now takes. It must stay
+      that way: a read-WRITE DuckDB connection holds an EXCLUSIVE lock on the
+      file, so a single read opened read-write shuts out every concurrent
+      reader for as long as it runs. Read-only connections share the file
+      freely. (Measured: two read-only opens coexist; while a read-write one
+      is held, a second open of either kind fails with "Could not set lock on
+      file ... Conflicting lock is held".)
+
+      A set of call sites historically passed `read_only=False` while only
+      ever executing SELECTs -- `query._warm_list_runs`/`_warm_get_run`/
+      `_warm_find_runs`/`run_sql`, `postmortem.find_run_for_scaffold` and
+      five `mcp.py` tools. That was the main source of catalog contention
+      between concurrent `bth` invocations and long-lived MCP servers, and
+      they now all open read-only. Genuine writers do not come through here
+      at all; they use `campaigns.connect_catalog_db` (see its docstring).
+    - `missing` controls what happens when `bathos.db` does not exist:
+      `"empty"` (the default) returns `duckdb.connect("")`, an anonymous
+      in-memory connection with nothing attached -- this matches both the
+      pre-existing default behaviour of this function and `query.run_sql`'s
+      explicit `str(db_path) if db_path.exists() else ""` fallback. Most
       other call sites this wave moved onto `connect_read` guard with
       `catalog_readable(catalog_dir)` before calling (see below), so
       `missing` is never exercised there; it exists so a call site with a

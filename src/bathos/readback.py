@@ -272,13 +272,28 @@ def _find_run_with_output_sha256(
         for entry in entries:
             if isinstance(entry, dict) and entry.get("sha256") == content_hash:
                 return run_id, entry.get("path", "")
+
+    # Fallback to cool fragments
+    from bathos.catalog import read_runs
+    try:
+        for r in read_runs(Path(catalog_dir)):
+            if r.output_metadata:
+                try:
+                    entries = json.loads(r.output_metadata) if isinstance(r.output_metadata, str) else []
+                    for entry in entries:
+                        if isinstance(entry, dict) and entry.get("sha256") == content_hash:
+                            return r.id, entry.get("path", "")
+                except Exception:
+                    pass
+    except Exception:
+        pass
     return None
 
 
 def _find_all_runs_with_output_sha256(
     catalog_dir: Path | str, content_hash: str
 ) -> list[str]:
-    """Scan warm run catalog and trust ledger for all run IDs producing content_hash."""
+    """Scan warm run catalog, cool fragments, and trust ledger for all run IDs producing content_hash."""
     import duckdb
 
     cat_path = Path(catalog_dir)
@@ -320,6 +335,23 @@ def _find_all_runs_with_output_sha256(
         pass
     finally:
         con.close()
+
+    # Also check cool fragments for output_metadata
+    from bathos.catalog import read_runs
+    try:
+        for r in read_runs(cat_path):
+            if r.output_metadata:
+                try:
+                    entries = json.loads(r.output_metadata) if isinstance(r.output_metadata, str) else []
+                    for e in entries:
+                        if isinstance(e, dict) and e.get("sha256") == content_hash:
+                            run_ids.add(r.id)
+                            break
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
     return sorted(run_ids)
 
 

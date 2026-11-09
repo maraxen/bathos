@@ -1350,12 +1350,7 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
                     output_metadata.append({"path": output_path, **meta})
 
             # Serialize metadata to JSON
-            if output_metadata:
-                output_metadata_json = json.dumps(output_metadata)
-            elif run.output_metadata and run.output_metadata != "[]":
-                output_metadata_json = run.output_metadata
-            else:
-                output_metadata_json = "[]"
+            output_metadata_json = json.dumps(output_metadata) if output_metadata else "[]"
 
             # Insert into DuckDB
             con.execute(

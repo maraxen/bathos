@@ -121,18 +121,80 @@ def resolve_evidence_tier(stage_name: str | None, epistemic_class: str | None) -
 def compute_validity_inputs_hash(
     catalog_dir: Path | str,
     con: duckdb.DuckDBPyConnection | None = None,
+    workspace_root: Path | None = None,
 ) -> str:
     """Compute 64-char hex SHA256 over:
     (1) sorted instrument registries (canonical_path, sha256) + use_user_registry
     (2) catalog state: log mode (events rowid/count, watermarks, runs count) or legacy warm mode
-    (3) ledger states: blast_radius, archived_items, supersession_edges.
+    (3) cool-tier run fragments (count, total_size, max_mtime)
+    (4) ledger states: blast_radius, archived_items, supersession_edges.
     """
     cd = Path(catalog_dir)
     hasher = hashlib.sha256()
 
-    # 1. Registries
+    # 1. Collect candidate project roots
+    candidate_roots: list[Path] = []
+
+    # 1a. Explicit workspace_root
+    if workspace_root is not None and Path(workspace_root).is_dir():
+        candidate_roots.append(Path(workspace_root).resolve())
+
+    # 1b. Environment override
+    env_root = os.environ.get("BTH_WORKSPACE_ROOT")
+    if env_root and Path(env_root).is_dir():
+        candidate_roots.append(Path(env_root).resolve())
+
+    # 1c. Upward traversal from cwd
+    cwd = Path.cwd()
+    for d in [cwd, *cwd.parents]:
+        if (d / ".bth").is_dir() or (d / ".bth.toml").is_file():
+            candidate_roots.append(d.resolve())
+            break
+
+    # 1d. Upward traversal from catalog_dir
+    cd_res = cd.resolve()
+    for d in [cd_res, *cd_res.parents]:
+        if d.name == ".bth":
+            cand = d.parent
+            if (cand / ".bth" / "instruments").is_dir():
+                candidate_roots.append(cand.resolve())
+        elif (d / ".bth" / "instruments").is_dir():
+            candidate_roots.append(d.resolve())
+
+    # 1e. Workspace resolution via bathos.workspace
+    try:
+        from bathos.workspace import resolve_workspace
+
+        ws_ctx = resolve_workspace(cwd)
+        if ws_ctx.fs_root.is_dir():
+            candidate_roots.append(ws_ctx.fs_root.resolve())
+    except Exception:
+        pass
+
+    # 1f. Registered project roots
+    try:
+        for r in list_registered_roots():
+            if r.is_dir():
+                candidate_roots.append(r.resolve())
+    except Exception:
+        pass
+
+    # 1g. Filter out ~/.bth (OD-4: Never use ~/.bth/instruments/)
+    bth_home = (Path.home() / ".bth").resolve()
+    user_home = Path.home().resolve()
+    valid_roots: list[Path] = []
+    seen_roots: set[Path] = set()
+    for r in candidate_roots:
+        if r in seen_roots:
+            continue
+        if r == bth_home or (r / ".bth").resolve() == bth_home or r == user_home:
+            continue
+        seen_roots.add(r)
+        valid_roots.append(r)
+
+    # 1h. Collect registry files
     reg_files: list[tuple[str, str]] = []
-    # User global
+    # User global (${XDG_CONFIG_HOME:-~/.config}/bathos/instruments/*.toml)
     xdg_config = os.environ.get("XDG_CONFIG_HOME")
     user_inst = Path(xdg_config or (Path.home() / ".config")) / "bathos" / "instruments"
     if user_inst.is_dir():
@@ -141,8 +203,9 @@ def compute_validity_inputs_hash(
                 reg_files.append((str(p.resolve()), hashlib.sha256(p.read_bytes()).hexdigest()))
             except Exception:
                 pass
-    # Project locals from registered roots
-    for root in list_registered_roots():
+
+    # Project-local registries (<root>/.bth/instruments/*.toml)
+    for root in valid_roots:
         p_inst = root / ".bth" / "instruments"
         if p_inst.is_dir():
             for p in sorted(p_inst.glob("*.toml")):
@@ -150,17 +213,20 @@ def compute_validity_inputs_hash(
                     reg_files.append((str(p.resolve()), hashlib.sha256(p.read_bytes()).hexdigest()))
                 except Exception:
                     pass
-    # Also check current catalog workspace root if known
-    curr_inst = Path.cwd() / ".bth" / "instruments"
-    if curr_inst.is_dir():
-        for p in sorted(curr_inst.glob("*.toml")):
-            try:
-                reg_files.append((str(p.resolve()), hashlib.sha256(p.read_bytes()).hexdigest()))
-            except Exception:
-                pass
 
     reg_files = sorted(set(reg_files))
     hasher.update(json.dumps(reg_files).encode("utf-8"))
+
+    # 1i. Spec §2.2.B.1: Hash use_user_registry booleans per project and env
+    from bathos.version_resolver import _should_use_user_registry
+
+    user_reg_flags: list[tuple[str, bool]] = [
+        ("env", _should_use_user_registry(None)),
+    ]
+    for root in valid_roots:
+        user_reg_flags.append((str(root), _should_use_user_registry(root)))
+    user_reg_flags = sorted(set(user_reg_flags))
+    hasher.update(json.dumps(user_reg_flags).encode("utf-8"))
 
     # 2. Database state
     should_close_con = False
@@ -168,7 +234,7 @@ def compute_validity_inputs_hash(
         from bathos.index import connect_read
 
         try:
-            con = connect_read(cd)
+            con = connect_read(cd, missing="empty")
             should_close_con = True
         except Exception:
             con = None
@@ -209,6 +275,22 @@ def compute_validity_inputs_hash(
             if should_close_con:
                 con.close()
 
+    # 2b. Cool-tier run fragments (Spec §2.2.B.3: count, total size, max mtime)
+    runs_dir = cd / "runs"
+    if runs_dir.is_dir():
+        from bathos.catalog import iter_run_fragments
+
+        try:
+            run_frags = list(iter_run_fragments(runs_dir))
+        except Exception:
+            run_frags = sorted(
+                f for f in runs_dir.rglob("*.parquet") if not f.name.endswith(".tmp.parquet")
+            )
+        frag_count = len(run_frags)
+        frag_total_size = sum(f.stat().st_size for f in run_frags)
+        frag_max_mtime = max((f.stat().st_mtime_ns for f in run_frags), default=0)
+        hasher.update(json.dumps([frag_count, frag_total_size, frag_max_mtime]).encode("utf-8"))
+
     # Legacy cool fragments mtimes
     for dirname in ("blast_radius", "archived_items"):
         d = cd / dirname
@@ -225,6 +307,7 @@ def compute_validity_inputs_hash(
 def ensure_validity_cache(
     catalog_dir: Path | str,
     con: duckdb.DuckDBPyConnection | None = None,
+    workspace_root: Path | None = None,
 ) -> None:
     """Ensure <catalog_dir>/validity_cache.db exists, matches inputs_hash, and covers all runs."""
     cd = Path(catalog_dir)
@@ -232,7 +315,7 @@ def ensure_validity_cache(
     lock_file = validity_cache_lock_path(cd)
     lock_file.parent.mkdir(parents=True, exist_ok=True)
 
-    inputs_hash = compute_validity_inputs_hash(cd, con)
+    inputs_hash = compute_validity_inputs_hash(cd, con, workspace_root=workspace_root)
 
     # Fast read check without exclusive lock
     if cache_db.is_file():
@@ -270,7 +353,7 @@ def ensure_validity_cache(
         if con is None:
             from bathos.index import connect_read
 
-            con = connect_read(cd)
+            con = connect_read(cd, missing="empty")
             should_close_con = True
 
         try:
@@ -282,7 +365,12 @@ def ensure_validity_cache(
                 ).fetchall()
             }
             if "runs" not in tables:
-                run_rows = []
+                from bathos.catalog import read_runs
+
+                try:
+                    run_rows = [(r.id,) for r in read_runs(cd)]
+                except Exception:
+                    run_rows = []
             else:
                 run_rows = con.execute("SELECT id FROM runs").fetchall()
         finally:
@@ -291,7 +379,7 @@ def ensure_validity_cache(
                 con = None
 
         run_ids = [r[0] for r in run_rows]
-        validity_map = resolve_validity(run_ids, cd, con=con)
+        validity_map = resolve_validity(run_ids, cd, con=con, workspace_root=workspace_root)
 
         # Write to validity_cache.db
         w_con = duckdb.connect(str(cache_db))
@@ -359,7 +447,7 @@ def _find_run_main_root(
         from bathos.index import connect_read
 
         try:
-            con = connect_read(cd)
+            con = connect_read(cd, missing="empty")
             should_close = True
         except Exception:
             con = None
@@ -408,13 +496,27 @@ def _find_run_main_root(
                 except Exception:
                     pass
 
+    # Check catalog_dir hierarchy for project root with instruments (excluding ~/.bth per OD-4)
+    bth_home = (Path.home() / ".bth").resolve()
+    user_home = Path.home().resolve()
+    for d in [cd.resolve(), *cd.resolve().parents]:
+        if d == bth_home or (d / ".bth").resolve() == bth_home or d == user_home:
+            continue
+        if d.name == ".bth":
+            cand = d.parent
+            if (cand / ".bth" / "instruments").is_dir():
+                return cand
+        elif (d / ".bth" / "instruments").is_dir():
+            return d
+
     for root in reg_roots:
         if root.is_dir():
             return root
 
-    curr = Path.cwd()
-    if (curr / ".bth").is_dir() or (curr / "pyproject.toml").is_file():
-        return curr
+    cwd = Path.cwd()
+    for d in [cwd, *cwd.parents]:
+        if (d / ".bth").is_dir() or (d / ".bth.toml").is_file() or (d / "pyproject.toml").is_file():
+            return d
 
     return None
 
@@ -446,7 +548,7 @@ def resolve_validity(
     if con is None:
         from bathos.index import connect_read
 
-        con = connect_read(cd)
+        con = connect_read(cd, missing="empty")
         should_close = True
 
     try:
@@ -467,6 +569,43 @@ def resolve_validity(
             for row in cur.fetchall():
                 d = dict(zip(col_names, row))
                 runs_by_id[d["id"]] = d
+        else:
+            # Cool-tier fallback when runs table is absent
+            from bathos.catalog import read_runs
+
+            try:
+                target_ids = set(run_ids)
+                for r in read_runs(cd):
+                    if r.id in target_ids:
+                        runs_by_id[r.id] = {
+                            "id": r.id,
+                            "project_slug": r.project_slug,
+                            "command": r.command,
+                            "argv": r.argv,
+                            "git_hash": r.git_hash,
+                            "git_branch": r.git_branch,
+                            "git_dirty": r.git_dirty,
+                            "timestamp": r.timestamp,
+                            "duration_s": r.duration_s,
+                            "exit_code": r.exit_code,
+                            "status": r.status,
+                            "outcome": r.outcome,
+                            "metadata": r.metadata,
+                            "output_paths": r.output_paths,
+                            "sidecar_path": r.sidecar_path,
+                            "sidecar_sha256": r.sidecar_sha256,
+                            "script_sha256": r.script_sha256,
+                            "parent_run_id": r.parent_run_id,
+                            "agent_mode": r.agent_mode,
+                            "sidecar_mode": r.sidecar_mode,
+                            "campaign_id": r.campaign_id,
+                            "stage_name": r.stage_name,
+                            "epistemic_class": r.epistemic_class,
+                            "tags": r.tags,
+                            "toolchain_version_source": getattr(r, "toolchain_version_source", None),
+                        }
+            except Exception:
+                pass
 
         # 2. Fetch archived items
         archived_items: list[dict[str, Any]] = []

@@ -45,7 +45,7 @@ from bathos.checker import check_runs
 from bathos.cli_common import normalise_output_paths, normalise_tags, require_project_slug
 from bathos.compact import compact as compact_catalog
 from bathos.config import default_catalog_dir, find_project_config, load_project_config
-from bathos.errors import RESOLUTION_HINTS, BathosErrorCode, StepBackError
+from bathos.errors import BathosError, BathosErrorCode, RESOLUTION_HINTS, StepBackError
 from bathos.export import ExportError
 from bathos.figure_registry import FigureEntrySchemaError, register_figure_entry
 from bathos.index import connect_read
@@ -110,12 +110,17 @@ def _shape_error(tool_name: str, code: BathosErrorCode, exc: BaseException) -> d
     event(
         "mcp.tool_error", tool_name=tool_name, error_code=code.value, error_class=type(exc).__name__
     )
-    return {
+    envelope = {
         "ok": False,
         "error_code": code.value,
         "error": str(exc),
         "resolution_hint": RESOLUTION_HINTS.get(code, ""),
     }
+    for attr in ("run_id", "state", "defect_id", "reason", "replacement_id", "estimand_markers", "conflicting_runs"):
+        val = getattr(exc, attr, None)
+        if val is not None:
+            envelope[attr] = val
+    return envelope
 
 
 def _review_workspace() -> Path | None:
@@ -199,15 +204,29 @@ def traced_tool(fn):
                 }
                 if "ok" not in result and result.get("error") is not None:
                     merged["ok"] = False
+                if merged.get("error_code") and not merged.get("resolution_hint"):
+                    try:
+                        merged["resolution_hint"] = RESOLUTION_HINTS.get(
+                            BathosErrorCode(merged["error_code"]), ""
+                        )
+                    except (ValueError, KeyError):
+                        pass
                 return merged
             return {"ok": True, "error_code": None, "error": None, "resolution_hint": None}
 
         except McpAuthError as e:
             return _shape_error(tool_name, BathosErrorCode.AUTH_ERROR, e)
-        except StepBackError as e:
+        except BathosError as e:
             from bathos.errors import EXCEPTION_TO_CODE
 
-            code = EXCEPTION_TO_CODE.get(type(e).__name__, BathosErrorCode.INTERNAL)
+            code = getattr(e, "code", None) or getattr(e, "error_code", None)
+            if not isinstance(code, BathosErrorCode):
+                for cls in type(e).__mro__:
+                    if cls.__name__ in EXCEPTION_TO_CODE:
+                        code = EXCEPTION_TO_CODE[cls.__name__]
+                        break
+                else:
+                    code = BathosErrorCode.INTERNAL
             return _shape_error(tool_name, code, e)
         except GateError as e:
             return _shape_error(tool_name, BathosErrorCode.INTERNAL, e)

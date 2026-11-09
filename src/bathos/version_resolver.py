@@ -384,32 +384,47 @@ def _get_run_field(run: Any, field_name: str) -> Any:
         argv = run.get("argv")
     elif hasattr(run, "argv"):
         argv = getattr(run, "argv")
-    if argv and isinstance(argv, (list, tuple)):
-        # Check --field_name or --field-name
-        candidates = [
-            f"--{field_name}",
-            f"--{field_name.replace('_', '-')}",
-        ]
-        for i, arg in enumerate(argv):
-            for cand in candidates:
-                if arg == cand and i + 1 < len(argv):
-                    val_str = argv[i + 1]
-                    try:
-                        return int(val_str)
-                    except ValueError:
+    if argv:
+        if isinstance(argv, str):
+            try:
+                argv = json.loads(argv)
+            except Exception:
+                try:
+                    import shlex
+
+                    argv = shlex.split(argv)
+                except Exception:
+                    argv = None
+        if isinstance(argv, (list, tuple)):
+            # Check --field_name or --field-name
+            candidates = [
+                f"--{field_name}",
+                f"--{field_name.replace('_', '-')}",
+            ]
+            for i, arg in enumerate(argv):
+                for cand in candidates:
+                    val_str = None
+                    if arg == cand and i + 1 < len(argv):
+                        val_str = argv[i + 1]
+                    elif arg.startswith(f"{cand}="):
+                        val_str = arg.split("=", 1)[1]
+
+                    if val_str is not None:
+                        # Strip surrounding quotes if present (e.g. --sample_s="4")
+                        if (
+                            isinstance(val_str, str)
+                            and len(val_str) >= 2
+                            and val_str[0] in ('"', "'")
+                            and val_str[-1] == val_str[0]
+                        ):
+                            val_str = val_str[1:-1]
                         try:
-                            return float(val_str)
-                        except ValueError:
-                            return val_str
-                if arg.startswith(f"{cand}="):
-                    val_str = arg.split("=", 1)[1]
-                    try:
-                        return int(val_str)
-                    except ValueError:
-                        try:
-                            return float(val_str)
-                        except ValueError:
-                            return val_str
+                            return int(val_str)
+                        except (ValueError, TypeError):
+                            try:
+                                return float(val_str)
+                            except (ValueError, TypeError):
+                                return val_str
 
     return None
 
