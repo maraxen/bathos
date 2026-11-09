@@ -1,7 +1,7 @@
 # PROVISIONAL DRAFT for AC-9 (spec 261104, T7). Not confirmed by the owner. Nothing live may run on it.
 # Purposes L1-L6 are the assistant's reading of tev_design's AGENTS.md and the AC-7e sidecar;
 # the owner said (261109) the real goals are multipronged and different, and will correct them.
-# Only one retired purpose (R1); R2 is unnamed (owner: neither candidate was fully retired).
+# Two retired purposes: R1 (degenerate codons) and R2 (QM/MM reaction-state ensembles, chosen by the owner 261109, wording provisional).
 # The tev_design split is being scoped; this charter covers the repo as one project.
 mandate = "Build a scarless TEV: broaden the S1' pocket while preserving S1 Gln specificity and catalysis, through a multi-prong library program for the Chory collaboration. (PROVISIONAL: the project's real goals are multipronged and differ.)"
 
@@ -33,3 +33,8 @@ state = "live"
 text = "Degenerate-codon (NNK/NNS) site-saturation libraries."
 state = "retired"
 retired_reason = "No amber suppression in the selection strain; an oPool is defined oligos, so degenerate codons waste budget (decided 2026-08-31; tev_design reference 261007_no-amber-suppression)."
+
+[purpose.R2]
+text = "Extra QM/MM sampling to generate reaction-state backbone diversity for multistate design."
+state = "retired"
+retired_reason = "The two reaction states differ by 0.0184 A backbone RMSD because the backbone does not move along the reaction coordinate; more QM/MM gives backbone-uncertainty regularization, not multistate design (tev_design decision 260817_multistate-ensemble-generation-options, final). PROVISIONAL wording, owner to confirm."
