@@ -548,6 +548,21 @@ def test_ac_p2_10_finding_list_include_superseded(tmp_path: Path):
     assert f1.id in all_ids
     assert f2.id in all_ids
 
+    # Invariant I1: Predecessor on disk remains unchanged (status == "settled")
+    disk_f1 = parse_finding_file(f1.file_path)
+    assert disk_f1.status == "settled"
+
+    # Dynamic projection: get_finding dynamically resolves to "superseded"
+    retrieved_f1 = get_finding(f1.id, catalog_dir=cat_dir, workspace_root=repo)
+    assert retrieved_f1.active_status == "superseded"
+
+    # Supersession DAG edge is recorded in DuckDB supersession_edges
+    edges = get_superseded_by("finding", f1.id, catalog_dir=cat_dir)
+    assert len(edges) == 1
+    assert edges[0]["superseded_by_id"] == f2.id
+    assert edges[0]["superseded_by_type"] == "finding"
+    assert edges[0]["reason"] == f"superseded by settled finding {f2.id}"
+
 
 # ---------------------------------------------------------------------------
 # AC-P2-11: W3C PROV-JSON Invalidation and Revision
@@ -881,3 +896,159 @@ def test_session_start_hook_missing_cache_exits_zero(tmp_path: Path):
     )
     assert res.returncode == 0
     assert res.stdout.strip() == ""
+
+
+# ---------------------------------------------------------------------------
+# Invariant I1 & Supersession DAG Edge Immutability
+# ---------------------------------------------------------------------------
+def test_finding_supersession_invariant_i1_and_dag_edge(tmp_path: Path):
+    repo = _make_git_repo(tmp_path / "repo")
+    cat_dir = tmp_path / "catalog"
+    init_catalog(cat_dir)
+
+    r1 = _create_sample_run(cat_dir, "run_1", stage_name="validation", epistemic_class="confirmatory")
+    r2 = _create_sample_run(cat_dir, "run_2", stage_name="validation", epistemic_class="confirmatory")
+
+    f_a = create_finding(
+        question_slug="finding-a",
+        question="Initial hypothesis question?",
+        answer="Hypothesis confirmed",
+        supporting_runs=[r1.id],
+        status="settled",
+        catalog_dir=cat_dir,
+        workspace_root=repo,
+    )
+    f_b = create_finding(
+        question_slug="finding-b",
+        question="Follow-up question with refined answer?",
+        answer="Refined hypothesis confirmed",
+        supporting_runs=[r2.id],
+        status="settled",
+        supersedes=f_a.id,
+        catalog_dir=cat_dir,
+        workspace_root=repo,
+    )
+
+    # 1. Invariant I1: finding A's file on disk is NOT mutated
+    raw_a = parse_finding_file(f_a.file_path)
+    assert raw_a.status == "settled"
+
+    # 2. Dynamic read projection: get_finding reports active_status == "superseded"
+    retrieved_a = get_finding(f_a.id, catalog_dir=cat_dir, workspace_root=repo)
+    assert retrieved_a.active_status == "superseded"
+    assert retrieved_a.status == "settled"
+
+    # 3. get_superseded_by returns finding B's edge from DuckDB
+    edges = get_superseded_by("finding", f_a.id, catalog_dir=cat_dir)
+    assert len(edges) == 1
+    assert edges[0]["superseded_by_id"] == f_b.id
+    assert edges[0]["superseded_by_type"] == "finding"
+    assert edges[0]["reason"] == f"superseded by settled finding {f_b.id}"
+
+
+def test_finding_reopen_to_settle_lifecycle(tmp_path: Path):
+    """Test full reopen-to-settle lifecycle:
+    create settled F1 -> reopen as tentative F2 -> settle F2 with confirmatory runs ->
+    verify F1 dynamically transitions to superseded without disk mutation."""
+    repo = _make_git_repo(tmp_path / "repo")
+    cat_dir = tmp_path / "catalog"
+    init_catalog(cat_dir)
+
+    r1 = _create_sample_run(cat_dir, "run_1", stage_name="validation", epistemic_class="confirmatory")
+    r2 = _create_sample_run(cat_dir, "run_2", stage_name="validation", epistemic_class="confirmatory")
+
+    # Step 1: Create settled F1
+    f1 = create_finding(
+        question_slug="tev-stability",
+        question="Is TEV protease stable at 37C?",
+        answer="Stable under initial buffer conditions",
+        supporting_runs=[r1.id],
+        status="settled",
+        catalog_dir=cat_dir,
+        workspace_root=repo,
+    )
+    assert f1.status == "settled"
+    assert f1.active_status == "settled"
+
+    # Step 2: Reopen as tentative F2 with reopen_reason
+    f2_tentative = create_finding(
+        question_slug="tev-stability",
+        question="Is TEV protease stable at 37C?",
+        answer="Precipitation observed in replicate assay",
+        status="tentative",
+        reopen_reason="Replicate assays showed precipitation after 2 hours",
+        catalog_dir=cat_dir,
+        workspace_root=repo,
+    )
+    assert f2_tentative.status == "tentative"
+    assert f2_tentative.supersedes == f1.id
+
+    # F1 remains settled while F2 is tentative (both on disk and dynamically)
+    assert parse_finding_file(f1.file_path).status == "settled"
+    f1_during_reopen = get_finding(f1.id, catalog_dir=cat_dir, workspace_root=repo)
+    assert f1_during_reopen.active_status == "settled"
+    assert get_superseded_by("finding", f1.id, catalog_dir=cat_dir) == []
+
+    # Step 3: Settle F2 with confirmatory runs and reopen_reason
+    f2_settled = create_finding(
+        question_slug="tev-stability",
+        question="Is TEV protease stable at 37C?",
+        answer="Unstable at 37C; requires 20C or stabilizing additive",
+        supporting_runs=[r2.id],
+        status="settled",
+        reopen_reason="Confirmed across 3 replicate assays",
+        catalog_dir=cat_dir,
+        workspace_root=repo,
+    )
+    assert f2_settled.status == "settled"
+    assert f2_settled.active_status == "settled"
+    assert f2_settled.supersedes == f1.id
+
+    # Step 4: Verify F1 on disk is UNCHANGED (Invariant I1), but dynamically active_status is "superseded"
+    assert parse_finding_file(f1.file_path).status == "settled"
+    f1_after = get_finding(f1.id, catalog_dir=cat_dir, workspace_root=repo)
+    assert f1_after.active_status == "superseded"
+
+    # Verify DuckDB DAG edge exists
+    edges = get_superseded_by("finding", f1.id, catalog_dir=cat_dir)
+    assert len(edges) == 1
+    assert edges[0]["superseded_by_id"] == f2_settled.id
+
+
+def test_create_finding_supersedes_bogus_raises_error(tmp_path: Path):
+    """Test that create_finding with a bogus supersedes target raises SupersededTargetNotFoundError."""
+    repo = _make_git_repo(tmp_path / "repo")
+    cat_dir = tmp_path / "catalog"
+    init_catalog(cat_dir)
+
+    r1 = _create_sample_run(cat_dir, "run_1", stage_name="validation", epistemic_class="confirmatory")
+
+    # With status="settled"
+    with pytest.raises(SupersededTargetNotFoundError) as exc_settled:
+        create_finding(
+            question_slug="bogus-test-settled",
+            question="Question?",
+            answer="Answer",
+            supporting_runs=[r1.id],
+            status="settled",
+            supersedes="nonexistent-finding-id",
+            catalog_dir=cat_dir,
+            workspace_root=repo,
+        )
+    assert exc_settled.value.entity_type == "finding"
+    assert exc_settled.value.entity_id == "nonexistent-finding-id"
+
+    # With status="tentative"
+    with pytest.raises(SupersededTargetNotFoundError) as exc_tentative:
+        create_finding(
+            question_slug="bogus-test-tentative",
+            question="Question?",
+            answer="Answer",
+            status="tentative",
+            supersedes="another-bogus-id",
+            catalog_dir=cat_dir,
+            workspace_root=repo,
+        )
+    assert exc_tentative.value.entity_type == "finding"
+    assert exc_tentative.value.entity_id == "another-bogus-id"
+

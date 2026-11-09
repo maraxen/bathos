@@ -19,7 +19,6 @@ Spec 261106 Phase 2 (D7, OD-6):
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import tomllib
@@ -36,8 +35,10 @@ from bathos.errors import (
     FindingReopenReasonRequiredError,
     FindingSettledEvidenceInsufficientError,
     SpikeTierCannotSettleError,
+    SupersededTargetNotFoundError,
 )
 from bathos.index import record_acknowledgment
+from bathos.supersession import _entity_exists, add_supersession_edge
 from bathos.validity import resolve_validity
 from bathos.workspace import resolve_workspace
 
@@ -177,7 +178,8 @@ def create_finding(
 ) -> Finding:
     runs = list(supporting_runs or [])
     cd = Path(catalog_dir or default_catalog_dir())
-    fdir = get_findings_dir(workspace_root)
+    ws_root = Path(workspace_root) if workspace_root else None
+    fdir = get_findings_dir(ws_root)
     fdir.mkdir(parents=True, exist_ok=True)
 
     # 1. Reopen Guard: Check for settled findings on same question
@@ -186,13 +188,15 @@ def create_finding(
         for p in fdir.glob("*.toml"):
             try:
                 f = parse_finding_file(p)
-                active_st = resolve_finding_status(f, catalog_dir=cd)
-                if active_st == "settled" and (
-                    f.question_slug == question_slug
-                    or (f.question and f.question.strip().lower() == question.strip().lower())
+                if f.question_slug == question_slug or (
+                    f.question and f.question.strip().lower() == question.strip().lower()
                 ):
-                    existing_settled = f
-                    break
+                    active_st = resolve_finding_status(
+                        f, catalog_dir=cd, workspace_root=ws_root
+                    )
+                    if active_st == "settled":
+                        existing_settled = f
+                        break
             except Exception:
                 pass
 
@@ -205,9 +209,12 @@ def create_finding(
                 settled_finding_id=existing_settled.id,
                 settled_answer=existing_settled.answer,
             )
-        # Creating a successor in tentative status
-        status = "tentative"
         supersedes = existing_settled.id
+        if status != "settled":
+            status = "tentative"
+
+    if supersedes and not _entity_exists("finding", supersedes, cd, ws_root):
+        raise SupersededTargetNotFoundError("finding", supersedes)
 
     finding_id = f"finding-{uuid.uuid4().hex[:4]}-{uuid.uuid4().hex[:4]}-{uuid.uuid4().hex[:4]}"
     now_iso = datetime.now(UTC).isoformat()
@@ -222,7 +229,6 @@ def create_finding(
                 supporting_runs=[],
             )
 
-        ws_root = Path(workspace_root) if workspace_root else None
         validity_map = resolve_validity(runs, catalog_dir=cd, workspace_root=ws_root)
         active_runs = [v for v in validity_map.values() if v.state == "current"]
 
@@ -267,31 +273,9 @@ def create_finding(
                     reason=allow_mixed_estimand.strip(),
                 )
 
-        # Activate supersession on predecessor if specified
-        if supersedes:
-            from bathos.supersession import add_supersession_edge
-
-            with contextlib.suppress(Exception):
-                add_supersession_edge(
-                    "finding",
-                    supersedes,
-                    "finding",
-                    finding_id,
-                    reason=f"superseded by settled finding {finding_id}",
-                    catalog_dir=cd,
-                    workspace_root=workspace_root,
-                )
-
-            with contextlib.suppress(Exception):
-                pred = get_finding(supersedes, catalog_dir=cd, workspace_root=workspace_root)
-                if pred.file_path and pred.file_path.exists():
-                    pred.status = "superseded"
-                    pred.file_path.write_text(pred.render_toml(), encoding="utf-8")
-
     # Resolve overall evidence_tier
     evidence_tier = "exploratory"
     if runs:
-        ws_root = Path(workspace_root) if workspace_root else None
         validity_map = resolve_validity(runs, catalog_dir=cd, workspace_root=ws_root)
         tiers = {v.evidence_tier for v in validity_map.values() if not v.is_hidden}
         if "confirmatory" in tiers:
@@ -328,6 +312,19 @@ def create_finding(
         active_status=status,
     )
     target_file.write_text(finding.render_toml(), encoding="utf-8")
+
+    # Activate supersession on predecessor if specified and settled
+    if status == "settled" and supersedes:
+        add_supersession_edge(
+            "finding",
+            supersedes,
+            "finding",
+            finding.id,
+            reason=f"superseded by settled finding {finding.id}",
+            catalog_dir=cd,
+            workspace_root=workspace_root,
+        )
+
     return finding
 
 

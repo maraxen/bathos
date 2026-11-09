@@ -589,7 +589,7 @@ def gate_check(
                     if f.question_slug == sidecar.question_slug:
                         act_status = resolve_finding_status(f, catalog_dir=catalog_dir)
                         if act_status == "settled" and not getattr(sidecar, "reopen_reason", "").strip():
-                            from bathos.errors import BathosErrorCode, RESOLUTION_HINTS
+                            from bathos.errors import RESOLUTION_HINTS, BathosErrorCode
 
                             payload = _gate_failure_payload(
                                 error_code=GateErrorCode.SIDECAR_INVALID,

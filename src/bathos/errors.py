@@ -12,6 +12,7 @@ All MCP tools return envelopes with error_code values from this enum.
 from __future__ import annotations
 
 from enum import Enum
+from typing import Any
 
 
 class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(Enum) returning Enum member value for serialization
@@ -582,6 +583,7 @@ class EstimandBoundaryMixedError(BathosError):
         **kwargs: Any,
     ) -> None:
         super().__init__(message)
+        _ = kwargs
         self.estimand_markers = estimand_markers or epochs or []
         self.epochs = self.estimand_markers
         self.conflicting_runs = conflicting_runs or {}
@@ -645,13 +647,23 @@ class SupersededTargetNotFoundError(BathosError):
     def __init__(
         self,
         message: str = "Superseded target entity does not exist",
+        entity_id_pos: str | None = None,
         *,
         entity_type: str | None = None,
         entity_id: str | None = None,
     ) -> None:
-        super().__init__(message)
-        self.entity_type = entity_type
-        self.entity_id = entity_id
+        if entity_id_pos is not None:
+            # Called as SupersededTargetNotFoundError("finding", "target_id")
+            resolved_type = entity_type or message
+            resolved_id = entity_id or entity_id_pos
+            msg = f"Target entity '{resolved_id}' of type '{resolved_type}' not found"
+        else:
+            resolved_type = entity_type
+            resolved_id = entity_id
+            msg = message
+        super().__init__(msg)
+        self.entity_type = resolved_type
+        self.entity_id = resolved_id
 
 
 class SpikeTierCannotSettleError(FindingError):

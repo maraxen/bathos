@@ -15,6 +15,7 @@ story B2-03's own gate text describes.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import Any
 
 from bathos.schema import Run
 
