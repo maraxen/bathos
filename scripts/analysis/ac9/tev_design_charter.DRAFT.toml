@@ -1,0 +1,35 @@
+# PROVISIONAL DRAFT for AC-9 (spec 261104, T7). Not confirmed by the owner. Nothing live may run on it.
+# Purposes L1-L6 are the assistant's reading of tev_design's AGENTS.md and the AC-7e sidecar;
+# the owner said (261109) the real goals are multipronged and different, and will correct them.
+# Only one retired purpose (R1); R2 is unnamed (owner: neither candidate was fully retired).
+# The tev_design split is being scoped; this charter covers the repo as one project.
+mandate = "Build a scarless TEV: broaden the S1' pocket while preserving S1 Gln specificity and catalysis, through a multi-prong library program for the Chory collaboration. (PROVISIONAL: the project's real goals are multipronged and differ.)"
+
+[purpose.L1]
+text = "Deliver the Chory collaborator libraries: scarless assembly, 96 libraries, 40 selections, tube and deliverable shape."
+state = "live"
+
+[purpose.L2]
+text = "Design TEV variant sequences: MPNN arms with fixed or mutated residue shells (protection versus enrichment masks)."
+state = "live"
+
+[purpose.L3]
+text = "Choose and score the assembly method: fragment boundaries, junctions and junction crosstalk."
+state = "live"
+
+[purpose.L4]
+text = "Size the selections: coverage, bottleneck and sequencing depth."
+state = "live"
+
+[purpose.L5]
+text = "Simulate continuous selection in the lagoon."
+state = "live"
+
+[purpose.L6]
+text = "Active learning over designs."
+state = "live"
+
+[purpose.R1]
+text = "Degenerate-codon (NNK/NNS) site-saturation libraries."
+state = "retired"
+retired_reason = "No amber suppression in the selection strain; an oPool is defined oligos, so degenerate codons waste budget (decided 2026-08-31; tev_design reference 261007_no-amber-suppression)."

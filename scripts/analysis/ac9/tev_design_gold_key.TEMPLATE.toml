@@ -1,0 +1,11 @@
+# AC-9 gold key TEMPLATE. The owner fills this in; the assistant does not assign purposes.
+# One entry per sidecar path in the window. Value: a charter purpose id (L1..L6, R1),
+# or "off-charter" (real work that serves no charter purpose).
+# Paths are not listed yet: they are generated from the window once the charter is settled
+# (the tev_design split may change which paths belong to the record).
+# Planted-case needs (advisor, spec T7): >=2 live purposes with records that can be removed
+# (silent case), >=1 retired purpose with records (revival), off-charter material the owner
+# attests (unmapped case), one present purpose whose records fall only before the effective
+# window start (budget case), and one reading purpose that spans two charter purposes.
+[key]
+# "scripts/experiments/example.bth.toml" = "L2"
