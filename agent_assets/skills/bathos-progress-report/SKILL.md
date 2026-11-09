@@ -35,7 +35,16 @@ over-claims on multi-step summaries, and so does the orchestrator: an "about 35"
 when queried.
 
 Run the catalog queries (sources 3–4) yourself first: they take seconds and tell you which
-projects are worth a recon agent at all.
+projects are worth a recon agent at all. **Then sweep git activity across every repo too.**
+Untracked work never shows in the catalog: in the first dogfood, prolix shipped six GPU-kernel
+versions in the window with zero bathos runs and was missed until the researcher asked. For such work,
+read the raw benchmark or result files rather than the project's own summary. That ledger's headline
+"1.96x vs OpenMM" rested on an OpenMM figure that its own JSON contradicted (436 vs 803 ns/day).
+
+**Results get charts.** Each headline result and each ask resting on data gets one chart drawn from
+the run's result file: the finding in the title, the reference it is judged against (margin, bound,
+baseline) drawn on the chart, and a caption naming the run id and file. Use matched comparisons (same
+precision, same replica count) and label untracked numbers as such.
 
 Work often lives in worktrees and branches, not on main: `fd -H -I` across
 `<repo>/.claude/worktrees/*/.praxia/docs` finds docs that `main` does not have yet.
