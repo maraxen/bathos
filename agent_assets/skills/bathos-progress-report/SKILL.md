@@ -6,8 +6,8 @@ when_to_use: 'Triggers: progress report, advisor meeting, advisor update, weekly
 # bathos-progress-report
 
 A progress report is not a changelog. It is a short document whose job is to **get decisions out of
-the advisor** and keep him calibrated on where each project stands. Gathering is mechanical and
-agents do it well. Selection (what is worth his time) is the researcher's call, and this skill
+the advisor** and keep them calibrated on where each project stands. Gathering is mechanical and
+agents do it well. Selection (what is worth the advisor's time) is the researcher's call, and this skill
 makes that step explicit instead of letting an agent decide by commit volume.
 
 Works standalone. Uses maraxiom and affigit **only if installed** (see *Optional integrations*);
@@ -21,7 +21,7 @@ never require them.
    or a previous report doc) or a fixed span. Default: since the last meeting.
 3. **Scope**: which projects. Default: research projects at P1/P2 plus anything the researcher
    names. Research software goes in one "tooling" line unless it produced a research result.
-4. **Format**: Claude Doc (default; shareable and he can comment), Markdown memo, or a maraxiom
+4. **Format**: Claude Doc (default; shareable and the advisor can comment), Markdown memo, or a maraxiom
    `progress-report` deck (only if maraxiom is installed and there is time).
 
 ## Sources: gather per project, evidence for every line
@@ -40,6 +40,16 @@ projects are worth a recon agent at all.
 Work often lives in worktrees and branches, not on main: `fd -H -I` across
 `<repo>/.claude/worktrees/*/.praxia/docs` finds docs that `main` does not have yet.
 
+Gather from the main checkout. A worktree-isolated session refuses `cd` into other repos, `git -C`,
+and shell variables in commands, which turns every cross-repo read into a retry. Enter a worktree
+only for the edit to the repo you are changing (for example this skill), after gathering.
+
+Reading run outcomes: many projects use custom outcome labels (`bistable`, `confounded`,
+`instrument_invalid`) instead of pass/fail. Before citing one, open the sidecar. Check that it is
+not the `is_residual = true` catch-all (that means no registered branch matched), and check whether
+the sidecar disclosed the result as foreseen. Say "sidecar-evaluated" rather than "pre-registered"
+unless the sidecar commit predates the run, and outside an enforced directory it may not.
+
 | # | Source | How | What it yields |
 |---|---|---|---|
 | 1 | **Main-line git** | `git log --first-parent <default> --no-merges --since=<start>` plus merged PRs | Themes of work. Never use `--all` commit counts as a measure of progress: agent branches inflate them 10×. |
@@ -49,7 +59,7 @@ Work often lives in worktrees and branches, not on main: `fd -H -I` across
 | 5 | **Step-back holds** | `bth stepback status --campaign-id <id>` for open campaigns | Level 2/3 holds and `ESCALATE` recommendations are by definition items for the advisor (Level 3 = human chair). If the `stepback_*` tables are absent from the index, none were ever recorded; say so. |
 | 6 | **Project docs** | `.praxia/docs/{decisions,research,audits,specs}/` and `.praxia/handoffs/` dated in the window | Decisions taken, findings written up, open questions. |
 | 7 | **Gated items** | grep docs, handoffs, `ideas.jsonl`, backlog for `advisor`, the advisor's name, `PI decision`, `waiting on`, `needs decision`, `open question`, `blocked` | Candidate "needs your input" items with `file:line`. |
-| 8 | **Portfolio table** | `~/projects/project_status.toml` and `PROJECT_STATUS.advisor.md` (rendered by praxia `scripts/projects/project_status.py --write --snapshot`) | Priority, people, end and reconsider dates, last stated "next". **Overdue `end_date`/`reconsider` dates are prime agenda items.** |
+| 8 | **Portfolio table** | `~/projects/project_status.toml` and `PROJECT_STATUS.advisor.md` (rendered by praxia `scripts/projects/project_status.py --write --snapshot`, which was missing from praxia on 2026-11-09; read the TOML directly. The advisor's name is in `[meta] advisor`) | Priority, people, end and reconsider dates, last stated "next". **Overdue `end_date`/`reconsider` dates are prime agenda items.** |
 | 9 | **Previous report and action items** | last report doc or `status_history/*_advisor.md`; post-meeting triage outputs | Did we do what we said? Close the loop explicitly: done / not done / dropped, with reason. |
 | 10 | **Collaborator deliverables** | `people`/`endstate_text` in the status table; docs mentioning partner labs | External dates and owed items (designs to a wet lab, data from a partner). |
 | 11 | **Compute** | myxcel `list_jobs`, failed/preempted jobs in the window | Only if compute is a bottleneck or a request (allocation, GPU type). |
@@ -67,15 +77,15 @@ After gathering, build a **candidate list**, one line per item:
 Then ask, in one `AskUserQuestion` call (max 4 questions, `multiSelect` where it fits):
 
 - **Raise**: which results to lead with (pick ≤ 3 headlines; the rest go to an appendix or are dropped).
-- **Gated on advisor**: confirm which items actually need his decision, input or introduction. For
+- **Gated on advisor**: confirm which items actually need the advisor's decision, input or introduction. For
   each, the report states the decision, the options, and a recommendation. A question without a
-  recommendation wastes his time.
+  recommendation wastes their time.
 - **Overdue or reconsider dates**: close, extend (with a new date) or raise.
 - **Sensitive or not-ready**: anything to hold back (unverified numbers, collaborator-confidential).
 
 Rules for what is worth raising:
-- Raise **decisions he alone can make**, **results that change a plan**, **negative results that
-  kill a line of work**, and **slipped commitments**. Skip routine progress he does not need to act on.
+- Raise **decisions only the advisor can make**, **results that change a plan**, **negative results that
+  kill a line of work**, and **slipped commitments**. Skip routine progress the advisor does not need to act on.
 - A number goes in only if it comes from a run record with an evaluated outcome. Exploratory
   numbers are labelled "exploratory, not pre-registered" or left out.
 - Tooling and infrastructure work: one line, framed by what it unblocks for research.
