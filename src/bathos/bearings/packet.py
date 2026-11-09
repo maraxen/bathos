@@ -12,7 +12,9 @@ import hashlib
 import json
 import logging
 import re
+import shutil
 import subprocess
+import tempfile
 import tomllib
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -30,6 +32,9 @@ CHARTER_PATHS = (".bth/charter.toml", ".bth/charter.draft.toml")
 DOCS_ROOT = ".praxia/docs"
 PRIMARY_DOC_DIRS = (f"{DOCS_ROOT}/decisions/", f"{DOCS_ROOT}/specs/")
 NARRATIVE_DOC_DIRS = (f"{DOCS_ROOT}/handoffs/", f"{DOCS_ROOT}/daily/")
+
+# Owner decision 261108 (spec T6, AC-4b): about 30% under the largest inline size that worked.
+DEFAULT_BUDGET_BYTES = 600_000
 
 RUN_FIELDS = (
     "id",
@@ -505,4 +510,94 @@ def build_packet(
         "n_git_commits": len(git_log),
         "n_sidecars": len(sidecar_index),
         "n_excluded": len(exclusions),
+    }
+
+
+def _reader_bytes(packet_dir: Path) -> int:
+    """The size the reader sees: the sum of the files under ``reader/``."""
+    return sum(p.stat().st_size for p in (packet_dir / "reader").rglob("*") if p.is_file())
+
+
+def _jsonl(path: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").split("\n") if line]
+
+
+def build_packet_within_budget(
+    project_root: Path | str,
+    *,
+    out: Path | str,
+    since: str,
+    until: str,
+    max_bytes: int | None = DEFAULT_BUDGET_BYTES,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Build the packet, shortening the window from the old end until it fits ``max_bytes`` (spec AC-4b).
+
+    A window that already fits gives the same packet as ``build_packet``. Otherwise ``since`` moves to the earliest run
+    or commit time whose packet fits, which is well defined because size never grows as ``since`` moves later. Every
+    run and commit dropped that way is listed in the manifest by id with reason ``budget``. Content that does not shrink
+    with the window (docs are not windowed) can make a fit impossible: that refuses and writes nothing.
+    ``max_bytes`` of ``None`` or ``0`` switches the budget off. ``kwargs`` go to ``build_packet``.
+    """
+    out_p = Path(out)
+    if out_p.exists() and (not out_p.is_dir() or any(out_p.iterdir())):
+        raise BearingsPacketInvalidError(f"--out must be empty or absent: {out_p}")
+    budget = max_bytes if max_bytes and max_bytes > 0 else None
+    with tempfile.TemporaryDirectory() as td:
+        work = Path(td)
+        full_dir = work / "full"
+        full_res = build_packet(project_root, out=full_dir, since=since, until=until, **kwargs)
+        full_bytes = _reader_bytes(full_dir)
+        full_runs = {str(r["id"]) for r in _jsonl(full_dir / "reader" / "runs.jsonl")}
+        full_commits = {str(c["sha"]) for c in _jsonl(full_dir / "reader" / "git_log.jsonl")}
+        chosen_dir, chosen_res, eff_since = full_dir, full_res, since
+        if budget is not None and full_bytes > budget:
+            stamps = sorted(
+                {str(r["timestamp"]) for r in _jsonl(full_dir / "reader" / "runs.jsonl")}
+                | {str(c["committed_at"]) for c in _jsonl(full_dir / "reader" / "git_log.jsonl")},
+                key=parse_ts,
+            )
+            best: tuple[str, dict[str, Any], Path] | None = None
+            lo, hi = 0, len(stamps)  # the smallest index that fits; size never grows as since moves later
+            probes = 0
+            while lo < hi:
+                mid = (lo + hi) // 2
+                probe_dir = work / f"probe{probes}"
+                probes += 1
+                res = build_packet(project_root, out=probe_dir, since=stamps[mid], until=until, **kwargs)
+                if _reader_bytes(probe_dir) <= budget:
+                    best, hi = (stamps[mid], res, probe_dir), mid
+                else:
+                    lo = mid + 1
+            if best is None:
+                raise BearingsPacketInvalidError(
+                    f"Packet exceeds the {budget} byte budget even over the shortest window; content that does not "
+                    "shrink with the window (docs) is too large"
+                )
+            eff_since, chosen_res, chosen_dir = best
+        kept_runs = {str(r["id"]) for r in _jsonl(chosen_dir / "reader" / "runs.jsonl")}
+        kept_commits = {str(c["sha"]) for c in _jsonl(chosen_dir / "reader" / "git_log.jsonl")}
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(chosen_dir, out_p, dirs_exist_ok=True)
+        dropped_runs, dropped_commits = sorted(full_runs - kept_runs), sorted(full_commits - kept_commits)
+        manifest_path = out_p / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["budget"] = {
+            "max_bytes": budget,
+            "bytes": _reader_bytes(out_p),
+            "full_window_bytes": full_bytes,
+            "requested_since": since,
+            "effective_since": eff_since,
+            "window_shortened": eff_since != since,
+            "dropped": {"reason": "budget", "runs": dropped_runs, "commits": dropped_commits},
+        }
+        _write(manifest_path, _json_bytes(manifest))
+    return {
+        **chosen_res,
+        "out": str(out_p),
+        "bytes": manifest["budget"]["bytes"],
+        "window_shortened": manifest["budget"]["window_shortened"],
+        "effective_since": eff_since,
+        "n_dropped_runs": len(dropped_runs),
+        "n_dropped_commits": len(dropped_commits),
     }

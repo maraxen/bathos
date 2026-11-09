@@ -2518,20 +2518,25 @@ def bearings_packet_cmd(
     charter_file: tuple[str, ...] = (),
     backlog_titles: str = "",
     reachable_only: bool = False,
+    max_bytes: int = 600000,
     project_root: str = "",
     catalog_dir: str = "",
 ) -> None:
-    """Build the deterministic blind packet for a reader into an empty --out directory."""
-    from bathos.bearings.packet import build_packet
+    """Build the deterministic blind packet for a reader into an empty --out directory.
+
+    A packet over --max-bytes is cut by moving --since later until it fits (0 turns the budget off).
+    """
+    from bathos.bearings.packet import build_packet_within_budget
     from bathos.workspace import resolve_workspace
 
     root = Path(project_root) if project_root else resolve_workspace().fs_root
     try:
-        res = build_packet(
+        res = build_packet_within_budget(
             root,
             out=Path(out),
             since=since,
             until=until,
+            max_bytes=max_bytes,
             ref=ref,
             project=project or None,
             charter_file=list(charter_file) or None,

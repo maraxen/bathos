@@ -6255,19 +6255,24 @@ async def bearings_packet(
     charter_files: list[str] | None = None,
     backlog_titles: str | None = None,
     reachable_only: bool = False,
+    max_bytes: int = 600000,
     project_root: str | None = None,
     catalog_dir: str | None = None,
 ) -> dict:
-    """Build the deterministic blind packet for a bearings reader into an empty directory."""
-    from bathos.bearings.packet import build_packet
+    """Build the deterministic blind packet for a bearings reader into an empty directory.
+
+    A packet over max_bytes is cut by moving since later until it fits (0 turns the budget off).
+    """
+    from bathos.bearings.packet import build_packet_within_budget
     from bathos.workspace import resolve_workspace
 
     root = Path(project_root) if project_root else resolve_workspace().fs_root
-    res = build_packet(
+    res = build_packet_within_budget(
         root,
         out=Path(out),
         since=since,
         until=until,
+        max_bytes=max_bytes,
         ref=ref,
         project=project,
         charter_file=charter_files,
