@@ -45,7 +45,12 @@ from bathos.checker import check_runs
 from bathos.cli_common import normalise_output_paths, normalise_tags, require_project_slug
 from bathos.compact import compact as compact_catalog
 from bathos.config import default_catalog_dir, find_project_config, load_project_config
-from bathos.errors import BathosError, BathosErrorCode, RESOLUTION_HINTS, StepBackError
+from bathos.errors import (
+    RESOLUTION_HINTS,
+    BathosError,
+    BathosErrorCode,
+    FindingReopenReasonRequiredError,
+)
 from bathos.export import ExportError
 from bathos.figure_registry import FigureEntrySchemaError, register_figure_entry
 from bathos.index import connect_read
@@ -205,12 +210,10 @@ def traced_tool(fn):
                 if "ok" not in result and result.get("error") is not None:
                     merged["ok"] = False
                 if merged.get("error_code") and not merged.get("resolution_hint"):
-                    try:
+                    with contextlib.suppress(ValueError, KeyError):
                         merged["resolution_hint"] = RESOLUTION_HINTS.get(
                             BathosErrorCode(merged["error_code"]), ""
                         )
-                    except (ValueError, KeyError):
-                        pass
                 return merged
             return {"ok": True, "error_code": None, "error": None, "resolution_hint": None}
 
@@ -729,7 +732,10 @@ def defect_declare_tool(
         catalog_dir: Optional catalog directory
     """
     from datetime import UTC, datetime
+
+    _ = catalog_dir
     import tomlkit
+
     from bathos.workspace import resolve_workspace
 
     if user_scope:
@@ -861,6 +867,7 @@ def defect_list_tool(
     catalog_dir: str = "",
 ) -> dict:
     """List declared instrument defects across registries."""
+    _ = catalog_dir
     from bathos.version_resolver import load_instrument_registries
     from bathos.workspace import resolve_workspace
 
@@ -1089,6 +1096,99 @@ async def mcp_session_start_tool(
     catalog_dir: str = "",
 ) -> dict:
     return session_start_tool(byte_cap=byte_cap, catalog_dir=catalog_dir)
+
+
+@cisternal.tool(registry="bathos-cli", name="archive_sweep", cli_name="archive-sweep")
+def archive_sweep_tool(
+    dry_run: bool = True,
+    age_days: int = 90,
+    proposal_path: str = "",
+    apply: bool = False,
+    doc_store: str = "",
+    project_root: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Scan workspace for stale/void items, emit sweep proposal, or apply approved proposal."""
+    from bathos.archive_sweep import archive_sweep
+
+    return archive_sweep(
+        dry_run=dry_run,
+        age_days=age_days,
+        proposal_path=proposal_path,
+        apply=apply,
+        doc_store=doc_store,
+        project_root=project_root,
+        catalog_dir=catalog_dir,
+    )
+
+
+archive_sweep_tool.__annotations__["proposal_path"] = Annotated[
+    str, cyclopts.Parameter(name=["--proposal-path", "--proposal"])
+]
+
+
+@cisternal.tool(registry="bathos", name="archive_sweep")
+@traced_tool
+@require_write_token_when_applying
+async def mcp_archive_sweep_tool(
+    dry_run: bool = True,
+    age_days: int = 90,
+    proposal_path: str = "",
+    apply: bool = False,
+    doc_store: str = "",
+    project_root: str = "",
+    catalog_dir: str = "",
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token_when_applying
+) -> dict:
+    """Scan workspace for stale/void items, emit sweep proposal, or apply approved proposal."""
+    return archive_sweep_tool(
+        dry_run=dry_run,
+        age_days=age_days,
+        proposal_path=proposal_path,
+        apply=apply,
+        doc_store=doc_store,
+        project_root=project_root,
+        catalog_dir=catalog_dir,
+    )
+
+
+@cisternal.tool(
+    registry="bathos-cli", name="telemetry_rotate", cli_group="telemetry", cli_name="rotate"
+)
+def telemetry_rotate_tool(
+    max_size_mb: int = 10,
+    max_age_days: int = 30,
+    dry_run: bool = False,
+    catalog_dir: str = "",
+) -> dict:
+    """Rotate diagnostic telemetry log files in ~/.bth/catalog/logs/ into compressed .jsonl.zst archives."""
+    from bathos.telemetry import telemetry_rotate
+
+    return telemetry_rotate(
+        catalog_dir=catalog_dir or None,
+        max_size_mb=max_size_mb,
+        max_age_days=max_age_days,
+        dry_run=dry_run,
+    )
+
+
+@cisternal.tool(registry="bathos", name="telemetry_rotate")
+@traced_tool
+@require_write_token
+async def mcp_telemetry_rotate_tool(
+    max_size_mb: int = 10,
+    max_age_days: int = 30,
+    dry_run: bool = False,
+    catalog_dir: str = "",
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token
+) -> dict:
+    """Rotate diagnostic telemetry log files in ~/.bth/catalog/logs/ into compressed .jsonl.zst archives."""
+    return telemetry_rotate_tool(
+        max_size_mb=max_size_mb,
+        max_age_days=max_age_days,
+        dry_run=dry_run,
+        catalog_dir=catalog_dir,
+    )
 
 
 # ============================================================================
@@ -3175,10 +3275,7 @@ def cite_run_tool(
             banner = f"[UNVERIFIABLE — ACKNOWLEDGED: {ack_unverifiable.strip()}]"
 
     raw_citation = format_citation(run, fmt=format)
-    if banner and format == "markdown":
-        citation = f"{banner}\n{raw_citation}"
-    else:
-        citation = raw_citation
+    citation = f"{banner}\n{raw_citation}" if banner and format == "markdown" else raw_citation
     return {"citation": citation}
 
 
@@ -7020,6 +7117,8 @@ _WIRED = cisternal.wire(
         "finding_list",
         "supersede_edge_add",
         "session_start",
+        "archive_sweep",
+        "telemetry_rotate",
     ],
 )
 

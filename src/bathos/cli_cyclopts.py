@@ -152,6 +152,9 @@ wire(
         "finding_list",
         "supersede_edge_add",
         "session_start",
+        # archive sweep & telemetry rotation (spec 261106 Phase 3)
+        "archive_sweep",
+        "telemetry_rotate",
     ],
 )
 

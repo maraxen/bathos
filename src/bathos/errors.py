@@ -152,6 +152,12 @@ class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(
     SUPERSEDED_TARGET_NOT_FOUND = "superseded_target_not_found"
     SPIKE_TIER_CANNOT_SETTLE = "spike_tier_cannot_settle"
 
+    # Archive sweep, doc store & restore (spec 261106 Phase 3)
+    ARCHIVE_SWEEP_UNAPPROVED = "archive_sweep_unapproved"
+    ARCHIVE_PROPOSAL_STALE = "archive_proposal_stale"
+    DOC_STORE_UNAVAILABLE = "doc_store_unavailable"
+    RESTORE_CONFLICT = "restore_conflict"
+
 
 # Resolution hints registry: every BathosErrorCode member must have a non-empty entry
 RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
@@ -251,6 +257,10 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.FINDING_NOT_FOUND: "The specified finding slug or ID was not found in .bth/findings/. Query finding_list to inspect available findings.",
     BathosErrorCode.SUPERSEDED_TARGET_NOT_FOUND: "The target entity specified in supersedes does not exist. Verify the predecessor ID or slug.",
     BathosErrorCode.SPIKE_TIER_CANNOT_SETTLE: "Spike runs are preliminary probes and cannot support a settled finding. Elevate evidence via a confirmatory run.",
+    BathosErrorCode.ARCHIVE_SWEEP_UNAPPROVED: "Archive sweep requires an approved proposal file when --apply is set. Run with --dry-run first to generate a proposal.",
+    BathosErrorCode.ARCHIVE_PROPOSAL_STALE: "The archive proposal references files or git states that have changed since proposal generation. Re-run --dry-run to regenerate.",
+    BathosErrorCode.DOC_STORE_UNAVAILABLE: "The configured documentation store path is not accessible or writable. Check permissions or configuration.",
+    BathosErrorCode.RESTORE_CONFLICT: "Restoring this item would overwrite an existing modified or untracked file. Move or rename the destination file first.",
 }
 
 
@@ -418,6 +428,12 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     "FindingNotFoundError": BathosErrorCode.FINDING_NOT_FOUND,
     "SupersededTargetNotFoundError": BathosErrorCode.SUPERSEDED_TARGET_NOT_FOUND,
     "SpikeTierCannotSettleError": BathosErrorCode.SPIKE_TIER_CANNOT_SETTLE,
+    # Archive sweep, doc store & restore (spec 261106 Phase 3)
+    "ArchiveSweepError": BathosErrorCode.INVALID_PARAM,
+    "ArchiveSweepUnapprovedError": BathosErrorCode.ARCHIVE_SWEEP_UNAPPROVED,
+    "ArchiveProposalStaleError": BathosErrorCode.ARCHIVE_PROPOSAL_STALE,
+    "DocStoreUnavailableError": BathosErrorCode.DOC_STORE_UNAVAILABLE,
+    "RestoreConflictError": BathosErrorCode.RESTORE_CONFLICT,
 }
 
 
@@ -694,4 +710,28 @@ HIDDEN_STATE_TO_EXCEPTION: dict[str, type[ResultHiddenError]] = {
     "superseded": ResultSupersededError,
     "archived": ResultArchivedError,
 }
+
+
+# ── Archive Sweep & Doc Store Domain Exceptions (spec 261106 Phase 3) ────────
+
+
+class ArchiveSweepError(BathosError):
+    """Base error for archive sweep operations."""
+
+
+class ArchiveSweepUnapprovedError(ArchiveSweepError):
+    """Raised when --apply is passed without an approved proposal."""
+
+
+class ArchiveProposalStaleError(ArchiveSweepError):
+    """Raised when proposal file SHA256 or git state diverges."""
+
+
+class DocStoreUnavailableError(BathosError):
+    """Raised when configured documentation store is not accessible."""
+
+
+class RestoreConflictError(BathosError):
+    """Raised when restore would overwrite an existing modified/untracked file."""
+
 

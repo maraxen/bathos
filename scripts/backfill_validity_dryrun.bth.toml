@@ -1,0 +1,23 @@
+[experiment]
+hypothesis = "Running validity dry-run with hide_inferred=false vs hide_inferred=true accurately segregates low-provenance inferred runs into suspect vs void while preserving Invariant I1 across tev_design and asr."
+
+[outcomes.pass]
+condition = "total_runs > 0 AND report_written = true AND side_by_side_complete = true"
+decision = "Dry-run report complete; proceed to owner review of OD-1 hide_inferred counts."
+reasoning = "Side-by-side counts produced without mutating source repositories or user config."
+
+[outcomes.fail]
+condition = "total_runs == 0 OR report_written = false OR side_by_side_complete = false"
+decision = "Dry-run failed to produce complete side-by-side counts."
+reasoning = "Failed to evaluate defect cohorts or output report file."
+is_residual = true
+
+[result_schema]
+total_runs_tev = "int"
+total_runs_asr = "int"
+void_tev_hide_false = "int"
+void_tev_hide_true = "int"
+suspect_tev_hide_false = "int"
+suspect_tev_hide_true = "int"
+report_written = "bool"
+side_by_side_complete = "bool"

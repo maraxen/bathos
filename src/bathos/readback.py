@@ -75,9 +75,11 @@ from pathlib import Path
 
 from bathos.campaign_report import CampaignReport
 from bathos.compact import _collect_output_metadata
+from bathos.config import default_catalog_dir
 from bathos.figure_manifest import FigureManifest
 from bathos.index import catalog_readable, connect_read
 from bathos.query import CatalogError, get_run
+from bathos.schema import Run
 
 
 class ProductTrustState(StrEnum):
@@ -294,8 +296,6 @@ def _find_all_runs_with_output_sha256(
     catalog_dir: Path | str, content_hash: str
 ) -> list[str]:
     """Scan warm run catalog, cool fragments, and trust ledger for all run IDs producing content_hash."""
-    import duckdb
-
     cat_path = Path(catalog_dir)
     if not catalog_readable(cat_path):
         return []

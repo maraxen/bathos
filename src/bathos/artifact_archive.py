@@ -25,6 +25,7 @@ called explicitly.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import subprocess
@@ -38,6 +39,7 @@ from bathos.archived_items import (
     append_archived_item_record,
     latest_status,
 )
+from bathos.errors import RestoreConflictError
 from bathos.git import capture_git_state
 from bathos.sidecar import find_sidecar
 from bathos.telemetry import event
@@ -243,6 +245,8 @@ def archive_experiment_bundle(
     superseded_by: str = "",
     archived_by: str = "agent",
     dry_run: bool = False,
+    commit: bool = True,
+    item_id: str | None = None,
 ) -> ArchivedItem:
     """Archive a script + its sidecar + its tracked output paths.
 
@@ -255,7 +259,8 @@ def archive_experiment_bundle(
     if not script_path.exists():
         raise ArtifactNotFoundError(f"Script not found: {script_path}")
 
-    item_id = str(uuid.uuid4())
+    if item_id is None:
+        item_id = str(uuid.uuid4())
     sidecar_path = find_sidecar(script_path)
     script_sha256 = _sha256_file(script_path)
 
@@ -310,28 +315,45 @@ def archive_experiment_bundle(
     stub_commit_sha = ""
     if tracked:
         _run_git(["add", *[str(p) for p in tracked]], cwd=project_root)
-        commit_msg = (
-            f"archive: stub {script_path.name} (item_id={item_id})\n\n"
-            f"verdict: {verdict}\nreason: {reason}\nsuperseded_by: {superseded_by or '(unset)'}"
-        )
-        _run_git(["commit", "-m", commit_msg], cwd=project_root)
-        stub_commit_sha = _run_git(["rev-parse", "HEAD"], cwd=project_root).stdout.strip()
+        if commit:
+            commit_msg = (
+                f"archive: stub {script_path.name} (item_id={item_id})\n\n"
+                f"verdict: {verdict}\nreason: {reason}\nsuperseded_by: {superseded_by or '(unset)'}"
+            )
+            _run_git(["commit", "-m", commit_msg], cwd=project_root)
+            stub_commit_sha = _run_git(["rev-parse", "HEAD"], cwd=project_root).stdout.strip()
 
-        notes_payload = json.dumps(
-            {
-                "item_id": item_id,
-                "verdict": verdict,
-                "reason": reason,
-                "superseded_by": superseded_by,
-                "pre_archive_sha": pre_archive_sha,
-                "paths": [str(p.relative_to(project_root)) for p in tracked],
-            }
-        )
-        _run_git(
-            ["notes", "--ref=bathos-archive", "add", "-m", notes_payload, stub_commit_sha],
-            cwd=project_root,
-            check=False,  # non-fatal: notes are a durability bonus, not the source of truth
-        )
+            notes_payload = json.dumps(
+                {
+                    "item_id": item_id,
+                    "verdict": verdict,
+                    "reason": reason,
+                    "superseded_by": superseded_by,
+                    "pre_archive_sha": pre_archive_sha,
+                    "paths": [str(p.relative_to(project_root)) for p in tracked],
+                }
+            )
+            _run_git(
+                ["notes", "--ref=bathos-archive", "add", "-m", notes_payload, stub_commit_sha],
+                cwd=project_root,
+                check=False,  # non-fatal: notes are a durability bonus, not the source of truth
+            )
+
+    matched_run_ids: list[str] = []
+    from bathos.index import catalog_readable, connect_read
+
+    if catalog_readable(catalog_dir):
+        with contextlib.suppress(Exception):
+            con = connect_read(catalog_dir, read_only=True)
+            try:
+                script_rel = str(script_path.relative_to(project_root))
+                rows = con.execute(
+                    "SELECT id FROM runs WHERE (script_sha256 = ? OR command LIKE ?) AND project_slug = ?",
+                    [script_sha256, f"%{script_rel}%", project_slug],
+                ).fetchall()
+                matched_run_ids = [r[0] for r in rows]
+            finally:
+                con.close()
 
     all_rel_paths = [str(p.relative_to(project_root)) for p in bundle_paths]
 
@@ -349,9 +371,12 @@ def archive_experiment_bundle(
         bundle_sha256=bundle_sha256,
         bundle_path=bundle_rel_path,
         archived_by=archived_by,
+        script_sha256=script_sha256,
+        run_ids=matched_run_ids,
     )
     append_archived_item_record(record, catalog_dir)
-    _regenerate_index(project_root, catalog_dir)
+    if commit:
+        _regenerate_index(project_root, catalog_dir)
 
     event(
         "archive.artifact_archived",
@@ -523,68 +548,99 @@ def restore_archived_item(
     # still fallible and is handled separately (idempotent retry + a registered exception
     # type, not a bare try/except silence).
     bundle_restored: list[Path] = []
+    bundle_items_bytes: dict[str, bytes] = {}
     if bundle_path:
         bundle_file = Path(bundle_path)
         if not bundle_file.exists():
             raise BundleNotFoundError(f"Archive bundle not found on disk: {bundle_path}")
         import tempfile
 
-        # Clone into a scratch dir, not project_root -- `git clone` refuses a non-empty
-        # destination (the live working tree always is one), which previously made this
-        # silently no-op while the restore still reported success (data never came back).
-        with tempfile.TemporaryDirectory() as tmp:
-            clone_dir = Path(tmp) / "bundle_clone"
-            clone_result = _run_git(
-                ["clone", "-q", str(bundle_file), str(clone_dir)], cwd=project_root, check=False
-            )
-            if clone_result.returncode != 0:
-                raise BundleNotFoundError(
-                    f"Failed to clone archive bundle {bundle_path}: {clone_result.stderr}"
-                )
-            for item in sorted(clone_dir.rglob("*")):
-                if not item.is_file():
-                    continue
-                rel = item.relative_to(clone_dir)
-                if rel.parts and rel.parts[0] == ".git":
-                    continue
-                dest = project_root / rel
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(item.read_bytes())
-                bundle_restored.append(dest)
+        if str(bundle_file).endswith(".tar.zst") or str(bundle_file).endswith(".zst"):
+            import tarfile
 
-    restored: list[Path] = []
+            import zstandard
+
+            with tempfile.TemporaryDirectory() as tmp:
+                extract_dir = Path(tmp) / "tar_extract"
+                extract_dir.mkdir()
+                with (
+                    open(bundle_file, "rb") as raw,
+                    zstandard.ZstdDecompressor().stream_reader(raw) as zr,
+                    tarfile.open(fileobj=zr, mode="r|") as tar,
+                ):
+                    tar.extractall(extract_dir, filter="data")
+                for item in sorted(extract_dir.rglob("*")):
+                    if not item.is_file():
+                        continue
+                    rel_str = str(item.relative_to(extract_dir))
+                    bundle_items_bytes[rel_str] = item.read_bytes()
+        else:
+            with tempfile.TemporaryDirectory() as tmp:
+                clone_dir = Path(tmp) / "bundle_clone"
+                clone_result = _run_git(
+                    ["clone", "-q", str(bundle_file), str(clone_dir)], cwd=project_root, check=False
+                )
+                if clone_result.returncode != 0:
+                    raise BundleNotFoundError(
+                        f"Failed to clone archive bundle {bundle_path}: {clone_result.stderr}"
+                    )
+                for item in sorted(clone_dir.rglob("*")):
+                    if not item.is_file():
+                        continue
+                    rel = item.relative_to(clone_dir)
+                    if rel.parts and rel.parts[0] == ".git":
+                        continue
+                    bundle_items_bytes[str(rel)] = item.read_bytes()
+
+    tracked_items_bytes: dict[str, bytes] = {}
     for rel in paths:
-        abs_path = project_root / rel
-        # Raw-bytes subprocess call, deliberately NOT `_run_git` (text=True) -- output
-        # files are frequently binary (plots, .npz, ...) and text-mode decoding would
-        # corrupt them via locale-dependent encoding/decoding.
         show = subprocess.run(
             ["git", "show", f"{pre_archive_sha}:{rel}"],
             cwd=project_root,
             capture_output=True,
             check=False,
         )
-        if show.returncode != 0:
-            continue  # this path was untracked -> comes from the bundle instead
-        abs_path.parent.mkdir(parents=True, exist_ok=True)
-        abs_path.write_bytes(show.stdout)
-        restored.append(abs_path)
+        if show.returncode == 0:
+            tracked_items_bytes[rel] = show.stdout
+
+    # Pre-check all candidate items for conflicts before writing anything
+    all_targets_bytes = {**bundle_items_bytes, **tracked_items_bytes}
+    for rel, new_bytes in all_targets_bytes.items():
+        dest = project_root / rel
+        if dest.exists():
+            stub = parse_stub(dest)
+            if stub and stub.get("item_id") == item_id:
+                res = _run_git(["status", "--porcelain", str(dest)], cwd=project_root, check=False)
+                if res.stdout.strip():
+                    raise RestoreConflictError(f"Restoring {rel} would clobber modified stub file: {dest}")
+            elif dest.read_bytes() != new_bytes:
+                raise RestoreConflictError(
+                    f"Restoring {rel} would clobber existing modified or untracked file: {dest}"
+                )
+
+    # Now write files
+    for rel, b_bytes in bundle_items_bytes.items():
+        dest = project_root / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b_bytes)
+        bundle_restored.append(dest)
+
+    restored: list[Path] = []
+    for rel, t_bytes in tracked_items_bytes.items():
+        dest = project_root / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(t_bytes)
+        restored.append(dest)
 
     try:
         restore_commit_sha = ""
-        if restored:
-            _run_git(["add", *[str(p) for p in restored]], cwd=project_root)
-            # Idempotent retry: if an earlier attempt got this far and committed but then
-            # failed later (e.g. append_archived_item_record hitting concurrent DB
-            # contention -- a real risk in this codebase's SLURM-parallel design, see
-            # trust_ledger.py), the `git add` above is a no-op and nothing is staged.
-            # Committing anyway would fail with "nothing to commit" and permanently strand
-            # the item on every retry, since the bytes already match and will never
-            # re-produce a diff to commit.
+        to_stage = restored or bundle_restored
+        if to_stage:
+            _run_git(["add", *[str(p) for p in to_stage]], cwd=project_root)
             diff_check = _run_git(["diff", "--cached", "--quiet"], cwd=project_root, check=False)
-            if diff_check.returncode != 0:  # non-zero = there ARE staged changes to commit
+            if diff_check.returncode != 0:
                 _run_git(
-                    ["commit", "-m", f"restore: {item_id} (from {pre_archive_sha[:8]})"],
+                    ["commit", "-m", f"restore: {item_id} (from {pre_archive_sha[:8] if pre_archive_sha else 'archive'})"],
                     cwd=project_root,
                 )
             restore_commit_sha = _run_git(["rev-parse", "HEAD"], cwd=project_root).stdout.strip()
@@ -604,11 +660,14 @@ def restore_archived_item(
                 bundle_sha256=bundle_sha256,
                 bundle_path=bundle_path,
                 archived_by=restored_by,
+                script_sha256=record.script_sha256 if record else None,
+                run_ids=record.run_ids if record else [],
             ),
             catalog_dir,
         )
         _regenerate_index(project_root, catalog_dir)
-    except ArchiveError:
+    except (ArchiveError, RestoreConflictError):
+        raise
         raise
     except Exception as e:
         # The restore commit/ledger-append/index-regen tail is fallible (git commit can

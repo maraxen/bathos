@@ -31,6 +31,7 @@ from __future__ import annotations
 import atexit
 import contextlib
 import contextvars
+import hashlib
 import json
 import logging
 import os
@@ -43,6 +44,7 @@ import uuid
 from datetime import UTC, datetime
 from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 from pathlib import Path
+from typing import Any
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Contextvars — set by callers (runner.py, mcp.py, cli.py)
@@ -459,3 +461,203 @@ def _get_default_log_dir() -> Path:
 
     # Default to ~/.bth/catalog/logs/
     return Path.home() / ".bth" / "catalog" / "logs"
+
+
+def _is_forbidden_runlog_path(path: Path | str) -> bool:
+    """Return True if path is within a project run log (.bth/log/) or log-mirror."""
+    parts = Path(path).resolve().parts
+    for i in range(len(parts) - 1):
+        if parts[i] == ".bth" and parts[i + 1] in ("log", "log-mirror"):
+            return True
+    return False
+
+
+def telemetry_rotate(
+    catalog_dir: Path | str | None = None,
+    max_size_mb: int = 10,
+    max_age_days: int = 30,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Rotate diagnostic telemetry log files in ~/.bth/catalog/logs/ into compressed .jsonl.zst archives.
+
+    Never touches project run logs (<main_root>/.bth/log/*.jsonl), strictly enforced via Hard Invariant B3-3.
+    """
+    import duckdb
+    import zstandard
+
+    # Resolve catalog_dir and log_dir
+    if catalog_dir:
+        c_path = Path(catalog_dir).resolve()
+        if c_path.name == "logs":
+            log_dir = c_path
+            cat_dir = c_path.parent
+        else:
+            log_dir = c_path / "logs"
+            cat_dir = c_path
+    else:
+        log_dir = _get_default_log_dir().resolve()
+        cat_dir = log_dir.parent
+
+    # Hard Invariant B3-3 check on directories
+    if _is_forbidden_runlog_path(log_dir) or _is_forbidden_runlog_path(cat_dir):
+        raise ValueError(
+            f"Refusing to rotate telemetry: target path '{log_dir}' is inside project runlog "
+            "directory (.bth/log/ or .bth/log-mirror/), violating Hard Invariant B3-3."
+        )
+
+    if not log_dir.is_dir():
+        return {
+            "ok": True,
+            "dry_run": dry_run,
+            "rotated_count": 0,
+            "compressed_bytes": 0,
+            "archives": [],
+        }
+
+    now_ts = time.time()
+    candidates: list[Path] = []
+
+    # Find candidate files matching events.*.jsonl*
+    for p in sorted(log_dir.glob("events.*.jsonl*")):
+        if not p.is_file():
+            continue
+        if "archive" in p.parts:
+            continue
+        if _is_forbidden_runlog_path(p):
+            raise ValueError(
+                f"Refusing to rotate telemetry: candidate file '{p}' is inside project runlog, "
+                "violating Hard Invariant B3-3."
+            )
+
+        name_parts = p.name.split(".")
+        if len(name_parts) >= 4 and name_parts[-1] == "jsonl":
+            try:
+                pid = int(name_parts[-2])
+                try:
+                    os.kill(pid, 0)
+                    continue
+                except ProcessLookupError:
+                    pass
+                except PermissionError:
+                    continue
+            except ValueError:
+                pass
+
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+
+        size_mb = st.st_size / (1024 * 1024)
+        age_d = max(0.0, (now_ts - st.st_mtime) / 86400.0)
+
+        if size_mb >= max_size_mb or age_d >= max_age_days:
+            candidates.append(p)
+
+    if dry_run or not candidates:
+        return {
+            "ok": True,
+            "dry_run": dry_run,
+            "rotated_count": len(candidates),
+            "compressed_bytes": sum(c.stat().st_size for c in candidates if c.is_file()),
+            "archives": [str(c) for c in candidates],
+        }
+
+    cctx = zstandard.ZstdCompressor(level=19)
+    archive_year = datetime.now(UTC).strftime("%Y")
+    archive_dir = log_dir / "archive" / archive_year
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    rotated_archives: list[str] = []
+    total_compressed = 0
+
+    db_path = cat_dir / "validity_cache.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with duckdb.connect(str(db_path)) as con:
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS telemetry_index (
+                archive_path TEXT PRIMARY KEY,
+                start_time TEXT,
+                end_time TEXT,
+                event_count BIGINT,
+                sha256 TEXT,
+                rotated_at TEXT
+            );
+        """)
+
+        for file_path in candidates:
+            name_parts = file_path.name.split(".")
+            host = name_parts[1] if len(name_parts) >= 3 else socket.gethostname()
+            pid_str = name_parts[2] if len(name_parts) >= 3 else "0"
+            ts_str = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+            archive_filename = f"events_{host}_{pid_str}_{ts_str}.jsonl.zst"
+            target_path = archive_dir / archive_filename
+
+            counter = 1
+            while target_path.exists():
+                archive_filename = f"events_{host}_{pid_str}_{ts_str}_{counter}.jsonl.zst"
+                target_path = archive_dir / archive_filename
+                counter += 1
+
+            tmp_path = archive_dir / f".{archive_filename}.tmp"
+            event_count = 0
+            start_time = None
+            end_time = None
+
+            try:
+                with (
+                    open(file_path, "rb") as fin,
+                    open(tmp_path, "wb") as fout,
+                    cctx.stream_writer(fout) as compressor,
+                ):
+                    for line in fin:
+                            event_count += 1
+                            compressor.write(line)
+                            if start_time is None:
+                                with contextlib.suppress(Exception):
+                                    start_time = json.loads(line.decode("utf-8")).get("ts")
+                            with contextlib.suppress(Exception):
+                                end_time = json.loads(line.decode("utf-8")).get("ts")
+
+                tmp_path.rename(target_path)
+
+                hasher = hashlib.sha256()
+                with open(target_path, "rb") as tf:
+                    while chunk := tf.read(65536):
+                        hasher.update(chunk)
+                archive_sha = hasher.hexdigest()
+
+                con.execute(
+                    "INSERT OR REPLACE INTO telemetry_index "
+                    "(archive_path, start_time, end_time, event_count, sha256, rotated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    [
+                        str(target_path),
+                        start_time,
+                        end_time,
+                        event_count,
+                        archive_sha,
+                        datetime.now(UTC).isoformat(),
+                    ],
+                )
+
+                total_compressed += target_path.stat().st_size
+                rotated_archives.append(str(target_path))
+                file_path.unlink()
+            except Exception:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+                raise
+
+    return {
+        "ok": True,
+        "dry_run": False,
+        "rotated_count": len(rotated_archives),
+        "compressed_bytes": total_compressed,
+        "archives": rotated_archives,
+    }
+
+
+rotate_telemetry_logs = telemetry_rotate
+
