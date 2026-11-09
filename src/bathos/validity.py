@@ -104,18 +104,13 @@ def validity_cache_lock_path(catalog_dir: Path | str | None = None) -> Path:
 
 def resolve_evidence_tier(stage_name: str | None, epistemic_class: str | None) -> str:
     """Resolve evidence tier string according to Spec §4.2."""
-    raw = (stage_name or epistemic_class or "").lower().strip()
-    if not raw:
-        return "undeclared"
-    if raw in ("confirmatory", "validation", "power"):
-        return "confirmatory"
-    if raw in ("calibrating", "benchmark"):
-        return "calibrating"
-    if raw in ("exploratory", "explore"):
-        return "exploratory"
-    if raw == "spike":
-        return "spike"
-    return "undeclared"
+    from bathos.sidecar import resolve_epistemic_tier
+
+    return resolve_epistemic_tier(
+        stage_name_declared=bool(stage_name),
+        stage_name_raw=stage_name,
+        epistemic_class=epistemic_class,
+    )
 
 
 def compute_validity_inputs_hash(
@@ -602,6 +597,8 @@ def resolve_validity(
                             "stage_name": r.stage_name,
                             "epistemic_class": r.epistemic_class,
                             "tags": r.tags,
+                            "dependency_provenance": r.dependency_provenance,
+                            "dependency_lock_sha256": r.dependency_lock_sha256,
                             "toolchain_version_source": getattr(r, "toolchain_version_source", None),
                         }
             except Exception:
@@ -624,9 +621,15 @@ def resolve_validity(
         superseded_map: dict[str, str] = {}
         if "supersession_edges" in tables:
             try:
-                rows = con.execute(
-                    "SELECT from_id, to_id FROM supersession_edges WHERE from_type = 'run' AND state = 'active'"
-                ).fetchall()
+                cols = [c[1] for c in con.execute("PRAGMA table_info('supersession_edges')").fetchall()]
+                if "entity_type" in cols:
+                    rows = con.execute(
+                        "SELECT entity_id, superseded_by_id FROM supersession_edges WHERE entity_type = 'run'"
+                    ).fetchall()
+                else:
+                    rows = con.execute(
+                        "SELECT from_id, to_id FROM supersession_edges WHERE from_type = 'run'"
+                    ).fetchall()
                 for f_id, t_id in rows:
                     superseded_map[f_id] = t_id
             except Exception:

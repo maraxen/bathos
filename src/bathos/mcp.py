@@ -899,6 +899,198 @@ async def mcp_defect_list_tool(
     return defect_list_tool(package=package, catalog_dir=catalog_dir)
 
 
+# ── Findings & Supersession (spec 261106 Phase 2) ───────────────────────────
+
+
+@cisternal.tool(registry="bathos-cli", name="finding_create", cli_group="findings", cli_name="create")
+def finding_create_tool(
+    question_slug: str,
+    question: str,
+    answer: str,
+    supporting_runs: list[str] | None = None,
+    status: str = "tentative",
+    supersedes: str = "",
+    reopen_reason: str = "",
+    allow_mixed_estimand: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    from bathos.findings import create_finding
+
+    finding = create_finding(
+        question_slug=question_slug,
+        question=question,
+        answer=answer,
+        supporting_runs=supporting_runs,
+        status=status,
+        supersedes=supersedes,
+        reopen_reason=reopen_reason,
+        allow_mixed_estimand=allow_mixed_estimand,
+        catalog_dir=catalog_dir or None,
+    )
+    return {
+        "ok": True,
+        "finding": finding.to_dict(),
+        "message": f"Created finding {finding.id} ({finding.active_status or finding.status})",
+    }
+
+
+@cisternal.tool(registry="bathos", name="finding_create")
+@traced_tool
+@require_write_token
+async def mcp_finding_create_tool(
+    question_slug: str,
+    question: str,
+    answer: str,
+    supporting_runs: list[str] | None = None,
+    status: str = "tentative",
+    supersedes: str = "",
+    reopen_reason: str = "",
+    allow_mixed_estimand: str = "",
+    catalog_dir: str = "",
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token
+) -> dict:
+    return finding_create_tool(
+        question_slug=question_slug,
+        question=question,
+        answer=answer,
+        supporting_runs=supporting_runs,
+        status=status,
+        supersedes=supersedes,
+        reopen_reason=reopen_reason,
+        allow_mixed_estimand=allow_mixed_estimand,
+        catalog_dir=catalog_dir,
+    )
+
+
+@cisternal.tool(registry="bathos-cli", name="finding_get", cli_group="findings", cli_name="get")
+def finding_get_tool(
+    slug_or_id: str,
+    catalog_dir: str = "",
+) -> dict:
+    from bathos.findings import get_finding
+
+    finding = get_finding(slug_or_id, catalog_dir=catalog_dir or None)
+    d = finding.to_dict()
+    return {
+        "ok": True,
+        "finding": d,
+        "message": f"{d['question_slug']}: {d['status']} -> {d['answer']}",
+    }
+
+
+@cisternal.tool(registry="bathos", name="finding_get")
+@traced_tool
+async def mcp_finding_get_tool(
+    slug_or_id: str,
+    catalog_dir: str = "",
+) -> dict:
+    return finding_get_tool(slug_or_id=slug_or_id, catalog_dir=catalog_dir)
+
+
+@cisternal.tool(registry="bathos-cli", name="finding_list", cli_group="findings", cli_name="list")
+def finding_list_tool(
+    status: str = "",
+    include_superseded: bool = False,
+    catalog_dir: str = "",
+) -> dict:
+    from bathos.findings import list_findings
+
+    findings = list_findings(
+        status=status,
+        include_superseded=include_superseded,
+        catalog_dir=catalog_dir or None,
+    )
+    rows = [f.to_dict() for f in findings]
+    return {
+        "ok": True,
+        "findings": rows,
+        "count": len(rows),
+        "message": f"Found {len(rows)} findings",
+    }
+
+
+@cisternal.tool(registry="bathos", name="finding_list")
+@traced_tool
+async def mcp_finding_list_tool(
+    status: str = "",
+    include_superseded: bool = False,
+    catalog_dir: str = "",
+) -> dict:
+    return finding_list_tool(
+        status=status,
+        include_superseded=include_superseded,
+        catalog_dir=catalog_dir,
+    )
+
+
+@cisternal.tool(registry="bathos-cli", name="supersede_edge_add", cli_group="supersede", cli_name="add")
+def supersede_edge_add_tool(
+    entity_type: str,
+    entity_id: str,
+    superseded_by_type: str,
+    superseded_by_id: str,
+    reason: str,
+    catalog_dir: str = "",
+) -> dict:
+    from bathos.supersession import add_supersession_edge
+
+    edge = add_supersession_edge(
+        entity_type=entity_type,
+        entity_id=entity_id,
+        superseded_by_type=superseded_by_type,
+        superseded_by_id=superseded_by_id,
+        reason=reason,
+        catalog_dir=catalog_dir or None,
+    )
+    return {
+        "ok": True,
+        "edge": edge.to_dict(),
+        "message": f"Recorded supersession edge {edge.id}",
+    }
+
+
+@cisternal.tool(registry="bathos", name="supersede_edge_add")
+@traced_tool
+@require_write_token
+async def mcp_supersede_edge_add_tool(
+    entity_type: str,
+    entity_id: str,
+    superseded_by_type: str,
+    superseded_by_id: str,
+    reason: str,
+    catalog_dir: str = "",
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token
+) -> dict:
+    return supersede_edge_add_tool(
+        entity_type=entity_type,
+        entity_id=entity_id,
+        superseded_by_type=superseded_by_type,
+        superseded_by_id=superseded_by_id,
+        reason=reason,
+        catalog_dir=catalog_dir,
+    )
+
+
+@cisternal.tool(registry="bathos-cli", name="session_start", cli_name="session-start")
+def session_start_tool(
+    byte_cap: int = 2048,
+    catalog_dir: str = "",
+) -> dict:
+    from bathos.session_start import generate_session_start_cache
+
+    res = generate_session_start_cache(catalog_dir=catalog_dir or None, byte_cap=byte_cap)
+    return {"ok": True, **res}
+
+
+@cisternal.tool(registry="bathos", name="session_start")
+@traced_tool
+async def mcp_session_start_tool(
+    byte_cap: int = 2048,
+    catalog_dir: str = "",
+) -> dict:
+    return session_start_tool(byte_cap=byte_cap, catalog_dir=catalog_dir)
+
+
 # ============================================================================
 # Read-back / query API (S1) — bathos.readback adapter
 #
@@ -4987,6 +5179,8 @@ def new_experiment_tool(
     force: bool = False,
     mode: str = "explore",
     workload: str | None = None,
+    question_slug: str = "",
+    reopen_reason: str = "",
 ) -> dict:
     """Scaffold an experiment script and its pre-registration sidecar.
 
@@ -5017,7 +5211,25 @@ def new_experiment_tool(
         ws = resolve_workspace().fs_root
 
     try:
-        scaffolded = scaffold_experiment(name, ws, force=force, mode=mode, workload=workload)
+        scaffolded = scaffold_experiment(
+            name,
+            ws,
+            force=force,
+            mode=mode,
+            workload=workload,
+            question_slug=question_slug,
+            reopen_reason=reopen_reason,
+        )
+    except FindingReopenReasonRequiredError as e:
+        return {
+            "ok": False,
+            "error": str(e),
+            "error_code": BathosErrorCode.FINDING_REOPEN_REASON_REQUIRED.value,
+            "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.FINDING_REOPEN_REASON_REQUIRED],
+            "question_slug": e.question_slug,
+            "settled_finding_id": e.settled_finding_id,
+            "settled_answer": e.settled_answer,
+        }
     except FileExistsError as e:
         return {
             "ok": False,
@@ -5075,6 +5287,8 @@ async def new_experiment(
     force: bool = False,
     mode: str = "explore",
     workload: str | None = None,
+    question_slug: str = "",
+    reopen_reason: str = "",
     token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
     """Scaffold an experiment script and its pre-registration sidecar.
@@ -5091,7 +5305,13 @@ async def new_experiment(
     Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841).
     """
     return new_experiment_tool(
-        name=name, workspace_root=workspace_root, force=force, mode=mode, workload=workload
+        name=name,
+        workspace_root=workspace_root,
+        force=force,
+        mode=mode,
+        workload=workload,
+        question_slug=question_slug,
+        reopen_reason=reopen_reason,
     )
 
 
@@ -6795,6 +7015,11 @@ _WIRED = cisternal.wire(
         "stepback_snooze",
         "defect_declare",
         "defect_list",
+        "finding_create",
+        "finding_get",
+        "finding_list",
+        "supersede_edge_add",
+        "session_start",
     ],
 )
 

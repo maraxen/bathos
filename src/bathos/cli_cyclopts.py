@@ -146,8 +146,17 @@ wire(
         # instrument group (P1 defect tools)
         "defect_declare",
         "defect_list",
+        # findings & supersession (spec 261106 Phase 2)
+        "finding_create",
+        "finding_get",
+        "finding_list",
+        "supersede_edge_add",
+        "session_start",
     ],
 )
+
+if "findings" in app._commands:
+    app.command(app._commands["findings"], name="finding")
 
 del _bathos_mcp
 

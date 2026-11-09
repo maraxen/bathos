@@ -311,14 +311,14 @@ CREATE TABLE IF NOT EXISTS acknowledgment_ledger (
 
 SUPERSESSION_EDGES_DDL = """
 CREATE TABLE IF NOT EXISTS supersession_edges (
-    from_type VARCHAR NOT NULL,
-    from_id VARCHAR NOT NULL,
-    to_type VARCHAR NOT NULL,
-    to_id VARCHAR NOT NULL,
-    state VARCHAR NOT NULL,
-    reason VARCHAR,
-    declared_at VARCHAR NOT NULL,
-    record_id VARCHAR PRIMARY KEY
+    id VARCHAR PRIMARY KEY,
+    entity_type VARCHAR NOT NULL,
+    entity_id VARCHAR NOT NULL,
+    superseded_by_type VARCHAR NOT NULL,
+    superseded_by_id VARCHAR NOT NULL,
+    reason VARCHAR NOT NULL,
+    declared_by VARCHAR NOT NULL,
+    declared_at VARCHAR NOT NULL
 )
 """
 
@@ -435,6 +435,13 @@ def init_index_schema(con: duckdb.DuckDBPyConnection) -> None:
     _add_missing_columns(con, "archived_items", ARCHIVED_ITEMS_DDL)
     con.execute(ACKNOWLEDGMENT_LEDGER_DDL)
     con.execute(SUPERSESSION_EDGES_DDL)
+    _add_missing_columns(con, "supersession_edges", SUPERSESSION_EDGES_DDL)
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_supersession_entity ON supersession_edges(entity_type, entity_id)"
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_supersession_successor ON supersession_edges(superseded_by_type, superseded_by_id)"
+    )
     con.execute(SUBMITS_DDL)
     con.execute(OUTPUT_COPIES_DDL)
 
@@ -478,8 +485,6 @@ def record_acknowledgment(
 
     def _write_legacy() -> None:
         db_path = cd / "bathos.db"
-        if not db_path.exists():
-            return
         con = duckdb.connect(str(db_path))
         try:
             con.execute(ACKNOWLEDGMENT_LEDGER_DDL)

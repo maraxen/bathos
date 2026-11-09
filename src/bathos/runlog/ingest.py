@@ -63,7 +63,7 @@ import pyarrow as pa
 from bathos.config import default_catalog_dir
 from bathos.runlog.fold_anchors import fold_anchor
 from bathos.runlog.fold_campaigns import fold_campaign, resolve_run_campaign_id
-from bathos.runlog.fold_edges import fold_edge
+from bathos.runlog.fold_edges import fold_edge, fold_supersession_edge
 from bathos.runlog.fold_ledgers import (
     fold_acknowledgment,
     fold_archived_item,
@@ -85,6 +85,7 @@ from bathos.runlog.index import (
     RUNS_COLUMNS,
     SIDECAR_ANCHORS_COLUMNS,
     SUBMITS_COLUMNS,
+    SUPERSESSION_EDGES_COLUMNS,
     TRUST_LEDGER_COLUMNS,
     index_db_path,
     init_index_schema,
@@ -141,6 +142,7 @@ _SUBMIT_KINDS = frozenset({"submit.recorded", "submit.imported"})
 _ACKNOWLEDGMENT_KINDS = frozenset(
     {"validity.acknowledged", "validity.estimand_override_recorded", "validity.acknowledged.imported"}
 )
+_SUPERSESSION_KINDS = frozenset({"supersession.declared", "supersession.imported"})
 # Output tiering (spec 261023, section 5.3): entity `[run_id, copy_id]`. Unlike the kinds above this one has NO
 # `*.imported` counterpart. It MUST be dispatched in `fold_roots_into`: that loop advances the watermark past a
 # kind it does not know, so an unwired kind would be stored in `events` and never folded.
@@ -979,6 +981,17 @@ def _refold_acknowledgment(
     _insert_row(con, "acknowledgment_ledger", ACKNOWLEDGMENT_LEDGER_COLUMNS, folded)
 
 
+def _refold_supersession_edge(
+    con: duckdb.DuckDBPyConnection, edge_id: str, lookup: _FoldLookup | None = None
+) -> None:
+    events = _resolve_lookup(con, lookup).events_for_entity_key([edge_id])
+    con.execute("DELETE FROM supersession_edges WHERE id = ?", [edge_id])
+    folded = fold_supersession_edge(events)
+    if folded is None:
+        return
+    _insert_row(con, "supersession_edges", SUPERSESSION_EDGES_COLUMNS, folded)
+
+
 def _refold_submit(
     con: duckdb.DuckDBPyConnection, submit_id: str, lookup: _FoldLookup | None = None
 ) -> None:
@@ -1146,6 +1159,7 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
     affected_archived_item_ids: set[str] = set()
     affected_ack_ids: set[str] = set()
     affected_submit_ids: set[str] = set()
+    affected_supersession_ids: set[str] = set()
     affected_output_copy_keys: set[tuple[str, str]] = set()
 
     con = duckdb.connect(str(db_path))
@@ -1229,6 +1243,8 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
                         affected_ack_ids.add(entity[0])
                     elif kind in _SUBMIT_KINDS and len(entity) == 1:
                         affected_submit_ids.add(entity[0])
+                    elif kind in _SUPERSESSION_KINDS and len(entity) == 1:
+                        affected_supersession_ids.add(entity[0])
                     elif kind in _OUTPUT_COPY_KINDS and len(entity) == 2:
                         affected_output_copy_keys.add((entity[0], entity[1]))
                 if new_offset != prev_offset:
@@ -1263,6 +1279,7 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
             + [[a] for a in affected_archived_item_ids]
             + [[a] for a in affected_ack_ids]
             + [[s] for s in affected_submit_ids]
+            + [[s] for s in affected_supersession_ids]
             + [list(k) for k in affected_output_copy_keys]
         )
 
@@ -1292,6 +1309,8 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
                 _refold_acknowledgment(con, record_id, lookup=lookup)
             for submit_id in affected_submit_ids:
                 _refold_submit(con, submit_id, lookup=lookup)
+            for s_id in affected_supersession_ids:
+                _refold_supersession_edge(con, s_id, lookup=lookup)
             for oc_run_id, oc_copy_id in affected_output_copy_keys:
                 _refold_output_copy(con, oc_run_id, oc_copy_id, lookup=lookup)
 

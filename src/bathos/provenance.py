@@ -24,6 +24,7 @@ def format_prov_json(
     *,
     run_parent_edges: Mapping[str, list[str]] | None = None,
     validity_map: Mapping[str, Any] | None = None,
+    supersession_map: Mapping[str, Any] | None = None,
 ) -> dict:
     """Format a lineage chain as W3C PROV-JSON 1.0.
 
@@ -49,6 +50,8 @@ def format_prov_json(
     activities = {}
     was_derived_from = {}
     agents = {}
+    was_invalidated_by = {}
+    was_revision_of = {}
 
     # Build entities (one per run), activities (one per execution),
     # and agents (one per unique agent mode)
@@ -114,9 +117,59 @@ def format_prov_json(
                 }
                 derived_idx += 1
 
+    # wasInvalidatedBy links for void/affected runs (AC-P2-11)
+    invalidation_idx = 0
+    for run in runs:
+        if validity_map and run.id in validity_map:
+            v = validity_map[run.id]
+            v_state = getattr(v, "state", str(v))
+            if v_state in ("void", "affected"):
+                run_key = f"bth:run_{run.id[:8]}"
+                invalidation_key = f"_:invalidation_{invalidation_idx}"
+                inv_entry: dict[str, Any] = {
+                    "prov:type": "prov:wasInvalidatedBy",
+                    "prov:entity": run_key,
+                    "bth:validity_state": v_state,
+                }
+                reason = getattr(v, "reason", None)
+                if reason:
+                    inv_entry["bth:reason"] = reason
+                was_invalidated_by[invalidation_key] = inv_entry
+                invalidation_idx += 1
+
+    # wasRevisionOf links for superseded entities (AC-P2-11)
+    revision_idx = 0
+    for run in runs:
+        older_key = f"bth:run_{run.id[:8]}"
+        replacement_id = None
+        if validity_map and run.id in validity_map:
+            v = validity_map[run.id]
+            if getattr(v, "state", None) == "superseded":
+                replacement_id = getattr(v, "replacement_id", None)
+        if supersession_map and run.id in supersession_map:
+            val = supersession_map[run.id]
+            if isinstance(val, str):
+                replacement_id = val
+            elif hasattr(val, "superseded_by_id"):
+                replacement_id = val.superseded_by_id
+            elif isinstance(val, dict) and "superseded_by_id" in val:
+                replacement_id = val["superseded_by_id"]
+
+        if replacement_id:
+            newer_key = f"bth:run_{replacement_id[:8]}"
+            revision_key = f"_:revision_{revision_idx}"
+            was_revision_of[revision_key] = {
+                "prov:type": "prov:wasRevisionOf",
+                "prov:newerEntity": newer_key,
+                "prov:olderEntity": older_key,
+            }
+            revision_idx += 1
+
     return {
         "entity": entities,
         "activity": activities,
         "agent": agents,
         "wasDerivedFrom": was_derived_from,
+        "wasInvalidatedBy": was_invalidated_by,
+        "wasRevisionOf": was_revision_of,
     }

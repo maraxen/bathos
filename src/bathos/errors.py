@@ -144,6 +144,13 @@ class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(
     RESULT_UNVERIFIABLE_UNACKNOWLEDGED = "result_unverifiable_unacknowledged"
     ESTIMAND_BOUNDARY_MIXED = "estimand_boundary_mixed"
 
+    # Findings & evidence tiers (spec 261106 Phase 2)
+    FINDING_REOPEN_REASON_REQUIRED = "finding_reopen_reason_required"
+    FINDING_SETTLED_EVIDENCE_INSUFFICIENT = "finding_settled_evidence_insufficient"
+    FINDING_NOT_FOUND = "finding_not_found"
+    SUPERSEDED_TARGET_NOT_FOUND = "superseded_target_not_found"
+    SPIKE_TIER_CANNOT_SETTLE = "spike_tier_cannot_settle"
+
 
 # Resolution hints registry: every BathosErrorCode member must have a non-empty entry
 RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
@@ -238,6 +245,11 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.RESULT_SUSPECT_UNACKNOWLEDGED: "Run was produced by an unverified toolchain matching a defect range or lacks a required predicate field. To proceed, pass --ack-suspect '<rationale>' (ack_suspect='<rationale>').",
     BathosErrorCode.RESULT_UNVERIFIABLE_UNACKNOWLEDGED: "Run provenance cannot be verified against repository lockfiles. To proceed, pass --ack-unverifiable '<rationale>' (ack_unverifiable='<rationale>').",
     BathosErrorCode.ESTIMAND_BOUNDARY_MIXED: "Attempted to combine runs across an estimand change boundary at a confirmatory gate. Results compute different quantities; separate by epoch or pass --allow-mixed-estimand '<rationale>'.",
+    BathosErrorCode.FINDING_REOPEN_REASON_REQUIRED: "The question is already settled. Provide --reopen-reason explaining why prior confirmatory evidence is being challenged.",
+    BathosErrorCode.FINDING_SETTLED_EVIDENCE_INSUFFICIENT: "Settling a finding requires at least one active confirmatory run. Elevate supporting evidence before setting status to settled.",
+    BathosErrorCode.FINDING_NOT_FOUND: "The specified finding slug or ID was not found in .bth/findings/. Query finding_list to inspect available findings.",
+    BathosErrorCode.SUPERSEDED_TARGET_NOT_FOUND: "The target entity specified in supersedes does not exist. Verify the predecessor ID or slug.",
+    BathosErrorCode.SPIKE_TIER_CANNOT_SETTLE: "Spike runs are preliminary probes and cannot support a settled finding. Elevate evidence via a confirmatory run.",
 }
 
 
@@ -398,6 +410,13 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     "ResultSuspectUnacknowledgedError": BathosErrorCode.RESULT_SUSPECT_UNACKNOWLEDGED,
     "ResultUnverifiableUnacknowledgedError": BathosErrorCode.RESULT_UNVERIFIABLE_UNACKNOWLEDGED,
     "EstimandBoundaryMixedError": BathosErrorCode.ESTIMAND_BOUNDARY_MIXED,
+    # Findings & evidence tiers (spec 261106 Phase 2)
+    "FindingError": BathosErrorCode.INVALID_PARAM,
+    "FindingReopenReasonRequiredError": BathosErrorCode.FINDING_REOPEN_REASON_REQUIRED,
+    "FindingSettledEvidenceInsufficientError": BathosErrorCode.FINDING_SETTLED_EVIDENCE_INSUFFICIENT,
+    "FindingNotFoundError": BathosErrorCode.FINDING_NOT_FOUND,
+    "SupersededTargetNotFoundError": BathosErrorCode.SUPERSEDED_TARGET_NOT_FOUND,
+    "SpikeTierCannotSettleError": BathosErrorCode.SPIKE_TIER_CANNOT_SETTLE,
 }
 
 
@@ -566,6 +585,88 @@ class EstimandBoundaryMixedError(BathosError):
         self.estimand_markers = estimand_markers or epochs or []
         self.epochs = self.estimand_markers
         self.conflicting_runs = conflicting_runs or {}
+
+
+# ── Findings & Supersession Domain Exceptions (spec 261106 P2) ────────────────
+
+
+class FindingError(BathosError):
+    """Base class for findings register errors."""
+
+
+class FindingReopenReasonRequiredError(FindingError):
+    """Attempted to create finding or experiment for settled question without reopen_reason."""
+
+    def __init__(
+        self,
+        message: str = "Settled question requires reopen_reason",
+        *,
+        question_slug: str | None = None,
+        settled_finding_id: str | None = None,
+        settled_answer: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.question_slug = question_slug
+        self.settled_finding_id = settled_finding_id
+        self.settled_answer = settled_answer
+
+
+class FindingSettledEvidenceInsufficientError(FindingError):
+    """Settling a finding requires at least one active confirmatory run."""
+
+    def __init__(
+        self,
+        message: str = "Settling a finding requires at least one active confirmatory run",
+        *,
+        finding_id: str | None = None,
+        supporting_runs: list[str] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.finding_id = finding_id
+        self.supporting_runs = supporting_runs or []
+
+
+class FindingNotFoundError(FindingError):
+    """Requested finding slug or ID does not exist."""
+
+    def __init__(
+        self,
+        message: str = "Finding not found",
+        *,
+        slug_or_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.slug_or_id = slug_or_id
+
+
+class SupersededTargetNotFoundError(BathosError):
+    """The target entity specified in supersedes does not exist."""
+
+    def __init__(
+        self,
+        message: str = "Superseded target entity does not exist",
+        *,
+        entity_type: str | None = None,
+        entity_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.entity_type = entity_type
+        self.entity_id = entity_id
+
+
+class SpikeTierCannotSettleError(FindingError):
+    """Spike runs are preliminary probes and cannot support a settled finding."""
+
+    def __init__(
+        self,
+        message: str = "Spike runs cannot support a settled finding",
+        *,
+        finding_id: str | None = None,
+        spike_runs: list[str] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.finding_id = finding_id
+        self.spike_runs = spike_runs or []
 
 
 HIDDEN_STATE_TO_ERROR_CODE: dict[str, BathosErrorCode] = {

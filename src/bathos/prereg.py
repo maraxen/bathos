@@ -577,6 +577,37 @@ def gate_check(
             ok=False, mode=mode, bundle=bundle, validation=validation, error_payload=payload
         )
 
+    # Reopen guard (Spec §4.4.C, AC-P2-05): if question_slug matches a settled finding, require reopen_reason
+    if getattr(sidecar, "question_slug", ""):
+        from bathos.findings import get_findings_dir, parse_finding_file, resolve_finding_status
+
+        fdir = get_findings_dir()
+        if fdir.exists():
+            for p in fdir.glob("*.toml"):
+                try:
+                    f = parse_finding_file(p)
+                    if f.question_slug == sidecar.question_slug:
+                        act_status = resolve_finding_status(f, catalog_dir=catalog_dir)
+                        if act_status == "settled" and not getattr(sidecar, "reopen_reason", "").strip():
+                            from bathos.errors import BathosErrorCode, RESOLUTION_HINTS
+
+                            payload = _gate_failure_payload(
+                                error_code=GateErrorCode.SIDECAR_INVALID,
+                                phase="pre_execution",
+                                errors=[
+                                    f"Question '{sidecar.question_slug}' is already settled: '{f.answer}'. "
+                                    "Provide reopen_reason in [experiment] to proceed."
+                                ],
+                                agent_mode=mode,
+                                taxonomy_label=BathosErrorCode.FINDING_REOPEN_REASON_REQUIRED.value,
+                            )
+                            payload.resolution_hint = RESOLUTION_HINTS[
+                                BathosErrorCode.FINDING_REOPEN_REASON_REQUIRED
+                            ]
+                            return GateResult(ok=False, mode=mode, bundle=bundle, error_payload=payload)
+                except Exception:
+                    pass
+
     # Stale-script gate: block in BOTH collaborative and autonomous mode, unlike the
     # autonomous-only checks below -- a human re-running a script with a known-wrong
     # default is exactly as dangerous as an agent doing so. Bypassable only via the
