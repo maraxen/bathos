@@ -18,6 +18,7 @@ from bathos.bearings.ac9 import (
     decoy_invalid,
     decoy_mapped_share,
     degenerate_mappings,
+    meets_marginal,
     meets_pass,
     reading_gold,
 )
@@ -364,6 +365,62 @@ def test_a_run_whose_sidecar_path_names_a_charter_id_is_withheld(planted):
     _no_slug_in_reader(out)
 
 
+def test_a_withheld_runs_sidecar_label_makes_its_purpose_indeterminate(planted):
+    # Round 2 (261110): a run withheld by its sidecar path used to leave its purpose silent.
+    sha = commit_files(
+        planted["repo"],
+        {
+            "scripts/gamma_aim_rerun.bth.toml": _sidecar(
+                '[charter]\npurpose = "gamma-aim"\n', "rerun"
+            )
+        },
+    )
+    insert_runs(
+        planted,
+        [
+            {
+                "id": "000000a5aaaaaaaa",
+                "project_slug": "pkt",
+                "timestamp": DATE,
+                "git_hash": sha,
+                "sidecar_path": "scripts/gamma_aim_rerun.bth.toml",
+                "command": "python rerun",
+                "status": "completed",
+            }
+        ],
+    )
+    out, _ = _packet(planted)
+    _no_slug_in_reader(out)
+    key = answer_key(planted["repo"], out, planted["charter"])
+    assert "gamma-aim" in key["indeterminate"] and key["silent"] == ["delta-aim"]
+
+
+def test_a_run_withheld_by_its_command_still_has_its_sidecar_label_read(planted):
+    sha = commit_files(
+        planted["repo"],
+        {"scripts/plainname.bth.toml": _sidecar('[charter]\npurpose = "delta-aim"\n', "plain")},
+    )
+    insert_runs(
+        planted,
+        [
+            {
+                "id": "000000a6aaaaaaaa",
+                "project_slug": "pkt",
+                "timestamp": DATE,
+                "git_hash": sha,
+                "sidecar_path": "scripts/plainname.bth.toml",
+                "command": "python plainname --aim delta-aim",
+                "status": "completed",
+            }
+        ],
+    )
+    out, _ = _packet(planted)
+    assert excluded(out)["run:000000a6aaaaaaaa"] == "names_charter_id"
+    assert "000000a6aaaaaaaa" not in (out / "reader" / "runs.jsonl").read_text()
+    key = answer_key(planted["repo"], out, planted["charter"])
+    assert "delta-aim" in key["indeterminate"] and key["silent"] == ["gamma-aim"]
+
+
 def test_a_withheld_sidecar_with_a_malformed_label_stops_the_answer_key(planted):
     _add_run(planted, "arr", '[[charter]]\npurpose = "gamma-aim"\n', "000000a3aaaaaaaa")
     out, _ = _packet(planted)
@@ -383,6 +440,23 @@ def test_one_path_labelled_differently_at_two_commits_is_indeterminate(planted):
     key = answer_key(planted["repo"], out, planted["charter"])
     assert {"alpha-aim", "delta-aim"} <= set(key["indeterminate"])
     assert "alpha-aim" not in key["present"] and "delta-aim" not in key["silent"]
+
+
+def test_a_disagreeing_path_does_not_cancel_firm_support_from_another_path(planted):
+    # Round 2 (261110): disagreement is per path.
+    _add_run(
+        planted,
+        "promo",
+        _sidecar('[charter]\npurpose = "gamma-aim"\n', "promoter p7 again"),
+        "000000a7aaaaaaaa",
+    )
+    _add_run(
+        planted, "promo2", _sidecar('[charter]\npurpose = "beta-aim"\n', "p8"), "000000a8aaaaaaaa"
+    )
+    out, _ = _packet(planted)
+    key = answer_key(planted["repo"], out, planted["charter"])
+    assert "beta-aim" in key["present"]  # firm on promo2, though promo disagrees
+    assert "gamma-aim" in key["indeterminate"]
 
 
 # ── review 261110: scoring ─────────────────────────────────────────────────────────────────────────────────────
@@ -429,6 +503,20 @@ def test_a_sparse_mapping_with_one_correct_target_does_not_meet_pass(planted):
     assert m["gold_agreement"] == 1.0  # precision alone would pass ...
     assert m["false_silent"] == 0.5  # ... false-silent catches it
     assert not meets_pass(m)
+
+
+def test_marginal_is_every_metric_at_least_0_6_with_false_silent_read_as_its_complement():
+    base = {
+        "silent_recall": 0.6,
+        "false_silent": 0.4,
+        "off_charter_unmapped": 0.6,
+        "revived_flagged": 0.6,
+        "gold_agreement": 0.6,
+    }
+    assert meets_marginal(base) and not meets_pass(base)
+    assert not meets_marginal(base | {"false_silent": 0.5})
+    assert not meets_marginal(base | {"gold_agreement": 0.59})
+    assert not meets_marginal(base | {"revived_flagged": None})
 
 
 def test_degenerate_mappings_survive_a_charter_with_no_live_purpose():

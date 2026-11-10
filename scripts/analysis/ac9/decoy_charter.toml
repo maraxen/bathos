@@ -11,7 +11,11 @@
 # should still leave it unmapped (the target and the design objective differ), but it is the purpose most likely to
 # push a sound run over 20%.
 # Draft by the assistant 261110 for owner confirmation; nanobody has no confirmed charter of its own, so this is not
-# its charter and has no standing there. Same shape as the tev_design draft: 6 live, 2 retired.
+# its charter and has no standing there. 6 live, 2 retired, the shape the owner's T7 design names (the tev_design
+# draft itself has 7 live, 2 retired).
+# Round 2 (261110): every purpose now names a nanobody-only object, so no purpose reads as a generic method that
+# tev_design's active-learning or specificity work could match. `cross-reactivity-balance` remains the second
+# purpose at risk (tev_design also broadens specificity with second-shell edits, but of a protease's substrates).
 mandate = "Decide which residues of a therapeutic nanobody to engineer from allosteric networks learned from MD, then realise those edits as multistate sequence design against a family of related target proteins."
 
 [purpose.entropy-network-site-ranking]
@@ -19,11 +23,11 @@ text = "Turn ciMIST entropy-tree networks learned from nanobody MD into a ranked
 state = "live"
 
 [purpose.dense-mi-graph-metrics]
-text = "Compute graph metrics (betweenness, eigenvector centrality, communities) on the dense mutual-information matrix as alternative site selectors."
+text = "Compute graph metrics (betweenness, eigenvector centrality, communities) on the ciMIST dense mutual-information matrix of nanobody MD as alternative selectors of residues to engineer."
 state = "live"
 
 [purpose.kinetic-coupling-selector]
-text = "Use timing-correlation coupling from trajectory state sequences as an allostery signal independent of the entropy tree."
+text = "Use timing-correlation coupling from nanobody trajectory state sequences as an allostery signal independent of the ciMIST entropy tree."
 state = "live"
 
 [purpose.apo-holo-entropy-contrast]
@@ -39,11 +43,11 @@ text = "Broaden binding across the 3FTx family through second-shell, non-paratop
 state = "live"
 
 [purpose.bayesian-glm-reuse]
-text = "Reuse an existing Bayesian GLM that predicts allosteric mutation sites."
+text = "Reuse a Bayesian GLM from the ciMIST PDZ work to predict allosteric engineering sites on the nanobody."
 state = "retired"
 retired_reason = "No such model exists in the related repos; the only Bayesian code is entropy and mutual-information estimation."
 
 [purpose.mist-degree-hubs]
-text = "Rank engineering sites by MIST tree degree alone (MI hubs)."
+text = "Rank nanobody engineering sites by ciMIST MIST tree degree alone (MI hubs)."
 state = "retired"
 retired_reason = "Tree degree is not a validated graph metric; superseded by dense-MI graph metrics and kinetic coupling."

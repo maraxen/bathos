@@ -388,6 +388,7 @@ def build_packet(
     sidecar_unresolved: list[dict[str, str]] = []
     labels_stripped: list[str] = []
     withheld_runs: set[str] = set()
+    withheld_run_sidecars: set[str] = set()
     if catalog_readable(cat_dir):
         con = connect_read(cat_dir)
         try:
@@ -418,15 +419,17 @@ def build_packet(
             if reachable_only and not (gh and _reachable(repo, str(gh), ref_sha, reach_cache)):
                 exclusions.append({"path": f"run:{rid}", "reason": "unreachable_from_ref"})
                 continue
+            # A run withheld for what it says still has its sidecar resolved below, so the scorer can read that
+            # sidecar's label and treat the purpose as indeterminate rather than silent (review round 2, 261110).
             if any(isinstance(v, str) and _run_quotes(v, needles) for v in rec.values()):
                 exclusions.append({"path": f"run:{rid}", "reason": "quotes_charter"})
-                continue
-            if any(
+                withheld_runs.add(rid)
+            elif any(
                 isinstance(v, str) and k != "sidecar_path" and _names_id(v, id_pats)
                 for k, v in rec.items()
             ):
                 exclusions.append({"path": f"run:{rid}", "reason": "names_charter_id"})
-                continue
+                withheld_runs.add(rid)
             for field in ("command", "tags"):
                 if isinstance(rec.get(field), str):
                     rec[field] = _scrub_abs_paths(rec[field])
@@ -468,13 +471,17 @@ def build_packet(
             sidecar_unresolved.append({"run": str(rec["id"]), "path": str(recorded)})
             continue
         rev, rel, proc = found
-        if _names_id(rel, id_pats):
+        blob = _git(repo, "rev-parse", f"{rev}:{rel}").stdout.decode().strip()
+        rid = str(rec["id"])
+        if rid not in withheld_runs and _names_id(rel, id_pats):
             # The resolved path is what would reach the reader; a path naming a charter id withholds the run.
-            exclusions.append({"path": f"run:{rec['id']}", "reason": "names_charter_id"})
-            withheld_runs.add(str(rec["id"]))
+            exclusions.append({"path": f"run:{rid}", "reason": "names_charter_id"})
+            withheld_runs.add(rid)
+        if rid in withheld_runs:
+            # Owner-side record only: the scorer reads this sidecar's label; nothing of it reaches the reader.
+            withheld_run_sidecars.add(f"sidecar:{rel}@{blob}")
             continue
         rec["sidecar_path"] = rel
-        blob = _git(repo, "rev-parse", f"{rev}:{rel}").stdout.decode().strip()
         if (rel, blob) in sidecars or any(s["path"] == f"sidecar:{rel}@{blob}" for s in exclusions):
             continue
         try:
@@ -583,6 +590,8 @@ def build_packet(
         "short_needles_skipped": sorted(short_skipped, key=lambda d: d["source"]),
         # Charter ids too short to token-match safely (review 261110); records naming them are not filtered.
         "short_ids_skipped": short_ids,
+        # Sidecars of runs withheld from the reader, so the scorer can read their labels (owner-side only).
+        "withheld_run_sidecars": sorted(withheld_run_sidecars),
         "sidecar_unresolved": sorted(sidecar_unresolved, key=lambda d: (d["run"], d["path"])),
         # Sidecars whose [charter] purpose label was removed before they entered reader/ (owner-side only).
         "labels_stripped": sorted(labels_stripped),

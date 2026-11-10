@@ -44,6 +44,8 @@ __all__ = [
     "decoy_invalid",
     "decoy_mapped_share",
     "degenerate_mappings",
+    "MARGINAL",
+    "meets_marginal",
     "meets_pass",
     "packet_labels",
     "reading_gold",
@@ -137,6 +139,7 @@ def answer_key(
     for path, _, slugs in _shown_blob_labels(repo_p, pkt):
         by_path.setdefault(path, []).append(set(slugs))
     shown: set[str] = set()
+    firm: set[str] = set()
     disagree: set[str] = set()
     labels: dict[str, set[str]] = {}
     for path, all_sets in by_path.items():
@@ -147,21 +150,27 @@ def answer_key(
         union = set().union(*sets)
         common = set.intersection(*sets)
         shown |= union
+        # Per path: a slug one path labels consistently is firm, whatever another path's history says.
+        firm |= common
         disagree |= union - common
-        if union:
-            labels.setdefault(path, set()).update(union)
+        labels.setdefault(path, set()).update(union)
 
-    # Sidecars the packet withheld: their labels are still the truth about the work, but readers could not see it.
+    # Sidecars the packet withheld (excluded themselves, or belonging to a withheld run): their labels are still
+    # the truth about the work, but readers could not see it.
     withheld: set[str] = set()
     n_withheld_sidecars = 0
     pats = {pid: id_token_pattern(pid) for pid in charter_purposes}
+    candidates: dict[str, str | None] = {}
     for exc in manifest.get("exclusions", []):
         path = str(exc.get("path", ""))
-        if not path.startswith("sidecar:") or "@" not in path:
-            continue
+        if path.startswith("sidecar:") and "@" in path:
+            candidates[path] = str(exc.get("reason"))
+    for path in manifest.get("withheld_run_sidecars", []):
+        candidates.setdefault(str(path), None)
+    for path, reason in sorted(candidates.items()):
         rel, _, blob = path[len("sidecar:") :].rpartition("@")
         text = _blob_text(repo_p, blob)
-        slugs = [] if exc.get("reason") == "not_text" else (_label_of(text, path) or [])
+        slugs = [] if reason == "not_text" else (_label_of(text, path) or [])
         named = {pid for pid, p in pats.items() if p.search(text)}
         if slugs or named:
             n_withheld_sidecars += 1
@@ -173,7 +182,6 @@ def answer_key(
     if unknown:
         raise Ac9LabelError(f"label(s) {unknown} name no charter purpose")
 
-    firm = shown - disagree
     indeterminate = (withheld | disagree) - firm - {OFF_CHARTER}
     live = {p for p, v in charter_purposes.items() if v.get("state") == "live"}
     retired = {p for p, v in charter_purposes.items() if v.get("state") == "retired"}
@@ -189,7 +197,9 @@ def answer_key(
         "off_charter_sidecars": sorted(p for p, s in labels.items() if OFF_CHARTER in s),
         "budget_limited": _packet_budget_dropped(manifest),
         "n_withheld_sidecars": n_withheld_sidecars,
-        # Runs the packet excluded for any reason; their labels are not read here. The AC-9 sidecar bounds the share.
+        # Runs the packet excluded for any reason. Those withheld for what they say have their sidecar labels read
+        # (withheld_run_sidecars); the rest (unreachable, not terminal) are outside the window. The AC-9 sidecar bounds
+        # the share.
         "n_withheld_runs": n_withheld_runs,
         "labels": {path: sorted(s) for path, s in sorted(labels.items())},
     }
@@ -300,6 +310,26 @@ def meets_pass(metrics: dict[str, Any]) -> bool:
         if name == "false_silent" and value > bound:
             return False
         if name != "false_silent" and value < bound:
+            return False
+    return True
+
+
+MARGINAL = 0.6  # T7: `marginal` when every metric is at least 0.6
+
+
+def meets_marginal(metrics: dict[str, Any]) -> bool:
+    """T7's ``marginal`` band: every metric scorable and at least 0.6.
+
+    False-silent is an error rate (lower is better), so "at least 0.6" is read as its complement: false-silent at most
+    0.4. This reading is the implementer's (261110) and is recorded in the spec for the owner to confirm.
+    """
+    for name in PASS:
+        value = metrics[name]
+        if value is None:
+            return False
+        if name == "false_silent" and value > 1 - MARGINAL:
+            return False
+        if name != "false_silent" and value < MARGINAL:
             return False
     return True
 
