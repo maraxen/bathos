@@ -22,6 +22,8 @@ from bathos.bearings.ac9 import (
     meets_pass,
     reading_gold,
 )
+from bathos.bearings.packet import _reader_names_id
+from bathos.bearings.purpose_label import id_patterns, id_token_pattern, ids_named
 from bathos.bearings.reading import _existing_reading, compare_reading, record_reading
 from bathos.charter import Purpose, confirm, parse_charter
 from tests.test_bearings_packet import (  # noqa: F401  (env is a fixture)
@@ -534,6 +536,102 @@ def test_the_decoy_mapped_share_counts_any_target_retired_included(planted):
     none = _compare(planted, rid, {rp: None for rp in ORACLE}, "decoy_none")
     assert decoy_mapped_share(none) == 0.0
     assert not decoy_invalid(0.2)
+
+
+# ── review round 2 (Cursor, 261110) ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        "beta‑aim",  # non-breaking hyphen, common in model output
+        "beta‐aim",
+        "BETA–AIM",  # en dash, upper case
+        "beta-\naim",  # broken across a line
+        "beta-​aim",  # zero-width space
+        "beta%2Daim",
+    ],
+    ids=["nb-hyphen", "hyphen", "en-dash", "line-break", "zero-width", "url-encoded"],
+)
+def test_unicode_and_encoded_spellings_of_an_id_are_withheld(planted, spelling):
+    doc = ".praxia/docs/specs/261101_plan.md"
+    commit_files(planted["repo"], {doc: f"# Plan\n\nRelates to {spelling}.\n"})
+    sha = commit_files(planted["repo"], {"n.txt": "n\n"}, msg=f"tune {spelling} knobs")
+    out, _ = _packet(planted)
+    assert excluded(out)[doc] == "names_charter_id"
+    if (
+        "\n" not in spelling
+    ):  # git's subject is the first line only; the rest never reaches the packet
+        assert excluded(out)[f"git:{sha}"] == "names_charter_id"
+    _no_slug_in_reader(out)
+
+
+def test_a_project_slug_naming_a_charter_id_is_refused(planted):
+    with pytest.raises(ValueError, match="names a charter purpose id"):
+        build(planted, name="slugpkt", project="alpha-aim")
+
+
+def test_one_path_shown_under_one_label_and_withheld_under_another_is_indeterminate(planted):
+    _add_run(
+        planted,
+        "grow",
+        _sidecar('[charter]\npurpose = "delta-aim"\n', "delta-aim follow-up"),
+        "000000a9aaaaaaaa",
+    )
+    out, _ = _packet(planted)
+    key = answer_key(planted["repo"], out, planted["charter"])
+    assert {"alpha-aim", "delta-aim"} <= set(key["indeterminate"])
+    assert "alpha-aim" not in key["present"]
+
+
+def test_a_labelled_sidecar_that_is_not_utf8_keeps_its_label(planted):
+    repo = planted["repo"]
+    (repo / "scripts").mkdir(exist_ok=True)
+    (repo / "scripts" / "bin.bth.toml").write_bytes(
+        b'[charter]\npurpose = "gamma-aim"\n\n[experiment]\nhypothesis = "x"\n# \xff\n'
+    )
+    sha = commit_files(repo, {"m.txt": "m\n"})
+    insert_runs(
+        planted,
+        [
+            {
+                "id": "000000aaaaaaaaaa",
+                "project_slug": "pkt",
+                "timestamp": DATE,
+                "git_hash": sha,
+                "sidecar_path": "scripts/bin.bth.toml",
+                "command": "python bin",
+                "status": "completed",
+            }
+        ],
+    )
+    out, _ = _packet(planted)
+    assert _reasons(out, "sidecar:scripts/bin.bth.toml") == {"not_text"}
+    key = answer_key(repo, out, planted["charter"])
+    assert "gamma-aim" in key["indeterminate"]
+    assert key["labels"]["scripts/bin.bth.toml"] == ["gamma-aim"]
+
+
+def test_one_word_and_short_ids_are_not_token_matched():
+    pats, unmatched = id_patterns(["size", "mpnn", "P1", "mpnn-design"])
+    assert [pid for pid, _ in pats] == ["mpnn-design", OFF_CHARTER]
+    assert unmatched == ["P1", "mpnn", "size"]
+    assert not ids_named("The sample size is 4; we ran MPNN.", pats)
+
+
+def test_an_id_stored_with_an_underscore_matches_its_hyphen_spelling():
+    assert id_token_pattern("beta_aim").search("beta-aim")
+
+
+def test_the_last_check_finds_an_id_anywhere_under_reader(tmp_path):
+    reader = tmp_path / "reader"
+    (reader / "docs").mkdir(parents=True)
+    (reader / "docs" / "ok.md").write_text("nothing here\n")
+    (reader / "runs.jsonl").write_text('{"command": "python x --aim beta\\u2011aim"}\n')
+    pats, _ = id_patterns(["beta-aim"])
+    assert _reader_names_id(reader, pats) == []  # a JSON escape is not the character itself
+    (reader / "docs" / "leak.md").write_text("see beta‑aim\n")
+    assert _reader_names_id(reader, pats) == ["docs/leak.md"]
 
 
 def test_the_decoy_charter_shares_no_purpose_with_the_tev_design_draft():

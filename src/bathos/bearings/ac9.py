@@ -29,7 +29,8 @@ from bathos.bearings.purpose_label import (
     LABEL_TABLE,
     OFF_CHARTER,
     PurposeLabelError,
-    id_token_pattern,
+    id_patterns,
+    ids_named,
     read_purpose_label,
 )
 from bathos.bearings.reading import RESOLVED, _PacketView, resolve_citation
@@ -135,48 +136,51 @@ def answer_key(
     repo_p, pkt = Path(repo), Path(packet_dir)
     manifest = _manifest(pkt)
 
-    by_path: dict[str, list[set[str]]] = {}
-    for path, _, slugs in _shown_blob_labels(repo_p, pkt):
-        by_path.setdefault(path, []).append(set(slugs))
+    # Every labelled blob per path, shown or withheld: (slugs, shown?).
+    per_path: dict[str, list[tuple[set[str], bool]]] = {}
     shown: set[str] = set()
-    firm: set[str] = set()
-    disagree: set[str] = set()
-    labels: dict[str, set[str]] = {}
-    for path, all_sets in by_path.items():
-        # Compare labelled blobs only: a label added to a later version of a sidecar is not a disagreement.
-        sets = [s for s in all_sets if s]
-        if not sets:
-            continue
-        union = set().union(*sets)
-        common = set.intersection(*sets)
-        shown |= union
-        # Per path: a slug one path labels consistently is firm, whatever another path's history says.
-        firm |= common
-        disagree |= union - common
-        labels.setdefault(path, set()).update(union)
+    for path, _, slugs in _shown_blob_labels(repo_p, pkt):
+        if slugs:
+            per_path.setdefault(path, []).append((set(slugs), True))
+            shown |= set(slugs)
 
     # Sidecars the packet withheld (excluded themselves, or belonging to a withheld run): their labels are still
-    # the truth about the work, but readers could not see it.
+    # the truth about the work, but readers could not see it. The same id set and matcher as the packet builder.
     withheld: set[str] = set()
     n_withheld_sidecars = 0
-    pats = {pid: id_token_pattern(pid) for pid in charter_purposes}
-    candidates: dict[str, str | None] = {}
+    pats, _ = id_patterns(charter_purposes)
+    candidates: set[str] = set()
     for exc in manifest.get("exclusions", []):
         path = str(exc.get("path", ""))
         if path.startswith("sidecar:") and "@" in path:
-            candidates[path] = str(exc.get("reason"))
-    for path in manifest.get("withheld_run_sidecars", []):
-        candidates.setdefault(str(path), None)
-    for path, reason in sorted(candidates.items()):
+            candidates.add(path)
+    candidates |= {str(p) for p in manifest.get("withheld_run_sidecars", [])}
+    for path in sorted(candidates):
         rel, _, blob = path[len("sidecar:") :].rpartition("@")
-        text = _blob_text(repo_p, blob)
-        slugs = [] if reason == "not_text" else (_label_of(text, path) or [])
-        named = {pid for pid, p in pats.items() if p.search(text)}
+        text = _blob_text(
+            repo_p, blob
+        )  # undecodable bytes are replaced; a label on the readable lines survives
+        slugs = set(_label_of(text, path) or [])
+        named = ids_named(text, pats) & set(charter_purposes)
         if slugs or named:
             n_withheld_sidecars += 1
-        withheld |= set(slugs) | named
+        withheld |= slugs | named
         if slugs:
-            labels.setdefault(rel, set()).update(slugs)
+            per_path.setdefault(rel, []).append((slugs, False))
+
+    firm: set[str] = set()
+    disagree: set[str] = set()
+    labels: dict[str, set[str]] = {}
+    for path, entries in per_path.items():
+        # Labelled blobs only: a label added to a later version of a sidecar is not a disagreement. Shown and
+        # withheld blobs of one path are compared together; firm support needs a shown blob.
+        sets = [s for s, _ in entries]
+        union = set().union(*sets)
+        common = set.intersection(*sets)
+        if any(is_shown for _, is_shown in entries):
+            firm |= common
+        disagree |= union - common
+        labels.setdefault(path, set()).update(union)
 
     unknown = sorted((shown | withheld) - set(charter_purposes) - {OFF_CHARTER})
     if unknown:

@@ -16,24 +16,64 @@ from __future__ import annotations
 
 import re
 import tomllib
+import unicodedata
+from collections.abc import Iterable
 from typing import Any
 
 PURPOSE_SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 LABEL_TABLE = "charter"
 # Reserved label value: real work that serves no charter purpose. It stands alone in a label.
 OFF_CHARTER = "off-charter"
+# Ids matched as leak needles must be at least this long AND contain a separator: a one-word id (`size`, `mpnn`)
+# would match ordinary prose and withhold most of a record (review round 2, 261110).
+MIN_ID_CHARS = 4
+
+_DASHES = dict.fromkeys(map(ord, "‐‑‒–—―−﹘﹣－"), "-")
+_ENCODED_HYPHEN_RE = re.compile(r"%2d|\\u002d|&#45;|&#x2d;", re.IGNORECASE)
+_BROKEN_HYPHEN_RE = re.compile(r"-[ \t]*\r?\n[ \t>#*]*")
+
+
+def fold_for_ids(text: str) -> str:
+    """Normalise text before id matching: unicode dashes to ``-``, invisible format characters (zero-width, soft
+    hyphen) removed, encoded hyphens decoded, and a hyphen broken across lines joined (review round 2, 261110)."""
+    t = unicodedata.normalize("NFKC", text)
+    t = "".join(ch for ch in t if unicodedata.category(ch) != "Cf")
+    t = t.translate(_DASHES)
+    t = _ENCODED_HYPHEN_RE.sub("-", t)
+    return _BROKEN_HYPHEN_RE.sub("-", t)
 
 
 def id_token_pattern(pid: str) -> re.Pattern[str]:
     """Whole-token, case-insensitive match for a charter id; hyphen and underscore spellings both count.
 
     Charter ids are readable slugs, so they are ordinary words that can appear anywhere in a record; the packet
-    builder uses this to keep any record naming one away from readers.
+    builder uses this to keep any record naming one away from readers. Match against ``fold_for_ids(text)``.
     """
     # Only letters and digits bound a token, so `beta_aim_rerun` and `pre-beta-aim` name `beta-aim`, while
-    # `xbeta-aim` and `beta-aims` do not.
-    body = re.escape(pid).replace(r"\-", "[-_]")
+    # `xbeta-aim` and `beta-aims` do not. Either separator in the stored id matches either in the text.
+    body = re.sub(r"\\-|_", "[-_]", re.escape(pid))
     return re.compile(rf"(?<![A-Za-z0-9]){body}(?![A-Za-z0-9])", re.IGNORECASE)
+
+
+def id_patterns(ids: Iterable[str]) -> tuple[list[tuple[str, re.Pattern[str]]], list[str]]:
+    """Patterns for the ids that can be matched safely, plus ``off-charter``; and the ids left unmatched.
+
+    The packet builder and the AC-9 scorer both use this, so they agree on which ids are needles.
+    """
+    pats: list[tuple[str, re.Pattern[str]]] = []
+    unmatched: list[str] = []
+    for pid in sorted(set(ids) | {OFF_CHARTER}):
+        if len(pid) < MIN_ID_CHARS or not re.search(r"[A-Za-z0-9][-_][A-Za-z0-9]", pid):
+            unmatched.append(pid)
+        else:
+            pats.append((pid, id_token_pattern(pid)))
+    return pats, unmatched
+
+
+def ids_named(text: str, pats: list[tuple[str, re.Pattern[str]]]) -> set[str]:
+    """The ids from ``pats`` that ``text`` names, after ``fold_for_ids``."""
+    folded = fold_for_ids(text)
+    return {pid for pid, p in pats if p.search(folded)}
 
 
 _HEADER_RE = re.compile(r"^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(?:#.*)?$")

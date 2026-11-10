@@ -22,9 +22,9 @@ from pathlib import Path
 from typing import Any
 
 from bathos.bearings.purpose_label import (
-    OFF_CHARTER,
     PurposeLabelError,
-    id_token_pattern,
+    id_patterns,
+    ids_named,
     strip_purpose_label,
 )
 from bathos.errors import BearingsPacketInvalidError, BearingsPacketMismatchError
@@ -32,7 +32,6 @@ from bathos.errors import BearingsPacketInvalidError, BearingsPacketMismatchErro
 logger = logging.getLogger(__name__)
 
 MIN_NEEDLE_CHARS = 12
-MIN_ID_CHARS = 4
 HARNESS_BASENAMES = frozenset({"CLAUDE.md", "AGENTS.md", "GEMINI.md"})
 ROOT_HARNESS_PATHS = ("CLAUDE.md", "AGENTS.md", "GEMINI.md")
 CHARTER_PATHS = (".bth/charter.toml", ".bth/charter.draft.toml")
@@ -202,24 +201,24 @@ def _quotes(text: str, needles: list[tuple[str, str]]) -> bool:
     return any(n in hay for _, n in needles)
 
 
-def _id_patterns(ids: set[str]) -> tuple[list[re.Pattern[str]], list[str]]:
-    """Whole-token patterns for every charter id and the reserved ``off-charter`` label.
-
-    Ids shorter than ``MIN_ID_CHARS`` (opaque ids such as ``P1``) would match ordinary text, so they are skipped
-    and listed in the manifest, the way short purpose texts are (review 261110).
-    """
-    pats: list[re.Pattern[str]] = []
-    short: list[str] = []
-    for pid in sorted(ids | {OFF_CHARTER}):
-        if len(pid) < MIN_ID_CHARS:
-            short.append(pid)
-        else:
-            pats.append(id_token_pattern(pid))
-    return pats, short
+def _names_id(text: str, pats: list[tuple[str, re.Pattern[str]]]) -> bool:
+    """Whether ``text`` names a charter id or ``off-charter`` (whole token, after unicode folding)."""
+    return bool(ids_named(text, pats))
 
 
-def _names_id(text: str, pats: list[re.Pattern[str]]) -> bool:
-    return any(p.search(text) for p in pats)
+def _reader_names_id(reader: Path, pats: list[tuple[str, re.Pattern[str]]]) -> list[str]:
+    """Last check over every byte written under ``reader/``: the reader paths that name an id. Must be empty."""
+    hits = []
+    for p in sorted(reader.rglob("*")):
+        if p.is_file():
+            rel = p.relative_to(reader).as_posix()
+            if _names_id(rel, pats) or _names_id(p.read_bytes().decode("utf-8", "replace"), pats):
+                hits.append(rel)
+    return hits
+
+
+class PacketLeakError(RuntimeError):
+    """A charter id reached ``reader/`` despite the filters; the packet is refused rather than shipped."""
 
 
 def _scrub_abs_paths(text: str) -> str:
@@ -340,7 +339,10 @@ def build_packet(
     needles, short_skipped, charter_ids = _needles(
         root, repo, ref_sha, slug, charter_files, cat_dir
     )
-    id_pats, short_ids = _id_patterns(charter_ids)
+    id_pats, ids_not_matched = id_patterns(charter_ids)
+    if _names_id(slug, id_pats):
+        # The project slug is written into reader/index.json; it cannot be withheld, so refuse.
+        raise ValueError(f"project slug {slug!r} names a charter purpose id; rename the purpose")
 
     exclusions: list[dict[str, str]] = []
 
@@ -575,6 +577,9 @@ def build_packet(
     if titles is not None:
         _write(reader / "backlog_titles.txt", "".join(t + "\n" for t in titles).encode("utf-8"))
 
+    leaked = _reader_names_id(reader, id_pats)
+    if leaked:
+        raise PacketLeakError(f"charter id reached reader/ in {leaked}; packet refused")
     packet_sha = _packet_hash(reader)
     exclusions.sort(key=lambda e: (e["path"], e["reason"]))
     manifest = {
@@ -588,8 +593,9 @@ def build_packet(
         "backlog": "provided" if titles is not None else "not_provided",
         "exclusions": exclusions,
         "short_needles_skipped": sorted(short_skipped, key=lambda d: d["source"]),
-        # Charter ids too short to token-match safely (review 261110); records naming them are not filtered.
-        "short_ids_skipped": short_ids,
+        # Charter ids not token-matched (under 4 characters or one word, review 261110); records naming them are not
+        # filtered by id, only by purpose text.
+        "ids_not_matched": ids_not_matched,
         # Sidecars of runs withheld from the reader, so the scorer can read their labels (owner-side only).
         "withheld_run_sidecars": sorted(withheld_run_sidecars),
         "sidecar_unresolved": sorted(sidecar_unresolved, key=lambda d: (d["run"], d["path"])),
