@@ -693,15 +693,15 @@ def oracle_reading(
     for i, slug in enumerate(sorted(groups, key=_seeded)):
         rs = sorted(groups[slug], key=lambda r: _seeded(str(r["id"])))[:5]
         hyps: list[str] = []
-        for path in dict.fromkeys(r["sidecar_path"] for r in rs):
+        # Only sidecars the packet shows can be read or cited; a withheld sidecar's run is still cited.
+        shown_paths = [p for p in dict.fromkeys(r["sidecar_path"] for r in rs) if p in blob_of]
+        for path in shown_paths:
             text = (reader / "sidecars" / blob_of[path] / path).read_text(encoding="utf-8")
             with contextlib.suppress(tomllib.TOMLDecodeError):
                 h = str(tomllib.loads(text).get("experiment", {}).get("hypothesis", "")).strip()
                 if h and h not in hyps:
                     hyps.append(h[:300])
-        cits = [f"run:{r['id']}" for r in rs] + [
-            f"sidecar:{p}" for p in dict.fromkeys(r["sidecar_path"] for r in rs)
-        ]
+        cits = [f"run:{r['id']}" for r in rs] + [f"sidecar:{p}" for p in shown_paths]
         purposes.append(
             {
                 "id": f"o{i + 1}",

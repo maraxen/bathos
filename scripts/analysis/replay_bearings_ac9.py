@@ -213,6 +213,10 @@ def main() -> None:
     mode.add_argument("--gate", action="store_true")
     mode.add_argument("--controls-only", action="store_true")
     mode.add_argument("--build", action="store_true")
+    mode.add_argument("--record-oracles", action="store_true")
+    mode.add_argument("--record-readings", action="store_true")
+    mode.add_argument("--mapper-inputs", action="store_true")
+    mode.add_argument("--compare", action="store_true")
     a = p.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     work = a.work_dir
@@ -269,7 +273,186 @@ def main() -> None:
         print(json.dumps(built, indent=2))
         return
 
+    if a.record_oracles:
+        record_oracles(work, a.repo, a.catalog_dir)
+        return
+    if a.record_readings:
+        record_readings(work, a.repo, a.catalog_dir)
+        return
+    if a.mapper_inputs:
+        mapper_inputs(work, a.repo, a.catalog_dir)
+        return
+    if a.compare:
+        compare_all(work, a.repo, a.catalog_dir)
+        return
+
     score(work, a.repo, a.catalog_dir)
+
+
+# ── run protocol steps between build and score (amendment 6, committed before any mapper) ───────────────────────
+
+
+def _record(repo: Path, reading: dict, packet: Path, path: Path, catalog_dir: Path | None) -> dict:
+    from bathos.bearings.reading import record_reading
+
+    path.write_text(json.dumps(reading, indent=2) + "\n")
+    try:
+        res = record_reading(repo, reading_file=path, packet_dir=packet, catalog_dir=catalog_dir)
+        return {"reading_id": res["reading_id"], "ok": True}
+    except Exception as e:  # noqa: BLE001 -- a failed validation is reported, it gets one disclosed redo
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
+def record_oracles(work: Path, repo: Path, catalog_dir: Path | None) -> None:
+    """Record the label-built oracle reading of each planted packet and of qb (amendment 5)."""
+    charter = _charter_purposes(repo / ".bth" / "charter.toml")
+    overlay = ac9.load_label_overlay(LABEL_CONFIRMATION)
+    out = {}
+    for q in ("q1", "q2", "q3", "qb"):
+        done = work / q / "oracle_record.json"
+        if done.is_file() and json.loads(done.read_text()).get("ok"):
+            out[q] = json.loads(done.read_text())  # recorded once; never record the same reading twice
+            continue
+        pdir = work / q / "packet"
+        sha = verify_packet(pdir)
+        if not (work / q / "oracle_reading.json").is_file():
+            key = ac9.answer_key(repo, pdir, charter, overlay)
+            (work / q / "oracle_reading.json").write_text(
+                json.dumps(ac9.oracle_reading(pdir, key["labels"], sha), indent=2) + "\n"
+            )
+        reading = json.loads((work / q / "oracle_reading.json").read_text())
+        out[q] = _record(
+            repo, reading, pdir, work / q / "oracle_reading.recorded.json", catalog_dir
+        )
+        (work / q / "oracle_record.json").write_text(json.dumps(out[q], indent=2) + "\n")
+    print(json.dumps({q: v.get("ok") for q, v in out.items()}))
+
+
+def record_readings(work: Path, repo: Path, catalog_dir: Path | None) -> None:
+    """Record each collected reader reading (``work/readings/<q>/<reader>.json``); prints status only."""
+    status = {}
+    for q in ARMS:
+        for r in READERS:
+            src = work / "readings" / q / f"{r}.json"
+            if not src.is_file():
+                status[f"{q}/{r}"] = "missing"
+                continue
+            res = _record(
+                repo,
+                json.loads(src.read_text()),
+                work / q / "packet",
+                work / q / f"{r}.reading.json",
+                catalog_dir,
+            )
+            (work / q / f"{r}_record.json").write_text(json.dumps(res, indent=2) + "\n")
+            status[f"{q}/{r}"] = "recorded" if res["ok"] else res["error"][:200]
+    print(json.dumps(status, indent=2))
+
+
+def _charter_view(path: Path) -> list[dict]:
+    ch = parse_charter(path)
+    return [{"id": pid, "text": v.text, "state": v.state} for pid, v in sorted(ch.purposes.items())]
+
+
+def mapper_inputs(work: Path, repo: Path, catalog_dir: Path | None) -> None:
+    """One input file per mapping job: the reading's purposes (id and text only) and one charter's purposes.
+
+    Jobs: each recorded reader reading against the tev_design charter and against the decoy; each oracle reading
+    against the tev_design charter. The mapper sees nothing else: no citations, no packet, no labels.
+    """
+    from bathos.bearings.reading import _existing_reading
+
+    cat = catalog_dir or Path(os.environ.get("BTH_CATALOG_DIR", Path.home() / ".bth" / "catalog"))
+    tev, decoy = _charter_view(repo / ".bth" / "charter.toml"), _charter_view(DECOY)
+    jobs = []
+    for q in ("q1", "q2", "q3", "qb"):
+        sources = [("oracle", work / q / "oracle_record.json")]
+        if q != "qb":
+            sources += [(r, work / q / f"{r}_record.json") for r in READERS]
+        for who, rec_path in sources:
+            if not rec_path.is_file():
+                continue
+            rec = json.loads(rec_path.read_text())
+            if not rec.get("ok"):
+                continue
+            reading = _existing_reading(cat, PROJECT, rec["reading_id"])
+            purposes = [{"id": p["id"], "text": p["text"]} for p in reading["purposes"]]
+            for cname, cview in (("charter", tev), ("decoy", decoy)):
+                if cname == "decoy" and who == "oracle":
+                    continue
+                name = f"{q}_{who}_{cname}"
+                (work / "mapper" / "in").mkdir(parents=True, exist_ok=True)
+                (work / "mapper" / "in" / f"{name}.json").write_text(
+                    json.dumps({"reading_purposes": purposes, "charter_purposes": cview}, indent=2)
+                    + "\n"
+                )
+                jobs.append(name)
+    (work / "mapper" / "jobs.json").write_text(json.dumps(jobs, indent=2) + "\n")
+    print(json.dumps({"jobs": len(jobs)}))
+
+
+def comparison_from_mapping(mapping: dict, charter: dict) -> dict:
+    """Comparison items from a mapping without a catalog write: mapped live targets, retired targets as
+    ``matched_retired``, unmapped purposes, and silent live purposes (used for the decoy and degenerate arms)."""
+    items, mapped_live = [], set()
+    for rp, t in mapping.items():
+        targets = t if isinstance(t, list) else ([t] if t else [])
+        if not targets:
+            items.append({"kind": "unmapped", "reading_purpose_id": rp, "matched_retired": None})
+        for tg in targets:
+            if charter[tg]["state"] == "retired":
+                items.append({"kind": "unmapped", "reading_purpose_id": rp, "matched_retired": tg})
+            else:
+                mapped_live.add(tg)
+                items.append({"kind": "mapped", "reading_purpose_id": rp, "charter_purpose_id": tg})
+    items += [
+        {"kind": "silent", "charter_purpose_id": p}
+        for p, v in charter.items()
+        if v["state"] == "live" and p not in mapped_live
+    ]
+    return {"items": items}
+
+
+def compare_all(work: Path, repo: Path, catalog_dir: Path | None) -> None:
+    """Turn every mapper output (``work/mapper/out/<job>.json``) into the comparison files ``score`` reads."""
+    from bathos.bearings.reading import compare_reading
+
+    decoy = _charter_purposes(DECOY)
+    status = {}
+    for name in json.loads((work / "mapper" / "jobs.json").read_text()):
+        out = work / "mapper" / "out" / f"{name}.json"
+        if not out.is_file():
+            status[name] = "missing"
+            continue
+        q, who, cname = name.split("_")
+        mapping = json.loads(out.read_text())
+        if cname == "decoy":
+            (work / q / f"decoy_{who}.json").write_text(
+                json.dumps(comparison_from_mapping(mapping["mapping"], decoy), indent=2) + "\n"
+            )
+            status[name] = "decoy written"
+            continue
+        rec = json.loads(
+            (
+                work / q / ("oracle_record.json" if who == "oracle" else f"{who}_record.json")
+            ).read_text()
+        )
+        cmp = compare_reading(
+            repo, reading_id=rec["reading_id"], mapping_file=out, catalog_dir=catalog_dir
+        )
+        dest = (
+            work / "qb" / "comparison.json"
+            if q == "qb"
+            else work / q / ("oracle.json" if who == "oracle" else f"{who}.json")
+        )
+        payload = (
+            cmp
+            if (q == "qb" or who == "oracle")
+            else {"reading_id": rec["reading_id"], "comparison": cmp}
+        )
+        dest.write_text(json.dumps(payload, indent=2) + "\n")
+        status[name] = "compared"
+    print(json.dumps(status, indent=2))
 
 
 def score(work: Path, repo: Path, catalog_dir: Path | None) -> None:
@@ -382,29 +565,9 @@ def _degenerate_comparisons(pk: dict, charter: dict) -> list[dict]:
     """The four degenerate mappers applied to a packet's first reading, as comparison item lists (no catalog write)."""
     gold = pk["readings"][0]["gold"]
     rps = sorted(gold)
-    out = []
-    for mapping in ac9.degenerate_mappings(rps, charter).values():
-        items = []
-        mapped_live = set()
-        for rp, t in mapping.items():
-            targets = t if isinstance(t, list) else ([t] if t else [])
-            for tg in targets:
-                if charter[tg]["state"] == "retired":
-                    items.append(
-                        {"kind": "unmapped", "reading_purpose_id": rp, "matched_retired": tg}
-                    )
-                else:
-                    mapped_live.add(tg)
-                    items.append(
-                        {"kind": "mapped", "reading_purpose_id": rp, "charter_purpose_id": tg}
-                    )
-        items += [
-            {"kind": "silent", "charter_purpose_id": p}
-            for p, v in charter.items()
-            if v["state"] == "live" and p not in mapped_live
-        ]
-        out.append({"items": items})
-    return out
+    return [
+        comparison_from_mapping(m, charter) for m in ac9.degenerate_mappings(rps, charter).values()
+    ]
 
 
 if __name__ == "__main__":
