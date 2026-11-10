@@ -142,6 +142,22 @@ Tests: the touched test files (Bearings, charter, validate, fold, index migratio
 
 Tests: 348 pass across the Bearings, charter, validation, fold and index-migration files.
 
+## Round 4 (261110, scope: commit 20839b23 only; focuses as in rounds 1–2)
+
+- **Cursor** (dispatch 2d3a003d) looked at correctness and blindness. Admitted. No high-severity finding.
+- **Antigravity** (dispatch 384efd33) looked at measurement validity. Admitted.
+
+| Finding (round 4) | Severity | Status |
+|---|---|---|
+| Dropping a whole reading purpose that cites an ambiguous path hides mapper errors, including off-charter ones, and can empty the gold-agreement denominator | high (Antigravity, ×2) | **fixed** 3cba000d: every purpose stays in gold; a target only among the ambiguous labels is unscored (`n_unscored_pairs`), any other target is a miss |
+| A revived flag from a purpose citing an ambiguous path is missed | medium (both) | **fixed** 3cba000d and 1ca85ea2: flagged from firm or ambiguous labels; agreed labels of a path stay firm gold |
+| A withheld run with an unresolvable sidecar corrupts silent ground truth; reporting it is not enough | high (Antigravity) | **fixed** 3cba000d: `invalid_reasons(key)` makes the comparison invalid |
+| Withheld-sidecar share denominator mixes populations | medium (Antigravity) | **fixed** 3cba000d: `n_shown_sidecars_labelled` |
+| `reading_gold` defaults to empty gold for ambiguous citers | medium (Cursor) | **fixed** 3cba000d: no dropping; ambiguity passed as `maybe` |
+| `&shy` without a semicolon is decoded; fullwidth `＆` or `％` not decoded; fixed list of `\uXXXX` dash escapes | low (Cursor) | **fixed** 1ca85ea2 |
+
+Tests: 356 pass across the Bearings, charter, validation, fold and index-migration files. **Stopping rule met:** round 4 found nothing high-severity in the round-3 code beyond the ambiguous-gold design, and that design is replaced. The round-4 fixes themselves have not had an independent review.
+
 ## Found clean (Cursor)
 
 - A root-level `charter.purpose` and a root inline charter table are excluded.
