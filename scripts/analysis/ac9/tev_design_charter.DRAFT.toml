@@ -1,13 +1,13 @@
-# PROVISIONAL DRAFT for AC-9 (spec 261104, T7). Not confirmed by the owner. Nothing live may run on it.
-# Purpose ids are readable slugs (owner 261109): sidecars name them in `[charter] purpose = "<slug>"`.
-# Former ids: L1 chory-libraries, L2 mpnn-design, L3 assembly-method, L4 size-selections, L5 lagoon-simulation,
-# L6 active-learning, L7 distal-local-specificity, R1 degenerate-codon-libraries, R2 qmmm-reaction-states.
-# mpnn-design through active-learning are the assistant's reading of tev_design's AGENTS.md and the AC-7e sidecar,
-# kept by the owner 261109 as drafted. chory-libraries was rewritten and distal-local-specificity added by the owner 261109.
-# distal-local-specificity is "not an immediate goal"; the format has only live/retired, so it is marked live (owner to confirm).
-# Two retired purposes: degenerate-codon-libraries and qmmm-reaction-states (chosen by the owner 261109, wording provisional).
-# The tev_design split is being scoped; this charter covers the repo as one project.
-mandate = "Build a scarless TEV: broaden the S1' pocket while preserving S1 Gln specificity and catalysis, through a multi-prong library program for the Chory collaboration. (PROVISIONAL: the project's real goals are multipronged and differ.)"
+# tev_design charter, settled with the owner 261110 through AskUserQuestion; NOT YET CONFIRMED (that is
+# `bth charter confirm` in tev_design, an owner action). Copy to tev_design/.bth/charter.toml, commit it there, then
+# confirm. Purpose ids are readable slugs (owner 261109): labels name them as `[charter] purpose = "<slug>"`.
+# History: 261109 draft (7 live, 2 retired; former ids L1-L7, R1-R2). 261110: mandate A chosen; distal-local-specificity
+# left out until it is active (add it with a pivot); literature-review, fitness-prediction and readout-validation added
+# from recurring work in the 2026-10-12..11-09 window; active-learning and size-selections kept live though quiet;
+# no tev_design aim is retired yet beyond the two below (so AC-9's revival case waits for revival work).
+# The tev_design split is being scoped: when it happens, moved purposes are retired here with a reason naming the new
+# project, which gets its own charter (owner 261110).
+mandate = "Design TEV protease variants with new substrate specificities, above all a scarless TEV that accepts any P1′, by delivering a multi-pronged set of designed libraries for the Chory selections and building the design and selection-modelling methods they rely on."
 
 [purpose.chory-libraries]
 text = "Deliver the Chory collaborator libraries: scarless TEV stretch goal, up to 96 libraries subjected to multiplex selection, demonstrating turboPRANCE multiplexability."
@@ -33,8 +33,16 @@ state = "live"
 text = "Active learning over designs."
 state = "live"
 
-[purpose.distal-local-specificity]
-text = "Distal versus local mutation impact on specificity (not an immediate goal)."
+[purpose.literature-review]
+text = "Build and run the literature-review pipeline: gather, quote-check and score claims from the TEV and protease-engineering literature."
+state = "live"
+
+[purpose.fitness-prediction]
+text = "Predict design fitness and confidence: confidence metrics, fitness-latent models and activity predictors used to choose designs."
+state = "live"
+
+[purpose.readout-validation]
+text = "Validate the readouts and scorers used to judge designs: AF3 fold readouts, MPNN tooling gates and the fold ledger."
 state = "live"
 
 [purpose.degenerate-codon-libraries]
@@ -45,4 +53,4 @@ retired_reason = "No amber suppression in the selection strain; an oPool is defi
 [purpose.qmmm-reaction-states]
 text = "Extra QM/MM sampling to generate reaction-state backbone diversity for multistate design."
 state = "retired"
-retired_reason = "The two reaction states differ by 0.0184 A backbone RMSD because the backbone does not move along the reaction coordinate; more QM/MM gives backbone-uncertainty regularization, not multistate design (tev_design decision 260817_multistate-ensemble-generation-options, final). PROVISIONAL wording, owner to confirm."
+retired_reason = "The two reaction states differ by 0.0184 A backbone RMSD because the backbone does not move along the reaction coordinate; more QM/MM gives backbone-uncertainty regularization, not multistate design (tev_design decision 260817_multistate-ensemble-generation-options, final)."
