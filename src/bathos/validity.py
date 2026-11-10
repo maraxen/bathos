@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -35,7 +36,7 @@ from bathos.version_resolver import (
 logger = logging.getLogger(__name__)
 
 NEUTRAL_OUTCOME_LABELS = frozenset(
-    {"observed", "collected", "recorded", "reaped", "unassigned", ""}
+    {"", "unknown", "observed", "invalid_measurement", "error", "collected", "recorded", "reaped", "unassigned"}
 )
 
 VALIDITY_CACHE_META_DDL = """
@@ -92,10 +93,18 @@ class ValidityResult:
 
 
 def validity_cache_db_path(catalog_dir: Path | str | None = None) -> Path:
+    if catalog_dir is None:
+        env_cat = os.environ.get("BTH_CATALOG_DIR")
+        if env_cat:
+            catalog_dir = Path(env_cat)
     return Path(catalog_dir or default_catalog_dir()) / "validity_cache.db"
 
 
 def validity_cache_lock_path(catalog_dir: Path | str | None = None) -> Path:
+    if catalog_dir is None:
+        env_cat = os.environ.get("BTH_CATALOG_DIR")
+        if env_cat:
+            catalog_dir = Path(env_cat)
     return Path(catalog_dir or default_catalog_dir()) / "validity_cache.lock"
 
 
@@ -511,7 +520,7 @@ def _find_run_main_root(
 
 def resolve_validity(
     run_ids: list[str],
-    catalog_dir: Path | str,
+    catalog_dir: Path | str | None = None,
     con: duckdb.DuckDBPyConnection | None = None,
     workspace_root: Path | None = None,
     db: duckdb.DuckDBPyConnection | None = None,
@@ -528,9 +537,13 @@ def resolve_validity(
     if not run_ids:
         return {}
 
+    start_time = time.perf_counter()
+
     if con is None and db is not None:
         con = db
 
+    if catalog_dir is None:
+        catalog_dir = os.environ.get("BTH_CATALOG_DIR") or default_catalog_dir()
     cd = Path(catalog_dir)
     should_close = False
     if con is None:
@@ -646,10 +659,63 @@ def resolve_validity(
                 pass
 
         # 5. Load instrument registries
-        # Map main_roots
+        # Map main_roots (batched)
         main_root_cache: dict[str, Path | None] = {}
+        missing_root_ids: list[str] = []
+
         for r_id in run_ids:
-            main_root_cache[r_id] = _find_run_main_root(r_id, cd, con=con, workspace_root=workspace_root)
+            if workspace_root and workspace_root.is_dir():
+                main_root_cache[r_id] = workspace_root
+            else:
+                missing_root_ids.append(r_id)
+
+        if missing_root_ids:
+            # Batch query events table if available
+            if con is not None and "events" in tables:
+                try:
+                    placeholders = ", ".join(["?"] * len(missing_root_ids))
+                    event_rows = con.execute(
+                        f"SELECT entity_key, main_root FROM events WHERE entity_key IN ({placeholders}) AND main_root IS NOT NULL",
+                        missing_root_ids,
+                    ).fetchall()
+                    for ek, mr in event_rows:
+                        if mr:
+                            p = Path(mr)
+                            if p.is_dir():
+                                main_root_cache[ek] = p
+                except Exception:
+                    pass
+
+            # For remaining missing, resolve via already-in-memory project_slug
+            reg_roots = list_registered_roots()
+            slug_to_root: dict[str, Path | None] = {}
+            for r_id in missing_root_ids:
+                if r_id in main_root_cache:
+                    continue
+                p_slug = runs_by_id.get(r_id, {}).get("project_slug")
+                if p_slug:
+                    if p_slug not in slug_to_root:
+                        found_root = None
+                        for root in reg_roots:
+                            if root.is_dir() and (root / ".bth.toml").is_file():
+                                try:
+                                    import tomllib
+
+                                    doc = tomllib.loads((root / ".bth.toml").read_text())
+                                    if doc.get("project", {}).get("slug") == p_slug:
+                                        found_root = root
+                                        break
+                                except Exception:
+                                    pass
+                        slug_to_root[p_slug] = found_root
+
+                    if slug_to_root.get(p_slug):
+                        main_root_cache[r_id] = slug_to_root[p_slug]
+                        continue
+
+                # Final fallback for this r_id
+                root = _find_run_main_root(r_id, cd, con=con, workspace_root=workspace_root)
+                main_root_cache[r_id] = root
 
         registries_by_root: dict[Path | None, dict[str, Any]] = {}
         for r_id, m_root in main_root_cache.items():
@@ -672,6 +738,7 @@ def resolve_validity(
 
         # Step 1: Check archived items
         archived_match = None
+        run_proj = run.get("project_slug")
         for item in archived_by_item_id.values():
             if item.get("event") != "archived":
                 continue
@@ -690,24 +757,58 @@ def resolve_validity(
             if s_sha and s_sha in (item.get("script_sha256"), item.get("pre_archive_sha")):
                 archived_match = item
                 break
-            # Check paths
-            raw_paths = item.get("paths")
-            if raw_paths:
-                try:
-                    paths = json.loads(raw_paths) if isinstance(raw_paths, str) else raw_paths
-                    s_path = run.get("sidecar_path")
-                    if s_path and s_path in paths:
-                        archived_match = item
-                        break
-                except Exception:
-                    pass
+            # Check paths with project_slug guard
+            if run_proj and item.get("project_slug") == run_proj:
+                raw_paths = item.get("paths")
+                if raw_paths:
+                    try:
+                        paths = set(json.loads(raw_paths) if isinstance(raw_paths, str) else raw_paths)
+                        cand_paths: set[str] = set()
+                        s_path = run.get("sidecar_path")
+                        if s_path:
+                            cand_paths.add(s_path)
+                        raw_outputs = run.get("output_paths")
+                        if raw_outputs:
+                            outs = json.loads(raw_outputs) if isinstance(raw_outputs, str) else raw_outputs
+                            if isinstance(outs, (list, tuple, set)):
+                                cand_paths.update(str(p) for p in outs)
+                            elif isinstance(outs, str):
+                                cand_paths.add(outs)
+                        # Extract script path from command
+                        cmd = run.get("command")
+                        if cmd:
+                            cmd_parts = cmd.split()
+                            for part in cmd_parts:
+                                if part.endswith((".py", ".sh", ".bash", ".slurm", ".rs", ".jl", ".r")):
+                                    cand_paths.add(part)
+                                    break
+                            else:
+                                if cmd_parts:
+                                    cand_paths.add(cmd_parts[0])
+                        # Extract script path from argv
+                        raw_argv = run.get("argv")
+                        if raw_argv:
+                            argvs = json.loads(raw_argv) if isinstance(raw_argv, str) else raw_argv
+                            if isinstance(argvs, (list, tuple)):
+                                for arg in argvs:
+                                    if isinstance(arg, str) and arg.endswith((".py", ".sh", ".bash", ".slurm", ".rs", ".jl", ".r")):
+                                        cand_paths.add(arg)
+                                        break
+                                else:
+                                    if argvs and isinstance(argvs[0], str):
+                                        cand_paths.add(argvs[0])
+                        if cand_paths & paths:
+                            archived_match = item
+                            break
+                    except Exception:
+                        pass
 
         if archived_match is not None:
             results[r_id] = ValidityResult(
                 run_id=r_id,
                 state="archived",
                 reason=archived_match.get("reason") or f"archived under bundle {archived_match.get('bundle_sha256')}",
-                replacement_id=None,
+                replacement_id=archived_match.get("superseded_by"),
                 version_source=run.get("toolchain_version_source") or "unknown",
                 evidence_tier=evidence_tier,
                 is_hidden=True,
@@ -906,7 +1007,83 @@ def resolve_validity(
             estimand_marker=estimand_marker,
         )
 
+    try:
+        from bathos.telemetry import event
+
+        dur_ms = max(0, int((time.perf_counter() - start_time) * 1000))
+        hidden_cnt = sum(1 for v in results.values() if v.is_hidden)
+        void_cnt = sum(1 for v in results.values() if v.state == "void")
+        affected_cnt = sum(1 for v in results.values() if v.state == "affected")
+        superseded_cnt = sum(1 for v in results.values() if v.state == "superseded")
+        archived_cnt = sum(1 for v in results.values() if v.state == "archived")
+        suspect_cnt = sum(1 for v in results.values() if v.state == "suspect")
+        unverifiable_cnt = sum(1 for v in results.values() if v.state == "unverifiable")
+        event(
+            "validity.resolved",
+            run_ids_count=len(run_ids),
+            hidden_count=hidden_cnt,
+            void_count=void_cnt,
+            affected_count=affected_cnt,
+            superseded_count=superseded_cnt,
+            archived_count=archived_cnt,
+            suspect_count=suspect_cnt,
+            unverifiable_count=unverifiable_cnt,
+            cache_hit=False,
+            duration_ms=dur_ms,
+        )
+        if hidden_cnt > 0:
+            event(
+                "validity.filter_applied",
+                filter_name="resolve_validity",
+                hidden_count=hidden_cnt,
+                total_count=len(run_ids),
+            )
+    except Exception:
+        pass
+
     return results
+
+
+def emit_validity_filter_applied(
+    filter_name: str = "runs_current",
+    hidden_count: int = 0,
+    total_count: int = 0,
+    **extra: Any,
+) -> None:
+    """Emit diagnostic validity.filter_applied telemetry."""
+    try:
+        from bathos.telemetry import event
+
+        event(
+            "validity.filter_applied",
+            filter_name=filter_name,
+            hidden_count=hidden_count,
+            total_count=total_count,
+            **extra,
+        )
+    except Exception:
+        pass
+
+
+def emit_validity_override_used(
+    override_kind: str,
+    entity_id: str = "",
+    reason: str = "",
+    **extra: Any,
+) -> None:
+    """Emit diagnostic validity.override_used telemetry."""
+    try:
+        from bathos.telemetry import event
+
+        event(
+            "validity.override_used",
+            override_kind=override_kind,
+            entity_id=entity_id,
+            reason=reason,
+            **extra,
+        )
+    except Exception:
+        pass
 
 
 def compute_distance_from_present(
@@ -914,6 +1091,7 @@ def compute_distance_from_present(
     validity: ValidityResult,
     main_root: Path | None = None,
     con: duckdb.DuckDBPyConnection | None = None,
+    catalog_dir: Path | str | None = None,
 ) -> dict[str, Any]:
     """Compute distance-from-present facts (§3.5).
 
@@ -980,28 +1158,102 @@ def compute_distance_from_present(
     # Reproduction count: count of runs with same sidecar_sha256 whose outcome not in NEUTRAL_OUTCOME_LABELS
     sidecar_sha = run.get("sidecar_sha256") if isinstance(run, dict) else getattr(run, "sidecar_sha256", None)
     run_id = run.get("id") if isinstance(run, dict) else getattr(run, "id", None)
+    run_ts = run.get("timestamp") if isinstance(run, dict) else getattr(run, "timestamp", None)
+    run_outcome = run.get("outcome") if isinstance(run, dict) else getattr(run, "outcome", None)
+    run_slug = run.get("project_slug") if isinstance(run, dict) else getattr(run, "project_slug", None)
     reproduction_count = 0
 
-    if sidecar_sha and con is not None:
-        try:
-            tables = {
-                r[0]
-                for r in con.execute(
-                    "SELECT table_name FROM duckdb_tables()"
-                ).fetchall()
-            }
-            if "runs" in tables:
-                neutral_placeholders = ", ".join(["?"] * len(NEUTRAL_OUTCOME_LABELS))
-                query = (
-                    "SELECT count(*) FROM runs WHERE sidecar_sha256 = ? AND id != ? "
-                    f"AND COALESCE(outcome, '') NOT IN ({neutral_placeholders})"
-                )
-                params = [sidecar_sha, run_id, *list(NEUTRAL_OUTCOME_LABELS)]
-                row = con.execute(query, params).fetchone()
-                if row:
-                    reproduction_count = int(row[0])
-        except Exception:
-            pass
+    # Spec §1.4.C.3: Exploratory/neutral runs never have confirmatory reproductions
+    if (
+        sidecar_sha
+        and run_id
+        and run_ts
+        and run_outcome
+        and run_slug
+        and run_outcome not in NEUTRAL_OUTCOME_LABELS
+    ):
+        ts_val = run_ts
+        if isinstance(ts_val, datetime):
+            if ts_val.tzinfo is None:
+                ts_val = ts_val.replace(tzinfo=UTC)
+            ts_str = ts_val.isoformat()
+        else:
+            ts_str = str(ts_val)
+
+        close_con = False
+        db_con = con
+        if db_con is None:
+            try:
+                from bathos.index import connect_read
+
+                db_con = connect_read(read_only=True)
+                close_con = True
+            except Exception:
+                db_con = None
+
+        if db_con is not None:
+            try:
+                tables = {
+                    r[0]
+                    for r in db_con.execute(
+                        "SELECT table_name FROM duckdb_tables()"
+                    ).fetchall()
+                }
+                has_runs_current = False
+                try:
+                    db_con.execute("SELECT 1 FROM runs_current LIMIT 0")
+                    has_runs_current = True
+                except Exception:
+                    has_runs_current = False
+
+                tbl_target = "runs_current" if has_runs_current else "runs"
+                if tbl_target in tables or has_runs_current:
+                    query = f"""
+                        SELECT id FROM {tbl_target}
+                        WHERE sidecar_sha256 = ?
+                          AND id != ?
+                          AND project_slug = ?
+                          AND timestamp > ?
+                          AND status = 'completed'
+                          AND outcome = ?
+                    """
+                    try:
+                        rows = db_con.execute(
+                            query,
+                            [sidecar_sha, run_id, run_slug, ts_val, run_outcome],
+                        ).fetchall()
+                    except Exception:
+                        rows = db_con.execute(
+                            query,
+                            [sidecar_sha, run_id, run_slug, ts_str, run_outcome],
+                        ).fetchall()
+
+                    cand_ids = [r[0] for r in rows if r[0]]
+                    if cand_ids:
+                        try:
+                            cd = Path(catalog_dir or os.environ.get("BTH_CATALOG_DIR") or default_catalog_dir())
+                            v_map = resolve_validity(
+                                cand_ids,
+                                catalog_dir=cd,
+                                con=db_con,
+                                workspace_root=main_root,
+                            )
+                            reproduction_count = sum(
+                                1 for cid in cand_ids if v_map.get(cid) and v_map[cid].state == "current"
+                            )
+                        except Exception:
+                            try:
+                                q_vc = f"SELECT run_id FROM validity_cache WHERE run_id IN ({','.join(['?']*len(cand_ids))}) AND validity_state != 'current'"
+                                bad_ids = {r[0] for r in db_con.execute(q_vc, cand_ids).fetchall()}
+                                reproduction_count = len([cid for cid in cand_ids if cid not in bad_ids])
+                            except Exception:
+                                reproduction_count = len(cand_ids)
+            except Exception:
+                pass
+            finally:
+                if close_con:
+                    with contextlib.suppress(Exception):
+                        db_con.close()
 
     return {
         "age_days": age_days,

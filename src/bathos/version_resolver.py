@@ -5,6 +5,7 @@ Spec 261106 §1.3.C, §2.1, §3.2, §3.3.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import hashlib
 import json
@@ -455,11 +456,123 @@ def evaluate_predicate(condition: str, run: Any) -> tuple[bool, str | None]:
         return False, f"predicate evaluation error: {exc}"
 
 
+def _read_version_cache(
+    main_root_str: str, git_hash: str
+) -> tuple[str | None, dict[str, tuple[str, str | None]]] | None:
+    # 1. Check <main_root>/.bth/cache/version_cache.json
+    try:
+        json_path = Path(main_root_str) / ".bth" / "cache" / "version_cache.json"
+        if json_path.is_file():
+            doc = json.loads(json_path.read_text(encoding="utf-8"))
+            entry = doc.get(git_hash)
+            if entry and isinstance(entry, dict):
+                calc_sha = entry.get("lock_sha256")
+                pkgs_raw = entry.get("packages", {})
+                pkgs = {
+                    k: (v[0], v[1])
+                    for k, v in pkgs_raw.items()
+                    if isinstance(v, (list, tuple)) and len(v) >= 2
+                }
+                if calc_sha is not None:
+                    return calc_sha, pkgs
+    except Exception:
+        pass
+
+    # 2. Check validity_cache.db:version_cache
+    try:
+        from bathos.config import default_catalog_dir
+        from bathos.validity import ensure_validity_cache, validity_cache_db_path
+
+        cat_dir = os.environ.get("BTH_CATALOG_DIR") or default_catalog_dir()
+        db_path = validity_cache_db_path(cat_dir)
+        if db_path.is_file():
+            with duckdb.connect(str(db_path), read_only=True) as con:
+                tables = {r[0] for r in con.execute("SELECT table_name FROM duckdb_tables()").fetchall()}
+            if "version_cache" not in tables and Path(cat_dir).is_dir():
+                with contextlib.suppress(Exception):
+                    ensure_validity_cache(cat_dir)
+                    with duckdb.connect(str(db_path), read_only=True) as con:
+                        tables = {r[0] for r in con.execute("SELECT table_name FROM duckdb_tables()").fetchall()}
+            if "version_cache" in tables:
+                with duckdb.connect(str(db_path), read_only=True) as con:
+                    rows = con.execute(
+                        "SELECT lock_sha256, package_name, resolved_version, resolved_commit "
+                        "FROM version_cache WHERE main_root = ? AND git_hash = ?",
+                        [main_root_str, git_hash],
+                    ).fetchall()
+                    if rows:
+                        calc_sha = rows[0][0]
+                        pkgs = {r[1]: (r[2], r[3]) for r in rows}
+                        return calc_sha, pkgs
+    except Exception:
+        pass
+
+    return None
+
+
+def _write_version_cache(
+    main_root_str: str,
+    git_hash: str,
+    calc_sha: str,
+    pkgs: dict[str, tuple[str, str | None]],
+) -> None:
+    # 1. Update <main_root>/.bth/cache/version_cache.json
+    try:
+        cache_dir = Path(main_root_str) / ".bth" / "cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        json_path = cache_dir / "version_cache.json"
+        doc = {}
+        if json_path.is_file():
+            with contextlib.suppress(Exception):
+                doc = json.loads(json_path.read_text(encoding="utf-8"))
+        doc[git_hash] = {
+            "lock_sha256": calc_sha,
+            "packages": {pkg: [ver, comm] for pkg, (ver, comm) in pkgs.items()},
+        }
+        tmp_path = json_path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+        tmp_path.replace(json_path)
+    except Exception:
+        pass
+
+    # 2. Update validity_cache.db:version_cache
+    try:
+        from bathos.config import default_catalog_dir
+        from bathos.validity import VERSION_CACHE_DDL, ensure_validity_cache, validity_cache_db_path
+
+        cat_dir = os.environ.get("BTH_CATALOG_DIR") or default_catalog_dir()
+        db_path = validity_cache_db_path(cat_dir)
+        if "BTH_CATALOG_DIR" in os.environ or db_path.parent.is_dir():
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            if not db_path.is_file():
+                with contextlib.suppress(Exception):
+                    ensure_validity_cache(cat_dir)
+            with duckdb.connect(str(db_path)) as con:
+                con.execute(VERSION_CACHE_DDL)
+                rows = [
+                    (main_root_str, git_hash, calc_sha, pkg_name, ver, comm, "lockfile")
+                    for pkg_name, (ver, comm) in pkgs.items()
+                ]
+                if rows:
+                    con.executemany(
+                        "INSERT OR REPLACE INTO version_cache VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        rows,
+                    )
+    except Exception:
+        pass
+
+
 @functools.lru_cache(maxsize=1024)
 def _get_uv_lock_packages(
     main_root_str: str, git_hash: str
 ) -> tuple[str | None, dict[str, tuple[str, str | None]]]:
     """Return (calc_sha, dict_of_pkg_to_tuple_of_version_and_commit)."""
+    # 1. Check persistent caches (JSON & DuckDB)
+    cached = _read_version_cache(main_root_str, git_hash)
+    if cached is not None:
+        return cached
+
+    # 2. Fallback to git show <git_hash>:uv.lock
     try:
         res = subprocess.run(
             ["git", "-C", main_root_str, "show", f"{git_hash}:uv.lock"],
@@ -478,6 +591,8 @@ def _get_uv_lock_packages(
                     src = p.get("source", {})
                     c = src.get("commit") or src.get("git") if isinstance(src, dict) else None
                     pkgs[name] = (v, c)
+            # 3. Populate persistent caches
+            _write_version_cache(main_root_str, git_hash, calc_sha, pkgs)
             return calc_sha, pkgs
     except Exception:
         pass

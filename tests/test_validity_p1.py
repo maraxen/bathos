@@ -55,6 +55,9 @@ from bathos.trust_ledger import (
     write_ledger_fragment,
 )
 from bathos.validity import (
+    compute_distance_from_present,
+    emit_validity_filter_applied,
+    emit_validity_override_used,
     ensure_validity_cache,
     resolve_validity,
 )
@@ -1121,3 +1124,236 @@ def test_pep440_local_version_handling():
     assert not version_in_range("0.2.1+armask", "0.1.0", "0.2.1")
     # Version 0.2.0+armask strips to 0.2.0 base_version < 0.2.1 -> in range
     assert version_in_range("0.2.0+armask", "0.1.0", "0.2.1")
+
+
+# ---------------------------------------------------------------------------
+# M1 Track 1: compute_distance_from_present 5-Condition Enforcement (§1.4.C.3)
+# ---------------------------------------------------------------------------
+def test_compute_distance_from_present_spec_1_4_c_3(tmp_path: Path):
+    cat_dir = tmp_path / "catalog"
+    init_catalog(cat_dir)
+
+    t0 = datetime(2026, 1, 1, 10, 0, 0, tzinfo=UTC)
+    t1 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    t2 = datetime(2026, 1, 1, 14, 0, 0, tzinfo=UTC)
+
+    def _make_run(run_id, slug, status="completed", outcome="pass", sha=None, ts=None):
+        r = Run(
+            id=run_id,
+            project_slug=slug,
+            command="python exp.py",
+            argv=["python", "exp.py"],
+            git_hash="abc1234",
+            git_branch="main",
+            git_dirty=False,
+            status=status,
+            outcome=outcome,
+            sidecar_sha256=sha,
+            timestamp=ts or datetime.now(UTC),
+        )
+        write_run(r, cat_dir)
+        return r
+
+    # Base run R
+    r_base = _make_run("00000000-0000-0000-0000-000000000010", "projA", "completed", "pass", "sha-valid-123", t1)
+    # (a) Prior run (timestamp < R.timestamp) -> MUST NOT count
+    _make_run("00000000-0000-0000-0000-000000000011", "projA", "completed", "pass", "sha-valid-123", t0)
+    # (b) Crashed/failed run (status != 'completed') -> MUST NOT count
+    _make_run("00000000-0000-0000-0000-000000000012", "projA", "failed", "pass", "sha-valid-123", t2)
+    # (e) Differing outcome (outcome != R.outcome) -> MUST NOT count
+    _make_run("00000000-0000-0000-0000-000000000013", "projA", "completed", "fail", "sha-valid-123", t2)
+    # Project scoping: different project -> MUST NOT count
+    _make_run("00000000-0000-0000-0000-000000000014", "projB", "completed", "pass", "sha-valid-123", t2)
+    # (d) Differing sidecar hash -> MUST NOT count
+    _make_run("00000000-0000-0000-0000-000000000015", "projA", "completed", "pass", "sha-diff-456", t2)
+    # Genuine reproduction -> MUST COUNT
+    _make_run("00000000-0000-0000-0000-000000000016", "projA", "completed", "pass", "sha-valid-123", t2)
+
+    compact(cat_dir)
+
+    con = connect_read(cat_dir)
+    res_map = resolve_validity([r_base.id], cat_dir, con=con)
+    facts = compute_distance_from_present(r_base, res_map[r_base.id], con=con)
+    con.close()
+    assert facts["reproduction_count"] == 1
+
+    # Exploratory run with neutral outcome -> MUST return reproduction_count == 0
+    r_exploratory = _make_run(
+        "00000000-0000-0000-0000-000000000017",
+        "projA",
+        "completed",
+        "observed",
+        "sha-valid-123",
+        t1,
+    )
+    compact(cat_dir)
+    con = connect_read(cat_dir)
+    exp_map = resolve_validity([r_exploratory.id], cat_dir, con=con)
+    exp_facts = compute_distance_from_present(r_exploratory, exp_map[r_exploratory.id], con=con)
+    con.close()
+    assert exp_facts["reproduction_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# M1 Track 1: Step 1 Archived Items Multi-Attribute Matching (Spec §2.1 Step 1)
+# ---------------------------------------------------------------------------
+def test_archived_items_multi_attribute_matching_and_replacement_id(tmp_path: Path):
+    cat_dir = tmp_path / "catalog"
+    init_catalog(cat_dir)
+
+    # Insert archived_items records
+    con = duckdb.connect(str(cat_dir / "bathos.db"))
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS archived_items (
+            id TEXT PRIMARY KEY,
+            bundle_sha256 TEXT,
+            pre_archive_sha TEXT,
+            script_sha256 TEXT,
+            paths TEXT,
+            run_ids TEXT,
+            reason TEXT,
+            superseded_by TEXT,
+            project_slug TEXT,
+            recorded_at TEXT,
+            event TEXT
+        )
+    """)
+    con.execute("""
+        INSERT INTO archived_items VALUES
+        ('arch-1', 'bundle1', null, null, '["outputs/model.pt"]', null, 'model archived', 'item-succ-1', 'projA', '2026-01-01', 'archived'),
+        ('arch-2', 'bundle2', null, null, '["scripts/train.py"]', null, 'script archived', 'item-succ-2', 'projA', '2026-01-01', 'archived'),
+        ('arch-3', 'bundle3', null, null, '["scripts/other.py"]', null, 'other project script', 'item-succ-3', 'projB', '2026-01-01', 'archived')
+    """)
+    con.close()
+
+    def _make_arch_run(run_id, slug, **kwargs):
+        r = Run(
+            id=run_id,
+            project_slug=slug,
+            command=kwargs.get("command", "python run.py"),
+            argv=kwargs.get("argv", ["python", "run.py"]),
+            git_hash="abc1234",
+            git_branch="main",
+            git_dirty=False,
+            status="completed",
+            output_paths=kwargs.get("output_paths", []),
+        )
+        write_run(r, cat_dir)
+        return r
+
+    # Run 1: matched via output_paths
+    r1 = _make_arch_run("00000000-0000-0000-0000-000000000021", "projA", output_paths=["outputs/model.pt"])
+    # Run 2: matched via command script
+    r2 = _make_arch_run("00000000-0000-0000-0000-000000000022", "projA", command="python scripts/train.py --batch-size 32")
+    # Run 3: matched via argv script
+    r3 = _make_arch_run("00000000-0000-0000-0000-000000000023", "projA", argv=["scripts/train.py", "--lr", "0.01"])
+    # Run 4: path matches arch-3 but project_slug differs (projA vs projB) -> NOT archived
+    r4 = _make_arch_run("00000000-0000-0000-0000-000000000024", "projA", command="python scripts/other.py")
+
+    for r in (r1, r2, r3, r4):
+        write_run(r, cat_dir)
+    compact(cat_dir)
+
+    res = resolve_validity([r1.id, r2.id, r3.id, r4.id], cat_dir)
+    assert res[r1.id].state == "archived"
+    assert res[r1.id].replacement_id == "item-succ-1"
+
+    assert res[r2.id].state == "archived"
+    assert res[r2.id].replacement_id == "item-succ-2"
+
+    assert res[r3.id].state == "archived"
+    assert res[r3.id].replacement_id == "item-succ-2"
+
+    assert res[r4.id].state == "current"
+    assert res[r4.id].replacement_id is None
+
+
+# ---------------------------------------------------------------------------
+# M1 Track 1: Persistent version_cache across processes
+# ---------------------------------------------------------------------------
+def test_version_cache_persistent_across_processes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    repo = _make_git_repo(tmp_path / "repo")
+    cat_dir = tmp_path / "catalog"
+    init_catalog(cat_dir)
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(cat_dir))
+
+    lock_file = repo / "uv.lock"
+    lock_file.write_text('version = 1\n[[package]]\nname = "aminx"\nversion = "0.3.0"\n')
+    subprocess.run(["git", "add", "uv.lock"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "add uv lock", "--no-verify"], cwd=repo, check=True)
+    c_hash = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    lock_sha = hashlib.sha256(lock_file.read_bytes()).hexdigest()
+
+    from bathos.version_resolver import _get_uv_lock_packages, _read_version_cache
+
+    # 1. First lookup runs git and writes to cache
+    sha, pkgs = _get_uv_lock_packages(str(repo), c_hash)
+    assert sha == lock_sha
+    assert "aminx" in pkgs
+    assert pkgs["aminx"][0] == "0.3.0"
+
+    # 2. Check JSON cache file was written to <main_root>/.bth/cache/version_cache.json
+    cache_file = repo / ".bth" / "cache" / "version_cache.json"
+    assert cache_file.is_file()
+    doc = json.loads(cache_file.read_text())
+    assert c_hash in doc
+    assert doc[c_hash]["lock_sha256"] == lock_sha
+
+    # 3. Explicit non-mocked assertion: DuckDB validity_cache.db:version_cache table is populated
+    db_path = cat_dir / "validity_cache.db"
+    assert db_path.is_file(), "validity_cache.db was not created in BTH_CATALOG_DIR"
+    with duckdb.connect(str(db_path), read_only=True) as con:
+        tables = {r[0] for r in con.execute("SELECT table_name FROM duckdb_tables()").fetchall()}
+        assert "version_cache" in tables, "Table version_cache does not exist in validity_cache.db"
+        rows = con.execute(
+            "SELECT lock_sha256, package_name, resolved_version, resolved_commit FROM version_cache "
+            "WHERE main_root = ? AND git_hash = ?",
+            [str(repo), c_hash],
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == lock_sha
+        assert rows[0][1] == "aminx"
+        assert rows[0][2] == "0.3.0"
+
+    # 4. Read back via _read_version_cache
+    read_sha, read_pkgs = _read_version_cache(str(repo), c_hash)
+    assert read_sha == lock_sha
+    assert read_pkgs["aminx"][0] == "0.3.0"
+
+    # 5. Remove JSON cache to prove DuckDB fallback is genuinely queried and non-mocked
+    cache_file.unlink()
+    assert not cache_file.exists()
+    db_read_sha, db_read_pkgs = _read_version_cache(str(repo), c_hash)
+    assert db_read_sha == lock_sha
+    assert db_read_pkgs["aminx"][0] == "0.3.0"
+
+
+# ---------------------------------------------------------------------------
+# M1 Track 1: Diagnostic telemetry emission (Spec §6.2)
+# ---------------------------------------------------------------------------
+def test_validity_diagnostic_telemetry_emission(tmp_path: Path):
+    cat_dir = tmp_path / "catalog"
+    init_catalog(cat_dir)
+
+    r = Run(
+        id="00000000-0000-0000-0000-000000000030",
+        project_slug="projA",
+        command="python run.py",
+        argv=["python", "run.py"],
+        git_hash="abc1234",
+        git_branch="main",
+        git_dirty=False,
+        status="completed",
+    )
+    write_run(r, cat_dir)
+    compact(cat_dir)
+
+    # Calling resolve_validity emits validity.resolved
+    res = resolve_validity([r.id], cat_dir)
+    assert r.id in res
+
+    # Test telemetry helper wrappers without raising
+    emit_validity_filter_applied(filter_name="test_filter", hidden_count=2, total_count=10)
+    emit_validity_override_used(override_kind="test_override", entity_id=r.id, reason="test reason")
