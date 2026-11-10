@@ -64,6 +64,7 @@ def main() -> None:
     docs = [f for f in files if f.startswith(PRIMARY_DOC_DIRS)]
     sidecar_paths = [f for f in files if f.endswith(".bth.toml")]
     doc_text = {d: git(a.repo, "show", f"{a.ref}:{d}") for d in docs}
+    sidecar_text = {s: git(a.repo, "show", f"{a.ref}:{s}") for s in sidecar_paths}
 
     report: dict[str, object] = {
         "repo": str(a.repo),
@@ -74,33 +75,41 @@ def main() -> None:
         "n_sidecar_paths": len(sidecar_paths),
         "per_slug": {},
     }
-    any_subj, any_doc, any_path = set(), set(), set()
+    from bathos.bearings.purpose_label import fold_for_ids
+
+    any_subj, any_doc, any_path, any_text = set(), set(), set(), set()
     for s, p in pats.items():
-        hs = [i for i, t in enumerate(subjects) if p.search(t)]
-        hd = [d for d, t in doc_text.items() if p.search(t)]
-        hp = [f for f in sidecar_paths if p.search(f)]
+        hs = [i for i, t in enumerate(subjects) if p.search(fold_for_ids(t))]
+        hd = [d for d, t in doc_text.items() if p.search(fold_for_ids(t))]
+        hp = [f for f in sidecar_paths if p.search(fold_for_ids(f))]
+        ht = [f for f, t in sidecar_text.items() if p.search(fold_for_ids(t))]
         any_subj.update(hs)
         any_doc.update(hd)
         any_path.update(hp)
+        any_text.update(ht)
         report["per_slug"][s] = {  # type: ignore[index]
             "subjects": len(hs),
             "docs": len(hd),
             "sidecar_paths": len(hp),
+            "sidecar_text": len(ht),
             "example_subjects": [subjects[i] for i in hs[:3]],
             "example_paths": hp[:3],
         }
     report["subjects_with_any_slug"] = len(any_subj)
     report["docs_with_any_slug"] = len(any_doc)
     report["sidecar_paths_with_any_slug"] = len(any_path)
+    report["sidecar_texts_with_any_slug"] = len(any_text)
     a.out.parent.mkdir(parents=True, exist_ok=True)
     a.out.write_text(json.dumps(report, indent=2) + "\n")
     logger.info(
-        "subjects %d/%d, docs %d/%d, sidecar paths %d/%d name a slug",
+        "subjects %d/%d, docs %d/%d, sidecar paths %d/%d, sidecar texts %d/%d name a slug",
         len(any_subj),
         len(subjects),
         len(any_doc),
         len(docs),
         len(any_path),
+        len(sidecar_paths),
+        len(any_text),
         len(sidecar_paths),
     )
 
