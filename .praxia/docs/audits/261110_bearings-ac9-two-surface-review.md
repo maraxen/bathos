@@ -90,6 +90,28 @@ base_sha: 'f1708528'
 
 Tests: the touched test files (Bearings, charter, validate, fold, index migration) pass.
 
+## Round 2 (261110, base dca7a914)
+
+- **Antigravity** (dispatch c2913f7a, a retry of 8340f5d9). The first attempt failed with no report: it called an MCP tool and headless mode denied it. The retry's record reads `admission: rejected`, but the only reason given is the first attempt's leftover `.praxia/patches/8340f5d9….diff`, a host artifact, so the report is usable.
+- **Cursor** (dispatch 0a8e1390): admitted. Its base predates 507afc46, so its run-withholding finding was already fixed there.
+
+| Finding (round 2) | Severity | Status |
+|---|---|---|
+| A run withheld by its sidecar path or a field loses its sidecar label; the purpose counts as silent | high (both) | **fixed** 507afc46: `withheld_run_sidecars` |
+| Unicode or encoded hyphens, zero-width characters, line-broken slugs pass the matcher | high (Cursor) | **fixed** f7da0728: `fold_for_ids` |
+| Project slug in `reader/index.json` is not scanned; there is no last check over every reader byte | high (Cursor) | **fixed** f7da0728: slug refused; `PacketLeakError` scan |
+| Disagreement between commits is project-wide, not per path | low (Antigravity) | **fixed** 507afc46 |
+| One path shown under one label and withheld under another stays present | medium (Cursor) | **fixed** f7da0728 |
+| A `not_text` sidecar loses its label | medium (Cursor) | **fixed** f7da0728 |
+| Packet and scorer use different id sets; one-word ids over-exclude | medium (Cursor) | **fixed** f7da0728: shared `id_patterns`; one-word ids unmatched |
+| A stored id containing `_` does not match its hyphen spelling | low (Cursor) | **fixed** f7da0728 |
+| Two decoy purposes are generic | medium (Antigravity) | **fixed** 507afc46 |
+| Decoy comment says tev_design's draft is "6 live" | spec (Antigravity) | **fixed** 507afc46: it is 7 live |
+| `marginal` is not implemented | spec (Antigravity) | **fixed** 507afc46: `meets_marginal` (false-silent ≤ 0.4 reading, owner to confirm) |
+| Indeterminate can shrink denominators; metrics with no items make a run unscorable | high/medium (Antigravity) | **moved to the AC-9 sidecar**: bounds proposed in spec T7 |
+| Working-tree or confirmation ids change the packet hash | medium (Cursor) | **as designed**: same sources as the purpose-text needles |
+| Off-charter cited together with an unlabelled sidecar is penalised twice | (Antigravity) | **open** |
+
 ## Found clean (Cursor)
 
 - A root-level `charter.purpose` and a root inline charter table are excluded.
