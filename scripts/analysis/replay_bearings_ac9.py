@@ -38,6 +38,9 @@ HERE = Path(__file__).resolve().parent
 DECOY = HERE / "ac9" / "decoy_charter.toml"
 # Owner-written until cisternal's shadow.label owner_confirmed events exist: since, until, ref, confirmed_through.
 LABEL_CONFIRMATION = HERE / "ac9" / "label_confirmation.toml"
+# AC-9 amendment 3 (owner 261110): no labelled window holds revival work, so the revived case is planted when
+# the record has one, reported, and does not gate pass, marginal or the planted-case check.
+GATE_REVIVED = False
 READERS = (
     "reader1",
     "reader2",
@@ -98,7 +101,9 @@ def gate(repo: Path, work: Path, catalog_dir: Path | None) -> dict:
     overlay = ac9.load_label_overlay(LABEL_CONFIRMATION)
     out["n_overlay_labels"] = len(overlay)
     key = ac9.answer_key(repo, full, charter, overlay)
-    plans, unmet = ac9.plan_planted_packets(_run_labels(full, key), charter)
+    plans, unmet = ac9.plan_planted_packets(
+        _run_labels(full, key), charter, require_revival=GATE_REVIVED
+    )
     out |= {"full_packet_sha256": res["packet_sha256"], "plans": plans, "unmet": unmet}
     out["start_gate_ok"] = not unmet
     return out
@@ -230,7 +235,7 @@ def main() -> None:
             (q / "oracle_reading.json").write_text(json.dumps(reading, indent=2) + "\n")
             built[plan["packet"]] = {
                 "packet_sha256": sha,
-                "missing_cases": ac9.missing_cases(key),
+                "missing_cases": ac9.missing_cases(key, require_revival=GATE_REVIVED),
                 "bound_violations": ac9.bound_violations(key, charter),
             }
         conf = tomllib.loads(LABEL_CONFIRMATION.read_text(encoding="utf-8"))
@@ -276,7 +281,9 @@ def score(work: Path, repo: Path, catalog_dir: Path | None) -> None:
         except Exception:  # noqa: BLE001
             leak_or_hash += 1
         key = ac9.answer_key(repo, pdir, charter, overlay)
-        invalid += [f"{q}: missing {c}" for c in ac9.missing_cases(key)]
+        invalid += [
+            f"{q}: missing {c}" for c in ac9.missing_cases(key, require_revival=GATE_REVIVED)
+        ]
         invalid += [f"{q}: {v}" for v in ac9.bound_violations(key, charter)]
         readings = []
         for r in READERS:
@@ -317,7 +324,8 @@ def score(work: Path, repo: Path, catalog_dir: Path | None) -> None:
         not ac9.meets_pass(
             ac9.pooled_metrics(
                 [{"key": pk["key"], "readings": [{"gold": rd["gold"], "comparison": c}]}]
-            )
+            ),
+            gate_revived=GATE_REVIVED,
         )
         for pk in packets
         for rd in pk["readings"][:1]
@@ -343,8 +351,8 @@ def score(work: Path, repo: Path, catalog_dir: Path | None) -> None:
             for k, v in oracle.items()
             if not k.startswith(("silent_recall_majority", "false_silent_majority"))
         },
-        "meets_pass": ac9.meets_pass(pooled),
-        "meets_marginal": ac9.meets_marginal(pooled),
+        "meets_pass": ac9.meets_pass(pooled, gate_revived=GATE_REVIVED),
+        "meets_marginal": ac9.meets_marginal(pooled, gate_revived=GATE_REVIVED),
     }
     (work / "result.json").write_text(
         json.dumps({**result, "invalid_detail": invalid}, indent=2) + "\n"

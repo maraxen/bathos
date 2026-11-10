@@ -5,6 +5,9 @@
 # left out until it is active (add it with a pivot); literature-review, fitness-prediction and readout-validation added
 # from recurring work in the 2026-10-12..11-09 window; active-learning and size-selections kept live though quiet;
 # no tev_design aim is retired yet beyond the two below (so AC-9's revival case waits for revival work).
+# 261110, after the first confirmation (sha 87cc2147): lagoon-simulation renamed lagoon-dynamics (owner), because a
+# tev_design doc filename (261103_lagoon-simulation-purpose.md) cited by 32 lagoon sidecars named the old id, so the
+# packet withheld them. Text unchanged. Re-confirm after copying.
 # The tev_design split is being scoped: when it happens, moved purposes are retired here with a reason naming the new
 # project, which gets its own charter (owner 261110).
 mandate = "Design TEV protease variants with new substrate specificities, above all a scarless TEV that accepts any P1′, by delivering a multi-pronged set of designed libraries for the Chory selections and building the design and selection-modelling methods they rely on."
@@ -25,7 +28,7 @@ state = "live"
 text = "Size the selections: coverage, bottleneck and sequencing depth."
 state = "live"
 
-[purpose.lagoon-simulation]
+[purpose.lagoon-dynamics]
 text = "Simulate continuous selection in the lagoon."
 state = "live"
 

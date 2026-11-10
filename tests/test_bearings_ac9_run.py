@@ -98,6 +98,32 @@ def test_an_insufficient_record_plants_nothing_and_says_why(runs, why):
     assert plans == [] and any(why in u for u in unmet)
 
 
+def test_without_required_revival_a_record_with_no_revival_still_plants():
+    # AC-9 amendment 3 (owner 261110): every retired purpose is then absent in every packet.
+    plans, unmet = plan_planted_packets(_runs(revived=0), CHARTER, require_revival=False)
+    assert unmet == [] and len(plans) == 3
+    assert all(p["revived"] is None and p["absent_retired"] == RETIRED for p in plans)
+    # ... and a record that has one still revives it.
+    plans, _ = plan_planted_packets(_runs(), CHARTER, require_revival=False)
+    assert all(p["revived"] == "old-x" for p in plans)
+
+
+def test_without_gating_revival_pass_and_cases_ignore_it():
+    m = {
+        "silent_recall": 1.0,
+        "false_silent": 0.0,
+        "off_charter_unmapped": 1.0,
+        "revived_flagged": None,
+        "gold_agreement": 1.0,
+    }
+    assert not meets_pass(m) and meets_pass(m, gate_revived=False)
+    assert ac9.meets_marginal(m, gate_revived=False)
+    key = _full_key(revived=[])
+    assert missing_cases(key) == ["revived"] and missing_cases(key, require_revival=False) == []
+    # Negative control: the other metrics still gate.
+    assert not meets_pass(m | {"off_charter_unmapped": 0.5}, gate_revived=False)
+
+
 # ── pooling (T7(b)) ──────────────────────────────────────────────────────────────────────────────────────────────
 
 

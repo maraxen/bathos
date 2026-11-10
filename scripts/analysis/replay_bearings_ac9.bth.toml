@@ -49,27 +49,29 @@ AMENDMENT 261110, before any packet, reading, mapping or tev_design label exists
 
 AMENDMENT 261110 (2), still before any packet, reading or mapping: charter and first batch settled with the owner. Charter (scripts/analysis/ac9/tev_design_charter.DRAFT.toml, not yet confirmed in tev_design): mandate A; 9 live purposes (chory-libraries, mpnn-design, assembly-method, size-selections, lagoon-simulation, active-learning, literature-review, fitness-prediction, readout-validation); 2 retired (degenerate-codon-libraries, qmmm-reaction-states); distal-local-specificity left out until active. First batch: 311 sidecars of 2026-10-12..2026-11-09, all 33 groups confirmed by the owner (label_confirmation.toml; counts by label: lagoon-simulation 124, mpnn-design 79, literature-review 46, chory-libraries 22, fitness-prediction 17, readout-validation 14, off-charter 3, mixed 6). Disclosed: (a) three live purposes (literature-review, fitness-prediction, readout-validation) were added because recurring work in this same window fitted no purpose, so the charter is fitted to the record it scores and off-charter work is thin (3 sidecars, 19 runs); the off-charter case is therefore easier than it would be on a charter written in advance. (b) No retired purpose has runs in the window (owner: none retired yet), so the revival case cannot be planted and the start gate stays unmet until a window holds revival work, unless the owner amends this case before any data. (c) The ref is tev_design main (5f4856c7); runs on other branches are not reachable from it and drop out, which the gate will count.
 
+AMENDMENT 261110 (3), still before any planted packet, reading or mapping. The owner confirmed the charter (sha 87cc2147, 20:30Z) and the gate ran (full window packet e56e859e7241: 1,297 runs, 1,188 labelled). Only the revival case was unmet, and a full-window answer key showed 35 of 304 labelled sidecars withheld (11.5%, over the 10% bound), 32 of them because they cite a tev_design doc named 261103_lagoon-simulation-purpose.md, whose filename contains the charter id. Owner decisions through AskUserQuestion: (i) rename lagoon-simulation to lagoon-dynamics (0 hits in the packet's sidecar blobs, docs and subjects; text unchanged; the charter is re-confirmed after the change, and the label file renamed to match); (ii) drop the revival case: plan_planted_packets(require_revival=False) and missing_cases(require_revival=False) plant and check without it, a retired purpose with runs is still revived when the record has one, revived_flagged is reported and no longer gates pass or marginal (meets_pass / meets_marginal gate_revived=False; script constant GATE_REVIVED). Disclosed: this is a weaker check than the owner's T7 design, chosen because revivals are rare by design and no labelled window holds one. Correction to an earlier figure: the slug count of runs b05b9e67 / 7c03a779 / f35d5826 read tev_design's HEAD, from which 306 of the 311 window sidecars are gone, so it undercounted; counted on the packet's own blobs, lagoon-simulation appeared in 32 sidecars, literature-review in 2, fitness-prediction in 1, every other id in none.
+
 Protocol. (1) Done 261110: design settled with the owner (labels by shadow capture; bounds; pooling with every case planted; oracle reading from labels); planting, scoring, bounds and controls committed with tests (tests/test_bearings_ac9_run.py, tests/test_bearings_ac9_planted.py); `--controls-only` passes; `--gate` run, not met. This sidecar is committed before any packet, reading or mapping exists. (2) Owner items above; `--gate` until met. (3) `--build`: packets, budget control and oracle readings; counts only appended here before any reader runs. (4) Readers, then mappers (planted, oracle, decoy, budget). (5) `bth run` the scorer. The result is reported either way."""
 stage_name = "validation"
 novel = true
 
 [outcomes.invalid]
-condition = "NOT controls_ok OR NOT start_gate_ok OR leak_or_hash_failures > 0 OR invalid_reasons_n > 0 OR decoy_mapped_share IS NULL OR decoy_mapped_share > 0.2 OR degenerate_failing < degenerate_total OR NOT budget_control_ok OR pooled_silent_recall IS NULL OR pooled_false_silent IS NULL OR pooled_off_charter_unmapped IS NULL OR pooled_revived_flagged IS NULL OR pooled_gold_agreement IS NULL"
+condition = "NOT controls_ok OR NOT start_gate_ok OR leak_or_hash_failures > 0 OR invalid_reasons_n > 0 OR decoy_mapped_share IS NULL OR decoy_mapped_share > 0.2 OR degenerate_failing < degenerate_total OR NOT budget_control_ok OR pooled_silent_recall IS NULL OR pooled_false_silent IS NULL OR pooled_off_charter_unmapped IS NULL OR pooled_gold_agreement IS NULL"
 decision = "The run is invalid: report it, cite no number from it, fix the cause, and pre-register a new run."
 reasoning = "T7's invalid conditions plus the duties the four review rounds placed on this sidecar: planted cases present, withheld evidence bounded, no unscorable metric."
 
 [outcomes.pass]
-condition = "pooled_silent_recall >= 0.8 AND pooled_false_silent <= 0.2 AND pooled_off_charter_unmapped >= 0.8 AND pooled_revived_flagged >= 0.6666 AND pooled_gold_agreement >= 0.8"
+condition = "pooled_silent_recall >= 0.8 AND pooled_false_silent <= 0.2 AND pooled_off_charter_unmapped >= 0.8 AND pooled_gold_agreement >= 0.8"
 decision = "Charter comparison meets the owner's bar on this record: the owner may move Bearings from shadow to advisory (the brief is shown, nothing enforced). Report per-reader results beside the pooled ones."
-reasoning = "Owner thresholds, 261109. 0.6666 stands for 2/3 to absorb float rounding."
+reasoning = "Owner thresholds, 261109; revived_flagged no longer gates (amendment 3, owner 261110), reported when it occurs."
 
 [outcomes.marginal]
-condition = "pooled_silent_recall >= 0.6 AND pooled_false_silent <= 0.4 AND pooled_off_charter_unmapped >= 0.6 AND pooled_revived_flagged >= 0.6 AND pooled_gold_agreement >= 0.6"
+condition = "pooled_silent_recall >= 0.6 AND pooled_false_silent <= 0.4 AND pooled_off_charter_unmapped >= 0.6 AND pooled_gold_agreement >= 0.6"
 decision = "Stay in shadow. Read the fail rules to find the weak metric, change one thing, and pre-register a new run."
 reasoning = "Owner 261109; false-silent read as at most 0.4, owner 261110."
 
 [outcomes.fail]
-condition = "NOT (pooled_silent_recall >= 0.6 AND pooled_false_silent <= 0.4 AND pooled_off_charter_unmapped >= 0.6 AND pooled_revived_flagged >= 0.6 AND pooled_gold_agreement >= 0.6)"
+condition = "NOT (pooled_silent_recall >= 0.6 AND pooled_false_silent <= 0.4 AND pooled_off_charter_unmapped >= 0.6 AND pooled_gold_agreement >= 0.6)"
 decision = "Stay in shadow. Read the fail rules above, starting with the mapper-only arm."
 reasoning = "Below marginal on at least one metric."
 is_residual = true

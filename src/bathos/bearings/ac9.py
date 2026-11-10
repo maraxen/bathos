@@ -441,9 +441,15 @@ def _reading_counts(
     }
 
 
-def meets_pass(metrics: dict[str, Any]) -> bool:
-    """True only when every scorable metric meets the owner's T7 pass value. An unscorable metric is not a pass."""
+def meets_pass(metrics: dict[str, Any], *, gate_revived: bool = True) -> bool:
+    """True only when every scorable metric meets the owner's T7 pass value. An unscorable metric is not a pass.
+
+    ``gate_revived=False`` leaves revived_flagged out (AC-9 amendment 3, owner 261110: no labelled window holds
+    revival work, so the case is reported when it occurs but does not gate).
+    """
     for name, bound in PASS.items():
+        if name == "revived_flagged" and not gate_revived:
+            continue
         value = metrics[name]
         if value is None:
             return False
@@ -473,13 +479,15 @@ def invalid_reasons(key: dict[str, Any]) -> list[str]:
 MARGINAL = 0.6  # T7: `marginal` when every metric is at least 0.6
 
 
-def meets_marginal(metrics: dict[str, Any]) -> bool:
+def meets_marginal(metrics: dict[str, Any], *, gate_revived: bool = True) -> bool:
     """T7's ``marginal`` band: every metric scorable and at least 0.6.
 
     False-silent is an error rate (lower is better), so "at least 0.6" is read as its complement: false-silent at most
     0.4. This reading is the implementer's (261110) and is recorded in the spec for the owner to confirm.
     """
     for name in PASS:
+        if name == "revived_flagged" and not gate_revived:
+            continue
         value = metrics[name]
         if value is None:
             return False
@@ -546,9 +554,15 @@ def _seeded(token: str) -> str:
 
 
 def plan_planted_packets(
-    run_labels: dict[str, list[str]], charter_purposes: dict[str, dict[str, Any]]
+    run_labels: dict[str, list[str]],
+    charter_purposes: dict[str, dict[str, Any]],
+    *,
+    require_revival: bool = True,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """The three planted packets, chosen mechanically from labelled runs. Returns ``(plans, unmet)``.
+
+    ``require_revival=False`` (AC-9 amendment 3) plants without a revived retired purpose when none has runs; one is
+    still revived when the record has one.
 
     ``run_labels`` maps run id -> its sidecar's purpose slugs (unlabelled runs are left out by the caller). A live
     purpose is eligible when it has at least ``MIN_RUNS_PER_PURPOSE`` labelled runs. Eligible live purposes are ranked
@@ -575,14 +589,12 @@ def plan_planted_packets(
         unmet.append(
             f"{len(eligible)} live purposes with >= {MIN_RUNS_PER_PURPOSE} labelled runs; need {MIN_ELIGIBLE_LIVE}"
         )
-    if not revivable:
+    if require_revival and not revivable:
         unmet.append(
             f"no retired purpose with >= {MIN_RUNS_PER_PURPOSE} labelled runs (revival case)"
         )
-    if len(retired) < MIN_RETIRED:
-        unmet.append(
-            f"{len(retired)} retired purposes; need {MIN_RETIRED} (one revived, one absent)"
-        )
+    if len(retired) < (MIN_RETIRED if require_revival else 1):
+        unmet.append(f"{len(retired)} retired purposes; need at least one absent retired purpose")
     if len(by_purpose.get(OFF_CHARTER, [])) < MIN_OFF_CHARTER_RUNS:
         unmet.append(f"fewer than {MIN_OFF_CHARTER_RUNS} runs labelled {OFF_CHARTER}")
     if unmet:
@@ -593,8 +605,8 @@ def plan_planted_packets(
     for k in range(N_PACKETS):
         silent = {eligible[(2 * k + j) % n] for j in range(SILENT_PER_PACKET)}
         present = [p for p in eligible if p not in silent]
-        revived = revivable[k % len(revivable)]
-        allowed = set(present) | {revived, OFF_CHARTER}
+        revived = revivable[k % len(revivable)] if revivable else None
+        allowed = set(present) | {OFF_CHARTER} | ({revived} if revived else set())
         per_purpose: dict[str, int] = {}
         kept = []
         for rid in sorted(run_labels, key=_seeded):
@@ -612,19 +624,21 @@ def plan_planted_packets(
                 "silent": sorted(silent),
                 "present": sorted(present),
                 "revived": revived,
-                "absent_retired": sorted(set(retired) - {revived}),
+                "absent_retired": sorted(
+                    set(retired) - {revived}
+                ),  # every retired purpose when none revives
                 "runs": sorted(kept),
             }
         )
     return plans, []
 
 
-def missing_cases(key: dict[str, Any]) -> list[str]:
+def missing_cases(key: dict[str, Any], *, require_revival: bool = True) -> list[str]:
     """Cases a planted packet's answer key fails to contain; the run is invalid if any packet misses one."""
     need = {
         "present": key["present"],
         "silent": key["silent"],
-        "revived": key["revived"],
+        **({"revived": key["revived"]} if require_revival else {}),
         "absent_retired": key["absent_retired"],
         "off_charter_sidecars": key["off_charter_sidecars"],
     }
