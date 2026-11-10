@@ -18,6 +18,7 @@ from bathos.bearings.ac9 import (
     decoy_invalid,
     decoy_mapped_share,
     degenerate_mappings,
+    invalid_reasons,
     meets_marginal,
     meets_pass,
     reading_gold,
@@ -148,8 +149,9 @@ ORACLE = {
 def _score(w, out: Path, rid: str, mapping: dict, name: str):
     key = answer_key(w["repo"], out, w["charter"])
     reading = _existing_reading(w["cat"], "pkt", rid)
-    gold = reading_gold(out, reading, key["labels"], key["ambiguous_paths"])
-    return key, gold, ac9_metrics(key, gold, _compare(w, rid, mapping, name))
+    gold = reading_gold(out, reading, key["labels"])
+    maybe = reading_gold(out, reading, key["ambiguous_labels"])
+    return key, gold, ac9_metrics(key, gold, _compare(w, rid, mapping, name), maybe)
 
 
 def test_the_answer_key_comes_from_the_labels(planted):
@@ -732,18 +734,69 @@ def test_a_path_mixing_off_charter_and_a_slug_gives_no_gold(planted):
     assert "scripts/tidy.bth.toml" in key["ambiguous_paths"]
     assert "scripts/tidy.bth.toml" not in key["labels"]
     rid = _record(planted, out, sha)
-    gold = reading_gold(
-        out, _existing_reading(planted["cat"], "pkt", rid), key["labels"], key["ambiguous_paths"]
+    reading = _existing_reading(planted["cat"], "pkt", rid)
+    gold = reading_gold(out, reading, key["labels"])
+    maybe = reading_gold(out, reading, key["ambiguous_labels"])
+    assert gold["r-tidy"] == [] and maybe["r-tidy"] == ["gamma-aim", OFF_CHARTER]
+    # A target among the ambiguous labels is neither right nor wrong ...
+    m = ac9_metrics(
+        key, gold, _compare(planted, rid, {**ORACLE, "r-tidy": "gamma-aim"}, "mixed"), maybe
     )
-    assert "r-tidy" not in gold
-    m = ac9_metrics(key, gold, _compare(planted, rid, {**ORACLE, "r-tidy": "gamma-aim"}, "mixed"))
-    assert m["n_off_charter"] == 0 and m["n_mapped"] == 3  # r-tidy's pair is not scored
+    assert m["n_off_charter"] == 0 and m["n_mapped"] == 3 and m["n_unscored_pairs"] == 1
+    # ... but any other target is a miss (round 4: an error is not hidden by an ambiguous citation).
+    m = ac9_metrics(
+        key, gold, _compare(planted, rid, {**ORACLE, "r-tidy": "beta-aim"}, "mixed_wrong"), maybe
+    )
+    assert m["n_mapped"] == 4 and m["gold_agreement"] == 0.75
+
+
+def test_an_ambiguous_citation_does_not_hide_firm_gold_or_a_revived_flag(planted):
+    # Round 4: r-legacy cites old-aim firmly and an ambiguous path; its revived flag still counts.
+    _add_run(
+        planted,
+        "tidy",
+        _sidecar('[charter]\npurpose = "gamma-aim"\n', "tidy again"),
+        "000000b6aaaaaaaa",
+    )
+    out, sha = _packet(planted)
+    key = answer_key(planted["repo"], out, planted["charter"])
+    rid = _record(planted, out, sha)
+    reading = _existing_reading(planted["cat"], "pkt", rid)
+    reading["purposes"] = [
+        {**p, "citations": [*p["citations"], "sidecar:scripts/tidy.bth.toml"]}
+        if p["id"] == "r-legacy"
+        else p
+        for p in reading["purposes"]
+    ]
+    gold = reading_gold(out, reading, key["labels"])
+    maybe = reading_gold(out, reading, key["ambiguous_labels"])
+    assert gold["r-legacy"] == ["old-aim"]
+    m = ac9_metrics(key, gold, _compare(planted, rid, ORACLE, "legacy_amb"), maybe)
+    assert m["revived_flagged"] == 1.0
 
 
 def test_the_key_reports_shown_denominators_for_the_withheld_share(planted):
     out, _ = _packet(planted)
     key = answer_key(planted["repo"], out, planted["charter"])
     assert key["n_shown_sidecars"] == 5 and key["n_shown_runs"] == 5
+    assert key["n_shown_sidecars_labelled"] == 4  # plain.bth.toml carries no label
+
+
+def test_an_unresolvable_withheld_run_makes_the_comparison_invalid(planted):
+    insert_runs(
+        planted,
+        [
+            _run_row(
+                "000000b7aaaaaaaa", "0" * 40, "scripts/gone.bth.toml", "python x --aim gamma-aim"
+            )
+        ],
+    )
+    out, _ = _packet(planted)
+    key = answer_key(planted["repo"], out, planted["charter"])
+    assert invalid_reasons(key) and not invalid_reasons(
+        answer_key(planted["repo"], _packet(planted, name="clean")[0], planted["charter"])
+        | {"n_withheld_runs_unresolved": 0}
+    )
 
 
 def test_the_decoy_charter_shares_no_purpose_with_the_tev_design_draft():
