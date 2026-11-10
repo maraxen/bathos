@@ -1,0 +1,40 @@
+# AC-9 decoy charter: the negative control (spec 261104 T7(a)). A mapper given a tev_design reading and THIS charter
+# should map almost nothing; over 20% of reading purposes mapped makes the AC-9 run invalid.
+# It is drawn from another real project (bathos, the experiment tracker) so its purposes are concrete and plausible,
+# not strawmen, and share no aim with protein library design. Same shape as the tev_design draft: 6 live, 2 retired.
+# Draft by the assistant 261109; the owner may substitute another project's charter.
+mandate = "Never lose track of what ran, what it produced, or whether its results are still valid, for one researcher across many projects and a cluster."
+
+[purpose.run-provenance]
+text = "Record every script run with its git state, command, outputs and outcome, safely from parallel cluster jobs."
+state = "live"
+
+[purpose.pre-registration]
+text = "Make hypotheses and pass/fail criteria be written and committed before a run, and evaluate them at run end."
+state = "live"
+
+[purpose.catalog-queries]
+text = "Answer what ran and what it produced through fast queries over a tiered run catalog."
+state = "live"
+
+[purpose.cluster-sync]
+text = "Submit runs to the SLURM cluster and bring their records and outputs home."
+state = "live"
+
+[purpose.claim-rigor]
+text = "Gate claims on review coverage, controls and reproduction before a campaign may conclude."
+state = "live"
+
+[purpose.output-tiering]
+text = "Keep verified warm, cold and mirror copies of run outputs so worktrees can be deleted."
+state = "live"
+
+[purpose.iceberg-catalog]
+text = "Store the catalog in pyiceberg tables."
+state = "retired"
+retired_reason = "pyiceberg serves distributed data lakes; DuckDB plus Parquet is simpler for one researcher."
+
+[purpose.typer-cli]
+text = "Build the command line on Typer."
+state = "retired"
+retired_reason = "Replaced by cyclopts; there is no cli.py and no Typer."
