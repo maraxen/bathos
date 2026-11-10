@@ -152,13 +152,31 @@ def parse_doc_frontmatter(content: str) -> tuple[dict[str, Any], str, str]:
     if not lines:
         return {}, "", "---"
 
-    first_line = lines[0].strip()
+    first_line = lines[0].rstrip()
     if first_line in ("---", "---bth---", "# ---bth---"):
         delimiter = first_line
-        closing_delim = "---" if delimiter == "---" else delimiter
+        closing_delims = (
+            ("---",)
+            if delimiter == "---"
+            else (delimiter, "---")
+            if not delimiter.startswith("#")
+            else (delimiter, "# ---")
+        )
         for idx in range(1, len(lines)):
-            if lines[idx].strip() in ("---", closing_delim):
-                fm_text = "".join(lines[1:idx])
+            if lines[idx].rstrip() in closing_delims:
+                raw_lines = lines[1:idx]
+                if delimiter.startswith("#"):
+                    stripped = []
+                    for ln in raw_lines:
+                        if ln.startswith("# "):
+                            stripped.append(ln[2:])
+                        elif ln.startswith("#"):
+                            stripped.append(ln[1:])
+                        else:
+                            stripped.append(ln)
+                    fm_text = "".join(stripped)
+                else:
+                    fm_text = "".join(raw_lines)
                 body_text = "".join(lines[idx + 1 :])
                 try:
                     meta = yaml.safe_load(fm_text) or {}
@@ -177,6 +195,8 @@ def format_doc_frontmatter(metadata: dict[str, Any], body: str, delimiter_style:
     if not metadata:
         return body
     fm_yaml = yaml.dump(metadata, sort_keys=False, default_flow_style=False).strip()
+    if delimiter_style.startswith("#"):
+        fm_yaml = "\n".join(f"# {line}" if line else "#" for line in fm_yaml.splitlines())
     closing = "---" if delimiter_style == "---" else delimiter_style
     body_clean = body.lstrip("\n")
     return f"{delimiter_style}\n{fm_yaml}\n{closing}\n\n{body_clean}"
@@ -238,7 +258,7 @@ def archive_doc(
 
     tar_buf = io.BytesIO()
     with tarfile.open(fileobj=tar_buf, mode="w") as tar:
-        tar_info = tarfile.TarInfo(name=doc_path.name)
+        tar_info = tarfile.TarInfo(name=source_rel)
         tar_info.size = doc_size
         tar_info.mtime = doc_path.stat().st_mtime
         tar.addfile(tar_info, io.BytesIO(doc_bytes))

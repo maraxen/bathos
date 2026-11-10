@@ -2126,7 +2126,12 @@ def restore_tool(
     Returns:
         Dict with restored paths, or {"error": ..., "error_code": ...} on failure
     """
-    from bathos.artifact_archive import ArchiveError, ArtifactNotFoundError, restore_archived_item
+    from bathos.artifact_archive import (
+        ArchiveError,
+        ArtifactNotFoundError,
+        RestoreConflictError,
+        restore_archived_item,
+    )
 
     if not item_id:
         return {
@@ -2148,6 +2153,13 @@ def restore_tool(
         )
     except ArtifactNotFoundError as e:
         code = BathosErrorCode.ARCHIVE_ITEM_NOT_FOUND
+        return {
+            "error": str(e),
+            "error_code": code.value,
+            "resolution_hint": RESOLUTION_HINTS[code],
+        }
+    except RestoreConflictError as e:
+        code = BathosErrorCode.RESTORE_CONFLICT
         return {
             "error": str(e),
             "error_code": code.value,

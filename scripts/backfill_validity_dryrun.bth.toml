@@ -13,6 +13,7 @@ reasoning = "Failed to evaluate defect cohorts or output report file."
 is_residual = true
 
 [result_schema]
+total_runs = "int"
 total_runs_tev = "int"
 total_runs_asr = "int"
 void_tev_hide_false = "int"

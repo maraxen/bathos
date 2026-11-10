@@ -573,6 +573,24 @@ def restore_archived_item(
                     if not item.is_file():
                         continue
                     rel_str = str(item.relative_to(extract_dir))
+                    if kind == "doc":
+                        target_path = paths[0] if (paths and paths[0]) else None
+                        if not target_path:
+                            # Try paired manifest .md next to .tar.zst bundle
+                            manifest_candidate = bundle_file.with_name(
+                                bundle_file.name.removesuffix(".tar.zst").removesuffix(".zst") + ".md"
+                            )
+                            if manifest_candidate.is_file():
+                                try:
+                                    from bathos.doc_store import parse_doc_frontmatter
+                                    m_meta, _, _ = parse_doc_frontmatter(
+                                        manifest_candidate.read_text(encoding="utf-8")
+                                    )
+                                    target_path = m_meta.get("source")
+                                except Exception:
+                                    pass
+                        if target_path and (rel_str == Path(target_path).name or rel_str == Path(rel_str).name):
+                            rel_str = target_path
                     bundle_items_bytes[rel_str] = item.read_bytes()
         else:
             with tempfile.TemporaryDirectory() as tmp:
@@ -634,7 +652,7 @@ def restore_archived_item(
 
     try:
         restore_commit_sha = ""
-        to_stage = restored or bundle_restored
+        to_stage = list(dict.fromkeys(restored + bundle_restored))
         if to_stage:
             _run_git(["add", *[str(p) for p in to_stage]], cwd=project_root)
             diff_check = _run_git(["diff", "--cached", "--quiet"], cwd=project_root, check=False)
@@ -667,7 +685,6 @@ def restore_archived_item(
         )
         _regenerate_index(project_root, catalog_dir)
     except (ArchiveError, RestoreConflictError):
-        raise
         raise
     except Exception as e:
         # The restore commit/ledger-append/index-regen tail is fallible (git commit can

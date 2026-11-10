@@ -5,7 +5,7 @@ Spec 261106 §1.3.C, §2.1, §3.2, §3.3.
 
 from __future__ import annotations
 
-import contextlib
+import functools
 import hashlib
 import json
 import logging
@@ -289,6 +289,7 @@ def version_in_range(
     return True
 
 
+@functools.lru_cache(maxsize=2048)
 def is_git_ancestor(ancestor: str, descendant: str, repo_root: Path) -> bool:
     """True iff ancestor is an ancestor of descendant in repo_root."""
     try:
@@ -311,15 +312,12 @@ def commit_in_range(
     """Evaluate commit ancestry: commit matches iff introduced is ancestor and fixed is NOT ancestor."""
     if not commit_sha:
         return False
-    if introduced:
-        if not is_git_ancestor(introduced, commit_sha, repo_root):
-            return False
-    if fixed:
-        if is_git_ancestor(fixed, commit_sha, repo_root):
-            return False
-    return True
+    if introduced and not is_git_ancestor(introduced, commit_sha, repo_root):
+        return False
+    return not (fixed and is_git_ancestor(fixed, commit_sha, repo_root))
 
 
+@functools.lru_cache(maxsize=128)
 def extract_predicate_columns(condition: str) -> list[str]:
     """Extract referenced column names from DuckDB SQL expression AST."""
     if not condition or not condition.strip():
@@ -457,6 +455,35 @@ def evaluate_predicate(condition: str, run: Any) -> tuple[bool, str | None]:
         return False, f"predicate evaluation error: {exc}"
 
 
+@functools.lru_cache(maxsize=1024)
+def _get_uv_lock_packages(
+    main_root_str: str, git_hash: str
+) -> tuple[str | None, dict[str, tuple[str, str | None]]]:
+    """Return (calc_sha, dict_of_pkg_to_tuple_of_version_and_commit)."""
+    try:
+        res = subprocess.run(
+            ["git", "-C", main_root_str, "show", f"{git_hash}:uv.lock"],
+            capture_output=True,
+            check=False,
+        )
+        if res.returncode == 0 and res.stdout:
+            lock_bytes = res.stdout
+            calc_sha = hashlib.sha256(lock_bytes).hexdigest()
+            lock_doc = tomllib.loads(lock_bytes.decode("utf-8"))
+            pkgs: dict[str, tuple[str, str | None]] = {}
+            for p in lock_doc.get("package", []):
+                name = p.get("name")
+                if name:
+                    v = p.get("version")
+                    src = p.get("source", {})
+                    c = src.get("commit") or src.get("git") if isinstance(src, dict) else None
+                    pkgs[name] = (v, c)
+            return calc_sha, pkgs
+    except Exception:
+        pass
+    return None, {}
+
+
 def resolve_toolchain_version(
     run: Any,
     main_root: Path | None,
@@ -547,29 +574,15 @@ def resolve_toolchain_version(
     lock_verified = False
 
     if main_root is not None and main_root.is_dir() and git_hash and git_hash != "unknown":
-        try:
-            res = subprocess.run(
-                ["git", "-C", str(main_root), "show", f"{git_hash}:uv.lock"],
-                capture_output=True,
-                check=False,
-            )
-            if res.returncode == 0 and res.stdout:
-                lock_bytes = res.stdout
-                calc_sha = hashlib.sha256(lock_bytes).hexdigest()
-                lock_doc = tomllib.loads(lock_bytes.decode("utf-8"))
-                for p in lock_doc.get("package", []):
-                    name = p.get("name")
-                    if name and (name == package or key_prefix(name) == pkg_key):
-                        lock_version = p.get("version")
-                        src = p.get("source", {})
-                        if isinstance(src, dict):
-                            lock_commit = src.get("commit") or src.get("git")
-                        break
-
-                if dep_lock_sha and dep_lock_sha == calc_sha:
-                    lock_verified = True
-        except Exception as exc:
-            logger.debug("Failed to read uv.lock at %s in %s: %s", git_hash, main_root, exc)
+        calc_sha, pkgs = _get_uv_lock_packages(str(main_root), git_hash)
+        if calc_sha is not None:
+            for name, (v, c) in pkgs.items():
+                if name == package or key_prefix(name) == pkg_key:
+                    lock_version = v
+                    lock_commit = c
+                    break
+            if dep_lock_sha and dep_lock_sha == calc_sha:
+                lock_verified = True
 
     # Resolve Tiers 1-4:
     if lock_verified and lock_version:
@@ -586,9 +599,13 @@ def resolve_toolchain_version(
         # Tier 3 (uv.lock found at commit, but lock SHA unverified/missing)
         return lock_version, lock_commit, "inferred-from-commit"
 
-    if git_hash and git_hash != "unknown" and main_root is not None:
-        if main_root.name == package or (isinstance(run, dict) and run.get("project_slug") == package):
-            return None, git_hash, "inferred-from-commit"
+    if (
+        git_hash
+        and git_hash != "unknown"
+        and main_root is not None
+        and (main_root.name == package or (isinstance(run, dict) and run.get("project_slug") == package))
+    ):
+        return None, git_hash, "inferred-from-commit"
 
     # Tier 4: Unknown
     return None, None, "unknown"

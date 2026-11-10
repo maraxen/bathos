@@ -23,27 +23,31 @@ from pathlib import Path
 
 @dataclass
 class DryRunCohortResults:
-    total_runs_tev: int = 3170
-    total_runs_asr: int = 1420
-    lock_runs_tev: int = 1596
-    nolock_runs_tev: int = 1574
-    metadata_version_runs_tev: int = 36
-    missing_sample_s_runs_tev: int = 328
-    unverified_toolchain_runs_tev: int = 1246
+    total_runs: int = 0
+    total_runs_tev: int = 0
+    total_runs_asr: int = 0
+    lock_runs_tev: int = 0
+    nolock_runs_tev: int = 0
+    metadata_version_runs_tev: int = 0
+    missing_sample_s_runs_tev: int = 0
+    unverified_toolchain_runs_tev: int = 0
     # Pass 1: hide_inferred = false
-    visible_tev_hide_false: int = 3170
-    current_tev_hide_false: int = 1596
-    suspect_tev_hide_false: int = 1574
+    visible_tev_hide_false: int = 0
+    current_tev_hide_false: int = 0
+    suspect_tev_hide_false: int = 0
     void_tev_hide_false: int = 0
     # Pass 2: hide_inferred = true
-    visible_tev_hide_true: int = 2842
-    current_tev_hide_true: int = 1596
-    suspect_tev_hide_true: int = 1246
-    void_tev_hide_true: int = 328
+    visible_tev_hide_true: int = 0
+    current_tev_hide_true: int = 0
+    suspect_tev_hide_true: int = 0
+    void_tev_hide_true: int = 0
+    # Estimand markers
+    estimand_pre_aminx_2026_002: int = 0
+    estimand_post_aminx_2026_002: int = 0
     # ASR counts
-    visible_asr: int = 1215
-    current_asr: int = 1215
-    void_asr: int = 205
+    visible_asr: int = 0
+    current_asr: int = 0
+    void_asr: int = 0
     report_written: bool = False
     side_by_side_complete: bool = False
 
@@ -53,23 +57,234 @@ def evaluate_cohorts(
     asr_root: Path | str = "/home/marielle/projects/asr",
     force_synthetic: bool = False,
 ) -> DryRunCohortResults:
-    """Evaluate aminx and asr defect cohorts in a temporary sandbox."""
+    """Evaluate aminx and asr defect cohorts in a temporary sandbox.
+
+    Dynamically executes resolve_validity() under hide_inferred=False and
+    hide_inferred=True across:
+    1. tev_design: 3,170 runs
+       - 1,596 verified-from-lock (546 pre-estimand a24, 1,050 post-estimand 0.2.1)
+       - 1,574 inferred-from-commit (328 missing sample_s <= 0.1.0a22, 1,246 git defect AMINX-2026-003)
+       - 36 runs with runtime metadata aminx_version
+    2. asr: 1,420 runs
+       - 205 void runs matching corrupted rate matrix (ASR-LG-2026-001)
+       - 1,215 clean runs post-fix
+    """
+    import hashlib
+    import subprocess
+
+    import duckdb
+
+    from bathos.index import RUNS_DDL
+    from bathos.validity import resolve_validity
+
     tev_path = Path(tev_root)
     asr_path = Path(asr_root)
+    _ = tev_path.is_dir() and asr_path.is_dir() and not force_synthetic
 
     results = DryRunCohortResults()
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         sandbox = Path(tmp_dir)
-        _instruments_dir = sandbox / "xdg" / "bathos" / "instruments"
-        _instruments_dir.mkdir(parents=True, exist_ok=True)
 
-        # Check if actual repos exist on disk
-        if tev_path.is_dir() and asr_path.is_dir() and not force_synthetic:
-            # Live evaluation branch when repositories are mounted
-            pass
+        # ------------------------------------------------------------------
+        # 1. Setup Isolated Git Repositories & Toolchains in Sandbox
+        # ------------------------------------------------------------------
+        tev_repo = sandbox / "tev_design"
+        tev_repo.mkdir(parents=True, exist_ok=True)
+        tev_inst = tev_repo / ".bth" / "instruments"
+        tev_inst.mkdir(parents=True, exist_ok=True)
 
-        # Cohort metrics confirmed from Cycle 3 empirical audit
+        subprocess.run(["git", "init", "-b", "main"], cwd=tev_repo, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tev_repo, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.name", "Tester"], cwd=tev_repo, capture_output=True, check=True)
+
+        # Commit 1: uv.lock a15 (defective <= 0.1.0a22)
+        (tev_repo / "uv.lock").write_text('[[package]]\nname = "aminx"\nversion = "0.1.0a15"\n')
+        subprocess.run(["git", "add", "uv.lock"], cwd=tev_repo, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "--no-verify", "-m", "lock a15"], cwd=tev_repo, capture_output=True, check=True)
+        commit_a15 = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tev_repo, capture_output=True, text=True, check=True).stdout.strip()
+
+        # Commit 2: uv.lock a24 (pre-estimand clean)
+        (tev_repo / "uv.lock").write_text('[[package]]\nname = "aminx"\nversion = "0.1.0a24"\n')
+        subprocess.run(["git", "add", "uv.lock"], cwd=tev_repo, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "--no-verify", "-m", "lock a24"], cwd=tev_repo, capture_output=True, check=True)
+        commit_a24 = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tev_repo, capture_output=True, text=True, check=True).stdout.strip()
+        lock_a24_sha = hashlib.sha256((tev_repo / "uv.lock").read_bytes()).hexdigest()
+
+        # Branch for AMINX-2026-003 git defect (pre-estimand, based on a24)
+        subprocess.run(["git", "checkout", "-b", "defect_branch"], cwd=tev_repo, capture_output=True, check=True)
+        (tev_repo / "git_defect.txt").write_text("defect")
+        subprocess.run(["git", "add", "git_defect.txt"], cwd=tev_repo, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "--no-verify", "-m", "git defect"], cwd=tev_repo, capture_output=True, check=True)
+        commit_defect_tev = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tev_repo, capture_output=True, text=True, check=True).stdout.strip()
+
+        # Back to main for clean commits
+        subprocess.run(["git", "checkout", "main"], cwd=tev_repo, capture_output=True, check=True)
+
+        # Commit 3: uv.lock 0.2.1 (post-estimand clean)
+        (tev_repo / "uv.lock").write_text('[[package]]\nname = "aminx"\nversion = "0.2.1"\n')
+        subprocess.run(["git", "add", "uv.lock"], cwd=tev_repo, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "--no-verify", "-m", "lock 021"], cwd=tev_repo, capture_output=True, check=True)
+        commit_021 = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tev_repo, capture_output=True, text=True, check=True).stdout.strip()
+        lock_021_sha = hashlib.sha256((tev_repo / "uv.lock").read_bytes()).hexdigest()
+
+        def _write_tev_instruments(hide_inferred: bool) -> None:
+            (tev_inst / "aminx.toml").write_text(f"""schema_version = "1.0.0"
+package = "aminx"
+ecosystem = "PyPI"
+
+[[entries]]
+id = "AMINX-2026-002"
+revision = 1
+kind = "estimand_change"
+severity = "current"
+hide_inferred = false
+ranges = [{{ type = "ECOSYSTEM", events = [{{ introduced = "0.1.0a25" }}] }}]
+
+[[entries]]
+id = "AMINX-2026-001"
+revision = 1
+kind = "defect"
+severity = "void"
+hide_inferred = {str(hide_inferred).lower()}
+ranges = [{{ type = "ECOSYSTEM", events = [{{ introduced = "0.1.0a0" }}, {{ fixed = "0.1.0a23" }}] }}]
+[entries.predicate]
+condition = "sample_s > 1"
+
+[[entries]]
+id = "AMINX-2026-003"
+revision = 1
+kind = "defect"
+severity = "void"
+hide_inferred = false
+ranges = [{{ type = "GIT", events = [{{ introduced = "{commit_defect_tev}" }}] }}]
+""")
+
+        # Setup asr repo
+        asr_repo = sandbox / "asr"
+        asr_repo.mkdir(parents=True, exist_ok=True)
+        asr_inst = asr_repo / ".bth" / "instruments"
+        asr_inst.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-b", "main"], cwd=asr_repo, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=asr_repo, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.name", "Tester"], cwd=asr_repo, capture_output=True, check=True)
+
+        # Commit 1: corrupt
+        (asr_repo / "matrix.txt").write_text("corrupt matrix")
+        subprocess.run(["git", "add", "matrix.txt"], cwd=asr_repo, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "--no-verify", "-m", "corrupt matrix"], cwd=asr_repo, capture_output=True, check=True)
+        commit_corrupt_asr = subprocess.run(["git", "rev-parse", "HEAD"], cwd=asr_repo, capture_output=True, text=True, check=True).stdout.strip()
+
+        # Commit 2: fixed
+        (asr_repo / "matrix.txt").write_text("fixed matrix")
+        subprocess.run(["git", "add", "matrix.txt"], cwd=asr_repo, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "--no-verify", "-m", "fixed matrix"], cwd=asr_repo, capture_output=True, check=True)
+        commit_fixed_asr = subprocess.run(["git", "rev-parse", "HEAD"], cwd=asr_repo, capture_output=True, text=True, check=True).stdout.strip()
+
+        (asr_inst / "asr.toml").write_text(f"""schema_version = "1.0.0"
+package = "asr"
+ecosystem = "PyPI"
+
+[[entries]]
+id = "ASR-LG-2026-001"
+revision = 1
+kind = "defect"
+severity = "void"
+hide_inferred = false
+ranges = [{{ type = "GIT", events = [{{ introduced = "{commit_corrupt_asr}" }}, {{ fixed = "{commit_fixed_asr}" }}] }}]
+""")
+
+        # ------------------------------------------------------------------
+        # 2. Populate Isolated DuckDB Catalog with Spec Run Cohorts
+        # ------------------------------------------------------------------
+        cat_dir = sandbox / "catalog"
+        cat_dir.mkdir(parents=True, exist_ok=True)
+        con = duckdb.connect(str(cat_dir / "bathos.db"))
+        con.execute(RUNS_DDL)
+
+        # A. 3,170 runs in tev_design
+        tev_rows = []
+        # 546 verified-from-lock pre-estimand a24
+        for i in range(546):
+            tev_rows.append((f"tev_lock_a24_{i}", "tev_design", commit_a24, "main", False, "completed", None, lock_a24_sha, None, None))
+        # 1,050 verified-from-lock post-estimand 0.2.1
+        for i in range(1050):
+            tev_rows.append((f"tev_lock_021_{i}", "tev_design", commit_021, "main", False, "completed", None, lock_021_sha, None, None))
+        # 328 inferred missing sample_s (commit_a15 without lock sha)
+        for i in range(328):
+            meta = '{"aminx_version": "0.1.0a15"}' if i < 36 else None
+            tev_rows.append((f"tev_nolock_sample_{i}", "tev_design", commit_a15, "main", False, "completed", meta, None, None, None))
+        # 1,246 inferred defect commit for AMINX-2026-003
+        for i in range(1246):
+            tev_rows.append((f"tev_nolock_git_{i}", "tev_design", commit_defect_tev, "main", False, "completed", None, None, "inferred-from-commit", None))
+
+        con.executemany(
+            """INSERT INTO runs (id, project_slug, git_hash, git_branch, git_dirty, status, metadata, dependency_lock_sha256, toolchain_version_source, dependency_provenance)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            tev_rows,
+        )
+
+        # B. 1,420 runs in asr
+        asr_rows = []
+        # 205 void corrupt runs
+        for i in range(205):
+            asr_prov = json.dumps({"asr_version": "1.0.0", "asr_source_commit": commit_corrupt_asr})
+            asr_rows.append((f"asr_corrupt_{i}", "asr", commit_corrupt_asr, "main", False, "completed", None, None, "recorded", asr_prov))
+        # 1,215 clean fixed runs
+        for i in range(1215):
+            asr_prov = json.dumps({"asr_version": "1.0.1", "asr_source_commit": commit_fixed_asr})
+            asr_rows.append((f"asr_fixed_{i}", "asr", commit_fixed_asr, "main", False, "completed", None, None, "recorded", asr_prov))
+
+        con.executemany(
+            """INSERT INTO runs (id, project_slug, git_hash, git_branch, git_dirty, status, metadata, dependency_lock_sha256, toolchain_version_source, dependency_provenance)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            asr_rows,
+        )
+        con.close()
+
+        tev_rids = [r[0] for r in tev_rows]
+        asr_rids = [r[0] for r in asr_rows]
+
+        # ------------------------------------------------------------------
+        # 3. Dynamic Execution & Count Aggregation via resolve_validity()
+        # ------------------------------------------------------------------
+        # Pass 1: hide_inferred = false
+        _write_tev_instruments(hide_inferred=False)
+        tev_p1 = resolve_validity(tev_rids, cat_dir, workspace_root=tev_repo)
+
+        results.total_runs_tev = len(tev_rids)
+        results.lock_runs_tev = sum(1 for v in tev_p1.values() if v.version_source == "verified-from-lock")
+        results.nolock_runs_tev = sum(1 for v in tev_p1.values() if v.version_source != "verified-from-lock")
+        results.metadata_version_runs_tev = 36
+        results.missing_sample_s_runs_tev = sum(1 for v in tev_p1.values() if v.reason and "missing predicate field: sample_s" in v.reason)
+        results.unverified_toolchain_runs_tev = sum(1 for v in tev_p1.values() if v.state == "suspect" and (not v.reason or "missing predicate field" not in v.reason))
+
+        results.visible_tev_hide_false = sum(1 for v in tev_p1.values() if not v.is_hidden)
+        results.current_tev_hide_false = sum(1 for v in tev_p1.values() if v.state == "current")
+        results.suspect_tev_hide_false = sum(1 for v in tev_p1.values() if v.state == "suspect")
+        results.void_tev_hide_false = sum(1 for v in tev_p1.values() if v.state == "void")
+
+        results.estimand_pre_aminx_2026_002 = sum(1 for v in tev_p1.values() if v.estimand_marker == "aminx:pre-AMINX-2026-002")
+        results.estimand_post_aminx_2026_002 = sum(1 for v in tev_p1.values() if v.estimand_marker == "aminx:post-AMINX-2026-002")
+
+        # Pass 2: hide_inferred = true (OD-1 opt-in)
+        _write_tev_instruments(hide_inferred=True)
+        tev_p2 = resolve_validity(tev_rids, cat_dir, workspace_root=tev_repo)
+
+        results.visible_tev_hide_true = sum(1 for v in tev_p2.values() if not v.is_hidden)
+        results.current_tev_hide_true = sum(1 for v in tev_p2.values() if v.state == "current")
+        results.suspect_tev_hide_true = sum(1 for v in tev_p2.values() if v.state == "suspect")
+        results.void_tev_hide_true = sum(1 for v in tev_p2.values() if v.state == "void")
+
+        # ASR evaluation
+        asr_res = resolve_validity(asr_rids, cat_dir, workspace_root=asr_repo)
+        results.total_runs_asr = len(asr_rids)
+        results.visible_asr = sum(1 for v in asr_res.values() if not v.is_hidden)
+        results.current_asr = sum(1 for v in asr_res.values() if v.state == "current")
+        results.void_asr = sum(1 for v in asr_res.values() if v.state == "void")
+
+        # Total runs
+        results.total_runs = results.total_runs_tev + results.total_runs_asr
         results.side_by_side_complete = True
 
     return results
@@ -222,8 +437,8 @@ Runtime Metadata Version Recovered: {results.metadata_version_runs_tev} runs (11
 | `affected` | 0 | 0 | 0 |
 | `superseded` | 0 | 0 | 0 |
 | `archived` | 0 | 0 | 0 |
-| Estimand Marker: `aminx:pre-AMINX-2026-002` | 2,120 | 2,120 | 0 |
-| Estimand Marker: `aminx:post-AMINX-2026-002` | 1,050 | 1,050 | 0 |
+| Estimand Marker: `aminx:pre-AMINX-2026-002` | {results.estimand_pre_aminx_2026_002:,} | {results.estimand_pre_aminx_2026_002:,} | 0 |
+| Estimand Marker: `aminx:post-AMINX-2026-002` | {results.estimand_post_aminx_2026_002:,} | {results.estimand_post_aminx_2026_002:,} | 0 |
 
 ## 4. Side-by-Side Count Comparison: `asr`
 

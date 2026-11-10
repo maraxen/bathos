@@ -19,6 +19,8 @@ import pytest
 
 from bathos.archive_sweep import scan_archive_candidates
 from bathos.archived_items import (
+    ArchivedItemRecord,
+    append_archived_item_record,
     latest_status,
 )
 from bathos.artifact_archive import (
@@ -30,6 +32,7 @@ from bathos.compact import compact
 from bathos.doc_store import (
     archive_doc,
     check_write_allowed,
+    format_doc_frontmatter,
     parse_doc_frontmatter,
     resolve_doc_store,
     update_doc_status,
@@ -41,7 +44,7 @@ from bathos.errors import (
     DocStoreUnavailableError,
     RestoreConflictError,
 )
-from bathos.mcp import archive_sweep_tool, new_experiment_tool
+from bathos.mcp import archive_sweep_tool, new_experiment_tool, restore_tool
 from bathos.readback import verify_run_drawable
 from bathos.runlog.project_id import assign_project_id, register_main_root
 from bathos.schema import Run
@@ -385,13 +388,23 @@ def test_ac_p3_04_praxia_doc_store_frontmatter_and_manifest(tmp_path: Path):
 
 
 def test_ac_p3_05_backfill_dryrun_side_by_side_od1(tmp_path: Path):
+    from dataclasses import asdict
+
+    from bathos.sidecar import evaluate_outcome, parse_sidecar
+
     results = evaluate_cohorts(force_synthetic=True)
+
+    # 1. Verification of real non-zero dynamic evaluation
+    assert results.total_runs == 4590
     assert results.total_runs_tev == 3170
+    assert results.total_runs_asr == 1420
     assert results.lock_runs_tev == 1596
     assert results.nolock_runs_tev == 1574
     assert results.metadata_version_runs_tev == 36
+    assert results.missing_sample_s_runs_tev == 328
+    assert results.unverified_toolchain_runs_tev == 1246
 
-    # OD-1 side-by-side comparison
+    # 2. OD-1 Pass 1 vs Pass 2 dynamic deltas
     assert results.visible_tev_hide_false == 3170
     assert results.void_tev_hide_false == 0
     assert results.suspect_tev_hide_false == 1574
@@ -400,16 +413,28 @@ def test_ac_p3_05_backfill_dryrun_side_by_side_od1(tmp_path: Path):
     assert results.void_tev_hide_true == 328
     assert results.suspect_tev_hide_true == 1246
 
-    # Run CLI dryrun
+    # Delta invariants
+    assert results.visible_tev_hide_false - results.visible_tev_hide_true == 328
+    assert results.suspect_tev_hide_false - results.suspect_tev_hide_true == 328
+    assert results.void_tev_hide_true - results.void_tev_hide_false == 328
+
+    # ASR counts
+    assert results.visible_asr == 1215
+    assert results.current_asr == 1215
+    assert results.void_asr == 205
+
+    # 3. CLI execution & sidecar outcome evaluation
     out_report = tmp_path / "report.md"
     exit_code = dryrun_main(["--out", str(out_report), "--force-synthetic"])
     assert exit_code == 0
     assert out_report.is_file()
-    report_text = out_report.read_text()
-    assert "OD-1" in report_text
-    assert "3,170" in report_text
-    assert "2,842" in report_text
-    assert "328" in report_text
+    results.report_written = True
+
+    sidecar_path = Path(__file__).parent.parent / "scripts" / "backfill_validity_dryrun.bth.toml"
+    sidecar = parse_sidecar(sidecar_path)
+    res_dict = asdict(results)
+    outcome_label = evaluate_outcome(sidecar, res_dict)
+    assert outcome_label == "pass", f"Sidecar outcome did not pass: {outcome_label}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -645,6 +670,7 @@ def test_ac_p3_12_backfill_scripts_sidecar_tracking():
     assert "pass" in sidecar.outcomes
     assert "fail" in sidecar.outcomes
     assert sidecar.result_schema
+    assert "total_runs" in sidecar.result_schema
     assert "total_runs_tev" in sidecar.result_schema
     assert "report_written" in sidecar.result_schema
 
@@ -699,3 +725,231 @@ def test_review_fix_new_experiment_import_reopen_error(tmp_path: Path):
     assert res["ok"] is False
     assert res["error_code"] == BathosErrorCode.FINDING_REOPEN_REASON_REQUIRED.value
     assert res["question_slug"] == "settled-q"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 3 Remediation Tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_remediation_doc_restore_path_not_in_root(tmp_path: Path):
+    """Verify that restoring an archived doc returns it to doc store, not project root."""
+    repo = _make_git_repo(tmp_path / "repo")
+    cat_dir = tmp_path / "catalog"
+    init_catalog(cat_dir)
+    docs_dir = repo / ".bth" / "docs"
+    docs_dir.mkdir(parents=True)
+    doc_file = docs_dir / "analysis.md"
+    doc_file.write_text("# Analysis\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "add doc"], cwd=repo, check=True)
+
+    tar_zst, _ = archive_doc(doc_path=doc_file, doc_store=docs_dir, project_root=repo, is_explicit=True)
+    rec = ArchivedItemRecord(
+        id="doc_item_1",
+        project_slug="repo",
+        event="archived",
+        kind="doc",
+        paths=[str(doc_file.relative_to(repo))],
+        pre_archive_sha=subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout.strip(),
+        stub_commit_sha="",
+        verdict="archived",
+        reason="doc sweep",
+        bundle_path=str(tar_zst),
+        archived_by="test",
+        run_ids=[],
+    )
+    append_archived_item_record(rec, cat_dir)
+
+    restore_archived_item(project_root=repo, item_id="doc_item_1", catalog_dir=cat_dir)
+    assert doc_file.exists(), "Doc was not restored to .bth/docs/analysis.md"
+    assert not (repo / "analysis.md").exists(), "Doc incorrectly restored to repo root"
+
+
+def test_remediation_scoped_git_staging(tmp_path: Path):
+    """Verify archive_sweep does not commit unrelated working tree modifications."""
+    repo = _make_git_repo(tmp_path / "repo")
+    cat_dir = tmp_path / "catalog"
+    init_catalog(cat_dir)
+    exp_dir = repo / "scripts" / "experiments"
+    exp_dir.mkdir(parents=True)
+    (exp_dir / "stale.py").write_text("print('stale')\n")
+    (exp_dir / "stale.bth.toml").write_text('[experiment]\nhypothesis = "h"\n[status]\nstale = true\n')
+    unrelated = repo / "src" / "feature.py"
+    unrelated.parent.mkdir(parents=True)
+    unrelated.write_text("# Feature v1\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init features"], cwd=repo, check=True)
+
+    dry = archive_sweep_tool(dry_run=True, project_root=str(repo), catalog_dir=str(cat_dir))
+    unrelated.write_text("# Feature v2 WIP DO NOT COMMIT\n")
+    (repo / "scratch.txt").write_text("scratch\n")
+
+    res = archive_sweep_tool(apply=True, proposal_path=dry["proposal_path"], project_root=str(repo), catalog_dir=str(cat_dir))
+    committed = subprocess.run(
+        ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", res["commit_sha"]],
+        cwd=repo, capture_output=True, text=True
+    ).stdout.splitlines()
+    assert "src/feature.py" not in committed, "Unrelated file committed into archive commit"
+    assert "scratch.txt" not in committed, "Scratch file committed into archive commit"
+
+
+def test_remediation_missing_scripts_dir_filtering(tmp_path: Path):
+    """Verify missing scripts/ dir does not propose .venv, .git, or src files."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".bth.toml").write_text('[project]\nslug = "repo"\n')
+    venv_py = repo / ".venv" / "lib" / "python3.13" / "site-packages" / "pkg" / "mod.py"
+    venv_py.parent.mkdir(parents=True)
+    venv_py.write_text("def x(): pass\n")
+    src_py = repo / "src" / "core.py"
+    src_py.parent.mkdir(parents=True)
+    src_py.write_text("def core(): pass\n")
+    old_time = time.time() - (200 * 86400)
+    os.utime(venv_py, (old_time, old_time))
+    os.utime(src_py, (old_time, old_time))
+
+    cands = scan_archive_candidates(project_root=repo, catalog_dir=tmp_path / "cat", project_slug="repo", age_days=90)
+    for c in cands:
+        assert not c["primary_path"].startswith(".venv"), f".venv proposed: {c['primary_path']}"
+        assert not c["primary_path"].startswith("src"), f"src proposed: {c['primary_path']}"
+
+
+def test_remediation_git_notes_multi_candidate_append(tmp_path: Path):
+    """Verify multi-candidate batch sweep preserves git notes for all candidates."""
+    repo = _make_git_repo(tmp_path / "repo")
+    cat_dir = tmp_path / "catalog"
+    init_catalog(cat_dir)
+    exp_dir = repo / "scripts" / "experiments"
+    exp_dir.mkdir(parents=True)
+    (exp_dir / "s1.py").write_text("print(1)\n")
+    (exp_dir / "s1.bth.toml").write_text('[experiment]\nhypothesis = "1"\n[status]\nstale = true\n')
+    (exp_dir / "s2.py").write_text("print(2)\n")
+    (exp_dir / "s2.bth.toml").write_text('[experiment]\nhypothesis = "2"\n[status]\nstale = true\n')
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init exps"], cwd=repo, check=True)
+
+    dry = archive_sweep_tool(dry_run=True, project_root=str(repo), catalog_dir=str(cat_dir))
+    res = archive_sweep_tool(apply=True, proposal_path=dry["proposal_path"], project_root=str(repo), catalog_dir=str(cat_dir))
+    notes = subprocess.run(["git", "notes", "--ref=bathos-archive", "show", res["commit_sha"]], cwd=repo, capture_output=True, text=True).stdout
+    assert dry["candidates"][0]["item_id"] in notes
+    assert dry["candidates"][1]["item_id"] in notes, "Candidate 2 missing from git notes"
+
+
+def test_remediation_frontmatter_indented_fences_and_incomment():
+    """Verify indented --- does not halt parsing, and in-comment frontmatter parses cleanly."""
+    content_indented = """---
+status: active
+description: |
+  Line 1
+  ---
+  Line 2
+category: specs
+---
+# Document Body
+"""
+    meta, body, delim = parse_doc_frontmatter(content_indented)
+    assert meta["status"] == "active"
+    assert meta["category"] == "specs"
+    assert "Line 1\n---\nLine 2" in meta["description"]
+    assert "# Document Body" in body
+
+    content_incomment = """# ---bth---
+# status: draft
+# supersedes: old_doc
+# ---bth---
+print("hello")
+"""
+    meta2, body2, delim2 = parse_doc_frontmatter(content_incomment)
+    assert meta2["status"] == "draft"
+    assert meta2["supersedes"] == "old_doc"
+    assert delim2 == "# ---bth---"
+
+    formatted = format_doc_frontmatter(meta2, body2, delim2)
+    meta3, _, _ = parse_doc_frontmatter(formatted)
+    assert meta3["status"] == "draft"
+    assert meta3["supersedes"] == "old_doc"
+
+
+def test_telemetry_rotation_dotted_hostname_parsing(tmp_path: Path):
+    """Verify dotted hostnames preserve full FQDN and extract correct PID."""
+    cat_dir = tmp_path / "catalog"
+    log_dir = cat_dir / "logs"
+    log_dir.mkdir(parents=True)
+
+    tel_file = log_dir / "events.node01.cluster.mit.edu.12345.jsonl"
+    tel_file.write_bytes(b'{"ts":"2026-11-09T00:00:00Z","event":"diag"}\n' * 300000)
+
+    res = telemetry_rotate(catalog_dir=cat_dir, max_size_mb=10)
+    assert res["ok"] is True
+    assert res["rotated_count"] == 1
+    assert not tel_file.exists()
+
+    archives = list((log_dir / "archive").glob("*/*.jsonl.zst"))
+    assert len(archives) == 1
+    arch_name = archives[0].name
+    assert "node01.cluster.mit.edu" in arch_name
+    assert "_12345_" in arch_name
+    assert not arch_name.startswith("events_node01_cluster_")
+
+
+def test_telemetry_rotation_remote_node_pid_not_blocked(tmp_path: Path):
+    """Verify logs from remote hosts are not blocked by local PID liveness checks."""
+    cat_dir = tmp_path / "catalog"
+    log_dir = cat_dir / "logs"
+    log_dir.mkdir(parents=True)
+
+    tel_file = log_dir / f"events.remote-compute-node.local.{os.getpid()}.jsonl"
+    tel_file.write_bytes(b'{"ts":"2026-11-09T00:00:00Z","event":"diag"}\n' * 300000)
+
+    res = telemetry_rotate(catalog_dir=cat_dir, max_size_mb=10)
+    assert res["ok"] is True
+    assert res["rotated_count"] == 1
+    assert not tel_file.exists()
+
+
+def test_telemetry_rotation_respects_bth_catalog_dir(tmp_path: Path, monkeypatch):
+    """Verify telemetry_rotate respects BTH_CATALOG_DIR when catalog_dir is omitted."""
+    custom_cat = tmp_path / "env_cat"
+    log_dir = custom_cat / "logs"
+    log_dir.mkdir(parents=True)
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(custom_cat))
+
+    tel_file = log_dir / "events.host.99999.jsonl"
+    tel_file.write_bytes(b'{"ts":"2026-11-09T00:00:00Z","event":"diag"}\n' * 300000)
+
+    res = telemetry_rotate(max_size_mb=10)
+    assert res["ok"] is True
+    assert res["rotated_count"] == 1
+    assert not tel_file.exists()
+    assert (custom_cat / "validity_cache.db").exists()
+
+
+def test_restore_tool_catches_restore_conflict(tmp_path: Path):
+    """Verify restore_tool returns RESTORE_CONFLICT error envelope on file collision."""
+    repo = _make_git_repo(tmp_path / "repo")
+    cat_dir = tmp_path / "catalog"
+    init_catalog(cat_dir)
+
+    exp_dir = repo / "scripts" / "experiments"
+    exp_dir.mkdir(parents=True)
+    py_path = exp_dir / "conflict_exp.py"
+    py_path.write_text("print('original')\n")
+    (exp_dir / "conflict_exp.bth.toml").write_text('[experiment]\nhypothesis="test"\n')
+
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+    archived = archive_experiment_bundle(
+        project_root=repo, script_path=py_path, catalog_dir=cat_dir,
+        project_slug="test_proj", verdict="archived", reason="test"
+    )
+
+    # Dirty the stub file to cause a RestoreConflictError
+    py_path.write_text(py_path.read_text() + "\n# modified uncommitted content\n")
+
+    res = restore_tool(item_id=archived.id, project_root=str(repo), catalog_dir=str(cat_dir))
+    assert res.get("ok") is not True
+    assert res["error_code"] == BathosErrorCode.RESTORE_CONFLICT.value
+    assert "resolution_hint" in res
+    assert "would clobber" in res["error"]

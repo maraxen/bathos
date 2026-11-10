@@ -36,6 +36,7 @@ import json
 import logging
 import os
 import queue
+import re
 import socket
 import sys
 import time
@@ -447,10 +448,36 @@ def _shutdown() -> None:
         _listener = None
 
 
+_LOG_FILENAME_RE = re.compile(r"^events\.(.+)\.(\d+)\.jsonl(?:\.\d+)?$")
+
+
+def _parse_telemetry_filename(filename: str) -> tuple[str, int | None]:
+    """Extract (hostname, pid) from telemetry filename like events.<host>.<pid>.jsonl[.N].
+
+    Supports dotted FQDN hostnames (e.g. node01.cluster.mit.edu) and backup suffixes.
+    Returns (host, pid) where pid is int or None if not parseable.
+    """
+    m = _LOG_FILENAME_RE.match(filename)
+    if m:
+        return m.group(1), int(m.group(2))
+    parts = filename.split(".")
+    if len(parts) >= 4 and parts[-1] == "jsonl":
+        try:
+            return ".".join(parts[1:-2]) or socket.gethostname(), int(parts[-2])
+        except ValueError:
+            pass
+    elif len(parts) >= 5 and parts[-2] == "jsonl":
+        try:
+            return ".".join(parts[1:-3]) or socket.gethostname(), int(parts[-3])
+        except ValueError:
+            pass
+    return socket.gethostname(), None
+
+
 def _get_default_log_dir() -> Path:
     """Resolve default log directory.
 
-    Order: _DEFAULT_LOG_DIR (for tests) → BTH_LOG_DIR env var → ~/.bth/catalog/logs/ (default).
+    Order: _DEFAULT_LOG_DIR (for tests) → BTH_LOG_DIR env var → BTH_CATALOG_DIR / logs → default_catalog_dir() / logs.
     """
     # Check module variable (for test monkeypatch)
     if _DEFAULT_LOG_DIR is not None:
@@ -459,8 +486,12 @@ def _get_default_log_dir() -> Path:
     if env_dir := os.environ.get("BTH_LOG_DIR"):
         return Path(env_dir)
 
-    # Default to ~/.bth/catalog/logs/
-    return Path.home() / ".bth" / "catalog" / "logs"
+    if cat_env := os.environ.get("BTH_CATALOG_DIR"):
+        return Path(cat_env) / "logs"
+
+    from bathos.config import default_catalog_dir
+
+    return default_catalog_dir() / "logs"
 
 
 def _is_forbidden_runlog_path(path: Path | str) -> bool:
@@ -486,6 +517,14 @@ def telemetry_rotate(
     import zstandard
 
     # Resolve catalog_dir and log_dir
+    if not catalog_dir:
+        if cat_env := os.environ.get("BTH_CATALOG_DIR"):
+            catalog_dir = Path(cat_env)
+        elif _DEFAULT_LOG_DIR is None and not os.environ.get("BTH_LOG_DIR"):
+            from bathos.config import default_catalog_dir
+
+            catalog_dir = default_catalog_dir()
+
     if catalog_dir:
         c_path = Path(catalog_dir).resolve()
         if c_path.name == "logs":
@@ -529,19 +568,17 @@ def telemetry_rotate(
                 "violating Hard Invariant B3-3."
             )
 
-        name_parts = p.name.split(".")
-        if len(name_parts) >= 4 and name_parts[-1] == "jsonl":
+        # Check if the process that created this file is still running.
+        # Only check local process table if log was created on this host.
+        host, pid = _parse_telemetry_filename(p.name)
+        if pid is not None and host == socket.gethostname():
             try:
-                pid = int(name_parts[-2])
-                try:
-                    os.kill(pid, 0)
-                    continue
-                except ProcessLookupError:
-                    pass
-                except PermissionError:
-                    continue
-            except ValueError:
+                os.kill(pid, 0)
+                continue
+            except ProcessLookupError:
                 pass
+            except PermissionError:
+                continue
 
         try:
             st = p.stat()
@@ -587,9 +624,8 @@ def telemetry_rotate(
         """)
 
         for file_path in candidates:
-            name_parts = file_path.name.split(".")
-            host = name_parts[1] if len(name_parts) >= 3 else socket.gethostname()
-            pid_str = name_parts[2] if len(name_parts) >= 3 else "0"
+            host, pid = _parse_telemetry_filename(file_path.name)
+            pid_str = str(pid) if pid is not None else "0"
             ts_str = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
             archive_filename = f"events_{host}_{pid_str}_{ts_str}.jsonl.zst"
             target_path = archive_dir / archive_filename

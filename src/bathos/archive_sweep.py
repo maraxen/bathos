@@ -190,87 +190,98 @@ def scan_archive_candidates(
 
     # Criterion 2: Scripts with 100% hidden runs
     # Criterion 3: Unreferenced scripts (age >= age_days, 0 findings, 0 claims)
-    script_dirs = [project_root / "scripts"] if (project_root / "scripts").is_dir() else [project_root]
-    now_ts = time.time()
+    if (project_root / "scripts").is_dir():
+        py_files = iter_project_files(project_root / "scripts", ".py")
+    else:
+        # Repository has no scripts/ directory: iterate project files with boundary pruning
+        # and strictly exclude operational source, test suites, internal doc stores, and build trees.
+        EXCLUDE_SCRIPT_PARTS = frozenset({
+            "src", "tests", "test", ".bth", ".praxia", "build", "dist", ".claude", "docs"
+        })
+        all_py = iter_project_files(project_root, ".py")
+        py_files = [
+            p for p in all_py
+            if not any(part in EXCLUDE_SCRIPT_PARTS for part in p.relative_to(project_root).parts[:-1])
+        ]
 
-    for s_dir in script_dirs:
-        for py_path in s_dir.rglob("*.py"):
-            rel_py = str(py_path.relative_to(project_root))
-            if rel_py in archived_paths or rel_py in seen_paths:
+    now_ts = time.time()
+    for py_path in py_files:
+        rel_py = str(py_path.relative_to(project_root))
+        if rel_py in archived_paths or rel_py in seen_paths:
+            continue
+
+        # Check runs in catalog
+        py_sha = _sha256_file(py_path)
+        runs: list[str] = []
+        if catalog_readable(catalog_dir):
+            with contextlib.suppress(Exception):
+                con = connect_read(catalog_dir, read_only=True)
+                try:
+                    rows = con.execute(
+                        "SELECT id FROM runs WHERE (script_sha256 = ? OR command LIKE ?) AND project_slug = ?",
+                        [py_sha, f"%{rel_py}%", project_slug],
+                    ).fetchall()
+                    runs = [r[0] for r in rows]
+                finally:
+                    con.close()
+
+        # Criterion 2 check: count > 0 and 100% hidden
+        if runs:
+            v_map = resolve_validity(runs, catalog_dir, workspace_root=project_root)
+            if all(v_map.get(r) and v_map[r].is_hidden for r in runs):
+                paths = [rel_py]
+                file_hashes = {rel_py: py_sha}
+                sidecar_p = find_sidecar(py_path)
+                if sidecar_p and sidecar_p.is_file():
+                    rel_sc = str(sidecar_p.relative_to(project_root))
+                    paths.append(rel_sc)
+                    file_hashes[rel_sc] = _sha256_file(sidecar_p)
+
+                seen_paths.update(paths)
+                candidates.append({
+                    "item_id": str(uuid.uuid4()),
+                    "kind": "experiment",
+                    "primary_path": rel_py,
+                    "paths": paths,
+                    "criterion": "all_runs_hidden",
+                    "reason": f"All {len(runs)} historical runs are hidden (void/superseded/archived)",
+                    "file_hashes": file_hashes,
+                    "mtime": py_path.stat().st_mtime,
+                    "run_ids": runs,
+                })
                 continue
 
-            # Check runs in catalog
-            py_sha = _sha256_file(py_path)
-            runs: list[str] = []
-            if catalog_readable(catalog_dir):
-                with contextlib.suppress(Exception):
-                    con = connect_read(catalog_dir, read_only=True)
-                    try:
-                        rows = con.execute(
-                            "SELECT id FROM runs WHERE (script_sha256 = ? OR command LIKE ?) AND project_slug = ?",
-                            [py_sha, f"%{rel_py}%", project_slug],
-                        ).fetchall()
-                        runs = [r[0] for r in rows]
-                    finally:
-                        con.close()
+        # Criterion 3 check: age >= age_days and 0 active citations
+        mtime = py_path.stat().st_mtime
+        age_d = (now_ts - mtime) / 86400.0
+        if age_d >= age_days:
+            # Check if cited by active findings or claims
+            is_cited = False
+            for r in runs:
+                if r in all_active_cited:
+                    is_cited = True
+                    break
+            if not is_cited:
+                paths = [rel_py]
+                file_hashes = {rel_py: py_sha}
+                sidecar_p = find_sidecar(py_path)
+                if sidecar_p and sidecar_p.is_file():
+                    rel_sc = str(sidecar_p.relative_to(project_root))
+                    paths.append(rel_sc)
+                    file_hashes[rel_sc] = _sha256_file(sidecar_p)
 
-            # Criterion 2 check: count > 0 and 100% hidden
-            if runs:
-                v_map = resolve_validity(runs, catalog_dir, workspace_root=project_root)
-                if all(v_map.get(r) and v_map[r].is_hidden for r in runs):
-                    paths = [rel_py]
-                    file_hashes = {rel_py: py_sha}
-                    sidecar_p = find_sidecar(py_path)
-                    if sidecar_p and sidecar_p.is_file():
-                        rel_sc = str(sidecar_p.relative_to(project_root))
-                        paths.append(rel_sc)
-                        file_hashes[rel_sc] = _sha256_file(sidecar_p)
-
-                    seen_paths.update(paths)
-                    candidates.append({
-                        "item_id": str(uuid.uuid4()),
-                        "kind": "experiment",
-                        "primary_path": rel_py,
-                        "paths": paths,
-                        "criterion": "all_runs_hidden",
-                        "reason": f"All {len(runs)} historical runs are hidden (void/superseded/archived)",
-                        "file_hashes": file_hashes,
-                        "mtime": py_path.stat().st_mtime,
-                        "run_ids": runs,
-                    })
-                    continue
-
-            # Criterion 3 check: age >= age_days and 0 active citations
-            mtime = py_path.stat().st_mtime
-            age_d = (now_ts - mtime) / 86400.0
-            if age_d >= age_days:
-                # Check if cited by active findings or claims
-                is_cited = False
-                for r in runs:
-                    if r in all_active_cited:
-                        is_cited = True
-                        break
-                if not is_cited:
-                    paths = [rel_py]
-                    file_hashes = {rel_py: py_sha}
-                    sidecar_p = find_sidecar(py_path)
-                    if sidecar_p and sidecar_p.is_file():
-                        rel_sc = str(sidecar_p.relative_to(project_root))
-                        paths.append(rel_sc)
-                        file_hashes[rel_sc] = _sha256_file(sidecar_p)
-
-                    seen_paths.update(paths)
-                    candidates.append({
-                        "item_id": str(uuid.uuid4()),
-                        "kind": "experiment",
-                        "primary_path": rel_py,
-                        "paths": paths,
-                        "criterion": "unreferenced_age",
-                        "reason": f"Unreferenced for {int(age_d)} days with 0 active findings/claims",
-                        "file_hashes": file_hashes,
-                        "mtime": mtime,
-                        "run_ids": runs,
-                    })
+                seen_paths.update(paths)
+                candidates.append({
+                    "item_id": str(uuid.uuid4()),
+                    "kind": "experiment",
+                    "primary_path": rel_py,
+                    "paths": paths,
+                    "criterion": "unreferenced_age",
+                    "reason": f"Unreferenced for {int(age_d)} days with 0 active findings/claims",
+                    "file_hashes": file_hashes,
+                    "mtime": mtime,
+                    "run_ids": runs,
+                })
 
     # Criterion 4: Docs citing exclusively hidden runs
     target_doc_stores: list[Path] = []
@@ -414,6 +425,7 @@ def archive_sweep(
 
         # Batch execution: archive items with commit=False
         archived_ids: list[str] = []
+        doc_archive_targets: list[Path] = []
         for cand in candidates:
             cand_id = cand.get("item_id") or str(uuid.uuid4())
             kind = cand.get("kind", "experiment")
@@ -442,6 +454,7 @@ def archive_sweep(
                     item_id=cand_id,
                     is_explicit=is_doc_explicit,
                 )
+                doc_archive_targets.extend([tar_zst, manifest_md])
                 doc_record = ArchivedItemRecord(
                     id=cand_id,
                     project_slug=project_slug,
@@ -459,13 +472,51 @@ def archive_sweep(
                 append_archived_item_record(doc_record, cat_path)
                 archived_ids.append(cand_id)
 
-        # Single atomic git commit
-        _run_git(["add", "-A"], cwd=root_path)
+        # Regenerate index before staging and commit so ARCHIVE_INDEX.md is included in commit
+        _regenerate_index(root_path, cat_path)
+
+        # Scoped explicit git staging
+        paths_to_stage: set[str] = set()
+        for cand in candidates:
+            for p in cand.get("paths", [cand["primary_path"]]):
+                paths_to_stage.add(p)
+            for p in cand.get("file_hashes", {}):
+                paths_to_stage.add(p)
+        for target in doc_archive_targets:
+            try:
+                rel_target = str(target.resolve().relative_to(root_path.resolve()))
+                paths_to_stage.add(rel_target)
+            except ValueError:
+                pass
+        if proposal_path:
+            p_path = Path(proposal_path)
+            if not p_path.is_absolute():
+                p_path = root_path / p_path
+            try:
+                rel_prop = str(p_path.resolve().relative_to(root_path.resolve()))
+                paths_to_stage.add(rel_prop)
+            except ValueError:
+                pass
+        paths_to_stage.add(".bth/ARCHIVE_INDEX.md")
+
+        tracked_output = _run_git(["ls-files"], cwd=root_path, check=False).stdout
+        tracked_set = set(ln.strip() for ln in tracked_output.splitlines() if ln.strip())
+
+        staging_paths = [
+            p for p in sorted(paths_to_stage)
+            if (root_path / p).exists() or p in tracked_set
+        ]
+
+        if staging_paths:
+            _run_git(["add", "--", *staging_paths], cwd=root_path)
+
         commit_msg = f"archive: sweep {len(candidates)} obsolete items (proposal: {proposal_path})"
-        _run_git(["commit", "-m", commit_msg], cwd=root_path)
+        diff_check = _run_git(["diff", "--cached", "--quiet"], cwd=root_path, check=False)
+        if diff_check.returncode != 0:
+            _run_git(["commit", "-m", commit_msg], cwd=root_path)
         batch_commit_sha = _run_git(["rev-parse", "HEAD"], cwd=root_path).stdout.strip()
 
-        # Attach git notes under bathos-archive
+        # Attach git notes under bathos-archive (use append to prevent collision across batch items)
         for cand in candidates:
             notes_payload = json.dumps({
                 "item_id": cand.get("item_id"),
@@ -476,12 +527,10 @@ def archive_sweep(
                 "proposal": proposal_path,
             })
             _run_git(
-                ["notes", "--ref=bathos-archive", "add", "-m", notes_payload, batch_commit_sha],
+                ["notes", "--ref=bathos-archive", "append", "-m", notes_payload, batch_commit_sha],
                 cwd=root_path,
                 check=False,
             )
-
-        _regenerate_index(root_path, cat_path)
 
         return {
             "ok": True,
