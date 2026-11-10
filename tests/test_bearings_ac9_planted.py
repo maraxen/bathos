@@ -627,11 +627,33 @@ def test_the_last_check_finds_an_id_anywhere_under_reader(tmp_path):
     reader = tmp_path / "reader"
     (reader / "docs").mkdir(parents=True)
     (reader / "docs" / "ok.md").write_text("nothing here\n")
-    (reader / "runs.jsonl").write_text('{"command": "python x --aim beta\\u2011aim"}\n')
     pats, _ = id_patterns(["beta-aim"])
-    assert _reader_names_id(reader, pats) == []  # a JSON escape is not the character itself
+    assert _reader_names_id(reader, pats) == []
     (reader / "docs" / "leak.md").write_text("see beta‑aim\n")
-    assert _reader_names_id(reader, pats) == ["docs/leak.md"]
+    # A reader parses JSON, so an escape is the character it encodes; tags hold JSON inside a JSON string.
+    (reader / "runs.jsonl").write_text('{"tags": "[\\"beta\\\\u2011aim\\"]"}\n')
+    assert _reader_names_id(reader, pats) == ["docs/leak.md", "runs.jsonl"]
+
+
+def test_a_run_whose_json_tags_escape_an_id_is_withheld(planted):
+    sha = commit_files(planted["repo"], {"scripts/t.bth.toml": '[experiment]\nhypothesis = "t"\n'})
+    insert_runs(
+        planted,
+        [
+            {
+                "id": "000000abaaaaaaaa",
+                "project_slug": "pkt",
+                "timestamp": DATE,
+                "git_hash": sha,
+                "sidecar_path": "scripts/t.bth.toml",
+                "command": "python t",
+                "tags": '["beta\\u2011aim"]',
+                "status": "completed",
+            }
+        ],
+    )
+    out, _ = _packet(planted)
+    assert excluded(out)["run:000000abaaaaaaaa"] == "names_charter_id"
 
 
 def test_the_decoy_charter_shares_no_purpose_with_the_tev_design_draft():

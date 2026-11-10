@@ -206,14 +206,51 @@ def _names_id(text: str, pats: list[tuple[str, re.Pattern[str]]]) -> bool:
     return bool(ids_named(text, pats))
 
 
+def _decoded_forms(value: str) -> list[str]:
+    """A string as a reader could see it: raw, without shell escapes, and, when it holds JSON (``tags``), every
+    string inside it decoded, so a ``\\u2011`` escape is seen as the character it encodes."""
+    forms = [value, value.replace("\\", "")]
+    if value.lstrip()[:1] in ("[", "{"):
+        with contextlib.suppress(ValueError):
+            forms.extend(_json_strings(json.loads(value)))
+    return forms
+
+
+def _json_strings(obj: Any) -> list[str]:
+    """Every key and string value in parsed JSON, recursing into strings that themselves hold JSON."""
+    if isinstance(obj, str):
+        return _decoded_forms(obj)
+    if isinstance(obj, dict):
+        return [s for k, v in obj.items() for s in (*_decoded_forms(str(k)), *_json_strings(v))]
+    if isinstance(obj, list):
+        return [s for v in obj for s in _json_strings(v)]
+    return []
+
+
+def _run_names_id(value: str, pats: list[tuple[str, re.Pattern[str]]]) -> bool:
+    return any(_names_id(f, pats) for f in _decoded_forms(value))
+
+
 def _reader_names_id(reader: Path, pats: list[tuple[str, re.Pattern[str]]]) -> list[str]:
-    """Last check over every byte written under ``reader/``: the reader paths that name an id. Must be empty."""
+    """Last check over every byte written under ``reader/``: the reader paths that name an id. Must be empty.
+
+    JSON files are also parsed and every string in them decoded, because a reader consumes parsed JSON, where an
+    escape such as ``\\u2011`` becomes the character itself (review, 261110).
+    """
     hits = []
     for p in sorted(reader.rglob("*")):
-        if p.is_file():
-            rel = p.relative_to(reader).as_posix()
-            if _names_id(rel, pats) or _names_id(p.read_bytes().decode("utf-8", "replace"), pats):
-                hits.append(rel)
+        if not p.is_file():
+            continue
+        rel = p.relative_to(reader).as_posix()
+        text = p.read_bytes().decode("utf-8", "replace")
+        forms = [rel, text]
+        if p.suffix in (".json", ".jsonl"):
+            for line in text.split("\n") if p.suffix == ".jsonl" else [text]:
+                if line.strip():
+                    with contextlib.suppress(ValueError):
+                        forms.extend(_json_strings(json.loads(line)))
+        if any(_names_id(f, pats) for f in forms):
+            hits.append(rel)
     return hits
 
 
@@ -427,7 +464,7 @@ def build_packet(
                 exclusions.append({"path": f"run:{rid}", "reason": "quotes_charter"})
                 withheld_runs.add(rid)
             elif any(
-                isinstance(v, str) and k != "sidecar_path" and _names_id(v, id_pats)
+                isinstance(v, str) and k != "sidecar_path" and _run_names_id(v, id_pats)
                 for k, v in rec.items()
             ):
                 exclusions.append({"path": f"run:{rid}", "reason": "names_charter_id"})
