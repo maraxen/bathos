@@ -311,7 +311,9 @@ def record_oracles(work: Path, repo: Path, catalog_dir: Path | None) -> None:
     for q in ("q1", "q2", "q3", "qb"):
         done = work / q / "oracle_record.json"
         if done.is_file() and json.loads(done.read_text()).get("ok"):
-            out[q] = json.loads(done.read_text())  # recorded once; never record the same reading twice
+            out[q] = json.loads(
+                done.read_text()
+            )  # recorded once; never record the same reading twice
             continue
         pdir = work / q / "packet"
         sha = verify_packet(pdir)
@@ -328,18 +330,32 @@ def record_oracles(work: Path, repo: Path, catalog_dir: Path | None) -> None:
     print(json.dumps({q: v.get("ok") for q, v in out.items()}))
 
 
+def _as_ruled(reading: dict, packet: Path) -> dict:
+    """Owner ruling, AC-9 (261110, applying AC-7e's of 261108): a ``doc:`` citation naming a listed sidecar (path
+    and blob as in index.json, line range inside the file) counts as ``sidecar:<path>``. Applied to every reading,
+    for validity and for gold. AC-7e's own implementation, unchanged."""
+    from replay_bearings_ac7b import _PacketView as _AC7View
+    from replay_bearings_ac7e import sidecar_as_doc
+
+    return sidecar_as_doc(reading, _AC7View(packet))
+
+
 def record_readings(work: Path, repo: Path, catalog_dir: Path | None) -> None:
     """Record each collected reader reading (``work/readings/<q>/<reader>.json``); prints status only."""
     status = {}
     for q in ARMS:
         for r in READERS:
             src = work / "readings" / q / f"{r}.json"
+            done = work / q / f"{r}_record.json"
+            if done.is_file() and json.loads(done.read_text()).get("ok"):
+                status[f"{q}/{r}"] = "already recorded"  # never record the same reading twice
+                continue
             if not src.is_file():
                 status[f"{q}/{r}"] = "missing"
                 continue
             res = _record(
                 repo,
-                json.loads(src.read_text()),
+                _as_ruled(json.loads(src.read_text()), work / q / "packet"),
                 work / q / "packet",
                 work / q / f"{r}.reading.json",
                 catalog_dir,
@@ -486,11 +502,14 @@ def score(work: Path, repo: Path, catalog_dir: Path | None) -> None:
         readings = []
         for r in READERS:
             rec = json.loads((work / q / f"{r}.json").read_text())
-            reading = _existing_reading(
-                catalog_dir
-                or Path(os.environ.get("BTH_CATALOG_DIR", Path.home() / ".bth" / "catalog")),
-                PROJECT,
-                rec["reading_id"],
+            reading = _as_ruled(
+                _existing_reading(
+                    catalog_dir
+                    or Path(os.environ.get("BTH_CATALOG_DIR", Path.home() / ".bth" / "catalog")),
+                    PROJECT,
+                    rec["reading_id"],
+                ),
+                pdir,
             )
             readings.append(
                 {
