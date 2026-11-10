@@ -112,6 +112,36 @@ Tests: the touched test files (Bearings, charter, validate, fold, index migratio
 | Working-tree or confirmation ids change the packet hash | medium (Cursor) | **as designed**: same sources as the purpose-text needles |
 | Off-charter cited together with an unlabelled sidecar is penalised twice | (Antigravity) | **open** |
 
+## Advisor check after round 2 (261110)
+
+- **JSON-encoded leak, fixed 5c33dff2.** A run's tags hold JSON inside a JSON string, so a `‑` escape decoded to the slug for a reader. The id check now tries JSON-decoded forms, and the last scan parses `.json` and `.jsonl` files.
+- **Slug count extended to sidecar text (run f35d5826):** 1 of 132 tev_design sidecars names a slug in ordinary prose. The spec now calls the count an unregistered descriptive count.
+- **Withheld-run count fixed:** it now covers the blindness filters only, with every exclusion also listed by reason.
+
+## Round 3 (261110, base 581a22c5; focuses swapped)
+
+- **Antigravity** (dispatch af3e5309) looked at correctness and blindness. Admitted.
+- **Cursor** (dispatch 938017d2) looked at measurement validity. Admitted.
+- **Antigravity claims rejected:**
+  - "no tests for `ac9.py`" is false; the planted-set file covers it.
+  - "a literal `‑` in a plain field decodes to the character" is false; `canonical_json` escapes the backslash. Those escapes are now decoded anyway, since an LLM reads them as hyphens.
+
+| Finding (round 3) | Severity | Status |
+|---|---|---|
+| Soft hyphen deleted, not mapped, so the slug slips through | critical (Antigravity) | **fixed** 20839b23 (all round-3 fixes): dash category (Pd), soft hyphen and U+2043 all map to `-` |
+| U+2043; named or zero-padded HTML entities; escaped dashes; `%5F` | high (Antigravity) | **fixed**: `html.unescape` plus a wider escape pattern |
+| A withheld run with an unresolvable sidecar leaves its purpose silent | high (Antigravity) | **fixed**: listed as `withheld_runs_unresolved`, counted as `n_withheld_runs_unresolved` |
+| Deep JSON nesting crashes the build (`RecursionError`) | high (Antigravity) | **fixed**: depth limit, walk without recursion, error caught |
+| Last scan cost on large packets | high (Antigravity) | **fixed**: skips non-ASCII handling for ASCII text, deduplicates strings, folds whole text once |
+| Line-end dash joins unrelated words | medium (Antigravity) | **fixed**: joins only between letters or digits |
+| Cyrillic look-alike letters; combining marks | medium (Antigravity) | **out of scope**: deliberate evasion, not accidental leakage |
+| A shared sidecar counts as withheld | low (both) | **fixed** |
+| A path mixing off-charter and a slug gives union gold, so off-charter is unscorable and a wrong mapping counts as agreement | high (Cursor) | **fixed**: `ambiguous_paths` give no gold; citing reading purposes are not scored on gold |
+| No shown denominators for the withheld-share bounds | medium (Cursor) | **fixed**: `n_shown_sidecars`, `n_shown_runs` |
+| Running or unreachable runs' labels are not read | low (Cursor) | **open, by design**: out of the window; the AC-9 run should have no running runs |
+
+Tests: 348 pass across the Bearings, charter, validation, fold and index-migration files.
+
 ## Found clean (Cursor)
 
 - A root-level `charter.purpose` and a root inline charter table are excluded.
