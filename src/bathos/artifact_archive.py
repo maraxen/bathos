@@ -183,14 +183,17 @@ def _stub_content(
     reason: str,
     superseded_by: str,
     pre_archive_sha: str,
+    is_python: bool = False,
 ) -> str:
     """A short, self-describing comment-block stub.
 
-    Deliberately a plain '#'-comment block for EVERY text file kind (.py, .bth.toml,
+    Deliberately a plain '#'-comment block for non-Python text files (.bth.toml,
     .slurm, ...) rather than a kind-specific format (e.g. a parseable [archived] TOML
     table for sidecars) -- a stubbed .bth.toml that still parsed as a valid sidecar table
     would risk being picked up by bathos.sidecar.parse_sidecar as if it were live, which
     is exactly the "wrong live default" danger this whole design exists to avoid.
+    For .py files, appends a RuntimeError so executing a stubbed script fails loudly
+    with a non-zero exit code instead of silently exiting 0.
 
     Embeds project_slug (not just pre_archive_sha) so restore_archived_item's stub_path
     fallback can record the real project_slug on its "restored" ledger event instead of a
@@ -199,6 +202,7 @@ def _stub_content(
     """
     lines = [
         f"# {_STUB_MARKER} (item_id={item_id})",
+        "# bathos:archived",
         f"# project_slug: {project_slug}",
         f"# verdict: {verdict}",
         f"# reason: {reason}",
@@ -206,6 +210,10 @@ def _stub_content(
         f"# pre_archive_sha: {pre_archive_sha}",
         f"# restore: bth restore {item_id}",
     ]
+    if is_python:
+        lines.append(
+            f'raise RuntimeError("This script was archived by bathos; run \'bth restore --item-id {item_id}\' to restore it.")'
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -223,8 +231,10 @@ def parse_stub(path: Path) -> dict[str, str] | None:
     if _STUB_MARKER not in text:
         return None
     fields: dict[str, str] = {}
-    for line in text.splitlines():
-        line = line.lstrip("#").strip()
+    for raw_line in text.splitlines():
+        if not raw_line.lstrip().startswith("#"):
+            continue
+        line = raw_line.lstrip("#").strip()
         if ":" not in line:
             continue
         key, _, value = line.partition(":")
@@ -247,6 +257,7 @@ def archive_experiment_bundle(
     dry_run: bool = False,
     commit: bool = True,
     item_id: str | None = None,
+    extra_paths: list[Path] | None = None,
 ) -> ArchivedItem:
     """Archive a script + its sidecar + its tracked output paths.
 
@@ -267,13 +278,18 @@ def archive_experiment_bundle(
     bundle_paths: list[Path] = [script_path]
     if sidecar_path is not None:
         bundle_paths.append(sidecar_path)
+    if extra_paths:
+        for ep in extra_paths:
+            ep_res = ep.resolve()
+            if ep_res.exists() and ep_res not in bundle_paths:
+                bundle_paths.append(ep_res)
 
     output_rel_paths = _tracked_output_paths_for_script(catalog_dir, project_slug, script_sha256)
     output_paths = [
         (project_root / rel).resolve() if not Path(rel).is_absolute() else Path(rel).resolve()
         for rel in output_rel_paths
     ]
-    existing_output_paths = [p for p in output_paths if p.exists()]
+    existing_output_paths = [p for p in output_paths if p.exists() and p not in bundle_paths]
     bundle_paths.extend(existing_output_paths)
 
     _refuse_if_dirty(project_root, bundle_paths)
@@ -297,7 +313,15 @@ def archive_experiment_bundle(
     pre_archive_sha = capture_git_state(project_root).hash
 
     for p in tracked:
-        stub = _stub_content(item_id, project_slug, verdict, reason, superseded_by, pre_archive_sha)
+        stub = _stub_content(
+            item_id,
+            project_slug,
+            verdict,
+            reason,
+            superseded_by,
+            pre_archive_sha,
+            is_python=(p.suffix == ".py"),
+        )
         p.write_text(stub)
 
     bundle_sha256 = ""

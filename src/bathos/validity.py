@@ -7,14 +7,18 @@ Invariant I1 (Non-Obliteration): base run records in cool Parquet fragments,
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import fcntl
+import functools
 import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 import time
+import tomllib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,8 +30,12 @@ from bathos.config import default_catalog_dir
 from bathos.runlog.project_id import list_registered_roots
 from bathos.version_resolver import (
     DefectEntry,
+    _get_uv_lock_packages,
     commit_in_range,
     evaluate_predicate,
+    is_self_package,
+    is_valid_git_commit,
+    key_prefix,
     load_instrument_registries,
     resolve_toolchain_version,
     version_in_range,
@@ -231,7 +239,7 @@ def compute_validity_inputs_hash(
         from bathos.index import connect_read
 
         try:
-            con = connect_read(cd, missing="empty")
+            con = connect_read(cd, missing="empty", wire_validity=False)
             should_close_con = True
         except Exception:
             con = None
@@ -350,7 +358,7 @@ def ensure_validity_cache(
         if con is None:
             from bathos.index import connect_read
 
-            con = connect_read(cd, missing="empty")
+            con = connect_read(cd, missing="empty", wire_validity=False)
             should_close_con = True
 
         try:
@@ -370,13 +378,12 @@ def ensure_validity_cache(
                     run_rows = []
             else:
                 run_rows = con.execute("SELECT id FROM runs").fetchall()
+            run_ids = [r[0] for r in run_rows]
+            validity_map = resolve_validity(run_ids, cd, con=con, workspace_root=workspace_root)
         finally:
             if should_close_con:
                 con.close()
                 con = None
-
-        run_ids = [r[0] for r in run_rows]
-        validity_map = resolve_validity(run_ids, cd, con=con, workspace_root=workspace_root)
 
         # Write to validity_cache.db
         w_con = duckdb.connect(str(cache_db))
@@ -444,7 +451,7 @@ def _find_run_main_root(
         from bathos.index import connect_read
 
         try:
-            con = connect_read(cd, missing="empty")
+            con = connect_read(cd, missing="empty", wire_validity=False)
             should_close = True
         except Exception:
             con = None
@@ -518,6 +525,259 @@ def _find_run_main_root(
     return None
 
 
+_DEFECT_STATE_PRIORITY: dict[str, int] = {
+    "void": 4,
+    "affected": 3,
+    "suspect": 2,
+    "unverifiable": 1,
+}
+
+
+def _prefer_defect(
+    curr: tuple[DefectEntry, str, bool, str | None, str] | None,
+    cand: tuple[DefectEntry, str, bool, str | None, str],
+) -> tuple[DefectEntry, str, bool, str | None, str]:
+    """Select the higher-severity defect match (void > affected > suspect > unverifiable)."""
+    if curr is None:
+        return cand
+    if _DEFECT_STATE_PRIORITY.get(cand[1], 0) > _DEFECT_STATE_PRIORITY.get(curr[1], 0):
+        return cand
+    return curr
+
+
+def _run_explicitly_records_package(run: dict[str, Any], pkg: str) -> bool:
+    """Return True if run's dependency_provenance or metadata explicitly mentions pkg."""
+    pkg_key = key_prefix(pkg)
+    dep_prov = run.get("dependency_provenance")
+    if dep_prov:
+        if isinstance(dep_prov, str):
+            with contextlib.suppress(Exception):
+                dep_prov = json.loads(dep_prov)
+        if isinstance(dep_prov, dict):
+            for k in (
+                f"{pkg_key}_version",
+                f"{pkg}_version",
+                f"{pkg_key}_source_commit",
+                f"{pkg}_source_commit",
+            ):
+                val = dep_prov.get(k)
+                if val and str(val) != "unknown":
+                    return True
+
+    meta = run.get("metadata")
+    if meta:
+        if isinstance(meta, str):
+            with contextlib.suppress(Exception):
+                meta = json.loads(meta)
+        if isinstance(meta, dict):
+            for k in (
+                f"{pkg}_version",
+                f"{pkg_key}_version",
+                f"{pkg}_installed_dist_version",
+                f"{pkg_key}_installed_dist_version",
+                f"scores_{pkg}_version",
+                f"scores_{pkg_key}_version",
+                f"tev_pinned_{pkg}_wheel",
+                f"tev_pinned_{pkg_key}_wheel",
+            ):
+                val = meta.get(k)
+                if val and str(val) != "unknown":
+                    return True
+    return False
+
+
+def _resolve_run_script_file(run: dict[str, Any], main_root: Path | None) -> Path | None:
+    """Resolve the run's .py script file on disk under main_root if it exists."""
+    if main_root is None or not main_root.is_dir():
+        return None
+    cand_strs: list[str] = []
+    cmd = run.get("command")
+    if isinstance(cmd, str) and cmd:
+        parts = cmd.split()
+        for idx, p in enumerate(parts):
+            if p.endswith(".py"):
+                cand_strs.append(p)
+            elif p == "-m" and idx + 1 < len(parts):
+                cand_strs.append(parts[idx + 1].replace(".", "/") + ".py")
+    raw_argv = run.get("argv")
+    if raw_argv:
+        argvs = raw_argv
+        if isinstance(raw_argv, str):
+            with contextlib.suppress(Exception):
+                argvs = json.loads(raw_argv)
+        if isinstance(argvs, (list, tuple)):
+            for idx, arg in enumerate(argvs):
+                if isinstance(arg, str):
+                    if arg.endswith(".py"):
+                        cand_strs.append(arg)
+                    elif arg == "-m" and idx + 1 < len(argvs) and isinstance(argvs[idx + 1], str):
+                        cand_strs.append(argvs[idx + 1].replace(".", "/") + ".py")
+    s_path = run.get("sidecar_path")
+    if isinstance(s_path, str) and s_path.endswith(".bth.toml"):
+        cand_strs.append(s_path[:-9] + ".py")
+
+    for c_str in cand_strs:
+        p = Path(c_str)
+        if not p.is_absolute():
+            p = main_root / p
+        with contextlib.suppress(Exception):
+            if p.is_file():
+                return p.resolve()
+    return None
+
+
+def _resolve_local_import_files(
+    cur_file: Path,
+    main_root: Path,
+    text: str,
+) -> list[Path]:
+    """Resolve local .py files imported by cur_file within main_root."""
+    cand_rel_modules: list[tuple[Path, str]] = []
+
+    try:
+        tree = ast.parse(text)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name:
+                        cand_rel_modules.append((main_root, alias.name))
+                        cand_rel_modules.append((main_root / "src", alias.name))
+                        cand_rel_modules.append((cur_file.parent, alias.name))
+            elif isinstance(node, ast.ImportFrom):
+                base_dirs: list[Path] = []
+                if node.level and node.level > 0:
+                    rel_base = cur_file.parent
+                    for _ in range(node.level - 1):
+                        rel_base = rel_base.parent
+                    base_dirs.append(rel_base)
+                else:
+                    base_dirs.extend([main_root, main_root / "src", cur_file.parent])
+
+                mod_prefix = node.module or ""
+                for bdir in base_dirs:
+                    if mod_prefix:
+                        cand_rel_modules.append((bdir, mod_prefix))
+                    for alias in node.names:
+                        if alias.name and alias.name != "*":
+                            sub_mod = f"{mod_prefix}.{alias.name}" if mod_prefix else alias.name
+                            cand_rel_modules.append((bdir, sub_mod))
+    except SyntaxError:
+        for m in re.finditer(r"^\s*(?:from|import)\s+([a-zA-Z0-9_.]+)", text, re.MULTILINE):
+            mod_name = m.group(1).lstrip(".")
+            if mod_name:
+                cand_rel_modules.append((main_root, mod_name))
+                cand_rel_modules.append((main_root / "src", mod_name))
+                cand_rel_modules.append((cur_file.parent, mod_name))
+
+    resolved: list[Path] = []
+    seen: set[Path] = set()
+    for base_dir, dotted in cand_rel_modules:
+        rel_slash = dotted.replace(".", "/")
+        for cand in (base_dir / f"{rel_slash}.py", base_dir / rel_slash / "__init__.py"):
+            with contextlib.suppress(OSError):
+                if cand.is_file():
+                    rp = cand.resolve()
+                    if rp not in seen:
+                        seen.add(rp)
+                        resolved.append(rp)
+    return resolved
+
+
+@functools.lru_cache(maxsize=512)
+def _script_file_mentions_package(script_path_str: str, main_root_str: str, pkg_key: str) -> bool:
+    """Return True if script_path (or its local imports in main_root up to depth 4) mentions pkg_key."""
+    script_path = Path(script_path_str)
+    main_root = Path(main_root_str)
+    pkg_alt = pkg_key.replace("_", "-")
+    pat = re.compile(rf"\b(?:{re.escape(pkg_key)}|{re.escape(pkg_alt)})\b", re.IGNORECASE)
+
+    queue: list[tuple[Path, int]] = [(script_path, 0)]
+    visited: set[Path] = set()
+
+    while queue:
+        cur_path, depth = queue.pop(0)
+        with contextlib.suppress(OSError):
+            cur_resolved = cur_path.resolve()
+            if cur_resolved in visited:
+                continue
+            visited.add(cur_resolved)
+
+        try:
+            text = cur_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            if depth == 0:
+                return True
+            continue
+
+        if pat.search(text):
+            return True
+
+        if depth < 4:
+            for child_path in _resolve_local_import_files(cur_path, main_root, text):
+                if child_path not in visited:
+                    queue.append((child_path, depth + 1))
+
+    return False
+
+
+def _resolve_pkg_git_repo(
+    pkg: str,
+    self_pkg: bool,
+    target_commit: str | None,
+    introduced_commit: str | None,
+    main_root: Path | None,
+) -> Path:
+    """Resolve the git repository root for evaluating a GIT defect/estimand range."""
+    base_root = main_root or Path.cwd()
+    if self_pkg or main_root is None:
+        return base_root
+
+    # If the commit exists in main_root (e.g. synthetic test cohorts), use main_root
+    check_sha = target_commit or introduced_commit
+    if check_sha and is_valid_git_commit(check_sha, base_root):
+        return base_root
+
+    # Otherwise check sibling repository (<parent>/<pkg> or <parent>/<pkg_key>)
+    pkg_key = key_prefix(pkg)
+    for cand_name in (pkg, pkg_key, pkg.replace("_", "-")):
+        sibling = main_root.parent / cand_name
+        if (
+            sibling.is_dir()
+            and (sibling / ".git").exists()
+            and (not check_sha or is_valid_git_commit(check_sha, sibling))
+        ):
+            return sibling
+    return base_root
+
+
+def _is_external_pkg_absent(
+    run: dict[str, Any],
+    main_root: Path | None,
+    pkg: str,
+    catalog_dir: Path | str | None = None,
+) -> bool:
+    """Return True if external pkg is absent from the project's lockfile and not declared project-locally."""
+    if main_root is None or not main_root.is_dir():
+        return False
+    pkg_key = key_prefix(pkg)
+    git_hash = run.get("git_hash")
+    if git_hash and git_hash != "unknown":
+        cat_str = str(catalog_dir) if catalog_dir is not None else None
+        calc_sha, pkgs = _get_uv_lock_packages(str(main_root), git_hash, catalog_dir=cat_str)
+        if calc_sha is not None:
+            return not any(name == pkg or key_prefix(name) == pkg_key for name in pkgs)
+    proj_inst = main_root / ".bth" / "instruments" / f"{pkg}.toml"
+    if not proj_inst.is_file():
+        lock_file = main_root / "uv.lock"
+        if lock_file.is_file():
+            with contextlib.suppress(Exception):
+                lock_doc = tomllib.loads(lock_file.read_text(encoding="utf-8"))
+                names = [p.get("name", "") for p in lock_doc.get("package", [])]
+                return not any(n == pkg or key_prefix(n) == pkg_key for n in names)
+        return True
+    return False
+
+
 def resolve_validity(
     run_ids: list[str],
     catalog_dir: Path | str | None = None,
@@ -549,7 +809,7 @@ def resolve_validity(
     if con is None:
         from bathos.index import connect_read
 
-        con = connect_read(cd, missing="empty")
+        con = connect_read(cd, missing="empty", wire_validity=False)
         should_close = True
 
     try:
@@ -862,13 +1122,25 @@ def resolve_validity(
             continue
 
         # Step 4: Check instrument defect & estimand registries
-        matched_defect: tuple[DefectEntry, str, bool, str | None] | None = None
+        matched_defect: tuple[DefectEntry, str, bool, str | None, str] | None = None
         estimand_marker: str | None = None
         primary_version_source: str = run.get("toolchain_version_source") or "unknown"
 
         for pkg, registry in registries.items():
-            version, commit, v_source = resolve_toolchain_version(run, main_root, pkg)
-            if v_source != "unknown":
+            self_pkg = is_self_package(pkg, run, main_root)
+            explicit_pkg = _run_explicitly_records_package(run, pkg)
+            version, commit, v_source = resolve_toolchain_version(run, main_root, pkg, catalog_dir=cd)
+
+            if not self_pkg and not explicit_pkg:
+                script_file = _resolve_run_script_file(run, main_root)
+                if script_file is not None and not _script_file_mentions_package(
+                    str(script_file), str(main_root), key_prefix(pkg)
+                ):
+                    continue
+                if v_source == "unknown" and _is_external_pkg_absent(run, main_root, pkg, catalog_dir=cd):
+                    continue
+
+            if v_source != "unknown" and (primary_version_source == "unknown" or self_pkg or explicit_pkg):
                 primary_version_source = v_source
 
             for entry in registry.entries:
@@ -897,10 +1169,14 @@ def resolve_validity(
                                     except Exception:
                                         pass
                             elif r.type == "GIT":
-                                target_commit = commit or run.get("git_hash")
-                                repo_root = main_root or Path.cwd()
+                                target_commit = commit or (run.get("git_hash") if self_pkg else None)
+                                repo_root = _resolve_pkg_git_repo(
+                                    pkg, self_pkg, target_commit, r.introduced, main_root
+                                )
                                 if target_commit and r.introduced:
-                                    if target_commit == r.introduced or commit_in_range(target_commit, r.introduced, None, repo_root):
+                                    if target_commit == r.introduced or commit_in_range(
+                                        target_commit, r.introduced, None, repo_root
+                                    ):
                                         estimand_marker = f"{pkg}:post-{entry.id}"
                                     else:
                                         estimand_marker = f"{pkg}:pre-{entry.id}"
@@ -909,40 +1185,48 @@ def resolve_validity(
 
                 # Range check for defects
                 matches_range = False
+                effective_v_source = v_source
                 for r in entry.ranges:
                     if r.type == "ECOSYSTEM":
                         if version is not None and version_in_range(version, r.introduced, r.fixed):
                             matches_range = True
                             break
                     elif r.type == "GIT":
-                        target_commit = commit or run.get("git_hash")
-                        repo_root = main_root or Path.cwd()
-                        if target_commit and commit_in_range(target_commit, r.introduced, r.fixed, repo_root):
+                        target_commit = commit or (run.get("git_hash") if self_pkg else None)
+                        repo_root = _resolve_pkg_git_repo(
+                            pkg, self_pkg, target_commit, r.introduced, main_root
+                        )
+                        fixed_targets = r.fixed_all if r.fixed_all else (r.fixed,)
+                        if target_commit and commit_in_range(target_commit, r.introduced, fixed_targets, repo_root):
                             matches_range = True
+                            if commit is None and v_source != "recorded":
+                                effective_v_source = "inferred-from-commit"
                             break
 
                 if matches_range:
-
                     # Defect predicate check (OD-2)
                     if entry.predicate:
                         pred_match, pred_err = evaluate_predicate(entry.predicate.condition, run)
                         if not pred_match:
                             if pred_err and "missing predicate field" in pred_err:
                                 # OD-2: Resolve to suspect due to missing field
-                                if entry.hide_inferred and v_source == "inferred-from-commit":
+                                if entry.hide_inferred and effective_v_source == "inferred-from-commit":
                                     d_state = "void"
                                     d_hidden = True
                                 else:
                                     d_state = "suspect"
                                     d_hidden = False
-                                matched_defect = (entry, d_state, d_hidden, pred_err)
-                                break
+                                matched_defect = _prefer_defect(
+                                    matched_defect,
+                                    (entry, d_state, d_hidden, pred_err, effective_v_source),
+                                )
+                                continue
                             else:
                                 # Condition was False
                                 continue
 
                     # Defect matched
-                    if v_source == "inferred-from-commit":
+                    if effective_v_source == "inferred-from-commit":
                         if entry.hide_inferred:  # OD-1
                             d_state = entry.severity
                             d_hidden = True
@@ -953,40 +1237,46 @@ def resolve_validity(
                         d_state = entry.severity
                         d_hidden = (entry.severity == "void")
 
-                    matched_defect = (
-                        entry,
-                        d_state,
-                        d_hidden,
-                        f"matches defect {entry.id}: {entry.description}" if entry.description else f"matches defect {entry.id}",
+                    matched_defect = _prefer_defect(
+                        matched_defect,
+                        (
+                            entry,
+                            d_state,
+                            d_hidden,
+                            f"matches defect {entry.id}: {entry.description}"
+                            if entry.description
+                            else f"matches defect {entry.id}",
+                            effective_v_source,
+                        ),
                     )
-                    break
-
-            if matched_defect:
-                break
 
             # Unknown version checks for active defect / estimand
             if v_source == "unknown":
                 active_defects = [e for e in registry.entries if e.kind == "defect"]
-                if active_defects and not matched_defect:
+                if active_defects:
                     first_def = active_defects[0]
-                    matched_defect = (
-                        first_def,
-                        "unverifiable",
-                        False,
-                        f"toolchain version unresolvable for defect {first_def.id}",
+                    matched_defect = _prefer_defect(
+                        matched_defect,
+                        (
+                            first_def,
+                            "unverifiable",
+                            False,
+                            f"toolchain version unresolvable for defect {first_def.id}",
+                            v_source,
+                        ),
                     )
                 active_estimands = [e for e in registry.entries if e.kind == "estimand_change"]
                 if active_estimands and not estimand_marker:
                     estimand_marker = f"{pkg}:unknown"
 
         if matched_defect is not None:
-            entry, d_state, d_hidden, d_reason = matched_defect
+            entry, d_state, d_hidden, d_reason, matched_v_src = matched_defect
             results[r_id] = ValidityResult(
                 run_id=r_id,
                 state=d_state,
                 reason=d_reason,
                 replacement_id=None,
-                version_source=primary_version_source,
+                version_source=matched_v_src if matched_v_src != "unknown" else primary_version_source,
                 evidence_tier=evidence_tier,
                 is_hidden=d_hidden,
                 defect_id=entry.id,

@@ -118,7 +118,13 @@ def _evaluate_synthetic_cohort() -> DryRunCohortResults:
         subprocess.run(["git", "checkout", "-b", "defect_branch"], cwd=tev_repo, capture_output=True, check=True)
         (tev_repo / "git_defect.txt").write_text("defect")
         subprocess.run(["git", "add", "git_defect.txt"], cwd=tev_repo, capture_output=True, check=True)
-        subprocess.run(["git", "commit", "--no-verify", "-m", "git defect"], cwd=tev_repo, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "--no-verify", "-m", "git defect src"], cwd=tev_repo, capture_output=True, check=True)
+        commit_defect_src = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tev_repo, capture_output=True, text=True, check=True).stdout.strip()
+        (tev_repo / "uv.lock").write_text(
+            f'[[package]]\nname = "aminx"\nversion = "0.1.0a24"\nsource = {{ commit = "{commit_defect_src}" }}\n'
+        )
+        subprocess.run(["git", "add", "uv.lock"], cwd=tev_repo, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "--no-verify", "-m", "git defect lock"], cwd=tev_repo, capture_output=True, check=True)
         commit_defect_tev = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tev_repo, capture_output=True, text=True, check=True).stdout.strip()
 
         # Back to main for clean commits
@@ -160,7 +166,7 @@ revision = 1
 kind = "defect"
 severity = "void"
 hide_inferred = false
-ranges = [{{ type = "GIT", events = [{{ introduced = "{commit_defect_tev}" }}] }}]
+ranges = [{{ type = "GIT", events = [{{ introduced = "{commit_defect_src}" }}] }}]
 """)
 
         # Setup asr repo
@@ -221,12 +227,6 @@ ranges = [{{ type = "GIT", events = [{{ introduced = "{commit_corrupt_asr}" }}, 
         for i in range(1246):
             tev_rows.append((f"tev_nolock_git_{i}", "tev_design", commit_defect_tev, "main", False, "completed", None, None, "inferred-from-commit", None))
 
-        con.executemany(
-            """INSERT INTO runs (id, project_slug, git_hash, git_branch, git_dirty, status, metadata, dependency_lock_sha256, toolchain_version_source, dependency_provenance)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            tev_rows,
-        )
-
         # B. 1,420 runs in asr
         asr_rows = []
         # 205 void corrupt runs
@@ -238,10 +238,27 @@ ranges = [{{ type = "GIT", events = [{{ introduced = "{commit_corrupt_asr}" }}, 
             asr_prov = json.dumps({"asr_version": "1.0.1", "asr_source_commit": commit_fixed_asr})
             asr_rows.append((f"asr_fixed_{i}", "asr", commit_fixed_asr, "main", False, "completed", None, None, "recorded", asr_prov))
 
-        con.executemany(
-            """INSERT INTO runs (id, project_slug, git_hash, git_branch, git_dirty, status, metadata, dependency_lock_sha256, toolchain_version_source, dependency_provenance)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            asr_rows,
+        import pyarrow as pa
+
+        all_rows = tev_rows + asr_rows
+        cols = [
+            "id",
+            "project_slug",
+            "git_hash",
+            "git_branch",
+            "git_dirty",
+            "status",
+            "metadata",
+            "dependency_lock_sha256",
+            "toolchain_version_source",
+            "dependency_provenance",
+        ]
+        pa_tbl = pa.Table.from_pydict(
+            {col: [r[idx] for r in all_rows] for idx, col in enumerate(cols)}
+        )
+        con.register("synthetic_runs_tbl", pa_tbl)
+        con.execute(
+            f"INSERT INTO runs ({', '.join(cols)}) SELECT {', '.join(cols)} FROM synthetic_runs_tbl"
         )
         con.close()
 
@@ -251,44 +268,63 @@ ranges = [{{ type = "GIT", events = [{{ introduced = "{commit_corrupt_asr}" }}, 
         # ------------------------------------------------------------------
         # 3. Dynamic Execution & Count Aggregation via resolve_validity()
         # ------------------------------------------------------------------
-        # Pass 1: hide_inferred = false
-        _write_tev_instruments(hide_inferred=False)
-        tev_p1 = resolve_validity(tev_rids, cat_dir, workspace_root=tev_repo)
+        orig_xdg = os.environ.get("XDG_CONFIG_HOME")
+        orig_cat_dir = os.environ.get("BTH_CATALOG_DIR")
+        os.environ["XDG_CONFIG_HOME"] = str(sandbox / "config")
+        os.environ["BTH_CATALOG_DIR"] = str(cat_dir)
+        try:
+            vcache = cat_dir / "validity_cache.db"
+            # Pass 1: hide_inferred = false
+            _write_tev_instruments(hide_inferred=False)
+            if vcache.exists():
+                vcache.unlink()
+            tev_p1 = resolve_validity(tev_rids, cat_dir, workspace_root=tev_repo)
 
-        results.total_runs_tev = len(tev_rids)
-        results.lock_runs_tev = sum(1 for v in tev_p1.values() if v.version_source == "verified-from-lock")
-        results.nolock_runs_tev = sum(1 for v in tev_p1.values() if v.version_source != "verified-from-lock")
-        results.metadata_version_runs_tev = 36
-        results.missing_sample_s_runs_tev = sum(1 for v in tev_p1.values() if v.reason and "missing predicate field: sample_s" in v.reason)
-        results.unverified_toolchain_runs_tev = sum(1 for v in tev_p1.values() if v.state == "suspect" and (not v.reason or "missing predicate field" not in v.reason))
+            results.total_runs_tev = len(tev_rids)
+            results.lock_runs_tev = sum(1 for v in tev_p1.values() if v.version_source == "verified-from-lock")
+            results.nolock_runs_tev = sum(1 for v in tev_p1.values() if v.version_source != "verified-from-lock")
+            results.metadata_version_runs_tev = 36
+            results.missing_sample_s_runs_tev = sum(1 for v in tev_p1.values() if v.reason and "missing predicate field: sample_s" in v.reason)
+            results.unverified_toolchain_runs_tev = sum(1 for v in tev_p1.values() if v.state == "suspect" and (not v.reason or "missing predicate field" not in v.reason))
 
-        results.visible_tev_hide_false = sum(1 for v in tev_p1.values() if not v.is_hidden)
-        results.current_tev_hide_false = sum(1 for v in tev_p1.values() if v.state == "current")
-        results.suspect_tev_hide_false = sum(1 for v in tev_p1.values() if v.state == "suspect")
-        results.void_tev_hide_false = sum(1 for v in tev_p1.values() if v.state == "void")
+            results.visible_tev_hide_false = sum(1 for v in tev_p1.values() if not v.is_hidden)
+            results.current_tev_hide_false = sum(1 for v in tev_p1.values() if v.state == "current")
+            results.suspect_tev_hide_false = sum(1 for v in tev_p1.values() if v.state == "suspect")
+            results.void_tev_hide_false = sum(1 for v in tev_p1.values() if v.state == "void")
 
-        results.estimand_pre_aminx_2026_002 = sum(1 for v in tev_p1.values() if v.estimand_marker == "aminx:pre-AMINX-2026-002")
-        results.estimand_post_aminx_2026_002 = sum(1 for v in tev_p1.values() if v.estimand_marker == "aminx:post-AMINX-2026-002")
+            results.estimand_pre_aminx_2026_002 = sum(1 for v in tev_p1.values() if v.estimand_marker == "aminx:pre-AMINX-2026-002")
+            results.estimand_post_aminx_2026_002 = sum(1 for v in tev_p1.values() if v.estimand_marker == "aminx:post-AMINX-2026-002")
 
-        # Pass 2: hide_inferred = true (OD-1 opt-in)
-        _write_tev_instruments(hide_inferred=True)
-        tev_p2 = resolve_validity(tev_rids, cat_dir, workspace_root=tev_repo)
+            # Pass 2: hide_inferred = true (OD-1 opt-in)
+            _write_tev_instruments(hide_inferred=True)
+            if vcache.exists():
+                vcache.unlink()
+            tev_p2 = resolve_validity(tev_rids, cat_dir, workspace_root=tev_repo)
 
-        results.visible_tev_hide_true = sum(1 for v in tev_p2.values() if not v.is_hidden)
-        results.current_tev_hide_true = sum(1 for v in tev_p2.values() if v.state == "current")
-        results.suspect_tev_hide_true = sum(1 for v in tev_p2.values() if v.state == "suspect")
-        results.void_tev_hide_true = sum(1 for v in tev_p2.values() if v.state == "void")
+            results.visible_tev_hide_true = sum(1 for v in tev_p2.values() if not v.is_hidden)
+            results.current_tev_hide_true = sum(1 for v in tev_p2.values() if v.state == "current")
+            results.suspect_tev_hide_true = sum(1 for v in tev_p2.values() if v.state == "suspect")
+            results.void_tev_hide_true = sum(1 for v in tev_p2.values() if v.state == "void")
 
-        # ASR evaluation
-        asr_res = resolve_validity(asr_rids, cat_dir, workspace_root=asr_repo)
-        results.total_runs_asr = len(asr_rids)
-        results.visible_asr = sum(1 for v in asr_res.values() if not v.is_hidden)
-        results.current_asr = sum(1 for v in asr_res.values() if v.state == "current")
-        results.void_asr = sum(1 for v in asr_res.values() if v.state == "void")
+            # ASR evaluation
+            asr_res = resolve_validity(asr_rids, cat_dir, workspace_root=asr_repo)
+            results.total_runs_asr = len(asr_rids)
+            results.visible_asr = sum(1 for v in asr_res.values() if not v.is_hidden)
+            results.current_asr = sum(1 for v in asr_res.values() if v.state == "current")
+            results.void_asr = sum(1 for v in asr_res.values() if v.state == "void")
 
-        # Total runs
-        results.total_runs = results.total_runs_tev + results.total_runs_asr
-        results.side_by_side_complete = True
+            # Total runs
+            results.total_runs = results.total_runs_tev + results.total_runs_asr
+            results.side_by_side_complete = True
+        finally:
+            if orig_xdg is not None:
+                os.environ["XDG_CONFIG_HOME"] = orig_xdg
+            else:
+                os.environ.pop("XDG_CONFIG_HOME", None)
+            if orig_cat_dir is not None:
+                os.environ["BTH_CATALOG_DIR"] = orig_cat_dir
+            else:
+                os.environ.pop("BTH_CATALOG_DIR", None)
 
     return results
 
@@ -355,7 +391,7 @@ revision = 1
 kind = "defect"
 severity = "void"
 hide_inferred = false
-ranges = [{ type = "GIT", events = [{ introduced = "56286cf" }, { fixed = "d4a17b3" }] }]
+ranges = [{ type = "GIT", events = [{ introduced = "56286cf" }, { fixed = "d4a17b3" }, { fixed = "ef66b99" }] }]
 """)
 
         def _write_live_aminx(hide_inferred: bool) -> None:
@@ -387,7 +423,10 @@ revision = 1
 kind = "defect"
 severity = "void"
 hide_inferred = false
-ranges = [{{ type = "GIT", events = [{{ introduced = "e5f40cb8b" }}, {{ fixed = "d930bbad" }}] }}]
+ranges = [
+  {{ type = "ECOSYSTEM", events = [{{ introduced = "0.1.0a24" }}, {{ fixed = "0.1.0a28" }}] }},
+  {{ type = "GIT", events = [{{ introduced = "e5f40cb8b" }}, {{ fixed = "df4581ec" }}, {{ fixed = "e03e0081" }}, {{ fixed = "867c5fab" }}, {{ fixed = "039d149c" }}] }}
+]
 """)
 
         orig_xdg = os.environ.get("XDG_CONFIG_HOME")

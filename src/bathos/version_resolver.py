@@ -35,6 +35,7 @@ class DefectRange:
     type: str  # "ECOSYSTEM" | "GIT"
     introduced: str | None = None
     fixed: str | None = None
+    fixed_all: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -73,16 +74,21 @@ def parse_instrument_registry(path: Path) -> InstrumentRegistry:
             events = r.get("events", [])
             intro = None
             fixed = None
+            fixed_list: list[str] = []
             for ev in events:
                 if "introduced" in ev:
                     intro = str(ev["introduced"])
                 if "fixed" in ev:
-                    fixed = str(ev["fixed"])
+                    f_val = str(ev["fixed"])
+                    if fixed is None:
+                        fixed = f_val
+                    fixed_list.append(f_val)
             ranges.append(
                 DefectRange(
                     type=r.get("type", "ECOSYSTEM"),
                     introduced=intro,
                     fixed=fixed,
+                    fixed_all=tuple(fixed_list),
                 )
             )
         pred: DefectPredicate | None = None
@@ -291,8 +297,26 @@ def version_in_range(
 
 
 @functools.lru_cache(maxsize=2048)
+def is_valid_git_commit(sha: str, repo_root: Path) -> bool:
+    """True iff sha resolves to an existing commit object in repo_root."""
+    if not sha or sha == "unknown":
+        return False
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(repo_root), "cat-file", "-e", f"{sha}^{{commit}}"],
+            capture_output=True,
+            check=False,
+        )
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
+@functools.lru_cache(maxsize=2048)
 def is_git_ancestor(ancestor: str, descendant: str, repo_root: Path) -> bool:
-    """True iff ancestor is an ancestor of descendant in repo_root."""
+    """True iff ancestor and descendant exist in repo_root and ancestor is an ancestor of descendant."""
+    if not is_valid_git_commit(ancestor, repo_root) or not is_valid_git_commit(descendant, repo_root):
+        return False
     try:
         res = subprocess.run(
             ["git", "-C", str(repo_root), "merge-base", "--is-ancestor", ancestor, descendant],
@@ -307,15 +331,45 @@ def is_git_ancestor(ancestor: str, descendant: str, repo_root: Path) -> bool:
 def commit_in_range(
     commit_sha: str,
     introduced: str | None,
-    fixed: str | None,
+    fixed: str | tuple[str, ...] | list[str] | None,
     repo_root: Path,
 ) -> bool:
-    """Evaluate commit ancestry: commit matches iff introduced is ancestor and fixed is NOT ancestor."""
-    if not commit_sha:
+    """Evaluate commit ancestry: commit matches iff introduced is ancestor and no valid fixed commit is ancestor.
+
+    Guards against unknown commit SHAs (git exit code 128): if `introduced` or all `fixed` SHAs
+    do not exist as commit objects in `repo_root`, returns False rather than treating exit 128 as unfixed.
+    """
+    if not commit_sha or not is_valid_git_commit(commit_sha, repo_root):
         return False
-    if introduced and not is_git_ancestor(introduced, commit_sha, repo_root):
-        return False
-    return not (fixed and is_git_ancestor(fixed, commit_sha, repo_root))
+    if introduced:
+        if not is_valid_git_commit(introduced, repo_root):
+            return False
+        if not is_git_ancestor(introduced, commit_sha, repo_root):
+            return False
+    if isinstance(fixed, str):
+        fixed_shas = [fixed] if fixed else []
+    elif isinstance(fixed, (tuple, list)):
+        fixed_shas = [str(f) for f in fixed if f]
+    else:
+        fixed_shas = []
+    if fixed_shas:
+        valid_fixed = [f for f in fixed_shas if is_valid_git_commit(f, repo_root)]
+        if not valid_fixed:
+            # Never treat an unknown/non-existent fixed SHA (exit code 128) as "unfixed"
+            return False
+        if any(is_git_ancestor(f, commit_sha, repo_root) for f in valid_fixed):
+            return False
+    return True
+
+
+_PRED_CON: duckdb.DuckDBPyConnection | None = None
+
+
+def _get_pred_con() -> duckdb.DuckDBPyConnection:
+    global _PRED_CON
+    if _PRED_CON is None:
+        _PRED_CON = duckdb.connect()
+    return _PRED_CON
 
 
 @functools.lru_cache(maxsize=128)
@@ -325,7 +379,7 @@ def extract_predicate_columns(condition: str) -> list[str]:
         return []
     try:
         row = (
-            duckdb.connect()
+            _get_pred_con()
             .execute("SELECT json_serialize_sql(?)", [f"SELECT ({condition})"])
             .fetchone()
         )
@@ -446,7 +500,7 @@ def evaluate_predicate(condition: str, run: Any) -> tuple[bool, str | None]:
     # Evaluate SQL condition using a temporary PyArrow table in DuckDB
     try:
         tbl = pa.Table.from_pydict({k: [v] for k, v in values.items()})
-        con = duckdb.connect()
+        con = _get_pred_con()
         con.register("_run_row", tbl)
         res = con.execute(f"SELECT ({condition}) FROM _run_row").fetchone()
         if res and res[0] is not None:
@@ -457,7 +511,9 @@ def evaluate_predicate(condition: str, run: Any) -> tuple[bool, str | None]:
 
 
 def _read_version_cache(
-    main_root_str: str, git_hash: str
+    main_root_str: str,
+    git_hash: str,
+    catalog_dir: str | None = None,
 ) -> tuple[str | None, dict[str, tuple[str, str | None]]] | None:
     # 1. Check <main_root>/.bth/cache/version_cache.json
     try:
@@ -481,20 +537,14 @@ def _read_version_cache(
     # 2. Check validity_cache.db:version_cache
     try:
         from bathos.config import default_catalog_dir
-        from bathos.validity import ensure_validity_cache, validity_cache_db_path
+        from bathos.validity import validity_cache_db_path
 
-        cat_dir = os.environ.get("BTH_CATALOG_DIR") or default_catalog_dir()
+        cat_dir = catalog_dir or os.environ.get("BTH_CATALOG_DIR") or default_catalog_dir()
         db_path = validity_cache_db_path(cat_dir)
         if db_path.is_file():
             with duckdb.connect(str(db_path), read_only=True) as con:
                 tables = {r[0] for r in con.execute("SELECT table_name FROM duckdb_tables()").fetchall()}
-            if "version_cache" not in tables and Path(cat_dir).is_dir():
-                with contextlib.suppress(Exception):
-                    ensure_validity_cache(cat_dir)
-                    with duckdb.connect(str(db_path), read_only=True) as con:
-                        tables = {r[0] for r in con.execute("SELECT table_name FROM duckdb_tables()").fetchall()}
-            if "version_cache" in tables:
-                with duckdb.connect(str(db_path), read_only=True) as con:
+                if "version_cache" in tables:
                     rows = con.execute(
                         "SELECT lock_sha256, package_name, resolved_version, resolved_commit "
                         "FROM version_cache WHERE main_root = ? AND git_hash = ?",
@@ -515,38 +565,43 @@ def _write_version_cache(
     git_hash: str,
     calc_sha: str,
     pkgs: dict[str, tuple[str, str | None]],
+    catalog_dir: str | None = None,
 ) -> None:
+    from bathos.config import default_catalog_dir
+    from bathos.validity import VERSION_CACHE_DDL, validity_cache_db_path
+
+    cat_dir = catalog_dir or os.environ.get("BTH_CATALOG_DIR") or default_catalog_dir()
+    cat_in_tmp = str(Path(cat_dir)).startswith("/tmp/")
+    root_in_tmp = str(Path(main_root_str)).startswith("/tmp/")
+    allow_workspace_write = os.environ.get("BTH_READONLY_DRYRUN") != "1" and (
+        not cat_in_tmp or root_in_tmp
+    )
+
     # 1. Update <main_root>/.bth/cache/version_cache.json
-    try:
-        cache_dir = Path(main_root_str) / ".bth" / "cache"
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        json_path = cache_dir / "version_cache.json"
-        doc = {}
-        if json_path.is_file():
-            with contextlib.suppress(Exception):
-                doc = json.loads(json_path.read_text(encoding="utf-8"))
-        doc[git_hash] = {
-            "lock_sha256": calc_sha,
-            "packages": {pkg: [ver, comm] for pkg, (ver, comm) in pkgs.items()},
-        }
-        tmp_path = json_path.with_suffix(".tmp")
-        tmp_path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
-        tmp_path.replace(json_path)
-    except Exception:
-        pass
+    if allow_workspace_write:
+        try:
+            cache_dir = Path(main_root_str) / ".bth" / "cache"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            json_path = cache_dir / "version_cache.json"
+            doc = {}
+            if json_path.is_file():
+                with contextlib.suppress(Exception):
+                    doc = json.loads(json_path.read_text(encoding="utf-8"))
+            doc[git_hash] = {
+                "lock_sha256": calc_sha,
+                "packages": {pkg: [ver, comm] for pkg, (ver, comm) in pkgs.items()},
+            }
+            tmp_path = json_path.with_suffix(".tmp")
+            tmp_path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+            tmp_path.replace(json_path)
+        except Exception:
+            pass
 
     # 2. Update validity_cache.db:version_cache
     try:
-        from bathos.config import default_catalog_dir
-        from bathos.validity import VERSION_CACHE_DDL, ensure_validity_cache, validity_cache_db_path
-
-        cat_dir = os.environ.get("BTH_CATALOG_DIR") or default_catalog_dir()
         db_path = validity_cache_db_path(cat_dir)
-        if "BTH_CATALOG_DIR" in os.environ or db_path.parent.is_dir():
+        if catalog_dir is not None or "BTH_CATALOG_DIR" in os.environ or db_path.parent.is_dir():
             db_path.parent.mkdir(parents=True, exist_ok=True)
-            if not db_path.is_file():
-                with contextlib.suppress(Exception):
-                    ensure_validity_cache(cat_dir)
             with duckdb.connect(str(db_path)) as con:
                 con.execute(VERSION_CACHE_DDL)
                 rows = [
@@ -564,11 +619,13 @@ def _write_version_cache(
 
 @functools.lru_cache(maxsize=1024)
 def _get_uv_lock_packages(
-    main_root_str: str, git_hash: str
+    main_root_str: str,
+    git_hash: str,
+    catalog_dir: str | None = None,
 ) -> tuple[str | None, dict[str, tuple[str, str | None]]]:
     """Return (calc_sha, dict_of_pkg_to_tuple_of_version_and_commit)."""
     # 1. Check persistent caches (JSON & DuckDB)
-    cached = _read_version_cache(main_root_str, git_hash)
+    cached = _read_version_cache(main_root_str, git_hash, catalog_dir=catalog_dir)
     if cached is not None:
         return cached
 
@@ -589,20 +646,49 @@ def _get_uv_lock_packages(
                 if name:
                     v = p.get("version")
                     src = p.get("source", {})
-                    c = src.get("commit") or src.get("git") if isinstance(src, dict) else None
+                    if isinstance(src, dict):
+                        c = src.get("commit") or src.get("git")
+                        if not c and ("editable" in src or "virtual" in src):
+                            c = "editable"
+                    else:
+                        c = None
                     pkgs[name] = (v, c)
             # 3. Populate persistent caches
-            _write_version_cache(main_root_str, git_hash, calc_sha, pkgs)
+            _write_version_cache(main_root_str, git_hash, calc_sha, pkgs, catalog_dir=catalog_dir)
             return calc_sha, pkgs
     except Exception:
         pass
     return None, {}
 
 
+def is_self_package(package: str, run: Any, main_root: Path | None) -> bool:
+    """Return True if `package` is the consuming repository's own package."""
+    pkg_key = key_prefix(package)
+    proj_slug = None
+    if isinstance(run, dict):
+        proj_slug = run.get("project_slug")
+    elif hasattr(run, "project_slug"):
+        proj_slug = getattr(run, "project_slug")
+    if proj_slug and key_prefix(str(proj_slug)) == pkg_key:
+        return True
+    if main_root is not None:
+        if key_prefix(main_root.name) == pkg_key:
+            return True
+        pyproj = main_root / "pyproject.toml"
+        if pyproj.is_file():
+            with contextlib.suppress(Exception):
+                doc = tomllib.loads(pyproj.read_text(encoding="utf-8"))
+                proj_name = doc.get("project", {}).get("name")
+                if proj_name and key_prefix(str(proj_name)) == pkg_key:
+                    return True
+    return False
+
+
 def resolve_toolchain_version(
     run: Any,
     main_root: Path | None,
     package: str,
+    catalog_dir: Path | str | None = None,
 ) -> tuple[str | None, str | None, str]:
     """Resolve (version, commit, version_source) across the 4-tier hierarchy.
 
@@ -610,10 +696,11 @@ def resolve_toolchain_version(
     1. "recorded": dependency_provenance or metadata verified by lock SHA.
     2. "verified-from-lock": git show <run.git_hash>:uv.lock SHA matches dependency_lock_sha256.
     3. "inferred-from-commit": runtime metadata (metadata.<pkg>_version, wheel name, etc.)
-       or uv.lock without lock SHA match.
+       or uv.lock without lock SHA match, or editable self-package in uv.lock without commit SHA.
     4. "unknown": toolchain unresolvable.
     """
     pkg_key = key_prefix(package)
+    self_pkg = is_self_package(package, run, main_root)
 
     # 1. Tier 1: Check dependency_provenance
     dep_prov = None
@@ -686,18 +773,32 @@ def resolve_toolchain_version(
 
     lock_version: str | None = None
     lock_commit: str | None = None
+    lock_is_editable = False
     lock_verified = False
 
     if main_root is not None and main_root.is_dir() and git_hash and git_hash != "unknown":
-        calc_sha, pkgs = _get_uv_lock_packages(str(main_root), git_hash)
+        cat_str = str(catalog_dir) if catalog_dir is not None else None
+        calc_sha, pkgs = _get_uv_lock_packages(str(main_root), git_hash, catalog_dir=cat_str)
         if calc_sha is not None:
             for name, (v, c) in pkgs.items():
                 if name == package or key_prefix(name) == pkg_key:
                     lock_version = v
-                    lock_commit = c
+                    if c == "editable":
+                        lock_is_editable = True
+                        lock_commit = git_hash
+                    elif c is None and self_pkg:
+                        # Editable self-package in uv.lock without a pinned commit SHA
+                        lock_is_editable = True
+                        lock_commit = git_hash
+                    else:
+                        lock_commit = c
                     break
             if dep_lock_sha and dep_lock_sha == calc_sha:
                 lock_verified = True
+
+    # Editable self-package in uv.lock has no commit SHA pinned in uv.lock -> Tier 3 inferred-from-commit
+    if lock_is_editable:
+        return meta_version or lock_version, lock_commit, "inferred-from-commit"
 
     # Resolve Tiers 1-4:
     if lock_verified and lock_version:
@@ -714,12 +815,7 @@ def resolve_toolchain_version(
         # Tier 3 (uv.lock found at commit, but lock SHA unverified/missing)
         return lock_version, lock_commit, "inferred-from-commit"
 
-    if (
-        git_hash
-        and git_hash != "unknown"
-        and main_root is not None
-        and (main_root.name == package or (isinstance(run, dict) and run.get("project_slug") == package))
-    ):
+    if git_hash and git_hash != "unknown" and self_pkg:
         return None, git_hash, "inferred-from-commit"
 
     # Tier 4: Unknown

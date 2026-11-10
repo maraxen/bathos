@@ -1357,3 +1357,281 @@ def test_validity_diagnostic_telemetry_emission(tmp_path: Path):
     # Test telemetry helper wrappers without raising
     emit_validity_filter_applied(filter_name="test_filter", hidden_count=2, total_count=10)
     emit_validity_override_used(override_kind="test_override", entity_id=r.id, reason="test reason")
+
+
+# ---------------------------------------------------------------------------
+# Option A Regression Tests: Bug 1a, 1b, 1c
+# ---------------------------------------------------------------------------
+def test_bug1a_unknown_fixed_sha_and_multi_fixed_events(tmp_path: Path):
+    """Bug 1a: Never treat git merge-base exit 128 on fixed SHA as unfixed; support multiple fixed events."""
+    from bathos.version_resolver import commit_in_range, parse_instrument_registry
+
+    repo = _make_git_repo(tmp_path / "asr")
+    (repo / "src.txt").write_text("v1: buggy\n")
+    subprocess.run(["git", "add", "src.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "buggy commit", "--no-verify"], cwd=repo, check=True)
+    c_intro = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+    (repo / "src.txt").write_text("v2: fixed on main\n")
+    subprocess.run(["git", "add", "src.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "fix on main", "--no-verify"], cwd=repo, check=True)
+    c_fix_main = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+    (repo / "src.txt").write_text("v3: descendant of fix\n")
+    subprocess.run(["git", "add", "src.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "post-fix work", "--no-verify"], cwd=repo, check=True)
+    c_post_fix = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+    # 1. Unknown/dangling fixed SHA (exit code 128) must NOT be treated as unfixed
+    assert commit_in_range(c_post_fix, c_intro, "deadbeefdeadbeef", repo) is False
+
+    # 2. Unknown introduced SHA must return False
+    assert commit_in_range(c_post_fix, "deadbeefdeadbeef", None, repo) is False
+
+    # 3. Multiple fixed SHAs (one dangling/other-worktree SHA + one valid ancestor fix on main)
+    inst_toml = repo / "asr.toml"
+    inst_toml.write_text(f"""schema_version = "1.0.0"
+package = "asr"
+ecosystem = "PyPI"
+
+[[entries]]
+id = "ASR-LG-2026-001"
+revision = 1
+kind = "defect"
+severity = "void"
+hide_inferred = false
+ranges = [{{ type = "GIT", events = [{{ introduced = "{c_intro}" }}, {{ fixed = "deadbeef0000" }}, {{ fixed = "{c_fix_main}" }}] }}]
+""")
+    reg = parse_instrument_registry(inst_toml)
+    r_git = reg.entries[0].ranges[0]
+    assert len(r_git.fixed_all) == 2
+    assert commit_in_range(c_intro, r_git.introduced, r_git.fixed_all, repo) is True
+    assert commit_in_range(c_fix_main, r_git.introduced, r_git.fixed_all, repo) is False
+    assert commit_in_range(c_post_fix, r_git.introduced, r_git.fixed_all, repo) is False
+
+
+def test_bug1b_external_pkg_no_fallback_to_project_git_hash_and_editable_self_pkg(tmp_path: Path):
+    """Bug 1b: External pkg GIT range never uses project git_hash; editable self-pkg resolves inferred-from-commit."""
+    from bathos.version_resolver import resolve_toolchain_version
+
+    repo = _make_git_repo(tmp_path / "asr")
+    (repo / ".bth.toml").write_text('[project]\nslug = "asr"\n')
+    (repo / "uv.lock").write_text(
+        'version = 1\n[[package]]\nname = "asr"\nversion = "0.1.0"\nsource = { editable = "." }\n'
+        '[[package]]\nname = "aminx"\nversion = "0.2.1"\n'
+    )
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "lock editable asr", "--no-verify"], cwd=repo, check=True)
+    c_asr = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+    lock_sha = hashlib.sha256((repo / "uv.lock").read_bytes()).hexdigest()
+
+    run_dict = {
+        "id": "00000000-0000-0000-0000-000000000091",
+        "project_slug": "asr",
+        "git_hash": c_asr,
+        "dependency_lock_sha256": lock_sha,
+    }
+    # Editable self-package in uv.lock has no pinned commit SHA in uv.lock -> inferred-from-commit
+    ver, commit, v_src = resolve_toolchain_version(run_dict, repo, "asr")
+    assert ver == "0.1.0"
+    assert commit == c_asr
+    assert v_src == "inferred-from-commit"
+
+    # External package GIT range with c_asr as introduced must NOT match a consuming project's git_hash
+    inst_dir = repo / ".bth" / "instruments"
+    inst_dir.mkdir(parents=True)
+    (inst_dir / "aminx.toml").write_text(f"""schema_version = "1.0.0"
+package = "aminx"
+ecosystem = "PyPI"
+
+[[entries]]
+id = "AMINX-GIT-001"
+revision = 1
+kind = "defect"
+severity = "void"
+hide_inferred = true
+ranges = [{{ type = "GIT", events = [{{ introduced = "{c_asr}" }}] }}]
+""")
+    cat_dir = tmp_path / "catalog"
+    init_catalog(cat_dir)
+    r = Run(
+        id=run_dict["id"],
+        project_slug="asr",
+        command="python run.py",
+        argv=["python", "run.py"],
+        git_hash=c_asr,
+        git_branch="main",
+        git_dirty=False,
+        status="completed",
+        dependency_lock_sha256=lock_sha,
+    )
+    write_run(r, cat_dir)
+    compact(cat_dir)
+
+    res = resolve_validity([r.id], cat_dir, workspace_root=repo)
+    assert res[r.id].state == "current"
+
+
+def test_bug1c_multi_package_highest_severity_and_non_consumer_script_protection(tmp_path: Path):
+    """Bug 1c: Evaluate all packages for highest severity; skip external pkg defects when script doesn't use pkg."""
+    repo = _make_git_repo(tmp_path / "tev_design")
+    (repo / ".bth.toml").write_text('[project]\nslug = "tev_design"\n')
+    exp_dir = repo / "scripts" / "experiments"
+    exp_dir.mkdir(parents=True)
+
+    # Script that does NOT import or mention aminx
+    pure_script = exp_dir / "pure_numpy.py"
+    pure_script.write_text("import math\nprint(math.pi)\n")
+    # Script that DOES import aminx
+    consumer_script = exp_dir / "use_aminx.py"
+    consumer_script.write_text("import aminx\nprint('using aminx')\n")
+
+    (repo / "uv.lock").write_text(
+        'version = 1\n[[package]]\nname = "aminx"\nversion = "0.1.0a15"\n'
+        '[[package]]\nname = "otherpkg"\nversion = "1.0.0"\n'
+    )
+    inst_dir = repo / ".bth" / "instruments"
+    inst_dir.mkdir(parents=True)
+    # Package 1 (aa_first alphabetically): suspect defect (missing predicate field)
+    (inst_dir / "aa_first.toml").write_text("""schema_version = "1.0.0"
+package = "otherpkg"
+ecosystem = "PyPI"
+
+[[entries]]
+id = "OTHER-001"
+revision = 1
+kind = "defect"
+severity = "void"
+hide_inferred = false
+ranges = [{ type = "ECOSYSTEM", events = [{ introduced = "0.5.0" }, { fixed = "2.0.0" }] }]
+[entries.predicate]
+condition = "missing_col > 1"
+""")
+    # Package 2 (zz_second alphabetically): void defect without predicate
+    (inst_dir / "zz_second.toml").write_text("""schema_version = "1.0.0"
+package = "aminx"
+ecosystem = "PyPI"
+
+[[entries]]
+id = "AMINX-001"
+revision = 1
+kind = "defect"
+severity = "void"
+hide_inferred = true
+ranges = [{ type = "ECOSYSTEM", events = [{ introduced = "0.1.0a0" }, { fixed = "0.1.0a23" }] }]
+[entries.predicate]
+condition = "sample_s > 1"
+""")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "setup", "--no-verify"], cwd=repo, check=True)
+    c_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+    cat_dir = tmp_path / "catalog"
+    init_catalog(cat_dir)
+
+    # Run 1: executes pure_numpy.py (does not import aminx or otherpkg) -> must stay current!
+    r_pure = Run(
+        id="00000000-0000-0000-0000-000000000092",
+        project_slug="tev_design",
+        command="python scripts/experiments/pure_numpy.py",
+        argv=["python", "scripts/experiments/pure_numpy.py"],
+        git_hash=c_sha,
+        git_branch="main",
+        git_dirty=False,
+        status="completed",
+    )
+    # Run 2: executes use_aminx.py and explicitly records both packages -> must pick void over suspect!
+    r_both = Run(
+        id="00000000-0000-0000-0000-000000000093",
+        project_slug="tev_design",
+        command="python scripts/experiments/use_aminx.py",
+        argv=["python", "scripts/experiments/use_aminx.py"],
+        git_hash=c_sha,
+        git_branch="main",
+        git_dirty=False,
+        status="completed",
+        metadata=json.dumps({"otherpkg_version": "1.0.0", "aminx_version": "0.1.0a15"}),
+    )
+    write_run(r_pure, cat_dir)
+    write_run(r_both, cat_dir)
+    compact(cat_dir)
+
+    res = resolve_validity([r_pure.id, r_both.id], cat_dir, workspace_root=repo)
+    assert res[r_pure.id].state == "current"
+    assert res[r_both.id].state == "void"
+    assert res[r_both.id].defect_id == "AMINX-001"
+
+
+def test_bug1b_and_1c_sibling_git_repo_and_depth3_transitive_imports(tmp_path: Path):
+    """Verify sibling git repo resolution for external GIT ranges and depth-3 from..import local transitive imports."""
+    # 1. Create sibling external package git repository (tmp_path / "aminx")
+    aminx_repo = _make_git_repo(tmp_path / "aminx")
+    (aminx_repo / "core.py").write_text("v1 = 'buggy'\n")
+    subprocess.run(["git", "add", "."], cwd=aminx_repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "aminx buggy", "--no-verify"], cwd=aminx_repo, check=True)
+    c_aminx_bug = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=aminx_repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    (aminx_repo / "core.py").write_text("v2 = 'fixed'\n")
+    subprocess.run(["git", "add", "."], cwd=aminx_repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "aminx fixed", "--no-verify"], cwd=aminx_repo, check=True)
+    c_aminx_fix = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=aminx_repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    # 2. Create consuming project git repository (tmp_path / "tev_design")
+    repo = _make_git_repo(tmp_path / "tev_design")
+    (repo / ".bth.toml").write_text('[project]\nslug = "tev_design"\n')
+    exp_dir = repo / "scripts" / "experiments"
+    exp_dir.mkdir(parents=True)
+
+    # 3-hop local import chain: entry.py -> from scripts.experiments import hop1 -> from .hop2 import run_fn -> import aminx
+    (exp_dir / "hop2.py").write_text("import aminx\ndef run_fn(): return 1\n")
+    (exp_dir / "hop1.py").write_text("from .hop2 import run_fn\n")
+    (exp_dir / "entry.py").write_text("from scripts.experiments import hop1\nhop1.run_fn()\n")
+
+    (repo / "uv.lock").write_text(
+        f'version = 1\n[[package]]\nname = "aminx"\nversion = "0.1.0a24"\nsource = {{ commit = "{c_aminx_bug}" }}\n'
+    )
+    inst_dir = repo / ".bth" / "instruments"
+    inst_dir.mkdir(parents=True)
+    (inst_dir / "aminx.toml").write_text(f"""schema_version = "1.0.0"
+package = "aminx"
+ecosystem = "PyPI"
+
+[[entries]]
+id = "AMINX-GIT-SIBLING"
+revision = 1
+kind = "defect"
+severity = "void"
+hide_inferred = true
+ranges = [{{ type = "GIT", events = [{{ introduced = "{c_aminx_bug}" }}, {{ fixed = "{c_aminx_fix}" }}] }}]
+""")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init tev_design", "--no-verify"], cwd=repo, check=True)
+    c_tev = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    cat_dir = tmp_path / "catalog"
+    init_catalog(cat_dir)
+
+    r_transitive = Run(
+        id="00000000-0000-0000-0000-000000000094",
+        project_slug="tev_design",
+        command="python scripts/experiments/entry.py",
+        argv=["python", "scripts/experiments/entry.py"],
+        git_hash=c_tev,
+        git_branch="main",
+        git_dirty=False,
+        status="completed",
+    )
+    write_run(r_transitive, cat_dir)
+    compact(cat_dir)
+
+    res = resolve_validity([r_transitive.id], cat_dir, workspace_root=repo)
+    assert res[r_transitive.id].state == "void"
+    assert res[r_transitive.id].defect_id == "AMINX-GIT-SIBLING"
+
+

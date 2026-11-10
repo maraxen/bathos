@@ -1037,3 +1037,294 @@ def test_restore_tool_catches_restore_conflict(tmp_path: Path):
     assert res["error_code"] == BathosErrorCode.RESTORE_CONFLICT.value
     assert "resolution_hint" in res
     assert "would clobber" in res["error"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Option A Regression Tests: Bugs 2, 3, 4, 5
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_bug2_citation_prefix_matching_and_criterion2_guard(tmp_path: Path):
+    """Bug 2a/2b/2c: Prefix run matching, direct script citation, campaign protection, <90d guard, and backfill_findings real schemas."""
+    repo = _make_git_repo(tmp_path / "repo")
+    cat_dir = tmp_path / "catalog"
+    init_catalog(cat_dir)
+
+    exp_dir = repo / "scripts" / "experiments"
+    exp_dir.mkdir(parents=True)
+    old_time = time.time() - (120 * 86400)
+
+    # 1. Script protected by 8-char run prefix in finding
+    s_prefix = exp_dir / "prefix_protected.py"
+    s_prefix.write_text("print('prefix')\n")
+    os.utime(s_prefix, (old_time, old_time))
+    _create_sample_run(
+        cat_dir,
+        "0ef7d167-1111-2222-3333-444444444444",
+        project_slug=repo.name,
+        script_path="scripts/experiments/prefix_protected.py",
+        script_sha256=_sha256_file(s_prefix),
+    )
+
+    # 2. Script protected by direct script path in claim verified_by (even with 0 runs in DB)
+    s_claim_ref = exp_dir / "claim_verified_script.py"
+    s_claim_ref.write_text("print('claim verified')\n")
+    os.utime(s_claim_ref, (old_time, old_time))
+
+    # 3. Script protected by active DuckDB campaign
+    s_camp = exp_dir / "campaign_member.py"
+    s_camp.write_text("print('campaign')\n")
+    os.utime(s_camp, (old_time, old_time))
+    _create_sample_run(
+        cat_dir,
+        "cccccccc-1111-2222-3333-444444444444",
+        project_slug=repo.name,
+        script_path="scripts/experiments/campaign_member.py",
+        script_sha256=_sha256_file(s_camp),
+    )
+
+    # 4. Brand-new (<90d) script with 100% void runs -> must NOT be swept under all_runs_hidden
+    s_young_void = exp_dir / "young_void.py"
+    s_young_void.write_text("import aminx\nprint('young void')\n")
+    _create_sample_run(
+        cat_dir,
+        "dddddddd-1111-2222-3333-444444444444",
+        project_slug=repo.name,
+        script_path="scripts/experiments/young_void.py",
+        script_sha256=_sha256_file(s_young_void),
+        metadata={"aminx_version": "0.1.0a15"},
+    )
+    compact(cat_dir)
+
+    # Add campaign in DuckDB
+    import duckdb
+
+    from bathos.campaigns import create_campaign
+
+    con = duckdb.connect(str(cat_dir / "bathos.db"))
+    camp = create_campaign(con, name="Active Camp", project_slug=repo.name, mode="exploration")
+    con.execute("INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, 'cccccccc-1111-2222-3333-444444444444')", [camp.id])
+    con.close()
+
+    # Void the young_void run
+    inst_dir = repo / ".bth" / "instruments"
+    inst_dir.mkdir(parents=True)
+    (inst_dir / "aminx.toml").write_text(
+        'schema_version = "1.0.0"\npackage = "aminx"\necosystem = "PyPI"\n\n[[entries]]\n'
+        'id = "AMINX-001"\nrevision = 1\nkind = "defect"\nseverity = "void"\nhide_inferred = true\n'
+        'ranges = [{ type = "ECOSYSTEM", events = [{ introduced = "0.1.0a0" }, { fixed = "0.1.0a23" }] }]\n'
+    )
+
+    # Real-schema claims_ledger.toml and .praxia/verdicts/*.toml
+    audit_dir = repo / "scripts" / "audit"
+    audit_dir.mkdir(parents=True)
+    claims_ledger = audit_dir / "claims_ledger.toml"
+    claims_ledger.write_text(
+        '[[claims]]\nid = "C01"\nclaim = "Does prefix run work?"\nnumbers = "mean = 1.23"\n'
+        'bathos_run = "0ef7d167 (seed 0)"\nevidential_status = "tracked_reproducible"\n'
+        'where_stated = "scripts/experiments/prefix_protected.py"\n'
+    )
+    verdicts_dir = repo / ".praxia" / "verdicts"
+    verdicts_dir.mkdir(parents=True)
+    (verdicts_dir / "v_nested.toml").write_text(
+        '[verdict]\nsprint_id = "261001_nested"\ntitle = "Nested Verdict Title"\n'
+        'outcome = "Validated in run 0ef7d167"\nstatus = "settled"\n'
+    )
+
+    findings_dir = repo / ".bth" / "findings"
+    ingest_claims_ledger(claims_ledger, findings_dir)
+    ingest_praxia_verdicts(verdicts_dir, findings_dir)
+
+    ingested_c01 = parse_finding_file(next(findings_dir.glob("*does-prefix-run-work*.toml")))
+    assert ingested_c01.question == "Does prefix run work?"
+    assert ingested_c01.answer == "mean = 1.23"
+    assert "0ef7d167" in ingested_c01.supporting_runs
+
+    ingested_v = parse_finding_file(next(findings_dir.glob("*nested-verdict-title*.toml")))
+    assert ingested_v.question == "Nested Verdict Title"
+    assert "0ef7d167" in ingested_v.supporting_runs
+
+    # Add .bth/claims/c1.toml citing s_claim_ref
+    claims_dir = repo / ".bth" / "claims"
+    claims_dir.mkdir(parents=True)
+    (claims_dir / "c1.toml").write_text(
+        'id = "CLM-1"\nstatus = "registered"\n[assumptions.a1]\nverified_by = "scripts/experiments/claim_verified_script.py"\n'
+    )
+
+    cands = scan_archive_candidates(project_root=repo, catalog_dir=cat_dir, project_slug=repo.name, age_days=90)
+    cand_paths = {c["primary_path"] for c in cands}
+    assert "scripts/experiments/prefix_protected.py" not in cand_paths
+    assert "scripts/experiments/claim_verified_script.py" not in cand_paths
+    assert "scripts/experiments/campaign_member.py" not in cand_paths
+    assert "scripts/experiments/young_void.py" not in cand_paths
+
+
+def test_bug3_static_reference_package_test_gate_justfile_deck_exclusions(tmp_path: Path):
+    """Bug 3: Exclude library packages, tests, gates/fixtures, and scripts referenced by src/tests/Justfile/decks/other scripts."""
+    repo = _make_git_repo(tmp_path / "repo")
+    cat_dir = tmp_path / "catalog"
+    init_catalog(cat_dir)
+    old_time = time.time() - (150 * 86400)
+
+    # 1. Python package under scripts/
+    pkg_dir = repo / "scripts" / "tev_design"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "__init__.py").write_text("")
+    pkg_mod = pkg_dir / "pipeline_step.py"
+    pkg_mod.write_text("def step(): pass\n")
+    os.utime(pkg_mod, (old_time, old_time))
+
+    # 2. Gate & fixture directories under scripts/
+    gate_dir = repo / "scripts" / "gates"
+    gate_dir.mkdir(parents=True)
+    gate_py = gate_dir / "check_invariants.py"
+    gate_py.write_text("print('gate')\n")
+    os.utime(gate_py, (old_time, old_time))
+
+    # 3. Test file under scripts/experiments/
+    exp_dir = repo / "scripts" / "experiments"
+    exp_dir.mkdir(parents=True)
+    test_py = exp_dir / "test_helper.py"
+    test_py.write_text("def test_x(): pass\n")
+    os.utime(test_py, (old_time, old_time))
+
+    # 4. Script referenced by Justfile
+    just_py = exp_dir / "run_from_justfile.py"
+    just_py.write_text("print('just')\n")
+    os.utime(just_py, (old_time, old_time))
+    (repo / "Justfile").write_text("bench:\n    uv run python scripts/experiments/run_from_justfile.py\n")
+
+    # 5. Script referenced by decks/**/.mrx/figures.toml
+    deck_py = exp_dir / "plot_deck_figure.py"
+    deck_py.write_text("print('deck')\n")
+    os.utime(deck_py, (old_time, old_time))
+    mrx_dir = repo / "decks" / "talk" / ".mrx"
+    mrx_dir.mkdir(parents=True)
+    (mrx_dir / "figures.toml").write_text('[[figures]]\nscript = "scripts/experiments/plot_deck_figure.py"\n')
+
+    # 6. Script imported by another script
+    shared_py = exp_dir / "shared_helper_lib.py"
+    shared_py.write_text("def helper(): return 1\n")
+    os.utime(shared_py, (old_time, old_time))
+    active_caller = exp_dir / "active_caller.py"
+    active_caller.write_text("from scripts.experiments import shared_helper_lib\n")
+
+    # 7. Truly unreferenced old script -> SHOULD be proposed
+    truly_old = exp_dir / "truly_obsolete_oneoff.py"
+    truly_old.write_text("print('obsolete')\n")
+    os.utime(truly_old, (old_time, old_time))
+
+    cands = scan_archive_candidates(project_root=repo, catalog_dir=cat_dir, project_slug=repo.name, age_days=90)
+    cand_paths = {c["primary_path"] for c in cands}
+
+    assert "scripts/tev_design/pipeline_step.py" not in cand_paths
+    assert "scripts/gates/check_invariants.py" not in cand_paths
+    assert "scripts/experiments/test_helper.py" not in cand_paths
+    assert "scripts/experiments/run_from_justfile.py" not in cand_paths
+    assert "scripts/experiments/plot_deck_figure.py" not in cand_paths
+    assert "scripts/experiments/shared_helper_lib.py" not in cand_paths
+    assert "scripts/experiments/truly_obsolete_oneoff.py" in cand_paths
+
+
+def test_bug4_and_bug5_fail_loud_py_stubs_and_companion_sidecar_pairing(tmp_path: Path):
+    """Bug 4 & 5: Companion .bth.toml sidecars paired in sweep; stubbed .py raises RuntimeError when executed."""
+    import sys
+    import tomllib
+
+    from bathos.artifact_archive import parse_stub
+
+    repo = _make_git_repo(tmp_path / "repo")
+    cat_dir = tmp_path / "catalog"
+    init_catalog(cat_dir)
+    old_time = time.time() - (150 * 86400)
+
+    exp_dir = repo / "scripts" / "experiments"
+    exp_dir.mkdir(parents=True)
+    py_path = exp_dir / "paired_obsolete.py"
+    py_path.write_text("print('hello world')\n")
+    sc_path = exp_dir / "paired_obsolete.bth.toml"
+    sc_path.write_text('[experiment]\nhypothesis = "paired test"\n')
+
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "add paired script and sidecar"], cwd=repo, check=True)
+    os.utime(py_path, (old_time, old_time))
+    os.utime(sc_path, (old_time, old_time))
+
+    dry = archive_sweep_tool(dry_run=True, age_days=90, project_root=str(repo), catalog_dir=str(cat_dir))
+    assert dry["candidate_count"] == 1
+    prop_data = tomllib.loads(Path(dry["proposal_path"]).read_text(encoding="utf-8"))
+    cand = prop_data["candidates"][0]
+    assert "scripts/experiments/paired_obsolete.py" in cand["paths"]
+    assert "scripts/experiments/paired_obsolete.bth.toml" in cand["paths"]
+    assert "scripts/experiments/paired_obsolete.bth.toml" in cand["file_hashes"]
+
+    res_apply = archive_sweep_tool(
+        apply=True,
+        proposal_path=dry["proposal_path"],
+        project_root=str(repo),
+        catalog_dir=str(cat_dir),
+    )
+    assert res_apply["ok"] is True
+
+    # Both script and sidecar are stubbed
+    py_stub = py_path.read_text(encoding="utf-8")
+    sc_stub = sc_path.read_text(encoding="utf-8")
+    assert "# bathos:archived" in py_stub
+    assert "raise RuntimeError(" in py_stub
+    assert "# bathos:archived" in sc_stub
+    assert "raise RuntimeError(" not in sc_stub
+
+    # Executing stubbed .py script fails loudly with non-zero exit code
+    proc = subprocess.run([sys.executable, str(py_path)], capture_output=True, text=True)
+    assert proc.returncode != 0
+    assert "RuntimeError: This script was archived by bathos" in proc.stderr
+
+    # parse_stub and restore_archived_item still work cleanly
+    parsed = parse_stub(py_path)
+    assert parsed is not None
+    assert parsed["item_id"] == cand["item_id"]
+    restore_archived_item(project_root=repo, item_id=cand["item_id"], catalog_dir=cat_dir)
+    assert py_path.read_text(encoding="utf-8") == "print('hello world')\n"
+    assert sc_path.read_text(encoding="utf-8") == '[experiment]\nhypothesis = "paired test"\n'
+
+
+def test_bug2c_backfill_findings_long_claims_and_slug_collisions(tmp_path: Path):
+    """Verify ingest_claims_ledger and ingest_praxia_verdicts truncate >255-char slugs and deduplicate collisions."""
+    long_prefix = "a-very-long-scientific-claim-statement-that-exceeds-filesystem-limits-" * 5
+    claims_ledger = tmp_path / "claims_ledger.toml"
+    claims_ledger.write_text(
+        f'[[claims]]\nid = "K-18"\nclaim = "{long_prefix} variant A with \\"quotes\\""\n'
+        f'numbers = "delta = +1.5"\nevidential_status = "tracked_reproducible"\n\n'
+        f'[[claims]]\nid = "K-19"\nclaim = "{long_prefix} variant B"\n'
+        f'numbers = "delta = +2.0"\nevidential_status = "stale"\n',
+        encoding="utf-8",
+    )
+
+    verdicts_dir = tmp_path / "verdicts"
+    verdicts_dir.mkdir(parents=True)
+    (verdicts_dir / "v_long_1.toml").write_text(
+        f'[verdict]\nsprint_id = "261101_long_1"\ntitle = "{long_prefix} verdict 1"\n'
+        f'outcome = "confirmed"\nstatus = "settled"\n',
+        encoding="utf-8",
+    )
+    (verdicts_dir / "v_long_2.toml").write_text(
+        f'[verdict]\nsprint_id = "261101_long_2"\ntitle = "{long_prefix} verdict 2"\n'
+        f'outcome = "refuted"\nstatus = "refuted"\n',
+        encoding="utf-8",
+    )
+
+    findings_dir = tmp_path / "findings"
+    c_list = ingest_claims_ledger(claims_ledger, findings_dir)
+    v_list = ingest_praxia_verdicts(verdicts_dir, findings_dir)
+    assert len(c_list) == 2
+    assert len(v_list) == 2
+
+    written_files = sorted(findings_dir.glob("*.toml"))
+    assert len(written_files) == 4
+    for p in written_files:
+        assert len(p.name) <= 80
+        parsed = parse_finding_file(p)
+        assert parsed.id
+        assert parsed.question
+
+

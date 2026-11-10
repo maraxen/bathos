@@ -562,6 +562,7 @@ def connect_read(
     *,
     read_only: bool = True,
     missing: str = "empty",
+    wire_validity: bool = True,
 ) -> duckdb.DuckDBPyConnection:
     """The one flag-gated read entry point (spec `bathos.index.connect_read`).
 
@@ -622,7 +623,8 @@ def connect_read(
                 return duckdb.connect("")
             raise FileNotFoundError(f"catalog database not found: {db_path}")
         con = duckdb.connect(str(db_path), read_only=read_only)
-        _wire_validity_cache_and_views(con, cd)
+        if wire_validity:
+            _wire_validity_cache_and_views(con, cd)
         return con
 
     idx_path = index_db_path(cd)
@@ -676,10 +678,12 @@ def connect_read(
         else:
             con.execute(f"CREATE VIEW supersession_edges AS {_empty_select(SUPERSESSION_EDGES_DDL)}")
 
-        _wire_validity_cache_and_views(con, cd)
+        if wire_validity:
+            _wire_validity_cache_and_views(con, cd)
     else:
         init_index_schema(con)
-        _wire_validity_cache_and_views(con, cd)
+        if wire_validity:
+            _wire_validity_cache_and_views(con, cd)
     return con
 
 
