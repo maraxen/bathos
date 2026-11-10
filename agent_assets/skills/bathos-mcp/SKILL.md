@@ -5,7 +5,7 @@ when_to_use: 'Triggers: bathos mcp, BathosErrorCode, error envelope, validation_
 ---
 # bathos-mcp
 
-Integration contract for programmatic callers of bathos's MCP server (`bth-mcp`). All bathos MCP tools (registered via the `_WIRED = cisternal.wire(...)` list at the bottom of `mcp.py` — 62 as of this writing, see that file for the current enumerated set) return a typed envelope with consistent structure. Understanding the envelope shape and error codes is essential for robust integrations.
+Integration contract for programmatic callers of bathos's MCP server (`bth-mcp`). All bathos MCP tools (registered via the `_WIRED = cisternal.wire(...)` list at the bottom of `mcp.py` — 97 as of this writing, see that file for the current enumerated set) return a typed envelope with consistent structure. Understanding the envelope shape and error codes is essential for robust integrations.
 
 ## Envelope Shape
 
@@ -24,7 +24,7 @@ Every successful or failed MCP call returns a dictionary with these four standar
 
 **Fields:**
 - `ok` (bool) — `true` if call succeeded; `false` if error
-- `error_code` (str | null) — `null` on success; one of 16 BathosErrorCode values on error
+- `error_code` (str | null) — `null` on success; one of 41 BathosErrorCode values on error
 - `error` (str | null) — `null` on success; human-readable error message on error
 - `resolution_hint` (str | null) — `null` on success; actionable fix suggestion on error
 - Additional fields vary by tool (on success only)
@@ -43,13 +43,13 @@ use `result.get("ok", False)` rather than indexing.
 
 Mutating tools (`run`, `init`, `compact`, `archive`, `sync`, `repair`, `attestation_register`, the
 scaffold/register/conclude family, `blast_radius_assess`/`blast_radius_clear`, `claim_author`/
-`new_experiment`, and others) take a `token=` parameter, which is **not needed over stdio**, the
+`new_experiment`, `defect_declare`, `finding_create`, `supersede_edge_add`, `telemetry_rotate`, and others) take a `token=` parameter, which is **not needed over stdio**, the
 transport `bth-mcp` always serves today: the caller owns the server process, so do not read
 `~/.bth/mcp_token` to call them (debt #2841). The check applies when the tools are served any
 other way, or when `BTH_MCP_REQUIRE_TOKEN=1` is set; then `token=` must match
 `~/.bth/mcp_token`, and a missing or invalid token raises `auth_error`.
 
-## BathosErrorCode Values (24 total)
+## BathosErrorCode Values (41 total)
 
 **Gate-derived codes (11, aliased from GateErrorCode):**
 - `sidecar_missing` — Sidecar `.bth.toml` not found
@@ -82,6 +82,29 @@ other way, or when `BTH_MCP_REQUIRE_TOKEN=1` is set; then `token=` must match
 **Document authoring:**
 - `document_invalid` — Document schema or structure validation failed
 - `document_conflict` — Document authoring conflict or lock contention
+
+**Result Validity & Instrument Defect Registry (Spec 261106 P1):**
+- `result_void` — Run was produced by a defective instrument version and is void
+- `result_affected` — Run is implicated by an active blast-radius ledger entry
+- `result_superseded` — Run was superseded by a newer run
+- `result_archived` — Run's script or output artifacts were archived
+- `result_hidden` — Attempted to access a hidden run without `--include-superseded`
+- `result_suspect_unacknowledged` — Run toolchain is unverified/suspect; requires `ack_suspect`
+- `result_unverifiable_unacknowledged` — Run provenance unverified against lockfiles; requires `ack_unverifiable`
+- `estimand_boundary_mixed` — Attempted to pool runs across estimand change boundary without `allow_mixed_estimand`
+
+**Findings & Evidence Tiers (Spec 261106 P2):**
+- `finding_reopen_reason_required` — Question is already settled; requires `reopen_reason`
+- `finding_settled_evidence_insufficient` — Settling a finding requires at least one active confirmatory run
+- `finding_not_found` — Finding slug or ID not found in `.bth/findings/`
+- `superseded_target_not_found` — Target entity in `supersedes` does not exist
+- `spike_tier_cannot_settle` — Spike runs are preliminary probes and cannot support a settled finding
+
+**Archive Sweep, Doc Store & Telemetry (Spec 261106 P3):**
+- `archive_sweep_unapproved` — Sweep `--apply` passed without an approved proposal
+- `archive_proposal_stale` — Proposal SHA256 or git state diverged before apply
+- `doc_store_unavailable` — Configured doc store not accessible
+- `restore_conflict` — Restore would overwrite an untracked or modified file
 
 ## Caller Pattern (Standard Case)
 
@@ -149,6 +172,53 @@ else:
 - `errors` is absent on success; present as a list of human-readable validation issues on failure
 
 If a validation fails for reasons outside the tool (missing file, permission denied), both `ok` and `validation_ok` are `false`, and the error message is in `error`, not `errors`.
+
+## Result Validity, Findings & Archive MCP Tools (Spec 261106)
+
+Ten new MCP tools extend bathos with result-validity management, findings registers, archive sweep, and session initialization:
+
+1. **`defect_declare`** (`@require_write_token`):
+   - Declares an instrument defect or estimand change in `.bth/instruments/<pkg>.toml` (project) or `${XDG_CONFIG_HOME:-~/.config}/bathos/instruments/<pkg>.toml` (user-global).
+   - Parameters: `package`, `defect_id`, `introduced`, `fixed`, `severity` (`void` | `suspect`), `kind` (`defect` | `estimand_change`), `summary`, `predicate` (optional DuckDB SQL), `hide_inferred` (OD-1), `user_global` (bool).
+   - CLI mirror: `bth instrument declare-defect`.
+2. **`defect_list`** (read-only):
+   - Lists active instrument defects and estimand changes across project-local and user registries.
+   - Parameters: `package` (optional), `catalog_dir` (optional).
+   - CLI mirror: `bth instrument list-defects`.
+3. **`finding_create`** (`@require_write_token`):
+   - Scaffolds and registers a durable finding in `.bth/findings/<slug>.toml`.
+   - Parameters: `slug`, `question`, `answer`, `status` (`tentative` | `settled`), `supporting_runs` (list[str]), `reopen_reason` (str, required if question already settled), `supersedes` (str | list[str], optional predecessor slug(s) or UUID(s)).
+   - Enforces settling gate (requires completed confirmatory run; `spike` runs cannot settle with `spike_tier_cannot_settle`), reopen guard (`finding_reopen_reason_required`), and OD-6 estimand boundary check (`estimand_boundary_mixed`).
+   - CLI mirror: `bth findings create`.
+4. **`finding_update`** (`@require_write_token`):
+   - Updates an existing finding's status, answer, supporting runs, or supersedes target in `.bth/findings/<slug>.toml`.
+   - Parameters: `slug_or_id`, `status` (`tentative` | `settled`), `answer`, `supporting_runs` (list[str]), `supersedes` (str | list[str], optional predecessor slug(s) or UUID(s)), `allow_mixed_estimand` (str), `catalog_dir` (optional).
+   - Enforces settling gate (requires completed confirmatory run; `spike` runs cannot settle with `spike_tier_cannot_settle`), predecessor supersession edge activation, and OD-6 estimand boundary check (`estimand_boundary_mixed`).
+   - CLI mirror: `bth findings update`.
+5. **`finding_get`** (read-only):
+   - Retrieves finding details by slug or ID with dynamic status evaluation (downgrades to `needs-recheck` if supporting runs become hidden or suspect; exposes `superseded_by`).
+   - Parameters: `slug_or_id`, `catalog_dir` (optional).
+   - CLI mirror: `bth findings get`.
+6. **`finding_list`** (read-only):
+   - Lists registered findings with status filtering and optional superseded inclusion.
+   - Parameters: `status` (optional), `include_superseded` (bool), `catalog_dir` (optional).
+   - CLI mirror: `bth findings list`.
+7. **`supersede_add`** (MCP tool name: `supersede_edge_add`, `@require_write_token`):
+   - Records typed supersession edges between runs, findings, or artifacts in `supersession_edges`.
+   - Parameters: `from_type`, `from_id`, `superseded_by_type`, `superseded_by_id`, `reason`.
+   - CLI mirror: `bth supersede add`.
+8. **`session_start_summary`** (MCP tool name: `session_start`, read-only):
+   - Produces a fast (<50ms, byte-capped at 2KB) context payload of active beliefs, open questions, and degraded findings (`needs-recheck`) for session-start hooks.
+   - Parameters: `byte_cap` (default 2048), `catalog_dir` (optional).
+   - CLI mirror: `bth session-start` and `bth-session-start-hook`.
+9. **`archive_sweep`** (`@require_write_token_when_applying`):
+   - Workspace cleanup tool: runs candidate discovery in `--dry-run` mode to generate a proposal with SHA256 hash, or applies an approved proposal (`--apply --proposal <path>`) with an atomic git commit and catalog archive record.
+   - Parameters: `dry_run` (bool), `apply` (bool), `proposal_path` (str), `age_days` (int).
+   - CLI mirror: `bth archive-sweep`.
+10. **`telemetry_rotate`** (`@require_write_token`):
+   - Compresses and rotates raw diagnostic JSONL logs in `~/.bth/catalog/logs/` into `.jsonl.zst`.
+   - Parameters: `max_size_mb` (int), `max_age_days` (int), `catalog_dir` (optional).
+   - CLI mirror: `bth telemetry rotate`.
 
 ## Related
 

@@ -57,6 +57,27 @@ Marks campaign closed; queries still work but status is `concluded`. If a claim 
 - `--outcome` — required; specifies the campaign outcome (e.g., `pass`, `fail`, `inconclusive`)
 - `--negative-check TEXT` — required when `--outcome` is negative-sounding and a claim is registered (see **bathos-rigor-gates** for the detection vocabulary)
 - `--abort-if-below-threshold` — halts the conclude operation if metric thresholds are not met
+- `--ack-suspect "<reason>"` — required if any member run has `validity_state="suspect"` (OD-5)
+- `--ack-unverifiable "<reason>"` — required if any member run has `validity_state="unverifiable"` (OD-5)
+- `--allow-mixed-estimand "<reason>"` — required if member runs span different estimand epochs (OD-6)
+
+**Validity Gate Refusals (Invariant I2):**
+At `bth campaign conclude`, `bth claim register`, and `bth claim validate`, all member, covering, and parity runs are checked against `resolve_validity`. Hidden runs are strictly refused:
+- `RESULT_VOID` — run produced by a defective instrument version
+- `RESULT_AFFECTED` — run implicated by an active blast-radius ledger entry
+- `RESULT_SUPERSEDED` — run superseded by a successor run
+- `RESULT_ARCHIVED` — run's script or output artifacts have been archived
+- `RESULT_HIDDEN` — general hidden run refusal
+
+**OD-5 Required Rationale Flags:**
+- If any member run is `suspect`, conclusion is refused with `RESULT_SUSPECT_UNACKNOWLEDGED` unless a non-empty audit rationale is supplied via `--ack-suspect "<rationale>"`.
+- If any member run is `unverifiable`, conclusion is refused with `RESULT_UNVERIFIABLE_UNACKNOWLEDGED` unless a non-empty audit rationale is supplied via `--ack-unverifiable "<rationale>"`.
+- Empty or whitespace-only strings are rejected. Acknowledgments are recorded into `acknowledgment_ledger`.
+
+**OD-6 Estimand Boundary Enforcement:**
+- When member runs in a campaign span different estimand epochs (e.g., `pre-<id>` vs `post-<id>`, or `unknown` alongside a known estimand), `bth campaign conclude` and `bth claim register` **REFUSE** cross-boundary pooling with `ESTIMAND_BOUNDARY_MIXED`.
+- Pooling across estimand boundaries requires an explicit justification via `--allow-mixed-estimand "<rationale>"` (recorded via `validity.estimand_override_recorded` into `acknowledgment_ledger`).
+- Informational reads (`bth campaign review`, `bth ls`, `bth find`) emit a warning banner on mixed estimands rather than refusing.
 
 **Obligations:** The post-mortem Obligations system (`[obligations]` in `.bth.toml`) is documented in **bathos-rigor-gates**.
 
@@ -209,7 +230,10 @@ bth lineage <run-id>
 bth lineage <run-id> --format prov
 ```
 
-Shows parent-child run relationships. `--format prov` outputs W3C PROV-JSON.
+Shows parent-child run relationships. `--format prov` outputs W3C PROV-JSON annotated with validity metadata:
+- Attaches `bth:validity_state`, `bth:validity_reason`, and `bth:estimand_marker` to each entity.
+- Emits `prov:wasInvalidatedBy` links for runs in `void` or `affected` states.
+- Emits `prov:wasRevisionOf` links for `superseded` runs pointing to their replacement successor run.
 
 **Note:** `--format dot` is listed in `--help` but is **not actually implemented** — it errors with 'dot format not yet implemented' (exit 1). Only `text` and `prov` currently work.
 
@@ -222,6 +246,11 @@ bth cite <run-id>
 ```
 
 Emits a structured citation (markdown or `--format json`) linking the run to its hypothesis-sidecar hash, manifest hash, git SHA, and outcome — not a bibliographic (BibTeX/APA) format.
+
+**Validity Gate Enforcements:**
+- Citing a hidden run (`void`, `affected`, `superseded`, `archived`) is refused by default with `RESULT_HIDDEN` (pass `--include-superseded` to cite unmuted historical runs).
+- Citing a `suspect` run requires `--ack-suspect "<rationale>"` (refuses with `RESULT_SUSPECT_UNACKNOWLEDGED`).
+- Citing an `unverifiable` run requires `--ack-unverifiable "<rationale>"` (refuses with `RESULT_UNVERIFIABLE_UNACKNOWLEDGED`).
 
 ## Postmortems
 
@@ -361,14 +390,16 @@ claim_isolates      = ["C_baseline"]                        # confound / variabl
 
 ### The Union Gate at `conclude`
 
-- A clause is **covered** when some run has all of its `hypothesis_ids` in its `claim_discriminates`.
+- A clause is **covered** when some completed run has all of its `hypothesis_ids` in its `claim_discriminates`.
+- **Validity Gate (Invariant I2):** Covering runs must resolve to validity state `current`. If any covering or member run is in a hidden state (`void`, `affected`, `superseded`, `archived`), `conclude` is refused (`RESULT_VOID`, `RESULT_AFFECTED`, etc.). If suspect or unverifiable, `--ack-suspect` or `--ack-unverifiable` is required (OD-5).
+- **Estimand Boundary Check (OD-6):** Pooling across different estimand epochs without `--allow-mixed-estimand` is refused (`ESTIMAND_BOUNDARY_MIXED`).
 - **confirmation / sequential** campaign: an uncovered clause downgrades the verdict to `confounded`
   (not `pass`). `bth campaign conclude --force` bypasses, recording `claim_mode='bypassed'`.
 - **exploration** campaign: the checks still run but are warn-only — no downgrade.
 - Modifying the claim file after registration → `conclude` errors on the SHA mismatch; re-register with `--force`.
 - **Signal 12** (`bth sprint-audit`) flags a confirmation campaign with no registered claim — the one case
   where the gate silently does nothing.
-- `bth campaign review`'s `blast_radius_status`/`claim_blast_radius_status` fields (informational, non-gating) report whether any covering run has been flagged by a blast-radius assessment — see **bathos-blast-radius**.
+- `bth campaign review`'s `blast_radius_status`/`claim_blast_radius_status` fields report whether any covering run has been flagged by a blast-radius assessment — see **bathos-blast-radius**.
 
 ## Signal discrimination and probe design
 

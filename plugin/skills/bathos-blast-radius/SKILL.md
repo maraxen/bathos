@@ -12,15 +12,17 @@ run, sorting matches into `affected` / `unverifiable` / (implicitly) `unaffected
 and durably recording the first two in a `blast_radius_ledger` (same append-only,
 composite-keyed, cool-Parquet+warm-DuckDB dual-write shape as
 **bathos-trust-ledger** — read that skill first if you haven't; this one assumes
-it). Flagging never gates anything (`campaign conclude`/`claim validate` still run)
-— it is a report + a durable, queryable annotation, nothing more.
+it). Under Invariant I2 (the Ratchet Invariant), flagging is strictly load-bearing:
+`affected` runs are hidden by default and refused at all citation, registration,
+conclusion, and graduation gates (`RESULT_AFFECTED`), while `unverifiable` runs
+require an explicit `--ack-unverifiable "<rationale>"` (OD-5).
 
-## The four anchor types
+## The five anchor types
 
 `assess_blast_radius` takes exactly one anchor. Three reuse the v1 file-path
 heuristic (a changed file "matches" a run if it's a substring of the run's
 `command`/`argv`, in either direction — deliberately coarse, see Known noise below);
-the fourth is a distinct dependency-lock check:
+the fourth is a whole-lockfile check; the fifth is an instrument defect range check:
 
 | Anchor | CLI flag | Ancestry check? | Match logic |
 |---|---|---|---|
@@ -28,6 +30,7 @@ the fourth is a distinct dependency-lock check:
 | `commit_range` | `--commit-range <a..b>` | Yes — boundary is `<a>` | Changed files = `git diff --name-only a..b`. **Two-dot only** — three-dot `a...b` (symmetric-difference) is rejected with a `ValueError`, since its base isn't guaranteed to be an ancestor of its tip |
 | `file` | `--files a,b` (comma-separated) | **No** | Any run touching the given path(s) is `affected` regardless of when it ran — there's no commit boundary to compare against |
 | `dependency` | `--dependency` | N/A | Reuses `check_dependency_lock_drift`/`hash_dependency_lock` as-is (whole-lockfile hash, no per-package diff). A run with **no recorded** `dependency_lock_sha256` goes to `unverifiable`, not `unaffected` — deliberately not reusing that checker's own fail-open default, which would be a silent false negative here |
+| `dependency_range` | `--dependency-range <entry_id>@r<revision>` | Ecosystem / Git | Evaluates whether a run executed within an introduced/fixed instrument defect or regression range |
 
 `--project <slug>` optionally scopes the scan to one `project_slug` (bathos's
 catalog is shared across projects; without this, a run in project B whose command
@@ -96,12 +99,14 @@ different states.
 bth blast-radius clear run <run_id> --reason "reproduced with box=6nm, forces unaffected"
 bth blast-radius clear campaign <campaign_id> --reason "..."
 bth blast-radius clear claim <campaign_id> --reason "..."   # claim entity_id is the campaign_id — see gotcha above
+# Clearing an instrument defect exemption (per-revision):
+bth blast-radius clear run <run_id> --anchor-kind dependency_range --anchor-value AMINX-2026-001@r1 --reason "predicate verified clean"
 ```
 
 Unlike **bathos-trust-ledger**'s `graduate_product`, clearing here is **not**
-attestation-gated — it requires only a non-empty `--reason` string. This is a
-deliberate Phase-1 scope cut, not an oversight — don't expect the rigor of the
-trust-ledger's PASS-before-promote ratchet here.
+attestation-gated — it requires only a non-empty `--reason` string.
+
+**Exemption scoping:** When clearing a `dependency_range` anchor, the clearance is strictly scoped to that revision (`<entry_id>@r<revision>`). If the defect declaration is amended to revision `r2` (e.g. `AMINX-2026-001@r2`), previous exemptions for `r1` are invalidated and the run is re-evaluated.
 
 ## Shadow auto-clear verdict — observability only, NEVER auto-applied
 
@@ -130,8 +135,8 @@ bth query blast-status claim <campaign_id>    # entity_id is the campaign_id
 implicitly clean until something flags it.
 
 `bth campaign review <campaign_id>` surfaces `blast_radius_status` and
-`claim_blast_radius_status` automatically — informational and **non-gating**, same
-semantics as above.
+`claim_blast_radius_status` automatically — informational on read, but gating at
+`bth campaign conclude`, `bth claim register`, and `bth claim validate`.
 
 ## Shadow-mode git-hook trigger (backlog #4555)
 

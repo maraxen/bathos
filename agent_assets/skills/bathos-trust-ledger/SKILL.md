@@ -36,6 +36,11 @@ get_trust_state(catalog_dir, content_hash)  # -> "unknown" | "candidate" | "prom
 - **`candidate`** — the hash IS an anchor's own identity (non-attestation kind) or IS some run's recorded output sha256, but has no promotion in the ledger.
 - **`promoted`** — the append-only trust ledger has a promotion record (folded latest-wins by `amended_at`). Only `graduate_product` appends one.
 
+**Dynamic Downranking at Read Time (Spec 261106 P1):**
+When `get_trust_state` evaluates a hash whose latest ledger record is `promoted`:
+- If **all** producing runs in the catalog for this `content_hash` have resolved to hidden validity states (`void`, `affected`, `superseded`, `archived`), `get_trust_state` dynamically downranks the trust state from `promoted` to **`candidate`**.
+- If at least one producing run is in `current` (or `suspect`/`unverifiable`) state, `promoted` status is retained.
+
 List everything not yet promoted for a campaign:
 
 ```python
@@ -144,6 +149,8 @@ try:
         run_id=run_id,
         output_path="outputs/model.json",
         reason="oracle harness pass, max_discrepancy=0.0",
+        ack_suspect="",                             # required non-empty rationale if run is suspect
+        ack_unverifiable="",                        # required non-empty rationale if run is unverifiable
     )
     print(record.from_state, "->", record.to_state)  # candidate -> promoted
 except GraduationRefused as e:
@@ -159,14 +166,20 @@ Notes:
 
 - `graduate_product` is idempotent: if the hash is already promoted it returns the EXISTING ledger record instead of appending a duplicate (the returned record reflects whichever call performed the promotion).
 - The ratchet check re-queries the attestation store itself; a plausible-looking but unregistered `attestation_ref` cannot bypass it.
+- **Validity Gate (Invariant I2):** `graduate_product` checks the validity state of `run_id`. If the producing run is hidden (`void`, `affected`, `superseded`, `archived`), graduation is strictly refused (`RESULT_VOID`, `RESULT_AFFECTED`, etc.). If the producing run is `suspect`, `ack_suspect` is required; if `unverifiable`, `ack_unverifiable` is required (OD-5).
 - The ledger is durable by construction: every append writes a cool-tier Parquet fragment plus a warm DuckDB row, and `compact(force_rebuild=True)` re-ingests fragments rather than losing history.
 
 ## Readback trio semantics
 
-- **`resolve_pin(catalog_dir, run_id, output_path) -> ResolvedPin{content_hash, trust_state, fresh, live_content_hash}`** — raises `CatalogError` if the run doesn't exist. If `output_path` was never recorded for the run: `content_hash=None`, `trust_state="unknown"`, `fresh=False`.
+- **`resolve_pin(catalog_dir, run_id, output_path) -> ResolvedPin`** — raises `CatalogError` if the run doesn't exist. If `output_path` was never recorded for the run: `content_hash=None`, `trust_state="unknown"`, `fresh=False`.
+  - **Validity Annotations (Spec 261106):** Returns `validity_state` and `validity_reason`. If the producing run is in a hidden validity state (`void`, `affected`, `superseded`, `archived`), `resolve_pin` forces `trust_state = "unknown"` and `fresh = False`.
 - **`fresh` flag + DEBT-RF1 (recorded-vs-live gap):** `content_hash` returned is the RECORDED hash from warm-tier `output_metadata`; `fresh=True` means the LIVE on-disk file was re-hashed right now and matches that recorded value. Comparing two recorded values (e.g. payload.sha256 vs pin.content_hash) compares recorded-vs-recorded and can pass even after the file was edited on disk. **Any verification decision must also require `pin.fresh is True`** (tracked as DEBT-RF1 in affigit spec 260825_figure-component-hierarchy-and-pin-variants; ResolvedPin.live_content_hash was added 2026-08-26 (commit 2c40332d) so a not-fresh diagnostic can report the actual on-disk hash instead of re-quoting the recorded one — still check `pin.fresh` explicitly for the pass/fail decision itself, since a live hash alone doesn't tell you which value is "correct").
-- **`get_trust_state(catalog_dir, content_hash)`** — pure fold, see trust-state model above.
+- **`get_trust_state(catalog_dir, content_hash)`** — pure fold with read-time downranking, see trust-state model above.
 - **`query_attestation(catalog_dir, content_hash, min_strength=None)`** — returns the strongest/most recent PASS attestation dict (`kind`, `attested`, `verdict`, kind-specific fields, `attestation_sha256`, `campaign_id`, `anchored_at`) or None. WARN/FAIL are never returned.
+
+## Maraxiom Bridge: `verify_run_drawable`
+
+Used by Maraxiom `review_build` to ensure figures only render from clean evidence. Checks `run_id` validity and raises `ResultHiddenError` (or appropriate `ResultVoidError`, `ResultAffectedError`, etc.) if the producing run is in a hidden validity state.
 
 ## Error codes
 
@@ -175,6 +188,11 @@ Mapped through `bathos.errors.EXCEPTION_TO_CODE` → MCP envelope `error_code`:
 | Exception / code | Meaning | Fix |
 |---|---|---|
 | `GraduationRefused` → `graduation_refused` | Ratchet invariant unmet: no PASS attestation for the content_hash at `min_strength`; nothing appended | Register a valid PASS attestation first (`bth attestation register`) |
+| `ResultHiddenError` → `result_hidden` | Producing run is hidden (`void`, `affected`, `superseded`, `archived`); cannot graduate | Re-run under fixed toolchain or inspect successor |
+| `ResultVoidError` → `result_void` | Producing run was produced by a defective toolchain | Re-run under fixed toolchain |
+| `ResultAffectedError` → `result_affected` | Producing run is implicated in blast radius ledger | Re-run or clear flag with audit justification |
+| `ResultSuspectUnacknowledgedError` → `result_suspect_unacknowledged` | Producing run is suspect; missing `ack_suspect` rationale | Provide non-empty `--ack-suspect "<rationale>"` |
+| `ResultUnverifiableUnacknowledgedError` → `result_unverifiable_unacknowledged` | Producing run is unverifiable; missing `ack_unverifiable` | Provide non-empty `--ack-unverifiable "<rationale>"` |
 | `AttestationValidationFailed` → `sidecar_invalid` | Attestation failed validation at registration (missing evidence fields, digest mismatch); nothing written | Fix the TOML per the schema above; dry-run with `bth attestation validate` |
 | `CatalogError` → `catalog_error` | e.g. resolve_pin on a nonexistent run_id | Verify run_id (`bth find`), compact if the run isn't visible |
 

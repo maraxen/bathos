@@ -68,7 +68,7 @@ bth run --project-slug <slug> -- uv run --no-sync python3 scripts/foo.py --args
 Resolve the returned id and check its `outcome` actually evaluated:
 
 ```bash
-bth sql "SELECT id, status, outcome, exit_code, command FROM runs WHERE id LIKE '<prefix>%'"
+bth sql "SELECT id, status, outcome, exit_code, command FROM runs_current WHERE id LIKE '<prefix>%'"
 ```
 
 Spot-check that its claimed paths resolve. A script emitting confident, schema-valid, entirely fabricated output exits 0.
@@ -91,7 +91,7 @@ Lists from all three places are combined. A malformed value refuses the run. Eac
 
 ```bash
 bth sql "SELECT id, json_extract_string(dependency_provenance, '\$.aminx_source_commit'),
-         json_extract_string(dependency_provenance, '\$.aminx_module_in_dist') FROM runs"
+         json_extract_string(dependency_provenance, '\$.aminx_module_in_dist') FROM runs_current"
 ```
 
 `<pkg>_module_in_dist = false` (also printed as a stderr warning) means the recorded version describes code that did not execute. Do not cite that run's dependency identity. A plain wheel install has no source commit (`unknown`) unless the wheel carries one. Keep a pin record (e.g. tev_design's `AMINX_PIN.md`) for that half.
@@ -495,16 +495,21 @@ Every experiment sidecar can declare a `stage_name` field (default: `"exploratio
 - `validation` — testing hypothesis with controlled parameters; reproducibility required
 - `ablation` — isolating contributions of components
 - `production` — final tested run ready for publication
+- `spike` (`T0_spike`) — rapid technical probe or feasibility check before formal pre-registration. **Iron Law:** a `spike` run CANNOT settle a finding. Attempting to settle a finding supported only by `spike` runs is refused with `SPIKE_TIER_CANNOT_SETTLE`.
+
+**Stage aliases:**
+- `confirmatory` is recognized as an alias for `validation`.
+- `power` is recognized as an alias for `production`.
 
 ```toml
 [experiment]
 hypothesis = "..."
-stage_name = "validation"  # optional, defaults to "exploration"
+stage_name = "validation"  # or "confirmatory", "production", "spike", etc.
 ```
 
 Non-canonical values (e.g., `"pilot"`, `"final"`) trigger a warning and are coerced to `"exploration"`:
 ```
-WARNING: Invalid stage_name 'pilot' in scripts/experiments/train.bth.toml; must be one of {'exploration', 'calibration', 'validation', 'ablation', 'production'}. Coercing to 'exploration'.
+WARNING: Invalid stage_name 'pilot' in scripts/experiments/train.bth.toml; must be one of {'exploration', 'calibration', 'validation', 'ablation', 'production', 'spike', 'confirmatory', 'power'}. Coercing to 'exploration'.
 ```
 
 ### Novel Flag
@@ -753,17 +758,41 @@ Exit 3 (`LAUNDERING` over MCP) means do not bind and do not add. Fix the pre-reg
 ```bash
 bth ls --limit 20 --since 7d
 bth ls --status completed --project myproject
+bth ls --include-superseded
 ```
 
-Shows table of recent runs (project, command, outcome, duration, timestamp).
+Shows table of recent runs (project, command, outcome, duration, timestamp). By default, filters out hidden runs (`void`, `affected`, `superseded`, and `archived`). Pass `--include-superseded` to display all rows including invalidated/superseded runs.
 
 ### Show Run Details
 
 ```bash
 bth show abc123-uuid
+bth show abc123-uuid --include-superseded
 ```
 
-Full run metadata, git state, outcome, sidecar hash, postmortem status.
+Full run metadata, git state, outcome, sidecar hash, postmortem status, validity state, and distance-from-present calculation. Refuses to display a hidden run by default with a resolution hint (`RESULT_HIDDEN`); pass `--include-superseded` to inspect details of a void or superseded run.
+
+### The Seven Validity States & Distance-From-Present (D6)
+
+Every run in bathos resolves to one of 7 canonical validity states:
+1. `current` — clean toolchain, active valid evidence, not superseded or archived.
+2. `suspect` — matches an instrument defect range with `severity="suspect"`, an inferred defect match (`version_source == "inferred-from-commit"` under OD-1 with `hide_inferred = false`), or has a missing predicate field under OD-2. Requires `--ack-suspect "<rationale>"` at gates.
+3. `unverifiable` — dependency provenance cannot be verified against lockfiles. Requires `--ack-unverifiable "<rationale>"` at gates under OD-5.
+4. `void` — produced by an instrument defect matching a range with `severity="void"` (or `hide_inferred = true`). Hidden by default; strictly refused at gates (`RESULT_VOID`).
+5. `affected` — implicated by an active blast-radius ledger entry (`commit`, `commit_range`, `file`, `dependency_range`). Hidden by default; strictly refused at gates (`RESULT_AFFECTED`).
+6. `superseded` — replaced by a successor run via `supersession_edges` (`bth supersede add`). Hidden by default; strictly refused at gates (`RESULT_SUPERSEDED`).
+7. `archived` — script or output artifacts have been archived via `bth archive-sweep` or `archive_artifact`. Hidden by default; strictly refused at gates (`RESULT_ARCHIVED`).
+
+**Distance-from-present calculation (D6):**
+Displayed in `bth show <id>` to assess the recency and independent corroboration of a run:
+- `months_since_run` — integer elapsed months since run execution (`(now - timestamp).days // 30`).
+- `superseded_count` — count of successor runs or findings superseding this run in `supersession_edges`.
+- `reproduction_count` — count of independent completed runs meeting all 5 reproduction conditions (Spec §1.4.C.3):
+  1. `R'.timestamp > R.timestamp` (strictly newer execution)
+  2. `R'.status == 'completed'`
+  3. `R'` resolves to `validity.state == 'current'` (clean toolchain, not hidden)
+  4. `R'.sidecar_sha256 == R.sidecar_sha256` (non-null, exact identical sidecar specification)
+  5. `R'.outcome == R.outcome`, where `R.outcome` is not in `NEUTRAL_OUTCOME_LABELS` (`{"", "unknown", "observed", "invalid_measurement", "error", "collected", "recorded", "reaped", "unassigned"}`).
 
 ### Check Git-Drift Validity
 
@@ -782,21 +811,31 @@ bth find --project myproject --status completed
 bth find --tags experiment:baseline --tags date:2026-06-01
 bth find --slurm-job 12345678
 bth find --output-file "outputs/run_*.json"
+bth find --include-superseded
 ```
 
-**Options:** `--project`, `--since` (e.g. `7d`, `24h`), `--status`, `--tags` (repeatable), `--slurm-job`, `--output-file` (glob against registered output paths). There is **no `--filter` and no `--limit`** — these are fixed equality/glob filters and every match is printed. For an arbitrary DuckDB `WHERE` clause, use `bth sql` instead:
+**Options:** `--project`, `--since` (e.g. `7d`, `24h`), `--status`, `--tags` (repeatable), `--slurm-job`, `--output-file` (glob against registered output paths). By default, `bth find` filters out hidden runs (`void`, `affected`, `superseded`, `archived`); pass `--include-superseded` to search unmuted history. There is **no `--filter` and no `--limit`** — these are fixed equality/glob filters and every match is printed. For an arbitrary DuckDB `WHERE` clause, use `bth sql` instead:
 
 ```bash
-bth sql "SELECT * FROM runs WHERE outcome='pass' AND project_slug='myproject'"
+bth sql "SELECT * FROM runs_current WHERE outcome='pass' AND project_slug='myproject'"
 ```
 
-### Run Arbitrary SQL
+### Run Arbitrary SQL: `runs_current` vs `runs` (OD-3)
 
 ```bash
-bth sql "SELECT outcome, COUNT(*) FROM runs WHERE project_slug='myproject' GROUP BY outcome"
+bth sql "SELECT outcome, COUNT(*) FROM runs_current WHERE project_slug='myproject' GROUP BY outcome"
 ```
 
 Query catalog directly. Useful for analytics and audits.
+
+**Targeting `runs_current` by default (OD-3):**
+Always query `runs_current` for active findings, summaries, and decisions. `runs_current` is a view created on read connections that filters out hidden rows (`void`, `affected`, `superseded`, and `archived`).
+
+The underlying table `runs` contains the full, unmuted history of all executions. When querying `runs` directly, if hidden rows exist in the catalog, bathos emits a warning notice to stderr:
+```
+Query targets unmuted history via table 'runs' (N void/affected/superseded/archived runs present). Query 'runs_current' for current results, or pass --include-superseded (alias: --allow-hidden) to suppress this notice.
+```
+In FastMCP (`run_sql`), `"notice"` and `"hidden_count"` are attached to the response dictionary unless `include_superseded=True` or `allow_hidden=True`. Pass `--include-superseded` (or `--allow-hidden`) when you explicitly want full unmuted history without a warning.
 
 ## Catalog Management
 
@@ -941,11 +980,90 @@ bth run -- uv run --no-sync python scripts/experiments/baseline_training.py --ou
 # Then verify by the RECORD (outcome != unknown), `bth compact` only on a legacy (no cutover.json) catalog
 
 # 5. Query results
-bth sql "SELECT * FROM runs WHERE outcome='pass' AND project_slug='myproject'"
+bth sql "SELECT * FROM runs_current WHERE outcome='pass' AND project_slug='myproject'"
 
 # 6. Export report
 bth export --html --out ~/reports/latest.html
 ```
+
+## Instrument Defect & Estimand Registries (v0.14+)
+
+Catalog known upstream package defects and estimand changes retroactively without mutating immutable run records.
+
+### Registry Locations & Precedence (OD-4)
+
+- **User-Global Registry**: `${XDG_CONFIG_HOME:-~/.config}/bathos/instruments/<pkg>.toml` (opted into via `.bth.toml` `[instruments] use_user_registry = true` or `pyproject.toml` `[tool.bathos.instruments] use_user_registry = true`). Never uses `~/.bth/instruments/`.
+- **Project-Local Registry**: `<main_root>/.bth/instruments/<pkg>.toml`.
+- **Precedence**: Project-local entries override user-global entries with the same `id`.
+
+### Declaring Defects
+
+```bash
+bth instrument declare-defect aminx AMINX-2026-001 \
+  --introduced 0.12.0 --fixed 0.12.4 \
+  --severity void \
+  --summary "Zero-division error in solvent radius calculation"
+```
+MCP mirrors: `defect_declare(...)` and `defect_list(...)`.
+
+### Inferred Matches and `hide_inferred` (OD-1)
+
+When a run's dependency provenance lacks an exact wheel/commit hash, bathos infers version from git commit timestamps (`version_source == "inferred-from-commit"`). Inferred matches cap at `suspect` by default (never voided silently). To force inferred matches to void, declare `hide_inferred = true` in the defect definition.
+
+### Missing Predicate Fields (OD-2)
+
+When a defect includes a DuckDB SQL `predicate` (e.g. `sample_s > 1`), bathos validates that all referenced columns exist in the run record, metadata, or argv. If any field is missing, resolves to `suspect` with reason `"missing predicate field: <f>"`, never silent non-match (`current`), never `void` when `hide_inferred = false`.
+
+## Findings Register & Current Beliefs (v0.14+)
+
+Track durable research findings and open questions in `.bth/findings/<slug>.toml` to prevent circling and regression.
+
+### Scaffolding & Creating Findings
+
+```bash
+# Create tentative finding backed by exploratory runs
+bth findings create solvent-bound "What is the solvent density limit?" \
+  "Limit is 1.42 g/cm^3" --status tentative --supporting-runs run_1234abcd
+
+# Settle a finding (requires at least one active confirmatory run)
+bth findings create solvent-bound "What is the solvent density limit?" \
+  "Limit is 1.42 g/cm^3" --status settled --supporting-runs run_confirmatory_uuid
+```
+MCP mirrors: `finding_create`, `finding_get`, `finding_list`.
+
+### Rules & Gates
+
+1. **Settling Gate:** Settling requires at least one active, completed confirmatory run (`validation`/`production`/`confirmatory`). `spike` runs CANNOT settle a finding (`SPIKE_TIER_CANNOT_SETTLE`).
+2. **Dynamic Downgrade:** If all supporting runs become hidden (`void`, `affected`, `superseded`, `archived`) or suspect, the finding automatically downgrades to `needs-recheck` at read time.
+3. **Reopen Guard (OD-6 / m3-4):** Scaffolding or creating a finding for a question that is already `settled` requires `--reopen-reason "<rationale>"`, else refused with `FINDING_REOPEN_REASON_REQUIRED`.
+4. **Supersession Edges:** Replace outdated findings or runs with `bth supersede add finding old_slug finding new_slug --reason "..."` (MCP: `supersede_edge_add`).
+5. **SessionStart Hook:** `bth-session-start-hook` (MCP: `session_start`) injects current beliefs and degraded findings (`needs-recheck`) directly into agent context on session launch (<50ms, byte-capped at 2KB).
+
+## Batch Archive Sweep, Doc Store & Telemetry Rotation (v0.14+)
+
+### Batch Archive Sweep
+Reclaim workspace disk space by archiving stale scripts and uncataloged outputs:
+```bash
+# 1. Preview candidates and generate proposal
+bth archive-sweep --dry-run --age-days 90
+
+# 2. Apply proposal (atomic commit + catalog archive update)
+bth archive-sweep --apply --proposal .bth/archive_proposals/sweep_<id>.json
+
+# 3. Restore archived artifacts
+bth restore --item-id <id>
+```
+MCP mirrors: `archive_sweep` and `restore`. Guard: If proposal diverges or working tree is dirty, apply fails with `ARCHIVE_PROPOSAL_STALE`. Restore refuses with `RESTORE_CONFLICT` if workspace files have untracked modifications.
+
+### 5-Layer Doc Store Resolution Chain
+Resolves documents across `.bth/docs` vs explicit `.praxia/docs` `.tar.zst` + `.md` manifest pairs, providing durable retrieval for research documentation.
+
+### Telemetry Rotation
+Rotate raw diagnostic JSONL logs in `~/.bth/catalog/logs/` into `.jsonl.zst`:
+```bash
+bth telemetry rotate --max-size-mb 10 --max-age-days 30
+```
+MCP mirror: `telemetry_rotate`.
 
 ## Related
 
