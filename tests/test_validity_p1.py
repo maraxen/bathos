@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,8 +16,6 @@ import duckdb
 import pytest
 
 from bathos.blast_radius import (
-    BlastRadiusRecord,
-    append_ledger_record,
     clear_blast_radius_flag,
 )
 from bathos.campaigns import (
@@ -28,14 +25,12 @@ from bathos.campaigns import (
     get_campaign,
 )
 from bathos.catalog import init_catalog, write_run
-from bathos.claim import register_claim, validate_claim
+from bathos.claim import register_claim
 from bathos.compact import compact
 from bathos.errors import (
-    BathosErrorCode,
     EstimandBoundaryMixedError,
     ResultHiddenError,
     ResultSuspectUnacknowledgedError,
-    ResultUnverifiableUnacknowledgedError,
     ResultVoidError,
 )
 from bathos.index import connect_read
@@ -49,9 +44,8 @@ from bathos.mcp import (
     list_runs_tool,
     run_sql_tool,
 )
-from bathos.query import find_runs, get_run, list_runs, run_sql
-from bathos.readback import ProductTrustState, get_trust_state, resolve_pin
-from bathos.runlog.mode import cutover_marker_path
+from bathos.query import find_runs, get_run, list_runs
+from bathos.readback import ProductTrustState, get_trust_state
 from bathos.runlog.project_id import assign_project_id, register_main_root
 from bathos.schema import Run
 from bathos.trust_ledger import (
@@ -61,16 +55,11 @@ from bathos.trust_ledger import (
     write_ledger_fragment,
 )
 from bathos.validity import (
-    ValidityResult,
-    compute_validity_inputs_hash,
     ensure_validity_cache,
     resolve_validity,
 )
 from bathos.version_resolver import (
-    DefectEntry,
-    commit_in_range,
     load_instrument_registry_packages,
-    resolve_toolchain_version,
     version_in_range,
 )
 
@@ -177,7 +166,7 @@ description = "Inflated rates when sample_s exceeds 1"
     init_catalog(cat_dir)
 
     run_id = "00000000-0000-0000-0000-000000000001"
-    run = _create_sample_run(
+    _create_sample_run(
         cat_dir,
         run_id,
         git_hash=c_hash,
@@ -560,14 +549,14 @@ ranges = [{ type = "ECOSYSTEM", events = [{ introduced = "0.1.0" }, { fixed = "0
     db.execute("INSERT INTO campaign_runs (campaign_id, run_id) VALUES (?, ?)", [camp.id, void_id])
 
     claim_path = repo / "claim.bth.toml"
-    claim_path.write_text("""[claim]
+    claim_path.write_text(f"""[claim]
 statement = "Test claim"
-campaign_id = "{camp_id}"
+campaign_id = "{camp.id}"
 
 [clauses.c1]
 label = "clause 1"
 predicate = "temp_mean > 0"
-""".format(camp_id=camp.id))
+""")
 
     # register_claim on campaign with void member run raises ResultVoidError
     with pytest.raises(ResultVoidError):
@@ -838,7 +827,7 @@ ranges = [{ type = "ECOSYSTEM", events = [{ introduced = "0.1.0" }, { fixed = "0
 # ---------------------------------------------------------------------------
 # AC-P1-15: run_sql OD-3 notice check on base runs table
 # ---------------------------------------------------------------------------
-def test_ac_p1_15_raw_runs_notice_od3(tmp_path: Path, capsys):
+def test_ac_p1_15_raw_runs_notice_od3(tmp_path: Path):
     repo = _make_git_repo(tmp_path / "repo")
     inst_dir = repo / ".bth" / "instruments"
     inst_dir.mkdir(parents=True)

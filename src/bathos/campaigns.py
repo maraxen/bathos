@@ -542,6 +542,7 @@ def _add_run_to_campaign_impl(
     run_timestamp, run_outcome, run_sidecar_path = run_rows[0]
 
     from pathlib import Path as _P
+
     from bathos.errors import HIDDEN_STATE_TO_EXCEPTION
     from bathos.validity import resolve_validity
 
@@ -1342,8 +1343,8 @@ def _conclude_campaign_impl(
     precomputed_member_ids = member_ids
     if member_ids:
         from bathos.errors import (
-            EstimandBoundaryMixedError,
             HIDDEN_STATE_TO_EXCEPTION,
+            EstimandBoundaryMixedError,
             ResultSuspectUnacknowledgedError,
             ResultUnverifiableUnacknowledgedError,
         )

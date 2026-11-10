@@ -13,10 +13,8 @@ import hashlib
 import json
 import logging
 import os
-import re
 import subprocess
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -24,7 +22,6 @@ from typing import Any
 import duckdb
 
 from bathos.config import default_catalog_dir
-from bathos.runlog.mode import is_log_mode
 from bathos.runlog.project_id import list_registered_roots
 from bathos.version_resolver import (
     DefectEntry,
@@ -182,7 +179,7 @@ def compute_validity_inputs_hash(
     for r in candidate_roots:
         if r in seen_roots:
             continue
-        if r == bth_home or (r / ".bth").resolve() == bth_home or r == user_home:
+        if r in (bth_home, user_home) or (r / ".bth").resolve() == bth_home:
             continue
         seen_roots.add(r)
         valid_roots.append(r)
@@ -194,20 +191,16 @@ def compute_validity_inputs_hash(
     user_inst = Path(xdg_config or (Path.home() / ".config")) / "bathos" / "instruments"
     if user_inst.is_dir():
         for p in sorted(user_inst.glob("*.toml")):
-            try:
+            with contextlib.suppress(Exception):
                 reg_files.append((str(p.resolve()), hashlib.sha256(p.read_bytes()).hexdigest()))
-            except Exception:
-                pass
 
     # Project-local registries (<root>/.bth/instruments/*.toml)
     for root in valid_roots:
         p_inst = root / ".bth" / "instruments"
         if p_inst.is_dir():
             for p in sorted(p_inst.glob("*.toml")):
-                try:
+                with contextlib.suppress(Exception):
                     reg_files.append((str(p.resolve()), hashlib.sha256(p.read_bytes()).hexdigest()))
-                except Exception:
-                    pass
 
     reg_files = sorted(set(reg_files))
     hasher.update(json.dumps(reg_files).encode("utf-8"))
@@ -495,7 +488,7 @@ def _find_run_main_root(
     bth_home = (Path.home() / ".bth").resolve()
     user_home = Path.home().resolve()
     for d in [cd.resolve(), *cd.resolve().parents]:
-        if d == bth_home or (d / ".bth").resolve() == bth_home or d == user_home:
+        if d in (bth_home, user_home) or (d / ".bth").resolve() == bth_home:
             continue
         if d.name == ".bth":
             cand = d.parent

@@ -39,6 +39,7 @@ make in step 4 -- this wave adds the function; step 4 wires its callers.
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 
 import duckdb
@@ -474,6 +475,7 @@ def record_acknowledgment(
     import os
     import uuid
     from datetime import UTC, datetime
+
     from bathos.config import default_catalog_dir
     from bathos.runlog.emit import emit_or_legacy, unit_of_work
 
@@ -526,10 +528,8 @@ def _wire_validity_cache_and_views(con: duckdb.DuckDBPyConnection, catalog_dir: 
         validity_cache_db_path,
     )
 
-    try:
+    with contextlib.suppress(Exception):
         ensure_validity_cache(catalog_dir, con)
-    except Exception as exc:
-        pass
 
     vcache_path = validity_cache_db_path(catalog_dir)
     if vcache_path.is_file():
@@ -551,14 +551,10 @@ def _wire_validity_cache_and_views(con: duckdb.DuckDBPyConnection, catalog_dir: 
             pass
 
     # Fallback if vcache not attached or error
-    try:
+    with contextlib.suppress(Exception):
         con.execute(f"CREATE TEMP VIEW validity_cache AS {_empty_select(VALIDITY_CACHE_DDL)}")
-    except Exception:
-        pass
-    try:
+    with contextlib.suppress(Exception):
         con.execute("CREATE TEMP VIEW runs_current AS SELECT * FROM runs")
-    except Exception:
-        pass
 
 
 def connect_read(

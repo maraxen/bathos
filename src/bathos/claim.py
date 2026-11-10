@@ -673,8 +673,8 @@ def register_claim(
         member_ids = union_campaign_member_ids(db, full_id, catalog_dir)
         if member_ids:
             from bathos.errors import (
-                EstimandBoundaryMixedError,
                 HIDDEN_STATE_TO_EXCEPTION,
+                EstimandBoundaryMixedError,
                 ResultSuspectUnacknowledgedError,
                 ResultUnverifiableUnacknowledgedError,
             )
