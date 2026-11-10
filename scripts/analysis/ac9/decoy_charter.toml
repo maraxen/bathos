@@ -10,7 +10,7 @@
 # Risk, for the owner: `multistate-binder-design` shares a method with tev_design's `mpnn-design`. A correct mapper
 # should still leave it unmapped (the target and the design objective differ), but it is the purpose most likely to
 # push a sound run over 20%.
-# Draft by the assistant 261110 for owner confirmation; nanobody has no confirmed charter of its own, so this is not
+# Drafted by the assistant 261110; accepted by the owner 261110 (AskUserQuestion). nanobody has no confirmed charter, so this is not
 # its charter and has no standing there. 6 live, 2 retired, the shape the owner's T7 design names (the tev_design
 # draft itself has 7 live, 2 retired).
 # Round 2 (261110): every purpose now names a nanobody-only object, so no purpose reads as a generic method that
