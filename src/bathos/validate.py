@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -660,6 +661,19 @@ def validate_sidecar(
     """
     errors = []
     warnings = _unknown_experiment_key_warnings(sidecar)
+
+    # ── [charter] purpose label (spec 261104 T7, owner 261109) ───────────────────
+    # Shape only: a readable slug or a list of slugs. Whether each slug names a confirmed charter purpose is checked
+    # against the charter, not here. A malformed label is an error because a scorer must never guess at it.
+    if sidecar_path is not None:
+        from bathos.bearings.purpose_label import PurposeLabelError, read_purpose_label
+
+        try:
+            read_purpose_label(tomllib.loads(Path(sidecar_path).read_text(encoding="utf-8")))
+        except PurposeLabelError as e:
+            errors.append(ValidationError("charter.purpose", str(e)))
+        except (OSError, tomllib.TOMLDecodeError):
+            pass  # the sidecar parser already reports an unreadable file
 
     # ── [review] block structural validation (build-order step 2) ────────────────
     # Advisory tier: this validates SHAPE only. Whether the review is adequate is the Review

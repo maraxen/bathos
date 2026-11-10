@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from bathos.bearings.purpose_label import PurposeLabelError, strip_purpose_label
 from bathos.errors import BearingsPacketInvalidError, BearingsPacketMismatchError
 
 logger = logging.getLogger(__name__)
@@ -84,7 +85,14 @@ def parse_ts(value: str) -> datetime:
 
 def _git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[bytes]:
     # Pin the config that changes output, so the user's git settings cannot move the hash.
-    pins = ("-c", "log.showSignature=false", "-c", "i18n.logOutputEncoding=UTF-8", "-c", "core.quotepath=off")
+    pins = (
+        "-c",
+        "log.showSignature=false",
+        "-c",
+        "i18n.logOutputEncoding=UTF-8",
+        "-c",
+        "core.quotepath=off",
+    )
     return subprocess.run(  # noqa: S603 -- explicit argv, no shell
         ["git", *pins, "-C", str(root), *args], check=check, capture_output=True
     )
@@ -132,7 +140,9 @@ def _needles(
         try:
             doc = tomllib.loads(at_ref.stdout.decode("utf-8"))
         except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
-            logger.warning("charter at %s is unreadable, not used for blindness: %s", ref_sha[:12], e)
+            logger.warning(
+                "charter at %s is unreadable, not used for blindness: %s", ref_sha[:12], e
+            )
         else:
             raw.append(("ref:mandate", str(doc.get("mandate", ""))))
             ref_purposes = doc.get("purpose", {})
@@ -187,7 +197,9 @@ def _scrub_abs_paths(text: str) -> str:
     The checkout a run or build happened in must not reach the reader or move the hash.
     """
     unschemed = text.replace("file:///", "/")
-    return _ABS_PATH_RE.sub(lambda m: "<abs>/" + m.group(0).rstrip("/").rsplit("/", 1)[-1], unschemed)
+    return _ABS_PATH_RE.sub(
+        lambda m: "<abs>/" + m.group(0).rstrip("/").rsplit("/", 1)[-1], unschemed
+    )
 
 
 def _run_quotes(value: str, needles: list[tuple[str, str]]) -> bool:
@@ -226,7 +238,9 @@ def verify_packet(out: Path | str) -> str:
     manifest_p = out_p / "manifest.json"
     reader = out_p / "reader"
     if not manifest_p.is_file() or not reader.is_dir():
-        raise BearingsPacketInvalidError(f"Not a bearings packet (manifest.json or reader/ missing): {out_p}")
+        raise BearingsPacketInvalidError(
+            f"Not a bearings packet (manifest.json or reader/ missing): {out_p}"
+        )
     try:
         recorded = json.loads(manifest_p.read_text(encoding="utf-8"))["packet_sha256"]
     except (ValueError, KeyError) as e:
@@ -335,6 +349,7 @@ def build_packet(
     runs: list[dict[str, Any]] = []
     sidecars: dict[tuple[str, str], bytes] = {}
     sidecar_unresolved: list[dict[str, str]] = []
+    labels_stripped: list[str] = []
     if catalog_readable(cat_dir):
         con = connect_read(cat_dir)
         try:
@@ -418,14 +433,24 @@ def build_packet(
         except UnicodeDecodeError:
             exclusions.append({"path": f"sidecar:{rel}@{blob}", "reason": "not_text"})
             continue
+        # The [charter] purpose label is what readers are scored against; it never reaches a reader.
+        try:
+            text, had_label = strip_purpose_label(text)
+        except PurposeLabelError:
+            exclusions.append({"path": f"sidecar:{rel}@{blob}", "reason": "label_unstrippable"})
+            continue
         if _quotes(text, needles):
             exclusions.append({"path": f"sidecar:{rel}@{blob}", "reason": "quotes_charter"})
         else:
-            sidecars[(rel, blob)] = proc.stdout
+            sidecars[(rel, blob)] = text.encode("utf-8") if had_label else proc.stdout
+            if had_label:
+                labels_stripped.append(f"sidecar:{rel}@{blob}")
 
     # ── Git subjects in the window ──────────────────────────────────────────────
     git_log: list[dict[str, str]] = []
-    log_out = _git(repo, "log", ref_sha, "--format=%H%x00%cI%x00%s").stdout.decode("utf-8", errors="replace")
+    log_out = _git(repo, "log", ref_sha, "--format=%H%x00%cI%x00%s").stdout.decode(
+        "utf-8", errors="replace"
+    )
     parsed_log: list[tuple[datetime, dict[str, str]]] = []
     # split("\n"), not splitlines(): a subject may hold \x0b, \x85 or \u2028.
     for line in log_out.split("\n"):
@@ -497,9 +522,13 @@ def build_packet(
         "exclusions": exclusions,
         "short_needles_skipped": sorted(short_skipped, key=lambda d: d["source"]),
         "sidecar_unresolved": sorted(sidecar_unresolved, key=lambda d: (d["run"], d["path"])),
+        # Sidecars whose [charter] purpose label was removed before they entered reader/ (owner-side only).
+        "labels_stripped": sorted(labels_stripped),
     }
     _write(out_p / "manifest.json", _json_bytes(manifest))
-    logger.info("built bearings packet %s (%d docs, %d runs)", packet_sha[:12], len(docs), len(runs_sorted))
+    logger.info(
+        "built bearings packet %s (%d docs, %d runs)", packet_sha[:12], len(docs), len(runs_sorted)
+    )
     return {
         "ok": True,
         "packet_sha256": packet_sha,
@@ -558,13 +587,18 @@ def build_packet_within_budget(
                 key=parse_ts,
             )
             best: tuple[str, dict[str, Any], Path] | None = None
-            lo, hi = 0, len(stamps)  # the smallest index that fits; size never grows as since moves later
+            lo, hi = (
+                0,
+                len(stamps),
+            )  # the smallest index that fits; size never grows as since moves later
             probes = 0
             while lo < hi:
                 mid = (lo + hi) // 2
                 probe_dir = work / f"probe{probes}"
                 probes += 1
-                res = build_packet(project_root, out=probe_dir, since=stamps[mid], until=until, **kwargs)
+                res = build_packet(
+                    project_root, out=probe_dir, since=stamps[mid], until=until, **kwargs
+                )
                 if _reader_bytes(probe_dir) <= budget:
                     best, hi = (stamps[mid], res, probe_dir), mid
                 else:
@@ -579,7 +613,10 @@ def build_packet_within_budget(
         kept_commits = {str(c["sha"]) for c in _jsonl(chosen_dir / "reader" / "git_log.jsonl")}
         out_p.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(chosen_dir, out_p, dirs_exist_ok=True)
-        dropped_runs, dropped_commits = sorted(full_runs - kept_runs), sorted(full_commits - kept_commits)
+        dropped_runs, dropped_commits = (
+            sorted(full_runs - kept_runs),
+            sorted(full_commits - kept_commits),
+        )
         manifest_path = out_p / "manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         manifest["budget"] = {
