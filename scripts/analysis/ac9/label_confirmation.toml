@@ -12,7 +12,7 @@ since = "2026-10-12T00:00:00-04:00"
 until = "2026-11-10T00:00:00-05:00"
 ref = "5f4856c72c3e7f223b0d971d765a6a01c3c4aa60"
 confirmed_through = "5f4856c72c3e7f223b0d971d765a6a01c3c4aa60"
-budget_max_bytes = 60000
+budget_max_bytes = 1500000
 confirmed_by = "owner (AskUserQuestion, 261110)"
 
 [labels]

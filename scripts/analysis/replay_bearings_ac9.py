@@ -112,9 +112,9 @@ def gate(repo: Path, work: Path, catalog_dir: Path | None) -> dict:
 def sub_packet(full: Path, out: Path, run_ids: set[str]) -> str:
     """A packet of ``full`` holding only ``run_ids`` and the sidecars they name: no docs, no commits (as AC-7e).
 
-    The source manifest's owner-side fields are copied, so evidence the full packet withheld stays visible to the
-    scorer (conservative: a withheld sidecar of a planted-silent purpose makes it indeterminate, never present).
-    Returns the new packet's sha256.
+    Withheld evidence is scoped to the packet (amendment 4, 261110): only exclusions of the kept runs' own sidecars
+    are copied. Runs the planting left out are not planted, not withheld, so their exclusions (and run exclusions)
+    stay with the full packet. Returns the new packet's sha256.
     """
     from bathos.bearings.packet import _json_bytes, _packet_hash
 
@@ -137,9 +137,22 @@ def sub_packet(full: Path, out: Path, run_ids: set[str]) -> str:
     (o / "index.json").write_bytes(_json_bytes({**index, "docs": [], "sidecars": side}))
     sha = _packet_hash(o)
     manifest = json.loads((full / "manifest.json").read_text(encoding="utf-8"))
-    (out / "manifest.json").write_bytes(
-        _json_bytes({**manifest, "packet_sha256": sha, "ac9_plan_runs": sorted(run_ids)})
-    )
+    kept_paths = {r.get("sidecar_path") for r in keep if r.get("sidecar_path")}
+    scoped = [
+        e
+        for e in manifest.get("exclusions", [])
+        if str(e.get("path", "")).startswith("sidecar:")
+        and str(e["path"])[len("sidecar:") :].rpartition("@")[0] in kept_paths
+    ]
+    sub_manifest = {
+        **manifest,
+        "packet_sha256": sha,
+        "exclusions": scoped,
+        "withheld_run_sidecars": [],
+        "withheld_runs_unresolved": [],
+        "ac9_plan_runs": sorted(run_ids),
+    }
+    (out / "manifest.json").write_bytes(_json_bytes(sub_manifest))
     return sha
 
 
@@ -247,7 +260,7 @@ def main() -> None:
             until=conf["until"],
             ref=conf["ref"],
             catalog_dir=a.catalog_dir,
-            max_bytes=int(conf.get("budget_max_bytes", 60000)),
+            max_bytes=int(conf.get("budget_max_bytes", 1500000)),
         )
         built["qb"] = {"packet_sha256": bres.get("packet_sha256")}
         (work / "built.json").write_text(json.dumps(built, indent=2) + "\n")
