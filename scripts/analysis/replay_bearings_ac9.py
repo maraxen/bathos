@@ -41,6 +41,8 @@ LABEL_CONFIRMATION = HERE / "ac9" / "label_confirmation.toml"
 # AC-9 amendment 3 (owner 261110): no labelled window holds revival work, so the revived case is planted when
 # the record has one, reported, and does not gate pass, marginal or the planted-case check.
 GATE_REVIVED = False
+# Reader arms for replay_bearings_ac7b_surface --study ac9 (qb is mapped from its oracle reading, amendment 5).
+ARMS = ("q1", "q2", "q3")
 READERS = (
     "reader1",
     "reader2",
