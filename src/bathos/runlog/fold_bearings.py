@@ -108,6 +108,8 @@ def fold_bearings_items(events: list[dict]) -> list[dict[str, Any]]:
                     "kind": str(item.get("kind", "")),
                     "subject_json": _canonical_json(subject),
                     "matched_retired": item.get("matched_retired"),
+                    # Silent items only; None for other kinds and for comparisons made before the flag existed.
+                    "budget_limited": item.get("budget_limited"),
                 }
             )
     return rows

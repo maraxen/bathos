@@ -21,12 +21,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from bathos.bearings.purpose_label import PurposeLabelError, strip_purpose_label
+from bathos.bearings.purpose_label import (
+    OFF_CHARTER,
+    PurposeLabelError,
+    id_token_pattern,
+    strip_purpose_label,
+)
 from bathos.errors import BearingsPacketInvalidError, BearingsPacketMismatchError
 
 logger = logging.getLogger(__name__)
 
 MIN_NEEDLE_CHARS = 12
+MIN_ID_CHARS = 4
 HARNESS_BASENAMES = frozenset({"CLAUDE.md", "AGENTS.md", "GEMINI.md"})
 ROOT_HARNESS_PATHS = ("CLAUDE.md", "AGENTS.md", "GEMINI.md")
 CHARTER_PATHS = (".bth/charter.toml", ".bth/charter.draft.toml")
@@ -114,16 +120,18 @@ def _needles(
     slug: str,
     charter_files: Sequence[Path],
     cat_dir: Path,
-) -> tuple[list[tuple[str, str]], list[dict[str, Any]]]:
-    """Return ``([(source, normalised text)], short_needles_skipped)``.
+) -> tuple[list[tuple[str, str]], list[dict[str, Any]], set[str]]:
+    """Return ``([(source, normalised text)], short_needles_skipped, charter_ids)``.
 
     Sources: the current charter file, every ``--charter-file``, the charter committed at the
-    ref, and every ``charter_confirmations`` row, so no older purpose can leak.
+    ref, and every ``charter_confirmations`` row, so no older purpose can leak. ``charter_ids``
+    are the purpose ids from the same sources: readable slugs, so they are leak needles too.
     """
     from bathos.charter import parse_charter
     from bathos.index import catalog_readable, connect_read
 
     raw: list[tuple[str, str]] = []
+    ids: set[str] = set()
     own = root / ".bth" / "charter.toml"
     files: list[tuple[str, Path]] = []
     if own.is_file():
@@ -134,6 +142,7 @@ def _needles(
         raw.append((f"{label}:mandate", ch.mandate))
         for pid in sorted(ch.purposes):
             raw.append((f"{label}:purpose:{pid}", ch.purposes[pid].text))
+            ids.add(pid)
 
     at_ref = _git(repo, "cat-file", "blob", f"{ref_sha}:.bth/charter.toml", check=False)
     if at_ref.returncode == 0:
@@ -151,6 +160,7 @@ def _needles(
                     entry = ref_purposes[pid]
                     if isinstance(entry, dict):
                         raw.append((f"ref:purpose:{pid}", str(entry.get("text", ""))))
+                        ids.add(str(pid))
 
     if catalog_readable(cat_dir):
         con = connect_read(cat_dir)
@@ -167,6 +177,7 @@ def _needles(
             purposes = json.loads(row[1]) if row[1] else {}
             for pid in sorted(purposes):
                 raw.append((f"confirmed:purpose:{pid}", str(purposes[pid].get("text", ""))))
+                ids.add(str(pid))
 
     needles: list[tuple[str, str]] = []
     short: list[dict[str, Any]] = []
@@ -183,12 +194,32 @@ def _needles(
             if form not in seen:
                 seen.add(form)
                 needles.append((source, form))
-    return needles, short
+    return needles, short, ids
 
 
 def _quotes(text: str, needles: list[tuple[str, str]]) -> bool:
     hay = _norm(text)
     return any(n in hay for _, n in needles)
+
+
+def _id_patterns(ids: set[str]) -> tuple[list[re.Pattern[str]], list[str]]:
+    """Whole-token patterns for every charter id and the reserved ``off-charter`` label.
+
+    Ids shorter than ``MIN_ID_CHARS`` (opaque ids such as ``P1``) would match ordinary text, so they are skipped
+    and listed in the manifest, the way short purpose texts are (review 261110).
+    """
+    pats: list[re.Pattern[str]] = []
+    short: list[str] = []
+    for pid in sorted(ids | {OFF_CHARTER}):
+        if len(pid) < MIN_ID_CHARS:
+            short.append(pid)
+        else:
+            pats.append(id_token_pattern(pid))
+    return pats, short
+
+
+def _names_id(text: str, pats: list[re.Pattern[str]]) -> bool:
+    return any(p.search(text) for p in pats)
 
 
 def _scrub_abs_paths(text: str) -> str:
@@ -306,7 +337,10 @@ def build_packet(
         charter_files = [Path(charter_file)]
     else:
         charter_files = [Path(c) for c in charter_file]
-    needles, short_skipped = _needles(root, repo, ref_sha, slug, charter_files, cat_dir)
+    needles, short_skipped, charter_ids = _needles(
+        root, repo, ref_sha, slug, charter_files, cat_dir
+    )
+    id_pats, short_ids = _id_patterns(charter_ids)
 
     exclusions: list[dict[str, str]] = []
 
@@ -337,6 +371,9 @@ def build_packet(
             if _quotes(text, needles):
                 exclusions.append({"path": path, "reason": "quotes_charter"})
                 continue
+            if _names_id(text, id_pats) or _names_id(path, id_pats):
+                exclusions.append({"path": path, "reason": "names_charter_id"})
+                continue
             docs.append({"path": path, "blob_sha": blob_sha})
             doc_bytes[path] = data
     for path in (*ROOT_HARNESS_PATHS, *CHARTER_PATHS):
@@ -350,6 +387,7 @@ def build_packet(
     sidecars: dict[tuple[str, str], bytes] = {}
     sidecar_unresolved: list[dict[str, str]] = []
     labels_stripped: list[str] = []
+    withheld_runs: set[str] = set()
     if catalog_readable(cat_dir):
         con = connect_read(cat_dir)
         try:
@@ -382,6 +420,12 @@ def build_packet(
                 continue
             if any(isinstance(v, str) and _run_quotes(v, needles) for v in rec.values()):
                 exclusions.append({"path": f"run:{rid}", "reason": "quotes_charter"})
+                continue
+            if any(
+                isinstance(v, str) and k != "sidecar_path" and _names_id(v, id_pats)
+                for k, v in rec.items()
+            ):
+                exclusions.append({"path": f"run:{rid}", "reason": "names_charter_id"})
                 continue
             for field in ("command", "tags"):
                 if isinstance(rec.get(field), str):
@@ -424,6 +468,11 @@ def build_packet(
             sidecar_unresolved.append({"run": str(rec["id"]), "path": str(recorded)})
             continue
         rev, rel, proc = found
+        if _names_id(rel, id_pats):
+            # The resolved path is what would reach the reader; a path naming a charter id withholds the run.
+            exclusions.append({"path": f"run:{rec['id']}", "reason": "names_charter_id"})
+            withheld_runs.add(str(rec["id"]))
+            continue
         rec["sidecar_path"] = rel
         blob = _git(repo, "rev-parse", f"{rev}:{rel}").stdout.decode().strip()
         if (rel, blob) in sidecars or any(s["path"] == f"sidecar:{rel}@{blob}" for s in exclusions):
@@ -441,10 +490,15 @@ def build_packet(
             continue
         if _quotes(text, needles):
             exclusions.append({"path": f"sidecar:{rel}@{blob}", "reason": "quotes_charter"})
+        elif _names_id(text, id_pats):
+            # A slug echoed in the hypothesis, a misplaced label or a comment (review 261110).
+            exclusions.append({"path": f"sidecar:{rel}@{blob}", "reason": "names_charter_id"})
         else:
             sidecars[(rel, blob)] = text.encode("utf-8") if had_label else proc.stdout
             if had_label:
                 labels_stripped.append(f"sidecar:{rel}@{blob}")
+
+    runs_sorted = [r for r in runs_sorted if str(r["id"]) not in withheld_runs]
 
     # ── Git subjects in the window ──────────────────────────────────────────────
     git_log: list[dict[str, str]] = []
@@ -464,6 +518,9 @@ def build_packet(
         if _quotes(subject, needles):
             exclusions.append({"path": f"git:{sha}", "reason": "quotes_charter"})
             continue
+        if _names_id(subject, id_pats):
+            exclusions.append({"path": f"git:{sha}", "reason": "names_charter_id"})
+            continue
         parsed_log.append((cdt, {"sha": sha, "committed_at": cts, "subject": subject}))
     git_log = [rec for _, rec in sorted(parsed_log, key=lambda t: (t[0], t[1]["sha"]))]
 
@@ -477,6 +534,9 @@ def build_packet(
                 continue
             if _quotes(t, needles):
                 exclusions.append({"path": f"backlog:line{n + 1}", "reason": "quotes_charter"})
+                continue
+            if _names_id(t, id_pats):
+                exclusions.append({"path": f"backlog:line{n + 1}", "reason": "names_charter_id"})
                 continue
             titles.append(t)
         titles.sort()
@@ -521,6 +581,8 @@ def build_packet(
         "backlog": "provided" if titles is not None else "not_provided",
         "exclusions": exclusions,
         "short_needles_skipped": sorted(short_skipped, key=lambda d: d["source"]),
+        # Charter ids too short to token-match safely (review 261110); records naming them are not filtered.
+        "short_ids_skipped": short_ids,
         "sidecar_unresolved": sorted(sidecar_unresolved, key=lambda d: (d["run"], d["path"])),
         # Sidecars whose [charter] purpose label was removed before they entered reader/ (owner-side only).
         "labels_stripped": sorted(labels_stripped),

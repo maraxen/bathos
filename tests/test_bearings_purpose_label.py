@@ -9,7 +9,12 @@ from pathlib import Path
 
 import pytest
 
-from bathos.bearings.purpose_label import PurposeLabelError, read_purpose_label, strip_purpose_label
+from bathos.bearings.purpose_label import (
+    PurposeLabelError,
+    id_token_pattern,
+    read_purpose_label,
+    strip_purpose_label,
+)
 from tests.test_bearings_packet import (  # noqa: F401  (env is a fixture)
     DATE,
     build,
@@ -97,10 +102,51 @@ def test_the_label_table_is_removed_wherever_it_sits_and_nothing_else_changes(wh
     assert tomllib.loads(stripped) == tomllib.loads(BODY)
 
 
-def test_a_charter_subtable_is_removed_too():
-    text = BODY + '[charter]\npurpose = "a"\n[charter.note]\nwhy = "lagoon-simulation"\n'
-    stripped, had = strip_purpose_label(text)
-    assert had and "lagoon-simulation" not in stripped
+@pytest.mark.parametrize(
+    "label",
+    [
+        '[charter]\npurpose = "a"\n[charter.note]\nwhy = "lagoon-simulation"\n',
+        '[[charter]]\npurpose = "lagoon-simulation"\n',
+        '[charter]\npurpose = "L5"\n',
+        '[charter]\npurpose = ["off-charter", "lagoon-simulation"]\n',
+    ],
+    ids=["subtable", "array-of-tables", "opaque-id", "off-charter-mixed"],
+)
+def test_a_malformed_label_is_refused_by_strip_so_the_sidecar_is_excluded(label):
+    # Review 261110: these used to strip cleanly and then abort the scorer; now the packet excludes the sidecar.
+    with pytest.raises(PurposeLabelError):
+        strip_purpose_label(BODY + label)
+
+
+@pytest.mark.parametrize(
+    "slug,ok",
+    [("7ab", True), ("a", True), ("a-b", True), ("a-", False), ("a--b", False), ("-a", False)],
+)
+def test_slugs_are_lowercase_words_joined_by_single_hyphens(slug, ok):
+    toml = f'[charter]\npurpose = "{slug}"\n'
+    if ok:
+        assert read_purpose_label(tomllib.loads(toml)) == [slug]
+    else:
+        with pytest.raises(PurposeLabelError):
+            read_purpose_label(tomllib.loads(toml))
+
+
+@pytest.mark.parametrize(
+    "text,hit",
+    [
+        ("serves lagoon-simulation today", True),
+        ("Lagoon_Simulation.py", True),
+        ("scripts/lagoon-simulation/run.bth.toml", True),
+        ("# lagoon-simulation", True),
+        ("lagoon_simulation_rerun.bth.toml", True),
+        ("pre-lagoon-simulation", True),
+        ("xlagoon-simulation", False),
+        ("lagoon-simulations", False),
+        ("lagoon simulation", False),
+    ],
+)
+def test_the_id_token_pattern_matches_whole_tokens_in_either_spelling(text, hit):
+    assert bool(id_token_pattern("lagoon-simulation").search(text)) is hit
 
 
 @pytest.mark.parametrize(

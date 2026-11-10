@@ -38,7 +38,13 @@ def _compared(eid: str = "c1", ts: str = "2026-11-04T11:00:00Z", items=None) -> 
             {"item_id": "i1", "kind": "mapped", "reading_purpose_id": "r1", "charter_purpose_id": "P1", "matched_retired": None},
             {"item_id": "i2", "kind": "unmapped", "reading_purpose_id": "r2", "matched_retired": "P3"},
             {"item_id": "i3", "kind": "unmapped", "open_line_index": 0, "matched_retired": None},
-            {"item_id": "i4", "kind": "silent", "charter_purpose_id": "P2", "matched_retired": None},
+            {
+                "item_id": "i4",
+                "kind": "silent",
+                "charter_purpose_id": "P2",
+                "matched_retired": None,
+                "budget_limited": True,
+            },
         ]
     return _ev(KIND_COMPARED, ts, eid, mapper_id="mapper-B", charter_sha256="c" * 64, items=items)
 
@@ -66,6 +72,8 @@ def test_item_rows_and_subjects():
     assert set(by) == {"i1", "i2", "i3", "i4"}
     assert by["i2"]["matched_retired"] == "P3"
     assert by["i1"]["matched_retired"] is None
+    # Review 261110: the silent item's budget flag survives the fold; other kinds carry None.
+    assert by["i4"]["budget_limited"] is True and by["i1"]["budget_limited"] is None
     assert json.loads(by["i3"]["subject_json"]) == {"open_line_index": 0}
     assert json.loads(by["i4"]["subject_json"]) == {"charter_purpose_id": "P2"}
     assert json.loads(by["i1"]["subject_json"]) == {"charter_purpose_id": "P1", "reading_purpose_id": "r1"}

@@ -18,8 +18,23 @@ import re
 import tomllib
 from typing import Any
 
-PURPOSE_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$")
+PURPOSE_SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 LABEL_TABLE = "charter"
+# Reserved label value: real work that serves no charter purpose. It stands alone in a label.
+OFF_CHARTER = "off-charter"
+
+
+def id_token_pattern(pid: str) -> re.Pattern[str]:
+    """Whole-token, case-insensitive match for a charter id; hyphen and underscore spellings both count.
+
+    Charter ids are readable slugs, so they are ordinary words that can appear anywhere in a record; the packet
+    builder uses this to keep any record naming one away from readers.
+    """
+    # Only letters and digits bound a token, so `beta_aim_rerun` and `pre-beta-aim` name `beta-aim`, while
+    # `xbeta-aim` and `beta-aims` do not.
+    body = re.escape(pid).replace(r"\-", "[-_]")
+    return re.compile(rf"(?<![A-Za-z0-9]){body}(?![A-Za-z0-9])", re.IGNORECASE)
+
 
 _HEADER_RE = re.compile(r"^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(?:#.*)?$")
 
@@ -58,6 +73,11 @@ def read_purpose_label(data: dict[str, Any]) -> list[str] | None:
         )
     if len(set(slugs)) != len(slugs):
         raise PurposeLabelError(f"[{LABEL_TABLE}] purpose repeats a slug: {slugs!r}")
+    if OFF_CHARTER in slugs and len(slugs) > 1:
+        raise PurposeLabelError(
+            f"[{LABEL_TABLE}] purpose {OFF_CHARTER!r} means the work serves no charter purpose; "
+            f"it cannot be combined with others: {slugs!r}"
+        )
     return sorted(slugs)
 
 
@@ -83,6 +103,9 @@ def strip_purpose_label(text: str) -> tuple[str, bool]:
         return text, False
     if LABEL_TABLE not in original:
         return text, False
+    # A malformed label ([[charter]], [charter.note], purpose = "L5") is refused here, so the sidecar is excluded
+    # at build time instead of passing through stripped and later failing the scorer.
+    read_purpose_label(original)
 
     kept: list[str] = []
     in_label = False

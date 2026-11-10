@@ -393,6 +393,7 @@ CREATE TABLE IF NOT EXISTS bearings_items (
     kind VARCHAR,
     subject_json VARCHAR,
     matched_retired VARCHAR,
+    budget_limited BOOLEAN,
     PRIMARY KEY (compare_eid, item_id)
 )
 """
@@ -470,6 +471,7 @@ def init_index_schema(con: duckdb.DuckDBPyConnection) -> None:
         con, "bearings_readings", BEARINGS_READINGS_DDL
     )  # links_json (AC-5b), budget_json (AC-4b)
     con.execute(BEARINGS_ITEMS_DDL)
+    _add_missing_columns(con, "bearings_items", BEARINGS_ITEMS_DDL)  # budget_limited (review 261110)
 
 
 def _empty_select(ddl: str) -> str:

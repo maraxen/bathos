@@ -27,9 +27,10 @@ PRIMARY_DOC_DIRS = (".praxia/docs/decisions/", ".praxia/docs/specs/")
 
 
 def token_re(slug: str) -> re.Pattern[str]:
-    """Whole-token, case-insensitive; hyphen and underscore spellings both count."""
-    body = re.escape(slug).replace(r"\-", "[-_]")
-    return re.compile(rf"(?<![A-Za-z0-9_-]){body}(?![A-Za-z0-9_-])", re.IGNORECASE)
+    """The packet builder's own matcher (``bathos.bearings.purpose_label.id_token_pattern``)."""
+    from bathos.bearings.purpose_label import id_token_pattern
+
+    return id_token_pattern(slug)
 
 
 def git(repo: Path, *args: str) -> str:
