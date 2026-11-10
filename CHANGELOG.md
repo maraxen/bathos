@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.3] - 2026-11-03
+
+### Changed
+- `UnaffiliatedProjectError` now maps to its own error code, `runlog_unaffiliated_project`, with a hint about running under the project's `.bth.toml` or setting `BTH_WORKSPACE_ROOT`. It previously reused `runlog_project_id_missing`, whose `bth init --assign-id` hint did not fix an unbound checkout (praxia debt #3210).
+- `bth run` in log mode now warns on stderr when the resolved project's `.bth.toml` has no `[project] id` (and no `BTH_PROJECT_ID` under SLURM), since the run is recorded with `project_id` null. The run still proceeds (praxia debt #3211).
+
+## [0.13.2] - 2026-11-03
+
+### Fixed
+- **A SLURM job without an exported `BTH_PROJECT_ID` records the resolved `.bth.toml` id (praxia debt #3202).** `resolve_write_project_id` returned `None` for every event under `SLURM_JOB_ID` unless `bth submit` had exported `BTH_PROJECT_ID`, even when the run was bound to its project log. An exported id still wins; an unaffiliated root stays `None`; otherwise the writer reads `[project] id` from the resolved main root's `.bth.toml`.
+
+## [0.13.1] - 2026-11-03
+
+### Fixed
+- **A non-git checkout now binds to its project (praxia debt #3201).** `resolve_workspace` used the recorded `[project] root` as `fs_root` when no `BTH_WORKSPACE_ROOT` or git toplevel applied. On a host where that path does not exist (an Engaging worktree of a project recorded on a laptop), `resolve_log_root` then found no `.bth.toml` and filed the run under `~/.bth/log/unaffiliated/` with `project_id` null, so `bth sql --project <slug>` missed it. The config rung now uses the directory where `.bth.toml` was found walking up from cwd; the recorded root stays identity/display only (`identity_root`). Ladder order is unchanged: `BTH_WORKSPACE_ROOT`, git toplevel, found `.bth.toml` directory, cwd.
+- **A slug-bearing `bth run` never falls back to `unaffiliated` silently.** In log mode, a run whose log root resolves to unaffiliated now fails before launch (exit 1, no subprocess) with an error naming the slug, cwd, recorded root and resolved `fs_root`. A run with no slug (other writers) is unchanged. Existing runs already in `~/.bth/log/unaffiliated/` are not moved; re-ingest is a separate follow-up.
+
 ## [0.13.0a9] - 2026-10-30
 
 ### Added

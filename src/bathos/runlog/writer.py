@@ -294,17 +294,19 @@ def append_event(
 def resolve_write_project_id(log_root: LogRootResolution) -> str | None:
     """Resolve the `project_id` to embed on an event, per D7:
 
-    - a SLURM job (`SLURM_JOB_ID` set) uses `BTH_PROJECT_ID`, exported by
-      `bth submit`; absent, that's `None` (mapped at ingest by slug, with a
-      warning -- ingest-side, not this module's concern).
+    - if `SLURM_JOB_ID` is set and `BTH_PROJECT_ID` is set and non-empty,
+      return that env value (`bth submit` exports it; env still wins).
     - otherwise, an unaffiliated root has no id (`None`).
     - otherwise, it's read straight off the resolved main root's `.bth.toml`
-      (may be `None` if missing -- callers that must fail on that, like a
-      local `bth run`, should call `project_id.require_project_id` instead
-      and handle its raised error before ever reaching this point).
+      (may be `None` if the file or id is absent -- callers that must fail
+      on that, like a local `bth run`, should call
+      `project_id.require_project_id` instead and handle its raised error
+      before ever reaching this point).
     """
     if os.environ.get("SLURM_JOB_ID"):
-        return os.environ.get("BTH_PROJECT_ID") or None
+        env_id = os.environ.get("BTH_PROJECT_ID")
+        if env_id:
+            return env_id
     if log_root.unaffiliated:
         return None
     return read_project_id(log_root.main_root / ".bth.toml")

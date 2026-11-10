@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bathos"
-version = "0.13.0a9"
+version = "0.13.3"
 description = "Local-first, zero-server experiment tracking for researchers"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -44,7 +44,7 @@ dependencies = [
     # 0.1.1a14: `bth plugin repo-bundle` (plugin/ + .claude-plugin/marketplace.json,
     # installable from GitHub) and [plugin.mcp] launch = "uvx".
     # 0.1.4: `bth plugin install|update antigravity` (via `agy plugin install`).
-    "cisternal>=0.1.5",
+    "cisternal>=0.1.6",
     # backlog #4702: bathos/cli_cyclopts.py (the real `bth` CLI as of the final
     # cutover) wires directly against cisternal's cyclopts-based wire() --
     # declared here since it's imported directly, not just pulled in

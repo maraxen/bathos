@@ -767,6 +767,14 @@ def _read_events(home: Path) -> list[dict]:
     return out
 
 
+def _read_run_events(tmp_path: Path) -> list[dict]:
+    """Events of runs launched by `_run`: the project's own log under `wt/` (debt #3201)."""
+    out: list[dict] = []
+    for f in sorted((tmp_path / "wt" / ".bth" / "log").glob("*.jsonl")):
+        out.extend(json.loads(line) for line in f.read_text().splitlines() if line.strip())
+    return out
+
+
 @pytest.fixture
 def logmode(tmp_catalog: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("BTH_LOG_MODE", "1")
@@ -783,6 +791,8 @@ def _run(
     cwd = tmp_path / "wt"
     scripts = cwd / "scripts" / "explore"
     scripts.mkdir(parents=True, exist_ok=True)
+    # debt #3201: a slug-bearing run must bind to a project, else it fails loudly.
+    (cwd / ".bth.toml").write_text(f'[project]\nslug = "testproj"\nroot = "{cwd}"\n')
     (scripts / "gen.py").write_text(_SCRIPT)
     (scripts / "gen.bth.toml").write_text(_sidecar_text(roots))
     return run_script(
@@ -795,14 +805,15 @@ def _run(
     )
 
 
+@pytest.mark.usefixtures("bathos_test_home")
 def test_run_end_event_has_legacy_keys_relpath_phase_and_expanded_roots(
-    logmode: Path, tmp_path: Path, bathos_test_home: Path
+    logmode: Path, tmp_path: Path
 ):
     rc = _run(
         tmp_path, logmode, ["outputs/data"], output_paths=[str(tmp_path / "wt" / "extra.txt")]
     )
     assert rc == 0
-    events = _read_events(bathos_test_home)
+    events = _read_run_events(tmp_path)
     started = next(e for e in events if e["kind"] == "run.started")
     assert started["data"]["outputs_declared"] is True
 
@@ -829,12 +840,13 @@ def test_run_end_event_has_legacy_keys_relpath_phase_and_expanded_roots(
     assert ref["outputs/data/b.bin"].phase == "run_end"
 
 
+@pytest.mark.usefixtures("bathos_test_home")
 def test_run_without_declared_roots_is_not_outputs_declared_but_still_tagged(
-    logmode: Path, tmp_path: Path, bathos_test_home: Path
+    logmode: Path, tmp_path: Path
 ):
     rc = _run(tmp_path, logmode, None, output_paths=[str(tmp_path / "wt" / "extra.txt")])
     assert rc == 0
-    events = _read_events(bathos_test_home)
+    events = _read_run_events(tmp_path)
     started = next(e for e in events if e["kind"] == "run.started")
     assert "outputs_declared" not in started["data"]
     (hashed,) = [e for e in events if e["kind"] == "run.outputs_hashed"]
@@ -847,15 +859,16 @@ def test_run_without_declared_roots_is_not_outputs_declared_but_still_tagged(
     assert not any(r.startswith("outputs/data") for r in by_rel)
 
 
+@pytest.mark.usefixtures("bathos_test_home")
 def test_symlink_under_a_declared_root_records_a_tombstone_and_the_run_still_finishes(
-    logmode: Path, tmp_path: Path, bathos_test_home: Path, monkeypatch: pytest.MonkeyPatch
+    logmode: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setenv("MAKE_SYMLINK", "1")
     rc = _run(
         tmp_path, logmode, ["outputs/data"], output_paths=[str(tmp_path / "wt" / "extra.txt")]
     )
     assert rc == 0
-    events = _read_events(bathos_test_home)
+    events = _read_run_events(tmp_path)
     (hashed,) = [e for e in events if e["kind"] == "run.outputs_hashed"]
     assert hashed["data"]["phase"] == "run_end"
     assert hashed["data"]["refused"] == "symlink_in_outputs"
@@ -866,8 +879,9 @@ def test_symlink_under_a_declared_root_records_a_tombstone_and_the_run_still_fin
     assert reference_hashes([e for e in events if e["entity"] == hashed["entity"]]) == {}
 
 
+@pytest.mark.usefixtures("bathos_test_home")
 def test_declared_roots_make_the_run_end_emit_hard_fail_and_failure_is_not_swallowed(
-    logmode: Path, tmp_path: Path, bathos_test_home: Path, monkeypatch: pytest.MonkeyPatch
+    logmode: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     import bathos.runner as runner_mod
     from bathos.runlog.emit import RunNotLaunchedError
@@ -885,7 +899,7 @@ def test_declared_roots_make_the_run_end_emit_hard_fail_and_failure_is_not_swall
     rc = _run(tmp_path, logmode, ["outputs/data"])
     assert seen == {"hard_fail": True}
     assert rc != 0  # the script exited 0; the lost run-end event must not look like success
-    events = _read_events(bathos_test_home)
+    events = _read_run_events(tmp_path)
     assert not any(e["kind"] == "run.outputs_hashed" for e in events)
     assert any(e["kind"] == "run.finished" for e in events)  # the run does not stay 'running'
 

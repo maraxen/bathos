@@ -49,6 +49,8 @@ from bathos.runlog.emit import (
     sidecar_declaration_for_event,
     unit_of_work,
 )
+from bathos.runlog.resolve import UnaffiliatedProjectError, require_affiliated
+from bathos.runlog.writer import resolve_write_project_id
 from bathos.schema import Run
 from bathos.sidecar import (
     DifferentialBlock,
@@ -1029,6 +1031,26 @@ def _run_script_impl(
         return 1
     for note in lock_settings.warnings:
         print(f"warning: {note}", file=sys.stderr)
+
+    # A slug-bearing log-mode run whose log root resolves to unaffiliated would silently land in
+    # ~/.bth/log/unaffiliated/ with project_id null (debt #3201). Refuse here, before any run id,
+    # telemetry event or git capture exists, so no caller sees a run_id for a run never persisted.
+    if project_slug and current_mode():
+        try:
+            affiliated_root = require_affiliated(project_slug, cwd)
+        except UnaffiliatedProjectError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+        # An affiliated root whose .bth.toml has no [project] id (and no BTH_PROJECT_ID under SLURM)
+        # still records project_id null, invisible to project_id-keyed reads (debt #3211). Warn
+        # rather than refuse: refusing would break projects that predate ids.
+        if resolve_write_project_id(affiliated_root) is None:
+            print(
+                f"warning: {affiliated_root.main_root}/.bth.toml has no [project] id; this run "
+                "will be recorded with project_id null. Run `bth init --assign-id` there and "
+                "commit the result.",
+                file=sys.stderr,
+            )
 
     # Resolve --campaign up front (fail fast, before running the subprocess) and
     # store the full UUID — never the raw prefix — on the run record.

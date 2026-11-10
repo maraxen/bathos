@@ -50,6 +50,15 @@ class LogRootResolution:
     unparseable `git worktree list`)."""
 
 
+class UnaffiliatedProjectError(RunLogError):
+    """A run carries a project slug but its log root resolved to `unaffiliated`.
+
+    The run would be filed under `~/.bth/log/unaffiliated/` with `project_id` null,
+    invisible to `bth sql --project <slug>` (praxia debt #3201). Raised rather than
+    silently falling back.
+    """
+
+
 @dataclass(frozen=True)
 class _WorktreeEntry:
     path: Path
@@ -184,6 +193,22 @@ def resolve_log_root(cwd: Path | None = None) -> LogRootResolution:
     return LogRootResolution(
         main_root=first.path.resolve(), worktree_root=fs_root, unaffiliated=False
     )
+
+
+def require_affiliated(slug: str, cwd: Path | None = None) -> LogRootResolution:
+    """Resolve the log root for a run that carries `slug`; raise if it is unaffiliated."""
+    cwd = (cwd or Path.cwd()).resolve()
+    resolution = resolve_log_root(cwd)
+    if resolution.unaffiliated:
+        ws = resolve_workspace(cwd)
+        raise UnaffiliatedProjectError(
+            f"run for project {slug!r} would be recorded as unaffiliated "
+            f"(project_id null): cwd={cwd}, recorded [project] root={ws.identity_root}, "
+            f"resolved fs_root={ws.fs_root} (rung: {ws.source}). No .bth.toml and no "
+            "repository were found at the resolved root. Run from a directory under the "
+            "project's .bth.toml, or set BTH_WORKSPACE_ROOT to the checkout root."
+        )
+    return resolution
 
 
 def fallback_log_root(resolution: LogRootResolution) -> Path:
