@@ -68,6 +68,28 @@ base_sha: 'f1708528'
 - no live purpose;
 - the slugs `7ab`, `a-` and `a--b`.
 
+## Remediation (261110, commits c386606c and 105b22be)
+
+| Finding | Status |
+|---|---|
+| Slugs reach readers | **fixed**: charter ids are whole-token leak needles across every record kind (`names_charter_id`) |
+| Off-charter mapped to retired credited | **fixed**: needs no target at all |
+| Revived lineage | **fixed**: the flagging reading purpose's gold must name the retired id |
+| Spec slug pattern | **fixed**: spec corrected; pattern now single hyphens only (`a--b` refused) |
+| `label_unstrippable`-only purpose counted silent | **fixed**: withheld evidence makes a purpose indeterminate |
+| `[[charter]]` / `[charter.note]` / `L5` abort the scorer | **fixed**: refused at strip, sidecar excluded; a withheld malformed label raises `Ac9LabelError` (owner fixes it) |
+| Two blobs, different labels | **fixed**: disagreeing slugs are indeterminate (labelled blobs only) |
+| Mixed `off-charter` list | **fixed**: refused as a malformed label |
+| Gold agreement ignores retired pairs | **fixed**: retired pairs included; sparse mapping caught by false-silent (test) |
+| `doc:`/`git:`-only citations get empty gold | **open**: labels live on sidecars; left for the AC-9 sidecar to treat |
+| Decoy too easy; 0.2 rule missing | **fixed**: nanobody-drawn draft (owner to confirm), `decoy_mapped_share`, `decoy_invalid` |
+| Budget-cut packet fails `meets_pass` | **as designed**; pooling across packets belongs to the AC-9 sidecar |
+| Comment/blank line after the label table deleted | **open, low**: harmless; the deleted lines are not shown to readers |
+| `degenerate_mappings` IndexError | **fixed** |
+| `bearings_items` drops `budget_limited` | **fixed**: column added, migrated by `_add_missing_columns` |
+
+Tests: the touched test files (Bearings, charter, validate, fold, index migration) pass.
+
 ## Found clean (Cursor)
 
 - A root-level `charter.purpose` and a root inline charter table are excluded.
