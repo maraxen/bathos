@@ -19,6 +19,8 @@ at least 2 of 3 readings, here as a rate). The AC-9 sidecar decides how comparis
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
 import subprocess
 import tomllib
@@ -47,6 +49,12 @@ __all__ = [
     "degenerate_mappings",
     "MARGINAL",
     "invalid_reasons",
+    "BOUNDS",
+    "bound_violations",
+    "missing_cases",
+    "oracle_reading",
+    "plan_planted_packets",
+    "pooled_metrics",
     "meets_marginal",
     "meets_pass",
     "packet_labels",
@@ -323,13 +331,46 @@ def ac9_metrics(
       other target outside its gold is a miss, so an error on a purpose that also cites an ambiguous path still
       counts (review round 4, 261110).
     """
-    maybe = maybe or {}
-    items = comparison["items"]
-    silent_reported = {
+    c = _reading_counts(key, gold, comparison, maybe)
+    return {
+        "silent_recall": _rate(c["silent_hits"], c["n_silent"]),
+        "n_silent": c["n_silent"],
+        "false_silent": _rate(c["false_silent_hits"], c["n_present"]),
+        "n_present": c["n_present"],
+        "off_charter_unmapped": _rate(c["off_charter_hits"], c["n_off_charter"]),
+        "n_off_charter": c["n_off_charter"],
+        "revived_flagged": _rate(c["revived_hits"], c["n_revived"]),
+        "n_revived": c["n_revived"],
+        "gold_agreement": _rate(c["gold_hits"], c["n_mapped"]),
+        "n_mapped": c["n_mapped"],
+        "n_unscored_pairs": c["n_unscored_pairs"],
+        "n_indeterminate": len(key.get("indeterminate", [])),
+    }
+
+
+def _silent_reported(comparison: dict[str, Any]) -> set[str]:
+    return {
         it["charter_purpose_id"]
-        for it in items
+        for it in comparison["items"]
         if it["kind"] == "silent" and not it.get("budget_limited")
     }
+
+
+def _reading_counts(
+    key: dict[str, Any],
+    gold: dict[str, list[str]],
+    comparison: dict[str, Any],
+    maybe: dict[str, list[str]] | None = None,
+    silent_reported: set[str] | None = None,
+) -> dict[str, int]:
+    """Hits and denominators for one reading (the integers behind ``ac9_metrics``'s rates).
+
+    ``silent_reported`` overrides this reading's own silent set; the pooled scorer passes the packet's combined set.
+    """
+    maybe = maybe or {}
+    items = comparison["items"]
+    if silent_reported is None:
+        silent_reported = _silent_reported(comparison)
     scorable = not key["budget_limited"]
     true_silent = key["silent"] if scorable else []
     present = key["present"] if scorable else []
@@ -348,20 +389,18 @@ def ac9_metrics(
     }
     all_pairs = [(rp, t) for rp, ts in sorted(targets.items()) for t in sorted(ts)]
     pairs = [(rp, t) for rp, t in all_pairs if t in gold.get(rp, []) or t not in maybe.get(rp, [])]
-
     return {
-        "silent_recall": _rate(sum(p in silent_reported for p in true_silent), len(true_silent)),
+        "silent_hits": sum(p in silent_reported for p in true_silent),
         "n_silent": len(true_silent),
-        "false_silent": _rate(sum(p in silent_reported for p in present), len(present)),
+        "false_silent_hits": sum(p in silent_reported for p in present),
         "n_present": len(present),
-        "off_charter_unmapped": _rate(sum(not targets.get(rp) for rp in off_rps), len(off_rps)),
+        "off_charter_hits": sum(not targets.get(rp) for rp in off_rps),
         "n_off_charter": len(off_rps),
-        "revived_flagged": _rate(sum(r in flagged for r in key["revived"]), len(key["revived"])),
+        "revived_hits": sum(r in flagged for r in key["revived"]),
         "n_revived": len(key["revived"]),
-        "gold_agreement": _rate(sum(t in gold.get(rp, []) for rp, t in pairs), len(pairs)),
+        "gold_hits": sum(t in gold.get(rp, []) for rp, t in pairs),
         "n_mapped": len(pairs),
         "n_unscored_pairs": len(all_pairs) - len(pairs),
-        "n_indeterminate": len(key.get("indeterminate", [])),
     }
 
 
@@ -442,3 +481,236 @@ def decoy_mapped_share(comparison: dict[str, Any]) -> float:
 def decoy_invalid(share: float) -> bool:
     """A decoy run with more than ``DECOY_MAX_MAPPED`` of reading purposes mapped invalidates the AC-9 run."""
     return share > DECOY_MAX_MAPPED
+
+
+# ── AC-9 run: planting, oracle reading, pooling, bounds (owner 261110) ──────────────────────────────────────────
+
+PLANT_SEED = "ac9-261110"  # fixed before any label exists; ranks charter ids and runs
+N_PACKETS = 3
+SILENT_PER_PACKET = 2
+MIN_RUNS_PER_PURPOSE = 2  # a reading purpose needs at least 2 citations
+MAX_RUNS_PER_PURPOSE = 10  # cap per purpose, so one busy purpose cannot dominate a packet
+MIN_ELIGIBLE_LIVE = SILENT_PER_PACKET + 3  # 2 planted silent and at least 3 present in every packet
+MIN_RETIRED = 2  # one revived and one absent in every packet
+MIN_OFF_CHARTER_RUNS = 2
+
+# Antigravity's proposal, accepted by the owner 261110 (AskUserQuestion); arbitrary starting points.
+BOUNDS = {
+    "indeterminate_live_max": 1,
+    "indeterminate_live_frac": 0.15,
+    "withheld_sidecar_frac": 0.10,
+    "withheld_run_frac": 0.10,
+    "ambiguous_paths_max": 1,
+}
+
+
+def _seeded(token: str) -> str:
+    return hashlib.sha256(f"{PLANT_SEED}:{token}".encode()).hexdigest()
+
+
+def plan_planted_packets(
+    run_labels: dict[str, list[str]], charter_purposes: dict[str, dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """The three planted packets, chosen mechanically from labelled runs. Returns ``(plans, unmet)``.
+
+    ``run_labels`` maps run id -> its sidecar's purpose slugs (unlabelled runs are left out by the caller). A live
+    purpose is eligible when it has at least ``MIN_RUNS_PER_PURPOSE`` labelled runs. Eligible live purposes are ranked
+    by a seeded hash; packet k plants ranks 2k and 2k+1 (mod the number eligible) as silent and keeps the rest present.
+    Retired purposes with runs are ranked the same way; packet k revives one, so every other retired purpose is absent.
+    A run is kept only if every label it carries is a kept purpose or ``off-charter``; each purpose keeps at most
+    ``MAX_RUNS_PER_PURPOSE`` runs, lowest seeded rank first (a run counts toward its first label in sorted order).
+    ``unmet`` lists why the record cannot plant every case; when it is non-empty, ``plans`` is empty.
+    """
+    by_purpose: dict[str, list[str]] = {}
+    for rid, slugs in run_labels.items():
+        for s in slugs:
+            by_purpose.setdefault(s, []).append(rid)
+    live = [p for p, v in charter_purposes.items() if v.get("state") == "live"]
+    retired = [p for p, v in charter_purposes.items() if v.get("state") == "retired"]
+    eligible = sorted(
+        (p for p in live if len(by_purpose.get(p, [])) >= MIN_RUNS_PER_PURPOSE), key=_seeded
+    )
+    revivable = sorted(
+        (p for p in retired if len(by_purpose.get(p, [])) >= MIN_RUNS_PER_PURPOSE), key=_seeded
+    )
+    unmet = []
+    if len(eligible) < MIN_ELIGIBLE_LIVE:
+        unmet.append(
+            f"{len(eligible)} live purposes with >= {MIN_RUNS_PER_PURPOSE} labelled runs; need {MIN_ELIGIBLE_LIVE}"
+        )
+    if not revivable:
+        unmet.append(
+            f"no retired purpose with >= {MIN_RUNS_PER_PURPOSE} labelled runs (revival case)"
+        )
+    if len(retired) < MIN_RETIRED:
+        unmet.append(
+            f"{len(retired)} retired purposes; need {MIN_RETIRED} (one revived, one absent)"
+        )
+    if len(by_purpose.get(OFF_CHARTER, [])) < MIN_OFF_CHARTER_RUNS:
+        unmet.append(f"fewer than {MIN_OFF_CHARTER_RUNS} runs labelled {OFF_CHARTER}")
+    if unmet:
+        return [], unmet
+
+    plans = []
+    n = len(eligible)
+    for k in range(N_PACKETS):
+        silent = {eligible[(2 * k + j) % n] for j in range(SILENT_PER_PACKET)}
+        present = [p for p in eligible if p not in silent]
+        revived = revivable[k % len(revivable)]
+        allowed = set(present) | {revived, OFF_CHARTER}
+        per_purpose: dict[str, int] = {}
+        kept = []
+        for rid in sorted(run_labels, key=_seeded):
+            slugs = sorted(run_labels[rid])
+            if not slugs or not set(slugs) <= allowed:
+                continue
+            first = slugs[0]
+            if per_purpose.get(first, 0) >= MAX_RUNS_PER_PURPOSE:
+                continue
+            per_purpose[first] = per_purpose.get(first, 0) + 1
+            kept.append(rid)
+        plans.append(
+            {
+                "packet": f"q{k + 1}",
+                "silent": sorted(silent),
+                "present": sorted(present),
+                "revived": revived,
+                "absent_retired": sorted(set(retired) - {revived}),
+                "runs": sorted(kept),
+            }
+        )
+    return plans, []
+
+
+def missing_cases(key: dict[str, Any]) -> list[str]:
+    """Cases a planted packet's answer key fails to contain; the run is invalid if any packet misses one."""
+    need = {
+        "present": key["present"],
+        "silent": key["silent"],
+        "revived": key["revived"],
+        "absent_retired": key["absent_retired"],
+        "off_charter_sidecars": key["off_charter_sidecars"],
+    }
+    return sorted(case for case, got in need.items() if not got)
+
+
+def bound_violations(key: dict[str, Any], charter_purposes: dict[str, dict[str, Any]]) -> list[str]:
+    """Withheld, indeterminate and ambiguous evidence over the owner's bounds (``BOUNDS``); each makes a run invalid."""
+    live = {p for p, v in charter_purposes.items() if v.get("state") == "live"}
+    out = list(invalid_reasons(key))
+    n_ind = len(set(key["indeterminate"]) & live)
+    allowed = max(
+        BOUNDS["indeterminate_live_max"], int(BOUNDS["indeterminate_live_frac"] * len(live))
+    )
+    if n_ind > allowed:
+        out.append(f"{n_ind} live purposes indeterminate; at most {allowed}")
+    ws, ss = key["n_withheld_sidecars"], key["n_shown_sidecars_labelled"]
+    if ws and ws / (ws + ss) > BOUNDS["withheld_sidecar_frac"]:
+        out.append(
+            f"withheld labelled sidecars {ws}/{ws + ss} over {BOUNDS['withheld_sidecar_frac']}"
+        )
+    wr, sr = key["n_withheld_runs"], key["n_shown_runs"]
+    if wr and wr / (wr + sr) > BOUNDS["withheld_run_frac"]:
+        out.append(f"withheld runs {wr}/{wr + sr} over {BOUNDS['withheld_run_frac']}")
+    if len(key["ambiguous_paths"]) > BOUNDS["ambiguous_paths_max"]:
+        out.append(
+            f"{len(key['ambiguous_paths'])} ambiguous paths; at most {BOUNDS['ambiguous_paths_max']}"
+        )
+    return out
+
+
+def oracle_reading(
+    packet_dir: Path | str, labels: dict[str, list[str]], packet_sha256: str
+) -> dict[str, Any]:
+    """The mapper-only arm's reading (owner 261110): one reading purpose per labelled purpose in the packet, built
+    mechanically from the labels, so mapper error is measured without reader error.
+
+    Each purpose's text is the distinct hypotheses of its sidecars (no slug can appear: a sidecar naming one is never
+    shown), and it cites up to 5 of its runs plus their sidecars. Ids are opaque and ordered by seeded rank.
+    """
+    reader = Path(packet_dir) / "reader"
+    runs = [
+        json.loads(x) for x in (reader / "runs.jsonl").read_text(encoding="utf-8").split("\n") if x
+    ]
+    index = json.loads((reader / "index.json").read_text(encoding="utf-8"))
+    blob_of = {s["path"]: s["blob_sha"] for s in index["sidecars"]}
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for r in runs:
+        for slug in labels.get(r.get("sidecar_path") or "", []):
+            groups.setdefault(slug, []).append(r)
+    purposes = []
+    for i, slug in enumerate(sorted(groups, key=_seeded)):
+        rs = sorted(groups[slug], key=lambda r: _seeded(str(r["id"])))[:5]
+        hyps: list[str] = []
+        for path in dict.fromkeys(r["sidecar_path"] for r in rs):
+            text = (reader / "sidecars" / blob_of[path] / path).read_text(encoding="utf-8")
+            with contextlib.suppress(tomllib.TOMLDecodeError):
+                h = str(tomllib.loads(text).get("experiment", {}).get("hypothesis", "")).strip()
+                if h and h not in hyps:
+                    hyps.append(h[:300])
+        cits = [f"run:{r['id']}" for r in rs] + [
+            f"sidecar:{p}" for p in dict.fromkeys(r["sidecar_path"] for r in rs)
+        ]
+        purposes.append(
+            {
+                "id": f"o{i + 1}",
+                "text": " / ".join(hyps) or "work recorded in these runs",
+                "citations": cits,
+            }
+        )
+    return {"packet_sha256": packet_sha256, "reader_id": "oracle-from-labels", "purposes": purposes}
+
+
+def pooled_metrics(packets: list[dict[str, Any]]) -> dict[str, Any]:
+    """T7's metrics pooled over readers and packets (owner 261110): sum hits and denominators, then form rates.
+
+    Each packet is ``{"key": answer_key, "readings": [{"gold", "maybe", "comparison"}, ...]}``. Per T7(b), within a
+    packet a purpose counts as reported silent only if NO reader maps it (the intersection of the readers' silent
+    sets), so silent and false-silent are counted once per packet. Off-charter, revived and gold agreement are counted
+    per reading and summed. The majority rule (silent in at least 2 of 3 readers) is reported beside it, descriptive.
+    """
+    tot: dict[str, int] = {}
+    maj_hits = maj_false = 0
+    for pk in packets:
+        key, readings = pk["key"], pk["readings"]
+        if not readings:
+            continue
+        sets = [_silent_reported(r["comparison"]) for r in readings]
+        combined = set.intersection(*sets)
+        majority = {p for p in set().union(*sets) if sum(p in s for s in sets) * 2 > len(sets)}
+        first = _reading_counts(
+            key, readings[0]["gold"], readings[0]["comparison"], readings[0].get("maybe"), combined
+        )
+        for name in ("silent_hits", "n_silent", "false_silent_hits", "n_present"):
+            tot[name] = tot.get(name, 0) + first[name]
+        scorable = not key["budget_limited"]
+        maj_hits += sum(p in majority for p in (key["silent"] if scorable else []))
+        maj_false += sum(p in majority for p in (key["present"] if scorable else []))
+        for r in readings:
+            c = _reading_counts(key, r["gold"], r["comparison"], r.get("maybe"))
+            for name in (
+                "off_charter_hits",
+                "n_off_charter",
+                "revived_hits",
+                "n_revived",
+                "gold_hits",
+                "n_mapped",
+                "n_unscored_pairs",
+            ):
+                tot[name] = tot.get(name, 0) + c[name]
+    g = tot.get
+    return {
+        "silent_recall": _rate(g("silent_hits", 0), g("n_silent", 0)),
+        "n_silent": g("n_silent", 0),
+        "false_silent": _rate(g("false_silent_hits", 0), g("n_present", 0)),
+        "n_present": g("n_present", 0),
+        "off_charter_unmapped": _rate(g("off_charter_hits", 0), g("n_off_charter", 0)),
+        "n_off_charter": g("n_off_charter", 0),
+        "revived_flagged": _rate(g("revived_hits", 0), g("n_revived", 0)),
+        "n_revived": g("n_revived", 0),
+        "gold_agreement": _rate(g("gold_hits", 0), g("n_mapped", 0)),
+        "n_mapped": g("n_mapped", 0),
+        "n_unscored_pairs": g("n_unscored_pairs", 0),
+        "silent_recall_majority": _rate(maj_hits, g("n_silent", 0)),
+        "false_silent_majority": _rate(maj_false, g("n_present", 0)),
+    }

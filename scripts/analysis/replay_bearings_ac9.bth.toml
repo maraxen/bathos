@@ -1,0 +1,108 @@
+[experiment]
+hypothesis = """Charter comparison works: given blind readings of a project's record, a mapper reports a charter purpose as silent when the record holds no work for it, and reports work that serves no charter purpose as unmapped, against ground truth the readers never see (spec 261104, AC-9). Pooled over 3 planted packets x 3 readers: silent recall at least 0.8, false-silent at most 0.2, off-charter work unmapped in at least 0.8 of readings, a revived retired purpose flagged in at least 2 of 3 readings, and mapped targets agreeing with the labels at 0.8 or better.
+
+What this is for. AC-9 is the shadow -> advisory promotion gate for Bearings, in the terms of the cisternal shadow-development draft (bathos handoff 261109): Bearings runs in shadow (readings and comparisons are logged as bearings.reading_recorded / bearings.compared events, never shown), sidecar labels are the at-work labels (shadow.label, label_source at_work, owner-confirmed in batches), and this sidecar is the pre-registered gate, committed before the first verdict it scores. A pass permits moving Bearings to advisory (the owner decides; nothing promotes itself). When cisternal's shadow events land, a thin adapter emits the same data in its schema; these gates do not change.
+
+Ground truth. Each tev_design sidecar's `[charter] purpose` label (one or more charter slugs, or "off-charter"), written when the sidecar is written and confirmed by the owner (owner 261109). The packet builder strips the label and withholds any record naming a charter id, so readers stay blind (four review rounds, audit .praxia/docs/audits/261110_bearings-ac9-two-surface-review.md). Off-charter work is tev_design's own work labelled "off-charter", not material spliced from another project as the 261108 advisor design had it: shadow labels carry it natively, in-domain off-charter work is the harder and more realistic case, and the scorer cannot read another repository's labels. Recorded as the implementer's choice, 261110.
+
+START GATE (owner items; nothing is built, read or scored until all hold; `--gate` checks and records them, `--build` and the scored run refuse otherwise):
+1. tev_design has a charter at .bth/charter.toml, confirmed by the owner (`bth charter confirm`). The draft is scripts/analysis/ac9/tev_design_charter.DRAFT.toml (7 live, 2 retired; the owner's T7 text said 6 and 2, and the draft's slugs, R2's wording and L7's state still await the owner). The confirmed sha256 counts and is recorded by the gate.
+2. tev_design sidecars carry `[charter] purpose` labels written at work time, and the owner has confirmed a batch. Until cisternal's shadow.label owner_confirmed events exist, the owner writes scripts/analysis/ac9/label_confirmation.toml with `since`, `until`, `ref` (the frozen window) and `confirmed_through` (the last tev_design commit whose labels the owner confirmed). The window is the owner's, fixed in that file before any packet is built.
+3. The frozen planting rule (below) finds every case in that window: at least 5 live purposes with at least 2 labelled runs each, at least 2 retired purposes of which at least one has 2 labelled runs, and at least 2 runs labelled off-charter.
+Gate state at registration, 261110 (`--gate`, read-only): not met. No tev_design charter file; no label confirmation; 0 tev_design sidecars carry a label.
+
+Planting, fixed in code before any label exists (bathos.bearings.ac9.plan_planted_packets, PLANT_SEED "ac9-261110"). From the full packet of the owner's window: keep only runs whose sidecar is labelled (an unlabelled run would give a reader citing it empty gold). Live purposes with at least 2 labelled runs are eligible and ranked by sha256(seed:id). Packet qk (k = 1, 2, 3) plants eligible ranks 2(k-1) and 2(k-1)+1 (mod the number eligible) as silent by removing every run that carries either label, and keeps the other eligible purposes present. Retired purposes with runs are ranked the same way; packet qk revives one (its runs kept), so every other retired purpose is absent. Off-charter runs are kept in every packet. A run is kept only if all its labels are kept purposes or off-charter. Each purpose keeps at most 10 runs, lowest seeded rank first. Docs and commits are dropped: packets hold runs and their sidecars only, as AC-7e, so no unlabelled evidence (a doc about a planted-silent purpose) can score a correct reader wrong. The three packets plant different silent pairs, so a reader that maps the same way every time cannot pass. Packets are cut from the full packet (sub_packet), whose withheld-evidence records are copied, so a planted-silent purpose with withheld evidence becomes indeterminate, never present (conservative).
+
+Arms.
+- q1, q2, q3: the planted packets, each read by 3 readers.
+- Mapper-only: for each planted packet, a reading built mechanically from the labels (oracle_reading: one reading purpose per labelled purpose, text = its sidecars' hypotheses, citing up to 5 runs; owner 261110), mapped by the same mapper. Isolates mapper error from reader error. Reported, not gating; read by the rule below.
+- Decoy: every reader's reading of every planted packet is also mapped against the nanobody decoy charter (scripts/analysis/ac9/decoy_charter.toml, accepted by the owner 261110).
+- qb, budget control: the owner's window built under a byte budget (build_packet_within_budget, `budget_max_bytes` in label_confirmation.toml, default 60000), read by one reader and mapped. Control only: every silent item must carry budget_limited, so it scores no silent case. It does not enter the pooled metrics.
+
+Readers, as AC-7d and AC-7e: reader1 and reader3 on Cursor via praxia surface_dispatch, reader2 on Antigravity (two model families); the AC-7 extraction rule; one disclosed redo for a reading that fails extraction or validation; a failure before any reading is infrastructure; the first complete reading counts. Mapper: one fresh agent per reading (Claude, model id recorded at run time from praxia's model registry), seeing only the reading and the charter's purpose texts and ids, writing a mapping file; the same mapper prompt for the planted, oracle, decoy and budget arms.
+
+Scoring (bathos.bearings.ac9, review-hardened 261110):
+- Answer key per packet from the labels (answer_key): present, silent, revived, absent retired, off-charter sidecars; indeterminate where the packet withheld evidence; ambiguous paths (labels that changed between commits) give no firm gold.
+- Combining readers, T7(b): within a packet a purpose counts as reported silent only if NO reader maps it (intersection), so silent recall and false-silent are counted once per packet; off-charter, revived and gold agreement are counted per reading. The majority rule (2 of 3) is reported beside it, descriptive.
+- Pooling (owner 261110): hits and denominators are summed over packets and readings, then the rates are formed and the thresholds applied once (pooled_metrics). Expected pooled n with the plant as designed: about 6 silent, 9 to 12 present, 9 off-charter readings, 9 revived readings.
+- A target found only among a reading purpose's ambiguous labels is unscored; any other target outside its gold is a miss.
+
+Invalid, each a field below: controls fail; the start gate is not met; any leak or packet-hash failure; any packet missing a planted case (present, silent, revived, absent retired, off-charter) or over the owner's bounds (Antigravity's proposal, accepted 261110, arbitrary starting points: at most 1 live purpose or 15% of live purposes indeterminate; withheld labelled sidecars and withheld runs each at most 10% of their kind; at most 1 ambiguous path; any withheld run with an unresolvable sidecar); the pooled decoy mapped share over 0.2; any of the 4 degenerate mappers (all unmapped, all to the first live purpose, each to every purpose, first only) meeting pass on a real planted key; the budget control's silent items not all budget_limited; any pooled metric unscorable.
+
+Thresholds (owner 261109, the advisor's values, arbitrary starting points not derived from pilot data): pass as in the first paragraph; marginal when every metric is at least 0.6 and false-silent at most 0.4 (owner 261110), not pass; otherwise fail. With about 9 readings one reading moves a per-reading rate by about 0.11; one packet's silent call moves silent recall by about 0.17.
+
+How a fail will be read, fixed now:
+- The mapper-only arm also fails: the mapper cannot match work to charter text even from a correct reading; fix the mapper or the charter wording before blaming readers.
+- The mapper-only arm passes and the reader arm fails on silent recall: readers miss work (or, through the intersection rule, one reader maps a silent purpose); look at which reader and family.
+- False-silent fails: readers or mapper drop real work; compare per-reader silent sets.
+- Off-charter fails: the mapper forces off-charter work onto a purpose (over-mapping); compare with the decoy share.
+How a pass will be read: in this project, on this record, charter comparison meets the owner's bar, so Bearings may move to advisory. It does not show the same on another project, or on live (unplanted) records, or that the brief is useful to the owner (that is the owner axis, Design 6).
+
+Disclosures.
+- The author designed the planting and the scorer, and the scorer was hardened through four review rounds before this registration; no tev_design label, reading or score existed at registration.
+- The window, the labels and the charter are the owner's, set after registration; the planting is mechanical from them.
+- Labels written at work time by agents may echo their own slug in the sidecar text; such sidecars are withheld (1 of 132 tev_design sidecars already names a slug in prose, run f35d5826, a descriptive count), which can make purposes indeterminate and trip the bounds.
+- Three readers per packet show consistency, not a rate; two model families, one prompt; one mapper family.
+- Look-alike letters from other scripts are not caught by the leak filter (accidental leakage only, by design).
+
+Protocol. (1) Done 261110: design settled with the owner (labels by shadow capture; bounds; pooling with every case planted; oracle reading from labels); planting, scoring, bounds and controls committed with tests (tests/test_bearings_ac9_run.py, tests/test_bearings_ac9_planted.py); `--controls-only` passes; `--gate` run, not met. This sidecar is committed before any packet, reading or mapping exists. (2) Owner items above; `--gate` until met. (3) `--build`: packets, budget control and oracle readings; counts only appended here before any reader runs. (4) Readers, then mappers (planted, oracle, decoy, budget). (5) `bth run` the scorer. The result is reported either way."""
+stage_name = "validation"
+novel = true
+
+[outcomes.invalid]
+condition = "NOT controls_ok OR NOT start_gate_ok OR leak_or_hash_failures > 0 OR invalid_reasons_n > 0 OR decoy_mapped_share IS NULL OR decoy_mapped_share > 0.2 OR degenerate_failing < degenerate_total OR NOT budget_control_ok OR pooled_silent_recall IS NULL OR pooled_false_silent IS NULL OR pooled_off_charter_unmapped IS NULL OR pooled_revived_flagged IS NULL OR pooled_gold_agreement IS NULL"
+decision = "The run is invalid: report it, cite no number from it, fix the cause, and pre-register a new run."
+reasoning = "T7's invalid conditions plus the duties the four review rounds placed on this sidecar: planted cases present, withheld evidence bounded, no unscorable metric."
+
+[outcomes.pass]
+condition = "pooled_silent_recall >= 0.8 AND pooled_false_silent <= 0.2 AND pooled_off_charter_unmapped >= 0.8 AND pooled_revived_flagged >= 0.6666 AND pooled_gold_agreement >= 0.8"
+decision = "Charter comparison meets the owner's bar on this record: the owner may move Bearings from shadow to advisory (the brief is shown, nothing enforced). Report per-reader results beside the pooled ones."
+reasoning = "Owner thresholds, 261109. 0.6666 stands for 2/3 to absorb float rounding."
+
+[outcomes.marginal]
+condition = "pooled_silent_recall >= 0.6 AND pooled_false_silent <= 0.4 AND pooled_off_charter_unmapped >= 0.6 AND pooled_revived_flagged >= 0.6 AND pooled_gold_agreement >= 0.6"
+decision = "Stay in shadow. Read the fail rules to find the weak metric, change one thing, and pre-register a new run."
+reasoning = "Owner 261109; false-silent read as at most 0.4, owner 261110."
+
+[outcomes.fail]
+condition = "NOT (pooled_silent_recall >= 0.6 AND pooled_false_silent <= 0.4 AND pooled_off_charter_unmapped >= 0.6 AND pooled_revived_flagged >= 0.6 AND pooled_gold_agreement >= 0.6)"
+decision = "Stay in shadow. Read the fail rules above, starting with the mapper-only arm."
+reasoning = "Below marginal on at least one metric."
+is_residual = true
+
+[result_schema]
+controls_ok = "bool"
+start_gate_ok = "bool"
+leak_or_hash_failures = "int"
+invalid_reasons_n = "int"
+decoy_mapped_share = "float"
+decoy_n_reading_purposes = "int"
+degenerate_failing = "int"
+degenerate_total = "int"
+budget_control_ok = "bool"
+pooled_silent_recall = "float"
+pooled_n_silent = "int"
+pooled_false_silent = "float"
+pooled_n_present = "int"
+pooled_off_charter_unmapped = "float"
+pooled_n_off_charter = "int"
+pooled_revived_flagged = "float"
+pooled_n_revived = "int"
+pooled_gold_agreement = "float"
+pooled_n_mapped = "int"
+pooled_n_unscored_pairs = "int"
+pooled_silent_recall_majority = "float"
+pooled_false_silent_majority = "float"
+oracle_silent_recall = "float"
+oracle_n_silent = "int"
+oracle_false_silent = "float"
+oracle_n_present = "int"
+oracle_off_charter_unmapped = "float"
+oracle_n_off_charter = "int"
+oracle_revived_flagged = "float"
+oracle_n_revived = "int"
+oracle_gold_agreement = "float"
+oracle_n_mapped = "int"
+oracle_n_unscored_pairs = "int"
+meets_pass = "bool"
+meets_marginal = "bool"
