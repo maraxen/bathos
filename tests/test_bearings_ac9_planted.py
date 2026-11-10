@@ -148,7 +148,7 @@ ORACLE = {
 def _score(w, out: Path, rid: str, mapping: dict, name: str):
     key = answer_key(w["repo"], out, w["charter"])
     reading = _existing_reading(w["cat"], "pkt", rid)
-    gold = reading_gold(out, reading, key["labels"])
+    gold = reading_gold(out, reading, key["labels"], key["ambiguous_paths"])
     return key, gold, ac9_metrics(key, gold, _compare(w, rid, mapping, name))
 
 
@@ -654,6 +654,96 @@ def test_a_run_whose_json_tags_escape_an_id_is_withheld(planted):
     )
     out, _ = _packet(planted)
     assert excluded(out)["run:000000abaaaaaaaa"] == "names_charter_id"
+
+
+# ── review round 3 (261110) ─────────────────────────────────────────────────────────────────────────────────────
+
+
+def _run_row(rid: str, sha: str, sidecar: str, command: str, **extra: str) -> dict:
+    return {
+        "id": rid,
+        "project_slug": "pkt",
+        "timestamp": DATE,
+        "git_hash": sha,
+        "sidecar_path": sidecar,
+        "command": command,
+        "status": "completed",
+        **extra,
+    }
+
+
+def test_a_sidecar_shared_by_a_kept_and_a_withheld_run_counts_as_shown(planted):
+    sha = _add_run(
+        planted, "shared", _sidecar('[charter]\npurpose = "gamma-aim"\n', "s"), "000000b1aaaaaaaa"
+    )
+    insert_runs(
+        planted,
+        [
+            _run_row(
+                "000000b2aaaaaaaa", sha, "scripts/shared.bth.toml", "python shared --aim gamma-aim"
+            )
+        ],
+    )
+    out, _ = _packet(planted)
+    assert excluded(out)["run:000000b2aaaaaaaa"] == "names_charter_id"
+    key = answer_key(planted["repo"], out, planted["charter"])
+    assert "gamma-aim" in key["present"] and key["n_withheld_sidecars"] == 0
+
+
+def test_a_withheld_run_with_an_unresolvable_sidecar_is_counted(planted):
+    insert_runs(
+        planted,
+        [
+            _run_row(
+                "000000b3aaaaaaaa",
+                "0" * 40,
+                "scripts/never_committed.bth.toml",
+                "python x --aim gamma-aim",
+            )
+        ],
+    )
+    out, _ = _packet(planted)
+    assert answer_key(planted["repo"], out, planted["charter"])["n_withheld_runs_unresolved"] == 1
+
+
+def test_deeply_nested_json_tags_do_not_crash_the_build(planted):
+    sha = commit_files(
+        planted["repo"], {"scripts/deep.bth.toml": '[experiment]\nhypothesis = "d"\n'}
+    )
+    deep = "[" * 5000 + "]" * 5000
+    insert_runs(
+        planted,
+        [_run_row("000000b4aaaaaaaa", sha, "scripts/deep.bth.toml", "python deep", tags=deep)],
+    )
+    out, _ = _packet(planted)
+    assert (out / "manifest.json").is_file()
+
+
+def test_a_path_mixing_off_charter_and_a_slug_gives_no_gold(planted):
+    # Cursor round 3: union gold made off-charter unscorable and let the other slug count as agreement.
+    _add_run(
+        planted,
+        "tidy",
+        _sidecar('[charter]\npurpose = "gamma-aim"\n', "tidy again"),
+        "000000b5aaaaaaaa",
+    )
+    out, sha = _packet(planted)
+    key = answer_key(planted["repo"], out, planted["charter"])
+    assert "scripts/tidy.bth.toml" in key["ambiguous_paths"]
+    assert "scripts/tidy.bth.toml" not in key["labels"]
+    rid = _record(planted, out, sha)
+    gold = reading_gold(
+        out, _existing_reading(planted["cat"], "pkt", rid), key["labels"], key["ambiguous_paths"]
+    )
+    assert "r-tidy" not in gold
+    m = ac9_metrics(key, gold, _compare(planted, rid, {**ORACLE, "r-tidy": "gamma-aim"}, "mixed"))
+    assert m["n_off_charter"] == 0 and m["n_mapped"] == 3  # r-tidy's pair is not scored
+
+
+def test_the_key_reports_shown_denominators_for_the_withheld_share(planted):
+    out, _ = _packet(planted)
+    key = answer_key(planted["repo"], out, planted["charter"])
+    assert key["n_shown_sidecars"] == 5 and key["n_shown_runs"] == 5
 
 
 def test_the_decoy_charter_shares_no_purpose_with_the_tev_design_draft():

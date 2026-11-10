@@ -14,6 +14,7 @@ Labels are readable slugs, not opaque ids, so a person reading a sidecar can tel
 
 from __future__ import annotations
 
+import html
 import re
 import tomllib
 import unicodedata
@@ -28,19 +29,47 @@ OFF_CHARTER = "off-charter"
 # would match ordinary prose and withhold most of a record (review round 2, 261110).
 MIN_ID_CHARS = 4
 
-_DASHES = dict.fromkeys(map(ord, "‐‑‒–—―−﹘﹣－"), "-")
-_ENCODED_HYPHEN_RE = re.compile(r"%2d|\\u002d|&#45;|&#x2d;", re.IGNORECASE)
-_BROKEN_HYPHEN_RE = re.compile(r"-[ \t]*\r?\n[ \t>#*]*")
+# Hyphen-like characters outside Unicode's dash category (Pd): soft hyphen (Cf) and hyphen bullet (Po).
+_HYPHEN_LIKE = frozenset("­⁃")
+# Escaped forms a reader would decode: URL-encoded, and backslash-u escapes of any dash, soft hyphen or underscore.
+_ENCODED_SEP_RE = re.compile(
+    r"%2d|%5f|\\u00ad|\\u002d|\\u005f|\\u2043|\\u201[0-5]|\\u2212|\\ufe58|\\ufe63|\\uff0d",
+    re.IGNORECASE,
+)
+# A hyphen broken across a line, between two letters or digits (a lone dash ending a line is not joined).
+_BROKEN_HYPHEN_RE = re.compile(r"(?<=[A-Za-z0-9])-[ \t]*\r?\n[ \t>#*]*(?=[A-Za-z0-9])")
+
+
+def _encoded_sep(m: re.Match[str]) -> str:
+    return "_" if m.group(0).lower() in ("%5f", "\\u005f") else "-"
 
 
 def fold_for_ids(text: str) -> str:
-    """Normalise text before id matching: unicode dashes to ``-``, invisible format characters (zero-width, soft
-    hyphen) removed, encoded hyphens decoded, and a hyphen broken across lines joined (review round 2, 261110)."""
-    t = unicodedata.normalize("NFKC", text)
-    t = "".join(ch for ch in t if unicodedata.category(ch) != "Cf")
-    t = t.translate(_DASHES)
-    t = _ENCODED_HYPHEN_RE.sub("-", t)
-    return _BROKEN_HYPHEN_RE.sub("-", t)
+    """Normalise text before id matching, so the forms a reader would see as a charter id are matched as one.
+
+    HTML entities and escaped separators are decoded; NFKC is applied; every dash character (Unicode Pd), the soft
+    hyphen and the hyphen bullet become ``-``; other invisible format characters (zero-width) are removed; and a
+    hyphen broken across a line between two letters or digits is joined (review rounds 2 and 3, 261110).
+
+    Out of scope: deliberate evasion such as homoglyphs from other scripts or combining marks. The threat is a slug
+    leaking by accident, from an agent or a person writing records.
+    """
+    t = text
+    if "&" in t:
+        t = html.unescape(t)
+    if "%" in t or "\\" in t:
+        t = _ENCODED_SEP_RE.sub(_encoded_sep, t)
+    if not t.isascii():
+        t = unicodedata.normalize("NFKC", t)
+        out = []
+        for ch in t:
+            cat = unicodedata.category(ch)
+            if ch in _HYPHEN_LIKE or cat == "Pd":
+                out.append("-")
+            elif cat != "Cf":
+                out.append(ch)
+        t = "".join(out)
+    return _BROKEN_HYPHEN_RE.sub("-", t) if "\n" in t else t
 
 
 def id_token_pattern(pid: str) -> re.Pattern[str]:

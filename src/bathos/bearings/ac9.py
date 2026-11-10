@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import subprocess
 import tomllib
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -139,7 +140,9 @@ def answer_key(
     # Every labelled blob per path, shown or withheld: (slugs, shown?).
     per_path: dict[str, list[tuple[set[str], bool]]] = {}
     shown: set[str] = set()
-    for path, _, slugs in _shown_blob_labels(repo_p, pkt):
+    shown_blobs: set[tuple[str, str]] = set()
+    for path, blob, slugs in _shown_blob_labels(repo_p, pkt):
+        shown_blobs.add((path, blob))
         if slugs:
             per_path.setdefault(path, []).append((set(slugs), True))
             shown |= set(slugs)
@@ -157,6 +160,8 @@ def answer_key(
     candidates |= {str(p) for p in manifest.get("withheld_run_sidecars", [])}
     for path in sorted(candidates):
         rel, _, blob = path[len("sidecar:") :].rpartition("@")
+        if (rel, blob) in shown_blobs:
+            continue  # a sidecar a kept run shows is shown evidence, even if a withheld run shared it (round 3)
         text = _blob_text(
             repo_p, blob
         )  # undecodable bytes are replaced; a label on the readable lines survives
@@ -171,6 +176,7 @@ def answer_key(
     firm: set[str] = set()
     disagree: set[str] = set()
     labels: dict[str, set[str]] = {}
+    ambiguous: set[str] = set()
     for path, entries in per_path.items():
         # Labelled blobs only: a label added to a later version of a sidecar is not a disagreement. Shown and
         # withheld blobs of one path are compared together; firm support needs a shown blob.
@@ -180,7 +186,12 @@ def answer_key(
         if any(is_shown for _, is_shown in entries):
             firm |= common
         disagree |= union - common
-        labels.setdefault(path, set()).update(union)
+        if union == common:
+            labels[path] = union
+        else:
+            # Its blobs disagree (or mix off-charter with a slug): the path gives no gold, and a reading purpose
+            # citing it is not scored on gold (review round 3, 261110).
+            ambiguous.add(path)
 
     unknown = sorted((shown | withheld) - set(charter_purposes) - {OFF_CHARTER})
     if unknown:
@@ -208,19 +219,38 @@ def answer_key(
         # Runs withheld by the blindness filters (quotes_charter, names_charter_id); their sidecar labels are read
         # (withheld_run_sidecars). The AC-9 sidecar bounds this share. All run exclusions, by reason, beside it.
         "n_withheld_runs": n_withheld_runs,
+        # Withheld runs whose sidecar could not be resolved: their purpose is unknown, so it may sit in `silent`.
+        # The AC-9 sidecar must count these against the withheld-share bound.
+        "n_withheld_runs_unresolved": len(manifest.get("withheld_runs_unresolved", [])),
         "run_exclusions_by_reason": dict(sorted(runs_by_reason.items())),
         "labels": {path: sorted(s) for path, s in sorted(labels.items())},
+        "ambiguous_paths": sorted(ambiguous),
+        # Denominators for the withheld-share bounds (round 3): what the reader was shown.
+        "n_shown_sidecars": len(shown_blobs),
+        "n_shown_runs": _count_lines(pkt / "reader" / "runs.jsonl"),
     }
 
 
+def _count_lines(path: Path) -> int:
+    try:
+        return sum(1 for line in path.read_text(encoding="utf-8").split("\n") if line.strip())
+    except OSError:
+        return 0
+
+
 def reading_gold(
-    packet_dir: Path | str, reading: dict[str, Any], labels: dict[str, list[str]]
+    packet_dir: Path | str,
+    reading: dict[str, Any],
+    labels: dict[str, list[str]],
+    ambiguous: Iterable[str] = (),
 ) -> dict[str, list[str]]:
     """Reading purpose id -> the labels of the runs and sidecars it cites (empty when it cites none labelled).
 
     A cited run whose sidecar was withheld still has that sidecar's label as gold: what the work serves does not
-    depend on what the reader was shown.
+    depend on what the reader was shown. A reading purpose citing an ``ambiguous`` path (``answer_key``'s
+    ``ambiguous_paths``) is left out of the result, so it is scored neither right nor wrong on gold.
     """
+    ambiguous_set = set(ambiguous)
     view = _PacketView(Path(packet_dir))
     run_sidecar: dict[str, str | None] = {}
     for line in (view.reader / "runs.jsonl").read_text(encoding="utf-8").split("\n"):
@@ -230,6 +260,7 @@ def reading_gold(
     gold: dict[str, list[str]] = {}
     for purpose in reading["purposes"]:
         found: set[str] = set()
+        cites_ambiguous = False
         for cit in purpose["citations"]:
             raw = cit["citation"] if isinstance(cit, dict) and "citation" in cit else cit
             res, key = resolve_citation(raw, view)
@@ -244,8 +275,10 @@ def reading_gold(
                 else None
             )
             if path:
+                cites_ambiguous |= path in ambiguous_set
                 found.update(labels.get(path, []))
-        gold[purpose["id"]] = sorted(found)
+        if not cites_ambiguous:
+            gold[purpose["id"]] = sorted(found)
     return gold
 
 
@@ -292,7 +325,8 @@ def ac9_metrics(
     targets = _targets_by_reading_purpose(items)
     off_rps = [rp for rp, g in gold.items() if g == [OFF_CHARTER]]
     flagged = {r for rp, ts in targets.items() for r in ts if r in gold.get(rp, [])}
-    pairs = [(rp, t) for rp, ts in sorted(targets.items()) for t in sorted(ts)]
+    # Only reading purposes with gold are scored on it; one citing an ambiguous path has none (round 3).
+    pairs = [(rp, t) for rp, ts in sorted(targets.items()) if rp in gold for t in sorted(ts)]
 
     return {
         "silent_recall": _rate(sum(p in silent_reported for p in true_silent), len(true_silent)),

@@ -11,6 +11,7 @@ import pytest
 
 from bathos.bearings.purpose_label import (
     PurposeLabelError,
+    fold_for_ids,
     id_token_pattern,
     read_purpose_label,
     strip_purpose_label,
@@ -269,3 +270,38 @@ def test_a_sidecar_with_a_malformed_label_fails_validation(tmp_path):
 
 def test_a_sidecar_without_a_label_is_unaffected(tmp_path):
     assert _validate(tmp_path, "").ok
+
+
+# ── fold_for_ids (review round 3, 261110) ───────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "lagoon­simulation",  # soft hyphen
+        "lagoon⁃simulation",  # hyphen bullet
+        "lagoon⸺simulation",  # two-em dash (Pd)
+        "lagoon&hyphen;simulation",
+        "lagoon&#045;simulation",
+        "lagoon&#x002d;simulation",
+        "lagoon&ndash;simulation",
+        "lagoon\\u2011simulation",  # a literal backslash-u escape a reader would decode
+        "lagoon%5Fsimulation",
+        "lagoon-\n  simulation",
+    ],
+)
+def test_fold_for_ids_turns_every_hyphen_form_into_a_match(text):
+    assert id_token_pattern("lagoon-simulation").search(fold_for_ids(text))
+
+
+@pytest.mark.parametrize(
+    "text", ["We will lead -\nscaffolds next.", "lagoon simulation", "lagoonsimulation"]
+)
+def test_fold_for_ids_does_not_invent_a_match(text):
+    assert not id_token_pattern("lagoon-simulation").search(fold_for_ids(text))
+    assert not id_token_pattern("lead-scaffolds").search(fold_for_ids(text))
+
+
+def test_fold_for_ids_leaves_plain_ascii_unchanged():
+    text = "ordinary text, with-hyphens and under_scores\n"
+    assert fold_for_ids(text) == text

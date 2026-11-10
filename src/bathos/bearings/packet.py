@@ -206,25 +206,36 @@ def _names_id(text: str, pats: list[tuple[str, re.Pattern[str]]]) -> bool:
     return bool(ids_named(text, pats))
 
 
-def _decoded_forms(value: str) -> list[str]:
+# How many layers of JSON-inside-a-string are decoded; beyond this the raw string is still matched.
+MAX_JSON_STRING_DEPTH = 8
+
+
+def _decoded_forms(value: str, depth: int = 0) -> list[str]:
     """A string as a reader could see it: raw, without shell escapes, and, when it holds JSON (``tags``), every
     string inside it decoded, so a ``\\u2011`` escape is seen as the character it encodes."""
     forms = [value, value.replace("\\", "")]
-    if value.lstrip()[:1] in ("[", "{"):
-        with contextlib.suppress(ValueError):
-            forms.extend(_json_strings(json.loads(value)))
+    if depth < MAX_JSON_STRING_DEPTH and value.lstrip()[:1] in ("[", "{"):
+        # RecursionError: json.loads on pathologically nested input (review round 3, 261110).
+        with contextlib.suppress(ValueError, RecursionError):
+            forms.extend(_json_strings(json.loads(value), depth + 1))
     return forms
 
 
-def _json_strings(obj: Any) -> list[str]:
+def _json_strings(obj: Any, depth: int = 0) -> list[str]:
     """Every key and string value in parsed JSON, recursing into strings that themselves hold JSON."""
-    if isinstance(obj, str):
-        return _decoded_forms(obj)
-    if isinstance(obj, dict):
-        return [s for k, v in obj.items() for s in (*_decoded_forms(str(k)), *_json_strings(v))]
-    if isinstance(obj, list):
-        return [s for v in obj for s in _json_strings(v)]
-    return []
+    stack: list[Any] = [obj]
+    out: list[str] = []
+    while stack:  # iterative over containers, so deep nesting cannot exhaust the stack
+        cur = stack.pop()
+        if isinstance(cur, str):
+            out.extend(_decoded_forms(cur, depth))
+        elif isinstance(cur, dict):
+            for k, v in cur.items():
+                out.extend(_decoded_forms(str(k), depth))
+                stack.append(v)
+        elif isinstance(cur, list):
+            stack.extend(cur)
+    return out
 
 
 def _run_names_id(value: str, pats: list[tuple[str, re.Pattern[str]]]) -> bool:
@@ -243,14 +254,18 @@ def _reader_names_id(reader: Path, pats: list[tuple[str, re.Pattern[str]]]) -> l
             continue
         rel = p.relative_to(reader).as_posix()
         text = p.read_bytes().decode("utf-8", "replace")
-        forms = [rel, text]
-        if p.suffix in (".json", ".jsonl"):
-            for line in text.split("\n") if p.suffix == ".jsonl" else [text]:
-                if line.strip():
-                    with contextlib.suppress(ValueError):
-                        forms.extend(_json_strings(json.loads(line)))
-        if any(_names_id(f, pats) for f in forms):
+        if _names_id(rel, pats) or _names_id(text, pats):
             hits.append(rel)
+            continue
+        if p.suffix in (".json", ".jsonl"):
+            seen: set[str] = set()
+            for line in text.split("\n") if p.suffix == ".jsonl" else [text]:
+                if not line.strip():
+                    continue
+                with contextlib.suppress(ValueError, RecursionError):
+                    seen.update(_json_strings(json.loads(line)))
+            if any(_names_id(f, pats) for f in seen):
+                hits.append(rel)
     return hits
 
 
@@ -428,6 +443,7 @@ def build_packet(
     labels_stripped: list[str] = []
     withheld_runs: set[str] = set()
     withheld_run_sidecars: set[str] = set()
+    withheld_runs_unresolved: set[str] = set()
     if catalog_readable(cat_dir):
         con = connect_read(cat_dir)
         try:
@@ -508,6 +524,9 @@ def build_packet(
                 break
         if not found:
             sidecar_unresolved.append({"run": str(rec["id"]), "path": str(recorded)})
+            if str(rec["id"]) in withheld_runs:
+                # Its label cannot be read, so the scorer cannot say which purpose lost evidence (review round 3).
+                withheld_runs_unresolved.add(str(rec["id"]))
             continue
         rev, rel, proc = found
         blob = _git(repo, "rev-parse", f"{rev}:{rel}").stdout.decode().strip()
@@ -635,6 +654,8 @@ def build_packet(
         "ids_not_matched": ids_not_matched,
         # Sidecars of runs withheld from the reader, so the scorer can read their labels (owner-side only).
         "withheld_run_sidecars": sorted(withheld_run_sidecars),
+        # Withheld runs whose sidecar could not be resolved: evidence lost to an unknown purpose (owner-side only).
+        "withheld_runs_unresolved": sorted(withheld_runs_unresolved),
         "sidecar_unresolved": sorted(sidecar_unresolved, key=lambda d: (d["run"], d["path"])),
         # Sidecars whose [charter] purpose label was removed before they entered reader/ (owner-side only).
         "labels_stripped": sorted(labels_stripped),
