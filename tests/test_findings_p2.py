@@ -19,9 +19,11 @@ import pytest
 
 from bathos.campaign_edges import CycleRejectedError
 from bathos.catalog import init_catalog, write_run
+from bathos.compact import compact
 from bathos.errors import (
     EstimandBoundaryMixedError,
     FindingReopenReasonRequiredError,
+    FindingSettledEvidenceInsufficientError,
     SpikeTierCannotSettleError,
     SupersededTargetNotFoundError,
 )
@@ -30,8 +32,11 @@ from bathos.findings import (
     get_finding,
     list_findings,
     parse_finding_file,
+    update_finding,
 )
 from bathos.index import connect_read
+from bathos.mcp import finding_update_tool, mcp_finding_update_tool
+from bathos.mcp_auth import mark_stdio_transport
 from bathos.new_experiment import scaffold_experiment
 from bathos.provenance import format_prov_json
 from bathos.query import list_runs
@@ -1051,4 +1056,354 @@ def test_create_finding_supersedes_bogus_raises_error(tmp_path: Path):
         )
     assert exc_tentative.value.entity_type == "finding"
     assert exc_tentative.value.entity_id == "another-bogus-id"
+
+
+# ---------------------------------------------------------------------------
+# M1 Track 1: update_finding Lifecycle & Settling Gate Enforcement
+# ---------------------------------------------------------------------------
+def test_update_finding_lifecycle_and_settling_gate(tmp_path: Path):
+    repo = _make_git_repo(tmp_path / "repo")
+    cat_dir = tmp_path / "catalog"
+    init_catalog(cat_dir)
+
+    # Setup instrument registry with estimand change for OD-6 test
+    inst_dir = repo / ".bth" / "instruments"
+    inst_dir.mkdir(parents=True, exist_ok=True)
+    (inst_dir / "estimator.toml").write_text("""schema_version = "1.0.0"
+package = "estimator"
+ecosystem = "PyPI"
+
+[[entries]]
+id = "EST-001"
+revision = 1
+kind = "estimand_change"
+ranges = [{ type = "ECOSYSTEM", events = [{ introduced = "2.0.0" }] }]
+""")
+
+    # Supporting runs
+    r_spike = _create_sample_run(cat_dir, "run_spike", stage_name="T0_spike", epistemic_class="spike")
+    r_exploratory = _create_sample_run(cat_dir, "run_exploratory", stage_name="analysis", epistemic_class="exploratory")
+
+    # Confirmatory runs across estimand epochs
+    r_pre = _create_sample_run(
+        cat_dir,
+        "run_pre",
+        stage_name="validation",
+        epistemic_class="confirmatory",
+        metadata={"estimator_version": "1.0.0"},
+    )
+    r_post = _create_sample_run(
+        cat_dir,
+        "run_post",
+        stage_name="validation",
+        epistemic_class="confirmatory",
+        metadata={"estimator_version": "2.1.0"},
+    )
+    compact(cat_dir)
+
+    # 1. Create a tentative predecessor finding
+    pred_finding = create_finding(
+        question_slug="pred-q",
+        question="Initial question?",
+        answer="Initial tentative answer",
+        status="tentative",
+        catalog_dir=cat_dir,
+        workspace_root=repo,
+    )
+
+    # 2. Create another tentative finding that supersedes pred_finding
+    finding = create_finding(
+        question_slug="target-q",
+        question="Target question?",
+        answer="Tentative answer",
+        status="tentative",
+        supersedes=pred_finding.id,
+        catalog_dir=cat_dir,
+        workspace_root=repo,
+    )
+    assert finding.status == "tentative"
+    assert pred_finding.active_status == "tentative"
+
+    # 3. Simple answer update
+    up1 = update_finding(
+        finding.id,
+        answer="Refined tentative answer",
+        catalog_dir=cat_dir,
+        workspace_root=repo,
+    )
+    assert up1.answer == "Refined tentative answer"
+    assert up1.status == "tentative"
+
+    # 4. Settling gate: no runs -> error
+    with pytest.raises(FindingSettledEvidenceInsufficientError):
+        update_finding(
+            finding.id,
+            status="settled",
+            supporting_runs=[],
+            catalog_dir=cat_dir,
+            workspace_root=repo,
+        )
+
+    # 5. Settling gate: spike-only runs -> error
+    with pytest.raises(SpikeTierCannotSettleError):
+        update_finding(
+            finding.id,
+            status="settled",
+            supporting_runs=[r_spike.id],
+            catalog_dir=cat_dir,
+            workspace_root=repo,
+        )
+
+    # 6. Settling gate: exploratory-only runs -> error
+    with pytest.raises(FindingSettledEvidenceInsufficientError):
+        update_finding(
+            finding.id,
+            status="settled",
+            supporting_runs=[r_exploratory.id],
+            catalog_dir=cat_dir,
+            workspace_root=repo,
+        )
+
+    # 7. Settling gate: mixed estimand epochs without rationale -> error (OD-6)
+    with pytest.raises(EstimandBoundaryMixedError):
+        update_finding(
+            finding.id,
+            status="settled",
+            supporting_runs=[r_pre.id, r_post.id],
+            catalog_dir=cat_dir,
+            workspace_root=repo,
+        )
+
+    # 8. Settling gate: mixed estimand epochs with allow_mixed_estimand -> SUCCESS
+    up_settled = update_finding(
+        finding.id,
+        status="settled",
+        supporting_runs=[r_pre.id, r_post.id],
+        allow_mixed_estimand="estimator metric definition is calibrated across versions",
+        catalog_dir=cat_dir,
+        workspace_root=repo,
+    )
+    assert up_settled.status == "settled"
+    assert up_settled.evidence_tier == "confirmatory"
+
+    # Verify supersession edge on predecessor was activated
+    refreshed_pred = get_finding(pred_finding.id, catalog_dir=cat_dir, workspace_root=repo)
+    assert refreshed_pred.active_status == "superseded"
+
+
+# ---------------------------------------------------------------------------
+# M1 Track 1: finding_update FastMCP Tool Parity
+# ---------------------------------------------------------------------------
+@pytest.mark.anyio
+async def test_mcp_finding_update_tool_parity(tmp_path: Path, monkeypatch):
+    mark_stdio_transport()
+    repo = _make_git_repo(tmp_path / "repo")
+    monkeypatch.chdir(repo)
+    cat_dir = tmp_path / "catalog"
+    init_catalog(cat_dir)
+
+    r = _create_sample_run(cat_dir, "run_conf_mcp", stage_name="validation", epistemic_class="confirmatory")
+
+    f = create_finding(
+        question_slug="mcp-test-q",
+        question="MCP question?",
+        answer="Initial answer",
+        status="tentative",
+        catalog_dir=cat_dir,
+        workspace_root=repo,
+    )
+
+    # Test CLI sync wrapper
+    res_cli = finding_update_tool(
+        slug_or_id=f.id,
+        answer="Updated answer via CLI",
+        catalog_dir=str(cat_dir),
+    )
+    assert res_cli["ok"] is True
+    assert res_cli["finding"]["answer"] == "Updated answer via CLI"
+
+    # Test MCP async wrapper
+    res_mcp = await mcp_finding_update_tool(
+        slug_or_id=f.id,
+        status="settled",
+        supporting_runs=[r.id],
+        catalog_dir=str(cat_dir),
+    )
+    assert res_mcp["ok"] is True
+    assert res_mcp["finding"]["status"] == "settled"
+    assert res_mcp["finding"]["evidence_tier"] == "confirmatory"
+
+
+# ---------------------------------------------------------------------------
+# CH2-F1: Supersession by Question Slug, Lists & Finding.superseded_by
+# ---------------------------------------------------------------------------
+def test_finding_supersession_by_question_slug_transitions_status(tmp_path: Path):
+    repo = _make_git_repo(tmp_path / "repo")
+    cat_dir = tmp_path / "catalog"
+    init_catalog(cat_dir)
+
+    r1 = _create_sample_run(cat_dir, "run_conf_01", stage_name="validation", epistemic_class="confirmatory")
+    r2 = _create_sample_run(cat_dir, "run_conf_02", stage_name="validation", epistemic_class="confirmatory")
+
+    f_old = create_finding(
+        question_slug="old-slug-q",
+        question="Old question?",
+        answer="Old answer",
+        supporting_runs=[r1.id],
+        status="settled",
+        catalog_dir=cat_dir,
+        workspace_root=repo,
+    )
+
+    # Supersede via question slug (not UUID)
+    f_new = create_finding(
+        question_slug="new-slug-q",
+        question="New question?",
+        answer="New answer",
+        supporting_runs=[r2.id],
+        status="settled",
+        supersedes="old-slug-q",
+        catalog_dir=cat_dir,
+        workspace_root=repo,
+    )
+
+    # Disk file is unmutated (Invariant I1)
+    disk_old = parse_finding_file(f_old.file_path)
+    assert disk_old.status == "settled"
+
+    # Read back f_old: dynamically resolves to superseded
+    reloaded_old = get_finding(f_old.id, catalog_dir=cat_dir, workspace_root=repo)
+    assert reloaded_old.active_status == "superseded"
+    assert reloaded_old.superseded_by == f_new.id
+    assert reloaded_old.to_dict()["superseded_by"] == f_new.id
+    assert reloaded_old.to_dict()["status"] == "superseded"
+
+    # Read back by question slug
+    slug_old = get_finding("old-slug-q", catalog_dir=cat_dir, workspace_root=repo)
+    assert slug_old.active_status == "superseded"
+    assert slug_old.superseded_by == f_new.id
+
+    # Read back f_new
+    reloaded_new = get_finding(f_new.id, catalog_dir=cat_dir, workspace_root=repo)
+    assert reloaded_new.active_status == "settled"
+    assert reloaded_new.supersedes == f_old.id
+    assert reloaded_new.superseded_by is None
+    assert reloaded_new.to_dict()["superseded_by"] is None
+
+
+def test_finding_supersession_by_list_of_slugs(tmp_path: Path):
+    repo = _make_git_repo(tmp_path / "repo")
+    cat_dir = tmp_path / "catalog"
+    init_catalog(cat_dir)
+
+    r1 = _create_sample_run(cat_dir, "run_conf_01", stage_name="validation", epistemic_class="confirmatory")
+    r2 = _create_sample_run(cat_dir, "run_conf_02", stage_name="validation", epistemic_class="confirmatory")
+    r3 = _create_sample_run(cat_dir, "run_conf_03", stage_name="validation", epistemic_class="confirmatory")
+
+    f_pre1 = create_finding(
+        question_slug="pre1-slug",
+        question="Pre1?",
+        answer="Ans1",
+        supporting_runs=[r1.id],
+        status="settled",
+        catalog_dir=cat_dir,
+        workspace_root=repo,
+    )
+    f_pre2 = create_finding(
+        question_slug="pre2-slug",
+        question="Pre2?",
+        answer="Ans2",
+        supporting_runs=[r2.id],
+        status="settled",
+        catalog_dir=cat_dir,
+        workspace_root=repo,
+    )
+
+    # Supersede via list of slugs
+    f_succ = create_finding(
+        question_slug="succ-slug",
+        question="Successor?",
+        answer="Unified Ans",
+        supporting_runs=[r3.id],
+        status="settled",
+        supersedes=["pre1-slug", "pre2-slug"],
+        catalog_dir=cat_dir,
+        workspace_root=repo,
+    )
+
+    reloaded_pre1 = get_finding(f_pre1.id, catalog_dir=cat_dir, workspace_root=repo)
+    assert reloaded_pre1.active_status == "superseded"
+    assert reloaded_pre1.superseded_by == f_succ.id
+
+    reloaded_pre2 = get_finding(f_pre2.id, catalog_dir=cat_dir, workspace_root=repo)
+    assert reloaded_pre2.active_status == "superseded"
+    assert reloaded_pre2.superseded_by == f_succ.id
+
+
+def test_finding_update_supersedes_slug_activation(tmp_path: Path):
+    repo = _make_git_repo(tmp_path / "repo")
+    cat_dir = tmp_path / "catalog"
+    init_catalog(cat_dir)
+
+    r1 = _create_sample_run(cat_dir, "run_conf_01", stage_name="validation", epistemic_class="confirmatory")
+    r2 = _create_sample_run(cat_dir, "run_conf_02", stage_name="validation", epistemic_class="confirmatory")
+
+    f_old = create_finding(
+        question_slug="legacy-hypothesis",
+        question="Old question?",
+        answer="Old answer",
+        supporting_runs=[r1.id],
+        status="settled",
+        catalog_dir=cat_dir,
+        workspace_root=repo,
+    )
+
+    # Create tentative successor with supersedes as slug
+    f_new = create_finding(
+        question_slug="new-hypothesis",
+        question="New question?",
+        answer="New tentative answer",
+        supporting_runs=[r2.id],
+        status="tentative",
+        supersedes="legacy-hypothesis",
+        catalog_dir=cat_dir,
+        workspace_root=repo,
+    )
+
+    # Tentative does not supersede yet
+    assert get_finding(f_old.id, catalog_dir=cat_dir, workspace_root=repo).active_status == "settled"
+
+    # Update to settled
+    update_finding(
+        f_new.id,
+        status="settled",
+        catalog_dir=cat_dir,
+        workspace_root=repo,
+    )
+
+    # Now f_old is superseded
+    reloaded_old = get_finding(f_old.id, catalog_dir=cat_dir, workspace_root=repo)
+    assert reloaded_old.active_status == "superseded"
+    assert reloaded_old.superseded_by == f_new.id
+
+
+def test_superseded_target_not_found_with_list(tmp_path: Path):
+    repo = _make_git_repo(tmp_path / "repo")
+    cat_dir = tmp_path / "catalog"
+    init_catalog(cat_dir)
+
+    r1 = _create_sample_run(cat_dir, "run_conf_01", stage_name="validation", epistemic_class="confirmatory")
+
+    with pytest.raises(SupersededTargetNotFoundError):
+        create_finding(
+            question_slug="orphan-succ",
+            question="Orphan?",
+            answer="Ans",
+            supporting_runs=[r1.id],
+            status="settled",
+            supersedes=["nonexistent-slug"],
+            catalog_dir=cat_dir,
+            workspace_root=repo,
+        )
+
 

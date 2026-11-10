@@ -172,6 +172,24 @@ def add_supersession_edge(
     cd = Path(catalog_dir or default_catalog_dir())
     ws_root = Path(workspace_root) if workspace_root else None
 
+    if entity_type == "finding" and isinstance(entity_id, str):
+        try:
+            from bathos.findings import get_finding
+
+            f_target = get_finding(entity_id, catalog_dir=cd, workspace_root=ws_root)
+            entity_id = f_target.id
+        except Exception:
+            pass
+
+    if superseded_by_type == "finding" and isinstance(superseded_by_id, str):
+        try:
+            from bathos.findings import get_finding
+
+            f_succ = get_finding(superseded_by_id, catalog_dir=cd, workspace_root=ws_root)
+            superseded_by_id = f_succ.id
+        except Exception:
+            pass
+
     # Target existence check
     if not _entity_exists(entity_type, entity_id, cd, ws_root):
         raise SupersededTargetNotFoundError(

@@ -969,6 +969,54 @@ async def mcp_finding_create_tool(
     )
 
 
+@cisternal.tool(registry="bathos-cli", name="finding_update", cli_group="findings", cli_name="update")
+def finding_update_tool(
+    slug_or_id: str,
+    status: str = "",
+    answer: str = "",
+    supporting_runs: list[str] | None = None,
+    allow_mixed_estimand: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    from bathos.findings import update_finding
+
+    finding = update_finding(
+        slug_or_id=slug_or_id,
+        status=status or None,
+        answer=answer or None,
+        supporting_runs=supporting_runs,
+        allow_mixed_estimand=allow_mixed_estimand,
+        catalog_dir=catalog_dir or None,
+    )
+    return {
+        "ok": True,
+        "finding": finding.to_dict(),
+        "message": f"Updated finding {finding.id} ({finding.active_status or finding.status})",
+    }
+
+
+@cisternal.tool(registry="bathos", name="finding_update")
+@traced_tool
+@require_write_token
+async def mcp_finding_update_tool(
+    slug_or_id: str,
+    status: str = "",
+    answer: str = "",
+    supporting_runs: list[str] | None = None,
+    allow_mixed_estimand: str = "",
+    catalog_dir: str = "",
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token
+) -> dict:
+    return finding_update_tool(
+        slug_or_id=slug_or_id,
+        status=status,
+        answer=answer,
+        supporting_runs=supporting_runs,
+        allow_mixed_estimand=allow_mixed_estimand,
+        catalog_dir=catalog_dir,
+    )
+
+
 @cisternal.tool(registry="bathos-cli", name="finding_get", cli_group="findings", cli_name="get")
 def finding_get_tool(
     slug_or_id: str,
@@ -7125,6 +7173,7 @@ _WIRED = cisternal.wire(
         "defect_declare",
         "defect_list",
         "finding_create",
+        "finding_update",
         "finding_get",
         "finding_list",
         "supersede_edge_add",

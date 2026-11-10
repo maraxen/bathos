@@ -59,8 +59,9 @@ class Finding:
     declared_by: str = ""
     last_reviewed: str = ""
     file_path: Path | None = None
-    # Dynamic field
+    # Dynamic fields
     active_status: str = ""
+    superseded_by: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -73,6 +74,7 @@ class Finding:
             "supporting_runs": self.supporting_runs,
             "evidence_tier": self.evidence_tier,
             "supersedes": self.supersedes,
+            "superseded_by": self.superseded_by,
             "reopen_reason": self.reopen_reason,
             "allow_mixed_estimand": self.allow_mixed_estimand,
             "declared_at": self.declared_at,
@@ -131,23 +133,53 @@ def parse_finding_file(path: Path) -> Finding:
     )
 
 
+def _normalize_supersedes(
+    supersedes: str | list[str] | None,
+    catalog_dir: Path | str | None = None,
+    workspace_root: Path | str | None = None,
+) -> list[str]:
+    """Resolve supersedes argument (string, comma-separated string, or list of strings) to canonical finding UUIDs."""
+    if not supersedes:
+        return []
+    if isinstance(supersedes, str):
+        raw_items = [s.strip() for s in supersedes.split(",") if s.strip()]
+    else:
+        raw_items = []
+        for s in supersedes:
+            if isinstance(s, str):
+                raw_items.extend([x.strip() for x in s.split(",") if x.strip()])
+    resolved_ids: list[str] = []
+    for item in raw_items:
+        if not item:
+            continue
+        try:
+            target_finding = get_finding(item, catalog_dir=catalog_dir, workspace_root=workspace_root)
+            resolved_ids.append(target_finding.id)
+        except Exception:
+            resolved_ids.append(item)
+    return resolved_ids
+
+
 def resolve_finding_status(
     finding: Finding,
     catalog_dir: Path | str | None = None,
     workspace_root: Path | str | None = None,
 ) -> str:
     """Dynamically resolve finding status at read time without mutating disk."""
-    if finding.status == "superseded":
-        return "superseded"
-
     try:
         from bathos.supersession import get_superseded_by
 
         succs = get_superseded_by("finding", finding.id, catalog_dir=catalog_dir)
+        if not succs and finding.question_slug:
+            succs = get_superseded_by("finding", finding.question_slug, catalog_dir=catalog_dir)
         if succs:
+            finding.superseded_by = succs[0]["superseded_by_id"]
             return "superseded"
     except Exception:
         pass
+
+    if finding.status == "superseded":
+        return "superseded"
 
     if finding.status == "open" and not finding.supporting_runs:
         return "open"
@@ -169,7 +201,7 @@ def create_finding(
     answer: str,
     supporting_runs: list[str] | None = None,
     status: str = "tentative",
-    supersedes: str = "",
+    supersedes: str | list[str] = "",
     reopen_reason: str = "",
     allow_mixed_estimand: str = "",
     catalog_dir: Path | str | None = None,
@@ -213,8 +245,18 @@ def create_finding(
         if status != "settled":
             status = "tentative"
 
-    if supersedes and not _entity_exists("finding", supersedes, cd, ws_root):
-        raise SupersededTargetNotFoundError("finding", supersedes)
+    resolved_supersedes_ids = _normalize_supersedes(supersedes, catalog_dir=cd, workspace_root=ws_root)
+    for s_id in resolved_supersedes_ids:
+        if not _entity_exists("finding", s_id, cd, ws_root):
+            raise SupersededTargetNotFoundError("finding", s_id)
+
+    supersedes_stored = (
+        resolved_supersedes_ids[0]
+        if len(resolved_supersedes_ids) == 1
+        else ",".join(resolved_supersedes_ids)
+        if resolved_supersedes_ids
+        else ""
+    )
 
     finding_id = f"finding-{uuid.uuid4().hex[:4]}-{uuid.uuid4().hex[:4]}-{uuid.uuid4().hex[:4]}"
     now_iso = datetime.now(UTC).isoformat()
@@ -302,7 +344,7 @@ def create_finding(
         status=status,
         supporting_runs=runs,
         evidence_tier=evidence_tier,
-        supersedes=supersedes,
+        supersedes=supersedes_stored,
         reopen_reason=reopen_reason,
         allow_mixed_estimand=allow_mixed_estimand,
         declared_at=now_iso,
@@ -314,17 +356,167 @@ def create_finding(
     target_file.write_text(finding.render_toml(), encoding="utf-8")
 
     # Activate supersession on predecessor if specified and settled
-    if status == "settled" and supersedes:
-        add_supersession_edge(
-            "finding",
-            supersedes,
-            "finding",
-            finding.id,
-            reason=f"superseded by settled finding {finding.id}",
-            catalog_dir=cd,
-            workspace_root=workspace_root,
-        )
+    if status == "settled" and resolved_supersedes_ids:
+        for s_id in resolved_supersedes_ids:
+            add_supersession_edge(
+                "finding",
+                s_id,
+                "finding",
+                finding.id,
+                reason=f"superseded by settled finding {finding.id}",
+                catalog_dir=cd,
+                workspace_root=workspace_root,
+            )
 
+    return finding
+
+
+def update_finding(
+    slug_or_id: str,
+    *,
+    status: str | None = None,
+    answer: str | None = None,
+    supporting_runs: list[str] | None = None,
+    supersedes: str | list[str] | None = None,
+    allow_mixed_estimand: str = "",
+    catalog_dir: Path | str | None = None,
+    workspace_root: Path | str | None = None,
+    reviewed_by: str | None = None,
+) -> Finding:
+    """Update an existing finding and persist changes to disk.
+
+    Enforces settling gate (Spec §1.4.A, §4.4, §4.8, OD-6):
+    - When transitioning to 'settled':
+      - Requires >= 1 active confirmatory run (FindingSettledEvidenceInsufficientError)
+      - Spike runs cannot settle (SpikeTierCannotSettleError)
+      - Enforces OD-6 estimand boundary check across supporting runs (EstimandBoundaryMixedError)
+      - Activates predecessor supersession edge on 'supersedes' finding
+    """
+    cd = Path(catalog_dir or default_catalog_dir())
+    ws_root = Path(workspace_root) if workspace_root else None
+
+    # Load existing finding
+    finding = get_finding(slug_or_id, catalog_dir=cd, workspace_root=ws_root)
+    if finding.file_path is None or not finding.file_path.exists():
+        raise FindingNotFoundError(f"Finding '{slug_or_id}' file not found.", slug_or_id=slug_or_id)
+
+    target_status = status if status is not None else finding.status
+    target_answer = answer if answer is not None else finding.answer
+    runs = list(supporting_runs) if supporting_runs is not None else list(finding.supporting_runs)
+    mixed_estimand_reason = allow_mixed_estimand if allow_mixed_estimand else finding.allow_mixed_estimand
+
+    resolved_supersedes_ids: list[str] = []
+    if supersedes is not None:
+        resolved_supersedes_ids = _normalize_supersedes(supersedes, catalog_dir=cd, workspace_root=ws_root)
+        for s_id in resolved_supersedes_ids:
+            if not _entity_exists("finding", s_id, cd, ws_root):
+                raise SupersededTargetNotFoundError("finding", s_id)
+        finding.supersedes = (
+            resolved_supersedes_ids[0]
+            if len(resolved_supersedes_ids) == 1
+            else ",".join(resolved_supersedes_ids)
+            if resolved_supersedes_ids
+            else ""
+        )
+    elif finding.supersedes:
+        resolved_supersedes_ids = _normalize_supersedes(finding.supersedes, catalog_dir=cd, workspace_root=ws_root)
+
+    # Settling Gate Checks
+    if target_status == "settled":
+        if not runs:
+            raise FindingSettledEvidenceInsufficientError(
+                "Settling a finding requires at least one active confirmatory run. Elevate supporting evidence before setting status to settled.",
+                finding_id=finding.id,
+                supporting_runs=[],
+            )
+
+        validity_map = resolve_validity(runs, catalog_dir=cd, workspace_root=ws_root)
+        active_runs = [v for v in validity_map.values() if v.state == "current"]
+
+        # Spike tier cannot settle
+        if active_runs and all(v.evidence_tier == "spike" for v in active_runs):
+            raise SpikeTierCannotSettleError(
+                "Spike runs are preliminary probes and cannot support a settled finding. Elevate evidence via a confirmatory run.",
+                finding_id=finding.id,
+                spike_runs=[v.run_id for v in active_runs],
+            )
+
+        # Require >= 1 active confirmatory run
+        if not any(v.evidence_tier == "confirmatory" for v in active_runs):
+            raise FindingSettledEvidenceInsufficientError(
+                "Settling a finding requires at least one active confirmatory run. Elevate supporting evidence before setting status to settled.",
+                finding_id=finding.id,
+                supporting_runs=runs,
+            )
+
+        # OD-6 Estimand Boundary Check
+        markers_by_pkg: dict[str, set[str]] = {}
+        for mid, v in validity_map.items():
+            if v.estimand_marker:
+                pkg = v.estimand_marker.split(":")[0]
+                markers_by_pkg.setdefault(pkg, set()).add(v.estimand_marker)
+
+        for pkg, markers in markers_by_pkg.items():
+            if len(markers) > 1:
+                if not mixed_estimand_reason.strip():
+                    raise EstimandBoundaryMixedError(
+                        f"Supporting runs span multiple estimand epochs for {pkg}: {sorted(markers)}. "
+                        "Pass --allow-mixed-estimand '<reason>' to justify pooling across the boundary.",
+                        epochs=sorted(markers),
+                    )
+                record_acknowledgment(
+                    cd,
+                    kind="validity.estimand_override_recorded",
+                    entity_type="finding",
+                    entity_id=finding.id,
+                    run_ids=runs,
+                    surface="finding_settle",
+                    reason=mixed_estimand_reason.strip(),
+                )
+
+    # Resolve overall evidence_tier
+    evidence_tier = finding.evidence_tier
+    if runs:
+        validity_map = resolve_validity(runs, catalog_dir=cd, workspace_root=ws_root)
+        tiers = {v.evidence_tier for v in validity_map.values() if not v.is_hidden}
+        if "confirmatory" in tiers:
+            evidence_tier = "confirmatory"
+        elif "calibrating" in tiers:
+            evidence_tier = "calibrating"
+        elif "spike" in tiers:
+            evidence_tier = "spike"
+        else:
+            evidence_tier = "exploratory"
+
+    now_iso = datetime.now(UTC).isoformat()
+    actor_str = reviewed_by or os.environ.get("USER", finding.declared_by or "unknown")
+
+    finding.status = target_status
+    finding.answer = target_answer
+    finding.supporting_runs = runs
+    finding.evidence_tier = evidence_tier
+    finding.allow_mixed_estimand = mixed_estimand_reason
+    finding.last_reviewed = now_iso
+    finding.declared_by = actor_str
+
+    finding.file_path.write_text(finding.render_toml(), encoding="utf-8")
+
+    # Activate supersession on predecessor if specified and settled
+    if target_status == "settled" and resolved_supersedes_ids:
+        for s_id in resolved_supersedes_ids:
+            add_supersession_edge(
+                "finding",
+                s_id,
+                "finding",
+                finding.id,
+                reason=f"superseded by settled finding {finding.id}",
+                catalog_dir=cd,
+                workspace_root=ws_root,
+            )
+
+    finding.active_status = resolve_finding_status(
+        finding, catalog_dir=cd, workspace_root=ws_root
+    )
     return finding
 
 
