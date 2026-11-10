@@ -288,6 +288,8 @@ def test_a_sidecar_without_a_label_is_unaffected(tmp_path):
         "lagoon\\u2011simulation",  # a literal backslash-u escape a reader would decode
         "lagoon%5Fsimulation",
         "lagoon-\n  simulation",
+        "lagoon\uff06hyphen;simulation",  # fullwidth ampersand (round 4)
+        "lagoon\\u2e3asimulation",  # any escaped dash, not a fixed list (round 4)
     ],
 )
 def test_fold_for_ids_turns_every_hyphen_form_into_a_match(text):
@@ -295,7 +297,15 @@ def test_fold_for_ids_turns_every_hyphen_form_into_a_match(text):
 
 
 @pytest.mark.parametrize(
-    "text", ["We will lead -\nscaffolds next.", "lagoon simulation", "lagoonsimulation"]
+    "text",
+    [
+        "We will lead -\nscaffolds next.",
+        "lagoon simulation",
+        "lagoonsimulation",
+        "lagoon&shysimulation",  # an entity without ';' stays text (round 4)
+        "R&D on the lagoon; simulation later",
+        "C:\\Users\\lagoon\\simulation",
+    ],
 )
 def test_fold_for_ids_does_not_invent_a_match(text):
     assert not id_token_pattern("lagoon-simulation").search(fold_for_ids(text))

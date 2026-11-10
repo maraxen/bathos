@@ -775,6 +775,22 @@ def test_an_ambiguous_citation_does_not_hide_firm_gold_or_a_revived_flag(planted
     assert m["revived_flagged"] == 1.0
 
 
+def test_labels_every_commit_of_a_path_agrees_on_stay_firm_gold(planted):
+    # Cursor round 4: legacy is labelled [old-aim] then [old-aim, delta-aim]; old-aim stays firm, delta-aim is
+    # disputed (ambiguous, indeterminate).
+    _add_run(
+        planted,
+        "legacy",
+        _sidecar('[charter]\npurpose = ["old-aim", "delta-aim"]\n', "manual screen again"),
+        "000000b8aaaaaaaa",
+    )
+    out, _ = _packet(planted)
+    key = answer_key(planted["repo"], out, planted["charter"])
+    assert key["labels"]["scripts/legacy.bth.toml"] == ["old-aim"]
+    assert key["ambiguous_labels"]["scripts/legacy.bth.toml"] == ["delta-aim"]
+    assert "old-aim" in key["revived"] and "delta-aim" in key["indeterminate"]
+
+
 def test_the_key_reports_shown_denominators_for_the_withheld_share(planted):
     out, _ = _packet(planted)
     key = answer_key(planted["repo"], out, planted["charter"])

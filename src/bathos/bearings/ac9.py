@@ -188,12 +188,14 @@ def answer_key(
         if any(is_shown for _, is_shown in entries):
             firm |= common
         disagree |= union - common
-        if union == common:
-            labels[path] = union
-        else:
-            # Its blobs disagree (or mix off-charter with a slug): the path gives no firm gold. Its labels are kept
-            # as `ambiguous_labels`, so a target among them is not scored either way (review rounds 3-4, 261110).
-            ambiguous[path] = union
+        if common:
+            labels[path] = (
+                common  # what every labelled blob of the path agrees on is firm gold (round 4)
+            )
+        if union != common:
+            # Its blobs disagree (or mix off-charter with a slug): the disputed labels are kept as
+            # `ambiguous_labels`, so a target among them is not scored either way (review rounds 3-4, 261110).
+            ambiguous[path] = union - common
 
     unknown = sorted((shown | withheld) - set(charter_purposes) - {OFF_CHARTER})
     if unknown:

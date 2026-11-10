@@ -31,17 +31,27 @@ MIN_ID_CHARS = 4
 
 # Hyphen-like characters outside Unicode's dash category (Pd): soft hyphen (Cf) and hyphen bullet (Po).
 _HYPHEN_LIKE = frozenset("­⁃")
-# Escaped forms a reader would decode: URL-encoded, and backslash-u escapes of any dash, soft hyphen or underscore.
-_ENCODED_SEP_RE = re.compile(
-    r"%2d|%5f|\\u00ad|\\u002d|\\u005f|\\u2043|\\u201[0-5]|\\u2212|\\ufe58|\\ufe63|\\uff0d",
-    re.IGNORECASE,
-)
+# Escaped forms a reader would decode: URL-encoded separators, and any backslash-u escape (decoded below only when
+# it encodes a dash, soft hyphen, hyphen bullet or underscore).
+_ENCODED_SEP_RE = re.compile(r"%2d|%5f|\\u([0-9a-f]{4})", re.IGNORECASE)
+# HTML character references, only when terminated by ';' (so `&shy` in prose stays text; review round 4, 261110).
+_ENTITY_RE = re.compile(r"&(?:#\d+|#x[0-9a-f]+|[a-z][a-z0-9]*);", re.IGNORECASE)
 # A hyphen broken across a line, between two letters or digits (a lone dash ending a line is not joined).
 _BROKEN_HYPHEN_RE = re.compile(r"(?<=[A-Za-z0-9])-[ \t]*\r?\n[ \t>#*]*(?=[A-Za-z0-9])")
 
 
+def _is_hyphen(ch: str) -> bool:
+    return ch in _HYPHEN_LIKE or unicodedata.category(ch) == "Pd"
+
+
 def _encoded_sep(m: re.Match[str]) -> str:
-    return "_" if m.group(0).lower() in ("%5f", "\\u005f") else "-"
+    s = m.group(0).lower()
+    if s == "%2d":
+        return "-"
+    if s == "%5f":
+        return "_"
+    ch = chr(int(m.group(1), 16))
+    return "-" if _is_hyphen(ch) else "_" if ch == "_" else m.group(0)
 
 
 def fold_for_ids(text: str) -> str:
@@ -55,18 +65,20 @@ def fold_for_ids(text: str) -> str:
     leaking by accident, from an agent or a person writing records.
     """
     t = text
+    if not t.isascii():
+        t = unicodedata.normalize(
+            "NFKC", t
+        )  # first, so a fullwidth ＆ or ％ decodes below (round 4)
     if "&" in t:
-        t = html.unescape(t)
+        t = _ENTITY_RE.sub(lambda m: html.unescape(m.group(0)), t)
     if "%" in t or "\\" in t:
         t = _ENCODED_SEP_RE.sub(_encoded_sep, t)
     if not t.isascii():
-        t = unicodedata.normalize("NFKC", t)
         out = []
         for ch in t:
-            cat = unicodedata.category(ch)
-            if ch in _HYPHEN_LIKE or cat == "Pd":
+            if _is_hyphen(ch):
                 out.append("-")
-            elif cat != "Cf":
+            elif unicodedata.category(ch) != "Cf":
                 out.append(ch)
         t = "".join(out)
     return _BROKEN_HYPHEN_RE.sub("-", t) if "\n" in t else t
