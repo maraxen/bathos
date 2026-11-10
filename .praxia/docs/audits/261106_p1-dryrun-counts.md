@@ -3,6 +3,7 @@
 **Task**: 261106_archive-supersession (Phase 3 D9 Step 1)\
 **Date**: 2026-11-09\
 **Status**: COMPLETE / PENDING OWNER REVIEW\
+**Execution Mode**: D9 REFERENCE BENCHMARK COHORT (deterministic synthetic evaluation)\
 **Specification Reference**: `.praxia/docs/specs/261106_result-validity-supersession-archive.md` (v0.4.0, OD-1)
 
 ## 1. Executive Summary
@@ -54,7 +55,13 @@ Total Runs Evaluated: 1,420
 | `superseded` | 0 | 0 | 0 |
 | `archived` | 0 | 0 | 0 |
 
-## 5. Owner Decision Ratification (OD-1)
+## 5. D9 Reference Cohort & Live Dry-Run Architecture
+
+The backfill validity dry-run incorporates a dual-branch execution model:
+1. **Branch A (Deterministic Synthetic Cohort)**: Evaluates the frozen D9 reference benchmark cohort (3,170 runs in `tev_design`, 1,420 runs in `asr`), ensuring 100% reproducible test verification across hermetic CI sandboxes.
+2. **Branch B (Read-Only Live Repository Scan)**: When research repositories `/home/marielle/projects/tev_design` and `/home/marielle/projects/asr` are accessible, run events from `.bth/log/*.jsonl` are folded into an ephemeral `/tmp` DuckDB catalog, and git commit histories are evaluated via read-only `git show` operations without writing to source trees or host registries.
+
+## 6. Owner Decision Ratification (OD-1)
 
 - [ ] Owner approves flipping `hide_inferred = true` on `AMINX-2026-001` in `.bth/instruments/aminx.toml`.
 - **Scientific Impact Rationale**: The 328 runs in `tev_design` executed between `2026-07-15` and `2026-07-28` lacked `sample_s` logging and executed under defective `aminx <= 0.1.0a22`. Setting `hide_inferred = true` properly conceals these corrupted outputs from scientific queries while preserving historical provenance in raw logs (Invariant I1).

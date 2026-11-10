@@ -44,6 +44,7 @@ from bathos.errors import (
     DocStoreUnavailableError,
     RestoreConflictError,
 )
+from bathos.findings import parse_finding_file
 from bathos.mcp import archive_sweep_tool, new_experiment_tool, restore_tool
 from bathos.readback import verify_run_drawable
 from bathos.runlog.project_id import assign_project_id, register_main_root
@@ -58,6 +59,12 @@ from scripts.backfill_validity_dryrun import (
 )
 from scripts.backfill_validity_dryrun import (
     main as dryrun_main,
+)
+from scripts.experiments.backfill_findings import (
+    main as backfill_main,
+)
+from scripts.experiments.backfill_findings import (
+    run_backfill,
 )
 
 
@@ -81,6 +88,22 @@ def _make_git_repo(path: Path) -> Path:
     assign_project_id(path)
     register_main_root(path)
     return path
+
+
+@pytest.fixture(autouse=True)
+def _clear_validity_root_caches():
+    """Clear process-level validity caches to prevent test isolation leaks across tmp_paths."""
+    import bathos.validity as val_mod
+
+    if hasattr(val_mod, "_RUN_MAIN_ROOT_CACHE"):
+        val_mod._RUN_MAIN_ROOT_CACHE.clear()
+    if hasattr(val_mod, "_SLUG_TO_ROOT_CACHE"):
+        val_mod._SLUG_TO_ROOT_CACHE.clear()
+    yield
+    if hasattr(val_mod, "_RUN_MAIN_ROOT_CACHE"):
+        val_mod._RUN_MAIN_ROOT_CACHE.clear()
+    if hasattr(val_mod, "_SLUG_TO_ROOT_CACHE"):
+        val_mod._SLUG_TO_ROOT_CACHE.clear()
 
 
 def _create_sample_run(
@@ -423,7 +446,18 @@ def test_ac_p3_05_backfill_dryrun_side_by_side_od1(tmp_path: Path):
     assert results.current_asr == 1215
     assert results.void_asr == 205
 
-    # 3. CLI execution & sidecar outcome evaluation
+    # 3. 2-Branch architecture: fallback to Branch A when repos are inaccessible
+    res_fallback = evaluate_cohorts(
+        tev_root=tmp_path / "nonexistent_tev",
+        asr_root=tmp_path / "nonexistent_asr",
+        force_synthetic=False,
+    )
+    assert res_fallback.total_runs == 4590
+    assert res_fallback.visible_tev_hide_false - res_fallback.visible_tev_hide_true == 328
+    assert res_fallback.execution_mode == "synthetic"
+    assert res_fallback.live_scanned is False
+
+    # 4. CLI execution & sidecar outcome evaluation
     out_report = tmp_path / "report.md"
     exit_code = dryrun_main(["--out", str(out_report), "--force-synthetic"])
     assert exit_code == 0
@@ -443,6 +477,10 @@ def test_ac_p3_05_backfill_dryrun_side_by_side_od1(tmp_path: Path):
 
 
 def test_ac_p3_06_and_07_backfill_claims_and_verdicts_ingestion(tmp_path: Path):
+    from dataclasses import asdict
+
+    from bathos.sidecar import evaluate_outcome, parse_sidecar
+
     claims_toml = tmp_path / "claims_ledger.toml"
     # Write TOML format
     claims_lines = [
@@ -451,7 +489,7 @@ def test_ac_p3_06_and_07_backfill_claims_and_verdicts_ingestion(tmp_path: Path):
         'question = "Does NVT maintain temperature stability?"',
         'question_slug = "nvt-stability"',
         'answer = "Yes, temp std < 5K"',
-        'evidential_status = "settled"',
+        'evidential_status = "tracked_reproducible"',
         'supporting_runs = ["run_101", "run_102"]',
         'tier = "confirmatory"',
         "",
@@ -482,15 +520,45 @@ def test_ac_p3_06_and_07_backfill_claims_and_verdicts_ingestion(tmp_path: Path):
     assert len(ingested_claims) == 2
     assert len(ingested_verdicts) == 1
 
-    # AC-P3-07: refuted_or_superseded maps to superseded
-    c1_txt = (findings_dir / "nvt-stability.toml").read_text()
-    assert 'status = "settled"' in c1_txt
+    # AC-P3-07: refuted_or_superseded maps to superseded; tracked_reproducible maps to settled
+    f1 = parse_finding_file(findings_dir / "nvt-stability.toml")
+    assert f1.status == "settled"
+    assert f1.question_slug == "nvt-stability"
+    assert f1.evidence_tier == "confirmatory"
+    assert f1.declared_by == "backfill"
 
-    c2_txt = (findings_dir / "gamma-optimal.toml").read_text()
-    assert 'status = "superseded"' in c2_txt
+    f2 = parse_finding_file(findings_dir / "gamma-optimal.toml")
+    assert f2.status == "superseded"
+    assert f2.supersedes == "claim_000"
 
-    v1_txt = (findings_dir / "rate-matrix.toml").read_text()
-    assert 'status = "superseded"' in v1_txt
+    v1_finding = parse_finding_file(findings_dir / "rate-matrix.toml")
+    assert v1_finding.status == "superseded"
+
+    # Full backfill runner execution and sidecar tracking
+    findings_dir_2 = tmp_path / "findings_2"
+    res = run_backfill(claims_toml, verdicts_dir, findings_dir_2)
+    assert res.claims_ingested == 2
+    assert res.verdicts_ingested == 1
+    assert res.total_findings == 3
+    assert res.refuted_mapped_count == 2
+    assert res.refuted_or_superseded_mapped_to_superseded is True
+
+    sidecar_path = Path(__file__).parent.parent / "scripts" / "experiments" / "backfill_findings.bth.toml"
+    sidecar = parse_sidecar(sidecar_path)
+    res_dict = asdict(res)
+    outcome_label = evaluate_outcome(sidecar, res_dict)
+    assert outcome_label == "pass", f"Backfill findings sidecar outcome did not pass: {outcome_label}"
+
+    # Dry-run CLI execution
+    dry_dir = tmp_path / "findings_dry"
+    cli_code = backfill_main([
+        "--claims-ledger", str(claims_toml),
+        "--verdicts-dir", str(verdicts_dir),
+        "--findings-dir", str(dry_dir),
+        "--dry-run",
+    ])
+    assert cli_code == 0
+    assert not dry_dir.exists() or len(list(dry_dir.glob("*.toml"))) == 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -673,6 +741,22 @@ def test_ac_p3_12_backfill_scripts_sidecar_tracking():
     assert "total_runs" in sidecar.result_schema
     assert "total_runs_tev" in sidecar.result_schema
     assert "report_written" in sidecar.result_schema
+
+
+def test_ac_p3_13_backfill_findings_sidecar_tracking():
+    root = Path(__file__).parent.parent
+    sidecar_path = root / "scripts" / "experiments" / "backfill_findings.bth.toml"
+    assert sidecar_path.is_file()
+
+    sidecar = parse_sidecar(sidecar_path)
+    assert sidecar.hypothesis
+    assert "pass" in sidecar.outcomes
+    assert "fail" in sidecar.outcomes
+    assert sidecar.result_schema
+    assert "claims_ingested" in sidecar.result_schema
+    assert "verdicts_ingested" in sidecar.result_schema
+    assert "total_findings" in sidecar.result_schema
+    assert "refuted_or_superseded_mapped_to_superseded" in sidecar.result_schema
 
 
 # ─────────────────────────────────────────────────────────────────────────────

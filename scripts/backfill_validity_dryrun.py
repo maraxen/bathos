@@ -10,15 +10,29 @@ to .praxia/docs/audits/261106_p1-dryrun-counts.md.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
-import re
+import os
+import subprocess
 import sys
 import tempfile
-import tomllib
-import uuid
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
 from pathlib import Path
+
+# Re-export ingestion functions from canonical location
+from scripts.experiments.backfill_findings import (
+    ingest_claims_ledger,
+    ingest_praxia_verdicts,
+)
+
+__all__ = [
+    "DryRunCohortResults",
+    "evaluate_cohorts",
+    "format_report_markdown",
+    "ingest_claims_ledger",
+    "ingest_praxia_verdicts",
+    "main",
+]
 
 
 @dataclass
@@ -50,38 +64,27 @@ class DryRunCohortResults:
     void_asr: int = 0
     report_written: bool = False
     side_by_side_complete: bool = False
+    # Branch mode & live scan fields
+    execution_mode: str = "synthetic"  # "synthetic" or "live"
+    live_scanned: bool = False
+    live_runs_tev: int = 0
+    live_runs_asr: int = 0
 
 
-def evaluate_cohorts(
-    tev_root: Path | str = "/home/marielle/projects/tev_design",
-    asr_root: Path | str = "/home/marielle/projects/asr",
-    force_synthetic: bool = False,
-) -> DryRunCohortResults:
-    """Evaluate aminx and asr defect cohorts in a temporary sandbox.
-
-    Dynamically executes resolve_validity() under hide_inferred=False and
-    hide_inferred=True across:
-    1. tev_design: 3,170 runs
-       - 1,596 verified-from-lock (546 pre-estimand a24, 1,050 post-estimand 0.2.1)
-       - 1,574 inferred-from-commit (328 missing sample_s <= 0.1.0a22, 1,246 git defect AMINX-2026-003)
-       - 36 runs with runtime metadata aminx_version
-    2. asr: 1,420 runs
-       - 205 void runs matching corrupted rate matrix (ASR-LG-2026-001)
-       - 1,215 clean runs post-fix
-    """
-    import hashlib
-    import subprocess
-
+def _evaluate_synthetic_cohort() -> DryRunCohortResults:
+    """Branch A: Deterministic synthetic cohort for hermetic unit testing."""
     import duckdb
 
+    import bathos.validity as val_mod
     from bathos.index import RUNS_DDL
     from bathos.validity import resolve_validity
 
-    tev_path = Path(tev_root)
-    asr_path = Path(asr_root)
-    _ = tev_path.is_dir() and asr_path.is_dir() and not force_synthetic
+    if hasattr(val_mod, "_RUN_MAIN_ROOT_CACHE"):
+        val_mod._RUN_MAIN_ROOT_CACHE.clear()
+    if hasattr(val_mod, "_SLUG_TO_ROOT_CACHE"):
+        val_mod._SLUG_TO_ROOT_CACHE.clear()
 
-    results = DryRunCohortResults()
+    results = DryRunCohortResults(execution_mode="synthetic", live_scanned=False)
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         sandbox = Path(tmp_dir)
@@ -290,119 +293,217 @@ ranges = [{{ type = "GIT", events = [{{ introduced = "{commit_corrupt_asr}" }}, 
     return results
 
 
-def ingest_claims_ledger(claims_ledger_path: Path | str, findings_dir: Path | str) -> list[Path]:
-    """Ingest claims from claims_ledger.toml into .bth/findings/*.toml.
+def _evaluate_live_cohorts(tev_path: Path, asr_path: Path) -> DryRunCohortResults:
+    """Branch B: Ingest real .bth/log/*.jsonl into isolated /tmp DuckDB catalog."""
+    import duckdb
 
-    Maps evidential_status == "refuted_or_superseded" to status = "superseded".
+    import bathos.validity as val_mod
+    from bathos.runlog.ingest import fold_roots_into
+    from bathos.validity import resolve_validity
+
+    if hasattr(val_mod, "_RUN_MAIN_ROOT_CACHE"):
+        val_mod._RUN_MAIN_ROOT_CACHE.clear()
+    if hasattr(val_mod, "_SLUG_TO_ROOT_CACHE"):
+        val_mod._SLUG_TO_ROOT_CACHE.clear()
+
+    results = DryRunCohortResults(execution_mode="live", live_scanned=True)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        sandbox = Path(tmp_dir)
+        cat_dir = sandbox / "catalog"
+        cat_dir.mkdir(parents=True, exist_ok=True)
+        db_path = cat_dir / "bathos.db"
+
+        # 1. Ingest real run logs read-only into temporary DuckDB catalog
+        roots = [
+            ("main", "tev_design", tev_path / ".bth" / "log"),
+            ("main", "asr", asr_path / ".bth" / "log"),
+        ]
+        fold_roots_into(db_path, roots)
+
+        # 2. Query ingested runs
+        con = duckdb.connect(str(db_path), read_only=True)
+        try:
+            tev_rows = con.execute("SELECT id FROM runs WHERE project_slug = 'tev_design'").fetchall()
+            asr_rows = con.execute("SELECT id FROM runs WHERE project_slug = 'asr'").fetchall()
+            tev_rids = [r[0] for r in tev_rows]
+            asr_rids = [r[0] for r in asr_rows]
+        finally:
+            con.close()
+
+        # If project_slug wasn't recorded on some runs, fallback to reading all runs
+        if not tev_rids and not asr_rids:
+            con = duckdb.connect(str(db_path), read_only=True)
+            try:
+                all_rows = con.execute("SELECT id FROM runs").fetchall()
+                tev_rids = [r[0] for r in all_rows]
+            finally:
+                con.close()
+
+        # 3. Setup sandbox config & instruments directory
+        config_dir = sandbox / "config"
+        inst_dir = config_dir / "bathos" / "instruments"
+        inst_dir.mkdir(parents=True, exist_ok=True)
+
+        (inst_dir / "asr.toml").write_text("""schema_version = "1.0.0"
+package = "asr"
+ecosystem = "PyPI"
+
+[[entries]]
+id = "ASR-LG-2026-001"
+revision = 1
+kind = "defect"
+severity = "void"
+hide_inferred = false
+ranges = [{ type = "GIT", events = [{ introduced = "56286cf" }, { fixed = "d4a17b3" }] }]
+""")
+
+        def _write_live_aminx(hide_inferred: bool) -> None:
+            (inst_dir / "aminx.toml").write_text(f"""schema_version = "1.0.0"
+package = "aminx"
+ecosystem = "PyPI"
+
+[[entries]]
+id = "AMINX-2026-002"
+revision = 1
+kind = "estimand_change"
+severity = "current"
+hide_inferred = false
+ranges = [{{ type = "ECOSYSTEM", events = [{{ introduced = "0.1.0a25" }}] }}]
+
+[[entries]]
+id = "AMINX-2026-001"
+revision = 1
+kind = "defect"
+severity = "void"
+hide_inferred = {str(hide_inferred).lower()}
+ranges = [{{ type = "ECOSYSTEM", events = [{{ introduced = "0.1.0a0" }}, {{ fixed = "0.1.0a23" }}] }}]
+[entries.predicate]
+condition = "sample_s > 1"
+
+[[entries]]
+id = "AMINX-2026-003"
+revision = 1
+kind = "defect"
+severity = "void"
+hide_inferred = false
+ranges = [{{ type = "GIT", events = [{{ introduced = "e5f40cb8b" }}, {{ fixed = "d930bbad" }}] }}]
+""")
+
+        orig_xdg = os.environ.get("XDG_CONFIG_HOME")
+        orig_user_reg = os.environ.get("BTH_USE_USER_REGISTRY")
+        orig_cat_dir = os.environ.get("BTH_CATALOG_DIR")
+        os.environ["XDG_CONFIG_HOME"] = str(config_dir)
+        os.environ["BTH_USE_USER_REGISTRY"] = "1"
+        os.environ["BTH_CATALOG_DIR"] = str(cat_dir)
+
+        try:
+            # Pass 1: hide_inferred = false
+            _write_live_aminx(hide_inferred=False)
+            vcache = cat_dir / "validity_cache.db"
+            if vcache.exists():
+                vcache.unlink()
+            tev_p1 = resolve_validity(tev_rids, cat_dir, workspace_root=tev_path)
+
+            results.total_runs_tev = len(tev_rids)
+            results.lock_runs_tev = sum(1 for v in tev_p1.values() if v.version_source == "verified-from-lock")
+            results.nolock_runs_tev = sum(1 for v in tev_p1.values() if v.version_source != "verified-from-lock")
+            results.metadata_version_runs_tev = sum(1 for v in tev_p1.values() if v.version_source == "runtime-metadata")
+            results.missing_sample_s_runs_tev = sum(1 for v in tev_p1.values() if v.reason and "missing predicate field: sample_s" in v.reason)
+            results.unverified_toolchain_runs_tev = sum(1 for v in tev_p1.values() if v.state == "suspect" and (not v.reason or "missing predicate field" not in v.reason))
+
+            results.visible_tev_hide_false = sum(1 for v in tev_p1.values() if not v.is_hidden)
+            results.current_tev_hide_false = sum(1 for v in tev_p1.values() if v.state == "current")
+            results.suspect_tev_hide_false = sum(1 for v in tev_p1.values() if v.state == "suspect")
+            results.void_tev_hide_false = sum(1 for v in tev_p1.values() if v.state == "void")
+
+            results.estimand_pre_aminx_2026_002 = sum(1 for v in tev_p1.values() if v.estimand_marker == "aminx:pre-AMINX-2026-002")
+            results.estimand_post_aminx_2026_002 = sum(1 for v in tev_p1.values() if v.estimand_marker == "aminx:post-AMINX-2026-002")
+
+            # Pass 2: hide_inferred = true (OD-1 opt-in)
+            _write_live_aminx(hide_inferred=True)
+            if vcache.exists():
+                vcache.unlink()
+            tev_p2 = resolve_validity(tev_rids, cat_dir, workspace_root=tev_path)
+
+            results.visible_tev_hide_true = sum(1 for v in tev_p2.values() if not v.is_hidden)
+            results.current_tev_hide_true = sum(1 for v in tev_p2.values() if v.state == "current")
+            results.suspect_tev_hide_true = sum(1 for v in tev_p2.values() if v.state == "suspect")
+            results.void_tev_hide_true = sum(1 for v in tev_p2.values() if v.state == "void")
+
+            # ASR evaluation
+            asr_res = resolve_validity(asr_rids, cat_dir, workspace_root=asr_path)
+            results.total_runs_asr = len(asr_rids)
+            results.visible_asr = sum(1 for v in asr_res.values() if not v.is_hidden)
+            results.current_asr = sum(1 for v in asr_res.values() if v.state == "current")
+            results.void_asr = sum(1 for v in asr_res.values() if v.state == "void")
+
+            results.total_runs = results.total_runs_tev + results.total_runs_asr
+            results.side_by_side_complete = True
+            results.live_runs_tev = results.total_runs_tev
+            results.live_runs_asr = results.total_runs_asr
+        finally:
+            if orig_xdg is not None:
+                os.environ["XDG_CONFIG_HOME"] = orig_xdg
+            else:
+                os.environ.pop("XDG_CONFIG_HOME", None)
+
+            if orig_user_reg is not None:
+                os.environ["BTH_USE_USER_REGISTRY"] = orig_user_reg
+            else:
+                os.environ.pop("BTH_USE_USER_REGISTRY", None)
+
+            if orig_cat_dir is not None:
+                os.environ["BTH_CATALOG_DIR"] = orig_cat_dir
+            else:
+                os.environ.pop("BTH_CATALOG_DIR", None)
+
+    return results
+
+
+def evaluate_cohorts(
+    tev_root: Path | str = "/home/marielle/projects/tev_design",
+    asr_root: Path | str = "/home/marielle/projects/asr",
+    force_synthetic: bool = False,
+) -> DryRunCohortResults:
+    """Evaluate aminx and asr defect cohorts in a temporary sandbox.
+
+    2-Branch Architecture:
+    - Branch A (force_synthetic=True or repos inaccessible): executes deterministic synthetic cohort
+      (3,170 tev_design runs + 1,420 asr runs) for reproducible unit testing.
+    - Branch B (force_synthetic=False and repos accessible): ingests real .bth/log/*.jsonl read-only
+      into an isolated /tmp DuckDB catalog, evaluating resolve_validity against real git histories
+      without writing to source repos or real ~/.bth / ~/.config/bathos.
     """
-    claims_ledger_path = Path(claims_ledger_path)
-    findings_dir = Path(findings_dir)
-    findings_dir.mkdir(parents=True, exist_ok=True)
+    tev_path = Path(tev_root)
+    asr_path = Path(asr_root)
+    can_run_live = (
+        not force_synthetic
+        and tev_path.is_dir()
+        and asr_path.is_dir()
+        and (tev_path / ".bth" / "log").is_dir()
+        and (asr_path / ".bth" / "log").is_dir()
+    )
 
-    with open(claims_ledger_path, "rb") as f:
-        data = tomllib.load(f)
-
-    written: list[Path] = []
-    claims = data.get("claims", [])
-    if isinstance(claims, dict):
-        claims = list(claims.values())
-
-    for claim in claims:
-        cid = claim.get("id", str(uuid.uuid4()))
-        q = claim.get("question", "")
-        q_slug = claim.get("question_slug") or re.sub(r"[^a-z0-9_-]+", "-", q.lower()).strip("-") or cid
-        ans = claim.get("answer", "")
-        ev_status = claim.get("evidential_status", claim.get("status", "tentative"))
-        if ev_status == "refuted_or_superseded":
-            st = "superseded"
-        elif ev_status in ("settled", "tentative", "open", "superseded", "refuted"):
-            st = ev_status
-        else:
-            st = "tentative"
-
-        supporting = claim.get("supporting_runs", [])
-        tier = claim.get("tier", claim.get("evidence_tier", "exploratory"))
-        supersedes = claim.get("supersedes", "")
-
-        finding_path = findings_dir / f"{q_slug}.toml"
-        lines = [
-            "# Schema: bathos-finding-v1.0",
-            f'id = "{cid}"',
-            f'question_slug = "{q_slug}"',
-            f"question = {json.dumps(q)}",
-            f"answer = {json.dumps(ans)}",
-            f'status = "{st}"',
-            f"supporting_runs = {json.dumps(supporting)}",
-            f'evidence_tier = "{tier}"',
-            f'supersedes = "{supersedes}"',
-            'reopen_reason = ""',
-            'allow_mixed_estimand = ""',
-            f'declared_at = "{datetime.now(UTC).isoformat()}"',
-            'declared_by = "backfill"',
-            f'last_reviewed = "{datetime.now(UTC).isoformat()}"',
-            "",
-        ]
-        finding_path.write_text("\n".join(lines), encoding="utf-8")
-        written.append(finding_path)
-
-    return written
-
-
-def ingest_praxia_verdicts(verdicts_dir: Path | str, findings_dir: Path | str) -> list[Path]:
-    """Ingest verdicts from .praxia/verdicts/*.toml into .bth/findings/*.toml."""
-    verdicts_dir = Path(verdicts_dir)
-    findings_dir = Path(findings_dir)
-    findings_dir.mkdir(parents=True, exist_ok=True)
-
-    written: list[Path] = []
-    for vf in sorted(verdicts_dir.glob("*.toml")):
-        if not vf.is_file():
-            continue
-        with open(vf, "rb") as f:
-            data = tomllib.load(f)
-
-        cid = data.get("id", vf.stem)
-        q = data.get("question", "")
-        q_slug = data.get("question_slug") or re.sub(r"[^a-z0-9_-]+", "-", q.lower()).strip("-") or cid
-        ans = data.get("answer", "")
-        st = data.get("status", "settled")
-        if st == "refuted_or_superseded":
-            st = "superseded"
-        supporting = data.get("supporting_runs", [])
-        tier = data.get("tier", data.get("evidence_tier", "confirmatory"))
-        supersedes = data.get("supersedes", "")
-
-        finding_path = findings_dir / f"{q_slug}.toml"
-        lines = [
-            "# Schema: bathos-finding-v1.0",
-            f'id = "{cid}"',
-            f'question_slug = "{q_slug}"',
-            f"question = {json.dumps(q)}",
-            f"answer = {json.dumps(ans)}",
-            f'status = "{st}"',
-            f"supporting_runs = {json.dumps(supporting)}",
-            f'evidence_tier = "{tier}"',
-            f'supersedes = "{supersedes}"',
-            'reopen_reason = ""',
-            'allow_mixed_estimand = ""',
-            f'declared_at = "{datetime.now(UTC).isoformat()}"',
-            'declared_by = "backfill"',
-            f'last_reviewed = "{datetime.now(UTC).isoformat()}"',
-            "",
-        ]
-        finding_path.write_text("\n".join(lines), encoding="utf-8")
-        written.append(finding_path)
-
-    return written
+    if can_run_live:
+        return _evaluate_live_cohorts(tev_path, asr_path)
+    return _evaluate_synthetic_cohort()
 
 
 def format_report_markdown(results: DryRunCohortResults) -> str:
     """Format the OD-1 side-by-side comparison Markdown report."""
+    mode_desc = (
+        "LIVE REPOSITORY INGESTION (read-only scan against host .bth/log/*.jsonl)"
+        if results.live_scanned
+        else "D9 REFERENCE BENCHMARK COHORT (deterministic synthetic evaluation)"
+    )
+
     return f"""# P1 Dry-Run Verification Report: Defect Counts & OD-1 Inferred-Hiding Evaluation
 
 **Task**: 261106_archive-supersession (Phase 3 D9 Step 1)\\
 **Date**: 2026-11-09\\
 **Status**: COMPLETE / PENDING OWNER REVIEW\\
+**Execution Mode**: {mode_desc}\\
 **Specification Reference**: `.praxia/docs/specs/261106_result-validity-supersession-archive.md` (v0.4.0, OD-1)
 
 ## 1. Executive Summary
@@ -454,7 +555,13 @@ Total Runs Evaluated: {results.total_runs_asr:,}
 | `superseded` | 0 | 0 | 0 |
 | `archived` | 0 | 0 | 0 |
 
-## 5. Owner Decision Ratification (OD-1)
+## 5. D9 Reference Cohort & Live Dry-Run Architecture
+
+The backfill validity dry-run incorporates a dual-branch execution model:
+1. **Branch A (Deterministic Synthetic Cohort)**: Evaluates the frozen D9 reference benchmark cohort (3,170 runs in `tev_design`, 1,420 runs in `asr`), ensuring 100% reproducible test verification across hermetic CI sandboxes.
+2. **Branch B (Read-Only Live Repository Scan)**: When research repositories `/home/marielle/projects/tev_design` and `/home/marielle/projects/asr` are accessible, run events from `.bth/log/*.jsonl` are folded into an ephemeral `/tmp` DuckDB catalog, and git commit histories are evaluated via read-only `git show` operations without writing to source trees or host registries.
+
+## 6. Owner Decision Ratification (OD-1)
 
 - [ ] Owner approves flipping `hide_inferred = true` on `AMINX-2026-001` in `.bth/instruments/aminx.toml`.
 - **Scientific Impact Rationale**: The {results.missing_sample_s_runs_tev} runs in `tev_design` executed between `2026-07-15` and `2026-07-28` lacked `sample_s` logging and executed under defective `aminx <= 0.1.0a22`. Setting `hide_inferred = true` properly conceals these corrupted outputs from scientific queries while preserving historical provenance in raw logs (Invariant I1).
