@@ -49,6 +49,7 @@ __all__ = [
     "degenerate_mappings",
     "MARGINAL",
     "invalid_reasons",
+    "load_label_overlay",
     "BOUNDS",
     "bound_violations",
     "missing_cases",
@@ -110,6 +111,31 @@ def _shown_blob_labels(repo: Path, packet_dir: Path) -> list[tuple[str, str, lis
     return out
 
 
+def _effective_label_sets(blob_slugs: list[str], overlay_slugs: list[str] | None) -> list[set[str]]:
+    """The label sets a blob contributes: its own label, else the overlay's; both when they disagree."""
+    own, ov = set(blob_slugs), set(overlay_slugs or [])
+    if own and ov and own != ov:
+        return [own, ov]
+    return [own or ov] if (own or ov) else []
+
+
+def load_label_overlay(path: Path | str) -> dict[str, list[str]]:
+    """Owner-confirmed labels from a confirmation TOML's ``[labels]`` table: ``"<sidecar path>" = "<slug>"`` or a list.
+
+    Each value obeys the sidecar label rules (readable slugs, ``off-charter`` alone); a bad value raises
+    ``Ac9LabelError`` naming the path. A file with no ``[labels]`` table gives an empty overlay.
+    """
+    data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
+    out: dict[str, list[str]] = {}
+    for sidecar, value in (data.get("labels") or {}).items():
+        try:
+            slugs = read_purpose_label({LABEL_TABLE: {"purpose": value}})
+        except PurposeLabelError as e:
+            raise Ac9LabelError(f"label for {sidecar!r} in {Path(path).name}: {e}") from e
+        out[str(sidecar)] = slugs or []
+    return out
+
+
 def packet_labels(repo: Path | str, packet_dir: Path | str) -> dict[str, list[str]]:
     """Shown sidecar path -> sorted purpose slugs (union over the path's blobs). Unlabelled sidecars are absent."""
     labels: dict[str, set[str]] = {}
@@ -132,9 +158,17 @@ def _packet_budget_dropped(manifest: dict[str, Any]) -> bool:
 
 
 def answer_key(
-    repo: Path | str, packet_dir: Path | str, charter_purposes: dict[str, dict[str, Any]]
+    repo: Path | str,
+    packet_dir: Path | str,
+    charter_purposes: dict[str, dict[str, Any]],
+    labels_overlay: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     """What the packet's work serves, from the labels.
+
+    ``labels_overlay`` (sidecar path -> slugs, ``load_label_overlay``) holds owner-confirmed labels for sidecars whose
+    blobs carry none: a label added to a sidecar file today never reaches a past run's blob, so an after-the-fact
+    batch lives outside the files (shadow.label, label_source owner_confirmed). A blob's own label and an overlay
+    label that disagree are both kept, so the path is ambiguous; neither silently wins (261110).
 
     Raises ``Ac9LabelError`` if a label names no charter purpose or cannot be read.
 
@@ -150,12 +184,14 @@ def answer_key(
     shown: set[str] = set()
     shown_blobs: set[tuple[str, str]] = set()
     n_shown_labelled = 0
-    for path, blob, slugs in _shown_blob_labels(repo_p, pkt):
+    overlay = labels_overlay or {}
+    for path, blob, blob_slugs in _shown_blob_labels(repo_p, pkt):
         shown_blobs.add((path, blob))
-        n_shown_labelled += bool(slugs)
-        if slugs:
-            per_path.setdefault(path, []).append((set(slugs), True))
-            shown |= set(slugs)
+        sets = _effective_label_sets(blob_slugs, overlay.get(path))
+        n_shown_labelled += bool(sets)
+        for labelled in sets:
+            per_path.setdefault(path, []).append((labelled, True))
+            shown |= labelled
 
     # Sidecars the packet withheld (excluded themselves, or belonging to a withheld run): their labels are still
     # the truth about the work, but readers could not see it. The same id set and matcher as the packet builder.
@@ -175,13 +211,14 @@ def answer_key(
         text = _blob_text(
             repo_p, blob
         )  # undecodable bytes are replaced; a label on the readable lines survives
-        slugs = set(_label_of(text, path) or [])
+        sets = _effective_label_sets(_label_of(text, path) or [], overlay.get(rel))
+        slugs = set().union(*sets) if sets else set()
         named = ids_named(text, pats) & set(charter_purposes)
         if slugs or named:
             n_withheld_sidecars += 1
         withheld |= slugs | named
-        if slugs:
-            per_path.setdefault(rel, []).append((slugs, False))
+        for labelled in sets:
+            per_path.setdefault(rel, []).append((labelled, False))
 
     firm: set[str] = set()
     disagree: set[str] = set()

@@ -12,8 +12,10 @@ import bathos.bearings.ac9 as ac9
 from bathos.bearings.ac9 import (
     BOUNDS,
     OFF_CHARTER,
+    Ac9LabelError,
     answer_key,
     bound_violations,
+    load_label_overlay,
     meets_pass,
     missing_cases,
     oracle_reading,
@@ -238,3 +240,59 @@ def test_the_oracle_reading_records_and_a_correct_mapping_of_it_passes(planted):
     )
     m = pooled_metrics([{"key": key, "readings": [{"gold": gold, "comparison": cmp}]}])
     assert meets_pass(m), m
+
+
+# ── owner-confirmed label overlay (261110) ───────────────────────────────────────────────────────────────────────
+
+
+def test_the_overlay_labels_a_sidecar_whose_blob_has_none(planted):  # noqa: F811
+    # plain.bth.toml carries no label; a past run's blob never gains one, so the overlay supplies it.
+    out, _ = _packet(planted)
+    key = answer_key(
+        planted["repo"], out, planted["charter"], {"scripts/plain.bth.toml": ["gamma-aim"]}
+    )
+    assert "gamma-aim" in key["present"] and key["labels"]["scripts/plain.bth.toml"] == [
+        "gamma-aim"
+    ]
+    assert key["n_shown_sidecars_labelled"] == 5
+
+
+def test_an_overlay_disagreeing_with_a_blob_label_makes_the_path_ambiguous(planted):  # noqa: F811
+    out, _ = _packet(planted)
+    key = answer_key(
+        planted["repo"], out, planted["charter"], {"scripts/grow.bth.toml": ["delta-aim"]}
+    )
+    assert "scripts/grow.bth.toml" in key["ambiguous_paths"]
+    assert {"alpha-aim", "delta-aim"} <= set(key["indeterminate"])
+
+
+def test_an_overlay_agreeing_with_a_blob_label_changes_nothing(planted):  # noqa: F811
+    out, _ = _packet(planted)
+    base = answer_key(planted["repo"], out, planted["charter"])
+    same = answer_key(
+        planted["repo"], out, planted["charter"], {"scripts/grow.bth.toml": ["alpha-aim"]}
+    )
+    assert same == base
+
+
+@pytest.mark.parametrize(
+    "value",
+    ['"L5"', '["off-charter", "alpha-aim"]', '"a--b"', "5"],
+    ids=["opaque", "mixed", "hyphens", "number"],
+)
+def test_a_malformed_overlay_label_is_refused(tmp_path, value):
+    f = tmp_path / "label_confirmation.toml"
+    f.write_text(f'since = "x"\n\n[labels]\n"scripts/a.bth.toml" = {value}\n')
+    with pytest.raises(Ac9LabelError, match="scripts/a.bth.toml"):
+        load_label_overlay(f)
+
+
+def test_a_wellformed_overlay_loads(tmp_path):
+    f = tmp_path / "label_confirmation.toml"
+    f.write_text(
+        '[labels]\n"scripts/a.bth.toml" = "alpha-aim"\n"scripts/b.bth.toml" = ["b-aim", "a-aim"]\n'
+    )
+    assert load_label_overlay(f) == {
+        "scripts/a.bth.toml": ["alpha-aim"],
+        "scripts/b.bth.toml": ["a-aim", "b-aim"],
+    }

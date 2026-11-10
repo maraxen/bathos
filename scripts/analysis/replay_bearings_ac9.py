@@ -95,7 +95,9 @@ def gate(repo: Path, work: Path, catalog_dir: Path | None) -> dict:
         ref=conf["ref"],
         catalog_dir=catalog_dir,
     )
-    key = ac9.answer_key(repo, full, charter)
+    overlay = ac9.load_label_overlay(LABEL_CONFIRMATION)
+    out["n_overlay_labels"] = len(overlay)
+    key = ac9.answer_key(repo, full, charter, overlay)
     plans, unmet = ac9.plan_planted_packets(_run_labels(full, key), charter)
     out |= {"full_packet_sha256": res["packet_sha256"], "plans": plans, "unmet": unmet}
     out["start_gate_ok"] = not unmet
@@ -217,12 +219,13 @@ def main() -> None:
 
     if a.build:
         charter = _charter_purposes(a.repo / ".bth" / "charter.toml")
+        overlay = ac9.load_label_overlay(LABEL_CONFIRMATION)
         built = {}
         for plan in g["plans"]:
             q = work / plan["packet"]
             sha = sub_packet(work / "full", q / "packet", set(plan["runs"]))
             verify_packet(q / "packet")
-            key = ac9.answer_key(a.repo, q / "packet", charter)
+            key = ac9.answer_key(a.repo, q / "packet", charter, overlay)
             reading = ac9.oracle_reading(q / "packet", key["labels"], sha)
             (q / "oracle_reading.json").write_text(json.dumps(reading, indent=2) + "\n")
             built[plan["packet"]] = {
@@ -259,6 +262,7 @@ def score(work: Path, repo: Path, catalog_dir: Path | None) -> None:
     from bathos.bearings.reading import _existing_reading
 
     charter = _charter_purposes(repo / ".bth" / "charter.toml")
+    overlay = ac9.load_label_overlay(LABEL_CONFIRMATION)
     built = json.loads((work / "built.json").read_text())
     packets, oracle_packets = [], []
     decoy_mapped = decoy_total = 0
@@ -271,7 +275,7 @@ def score(work: Path, repo: Path, catalog_dir: Path | None) -> None:
                 leak_or_hash += 1
         except Exception:  # noqa: BLE001
             leak_or_hash += 1
-        key = ac9.answer_key(repo, pdir, charter)
+        key = ac9.answer_key(repo, pdir, charter, overlay)
         invalid += [f"{q}: missing {c}" for c in ac9.missing_cases(key)]
         invalid += [f"{q}: {v}" for v in ac9.bound_violations(key, charter)]
         readings = []
