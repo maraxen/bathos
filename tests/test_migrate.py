@@ -437,7 +437,7 @@ def test_migrate_v16_to_v17_exploratory_fields_null_backfill(tmp_path):
         values = tbl_after.column(field_name).to_pylist()
         assert all(v is None for v in values), f"{field_name}: expected all None, got {values}"
     assert set(tbl_after.column("schema_version").to_pylist()) == {CURRENT_SCHEMA_VERSION}
-    assert CURRENT_SCHEMA_VERSION == "19"
+    assert CURRENT_SCHEMA_VERSION == "20"
 
 
 def test_migrate_v17_to_v18_dependency_provenance_null_backfill(tmp_path):
@@ -524,3 +524,41 @@ def test_migrate_v14_to_v15_git_provenance_fields_null_backfill(tmp_path):
     assert tbl_after.num_rows == 1
     schema_versions = tbl_after.column("schema_version").to_pylist()
     assert all(v == CURRENT_SCHEMA_VERSION for v in schema_versions)
+
+
+def test_migrate_v19_to_v20_toolchain_version_source_null_backfill(tmp_path):
+    """v19->v20 migration: toolchain_version_source backfills to None."""
+    from bathos.compact import MIGRATIONS
+    from bathos.migrate import migrate_catalog
+    from bathos.schema import COOL_SCHEMA, CURRENT_SCHEMA_VERSION
+
+    v19_schema = pa.schema([f for f in COOL_SCHEMA if f.name != "toolchain_version_source"])
+    r = Run(
+        project_slug="test-project",
+        command="python test.py",
+        argv=["python", "test.py"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+    )
+    v19_tbl = r.to_arrow().select([f.name for f in v19_schema])
+    v19_tbl = v19_tbl.set_column(
+        v19_tbl.schema.get_field_index("schema_version"),
+        "schema_version",
+        pa.array(["19"], type=pa.string()),
+    )
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    fragment_path = runs_dir / "run_v19_test.parquet"
+    pq.write_table(v19_tbl, fragment_path)
+
+    result = migrate_catalog(tmp_path, dry_run=False)
+    assert result.migrated == 1
+    tbl_after = pq.read_table(fragment_path)
+    assert tbl_after.column("toolchain_version_source").to_pylist() == [None]
+    assert tbl_after.column("schema_version").to_pylist() == [CURRENT_SCHEMA_VERSION]
+
+    migrated = MIGRATIONS["19"]({"schema_version": "19"})
+    assert migrated["toolchain_version_source"] is None
+    assert migrated["schema_version"] == "20"
+

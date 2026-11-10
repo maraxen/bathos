@@ -39,6 +39,7 @@ make in step 4 -- this wave adds the function; step 4 wires its callers.
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 
 import duckdb
@@ -134,6 +135,7 @@ CREATE TABLE IF NOT EXISTS runs (
     tentative_outcome VARCHAR,
     agent_session VARCHAR,
     dependency_provenance VARCHAR,
+    toolchain_version_source VARCHAR,
     dependency_lock_sha256 VARCHAR,
     component_id VARCHAR,
     component_sidecar_sha256 VARCHAR,
@@ -288,7 +290,36 @@ CREATE TABLE IF NOT EXISTS archived_items (
     bundle_path VARCHAR,
     archived_by VARCHAR,
     recorded_at VARCHAR,
-    record_id VARCHAR PRIMARY KEY
+    record_id VARCHAR PRIMARY KEY,
+    script_sha256 VARCHAR,
+    run_ids VARCHAR
+)
+"""
+
+ACKNOWLEDGMENT_LEDGER_DDL = """
+CREATE TABLE IF NOT EXISTS acknowledgment_ledger (
+    id VARCHAR PRIMARY KEY,
+    kind VARCHAR NOT NULL,
+    entity_type VARCHAR NOT NULL,
+    entity_id VARCHAR NOT NULL,
+    run_ids VARCHAR NOT NULL,
+    surface VARCHAR NOT NULL,
+    reason VARCHAR NOT NULL,
+    actor VARCHAR NOT NULL,
+    recorded_at VARCHAR NOT NULL
+)
+"""
+
+SUPERSESSION_EDGES_DDL = """
+CREATE TABLE IF NOT EXISTS supersession_edges (
+    id VARCHAR PRIMARY KEY,
+    entity_type VARCHAR NOT NULL,
+    entity_id VARCHAR NOT NULL,
+    superseded_by_type VARCHAR NOT NULL,
+    superseded_by_id VARCHAR NOT NULL,
+    reason VARCHAR NOT NULL,
+    declared_by VARCHAR NOT NULL,
+    declared_at VARCHAR NOT NULL
 )
 """
 
@@ -350,6 +381,8 @@ SIDECAR_ANCHORS_COLUMNS: list[str] = _columns_of(SIDECAR_ANCHORS_DDL)
 BLAST_RADIUS_LEDGER_COLUMNS: list[str] = _columns_of(BLAST_RADIUS_LEDGER_DDL)
 TRUST_LEDGER_COLUMNS: list[str] = _columns_of(TRUST_LEDGER_DDL)
 ARCHIVED_ITEMS_COLUMNS: list[str] = _columns_of(ARCHIVED_ITEMS_DDL)
+ACKNOWLEDGMENT_LEDGER_COLUMNS: list[str] = _columns_of(ACKNOWLEDGMENT_LEDGER_DDL)
+SUPERSESSION_EDGES_COLUMNS: list[str] = _columns_of(SUPERSESSION_EDGES_DDL)
 SUBMITS_COLUMNS: list[str] = _columns_of(SUBMITS_DDL)
 OUTPUT_COPIES_COLUMNS: list[str] = _columns_of(OUTPUT_COPIES_DDL)
 
@@ -365,6 +398,13 @@ def _add_missing_columns(con: duckdb.DuckDBPyConnection, table: str, ddl: str) -
     created before a column was added to the DDL would otherwise lack it. Column name and type
     are parsed from the DDL lines; the PRIMARY KEY column is skipped.
     """
+    existing = {
+        row[0]
+        for row in con.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = ?",
+            [table],
+        ).fetchall()
+    }
     for line in ddl.strip().splitlines():
         stripped = line.strip().rstrip(",").strip()
         if not stripped or stripped.startswith(_DDL_NON_COLUMN_PREFIXES):
@@ -373,7 +413,10 @@ def _add_missing_columns(con: duckdb.DuckDBPyConnection, table: str, ddl: str) -
         if len(parts) != 2 or "PRIMARY KEY" in parts[1]:
             continue
         name, col_type = parts
-        con.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {name} {col_type}")
+        if name in existing:
+            continue
+        col_type_clean = col_type.replace(" NOT NULL", "")
+        con.execute(f"ALTER TABLE {table} ADD COLUMN {name} {col_type_clean}")
 
 
 def init_index_schema(con: duckdb.DuckDBPyConnection) -> None:
@@ -390,6 +433,16 @@ def init_index_schema(con: duckdb.DuckDBPyConnection) -> None:
     con.execute(BLAST_RADIUS_LEDGER_DDL)
     con.execute(TRUST_LEDGER_DDL)
     con.execute(ARCHIVED_ITEMS_DDL)
+    _add_missing_columns(con, "archived_items", ARCHIVED_ITEMS_DDL)
+    con.execute(ACKNOWLEDGMENT_LEDGER_DDL)
+    con.execute(SUPERSESSION_EDGES_DDL)
+    _add_missing_columns(con, "supersession_edges", SUPERSESSION_EDGES_DDL)
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_supersession_entity ON supersession_edges(entity_type, entity_id)"
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_supersession_successor ON supersession_edges(superseded_by_type, superseded_by_id)"
+    )
     con.execute(SUBMITS_DDL)
     con.execute(OUTPUT_COPIES_DDL)
 
@@ -405,6 +458,103 @@ def _empty_select(ddl: str) -> str:
         name, col_type = stripped.split(None, 1)
         cols.append(f"CAST(NULL AS {col_type.replace(' PRIMARY KEY', '')}) AS {name}")
     return "SELECT " + ", ".join(cols) + " WHERE false"
+
+
+def record_acknowledgment(
+    catalog_dir: Path | str | None,
+    kind: str,
+    entity_type: str,
+    entity_id: str,
+    run_ids: list[str],
+    surface: str,
+    reason: str,
+    actor: str | None = None,
+) -> str:
+    """Record a gate acknowledgment or estimand override in acknowledgment_ledger."""
+    import json
+    import os
+    import uuid
+    from datetime import UTC, datetime
+
+    from bathos.config import default_catalog_dir
+    from bathos.runlog.emit import emit_or_legacy, unit_of_work
+
+    cd = Path(catalog_dir or default_catalog_dir())
+    ack_id = str(uuid.uuid4())
+    now_iso = datetime.now(UTC).isoformat()
+    actor_str = actor or os.environ.get("USER", "unknown")
+    run_ids_json = json.dumps(run_ids)
+
+    def _write_legacy() -> None:
+        db_path = cd / "bathos.db"
+        con = duckdb.connect(str(db_path))
+        try:
+            con.execute(ACKNOWLEDGMENT_LEDGER_DDL)
+            con.execute(
+                "INSERT INTO acknowledgment_ledger "
+                "(id, kind, entity_type, entity_id, run_ids, surface, reason, actor, recorded_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [ack_id, kind, entity_type, entity_id, run_ids_json, surface, reason, actor_str, now_iso],
+            )
+        finally:
+            con.close()
+
+    event_kind = "validity.estimand_override_recorded" if "estimand" in kind else "validity.acknowledged"
+    with unit_of_work(cd):
+        emit_or_legacy(
+            kind=event_kind,
+            entity=[ack_id],
+            data={
+                "id": ack_id,
+                "kind": kind,
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+                "run_ids": run_ids_json,
+                "surface": surface,
+                "reason": reason,
+                "actor": actor_str,
+                "recorded_at": now_iso,
+            },
+            legacy_write=_write_legacy,
+            cwd=cd,
+        )
+    return ack_id
+
+
+def _wire_validity_cache_and_views(con: duckdb.DuckDBPyConnection, catalog_dir: Path) -> None:
+    from bathos.validity import (
+        VALIDITY_CACHE_DDL,
+        ensure_validity_cache,
+        validity_cache_db_path,
+    )
+
+    with contextlib.suppress(Exception):
+        ensure_validity_cache(catalog_dir, con)
+
+    vcache_path = validity_cache_db_path(catalog_dir)
+    if vcache_path.is_file():
+        try:
+            escaped_vc = str(vcache_path).replace("'", "''")
+            con.execute(f"ATTACH '{escaped_vc}' AS vcache (READ_ONLY)")
+            con.execute("CREATE TEMP VIEW validity_cache AS SELECT * FROM vcache.validity_cache")
+            con.execute(
+                """
+                CREATE TEMP VIEW runs_current AS
+                SELECT r.*
+                FROM runs r
+                LEFT JOIN vcache.validity_cache vc ON r.id = vc.run_id
+                WHERE COALESCE(vc.validity_state, 'current') NOT IN ('void', 'affected', 'superseded', 'archived')
+                """
+            )
+            return
+        except Exception:
+            pass
+
+    # Fallback if vcache not attached or error
+    with contextlib.suppress(Exception):
+        con.execute(f"CREATE TEMP VIEW validity_cache AS {_empty_select(VALIDITY_CACHE_DDL)}")
+    with contextlib.suppress(Exception):
+        con.execute("CREATE TEMP VIEW runs_current AS SELECT * FROM runs")
 
 
 def connect_read(
@@ -471,7 +621,9 @@ def connect_read(
             if missing == "empty":
                 return duckdb.connect("")
             raise FileNotFoundError(f"catalog database not found: {db_path}")
-        return duckdb.connect(str(db_path), read_only=read_only)
+        con = duckdb.connect(str(db_path), read_only=read_only)
+        _wire_validity_cache_and_views(con, cd)
+        return con
 
     idx_path = index_db_path(cd)
     con = duckdb.connect(":memory:")
@@ -505,8 +657,29 @@ def connect_read(
             con.execute("CREATE VIEW output_copies AS SELECT * FROM idx.output_copies")
         else:
             con.execute(f"CREATE VIEW output_copies AS {_empty_select(OUTPUT_COPIES_DDL)}")
+
+        have_acks = con.execute(
+            "SELECT count(*) FROM duckdb_tables() "
+            "WHERE database_name = 'idx' AND table_name = 'acknowledgment_ledger'"
+        ).fetchone()
+        if have_acks and have_acks[0]:
+            con.execute("CREATE VIEW acknowledgment_ledger AS SELECT * FROM idx.acknowledgment_ledger")
+        else:
+            con.execute(f"CREATE VIEW acknowledgment_ledger AS {_empty_select(ACKNOWLEDGMENT_LEDGER_DDL)}")
+
+        have_edges = con.execute(
+            "SELECT count(*) FROM duckdb_tables() "
+            "WHERE database_name = 'idx' AND table_name = 'supersession_edges'"
+        ).fetchone()
+        if have_edges and have_edges[0]:
+            con.execute("CREATE VIEW supersession_edges AS SELECT * FROM idx.supersession_edges")
+        else:
+            con.execute(f"CREATE VIEW supersession_edges AS {_empty_select(SUPERSESSION_EDGES_DDL)}")
+
+        _wire_validity_cache_and_views(con, cd)
     else:
         init_index_schema(con)
+        _wire_validity_cache_and_views(con, cd)
     return con
 
 
@@ -604,6 +777,8 @@ def connect_legacy(
 
 
 __all__ = [
+    "ACKNOWLEDGMENT_LEDGER_COLUMNS",
+    "ACKNOWLEDGMENT_LEDGER_DDL",
     "ARCHIVED_ITEMS_COLUMNS",
     "ARCHIVED_ITEMS_DDL",
     "BLAST_RADIUS_LEDGER_COLUMNS",
@@ -632,4 +807,5 @@ __all__ = [
     "connect_read",
     "index_db_path",
     "init_index_schema",
+    "record_acknowledgment",
 ]

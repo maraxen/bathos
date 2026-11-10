@@ -1383,6 +1383,7 @@ def _run_script_impl(
             if requires_waiver_reason
             else "{}"
         ),
+        toolchain_version_source="recorded" if dependency_provenance is not None else None,
     )
     run_uuid_var.set(run.id)
     event(

@@ -122,6 +122,13 @@ def resolve_tracked_packages(sidecar_path: Path | None, start: Path) -> list[str
     for where, value in sources:
         for entry in _parse_track_packages(value, where):
             seen.setdefault(entry, None)
+
+    # Auto-union active registry packages (spec §3.3)
+    from bathos.version_resolver import load_instrument_registry_packages
+
+    for pkg in load_instrument_registry_packages(start):
+        seen.setdefault(pkg, None)
+
     return list(seen)
 
 

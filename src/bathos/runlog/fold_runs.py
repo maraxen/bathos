@@ -112,6 +112,7 @@ GENERAL_FIELDS = (
     "epistemic_class",
     "agent_session",
     "dependency_provenance",
+    "toolchain_version_source",
     "claim_discriminates",
     "claim_isolates",
     "slurm_job_id",

@@ -43,7 +43,9 @@ CREATE TABLE IF NOT EXISTS archived_items (
     bundle_path TEXT,
     archived_by TEXT,
     recorded_at TEXT NOT NULL,
-    record_id TEXT PRIMARY KEY
+    record_id TEXT PRIMARY KEY,
+    script_sha256 TEXT,
+    run_ids TEXT
 )
 """
 
@@ -66,6 +68,8 @@ _FRAGMENT_SCHEMA = pa.schema(
         pa.field("bundle_path", pa.string()),
         pa.field("archived_by", pa.string()),
         pa.field("recorded_at", pa.string()),
+        pa.field("script_sha256", pa.string()),
+        pa.field("run_ids", pa.string()),  # JSON-encoded list[str]
     ]
 )
 
@@ -99,6 +103,8 @@ class ArchivedItemRecord:
     archived_by: str = ""
     recorded_at: str = field(default_factory=_now_iso)
     record_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    script_sha256: str | None = None
+    run_ids: list[str] = field(default_factory=list)
 
 
 def _fragments_dir(catalog_dir: Path | str) -> Path:
@@ -136,6 +142,8 @@ def write_archived_item_fragment(record: ArchivedItemRecord, catalog_dir: Path |
             "bundle_path": [record.bundle_path],
             "archived_by": [record.archived_by],
             "recorded_at": [record.recorded_at],
+            "script_sha256": [record.script_sha256],
+            "run_ids": [json.dumps(record.run_ids) if record.run_ids else None],
         },
         schema=_FRAGMENT_SCHEMA,
     )
@@ -169,6 +177,11 @@ def read_archived_item_fragments(catalog_dir: Path | str) -> list[ArchivedItemRe
             paths = json.loads(raw_paths) if raw_paths else []
         except (TypeError, ValueError):
             paths = []
+        raw_run_ids = pydict.get("run_ids", [None])[i] if "run_ids" in pydict else None
+        try:
+            run_ids = json.loads(raw_run_ids) if raw_run_ids else []
+        except (TypeError, ValueError):
+            run_ids = []
         records.append(
             ArchivedItemRecord(
                 record_id=pydict["record_id"][i],
@@ -186,6 +199,8 @@ def read_archived_item_fragments(catalog_dir: Path | str) -> list[ArchivedItemRe
                 bundle_path=pydict["bundle_path"][i] or "",
                 archived_by=pydict["archived_by"][i] or "",
                 recorded_at=pydict["recorded_at"][i],
+                script_sha256=pydict.get("script_sha256", [None])[i] if "script_sha256" in pydict else None,
+                run_ids=run_ids,
             )
         )
     return records
@@ -216,8 +231,9 @@ def _insert_row(con: duckdb.DuckDBPyConnection, record: ArchivedItemRecord) -> N
     con.execute(
         "INSERT INTO archived_items "
         "(id, project_slug, event, kind, paths, pre_archive_sha, stub_commit_sha, verdict, "
-        "reason, superseded_by, bundle_sha256, bundle_path, archived_by, recorded_at, record_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "reason, superseded_by, bundle_sha256, bundle_path, archived_by, recorded_at, record_id, "
+        "script_sha256, run_ids) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             record.id,
             record.project_slug,
@@ -234,6 +250,8 @@ def _insert_row(con: duckdb.DuckDBPyConnection, record: ArchivedItemRecord) -> N
             record.archived_by,
             record.recorded_at,
             record.record_id,
+            record.script_sha256,
+            json.dumps(record.run_ids) if record.run_ids else None,
         ],
     )
 
@@ -286,7 +304,7 @@ def latest_status(catalog_dir: Path | str, item_id: str) -> ArchivedItemRecord |
         row = con.execute(
             "SELECT id, project_slug, event, kind, paths, pre_archive_sha, stub_commit_sha, "
             "verdict, reason, superseded_by, bundle_sha256, bundle_path, archived_by, "
-            "recorded_at, record_id FROM archived_items WHERE id = ? "
+            "recorded_at, record_id, script_sha256, run_ids FROM archived_items WHERE id = ? "
             "ORDER BY recorded_at DESC LIMIT 1",
             [item_id],
         ).fetchone()
@@ -298,6 +316,10 @@ def latest_status(catalog_dir: Path | str, item_id: str) -> ArchivedItemRecord |
             paths = json.loads(row[4]) if row[4] else []
         except (TypeError, ValueError):
             paths = []
+        try:
+            run_ids = json.loads(row[16]) if row[16] else []
+        except (TypeError, ValueError):
+            run_ids = []
         return ArchivedItemRecord(
             id=row[0],
             project_slug=row[1],
@@ -314,6 +336,8 @@ def latest_status(catalog_dir: Path | str, item_id: str) -> ArchivedItemRecord |
             archived_by=row[12] or "",
             recorded_at=row[13],
             record_id=row[14],
+            script_sha256=row[15] or None,
+            run_ids=run_ids,
         )
     finally:
         con.close()

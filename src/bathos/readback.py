@@ -75,9 +75,11 @@ from pathlib import Path
 
 from bathos.campaign_report import CampaignReport
 from bathos.compact import _collect_output_metadata
+from bathos.config import default_catalog_dir
 from bathos.figure_manifest import FigureManifest
 from bathos.index import catalog_readable, connect_read
 from bathos.query import CatalogError, get_run
+from bathos.schema import Run
 
 
 class ProductTrustState(StrEnum):
@@ -108,6 +110,8 @@ class ResolvedPin:
     the run's output_metadata. When ``fresh`` is False these two differ (or
     ``live_content_hash`` is None because the file vanished) -- callers building a
     not-fresh diagnostic must report both, not report ``content_hash`` twice."""
+    validity_state: str = "current"
+    validity_reason: str | None = None
 
 
 def resolve_pin(catalog_dir: Path | str, run_id: str, output_path: str) -> ResolvedPin:
@@ -135,9 +139,16 @@ def resolve_pin(catalog_dir: Path | str, run_id: str, output_path: str) -> Resol
         CatalogError: If no run with ``run_id`` exists in the catalog.
     """
     cat_dir = Path(catalog_dir)
-    run = get_run(run_id, cat_dir)
+    run = get_run(run_id, cat_dir, include_superseded=True)
     if run is None:
         raise CatalogError(f"resolve_pin: no run found for run_id={run_id!r}")
+
+    from bathos.validity import resolve_validity
+    v_map = resolve_validity([run_id], cat_dir)
+    v = v_map.get(run_id)
+    val_state = v.state if v else "current"
+    val_reason = v.reason if v else None
+    val_hidden = v.is_hidden if v else False
 
     recorded_sha256: str | None = None
     if run.output_metadata and run.output_metadata not in ("", "[]"):
@@ -159,6 +170,20 @@ def resolve_pin(catalog_dir: Path | str, run_id: str, output_path: str) -> Resol
             trust_state=get_trust_state(cat_dir, None),
             fresh=False,
             live_content_hash=None,
+            validity_state=val_state,
+            validity_reason=val_reason,
+        )
+
+    if val_hidden:
+        return ResolvedPin(
+            run_id=run_id,
+            output_path=output_path,
+            content_hash=recorded_sha256,
+            trust_state=ProductTrustState.UNKNOWN,
+            fresh=False,
+            live_content_hash=None,
+            validity_state=val_state,
+            validity_reason=val_reason,
         )
 
     current = _collect_output_metadata(output_path)
@@ -172,6 +197,8 @@ def resolve_pin(catalog_dir: Path | str, run_id: str, output_path: str) -> Resol
         trust_state=get_trust_state(cat_dir, recorded_sha256),
         fresh=fresh,
         live_content_hash=live_sha256,
+        validity_state=val_state,
+        validity_reason=val_reason,
     )
 
 
@@ -247,7 +274,85 @@ def _find_run_with_output_sha256(
         for entry in entries:
             if isinstance(entry, dict) and entry.get("sha256") == content_hash:
                 return run_id, entry.get("path", "")
+
+    # Fallback to cool fragments
+    from bathos.catalog import read_runs
+    try:
+        for r in read_runs(Path(catalog_dir)):
+            if r.output_metadata:
+                try:
+                    entries = json.loads(r.output_metadata) if isinstance(r.output_metadata, str) else []
+                    for entry in entries:
+                        if isinstance(entry, dict) and entry.get("sha256") == content_hash:
+                            return r.id, entry.get("path", "")
+                except Exception:
+                    pass
+    except Exception:
+        pass
     return None
+
+
+def _find_all_runs_with_output_sha256(
+    catalog_dir: Path | str, content_hash: str
+) -> list[str]:
+    """Scan warm run catalog, cool fragments, and trust ledger for all run IDs producing content_hash."""
+    cat_path = Path(catalog_dir)
+    if not catalog_readable(cat_path):
+        return []
+
+    con = connect_read(cat_path, read_only=True)
+    run_ids: set[str] = set()
+    try:
+        tables = {
+            r[0]
+            for r in con.execute(
+                "SELECT table_name FROM duckdb_tables()"
+            ).fetchall()
+        }
+        if "runs" in tables:
+            rows = con.execute(
+                "SELECT id, output_metadata FROM runs "
+                "WHERE output_metadata IS NOT NULL AND output_metadata != '[]'"
+            ).fetchall()
+            for r_id, out_meta in rows:
+                try:
+                    entries = json.loads(out_meta) if out_meta else []
+                    for e in entries:
+                        if isinstance(e, dict) and e.get("sha256") == content_hash:
+                            run_ids.add(r_id)
+                            break
+                except Exception:
+                    pass
+        if "trust_ledger" in tables:
+            tl_rows = con.execute(
+                "SELECT run_id FROM trust_ledger WHERE content_hash = ? AND run_id IS NOT NULL",
+                [content_hash],
+            ).fetchall()
+            for (r_id,) in tl_rows:
+                if r_id:
+                    run_ids.add(r_id)
+    except Exception:
+        pass
+    finally:
+        con.close()
+
+    # Also check cool fragments for output_metadata
+    from bathos.catalog import read_runs
+    try:
+        for r in read_runs(cat_path):
+            if r.output_metadata:
+                try:
+                    entries = json.loads(r.output_metadata) if isinstance(r.output_metadata, str) else []
+                    for e in entries:
+                        if isinstance(e, dict) and e.get("sha256") == content_hash:
+                            run_ids.add(r.id)
+                            break
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    return sorted(run_ids)
 
 
 def get_trust_state(catalog_dir: Path | str, content_hash: str | None) -> str:
@@ -292,12 +397,46 @@ def get_trust_state(catalog_dir: Path | str, content_hash: str | None) -> str:
 
     to_state = fold_trust_state(catalog_dir, content_hash)
     if to_state == ProductTrustState.PROMOTED:
+        producing_runs = _find_all_runs_with_output_sha256(catalog_dir, content_hash)
+        if producing_runs:
+            from bathos.validity import resolve_validity
+
+            v_map = resolve_validity(producing_runs, catalog_dir)
+            if all(v_map.get(r) and v_map[r].is_hidden for r in producing_runs):
+                return ProductTrustState.CANDIDATE
         return ProductTrustState.PROMOTED
 
     if _is_registered_product(catalog_dir, content_hash):
         return ProductTrustState.CANDIDATE
 
     return ProductTrustState.UNKNOWN
+
+
+def verify_run_drawable(run_id: str, catalog_dir: Path | str | None = None) -> Run:
+    """Verify a run is drawable for external bridges (e.g. Maraxiom review_build).
+
+    Raises ResultHiddenError if run is hidden.
+    """
+    cat_dir = Path(catalog_dir or default_catalog_dir())
+    run = get_run(run_id, cat_dir, allow_cool_fallback=True, include_superseded=True)
+    if run is None:
+        raise CatalogError(f"Run {run_id} not found")
+    from bathos.errors import HIDDEN_STATE_TO_EXCEPTION, ResultHiddenError
+    from bathos.validity import resolve_validity
+
+    v_map = resolve_validity([run_id], cat_dir)
+    v = v_map.get(run_id)
+    if v and v.is_hidden:
+        exc_cls = HIDDEN_STATE_TO_EXCEPTION.get(v.state, ResultHiddenError)
+        raise exc_cls(
+            f"Run {run_id} is not drawable: validity state is {v.state}: {v.reason or ''}",
+            run_id=run_id,
+            state=v.state,
+            defect_id=v.defect_id,
+            reason=v.reason,
+            replacement_id=v.replacement_id,
+        )
+    return run
 
 
 def query_attestation(

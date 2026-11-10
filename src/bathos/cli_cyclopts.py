@@ -143,8 +143,23 @@ wire(
         "reference_get",
         "reference_search",
         "reference_applicable",
+        # instrument group (P1 defect tools)
+        "defect_declare",
+        "defect_list",
+        # findings & supersession (spec 261106 Phase 2)
+        "finding_create",
+        "finding_get",
+        "finding_list",
+        "supersede_edge_add",
+        "session_start",
+        # archive sweep & telemetry rotation (spec 261106 Phase 3)
+        "archive_sweep",
+        "telemetry_rotate",
     ],
 )
+
+if "findings" in app._commands:
+    app.command(app._commands["findings"], name="finding")
 
 del _bathos_mcp
 

@@ -10,6 +10,17 @@
         ],
         "matcher": "Bash|mcp__.*__submit_job"
       }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "bth-session-start-hook",
+            "type": "command"
+          }
+        ],
+        "matcher": ".*"
+      }
     ]
   }
 }

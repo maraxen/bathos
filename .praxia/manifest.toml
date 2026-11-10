@@ -98,3 +98,9 @@ event    = "PreToolUse"
 matcher  = "Bash|mcp__.*__submit_job"
 script   = "bth-preflight-hook"
 surfaces = ["claude"]
+
+[[plugin.hook_specs]]
+event    = "SessionStart"
+matcher  = ".*"
+script   = "bth-session-start-hook"
+surfaces = ["claude"]
