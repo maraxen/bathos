@@ -1,40 +1,49 @@
 # AC-9 decoy charter: the negative control (spec 261104 T7(a)). A mapper given a tev_design reading and THIS charter
-# should map almost nothing; over 20% of reading purposes mapped makes the AC-9 run invalid.
-# It is drawn from another real project (bathos, the experiment tracker) so its purposes are concrete and plausible,
-# not strawmen, and share no aim with protein library design. Same shape as the tev_design draft: 6 live, 2 retired.
-# Draft by the assistant 261109; the owner may substitute another project's charter.
-mandate = "Never lose track of what ran, what it produced, or whether its results are still valid, for one researcher across many projects and a cluster."
+# should map almost nothing; over 20% of reading purposes mapped (any target, retired included; ac9.decoy_invalid)
+# makes the AC-9 run invalid.
+#
+# Drawn from an ADJACENT project, nanobody (~/projects/nanobody/README.md), on the review of 261110: a decoy from an
+# unrelated field (the earlier bathos-tooling draft) is too easy, because nothing in a protein-design reading could
+# map to it. nanobody shares tev_design's vocabulary (proteins, variant libraries, MPNN design, MD) but not its aims,
+# so this tests whether the mapper tells a near miss from a match. Each purpose names an object only nanobody has
+# (ciMIST entropy networks, the nanobody, the three-finger target protein family).
+# Risk, for the owner: `multistate-binder-design` shares a method with tev_design's `mpnn-design`. A correct mapper
+# should still leave it unmapped (the target and the design objective differ), but it is the purpose most likely to
+# push a sound run over 20%.
+# Draft by the assistant 261110 for owner confirmation; nanobody has no confirmed charter of its own, so this is not
+# its charter and has no standing there. Same shape as the tev_design draft: 6 live, 2 retired.
+mandate = "Decide which residues of a therapeutic nanobody to engineer from allosteric networks learned from MD, then realise those edits as multistate sequence design against a family of related target proteins."
 
-[purpose.run-provenance]
-text = "Record every script run with its git state, command, outputs and outcome, safely from parallel cluster jobs."
+[purpose.entropy-network-site-ranking]
+text = "Turn ciMIST entropy-tree networks learned from nanobody MD into a ranked shortlist of residues to engineer."
 state = "live"
 
-[purpose.pre-registration]
-text = "Make hypotheses and pass/fail criteria be written and committed before a run, and evaluate them at run end."
+[purpose.dense-mi-graph-metrics]
+text = "Compute graph metrics (betweenness, eigenvector centrality, communities) on the dense mutual-information matrix as alternative site selectors."
 state = "live"
 
-[purpose.catalog-queries]
-text = "Answer what ran and what it produced through fast queries over a tiered run catalog."
+[purpose.kinetic-coupling-selector]
+text = "Use timing-correlation coupling from trajectory state sequences as an allostery signal independent of the entropy tree."
 state = "live"
 
-[purpose.cluster-sync]
-text = "Submit runs to the SLURM cluster and bring their records and outputs home."
+[purpose.apo-holo-entropy-contrast]
+text = "Compare entropy and mutual information between unbound and bound nanobody structures to locate binding-coupled residues."
 state = "live"
 
-[purpose.claim-rigor]
-text = "Gate claims on review coverage, controls and reproduction before a campaign may conclude."
+[purpose.multistate-binder-design]
+text = "Design nanobody sequences by multistate MPNN sampling conditioned on a slate of related three-finger target proteins (3FTx)."
 state = "live"
 
-[purpose.output-tiering]
-text = "Keep verified warm, cold and mirror copies of run outputs so worktrees can be deleted."
+[purpose.cross-reactivity-balance]
+text = "Broaden binding across the 3FTx family through second-shell, non-paratope edits without adding off-target binding."
 state = "live"
 
-[purpose.iceberg-catalog]
-text = "Store the catalog in pyiceberg tables."
+[purpose.bayesian-glm-reuse]
+text = "Reuse an existing Bayesian GLM that predicts allosteric mutation sites."
 state = "retired"
-retired_reason = "pyiceberg serves distributed data lakes; DuckDB plus Parquet is simpler for one researcher."
+retired_reason = "No such model exists in the related repos; the only Bayesian code is entropy and mutual-information estimation."
 
-[purpose.typer-cli]
-text = "Build the command line on Typer."
+[purpose.mist-degree-hubs]
+text = "Rank engineering sites by MIST tree degree alone (MI hubs)."
 state = "retired"
-retired_reason = "Replaced by cyclopts; there is no cli.py and no Typer."
+retired_reason = "Tree degree is not a validated graph metric; superseded by dense-MI graph metrics and kinetic coupling."
