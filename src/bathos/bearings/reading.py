@@ -226,8 +226,8 @@ def _existing_reading(cat_dir: Path, slug: str, reading_id: str) -> dict[str, An
     con = connect_read(cat_dir)
     try:
         row = con.execute(
-            "SELECT eid, packet_sha256, ref_sha, since, until, reader_id, purposes_json, open_lines_json "
-            "FROM bearings_readings WHERE project = ? AND reading_id = ? ORDER BY ts, eid LIMIT 1",
+            "SELECT eid, packet_sha256, ref_sha, since, until, reader_id, purposes_json, open_lines_json, "
+            "budget_json FROM bearings_readings WHERE project = ? AND reading_id = ? ORDER BY ts, eid LIMIT 1",
             [slug, reading_id],
         ).fetchone()
     finally:
@@ -243,6 +243,32 @@ def _existing_reading(cat_dir: Path, slug: str, reading_id: str) -> dict[str, An
         "reader_id": row[5],
         "purposes": json.loads(row[6] or "[]"),
         "open_lines": json.loads(row[7] or "[]"),
+        "budget": json.loads(row[8] or "null"),
+    }
+
+
+def _packet_budget(packet_dir: Path) -> dict[str, Any] | None:
+    """The packet's budget block in summary form (AC-4b), or None when the packet was built without a budget.
+
+    The manifest is outside the packet hash, so this records what the manifest said when the reading was stored.
+    """
+    try:
+        manifest = json.loads((packet_dir / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    block = manifest.get("budget")
+    if not isinstance(block, dict):
+        return None
+    dropped = block.get("dropped") or {}
+    runs = sorted(str(r) for r in dropped.get("runs") or [])
+    commits = sorted(str(c) for c in dropped.get("commits") or [])
+    return {
+        "max_bytes": block.get("max_bytes"),
+        "requested_since": block.get("requested_since"),
+        "effective_since": block.get("effective_since"),
+        "window_shortened": bool(block.get("window_shortened")),
+        "dropped_runs": runs,
+        "dropped_commits": commits,
     }
 
 
@@ -314,6 +340,7 @@ def record_reading(
             "purposes": purposes,
             "open_lines": open_lines,
             "links": links,
+            "budget": _packet_budget(Path(packet_dir)),
         },
         root=root,
         cat_dir=cat_dir,
@@ -409,11 +436,26 @@ def compare_reading(
         raise BearingsMappingInvalidError(
             f"Mapping must cover every reading purpose exactly once; missing={missing} unknown={extra}"
         )
-    for rp, target in mapping.items():
-        if target is not None and (not isinstance(target, str) or target not in charter_purposes):
+    # A reading purpose maps to no charter purpose (null or []), one (a string) or several (a list): one strand of
+    # work can serve two aims, and forcing one target would leave the other falsely silent.
+    targets_of: dict[str, list[str]] = {}
+    for rp, value in mapping.items():
+        targets = [] if value is None else [value] if isinstance(value, str) else value
+        if not isinstance(targets, list) or not all(isinstance(t, str) for t in targets):
             raise BearingsMappingInvalidError(
-                f"Mapping for {rp!r} names {target!r}, which is not a confirmed charter purpose id"
+                f"Mapping for {rp!r} must be null, a charter purpose id or a list of ids; got {value!r}"
             )
+        if len(set(targets)) != len(targets):
+            raise BearingsMappingInvalidError(f"Mapping for {rp!r} repeats a target: {targets!r}")
+        for target in targets:
+            if target not in charter_purposes:
+                raise BearingsMappingInvalidError(
+                    f"Mapping for {rp!r} names {target!r}, which is not a confirmed charter purpose id"
+                )
+        targets_of[rp] = sorted(targets)
+
+    budget = reading.get("budget")
+    budget_limited = bool(budget and (budget.get("dropped_runs") or budget.get("dropped_commits")))
 
     items: list[dict[str, Any]] = []
 
@@ -439,19 +481,22 @@ def compare_reading(
 
     mapped_live: set[str] = set()
     for rp in reading_ids:
-        target = mapping[rp]
-        if target is None:
+        targets = targets_of[rp]
+        if not targets:
             add("unmapped", "reading_purpose_id", rp)
-        elif charter_purposes[target].get("state") == "retired":
-            add("unmapped", "reading_purpose_id", rp, target=target, matched_retired=target)
-        else:
-            mapped_live.add(target)
-            add("mapped", "reading_purpose_id", rp, target=target, charter_purpose_id=target)
+        for target in targets:
+            if charter_purposes[target].get("state") == "retired":
+                add("unmapped", "reading_purpose_id", rp, target=target, matched_retired=target)
+            else:
+                mapped_live.add(target)
+                add("mapped", "reading_purpose_id", rp, target=target, charter_purpose_id=target)
     for i in range(len(reading["open_lines"])):
         add("unmapped", "open_line_index", i)
     for pid in sorted(charter_purposes):
         if charter_purposes[pid].get("state") == "live" and pid not in mapped_live:
-            add("silent", "charter_purpose_id", pid)
+            # When the packet dropped runs or commits for budget, a silent purpose may only be silent because its
+            # evidence was cut; the flag lets a scorer exclude it (T7(c): budget-dropped items are excluded).
+            add("silent", "charter_purpose_id", pid, budget_limited=budget_limited)
 
     counts = {
         k: sum(1 for it in items if it["kind"] == k) for k in ("mapped", "unmapped", "silent")
@@ -461,6 +506,7 @@ def compare_reading(
         "reading_id": reading_id,
         "charter_sha256": charter_sha,
         "counts": counts,
+        "budget": budget,
         "items": items,
     }
 

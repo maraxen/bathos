@@ -376,7 +376,8 @@ CREATE TABLE IF NOT EXISTS bearings_readings (
     reader_id VARCHAR,
     purposes_json VARCHAR,
     open_lines_json VARCHAR,
-    links_json VARCHAR
+    links_json VARCHAR,
+    budget_json VARCHAR
 )
 """
 
@@ -465,7 +466,9 @@ def init_index_schema(con: duckdb.DuckDBPyConnection) -> None:
     con.execute(CHARTER_CONFIRMATIONS_DDL)
     con.execute(CHARTER_PIVOTS_DDL)
     con.execute(BEARINGS_READINGS_DDL)
-    _add_missing_columns(con, "bearings_readings", BEARINGS_READINGS_DDL)  # links_json, AC-5b
+    _add_missing_columns(
+        con, "bearings_readings", BEARINGS_READINGS_DDL
+    )  # links_json (AC-5b), budget_json (AC-4b)
     con.execute(BEARINGS_ITEMS_DDL)
 
 
@@ -586,9 +589,13 @@ def connect_read(
             "WHERE database_name = 'idx' AND table_name = 'charter_confirmations'"
         ).fetchone()
         if have_confirmations and have_confirmations[0]:
-            con.execute("CREATE VIEW charter_confirmations AS SELECT * FROM idx.charter_confirmations")
+            con.execute(
+                "CREATE VIEW charter_confirmations AS SELECT * FROM idx.charter_confirmations"
+            )
         else:
-            con.execute(f"CREATE VIEW charter_confirmations AS {_empty_select(CHARTER_CONFIRMATIONS_DDL)}")
+            con.execute(
+                f"CREATE VIEW charter_confirmations AS {_empty_select(CHARTER_CONFIRMATIONS_DDL)}"
+            )
 
         have_pivots = con.execute(
             "SELECT count(*) FROM duckdb_tables() "
@@ -599,7 +606,10 @@ def connect_read(
         else:
             con.execute(f"CREATE VIEW charter_pivots AS {_empty_select(CHARTER_PIVOTS_DDL)}")
 
-        for tbl, tbl_ddl in (("bearings_readings", BEARINGS_READINGS_DDL), ("bearings_items", BEARINGS_ITEMS_DDL)):
+        for tbl, tbl_ddl in (
+            ("bearings_readings", BEARINGS_READINGS_DDL),
+            ("bearings_items", BEARINGS_ITEMS_DDL),
+        ):
             have_tbl = con.execute(
                 "SELECT count(*) FROM duckdb_tables() "
                 f"WHERE database_name = 'idx' AND table_name = '{tbl}'"  # noqa: S608 -- internal constant

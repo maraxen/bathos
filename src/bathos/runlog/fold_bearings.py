@@ -63,6 +63,8 @@ def fold_bearings_readings(events: list[dict]) -> list[dict[str, Any]]:
                 "purposes_json": _canonical_json(data.get("purposes", [])),
                 "open_lines_json": _canonical_json(data.get("open_lines", [])),
                 "links_json": _canonical_json(data.get("links", [])),
+                # The packet's budget block (AC-4b), or null for an unbudgeted packet or an older event.
+                "budget_json": _canonical_json(data.get("budget")),
             }
         )
     return rows

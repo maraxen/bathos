@@ -190,3 +190,90 @@ def test_the_mapping_alone_decides_what_is_silent(world):
     two = compare(world, rid, ["L3", "L4"], name="m2")
     assert sorted(silent(one)) == ["L3", "L4", "L5", "L6"]
     assert sorted(silent(two)) == ["L1", "L2", "L5", "L6"]
+
+
+def compare_raw(w, rid: str, mapping: dict, name: str = "raw") -> dict:
+    """Compare with a mapping given as-is (lists, nulls, bad values)."""
+    path = w["tmp"] / f"{name}.json"
+    path.write_text(json.dumps({"mapper_id": "mapper-B", "mapping": mapping}))
+    return compare_reading(w["repo"], reading_id=rid, mapping_file=path, catalog_dir=w["cat"])
+
+
+def test_one_reading_purpose_mapped_to_two_live_purposes_covers_both(world):
+    """One strand of work serving two aims: neither aim is silent (a one-target limit left one falsely silent)."""
+    res = compare_raw(world, record(world, 1), {"r1": ["L3", "L1"]})
+    assert sorted(it["charter_purpose_id"] for it in of_kind(res, "mapped")) == ["L1", "L3"]
+    assert sorted(silent(res)) == ["L2", "L4", "L5", "L6"]
+    assert res["counts"] == {"mapped": 2, "unmapped": 0, "silent": 4}
+
+
+def test_a_list_mixing_live_and_retired_maps_the_live_one_and_flags_the_retired_one(world):
+    res = compare_raw(world, record(world, 1), {"r1": ["L2", "R2"]})
+    assert [it["charter_purpose_id"] for it in of_kind(res, "mapped")] == ["L2"]
+    assert [it["matched_retired"] for it in of_kind(res, "unmapped")] == ["R2"]
+    assert "L2" not in silent(res)
+
+
+@pytest.mark.parametrize("empty", [None, []], ids=["null", "empty-list"])
+def test_null_and_empty_list_both_mean_unmapped(world, empty):
+    res = compare_raw(world, record(world, 1), {"r1": empty})
+    assert res["counts"] == {"mapped": 0, "unmapped": 1, "silent": len(LIVE)}
+
+
+def test_a_single_string_and_a_one_item_list_give_the_same_items(world):
+    rid = record(world, 1)
+    as_str = compare_raw(world, rid, {"r1": "L4"}, name="s")
+    as_list = compare_raw(world, rid, {"r1": ["L4"]}, name="l")
+    assert [it["item_id"] for it in as_str["items"]] == [it["item_id"] for it in as_list["items"]]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [["L1", "L1"], ["L1", "NOPE"], ["L1", 3], 7, {"L1": True}],
+    ids=["repeat", "unknown-id", "non-string-in-list", "number", "object"],
+)
+def test_malformed_multi_target_mappings_are_refused(world, bad):
+    from bathos.bearings.reading import BearingsMappingInvalidError
+
+    with pytest.raises(BearingsMappingInvalidError):
+        compare_raw(world, record(world, 1), {"r1": bad})
+
+
+def _plant_budget(w, runs: list[str], commits: list[str]) -> None:
+    """Add a budget block to the packet manifest (outside the packet hash), shaped as build_packet_within_budget
+    writes it."""
+    manifest_path = w["packet"] / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["budget"] = {
+        "max_bytes": 1000,
+        "bytes": 900,
+        "full_window_bytes": 5000,
+        "requested_since": SINCE,
+        "effective_since": SINCE,
+        "window_shortened": bool(runs or commits),
+        "dropped": {"reason": "budget", "runs": runs, "commits": commits},
+    }
+    manifest_path.write_text(json.dumps(manifest))
+
+
+def test_silent_items_are_budget_limited_when_the_packet_dropped_runs(world):
+    """AC-4b: a purpose whose evidence was cut for budget must be distinguishable from a truly silent one."""
+    _plant_budget(world, runs=["33333333dddddddd"], commits=[])
+    res = compare(world, record(world, 1), ["L1"])
+    assert res["budget"]["dropped_runs"] == ["33333333dddddddd"]
+    assert res["budget"]["window_shortened"] is True
+    assert {it["budget_limited"] for it in of_kind(res, "silent")} == {True}
+
+
+def test_silent_items_are_not_budget_limited_when_the_budget_dropped_nothing(world):
+    """Negative control: a budgeted packet that kept everything flags nothing."""
+    _plant_budget(world, runs=[], commits=[])
+    res = compare(world, record(world, 1), ["L1"])
+    assert res["budget"]["dropped_runs"] == [] and res["budget"]["dropped_commits"] == []
+    assert {it["budget_limited"] for it in of_kind(res, "silent")} == {False}
+
+
+def test_an_unbudgeted_packet_has_no_budget_and_flags_nothing(world):
+    res = compare(world, record(world, 1), ["L1"])
+    assert res["budget"] is None
+    assert {it["budget_limited"] for it in of_kind(res, "silent")} == {False}
