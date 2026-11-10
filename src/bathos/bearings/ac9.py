@@ -189,9 +189,13 @@ def answer_key(
     indeterminate = (withheld | disagree) - firm - {OFF_CHARTER}
     live = {p for p, v in charter_purposes.items() if v.get("state") == "live"}
     retired = {p for p, v in charter_purposes.items() if v.get("state") == "retired"}
-    n_withheld_runs = sum(
-        1 for e in manifest.get("exclusions", []) if str(e.get("path", "")).startswith("run:")
-    )
+    runs_by_reason: dict[str, int] = {}
+    for e in manifest.get("exclusions", []):
+        if str(e.get("path", "")).startswith("run:"):
+            reason = str(e.get("reason"))
+            runs_by_reason[reason] = runs_by_reason.get(reason, 0) + 1
+    # Withheld for what the run says (blindness filters), as distinct from runs outside the window's scope.
+    n_withheld_runs = sum(runs_by_reason.get(r, 0) for r in ("quotes_charter", "names_charter_id"))
     return {
         "present": sorted(live & firm),
         "silent": sorted(live - firm - indeterminate),
@@ -201,10 +205,10 @@ def answer_key(
         "off_charter_sidecars": sorted(p for p, s in labels.items() if OFF_CHARTER in s),
         "budget_limited": _packet_budget_dropped(manifest),
         "n_withheld_sidecars": n_withheld_sidecars,
-        # Runs the packet excluded for any reason. Those withheld for what they say have their sidecar labels read
-        # (withheld_run_sidecars); the rest (unreachable, not terminal) are outside the window. The AC-9 sidecar bounds
-        # the share.
+        # Runs withheld by the blindness filters (quotes_charter, names_charter_id); their sidecar labels are read
+        # (withheld_run_sidecars). The AC-9 sidecar bounds this share. All run exclusions, by reason, beside it.
         "n_withheld_runs": n_withheld_runs,
+        "run_exclusions_by_reason": dict(sorted(runs_by_reason.items())),
         "labels": {path: sorted(s) for path, s in sorted(labels.items())},
     }
 
