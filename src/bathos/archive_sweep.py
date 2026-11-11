@@ -998,11 +998,11 @@ def archive_sweep(
                     archived_by="agent",
                     run_ids=cand.get("run_ids", []),
                 )
-                append_archived_item_record(doc_record, cat_path)
+                append_archived_item_record(doc_record, cat_path, cwd=root_path)
                 archived_ids.append(cand_id)
 
         # Regenerate index before staging and commit so ARCHIVE_INDEX.md is included in commit
-        _regenerate_index(root_path, cat_path)
+        _regenerate_index(root_path, cat_path, project_slug=project_slug)
 
         # Scoped explicit git staging
         paths_to_stage: set[str] = set()
@@ -1037,7 +1037,7 @@ def archive_sweep(
         ]
 
         if staging_paths:
-            _run_git(["add", "--", *staging_paths], cwd=root_path)
+            _run_git(["add", "-f", "--", *staging_paths], cwd=root_path)
 
         commit_msg = f"archive: sweep {len(candidates)} obsolete items (proposal: {proposal_path})"
         diff_check = _run_git(["diff", "--cached", "--quiet"], cwd=root_path, check=False)

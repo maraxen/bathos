@@ -100,7 +100,7 @@ def _sha256_file(path: Path) -> str:
 
 def _run_git(args: list[str], cwd: Path, check: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["git", *args],
+        ["git", "-c", "core.hooksPath=/dev/null", *args],
         cwd=cwd,
         text=True,
         capture_output=True,
@@ -398,9 +398,9 @@ def archive_experiment_bundle(
         script_sha256=script_sha256,
         run_ids=matched_run_ids,
     )
-    append_archived_item_record(record, catalog_dir)
+    append_archived_item_record(record, catalog_dir, cwd=project_root)
     if commit:
-        _regenerate_index(project_root, catalog_dir)
+        _regenerate_index(project_root, catalog_dir, project_slug=project_slug)
 
     event(
         "archive.artifact_archived",
@@ -452,13 +452,28 @@ def _build_untracked_bundle(paths: list[Path], project_root: Path, bundle_target
         _run_git(["bundle", "create", str(bundle_target), "--all"], cwd=scratch)
 
 
-def _regenerate_index(project_root: Path, catalog_dir: Path) -> None:
+def _regenerate_index(
+    project_root: Path,
+    catalog_dir: Path,
+    project_slug: str | None = None,
+) -> None:
     """Regenerate the git-tracked, greppable flat index at .bth/ARCHIVE_INDEX.md.
 
     Generated artifact, like .praxia/docs/INDEX.md elsewhere -- never hand-edited,
     rebuilt in full from the archived_items ledger on every archive/restore.
     """
+    from bathos.config import find_project_config, load_project_config
     from bathos.index import catalog_readable, connect_read
+
+    if not project_slug or project_slug == "unknown":
+        cfg_file = find_project_config(project_root)
+        if cfg_file is not None and cfg_file.is_file():
+            with contextlib.suppress(Exception):
+                cfg = load_project_config(cfg_file)
+                if cfg and cfg.slug:
+                    project_slug = cfg.slug
+        if not project_slug or project_slug == "unknown":
+            project_slug = project_root.name
 
     index_dir = project_root / ".bth"
     index_dir.mkdir(parents=True, exist_ok=True)
@@ -470,7 +485,8 @@ def _regenerate_index(project_root: Path, catalog_dir: Path) -> None:
         try:
             rows = con.execute(
                 "SELECT id, event, kind, paths, verdict, reason, superseded_by, recorded_at "
-                "FROM archived_items ORDER BY recorded_at ASC"
+                "FROM archived_items WHERE project_slug IN (?, 'unknown') ORDER BY recorded_at ASC",
+                [project_slug],
             ).fetchall()
         finally:
             con.close()
@@ -706,8 +722,9 @@ def restore_archived_item(
                 run_ids=record.run_ids if record else [],
             ),
             catalog_dir,
+            cwd=project_root,
         )
-        _regenerate_index(project_root, catalog_dir)
+        _regenerate_index(project_root, catalog_dir, project_slug=project_slug)
     except (ArchiveError, RestoreConflictError):
         raise
     except Exception as e:
