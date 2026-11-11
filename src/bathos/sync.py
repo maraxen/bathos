@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -50,6 +51,58 @@ class SyncResult:
     remote: str
     filtered: int = 0
     truncated_candidates: list[str] = field(default_factory=list)
+
+
+def _sync_shadow_dir(
+    host: str,
+    remote_cat: str,
+    catalog_dir: Path,
+    pull: bool,
+    ssh_opts: str,
+    remote_name: str,
+    direction: str,
+) -> None:
+    """Carry the Bearings shadow log at its default ``<catalog_dir>/shadow`` (spec 261104 T7): at-work labels written
+    by cluster runs are captured once, so they must come back. Files are per host and pid, so a merge never collides;
+    ``--update`` re-copies a log that grew since the last sync (``--ignore-existing`` would freeze a partial copy).
+    Best effort: a failure is said on stderr and never fails the sync. A shadow log configured elsewhere is not
+    carried."""
+    local = catalog_dir / "shadow"
+    if not pull and not local.is_dir():
+        return
+    local.mkdir(parents=True, exist_ok=True)
+    remote = f"{host}:{remote_cat}/shadow/"
+    src, dst = (remote, str(local) + "/") if pull else (str(local) + "/", remote)
+    cmd = [
+        "rsync",
+        "-az",
+        f"-e{ssh_opts}",
+        "--update",
+        "--ignore-missing-args",
+        "--info=progress2",
+        src,
+        dst,
+    ]
+    event(
+        "sync.rsync_start",
+        direction=direction,
+        remote=remote_name,
+        src=src,
+        dst=dst,
+        filters="shadow",
+    )
+    try:
+        proc, fired = _popen_rsync_watchdog(cmd)
+        _out, err = proc.communicate()
+        code = proc.returncode
+    except Exception as e:  # noqa: BLE001 - best effort, reported below
+        code, err, fired = -1, str(e), None
+    event("sync.rsync_end", exit_code=code, duration_ms=0, bytes_transferred=0, files_transferred=0)
+    if code != 0 or (fired is not None and fired.is_set()):
+        print(
+            f"bathos: Bearings shadow log not synced ({direction} {remote}): rsync exit {code} {str(err)[:200]}",
+            file=sys.stderr,
+        )
 
 
 def sync_catalog(
@@ -320,6 +373,8 @@ def sync_catalog(
     )
     if camp_exit != 0:
         raise RuntimeError(f"rsync failed with exit code {camp_exit}")
+
+    _sync_shadow_dir(host, remote_cat, catalog_dir, pull, ssh_opts, remote_name, direction)
 
     # Post-pull truncation scan (Fix 6)
     truncated_candidates = []

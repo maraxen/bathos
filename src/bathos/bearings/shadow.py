@@ -3,8 +3,8 @@
 Nothing here shows anything to anyone or changes what a reader sees. It records, and it scores.
 
 - ``resolve_shadow_log_dir`` / ``ensure_shadow_pipeline``: where shadow records go, and starting cisternal's pipeline
-  for them (owner 261111: a separate shadow log, off unless configured; the ``CISTERNAL_TELEMETRY`` cutover pipeline
-  is reused when it is already running).
+  for them (owner 261111: a separate shadow log, on by default at ``<catalog_dir>/shadow``, overridable and
+  disablable by env or config; the ``CISTERNAL_TELEMETRY`` cutover pipeline is reused when it is already running).
 - ``emit_at_work_label``: called by ``bth run``; one ``shadow.label`` (source ``at_work``) per labelled sidecar, keyed
   on the sidecar alone, because a label written at work time cannot know any packet or reader.
 - ``comparison_payload`` / ``emit_comparison``: owner-side, after a comparison; one raw ``shadow.verdict`` per
@@ -74,39 +74,60 @@ class ShadowConfigError(ValueError):
 @dataclass(frozen=True)
 class ShadowLogDir:
     path: Path | None
-    source: str  # "argument" | "env" | "pyproject:<path>" | "user_config:<path>" | "off" | "disabled:<layer>"
+    # "argument" | "env" | "bth_toml:<path>" | "pyproject:<path>" | "user_config:<path>" | "default:<catalog_dir>"
+    # | "disabled:<layer>"
+    source: str
 
 
-def _nearest_pyproject(start: Path) -> Path | None:
+_KEY = "shadow_log_dir"
+_ALLOWED_KEYS = frozenset({_KEY})
+
+
+def _nearest(start: Path, name: str) -> Path | None:
     for d in (start, *start.parents):
-        p = d / "pyproject.toml"
+        p = d / name
         if p.is_file():
             return p
     return None
 
 
-def _toml_value(path: Path, keys: tuple[str, ...]) -> Any:
+def _bearings_table(path: Path, keys: tuple[str, ...]) -> dict[str, Any] | None:
+    """The ``[...bearings]`` table at ``keys`` in ``path``, or None when absent. A file that does not parse, a table
+    that is not a table, and an unknown key all raise, naming the file and key (never fall back)."""
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError) as e:
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
         raise ShadowConfigError(f"cannot read {path}: {e}") from e
     node: Any = data
     for k in keys:
         if not isinstance(node, dict) or k not in node:
             return None
         node = node[k]
+    where = f"[{'.'.join(keys)}] in {path}"
+    if not isinstance(node, dict):
+        raise ShadowConfigError(f"{where} must be a table, got {type(node).__name__}")
+    unknown = sorted(set(node) - _ALLOWED_KEYS)
+    if unknown:
+        raise ShadowConfigError(
+            f"unknown key(s) {unknown} in {where}; allowed: {sorted(_ALLOWED_KEYS)}"
+        )
+    if _KEY in node and not isinstance(node[_KEY], str):
+        raise ShadowConfigError(
+            f"{_KEY} in {where} must be a string, got {type(node[_KEY]).__name__}"
+        )
     return node
 
 
-def _as_dir(raw: Any, base: Path, where: str) -> Path | None:
-    if not isinstance(raw, str):
-        raise ShadowConfigError(
-            f"shadow_log_dir in {where} must be a string, got {type(raw).__name__}"
-        )
+def _as_dir(raw: str, base: Path) -> Path | None:
     if raw.strip().lower() in _DISABLED:
         return None
     p = Path(raw).expanduser()
     return p if p.is_absolute() else (base / p)
+
+
+def _user_config_path() -> Path:
+    xdg = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(xdg) / "bathos" / "config.toml"
 
 
 def resolve_shadow_log_dir(
@@ -114,10 +135,41 @@ def resolve_shadow_log_dir(
     *,
     start: Path | None = None,
     user_config: Path | None = None,
+    catalog_dir: Path | None = None,
 ) -> ShadowLogDir:
-    """Explicit argument > ``BTH_SHADOW_LOG_DIR`` (``none``/empty disables) > ``[tool.bathos] shadow_log_dir`` in the
-    nearest ``pyproject.toml`` > ``shadow_log_dir`` in ``${XDG_CONFIG_HOME:-~/.config}/bathos/config.toml`` > off.
-    A malformed file raises ``ShadowConfigError``."""
+    """Where Bearings shadow records go. First match wins:
+
+    1. an explicit argument;
+    2. ``BTH_SHADOW_LOG_DIR`` (``none``/empty disables);
+    3. ``[bearings] shadow_log_dir`` in the nearest ``.bth.toml`` (the project file SLURM jobs read);
+    4. ``[tool.bathos.bearings] shadow_log_dir`` in the nearest ``pyproject.toml``;
+    5. ``[bearings] shadow_log_dir`` in ``${XDG_CONFIG_HOME:-~/.config}/bathos/config.toml``;
+    6. the code default ``<catalog_dir>/shadow``, derived from the catalog root (``BTH_CATALOG_DIR`` or its default),
+       reported as ``default:<catalog_dir>``.
+
+    On by default (owner 261111): at-work labels are captured once and cannot be regenerated. Config files hold
+    overrides only. Every candidate file is read up front, whether or not a higher layer decides, and a malformed
+    file, a wrong type or an unknown key raises ``ShadowConfigError``; it never falls back to the default."""
+    here = Path(start) if start is not None else Path.cwd()
+    layers: list[tuple[str, Path, dict[str, Any] | None]] = []
+    bth_toml = _nearest(here, ".bth.toml")
+    if bth_toml is not None:
+        layers.append(
+            (f"bth_toml:{bth_toml}", bth_toml.parent, _bearings_table(bth_toml, ("bearings",)))
+        )
+    pyproj = _nearest(here, "pyproject.toml")
+    if pyproj is not None:
+        layers.append(
+            (
+                f"pyproject:{pyproj}",
+                pyproj.parent,
+                _bearings_table(pyproj, ("tool", "bathos", "bearings")),
+            )
+        )
+    ucfg = user_config if user_config is not None else _user_config_path()
+    if ucfg.is_file():
+        layers.append((f"user_config:{ucfg}", ucfg.parent, _bearings_table(ucfg, ("bearings",))))
+
     if explicit is not None:
         return ShadowLogDir(Path(explicit).expanduser(), "argument")
     if ENV_VAR in os.environ:
@@ -125,24 +177,14 @@ def resolve_shadow_log_dir(
         if raw.strip().lower() in _DISABLED:
             return ShadowLogDir(None, "disabled:env")
         return ShadowLogDir(Path(raw).expanduser(), "env")
-    here = Path(start) if start is not None else Path.cwd()
-    pyproj = _nearest_pyproject(here)
-    if pyproj is not None:
-        raw = _toml_value(pyproj, ("tool", "bathos", "shadow_log_dir"))
-        if raw is not None:
-            p = _as_dir(raw, pyproj.parent, str(pyproj))
-            return ShadowLogDir(p, f"pyproject:{pyproj}" if p else f"disabled:pyproject:{pyproj}")
-    if user_config is None:
-        xdg = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
-        user_config = Path(xdg) / "bathos" / "config.toml"
-    if user_config.is_file():
-        raw = _toml_value(user_config, ("shadow_log_dir",))
-        if raw is not None:
-            p = _as_dir(raw, user_config.parent, str(user_config))
-            return ShadowLogDir(
-                p, f"user_config:{user_config}" if p else f"disabled:user_config:{user_config}"
-            )
-    return ShadowLogDir(None, "off")
+    for source, base, table in layers:
+        if table is not None and _KEY in table:
+            p = _as_dir(table[_KEY], base)
+            return ShadowLogDir(p, source if p else f"disabled:{source}")
+    from bathos.charter import _resolve_catalog_dir
+
+    cat = _resolve_catalog_dir(catalog_dir)
+    return ShadowLogDir(cat / "shadow", f"default:{cat}")
 
 
 def _git_toplevel(path: Path) -> Path | None:
@@ -167,18 +209,21 @@ def _git_toplevel(path: Path) -> Path | None:
 
 
 def ensure_shadow_pipeline(
-    explicit: Path | str | None = None, *, start: Path | None = None
+    explicit: Path | str | None = None,
+    *,
+    start: Path | None = None,
+    catalog_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Make sure a cisternal pipeline can take shadow records. Returns ``{active, pipeline, path, source}``.
 
     ``pipeline`` is ``existing`` when one is already running (the cutover, or an earlier call), ``shadow`` when this
-    call started one into the resolved dir, ``off`` when nothing is configured. A dir inside the project's git work
+    call started one into the resolved dir, ``off`` when a layer disabled it. A dir inside the project's git work
     tree is refused (a reader's packet is built from that tree)."""
     from cisternal.telemetry.pipeline import get_pipeline
 
     if get_pipeline() is not None:
         return {"active": True, "pipeline": "existing", "path": None, "source": "existing"}
-    res = resolve_shadow_log_dir(explicit, start=start)
+    res = resolve_shadow_log_dir(explicit, start=start, catalog_dir=catalog_dir)
     if res.path is None:
         return {"active": False, "pipeline": "off", "path": None, "source": res.source}
     path = res.path.resolve()
@@ -253,12 +298,29 @@ def emit_at_work_label(
     log_dir: Path | str | None = None,
 ) -> str:
     """Emit the sidecar's ``[charter] purpose`` as an at-work label. Returns what happened, never raises:
-    ``emitted``, ``off`` (no shadow log), ``no_label``, or ``skipped:<reason>``."""
+    ``emitted``, ``off`` (a layer disabled the shadow log), ``no_label``, or ``skipped:<reason>``.
+
+    A labelled sidecar whose label is not recorded says so on stderr every time (the label cannot be captured
+    later); the run itself is never changed."""
+    import sys
+
     try:
-        return _emit_at_work_label(Path(sidecar_path), run_id, catalog_dir, log_dir)
+        status = _emit_at_work_label(Path(sidecar_path), run_id, catalog_dir, log_dir)
+    except ShadowConfigError as e:
+        print(f"bathos: Bearings at-work label NOT recorded: {e}", file=sys.stderr)
+        return "skipped:config_error"
     except Exception as e:  # a shadow emit must never change a run
-        logger.warning("bearings at-work label not emitted: %s: %s", type(e).__name__, e)
+        print(
+            f"bathos: Bearings at-work label NOT recorded ({type(e).__name__}: {e})",
+            file=sys.stderr,
+        )
         return f"skipped:error:{type(e).__name__}"
+    if status == "off" or status.startswith("skipped:"):
+        print(
+            f"bathos: Bearings at-work label NOT recorded ({status}) for {sidecar_path}",
+            file=sys.stderr,
+        )
+    return status
 
 
 def _emit_at_work_label(path: Path, run_id: str, catalog_dir: Path | None, log_dir: Any) -> str:
@@ -279,9 +341,9 @@ def _emit_at_work_label(path: Path, run_id: str, catalog_dir: Path | None, log_d
     # emit time cannot be undone, and a charter re-confirm must not erase the labels gathered so far.
     charter_sha, confirmed, ever_confirmed, known = _charter_state(root, catalog_dir)
     unknown = sorted(set(slugs) - known - {OFF_CHARTER})
-    pipe = ensure_shadow_pipeline(log_dir, start=root)
+    pipe = ensure_shadow_pipeline(log_dir, start=root, catalog_dir=catalog_dir)
     if not pipe["active"]:
-        return "off"
+        return "off" if pipe["pipeline"] == "off" else _skip("pipeline_not_started", path)
     import cisternal.shadow as cs
 
     project = _resolve_project_slug(root)
@@ -636,11 +698,12 @@ def shadow_check(
     log and on the mode-state files. A feature with no records reports its refusal instead of a result."""
     from cisternal.shadow.mode_state import GateCheckError, check_mode_state
 
+    source = "argument"
     if records_dir is None:
         res = resolve_shadow_log_dir()
         if res.path is None:
-            raise ShadowConfigError(f"no shadow log configured ({res.source}); set {ENV_VAR}")
-        records_dir = res.path
+            raise ShadowConfigError(f"the shadow log is disabled ({res.source}); nothing to check")
+        records_dir, source = res.path, res.source
     msd = Path(mode_state_dir).resolve()
     if repo_root is None and msd.name == "mode_state" and msd.parent.name == ".praxia":
         repo_root = (
@@ -658,6 +721,7 @@ def shadow_check(
             results[feat] = {"refused": str(e), "exit_code": e.exit_code}
     return {
         "records_dir": str(records_dir),
+        "records_dir_source": source,
         "feature_version": derived["feature_version"],
         "skipped": derived["skipped"],
         "n_used": len(derived["used"]),

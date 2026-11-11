@@ -90,8 +90,8 @@ Changes from the design above, found while building:
 - The default `--mode-state-dir` is bathos's own `.praxia/mode_state`, found relative to the source tree. From an installed tool, pass it explicitly.
 
 Before any gate can pass (owner items, in this order, so no labelled run after confirmation goes unlogged):
-1. reinstall bth with cisternal 0.1.7;
-2. set `BTH_SHADOW_LOG_DIR` (or `[tool.bathos] shadow_log_dir`) for `bth run` in tev_design, outside its work tree;
+1. reinstall bth with cisternal 0.1.7 (done 261111);
+2. nothing to set: the shadow log defaults to `<catalog_dir>/shadow` (see "Default location" below);
 3. confirm the tev_design charter (labels logged before the first confirmation never count);
 4. run the isolation proof once against the real shadow log, so a passing `shadow.isolation` event exists per feature (`cisternal shadow check` blocks with `no_isolation_evidence` until then).
 
@@ -107,3 +107,13 @@ Still open:
 - False-silent is gated on the point estimate only, because cisternal has no bound on the false-positive rate.
 - No command writes a `shadow.isolation` event into the real log, so `shadow-check` ends in `no_isolation_evidence` until one exists.
 - `_git_toplevel` was not tested from a linked worktree.
+
+## Default location (owner 261111, after an Opus advisor review)
+
+The owner asked to avoid an env var. Options considered: defaults in generated config files (the owner's first idea), a code default derived from a configured root, or off unless configured. The advisor's report is `.praxia/subagent_outputs/dsp_8e20004763bf4d19.1.md`. Generated config files make corruption worse: a corrupt file loses the default itself, the file goes stale when the code default changes, a cluster node may lack it, and provenance cannot tell a user's choice from a generated value. Off-by-default loses labels that can be captured only once. The owner chose the code default derived from a root.
+
+- **Resolution:** explicit argument > `BTH_SHADOW_LOG_DIR` > `[bearings]` in the nearest `.bth.toml` (the file SLURM jobs read) > `[tool.bathos.bearings]` in the nearest `pyproject.toml` > `[bearings]` in `~/.config/bathos/config.toml` > `<catalog_dir>/shadow`, reported as `default:<catalog_dir>`. `none` disables at any layer. The keys moved into a `[bearings]` table before anyone had set them.
+- **Malformed files:** every candidate file is read up front, whether or not a higher layer decides. A parse error, a wrong type or an unknown key raises `ShadowConfigError` naming the file. Nothing falls back to the default.
+- **Visible when not recording:** a labelled sidecar whose label is not recorded (disabled, broken config, any error) prints `bathos: Bearings at-work label NOT recorded ...` to stderr on every run. The run is never changed. `bth bearings shadow-check` reports `records_dir_source`. Not wired into `bth check`, which is a registry-driven run-freshness gate with an MCP mirror; a config check there is a separate change.
+- **Checked:** cisternal writes `events.<host>.<pid>.jsonl` (`pipeline.py:418`), so concurrent cluster jobs never share a file. `bth sync` carried only `runs/` and `campaigns/`, so it now carries `<catalog_dir>/shadow` too. That step uses `--update`, because `--ignore-existing` would freeze a partly written log, plus `--ignore-missing-args`. It is best effort: a failure prints a warning to stderr and never fails the sync. A shadow log configured outside the catalog is not synced.
+- **Global rule:** the advisor drafted replacement text for the derived-data rule (code defaults derived from configured roots; config files hold overrides only; data captured once defaults on; malformed files fail loudly). It is in the report above, for the owner to apply.

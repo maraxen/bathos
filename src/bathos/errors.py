@@ -261,7 +261,7 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.BEARINGS_PACKET_LEAK: "A reader-visible packet byte names a charter purpose id; the packet was not written. Rename the offending file, field or project slug",
     BathosErrorCode.BEARINGS_PURPOSE_LABEL_INVALID: "Write the label as [charter] purpose = \"<slug>\" or a list of slugs (lowercase words joined by single hyphens); 'off-charter' stands alone",
     BathosErrorCode.BEARINGS_AC9_LABEL_INVALID: "A sidecar label names no charter purpose or cannot be read; fix the label or the charter before scoring AC-9",
-    BathosErrorCode.BEARINGS_SHADOW_CONFIG_INVALID: "Fix shadow_log_dir (BTH_SHADOW_LOG_DIR, [tool.bathos] or ~/.config/bathos/config.toml); it must be a path outside the project work tree",
+    BathosErrorCode.BEARINGS_SHADOW_CONFIG_INVALID: "Fix shadow_log_dir (BTH_SHADOW_LOG_DIR, [bearings] in .bth.toml, [tool.bathos.bearings] in pyproject.toml, or [bearings] in ~/.config/bathos/config.toml); the file must parse, the key must be a string, and the path must be outside the project work tree",
 }
 
 

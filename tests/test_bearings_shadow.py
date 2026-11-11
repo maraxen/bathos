@@ -58,15 +58,24 @@ def _records(log: Path) -> list[dict]:
 
 def test_resolution_layers(tmp_path, monkeypatch):
     monkeypatch.delenv(bs.ENV_VAR, raising=False)
+    cat = tmp_path / "cat"
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(cat))
     proj = tmp_path / "p"
     proj.mkdir()
     ucfg = tmp_path / "u.toml"
-    assert bs.resolve_shadow_log_dir(start=proj, user_config=ucfg).source == "off"
-    ucfg.write_text('shadow_log_dir = "/x/user"\n')
+    # Nothing configured: the code default, derived from the catalog root (owner 261111).
+    r = bs.resolve_shadow_log_dir(start=proj, user_config=ucfg)
+    assert r.path == cat / "shadow" and r.source == f"default:{cat}"
+    ucfg.write_text('[bearings]\nshadow_log_dir = "/x/user"\n')
     assert bs.resolve_shadow_log_dir(start=proj, user_config=ucfg).path == Path("/x/user")
-    (proj / "pyproject.toml").write_text('[tool.bathos]\nshadow_log_dir = "logs"\n')
+    (proj / "pyproject.toml").write_text('[tool.bathos.bearings]\nshadow_log_dir = "logs"\n')
     r = bs.resolve_shadow_log_dir(start=proj, user_config=ucfg)
     assert r.path == proj / "logs" and r.source.startswith("pyproject:")
+    (proj / ".bth.toml").write_text(
+        '[bearings]\nshadow_log_dir = "/x/bth"\n'
+    )  # what SLURM jobs read
+    r = bs.resolve_shadow_log_dir(start=proj, user_config=ucfg)
+    assert r.path == Path("/x/bth") and r.source.startswith("bth_toml:")
     monkeypatch.setenv(bs.ENV_VAR, "/x/env")
     assert bs.resolve_shadow_log_dir(start=proj, user_config=ucfg).path == Path("/x/env")
     monkeypatch.setenv(bs.ENV_VAR, "none")
@@ -75,14 +84,49 @@ def test_resolution_layers(tmp_path, monkeypatch):
     assert bs.resolve_shadow_log_dir("/x/arg", start=proj).path == Path("/x/arg")
 
 
-def test_a_malformed_config_fails_loudly(tmp_path, monkeypatch):
+def test_none_in_a_config_file_disables(tmp_path, monkeypatch):
     monkeypatch.delenv(bs.ENV_VAR, raising=False)
-    (tmp_path / "pyproject.toml").write_text("[tool.bathos\n")
-    with pytest.raises(bs.ShadowConfigError):
-        bs.resolve_shadow_log_dir(start=tmp_path, user_config=tmp_path / "none.toml")
-    (tmp_path / "pyproject.toml").write_text("[tool.bathos]\nshadow_log_dir = 3\n")
-    with pytest.raises(bs.ShadowConfigError):
-        bs.resolve_shadow_log_dir(start=tmp_path, user_config=tmp_path / "none.toml")
+    (tmp_path / ".bth.toml").write_text('[bearings]\nshadow_log_dir = "none"\n')
+    r = bs.resolve_shadow_log_dir(start=tmp_path, user_config=tmp_path / "absent.toml")
+    assert r.path is None and r.source.startswith("disabled:bth_toml:")
+
+
+@pytest.mark.parametrize(
+    ("name", "text"),
+    [
+        ("pyproject.toml", "[tool.bathos\n"),  # does not parse
+        ("pyproject.toml", "[tool.bathos.bearings]\nshadow_log_dir = 3\n"),  # wrong type
+        (
+            "pyproject.toml",
+            "[tool.bathos.bearings]\nshadow_log_dri = 'x'\n",
+        ),  # unknown key (a typo)
+        (".bth.toml", "[bearings]\nshadow_log_dir = 'x'\nextra = 1\n"),
+        (".bth.toml", "bearings = 'x'\n"),  # not a table
+    ],
+)
+def test_a_malformed_config_fails_loudly_and_never_falls_back(tmp_path, monkeypatch, name, text):
+    monkeypatch.delenv(bs.ENV_VAR, raising=False)
+    (tmp_path / name).write_text(text)
+    with pytest.raises(bs.ShadowConfigError, match=name.replace(".", r"\.")):
+        bs.resolve_shadow_log_dir(start=tmp_path, user_config=tmp_path / "absent.toml")
+
+
+def test_every_file_is_read_up_front_even_when_a_higher_layer_decides(tmp_path, monkeypatch):
+    ucfg = tmp_path / "u.toml"
+    ucfg.write_text("[bearings\n")  # broken, at the lowest layer
+    monkeypatch.setenv(bs.ENV_VAR, "/x/env")  # a higher layer decides
+    with pytest.raises(bs.ShadowConfigError, match="u.toml"):
+        bs.resolve_shadow_log_dir(start=tmp_path, user_config=ucfg)
+
+
+def test_other_tool_bathos_keys_are_not_this_features_business(tmp_path, monkeypatch):
+    monkeypatch.delenv(bs.ENV_VAR, raising=False)
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_path / "cat"))
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.bathos]\nslug = 'p'\n[tool.bathos.outputs]\nx = 1\n"
+    )
+    r = bs.resolve_shadow_log_dir(start=tmp_path, user_config=tmp_path / "absent.toml")
+    assert r.source.startswith("default:")
 
 
 @pytest.mark.usefixtures("no_pipeline")
@@ -154,8 +198,97 @@ def test_a_label_under_an_edited_charter_is_logged_with_its_state(planted, shado
     assert f["unknown_slugs"] == []
 
 
-def test_an_emit_error_never_raises(tmp_path):
+def test_an_emit_error_never_raises(tmp_path, capsys):
     assert bs.emit_at_work_label(tmp_path / "missing.bth.toml").startswith("skipped:error:")
+    assert "NOT recorded" in capsys.readouterr().err
+
+
+@pytest.mark.usefixtures("no_pipeline")
+def test_with_nothing_configured_labels_go_to_the_catalog_default(planted, monkeypatch):  # noqa: F811
+    monkeypatch.delenv(bs.ENV_VAR, raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(planted["tmp"] / "xdg"))
+    p = planted["repo"] / "scripts" / "grow.bth.toml"
+    assert bs.emit_at_work_label(p, catalog_dir=planted["cat"]) == "emitted"
+    labels = [r for r in _records(planted["cat"] / "shadow") if r.get("name") == "shadow.label"]
+    assert len(labels) == 1
+
+
+@pytest.mark.usefixtures("no_pipeline")
+def test_a_disabled_or_broken_shadow_log_is_said_on_stderr(planted, monkeypatch, capsys):  # noqa: F811
+    p = planted["repo"] / "scripts" / "grow.bth.toml"
+    monkeypatch.setenv(bs.ENV_VAR, "none")
+    assert bs.emit_at_work_label(p, catalog_dir=planted["cat"]) == "off"
+    assert "NOT recorded (off)" in capsys.readouterr().err
+    monkeypatch.delenv(bs.ENV_VAR)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(planted["tmp"] / "xdg"))
+    (planted["tmp"] / "xdg" / "bathos").mkdir(parents=True)
+    (planted["tmp"] / "xdg" / "bathos" / "config.toml").write_text("[bearings\n")
+    assert bs.emit_at_work_label(p, catalog_dir=planted["cat"]) == "skipped:config_error"
+    assert "config.toml" in capsys.readouterr().err
+
+
+# ── bth sync carries the default shadow dir ──────────────────────────────────────────────────────────────────────
+
+
+def _fake_popen_factory(calls, fail_on=None):
+    from unittest.mock import MagicMock
+
+    def fake(cmd, **kw):  # noqa: ARG001
+        calls.append(cmd)
+        proc = MagicMock()
+        proc.stderr.readline.return_value = ""
+        proc.stdout.read.return_value = ""
+        proc.stderr.read.return_value = ""
+        rc = 23 if (fail_on and any(fail_on in c for c in cmd)) else 0
+        proc.wait.return_value = rc
+        proc.returncode = rc
+        proc.communicate.return_value = ("", "boom" if rc else "")
+        proc.poll.return_value = rc
+        return proc
+
+    return fake
+
+
+@pytest.mark.parametrize("pull", [False, True])
+def test_sync_carries_the_shadow_dir_with_update(tmp_path, monkeypatch, pull):
+    from unittest.mock import patch
+
+    from bathos.config import ProjectConfig
+    from bathos.sync import sync_catalog
+
+    cat = tmp_path / "catalog"
+    (cat / "runs").mkdir(parents=True)
+    (cat / "shadow").mkdir()
+    cfg = ProjectConfig(
+        slug="t", root=tmp_path, remotes={"eng": {"host": "eng", "remote_root": "~/p"}}
+    )
+    calls: list[list[str]] = []
+    monkeypatch.setattr("bathos.sync.ensure_remote_catalog_dir", lambda *_a, **_k: None)
+    with patch("bathos.sync.subprocess.Popen", side_effect=_fake_popen_factory(calls)):
+        sync_catalog("eng", cfg, cat, pull=pull)
+    shadow = [c for c in calls if any(str(a).rstrip("/").endswith("shadow") for a in c)]
+    assert len(shadow) == 1
+    assert "--update" in shadow[0] and "--ignore-existing" not in shadow[0]
+
+
+def test_a_failed_shadow_sync_warns_and_never_fails_the_sync(tmp_path, monkeypatch, capsys):
+    from unittest.mock import patch
+
+    from bathos.config import ProjectConfig
+    from bathos.sync import sync_catalog
+
+    cat = tmp_path / "catalog"
+    (cat / "runs").mkdir(parents=True)
+    (cat / "shadow").mkdir()
+    cfg = ProjectConfig(
+        slug="t", root=tmp_path, remotes={"eng": {"host": "eng", "remote_root": "~/p"}}
+    )
+    monkeypatch.setattr("bathos.sync.ensure_remote_catalog_dir", lambda *_a, **_k: None)
+    with patch(
+        "bathos.sync.subprocess.Popen", side_effect=_fake_popen_factory([], fail_on="/shadow")
+    ):
+        sync_catalog("eng", cfg, cat, pull=False)
+    assert "shadow log not synced" in capsys.readouterr().err
 
 
 # ── derive matches AC-9's pooled counts ──────────────────────────────────────────────────────────────────────────
