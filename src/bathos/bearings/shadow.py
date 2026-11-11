@@ -10,8 +10,9 @@ Nothing here shows anything to anyone or changes what a reader sees. It records,
 - ``comparison_payload`` / ``emit_comparison``: owner-side, after a comparison; one raw ``shadow.verdict`` per
   (packet, reader) carrying what ``ac9`` needs to score it. Raw verdicts are never scored directly.
 - ``derive``: expands raw verdicts into the binary gate features below, with labels derived from the at-work labels
-  (owner 261111). A raw verdict is used only when every label it rests on was logged at work against the same
-  confirmed charter, with the same slugs.
+  (owner 261111). A raw verdict is used only when every label it rests on was logged at work after the charter's
+  first confirmation, with the same slugs, all of them ids of the charter the comparison used (owner 261111: labels
+  are logged whatever the charter's state and filtered here, so a re-confirm does not erase them).
 - ``shadow_check``: ``derive`` then ``cisternal.shadow.check_mode_state`` per gate feature. Read-only.
 
 Gate features, per arm (``readers`` or ``mapper_only``), matching ``ac9.pooled_metrics`` count for count:
@@ -190,9 +191,15 @@ def ensure_shadow_pipeline(
     import cisternal
 
     path.mkdir(parents=True, exist_ok=True)
-    cisternal.init(
-        log_dir=path
-    )  # heartbeat stays at its 30 s default (0 would spin: self_obs sleeps `interval`)
+    # cisternal's consumer is a daemon thread with no exit hook: without this, a label queued just before a short
+    # `bth run` exits is lost while emit_label has already returned True.
+    import atexit
+
+    from cisternal.telemetry.pipeline import shutdown_pipeline
+
+    atexit.register(shutdown_pipeline)
+    # The heartbeat stays at its 30 s default (0 would spin: self_obs sleeps `interval`).
+    cisternal.init(log_dir=path)
     return {
         "active": get_pipeline() is not None,
         "pipeline": "shadow",
@@ -268,13 +275,10 @@ def _emit_at_work_label(path: Path, run_id: str, catalog_dir: Path | None, log_d
     root = _git_toplevel(path)
     if root is None:
         return _skip("not_in_git", path)
-    charter = _confirmed_charter(root, catalog_dir)
-    if charter is None:
-        return _skip("charter_unconfirmed", path)
-    charter_sha, purposes = charter
-    unknown = sorted(set(slugs) - set(purposes) - {OFF_CHARTER})
-    if unknown:
-        return _skip(f"unknown_slug:{','.join(unknown)}", path)
+    # Owner 261111: log every label, whatever the charter's state, and filter at check time (``derive``): a drop at
+    # emit time cannot be undone, and a charter re-confirm must not erase the labels gathered so far.
+    charter_sha, confirmed, ever_confirmed, known = _charter_state(root, catalog_dir)
+    unknown = sorted(set(slugs) - known - {OFF_CHARTER})
     pipe = ensure_shadow_pipeline(log_dir, start=root)
     if not pipe["active"]:
         return "off"
@@ -289,10 +293,34 @@ def _emit_at_work_label(path: Path, run_id: str, catalog_dir: Path | None, log_d
         label_source="at_work",
         labeller="bth-run",
         charter_sha256=charter_sha,
+        charter_confirmed=confirmed,
+        after_first_confirmation=ever_confirmed,
+        unknown_slugs=unknown,
         project=project,
         run_id=run_id,
     )
     return "emitted" if ok else _skip("pipeline_refused", path)
+
+
+def _charter_state(root: Path, catalog_dir: Path | None) -> tuple[str, bool, bool, set[str]]:
+    """(current charter file sha256 or "", confirmed now, confirmed at least once, purpose ids in the file)."""
+    from bathos.charter import CharterNotFoundError, parse_charter, status
+
+    try:
+        st = status(root, catalog_dir=catalog_dir)
+    except CharterNotFoundError:
+        return "", False, False, set()
+    try:
+        ids = set(parse_charter(root / ".bth" / "charter.toml").purposes)
+    except Exception:  # a malformed charter still gets its labels logged, with no known ids
+        ids = set()
+    state = st.get("state")
+    return (
+        str(st.get("current_sha256") or ""),
+        state == "confirmed",
+        state != "never_confirmed",
+        ids,
+    )
 
 
 def _skip(reason: str, path: Path) -> str:
@@ -356,6 +384,7 @@ def comparison_payload(
         "packet_sha256": reading["packet_sha256"],
         "reader_id": reading["reader_id"],
         "charter_sha256": charter_sha256,
+        "charter_ids": sorted(charter_purposes),
         "key": {
             k: key[k] for k in ("present", "silent", "revived", "indeterminate", "budget_limited")
         },
@@ -431,7 +460,10 @@ def derive(
     "skipped": [...], "used": [...]}``."""
     from bathos.bearings.ac9 import OFF_CHARTER, _silent_reported, _targets_by_reading_purpose
 
-    at_work: dict[tuple[str, str], tuple[float, list[str]]] = {}
+    # Sidecar subject -> (ts, slugs) of its latest at-work label written after the charter's first confirmation
+    # (owner 261111: labels are logged whatever the charter's state and filtered here, not at emit). The subject holds
+    # the sidecar's bytes hash, so a later label for the same subject carries the same slugs.
+    at_work: dict[str, tuple[float, list[str]]] = {}
     raw: dict[str, dict[tuple[str, str], tuple[float, dict[str, Any]]]] = {a: {} for a in ARMS}
     isolation: list[dict[str, Any]] = []
     for rec in records:
@@ -442,9 +474,10 @@ def derive(
         elif (
             name == "shadow.label" and feat == LABEL_FEATURE and f.get("label_source") == "at_work"
         ):
-            k = (str(f.get("subject_key")), str(f.get("charter_sha256", "")))
-            if k not in at_work or ts >= at_work[k][0]:
-                at_work[k] = (ts, sorted(f.get("label") or []))
+            if f.get("after_first_confirmation") is True:
+                k = str(f.get("subject_key"))
+                if k not in at_work or ts >= at_work[k][0]:
+                    at_work[k] = (ts, sorted(f.get("label") or []))
         elif name == "shadow.verdict":
             for arm in ARMS:
                 if feat == raw_feature(arm):
@@ -475,10 +508,11 @@ def derive(
             payload = (f.get("verdict") or {}).get("payload") or {}
             if project is not None and payload.get("project") != project:
                 continue
+            valid = set(payload.get("charter_ids", [])) | {OFF_CHARTER}
             bad = [
                 s
                 for s, slugs in payload.get("required_labels", {}).items()
-                if at_work.get((s, payload.get("charter_sha256", "")), (0, None))[1] != slugs
+                if at_work.get(s, (0, None))[1] != slugs or not set(slugs) <= valid
             ]
             if bad:
                 skipped.append(

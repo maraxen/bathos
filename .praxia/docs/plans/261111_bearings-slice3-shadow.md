@@ -89,10 +89,21 @@ Changes from the design above, found while building:
 - No MCP mirror: `bearings` has no MCP surface yet.
 - The default `--mode-state-dir` is bathos's own `.praxia/mode_state`, found relative to the source tree. From an installed tool, pass it explicitly.
 
-Before any gate can pass (owner items):
-- confirm the tev_design charter;
-- set `BTH_SHADOW_LOG_DIR` (or `[tool.bathos] shadow_log_dir`) for `bth run` in tev_design;
-- reinstall bth with cisternal 0.1.7;
-- run the isolation proof once against the real shadow log, so a passing `shadow.isolation` event exists per feature (`cisternal shadow check` blocks with `no_isolation_evidence` until then).
+Before any gate can pass (owner items, in this order, so no labelled run after confirmation goes unlogged):
+1. reinstall bth with cisternal 0.1.7;
+2. set `BTH_SHADOW_LOG_DIR` (or `[tool.bathos] shadow_log_dir`) for `bth run` in tev_design, outside its work tree;
+3. confirm the tev_design charter (labels logged before the first confirmation never count);
+4. run the isolation proof once against the real shadow log, so a passing `shadow.isolation` event exists per feature (`cisternal shadow check` blocks with `no_isolation_evidence` until then).
 
-Follow-up, not built: moving all bathos telemetry onto cisternal by default (owner question 261111).
+Follow-up, not built: moving all bathos telemetry onto cisternal by default (owner question 261111). If `CISTERNAL_TELEMETRY` is set, labels go to the cutover pipeline's log dir, not the shadow dir, so `shadow-check` must be pointed there with `--records-dir`; a default flip should merge the two locations.
+
+## Review fixes 261111 (advisor review after the first build)
+
+- **Labels: log always, filter at check (owner 261111, AskUserQuestion).** As first built, an unconfirmed charter or an unknown slug dropped the label at emit time, and `derive` matched labels to the comparison's charter sha, so any re-confirm (a typo fix, a pivot, the AC-9 wording fix) silently erased every label gathered so far. Now `bth run` always logs the label with `charter_sha256`, `charter_confirmed`, `after_first_confirmation` and `unknown_slugs`. `derive` counts a label written after the first confirmation whose slugs are all ids of the charter the comparison used. Verdicts stay pinned to the charter sha through `feature_version`.
+- **Exit flush.** cisternal's consumer is a daemon thread with no exit hook, so a label queued just before a short `bth run` exited could be lost while `emit_label` returned True. `ensure_shadow_pipeline` now registers `shutdown_pipeline` at exit. Two subprocess tests run a real `bth run`. One asserts the label is on disk after exit. The other asserts that a refused shadow config changes neither a passing nor a failing run's exit code.
+
+Still open:
+- Revived-retired is not gated (AC-9 had n = 0).
+- False-silent is gated on the point estimate only, because cisternal has no bound on the false-positive rate.
+- No command writes a `shadow.isolation` event into the real log, so `shadow-check` ends in `no_isolation_evidence` until one exists.
+- `_git_toplevel` was not tested from a linked worktree.

@@ -122,31 +122,36 @@ def test_a_labelled_sidecar_emits_one_at_work_label(planted, shadow_log):  # noq
     assert f["charter_sha256"] and f["run_id"] == "r1"
 
 
-@pytest.mark.usefixtures("shadow_log")
-def test_no_label_unknown_slug_and_no_log_emit_nothing(planted, monkeypatch):  # noqa: F811
+def test_no_label_malformed_and_no_log_emit_nothing_an_unknown_slug_is_logged(  # noqa: F811
+    planted,  # noqa: F811
+    shadow_log,
+    monkeypatch,
+):
     s = planted["repo"] / "scripts"
     assert bs.emit_at_work_label(s / "plain.bth.toml", catalog_dir=planted["cat"]) == "no_label"
-    (s / "odd.bth.toml").write_text('[charter]\npurpose = "not-a-purpose"\n')
-    assert bs.emit_at_work_label(s / "odd.bth.toml", catalog_dir=planted["cat"]).startswith(
-        "skipped:unknown_slug"
-    )
     (s / "bad.bth.toml").write_text("[[charter]]\npurpose = 'x'\n")
     assert (
         bs.emit_at_work_label(s / "bad.bth.toml", catalog_dir=planted["cat"])
         == "skipped:malformed_label"
     )
+    # Owner 261111: log always, filter at check; an unknown slug is logged and named.
+    (s / "odd.bth.toml").write_text('[charter]\npurpose = "not-a-purpose"\n')
+    assert bs.emit_at_work_label(s / "odd.bth.toml", catalog_dir=planted["cat"]) == "emitted"
+    (label,) = [r for r in _records(shadow_log) if r.get("name") == "shadow.label"]
+    assert label["fields"]["unknown_slugs"] == ["not-a-purpose"]
     monkeypatch.setenv(bs.ENV_VAR, "none")
     assert bs.emit_at_work_label(s / "grow.bth.toml", catalog_dir=planted["cat"]) == "off"
 
 
-@pytest.mark.usefixtures("shadow_log")
-def test_an_unconfirmed_charter_emits_nothing(planted):  # noqa: F811
+def test_a_label_under_an_edited_charter_is_logged_with_its_state(planted, shadow_log):  # noqa: F811
     ch = planted["repo"] / ".bth" / "charter.toml"
     ch.write_text(ch.read_text() + "\n# edited\n")  # editing the file unconfirms it
-    out = bs.emit_at_work_label(
-        planted["repo"] / "scripts" / "grow.bth.toml", catalog_dir=planted["cat"]
-    )
-    assert out == "skipped:charter_unconfirmed"
+    p = planted["repo"] / "scripts" / "grow.bth.toml"
+    assert bs.emit_at_work_label(p, catalog_dir=planted["cat"]) == "emitted"
+    (label,) = [r for r in _records(shadow_log) if r.get("name") == "shadow.label"]
+    f = label["fields"]
+    assert f["charter_confirmed"] is False and f["after_first_confirmation"] is True
+    assert f["unknown_slugs"] == []
 
 
 def test_an_emit_error_never_raises(tmp_path):
@@ -156,8 +161,10 @@ def test_an_emit_error_never_raises(tmp_path):
 # ── derive matches AC-9's pooled counts ──────────────────────────────────────────────────────────────────────────
 
 
-def _setup(planted, n_readers=2, mapping_kind="oracle"):  # noqa: F811
-    """Labels logged at work, one packet, n readers (oracle readings with distinct reader ids), compared."""
+def _setup(planted, n_readers=2, mapping_kind="oracle", reconfirm=False):  # noqa: F811
+    """Labels logged at work, one packet, n readers (oracle readings with distinct reader ids), compared.
+
+    ``reconfirm``: edit and re-confirm the charter after the labels were logged, before the comparisons."""
     for name, lbl, _ in SIDECARS:
         if lbl:
             assert (
@@ -166,6 +173,15 @@ def _setup(planted, n_readers=2, mapping_kind="oracle"):  # noqa: F811
                 )
                 == "emitted"
             )
+    if reconfirm:
+        from bathos.charter import confirm
+        from tests.test_bearings_packet import TOKEN
+
+        ch = planted["repo"] / ".bth" / "charter.toml"
+        ch.write_text(ch.read_text() + "\n# wording fixed\n")
+        confirm(
+            planted["repo"], chair_token=TOKEN, interactive_tty=False, catalog_dir=planted["cat"]
+        )
     out, sha = _packet(planted)
     key = answer_key(planted["repo"], out, planted["charter"])
     from bathos.bearings.shadow import _confirmed_charter
@@ -259,6 +275,30 @@ def test_retrospective_labels_do_not_count(planted, shadow_log):  # noqa: F811
         if r.get("name") == "shadow.label":
             r["fields"]["label_source"] = "retrospective"
     assert bs.derive(recs, project="pkt")["used"] == []
+
+
+def test_labels_survive_a_charter_reconfirm(planted, shadow_log):  # noqa: F811
+    """Owner 261111: a re-confirm (here a wording edit) must not erase labels logged under the earlier charter, while
+    the verdicts themselves are pinned to the new charter's sha."""
+    m = _setup(planted, reconfirm=True)
+    recs = _records(shadow_log)
+    label_shas = {r["fields"]["charter_sha256"] for r in recs if r.get("name") == "shadow.label"}
+    d = bs.derive(recs, project="pkt")
+    assert d["skipped"] == [] and len(d["used"]) == 2
+    (fv,) = d["feature_version"].values()
+    assert not any(fv.endswith(s[:16]) for s in label_shas)  # verdicts are under the new charter
+    s = _conf(d, "bearings.readers.silent")
+    assert s.tp + s.fn == m["n_silent"]
+
+
+def test_labels_written_before_the_first_confirmation_do_not_count(planted, shadow_log):  # noqa: F811
+    _setup(planted, n_readers=1)
+    recs = _records(shadow_log)
+    for r in recs:
+        if r.get("name") == "shadow.label":
+            r["fields"]["after_first_confirmation"] = False
+    d = bs.derive(recs, project="pkt")
+    assert d["used"] == [] and d["skipped"][0]["reason"].startswith("labels_not_logged_at_work")
 
 
 # ── mode-state and the gate ──────────────────────────────────────────────────────────────────────────────────────
@@ -360,3 +400,39 @@ def test_shadow_reader_isolation(planted, shadow_log):  # noqa: F811
             enforced_by=enforced,
         )
         assert res.passed, res
+
+
+# ── a real `bth run` (subprocess): the label survives process exit, and the hook never changes the run ──────────
+
+
+def _bth_run(repo: Path, script: str) -> int:
+    import subprocess
+    import sys
+
+    bth = Path(sys.executable).with_name("bth")
+    return subprocess.run(
+        [str(bth), "run", script], cwd=repo, capture_output=True, text=True, timeout=300
+    ).returncode
+
+
+def test_a_real_bth_run_logs_one_at_work_label(planted, shadow_log):  # noqa: F811
+    commit_files(planted["repo"], {"scripts/grow.py": "print('ok')\n"}, msg="script")
+    assert _bth_run(planted["repo"], "scripts/grow.py") == 0
+    labels = [
+        r for r in bs.read_records(bs._record_files(shadow_log)) if r.get("name") == "shadow.label"
+    ]
+    assert len(labels) == 1 and labels[0]["fields"]["label"] == ["alpha-aim"]
+    assert labels[0]["fields"]["run_id"]
+
+
+def test_a_failing_shadow_hook_leaves_the_run_unchanged(planted, monkeypatch, no_pipeline):  # noqa: F811, ARG001
+    commit_files(planted["repo"], {"scripts/grow.py": "print('ok')\n"}, msg="script")
+    monkeypatch.setenv(bs.ENV_VAR, str(planted["repo"] / "inside"))  # refused: inside the work tree
+    assert _bth_run(planted["repo"], "scripts/grow.py") == 0
+    assert not (planted["repo"] / "inside").exists()
+    commit_files(
+        planted["repo"], {"scripts/fail.py": "raise SystemExit(3)\n"}, msg="failing script"
+    )
+    assert (
+        _bth_run(planted["repo"], "scripts/fail.py") == 3
+    )  # the script's own exit code, not the hook's
