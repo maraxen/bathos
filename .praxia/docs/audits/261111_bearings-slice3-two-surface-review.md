@@ -147,3 +147,27 @@ Cursor found these correct:
 
 Antigravity found that deriving silent labels is not circular: the verdict is the readers' intersection, the label
 is the sidecars' purposes. It also found that `fp_rate` equals `false_silent / n_present`.
+
+## Fixes (261111, owner choices via AskUserQuestion: real negative class; fix V2, V3/V4, V6/V7, V5)
+
+| Item | Commit | Fix |
+|---|---|---|
+| V6 | 5568c1a1 | The four errors also derive from `BearingsError`, keeping their builtin base; a `traced_tool` test pins each code. |
+| V3, V4 | 5ab411fe | The version is picked after the project filter; dropped subjects appear in `skipped` as `other_feature_version:<v>`. |
+| V7, F8 (forwarding) | 6b04f188 | The readers arm needs three blind readers per packet. An oracle reading is refused on the readers arm at emit and dropped at derive. The isolation enforcer records under `mapper_only`. The CLI forwards `--catalog-dir`. |
+| V1, V2 | 2e0f85a6 | Agreement gains a negative class: unmapped live targets for reading purposes with charter-purpose gold. The mapped items are unchanged, so precision is still AC-9 gold agreement. The agreement mode-state version goes 0.1.0 → 0.2.0, thresholds unchanged. The payload freezes `live_ids` and `bound_violations`. derive skips invalid, unlabelled and pre-check payloads. `shadow_check` reports an arm-level conjunction. |
+| V5 | 2e683b44 | myxcel pushes without `.git` (engaging, titanix and home-gpu profiles all exclude it), so the cluster default is accepted, now pinned by a test. The guard fails closed when git times out or errors. The remote `shadow/` is created so a pull before the first label doesn't exit 23. |
+
+**Positive control:** a synthetic perfect corpus, 3 packets × 3 readers, prevalence ≤ 0.5 per metric, with isolation
+evidence. It passes all six gates and both arms. The degenerate-mapper test now asserts on the arm verdict.
+
+**Still open, not fixed in this pass:**
+- F3's `n_present` floor. Silent can rest on few present purposes; the agreement and recall floors follow from the
+  Wilson bounds.
+- Partially labelled packets. Unlabelled work in a packet can still read as silent; only zero-label packets are
+  refused.
+- F5 (content-keyed labels).
+- F6's independence across packets and readers.
+- F7 (single-word ids, multi-slug padding).
+- The rest of F8's audit provenance.
+- Cursor's non-table config node.
