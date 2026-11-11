@@ -1,4 +1,4 @@
-# bathos Internal Docs
+# agent-a3507d8df4756150c Internal Docs
 
 Superseded and archived docs: [HISTORY.md](HISTORY.md).
 
@@ -65,6 +65,7 @@ Superseded and archived docs: [HISTORY.md](HISTORY.md).
 ## Actuation Surfaces
 
 ## Audits
+- [261111_bearings-slice3-two-surface-review](audits/261111_bearings-slice3-two-surface-review.md) — Cursor (correctness, merge) and Antigravity (measurement) review of slice 3 shadow gates and the main merge; verified findings and verdicts
 - [261110_bearings-ac9-two-surface-review](audits/261110_bearings-ac9-two-surface-review.md) — Two-surface review of the AC-9 commits on wt/261104_bearings-ac7; slug leaks and two scoring defects confirmed
 - [261106_p1-dryrun-counts](audits/261106_p1-dryrun-counts.md)
 - [261106_validity-spec-review](audits/261106_validity-spec-review.md)
