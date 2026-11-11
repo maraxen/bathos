@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-11
+
+### Added
+- **Result Validity, Supersession & Archive (`261106`, PR #164):**
+  - **Phase 1 — Read-Time Result Validity:** Instrument defect and estimand-change registries (`.bth/instruments/*.toml` and user-global `~/.config/bathos/instruments/*.toml` gated by `[instruments] use_user_registry = true`), PEP 440 + git ancestry version resolution (`version_resolver.py`), predicate evaluation against run metadata/sidecars, DuckDB validity cache (`validity_cache.db`), and default hiding of voided/superseded runs across query and readback surfaces (`--include-invalid` to inspect).
+  - **Phase 2 — Findings & Supersession:** `.bth/findings/*.toml` lifecycle (`bth finding create/list/show/settle/supersede/reopen`), 5-tier evidence classification, settling gates, estimand compatibility checks, slug-to-UUID supersession resolution, and `bth-session-start-hook` cache generation (`.bth/cache/session_start.md`).
+  - **Phase 3 — Archive Sweep, Doc Store & Telemetry Rotation:** `bth archive-sweep` (`--dry-run` proposal generation under `.bth/archive_proposals/` and `--apply` atomic batch stubbing with `bathos-archive` git notes and `.bth/ARCHIVE_INDEX.md`), doc store archival (`.tar.zst` bundles + frontmatter manifests), and `bth telemetry-rotate`.
+
+### Fixed
+- **Archive sweep & validity false-positive remediation (`aafca79e`, `c2beef64`, `fbba35f8`):**
+  - Scope user-global instrument registries (`aminx.toml`) to projects/scripts that actually depend on or import the package; prevent unknown git SHAs in `is_git_ancestor` from acting as open-ended defect ranges; support multi-branch fix commits in `GIT` defect ranges.
+  - Protect scripts cited by 8-char run ID prefixes, campaign IDs, `.bth/claims/`, `.bth/findings/`, `.praxia/verdicts/`, `c1_invariant_gates.toml`, `Justfile`, `tests/`, and sibling imports from `archive_sweep`.
+  - Emit `raise RuntimeError(...)` in archived `.py` stubs so invoking a stubbed script fails loudly with exit code 1 instead of silently exiting 0; pair `.bth.toml` sidecars with scripts on Criterion 3 (`unreferenced_age`).
+  - Force-stage `.bth/ARCHIVE_INDEX.md` and proposal files (`git add -f --`) when `.bth/*` is gitignored, filter `.bth/ARCHIVE_INDEX.md` by `project_slug`, pass `cwd=project_root` to `append_archived_item_record`, and disable git hooks inside `_run_git`.
+- **`bth migrate --import-legacy` honours `--dry-run` and `--project` (#6527, PR #162).**
+
 ## [0.13.3] - 2026-11-03
 
 ### Changed
