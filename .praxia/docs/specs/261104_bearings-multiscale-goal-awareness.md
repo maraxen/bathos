@@ -200,7 +200,7 @@ Tags follow the global spike-test rule. *Verified* means read at a file:line or 
 (4) `bth run` emits a `shadow.label` with source `at_work` whenever a sidecar carries `[charter] purpose`, replacing the overlay workaround for past run blobs.
 Fit constraints for the design, from the code:
 - cisternal's scorer is binary per `subject_key`, so each AC-9 metric becomes its own feature: silent, off-charter left unmapped, and gold agreement as one-vs-rest (sidecar x purpose) pairs. Reader and mapper are separate features, so a failure can be pinned to one of them.
-- For each `subject_key`, the latest verdict replaces earlier ones, so the key must include the reader and packet, or Bearings emits one already-pooled verdict.
+- For each `subject_key`, the latest verdict replaces earlier ones. *Corrected 261111:* an at-work label written by `bth run` cannot know any reader or packet, so the raw label is keyed on the sidecar alone (`sidecar:<project>:<path>@<sha256>`); bathos expands raw labels and raw verdicts at check time into binary subjects that do carry packet and reader, and the reader arm (readers or mapper-only) goes in the feature name. Plan: `.praxia/docs/plans/261111_bearings-slice3-shadow.md`.
 - `feature_version` is pinned to the mapper-prompt sha plus the charter sha (scoring filters on it), so verdicts from the failed mapper never pool with the fixed one.
 - Mode-state thresholds are a new pre-registration derived from AC-9's bars, with `threshold_basis` citing the AC-9 sidecar.
 - A 12 of 12 result has a Wilson 95% lower bound of 0.76, so a lower-bound gate at 0.8 needs at least 16 items per metric even for a perfect mapper.
