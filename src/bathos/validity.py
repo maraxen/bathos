@@ -396,26 +396,27 @@ def ensure_validity_cache(
             w_con.execute("BEGIN")
             w_con.execute("DELETE FROM validity_cache")
             if validity_map:
-                insert_data = [
-                    (
-                        v.run_id,
-                        v.state,
-                        v.reason,
-                        v.replacement_id,
-                        v.version_source,
-                        v.evidence_tier,
-                        v.defect_id,
-                        v.defect_revision,
-                        v.estimand_marker,
-                        inputs_hash,
-                        now_iso,
-                    )
-                    for v in validity_map.values()
-                ]
-                w_con.executemany(
-                    "INSERT INTO validity_cache VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    insert_data,
+                import pyarrow as pa
+
+                vals = list(validity_map.values())
+                n_vals = len(vals)
+                tbl = pa.Table.from_pydict(
+                    {
+                        "run_id": [v.run_id for v in vals],
+                        "validity_state": [v.state for v in vals],
+                        "reason": [v.reason for v in vals],
+                        "replacement_id": [v.replacement_id for v in vals],
+                        "version_source": [v.version_source for v in vals],
+                        "evidence_tier": [v.evidence_tier for v in vals],
+                        "defect_id": [v.defect_id for v in vals],
+                        "defect_revision": [v.defect_revision for v in vals],
+                        "estimand_marker": [v.estimand_marker for v in vals],
+                        "inputs_hash": [inputs_hash] * n_vals,
+                        "cached_at": [now_iso] * n_vals,
+                    }
                 )
+                w_con.register("_vc_insert", tbl)
+                w_con.execute("INSERT INTO validity_cache SELECT * FROM _vc_insert")
             w_con.execute(
                 "INSERT OR REPLACE INTO validity_cache_meta (singleton, inputs_hash, updated_at) "
                 "VALUES (1, ?, ?)",
@@ -513,14 +514,15 @@ def _find_run_main_root(
         elif (d / ".bth" / "instruments").is_dir():
             return d
 
-    for root in reg_roots:
-        if root.is_dir():
-            return root
+    if not proj_slug:
+        for root in reg_roots:
+            if root.is_dir():
+                return root
 
-    cwd = Path.cwd()
-    for d in [cwd, *cwd.parents]:
-        if (d / ".bth").is_dir() or (d / ".bth.toml").is_file() or (d / "pyproject.toml").is_file():
-            return d
+        cwd = Path.cwd()
+        for d in [cwd, *cwd.parents]:
+            if (d / ".bth").is_dir() or (d / ".bth.toml").is_file() or (d / "pyproject.toml").is_file():
+                return d
 
     return None
 
@@ -750,6 +752,20 @@ def _resolve_pkg_git_repo(
     return base_root
 
 
+@functools.lru_cache(maxsize=256)
+def _read_uv_lock_pkg_keys(lock_file_str: str, mtime_ns: int) -> frozenset[str] | None:
+    with contextlib.suppress(Exception):
+        lock_doc = tomllib.loads(Path(lock_file_str).read_text(encoding="utf-8"))
+        names: set[str] = set()
+        for p in lock_doc.get("package", []):
+            n = p.get("name", "")
+            if n:
+                names.add(n)
+                names.add(key_prefix(n))
+        return frozenset(names)
+    return None
+
+
 def _is_external_pkg_absent(
     run: dict[str, Any],
     main_root: Path | None,
@@ -770,10 +786,10 @@ def _is_external_pkg_absent(
     if not proj_inst.is_file():
         lock_file = main_root / "uv.lock"
         if lock_file.is_file():
-            with contextlib.suppress(Exception):
-                lock_doc = tomllib.loads(lock_file.read_text(encoding="utf-8"))
-                names = [p.get("name", "") for p in lock_doc.get("package", [])]
-                return not any(n == pkg or key_prefix(n) == pkg_key for n in names)
+            with contextlib.suppress(OSError):
+                keys = _read_uv_lock_pkg_keys(str(lock_file), lock_file.stat().st_mtime_ns)
+                if keys is not None:
+                    return pkg not in keys and pkg_key not in keys
         return True
     return False
 
@@ -830,6 +846,15 @@ def resolve_validity(
             for row in cur.fetchall():
                 d = dict(zip(col_names, row))
                 runs_by_id[d["id"]] = d
+            # Also resolve any 8-char prefix run_ids passed by findings/verdicts
+            for r_id in run_ids:
+                if r_id not in runs_by_id and 8 <= len(r_id) < 36:
+                    with contextlib.suppress(Exception):
+                        p_cur = con.execute("SELECT * FROM runs WHERE id LIKE ? LIMIT 1", [f"{r_id}%"])
+                        p_row = p_cur.fetchone()
+                        if p_row is not None:
+                            p_cols = [desc[0] for desc in p_cur.description]
+                            runs_by_id[r_id] = dict(zip(p_cols, p_row))
         else:
             # Cool-tier fallback when runs table is absent
             from bathos.catalog import read_runs
@@ -930,52 +955,58 @@ def resolve_validity(
                 missing_root_ids.append(r_id)
 
         if missing_root_ids:
-            # Batch query events table if available
+            slug_to_root: dict[str, Path | None] = {}
+            # 1. Query distinct project -> main_root from events table once
             if con is not None and "events" in tables:
-                try:
-                    placeholders = ", ".join(["?"] * len(missing_root_ids))
-                    event_rows = con.execute(
-                        f"SELECT entity_key, main_root FROM events WHERE entity_key IN ({placeholders}) AND main_root IS NOT NULL",
-                        missing_root_ids,
+                with contextlib.suppress(Exception):
+                    proj_rows = con.execute(
+                        "SELECT DISTINCT project, main_root FROM events "
+                        "WHERE project IS NOT NULL AND main_root IS NOT NULL"
                     ).fetchall()
-                    for ek, mr in event_rows:
-                        if mr:
+                    for proj_s, mr in proj_rows:
+                        if proj_s and mr and proj_s not in slug_to_root:
                             p = Path(mr)
                             if p.is_dir():
-                                main_root_cache[ek] = p
-                except Exception:
-                    pass
+                                slug_to_root[str(proj_s)] = p
 
-            # For remaining missing, resolve via already-in-memory project_slug
+                    if len(missing_root_ids) <= 256:
+                        placeholders = ", ".join(["?"] * len(missing_root_ids))
+                        event_rows = con.execute(
+                            f"SELECT entity_key, main_root FROM events WHERE entity_key IN ({placeholders}) AND main_root IS NOT NULL",
+                            missing_root_ids,
+                        ).fetchall()
+                        for ek, mr in event_rows:
+                            if mr:
+                                p = Path(mr)
+                                if p.is_dir():
+                                    main_root_cache[ek] = p
+
+            # 2. Populate slug_to_root from registered roots once
             reg_roots = list_registered_roots()
-            slug_to_root: dict[str, Path | None] = {}
+            for root in reg_roots:
+                if root.is_dir() and (root / ".bth.toml").is_file():
+                    with contextlib.suppress(Exception):
+                        doc = tomllib.loads((root / ".bth.toml").read_text())
+                        s_val = doc.get("project", {}).get("slug")
+                        if s_val and str(s_val) not in slug_to_root:
+                            slug_to_root[str(s_val)] = root
+
+            fallback_no_slug_root: Path | None = None
+            computed_fallback = False
+
             for r_id in missing_root_ids:
                 if r_id in main_root_cache:
                     continue
                 p_slug = runs_by_id.get(r_id, {}).get("project_slug")
                 if p_slug:
-                    if p_slug not in slug_to_root:
-                        found_root = None
-                        for root in reg_roots:
-                            if root.is_dir() and (root / ".bth.toml").is_file():
-                                try:
-                                    import tomllib
-
-                                    doc = tomllib.loads((root / ".bth.toml").read_text())
-                                    if doc.get("project", {}).get("slug") == p_slug:
-                                        found_root = root
-                                        break
-                                except Exception:
-                                    pass
-                        slug_to_root[p_slug] = found_root
-
-                    if slug_to_root.get(p_slug):
-                        main_root_cache[r_id] = slug_to_root[p_slug]
-                        continue
-
-                # Final fallback for this r_id
-                root = _find_run_main_root(r_id, cd, con=con, workspace_root=workspace_root)
-                main_root_cache[r_id] = root
+                    main_root_cache[r_id] = slug_to_root.get(str(p_slug))
+                else:
+                    if not computed_fallback:
+                        fallback_no_slug_root = _find_run_main_root(
+                            r_id, cd, con=con, workspace_root=workspace_root
+                        )
+                        computed_fallback = True
+                    main_root_cache[r_id] = fallback_no_slug_root
 
         registries_by_root: dict[Path | None, dict[str, Any]] = {}
         for r_id, m_root in main_root_cache.items():
@@ -1129,7 +1160,6 @@ def resolve_validity(
         for pkg, registry in registries.items():
             self_pkg = is_self_package(pkg, run, main_root)
             explicit_pkg = _run_explicitly_records_package(run, pkg)
-            version, commit, v_source = resolve_toolchain_version(run, main_root, pkg, catalog_dir=cd)
 
             if not self_pkg and not explicit_pkg:
                 script_file = _resolve_run_script_file(run, main_root)
@@ -1137,8 +1167,13 @@ def resolve_validity(
                     str(script_file), str(main_root), key_prefix(pkg)
                 ):
                     continue
-                if v_source == "unknown" and _is_external_pkg_absent(run, main_root, pkg, catalog_dir=cd):
-                    continue
+
+            version, commit, v_source = resolve_toolchain_version(run, main_root, pkg, catalog_dir=cd)
+
+            if not self_pkg and not explicit_pkg and v_source == "unknown" and _is_external_pkg_absent(
+                run, main_root, pkg, catalog_dir=cd
+            ):
+                continue
 
             if v_source != "unknown" and (primary_version_source == "unknown" or self_pkg or explicit_pkg):
                 primary_version_source = v_source

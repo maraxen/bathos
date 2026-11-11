@@ -755,6 +755,38 @@ def scan_archive_candidates(
         script_entries.append((rel_py, py_path, py_sha, mtime, age_d, companion_sidecars, runs))
         all_runs_to_resolve.update(runs)
 
+    # Criterion 4: Docs citing exclusively hidden runs (collect first so we can batch resolve_validity)
+    target_doc_stores: list[Path] = []
+    if doc_store and doc_store.is_dir():
+        target_doc_stores.append(doc_store)
+    default_docs = project_root / ".bth" / "docs"
+    if default_docs.is_dir() and default_docs not in target_doc_stores:
+        target_doc_stores.append(default_docs)
+
+    doc_entries: list[tuple[str, Path, set[str]]] = []
+    for ds in target_doc_stores:
+        for md_path in ds.rglob("*.md"):
+            if "archive" in md_path.parts:
+                continue
+            try:
+                rel_md = str(md_path.relative_to(project_root))
+            except ValueError:
+                rel_md = str(md_path)
+            if rel_md in archived_paths or rel_md in seen_paths:
+                continue
+
+            try:
+                text = md_path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+
+            cited_run_ids = set(_RUN_ID_RE.findall(text))
+            if not cited_run_ids:
+                continue
+
+            doc_entries.append((rel_md, md_path, cited_run_ids))
+            all_runs_to_resolve.update(cited_run_ids)
+
     v_map_all = (
         resolve_validity(sorted(all_runs_to_resolve), catalog_dir, workspace_root=project_root)
         if all_runs_to_resolve
@@ -800,50 +832,24 @@ def scan_archive_candidates(
             "run_ids": runs,
         })
 
-    # Criterion 4: Docs citing exclusively hidden runs
-    target_doc_stores: list[Path] = []
-    if doc_store and doc_store.is_dir():
-        target_doc_stores.append(doc_store)
-    default_docs = project_root / ".bth" / "docs"
-    if default_docs.is_dir() and default_docs not in target_doc_stores:
-        target_doc_stores.append(default_docs)
-
-    for ds in target_doc_stores:
-        for md_path in ds.rglob("*.md"):
-            if "archive" in md_path.parts:
-                continue
-            try:
-                rel_md = str(md_path.relative_to(project_root))
-            except ValueError:
-                rel_md = str(md_path)
-            if rel_md in archived_paths or rel_md in seen_paths:
-                continue
-
-            try:
-                text = md_path.read_text(encoding="utf-8")
-            except OSError:
-                continue
-
-            cited_run_ids = set(_RUN_ID_RE.findall(text))
-            if not cited_run_ids:
-                continue
-
-            v_map = resolve_validity(list(cited_run_ids), catalog_dir, workspace_root=project_root)
-            # Candidate if every cited run is hidden
-            if cited_run_ids and all(v_map.get(r) and v_map[r].is_hidden for r in cited_run_ids):
-                md_sha = _sha256_file(md_path)
-                seen_paths.add(rel_md)
-                candidates.append({
-                    "item_id": str(uuid.uuid4()),
-                    "kind": "doc",
-                    "primary_path": rel_md,
-                    "paths": [rel_md],
-                    "criterion": "doc_citing_hidden_runs",
-                    "reason": f"Doc cites exclusively hidden runs: {sorted(cited_run_ids)}",
-                    "file_hashes": {rel_md: md_sha},
-                    "mtime": md_path.stat().st_mtime,
-                    "run_ids": list(cited_run_ids),
-                })
+    for rel_md, md_path, cited_run_ids in doc_entries:
+        if rel_md in seen_paths:
+            continue
+        # Candidate if every cited run is hidden
+        if cited_run_ids and all(v_map_all.get(r) and v_map_all[r].is_hidden for r in cited_run_ids):
+            md_sha = _sha256_file(md_path)
+            seen_paths.add(rel_md)
+            candidates.append({
+                "item_id": str(uuid.uuid4()),
+                "kind": "doc",
+                "primary_path": rel_md,
+                "paths": [rel_md],
+                "criterion": "doc_citing_hidden_runs",
+                "reason": f"Doc cites exclusively hidden runs: {sorted(cited_run_ids)}",
+                "file_hashes": {rel_md: md_sha},
+                "mtime": md_path.stat().st_mtime,
+                "run_ids": list(cited_run_ids),
+            })
 
     return candidates
 

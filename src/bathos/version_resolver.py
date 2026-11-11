@@ -510,6 +510,9 @@ def evaluate_predicate(condition: str, run: Any) -> tuple[bool, str | None]:
         return False, f"predicate evaluation error: {exc}"
 
 
+_JSON_DOC_CACHE: dict[tuple[str, int], dict[str, Any]] = {}
+
+
 def _read_version_cache(
     main_root_str: str,
     git_hash: str,
@@ -519,7 +522,13 @@ def _read_version_cache(
     try:
         json_path = Path(main_root_str) / ".bth" / "cache" / "version_cache.json"
         if json_path.is_file():
-            doc = json.loads(json_path.read_text(encoding="utf-8"))
+            mtime_ns = json_path.stat().st_mtime_ns
+            cache_key = (str(json_path), mtime_ns)
+            doc = _JSON_DOC_CACHE.get(cache_key)
+            if doc is None:
+                doc = json.loads(json_path.read_text(encoding="utf-8"))
+                _JSON_DOC_CACHE.clear()
+                _JSON_DOC_CACHE[cache_key] = doc
             entry = doc.get(git_hash)
             if entry and isinstance(entry, dict):
                 calc_sha = entry.get("lock_sha256")
@@ -578,43 +587,66 @@ def _write_version_cache(
     )
 
     # 1. Update <main_root>/.bth/cache/version_cache.json
+    json_written = False
     if allow_workspace_write:
         try:
             cache_dir = Path(main_root_str) / ".bth" / "cache"
             cache_dir.mkdir(parents=True, exist_ok=True)
             json_path = cache_dir / "version_cache.json"
-            doc = {}
+            doc: dict[str, Any] = {}
             if json_path.is_file():
-                with contextlib.suppress(Exception):
-                    doc = json.loads(json_path.read_text(encoding="utf-8"))
+                mtime_ns = json_path.stat().st_mtime_ns
+                cached_doc = _JSON_DOC_CACHE.get((str(json_path), mtime_ns))
+                if cached_doc is not None:
+                    doc = dict(cached_doc)
+                else:
+                    with contextlib.suppress(Exception):
+                        doc = json.loads(json_path.read_text(encoding="utf-8"))
             doc[git_hash] = {
                 "lock_sha256": calc_sha,
                 "packages": {pkg: [ver, comm] for pkg, (ver, comm) in pkgs.items()},
             }
             tmp_path = json_path.with_suffix(".tmp")
-            tmp_path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+            tmp_path.write_text(json.dumps(doc, separators=(",", ":")), encoding="utf-8")
             tmp_path.replace(json_path)
+            json_written = True
+            with contextlib.suppress(OSError):
+                new_mtime = json_path.stat().st_mtime_ns
+                _JSON_DOC_CACHE.clear()
+                _JSON_DOC_CACHE[(str(json_path), new_mtime)] = doc
         except Exception:
             pass
 
-    # 2. Update validity_cache.db:version_cache
-    try:
-        db_path = validity_cache_db_path(cat_dir)
-        if catalog_dir is not None or "BTH_CATALOG_DIR" in os.environ or db_path.parent.is_dir():
-            db_path.parent.mkdir(parents=True, exist_ok=True)
-            with duckdb.connect(str(db_path)) as con:
-                con.execute(VERSION_CACHE_DDL)
-                rows = [
-                    (main_root_str, git_hash, calc_sha, pkg_name, ver, comm, "lockfile")
-                    for pkg_name, (ver, comm) in pkgs.items()
-                ]
-                if rows:
-                    con.executemany(
-                        "INSERT OR REPLACE INTO version_cache VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        rows,
+    # 2. Update validity_cache.db:version_cache via single vectorized Arrow table insert
+    # Skip per-commit DuckDB open/WAL/close when version_cache.json has already persisted the entry
+    # in a live workspace (unless cat_in_tmp or not allow_workspace_write).
+    if not json_written or not allow_workspace_write or cat_in_tmp:
+        try:
+            db_path = validity_cache_db_path(cat_dir)
+            if catalog_dir is not None or "BTH_CATALOG_DIR" in os.environ or db_path.parent.is_dir():
+                db_path.parent.mkdir(parents=True, exist_ok=True)
+                if pkgs:
+                    pkg_names = list(pkgs.keys())
+                    vers = [pkgs[k][0] for k in pkg_names]
+                    comms = [pkgs[k][1] for k in pkg_names]
+                    n = len(pkg_names)
+                    tbl = pa.Table.from_pydict(
+                        {
+                            "main_root": [main_root_str] * n,
+                            "git_hash": [git_hash] * n,
+                            "lock_sha256": [calc_sha] * n,
+                            "package_name": pkg_names,
+                            "resolved_version": vers,
+                            "resolved_commit": comms,
+                            "version_source": ["lockfile"] * n,
+                        }
                     )
-    except Exception:
-        pass
+                    with duckdb.connect(str(db_path)) as con:
+                        con.execute(VERSION_CACHE_DDL)
+                        con.register("_vc_batch", tbl)
+                        con.execute("INSERT OR REPLACE INTO version_cache SELECT * FROM _vc_batch")
+        except Exception:
+            pass
 
 
 @functools.lru_cache(maxsize=1024)
@@ -661,6 +693,16 @@ def _get_uv_lock_packages(
     return None, {}
 
 
+@functools.lru_cache(maxsize=256)
+def _read_pyproject_name_key(pyproj_str: str, mtime_ns: int) -> str | None:
+    with contextlib.suppress(Exception):
+        doc = tomllib.loads(Path(pyproj_str).read_text(encoding="utf-8"))
+        proj_name = doc.get("project", {}).get("name")
+        if proj_name:
+            return key_prefix(str(proj_name))
+    return None
+
+
 def is_self_package(package: str, run: Any, main_root: Path | None) -> bool:
     """Return True if `package` is the consuming repository's own package."""
     pkg_key = key_prefix(package)
@@ -676,10 +718,8 @@ def is_self_package(package: str, run: Any, main_root: Path | None) -> bool:
             return True
         pyproj = main_root / "pyproject.toml"
         if pyproj.is_file():
-            with contextlib.suppress(Exception):
-                doc = tomllib.loads(pyproj.read_text(encoding="utf-8"))
-                proj_name = doc.get("project", {}).get("name")
-                if proj_name and key_prefix(str(proj_name)) == pkg_key:
+            with contextlib.suppress(OSError):
+                if _read_pyproject_name_key(str(pyproj), pyproj.stat().st_mtime_ns) == pkg_key:
                     return True
     return False
 

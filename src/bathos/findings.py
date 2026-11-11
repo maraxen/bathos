@@ -19,6 +19,7 @@ Spec 261106 Phase 2 (D7, OD-6):
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import tomllib
@@ -563,18 +564,89 @@ def list_findings(
     if not fdir.exists():
         return []
 
-    results: list[Finding] = []
+    parsed_findings: list[Finding] = []
     for p in sorted(fdir.glob("*.toml")):
+        with contextlib.suppress(Exception):
+            parsed_findings.append(parse_finding_file(p))
+
+    if not parsed_findings:
+        return []
+
+    cd = Path(catalog_dir or default_catalog_dir())
+    superseded_finding_map: dict[str, str] = {}
+    with contextlib.suppress(Exception):
+        from bathos.index import connect_read
+
+        con = connect_read(cd, missing="empty", wire_validity=False)
         try:
-            f = parse_finding_file(p)
-            f.active_status = resolve_finding_status(
-                f, catalog_dir=catalog_dir, workspace_root=workspace_root
-            )
-            if not include_superseded and f.active_status == "superseded":
-                continue
-            if status and f.active_status != status:
-                continue
-            results.append(f)
-        except Exception:
-            pass
+            has_table = con.execute(
+                "SELECT count(*) FROM duckdb_tables() WHERE table_name = 'supersession_edges'"
+            ).fetchone()
+            if has_table and has_table[0] > 0:
+                cols_info = [
+                    c[1] for c in con.execute("PRAGMA table_info('supersession_edges')").fetchall()
+                ]
+                if "entity_type" in cols_info:
+                    rows = con.execute(
+                        "SELECT entity_id, superseded_by_id FROM supersession_edges "
+                        "WHERE entity_type = 'finding' ORDER BY declared_at ASC"
+                    ).fetchall()
+                else:
+                    rows = con.execute(
+                        "SELECT from_id, to_id FROM supersession_edges "
+                        "WHERE from_type = 'finding' ORDER BY declared_at ASC"
+                    ).fetchall()
+                for ent_id, succ_id in rows:
+                    if ent_id and succ_id and ent_id not in superseded_finding_map:
+                        superseded_finding_map[ent_id] = succ_id
+        finally:
+            con.close()
+
+    all_supporting_runs: set[str] = set()
+    for f in parsed_findings:
+        succ = superseded_finding_map.get(f.id) or (
+            superseded_finding_map.get(f.question_slug) if f.question_slug else None
+        )
+        if succ:
+            f.superseded_by = succ
+            f.active_status = "superseded"
+            continue
+        if f.status == "superseded":
+            f.active_status = "superseded"
+            continue
+        if f.status == "open" and not f.supporting_runs:
+            f.active_status = "open"
+            continue
+        if f.supporting_runs:
+            all_supporting_runs.update(f.supporting_runs)
+
+    validity_map = (
+        resolve_validity(sorted(all_supporting_runs), catalog_dir=cd, workspace_root=workspace_root)
+        if all_supporting_runs
+        else {}
+    )
+
+    results: list[Finding] = []
+    for f in parsed_findings:
+        if f.superseded_by or f.status == "superseded":
+            f.active_status = "superseded"
+        elif f.status == "open" and not f.supporting_runs:
+            f.active_status = "open"
+        elif f.supporting_runs:
+            if all(
+                validity_map.get(r) and validity_map[r].is_hidden
+                for r in f.supporting_runs
+            ):
+                f.active_status = "needs-recheck"
+            else:
+                f.active_status = f.status
+        else:
+            f.active_status = f.status
+
+        if not include_superseded and f.active_status == "superseded":
+            continue
+        if status and f.active_status != status:
+            continue
+        results.append(f)
+
     return results
