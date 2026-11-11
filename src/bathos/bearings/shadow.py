@@ -17,8 +17,11 @@ Nothing here shows anything to anyone or changes what a reader sees. It records,
 
 Gate features, per arm (``readers`` or ``mapper_only``), matching ``ac9.pooled_metrics`` count for count:
 
-- ``bearings.<arm>.agreement``: one item per (packet, reader, reading purpose, target); verdict true; label true when
-  the target is in the reading purpose's gold. Precision is gold agreement.
+- ``bearings.<arm>.agreement``: one item per (packet, reader, reading purpose, target). Verdict true for every target
+  the mapping made; verdict false for every live target it did not make, for reading purposes whose gold names a
+  charter purpose (review 261111 V1: without that negative class every verdict is true, cisternal's base rate equals
+  precision, and the gate can never pass). Label true when the target is in the reading purpose's gold; targets found
+  only among disputed labels are unscored. Precision is gold agreement.
 - ``bearings.<arm>.off_charter``: one item per (packet, reader, reading purpose with labelled evidence); verdict true
   when the reading purpose is left unmapped; label true when its gold is exactly ``off-charter``. Recall is off-charter
   work left unmapped.
@@ -439,7 +442,7 @@ def comparison_payload(
     project: str,
 ) -> dict[str, Any]:
     """What ``derive`` needs to score one comparison, frozen at emit time (the packet dir may be gone later)."""
-    from bathos.bearings.ac9 import answer_key, reading_gold
+    from bathos.bearings.ac9 import answer_key, bound_violations, reading_gold
 
     repo_p, pkt = Path(repo), Path(packet_dir)
     key = answer_key(repo_p, pkt, charter_purposes)
@@ -450,6 +453,10 @@ def comparison_payload(
         "reader_id": reading["reader_id"],
         "charter_sha256": charter_sha256,
         "charter_ids": sorted(charter_purposes),
+        "live_ids": sorted(p for p, v in charter_purposes.items() if v.get("state") == "live"),
+        # AC-9's own reasons this comparison is invalid (unresolved withheld runs, withheld/indeterminate/ambiguous
+        # shares over the owner's bounds). Frozen here because derive() has no key counts or charter states (V2).
+        "validity": bound_violations(key, charter_purposes),
         "key": {
             k: key[k] for k in ("present", "silent", "revived", "indeterminate", "budget_limited")
         },
@@ -595,6 +602,18 @@ def derive(
                 skipped.append({"subject": subject, "reason": f"other_feature_version:{v}"})
                 continue
             payload = _payload(f)
+            # AC-9 validity first (V2): a comparison AC-9 would call invalid is not scored in shadow either. A payload
+            # from before these fields existed is skipped rather than trusted.
+            if "validity" not in payload or "live_ids" not in payload:
+                skipped.append({"subject": subject, "reason": "payload_predates_validity_check"})
+                continue
+            if payload["validity"]:
+                skipped.append({"subject": subject, "reason": "invalid:" + "; ".join(payload["validity"])})
+                continue
+            if not payload.get("required_labels"):
+                # No labelled sidecar in the packet: every live purpose would be "silent" with no label behind it.
+                skipped.append({"subject": subject, "reason": "no_labelled_sidecars"})
+                continue
             valid = set(payload.get("charter_ids", [])) | {OFF_CHARTER}
             bad = [
                 s
@@ -707,6 +726,26 @@ def derive(
                             ts,
                             derived_from=derived_from,
                         )
+                # The negative class (V1): every live target a reading purpose with charter-purpose gold was NOT
+                # mapped to. Without it every agreement verdict is true, cisternal's base rate equals precision, and
+                # the gate's "precision lower bound above the base rate" check can never pass. The mapped items above
+                # are unchanged, so precision still equals AC-9 gold agreement.
+                live_ids = payload.get("live_ids", [])
+                for rp, g in sorted(gold.items()):
+                    if not set(g) - {OFF_CHARTER}:
+                        continue  # no charter-purpose gold: an all-false row would only lower the bar
+                    mapped = targets.get(rp, set())
+                    for t in live_ids:
+                        if t in mapped or (t not in g and t in maybe.get(rp, [])):
+                            continue
+                        put(
+                            "agreement",
+                            f"{base}|rp:{rp}|target:{t}",
+                            False,
+                            t in g,
+                            ts,
+                            derived_from=derived_from,
+                        )
     return {"features": features, "feature_version": chosen, "skipped": skipped, "used": used}
 
 
@@ -760,7 +799,23 @@ def shadow_check(
             results[feat] = r.to_dict()
         except GateCheckError as e:
             results[feat] = {"refused": str(e), "exit_code": e.exit_code}
+    # An arm is one promotion decision: all three of its metrics at the same feature_version, never one alone. A
+    # sparse mapper can pass agreement and a mostly-unmapped one off-charter, each by itself.
+    arms = {
+        arm: {
+            "promotion_permitted": all(
+                results.get(gate_feature(arm, m), {}).get("promotion_permitted") is True for m in METRICS
+            ),
+            "blocked_metrics": [
+                m
+                for m in METRICS
+                if results.get(gate_feature(arm, m), {}).get("promotion_permitted") is not True
+            ],
+        }
+        for arm in ARMS
+    }
     return {
+        "arms": arms,
         "records_dir": str(records_dir),
         "records_dir_source": source,
         "feature_version": derived["feature_version"],

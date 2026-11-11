@@ -5,7 +5,7 @@
 [feature]
 name = "bearings.mapper_only.agreement"
 description = "Gold agreement: of the (reading purpose, target) pairs a mapping makes, the share its at-work labels support"
-version = "0.1.0"
+version = "0.2.0"  # 261111: items now include the negative class (unmapped live targets); thresholds unchanged
 
 [ladder]
 current_stage = "shadow"

@@ -510,8 +510,9 @@ def test_degenerate_mappers_are_blocked(planted, shadow_log, kind):  # noqa: F81
         out_dir=planted["tmp"] / "derived",
         project="pkt",
     )
-    readers = {k: v for k, v in res["features"].items() if k.startswith("bearings.readers.")}
-    assert readers and not any(v.get("promotion_permitted") for v in readers.values())
+    assert any(k.startswith("bearings.readers.") for k in res["features"])
+    # The arm is the decision: a sparse mapper can pass one metric alone (review 261111 F3).
+    assert res["arms"]["readers"]["promotion_permitted"] is False
 
 
 @pytest.mark.usefixtures("no_pipeline")
@@ -624,3 +625,138 @@ def test_a_failing_shadow_hook_leaves_the_run_unchanged(planted, monkeypatch, no
     assert (
         _bth_run(planted["repo"], "scripts/fail.py") == 3
     )  # the script's own exit code, not the hook's
+
+
+# ── positive control: a perfect, well-mixed record passes every gate (review 261111 V1) ─────────────────────────────
+
+_LIVE = ["alpha-aim", "beta-aim", "gamma-aim", "delta-aim", "epsilon-aim", "zeta-aim"]
+_ENFORCER = "tests/test_bearings_shadow.py::test_shadow_reader_isolation"
+
+
+def _perfect_corpus(n_packets: int = 3, n_readers: int = 3) -> list[dict]:
+    """Synthetic raw verdicts and at-work labels, shaped as comparison_payload freezes them.
+
+    Each packet: three present purposes (each cited by one reading purpose and mapped to it), three silent ones (no
+    reader maps them), and one off-charter reading purpose left unmapped. Prevalence stays well below 1, so the
+    base-rate check is a real bar, not a free pass."""
+    present, silent = _LIVE[:3], _LIVE[3:]
+    recs: list[dict] = []
+    ts = 1000.0
+    for k in range(n_packets):
+        pkt = f"pkt{k}"
+        subj = {f"sidecar:t|s{k}_{i}": [pid] for i, pid in enumerate(present)} | {
+            f"sidecar:t|s{k}_off": ["off-charter"]
+        }
+        for sk, slugs in subj.items():
+            recs.append(
+                {
+                    "name": "shadow.label",
+                    "ts": ts,
+                    "fields": {
+                        "feature": bs.LABEL_FEATURE,
+                        "subject_key": sk,
+                        "label": slugs,
+                        "label_source": "at_work",
+                        "after_first_confirmation": True,
+                    },
+                }
+            )
+        gold = {f"r{i}": [pid] for i, pid in enumerate(present)} | {"r_off": ["off-charter"]}
+        items = [
+            {"kind": "mapped", "reading_purpose_id": f"r{i}", "charter_purpose_id": pid}
+            for i, pid in enumerate(present)
+        ] + [{"kind": "silent", "charter_purpose_id": pid} for pid in silent]
+        items.append({"kind": "unmapped", "reading_purpose_id": "r_off"})
+        for j in range(n_readers):
+            ts += 1
+            payload = {
+                "project": "pc",
+                "packet_sha256": pkt,
+                "reader_id": f"reader-{j}",
+                "charter_sha256": "c" * 64,
+                "charter_ids": _LIVE,
+                "live_ids": _LIVE,
+                "validity": [],
+                "key": {
+                    "present": present,
+                    "silent": silent,
+                    "revived": [],
+                    "indeterminate": [],
+                    "budget_limited": False,
+                },
+                "gold": gold,
+                "maybe": {},
+                "items": items,
+                "required_labels": subj,
+            }
+            for arm in bs.ARMS:
+                recs.append(
+                    {
+                        "name": "shadow.verdict",
+                        "ts": ts,
+                        "fields": {
+                            "feature": bs.raw_feature(arm),
+                            "subject_key": f"packet:{pkt}|reader:reader-{j}",
+                            "verdict": {"value": "recorded", "payload": payload},
+                            "feature_version": "m1-" + "c" * 16,
+                        },
+                    }
+                )
+    for feat in bs.GATE_FEATURES:
+        recs.append(
+            {
+                "name": "shadow.isolation",
+                "ts": ts + 1,
+                "fields": {
+                    "feature": feat,
+                    "writes_isolated": True,
+                    "leaked_paths": [],
+                    "enforced_by": _ENFORCER,
+                },
+            }
+        )
+    return recs
+
+
+@pytest.mark.usefixtures("no_pipeline")
+def test_a_perfect_well_mixed_record_passes_every_gate(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "events.jsonl").write_text("".join(json.dumps(r) + "\n" for r in _perfect_corpus()))
+    res = bs.shadow_check(
+        records_dir=logs, mode_state_dir=MODE_STATE, out_dir=tmp_path / "d", project="pc"
+    )
+    assert res["skipped"] == []
+    blocked = {
+        f: v.get("blocking_reasons", v.get("refused"))
+        for f, v in res["features"].items()
+        if v.get("promotion_permitted") is not True
+    }
+    assert blocked == {}
+    assert all(a["promotion_permitted"] for a in res["arms"].values())
+
+
+@pytest.mark.usefixtures("no_pipeline")
+def test_agreement_scores_unmapped_live_targets_as_negatives():
+    d = bs.derive(_perfect_corpus(n_packets=1), project="pc")
+    c = _conf(d, "bearings.readers.agreement")
+    # 3 readers x 3 supported mapped pairs; 3 readers x 3 reading purposes x 5 unmapped live targets
+    assert (c.tp, c.fp, c.fn, c.tn) == (9, 0, 0, 45)
+
+
+@pytest.mark.usefixtures("no_pipeline")
+def test_an_invalid_or_unlabelled_comparison_is_not_scored():
+    recs = _perfect_corpus(n_packets=1)
+    for r in recs:
+        if r["name"] == "shadow.verdict":
+            p = r["fields"]["verdict"]["payload"]
+            if p["reader_id"] == "reader-0":
+                p["validity"] = ["1 withheld run(s) with an unresolvable sidecar"]
+            elif p["reader_id"] == "reader-1":
+                p["required_labels"] = {}
+            else:
+                p.pop("validity", None)  # the payload dict is shared by both arms' records
+    d = bs.derive(recs, project="pc")
+    reasons = sorted({s["reason"].split(":")[0] for s in d["skipped"]})
+    assert reasons == ["invalid", "no_labelled_sidecars", "payload_predates_validity_check"]
+    assert d["used"] == []
