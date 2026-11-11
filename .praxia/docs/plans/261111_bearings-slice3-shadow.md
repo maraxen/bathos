@@ -72,8 +72,27 @@ The silent label is a deterministic function of at-work labels over the packet's
 
 The mapper or charter-wording fix that AC-9's failure calls for; showing anything to the owner; schedules for shadow reader passes; promotion.
 
-## Decisions for the owner
+## Owner decisions 261111 (AskUserQuestion)
 
-- D1. Telemetry switch: C1's dedicated shadow pipeline, or require `CISTERNAL_TELEMETRY`.
-- D2. Silent recall and false-silent: derived per-(packet, reader, purpose) labels as above, or keep them in `ac9.py` beside the cisternal gate.
-- D3. Gate form: point estimates at the AC-9 bars, or Wilson lower bounds (at least 16 items per metric even for a perfect mapper).
+- D1: a separate shadow log (C1). Owner also asked whether bathos should move to cisternal telemetry everywhere. Answer: the cutover is already wired behind `CISTERNAL_TELEMETRY` (`telemetry.py:222,349,391`), so a full move is a default flip with its own checks (SLURM heartbeat thread, log location); it is kept out of this slice as a follow-up. C1 reuses the cutover pipeline when one is running, so nothing here is redone.
+- D2: derived silent labels in cisternal (C4 as written).
+- D3: point estimate at the AC-9 bar **and** Wilson 95% lower bound at least 0.65: `min_recall`/`min_precision` 0.8 with `*_lower_bound` 0.65; false-silent at most 0.2 is `max_fp_rate = 0.2` on the silent feature (AC-9's false-silent divides by present purposes, so it is the false-positive rate, not 1 - precision; corrected while building).
+
+## Built 261111 (not yet reviewed)
+
+`src/bathos/bearings/shadow.py`, the `runner.py` hook after `run_uuid_var.set`, `bth bearings shadow-check`, `--shadow-packet-dir` / `--shadow-arm` / `--mapper-version` on `bth bearings compare`, six TOMLs in `.praxia/mode_state/`, `tests/test_bearings_shadow.py` (18 tests), and error codes for `ShadowConfigError` plus three exceptions from the AC-9 rounds that `test_errors` found unregistered (`PacketLeakError`, `PurposeLabelError`, `Ac9LabelError`).
+
+Changes from the design above, found while building:
+- **Items follow AC-9's units, not sidecars.** AC-9 scores gold agreement per (reading purpose, target) pair and off-charter per reading purpose, so the derived subjects are those (with packet and reader), not per sidecar. The raw verdict freezes `answer_key`, `reading_gold` and the comparison items at emit time, and lists every labelled blob it rests on by at-work subject (`required_labels`). `derive` uses a raw verdict only when each of those labels was logged at work against the same charter sha with the same slugs. Otherwise it is skipped with `labels_not_logged_at_work`.
+- **Pooling matches `ac9.pooled_metrics`**: silent uses the intersection of the readers' silent sets per packet; off-charter and agreement are per reading. A test asserts the derived confusion counts equal the pooled hits and denominators.
+- `min_verdicts = min_labels = 8`: the fewest items at which a perfect record clears a 0.65 Wilson lower bound.
+- No MCP mirror: `bearings` has no MCP surface yet.
+- The default `--mode-state-dir` is bathos's own `.praxia/mode_state`, found relative to the source tree. From an installed tool, pass it explicitly.
+
+Before any gate can pass (owner items):
+- confirm the tev_design charter;
+- set `BTH_SHADOW_LOG_DIR` (or `[tool.bathos] shadow_log_dir`) for `bth run` in tev_design;
+- reinstall bth with cisternal 0.1.7;
+- run the isolation proof once against the real shadow log, so a passing `shadow.isolation` event exists per feature (`cisternal shadow check` blocks with `no_isolation_evidence` until then).
+
+Follow-up, not built: moving all bathos telemetry onto cisternal by default (owner question 261111).

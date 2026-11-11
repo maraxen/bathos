@@ -150,6 +150,11 @@ class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(
     BEARINGS_NO_CONFIRMED_CHARTER = "bearings_no_confirmed_charter"
     BEARINGS_MAPPING_INVALID = "bearings_mapping_invalid"
     BEARINGS_MAPPER_IS_READER = "bearings_mapper_is_reader"
+    # Bearings purpose labels, AC-9 and shadow mode (spec 261104 T7).
+    BEARINGS_PACKET_LEAK = "bearings_packet_leak"
+    BEARINGS_PURPOSE_LABEL_INVALID = "bearings_purpose_label_invalid"
+    BEARINGS_AC9_LABEL_INVALID = "bearings_ac9_label_invalid"
+    BEARINGS_SHADOW_CONFIG_INVALID = "bearings_shadow_config_invalid"
 
 
 # Resolution hints registry: every BathosErrorCode member must have a non-empty entry
@@ -253,6 +258,10 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.BEARINGS_NO_CONFIRMED_CHARTER: "The charter must be confirmed (and unedited since) before a reading can be compared; ask the owner to run 'bth charter confirm'",
     BathosErrorCode.BEARINGS_MAPPING_INVALID: "The mapping must cover every reading purpose exactly once and name only confirmed charter purpose ids (or null)",
     BathosErrorCode.BEARINGS_MAPPER_IS_READER: "The mapper must be a different agent from the reader; give the mapper its own mapper_id",
+    BathosErrorCode.BEARINGS_PACKET_LEAK: "A reader-visible packet byte names a charter purpose id; the packet was not written. Rename the offending file, field or project slug",
+    BathosErrorCode.BEARINGS_PURPOSE_LABEL_INVALID: "Write the label as [charter] purpose = \"<slug>\" or a list of slugs (lowercase words joined by single hyphens); 'off-charter' stands alone",
+    BathosErrorCode.BEARINGS_AC9_LABEL_INVALID: "A sidecar label names no charter purpose or cannot be read; fix the label or the charter before scoring AC-9",
+    BathosErrorCode.BEARINGS_SHADOW_CONFIG_INVALID: "Fix shadow_log_dir (BTH_SHADOW_LOG_DIR, [tool.bathos] or ~/.config/bathos/config.toml); it must be a path outside the project work tree",
 }
 
 
@@ -422,6 +431,10 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     "BearingsNoConfirmedCharterError": BathosErrorCode.BEARINGS_NO_CONFIRMED_CHARTER,
     "BearingsMappingInvalidError": BathosErrorCode.BEARINGS_MAPPING_INVALID,
     "BearingsMapperIsReaderError": BathosErrorCode.BEARINGS_MAPPER_IS_READER,
+    "PacketLeakError": BathosErrorCode.BEARINGS_PACKET_LEAK,
+    "PurposeLabelError": BathosErrorCode.BEARINGS_PURPOSE_LABEL_INVALID,
+    "Ac9LabelError": BathosErrorCode.BEARINGS_AC9_LABEL_INVALID,
+    "ShadowConfigError": BathosErrorCode.BEARINGS_SHADOW_CONFIG_INVALID,
 }
 
 

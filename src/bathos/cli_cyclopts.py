@@ -2583,23 +2583,106 @@ def bearings_compare_cmd(
     mapping: str,
     project_root: str = "",
     catalog_dir: str = "",
+    shadow_packet_dir: str = "",
+    shadow_arm: str = "readers",
+    mapper_version: str = "",
 ) -> None:
-    """Compare a recorded reading with the confirmed charter using a different agent's mapping."""
+    """Compare a recorded reading with the confirmed charter using a different agent's mapping.
+
+    With --shadow-packet-dir (owner side only: it reads the purpose labels), also record the comparison as a raw
+    Bearings shadow verdict (spec 261104 T7). Inert unless a shadow log is configured (BTH_SHADOW_LOG_DIR); never
+    changes the comparison."""
     from bathos.bearings.reading import compare_reading
     from bathos.workspace import resolve_workspace
 
     root = Path(project_root) if project_root else resolve_workspace().fs_root
+    cat = Path(catalog_dir) if catalog_dir else None
     try:
         res = compare_reading(
             root,
             reading_id=reading_id,
             mapping_file=Path(mapping),
-            catalog_dir=Path(catalog_dir) if catalog_dir else None,
+            catalog_dir=cat,
         )
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         raise SystemExit(1) from None
     print(json.dumps(res, indent=2))
+    if shadow_packet_dir:
+        _emit_shadow_comparison(root, cat, reading_id, res, Path(shadow_packet_dir), shadow_arm, mapper_version)
+
+
+def _emit_shadow_comparison(
+    root: Path,
+    cat: Path | None,
+    reading_id: str,
+    comparison: dict,
+    packet_dir: Path,
+    arm: str,
+    mapper_version: str,
+) -> None:
+    from bathos.bearings import shadow as bs
+    from bathos.bearings.reading import _existing_reading
+    from bathos.charter import _resolve_catalog_dir, _resolve_project_slug
+
+    if not mapper_version:
+        print("shadow: --mapper-version is required to record a shadow verdict; none recorded", file=sys.stderr)
+        return
+    try:
+        pipe = bs.ensure_shadow_pipeline(start=root)
+        if not pipe["active"]:
+            print(f"shadow: no shadow log configured ({pipe['source']}); none recorded", file=sys.stderr)
+            return
+        charter = bs._confirmed_charter(root, cat)
+        if charter is None:
+            print("shadow: charter not confirmed; none recorded", file=sys.stderr)
+            return
+        slug = _resolve_project_slug(root)
+        reading = _existing_reading(_resolve_catalog_dir(cat), slug, reading_id)
+        if reading is None:
+            print(f"shadow: reading {reading_id} not found; none recorded", file=sys.stderr)
+            return
+        payload = bs.comparison_payload(
+            root, packet_dir, reading, comparison, charter[1], charter_sha256=charter[0], project=slug
+        )
+        ok = bs.emit_comparison(payload, arm=arm, mapper_version=mapper_version)
+        print(f"shadow: raw verdict {'recorded' if ok else 'not recorded'}", file=sys.stderr)
+    except Exception as e:  # shadow must never change the live result
+        print(f"shadow: not recorded ({type(e).__name__}: {e})", file=sys.stderr)
+
+
+@bearings_app.command(name="shadow-check")
+def bearings_shadow_check_cmd(
+    *,
+    records_dir: str = "",
+    mode_state_dir: str = "",
+    out_dir: str = "",
+    project: str = "",
+) -> None:
+    """Score the Bearings shadow log against its pre-registered promotion gates (read-only; never promotes).
+
+    Expands raw verdicts and at-work labels into the six gate features, then runs cisternal's gate check on each.
+    The mode-state directory defaults to bathos's own .praxia/mode_state (where the Bearings gates are registered)."""
+    import tempfile
+
+    from bathos.bearings import shadow as bs
+
+    msd = Path(mode_state_dir) if mode_state_dir else Path(__file__).resolve().parents[2] / ".praxia" / "mode_state"
+    if not (msd / f"{bs.GATE_FEATURES[0]}.toml").is_file():
+        print(f"Error: no Bearings mode-state files in {msd}; pass --mode-state-dir", file=sys.stderr)
+        raise SystemExit(3)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            res = bs.shadow_check(
+                records_dir=Path(records_dir) if records_dir else None,
+                mode_state_dir=msd,
+                out_dir=Path(out_dir) if out_dir else Path(tmp),
+                project=project or None,
+            )
+    except bs.ShadowConfigError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise SystemExit(3) from None
+    print(json.dumps(res, indent=2, default=str))
 
 
 if __name__ == "__main__":
