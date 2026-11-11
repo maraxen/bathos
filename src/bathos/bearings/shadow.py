@@ -63,6 +63,7 @@ def gate_feature(arm: str, metric: str) -> str:
     return f"bearings.{arm}.{metric}"
 
 
+READERS_PER_PACKET = 3  # T7: the readers arm is three blind readers per packet
 GATE_FEATURES = tuple(gate_feature(a, m) for a in ARMS for m in METRICS)
 
 
@@ -464,6 +465,13 @@ def emit_comparison(payload: dict[str, Any], *, arm: str, mapper_version: str) -
     verdicts from a changed mapper or charter never pool with earlier ones. False when no pipeline is running."""
     import cisternal.shadow as cs
 
+    from bathos.bearings.ac9 import ORACLE_READER_ID
+
+    if arm == "readers" and payload.get("reader_id") == ORACLE_READER_ID:
+        raise ShadowConfigError(
+            "an oracle reading is built from the labels, so it is not a blind reader; record it under arm "
+            "'mapper_only' (review 261111 V7)"
+        )
     canon = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return cs.emit_verdict(
         feature=raw_feature(arm),
@@ -522,7 +530,12 @@ def derive(
     ``feature_version`` maps an arm to the version to score; an arm left out uses the version of its latest raw
     verdict. Returns ``{"features": {feature: {"verdicts": [...], "labels": [...]}}, "feature_version": {...},
     "skipped": [...], "used": [...]}``."""
-    from bathos.bearings.ac9 import OFF_CHARTER, _silent_reported, _targets_by_reading_purpose
+    from bathos.bearings.ac9 import (
+        OFF_CHARTER,
+        ORACLE_READER_ID,
+        _silent_reported,
+        _targets_by_reading_purpose,
+    )
 
     # Sidecar subject -> (ts, slugs) of its latest at-work label written after the charter's first confirmation
     # (owner 261111: labels are logged whatever the charter's state and filtered here, not at emit). The subject holds
@@ -629,7 +642,23 @@ def derive(
             )
 
         for pkt, readings in sorted(packets.items()):
-            keys = {json.dumps(p["key"], sort_keys=True) for _, p in readings}
+            if arm == "readers":
+                # T7: three blind readers per packet. An oracle reading is never blind; fewer readers make the
+                # silent intersection a different (weaker) rule than the one the gate pre-registered (V7).
+                n_oracle = sum(p["reader_id"] == ORACLE_READER_ID for _, p in readings)
+                readings = [(t, p) for t, p in readings if p["reader_id"] != ORACLE_READER_ID]
+                n_blind = len({p["reader_id"] for _, p in readings})
+                if n_oracle or n_blind < READERS_PER_PACKET:
+                    skipped.append(
+                        {
+                            "subject": f"packet:{pkt}",
+                            "reason": f"readers_arm_needs_{READERS_PER_PACKET}_blind_readers:"
+                            f"{n_blind}_blind_{n_oracle}_oracle",
+                        }
+                    )
+                    if n_blind < READERS_PER_PACKET:
+                        continue
+            keys ={json.dumps(p["key"], sort_keys=True) for _, p in readings}
             if len(keys) != 1:
                 skipped.append({"subject": f"packet:{pkt}", "reason": "answer_keys_differ"})
                 continue

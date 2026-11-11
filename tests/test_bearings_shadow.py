@@ -294,7 +294,7 @@ def test_a_failed_shadow_sync_warns_and_never_fails_the_sync(tmp_path, monkeypat
 # ── derive matches AC-9's pooled counts ──────────────────────────────────────────────────────────────────────────
 
 
-def _setup(planted, n_readers=2, mapping_kind="oracle", reconfirm=False):  # noqa: F811
+def _setup(planted, n_readers=3, mapping_kind="oracle", reconfirm=False):  # noqa: F811
     """Labels logged at work, one packet, n readers (oracle readings with distinct reader ids), compared.
 
     ``reconfirm``: edit and re-confirm the charter after the labels were logged, before the comparisons."""
@@ -378,7 +378,7 @@ def _conf(derived, feat):
 def test_derived_counts_equal_ac9_pooled_counts(planted, shadow_log):  # noqa: F811
     m = _setup(planted)
     d = bs.derive(_records(shadow_log), project="pkt")
-    assert d["skipped"] == [] and len(d["used"]) == 2
+    assert d["skipped"] == [] and len(d["used"]) == 3
     s = _conf(d, "bearings.readers.silent")
     assert s.tp + s.fn == m["n_silent"] and s.tp == round(m["silent_recall"] * m["n_silent"])
     assert s.fp + s.tn == m["n_present"] and s.fp == round(m["false_silent"] * m["n_present"])
@@ -389,7 +389,7 @@ def test_derived_counts_equal_ac9_pooled_counts(planted, shadow_log):  # noqa: F
     a = _conf(d, "bearings.readers.agreement")
     assert a.tp + a.fp == m["n_mapped"] and a.tp == round(m["gold_agreement"] * m["n_mapped"])
     assert (
-        m["off_charter_unmapped"] == 0.5 and m["gold_agreement"] < 1.0
+        0 < m["off_charter_unmapped"] < 1.0 and m["gold_agreement"] < 1.0
     )  # the second reader's misses are counted
 
 
@@ -417,7 +417,7 @@ def test_labels_survive_a_charter_reconfirm(planted, shadow_log):  # noqa: F811
     recs = _records(shadow_log)
     label_shas = {r["fields"]["charter_sha256"] for r in recs if r.get("name") == "shadow.label"}
     d = bs.derive(recs, project="pkt")
-    assert d["skipped"] == [] and len(d["used"]) == 2
+    assert d["skipped"] == [] and len(d["used"]) == 3
     (fv,) = d["feature_version"].values()
     assert not any(fv.endswith(s[:16]) for s in label_shas)  # verdicts are under the new charter
     s = _conf(d, "bearings.readers.silent")
@@ -473,6 +473,20 @@ def test_verdicts_left_out_by_the_version_pick_are_listed_as_skipped(planted, sh
     assert sum(r.startswith("other_feature_version:") for r in reasons) == len(_raw_verdicts(recs))
 
 
+def test_the_readers_arm_needs_three_blind_readers(planted, shadow_log):  # noqa: F811
+    """Review 261111 V7: a packet with fewer than three blind readers is not scored on the readers arm."""
+    _setup(planted, n_readers=2)
+    d = bs.derive(_records(shadow_log), project="pkt")
+    assert [s["reason"] for s in d["skipped"]] == ["readers_arm_needs_3_blind_readers:2_blind_0_oracle"]
+    assert not any(d["features"][f]["verdicts"] for f in bs.GATE_FEATURES if f.startswith("bearings.readers."))
+
+
+def test_an_oracle_reading_is_refused_on_the_readers_arm():
+    payload = {"reader_id": "oracle-from-labels", "packet_sha256": "p", "charter_sha256": "c" * 64, "project": "x"}
+    with pytest.raises(bs.ShadowConfigError, match="mapper_only"):
+        bs.emit_comparison(payload, arm="readers", mapper_version="m1")
+
+
 # ── mode-state and the gate ──────────────────────────────────────────────────────────────────────────────────────
 
 
@@ -489,7 +503,7 @@ def test_every_gate_feature_has_a_valid_mode_state_in_shadow():
     "kind", ["all_unmapped", "all_to_first_live", "each_to_every_purpose", "first_only"]
 )
 def test_degenerate_mappers_are_blocked(planted, shadow_log, kind):  # noqa: F811
-    _setup(planted, n_readers=1, mapping_kind=kind)
+    _setup(planted, mapping_kind=kind)
     res = bs.shadow_check(
         records_dir=shadow_log,
         mode_state_dir=MODE_STATE,
@@ -557,7 +571,9 @@ def test_shadow_reader_isolation(planted, shadow_log):  # noqa: F811
             charter_sha256=_confirmed_charter(planted["repo"], planted["cat"])[0],
             project="pkt",
         )
-        bs.emit_comparison(payload, arm="readers", mapper_version="m1")
+        # An oracle reading is never a blind reader, so it is refused on the readers arm (V7); isolation does not
+        # depend on the arm.
+        bs.emit_comparison(payload, arm="mapper_only", mapper_version="m1")
 
     bs.ensure_shadow_pipeline(start=planted["repo"])
     enforced = "tests/test_bearings_shadow.py::test_shadow_reader_isolation"

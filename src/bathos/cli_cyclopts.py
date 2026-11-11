@@ -2648,7 +2648,7 @@ def _emit_shadow_comparison(
         print("shadow: --mapper-version is required to record a shadow verdict; none recorded", file=sys.stderr)
         return
     try:
-        pipe = bs.ensure_shadow_pipeline(start=root)
+        pipe = bs.ensure_shadow_pipeline(start=root, catalog_dir=cat)
         if not pipe["active"]:
             print(f"shadow: no shadow log configured ({pipe['source']}); none recorded", file=sys.stderr)
             return

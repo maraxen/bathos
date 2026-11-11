@@ -55,6 +55,7 @@ __all__ = [
     "bound_violations",
     "missing_cases",
     "oracle_reading",
+    "ORACLE_READER_ID",
     "plan_planted_packets",
     "pooled_metrics",
     "meets_marginal",
@@ -70,6 +71,7 @@ PASS = {
     "revived_flagged": 2 / 3,  # at least
     "gold_agreement": 0.8,  # at least
 }
+ORACLE_READER_ID = "oracle-from-labels"  # oracle_reading's reader: built from the labels, so never a blind reader
 DECOY_MAX_MAPPED = 0.2  # T7(a): a decoy-charter mapped share above this makes the run invalid
 
 
@@ -710,7 +712,7 @@ def oracle_reading(
                 "citations": cits,
             }
         )
-    return {"packet_sha256": packet_sha256, "reader_id": "oracle-from-labels", "purposes": purposes}
+    return {"packet_sha256": packet_sha256, "reader_id": ORACLE_READER_ID, "purposes": purposes}
 
 
 def pooled_metrics(packets: list[dict[str, Any]]) -> dict[str, Any]:
