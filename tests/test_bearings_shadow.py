@@ -516,6 +516,7 @@ def test_the_readers_arm_needs_three_blind_readers(planted, shadow_log):  # noqa
     _setup(planted, n_readers=2)
     d = bs.derive(_records(shadow_log), project="pkt")
     assert [s["reason"] for s in d["skipped"]] == ["readers_arm_needs_3_blind_readers:2_blind_0_oracle"]
+    assert d["used"] == []  # a dropped packet's readings are not counted as used
     assert not any(d["features"][f]["verdicts"] for f in bs.GATE_FEATURES if f.startswith("bearings.readers."))
 
 
@@ -798,3 +799,63 @@ def test_an_invalid_or_unlabelled_comparison_is_not_scored():
     reasons = sorted({s["reason"].split(":")[0] for s in d["skipped"]})
     assert reasons == ["invalid", "no_labelled_sidecars", "payload_predates_validity_check"]
     assert d["used"] == []
+
+
+def _degenerate_corpus(kind: str) -> list[dict]:
+    """``_perfect_corpus`` with every reader's mapping replaced by a degenerate one (same labels, same packets)."""
+    recs = _perfect_corpus()
+    done: set[int] = set()
+    for r in recs:
+        if r["name"] != "shadow.verdict":
+            continue
+        p = r["fields"]["verdict"]["payload"]
+        if id(p) in done:  # the payload dict is shared by both arms' records
+            continue
+        done.add(id(p))
+        rps = sorted(p["gold"])
+        if kind == "all_unmapped":
+            mapping = {rp: [] for rp in rps}
+        elif kind == "all_to_first_live":
+            mapping = {rp: [_LIVE[0]] for rp in rps}
+        elif kind == "each_to_every_purpose":
+            mapping = {rp: list(_LIVE) for rp in rps}
+        else:  # first_only: one reading purpose mapped (correctly), the rest left unmapped
+            mapping = {rp: (p["gold"][rp] if rp == rps[0] else []) for rp in rps}
+        mapped = {t for ts in mapping.values() for t in ts}
+        items = [
+            {"kind": "mapped", "reading_purpose_id": rp, "charter_purpose_id": t}
+            for rp, ts in mapping.items()
+            for t in ts
+        ]
+        items += [{"kind": "unmapped", "reading_purpose_id": rp} for rp, ts in mapping.items() if not ts]
+        items += [{"kind": "silent", "charter_purpose_id": t} for t in _LIVE if t not in mapped]
+        p["items"] = items
+    return recs
+
+
+@pytest.mark.usefixtures("no_pipeline")
+@pytest.mark.parametrize(
+    "kind", ["all_unmapped", "all_to_first_live", "each_to_every_purpose", "first_only"]
+)
+def test_degenerate_mappers_are_blocked_on_metrics_not_counts(tmp_path, kind):
+    """On a corpus where a perfect mapper passes every gate, a degenerate mapper is blocked by what it gets wrong,
+    never by sample size or missing isolation evidence (the planted fixture is too small to show that)."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "events.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in _degenerate_corpus(kind))
+    )
+    res = bs.shadow_check(
+        records_dir=logs, mode_state_dir=MODE_STATE, out_dir=tmp_path / "d", project="pc"
+    )
+    for arm in bs.ARMS:
+        assert res["arms"][arm]["promotion_permitted"] is False
+        for m in res["arms"][arm]["blocked_metrics"]:
+            reasons = res["features"][bs.gate_feature(arm, m)].get("blocking_reasons", [])
+            assert reasons and not any(
+                r.startswith(("insufficient_", "no_isolation", "enforcer_")) for r in reasons
+            ), (m, reasons)
+    if kind == "first_only":
+        # A sparse but correct mapper passes agreement alone (F3); only the arm-level conjunction stops it.
+        assert res["features"]["bearings.readers.agreement"]["promotion_permitted"] is True
+        assert "agreement" not in res["arms"]["readers"]["blocked_metrics"]

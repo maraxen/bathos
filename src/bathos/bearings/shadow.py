@@ -227,6 +227,8 @@ def _work_tree_or_none(path: Path) -> Path | None:
             timeout=10,
             env={**os.environ, "LC_ALL": "C"},  # the "not a git repository" match below needs git's English
         )
+    except FileNotFoundError:
+        return None  # no git binary (a bare compute node): no work tree a packet could be built from
     except (OSError, subprocess.SubprocessError) as e:
         raise ShadowConfigError(
             f"cannot tell whether {where} is in a git work tree ({type(e).__name__}); refusing the shadow log dir"
@@ -653,7 +655,6 @@ def derive(
                 )
                 continue
             packets.setdefault(payload["packet_sha256"], []).append((ts, payload))
-            used.append(subject)
 
         def put(
             metric: str, subject: str, verdict: bool, label: bool, ts: float, **extra: Any
@@ -704,10 +705,12 @@ def derive(
                     )
                     if n_blind < READERS_PER_PACKET:
                         continue
-            keys ={json.dumps(p["key"], sort_keys=True) for _, p in readings}
+            keys = {json.dumps(p["key"], sort_keys=True) for _, p in readings}
             if len(keys) != 1:
                 skipped.append({"subject": f"packet:{pkt}", "reason": "answer_keys_differ"})
                 continue
+            # Only readings actually scored count as used (a packet dropped above contributes nothing).
+            used.extend(f"packet:{pkt}|reader:{p['reader_id']}" for _, p in readings)
             key = readings[0][1]["key"]
             ts_max = max(ts for ts, _ in readings)
             derived_from = f"packet:{pkt}"
