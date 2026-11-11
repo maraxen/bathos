@@ -156,10 +156,25 @@ is the sidecars' purposes. It also found that `fp_rate` equals `false_silent / n
 | V3, V4 | 5ab411fe | The version is picked after the project filter; dropped subjects appear in `skipped` as `other_feature_version:<v>`. |
 | V7, F8 (forwarding) | 6b04f188 | The readers arm needs three blind readers per packet. An oracle reading is refused on the readers arm at emit and dropped at derive. The isolation enforcer records under `mapper_only`. The CLI forwards `--catalog-dir`. |
 | V1, V2 | 2e0f85a6 | Agreement gains a negative class: unmapped live targets for reading purposes with charter-purpose gold. The mapped items are unchanged, so precision is still AC-9 gold agreement. The agreement mode-state version goes 0.1.0 → 0.2.0, thresholds unchanged. The payload freezes `live_ids` and `bound_violations`. derive skips invalid, unlabelled and pre-check payloads. `shadow_check` reports an arm-level conjunction. |
-| V5 | 2e683b44 | myxcel pushes without `.git` (engaging, titanix and home-gpu profiles all exclude it), so the cluster default is accepted, now pinned by a test. The guard fails closed when git times out or errors. The remote `shadow/` is created so a pull before the first label doesn't exit 23. |
+| V5, partial | 2e683b44, 6b0cdc27 | The work-tree guard fails closed when git times out or errors. A missing git binary counts as "no work tree". The remote `shadow/` is created, so a pull before the first label doesn't exit 23. **Not resolved: cluster runs still record no usable label** (below). |
+| tests | 6b0cdc27 | The degenerate mappers run on the synthetic corpus: every arm is blocked by metric reasons, never by counts. `first_only` passes agreement alone (F3), and only the arm conjunction stops it. `used` counts only scored readings. |
 
 **Positive control:** a synthetic perfect corpus, 3 packets × 3 readers, prevalence ≤ 0.5 per metric, with isolation
-evidence. It passes all six gates and both arms. The degenerate-mapper test now asserts on the arm verdict.
+evidence. It passes all six gates and both arms.
+
+**V5, corrected reading.** Cursor's symptom is real, but the cause differs from what the review said:
+1. myxcel pushes without `.git` (the engaging, titanix and home-gpu profiles all exclude it). The default
+   `<catalog>/shadow` on the cluster is therefore accepted by the guard; a test pins that.
+2. But `_emit_at_work_label` finds the project root with `_git_toplevel(path)`, which on the cluster returns None.
+   So it returns `skipped:not_in_git` and no label is written.
+3. Even with the root fixed, the charter state comes from the catalog's `charter_confirmations`
+   (`charter.py:237`), which the cluster catalog does not have. A cluster label would carry
+   `after_first_confirmation=False`, and `derive` discards it.
+
+Making cluster labels count is a design choice, so it went to the owner and was not guessed here.
+
+**CI baseline:** the merge f2e8723d failed the same 15 tests as main 0.14.0 (identical list; the ty errors are in
+main's code). No failure is specific to this branch.
 
 **Still open, not fixed in this pass:**
 - F3's `n_present` floor. Silent can rest on few present purposes; the agreement and recall floors follow from the
