@@ -144,6 +144,44 @@ def test_a_shadow_log_inside_the_work_tree_is_refused(planted, monkeypatch):  # 
     assert get_pipeline() is None
 
 
+def _nothing_configured(tmp_path, monkeypatch):
+    monkeypatch.delenv(bs.ENV_VAR, raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+
+
+@pytest.mark.usefixtures("no_pipeline")
+def test_a_cluster_layout_catalog_inside_a_pushed_project_is_accepted(tmp_path, monkeypatch):
+    """Review 261111 V5: `bth submit` jobs use BTH_CATALOG_DIR=$BTH_PROJECT_ROOT/.bth/catalog, and myxcel pushes the
+    project without `.git`, so the default <catalog>/shadow is not inside a work tree and labels are recorded."""
+    _nothing_configured(tmp_path, monkeypatch)
+    root = tmp_path / "pushed_project"
+    cat = root / ".bth" / "catalog"
+    cat.mkdir(parents=True)
+    res = bs.ensure_shadow_pipeline(start=root, catalog_dir=cat)
+    assert res["active"] and (cat / "shadow").is_dir()
+
+
+@pytest.mark.usefixtures("no_pipeline")
+def test_a_git_failure_refuses_the_shadow_dir_and_creates_nothing(tmp_path, monkeypatch):
+    """The work-tree guard must not pass by not knowing: a git timeout is not "outside a work tree"."""
+    import subprocess
+
+    _nothing_configured(tmp_path, monkeypatch)
+    cat = tmp_path / "proj" / ".bth" / "catalog"
+    cat.mkdir(parents=True)
+    real_run = subprocess.run
+
+    def fake_run(argv, *a, **k):
+        if "rev-parse" in argv:
+            raise subprocess.TimeoutExpired(argv, 10)
+        return real_run(argv, *a, **k)
+
+    monkeypatch.setattr(bs.subprocess, "run", fake_run)
+    with pytest.raises(bs.ShadowConfigError, match="cannot tell"):
+        bs.ensure_shadow_pipeline(start=cat.parent.parent, catalog_dir=cat)
+    assert not (cat / "shadow").exists() and get_pipeline() is None
+
+
 # ── at-work labels ───────────────────────────────────────────────────────────────────────────────────────────────
 
 

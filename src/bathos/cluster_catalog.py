@@ -151,7 +151,10 @@ def _quote_remote_dest(dest: str) -> str:
 
 
 def ensure_remote_catalog_dir(host: str, remote_root: str) -> None:
-    """`mkdir -p` the remote cool catalog's `campaigns/` and `runs/` dirs.
+    """`mkdir -p` the remote cool catalog's `campaigns/`, `runs/` and `shadow/` dirs.
+
+    `shadow/` (Bearings shadow log) too: `bth sync --pull` rsyncs it, and rsync exits 23 on a missing source dir
+    despite `--ignore-missing-args` (review 261111).
 
     Both must exist before `bth sync`/`bth submit --push-first` rsync into
     them, or rsync fails with exit 11 (#1945) when the remote catalog tree
@@ -163,7 +166,7 @@ def ensure_remote_catalog_dir(host: str, remote_root: str) -> None:
     if "\n" in remote_root or "\r" in remote_root:
         raise ValueError("remote_root must not contain a newline")
     base = remote_catalog_path(remote_root)
-    dests = [f"{base}/campaigns", f"{base}/runs"]
+    dests = [f"{base}/campaigns", f"{base}/runs", f"{base}/shadow"]
     remote_cmd = "mkdir -p -- " + " ".join(_quote_remote_dest(d) for d in dests)
     result = subprocess.run(
         ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, "--", remote_cmd],

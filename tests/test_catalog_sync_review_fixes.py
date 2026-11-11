@@ -262,6 +262,7 @@ def test_ensure_remote_catalog_dir_quotes_and_timeout(monkeypatch):
     assert "${HOME}" in remote_cmd or "$HOME" in remote_cmd
     assert "'~/" not in remote_cmd
     assert ".bth/catalog/campaigns" in remote_cmd
+    assert ".bth/catalog/shadow" in remote_cmd  # pull rsyncs it; a missing source dir exits 23 (review 261111)
     with pytest.raises(ValueError, match="newline"):
         ensure_remote_catalog_dir("engaging\nhost", "~/projects/prolix")
 

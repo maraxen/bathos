@@ -214,6 +214,33 @@ def _git_toplevel(path: Path) -> Path | None:
     )
 
 
+def _work_tree_or_none(path: Path) -> Path | None:
+    """The git work tree holding ``path``; None only when git says it is not in one. Raises ``ShadowConfigError``
+    when git is missing, times out or fails otherwise: the work-tree guard must not pass by not knowing (review
+    261111). Cluster checkouts are pushed without ``.git``, so "not a git repository" is the normal case there."""
+    where = path if path.is_dir() else path.parent
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(where), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={**os.environ, "LC_ALL": "C"},  # the "not a git repository" match below needs git's English
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        raise ShadowConfigError(
+            f"cannot tell whether {where} is in a git work tree ({type(e).__name__}); refusing the shadow log dir"
+        ) from e
+    if out.returncode == 0 and out.stdout.strip():
+        return Path(out.stdout.strip()).resolve()
+    if "not a git repository" in out.stderr:
+        return None
+    raise ShadowConfigError(
+        f"cannot tell whether {where} is in a git work tree (git exit {out.returncode}: {out.stderr.strip()[:200]}); "
+        "refusing the shadow log dir"
+    )
+
+
 def ensure_shadow_pipeline(
     explicit: Path | str | None = None,
     *,
@@ -233,7 +260,7 @@ def ensure_shadow_pipeline(
     if res.path is None:
         return {"active": False, "pipeline": "off", "path": None, "source": res.source}
     path = res.path.resolve()
-    top = _git_toplevel(Path(start) if start is not None else Path.cwd())
+    top = _work_tree_or_none(Path(start) if start is not None else Path.cwd())
     if top is not None and (path == top or top in path.parents):
         raise ShadowConfigError(
             f"shadow log dir {path} is inside the project work tree {top}; packets are built from it, so shadow "
