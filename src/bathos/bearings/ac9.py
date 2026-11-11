@@ -36,6 +36,7 @@ from bathos.bearings.purpose_label import (
     read_purpose_label,
 )
 from bathos.bearings.reading import RESOLVED, _PacketView, resolve_citation
+from bathos.errors import BearingsError
 
 __all__ = [
     "OFF_CHARTER",
@@ -72,7 +73,7 @@ PASS = {
 DECOY_MAX_MAPPED = 0.2  # T7(a): a decoy-charter mapped share above this makes the run invalid
 
 
-class Ac9LabelError(ValueError):
+class Ac9LabelError(BearingsError, ValueError):
     """A label names no charter purpose, is malformed, or a sidecar in the packet cannot be read back from the repo."""
 
 

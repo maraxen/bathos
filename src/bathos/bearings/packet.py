@@ -27,7 +27,7 @@ from bathos.bearings.purpose_label import (
     ids_named,
     strip_purpose_label,
 )
-from bathos.errors import BearingsPacketInvalidError, BearingsPacketMismatchError
+from bathos.errors import BearingsError, BearingsPacketInvalidError, BearingsPacketMismatchError
 
 logger = logging.getLogger(__name__)
 
@@ -269,7 +269,7 @@ def _reader_names_id(reader: Path, pats: list[tuple[str, re.Pattern[str]]]) -> l
     return hits
 
 
-class PacketLeakError(RuntimeError):
+class PacketLeakError(BearingsError, RuntimeError):
     """A charter id reached ``reader/`` despite the filters; the packet is refused rather than shipped."""
 
 

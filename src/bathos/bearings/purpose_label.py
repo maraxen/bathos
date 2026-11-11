@@ -21,6 +21,8 @@ import unicodedata
 from collections.abc import Iterable
 from typing import Any
 
+from bathos.errors import BearingsError
+
 PURPOSE_SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 LABEL_TABLE = "charter"
 # Reserved label value: real work that serves no charter purpose. It stands alone in a label.
@@ -120,7 +122,7 @@ def ids_named(text: str, pats: list[tuple[str, re.Pattern[str]]]) -> set[str]:
 _HEADER_RE = re.compile(r"^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(?:#.*)?$")
 
 
-class PurposeLabelError(ValueError):
+class PurposeLabelError(BearingsError, ValueError):
     """A ``[charter]`` table that is malformed, or that cannot be stripped without touching anything else."""
 
 

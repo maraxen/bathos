@@ -40,7 +40,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger(__name__)
+from bathos.errors import BearingsError
+
+logger =logging.getLogger(__name__)
 
 ENV_VAR = "BTH_SHADOW_LOG_DIR"
 LABEL_FEATURE = "bearings.purpose_label"
@@ -64,7 +66,7 @@ def gate_feature(arm: str, metric: str) -> str:
 GATE_FEATURES = tuple(gate_feature(a, m) for a in ARMS for m in METRICS)
 
 
-class ShadowConfigError(ValueError):
+class ShadowConfigError(BearingsError, ValueError):
     """A malformed shadow configuration, or a shadow log dir that a reader could see."""
 
 
