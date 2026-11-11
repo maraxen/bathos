@@ -61,7 +61,8 @@ def require_project_id(main_root: Path) -> str:
 
     Used by local writers (2b) that must fail rather than silently write
     `project_id: null` for a project that simply forgot to assign one --
-    unlike a SLURM job, which has its own `BTH_PROJECT_ID` fallback path.
+    unlike a SLURM job, where `BTH_PROJECT_ID` (when set) overrides the id read from
+    `.bth.toml` and a job with neither records null (see `resolve_write_project_id`).
     """
     pid = read_project_id(main_root / ".bth.toml")
     if pid is None:

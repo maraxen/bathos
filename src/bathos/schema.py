@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pyarrow as pa
 
-CURRENT_SCHEMA_VERSION = "19"
+CURRENT_SCHEMA_VERSION = "20"
 
 # Format validator for stage_name values — used by linter.check_canonical_stage_names.
 # Enforcement at parse time uses CANONICAL_STAGES set-membership (parse_sidecar); this
@@ -98,6 +98,8 @@ COOL_SCHEMA = pa.schema(
         pa.field("agent_session", pa.string(), nullable=True),
         # v18 (debt #2946): JSON object of flat per-package provenance keys, or null.
         pa.field("dependency_provenance", pa.string(), nullable=True),
+        # v20 (spec 261106): 4-tier resolved toolchain version source.
+        pa.field("toolchain_version_source", pa.string(), nullable=True),
     ]
 )
 
@@ -169,6 +171,8 @@ WARM_SCHEMA = pa.schema(
         pa.field("agent_session", pa.string(), nullable=True),
         # v18 (debt #2946): JSON object of flat per-package provenance keys, or null.
         pa.field("dependency_provenance", pa.string(), nullable=True),
+        # v20 (spec 261106): 4-tier resolved toolchain version source.
+        pa.field("toolchain_version_source", pa.string(), nullable=True),
     ]
 )
 
@@ -256,6 +260,9 @@ class Run:
     #: `<pkg>_module_in_dist`, ...; see bathos.dependency_provenance). None when the
     #: project tracks no packages -- distinct from a tracked package whose values are "unknown".
     dependency_provenance: str | None = None
+    #: v20 (spec 261106). Resolved toolchain version source:
+    #: "recorded" | "verified-from-lock" | "inferred-from-commit" | "unknown" | None.
+    toolchain_version_source: str | None = None
 
     def to_arrow(self) -> pa.Table:
         return pa.table(
@@ -322,6 +329,7 @@ class Run:
                 "tentative_outcome": [self.tentative_outcome],
                 "agent_session": [self.agent_session],
                 "dependency_provenance": [self.dependency_provenance],
+                "toolchain_version_source": [self.toolchain_version_source],
                 "metadata": [self.metadata],
                 "output_metadata": [self.output_metadata],
             },
@@ -470,6 +478,9 @@ class Run:
             agent_session=pydict.get("agent_session", [None])[i] if "agent_session" in pydict else None,
             dependency_provenance=pydict.get("dependency_provenance", [None])[i]
             if "dependency_provenance" in pydict
+            else None,
+            toolchain_version_source=pydict.get("toolchain_version_source", [None])[i]
+            if "toolchain_version_source" in pydict
             else None,
             metadata=(pydict.get("metadata", ["{}"])[i] or "{}") if "metadata" in pydict else "{}",
             output_metadata=(pydict.get("output_metadata", ["[]"])[i] or "[]")

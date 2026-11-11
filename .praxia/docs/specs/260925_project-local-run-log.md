@@ -80,9 +80,12 @@ invest_overrides: []
   minted **only** by `bth init` (or `bth init --assign-id` for existing projects), which the
   user commits; a run never writes `.bth.toml`. The id is read from the resolved root's
   `.bth.toml` (the main checkout, per D1). A local `bth run` with no id fails with a structured
-  error naming that command. SLURM jobs use `BTH_PROJECT_ID`, which `bth submit` exports from
-  the local id; a job with neither writes `project_id: null` and ingest maps its `project` slug
-  through `projects.toml`, with a warning. The id is stable across moves, clones and worktrees.
+  error naming that command. SLURM jobs use `BTH_PROJECT_ID` when it is set (`bth submit`
+  exports it from the local id); otherwise the writer falls back to the `[project] id` in the
+  resolved root's `.bth.toml` (praxia debt #3202), so such a job mirrors under
+  `~/.bth/log-mirror/<id>/`. Only a job with neither writes `project_id: null`, and ingest then
+  maps its `project` slug through `projects.toml`, with a warning. The id is stable across
+  moves, clones and worktrees.
   Forks or copies share it deliberately; segment names never collide between writers (a
   `cp -r` copy duplicates existing files, which eid dedup absorbs), and `bth verify` flags
   two registered roots with the same id (AC-24). The mirror

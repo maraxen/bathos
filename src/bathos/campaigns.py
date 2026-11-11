@@ -541,6 +541,43 @@ def _add_run_to_campaign_impl(
         raise CampaignError(f"Run not found: {run_id}")
     run_timestamp, run_outcome, run_sidecar_path = run_rows[0]
 
+    from pathlib import Path as _P
+
+    from bathos.errors import HIDDEN_STATE_TO_EXCEPTION
+    from bathos.validity import resolve_validity
+
+    cat_path = _P(catalog_dir) if catalog_dir else None
+    v_map = resolve_validity([run_id], cat_path or _P.cwd(), db=db)
+    v = v_map.get(run_id)
+    if v and v.is_hidden:
+        exc_cls = HIDDEN_STATE_TO_EXCEPTION.get(v.state, CampaignError)
+        raise exc_cls(
+            f"Cannot add run {run_id} to campaign: run is hidden ({v.state}): {v.reason or ''}",
+            run_id=run_id,
+            state=v.state,
+            defect_id=v.defect_id,
+            reason=v.reason,
+            replacement_id=v.replacement_id,
+        )
+    # OD-6: Warn-only on estimand mixing
+    if v and v.estimand_marker:
+        pkg = v.estimand_marker.split(":")[0]
+        ex_members = union_campaign_member_ids(db, campaign_id, cat_path)
+        if ex_members:
+            ex_vmap = resolve_validity(ex_members, cat_path or _P.cwd(), db=db)
+            ex_markers = {
+                ev.estimand_marker
+                for ev in ex_vmap.values()
+                if ev.estimand_marker and ev.estimand_marker.startswith(f"{pkg}:")
+            }
+            if ex_markers and v.estimand_marker not in ex_markers:
+                print(
+                    f"Warning: adding run {run_id} introduces mixed estimand epochs for {pkg}: "
+                    f"{v.estimand_marker} vs existing {sorted(ex_markers)}. "
+                    "Campaign conclude will require --allow-mixed-estimand justification.",
+                    file=sys.stderr,
+                )
+
     # ── STEPBACK REVIEW & ESCALATION LIFECYCLE HOOK (Decision D1) ───────────────
     # Non-blocking advisory warning by default; blocks only when opt-in enforce=true.
     from bathos.stepback.catalog import get_escalation_state
@@ -636,12 +673,10 @@ def _add_run_to_campaign_impl(
         evalue = 1.0
         sidecar_stopping_threshold = None
         if run_sidecar_path:
-            from pathlib import Path
-
             from bathos.sidecar import SidecarError, parse_sidecar
 
             try:
-                sidecar_path_obj = Path(run_sidecar_path)
+                sidecar_path_obj = _P(run_sidecar_path)
                 if sidecar_path_obj.exists():
                     sidecar = parse_sidecar(sidecar_path_obj)
                     # invalid_measurement is a non-verdict (spec §3.2): neutral, like observed.
@@ -1146,6 +1181,9 @@ def conclude_campaign(
     negative_check: str | None = None,
     negative_outcome_pattern=None,
     catalog_dir: Path | None = None,
+    ack_suspect: str = "",
+    ack_unverifiable: str = "",
+    allow_mixed_estimand: str = "",
 ) -> None:
     """Mark campaign as concluded. Thin wrapper: fixes the runlog mode for this
     unit of work (AC-25), then delegates to `_conclude_campaign_impl` for the
@@ -1163,6 +1201,9 @@ def conclude_campaign(
             negative_check=negative_check,
             negative_outcome_pattern=negative_outcome_pattern,
             catalog_dir=catalog_dir,
+            ack_suspect=ack_suspect,
+            ack_unverifiable=ack_unverifiable,
+            allow_mixed_estimand=allow_mixed_estimand,
         )
 
 
@@ -1176,6 +1217,9 @@ def _conclude_campaign_impl(
     negative_check: str | None = None,
     negative_outcome_pattern=None,
     catalog_dir: Path | None = None,
+    ack_suspect: str = "",
+    ack_unverifiable: str = "",
+    allow_mixed_estimand: str = "",
 ) -> None:
     """Mark campaign as concluded.
 
@@ -1293,6 +1337,94 @@ def _conclude_campaign_impl(
             claim_path_rel = None
         if not registered_sha:
             registered_sha = None
+
+    # Unconditional validity check of all campaign members (AC-P1-10)
+    member_ids = union_campaign_member_ids(db, full_id, catalog_dir)
+    precomputed_member_ids = member_ids
+    if member_ids:
+        from bathos.errors import (
+            HIDDEN_STATE_TO_EXCEPTION,
+            EstimandBoundaryMixedError,
+            ResultSuspectUnacknowledgedError,
+            ResultUnverifiableUnacknowledgedError,
+        )
+        from bathos.index import record_acknowledgment
+        from bathos.validity import resolve_validity
+
+        cat_path = Path(catalog_dir) if catalog_dir else None
+        validity_map = resolve_validity(
+            member_ids, cat_path or Path.cwd(), db=db, workspace_root=workspace_root
+        )
+        for mid, v in validity_map.items():
+            if v.is_hidden:
+                exc_cls = HIDDEN_STATE_TO_EXCEPTION.get(v.state, CampaignError)
+                raise exc_cls(
+                    f"Cannot conclude campaign {full_id[:8]}: member run {mid} is hidden ({v.state}): {v.reason or ''}",
+                    run_id=mid,
+                    state=v.state,
+                    defect_id=v.defect_id,
+                    reason=v.reason,
+                    replacement_id=v.replacement_id,
+                )
+            if v.state == "suspect":
+                if not ack_suspect.strip():
+                    raise ResultSuspectUnacknowledgedError(
+                        f"Cannot conclude campaign {full_id[:8]}: member run {mid} is suspect: {v.reason or ''}. "
+                        "Pass --ack-suspect '<reason>' to acknowledge.",
+                        run_id=mid,
+                        reason=v.reason,
+                    )
+                record_acknowledgment(
+                    catalog_dir,
+                    kind="validity.acknowledged",
+                    entity_type="campaign",
+                    entity_id=full_id,
+                    run_ids=[mid],
+                    surface="campaign_conclude",
+                    reason=ack_suspect.strip(),
+                )
+            elif v.state == "unverifiable":
+                if not ack_unverifiable.strip():
+                    raise ResultUnverifiableUnacknowledgedError(
+                        f"Cannot conclude campaign {full_id[:8]}: member run {mid} is unverifiable: {v.reason or ''}. "
+                        "Pass --ack-unverifiable '<reason>' to acknowledge.",
+                        run_id=mid,
+                        reason=v.reason,
+                    )
+                record_acknowledgment(
+                    catalog_dir,
+                    kind="validity.acknowledged",
+                    entity_type="campaign",
+                    entity_id=full_id,
+                    run_ids=[mid],
+                    surface="campaign_conclude",
+                    reason=ack_unverifiable.strip(),
+                )
+
+        # Estimand Boundary Check (OD-6):
+        markers_by_pkg: dict[str, set[str]] = {}
+        for mid, v in validity_map.items():
+            if v.estimand_marker:
+                pkg = v.estimand_marker.split(":")[0]
+                markers_by_pkg.setdefault(pkg, set()).add(v.estimand_marker)
+
+        for pkg, markers in markers_by_pkg.items():
+            if len(markers) > 1:
+                if not allow_mixed_estimand.strip():
+                    raise EstimandBoundaryMixedError(
+                        f"Campaign {full_id[:8]} member runs span multiple estimand epochs for {pkg}: {sorted(markers)}. "
+                        "Pass --allow-mixed-estimand '<reason>' to justify pooling across the boundary.",
+                        epochs=sorted(markers),
+                    )
+                record_acknowledgment(
+                    catalog_dir,
+                    kind="validity.estimand_override_recorded",
+                    entity_type="campaign",
+                    entity_id=full_id,
+                    run_ids=member_ids,
+                    surface="campaign_conclude",
+                    reason=allow_mixed_estimand.strip(),
+                )
 
     # AC-08: Union Gate short-circuits if claim_path IS NULL (opt-in adoption ladder)
     if claim_path_rel and registered_sha:
@@ -2095,6 +2227,37 @@ def review_campaign(
             blast_radius_status = fold_blast_radius_state(catalog_dir, "campaign", campaign_id)
             claim_blast_radius_status = fold_blast_radius_state(catalog_dir, "claim", campaign_id)
 
+    validity_summary = {
+        "counts_by_state": {},
+        "hidden_runs": [],
+        "estimand_epochs": {},
+    }
+    member_run_ids = [r[0] for r in rows]
+    if member_run_ids:
+        try:
+            from bathos.validity import resolve_validity
+
+            cat_path = Path(catalog_dir) if catalog_dir else None
+            v_map = resolve_validity(
+                member_run_ids, cat_path or Path.cwd(), db=db, workspace_root=workspace_root
+            )
+            for rid, v in v_map.items():
+                validity_summary["counts_by_state"][v.state] = (
+                    validity_summary["counts_by_state"].get(v.state, 0) + 1
+                )
+                if v.is_hidden:
+                    validity_summary["hidden_runs"].append(
+                        {"run_id": rid, "state": v.state, "reason": v.reason}
+                    )
+                if v.estimand_marker:
+                    pkg = v.estimand_marker.split(":")[0]
+                    validity_summary["estimand_epochs"].setdefault(pkg, set()).add(v.estimand_marker)
+            validity_summary["estimand_epochs"] = {
+                k: sorted(v) for k, v in validity_summary["estimand_epochs"].items()
+            }
+        except Exception:
+            pass
+
     return {
         "total_runs": total,
         "residual_rate": residual_rate,
@@ -2105,6 +2268,7 @@ def review_campaign(
         "popper": popper_data,
         "blast_radius_status": blast_radius_status,
         "claim_blast_radius_status": claim_blast_radius_status,
+        "validity_summary": validity_summary,
         "amendments": _member_amendments(workspace_root, [r[0] for r in rows]),
         "waivers": _member_waivers(db, workspace_root, [r[0] for r in rows], catalog_dir),
     }

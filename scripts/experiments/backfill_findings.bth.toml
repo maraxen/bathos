@@ -1,0 +1,21 @@
+[experiment]
+hypothesis = "Ingesting legacy claims_ledger.toml from tev_design and .praxia/verdicts/*.toml from asr into native .bth/findings/*.toml achieves 100% field parity and accurately maps refuted_or_superseded to superseded."
+
+[outcomes.pass]
+condition = "total_findings > 0 AND refuted_or_superseded_mapped_to_superseded = true"
+decision = "Findings ingestion successful; retire legacy audit prototypes claims_ledger.toml and .praxia/verdicts/."
+reasoning = "All claims and verdicts migrated with 100% field parity and valid status mapping."
+
+[outcomes.fail]
+condition = "total_findings == 0 OR refuted_or_superseded_mapped_to_superseded = false"
+decision = "Findings ingestion failed or counts diverged from expected prototype totals."
+reasoning = "Missing claims, missing verdicts, or improper status mapping."
+is_residual = true
+
+[result_schema]
+claims_ingested = "int"
+verdicts_ingested = "int"
+total_findings = "int"
+refuted_mapped_count = "int"
+refuted_or_superseded_mapped_to_superseded = "bool"
+dry_run = "bool"

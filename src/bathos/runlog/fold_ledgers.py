@@ -95,6 +95,39 @@ def fold_archived_item(events: list[dict]) -> dict[str, Any] | None:
         "archived_by": data.get("archived_by"),
         "recorded_at": data.get("recorded_at"),
         "record_id": data.get("record_id"),
+        "script_sha256": data.get("script_sha256"),
+        "run_ids": data.get("run_ids"),
+    }
+
+
+def fold_acknowledgment(events: list[dict]) -> dict[str, Any] | None:
+    """Fold `validity.acknowledged` and `validity.estimand_override_recorded` events.
+
+    Each acknowledgment record is keyed by its unique id (uuid4).
+    """
+    valid_events = [
+        e
+        for e in events
+        if e.get("kind") in ("validity.acknowledged", "validity.estimand_override_recorded")
+    ]
+    if not valid_events:
+        return None
+    ev = sorted(
+        valid_events,
+        key=lambda e: (e.get("ts") or "", e.get("eid") or ""),
+    )[-1]
+    data = ev.get("data") or {}
+    entity = ev.get("entity") or [None]
+    return {
+        "id": data.get("id") or entity[0],
+        "kind": data.get("kind"),
+        "entity_type": data.get("entity_type"),
+        "entity_id": data.get("entity_id"),
+        "run_ids": data.get("run_ids"),
+        "surface": data.get("surface"),
+        "reason": data.get("reason"),
+        "actor": data.get("actor") or ev.get("actor") or "",
+        "recorded_at": data.get("recorded_at") or ev.get("ts"),
     }
 
 
@@ -134,4 +167,10 @@ def fold_submit(events: list[dict]) -> dict[str, Any] | None:
     }
 
 
-__all__ = ["fold_archived_item", "fold_blast_radius", "fold_submit", "fold_trust_ledger"]
+__all__ = [
+    "fold_acknowledgment",
+    "fold_archived_item",
+    "fold_blast_radius",
+    "fold_submit",
+    "fold_trust_ledger",
+]

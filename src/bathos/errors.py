@@ -12,6 +12,7 @@ All MCP tools return envelopes with error_code values from this enum.
 from __future__ import annotations
 
 from enum import Enum
+from typing import Any
 
 
 class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(Enum) returning Enum member value for serialization
@@ -65,6 +66,7 @@ class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(
     # section's BTH_LOG_MODE guard. Inert while the flag is off.
     RUNLOG_NOT_IGNORED = "runlog_not_ignored"
     RUNLOG_PROJECT_ID_MISSING = "runlog_project_id_missing"
+    RUNLOG_UNAFFILIATED_PROJECT = "runlog_unaffiliated_project"
     RUNLOG_MODE_REFUSED = "runlog_mode_refused"
 
     # Output tiering (bathos.output_tiers, spec 261023_output-tiering): refusals of
@@ -134,6 +136,28 @@ class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(
     ESCALATION_LEVEL_INVALID = "escalation_level_invalid"
     CHAIR_TOKEN_INVALID = "chair_token_invalid"
 
+    # Result validity, supersession & archive (spec 261106).
+    RESULT_VOID = "result_void"
+    RESULT_AFFECTED = "result_affected"
+    RESULT_SUPERSEDED = "result_superseded"
+    RESULT_ARCHIVED = "result_archived"
+    RESULT_HIDDEN = "result_hidden"
+    RESULT_SUSPECT_UNACKNOWLEDGED = "result_suspect_unacknowledged"
+    RESULT_UNVERIFIABLE_UNACKNOWLEDGED = "result_unverifiable_unacknowledged"
+    ESTIMAND_BOUNDARY_MIXED = "estimand_boundary_mixed"
+
+    # Findings & evidence tiers (spec 261106 Phase 2)
+    FINDING_REOPEN_REASON_REQUIRED = "finding_reopen_reason_required"
+    FINDING_SETTLED_EVIDENCE_INSUFFICIENT = "finding_settled_evidence_insufficient"
+    FINDING_NOT_FOUND = "finding_not_found"
+    SUPERSEDED_TARGET_NOT_FOUND = "superseded_target_not_found"
+    SPIKE_TIER_CANNOT_SETTLE = "spike_tier_cannot_settle"
+
+    # Archive sweep, doc store & restore (spec 261106 Phase 3)
+    ARCHIVE_SWEEP_UNAPPROVED = "archive_sweep_unapproved"
+    ARCHIVE_PROPOSAL_STALE = "archive_proposal_stale"
+    DOC_STORE_UNAVAILABLE = "doc_store_unavailable"
+    RESTORE_CONFLICT = "restore_conflict"
     # Project Charter & Confirmation (spec 261104, slice 1).
     CHARTER_NOT_FOUND = "charter_not_found"
     CHARTER_INVALID = "charter_invalid"
@@ -187,6 +211,7 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.DOCUMENT_CONFLICT: "A document already exists at that path. Pass force=true to overwrite it, or author to a different path",
     BathosErrorCode.RUNLOG_NOT_IGNORED: "Add '/.bth/log/' to .gitignore in the main checkout (or run `bth init` there) before recording runs",
     BathosErrorCode.RUNLOG_PROJECT_ID_MISSING: "Run `bth init --assign-id` in the main checkout, then commit the updated .bth.toml",
+    BathosErrorCode.RUNLOG_UNAFFILIATED_PROJECT: "Run from a directory under the project's .bth.toml, or set BTH_WORKSPACE_ROOT to the checkout root; the run would otherwise be filed as unaffiliated with project_id null",
     BathosErrorCode.RUNLOG_MODE_REFUSED: "Unset BTH_LOG_MODE, or run `bth migrate --to-log` to write the real cut-over marker",
     BathosErrorCode.NO_REFERENCE_HASHES: "The run has no reference hash set: declare [outputs] roots in its sidecar and re-run, or (a pre-standard run only) `bth outputs adopt` its output roots",
     BathosErrorCode.RUN_NOT_TERMINAL: "Wait for the run to finish (or reap it) before adopting outputs; a running run's files are still changing",
@@ -242,6 +267,23 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.REVIEWER_CONFLICT_OF_INTEREST: "Assign review to an independent agent or researcher who did not author runs in this campaign",
     BathosErrorCode.ESCALATION_LEVEL_INVALID: "Specify a valid escalation level between 0 and 3",
     BathosErrorCode.CHAIR_TOKEN_INVALID: "Verify the chair token in `~/.bth/chair_token` or invoke from an interactive TTY",
+    BathosErrorCode.RESULT_VOID: "The requested run was produced by a defective instrument version and is void. Query runs_current or use a replacement run. Pass --include-superseded to inspect history.",
+    BathosErrorCode.RESULT_AFFECTED: "The requested run is implicated by an active blast-radius ledger entry. Re-run or clear the flag with audit justification via 'bth blast-radius clear'.",
+    BathosErrorCode.RESULT_SUPERSEDED: "The requested run was superseded by a newer run. Use --include-superseded to inspect, or query the successor run.",
+    BathosErrorCode.RESULT_ARCHIVED: "The requested script or outputs were archived. Use 'bth restore --item-id <id>' to restore files to workspace.",
+    BathosErrorCode.RESULT_HIDDEN: "The requested run is hidden by default due to void, affected, superseded, or archived status. Pass --include-superseded to inspect.",
+    BathosErrorCode.RESULT_SUSPECT_UNACKNOWLEDGED: "Run was produced by an unverified toolchain matching a defect range or lacks a required predicate field. To proceed, pass --ack-suspect '<rationale>' (ack_suspect='<rationale>').",
+    BathosErrorCode.RESULT_UNVERIFIABLE_UNACKNOWLEDGED: "Run provenance cannot be verified against repository lockfiles. To proceed, pass --ack-unverifiable '<rationale>' (ack_unverifiable='<rationale>').",
+    BathosErrorCode.ESTIMAND_BOUNDARY_MIXED: "Attempted to combine runs across an estimand change boundary at a confirmatory gate. Results compute different quantities; separate by epoch or pass --allow-mixed-estimand '<rationale>'.",
+    BathosErrorCode.FINDING_REOPEN_REASON_REQUIRED: "The question is already settled. Provide --reopen-reason explaining why prior confirmatory evidence is being challenged.",
+    BathosErrorCode.FINDING_SETTLED_EVIDENCE_INSUFFICIENT: "Settling a finding requires at least one active confirmatory run. Elevate supporting evidence before setting status to settled.",
+    BathosErrorCode.FINDING_NOT_FOUND: "The specified finding slug or ID was not found in .bth/findings/. Query finding_list to inspect available findings.",
+    BathosErrorCode.SUPERSEDED_TARGET_NOT_FOUND: "The target entity specified in supersedes does not exist. Verify the predecessor ID or slug.",
+    BathosErrorCode.SPIKE_TIER_CANNOT_SETTLE: "Spike runs are preliminary probes and cannot support a settled finding. Elevate evidence via a confirmatory run.",
+    BathosErrorCode.ARCHIVE_SWEEP_UNAPPROVED: "Archive sweep requires an approved proposal file when --apply is set. Run with --dry-run first to generate a proposal.",
+    BathosErrorCode.ARCHIVE_PROPOSAL_STALE: "The archive proposal references files or git states that have changed since proposal generation. Re-run --dry-run to regenerate.",
+    BathosErrorCode.DOC_STORE_UNAVAILABLE: "The configured documentation store path is not accessible or writable. Check permissions or configuration.",
+    BathosErrorCode.RESTORE_CONFLICT: "Restoring this item would overwrite an existing modified or untracked file. Move or rename the destination file first.",
     # Project Charter & Confirmation (spec 261104, slice 1).
     BathosErrorCode.CHARTER_NOT_FOUND: "Create a charter at .bth/charter.toml or scaffold one with 'bth charter draft'",
     BathosErrorCode.CHARTER_INVALID: "Fix syntax, schema, or missing fields in .bth/charter.toml",
@@ -352,6 +394,10 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     "LogNotIgnoredError": BathosErrorCode.RUNLOG_NOT_IGNORED,
     "ProjectIdMissingError": BathosErrorCode.RUNLOG_PROJECT_ID_MISSING,
     "LogModeRefusedError": BathosErrorCode.RUNLOG_MODE_REFUSED,
+    # Debt #3201 / #3210: a slug-bearing run resolved to the unaffiliated log, so it would carry
+    # no project_id. The cause is an unbound checkout (no .bth.toml / repo at the resolved root),
+    # not a missing id, so it gets its own code and hint (`bth init --assign-id` would not help).
+    "UnaffiliatedProjectError": BathosErrorCode.RUNLOG_UNAFFILIATED_PROJECT,
     # ── debt 1996 ────────────────────────────────────────────────────────────
     # Five more exceptions raised in src/bathos/ with no entry here, which kept
     # test_every_domain_exception_has_registered_code red on main. Same rule as
@@ -413,6 +459,28 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     "StepBackUnauthorizedChairError": BathosErrorCode.STEPBACK_UNAUTHORIZED_CHAIR,
     "ChairTokenInvalidError": BathosErrorCode.CHAIR_TOKEN_INVALID,
     "EscalationLevelInvalidError": BathosErrorCode.ESCALATION_LEVEL_INVALID,
+    # Result validity (spec 261106)
+    "ResultHiddenError": BathosErrorCode.RESULT_HIDDEN,
+    "ResultVoidError": BathosErrorCode.RESULT_VOID,
+    "ResultAffectedError": BathosErrorCode.RESULT_AFFECTED,
+    "ResultSupersededError": BathosErrorCode.RESULT_SUPERSEDED,
+    "ResultArchivedError": BathosErrorCode.RESULT_ARCHIVED,
+    "ResultSuspectUnacknowledgedError": BathosErrorCode.RESULT_SUSPECT_UNACKNOWLEDGED,
+    "ResultUnverifiableUnacknowledgedError": BathosErrorCode.RESULT_UNVERIFIABLE_UNACKNOWLEDGED,
+    "EstimandBoundaryMixedError": BathosErrorCode.ESTIMAND_BOUNDARY_MIXED,
+    # Findings & evidence tiers (spec 261106 Phase 2)
+    "FindingError": BathosErrorCode.INVALID_PARAM,
+    "FindingReopenReasonRequiredError": BathosErrorCode.FINDING_REOPEN_REASON_REQUIRED,
+    "FindingSettledEvidenceInsufficientError": BathosErrorCode.FINDING_SETTLED_EVIDENCE_INSUFFICIENT,
+    "FindingNotFoundError": BathosErrorCode.FINDING_NOT_FOUND,
+    "SupersededTargetNotFoundError": BathosErrorCode.SUPERSEDED_TARGET_NOT_FOUND,
+    "SpikeTierCannotSettleError": BathosErrorCode.SPIKE_TIER_CANNOT_SETTLE,
+    # Archive sweep, doc store & restore (spec 261106 Phase 3)
+    "ArchiveSweepError": BathosErrorCode.INVALID_PARAM,
+    "ArchiveSweepUnapprovedError": BathosErrorCode.ARCHIVE_SWEEP_UNAPPROVED,
+    "ArchiveProposalStaleError": BathosErrorCode.ARCHIVE_PROPOSAL_STALE,
+    "DocStoreUnavailableError": BathosErrorCode.DOC_STORE_UNAVAILABLE,
+    "RestoreConflictError": BathosErrorCode.RESTORE_CONFLICT,
     # Project charter & confirmation (spec 261104, slice 1).
     "CharterError": BathosErrorCode.INTERNAL,
     "CharterNotFoundError": BathosErrorCode.CHARTER_NOT_FOUND,
@@ -513,6 +581,227 @@ class EscalationLevelInvalidError(StepBackError):
     """Specified escalation level is outside 0-3 range."""
 
 
+# ── Result Validity Domain Exceptions (spec 261106) ──────────────────────────
+
+
+class ResultHiddenError(BathosError):
+    """Raised when an operation encounters or requests a hidden run without permission."""
+
+    def __init__(
+        self,
+        message: str = "Result is hidden",
+        *,
+        run_id: str | None = None,
+        state: str = "void",
+        defect_id: str | None = None,
+        reason: str | None = None,
+        replacement_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.run_id = run_id
+        self.state = state
+        self.defect_id = defect_id
+        self.reason = reason
+        self.replacement_id = replacement_id
+
+
+class ResultVoidError(ResultHiddenError):
+    """Run was produced by a defective toolchain version and is void."""
+
+
+class ResultAffectedError(ResultHiddenError):
+    """Run is implicated by an active blast-radius ledger entry."""
+
+
+class ResultSupersededError(ResultHiddenError):
+    """Run was superseded by a newer run."""
+
+
+class ResultArchivedError(ResultHiddenError):
+    """Run scripts or outputs were archived."""
+
+
+class ResultSuspectUnacknowledgedError(BathosError):
+    """Run is suspect (inferred version or missing predicate field) and lacked required acknowledgment."""
+
+    def __init__(
+        self,
+        message: str = "Suspect result requires acknowledgment",
+        *,
+        run_id: str | None = None,
+        defect_id: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.run_id = run_id
+        self.defect_id = defect_id
+        self.reason = reason
+
+
+class ResultUnverifiableUnacknowledgedError(BathosError):
+    """Run toolchain version is unverifiable against repository lockfiles and lacked required acknowledgment."""
+
+    def __init__(
+        self,
+        message: str = "Unverifiable result requires acknowledgment",
+        *,
+        run_id: str | None = None,
+        defect_id: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.run_id = run_id
+        self.defect_id = defect_id
+        self.reason = reason
+
+
+class EstimandBoundaryMixedError(BathosError):
+    """Runs across an estimand change boundary were pooled at a confirmatory gate without override."""
+
+    def __init__(
+        self,
+        message: str = "Cannot pool runs across estimand change boundary without override",
+        *,
+        estimand_markers: list[str] | None = None,
+        conflicting_runs: dict[str, list[str]] | None = None,
+        epochs: list[str] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message)
+        _ = kwargs
+        self.estimand_markers = estimand_markers or epochs or []
+        self.epochs = self.estimand_markers
+        self.conflicting_runs = conflicting_runs or {}
+
+
+# ── Findings & Supersession Domain Exceptions (spec 261106 P2) ────────────────
+
+
+class FindingError(BathosError):
+    """Base class for findings register errors."""
+
+
+class FindingReopenReasonRequiredError(FindingError):
+    """Attempted to create finding or experiment for settled question without reopen_reason."""
+
+    def __init__(
+        self,
+        message: str = "Settled question requires reopen_reason",
+        *,
+        question_slug: str | None = None,
+        settled_finding_id: str | None = None,
+        settled_answer: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.question_slug = question_slug
+        self.settled_finding_id = settled_finding_id
+        self.settled_answer = settled_answer
+
+
+class FindingSettledEvidenceInsufficientError(FindingError):
+    """Settling a finding requires at least one active confirmatory run."""
+
+    def __init__(
+        self,
+        message: str = "Settling a finding requires at least one active confirmatory run",
+        *,
+        finding_id: str | None = None,
+        supporting_runs: list[str] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.finding_id = finding_id
+        self.supporting_runs = supporting_runs or []
+
+
+class FindingNotFoundError(FindingError):
+    """Requested finding slug or ID does not exist."""
+
+    def __init__(
+        self,
+        message: str = "Finding not found",
+        *,
+        slug_or_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.slug_or_id = slug_or_id
+
+
+class SupersededTargetNotFoundError(BathosError):
+    """The target entity specified in supersedes does not exist."""
+
+    def __init__(
+        self,
+        message: str = "Superseded target entity does not exist",
+        entity_id_pos: str | None = None,
+        *,
+        entity_type: str | None = None,
+        entity_id: str | None = None,
+    ) -> None:
+        if entity_id_pos is not None:
+            # Called as SupersededTargetNotFoundError("finding", "target_id")
+            resolved_type = entity_type or message
+            resolved_id = entity_id or entity_id_pos
+            msg = f"Target entity '{resolved_id}' of type '{resolved_type}' not found"
+        else:
+            resolved_type = entity_type
+            resolved_id = entity_id
+            msg = message
+        super().__init__(msg)
+        self.entity_type = resolved_type
+        self.entity_id = resolved_id
+
+
+class SpikeTierCannotSettleError(FindingError):
+    """Spike runs are preliminary probes and cannot support a settled finding."""
+
+    def __init__(
+        self,
+        message: str = "Spike runs cannot support a settled finding",
+        *,
+        finding_id: str | None = None,
+        spike_runs: list[str] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.finding_id = finding_id
+        self.spike_runs = spike_runs or []
+
+
+HIDDEN_STATE_TO_ERROR_CODE: dict[str, BathosErrorCode] = {
+    "void": BathosErrorCode.RESULT_VOID,
+    "affected": BathosErrorCode.RESULT_AFFECTED,
+    "superseded": BathosErrorCode.RESULT_SUPERSEDED,
+    "archived": BathosErrorCode.RESULT_ARCHIVED,
+}
+
+HIDDEN_STATE_TO_EXCEPTION: dict[str, type[ResultHiddenError]] = {
+    "void": ResultVoidError,
+    "affected": ResultAffectedError,
+    "superseded": ResultSupersededError,
+    "archived": ResultArchivedError,
+}
+
+
+# ── Archive Sweep & Doc Store Domain Exceptions (spec 261106 Phase 3) ────────
+
+
+class ArchiveSweepError(BathosError):
+    """Base error for archive sweep operations."""
+
+
+class ArchiveSweepUnapprovedError(ArchiveSweepError):
+    """Raised when --apply is passed without an approved proposal."""
+
+
+class ArchiveProposalStaleError(ArchiveSweepError):
+    """Raised when proposal file SHA256 or git state diverges."""
+
+
+class DocStoreUnavailableError(BathosError):
+    """Raised when configured documentation store is not accessible."""
+
+
+class RestoreConflictError(BathosError):
+    """Raised when restore would overwrite an existing modified/untracked file."""
 # ── Charter Domain Exceptions (spec 261104) ───────────────────────────────────
 
 

@@ -1,9 +1,13 @@
-# agent-a3507d8df4756150c Internal Docs
+# bathos Internal Docs
+
+Superseded and archived docs: [HISTORY.md](HISTORY.md).
 
 ## Daily
 - [260805_overnight-decisions](daily/260805_overnight-decisions.md) — Every decision made without a human gate during the overnight autonomous loop run, with enough context to backtrack
 
 ## Handoffs
+- [261109_cisternal-shadow-development-spec-draft](handoffs/261109_cisternal-shadow-development-spec-draft.md) — Draft spec for a cisternal.shadow module and developing-in-shadow skill, for a cisternal session to file under its specs and review.
+- [261106_agy-argon-spec-dispatch-prompt](handoffs/261106_agy-argon-spec-dispatch-prompt.md) — Paste-ready /goal /teamwork /boost prompt for Antigravity (Gemini Argon) to run recon, prior-art research, specification and adversarial spec-review cycles for task 261106_archive-supersession, starting from the approved design doc.
 - [261026_provenance-praxia-g31-handoff](handoffs/261026_provenance-praxia-g31-handoff.md) — What bathos changed (sidecar locks as commit refs, untrackable manifest) and the praxia-side work it needs; blocks praxia's relief from per-run tree dirtying. Tracking item praxia debt
 - [261023_myxcel-cold-primitives-brief](handoffs/261023_myxcel-cold-primitives-brief.md) — Completed brief for myxcel cold put, commit, verify-file, get, lock, unlock, ls and rm-partial, all merged in myxcel; spec section 6.2 is the authoritative contract, not this brief
 - [260616_worktree-prune-backlog-assess](handoffs/260616_worktree-prune-backlog-assess.md) — repo consolidated to single main worktree; bathos backlog drained (only #1774 P3 remains)
@@ -11,6 +15,7 @@
 - [260601_v061-sprint-close](handoffs/260601_v061-sprint-close.md)
 
 ## Plans
+- [261111_bearings-slice3-shadow](plans/261111_bearings-slice3-shadow.md) — Plan for wiring Bearings into cisternal shadow mode: at-work labels from bth run, expanded binary subjects, mode-state TOMLs, isolation test, shadow log location.
 - [261104_bearings-slice1-charter](plans/261104_bearings-slice1-charter.md) — Build plan for Bearings slice 1 (AC-1, AC-2, AC-3 ext half): charter file, human-only hash-bound confirmation, purpose-ledger pivot, folds; dispatch brief for agy.
 - [260828_cyclopts-migration-milestone-2-scope](plans/260828_cyclopts-migration-milestone-2-scope.md) — Cyclopts CLI migration — Milestone 2 scope (backlog
 - [260805_deferred-item-triage-reconcile-the-handoff-backlog](plans/260805_deferred-item-triage-reconcile-the-handoff-backlog.md) — Scope for a one-time sweep of 42 deferred handoff entries plus a session-close reconciliation step, after Postgres evidence showed the defect is stale handoffs rather than untracked work
@@ -23,6 +28,8 @@
 - [260515_v02-sprint-plan](plans/260515_v02-sprint-plan.md)
 
 ## Specs
+- [261106_result-validity-supersession-archive-design](specs/261106_result-validity-supersession-archive-design.md) — Design (pre-spec) for task 261106_archive-supersession: instrument defect ranges with version backfill from uv.lock, hidden-by-default reads/cites for void/affected/superseded/archived results, evidence tiers incl. spike, distance-from-present annotations, a lightweight findings register with supersession edges, session-start current-beliefs view, and a batch archive sweep with a self-contained doc store that can be pointed at .praxia/docs. Phased: P1 stop the leak, P2 findings + tiers, P3 archive sweep.
+- [261106_result-validity-supersession-archive](specs/261106_result-validity-supersession-archive.md) — Comprehensive production specification for task 261106_archive-supersession: instrument defect ranges with version backfill from uv.lock and metadata, read-time validity filtering & refusal gates across 13 surfaces, evidence tiers including spike, distance-from-present annotations, a lightweight findings register with supersession edges, session-start current beliefs view, batch archive sweeps, praxia-compatible document store, and backfill migration for asr and tev_design.
 - [261104_bearings-multiscale-goal-awareness](specs/261104_bearings-multiscale-goal-awareness.md) — Owner-confirmed project charter, purpose ledger and blind cold reader over runs and docs, observe-only, with pre-registered shadow exit
 - [261027_step-back-reviews-advisor-committee-escalation](specs/261027_step-back-reviews-advisor-committee-escalation.md) — Exhaustive architectural specification for Task 261027_step-back-reviews: automated event triggers with mathematical guard clauses, 5-dimension scored rubric with hierarchical gap-free evaluation and hard-floor veto, 5 qualitative cognitive modes with campaign domain evidence citations, authenticated reviewer independence constraints, 4-tier escalation ladder terminating at the human chair with unconditional FastMCP refusal and TTY/chair-token enforcement, meta-signals 15-18 with dispatch-telemetry guards, Cyclopts CLI/FastMCP tooling parity, DuckDB schema v19 migration, and advisor brief matrix integration.
 - [261026_distributional-breakdown-discipline](specs/261026_distributional-breakdown-discipline.md) — Spec for debt #3045: [breakdown] sidecar block + aggregate-verdict lint, postmortem [[amendments]], postmortem [fork] for marginal results; warn everywhere, refuse when claim-bound.
@@ -58,12 +65,17 @@
 ## Actuation Surfaces
 
 ## Audits
+- [261110_bearings-ac9-two-surface-review](audits/261110_bearings-ac9-two-surface-review.md) — Two-surface review of the AC-9 commits on wt/261104_bearings-ac7; slug leaks and two scoring defects confirmed
+- [261106_p1-dryrun-counts](audits/261106_p1-dryrun-counts.md)
+- [261106_validity-spec-review](audits/261106_validity-spec-review.md)
 - [261104_bearings-coherence-rounds](audits/261104_bearings-coherence-rounds.md)
 - [261023_output-tiering-argon-review](audits/261023_output-tiering-argon-review.md) — Verbatim spec-challenger review of specs/261023_output-tiering.md at 2b4c68c4 by gemini-4-argon-high through praxia surface_dispatch c0daf6d7; dispositions (confirmed, version-dependent, fabricated) are in the spec section 13
 - [261015_exploratory-mode-contract-adversarial-review](audits/261015_exploratory-mode-contract-adversarial-review.md) — Spec-challenger findings C1-C25 and spec-defender rulings for specs/261015_exploratory-mode-contract.md, run sequentially
 
 ## Research
 - [261106_bearings-ac7d-literature-notes](research/261106_bearings-ac7d-literature-notes.md) — Pre-score notes on planted-partition detectability limits, framing how an AC-7d pass or fail will be read
+- [261106_validity-prior-art](research/261106_validity-prior-art.md) — Phase 2 Prior Art Research for bathos task 261106_archive-supersession: external invalidation and supersession patterns across 9 domains (MLOps, DataLad, W3C PROV, Bazel/Nix, Retraction Watch, GRADE, 21 CFR Part 11, OSV, ADR), in-depth evaluation of in-house prototypes in tev_design, asr, and praxia, empirical count verifications, and architectural recommendations for the Phase 3 specification.
+- [261106_validity-surfaces-recon](research/261106_validity-surfaces-recon.md) — Comprehensive code reconnaissance verifying Section 3 evidence rows, mapping all D3 read/write surfaces to exact path:line insertion points, root-causing null dependency_provenance, and inventorying reusable machinery in bathos.
 - [261104_multiscale-goal-awareness-background](research/261104_multiscale-goal-awareness-background.md) — From-memory literature grounding, measured bathos surface and documented drift episodes behind the multi-scale goal awareness brainstorm
 - [261015_claim-appraisal-nlm-research](research/261015_claim-appraisal-nlm-research.md) — NotebookLM (Scientific Rigor notebook 1d786e78) answers on appraisal frameworks, doubt/trust taxonomies, grading and appraiser independence, feeding the spec's appraisal payload
 - [261015_exploratory-mode-nlm-research](research/261015_exploratory-mode-nlm-research.md) — NotebookLM (agentic-science notebook 3f0490aa) answers to 7 questions feeding the exploratory-mode contract spec; quotes spot-checked against raw responses
@@ -91,6 +103,8 @@
 
 ## Archive
 - [handoffs_migrated_260828_001](archive/handoffs_migrated_260828_001.md)
+
+## Residue cards
 
 ## Misc
 - [260515_mission](misc/260515_mission.md)

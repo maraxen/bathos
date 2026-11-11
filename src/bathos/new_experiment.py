@@ -235,6 +235,8 @@ def scaffold_experiment(
     force: bool = False,
     mode: str = "explore",
     workload: str | None = None,
+    question_slug: str = "",
+    reopen_reason: str = "",
 ) -> ScaffoldResult:
     """Write `scripts/experiments/<name>.py` and its `<name>.bth.toml` sidecar.
 
@@ -254,6 +256,30 @@ def scaffold_experiment(
     if workload is not None and workload not in _WORKLOADS:
         raise ValueError(f"unknown workload {workload!r}: expected one of {', '.join(_WORKLOADS)}")
 
+    if question_slug:
+        from bathos.errors import FindingReopenReasonRequiredError
+        from bathos.findings import get_findings_dir, parse_finding_file, resolve_finding_status
+
+        fdir = get_findings_dir(project_root)
+        if fdir.exists():
+            for p in fdir.glob("*.toml"):
+                try:
+                    f = parse_finding_file(p)
+                    if f.question_slug == question_slug:
+                        act_status = resolve_finding_status(f)
+                        if act_status == "settled" and not reopen_reason.strip():
+                            raise FindingReopenReasonRequiredError(
+                                f"Question '{question_slug}' is already settled: '{f.answer}'. "
+                                "Provide --reopen-reason to proceed.",
+                                question_slug=question_slug,
+                                settled_finding_id=f.id,
+                                settled_answer=f.answer,
+                            )
+                except FindingReopenReasonRequiredError:
+                    raise
+                except Exception:
+                    pass
+
     warning = ""
     if not _NAME_RE.match(name):
         warning = f"Name {name!r} should be lowercase with underscores (verb_noun style)."
@@ -271,6 +297,11 @@ def scaffold_experiment(
             raise FileExistsError(f"Already exists (use --force to overwrite): {paths}")
 
     sidecar_template = _EXPLORE_SIDECAR_TEMPLATE if mode == "explore" else _CONFIRM_SIDECAR_TEMPLATE
+    if question_slug:
+        extra_experiment = f'question_slug = "{question_slug}"\n'
+        if reopen_reason:
+            extra_experiment += f'reopen_reason = "{reopen_reason}"\n'
+        sidecar_template = sidecar_template.replace("[experiment]\n", f"[experiment]\n{extra_experiment}")
 
     script.write_text(_SCRIPT_TEMPLATE.format(name=name))
     script.chmod(0o755)

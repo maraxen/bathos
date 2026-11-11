@@ -48,4 +48,31 @@ def fold_edge(events: list[dict]) -> dict[str, Any] | None:
     }
 
 
-__all__ = ["fold_edge"]
+def fold_supersession_edge(events: list[dict]) -> dict[str, Any] | None:
+    """Fold `supersession.declared`/`supersession.imported` events for one edge id."""
+    valid_events = [
+        e
+        for e in events
+        if e.get("kind") in ("supersession.declared", "supersession.imported")
+    ]
+    if not valid_events:
+        return None
+    ev = sorted(
+        valid_events,
+        key=lambda e: (e.get("ts") or "", e.get("eid") or ""),
+    )[-1]
+    data = ev.get("data") or {}
+    entity = ev.get("entity") or [None]
+    return {
+        "id": data.get("id") or entity[0],
+        "entity_type": data.get("entity_type"),
+        "entity_id": data.get("entity_id"),
+        "superseded_by_type": data.get("superseded_by_type"),
+        "superseded_by_id": data.get("superseded_by_id"),
+        "reason": data.get("reason"),
+        "declared_by": data.get("declared_by") or ev.get("actor") or "",
+        "declared_at": data.get("declared_at") or ev.get("ts"),
+    }
+
+
+__all__ = ["fold_edge", "fold_supersession_edge"]

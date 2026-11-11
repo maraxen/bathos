@@ -94,7 +94,7 @@ class BlastRadiusRecord:
     entity_id: str
     to_state: str  # "affected" | "unverifiable" | "cleared"
     from_state: str | None = None
-    anchor_kind: str | None = None  # "commit" | "commit_range" | "file"
+    anchor_kind: str | None = None  # "commit" | "commit_range" | "file" | "dependency_range"
     anchor_value: str | None = None
     matched_files: str | None = None  # JSON-encoded list[str]
     matched_clauses: str | None = None  # JSON-encoded list[str], claim entity_type only (AC-8)
@@ -1169,7 +1169,13 @@ def _flag_blast_radius_impl(
 
 
 def clear_blast_radius_flag(
-    catalog_dir: Path | str, entity_type: str, entity_id: str, *, reason: str
+    catalog_dir: Path | str,
+    entity_type: str,
+    entity_id: str,
+    *,
+    reason: str,
+    anchor_kind: str | None = None,
+    anchor_value: str | None = None,
 ) -> BlastRadiusRecord:
     """Manually clear a blast-radius flag (AC-9).
 
@@ -1193,6 +1199,8 @@ def clear_blast_radius_flag(
         to_state="cleared",
         from_state=current,
         reason=reason,
+        anchor_kind=anchor_kind,
+        anchor_value=anchor_value,
     )
     return append_ledger_record(record, catalog_dir)
 

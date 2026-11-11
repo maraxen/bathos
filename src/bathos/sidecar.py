@@ -269,6 +269,8 @@ class Sidecar:
     stage_name_declared: bool = False
     stage_name_raw: str | None = None
     question: str | None = None
+    question_slug: str = ""
+    reopen_reason: str = ""
     observe: ObserveBlock | None = None
     calibrate: CalibrateBlock | None = None
     # Top-level [outputs] roots (all sidecar kinds); None when the table is absent.
@@ -464,10 +466,42 @@ CANONICAL_STAGES = {
     "validation",
     "ablation",
     "production",
+    "spike",
 }
 
 # Epistemic class of a run (spec §3.1). Resolved once at run start by resolve_epistemic_class.
-EPISTEMIC_CLASSES = ("exploratory", "calibrating", "confirmatory", "legacy")
+EPISTEMIC_CLASSES = ("spike", "exploratory", "calibrating", "confirmatory", "legacy")
+
+STAGE_ALIASES: dict[str, str] = {
+    "confirmatory": "validation",
+    "power": "validation",
+}
+
+STAGE_TO_EPISTEMIC_TIER: dict[str, str] = {
+    "validation": "confirmatory",
+    "ablation": "confirmatory",
+    "production": "confirmatory",
+    "confirmatory": "confirmatory",
+    "power": "confirmatory",
+    "calibration": "calibrating",
+    "exploration": "exploratory",
+    "spike": "spike",
+}
+
+
+def resolve_epistemic_tier(
+    *,
+    stage_name_declared: bool,
+    stage_name_raw: str | None,
+    epistemic_class: str | None = None,
+) -> str:
+    if not stage_name_declared:
+        return "undeclared"
+    if stage_name_raw and stage_name_raw in STAGE_TO_EPISTEMIC_TIER:
+        return STAGE_TO_EPISTEMIC_TIER[stage_name_raw]
+    if epistemic_class in ("confirmatory", "calibrating", "exploratory", "spike"):
+        return epistemic_class
+    return "undeclared"
 
 
 def _hydrate(tp, value):
@@ -548,6 +582,8 @@ EXPERIMENT_KEYS: frozenset[str] = frozenset(
         "agent_mode",
         "claim_discriminates",
         "claim_isolates",
+        "question_slug",
+        "reopen_reason",
     }
 )
 
@@ -570,6 +606,8 @@ def parse_sidecar(path: Path) -> Sidecar:
         stage_declared = "stage_name" in section
         stage_raw = str(section["stage_name"]) if stage_declared else None
         stage_name = section.get("stage_name", "exploration")
+        if isinstance(stage_name, str) and stage_name in STAGE_ALIASES:
+            stage_name = STAGE_ALIASES[stage_name]
         if not (isinstance(stage_name, str) and stage_name in CANONICAL_STAGES):
             logger.warning(
                 f"Invalid stage_name '{stage_name}' in {path}; must be one of {CANONICAL_STAGES}. "
@@ -584,6 +622,9 @@ def parse_sidecar(path: Path) -> Sidecar:
         if question is not None:
             question = str(question)
 
+        question_slug = str(section.get("question_slug", ""))
+        reopen_reason = str(section.get("reopen_reason", ""))
+
         sidecar = Sidecar(
             kind=kind,
             hypothesis=section.get("hypothesis", ""),
@@ -591,6 +632,8 @@ def parse_sidecar(path: Path) -> Sidecar:
             stage_name_declared=stage_declared,
             stage_name_raw=stage_raw,
             question=question,
+            question_slug=question_slug,
+            reopen_reason=reopen_reason,
             novel=novel,
             outcomes=outcomes,
             result_schema=data.get("result_schema", {}),
@@ -1328,9 +1371,13 @@ def resolve_epistemic_class(sidecar: Sidecar, *, stem_has_prior_runs: bool) -> s
     if not sidecar.stage_name_declared:
         return "legacy"
     raw = sidecar.stage_name_raw
+    if raw in STAGE_ALIASES:
+        raw = STAGE_ALIASES[raw]
     if raw not in CANONICAL_STAGES:
         # A typo ("validaton") fails closed: it can never loosen the rules.
         return "confirmatory"
+    if raw == "spike":
+        return "spike"
     if raw == "exploration":
         if sidecar.observe is not None:
             return "exploratory"

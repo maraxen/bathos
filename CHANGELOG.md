@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-11
+
+### Added
+- **Result Validity, Supersession & Archive (`261106`, PR #164):**
+  - **Phase 1 — Read-Time Result Validity:** Instrument defect and estimand-change registries (`.bth/instruments/*.toml` and user-global `~/.config/bathos/instruments/*.toml` gated by `[instruments] use_user_registry = true`), PEP 440 + git ancestry version resolution (`version_resolver.py`), predicate evaluation against run metadata/sidecars, DuckDB validity cache (`validity_cache.db`), and default hiding of voided/superseded runs across query and readback surfaces (`--include-invalid` to inspect).
+  - **Phase 2 — Findings & Supersession:** `.bth/findings/*.toml` lifecycle (`bth finding create/list/show/settle/supersede/reopen`), 5-tier evidence classification, settling gates, estimand compatibility checks, slug-to-UUID supersession resolution, and `bth-session-start-hook` cache generation (`.bth/cache/session_start.md`).
+  - **Phase 3 — Archive Sweep, Doc Store & Telemetry Rotation:** `bth archive-sweep` (`--dry-run` proposal generation under `.bth/archive_proposals/` and `--apply` atomic batch stubbing with `bathos-archive` git notes and `.bth/ARCHIVE_INDEX.md`), doc store archival (`.tar.zst` bundles + frontmatter manifests), and `bth telemetry-rotate`.
+
+### Fixed
+- **Archive sweep & validity false-positive remediation (`aafca79e`, `c2beef64`, `fbba35f8`):**
+  - Scope user-global instrument registries (`aminx.toml`) to projects/scripts that actually depend on or import the package; prevent unknown git SHAs in `is_git_ancestor` from acting as open-ended defect ranges; support multi-branch fix commits in `GIT` defect ranges.
+  - Protect scripts cited by 8-char run ID prefixes, campaign IDs, `.bth/claims/`, `.bth/findings/`, `.praxia/verdicts/`, `c1_invariant_gates.toml`, `Justfile`, `tests/`, and sibling imports from `archive_sweep`.
+  - Emit `raise RuntimeError(...)` in archived `.py` stubs so invoking a stubbed script fails loudly with exit code 1 instead of silently exiting 0; pair `.bth.toml` sidecars with scripts on Criterion 3 (`unreferenced_age`).
+  - Force-stage `.bth/ARCHIVE_INDEX.md` and proposal files (`git add -f --`) when `.bth/*` is gitignored, filter `.bth/ARCHIVE_INDEX.md` by `project_slug`, pass `cwd=project_root` to `append_archived_item_record`, and disable git hooks inside `_run_git`.
+- **`bth migrate --import-legacy` honours `--dry-run` and `--project` (#6527, PR #162).**
+
+## [0.13.3] - 2026-11-03
+
+### Changed
+- `UnaffiliatedProjectError` now maps to its own error code, `runlog_unaffiliated_project`, with a hint about running under the project's `.bth.toml` or setting `BTH_WORKSPACE_ROOT`. It previously reused `runlog_project_id_missing`, whose `bth init --assign-id` hint did not fix an unbound checkout (praxia debt #3210).
+- `bth run` in log mode now warns on stderr when the resolved project's `.bth.toml` has no `[project] id` (and no `BTH_PROJECT_ID` under SLURM), since the run is recorded with `project_id` null. The run still proceeds (praxia debt #3211).
+
+## [0.13.2] - 2026-11-03
+
+### Fixed
+- **A SLURM job without an exported `BTH_PROJECT_ID` records the resolved `.bth.toml` id (praxia debt #3202).** `resolve_write_project_id` returned `None` for every event under `SLURM_JOB_ID` unless `bth submit` had exported `BTH_PROJECT_ID`, even when the run was bound to its project log. An exported id still wins; an unaffiliated root stays `None`; otherwise the writer reads `[project] id` from the resolved main root's `.bth.toml`.
+
+## [0.13.1] - 2026-11-03
+
+### Fixed
+- **A non-git checkout now binds to its project (praxia debt #3201).** `resolve_workspace` used the recorded `[project] root` as `fs_root` when no `BTH_WORKSPACE_ROOT` or git toplevel applied. On a host where that path does not exist (an Engaging worktree of a project recorded on a laptop), `resolve_log_root` then found no `.bth.toml` and filed the run under `~/.bth/log/unaffiliated/` with `project_id` null, so `bth sql --project <slug>` missed it. The config rung now uses the directory where `.bth.toml` was found walking up from cwd; the recorded root stays identity/display only (`identity_root`). Ladder order is unchanged: `BTH_WORKSPACE_ROOT`, git toplevel, found `.bth.toml` directory, cwd.
+- **A slug-bearing `bth run` never falls back to `unaffiliated` silently.** In log mode, a run whose log root resolves to unaffiliated now fails before launch (exit 1, no subprocess) with an error naming the slug, cwd, recorded root and resolved `fs_root`. A run with no slug (other writers) is unchanged. Existing runs already in `~/.bth/log/unaffiliated/` are not moved; re-ingest is a separate follow-up.
+
 ## [0.13.0a9] - 2026-10-30
 
 ### Added
