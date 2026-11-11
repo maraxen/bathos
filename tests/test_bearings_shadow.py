@@ -434,6 +434,45 @@ def test_labels_written_before_the_first_confirmation_do_not_count(planted, shad
     assert d["used"] == [] and d["skipped"][0]["reason"].startswith("labels_not_logged_at_work")
 
 
+def _raw_verdicts(recs):
+    return [r for r in recs if r.get("name") == "shadow.verdict"]
+
+
+def _restamp(rec, *, version=None, project=None, ts_add=1000.0):
+    import copy
+
+    r = copy.deepcopy(rec)
+    f = r.get("fields", r)
+    if version is not None:
+        f["feature_version"] = version
+    if project is not None:
+        f["verdict"]["payload"]["project"] = project
+    r["ts"] = float(r.get("ts", 0.0)) + ts_add
+    return r
+
+
+def test_another_projects_newer_version_does_not_hide_this_projects_verdicts(planted, shadow_log):  # noqa: F811
+    """Review 261111 V3: the version is picked after the project filter."""
+    _setup(planted)
+    recs = _records(shadow_log)
+    before = bs.derive(recs, project="pkt")
+    other = _restamp(_raw_verdicts(recs)[0], version="m9-other", project="elsewhere")
+    after = bs.derive([*recs, other], project="pkt")
+    assert after["feature_version"] == before["feature_version"]
+    assert sorted(after["used"]) == sorted(before["used"]) and after["used"]
+
+
+def test_verdicts_left_out_by_the_version_pick_are_listed_as_skipped(planted, shadow_log):  # noqa: F811
+    """Review 261111 V4: one re-emit under a new version must not drop the rest of the corpus silently."""
+    _setup(planted)
+    recs = _records(shadow_log)
+    newer = _restamp(_raw_verdicts(recs)[0], version="m2-newer")
+    d = bs.derive([*recs, newer], project="pkt")
+    assert set(d["feature_version"].values()) == {"m2-newer"}
+    reasons = [s["reason"] for s in d["skipped"]]
+    assert sum(r.startswith("other_feature_version:") for r in reasons) == len(_raw_verdicts(recs))
+
+
 # ── mode-state and the gate ──────────────────────────────────────────────────────────────────────────────────────
 
 

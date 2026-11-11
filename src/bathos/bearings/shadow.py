@@ -558,20 +558,30 @@ def derive(
     skipped: list[dict[str, str]] = []
     used: list[str] = []
 
+    def _payload(f: dict[str, Any]) -> dict[str, Any]:
+        return (f.get("verdict") or {}).get("payload") or {}
+
     for arm in ARMS:
-        if not raw[arm]:
+        # Filter by project before picking the version: the default log is shared by every project on the machine,
+        # and another project's newer verdict must not decide which of this project's verdicts are scored (V3).
+        mine = {
+            k: tv
+            for k, tv in raw[arm].items()
+            if project is None or _payload(tv[1]).get("project") == project
+        }
+        if not mine:
             continue
         fv = (feature_version or {}).get(arm)
         if fv is None:
-            fv = max(raw[arm].items(), key=lambda kv: kv[1][0])[0][1]
+            fv = max(mine.items(), key=lambda kv: kv[1][0])[0][1]
         chosen[arm] = fv
         packets: dict[str, list[tuple[float, dict[str, Any]]]] = {}
-        for (subject, v), (ts, f) in sorted(raw[arm].items()):
+        for (subject, v), (ts, f) in sorted(mine.items()):
             if v != fv:
+                # Said, not dropped silently: a re-emit under a new charter sha otherwise replaces the corpus (V4).
+                skipped.append({"subject": subject, "reason": f"other_feature_version:{v}"})
                 continue
-            payload = (f.get("verdict") or {}).get("payload") or {}
-            if project is not None and payload.get("project") != project:
-                continue
+            payload = _payload(f)
             valid = set(payload.get("charter_ids", [])) | {OFF_CHARTER}
             bad = [
                 s
