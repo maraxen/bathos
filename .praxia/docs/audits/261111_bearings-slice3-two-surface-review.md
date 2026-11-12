@@ -4,7 +4,7 @@ description: Cursor (correctness, merge) and Antigravity (measurement) review of
 status: active
 task_id: 261104_multiscale-goal-awareness
 date: '261111'
-verdict: needs_work
+verdict: fixed_pending_rereview
 base_sha: f2e8723d
 ---
 # Bearings slice 3 and merge f2e8723d: two-surface review
@@ -186,13 +186,30 @@ Residual: the comparison trusts the cluster clock against the local one, so a la
 **CI baseline:** the merge f2e8723d failed the same 15 tests as main 0.14.0 (identical list; the ty errors are in
 main's code). No failure is specific to this branch.
 
-**Still open, not fixed in this pass:**
-- F3's `n_present` floor. Silent can rest on few present purposes; the agreement and recall floors follow from the
-  Wilson bounds.
-- Partially labelled packets. Unlabelled work in a packet can still read as silent; only zero-label packets are
-  refused.
-- F5 (content-keyed labels).
-- F6's independence across packets and readers.
-- F7 (single-word ids, multi-slug padding).
-- The rest of F8's audit provenance.
-- Cursor's non-table config node.
+**Open items, fixed 261112** (owner choices via AskUserQuestion unless marked):
+
+| Item | Commit | Fix |
+|---|---|---|
+| F3 | c50601b2 | False-silent is not read below 8 present purposes (`MIN_PRESENT`). cisternal's mode-state schema rejects unknown keys, so `shadow_check` enforces it (`bathos_n_present_below_floor`) and the silent mode-states (0.2.0) state it in `threshold_basis`. |
+| Partially labelled packets | c50601b2 | Any unlabelled sidecar the key reads (shown or withheld) leaves that packet's silent items unscored (`silent_unscored_unlabelled_sidecars`); agreement and off-charter still score. |
+| F5 | c50601b2 | A sidecar counts only when its earliest at-work label was written at or after the first confirmation. |
+| F6 | c50601b2 | Only packets with disjoint `[since, until)` windows are scored, per project, earliest-ending first; the rest are skipped (`window_overlaps`, `window_unreadable`). |
+| F7a (my call; owner kept it 261112) | c50601b2 | A charter id the packet builder cannot token-match makes the comparison invalid. |
+| F7b | c50601b2 | A sidecar naming more than 2 charter purposes is disputed gold (shadow-only); `shadow-check` lists them as `padded_sidecars`. |
+| F8 | c50601b2 | The payload carries `reading_id`, `mapper_id`, `window` and `run_ids`; derived items name their raw subjects in `derived_from`; `compare_reading` returns `mapper_id`. |
+| Non-table config node (Cursor) | c50601b2 | A parent such as `tool.bathos = "x"` raises instead of falling through. |
+| Cluster clock skew | 30c76598 | A check-time label also needs a charter sha the checking catalog confirmed (`confirmed_charter_shas`). |
+
+Also in c50601b2: the agreement negative class read `live_ids` from a variable left over from the filter loop. That was
+harmless, because the version pin fixes the charter, but it now reads its own reading. Mode-states: agreement 0.3.0,
+off-charter and silent 0.2.0. Thresholds are unchanged apart from the new silent floor.
+
+**Residuals (known, not fixed):**
+- The shadow gates no longer match `ac9.pooled_metrics` count for count when a sidecar has more than 2 slugs, an id
+  cannot be token-matched, or a packet holds unlabelled sidecars. These rules are shadow-only; AC-9's scorer is
+  unchanged.
+- Independence (F6): one unchanged sidecar run in two separate weeks puts the same content-keyed label in two
+  disjoint packets. The three readers within a packet are correlated by the arm's design.
+- `bth bearings shadow-check` exits 0 for any blocked result (it is a read-only report); read `arms.*.promotion_permitted`.
+- Expect little to score at first. With the unlabelled-sidecar skip and the earliest-label rule, silent, and often whole
+  packets, score only once a full window holds work labelled after confirmation.
