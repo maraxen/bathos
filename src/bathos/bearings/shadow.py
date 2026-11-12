@@ -15,7 +15,9 @@ Nothing here shows anything to anyone or changes what a reader sees. It records,
   are logged whatever the charter's state and filtered here, so a re-confirm does not erase them).
 - ``shadow_check``: ``derive`` then ``cisternal.shadow.check_mode_state`` per gate feature. Read-only.
 
-Gate features, per arm (``readers`` or ``mapper_only``), matching ``ac9.pooled_metrics`` count for count:
+Gate features, per arm (``readers`` or ``mapper_only``), matching ``ac9.pooled_metrics`` count for count on a
+packet with no sidecar over ``MAX_FIRM_SLUGS`` purposes and no unlabelled sidecar (the slug cap, the silent skip, the
+unmatchable-id refusal and the window rule are shadow-only; AC-9's scorer is unchanged):
 
 - ``bearings.<arm>.agreement``: one item per (packet, reader, reading purpose, target). Verdict true for every target
   the mapping made; verdict false for every live target it did not make, for reading purposes whose gold names a
@@ -447,25 +449,8 @@ def first_confirmations(catalog_dir: Path | str | None = None) -> dict[str, floa
     labels always carry ``after_first_confirmation=False``). Empty when the catalog cannot be read."""
     from datetime import datetime
 
-    from bathos.charter import _resolve_catalog_dir
-    from bathos.index import catalog_readable, connect_read
-
-    cd = _resolve_catalog_dir(Path(catalog_dir) if catalog_dir else None)
-    if not catalog_readable(cd):
-        return {}
-    try:
-        con = connect_read(cd)
-        try:
-            rows = con.execute("SELECT project, ts FROM charter_confirmations").fetchall()
-        finally:
-            con.close()
-    except (
-        Exception
-    ) as e:  # a missing table is "no confirmations", never a crash in a read-only check
-        logger.info("charter_confirmations unreadable in %s: %s", cd, e)
-        return {}
     out: dict[str, float] = {}
-    for project, ts in rows:
+    for project, ts, _ in _confirmation_rows(catalog_dir):
         try:
             t = datetime.fromisoformat(str(ts)).timestamp()
         except ValueError:
@@ -473,6 +458,38 @@ def first_confirmations(catalog_dir: Path | str | None = None) -> dict[str, floa
         if project not in out or t < out[project]:
             out[str(project)] = t
     return out
+
+
+def confirmed_charter_shas(catalog_dir: Path | str | None = None) -> dict[str, set[str]]:
+    """Project -> every charter sha256 the catalog has confirmed (owner 261112, cluster clock skew): a label judged at
+    check time must also have been written under confirmed charter text, which no clock can fake."""
+    out: dict[str, set[str]] = {}
+    for project, _, sha in _confirmation_rows(catalog_dir):
+        if sha:
+            out.setdefault(str(project), set()).add(str(sha))
+    return out
+
+
+def _confirmation_rows(catalog_dir: Path | str | None) -> list[tuple[Any, Any, Any]]:
+    from bathos.charter import _resolve_catalog_dir
+    from bathos.index import catalog_readable, connect_read
+
+    cd = _resolve_catalog_dir(Path(catalog_dir) if catalog_dir else None)
+    if not catalog_readable(cd):
+        return []
+    try:
+        con = connect_read(cd)
+        try:
+            return con.execute(
+                "SELECT project, ts, charter_sha256 FROM charter_confirmations"
+            ).fetchall()
+        finally:
+            con.close()
+    except (
+        Exception
+    ) as e:  # a missing table is "no confirmations", never a crash in a read-only check
+        logger.info("charter_confirmations unreadable in %s: %s", cd, e)
+        return []
 
 
 def _label_project(fields: dict[str, Any]) -> str:
@@ -734,12 +751,14 @@ def derive(
     project: str | None = None,
     feature_version: dict[str, str] | None = None,
     first_confirmed: dict[str, float] | None = None,
+    confirmed_shas: dict[str, set[str]] | None = None,
 ) -> dict[str, Any]:
     """Binary gate records from raw verdicts and at-work labels.
 
     ``feature_version`` maps an arm to the version to score; an arm left out uses the version of its latest raw
-    verdict. ``first_confirmed`` (project -> unix time, from ``first_confirmations``) lets a label whose emitter could
-    not see the confirmation (a cluster run) count when it was written at or after the first confirmation. Returns ``{"features": {feature: {"verdicts": [...], "labels": [...]}}, "feature_version": {...},
+    verdict. ``first_confirmed`` (project -> unix time, from ``first_confirmations``) and ``confirmed_shas`` (from
+    ``confirmed_charter_shas``) let a label whose emitter could not see the confirmation (a cluster run) count when it
+    was written at or after the first confirmation under a confirmed charter sha. Returns ``{"features": {feature: {"verdicts": [...], "labels": [...]}}, "feature_version": {...},
     "skipped": [...], "used": [...]}``."""
     from bathos.bearings.ac9 import (
         OFF_CHARTER,
@@ -762,8 +781,15 @@ def derive(
         elif (
             name == "shadow.label" and feat == LABEL_FEATURE and f.get("label_source") == "at_work"
         ):
-            first = (first_confirmed or {}).get(_label_project(f))
-            after = f.get("after_first_confirmation") is True or (first is not None and ts >= first)
+            proj = _label_project(f)
+            first = (first_confirmed or {}).get(proj)
+            # Judged at check time (cluster labels): written at or after the first confirmation AND under a charter
+            # sha this catalog confirmed, so a skewed cluster clock alone cannot let a draft-charter label in.
+            after = f.get("after_first_confirmation") is True or (
+                first is not None
+                and ts >= first
+                and str(f.get("charter_sha256") or "") in (confirmed_shas or {}).get(proj, set())
+            )
             label_recs.setdefault(str(f.get("subject_key")), []).append(
                 (ts, after, sorted(f.get("label") or []))
             )
@@ -1037,6 +1063,7 @@ def shadow_check(
         read_records(_record_files(Path(records_dir))),
         project=project,
         first_confirmed=first_confirmations(catalog_dir),
+        confirmed_shas=confirmed_charter_shas(catalog_dir),
     )
     files = write_derived(derived, out_dir)
     results: dict[str, Any] = {}

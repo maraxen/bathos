@@ -938,24 +938,32 @@ def _flag_false_labels(recs):
     for r in recs:
         if r.get("name") == "shadow.label":
             r["fields"]["after_first_confirmation"] = False
+            r["fields"]["charter_sha256"] = "s" * 64
     return recs
 
 
 @pytest.mark.usefixtures("no_pipeline")
 def test_a_label_after_the_first_confirmation_counts_by_time_at_check():
     """A label the emitter flagged False (it could not see the confirmation) counts when its time is at or after
-    the project's first confirmation in the checking catalog, and not when it is earlier."""
+    the project's first confirmation in the checking catalog and its charter sha is one that catalog confirmed."""
     recs = _flag_false_labels(_perfect_corpus(n_packets=1))
     label_ts = min(r["ts"] for r in recs if r["name"] == "shadow.label")
+    shas = {"pc": {"s" * 64}}
+
+    def used(first, confirmed):
+        return bs.derive(recs, project="pc", first_confirmed=first, confirmed_shas=confirmed)[
+            "used"
+        ]
+
     assert bs.derive(recs, project="pc")["used"] == []  # the flag alone: nothing counts
-    later = bs.derive(recs, project="pc", first_confirmed={"pc": label_ts - 1})
-    assert len(later["used"]) == 6  # 3 readers, each on both arms
-    earlier = bs.derive(recs, project="pc", first_confirmed={"pc": label_ts + 1})
-    assert earlier["used"] == []
-    other = bs.derive(recs, project="pc", first_confirmed={"elsewhere": 0.0})
-    assert (
-        other["used"] == []
-    )  # another project's confirmation says nothing about this one's labels
+    assert len(used({"pc": label_ts - 1}, shas)) == 6  # 3 readers, each on both arms
+    assert used({"pc": label_ts + 1}, shas) == []
+    # another project's confirmation says nothing about this one's labels
+    assert used({"elsewhere": 0.0}, {"elsewhere": shas["pc"]}) == []
+    # Clock skew (owner 261112): in time, but under charter text this catalog never confirmed, does not count;
+    # neither does a check that passes no confirmed shas at all.
+    assert used({"pc": label_ts - 1}, {"pc": {"d" * 64}}) == []
+    assert used({"pc": label_ts - 1}, None) == []
 
 
 def test_first_confirmations_reads_the_catalog(planted):  # noqa: F811
@@ -965,6 +973,11 @@ def test_first_confirmations_reads_the_catalog(planted):  # noqa: F811
     assert set(first) == {"pkt"}
     assert abs(first["pkt"] - datetime.now().timestamp()) < 24 * 3600
     assert bs.first_confirmations(planted["tmp"] / "no_catalog") == {}
+    from bathos.bearings.shadow import _confirmed_charter
+
+    sha, _ = _confirmed_charter(planted["repo"], planted["cat"])
+    assert bs.confirmed_charter_shas(planted["cat"]) == {"pkt": {sha}}
+    assert bs.confirmed_charter_shas(planted["tmp"] / "no_catalog") == {}
 
 
 # ── open items from review 261111 (owner choices 261112, AskUserQuestion) ─────────────────────────────────────────
