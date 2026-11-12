@@ -2677,6 +2677,7 @@ def bearings_shadow_check_cmd(
     mode_state_dir: str = "",
     out_dir: str = "",
     project: str = "",
+    catalog_dir: str = "",
 ) -> None:
     """Score the Bearings shadow log against its pre-registered promotion gates (read-only; never promotes).
 
@@ -2697,6 +2698,7 @@ def bearings_shadow_check_cmd(
                 mode_state_dir=msd,
                 out_dir=Path(out_dir) if out_dir else Path(tmp),
                 project=project or None,
+                catalog_dir=Path(catalog_dir) if catalog_dir else None,
             )
     except bs.ShadowConfigError as e:
         print(f"Error: {e}", file=sys.stderr)

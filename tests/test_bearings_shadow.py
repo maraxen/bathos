@@ -515,13 +515,22 @@ def test_the_readers_arm_needs_three_blind_readers(planted, shadow_log):  # noqa
     """Review 261111 V7: a packet with fewer than three blind readers is not scored on the readers arm."""
     _setup(planted, n_readers=2)
     d = bs.derive(_records(shadow_log), project="pkt")
-    assert [s["reason"] for s in d["skipped"]] == ["readers_arm_needs_3_blind_readers:2_blind_0_oracle"]
+    assert [s["reason"] for s in d["skipped"]] == [
+        "readers_arm_needs_3_blind_readers:2_blind_0_oracle"
+    ]
     assert d["used"] == []  # a dropped packet's readings are not counted as used
-    assert not any(d["features"][f]["verdicts"] for f in bs.GATE_FEATURES if f.startswith("bearings.readers."))
+    assert not any(
+        d["features"][f]["verdicts"] for f in bs.GATE_FEATURES if f.startswith("bearings.readers.")
+    )
 
 
 def test_an_oracle_reading_is_refused_on_the_readers_arm():
-    payload = {"reader_id": "oracle-from-labels", "packet_sha256": "p", "charter_sha256": "c" * 64, "project": "x"}
+    payload = {
+        "reader_id": "oracle-from-labels",
+        "packet_sha256": "p",
+        "charter_sha256": "c" * 64,
+        "project": "x",
+    }
     with pytest.raises(bs.ShadowConfigError, match="mapper_only"):
         bs.emit_comparison(payload, arm="readers", mapper_version="m1")
 
@@ -548,6 +557,7 @@ def test_degenerate_mappers_are_blocked(planted, shadow_log, kind):  # noqa: F81
         mode_state_dir=MODE_STATE,
         out_dir=planted["tmp"] / "derived",
         project="pkt",
+        catalog_dir=planted["cat"],
     )
     assert any(k.startswith("bearings.readers.") for k in res["features"])
     # The arm is the decision: a sparse mapper can pass one metric alone (review 261111 F3).
@@ -558,7 +568,10 @@ def test_degenerate_mappers_are_blocked(planted, shadow_log, kind):  # noqa: F81
 def test_shadow_check_with_no_records_refuses(tmp_path):
     (tmp_path / "logs").mkdir()
     res = bs.shadow_check(
-        records_dir=tmp_path / "logs", mode_state_dir=MODE_STATE, out_dir=tmp_path / "d"
+        records_dir=tmp_path / "logs",
+        mode_state_dir=MODE_STATE,
+        out_dir=tmp_path / "d",
+        catalog_dir=tmp_path / "no_catalog",
     )
     assert all("refused" in v for v in res["features"].values())
 
@@ -697,6 +710,7 @@ def _perfect_corpus(n_packets: int = 3, n_readers: int = 3) -> list[dict]:
                         "label": slugs,
                         "label_source": "at_work",
                         "after_first_confirmation": True,
+                        "project": "pc",
                     },
                 }
             )
@@ -763,7 +777,11 @@ def test_a_perfect_well_mixed_record_passes_every_gate(tmp_path):
     logs.mkdir()
     (logs / "events.jsonl").write_text("".join(json.dumps(r) + "\n" for r in _perfect_corpus()))
     res = bs.shadow_check(
-        records_dir=logs, mode_state_dir=MODE_STATE, out_dir=tmp_path / "d", project="pc"
+        records_dir=logs,
+        mode_state_dir=MODE_STATE,
+        out_dir=tmp_path / "d",
+        project="pc",
+        catalog_dir=tmp_path / "no_catalog",
     )
     assert res["skipped"] == []
     blocked = {
@@ -827,7 +845,9 @@ def _degenerate_corpus(kind: str) -> list[dict]:
             for rp, ts in mapping.items()
             for t in ts
         ]
-        items += [{"kind": "unmapped", "reading_purpose_id": rp} for rp, ts in mapping.items() if not ts]
+        items += [
+            {"kind": "unmapped", "reading_purpose_id": rp} for rp, ts in mapping.items() if not ts
+        ]
         items += [{"kind": "silent", "charter_purpose_id": t} for t in _LIVE if t not in mapped]
         p["items"] = items
     return recs
@@ -846,7 +866,11 @@ def test_degenerate_mappers_are_blocked_on_metrics_not_counts(tmp_path, kind):
         "".join(json.dumps(r) + "\n" for r in _degenerate_corpus(kind))
     )
     res = bs.shadow_check(
-        records_dir=logs, mode_state_dir=MODE_STATE, out_dir=tmp_path / "d", project="pc"
+        records_dir=logs,
+        mode_state_dir=MODE_STATE,
+        out_dir=tmp_path / "d",
+        project="pc",
+        catalog_dir=tmp_path / "no_catalog",
     )
     for arm in bs.ARMS:
         assert res["arms"][arm]["promotion_permitted"] is False
@@ -859,3 +883,66 @@ def test_degenerate_mappers_are_blocked_on_metrics_not_counts(tmp_path, kind):
         # A sparse but correct mapper passes agreement alone (F3); only the arm-level conjunction stops it.
         assert res["features"]["bearings.readers.agreement"]["promotion_permitted"] is True
         assert "agreement" not in res["arms"]["readers"]["blocked_metrics"]
+
+
+# ── cluster runs: pushed without .git, catalog without confirmations (owner 261112: judge at check time) ─────────
+
+
+def test_a_cluster_run_without_git_emits_a_label_keyed_like_the_local_packet(
+    tmp_path, monkeypatch, shadow_log
+):  # noqa: ARG001  (shadow_log: the env and the pipeline lifecycle)
+    """V5: `bth submit` jobs run in a checkout pushed without `.git`; BTH_PROJECT_ROOT gives the root, so the subject
+    key is the repo-relative one a local packet's required_labels uses."""
+    import hashlib
+
+    root = tmp_path / "pushed"
+    (root / "scripts").mkdir(parents=True)
+    side = root / "scripts" / "grow.bth.toml"
+    side.write_text('[experiment]\nhypothesis = "h"\n\n[charter]\npurpose = ["alpha-aim"]\n')
+    monkeypatch.setenv("BTH_PROJECT_ROOT", str(root))
+    monkeypatch.setenv("BTH_PROJECT_SLUG", "pkt")
+    cat = root / ".bth" / "catalog"
+    cat.mkdir(parents=True)
+    assert bs.emit_at_work_label(side, run_id="r1", catalog_dir=cat) == "emitted"
+    (lab,) = [r for r in _records(shadow_log) if r.get("name") == "shadow.label"]
+    f = lab["fields"]
+    assert f["subject_key"] == bs.sidecar_subject(
+        "pkt", "scripts/grow.bth.toml", hashlib.sha256(side.read_bytes()).hexdigest()
+    )
+    assert f["after_first_confirmation"] is False  # the cluster catalog never saw the confirmation
+    assert (
+        f["project"] == "pkt"
+    )  # what derive matches against the checking catalog's first confirmation
+
+
+def _flag_false_labels(recs):
+    for r in recs:
+        if r.get("name") == "shadow.label":
+            r["fields"]["after_first_confirmation"] = False
+    return recs
+
+
+@pytest.mark.usefixtures("no_pipeline")
+def test_a_label_after_the_first_confirmation_counts_by_time_at_check():
+    """A label the emitter flagged False (it could not see the confirmation) counts when its time is at or after
+    the project's first confirmation in the checking catalog, and not when it is earlier."""
+    recs = _flag_false_labels(_perfect_corpus(n_packets=1))
+    label_ts = min(r["ts"] for r in recs if r["name"] == "shadow.label")
+    assert bs.derive(recs, project="pc")["used"] == []  # the flag alone: nothing counts
+    later = bs.derive(recs, project="pc", first_confirmed={"pc": label_ts - 1})
+    assert len(later["used"]) == 6  # 3 readers, each on both arms
+    earlier = bs.derive(recs, project="pc", first_confirmed={"pc": label_ts + 1})
+    assert earlier["used"] == []
+    other = bs.derive(recs, project="pc", first_confirmed={"elsewhere": 0.0})
+    assert (
+        other["used"] == []
+    )  # another project's confirmation says nothing about this one's labels
+
+
+def test_first_confirmations_reads_the_catalog(planted):  # noqa: F811
+    from datetime import datetime
+
+    first = bs.first_confirmations(planted["cat"])
+    assert set(first) == {"pkt"}
+    assert abs(first["pkt"] - datetime.now().timestamp()) < 24 * 3600
+    assert bs.first_confirmations(planted["tmp"] / "no_catalog") == {}

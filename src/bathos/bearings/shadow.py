@@ -45,7 +45,7 @@ from typing import Any
 
 from bathos.errors import BearingsError
 
-logger =logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 ENV_VAR = "BTH_SHADOW_LOG_DIR"
 LABEL_FEATURE = "bearings.purpose_label"
@@ -225,10 +225,15 @@ def _work_tree_or_none(path: Path) -> Path | None:
             capture_output=True,
             text=True,
             timeout=10,
-            env={**os.environ, "LC_ALL": "C"},  # the "not a git repository" match below needs git's English
+            env={
+                **os.environ,
+                "LC_ALL": "C",
+            },  # the "not a git repository" match below needs git's English
         )
     except FileNotFoundError:
-        return None  # no git binary (a bare compute node): no work tree a packet could be built from
+        return (
+            None  # no git binary (a bare compute node): no work tree a packet could be built from
+        )
     except (OSError, subprocess.SubprocessError) as e:
         raise ShadowConfigError(
             f"cannot tell whether {where} is in a git work tree ({type(e).__name__}); refusing the shadow log dir"
@@ -369,7 +374,7 @@ def _emit_at_work_label(path: Path, run_id: str, catalog_dir: Path | None, log_d
         return _skip("malformed_label", path)
     if not slugs:
         return "no_label"
-    root = _git_toplevel(path)
+    root = _git_toplevel(path) or _pushed_project_root(path)
     if root is None:
         return _skip("not_in_git", path)
     # Owner 261111: log every label, whatever the charter's state, and filter at check time (``derive``): a drop at
@@ -397,6 +402,64 @@ def _emit_at_work_label(path: Path, run_id: str, catalog_dir: Path | None, log_d
         run_id=run_id,
     )
     return "emitted" if ok else _skip("pipeline_refused", path)
+
+
+def _pushed_project_root(path: Path) -> Path | None:
+    """The project root of a checkout pushed without ``.git`` (a `bth submit` job): ``BTH_PROJECT_ROOT`` (or
+    ``BTH_WORKSPACE_ROOT``), which ``_bth_env.sh`` exports, when ``path`` lies under it. The relative path it gives
+    is the repo-relative one, because myxcel pushes the tree as is, so the subject key matches the local packet's."""
+    p = path.resolve()
+    for var in ("BTH_PROJECT_ROOT", "BTH_WORKSPACE_ROOT"):
+        val = os.environ.get(var, "").strip()
+        if not val:
+            continue
+        root = Path(val).expanduser().resolve()
+        if root == p or root in p.parents:
+            return root
+    return None
+
+
+def first_confirmations(catalog_dir: Path | str | None = None) -> dict[str, float]:
+    """Project -> unix time of its charter's first confirmation, from the catalog's ``charter_confirmations``.
+
+    Owner 261112: whether an at-work label came after the first confirmation is judged at check time against this
+    catalog, not only by the flag the emitter could compute (a cluster catalog never holds the confirmations, so its
+    labels always carry ``after_first_confirmation=False``). Empty when the catalog cannot be read."""
+    from datetime import datetime
+
+    from bathos.charter import _resolve_catalog_dir
+    from bathos.index import catalog_readable, connect_read
+
+    cd = _resolve_catalog_dir(Path(catalog_dir) if catalog_dir else None)
+    if not catalog_readable(cd):
+        return {}
+    try:
+        con = connect_read(cd)
+        try:
+            rows = con.execute("SELECT project, ts FROM charter_confirmations").fetchall()
+        finally:
+            con.close()
+    except (
+        Exception
+    ) as e:  # a missing table is "no confirmations", never a crash in a read-only check
+        logger.info("charter_confirmations unreadable in %s: %s", cd, e)
+        return {}
+    out: dict[str, float] = {}
+    for project, ts in rows:
+        try:
+            t = datetime.fromisoformat(str(ts)).timestamp()
+        except ValueError:
+            continue
+        if project not in out or t < out[project]:
+            out[str(project)] = t
+    return out
+
+
+def _label_project(fields: dict[str, Any]) -> str:
+    if fields.get("project"):
+        return str(fields["project"])
+    key = str(fields.get("subject_key", ""))  # sidecar:{project}:{rel}@{sha}
+    return key.split(":", 2)[1] if key.startswith("sidecar:") and key.count(":") >= 2 else ""
 
 
 def _charter_state(root: Path, catalog_dir: Path | None) -> tuple[str, bool, bool, set[str]]:
@@ -560,11 +623,13 @@ def derive(
     *,
     project: str | None = None,
     feature_version: dict[str, str] | None = None,
+    first_confirmed: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """Binary gate records from raw verdicts and at-work labels.
 
     ``feature_version`` maps an arm to the version to score; an arm left out uses the version of its latest raw
-    verdict. Returns ``{"features": {feature: {"verdicts": [...], "labels": [...]}}, "feature_version": {...},
+    verdict. ``first_confirmed`` (project -> unix time, from ``first_confirmations``) lets a label whose emitter could
+    not see the confirmation (a cluster run) count when it was written at or after the first confirmation. Returns ``{"features": {feature: {"verdicts": [...], "labels": [...]}}, "feature_version": {...},
     "skipped": [...], "used": [...]}``."""
     from bathos.bearings.ac9 import (
         OFF_CHARTER,
@@ -587,7 +652,8 @@ def derive(
         elif (
             name == "shadow.label" and feat == LABEL_FEATURE and f.get("label_source") == "at_work"
         ):
-            if f.get("after_first_confirmation") is True:
+            first = (first_confirmed or {}).get(_label_project(f))
+            if f.get("after_first_confirmation") is True or (first is not None and ts >= first):
                 k = str(f.get("subject_key"))
                 if k not in at_work or ts >= at_work[k][0]:
                     at_work[k] = (ts, sorted(f.get("label") or []))
@@ -637,7 +703,9 @@ def derive(
                 skipped.append({"subject": subject, "reason": "payload_predates_validity_check"})
                 continue
             if payload["validity"]:
-                skipped.append({"subject": subject, "reason": "invalid:" + "; ".join(payload["validity"])})
+                skipped.append(
+                    {"subject": subject, "reason": "invalid:" + "; ".join(payload["validity"])}
+                )
                 continue
             if not payload.get("required_labels"):
                 # No labelled sidecar in the packet: every live purpose would be "silent" with no label behind it.
@@ -803,9 +871,11 @@ def shadow_check(
     out_dir: Path | str,
     project: str | None = None,
     repo_root: Path | None = None,
+    catalog_dir: Path | str | None = None,
 ) -> dict[str, Any]:
     """``derive`` the shadow log into ``out_dir``, then evaluate every gate feature's mode-state. Read-only on the
-    log and on the mode-state files. A feature with no records reports its refusal instead of a result."""
+    log, the mode-state files and the catalog (``catalog_dir``: where the charter's first confirmation is read). A
+    feature with no records reports its refusal instead of a result."""
     from cisternal.shadow.mode_state import GateCheckError, check_mode_state
 
     source = "argument"
@@ -819,7 +889,11 @@ def shadow_check(
         repo_root = (
             msd.parent.parent
         )  # the enforcer path in the TOMLs is relative to the repo holding them
-    derived = derive(read_records(_record_files(Path(records_dir))), project=project)
+    derived = derive(
+        read_records(_record_files(Path(records_dir))),
+        project=project,
+        first_confirmed=first_confirmations(catalog_dir),
+    )
     files = write_derived(derived, out_dir)
     results: dict[str, Any] = {}
     for feat, (vf, lf) in files.items():
@@ -834,7 +908,8 @@ def shadow_check(
     arms = {
         arm: {
             "promotion_permitted": all(
-                results.get(gate_feature(arm, m), {}).get("promotion_permitted") is True for m in METRICS
+                results.get(gate_feature(arm, m), {}).get("promotion_permitted") is True
+                for m in METRICS
             ),
             "blocked_metrics": [
                 m
