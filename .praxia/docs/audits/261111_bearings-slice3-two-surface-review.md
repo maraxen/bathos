@@ -156,7 +156,8 @@ is the sidecars' purposes. It also found that `fp_rate` equals `false_silent / n
 | V3, V4 | 5ab411fe | The version is picked after the project filter; dropped subjects appear in `skipped` as `other_feature_version:<v>`. |
 | V7, F8 (forwarding) | 6b04f188 | The readers arm needs three blind readers per packet. An oracle reading is refused on the readers arm at emit and dropped at derive. The isolation enforcer records under `mapper_only`. The CLI forwards `--catalog-dir`. |
 | V1, V2 | 2e0f85a6 | Agreement gains a negative class: unmapped live targets for reading purposes with charter-purpose gold. The mapped items are unchanged, so precision is still AC-9 gold agreement. The agreement mode-state version goes 0.1.0 → 0.2.0, thresholds unchanged. The payload freezes `live_ids` and `bound_violations`. derive skips invalid, unlabelled and pre-check payloads. `shadow_check` reports an arm-level conjunction. |
-| V5, partial | 2e683b44, 6b0cdc27 | The work-tree guard fails closed when git times out or errors. A missing git binary counts as "no work tree". The remote `shadow/` is created, so a pull before the first label doesn't exit 23. **Not resolved: cluster runs still record no usable label** (below). |
+| V5, partial | 2e683b44, 6b0cdc27 | The work-tree guard fails closed when git times out or errors. A missing git binary counts as "no work tree". The remote `shadow/` is created, so a pull before the first label doesn't exit 23. |
+| V5, cluster labels | b142fabe | Cluster runs emit labels (root from `BTH_PROJECT_ROOT`), judged against the first confirmation at check time (owner 261112). |
 | tests | 6b0cdc27 | The degenerate mappers run on the synthetic corpus: every arm is blocked by metric reasons, never by counts. `first_only` passes agreement alone (F3), and only the arm conjunction stops it. `used` counts only scored readings. |
 
 **Positive control:** a synthetic perfect corpus, 3 packets × 3 readers, prevalence ≤ 0.5 per metric, with isolation
@@ -171,7 +172,16 @@ evidence. It passes all six gates and both arms.
    (`charter.py:237`), which the cluster catalog does not have. A cluster label would carry
    `after_first_confirmation=False`, and `derive` discards it.
 
-Making cluster labels count is a design choice, so it went to the owner and was not guessed here.
+Making cluster labels count was a design choice, so it went to the owner, who chose on 261112 to judge it at check
+time. Commit b142fabe:
+- With no `.git`, the emitter takes its root from `BTH_PROJECT_ROOT` or `BTH_WORKSPACE_ROOT`, giving the same
+  repo-relative subject key.
+- `shadow_check` reads each project's first confirmation from the checking catalog (`first_confirmations`,
+  `--catalog-dir`).
+- `derive` counts a label written at or after that confirmation.
+- Earlier labels, and labels matched only against another project's confirmation, still do not count.
+
+Residual: the comparison trusts the cluster clock against the local one, so a large clock skew moves the cut-off.
 
 **CI baseline:** the merge f2e8723d failed the same 15 tests as main 0.14.0 (identical list; the ty errors are in
 main's code). No failure is specific to this branch.
