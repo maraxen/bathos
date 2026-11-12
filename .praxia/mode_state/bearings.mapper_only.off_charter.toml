@@ -5,7 +5,7 @@
 [feature]
 name = "bearings.mapper_only.off_charter"
 description = "Off-charter work left unmapped: reading purposes built only on off-charter-labelled work that the mapping leaves without a target"
-version = "0.1.0"
+version = "0.2.0"  # 261112: evidence rules (earliest at-work label, disjoint packet windows, sidecars with >2 slugs disputed, unmatchable ids invalid); thresholds unchanged
 
 [ladder]
 current_stage = "shadow"

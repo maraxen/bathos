@@ -504,6 +504,7 @@ def compare_reading(
     result = {
         "ok": True,
         "reading_id": reading_id,
+        "mapper_id": mapper_id,
         "charter_sha256": charter_sha,
         "counts": counts,
         "budget": budget,

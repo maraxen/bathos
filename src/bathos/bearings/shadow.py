@@ -27,7 +27,14 @@ Gate features, per arm (``readers`` or ``mapper_only``), matching ``ac9.pooled_m
   work left unmapped.
 - ``bearings.<arm>.silent``: one item per (packet, live purpose present or silent); verdict true when no reader maps
   it (T7(b)); label true when it is silent in the answer key. Recall is silent recall; the false-positive rate is
-  false-silent.
+  false-silent. Not scored for a packet holding any unlabelled sidecar (its work could serve a "silent" purpose), and
+  not read below ``MIN_PRESENT`` present purposes.
+
+Evidence rules (owner 261112, review 261111 F5-F7): a sidecar's label counts only when its earliest at-work label was
+written at or after the first confirmation; only packets whose windows do not overlap an earlier scored packet of the
+same project are scored, so one label is not counted again by every overlapping window; a comparison whose charter
+has ids the packet builder cannot token-match is invalid; a sidecar with more than ``MAX_FIRM_SLUGS`` purposes is
+disputed gold.
 """
 
 from __future__ import annotations
@@ -67,6 +74,13 @@ def gate_feature(arm: str, metric: str) -> str:
 
 
 READERS_PER_PACKET = 3  # T7: the readers arm is three blind readers per packet
+# Owner 261112 (AskUserQuestion, review 261111 F7b): a sidecar naming more than this many charter purposes is not firm
+# gold; its slugs join the disputed class, so padding a sidecar with slugs cannot make a mapping look right.
+MAX_FIRM_SLUGS = 2
+# Owner 261112 (F3): the silent gate's false-silent rate is a point estimate over present purposes; below this many
+# present purposes it is not read. cisternal's mode-state schema has no key for it, so bathos enforces it in
+# shadow_check and the silent mode-states (0.2.0) state it in threshold_basis.
+MIN_PRESENT = 8
 GATE_FEATURES = tuple(gate_feature(a, m) for a in ARMS for m in METRICS)
 
 
@@ -105,8 +119,14 @@ def _bearings_table(path: Path, keys: tuple[str, ...]) -> dict[str, Any] | None:
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
         raise ShadowConfigError(f"cannot read {path}: {e}") from e
     node: Any = data
-    for k in keys:
-        if not isinstance(node, dict) or k not in node:
+    for i, k in enumerate(keys):
+        if not isinstance(node, dict):
+            # e.g. `tool.bathos = "x"`: a parent that is not a table is malformed, not absent (review 261111, Cursor)
+            parent = ".".join(keys[:i])
+            raise ShadowConfigError(
+                f"[{parent}] in {path} must be a table, got {type(node).__name__}"
+            )
+        if k not in node:
             return None
         node = node[k]
     where = f"[{'.'.join(keys)}] in {path}"
@@ -502,6 +522,11 @@ def _blob_bytes(repo: Path, blob: str) -> bytes:
 
 def _required_labels(repo: Path, packet_dir: Path, project: str) -> dict[str, list[str]]:
     """Every labelled sidecar blob the answer key reads (shown, excluded, or a withheld run's), by at-work subject."""
+    return _label_scan(repo, packet_dir, project)[0]
+
+
+def _label_scan(repo: Path, packet_dir: Path, project: str) -> tuple[dict[str, list[str]], int]:
+    """``_required_labels``, plus how many of those sidecar blobs carry no label at all (partial packets, 261112)."""
     from bathos.bearings.ac9 import _label_of, _manifest
 
     blobs: set[tuple[str, str]] = set()
@@ -515,12 +540,33 @@ def _required_labels(repo: Path, packet_dir: Path, project: str) -> dict[str, li
             rel, _, blob = c[len("sidecar:") :].rpartition("@")
             blobs.add((rel, blob))
     out: dict[str, list[str]] = {}
+    n_unlabelled = 0
     for rel, blob in sorted(blobs):
         raw = _blob_bytes(repo, blob)
         slugs = _label_of(raw.decode("utf-8", errors="replace"), f"sidecar:{rel}@{blob[:12]}")
         if slugs:
             out[sidecar_subject(project, rel, hashlib.sha256(raw).hexdigest())] = sorted(slugs)
-    return out
+        else:
+            n_unlabelled += 1
+    return out, n_unlabelled
+
+
+def _cap_padded(
+    labels: dict[str, list[str]], ambiguous: dict[str, list[str]]
+) -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
+    """Move sidecars naming more than ``MAX_FIRM_SLUGS`` charter purposes from firm gold to the disputed class (F7b)."""
+    from bathos.bearings.ac9 import OFF_CHARTER
+
+    firm: dict[str, list[str]] = {}
+    disputed = {p: list(s) for p, s in ambiguous.items()}
+    padded: list[str] = []
+    for path, slugs in labels.items():
+        if len(set(slugs) - {OFF_CHARTER}) > MAX_FIRM_SLUGS:
+            padded.append(path)
+            disputed[path] = sorted(set(disputed.get(path, [])) | set(slugs))
+        else:
+            firm[path] = slugs
+    return firm, disputed, sorted(padded)
 
 
 def comparison_payload(
@@ -534,28 +580,55 @@ def comparison_payload(
     project: str,
 ) -> dict[str, Any]:
     """What ``derive`` needs to score one comparison, frozen at emit time (the packet dir may be gone later)."""
-    from bathos.bearings.ac9 import answer_key, bound_violations, reading_gold
+    from bathos.bearings.ac9 import _manifest, answer_key, bound_violations, reading_gold
+    from bathos.bearings.purpose_label import id_patterns
+    from bathos.bearings.reading import reading_id_of
 
     repo_p, pkt = Path(repo), Path(packet_dir)
     key = answer_key(repo_p, pkt, charter_purposes)
+    manifest = _manifest(pkt)
     keep = ("kind", "reading_purpose_id", "charter_purpose_id", "matched_retired", "budget_limited")
+    validity = list(bound_violations(key, charter_purposes))
+    # F7a: an id the packet builder cannot token-match (one word, or too short) was never kept from the readers, so a
+    # reader may have read it; the comparison is not blind for that id.
+    _, unmatched = id_patterns(charter_purposes)
+    unmatched = sorted(set(unmatched) & set(charter_purposes))
+    if unmatched:
+        validity.append(f"charter id(s) {unmatched} cannot be token-matched (use multi-word ids)")
+    firm, disputed, padded = _cap_padded(key["labels"], key["ambiguous_labels"])
+    required, n_unlabelled = _label_scan(repo_p, pkt, project)
+    runs_file = pkt / "reader" / "runs.jsonl"
+    run_ids = sorted(
+        str(json.loads(line)["id"])
+        for line in runs_file.read_text(encoding="utf-8").split("\n")
+        if line.strip()
+    )
     return {
         "project": project,
         "packet_sha256": reading["packet_sha256"],
         "reader_id": reading["reader_id"],
+        # Audit provenance (F8): which reading and mapper, over which window and runs.
+        "reading_id": comparison.get("reading_id") or reading_id_of(reading),
+        "mapper_id": comparison.get("mapper_id"),
+        "window": {"since": manifest.get("since"), "until": manifest.get("until")},
+        "run_ids": run_ids,
         "charter_sha256": charter_sha256,
         "charter_ids": sorted(charter_purposes),
         "live_ids": sorted(p for p, v in charter_purposes.items() if v.get("state") == "live"),
         # AC-9's own reasons this comparison is invalid (unresolved withheld runs, withheld/indeterminate/ambiguous
-        # shares over the owner's bounds). Frozen here because derive() has no key counts or charter states (V2).
-        "validity": bound_violations(key, charter_purposes),
+        # shares over the owner's bounds), plus unmatchable ids. Frozen here because derive() has no key counts or
+        # charter states (V2).
+        "validity": validity,
         "key": {
             k: key[k] for k in ("present", "silent", "revived", "indeterminate", "budget_limited")
         },
-        "gold": reading_gold(pkt, reading, key["labels"]),
-        "maybe": reading_gold(pkt, reading, key["ambiguous_labels"]),
+        "gold": reading_gold(pkt, reading, firm),
+        "maybe": reading_gold(pkt, reading, disputed),
+        "padded_sidecars": padded,
         "items": [{k: it[k] for k in keep if k in it} for it in comparison["items"]],
-        "required_labels": _required_labels(repo_p, pkt, project),
+        "required_labels": required,
+        # Sidecars the answer key reads that carry no label: their work could serve a "silent" purpose (261112).
+        "n_unlabelled_sidecars": n_unlabelled,
     }
 
 
@@ -618,6 +691,43 @@ def read_records(files: Iterable[Path]) -> list[dict[str, Any]]:
     return out
 
 
+# A raw verdict missing any of these predates the checks that read them, and is skipped rather than trusted.
+_PAYLOAD_REQUIRED = ("validity", "live_ids", "window", "n_unlabelled_sidecars")
+
+
+def _disjoint_windows(
+    eligible: list[tuple[str, list[tuple[float, dict[str, Any]]]]], skipped: list[dict[str, str]]
+) -> list[tuple[str, list[tuple[float, dict[str, Any]]]]]:
+    """The packets whose ``[since, until)`` windows do not overlap, per project (owner 261112, F6).
+
+    Overlapping windows read the same sidecars, so each would count one label again. Earliest-ending first keeps
+    the most packets and is deterministic; every packet left out is listed in ``skipped``."""
+    from bathos.bearings.packet import parse_ts
+
+    by_project: dict[str, list[tuple[Any, Any, str, list[tuple[float, dict[str, Any]]]]]] = {}
+    for pkt, readings in eligible:
+        p = readings[0][1]
+        w = p.get("window") or {}
+        try:
+            since, until = parse_ts(str(w["since"])), parse_ts(str(w["until"]))
+        except (KeyError, TypeError, ValueError):
+            skipped.append({"subject": f"packet:{pkt}", "reason": "window_unreadable"})
+            continue
+        by_project.setdefault(str(p.get("project")), []).append((until, since, pkt, readings))
+    kept: list[tuple[str, list[tuple[float, dict[str, Any]]]]] = []
+    for _, cands in sorted(by_project.items()):
+        last_until, last_pkt = None, ""
+        for until, since, pkt, readings in sorted(cands, key=lambda c: (c[0], c[1], c[2])):
+            if last_until is not None and since < last_until:
+                skipped.append(
+                    {"subject": f"packet:{pkt}", "reason": f"window_overlaps:packet:{last_pkt}"}
+                )
+                continue
+            kept.append((pkt, readings))
+            last_until, last_pkt = until, pkt
+    return sorted(kept, key=lambda kv: kv[0])
+
+
 def derive(
     records: Iterable[dict[str, Any]],
     *,
@@ -638,10 +748,10 @@ def derive(
         _targets_by_reading_purpose,
     )
 
-    # Sidecar subject -> (ts, slugs) of its latest at-work label written after the charter's first confirmation
-    # (owner 261111: labels are logged whatever the charter's state and filtered here, not at emit). The subject holds
-    # the sidecar's bytes hash, so a later label for the same subject carries the same slugs.
-    at_work: dict[str, tuple[float, list[str]]] = {}
+    # Every at-work label per sidecar subject (owner 261111: labels are logged whatever the charter's state and
+    # filtered here, not at emit). The subject holds the sidecar's bytes hash, so every label of one subject carries
+    # the same slugs.
+    label_recs: dict[str, list[tuple[float, bool, list[str]]]] = {}
     raw: dict[str, dict[tuple[str, str], tuple[float, dict[str, Any]]]] = {a: {} for a in ARMS}
     isolation: list[dict[str, Any]] = []
     for rec in records:
@@ -653,16 +763,24 @@ def derive(
             name == "shadow.label" and feat == LABEL_FEATURE and f.get("label_source") == "at_work"
         ):
             first = (first_confirmed or {}).get(_label_project(f))
-            if f.get("after_first_confirmation") is True or (first is not None and ts >= first):
-                k = str(f.get("subject_key"))
-                if k not in at_work or ts >= at_work[k][0]:
-                    at_work[k] = (ts, sorted(f.get("label") or []))
+            after = f.get("after_first_confirmation") is True or (first is not None and ts >= first)
+            label_recs.setdefault(str(f.get("subject_key")), []).append(
+                (ts, after, sorted(f.get("label") or []))
+            )
         elif name == "shadow.verdict":
             for arm in ARMS:
                 if feat == raw_feature(arm):
                     k = (str(f.get("subject_key")), str(f.get("feature_version", "")))
                     if k not in raw[arm] or ts >= raw[arm][k][0]:
                         raw[arm][k] = (ts, f)
+    # Owner 261112 (F5, earliest-label rule): a sidecar counts only when its FIRST at-work label was written at or after
+    # the first confirmation. A sidecar labelled against a draft charter and re-run later is retrospective, not
+    # at-work, however often it runs afterwards.
+    at_work: dict[str, tuple[float, list[str]]] = {}
+    for sk, recs_k in label_recs.items():
+        recs_k.sort(key=lambda r: r[0])
+        if recs_k[0][1]:
+            at_work[sk] = (recs_k[-1][0], recs_k[-1][2])
 
     features: dict[str, dict[str, list[dict[str, Any]]]] = {
         g: {"verdicts": [], "labels": []} for g in GATE_FEATURES
@@ -672,6 +790,7 @@ def derive(
     chosen: dict[str, str] = {}
     skipped: list[dict[str, str]] = []
     used: list[str] = []
+    padded: set[str] = set()
 
     def _payload(f: dict[str, Any]) -> dict[str, Any]:
         return (f.get("verdict") or {}).get("payload") or {}
@@ -699,7 +818,7 @@ def derive(
             payload = _payload(f)
             # AC-9 validity first (V2): a comparison AC-9 would call invalid is not scored in shadow either. A payload
             # from before these fields existed is skipped rather than trusted.
-            if "validity" not in payload or "live_ids" not in payload:
+            if any(k not in payload for k in _PAYLOAD_REQUIRED):
                 skipped.append({"subject": subject, "reason": "payload_predates_validity_check"})
                 continue
             if payload["validity"]:
@@ -756,6 +875,7 @@ def derive(
                 }
             )
 
+        eligible: list[tuple[str, list[tuple[float, dict[str, Any]]]]] = []
         for pkt, readings in sorted(packets.items()):
             if arm == "readers":
                 # T7: three blind readers per packet. An oracle reading is never blind; fewer readers make the
@@ -777,12 +897,30 @@ def derive(
             if len(keys) != 1:
                 skipped.append({"subject": f"packet:{pkt}", "reason": "answer_keys_differ"})
                 continue
+            eligible.append((pkt, readings))
+
+        for pkt, readings in _disjoint_windows(eligible, skipped):
             # Only readings actually scored count as used (a packet dropped above contributes nothing).
             used.extend(f"packet:{pkt}|reader:{p['reader_id']}" for _, p in readings)
+            for _, p in readings:
+                padded.update(f"packet:{pkt}|{s}" for s in p.get("padded_sidecars", []))
             key = readings[0][1]["key"]
             ts_max = max(ts for ts, _ in readings)
-            derived_from = f"packet:{pkt}"
-            if not key["budget_limited"]:
+            # Audit provenance (F8): the raw subjects each derived item comes from.
+            derived_from = ";".join(
+                sorted(f"packet:{pkt}|reader:{p['reader_id']}" for _, p in readings)
+            )
+            n_unlabelled = max(int(p.get("n_unlabelled_sidecars", 0)) for _, p in readings)
+            if n_unlabelled:
+                # Owner 261112: unlabelled work in the packet could serve a purpose the key calls silent, so silent
+                # truth is unknown here. Agreement and off-charter use only labelled gold and still score.
+                skipped.append(
+                    {
+                        "subject": f"packet:{pkt}",
+                        "reason": f"silent_unscored_unlabelled_sidecars:{n_unlabelled}",
+                    }
+                )
+            elif not key["budget_limited"]:
                 combined = set.intersection(*[_silent_reported(p) for _, p in readings])
                 for pid in sorted(set(key["silent"]) | set(key["present"])):
                     put(
@@ -828,7 +966,7 @@ def derive(
                 # mapped to. Without it every agreement verdict is true, cisternal's base rate equals precision, and
                 # the gate's "precision lower bound above the base rate" check can never pass. The mapped items above
                 # are unchanged, so precision still equals AC-9 gold agreement.
-                live_ids = payload.get("live_ids", [])
+                live_ids = p.get("live_ids", [])
                 for rp, g in sorted(gold.items()):
                     if not set(g) - {OFF_CHARTER}:
                         continue  # no charter-purpose gold: an all-false row would only lower the bar
@@ -844,7 +982,13 @@ def derive(
                             ts,
                             derived_from=derived_from,
                         )
-    return {"features": features, "feature_version": chosen, "skipped": skipped, "used": used}
+    return {
+        "features": features,
+        "feature_version": chosen,
+        "skipped": skipped,
+        "used": used,
+        "padded_sidecars": sorted(padded),
+    }
 
 
 def write_derived(derived: dict[str, Any], out_dir: Path | str) -> dict[str, tuple[Path, Path]]:
@@ -903,6 +1047,25 @@ def shadow_check(
             results[feat] = r.to_dict()
         except GateCheckError as e:
             results[feat] = {"refused": str(e), "exit_code": e.exit_code}
+    # F3 (owner 261112): false-silent is a point estimate over present purposes (label false on the silent feature);
+    # below MIN_PRESENT of them it is not read, whatever cisternal's own counts say.
+    for arm in ARMS:
+        feat = gate_feature(arm, "silent")
+        n_present = len(
+            {
+                _unwrap(r)[2]["subject_key"]
+                for r in derived["features"][feat]["labels"]
+                if _unwrap(r)[2].get("label") is False
+            }
+        )
+        r = results.get(feat)
+        if isinstance(r, dict) and "refused" not in r:
+            r["n_present"] = n_present
+            if n_present < MIN_PRESENT:
+                r["promotion_permitted"] = False
+                r.setdefault("blocking_reasons", []).append(
+                    f"bathos_n_present_below_floor:{n_present}<{MIN_PRESENT}"
+                )
     # An arm is one promotion decision: all three of its metrics at the same feature_version, never one alone. A
     # sparse mapper can pass agreement and a mostly-unmapped one off-charter, each by itself.
     arms = {
@@ -926,5 +1089,6 @@ def shadow_check(
         "feature_version": derived["feature_version"],
         "skipped": derived["skipped"],
         "n_used": len(derived["used"]),
+        "padded_sidecars": derived["padded_sidecars"],
         "features": results,
     }

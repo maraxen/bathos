@@ -5,7 +5,7 @@
 [feature]
 name = "bearings.mapper_only.silent"
 description = "Silent purposes: live charter purposes no reader maps (T7(b)) against purposes no shown labelled sidecar serves"
-version = "0.1.0"
+version = "0.2.0"  # 261112: evidence rules (earliest at-work label, disjoint packet windows, sidecars with >2 slugs disputed, unmatchable ids invalid); unlabelled-sidecar packets unscored; new floor n_present >= 8 (owner 261112)
 
 [ladder]
 current_stage = "shadow"
@@ -27,4 +27,4 @@ min_recall = 0.8
 min_recall_lower_bound = 0.65
 max_fp_rate = 0.2
 isolation_violations_max = 0
-threshold_basis = "AC-9 silent recall >= 0.8 (recall) and false-silent <= 0.2 (false-positive rate), the owner's bars in scripts/analysis/replay_bearings_ac9.bth.toml (T7, 261109), on the point estimate; plus a Wilson 95% lower bound of at least 0.65 (owner 261111, AskUserQuestion), which a perfect record reaches only with 8 or more items. Only at-work labels against the charter confirmed 261110 or later count; the 311 retrospective overlay labels are excluded."
+threshold_basis = "AC-9 silent recall >= 0.8 (recall) and false-silent <= 0.2 (false-positive rate), the owner's bars in scripts/analysis/replay_bearings_ac9.bth.toml (T7, 261109), on the point estimate; plus a Wilson 95% lower bound of at least 0.65 (owner 261111, AskUserQuestion), which a perfect record reaches only with 8 or more items. Only at-work labels against the charter confirmed 261110 or later count; the 311 retrospective overlay labels are excluded. False-silent is read only with at least 8 present purposes (owner 261112, AskUserQuestion, review 261111 F3); cisternal has no key for it, so bathos.bearings.shadow.MIN_PRESENT enforces it in bth bearings shadow-check."

@@ -332,6 +332,20 @@ def test_a_failed_shadow_sync_warns_and_never_fails_the_sync(tmp_path, monkeypat
 # ── derive matches AC-9's pooled counts ──────────────────────────────────────────────────────────────────────────
 
 
+@pytest.fixture
+def planted_full(request, monkeypatch):
+    """``planted`` with every sidecar labelled (``plain`` serves gamma-aim), so silent is scored (owner 261112: a packet
+    holding an unlabelled sidecar has unknown silent truth)."""
+    import tests.test_bearings_ac9_planted as planted_mod
+
+    full = [
+        (n, lbl or '[charter]\npurpose = "gamma-aim"\n', h) for n, lbl, h in planted_mod.SIDECARS
+    ]
+    monkeypatch.setattr(planted_mod, "SIDECARS", full)  # what the fixture commits
+    monkeypatch.setitem(globals(), "SIDECARS", full)  # what _setup labels at work
+    return request.getfixturevalue("planted")
+
+
 def _setup(planted, n_readers=3, mapping_kind="oracle", reconfirm=False):  # noqa: F811
     """Labels logged at work, one packet, n readers (oracle readings with distinct reader ids), compared.
 
@@ -413,8 +427,8 @@ def _conf(derived, feat):
         return confusion(col.verdicts, col.labels, True)
 
 
-def test_derived_counts_equal_ac9_pooled_counts(planted, shadow_log):  # noqa: F811
-    m = _setup(planted)
+def test_derived_counts_equal_ac9_pooled_counts(planted_full, shadow_log):
+    m = _setup(planted_full)
     d = bs.derive(_records(shadow_log), project="pkt")
     assert d["skipped"] == [] and len(d["used"]) == 3
     s = _conf(d, "bearings.readers.silent")
@@ -448,10 +462,10 @@ def test_retrospective_labels_do_not_count(planted, shadow_log):  # noqa: F811
     assert bs.derive(recs, project="pkt")["used"] == []
 
 
-def test_labels_survive_a_charter_reconfirm(planted, shadow_log):  # noqa: F811
+def test_labels_survive_a_charter_reconfirm(planted_full, shadow_log):
     """Owner 261111: a re-confirm (here a wording edit) must not erase labels logged under the earlier charter, while
     the verdicts themselves are pinned to the new charter's sha."""
-    m = _setup(planted, reconfirm=True)
+    m = _setup(planted_full, reconfirm=True)
     recs = _records(shadow_log)
     label_shas = {r["fields"]["charter_sha256"] for r in recs if r.get("name") == "shadow.label"}
     d = bs.derive(recs, project="pkt")
@@ -730,6 +744,11 @@ def _perfect_corpus(n_packets: int = 3, n_readers: int = 3) -> list[dict]:
                 "charter_ids": _LIVE,
                 "live_ids": _LIVE,
                 "validity": [],
+                "window": {
+                    "since": f"2026-11-{1 + 7 * k:02d}T00:00:00Z",
+                    "until": f"2026-11-{8 + 7 * k:02d}T00:00:00Z",
+                },
+                "n_unlabelled_sidecars": 0,
                 "key": {
                     "present": present,
                     "silent": silent,
@@ -946,3 +965,138 @@ def test_first_confirmations_reads_the_catalog(planted):  # noqa: F811
     assert set(first) == {"pkt"}
     assert abs(first["pkt"] - datetime.now().timestamp()) < 24 * 3600
     assert bs.first_confirmations(planted["tmp"] / "no_catalog") == {}
+
+
+# ── open items from review 261111 (owner choices 261112, AskUserQuestion) ─────────────────────────────────────────
+
+
+def _verdict_payloads(recs):
+    return [r["fields"]["verdict"]["payload"] for r in recs if r.get("name") == "shadow.verdict"]
+
+
+def test_a_packet_with_an_unlabelled_sidecar_scores_everything_but_silent(planted, shadow_log):  # noqa: F811
+    """``plain`` carries no label, so its work could serve a purpose the key calls silent."""
+    _setup(planted)
+    d = bs.derive(_records(shadow_log), project="pkt")
+    assert [s["reason"] for s in d["skipped"]] == ["silent_unscored_unlabelled_sidecars:1"]
+    assert len(d["used"]) == 3
+    assert d["features"]["bearings.readers.silent"]["verdicts"] == []
+    assert d["features"]["bearings.readers.agreement"]["verdicts"]
+    assert d["features"]["bearings.readers.off_charter"]["verdicts"]
+
+
+def test_the_payload_carries_audit_provenance(planted, shadow_log):  # noqa: F811
+    _setup(planted, n_readers=1)
+    (p,) = _verdict_payloads(_records(shadow_log))
+    assert p["mapper_id"] == "mapper" and len(p["reading_id"]) == 16
+    assert p["window"]["since"] and p["window"]["until"]
+    assert len(p["run_ids"]) == 5 and p["n_unlabelled_sidecars"] == 1
+    assert p["padded_sidecars"] == []
+
+
+@pytest.mark.usefixtures("no_pipeline")
+def test_a_charter_id_the_builder_cannot_match_makes_the_comparison_invalid(planted):  # noqa: F811
+    out, sha = _packet(planted)
+    from bathos.bearings.shadow import _confirmed_charter
+
+    charter_sha, _ = _confirmed_charter(planted["repo"], planted["cat"])
+    stored = {"packet_sha256": sha, "reader_id": "r", "purposes": []}
+    charter = dict(planted["charter"]) | {"omega": {"state": "live", "text": "one word"}}
+    payload = bs.comparison_payload(
+        planted["repo"],
+        out,
+        stored,
+        {"items": [], "reading_id": "x" * 16},
+        charter,
+        charter_sha256=charter_sha,
+        project="pkt",
+    )
+    assert any("['omega'] cannot be token-matched" in v for v in payload["validity"])
+
+
+def test_a_sidecar_with_more_than_two_purposes_is_disputed_gold():
+    firm, disputed, padded = bs._cap_padded(
+        {"a.toml": ["alpha-aim", "beta-aim", "gamma-aim"], "b.toml": ["alpha-aim", "off-charter"]},
+        {"c.toml": ["delta-aim"]},
+    )
+    assert firm == {"b.toml": ["alpha-aim", "off-charter"]}
+    assert disputed == {"c.toml": ["delta-aim"], "a.toml": ["alpha-aim", "beta-aim", "gamma-aim"]}
+    assert padded == ["a.toml"]
+
+
+@pytest.mark.usefixtures("no_pipeline")
+def test_derived_items_name_the_raw_subjects_they_come_from():
+    d = bs.derive(_perfect_corpus(n_packets=1), project="pc")
+    lab = d["features"]["bearings.readers.silent"]["labels"][0]["fields"]
+    assert lab["derived_from"] == ";".join(f"packet:pkt0|reader:reader-{j}" for j in range(3))
+
+
+@pytest.mark.usefixtures("no_pipeline")
+def test_a_sidecar_first_labelled_before_the_confirmation_never_counts():
+    """F5: a later post-confirmation label of the same (unchanged) sidecar does not make it at-work."""
+    recs = _perfect_corpus(n_packets=1)
+    first = next(r for r in recs if r["name"] == "shadow.label")
+    early = json.loads(json.dumps(first))
+    early["ts"] = first["ts"] - 500
+    early["fields"]["after_first_confirmation"] = False
+    d = bs.derive([early, *recs], project="pc")
+    assert d["used"] == []
+    assert {s["reason"] for s in d["skipped"]} == {"labels_not_logged_at_work:1"}
+    # by time, too: a check-time confirmation between the two labels still leaves the earliest one before it
+    assert (
+        bs.derive([early, *recs], project="pc", first_confirmed={"pc": first["ts"] - 1})["used"]
+        == []
+    )
+
+
+@pytest.mark.usefixtures("no_pipeline")
+def test_only_packets_with_disjoint_windows_are_scored():
+    recs = _perfect_corpus(n_packets=3)
+    for p in _verdict_payloads(recs):
+        if p["packet_sha256"] == "pkt1":  # reaches back into pkt0's week
+            p["window"] = {"since": "2026-11-05T00:00:00Z", "until": "2026-11-15T00:00:00Z"}
+        elif p["packet_sha256"] == "pkt2":
+            p["window"] = {"since": "2026-11-15T00:00:00Z", "until": "2026-11-22T00:00:00Z"}
+    d = bs.derive(recs, project="pc")
+    assert {s["reason"] for s in d["skipped"]} == {"window_overlaps:packet:pkt0"}
+    assert {u.split("|")[0] for u in d["used"]} == {"packet:pkt0", "packet:pkt2"}
+
+
+@pytest.mark.usefixtures("no_pipeline")
+def test_a_packet_without_a_readable_window_is_not_scored():
+    recs = _perfect_corpus(n_packets=1)
+    for p in _verdict_payloads(recs):
+        p["window"] = {"since": None, "until": "2026-11-08T00:00:00Z"}
+    d = bs.derive(recs, project="pc")
+    assert d["used"] == [] and {s["reason"] for s in d["skipped"]} == {"window_unreadable"}
+
+
+@pytest.mark.usefixtures("no_pipeline")
+def test_false_silent_is_not_read_below_eight_present_purposes(tmp_path):
+    """F3: three packets with two present purposes each (6 present, 9 silent); silent is blocked by the floor alone."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    recs = _perfect_corpus(n_packets=3)
+    for p in _verdict_payloads(recs):
+        p["key"]["present"] = p["key"]["present"][:2]
+    (logs / "events.jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs))
+    res = bs.shadow_check(
+        records_dir=logs,
+        mode_state_dir=MODE_STATE,
+        out_dir=tmp_path / "d",
+        project="pc",
+        catalog_dir=tmp_path / "no_catalog",
+    )
+    for arm in bs.ARMS:
+        silent = res["features"][f"bearings.{arm}.silent"]
+        assert silent["n_present"] == 6 and silent["promotion_permitted"] is False
+        # cisternal alone would pass silent (6 present + 9 silent, recall 1): the floor is its only reason
+        assert silent["blocking_reasons"] == [f"bathos_n_present_below_floor:6<{bs.MIN_PRESENT}"]
+        assert res["arms"][arm]["blocked_metrics"] == ["silent"]
+
+
+def test_a_config_parent_that_is_not_a_table_raises(tmp_path):
+    cfg = tmp_path / "pyproject.toml"
+    cfg.write_text('[tool]\nbathos = "x"\n')
+    with pytest.raises(bs.ShadowConfigError, match=r"\[tool.bathos\] .* must be a table"):
+        bs._bearings_table(cfg, ("tool", "bathos", "bearings"))

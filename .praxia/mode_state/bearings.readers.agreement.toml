@@ -5,7 +5,7 @@
 [feature]
 name = "bearings.readers.agreement"
 description = "Gold agreement: of the (reading purpose, target) pairs a mapping makes, the share its at-work labels support"
-version = "0.2.0"  # 261111: items now include the negative class (unmapped live targets); thresholds unchanged
+version = "0.3.0"  # 261112: evidence rules (earliest at-work label, disjoint packet windows, sidecars with >2 slugs disputed, unmatchable ids invalid); thresholds unchanged. 0.2.0 (261111): negative class (unmapped live targets)
 
 [ladder]
 current_stage = "shadow"
