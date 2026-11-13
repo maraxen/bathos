@@ -128,7 +128,8 @@ def test_non_experiment_sidecar_is_legacy(tmp_path):
 def test_every_resolved_class_is_in_the_vocabulary():
     from bathos.sidecar import EPISTEMIC_CLASSES
 
-    assert set(EPISTEMIC_CLASSES) == {"exploratory", "calibrating", "confirmatory", "legacy"}
+    # "spike" joined with the Phase 2 findings work (ed1fa8c6).
+    assert set(EPISTEMIC_CLASSES) == {"spike", "exploratory", "calibrating", "confirmatory", "legacy"}
 
 
 # --- `observed` is neutral (spec §3.2, C5) ----------------------------------------------------

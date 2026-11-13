@@ -13,8 +13,9 @@ that are NOT on a catalog path are bare, argument-less in-memory scratch
 connections (`duckdb.connect()`, used by `validate.py`'s outcome-condition SQL
 parse check and `query.run_sql`'s no-`catalog_dir` branch) -- there is no
 argument-less call anywhere in this codebase that targets a real file, so
-"has at least one argument" is an exact, not just a heuristic, stand-in for
-"targets a catalog path" as of this wave. A future call that legitimately
+"has at least one argument" was an exact stand-in for "targets a catalog path"
+as of that wave. Since spec 261106 some calls with a path open the derived
+`validity_cache.db` instead; they are listed by name in `NON_CATALOG` below. A future call that legitimately
 needs an argument without targeting a catalog (e.g. `duckdb.connect(":memory:")`)
 is still exempted explicitly below.
 
@@ -105,6 +106,29 @@ ALLOWLIST: dict[tuple[str, str], str] = {
     ("checker.py", "_legacy_write"): (
         "output_metadata backfill UPDATE; already named for its flag-off-only role"
     ),
+    ("supersession.py", "_write_legacy"): (
+        "supersession_edges INSERT into bathos.db; passed as legacy_write to "
+        "emit_or_legacy inside unit_of_work, so it only runs flag-off"
+    ),
+}
+
+# (module, enclosing function) -> reason. Call sites that pass a path but do NOT open the
+# catalog: they open `<catalog_dir>/validity_cache.db`, a derived, rebuildable cache keyed by an
+# inputs hash (spec 261106), never bathos.db or index.db. Kept apart from ALLOWLIST, whose
+# entries are legacy catalog writers that step 5 empties; these stay.
+NON_CATALOG: dict[tuple[str, str], str] = {
+    ("validity.py", "ensure_validity_cache"): (
+        "reads/populates validity_cache.db (validity_cache_db_path) under its own flock"
+    ),
+    ("version_resolver.py", "_read_version_cache"): (
+        "reads the version_cache table in validity_cache.db"
+    ),
+    ("version_resolver.py", "_write_version_cache"): (
+        "writes the version_cache table in validity_cache.db"
+    ),
+    ("telemetry.py", "telemetry_rotate"): (
+        "writes the telemetry_index table in <catalog_dir>/validity_cache.db"
+    ),
 }
 
 
@@ -176,7 +200,7 @@ def test_ac18_no_direct_duckdb_connect_outside_index_and_ingest() -> None:
 
         for lineno, func_name in finder.violations:
             key = (rel, func_name or "<module>")
-            if key in ALLOWLIST:
+            if key in ALLOWLIST or key in NON_CATALOG:
                 continue
             unresolved.append(
                 f"{rel}:{lineno} in {func_name or '<module scope>'}() -- "
@@ -206,7 +230,7 @@ def test_ac18_allowlist_entries_still_exist() -> None:
         for _lineno, func_name in finder.violations:
             seen.add((rel, func_name or "<module>"))
 
-    stale = sorted(set(ALLOWLIST) - seen)
+    stale = sorted((set(ALLOWLIST) | set(NON_CATALOG)) - seen)
     assert not stale, f"Stale AC-18 allow-list entries (no matching call site found): {stale}"
 
 

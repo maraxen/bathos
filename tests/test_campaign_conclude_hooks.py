@@ -283,8 +283,8 @@ def test_second_hook_still_runs_after_first_hook_raises(catalog_with_two_runs: P
 
 
 def test_hooks_survive_member_resolution_failure(catalog_with_two_runs: Path, monkeypatch, capsys):
-    """Regression for a gap found in adversarial review: union_campaign_member_ids()
-    (and, transitively, _resolve_member_run_infos()) originally sat OUTSIDE the
+    """Regression for a gap found in adversarial review: membership resolution
+    (union_campaign_member_ids(), then _resolve_member_run_infos()) originally sat OUTSIDE the
     try/except in _run_campaign_conclude_hooks() -- a raise there (e.g. a corrupt
     cool-tier parquet fragment inside union_campaign_member_ids's read_runs() call)
     would have propagated straight out of conclude_campaign(), after the campaign was
@@ -294,17 +294,18 @@ def test_hooks_survive_member_resolution_failure(catalog_with_two_runs: Path, mo
     try:
         campaign = create_campaign(db, name="Test", project_slug="prolix", mode="exploration")
 
-        def boom_union(*_args, **_kwargs):
+        def boom_resolve(*_args, **_kwargs):
             raise RuntimeError("simulated corrupt cool-tier fragment")
 
-        monkeypatch.setattr("bathos.campaigns.union_campaign_member_ids", boom_union)
+        # Since the AC-P1-10 validity gate, conclude resolves membership itself BEFORE the
+        # commit (a failure there aborts cleanly, nothing concluded) and hands the ids to
+        # the hooks, so the post-commit membership step left to fail is
+        # _resolve_member_run_infos -- the one this regression guards.
+        monkeypatch.setattr("bathos.campaigns._resolve_member_run_infos", boom_resolve)
 
         captured = []
         _patch_entry_points(monkeypatch, {HOOK_GROUP: [_FakeEntryPoint("hook", captured.append)]})
 
-        # No claim registered (mode=exploration) -- the only call to
-        # union_campaign_member_ids in this run is the one inside the hook dispatch
-        # path, so this isolates that call without a real catalog/parquet fixture.
         result = conclude_campaign(db, campaign.id, "pass", "worked")
         assert result is None
 

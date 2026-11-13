@@ -340,13 +340,13 @@ def test_compact_v18_catalog_migration(tmp_path: Path):
         "SELECT value FROM _schema_meta WHERE key = 'warm_version'"
     ).fetchone()
     assert warm_version is not None
-    assert warm_version[0] == "19"
+    assert warm_version[0] == "20"
     assert warm_version[0] == CURRENT_SCHEMA_VERSION
 
     migrations = con.execute(
         "SELECT warm_version, notes FROM _schema_migrations ORDER BY migrated_at"
     ).fetchall()
-    assert ("19", "compact") in [(m[0], m[1]) for m in migrations]
+    assert ("20", "compact") in [(m[0], m[1]) for m in migrations]
 
     # Tables exist and cool fragments were ingested
     rev_rows = con.execute(

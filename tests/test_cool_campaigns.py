@@ -205,7 +205,11 @@ def test_run_script_opens_campaign_db_read_only_when_json_missing(tmp_catalog: P
     real_connect = duckdb.connect
 
     def _wrap(*args, **kwargs):
-        seen.append(bool(kwargs.get("read_only")))
+        target = str(args[0] if args else kwargs.get("database", ""))
+        # validity_cache.db is a derived cache that connect_read fills on demand (spec
+        # 261106); it is not the catalog, so its writable open is not what this guards.
+        if not target.endswith("validity_cache.db"):
+            seen.append(bool(kwargs.get("read_only")))
         return real_connect(*args, **kwargs)
 
     monkeypatch.setattr("duckdb.connect", _wrap)

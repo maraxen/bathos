@@ -159,7 +159,8 @@ wire(
 )
 
 if "findings" in app._commands:
-    app.command(app._commands["findings"], name="finding")
+    # app[...] resolves to the App (typed); _commands values are `App | CommandSpec`, which no overload accepts.
+    app.command(app["findings"], name="finding")
 
 del _bathos_mcp
 
