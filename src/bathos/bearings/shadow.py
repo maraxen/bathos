@@ -453,8 +453,12 @@ def first_confirmations(catalog_dir: Path | str | None = None) -> dict[str, floa
     for project, ts, _ in _confirmation_rows(catalog_dir):
         try:
             t = datetime.fromisoformat(str(ts)).timestamp()
-        except ValueError:
-            continue
+        except ValueError as e:
+            # Review 261113 L1: skipping the row would keep its sha confirmed but drop its cutoff, so every check-time
+            # label of that project would vanish without a word. Refuse instead.
+            raise ShadowConfigError(
+                f"charter_confirmations row for {project!r} has an unparseable ts {ts!r}"
+            ) from e
         if project not in out or t < out[project]:
             out[str(project)] = t
     return out
@@ -471,6 +475,8 @@ def confirmed_charter_shas(catalog_dir: Path | str | None = None) -> dict[str, s
 
 
 def _confirmation_rows(catalog_dir: Path | str | None) -> list[tuple[Any, Any, Any]]:
+    import duckdb
+
     from bathos.charter import _resolve_catalog_dir
     from bathos.index import catalog_readable, connect_read
 
@@ -485,11 +491,12 @@ def _confirmation_rows(catalog_dir: Path | str | None) -> list[tuple[Any, Any, A
             ).fetchall()
         finally:
             con.close()
-    except (
-        Exception
-    ) as e:  # a missing table is "no confirmations", never a crash in a read-only check
-        logger.info("charter_confirmations unreadable in %s: %s", cd, e)
+    except duckdb.CatalogException as e:  # a missing table is "no confirmations"
+        logger.info("charter_confirmations absent in %s: %s", cd, e)
         return []
+    except Exception as e:
+        # Review 261113 L1: any other failure would silently drop every check-time label; refuse the check.
+        raise ShadowConfigError(f"charter_confirmations unreadable in {cd}: {e}") from e
 
 
 def _label_project(fields: dict[str, Any]) -> str:
@@ -613,6 +620,16 @@ def comparison_payload(
     if unmatched:
         validity.append(f"charter id(s) {unmatched} cannot be token-matched (use multi-word ids)")
     firm, disputed, padded = _cap_padded(key["labels"], key["ambiguous_labels"])
+    # The cap applies to the key too (review 261113 H1): a purpose whose only firm support was a padded sidecar is
+    # disputed, so it is neither present (it must not count toward the silent arm's n_present floor) nor silent.
+    from bathos.bearings.ac9 import OFF_CHARTER
+
+    firm_slugs = {s for slugs in firm.values() for s in slugs} - {OFF_CHARTER}
+    capped_key = {k: key[k] for k in ("present", "silent", "revived", "indeterminate", "budget_limited")}
+    demoted = [p for p in (*key["present"], *key["revived"]) if p not in firm_slugs]
+    capped_key["present"] = [p for p in key["present"] if p in firm_slugs]
+    capped_key["revived"] = [p for p in key["revived"] if p in firm_slugs]
+    capped_key["indeterminate"] = sorted(set(key["indeterminate"]) | set(demoted))
     required, n_unlabelled = _label_scan(repo_p, pkt, project)
     runs_file = pkt / "reader" / "runs.jsonl"
     run_ids = sorted(
@@ -636,9 +653,7 @@ def comparison_payload(
         # shares over the owner's bounds), plus unmatchable ids. Frozen here because derive() has no key counts or
         # charter states (V2).
         "validity": validity,
-        "key": {
-            k: key[k] for k in ("present", "silent", "revived", "indeterminate", "budget_limited")
-        },
+        "key": capped_key,
         "gold": reading_gold(pkt, reading, firm),
         "maybe": reading_gold(pkt, reading, disputed),
         "padded_sidecars": padded,
@@ -805,7 +820,9 @@ def derive(
     at_work: dict[str, tuple[float, list[str]]] = {}
     for sk, recs_k in label_recs.items():
         recs_k.sort(key=lambda r: r[0])
-        if recs_k[0][1]:
+        # Rows tied at the earliest ts all count as first (review 261113 M1): log order must not decide.
+        t0 = recs_k[0][0]
+        if all(r[1] for r in recs_k if r[0] == t0):
             at_work[sk] = (recs_k[-1][0], recs_k[-1][2])
 
     features: dict[str, dict[str, list[dict[str, Any]]]] = {

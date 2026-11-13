@@ -4,7 +4,7 @@ description: Cursor (correctness, merge) and Antigravity (measurement) review of
 status: active
 task_id: 261104_multiscale-goal-awareness
 date: '261111'
-verdict: fixed_pending_rereview
+verdict: fixed
 base_sha: f2e8723d
 ---
 # Bearings slice 3 and merge f2e8723d: two-surface review
@@ -213,3 +213,18 @@ off-charter and silent 0.2.0. Thresholds are unchanged apart from the new silent
 - `bth bearings shadow-check` exits 0 for any blocked result (it is a read-only report); read `arms.*.promotion_permitted`.
 - Expect little to score at first. With the unlabelled-sidecar skip and the earliest-label rule, silent, and often whole
   packets, score only once a full window holds work labelled after confirmation.
+
+**Re-review 261113 (Cursor, correctness, dispatch b3e4810d, range ea920f11..b16dfd5b): needs_work → fixed.**
+Each finding was checked in the code before fixing. Owner chose "fix all three". Each new test fails with its fix
+reverted (checked by mutation).
+
+| Finding | Severity | Fix |
+|---|---|---|
+| H1: the slug cap moved padded sidecars to disputed gold, but the payload's `key` was copied from `answer_key` from before the cap, so a purpose held only by a padded sidecar still counted as present and toward the silent floor | high | `comparison_payload` applies the cap to the key: such a purpose moves from present (or revived) to indeterminate, never silent |
+| M1: the earliest-label rule sorted by ts only; with tied timestamps, log order decided | medium | A subject qualifies only when every label tied at its earliest ts qualifies |
+| L1: an unparseable confirmation ts was skipped while its sha stayed confirmed, so check-time labels vanished silently; any catalog read error read as "no confirmations" | low | Both raise `ShadowConfigError` (shadow-check refuses); only a missing `charter_confirmations` table reads as none |
+
+Verified with nothing found: disjoint windows (abutting kept, equal windows keep one), the floor applies to the scored
+set, the silent-only skip, `_PAYLOAD_REQUIRED`, `confirmed_charter_shas` across re-confirms, and isolation. Tests added
+for each of Cursor's five missing-test items. A payload emitted before this fix still carries the uncapped key; re-emit
+the comparison if one exists.

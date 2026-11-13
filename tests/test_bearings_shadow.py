@@ -1113,3 +1113,101 @@ def test_a_config_parent_that_is_not_a_table_raises(tmp_path):
     cfg.write_text('[tool]\nbathos = "x"\n')
     with pytest.raises(bs.ShadowConfigError, match=r"\[tool.bathos\] .* must be a table"):
         bs._bearings_table(cfg, ("tool", "bathos", "bearings"))
+
+
+# ── review 261113 (Cursor re-review of the 261112 fixes) ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.usefixtures("no_pipeline")
+def test_a_purpose_held_only_by_a_padded_sidecar_is_not_present(planted, monkeypatch):  # noqa: F811
+    """H1: the slug cap applies to the key, so padded support cannot count toward the silent arm's n_present floor."""
+    import bathos.bearings.ac9 as ac9
+
+    out, sha = _packet(planted)
+    labels = {
+        "scripts/pad.bth.toml": ["alpha-aim", "beta-aim", "gamma-aim"],
+        "scripts/one.bth.toml": ["alpha-aim"],
+    }
+    key = {
+        "labels": labels,
+        "ambiguous_labels": {},
+        "present": ["alpha-aim", "beta-aim", "gamma-aim"],
+        "silent": ["delta-aim"],
+        "revived": [],
+        "indeterminate": [],
+        "budget_limited": False,
+    }
+    monkeypatch.setattr(ac9, "answer_key", lambda *_a, **_k: key)
+    monkeypatch.setattr(ac9, "bound_violations", lambda *_a, **_k: [])
+    payload = bs.comparison_payload(
+        planted["repo"],
+        out,
+        {"packet_sha256": sha, "reader_id": "r", "purposes": []},
+        {"items": [], "reading_id": "x" * 16},
+        planted["charter"],
+        charter_sha256="c" * 64,
+        project="pkt",
+    )
+    assert payload["padded_sidecars"] == ["scripts/pad.bth.toml"]
+    assert payload["key"]["present"] == ["alpha-aim"]
+    assert payload["key"]["indeterminate"] == ["beta-aim", "gamma-aim"]
+    assert payload["key"]["silent"] == ["delta-aim"]  # never silent either
+
+
+@pytest.mark.usefixtures("no_pipeline")
+@pytest.mark.parametrize("dup_first", [True, False])
+def test_tied_earliest_labels_all_have_to_qualify(dup_first):
+    """M1: two labels of one subject at the same earliest ts; log order must not decide whether it counts."""
+    recs = _perfect_corpus(n_packets=1)
+    first = next(r for r in recs if r["name"] == "shadow.label")
+    tie = json.loads(json.dumps(first))
+    tie["fields"]["after_first_confirmation"] = False
+    d = bs.derive([tie, *recs] if dup_first else [*recs, tie], project="pc")
+    assert d["used"] == []
+    assert {s["reason"] for s in d["skipped"]} == {"labels_not_logged_at_work:1"}
+
+
+@pytest.mark.usefixtures("no_pipeline")
+def test_abutting_windows_are_all_kept_and_equal_windows_keep_one():
+    d = bs.derive(_perfect_corpus(n_packets=3), project="pc")  # [1,8), [8,15), [15,22)
+    assert {u.split("|")[0] for u in d["used"]} == {"packet:pkt0", "packet:pkt1", "packet:pkt2"}
+    recs = _perfect_corpus(n_packets=2)
+    for p in _verdict_payloads(recs):
+        p["window"] = {"since": "2026-11-01T00:00:00Z", "until": "2026-11-08T00:00:00Z"}
+    d = bs.derive(recs, project="pc")
+    assert {u.split("|")[0] for u in d["used"]} == {"packet:pkt0"}
+    assert {s["reason"] for s in d["skipped"]} == {"window_overlaps:packet:pkt0"}
+
+
+@pytest.mark.usefixtures("no_pipeline")
+@pytest.mark.parametrize("missing", ["window", "n_unlabelled_sidecars"])
+def test_a_payload_missing_a_261112_field_is_not_scored(missing):
+    recs = _perfect_corpus(n_packets=1)
+    for p in _verdict_payloads(recs):
+        p.pop(missing, None)  # one payload dict is shared by both arms' records
+    d = bs.derive(recs, project="pc")
+    assert d["used"] == []
+    assert {s["reason"] for s in d["skipped"]} == {"payload_predates_validity_check"}
+
+
+def test_confirmation_reads_refuse_rather_than_drop_labels(planted, monkeypatch):  # noqa: F811
+    """L1: an unparseable confirmation ts, or a catalog read that fails for any reason but a missing table, refuses."""
+    real_rows = bs._confirmation_rows
+    rows = [("p", "2026-11-01T00:00:00", "a" * 64), ("p", "2026-11-05T00:00:00", "b" * 64)]
+    monkeypatch.setattr(bs, "_confirmation_rows", lambda _cd: rows)
+    assert bs.confirmed_charter_shas() == {"p": {"a" * 64, "b" * 64}}  # a re-confirm keeps both
+    assert set(bs.first_confirmations()) == {"p"}
+    monkeypatch.setattr(bs, "_confirmation_rows", lambda _cd: [("p", "not-a-timestamp", "a" * 64)])
+    with pytest.raises(bs.ShadowConfigError, match="unparseable ts"):
+        bs.first_confirmations()
+    monkeypatch.setattr(bs, "_confirmation_rows", real_rows)  # not undo(): that drops the fixture's env too
+    assert bs.confirmed_charter_shas(planted["cat"])  # the real read works before it is broken
+
+    import bathos.index as index
+
+    def boom(_cd):
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(index, "connect_read", boom)
+    with pytest.raises(bs.ShadowConfigError, match="disk on fire"):
+        bs.confirmed_charter_shas(planted["cat"])
