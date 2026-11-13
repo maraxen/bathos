@@ -543,14 +543,14 @@ def _add_run_to_campaign_impl(
 
     from pathlib import Path as _P
 
-    from bathos.errors import HIDDEN_STATE_TO_EXCEPTION
+    from bathos.errors import HIDDEN_STATE_TO_EXCEPTION, ResultHiddenError
     from bathos.validity import resolve_validity
 
     cat_path = _P(catalog_dir) if catalog_dir else None
     v_map = resolve_validity([run_id], cat_path or _P.cwd(), db=db)
     v = v_map.get(run_id)
     if v and v.is_hidden:
-        exc_cls = HIDDEN_STATE_TO_EXCEPTION.get(v.state, CampaignError)
+        exc_cls = HIDDEN_STATE_TO_EXCEPTION.get(v.state, ResultHiddenError)
         raise exc_cls(
             f"Cannot add run {run_id} to campaign: run is hidden ({v.state}): {v.reason or ''}",
             run_id=run_id,
@@ -1345,6 +1345,7 @@ def _conclude_campaign_impl(
         from bathos.errors import (
             HIDDEN_STATE_TO_EXCEPTION,
             EstimandBoundaryMixedError,
+            ResultHiddenError,
             ResultSuspectUnacknowledgedError,
             ResultUnverifiableUnacknowledgedError,
         )
@@ -1357,7 +1358,7 @@ def _conclude_campaign_impl(
         )
         for mid, v in validity_map.items():
             if v.is_hidden:
-                exc_cls = HIDDEN_STATE_TO_EXCEPTION.get(v.state, CampaignError)
+                exc_cls = HIDDEN_STATE_TO_EXCEPTION.get(v.state, ResultHiddenError)
                 raise exc_cls(
                     f"Cannot conclude campaign {full_id[:8]}: member run {mid} is hidden ({v.state}): {v.reason or ''}",
                     run_id=mid,
