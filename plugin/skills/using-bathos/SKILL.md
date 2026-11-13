@@ -798,7 +798,7 @@ Displayed in `bth show <id>` to assess the recency and independent corroboration
 
 ```bash
 bth check
-bth check --status STALE
+bth check --status-filter STALE
 bth check --check-outputs
 ```
 

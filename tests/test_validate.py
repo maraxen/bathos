@@ -1,6 +1,8 @@
 import textwrap
 from pathlib import Path
 
+import pytest
+
 
 def _write_toml(tmp_path: Path, content: str) -> Path:
     p = tmp_path / "run_test.bth.toml"
@@ -1045,3 +1047,284 @@ def test_unreserved_outcome_label_unknown_still_passes(tmp_path):
     sidecar = parse_sidecar(path)
     result = validate_sidecar(sidecar)
     assert result.ok is True
+
+
+
+def test_stoichiometry_warn_only_override_and_gate_blocking(tmp_path: Path, monkeypatch) -> None:
+    import hashlib
+
+    from bathos.catalog import init_catalog
+    from bathos.prereg import GateErrorCode, SidecarBundle, gate_check
+    from bathos.sidecar import parse_sidecar
+    from bathos.validate import validate_sidecar
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".bth.toml").write_text('[project]\nslug = "testproj"\n', encoding="utf-8")
+    catalog = tmp_path / ".bth" / "catalog"
+    init_catalog(catalog)
+    exp_dir = tmp_path / "scripts" / "experiments"
+    exp_dir.mkdir(parents=True)
+    script_path = exp_dir / "run_stoich.py"
+    script_path.write_text("print('ok')\n", encoding="utf-8")
+    sidecar_path = exp_dir / "run_stoich.bth.toml"
+    sidecar_path.write_text(
+        textwrap.dedent(
+            """
+            [experiment]
+            hypothesis = "Unmet collision floor blocks gate unless warn-only rollback set"
+            [outcomes.pass]
+            condition = "val > 0"
+            decision = "go"
+            reasoning = "ok"
+            adversarial_check = "val >= 0"
+            [outcomes.fail]
+            condition = "val <= 0"
+            decision = "stop"
+            reasoning = "bad"
+            is_residual = true
+            [result_schema]
+            val = "float"
+
+            [stoichiometry]
+            barcoding_mode = "pre_barcoded_vector"
+            max_collision_prob = 0.05
+
+            [[stoichiometry.stages]]
+            name = "dna_in"
+            kind = "input_molecules"
+            molecules = 1e9
+
+            [[stoichiometry.stages]]
+            name = "colonies"
+            kind = "colony_cfu"
+            depends_on = ["dna_in"]
+            colony_cfu = 1500000.0
+
+            [[stoichiometry.stages]]
+            name = "bc"
+            kind = "barcode_collision"
+            depends_on = ["colonies"]
+            barcode_diversity = 5000000
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.delenv("BTH_STOICHIOMETRY_WARN_ONLY", raising=False)
+    sidecar = parse_sidecar(sidecar_path)
+    blocked = validate_sidecar(sidecar, sidecar_path=sidecar_path)
+    assert blocked.ok is False
+
+    bundle = SidecarBundle(
+        path=sidecar_path,
+        sha256=hashlib.sha256(sidecar_path.read_bytes()).hexdigest(),
+        found=True,
+    )
+    gate_blocked = gate_check(
+        script_path=script_path,
+        bundle=bundle,
+        mode="autonomous",
+        catalog_dir=catalog,
+    )
+    assert gate_blocked.ok is False
+    assert gate_blocked.error_payload is not None
+    assert gate_blocked.error_payload.error_code == GateErrorCode.SIDECAR_INVALID
+
+    monkeypatch.setenv("BTH_STOICHIOMETRY_WARN_ONLY", "1")
+    captured_events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "bathos.validate.event",
+        lambda name, **kw: captured_events.append((name, kw)),
+    )
+    warned = validate_sidecar(sidecar, sidecar_path=sidecar_path)
+    assert warned.ok is True
+    assert warned.errors == []
+    assert any(w.startswith("[stoichiometry warn-only] ") for w in warned.warnings)
+    assert any(name == "stoichiometry.warn_only_downgrade" for name, _ in captured_events)
+
+    gate_allowed = gate_check(
+        script_path=script_path,
+        bundle=bundle,
+        mode="autonomous",
+        catalog_dir=catalog,
+    )
+    assert gate_allowed.ok is True
+
+
+def test_stoichiometry_validated_when_outcomes_missing(tmp_path: Path) -> None:
+    from bathos.sidecar import parse_sidecar
+    from bathos.validate import validate_sidecar
+
+    path = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "Missing outcomes still evaluates stoichiometry"
+        [result_schema]
+        val = "float"
+
+        [stoichiometry]
+        barcoding_mode = "primer_pcr"
+
+        [[stoichiometry.stages]]
+        name = "dna_in"
+        kind = "input_molecules"
+        molecules = 1e8
+        species = ["methylated_circular_vector"]
+
+        [[stoichiometry.stages]]
+        name = "colonies"
+        kind = "colony_cfu"
+        depends_on = ["dna_in"]
+        colony_cfu = 1e5
+        """,
+    )
+    res = validate_sidecar(parse_sidecar(path))
+    assert res.ok is False
+    fields = {err.field for err in res.errors}
+    assert "outcomes" in fields
+    assert "stoichiometry.stages.colonies.species" in fields
+
+
+def test_reagents_amortization_exact_decimal_boundaries_pass(tmp_path: Path) -> None:
+    from bathos.sidecar import parse_sidecar
+    from bathos.stoichiometry import evaluate_reagents
+    from bathos.validate import validate_sidecar
+
+    path = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "Exact Decimal reagent amortization passes tight boundaries"
+        [outcomes.pass]
+        condition = "val > 0"
+        decision = "go"
+        reasoning = "Within bounds"
+        is_residual = true
+        [result_schema]
+        val = "float"
+
+        [reagents.exact_waste]
+        pack_rxns = 3
+        experiment_rxns = 0.9
+        max_waste_fraction = 0.7
+
+        [reagents.exact_unused]
+        pack_rxns = 10
+        experiment_rxns = 7.1
+        max_unused_rxns = 2.9
+        max_waste_fraction = 0.29
+
+        [reagents.exact_total_cost]
+        pack_rxns = 96
+        experiment_rxns = 200
+        pack_cost_usd = 0.4
+        max_total_cost_usd = 1.2
+
+        [reagents.exact_per_rxn_cost]
+        pack_rxns = 1
+        experiment_rxns = 0.7
+        pack_cost_usd = 0.07
+        max_cost_per_rxn_usd = 0.1
+
+        [reagents.unbounded_ceil]
+        pack_rxns = 96
+        experiment_rxns = 100
+        """,
+    )
+    sidecar = parse_sidecar(path)
+    evaluation = evaluate_reagents(sidecar.reagents)
+    assert evaluation.errors == ()
+    assert evaluation.reports["unbounded_ceil"].packs_required == 2
+    assert evaluation.reports["unbounded_ceil"].purchased_rxns == 192
+    assert evaluation.reports["unbounded_ceil"].unused_rxns == 92.0
+    assert evaluation.reports["exact_total_cost"].packs_required == 3
+    res = validate_sidecar(sidecar)
+    assert res.ok is True, res.errors
+
+
+@pytest.mark.parametrize(
+    ("reagent_toml", "expected_field"),
+    [
+        (
+            """
+            [reagents.kit]
+            pack_rxns = 96
+            experiment_rxns = 100
+            max_waste_fraction = 0.4
+            """,
+            "reagents.kit.max_waste_fraction",
+        ),
+        (
+            """
+            [reagents.kit]
+            pack_rxns = 96
+            experiment_rxns = 100
+            max_unused_rxns = 50.0
+            """,
+            "reagents.kit.max_unused_rxns",
+        ),
+        (
+            """
+            [reagents.kit]
+            pack_rxns = 96
+            experiment_rxns = 200
+            pack_cost_usd = 0.4
+            max_total_cost_usd = 1.19
+            """,
+            "reagents.kit.max_total_cost_usd",
+        ),
+        (
+            """
+            [reagents.kit]
+            pack_rxns = 1
+            experiment_rxns = 0.7
+            pack_cost_usd = 0.08
+            max_cost_per_rxn_usd = 0.1
+            """,
+            "reagents.kit.max_cost_per_rxn_usd",
+        ),
+        (
+            """
+            [reagents.kit]
+            pack_rxns = 96
+            experiment_rxns = 100
+            max_total_cost_usd = 50.0
+            """,
+            "reagents.kit.pack_cost_usd",
+        ),
+        (
+            """
+            [reagents.kit]
+            pack_rxns = 96
+            experiment_rxns = 100
+            max_cost_per_rxn_usd = 1.0
+            """,
+            "reagents.kit.pack_cost_usd",
+        ),
+    ],
+)
+def test_reagents_amortization_violations_fail(
+    tmp_path: Path, reagent_toml: str, expected_field: str
+) -> None:
+    from bathos.sidecar import parse_sidecar
+    from bathos.validate import validate_sidecar
+
+    path = _write_toml(
+        tmp_path,
+        f"""
+        [experiment]
+        hypothesis = "Reagent amortization violation fails"
+        [outcomes.pass]
+        condition = "val > 0"
+        decision = "go"
+        reasoning = "Within bounds"
+        is_residual = true
+        [result_schema]
+        val = "float"
+        {reagent_toml}
+        """,
+    )
+    res = validate_sidecar(parse_sidecar(path))
+    assert res.ok is False
+    assert any(err.field == expected_field for err in res.errors)

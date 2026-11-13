@@ -237,6 +237,9 @@ COMMAND_APP_PATHS: dict[str, tuple[str, ...]] = {
     "submit": ("submit",),
     "find": ("find",),
     "campaign add": ("campaign", "add"),
+    "check": ("check",),
+    "validate-sidecar": ("validate-sidecar",),
+    "verify-citations": ("verify-citations",),
 }
 
 # Flags valid for every command regardless of its own signature.

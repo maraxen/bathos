@@ -179,6 +179,7 @@ class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(
     BEARINGS_PURPOSE_LABEL_INVALID = "bearings_purpose_label_invalid"
     BEARINGS_AC9_LABEL_INVALID = "bearings_ac9_label_invalid"
     BEARINGS_SHADOW_CONFIG_INVALID = "bearings_shadow_config_invalid"
+    CITATION_INVALID = "citation_invalid"
 
 
 # Resolution hints registry: every BathosErrorCode member must have a non-empty entry
@@ -304,6 +305,7 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.BEARINGS_PURPOSE_LABEL_INVALID: "Write the label as [charter] purpose = \"<slug>\" or a list of slugs (lowercase words joined by single hyphens); 'off-charter' stands alone",
     BathosErrorCode.BEARINGS_AC9_LABEL_INVALID: "A sidecar label names no charter purpose or cannot be read; fix the label or the charter before scoring AC-9",
     BathosErrorCode.BEARINGS_SHADOW_CONFIG_INVALID: "Fix shadow_log_dir (BTH_SHADOW_LOG_DIR, [bearings] in .bth.toml, [tool.bathos.bearings] in pyproject.toml, or [bearings] in ~/.config/bathos/config.toml); the file must parse, the key must be a string, and the path must be outside the project work tree",
+    BathosErrorCode.CITATION_INVALID: "Verify that <sources_dir>/manifest.json digests, .numbered.txt coordinates, and blockquote text match the source extracts.",
 }
 
 
@@ -503,6 +505,7 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     "PurposeLabelError": BathosErrorCode.BEARINGS_PURPOSE_LABEL_INVALID,
     "Ac9LabelError": BathosErrorCode.BEARINGS_AC9_LABEL_INVALID,
     "ShadowConfigError": BathosErrorCode.BEARINGS_SHADOW_CONFIG_INVALID,
+    "CitationVerificationError": BathosErrorCode.CITATION_INVALID,
 }
 
 
@@ -870,3 +873,10 @@ class BearingsMappingInvalidError(BearingsError):
 
 class BearingsMapperIsReaderError(BearingsError):
     """The mapper is the same agent as the reader."""
+
+
+# ── Citation Coordinate Verification Exceptions ────────────────────────────────
+
+
+class CitationVerificationError(BathosError):
+    """Strict citation coordinate, manifest, or source extract verification failure."""

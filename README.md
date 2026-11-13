@@ -32,7 +32,7 @@ bth ls --since 7d
 bth show <run-id>
 
 # Check catalog runs for git-drift freshness
-bth check [--status <status>] [--check-outputs]
+bth check [--status-filter <status>] [--check-outputs]
 
 # Escape hatch: raw DuckDB SQL against the catalog
 bth sql "SELECT project_slug, count(*) FROM runs GROUP BY 1"

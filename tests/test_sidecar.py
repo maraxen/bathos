@@ -1168,3 +1168,166 @@ def test_parse_non_canonical_stage_name_keeps_raw_and_coerces(tmp_path):
     assert s.stage_name == "exploration"
     assert s.stage_name_declared is True
     assert s.stage_name_raw == "validaton"
+
+
+
+def test_stoichiometry_and_reagents_parse_success_on_experiment(tmp_path: Path) -> None:
+    from bathos.sidecar import SidecarKind, parse_sidecar
+
+    path = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "Parse stoichiometry and reagents cleanly"
+        [outcomes.pass]
+        condition = "metric > 0"
+        decision = "go"
+        is_residual = true
+        [result_schema]
+        metric = "float"
+
+        [stoichiometry]
+        schema_version = 1
+        barcoding_mode = "primer_pcr"
+        min_group_size = 100
+
+        [[stoichiometry.stages]]
+        name = "dna_in"
+        kind = "input_molecules"
+        molecules = 1e8
+        species = ["methylated_circular_vector"]
+
+        [stoichiometry.subpools.main_pool]
+        weight = 1.0
+
+        [reagents.gibson_mix]
+        pack_rxns = 96
+        experiment_rxns = 100
+        pack_cost_usd = 120.0
+        max_total_cost_usd = 240.0
+        """,
+    )
+    sidecar = parse_sidecar(path)
+    assert sidecar.kind == SidecarKind.EXPERIMENT
+    assert sidecar.stoichiometry is not None
+    assert sidecar.stoichiometry.stages[0].name == "dna_in"
+    assert sidecar.stoichiometry.subpools["main_pool"].weight == 1.0
+    assert sidecar.reagents["gibson_mix"].pack_rxns == 96
+    assert sidecar.reagents["gibson_mix"].experiment_rxns == 100
+
+
+@pytest.mark.parametrize("kind_header", ["[benchmark]", "[validation]", "[debug]"])
+@pytest.mark.parametrize(
+    "block_toml",
+    [
+        """
+        [stoichiometry]
+        [[stoichiometry.stages]]
+        name = "dna_in"
+        kind = "input_molecules"
+        molecules = 1e6
+        """,
+        """
+        [reagents.kit_a]
+        pack_rxns = 10
+        experiment_rxns = 5
+        """,
+    ],
+)
+def test_stoichiometry_and_reagents_rejected_on_non_experiment_kinds(
+    tmp_path: Path, kind_header: str, block_toml: str
+) -> None:
+    from bathos.sidecar import SidecarError, parse_sidecar
+
+    path = _write_toml(
+        tmp_path,
+        f"""
+        {kind_header}
+        [result_schema]
+        x = "float"
+        {block_toml}
+        """,
+    )
+    with pytest.raises(SidecarError, match=r"only allowed on \[experiment\]"):
+        parse_sidecar(path)
+
+
+@pytest.mark.parametrize(
+    "bad_block",
+    [
+        "[stoichiometry]\n",
+        "[stoichiometry]\nstages = []\n",
+        "[stoichiometry]\nunknown_field = 1\n[[stoichiometry.stages]]\nname = 'inp'\nkind = 'input_molecules'\nmolecules = 100\n",
+        "[stoichiometry]\n[[stoichiometry.stages]]\nname = 'inp'\nkind = 'input_molecules'\nmolecules = 100\nextra_key = 1\n",
+        "[stoichiometry]\n[[stoichiometry.stages]]\nname = 'inp'\nkind = 'input_molecules'\nmolecules = 100\n[stoichiometry.subpools]\n",
+        "[stoichiometry]\n[[stoichiometry.stages]]\nname = 'inp'\nkind = 'input_molecules'\nmolecules = 100\n[stoichiometry.subpools.main]\nweight = 1.0\nbogus = 2\n",
+        "[reagents]\n",
+        "[reagents.kit]\npack_rxns = 10\nexperiment_rxns = 5\nbogus = 1\n",
+    ],
+)
+def test_stoichiometry_and_reagents_reject_unknown_keys_and_empty_tables(
+    tmp_path: Path, bad_block: str
+) -> None:
+    from bathos.sidecar import SidecarError, parse_sidecar
+
+    path = _write_toml(
+        tmp_path,
+        f"""
+        [experiment]
+        hypothesis = "Reject bad structure"
+        [result_schema]
+        x = "float"
+        {bad_block}
+        """,
+    )
+    with pytest.raises(SidecarError):
+        parse_sidecar(path)
+
+
+@pytest.mark.parametrize(
+    "bad_stoich_or_reagent",
+    [
+        "[stoichiometry]\nschema_version = 2\n[[stoichiometry.stages]]\nname='a'\nkind='input_molecules'\nmolecules=10\n",
+        "[stoichiometry]\nschema_version = true\n[[stoichiometry.stages]]\nname='a'\nkind='input_molecules'\nmolecules=10\n",
+        "[stoichiometry]\nbarcoding_mode = 'bad_mode'\n[[stoichiometry.stages]]\nname='a'\nkind='input_molecules'\nmolecules=10\n",
+        "[stoichiometry]\nmax_collision_prob = 1.0\n[[stoichiometry.stages]]\nname='a'\nkind='input_molecules'\nmolecules=10\n",
+        "[stoichiometry]\nmin_consensus_reads = true\n[[stoichiometry.stages]]\nname='a'\nkind='input_molecules'\nmolecules=10\n",
+        "[stoichiometry]\ntarget_reads = 10.5\n[[stoichiometry.stages]]\nname='a'\nkind='input_molecules'\nmolecules=10\n",
+        "[stoichiometry]\n[[stoichiometry.stages]]\nname='BadName'\nkind='input_molecules'\nmolecules=10\n",
+        "[stoichiometry]\n[[stoichiometry.stages]]\nname='a'\nkind='unknown_kind'\nmolecules=10\n",
+        "[stoichiometry]\n[[stoichiometry.stages]]\nname='a'\nkind='input_molecules'\nmolecules=nan\n",
+        "[stoichiometry]\n[[stoichiometry.stages]]\nname='a'\nkind='input_molecules'\nmolecules=inf\n",
+        "[stoichiometry]\n[[stoichiometry.stages]]\nname='a'\nkind='input_molecules'\nmolecules=-1.0\n",
+        "[stoichiometry]\n[[stoichiometry.stages]]\nname='a'\nkind='input_molecules'\n",
+        "[stoichiometry]\n[[stoichiometry.stages]]\nname='a'\nkind='colony_cfu'\n",
+        "[stoichiometry]\n[[stoichiometry.stages]]\nname='a'\nkind='colony_cfu'\ncolony_cfu=10\nefficiency=0.5\n",
+        "[stoichiometry]\n[[stoichiometry.stages]]\nname='a'\nkind='barcode_collision'\nbarcode_diversity=10.5\n",
+        "[stoichiometry]\n[[stoichiometry.stages]]\nname='a'\nkind='founder_inoculum'\nsampling_fraction=0.5\ninoculum_cells=100\n",
+        "[stoichiometry]\n[[stoichiometry.stages]]\nname='a'\nkind='phix_adjusted_net_reads'\nraw_reads=100\nphix_fraction=1.0\n",
+        "[stoichiometry]\n[[stoichiometry.stages]]\nname='dup'\nkind='input_molecules'\nmolecules=10\n[[stoichiometry.stages]]\nname='dup'\nkind='input_molecules'\nmolecules=20\n",
+        "[reagents.kit]\npack_rxns = 0.4\nexperiment_rxns = 1\n",
+        "[reagents.kit]\npack_rxns = true\nexperiment_rxns = 1\n",
+        "[reagents.kit]\npack_rxns = 10\nexperiment_rxns = 0\n",
+        "[reagents.kit]\npack_rxns = 10\nexperiment_rxns = inf\n",
+        "[reagents.kit]\npack_rxns = 10\nexperiment_rxns = 5\npack_cost_usd = -1.0\n",
+        "[reagents.kit]\npack_rxns = 10\nexperiment_rxns = 5\nmax_waste_fraction = 1.0\n",
+        "[reagents.kit]\npack_rxns = 10\nexperiment_rxns = 5\nmax_unused_rxns = -0.1\n",
+    ],
+)
+def test_stoichiometry_and_reagents_boundary_errors(
+    tmp_path: Path, bad_stoich_or_reagent: str
+) -> None:
+    from bathos.sidecar import SidecarError, parse_sidecar
+
+    path = _write_toml(
+        tmp_path,
+        f"""
+        [experiment]
+        hypothesis = "Boundary validation"
+        [result_schema]
+        x = "float"
+        {bad_stoich_or_reagent}
+        """,
+    )
+    with pytest.raises(SidecarError):
+        parse_sidecar(path)

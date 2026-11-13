@@ -165,3 +165,80 @@ def test_unknown_keys_are_ignored_and_kind_defaults_to_experiment():
     sc = Sidecar.from_declaration({"result_schema": {}, "added_by_a_future_version": 1})
     assert sc.kind is SidecarKind.EXPERIMENT
     assert sc.breakdown is None
+
+
+
+def test_pre_change_snapshot_without_stoichiometry_or_reagents_loads(tmp_path: Path):
+    """Frozen pre-change `run.started` snapshot omitting stoichiometry & reagents loads cleanly."""
+    path = tmp_path / "s.bth.toml"
+    path.write_text(_RICH)
+    decl = _wire(sidecar_declaration_for_event(parse_sidecar(path)))
+    decl.pop("stoichiometry", None)
+    decl.pop("reagents", None)
+    restored = Sidecar.from_declaration(decl)
+    assert restored.stoichiometry is None
+    assert restored.reagents == {}
+
+
+def test_round_trip_with_stoichiometry_and_reagents_equals_parsed(tmp_path: Path):
+    rich_with_stoich = _RICH + textwrap.dedent(
+        """
+        [stoichiometry]
+        schema_version = 1
+        barcoding_mode = "pre_barcoded_vector"
+        max_collision_prob = 0.05
+        min_consensus_reads = 3.0
+        min_template_ratio = 10.0
+        target_reads = 100000
+        min_group_size = 50
+
+        [[stoichiometry.stages]]
+        name = "dna_in"
+        kind = "input_molecules"
+        molecules = 1e8
+        species = ["methylated_circular_vector"]
+
+        [[stoichiometry.stages]]
+        name = "cleanup"
+        kind = "enzymatic_species_cleanup"
+        depends_on = ["dna_in"]
+        enzyme = "DpnI"
+
+        [[stoichiometry.stages]]
+        name = "colonies"
+        kind = "colony_cfu"
+        depends_on = ["cleanup"]
+        colony_cfu = 1000.0
+
+        [[stoichiometry.stages]]
+        name = "bc"
+        kind = "barcode_collision"
+        depends_on = ["colonies"]
+        barcode_diversity = 1000000
+
+        [stoichiometry.subpools.pool_one]
+        weight = 1.0
+        min_group_size = 50
+
+        [reagents.int_rxns]
+        pack_rxns = 96
+        experiment_rxns = 100
+        pack_cost_usd = 50.0
+        max_total_cost_usd = 100.0
+
+        [reagents.float_rxns]
+        pack_rxns = 3
+        experiment_rxns = 0.9
+        max_waste_fraction = 0.7
+        """
+    )
+    path = tmp_path / "s_stoich.bth.toml"
+    path.write_text(rich_with_stoich)
+    original = parse_sidecar(path)
+    restored = Sidecar.from_declaration(_wire(sidecar_declaration_for_event(original)))
+    assert restored == original
+    assert restored.stoichiometry is not None
+    assert len(restored.stoichiometry.stages) == 4
+    assert restored.stoichiometry.subpools["pool_one"].weight == 1.0
+    assert restored.reagents["int_rxns"].experiment_rxns == 100
+    assert restored.reagents["float_rxns"].experiment_rxns == 0.9

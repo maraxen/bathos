@@ -86,6 +86,7 @@ wire(
         "lint",
         # top-level singletons, extracted (Milestone 2)
         "cite_run",
+        "verify_citations",
         "lineage_prov",
         "repair",
         "new_experiment",

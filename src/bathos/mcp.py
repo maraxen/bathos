@@ -2340,12 +2340,150 @@ def backfill_declarations_tool(
     }
 
 
+def _eval_stoichiometry_sidecar(
+    sidecar,
+    path: Path,
+    *,
+    require_stoich: bool,
+) -> tuple[dict, bool]:
+    from bathos.stoichiometry import validate_reagents_block, validate_stoichiometry_block
+
+    if require_stoich and sidecar.stoichiometry is None:
+        return (
+            {
+                "path": str(path),
+                "ok": False,
+                "status": "error",
+                "errors": ["[stoichiometry] table required when --check-stoichiometry is requested"],
+                "warnings": [],
+            },
+            False,
+        )
+
+    stoich_errors, stoich_warnings = validate_stoichiometry_block(sidecar)
+    reagent_errors, reagent_warnings = validate_reagents_block(sidecar)
+    error_msgs = [f"{err.field}: {err.message}" for err in (*stoich_errors, *reagent_errors)]
+    warning_msgs = [*stoich_warnings, *reagent_warnings]
+    passed = len(error_msgs) == 0
+    return (
+        {
+            "path": str(path),
+            "ok": passed,
+            "status": "ok" if passed else "error",
+            "errors": error_msgs,
+            "warnings": warning_msgs,
+        },
+        passed,
+    )
+
+
+def _classify_and_validate_discovered_sidecar(discovered_path: Path) -> tuple[dict, bool, bool]:
+    import tomllib
+
+    from bathos.artifact_archive import parse_stub
+    from bathos.sidecar import SidecarError, parse_sidecar
+    from bathos.stoichiometry import (
+        NON_SIDECAR_ARTIFACT_TABLES,
+        PROJECT_CONFIG_TABLES,
+        SIDECAR_KIND_TABLES,
+        SUBMIT_CONFIG_SIDECAR_TABLES,
+    )
+
+    def _fail(message: str) -> tuple[dict, bool, bool]:
+        return (
+            {
+                "path": str(discovered_path),
+                "ok": False,
+                "status": "error",
+                "errors": [message],
+                "warnings": [],
+            },
+            False,
+            False,
+        )
+
+    def _skipped() -> tuple[dict, bool, bool]:
+        return (
+            {
+                "path": str(discovered_path),
+                "ok": True,
+                "status": "skipped",
+                "errors": [],
+                "warnings": [],
+            },
+            False,
+            True,
+        )
+
+    try:
+        raw_text = discovered_path.read_text(encoding="utf-8")
+        data = tomllib.loads(raw_text)
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        try:
+            parse_sidecar(discovered_path)
+        except (SidecarError, OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as parse_exc:
+            return _fail(str(parse_exc))
+        return _fail(str(exc))
+
+    if discovered_path.name == ".bth.toml" and "project" in data and (
+        "stoichiometry" in data or "reagents" in data
+    ):
+        return _fail(
+            f"{discovered_path}: [stoichiometry] and [reagents] are forbidden in project .bth.toml; "
+            "declare them in per-script <stem>.bth.toml [experiment] sidecars"
+        )
+
+    if any(key in data for key in SIDECAR_KIND_TABLES):
+        try:
+            sidecar = parse_sidecar(discovered_path)
+        except SidecarError as exc:
+            return _fail(str(exc))
+        if sidecar.stoichiometry is None and not sidecar.reagents:
+            return _skipped()
+        entry, passed = _eval_stoichiometry_sidecar(
+            sidecar, discovered_path, require_stoich=False
+        )
+        return entry, True, passed
+
+    if "stoichiometry" in data or "reagents" in data:
+        return _fail(
+            f"{discovered_path}: [stoichiometry] and [reagents] are restricted to [experiment] "
+            "sidecars and forbidden in config, artifact, stub, or submit-config TOML files"
+        )
+
+    top_keys = set(data)
+    is_project_cfg = discovered_path.name == ".bth.toml" and bool(
+        top_keys & PROJECT_CONFIG_TABLES
+    )
+    is_artifact = bool(top_keys & NON_SIDECAR_ARTIFACT_TABLES)
+    is_archive_stub = (
+        discovered_path.name != ".bth.toml"
+        and not data
+        and parse_stub(discovered_path) is not None
+    )
+    is_submit_config = (
+        discovered_path.name != ".bth.toml"
+        and bool(data)
+        and top_keys <= SUBMIT_CONFIG_SIDECAR_TABLES
+    )
+    if is_project_cfg or is_artifact or is_archive_stub or is_submit_config:
+        return _skipped()
+
+    try:
+        parse_sidecar(discovered_path)
+    except SidecarError as exc:
+        return _fail(str(exc))
+    return _fail(f"{discovered_path}: missing recognized sidecar kind table")
+
+
 @cisternal.tool(registry="bathos-cli", name="check", cli_name="check")
 def check_tool(
     catalog_dir: str = "",
     project_root: str = "",
     status_filter: str = "",
     check_outputs: bool = False,
+    check_stoichiometry: bool = False,
+    sidecar_path: str = "",
     rebaseline: bool = False,
 ) -> dict:
     """Check run freshness vs git HEAD.
@@ -2356,6 +2494,9 @@ def check_tool(
         status_filter: Filter by status (e.g., "stale")
         check_outputs: Also verify output files exist, are readable, and match their
             recorded SHA256 (output SHA drift)
+        check_stoichiometry: Validate [stoichiometry] stage graphs and [reagents] bounds
+            on experiment sidecars
+        sidecar_path: Specific sidecar TOML file path to validate strictly (bypasses discovery)
         rebaseline: Recompute the output-metadata drift baseline (run.outputs_hashed,
             delivery step 2b / AC-25) for every run in `results`, instead of relying
             on the baseline compact.py refreshes automatically. Behind the runlog
@@ -2367,7 +2508,9 @@ def check_tool(
         Dict with check results
     """
     from bathos.checker import check_output_files, check_output_sha_drift, rebaseline_run_outputs
+    from bathos.linter import iter_project_sidecars
     from bathos.query import get_run
+    from bathos.sidecar import SidecarError, parse_sidecar
 
     cat_dir = _get_catalog_dir(catalog_dir or None)
     proj_root = Path(project_root) if project_root else Path.cwd()
@@ -2420,20 +2563,86 @@ def check_tool(
             rebaseline_run_outputs(cat_dir, run, cwd=proj_root)
             rebaselined_count += 1
 
-    result_dict = {
+    stoichiometry_results: list[dict] = []
+    stoichiometry_failure_count = 0
+    stoichiometry_checked_count = 0
+    stoich_zero_error = ""
+
+    if sidecar_path:
+        target_path = Path(sidecar_path)
+        if not target_path.is_absolute():
+            target_path = proj_root / target_path
+        if not target_path.exists():
+            stoichiometry_results.append(
+                {
+                    "path": str(target_path),
+                    "ok": False,
+                    "status": "error",
+                    "errors": [f"File not found: {target_path}"],
+                    "warnings": [],
+                }
+            )
+            stoichiometry_failure_count = 1
+        else:
+            try:
+                sidecar = parse_sidecar(target_path)
+            except SidecarError as exc:
+                stoichiometry_results.append(
+                    {
+                        "path": str(target_path),
+                        "ok": False,
+                        "status": "error",
+                        "errors": [str(exc)],
+                        "warnings": [],
+                    }
+                )
+                stoichiometry_failure_count = 1
+            else:
+                entry, passed = _eval_stoichiometry_sidecar(
+                    sidecar, target_path, require_stoich=check_stoichiometry
+                )
+                stoichiometry_results.append(entry)
+                stoichiometry_checked_count = 1
+                if not passed:
+                    stoichiometry_failure_count = 1
+    elif check_stoichiometry:
+        for discovered_path in iter_project_sidecars(proj_root):
+            entry, was_checked, passed = _classify_and_validate_discovered_sidecar(discovered_path)
+            stoichiometry_results.append(entry)
+            if was_checked:
+                stoichiometry_checked_count += 1
+            if not passed:
+                stoichiometry_failure_count += 1
+
+        if stoichiometry_checked_count == 0 and stoichiometry_failure_count == 0:
+            stoichiometry_failure_count = 1
+            stoich_zero_error = (
+                f"No sidecar files declaring [stoichiometry] or [reagents] found under {proj_root}"
+            )
+
+    result_dict: dict = {
         "results": results_json,
         "count": len(results_json),
         "stale_count": stale_count,
         "drift_count": drift_count,
         "output_status": output_status,
         "rebaselined_count": rebaselined_count,
+        "stoichiometry_results": stoichiometry_results,
+        "stoichiometry_failure_count": stoichiometry_failure_count,
     }
+    error_parts: list[str] = []
     if stale_count > 0 or drift_count > 0:
         # Singular "error" key -- see cli_render.render_or_exit -- matches the shipped
         # Typer `check` command's `if stale_count or drift_count: raise typer.Exit(1)`.
-        result_dict["error"] = (
+        error_parts.append(
             f"{stale_count} stale run(s), {drift_count} output SHA drift(s) detected"
         )
+    if stoich_zero_error:
+        error_parts.append(stoich_zero_error)
+    elif stoichiometry_failure_count > 0:
+        error_parts.append(f"{stoichiometry_failure_count} stoichiometry check failure(s) detected")
+    if error_parts:
+        result_dict["error"] = "; ".join(error_parts)
     return result_dict
 
 
@@ -3369,6 +3578,51 @@ async def mcp_cite_run_tool(
     )
 
 
+@cisternal.tool(registry="bathos-cli", name="verify_citations", cli_name="verify-citations")
+def verify_citations_tool(
+    doc_path: str,
+    sources_dir: str,
+    strict_coords: bool = True,
+) -> dict:
+    """Verify markdown blockquotes and coordinate tags against numbered sources and manifest."""
+    from dataclasses import asdict
+
+    from bathos.cite import verify_citations
+
+    result = verify_citations(
+        doc_path=doc_path,
+        sources_dir=sources_dir,
+        strict_coords=strict_coords,
+    )
+    payload = asdict(result)
+    payload["errors"] = list(result.errors)
+    payload["warnings"] = list(result.warnings)
+    if not result.ok:
+        payload["error"] = "; ".join(result.errors) or "Citation verification failed"
+    return payload
+
+
+@cisternal.tool(registry="bathos", name="verify_citations")
+@traced_tool
+async def mcp_verify_citations_tool(
+    doc_path: str,
+    sources_dir: str,
+    strict_coords: bool = True,
+) -> dict:
+    """Verify markdown blockquotes and coordinate tags against numbered sources and manifest."""
+    from bathos.errors import RESOLUTION_HINTS, BathosErrorCode
+
+    result = verify_citations_tool(
+        doc_path=doc_path,
+        sources_dir=sources_dir,
+        strict_coords=strict_coords,
+    )
+    if not result.get("ok", True):
+        result["error_code"] = BathosErrorCode.CITATION_INVALID.value
+        result["resolution_hint"] = RESOLUTION_HINTS[BathosErrorCode.CITATION_INVALID]
+    return result
+
+
 @cisternal.tool(registry="bathos-cli", name="lineage_prov", cli_name="lineage")
 def lineage_prov_tool(
     run_id: str,
@@ -4123,6 +4377,9 @@ async def mcp_check_tool(
     catalog_dir: str = "",
     project_root: str = "",
     status_filter: str = "",
+    check_outputs: bool = False,
+    check_stoichiometry: bool = False,
+    sidecar_path: str = "",
     rebaseline: bool = False,
 ) -> dict:
     """Check run freshness vs git HEAD."""
@@ -4130,6 +4387,9 @@ async def mcp_check_tool(
         catalog_dir=catalog_dir,
         project_root=project_root,
         status_filter=status_filter,
+        check_outputs=check_outputs,
+        check_stoichiometry=check_stoichiometry,
+        sidecar_path=sidecar_path,
         rebaseline=rebaseline,
     )
 
@@ -7267,6 +7527,7 @@ _WIRED = cisternal.wire(
         "find_runs",
         "get_run",
         "cite_run",
+        "verify_citations",
         "lineage_prov",
         "run_sql",
         "resolve_pin",

@@ -156,7 +156,7 @@ After syncing runs from the cluster, validate that they are still reproducible:
 
 .. code-block:: bash
 
-    bth check --output validity-report.txt
+    bth check > validity-report.txt
 
 This reports:
 

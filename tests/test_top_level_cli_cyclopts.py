@@ -220,6 +220,43 @@ class TestCheckCyclopts:
         result = runner.invoke(app, ["check", "--catalog-dir", str(tmp_catalog)])
         assert result.exit_code == 0, result.output
 
+    def test_check_stoichiometry_flag_exits_0_and_1(self, tmp_catalog, tmp_path):
+        init_catalog(tmp_catalog)
+        (tmp_path / ".bth.toml").write_text('[project]\nslug = "cyc"\n')
+        good = tmp_path / "exp.bth.toml"
+        good.write_text(
+            """
+[experiment]
+hypothesis = "h"
+[outcomes.pass]
+condition = "x > 0"
+decision = "go"
+is_residual = true
+[result_schema]
+x = "float"
+[stoichiometry]
+barcoding_mode = "primer_pcr"
+[[stoichiometry.stages]]
+name = "dna_in"
+kind = "input_molecules"
+molecules = 1e6
+"""
+        )
+        ok_res = runner.invoke(
+            app,
+            [
+                "check",
+                "--catalog-dir",
+                str(tmp_catalog),
+                "--project-root",
+                str(tmp_path),
+                "--check-stoichiometry",
+                "--sidecar-path",
+                str(good),
+            ],
+        )
+        assert ok_res.exit_code == 0, ok_res.output
+
 
 class TestCompactCyclopts:
     def test_happy_path(self, tmp_catalog):
@@ -444,3 +481,38 @@ class TestLintCyclopts:
 
         result = runner.invoke(app, ["lint", "--project-root", str(tmp_path)])
         assert result.exit_code == 1, result.output
+
+
+
+class TestVerifyCitationsCyclopts:
+    def test_verify_citations_happy_and_error_paths(self, tmp_path):
+        import hashlib
+
+        sources_dir = tmp_path / "sources"
+        sources_dir.mkdir()
+        raw = b"[Page 1, Line 1] Clean verified quote.\n"
+        (sources_dir / "ref.numbered.txt").write_bytes(raw)
+        digest = hashlib.sha256(raw).hexdigest()
+        (sources_dir / "manifest.json").write_text(
+            json.dumps({"schema_version": 1, "sources": {"ref.numbered.txt": {"sha256": digest}}}),
+            encoding="utf-8",
+        )
+        doc_ok = tmp_path / "ok.md"
+        doc_ok.write_text(
+            f"> Clean verified quote. [source: ref.numbered.txt, sha256: {digest}, Page 1, Line 1]\n"
+        )
+        res_ok = runner.invoke(
+            app,
+            ["verify-citations", "--doc-path", str(doc_ok), "--sources-dir", str(sources_dir)],
+        )
+        assert res_ok.exit_code == 0, res_ok.output
+
+        doc_bad = tmp_path / "bad.md"
+        doc_bad.write_text(
+            f"> Fabricated quote. [source: ref.numbered.txt, sha256: {digest}, Page 1, Line 1]\n"
+        )
+        res_bad = runner.invoke(
+            app,
+            ["verify-citations", "--doc-path", str(doc_bad), "--sources-dir", str(sources_dir)],
+        )
+        assert res_bad.exit_code == 1

@@ -638,6 +638,46 @@ def validate_breakdown_block(sidecar: Sidecar) -> tuple[list[ValidationError], l
     return errors, warnings
 
 
+
+def _apply_stoichiometry_and_reagents(
+    sidecar: Sidecar,
+    sidecar_path: Path | None,
+    errors: list[ValidationError],
+    warnings: list[str],
+) -> None:
+    """Validate `[stoichiometry]` / `[reagents.*]` and honor BTH_STOICHIOMETRY_WARN_ONLY."""
+    if sidecar.stoichiometry is None and not sidecar.reagents:
+        return
+    from bathos.config import env_override
+    from bathos.stoichiometry import validate_reagents_block, validate_stoichiometry_block
+
+    stoich_errors, stoich_warnings = validate_stoichiometry_block(sidecar)
+    reagent_errors, reagent_warnings = validate_reagents_block(sidecar)
+    combined_errors = [*stoich_errors, *reagent_errors]
+    warnings.extend(stoich_warnings)
+    warnings.extend(reagent_warnings)
+
+    if combined_errors and env_override("BTH_STOICHIOMETRY_WARN_ONLY") is True:
+        for err in combined_errors:
+            warnings.append(f"[stoichiometry warn-only] {err.field}: {err.message}")
+        event(
+            "stoichiometry.warn_only_downgrade",
+            path=str(sidecar_path) if sidecar_path else "",
+            error_count=len(combined_errors),
+            fields=[err.field for err in combined_errors],
+        )
+        return
+
+    for err in combined_errors:
+        errors.append(err)
+        if sidecar_path:
+            event(
+                "sidecar.validate_error",
+                path=str(sidecar_path),
+                field=err.field,
+                reason=err.message,
+            )
+
 def validate_sidecar(
     sidecar: Sidecar,
     sidecar_path: Path | None = None,
@@ -766,6 +806,7 @@ def validate_sidecar(
                     "(validation/ablation/production)",
                 )
             )
+            _apply_stoichiometry_and_reagents(sidecar, sidecar_path, errors, warnings)
             return ValidationResult(ok=False, errors=errors, warnings=warnings)
 
     # Source placeholder guard applies to every class: an unfilled template is never a source.
@@ -848,6 +889,7 @@ def validate_sidecar(
                 field="outcomes",
                 reason="No [outcomes] section found",
             )
+        _apply_stoichiometry_and_reagents(sidecar, sidecar_path, errors, warnings)
         return ValidationResult(ok=False, errors=errors, warnings=warnings)
 
     # Each branch must have condition, decision, reasoning
@@ -1010,5 +1052,7 @@ def validate_sidecar(
     breakdown_errors, breakdown_warnings = validate_breakdown_block(sidecar)
     errors.extend(breakdown_errors)
     warnings.extend(breakdown_warnings)
+
+    _apply_stoichiometry_and_reagents(sidecar, sidecar_path, errors, warnings)
 
     return ValidationResult(ok=len(errors) == 0, errors=errors, warnings=warnings)

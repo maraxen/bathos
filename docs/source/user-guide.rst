@@ -164,9 +164,10 @@ Validate run freshness and git state.
 
 .. code-block:: bash
 
-    bth check [--output <FILE>]
+    bth check [--status-filter <STATUS>] [--check-outputs]
 
-- ``--output``: Write report to file (default: stdout)
+- ``--status-filter``: Filter runs by status (e.g., ``STALE``)
+- ``--check-outputs``: Verify recorded output files and SHA256 hashes
 
 Checks if runs are still valid against current git HEAD. Flags stale runs.
 

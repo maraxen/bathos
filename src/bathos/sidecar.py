@@ -255,6 +255,137 @@ def review_tier(review: ReviewBlock | None) -> str:
     return "C0"
 
 
+
+STAGE_KINDS = frozenset(
+    {
+        "input_molecules",
+        "enzymatic_species_cleanup",
+        "colony_cfu",
+        "barcode_collision",
+        "founder_inoculum",
+        "pcr_template_molecules",
+        "bulk_fluorometry",
+        "phix_adjusted_net_reads",
+    }
+)
+BARCODING_MODES = frozenset({"pre_barcoded_vector", "primer_pcr"})
+_STAGE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+STOICHIOMETRY_KEYS = frozenset(
+    {
+        "schema_version",
+        "barcoding_mode",
+        "max_collision_prob",
+        "warn_collision_prob",
+        "min_consensus_reads",
+        "min_template_ratio",
+        "target_reads",
+        "min_group_size",
+        "stages",
+        "subpools",
+    }
+)
+STOICHIOMETRY_STAGE_KEYS = frozenset(
+    {
+        "name",
+        "kind",
+        "depends_on",
+        "molecules",
+        "species",
+        "enzyme",
+        "removes_species",
+        "retention_fraction",
+        "forbidden_species",
+        "colony_cfu",
+        "efficiency",
+        "barcode_diversity",
+        "sampling_fraction",
+        "inoculum_cells",
+        "copies_per_cell",
+        "lysis_recovery_yield",
+        "pcr_aliquot_fraction",
+        "raw_reads",
+        "phix_fraction",
+        "qc_pass_fraction",
+    }
+)
+SUBPOOL_KEYS = frozenset({"weight", "min_group_size"})
+REAGENT_KEYS = frozenset(
+    {
+        "pack_rxns",
+        "experiment_rxns",
+        "pack_cost_usd",
+        "max_waste_fraction",
+        "max_unused_rxns",
+        "max_total_cost_usd",
+        "max_cost_per_rxn_usd",
+    }
+)
+
+
+@dataclass(frozen=True)
+class SubpoolSpec:
+    """Weighted subpool stratum floor inside `[stoichiometry.subpools.<name>]`."""
+
+    weight: float
+    min_group_size: int | None = None
+
+
+@dataclass(frozen=True)
+class StoichiometryStage:
+    """Single stage node inside `[[stoichiometry.stages]]`."""
+
+    name: str
+    kind: str
+    depends_on: tuple[str, ...] = ()
+    molecules: float | None = None
+    species: tuple[str, ...] = ()
+    enzyme: str = ""
+    removes_species: tuple[str, ...] = ()
+    retention_fraction: float = 1.0
+    forbidden_species: tuple[str, ...] | None = None
+    colony_cfu: float | None = None
+    efficiency: float | None = None
+    barcode_diversity: int | None = None
+    sampling_fraction: float | None = None
+    inoculum_cells: float | None = None
+    copies_per_cell: float = 1.0
+    lysis_recovery_yield: float = 1.0
+    pcr_aliquot_fraction: float = 1.0
+    raw_reads: int | None = None
+    phix_fraction: float = 0.0
+    qc_pass_fraction: float = 1.0
+
+
+@dataclass(frozen=True)
+class StoichiometryBlock:
+    """Experiment-only physical stoichiometry stage-graph block (`[stoichiometry]`)."""
+
+    stages: tuple[StoichiometryStage, ...]
+    schema_version: int = 1
+    barcoding_mode: str = "pre_barcoded_vector"
+    max_collision_prob: float = 0.05
+    warn_collision_prob: float | None = None
+    min_consensus_reads: float = 3.0
+    min_template_ratio: float = 10.0
+    target_reads: int | None = None
+    min_group_size: int | None = None
+    subpools: dict[str, SubpoolSpec] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ReagentSpec:
+    """Reagent pack-size and waste/cost bounds (`[reagents.<name>]`)."""
+
+    pack_rxns: int
+    experiment_rxns: int | float
+    pack_cost_usd: float | None = None
+    max_waste_fraction: float | None = None
+    max_unused_rxns: float | None = None
+    max_total_cost_usd: float | None = None
+    max_cost_per_rxn_usd: float | None = None
+
+
 @dataclass
 class Sidecar:
     kind: SidecarKind
@@ -326,6 +457,9 @@ class Sidecar:
     result_schema_meta: dict[str, dict] = field(default_factory=dict)
     # step-back review configuration (optional [stepback] block, spec 261027)
     stepback: dict[str, typing.Any] = field(default_factory=dict)
+    # experiment-only physical stoichiometry and reagent pack amortization (spec 261113)
+    stoichiometry: StoichiometryBlock | None = None
+    reagents: dict[str, ReagentSpec] = field(default_factory=dict)
 
     @classmethod
     def from_declaration(cls, decl: dict) -> Sidecar:
@@ -859,6 +993,17 @@ def parse_sidecar(path: Path) -> Sidecar:
     if "stepback" in data and isinstance(data["stepback"], dict):
         sidecar.stepback = dict(data["stepback"])
 
+    # Parse [stoichiometry] and [reagents] (optional, experiment sidecars only; spec 261113 D1).
+    if ("stoichiometry" in data or "reagents" in data) and sidecar.kind != SidecarKind.EXPERIMENT:
+        raise SidecarError(
+            f"{path}: [stoichiometry] and [reagents] are only allowed on [experiment] sidecars, "
+            f"not on [{sidecar.kind.value}]"
+        )
+    if "stoichiometry" in data:
+        sidecar.stoichiometry = _parse_stoichiometry(data["stoichiometry"], path)
+    if "reagents" in data:
+        sidecar.reagents = _parse_reagents(data["reagents"], path)
+
     return sidecar
 
 
@@ -1156,6 +1301,442 @@ def _parse_budget(raw, path: Path) -> BudgetBlock:
         record_per_unit_key=record_per_unit_key,
         tolerance=tolerance,
     )
+
+
+def _reject_unknown_keys(raw: dict, allowed: frozenset[str], path: Path, section: str) -> None:
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise SidecarError(
+            f"{path}: unknown key(s) in {section}: {', '.join(repr(k) for k in unknown)} "
+            f"(allowed: {', '.join(sorted(allowed))})"
+        )
+
+
+def _strict_int(
+    path: Path,
+    where: str,
+    value,
+    *,
+    min_value: int = 1,
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise SidecarError(
+            f"{path}: {where} must be an integer, got {type(value).__name__}"
+        )
+    if value < min_value:
+        raise SidecarError(f"{path}: {where} must be >= {min_value}, got {value}")
+    return value
+
+
+def _strict_float(
+    path: Path,
+    where: str,
+    value,
+    *,
+    gt: float | None = None,
+    ge: float | None = None,
+    lt: float | None = None,
+    le: float | None = None,
+) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SidecarError(
+            f"{path}: {where} must be a number, got {type(value).__name__}"
+        )
+    try:
+        num = float(value)
+    except OverflowError as exc:
+        raise SidecarError(f"{path}: {where} is too large to be finite: {value!r}") from exc
+    if not math.isfinite(num):
+        raise SidecarError(f"{path}: {where} must be finite, got {value!r}")
+    if gt is not None and not (num > gt):
+        raise SidecarError(f"{path}: {where} must be > {gt}, got {num}")
+    if ge is not None and not (num >= ge):
+        raise SidecarError(f"{path}: {where} must be >= {ge}, got {num}")
+    if lt is not None and not (num < lt):
+        raise SidecarError(f"{path}: {where} must be < {lt}, got {num}")
+    if le is not None and not (num <= le):
+        raise SidecarError(f"{path}: {where} must be <= {le}, got {num}")
+    return num
+
+
+def _strict_number_preserve(path: Path, where: str, value) -> int | float:
+    _strict_float(path, where, value, gt=0.0)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return float(value)
+
+
+def _strict_str_tuple(
+    path: Path,
+    where: str,
+    value,
+    *,
+    default: tuple[str, ...] | None = (),
+) -> tuple[str, ...] | None:
+    if value is None:
+        return default
+    if not isinstance(value, list):
+        raise SidecarError(f"{path}: {where} must be a list of strings")
+    items: list[str] = []
+    for entry in value:
+        if not isinstance(entry, str) or not entry.strip():
+            raise SidecarError(f"{path}: {where} entries must be non-empty strings, got {entry!r}")
+        items.append(entry)
+    return tuple(items)
+
+
+def _parse_stoichiometry_subpools(raw, path: Path) -> dict[str, SubpoolSpec]:
+    if not isinstance(raw, dict) or not raw:
+        raise SidecarError(f"{path}: [stoichiometry.subpools] must be a non-empty table")
+    subpools: dict[str, SubpoolSpec] = {}
+    for name, entry in raw.items():
+        if not isinstance(name, str) or not name.strip():
+            raise SidecarError(f"{path}: [stoichiometry.subpools] key must be non-empty")
+        section = f"[stoichiometry.subpools.{name}]"
+        if not isinstance(entry, dict):
+            raise SidecarError(f"{path}: {section} must be a table")
+        _reject_unknown_keys(entry, SUBPOOL_KEYS, path, section)
+        if "weight" not in entry:
+            raise SidecarError(f"{path}: {section}.weight is required")
+        weight = _strict_float(path, f"{section}.weight", entry["weight"], gt=0.0)
+        min_group = (
+            _strict_int(path, f"{section}.min_group_size", entry["min_group_size"], min_value=1)
+            if entry.get("min_group_size") is not None
+            else None
+        )
+        subpools[name] = SubpoolSpec(weight=weight, min_group_size=min_group)
+    return subpools
+
+
+def _parse_stoichiometry_stage(raw, index: int, path: Path) -> StoichiometryStage:
+    where = f"[[stoichiometry.stages]][{index}]"
+    if not isinstance(raw, dict):
+        raise SidecarError(f"{path}: {where} must be a table")
+    _reject_unknown_keys(raw, STOICHIOMETRY_STAGE_KEYS, path, where)
+
+    name = raw.get("name")
+    if not isinstance(name, str) or not _STAGE_NAME_RE.match(name):
+        raise SidecarError(
+            f"{path}: {where}.name must match ^[a-z][a-z0-9_]*$, got {name!r}"
+        )
+
+    kind = raw.get("kind")
+    if not isinstance(kind, str) or kind not in STAGE_KINDS:
+        raise SidecarError(
+            f"{path}: {where}.kind must be one of {sorted(STAGE_KINDS)}, got {kind!r}"
+        )
+
+    depends_on = _strict_str_tuple(path, f"{where}.depends_on", raw.get("depends_on"), default=())
+    assert depends_on is not None
+
+    molecules = (
+        _strict_float(path, f"{where}.molecules", raw["molecules"], gt=0.0)
+        if raw.get("molecules") is not None
+        else None
+    )
+    if kind == "input_molecules" and molecules is None:
+        raise SidecarError(f"{path}: {where} ({kind}) requires 'molecules'")
+
+    species = _strict_str_tuple(path, f"{where}.species", raw.get("species"), default=())
+    assert species is not None
+
+    enzyme = raw.get("enzyme", "")
+    if not isinstance(enzyme, str):
+        raise SidecarError(
+            f"{path}: {where}.enzyme must be a string, got {type(enzyme).__name__}"
+        )
+
+    removes_species = _strict_str_tuple(
+        path, f"{where}.removes_species", raw.get("removes_species"), default=()
+    )
+    assert removes_species is not None
+
+    retention_fraction = (
+        _strict_float(
+            path, f"{where}.retention_fraction", raw["retention_fraction"], gt=0.0, le=1.0
+        )
+        if raw.get("retention_fraction") is not None
+        else 1.0
+    )
+
+    forbidden_species = (
+        _strict_str_tuple(
+            path, f"{where}.forbidden_species", raw.get("forbidden_species"), default=None
+        )
+        if "forbidden_species" in raw
+        else None
+    )
+
+    colony_cfu = (
+        _strict_float(path, f"{where}.colony_cfu", raw["colony_cfu"], gt=0.0)
+        if raw.get("colony_cfu") is not None
+        else None
+    )
+    efficiency = (
+        _strict_float(path, f"{where}.efficiency", raw["efficiency"], gt=0.0, le=1.0)
+        if raw.get("efficiency") is not None
+        else None
+    )
+    if kind == "colony_cfu" and (colony_cfu is not None) == (efficiency is not None):
+        raise SidecarError(
+            f"{path}: {where} (colony_cfu) requires exactly one of 'colony_cfu' or 'efficiency'"
+        )
+
+    barcode_diversity = (
+        _strict_int(path, f"{where}.barcode_diversity", raw["barcode_diversity"], min_value=1)
+        if raw.get("barcode_diversity") is not None
+        else None
+    )
+    if kind == "barcode_collision" and barcode_diversity is None:
+        raise SidecarError(f"{path}: {where} (barcode_collision) requires 'barcode_diversity'")
+
+    sampling_fraction = (
+        _strict_float(
+            path, f"{where}.sampling_fraction", raw["sampling_fraction"], gt=0.0, le=1.0
+        )
+        if raw.get("sampling_fraction") is not None
+        else None
+    )
+    inoculum_cells = (
+        _strict_float(path, f"{where}.inoculum_cells", raw["inoculum_cells"], gt=0.0)
+        if raw.get("inoculum_cells") is not None
+        else None
+    )
+    if kind == "founder_inoculum" and (sampling_fraction is not None) == (
+        inoculum_cells is not None
+    ):
+        raise SidecarError(
+            f"{path}: {where} (founder_inoculum) requires exactly one of "
+            "'sampling_fraction' or 'inoculum_cells'"
+        )
+
+    copies_per_cell = (
+        _strict_float(path, f"{where}.copies_per_cell", raw["copies_per_cell"], gt=0.0)
+        if raw.get("copies_per_cell") is not None
+        else 1.0
+    )
+    lysis_recovery_yield = (
+        _strict_float(
+            path, f"{where}.lysis_recovery_yield", raw["lysis_recovery_yield"], gt=0.0, le=1.0
+        )
+        if raw.get("lysis_recovery_yield") is not None
+        else 1.0
+    )
+    pcr_aliquot_fraction = (
+        _strict_float(
+            path, f"{where}.pcr_aliquot_fraction", raw["pcr_aliquot_fraction"], gt=0.0, le=1.0
+        )
+        if raw.get("pcr_aliquot_fraction") is not None
+        else 1.0
+    )
+
+    raw_reads = (
+        _strict_int(path, f"{where}.raw_reads", raw["raw_reads"], min_value=1)
+        if raw.get("raw_reads") is not None
+        else None
+    )
+    if kind == "phix_adjusted_net_reads" and raw_reads is None:
+        raise SidecarError(f"{path}: {where} (phix_adjusted_net_reads) requires 'raw_reads'")
+
+    phix_fraction = (
+        _strict_float(path, f"{where}.phix_fraction", raw["phix_fraction"], ge=0.0, lt=1.0)
+        if raw.get("phix_fraction") is not None
+        else 0.0
+    )
+    qc_pass_fraction = (
+        _strict_float(path, f"{where}.qc_pass_fraction", raw["qc_pass_fraction"], gt=0.0, le=1.0)
+        if raw.get("qc_pass_fraction") is not None
+        else 1.0
+    )
+
+    return StoichiometryStage(
+        name=name,
+        kind=kind,
+        depends_on=depends_on,
+        molecules=molecules,
+        species=species,
+        enzyme=enzyme,
+        removes_species=removes_species,
+        retention_fraction=retention_fraction,
+        forbidden_species=forbidden_species,
+        colony_cfu=colony_cfu,
+        efficiency=efficiency,
+        barcode_diversity=barcode_diversity,
+        sampling_fraction=sampling_fraction,
+        inoculum_cells=inoculum_cells,
+        copies_per_cell=copies_per_cell,
+        lysis_recovery_yield=lysis_recovery_yield,
+        pcr_aliquot_fraction=pcr_aliquot_fraction,
+        raw_reads=raw_reads,
+        phix_fraction=phix_fraction,
+        qc_pass_fraction=qc_pass_fraction,
+    )
+
+
+def _parse_stoichiometry(raw, path: Path) -> StoichiometryBlock:
+    if not isinstance(raw, dict) or not raw:
+        raise SidecarError(f"{path}: [stoichiometry] must be a non-empty table")
+    _reject_unknown_keys(raw, STOICHIOMETRY_KEYS, path, "[stoichiometry]")
+
+    schema_version = (
+        _strict_int(path, "[stoichiometry].schema_version", raw["schema_version"], min_value=1)
+        if raw.get("schema_version") is not None
+        else 1
+    )
+    if schema_version != 1:
+        raise SidecarError(
+            f"{path}: [stoichiometry].schema_version must be 1, got {schema_version}"
+        )
+
+    barcoding_mode = raw.get("barcoding_mode", "pre_barcoded_vector")
+    if not isinstance(barcoding_mode, str) or barcoding_mode not in BARCODING_MODES:
+        raise SidecarError(
+            f"{path}: [stoichiometry].barcoding_mode must be one of {sorted(BARCODING_MODES)}, "
+            f"got {barcoding_mode!r}"
+        )
+
+    max_collision_prob = (
+        _strict_float(
+            path, "[stoichiometry].max_collision_prob", raw["max_collision_prob"], gt=0.0, lt=1.0
+        )
+        if raw.get("max_collision_prob") is not None
+        else 0.05
+    )
+    warn_collision_prob = (
+        _strict_float(
+            path,
+            "[stoichiometry].warn_collision_prob",
+            raw["warn_collision_prob"],
+            gt=0.0,
+            lt=1.0,
+        )
+        if raw.get("warn_collision_prob") is not None
+        else None
+    )
+    min_consensus_reads = (
+        _strict_float(
+            path, "[stoichiometry].min_consensus_reads", raw["min_consensus_reads"], gt=0.0
+        )
+        if raw.get("min_consensus_reads") is not None
+        else 3.0
+    )
+    min_template_ratio = (
+        _strict_float(
+            path, "[stoichiometry].min_template_ratio", raw["min_template_ratio"], gt=0.0
+        )
+        if raw.get("min_template_ratio") is not None
+        else 10.0
+    )
+    target_reads = (
+        _strict_int(path, "[stoichiometry].target_reads", raw["target_reads"], min_value=1)
+        if raw.get("target_reads") is not None
+        else None
+    )
+    min_group_size = (
+        _strict_int(path, "[stoichiometry].min_group_size", raw["min_group_size"], min_value=1)
+        if raw.get("min_group_size") is not None
+        else None
+    )
+
+    stages_raw = raw.get("stages")
+    if not isinstance(stages_raw, list) or not stages_raw:
+        raise SidecarError(f"{path}: [stoichiometry].stages must be a non-empty array of tables")
+
+    parsed_stages: list[StoichiometryStage] = []
+    seen_names: set[str] = set()
+    for index, stage_raw in enumerate(stages_raw):
+        stage = _parse_stoichiometry_stage(stage_raw, index, path)
+        if stage.name in seen_names:
+            raise SidecarError(
+                f"{path}: duplicate stage name in [[stoichiometry.stages]]: {stage.name!r}"
+            )
+        seen_names.add(stage.name)
+        parsed_stages.append(stage)
+
+    subpools = (
+        _parse_stoichiometry_subpools(raw["subpools"], path) if "subpools" in raw else {}
+    )
+
+    return StoichiometryBlock(
+        stages=tuple(parsed_stages),
+        schema_version=schema_version,
+        barcoding_mode=barcoding_mode,
+        max_collision_prob=max_collision_prob,
+        warn_collision_prob=warn_collision_prob,
+        min_consensus_reads=min_consensus_reads,
+        min_template_ratio=min_template_ratio,
+        target_reads=target_reads,
+        min_group_size=min_group_size,
+        subpools=subpools,
+    )
+
+
+def _parse_reagents(raw, path: Path) -> dict[str, ReagentSpec]:
+    if not isinstance(raw, dict) or not raw:
+        raise SidecarError(f"{path}: [reagents] must be a non-empty table")
+    reagents: dict[str, ReagentSpec] = {}
+    for reagent_name, entry in raw.items():
+        if not isinstance(reagent_name, str) or not reagent_name.strip():
+            raise SidecarError(f"{path}: [reagents] key must be a non-empty string")
+        section = f"[reagents.{reagent_name}]"
+        if not isinstance(entry, dict):
+            raise SidecarError(f"{path}: {section} must be a table")
+        _reject_unknown_keys(entry, REAGENT_KEYS, path, section)
+
+        if "pack_rxns" not in entry:
+            raise SidecarError(f"{path}: {section}.pack_rxns is required")
+        if "experiment_rxns" not in entry:
+            raise SidecarError(f"{path}: {section}.experiment_rxns is required")
+
+        pack_rxns = _strict_int(path, f"{section}.pack_rxns", entry["pack_rxns"], min_value=1)
+        experiment_rxns = _strict_number_preserve(
+            path, f"{section}.experiment_rxns", entry["experiment_rxns"]
+        )
+        pack_cost_usd = (
+            _strict_float(path, f"{section}.pack_cost_usd", entry["pack_cost_usd"], ge=0.0)
+            if entry.get("pack_cost_usd") is not None
+            else None
+        )
+        max_waste_fraction = (
+            _strict_float(
+                path,
+                f"{section}.max_waste_fraction",
+                entry["max_waste_fraction"],
+                ge=0.0,
+                lt=1.0,
+            )
+            if entry.get("max_waste_fraction") is not None
+            else None
+        )
+        max_unused_rxns = (
+            _strict_float(path, f"{section}.max_unused_rxns", entry["max_unused_rxns"], ge=0.0)
+            if entry.get("max_unused_rxns") is not None
+            else None
+        )
+        max_total_cost_usd = (
+            _strict_float(
+                path, f"{section}.max_total_cost_usd", entry["max_total_cost_usd"], ge=0.0
+            )
+            if entry.get("max_total_cost_usd") is not None
+            else None
+        )
+        max_cost_per_rxn_usd = (
+            _strict_float(
+                path, f"{section}.max_cost_per_rxn_usd", entry["max_cost_per_rxn_usd"], ge=0.0
+            )
+            if entry.get("max_cost_per_rxn_usd") is not None
+            else None
+        )
+        reagents[reagent_name] = ReagentSpec(
+            pack_rxns=pack_rxns,
+            experiment_rxns=experiment_rxns,
+            pack_cost_usd=pack_cost_usd,
+            max_waste_fraction=max_waste_fraction,
+            max_unused_rxns=max_unused_rxns,
+            max_total_cost_usd=max_total_cost_usd,
+            max_cost_per_rxn_usd=max_cost_per_rxn_usd,
+        )
+    return reagents
 
 
 def _parse_outcomes(data: dict) -> dict[str, OutcomeSpec]:

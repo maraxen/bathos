@@ -2,6 +2,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from bathos.catalog import init_catalog, write_run
 from bathos.cli_common import catalog_dir as _catalog_dir
 from bathos.cli_cyclopts import app
@@ -922,3 +924,427 @@ def test_lint_flags_unarchived_stale_script_without_warm_catalog(tmp_path: Path,
     assert not catalog.exists()  # no compact has run -- db_path.exists() would be False
     result = runner.invoke(app, ["lint"])
     assert "unarchived_stale_script" in result.output
+
+
+
+_PASSING_STOICHIOMETRY_TOML = """
+[experiment]
+hypothesis = "Passing 50M ONT library stoichiometry"
+[outcomes.pass]
+condition = "val > 0"
+decision = "go"
+reasoning = "ok"
+[outcomes.fail]
+condition = "val <= 0"
+decision = "stop"
+reasoning = "bad"
+is_residual = true
+[result_schema]
+val = "float"
+
+[stoichiometry]
+barcoding_mode = "primer_pcr"
+min_consensus_reads = 3.0
+min_template_ratio = 10.0
+
+[[stoichiometry.stages]]
+name = "dna_in"
+kind = "input_molecules"
+molecules = 1e11
+species = ["methylated_circular_vector", "linear_partial_ligations"]
+
+[[stoichiometry.stages]]
+name = "dpni"
+kind = "enzymatic_species_cleanup"
+depends_on = ["dna_in"]
+enzyme = "DpnI"
+
+[[stoichiometry.stages]]
+name = "exo"
+kind = "enzymatic_species_cleanup"
+depends_on = ["dpni"]
+enzyme = "linear_selective_nuclease"
+
+[[stoichiometry.stages]]
+name = "colonies"
+kind = "colony_cfu"
+depends_on = ["exo"]
+colony_cfu = 1500000.0
+
+[[stoichiometry.stages]]
+name = "bulk_qc"
+kind = "bulk_fluorometry"
+depends_on = ["colonies"]
+
+[[stoichiometry.stages]]
+name = "pcr_pool"
+kind = "pcr_template_molecules"
+depends_on = ["bulk_qc"]
+copies_per_cell = 1000.0
+
+[[stoichiometry.stages]]
+name = "reads"
+kind = "phix_adjusted_net_reads"
+depends_on = ["pcr_pool"]
+raw_reads = 50000000
+"""
+
+_FAILING_STOICHIOMETRY_TOML = """
+[experiment]
+hypothesis = "Failing collision stoichiometry"
+[outcomes.pass]
+condition = "val > 0"
+decision = "go"
+reasoning = "ok"
+[outcomes.fail]
+condition = "val <= 0"
+decision = "stop"
+reasoning = "bad"
+is_residual = true
+[result_schema]
+val = "float"
+
+[stoichiometry]
+barcoding_mode = "pre_barcoded_vector"
+max_collision_prob = 0.05
+
+[[stoichiometry.stages]]
+name = "dna_in"
+kind = "input_molecules"
+molecules = 1e9
+
+[[stoichiometry.stages]]
+name = "colonies"
+kind = "colony_cfu"
+depends_on = ["dna_in"]
+colony_cfu = 1500000.0
+
+[[stoichiometry.stages]]
+name = "bc"
+kind = "barcode_collision"
+depends_on = ["colonies"]
+barcode_diversity = 5000000
+"""
+
+
+def _write_mixed_base_repo(tmp_path: Path, *, include_stoich: bool = True) -> Path:
+    from bathos.artifact_archive import _STUB_MARKER
+
+    catalog = tmp_path / ".bth" / "catalog"
+    init_catalog(catalog)
+    (tmp_path / ".bth.toml").write_text(f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n')
+    (tmp_path / "scripts" / "experiments").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "scripts" / "experiments" / ".bth.toml").write_text(
+        '[experiment]\nhypothesis = "Directory experiment defaults"\n[result_schema]\nval = "float"\n'
+    )
+    (tmp_path / "scripts" / "benchmarks").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "scripts" / "benchmarks" / ".bth.toml").write_text(
+        '[benchmark]\nbaseline_ref = "ref"\nmetric = "m"\n[result_schema]\nval = "float"\n'
+    )
+    (tmp_path / "sub_prov").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "sub_prov" / ".bth.toml").write_text('[provenance]\nsource = "test"\n')
+    (tmp_path / "sub_bearings").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "sub_bearings" / ".bth.toml").write_text(
+        '[bearings]\nshadow_log_dir = "/tmp/outside_shadow"\n'
+    )
+    (tmp_path / "sub_instruments").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "sub_instruments" / ".bth.toml").write_text(
+        '[instruments.boltz]\nversion = "2.1"\n'
+    )
+    (tmp_path / "claim.bth.toml").write_text('[claim]\nstatement = "H1"\n')
+    att_dir = tmp_path / ".bth" / "attestations"
+    att_dir.mkdir(parents=True, exist_ok=True)
+    (att_dir / "sample.attestation.bth.toml").write_text('[attestation]\nstatus = "pass"\n')
+    (tmp_path / "parity.bth.toml").write_text('[parity]\nreference_paper = "10.1/x"\n')
+    (tmp_path / "scripts" / "experiments" / "archived_exp.bth.toml").write_text(
+        f"# {_STUB_MARKER} (item_id=item_001)\n# bathos:archived\n# reason: superseded\n"
+    )
+    (tmp_path / "scripts" / "experiments" / "submit_only.bth.toml").write_text(
+        '[cluster]\npartition = "gpu"\n'
+    )
+    if include_stoich:
+        (tmp_path / "scripts" / "experiments" / "valid_stoich.bth.toml").write_text(
+            _PASSING_STOICHIOMETRY_TOML
+        )
+    return catalog
+
+
+def test_check_stoichiometry_passes_on_clean_mixed_repository(tmp_path: Path, monkeypatch) -> None:
+    catalog = _write_mixed_base_repo(tmp_path, include_stoich=True)
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
+
+    result = runner.invoke(
+        app,
+        ["check", "--check-stoichiometry", "--project-root", str(tmp_path)],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["stoichiometry_failure_count"] == 0
+    statuses = {Path(item["path"]).name: item["status"] for item in payload["stoichiometry_results"]}
+    assert statuses["valid_stoich.bth.toml"] == "ok"
+    assert statuses["archived_exp.bth.toml"] == "skipped"
+    assert statuses["submit_only.bth.toml"] == "skipped"
+    assert statuses["claim.bth.toml"] == "skipped"
+    assert statuses["parity.bth.toml"] == "skipped"
+
+
+def test_check_stoichiometry_fails_on_zero_stoichiometry_projects(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from bathos.mcp import check_tool
+
+    catalog = _write_mixed_base_repo(tmp_path, include_stoich=False)
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
+
+    cli_res = runner.invoke(
+        app,
+        ["check", "--check-stoichiometry", "--project-root", str(tmp_path)],
+    )
+    assert cli_res.exit_code == 1
+    direct = check_tool(
+        catalog_dir=str(catalog),
+        project_root=str(tmp_path),
+        check_stoichiometry=True,
+    )
+    assert direct["stoichiometry_failure_count"] == 1
+    assert "No sidecar files" in direct["error"]
+
+
+@pytest.mark.parametrize(
+    ("rel_path", "bad_toml"),
+    [
+        (
+            "bad_proj/.bth.toml",
+            '[project]\nslug = "x"\n[stoichiometry]\n[[stoichiometry.stages]]\nname="a"\nkind="input_molecules"\nmolecules=10\n',
+        ),
+        (
+            "bad_bearings/.bth.toml",
+            '[bearings]\nshadow_log_dir = "/tmp/s"\n[stoichiometry]\n[[stoichiometry.stages]]\nname="a"\nkind="input_molecules"\nmolecules=10\n',
+        ),
+        (
+            "bad_instruments/.bth.toml",
+            '[instruments.x]\nv = "1"\n[reagents.k]\npack_rxns = 10\nexperiment_rxns = 5\n',
+        ),
+        (
+            "scripts/experiments/cluster_reag.bth.toml",
+            '[cluster]\npartition = "gpu"\n[reagents.k]\npack_rxns = 10\nexperiment_rxns = 5\n',
+        ),
+        (
+            "claim_reag/claim.bth.toml",
+            '[claim]\nstatement = "H1"\n[reagents.k]\npack_rxns = 10\nexperiment_rxns = 5\n',
+        ),
+        (
+            ".bth/attestations/bad.attestation.bth.toml",
+            '[attestation]\nstatus = "pass"\n[stoichiometry]\n[[stoichiometry.stages]]\nname="a"\nkind="input_molecules"\nmolecules=10\n',
+        ),
+        (
+            "parity_bad/parity.bth.toml",
+            '[parity]\nref = "x"\n[reagents.k]\npack_rxns = 10\nexperiment_rxns = 5\n',
+        ),
+        (
+            "scripts/benchmarks/bench_stoich.bth.toml",
+            '[benchmark]\n[result_schema]\nx = "float"\n[stoichiometry]\n[[stoichiometry.stages]]\nname="a"\nkind="input_molecules"\nmolecules=10\n',
+        ),
+        (
+            "scripts/experiments/stub_stoich.bth.toml",
+            '# ARCHIVED by bathos artifact_archive (item_id=i1)\n[stoichiometry]\n[[stoichiometry.stages]]\nname="a"\nkind="input_molecules"\nmolecules=10\n',
+        ),
+        (
+            "scripts/experiments/stem_bearings.bth.toml",
+            '[bearings]\nshadow_log_dir = "/tmp/x"\n',
+        ),
+        (
+            "scripts/experiments/stem_instruments.bth.toml",
+            '[instruments.boltz]\nv = "1"\n',
+        ),
+        (
+            "bad_cluster_dot/.bth.toml",
+            '[cluster]\npartition = "cpu"\n',
+        ),
+        (
+            "scripts/experiments/non_stub_empty.bth.toml",
+            "# plain comment without archive stub marker\n",
+        ),
+        (
+            "scripts/experiments/stub_typo.bth.toml",
+            '# ARCHIVED by bathos artifact_archive (item_id=i2)\n[experment]\nhypothesis = "typo"\n',
+        ),
+        (
+            "scripts/experiments/cluster_typo.bth.toml",
+            '[cluster]\npartition = "gpu"\n[experment]\nhypothesis = "typo"\n',
+        ),
+        (
+            "scripts/experiments/broken_kind.bth.toml",
+            '[experment]\nhypothesis = "typo"\n',
+        ),
+    ],
+)
+def test_check_stoichiometry_fails_on_illegal_and_malformed_discovery_files(
+    tmp_path: Path,
+    monkeypatch,
+    rel_path: str,
+    bad_toml: str,
+) -> None:
+    catalog = _write_mixed_base_repo(tmp_path, include_stoich=True)
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
+    target = tmp_path / rel_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(bad_toml, encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        ["check", "--check-stoichiometry", "--project-root", str(tmp_path)],
+    )
+    assert result.exit_code == 1, f"{rel_path} unexpectedly passed: {result.output}"
+
+
+def test_check_stoichiometry_direct_sidecar_path_and_rollback_separation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import asyncio
+
+    from bathos.artifact_archive import _STUB_MARKER
+    from bathos.mcp import mcp_check_tool
+
+    catalog = _write_mixed_base_repo(tmp_path, include_stoich=False)
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog))
+
+    good = tmp_path / "good.bth.toml"
+    good.write_text(_PASSING_STOICHIOMETRY_TOML)
+    bad = tmp_path / "bad.bth.toml"
+    bad.write_text(_FAILING_STOICHIOMETRY_TOML)
+    no_stoich = tmp_path / "no_stoich.bth.toml"
+    no_stoich.write_text('[experiment]\nhypothesis = "h"\n[result_schema]\nv = "float"\n')
+    stub_path = tmp_path / "archived_direct.bth.toml"
+    stub_path.write_text(f"# {_STUB_MARKER} (item_id=x)\n")
+    cluster_path = tmp_path / "cluster_direct.bth.toml"
+    cluster_path.write_text('[cluster]\npartition = "gpu"\n')
+    reag_bad = tmp_path / "reagent_bad.bth.toml"
+    reag_bad.write_text(
+        """
+[experiment]
+hypothesis = "Exceeded reagent waste bound"
+[outcomes.pass]
+condition = "v > 0"
+decision = "go"
+is_residual = true
+[result_schema]
+v = "float"
+[reagents.kit]
+pack_rxns = 96
+experiment_rxns = 100
+max_waste_fraction = 0.2
+"""
+    )
+
+    assert (
+        runner.invoke(
+            app,
+            ["check", "--check-stoichiometry", "--sidecar-path", str(good), "--project-root", str(tmp_path)],
+        ).exit_code
+        == 0
+    )
+    # Direct --sidecar-path ignores BTH_STOICHIOMETRY_WARN_ONLY
+    monkeypatch.setenv("BTH_STOICHIOMETRY_WARN_ONLY", "1")
+    for failing_target in (bad, no_stoich, stub_path, cluster_path, tmp_path / ".bth.toml", reag_bad):
+        res = runner.invoke(
+            app,
+            [
+                "check",
+                "--check-stoichiometry",
+                "--sidecar-path",
+                str(failing_target),
+                "--project-root",
+                str(tmp_path),
+            ],
+        )
+        assert res.exit_code == 1, f"{failing_target} unexpectedly passed"
+
+    # MCP mcp_check_tool parity forwards check_outputs, check_stoichiometry, and sidecar_path
+    mcp_res = asyncio.run(
+        mcp_check_tool(
+            catalog_dir=str(catalog),
+            project_root=str(tmp_path),
+            check_outputs=True,
+            check_stoichiometry=True,
+            sidecar_path=str(good),
+        )
+    )
+    assert mcp_res["ok"] is True
+    assert mcp_res["stoichiometry_failure_count"] == 0
+
+
+def test_verify_citations_cli_pass_and_failure_modes(tmp_path: Path) -> None:
+    import hashlib
+    import json
+
+    sources_dir = tmp_path / "sources"
+    sources_dir.mkdir()
+    src_bytes = (
+        b"[Page 1, Line 1] First verified sentence.\n"
+        b"[Page 2, Line 1] Second page sentence.\n"
+    )
+    (sources_dir / "src.numbered.txt").write_bytes(src_bytes)
+    digest = hashlib.sha256(src_bytes).hexdigest()
+    (sources_dir / "manifest.json").write_text(
+        json.dumps({"schema_version": 1, "sources": {"src.numbered.txt": {"sha256": digest}}}),
+        encoding="utf-8",
+    )
+
+    ok_doc = tmp_path / "ok.md"
+    ok_doc.write_text(
+        f'> "First verified sentence." [source: src.numbered.txt, sha256: {digest}, Page 1, Line 1]\n',
+        encoding="utf-8",
+    )
+    ok_cli = runner.invoke(
+        app,
+        ["verify-citations", "--doc-path", str(ok_doc), "--sources-dir", str(sources_dir)],
+    )
+    assert ok_cli.exit_code == 0, ok_cli.output
+
+    oow_doc = tmp_path / "oow.md"
+    oow_doc.write_text(
+        f"> Second page sentence. [source: src.numbered.txt, sha256: {digest}, Page 1, Line 1]\n",
+        encoding="utf-8",
+    )
+    assert (
+        runner.invoke(
+            app,
+            ["verify-citations", "--doc-path", str(oow_doc), "--sources-dir", str(sources_dir)],
+        ).exit_code
+        == 1
+    )
+    assert (
+        runner.invoke(
+            app,
+            [
+                "verify-citations",
+                "--doc-path",
+                str(oow_doc),
+                "--sources-dir",
+                str(sources_dir),
+                "--no-strict-coords",
+            ],
+        ).exit_code
+        == 0
+    )
+
+    empty_doc = tmp_path / "empty_quote.md"
+    empty_doc.write_text(
+        f'> "" [source: src.numbered.txt, sha256: {digest}, Page 1, Line 1]\n',
+        encoding="utf-8",
+    )
+    assert (
+        runner.invoke(
+            app,
+            [
+                "verify-citations",
+                "--doc-path",
+                str(empty_doc),
+                "--sources-dir",
+                str(sources_dir),
+                "--no-strict-coords",
+            ],
+        ).exit_code
+        == 1
+    )
