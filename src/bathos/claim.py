@@ -1189,13 +1189,13 @@ def _attest_parity_impl(
 
     outcome, metadata_json, parity_run_type_col = run_rows[0]
 
-    from bathos.errors import HIDDEN_STATE_TO_EXCEPTION
+    from bathos.errors import HIDDEN_STATE_TO_EXCEPTION, ResultHiddenError
     from bathos.validity import resolve_validity
 
     v_map = resolve_validity([parity_run_id], catalog_dir or workspace_root or Path.cwd(), db=db)
     v = v_map.get(parity_run_id)
     if v and v.is_hidden:
-        exc_cls = HIDDEN_STATE_TO_EXCEPTION.get(v.state, ValueError)
+        exc_cls = HIDDEN_STATE_TO_EXCEPTION.get(v.state, ResultHiddenError)
         raise exc_cls(
             f"Parity run '{parity_run_id}' is hidden ({v.state}): {v.reason or ''}",
             run_id=parity_run_id,

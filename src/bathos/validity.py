@@ -753,7 +753,7 @@ def _resolve_pkg_git_repo(
 
 
 @functools.lru_cache(maxsize=256)
-def _read_uv_lock_pkg_keys(lock_file_str: str, mtime_ns: int) -> frozenset[str] | None:
+def _read_uv_lock_pkg_keys(lock_file_str: str, mtime_ns: int) -> frozenset[str] | None:  # noqa: ARG001 -- mtime_ns is the lru_cache invalidation key
     with contextlib.suppress(Exception):
         lock_doc = tomllib.loads(Path(lock_file_str).read_text(encoding="utf-8"))
         names: set[str] = set()

@@ -367,7 +367,9 @@ def test_restore_missing_bundle_leaves_no_partial_writes(tmp_path):
     assert script.read_text() == stub_text_before_restore
 
 
-def test_restore_tail_failure_raises_registered_error_and_retry_is_idempotent(tmp_path):
+def test_restore_tail_failure_raises_registered_error_and_retry_is_idempotent(
+    tmp_path, monkeypatch
+):
     """Regression test: restore_archived_item's post-restore tail (git commit for the
     restored tracked paths + append_archived_item_record + index regen) is fallible and
     runs AFTER bytes are already correctly written to disk. A failure there must surface as
@@ -397,11 +399,21 @@ def test_restore_tail_failure_raises_registered_error_and_retry_is_idempotent(tm
         reason="r",
     )
 
-    # Force the tail's `git commit` to fail deterministically, regardless of the host's own
-    # global git identity config.
-    reject_hook = repo / ".git" / "hooks" / "pre-commit"
-    reject_hook.write_text("#!/bin/sh\nexit 1\n")
-    reject_hook.chmod(0o755)
+    # Force the tail's `git commit` to fail deterministically. A rejecting pre-commit hook no
+    # longer works: since fbba35f8 every archive git call runs with core.hooksPath=/dev/null.
+    import subprocess
+
+    import bathos.artifact_archive as aa
+
+    real_run_git = aa._run_git
+    reject = {"commit": True}
+
+    def _run_git(args, cwd, check=True):
+        if reject["commit"] and args and args[0] == "commit":
+            raise subprocess.CalledProcessError(1, ["git", *args], stderr="rejected")
+        return real_run_git(args, cwd, check=check)
+
+    monkeypatch.setattr(aa, "_run_git", _run_git)
 
     with pytest.raises(ArchiveError):
         restore_archived_item(project_root=repo, item_id=item.id, catalog_dir=catalog_dir)
@@ -411,7 +423,7 @@ def test_restore_tail_failure_raises_registered_error_and_retry_is_idempotent(tm
 
     # Fix the underlying cause and retry -- must succeed, not get stuck on "nothing to
     # commit" now that the file is already staged (or already committed) from attempt 1.
-    reject_hook.unlink()
+    reject["commit"] = False
     result = restore_archived_item(project_root=repo, item_id=item.id, catalog_dir=catalog_dir)
     assert result.restore_commit_sha
 

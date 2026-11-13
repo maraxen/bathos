@@ -694,7 +694,7 @@ def _get_uv_lock_packages(
 
 
 @functools.lru_cache(maxsize=256)
-def _read_pyproject_name_key(pyproj_str: str, mtime_ns: int) -> str | None:
+def _read_pyproject_name_key(pyproj_str: str, mtime_ns: int) -> str | None:  # noqa: ARG001 -- mtime_ns is the lru_cache invalidation key
     with contextlib.suppress(Exception):
         doc = tomllib.loads(Path(pyproj_str).read_text(encoding="utf-8"))
         proj_name = doc.get("project", {}).get("name")

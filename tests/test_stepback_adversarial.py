@@ -529,7 +529,11 @@ class TestBoundaryExtremesAndSingularities(unittest.TestCase):
         res_thresh = evaluate_threshold_edit(single_run)
         self.assertFalse(res_thresh["fired"])
 
-        all_res = evaluate_all_triggers(camp, single_run)
+        # Pin the clock: MockCampaign was created 2026-10-27, so from 14 days later campaign_staleness fires on
+        # wall-clock time alone (the test went red on 2026-11-10 with no code change).
+        from datetime import UTC, datetime
+
+        all_res = evaluate_all_triggers(camp, single_run, now_dt=datetime(2026, 10, 28, tzinfo=UTC))
         self.assertFalse(all_res["fired"])
 
     def test_boundary_b_equals_zero(self):
