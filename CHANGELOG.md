@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-13
+
+### Added
+- **Bearings v1, multi-scale goal awareness (observe-only; spec `261104`, PR #161):**
+  - **Slice 1 — charter:** project charters with human-only confirmation (`bth charter confirm`) and a purpose-ledger pivot.
+  - **Slice 2 — blind packet and reading record:** a deterministic blind packet with content-based exclusion and a byte budget (AC-4, AC-4b); a reading record, mapper comparison and fold into the bearings tables (AC-5, AC-5b typed purpose graph); CLI and MCP surface.
+  - **AC-9 labels:** a sidecar `[charter] purpose` label written at work time and stripped from packets; an answer key, metrics and degenerate mappers built from purpose labels; charter ids treated as whole-token leak needles after unicode folding, with a last-byte leak check (`PacketLeakError`).
+  - **Slice 3 — shadow mode on cisternal 0.1.7:** `bth run` emits at-work `shadow.label` records. A shadow log defaults to `<catalog_dir>/shadow`, and its location is resolved from: an explicit argument, then `BTH_SHADOW_LOG_DIR` (`none` disables), then `.bth.toml`, then `pyproject.toml`, then the XDG config. `bth sync` carries `shadow/`. Shadow-check derives verdicts and gates them via `cisternal shadow check`: a Wilson lower bound, false-silent read only from 8 present items (`MIN_PRESENT`), at most 2 firm slugs per sidecar, disjoint packet windows, and labels counted only after the first charter confirmation.
+
+### Changed
+- **Dependency:** the cisternal floor is raised to `>=0.1.7` (`cisternal.shadow`).
+
+### Fixed
+- **CI:** main is green again (15 tests, 2 ruff findings, 16 ty errors; PR #165).
+- **Bearings shadow review rounds (261111–261113):** the agreement gate gets a negative class; AC-9 validity checks run inside derive; the shadow version is picked per project; the work-tree guard fails closed. A padded sidecar's purposes are capped in the answer key. Tied earliest labels must all qualify. An unreadable or unparseable charter-confirmation row raises `ShadowConfigError` instead of silently dropping labels.
+
 ## [0.14.0] - 2026-11-11
 
 ### Added
