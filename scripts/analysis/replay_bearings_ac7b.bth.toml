@@ -1,0 +1,161 @@
+# Arms revised 261105 (see "New arm"): demistify replaces tev_design. Earlier approval: tev_design cut 5f4856c7, Opus plus the owner as
+# labellers, thresholds 3 / 2 / 10%. Not runnable yet: Protocol step 2 (the scorer and its synthetic
+# controls, committed and passing) must come first. No packet is built and no reader runs before that.
+[experiment]
+hypothesis = """A blind reader that writes a typed purpose graph separates colliculix's drift from projects that have several connected aims. Its graph shows more groups of effort that pass no results to each other (spec 261104, AC-7b, assumption A9b).
+
+Why this exists. AC-7 (run 530b1a32) failed. The readers found all 7 colliculix purposes, but purpose counts did not separate the arms: plegadx had a median of 4 against colliculix's 2. The owner then ruled that plegadx and tev_design genuinely have several aims, so counting cannot work. Purposes form a rhizome, not a tree, and results flow binds: aims belong together when one's results are used by another (spec decision log, OWNER 261105).
+
+Arms. Cuts are commits; each window is the 28 days before the cut, matching the Design item 7 cadence.
+- Positive control: colliculix at 14c3804, as in AC-7. The contamination grep and the run-reachability departure are both unchanged.
+- Negative control: plegadx at 1472ee54, as in AC-7. The owner says it genuinely has several aims.
+- Negative control: tev_design at a new cut, 5f4856c7 (2026-10-23 11:22:53 -0400, the last commit on main before November), over 2026-09-25 to 2026-10-23. The owner chose it on 261105. A probe on 261105 found the lagoon simulation and active-learning work first appear on 2026-08-05, after the AC-7 cut of 2026-07-28. October is the only month in which commit subjects show the lagoon simulation (200), the design libraries (59) and active learning (3) together, so this is the hard negative the rule must survive. Active learning is thin by subject and may be named otherwise in the record. These subject counts are a design probe and gate nothing.
+
+Readers. Three fresh Sonnet readers per arm, each using scripts/analysis/replay_bearings_ac7b_reader_prompt.md and writing a v2 reading (spec Design item 5): purposes, open lines and typed links (feeds, serves, shares, competes), each with citations and an uncertainty flag. The AC-7 readings are not reused, because they hold almost no links. A rejected reading gets one disclosed redo.
+
+Labels, reduced by the owner 261105 to bridge links only. Labelling exists so the reader cannot set its own score by drawing too many or too few binding links. Only a bridge can change the score: a binding link (feeds, serves) whose removal would split a group. The scorer lists each reading's bridges mechanically, and a labeller who is not the reader judges each one as supported, unsupported or unsure, by checking its citations against the packet. Nodes are not labelled, because the 10% effort floor already drops vague nodes. Non-bridge links stand as the reader wrote them. Removing a bridge never turns another link into a bridge, so a single labelling pass is enough. Weakness, disclosed: a reader that invents a redundant loop of binding links creates no bridges, and nothing checks those links.
+Labellers, chosen by the owner 261105:
+- One fresh Opus agent labels colliculix and plegadx, working only from a prompt file holding the readings and the cited packet lines. It is not shown A-G, this hypothesis or the thresholds.
+- The owner labels tev_design, because its text twice stopped Opus at a safety classifier in AC-7. (Superseded by the arm change below: demistify replaces tev_design, and Opus labels all three arms.)
+- If the Opus labeller is stopped or returns an invalid label set, it gets one disclosed redo, and after that the owner labels the rest.
+
+Scoring, mechanical (replay_bearings_ac7b.py, to be written and tested before approval).
+- A node's effort is the number of distinct resolved run: and git: citations it carries.
+- Drift groups are the connected components of nodes under binding links, ignoring direction, after removing bridges labelled unsupported, that hold at least 10% of the reading's total effort.
+- shares and competes links never join groups.
+- Unsure bridges count as unsupported for the outcome. The scorer also reports groups with unsure bridges counted as supported, descriptively.
+- Each arm's figure is the median over its readers.
+
+Synthetic controls, which must pass before any real score is read:
+- two disjoint fed chains of equal effort give 2;
+- one fully fed graph gives 1;
+- two chains joined only by a shares link give 2;
+- a tiny third island below 10% of effort is ignored;
+- in a planted graph, exactly the planted bridges are listed for labelling, and a link inside a cycle is not.
+
+Disclosures.
+- The positive control was chosen after the fact. The author and the owner both know the diagnosis and the AC-7 readings.
+- The rule was chosen after seeing AC-7's readings, which is why its readings are not reused and the tev_design cut moves.
+- Effort counted by citations rewards a reader who cites more; the 10% floor and the median over readers soften this.
+- Three readers per arm show consistency, not a rate. One model on one prompt.
+
+Protocol. (1) Done 261105: the owner settled the design, and this sidecar is committed. (2) Done 261105 in f433f861: the scorer is committed, and `--controls-only` passes. Beyond the sidecar's list, the controls also check that a competes link does not join groups, that zero effort gives 0 groups, and that a doubled link is not a bridge. They fail on three deliberately broken scorers: shares counted as binding, no 10% floor, and every link treated as a bridge. (3) Done 261105. Packets were built in ~/scratch/ac7b (counts only):
+- colliculix 4e5c3b80e3cf: 35 runs, 154 commits, 7 docs, 11 sidecars, 18 excluded.
+- tev_design fa42f5281358: 350 runs, 56 commits, 22 docs, 204 sidecars, 152 excluded.
+- plegadx c3424761414f: 95 runs, 265 commits, 48 docs, 22 sidecars, 44 excluded.
+The colliculix and plegadx hashes equal AC-7's, so the builder is deterministic, and the colliculix contamination grep found 0. The tev_design packet has 79 files mentioning the lagoon simulation and 3 mentioning active learning. It is 2.84 MB, against 0.34 MB for colliculix and 0.55 MB for plegadx, so a reader may not read all of it.
+
+Coverage note 261105, chosen by the owner before any reader ran. The registered 28-day tev_design packet is kept. A 14-day window was considered and declined, though it still held lagoon in 28 files and active learning in 3. A reader that skims writes fewer links and so inflates its group count, so the result gains descriptive coverage fields, which gate nothing:
+- the minimum fraction of docs and of sidecars opened per arm;
+- the minimum fraction of runs.jsonl and git_log.jsonl lines read per arm.
+They are computed from each reader's transcript, which is copied to ~/scratch/ac7b/transcripts when the reader finishes. One tev_design reader runs alone first as a pilot, because the new window holds the lagoon content and a classifier stop is possible. If it completes with a valid reading, it is reader1, and the other 8 readers follow. If it is stopped or invalid, the one disclosed redo waits for the owner.
+
+Pilot result and arm change 261105, chosen by the owner before any other reader ran.
+- The pilot completed with no classifier stop: a valid v2 reading, 0 citation or link failures, 0 audit violations. Its coverage was 1.00 of runs and commits, 0.23 of docs and 0.02 of sidecars, with one Grep or Glob call that touched neither docs nor sidecars.
+- One reader cannot read this packet. Cutting sidecars to their hypothesis and outcomes still leaves 2.52 MB, and the docs alone are 0.71 MB. Arms read to such different depths cannot be compared, so the owner replaces tev_design@5f4856c7 with a hard negative that can be fully read: a project with several connected aims and a packet near 0.3-0.6 MB. The owner names it from a size probe, before any reader runs.
+- The pilot is retired to ~/scratch/ac7b/attempts/pilot_tev_5f4856c7. It is not scored and does not use the one redo. The author saw only its counts and its hand-back, which gave counts and named three purposes by id only.
+- The scaling problem is recorded as spec TBD T6 and is separate work.
+- All 9 readers will be fresh.
+
+New arm 261105, named by the owner from a size probe before any scored reader ran: **demistify** at 3417ca40 (author date 2026-11-02T20:58:00-05:00, the latest commit on main), over 2026-10-05 to 2026-11-02.
+- The probe (~/scratch/ac7b/probe_candidates.py, throwaway, counts only) built 28-day packets ending at each candidate's main HEAD. demistify's packet holds 5 runs, 146 commits, 20 docs and 5 sidecars, 0.53 MB, close to plegadx's 0.55 MB.
+- The owner judges demistify a healthy project with several connected aims.
+- The outcome conditions and result fields are renamed from tev_design_* to demistify_*. The conditions and thresholds are otherwise unchanged.
+- Opus labels the bridges of all three arms, because the tev_design text that stopped Opus is no longer an arm.
+- Packets were rebuilt fresh for all three arms. colliculix 4e5c3b80e3cf and plegadx c3424761414f are unchanged. demistify is 842f3230675b: 5 runs, 146 commits, 20 docs, 5 sidecars, 51 excluded, 0.53 MB.
+- Reader change 261105, requested by the owner after all 9 Sonnet readers hit an account usage limit partway through reading (none wrote a reading file, so none is used and none counts as a redo).
+  - The readers are now Cursor and Antigravity agents sent through praxia surface_dispatch: reader1 and reader3 on Cursor, reader2 on Antigravity, the same in every arm, all at the power tier. They are not Sonnet, and their model families differ from AC-7's readers.
+  - Each reader gets its whole packet inside its prompt, rendered with line numbers (replay_bearings_ac7b_surface.py). It runs under the completion role in its own empty folder, a linked worktree of an empty repository, and returns its reading as one structured verdict that must match the v2 reading schema. The prompt text is the committed reader prompt, reworded only where it explained file access.
+  - Coverage is complete by construction, so the coverage fields read 1.0 for these readers. The prompts are 345 KB (colliculix), 553 KB (demistify) and 582 KB (plegadx).
+  - praxia cannot verify Cursor's or Antigravity's tool logs. The transcript audit is therefore replaced by its construction: the folder holds nothing to read, and the prompt forbids tools. Staying inside the folder is instructed, not proven.
+  - A verdict that is rejected or fails validation gets one disclosed redo.
+- Reader outcome and extraction rule, 261105. This note was written and committed before any count was taken on a recovered reading.
+  - **What praxia recorded:** 1 of 9 admitted (colliculix/reader3).
+    - **Antigravity (3 readers):** never started. praxia passes the whole prompt to agy as one argument (praxia-agy-executor/src/lib.rs:912), and the kernel refuses an argument above 128 KiB ("Argument list too long").
+    - **Cursor (5 readers):** rejected with "completion produced no structured_output". praxia reads a Cursor answer only from the last fenced ```json block (praxia-dispatch/src/materialize.rs:399). These readers ended with bare JSON or with JSON followed only by a closing fence. Their final results do parse, and their answers are complete.
+    - **praxia's retry:** skipped, because its precondition counts praxia's own .praxia/dispatch/.lock as a dirty tree. That is a praxia defect, filed as debt.
+  - **Extraction rule (scripts/analysis/replay_bearings_ac7b_surface.py, recover_result), applied to every reader the same way:**
+    - First praxia's own rule, ported: the last ```json block that parses.
+    - Failing that, strip at most one opening fence line and one closing fence line from the reader's final result text, and require the rest to parse as one JSON object. Anything else is invalid.
+    - collect asserts that the rule gives exactly praxia's admitted answer for colliculix/reader3.
+    - A recovered reading is the reader's own completed answer, so it is not a redo. A reading that fails the rule or validation still gets its one redo.
+  - **Antigravity readers, run directly (replay_bearings_ac7b_surface.py agy):** each runs once in its own empty folder.
+    - The prompt is the one praxia's render_completion_prompt would build: system, user, then praxia's fenced-json instruction. It is sent on stdin as stream-json.
+    - argv: agy --print= --input-format stream-json --output-format stream-json --sandbox --mode plan --print-timeout 2400s --model gemini-4-argon-high. The model is praxia's power tier for antigravity.
+    - This departs from "send through surface_dispatch", but keeps the registered surface split. Because their first attempt never started, these runs count as each reader's first attempt.
+    - A smoke test on a toy prompt confirmed the input format and the result event before any reader ran.
+  - **Containment evidence:** collect counts each reader's log events by type, including tool calls, and writes surface/event_counts.json. Every packet is inline, so zero tool events means the reader read nothing outside its prompt. Any nonzero count is reported before scoring.
+  - **Reader result, 261105, counts only:**
+    - **Antigravity:** all 3 direct runs ended with status SUCCESS and no cut-off.
+    - **Extraction:** the rule gave a reading for all 9 readers. 1 came from praxia's own rule (colliculix/reader3, identical to praxia's admitted answer) and 8 from the recovery rule.
+    - **Validity:** all 9 readings pass the v2 validator, with 0 links lacking a resolvable citation. No redo was needed.
+    - **Containment:** every log holds only reasoning, answer and result events, so 0 tool events in any reader (surface/event_counts.json).
+  - **Labeller input, 261105, written before dispatch:** `--labeller-packet` writes labeller/prompt.md and labeller/key.json, and `--apply-labels` maps the answers back.
+    - The labeller works from labeller/prompt.md alone. It holds only the 44 listed links over 9 readings, 123 KB in total, small enough for one reader's budget (T6).
+    - Readings carry opaque ids R01-R09 in a shuffled order (seed 261105). The key file mapping ids to readings is never shown to the labeller.
+    - Each link shows its two endpoint texts as the reader wrote them, its type, and each cited record quoted from the packet:
+      - the run line;
+      - the commit line;
+      - the cited doc lines, capped at 80;
+      - the sidecar, capped at 150 lines.
+    - The prompt gives the four type definitions and the three labels. It does not mention the hypothesis, the arms, the thresholds, groups, or why these links were chosen.
+    - `--apply-labels` fails unless every listed link has exactly one label from {supported, unsupported, unsure}.
+    - The labeller is one fresh Opus agent with one disclosed redo, as registered. The labels are inspected by counts only before the scored run.
+  - **Blindness disclosure:** while diagnosing the Cursor failures, a content search of colliculix/reader1's log printed about 30 short fragments of that reader's reasoning. They include purpose ids up to r16, which hints at its purpose count. No link, group or bridge content was seen. From then on, logs were inspected by event counts and structure only.
+- Disclosure: demistify has only 5 runs, so its effort comes mostly from commits. Effort counts run: and git: citations equally, so that is in scope, but it differs from colliculix, whose effort is spread over runs and commits. (4) Run the readers. (5) Label. (6) bth run the scorer. The result is reported either way."""
+stage_name = "validation"
+novel = true
+
+[outcomes.instrument_broken]
+condition = "NOT controls_ok OR contamination_hits > 0 OR packet_hash_mismatches > 0 OR reader_audit_violations > 0 OR rejected_readings > 0 OR n_readings <> 9 OR n_unlabelled > 0"
+decision = "The run is invalid: report it, cite no number from it, fix the cause, and pre-register a new run."
+reasoning = "As in AC-7. controls_ok now also covers the graph scorer's four synthetic controls."
+
+[outcomes.pass]
+condition = "colliculix_groups_median >= 3 AND demistify_groups_median <= 2 AND plegadx_groups_median <= 2 AND colliculix_groups_median > greatest(demistify_groups_median, plegadx_groups_median)"
+decision = "A9b stands for this reader and prompt. Build the v2 reading record (AC-5b) into slice 3, and open T1 with these readings as the first calibration."
+reasoning = "3 and 2 are judgment cutoffs with no empirical basis. 3 means at least three groups of effort pass no results to each other; the diagnosis has at least that many unconnected lines. 2 allows a healthy project one independent side line. The last clause requires separation."
+
+[outcomes.marginal]
+condition = "colliculix_groups_median > greatest(demistify_groups_median, plegadx_groups_median)"
+decision = "The owner reads the graphs before anything is built. A changed prompt, rule or threshold needs a new pre-registration."
+reasoning = "The graph separates the arms, but not by the registered margins."
+
+[outcomes.fail]
+condition = "NOT (colliculix_groups_median > greatest(demistify_groups_median, plegadx_groups_median))"
+decision = "Do not build slice 3 on the blind reader. Re-open the mechanism with the owner."
+reasoning = "Even with results flow as the binding rule, the reader cannot tell drift from a busy project with several aims."
+is_residual = true
+
+[result_schema]
+controls_ok = "bool"
+contamination_hits = "int"
+packet_hash_mismatches = "int"
+reader_audit_violations = "int"
+rejected_readings = "int"
+n_readings = "int"
+n_unlabelled = "int"
+colliculix_groups_median = "float"
+demistify_groups_median = "float"
+plegadx_groups_median = "float"
+colliculix_groups_unsure_supported_median = "float"
+demistify_groups_unsure_supported_median = "float"
+plegadx_groups_unsure_supported_median = "float"
+colliculix_supported_bridge_frac = "float"
+demistify_supported_bridge_frac = "float"
+plegadx_supported_bridge_frac = "float"
+colliculix_uncertain_node_frac = "float"
+demistify_uncertain_node_frac = "float"
+plegadx_uncertain_node_frac = "float"
+colliculix_min_docs_read_frac = "float"
+colliculix_min_sidecars_read_frac = "float"
+colliculix_min_runs_read_frac = "float"
+colliculix_min_git_read_frac = "float"
+demistify_min_docs_read_frac = "float"
+demistify_min_sidecars_read_frac = "float"
+demistify_min_runs_read_frac = "float"
+demistify_min_git_read_frac = "float"
+plegadx_min_docs_read_frac = "float"
+plegadx_min_sidecars_read_frac = "float"
+plegadx_min_runs_read_frac = "float"
+plegadx_min_git_read_frac = "float"

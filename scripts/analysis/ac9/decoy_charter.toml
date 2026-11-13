@@ -1,0 +1,53 @@
+# AC-9 decoy charter: the negative control (spec 261104 T7(a)). A mapper given a tev_design reading and THIS charter
+# should map almost nothing; over 20% of reading purposes mapped (any target, retired included; ac9.decoy_invalid)
+# makes the AC-9 run invalid.
+#
+# Drawn from an ADJACENT project, nanobody (~/projects/nanobody/README.md), on the review of 261110: a decoy from an
+# unrelated field (the earlier bathos-tooling draft) is too easy, because nothing in a protein-design reading could
+# map to it. nanobody shares tev_design's vocabulary (proteins, variant libraries, MPNN design, MD) but not its aims,
+# so this tests whether the mapper tells a near miss from a match. Each purpose names an object only nanobody has
+# (ciMIST entropy networks, the nanobody, the three-finger target protein family).
+# Risk, for the owner: `multistate-binder-design` shares a method with tev_design's `mpnn-design`. A correct mapper
+# should still leave it unmapped (the target and the design objective differ), but it is the purpose most likely to
+# push a sound run over 20%.
+# Drafted by the assistant 261110; accepted by the owner 261110 (AskUserQuestion). nanobody has no confirmed charter, so this is not
+# its charter and has no standing there. 6 live, 2 retired, the shape the owner's T7 design names (the tev_design
+# draft itself has 7 live, 2 retired).
+# Round 2 (261110): every purpose now names a nanobody-only object, so no purpose reads as a generic method that
+# tev_design's active-learning or specificity work could match. `cross-reactivity-balance` remains the second
+# purpose at risk (tev_design also broadens specificity with second-shell edits, but of a protease's substrates).
+mandate = "Decide which residues of a therapeutic nanobody to engineer from allosteric networks learned from MD, then realise those edits as multistate sequence design against a family of related target proteins."
+
+[purpose.entropy-network-site-ranking]
+text = "Turn ciMIST entropy-tree networks learned from nanobody MD into a ranked shortlist of residues to engineer."
+state = "live"
+
+[purpose.dense-mi-graph-metrics]
+text = "Compute graph metrics (betweenness, eigenvector centrality, communities) on the ciMIST dense mutual-information matrix of nanobody MD as alternative selectors of residues to engineer."
+state = "live"
+
+[purpose.kinetic-coupling-selector]
+text = "Use timing-correlation coupling from nanobody trajectory state sequences as an allostery signal independent of the ciMIST entropy tree."
+state = "live"
+
+[purpose.apo-holo-entropy-contrast]
+text = "Compare entropy and mutual information between unbound and bound nanobody structures to locate binding-coupled residues."
+state = "live"
+
+[purpose.multistate-binder-design]
+text = "Design nanobody sequences by multistate MPNN sampling conditioned on a slate of related three-finger target proteins (3FTx)."
+state = "live"
+
+[purpose.cross-reactivity-balance]
+text = "Broaden binding across the 3FTx family through second-shell, non-paratope edits without adding off-target binding."
+state = "live"
+
+[purpose.bayesian-glm-reuse]
+text = "Reuse a Bayesian GLM from the ciMIST PDZ work to predict allosteric engineering sites on the nanobody."
+state = "retired"
+retired_reason = "No such model exists in the related repos; the only Bayesian code is entropy and mutual-information estimation."
+
+[purpose.mist-degree-hubs]
+text = "Rank nanobody engineering sites by ciMIST MIST tree degree alone (MI hubs)."
+state = "retired"
+retired_reason = "Tree degree is not a validated graph metric; superseded by dense-MI graph metrics and kinetic coupling."

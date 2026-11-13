@@ -1,0 +1,41 @@
+# Reshape of the scored AC-7c run (2032d774-5edb-43c5-8f64-3c27910c186d) into a per-reading table for its review page.
+# Written and committed before this script runs. Its outcome only checks that the reshape reproduces the scored medians;
+# the extra columns are descriptive, chosen after the scored result was seen, and gate nothing.
+
+[experiment]
+hypothesis = """Recomputing each AC-7c reading's drift groups with the scorer's own functions from the same readings, packets and bridge labels gives one row per reading whose per-arm medians equal what run 2032d774 recorded: strict k1 1, k2 2, k3 1; lenient k1 1, k2 2, k3 1.
+
+Descriptive columns, added after the scored result (post-hoc, gating nothing), to answer one question: the planted arm's bridges were labelled supported less often (0.55) than the controls' (0.87 and 0.93), so did the readers find the split themselves, or did the labeller make it by cutting links the readers drew across the seam?
+- groups_no_labels: the reader's own graph with no bridge removed.
+- n_cross_seam_bridges and cross_seam_supported (planted arm only): bridges whose endpoints draw their run: and git: citations mostly from different source projects (membership from manifest.json), and how many of those the labeller supported.
+
+How these will be read, fixed before running:
+- k2_no_labels_median = 2: the readers found the split on their own; the labeller did not create it.
+- k2_no_labels_median = 1, with cross-seam bridges labelled not supported: the readers over-connect, and the blind labeller does real work. That is still a pass of the registered instrument (AC-7b used the same labeller), but it is a design finding for Bearings: the reader alone cannot be trusted to draw binding links."""
+stage_name = "validation"
+novel = false
+
+[outcomes.consistent]
+condition = "n_rows = 9 AND k1_strict_median = 1 AND k2_strict_median = 2 AND k3_strict_median = 1 AND k1_lenient_median = 1 AND k2_lenient_median = 2 AND k3_lenient_median = 1"
+decision = "Use the table for the review page."
+reasoning = "The page shows the scored run's numbers, so the reshape must reproduce them exactly."
+
+[outcomes.instrument_broken]
+condition = "TRUE"
+is_residual = true
+decision = "Do not build the page from this table; find why the reshape differs from the scored run."
+reasoning = "Any mismatch means the table is not the scored result."
+
+[result_schema]
+n_rows = "int"
+k1_strict_median = "float"
+k2_strict_median = "float"
+k3_strict_median = "float"
+k1_lenient_median = "float"
+k2_lenient_median = "float"
+k3_lenient_median = "float"
+k1_no_labels_median = "float"
+k2_no_labels_median = "float"
+k3_no_labels_median = "float"
+k2_cross_seam_bridges = "int"
+k2_cross_seam_supported = "int"

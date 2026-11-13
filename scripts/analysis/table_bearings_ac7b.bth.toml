@@ -1,0 +1,30 @@
+# Reshape of the scored AC-7b run (b85be024-ddd1-4d33-903e-c4c4b9600ba8) into a per-reading table for its review page.
+# Written and committed before this script runs. It adds no new finding: its only outcome checks that the reshape
+# reproduces the medians the scored run recorded.
+
+[experiment]
+hypothesis = """Recomputing each AC-7b reading's drift groups with the scorer's own functions (reading_graph, bridges,
+drift_groups) from the same readings, packets and bridge labels gives one row per reading whose per-arm medians equal
+what run b85be024 recorded: strict colliculix 1, demistify 2, plegadx 3; lenient colliculix 1, demistify 2, plegadx 2."""
+stage_name = "validation"
+novel = false
+
+[outcomes.consistent]
+condition = "n_rows = 9 AND colliculix_strict_median = 1 AND demistify_strict_median = 2 AND plegadx_strict_median = 3 AND colliculix_lenient_median = 1 AND demistify_lenient_median = 2 AND plegadx_lenient_median = 2"
+decision = "Use the table for the review page."
+reasoning = "The page shows the scored run's numbers, so the reshape must reproduce them exactly."
+
+[outcomes.instrument_broken]
+condition = "TRUE"
+is_residual = true
+decision = "Do not build the page from this table; find why the reshape differs from the scored run."
+reasoning = "Any mismatch means the table is not the scored result."
+
+[result_schema]
+n_rows = "int"
+colliculix_strict_median = "float"
+demistify_strict_median = "float"
+plegadx_strict_median = "float"
+colliculix_lenient_median = "float"
+demistify_lenient_median = "float"
+plegadx_lenient_median = "float"

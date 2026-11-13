@@ -1,0 +1,43 @@
+# Reshape of the scored AC-7e run (65dbecd1-651a-4fee-b3eb-d037328b7b21) into a per-reading table for its review page.
+# Written and committed before this script runs. Its outcome only checks that the reshape reproduces the scored medians;
+# the extra columns are descriptive, chosen after the scored result was seen, and gate nothing.
+
+[experiment]
+hypothesis = """Recomputing each AC-7e reading's drift groups with the scorer's own functions from the same readings, packets and bridge labels gives one row per reading (12) whose per-arm medians equal what run 65dbecd1 recorded: strict p1 7, p2 2, p3 3, p4 4; lenient p1 6, p2 2, p3 3, p4 4; no labels p1 6, p2 2, p3 3, p4 4.
+
+Descriptive columns, added after the scored result (post-hoc, gating nothing), to answer one question: the registered outcome was fail because the lagoon-alone control read 7 groups, more than the splice's 4. Is that one reader reading many groups (a single outlier carrying the median) or are the readings spread widely within each arm? The table shows each reading's groups, raw component counts with and without strict removal, bridge count and supported share.
+
+How these will be read, fixed before running:
+- If the lagoon-alone readings are spread widely (the largest and smallest differ by 3 or more groups), the group count within one project depends on how finely a reader splits the record, and a median of 3 readers is not stable evidence. That is a finding about the measure, not about the aims.
+- If the lagoon-alone readings agree closely, the control's high count is a property of that record."""
+stage_name = "validation"
+novel = false
+
+[outcomes.consistent]
+condition = "n_rows = 12 AND p1_strict_median = 7 AND p2_strict_median = 2 AND p3_strict_median = 3 AND p4_strict_median = 4 AND p1_lenient_median = 6 AND p2_lenient_median = 2 AND p3_lenient_median = 3 AND p4_lenient_median = 4 AND p1_no_labels_median = 6 AND p2_no_labels_median = 2 AND p3_no_labels_median = 3 AND p4_no_labels_median = 4"
+decision = "Use the table for the review page."
+reasoning = "The page shows the scored run's numbers, so the reshape must reproduce them exactly."
+
+[outcomes.instrument_broken]
+condition = "TRUE"
+is_residual = true
+decision = "Do not build the page from this table; find why the reshape differs from the scored run."
+reasoning = "Any mismatch means the table is not the scored result."
+
+[result_schema]
+n_rows = "int"
+strict_above_no_labels_rows = "int"
+strict_below_no_labels_rows = "int"
+components_decrease_rows = "int"
+p1_strict_median = "float"
+p2_strict_median = "float"
+p3_strict_median = "float"
+p4_strict_median = "float"
+p1_lenient_median = "float"
+p2_lenient_median = "float"
+p3_lenient_median = "float"
+p4_lenient_median = "float"
+p1_no_labels_median = "float"
+p2_no_labels_median = "float"
+p3_no_labels_median = "float"
+p4_no_labels_median = "float"

@@ -1,0 +1,59 @@
+# tev_design charter, settled with the owner 261110 through AskUserQuestion; NOT YET CONFIRMED (that is
+# `bth charter confirm` in tev_design, an owner action). Copy to tev_design/.bth/charter.toml, commit it there, then
+# confirm. Purpose ids are readable slugs (owner 261109): labels name them as `[charter] purpose = "<slug>"`.
+# History: 261109 draft (7 live, 2 retired; former ids L1-L7, R1-R2). 261110: mandate A chosen; distal-local-specificity
+# left out until it is active (add it with a pivot); literature-review, fitness-prediction and readout-validation added
+# from recurring work in the 2026-10-12..11-09 window; active-learning and size-selections kept live though quiet;
+# no tev_design aim is retired yet beyond the two below (so AC-9's revival case waits for revival work).
+# 261110, after the first confirmation (sha 87cc2147): lagoon-simulation renamed lagoon-dynamics (owner), because a
+# tev_design doc filename (261103_lagoon-simulation-purpose.md) cited by 32 lagoon sidecars named the old id, so the
+# packet withheld them. Text unchanged. Re-confirm after copying.
+# The tev_design split is being scoped: when it happens, moved purposes are retired here with a reason naming the new
+# project, which gets its own charter (owner 261110).
+mandate = "Design TEV protease variants with new substrate specificities, above all a scarless TEV that accepts any P1′, by delivering a multi-pronged set of designed libraries for the Chory selections and building the design and selection-modelling methods they rely on."
+
+[purpose.chory-libraries]
+text = "Deliver the Chory collaborator libraries: scarless TEV stretch goal, up to 96 libraries subjected to multiplex selection, demonstrating turboPRANCE multiplexability."
+state = "live"
+
+[purpose.mpnn-design]
+text = "Design TEV variant sequences: MPNN arms with fixed or mutated residue shells (protection versus enrichment masks)."
+state = "live"
+
+[purpose.assembly-method]
+text = "Choose and score the assembly method: fragment boundaries, junctions and junction crosstalk."
+state = "live"
+
+[purpose.size-selections]
+text = "Size the selections: coverage, bottleneck and sequencing depth."
+state = "live"
+
+[purpose.lagoon-dynamics]
+text = "Simulate continuous selection in the lagoon."
+state = "live"
+
+[purpose.active-learning]
+text = "Active learning over designs."
+state = "live"
+
+[purpose.literature-review]
+text = "Build and run the literature-review pipeline: gather, quote-check and score claims from the TEV and protease-engineering literature."
+state = "live"
+
+[purpose.fitness-prediction]
+text = "Predict design fitness and confidence: confidence metrics, fitness-latent models and activity predictors used to choose designs."
+state = "live"
+
+[purpose.readout-validation]
+text = "Validate the readouts and scorers used to judge designs: AF3 fold readouts, MPNN tooling gates and the fold ledger."
+state = "live"
+
+[purpose.degenerate-codon-libraries]
+text = "Degenerate-codon (NNK/NNS) site-saturation libraries."
+state = "retired"
+retired_reason = "No amber suppression in the selection strain; an oPool is defined oligos, so degenerate codons waste budget (decided 2026-08-31; tev_design reference 261007_no-amber-suppression)."
+
+[purpose.qmmm-reaction-states]
+text = "Extra QM/MM sampling to generate reaction-state backbone diversity for multistate design."
+state = "retired"
+retired_reason = "The two reaction states differ by 0.0184 A backbone RMSD because the backbone does not move along the reaction coordinate; more QM/MM gives backbone-uncertainty regularization, not multistate design (tev_design decision 260817_multistate-ensemble-generation-options, final)."

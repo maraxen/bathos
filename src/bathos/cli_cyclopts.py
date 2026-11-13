@@ -2377,5 +2377,335 @@ def stepback_resolve_cmd(
     )
 
 
+# ---------------------------------------------------------------------------
+# Charter CLI (spec 261104, slice 1)
+# ---------------------------------------------------------------------------
+
+charter_app = cyclopts.App(name="charter", help="Project charter and confirmation subsystem.")
+app.command(charter_app)
+
+
+@charter_app.command(name="draft")
+def charter_draft_cmd(
+    *,
+    project_root: str = "",
+) -> None:
+    """Generate a proposal draft at .bth/charter.draft.toml."""
+    from bathos.charter import draft
+    from bathos.workspace import resolve_workspace
+
+    root = Path(project_root) if project_root else resolve_workspace().fs_root
+    try:
+        draft_path = draft(root)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+
+    print(f"Draft written to {draft_path}")
+    print("Note: A draft has no standing until it is copied to .bth/charter.toml and confirmed.")
+
+
+@charter_app.command(name="confirm")
+def charter_confirm_cmd(
+    *,
+    project_root: str = "",
+    amend_mandate: bool = False,
+    chair_token: str | None = None,
+    catalog_dir: str = "",
+) -> None:
+    """Confirm the project charter in .bth/charter.toml (human-chair only)."""
+    from bathos.charter import confirm
+    from bathos.workspace import resolve_workspace
+
+    root = Path(project_root) if project_root else resolve_workspace().fs_root
+    cat_p = Path(catalog_dir) if catalog_dir else None
+    try:
+        res = confirm(
+            root,
+            amend_mandate=amend_mandate,
+            chair_token=chair_token or None,
+            interactive_tty=sys.stdin.isatty(),
+            catalog_dir=cat_p,
+        )
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+
+    print(f"Charter confirmed: sha256={res['charter_sha256'][:16]} (auth_mode={res['auth_mode']})")
+
+
+@charter_app.command(name="status")
+def charter_status_cmd(
+    *,
+    project_root: str = "",
+    catalog_dir: str = "",
+    json_output: bool = False,
+) -> None:
+    """Query current confirmation status for the project charter."""
+    from bathos.charter import status
+    from bathos.workspace import resolve_workspace
+
+    root = Path(project_root) if project_root else resolve_workspace().fs_root
+    cat_p = Path(catalog_dir) if catalog_dir else None
+    try:
+        res = status(root, catalog_dir=cat_p)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+
+    if json_output:
+        print(json.dumps(res, indent=2))
+        return
+
+    print("Charter Status:")
+    print(f"  State:                 {res['state']}")
+    print(f"  Current SHA256:        {res['current_sha256']}")
+    print(f"  Last Confirmed SHA256: {res['last_confirmed_sha256'] or 'none'}")
+    if res.get("confirmed_at"):
+        print(f"  Confirmed At:          {res['confirmed_at']}")
+
+
+@charter_app.command(name="pivot")
+def charter_pivot_cmd(
+    *,
+    reason: str,
+    reaffirm: tuple[str, ...] = (),
+    retire: tuple[str, ...] = (),
+    cheapest_next_test: str,
+    project_root: str = "",
+    catalog_dir: str = "",
+) -> None:
+    """Execute purpose ledger pivot, reaffirming or retiring all live purposes."""
+    from bathos.charter import pivot
+    from bathos.workspace import resolve_workspace
+
+    root = Path(project_root) if project_root else resolve_workspace().fs_root
+    cat_p = Path(catalog_dir) if catalog_dir else None
+
+    dispositions: dict[str, str] = {}
+    retired_reasons: dict[str, str] = {}
+
+    for r_item in reaffirm:
+        for p in r_item.split(","):
+            if p.strip():
+                dispositions[p.strip()] = "reaffirm"
+
+    for item in retire:
+        if "=" in item:
+            pid, ret_reason = item.split("=", 1)
+        elif ":" in item:
+            pid, ret_reason = item.split(":", 1)
+        else:
+            pid = item
+            ret_reason = ""
+        pid = pid.strip()
+        dispositions[pid] = "retire"
+        retired_reasons[pid] = ret_reason.strip()
+
+    try:
+        res = pivot(
+            root,
+            reason=reason,
+            dispositions=dispositions,
+            retired_reasons=retired_reasons,
+            cheapest_next_test=cheapest_next_test,
+            catalog_dir=cat_p,
+        )
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+
+    print(
+        f"Pivot recorded: charter updated and unconfirmed (sha256={res['charter_sha256_after'][:16]})"
+    )
+
+# ---------------------------------------------------------------------------
+# Bearings CLI (spec 261104, slice 2)
+# ---------------------------------------------------------------------------
+
+bearings_app = cyclopts.App(name="bearings", help="Blind packet, reading record and charter comparison.")
+app.command(bearings_app)
+
+
+@bearings_app.command(name="packet")
+def bearings_packet_cmd(
+    *,
+    out: str,
+    since: str,
+    until: str,
+    ref: str = "HEAD",
+    project: str = "",
+    charter_file: tuple[str, ...] = (),
+    backlog_titles: str = "",
+    reachable_only: bool = False,
+    max_bytes: int = 600000,
+    project_root: str = "",
+    catalog_dir: str = "",
+) -> None:
+    """Build the deterministic blind packet for a reader into an empty --out directory.
+
+    A packet over --max-bytes is cut by moving --since later until it fits (0 turns the budget off).
+    """
+    from bathos.bearings.packet import build_packet_within_budget
+    from bathos.workspace import resolve_workspace
+
+    root = Path(project_root) if project_root else resolve_workspace().fs_root
+    try:
+        res = build_packet_within_budget(
+            root,
+            out=Path(out),
+            since=since,
+            until=until,
+            max_bytes=max_bytes,
+            ref=ref,
+            project=project or None,
+            charter_file=list(charter_file) or None,
+            backlog_titles=backlog_titles or None,
+            reachable_only=reachable_only,
+            catalog_dir=Path(catalog_dir) if catalog_dir else None,
+        )
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+    print(json.dumps(res, indent=2))
+
+
+@bearings_app.command(name="record")
+def bearings_record_cmd(
+    *,
+    reading: str,
+    packet: str,
+    project_root: str = "",
+    catalog_dir: str = "",
+) -> None:
+    """Record a blind reader's cited reading against the packet it was written from."""
+    from bathos.bearings.reading import record_reading
+    from bathos.workspace import resolve_workspace
+
+    root = Path(project_root) if project_root else resolve_workspace().fs_root
+    try:
+        res = record_reading(
+            root,
+            reading_file=Path(reading),
+            packet_dir=Path(packet),
+            catalog_dir=Path(catalog_dir) if catalog_dir else None,
+        )
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+    print(json.dumps(res, indent=2))
+
+
+@bearings_app.command(name="compare")
+def bearings_compare_cmd(
+    *,
+    reading_id: str,
+    mapping: str,
+    project_root: str = "",
+    catalog_dir: str = "",
+    shadow_packet_dir: str = "",
+    shadow_arm: str = "readers",
+    mapper_version: str = "",
+) -> None:
+    """Compare a recorded reading with the confirmed charter using a different agent's mapping.
+
+    With --shadow-packet-dir (owner side only: it reads the purpose labels), also record the comparison as a raw
+    Bearings shadow verdict (spec 261104 T7). Inert unless a shadow log is configured (BTH_SHADOW_LOG_DIR); never
+    changes the comparison."""
+    from bathos.bearings.reading import compare_reading
+    from bathos.workspace import resolve_workspace
+
+    root = Path(project_root) if project_root else resolve_workspace().fs_root
+    cat = Path(catalog_dir) if catalog_dir else None
+    try:
+        res = compare_reading(
+            root,
+            reading_id=reading_id,
+            mapping_file=Path(mapping),
+            catalog_dir=cat,
+        )
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+    print(json.dumps(res, indent=2))
+    if shadow_packet_dir:
+        _emit_shadow_comparison(root, cat, reading_id, res, Path(shadow_packet_dir), shadow_arm, mapper_version)
+
+
+def _emit_shadow_comparison(
+    root: Path,
+    cat: Path | None,
+    reading_id: str,
+    comparison: dict,
+    packet_dir: Path,
+    arm: str,
+    mapper_version: str,
+) -> None:
+    from bathos.bearings import shadow as bs
+    from bathos.bearings.reading import _existing_reading
+    from bathos.charter import _resolve_catalog_dir, _resolve_project_slug
+
+    if not mapper_version:
+        print("shadow: --mapper-version is required to record a shadow verdict; none recorded", file=sys.stderr)
+        return
+    try:
+        pipe = bs.ensure_shadow_pipeline(start=root, catalog_dir=cat)
+        if not pipe["active"]:
+            print(f"shadow: no shadow log configured ({pipe['source']}); none recorded", file=sys.stderr)
+            return
+        charter = bs._confirmed_charter(root, cat)
+        if charter is None:
+            print("shadow: charter not confirmed; none recorded", file=sys.stderr)
+            return
+        slug = _resolve_project_slug(root)
+        reading = _existing_reading(_resolve_catalog_dir(cat), slug, reading_id)
+        if reading is None:
+            print(f"shadow: reading {reading_id} not found; none recorded", file=sys.stderr)
+            return
+        payload = bs.comparison_payload(
+            root, packet_dir, reading, comparison, charter[1], charter_sha256=charter[0], project=slug
+        )
+        ok = bs.emit_comparison(payload, arm=arm, mapper_version=mapper_version)
+        print(f"shadow: raw verdict {'recorded' if ok else 'not recorded'}", file=sys.stderr)
+    except Exception as e:  # shadow must never change the live result
+        print(f"shadow: not recorded ({type(e).__name__}: {e})", file=sys.stderr)
+
+
+@bearings_app.command(name="shadow-check")
+def bearings_shadow_check_cmd(
+    *,
+    records_dir: str = "",
+    mode_state_dir: str = "",
+    out_dir: str = "",
+    project: str = "",
+    catalog_dir: str = "",
+) -> None:
+    """Score the Bearings shadow log against its pre-registered promotion gates (read-only; never promotes).
+
+    Expands raw verdicts and at-work labels into the six gate features, then runs cisternal's gate check on each.
+    The mode-state directory defaults to bathos's own .praxia/mode_state (where the Bearings gates are registered)."""
+    import tempfile
+
+    from bathos.bearings import shadow as bs
+
+    msd = Path(mode_state_dir) if mode_state_dir else Path(__file__).resolve().parents[2] / ".praxia" / "mode_state"
+    if not (msd / f"{bs.GATE_FEATURES[0]}.toml").is_file():
+        print(f"Error: no Bearings mode-state files in {msd}; pass --mode-state-dir", file=sys.stderr)
+        raise SystemExit(3)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            res = bs.shadow_check(
+                records_dir=Path(records_dir) if records_dir else None,
+                mode_state_dir=msd,
+                out_dir=Path(out_dir) if out_dir else Path(tmp),
+                project=project or None,
+                catalog_dir=Path(catalog_dir) if catalog_dir else None,
+            )
+    except bs.ShadowConfigError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise SystemExit(3) from None
+    print(json.dumps(res, indent=2, default=str))
+
+
 if __name__ == "__main__":
     app()

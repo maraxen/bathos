@@ -1,0 +1,29 @@
+# Bearings shadow gate (spec 261104 T7; plan .praxia/docs/plans/261111_bearings-slice3-shadow.md).
+# Pre-registered 261111 before any verdict was emitted. Items come from bathos.bearings.shadow.derive; check with
+# `bth bearings shadow-check`. Arm: three blind readers per packet.
+
+[feature]
+name = "bearings.readers.off_charter"
+description = "Off-charter work left unmapped: reading purposes built only on off-charter-labelled work that the mapping leaves without a target"
+version = "0.2.0"  # 261112: evidence rules (earliest at-work label, disjoint packet windows, sidecars with >2 slugs disputed, unmatchable ids invalid); thresholds unchanged
+
+[ladder]
+current_stage = "shadow"
+
+[shadow]
+traffic_fraction = 1.0
+writes_isolated = true
+writes_isolated_enforced_by = "tests/test_bearings_shadow.py::test_shadow_reader_isolation"
+
+[scoring]
+positive_label = true
+
+[promotion]
+target_stage = "advisory"
+min_verdicts = 8
+min_labels = 8
+allowed_label_sources = ["frozen_gold", "owner_confirmed", "at_work"]
+min_recall = 0.8
+min_recall_lower_bound = 0.65
+isolation_violations_max = 0
+threshold_basis = "AC-9 off-charter left unmapped >= 0.8 (recall of this feature), the owner's bars in scripts/analysis/replay_bearings_ac9.bth.toml (T7, 261109), on the point estimate; plus a Wilson 95% lower bound of at least 0.65 (owner 261111, AskUserQuestion), which a perfect record reaches only with 8 or more items. Only at-work labels against the charter confirmed 261110 or later count; the 311 retrospective overlay labels are excluded."

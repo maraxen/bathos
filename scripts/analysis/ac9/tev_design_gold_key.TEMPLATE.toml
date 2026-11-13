@@ -1,0 +1,14 @@
+# SUPERSEDED (owner 261109): AC-9 labels now come from each sidecar's own `[charter] purpose = "<slug>"`, written
+# when the sidecar is written and confirmed by the owner in batches (spec 261104 T7). The packet builder strips the
+# label so readers stay blind. This file is kept only for the planted-case needs below and as the format for a
+# one-off key if one is ever needed. The parked retrospective path list is tev_design_sidecar_paths.WINDOW_*.tsv.
+#
+# Value format (if used): a charter purpose slug from tev_design_charter.DRAFT.toml, or "off-charter"
+# (real work that serves no charter purpose).
+#
+# Planted-case needs (advisor, spec T7): >=2 live purposes with records that can be removed
+# (silent case), >=1 retired purpose with records (revival), off-charter material the owner
+# attests (unmapped case), one present purpose whose records fall only before the effective
+# window start (budget case), and one reading purpose that spans two charter purposes.
+[key]
+# "scripts/experiments/example.bth.toml" = "mpnn-design"

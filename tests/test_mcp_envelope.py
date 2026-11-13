@@ -169,3 +169,28 @@ def test_self_reported_bare_error_key_infers_ok_false(
 
     assert result["ok"] is False, f"Expected ok=False to be inferred, got envelope: {result}"
     assert result["error"] == "script_path parameter is required"
+
+
+@pytest.mark.parametrize(
+    ("module", "name", "code"),
+    [
+        ("bathos.bearings.packet", "PacketLeakError", "bearings_packet_leak"),
+        ("bathos.bearings.purpose_label", "PurposeLabelError", "bearings_purpose_label_invalid"),
+        ("bathos.bearings.ac9", "Ac9LabelError", "bearings_ac9_label_invalid"),
+        ("bathos.bearings.shadow", "ShadowConfigError", "bearings_shadow_config_invalid"),
+    ],
+)
+def test_bearings_errors_outside_errors_py_keep_their_codes(event_mock, module, name, code):  # noqa: ARG001
+    """Review 261111 (V6): these four were registered in EXCEPTION_TO_CODE but were not BathosError subclasses, so
+    traced_tool shaped them as ``internal``. They keep their builtin base so existing ``except ValueError`` callers
+    still catch them."""
+    import importlib
+
+    exc = getattr(importlib.import_module(module), name)
+
+    @traced_tool
+    async def raising_tool():
+        raise exc("boom")
+
+    result = asyncio.run(raising_tool())
+    assert result["ok"] is False and result["error_code"] == code

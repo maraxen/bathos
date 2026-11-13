@@ -158,6 +158,27 @@ class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(
     ARCHIVE_PROPOSAL_STALE = "archive_proposal_stale"
     DOC_STORE_UNAVAILABLE = "doc_store_unavailable"
     RESTORE_CONFLICT = "restore_conflict"
+    # Project Charter & Confirmation (spec 261104, slice 1).
+    CHARTER_NOT_FOUND = "charter_not_found"
+    CHARTER_INVALID = "charter_invalid"
+    CHARTER_PIVOT_INCOMPLETE = "charter_pivot_incomplete"
+    CHARTER_MANDATE_CHANGED = "charter_mandate_changed"
+    CHARTER_AGENT_CONFIRM_REFUSED = "charter_agent_confirm_refused"
+    CHARTER_UNAUTHORIZED = "charter_unauthorized"
+    CHARTER_LEDGER_UNAVAILABLE = "charter_ledger_unavailable"
+    # Bearings blind packet and reading record (spec 261104, slice 2).
+    BEARINGS_PACKET_INVALID = "bearings_packet_invalid"
+    BEARINGS_PACKET_MISMATCH = "bearings_packet_mismatch"
+    BEARINGS_READING_INVALID = "bearings_reading_invalid"
+    BEARINGS_READING_NOT_FOUND = "bearings_reading_not_found"
+    BEARINGS_NO_CONFIRMED_CHARTER = "bearings_no_confirmed_charter"
+    BEARINGS_MAPPING_INVALID = "bearings_mapping_invalid"
+    BEARINGS_MAPPER_IS_READER = "bearings_mapper_is_reader"
+    # Bearings purpose labels, AC-9 and shadow mode (spec 261104 T7).
+    BEARINGS_PACKET_LEAK = "bearings_packet_leak"
+    BEARINGS_PURPOSE_LABEL_INVALID = "bearings_purpose_label_invalid"
+    BEARINGS_AC9_LABEL_INVALID = "bearings_ac9_label_invalid"
+    BEARINGS_SHADOW_CONFIG_INVALID = "bearings_shadow_config_invalid"
 
 
 # Resolution hints registry: every BathosErrorCode member must have a non-empty entry
@@ -263,6 +284,26 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.ARCHIVE_PROPOSAL_STALE: "The archive proposal references files or git states that have changed since proposal generation. Re-run --dry-run to regenerate.",
     BathosErrorCode.DOC_STORE_UNAVAILABLE: "The configured documentation store path is not accessible or writable. Check permissions or configuration.",
     BathosErrorCode.RESTORE_CONFLICT: "Restoring this item would overwrite an existing modified or untracked file. Move or rename the destination file first.",
+    # Project Charter & Confirmation (spec 261104, slice 1).
+    BathosErrorCode.CHARTER_NOT_FOUND: "Create a charter at .bth/charter.toml or scaffold one with 'bth charter draft'",
+    BathosErrorCode.CHARTER_INVALID: "Fix syntax, schema, or missing fields in .bth/charter.toml",
+    BathosErrorCode.CHARTER_PIVOT_INCOMPLETE: "Provide a disposition ('reaffirm' or 'retire') for every live purpose",
+    BathosErrorCode.CHARTER_MANDATE_CHANGED: "Pass --amend-mandate to confirm a charter whose mandate text differs from the last confirmed mandate",
+    BathosErrorCode.CHARTER_AGENT_CONFIRM_REFUSED: "Confirmation must be performed directly by the human chair in an interactive terminal or with a chair token",
+    BathosErrorCode.CHARTER_UNAUTHORIZED: "Run in an interactive terminal or supply a valid chair token via --chair-token or BTH_CHAIR_TOKEN_PATH",
+    BathosErrorCode.CHARTER_LEDGER_UNAVAILABLE: "Charter events need a log-mode catalog whose project log is writable; run 'bth migrate --to-log' or fix the log path, then retry",
+    # Bearings blind packet and reading record (spec 261104, slice 2).
+    BathosErrorCode.BEARINGS_PACKET_INVALID: "The packet directory is missing, malformed or not empty; build it with 'bth bearings packet' into an empty --out",
+    BathosErrorCode.BEARINGS_PACKET_MISMATCH: "The packet bytes or packet_sha256 do not match the reading; rebuild the packet or fix the reading's packet_sha256",
+    BathosErrorCode.BEARINGS_READING_INVALID: "Fix the reading file: it needs packet_sha256, reader_id, purposes with ids and text, and citations that are strings or objects",
+    BathosErrorCode.BEARINGS_READING_NOT_FOUND: "No recorded reading has that reading_id; record it with 'bth bearings record' first",
+    BathosErrorCode.BEARINGS_NO_CONFIRMED_CHARTER: "The charter must be confirmed (and unedited since) before a reading can be compared; ask the owner to run 'bth charter confirm'",
+    BathosErrorCode.BEARINGS_MAPPING_INVALID: "The mapping must cover every reading purpose exactly once and name only confirmed charter purpose ids (or null)",
+    BathosErrorCode.BEARINGS_MAPPER_IS_READER: "The mapper must be a different agent from the reader; give the mapper its own mapper_id",
+    BathosErrorCode.BEARINGS_PACKET_LEAK: "A reader-visible packet byte names a charter purpose id; the packet was not written. Rename the offending file, field or project slug",
+    BathosErrorCode.BEARINGS_PURPOSE_LABEL_INVALID: "Write the label as [charter] purpose = \"<slug>\" or a list of slugs (lowercase words joined by single hyphens); 'off-charter' stands alone",
+    BathosErrorCode.BEARINGS_AC9_LABEL_INVALID: "A sidecar label names no charter purpose or cannot be read; fix the label or the charter before scoring AC-9",
+    BathosErrorCode.BEARINGS_SHADOW_CONFIG_INVALID: "Fix shadow_log_dir (BTH_SHADOW_LOG_DIR, [bearings] in .bth.toml, [tool.bathos.bearings] in pyproject.toml, or [bearings] in ~/.config/bathos/config.toml); the file must parse, the key must be a string, and the path must be outside the project work tree",
 }
 
 
@@ -440,6 +481,28 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     "ArchiveProposalStaleError": BathosErrorCode.ARCHIVE_PROPOSAL_STALE,
     "DocStoreUnavailableError": BathosErrorCode.DOC_STORE_UNAVAILABLE,
     "RestoreConflictError": BathosErrorCode.RESTORE_CONFLICT,
+    # Project charter & confirmation (spec 261104, slice 1).
+    "CharterError": BathosErrorCode.INTERNAL,
+    "CharterNotFoundError": BathosErrorCode.CHARTER_NOT_FOUND,
+    "CharterInvalidError": BathosErrorCode.CHARTER_INVALID,
+    "CharterPivotIncompleteError": BathosErrorCode.CHARTER_PIVOT_INCOMPLETE,
+    "CharterMandateChangedError": BathosErrorCode.CHARTER_MANDATE_CHANGED,
+    "CharterAgentConfirmRefusedError": BathosErrorCode.CHARTER_AGENT_CONFIRM_REFUSED,
+    "CharterUnauthorizedError": BathosErrorCode.CHARTER_UNAUTHORIZED,
+    "CharterLedgerUnavailableError": BathosErrorCode.CHARTER_LEDGER_UNAVAILABLE,
+    # Bearings (spec 261104, slice 2).
+    "BearingsError": BathosErrorCode.INTERNAL,
+    "BearingsPacketInvalidError": BathosErrorCode.BEARINGS_PACKET_INVALID,
+    "BearingsPacketMismatchError": BathosErrorCode.BEARINGS_PACKET_MISMATCH,
+    "BearingsReadingInvalidError": BathosErrorCode.BEARINGS_READING_INVALID,
+    "BearingsReadingNotFoundError": BathosErrorCode.BEARINGS_READING_NOT_FOUND,
+    "BearingsNoConfirmedCharterError": BathosErrorCode.BEARINGS_NO_CONFIRMED_CHARTER,
+    "BearingsMappingInvalidError": BathosErrorCode.BEARINGS_MAPPING_INVALID,
+    "BearingsMapperIsReaderError": BathosErrorCode.BEARINGS_MAPPER_IS_READER,
+    "PacketLeakError": BathosErrorCode.BEARINGS_PACKET_LEAK,
+    "PurposeLabelError": BathosErrorCode.BEARINGS_PURPOSE_LABEL_INVALID,
+    "Ac9LabelError": BathosErrorCode.BEARINGS_AC9_LABEL_INVALID,
+    "ShadowConfigError": BathosErrorCode.BEARINGS_SHADOW_CONFIG_INVALID,
 }
 
 
@@ -739,5 +802,71 @@ class DocStoreUnavailableError(BathosError):
 
 class RestoreConflictError(BathosError):
     """Raised when restore would overwrite an existing modified/untracked file."""
+# ── Charter Domain Exceptions (spec 261104) ───────────────────────────────────
 
 
+class CharterError(BathosError):
+    """Base class for project charter errors."""
+
+
+class CharterNotFoundError(CharterError):
+    """Charter file does not exist."""
+
+
+class CharterInvalidError(CharterError):
+    """Charter syntax, schema, or field is invalid."""
+
+
+class CharterPivotIncompleteError(CharterError):
+    """Pivot did not dispose of every live purpose."""
+
+
+class CharterMandateChangedError(CharterError):
+    """Mandate text changed without --amend-mandate."""
+
+
+class CharterAgentConfirmRefusedError(CharterError):
+    """Autonomous agent attempted to confirm charter via MCP."""
+
+
+class CharterUnauthorizedError(CharterError):
+    """Caller is not authorized to confirm charter (missing TTY / chair token)."""
+
+
+class CharterLedgerUnavailableError(CharterError):
+    """A charter event could not be recorded: the catalog is not in log mode, or the append failed."""
+
+
+# ── Bearings Domain Exceptions (spec 261104, slice 2) ────────────────────────
+
+
+class BearingsError(BathosError):
+    """Base class for bearings packet, reading and comparison errors."""
+
+
+class BearingsPacketInvalidError(BearingsError):
+    """The packet is missing, malformed, or the output directory is not empty."""
+
+
+class BearingsPacketMismatchError(BearingsError):
+    """Packet bytes or hash do not match the reading."""
+
+
+class BearingsReadingInvalidError(BearingsError):
+    """The reading file is malformed."""
+
+
+class BearingsReadingNotFoundError(BearingsError):
+    """No recorded reading has that id."""
+
+
+class BearingsNoConfirmedCharterError(BearingsError):
+    """No confirmed charter to compare against."""
+
+
+class BearingsMappingInvalidError(BearingsError):
+    """The mapping is incomplete or names unknown charter purposes."""
+
+
+class BearingsMapperIsReaderError(BearingsError):
+    """The mapper is the same agent as the reader."""

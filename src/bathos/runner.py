@@ -1386,6 +1386,14 @@ def _run_script_impl(
         toolchain_version_source="recorded" if dependency_provenance is not None else None,
     )
     run_uuid_var.set(run.id)
+    # Spec 261104 T7 (owner 261110): a sidecar's `[charter] purpose` becomes an at-work shadow label. Inert unless a
+    # shadow log is configured; never fails the run (bearings/shadow.py).
+    if bundle is not None and bundle.found and bundle.path is not None:
+        from bathos.bearings.shadow import emit_at_work_label
+
+        label_status = emit_at_work_label(bundle.path, run_id=run.id, catalog_dir=catalog_dir)
+        if label_status not in ("no_label", "off"):
+            event("bearings.at_work_label", status=label_status)
     event(
         "run.start",
         run_uuid=run.id,

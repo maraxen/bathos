@@ -7075,6 +7075,185 @@ async def stepback_snooze(
     )
 
 
+# ---------------------------------------------------------------------------
+# Project Charter MCP Tools (spec 261104, slice 1)
+# ---------------------------------------------------------------------------
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def charter_status(
+    project_root: str | None = None,
+    catalog_dir: str | None = None,
+) -> dict:
+    """Query current confirmation status for the project charter."""
+    from bathos.charter import status
+    from bathos.workspace import resolve_workspace
+
+    root = Path(project_root) if project_root else resolve_workspace().fs_root
+    cat_p = Path(catalog_dir) if catalog_dir else None
+    res = status(root, catalog_dir=cat_p)
+    return {"ok": True, **res}
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def charter_draft(
+    project_root: str | None = None,
+) -> dict:
+    """Generate a proposal draft at .bth/charter.draft.toml."""
+    from bathos.charter import draft
+    from bathos.workspace import resolve_workspace
+
+    root = Path(project_root) if project_root else resolve_workspace().fs_root
+    draft_path = draft(root)
+    return {
+        "ok": True,
+        "draft_path": str(draft_path),
+        "note": "A draft has no standing until it is copied to .bth/charter.toml and confirmed.",
+    }
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def charter_pivot(
+    reason: str,
+    dispositions: dict[str, str],
+    retired_reasons: dict[str, str] | None = None,
+    cheapest_next_test: str = "none_pending",
+    project_root: str | None = None,
+    catalog_dir: str | None = None,
+) -> dict:
+    """Execute purpose ledger pivot, reaffirming or retiring all live purposes."""
+    from bathos.charter import pivot
+    from bathos.workspace import resolve_workspace
+
+    root = Path(project_root) if project_root else resolve_workspace().fs_root
+    cat_p = Path(catalog_dir) if catalog_dir else None
+    res = pivot(
+        root,
+        reason=reason,
+        dispositions=dispositions,
+        retired_reasons=retired_reasons,
+        cheapest_next_test=cheapest_next_test,
+        catalog_dir=cat_p,
+    )
+    return {
+        "ok": True,
+        "message": "Pivot recorded",
+        **res,
+    }
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def charter_confirm(
+    project_root: str | None = None,
+    amend_mandate: bool = False,
+    chair_token: str | None = None,
+    catalog_dir: str | None = None,
+) -> dict:
+    """Confirm the project charter in .bth/charter.toml.
+
+    HUMAN CHAIR INVARIANCE:
+    In FastMCP, callers are autonomous agents. Any attempt to confirm a charter
+    via MCP is strictly and unconditionally refused.
+    """
+    _ = (project_root, amend_mandate, chair_token, catalog_dir)
+    from bathos.errors import CharterAgentConfirmRefusedError
+
+    raise CharterAgentConfirmRefusedError(
+        "Charter confirmation is strictly human-only; autonomous agents calling via MCP are unconditionally refused."
+    )
+
+# ---------------------------------------------------------------------------
+# Bearings MCP Tools (spec 261104, slice 2)
+# ---------------------------------------------------------------------------
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def bearings_packet(
+    out: str,
+    since: str,
+    until: str,
+    ref: str = "HEAD",
+    project: str | None = None,
+    charter_files: list[str] | None = None,
+    backlog_titles: str | None = None,
+    reachable_only: bool = False,
+    max_bytes: int = 600000,
+    project_root: str | None = None,
+    catalog_dir: str | None = None,
+) -> dict:
+    """Build the deterministic blind packet for a bearings reader into an empty directory.
+
+    A packet over max_bytes is cut by moving since later until it fits (0 turns the budget off).
+    """
+    from bathos.bearings.packet import build_packet_within_budget
+    from bathos.workspace import resolve_workspace
+
+    root = Path(project_root) if project_root else resolve_workspace().fs_root
+    res = build_packet_within_budget(
+        root,
+        out=Path(out),
+        since=since,
+        until=until,
+        max_bytes=max_bytes,
+        ref=ref,
+        project=project,
+        charter_file=charter_files,
+        backlog_titles=backlog_titles,
+        reachable_only=reachable_only,
+        catalog_dir=Path(catalog_dir) if catalog_dir else None,
+    )
+    return {"ok": True, **res}
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def bearings_record(
+    reading_file: str,
+    packet_dir: str,
+    project_root: str | None = None,
+    catalog_dir: str | None = None,
+) -> dict:
+    """Record a blind reader's cited reading; every purpose needs 2 resolvable citations."""
+    from bathos.bearings.reading import record_reading
+    from bathos.workspace import resolve_workspace
+
+    root = Path(project_root) if project_root else resolve_workspace().fs_root
+    res = record_reading(
+        root,
+        reading_file=Path(reading_file),
+        packet_dir=Path(packet_dir),
+        catalog_dir=Path(catalog_dir) if catalog_dir else None,
+    )
+    return {"ok": True, **res}
+
+
+@cisternal.tool(registry="bathos")
+@traced_tool
+async def bearings_compare(
+    reading_id: str,
+    mapping_file: str,
+    project_root: str | None = None,
+    catalog_dir: str | None = None,
+) -> dict:
+    """Compare a recorded reading with the confirmed charter using a different agent's mapping."""
+    from bathos.bearings.reading import compare_reading
+    from bathos.workspace import resolve_workspace
+
+    root = Path(project_root) if project_root else resolve_workspace().fs_root
+    res = compare_reading(
+        root,
+        reading_id=reading_id,
+        mapping_file=Path(mapping_file),
+        catalog_dir=Path(catalog_dir) if catalog_dir else None,
+    )
+    return {"ok": True, **res}
+
+
 if __name__ == "__main__":
     init_server_telemetry()
     app.run()
@@ -7181,6 +7360,13 @@ _WIRED = cisternal.wire(
         "session_start",
         "archive_sweep",
         "telemetry_rotate",
+        "charter_status",
+        "charter_draft",
+        "charter_pivot",
+        "charter_confirm",
+        "bearings_packet",
+        "bearings_record",
+        "bearings_compare",
     ],
 )
 
