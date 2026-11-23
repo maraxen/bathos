@@ -744,7 +744,7 @@ def _add_run_to_campaign_impl(
         if resolved_sidecar is not None:
             evalue = (
                 1.0
-                if run_outcome == "invalid_measurement"
+                if run_outcome in ("invalid_measurement", "invariant_fail")
                 else compute_evalue(resolved_sidecar, run_outcome or "unknown")
             )
             sidecar_stopping_threshold = resolved_sidecar.popper_stopping_threshold
@@ -762,6 +762,7 @@ def _add_run_to_campaign_impl(
             "unknown",
             "observed",
             "invalid_measurement",
+            "invariant_fail",
             None,
             "",
         )
@@ -975,10 +976,10 @@ def link_cool_runs_to_campaigns(
                     db=db,
                 )
                 if sidecar is not None:
-                    # invalid_measurement is a non-verdict (spec §3.2): neutral, like observed.
+                    # invalid_measurement and invariant_fail are non-verdicts: neutral, like observed.
                     evalue = (
                         1.0
-                        if run.outcome == "invalid_measurement"
+                        if run.outcome in ("invalid_measurement", "invariant_fail")
                         else compute_evalue(sidecar, run.outcome or "unknown")
                     )
                     sidecar_stopping_threshold = sidecar.popper_stopping_threshold
@@ -989,6 +990,7 @@ def link_cool_runs_to_campaigns(
                 "unknown",
                 "observed",
                 "invalid_measurement",
+                "invariant_fail",
                 None,
                 "",
             )
@@ -1403,11 +1405,14 @@ def _conclude_campaign_impl(
     from pathlib import Path
 
     from bathos.claim import (
+        check_decision_scope,
         check_sha,
+        factor_coverage_check,
         is_negative_outcome,
         parse_claim,
         resolve_claim_path,
         run_union_gate,
+        untested_assumptions,
     )
     from bathos.runlog.emit import emit_or_legacy
     from bathos.workspace import resolve_workspace
@@ -1604,6 +1609,88 @@ def _conclude_campaign_impl(
                 "outcome label"
             )
 
+        def _record_claim_bypass() -> None:
+            def _claim_bypassed_legacy_write() -> None:
+                db.execute("UPDATE campaigns SET claim_mode='bypassed' WHERE id=?", [full_id])
+
+            emit_or_legacy(
+                kind="campaign.claim_bypassed",
+                entity=[full_id],
+                data={"claim_mode": "bypassed"},
+                legacy_write=_claim_bypassed_legacy_write,
+                cwd=workspace_root,
+            )
+
+        # #2202: Claim assumption-status gate — refuse unless every status-annotated assumption
+        # has status == 'tested' or an explicit waiver / --force-verdict override.
+        untested = untested_assumptions(claim)
+        if untested:
+            details = []
+            for a in untested:
+                aid = a.get("id", "?")
+                astatus = a.get("status", "")
+                halt_if = a.get("halt_if", "")
+                part = f"{aid} (status={astatus!r})"
+                if halt_if:
+                    part += f" [halt_if: {halt_if}]"
+                details.append(part)
+            msg = (
+                f"Cannot conclude campaign {full_id[:8]}: governing claim has untested/non-tested "
+                f"assumption(s): {'; '.join(details)}. Mark status = 'tested', add a waiver reason "
+                "on the assumption, or pass --force-verdict to record an override."
+            )
+            if campaign_mode == "exploration":
+                print(f"WARNING: {msg}")
+            elif force_verdict:
+                print(f"WARNING: Assumption gate bypassed — {'; '.join(details)}")
+                _record_claim_bypass()
+            else:
+                raise CampaignError(msg)
+
+        # #2199: Structured decision_scope vs tested scope gate.
+        if claim.decision_scope:
+            scope_res = check_decision_scope(db, full_id, claim)
+            if scope_res["verdict"] != "covered":
+                scope_parts = [
+                    f"{u['axis']} missing {u['missing_levels']} (tested: {u['tested_levels']})"
+                    for u in scope_res["uncovered"]
+                ]
+                for hc in scope_res.get("hash_conflicts", []):
+                    scope_parts.append(
+                        f"position/aperture label {hc['label']!r} maps to multiple hashes {hc['hashes']}"
+                    )
+                msg = (
+                    f"Cannot conclude campaign {full_id[:8]}: claim decision_scope is not a subset "
+                    f"of tested scope ({'; '.join(scope_parts)}). Run the missing levels or pass "
+                    "--force-verdict to record an override."
+                )
+                if campaign_mode == "exploration":
+                    print(f"WARNING: {msg}")
+                elif force_verdict:
+                    print(f"WARNING: Decision scope gate bypassed — {'; '.join(scope_parts)}")
+                    _record_claim_bypass()
+                else:
+                    raise CampaignError(msg)
+
+        # #2200: Declared-vs-analyzed factor coverage & n_units_informative check.
+        fc_res = factor_coverage_check(
+            db, full_id, claim, workspace_root=workspace_root, catalog_dir=catalog_dir
+        )
+        for fc_warn in fc_res["warnings"]:
+            print(f"WARNING: Factor coverage: {fc_warn}")
+        if fc_res["errors"]:
+            msg = (
+                f"Cannot conclude campaign {full_id[:8]}: factor/arm coverage check failed: "
+                f"{'; '.join(fc_res['errors'])}"
+            )
+            if campaign_mode == "exploration":
+                print(f"WARNING: {msg}")
+            elif force_verdict:
+                print(f"WARNING: Factor coverage gate bypassed — {'; '.join(fc_res['errors'])}")
+                _record_claim_bypass()
+            else:
+                raise CampaignError(msg)
+
         # F2 PARITY CONFOUND CHECK (before Union Gate)
         # Check for uncontrolled reference_parity confounds and downgrade if needed
         from bathos.claim import parity_confound_check
@@ -1724,20 +1811,7 @@ def _conclude_campaign_impl(
                     # AC-09: Bypass with audit trail
                     print(f"Union Gate bypassed — unmapped clauses: {uncovered_display}")
                     outcome_label = outcome_label  # Keep researcher's label
-
-                    def _claim_bypassed_legacy_write() -> None:
-                        db.execute(
-                            "UPDATE campaigns SET claim_mode='bypassed' WHERE id=?", [full_id]
-                        )
-
-                    # AC-25: campaign.claim_bypassed
-                    emit_or_legacy(
-                        kind="campaign.claim_bypassed",
-                        entity=[full_id],
-                        data={"claim_mode": "bypassed"},
-                        legacy_write=_claim_bypassed_legacy_write,
-                        cwd=workspace_root,
-                    )
+                    _record_claim_bypass()
                 else:
                     # AC-08: Soft-block downgrade to confounded
                     print(

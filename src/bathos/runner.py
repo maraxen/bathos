@@ -57,12 +57,15 @@ from bathos.runlog.writer import resolve_write_project_id
 from bathos.schema import Run
 from bathos.sidecar import (
     DifferentialBlock,
+    SanityBlock,
     Sidecar,
     SidecarError,
     breakdown_summary_columns,
     derive_pass_labels,
     effective_label,
+    evaluate_invariants,
     evaluate_outcome,
+    evaluate_sanity_assertions,
     is_in_enforced_dir,
     label_names_nonresidual_outcome,
     missing_breakdown_columns,
@@ -974,6 +977,112 @@ def _run_differential_preflight(
     )
 
 
+@dataclasses.dataclass
+class SanityPreflightResult:
+    """Outcome of the confirmatory `[sanity]` synthetic-ground-truth pre-flight (spec 260707 §7)."""
+
+    ok: bool
+    violated: list[str]
+    reason: str
+    cached: bool = False
+
+
+def _has_cached_sanity_pass(catalog_dir: Path, script_sha256: str, sidecar_sha256: str) -> bool:
+    """Return True if a prior non-invalid run with identical script+sidecar SHAs passed `[sanity]`."""
+    if not script_sha256 or not sidecar_sha256:
+        return False
+
+    def _meta_passed(meta_str: str | None, outcome: str | None) -> bool:
+        if outcome == "invalid_measurement" or not meta_str:
+            return False
+        parsed = _parse_result_dict(meta_str)
+        sc_info = parsed.get("sanity_check")
+        return (
+            isinstance(sc_info, dict)
+            and sc_info.get("status") in ("passed", "cached")
+            and sc_info.get("sidecar_sha256") == sidecar_sha256
+        )
+
+    try:
+        from bathos.catalog import read_runs
+
+        for r in read_runs(catalog_dir):
+            if r.script_sha256 == script_sha256 and _meta_passed(r.metadata, r.outcome):
+                return True
+    except Exception:
+        pass
+
+    try:
+        from bathos.index import catalog_readable, connect_read
+
+        if catalog_readable(catalog_dir):
+            db = connect_read(catalog_dir, read_only=True)
+            try:
+                rows = db.execute(
+                    "SELECT metadata, outcome FROM runs WHERE script_sha256 = ?",
+                    [script_sha256],
+                ).fetchall()
+                for meta_str, outcome in rows:
+                    if _meta_passed(meta_str, outcome):
+                        return True
+            finally:
+                db.close()
+    except Exception:
+        pass
+    return False
+
+
+def _run_sanity_preflight(
+    sanity: SanityBlock,
+    argv: list[str],
+    cwd: Path,
+    base_env: dict,
+    results_temp_dir: Path,
+    run_id: str,
+    *,
+    catalog_dir: Path,
+    script_sha256: str,
+    sidecar_sha256: str,
+) -> SanityPreflightResult:
+    """Run `[*argv, *sanity.argv_suffix]` and assert every `[sanity.assertions.*]` holds."""
+    if _has_cached_sanity_pass(catalog_dir, script_sha256, sidecar_sha256):
+        return SanityPreflightResult(ok=True, violated=[], reason="", cached=True)
+
+    sanity_path = results_temp_dir / f"{run_id}.sanity.bth-results.json"
+    sanity_output_dir = results_temp_dir / f"{run_id}.sanity-outputs"
+    sanity_output_dir.mkdir(parents=True, exist_ok=True)
+
+    env = base_env.copy()
+    env["BTH_RESULTS_PATH"] = str(sanity_path)
+    env["BTH_OUTPUT_DIR"] = str(sanity_output_dir)
+    env["BTH_SANITY_CHECK"] = "1"
+
+    sanity_argv = [*argv, *sanity.argv_suffix]
+    proc = subprocess.Popen(sanity_argv, cwd=cwd, env=env)
+    exit_code = proc.wait()
+    raw = _read_result_emission(sanity_path, None, None).content
+    sanity_path.unlink(missing_ok=True)
+
+    if exit_code != 0:
+        return SanityPreflightResult(
+            ok=False,
+            violated=[],
+            reason=(
+                f"[sanity] pre-flight command {sanity_argv!r} exited with code {exit_code}"
+            ),
+        )
+
+    meta = _parse_result_dict(raw)
+    violated = evaluate_sanity_assertions(sanity, meta)
+    if violated:
+        return SanityPreflightResult(
+            ok=False,
+            violated=violated,
+            reason=f"[sanity] assertions failed: {', '.join(violated)}",
+        )
+    return SanityPreflightResult(ok=True, violated=[], reason="")
+
+
 def _is_ephemeral_path(path: str) -> bool:
     """Return True if path resolves under a system temp directory."""
     p = Path(path)
@@ -1711,6 +1820,82 @@ def _run_script_impl(
             return finish_exit_code
         event("run.differential_preflight_passed", run_uuid=run.id)
 
+    # Confirmatory [sanity] synthetic-ground-truth pre-flight (spec 260707 §7; debt #2202):
+    # before the main run, invoke the script with argv_suffix and check [sanity.assertions.*].
+    # Failure blocks the main subprocess and records outcome="invalid_measurement".
+    sanity_check_record: dict[str, str] | None = None
+    if sidecar is not None and sidecar.sanity is not None:
+        sidecar_sha = bundle.sha256 if bundle and bundle.found else ""
+        sanity_preflight = _run_sanity_preflight(
+            sanity=sidecar.sanity,
+            argv=argv,
+            cwd=cwd,
+            base_env=os.environ.copy(),
+            results_temp_dir=results_temp_dir,
+            run_id=run.id,
+            catalog_dir=catalog_dir,
+            script_sha256=script_sha256_val,
+            sidecar_sha256=sidecar_sha,
+        )
+        if not sanity_preflight.ok:
+            event(
+                "run.sanity_preflight_failed",
+                run_uuid=run.id,
+                violated=sanity_preflight.violated,
+                reason=sanity_preflight.reason,
+            )
+            payload = _gate_failure_payload(
+                error_code=GateErrorCode.DIFFERENTIAL_INVARIANT_VIOLATED,
+                phase="pre_execution",
+                errors=[sanity_preflight.reason],
+                agent_mode=resolved_mode,
+                taxonomy_label="sanity_check_failed",
+            )
+            failed_meta = _with_metadata_key(
+                run.metadata,
+                "sanity_check",
+                {
+                    "status": "failed",
+                    "violated": sanity_preflight.violated,
+                    "sidecar_sha256": sidecar_sha,
+                },
+            )
+            run = dataclasses.replace(
+                run,
+                status="completed",
+                exit_code=0,
+                outcome="invalid_measurement",
+                outcome_error_reason=json.dumps(dataclasses.asdict(payload)),
+                metadata=failed_meta,
+            )
+            finish_exit_code = 1
+            if current_mode():
+                outcome = emit_event(
+                    kind="run.finished",
+                    entity=[run.id],
+                    data=run_event_data(run),
+                    cwd=cwd,
+                )
+                finish_exit_code = apply_run_finished_exit_semantics(finish_exit_code, outcome)
+            else:
+                try:
+                    write_run(run, catalog_dir)
+                except Exception as e:
+                    event("run.error", phase="persist", exc_type=type(e).__name__, exc_msg=str(e))
+                    raise
+            print(json.dumps(dataclasses.asdict(payload)), file=sys.stderr)
+            run_outcome_var.set((run.outcome, run.outcome_error_reason))
+            return finish_exit_code
+        sanity_check_record = {
+            "status": "cached" if sanity_preflight.cached else "passed",
+            "sidecar_sha256": sidecar_sha,
+        }
+        event(
+            "run.sanity_preflight_passed",
+            run_uuid=run.id,
+            cached=sanity_preflight.cached,
+        )
+
     # Write pre-execution manifest (before subprocess)
     if bundle and bundle.found:
         try:
@@ -1966,6 +2151,32 @@ def _run_script_impl(
                 reason=outcome_error_reason,
             )
 
+    # Hard-fail [invariants] post-execution gate (spec 260707 §3.3; debt #2202):
+    # if any declared invariant fails on a clean run, override outcome to "invariant_fail"
+    # regardless of what [outcomes.*] concluded, preserving the original label in JSON.
+    if (
+        sidecar is not None
+        and exit_code == 0
+        and sidecar.invariants
+        and outcome not in ("error", "invalid_measurement")
+    ):
+        violated_invariants = evaluate_invariants(sidecar, _parse_result_dict(metadata))
+        if violated_invariants:
+            would_have_been = outcome
+            outcome = "invariant_fail"
+            outcome_error_reason = json.dumps(
+                {
+                    "violated_invariants": violated_invariants,
+                    "would_have_been": would_have_been,
+                }
+            )
+            event(
+                "run.invariant_failed",
+                run_uuid=run.id,
+                violated_invariants=violated_invariants,
+                would_have_been=would_have_been,
+            )
+
     # Spec 261026 D1 emission check: a clean run whose verdict names a declared non-residual
     # outcome must have emitted the [breakdown] summary columns. Advisory only: the outcome is
     # unchanged (the claim-bound gates refuse later). Exploratory runs read tentative_outcome.
@@ -1984,7 +2195,14 @@ def _run_script_impl(
 
     # Populate outcome_is_residual flag
     outcome_is_residual = False
-    if sidecar and outcome and outcome not in ("unknown", "", "error", "observed"):
+    if sidecar and outcome and outcome not in (
+        "unknown",
+        "",
+        "error",
+        "observed",
+        "invalid_measurement",
+        "invariant_fail",
+    ):
         spec = sidecar.outcomes.get(outcome)
         if spec:
             outcome_is_residual = getattr(spec, "is_residual", False)
@@ -2038,6 +2256,8 @@ def _run_script_impl(
         metadata = _with_metadata_key(
             metadata, "requires_waiver", {"reason": requires_waiver_reason}
         )
+    if sanity_check_record is not None:
+        metadata = _with_metadata_key(metadata, "sanity_check", sanity_check_record)
     run = dataclasses.replace(
         run,
         duration_s=time.monotonic() - start,

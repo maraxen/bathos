@@ -10,6 +10,7 @@ import tomllib
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import duckdb
 
@@ -125,6 +126,7 @@ class ClaimFile:
     union_gate_clauses: list[dict]  # {id, description, hypothesis_ids}
     path: Path
     sha256: str
+    decision_scope: dict[str, Any] = field(default_factory=dict)  # debt #2199
 
 
 def parse_claim(path: Path) -> ClaimFile:
@@ -163,6 +165,22 @@ def parse_claim(path: Path) -> ClaimFile:
     discriminability = claim_section.get("discriminability", [])
     union_gate = claim_section.get("union_gate", {})
     union_gate_clauses = union_gate.get("clauses", [])
+    raw_scope = (
+        claim_section["decision_scope"]
+        if "decision_scope" in claim_section
+        else data.get("decision_scope", {})
+    )
+    if isinstance(raw_scope, dict):
+        decision_scope: Any = {}
+        for axis, levels in raw_scope.items():
+            if isinstance(levels, (list, tuple)):
+                decision_scope[str(axis)] = [str(lv) for lv in levels]
+            elif isinstance(levels, str):
+                decision_scope[str(axis)] = [levels]
+            else:
+                decision_scope[str(axis)] = levels
+    else:
+        decision_scope = raw_scope
 
     # Compute SHA256 of file content
     sha256_hex = hashlib.sha256(content).hexdigest()
@@ -179,6 +197,7 @@ def parse_claim(path: Path) -> ClaimFile:
         union_gate_clauses=union_gate_clauses,
         path=path,
         sha256=sha256_hex,
+        decision_scope=decision_scope,
     )
 
 
@@ -545,6 +564,50 @@ def validate_claim(
         warnings.append(
             f"positive-testing bias detected — all {len(claim.discriminability)} discriminability entries predict the same outcome '{next(iter(all_outcomes))}'; no run in the matrix challenges the primary hypothesis"
         )
+
+    # #2199: structured decision_scope validation
+    if claim.decision_scope:
+        if not isinstance(claim.decision_scope, dict):
+            errors.append(
+                ValidationError(
+                    "claim.decision_scope must be a table mapping configuration axes to level lists"
+                )
+            )
+        else:
+            for axis, levels in claim.decision_scope.items():
+                if not str(axis).strip():
+                    errors.append(ValidationError("decision_scope axis name must not be blank"))
+                elif (
+                    not isinstance(levels, (list, tuple))
+                    or not levels
+                    or any(not str(lv).strip() for lv in levels)
+                ):
+                    errors.append(
+                        ValidationError(
+                            f"decision_scope axis '{axis}' must map to a non-empty list of level names"
+                        )
+                    )
+            if not (claim.regime or "").strip():
+                warnings.append(
+                    "claim.decision_scope is declared without a prose [claim] regime description"
+                )
+
+    # #2202: surface untested/non-tested assumption status early
+    for assumption in claim.assumptions:
+        if not isinstance(assumption, dict) or "status" not in assumption:
+            continue
+        status_val = assumption.get("status")
+        if not isinstance(status_val, str):
+            errors.append(
+                ValidationError(
+                    f"assumption '{assumption.get('id', '?')}' status must be a string"
+                )
+            )
+        elif status_val.strip() != "tested" and not _assumption_is_waived(assumption):
+            warnings.append(
+                f"assumption '{assumption.get('id', '?')}' has status={status_val!r} != 'tested' — "
+                "campaign conclude will block unless tested or explicitly waived"
+            )
 
     return ValidationResult(ok=len(errors) == 0, errors=errors, warnings=warnings, infos=infos)
 
@@ -1777,4 +1840,226 @@ def contradicted_citations(
         "indeterminate": indeterminate,
         "evaluable": supports_seen - len(indeterminate),
         "supports_seen": supports_seen,
+    }
+
+
+def _assumption_is_waived(assumption: dict) -> bool:
+    """Return True iff an assumption entry carries an explicit non-empty waiver/override reason."""
+    waiver = assumption.get("waiver")
+    if isinstance(waiver, str) and waiver.strip():
+        return True
+    if isinstance(waiver, dict) and str(waiver.get("reason") or "").strip():
+        return True
+    for key in ("waive_reason", "override_reason"):
+        val = assumption.get(key)
+        if isinstance(val, str) and val.strip():
+            return True
+    if assumption.get("waived") is True:
+        reason = str(assumption.get("reason") or "").strip()
+        if reason:
+            return True
+    return False
+
+
+def untested_assumptions(claim: ClaimFile) -> list[dict]:
+    """Return claim assumptions whose declared `status` is not `'tested'` and not explicitly waived (#2202).
+
+    Assumptions that omit the `status` key entirely are treated as legacy/unannotated for
+    backward compatibility with existing claims.
+    """
+    untested: list[dict] = []
+    for assumption in claim.assumptions:
+        if not isinstance(assumption, dict) or "status" not in assumption:
+            continue
+        status_val = str(assumption.get("status") or "").strip()
+        if status_val != "tested" and not _assumption_is_waived(assumption):
+            untested.append(assumption)
+    return untested
+
+
+def _runs_table_name(db: duckdb.DuckDBPyConnection) -> str:
+    try:
+        tables = {
+            r[0]
+            for r in db.execute(
+                "SELECT table_name FROM duckdb_tables() WHERE table_name='runs_current'"
+            ).fetchall()
+        }
+        return "runs_current" if "runs_current" in tables else "runs"
+    except Exception:
+        return "runs"
+
+
+def check_decision_scope(
+    db: duckdb.DuckDBPyConnection,
+    campaign_id: str,
+    claim: ClaimFile,
+) -> dict:
+    """Verify claim `decision_scope` is a subset of the campaign's tested run scope (#2199).
+
+    Inspects completed valid member runs (`outcome NOT IN ('error', 'invalid_measurement',
+    'invariant_fail')`) and extracts axis levels from `runs.metadata` (`tested_scope`,
+    `tested_regime`, `scope`, `params`, `config`, or top-level keys). Also flags when one
+    named position/aperture label maps to multiple distinct content hashes across runs.
+    """
+    if not claim.decision_scope or not isinstance(claim.decision_scope, dict):
+        return {"verdict": "covered", "uncovered": [], "tested_scope": {}, "hash_conflicts": []}
+
+    runs_tbl = _runs_table_name(db)
+    rows = db.execute(
+        f"""
+        SELECT r.id, r.outcome, r.metadata
+        FROM campaign_runs cr
+        JOIN {runs_tbl} r ON cr.run_id = r.id
+        WHERE cr.campaign_id = ?
+        """,
+        [campaign_id],
+    ).fetchall()
+
+    tested_by_axis: dict[str, set[str]] = {}
+    label_hashes: dict[str, set[str]] = {}
+
+    for _run_id, outcome, metadata_json in rows:
+        if outcome in ("error", "invalid_measurement", "invariant_fail"):
+            continue
+        try:
+            meta = json.loads(metadata_json or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(meta, dict):
+            continue
+
+        for axis in claim.decision_scope:
+            candidates = []
+            for container_key in ("tested_scope", "tested_regime", "scope", "params", "config"):
+                container = meta.get(container_key)
+                if isinstance(container, dict) and axis in container:
+                    candidates.append(container[axis])
+            if axis in meta:
+                candidates.append(meta[axis])
+
+            bucket = tested_by_axis.setdefault(axis, set())
+            for val in candidates:
+                if val is None:
+                    continue
+                if isinstance(val, (list, tuple, set)):
+                    bucket.update(str(x) for x in val)
+                else:
+                    bucket.add(str(val))
+
+        for hash_key in ("position_set_hashes", "aperture_hashes"):
+            h_map = meta.get(hash_key)
+            if isinstance(h_map, dict):
+                for lbl, digest in h_map.items():
+                    if lbl and digest is not None:
+                        label_hashes.setdefault(str(lbl), set()).add(str(digest))
+
+    uncovered: list[dict] = []
+    for axis, levels in claim.decision_scope.items():
+        if not isinstance(levels, (list, tuple)):
+            continue
+        required = {str(lv) for lv in levels}
+        tested = tested_by_axis.get(axis, set())
+        missing = sorted(required - tested)
+        if missing:
+            uncovered.append(
+                {
+                    "axis": axis,
+                    "missing_levels": missing,
+                    "tested_levels": sorted(tested),
+                }
+            )
+
+    hash_conflicts = [
+        {"label": lbl, "hashes": sorted(hashes)}
+        for lbl, hashes in sorted(label_hashes.items())
+        if len(hashes) > 1
+    ]
+
+    verdict = "covered" if (not uncovered and not hash_conflicts) else "uncovered"
+    return {
+        "verdict": verdict,
+        "uncovered": uncovered,
+        "tested_scope": {k: sorted(v) for k, v in tested_by_axis.items()},
+        "hash_conflicts": hash_conflicts,
+    }
+
+
+def factor_coverage_check(
+    db: duckdb.DuckDBPyConnection,
+    campaign_id: str,
+    claim: ClaimFile,  # noqa: ARG001 - symmetry with campaign-level claim checks
+    workspace_root: Path | None = None,
+    catalog_dir: Path | None = None,
+) -> dict:
+    """Check declared-vs-analyzed factor coverage and `n_units_informative` across member runs (#2200)."""
+    from bathos.validate import check_factor_coverage
+
+    cat_dir = _infer_catalog_dir(db, catalog_dir, workspace_root)
+    runs_tbl = _runs_table_name(db)
+    try:
+        rows = db.execute(
+            f"""
+            SELECT r.id, r.outcome, r.metadata, r.sidecar_path, r.sidecar_sha256
+            FROM campaign_runs cr
+            JOIN {runs_tbl} r ON cr.run_id = r.id
+            WHERE cr.campaign_id = ?
+            """,
+            [campaign_id],
+        ).fetchall()
+    except Exception:
+        rows = [
+            (rid, out, meta, sp, "")
+            for rid, out, meta, sp in db.execute(
+                f"""
+                SELECT r.id, r.outcome, r.metadata, r.sidecar_path
+                FROM campaign_runs cr
+                JOIN {runs_tbl} r ON cr.run_id = r.id
+                WHERE cr.campaign_id = ?
+                """,
+                [campaign_id],
+            ).fetchall()
+        ]
+
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    for run_id, outcome, metadata_json, sidecar_path, sidecar_sha256 in rows:
+        if outcome in ("error", "invalid_measurement", "invariant_fail"):
+            continue
+        try:
+            meta = json.loads(metadata_json or "{}")
+        except (json.JSONDecodeError, TypeError):
+            meta = {}
+        if not isinstance(meta, dict):
+            meta = {}
+
+        declared: dict[str, list[str]] = {}
+        excluded: dict[str, str] = {}
+        if sidecar_path or sidecar_sha256:
+            try:
+                sc = _resolve_member_sidecar(
+                    db,
+                    run_id=run_id or "",
+                    sidecar_path=sidecar_path or "",
+                    sidecar_sha256=sidecar_sha256 or "",
+                    workspace_root=workspace_root,
+                    catalog_dir=cat_dir,
+                )
+                if sc is not None:
+                    declared = sc.declared_levels
+                    excluded = sc.excluded_levels
+            except Exception:
+                pass
+
+        cov_errors, cov_warnings = check_factor_coverage(declared, meta, excluded)
+        for err in cov_errors:
+            errors.append(f"run {str(run_id)[:8]}: {err.message}")
+        for warn in cov_warnings:
+            warnings.append(f"run {str(run_id)[:8]}: {warn}")
+
+    return {
+        "verdict": "covered" if not errors else "uncovered",
+        "errors": errors,
+        "warnings": warnings,
     }

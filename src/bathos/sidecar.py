@@ -49,6 +49,22 @@ class OutcomeSpec:
 
 
 @dataclass
+class InvariantSpec:
+    """Sidecar `[invariants.<name>]` hard-fail assertion (spec 260707 §3)."""
+
+    condition: str
+    reasoning: str = ""
+
+
+@dataclass
+class SanityBlock:
+    """Confirmatory `[sanity]` pre-flight block (spec 260707 §7)."""
+
+    argv_suffix: list[str] = field(default_factory=lambda: ["--sanity-check"])
+    assertions: dict[str, InvariantSpec] = field(default_factory=dict)
+
+
+@dataclass
 class ReproductionBlock:
     """Reproduction metadata for experiment sidecars (optional [reproduction] block)."""
 
@@ -461,6 +477,11 @@ class Sidecar:
     # experiment-only physical stoichiometry and reagent pack amortization (spec 261113)
     stoichiometry: StoichiometryBlock | None = None
     reagents: dict[str, ReagentSpec] = field(default_factory=dict)
+    # scientific-validity gates (spec 260707 §3, §7; debt #2202, #2200)
+    invariants: dict[str, InvariantSpec] = field(default_factory=dict)
+    sanity: SanityBlock | None = None
+    declared_levels: dict[str, list[str]] = field(default_factory=dict)
+    excluded_levels: dict[str, str] = field(default_factory=dict)
 
     def to_declaration(self) -> dict[str, typing.Any]:
         """Serialize this Sidecar to a JSON-safe declaration dict (symmetric with `from_declaration`)."""
@@ -593,12 +614,15 @@ ENFORCED_DIRS = {"experiments", "benchmarks", "validation"}
 #
 # "observed" (spec §3.2, epistemic class) is what exploratory and calibrating runs store as their
 # outcome: a value was recorded, no verdict was reached. It is bathos-exclusive for the same reason.
-RESERVED_OUTCOME_LABELS = {"invalid_measurement", "observed"}
+RESERVED_OUTCOME_LABELS = {"invalid_measurement", "observed", "invariant_fail"}
 
 # Labels that never open an outcome_failed obligation (spec 261015 §3.2, C5). "observed" is what
 # exploratory and calibrating runs store; "invalid_measurement" is the instrument-failure label
-# (debt #1071). Both are neutral: no failure, no e-value evidence.
-NEUTRAL_OUTCOME_LABELS = frozenset({"", "unknown", "observed", "invalid_measurement"})
+# (debt #1071); "invariant_fail" is a violated [invariants] assertion (spec 260707 §3.3).
+# All three are neutral: no failure, no e-value evidence.
+NEUTRAL_OUTCOME_LABELS = frozenset(
+    {"", "unknown", "observed", "invalid_measurement", "invariant_fail"}
+)
 
 # Canonical set: the advisory vocabulary for stage_name values.
 # These are best-practice values discovered from real stage_name usage.
@@ -727,6 +751,8 @@ EXPERIMENT_KEYS: frozenset[str] = frozenset(
         "claim_isolates",
         "question_slug",
         "reopen_reason",
+        "declared_levels",
+        "excluded_levels",
     }
 )
 
@@ -1012,6 +1038,13 @@ def parse_sidecar(path: Path) -> Sidecar:
         sidecar.stoichiometry = _parse_stoichiometry(data["stoichiometry"], path)
     if "reagents" in data:
         sidecar.reagents = _parse_reagents(data["reagents"], path)
+    if "invariants" in data:
+        sidecar.invariants = _parse_invariants(data["invariants"], path)
+    if "sanity" in data:
+        sidecar.sanity = _parse_sanity(data["sanity"], path)
+    declared_levels, excluded_levels = _parse_factors_and_exclusions(data, path)
+    sidecar.declared_levels = declared_levels
+    sidecar.excluded_levels = excluded_levels
 
     return sidecar
 
@@ -1764,6 +1797,118 @@ def _parse_outcomes(data: dict) -> dict[str, OutcomeSpec]:
     }
 
 
+def _parse_assertion_table(
+    raw: object, section_name: str, path: Path | None
+) -> dict[str, InvariantSpec]:
+    """Parse a table of named `{condition, reasoning}` assertions (`[invariants]` or `[sanity.assertions]`)."""
+    if not isinstance(raw, dict):
+        raise SidecarError(f"{path}: [{section_name}] must be a table")
+    parsed: dict[str, InvariantSpec] = {}
+    for name, spec in raw.items():
+        if not isinstance(spec, dict):
+            raise SidecarError(f"{path}: [{section_name}.{name}] must be a table")
+        for key in spec:
+            if key not in {"condition", "reasoning"}:
+                logger.warning(f"Unknown key in [{section_name}.{name}]: {key!r}")
+        cond = spec.get("condition", "")
+        reason = spec.get("reasoning", "")
+        parsed[str(name)] = InvariantSpec(
+            condition="" if cond is None else str(cond),
+            reasoning="" if reason is None else str(reason),
+        )
+    return parsed
+
+
+def _parse_invariants(raw: object, path: Path | None = None) -> dict[str, InvariantSpec]:
+    """Parse the optional top-level `[invariants]` block (spec 260707 §3)."""
+    return _parse_assertion_table(raw, "invariants", path)
+
+
+def _parse_sanity(raw: object, path: Path | None = None) -> SanityBlock:
+    """Parse the optional top-level `[sanity]` confirmatory pre-flight block (spec 260707 §7)."""
+    if not isinstance(raw, dict):
+        raise SidecarError(f"{path}: [sanity] must be a table")
+    for key in raw:
+        if key not in {"argv_suffix", "assertions"}:
+            logger.warning(f"Unknown key in [sanity]: {key!r}")
+    if "argv_suffix" in raw:
+        suffix_raw = raw["argv_suffix"]
+        if isinstance(suffix_raw, str):
+            argv_suffix = [suffix_raw]
+        elif isinstance(suffix_raw, list) and all(isinstance(x, str) for x in suffix_raw):
+            argv_suffix = list(suffix_raw)
+        else:
+            raise SidecarError(f"{path}: [sanity].argv_suffix must be a list of strings")
+    else:
+        argv_suffix = ["--sanity-check"]
+    assertions_raw = raw.get("assertions", {})
+    assertions = _parse_assertion_table(assertions_raw, "sanity.assertions", path)
+    return SanityBlock(argv_suffix=argv_suffix, assertions=assertions)
+
+
+def _parse_factors_and_exclusions(
+    data: dict, path: Path | None = None
+) -> tuple[dict[str, list[str]], dict[str, str]]:
+    """Parse optional `[factors]` / `[excluded_levels]` / `[experiment]` level declarations (#2200)."""
+    declared: dict[str, list[str]] = {}
+    excluded: dict[str, str] = {}
+
+    def _merge_declared(src: object, where: str) -> None:
+        if src is None:
+            return
+        if not isinstance(src, dict):
+            raise SidecarError(f"{path}: {where} must be a table mapping factor -> levels")
+        for factor, levels in src.items():
+            if isinstance(levels, (list, tuple)):
+                declared[str(factor)] = [str(v) for v in levels]
+            elif isinstance(levels, str):
+                declared[str(factor)] = [levels]
+            else:
+                raise SidecarError(
+                    f"{path}: {where}.{factor} must be a list of level names"
+                )
+
+    def _merge_excluded(src: object, where: str) -> None:
+        if src is None:
+            return
+        if not isinstance(src, dict):
+            raise SidecarError(f"{path}: {where} must be a table mapping level -> reason")
+        for key, val in src.items():
+            if isinstance(val, dict):
+                # Nested [excluded_levels.<factor>] { level = "reason" }
+                for sub_level, reason in val.items():
+                    if not isinstance(reason, str):
+                        raise SidecarError(
+                            f"{path}: {where}.{key}.{sub_level} reason must be a string"
+                        )
+                    excluded[f"{key}.{sub_level}"] = reason.strip()
+            else:
+                if not isinstance(val, str):
+                    raise SidecarError(f"{path}: {where}.{key} reason must be a string")
+                excluded[str(key)] = val.strip()
+
+    exp = data.get("experiment")
+    if isinstance(exp, dict):
+        _merge_declared(exp.get("declared_levels"), "[experiment].declared_levels")
+        _merge_excluded(exp.get("excluded_levels"), "[experiment].excluded_levels")
+
+    factors = data.get("factors")
+    if factors is not None:
+        if not isinstance(factors, dict):
+            raise SidecarError(f"{path}: [factors] must be a table")
+        for key in factors:
+            if key not in {"levels", "declared_levels", "excluded_levels"}:
+                logger.warning(f"Unknown key in [factors]: {key!r}")
+        _merge_declared(factors.get("levels"), "[factors.levels]")
+        _merge_declared(factors.get("declared_levels"), "[factors.declared_levels]")
+        _merge_excluded(factors.get("excluded_levels"), "[factors.excluded_levels]")
+
+    if "excluded_levels" in data:
+        _merge_excluded(data.get("excluded_levels"), "[excluded_levels]")
+
+    return declared, excluded
+
+
 def single_row_projection(row: dict) -> str:
     """Render a dict as a DuckDB single-row SELECT projection.
 
@@ -1919,9 +2064,9 @@ def compute_evalue(
     if sidecar.popper_null_pass_rate is None:
         return 1.0
 
-    # Same neutral set as before plus invalid_measurement; "" is deliberately not here (it
-    # always fell through to the fail-direction formula, and still does).
-    if outcome_label in ("error", "unknown", "observed", "invalid_measurement"):
+    # Same neutral set as before plus invalid_measurement and invariant_fail; "" is deliberately
+    # not here (it always fell through to the fail-direction formula, and still does).
+    if outcome_label in ("error", "unknown", "observed", "invalid_measurement", "invariant_fail"):
         return 1.0
 
     # Explicit weight override takes priority
@@ -2703,7 +2848,7 @@ def evaluate_adversarial_check_detailed(
     when a declared check could not be evaluated (status None), or "" otherwise. The error lets
     the runner record the failure in outcome_error_reason instead of dropping it silently.
     """
-    if not outcome_label or outcome_label in ("error", "unknown") or not result:
+    if not outcome_label or outcome_label in ("error", "unknown", "invalid_measurement", "invariant_fail") or not result:
         return None, ""
     spec = sidecar.outcomes.get(outcome_label)
     check = getattr(spec, "adversarial_check", None) if spec else None
@@ -2737,3 +2882,35 @@ def evaluate_outcome(sidecar: Sidecar, result: dict) -> str:
         except Exception as e:
             raise SidecarError(f"Failed to evaluate outcome '{label}': {e}") from e
     return "unknown"
+
+
+def _evaluate_assertion_map(assertions: dict[str, InvariantSpec], result: dict) -> list[str]:
+    """Return names of all assertions whose condition evaluated False, NULL, or raised."""
+    if not assertions:
+        return []
+    if not result:
+        return list(assertions.keys())
+
+    violations: list[str] = []
+    for name, spec in assertions.items():
+        try:
+            value = _condition_value(spec.condition, result)
+            if not value:
+                violations.append(name)
+        except Exception as e:
+            logger.debug(f"Assertion {name!r} ({spec.condition!r}) failed to evaluate: {e}")
+            violations.append(name)
+    return violations
+
+
+def evaluate_invariants(sidecar: Sidecar, result: dict) -> list[str]:
+    """Return the list of `[invariants.*]` names whose condition evaluated False (or raised).
+
+    Empty list means all declared invariants held (or none were declared).
+    """
+    return _evaluate_assertion_map(sidecar.invariants, result)
+
+
+def evaluate_sanity_assertions(sanity: SanityBlock, result: dict) -> list[str]:
+    """Return the list of `[sanity.assertions.*]` names whose condition evaluated False (or raised)."""
+    return _evaluate_assertion_map(sanity.assertions, result)

@@ -109,87 +109,92 @@ _DIR_RULES: dict[str, dict] = {
 
 def lint_project(project_root: Path) -> list[LintIssue]:
     scripts_dir = project_root / "scripts"
-    if not scripts_dir.exists():
-        return []
-
     issues: list[LintIssue] = []
 
-    for dir_name, rules in _DIR_RULES.items():
-        dir_path = scripts_dir / dir_name
-        if not dir_path.exists():
-            continue
-
-        for script in sorted(dir_path.iterdir()):
-            if script.name.startswith(".") or script.name.startswith("_") or script.is_dir():
+    if scripts_dir.exists():
+        for dir_name, rules in _DIR_RULES.items():
+            dir_path = scripts_dir / dir_name
+            if not dir_path.exists():
                 continue
 
-            # Skip sidecar and run-lock files (the latter written by `_write_manifest`
-            # in runner.py as "<script_stem>.bth.<run_id>.bth.lock.toml" -- it ends in
-            # ".bth.lock.toml", not ".bth.toml", so needs its own check here).
-            if script.suffix == ".toml" and (
-                script.name.endswith(_SIDECAR_SUFFIX) or script.name.endswith(_LOCK_FILE_SUFFIX)
-            ):
-                continue
+            for script in sorted(dir_path.iterdir()):
+                if script.name.startswith(".") or script.name.startswith("_") or script.is_dir():
+                    continue
 
-            stem = script.stem
-            ext = script.suffix
+                # Skip sidecar and run-lock files (the latter written by `_write_manifest`
+                # in runner.py as "<script_stem>.bth.<run_id>.bth.lock.toml" -- it ends in
+                # ".bth.lock.toml", not ".bth.toml", so needs its own check here).
+                if script.suffix == ".toml" and (
+                    script.name.endswith(_SIDECAR_SUFFIX) or script.name.endswith(_LOCK_FILE_SUFFIX)
+                ):
+                    continue
 
-            if ext not in rules["extensions"]:
-                issues.append(
-                    LintIssue(
-                        path=script,
-                        directory=dir_name,
-                        issue="naming",
-                        severity=IssueSeverity.ERROR,
-                        detail=f"expected extension {rules['extensions']}, got {ext!r}",
+                stem = script.stem
+                ext = script.suffix
+
+                if ext not in rules["extensions"]:
+                    issues.append(
+                        LintIssue(
+                            path=script,
+                            directory=dir_name,
+                            issue="naming",
+                            severity=IssueSeverity.ERROR,
+                            detail=f"expected extension {rules['extensions']}, got {ext!r}",
+                        )
                     )
-                )
-                continue
+                    continue
 
-            if not rules["pattern"].match(stem):
-                expected = (
-                    "verb_noun"
-                    if dir_name not in ("debug", "explore", "scratch")
-                    else "YYMMDD_desc"
-                )
-                issues.append(
-                    LintIssue(
-                        path=script,
-                        directory=dir_name,
-                        issue="naming",
-                        severity=IssueSeverity.ERROR,
-                        detail=f"expected {expected} style, got {stem!r}",
+                if not rules["pattern"].match(stem):
+                    expected = (
+                        "verb_noun"
+                        if dir_name not in ("debug", "explore", "scratch")
+                        else "YYMMDD_desc"
                     )
-                )
-
-            if rules["sidecar"] is not None and find_sidecar(script) is None:
-                issues.append(
-                    LintIssue(
-                        path=script,
-                        directory=dir_name,
-                        issue="missing_sidecar",
-                        severity=rules["sidecar"],
-                        detail=f"create {stem}.bth.toml next to this script",
+                    issues.append(
+                        LintIssue(
+                            path=script,
+                            directory=dir_name,
+                            issue="naming",
+                            severity=IssueSeverity.ERROR,
+                            detail=f"expected {expected} style, got {stem!r}",
+                        )
                     )
-                )
 
-    # Tier-1 checks for validation/production experiments
-    issues.extend(check_novel_or_reproduces_declared(project_root))
+                if rules["sidecar"] is not None and find_sidecar(script) is None:
+                    issues.append(
+                        LintIssue(
+                            path=script,
+                            directory=dir_name,
+                            issue="missing_sidecar",
+                            severity=rules["sidecar"],
+                            detail=f"create {stem}.bth.toml next to this script",
+                        )
+                    )
 
-    # Tier-1 check: null-capable outcomes need a positive control (debt #1071)
-    issues.extend(check_positive_control_missing(project_root))
+        # Tier-1 checks for validation/production experiments
+        issues.extend(check_novel_or_reproduces_declared(project_root))
 
-    # Tier-1 check: uncorrected multiple-comparisons in outcome conditions (debt #1071)
-    issues.extend(check_multiple_comparisons(project_root))
+        # Tier-1 check: null-capable outcomes need a positive control (debt #1071)
+        issues.extend(check_positive_control_missing(project_root))
 
-    # Worst-case aggregates gating a verdict with no [breakdown] (spec 261026 D4)
-    issues.extend(check_aggregate_without_breakdown(project_root))
+        # Tier-1 check: uncorrected multiple-comparisons in outcome conditions (debt #1071)
+        issues.extend(check_multiple_comparisons(project_root))
 
-    # Epistemic-class contract: stage_name canonicality, restage hints, source grammar (spec §3.1-3.2)
-    issues.extend(check_epistemic_sidecars(project_root))
+        # Worst-case aggregates gating a verdict with no [breakdown] (spec 261026 D4)
+        issues.extend(check_aggregate_without_breakdown(project_root))
 
-    # Step-back review records lint
-    issues.extend(check_stepback_reviews(project_root))
+        # Epistemic-class contract: stage_name canonicality, restage hints, source grammar (spec §3.1-3.2)
+        issues.extend(check_epistemic_sidecars(project_root))
+
+        # Unmeasured prose data-quality/filtering claims (#2662) and factor coverage declarations (#2200)
+        issues.extend(check_unmeasured_data_quality_claims(project_root))
+        issues.extend(check_factor_coverage_lint(project_root))
+
+        # Step-back review records lint
+        issues.extend(check_stepback_reviews(project_root))
+
+    # AC-06 (#2199): wire check_single_cell_gate into lint_project when a project catalog exists
+    issues.extend(_lint_single_cell_campaigns(project_root))
 
     return issues
 
@@ -1797,6 +1802,183 @@ def check_single_cell_gate(
                 detail=f"all {len(metas)} confirmatory runs use identical values for: {sorted(uniform_keys)[:5]}; claim.regime may not be covered",
             )
         )
+    return issues
+
+
+def _resolve_project_catalog_dir(project_root: Path) -> Path | None:
+    """Resolve a project-scoped catalog directory without leaking ~/.bth/catalog."""
+    import os
+
+    env_cat = os.environ.get("BTH_CATALOG_DIR")
+    if env_cat:
+        p = Path(env_cat)
+        return p if p.exists() else None
+    local_cat = project_root / ".bth" / "catalog"
+    if local_cat.exists():
+        return local_cat
+    bth_toml = project_root / ".bth.toml"
+    if bth_toml.is_file():
+        with suppress(Exception):
+            from bathos.config import load_project_config
+
+            cfg = load_project_config(bth_toml)
+            if cfg.catalog_dir and cfg.catalog_dir.exists():
+                return cfg.catalog_dir
+    return None
+
+
+def _lint_single_cell_campaigns(project_root: Path) -> list[LintIssue]:
+    """Run `check_single_cell_gate` over confirmatory/sequential campaigns in the project catalog."""
+    catalog_dir = _resolve_project_catalog_dir(project_root)
+    if catalog_dir is None or not catalog_readable(catalog_dir):
+        return []
+
+    issues: list[LintIssue] = []
+    try:
+        db = connect_read(catalog_dir, read_only=True)
+        try:
+            rows = db.execute(
+                "SELECT id FROM campaigns WHERE mode IN ('confirmation', 'sequential')"
+            ).fetchall()
+            for (campaign_id,) in rows:
+                issues.extend(check_single_cell_gate([], campaign_id, db))
+        finally:
+            db.close()
+    except Exception:
+        return []
+    return issues
+
+
+def check_invariants_declared(project_root: Path) -> list[LintIssue]:
+    """Tier-2 advisory: warn when confirmatory/benchmark sidecars declare no `[invariants]` (spec 260707 §9)."""
+    from bathos.sidecar import SidecarKind, parse_sidecar
+
+    issues: list[LintIssue] = []
+    for dir_name in ("experiments", "benchmarks"):
+        target_dir = project_root / "scripts" / dir_name
+        if not target_dir.exists():
+            continue
+        for sidecar_path in iter_project_sidecars(target_dir):
+            if sidecar_path.name == ".bth.toml":
+                continue
+            try:
+                sidecar = parse_sidecar(sidecar_path)
+            except Exception:
+                continue
+            if sidecar.kind not in (SidecarKind.EXPERIMENT, SidecarKind.BENCHMARK):
+                continue
+            if sidecar.kind == SidecarKind.EXPERIMENT and sidecar.observe is not None:
+                continue
+            if sidecar.kind == SidecarKind.EXPERIMENT and sidecar.calibrate is not None:
+                continue
+            if not sidecar.invariants:
+                issues.append(
+                    LintIssue(
+                        path=sidecar_path,
+                        directory=dir_name,
+                        issue="missing_invariants",
+                        severity=IssueSeverity.WARNING,
+                        detail=(
+                            "sidecar declares no [invariants] assertions — consider adding numeric "
+                            "or differential invariants to fail closed on silent measurement bugs"
+                        ),
+                    )
+                )
+    return issues
+
+
+def check_unmeasured_data_quality_claims(project_root: Path) -> list[LintIssue]:
+    """Flag sidecars making prose data-quality/filtering claims without measured counts + invariants (#2662)."""
+    from bathos.sidecar import parse_sidecar
+    from bathos.validate import validate_prose_data_quality_claims
+
+    issues: list[LintIssue] = []
+    for sidecar_path in iter_project_sidecars(project_root):
+        if sidecar_path.name == ".bth.toml":
+            continue
+        try:
+            sidecar = parse_sidecar(sidecar_path)
+        except Exception:
+            continue
+        for err in validate_prose_data_quality_claims(sidecar):
+            issues.append(
+                LintIssue(
+                    path=sidecar_path,
+                    directory=sidecar_path.parent.name,
+                    issue="unmeasured_data_quality_claim",
+                    severity=IssueSeverity.ERROR,
+                    detail=err.message,
+                )
+            )
+    return issues
+
+
+def check_factor_coverage_lint(project_root: Path) -> list[LintIssue]:
+    """Lint sidecars for factor coverage / exclusion declarations and `n_units_informative` (#2200)."""
+    from bathos.sidecar import parse_sidecar
+    from bathos.validate import validate_factor_declarations
+
+    issues: list[LintIssue] = []
+    for sidecar_path in iter_project_sidecars(project_root):
+        if sidecar_path.name == ".bth.toml":
+            continue
+        try:
+            sidecar = parse_sidecar(sidecar_path)
+        except Exception:
+            continue
+        warnings: list[str] = []
+        errors = validate_factor_declarations(sidecar, warnings=warnings)
+        for err in errors:
+            issues.append(
+                LintIssue(
+                    path=sidecar_path,
+                    directory=sidecar_path.parent.name,
+                    issue="factor_declaration_invalid",
+                    severity=IssueSeverity.ERROR,
+                    detail=err.message,
+                )
+            )
+        for warn in warnings:
+            issues.append(
+                LintIssue(
+                    path=sidecar_path,
+                    directory=sidecar_path.parent.name,
+                    issue="missing_n_units_informative",
+                    severity=IssueSeverity.WARNING,
+                    detail=warn,
+                )
+            )
+        if sidecar.declared_levels and sidecar.result_schema:
+            schema_keys = set(sidecar.result_schema.keys())
+            for factor, levels in sidecar.declared_levels.items():
+                plural = factor if factor.endswith("s") else f"{factor}s"
+                coverage_keys = {
+                    "analyzed_levels",
+                    "covered_levels",
+                    factor,
+                    plural,
+                    f"{factor}_analyzed",
+                    f"analyzed_{factor}",
+                    f"per_{factor}",
+                }
+                all_excluded = all(
+                    (f"{factor}.{lv}" in sidecar.excluded_levels and sidecar.excluded_levels[f"{factor}.{lv}"].strip())
+                    or (lv in sidecar.excluded_levels and sidecar.excluded_levels[lv].strip())
+                    for lv in levels
+                )
+                if not (schema_keys & coverage_keys) and not all_excluded:
+                    issues.append(
+                        LintIssue(
+                            path=sidecar_path,
+                            directory=sidecar_path.parent.name,
+                            issue="declared_levels_untracked",
+                            severity=IssueSeverity.WARNING,
+                            detail=(
+                                f"declared_levels.{factor} has no matching coverage field in "
+                                "[result_schema] (e.g. analyzed_levels / per_<factor>)"
+                            ),
+                        )
+                    )
     return issues
 
 

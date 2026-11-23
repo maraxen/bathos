@@ -13,6 +13,7 @@ import duckdb
 from bathos.sidecar import (
     BREAKDOWN_DIRECTIONS,
     RESERVED_OUTCOME_LABELS,
+    InvariantSpec,
     Sidecar,
     SidecarKind,
     _condition_value,
@@ -20,6 +21,7 @@ from bathos.sidecar import (
     check_sanity_expr,
     columns_referenced,
     evaluate_adversarial_check_detailed,
+    evaluate_invariants,
     expand_breakdown_aggregates,
     parse_source,
     resolve_epistemic_class,
@@ -546,6 +548,64 @@ def _check_result_schema_recursive(
 _DOTTED_REF_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+)\b")
 
 
+def _validate_sql_condition(condition: str, result_schema: dict[str, Any]) -> str | None:
+    """Validate a DuckDB SQL boolean fragment against a dummy table built from `result_schema`.
+
+    Returns None if valid, or the DuckDB error string if invalid.
+    """
+    try:
+        con = duckdb.connect()
+        try:
+            if result_schema:
+                col_defs: list[str] = []
+                for k, v in result_schema.items():
+                    sql_t = _schema_type_to_sql(v)
+                    if sql_t is not None:
+                        col_defs.append(f"{_quote_sql_ident(k)} {sql_t}")
+                cols = ", ".join(col_defs)
+                if cols:
+                    con.execute(f"CREATE TEMP TABLE _dummy ({cols})")
+                    con.execute(f"SELECT ({condition}) FROM _dummy LIMIT 0")
+                else:
+                    con.execute(f"SELECT ({condition})")
+            else:
+                con.execute(f"SELECT ({condition})")
+        finally:
+            con.close()
+    except Exception as e:
+        return str(e)
+    return None
+
+
+def _check_dotted_refs_in_result(
+    condition: str,
+    field_prefix: str,
+    label_desc: str,
+    result: dict[str, Any],
+    errors: list[ValidationError],
+) -> None:
+    """Ensure dotted nested references in `condition` resolve inside `result`."""
+    if not condition or "${" in condition:
+        return
+    stripped = _strip_sql_string_literals(condition)
+    for ref in _DOTTED_REF_RE.findall(stripped):
+        parts = ref.split(".")
+        cur: Any = result
+        missing = False
+        for part in parts:
+            if not isinstance(cur, dict) or part not in cur:
+                missing = True
+                break
+            cur = cur[part]
+        if missing:
+            errors.append(
+                ValidationError(
+                    field_prefix,
+                    f"Nested key {ref!r} referenced by {label_desc} is missing in result JSON",
+                )
+            )
+
+
 def validate_result_against_sidecar(
     sidecar: Sidecar,
     result: object,
@@ -571,25 +631,21 @@ def validate_result_against_sidecar(
 
     # Check nested dotted keys referenced by conditions exist in `result`
     for label, spec in sidecar.outcomes.items():
-        if not spec.condition or "${" in spec.condition:
-            continue
-        stripped = _strip_sql_string_literals(spec.condition)
-        for ref in _DOTTED_REF_RE.findall(stripped):
-            parts = ref.split(".")
-            cur: Any = result
-            missing = False
-            for part in parts:
-                if not isinstance(cur, dict) or part not in cur:
-                    missing = True
-                    break
-                cur = cur[part]
-            if missing:
-                errors.append(
-                    ValidationError(
-                        f"outcomes.{label}.condition",
-                        f"Nested key {ref!r} referenced by outcomes.{label} is missing in result JSON",
-                    )
-                )
+        _check_dotted_refs_in_result(
+            spec.condition,
+            f"outcomes.{label}.condition",
+            f"outcomes.{label}",
+            result,
+            errors,
+        )
+    for inv_name, inv_spec in sidecar.invariants.items():
+        _check_dotted_refs_in_result(
+            inv_spec.condition,
+            f"invariants.{inv_name}.condition",
+            f"invariants.{inv_name}",
+            result,
+            errors,
+        )
 
     matched_outcome: str | None = None
     eval_errored = False
@@ -630,6 +686,21 @@ def validate_result_against_sidecar(
                         f"Adversarial check evaluation error against result JSON: {adv_err}",
                     )
                 )
+
+    if sidecar.invariants:
+        for violated_name in evaluate_invariants(sidecar, result):
+            errors.append(
+                ValidationError(
+                    f"invariants.{violated_name}",
+                    f"Invariant {violated_name!r} failed against result JSON "
+                    f"(condition: {sidecar.invariants[violated_name].condition!r})",
+                )
+            )
+
+    cov_errors, _cov_warnings = check_factor_coverage(
+        sidecar.declared_levels, result, sidecar.excluded_levels
+    )
+    errors.extend(cov_errors)
 
     if sidecar_path:
         for err in errors:
@@ -1069,6 +1140,528 @@ def validate_differential_block(
             )
 
     return errors
+
+
+def _validate_assertion_map(
+    assertions: dict[str, InvariantSpec],
+    prefix: str,
+    sidecar: Sidecar,
+    sidecar_path: Path | None,
+    errors: list[ValidationError],
+    warnings: list[str] | None = None,
+) -> None:
+    """Validate `{name: InvariantSpec}` entries (`[invariants.*]` or `[sanity.assertions.*]`)."""
+    schema_keys = _collect_schema_field_names(sidecar.result_schema) if sidecar.result_schema else set()
+
+    for name, spec in assertions.items():
+        if not spec.condition.strip():
+            err = ValidationError(f"{prefix}.{name}", "Missing 'condition' field")
+            errors.append(err)
+            if sidecar_path:
+                event(
+                    "sidecar.validate_error",
+                    path=str(sidecar_path),
+                    field=err.field,
+                    reason=err.message,
+                )
+        elif "${" in spec.condition:
+            err = ValidationError(
+                f"{prefix}.{name}.condition",
+                f"unfilled placeholder in condition {spec.condition!r}: "
+                "template '${...}' must be filled in before the sidecar is valid",
+            )
+            errors.append(err)
+            if sidecar_path:
+                event(
+                    "sidecar.validate_error",
+                    path=str(sidecar_path),
+                    field=err.field,
+                    reason=err.message,
+                )
+        else:
+            for null_op in _find_null_equality_ops(spec.condition):
+                err = ValidationError(
+                    f"{prefix}.{name}.condition",
+                    f"Invalid SQL NULL comparison ({null_op!r}) in condition "
+                    f"{spec.condition!r} — use 'IS NULL' or 'IS NOT NULL' instead",
+                )
+                errors.append(err)
+                if sidecar_path:
+                    event(
+                        "sidecar.validate_error",
+                        path=str(sidecar_path),
+                        field=err.field,
+                        reason=err.message,
+                    )
+            sql_err = _validate_sql_condition(spec.condition, sidecar.result_schema)
+            if sql_err is not None:
+                err = ValidationError(
+                    f"{prefix}.{name}.condition",
+                    f"DuckDB parse error: {sql_err}",
+                )
+                errors.append(err)
+                if sidecar_path:
+                    event(
+                        "sidecar.validate_error",
+                        path=str(sidecar_path),
+                        field=err.field,
+                        reason=err.message,
+                    )
+            elif warnings is not None and schema_keys:
+                stripped = _strip_sql_string_literals(spec.condition)
+                if not columns_referenced(stripped, schema_keys):
+                    warnings.append(
+                        f"{prefix}.{name}.condition: references no field declared in [result_schema]"
+                    )
+
+        if not spec.reasoning.strip():
+            err = ValidationError(f"{prefix}.{name}", "Missing 'reasoning' field")
+            errors.append(err)
+            if sidecar_path:
+                event(
+                    "sidecar.validate_error",
+                    path=str(sidecar_path),
+                    field=err.field,
+                    reason=err.message,
+                )
+
+
+def validate_invariants_block(
+    sidecar: Sidecar,
+    sidecar_path: Path | None = None,
+    *,
+    warnings: list[str] | None = None,
+) -> list[ValidationError]:
+    """Validate optional `[invariants]` assertions (spec 260707 §5)."""
+    errors: list[ValidationError] = []
+    if not sidecar.invariants:
+        return errors
+
+    if sidecar.kind == SidecarKind.DEBUG:
+        err = ValidationError(
+            "invariants",
+            "[invariants] is only valid in [experiment], [benchmark], or [validation] sidecars",
+        )
+        errors.append(err)
+        if sidecar_path:
+            event(
+                "sidecar.validate_error",
+                path=str(sidecar_path),
+                field=err.field,
+                reason=err.message,
+            )
+        return errors
+
+    _validate_assertion_map(
+        sidecar.invariants,
+        "invariants",
+        sidecar,
+        sidecar_path,
+        errors,
+        warnings=warnings,
+    )
+    return errors
+
+
+def validate_sanity_block(
+    sidecar: Sidecar,
+    sidecar_path: Path | None = None,
+    *,
+    warnings: list[str] | None = None,
+) -> list[ValidationError]:
+    """Validate optional confirmatory `[sanity]` pre-flight block (spec 260707 §7)."""
+    errors: list[ValidationError] = []
+    if sidecar.sanity is None:
+        return errors
+
+    if sidecar.kind == SidecarKind.DEBUG:
+        err = ValidationError(
+            "sanity",
+            "[sanity] is only valid in [experiment], [benchmark], or [validation] sidecars",
+        )
+        errors.append(err)
+        if sidecar_path:
+            event(
+                "sidecar.validate_error",
+                path=str(sidecar_path),
+                field=err.field,
+                reason=err.message,
+            )
+        return errors
+
+    if not sidecar.sanity.argv_suffix or any(
+        not str(arg).strip() for arg in sidecar.sanity.argv_suffix
+    ):
+        err = ValidationError(
+            "sanity.argv_suffix",
+            "argv_suffix must be a non-empty list of non-blank CLI arguments",
+        )
+        errors.append(err)
+        if sidecar_path:
+            event(
+                "sidecar.validate_error",
+                path=str(sidecar_path),
+                field=err.field,
+                reason=err.message,
+            )
+
+    if not sidecar.sanity.assertions:
+        err = ValidationError(
+            "sanity.assertions",
+            "[sanity] requires at least one [sanity.assertions.<name>] entry",
+        )
+        errors.append(err)
+        if sidecar_path:
+            event(
+                "sidecar.validate_error",
+                path=str(sidecar_path),
+                field=err.field,
+                reason=err.message,
+            )
+        return errors
+
+    _validate_assertion_map(
+        sidecar.sanity.assertions,
+        "sanity.assertions",
+        sidecar,
+        sidecar_path,
+        errors,
+        warnings=warnings,
+    )
+    return errors
+
+
+# --- #2662: Unmeasured prose data-quality / filtering claims -----------------------------------
+
+_PROSE_QUALITY_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"\b(?:[Xx]|stop|gap|unk|unknown|ambiguous|non[- ]?standard|nan|null|duplicate|outlier|artifact|contamination)[- ]free\b"
+    ),
+    re.compile(
+        r"\bfree\s+of\s+(?:[Xx]\b|unknown\s+tokens?|ambiguous|gaps?|stops?|NaNs?|nulls?|duplicates?|contaminants?|outliers?)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:no|without|zero|0|exclud(?:e|es|ed|ing)|filtered\s+out|remov(?:e|ed|ing)|strip(?:ped|ping)?|clean(?:ed)?\s+of)\s+"
+        r"(?:[Xx]\b(?:\s+(?:residues?|tokens?|characters?|letters?))?|unknown\s+(?:tokens?|residues?|letters?|aas?|amino\s+acids?)|"
+        r"token\s+20|ambiguous\s+(?:residues?|bases?|tokens?|calls?)|stop\s+codons?|NaNs?\b|nulls?\b|duplicates?\b|contaminants?\b)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b\d+\s+(?:unique|filtered|deduplicated|valid|clean|retained|X[- ]?free)\s+"
+        r"(?:queries|sequences|samples|rows|items|records|units|chains|structures|candidates)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:post[- ]?filter(?:ed)?|deduplicated|filtered\s+(?:queries|sequences|samples|dataset|set|inputs?))\b",
+        re.IGNORECASE,
+    ),
+)
+
+_DATA_QUALITY_SCHEMA_KEY_RE = re.compile(
+    r"^(?:n_.*|count_.*|num_.*|x_.*|.*_count|.*_cnt|.*_filtered|.*_unique|.*_valid|.*_excluded|"
+    r".*_missing|.*_nan|.*_null|.*_unknown|.*_x|has_.*|is_.*_free)$",
+    re.IGNORECASE,
+)
+
+
+def _sidecar_prose_fields(sidecar: Sidecar) -> list[tuple[str, str]]:
+    """Collect prose text fields from a sidecar for #2662 inspection."""
+    texts: list[tuple[str, str]] = []
+    for attr in (
+        "hypothesis",
+        "question",
+        "reopen_reason",
+        "property",
+        "reference",
+        "target",
+        "symptom",
+        "suspected_cause",
+        "verification",
+    ):
+        val = getattr(sidecar, attr, None)
+        if isinstance(val, str) and val.strip():
+            texts.append((attr, val))
+    if sidecar.observe and sidecar.observe.looking_for:
+        texts.append(("observe.looking_for", sidecar.observe.looking_for))
+    if sidecar.calibrate and sidecar.calibrate.quantity:
+        texts.append(("calibrate.quantity", sidecar.calibrate.quantity))
+    for label, spec in sidecar.outcomes.items():
+        if spec.decision:
+            texts.append((f"outcomes.{label}.decision", spec.decision))
+        if spec.reasoning:
+            texts.append((f"outcomes.{label}.reasoning", spec.reasoning))
+    for name, inv in sidecar.invariants.items():
+        if inv.reasoning:
+            texts.append((f"invariants.{name}.reasoning", inv.reasoning))
+    return texts
+
+
+def validate_prose_data_quality_claims(
+    sidecar: Sidecar,
+    sidecar_path: Path | None = None,
+) -> list[ValidationError]:
+    """Guard against prose data-quality/filtering claims lacking a measured count + invariant (#2662)."""
+    hits: list[tuple[str, str]] = []
+    for field_name, text in _sidecar_prose_fields(sidecar):
+        for pat in _PROSE_QUALITY_PATTERNS:
+            m = pat.search(text)
+            if m:
+                hits.append((field_name, m.group(0)))
+                break
+
+    if not hits:
+        return []
+
+    schema_keys = _collect_schema_field_names(sidecar.result_schema)
+    quality_keys = {k for k in schema_keys if _DATA_QUALITY_SCHEMA_KEY_RE.match(k.split(".")[-1])}
+
+    assertion_fragments: list[str] = [
+        inv.condition for inv in sidecar.invariants.values() if inv.condition
+    ]
+    if sidecar.observe is not None:
+        assertion_fragments.extend(expr for expr in sidecar.observe.sanity if expr)
+    if sidecar.sanity is not None:
+        assertion_fragments.extend(
+            a.condition for a in sidecar.sanity.assertions.values() if a.condition
+        )
+
+    referenced_quality = set()
+    for frag in assertion_fragments:
+        referenced_quality.update(columns_referenced(frag, quality_keys))
+
+    if quality_keys and referenced_quality:
+        return []
+
+    errors: list[ValidationError] = []
+    sample_field, sample_match = hits[0]
+    if not quality_keys:
+        reason = (
+            f"{sample_field} makes prose data-quality/filtering claim ({sample_match!r}) "
+            "without a measured count/quality column in [result_schema] (e.g. n_x / x_count / n_filtered) "
+            "and a corresponding fail-closed [invariants.*] assertion"
+        )
+    else:
+        reason = (
+            f"{sample_field} makes prose data-quality/filtering claim ({sample_match!r}) — "
+            f"[result_schema] declares {sorted(quality_keys)}, but no [invariants.*] "
+            "(or [sanity]) condition asserts it fails closed"
+        )
+    err = ValidationError("prose_data_quality", reason)
+    errors.append(err)
+    if sidecar_path:
+        event(
+            "sidecar.validate_error",
+            path=str(sidecar_path),
+            field=err.field,
+            reason=err.message,
+        )
+    return errors
+
+
+# --- #2200: Declared-vs-analyzed factor/arm coverage & n_units_informative ---------------------
+
+
+def validate_factor_declarations(
+    sidecar: Sidecar,
+    sidecar_path: Path | None = None,
+    *,
+    warnings: list[str] | None = None,
+) -> list[ValidationError]:
+    """Validate `[factors]` / `[excluded_levels]` declarations and `n_units_informative` convention (#2200)."""
+    errors: list[ValidationError] = []
+
+    for factor, levels in sidecar.declared_levels.items():
+        if not levels or any(not str(lv).strip() for lv in levels):
+            err = ValidationError(
+                f"factors.declared_levels.{factor}",
+                "declared_levels must be a non-empty list of non-blank level names",
+            )
+            errors.append(err)
+            if sidecar_path:
+                event(
+                    "sidecar.validate_error",
+                    path=str(sidecar_path),
+                    field=err.field,
+                    reason=err.message,
+                )
+
+    for key, reason in sidecar.excluded_levels.items():
+        if not isinstance(reason, str) or not reason.strip():
+            err = ValidationError(
+                f"excluded_levels.{key}",
+                f"excluded_levels entry {key!r} must state a non-empty exclusion reason",
+            )
+            errors.append(err)
+            if sidecar_path:
+                event(
+                    "sidecar.validate_error",
+                    path=str(sidecar_path),
+                    field=err.field,
+                    reason=err.message,
+                )
+
+    if (
+        warnings is not None
+        and "n_units" in sidecar.result_schema
+        and "n_units_informative" not in sidecar.result_schema
+    ):
+        warnings.append(
+            "result_schema.n_units: declares 'n_units' without companion 'n_units_informative' "
+            "(#2200 — report non-degenerate unit count alongside total n_units)"
+        )
+
+    return errors
+
+
+def _extract_analyzed_levels(factor: str, result: dict[str, Any]) -> set[str] | None:
+    """Best-effort extraction of analyzed level names for `factor` from a result dict."""
+    analyzed_map = result.get("analyzed_levels") or result.get("covered_levels")
+    if isinstance(analyzed_map, dict) and factor in analyzed_map:
+        val = analyzed_map[factor]
+        if isinstance(val, (list, tuple, set)):
+            return {str(x) for x in val}
+        if isinstance(val, dict):
+            return {str(k) for k in val}
+
+    plural = factor if factor.endswith("s") else f"{factor}s"
+    candidates = (
+        f"{factor}_analyzed",
+        f"analyzed_{factor}",
+        f"{plural}_analyzed",
+        f"analyzed_{plural}",
+        f"per_{factor}",
+        factor,
+        plural,
+    )
+    for key in candidates:
+        val = result.get(key)
+        if isinstance(val, dict):
+            return {str(k) for k in val}
+        if isinstance(val, list):
+            if val and all(isinstance(x, dict) for x in val):
+                extracted = {str(x[factor]) for x in val if factor in x}
+                if extracted:
+                    return extracted
+            else:
+                return {str(x) for x in val}
+    return None
+
+
+def _is_level_excluded(factor: str, level: str, excluded_levels: dict[str, str]) -> bool:
+    for key in (f"{factor}.{level}", level):
+        reason = excluded_levels.get(key)
+        if isinstance(reason, str) and reason.strip():
+            return True
+    return False
+
+
+def _extract_declared_from_result(result: dict[str, Any]) -> dict[str, list[str]]:
+    """Collect declared factor levels from result manifest/metadata fields if present."""
+    declared: dict[str, list[str]] = {}
+    dl = result.get("declared_levels")
+    if isinstance(dl, dict):
+        for k, v in dl.items():
+            if isinstance(v, (list, tuple)):
+                declared[str(k)] = [str(x) for x in v]
+
+    for container_key in ("input_manifest", "manifest"):
+        container = result.get(container_key)
+        if isinstance(container, dict):
+            for k, v in container.items():
+                if isinstance(v, (list, tuple)) and k not in declared:
+                    declared[str(k)] = [str(x) for x in v]
+
+    meta = result.get("metadata")
+    if isinstance(meta, dict):
+        for k in ("models_used", "arms", "states", "temperatures", "levels"):
+            v = meta.get(k)
+            if isinstance(v, (list, tuple)) and k not in declared:
+                declared[k] = [str(x) for x in v]
+    return declared
+
+
+def check_factor_coverage(
+    declared_levels: dict[str, list[str]],
+    result: dict[str, Any],
+    excluded_levels: dict[str, str] | None = None,
+) -> tuple[list[ValidationError], list[str]]:
+    """Check declared vs analyzed factor/arm coverage and `n_units_informative` (#2200).
+
+    Returns ``(errors, warnings)``.
+    """
+    errors: list[ValidationError] = []
+    warnings: list[str] = []
+    exclusions = dict(excluded_levels or {})
+    if isinstance(result.get("excluded_levels"), dict):
+        for k, v in result["excluded_levels"].items():
+            if isinstance(v, str):
+                exclusions.setdefault(str(k), v.strip())
+
+    merged_declared = dict(declared_levels)
+    for k, v in _extract_declared_from_result(result).items():
+        merged_declared.setdefault(k, v)
+
+    for factor, levels in merged_declared.items():
+        if not levels:
+            continue
+        analyzed = _extract_analyzed_levels(factor, result)
+        if analyzed is None:
+            is_explicit = factor in declared_levels or (
+                isinstance(result.get("declared_levels"), dict)
+                and factor in result["declared_levels"]
+            )
+            if not is_explicit:
+                continue
+            analyzed = set()
+
+        missing = [
+            lv
+            for lv in levels
+            if str(lv) not in analyzed and not _is_level_excluded(factor, str(lv), exclusions)
+        ]
+        if missing:
+            errors.append(
+                ValidationError(
+                    "factor_coverage",
+                    f"Declared factor {factor!r} levels missing from analyzed result and not in "
+                    f"excluded_levels with a reason: {missing}",
+                )
+            )
+
+    if "n_units" in result and result["n_units"] is not None:
+        n_units = result["n_units"]
+        if isinstance(n_units, (int, float)) and not isinstance(n_units, bool) and n_units > 0:
+            if "n_units_informative" not in result or result["n_units_informative"] is None:
+                errors.append(
+                    ValidationError(
+                        "n_units_informative",
+                        f"Result reports n_units={n_units} without companion n_units_informative (#2200)",
+                    )
+                )
+            else:
+                n_inf = result["n_units_informative"]
+                if not isinstance(n_inf, (int, float)) or isinstance(n_inf, bool):
+                    errors.append(
+                        ValidationError(
+                            "n_units_informative",
+                            f"n_units_informative must be numeric, got {type(n_inf).__name__}",
+                        )
+                    )
+                elif n_inf < 0 or n_inf > n_units:
+                    errors.append(
+                        ValidationError(
+                            "n_units_informative",
+                            f"n_units_informative ({n_inf}) must be in [0, n_units={n_units}]",
+                        )
+                    )
+                elif (n_inf / n_units) < 0.5:
+                    warnings.append(
+                        f"n_units_informative: low informative fraction {n_inf}/{n_units} "
+                        f"({n_inf / n_units:.1%}) — possible rank-tie / padded-length dilution (#2200)"
+                    )
+
+    return errors, warnings
 
 
 def validate_claim_discriminability(
@@ -1589,29 +2182,11 @@ def validate_sidecar(
 
         # DuckDB SQL must parse. A placeholder condition is reported above; it is not parsed here.
         if spec.condition and "${" not in spec.condition:
-            try:
-                con = duckdb.connect()
-                # Build a dummy table from result_schema to validate SQL (including nested STRUCTs)
-                if sidecar.result_schema:
-                    col_defs: list[str] = []
-                    for k, v in sidecar.result_schema.items():
-                        sql_t = _schema_type_to_sql(v)
-                        if sql_t is not None:
-                            col_defs.append(f"{_quote_sql_ident(k)} {sql_t}")
-                    cols = ", ".join(col_defs)
-                    if cols:
-                        con.execute(f"CREATE TEMP TABLE _dummy ({cols})")
-                        con.execute(f"SELECT ({spec.condition}) FROM _dummy LIMIT 0")
-                    else:
-                        con.execute(f"SELECT ({spec.condition})")
-                else:
-                    # If no schema, just validate as boolean expression
-                    con.execute(f"SELECT ({spec.condition})")
-                con.close()
-            except Exception as e:
+            sql_err = _validate_sql_condition(spec.condition, sidecar.result_schema)
+            if sql_err is not None:
                 err = ValidationError(
                     f"outcomes.{label}.condition",
-                    f"DuckDB parse error: {e}",
+                    f"DuckDB parse error: {sql_err}",
                 )
                 errors.append(err)
                 if sidecar_path:
@@ -1619,7 +2194,7 @@ def validate_sidecar(
                         "sidecar.validate_error",
                         path=str(sidecar_path),
                         field=f"outcomes.{label}.condition",
-                        reason=f"DuckDB parse error: {e}",
+                        reason=f"DuckDB parse error: {sql_err}",
                     )
 
     # Catch shadowed / duplicate / unsatisfiable outcome branches
@@ -1684,6 +2259,16 @@ def validate_sidecar(
     # Validate [differential] block if present (debt #1071)
     differential_errors = validate_differential_block(sidecar, sidecar_path)
     errors.extend(differential_errors)
+
+    # Validate [invariants] and [sanity] blocks (spec 260707; debt #2202)
+    errors.extend(validate_invariants_block(sidecar, sidecar_path, warnings=warnings))
+    errors.extend(validate_sanity_block(sidecar, sidecar_path, warnings=warnings))
+
+    # Guard against unmeasured prose data-quality/filtering claims (debt #2662)
+    errors.extend(validate_prose_data_quality_claims(sidecar, sidecar_path))
+
+    # Validate factor/exclusion declarations & n_units_informative convention (debt #2200)
+    errors.extend(validate_factor_declarations(sidecar, sidecar_path, warnings=warnings))
 
     # Cross-check claim_discriminates/claim_isolates if a registered claim was supplied (#3719)
     if claim is not None:
